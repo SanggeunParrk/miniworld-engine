@@ -33,8 +33,8 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 
 def h100_enabled(device) -> bool:
-    """Unqualified Hopper prototype, explicitly opt-in until module gates pass."""
-    return (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100", "0") == "1"
+    """Native Hopper kernels; per-shape speed qualification is recorded separately."""
+    return (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100", "1") == "1"
             and torch.cuda.get_device_capability(device) == (9, 0))
 
 
@@ -311,7 +311,7 @@ class PvGateCore:
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         if h100_enabled(self.device_index):
             sg = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PV_GROUP", "0"))
-            if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1":
+            if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1":
                 sg = min(S, sg) if sg else _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
                 h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
             elif sg > 0:
@@ -426,7 +426,7 @@ class DpbKernel:
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
-            op = (h100_ext().dpb_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1"
+            op = (h100_ext().dpb_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
                   else h100_ext().dpb)
             op(do, v, P, dd, out, A, self.nh, self.dh)
             return out
@@ -535,7 +535,7 @@ class GemmSwigluAB:
 
     def __call__(self, x, w, ab, h):
         if h100_enabled(self.device_index):
-            op = (h100_ext().swiglu_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "0") == "1"
+            op = (h100_ext().swiglu_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
                   else h100_ext().swiglu)
             op(x, w, ab, h)
             return h

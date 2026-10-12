@@ -65,14 +65,26 @@ def _graph(nodes: int | None = None, *, grad: bool = False):
     }
 
 
-def _edge_tail(backend: EdgeTailBackend, *, backward: bool) -> None:
-    """Run one encoder edge tail, forward or forward+backward, on one of the two policies."""
+def _edge_tail(backend: EdgeTailBackend, *, backward: bool,
+               dropouts: tuple[float, ...] = (0.1,)) -> None:
+    """Run one encoder edge tail, forward or forward+backward, on one of the two policies.
+
+    `dropouts` is the set of dropout probabilities driven. `DROPOUT` is a constexpr in the key of
+    the two `saveact` kernels that read the keep mask, so p > 0 and p == 0 are two programs that
+    each get their own cache entry; a driver that only called p = 0.1 left the eval / p = 0 side
+    unbuilt. The other kernels do not key it, so they keep the single training value.
+    """
     from miniworld_engine.kernels.mpnn_edge_tail.interface import edge_tail_update
 
-    tensors = _graph(grad=backward)
-    out = edge_tail_update(**tensors, eps=1e-5, dropout_probability=0.1, backend=backend)
-    if backward:
-        out.sum().backward()
+    for p in dropouts:
+        tensors = _graph(grad=backward)
+        out = edge_tail_update(**tensors, eps=1e-5, dropout_probability=p, backend=backend)
+        if backward:
+            out.sum().backward()
+
+
+#: Both sides of the `DROPOUT` key flag: training (p > 0) and eval / p = 0.
+_BOTH_DROPOUTS = (0.1, 0.0)
 
 
 def mpnn_edge_tail_fwd_gemm_gather_saveact_triton() -> None:
@@ -84,11 +96,11 @@ def mpnn_edge_tail_fwd_gemm_b2b_saveact_triton() -> None:
 
 
 def mpnn_edge_tail_fwd_gemm_layernorm_saveact_triton() -> None:
-    _edge_tail("triton_compute", backward=False)
+    _edge_tail("triton_compute", backward=False, dropouts=_BOTH_DROPOUTS)
 
 
 def mpnn_edge_tail_bwd_layernorm_saveact_triton() -> None:
-    _edge_tail("triton_compute", backward=True)
+    _edge_tail("triton_compute", backward=True, dropouts=_BOTH_DROPOUTS)
 
 
 def mpnn_edge_tail_bwd_dx_saveact_triton() -> None:

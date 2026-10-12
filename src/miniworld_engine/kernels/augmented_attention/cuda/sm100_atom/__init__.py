@@ -17,6 +17,9 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers), bf16:
   cond_bwd.cu     the conditioning projections' dgrad and the two cond LayerNorm backwards -> d cond.
   dw_atom.cu      every dense weight gradient of a block in one grouped split-K launch (bf16 and TF32).
 
+On sm_90a (H100) the same sources carry a second half under ``-DATOM_HOPPER=1`` (``*_sm90`` kernels, wgmma, bf16; ``_HOPPER_KERNELS``):
+``atom_kernel`` / ``load_all`` and the launchers below pick it by ``_hopper(device)``; the fp32 (TF32) path is sm_100a only.
+
 The fp32 path (fp32 activations, ``KERNELS_TF32``, loaded by ``atom_kernel32`` only when an fp32 call is served; used by the local
 atom block, ``integrations/local_dit``):
   gemm_tf32.cu    every projection and activation-gradient product as one tcgen05 kind::tf32 GEMM launch with the block's epilogues
@@ -48,20 +51,29 @@ SOURCES = ("cond_fwd", "pre_fwd", "post_fwd",
 
 # --------------------------------------------------------------------------------------------------- build
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str, defs: tuple = ()) -> str:
-    """Path of ``<stem>.cu`` built for sm_100a with the sources' default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag
-    changes."""
+def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
+    """Path of ``<stem>.cu`` built for sm_100a (``hopper``: sm_90a with ``-DATOM_HOPPER=1``, the sources' Hopper half) with the sources'
+    default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
-    nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
+    if hopper:
+        from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, nvcc_path
+        ensure_cuda_home()
+        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
+        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+            raise RuntimeError("Atom Hopper kernels require the matching CUDA <= 12.9 toolchain")
+    else:
+        nvcc, rel, host = kernel_toolchain()
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_90a" if hopper else "-arch=sm_100a",
+             *(("-DATOM_HOPPER=1",) if hopper else ()),
+             "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
     if hopper:
         h.update((_dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc").read_bytes())
     root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    out = root / "local_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = root / ("local_dit_sm90" if hopper else "local_dit_sm100") / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -79,7 +91,7 @@ def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
-        return driver.Kernel(cubin(stem, defs), func, smem, pdl=pdl)
+        return driver.Kernel(cubin(stem, defs, _hopper(device_index)), func, smem, pdl=pdl)
 
 
 #: (stem, function, dynamic smem, PDL[, -D defs]) of every kernel the block launches
@@ -101,6 +113,7 @@ def _hopper(device_index: int) -> bool:
     return torch.cuda.get_device_capability(device_index) == (9, 0)
 
 
+#: (stem, function, dynamic smem, PDL) of every kernel the block launches on sm_90a (the ``ATOM_HOPPER`` half of the same sources)
 _HOPPER_KERNELS = {
     "cond": ("cond_fwd", "atom_cond_fwd_sm90", 131136, False),
     "cond1": ("cond_fwd", "atom_cond_fwd_single_sm90", 114752, False),
@@ -118,20 +131,13 @@ _HOPPER_KERNELS = {
     "grad_pack": ("pre_bwd", "atom_grad_pack_sm90", 0, False),
     "col_part": ("cond_bwd", "atom_column_partials_sm90", 0, False),
     "col_fin": ("cond_bwd", "atom_column_finish_sm90", 0, False),
-    "pb_w": ("pair_bias", "atom_pair_weight_sm90", 0, False),
-    "pb_fin": ("pair_bias", "atom_pair_finish_sm90", 0, False),
-    "pb_part": ("pair_bias", "atom_pair_partials_sm90", 0, False),
-    "db_native": ("attn_dbias", "atom_dbias_sm90", 82208, False),
-    "db_tma": ("attn_dbias", "atom_dbias_tma_sm90", 82240, False),
-    "db_sum": ("pair_bias", "atom_dbias_transpose_sum_sm90", 0, False),
-    "dq_pack": ("pair_bias", "atom_pack_dqkv_sm90", 0, False),
-    "empty_uniform": ("pair_bias", "atom_empty_uniform_sm90", 0, False),
-    **{k: KERNELS[k] for k in ("pb_f", "pb_fp", "pb_b")},
 }
 
 
 def atom_kernel(name: str, device_index: int):
-    stem, func, smem, pdl, *defs = KERNELS[name]
+    if _hopper(device_index) and name not in _HOPPER_KERNELS:
+        raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
+    stem, func, smem, pdl, *defs = (_HOPPER_KERNELS if _hopper(device_index) else KERNELS)[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
 
@@ -148,21 +154,6 @@ def nsm(device_index: int) -> int:
 
 def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
-
-
-def empty_uniform_enabled(device_index: int) -> bool:
-    return _hopper(device_index) and os.environ.get("MINIWORLD_ATOM_DIT_H100_EMPTY_UNIFORM", "0") == "1"
-
-
-def empty_uniform_hopper(keys, src, dst, n, *, value_gradient=False, force=False):
-    """Live-mask uniform-mean epilogue; src is dense [A*N,128] BF16."""
-    if keys is None or not (force or empty_uniform_enabled(_dev(src))):
-        return
-    if (src.dtype != torch.bfloat16 or dst.dtype != torch.bfloat16
-            or not src.is_contiguous() or not dst.is_contiguous()):
-        raise ValueError("Atom uniform edge requires contiguous BF16 tensors")
-    atom_kernel("empty_uniform", _dev(src))((4, src.shape[0] // n, 1), (256, 1, 1),
-        keys, src, dst, int(n), int(512 if value_gradient else 128), int(256 if value_gradient else 0))
 
 
 # --------------------------------------------------------------------------------------------------- tensor maps
@@ -217,7 +208,7 @@ def post_params(blk):
 
 
 # --------------------------------------------------------------------------------------------------- launches
-def cond_fwd(c, W, b, g1, g2, eps=1e-5):
+def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
@@ -240,7 +231,8 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
 
 
 def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
-    """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
+    """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``). ``cross`` (sm_90a only): the cross-attention
+    mode's variant of the Hopper kernel."""
     M = a.shape[0]
     Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
@@ -252,6 +244,7 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
         atom_kernel("pre_cross" if cross else "pre", d)((min((2 if cross else 1) * nsm(d), (M + 63) // 64), 1, 1), (160, 1, 1),
                              *maps, bq, Q, K, V, G, X, int(M), float(eps), int(save))
         return Q, K, V, G, X
+    assert not cross, "cross is the Hopper kernel's mode; sm_100a uses pre_fwd_kv"
     maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
             _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(G), _rows(G))
     ntile = M // 32
@@ -275,7 +268,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     return Q, K, V, G, X, (XK if save else None)
 
 
-def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
+def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=False):
     """a, o, g [M, 128], mod [M, 768] -> the block output [M, 128] bf16 (+ u, a2, x2, t when ``save``)."""
     M = a.shape[0]
     def new():
@@ -818,3 +811,125 @@ class AtomDw:
 def atom_dw(device_index: int, f32: bool) -> AtomDw:
     return AtomDw(device_index, f32)
 
+
+# --------------------------------------------------------------------------------------------------- sm_90a (H100) helpers
+# PyTorch may erase its cached cuBLASLt workspace when a different graph is reset.
+# A capture-local tensor keeps each retained graph's scratch storage alive.
+# This is an opt-in lifetime repair; all projection operands and CUDA kernels stay unchanged.
+_OWNED_WGRAD_CPP = r"""
+#include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDAGuard.h>
+#include <cublasLt.h>
+torch::Tensor owned_wgrad(torch::Tensor g, torch::Tensor x) {
+  TORCH_CHECK(g.is_cuda() && x.is_cuda() && g.device()==x.device()
+    && g.scalar_type()==at::kBFloat16 && x.scalar_type()==at::kBFloat16
+    && g.dim()==2 && x.dim()==2 && g.size(0)==x.size(0)
+    && g.stride(1)==1 && x.stride(1)==1 && g.size(0)>0
+    && g.stride(0)>=g.size(1) && x.stride(0)>=x.size(1),
+    "owned cuBLASLt wgrad requires BF16 row-major or row-padded operands");
+  c10::cuda::CUDAGuard guard(g.device());
+  const int64_t reduction=g.size(0), outputs=g.size(1), inputs=x.size(1);
+  auto out=torch::empty({outputs,inputs},g.options().dtype(at::kFloat));
+  const size_t workspace_bytes=at::cuda::getCUDABlasLtWorkspaceSize();
+  auto workspace=torch::empty({int64_t(workspace_bytes)},g.options().dtype(at::kByte));
+  auto checked=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"owned cuBLASLt wgrad status ",int(s));};
+  struct Descriptors {
+    cublasLtMatmulDesc_t operation=nullptr;
+    cublasLtMatrixLayout_t a=nullptr,b=nullptr,c=nullptr;
+    cublasLtMatmulPreference_t preference=nullptr;
+    ~Descriptors(){
+      if(preference)cublasLtMatmulPreferenceDestroy(preference);
+      if(c)cublasLtMatrixLayoutDestroy(c);
+      if(b)cublasLtMatrixLayoutDestroy(b);
+      if(a)cublasLtMatrixLayoutDestroy(a);
+      if(operation)cublasLtMatmulDescDestroy(operation);
+    }
+  } d;
+  checked(cublasLtMatmulDescCreate(&d.operation,CUBLAS_COMPUTE_32F,CUDA_R_32F));
+  cublasOperation_t op_a=CUBLAS_OP_N,op_b=CUBLAS_OP_T;
+  checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSA,&op_a,sizeof(op_a)));
+  checked(cublasLtMatmulDescSetAttribute(d.operation,CUBLASLT_MATMUL_DESC_TRANSB,&op_b,sizeof(op_b)));
+  checked(cublasLtMatrixLayoutCreate(&d.a,CUDA_R_16BF,inputs,reduction,x.stride(0)));
+  checked(cublasLtMatrixLayoutCreate(&d.b,CUDA_R_16BF,outputs,reduction,g.stride(0)));
+  checked(cublasLtMatrixLayoutCreate(&d.c,CUDA_R_32F,inputs,outputs,inputs));
+  checked(cublasLtMatmulPreferenceCreate(&d.preference));
+  checked(cublasLtMatmulPreferenceSetAttribute(d.preference,CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES,&workspace_bytes,sizeof(workspace_bytes)));
+  const void* ptrs[]={x.data_ptr(),g.data_ptr(),out.data_ptr(),out.data_ptr()};
+  cublasLtMatmulPreferenceAttributes_t attrs[]={CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_A_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_B_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_C_BYTES,CUBLASLT_MATMUL_PREF_MIN_ALIGNMENT_D_BYTES};
+  for(int i=0;i<4;++i){
+    uint32_t alignment=256;
+    while(reinterpret_cast<uintptr_t>(ptrs[i])%alignment)alignment>>=1;
+    checked(cublasLtMatmulPreferenceSetAttribute(d.preference,attrs[i],&alignment,sizeof(alignment)));
+  }
+  cublasLtMatmulHeuristicResult_t algo{};int found=0;
+  auto handle=at::cuda::getCurrentCUDABlasLtHandle();
+  checked(cublasLtMatmulAlgoGetHeuristic(handle,d.operation,d.a,d.b,d.c,d.c,d.preference,1,&algo,&found));
+  TORCH_CHECK(found==1,"owned cuBLASLt wgrad has no valid algorithm");
+  float alpha=1.f,beta=0.f;
+  checked(cublasLtMatmul(handle,d.operation,&alpha,x.data_ptr(),d.a,g.data_ptr(),d.b,
+    &beta,out.data_ptr(),d.c,out.data_ptr(),d.c,&algo.algo,workspace.data_ptr(),workspace_bytes,at::cuda::getCurrentCUDAStream()));
+  return out;
+}
+
+"""
+
+
+@functools.lru_cache(maxsize=1)
+def _owned_wgrad_extension():
+    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import ensure_cuda_home
+
+    cuda_home = ensure_cuda_home()
+    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+        raise RuntimeError("Atom Hopper cuBLASLt gradients require CUDA <= 12.9")
+    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    build = root / "atom_owned_wgrad" / hashlib.sha256(_OWNED_WGRAD_CPP.encode()).hexdigest()[:16]
+    build.mkdir(parents=True, exist_ok=True)
+    return load_inline(
+        name="atom_hopper_owned_wgrad", cpp_sources=_OWNED_WGRAD_CPP, functions=["owned_wgrad"],
+        with_cuda=True, build_directory=str(build),
+        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
+        extra_cflags=["-O3"], extra_ldflags=["-lcublasLt"], verbose=False,
+    )
+
+
+def owned_wgrad_hopper(gradient, activation):
+    """BF16 GEMM to FP32 with cuBLASLt scratch owned by the captured graph."""
+    return _owned_wgrad_extension().owned_wgrad(gradient, activation)
+
+
+def pack_hopper(weights, backward=False):
+    """Live CUDA weight packing; identical launch count for BF16 and FP32 masters."""
+    if len(weights) != 23:
+        raise ValueError("Atom weight pack requires the 23 canonical weights")
+    d, dev = _dev(weights[0]), weights[0].device
+    shapes = ((768, 128), (512, 128), (128, 128), (512, 128), (128, 256))
+    wc, wp, wo, wu, wd = (torch.empty(s, device=dev, dtype=torch.bfloat16) for s in shapes)
+    b = torch.empty(768, device=dev, dtype=torch.float32)
+    g1, g2, bq = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(3))
+    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
+        raise ValueError("Atom Hopper pack requires contiguous BF16/FP32 parameters")
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    atom_kernel("pack", d)((384, 1, 1), (256, 1, 1), *weights, wc, wp, wo, wu, wd, b, g1, g2, bq, bfmask)
+    wb = {}
+    if backward:
+        wt = [torch.empty(tuple(reversed(s)), device=dev, dtype=torch.bfloat16) for s in shapes]
+        atom_kernel("pack_t", d)((272, 1, 1), (32, 8, 1), wc, wp, wo, wu, wd, *wt)
+        wb = dict(zip(("WmodT", "WpT", "WoT", "WuT", "WsT"), wt, strict=True))
+    return (wc, b, g1, g2), (wp, bq), (wo, wu, wd), wb
+
+
+def finish_columns_hopper(dmod, dp, dgparts, dbias, dbq, dg):
+    part = torch.empty(4, 896, device=dmod.device, dtype=torch.float32)
+    d, m = _dev(dmod), dmod.shape[0]
+    atom_kernel("col_part", d)((56, 4, 1), (256, 1, 1), dmod, dp, part, int(m))
+    atom_kernel("col_fin", d)((4, 1, 1), (256, 1, 1), part, dgparts, dbias, dbq, dg, int((m + 63) // 64))
+
+
+def grad_pack_hopper(grads, weights):
+    if any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
+        raise ValueError("Hopper gradient pack requires contiguous FP32 gradient views")
+    out = [torch.empty_like(w) for w in weights]
+    bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
+    atom_kernel("grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, bfmask)
+    return out

@@ -218,7 +218,7 @@ def layernorm_linear_triton_fwd(
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Portable Triton ``LayerNorm(x) @ W^T + b``. Falls back to eager torch if K>1024."""
-    return _launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=False)[0]
+    return _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=False)[0]
 
 
 def _layernorm_linear_triton_fwd_stats_fake(x, ln_weight, ln_bias, weight, bias, eps=1e-5):
@@ -235,10 +235,10 @@ def layernorm_linear_triton_fwd_stats(
     weight: torch.Tensor, bias: torch.Tensor | None, eps: float = 1e-5,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Training forward: save the same FP32 statistics used by the projection."""
-    return _launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=True)
+    return _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, save_stats=True)
 
 
-def _launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
+def _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
     assert x.is_cuda and weight.is_cuda
     K = x.shape[-1]
     N = weight.shape[0]

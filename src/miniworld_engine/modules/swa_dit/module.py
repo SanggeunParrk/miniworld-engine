@@ -164,7 +164,7 @@ class SWADiTBlock(nn.Module):
         if refusal is None:
             return self._fused(x, c_base, attention_params)
         from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
-        if self.implementation != ImplementationType.PYTORCH and native_h100_enabled(x):
+        if self.implementation != ImplementationType.PYTORCH and _native_h100_strict(x, native_h100_enabled):
             raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
         return self(x, c_base.repeat(x.shape[0] // c_base.shape[0], 1, 1), attention_params)
 
@@ -180,7 +180,7 @@ class SWADiTBlock(nn.Module):
                 # One modulation row per sequence row (B = N): no augment structure is known here.
                 return self._fused(x, cond, attention_params)
             from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
-            if native_h100_enabled(x):
+            if _native_h100_strict(x, native_h100_enabled):
                 raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
             from miniworld_engine import ops
 
@@ -206,3 +206,14 @@ class SWADiTBlock(nn.Module):
         x = x + gate_a * self.attn(attn_in, attention_params)
         ffn_in = self.ffn_norm(x) * (1 + scale_f) + shift_f
         return x + gate_f * self.ffn(ffn_in)
+
+
+def _native_h100_strict(x: torch.Tensor, native_h100_enabled) -> bool:
+    """True when the caller forced the native H100 path (``MINIWORLD_SWA_H100_CUDA_ONLY=1``): an unsupported call then raises.
+
+    Otherwise the native path is a default that serves what it is validated for and the module falls back to the
+    PyTorch / Triton path for every other contract, as on every other card.
+    """
+    import os
+
+    return os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY") == "1" and native_h100_enabled(x)

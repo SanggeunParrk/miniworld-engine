@@ -43,8 +43,12 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef MW_DW_EARLY_RELEASE
 #define MW_DW_EARLY_RELEASE 0
 #endif
-constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
-constexpr int NDW = 8 * DW_REPL, NDX = NCTA - NDW;
+#ifndef MW_N
+#define MW_N 4              // hidden = MW_N * D (the n of Transition(d, n))
+#endif
+constexpr int D_ = 128, H_ = MW_N * 128, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
+constexpr int NSL = H_ / HS;                                  // hidden slices (8 at n = 4)
+constexpr int NDW = NSL * DW_REPL, NDX = NCTA - NDW;
 static_assert(NDX > 0, "no DX CTAs left");
 
 // ---- DW role shared memory
@@ -102,7 +106,7 @@ struct BwdPar {                                 // the tensor maps stay in the g
 
 // ============================================================================================ DW role
 TMN_DEVI void weight_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg, int wtid, int warp, int lane) {
-  const int slice = cta % 8, repl = cta / 8, nrep = DW_REPL;
+  const int slice = cta % NSL, repl = cta / NSL, nrep = DW_REPL;
   const uint32_t su = smem_u32(sm);
   uint64_t* bars = reinterpret_cast<uint64_t*>(sm + W_BAR);
   uint64_t* w_full = bars; uint64_t* in_full = bars + 1; uint64_t* in_free = bars + 3; uint64_t* hdb_free = bars + 5;
@@ -452,8 +456,9 @@ template <typename T> __global__ void reduce_partials(const float* __restrict__ 
                                      const float* __restrict__ dgbw, float* __restrict__ dgam, float* __restrict__ dbeta) {
   const int tid=threadIdx.x;
   const int idx = blockIdx.x * blockDim.x + tid;
-  if (blockIdx.x >= 768) {
-    const int c=(blockIdx.x-768)*32+(tid&31), part=tid>>5;
+  constexpr int B_WS = 2 * NSL * HS * D_ / 256, B_AFF = 3 * NSL * HS * D_ / 256;   // first dWs-transpose block, first dgamma / dbeta block
+  if (blockIdx.x >= B_AFF) {
+    const int c=(blockIdx.x-B_AFF)*32+(tid&31), part=tid>>5;
     float g=0.f,b=0.f;
     for(int r=part;r<NDX*8;r+=8){g+=dgbw[(size_t)r*256+c];b+=dgbw[(size_t)r*256+128+c];}
     __shared__ float scratch[512];scratch[tid]=g;scratch[256+tid]=b;__syncthreads();
@@ -463,20 +468,20 @@ template <typename T> __global__ void reduce_partials(const float* __restrict__ 
       dgam[c]=gs;dbeta[c]=bs;
     }return;
   }
-  if (blockIdx.x >= 512) {
+  if (blockIdx.x >= B_WS) {
     // Reduce a 16x16 tile, then transpose in shared memory for coalesced dWs stores.
-    const int tile=blockIdx.x-512, h0=(tile/8)*16, d0=(tile%8)*16;
+    const int tile=blockIdx.x-B_WS, h0=(tile/(D_/16))*16, d0=(tile%(D_/16))*16;
     const int h=h0+tid/16, d=d0+tid%16, slice=h/64, hs=h%64;
     float v=0.f;
-    for(int r=0;r<DW_REPL;++r)v+=ws[((size_t)(r*8+slice)*3+2)*HS*D_+hs*D_+d];
+    for(int r=0;r<DW_REPL;++r)v+=ws[((size_t)(r*NSL+slice)*3+2)*HS*D_+hs*D_+d];
     __shared__ float transpose[16][17];
     transpose[tid/16][tid%16]=v;__syncthreads();
     dWs[(size_t)(d0+tid/16)*H_+h0+tid%16]=dw_value<T>(transpose[tid%16][tid/16]);
     return;
   }
-  const int which = idx / (8 * HS * D_), rem = idx % (8 * HS * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
+  const int which = idx / (NSL * HS * D_), rem = idx % (NSL * HS * D_), slice = rem / (HS * D_), hs = (rem / D_) % HS, d = rem % D_;
   float v = 0.f;
-  for (int r = 0; r < DW_REPL; ++r) v += ws[((size_t)(r * 8 + slice) * 3 + which) * HS * D_ + hs * D_ + d];
+  for (int r = 0; r < DW_REPL; ++r) v += ws[((size_t)(r * NSL + slice) * 3 + which) * HS * D_ + hs * D_ + d];
   const T o = dw_value<T>(v);
   if (which == 0) dWa[(slice * HS + hs) * D_ + d] = o;
   else if (which == 1) dWb[(slice * HS + hs) * D_ + d] = o;
@@ -518,7 +523,7 @@ void transition_fused_bwd_launch(
 void transition_fused_reduce_launch(
     const float* partw, void* dWa, void* dWb, void* dWs,
     const float* dgbw, float* dgam, float* dbeta, bool fp32_dw, cudaStream_t stream) {
-  const int work = 3 * 8 * HS * D_ + 4 * 256;
+  const int work = 3 * NSL * HS * D_ + 4 * 256;
   if (fp32_dw)
     reduce_partials<float><<<(work + 255) / 256, 256, 0, stream>>>(partw, (float*)dWa, (float*)dWb, (float*)dWs, dgbw, dgam, dbeta);
   else

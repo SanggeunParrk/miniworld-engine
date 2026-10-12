@@ -2,12 +2,14 @@
 (cuBLAS).
 
 H100 inference and training use native CUDA by default for the required buckets.
-The original B200 exact-zero LN beta gradient fails the FP32 oracle cosine, so
-H100 training reconstructs that FP32 rounding with native CUDA and cuBLAS. This
-accuracy-first shadow materializes extra FP32 workspaces: the B200 tensor
-lifetimes and former fast-path latency do not describe this training default.
+The B200 pair-weight (Wb) gradient fails the FP32 oracle cosine at the required
+buckets, so H100 training reconstructs that FP32 rounding with native CUDA and
+cuBLAS (ln_pair has no beta, so only dWb is repaired). This accuracy-first shadow
+materializes extra FP32 workspaces: the B200 tensor lifetimes and former fast-path
+latency do not describe this training default.
 MINIWORLD_APB_H100_TRAIN=0 retains the explicit legacy comparison path; disabling
-MINIWORLD_APB_H100_BETA_SHADOW selects the known-inaccurate experimental gradient.
+MINIWORLD_APB_H100_BETA_SHADOW (the name predates the beta removal) selects the
+known-inaccurate experimental gradient.
 
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
@@ -29,7 +31,7 @@ Training (autograd Function, opaque forward / backward): the same forward in nat
 gate_rows and addmm; backward: dO GEMMs, gate_bwd (dO, D, dg), attn_dkv / attn_dqb -DNHEAD, qkv_bwd, the dxa / dW GEMMs,
 ln_bwd (+ residual), pair_bias_bwd. B200 retains its finite masked logits. H100 uses
 -inf in the native attention core, matching the FP32 efficient-SDPA reference's
-zero attention update for an all-false key mask; its beta shadow also applies
+zero attention update for an all-false key mask; its dWb shadow also applies
 masked_fill's zero derivative at every masked key."""
 
 from __future__ import annotations
@@ -281,20 +283,18 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 
 
 
-def _beta_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy, exact_dwb):
-    return (torch.empty((DP,), device=single.device, dtype=torch.float32),
-            torch.empty(leaves[-1].shape, device=single.device, dtype=torch.float32))
+def _pair_weight_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy):
+    return torch.empty(leaves[-1].shape, device=single.device, dtype=torch.float32)
 
 
-@opaque(fake=_beta_shadow_fake, name="apb_h100_beta_fp32_shadow")
-def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
-                 leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor, exact_dwb: bool) -> tuple[torch.Tensor, torch.Tensor]:
-    """Accuracy-first pair-affine gradients with native CUDA and cuBLAS.
+@opaque(fake=_pair_weight_shadow_fake, name="apb_h100_pair_weight_fp32_shadow")
+def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
+                        leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor) -> torch.Tensor:
+    """Accuracy-first exact pair-weight (to_bias.weight) gradient with native CUDA and cuBLAS.
 
-    This intentionally recreates the FP32 numerical path: beta's mathematical
-    gradient is zero, but the required oracle contains reduction roundoff.
-    The exact weight gradient also retains that residual when pair gamma is
-    zero. Its head-major operand matches the reference Linear backward layout.
+    This intentionally recreates the FP32 numerical path of the oracle: the
+    exact weight gradient retains reduction roundoff that the fused kernel does
+    not. Its head-major operand matches the reference Linear backward layout.
     This materializes pair normalization for dWb and exceeds B200 lifetimes.
     """
     E = _rows().ext()
@@ -305,11 +305,10 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         # The exact pair-weight gradient needs graph-owned scratch. Explicitly
         # disabling that repair retains the earlier ownership choices for
         # diagnostic comparisons; those old gradients are not qualified.
-        owned_sgemm_default = qualified and (exact_dwb or shape in ((12, 384), (16, 384)))
+        owned_sgemm_default = qualified
         mm = E.exact_mm_owned if os.environ.get(
             "MINIWORLD_APB_H100_OWNED_SGEMM", "1" if owned_sgemm_default else "0"
         ) == "1" else E.exact_mm
-        fused_beta = qualified and os.environ.get("MINIWORLD_APB_H100_SHADOW_BETA_MM", "1" if qualified else "0") == "1"
         shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
         pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
@@ -328,7 +327,7 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
             values = convert([single, pair, dy, *leaves])
             x, z, dy32 = values[:3]
             affine = values[3:]
-        lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = affine
+        lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = affine
         L, D = single.shape[1:]
         H, dh = wb.shape[0], D // wb.shape[0]
         xa = E.exact_ln(x, lnw, lnb, eps_s).view(L, D)
@@ -336,23 +335,19 @@ def _beta_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | 
         # H24. The fused producer keeps its normalized pair tile on chip and
         # writes masked head-major bias directly for the other required shapes.
         za = None if fused_pair_project else (
-            E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2) if pair_ln
-            else E.exact_ln(z, lnpw, lnpb, eps_p)).view(L * L, DP)
+            E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2) if pair_ln
+            else E.exact_ln(z, lnpw, torch.zeros_like(lnpw), eps_p)).view(L * L, DP)
         def finish(db):
-            beta = E.exact_beta_mm(db, wb) if fused_beta else E.exact_beta(mm(db, wb))
-            if not exact_dwb:
-                return beta, torch.empty_like(wb)
             norm = za
             if norm is None:
-                norm = E.exact_ln_bf16(pair, lnpw, lnpb, eps_p, pair_ln == 2).view(L*L, DP)
+                norm = E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2).view(L*L, DP)
             db_head = E.exact_transpose_tiled(db, None, L, False).view(H, L*L)
-            dwb = E.exact_mm_owned(db_head, norm)
-            return beta, dwb
+            return E.exact_mm_owned(db_head, norm)
         q = mm(xa, wq.t(), bq)
         k = mm(xa, wk.t())
         v = mm(xa, wv.t())
         gate = mm(xa, wg.t())
-        bias = (E.exact_ln_pair_project(pair, lnpw, lnpb, wb, mask, eps_p) if fused_pair_project
+        bias = (E.exact_ln_pair_project(pair, lnpw, wb, mask, eps_p) if fused_pair_project
                 else mm(za, wb.t()))
         dog = mm(dy32.view(L, D), wo)
         do_rows = E.exact_point(dog, gate, 1.0, 1).view(L, H, dh)
@@ -400,27 +395,25 @@ class _Training(torch.autograd.Function):
         qualified_exact_dwb = single.shape[1] in (384, 768) and (
             leaves[-1].shape[0], single.shape[-1]) in (
                 (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+        # ln_pair has no beta: the shadow only repairs the pair-weight gradient.
         ctx.exact_dwb = ctx.beta_shadow and os.environ.get(
             "MINIWORLD_APB_H100_EXACT_DWB", "1" if qualified_exact_dwb else "0") == "1"
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)
         ctx.saved_count = len(saved)
-        ctx.save_for_backward(mask, single, pair, *leaves, *saved, *(params if ctx.beta_shadow else ()))
+        ctx.save_for_backward(mask, single, pair, *leaves, *saved, *(params if ctx.exact_dwb else ()))
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:13]), list(v[13:])          # saved: 10 or 11 tensors
+        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:13]), list(v[13:13 + ctx.saved_count])
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
-        if ctx.beta_shadow:
-            params = list(v[14 + ctx.saved_count:])
-            dbeta, dwb = _beta_shadow(single, pair, mask, params, *ctx.eps, dy, ctx.exact_dwb)
-            grads[9] = dbeta
-            if ctx.exact_dwb:
-                grads[10] = dwb
+        if ctx.exact_dwb:
+            params = list(v[13 + ctx.saved_count:])
+            grads[9] = _pair_weight_shadow(single, pair, mask, params, *ctx.eps, dy)
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
             from .token_dit_train import _activate_native_caller

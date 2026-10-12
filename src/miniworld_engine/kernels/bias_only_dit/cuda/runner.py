@@ -299,7 +299,7 @@ class FusedBiasOnlyDiT:
         tab = self._tables3(cond, S, L)
         T = tab.shape[0]
         _, _, packs = self._pack3()
-        front, core, tail = self._ops3(dev)
+        front_op, core, tail = self._ops3(dev)
         tcl = tail.cluster(M // 128)                                  # 8, or 6 / the pair tail where it takes fewer rounds
         pair = tcl == _tf32().TAIL_PAIR
         wk, Mt = (8 if pair else tcl), _tf32().tail_rows(M, tcl)     # the pair tail: the CL 8 packs, scratch of whole tile pairs
@@ -310,7 +310,7 @@ class FusedBiasOnlyDiT:
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["x"][b % 2]
             tb = tab[:, b]
-            front(x, tb, p["wvg"], vg, T, xa=buf["xa"])
+            front_op(x, tb, p["wvg"], vg, T, xa=buf["xa"])
             core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v), TF32-rounded
             tail(a, x, tb, p["wo"][wk], p["wab"], p["wsq"][wk], y, T, xt=buf["xt"][:Mt], h=buf["h"][:Mt * 48], cl=tcl)
             x = y
@@ -408,7 +408,7 @@ class FusedBiasOnlyDiT:
         tab = self._tables3b(cond, S, L)
         T = tab.shape[0]
         _, _, packs = self._pack3b()
-        front, core, tail = self._ops3b(dev)
+        front_op, core, tail = self._ops3b(dev)
         tcl = tail.cluster(M // 128)                                  # 8, 6, or the pair tail where it takes fewer rounds
         pair, Mt = tcl == B16.TAIL_PAIR, B16.tail_rows(M, tcl)
         buf = self._buffers3b(S, L, dev)
@@ -420,7 +420,7 @@ class FusedBiasOnlyDiT:
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["xn"][b % 2]
             tb = tab[:, b]
-            front(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
+            front_op(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
             core(vg[:, :DA], P[b * H:(b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:])     # sigmoid(g) * (P v)
             wo, wsq = (p["wo"][8], p["wsqn"]) if pair else (p["wo"][tcl], p["wsq"][tcl])
             tail(a, xin, tb, wo, p["wab"], wsq, y, T, xt=buf["xt"][:Mt], h=buf["h"][:Mt * 24], cl=tcl)
@@ -495,6 +495,13 @@ _H100_INFER_PACKS: dict = {}
 _H100_INFER_PROBS: dict = {}
 _H100_INFER_OPS: dict = {}
 _H100_INFER_STREAMS: dict = {}
+
+
+def _h100_infer_core(idx: int):
+    """The per-device ``PvGateCore`` (sigmoid(g) * P v) for the Hopper inference step, built once."""
+    if idx not in _H100_INFER_OPS:
+        _H100_INFER_OPS[idx] = C.PvGateCore(idx, nh=16, dh=48)
+    return _H100_INFER_OPS[idx]
 
 
 def h100_inference(single, cond, pair, mask, weights):
@@ -573,9 +580,8 @@ def h100_inference(single, cond, pair, mask, weights):
     vg = torch.mm(xa, wvg.t())
     og = torch.empty_like(xa)
     idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
-    if idx not in _H100_INFER_OPS:
-        _H100_INFER_OPS[idx] = C.PvGateCore(idx, nh=16, dh=48)
-    _H100_INFER_OPS[idx](vg[:, :D], prob, og, A, g=vg[:, D:])
+    core = _h100_infer_core(idx)
+    core(vg[:, :D], prob, og, A, g=vg[:, D:])
     y = torch.mm(og, wo.t())
     C.resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, T, EPS)
     h = single.new_empty((M, 2 * D))

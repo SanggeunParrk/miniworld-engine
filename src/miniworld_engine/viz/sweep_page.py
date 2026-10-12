@@ -385,7 +385,7 @@ axis values. Transition B2B applies its existing covering prune using the record
  Paired dimensions are decoded from actual cache keys; they are not Cartesian axes.
  Stream labels identify the caller workload: an MSA call also launches pair-tensor kernels.
  A stale plan must be regenerated with <code>dev derive</code> before rendering this page.
- <a href="../../tests/data/checkpoint-shapes-20260915.json">Constructor census</a> ·
+ <a href="../../tests/cpu/data/checkpoint-shapes-20260915.json">Constructor census</a> ·
  Model shape cleanup (<code>archive/records-20260928:docs/records/model-shape-cleanup-20260916.md</code>)</p>
 <p class="lede">Tile, warp and stage grids remain unchanged. Costs include only the explicitly identified prune,
  not measured build ETAs; existing usable cache entries reduce the remaining work.</p>
@@ -492,7 +492,7 @@ def render(rows: list[dict], totals: dict) -> str:
                  f'<td class="lad faint" title="{e(r["exempt"])}">&mdash;</td>')
         dt = "".join(f'<span class="dt {e(x)}">{e(x)}</span>' for x in r["dtypes"].split("|"))
         shape_note = (
-            '<div class="fam"><a href="../../tests/data/autotune-space-20260916.json">'
+            '<div class="fam"><a href="../../tests/cpu/data/autotune-space-20260916.json">'
             'Fallback shape audit: includes extrapolated widths; misses checkpoint widths</a></div>'
             if r["kernel"] == "layernorm_bwd_atomic_triton" and not r["coverage_verified"] else "")
         body.append(

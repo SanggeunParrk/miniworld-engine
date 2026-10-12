@@ -119,11 +119,8 @@ class AttentionPairBias(nn.Module):
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        # Explicit repaired PyTorch comparison, separate from the original reference
-        # and cuEquivariance baseline.  Pair-LN beta contributes the same additive
-        # bias at every key, so softmax removes it analytically.  Omitting it BEFORE
-        # BF16 rounding avoids introducing a spurious beta gradient through that
-        # rounding.  Keep beta connected to autograd with its exact zero derivative.
+        # Explicit repaired PyTorch comparison, separate from the original reference and cuEquivariance baseline: the
+        # pair LayerNorm (which has no beta any more) runs in FP32 and is rounded to BF16 once, as the CUDA path does.
         # The BF16 guard also leaves the runner's FP32 reference unchanged.
         repaired_pair_norm = (
             self.implementation == ImplementationType.PYTORCH
@@ -138,7 +135,7 @@ class AttentionPairBias(nn.Module):
         if repaired_pair_norm:
             pair = F.layer_norm(
                 pair.float(), self.ln_pair.normalized_shape,
-                self.ln_pair.weight.float(), self.ln_pair.bias.float() * 0,
+                self.ln_pair.weight.float(), None,
                 self.ln_pair.eps,
             ).to(pair.dtype)
         else:

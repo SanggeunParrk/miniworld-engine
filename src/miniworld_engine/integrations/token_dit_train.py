@@ -12,21 +12,25 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
   * fp32 only, copies the bf16 path makes and this one does not: no cond copy (the gate GEMM reads cond), no v copy (QK-norm:
     the core reads v from qkvg), dQ / dK / dV written by the core straight into the q|k|v|g gradient, the dxt / dxa GEMMs
     straight into their blocks of the conditioning gradient; the row kernels run one resident wave of blocks (``row_grid``);
-  * the attention core: ``kernels/augmented_attention/cuda/sm100`` -- bf16: attn_fwd2, attn_dkv + attn_dqb; fp32: attn_fwd_tf32,
-    attn_dkv_tf32 + attn_dqb_tf32 (kind::tf32 MMAs, fp32 softmax);
+  * the attention core: B200 ``kernels/augmented_attention/cuda/sm100`` -- bf16: attn_fwd2, attn_dkv + attn_dqb; fp32:
+    attn_fwd_tf32, attn_dkv_tf32 + attn_dqb_tf32 (kind::tf32 MMAs, fp32 softmax); H100 the sm_90a cores of
+    ``kernels/augmented_attention/cuda`` (bf16 wgmma; fp32 TF32 wgmma), which write og = sigmoid(g) o themselves (no O kept);
   * every elementwise / row step: ``kernels/conditioned_transition/cuda/token_dit_train_rows.cu``; in bf16 the expand GEMM
-    carries the SwiGLU (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
+    carries the SwiGLU on B200 (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
+  * H100 only: the native path (``MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE``, default on): fused weight pack / final gradient
+    kernels, graph-owned cuBLAS workspaces for the qualified buckets, and the caller-gradient hooks (``_native_caller_*``);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
-``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), B200, a bf16 or
-fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair 128 /
-transition n = 2) at a head layout of LAYOUTS (16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; bf16 and fp32 alike),
-B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples over as its [B, L] row),
-LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
+``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), H100 or B200, a
+bf16 or fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair
+128 / transition n = 2) at a head layout of LAYOUTS (B200: 16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; H100: 16 x 48
+only; bf16 and fp32 alike), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
+over as its [B, L] row), LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
 
-Any A and L: the kernels tile L by 128 and pair the samples, so ``block`` pads L to the next multiple of 128 and A to an even
-count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked out -- and returns the first
-A samples' first L rows. The padding is computed and dropped; it adds nothing to any gradient.
+Any A and L: the kernels tile L by 128 (and the sm_100a forward pairs the samples), so ``block`` pads L to the next multiple of
+128 and, on B200, A to an even count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked
+out -- and returns the first A samples' first L rows. The H100 cores take any A. The padding is computed and dropped; it adds
+nothing to any gradient.
 
 The precision follows the tensors, not an enclosing autocast: the forward and backward run with autocast off (bf16-mixed
 training hands an fp32 diffusion block fp32 activations, which take the fp32 / TF32 kernels).
@@ -89,6 +93,11 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
         return False
+    if cap == (9, 0) and (a.n_head, d) != (H, D):
+        return False                         # H100: 16 x 48 only (the sm_90a cores; the other layouts are B200-only)
+    if (cap == (9, 0) and operand_dtype(single, compute_dtype) is not BF
+            and os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN_FP32", "1") == "0"):
+        return False
     if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
         return False
     norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
@@ -150,7 +159,7 @@ QS90 = LOG2E / DH ** 0.5           # the sm_90a core's q scale: its logits are i
 
 def _sm90(dev) -> bool:
     """H100: the sm_90a attention cores and their operand conventions; B200 otherwise (``serves`` admits only these two)."""
-    return torch.cuda.get_device_capability(dev) == (9, 0)
+    return torch.device(dev).type == "cuda" and torch.cuda.get_device_capability(dev) == (9, 0)
 
 
 def _key_mask(mask, A, L, perm=None):
@@ -433,23 +442,28 @@ def _names_for(qk):
 
 
 def _own_cond(cond, fp32) -> bool:
-    """fp32 path with an fp32 cond: the gate GEMM (and its weight gradient) reads cond itself, no operand copy is made."""
-    return fp32 and cond.dtype is torch.float32
+    """fp32 path with an fp32 cond: the gate GEMM (and its weight gradient) reads cond itself, no operand copy is made. Not on
+    the H100 native path, whose cond may be sample-expanded (stride 0): it reads cond through ``cond_prep90`` and keeps cbf."""
+    return fp32 and cond.dtype is torch.float32 and not _native90(cond.device)
 
 
 def _saved_like(single, cond, pair, fp32, qk=True, H=H):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
-    recomputes it): those slots are empty [0, n] tensors."""
+    recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
+    v^T is built from v) and no O slot (the cores write og), and fp32 keeps LN(pair) (the dWf / dpair GEMMs read it)."""
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
+    h100 = _sm90(single.device)
+    copies = qk or h100
     return [e((M, D), dtype=f32), e((M, DC), dtype=at), e((0 if _own_cond(cond, fp32) else M, DC), dtype=at), e((M, 2), dtype=f32),
             e((M, 4 * D), dtype=at), e((M, 2 * D), dtype=at), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at),
-            e((M, 2 * H), dtype=f32), *((e((M, D), dtype=at), e((M, D), dtype=at), e((0 if fp32 else M, D), dtype=at)) if qk else ()),
-            e((H, L, L), dtype=at), e((M, D), dtype=f32), e((A, H, L), dtype=f32), e((M, D), dtype=at), e((M, D), dtype=at),
-            e((M, D), dtype=f32), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, D), dtype=at),
-            e((0 if fp32 else R, DP), dtype=at), e((R, 2), dtype=f32)]
+            e((M, 2 * H), dtype=f32),
+            *((e((M, D), dtype=at), e((M, D), dtype=at), e((0 if (fp32 and not h100) else M, D), dtype=at)) if copies else ()),
+            e((H, L, L), dtype=at), *([] if h100 else [e((M, D), dtype=f32)]), e((A, H, L), dtype=f32), e((M, D), dtype=at),
+            e((M, D), dtype=at), e((M, D), dtype=f32), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at),
+            e((M, D), dtype=at), e((0 if (fp32 and not h100) else R, DP), dtype=at), e((R, 2), dtype=f32)]
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
@@ -481,8 +495,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     M, R, dev = A * L, L * L, single.device
     at = torch.float32 if fp32 else BF
     h100 = _sm90(dev)
+    native = _native90(dev)
+    copies = qk or h100                        # q / k / v copies: QK-norm, or the sm_90a cores' pre-scaled q (see _saved_like)
     x = torch.empty(M, D, device=dev)                                          # the fp32 residual, written by adaln_a
-    c2 = cond.reshape(M, DC).contiguous()
+    c2 = None if native else cond.reshape(M, DC).contiguous()                  # native: cond_prep90 reads cond as given
     own_c = _own_cond(cond, fp32)
     chat = torch.empty(M, DC, device=dev, dtype=at); cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
@@ -496,8 +512,8 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     if pipeline:
         torch.cuda.current_stream(dev).wait_event(W["_cond_ready"])
     Wn, Wg = W["Wn"], W["Wg"]
-    G = torch.mm(chat, Wn.t())                                                  # [M, 4D] s1 | sh1 | s2 | sh2
-    Gg = torch.mm(c2 if own_c else cbf, Wg.t())                                 # [M, 2D] gate1 | gate2
+    G = mm(chat, Wn.t())                                                        # [M, 4D] s1 | sh1 | s2 | sh2
+    Gg = mm(c2 if own_c else cbf, Wg.t())                                       # [M, 2D] gate1 | gate2
     bs1, bs2, bg1, bg2 = W["bs1"], W["bs2"], W["bg1"], W["bg2"]
     xa = torch.empty(M, D, device=dev, dtype=at); xst = torch.empty(M, 2, device=dev)
     T.adaln_a(single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x)  # reads the input, writes x on the way
@@ -507,9 +523,10 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     qkvg = addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
-    if qk:                                     # fp32: v is not copied, the core reads it as a column view of qkvg
-        qn = torch.empty(M, D, device=dev, dtype=at); kn = torch.empty_like(qn); vc = None if fp32 else torch.empty_like(qn)
-        T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk)
+    if copies:                                 # B200 fp32: v is not copied, the core reads it as a column view of qkvg
+        qn = torch.empty(M, D, device=dev, dtype=at); kn = torch.empty_like(qn)
+        vc = None if (fp32 and not h100) else torch.empty_like(qn)
+        T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, QS90 if h100 else 1.0)   # H100: q scaled for the exp2 core
         vsave = vc if vc is not None else qkvg.new_empty(0, D)
         if vc is None:
             vc = qkvg[:, 2 * D:3 * D]
@@ -517,19 +534,36 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
         qn, kn, vc = (qkvg[:, i * D:(i + 1) * D] for i in range(3))
     p2 = pair.reshape(R, DP)
     pst = torch.empty(R, 2, device=dev)
-    if fp32:                                   # LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
+    O = None
+    if h100 or not fp32:
+        ph = torch.empty(R, DP, device=dev, dtype=at)
+        T.pair_ln(p2, ph, pst, EPS)
+        # head-major bias, Wf = Wb diag(wp): natural units for sm_100a, log2 units (and key-permuted for the TF32 core) for sm_90a
+        bias = mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
+    else:                                      # B200 fp32: LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
         ph = pair.new_empty(0, DP, dtype=at)
         bias = torch.empty(H, L, L, device=dev)
         T.pair_bias(p2, W["Wf"], None if mask is None else mask.reshape(L).to(torch.bool).contiguous(), bias, pst, L, EPS)
+    if h100:
+        km = kmp = perm = None
+        if native:
+            bias, km, kmp = T.train_bias90(bias, mask, A, fp32)
+        elif fp32:                                                              # TF32 core: key-permuted bias / mask
+            perm = rows.key_perm(L, dev)
+            bias = bias[..., perm].contiguous()
+        if fp32:                                                                # TF32 core: v^T, key-permuted bias / mask
+            vt = torch.empty(D, M, device=dev)
+            T.transpose(vc, vt)                                                 # v^T [D, M]
+            og, LSE = sm90.tf32_forward(qn, kn, vt, bias, kmp if native else _key_mask(mask, A, L, perm), A, L, qkvg)   # sigmoid(g) o, no O
+            del vt
+        else:
+            og, LSE = sm90.forward(qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg)   # sigmoid(g) o, no O
     else:
-        ph = torch.empty(R, DP, device=dev, dtype=at)
-        T.pair_ln(p2, ph, pst, EPS)
-        bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                       # head-major, natural units; Wf = Wb diag(wp)
-        if mask is not None:
+        if not fp32 and mask is not None:
             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
-    og = torch.empty(M, D, device=dev, dtype=at)
-    T.gate_o(O, qkvg, og)
+        O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+        og = torch.empty(M, D, device=dev, dtype=at)
+        T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
     y = mm(og, Wo.t())
     x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=at); x1st = torch.empty(M, 2, device=dev)
@@ -548,10 +582,11 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     T.res_c(x1, z, Gg, bg2, out)
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
-    qkv_out = [qn, kn, vsave] if qk else []
+    qkv_out = [qn, kn, vsave] if copies else []
     cbf = cbf if cbf is not None else c2.new_empty(0, DC, dtype=at)
-    return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, O, LSE, og, y, x1, x1st, xt,
-            ab, z, ph, pst]
+    # the sm_90a cores write og and the backward needs no O: H100 keeps none (not even a placeholder, which AOT mis-strides)
+    return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, *([] if h100 else [O]), LSE, og,
+            y, x1, x1st, xt, ab, z, ph, pst]
 
 
 def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
@@ -634,10 +669,12 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     T = ext(D, DH, rpb=_native_rpb() if _native90(single.device) else 8,
             empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]))
     h100 = _sm90(single.device)
+    saved = list(saved)
     if not (qk or h100):                       # the forward's q / k / v: column views of qkvg (see _fwd_body)
         saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
-    (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, O, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
-    if vc.numel() == 0:                        # fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
+    O = None if h100 else saved.pop(14)        # H100 keeps og only (the cores write it)
+    (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
+    if vc.numel() == 0:                        # B200 fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
         vc = qkvg[:, 2 * D:3 * D]
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
@@ -650,7 +687,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
     native = _native90(dev)
-    c2, p2 = (None if native else cond.reshape(M, DC).contiguous()), pair.reshape(R, DP)
+    c2, p2 = (None if native else cond.reshape(M, DC).contiguous()), pair.reshape(R, DP)   # native: cond_bwd90 reads cond as given
     dout = dout.reshape(M, D).to(sdt).contiguous()
     # per-block column sums: bg2 bs2 bg1 bs1 bq | dwq dwk (per head); rows: the row kernels' block count (T.part_rows)
     allp = torch.empty(T.part_rows(M, fp32), 7 * D, device=dev)
@@ -662,34 +699,43 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dh = mm(dz, Wsq)                                                      # [M, 2D]
     dab = torch.empty_like(ab); h = torch.empty_like(dh)
     T.swiglu_bwd(dh, ab, dab, h)
-    dWsq = _mm32(dz.t(), h)
-    # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing)
-    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D:]) if fp32 else torch.mm(dab, Wab)
-    dWab = _mm32(dab.t(), xt)
+    dWsq = mm32(dz.t(), h)
+    # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing); the H100 owned
+    # GEMMs return a fresh tensor, which the row kernels copy as before
+    direct = fp32 and mm is torch.mm
+    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D:]) if direct else mm(dab, Wab)
+    dWab = mm32(dab.t(), xt)
     dx1 = torch.empty(M, D, device=dev); dy = torch.empty(M, D, device=dev, dtype=at)
     T.res_adaln_b_bwd(dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
     dog = mm(dy, Wo)
     dWo = mm32(dy.t(), og)
     dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
-    T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    # fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
-    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH, dq=dqkvg[:, :D], dk=dqkvg[:, D:2 * D],
-                                          dv=dqkvg[:, 2 * D:3 * D]) if fp32
-                      else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
+    T.gate_o_bwd(dog, og if h100 else O, qkvg, dob, dd, dqkvg, L, h100)       # H100: D and dg from og (dO o = dog og)
+    if native:
+        DQ, DK, DV, DB = _native_attn_bwd90(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L, fp32)
+    elif h100 and fp32:
+        DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
+    elif h100:                                                                  # dq for the unscaled q, dbias natural units
+        DQ, DK, DV, DB = sm90.backward(qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L)
+    else:
+        # B200 fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
+        DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH, dq=dqkvg[:, :D], dk=dqkvg[:, D:2 * D],
+                                              dv=dqkvg[:, 2 * D:3 * D]) if fp32
+                          else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
-    dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D:2 * D]) if fp32 else torch.mm(dqkvg, Wqkvg)
-    dWqkvg = _mm32(dqkvg.t(), xa)
+    dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D:2 * D]) if direct else mm(dqkvg, Wqkvg)
+    dWqkvg = mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
     if not native:
         sums = allp.sum(0) if qk else allp[:, :5 * D].sum(0)
         pb = sums[:5 * D].view(5, D)
         dwqk = sums[5 * D:].view(2, H, DH).sum(1).reshape(-1) if qk else torch.zeros(2 * DH, device=dev)
-    dchat = torch.mm(dG, Wn)
-    dWn = _mm32(dG.t(), chat)
-    dcg = torch.mm(dGg, Wg)
-    dWg = _mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
+    dchat = mm(dG, Wn)
+    dWn = mm32(dG.t(), chat)
+    dcg = mm(dGg, Wg)
+    dWg = mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
     dc = torch.empty(M, DC, device=dev, dtype=cdt)
     if native:
         T.cond_bwd90(dchat, dcg, cond, cst, dc)
@@ -705,14 +751,14 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D:(i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
-    if fp32:                                   # LN(pair) recomputed: dpair and the dWf partials in one pass
+    if fp32 and not h100:                      # B200 fp32: LN(pair) recomputed: dpair and the dWf partials in one pass
         pwf = torch.empty(T.pair_grid(R), H * DP, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, DP)
     else:
-        dbv = DB.view(H, R).to(at)                                              # masked key columns are 0 (P = 0)
-        dWf = _mm32(dbv, ph)                                                    # [H, DP]
-        dph = _mm32(dbv.t(), Wf.to(at))                                         # [R, DP]
+        dbv = DB.reshape(H, R).to(at)                                           # masked key columns are 0 (P = 0); H100: may be a transposed view
+        dWf = mm32(dbv, ph)                                                     # [H, DP]
+        dph = mm32(dbv.t(), Wf.to(at))                                          # [R, DP]
         T.pair_ln_bwd(dph, p2, pst, dpair)
     dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
     grads = {
@@ -779,12 +825,20 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     fp32 = operand_dtype(single, compute_dtype) is torch.float32
     A, _, L, _ = single.shape
-    Ap, Lp = A + A % 2, -(-L // QM) * QM
+    # the sm_100a forward pairs the samples; the H100 cores take any A (and the qualified odd-A buckets stay unpadded)
+    Ap = A if _sm90(single.device) else A + A % 2
+    Lp = -(-L // QM) * QM
     padded = (Ap, Lp) != (A, L)
+    caller = (single, cond, pair)              # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
     if padded:
         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
-    out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
-                       *[module.get_parameter(n) for n in _names_for(qk)])
+    params = [module.get_parameter(n) for n in _names_for(qk)]
+    out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head), *params)
+    # Flag 0 reconstructs the legacy caller for comparisons; the CUDA core is unchanged.
+    if _native90(caller[0].device) and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0":
+        # The result's edges now strongly own leaf AccumulateGrad nodes.
+        # Installing before apply can attach hooks to a temporary weak owner.
+        _native_caller_hooks(*caller, *module.parameters(), force=True)
     return out[:A, :, :L] if padded else out
 
 

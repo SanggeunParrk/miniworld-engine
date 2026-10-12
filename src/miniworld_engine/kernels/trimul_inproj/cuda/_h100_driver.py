@@ -352,7 +352,7 @@ class _CtypesDriver(object):
     def launch_kernel_ex(
         self, func, grid, block, smem_bytes, stream, kernel_params, pdl=False
     ):
-        """cuLaunchKernelEx with the programmatic-stream-serialisation attribute (CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION = 3)."""
+        """cuLaunchKernelEx with the programmatic-stream-serialisation attribute (CU_LAUNCH_ATTRIBUTE_PROGRAMMATIC_STREAM_SERIALIZATION = 6)."""
         cfg = _CUlaunchConfig(
             int(grid[0]),
             int(grid[1]),
@@ -367,7 +367,7 @@ class _CtypesDriver(object):
         )
         attrs = (_CUlaunchAttribute * 1)()
         if pdl:
-            attrs[0].id = 3
+            attrs[0].id = 6
             ctypes.memmove(attrs[0].value, ctypes.byref(ctypes.c_int(1)), 4)
             cfg.attrs = ctypes.cast(attrs, ctypes.POINTER(_CUlaunchAttribute))
             cfg.numAttrs = 1

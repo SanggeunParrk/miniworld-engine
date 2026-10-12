@@ -275,24 +275,28 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
             wgrad(datt, gated), wgrad(dab, y), wgrad(dffn, hh)]
 
 
-def _native_cast_fake(values, templates):
+def _native_h100_cast_fake(values: list[torch.Tensor], templates: list[torch.Tensor]) -> list[torch.Tensor]:
+    """One empty tensor per template, in the template's shape, dtype and device."""
     return [torch.empty_like(t) for t in templates]
 
 
-@opaque(fake=_native_cast_fake, name="h100_swa_native_cast")
+@opaque(fake=_native_h100_cast_fake, name="swa_dit_h100_native_cast")
 def native_h100_cast(values: list[torch.Tensor], templates: list[torch.Tensor]) -> list[torch.Tensor]:
+    """Copy-cast each of ``values`` into a new tensor shaped and typed like the matching template."""
     out = [torch.empty_like(t) for t in templates]
     _native_h100_extension().native_copy(values, out, 0)
     return out
 
 
-def _native_mod_fwd_fake(c, w):
+def _native_h100_mod_fwd_fake(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """[R, 768] fp32 modulation, c as fp32, w as fp32."""
     return (c.new_empty((c.shape[0], 768), dtype=torch.float32),
             c.new_empty(c.shape, dtype=torch.float32), w.new_empty(w.shape, dtype=torch.float32))
 
 
-@opaque(fake=_native_mod_fwd_fake, name="h100_swa_native_mod_fwd")
+@opaque(fake=_native_h100_mod_fwd_fake, name="swa_dit_h100_native_mod_fwd")
 def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(silu-free fp32 c @ w^T, c as fp32, w as fp32) on the H100 native copy kernels and cuBLAS."""
     ext = _native_h100_extension()
     a, w32 = torch.empty_like(c, dtype=torch.float32), torch.empty_like(w, dtype=torch.float32)
     ext.native_copy([c], [a], 1)
@@ -301,12 +305,15 @@ def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor,
         return _native_mm(a, w32.t()), a, w32
 
 
-def _native_mod_bwd_fake(dy, c, a, w32, w):
+def _native_h100_mod_bwd_fake(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor,
+                              w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """dc like c, dweight like w."""
     return torch.empty_like(c), torch.empty_like(w)
 
 
-@opaque(fake=_native_mod_bwd_fake, name="h100_swa_native_mod_bwd")
+@opaque(fake=_native_h100_mod_bwd_fake, name="swa_dit_h100_native_mod_bwd")
 def native_h100_mod_bwd(dy: torch.Tensor, c: torch.Tensor, a: torch.Tensor, w32: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """(dc, dweight) of :func:`native_h100_mod_fwd`; dc and dweight are cast back to c's and w's dtype."""
     ext = _native_h100_extension()
     with torch.autocast("cuda", enabled=False):
         da, dw = _native_mm(dy, w32), _native_mm(dy.t(), a)

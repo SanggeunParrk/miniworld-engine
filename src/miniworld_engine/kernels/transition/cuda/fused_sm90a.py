@@ -39,6 +39,8 @@ ROWS = 128
 #: Hidden slice replicas in the backward's weight role: NDW = 8 * DW_REPL weight CTAs.
 #: 8 measured fastest at both lengths; see ``archive/experiments-20260928:experiments/transition_fused/records/``.
 DW_REPL = 8
+#: Hidden multiples (the n of ``Transition(128, n)``) with a build.
+NS = (4, 2)
 
 
 def native_aux_enabled(d: int = 128) -> bool:
@@ -63,7 +65,9 @@ def _native_ext():
     )
 
 
-def _cuda_prepare_fake(wa, wb, ws, transpose=True):
+def _cuda_prepare_launch_fake(wa, wb, ws, transpose=True):
+    """Output structure only: a fresh bf16 copy of each weight that is not already contiguous bf16, then ws^T
+    ([K, N] bf16; a 0-element placeholder when ``transpose`` is false)."""
     fresh = [torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
              for w in (wa, wb, ws)
              if w.dtype != torch.bfloat16 or not w.is_contiguous()]
@@ -72,11 +76,12 @@ def _cuda_prepare_fake(wa, wb, ws, transpose=True):
     return fresh
 
 
-@opaque(fake=_cuda_prepare_fake, name="transition_native_prepare_sm90a")
+@opaque(fake=_cuda_prepare_launch_fake, name="transition_native_prepare_sm90a")
 def _cuda_prepare_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
                          transpose: bool = True) -> list[torch.Tensor]:
+    """Pack the weights for the sm90a kernels (bf16, contiguous) and return only the freshly allocated tensors."""
     if _is_fake(wa, wb, ws):
-        return _cuda_prepare_fake(wa, wb, ws, transpose)
+        return _cuda_prepare_launch_fake(wa, wb, ws, transpose)
     packed = _native_ext().prepare(wa, wb, ws, transpose)
     # A custom operator may only return fresh tensors. Keep the no-copy BF16
     # aliases outside the opaque launch, where Dynamo can see their identity.
@@ -100,16 +105,16 @@ def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-def _ext(ctas: int, dw_repl: int, save: bool):
+def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
     warp_store = os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
     early_release = os.environ.get("MINIWORLD_TRANSITION_H100_DW_EARLY_RELEASE", "0") == "1"
     dw_overlap = early_release or os.environ.get("MINIWORLD_TRANSITION_H100_DW_OVERLAP", "0") == "1"
-    return _build_ext(ctas, dw_repl, save, warp_store, dw_overlap, early_release)
+    return _build_ext(ctas, dw_repl, save, warp_store, dw_overlap, early_release, n)
 
 
 @functools.lru_cache(maxsize=32)
 def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool, dw_overlap: bool = False,
-               early_release: bool = False):
+               early_release: bool = False, n: int = 4):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 
@@ -127,13 +132,14 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool, dw_overlap
         name=(f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1"
               + ("_affine_warp_store_v1" if warp_store else "")
               + ("_dw_overlap_v1" if dw_overlap else "")
-              + ("_early_release_v1" if early_release else "")),
+              + ("_early_release_v1" if early_release else "")
+              + (f"_n{n}" if n != 4 else "")),
         sources=[str(_dir / "transition_fused_sm90a.cu"),
                  str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
                  str(_dir / "transition_fused_bwd_sm90a_kernel.cu")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
                            f"-I{_dir / 'anthropic_v5'}", f"-DNCTA={ctas}", f"-DDW_REPL={dw_repl}",
-                           f"-DFWD_SAVE={int(save)}",
+                           f"-DFWD_SAVE={int(save)}", f"-DMW_N={n}",
                            *(["-DMW_AFFINE_WARP_STORE=1"] if warp_store else []),
                            *(["-DMW_DW_OVERLAP=1"] if dw_overlap else []),
                            *(["-DMW_DW_EARLY_RELEASE=1"] if early_release else []),
@@ -144,8 +150,8 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, warp_store: bool, dw_overlap
     )
 
 
-def _ext_for(x: torch.Tensor, save: bool = True):
-    return _ext(_sm_count(x.device), DW_REPL, save)
+def _ext_for(x: torch.Tensor, save: bool = True, n: int = 4):
+    return _ext(_sm_count(x.device), DW_REPL, save, n)
 
 
 @functools.lru_cache(maxsize=8)
@@ -168,7 +174,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return False
     if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
         return False
-    if x.shape[-1] != 128 or wa.shape != (512, 128) or ws.shape != (128, 512):
+    if x.shape[-1] != 128 or wa.shape[0] // 128 not in NS or wa.shape != (wa.shape[0], 128) or ws.shape != (128, wa.shape[0]):
         return False
     rows = 1
     for s in x.shape[:-1]:
@@ -198,7 +204,7 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     try:
         # Build the variant this call will actually use, so inference never pays for the
         # training forward's build.
-        _ext_for(x, torch.is_grad_enabled())
+        _ext_for(x, torch.is_grad_enabled(), wa.shape[0] // 128)
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
         warnings.warn(f"fused sm90a Transition unavailable, keeping the existing path: {exc!r}",
@@ -240,7 +246,7 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
     config = _select_schedule(args, backward=False, save=save)
     if _is_fake(x, wa):
         return _fwd_launch_fake(*args)
-    return tuple(_ext(config["ctas"], config["dw_repl"], save).transition_fused_fwd(*args))
+    return tuple(_ext(config["ctas"], config["dw_repl"], save, wa.shape[0] // 128).transition_fused_fwd(*args))
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw=False):
@@ -261,19 +267,20 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
     symbol = "transition_fused_bwd_native" if native_aux_enabled() else "transition_fused_bwd_master"
-    return tuple(getattr(_ext(config["ctas"], config["dw_repl"], True), symbol)(*args))
+    return tuple(getattr(_ext(config["ctas"], config["dw_repl"], True, wa.shape[0] // 128), symbol)(*args))
 
 
 def _select_schedule(args, *, backward, save):
     from miniworld_engine.autotune.fused_config import transition_candidates, validator
     from miniworld_engine.autotune.native import choose_config, tensor_key
     x = args[1] if backward else args[0]
+    n = (args[6] if backward else args[3]).shape[0] // 128
     sms = _sm_count(x.device)
-    grid = transition_candidates(sms, backward=backward)
+    grid = transition_candidates(sms, backward=backward, n=n)
     symbol = (("transition_fused_bwd_native" if native_aux_enabled() else "transition_fused_bwd_master")
               if backward else "transition_fused_fwd")
     def run(c):
-        return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save), symbol)(*args))
+        return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save, n), symbol)(*args))
     tensors = args[:-1] if backward else args[:6]
     op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
     return choose_config(op, grid, dtype=str(x.dtype),
@@ -284,18 +291,20 @@ def _select_schedule(args, *, backward, save):
 
 
 def _master_pack_fake(wa, wb, ws):
+    """Output structure only: (Wa, Wb, Ws) as bf16 in their own shapes, then Ws^T as bf16."""
     return tuple(torch.empty(w.shape, device=w.device, dtype=torch.bfloat16) for w in (wa, wb, ws)) + (torch.empty(ws.shape[1], ws.shape[0], device=ws.device, dtype=torch.bfloat16),)
 
 
 @opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
 def _master_pack(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bf16 copies of an fp32 master (Wa, Wb, Ws) plus Ws^T, all freshly allocated."""
     if native_aux_enabled(wa.shape[1]):
         return _cuda_prepare(wa, wb, ws)
     from miniworld_engine.integrations.h100_master import transition_pack_kernel
     a, b, s, st = _master_pack_fake(wa, wb, ws)
     d = wa.shape[1]
     rows = 8 if d == 64 else 32
-    transition_pack_kernel[(wa.shape[0] // 32, d // rows)](wa, wb, ws, a, b, s, st, D=d, ROWS=rows, num_warps=4)
+    transition_pack_kernel[(wa.shape[0] // 32, d // rows)](wa, wb, ws, a, b, s, st, D=d, ROWS=rows)
     return a, b, s, st
 
 

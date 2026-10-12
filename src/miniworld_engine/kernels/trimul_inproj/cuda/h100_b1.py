@@ -116,12 +116,12 @@ class Plan(T.CooperativePlan):
             raise ValueError("invalid dTri store tile")
         self.xhat, self.rstd = xhat, rstd
         if (
-            d["n"] not in (384, 768)
+            d["n"] not in (128, 256, 384, 512, 640, 768, 896, 1024)
             or d["x"].dtype != torch.bfloat16
             or d["x"].numel() != d["n"] ** 2 * 128
         ):
             raise ValueError(
-                "This development kernel supports BF16 C128, L384/768 only"
+                "This candidate requires BF16 C128 and supported multiples of 128"
             )
         if part != 2 or not 1 <= count <= 132:
             raise ValueError(

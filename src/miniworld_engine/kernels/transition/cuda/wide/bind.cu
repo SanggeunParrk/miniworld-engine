@@ -37,14 +37,16 @@ void wide_d256_fwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensor
 void wide_dxln_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const __nv_bfloat16*, const __nv_bfloat16*, __nv_bfloat16*,
                       const float*, const float*, const float*, float*, float*, int, int, cudaStream_t);
 #endif
-#if WIDE_D == 384 || WIDE_D == 512
+#if WIDE_D >= 384
 int wide_squeeze_bn();
+#if WIDE_D <= 512
 void wide_lnsg_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const float*, const float*, __nv_bfloat16*,
                       float*, float*, int, int, float, int, int, cudaStream_t
 #if MW_SAVE_AB
                       ,__nv_bfloat16*,__nv_bfloat16*
 #endif
                       );
+#endif
 void wide_squeeze_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, int, int, int, int,
                          cudaStream_t);
 #ifndef MW_GATE_SAVED_TMA
@@ -125,7 +127,10 @@ void f32_1d(const torch::Tensor& t, int64_t n, const char* what) {
 }
 __nv_bfloat16* bp(const torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr()); }
 float* fp(const torch::Tensor& t) { return t.data_ptr<float>(); }
-constexpr int64_t D = WIDE_D, H = 4 * WIDE_D, ROWS = 128;
+#ifndef WIDE_N
+#define WIDE_N 4                                  // hidden multiple: H = WIDE_N * D (the n of Transition(d, n))
+#endif
+constexpr int64_t D = WIDE_D, H = WIDE_N * WIDE_D, ROWS = 128;
 
 }  // namespace
 
@@ -174,7 +179,7 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
 }
 #endif
 
-#if WIDE_D == 384 || WIDE_D == 512
+#if WIDE_D >= 384
 // x [M,D]; gamma/beta fp32; w1p = [Wa;Wb] packed in 64-row blocks [Wa 64 | Wb 64] [2H,D]; ws [D,H]. Returns (out, xn, rstd, c1, h):
 // h [M,H] is the SwiGLU intermediate the two kernels pass through HBM anyway -- the backward may keep it (save_h).
 std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, torch::Tensor w1p, torch::Tensor ws,
@@ -193,12 +198,16 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
 #if MW_SAVE_AB
   auto saved_a=torch::empty({save?M:1,save?H:1},x.options()),saved_b=torch::empty_like(saved_a);
 #endif
+#if WIDE_D <= 512
   wide_lnsg_launch(rm(x, 64, 64), rm(w1p, 64, 128), rm(h, 64, 64), fp(gamma), fp(beta), bp(xn), fp(rstd), fp(c1), (int)M, (int)H,
                    (float)eps, save ? 1 : 0, WIDE_SMS, stream
 #if MW_SAVE_AB
                    ,bp(saved_a),bp(saved_b)
 #endif
                    );
+#else
+  expect(false, "D768 runs the split forward (LayerNorm kernel, fwd_split) only");
+#endif
   const int bn = wide_squeeze_bn();
   wide_squeeze_launch(rm(h, 64, 64), rm(ws, 64, bn), rm(x, 64, 64), rm(out, 64, 64), (int)M, (int)H, (int)D, WIDE_SMS, stream);
 #if MW_SAVE_AB

@@ -22,7 +22,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef FWD_SAVE
 #define FWD_SAVE 1          // 1: also write xn, rstd and c1 (what the backward needs). 0: inference, output only -- see below.
 #endif
-constexpr int D_ = 128, H_ = 512, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
+#ifndef MW_N
+#define MW_N 4              // hidden = MW_N * D (the n of Transition(d, n))
+#endif
+constexpr int D_ = 128, H_ = MW_N * 128, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64;
 
 // ---- shared memory: a two-slot weight ring plus double-buffered x and xn tiles
 constexpr int F_SLOT = 49152, F_RING = 0;                      // slot: [Wa_j; Wb_j] 32 KB at +0, then Ws^T_j 16 KB at +32768

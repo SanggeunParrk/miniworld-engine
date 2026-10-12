@@ -1,4 +1,7 @@
 #if defined(MW_TRANSITION_AUX_ONLY)
+#ifndef MW_N
+#define MW_N 4              // hidden = MW_N * D (the n of Transition(d, n)); the D128 fused kernels are built per n
+#endif
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -65,39 +68,49 @@ __global__ void cast_k(Cast p){
 __device__ float wsum(float x){for(int q=16;q;q>>=1)x=__fadd_rn(x,__shfl_xor_sync(0xffffffff,x,q));return x;}
 // Each persistent warp owns rows and keeps its affine-gradient sums in registers.
 // A second fixed-order reduction replaces the old global floating-point atomics.
-__global__ __launch_bounds__(128,4)
+template<int NV,bool HOIST=(NV<=4)> __global__ __launch_bounds__(128,NV>4?3:4)
 void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const float* c1,
               const bf* residual,bf* dx,float* partial,int rows,int d){
   int lane=threadIdx.x&31,warp=threadIdx.x>>5,gw=blockIdx.x*4+warp,nw=gridDim.x*4;
-  float ag[16]={0},ab[16]={0};
+  float ag[4*NV]={0},ab[4*NV]={0};
   union Vec{uint2 u;bf v[4];};
+  float4 gm[HOIST?NV:1];                               // gamma stays in registers across the rows of this warp (not at NV = 6: registers)
+  if(HOIST){
+    #pragma unroll
+    for(int v=0;v<NV;++v){int c=(v*32+lane)*4;gm[HOIST?v:0]=c<d?*reinterpret_cast<const float4*>(gamma+c):make_float4(0.f,0.f,0.f,0.f);}
+  }
   for(int row=gw;row<rows;row+=nw){
-    float xh[16],grad[16],wd[16],a=0.f,b=0.f;
+    float xh[4*NV],grad[4*NV],wd[4*NV],a=0.f,b=0.f;
+    Vec rv[NV];                                        // the residual is issued with the first loads: it was a second dependent round trip
+    #pragma unroll
+    for(int v=0;v<NV;++v){int c=(v*32+lane)*4;if(c<d)rv[v].u=*reinterpret_cast<const uint2*>(residual+row*d+c);}
     float rstd=rs[row],offset=c1[row];
     #pragma unroll
-    for(int v=0;v<4;++v){
+    for(int v=0;v<NV;++v){
       int c=(v*32+lane)*4;
       if(c<d){
         Vec xv,gv;xv.u=*reinterpret_cast<const uint2*>(x+row*d+c);gv.u=*reinterpret_cast<const uint2*>(dy+row*d+c);
+        const float4 gq=HOIST?gm[HOIST?v:0]:*reinterpret_cast<const float4*>(gamma+c);
+        const float g4[4]={gq.x,gq.y,gq.z,gq.w};
         #pragma unroll
         for(int e=0;e<4;++e){
           int k=4*v+e;
           xh[k]=fmaf(__bfloat162float(xv.v[e]),rstd,-offset);
-          grad[k]=__bfloat162float(gv.v[e]);wd[k]=gamma[c+e]*grad[k];
+          grad[k]=__bfloat162float(gv.v[e]);wd[k]=g4[e]*grad[k];
           a=__fadd_rn(a,wd[k]*xh[k]);b=__fadd_rn(b,wd[k]);
         }
       }
     }
     a=wsum(a)/d;b=wsum(b)/d;
     #pragma unroll
-    for(int v=0;v<4;++v){
+    for(int v=0;v<NV;++v){
       int c=(v*32+lane)*4;
       if(c<d){
-        Vec out,res;res.u=*reinterpret_cast<const uint2*>(residual+row*d+c);
+        Vec out;
         #pragma unroll
         for(int e=0;e<4;++e){
           int k=4*v+e;
-          out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(res.v[e]));
+          out.v[e]=__float2bfloat16_rn((wd[k]-(xh[k]*a+b))*rstd+__bfloat162float(rv[v].v[e]));
           ag[k]=__fadd_rn(ag[k],grad[k]*xh[k]);ab[k]=__fadd_rn(ab[k],grad[k]);
         }
         *reinterpret_cast<uint2*>(dx+row*d+c)=out.u;
@@ -105,7 +118,7 @@ void ln_bwd_k(const bf* dy,const bf* x,const float* gamma,const float* rs,const 
     }
   }
   #pragma unroll
-  for(int v=0;v<4;++v){
+  for(int v=0;v<NV;++v){
     int c=(v*32+lane)*4;
     if(c<d){
       #pragma unroll
@@ -269,16 +282,17 @@ std::vector<at::Tensor> ln_bwd(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::T
   c10::cuda::CUDAGuard guard(x.device());
   for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
   int d=x.size(-1),rows=x.numel()/d;
-  TORCH_CHECK((d==256||d==384||d==512)&&waves>0,"wide LN contract");
+  TORCH_CHECK((d==256||d==384||d==512||d==768)&&waves>0,"wide LN contract");
   for(auto* t:{&gamma,&rs,&c1})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kFloat,"LN FP32 stats/affine");
   TORCH_CHECK(gamma.numel()==d&&rs.numel()==rows&&c1.numel()==rows,"LN stats shapes");
   int sms=0;C10_CUDA_CHECK(cudaDeviceGetAttribute(&sms,cudaDevAttrMultiProcessorCount,x.get_device()));
   int grid=sms*waves,nw=grid*4;
   auto dx=at::empty_like(x),dg=at::empty_like(gamma),db=at::empty_like(gamma),partial=at::empty({2,nw,d},gamma.options());
   auto stream=at::cuda::getCurrentCUDAStream();
-  ln_bwd_k<<<grid,128,0,stream>>>(reinterpret_cast<const bf*>(dy.data_ptr()),reinterpret_cast<const bf*>(x.data_ptr()),
+  auto launch_bwd=[&](auto kernel){kernel<<<grid,128,0,stream>>>(reinterpret_cast<const bf*>(dy.data_ptr()),reinterpret_cast<const bf*>(x.data_ptr()),
     gamma.data_ptr<float>(),rs.data_ptr<float>(),c1.data_ptr<float>(),reinterpret_cast<const bf*>(residual.data_ptr()),
-    reinterpret_cast<bf*>(dx.data_ptr()),partial.data_ptr<float>(),rows,d);
+    reinterpret_cast<bf*>(dx.data_ptr()),partial.data_ptr<float>(),rows,d);};
+  if(d>512)launch_bwd(ln_bwd_k<6>);else launch_bwd(ln_bwd_k<4>);
   ln_reduce_k<<<d,256,0,stream>>>(partial.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),nw,d);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {dx,dg,db};
 }
@@ -326,13 +340,13 @@ std::vector<at::Tensor> reduce_affine(at::Tensor pg,at::Tensor pb){
     pg.data_ptr<float>(),pb.data_ptr<float>(),dg.data_ptr<float>(),db.data_ptr<float>(),pg.size(0),pg.size(1));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {dg,db};
 }
-__global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn,float* rs,float* c1,int rows,int d,float eps){
+template<int NV> __global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn,float* rs,float* c1,int rows,int d,float eps){
   int lane=threadIdx.x&31,row=blockIdx.x*8+(threadIdx.x>>5);
   if(row>=rows)return;
-  float v[16],sum=0.f,var=0.f;
+  float v[4*NV],sum=0.f,var=0.f;
   union Vec{uint2 u;bf v[4];};
   #pragma unroll
-  for(int j=0;j<4;++j){
+  for(int j=0;j<NV;++j){
     int c=(j*32+lane)*4;
     Vec q;q.u=*reinterpret_cast<const uint2*>(x+row*d+c);
     #pragma unroll
@@ -340,10 +354,10 @@ __global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn
   }
   float mean=wsum(sum)/d;
   #pragma unroll
-  for(int k=0;k<16;++k){float q=v[k]-mean;var=__fadd_rn(var,q*q);}
+  for(int k=0;k<4*NV;++k){float q=v[k]-mean;var=__fadd_rn(var,q*q);}
   float r=rsqrtf(wsum(var)/d+eps);
   #pragma unroll
-  for(int j=0;j<4;++j){
+  for(int j=0;j<NV;++j){
     int c=(j*32+lane)*4;Vec q;
     #pragma unroll
     for(int k=0;k<4;++k)q.v[k]=__float2bfloat16_rn((v[j*4+k]-mean)*r*gamma[c+k]+beta[c+k]);
@@ -353,11 +367,15 @@ __global__ void ln_fwd_k(const bf* x,const float* gamma,const float* beta,bf* xn
 }
 std::vector<at::Tensor> ln_fwd(at::Tensor x,at::Tensor gamma,at::Tensor beta,double eps){
   c10::cuda::CUDAGuard guard(x.device());
-  TORCH_CHECK(x.is_cuda()&&x.dim()==2&&x.size(1)==512&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16,"D512 BF16 rows required");
-  for(auto* t:{&gamma,&beta})TORCH_CHECK(t->device()==x.device()&&t->is_contiguous()&&t->scalar_type()==at::kFloat&&t->numel()==512,"FP32 affine required");
+  const int d=x.size(1);
+  TORCH_CHECK(x.is_cuda()&&x.dim()==2&&(d==512||d==768)&&x.is_contiguous()&&x.scalar_type()==at::kBFloat16,"D512 / D768 BF16 rows required");
+  for(auto* t:{&gamma,&beta})TORCH_CHECK(t->device()==x.device()&&t->is_contiguous()&&t->scalar_type()==at::kFloat&&t->numel()==d,"FP32 affine required");
   auto xn=at::empty_like(x),rs=at::empty({x.size(0)},gamma.options()),c1=at::empty_like(rs);
-  ln_fwd_k<<<(x.size(0)+7)/8,256,0,at::cuda::getCurrentCUDAStream()>>>(reinterpret_cast<const bf*>(x.data_ptr()),
-    gamma.data_ptr<float>(),beta.data_ptr<float>(),reinterpret_cast<bf*>(xn.data_ptr()),rs.data_ptr<float>(),c1.data_ptr<float>(),x.size(0),512,eps);
+  auto args_x=reinterpret_cast<const bf*>(x.data_ptr());
+  if(d==768)ln_fwd_k<6><<<(x.size(0)+7)/8,256,0,at::cuda::getCurrentCUDAStream()>>>(args_x,
+    gamma.data_ptr<float>(),beta.data_ptr<float>(),reinterpret_cast<bf*>(xn.data_ptr()),rs.data_ptr<float>(),c1.data_ptr<float>(),x.size(0),d,eps);
+  else ln_fwd_k<4><<<(x.size(0)+7)/8,256,0,at::cuda::getCurrentCUDAStream()>>>(args_x,
+    gamma.data_ptr<float>(),beta.data_ptr<float>(),reinterpret_cast<bf*>(xn.data_ptr()),rs.data_ptr<float>(),c1.data_ptr<float>(),x.size(0),d,eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();return {xn,rs,c1};
 }
 PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
@@ -481,7 +499,7 @@ std::vector<torch::Tensor> transition_fused_fwd(torch::Tensor x, torch::Tensor g
                                                 bool save) {
   const int64_t M = x.size(0), D = x.size(1), H = wa.size(0);
   expect(x.is_cuda() && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x must be contiguous cuda bf16");
-  expect(D == 128 && H == 512, "only d_hidden 128 with n 4 is built");
+  expect(D == 128 && H == MW_N * 128, "built for d_hidden 128 with the hidden multiple MW_N only");
   expect(M % transition_fused_fwd_rows() == 0, "row count must be a whole tile");
   expect(gamma.scalar_type() == torch::kFloat32 && beta.scalar_type() == torch::kFloat32, "gamma/beta must be fp32");
   expect(wa.is_contiguous() && wb.is_contiguous() && wst.is_contiguous(), "weights must be contiguous");
@@ -519,7 +537,7 @@ std::vector<torch::Tensor> transition_fused_bwd_master(torch::Tensor dy, torch::
                                                 torch::Tensor ws, bool fp32_dw) {
   const int64_t M = x.size(0), D = x.size(1), H = wa.size(0);
   expect(dy.is_cuda() && dy.is_contiguous() && dy.scalar_type() == torch::kBFloat16, "dy must be contiguous cuda bf16");
-  expect(D == 128 && H == 512, "only d_hidden 128 with n 4 is built");
+  expect(D == 128 && H == MW_N * 128, "built for d_hidden 128 with the hidden multiple MW_N only");
   expect(M % transition_fused_bwd_rows() == 0, "row count must be a whole tile");
   expect(gamma.scalar_type() == torch::kFloat32, "gamma must be fp32");
   expect(ws.is_contiguous() && ws.size(0) == D && ws.size(1) == H, "ws must be contiguous [D, H]");
@@ -560,7 +578,7 @@ std::vector<torch::Tensor> transition_fused_bwd_native(torch::Tensor dy, torch::
   expect(cudaSetDevice(x.get_device()) == cudaSuccess, "CUDA context initialization failed");
   const int64_t M = x.size(0), D = x.size(1), H = wa.size(0);
   expect(dy.is_cuda() && dy.is_contiguous() && dy.scalar_type() == torch::kBFloat16, "dy must be contiguous cuda bf16");
-  expect(D == 128 && H == 512, "only d_hidden 128 with n 4 is built");
+  expect(D == 128 && H == MW_N * 128, "built for d_hidden 128 with the hidden multiple MW_N only");
   expect(M % transition_fused_bwd_rows() == 0, "row count must be a whole tile");
   expect(gamma.scalar_type() == torch::kFloat32, "gamma must be fp32");
   expect(ws.is_contiguous() && ws.size(0) == D && ws.size(1) == H, "ws must be contiguous [D, H]");

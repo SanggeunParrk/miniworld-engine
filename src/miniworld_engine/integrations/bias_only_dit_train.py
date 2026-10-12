@@ -95,6 +95,8 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         return False
     if dt is F32 and (module.attention.to_value.weight.dtype is not F32 or torch.is_autocast_enabled("cuda")):
         return False                     # fp32 = an fp32 block; under autocast the module path keeps its casts
+    if dt is F32 and torch.cuda.get_device_capability(single.device) != (10, 0):
+        return False                     # the TF32 path is kind::tf32 tcgen05 (sm_100); the Hopper path is bf16 only
     if not any(t.requires_grad for t in (single, cond, src)) and not any(p.requires_grad for p in module.parameters()):
         return False
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[2] % 128 or single.shape[2] > 768:
@@ -147,10 +149,41 @@ def _bwd_fused(dev, H, DA):
     """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward is on (the default;
     MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0, read per call: the per-step launches) and its kernels built, else None."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
-    if not BWF.bwd_fused_on():
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    if not BWF.bwd_fused_on() or h100_enabled(dev):      # the fused backward kernels are sm_100 only: Hopper keeps the per-step launches
         return None
     idx = dev.index if dev.index is not None else torch.cuda.current_device()
     return BWF.ops(idx, H, DA // H) if BWF.bwd_fused_ready(idx, H, DA // H) else None
+
+
+def _pack_h100(P):
+    """Hopper weight pack (``pack90``: the same layouts as ``_pack`` without the fused backward's K-major operands; parameters that
+    already have the wanted dtype are used as they are)."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    bt = ext()
+    g = lambda n: P[n]
+    pipeline = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
+    cast = lambda t: (t.detach() if pipeline and t.dtype is torch.float32
+                      else bt.pack90([t.detach()], [], True).view(t.shape))
+    def cat(ts, scales=(), fp32=False):
+        if pipeline and len(ts) == 1 and not scales and ts[0].dtype is (torch.float32 if fp32 else BF):
+            return ts[0].detach()
+        return bt.pack90([t.detach() for t in ts], list(scales), fp32).view(-1, ts[0].shape[-1])
+    w1, w2 = cast(g("attention.ada_ln_in.ln_cond.weight")), cast(g("transition.ada_ln_in.ln_cond.weight"))
+    projections = [g("attention.ada_ln_in.to_scale.weight"), g("attention.ada_ln_in.to_bias.weight"),
+                   g("transition.ada_ln_in.to_scale.weight"), g("transition.ada_ln_in.to_bias.weight")]
+    wp, wb = cast(g("attention.ln_pair.weight")), cast(g("attention.to_bias.weight"))
+    W = dict(w1=w1, w2=w2, Wraw=cat(projections, fp32=True), Wn=cat(projections, [w1, w1, w2, w2]),
+             Wg=cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]),
+             Wvg=cat([g("attention.to_value.weight"), g("attention.to_gate.weight")]),
+             wp=wp, Wb=wb, Wf_bf=cat([g("attention.to_bias.weight")], [wp]),
+             Wo=cat([g("attention.to_out.weight")]),
+             Wab=cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]),
+             Wsq=cat([g("transition.squeeze.weight")]))
+    for key, name in (("bs1", "attention.ada_ln_in.to_scale.bias"), ("bs2", "transition.ada_ln_in.to_scale.bias"),
+                      ("bg1", "attention.to_scale.bias"), ("bg2", "transition.to_scale.bias")):
+        W[key] = cast(g(name))
+    return W
 
 
 def _pack(P, dev):
@@ -164,7 +197,11 @@ def _pack(P, dev):
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    W = _pack_one(P, dev, mid) if one else None
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    if h100_enabled(dev):
+        W = _pack_h100(P)
+    else:
+        W = _pack_one(P, dev, mid) if one else None
     if W is not None:
         if slot is not None:
             _capture.prune(_PACKS)
@@ -659,6 +696,16 @@ def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved,
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
 
 
+def _repeat_shared_fake(cond, samples):
+    return cond.new_empty((samples, *cond.shape[1:]))
+
+
+@opaque(fake=_repeat_shared_fake, name="bias_only_dit_repeat_shared")
+def _repeat_shared(cond: torch.Tensor, samples: int) -> torch.Tensor:
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    return ext().repeat90(cond[:1], samples)
+
+
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, *params):
@@ -959,6 +1006,10 @@ class _BlockH(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, bias, mask, sink, *params):
         f32 = single.dtype is F32
+        if not f32:
+            from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+            if h100_enabled(single.device) and cond.stride(0) == 0:      # an expanded shared cond: materialized by the Hopper kernel
+                cond = _repeat_shared(cond, single.shape[0])
         out, *saved = (_fwd32h if f32 else _fwdh)(single, cond, bias, mask, list(params))
         ctx.save_for_backward(single, cond, *params, *saved)
         ctx.meta = (mask, len(params), sink, f32, tuple(bias.shape), bias.dtype)
@@ -987,8 +1038,26 @@ def block(module, single, cond, pair, mask=None, bias=None):
     params = [module.get_parameter(n) for n in NAMES]
     if bias is not None:
         return _BlockH.apply(single, cond, bias.contiguous(), mask, getattr(bias, SINK_ATTR, None), *params)
+    # Preserve the caller's edge, including a nonleaf expanded view: substituting cond._base would make autograd.grad(output, cond)
+    # report an unused input. The Function materializes shared rows and returns a gradient with the original input shape.
     fn = _Block32 if single.dtype is F32 else _Block
-    return fn.apply(single, cond, pair.contiguous(), mask, *params)
+    out = fn.apply(single, cond, pair.contiguous(), mask, *params)
+    if single.dtype is not F32:
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+        if h100_enabled(single.device):
+            from .token_dit_train import _native_caller_hooks
+            _native_caller_hooks(single, cond, pair, *module.parameters(), force=True)
+    return out
 
 
 __all__ = ["NAMES", "PAIR_PARAMS", "block", "serves"]
+
+
+def h100_infer(module, single, cond, pair, mask):
+    """Opt-in Hopper inference, preserving the fused training forward boundaries."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+    if cond.shape[0] == 1 and single.shape[0] != 1:
+        cond = ext().repeat90(cond, single.shape[0])
+    elif cond.stride(0) == 0:
+        cond = ext().repeat90(cond[:1].contiguous(), single.shape[0])
+    return _fwd(single, cond, pair, mask, [module.get_parameter(n) for n in NAMES])[0]

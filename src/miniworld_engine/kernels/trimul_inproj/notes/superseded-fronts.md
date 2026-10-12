@@ -3,7 +3,7 @@
 Five kernels were tuned by every `build all` and checked by every numerics run while no path from
 the module layer, the `ops` package or the top-level `__init__` reached any of them. They were the
 trimul in-projection's earlier front-ends, left behind as the front moved. Removed in the commit
-that added `tests/registry/test_a_built_kernel_is_one_something_launches.py`, which is what will
+that added `tests/cpu/registry/test_a_built_kernel_is_one_something_launches.py`, which is what will
 catch the next one.
 
 This file is the part worth keeping: what each was, why it was built, and what replaced it. The

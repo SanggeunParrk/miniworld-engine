@@ -26,6 +26,9 @@ static_assert(KV==64 || KV==128);
 #ifndef MW_TRIATTN_ROW_GROUP
 #define MW_TRIATTN_ROW_GROUP 1
 #endif
+#ifndef MW_TRIATTN_MAXFREE
+#define MW_TRIATTN_MAXFREE 1
+#endif
 #ifndef MW_TRIATTN_PIPELINE
 #define MW_TRIATTN_PIPELINE 0
 #endif
@@ -66,7 +69,7 @@ struct Config {
     cutlass::arch::ClusterBarrier bready[2];
 #endif
   };
-  struct Params { TQ q; TK k,v; TB bias; TO out; float* lse; int L,H; Element const* raw_bias; };
+  struct Params { TQ q; TK k,v; TB bias; TO out; float* lse; int L,H; Element const* raw_bias; unsigned char* fix=nullptr; };
 };
 template<class T,class G,class S>
 __device__ __forceinline__ void tma_load(T const& t,G const& g,S const& s,
@@ -79,7 +82,7 @@ __device__ __forceinline__ void tma_load(T const& t,G const& g,S const& s,
 #endif
   copy(t.with(reinterpret_cast<uint64_t&>(bar)),c.partition_S(g),c.partition_D(s));
 }
-template<bool Single> __global__ __launch_bounds__(128*Config::R,Config::R==4?1:(Config::R==2?3:(KV==128?3:5)))
+template<bool Single,bool MF=false> __global__ __launch_bounds__(128*Config::R,Config::R==4?1:(Config::R==2?3:(KV==128?3:5)))
 #if MW_TRIATTN_PIPELINE==3
 __cluster_dims__(1,2,1)
 #endif
@@ -87,6 +90,12 @@ void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
   extern __shared__ char storage[];
   auto& s=*reinterpret_cast<Config::Shared*>(storage);
   int tid=threadIdx.x, qt=blockIdx.x, rg=blockIdx.y, h=blockIdx.z, L=p.L, nt=L/KV;
+  if constexpr(!MF) {
+    // Safe pass: only the pair rows the max-free pass could not finish.
+    bool any=false;
+    for(int r=0;r<Config::R;++r) any|=p.fix[(size_t(h)*L+rg*Config::R+r)*(L/64)+qt]!=0;
+    if(!any) return;
+  }
   bool live=false;for(int j=tid;j<L;j+=128*Config::R)live|=float(p.raw_bias[h*L*L+j])>-1e30f;
   bool allMasked=!__syncthreads_or(live);
   if(tid==0) {
@@ -160,7 +169,7 @@ void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
     auto oc=pt.partition_C(make_identity_tensor(Shape<_64,_32>{}));
     auto score=partition_fragment_C(smma,Shape<_64,Int<KV>>{});
     auto out=partition_fragment_C(pmma,Shape<_64,_32>{}); clear(out);
-    float m[2]={-INFINITY,-INFINITY}, l[2]={1.f,1.f};
+    float m[2]={-INFINITY,-INFINITY}, l[2]={MF?0.f:1.f,MF?0.f:1.f};
     s.qfull.wait(0);
     auto sq=make_tensor(make_smem_ptr(s.q[r].data()),Config::QL{});
     auto qa=st.partition_fragment_A(sq);
@@ -189,23 +198,54 @@ void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
           for(int xi=0;xi<8;++xi) {
             int x=xb+xi, mi=(x%4)/2;
             float bias=float(Element::bitcast(uint16_t(bv[xi/2]>>((xi%2)*16))));
+#ifdef MW_CORE_ABL_NOBIASADD
+            score(x)=allMasked?0.f:score(x);
+#else
             score(x)=allMasked?0.f:score(x)+bias*(1.f/SCALE);
-            mx[mi]=fmaxf(mx[mi],score(x));
+#endif
+#ifndef MW_CORE_ABL_NOMAX
+            if constexpr(!MF) mx[mi]=fmaxf(mx[mi],score(x));
+#endif
           }
         }
-        float alpha[2], ls[2]={0.f,0.f};
+        if constexpr(MF) {
+          if(kt==0) {
+            #pragma unroll
+            for(int x=0;x<size(score);++x) mx[(x%4)/2]=fmaxf(mx[(x%4)/2],score(x));
+          }
+        }
+        float alpha[2]={1.f,1.f}, ls[2]={0.f,0.f};
         #pragma unroll
         for(int mi=0;mi<2;++mi) {
+          if constexpr(MF) {
+            // Fixed per-row shift: the first key tile's row maximum (a real logit, so p_max >= 1).
+            if(kt==0) {
+              mx[mi]=fmaxf(mx[mi],__shfl_xor_sync(0xffffffffu,mx[mi],1));
+              mx[mi]=fmaxf(mx[mi],__shfl_xor_sync(0xffffffffu,mx[mi],2));
+              m[mi]=fmaxf(mx[mi]*(SCALE*LOG2E),-1e38f);
+            }
+          } else {
           mx[mi]=fmaxf(mx[mi],__shfl_xor_sync(0xffffffffu,mx[mi],1));
           mx[mi]=fmaxf(mx[mi],__shfl_xor_sync(0xffffffffu,mx[mi],2));
+#ifdef MW_CORE_ABL_NOMAX
+          alpha[mi]=1.f; m[mi]=0.f;
+#else
           float mn=fmaxf(fmaxf(m[mi],mx[mi]*(SCALE*LOG2E)),-1e38f);
           alpha[mi]=ex2(m[mi]-mn); m[mi]=mn;
+#endif
+          }
         }
         #pragma unroll
         for(int x=0;x<size(score);++x) {
           int mi=(x%4)/2;
+#ifdef MW_CORE_ABL_NOEXP
+          score(x)=score(x)*(SCALE*LOG2E)-m[mi];
+#else
           score(x)=ex2(score(x)*(SCALE*LOG2E)-m[mi]);
+#endif
+#ifndef MW_CORE_ABL_NOSUM
           ls[mi]+=score(x);
+#endif
         }
         #pragma unroll
         for(int mi=0;mi<2;++mi) {
@@ -216,13 +256,21 @@ void training_fwd_stream(CUTE_GRID_CONSTANT Config::Params const p) {
         auto ar=make_tensor(score.data(),flash::convert_layout_acc_Aregs<Config::PV>(score.layout()));
         auto pr=make_tensor_like<Element>(ar); flash::convert_type_out(ar,pr);
         warpgroup_wait<0>(); warpgroup_fence_operand(out);
+        if constexpr(!MF) {
         #pragma unroll
         for(int x=0;x<size(out);++x) out(x)*=alpha[(x%4)/2];
+        }
         auto vv=make_tensor(make_smem_ptr(s.v[stage][r].data()),Config::VT{});
         auto vb=pt.partition_fragment_B(vv);
         flash::gemm<false,-1>(pmma,pr,vb,out);
     }
     warpgroup_wait<0>(); warpgroup_fence_operand(out);
+    if constexpr(MF) {
+      bool bad=false;
+      #pragma unroll
+      for(int mi=0;mi<2;++mi) bad|=!(l[mi]>=0.5f && l[mi]<1e30f);
+      if(bad) p.fix[(size_t(h)*L+row)*(L/64)+qt]=1;
+    }
     float inv[2];
     #pragma unroll
     for(int mi=0;mi<2;++mi) {
@@ -431,6 +479,9 @@ std::vector<torch::Tensor> launch_forward(torch::Tensor q,torch::Tensor k,torch:
   auto og=make_tensor(make_gmem_ptr((Element*)output.data_ptr()),shape,Config::QStride{C,_1{},_32{},int64_t(L)*C});
   auto to=make_tma_copy(SM90_TMA_STORE{},og,Config::QL{},Shape<_64,_32>{},_1{});
   Config::Params p{make_q(q),make_k(k),make_k(v),tb,to,lse.data_ptr<float>(),L,H,(Element const*)b.data_ptr()};
+  // One flag per (head, pair row, query tile): set by the max-free pass when a row's sum left [0.5, 1e30].
+  auto fix=MW_TRIATTN_MAXFREE?torch::zeros({int64_t(H)*L*(L/64)},q.options().dtype(torch::kUInt8)):torch::ones({int64_t(H)*L*(L/64)},q.options().dtype(torch::kUInt8));
+  p.fix=fix.data_ptr<unsigned char>();
 #if MW_TRIATTN_PIPELINE==1 || MW_TRIATTN_PIPELINE==2
   if(L==64) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream_ws<true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
@@ -440,12 +491,17 @@ std::vector<torch::Tensor> launch_forward(torch::Tensor q,torch::Tensor k,torch:
     training_fwd_stream_ws<false><<<dim3(L/64,L/Config::R,H),128*Config::R+32,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
   }
 #else
+  auto run=[&](auto single,auto mf) {
+    constexpr bool S=decltype(single)::value, M=decltype(mf)::value;
+    C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream<S,M>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
+    training_fwd_stream<S,M><<<dim3(L/64,L/Config::R,H),128*Config::R,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
+  };
   if(L==64) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream<true>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
-    training_fwd_stream<true><<<dim3(L/64,L/Config::R,H),128*Config::R,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
+    if(MW_TRIATTN_MAXFREE) run(std::true_type{},std::true_type{});
+    run(std::true_type{},std::false_type{});
   } else {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(training_fwd_stream<false>,cudaFuncAttributeMaxDynamicSharedMemorySize,sizeof(Config::Shared)));
-    training_fwd_stream<false><<<dim3(L/64,L/Config::R,H),128*Config::R,sizeof(Config::Shared),at::cuda::getCurrentCUDAStream()>>>(p);
+    if(MW_TRIATTN_MAXFREE) run(std::false_type{},std::true_type{});
+    run(std::false_type{},std::false_type{});
   }
 #endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();

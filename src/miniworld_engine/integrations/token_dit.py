@@ -12,7 +12,7 @@ use the native CUDA block by default; unsupported engine calls raise. Per-shape 
 Precision: the runner's, i.e. single's dtype (bf16, or fp32 on TF32 tensor cores at every head layout of LAYOUTS on B200); the
 step runs with autocast off.
 
-Lengths: on H100 L must be a multiple of 128 (the Triton gated core's tiles). On B200 any L >= 8: the sm_100a core takes a
+Lengths: on H100 L must be a multiple of 128 (the sm_90a core's tiles). On B200 any L >= 8: the sm_100a core takes a
 multiple of 8 (its TMA maps are 3-D per sample, so tile tails load as zeros and stores clip), and ``update`` pads the other
 lengths to the next multiple of 8 -- single / cond with zero rows, the pair with zero rows and columns, the key mask with
 False -- and returns the first L rows.

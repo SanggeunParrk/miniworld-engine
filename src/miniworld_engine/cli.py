@@ -135,12 +135,16 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # The bias-only token DiT block (no query / key). Its engine path is hand CUDA + cuBLAS (kernels/bias_only_dit):
     # nothing on it autotunes, so no build case fills a cache for it (BUILDLESS).
     "bias_only_dit": ModuleTarget(()),
+    # The AF3 atom DiT block with block-local (32 x 128 window) attention (modules/local_dit). Its engine path is the
+    # opaque hand-CUDA ops local_dit_block_fwd / _bwd (integrations/local_dit.py): nothing on it autotunes (BUILDLESS).
+    "local_dit": ModuleTarget(()),
 }
 
 #: Module targets whose engine path launches no autotuned kernel, and why: the pre-bench build has nothing to fill for
 #: them, and an empty ``cases`` means exactly that rather than a forgotten mapping.
 BUILDLESS: dict[str, str] = {
     "bias_only_dit": "hand-written CUDA (fixed launch shapes, cubins built on first use) and cuBLAS; no Triton",
+    "local_dit": "hand-written CUDA window-attention block ops (local_dit_block_fwd / _bwd); no Triton",
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
@@ -152,7 +156,7 @@ GROUPS: dict[str, tuple[str, ...]] = {
                    "triangle_multiplication", "triangle_multiplication_bidirectional"),
     "diffusion": ("conditioned_transition", "adaptive_layernorm",
                   "augmented_attention_token", "augmented_attention_atom",
-                  "swa_atom_attention", "dit", "swa_dit", "bias_only_dit"),
+                  "swa_atom_attention", "dit", "swa_dit", "bias_only_dit", "local_dit"),
     "attention": ("triangle_attention",
                   "augmented_attention_token", "augmented_attention_atom"),
 }
@@ -607,7 +611,7 @@ def is_bad_unit(result: dict) -> bool:
     the leftover OOM shapes report "0 ok, 9 failed" and refuse to merge.
 
     One function, not an expression inlined at the call site, because the rule has to agree with
-    the `skipped` flag the builder sets -- see tests/registry/test_permanent_skip_classification.py, which
+    the `skipped` flag the builder sets -- see tests/cpu/registry/test_permanent_skip_classification.py, which
     drives both ends of it.
     """
     return (result.get("claimed_elsewhere", False)
@@ -1684,7 +1688,7 @@ def build_parser() -> argparse.ArgumentParser:
     """The whole CLI, built but not run.
 
     Separate from :func:`main` so a test can parse a command line without executing it -- which
-    is what lets tests/layout/test_cli_documented_commands.py check that every `miniworld-engine ...`
+    is what lets tests/cpu/layout/test_cli_documented_commands.py check that every `miniworld-engine ...`
     line in the README and the docs is a command this parser accepts. The module docstring used
     to advertise `miniworld-engine bench all`; the subcommands are `bench_kernel` and
     `bench_module`, and there has never been a `bench`.
@@ -1703,7 +1707,7 @@ def build_parser() -> argparse.ArgumentParser:
     #                  48) and kept only for its shape-ladder overrides
     #   dev merge     fold shards in by hand -- `build` does this itself; this is for shards from
     #                 another machine, or a re-merge after a cache-key scheme bump
-    #   dev audit     the build-system checks. tests/registry/test_registry_complete.py,
+    #   dev audit     the build-system checks. tests/cpu/registry/test_registry_complete.py,
     #                 test_declared_dtype_coverage.py and test_spread_shape_key.py already drive
     #                 these; the command adds only `--shards`, i.e. evidence from a real build
     #                 that a CPU test cannot have.

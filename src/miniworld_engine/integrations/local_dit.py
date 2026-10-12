@@ -117,10 +117,13 @@ def _namespace(weights) -> SimpleNamespace:
     return block
 
 
-def _pack(weights):
-    """The kernels' stacked bf16 weights and the backward's transposed A operands."""
+def _pack(weights, backward=False):
+    """The kernels' stacked bf16 weights and the backward's transposed A operands (Hopper: the live CUDA pack, ``backward`` adds the
+    transposes)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
 
+    if sm100._hopper(weights[0].device.index if weights[0].device.index is not None else torch.cuda.current_device()):
+        return sm100.pack_hopper(weights, backward=backward)
     block = _namespace(weights)
     with torch.no_grad():
         wc, wp, wo = sm100.cond_params(block), sm100.pre_params(block), sm100.post_params(block)
@@ -138,15 +141,16 @@ def _pack(weights):
 _PACKS: dict = {}
 
 
-def _weights(weights):
-    """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it."""
+def _weights(weights, backward=False):
+    """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it. ``backward`` only matters on Hopper
+    (the pack then also holds the transposed A operands) and is part of the key."""
     try:
         versions = tuple(w._version for w in weights)
     except RuntimeError:  # inference tensors carry no version counter: nothing could invalidate an entry
-        return _pack(weights)
-    key = _capture.scoped(tuple(id(w) for w in weights))
+        return _pack(weights, backward)
+    key = _capture.scoped((bool(backward), *(id(w) for w in weights)))
     if key is None:
-        return _pack(weights)
+        return _pack(weights, backward)
     hit = _PACKS.get(key)
     if hit is not None:
         refs, seen, pack = hit
@@ -155,7 +159,7 @@ def _weights(weights):
     _capture.prune(_PACKS)
     if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
         _PACKS.pop(next(iter(_PACKS)))
-    pack = _pack(weights)
+    pack = _pack(weights, backward)
     _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
     return pack
 
@@ -164,9 +168,6 @@ def _padded(t, n):
     """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
     return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
 
-def _padded(t, n):
-    """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
-    return t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
 
 def _unpadded(t, shape):
     """[A, 1, n, d] (a view of the kernels' rows) -> the caller's [A, 1, N, d]."""
@@ -288,6 +289,12 @@ def _fp32_call(module, single, cond, pair) -> bool:
 
 
 def serves(module, single, cond, pair, mask) -> bool:
+    qualified = _serves_hopper_training(module, single, cond, pair, mask)
+    if qualified is not None:
+        return qualified
+    qualified = _serves_hopper_inference(module, single, cond, pair, mask)
+    if qualified is not None:
+        return qualified
     fp32 = _fp32_call(module, single, cond, pair)
     if (_FAILED32 if fp32 else _FAILED) or os.environ.get("MINIWORLD_LOCAL_DIT_SM100", "1") == "0" \
             or settings.current().engine_backend == "triton":
@@ -304,6 +311,8 @@ def serves(module, single, cond, pair, mask) -> bool:
     if not (cap == (10, 0) or hopper):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) and not fp32:
+        return False
+    if hopper and fp32:     # the fp32 kernels are tcgen05 (sm_100a) only
         return False
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != DS_ or single.shape[2] == 0:
         return False
@@ -412,7 +421,9 @@ def _serves_hopper_inference(module, single, cond, pair, mask):
 def _keys(mask, n0, n):
     """The valid-key bytes [n] the attention kernels read (None: every key valid and no padding)."""
     if mask is not None:
-        return mask[0] if n == n0 else F.pad(mask[0], (0, n - n0)).contiguous()
+        if n == n0:
+            return mask[0].contiguous()
+        return F.pad(mask[0], (0, n - n0)).contiguous()
     return None if n == n0 else (torch.arange(n, device=_device_of(mask)) < n0)
 
 
@@ -433,24 +444,35 @@ def _tkey(t):
     return (t.data_ptr(), t._version, tuple(t.shape), t.dtype, t.device)
 
 
-def _kv_pack(weights):
+def _kv_pack(weights, packed_pre=None):
     """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16) and [Wk; Wv] [256, 128].
-    Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack."""
+    Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack.
+    Hopper (``packed_pre`` = the pack's ``wp``): the live CUDA pack, Wk / Wv views of ``packed_pre`` and no [Wk; Wv] (None)."""
+    hopper = packed_pre is not None and torch.cuda.get_device_capability(weights[len(WEIGHTS)].device) == (9, 0)
+
     def build():
+        if hopper:
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                sm100_atom_local as local,
+            )
+
+            return (*local.kv_pack_hopper(weights[len(WEIGHTS):], packed_pre), None)
         gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS):]
         wk, wv = weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]
         wk, wv = wk.to(BF), wv.to(BF)
         return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk, wv, torch.cat([wk, wv])
 
     tail = weights[len(WEIGHTS):] + [weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]]
-    return _capture.lookup(_KV, tuple((t.data_ptr(), t._version) for t in tail), build, limit=16)
+    return _capture.lookup(_KV, (hopper, *((t.data_ptr(), t._version) for t in tail)), build, limit=16)
 
 
-def _cond_tables(cond, c2_fn, n, weights, wc, cross, save):
+def _cond_tables(cond, c2_fn, n, weights, wc, cross, save, wp=None, owned=False, packed_infer=False):
     """The conditioning tables of a call: mod [rows, 768] (cond_fwd) and, in the cross-attention mode, cn (the LN of the conditioning) and the
     key / value modulation mkv [rows, 256]. They depend on the conditioning tensor and the weights only -- the same at every block call that
     reads one conditioning (a sampler's steps), so an inference call (``save`` False) takes them from the hoist: made once per conditioning
-    tensor (pointer, version) and weights, scoped to the CUDA-graph capture (``kernels._capture.lookup_inputs``)."""
+    tensor (pointer, version) and weights, scoped to the CUDA-graph capture (``kernels._capture.lookup_inputs``).
+    Hopper: ``wp`` (the pack's input-projection operands) feeds the KV pack, ``owned`` routes the product through the owned cuBLAS
+    workspace, ``packed_infer`` picks the persistent conditioning schedule."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -458,12 +480,12 @@ def _cond_tables(cond, c2_fn, n, weights, wc, cross, save):
 
     def build():
         c2 = c2_fn()
-        mod = rows.cond_fwd(c2, *wc)
+        mod = rows.cond_fwd(c2, *wc, **({"hopper_waves": .5 if packed_infer else 2.} if wp is not None else {}))
         if not cross:
             return mod, None, None
-        wm, _, gkv, *_ = _kv_pack(weights)
+        wm, _, gkv, *_ = _kv_pack(weights, wp)
         cn = local.cond_ln(c2, gkv)
-        return mod, cn, cn @ wm.t()
+        return mod, cn, _mm(cn, wm.t(), owned)
 
     if save or not _hoisting():
         return build()
@@ -525,12 +547,18 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
              and (a, n0) in ((5, 8192), (48, 4096), (48, 8192)))
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
-        packed_infer = (not save and cross and a == 5 and n0 in (2048, 4096)
-                        and rows._hopper(single.device.index))
+        hopper = rows._hopper(single.device.index if single.device.index is not None else torch.cuda.current_device())
+        packed_infer = not save and cross and a == 5 and n0 in (2048, 4096) and hopper
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)], backward=save)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
-        mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save)
-        if cross:       # keys and values from a second AdaLN of x1, inside pre_fwd
+        mod, cn, mkv = _cond_tables(cond, lambda: _padded(cond, n).reshape(m, DC_).contiguous(), n, weights, wc, cross, save,
+                                    wp=wp if hopper else None, owned=owned, packed_infer=packed_infer)
+        if cross and hopper:    # Hopper: pre_fwd's own k / v are not used; keys and values from a second AdaLN of x1 (kv_fwd) and cuBLAS
+            _, bs, _, wk, wv, _ = _kv_pack(weights, wp)
+            q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=True, cross=True)
+            xkv = local.kv_fwd(x1, mkv, bs)
+            k, v = _mm(xkv, wk.t(), owned), _mm(xkv, wv.t(), owned)
+        elif cross:     # keys and values from a second AdaLN of x1, inside pre_fwd
             bs = _kv_pack(weights)[1]
             q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, *wp, mkv, bs, save=save)
         else:
@@ -538,7 +566,7 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
         bias = _pair_bias(pair, n, weights, save)
         o, lse = local.attn_fwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n))
         out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save,
-                                        packed_hopper=packed_infer)
+                                          **({"packed_hopper": packed_infer} if hopper else {}))
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
@@ -566,7 +594,25 @@ def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
     return out
 
 
-def _wgrad(dout, x):
+def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
+    """Opt-in graph workspace ownership; defaults require paired qualification."""
+    scope = (training and single.shape[2] in (4096, 8192)) or (
+        not training and (single.shape[0], single.shape[2]) == (48, 4096))
+    return (scope and torch.cuda.get_device_capability(single.device) == (9, 0)
+            and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1")
+
+
+def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False) -> torch.Tensor:
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+
+    return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
+
+
+def _mm(a: torch.Tensor, b: torch.Tensor, owned: bool) -> torch.Tensor:
+    return _owned_mm(a, b) if owned else a @ b
+
+
+def _wgrad(dout, x, owned: bool = False):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
     return (_owned_mm(dout.t(), x, True) if owned else
             torch.mm(dout.t(), x, out_dtype=torch.float32))
@@ -593,7 +639,7 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
     dev = single.device
     owned = _owned_blas_enabled(single, True)
     with torch.cuda.device(dev):
-        hopper = rows._hopper(dev.index)
+        hopper = rows._hopper(dev.index if dev.index is not None else torch.cuda.current_device())
         if hopper and (dy.dtype != BF or dy.device != dev or dy.shape != single.shape or not dy.is_contiguous()):
             raise NotImplementedError("H100 local DiT backward requires a contiguous bf16 upstream gradient matching single")
         wc, wp, wo, wb = _weights(weights[: len(WEIGHTS)], backward=True)
@@ -613,45 +659,89 @@ def _block_bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair:
         db = local.attn_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias, lse, dd, dp,
                             _keys(mask, n0, n))
         dz, dgamma, dwb = local.pair_bias_bwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db)
+        dmkv = dbs = dg_kv = None
         if cross:   # the K / V branch: dxkv -> its AdaLN -> dx1 (through AdaLN 1 below) and the conditioning
             cn, mkv, xkv = extra
-            wm, bs, gkv, *_ = _kv_pack(weights)
-            dbs = torch.zeros(DS_, device=dev)
-            dg_kv = torch.zeros(DS_, device=dev)
-            # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
-            ds, dmkv = rows.pre_bwd_kv(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs)
-        else:
+        if hopper:
+            if cross:
+                wm, bs, gkv, wk, wv, _ = _kv_pack(weights, wp)
+                dk, dv = dp[:, DS_:2 * DS_], dp[:, 2 * DS_:3 * DS_]
+                dxkv = torch.addmm(dk @ wk, dv, wv)
+                dwk, dwv = _wgrad(dk, xkv, owned), _wgrad(dv, xkv, owned)
+                dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
+                dwm = _wgrad(dmkv, cn, owned)
+                dbs = local.kv_bias_hopper(dmkv)
+                dg_kv = allocate(DS_, device=dev)
+                dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
+                local.zero_kv_hopper(dp)    # pre_bwd's dgrad then covers q and the gate only
             ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
-        dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
-        if cross:
-            local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv, acc=dc)    # dc += the K / V modulation's gradient through LN(c) * gamma
-        names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
-        A_ = "attention."
-        spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
-                (dab, x2, [("transition.expand_a.weight", 0), ("transition.expand_a.weight", 1), ("transition.expand_b.weight", 0),
-                           ("transition.expand_b.weight", 1)]),
-                (du, gated, [(A_ + "to_out.weight", 0)]),
-                (dmod[:, 0:256], cn1, [(A_ + "ada_ln_in.to_scale.weight", 0), (A_ + "ada_ln_in.to_bias.weight", 0)]),
-                (dmod[:, 256:512], cn2, [("transition.ada_ln_in.to_scale.weight", 0), ("transition.ada_ln_in.to_bias.weight", 0)]),
-                (dmod[:, 512:768], c2, [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)])]
-        if cross:
-            spec += [(dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]), (dp[:, 3 * DS_:4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
-                     (dp[:, DS_:3 * DS_], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
-                     (dmkv, cn, [(A_ + "ada_ln_kv.to_scale.weight", 0), (A_ + "ada_ln_kv.to_bias.weight", 0)])]
+            if cross:
+                local.adaln1_extra(s2, mod, dx1_kv, ds, dmod, dbias_cols[0:DS_])
+            dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
+            if cross:
+                local.add_cond_hopper(dc, dc_kv)
+            rows.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
+            dws, dwu, dwo, dwp = _wgrad(dt, hh, owned), _wgrad(dab, x2, owned), _wgrad(du, gated, owned), _wgrad(dp, x1, owned)
+            dw1, dw2, dw3 = _wgrad(dmod[:, 0:256], cn1, owned), _wgrad(dmod[:, 256:512], cn2, owned), _wgrad(dmod[:, 512:768], c2, owned)
         else:
-            spec += [(dp, x1, [(A_ + "to_query.weight", 0), (A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0), (A_ + "to_gate.weight", 0)])]
-        fused = _fused_wgrads(spec, weights, names, False, dev, m)
+            if cross:
+                wm, bs, gkv, *_ = _kv_pack(weights)
+                dbs = torch.zeros(DS_, device=dev)
+                dg_kv = torch.zeros(DS_, device=dev)
+                # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
+                ds, dmkv = rows.pre_bwd_kv(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs)
+            else:
+                ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
+            dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
+            if cross:
+                local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv, acc=dc)    # dc += the K / V modulation's gradient through LN(c) * gamma
+            A_ = "attention."
+            spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
+                    (dab, x2, [("transition.expand_a.weight", 0), ("transition.expand_a.weight", 1), ("transition.expand_b.weight", 0),
+                               ("transition.expand_b.weight", 1)]),
+                    (du, gated, [(A_ + "to_out.weight", 0)]),
+                    (dmod[:, 0:256], cn1, [(A_ + "ada_ln_in.to_scale.weight", 0), (A_ + "ada_ln_in.to_bias.weight", 0)]),
+                    (dmod[:, 256:512], cn2, [("transition.ada_ln_in.to_scale.weight", 0), ("transition.ada_ln_in.to_bias.weight", 0)]),
+                    (dmod[:, 512:768], c2, [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)])]
+            if cross:
+                spec += [(dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]), (dp[:, 3 * DS_:4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
+                         (dp[:, DS_:3 * DS_], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
+                         (dmkv, cn, [(A_ + "ada_ln_kv.to_scale.weight", 0), (A_ + "ada_ln_kv.to_bias.weight", 0)])]
+            else:
+                spec += [(dp, x1, [(A_ + "to_query.weight", 0), (A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0),
+                                   (A_ + "to_gate.weight", 0)])]
+            names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+            fused = _fused_wgrads(spec, weights, names, False, dev, m)
     grads = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128], "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128],
         "attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
         "attention.to_scale.bias": dbias_cols[512:640], "transition.ada_ln_in.ln_cond.weight": dgamma_cond[128:],
         "transition.ada_ln_in.to_scale.bias": dbias_cols[256:384], "transition.to_scale.bias": dbias_cols[640:768],
     }
-    if cross:
-        grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.bias": dbs})
-    per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
-                  for name, w in zip(names, weights, strict=True)]
-    dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
+    names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+    if hopper:
+        grads.update({
+            "attention.ada_ln_in.to_scale.weight": dw1[:128], "attention.ada_ln_in.to_bias.weight": dw1[128:],
+            "attention.to_query.weight": dwp[0:128], "attention.to_key.weight": dwp[128:256], "attention.to_value.weight": dwp[256:384],
+            "attention.to_gate.weight": dwp[384:512], "attention.to_out.weight": dwo, "attention.to_scale.weight": dw3[:128],
+            "transition.ada_ln_in.to_scale.weight": dw2[:128], "transition.ada_ln_in.to_bias.weight": dw2[128:],
+            "transition.expand_a.weight": dwu[:256], "transition.expand_b.weight": dwu[256:], "transition.squeeze.weight": dws,
+            "transition.to_scale.weight": dw3[128:],
+        })
+        if cross:
+            grads["attention.to_key.weight"], grads["attention.to_value.weight"] = dwk, dwv
+            grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
+                          "attention.ada_ln_kv.to_scale.bias": dbs, "attention.ada_ln_kv.to_bias.weight": dwm[DS_:]})
+        per_weight = rows.grad_pack_hopper([grads[name] for name in WEIGHTS], weights[:len(WEIGHTS)])
+        if cross:
+            per_weight += local.cross_grad_pack_hopper([grads[name] for name in CROSS_WEIGHTS], weights[len(WEIGHTS):])
+        dpair = dz.view(pair.shape)
+    else:
+        if cross:
+            grads.update({"attention.ada_ln_kv.ln_cond.weight": dg_kv, "attention.ada_ln_kv.to_scale.bias": dbs})
+        per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
+                      for name, w in zip(names, weights, strict=True)]
+        dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [_unpadded(ds.view(a, 1, n, DS_), single.shape), _unpadded(dc.view(a, 1, n, DC_), cond.shape), dpair, *per_weight]
 
 

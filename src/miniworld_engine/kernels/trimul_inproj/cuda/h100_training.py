@@ -157,7 +157,8 @@ def backward(
 
         d = _data(leaves, mask, ds, packed=packed, for_backward=True)
         d["master_weights"] = fp32_dw
-        cfg = T.read_config("b1/configs.json")[str(n)]
+        configs = T.read_config("b1/configs.json")
+        cfg = configs[str(n) if str(n) in configs else "384" if n <= 384 else "768"]
         cfg = dict(cfg)
         cfg["defines"] = dict(cfg.get("defines") or {}, MASTER_FP32=int(fp32_dw))
         b1 = B1.Plan(dict(d, x=xn), dy, tri, stats, **cfg)

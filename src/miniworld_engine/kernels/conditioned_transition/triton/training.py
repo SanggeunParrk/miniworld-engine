@@ -31,7 +31,6 @@ from miniworld_engine.autotune.configs import configs_for
 import torch
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
 import triton
 import triton.language as tl
 
@@ -538,6 +537,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None):
+        # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
+        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
         if ctx.master:
