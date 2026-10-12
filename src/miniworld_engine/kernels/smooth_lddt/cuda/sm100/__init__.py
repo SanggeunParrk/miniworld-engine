@@ -16,7 +16,13 @@ import torch
 
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
-GA = int(os.environ.get("MW_SLDDT_GA", "1"))   # augments per thread: also the -DGA of the cubin
+FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full)
+FULL_SMEM = 110 * 1024   # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
+FORCE_TILE = os.environ.get("MW_SLDDT_TILE", "0") == "1"
+
+
+def _full(n: int) -> bool:
+    return not FORCE_TILE and n * 32 <= FULL_SMEM
 
 
 @functools.lru_cache(maxsize=None)
@@ -25,7 +31,7 @@ def cubin() -> str:
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-DGA={GA}")
+    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     src = _dir / "smooth_lddt.cu"
     h.update(src.read_bytes())
@@ -47,7 +53,9 @@ def _kernels(index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(index):
-        return tuple(driver.Kernel(cubin(), name, 0) for name in ("slddt_prep", "slddt_fwd", "slddt_bwd"))
+        # the whole-structure kernels take N * 32 B of dynamic shared memory: the attribute is raised once, the launch size is set per call
+        return tuple(driver.Kernel(cubin(), name, FULL_SMEM if name.endswith("_full") else 0)
+                     for name in ("slddt_prep", "slddt_fwd", "slddt_bwd", "slddt_fwd_full", "slddt_bwd_full"))
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -55,34 +63,47 @@ def _dev(t: torch.Tensor) -> int:
 
 
 def prep(gt, nuc, mask):
-    """(tile [B, NB, NB] int8, row_count [B, N] int32) of the ground truth gt [B, N, 3] fp32; nuc / mask [B, N] int8; N % 128 == 0."""
+    """(tile [B, NB, NB] int8, row_count [B, N] int32, FM, UM [B, N, N / 32] int32 bit masks) of the ground truth gt [B, N, 3] fp32;
+    nuc / mask [B, N] int8; N % 128 == 0. tile bit 0: FM has a bit in the tile, bit 1: UM has one."""
     B, N = mask.shape
     nb = N // BLK
-    prep_k, _, _ = _kernels(_dev(gt))
+    prep_k = _kernels(_dev(gt))[0]
     tile = torch.empty(B, nb, nb, device=gt.device, dtype=torch.int8)
     cnt = torch.zeros(B, N, device=gt.device, dtype=torch.int32)   # the kernel adds the per-tile counts with integer atomics
+    fm = torch.empty(B, N, N // 32, device=gt.device, dtype=torch.int32)   # every word is written
+    um = torch.empty_like(fm)
     with torch.cuda.device(gt.device):
-        prep_k((B, nb, nb), (BLK, 1, 1), gt, nuc, mask, tile, cnt, int(B), int(N), int(nb))
-    return tile, cnt
+        prep_k((B, nb, nb), (BLK, 1, 1), gt, nuc, mask, tile, cnt, fm, um, int(B), int(N), int(nb))
+    return tile, cnt, fm, um
 
 
-def forward(x, gt, nuc, mask, tile):
+def forward(x, gt, tile, fm):
     """Per (augment * batch, row block) partial sums of the pair scores, [A * B, NB] fp32."""
     A, B, N, _ = x.shape
     nb = N // BLK
-    _, fwd_k, _ = _kernels(_dev(x))
+    ks = _kernels(_dev(x))
     out = torch.empty(A * B, nb, device=x.device, dtype=torch.float32)
     with torch.cuda.device(x.device):
-        fwd_k((-(-A // GA) * B, nb, 1), (BLK, 1, 1), x, gt, nuc, mask, tile, out, int(A), int(B), int(N), int(nb))
+        if _full(N):
+            k = ks[3]
+            k.smem = N * 32
+            k((A * B, -(-N // FBLK), 1), (FBLK, 1, 1), x, gt, fm, out, int(B), int(N), int(nb))
+        else:
+            ks[1]((A * B, nb, 1), (BLK, 1, 1), x, gt, tile, fm, out, int(B), int(N), int(nb))
     return out
 
 
-def backward(x, gt, nuc, mask, tile, go):
+def backward(x, gt, nuc, tile, um, go):
     """d(sum of the pair scores)/dx [A, B, N, 3] fp32 for the upstream gradient go [A * B] fp32."""
     A, B, N, _ = x.shape
     nb = N // BLK
-    _, _, bwd_k = _kernels(_dev(x))
+    ks = _kernels(_dev(x))
     gx = torch.empty_like(x)
     with torch.cuda.device(x.device):
-        bwd_k((-(-A // GA) * B, nb, 1), (BLK, 1, 1), x, gt, nuc, mask, tile, go, gx, int(A), int(B), int(N), int(nb))
+        if _full(N):
+            k = ks[4]
+            k.smem = N * 32
+            k((A * B, -(-N // FBLK), 1), (FBLK, 1, 1), x, gt, nuc, um, go, gx, int(B), int(N), int(nb))
+        else:
+            ks[2]((A * B, nb, 1), (BLK, 1, 1), x, gt, nuc, tile, um, go, gx, int(B), int(N), int(nb))
     return gx

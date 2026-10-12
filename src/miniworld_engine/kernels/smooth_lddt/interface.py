@@ -5,8 +5,8 @@
 t in (0.5, 1, 2, 4) A, ``keep`` = both atoms resolved, i != j, ``d_gt(i, j) < 30 A`` for a nucleotide atom i and ``15 A`` otherwise.
 
 The reference (and the old PyTorch loss) builds an [N, N] tensor per augment (48 x 4096^2 pairs at the diffusion training shape: seconds
-of elementwise passes and 3 GB intermediates). The kernels build none: distances come from the coordinates tile by tile, the four
-sigmoids share one exponential, and tiles with no pair inside the radius are skipped. The augments are rigid motions of one structure,
+of elementwise passes and 3 GB intermediates). The kernels build none: the ground-truth pair set is kept as bit masks (N x N bits, built once per call), distances come from the
+coordinates, the four sigmoids share one exponential, and only the pairs inside the radius are visited (tiles with none are skipped). The augments are rigid motions of one structure,
 so the ground-truth pair set, its normaliser and the tile flags are computed once per call. The backward is analytic, deterministic
 (every atom collects the gradient of both of its roles in a pair; no atomics) and CUDA-graph capturable.
 
@@ -41,60 +41,61 @@ def refusal(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: 
 
 
 def _smooth_lddt_prep_fake(gt, nuc, mask):
-    """[tile flags [B, NB, NB] int8, per-row pair counts [B, N] int32]."""
+    """[tile flags [B, NB, NB] int8, per-row pair counts [B, N] int32, pair bit masks FM and UM [B, N, N // 32] int32]."""
     b, n = mask.shape
     nb = n // BLK
-    return [torch.empty((b, nb, nb), dtype=torch.int8, device=gt.device), torch.empty((b, n), dtype=torch.int32, device=gt.device)]
+    return [torch.empty((b, nb, nb), dtype=torch.int8, device=gt.device), torch.empty((b, n), dtype=torch.int32, device=gt.device),
+            torch.empty((b, n, n // 32), dtype=torch.int32, device=gt.device), torch.empty((b, n, n // 32), dtype=torch.int32, device=gt.device)]
 
 
 @opaque(fake=_smooth_lddt_prep_fake, name="smooth_lddt_prep")
 def smooth_lddt_prep(gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor) -> list[torch.Tensor]:
-    """[tile flags [B, NB, NB] int8, per-row pair counts [B, N] int32] of the ground truth gt [B, N, 3] fp32 (N % 128 == 0)."""
+    """Ground-truth pair set of gt [B, N, 3] fp32 (N % 128 == 0): [tile flags, per-row pair counts, FM, UM bit masks]."""
     from miniworld_engine.kernels.smooth_lddt.cuda import sm100
 
     return list(sm100.prep(gt, nuc, mask))
 
 
-def _smooth_lddt_fwd_fake(x, gt, nuc, mask, tile):
+def _smooth_lddt_fwd_fake(x, gt, tile, fm):
     """Partial sums [A * B, NB] fp32."""
     return torch.empty((x.shape[0] * x.shape[1], x.shape[2] // BLK), dtype=torch.float32, device=x.device)
 
 
 @opaque(fake=_smooth_lddt_fwd_fake, name="smooth_lddt_fwd")
-def smooth_lddt_fwd(x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor, tile: torch.Tensor) -> torch.Tensor:
+def smooth_lddt_fwd(x: torch.Tensor, gt: torch.Tensor, tile: torch.Tensor, fm: torch.Tensor) -> torch.Tensor:
     """Partial sums of the pair scores per (augment * batch, row block), [A * B, NB] fp32."""
     from miniworld_engine.kernels.smooth_lddt.cuda import sm100
 
-    return sm100.forward(x, gt, nuc, mask, tile)
+    return sm100.forward(x, gt, tile, fm)
 
 
-def _smooth_lddt_bwd_fake(x, gt, nuc, mask, tile, go):
+def _smooth_lddt_bwd_fake(x, gt, nuc, tile, um, go):
     """The coordinate gradient, the shape of x (fp32)."""
     return torch.empty_like(x)
 
 
 @opaque(fake=_smooth_lddt_bwd_fake, name="smooth_lddt_bwd")
-def smooth_lddt_bwd(x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, mask: torch.Tensor, tile: torch.Tensor,
+def smooth_lddt_bwd(x: torch.Tensor, gt: torch.Tensor, nuc: torch.Tensor, tile: torch.Tensor, um: torch.Tensor,
                     go: torch.Tensor) -> torch.Tensor:
     """d(sum of the pair scores)/dx [A, B, N, 3] fp32 for the upstream gradient ``go`` [A * B] fp32."""
     from miniworld_engine.kernels.smooth_lddt.cuda import sm100
 
-    return sm100.backward(x, gt, nuc, mask, tile, go)
+    return sm100.backward(x, gt, nuc, tile, um, go)
 
 
 class SmoothLddtFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, x, gt, nuc, mask, tile):
+    def forward(ctx, x, gt, nuc, tile, fm, um):
         ctx.in_dtype = x.dtype
         x32 = x.float().contiguous()
-        ctx.save_for_backward(x32, gt, nuc, mask, tile)
-        return smooth_lddt_fwd(x32, gt, nuc, mask, tile).sum(dim=1).view(x.shape[0], x.shape[1])
+        ctx.save_for_backward(x32, gt, nuc, tile, um)
+        return smooth_lddt_fwd(x32, gt, tile, fm).sum(dim=1).view(x.shape[0], x.shape[1])
 
     @staticmethod
     def backward(ctx, grad_sum):
-        x32, gt, nuc, mask, tile = ctx.saved_tensors
-        gx = smooth_lddt_bwd(x32, gt, nuc, mask, tile, grad_sum.contiguous().view(-1).float())
-        return gx.to(ctx.in_dtype), None, None, None, None
+        x32, gt, nuc, tile, um = ctx.saved_tensors
+        gx = smooth_lddt_bwd(x32, gt, nuc, tile, um, grad_sum.contiguous().view(-1).float())
+        return gx.to(ctx.in_dtype), None, None, None, None, None
 
 
 def smooth_lddt(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -110,9 +111,9 @@ def smooth_lddt(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, ma
     gt32 = gt.detach().float().contiguous()
     nuc8 = is_nuc.detach().to(torch.int8).contiguous()
     mask8 = mask.detach().to(torch.int8).contiguous()
-    tile, cnt = smooth_lddt_prep(gt32, nuc8, mask8)
+    tile, cnt, fm, um = smooth_lddt_prep(gt32, nuc8, mask8)
     denom = cnt.sum(dim=1).clamp(min=1).to(torch.float32)               # [B] pairs of the ground truth
-    total = SmoothLddtFunction.apply(x_pred, gt32, nuc8, mask8, tile)   # [A, B] sum of the pair scores
+    total = SmoothLddtFunction.apply(x_pred, gt32, nuc8, tile, fm, um)   # [A, B] sum of the pair scores
     return (1.0 - total / denom).mean()
 
 

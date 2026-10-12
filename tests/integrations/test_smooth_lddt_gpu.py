@@ -27,8 +27,13 @@ def _rel(a, e):
     return float((a.double() - e.double()).norm() / e.double().norm().clamp_min(1e-30))
 
 
-@pytest.mark.parametrize("a,b,n", [(3, 2, 200), (4, 1, 500), (2, 2, 1024), (48, 1, 1000)])
-def test_value_and_gradient_match_the_dense_reference(a, b, n):
+@pytest.mark.parametrize("a,b,n,tile", [(3, 2, 200, False), (4, 1, 500, False), (2, 2, 1024, False), (48, 1, 1000, False),
+                                        (2, 1, 3000, False), (2, 1, 3600, False),   # whole-structure kernels up to N = 3520, tile kernels above
+                                        (3, 2, 200, True), (4, 1, 1000, True)])     # the tile kernels forced
+def test_value_and_gradient_match_the_dense_reference(a, b, n, tile, monkeypatch):
+    from miniworld_engine.kernels.smooth_lddt.cuda import sm100
+
+    monkeypatch.setattr(sm100, "FORCE_TILE", tile)
     x, gt, nuc, mask = _case(a, b, n)
     assert refusal(x, gt, nuc, mask) is None
     xk, xr = x.clone().requires_grad_(), x.clone().requires_grad_()
