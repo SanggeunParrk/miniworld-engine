@@ -100,7 +100,8 @@ def _leaves(module) -> list[torch.Tensor]:
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
     """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
-    if torch.cuda.get_device_capability(leaves[0].device) == (9, 0):
+    # Compiled, the casts are aten ops (traced, fused by the compiler; the same round-to-nearest as the launch below).
+    if torch.cuda.get_device_capability(leaves[0].device) == (9, 0) and not torch.compiler.is_compiling():
         return _rows().ext().cast_leaves(leaves)
     bf = torch.bfloat16
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
@@ -415,7 +416,10 @@ class _Training(torch.autograd.Function):
             params = list(v[13 + ctx.saved_count:])
             grads[9] = _pair_weight_shadow(single, pair, mask, params, *ctx.eps, dy)
         if torch.cuda.get_device_capability(single.device) == (9, 0):
-            grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+            if torch.compiler.is_compiling():
+                grads = [g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)]
+            else:
+                grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
             from .token_dit_train import _activate_native_caller
             _activate_native_caller(force=True)
             return (None, None, None, dx, dz, *grads)

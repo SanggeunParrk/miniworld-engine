@@ -339,7 +339,11 @@ class TriangleAttention(nn.Module):
             if triattn_h100.serves(self, pair, mask):
                 with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                     return triattn_h100.forward(self, pair, mask)
-            raise ValueError("requested H100 CUDA TriangleAttention does not support this shape or dtype")
+            # A call outside the native contract (heads of 64+ channels, an unqualified bucket, ...) falls back to the
+            # composed path below; only an explicitly forced native route (the candidate flag / env) keeps the error.
+            if (getattr(self, "_h100_b200style_cuda", False)
+                    or os.environ.get("MINIWORLD_TRIATTN_H100_CANDIDATE") == "1"):
+                raise ValueError("requested H100 CUDA TriangleAttention does not support this shape or dtype")
         if pair.dtype == torch.bfloat16 and self.to_value.weight.dtype == torch.float32 and self._backend == KernelBackend.TRITON:
             from miniworld_engine.kernels.triangle_attention.cuda import (
                 qg_projection_attention,

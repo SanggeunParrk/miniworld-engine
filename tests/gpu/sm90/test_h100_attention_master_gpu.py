@@ -54,7 +54,11 @@ def test_attention_master_compile_and_live_graph(kind):
     model = _randomize(make().float()).cuda().train()
     with torch.no_grad():
         for p in model.parameters():
-            if p.ndim == 2:
+            # APB's exact FP32 dWb shadow (and its LN-weight-folded Wf) reads the 1-D LayerNorm vectors at the model's
+            # parameter dtype. The narrow reference rounds them to bf16; an unrounded fp32 master therefore holds different
+            # values and legitimately has a different dWb (norm 0.0143 on to_bias.weight) -- not a rounding defect. Give
+            # both models the same bf16-representable values.
+            if p.ndim == 2 or kind == "apb":
                 p.copy_(p.bfloat16().float())
     narrow = copy.deepcopy(model).bfloat16()
     narrow.load_state_dict(model.state_dict())
