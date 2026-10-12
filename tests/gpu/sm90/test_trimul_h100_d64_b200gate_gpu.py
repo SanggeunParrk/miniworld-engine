@@ -17,8 +17,11 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
     from miniworld_engine import settings
+    from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
-    from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import (
+        BidirectionalTriangleMultiplication,
+    )
 
     helpers = runpy.run_path(str(Path(__file__).with_name("test_trimul_h100_b200style_gpu.py")))
     for key in ("NATIVE_BUCKETS", "TRAIN_CUDA", "TRAIN_FUSED_PREP", "CUDA_AUX"):
@@ -27,9 +30,9 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
     previous = settings.configure(engine_backend="auto")
     try:
         leaves, mask, ds, dy = helpers["fixture"](64, length, direction, master)
-        module = (BidirectionalTriangleMultiplication(64, p_drop=0.25, implementation="miniworld")
+        module = (BidirectionalTriangleMultiplication(64, p_drop=0.25, implementation=ImplementationType.MINIWORLD)
                   if direction == 0 else TriangleMultiplication(64, outgoing=direction == 1,
-                                                               p_drop=0.25, implementation="miniworld")).cuda().train()
+                                                               p_drop=0.25, implementation=ImplementationType.MINIWORLD)).cuda().train()
         actual = [module.to_left.weight, module.to_left_gate.weight, module.to_right.weight,
                   module.to_right_gate.weight, module.to_gate.weight, module.to_out.weight,
                   module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias]

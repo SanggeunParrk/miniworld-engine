@@ -27,7 +27,8 @@ needs_hopper = pytest.mark.skipif(not HOPPER, reason="the fused Transition is sm
 @pytest.mark.parametrize("transpose", [False, True])
 def test_native_prepare_compile_and_alias_contract(dtype, strided, transpose):
     from miniworld_engine.kernels.transition.cuda.fused_sm90a import (
-        _cuda_prepare, _cuda_prepare_launch,
+        _cuda_prepare,
+        _cuda_prepare_launch,
     )
 
     def weight(rows, cols):

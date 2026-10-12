@@ -152,7 +152,9 @@ def test_apb_b200_training(L, masked, shape):
     yg, gg = _train(ours, sb, pb, mask, dy.bfloat16())
     yb, gb = _train(tb, sb, pb, mask, dy.bfloat16())
     assert _rel(yg, yw) < 1.3 * _rel(yb, yw) + 1e-3
-    assert "ln_pair.bias" not in gw and "ln_pair.bias" not in gg    # no offset: it would shift every logit of a head by one constant
+    # no offset: it would shift every logit of a head by one constant
+    assert "ln_pair.bias" not in gw
+    assert "ln_pair.bias" not in gg
     worst = []
     for n in gw:
         e, e0 = _rel(gg[n], gw[n]), _rel(gb[n], gw[n])
