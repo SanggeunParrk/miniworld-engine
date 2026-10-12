@@ -1,0 +1,86 @@
+"""The explicit D64 B200-style flag changes gate-gradient placement only."""
+import os
+import runpy
+from pathlib import Path
+
+import pytest
+import torch
+
+pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+
+
+@pytest.mark.parametrize("length", [128, 256, 1024])
+@pytest.mark.parametrize("direction", [0, 1, 2])
+@pytest.mark.parametrize("master", [False, True])
+@pytest.mark.parametrize("enabled", [False, True])
+def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, monkeypatch):
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("Hopper required")
+    from miniworld_engine import settings
+    from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+    from miniworld_engine.modules.triangle_multiplication.bidirectional import BidirectionalTriangleMultiplication
+
+    helpers = runpy.run_path(str(Path(__file__).with_name("test_trimul_h100_b200style_gpu.py")))
+    for key in ("NATIVE_BUCKETS", "TRAIN_CUDA", "TRAIN_FUSED_PREP", "CUDA_AUX"):
+        monkeypatch.setenv("MINIWORLD_TRIMUL_H100_" + key, "1")
+    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_B200STYLE", str(int(enabled)))
+    previous = settings.configure(engine_backend="auto")
+    try:
+        leaves, mask, ds, dy = helpers["fixture"](64, length, direction, master)
+        module = (BidirectionalTriangleMultiplication(64, p_drop=0.25, implementation="miniworld")
+                  if direction == 0 else TriangleMultiplication(64, outgoing=direction == 1,
+                                                               p_drop=0.25, implementation="miniworld")).cuda().train()
+        actual = [module.to_left.weight, module.to_left_gate.weight, module.to_right.weight,
+                  module.to_right_gate.weight, module.to_gate.weight, module.to_out.weight,
+                  module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias]
+        with torch.no_grad():
+            for p, value in zip(actual, leaves[1:], strict=True):
+                p.data = p.data.to(value.dtype)
+                p.copy_(value)
+        monkeypatch.setattr(module, "_make_drop_row_scale", lambda pair, p: ds[None, None])
+
+        def step():
+            y = module(leaves[0], mask)
+            return y, torch.autograd.grad(y, [leaves[0], *actual], dy)
+
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            step(); step()
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            y, grads = step()
+        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
+                                               torch.profiler.ProfilerActivity.CUDA]) as prof:
+            graph.replay()
+            torch.cuda.synchronize()
+        names = [e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
+        assert any("_b2w" in n for n in names), names
+        pipelined = enabled and not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
+        affine_registers = pipelined and direction != 0 and not (
+            direction == 1 and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") == "1")
+        assert any("_b2w_affinereg" in n for n in names) == affine_registers, names
+        assert any("_b2w_gatepipe" in n for n in names) == (pipelined and not affine_registers), names
+        assert any("_b2w_b7gate" in n for n in names) == (enabled and not pipelined), names
+        assert not any("triton" in n.lower() for n in names), names
+        helpers["assert_reference"]([leaves[0], *actual], mask, ds, dy, direction, y, grads)
+        with torch.no_grad():
+            leaves[0].normal_()
+            actual[0].mul_(0.95)
+            mask.logical_not_()
+            ds.zero_()
+            dy.normal_()
+        graph.replay()
+        assert torch.equal(y, leaves[0])
+        assert torch.equal(grads[0], dy)
+        assert all(torch.count_nonzero(g) == 0 for g in grads[1:])
+    finally:
+        settings.configure(**vars(previous))
+
+
+@pytest.mark.parametrize("length", [384, 768])
+@pytest.mark.parametrize("master", [False, True])
+def test_forced_affine_split_keeps_qualified_pipeline(length, master, monkeypatch):
+    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT", "1")
+    test_flag_dispatch_and_all_gradients(length, 1, master, True, monkeypatch)

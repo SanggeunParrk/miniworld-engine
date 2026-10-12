@@ -1,0 +1,439 @@
+"""The fused MSAPairWeightedAveraging TRAINING path (integrations.pwa_train) against this engine's own path.
+
+Needs an H100 (sm_90a kernels) or a B200 (sm_100a kernels); skipped everywhere else. The reference is the SAME module with the
+opt-in variable unset.
+"""
+
+import pytest
+import torch
+from settings_helpers import override_setting
+
+from miniworld_engine import settings
+from miniworld_engine.integrations import pwa_train as pt
+from miniworld_engine.modules.exceptions import ImplementationType
+from miniworld_engine.modules.msa_pair_weighted_averaging import (
+    MSAPairWeightedAveraging,
+)
+
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU"),
+    pytest.mark.skipif(
+        torch.cuda.is_available()
+        and torch.cuda.get_device_capability() not in ((9, 0), (10, 0)),
+        reason="the kernels are built for sm_90a and sm_100a",
+    ),
+]
+
+D_MSA, D_PAIR, D_HID, HEADS, L, S = 64, 128, 32, 8, 384, 256
+DEV, DT = "cuda", torch.bfloat16
+PARAMS = (
+    "ln_msa.weight",
+    "ln_msa.bias",
+    "to_value.weight",
+    "to_gate.weight",
+    "ln_pair.weight",
+    "to_bias.weight",
+    "to_out.weight",
+)
+
+
+@pytest.fixture(autouse=True)
+def explicit_baseline(monkeypatch):
+    """A baseline call explicitly disables the now-default native path."""
+    override_setting(monkeypatch, "pwa_train", "0")
+    override_setting(monkeypatch, "pwa_infer", None)
+
+
+class opted_in:
+    def __enter__(self):
+        self.saved = settings.current().pwa_train
+        settings.configure(pwa_train=True)
+
+    def __exit__(self, *a):
+        settings.configure(pwa_train=self.saved)
+
+
+def rel(a, b):
+    return (
+        torch.linalg.vector_norm(a.float() - b.float())
+        / torch.linalg.vector_norm(b.float())
+    ).item()
+
+
+@pytest.fixture(scope="module")
+def module():
+    torch.manual_seed(0)
+    m = (
+        MSAPairWeightedAveraging(
+            D_MSA, D_PAIR, HEADS, D_HID, implementation=ImplementationType.MINIWORLD
+        )
+        .to(DEV)
+        .to(DT)
+    )
+    with (
+        torch.no_grad()
+    ):  # zero / unit initialisations hide kernel bugs: randomise everything
+        for n, p in m.named_parameters():
+            p.normal_(0, 0.3) if "ln_" in n and n.endswith("bias") else p.normal_(
+                1.0 if "ln_" in n else 0.0, 0.3 if "ln_" in n else 0.15
+            )
+    return m.train()
+
+
+@pytest.fixture(scope="module")
+def inputs():
+    torch.manual_seed(1)
+    return {
+        "msa": (torch.randn(1, S, L, D_MSA, device=DEV, dtype=DT) * 0.5).contiguous(),
+        "pair": (torch.randn(1, L, L, D_PAIR, device=DEV, dtype=DT) * 0.5).contiguous(),
+        "gz": (torch.randn(1, S, L, D_MSA, device=DEV, dtype=DT) * 0.1).contiguous(),
+        "full": torch.ones(1, L, device=DEV, dtype=torch.bool),
+        "ragged": (torch.rand(1, L, device=DEV) < 0.85),
+    }
+
+
+def _run(module, inputs, mask_key, fused):
+    msa = inputs["msa"].clone().requires_grad_(True)
+    pair = inputs["pair"].clone().requires_grad_(True)
+    module.zero_grad(set_to_none=True)
+    if fused:
+        with opted_in():
+            out = module(msa, pair, inputs[mask_key])
+    else:
+        out = module(msa, pair, inputs[mask_key])
+    out.backward(inputs["gz"])
+    grads = {n: p.grad.detach().clone() for n, p in module.named_parameters()}
+    return out.detach(), msa.grad.detach().clone(), pair.grad.detach().clone(), grads
+
+
+@pytest.mark.parametrize("mask_key", ["full", "ragged"])
+def test_fused_training_path_matches_the_engines_own(module, inputs, mask_key):
+    out_e, dmsa_e, dpair_e, g_e = _run(module, inputs, mask_key, fused=False)
+    out_f, dmsa_f, dpair_f, g_f = _run(module, inputs, mask_key, fused=True)
+    # sm_100a rounds where the module's bf16 statements do (logits, o, the value projection), the engine's Triton path keeps
+    # more in fp32: vs an fp32 copy the Triton path is ~3e-3 and both the module and sm_100a ~4.6e-3, so they sit ~5e-3 apart
+    # (test_sm100_is_no_worse_than_the_modules_bf16_statements holds sm_100a to the module itself)
+    tol = 8e-3 if torch.cuda.get_device_capability() == (10, 0) else 5e-3
+    assert rel(out_f, out_e) < tol
+    assert (
+        rel(dmsa_f, dmsa_e) < tol
+    )  # the residual dominates; also check the update part below
+    gz = inputs["gz"]
+    assert rel(dmsa_f.float() - gz.float(), dmsa_e.float() - gz.float()) < 2e-2
+    assert rel(dpair_f, dpair_e) < 1e-2
+    for n in PARAMS:
+        assert rel(g_f[n], g_e[n]) < 1e-2, n
+
+
+@pytest.mark.parametrize("mask_key", ["full", "ragged"])
+def test_sm100_is_no_worse_than_the_modules_bf16_statements(module, inputs, mask_key):
+    """sm_100a against an fp32 copy of the module: the output and every gradient within 1.15x of the module's own bf16
+    PyTorch statements' error (measured: 0.77-1.03x)."""
+    import copy
+
+    if torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("the sm_100a path")
+    ref = copy.deepcopy(module).float()
+    ref.implementation = ImplementationType.PYTORCH
+    pyt = copy.deepcopy(module)
+    pyt.implementation = ImplementationType.PYTORCH
+
+    def run(mod, fp32=False):
+        dt = torch.float32 if fp32 else DT
+        msa = inputs["msa"].to(dt).clone().requires_grad_(True)
+        pair = inputs["pair"].to(dt).clone().requires_grad_(True)
+        mod.zero_grad(set_to_none=True)
+        with opted_in():
+            out = mod(msa, pair, inputs[mask_key])
+        out.backward(inputs["gz"].to(dt))
+        return [
+            out.detach().float(),
+            msa.grad.float() - inputs["gz"].float(),
+            pair.grad.float(),
+            *[mod.get_parameter(n).grad.float() for n in PARAMS],
+        ]
+
+    r, ours, torch_bf16 = run(ref, True), run(module), run(pyt)
+    for name, a, b, t in zip(
+        ["out", "d_msa (update)", "d_pair", *PARAMS], ours, torch_bf16, r, strict=True
+    ):
+        assert rel(a, t) <= 1.15 * rel(b, t), (name, rel(a, t), rel(b, t))
+    # inference (its own entry point, no saves): the update against fp32
+    for mod in (ref, module, pyt):
+        mod.eval()
+    try:
+        with torch.no_grad(), opted_in():
+            outs = [
+                mod(
+                    inputs["msa"].to(dt), inputs["pair"].to(dt), inputs[mask_key]
+                ).float()
+                - inputs["msa"].float()
+                for mod, dt in ((ref, torch.float32), (module, DT), (pyt, DT))
+            ]
+        assert rel(outs[1], outs[0]) <= 1.15 * rel(outs[2], outs[0]), (
+            "inference update",
+            rel(outs[1], outs[0]),
+            rel(outs[2], outs[0]),
+        )
+    finally:
+        for mod in (ref, module, pyt):
+            mod.train()
+
+
+def test_refusals(module, inputs):
+    with opted_in():
+        assert (
+            pt.refusal(inputs["msa"], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID)
+            is None
+        )
+        assert (
+            pt.refusal(
+                inputs["msa"][:, :, :320], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID
+            )
+            is not None
+        )
+    assert (
+        pt.refusal(inputs["msa"], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID)
+        is not None
+    )  # not opted in
+    if torch.cuda.get_device_capability() == (10, 0):  # sm_100a: 128-row MSA tiles
+        with opted_in():
+            assert (
+                pt.refusal(
+                    inputs["msa"][:, :200], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID
+                )
+                is not None
+            )
+
+
+def test_fused_dropout_is_the_modules_row_dropout(module, inputs):
+    """With the module's drop_msa live, the fused path draws its own keep-mask; check it against the engine's own path
+    driven by the same mask: the update is masked and scaled, the residual is not."""
+    p = 0.15
+    torch.manual_seed(7)
+    module.drop_msa.p_drop = p
+    try:
+        msa = inputs["msa"].clone().requires_grad_(True)
+        pair = inputs["pair"].clone().requires_grad_(True)
+        module.zero_grad(set_to_none=True)
+        with opted_in():
+            out_f = module(msa, pair, inputs["full"])
+        out_f.backward(inputs["gz"])
+        dmsa_f = msa.grad.clone()
+        dpair_f = pair.grad.clone()
+        g_f = {n: p_.grad.clone() for n, p_ in module.named_parameters()}
+        assert pt.STATS["served"] > 0
+        # recover the keep-mask the path used from its own output: update = out - msa is 0 exactly where the mask is 0
+        module.drop_msa.p_drop = 0.0
+        with torch.no_grad(), opted_in():
+            out_nodrop = module(inputs["msa"], inputs["pair"], inputs["full"])
+        upd_f = out_f.detach().float() - inputs["msa"].float()
+        keep = upd_f.abs().sum(1, keepdim=True) > 0  # [1, 1, L, D]
+        assert 0.75 < keep.float().mean().item() < 0.95
+        # the engine's own path with dropout off, fed the masked/scaled output gradient, gives the same update-side gradients
+        msa_e = inputs["msa"].clone().requires_grad_(True)
+        pair_e = inputs["pair"].clone().requires_grad_(True)
+        module.zero_grad(set_to_none=True)
+        out_e = module(msa_e, pair_e, inputs["full"])
+        gz_m = (inputs["gz"] * keep.to(DT) / (1 - p)).to(DT)
+        out_e.backward(gz_m)
+        assert rel(dpair_f, pair_e.grad) < 1e-2
+        for n in PARAMS:
+            assert rel(g_f[n], module.get_parameter(n).grad) < 1e-2, n
+        # dmsa: ours = residual grad (gz) + update grad; the engine's = gz_m + update grad
+        assert (
+            rel(
+                dmsa_f.float() - inputs["gz"].float(), msa_e.grad.float() - gz_m.float()
+            )
+            < 2e-2
+        )
+        # forward: the kept, scaled update matches the dropout-free update
+        upd_n = (out_nodrop.float() - inputs["msa"].float()) * keep.float() / (1 - p)
+        assert rel(upd_f, upd_n) < 1e-2
+    finally:
+        module.drop_msa.p_drop = 0.0
+
+
+def test_inference_takes_the_same_kernels(module, inputs):
+    module.eval()
+    try:
+        with torch.no_grad():
+            out_e = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+            served = pt.STATS["served"]
+            with opted_in():
+                out_f = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+        assert pt.STATS["served"] == served + 1
+        # sm_100a rounds as the module's bf16 statements do; the engine's Triton path is closer to fp32 (see the training test)
+        assert rel(out_f, out_e) < (
+            8e-3 if torch.cuda.get_device_capability() == (10, 0) else 5e-3
+        )
+        assert (
+            rel(
+                out_f.float() - inputs["msa"].float(),
+                out_e.float() - inputs["msa"].float(),
+            )
+            < 2e-2
+        )  # the update itself
+    finally:
+        module.train()
+
+
+def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
+    from miniworld_engine import settings
+
+    override_setting(monkeypatch, "pwa_train", None)
+    assert settings.current().engine_backend == "auto"
+    assert pt.wanted(module.implementation)
+    msa = (
+        inputs["msa"]
+        .transpose(-1, -2)
+        .contiguous()
+        .transpose(-1, -2)
+        .requires_grad_(True)
+    )
+    pair = (
+        inputs["pair"]
+        .transpose(-1, -2)
+        .contiguous()
+        .transpose(-1, -2)
+        .requires_grad_(True)
+    )
+    args = (msa, pair, *module.parameters())
+    y = module(msa, pair, inputs["ragged"])
+    expected = torch.autograd.grad(y, args, inputs["gz"])
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(module, backend=counter, fullgraph=True)
+    z = compiled(msa, pair, inputs["ragged"])
+    actual = torch.autograd.grad(z, args, inputs["gz"])
+    for _ in range(12):
+        compiled(msa, pair, inputs["ragged"])
+    assert counter.frame_count == 1
+    torch.testing.assert_close(z, y, rtol=0, atol=0)
+    for a, b in zip(actual, expected, strict=True):
+        # Native FP32 parameter reductions can differ in accumulation order.
+        torch.testing.assert_close(a, b, rtol=5e-4, atol=3e-5)
+    with torch.no_grad():
+        torch.testing.assert_close(
+            compiled(msa, pair, inputs["ragged"]), y, rtol=0, atol=0
+        )
+
+
+def test_no_grad_training_keeps_dropout(module, inputs, monkeypatch):
+    override_setting(monkeypatch, "pwa_train", None)
+    monkeypatch.setattr(module.drop_msa, "p_drop", 0.15)
+    torch.manual_seed(461)
+    expected = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+    torch.manual_seed(461)
+    with torch.no_grad():
+        actual = module(inputs["msa"], inputs["pair"], inputs["ragged"])
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+
+
+SM90 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+
+
+@pytest.mark.skipif(not SM90, reason="H100 native inference")
+@pytest.mark.parametrize("length", [128, 768])
+def test_native_inference_default_live_master_graph(module, monkeypatch, length):
+    """Default inference preserves old rounding and observes changed master weights."""
+    import copy
+    monkeypatch.delenv(pt.ENV, raising=False)
+    monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
+    m = copy.deepcopy(module).eval().float()
+    ref = copy.deepcopy(m)
+    ref.implementation = ImplementationType.PYTORCH
+    ref.ln_msa.implementation = ImplementationType.PYTORCH
+    ref.ln_pair.implementation = ImplementationType.PYTORCH
+    torch.manual_seed(482)
+    x = torch.randn(1, 128, length, D_MSA, device=DEV, dtype=DT)
+    z = torch.randn(1, length, length, D_PAIR, device=DEV, dtype=DT)
+    mask = torch.rand(1, length, device=DEV) > .15
+    with torch.no_grad():
+        actual = m(x, z, mask)
+        expected = ref(x.float(), z.float(), mask)
+        cosine = torch.nn.functional.cosine_similarity(actual.float().flatten(), expected.flatten(), dim=0)
+        assert cosine.item() >= .9999
+        monkeypatch.setenv("MINIWORLD_PWA_H100_CUDA_AUX", "0")
+        legacy = m(x, z, mask)
+        if length >= 512:      # the split path (cuBLAS contraction + gate / out pass) rounds o to bf16 before the gate: bf16-level, not bitwise
+            assert rel(actual.float() - x.float(), legacy.float() - x.float()) < 1e-2
+        else:
+            torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
+        monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX")
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            for _ in range(3):
+                m(x, z, mask)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=stream):
+                captured = m(x, z, mask)
+        stream.synchronize()
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(captured, actual, rtol=0, atol=0)
+        x.add_(.125)
+        m.to_value.weight.add_(.03125)
+        mask[:, ::7].logical_not_()
+        graph.replay()
+        torch.cuda.synchronize()
+        torch.testing.assert_close(captured, m(x, z, mask), rtol=0, atol=0)
+        assert not torch.equal(captured, actual)
+
+
+@pytest.mark.skipif(not SM90, reason="H100 native inference")
+def test_native_inference_default_refuses_unserved_shape(module, inputs, monkeypatch):
+    monkeypatch.delenv(pt.ENV, raising=False)
+    monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
+    with torch.no_grad(), pytest.raises(ValueError, match="H100 CUDA PWA"):
+        module(inputs["msa"][:, :, :320], inputs["pair"][:, :320, :320], inputs["full"][:, :320])
+
+
+@pytest.mark.skipif(not SM90, reason="the sm_90a glue kernel")
+@pytest.mark.parametrize("length", [384, 768])
+def test_glue_dropout_shared_tiles_match_materialized_gradient(length):
+    """Both consumers' dWo reads must see masked tiles, including reused ring slots."""
+    torch.manual_seed(73)
+    s = 256
+
+    def rand(*shape):
+        return torch.randn(*shape, device=DEV, dtype=DT)
+
+    o, y, dy = rand(s, length, 256), rand(s, length, 64), rand(s, length, 64)
+    wg, wot = rand(256, 64), rand(256, 64)
+    mask = (torch.rand(length, 64, device=DEV) > 0.15).to(DT)
+    scale = 1.0 / 0.85
+    ext = pt._k()["glue3"]
+    expected = ext.pwa_glue3(
+        o, y, (dy * mask[None] * scale).contiguous(), wg, wot, None, 2, 1
+    )
+    actual = ext.pwa_glue3(o, y, dy, wg, wot, None, 2, 1, mask, scale)
+    for a, b in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(SM90, reason="the sm_100a glue kernel")
+@pytest.mark.parametrize("length", [384, 768])
+def test_glue2_dropout_masks_dres_in_shared_memory_like_a_materialized_gradient(length):
+    """sm_100a glue2: dres' = dres . keep / (1 - p) formed in shared memory gives the same outputs, bit for bit, as the
+    materialized masked gradient: do, dyg (= dgp . Wg) and both weight gradients (dWo, dWg) accumulated over reused tiles."""
+    torch.manual_seed(73)
+    s = 256
+
+    def rand(*shape):
+        return torch.randn(*shape, device=DEV, dtype=DT)
+
+    o, y, dy = rand(8, length, s * 32), rand(s, length, 64), rand(s, length, 64)
+    wg, wot = rand(256, 64), rand(256, 64)
+    mask = (torch.rand(length, 64, device=DEV) > 0.15).to(DT)
+    scale = 1.0 / 0.85
+    ext = pt._k100()["pwa"]
+    expected = ext.pwa_glue2(
+        o, y, (dy * mask[None] * scale).contiguous(), wg, wot, None, 1.0, 0
+    )
+    actual = ext.pwa_glue2(o, y, dy, wg, wot, mask, scale, 0)
+    for a, b in zip(actual, expected, strict=True):
+        torch.testing.assert_close(a, b, rtol=0, atol=0)
