@@ -420,7 +420,10 @@ def transition_wide_sm100a(x, gamma, beta, wa, wb, ws, eps):
     rather than falling back. Inference (grad mode off, or nothing requiring grad) runs the forward without the saves."""
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        out, *_ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(), beta.float().contiguous(),
-                              *(w.to(x.dtype).contiguous() for w in (wa, wb, ws)), float(eps), False)
+        from miniworld_engine.kernels import _capture
+
+        g, b, ww = _capture.param_forms(f"transition_wide_sm100a_{x.dtype}", (gamma, beta, wa, wb, ws), lambda: (
+            gamma.float().contiguous(), beta.float().contiguous(), tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws))))
+        out, *_ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False)
         return out.reshape(shape)
     return _WideTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

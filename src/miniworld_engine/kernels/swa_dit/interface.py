@@ -181,7 +181,9 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
         w = wmod.contiguous()
         if torch.is_grad_enabled() and (c2.requires_grad or w.requires_grad):
             return SWADiTModulationSm100.apply(c2, w)
-        return swa_dit_mod_fwd_sm100(c2, w.to(c2.dtype))
+        from miniworld_engine.kernels import _capture
+
+        return swa_dit_mod_fwd_sm100(c2, _capture.param_forms("swa_mod", (w,), lambda: w.to(c2.dtype)))
     if _mod_tf32(c_base, wmod):                          # B200, fp32, d_cond 128, no gradient: the TF32 mod_fwd_tf32 kernel
         from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_mod_fwd_tf32
 
@@ -215,7 +217,11 @@ def swa_dit_block(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: to
     weights = [w.contiguous() for w in (wqkv, wg, wo, wu, wd)]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (q, mod, *weights)):
         return SWADiTBlockFunction.apply(q, mod, cos, sin, seqused, *weights, B, half_window)
-    return swa_dit_block_fwd(q, mod, cos, sin, seqused, *(w.to(q.dtype) for w in weights), B, half_window, FP32_EPS, False)[0]
+    from miniworld_engine.kernels import _capture
+
+    dt = q.dtype
+    wk = _capture.param_forms(f"swa_block_{dt}", weights, lambda: tuple(w.to(dt) for w in weights))
+    return swa_dit_block_fwd(q, mod, cos, sin, seqused, *wk, B, half_window, FP32_EPS, False)[0]
 
 
 __all__ = ["D_ATOM", "FP32_EPS", "GLOBAL_HALF_WINDOW", "HALF_WINDOW", "N_HEAD", "N_HIDDEN", "is_global", "refusal", "swa_dit_block",

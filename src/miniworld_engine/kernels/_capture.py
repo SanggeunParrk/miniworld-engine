@@ -163,3 +163,24 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
         store.pop(next(iter(store)))
     out = store[sk] = build()
     return out
+
+
+_FORMS: dict = {}
+
+
+def param_forms(tag: str, params, build):
+    """``build()`` -- the kernel-dtype forms of some parameters (casts, contiguous copies, folds) -- cached while the very same
+    parameter storages are unmodified, scoped to the capture like every weight pack (``lookup``): an eager call and a captured step
+    under ``static_weights()`` share the entry, so a replay re-runs none of the cast kernels; a capture without it records them once
+    and every replay casts the weights as they are then.
+
+    The reason it exists: with fp32 master parameters over bf16 activations every call casts every weight, ~10 small kernels per
+    block per call (about 6-12 us), which made inference of the small blocks 10-50 % slower than with bf16 parameters. The key is
+    (pointer, version, dtype, shape) of each parameter and the entry keeps the parameters alive, so a freed storage's address cannot
+    alias a different tensor. A fused optimizer step does not bump ``_version`` -- as for every other pack, call
+    ``torch.autograd.graph.increment_version(params)`` after it. Inference tensors carry no version counter: not cached."""
+    try:
+        key = (tag, tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params))
+    except RuntimeError:
+        return build()
+    return lookup(_FORMS, key, lambda: (build(), tuple(params)), limit=64)[0]

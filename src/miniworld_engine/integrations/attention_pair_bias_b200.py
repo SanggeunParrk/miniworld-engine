@@ -139,7 +139,8 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
     """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     L = single.shape[1]
     rows, dev = _rows(), single.device
-    params, leaves = leaves, _kernel_leaves(leaves)
+    params = leaves
+    leaves = _capture.param_forms("apb_leaves", params, lambda: tuple(_kernel_leaves(params)))
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):

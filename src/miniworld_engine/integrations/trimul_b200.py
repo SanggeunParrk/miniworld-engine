@@ -7,6 +7,7 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Largest batch the native D64 path takes: the j-class assignment of k3g / b1s needs (B L / 128) CTAs at most, and the plane bmm batch is d B.
@@ -47,19 +48,16 @@ def update_inference(module, pair: torch.Tensor, mask: torch.Tensor | None, drop
     bsz, n, d = pair.shape[0], pair.shape[1], pair.shape[-1]
     token_mask = None if mask is None else mask.reshape(bsz * n).to(torch.bool).contiguous()
     bf = pair.dtype
-    leaves = [
-        pair,
-        module.to_left.weight.to(bf),
-        module.to_left_gate.weight.to(bf),
-        module.to_right.weight.to(bf),
-        module.to_right_gate.weight.to(bf),
-        module.to_gate.weight.to(bf).contiguous(),
-        module.to_out.weight.to(bf).contiguous(),
-        module.ln_pair.weight.float().contiguous(),
-        module.ln_pair.bias.float().contiguous(),
-        module.ln_out.weight.float().contiguous(),
-        module.ln_out.bias.float().contiguous(),
-    ]
+    params = (module.to_left.weight, module.to_left_gate.weight, module.to_right.weight, module.to_right_gate.weight,
+              module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight,
+              module.ln_out.bias)
+
+    def forms():
+        w = params
+        return (w[0].to(bf), w[1].to(bf), w[2].to(bf), w[3].to(bf), w[4].to(bf).contiguous(), w[5].to(bf).contiguous(),
+                w[6].float().contiguous(), w[7].float().contiguous(), w[8].float().contiguous(), w[9].float().contiguous())
+
+    leaves = [pair, *_capture.param_forms(f"trimul_b200_{bf}", params, forms)]
     scale = None if dropscale is None else dropscale.reshape(bsz * n, d).contiguous()
     direction = 0 if bidirectional else (1 if module.outgoing else 2)
     return inference(leaves, token_mask, scale, direction)
