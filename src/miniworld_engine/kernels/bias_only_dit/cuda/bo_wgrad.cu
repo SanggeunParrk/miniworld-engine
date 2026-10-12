@@ -1,5 +1,5 @@
 // bo_wgrad.cu -- the bias-only token DiT training backward's six weight gradients (and the cond-LN unfold) as ONE launch per block on
-// sm_100a (integrations/bias_only_dit_train.py, MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED): what six cuBLAS GEMMs and unfold did.
+// sm_100a (integrations/bias_only_dit_train.py, settings.bias_only_dit_bwd_fused): what six cuBLAS GEMMs and unfold did.
 //
 //   g  gradient        = grad^T act over the A L rows      out
 //   0  squeeze         dz [M, 768]^T  h [M, 1536]           [768, 1536]

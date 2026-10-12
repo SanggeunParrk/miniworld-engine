@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.swa_dit.interface import (
     GLOBAL_HALF_WINDOW,
@@ -21,11 +22,14 @@ from miniworld_engine.kernels.swa_dit.reference import (
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="B200 (sm_100)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
+        reason="B200 (sm_100)",
+    ),
 ]
 DEV, BF = "cuda", torch.bfloat16
 C, H, HIDDEN = 128, 4, 256
-BIG = 1_000_000                                                  # what a model's huge ``swa_window_size`` becomes
+BIG = 1_000_000  # what a model's huge ``swa_window_size`` becomes
 NAMES = ("out", "q", "c_base", "w_adaln", "w_qkv", "w_gate", "w_out", "w_up", "w_down")
 
 
@@ -36,22 +40,55 @@ def _case(a, b, s, seed=0):
         return (torch.randn(*shape, generator=g) * scale).to(DEV, BF)
 
     n = a * b
-    leaves = [r(n, s, C), r(b, s, C), r(6 * C, C, scale=0.05), r(3 * C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5),
-              r(C, C, scale=C ** -0.5), r(2 * HIDDEN, C, scale=C ** -0.5), r(C, HIDDEN, scale=HIDDEN ** -0.5)]
+    leaves = [
+        r(n, s, C),
+        r(b, s, C),
+        r(6 * C, C, scale=0.05),
+        r(3 * C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(2 * HIDDEN, C, scale=C**-0.5),
+        r(C, HIDDEN, scale=HIDDEN**-0.5),
+    ]
     angles = torch.randn(b, s, C // H // 2, generator=g) * 3.0
-    lengths = [s, max(1, s - 17), 5, s - 1] * n                  # ragged, front-packed, one row shorter than a window
-    return leaves, angles.cos().to(DEV), angles.sin().to(DEV), torch.tensor(lengths[:n], dtype=torch.int32, device=DEV)
+    lengths = [
+        s,
+        max(1, s - 17),
+        5,
+        s - 1,
+    ] * n  # ragged, front-packed, one row shorter than a window
+    return (
+        leaves,
+        angles.cos().to(DEV),
+        angles.sin().to(DEV),
+        torch.tensor(lengths[:n], dtype=torch.int32, device=DEV),
+    )
 
 
 def _fused(leaves, cos, sin, seqused, b, hw):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
-    return swa_dit_block(q, swa_dit_hoist_modulation(c_base, wmod), cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=hw)
+    return swa_dit_block(
+        q,
+        swa_dit_hoist_modulation(c_base, wmod),
+        cos,
+        sin,
+        seqused,
+        wqkv,
+        wg,
+        wo,
+        wu,
+        wd,
+        b,
+        half_window=hw,
+    )
 
 
 def _reference(leaves, cos, sin, seqused, b, hw):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation_reference(c_base, wmod)
-    return swa_dit_block_reference(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=hw)
+    return swa_dit_block_reference(
+        q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=hw
+    )
 
 
 def _train(fn, leaves, dy, *args):
@@ -77,28 +114,47 @@ def test_refusal_serves_global_in_bf16_only():
     leaves, cos, sin, seqused = _case(1, 1, 128)
     _, _, _, wqkv, wg, wo, wu, wd = leaves
     q = leaves[0]
-    assert refusal(q, cos, sin, seqused, wqkv, wg, wo, wu, wd, n_head=H, half_window=BIG) is None
-    assert refusal(q, cos, sin, seqused, wqkv, wg, wo, wu, wd, n_head=H, half_window=100) is not None     # neither 64 nor global
+    assert (
+        refusal(q, cos, sin, seqused, wqkv, wg, wo, wu, wd, n_head=H, half_window=BIG)
+        is None
+    )
+    assert (
+        refusal(q, cos, sin, seqused, wqkv, wg, wo, wu, wd, n_head=H, half_window=100)
+        is not None
+    )  # neither 64 nor global
     f32 = [t.float() for t in (q, wqkv, wg, wo, wu, wd)]
-    assert "global attention" in (refusal(f32[0], cos, sin, seqused, *f32[1:], n_head=H, half_window=BIG) or "")
+    assert "global attention" in (
+        refusal(f32[0], cos, sin, seqused, *f32[1:], n_head=H, half_window=BIG) or ""
+    )
 
 
 # (A, B, S): the embedder's A = 1 (S = 4096 in the model), small A, A = 48
-@pytest.mark.parametrize(("a", "b", "s"), [(1, 1, 256), (1, 2, 384), (3, 2, 256), (48, 1, 256)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"), [(1, 1, 256), (1, 2, 384), (3, 2, 256), (48, 1, 256)]
+)
 def test_training_matches_the_reference(a, b, s):
     leaves, cos, sin, seqused = _case(a, b, s)
     dy = torch.randn(a * b, s, C, device=DEV)
-    truth_g = _train(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b, BIG)
+    truth_g = _train(
+        _reference, [t.float() for t in leaves], dy, cos, sin, seqused, b, BIG
+    )
     got = _train(_fused, leaves, dy, cos, sin, seqused, b, BIG)
-    truth_w = _train(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b, 64)
+    truth_w = _train(
+        _reference, [t.float() for t in leaves], dy, cos, sin, seqused, b, 64
+    )
     win = _train(_fused, leaves, dy, cos, sin, seqused, b, 64)
     worst = []
     for name, g_, w_, eg, ew in zip(NAMES, got, win, truth_g, truth_w, strict=True):
         assert torch.isfinite(g_).all(), name
         egl, ewl = _rel(g_, eg), _rel(w_, ew)
         worst.append((egl / max(ewl, 1e-6), name, egl, ewl))
-        assert egl < 1.5 * ewl + 3e-3, f"{name}: global {egl:.2e} vs the windowed block {ewl:.2e}"
-    print(f"global training A{a} B{b} S{s} worst vs windowed:", sorted(worst, reverse=True)[:2])
+        assert egl < 1.5 * ewl + 3e-3, (
+            f"{name}: global {egl:.2e} vs the windowed block {ewl:.2e}"
+        )
+    print(
+        f"global training A{a} B{b} S{s} worst vs windowed:",
+        sorted(worst, reverse=True)[:2],
+    )
 
 
 @pytest.mark.parametrize(("a", "b", "s"), [(1, 1, 256), (1, 3, 384), (5, 1, 1024)])
@@ -146,8 +202,10 @@ def test_global_is_cuda_graph_capturable():
         out, dq = step()
     g.replay()
     torch.cuda.synchronize()
-    assert torch.equal(out, eager[0])                              # the forward is deterministic
-    assert _rel(dq, eager[1]) < 2e-2                               # FA4's dQ accumulates with atomics: summation order varies
+    assert torch.equal(out, eager[0])  # the forward is deterministic
+    assert (
+        _rel(dq, eager[1]) < 2e-2
+    )  # FA4's dQ accumulates with atomics: summation order varies
 
 
 @pytest.mark.parametrize("hw", [64, BIG])
@@ -172,9 +230,11 @@ def test_refusal_follows_the_sm100_switches(monkeypatch):
     _, _, _, wqkv, wg, wo, wu, wd = leaves
     args = (leaves[0], cos, sin, seqused, wqkv, wg, wo, wu, wd)
     assert refusal(*args, n_head=H, half_window=BIG) is None
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM100", "0")
+    override_setting(monkeypatch, "swa_dit_sm100", "0")
     assert "sm_100a" in (refusal(*args, n_head=H, half_window=BIG) or "")
-    assert refusal(*args, n_head=H, half_window=64) is None                 # the windowed block still has its Triton path
+    assert (
+        refusal(*args, n_head=H, half_window=64) is None
+    )  # the windowed block still has its Triton path
 
 
 @pytest.mark.parametrize("hw", [64, BIG])
@@ -199,13 +259,13 @@ def test_packed_weights_are_refreshed_in_a_captured_graph(hw):
     g.replay()
     torch.cuda.synchronize()
     before = out.clone()
-    for w in leaves[3:]:                                         # an "optimizer step": every block weight changes in place
+    for w in leaves[3:]:  # an "optimizer step": every block weight changes in place
         w.mul_(1.5)
     g.replay()
     torch.cuda.synchronize()
     want = _reference([t.float() for t in leaves], cos, sin, seqused, 1, hw)
     assert _rel(out, want) < 1e-2, _rel(out, want)
-    assert _rel(out, before) > 1e-2                              # the replay really used the new weights
+    assert _rel(out, before) > 1e-2  # the replay really used the new weights
 
 
 def test_inference_tensor_weights_are_served():

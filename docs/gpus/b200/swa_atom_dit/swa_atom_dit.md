@@ -10,7 +10,7 @@ Length is the atom count S. The module-level summary is in [b200.md](../b200.md)
 development build of these kernels (not shipped), unchanged, built on first use by the newest nvcc on the machine that knows
 sm_100a: 13.1 for the measurements below). The engine's fused block (`kernels/swa_dit/dispatch.py`, which `SWADiTBlock` takes) runs every stage on them on
 B200 in bf16 at the served widths, and the hoisted modulation (`swa_dit_hoist_modulation`) on `mod_fwd` / `mod_bwd`;
-`MINIWORLD_SWA_DIT_SM100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
+`settings.swa_dit_sm100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
 gradient against the fp32 reference (no worse than the Triton path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
 A = 1 / 3 / 5 / 8 / 48. The Measurements section below is the engine through the benchmark harness; the kernel tables (CUDA / ✓ / △ / ✗) and the speed-of-light section were
 taken in the standalone development build (not shipped) on the same sources, and "CUDA" in the kernel tables means the kernel ran at that shape there.
@@ -165,7 +165,7 @@ bulk shared::cluster copies, summed in rank order.
   (`kernels._capture.param_forms`), so inference with fp32 master equals inference with bf16 parameters.
 - Columns: **PyTorch compiled** = `implementations=[pytorch] compile=true` (the module's reference math, `torch.compile`); **engine per-op**
   = `+swa_dit_fused=false` (the per-op path: RMS-adaLN, FA4 window attention, SwiGLU, as separate ops); **fused Triton** =
-  `MINIWORLD_SWA_DIT_SM100=0` (the fused block's Triton kernels; the sm_90a kernels do not build for sm_100); **ours** = the default
+  `settings.swa_dit_sm100=0` (the fused block's Triton kernels; the sm_90a kernels do not build for sm_100); **ours** = the default
   (the sm_100a kernels). cuEquivariance has no such block. `compile=true` fails for ours in Dynamo on `sys.audit`, so ours is
   timed without `torch.compile` (as the other non-compiled rows).
 - Accuracy against the fp64 block (A8 S1024, standalone development build): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst
@@ -298,7 +298,7 @@ Two additions around the block, both for MiniWorld's input embedder (SWA atom bl
   the kernels above. bf16 and B200 only, `refusal()` says why a call is not served, and the output and every gradient match the
   windowed block at a window that covers the sequence (`tests/integrations/test_b200_swa_dit_global_gpu.py`). **At A = 1 it is slower than
   the per-op path**: 1.25 ms against 1.08 ms for the same embedder (opt-in switches of the consumer model code,
-  `MINIWORLD_SWA_FUSED=1` and `MINIWORLD_SWA_GLOBAL_BF16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
+  `settings.swa_fused=1` and `settings.swa_global_bf16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
   MiniWorld keeps it opt-in.
 
 The weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) is keyed on the tensor objects (weak references) and their versions since
@@ -320,7 +320,7 @@ kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation 
 fp32. Host side: `kernels/swa_dit/cuda/sm100/tf32_fwd.py` (forward, `block_fwd_tf32`, `mod_fwd_tf32`);
 `dispatch._tf32` picks them for fp32 q on B200 at the served widths with S a multiple of 128 (else the Triton fp32 path, which takes
 any S). A call that records a gradient (a training forward, the hoisted modulation with a gradient) runs the Triton fp32 path;
-`MINIWORLD_SWA_DIT_TF32=0` (or `MINIWORLD_SWA_DIT_SM100=0`, `engine_backend="triton"`) keeps the Triton fp32 path, and a build or
+`settings.swa_dit_tf32=0` (or `settings.swa_dit_sm100=0`, `engine_backend="triton"`) keeps the Triton fp32 path, and a build or
 load failure warns once and keeps it too. The hoisted modulation (`swa_dit_hoist_modulation`, fp32 c and Wmod) runs on
 `mod_fwd_tf32` when no gradient is recorded.
 

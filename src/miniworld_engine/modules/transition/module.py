@@ -17,16 +17,19 @@ from miniworld_engine.modules.primitives import LayerNorm, Linear
 def _fused_sm90a_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_90 through the fused hand-CUDA
     forward and backward (two launches instead of five, ~1.9x the Triton residual path on both
-    sides). Default on; set MINIWORLD_TRANSITION_FUSED_SM90A=0 to A/B against Triton."""
+    sides). Default on; set settings.transition_fused_sm90a=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton"
+    return (
+        settings.current().transition_fused_sm90a
+        and settings.current().engine_backend != "triton"
+    )
 
 
 def _fused_sm100a_enabled() -> bool:
     """Whether to route the n=4 bf16 residual path on sm_100 (B200) through the hand-CUDA kernels: ``fused_sm100a`` at d=128
     (module training step 2.5x / 2.3x the Triton residual path at L384 / L768) and ``fused_wide_sm100a`` at d=64/256/384/512.
-    Default on; MINIWORLD_TRANSITION_FUSED_SM100A=0 to A/B against Triton."""
+    Default on; settings.transition_fused_sm100a=0 to A/B against Triton."""
     from miniworld_engine import settings
 
     return settings.current().engine_backend != "triton"
@@ -34,7 +37,7 @@ def _fused_sm100a_enabled() -> bool:
 
 def _fused_sm80_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_80 through the fused hand-CUDA forward and two-kernel backward
-    (training step ~1.44x the Triton residual path).  Default on; MINIWORLD_TRANSITION_FUSED_SM80=0 to A/B against Triton."""
+    (training step ~1.44x the Triton residual path).  Default on; settings.transition_fused_sm80=0 to A/B against Triton."""
     from miniworld_engine import settings
 
     return settings.current().engine_backend != "triton"
@@ -134,10 +137,20 @@ class Transition(nn.Module):
             )
 
             pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
-            for kern, entry in ((fused_sm100a, fused_sm100a.transition_fused_sm100a),
-                                (fused_wide_sm100a, fused_wide_sm100a.transition_wide_sm100a)):
+            for kern, entry in (
+                (fused_sm100a, fused_sm100a.transition_fused_sm100a),
+                (fused_wide_sm100a, fused_wide_sm100a.transition_wide_sm100a),
+            ):
                 if kern.available(x, pa, ps):
-                    return entry(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+                    return entry(
+                        x,
+                        self.ln_in.weight,
+                        self.ln_in.bias,
+                        pa,
+                        pb,
+                        ps,
+                        self.ln_in.eps,
+                    )
 
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
@@ -147,27 +160,36 @@ class Transition(nn.Module):
 
             if fused_sm90a.available(x, wa, ws):
                 return fused_sm90a.transition_fused_sm90a(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
+                )
             # the other widths with an sm_90a build: D = 64, 256, 384, 512 (see fused_wide_sm90a)
             from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a
 
             if fused_wide_sm90a.available(x, wa, ws):
                 return fused_wide_sm90a.transition_wide_sm90a(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
+                )
 
         if _fused_sm80_enabled():
             from miniworld_engine.kernels.transition.cuda import fused_sm80
 
             if fused_sm80.available(x, wa, ws):
                 return fused_sm80.transition_fused_sm80(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
+                )
 
         from miniworld_engine.kernels.transition.triton.residual import (
             transition_residual,
         )
 
         return transition_residual(
-            x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps,
+            x,
+            self.ln_in.weight,
+            self.ln_in.bias,
+            wa,
+            wb,
+            ws,
+            self.ln_in.eps,
         )
 
     def _torch_forward(self, x: torch.Tensor) -> torch.Tensor:

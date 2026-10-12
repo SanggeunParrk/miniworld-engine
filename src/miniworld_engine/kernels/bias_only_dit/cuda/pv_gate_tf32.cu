@@ -32,7 +32,7 @@
 // shared memory keeps one CTA per SM).
 // Work item = (head, 128-query tile, group of SG samples), the group fastest (consecutive CTAs share the P tile in L2).
 // L a multiple of 128 (query tiles; 32-key chunks).
-// -DPDL_INF (only the three-kernel inference step builds it, MINIWORLD_BIAS_ONLY_DIT_INF3=1: K2 between bo_front_tf32 and bo_tail_tf32):
+// -DPDL_INF (only the three-kernel inference step builds it, settings.bias_only_dit_inf3=1: K2 between bo_front_tf32 and bo_tail_tf32):
 // programmatic dependent launch -- launch_dependents after setup, griddepcontrol.wait before the producer reads v and before the
 // epilogue reads g or stores a -- and the gated output rounded to the nearest TF32 (cvt.rna), since a is bo_tail_tf32's MMA operand.
 // Without it the cubin is the training path's / the default inference path's, unchanged.

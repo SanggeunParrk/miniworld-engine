@@ -14,6 +14,7 @@ fp32 (the second half): the fp32 kernels against the reference, against the modu
 precisions), against team-gm's unfused fp32 SWAAtomTransformer when team-gm is importable, compiled fullgraph, and the
 ops' schema / fakes.
 """
+
 from __future__ import annotations
 
 import copy
@@ -21,6 +22,7 @@ from dataclasses import asdict
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.kernels.swa_dit.interface import (
@@ -36,13 +38,25 @@ from miniworld_engine.modules.swa_atom_attention import build_attention_params
 from miniworld_engine.modules.swa_atom_attention.module import _flash_backend
 from miniworld_engine.modules.swa_dit import SWADiTBlock
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU"),
+]
 DEV, BF = "cuda", torch.bfloat16
 C, H, HIDDEN, HW = 128, 4, 256, 64
 
-TRITON = {"swa_dit_qkvg_fwd_cuda": False, "swa_dit_ffn_fwd_cuda": False, "swa_dit_ffn_bwd_cuda": False}
-CUDA = {"engine_backend": "auto", "swa_dit_qkvg_fwd_cuda": True, "swa_dit_ffn_fwd_cuda": True,
-        "swa_dit_ffn_bwd_cuda": True, "swa_dit_ffn_dw": "mat"}
+TRITON = {
+    "swa_dit_qkvg_fwd_cuda": False,
+    "swa_dit_ffn_fwd_cuda": False,
+    "swa_dit_ffn_bwd_cuda": False,
+}
+CUDA = {
+    "engine_backend": "auto",
+    "swa_dit_qkvg_fwd_cuda": True,
+    "swa_dit_ffn_fwd_cuda": True,
+    "swa_dit_ffn_bwd_cuda": True,
+    "swa_dit_ffn_dw": "mat",
+}
 PATHS = {
     "triton": TRITON,
     "triton_fused_dw": {**TRITON, "swa_dit_ffn_dw": "fused"},
@@ -55,7 +69,7 @@ PATHS = {
 def triton_not_sm100(monkeypatch):
     """These tests pin the Triton kernels (and the sm_90 CUDA stages) at atom counts off the 128 grid; on B200 the sm_100a
     path would refuse those counts. It has its own tests (tests/integrations/test_b200_swa_dit_gpu.py)."""
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM100", "0")
+    override_setting(monkeypatch, "swa_dit_sm100", "0")
 
 
 @pytest.fixture(autouse=True)
@@ -89,9 +103,16 @@ def _case(a: int, b: int, s: int, seed: int = 0, dtype: torch.dtype = BF):
         return (torch.randn(*shape, generator=g) * scale).to(DEV, dtype)
 
     n = a * b
-    leaves = [r(n, s, C), r(b, s, C), r(6 * C, C, scale=0.05),
-              r(3 * C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5),
-              r(2 * HIDDEN, C, scale=C ** -0.5), r(C, HIDDEN, scale=HIDDEN ** -0.5)]
+    leaves = [
+        r(n, s, C),
+        r(b, s, C),
+        r(6 * C, C, scale=0.05),
+        r(3 * C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(2 * HIDDEN, C, scale=C**-0.5),
+        r(C, HIDDEN, scale=HIDDEN**-0.5),
+    ]
     angles = torch.randn(b, s, C // H // 2, generator=g) * 3.0
     lengths = [s, max(1, s - 17), 5, s - 1] * n
     seqused = torch.tensor(lengths[:n], dtype=torch.int32, device=DEV)
@@ -101,13 +122,17 @@ def _case(a: int, b: int, s: int, seed: int = 0, dtype: torch.dtype = BF):
 def _fused(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation(c_base, wmod)
-    return swa_dit_block(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block(
+        q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW
+    )
 
 
 def _reference(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation_reference(c_base, wmod)
-    return swa_dit_block_reference(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block_reference(
+        q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW
+    )
 
 
 def _run(fn, leaves, dy, *args):
@@ -119,24 +144,35 @@ def _run(fn, leaves, dy, *args):
 
 def _rel(a, e):
     a, e = a.float(), e.float()
-    return ((a - e).norm() / e.norm().clamp_min(1e-30)).item(), ((a - e).abs().max() / e.abs().max().clamp_min(1e-30)).item()
+    return ((a - e).norm() / e.norm().clamp_min(1e-30)).item(), (
+        (a - e).abs().max() / e.abs().max().clamp_min(1e-30)
+    ).item()
 
 
 NAMES = ("q", "c_base", "w_adaln", "w_qkv", "w_gate", "w_out", "w_up", "w_down")
 
 
 @pytest.mark.parametrize("path", sorted(PATHS))
-@pytest.mark.parametrize(("a", "b", "s"), [(48, 1, 257), (3, 2, 333), (8, 2, 130), (1, 3, 300)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"), [(48, 1, 257), (3, 2, 333), (8, 2, 130), (1, 3, 300)]
+)
 def test_the_block_matches_its_fp32_reference(path, a, b, s):
     """Output and every gradient within bf16's band of the fp32 reference, on the same bf16 values."""
     _use(path)
     torch.manual_seed(0)
     leaves, cos, sin, seqused = _case(a, b, s)
-    dy = torch.randn(a * b, s, C, device=DEV, dtype=BF)      # bf16, so both sides see the same upstream values
+    dy = torch.randn(
+        a * b, s, C, device=DEV, dtype=BF
+    )  # bf16, so both sides see the same upstream values
     out, grads = _run(_fused, leaves, dy, cos, sin, seqused, b)
-    ref, ref_grads = _run(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b)
+    ref, ref_grads = _run(
+        _reference, [t.float() for t in leaves], dy, cos, sin, seqused, b
+    )
     failures = []
-    for name, got, want in [("out", out, ref), *zip(NAMES, grads, ref_grads, strict=True)]:
+    for name, got, want in [
+        ("out", out, ref),
+        *zip(NAMES, grads, ref_grads, strict=True),
+    ]:
         assert got is not None, name
         assert torch.isfinite(got).all(), name
         frob, peak = _rel(got, want)
@@ -154,7 +190,10 @@ def test_the_cuda_stages_agree_with_the_triton_kernels():
     out_t, grads_t = _run(_fused, leaves, dy, cos, sin, seqused, 1)
     settings.configure(**CUDA)
     out_c, grads_c = _run(_fused, leaves, dy, cos, sin, seqused, 1)
-    for name, got, want in [("out", out_c, out_t), *zip(NAMES, grads_c, grads_t, strict=True)]:
+    for name, got, want in [
+        ("out", out_c, out_t),
+        *zip(NAMES, grads_c, grads_t, strict=True),
+    ]:
         frob, _peak = _rel(got, want)
         assert frob < 1e-2, (name, frob)
 
@@ -166,7 +205,15 @@ def test_inference_and_training_forward_agree(path):
     leaves, cos, sin, seqused = _case(3, 2, 333, seed=4)
     with torch.no_grad():
         inference = _fused(leaves, cos, sin, seqused, 2)
-    training, _ = _run(_fused, leaves, torch.randn(6, 333, C, device=DEV, dtype=BF), cos, sin, seqused, 2)
+    training, _ = _run(
+        _fused,
+        leaves,
+        torch.randn(6, 333, C, device=DEV, dtype=BF),
+        cos,
+        sin,
+        seqused,
+        2,
+    )
     torch.testing.assert_close(inference, training, rtol=1e-2, atol=1e-2)
 
 
@@ -179,7 +226,9 @@ def _modulation_weight(block: SWADiTBlock) -> torch.Tensor:
 
 def _block(active=True, dtype=BF):
     torch.manual_seed(11)
-    block = SWADiTBlock(C, C, H, implementation=ImplementationType.MINIWORLD).to(DEV, dtype)
+    block = SWADiTBlock(C, C, H, implementation=ImplementationType.MINIWORLD).to(
+        DEV, dtype
+    )
     if active:
         with torch.no_grad():
             _modulation_weight(block).normal_(std=0.05)
@@ -218,14 +267,21 @@ def test_the_module_takes_the_fused_block_and_matches_its_per_op_path(path, hois
     x, c_base, ap = _module_case(a, b, s)
     c = c_base if hoisted else c_base.repeat(a, 1, 1)
     assert block.fused_refusal(x, c, ap) is None
-    fn = (lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_)) if hoisted else (lambda m, x_, c_, ap_: m(x_, c_, ap_))
+    fn = (
+        (lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_))
+        if hoisted
+        else (lambda m, x_, c_, ap_: m(x_, c_, ap_))
+    )
     dy = torch.randn(a * b, s, C, device=DEV, dtype=BF)
     out, grads = _module_grads(block, fn, x, c, ap, dy)
     settings.configure(swa_dit_fused=False)
     ref, ref_grads = _module_grads(block, fn, x, c, ap, dy)
     names = ["x", "cond", *(n for n, _ in block.named_parameters())]
     failures = []
-    for name, got, want in [("out", out, ref), *zip(names, grads, ref_grads, strict=True)]:
+    for name, got, want in [
+        ("out", out, ref),
+        *zip(names, grads, ref_grads, strict=True),
+    ]:
         assert got is not None, name
         assert want is not None, name
         frob, _peak = _rel(got, want)
@@ -245,7 +301,10 @@ def test_zero_initialised_gates_keep_the_block_the_identity():
         torch.testing.assert_close(block(x, c, ap), x, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 def test_the_fused_module_compiles_fullgraph():
     """Two opaque ops and an autograd.Function: torch.compile(fullgraph=True) traces the module with no break."""
     _use("triton")
@@ -253,9 +312,17 @@ def test_the_fused_module_compiles_fullgraph():
     x, c_base, ap = _module_case(3, 2, 200)
     c = c_base.repeat(3, 1, 1)
     dy = torch.randn(6, 200, C, device=DEV, dtype=BF)
-    eager, eager_grads = _module_grads(block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy)
+    eager, eager_grads = _module_grads(
+        block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy
+    )
     compiled, compiled_grads = _module_grads(
-        block, lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_), x, c, ap, dy)
+        block,
+        lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_),
+        x,
+        c,
+        ap,
+        dy,
+    )
     # Inductor reorders the per-row modulation (silu + matmul, plain torch ops), so a few bf16 outputs round the other
     # way (1 ULP, 7 of 153600 elements measured on H100); compare the output the way the gradients are compared.
     frob, _peak = _rel(compiled, eager)
@@ -297,12 +364,17 @@ def test_the_fp32_block_matches_its_fp32_reference(a, b, s):
     ref, ref_grads = _run(_reference, leaves, dy, cos, sin, seqused, b)
     attention_side = {"w_qkv", "w_gate", "w_out"}
     failures = []
-    for name, got, want in [("out", out, ref), *zip(NAMES, grads, ref_grads, strict=True)]:
+    for name, got, want in [
+        ("out", out, ref),
+        *zip(NAMES, grads, ref_grads, strict=True),
+    ]:
         assert torch.isfinite(got).all(), name
         frob, peak = _rel(got, want)
         bound = 2e-2 if name in attention_side else 5e-3
         if frob > bound or peak > 2 * bound:
-            failures.append(f"{name}: rel_frob={frob:.2e} rel_max={peak:.2e} (bound {bound:.0e})")
+            failures.append(
+                f"{name}: rel_frob={frob:.2e} rel_max={peak:.2e} (bound {bound:.0e})"
+            )
     assert not failures, f"fp32 A={a} B={b} S={s}:\n  " + "\n  ".join(failures)
 
 
@@ -310,13 +382,26 @@ def _reference_module(block, x, c, ap):
     """reference.py on a module's weights, with one modulation row per row of ``c`` (B = c.shape[0])."""
     b = c.shape[0]
     mod = swa_dit_hoist_modulation_reference(c, block.adaln_modulation[1].weight)
-    return swa_dit_block_reference(x, mod, ap[0][:b], ap[1][:b], ap[2], block.attn.Wqkv.weight, block.attn.gate_proj.weight,
-                                   block.attn.out_proj.weight, block.ffn.w_up.weight, block.ffn.w_down.weight, b,
-                                   half_window=HW)
+    return swa_dit_block_reference(
+        x,
+        mod,
+        ap[0][:b],
+        ap[1][:b],
+        ap[2],
+        block.attn.Wqkv.weight,
+        block.attn.gate_proj.weight,
+        block.attn.out_proj.weight,
+        block.ffn.w_up.weight,
+        block.ffn.w_down.weight,
+        b,
+        half_window=HW,
+    )
 
 
 @pytest.mark.parametrize("precision", ["highest", "medium"])
-def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(precision, matmul_precision):
+def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(
+    precision, matmul_precision
+):
     """The fp32 module on the fused block against the same module on its per-op path (``swa_dit_fused=False``: engine
     rmsnorm_adamod, cuBLAS projections, FlashAttention-4 in bf16, triton_swiglu_ffn), each against the fp32 reference.
     ``medium`` is MiniWorld's trainer setting (cuBLAS TF32). The fused error may not exceed the per-op error by more than
@@ -329,14 +414,24 @@ def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(precision, matmu
     assert block.fused_refusal(x, c_base, ap) is None
     dy = torch.randn(a * b, s, C, device=DEV)
     matmul_precision(precision)
-    fused, fused_grads = _module_grads(block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy)
+    fused, fused_grads = _module_grads(
+        block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy
+    )
     settings.configure(swa_dit_fused=False)
-    perop, perop_grads = _module_grads(block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy)
+    perop, perop_grads = _module_grads(
+        block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy
+    )
     matmul_precision("highest")
     ref, ref_grads = _module_grads(block, _reference_module, x, c_base, ap, dy)
     names = ["out", "x", "cond", *(n for n, _ in block.named_parameters())]
     failures = []
-    for name, f, p, r in zip(names, [fused, *fused_grads], [perop, *perop_grads], [ref, *ref_grads], strict=True):
+    for name, f, p, r in zip(
+        names,
+        [fused, *fused_grads],
+        [perop, *perop_grads],
+        [ref, *ref_grads],
+        strict=True,
+    ):
         assert f.dtype == F32, name
         err_f, err_p = _rel(f, r)[0], _rel(p, r)[0]
         if err_f > 1.5 * err_p + 1e-4:
@@ -351,15 +446,26 @@ def test_the_fp32_module_takes_the_fused_block_and_mixed_dtypes_do_not():
     assert "mixed dtypes" in str(block.fused_refusal(x.to(BF), c_base, ap))
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 def test_the_fp32_fused_module_compiles_fullgraph():
     block = _block(dtype=F32)
     x, c_base, ap = _module_case(3, 2, 200, dtype=F32)
     c = c_base.repeat(3, 1, 1)
     dy = torch.randn(6, 200, C, device=DEV)
-    eager, eager_grads = _module_grads(block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy)
+    eager, eager_grads = _module_grads(
+        block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy
+    )
     compiled, compiled_grads = _module_grads(
-        block, lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_), x, c, ap, dy)
+        block,
+        lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_),
+        x,
+        c,
+        ap,
+        dy,
+    )
     frob, _peak = _rel(compiled, eager)
     assert frob < 1e-4, frob
     for got, want in zip(compiled_grads, eager_grads, strict=True):
@@ -368,7 +474,10 @@ def test_the_fp32_fused_module_compiles_fullgraph():
         assert frob < 1e-3, frob
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="opcheck needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="opcheck needs the custom_op launches",
+)
 def test_the_fp32_ops_satisfy_their_contract():
     """Schema and fake against the fp32 forward (both save modes) and backward: the fakes carry the per-output dtypes
     (bf16 attention operands, q's dtype elsewhere), which only an fp32 call can tell apart."""
@@ -381,12 +490,18 @@ def test_the_fp32_ops_satisfy_their_contract():
     fwd_op = torch.ops.miniworld_engine.swa_dit_block_fwd.default
     bwd_op = torch.ops.miniworld_engine.swa_dit_block_bwd.default
     for save in (False, True):
-        torch.library.opcheck(fwd_op, (q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, save),
-                              test_utils=("test_schema", "test_faketensor"))
+        torch.library.opcheck(
+            fwd_op,
+            (q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, save),
+            test_utils=("test_schema", "test_faketensor"),
+        )
     saved = swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, True)
     dy = torch.randn_like(q)
-    torch.library.opcheck(bwd_op, (dy, q, mod, cos, sin, seqused, *weights, *saved[1:], 2, HW, 1e-7),
-                          test_utils=("test_schema", "test_faketensor"))
+    torch.library.opcheck(
+        bwd_op,
+        (dy, q, mod, cos, sin, seqused, *weights, *saved[1:], 2, HW, 1e-7),
+        test_utils=("test_schema", "test_faketensor"),
+    )
 
 
 def test_the_fp32_block_matches_team_gms_unfused_atom_transformer():
@@ -398,7 +513,9 @@ def test_the_fp32_block_matches_team_gms_unfused_atom_transformer():
         pytest.skip("team-gm's unfused path needs a flash backend")
     torch.manual_seed(13)
     a, b, s = 3, 2, 300
-    model = tg.SWAAtomTransformer(tg.SWAAtomTransformer.Config(n_block=3, fused_triton=False)).to(DEV)
+    model = tg.SWAAtomTransformer(
+        tg.SWAAtomTransformer.Config(n_block=3, fused_triton=False)
+    ).to(DEV)
     with torch.no_grad():
         for blk in model.blocks:
             blk.adaln_modulation[1].weight.normal_(std=0.05)
@@ -409,8 +526,20 @@ def test_the_fp32_block_matches_team_gms_unfused_atom_transformer():
         cos, sin, seqused = ap_[0][:b], ap_[1][:b], ap_[2]
         for blk in m.blocks:
             mod = swa_dit_hoist_modulation(c_, blk.adaln_modulation[1].weight)
-            x_ = swa_dit_block(x_, mod, cos, sin, seqused, blk.attn.Wqkv.weight, blk.attn.gate_proj.weight,
-                               blk.attn.out_proj.weight, blk.ffn.w_up.weight, blk.ffn.w_down.weight, b, half_window=HW)
+            x_ = swa_dit_block(
+                x_,
+                mod,
+                cos,
+                sin,
+                seqused,
+                blk.attn.Wqkv.weight,
+                blk.attn.gate_proj.weight,
+                blk.attn.out_proj.weight,
+                blk.ffn.w_up.weight,
+                blk.ffn.w_down.weight,
+                b,
+                half_window=HW,
+            )
         return x_
 
     def unfused(m, x_, c_, ap_):

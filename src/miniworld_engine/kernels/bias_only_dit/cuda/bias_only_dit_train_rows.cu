@@ -843,7 +843,7 @@ __global__ void __launch_bounds__(512) finalize_k(const float* __restrict__ PART
   finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT);
 }
 
-// pair_bias_bwd + finalize in ONE launch (MINIWORLD_BIAS_ONLY_DIT_BWD_PBFIN): the persistent pair_bias_bwd blocks (grid <= the
+// pair_bias_bwd + finalize in ONE launch (settings.bias_only_dit_bwd_pbfin): the persistent pair_bias_bwd blocks (grid <= the
 // resident blocks, so all are on the GPU at once) write their dWf partials, meet at a grid barrier (BAR[0]: thread 0 of every block
 // __threadfence + atomicAdd, then spins until gridDim.x arrived; __threadfence; __syncthreads), and then take finalize's 248 jobs in
 // turn (job = blockIdx.x + k gridDim.x; the partials read through L2, __ldcg, 16 rows in flight per thread: half finalize_k's
@@ -876,7 +876,7 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_fin_k(const bf* __r
 }
 
 // ------------------------------------------------------------------------------------------------------------ weight pack
-// The bf16 training step's weight pack (integrations/bias_only_dit_train.py _pack, MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=1) in ONE
+// The bf16 training step's weight pack (integrations/bias_only_dit_train.py _pack, settings.bias_only_dit_train_pack1=1) in ONE
 // launch: up to 48 segments, each dst = src (o scale[i % period], broadcast over the rows: the folded LayerNorm weights) with bf16
 // or fp32 on either side and on the scale (fp32 arithmetic, RN to the destination: the torch casts / products bit for bit), or
 // dst = (src o scale[col])^T of a [rows, cols] matrix, the scale optional (32 x 32 tiles through shared memory: the K-major weights
@@ -997,7 +997,6 @@ template <typename K>
 unsigned grid(K kernel, int64_t M, int rows_per_block = WPB, size_t smem = 0) {
   int per = 1;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, kernel, WPB * 32, smem);
-  if (const char* e = std::getenv("MINIWORLD_BO_ROWS_BLOCKS_PER_SM")) per = std::min(per, std::atoi(e));   // experiments
   return (unsigned)std::max<int64_t>(1, std::min<int64_t>((M + rows_per_block - 1) / rows_per_block, (int64_t)std::max(per, 1) * nsm()));
 }
 

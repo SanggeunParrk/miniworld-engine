@@ -18,7 +18,7 @@
 #              (cssb: /home/psk6950/ext/uplifting-biomolecular-modeling). FPF_OPM_CFG is unset for the row.
 #   anthropic_hybrid  integrations/anthropic_msa.py: upstream msa_opm prologue + cuBLAS + OUR
 #              csrc/opm_epilogue.cu. Needs OPT_CORE_DIR=$MINIWORLD_ANTHROPIC_ROOT/common/opt_core (the
-#              same tree). The harness pins MINIWORLD_OPM_TRAIN=0 for both anthropic labels
+#              same tree). The harness pins settings.opm_train=0 for both anthropic labels
 #              (opm_train would otherwise serve implementation="anthropic" first) and masks
 #              OPT_CORE_DIR for every non-anthropic row.
 #   cuequivariance ships no OuterProductMean kernel: not offered (explicitly `unsupported`).

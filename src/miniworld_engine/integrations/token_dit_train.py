@@ -22,7 +22,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
 fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair 128 /
 transition n = 2) at a head layout of LAYOUTS (16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; bf16 and fp32 alike),
 B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples over as its [B, L] row),
-LayerNorm eps 1e-5. Anything else keeps the module path. MINIWORLD_TOKEN_DIT_TRAIN=0 turns it off.
+LayerNorm eps 1e-5. Anything else keeps the module path. settings.token_dit_train=0 turns it off.
 
 Any A and L: the kernels tile L by 128 and pair the samples, so ``block`` pads L to the next multiple of 128 and A to an even
 count -- zero single / cond rows and samples, zero pair rows and columns, the padded keys masked out -- and returns the first
@@ -41,7 +41,6 @@ LayerNorm are computed per block rather than once per stack.
 from __future__ import annotations
 
 import contextlib
-import os
 
 import torch
 
@@ -49,49 +48,99 @@ from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 
-D, DC, DP, H, DH = 768, 384, 128, 16, 48          # the default layout; serves() takes LAYOUTS
+D, DC, DP, H, DH = 768, 384, 128, 16, 48  # the default layout; serves() takes LAYOUTS
 #: (heads, d_single): 16 x 48, 24 x 32, 12 x 64 and 16 x 64 (d 1024), bf16 and fp32 (the TF32 cores are built per layout too)
 LAYOUTS = ((16, 768), (24, 768), (12, 768), (16, 1024))
-QM = 128                                          # the attention kernels' query / key tile: L is padded to a multiple of it
+QM = 128  # the attention kernels' query / key tile: L is padded to a multiple of it
 EPS = 1e-5
 BF = torch.bfloat16
 
-ATT = ("ada_ln_in.ln_cond.weight", "ada_ln_in.to_scale.weight", "ada_ln_in.to_scale.bias", "ada_ln_in.to_bias.weight",
-       "to_scale.weight", "to_scale.bias", "to_query.weight", "to_query.bias", "to_key.weight", "to_value.weight",
-       "to_gate.weight", "to_out.weight", "ln_pair.weight", "to_bias.weight")
+ATT = (
+    "ada_ln_in.ln_cond.weight",
+    "ada_ln_in.to_scale.weight",
+    "ada_ln_in.to_scale.bias",
+    "ada_ln_in.to_bias.weight",
+    "to_scale.weight",
+    "to_scale.bias",
+    "to_query.weight",
+    "to_query.bias",
+    "to_key.weight",
+    "to_value.weight",
+    "to_gate.weight",
+    "to_out.weight",
+    "ln_pair.weight",
+    "to_bias.weight",
+)
 QKN = ("norm_query.weight", "norm_key.weight")
-TRN = ("ada_ln_in.ln_cond.weight", "ada_ln_in.to_scale.weight", "ada_ln_in.to_scale.bias", "ada_ln_in.to_bias.weight",
-       "to_scale.weight", "to_scale.bias", "expand_a.weight", "expand_b.weight", "squeeze.weight")
+TRN = (
+    "ada_ln_in.ln_cond.weight",
+    "ada_ln_in.to_scale.weight",
+    "ada_ln_in.to_scale.bias",
+    "ada_ln_in.to_bias.weight",
+    "to_scale.weight",
+    "to_scale.bias",
+    "expand_a.weight",
+    "expand_b.weight",
+    "squeeze.weight",
+)
 
 
 def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
-    if os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN", "1") == "0" or not torch.is_grad_enabled():
+    if (not settings.current().token_dit_train) or not torch.is_grad_enabled():
         return False
     if settings.current().engine_backend == "triton":
         return False
     a = module.attention
     # the engine's kernels (TRITON or MINIWORLD resolve to them), as the sm_90 / sm_100 attention cores gate on
     from miniworld_engine.modules.dispatch import KernelBackend
+
     if a._backend != KernelBackend.TRITON:
         return False
-    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+    if not (
+        single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
+    ):
         return False
-    if single.dtype not in (BF, torch.float32) or compute_dtype not in (None, BF, torch.float32):
+    if single.dtype not in (BF, torch.float32) or compute_dtype not in (
+        None,
+        BF,
+        torch.float32,
+    ):
         return False
-    if not any(t.requires_grad for t in (single, cond, pair)) and not any(p.requires_grad for p in module.parameters()):
+    if not any(t.requires_grad for t in (single, cond, pair)) and not any(
+        p.requires_grad for p in module.parameters()
+    ):
         return False
     # any A and L >= 1: ``block`` pads L to a multiple of 128 and A to an even count (the kernels' tiles / sample pairs)
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[0] < 1 or single.shape[2] < 1:
+    if (
+        single.ndim != 4
+        or single.shape[1] != 1
+        or single.shape[0] < 1
+        or single.shape[2] < 1
+    ):
         return False
     d = single.shape[-1]
-    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, single.shape[2], single.shape[2], DP):
+    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
+        1,
+        single.shape[2],
+        single.shape[2],
+        DP,
+    ):
         return False
-    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[
+        0
+    ] != 2 * d:
         return False
-    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])):
+    if mask is not None and not (
+        mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])
+    ):
         return False
-    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, module.transition.ada_ln_in.ln_in,
-             module.transition.ada_ln_in.ln_cond)
+    norms = (
+        a.ada_ln_in.ln_in,
+        a.ada_ln_in.ln_cond,
+        a.ln_pair,
+        module.transition.ada_ln_in.ln_in,
+        module.transition.ada_ln_in.ln_cond,
+    )
     return all(n.eps == EPS for n in norms)
 
 
@@ -119,7 +168,6 @@ def _tf32(on: bool):
         torch.backends.cuda.matmul.allow_tf32 = old
 
 
-
 def _mm32(a, b):
     """a @ b with an fp32 result (weight gradients): bf16 operands accumulate into fp32 output, fp32 ones already are.
 
@@ -138,7 +186,9 @@ def _mm32(a, b):
             s *= 2
     if s == 1:
         return torch.mm(a, b)
-    return torch.bmm(a.t().reshape(s, m // s, n).transpose(1, 2), b.reshape(s, m // s, k)).sum(0)
+    return torch.bmm(
+        a.t().reshape(s, m // s, n).transpose(1, 2), b.reshape(s, m // s, k)
+    ).sum(0)
 
 
 _PACKS: dict = {}
@@ -157,24 +207,68 @@ def _pack(P, qk, dev, at):
     g = lambda n: P[n]
     D = g("attention.to_out.weight").shape[0]
     DH = D // g("attention.to_bias.weight").shape[0]
-    w1, w2 = _f32(g("attention.ada_ln_in.ln_cond.weight")), _f32(g("transition.ada_ln_in.ln_cond.weight"))
-    Wraw = torch.cat([_f32(g("attention.ada_ln_in.to_scale.weight")), _f32(g("attention.ada_ln_in.to_bias.weight")),
-                      _f32(g("transition.ada_ln_in.to_scale.weight")), _f32(g("transition.ada_ln_in.to_bias.weight"))])
+    w1, w2 = (
+        _f32(g("attention.ada_ln_in.ln_cond.weight")),
+        _f32(g("transition.ada_ln_in.ln_cond.weight")),
+    )
+    Wraw = torch.cat(
+        [
+            _f32(g("attention.ada_ln_in.to_scale.weight")),
+            _f32(g("attention.ada_ln_in.to_bias.weight")),
+            _f32(g("transition.ada_ln_in.to_scale.weight")),
+            _f32(g("transition.ada_ln_in.to_bias.weight")),
+        ]
+    )
     wp, Wb = _f32(g("attention.ln_pair.weight")), _f32(g("attention.to_bias.weight"))
     Wf = Wb * wp
     W = {
-        "w1": w1, "w2": w2, "Wraw": Wraw, "Wn": torch.cat([Wraw[:2 * D] * w1, Wraw[2 * D:] * w2]).to(at),   # cond-LN weights folded
-        "Wg": torch.cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]).detach().to(at),
-        "bs1": _f32(g("attention.ada_ln_in.to_scale.bias")), "bs2": _f32(g("transition.ada_ln_in.to_scale.bias")),
-        "bg1": _f32(g("attention.to_scale.bias")), "bg2": _f32(g("transition.to_scale.bias")),
-        "Wqkvg": torch.cat([g("attention.to_query.weight"), g("attention.to_key.weight"), g("attention.to_value.weight"),
-                         g("attention.to_gate.weight")]).detach().to(at),
-        "bqkvg": torch.cat([g("attention.to_query.bias").detach().float(), torch.zeros(3 * D, device=dev)]).to(at),
-        "nq": _f32(g("attention.norm_query.weight")) if qk else torch.ones(DH, device=dev),
-        "nk": _f32(g("attention.norm_key.weight")) if qk else torch.ones(DH, device=dev),
-        "wp": wp, "Wb": Wb, "Wf": Wf, "Wf_at": Wf.to(at),
+        "w1": w1,
+        "w2": w2,
+        "Wraw": Wraw,
+        "Wn": torch.cat([Wraw[: 2 * D] * w1, Wraw[2 * D :] * w2]).to(
+            at
+        ),  # cond-LN weights folded
+        "Wg": torch.cat(
+            [g("attention.to_scale.weight"), g("transition.to_scale.weight")]
+        )
+        .detach()
+        .to(at),
+        "bs1": _f32(g("attention.ada_ln_in.to_scale.bias")),
+        "bs2": _f32(g("transition.ada_ln_in.to_scale.bias")),
+        "bg1": _f32(g("attention.to_scale.bias")),
+        "bg2": _f32(g("transition.to_scale.bias")),
+        "Wqkvg": torch.cat(
+            [
+                g("attention.to_query.weight"),
+                g("attention.to_key.weight"),
+                g("attention.to_value.weight"),
+                g("attention.to_gate.weight"),
+            ]
+        )
+        .detach()
+        .to(at),
+        "bqkvg": torch.cat(
+            [
+                g("attention.to_query.bias").detach().float(),
+                torch.zeros(3 * D, device=dev),
+            ]
+        ).to(at),
+        "nq": _f32(g("attention.norm_query.weight"))
+        if qk
+        else torch.ones(DH, device=dev),
+        "nk": _f32(g("attention.norm_key.weight"))
+        if qk
+        else torch.ones(DH, device=dev),
+        "wp": wp,
+        "Wb": Wb,
+        "Wf": Wf,
+        "Wf_at": Wf.to(at),
         "Wo": g("attention.to_out.weight").detach().to(at).contiguous(),
-        "Wab": torch.cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]).detach().to(at),
+        "Wab": torch.cat(
+            [g("transition.expand_a.weight"), g("transition.expand_b.weight")]
+        )
+        .detach()
+        .to(at),
         "Wsq": g("transition.squeeze.weight").detach().to(at).contiguous(),
     }
     if slot is not None:
@@ -188,23 +282,35 @@ _GSW: dict = {}
 
 def _swiglu_gemm(xt, wab):
     """The sm_100a expand GEMM with the SwiGLU epilogue that also writes [a | b] (``gemm_swiglu2_sm100.cu -DSAVE_AB``) where
-    it applies (bf16, B200, M >= its row threshold, MINIWORLD_TOKEN_DIT_GEMM_SWIGLU); None keeps cuBLAS + the SwiGLU rows."""
+    it applies (bf16, B200, M >= its row threshold, settings.token_dit_gemm_swiglu); None keeps cuBLAS + the SwiGLU rows."""
     from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+
     if not gemm_swiglu.supported(xt, wab):
         return None
-    idx = xt.device.index if xt.device.index is not None else torch.cuda.current_device()
+    idx = (
+        xt.device.index if xt.device.index is not None else torch.cuda.current_device()
+    )
     if idx not in _GSW:
         try:
-            _GSW[idx] = gemm_swiglu.GemmSwiglu(idx, K=wab.shape[1], H=wab.shape[0] // 2, save_ab=True)
-        except Exception as exc:         # a failed build keeps cuBLAS + the row pass
+            _GSW[idx] = gemm_swiglu.GemmSwiglu(
+                idx, K=wab.shape[1], H=wab.shape[0] // 2, save_ab=True
+            )
+        except Exception as exc:  # a failed build keeps cuBLAS + the row pass
             import warnings
-            warnings.warn(f"sm100 SwiGLU GEMM unavailable, keeping cuBLAS: {exc!r}", RuntimeWarning, stacklevel=2)
+
+            warnings.warn(
+                f"sm100 SwiGLU GEMM unavailable, keeping cuBLAS: {exc!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             _GSW[idx] = None
     return _GSW[idx]
 
 
 def _names_for(qk):
-    return ["attention." + n for n in ATT + (QKN if qk else ())] + ["transition." + n for n in TRN]
+    return ["attention." + n for n in ATT + (QKN if qk else ())] + [
+        "transition." + n for n in TRN
+    ]
 
 
 def _own_cond(cond, fp32) -> bool:
@@ -219,12 +325,39 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H):
     A, _, L, D = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32, at = torch.float32, (torch.float32 if fp32 else BF)
-    return [e((M, D), dtype=f32), e((M, DC), dtype=at), e((0 if _own_cond(cond, fp32) else M, DC), dtype=at), e((M, 2), dtype=f32),
-            e((M, 4 * D), dtype=at), e((M, 2 * D), dtype=at), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at),
-            e((M, 2 * H), dtype=f32), *((e((M, D), dtype=at), e((M, D), dtype=at), e((0 if fp32 else M, D), dtype=at)) if qk else ()),
-            e((H, L, L), dtype=at), e((M, D), dtype=f32), e((A, H, L), dtype=f32), e((M, D), dtype=at), e((M, D), dtype=at),
-            e((M, D), dtype=f32), e((M, 2), dtype=f32), e((M, D), dtype=at), e((M, 4 * D), dtype=at), e((M, D), dtype=at),
-            e((0 if fp32 else R, DP), dtype=at), e((R, 2), dtype=f32)]
+    return [
+        e((M, D), dtype=f32),
+        e((M, DC), dtype=at),
+        e((0 if _own_cond(cond, fp32) else M, DC), dtype=at),
+        e((M, 2), dtype=f32),
+        e((M, 4 * D), dtype=at),
+        e((M, 2 * D), dtype=at),
+        e((M, 2), dtype=f32),
+        e((M, D), dtype=at),
+        e((M, 4 * D), dtype=at),
+        e((M, 2 * H), dtype=f32),
+        *(
+            (
+                e((M, D), dtype=at),
+                e((M, D), dtype=at),
+                e((0 if fp32 else M, D), dtype=at),
+            )
+            if qk
+            else ()
+        ),
+        e((H, L, L), dtype=at),
+        e((M, D), dtype=f32),
+        e((A, H, L), dtype=f32),
+        e((M, D), dtype=at),
+        e((M, D), dtype=at),
+        e((M, D), dtype=f32),
+        e((M, 2), dtype=f32),
+        e((M, D), dtype=at),
+        e((M, 4 * D), dtype=at),
+        e((M, D), dtype=at),
+        e((0 if fp32 else R, DP), dtype=at),
+        e((R, 2), dtype=f32),
+    ]
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
@@ -232,8 +365,18 @@ def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads):
 
 
 @opaque(fake=_fwd_fake, name="token_dit_train_sm100_fwd")
-def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
-         qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
+def _fwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    qk: bool,
+    eq: float,
+    ek: float,
+    fp32: bool,
+    heads: int,
+) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
     tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16. Autocast off: the precision is
     ``fp32``'s, and an enclosing bf16 autocast would otherwise turn the fp32 path's GEMM outputs bf16."""
@@ -245,6 +388,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+
     A, _, L, D = single.shape
     DH = D // H
     T = ext(D, DH)
@@ -252,58 +396,80 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     P = dict(zip(names, params, strict=False))
     M, R, dev = A * L, L * L, single.device
     at = torch.float32 if fp32 else BF
-    x = torch.empty(M, D, device=dev)                                          # the fp32 residual, written by adaln_a
+    x = torch.empty(M, D, device=dev)  # the fp32 residual, written by adaln_a
     c2 = cond.reshape(M, DC).contiguous()
     own_c = _own_cond(cond, fp32)
-    chat = torch.empty(M, DC, device=dev, dtype=at); cbf = None if own_c else torch.empty_like(chat)
+    chat = torch.empty(M, DC, device=dev, dtype=at)
+    cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
     T.cond_prep(c2, chat, cbf, cst, EPS)
     W = _pack(P, qk, dev, at)
     Wn, Wg = W["Wn"], W["Wg"]
-    G = torch.mm(chat, Wn.t())                                                  # [M, 4D] s1 | sh1 | s2 | sh2
-    Gg = torch.mm(c2 if own_c else cbf, Wg.t())                                 # [M, 2D] gate1 | gate2
+    G = torch.mm(chat, Wn.t())  # [M, 4D] s1 | sh1 | s2 | sh2
+    Gg = torch.mm(c2 if own_c else cbf, Wg.t())  # [M, 2D] gate1 | gate2
     bs1, bs2, bg1, bg2 = W["bs1"], W["bs2"], W["bg1"], W["bg2"]
-    xa = torch.empty(M, D, device=dev, dtype=at); xst = torch.empty(M, 2, device=dev)
-    T.adaln_a(single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x)  # reads the input, writes x on the way
+    xa = torch.empty(M, D, device=dev, dtype=at)
+    xst = torch.empty(M, 2, device=dev)
+    T.adaln_a(
+        single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x
+    )  # reads the input, writes x on the way
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
     qkvg = torch.addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
-    if qk:                                     # fp32: v is not copied, the core reads it as a column view of qkvg
-        qn = torch.empty(M, D, device=dev, dtype=at); kn = torch.empty_like(qn); vc = None if fp32 else torch.empty_like(qn)
+    if qk:  # fp32: v is not copied, the core reads it as a column view of qkvg
+        qn = torch.empty(M, D, device=dev, dtype=at)
+        kn = torch.empty_like(qn)
+        vc = None if fp32 else torch.empty_like(qn)
         T.qknorm(qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk)
         vsave = vc if vc is not None else qkvg.new_empty(0, D)
         if vc is None:
-            vc = qkvg[:, 2 * D:3 * D]
-    else:                                      # the core reads q / k / v as column views of qkvg: no copies
-        qn, kn, vc = (qkvg[:, i * D:(i + 1) * D] for i in range(3))
+            vc = qkvg[:, 2 * D : 3 * D]
+    else:  # the core reads q / k / v as column views of qkvg: no copies
+        qn, kn, vc = (qkvg[:, i * D : (i + 1) * D] for i in range(3))
     p2 = pair.reshape(R, DP)
     pst = torch.empty(R, 2, device=dev)
-    if fp32:                                   # LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
+    if fp32:  # LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
         ph = pair.new_empty(0, DP, dtype=at)
         bias = torch.empty(H, L, L, device=dev)
-        T.pair_bias(p2, W["Wf"], None if mask is None else mask.reshape(L).to(torch.bool).contiguous(), bias, pst, L, EPS)
+        T.pair_bias(
+            p2,
+            W["Wf"],
+            None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
+            bias,
+            pst,
+            L,
+            EPS,
+        )
     else:
         ph = torch.empty(R, DP, device=dev, dtype=at)
         T.pair_ln(p2, ph, pst, EPS)
-        bias = torch.mm(W["Wf_at"], ph.t()).view(H, L, L)                       # head-major, natural units; Wf = Wb diag(wp)
+        bias = torch.mm(W["Wf_at"], ph.t()).view(
+            H, L, L
+        )  # head-major, natural units; Wf = Wb diag(wp)
         if mask is not None:
             bias.masked_fill_(~mask.reshape(1, 1, L), float("-inf"))
-    O, LSE = sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH) if fp32 else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+    O, LSE = (
+        sm100.forward_tf32(qn, kn, vc, bias, A, L, H, DH)
+        if fp32
+        else sm100.forward(qn, kn, vc, bias, A, L, H, DH)
+    )
     og = torch.empty(M, D, device=dev, dtype=at)
     T.gate_o(O, qkvg, og)
     Wo = W["Wo"]
     y = torch.mm(og, Wo.t())
-    x1 = torch.empty_like(x); xt = torch.empty(M, D, device=dev, dtype=at); x1st = torch.empty(M, 2, device=dev)
+    x1 = torch.empty_like(x)
+    xt = torch.empty(M, D, device=dev, dtype=at)
+    x1st = torch.empty(M, 2, device=dev)
     T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, EPS)
     Wab = W["Wab"]
     h = torch.empty(M, 2 * D, device=dev, dtype=at)
     gsw = _swiglu_gemm(xt, Wab)
-    if gsw is not None:                                                         # expand GEMM + SwiGLU, a | b saved on the way
+    if gsw is not None:  # expand GEMM + SwiGLU, a | b saved on the way
         ab = torch.empty(M, 4 * D, device=dev, dtype=at)
         gsw(xt, Wab, h, ab)
     else:
-        ab = torch.mm(xt, Wab.t())                                              # [M, 2 * 2D] a | b
+        ab = torch.mm(xt, Wab.t())  # [M, 2 * 2D] a | b
         rows.swiglu_rows(ab, h)
     Wsq = W["Wsq"]
     z = torch.mm(h, Wsq.t())
@@ -312,38 +478,125 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     # custom-op outputs may not alias each other: without QK-norm q / k / v are views of qkvg -- not outputs, recovered in _bwd
     qkv_out = [qn, kn, vsave] if qk else []
     cbf = cbf if cbf is not None else c2.new_empty(0, DC, dtype=at)
-    return [out.view(single.shape), x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, *qkv_out, bias, O, LSE, og, y, x1, x1st, xt,
-            ab, z, ph, pst]
+    return [
+        out.view(single.shape),
+        x,
+        chat,
+        cbf,
+        cst,
+        G,
+        Gg,
+        xst,
+        xa,
+        qkvg,
+        rqk,
+        *qkv_out,
+        bias,
+        O,
+        LSE,
+        og,
+        y,
+        x1,
+        x1st,
+        xt,
+        ab,
+        z,
+        ph,
+        pst,
+    ]
 
 
 def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads):
-    return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(p) for p in params)]
+    return [
+        torch.empty_like(single),
+        torch.empty_like(cond),
+        torch.empty_like(pair),
+        *(torch.empty_like(p) for p in params),
+    ]
 
 
 @opaque(fake=_bwd_fake, name="token_dit_train_sm100_bwd")
-def _bwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, params: list[torch.Tensor],
-         saved: list[torch.Tensor], dout: torch.Tensor, qk: bool, eq: float, ek: float, fp32: bool, heads: int) -> list[torch.Tensor]:
+def _bwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    params: list[torch.Tensor],
+    saved: list[torch.Tensor],
+    dout: torch.Tensor,
+    qk: bool,
+    eq: float,
+    ek: float,
+    fp32: bool,
+    heads: int,
+) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes (autocast off, as ``_fwd``)."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
-        return _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads)
+        return _bwd_body(
+            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads
+        )
 
 
 def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H):
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
     from miniworld_engine.kernels.conditioned_transition.cuda.train import ext
+
     D = single.shape[-1]
     DH = D // H
     T = ext(D, DH)
-    if not qk:                                 # the forward's q / k / v: column views of qkvg (see _fwd_body)
-        saved = [*saved[:10], *(saved[8][:, i * D:(i + 1) * D] for i in range(3)), *saved[10:]]   # after qkvg (8), rqk (9)
-    (x, chat, cbf, cst, G, Gg, xst, xa, qkvg, rqk, qn, kn, vc, bias, O, LSE, og, y, x1, x1st, xt, ab, z, ph, pst) = saved
-    if vc.numel() == 0:                        # fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
-        vc = qkvg[:, 2 * D:3 * D]
+    if not qk:  # the forward's q / k / v: column views of qkvg (see _fwd_body)
+        saved = [
+            *saved[:10],
+            *(saved[8][:, i * D : (i + 1) * D] for i in range(3)),
+            *saved[10:],
+        ]  # after qkvg (8), rqk (9)
+    (
+        x,
+        chat,
+        cbf,
+        cst,
+        G,
+        Gg,
+        xst,
+        xa,
+        qkvg,
+        rqk,
+        qn,
+        kn,
+        vc,
+        bias,
+        O,
+        LSE,
+        og,
+        y,
+        x1,
+        x1st,
+        xt,
+        ab,
+        z,
+        ph,
+        pst,
+    ) = saved
+    if (
+        vc.numel() == 0
+    ):  # fp32 + QK-norm: v as the forward's core read it, a column view of qkvg
+        vc = qkvg[:, 2 * D : 3 * D]
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
     W = _pack(dict(zip(names, params, strict=False)), qk, single.device, at)
-    Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = W["Wn"], W["Wraw"], W["Wg"], W["Wqkvg"], W["Wo"], W["Wab"], W["Wsq"], W["Wf"]
-    nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb"))
+    Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = (
+        W["Wn"],
+        W["Wraw"],
+        W["Wg"],
+        W["Wqkvg"],
+        W["Wo"],
+        W["Wab"],
+        W["Wsq"],
+        W["Wf"],
+    )
+    nq, nk, bs1, bs2, bg1, bg2, w1, w2, wp, Wb = (
+        W[k] for k in ("nq", "nk", "bs1", "bs2", "bg1", "bg2", "w1", "w2", "wp", "Wb")
+    )
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     sdt, cdt, pdtype = single.dtype, cond.dtype, pair.dtype
@@ -351,81 +604,131 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dout = dout.reshape(M, D).to(sdt).contiguous()
     # per-block column sums: bg2 bs2 bg1 bs1 bq | dwq dwk (per head); rows: the row kernels' block count (T.part_rows)
     allp = torch.empty(T.part_rows(M, fp32), 7 * D, device=dev)
-    part = [allp[:, i * D:(i + 1) * D] for i in range(5)]
-    pwqk = allp[:, 5 * D:]
-    dG = torch.empty(M, 4 * D, device=dev, dtype=at); dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
+    part = [allp[:, i * D : (i + 1) * D] for i in range(5)]
+    pwqk = allp[:, 5 * D :]
+    dG = torch.empty(M, 4 * D, device=dev, dtype=at)
+    dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = torch.mm(dz, Wsq)                                                      # [M, 2D]
-    dab = torch.empty_like(ab); h = torch.empty_like(dh)
+    dh = torch.mm(dz, Wsq)  # [M, 2D]
+    dab = torch.empty_like(ab)
+    h = torch.empty_like(dh)
     T.swiglu_bwd(dh, ab, dab, h)
     dWsq = _mm32(dz.t(), h)
     # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing)
-    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D:]) if fp32 else torch.mm(dab, Wab)
+    dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if fp32 else torch.mm(dab, Wab)
     dWab = _mm32(dab.t(), xt)
-    dx1 = torch.empty(M, D, device=dev); dy = torch.empty(M, D, device=dev, dtype=at)
-    T.res_adaln_b_bwd(dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2])
+    dx1 = torch.empty(M, D, device=dev)
+    dy = torch.empty(M, D, device=dev, dtype=at)
+    T.res_adaln_b_bwd(
+        dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2]
+    )
     dog = torch.mm(dy, Wo)
     dWo = _mm32(dy.t(), og)
-    dob = torch.empty(M, D, device=dev, dtype=at); dd = torch.empty(A, H, L, device=dev)
+    dob = torch.empty(M, D, device=dev, dtype=at)
+    dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
     # fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
-    DQ, DK, DV, DB = (sm100.backward_tf32(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH, dq=dqkvg[:, :D], dk=dqkvg[:, D:2 * D],
-                                          dv=dqkvg[:, 2 * D:3 * D]) if fp32
-                      else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH))
+    DQ, DK, DV, DB = (
+        sm100.backward_tf32(
+            qn,
+            kn,
+            vc,
+            dob,
+            bias,
+            LSE,
+            dd,
+            A,
+            L,
+            H,
+            DH,
+            dq=dqkvg[:, :D],
+            dk=dqkvg[:, D : 2 * D],
+            dv=dqkvg[:, 2 * D : 3 * D],
+        )
+        if fp32
+        else sm100.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH)
+    )
     T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
-    dxa = torch.mm(dqkvg, Wqkvg, out=dG[:, D:2 * D]) if fp32 else torch.mm(dqkvg, Wqkvg)
+    dxa = (
+        torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if fp32 else torch.mm(dqkvg, Wqkvg)
+    )
     dWqkvg = _mm32(dqkvg.t(), xa)
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
-    sums = allp.sum(0) if qk else allp[:, :5 * D].sum(0)                        # one reduction for every column sum
-    pb = sums[:5 * D].view(5, D)
-    dwqk = sums[5 * D:].view(2, H, DH).sum(1).reshape(-1) if qk else torch.zeros(2 * DH, device=dev)
+    sums = (
+        allp.sum(0) if qk else allp[:, : 5 * D].sum(0)
+    )  # one reduction for every column sum
+    pb = sums[: 5 * D].view(5, D)
+    dwqk = (
+        sums[5 * D :].view(2, H, DH).sum(1).reshape(-1)
+        if qk
+        else torch.zeros(2 * DH, device=dev)
+    )
     dchat = torch.mm(dG, Wn)
     dWn = _mm32(dG.t(), chat)
     dcg = torch.mm(dGg, Wg)
     dWg = _mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
     dc = torch.empty(M, DC, device=dev, dtype=cdt)
     T.cond_bwd(dchat, dcg, c2, cst, dc)
-    dWu = torch.empty_like(dWn); dw12 = torch.zeros(2, DC, device=dev)
-    Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D:(i + 1) * D] for i in range(4))
+    dWu = torch.empty_like(dWn)
+    dw12 = torch.zeros(2, DC, device=dev)
+    Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
     dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
-    if fp32:                                   # LN(pair) recomputed: dpair and the dWf partials in one pass
+    if fp32:  # LN(pair) recomputed: dpair and the dWf partials in one pass
         pwf = torch.empty(T.pair_grid(R), H * DP, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, DP)
     else:
-        dbv = DB.view(H, R).to(at)                                              # masked key columns are 0 (P = 0)
-        dWf = _mm32(dbv, ph)                                                    # [H, DP]
-        dph = _mm32(dbv.t(), Wf.to(at))                                         # [R, DP]
+        dbv = DB.view(H, R).to(at)  # masked key columns are 0 (P = 0)
+        dWf = _mm32(dbv, ph)  # [H, DP]
+        dph = _mm32(dbv.t(), Wf.to(at))  # [R, DP]
         T.pair_ln_bwd(dph, p2, pst, dpair)
     dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
     grads = {
-        "attention.ada_ln_in.ln_cond.weight": dw12[0], "attention.ada_ln_in.to_scale.weight": dWs1,
-        "attention.ada_ln_in.to_scale.bias": pb[3], "attention.ada_ln_in.to_bias.weight": dWb1,
-        "attention.to_scale.weight": dWg[:D], "attention.to_scale.bias": pb[2],
-        "attention.to_query.weight": dWqkvg[:D], "attention.to_query.bias": pb[4], "attention.to_key.weight": dWqkvg[D:2 * D],
-        "attention.to_value.weight": dWqkvg[2 * D:3 * D], "attention.to_gate.weight": dWqkvg[3 * D:],
-        "attention.norm_query.weight": dwqk[:DH], "attention.norm_key.weight": dwqk[DH:],
-        "attention.to_out.weight": dWo, "attention.ln_pair.weight": (dWf * Wb).sum(0), "attention.to_bias.weight": dWf * wp,
-        "transition.ada_ln_in.ln_cond.weight": dw12[1], "transition.ada_ln_in.to_scale.weight": dWs2,
-        "transition.ada_ln_in.to_scale.bias": pb[1], "transition.ada_ln_in.to_bias.weight": dWb2,
-        "transition.to_scale.weight": dWg[D:], "transition.to_scale.bias": pb[0],
-        "transition.expand_a.weight": dWab[:2 * D], "transition.expand_b.weight": dWab[2 * D:], "transition.squeeze.weight": dWsq,
+        "attention.ada_ln_in.ln_cond.weight": dw12[0],
+        "attention.ada_ln_in.to_scale.weight": dWs1,
+        "attention.ada_ln_in.to_scale.bias": pb[3],
+        "attention.ada_ln_in.to_bias.weight": dWb1,
+        "attention.to_scale.weight": dWg[:D],
+        "attention.to_scale.bias": pb[2],
+        "attention.to_query.weight": dWqkvg[:D],
+        "attention.to_query.bias": pb[4],
+        "attention.to_key.weight": dWqkvg[D : 2 * D],
+        "attention.to_value.weight": dWqkvg[2 * D : 3 * D],
+        "attention.to_gate.weight": dWqkvg[3 * D :],
+        "attention.norm_query.weight": dwqk[:DH],
+        "attention.norm_key.weight": dwqk[DH:],
+        "attention.to_out.weight": dWo,
+        "attention.ln_pair.weight": (dWf * Wb).sum(0),
+        "attention.to_bias.weight": dWf * wp,
+        "transition.ada_ln_in.ln_cond.weight": dw12[1],
+        "transition.ada_ln_in.to_scale.weight": dWs2,
+        "transition.ada_ln_in.to_scale.bias": pb[1],
+        "transition.ada_ln_in.to_bias.weight": dWb2,
+        "transition.to_scale.weight": dWg[D:],
+        "transition.to_scale.bias": pb[0],
+        "transition.expand_a.weight": dWab[: 2 * D],
+        "transition.expand_b.weight": dWab[2 * D :],
+        "transition.squeeze.weight": dWsq,
     }
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
     # its own tensor in the parameter's dtype -- one multi-tensor copy kernel for all of them (23 copies were ~45 us)
     outs = [torch.empty(p.shape, device=dev, dtype=p.dtype) for p in params]
-    torch._foreach_copy_(outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)])
+    torch._foreach_copy_(
+        outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
+    )
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), *outs]
 
 
 class _Block(torch.autograd.Function):
     @staticmethod
     def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, *params):
-        out, *saved = _fwd(single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads)
+        out, *saved = _fwd(
+            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads
+        )
         ctx.save_for_backward(single, cond, pair, *params, *saved)
         ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads)
         return out
@@ -435,9 +738,33 @@ class _Block(torch.autograd.Function):
         mask, qk, eq, ek, fp32, npar, heads = ctx.meta
         vals = ctx.saved_tensors
         single, cond, pair = vals[:3]
-        params, saved = list(vals[3:3 + npar]), list(vals[3 + npar:])
-        dx, dc, dpair, *pg = _bwd(single, cond, pair, mask, params, saved, dout.contiguous(), qk, eq, ek, fp32, heads)
-        return (dx, dc, dpair, None, None, None, None, None, None, *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)))
+        params, saved = list(vals[3 : 3 + npar]), list(vals[3 + npar :])
+        dx, dc, dpair, *pg = _bwd(
+            single,
+            cond,
+            pair,
+            mask,
+            params,
+            saved,
+            dout.contiguous(),
+            qk,
+            eq,
+            ek,
+            fp32,
+            heads,
+        )
+        return (
+            dx,
+            dc,
+            dpair,
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            *(g if ctx.needs_input_grad[9 + i] else None for i, g in enumerate(pg)),
+        )
 
 
 def _pad(single, cond, pair, mask, Ap, Lp):
@@ -449,8 +776,12 @@ def _pad(single, cond, pair, mask, Ap, Lp):
     rows = (0, 0, 0, Lp - L, 0, 0, 0, Ap - A)
     if mask is None:
         mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
-    return (F.pad(single, rows), F.pad(cond, rows), F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)),
-            F.pad(mask.to(torch.bool), (0, Lp - L), value=False))
+    return (
+        F.pad(single, rows),
+        F.pad(cond, rows),
+        F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)),
+        F.pad(mask.to(torch.bool), (0, Lp - L), value=False),
+    )
 
 
 def block(module, single, cond, pair, mask=None, compute_dtype=None):
@@ -467,8 +798,18 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     padded = (Ap, Lp) != (A, L)
     if padded:
         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
-    out = _Block.apply(single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head),
-                       *[module.get_parameter(n) for n in _names_for(qk)])
+    out = _Block.apply(
+        single,
+        cond,
+        pair.contiguous(),
+        mask,
+        qk,
+        eq,
+        ek,
+        fp32,
+        int(a.n_head),
+        *[module.get_parameter(n) for n in _names_for(qk)],
+    )
     return out[:A, :, :L] if padded else out
 
 

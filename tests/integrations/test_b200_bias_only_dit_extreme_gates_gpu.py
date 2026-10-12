@@ -12,6 +12,7 @@ import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit_train as T
@@ -24,7 +25,26 @@ pytestmark = [
 ]
 
 F64 = torch.float64
-GVALS = (0.0, -20.0, -80.0, -87.0, -87.5, -88.0, -88.5, -88.7, -89.0, -90.0, -100.0, -200.0, -1e4, 80.0, 88.5, 89.0, 100.0, 1e4)
+GVALS = (
+    0.0,
+    -20.0,
+    -80.0,
+    -87.0,
+    -87.5,
+    -88.0,
+    -88.5,
+    -88.7,
+    -89.0,
+    -90.0,
+    -100.0,
+    -200.0,
+    -1e4,
+    80.0,
+    88.5,
+    89.0,
+    100.0,
+    1e4,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -74,9 +94,15 @@ def test_pv_gate_core_with_a_constant_gate(gval):
     out = torch.empty(M, DA, device=dev, dtype=torch.bfloat16)
     T._op("pv", dev, H, dh)(vg[:, :DA], P.view(H * L, L), out, A, g=vg[:, DA:])
     torch.cuda.synchronize()
-    assert torch.isfinite(out).all(), (gval, int(torch.isnan(out).sum()), int(torch.isinf(out).sum()))
+    assert torch.isfinite(out).all(), (
+        gval,
+        int(torch.isnan(out).sum()),
+        int(torch.isinf(out).sum()),
+    )
     v = vg[:, :DA].double().view(A, L, H, dh)
-    want = torch.einsum("hmn,anhd->amhd", P.double(), v).reshape(M, DA) * torch.sigmoid(torch.tensor(gval, dtype=F64, device=dev))
+    want = torch.einsum("hmn,anhd->amhd", P.double(), v).reshape(M, DA) * torch.sigmoid(
+        torch.tensor(gval, dtype=F64, device=dev)
+    )
     err = float((out.double() - want).abs().max())
     assert err <= 1e-2 * float(want.abs().max()) + 1e-30, (gval, err)
 
@@ -84,7 +110,9 @@ def test_pv_gate_core_with_a_constant_gate(gval):
 def saturated_blocks(scale, n_head=16, d_head=None, seed=3):
     """A block whose gate pre-activations reach hundreds: random weights, then every gate / scale projection times ``scale``."""
     torch.manual_seed(seed)
-    ref = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH).cuda()
+    ref = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+    ).cuda()
     with torch.no_grad():
         for name, p in ref.named_parameters():
             if p.ndim == 2:
@@ -100,12 +128,18 @@ def saturated_blocks(scale, n_head=16, d_head=None, seed=3):
 
 def _inputs(L, A, seed=0):
     torch.manual_seed(seed)
-    return (torch.randn(A, 1, L, 768, device="cuda"), torch.randn(A, 1, L, 384, device="cuda"),
-            torch.randn(1, L, L, 128, device="cuda"), torch.randn(A, 1, L, 768, device="cuda"))
+    return (
+        torch.randn(A, 1, L, 768, device="cuda"),
+        torch.randn(A, 1, L, 384, device="cuda"),
+        torch.randn(1, L, L, 128, device="cuda"),
+        torch.randn(A, 1, L, 768, device="cuda"),
+    )
 
 
 def _clone(ref, impl, dtype):
-    m = BiasOnlyDiTBlock(n_head=ref.attention.n_head, d_head=None, implementation=impl).cuda()
+    m = BiasOnlyDiTBlock(
+        n_head=ref.attention.n_head, d_head=None, implementation=impl
+    ).cuda()
     m.load_state_dict(ref.state_dict())
     return m.to(dtype)
 
@@ -121,17 +155,23 @@ def _gate_range(ref, x, c):
 # every switch setting that serves a different kernel set
 TRAIN_ENVS = {
     "bf16-default": ("bf16", {}),
-    "bf16-unfused": ("bf16", {"MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED": "0"}),
-    "bf16-all-fused": ("bf16", {"MINIWORLD_BIAS_ONLY_DIT_BWD_MID": "1"}),
+    "bf16-unfused": ("bf16", {"bias_only_dit_bwd_fused": "0"}),
+    "bf16-all-fused": ("bf16", {"bias_only_dit_bwd_mid": "1"}),
     "fp32-default": ("fp32", {}),
 }
 INFER_ENVS = {
     "bf16-three-kernel": ("bf16", {}),
-    "bf16-12-launch": ("bf16", {"MINIWORLD_BIAS_ONLY_DIT_INF3_BF16": "0"}),
-    "bf16-cond-tables": ("bf16", {"MINIWORLD_BIAS_ONLY_DIT_INF3_BF16": "0", "MINIWORLD_BIAS_ONLY_DIT_COND": "1"}),
-    "bf16-resln": ("bf16", {"MINIWORLD_BIAS_ONLY_DIT_INF3_BF16": "0", "MINIWORLD_BIAS_ONLY_DIT_RESLN": "1"}),
+    "bf16-12-launch": ("bf16", {"bias_only_dit_inf3_bf16": "0"}),
+    "bf16-cond-tables": (
+        "bf16",
+        {"bias_only_dit_inf3_bf16": "0", "bias_only_dit_cond": "1"},
+    ),
+    "bf16-resln": (
+        "bf16",
+        {"bias_only_dit_inf3_bf16": "0", "bias_only_dit_resln": "1"},
+    ),
     "fp32-three-kernel": ("fp32", {}),
-    "fp32-12-launch": ("fp32", {"MINIWORLD_BIAS_ONLY_DIT_INF3": "0"}),
+    "fp32-12-launch": ("fp32", {"bias_only_dit_inf3": "0"}),
 }
 
 
@@ -143,31 +183,51 @@ def test_training_step_with_saturated_gates(monkeypatch, path, L, scale):
     fp64 block within ``BOUND`` of the PyTorch block's error."""
     dt, env = TRAIN_ENVS[path]
     for k, v in env.items():
-        monkeypatch.setenv(k, v)
+        override_setting(monkeypatch, k, v)
     dtype = torch.bfloat16 if dt == "bf16" else torch.float32
     ref = saturated_blocks(scale)
     A = 16
     x, c, p, dy = _inputs(L, A)
     lo, hi = _gate_range(ref, x, c)
-    assert lo < -150 and hi > 150, (lo, hi)                     # the gates really reach saturation (and past -88.7)
-    fast, base, ref64 = _clone(ref, ImplementationType.MINIWORLD, dtype), _clone(ref, ImplementationType.PYTORCH, dtype), \
-        copy.deepcopy(ref).double()
+    assert lo < -150 and hi > 150, (
+        lo,
+        hi,
+    )  # the gates really reach saturation (and past -88.7)
+    fast, base, ref64 = (
+        _clone(ref, ImplementationType.MINIWORLD, dtype),
+        _clone(ref, ImplementationType.PYTORCH, dtype),
+        copy.deepcopy(ref).double(),
+    )
 
     def run(m, dtyp):
         leaves = [t.detach().to(dtyp).requires_grad_(True) for t in (x, c, p)]
         m.zero_grad(set_to_none=True)
         y = m(*leaves, None)
         y.backward(dy.to(dtyp))
-        return [y.detach()] + [t.grad for t in leaves] + [q.grad for q in m.parameters()]
+        return (
+            [y.detach()] + [t.grad for t in leaves] + [q.grad for q in m.parameters()]
+        )
 
     got, want = run(fast, dtype), run(ref64, F64)
     with tf32(dt == "fp32"):
         b = run(base, dtype)
-    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    names = ["out", "d single", "d cond", "d pair"] + [
+        n for n, _ in fast.named_parameters()
+    ]
     k, add = BOUND[dt]
     for n, g, bb, w in zip(names, got, b, want, strict=True):
-        assert torch.isfinite(g).all(), (path, n, int(torch.isnan(g).sum()), int(torch.isinf(g).sum()))
-        assert relative64(g, w) <= k * relative64(bb, w) + add, (path, n, relative64(g, w), relative64(bb, w))
+        assert torch.isfinite(g).all(), (
+            path,
+            n,
+            int(torch.isnan(g).sum()),
+            int(torch.isinf(g).sum()),
+        )
+        assert relative64(g, w) <= k * relative64(bb, w) + add, (
+            path,
+            n,
+            relative64(g, w),
+            relative64(bb, w),
+        )
 
 
 @pytest.mark.parametrize("scale", [60.0, 400.0])
@@ -178,20 +238,31 @@ def test_inference_with_saturated_gates(monkeypatch, path, L, scale):
     block's error of the fp64 block (``BOUND``)."""
     dt, env = INFER_ENVS[path]
     for k, v in env.items():
-        monkeypatch.setenv(k, v)
+        override_setting(monkeypatch, k, v)
     dtype = torch.bfloat16 if dt == "bf16" else torch.float32
     ref = saturated_blocks(scale)
     S = 5
     x, c, p, _ = _inputs(L, S)
     lo, hi = _gate_range(ref, x, c)
     assert lo < -150 and hi > 150, (lo, hi)
-    fast, base, ref64 = (_clone(ref, ImplementationType.MINIWORLD, dtype).eval(), _clone(ref, ImplementationType.PYTORCH, dtype).eval(),
-                         copy.deepcopy(ref).double().eval())
+    fast, base, ref64 = (
+        _clone(ref, ImplementationType.MINIWORLD, dtype).eval(),
+        _clone(ref, ImplementationType.PYTORCH, dtype).eval(),
+        copy.deepcopy(ref).double().eval(),
+    )
     with torch.no_grad():
         got = fast(x.to(dtype), c.to(dtype), p.to(dtype))
         want = ref64(x.double(), c.double(), p.double())
         with tf32(dt == "fp32"):
             b = base(x.to(dtype), c.to(dtype), p.to(dtype))
-    assert torch.isfinite(got).all(), (path, int(torch.isnan(got).sum()), int(torch.isinf(got).sum()))
+    assert torch.isfinite(got).all(), (
+        path,
+        int(torch.isnan(got).sum()),
+        int(torch.isinf(got).sum()),
+    )
     k, add = BOUND[dt]
-    assert relative64(got, want) <= k * relative64(b, want) + add, (path, relative64(got, want), relative64(b, want))
+    assert relative64(got, want) <= k * relative64(b, want) + add, (
+        path,
+        relative64(got, want),
+        relative64(b, want),
+    )

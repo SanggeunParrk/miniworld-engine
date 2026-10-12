@@ -11,14 +11,14 @@ rows (the single stream at D = 384 below 17 tiles excepted, see [Small M](#small
 Dispatch: `modules/transition/module.py::_residual_forward` and `kernels/transition/whole_op.py` try
 `kernels/transition/cuda/fused_sm100a.available()` (D = 128, n = 4) and then `fused_wide_sm100a.available()` (every other (D, n) in
 its `SHAPES`) before the Triton path: sm_100 with an even SM count, bf16 activations and weights, hidden = n D, rows a multiple of
-128 (the two-role backwards also need enough SMs for both roles). Opt out of both with `MINIWORLD_TRANSITION_FUSED_SM100A=0`. The
-two-role backwards' weight-role replica counts are `DW_REPL = 9` (D128 n = 4; `MINIWORLD_TRANSITION_SM100_REPL` overrides it) and
-`REPL` = 20 / 30 / 14 for (64, 4) / (64, 2) / (128, 2) (`MINIWORLD_TRANSITION_WIDE_REPL`). At D = 384 the small-M paths take calls of
-at most 16 tiles (`SMALL_FWD_TILES`, `SMALL_TILES`; `MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES`, `MINIWORLD_TRANSITION_WIDE_SMALL_TILES`).
+128 (the two-role backwards also need enough SMs for both roles). Opt out of both with `settings.transition_fused_sm100a=0`. The
+two-role backwards' weight-role replica counts are `DW_REPL = 9` (D128 n = 4; `settings.transition_sm100_repl` overrides it) and
+`REPL` = 20 / 30 / 14 for (64, 4) / (64, 2) / (128, 2) (`settings.transition_wide_repl`). At D = 384 the small-M paths take calls of
+at most 16 tiles (`SMALL_FWD_TILES`, `SMALL_TILES`; `settings.transition_wide_small_fwd_tiles`, `settings.transition_wide_small_tiles`).
 
 **Build.** The kernels are compiled into cubins by the newest nvcc on the machine that knows sm_100a (`/usr/local/cuda*/bin/nvcc`
-or the torch-matched one; `MINIWORLD_TRANSITION_SM100_NVCC` overrides), one cubin group per (width, n) built on first use (each
-kernel with `-DHID=<n D>`) and cached under `MINIWORLD_ENGINE_JIT_ROOT/transition_sm100a/`, and launched through the driver API from
+or the torch-matched one; `settings.transition_sm100_nvcc` overrides), one cubin group per (width, n) built on first use (each
+kernel with `-DHID=<n D>`) and cached under `settings.engine_jit_root/transition_sm100a/`, and launched through the driver API from
 the torch extension (`sm100/transition_sm100.cu`: the D128 entry points, plus a generic cubin / tensor-map / launch surface the other
 widths are assembled on in Python). The reason is measured: the same D128 backward through CUDA 12.9's ptxas (the toolkit torch
 cu129 pins) runs ~8 % slower than through 13.1's (L384 backward 250 vs 230 µs, L768 990 vs 885 µs). A CUDA 13.1 at
@@ -495,7 +495,7 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
 
 B200 (148 SMs, 1000 W limit), torch 2.13 + cu129, kernels built by CUDA 13.1; `benchmarks/runners/bench.py target=transition
 level=module d_pair=D`, compiled, CUDA-graph replay, µs. *ours* = `modules.Transition` through `fused_sm100a` / `fused_wide_sm100a`;
-the Triton row is the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0` (the path B200 ran before). × = ours vs the fastest other row.
+the Triton row is the same module with `settings.transition_fused_sm100a=0` (the path B200 ran before). × = ours vs the fastest other row.
 Re-verified 2026-10-10 (engine v2.2.0 plus unreleased changes, driver 580.95.05, one GPU with no other process on it): the PyTorch compiled, Triton and ours **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 columns (60 cells) were re-measured with the command above, one run per width and mode, cells that moved by more than 8 % repeated;
 median change 1.1 % (ours 3.5 %), 90th percentile 5.3 %, no cell replaced. The D384 *ours* values are the fused
@@ -555,7 +555,7 @@ cannot reach 90 % on this card with the bf16 contract.
 
 Same card and toolchain; module level with bf16 parameters, one eager call captured in a CUDA graph and replayed, µs (measured with a
 benchmark of the standalone development build, not shipped; `benchmarks/runners/bench.py` has no n = 2 / MSA / single-stream Transition case). *ours* = `modules.Transition` on
-this path; Triton = the same module with `MINIWORLD_TRANSITION_FUSED_SM100A=0`; compiled = `torch.compile(dynamic=False)` of the
+this path; Triton = the same module with `settings.transition_fused_sm100a=0`; compiled = `torch.compile(dynamic=False)` of the
 PyTorch implementation. × = ours vs the faster other column. The D64 / D128 / D256 and MSA rows were measured before the D384 fused
 kernels landed (those widths' kernels are unchanged since).
 

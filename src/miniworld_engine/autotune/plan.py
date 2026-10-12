@@ -1,4 +1,5 @@
 """Choose module invocations that cover the missing kernel keys of a verified derivation."""
+
 from __future__ import annotations
 
 import hashlib
@@ -13,14 +14,30 @@ EVIDENCE = ROOT / "kernels" / "registry" / "registry_kernel.units.json"
 
 def source_identity() -> str:
     """Hash dispatch inputs; tuning results and page edits do not invalidate a derivation."""
-    files = [ROOT / "settings.py", ROOT / "kernels" / "registry" / "registry_module.csv",
-             ROOT / "kernels" / "registry" / "registry.csv"]
+    files = [
+        ROOT / "settings.py",
+        ROOT / "kernels" / "registry" / "registry_module.csv",
+        ROOT / "kernels" / "registry" / "registry.csv",
+    ]
     for directory in (ROOT / "modules", ROOT / "kernels", ROOT / "integrations"):
-        files.extend(path for path in directory.rglob("*.py")
-                     if "notes" not in path.relative_to(directory).parts)
+        files.extend(
+            path
+            for path in directory.rglob("*.py")
+            if "notes" not in path.relative_to(directory).parts
+        )
     files.extend((ROOT / "build" / "gpu_to_kernels").glob("*.csv"))
-    files.extend(ROOT / "autotune" / name for name in                 ("builder.py", "checkpoint_cases.py", "derive.py", "module_registry.py", "shape_key.py"))
+    files.extend(
+        ROOT / "autotune" / name
+        for name in (
+            "builder.py",
+            "checkpoint_cases.py",
+            "derive.py",
+            "module_registry.py",
+            "shape_key.py",
+        )
+    )
     from miniworld_engine.autotune import policy
+
     files.append(ROOT / "autotune" / "policy.py")
     h = hashlib.sha256(repr(policy.identity()).encode())
     for path in sorted(set(files)):
@@ -42,15 +59,20 @@ def stamp(path: Path, registry: Path, source: str) -> None:
 
 def load(arch: str, registry: Path | None = None, path: Path | None = None) -> dict:
     from miniworld_engine.autotune.derive import normalise_arch, registry_path
+
     registry = registry if registry is not None else registry_path(arch)
     path = path if path is not None else registry.with_suffix(".units.json")
     data = json.loads(path.read_text())
     if not isinstance(data, dict):
         raise ValueError("kernel derivation evidence must be an object")
-    if (not data.get("complete") or data.get("errors")
-            or data.get("source_identity") != source_identity()
-            or data.get("registry_identity") != hashlib.sha256(registry.read_bytes()).hexdigest()
-            or normalise_arch(data.get("arch", "")) != normalise_arch(arch)):
+    if (
+        not data.get("complete")
+        or data.get("errors")
+        or data.get("source_identity") != source_identity()
+        or data.get("registry_identity")
+        != hashlib.sha256(registry.read_bytes()).hexdigest()
+        or normalise_arch(data.get("arch", "")) != normalise_arch(arch)
+    ):
         raise ValueError("kernel derivation is incomplete or stale; run dev derive")
     return data
 
@@ -66,11 +88,19 @@ def is_verified(arch: str, registry: Path) -> bool:
 
 def label(unit, case) -> str:
     from miniworld_engine.autotune.derive import DeriveUnit
-    return DeriveUnit(case.name, case.stream_for(unit.dim_index), unit.length,
-                      tuple(case.dims[unit.dim_index].items()), unit.impl, unit.dtype,
-                      unit.compute, "train" if unit.train else "eval",
-                      (unit.switch, str(unit.value)) if unit.switch else None,
-                      case.augmentation_for(unit.dim_index, unit.train)).label
+
+    return DeriveUnit(
+        case.name,
+        case.stream_for(unit.dim_index),
+        unit.length,
+        tuple(case.dims[unit.dim_index].items()),
+        unit.impl,
+        unit.dtype,
+        unit.compute,
+        "train" if unit.train else "eval",
+        (unit.switch, str(unit.value)) if unit.switch else None,
+        case.augmentation_for(unit.dim_index, unit.train),
+    ).label
 
 
 def select(work: list, cases: list, evidence: dict, missing: set[str]) -> list:
@@ -85,14 +115,17 @@ def select(work: list, cases: list, evidence: dict, missing: set[str]) -> list:
     reachable = set().union(*(keys for _, keys in candidates)) if candidates else set()
     declared_modules = {key.split("[", 1)[0] for key in evidence}
     if set(by_name) >= declared_modules and missing - reachable:
-        raise ValueError(f"missing keys have no runnable module unit: {sorted(missing - reachable)}")
+        raise ValueError(
+            f"missing keys have no runnable module unit: {sorted(missing - reachable)}"
+        )
     remaining = missing & reachable
     selected = []
     while remaining:
         # At equal coverage use the smaller tensor invocation.
-        index = max(range(len(candidates)),
-                    key=lambda i: (len(candidates[i][1] & remaining),
-                                   -candidates[i][0].length))
+        index = max(
+            range(len(candidates)),
+            key=lambda i: (len(candidates[i][1] & remaining), -candidates[i][0].length),
+        )
         unit, keys = candidates.pop(index)
         selected.append(unit)
         remaining.difference_update(keys)
@@ -111,12 +144,14 @@ def _plan_suffix(arch: str) -> Path:
 def generated_registry(arch: str) -> Path:
     """Writable plans are isolated from the installed package and keyed by source revision.
 
-    MINIWORLD_PLAN_CACHE_DIR overrides only derived dispatch plans, not tuned kernel
+    settings.plan_cache_dir overrides only derived dispatch plans, not tuned kernel
     choices. Otherwise use the standard XDG cache location, including in wheel installs.
     """
     import os
 
-    override = os.environ.get("MINIWORLD_PLAN_CACHE_DIR")
+    from miniworld_engine import settings
+
+    override = settings.current().plan_cache_dir
     if override:
         root = Path(override).expanduser()
     else:
@@ -164,22 +199,39 @@ def ensure(arch: str, *, workers: int = 1) -> Path:
             return out
         except (OSError, ValueError):
             pass
-        print(f"Refreshing kernel plan for {arch}; no tuning runs until it is verified.",
-              flush=True)
+        print(
+            f"Refreshing kernel plan for {arch}; no tuning runs until it is verified.",
+            flush=True,
+        )
         with tempfile.TemporaryDirectory(prefix="derive-", dir=out.parent) as td:
             temporary = Path(td) / out.name
-            env = {**os.environ, "MINIWORLD_COMPILE_WRAP": "disable",
-                   "QUACK_CACHE_ENABLED": "0"}
-            command = [sys.executable, "-m", "miniworld_engine.cli", "dev", "derive",
-                       "--arch", arch, "--out", str(temporary),
-                       "--workers", str(max(1, workers))]
+            env = {
+                **os.environ,
+                "MINIWORLD_COMPILE_WRAP": "disable",
+                "QUACK_CACHE_ENABLED": "0",
+            }
+            command = [
+                sys.executable,
+                "-m",
+                "miniworld_engine.cli",
+                "dev",
+                "derive",
+                "--arch",
+                arch,
+                "--out",
+                str(temporary),
+                "--workers",
+                str(max(1, workers)),
+            ]
             result = subprocess.run(command, env=env, check=False)
             if result.returncode:
                 error_report = temporary.with_suffix(".errors.json")
                 if error_report.exists():
                     error_report.replace(out.with_suffix(".errors.json"))
-                raise ValueError(f"kernel plan derivation failed (exit {result.returncode}); "
-                                 "no tuning started")
+                raise ValueError(
+                    f"kernel plan derivation failed (exit {result.returncode}); "
+                    "no tuning started"
+                )
             load(arch, temporary)
             temporary.replace(out)
             temporary.with_suffix(".units.json").replace(out.with_suffix(".units.json"))

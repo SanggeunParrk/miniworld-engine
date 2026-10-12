@@ -164,7 +164,7 @@ Keys that are not in a target's yaml need the Hydra `+` prefix. Non-numeric list
   +-3-5 %; a difference below that is not a result. Re-run cells that move by more than 8 % against a committed value.
 - Other processes on the card contaminate timings silently. Check `nvidia-smi --query-compute-apps=pid,process_name,used_memory
   --format=csv -i <gpu>` before and after.
-- Kernels you build are JIT-compiled on first use into `MINIWORLD_ENGINE_JIT_ROOT`; give parallel runs separate roots or a
+- Kernels you build are JIT-compiled on first use into `settings.engine_jit_root`; give parallel runs separate roots or a
   warmed shared one (a concurrent build of the same cubin fails or stalls).
 - Do not run two harness processes on one GPU.
 

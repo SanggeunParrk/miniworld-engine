@@ -38,18 +38,18 @@ under autocast or with bf16 weights -- runs the module's PyTorch composition. Ea
 | 12 heads x 64 | 768 | `BiasOnlyDiTBlock(n_head=12)` | `+n_head=12` |
 | 16 heads x 64 | 1024 (v / g / out projections 768 <-> 1024) | `BiasOnlyDiTBlock(d_head=64)` | `+d_head=64` |
 
-**Switches** (default on): `MINIWORLD_BIAS_ONLY_DIT` (inference), `MINIWORLD_BIAS_ONLY_DIT_TRAIN` (training),
-`MINIWORLD_BIAS_ONLY_DIT_CORE` (the sm_100a core). Experiment knobs: `MINIWORLD_BIAS_ONLY_DIT_SG` (samples per core work item),
-`MINIWORLD_BIAS_ONLY_DIT_PV_VB` (keys per v tile), `MINIWORLD_BIAS_ONLY_DIT_RESLN` / `_COND` (inference GEMM-epilogue experiments,
+**Switches** (default on): `settings.bias_only_dit` (inference), `settings.bias_only_dit_train` (training),
+`settings.bias_only_dit_core` (the sm_100a core). Experiment knobs: `settings.bias_only_dit_sg` (samples per core work item),
+`settings.bias_only_dit_pv_vb` (keys per v tile), `settings.bias_only_dit_resln` / `_COND` (inference GEMM-epilogue experiments,
 off: slower, see below), `MINIWORLD_BO_ROWS_BLOCKS_PER_SM` (cap on the training row kernels' resident blocks),
-`MINIWORLD_BIAS_ONLY_DIT_INF3` (fp32 inference as three kernels per block, default on; 0: the 12-launch step:
-[F5](#f5--three-kernel-fp32-inference-step-the-default)) and `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16` (bf16 inference as three kernels
+`settings.bias_only_dit_inf3` (fp32 inference as three kernels per block, default on; 0: the 12-launch step:
+[F5](#f5--three-kernel-fp32-inference-step-the-default)) and `settings.bias_only_dit_inf3_bf16` (bf16 inference as three kernels
 per block, default on; 0: the 12-launch step: [I0](#i0--bf16-three-kernel-step-the-default)), both with
-`MINIWORLD_BIAS_ONLY_DIT_INF3_CL` (4 / 6 / 8: force the front kernel's cluster) and `_INF3_TAIL_CL` (8 / 6, and 4 at bf16: the pair
+`settings.bias_only_dit_inf3_cl` (4 / 6 / 8: force the front kernel's cluster) and `_INF3_TAIL_CL` (8 / 6, and 4 at bf16: the pair
 tail; force the tail's).
 
 **cache build ✓** everywhere: nothing on these paths autotunes. The row kernels have fixed launch shapes (grids sized from the
-occupancy API), the sm_100a kernels are cubins built on first use into `MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and
+occupancy API), the sm_100a kernels are cubins built on first use into `settings.engine_jit_root` (keyed by source and
 definitions), the choices that depend on the shape (core sample group, v tile, `dpb` key tile) are closed-form cost models, and
 the GEMMs are cuBLAS.
 
@@ -66,14 +66,14 @@ Per call the runner
    (the LayerNorm weight folded into the projection), and the CUDA row softmax written in place;
 2. makes the conditioning tables: a CUDA LayerNorm of the conditioning rows and two cuBLAS GEMMs (AdaLN scale / shift of both
    halves, the two output gates), over L rows when the samples share one conditioning, over S L rows otherwise;
-3. runs each block as three kernels chained by PDL (I0, the default), or with `MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` (and when
+3. runs each block as three kernels chained by PDL (I0, the default), or with `settings.bias_only_dit_inf3_bf16=0` (and when
    those kernels fail to build) as the 12-launch step: input AdaLN rows -> cuBLAS v|g GEMM -> **`pv_gate_inf`** -> cuBLAS out GEMM
    -> residual + gate + AdaLN rows -> expand GEMM + SwiGLU -> cuBLAS squeeze GEMM -> residual + gate rows in the output dtype. The
    residual stream is fp32.
 
 ### I0 · bf16 three-kernel step (the default)
 
-`kernels/bias_only_dit/cuda/inf3_bf16.py` (`MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=0` keeps the 12-launch step, as does a failed build:
+`kernels/bias_only_dit/cuda/inf3_bf16.py` (`settings.bias_only_dit_inf3_bf16=0` keeps the 12-launch step, as does a failed build:
 one warning). The conditioning tables are hoisted as for fp32 (F5) but bf16: [T, nb, 6, 768] = (gate1, gate2, s1, s2, sh1, sh2)
 with the four sigmoids applied, rounded to bf16 once (`runner._tables3b`, `lookup_inputs` rules). Per block three kernels, chained
 by programmatic dependent launch:
@@ -177,13 +177,13 @@ limit, ~25 ns per M128 N48 K16 plus ~90 ns per v tile (VB 256 against 192 at tra
 against 128: -5.4 us), and the whole P tile was loaded before sample 0's first product. The TMA side issues a 128-row box every
 0.16-0.19 us whatever its bytes (16-KB P chunk or 12-KB v tile).
 
-**P before the PDL wait** (opt2 r5, `-DP_EARLY`, the three-kernel step's core only; `MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0` keeps
+**P before the PDL wait** (opt2 r5, `-DP_EARLY`, the three-kernel step's core only; `settings.bias_only_dit_inf3_p_early=0` keeps
 the plain PDL build): the producer issues the first item's P chunks before `griddepcontrol.wait` (and the MMA warp copies them into
 TMEM), so the P phase runs under the front kernel; v, g and the output stay after the wait. Safe because that P is the runner's
 hoisted tensor, written by no kernel of the step's PDL chain, and the step's first front is launched without the programmatic
 attribute when the core takes P early, so every kernel of the chain starts after the stream's earlier work (P's writer included)
 is complete -- also where the hoist runs right before the step. Never in training (P^T comes from `softmax_t` just before the
-backward's pv). In-process A/B of the whole step (`bo32_infer_breakdown.py --bf16 --ab MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0`),
+backward's pv). In-process A/B of the whole step (`bo32_infer_breakdown.py --bf16 --ab settings.bias_only_dit_inf3_p_early=0`),
 us, on / off: L384 45.3 / 45.6, L512 55.5 / 55.9, L640 73.2 / 73.9, L768 77.0 / 77.3 -- small (the serial first front gives back
 part of it) and consistent: kept on.
 
@@ -249,9 +249,9 @@ L384 / L768 -- per-node numbers from separate runs drift ~10 % on this power-cap
 
 | change | before | after | off switch |
 |---|---|---|---|
-| the weight pack (repacked by every captured step: the weights change between steps) as ONE launch, `pack16` in `bias_only_dit_train_rows.cu`, bit-identical to the 19 torch casts / cats / products | 49.7 / 57.2 | 9.6 / 11.2 | `MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1=0` |
-| cuBLAS writes `dxt` / `dxa` straight into their d-shift columns of `dG` (the fp32 path's way); `res_adaln_b_bwd` / `adaln_a_bwd` read them there instead of copying them (2 x [M, 768] bf16 writes less) | 108.7 / 208.0 | 101.8 / 193.6 (the two rows) | `MINIWORLD_BIAS_ONLY_DIT_BWD_DG=0` |
-| the bias gradient on CTA pairs, `dpbx2_sm100.cu` (T3), where 256-key tiles divide L and the pairs' items fill the SM pairs (L768) | -- / 61.2 | -- / 47.4 | `MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0` (=1 forces it wherever 256 divides L) |
+| the weight pack (repacked by every captured step: the weights change between steps) as ONE launch, `pack16` in `bias_only_dit_train_rows.cu`, bit-identical to the 19 torch casts / cats / products | 49.7 / 57.2 | 9.6 / 11.2 | `settings.bias_only_dit_train_pack1=0` |
+| cuBLAS writes `dxt` / `dxa` straight into their d-shift columns of `dG` (the fp32 path's way); `res_adaln_b_bwd` / `adaln_a_bwd` read them there instead of copying them (2 x [M, 768] bf16 writes less) | 108.7 / 208.0 | 101.8 / 193.6 (the two rows) | `settings.bias_only_dit_bwd_dg=0` |
+| the bias gradient on CTA pairs, `dpbx2_sm100.cu` (T3), where 256-key tiles divide L and the pairs' items fill the SM pairs (L768) | -- / 61.2 | -- / 47.4 | `settings.bias_only_dit_dpb_pair=0` (=1 forces it wherever 256 divides L) |
 
 Whole step (bf16, A = 48, 16 x 48, whole-step graph, median of 9 alternating captures): -29.8 us at L384, -37.3 us at L768. Tests:
 `tests/integrations/test_b200_bias_only_dit_train_gpu.py` (every gradient against fp64 at the defaults and with the switches off,
@@ -345,7 +345,7 @@ shared driver rebuilt ctypes arguments per call, 25-35 us each). The descriptors
 pinned a step's activations per call (7 cudaMallocs per step, 13 GB reserved after a few steps). A step issues in ~0.9 ms of host
 time at L384 against ~1.0 ms of GPU time, so without CUDA graphs the GPU stays the bound.
 
-### T6 · fused bf16 backward (`MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED`, default on)
+### T6 · fused bf16 backward (`settings.bias_only_dit_bwd_fused`, default on)
 
 Status (2026-10-08): the block's bf16 backward runs as **11 launches at the defaults (12 at L768)**, 9 with `bo_bwd_mid` on, where
 the per-step path takes 23 (res_c_bwd, mm dh, swiglu_bwd, mm dWsq, mm dxt, mm dWab, res_adaln_b_bwd, mm dog, mm dWo, gate_bwd, pv dV,
@@ -355,7 +355,7 @@ loops), steady memory, no local memory, and the captured launch count, at the de
 
 | launch(es) | replaces | default | switch |
 |---|---|---|---|
-| `bo_bwd_tail` x 3 | res_c_bwd, mm dh, swiglu_bwd, mm dxt, res_adaln_b_bwd, mm dog, gate_bwd (7) | on | `MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL=off` (7 launches); 4 operand stages |
+| `bo_bwd_tail` x 3 | res_c_bwd, mm dh, swiglu_bwd, mm dxt, res_adaln_b_bwd, mm dog, gate_bwd (7) | on | `settings.bias_only_dit_bwd_tail=off` (7 launches); 4 operand stages |
 | `bo_pvdpb` | pv dV + dpb (2), where dbias runs on single CTAs (L384) | on | `_BWD_PVDPB=0`; L768 keeps pv dV + dpbx2 (`_BWD_PVPDL=0`: pv dV without PDL) |
 | `bo_bwd_mid` x 3 | mm dxa, adaln_a_bwd, mm dchat, mm dcg, cond_bwd (5) | **off** | `_BWD_MID=1` |
 | `bo_wgrad` | the six weight-gradient GEMMs + unfold (7) | on | `_BWD_FUSED=0` (everything per step) |
@@ -432,7 +432,7 @@ forward (`softmax_t` reads b and writes P / P^T beside it), no `pair_bias_bwd` /
 launch count of the block backward stays 11 at the bf16 defaults (pair_bias_bwd_fin -> finalize); the forward loses one. Inference
 on a given bias makes P = softmax(bias) per call (`softmax_rows`) and runs the same step; a sampler keeps the pair, whose P is made
 once per pair for every solver step (MiniWorld's `hoist_pair_bias` hoists only under autograd). Switches, read per call:
-`MINIWORLD_BIAS_ONLY_DIT_HOIST=0` (the PyTorch fold), `MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT=S` (the dW' row chunks; 1: one GEMM).
+`settings.bias_only_dit_hoist=0` (the PyTorch fold), `settings.bias_only_dit_hoist_wsplit=S` (the dW' row chunks; 1: one GEMM).
 `ln0_bwd_rows` is one warp per row pair with shuffles only (no shared memory, barriers or atomics): bitwise repeatable.
 
 Measured (B200, 2026-10-10, hoist2; `bench_scripts/bo_hoist_bench.py`): 24 blocks of 16 x 48, A = 48, bf16, checkpointing off, one
@@ -468,13 +468,13 @@ Status (2026-10-06): written, **not yet built or measured on B200** -- the kerne
 autocast is off (under autocast the module path keeps its casts, as before), and `tf32_ready` (a `device_constant`) has built the
 fp32 kernels: the fp32 row extension, the bf16 row extensions whose dtype-generic passes the fp32 path shares, the attention core
 (and for training the ungated core and `dpb32_sm100`). A failed build warns once and keeps the module path for the process.
-`MINIWORLD_BIAS_ONLY_DIT_TF32=0` turns the fp32 path off.
+`settings.bias_only_dit_tf32=0` turns the fp32 path off.
 
 **Recipe.** Every activation, saved tensor, table and gradient fp32; the residual stream fp32. General GEMMs are cuBLAS on TF32
 tensor cores (`tf32_gemms`: forced whatever the caller's `allow_tf32`, restored after -- the token DiT fp32 path's rule). The
 products of the attention are tcgen05 `kind::tf32` (fp32 operands rounded to tf32 by the MMA, fp32 accumulation). The training
 pair bias and its backward are TF32 `mma.sync` (operands rounded to nearest, as cuBLAS rounds the module's `to_bias` GEMM and its
-gradients; `MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1`: split fp32, three products, ~exact); the inference hoist keeps the exact fp32
+gradients; `settings.bias_only_dit_pair_exact=1`: split fp32, three products, ~exact); the inference hoist keeps the exact fp32
 FMA kernel (once per pair). Weight gradients fp32 (cuBLAS), the small ones through the bf16
 extension's dtype-generic `unfold` / `finalize`.
 
@@ -507,7 +507,7 @@ products.
 
 Warps: 0 TMA producer, 1 MMA (whole warp waits, `elect_one()` issues), 2 TMEM allocator, 4-7 epilogue (a query row per thread);
 `__launch_bounds__(256, 2)` caps the registers at 128 (shared memory keeps one CTA per SM). SG per call: the fewest bytes into the
-busiest SM (`pick_group_tf32`: rounds x (P once + SG v tiles + their g / a)); `MINIWORLD_BIAS_ONLY_DIT_SG` forces one.
+busiest SM (`pick_group_tf32`: rounds x (P once + SG v tiles + their g / a)); `settings.bias_only_dit_sg` forces one.
 
 ### F2 · `dpb32_sm100.cu` (dbias = P o (sum_a dO v^T - D))
 
@@ -525,7 +525,7 @@ as first ported). Tests: reruns bit-identical at L 128..768 for every layout, wi
 The CTA-pair kernel of the bf16 step (`dpbx2_sm100.cu`, T3) builds for fp32 from the same source (`-DTF32`: 32-channel boxes, 48-wide
 heads 32 + 16, `kind::tf32` K steps of 8, P and staging tiles in 128-byte rows; two 64 KB stages): the fp32 default by the bf16
 rule (256 divides L and the pairs' items fill the SM pairs: L768), 148.2 -> 104.0 us at L768 A = 48 in the in-process A/B;
-`MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0` keeps `dpb32_sm100.cu`, `=1` takes the pairs wherever 256 divides L. Tests: within 3e-3 of fp64, 20 poisoned reruns bit-identical, the fp32 step's gradients within the default
+`settings.bias_only_dit_tf32_dpb_pair=0` keeps `dpb32_sm100.cu`, `=1` takes the pairs wherever 256 divides L. Tests: within 3e-3 of fp64, 20 poisoned reruns bit-identical, the fp32 step's gradients within the default
 bound.
 
 ### F3 · fp32 rows (`bias_only_dit_f32_rows.cu`)
@@ -563,19 +563,19 @@ staging tiles (64-B swizzle, 8 KB per tensor). Forward: `h = silu(a) b`, `h`, `a
 formula). Backward: the IO thread loads `a`, `b` of tile u + NB as tile u's stores drain; the warps write `da = dh b s (1 + a (1 - s))`,
 `db = dh a s` in place, the IO thread stores them; `dh` never reaches memory. Measured (L768, per launch): forward 329 us against
 cuBLAS 254 + the SwiGLU pass 99 (its GEMM runs ~530 TF/s against cuBLAS's ~680; the whole step was not better), so the forward is
-opt-in (`MINIWORLD_BIAS_ONLY_DIT_TF32_GLU=1`); backward 253 against 138 + 165, on by default (`MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD=0`:
+opt-in (`settings.bias_only_dit_tf32_glu=1`); backward 253 against 138 + 165, on by default (`settings.bias_only_dit_tf32_glu_bwd=0`:
 cuBLAS + the rows; a failed build warns once and does the same).
 
-**Attention core, batched N** (`pv_gate_tf32.cu -DBATCHN`, default; `MINIWORLD_BIAS_ONLY_DIT_PV_BATCH=0`: one MMA per sample): the
+**Attention core, batched N** (`pv_gate_tf32.cu -DBATCHN`, default; `settings.bias_only_dit_pv_batch=0`: one MMA per sample): the
 group's v chunks sit NA 4-KB atoms apart, so all SG samples are ONE MN-major B operand of N = SG x NA x 32 (LBO = 4 KB): one MMA per
 K step reads the P chunk once instead of SG times (the per-sample loop issued SG small N = DH products, ~320 TF/s at L768). 48-wide
 heads compute 16 unused columns per sample (the next head's channels), so SG <= 4 there (two accumulator sets in 512 columns).
 
 **`res_adaln_b`** (forward, 4.7 TB/s where `adaln_a` runs 6.1): built for three blocks per SM (<= 80 registers) with its loads in two
 waves (residual inputs, then the AdaLN tables before the row statistics): L768 141 -> 107 us, L384 73 -> 57
-(`MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB=2`: the two-block build; read per call). `res_adaln_b_bwd` loads `dout` in a second wave
+(the two-block build was slower and is gone). `res_adaln_b_bwd` loads `dout` in a second wave
 before the row sums' barrier (all six streams at once spilled 24 B at 128 registers; a three-block build was slower, +99 us per L768
-step). Weight gradients: `MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT=S` runs each of the six as a bmm over S row chunks plus a sum of the
+step). Weight gradients: `settings.bias_only_dit_wgrad_split=S` runs each of the six as a bmm over S row chunks plus a sum of the
 partials (cuBLAS takes these long-K, small-output TF32 GEMMs at 360-500 TF/s, the data gradients at 600-670); off by default until
 measured (`bo32_train_breakdown.py --wgrad-probe`).
 `bench_scripts/bo32_train_breakdown.py --ab VAR=VAL ...` times the whole step against each switch in alternation in one process
@@ -584,7 +584,7 @@ measured (`bo32_train_breakdown.py --wgrad-probe`).
 
 ### F5 · three-kernel fp32 inference step (the default)
 
-Status (2026-10-07): the served fp32 inference step (round 10: the pair tail at L640 / L768). `MINIWORLD_BIAS_ONLY_DIT_INF3=0` (read per call) keeps the 12-launch
+Status (2026-10-07): the served fp32 inference step (round 10: the pair tail at L640 / L768). `settings.bias_only_dit_inf3=0` (read per call) keeps the 12-launch
 cuBLAS + rows step below, which a failed build of the three kernels also falls back to; the tests cover both.
 
 | L, us (A = 5, 16 x 48, per-sample conditioning; whole-step graph replay) | 12-launch step | three-kernel step | ratio | floor | SoL |
@@ -635,7 +635,7 @@ are 96 KB at CL 8, 128 KB at CL 6; 512 B are free).
 Round 7's switch A/B deleted row-major H (1-4 us slower than blocked), blocked XT with paired xt loads (~2 us) and the weight
 prefetch into L2 (4-14 us).
 
-**Round 10 (the default where it saves a round; `MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0` turns it off): the pair tail `bo_tail2_tf32`.** Estimate from the
+**Round 10 (the default where it saves a round; `settings.bias_only_dit_inf3_2cta=0` turns it off): the pair tail `bo_tail2_tf32`.** Estimate from the
 round-9 trace (CL 8, L768, tile 45.0 us): halving the weights at the CL 8 geometry buys little -- y and z already run near the N = 96
 MMA's own time per k-block (0.237 us against periods of 0.25), only a | b is intake-bound (0.594 against 0.497 of tensor time) --
 about 2.4 us per tile, 3 % of the step, and a cluster of 16 (two CL 8 tiles) would fit 7 times, not 15 (one GPC has fewer than 16
@@ -668,7 +668,7 @@ lines 6 KB apart) and z's L2 h blocks loaded two per 32-KB box into adjacent rin
 7.6 -> 3.7 us); the trace stamps when the producer sees each slot free, so `bo32_inf3_trace.py` prints the tensor core's time per
 block. Round 7: the CL 6 blocked-H store faulted (its per-warp shared-memory tile was named like the row-tile index); rewritten with
 distinct names (`rtile`, `wtile`). Round 1's kernels and the exchange switch are deleted. `bo32_infer_breakdown.py --ab VAR=VAL[,VAR=VAL]`
-(VAR one of `MINIWORLD_BIAS_ONLY_DIT_INF3_CL`, `_INF3_TAIL_CL`) runs the step with that setting in the same process.
+(VAR one of `settings.bias_only_dit_inf3_cl`, `_INF3_TAIL_CL`) runs the step with that setting in the same process.
 
 | L (A = 5, 16 x 48), us | 12-launch step | round 1 (DSMEM) | round 2 (L2) | round 3 | round 4 | round 4: front / core / tail alone |
 |---|---|---|---|---|---|---|
@@ -679,7 +679,7 @@ distinct names (`rtile`, `wtile`). Round 1's kernels and the exchange switch are
 | 640 | 178.9 | 246.1 | 168.3 | 155.6 | 147.5 | |
 | 768 | 192.5 | 252.4 | 172.1 | 160.2 | 153.3 | 30.5 / 21.7 / 93.5 (two rounds) |
 
-**Why.** The 12-launch fp32 step (`MINIWORLD_BIAS_ONLY_DIT_INF3=0`) is 12 launches per call (`cond_ln`, two table GEMMs, `adaln_in`, v|g GEMM, `pv_gate_tf32`, out GEMM,
+**Why.** The 12-launch fp32 step (`settings.bias_only_dit_inf3=0`) is 12 launches per call (`cond_ln`, two table GEMMs, `adaln_in`, v|g GEMM, `pv_gate_tf32`, out GEMM,
 `res_adaln`, expand GEMM, `swiglu`, squeeze GEMM, `res_out`). At L768 (A = 5, 16 x 48) the step is 197 us against a ~67 us floor: 33 us
 of launch gaps between nodes, the GEMMs at 50-70 % of their floor (M = 3840 rows underfill 148 SMs), every activation through HBM
 between them. The SWA atom DiT's fp32 forward is three kernels per block with the modulation hoisted; this is the same shape.
@@ -702,7 +702,7 @@ the weights are loaded before the wait (packed once, never written in a step).
 **Hoist and capture rules.** The tables are made once per conditioning tensor (address, in-place version, shape, strides, dtype, and a
 weak reference so that a freed address reused by another tensor misses) through `kernels._capture.lookup_inputs`, the local DiT's
 rule: eager calls share the eager entry; inside a CUDA-graph capture the entry is scoped to the capture (recorded, so every replay
-remakes the tables from the conditioning as it is then) unless `static_inputs()` / `MINIWORLD_STATIC_CONDITIONING=1` declares the
+remakes the tables from the conditioning as it is then) unless `static_inputs()` / `settings.static_conditioning=1` declares the
 conditioning fixed -- then a capture serves from the eager entries and the step graph is exactly the three kernels (the bench
 harness's inference mode, which also sets `static_weights`). P keeps its existing cache (`_capture.scoped`), the weight pack its own.
 
@@ -879,7 +879,7 @@ packed until used; in fp32 the same layout needs 72 registers of row data per th
 
 **Not ported:** `gemm_resln_sm100` and `cond_tables_sm100` (opt-in, measured slower than the default composition in bf16; the
 cond-table kernel's resident [128 x 384] A tile is 192 KB in fp32 and does not fit beside its B stages). The fp32 step runs the
-default composition (`MINIWORLD_BIAS_ONLY_DIT_RESLN` / `_COND` are ignored for fp32).
+default composition (`settings.bias_only_dit_resln` / `_COND` are ignored for fp32).
 
 **Accuracy contract** (the tests): output and every gradient against an fp64 reference within 1.5x the error of the PyTorch fp32
 module with TF32 GEMMs (`allow_tf32 = True`) + 1e-3. A TF32 operand keeps 10 mantissa bits (unit roundoff 2^-11 ~ 4.9e-4):

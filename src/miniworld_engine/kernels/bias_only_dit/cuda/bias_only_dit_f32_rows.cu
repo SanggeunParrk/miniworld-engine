@@ -173,7 +173,7 @@ __global__ void __launch_bounds__(256, 2) adaln_a_k(const float* __restrict__ X,
 }
 
 // x1 = x + sigmoid(Gg[:, 0:D] + bg1) y;  xt = sigmoid(G[:, 2D:3D] + bs2) LN(x1) + G[:, 3D:4D]
-// MB resident blocks per SM (MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB, default 3; 2: the 128-register build): with two it moved five
+// MB resident blocks per SM (3; the 128-register build with 2 was slower): with two it moved five
 // fp32 streams per row behind a two-warp barrier at 4.7 TB/s (L768 141 us); MB = 3 (<= 80 registers) issues the loads in two waves --
 // x, y, g1 (the residual), then the AdaLN tables before the row statistics, so they fly during the reductions -- 107 us.
 template <int MB>
@@ -714,7 +714,7 @@ __global__ void __launch_bounds__(128, 4) pair_bias_bwd_k(const float* __restric
 // bf16 path's kernels run them on bf16 mma.sync: the FMA-pipe kernels above are issue-bound (L768: 185 + 299 us against a memory
 // floor of ~60 + ~105). TERMS = 1: the operands rounded to tf32 (cvt.rna, round to nearest: the TF32 recipe, as cuBLAS rounds the
 // module's to_bias GEMM and its gradients); TERMS = 3: split fp32 (hi = tf32(x), lo = tf32(x - hi); hi hi + hi lo + lo hi), within
-// ~1e-6 of exact fp32 (MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1). Fragments of m16n8k8 .tf32 (g = lane / 4, q = lane % 4):
+// ~1e-6 of exact fp32 (settings.bias_only_dit_pair_exact=1). Fragments of m16n8k8 .tf32 (g = lane / 4, q = lane % 4):
 // A a0 (g, q), a1 (g + 8, q), a2 (g, q + 4), a3 (g + 8, q + 4); B b0 (k q, n g), b1 (k q + 4, n g); C (g, 2q | 2q + 1), (g + 8, ...).
 __device__ __forceinline__ void mma_tf32(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
   asm volatile("mma.sync.aligned.m16n8k8.row.col.f32.tf32.tf32.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -1036,11 +1036,6 @@ void f32r(const at::Tensor& t, const char* n) {      // fp32 rows: unit column s
 }
 
 int nsm() { static int n = at::cuda::getCurrentDeviceProperties()->multiProcessorCount; return n; }
-// the resident-block build of a row kernel: 2 or 3 from the environment variable (read per call: A/B in one process), else dflt
-int minb(const char* var, int dflt) {
-  const char* e = std::getenv(var);
-  return e && *e ? (std::atoi(e) >= 3 ? 3 : 2) : dflt;
-}
 //: rows of every partial buffer: an upper bound of the blocks of any launch here (the kernels return how many they wrote); the
 //: same bound as the bf16 training extension's, whose finalize sums them
 int64_t partial_rows(int64_t) { return 8 * (int64_t)nsm(); }
@@ -1083,7 +1078,7 @@ void res_adaln_b(at::Tensor x, at::Tensor y, at::Tensor Gg, at::Tensor bg1, at::
   f32c(x, "x"); f32c(y, "y"); f32r(Gg, "Gg"); f32c(bg1, "bg1"); f32r(G, "G"); f32c(bs2, "bs2"); f32c(xt, "xt"); f32c(x1st, "x1st");
   TORCH_CHECK(G.size(1) >= 4 * D && Gg.size(1) >= D, "res_adaln_b: G [M, 3072], Gg [M, >= 768]");
   const at::cuda::CUDAGuard gd(x.device());
-  auto k = minb("MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB", 3) == 3 ? res_adaln_b_k<3> : res_adaln_b_k<2>;
+  auto k = res_adaln_b_k<3>;
   k<<<grid(k, M, RPB2, 256), 256, 0, S()>>>(CP<float>(x), CP<float>(y), CP<float>(Gg), Gg.stride(0),
       CP<float>(bg1), CP<float>(G), G.stride(0), CP<float>(bs2), P<float>(xt), P<float2>(x1st), M, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();

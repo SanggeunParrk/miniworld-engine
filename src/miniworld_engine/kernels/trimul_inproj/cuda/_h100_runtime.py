@@ -57,7 +57,7 @@ def cache_dir():
     root = (
         Path(
             os.environ.get(
-                "MINIWORLD_ENGINE_JIT_ROOT",
+                "engine_jit_root",
                 str(Path.home() / ".cache/miniworld_engine_jit"),
             )
         )
@@ -178,6 +178,7 @@ def pack_into(dst, wl, wlg, wr, wrg):
     # This op already runs inside the opaque native boundary: a second compiled
     # Python function adds dispatch overhead without enabling further fusion.
     from ._h100_pack import pack_into as pack
+
     pack(dst, wl, wlg, wr, wrg)
 
 
@@ -208,6 +209,7 @@ def publish_header(path, text):
     if path.exists() and path.read_text() == text:
         return
     import tempfile
+
     with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
         handle.write(text)
         temporary = Path(handle.name)

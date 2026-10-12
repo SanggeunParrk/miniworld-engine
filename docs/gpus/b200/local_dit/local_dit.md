@@ -15,7 +15,7 @@ autograd Function, served eagerly, under `torch.compile` and in CUDA graphs), an
 their backward) are in `kernels/augmented_attention/cuda/sm100_atom/`. The block
 has the parameters of `DiTBlock` at atom widths, so both blocks share a checkpoint layout. `serves()` accepts: B200, implementation
 MINIWORLD / TRITON, bf16 single / cond / pair, the atom widths, B = 1, any N, a `[B, N]` bool key mask or none, no QK-norm; anything else
-keeps the PyTorch path, and `MINIWORLD_LOCAL_DIT_SM100=0` turns it off. N is padded to a multiple of 128 for the row kernels (zero rows,
+keeps the PyTorch path, and `settings.local_dit_sm100=0` turns it off. N is padded to a multiple of 128 for the row kernels (zero rows,
 the padded atoms masked as keys, the pair padded with zero windows); the first N rows come back.
 
 - The attention and pair-bias kernels are hand CUDA, the attention on tcgen05 / TMEM / TMA; the row kernels are tcgen05 / TMA; all dense
@@ -132,7 +132,7 @@ conditioning tensor and the weights, and the windowed pair bias only on the pair
 sampler they do not change, so an inference call (no gradients saved) computes them once per (tensor, in-place version, weights) and
 later calls read the cache; Anthropic's `FastAtomStack` does the same through its `dit_hoist`. A cache entry holds a weak reference to its
 tensor, so a freed-and-reused address never serves stale tables. With `kernels._capture.static_inputs()` (or
-`MINIWORLD_STATIC_CONDITIONING=1`) a CUDA-graph capture serves from the eager entries and a replay launches none of these kernels: one
+`settings.static_conditioning=1`) a CUDA-graph capture serves from the eager entries and a replay launches none of these kernels: one
 inference call goes from 11 to 6 kernels (a graph of the whole call under `static_weights()` as well is three kernels). Off by default; training never uses it. Tests: `tests/integrations/test_b200_local_dit_gpu.py`
 (`-k hoist or static_inputs`).
 
@@ -144,7 +144,7 @@ gates, the softmax and P, every saved activation and every gradient. The weight 
 partials, fp32 gradients). No Triton, none of the bf16 kernels. Dispatch: `integrations/local_dit.py`
 (`_fp32_call`, `_LocalBlock32` / `_infer32`, opaque ops `local_dit_block_fwd_tf32` / `local_dit_block_bwd_tf32`); the kernels load
 separately from the bf16 ones (a build / load failure warns once and keeps the module path for fp32 calls only);
-`MINIWORLD_LOCAL_DIT_TF32=0` keeps fp32 calls on the module path. A bf16 model fed fp32 activations, or a call under autocast, keeps the
+`settings.local_dit_tf32=0` keeps fp32 calls on the module path. A bf16 model fed fp32 activations, or a call under autocast, keeps the
 module path. The per-item hoist applies (fp32 tables under their own keys).
 
 Kernels (`kernels/augmented_attention/cuda/sm100_atom_local/`, `.../sm100_atom/`; budgets in each file's header):
@@ -193,7 +193,7 @@ LayerNorm reductions of those rows interleaved; sigmoids use `rcp.approx`. The u
 256-column halves, post: two 64-row halves) when that shortens the makespan (`sm100_atom._nfull`: all halves when 2 x tiles <= SMs, else
 only the tail beyond whole waves); measured, a half unit costs 0.7-0.8 of a full one, so splitting every unit loses past one wave.
 `atom_post_tf32` is capped at 168 registers (384 threads, one CTA per SM: the 128 cap kept its unit-loop state on the stack).
-`MINIWORLD_LOCAL_DIT_TF32_FUSED=0` keeps the unfused kernels; training always uses them (they save the activations). Fused and unfused
+`settings.local_dit_tf32_fused=0` keeps the unfused kernels; training always uses them (they save the activations). Fused and unfused
 agree to < 2e-6.
 
 What it took, in order (per block, 5 samples, us): the weight pack rebuilt in every graph replay (~30 small kernels -> one flat buffer, 3

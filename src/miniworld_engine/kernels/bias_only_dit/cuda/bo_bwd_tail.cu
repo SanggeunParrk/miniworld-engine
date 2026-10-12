@@ -1,5 +1,5 @@
 // bo_bwd_tail.cu -- the bias-only token DiT training backward from d out to the attention core's inputs on CTA PAIRS, sm_100a
-// (integrations/bias_only_dit_train.py, MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL=split3): what res_c_bwd, the dh GEMM, swiglu_bwd, the dxt
+// (integrations/bias_only_dit_train.py, settings.bias_only_dit_bwd_tail=split3): what res_c_bwd, the dh GEMM, swiglu_bwd, the dxt
 // GEMM, res_adaln_b_bwd, the d(og) GEMM and gate_bwd did as seven launches, in three launches of one kernel.
 //
 // Work items per PAIR TILE p (the 128-row tiles 2p and 2p + 1 of the A L rows; T tiles, the last pair's second tile absent when T

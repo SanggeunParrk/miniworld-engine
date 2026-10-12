@@ -35,7 +35,15 @@ from pathlib import Path
 import torch
 
 from ..._compile import opaque
-from ..._nvcc import _HOST_CANDIDATES, ensure_cuda_home, gencodes, host_flags, load_extension, nvcc_path
+from ..._nvcc import (
+    _HOST_CANDIDATES,
+    ensure_cuda_home,
+    gencodes,
+    host_flags,
+    load_extension,
+    nvcc_path,
+)
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent / "sm100"
 
@@ -43,12 +51,12 @@ _dir = Path(__file__).parent / "sm100"
 ROWS = 128
 D, H = 128, 512
 #: Hidden-slice replicas of the backward's weight role (8 * DW_REPL CTAs, the rest run the input role). 9 measured fastest at
-#: L384 and L768 on a 148-SM B200 (rounds v9, v13, v22); MINIWORLD_TRANSITION_SM100_REPL overrides it for A/B runs.
+#: L384 and L768 on a 148-SM B200 (rounds v9, v13, v22); settings.transition_sm100_repl overrides it for A/B runs.
 DW_REPL = 9
 
 
 def _repl() -> int:
-    return int(os.environ.get("MINIWORLD_TRANSITION_SM100_REPL", DW_REPL))
+    return settings.current().transition_sm100_repl or DW_REPL
 
 
 # ------------------------------------------------------------------------------------------------------------------ build
@@ -61,7 +69,9 @@ _PROBE = "__global__ void k(float* p) { p[0] = 1.0f; }\n#include <cuda_bf16.h>\n
 
 def _release(nvcc: str) -> tuple[int, int] | None:
     try:
-        out = subprocess.run([nvcc, "--version"], capture_output=True, text=True, timeout=20, check=False).stdout
+        out = subprocess.run(
+            [nvcc, "--version"], capture_output=True, text=True, timeout=20, check=False
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return None
     m = re.search(r"release (\d+)\.(\d+)", out)
@@ -70,7 +80,13 @@ def _release(nvcc: str) -> tuple[int, int] | None:
 
 def _knows_sm100(nvcc: str) -> bool:
     try:
-        out = subprocess.run([nvcc, "--list-gpu-arch"], capture_output=True, text=True, timeout=20, check=False).stdout
+        out = subprocess.run(
+            [nvcc, "--list-gpu-arch"],
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=False,
+        ).stdout
     except (OSError, subprocess.SubprocessError):
         return False
     return "compute_100" in out.split()
@@ -85,9 +101,23 @@ def _host_for(nvcc: str) -> list[str] | None:
             if cc is not None and not Path(cc).is_file():
                 continue
             flags = [] if cc is None else ["-ccbin", cc]
-            cmd = [nvcc, *flags, "-std=c++17", "-arch=sm_100a", "-cubin", str(src), "-o", str(Path(tmp) / "probe.cubin")]
+            cmd = [
+                nvcc,
+                *flags,
+                "-std=c++17",
+                "-arch=sm_100a",
+                "-cubin",
+                str(src),
+                "-o",
+                str(Path(tmp) / "probe.cubin"),
+            ]
             try:
-                if subprocess.run(cmd, capture_output=True, text=True, timeout=300, check=False).returncode == 0:
+                if (
+                    subprocess.run(
+                        cmd, capture_output=True, text=True, timeout=300, check=False
+                    ).returncode
+                    == 0
+                ):
                     return flags
             except (OSError, subprocess.SubprocessError):
                 continue
@@ -104,15 +134,24 @@ def _driver_major() -> int | None:
 
 @functools.lru_cache(maxsize=1)
 def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
-    """(nvcc, release, host flags) that build the kernel cubins: MINIWORLD_TRANSITION_SM100_NVCC if set, else the newest of
+    """(nvcc, release, host flags) that build the kernel cubins: settings.transition_sm100_nvcc if set, else the newest of
     ``/usr/local/cuda*/bin/nvcc`` and the torch-matched nvcc that knows sm_100, is no newer (major) than the driver, and can
     drive a host compiler."""
-    override = os.environ.get("MINIWORLD_TRANSITION_SM100_NVCC")
-    cands = [override] if override else [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
+    override = settings.current().transition_sm100_nvcc or None
+    cands = (
+        [override]
+        if override
+        else [*map(str, Path("/usr/local").glob("cuda*/bin/nvcc")), nvcc_path()]
+    )
     driver_major = _driver_major()
     found = {}
     for c in cands:
-        if c and Path(c).is_file() and os.path.realpath(c) not in found and _knows_sm100(c):
+        if (
+            c
+            and Path(c).is_file()
+            and os.path.realpath(c) not in found
+            and _knows_sm100(c)
+        ):
             rel = _release(c)
             # a cubin from a newer major toolkit than the driver supports does not load (cssb's 575 driver stops at CUDA 12.9)
             if rel and (driver_major is None or rel[0] <= driver_major or override):
@@ -121,10 +160,14 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
         flags = _host_for(nvcc)
         if flags is not None:
             return nvcc, rel, tuple(flags)
-    raise RuntimeError(f"no nvcc here can build sm_100a cubins (tried {sorted(found) or cands})")
+    raise RuntimeError(
+        f"no nvcc here can build sm_100a cubins (tried {sorted(found) or cands})"
+    )
 
 
-def build_cubins(group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]) -> dict[str, str]:
+def build_cubins(
+    group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]
+) -> dict[str, str]:
     """Build (or reuse) cubins: ``specs`` = (name, source relative to ``sm100/``, extra nvcc flags). The output directory is keyed
     by the group, the toolchain, the flags and every source under ``sm100/`` (the kernels include ``sm100.cuh``). Concurrent
     builders write private temporaries and rename them into place, so no lock is needed: the results are identical."""
@@ -132,7 +175,7 @@ def build_cubins(group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]
     digest = hashlib.sha256(f"{group} {nvcc} {rel} {flags} {specs}".encode())
     for src in sorted({s for _, s, _ in specs} | {"sm100.cuh"}):
         digest.update((_dir / src).read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "transition_sm100a" / f"{group}-{digest.hexdigest()[:16]}"
     out.mkdir(parents=True, exist_ok=True)
     paths = {}
@@ -140,11 +183,27 @@ def build_cubins(group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]
         dst = out / f"{name}.cubin"
         if not dst.exists():
             tmp = out / f"{name}.{os.getpid()}.tmp"
-            cmd = [nvcc, *flags, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{_dir}", *extra, str(_dir / src), "-o", str(tmp)]
-            r = subprocess.run(cmd, capture_output=True, text=True, timeout=900, check=False)
+            cmd = [
+                nvcc,
+                *flags,
+                "-std=c++17",
+                "-O3",
+                "-arch=sm_100a",
+                "-cubin",
+                f"-I{_dir}",
+                *extra,
+                str(_dir / src),
+                "-o",
+                str(tmp),
+            ]
+            r = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=900, check=False
+            )
             if r.returncode != 0:
                 tmp.unlink(missing_ok=True)
-                raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {src} {' '.join(extra)}:\n{r.stderr[-4000:]}")
+                raise RuntimeError(
+                    f"nvcc {rel[0]}.{rel[1]} failed on {src} {' '.join(extra)}:\n{r.stderr[-4000:]}"
+                )
             os.replace(tmp, dst)
         paths[name] = str(dst)
     return paths
@@ -165,7 +224,8 @@ def _ext():
         name="transition_fused_sm100a",
         sources=[str(_dir / "transition_sm100.cu")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("100a")],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
     ext.load(*_cubins())
     return ext
@@ -175,17 +235,22 @@ def _ext():
 def _is_b200(index: int) -> bool:
     props = torch.cuda.get_device_properties(index)
     # the backward's role split needs whole 2-CTA clusters on both sides of 8 * DW_REPL
-    return (props.major, props.minor) == (10, 0) and props.multi_processor_count % 2 == 0
+    return (props.major, props.minor) == (
+        10,
+        0,
+    ) and props.multi_processor_count % 2 == 0
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """The kernels' own requirements: sm_100, bf16 activations, D = 128 / hidden 512 (tile shapes are literals), whole 128-row tiles.
     The weights may be bf16 or fp32 (an fp32 master): the entry casts them to bf16 outside autograd."""
-    if os.environ.get("MINIWORLD_TRANSITION_FUSED_SM100A", "1") == "0":
+    if not settings.current().transition_fused_sm100a:
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_b200(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not _is_b200(
+        x.device.index if x.device.index is not None else torch.cuda.current_device()
+    ):
         return False
     if x.shape[-1] != D or wa.shape != (H, D) or ws.shape != (D, H):
         return False
@@ -212,13 +277,18 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         _ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"fused sm100a Transition unavailable, keeping the existing path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"fused sm100a Transition unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
 
 def _is_fake(*tensors) -> bool:
     from torch._subclasses.fake_tensor import FakeTensor
+
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
@@ -227,13 +297,25 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     argument)."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
-    return (torch.empty_like(x), torch.empty_like(x) if save else x.new_empty((1, D)),
-            torch.empty((rows,), **f32), torch.empty((rows,), **f32))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(x) if save else x.new_empty((1, D)),
+        torch.empty((rows,), **f32),
+        torch.empty((rows,), **f32),
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="transition_fused_fwd_sm100a")
-def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-                eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    save: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(out, xn, rstd, c1); xn / rstd / c1 are placeholders unless ``save``."""
     if _is_fake(x, wa):
         return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
@@ -244,18 +326,36 @@ def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
     """Output structure only: the six gradients, each shaped like what it is a gradient of (dgamma / dbeta and the weight
     gradients fp32)."""
     f32 = dict(dtype=torch.float32, device=x.device)
-    return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
-            torch.empty(wa.shape, **f32), torch.empty(wb.shape, **f32), torch.empty(ws.shape, **f32))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(gamma),
+        torch.empty_like(gamma),
+        torch.empty(wa.shape, **f32),
+        torch.empty(wb.shape, **f32),
+        torch.empty(ws.shape, **f32),
+    )
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_fused_bwd_sm100a")
-def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor, gamma: torch.Tensor,
-                wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """(dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
-    return tuple(_ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl()))
+    return tuple(
+        _ext().transition_fused_bwd(dy, x, xn, rstd, c1, gamma, wa, wb, ws, _repl())
+    )
 
 
 class _FusedTransitionSM100A(torch.autograd.Function):
@@ -280,19 +380,49 @@ class _FusedTransitionSM100A(torch.autograd.Function):
     def backward(ctx, dy):
         flat, xn, rstd, c1, gf, wa, wb, ws = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
-        dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws)
-        return (dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None)
+        dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            flat,
+            xn,
+            rstd,
+            c1,
+            gf,
+            wa,
+            wb,
+            ws,
+        )
+        return (
+            dx.reshape(ctx.shape),
+            dgam.to(gdt),
+            dbeta.to(bdt),
+            dwa.to(adt),
+            dwb.to(bwdt),
+            dws.to(sdt),
+            None,
+        )
 
 
 def transition_fused_sm100a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as the Triton ``transition_residual``. Call ``available(x, wa, ws)`` first.
     Inference (no grad needed) runs the forward without writing ``xn`` / statistics."""
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
+    if not (
+        torch.is_grad_enabled()
+        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    ):
         shape = x.shape
         from miniworld_engine.kernels import _capture
 
-        g, b, ww = _capture.param_forms(f"transition_sm100a_{x.dtype}", (gamma, beta, wa, wb, ws), lambda: (
-            gamma.float().contiguous(), beta.float().contiguous(), tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws))))
-        out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False)
+        g, b, ww = _capture.param_forms(
+            f"transition_sm100a_{x.dtype}",
+            (gamma, beta, wa, wb, ws),
+            lambda: (
+                gamma.float().contiguous(),
+                beta.float().contiguous(),
+                tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws)),
+            ),
+        )
+        out, _, _, _ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False
+        )
         return out.reshape(shape)
     return _FusedTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

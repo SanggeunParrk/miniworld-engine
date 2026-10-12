@@ -7,10 +7,12 @@ accepts is a wrong answer rather than a slow one. And the numbers have to agree 
 that is in use today, not just with a reference, because switching it on changes what every
 existing training run computes.
 """
+
 import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -18,7 +20,9 @@ pytestmark = pytest.mark.gpu
 
 CUDA = torch.cuda.is_available()
 HOPPER = CUDA and torch.cuda.get_device_capability() == (9, 0)
-needs_hopper = pytest.mark.skipif(not HOPPER, reason="the fused Transition is sm_90a only")
+needs_hopper = pytest.mark.skipif(
+    not HOPPER, reason="the fused Transition is sm_90a only"
+)
 
 
 def _weights(d=128, h=512, dev="cuda"):
@@ -38,13 +42,20 @@ def test_gate_rejects_everything_it_is_not_built_for():
     # Wrong dtype, wrong width, wrong hidden multiple, and a row count that is not a whole
     # 128-row tile: the persistent grid has no ragged tail.
     assert not fused_sm90a.supported(x.float(), wa, ws)
-    assert not fused_sm90a.supported(torch.randn(128, 256, device="cuda", dtype=torch.bfloat16),
-                                     *_weights(256, 1024))
-    assert not fused_sm90a.supported(torch.randn(127, 128, device="cuda", dtype=torch.bfloat16), wa, ws)
+    assert not fused_sm90a.supported(
+        torch.randn(128, 256, device="cuda", dtype=torch.bfloat16), *_weights(256, 1024)
+    )
+    assert not fused_sm90a.supported(
+        torch.randn(127, 128, device="cuda", dtype=torch.bfloat16), wa, ws
+    )
     assert not fused_sm90a.supported(x.cpu(), wa.cpu(), ws.cpu())
     # A 4-D pair activation is flattened over every leading axis, so 2*8*8 = 128 rows passes.
-    assert fused_sm90a.supported(
-        torch.randn(2, 8, 8, 128, device="cuda", dtype=torch.bfloat16), wa, ws) is HOPPER
+    assert (
+        fused_sm90a.supported(
+            torch.randn(2, 8, 8, 128, device="cuda", dtype=torch.bfloat16), wa, ws
+        )
+        is HOPPER
+    )
 
 
 @pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
@@ -53,7 +64,7 @@ def test_env_switch_turns_the_gate_off(monkeypatch):
 
     wa, ws = _weights()
     x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
-    monkeypatch.setenv("MINIWORLD_TRANSITION_FUSED_SM90A", "0")
+    override_setting(monkeypatch, "transition_fused_sm90a", "0")
     assert not fused_sm90a.supported(x, wa, ws)
 
 
@@ -61,7 +72,11 @@ def _build(shape, seed=72):
     from miniworld_engine.modules import Transition
 
     torch.manual_seed(seed)
-    module = Transition(shape[-1], n=4, implementation=ImplementationType.TRITON).cuda().bfloat16()
+    module = (
+        Transition(shape[-1], n=4, implementation=ImplementationType.TRITON)
+        .cuda()
+        .bfloat16()
+    )
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:
@@ -83,12 +98,17 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(engine_backend="auto" if fused else "triton", transition_fused_sm90a=fused)
+    settings.configure(
+        engine_backend="auto" if fused else "triton", transition_fused_sm90a=fused
+    )
     xx = x.clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
-    return {"out": y.detach().float(), "dx": xx.grad.detach().float(),
-            **{name: p.grad.detach().float() for name, p in mod.named_parameters()}}
+    return {
+        "out": y.detach().float(),
+        "dx": xx.grad.detach().float(),
+        **{name: p.grad.detach().float() for name, p in mod.named_parameters()},
+    }
 
 
 def _rel(got, want):
@@ -111,8 +131,13 @@ def test_is_no_less_accurate_than_the_triton_path(shape, monkeypatch):
     triton = _run(module, x, dy, fused=False)
 
     for name in reference:
-        got, base = _rel(fused[name], reference[name]), _rel(triton[name], reference[name])
-        assert got <= max(base * 1.5, 1e-6), f"{name}: fused {got:.3e} vs triton {base:.3e}"
+        got, base = (
+            _rel(fused[name], reference[name]),
+            _rel(triton[name], reference[name]),
+        )
+        assert got <= max(base * 1.5, 1e-6), (
+            f"{name}: fused {got:.3e} vs triton {base:.3e}"
+        )
 
 
 @needs_hopper
@@ -142,8 +167,11 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     calls = []
     original = fused_sm90a.transition_fused_sm90a
-    monkeypatch.setattr(fused_sm90a, "transition_fused_sm90a",
-                        lambda *a, **k: (calls.append(1), original(*a, **k))[1])
+    monkeypatch.setattr(
+        fused_sm90a,
+        "transition_fused_sm90a",
+        lambda *a, **k: (calls.append(1), original(*a, **k))[1],
+    )
     module, x, dy = _build((1, 32, 32, 128))
     _run(module, x, dy, fused=True)
     assert calls, "the fused path was never entered"
@@ -171,7 +199,9 @@ def test_replay_is_bit_identical():
         y = fused_sm90a.transition_fused_sm90a(x, gamma, beta, wa, wb, ws, 1e-5)
         y.backward(dy)
         assert all(t.grad is not None for t in (x, wa, wb, ws))
-        return [y.detach().clone()] + [t.grad.clone() for t in (x, wa, wb, ws) if t.grad is not None]
+        return [y.detach().clone()] + [
+            t.grad.clone() for t in (x, wa, wb, ws) if t.grad is not None
+        ]
 
     first, second = once(), once()
     assert all(torch.equal(a, b) for a, b in zip(first, second, strict=False))

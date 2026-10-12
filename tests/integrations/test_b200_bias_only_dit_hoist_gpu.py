@@ -20,12 +20,17 @@ import copy
 import pytest
 import torch
 import torch.nn.functional as Fn
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as INF
 from miniworld_engine.integrations import bias_only_dit_hoist as HO
 from miniworld_engine.integrations import bias_only_dit_train as TR
-from miniworld_engine.modules.bias_only_dit import BiasOnlyAttention, BiasOnlyDiTBlock, pair_bias_all
+from miniworld_engine.modules.bias_only_dit import (
+    BiasOnlyAttention,
+    BiasOnlyDiTBlock,
+    pair_bias_all,
+)
 from miniworld_engine.modules.bias_only_dit import hoist as hoist_mod
 from miniworld_engine.modules.bias_only_dit import module as bo_module
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -84,8 +89,10 @@ def policy():
 @contextlib.contextmanager
 def fused_only():
     """Neither the block's PyTorch composition nor the PyTorch fold of the hoist may run."""
+
     def boom(*a, **k):
         raise AssertionError("a PyTorch path ran")
+
     old_fwd, old_ref = bo_module.BiasOnlyAttention.forward, hoist_mod._reference
     bo_module.BiasOnlyAttention.forward = boom
     hoist_mod._reference = boom
@@ -106,8 +113,13 @@ def _poison(mb=512):
 # ------------------------------------------------------------------------------------------------ pair_bias_all alone
 def attentions(nb, n_head, d_head, dtype, seed=5):
     torch.manual_seed(seed)
-    mods = [randomize(BiasOnlyAttention(768, 384, 128, n_head, d_head)).cuda() for _ in range(nb)]
-    return [m.to(dtype) for m in mods]           # bf16: to_bias bf16, ln_pair stays fp32 (the engine pins norm weights)
+    mods = [
+        randomize(BiasOnlyAttention(768, 384, 128, n_head, d_head)).cuda()
+        for _ in range(nb)
+    ]
+    return [
+        m.to(dtype) for m in mods
+    ]  # bf16: to_bias bf16, ln_pair stays fp32 (the engine pins norm weights)
 
 
 def hoist_ref64(attns, pair, dbs):
@@ -118,7 +130,12 @@ def hoist_ref64(attns, pair, dbs):
     ln = Fn.layer_norm(p, (128,), eps=1e-5)
     outs = [((ln * g) @ w.t()).permute(0, 3, 1, 2) for g, w in zip(gs, ws, strict=True)]
     torch.autograd.backward(outs, [d.double() for d in dbs])
-    return [o.detach() for o in outs], p.grad, [g.grad for g in gs], [w.grad for w in ws]
+    return (
+        [o.detach() for o in outs],
+        p.grad,
+        [g.grad for g in gs],
+        [w.grad for w in ws],
+    )
 
 
 def hoist_run(attns, pair, dbs, implementation=MW, use=None):
@@ -129,10 +146,18 @@ def hoist_run(attns, pair, dbs, implementation=MW, use=None):
     outs = pair_bias_all(attns, p, implementation=implementation)
     idx = range(len(attns)) if use is None else use
     torch.autograd.backward([outs[i] for i in idx], [dbs[i] for i in idx])
-    return [o.detach() for o in outs], p.grad, [a.ln_pair.weight.grad for a in attns], [a.to_bias.weight.grad for a in attns]
+    return (
+        [o.detach() for o in outs],
+        p.grad,
+        [a.ln_pair.weight.grad for a in attns],
+        [a.to_bias.weight.grad for a in attns],
+    )
 
 
-TOL = {BF: {"bias": 6e-3, "dpair": 8e-3, "dg": 1e-4, "dW": 6e-3}, F32: {"bias": 3e-3, "dpair": 3e-3, "dg": 3e-3, "dW": 3e-3}}
+TOL = {
+    BF: {"bias": 6e-3, "dpair": 8e-3, "dg": 1e-4, "dW": 6e-3},
+    F32: {"bias": 3e-3, "dpair": 3e-3, "dg": 3e-3, "dW": 3e-3},
+}
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
@@ -144,7 +169,10 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
     attns = attentions(nb, n_head, d_head, dtype)
     g = torch.Generator(device="cuda").manual_seed(nb + n_head)
     pair = torch.randn(1, L, L, 128, device="cuda", generator=g).to(dtype)
-    dbs = [torch.randn(1, n_head, L, L, device="cuda", generator=g).to(dtype) for _ in range(nb)]
+    dbs = [
+        torch.randn(1, n_head, L, L, device="cuda", generator=g).to(dtype)
+        for _ in range(nb)
+    ]
     assert HO.serves(MW, attns, pair)
     with fused_only():
         outs, dp, dgs, dws = hoist_run(attns, pair, dbs)
@@ -152,25 +180,34 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
     tol = TOL[dtype]
     base = outs[0].untyped_storage().data_ptr()
     for i, (o, w) in enumerate(zip(outs, w_outs, strict=True)):
-        assert o.dtype is dtype and o.shape == (1, n_head, L, L) and o.is_contiguous(), i
-        assert o.data_ptr() == base + i * n_head * L * L * o.element_size(), i          # slice i of the one [nb H, L L] buffer
+        assert (
+            o.dtype is dtype and o.shape == (1, n_head, L, L) and o.is_contiguous()
+        ), i
+        assert o.data_ptr() == base + i * n_head * L * L * o.element_size(), (
+            i
+        )  # slice i of the one [nb H, L L] buffer
         assert relative(o, w) < tol["bias"], (i, relative(o, w))
     assert dp.dtype is dtype and relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
     for i in range(nb):
-        assert dgs[i].dtype is attns[i].ln_pair.weight.dtype and dws[i].dtype is attns[i].to_bias.weight.dtype, i
+        assert (
+            dgs[i].dtype is attns[i].ln_pair.weight.dtype
+            and dws[i].dtype is attns[i].to_bias.weight.dtype
+        ), i
         assert relative(dgs[i], w_dgs[i]) < tol["dg"], (i, relative(dgs[i], w_dgs[i]))
         assert relative(dws[i], w_dws[i]) < tol["dW"], (i, relative(dws[i], w_dws[i]))
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
 def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
-    """The PyTorch fold (implementation PYTORCH, and the engine path with MINIWORLD_BIAS_ONLY_DIT_HOIST=0) against fp64, the same
+    """The PyTorch fold (implementation PYTORCH, and the engine path with settings.bias_only_dit_hoist=0) against fp64, the same
     API; a backward through two of three biases: the third block's gradients are zero, the rest as fp64 with a zero d bias."""
     L, nb, H, DH = 256, 3, 16, 48
     attns = attentions(nb, H, DH, dtype, seed=9)
     g = torch.Generator(device="cuda").manual_seed(17)
     pair = torch.randn(1, L, L, 128, device="cuda", generator=g).to(dtype)
-    dbs = [torch.randn(1, H, L, L, device="cuda", generator=g).to(dtype) for _ in range(nb)]
+    dbs = [
+        torch.randn(1, H, L, L, device="cuda", generator=g).to(dtype) for _ in range(nb)
+    ]
     w_outs, w_dp, w_dgs, w_dws = hoist_ref64(attns, pair, dbs)
     outs, dp, dgs, dws = hoist_run(attns, pair, dbs, implementation=PT)
     bound = 2e-2 if dtype is BF else 3e-3
@@ -188,25 +225,30 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
     assert relative(dp, w_dp) < tol["dpair"]
     assert torch.count_nonzero(dgs[1]) == 0 and torch.count_nonzero(dws[1]) == 0
     for i in (0, 2):
-        assert relative(dgs[i], w_dgs[i]) < tol["dg"] and relative(dws[i], w_dws[i]) < tol["dW"], i
+        assert (
+            relative(dgs[i], w_dgs[i]) < tol["dg"]
+            and relative(dws[i], w_dws[i]) < tol["dW"]
+        ), i
 
 
 def test_serves_and_declines(monkeypatch):
     attns = attentions(2, 16, 48, BF)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=BF)
     assert HO.serves(MW, attns, p) and HO.serves(ImplementationType.TRITON, attns, p)
-    assert not HO.serves(PT, attns, p)                                                  # the PyTorch implementation: the fold
-    assert not HO.serves(MW, attns, p.expand(2, -1, -1, -1))                             # B == 1 only
-    assert not HO.serves(MW, attns, p.half())                                            # bf16 / fp32 only
+    assert not HO.serves(PT, attns, p)  # the PyTorch implementation: the fold
+    assert not HO.serves(MW, attns, p.expand(2, -1, -1, -1))  # B == 1 only
+    assert not HO.serves(MW, attns, p.half())  # bf16 / fp32 only
     a32 = attentions(2, 16, 48, F32)
     assert HO.serves(MW, a32, p.float())
-    assert not HO.serves(MW, attns, p.float())                                           # fp32 needs fp32 weights
+    assert not HO.serves(MW, attns, p.float())  # fp32 needs fp32 weights
     with torch.autocast("cuda", dtype=BF):
-        assert not HO.serves(MW, a32, p.float())                                         # fp32 under autocast: the fold
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_HOIST", "0")
+        assert not HO.serves(MW, a32, p.float())  # fp32 under autocast: the fold
+    override_setting(monkeypatch, "bias_only_dit_hoist", "0")
     assert not HO.serves(MW, attns, p)
     with pytest.raises(ValueError):
-        pair_bias_all([*attns, *attentions(1, 24, 32, BF)], p, implementation=MW)       # head counts differ
+        pair_bias_all(
+            [*attns, *attentions(1, 24, 32, BF)], p, implementation=MW
+        )  # head counts differ
 
 
 @pytest.mark.parametrize("R", [16, 1000, 147456])
@@ -216,6 +258,7 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
     (NaN-filled outputs; R off the 16-row block grain), d x within its output rounding of fp64, hi + lo within 3e-5, bit-identical on
     reruns; no local memory. y takes the path's dtype (that of x)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
     for name, regs, lmem in HK.kernel_attrs():
         assert lmem == 0 and regs <= 128, (name, regs, lmem)
     g = torch.Generator(device="cuda").manual_seed(R)
@@ -244,8 +287,16 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
 def stacks(nb, n_head, d_head, seed=3):
     """(the PyTorch fp32 blocks, the engine's blocks), same weights."""
     torch.manual_seed(seed)
-    ref = [randomize(BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=PT)).cuda() for _ in range(nb)]
-    fast = [BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=MW).cuda() for _ in range(nb)]
+    ref = [
+        randomize(
+            BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=PT)
+        ).cuda()
+        for _ in range(nb)
+    ]
+    fast = [
+        BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=MW).cuda()
+        for _ in range(nb)
+    ]
     for f, r in zip(fast, ref, strict=True):
         f.load_state_dict(r.state_dict())
     return ref, fast
@@ -264,7 +315,10 @@ def inputs(L, A, masked, seed=0):
 def forward(blocks, s, c, p, mask, hoist, wrap=None):
     if hoist:
         biases = pair_bias_all(blocks, p)
-        fns = [(lambda t, b=b, bb=bb: b(t, c, None, mask, bias=bb)) for b, bb in zip(blocks, biases, strict=True)]
+        fns = [
+            (lambda t, b=b, bb=bb: b(t, c, None, mask, bias=bb))
+            for b, bb in zip(blocks, biases, strict=True)
+        ]
     else:
         fns = [(lambda t, b=b: b(t, c, p, mask)) for b in blocks]
     for fn in fns:
@@ -278,20 +332,34 @@ def stack_step(blocks, x, c, p, mask, dy, dtype, hoist, wrap=None):
         b.zero_grad(set_to_none=True)
     y = forward(blocks, *leaves, mask, hoist, wrap)
     y.backward(dy.to(dtype))
-    return [y.detach()] + [t.grad for t in leaves] + [q.grad for b in blocks for q in b.parameters()]
+    return (
+        [y.detach()]
+        + [t.grad for t in leaves]
+        + [q.grad for b in blocks for q in b.parameters()]
+    )
 
 
 def names(blocks):
-    return ["out", "d single", "d cond", "d pair"] + [f"{i}.{n}" for i, b in enumerate(blocks) for n, _ in b.named_parameters()]
+    return ["out", "d single", "d cond", "d pair"] + [
+        f"{i}.{n}" for i, b in enumerate(blocks) for n, _ in b.named_parameters()
+    ]
 
 
-STACK = [(3, 384, 4, False), (3, 384, 4, True), (3, 768, 2, True), (3, 768, 2, False), (24, 384, 2, True)]
+STACK = [
+    (3, 384, 4, False),
+    (3, 384, 4, True),
+    (3, 768, 2, True),
+    (3, 768, 2, False),
+    (24, 384, 2, True),
+]
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (24, 32)])
 @pytest.mark.parametrize(("nb", "L", "A", "masked"), STACK)
-def test_hoisted_stack_every_gradient_against_fp64(nb, L, A, masked, n_head, d_head, dtype):
+def test_hoisted_stack_every_gradient_against_fp64(
+    nb, L, A, masked, n_head, d_head, dtype
+):
     """nb blocks on the hoisted biases (fused hoist + fused blocks; no PyTorch path runs) against the stack in fp64 (per-block bias).
 
     3 blocks: the output and every gradient within the training files' bounds against the PyTorch stack in the same dtype (bf16 1.1x
@@ -304,7 +372,7 @@ def test_hoisted_stack_every_gradient_against_fp64(nb, L, A, masked, n_head, d_h
     accumulated bf16 error, and that error alone can put one block's d gamma past 1.1x the PyTorch stack's -- for the fused per-block
     path as well. Measured on B200 (hoist2, ``bench_scripts/bo_hoist_diag.py``; this case, 16 x 48, L384 A2 masked): block 22's
     ln_pair gradient, hoisted / fused per-block / PyTorch bf16 error 1.172e-2 / 1.154e-2 / 1.008e-2 (1.16x / 1.14x; with
-    MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0 1.152e-2 / 1.187e-2: 1.14x / 1.18x); the hoist's arithmetic on the received d bias 4.5e-6 (every
+    settings.bias_only_dit_bwd_fused=0 1.152e-2 / 1.187e-2: 1.14x / 1.18x); the hoist's arithmetic on the received d bias 4.5e-6 (every
     ln_pair gradient 3.8-4.9e-6; to_bias 1.6e-3 = its bf16 output rounding); the error is the d bias's (upstream 1.172e-2); over the
     24 blocks the hoisted error is at or below the per-block path's at most blocks. 3 blocks hold the PyTorch bound."""
     if nb == 24 and (dtype is F32 or n_head == 24):
@@ -320,13 +388,16 @@ def test_hoisted_stack_every_gradient_against_fp64(nb, L, A, masked, n_head, d_h
         base_m, k, floor = ref, 1.5, 1e-3
     xb, cb, pb = (t.to(dtype).requires_grad_(True) for t in (x, c, p))
     bias0 = pair_bias_all(fast, pb)[0]
-    assert HO.serves(MW, [b.attention for b in fast], pb) and TR.serves(fast[0], xb, cb, None, mask, bias=bias0)
+    assert HO.serves(MW, [b.attention for b in fast], pb) and TR.serves(
+        fast[0], xb, cb, None, mask, bias=bias0
+    )
     del bias0
     cap, orig = {}, HO._hoist_bwd
 
-    def spy(pair2d, wf, dball, eps, split):                    # what the hoist's backward is handed
+    def spy(pair2d, wf, dball, eps, split):  # what the hoist's backward is handed
         cap["dball"], cap["pair"] = dball.clone(), pair2d.clone()
         return orig(pair2d, wf, dball, eps, split)
+
     HO._hoist_bwd = spy
     try:
         with fused_only():
@@ -341,25 +412,51 @@ def test_hoisted_stack_every_gradient_against_fp64(nb, L, A, masked, n_head, d_h
     deep = nb == 24
     for n, g, b, w, f in zip(nm, got, base, want, per_block, strict=True):
         assert g.dtype is b.dtype, n
-        bound = max(k * relative(b, w), 1.05 * relative(f, w)) if deep else k * relative(b, w)
-        assert relative(g, w) <= bound + floor, (n, "hoisted", relative(g, w), "pytorch", relative(b, w), "fused per-block",
-                                                 relative(f, w))
-    if deep:                                                    # the hoist's own arithmetic, in fp64 on its captured inputs
-        dwf = cap["dball"].double() @ Fn.layer_norm(cap["pair"].double(), (128,), eps=1e-5)        # [nb H, 128]
+        bound = (
+            max(k * relative(b, w), 1.05 * relative(f, w))
+            if deep
+            else k * relative(b, w)
+        )
+        assert relative(g, w) <= bound + floor, (
+            n,
+            "hoisted",
+            relative(g, w),
+            "pytorch",
+            relative(b, w),
+            "fused per-block",
+            relative(f, w),
+        )
+    if deep:  # the hoist's own arithmetic, in fp64 on its captured inputs
+        dwf = cap["dball"].double() @ Fn.layer_norm(
+            cap["pair"].double(), (128,), eps=1e-5
+        )  # [nb H, 128]
         for i, blk in enumerate(fast):
             gam, wb = blk.attention.ln_pair.weight, blk.attention.to_bias.weight
-            d = dwf[i * n_head:(i + 1) * n_head]
-            for prm, val in ((gam, (d * wb.double()).sum(0)), (wb, d * gam.double()[None, :])):
-                n = f"{i}.attention." + ("ln_pair.weight" if prm is gam else "to_bias.weight")
+            d = dwf[i * n_head : (i + 1) * n_head]
+            for prm, val in (
+                (gam, (d * wb.double()).sum(0)),
+                (wb, d * gam.double()[None, :]),
+            ):
+                n = f"{i}.attention." + (
+                    "ln_pair.weight" if prm is gam else "to_bias.weight"
+                )
                 g = got[nm.index(n)]
-                rounding = relative(val.to(prm.dtype), val)                                       # 0 for an fp32 parameter
-                assert relative(g, val) <= rounding + 1e-4, (n, "hoist arithmetic", relative(g, val), "output rounding", rounding)
+                rounding = relative(val.to(prm.dtype), val)  # 0 for an fp32 parameter
+                assert relative(g, val) <= rounding + 1e-4, (
+                    n,
+                    "hoist arithmetic",
+                    relative(g, val),
+                    "output rounding",
+                    rounding,
+                )
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("masked", [False, True])
-def test_inference_on_hoisted_biases_matches_the_per_pair_path(masked, n_head, d_head, dtype):
+def test_inference_on_hoisted_biases_matches_the_per_pair_path(
+    masked, n_head, d_head, dtype
+):
     """No autograd: blocks on hoisted biases (P = softmax(bias) per call) against the same blocks on the pair (P cached per pair):
     within the inference bounds of the per-pair path against fp64 (bf16 1.1x + 1e-4, fp32 1.5x + 1e-3)."""
     nb, L, S = 3, 384, 5
@@ -377,7 +474,10 @@ def test_inference_on_hoisted_biases_matches_the_per_pair_path(masked, n_head, d
             biases = pair_bias_all(fast, ps)
             assert INF.serves(fast[0], xs, cs, None, mask, bias=biases[0])
             hoisted = forward(fast, xs, cs, ps, mask, hoist=True)
-    assert relative(hoisted, want) <= k * relative(plain, want) + floor, (relative(hoisted, want), relative(plain, want))
+    assert relative(hoisted, want) <= k * relative(plain, want) + floor, (
+        relative(hoisted, want),
+        relative(plain, want),
+    )
     assert relative(hoisted, plain) < (1e-2 if dtype is BF else 3e-3)
 
 
@@ -386,12 +486,23 @@ def test_hoisted_stack_under_checkpointing_is_bit_identical(dtype):
     """The hoist outside non-reentrant checkpointed blocks (MiniWorld's place): the recompute runs the same kernels on the same
     inputs, so the output and every gradient equal the plain hoisted step bit for bit."""
     from torch.utils.checkpoint import checkpoint
+
     _, fast = stacks(3, 16, 48, seed=13)
     if dtype is BF:
         fast = [f.to(BF) for f in fast]
     x, c, p, dy, mask = inputs(384, 3, True, seed=6)
     plain = [t.clone() for t in stack_step(fast, x, c, p, mask, dy, dtype, hoist=True)]
-    ck = stack_step(fast, x, c, p, mask, dy, dtype, hoist=True, wrap=lambda fn, s: checkpoint(fn, s, use_reentrant=False))
+    ck = stack_step(
+        fast,
+        x,
+        c,
+        p,
+        mask,
+        dy,
+        dtype,
+        hoist=True,
+        wrap=lambda fn, s: checkpoint(fn, s, use_reentrant=False),
+    )
     for n, a, b in zip(names(fast), ck, plain, strict=True):
         assert torch.equal(a, b), n
 
@@ -408,7 +519,9 @@ def test_hoisted_steps_bit_identical_with_a_poisoned_allocator(n_head, d_head, d
     runs = []
     for _ in range(20):
         _poison()
-        runs.append([t.clone() for t in stack_step(fast, x, c, p, mask, dy, dtype, hoist=True)])
+        runs.append(
+            [t.clone() for t in stack_step(fast, x, c, p, mask, dy, dtype, hoist=True)]
+        )
         torch.cuda.synchronize()
     for i, g in enumerate(runs[0]):
         assert torch.isfinite(g.float()).all(), i
@@ -423,12 +536,17 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
     pair: the forward launches one kernel fewer (no pair_bias), the backward has no pair_bias_bwd (nor its pair_bias_bwd_fin merge)
     and exactly one finalize: as many launches as the pair's backward minus its pair kernels, plus finalize where the pair's was
     merged into pair_bias_bwd_fin."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
+
     _, fast = stacks(1, n_head, d_head, seed=8)
     blk = fast[0].to(dtype)
     L, A, H = 384, 4, n_head
-    x, c, p, dy, mask = (t if t is None else t.to(dtype) if t.is_floating_point() else t for t in inputs(L, A, True, seed=8))
+    x, c, p, dy, mask = (
+        t if t is None else t.to(dtype) if t.is_floating_point() else t
+        for t in inputs(L, A, True, seed=8)
+    )
     bias = torch.randn(1, H, L, L, device="cuda", dtype=dtype)
     params = [blk.get_parameter(n) for n in TR.NAMES]
     f32 = dtype is F32
@@ -455,11 +573,17 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
         nb_ = captured(lambda: bwd(x, c, p, mask, params, saved, dy))
         nbh = captured(lambda: bwdh(x, c, mask, params, saved_h, dy, db))
     assert not any("pair_bias" in n for n in nfh), nfh
-    assert sum("softmax_t" in n for n in nfh) == 1 and len(nfh) == len(nf) - 1, (nf, nfh)
+    assert sum("softmax_t" in n for n in nfh) == 1 and len(nfh) == len(nf) - 1, (
+        nf,
+        nfh,
+    )
     assert not any("pair_bias" in n for n in nbh), nbh
     assert sum("finalize" in n for n in nbh) == 1, nbh
     merged = any("pair_bias_bwd_fin" in n for n in nb_)
-    assert len(nbh) == len(nb_) - sum("pair_bias_bwd" in n or "finalize" in n for n in nb_) + 1, (nb_, nbh, merged)
+    assert (
+        len(nbh)
+        == len(nb_) - sum("pair_bias_bwd" in n or "finalize" in n for n in nb_) + 1
+    ), (nb_, nbh, merged)
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])

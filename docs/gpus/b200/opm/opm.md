@@ -40,7 +40,7 @@ the epilogue (its gradient is `dz` itself). Every other call runs the portable T
 
 #### Fused path · N a multiple of 64, S a multiple of 256
 
-The forward keeps the LayerNorm statistics, A2 / BT and O (`MINIWORLD_OPM_TRAIN_SAVE_O=0` recomputes O in the backward
+The forward keeps the LayerNorm statistics, A2 / BT and O (`settings.opm_train_save_o=0` recomputes O in the backward
 instead of keeping 302 MB at L384).
 
 ![OPM training](figures/opm_training.png)

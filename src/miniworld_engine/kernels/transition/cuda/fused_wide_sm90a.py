@@ -30,6 +30,7 @@ import torch
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent / "wide"
 
@@ -47,11 +48,11 @@ _SOURCES = {
 
 
 def save_h_enabled(d: int) -> bool:
-    """Opt-in (``MINIWORLD_TRANSITION_WIDE_SAVE_H=1``), D >= 384 only: keep the forward's SwiGLU intermediate h [M, 4D] for the
+    """Opt-in (``settings.transition_wide_save_h=1``), D >= 384 only: keep the forward's SwiGLU intermediate h [M, 4D] for the
     backward instead of recomputing-and-storing it in the gate kernel. The D >= 384 forward writes h to HBM anyway (between
     its two kernels), so this costs no forward time -- only activation memory, M x 4D bf16 per layer (453 MB at D = 384,
     604 MB at D = 512 for a 384 x 384 pair). Measured: gate kernel -12 % / -12 %, the backward ~-5 %."""
-    return d >= 384 and os.environ.get("MINIWORLD_TRANSITION_WIDE_SAVE_H", "0") == "1"
+    return d >= 384 and settings.current().transition_wide_save_h
 
 
 def _sm_count(device: torch.device | int | None = None) -> int:
@@ -69,13 +70,23 @@ def _ext(width: int, ctas: int):
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
-                           f"-I{_dir.parent / 'anthropic_v5'}", f"-I{_dir}", f"-I{_dir / 'kernels'}",
-                           f"-DWIDE_D={width}", f"-DWIDE_SMS={ctas}",
-                           "--expt-relaxed-constexpr",
-                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                           "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
-        extra_cflags=["-std=c++17"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            *gencodes("90a"),
+            f"-I{_dir.parent / 'anthropic_v5'}",
+            f"-I{_dir}",
+            f"-I{_dir / 'kernels'}",
+            f"-DWIDE_D={width}",
+            f"-DWIDE_SMS={ctas}",
+            "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
     )
 
 
@@ -91,11 +102,13 @@ def _is_hopper(index: int) -> bool:
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """Whether these kernels can run this call: sm_90, bf16, D in ``WIDTHS`` with hidden 4 D, whole 128-row tiles.
     The requirements are the kernels' own (literal tile shapes, persistent grids without a ragged tail), not a policy."""
-    if os.environ.get("MINIWORLD_TRANSITION_WIDE_SM90A", "1") == "0":
+    if not settings.current().transition_wide_sm90a:
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not _is_hopper(
+        x.device.index if x.device.index is not None else torch.cuda.current_device()
+    ):
         return False
     d = x.shape[-1]
     if d not in WIDTHS or wa.shape != (4 * d, d) or ws.shape != (d, 4 * d):
@@ -121,8 +134,11 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         _ext_for(x)
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED.add(x.shape[-1])
-        warnings.warn(f"wide sm90a Transition (D={x.shape[-1]}) unavailable, keeping the existing path: {exc!r}",
-                      RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"wide sm90a Transition (D={x.shape[-1]}) unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -130,6 +146,7 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
 def _is_fake(*tensors) -> bool:
     """True under FakeTensorMode, where a native extension must not be entered (see ``fused_sm90a._is_fake``)."""
     from torch._subclasses.fake_tensor import FakeTensor
+
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
@@ -137,7 +154,13 @@ def _pack(wa: torch.Tensor, wb: torch.Tensor, block: int) -> torch.Tensor:
     """[Wa; Wb] interleaved in ``block``-row blocks [Wa_0 | Wb_0 | Wa_1 | ...] -- one GEMM tile then holds a AND b of the
     same hidden units."""
     h, d = wa.shape
-    return torch.stack([wa.reshape(h // block, block, d), wb.reshape(h // block, block, d)], 1).reshape(2 * h, d).contiguous()
+    return (
+        torch.stack(
+            [wa.reshape(h // block, block, d), wb.reshape(h // block, block, d)], 1
+        )
+        .reshape(2 * h, d)
+        .contiguous()
+    )
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -155,35 +178,68 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     f32 = dict(dtype=torch.float32, device=x.device)
     d = x.shape[1]
     h = x.new_empty((x.shape[0], 4 * d)) if d >= 384 else x.new_empty((1, 1))
-    return (torch.empty_like(x), torch.empty_like(x) if save else x.new_empty((1, d)),
-            torch.empty((rows,), **f32), torch.empty((rows,), **f32), h)
+    return (
+        torch.empty_like(x),
+        torch.empty_like(x) if save else x.new_empty((1, d)),
+        torch.empty((rows,), **f32),
+        torch.empty((rows,), **f32),
+        h,
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="transition_wide_fwd_sm90a")
-def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                ws: torch.Tensor, eps: float, save: bool,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    save: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """x [M, D] bf16, gamma / beta fp32. Returns (out, xn, rstd, c1, h), out = transition(x) + x; h see the fake."""
     if _is_fake(x, wa):
         return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
     ext = _ext_for(x)
     if x.shape[-1] in (64, 256):
-        return (*ext.fwd(x, gamma, beta, wa, wb, ws.t().contiguous(), float(eps), bool(save)), x.new_empty((1, 1)))
+        return (
+            *ext.fwd(
+                x, gamma, beta, wa, wb, ws.t().contiguous(), float(eps), bool(save)
+            ),
+            x.new_empty((1, 1)),
+        )
     return tuple(ext.fwd(x, gamma, beta, _pack(wa, wb, 64), ws, float(eps), bool(save)))
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hsaved):
     """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32 at D >= 256."""
     wdt = torch.float32 if x.shape[-1] >= 256 else wa.dtype
-    return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
-            torch.empty(wa.shape, dtype=wdt, device=wa.device), torch.empty(wb.shape, dtype=wdt, device=wb.device),
-            torch.empty(ws.shape, dtype=wdt, device=ws.device))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(gamma),
+        torch.empty_like(gamma),
+        torch.empty(wa.shape, dtype=wdt, device=wa.device),
+        torch.empty(wb.shape, dtype=wdt, device=wb.device),
+        torch.empty(ws.shape, dtype=wdt, device=ws.device),
+    )
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_wide_bwd_sm90a")
-def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
-                gamma: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, hsaved: torch.Tensor,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    hsaved: torch.Tensor,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch. ``hsaved`` is the forward's
     h [M, 4D] when it was kept (save_h) and a placeholder otherwise."""
     if _is_fake(dy, x):
@@ -197,8 +253,8 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
     hid, dab = ext.gate(xn, dy, _pack(wa, wb, 128), ws.t().contiguous(), not have_h)
     if have_h:
         hid = hsaved
-    dws = _mm_f32(dy.t(), hid)                            # [D, H]
-    dwab = _mm_f32(dab.t(), xn)                           # [2H, D]: dWa then dWb (dab holds dA | dB, unpacked)
+    dws = _mm_f32(dy.t(), hid)  # [D, H]
+    dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb (dab holds dA | dB, unpacked)
     del hid
     w_ab = torch.cat((wa, wb), 0)
     if d == 256:
@@ -222,7 +278,9 @@ class _WideTransitionSM90A(torch.autograd.Function):
         wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
         out, xn, rstd, c1, h = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
         if not save_h_enabled(flat.shape[-1]):
-            h = h.new_empty((1, 1))                       # not kept: the gate kernel recomputes and stores it
+            h = h.new_empty(
+                (1, 1)
+            )  # not kept: the gate kernel recomputes and stores it
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, h)
         ctx.shape = shape
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
@@ -233,18 +291,46 @@ class _WideTransitionSM90A(torch.autograd.Function):
         flat, xn, rstd, c1, gf, wa, wb, ws, h = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
-            dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, h)
-        return (dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None)
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            flat,
+            xn,
+            rstd,
+            c1,
+            gf,
+            wa,
+            wb,
+            ws,
+            h,
+        )
+        return (
+            dx.reshape(ctx.shape),
+            dgam.to(gdt),
+            dbeta.to(bdt),
+            dwa.to(adt),
+            dwb.to(bwdt),
+            dws.to(sdt),
+            None,
+        )
 
 
 def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as ``fused_sm90a.transition_fused_sm90a``. Call ``supported()`` first: this
     raises rather than falling back. Inference (grad mode off, or nothing requiring grad) runs the forward without the
     saves, decided here and not inside the autograd Function, for the reason ``fused_sm90a`` documents."""
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
+    if not (
+        torch.is_grad_enabled()
+        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    ):
         shape = x.shape
-        out, _, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(),
-                                   beta.float().contiguous(), wa.contiguous(), wb.contiguous(), ws.contiguous(),
-                                   float(eps), False)
+        out, _, _, _, _ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(),
+            gamma.float().contiguous(),
+            beta.float().contiguous(),
+            wa.contiguous(),
+            wb.contiguous(),
+            ws.contiguous(),
+            float(eps),
+            False,
+        )
         return out.reshape(shape)
     return _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)

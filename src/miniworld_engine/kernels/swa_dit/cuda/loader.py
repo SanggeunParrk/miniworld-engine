@@ -3,7 +3,7 @@
 Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources, same nvcc flags (``-O3``,
 ``-gencode=arch=compute_90a,code=sm_90a``, ``--use_fast_math``); what changed is where and how they build:
 
-* under ``$MINIWORLD_ENGINE_JIT_ROOT/<extension>`` (default ``~/.cache/miniworld_engine_jit``), one directory per
+* under ``$settings.engine_jit_root/<extension>`` (default ``~/.cache/miniworld_engine_jit``), one directory per
   extension, instead of torch's extension cache or team-gm's ``SWA_CUDA_BUILD``. Set the root per checkout/GPU so
   concurrent builds do not collide;
 * through ``kernels._nvcc.load_extension``, which reclaims a lock left by a killed build (NFS-safe: it trusts the
@@ -18,6 +18,7 @@ The kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve 
 diagnostics ``SWA_FFN_ABL`` (ablation bits) and ``SWA_FFN_PROF`` (clock64 section profile) from the environment; both
 default off and change nothing when unset.
 """
+
 from __future__ import annotations
 
 import functools
@@ -26,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 import torch
+from miniworld_engine import settings
 
 _DIR = Path(__file__).resolve().parent
 
@@ -38,8 +40,8 @@ ERRORS: dict[str, str] = {}
 
 
 def jit_root() -> Path:
-    """Where the extensions build: ``$MINIWORLD_ENGINE_JIT_ROOT``, else ``~/.cache/miniworld_engine_jit``."""
-    return Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", str(Path.home() / ".cache" / "miniworld_engine_jit")))
+    """Where the extensions build: ``$settings.engine_jit_root``, else ``~/.cache/miniworld_engine_jit``."""
+    return settings.engine_jit_root()
 
 
 @functools.lru_cache(maxsize=16)
@@ -53,7 +55,11 @@ def is_sm90(device: torch.device | None = None) -> bool:
         return False
     if device is not None and device.type != "cuda":
         return False
-    index = device.index if device is not None and device.index is not None else torch.cuda.current_device()
+    index = (
+        device.index
+        if device is not None and device.index is not None
+        else torch.cuda.current_device()
+    )
     return _capability(index) == (9, 0)
 
 
@@ -69,7 +75,11 @@ def extension(which: str) -> Any:
         if not is_sm90():
             ERRORS[which] = "not an sm_90 device"
             return None
-        from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
+        from miniworld_engine.kernels._nvcc import (
+            ensure_cuda_home,
+            host_flags,
+            load_extension,
+        )
 
         ensure_cuda_home()
         src = SOURCES[which]
@@ -77,9 +87,19 @@ def extension(which: str) -> Any:
         build = jit_root() / name
         build.mkdir(parents=True, exist_ok=True)
         _EXT[which] = load_extension(
-            name, [str(_DIR / f"{src}.cu")], build_directory=str(build), extra_include_paths=[str(_DIR)],
-            extra_cuda_cflags=[*host_flags(), "-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math"],
-            extra_cflags=["-O3"], verbose=False)
-    except Exception as ex:                             # noqa: BLE001 -- fall back to Triton
+            name,
+            [str(_DIR / f"{src}.cu")],
+            build_directory=str(build),
+            extra_include_paths=[str(_DIR)],
+            extra_cuda_cflags=[
+                *host_flags(),
+                "-O3",
+                "-gencode=arch=compute_90a,code=sm_90a",
+                "--use_fast_math",
+            ],
+            extra_cflags=["-O3"],
+            verbose=False,
+        )
+    except Exception as ex:  # noqa: BLE001 -- fall back to Triton
         ERRORS[which] = repr(ex)
     return _EXT[which]

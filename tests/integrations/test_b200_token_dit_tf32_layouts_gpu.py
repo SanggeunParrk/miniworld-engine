@@ -1,24 +1,28 @@
 """fp32 (TF32 tensor cores) token DiT on B200 at every head layout: 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024).
 
-  * the TF32 attention cores built per layout (``attn_fwd_tf32``, ``attn_dkv_tf32`` + ``attn_dqb_tf32``, ``attn_inf_tf32``;
-    ``sm100._tdit_defs``) against fp64;
-  * the fused inference step (integrations/token_dit.py) and the fused training block (integrations/token_dit_train.py) in fp32
-    against the fp32 IEEE PyTorch block, no worse than the engine's own module path in the same TF32 regime, and the path
-    actually taken.
+* the TF32 attention cores built per layout (``attn_fwd_tf32``, ``attn_dkv_tf32`` + ``attn_dqb_tf32``, ``attn_inf_tf32``;
+  ``sm100._tdit_defs``) against fp64;
+* the fused inference step (integrations/token_dit.py) and the fused training block (integrations/token_dit_train.py) in fp32
+  against the fp32 IEEE PyTorch block, no worse than the engine's own module path in the same TF32 regime, and the path
+  actually taken.
 """
 
 import math
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
-HEADS = [(16, 48), (24, 32), (12, 64), (16, 64)]                 # (heads, head dim)
-LAYOUTS = [(h, h * dh) for h, dh in HEADS]                       # (heads, d_single)
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
+HEADS = [(16, 48), (24, 32), (12, 64), (16, 64)]  # (heads, head dim)
+LAYOUTS = [(h, h * dh) for h, dh in HEADS]  # (heads, d_single)
 
 
 @pytest.fixture(autouse=True)
@@ -40,7 +44,10 @@ def _rel(a, b):
 def _ref(q, k, v, bias, mask=None):
     """softmax(q k^T / sqrt(dh) + bias) v per sample and head in fp64; q, k, v [A, L, H, dh], bias [H, L, L]."""
     dh = q.shape[-1]
-    s = torch.einsum("alhd,amhd->ahlm", q.double(), k.double()) / math.sqrt(dh) + bias.double()
+    s = (
+        torch.einsum("alhd,amhd->ahlm", q.double(), k.double()) / math.sqrt(dh)
+        + bias.double()
+    )
     if mask is not None:
         s = s.masked_fill(~mask, float("-inf"))
     return torch.einsum("ahlm,amhd->alhd", s.softmax(-1), v.double()), s
@@ -73,20 +80,43 @@ def test_training_core_tf32(heads, L, masked):
     # LSE moves by at most that bound's max over the keys (/ ln 2 in log2 units). A fixed absolute bound does not hold across
     # layouts: the shift is systematic (truncation), it scales with the logits and the max runs over A H L rows (24 x 32,
     # L384: 6.1e-3 measured against the 5e-3 that held at 16 x 48).
-    lse_err = (LSE.double() - torch.logsumexp(s, -1) / math.log(2)).abs()                   # [A, H, L]
-    qk_abs = torch.einsum("alhd,amhd->ahlm", q.double().abs(), k.double().abs()).amax(-1)    # max_j sum_i |q_i k_ij|
-    lse_bound = qk_abs * 2.0 ** -9 / math.sqrt(dh) / math.log(2) + 1e-4                      # + fp32 accumulation / ex2.approx
+    lse_err = (LSE.double() - torch.logsumexp(s, -1) / math.log(2)).abs()  # [A, H, L]
+    qk_abs = torch.einsum("alhd,amhd->ahlm", q.double().abs(), k.double().abs()).amax(
+        -1
+    )  # max_j sum_i |q_i k_ij|
+    lse_bound = (
+        qk_abs * 2.0**-9 / math.sqrt(dh) / math.log(2) + 1e-4
+    )  # + fp32 accumulation / ex2.approx
     dO = torch.randn(A, L, H, dh, device="cuda", generator=g)
-    Dd = (dO * O.view(A, L, H, dh)).sum(-1).permute(0, 2, 1).contiguous()                 # [A, H, L]
-    DQ, DK, DV, DB = sm100.backward_tf32(q2, k2, v2, dO.reshape(A * L, W).contiguous(), bias.contiguous(), LSE, Dd, A, L, H, dh)
+    Dd = (dO * O.view(A, L, H, dh)).sum(-1).permute(0, 2, 1).contiguous()  # [A, H, L]
+    DQ, DK, DV, DB = sm100.backward_tf32(
+        q2,
+        k2,
+        v2,
+        dO.reshape(A * L, W).contiguous(),
+        bias.contiguous(),
+        LSE,
+        Dd,
+        A,
+        L,
+        H,
+        dh,
+    )
     torch.cuda.synchronize()
     want.backward(dO.double())
     bgrad = bd.grad.masked_fill(torch.isinf(bias.double()), 0.0)
-    errs = {"O": _rel(O.view(A, L, H, dh), want), "dq": _rel(DQ.view(A, L, H, dh), qd.grad),
-            "dk": _rel(DK.view(A, L, H, dh), kd.grad), "dv": _rel(DV.view(A, L, H, dh), vd.grad),
-            "dbias": _rel(DB.masked_fill(torch.isinf(bias), 0.0), bgrad)}
-    print(f"{H} x {dh} L{L} masked={masked}:", {k: f"{v:.2e}" for k, v in errs.items()},
-          f"LSE max {float(lse_err.max()):.2e}, max err / bound {float((lse_err / lse_bound).max()):.2f}")
+    errs = {
+        "O": _rel(O.view(A, L, H, dh), want),
+        "dq": _rel(DQ.view(A, L, H, dh), qd.grad),
+        "dk": _rel(DK.view(A, L, H, dh), kd.grad),
+        "dv": _rel(DV.view(A, L, H, dh), vd.grad),
+        "dbias": _rel(DB.masked_fill(torch.isinf(bias), 0.0), bgrad),
+    }
+    print(
+        f"{H} x {dh} L{L} masked={masked}:",
+        {k: f"{v:.2e}" for k, v in errs.items()},
+        f"LSE max {float(lse_err.max()):.2e}, max err / bound {float((lse_err / lse_bound).max()):.2f}",
+    )
     assert bool((lse_err <= lse_bound).all()), float((lse_err / lse_bound).max())
     assert errs["O"] < 2e-3, errs
     for name in ("dq", "dk", "dv", "dbias"):
@@ -104,19 +134,30 @@ def test_inference_core_tf32(heads, L):
     S, W, nb = 3, H * dh, 2
     c = math.log2(math.e)
     g = torch.Generator(device="cuda").manual_seed(L * H + 1)
-    q, k, v, gt = (torch.randn(S, L, H, dh, device="cuda", generator=g) for _ in range(4))
+    q, k, v, gt = (
+        torch.randn(S, L, H, dh, device="cuda", generator=g) for _ in range(4)
+    )
     bias = torch.randn(nb * H, L, L, device="cuda", generator=g)
     mask = torch.rand(L, device="cuda", generator=g) > 0.2
     mask[0] = True
-    qkg = torch.cat([(q * (c / math.sqrt(dh))).reshape(S * L, W), k.reshape(S * L, W), gt.reshape(S * L, W)], 1).contiguous()
-    vt = v.reshape(S * L, W).t().contiguous()                                              # [W, S L]
+    qkg = torch.cat(
+        [
+            (q * (c / math.sqrt(dh))).reshape(S * L, W),
+            k.reshape(S * L, W),
+            gt.reshape(S * L, W),
+        ],
+        1,
+    ).contiguous()
+    vt = v.reshape(S * L, W).t().contiguous()  # [W, S L]
     b2 = (bias * c).masked_fill(~mask, float("-inf")).contiguous()
     core = sm100.GatedInferenceCore(torch.cuda.current_device(), torch.float32, H, dh)
     core(qkg, b2, 1, S, vt)
     torch.cuda.synchronize()
     o, _ = _ref(q, k, v, bias[H:], mask)
     want = torch.sigmoid(gt.double()) * o
-    assert _rel(qkg[:, :W].view(S, L, H, dh), want) < 2e-3, _rel(qkg[:, :W].view(S, L, H, dh), want)
+    assert _rel(qkg[:, :W].view(S, L, H, dh), want) < 2e-3, _rel(
+        qkg[:, :W].view(S, L, H, dh), want
+    )
 
 
 # ------------------------------------------------------------------------------------------------------------- blocks
@@ -135,8 +176,20 @@ def _randomize(m):
 def _pair_of_blocks(layout, qk, seed):
     H, d = layout
     torch.manual_seed(seed)
-    ref = _randomize(DiTBlock(d_single=d, n_head=H, use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())
-    eng = DiTBlock(d_single=d, n_head=H, use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
+    ref = _randomize(
+        DiTBlock(
+            d_single=d,
+            n_head=H,
+            use_qk_norm=qk,
+            implementation=ImplementationType.PYTORCH,
+        ).cuda()
+    )
+    eng = DiTBlock(
+        d_single=d,
+        n_head=H,
+        use_qk_norm=qk,
+        implementation=ImplementationType.MINIWORLD,
+    ).cuda()
     eng.load_state_dict(ref.state_dict())
     return ref, eng
 
@@ -156,13 +209,16 @@ class _TF32:
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize(("S", "L", "qk"), [(5, 384, False), (4, 200, True), (3, 333, False)])
+@pytest.mark.parametrize(
+    ("S", "L", "qk"), [(5, 384, False), (4, 200, True), (3, 333, False)]
+)
 def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
     from miniworld_engine.integrations import token_dit
 
     H, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=11)
-    ref.eval(); eng.eval()
+    ref.eval()
+    eng.eval()
     g = torch.Generator(device="cuda").manual_seed(12)
     x = torch.randn(S, 1, L, d, device="cuda", generator=g)
     c = torch.randn(1, 1, L, 384, device="cuda", generator=g).expand(S, 1, L, 384)
@@ -187,14 +243,23 @@ def _run(m, single, cond, pair, mask, w):
     ins = [t.detach().clone().requires_grad_() for t in (single, cond, pair)]
     out = m(*ins, mask)
     (out.float() * w).sum().backward()
-    res = {"out": out.detach().float(), "dsingle": ins[0].grad.float(), "dcond": ins[1].grad.float(), "dpair": ins[2].grad.float()}
-    res.update({n: p.grad.float() for n, p in m.named_parameters() if p.grad is not None})
+    res = {
+        "out": out.detach().float(),
+        "dsingle": ins[0].grad.float(),
+        "dcond": ins[1].grad.float(),
+        "dpair": ins[2].grad.float(),
+    }
+    res.update(
+        {n: p.grad.float() for n, p in m.named_parameters() if p.grad is not None}
+    )
     m.zero_grad(set_to_none=True)
     return res
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)
-@pytest.mark.parametrize(("A", "L", "qk"), [(4, 256, True), (2, 384, False), (3, 200, True)])
+@pytest.mark.parametrize(
+    ("A", "L", "qk"), [(4, 256, True), (2, 384, False), (3, 200, True)]
+)
 def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     """The fused fp32 training block (TF32 kernels; L = 200 and odd A through the internal padding) against the fp32 IEEE
     block: output and every gradient within 1.5x the module path's error in the same TF32 regime."""
@@ -212,11 +277,15 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
         truth = _run(ref, single, cond, pair, mask, w)
     calls = []
     orig = token_dit_train._Block.apply
-    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(a[7]) or orig(*a))
+    monkeypatch.setattr(
+        token_dit_train._Block, "apply", lambda *a: calls.append(a[7]) or orig(*a)
+    )
     with _TF32(True):
         fused = _run(eng, single, cond, pair, mask, w)
-        assert calls and all(calls), "the fp32 training call did not take the fused fp32 path"
-        monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
+        assert calls and all(calls), (
+            "the fp32 training call did not take the fused fp32 path"
+        )
+        override_setting(monkeypatch, "token_dit_train", "0")
         module = _run(eng, single, cond, pair, mask, w)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))
     worst = []
@@ -245,7 +314,9 @@ def test_fused_training_fp32_under_bf16_autocast(layout, monkeypatch):
     plain = _run(eng, single, cond, pair, None, w)
     calls = []
     orig = token_dit_train._Block.apply
-    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(a[7]) or orig(*a))
+    monkeypatch.setattr(
+        token_dit_train._Block, "apply", lambda *a: calls.append(a[7]) or orig(*a)
+    )
     with torch.autocast("cuda", dtype=torch.bfloat16):
         amp = _run(eng, single, cond, pair, None, w)
     assert calls == [True]

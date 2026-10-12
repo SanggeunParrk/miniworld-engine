@@ -17,7 +17,7 @@
 #              FPF_PWA_CFG is unset for the row.
 #   anthropic_hybrid  integrations/anthropic_msa.py: the upstream msa_pwa cell (g_fo4p) with OUR
 #              fused LayerNorm substituted for norm_z. Needs OPT_CORE_DIR=$MINIWORLD_ANTHROPIC_ROOT/
-#              common/opt_core. The harness pins MINIWORLD_PWA_TRAIN=0 / MINIWORLD_PWA_INFER=0 for
+#              common/opt_core. The harness pins settings.pwa_train=0 / settings.pwa_infer=0 for
 #              both anthropic labels and masks OPT_CORE_DIR for every non-anthropic row.
 #   cuequivariance ships no pair-weighted-averaging kernel: not offered (`unsupported`).
 d_single: 384

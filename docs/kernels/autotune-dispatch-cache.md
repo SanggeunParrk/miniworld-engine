@@ -32,7 +32,7 @@ The wheel includes the canonical `kernels/registry/registry_kernel.csv` and matc
 they can be reused from a read-only installation. Historical revision directories are
 kept outside the package and do not ship. Missing or stale plans are regenerated under
 `$XDG_CACHE_HOME/miniworld-engine/plans` (default `~/.cache/miniworld-engine/plans`).
-`MINIWORLD_PLAN_CACHE_DIR` selects an explicit writable plan directory, for example
+`settings.plan_cache_dir` selects an explicit writable plan directory, for example
 shared storage visible to Slurm workers. This setting does not redirect tuned caches.
 Plans are validated against their architecture, runtime source files and registry;
 unshipped optimization notes do not change the dispatch identity.

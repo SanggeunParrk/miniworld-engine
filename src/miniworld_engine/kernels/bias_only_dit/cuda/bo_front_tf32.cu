@@ -1,4 +1,4 @@
-// bo_front_tf32.cu -- K1 of the bias-only token DiT's three-kernel fp32 (TF32) inference step on sm_100a (MINIWORLD_BIAS_ONLY_DIT_INF3=1):
+// bo_front_tf32.cu -- K1 of the bias-only token DiT's three-kernel fp32 (TF32) inference step on sm_100a (settings.bias_only_dit_inf3=1):
 //
 //   xa = LN(x) * s1[tok] + sh1[tok];   v | g = xa [Wv; Wg]^T     (tcgen05.mma kind::tf32; xa and v rounded to the nearest TF32)
 //

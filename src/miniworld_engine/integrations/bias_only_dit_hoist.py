@@ -31,14 +31,13 @@ accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtyp
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
 ``serves()`` is the gate (B200, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
-``modules.bias_only_dit.hoist``. MINIWORLD_BIAS_ONLY_DIT_HOIST=0 (read per call) turns it off;
-MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT=S (read per call) sets the row chunks of the dW' GEMM (1: one GEMM).
+``modules.bias_only_dit.hoist``. settings.bias_only_dit_hoist=0 (read per call) turns it off;
+settings.bias_only_dit_hoist_wsplit=S (read per call) sets the row chunks of the dW' GEMM (1: one GEMM).
 """
 
 from __future__ import annotations
 
 import contextlib
-import os
 
 import torch
 
@@ -56,7 +55,7 @@ def serves(implementation, attns, pair) -> bool:
     """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller)."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_HOIST", "1") == "0":
+    if not settings.current().bias_only_dit_hoist:
         return False
     if implementation not in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
         return False
@@ -64,10 +63,19 @@ def serves(implementation, attns, pair) -> bool:
         return False
     if not (pair.is_cuda and torch.cuda.get_device_capability(pair.device) == (10, 0)):
         return False
-    if pair.ndim != 4 or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2] or pair.shape[-1] != DP or pair.shape[1] == 0:
+    if (
+        pair.ndim != 4
+        or pair.shape[0] != 1
+        or pair.shape[1] != pair.shape[2]
+        or pair.shape[-1] != DP
+        or pair.shape[1] == 0
+    ):
         return False
     ws = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
-    if any(p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != DP for p in ws):
+    if any(
+        p is None or not p.is_cuda or p.device != pair.device or p.shape[-1] != DP
+        for p in ws
+    ):
         return False
     if pair.dtype is F32:
         return not torch.is_autocast_enabled("cuda") and all(p.dtype is F32 for p in ws)
@@ -76,8 +84,8 @@ def serves(implementation, attns, pair) -> bool:
 
 def _split(R: int) -> int:
     """Row chunks of the dW' = dbias_all Y GEMM (its [nb H, K] output alone is a few tiles): 48 where it divides R, else 64, else one
-    GEMM; MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT=S forces S (when it divides R)."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT", "")
+    GEMM; settings.bias_only_dit_hoist_wsplit=S forces S (when it divides R)."""
+    forced = settings.current().bias_only_dit_hoist_wsplit
     if forced:
         s = int(forced)
         return s if s > 1 and R % s == 0 else 1
@@ -91,6 +99,7 @@ def _gemms(dt):
         st.enter_context(torch.autocast("cuda", enabled=False))
         if dt is F32:
             from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
             st.enter_context(tf32.tf32_gemms())
         yield
 
@@ -103,10 +112,11 @@ def _fwd_fake(pair2d, wf, eps):
 def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tensor:
     """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
     ln0 = torch.empty_like(pair2d)
     HK.ln0_rows(pair2d, ln0, eps)
     with _gemms(pair2d.dtype):
-        return torch.mm(wf, ln0.t())                                         # [N, 128] x [128, R]
+        return torch.mm(wf, ln0.t())  # [N, 128] x [128, R]
 
 
 def _bwd_fake(pair2d, wf, dball, eps, split):
@@ -114,27 +124,37 @@ def _bwd_fake(pair2d, wf, dball, eps, split):
 
 
 @opaque(fake=_bwd_fake, name="bias_only_dit_hoist_bwd")
-def _hoist_bwd(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float, split: int) -> list[torch.Tensor]:
+def _hoist_bwd(
+    pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float, split: int
+) -> list[torch.Tensor]:
     """[d pair [R, 128] in the pair's dtype, dW'_all [N, 128] fp32] from dbias_all [N, R]: d LN0 = dbias_all^T W'_all (fp32); the LN0
     backward rows, which also write Y = LN0 as the dW' operand (bf16: [hi | lo], 256 columns); dW'_all = dbias_all Y over ``split``
     row chunks (strided views of dbias_all and Y: no copies), the two halves of the bf16 split added in fp32."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
     N, R = dball.shape
     f32 = pair2d.dtype is F32
     K = HK.operand_cols(pair2d.dtype)
     with _gemms(pair2d.dtype):
-        dln = torch.mm(dball.t(), wf) if f32 else torch.mm(dball.t(), wf, out_dtype=F32)              # [R, 128] fp32
+        dln = (
+            torch.mm(dball.t(), wf) if f32 else torch.mm(dball.t(), wf, out_dtype=F32)
+        )  # [R, 128] fp32
         dpair = torch.empty_like(pair2d)
         y = torch.empty(R, K, device=pair2d.device, dtype=pair2d.dtype)
         HK.ln0_bwd_rows(pair2d, dln, dpair, y, eps)
         del dln
         if split > 1:
             c = R // split
-            a, b = dball.view(N, split, c).transpose(0, 1), y.view(split, c, K)                         # [S, N, c], [S, c, K]
-            p = (torch.bmm(a, b) if f32 else torch.bmm(a, b, out_dtype=F32)).sum(0)                     # [N, K] fp32
+            a, b = (
+                dball.view(N, split, c).transpose(0, 1),
+                y.view(split, c, K),
+            )  # [S, N, c], [S, c, K]
+            p = (torch.bmm(a, b) if f32 else torch.bmm(a, b, out_dtype=F32)).sum(
+                0
+            )  # [N, K] fp32
         else:
             p = torch.mm(dball, y) if f32 else torch.mm(dball, y, out_dtype=F32)
-        dwf = p if K == DP else p[:, :DP] + p[:, DP:]                                                   # hi + lo
+        dwf = p if K == DP else p[:, :DP] + p[:, DP:]  # hi + lo
     return [dpair, dwf]
 
 
@@ -145,7 +165,7 @@ class _Sink:
     time); a gradient that does not sit in its slot (autograd summed it with another, a reentrant checkpoint copied the input) is
     copied in, a missing one is zero."""
 
-    __slots__ = ("nb", "h", "r", "dtype", "device", "buf", "given")
+    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "r")
 
     def __init__(self, nb, h, r, dtype, device):
         self.nb, self.h, self.r, self.dtype, self.device = nb, h, r, dtype, device
@@ -153,23 +173,36 @@ class _Sink:
 
     def slot(self, i, dtype, device):
         """Block i's [H, R] slice of the buffer, or None (another dtype / device, or the slot already handed out)."""
-        if dtype is not self.dtype or torch.device(device) != torch.device(self.device) or i in self.given:
+        if (
+            dtype is not self.dtype
+            or torch.device(device) != torch.device(self.device)
+            or i in self.given
+        ):
             return None
         if self.buf is None:
-            self.buf = torch.empty(self.nb * self.h, self.r, device=self.device, dtype=self.dtype)
+            self.buf = torch.empty(
+                self.nb * self.h, self.r, device=self.device, dtype=self.dtype
+            )
         self.given.add(i)
-        return self.buf[i * self.h:(i + 1) * self.h]
+        return self.buf[i * self.h : (i + 1) * self.h]
 
     def take(self, grads):
         """dbias_all [N, R] holding ``grads`` (one per block, None = zero); the buffer leaves the sink."""
         buf, self.buf, self.given = self.buf, None, set()
         if buf is None:
-            buf = torch.empty(self.nb * self.h, self.r, device=self.device, dtype=self.dtype)
+            buf = torch.empty(
+                self.nb * self.h, self.r, device=self.device, dtype=self.dtype
+            )
         for i, g in enumerate(grads):
-            s = buf[i * self.h:(i + 1) * self.h]
+            s = buf[i * self.h : (i + 1) * self.h]
             if g is None:
                 s.zero_()
-            elif not (g.data_ptr() == s.data_ptr() and g.dtype == s.dtype and g.is_contiguous() and g.numel() == s.numel()):
+            elif not (
+                g.data_ptr() == s.data_ptr()
+                and g.dtype == s.dtype
+                and g.is_contiguous()
+                and g.numel() == s.numel()
+            ):
                 s.copy_(g.reshape(self.h, self.r))
         return buf
 
@@ -185,18 +218,20 @@ def _fold(params, dt):
 
 class _Hoist(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, pair, eps, nb, sink, *params):  # noqa: D102 -- params: ln_pair.weight, to_bias.weight of each block
+    def forward(ctx, pair, eps, nb, sink, *params):
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
         gam, wts, wf = _fold(params, pair.dtype)
-        ctx.set_materialize_grads(False)                                     # an unused block's bias: None, not a zero tensor
+        ctx.set_materialize_grads(
+            False
+        )  # an unused block's bias: None, not a zero tensor
         ball = _hoist_fwd(pair.reshape(L * L, dp), wf, eps)
         ctx.save_for_backward(pair, wf, gam, wts)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
-        return tuple(ball[i * H:(i + 1) * H].view(1, H, L, L) for i in range(nb))
+        return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
 
     @staticmethod
-    def backward(ctx, *grads):  # noqa: D102
+    def backward(ctx, *grads):
         pair, wf, gam, wts = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]
@@ -204,13 +239,23 @@ class _Hoist(torch.autograd.Function):
         dpair, dwf = _hoist_bwd(pair.reshape(L * L, dp), wf, dball, eps, _split(L * L))
         del dball
         dwf = dwf.view(nb, H, dp)
-        dW = dwf * gam[:, None, :]                                           # dW_b = dW'_b diag(g_b)
-        dg = (dwf * wts).sum(1)                                              # dg_b = sum_h dW'_b o W_b
+        dW = dwf * gam[:, None, :]  # dW_b = dW'_b diag(g_b)
+        dg = (dwf * wts).sum(1)  # dg_b = sum_h dW'_b o W_b
         out = []
         for i in range(nb):
-            out.append(dg[i].to(pdts[2 * i]) if ctx.needs_input_grad[4 + 2 * i] else None)
-            out.append(dW[i].to(pdts[2 * i + 1]) if ctx.needs_input_grad[5 + 2 * i] else None)
-        return (dpair.view_as(pair) if ctx.needs_input_grad[0] else None, None, None, None, *out)
+            out.append(
+                dg[i].to(pdts[2 * i]) if ctx.needs_input_grad[4 + 2 * i] else None
+            )
+            out.append(
+                dW[i].to(pdts[2 * i + 1]) if ctx.needs_input_grad[5 + 2 * i] else None
+            )
+        return (
+            dpair.view_as(pair) if ctx.needs_input_grad[0] else None,
+            None,
+            None,
+            None,
+            *out,
+        )
 
 
 def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
@@ -219,7 +264,9 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     nb, H, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[1]
     sink = _Sink(nb, H, L * L, pair.dtype, pair.device)
     params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
-    outs = _Hoist.apply(pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params)
+    outs = _Hoist.apply(
+        pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params
+    )
     for i, o in enumerate(outs):
         setattr(o, SINK_ATTR, (sink, i))
     return tuple(outs)

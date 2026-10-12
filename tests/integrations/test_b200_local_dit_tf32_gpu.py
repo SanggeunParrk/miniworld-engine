@@ -12,6 +12,7 @@ claim holds by construction."""
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.integrations import local_dit
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -19,28 +20,54 @@ from miniworld_engine.modules.local_dit import LocalDiTBlock, to_windows
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="B200 (sm_100)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
+        reason="B200 (sm_100)",
+    ),
 ]
 
 DS, DC, DP = 128, 128, 16
 F32 = torch.float32
-TF32_KERNELS = ("local_attn_fwd_tf32",)                         # every call (inference hoists the tables)
-TRAIN_ROWS = ("atom_gemm_tf32", "f32_adaln", "f32_gate")         # training: the unfused row kernels (they save the activations)
-FUSED = ("atom_pre_tf32", "atom_post_tf32")                      # inference: AdaLNs + projections, and the rest of the block
-BF16_KERNELS = ("local_attn_fwd", "local_attn_dq", "local_attn_dkv", "atom_cond_fwd_sm100", "atom_pre_fwd_sm100", "atom_post_fwd_sm100",
-                "local_bias_fwd")
+TF32_KERNELS = ("local_attn_fwd_tf32",)  # every call (inference hoists the tables)
+TRAIN_ROWS = (
+    "atom_gemm_tf32",
+    "f32_adaln",
+    "f32_gate",
+)  # training: the unfused row kernels (they save the activations)
+FUSED = (
+    "atom_pre_tf32",
+    "atom_post_tf32",
+)  # inference: AdaLNs + projections, and the rest of the block
+BF16_KERNELS = (
+    "local_attn_fwd",
+    "local_attn_dq",
+    "local_attn_dkv",
+    "atom_cond_fwd_sm100",
+    "atom_pre_fwd_sm100",
+    "atom_post_fwd_sm100",
+    "local_bias_fwd",
+)
 
 
 def _block(seed=0, cross=False):
     torch.manual_seed(seed)
-    ref = LocalDiTBlock(cross_attention=cross, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():  # the zero inits (to_out, squeeze, to_bias) would make the block an identity
+    ref = LocalDiTBlock(
+        cross_attention=cross, implementation=ImplementationType.PYTORCH
+    )
+    with (
+        torch.no_grad()
+    ):  # the zero inits (to_out, squeeze, to_bias) would make the block an identity
         for name, p in ref.named_parameters():
             if p.ndim > 1:
                 p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5)
             else:
-                p.copy_(torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
-    eng = LocalDiTBlock(cross_attention=cross, implementation=ImplementationType.MINIWORLD)
+                p.copy_(
+                    torch.randn_like(p) * 0.1
+                    + (1.0 if name.endswith("weight") else 0.0)
+                )
+    eng = LocalDiTBlock(
+        cross_attention=cross, implementation=ImplementationType.MINIWORLD
+    )
     eng.load_state_dict(ref.state_dict())
     return ref.cuda().double(), eng.cuda().float()
 
@@ -48,13 +75,17 @@ def _block(seed=0, cross=False):
 def _inputs(A, N, seed=1):
     g = torch.Generator(device="cuda").manual_seed(seed)
     dense = torch.randn(1, N, N, DP, device="cuda", generator=g)
-    return (torch.randn(A, 1, N, DS, device="cuda", generator=g), torch.randn(A, 1, N, DC, device="cuda", generator=g), to_windows(dense))
+    return (
+        torch.randn(A, 1, N, DS, device="cuda", generator=g),
+        torch.randn(A, 1, N, DC, device="cuda", generator=g),
+        to_windows(dense),
+    )
 
 
 def _mask(N, seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
     m = torch.rand(1, N, device="cuda", generator=g) > 0.15
-    m[:, N - N // 8:] = False
+    m[:, N - N // 8 :] = False
     return m
 
 
@@ -81,7 +112,12 @@ def _train(m, ins, dtype, w, mask=None):
     leaves = [t.detach().clone().to(dtype).requires_grad_() for t in ins]
     out = m(*leaves, mask)
     (out.double() * w).sum().backward()
-    res = {"out": out.detach(), "dsingle": leaves[0].grad, "dcond": leaves[1].grad, "dpair": leaves[2].grad}
+    res = {
+        "out": out.detach(),
+        "dsingle": leaves[0].grad,
+        "dcond": leaves[1].grad,
+        "dpair": leaves[2].grad,
+    }
     res.update({n: p.grad.clone() for n, p in m.named_parameters()})
     m.zero_grad(set_to_none=True)
     return res
@@ -90,26 +126,51 @@ def _train(m, ins, dtype, w, mask=None):
 def _spy(monkeypatch):
     calls = []
     orig_apply, orig_infer = local_dit._LocalBlock32.apply, local_dit._infer32
-    monkeypatch.setattr(local_dit._LocalBlock32, "apply", lambda *a: calls.append("train32") or orig_apply(*a))
-    monkeypatch.setattr(local_dit, "_infer32", lambda *a: calls.append("infer32") or orig_infer(*a))
+    monkeypatch.setattr(
+        local_dit._LocalBlock32,
+        "apply",
+        lambda *a: calls.append("train32") or orig_apply(*a),
+    )
+    monkeypatch.setattr(
+        local_dit, "_infer32", lambda *a: calls.append("infer32") or orig_infer(*a)
+    )
     return calls
 
 
 def _check(fused, truth, module_tf32, module_ieee):
     worst = []
     for k in truth:
-        ef, em, ei = _rel(fused[k], truth[k]), _rel(module_tf32[k], truth[k]), _rel(module_ieee[k], truth[k])
+        ef, em, ei = (
+            _rel(fused[k], truth[k]),
+            _rel(module_tf32[k], truth[k]),
+            _rel(module_ieee[k], truth[k]),
+        )
         worst.append((ef / max(em, 1e-9), k, ef, em, ei))
         assert torch.isfinite(fused[k]).all(), k
         assert fused[k].dtype == F32, (k, fused[k].dtype)
-        assert ef < 1.5 * em + 1e-3, f"{k}: TF32 kernels {ef:.2e} vs module path (TF32) {em:.2e} (IEEE {ei:.2e})"
-        assert ef < 30 * ei + 1e-3, f"{k}: TF32 kernels {ef:.2e} vs module path (IEEE fp32) {ei:.2e}"
+        assert ef < 1.5 * em + 1e-3, (
+            f"{k}: TF32 kernels {ef:.2e} vs module path (TF32) {em:.2e} (IEEE {ei:.2e})"
+        )
+        assert ef < 30 * ei + 1e-3, (
+            f"{k}: TF32 kernels {ef:.2e} vs module path (IEEE fp32) {ei:.2e}"
+        )
     print("worst ratios to the TF32 module path:", sorted(worst, reverse=True)[:4])
 
 
-@pytest.mark.parametrize(("A", "N", "masked", "cross"), [(4, 256, False, False), (3, 300, False, False), (3, 384, True, False),
-                                                         (2, 200, True, False), (5, 130, False, False), (3, 300, False, True),
-                                                         (2, 384, True, True), (4, 130, True, True), (1, 100, True, False)])
+@pytest.mark.parametrize(
+    ("A", "N", "masked", "cross"),
+    [
+        (4, 256, False, False),
+        (3, 300, False, False),
+        (3, 384, True, False),
+        (2, 200, True, False),
+        (5, 130, False, False),
+        (3, 300, False, True),
+        (2, 384, True, True),
+        (4, 130, True, True),
+        (1, 100, True, False),
+    ],
+)
 def test_training_matches_the_module_path(A, N, masked, cross, monkeypatch):
     ref, eng = _block(cross=cross)
     ins = _inputs(A, N)
@@ -119,7 +180,7 @@ def test_training_matches_the_module_path(A, N, masked, cross, monkeypatch):
     calls = _spy(monkeypatch)
     fused = _train(eng, ins, F32, w, mask)
     assert calls == ["train32"], calls
-    monkeypatch.setenv("MINIWORLD_LOCAL_DIT_SM100", "0")
+    override_setting(monkeypatch, "local_dit_sm100", "0")
     with _tf32(True):
         module_tf32 = _train(eng, ins, F32, w, mask)
     with _tf32(False):
@@ -129,10 +190,21 @@ def test_training_matches_the_module_path(A, N, masked, cross, monkeypatch):
     _check(fused, truth, module_tf32, module_ieee)
 
 
-@pytest.mark.parametrize(("A", "N", "masked", "cross"), [(5, 128, False, False), (1, 384, False, False), (2, 1024, False, False),
-                                                         (5, 1024, True, False), (5, 300, True, False), (1, 1000, True, False),
-                                                         (2, 100, False, False), (2, 300, True, True), (5, 1024, False, True),
-                                                         (1, 130, False, True)])
+@pytest.mark.parametrize(
+    ("A", "N", "masked", "cross"),
+    [
+        (5, 128, False, False),
+        (1, 384, False, False),
+        (2, 1024, False, False),
+        (5, 1024, True, False),
+        (5, 300, True, False),
+        (1, 1000, True, False),
+        (2, 100, False, False),
+        (2, 300, True, True),
+        (5, 1024, False, True),
+        (1, 130, False, True),
+    ],
+)
 def test_inference_matches_the_module_path(A, N, masked, cross, monkeypatch):
     ref, eng = _block(2, cross)
     s, c, z = _inputs(A, N, 3)
@@ -142,7 +214,7 @@ def test_inference_matches_the_module_path(A, N, masked, cross, monkeypatch):
         calls = _spy(monkeypatch)
         fused = {"out": eng(s, c, z, mask)}
         assert calls == ["infer32"], calls
-        monkeypatch.setenv("MINIWORLD_LOCAL_DIT_SM100", "0")
+        override_setting(monkeypatch, "local_dit_sm100", "0")
         with _tf32(True):
             module_tf32 = {"out": eng(s, c, z, mask)}
         with _tf32(False):
@@ -151,8 +223,16 @@ def test_inference_matches_the_module_path(A, N, masked, cross, monkeypatch):
     _check(fused, truth, module_tf32, module_ieee)
 
 
-@pytest.mark.parametrize(("A", "N", "masked", "cross"), [(5, 1024, False, True), (5, 1024, False, False), (3, 300, True, True),
-                                                         (2, 384, True, False), (1, 130, False, True)])
+@pytest.mark.parametrize(
+    ("A", "N", "masked", "cross"),
+    [
+        (5, 1024, False, True),
+        (5, 1024, False, False),
+        (3, 300, True, True),
+        (2, 384, True, False),
+        (1, 130, False, True),
+    ],
+)
 def test_fused_inference_matches_the_unfused_kernels(A, N, masked, cross, monkeypatch):
     """The fused pre / post kernels do the unfused kernels' arithmetic (same products in the same K order, same rounding points, the same
     LayerNorm / sigmoid formulas): the outputs agree to fp32 rounding."""
@@ -163,15 +243,17 @@ def test_fused_inference_matches_the_unfused_kernels(A, N, masked, cross, monkey
         names = _kernel_names(lambda: eng(s, c, z, mask), FUSED)
         assert all(_count(names, k) == 1 for k in FUSED), names
         fused = {}
-        for units in ("full", "half"):                              # both work-unit sizes of each fused kernel
-            monkeypatch.setenv("MINIWORLD_TF32_FUSED_UNITS", units)
+        for units in ("full", "half"):  # both work-unit sizes of each fused kernel
+            override_setting(monkeypatch, "tf32_fused_units", units)
             fused[units] = eng(s, c, z, mask)
-        monkeypatch.setenv("MINIWORLD_LOCAL_DIT_TF32_FUSED", "0")
+        override_setting(monkeypatch, "local_dit_tf32_fused", "0")
         unfused = eng(s, c, z, mask)
     for out in fused.values():
         assert torch.isfinite(out).all()
         assert _rel(out, unfused) < 2e-6, _rel(out, unfused)
-    assert torch.equal(fused["full"], fused["half"])                 # the unit size changes the schedule, not the arithmetic
+    assert torch.equal(
+        fused["full"], fused["half"]
+    )  # the unit size changes the schedule, not the arithmetic
 
 
 def test_fused_mixed_units_match():
@@ -181,24 +263,48 @@ def test_fused_mixed_units_match():
 
     _, eng = _block(5, True)
     single, cond, pair = _inputs(5, 1024, 9)
-    weights = [eng.get_parameter(n) for n in (*local_dit.WEIGHTS, *local_dit.CROSS_WEIGHTS)]
+    weights = [
+        eng.get_parameter(n) for n in (*local_dit.WEIGHTS, *local_dit.CROSS_WEIGHTS)
+    ]
     n, m = 1024, 5 * 1024
     with torch.no_grad():
         eng(single, cond, pair)
         pk = local_dit._weights32(weights)
         s2 = single.reshape(m, DS)
-        mod, _, _, _, mkv = local_dit._cond_tables32(cond, lambda: cond.reshape(m, DS), n, weights, pk, True, False)
+        mod, _, _, _, mkv = local_dit._cond_tables32(
+            cond, lambda: cond.reshape(m, DS), n, weights, pk, True, False
+        )
 
         def pre(nfull):
-            return rows.pre32(s2, mod[:, local_dit._S1], mod[:, local_dit._B1], pk.wp, pk.bp[:DS], local_dit._P_RND[True], mks=mkv[:, :DS],
-                              mkb=mkv[:, DS:], nfull=nfull)
+            return rows.pre32(
+                s2,
+                mod[:, local_dit._S1],
+                mod[:, local_dit._B1],
+                pk.wp,
+                pk.bp[:DS],
+                local_dit._P_RND[True],
+                mks=mkv[:, :DS],
+                mkb=mkv[:, DS:],
+                nfull=nfull,
+            )
 
         p = pre(m // 128)
         o = torch.randn(m, DS, device="cuda")
 
         def post(nfull):
-            return rows.post32(o, p[:, DS:2 * DS], s2, mod[:, local_dit._SO], mod[:, local_dit._S2], mod[:, local_dit._B2], mod[:, local_dit._ST],
-                               pk.wo, pk.wu, pk.ws, nfull=nfull)
+            return rows.post32(
+                o,
+                p[:, DS : 2 * DS],
+                s2,
+                mod[:, local_dit._SO],
+                mod[:, local_dit._S2],
+                mod[:, local_dit._B2],
+                mod[:, local_dit._ST],
+                pk.wo,
+                pk.wu,
+                pk.ws,
+                nfull=nfull,
+            )
 
         whole = post(m // 128)
         for nfull in (0, 17, m // 128 - 1):
@@ -206,7 +312,10 @@ def test_fused_mixed_units_match():
             assert torch.equal(post(nfull), whole), nfull
 
 
-@pytest.mark.parametrize(("N", "masked", "cross"), [(256, False, False), (300, True, False), (300, True, True)])
+@pytest.mark.parametrize(
+    ("N", "masked", "cross"),
+    [(256, False, False), (300, True, False), (300, True, True)],
+)
 def test_inference_is_cuda_graph_capturable(N, masked, cross):
     _, eng = _block(4, cross)
     s, c, z = _inputs(2, N, 5)
@@ -299,10 +408,15 @@ def _kernel_names(fn, expect=()):
     names = []
     for _ in range(3):
         with profile(activities=[ProfilerActivity.CUDA]) as prof:
-            pad.add_(1)                                              # absorbs a dropped first record
+            pad.add_(1)  # absorbs a dropped first record
             fn()
             torch.cuda.synchronize()
-        names = [e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA and "Activity Buffer" not in e.name]
+        names = [
+            e.name
+            for e in prof.events()
+            if e.device_type == torch.autograd.DeviceType.CUDA
+            and "Activity Buffer" not in e.name
+        ]
         if all(_count(names, k) for k in expect):
             break
     return names
@@ -327,8 +441,25 @@ def test_the_tf32_cuda_kernels_run_and_no_triton(cross):
         with torch.no_grad():
             eng(*ins, mask)
 
-    for fn, extra in ((train, (*TRAIN_ROWS, "local_attn_dq_tf32", "local_attn_dkv_tf32", "f32_ln_aff", "local_bias_fwd_f32", "f32_adaln_bwd",
-                               "f32_gate_bwd", "f32_ln_bwd", "f32_swiglu_bwd", "f32_tail_bwd", "local_bias_bwd_f32")), (infer, FUSED)):
+    for fn, extra in (
+        (
+            train,
+            (
+                *TRAIN_ROWS,
+                "local_attn_dq_tf32",
+                "local_attn_dkv_tf32",
+                "f32_ln_aff",
+                "local_bias_fwd_f32",
+                "f32_adaln_bwd",
+                "f32_gate_bwd",
+                "f32_ln_bwd",
+                "f32_swiglu_bwd",
+                "f32_tail_bwd",
+                "local_bias_bwd_f32",
+            ),
+        ),
+        (infer, FUSED),
+    ):
         names = _kernel_names(fn, (*TF32_KERNELS, *extra))
         for k in (*TF32_KERNELS, *extra):
             assert _count(names, k), f"{k} did not run: {sorted(set(names))}"
@@ -344,12 +475,25 @@ def test_the_tf32_kernels_do_not_spill():
     )
 
     index = torch.cuda.current_device()
-    kernels = {**{f"atom.{n}": sm100_atom.atom_kernel32(n, index) for n in sm100_atom.KERNELS_TF32},
-               **{f"fused.{n}": sm100_atom.fused_kernel32(n, index) for n in sm100_atom.KERNELS_FUSED32},
-               **{f"local.{n}": sm100_atom_local._load32(n, index) for n in sm100_atom_local.KERNELS_TF32}}
+    kernels = {
+        **{
+            f"atom.{n}": sm100_atom.atom_kernel32(n, index)
+            for n in sm100_atom.KERNELS_TF32
+        },
+        **{
+            f"fused.{n}": sm100_atom.fused_kernel32(n, index)
+            for n in sm100_atom.KERNELS_FUSED32
+        },
+        **{
+            f"local.{n}": sm100_atom_local._load32(n, index)
+            for n in sm100_atom_local.KERNELS_TF32
+        },
+    }
     for name, k in kernels.items():
         assert k.lmem == 0, f"{name}: {k.lmem} B of local memory (spills)"
-        cap = 168 if name == "fused.post" else 128     # atom_post_tf32: 384 threads, one CTA per SM (smem) -> 65536 / 384 = 170 per thread
+        cap = (
+            168 if name == "fused.post" else 128
+        )  # atom_post_tf32: 384 threads, one CTA per SM (smem) -> 65536 / 384 = 170 per thread
         assert k.regs <= cap, f"{name}: {k.regs} registers"
 
 
@@ -358,14 +502,22 @@ def test_calls_it_does_not_serve_keep_the_module_path(monkeypatch):
     s, c, z = _inputs(2, 256, 7)
     ok = torch.ones(1, 256, dtype=torch.bool, device="cuda")
     assert local_dit.serves(eng, s, c, z, ok)
-    assert not local_dit.serves(eng, s, c.bfloat16(), z, ok)                               # mixed activation dtypes
+    assert not local_dit.serves(eng, s, c.bfloat16(), z, ok)  # mixed activation dtypes
     with torch.autocast("cuda", dtype=torch.bfloat16):
-        assert not local_dit.serves(eng, s, c, z, ok)                                       # autocast: the module path's dtype rules
-    bf = LocalDiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(torch.bfloat16)
-    assert not local_dit.serves(bf, s, c, z, ok)                                            # a bf16 model fed fp32 activations
-    monkeypatch.setenv("MINIWORLD_LOCAL_DIT_TF32", "0")
+        assert not local_dit.serves(
+            eng, s, c, z, ok
+        )  # autocast: the module path's dtype rules
+    bf = (
+        LocalDiTBlock(implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .to(torch.bfloat16)
+    )
+    assert not local_dit.serves(bf, s, c, z, ok)  # a bf16 model fed fp32 activations
+    override_setting(monkeypatch, "local_dit_tf32", "0")
     assert not local_dit.serves(eng, s, c, z, ok)
-    assert local_dit.serves(bf, s.bfloat16(), c.bfloat16(), z.bfloat16(), ok)              # the bf16 path is untouched by the switch
+    assert local_dit.serves(
+        bf, s.bfloat16(), c.bfloat16(), z.bfloat16(), ok
+    )  # the bf16 path is untouched by the switch
     calls = _spy(monkeypatch)
     with torch.no_grad():
         eng(s, c, z, ok)
@@ -383,12 +535,18 @@ def test_hoisted_fp32_tables_are_made_once_per_conditioning_and_pair(cross):
     local_dit._HOIST_BIAS.clear()
     with torch.no_grad():
         first = eng(single, cond, pair)
-        names = _kernel_names(lambda: eng(single, cond, pair), ("local_attn_fwd_tf32", *FUSED))
+        names = _kernel_names(
+            lambda: eng(single, cond, pair), ("local_attn_fwd_tf32", *FUSED)
+        )
         second = eng(single, cond, pair)
     assert torch.equal(first, second)
     assert _count(names, "f32_ln_aff", "local_bias_fwd_f32") == 0, names
-    assert _count(names, "atom_gemm_tf32", "f32_adaln", "f32_gate") == 0, names   # the fused pre / post kernels only
-    assert _count(names, "atom_pre_tf32") == 1 and _count(names, "atom_post_tf32") == 1, names
+    assert _count(names, "atom_gemm_tf32", "f32_adaln", "f32_gate") == 0, (
+        names
+    )  # the fused pre / post kernels only
+    assert (
+        _count(names, "atom_pre_tf32") == 1 and _count(names, "atom_post_tf32") == 1
+    ), names
     assert _count(names, "local_attn_fwd_tf32") == 1
 
 
@@ -397,14 +555,15 @@ def test_static_inputs_replay_launches_the_block_kernels_only(cross):
     """Under ``static_inputs()`` a captured fp32 inference call replays the block's own kernels only: no conditioning tables, no pair bias
     and no weight packing (the contract covers the weights). Without it a replay repacks the weights (one cat, an in-place rounding) and
     remakes the tables in a handful of launches, and sees an in-place update of the conditioning."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
 
     _, eng = _block(cross=cross)
     single, cond, pair = _inputs(3, 384)
     local_dit._HOIST_COND.clear()
     local_dit._HOIST_BIAS.clear()
-    want = 3                           # pre (AdaLNs + projections), attention, post
+    want = 3  # pre (AdaLNs + projections), attention, post
     with torch.no_grad():
         for static in (True, False):
             eng(single, cond, pair)
@@ -430,11 +589,16 @@ def test_static_inputs_replay_launches_the_block_kernels_only(cross):
 
 
 def test_fp32_hoist_off_recomputes_every_call(monkeypatch):
-    monkeypatch.setenv("MINIWORLD_LOCAL_DIT_HOIST", "0")
+    override_setting(monkeypatch, "local_dit_hoist", "0")
     _, eng = _block()
     single, cond, pair = _inputs(3, 256)
     with torch.no_grad():
-        names = _kernel_names(lambda: eng(single, cond, pair), ("f32_ln_aff", "local_bias_fwd_f32", "atom_gemm_tf32", *FUSED))
+        names = _kernel_names(
+            lambda: eng(single, cond, pair),
+            ("f32_ln_aff", "local_bias_fwd_f32", "atom_gemm_tf32", *FUSED),
+        )
     assert _count(names, "f32_ln_aff") == 1, names
     assert _count(names, "local_bias_fwd_f32") == 1, names
-    assert _count(names, "atom_gemm_tf32") == 1, names                      # the grouped conditioning GEMM (one launch)
+    assert _count(names, "atom_gemm_tf32") == 1, (
+        names
+    )  # the grouped conditioning GEMM (one launch)

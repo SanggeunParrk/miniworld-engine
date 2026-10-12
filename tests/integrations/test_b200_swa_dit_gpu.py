@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.swa_dit.cuda import sm100
 from miniworld_engine.kernels.swa_dit.interface import (
@@ -20,7 +21,10 @@ from miniworld_engine.kernels.swa_dit.reference import (
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="B200 (sm_100)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
+        reason="B200 (sm_100)",
+    ),
 ]
 DEV, BF = "cuda", torch.bfloat16
 C, H, HIDDEN, HW = 128, 4, 256, 64
@@ -33,22 +37,55 @@ def _case(a, b, s, seed=0):
         return (torch.randn(*shape, generator=g) * scale).to(DEV, BF)
 
     n = a * b
-    leaves = [r(n, s, C), r(b, s, C), r(6 * C, C, scale=0.05), r(3 * C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5),
-              r(C, C, scale=C ** -0.5), r(2 * HIDDEN, C, scale=C ** -0.5), r(C, HIDDEN, scale=HIDDEN ** -0.5)]
+    leaves = [
+        r(n, s, C),
+        r(b, s, C),
+        r(6 * C, C, scale=0.05),
+        r(3 * C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(2 * HIDDEN, C, scale=C**-0.5),
+        r(C, HIDDEN, scale=HIDDEN**-0.5),
+    ]
     angles = torch.randn(b, s, C // H // 2, generator=g) * 3.0
-    lengths = [s, max(1, s - 17), 5, s - 1] * n                       # ragged, front-packed, one row shorter than the window
-    return leaves, angles.cos().to(DEV), angles.sin().to(DEV), torch.tensor(lengths[:n], dtype=torch.int32, device=DEV)
+    lengths = [
+        s,
+        max(1, s - 17),
+        5,
+        s - 1,
+    ] * n  # ragged, front-packed, one row shorter than the window
+    return (
+        leaves,
+        angles.cos().to(DEV),
+        angles.sin().to(DEV),
+        torch.tensor(lengths[:n], dtype=torch.int32, device=DEV),
+    )
 
 
 def _fused(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
-    return swa_dit_block(q, swa_dit_hoist_modulation(c_base, wmod), cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block(
+        q,
+        swa_dit_hoist_modulation(c_base, wmod),
+        cos,
+        sin,
+        seqused,
+        wqkv,
+        wg,
+        wo,
+        wu,
+        wd,
+        b,
+        half_window=HW,
+    )
 
 
 def _reference(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation_reference(c_base, wmod)
-    return swa_dit_block_reference(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block_reference(
+        q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW
+    )
 
 
 def _train(fn, leaves, dy, *args):
@@ -71,19 +108,25 @@ def spy(monkeypatch):
     calls = []
     for name in ("block_fwd", "block_bwd", "mod_fwd", "mod_bwd"):
         orig = getattr(sm100, name)
-        monkeypatch.setattr(sm100, name, (lambda o, n: (lambda *a, **k: calls.append(n) or o(*a, **k)))(orig, name))
+        monkeypatch.setattr(
+            sm100,
+            name,
+            (lambda o, n: (lambda *a, **k: calls.append(n) or o(*a, **k)))(orig, name),
+        )
     return calls
 
 
 # (A, B, S): A < 4 (the ATM = 32 builds), A = 5 / 8, A = 48 with and without dQ fused into the dK / dV pass
-@pytest.mark.parametrize(("a", "b", "s"), [(3, 2, 256), (8, 2, 128), (48, 1, 256), (48, 1, 512)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"), [(3, 2, 256), (8, 2, 128), (48, 1, 256), (48, 1, 512)]
+)
 def test_training_matches_the_triton_path(a, b, s, spy, monkeypatch):
     leaves, cos, sin, seqused = _case(a, b, s)
     dy = torch.randn(a * b, s, C, device=DEV)
     truth = _train(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b)
     fused = _train(_fused, leaves, dy, cos, sin, seqused, b)
     assert sorted(set(spy)) == ["block_bwd", "block_fwd", "mod_bwd", "mod_fwd"], spy
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM100", "0")
+    override_setting(monkeypatch, "swa_dit_sm100", "0")
     spy.clear()
     triton = _train(_fused, leaves, dy, cos, sin, seqused, b)
     assert spy == [], "the switch did not keep the Triton path"
@@ -104,7 +147,7 @@ def test_inference_matches_the_triton_path(a, b, s, spy, monkeypatch):
         truth = _reference([t.float() for t in leaves], cos, sin, seqused, b)
         fused = _fused(leaves, cos, sin, seqused, b)
         assert sorted(set(spy)) == ["block_fwd", "mod_fwd"], spy
-        monkeypatch.setenv("MINIWORLD_SWA_DIT_SM100", "0")
+        override_setting(monkeypatch, "swa_dit_sm100", "0")
         triton = _fused(leaves, cos, sin, seqused, b)
     ef, et = _rel(fused, truth), _rel(triton, truth)
     print(f"inference A{a} B{b} S{s}: sm_100a {ef:.2e} Triton {et:.2e}")

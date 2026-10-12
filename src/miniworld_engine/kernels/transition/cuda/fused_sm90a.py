@@ -31,6 +31,7 @@ import torch
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
@@ -62,16 +63,27 @@ def _ext(ctas: int, dw_repl: int, save: bool):
     # identity so an older prebuilt kernel cannot satisfy the corrected build.
     return load_extension(
         name=f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1",
-        sources=[str(_dir / "transition_fused_sm90a.cu"),
-                 str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
-                 str(_dir / "transition_fused_bwd_sm90a_kernel.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"),
-                           f"-I{_dir / 'anthropic_v5'}", f"-DNCTA={ctas}", f"-DDW_REPL={dw_repl}",
-                           f"-DFWD_SAVE={int(save)}",
-                           "--expt-relaxed-constexpr",
-                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                           "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
-        extra_cflags=["-std=c++17"], verbose=False,
+        sources=[
+            str(_dir / "transition_fused_sm90a.cu"),
+            str(_dir / "transition_fused_fwd_sm90a_kernel.cu"),
+            str(_dir / "transition_fused_bwd_sm90a_kernel.cu"),
+        ],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            *gencodes("90a"),
+            f"-I{_dir / 'anthropic_v5'}",
+            f"-DNCTA={ctas}",
+            f"-DDW_REPL={dw_repl}",
+            f"-DFWD_SAVE={int(save)}",
+            "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
     )
 
 
@@ -93,11 +105,13 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     are literals, and a whole number of 128-row tiles because the persistent grid has no
     ragged-tail path.
     """
-    if os.environ.get("MINIWORLD_TRANSITION_FUSED_SM90A", "1") == "0":
+    if not settings.current().transition_fused_sm90a:
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    if not _is_hopper(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not _is_hopper(
+        x.device.index if x.device.index is not None else torch.cuda.current_device()
+    ):
         return False
     if x.shape[-1] != 128 or wa.shape != (512, 128) or ws.shape != (128, 512):
         return False
@@ -132,8 +146,11 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         _ext_for(x, torch.is_grad_enabled())
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"fused sm90a Transition unavailable, keeping the existing path: {exc!r}",
-                      RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"fused sm90a Transition unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -149,6 +166,7 @@ def _is_fake(*tensors) -> bool:
     autotuned Triton kernel, so recording nothing for it is the correct derivation.
     """
     from torch._subclasses.fake_tensor import FakeTensor
+
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
@@ -157,59 +175,101 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, wst, eps, save):
     nothing the GPU decides."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
-    return (torch.empty_like(x),
-            torch.empty_like(x) if save else x.new_empty((1, x.shape[1])),
-            torch.empty((rows,), **f32), torch.empty((rows,), **f32))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(x) if save else x.new_empty((1, x.shape[1])),
+        torch.empty((rows,), **f32),
+        torch.empty((rows,), **f32),
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="transition_fused_fwd_sm90a")
-def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor,
-                wb: torch.Tensor, wst: torch.Tensor, eps: float, save: bool,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    wst: torch.Tensor,
+    eps: float,
+    save: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The launch, split out of the autograd Function so Dynamo can trace up to it and past it.
     Returns (out, xn, rstd, c1), all freshly allocated."""
     args = (x, gamma, beta, wa, wb, wst, eps, save)
     config = _select_schedule(args, backward=False, save=save)
     if _is_fake(x, wa):
         return _fwd_launch_fake(*args)
-    return tuple(_ext(config["ctas"], config["dw_repl"], save).transition_fused_fwd(*args))
+    return tuple(
+        _ext(config["ctas"], config["dw_repl"], save).transition_fused_fwd(*args)
+    )
 
 
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws):
     """Output structure only: the six gradients, each shaped like what it is a gradient of."""
-    return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
-            torch.empty_like(wa), torch.empty_like(wb), torch.empty_like(ws))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(gamma),
+        torch.empty_like(gamma),
+        torch.empty_like(wa),
+        torch.empty_like(wb),
+        torch.empty_like(ws),
+    )
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_fused_bwd_sm90a")
-def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch.Tensor,
-                c1: torch.Tensor, gamma: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                ws: torch.Tensor,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-                           torch.Tensor]:
+def _bwd_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch."""
     args = (dy, x, xn, rstd, c1, gamma, wa, wb, ws)
     config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
-    return tuple(_ext(config["ctas"], config["dw_repl"], True).transition_fused_bwd(*args))
+    return tuple(
+        _ext(config["ctas"], config["dw_repl"], True).transition_fused_bwd(*args)
+    )
 
 
 def _select_schedule(args, *, backward, save):
     from miniworld_engine.autotune.fused_config import transition_candidates, validator
     from miniworld_engine.autotune.native import choose_config, tensor_key
+
     x = args[1] if backward else args[0]
     sms = _sm_count(x.device)
     grid = transition_candidates(sms, backward=backward)
     symbol = "transition_fused_bwd" if backward else "transition_fused_fwd"
+
     def run(c):
         return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save), symbol)(*args))
+
     tensors = args if backward else args[:6]
-    op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
-    return choose_config(op, grid, dtype=str(x.dtype),
-                         bucket=tensor_key(*tensors, extra=(save, args[-2] if not backward else None, sms)),
-                         device_index=x.device.index, run=run,
-                         validate=validator(run, grid[0], output_only=not save))
+    op = (
+        "transition_bwd_residual_sm90_cuda"
+        if backward
+        else "transition_fwd_residual_sm90_cuda"
+    )
+    return choose_config(
+        op,
+        grid,
+        dtype=str(x.dtype),
+        bucket=tensor_key(
+            *tensors, extra=(save, args[-2] if not backward else None, sms)
+        ),
+        device_index=x.device.index,
+        run=run,
+        validate=validator(run, grid[0], output_only=not save),
+    )
 
 
 class _FusedTransitionSM90A(torch.autograd.Function):
@@ -227,7 +287,15 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         save = any(ctx.needs_input_grad)
         out, xn, rstd, c1 = _fwd_launch(
-            flat, gf, bf, wa.contiguous(), wb.contiguous(), ws.t().contiguous(), float(eps), save)
+            flat,
+            gf,
+            bf,
+            wa.contiguous(),
+            wb.contiguous(),
+            ws.t().contiguous(),
+            float(eps),
+            save,
+        )
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws)
         ctx.shape = shape
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
@@ -238,10 +306,25 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         flat, xn, rstd, c1, gf, wa, wb, ws = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
-            dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, gf,
-            wa.contiguous(), wb.contiguous(), ws.contiguous())
-        return (dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt),
-                dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None)
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            flat,
+            xn,
+            rstd,
+            c1,
+            gf,
+            wa.contiguous(),
+            wb.contiguous(),
+            ws.contiguous(),
+        )
+        return (
+            dx.reshape(ctx.shape),
+            dgam.to(gdt),
+            dbeta.to(bdt),
+            dwa.to(adt),
+            dwb.to(bwdt),
+            dws.to(sdt),
+            None,
+        )
 
 
 def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
@@ -255,10 +338,20 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
     parameters keep under ``torch.no_grad()`` -- so deciding there sent every no_grad call through
     the training build, writing an M x 128 ``xn`` nobody reads (38 MB at L384, 151 MB at L768).
     """
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
+    if not (
+        torch.is_grad_enabled()
+        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    ):
         shape = x.shape
-        out, _, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma.float().contiguous(),
-                                   beta.float().contiguous(), wa.contiguous(), wb.contiguous(),
-                                   ws.t().contiguous(), float(eps), False)
+        out, _, _, _ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(),
+            gamma.float().contiguous(),
+            beta.float().contiguous(),
+            wa.contiguous(),
+            wb.contiguous(),
+            ws.t().contiguous(),
+            float(eps),
+            False,
+        )
         return out.reshape(shape)
     return _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)

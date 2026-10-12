@@ -1,4 +1,4 @@
-// bo_tail_tf32.cu -- K3 of the bias-only token DiT's three-kernel fp32 (TF32) inference step on sm_100a (MINIWORLD_BIAS_ONLY_DIT_INF3=1):
+// bo_tail_tf32.cu -- K3 of the bias-only token DiT's three-kernel fp32 (TF32) inference step on sm_100a (settings.bias_only_dit_inf3=1):
 // everything after the attention core, in ONE kernel per 128-row tile:
 //
 //   y   = a Wo^T                              (a [M, DA] = sigmoid(g) (P v), from pv_gate_tf32 -DPDL_INF, TF32-valued)

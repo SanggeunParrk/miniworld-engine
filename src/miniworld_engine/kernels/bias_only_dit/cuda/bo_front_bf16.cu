@@ -1,5 +1,5 @@
 // bo_front_bf16.cu -- K1 of the bias-only token DiT's bf16-mixed three-kernel inference step on sm_100a
-// (MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=1), the bf16 twin of bo_front_tf32.cu:
+// (settings.bias_only_dit_inf3_bf16=1), the bf16 twin of bo_front_tf32.cu:
 //
 //   xa = LN(x) * s1[tok] + sh1[tok];   v | g = xa [Wv; Wg]^T     (tcgen05.mma kind::f16; xa, v and g bf16, fp32 accumulation)
 //

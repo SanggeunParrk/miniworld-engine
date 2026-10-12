@@ -1,4 +1,4 @@
-// bo_tail_bf16.cu -- K3 of the bias-only token DiT's bf16-mixed inference step on sm_100a (MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=1):
+// bo_tail_bf16.cu -- K3 of the bias-only token DiT's bf16-mixed inference step on sm_100a (settings.bias_only_dit_inf3_bf16=1):
 // everything after the attention core in ONE kernel per 128-row tile, the bf16 twin of bo_tail_tf32.cu:
 //
 //   y   = a Wo^T                              (a [M, DA] bf16 = sigmoid(g) (P v), from pv_gate_inf -DPDL_INF)

@@ -30,6 +30,7 @@ What each path is, and who wrote which kernel:
 Both are forward-only. There is no backward for either, so a grad-enabled call is refused, never
 silently rerouted; training keeps the engine's own path until the backward kernels land.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -40,13 +41,15 @@ from typing import Any
 
 import torch
 
+from miniworld_engine import settings
+
 ENV = "OPT_CORE_DIR"
-PWA_CFG = "g_fo4p"                     # the config that wins at our shape; the shipped default too
+PWA_CFG = "g_fo4p"  # the config that wins at our shape; the shipped default too
 _LOADED: dict[str, Any] = {}
 _EXT: dict[str, Any] = {}
 
-C_HIDDEN, C_Z, C_M, HEADS = 32, 128, 64, 8          # the shapes the kernels are built for
-_TILE_I, _TILE_J = 4, 16                            # the epilogue's CTA tile, so N must divide by both
+C_HIDDEN, C_Z, C_M, HEADS = 32, 128, 64, 8  # the shapes the kernels are built for
+_TILE_I, _TILE_J = 4, 16  # the epilogue's CTA tile, so N must divide by both
 
 
 class PayloadUnavailable(RuntimeError):
@@ -62,22 +65,35 @@ def _load() -> dict[str, Any]:
     """Import the opt_core MSA cells from `$OPT_CORE_DIR`, once per process."""
     root = payload_dir()
     if not root:
-        raise PayloadUnavailable(f"{ENV} is not set (it must name the release's common/opt_core directory)")
+        raise PayloadUnavailable(
+            f"{ENV} is not set (it must name the release's common/opt_core directory)"
+        )
     root = str(Path(root).resolve())
     if _LOADED.get("root") == root:
         return _LOADED
     if not (Path(root) / "opt_core" / "ops" / "msa_opm" / "__init__.py").is_file():
-        raise PayloadUnavailable(f"{root} has no opt_core/ops/msa_opm (point {ENV} at common/opt_core)")
+        raise PayloadUnavailable(
+            f"{root} has no opt_core/ops/msa_opm (point {ENV} at common/opt_core)"
+        )
     already = sys.modules.get("opt_core")
-    if already is not None and (already.__file__ is None or Path(already.__file__).resolve().parent.parent != Path(root)):
-        raise PayloadUnavailable(f"opt_core is already imported from {already.__file__}, not from {root}")
+    if already is not None and (
+        already.__file__ is None
+        or Path(already.__file__).resolve().parent.parent != Path(root)
+    ):
+        raise PayloadUnavailable(
+            f"opt_core is already imported from {already.__file__}, not from {root}"
+        )
     if _LOADED:
-        raise PayloadUnavailable("changing the payload in a live process is not supported")
+        raise PayloadUnavailable(
+            "changing the payload in a live process is not supported"
+        )
     if root not in sys.path:
         sys.path.insert(0, root)
-    _LOADED.update(root=root,
-                   opm=importlib.import_module("opt_core.ops.msa_opm"),
-                   pwa=importlib.import_module("opt_core.ops.msa_pwa"))
+    _LOADED.update(
+        root=root,
+        opm=importlib.import_module("opt_core.ops.msa_opm"),
+        pwa=importlib.import_module("opt_core.ops.msa_pwa"),
+    )
     # the cell picks its tile config from this variable; set it once, not per call
     os.environ.setdefault("FPF_PWA_CFG", PWA_CFG)
     return _LOADED
@@ -88,11 +104,17 @@ def _ext():
     if "mod" in _EXT:
         return _EXT["mod"]
     from miniworld_engine.kernels._nvcc import load_extension as load
+
     src = Path(__file__).with_name("csrc") / "opm_epilogue.cu"
-    build = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit")) / "opm_epilogue"
+    build = settings.engine_jit_root() / "opm_epilogue"
     build.mkdir(parents=True, exist_ok=True)
-    _EXT["mod"] = load(name="miniworld_opm_epilogue", sources=[str(src)], build_directory=str(build),
-                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"], extra_cflags=["-O3"])
+    _EXT["mod"] = load(
+        name="miniworld_opm_epilogue",
+        sources=[str(src)],
+        build_directory=str(build),
+        extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"],
+        extra_cflags=["-O3"],
+    )
     return _EXT["mod"]
 
 
@@ -101,6 +123,7 @@ def wanted(implementation) -> bool:
     payload is named and the engine is not pinned to Triton; every other option is the caller's explicit choice."""
     from miniworld_engine import settings
     from miniworld_engine.modules.exceptions import ImplementationType
+
     if implementation == ImplementationType.ANTHROPIC:
         return True
     if implementation != ImplementationType.MINIWORLD:
@@ -112,7 +135,9 @@ def _common_refusal(x: torch.Tensor, *, grad: bool) -> str | None:
     if not payload_dir():
         return f"{ENV} is not set"
     if grad:
-        return "these are forward-only paths (grad is enabled); there is no backward yet"
+        return (
+            "these are forward-only paths (grad is enabled); there is no backward yet"
+        )
     if x.dtype != torch.bfloat16:
         return f"the kernels are bf16, got {x.dtype}"
     if not x.is_cuda:
@@ -124,13 +149,17 @@ def _common_refusal(x: torch.Tensor, *, grad: bool) -> str | None:
     return None
 
 
-def opm_refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, grad: bool, interchain: bool) -> str | None:
+def opm_refusal(
+    msa: torch.Tensor, d_hidden: int, d_pair: int, *, grad: bool, interchain: bool
+) -> str | None:
     """None if this path can run this OuterProductMean forward, else why it cannot. Never raises."""
     try:
         # what the caller asked for comes first: a shape or a flag this path cannot serve is the same answer on
         # any machine, and saying so beats reporting whichever machine the caller happened to be on.
         if interchain:
-            return "mask_interchain is applied after the projection and is not fused here"
+            return (
+                "mask_interchain is applied after the projection and is not fused here"
+            )
         if (d_hidden, d_pair) != (C_HIDDEN, C_Z):
             return f"the epilogue is built for (d_hidden={C_HIDDEN}, d_pair={C_Z}), got ({d_hidden}, {d_pair})"
         n = msa.shape[2]
@@ -141,18 +170,28 @@ def opm_refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, grad: bool, in
             return why
         _load()
         return None
-    except Exception as exc:                          # an unusable payload is a fallback, not a crash
+    except Exception as exc:  # an unusable payload is a fallback, not a crash
         return f"{type(exc).__name__}: {exc}"
 
 
-def pwa_refusal(msa: torch.Tensor, d_msa: int, d_pair: int, n_head: int, d_hidden: int,
-                *, grad: bool, dropout: bool) -> str | None:
+def pwa_refusal(
+    msa: torch.Tensor,
+    d_msa: int,
+    d_pair: int,
+    n_head: int,
+    d_hidden: int,
+    *,
+    grad: bool,
+    dropout: bool,
+) -> str | None:
     """None if this path can run this MSAPairWeightedAveraging forward, else why it cannot. Never raises."""
     try:
         # see opm_refusal: the request's own shape and mode are answered before the machine's.
         if (d_msa, d_pair, n_head, d_hidden) != (C_M, C_Z, HEADS, C_HIDDEN):
-            return (f"the cell serves (d_msa={C_M}, d_pair={C_Z}, n_head={HEADS}, d_hidden={C_HIDDEN}), "
-                    f"got ({d_msa}, {d_pair}, {n_head}, {d_hidden})")
+            return (
+                f"the cell serves (d_msa={C_M}, d_pair={C_Z}, n_head={HEADS}, d_hidden={C_HIDDEN}), "
+                f"got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+            )
         if dropout:
             return "a live row-dropout scale needs the training path"
         why = _common_refusal(msa, grad=grad)
@@ -176,13 +215,17 @@ def require_opm(*a, **kw) -> None:
     """An explicit ``implementation="anthropic"`` refuses with the reason instead of rerouting."""
     why = opm_refusal(*a, **kw)
     if why is not None:
-        raise PayloadUnavailable("the anthropic OPM path cannot serve this call: " + why)
+        raise PayloadUnavailable(
+            "the anthropic OPM path cannot serve this call: " + why
+        )
 
 
 def require_pwa(*a, **kw) -> None:
     why = pwa_refusal(*a, **kw)
     if why is not None:
-        raise PayloadUnavailable("the anthropic PWA path cannot serve this call: " + why)
+        raise PayloadUnavailable(
+            "the anthropic PWA path cannot serve this call: " + why
+        )
 
 
 def _swizzle_b(wot: torch.Tensor) -> torch.Tensor:
@@ -194,7 +237,9 @@ def _swizzle_b(wot: torch.Tensor) -> torch.Tensor:
     lane = torch.arange(32, device=wot.device)[None, None, :]
     idx_n = nn * 8 + lane // 4
     k_lo = (lane % 4) * 2
-    return torch.stack([wot[kk * 16 + k_lo + off, idx_n] for off in (0, 1, 8, 9)], dim=-1).contiguous()
+    return torch.stack(
+        [wot[kk * 16 + k_lo + off, idx_n] for off in (0, 1, 8, 9)], dim=-1
+    ).contiguous()
 
 
 def _opm_pack(module) -> dict[str, Any]:
@@ -202,10 +247,19 @@ def _opm_pack(module) -> dict[str, Any]:
     pack = getattr(module, "_anthropic_msa_pack", None)
     if pack is not None:
         return pack
-    pack = {"wa_t": module.to_left.weight.detach().to(torch.bfloat16).t().contiguous(),
-            "wb_t": module.to_right.weight.detach().to(torch.bfloat16).t().contiguous(),
-            "bf": module.to_out.weight.detach().contiguous().to(torch.bfloat16),       # Wo [c_z, c_hidden^2] as it is: the epilogue's wgmma reads B from shared with k contiguous
-            "bias": module.to_out.bias.detach().to(torch.bfloat16).to(torch.float32).contiguous()}
+    pack = {
+        "wa_t": module.to_left.weight.detach().to(torch.bfloat16).t().contiguous(),
+        "wb_t": module.to_right.weight.detach().to(torch.bfloat16).t().contiguous(),
+        "bf": module.to_out.weight.detach()
+        .contiguous()
+        .to(
+            torch.bfloat16
+        ),  # Wo [c_z, c_hidden^2] as it is: the epilogue's wgmma reads B from shared with k contiguous
+        "bias": module.to_out.bias.detach()
+        .to(torch.bfloat16)
+        .to(torch.float32)
+        .contiguous(),
+    }
     module._anthropic_msa_pack = pack
     return pack
 
@@ -217,22 +271,39 @@ def outer_product_mean(module, msa: torch.Tensor, mask: torch.Tensor) -> torch.T
     _s, n = msa.shape[1], msa.shape[2]
     mask16 = mask.to(torch.bfloat16)
     # upstream's fused prologue, asked for the unblocked A layout (BI=BJ=1), which puts A2 row = i*c_hidden + c
-    a2, bt, _, _, _ = p.fused_prologue(msa[0], mask16[0], module.ln_msa, pack["wa_t"], pack["wb_t"], None, None,
-                                       1, 1, 64, C_HIDDEN)
-    o = torch.matmul(a2, bt.t())                                   # the grouped outer product, cuBLAS NT
+    a2, bt, _, _, _ = p.fused_prologue(
+        msa[0],
+        mask16[0],
+        module.ln_msa,
+        pack["wa_t"],
+        pack["wb_t"],
+        None,
+        None,
+        1,
+        1,
+        64,
+        C_HIDDEN,
+    )
+    o = torch.matmul(a2, bt.t())  # the grouped outer product, cuBLAS NT
     mf = mask[0].to(torch.float32)
-    with torch.autocast("cuda", enabled=False):                    # the module's own fp32 mask count (autocast would make it bf16)
+    with torch.autocast(
+        "cuda", enabled=False
+    ):  # the module's own fp32 mask count (autocast would make it bf16)
         norm = (mf.t() @ mf).clamp_(min=1).contiguous()
     return _ext().opm_epilogue(o, norm, pack["bf"], pack["bias"], n, n)
 
 
-def pair_weighted_averaging(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def pair_weighted_averaging(
+    module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
     """MSAPairWeightedAveraging(msa, pair, mask) WITHOUT the residual -- the module adds its own."""
     p = _load()["pwa"]
     n = msa.shape[2]
     if mask is None:
         mask = torch.ones(msa.shape[0], n, dtype=torch.bool, device=msa.device)
-    pair_mask = mask[:, None, :].expand(-1, n, -1).to(torch.bfloat16)   # the cell masks the key axis j
+    pair_mask = (
+        mask[:, None, :].expand(-1, n, -1).to(torch.bfloat16)
+    )  # the cell masks the key axis j
     return p.forward_masked(_PwaView(module), msa, pair, pair_mask, chunk_heads=False)
 
 
@@ -240,7 +311,17 @@ class _PwaView:
     """The cell reads a stock module's attribute names; this is the same weights under those names. `norm_z` is
     deliberately this engine's fused LayerNorm rather than the stock torch call the cell would otherwise make."""
 
-    __slots__ = ("c_h", "inf", "norm_m", "norm_z", "num_heads", "proj_g", "proj_m", "proj_o", "proj_z")
+    __slots__ = (
+        "c_h",
+        "inf",
+        "norm_m",
+        "norm_z",
+        "num_heads",
+        "proj_g",
+        "proj_m",
+        "proj_o",
+        "proj_z",
+    )
 
     def __init__(self, module):
         self.norm_m = module.ln_msa

@@ -1,5 +1,5 @@
 // bo_bwd_mid.cu -- the bias-only token DiT training backward from the attention core's input gradients to d single / d cond on CTA
-// PAIRS, sm_100a (integrations/bias_only_dit_train.py, MINIWORLD_BIAS_ONLY_DIT_BWD_MID=1): what the dxa GEMM, adaln_a_bwd, the dchat
+// PAIRS, sm_100a (integrations/bias_only_dit_train.py, settings.bias_only_dit_bwd_mid=1): what the dxa GEMM, adaln_a_bwd, the dchat
 // and dcg GEMMs and cond_bwd did as five launches, in three launches of one kernel (PHASE 0, 1, 2). Items per PAIR TILE p (the
 // 128-row tiles 2p, 2p + 1; the last pair's second tile absent when T is odd), rank r of the cluster working on tile rt = 2p + r:
 //

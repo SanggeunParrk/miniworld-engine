@@ -66,10 +66,10 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
 "미검증" = the kernels accept the shape but no test or measurement has run there. 성능 확인: see "Hardware limit (SoL) per
 kernel" (△ = fastest measured, a kernel of the group below 70 % SoL; — = not measured). cache build ✓: nothing on these paths
 autotunes -- the CUDA row kernels have fixed launch shapes, the sm_100a kernels are cubins built on first use into
-`MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and flags), the SwiGLU GEMM choice is a fixed row threshold.
+`settings.engine_jit_root` (keyed by source and flags), the SwiGLU GEMM choice is a fixed row threshold.
 
-Switches (all default on): `MINIWORLD_TOKEN_DIT_ROWS_CUDA`, `MINIWORLD_AUGATTN_BF16_SM100`,
-`MINIWORLD_TOKEN_DIT_GEMM_SWIGLU` (`auto` = M >= 3840, `1` forces, `0` off), `MINIWORLD_TOKEN_DIT_TRAIN`.
+Switches (all default on): `settings.token_dit_rows_cuda`, `settings.augattn_bf16_sm100`,
+`settings.token_dit_gemm_swiglu` (`auto` = M >= 3840, `1` forces, `0` off), `settings.token_dit_train`.
 
 ## Inference
 

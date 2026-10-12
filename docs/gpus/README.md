@@ -17,7 +17,7 @@ The maintainer makes that call; the pages record it.
 - Install the pixi env on a CPU allocation of the cluster you will run on
   (`pixi install`, `pixi run fix-te-cu12`, `miniworld-engine dev install-flash --arch <sm>`).
   Conda prefixes are absolute paths: an env built in one checkout cannot be moved to another.
-- Give each GPU/checkout its own JIT cache (`MINIWORLD_ENGINE_JIT_ROOT`); prebuilt
+- Give each GPU/checkout its own JIT cache (`settings.engine_jit_root`); prebuilt
   TriangleAttention `.so` files are tied to the torch/python they were built with and the
   CUDA path silently falls back to Triton when they do not match
   (rebuild: see [h100/h100.md](h100/h100.md)).

@@ -13,8 +13,6 @@ which reverts the atom transformer to the original DiT block while keeping AF3's
 
 from __future__ import annotations
 
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -22,7 +20,7 @@ from jaxtyping import Float, Int
 from pydantic import BaseModel
 from torch.utils.checkpoint import checkpoint_sequential
 
-from miniworld_engine import kernels
+from miniworld_engine import kernels, settings
 from miniworld_engine.architecture._engine_impl import (
     to_engine_impl_pointwise,
     torch_pointwise,
@@ -254,7 +252,7 @@ class SWAAtomTransformer(nn.Module):
         # SwiGLU hidden 256, no MP options): three kernels per block forward (bf16: CUDA wgmma on H100, Triton elsewhere;
         # fp32: Triton), the adaLN modulation hoisted to the augment-invariant conditioning. Same parameters (checkpoint
         # compatible).
-        # None -> env MINIWORLD_SWA_FUSED ("1" on).
+        # None -> env settings.swa_fused ("1" on).
         fused_triton: bool | None = None
 
     def __init__(self, config: Config) -> None:
@@ -304,11 +302,11 @@ class SWAAtomTransformer(nn.Module):
         block, which is bf16 only: the fp32 caller gets it through a bf16 cast of
         the stream and the weights (autograd keeps the fp32 master weights; the
         output comes back in the input dtype). That is a precision change, so it
-        is opt-in with ``MINIWORLD_SWA_GLOBAL_BF16=1``.
+        is opt-in with ``settings.swa_global_bf16=1``.
         """
         return (
             q.dtype == torch.float32
-            and os.environ.get("MINIWORLD_SWA_GLOBAL_BF16", "0") == "1"
+            and settings.current().swa_global_bf16
             and self._is_global()
         )
 
@@ -326,7 +324,7 @@ class SWAAtomTransformer(nn.Module):
         want = (
             cfg.fused_triton
             if cfg.fused_triton is not None
-            else os.environ.get("MINIWORLD_SWA_FUSED", "0") == "1"
+            else settings.current().swa_fused
         )
         if not want or not q.is_cuda:
             return False

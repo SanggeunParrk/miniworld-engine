@@ -25,7 +25,7 @@ atom block, ``integrations/local_dit``):
 
 The cubins are built on first use by the newest nvcc here that knows sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``:
 13.1 builds; 12.9's ptxas gives slightly longer code) and cached under
-``MINIWORLD_ENGINE_JIT_ROOT`` keyed by the sources and the flags. They launch through the CUDA driver
+``settings.engine_jit_root`` keyed by the sources and the flags. They launch through the CUDA driver
 (``augmented_attention.cuda.sm100.driver``) on torch's current stream, CUDA-graph capturable.
 """
 
@@ -38,12 +38,20 @@ import subprocess
 from pathlib import Path
 
 import torch
+from miniworld_engine import settings
 
 NH, DH, DM, DP = 4, 32, 128, 16
 _dir = Path(__file__).parent
 _SMEM = 232448
-SOURCES = ("cond_fwd", "pre_fwd", "post_fwd",
-           "tr_bwd_gate", "post_bwd", "pre_bwd", "cond_bwd")
+SOURCES = (
+    "cond_fwd",
+    "pre_fwd",
+    "post_fwd",
+    "tr_bwd_gate",
+    "post_bwd",
+    "pre_bwd",
+    "cond_bwd",
+)
 
 
 # --------------------------------------------------------------------------------------------------- build
@@ -54,26 +62,49 @@ def cubin(stem: str, defs: tuple = ()) -> str:
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
+    flags = (
+        *host,
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_100a",
+        "-cubin",
+        "-lineinfo",
+        f"-I{_dir}",
+        *("-D" + d for d in defs),
+    )
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "local_dit_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run([nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)], capture_output=True, text=True,
-                             timeout=900, check=False)
+        res = subprocess.run(
+            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
         if res.returncode != 0:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}")
+            raise RuntimeError(
+                f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
+            )
         os.replace(tmp, out)
     return str(out)
 
 
 @functools.lru_cache(maxsize=None)
-def _load_atom_kernel(stem: str, func: str, device_index: int, smem: int = _SMEM, pdl: bool = False, defs: tuple = ()):
+def _load_atom_kernel(
+    stem: str,
+    func: str,
+    device_index: int,
+    smem: int = _SMEM,
+    pdl: bool = False,
+    defs: tuple = (),
+):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     with torch.cuda.device(device_index):
@@ -118,7 +149,9 @@ def _dev(t: torch.Tensor) -> int:
 def _tm(t, rows, box_rows, cols=DM, box_cols=DH, swizzle=128):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    return driver.TensorMap(t, [cols, rows], cols * 2, [box_cols, box_rows], swizzle=swizzle)
+    return driver.TensorMap(
+        t, [cols, rows], cols * 2, [box_cols, box_rows], swizzle=swizzle
+    )
 
 
 def _map(t, dims, stride, box, swizzle=128, dtype="bf16"):
@@ -142,27 +175,61 @@ def cond_params(blk):
     bias [768] fp32 (zero for the shifts), the two cond LayerNorm weights g1, g2 [128] fp32."""
     att, tr = blk.attention, blk.transition
     a1, a2 = att.ada_ln_in, tr.ada_ln_in
-    W = torch.cat([a1.to_scale.weight, a1.to_bias.weight, att.to_scale.weight, a2.to_scale.weight, a2.to_bias.weight,
-                   tr.to_scale.weight])
+    W = torch.cat(
+        [
+            a1.to_scale.weight,
+            a1.to_bias.weight,
+            att.to_scale.weight,
+            a2.to_scale.weight,
+            a2.to_bias.weight,
+            tr.to_scale.weight,
+        ]
+    )
     z = torch.zeros(DM, device=W.device)
-    b = torch.cat([a1.to_scale.bias.float(), z, att.to_scale.bias.float(), a2.to_scale.bias.float(), z, tr.to_scale.bias.float()])
-    return (W.to(torch.bfloat16).contiguous(), b.contiguous(), a1.ln_cond.weight.float().contiguous(),
-            a2.ln_cond.weight.float().contiguous())
+    b = torch.cat(
+        [
+            a1.to_scale.bias.float(),
+            z,
+            att.to_scale.bias.float(),
+            a2.to_scale.bias.float(),
+            z,
+            tr.to_scale.bias.float(),
+        ]
+    )
+    return (
+        W.to(torch.bfloat16).contiguous(),
+        b.contiguous(),
+        a1.ln_cond.weight.float().contiguous(),
+        a2.ln_cond.weight.float().contiguous(),
+    )
 
 
 def pre_params(blk):
     """The attention's four input projections stacked for pre_fwd: W [512, 128] bf16 = [Wq; Wk; Wv; Wg], bq [128] fp32."""
     att = blk.attention
-    W = torch.cat([att.to_query.weight, att.to_key.weight, att.to_value.weight, att.to_gate.weight])
+    W = torch.cat(
+        [
+            att.to_query.weight,
+            att.to_key.weight,
+            att.to_value.weight,
+            att.to_gate.weight,
+        ]
+    )
     return W.to(torch.bfloat16).contiguous(), att.to_query.bias.float().contiguous()
 
 
 def post_params(blk):
     """post_fwd's weights: Wo [128, 128], Wu = [Wa; Wb] [512, 128], Ws [128, 256] (bf16)."""
     att, tr = blk.attention, blk.transition
+
     def bf(t):
         return t.to(torch.bfloat16).contiguous()
-    return bf(att.to_out.weight), bf(torch.cat([tr.expand_a.weight, tr.expand_b.weight])), bf(tr.squeeze.weight)
+
+    return (
+        bf(att.to_out.weight),
+        bf(torch.cat([tr.expand_a.weight, tr.expand_b.weight])),
+        bf(tr.squeeze.weight),
+    )
 
 
 # --------------------------------------------------------------------------------------------------- launches
@@ -170,23 +237,57 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5):
     """c [M, 128] bf16 -> mod [M, 768] bf16 = [s1 | bi1 | so | s2 | bi2 | st] (the gates as rn(sigmoid))."""
     M = c.shape[0]
     out = torch.empty(M, 6 * DM, device=c.device, dtype=torch.bfloat16)
-    maps = (_rows(c), _map(W, [DM, 6 * DM], DM * 2, [32, 128], swizzle=64), _rows(out, 6 * DM))
+    maps = (
+        _rows(c),
+        _map(W, [DM, 6 * DM], DM * 2, [32, 128], swizzle=64),
+        _rows(out, 6 * DM),
+    )
     ntile = M // 32
     d = _dev(c)
-    atom_kernel("cond", d)((min(nsm(d) // 2, ntile), 2, 1), (384, 1, 1), *maps, g1, g2, b, int(ntile), float(eps))
+    atom_kernel("cond", d)(
+        (min(nsm(d) // 2, ntile), 2, 1),
+        (384, 1, 1),
+        *maps,
+        g1,
+        g2,
+        b,
+        int(ntile),
+        float(eps),
+    )
     return out
 
 
 def pre_fwd(a, mod, W, bq, save=False, eps=1e-5):
     """a [M, 128], mod [M, 768] -> Q, K, V, G [M, 128] bf16 (+ x1 = AdaLN 1 output when ``save``)."""
     M = a.shape[0]
-    Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
+    Q, K, V, G = (
+        torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
+    )
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
-    maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
-            _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(G), _rows(G))
+    maps = (
+        _rows(a),
+        _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+        _rows(mod, 6 * DM),
+        _rows(Q),
+        _rows(K),
+        _rows(V),
+        _rows(G),
+        _rows(X),
+        _rows(G),
+        _rows(G),
+    )
     ntile = M // 32
     d = _dev(a)
-    atom_kernel("pre", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, bq, bq, int(ntile), float(eps), int(save))
+    atom_kernel("pre", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        bq,
+        bq,
+        int(ntile),
+        float(eps),
+        int(save),
+    )
     return Q, K, V, G, X
 
 
@@ -194,30 +295,68 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
     instead of from x1. -> Q, K, V, G [M, 128] bf16 and, when ``save``, x1 and xkv (else X = G, XK = None)."""
     M = a.shape[0]
-    Q, K, V, G = (torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4))
+    Q, K, V, G = (
+        torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
+    )
     X = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
     XK = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) if save else G
-    maps = (_rows(a), _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _rows(mod, 6 * DM),
-            _rows(Q), _rows(K), _rows(V), _rows(G), _rows(X), _rows(mkv, 2 * DM), _rows(XK))
+    maps = (
+        _rows(a),
+        _map(W, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+        _rows(mod, 6 * DM),
+        _rows(Q),
+        _rows(K),
+        _rows(V),
+        _rows(G),
+        _rows(X),
+        _rows(mkv, 2 * DM),
+        _rows(XK),
+    )
     ntile = M // 32
     d = _dev(a)
-    atom_kernel("prex", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, bq, bs.float().contiguous(), int(ntile), float(eps), int(save))
+    atom_kernel("prex", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        bq,
+        bs.float().contiguous(),
+        int(ntile),
+        float(eps),
+        int(save),
+    )
     return Q, K, V, G, X, (XK if save else None)
 
 
 def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5):
     """a, o, g [M, 128], mod [M, 768] -> the block output [M, 128] bf16 (+ u, a2, x2, t when ``save``)."""
     M = a.shape[0]
+
     def new():
         return torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
+
     out = new()
     sv = tuple(new() for _ in range(4)) if save else (out,) * 4
-    maps = (_rows16(a), _rows16(o), _rows16(g), _rows16(mod, 6 * DM), _map(Wo, [DM, DM], DM * 2, [64, 128]),
-            _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64), _map(Wd, [2 * DM, DM], 4 * DM, [32, 128], swizzle=64),
-            _rows16(out), *(_rows16(t) for t in sv))
+    maps = (
+        _rows16(a),
+        _rows16(o),
+        _rows16(g),
+        _rows16(mod, 6 * DM),
+        _map(Wo, [DM, DM], DM * 2, [64, 128]),
+        _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+        _map(Wd, [2 * DM, DM], 4 * DM, [32, 128], swizzle=64),
+        _rows16(out),
+        *(_rows16(t) for t in sv),
+    )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("post", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, int(ntile), float(eps), int(save))
+    atom_kernel("post", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        int(ntile),
+        float(eps),
+        int(save),
+    )
     return (out, *sv)
 
 
@@ -228,27 +367,63 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     DT = torch.empty(M, DM, device=dev, dtype=torch.bfloat16)
     HH = torch.empty(M, 2 * DM, device=dev, dtype=torch.bfloat16)
     DAB = torch.empty(M, 4 * DM, device=dev, dtype=torch.bfloat16)
-    maps = (_rows16(dy), _rows16(t), _rows16(mod, 6 * DM), _rows16(x2), _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
-            _map(WsT, [DM, 2 * DM], DM * 2, [32, 128], swizzle=64), _rows16(DT), _rows16(dmod, 6 * DM), _rows16(HH, 2 * DM),
-            _rows16(DAB, 4 * DM))
+    maps = (
+        _rows16(dy),
+        _rows16(t),
+        _rows16(mod, 6 * DM),
+        _rows16(x2),
+        _map(Wu, [DM, 4 * DM], DM * 2, [32, 128], swizzle=64),
+        _map(WsT, [DM, 2 * DM], DM * 2, [32, 128], swizzle=64),
+        _rows16(DT),
+        _rows16(dmod, 6 * DM),
+        _rows16(HH, 2 * DM),
+        _rows16(DAB, 4 * DM),
+    )
     ntile = M // 16
     d = _dev(dy)
-    atom_kernel("trg", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile))
+    atom_kernel("trg", d)(
+        (min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
+    )
     return DT, HH, DAB
 
 
 def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1e-5):
     """-> DA, DU, GATED, DO [M, 128]; dmod blocks 2-4, dP block 3 (dg), D [A, 4, N]; d bsc2 / d bos into DBIAS."""
     M = dy.shape[0]
+
     def new():
         return torch.empty(M, DM, device=dy.device, dtype=torch.bfloat16)
+
     DA, DU, GATED, DO = new(), new(), new(), new()
-    maps = (_rows16(DAB, 4 * DM), _rows16(dy), _rows16(a2), _rows16(mod, 6 * DM), _rows16(u), _rows16(sg), _rows16(o),
-            _map(WuT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64), _map(WoT, [DM, DM], DM * 2, [32, 128], swizzle=64),
-            _rows16(DA), _rows16(dmod, 6 * DM), _rows16(DU), _rows16(GATED), _rows16(DO), _rows16(dP, 4 * DM))
+    maps = (
+        _rows16(DAB, 4 * DM),
+        _rows16(dy),
+        _rows16(a2),
+        _rows16(mod, 6 * DM),
+        _rows16(u),
+        _rows16(sg),
+        _rows16(o),
+        _map(WuT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
+        _map(WoT, [DM, DM], DM * 2, [32, 128], swizzle=64),
+        _rows16(DA),
+        _rows16(dmod, 6 * DM),
+        _rows16(DU),
+        _rows16(GATED),
+        _rows16(DO),
+        _rows16(dP, 4 * DM),
+    )
     ntile = M // 16
     d = _dev(dy)
-    atom_kernel("postb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, Dd, DBIAS, int(N), int(ntile), float(eps))
+    atom_kernel("postb", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        Dd,
+        DBIAS,
+        int(N),
+        int(ntile),
+        float(eps),
+    )
     return DA, DU, GATED, DO
 
 
@@ -256,11 +431,31 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     """dP [M, 512], a, mod (s1), DA -> d single [M, 128]; dmod blocks 0-1; d bsc1 into DBIAS[0:128], d bq into DBQ."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
-    maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
-            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(DA), _rows16(DA), _rows16(DA))
+    maps = (
+        _rows16(dP, 4 * DM),
+        _rows16(a),
+        _rows16(mod, 6 * DM),
+        _rows16(DA),
+        _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
+        _rows16(DS),
+        _rows16(dmod, 6 * DM),
+        _rows16(DA),
+        _rows16(DA),
+        _rows16(DA),
+    )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("preb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, DBQ, DBQ, int(ntile), float(eps))
+    atom_kernel("preb", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        DBIAS,
+        DBQ,
+        DBQ,
+        DBQ,
+        int(ntile),
+        float(eps),
+    )
     return DS
 
 
@@ -271,25 +466,62 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5)
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     dmkv = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
-    maps = (_rows16(dP, 4 * DM), _rows16(a), _rows16(mod, 6 * DM), _rows16(DA), _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
-            _rows16(DS), _rows16(dmod, 6 * DM), _rows16(x1), _rows16(mkv, 2 * DM), _rows16(dmkv, 2 * DM))
+    maps = (
+        _rows16(dP, 4 * DM),
+        _rows16(a),
+        _rows16(mod, 6 * DM),
+        _rows16(DA),
+        _map(WT, [4 * DM, DM], 8 * DM, [32, 128], swizzle=64),
+        _rows16(DS),
+        _rows16(dmod, 6 * DM),
+        _rows16(x1),
+        _rows16(mkv, 2 * DM),
+        _rows16(dmkv, 2 * DM),
+    )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("prebx", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, DBIAS, DBQ, DBS, bs.float().contiguous(), int(ntile), float(eps))
+    atom_kernel("prebx", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        DBIAS,
+        DBQ,
+        DBS,
+        bs.float().contiguous(),
+        int(ntile),
+        float(eps),
+    )
     return DS, dmkv
 
 
 def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     """dmod [M, 768] (backward layout), c [M, 128] -> dc, cn1, cn2 [M, 128]; d g1 / d g2 into DG [256]."""
     M = c.shape[0]
+
     def new():
         return torch.empty(M, DM, device=c.device, dtype=torch.bfloat16)
+
     dc, cn1, cn2 = new(), new(), new()
-    maps = (_rows16(dmod, 6 * DM), _rows16(c), _map(WmodT, [6 * DM, DM], 12 * DM, [32, 128], swizzle=64),
-            _rows16(dc), _rows16(cn1), _rows16(cn2))
+    maps = (
+        _rows16(dmod, 6 * DM),
+        _rows16(c),
+        _map(WmodT, [6 * DM, DM], 12 * DM, [32, 128], swizzle=64),
+        _rows16(dc),
+        _rows16(cn1),
+        _rows16(cn2),
+    )
     ntile = M // 16
     d = _dev(c)
-    atom_kernel("condb", d)((min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, g1, g2, DG, int(ntile), float(eps))
+    atom_kernel("condb", d)(
+        (min(nsm(d), ntile), 1, 1),
+        (384, 1, 1),
+        *maps,
+        g1,
+        g2,
+        DG,
+        int(ntile),
+        float(eps),
+    )
     return dc, cn1, cn2
 
 
@@ -304,20 +536,36 @@ def cubin_tf32(stem: str, defs: tuple = ()) -> str:
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *("-D" + d for d in defs))
+    flags = (
+        *host,
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_100a",
+        "-cubin",
+        "-lineinfo",
+        f"-I{_dir}",
+        *("-D" + d for d in defs),
+    )
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "local_dit_sm100_tf32" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run([nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)], capture_output=True, text=True,
-                             timeout=900, check=False)
+        res = subprocess.run(
+            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
         if res.returncode != 0:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}")
+            raise RuntimeError(
+                f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
+            )
         os.replace(tmp, out)
     return str(out)
 
@@ -337,10 +585,10 @@ KERNELS_TF32 = {
     "colsum": ("rows_tf32", "f32_colsum", 0),
 }
 
-#: Programmatic dependent launch for the fp32 path's kernels (``MINIWORLD_TF32_PDL``, default on). Every one of them executes
+#: Programmatic dependent launch for the fp32 path's kernels (``settings.tf32_pdl``, default on). Every one of them executes
 #: ``griddepcontrol.wait`` before its first global-memory access (after its smem / TMEM setup), so it may be scheduled while the previous
 #: kernel drains: the launch latency and the setup overlap the previous kernel's tail. ``set_pdl32`` flips the loaded kernels (A/B timing).
-PDL32 = [os.environ.get("MINIWORLD_TF32_PDL", "1") != "0"]
+PDL32 = [settings.current().tf32_pdl]
 _PDL32_LOADED: list = []
 
 
@@ -391,8 +639,8 @@ def _nfull(tiles, nsm_):
     is a serial latency chain (ncu: ~5 % issue utilisation), so the time is ~ the waves of units over the SMs times a unit's cost; a half unit
     costs 0.7-0.8 of a full one (round 5, 3072 / 6144 atoms). So: every tile split when the halves fit one wave; otherwise the tail beyond the
     whole waves split when ITS halves fit one wave (4096 atoms on 148 SMs: 148 full + 24 halves, 1.75 waves instead of 2); else none.
-    MINIWORLD_TF32_FUSED_UNITS=full / half forces either."""
-    mode = os.environ.get("MINIWORLD_TF32_FUSED_UNITS", "auto")
+    settings.tf32_fused_units=full / half forces either."""
+    mode = settings.current().tf32_fused_units
     if mode in ("full", "half"):
         return tiles if mode == "full" else 0
     if 2 * tiles <= nsm_:
@@ -408,7 +656,12 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
     pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
     ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves."""
     M = s.shape[0]
-    assert M % 128 == 0 and s.is_contiguous() and s.shape[1] == DM and tuple(wp.shape) == (4 * DM, DM), (s.shape, wp.shape)
+    assert (
+        M % 128 == 0
+        and s.is_contiguous()
+        and s.shape[1] == DM
+        and tuple(wp.shape) == (4 * DM, DM)
+    ), (s.shape, wp.shape)
     assert s1.stride(1) == b1.stride(1) == 1 and s1.stride(0) == b1.stride(0)
     cross = mks is not None
     if cross:
@@ -418,9 +671,25 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
     tiles = M // 128
     nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
     units = nfull + 2 * (tiles - nfull)
-    fused_kernel32("pre", d)((min(nsm(d), units), 1, 1), (384, 1, 1), _tm32(wp, (32, 256)), _tm32(p, (32, 32)), s, s1, b1,
-                             int(s1.stride(0)), mks, mkb, int(mks.stride(0)) if cross else 0, bq, int(cross), int(rndmask), int(M), float(eps),
-                             int(nfull))
+    fused_kernel32("pre", d)(
+        (min(nsm(d), units), 1, 1),
+        (384, 1, 1),
+        _tm32(wp, (32, 256)),
+        _tm32(p, (32, 32)),
+        s,
+        s1,
+        b1,
+        int(s1.stride(0)),
+        mks,
+        mkb,
+        int(mks.stride(0)) if cross else 0,
+        bq,
+        int(cross),
+        int(rndmask),
+        int(M),
+        float(eps),
+        int(nfull),
+    )
     return p
 
 
@@ -429,15 +698,37 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
     contiguous, g a [M, 128] view, so / s2 / b2 / st [M, 128] views with one row stride, wo / wu / ws the tf32-rounded packs -> out [M, 128].
     ``nfull`` (default ``_nfull``): the 128-row tiles run whole; the others as two 64-row halves."""
     M = s.shape[0]
-    assert M % 128 == 0 and s.is_contiguous() and o.is_contiguous() and o.shape == s.shape, (o.shape, s.shape)
-    assert g.stride(1) == 1 and all(t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st))
+    assert (
+        M % 128 == 0 and s.is_contiguous() and o.is_contiguous() and o.shape == s.shape
+    ), (o.shape, s.shape)
+    assert g.stride(1) == 1 and all(
+        t.stride(1) == 1 and t.stride(0) == so.stride(0) for t in (s2, b2, st)
+    )
     out = torch.empty(M, DM, device=s.device, dtype=F32)
     d = _dev(s)
     tiles = M // 128
     nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
     units = nfull + 2 * (tiles - nfull)
-    fused_kernel32("post", d)((min(nsm(d), units), 1, 1), (384, 1, 1), _tm32(wo, (32, 128)), _tm32(wu, (32, 256)), _tm32(ws, (32, 128)),
-                              o, g, int(g.stride(0)), s, so, s2, b2, st, int(so.stride(0)), out, int(M), float(eps), int(nfull))
+    fused_kernel32("post", d)(
+        (min(nsm(d), units), 1, 1),
+        (384, 1, 1),
+        _tm32(wo, (32, 128)),
+        _tm32(wu, (32, 256)),
+        _tm32(ws, (32, 128)),
+        o,
+        g,
+        int(g.stride(0)),
+        s,
+        so,
+        s2,
+        b2,
+        st,
+        int(so.stride(0)),
+        out,
+        int(M),
+        float(eps),
+        int(nfull),
+    )
     return out
 
 
@@ -455,14 +746,20 @@ def _tm32(t, box, swizzle=128):
     geometry, box, swizzle; encoding one costs ~5-10 us of host time). The cache does not hold the tensor."""
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
-    assert t.dtype == F32 and t.dim() == 2 and t.stride(1) == 1, (t.dtype, t.shape, t.stride())
+    assert t.dtype == F32 and t.dim() == 2 and t.stride(1) == 1, (
+        t.dtype,
+        t.shape,
+        t.stride(),
+    )
     rows, cols = t.shape
     key = (t.data_ptr(), cols, rows, t.stride(0), tuple(box), swizzle)
     m = _TMAPS32.get(key)
     if m is None:
         if len(_TMAPS32) >= 512:
             _TMAPS32.clear()
-        m = driver.TensorMap(t, [cols, rows], t.stride(0) * 4, list(box), swizzle=swizzle, dtype="f32")
+        m = driver.TensorMap(
+            t, [cols, rows], t.stride(0) * 4, list(box), swizzle=swizzle, dtype="f32"
+        )
         m.keep = None
         _TMAPS32[key] = m
     return m
@@ -472,8 +769,26 @@ def _tm32(t, box, swizzle=128):
 STORE, RESID_GATE, SWIGLU = 0, 1, 2
 
 
-def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol0=0, bias=None, sigmask=0, rndmask=0, mode=STORE,
-           res=None, gate=None, out2=None, a_grp=0):
+def gemm32(
+    a,
+    w,
+    out=None,
+    *,
+    k=None,
+    n=None,
+    a_col0=0,
+    b_row0=0,
+    b_col0=0,
+    ocol0=0,
+    bias=None,
+    sigmask=0,
+    rndmask=0,
+    mode=STORE,
+    res=None,
+    gate=None,
+    out2=None,
+    a_grp=0,
+):
     """The fp32 path's TF32 product (``gemm_tf32.cu``): acc = a[:, a_col0 : a_col0 + k] @ w[b_row0 : b_row0 + n, b_col0 : b_col0 + k]^T.
 
     ``a_grp`` > 0 makes it a grouped product: output columns [g a_grp, (g + 1) a_grp) read the A columns a_col0 + g k .. (several small
@@ -497,20 +812,63 @@ def gemm32(a, w, out=None, *, k=None, n=None, a_col0=0, b_row0=0, b_col0=0, ocol
     assert mode != SWIGLU or n == 512
     assert a_grp == 0 or (a_grp % nt == 0 and n % a_grp == 0), (a_grp, nt, n)
     if out is None:
-        out = torch.empty(M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32)
+        out = torch.empty(
+            M, n // 2 if mode == SWIGLU else n, device=a.device, dtype=F32
+        )
     ma, mb = _tm32(a, (32, 128)), _tm32(w, (32, nt))
     mo = _tm32(out, (32, 32))
     mo2 = mo if out2 is None else _tm32(out2, (32, 32))
     tiles = (M // 128) * (n // nt)
-    if mode == RESID_GATE and n == DM and a_col0 == 0 and b_row0 == 0 and b_col0 == 0 and ocol0 == 0 and bias is None:
+    if (
+        mode == RESID_GATE
+        and n == DM
+        and a_col0 == 0
+        and b_row0 == 0
+        and b_col0 == 0
+        and ocol0 == 0
+        and bias is None
+    ):
         # the gated residual with res and gate by TMA (gemm_rg_tf32.cu): 144 -> ~60 us at 196608 rows
-        atom_kernel32("gemm_rg", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, _tm32(res, (32, 32)), _tm32(gate, (32, 32)),
-                                    int(M), int(k), int(out2 is not None))
+        atom_kernel32("gemm_rg", d)(
+            (min(nsm(d), tiles), 1, 1),
+            (512, 1, 1),
+            ma,
+            mb,
+            mo,
+            mo2,
+            _tm32(res, (32, 32)),
+            _tm32(gate, (32, 32)),
+            int(M),
+            int(k),
+            int(out2 is not None),
+        )
         return out
-    atom_kernel32("gemm", d)((min(nsm(d), tiles), 1, 1), (512, 1, 1), ma, mb, mo, mo2, bias, res, gate, int(M), int(n), int(k), int(nt),
-                             int(a_col0), int(b_row0), int(b_col0), int(ocol0), int(sigmask), int(mode), int(out2 is not None),
-                             int(res.stride(0)) if res is not None else 0, int(gate.stride(0)) if gate is not None else 0, int(rndmask),
-                             int(a_grp))
+    atom_kernel32("gemm", d)(
+        (min(nsm(d), tiles), 1, 1),
+        (512, 1, 1),
+        ma,
+        mb,
+        mo,
+        mo2,
+        bias,
+        res,
+        gate,
+        int(M),
+        int(n),
+        int(k),
+        int(nt),
+        int(a_col0),
+        int(b_row0),
+        int(b_col0),
+        int(ocol0),
+        int(sigmask),
+        int(mode),
+        int(out2 is not None),
+        int(res.stride(0)) if res is not None else 0,
+        int(gate.stride(0)) if gate is not None else 0,
+        int(rndmask),
+        int(a_grp),
+    )
     return out
 
 
@@ -539,53 +897,116 @@ def ln32(c, g1, g2, g3=None, eps=1e-5, out=None):
         o3 = _new(c) if g3 is not None else None
         oc, ld = None, DM
     else:
-        assert out.dtype == F32 and out.stride(1) == 1 and out.shape == (M, (4 if g3 is not None else 3) * DM), (out.shape, out.stride())
-        o1, o2, oc = out[:, :DM], out[:, DM:2 * DM], out[:, 2 * DM:3 * DM]
-        o3 = out[:, 3 * DM:] if g3 is not None else None
+        assert (
+            out.dtype == F32
+            and out.stride(1) == 1
+            and out.shape == (M, (4 if g3 is not None else 3) * DM)
+        ), (out.shape, out.stride())
+        o1, o2, oc = out[:, :DM], out[:, DM : 2 * DM], out[:, 2 * DM : 3 * DM]
+        o3 = out[:, 3 * DM :] if g3 is not None else None
         ld = out.stride(0)
-    atom_kernel32("ln", _dev(c))(_rowgrid(M), (256, 1, 1), c, g1, o1, g2, o2, g3, o3, oc, int(ld), int(M), float(eps))
+    atom_kernel32("ln", _dev(c))(
+        _rowgrid(M),
+        (256, 1, 1),
+        c,
+        g1,
+        o1,
+        g2,
+        o2,
+        g3,
+        o3,
+        oc,
+        int(ld),
+        int(M),
+        float(eps),
+    )
     return o1, o2, o3
 
 
 def adaln32(a, scale, shift, eps=1e-5):
     """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M, 128] views (the stored sigmoid scale)."""
     out = _new(a)
-    atom_kernel32("adaln", _dev(a))(_rowgrid(a.shape[0]), (256, 1, 1), a, scale, int(scale.stride(0)), shift, int(shift.stride(0)), out,
-                                    int(a.shape[0]), float(eps))
+    atom_kernel32("adaln", _dev(a))(
+        _rowgrid(a.shape[0]),
+        (256, 1, 1),
+        a,
+        scale,
+        int(scale.stride(0)),
+        shift,
+        int(shift.stride(0)),
+        out,
+        int(a.shape[0]),
+        float(eps),
+    )
     return out
 
 
 def gate32(g, o):
     """sigmoid(g) * o: g a fp32 [M, 128] view, o [M, 128]."""
     out = _new(o)
-    atom_kernel32("gate", _dev(o))(_rowgrid(o.shape[0]), (256, 1, 1), g, int(g.stride(0)), o, out, int(o.shape[0]))
+    atom_kernel32("gate", _dev(o))(
+        _rowgrid(o.shape[0]), (256, 1, 1), g, int(g.stride(0)), o, out, int(o.shape[0])
+    )
     return out
 
 
 def tail_bwd32(dy, t, st, dst):
     """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st)."""
     dt = _new(dy)
-    atom_kernel32("tail_b", _dev(dy))(_rowgrid(dy.shape[0]), (256, 1, 1), dy, t, st, int(st.stride(0)), dt, dst, int(dst.stride(0)),
-                                      int(dy.shape[0]))
+    atom_kernel32("tail_b", _dev(dy))(
+        _rowgrid(dy.shape[0]),
+        (256, 1, 1),
+        dy,
+        t,
+        st,
+        int(st.stride(0)),
+        dt,
+        dst,
+        int(dst.stride(0)),
+        int(dy.shape[0]),
+    )
     return dt
 
 
 def swiglu_bwd32(dh, u):
     """dh [M, 256], u [M, 512] (interleaved [a_0 | b_0 | a_1 | b_1]) -> d[a | b] [M, 512] (same layout), h = silu(a) b [M, 256]."""
     dab, hh = _new(u, 4 * DM), _new(u, 2 * DM)
-    atom_kernel32("swiglu_b", _dev(u))(_rowgrid(u.shape[0]), (256, 1, 1), dh, u, dab, hh, int(u.shape[0]))
+    atom_kernel32("swiglu_b", _dev(u))(
+        _rowgrid(u.shape[0]), (256, 1, 1), dh, u, dab, hh, int(u.shape[0])
+    )
     return dab, hh
 
 
-def adaln_bwd32(a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5):
+def adaln_bwd32(
+    a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5
+):
     """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
     also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y)."""
     M = a.shape[0]
     da = _new(a)
     dyo = _new(a) if y is not None else None
-    atom_kernel32("adaln_b", _dev(a))(_rowgrid(M), (256, 1, 1), a, scale, int(scale.stride(0)), dx, dres, da, dscale, int(dscale.stride(0)),
-                                      dshift, int(dshift.stride(0)), y, so, int(so.stride(0)) if so is not None else 0, dso,
-                                      int(dso.stride(0)) if dso is not None else 0, dyo, int(M), float(eps))
+    atom_kernel32("adaln_b", _dev(a))(
+        _rowgrid(M),
+        (256, 1, 1),
+        a,
+        scale,
+        int(scale.stride(0)),
+        dx,
+        dres,
+        da,
+        dscale,
+        int(dscale.stride(0)),
+        dshift,
+        int(dshift.stride(0)),
+        y,
+        so,
+        int(so.stride(0)) if so is not None else 0,
+        dso,
+        int(dso.stride(0)) if dso is not None else 0,
+        dyo,
+        int(M),
+        float(eps),
+    )
     return da, dyo
 
 
@@ -594,7 +1015,20 @@ def gate_bwd32(dgated, g, o, dg, A, n):
     M = o.shape[0]
     do = _new(o)
     D = torch.empty(A, NH, n, device=o.device, dtype=F32)
-    atom_kernel32("gate_b", _dev(o))(_rowgrid(M), (256, 1, 1), dgated, g, int(g.stride(0)), o, do, dg, int(dg.stride(0)), D, int(M), int(n))
+    atom_kernel32("gate_b", _dev(o))(
+        _rowgrid(M),
+        (256, 1, 1),
+        dgated,
+        g,
+        int(g.stride(0)),
+        o,
+        do,
+        dg,
+        int(dg.stride(0)),
+        D,
+        int(M),
+        int(n),
+    )
     return do, D
 
 
@@ -602,11 +1036,17 @@ def colsum32(x):
     """The column sums of a fp32 [M, 128 g] view (unit column stride, any row pitch) -> [128 g] fp32: one launch writing G partial rows (a
     persistent grid, deterministic) and a tiny sum of those."""
     M, cols = x.shape
-    assert x.dtype == F32 and x.stride(1) == 1 and cols % DM == 0, (x.dtype, x.shape, x.stride())
+    assert x.dtype == F32 and x.stride(1) == 1 and cols % DM == 0, (
+        x.dtype,
+        x.shape,
+        x.stride(),
+    )
     d = _dev(x)
     g = max(1, min(2 * nsm(d), (M + 7) // 8))
     part = torch.empty(g, cols, device=x.device, dtype=F32)
-    atom_kernel32("colsum", d)((g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M))
+    atom_kernel32("colsum", d)(
+        (g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M)
+    )
     return part.sum(0)
 
 
@@ -615,8 +1055,21 @@ def ln_bwd32(c, dc, dcn1, g1, dcn2, g2, dcn3=None, g3=None, eps=1e-5):
     M = c.shape[0]
     d = _dev(c)
     dg = torch.zeros(3 * DM, device=c.device, dtype=F32)
-    atom_kernel32("ln_b", d)((max(1, min(4 * nsm(d), (M + 7) // 8)), 1, 1), (256, 1, 1), c, dc, dcn1, g1, dcn2, g2, dcn3, g3, dg, int(M),
-                             float(eps))
+    atom_kernel32("ln_b", d)(
+        (max(1, min(4 * nsm(d), (M + 7) // 8)), 1, 1),
+        (256, 1, 1),
+        c,
+        dc,
+        dcn1,
+        g1,
+        dcn2,
+        g2,
+        dcn3,
+        g3,
+        dg,
+        int(M),
+        float(eps),
+    )
     return dg
 
 
@@ -628,9 +1081,16 @@ _DW_NS, _DW_STG = 5, 40 * 1024
 
 
 class _DwTab(ctypes.Structure):
-    _fields_ = [("np", ctypes.c_int), ("mb", ctypes.c_int * _DW_MAXP), ("nn", ctypes.c_int * _DW_MAXP), ("ns", ctypes.c_int * _DW_MAXP),
-                ("outbase", ctypes.c_int * _DW_MAXP), ("wsoff", ctypes.c_longlong * _DW_MAXP), ("e4off", ctypes.c_longlong * _DW_MAXP),
-                ("e4total", ctypes.c_longlong)]
+    _fields_ = [
+        ("np", ctypes.c_int),
+        ("mb", ctypes.c_int * _DW_MAXP),
+        ("nn", ctypes.c_int * _DW_MAXP),
+        ("ns", ctypes.c_int * _DW_MAXP),
+        ("outbase", ctypes.c_int * _DW_MAXP),
+        ("wsoff", ctypes.c_longlong * _DW_MAXP),
+        ("e4off", ctypes.c_longlong * _DW_MAXP),
+        ("e4total", ctypes.c_longlong),
+    ]
 
 
 class _DwOut(ctypes.Structure):
@@ -677,12 +1137,25 @@ class AtomDw:
         nouts = 0
         tab.np = len(problems)
         for p, (A, B, dests) in enumerate(problems):
-            assert A.dtype == dt and B.dtype == dt and A.shape[0] == R and B.shape[0] == R and A.shape[1] % 128 == 0
-            assert A.stride(1) == 1 and B.stride(1) == 1 and B.shape[1] in (128, 256) and len(dests) == A.shape[1] // 128
+            assert (
+                A.dtype == dt
+                and B.dtype == dt
+                and A.shape[0] == R
+                and B.shape[0] == R
+                and A.shape[1] % 128 == 0
+            )
+            assert (
+                A.stride(1) == 1
+                and B.stride(1) == 1
+                and B.shape[1] in (128, 256)
+                and len(dests) == A.shape[1] // 128
+            )
             for t, slot in ((A, p), (B, _DW_MAXP + p)):
-                m = driver.TensorMap(t, [t.shape[1], R], t.stride(0) * esz, box, swizzle=sw, dtype=dname)
+                m = driver.TensorMap(
+                    t, [t.shape[1], R], t.stride(0) * esz, box, swizzle=sw, dtype=dname
+                )
                 keep.append(m)
-                raw[slot * 128:(slot + 1) * 128] = ctypes.string_at(m.addr, 128)
+                raw[slot * 128 : (slot + 1) * 128] = ctypes.string_at(m.addr, 128)
             mb, nn = A.shape[1] // 128, B.shape[1]
             tab.mb[p], tab.nn[p] = mb, nn
             tab.ns[p] = max(1, round(nsm_ * weights[p] / total))
@@ -690,8 +1163,15 @@ class AtomDw:
             wsoff += tab.ns[p] * mb * 128 * nn
             e4 += mb * 128 * nn // 4
             for d in dests:
-                assert d.is_contiguous() and d.shape == (128, nn) and d.dtype in (F32, torch.bfloat16), (d.shape, d.dtype)
-                out.ptr[nouts], out.bf16[nouts] = d.data_ptr(), int(d.dtype == torch.bfloat16)
+                assert (
+                    d.is_contiguous()
+                    and d.shape == (128, nn)
+                    and d.dtype in (F32, torch.bfloat16)
+                ), (d.shape, d.dtype)
+                out.ptr[nouts], out.bf16[nouts] = (
+                    d.data_ptr(),
+                    int(d.dtype == torch.bfloat16),
+                )
                 nouts += 1
         assert nouts <= _DW_MAXO
         tab.e4total = e4
@@ -708,4 +1188,3 @@ class AtomDw:
 @functools.lru_cache(maxsize=None)
 def atom_dw(device_index: int, f32: bool) -> AtomDw:
     return AtomDw(device_index, f32)
-

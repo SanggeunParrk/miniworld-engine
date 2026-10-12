@@ -9,7 +9,7 @@
                            softmax (with P^T for training), the pair bias LN(pair) Wf^T and its backward (exact fp32 on the FMA pipe),
                            the training rows (conditioning LN, AdaLN, residual + AdaLN, residual out, their backwards, the gate
                            backward) -- ``rows32()``
-  bo_front_tf32.cu         K1 of the three-kernel inference step (the default fp32 inference step; MINIWORLD_BIAS_ONLY_DIT_INF3=0:
+  bo_front_tf32.cu         K1 of the three-kernel inference step (the default fp32 inference step; settings.bias_only_dit_inf3=0:
                            cuBLAS + rows): LN + AdaLN of the block input and the v|g GEMM, a cluster of 4, 6 or 8 CTAs per 128-row
                            tile (``FrontTF32``)
   bo_tail_tf32.cu          K3 of that step: out GEMM, residual + gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM, residual + gate --
@@ -33,7 +33,14 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
-from miniworld_engine.kernels.bias_only_dit.cuda import LAYOUTS, PTR, _descriptors, _Launch, _Runs
+from miniworld_engine.kernels.bias_only_dit.cuda import (
+    LAYOUTS,
+    PTR,
+    _descriptors,
+    _Launch,
+    _Runs,
+)
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 _SMEM_MAX = 232448
@@ -63,15 +70,28 @@ def rows32():
     return load_extension(
         name="bias_only_dit_f32_rows_cuda",
         sources=[str(_dir / "bias_only_dit_f32_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("80", "90", "100", ptx=("100",))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes("80", "90", "100", ptx=("100",)),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def _f32_rows(t: torch.Tensor) -> int:
     """Row stride in bytes of an fp32 [rows, cols] view TMA reads (unit column stride, 16-byte aligned rows)."""
-    assert t.dtype is torch.float32 and t.stride(1) == 1 and t.stride(0) % 4 == 0 and t.data_ptr() % 16 == 0, (t.dtype, t.stride())
+    assert (
+        t.dtype is torch.float32
+        and t.stride(1) == 1
+        and t.stride(0) % 4 == 0
+        and t.data_ptr() % 16 == 0
+    ), (t.dtype, t.stride())
     return t.stride(0) * 4
 
 
@@ -82,8 +102,8 @@ _PV_GROUPS = {32: (1, 2, 4, 8), 48: (1, 2, 4, 5), 64: (1, 2, 4)}
 
 def pv_batched() -> bool:
     """pv_gate_tf32.cu -DBATCHN: one MMA per K step for all of an item's samples (N = SG x 32-channel atoms) instead of one per
-    sample. MINIWORLD_BIAS_ONLY_DIT_PV_BATCH=0: one per sample (the round-2 kernel)."""
-    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PV_BATCH", "1") != "0"
+    sample. settings.bias_only_dit_pv_batch=0: one per sample (the round-2 kernel)."""
+    return settings.current().bias_only_dit_pv_batch
 
 
 def pv_groups(dh: int) -> tuple[int, ...]:
@@ -106,9 +126,9 @@ def _pv_smem(dh: int, sg: int, nx: int = 3) -> int:
 
 def pick_group_tf32(S: int, L: int, nsm: int, nh: int, dh: int) -> int:
     """Samples per work item: the fewest bytes into the busiest SM -- rounds x (the P tile once, SG samples' v tiles, their g in and
-    a out). MINIWORLD_BIAS_ONLY_DIT_SG forces one (clamped to the built groups)."""
+    a out). settings.bias_only_dit_sg forces one (clamped to the built groups)."""
     groups = [g for g in pv_groups(dh) if g <= max(S, 1)]
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_SG")
+    forced = settings.current().bias_only_dit_sg
     if forced:
         f = int(forced)
         return max([g for g in groups if g <= f] or [1])
@@ -128,8 +148,11 @@ class PvGateCoreTF32:
     ``pdl``: the three-kernel inference step's build (``-DPDL_INF``: programmatic dependent launch, the gated output rounded to TF32
     for the tail's MMA), launched with the PDL attribute; default off (the training step and the default inference step)."""
 
-    def __init__(self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False):
+    def __init__(
+        self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False
+    ):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._sm100, self._tm = sm100, sm100._tm
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
@@ -139,22 +162,52 @@ class PvGateCoreTF32:
 
     def kernel(self, sg: int, gate: bool = True):
         """The cubin for SG samples per item, with or without the gate (built on first use); batched N unless
-        MINIWORLD_BIAS_ONLY_DIT_PV_BATCH=0."""
+        settings.bias_only_dit_pv_batch=0."""
         batch = ("BATCHN",) if pv_batched() else ()
         if self.pdl:
-            return self._sm100._sm100_kernel("pv_gate_tf32", "bo_pv_gate_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                             defs=(f"SG={sg}", f"GATE={int(gate)}", f"NHEAD={self.nh}", f"DHEAD={self.dh}", *batch,
-                                                   "PDL_INF"), smem=_pv_smem(self.dh, sg))
-        return self._sm100._sm100_kernel("pv_gate_tf32", "bo_pv_gate_tf32_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=(f"SG={sg}", f"GATE={int(gate)}", f"NHEAD={self.nh}", f"DHEAD={self.dh}", *batch),
-                                         smem=_pv_smem(self.dh, sg))
+            return self._sm100._sm100_kernel(
+                "pv_gate_tf32",
+                "bo_pv_gate_tf32_sm100",
+                self.device_index,
+                pdl=True,
+                src_dir=str(_dir),
+                defs=(
+                    f"SG={sg}",
+                    f"GATE={int(gate)}",
+                    f"NHEAD={self.nh}",
+                    f"DHEAD={self.dh}",
+                    *batch,
+                    "PDL_INF",
+                ),
+                smem=_pv_smem(self.dh, sg),
+            )
+        return self._sm100._sm100_kernel(
+            "pv_gate_tf32",
+            "bo_pv_gate_tf32_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=(
+                f"SG={sg}",
+                f"GATE={int(gate)}",
+                f"NHEAD={self.nh}",
+                f"DHEAD={self.dh}",
+                *batch,
+            ),
+            smem=_pv_smem(self.dh, sg),
+        )
 
     def _halves(self, t, M):
         """TMA maps of a [M, nh dh] fp32 view as the kernel stages it: channels 0-31 of a head (SW128) and 32..dh-1 (SW64 for 16
         channels, SW128 for 32, none for dh 32)."""
         tm, DA, wb, rs = self._tm, self.nh * self.dh, self.dh - 32, _f32_rows(t)
         a = tm(t, [DA, M], rs, [32, 128], dtype="f32")
-        b = a if wb == 0 else tm(t, [DA, M], rs, [wb, 128], swizzle=64 if wb == 16 else 128, dtype="f32")
+        b = (
+            a
+            if wb == 0
+            else tm(
+                t, [DA, M], rs, [wb, 128], swizzle=64 if wb == 16 else 128, dtype="f32"
+            )
+        )
         return a, b
 
     def _bind(self, v, P, out, S, L, g):
@@ -173,9 +226,23 @@ class PvGateCoreTF32:
     def __call__(self, v, P, out, S, g=None):
         """v [S L, nh dh] view, P [nh L, L] contiguous, out [S L, nh dh] view, g [S L, nh dh] view or None; all fp32."""
         L = v.shape[0] // S
-        assert P.dtype is torch.float32 and P.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
-        key = (v.data_ptr(), v.stride(0), None if g is None else (g.data_ptr(), g.stride(0)), P.data_ptr(), out.data_ptr(),
-               out.stride(0), S, L, pv_batched())
+        assert (
+            P.dtype is torch.float32
+            and P.is_contiguous()
+            and tuple(P.shape) == (self.nh * L, L)
+            and L % 128 == 0
+        )
+        key = (
+            v.data_ptr(),
+            v.stride(0),
+            None if g is None else (g.data_ptr(), g.stride(0)),
+            P.data_ptr(),
+            out.data_ptr(),
+            out.stride(0),
+            S,
+            L,
+            pv_batched(),
+        )
         self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g))()
         return out
 
@@ -196,9 +263,17 @@ class GemmGluTF32:
 
     def __init__(self, device_index: int, bwd: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._tm, self.bwd = sm100._tm, bwd
-        self.k = sm100._sm100_kernel("gemm_glu_tf32", "bo_glu_bwd_tf32_sm100" if bwd else "bo_glu_fwd_tf32_sm100", device_index,
-                                     src_dir=str(_dir), defs=("BWD",) if bwd else (), cluster=2, smem=glu_smem(bwd))
+        self.k = sm100._sm100_kernel(
+            "gemm_glu_tf32",
+            "bo_glu_bwd_tf32_sm100" if bwd else "bo_glu_fwd_tf32_sm100",
+            device_index,
+            src_dir=str(_dir),
+            defs=("BWD",) if bwd else (),
+            cluster=2,
+            smem=glu_smem(bwd),
+        )
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
@@ -206,21 +281,49 @@ class GemmGluTF32:
         M, D, H, tm = x.shape[0], self.D, self.H, self._tm
         f = dict(dtype="f32")
         mx = tm(x, [D, M], D * 4, [32, 64], swizzle=128, **f)
-        wmap = lambda t: tm(t, [D, t.shape[0]], D * 4, [32, 128], swizzle=128, **f)                      # noqa: E731
-        tile = lambda t: tm(t, [H, M], t.stride(0) * 4, [16, 128], swizzle=64, **f)                     # noqa: E731
-        half = lambda t, i: t[:, i * H:(i + 1) * H]                                                      # noqa: E731
+        wmap = lambda t: tm(t, [D, t.shape[0]], D * 4, [32, 128], swizzle=128, **f)  # noqa: E731
+        tile = lambda t: tm(t, [H, M], t.stride(0) * 4, [16, 128], swizzle=64, **f)  # noqa: E731
+        half = lambda t, i: t[:, i * H : (i + 1) * H]  # noqa: E731
         if self.bwd:
-            maps = (mx, wmap(w), tile(half(ab, 0)), tile(half(ab, 1)), tile(half(out, 0)), tile(half(out, 1)))
+            maps = (
+                mx,
+                wmap(w),
+                tile(half(ab, 0)),
+                tile(half(ab, 1)),
+                tile(half(out, 0)),
+                tile(half(out, 1)),
+            )
         else:
-            maps = (mx, wmap(w[:H]), wmap(w[H:]), tile(out), tile(half(ab, 0)), tile(half(ab, 1)))
-        return _Launch(self.k, (self.nsm & ~1, 1, 1), (512, 1, 1), *_descriptors(*maps), (M + 127) // 128)
+            maps = (
+                mx,
+                wmap(w[:H]),
+                wmap(w[H:]),
+                tile(out),
+                tile(half(ab, 0)),
+                tile(half(ab, 1)),
+            )
+        return _Launch(
+            self.k,
+            (self.nsm & ~1, 1, 1),
+            (512, 1, 1),
+            *_descriptors(*maps),
+            (M + 127) // 128,
+        )
 
     def __call__(self, x, w, ab, out):
         M, D, H = x.shape[0], self.D, self.H
         assert x.shape == (M, D) and ab.shape == (M, 2 * H), (x.shape, ab.shape)
-        assert w.shape == ((H, D) if self.bwd else (2 * H, D)) and out.shape == ((M, 2 * H) if self.bwd else (M, H)), (w.shape, out.shape)
-        assert all(t.dtype is torch.float32 and t.is_contiguous() and t.data_ptr() % 16 == 0 for t in (x, w, ab, out))
-        self.runs.bind((x.data_ptr(), w.data_ptr(), ab.data_ptr(), out.data_ptr(), M), lambda: self._bind(x, w, ab, out))()
+        assert w.shape == ((H, D) if self.bwd else (2 * H, D)) and out.shape == (
+            (M, 2 * H) if self.bwd else (M, H)
+        ), (w.shape, out.shape)
+        assert all(
+            t.dtype is torch.float32 and t.is_contiguous() and t.data_ptr() % 16 == 0
+            for t in (x, w, ab, out)
+        )
+        self.runs.bind(
+            (x.data_ptr(), w.data_ptr(), ab.data_ptr(), out.data_ptr(), M),
+            lambda: self._bind(x, w, ab, out),
+        )()
         return out
 
 
@@ -229,11 +332,13 @@ _GLU_FAILED: set = set()
 
 def glu_op(device_index: int, bwd: bool):
     """The SwiGLU GEMM (``GemmGluTF32``) for the training step, or None: switched off or its build failed (warned once): cuBLAS + the
-    fp32 rows. Backward on by default (MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD=0: off); forward OFF by default
-    (MINIWORLD_BIAS_ONLY_DIT_TF32_GLU=1: on) -- its GEMM runs at ~530 TF/s against cuBLAS's ~680, which eats the SwiGLU pass it
+    fp32 rows. Backward on by default (settings.bias_only_dit_tf32_glu_bwd=0: off); forward OFF by default
+    (settings.bias_only_dit_tf32_glu=1: on) -- its GEMM runs at ~530 TF/s against cuBLAS's ~680, which eats the SwiGLU pass it
     removes (L768 per launch 329 against 254 + 99 us; whole step not better)."""
-    var, default = ("MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD", "1") if bwd else ("MINIWORLD_BIAS_ONLY_DIT_TF32_GLU", "0")
-    if os.environ.get(var, default) == "0":
+    current = settings.current()
+    if not (
+        current.bias_only_dit_tf32_glu_bwd if bwd else current.bias_only_dit_tf32_glu
+    ):
         return None
     key = (device_index, bwd)
     if key in _GLU_FAILED:
@@ -244,8 +349,12 @@ def glu_op(device_index: int, bwd: bool):
             op = _GLU_OPS[key] = GemmGluTF32(device_index, bwd)
         except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps cuBLAS + the rows
             _GLU_FAILED.add(key)
-            warnings.warn(f"bias-only DiT fp32 SwiGLU GEMM ({'backward' if bwd else 'forward'}) unavailable, keeping cuBLAS + the "
-                          f"fp32 rows: {exc!r}", RuntimeWarning, stacklevel=2)
+            warnings.warn(
+                f"bias-only DiT fp32 SwiGLU GEMM ({'backward' if bwd else 'forward'}) unavailable, keeping cuBLAS + the "
+                f"fp32 rows: {exc!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
             return None
     return op
 
@@ -265,12 +374,12 @@ DPBX2_TF32_SMEM = (2 * 16384 + 4 * 3 * 4096) + 2 * 65536 + 256
 def dpb32_pair(L: int, nh: int = 16, nsm: int = 148) -> bool:
     """The fp32 bias gradient on CTA pairs, the TF32 build of ``dpbx2_sm100.cu`` (256-query x 256-key items, half the TMA intake per
     product; L768 A = 48, 16 x 48: 148.2 -> 104.0 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items
-    fill the SM pairs (the bf16 rule, ``dpb_pair_on``): at L 128-768 that is L768. MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0 / 1 (read per
+    fill the SM pairs (the bf16 rule, ``dpb_pair_on``): at L 128-768 that is L768. settings.bias_only_dit_tf32_dpb_pair=0 / 1 (read per
     call) keeps dpb32_sm100.cu / takes the pairs wherever 256 divides L."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "")
-    if L % 256 or forced == "0":
+    forced = settings.current().bias_only_dit_tf32_dpb_pair
+    if L % 256 or forced is False:
         return False
-    return forced == "1" or nh * (L // 256) * (L // 256) >= nsm // 2
+    return forced is True or nh * (L // 256) * (L // 256) >= nsm // 2
 
 
 _DPBX2_FAILED: set = set()
@@ -283,6 +392,7 @@ class Dpb32:
 
     def __init__(self, device_index: int, nh: int = 16, dh: int | None = None):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._sm100, self._tm, self.device_index = sm100, sm100._tm, device_index
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
@@ -292,45 +402,106 @@ class Dpb32:
         self._pair_k, self.last = None, "single"
 
     def kernel(self):
-        return self._sm100._sm100_kernel("dpb32_sm100", "bo_dpb32_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=(f"NJ={DPB32_NJ}", f"NHEAD={self.nh}", f"DHEAD={self.dh}"), smem=DPB32_SMEM)
+        return self._sm100._sm100_kernel(
+            "dpb32_sm100",
+            "bo_dpb32_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=(f"NJ={DPB32_NJ}", f"NHEAD={self.nh}", f"DHEAD={self.dh}"),
+            smem=DPB32_SMEM,
+        )
 
     def pair_kernel(self):
         """dpbx2_sm100.cu built -DTF32 (CTA pairs on 256 x 256 items)."""
-        return self._sm100._sm100_kernel("dpbx2_sm100", "bo_dpbx2_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=("TF32", f"NHEAD={self.nh}", f"DHEAD={self.dh}"), cluster=2, smem=DPBX2_TF32_SMEM)
+        return self._sm100._sm100_kernel(
+            "dpbx2_sm100",
+            "bo_dpbx2_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=("TF32", f"NHEAD={self.nh}", f"DHEAD={self.dh}"),
+            cluster=2,
+            smem=DPBX2_TF32_SMEM,
+        )
 
     def _bind(self, do, v, P, out, A, L):
         nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
         DA, f = nh * dh, dict(dtype="f32", swizzle=128)
-        box = lambda t, w, rows: tm(t, [DA, M], _f32_rows(t), [w, rows], **f)                 # noqa: E731
+        box = lambda t, w, rows: tm(t, [DA, M], _f32_rows(t), [w, rows], **f)  # noqa: E731
         if self.last == "pair":
             mdo, mv = box(do, 32, 128), box(v, 32, 128)
-            mdo2, mv2 = (box(do, 16, 128), box(v, 16, 128)) if dh == 48 else (mdo, mv)     # 48-wide heads: 32 + 16 channels
-            maps = _descriptors(mdo, mdo2, mv, mv2, tm(P, [L, nh * L], L * 4, [32, 128], **f), tm(out, [L, nh * L], L * 4, [32, 32], **f))
+            mdo2, mv2 = (
+                (box(do, 16, 128), box(v, 16, 128)) if dh == 48 else (mdo, mv)
+            )  # 48-wide heads: 32 + 16 channels
+            maps = _descriptors(
+                mdo,
+                mdo2,
+                mv,
+                mv2,
+                tm(P, [L, nh * L], L * 4, [32, 128], **f),
+                tm(out, [L, nh * L], L * 4, [32, 32], **f),
+            )
             items = nh // self.hp * (L // 256) * (L // 256)
-            return _Launch(self._pair_k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
+            return _Launch(
+                self._pair_k,
+                (min(self.nsm & ~1, 2 * items), 1, 1),
+                (256, 1, 1),
+                *maps,
+                PTR,
+                L,
+                A,
+            )
         mdo, mv = box(do, 32, 128), box(v, 32, DPB32_NJ)
-        mdo2, mv2 = (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)     # 48-wide heads: 32 + 16 channels
-        maps = _descriptors(mdo, mdo2, mv, mv2, tm(P, [L, nh * L], L * 4, [32, 128], **f), tm(out, [L, nh * L], L * 4, [32, 32], **f))
+        mdo2, mv2 = (
+            (box(do, 16, 128), box(v, 16, DPB32_NJ)) if dh == 48 else (mdo, mv)
+        )  # 48-wide heads: 32 + 16 channels
+        maps = _descriptors(
+            mdo,
+            mdo2,
+            mv,
+            mv2,
+            tm(P, [L, nh * L], L * 4, [32, 128], **f),
+            tm(out, [L, nh * L], L * 4, [32, 32], **f),
+        )
         grid = (min(self.nsm, nh // self.hp * (L // 128) * (L // DPB32_NJ)), 1, 1)
         return _Launch(self.kernel(), grid, (256, 1, 1), *maps, PTR, L, A)
 
     def __call__(self, do, v, P, dd, out, A):
         L = do.shape[0] // A
-        assert all(t.dtype is torch.float32 for t in (do, v, P, dd, out)) and dd.is_contiguous() and P.is_contiguous()
-        assert out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
-        pair = dpb32_pair(L, self.nh) and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        assert (
+            all(t.dtype is torch.float32 for t in (do, v, P, dd, out))
+            and dd.is_contiguous()
+            and P.is_contiguous()
+        )
+        assert (
+            out.is_contiguous() and tuple(P.shape) == (self.nh * L, L) and L % 128 == 0
+        )
+        pair = (
+            dpb32_pair(L, self.nh)
+            and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        )
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
             except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb32_sm100.cu
                 _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
-                warnings.warn(f"bias-only DiT fp32 CTA-pair bias gradient (dpbx2_sm100 TF32) unavailable, keeping dpb32_sm100: {exc!r}",
-                              RuntimeWarning, stacklevel=2)
+                warnings.warn(
+                    f"bias-only DiT fp32 CTA-pair bias gradient (dpbx2_sm100 TF32) unavailable, keeping dpb32_sm100: {exc!r}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 pair = False
         self.last = "pair" if pair else "single"
-        key = (pair, do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
+        key = (
+            pair,
+            do.data_ptr(),
+            do.stride(0),
+            v.data_ptr(),
+            v.stride(0),
+            P.data_ptr(),
+            out.data_ptr(),
+            A,
+            L,
+        )
         self.runs.bind(key, lambda: self._bind(do, v, P, out, A, L))(dd)
         return out
 
@@ -342,8 +513,8 @@ _SLOT, _NS, _NA = 16384, 3, 4
 
 def inf3_on() -> bool:
     """The fp32 inference step as three kernels per block (front, core, tail) behind the hoisted conditioning tables -- the default;
-    MINIWORLD_BIAS_ONLY_DIT_INF3=0 keeps the cuBLAS + rows step (12 launches per block). Read per call."""
-    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3", "1") != "0"
+    settings.bias_only_dit_inf3=0 keeps the cuBLAS + rows step (12 launches per block). Read per call."""
+    return settings.current().bias_only_dit_inf3
 
 
 def front_smem(cl: int, da: int) -> int:
@@ -375,8 +546,8 @@ TAIL_PAIR = 4
 
 
 def tail_pair_on() -> bool:
-    """The pair tail where it saves a round (the default); MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0 (read per call) keeps CL 8 / CL 6."""
-    return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA", "1") != "0"
+    """The pair tail where it saves a round (the default); settings.bias_only_dit_inf3_2cta=0 (read per call) keeps CL 8 / CL 6."""
+    return settings.current().bias_only_dit_inf3_2cta
 
 
 def tail_rows(M: int, cl: int) -> int:
@@ -390,7 +561,12 @@ def pack_pairs(w: torch.Tensor, cl: int = 8) -> torch.Tensor:
     p the k-block pair). Device ops only (capture-safe)."""
     n, k = w.shape
     assert n == 768 and k % 64 == 0 and cl in TAIL_CLUSTERS, (w.shape, cl)
-    return w.reshape(cl, 768 // cl, k // 64, 2, 32).permute(0, 2, 3, 1, 4).reshape(-1, 32).contiguous()
+    return (
+        w.reshape(cl, 768 // cl, k // 64, 2, 32)
+        .permute(0, 2, 3, 1, 4)
+        .reshape(-1, 32)
+        .contiguous()
+    )
 
 
 _MAXC: dict = {}
@@ -402,6 +578,7 @@ def max_clusters(kernel, cl: int, block: int = 384) -> int:
     key = (id(kernel), cl)
     if key not in _MAXC:
         from cuda.bindings import driver as cu
+
         cfg = cu.CUlaunchConfig()
         cfg.gridDimX, cfg.gridDimY, cfg.gridDimZ = cl * 64, 1, 1
         cfg.blockDimX, cfg.blockDimY, cfg.blockDimZ = block, 1, 1
@@ -431,11 +608,12 @@ def pick_cluster(n_tiles: int, options: dict) -> int:
 def read_trace(kernel) -> torch.Tensor:
     """g_trace [16 CTAs, 2048 events] int64 (%globaltimer ns, 0 = not recorded) of a -DTRACE cubin, after a synchronize."""
     from cuda.bindings import driver as cu
+
     torch.cuda.synchronize()
     err, dptr, size = cu.cuModuleGetGlobal(kernel.module, b"g_trace")
     assert err == cu.CUresult.CUDA_SUCCESS, err
     out = torch.zeros(16 * 2048, dtype=torch.int64, device="cuda")
-    err, = cu.cuMemcpyDtoD(cu.CUdeviceptr(out.data_ptr()), dptr, size)
+    (err,) = cu.cuMemcpyDtoD(cu.CUdeviceptr(out.data_ptr()), dptr, size)
     assert err == cu.CUresult.CUDA_SUCCESS, err
     torch.cuda.synchronize()
     return out.view(16, 2048)
@@ -443,21 +621,29 @@ def read_trace(kernel) -> torch.Tensor:
 
 def clear_trace(kernel) -> None:
     from cuda.bindings import driver as cu
+
     err, dptr, size = cu.cuModuleGetGlobal(kernel.module, b"g_trace")
     assert err == cu.CUresult.CUDA_SUCCESS, err
-    err, = cu.cuMemsetD8(dptr, 0, size)
+    (err,) = cu.cuMemsetD8(dptr, 0, size)
     assert err == cu.CUresult.CUDA_SUCCESS, err
     torch.cuda.synchronize()
 
 
 def front_cluster(n_tiles: int, nsm: int) -> int:
     """The front cluster for ``n_tiles`` without the kernels at hand (estimate: 148-SM B200, 15 / 22 / 33 resident clusters of
-    8 / 6 / 4); ``FrontTF32.cluster`` asks the driver. MINIWORLD_BIAS_ONLY_DIT_INF3_CL=4 / 6 / 8 forces one."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_CL")
+    8 / 6 / 4); ``FrontTF32.cluster`` asks the driver. settings.bias_only_dit_inf3_cl=4 / 6 / 8 forces one."""
+    forced = settings.current().bias_only_dit_inf3_cl
     if forced:
-        assert forced in ("4", "6", "8"), forced
-        return int(forced)
-    return pick_cluster(n_tiles, {8: (15 * nsm // 148, 1.0), 6: (22 * nsm // 148, 8 / 6), 4: (33 * nsm // 148, 2.0)})
+        assert forced in (4, 6, 8), forced
+        return forced
+    return pick_cluster(
+        n_tiles,
+        {
+            8: (15 * nsm // 148, 1.0),
+            6: (22 * nsm // 148, 8 / 6),
+            4: (33 * nsm // 148, 2.0),
+        },
+    )
 
 
 class _LaunchPDL:
@@ -471,7 +657,10 @@ class _LaunchPDL:
         import ctypes
 
         from cuda.bindings import driver as cu
-        from miniworld_engine.kernels.augmented_attention.cuda.sm100.driver import TensorMap
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100.driver import (
+            TensorMap,
+        )
+
         self._cu, self.k = cu, kernel
         self.hold, self.dyn, ptrs = [], [], []
         for a in args:
@@ -500,7 +689,11 @@ class _LaunchPDL:
         if kernel.cluster:
             at = cu.CUlaunchAttribute()
             at.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
-            at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = kernel.cluster, 1, 1
+            at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = (
+                kernel.cluster,
+                1,
+                1,
+            )
             attrs.append(at)
         if not serial:
             ap = cu.CUlaunchAttribute()
@@ -516,13 +709,18 @@ class _LaunchPDL:
         for h, t in zip(self.dyn, tensors, strict=True):
             h.value = t.data_ptr()
         self.cfg.hStream = cu.CUstream(torch.cuda.current_stream().cuda_stream)
-        err, = cu.cuLaunchKernelEx(self.cfg, self.k.func, self.argp, 0)
+        (err,) = cu.cuLaunchKernelEx(self.cfg, self.k.func, self.argp, 0)
         if err != cu.CUresult.CUDA_SUCCESS:
             raise RuntimeError(f"cuLaunchKernelEx: {err}")
 
 
 def _check_rows(t: torch.Tensor, cols: int, name: str) -> None:
-    assert t.dtype is torch.float32 and t.dim() == 2 and t.shape[1] == cols and t.stride(1) == 1, (name, t.dtype, t.shape, t.stride())
+    assert (
+        t.dtype is torch.float32
+        and t.dim() == 2
+        and t.shape[1] == cols
+        and t.stride(1) == 1
+    ), (name, t.dtype, t.shape, t.stride())
     assert t.data_ptr() % 16 == 0 and t.stride(0) % 4 == 0, (name, t.stride())
 
 
@@ -535,45 +733,108 @@ class FrontTF32:
 
     def __init__(self, device_index: int, da: int, trace: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         assert da in (768, 1024), da
-        self._sm100, self._tm, self.device_index, self.da, self.trace = sm100, sm100._tm, device_index, da, trace
+        self._sm100, self._tm, self.device_index, self.da, self.trace = (
+            sm100,
+            sm100._tm,
+            device_index,
+            da,
+            trace,
+        )
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
     def kernel(self, cl: int):
-        return self._sm100._sm100_kernel("bo_front_tf32", "bo_front_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                         defs=(f"CL={cl}", f"DATT={self.da}", *(("TRACE",) if self.trace else ())), cluster=cl,
-                                         smem=front_smem(cl, self.da))
+        return self._sm100._sm100_kernel(
+            "bo_front_tf32",
+            "bo_front_tf32_sm100",
+            self.device_index,
+            pdl=True,
+            src_dir=str(_dir),
+            defs=(f"CL={cl}", f"DATT={self.da}", *(("TRACE",) if self.trace else ())),
+            cluster=cl,
+            smem=front_smem(cl, self.da),
+        )
 
     def clusters(self) -> tuple[int, ...]:
-        return (8, 6, 4) if self.da == 768 else (8, 4)                # CL 6 splits 2 DA = 1536 columns only
+        return (
+            (8, 6, 4) if self.da == 768 else (8, 4)
+        )  # CL 6 splits 2 DA = 1536 columns only
 
     def cluster(self, n_tiles: int) -> int:
         """CTAs per row tile: the least modelled time over the sizes built (rounds of resident clusters x per-CTA time ~ 1 / CL).
-        MINIWORLD_BIAS_ONLY_DIT_INF3_CL forces one."""
-        forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_CL")
+        settings.bias_only_dit_inf3_cl forces one."""
+        forced = settings.current().bias_only_dit_inf3_cl
         if forced:
             assert int(forced) in self.clusters(), (forced, self.da)
             return int(forced)
-        return pick_cluster(n_tiles, {cl: (max_clusters(self.kernel(cl), cl), 8 / cl) for cl in self.clusters()})
+        return pick_cluster(
+            n_tiles,
+            {cl: (max_clusters(self.kernel(cl), cl), 8 / cl) for cl in self.clusters()},
+        )
 
     def _bind(self, tab, w, vg, xa, M, T, cl):
         nv = 2 * self.da // cl
         wrows = nv if nv <= 256 else nv // 2
-        maps = [self._tm(w, [768, 2 * self.da], 768 * 4, [32, wrows], dtype="f32"),
-                self._tm(xa, [768, M], xa.stride(0) * 4, [32, 128], dtype="f32")]
-        return _LaunchPDL(self.kernel(cl), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, tab, vg, xa, int(T),
-                          int(tab.stride(0)), int(xa.stride(0)), 1e-5)
+        maps = [
+            self._tm(w, [768, 2 * self.da], 768 * 4, [32, wrows], dtype="f32"),
+            self._tm(xa, [768, M], xa.stride(0) * 4, [32, 128], dtype="f32"),
+        ]
+        return _LaunchPDL(
+            self.kernel(cl),
+            ((M // 128) * cl, 1, 1),
+            (384, 1, 1),
+            *_descriptors(*maps),
+            PTR,
+            tab,
+            vg,
+            xa,
+            int(T),
+            int(tab.stride(0)),
+            int(xa.stride(0)),
+            1e-5,
+        )
 
     def __call__(self, x, tab, w, vg, T, xa):
         M, da = x.shape[0], self.da
         _check_rows(xa, 768, "xa")
-        assert x.is_contiguous() and x.shape == (M, 768) and x.dtype is torch.float32 and M % 128 == 0 and T % 128 == 0
-        assert tab.dtype is torch.float32 and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
-        assert tab.stride(0) % 4 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
-        assert w.is_contiguous() and w.shape == (2 * da, 768) and vg.is_contiguous() and vg.shape == (M, 2 * da)
+        assert (
+            x.is_contiguous()
+            and x.shape == (M, 768)
+            and x.dtype is torch.float32
+            and M % 128 == 0
+            and T % 128 == 0
+        )
+        assert (
+            tab.dtype is torch.float32
+            and tab.shape[0] == T
+            and tab[0].numel() == 6 * 768
+            and tab.stride(-1) == 1
+        )
+        assert (
+            tab.stride(0) % 4 == 0
+            and tab.data_ptr() % 16 == 0
+            and (tab.dim() == 2 or tab.stride(1) == 768)
+        )
+        assert (
+            w.is_contiguous()
+            and w.shape == (2 * da, 768)
+            and vg.is_contiguous()
+            and vg.shape == (M, 2 * da)
+        )
         cl = self.cluster(M // 128)
-        key = (tab.data_ptr(), tab.stride(0), w.data_ptr(), vg.data_ptr(), xa.data_ptr(), xa.stride(0), M, T, cl)
+        key = (
+            tab.data_ptr(),
+            tab.stride(0),
+            w.data_ptr(),
+            vg.data_ptr(),
+            xa.data_ptr(),
+            xa.stride(0),
+            M,
+            T,
+            cl,
+        )
         self.runs.bind(key, lambda: self._bind(tab, w, vg, xa, M, T, cl))(x)
         return vg
 
@@ -591,32 +852,56 @@ class TailTF32:
 
     def __init__(self, device_index: int, da: int, trace: bool = False):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         assert da in (768, 1024), da
-        self._sm100, self._tm, self.device_index, self.da, self.trace = sm100, sm100._tm, device_index, da, trace
+        self._sm100, self._tm, self.device_index, self.da, self.trace = (
+            sm100,
+            sm100._tm,
+            device_index,
+            da,
+            trace,
+        )
         self.runs = _Runs()
 
     def kernel(self, cl: int = 8):
         if cl == TAIL_PAIR:
-            return self._sm100._sm100_kernel("bo_tail2_tf32", "bo_tail2_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                             defs=(f"DATT={self.da}", *(("TRACE",) if self.trace else ())), cluster=8,
-                                             smem=tail_smem(TAIL_PAIR))
-        return self._sm100._sm100_kernel("bo_tail_tf32", "bo_tail_tf32_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                         defs=(f"CL={cl}", f"DATT={self.da}", *(("TRACE",) if self.trace else ())),
-                                         cluster=cl, smem=tail_smem(cl))
+            return self._sm100._sm100_kernel(
+                "bo_tail2_tf32",
+                "bo_tail2_tf32_sm100",
+                self.device_index,
+                pdl=True,
+                src_dir=str(_dir),
+                defs=(f"DATT={self.da}", *(("TRACE",) if self.trace else ())),
+                cluster=8,
+                smem=tail_smem(TAIL_PAIR),
+            )
+        return self._sm100._sm100_kernel(
+            "bo_tail_tf32",
+            "bo_tail_tf32_sm100",
+            self.device_index,
+            pdl=True,
+            src_dir=str(_dir),
+            defs=(f"CL={cl}", f"DATT={self.da}", *(("TRACE",) if self.trace else ())),
+            cluster=cl,
+            smem=tail_smem(cl),
+        )
 
     def cluster(self, n_tiles: int) -> int:
         """8 or 6 CTAs per row tile: the fewest rounds of resident clusters, a CL 6 CTA costing ~1.4 x a CL 8 one (4/3 of the
         products, xt streamed twice). A = 5: CL 6 at L512 only (20 tiles: one round of 22 against two of 15).
-        Unless MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0, the pair tail (``TAIL_PAIR``) where it takes fewer rounds than both (A = 5: L640 /
-        L768, 25 / 30 tiles in one round of clusters of two tiles). MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL=8 / 6 / 4 forces one."""
-        forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL")
+        Unless settings.bias_only_dit_inf3_2cta=0, the pair tail (``TAIL_PAIR``) where it takes fewer rounds than both (A = 5: L640 /
+        L768, 25 / 30 tiles in one round of clusters of two tiles). settings.bias_only_dit_inf3_tail_cl=8 / 6 / 4 forces one."""
+        forced = settings.current().bias_only_dit_inf3_tail_cl
         if forced:
             assert int(forced) in (*TAIL_CLUSTERS, TAIL_PAIR), forced
             return int(forced)
         n8, n6 = max_clusters(self.kernel(8), 8), max_clusters(self.kernel(6), 6)
         if tail_pair_on():
             rounds = min(-(-n_tiles // max(n8, 1)), -(-n_tiles // max(n6, 1)))
-            if -(-n_tiles // max(2 * max_clusters(self.kernel(TAIL_PAIR), 8), 1)) < rounds:
+            if (
+                -(-n_tiles // max(2 * max_clusters(self.kernel(TAIL_PAIR), 8), 1))
+                < rounds
+            ):
                 return TAIL_PAIR
         return pick_cluster(n_tiles, {8: (n8, 1.0), 6: (n6, 1.4)})
 
@@ -624,27 +909,63 @@ class TailTF32:
         if cl == TAIL_PAIR:
             return self._bind_pair(a, x, tab, wo, wab, wsq, xt, h, M, T)
         tm, da, f, nc = self._tm, self.da, dict(dtype="f32"), 768 // cl
-        maps = [tm(a, [da, M], da * 4, [32, 128], **f), tm(x, [768, M], 768 * 4, [32, 128], **f),
-                tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f), tm(wo, [32, wo.shape[0]], 32 * 4, [32, 2 * nc], **f),
-                tm(wab, [768, 3072], 768 * 4, [32, 1536 // cl // (2 if cl == 6 else 1)], **f),
-                tm(wsq, [32, wsq.shape[0]], 32 * 4, [32, 2 * nc], **f),
-                tm(xt, [768, M], xt.stride(0) * 4, [32, 128], **f),
-                tm(h, [32, h.shape[0]], 128, [32, 256], **f)]             # two h k-blocks per box
-        return _LaunchPDL(self.kernel(cl), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
-                          int(xt.stride(0)), int(T), 1e-5)
+        maps = [
+            tm(a, [da, M], da * 4, [32, 128], **f),
+            tm(x, [768, M], 768 * 4, [32, 128], **f),
+            tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f),
+            tm(wo, [32, wo.shape[0]], 32 * 4, [32, 2 * nc], **f),
+            tm(
+                wab,
+                [768, 3072],
+                768 * 4,
+                [32, 1536 // cl // (2 if cl == 6 else 1)],
+                **f,
+            ),
+            tm(wsq, [32, wsq.shape[0]], 32 * 4, [32, 2 * nc], **f),
+            tm(xt, [768, M], xt.stride(0) * 4, [32, 128], **f),
+            tm(h, [32, h.shape[0]], 128, [32, 256], **f),
+        ]  # two h k-blocks per box
+        return _LaunchPDL(
+            self.kernel(cl),
+            ((M // 128) * cl, 1, 1),
+            (384, 1, 1),
+            *_descriptors(*maps),
+            PTR,
+            xt,
+            h,
+            int(xt.stride(0)),
+            int(T),
+            1e-5,
+        )
 
     def _bind_pair(self, a, x, tab, wo, wab, wsq, xt, h, M, T):
         """bo_tail2_tf32.cu: clusters of 8 = two row tiles x 4 column groups; each CTA's W boxes are its half (96 rows of the CL 8
         packs, 128 rows of Wa or Wb); the scratch covers whole tile pairs."""
         tm, da, f, tiles = self._tm, self.da, dict(dtype="f32"), M // 128
         Mp = tail_rows(M, TAIL_PAIR)
-        maps = [tm(a, [da, M], da * 4, [32, 128], **f), tm(x, [768, M], 768 * 4, [32, 128], **f),
-                tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f), tm(wo, [32, wo.shape[0]], 32 * 4, [32, 192], **f),
-                tm(wab, [768, 3072], 768 * 4, [32, 128], **f), tm(wsq, [32, wsq.shape[0]], 32 * 4, [32, 192], **f),
-                tm(xt, [768, Mp], xt.stride(0) * 4, [32, 128], **f),
-                tm(h, [32, Mp * 48], 128, [32, 256], **f)]               # two h k-blocks per box
-        return _LaunchPDL(self.kernel(TAIL_PAIR), ((Mp // 256) * 8, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
-                          int(xt.stride(0)), int(T), int(tiles), 1e-5)
+        maps = [
+            tm(a, [da, M], da * 4, [32, 128], **f),
+            tm(x, [768, M], 768 * 4, [32, 128], **f),
+            tm(tab, [6 * 768, T], tab.stride(0) * 4, [32, 128], **f),
+            tm(wo, [32, wo.shape[0]], 32 * 4, [32, 192], **f),
+            tm(wab, [768, 3072], 768 * 4, [32, 128], **f),
+            tm(wsq, [32, wsq.shape[0]], 32 * 4, [32, 192], **f),
+            tm(xt, [768, Mp], xt.stride(0) * 4, [32, 128], **f),
+            tm(h, [32, Mp * 48], 128, [32, 256], **f),
+        ]  # two h k-blocks per box
+        return _LaunchPDL(
+            self.kernel(TAIL_PAIR),
+            ((Mp // 256) * 8, 1, 1),
+            (384, 1, 1),
+            *_descriptors(*maps),
+            PTR,
+            xt,
+            h,
+            int(xt.stride(0)),
+            int(T),
+            int(tiles),
+            1e-5,
+        )
 
     def __call__(self, a, x, tab, wo, wab, wsq, out, T, xt, h, cl=None):
         """wo / wsq: the pair-packed forms (``pack_pairs(., cl)``; the pair tail: ``pack_pairs(., 8)``) for ``cl`` (default:
@@ -654,17 +975,60 @@ class TailTF32:
         Mp = tail_rows(M, cl)
         _check_rows(xt, 768, "xt")
         assert xt.shape[0] == Mp, (xt.shape, Mp)
-        assert h.is_contiguous() and h.shape == (Mp * 48, 32) and h.dtype is torch.float32, h.shape     # blocked k-block-major
+        assert (
+            h.is_contiguous() and h.shape == (Mp * 48, 32) and h.dtype is torch.float32
+        ), h.shape  # blocked k-block-major
         assert a.is_contiguous() and a.shape == (M, da) and a.dtype is torch.float32
-        assert x.is_contiguous() and x.shape == (M, 768) and x.dtype is torch.float32 and M % 128 == 0 and T % 128 == 0
-        assert out.is_contiguous() and out.shape == (M, 768) and out.dtype is torch.float32 and out.data_ptr() != x.data_ptr()
-        assert tab.dtype is torch.float32 and tab.shape[0] == T and tab[0].numel() == 6 * 768 and tab.stride(-1) == 1
-        assert tab.stride(0) % 4 == 0 and tab.data_ptr() % 16 == 0 and (tab.dim() == 2 or tab.stride(1) == 768)
-        assert wo.shape == (768 * da // 32, 32) and wab.shape == (3072, 768) and wsq.shape == (768 * 48, 32), (wo.shape, wsq.shape)
-        assert all(w.is_contiguous() and w.dtype is torch.float32 for w in (wo, wab, wsq))
-        key = (a.data_ptr(), x.data_ptr(), tab.data_ptr(), tab.stride(0), wo.data_ptr(), wab.data_ptr(), wsq.data_ptr(),
-               xt.data_ptr(), xt.stride(0), h.data_ptr(), M, T, cl)
-        self.runs.bind(key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl))(out)
+        assert (
+            x.is_contiguous()
+            and x.shape == (M, 768)
+            and x.dtype is torch.float32
+            and M % 128 == 0
+            and T % 128 == 0
+        )
+        assert (
+            out.is_contiguous()
+            and out.shape == (M, 768)
+            and out.dtype is torch.float32
+            and out.data_ptr() != x.data_ptr()
+        )
+        assert (
+            tab.dtype is torch.float32
+            and tab.shape[0] == T
+            and tab[0].numel() == 6 * 768
+            and tab.stride(-1) == 1
+        )
+        assert (
+            tab.stride(0) % 4 == 0
+            and tab.data_ptr() % 16 == 0
+            and (tab.dim() == 2 or tab.stride(1) == 768)
+        )
+        assert (
+            wo.shape == (768 * da // 32, 32)
+            and wab.shape == (3072, 768)
+            and wsq.shape == (768 * 48, 32)
+        ), (wo.shape, wsq.shape)
+        assert all(
+            w.is_contiguous() and w.dtype is torch.float32 for w in (wo, wab, wsq)
+        )
+        key = (
+            a.data_ptr(),
+            x.data_ptr(),
+            tab.data_ptr(),
+            tab.stride(0),
+            wo.data_ptr(),
+            wab.data_ptr(),
+            wsq.data_ptr(),
+            xt.data_ptr(),
+            xt.stride(0),
+            h.data_ptr(),
+            M,
+            T,
+            cl,
+        )
+        self.runs.bind(
+            key, lambda: self._bind(a, x, tab, wo, wab, wsq, xt, h, M, T, cl)
+        )(out)
         return out
 
 
@@ -701,8 +1065,11 @@ def inf3_ready(index: int, nh: int, dh: int) -> bool:
         PvGateCoreTF32(index, nh, dh, pdl=True).kernel(1, True)
     except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the default fp32 step
         _INF3_FAILED = True
-        warnings.warn(f"bias-only DiT three-kernel fp32 inference step unavailable, keeping the cuBLAS + rows step: {exc!r}",
-                      RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"bias-only DiT three-kernel fp32 inference step unavailable, keeping the cuBLAS + rows step: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     _INF3_READY.add(key)
     return True
@@ -718,19 +1085,21 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
     """Build and load the fp32 path's kernels for (nh, dh) on device ``index`` once -- the fp32 row extension, the bf16 row
     extensions whose dtype-generic passes the fp32 path shares, a representative attention-core cubin (and, for training, the
     ungated core and the bias gradient) -- False (after one warning) when a toolchain or driver problem keeps the module path.
-    MINIWORLD_BIAS_ONLY_DIT_TF32=0 turns the fp32 path off. A constant to ``torch.compile``."""
+    settings.bias_only_dit_tf32=0 turns the fp32 path off. A constant to ``torch.compile``."""
     global _FAILED
-    if _FAILED or os.environ.get("MINIWORLD_BIAS_ONLY_DIT_TF32", "1") == "0":
+    if _FAILED or (not settings.current().bias_only_dit_tf32):
         return False
     key = (index, nh, dh, train)
     if key in _READY:
         return True
     try:
         from miniworld_engine.kernels.bias_only_dit import cuda as C
+
         rows32()
         C._ext()
         if train:
             from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+
             ext()
         core = PvGateCoreTF32(index, nh, dh)
         core.kernel(1, True)
@@ -739,13 +1108,40 @@ def tf32_ready(index: int, nh: int, dh: int, train: bool) -> bool:
             Dpb32(index, nh, dh).kernel()
     except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the module path
         _FAILED = True
-        warnings.warn(f"bias-only DiT fp32 (TF32) kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning,
-                      stacklevel=2)
+        warnings.warn(
+            f"bias-only DiT fp32 (TF32) kernels unavailable, keeping the module path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     _READY.add(key)
     return True
 
 
-__all__ = ["Dpb32", "dpb32_pair", "FrontTF32", "GemmGluTF32", "PvGateCoreTF32", "TailTF32", "clear_trace", "front_cluster", "glu_op", "inf3_on",
-           "inf3_ready", "max_clusters", "pack_pairs", "pick_cluster", "read_trace", "tail_pair_on", "tail_rows", "tail_smem",
-           "pick_group_tf32", "pv_batched", "pv_groups", "round_tf32", "rows32", "tf32_gemms", "tf32_ready"]
+__all__ = [
+    "Dpb32",
+    "dpb32_pair",
+    "FrontTF32",
+    "GemmGluTF32",
+    "PvGateCoreTF32",
+    "TailTF32",
+    "clear_trace",
+    "front_cluster",
+    "glu_op",
+    "inf3_on",
+    "inf3_ready",
+    "max_clusters",
+    "pack_pairs",
+    "pick_cluster",
+    "read_trace",
+    "tail_pair_on",
+    "tail_rows",
+    "tail_smem",
+    "pick_group_tf32",
+    "pv_batched",
+    "pv_groups",
+    "round_tf32",
+    "rows32",
+    "tf32_gemms",
+    "tf32_ready",
+]

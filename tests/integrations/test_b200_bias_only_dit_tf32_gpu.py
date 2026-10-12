@@ -18,6 +18,7 @@ import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as INF
@@ -79,8 +80,14 @@ def policy():
 def blocks(seed=811, n_head=16, d_head=None):
     """(the PyTorch fp32 block, the engine's fp32 block, the PyTorch block in fp64), same weights."""
     torch.manual_seed(seed)
-    ref = randomize(BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH)).cuda()
-    fast = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD).cuda()
+    ref = randomize(
+        BiasOnlyDiTBlock(
+            n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+        )
+    ).cuda()
+    fast = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD
+    ).cuda()
     fast.load_state_dict(ref.state_dict())
     ref64 = copy.deepcopy(ref).double()
     return ref, fast, ref64
@@ -89,6 +96,7 @@ def blocks(seed=811, n_head=16, d_head=None):
 def kernel_names(fn):
     """The CUDA kernels ``fn`` launches (CUPTI records driver-API launches too)."""
     from torch.profiler import ProfilerActivity, profile
+
     with profile(activities=[ProfilerActivity.CUDA]) as prof:
         fn()
         torch.cuda.synchronize()
@@ -98,8 +106,10 @@ def kernel_names(fn):
 @contextlib.contextmanager
 def no_module_path():
     """The block's PyTorch composition must not run (the fused path serves the whole block)."""
+
     def boom(*a, **k):
         raise AssertionError("the module's PyTorch composition ran")
+
     old = bo_module.BiasOnlyAttention.forward
     bo_module.BiasOnlyAttention.forward = boom
     try:
@@ -109,20 +119,26 @@ def no_module_path():
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
-# The served fp32 inference step is the three-kernel one (test_inf3_* below); these two pin MINIWORLD_BIAS_ONLY_DIT_INF3=0, the
+# The served fp32 inference step is the three-kernel one (test_inf3_* below); these two pin settings.bias_only_dit_inf3=0, the
 # 12-launch cuBLAS + rows step that stays selectable (and that a failed three-kernel build falls back to).
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("L", [128, 384, 768])
 @pytest.mark.parametrize("S", [1, 5])
 @pytest.mark.parametrize("shared", [True, False])
 @pytest.mark.parametrize("masked", [False, True])
-def test_inference_within_the_pytorch_tf32_error(monkeypatch, L, S, shared, masked, n_head, d_head):
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "0")
+def test_inference_within_the_pytorch_tf32_error(
+    monkeypatch, L, S, shared, masked, n_head, d_head
+):
+    override_setting(monkeypatch, "bias_only_dit_inf3", "0")
     ref, fast, ref64 = blocks(n_head=n_head, d_head=d_head)
     for m in (ref, fast, ref64):
         m.eval()
     x = torch.randn(S, 1, L, 768, device="cuda")
-    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    c = (
+        torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384)
+        if shared
+        else torch.randn(S, 1, L, 384, device="cuda")
+    )
     p = torch.randn(1, L, L, 128, device="cuda")
     mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
     with torch.no_grad():
@@ -142,7 +158,7 @@ def test_inference_within_the_pytorch_tf32_error(monkeypatch, L, S, shared, mask
 @pytest.mark.parametrize("inf3_env", ["0", "1"])
 def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
     """Eager / torch.compile / CUDA graph and the caches, for the 12-launch step (INF3=0) and the served three-kernel step."""
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", inf3_env)
+    override_setting(monkeypatch, "bias_only_dit_inf3", inf3_env)
     _, fast, _ = blocks(seed=5)
     fast.eval()
     L, S = 256, 5
@@ -154,13 +170,19 @@ def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
         names = kernel_names(lambda: fast(x, c, p))
         assert any("bo_pv_gate_tf32_sm100" in n for n in names), names
         assert not any("bo_pv_gate_inf_sm100" in n for n in names)
-        assert not any("triton" in n.lower() for n in names), [n for n in names if "triton" in n.lower()]
+        assert not any("triton" in n.lower() for n in names), [
+            n for n in names if "triton" in n.lower()
+        ]
         rows = [n for n in names if any(r in n for r in DEFAULT_ROWS)]
-        if inf3_env == "1":                                                  # front -> core -> tail, none of the 12-launch rows
-            assert all(any(k in n for n in names) for k in INF3_NAMES) and not rows, names
-        else:                                                                # no front / tail kernel
+        if inf3_env == "1":  # front -> core -> tail, none of the 12-launch rows
+            assert all(any(k in n for n in names) for k in INF3_NAMES) and not rows, (
+                names
+            )
+        else:  # no front / tail kernel
             assert not any(k in n for n in names for k in INF3_NAMES[::2]), names
-        compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
+        compiled = torch.compile(
+            fast, fullgraph=True, options={"triton.cudagraphs": False}
+        )
         assert relative(compiled(x, c, p), eager) < 1e-5
         # a captured step replays to the eager output (cuBLAS may pick another algorithm under capture: not bit-exact)
         xs, cs, ps = x.clone(), c.clone(), p.clone()
@@ -214,7 +236,13 @@ def step(m, x, c, p, mask, dy, dtype):
 
 
 # L / A pick the branches: pv groups of 1 to 8 samples, dpb key tiles of 128, 192 and 256; every head layout
-SHAPES = [(128, 8, False), (256, 16, True), (384, 6, True), (640, 4, False), (768, 3, True)]
+SHAPES = [
+    (128, 8, False),
+    (256, 16, True),
+    (384, 6, True),
+    (640, 4, False),
+    (768, 3, True),
+]
 
 
 @pytest.mark.parametrize(("L", "A", "masked"), SHAPES)
@@ -229,21 +257,34 @@ def test_every_gradient_within_the_pytorch_tf32_error(L, A, masked, n_head, d_he
         got = step(fast, x, c, p, mask, dy, torch.float32)
     with tf32(True):
         base = step(ref, x, c, p, mask, dy, torch.float32)
-    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    names = ["out", "d single", "d cond", "d pair"] + [
+        n for n, _ in fast.named_parameters()
+    ]
     for n, g, b, w in zip(names, got, base, want, strict=True):
         assert g.dtype is torch.float32, n
-        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (n, relative(g, w), relative(b, w))
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (
+            n,
+            relative(g, w),
+            relative(b, w),
+        )
 
 
-@pytest.mark.parametrize("env", [{"MINIWORLD_BIAS_ONLY_DIT_TF32_GLU": "1"}, {"MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD": "0"},
-                                 {"MINIWORLD_BIAS_ONLY_DIT_PV_BATCH": "0"}, {"MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB": "2"},
-                                 {"MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT": "1"}, {"MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "0"},
-                                 {"MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "8"}])
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"bias_only_dit_tf32_glu": "1"},
+        {"bias_only_dit_tf32_glu_bwd": "0"},
+        {"bias_only_dit_pv_batch": "0"},
+        {"bias_only_dit_pair_exact": "1"},
+        {"bias_only_dit_wgrad_split": "0"},
+        {"bias_only_dit_wgrad_split": "8"},
+    ],
+)
 def test_switches_keep_every_gradient_within_the_pytorch_tf32_error(monkeypatch, env):
     """Every A/B switch of the fp32 training step (the opt-in fused SwiGLU forward, the backward fusion off, the per-sample core,
     the row kernels' resident-block builds, the exact pair bias) gives a step within the same bound as the default."""
     for k, v in env.items():
-        monkeypatch.setenv(k, v)
+        override_setting(monkeypatch, k, v)
     L, A, masked = 384, 6, True
     ref, fast, ref64 = blocks(seed=5)
     x, c, p, dy, mask = inputs(L, A, masked)
@@ -252,9 +293,16 @@ def test_switches_keep_every_gradient_within_the_pytorch_tf32_error(monkeypatch,
         got = step(fast, x, c, p, mask, dy, torch.float32)
     with tf32(True):
         base = step(ref, x, c, p, mask, dy, torch.float32)
-    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    names = ["out", "d single", "d cond", "d pair"] + [
+        n for n, _ in fast.named_parameters()
+    ]
     for n, g, b, w in zip(names, got, base, want, strict=True):
-        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (env, n, relative(g, w), relative(b, w))
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (
+            env,
+            n,
+            relative(g, w),
+            relative(b, w),
+        )
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -271,15 +319,28 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
             if q.grad is not None:
                 q.grad.zero_()
         m(xs, cs, ps).backward(dy)
-        return [t.grad.clone() for t in (xs, cs, ps)] + [q.grad.clone() for q in m.parameters()]
+        return [t.grad.clone() for t in (xs, cs, ps)] + [
+            q.grad.clone() for q in m.parameters()
+        ]
 
     eager = run(fast)
-    from tests.cuda_graph_nodes import launched_kernels      # the graph's own kernel nodes (the profiler drops driver-API launches)
+    from tests.cuda_graph_nodes import (
+        launched_kernels,  # the graph's own kernel nodes (the profiler drops driver-API launches)
+    )
+
     names = launched_kernels(lambda: run(fast))
-    for k in ("bo_pv_gate_tf32_sm100", "bo_dpb32_sm100", "bo_glu_bwd_tf32_sm100", "pair_bias_tc_k", "pair_bias_bwd_tc_k",
-              "pack_k"):
+    for k in (
+        "bo_pv_gate_tf32_sm100",
+        "bo_dpb32_sm100",
+        "bo_glu_bwd_tf32_sm100",
+        "pair_bias_tc_k",
+        "pair_bias_bwd_tc_k",
+        "pack_k",
+    ):
         assert any(k in n for n in names), (k, names)
-    assert not any("triton" in n.lower() for n in names), [n for n in names if "triton" in n.lower()]
+    assert not any("triton" in n.lower() for n in names), [
+        n for n in names if "triton" in n.lower()
+    ]
     assert not any("bo_pv_gate_inf_sm100" in n or "bo_dpb_sm100" in n for n in names)
     # the bound launches reuse their argument blocks and the activations are allocated afresh each step: nothing may pile up
     torch.cuda.synchronize()
@@ -323,17 +384,19 @@ def test_declines_what_it_does_not_serve():
     assert TR.serves(fast, x, c, p)
     with torch.no_grad():
         assert INF.serves(fast, x, c, p)
-        assert not INF.serves(fast, x, c.bfloat16(), p)                                       # mixed dtypes
-        assert not INF.serves(fast, x.double(), c.double(), p.double())                        # fp64
+        assert not INF.serves(fast, x, c.bfloat16(), p)  # mixed dtypes
+        assert not INF.serves(fast, x.double(), c.double(), p.double())  # fp64
         with torch.autocast("cuda", dtype=torch.bfloat16):
-            assert not INF.serves(fast, x, c, p)                                               # autocast: the module's casts
+            assert not INF.serves(fast, x, c, p)  # autocast: the module's casts
         bf = copy.deepcopy(fast).to(torch.bfloat16)
-        assert not INF.serves(bf, x, c, p)                                                     # fp32 inputs, bf16 weights
+        assert not INF.serves(bf, x, c, p)  # fp32 inputs, bf16 weights
     assert not TR.serves(fast, x, c, p.bfloat16())
     with torch.autocast("cuda", dtype=torch.bfloat16):
         assert not TR.serves(fast, x, c, p)
-    assert not TR.serves(fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200])                 # L % 128
-    assert not TR.serves(blocks(n_head=8)[1], x, c, p)                                         # 8 x 96: no kernels
+    assert not TR.serves(
+        fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200]
+    )  # L % 128
+    assert not TR.serves(blocks(n_head=8)[1], x, c, p)  # 8 x 96: no kernels
 
 
 # ------------------------------------------------------------------------------------------------------------ kernels
@@ -342,6 +405,7 @@ def test_declines_what_it_does_not_serve():
 @pytest.mark.parametrize("S", [1, 2, 3, 5, 8])
 def test_core_and_softmax_match_fp64(L, S, n_head, d_head):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+
     torch.manual_seed(L + S)
     H, DA = n_head, n_head * d_head
     M = S * L
@@ -354,7 +418,9 @@ def test_core_and_softmax_match_fp64(L, S, n_head, d_head):
     assert relative(P, want_p) < 1e-5
     core = T.PvGateCoreTF32(torch.cuda.current_device(), nh=H, dh=d_head)
     v, g = vg[:, :DA], vg[:, DA:]
-    o = torch.einsum("hij,sjhd->sihd", P.double().view(H, L, L), v.double().view(S, L, H, d_head)).reshape(M, DA)
+    o = torch.einsum(
+        "hij,sjhd->sihd", P.double().view(H, L, L), v.double().view(S, L, H, d_head)
+    ).reshape(M, DA)
     a = torch.empty(M, DA, device="cuda")
     core(v, P, a, S, g=g)
     assert relative(a, torch.sigmoid(g.double()) * o) < 3e-3
@@ -368,20 +434,32 @@ def test_core_and_softmax_match_fp64(L, S, n_head, d_head):
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_every_sample_group_of_the_core(monkeypatch, n_head, d_head, batch):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PV_BATCH", batch)      # one MMA for the group's samples (default) / one per sample
-    L, S, H, DA = 384, 9, n_head, n_head * d_head            # S = 9: a partial last group for every group size
+
+    override_setting(
+        monkeypatch, "bias_only_dit_pv_batch", batch
+    )  # one MMA for the group's samples (default) / one per sample
+    L, S, H, DA = (
+        384,
+        9,
+        n_head,
+        n_head * d_head,
+    )  # S = 9: a partial last group for every group size
     torch.manual_seed(1)
     v, g = torch.randn(S * L, DA, device="cuda"), torch.randn(S * L, DA, device="cuda")
     P = torch.softmax(torch.randn(H * L, L, device="cuda"), -1)
-    o = torch.einsum("hij,sjhd->sihd", P.double().view(H, L, L), v.double().view(S, L, H, d_head)).reshape(S * L, DA)
+    o = torch.einsum(
+        "hij,sjhd->sihd", P.double().view(H, L, L), v.double().view(S, L, H, d_head)
+    ).reshape(S * L, DA)
     for sg in T.pv_groups(d_head):
-        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_SG", str(sg))
-        core = T.PvGateCoreTF32(torch.cuda.current_device(), nh=H, dh=d_head)                  # a new instance: no bound launch reuse
+        override_setting(monkeypatch, "bias_only_dit_sg", str(sg))
+        core = T.PvGateCoreTF32(
+            torch.cuda.current_device(), nh=H, dh=d_head
+        )  # a new instance: no bound launch reuse
         a = torch.empty(S * L, DA, device="cuda")
         core(v, P, a, S, g=g)
         assert relative(a, torch.sigmoid(g.double()) * o) < 3e-3, sg
         out = torch.empty(S * L, DA, device="cuda")
-        core(v, P, out, S)                                   # ungated (the training dV)
+        core(v, P, out, S)  # ungated (the training dV)
         assert relative(out, o) < 3e-3, sg
         for k in (core.kernel(sg, True), core.kernel(sg, False)):
             assert k.regs <= 128 and k.lmem == 0, (sg, k.regs, k.lmem)
@@ -393,6 +471,7 @@ def test_dpb32_repeatable(L, n_head, d_head):
     """dpb32_sm100.cu (the fp32 port of dpb_sm100.cu): the bias gradient is a fixed-order sum, so reruns are bit-identical (its
     predecessor dpb_tf32.cu was not from L640: several items per CTA); within 3e-3 of fp64 on four input draws; no spills."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+
     dev, A, H, DH = torch.cuda.current_device(), 6, n_head, d_head
     DA, M = H * DH, A * L
     dpb = T.Dpb32(dev, nh=H, dh=DH)
@@ -401,7 +480,10 @@ def test_dpb32_repeatable(L, n_head, d_head):
     for seed in range(4):
         torch.manual_seed(1000 * L + seed)
         P = torch.softmax(2 * torch.randn(H * L, L, device="cuda"), -1)
-        do, v = torch.randn(M, DA, device="cuda"), torch.randn(M, 2 * DA, device="cuda")[:, :DA]
+        do, v = (
+            torch.randn(M, DA, device="cuda"),
+            torch.randn(M, 2 * DA, device="cuda")[:, :DA],
+        )
         dd = torch.randn(A, H, L, device="cuda")
         outs = []
         for _ in range(3):
@@ -409,8 +491,14 @@ def test_dpb32_repeatable(L, n_head, d_head):
             dpb(do, v, P, dd, out, A)
             outs.append(out)
         assert all(torch.equal(outs[0], o) for o in outs[1:]), seed
-        want = P.double().view(H, L, L) * (torch.einsum("aihd,ajhd->hij", do.double().view(A, L, H, DH), v.double().reshape(A, L, H, DH))
-                                           - dd.double().sum(0)[:, :, None])
+        want = P.double().view(H, L, L) * (
+            torch.einsum(
+                "aihd,ajhd->hij",
+                do.double().view(A, L, H, DH),
+                v.double().reshape(A, L, H, DH),
+            )
+            - dd.double().sum(0)[:, :, None]
+        )
         assert relative(outs[0].view(H, L, L), want) < 3e-3, seed
 
 
@@ -420,6 +508,7 @@ def test_core_tf32_repeatable(L, n_head, d_head):
     """pv_gate_tf32.cu (double-buffered accumulators, several items per CTA from L640 at A = 6): reruns bit-identical, gated and
     ungated (the training dV)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+
     dev, A, H, DH = torch.cuda.current_device(), 6, n_head, d_head
     DA, M = H * DH, A * L
     core = T.PvGateCoreTF32(dev, nh=H, dh=DH)
@@ -441,9 +530,13 @@ def test_swiglu_gemms_match_fp64(M):
     """gemm_glu_tf32.cu: the expand GEMM with the SwiGLU in its epilogue (h, a | b) and the dh GEMM with the SwiGLU backward in its
     epilogue (da | db), TF32 products against fp64; M = 384: an odd number of 128-row tiles (a pair's missing tile)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+
     dev, D, H = torch.cuda.current_device(), 768, 1536
     torch.manual_seed(M)
-    x, w = torch.randn(M, D, device="cuda"), torch.randn(2 * H, D, device="cuda") / D ** 0.5
+    x, w = (
+        torch.randn(M, D, device="cuda"),
+        torch.randn(2 * H, D, device="cuda") / D**0.5,
+    )
     fwd, bwd = T.GemmGluTF32(dev), T.GemmGluTF32(dev, bwd=True)
     for k in (fwd.k, bwd.k):
         assert k.regs <= 128 and k.lmem == 0, (k.regs, k.lmem)
@@ -457,7 +550,10 @@ def test_swiglu_gemms_match_fp64(M):
     h_rows = torch.empty_like(h)
     T.rows32().swiglu_cuda(ab, h_rows)
     assert relative(h, h_rows) < 1e-6
-    dz, wsq = torch.randn(M, D, device="cuda"), torch.randn(D, H, device="cuda") / H ** 0.5
+    dz, wsq = (
+        torch.randn(M, D, device="cuda"),
+        torch.randn(D, H, device="cuda") / H**0.5,
+    )
     dab = torch.empty_like(ab)
     bwd(dz, wsq.t().contiguous(), ab, dab)
     dh = dz.double() @ wsq.double()
@@ -471,8 +567,13 @@ def test_fp32_row_kernels_fit_128_registers():
     """Every kernel of the fp32 row extension (defaults and opt-in builds): at most 128 registers, no local memory (spills). The
     three-warp res_adaln_b_bwd is built for two 192-thread blocks per SM: up to 168 registers."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
+
     cap = {"res_adaln_b_bwd_k": 168}
-    bad = [(name, regs, lmem) for name, regs, lmem in T.rows32().func_attrs() if regs > cap.get(name, 128) or lmem]
+    bad = [
+        (name, regs, lmem)
+        for name, regs, lmem in T.rows32().func_attrs()
+        if regs > cap.get(name, 128) or lmem
+    ]
     assert not bad, bad
 
 
@@ -481,17 +582,22 @@ def test_fp32_row_kernels_fit_128_registers():
 def test_training_kernels_match_fp64(L, n_head, d_head):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext as bo_ext
+
     F, dev = T.rows32(), torch.cuda.current_device()
     A, H, DH = 6, n_head, d_head
     DA, M, R = H * DH, A * L, L * L
     torch.manual_seed(L)
     # the pair bias and its backward (exact fp32) against fp64 autograd
     z = torch.randn(R, 128, device="cuda")
-    wf = torch.randn(H, 128, device="cuda") / 128 ** 0.5
+    wf = torch.randn(H, 128, device="cuda") / 128**0.5
     bias, pst = torch.empty(H, L, L, device="cuda"), torch.empty(R, 2, device="cuda")
     F.pair_bias_cuda(z, wf, bias, pst, 1e-5)
     z64, wf64 = z.double().requires_grad_(True), wf.double().requires_grad_(True)
-    b64 = (torch.nn.functional.layer_norm(z64, (128,), eps=1e-5) @ wf64.t()).t().reshape(H, L, L)
+    b64 = (
+        (torch.nn.functional.layer_norm(z64, (128,), eps=1e-5) @ wf64.t())
+        .t()
+        .reshape(H, L, L)
+    )
     assert relative(bias, b64) < 1e-5
     db = torch.randn(H, L, L, device="cuda")
     b64.backward(db.double())
@@ -501,7 +607,7 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
     assert relative(dz, z64.grad) < 1e-5
     assert relative(pwf[:n].sum(0), wf64.grad) < 1e-5
     # the training step's pair bias and its backward on TF32 tensor cores (mma.sync): TF32 products (terms 1, the default) bound
-    # as the other TF32 products; split fp32 (terms 3, MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT=1) as the exact kernels
+    # as the other TF32 products; split fp32 (terms 3, settings.bias_only_dit_pair_exact=1) as the exact kernels
     for terms, tol in ((1, 3e-3), (3, 1e-5)):
         bias_t, pst_t = torch.empty_like(bias), torch.empty_like(pst)
         F.pair_bias_tc_cuda(z, wf, bias_t, pst_t, 1e-5, terms)
@@ -527,36 +633,67 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
     dh, vh = do.double().view(A, L, H, DH), v.double().reshape(A, L, H, DH)
     dv = torch.empty(M, 2 * DA, device="cuda")[:, :DA]
     T.PvGateCoreTF32(dev, nh=H, dh=DH)(do, Pt.view(H * L, L), dv, A)
-    assert relative(dv, torch.einsum("hij,aihd->ajhd", P.double(), dh).reshape(M, DA)) < 3e-3
+    assert (
+        relative(dv, torch.einsum("hij,aihd->ajhd", P.double(), dh).reshape(M, DA))
+        < 3e-3
+    )
     dbias = torch.empty(H * L, L, device="cuda")
     dpb = T.Dpb32(dev, nh=H, dh=DH)
     dpb(do, v, P.view(H * L, L), dd, dbias, A)
-    want = P.double() * (torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None])
+    want = P.double() * (
+        torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None]
+    )
     rel = relative(dbias.view(H, L, L), want)
-    if rel >= 3e-3:                                              # where: per (head, 128-query tile, 32-key piece), and a rerun
+    if rel >= 3e-3:  # where: per (head, 128-query tile, 32-key piece), and a rerun
         again = torch.empty_like(dbias)
         dpb(do, v, P.view(H * L, L), dd, again, A)
-        err = (dbias.view(H, L, L).double() - want).abs().view(H, L // 128, 128, L // 32, 32).amax((2, 4))
+        err = (
+            (dbias.view(H, L, L).double() - want)
+            .abs()
+            .view(H, L // 128, 128, L // 32, 32)
+            .amax((2, 4))
+        )
         top = torch.topk(err.flatten(), 6)
-        where = [(int(i) // (err.shape[1] * err.shape[2]), int(i) // err.shape[2] % err.shape[1] * 128, int(i) % err.shape[2] * 32,
-                  float(e)) for e, i in zip(top.values, top.indices)]
-        raise AssertionError(f"dpb32 dbias rel {rel:.3e} (NJ {T.DPB32_NJ}); rerun bit-identical: "
-                             f"{torch.equal(dbias, again)}, rerun rel {relative(again.view(H, L, L), want):.3e}; worst (head, i0, j0, "
-                             f"max abs err): {where}; median tile err {float(err.median()):.3e}, |want| max {float(want.abs().max()):.3e}")
+        where = [
+            (
+                int(i) // (err.shape[1] * err.shape[2]),
+                int(i) // err.shape[2] % err.shape[1] * 128,
+                int(i) % err.shape[2] * 32,
+                float(e),
+            )
+            for e, i in zip(top.values, top.indices, strict=False)
+        ]
+        raise AssertionError(
+            f"dpb32 dbias rel {rel:.3e} (NJ {T.DPB32_NJ}); rerun bit-identical: "
+            f"{torch.equal(dbias, again)}, rerun rel {relative(again.view(H, L, L), want):.3e}; worst (head, i0, j0, "
+            f"max abs err): {where}; median tile err {float(err.median()):.3e}, |want| max {float(want.abs().max()):.3e}"
+        )
     # the gate backward rows
-    ao, gg = torch.randn(M, DA, device="cuda"), torch.randn(M, 2 * DA, device="cuda")[:, DA:]
+    ao, gg = (
+        torch.randn(M, DA, device="cuda"),
+        torch.randn(M, 2 * DA, device="cuda")[:, DA:],
+    )
     da = torch.randn(M, DA, device="cuda")
-    do2, dg, dd2 = torch.empty(M, DA, device="cuda"), torch.empty(M, 2 * DA, device="cuda")[:, DA:], torch.empty(A, H, L, device="cuda")
+    do2, dg, dd2 = (
+        torch.empty(M, DA, device="cuda"),
+        torch.empty(M, 2 * DA, device="cuda")[:, DA:],
+        torch.empty(A, H, L, device="cuda"),
+    )
     F.gate_bwd_cuda(da, ao, gg, do2, dg, dd2, L)
     s = torch.sigmoid(gg.double())
     assert relative(do2, da.double() * s) < 1e-6
     assert relative(dg, da.double() * ao.double() * (1 - s)) < 1e-6
-    assert relative(dd2, (da.double() * ao.double()).view(A, L, H, DH).sum(-1).permute(0, 2, 1)) < 1e-6
-    bo_ext()                                                     # the shared finalize / unfold extension builds
+    assert (
+        relative(
+            dd2, (da.double() * ao.double()).view(A, L, H, DH).sum(-1).permute(0, 2, 1)
+        )
+        < 1e-6
+    )
+    bo_ext()  # the shared finalize / unfold extension builds
 
 
 # ------------------------------------------------------------------------------------------------------------ three-kernel inference step
-# the served fp32 inference step (MINIWORLD_BIAS_ONLY_DIT_INF3=0 turns it off): bo_front_tf32 -> pv_gate_tf32 (-DPDL_INF) ->
+# the served fp32 inference step (settings.bias_only_dit_inf3=0 turns it off): bo_front_tf32 -> pv_gate_tf32 (-DPDL_INF) ->
 # bo_tail_tf32 per block, the conditioning tables hoisted
 INF3_L = [128, 256, 384, 512, 640, 768]
 INF3_NAMES = ("bo_front_tf32_sm100", "bo_pv_gate_tf32_sm100", "bo_tail_tf32_sm100")
@@ -569,7 +706,8 @@ def inf3(monkeypatch):
     """The step on (explicitly, though it is the default), and a spy that the runner really took it (a failed build would fall
     back silently)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import runner as RN
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "1")
+
+    override_setting(monkeypatch, "bias_only_dit_inf3", "1")
     calls = []
     orig = RN.FusedBiasOnlyDiT._step3
 
@@ -591,7 +729,9 @@ def _tables(T, nb=2, seed=0):
 
 def _ln64(x):
     x = x.double()
-    return (x - x.mean(-1, keepdim=True)) / torch.sqrt(x.var(-1, unbiased=False, keepdim=True) + 1e-5)
+    return (x - x.mean(-1, keepdim=True)) / torch.sqrt(
+        x.var(-1, unbiased=False, keepdim=True) + 1e-5
+    )
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -606,7 +746,11 @@ def test_inf3_within_the_pytorch_tf32_error(inf3, L, S, shared, masked, n_head, 
     for m in (ref, fast, ref64):
         m.eval()
     x = torch.randn(S, 1, L, 768, device="cuda")
-    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    c = (
+        torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384)
+        if shared
+        else torch.randn(S, 1, L, 384, device="cuda")
+    )
     p = torch.randn(1, L, L, 128, device="cuda")
     mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
     with torch.no_grad():
@@ -619,7 +763,10 @@ def test_inf3_within_the_pytorch_tf32_error(inf3, L, S, shared, masked, n_head, 
     assert inf3, "the three-kernel step did not run"
     assert got.dtype is torch.float32
     for g, b, w in ((got, base, want), (got - x, base - x, want - x.double())):
-        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (relative(g, w), relative(b, w))
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (
+            relative(g, w),
+            relative(b, w),
+        )
         assert relative(g, w) < 1e-2
 
 
@@ -633,14 +780,20 @@ def test_inf3_every_cluster_size(inf3, monkeypatch, cl, tail_cl, n_head, d_head,
     tail 6 at L512)."""
     if cl == "6" and d_head == 64:
         pytest.skip("front CL 6 splits 1536 v|g columns: 768 attention channels only")
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_CL", cl)
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL", tail_cl)
+    override_setting(monkeypatch, "bias_only_dit_inf3_cl", cl)
+    override_setting(monkeypatch, "bias_only_dit_inf3_tail_cl", tail_cl)
     ref, fast, ref64 = blocks(seed=17, n_head=n_head, d_head=d_head)
     for m in (ref, fast, ref64):
         m.eval()
     S = 5
-    x, c = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda")
-    p, mask = torch.randn(1, L, L, 128, device="cuda"), torch.rand(1, L, device="cuda") > 0.2
+    x, c = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+    )
+    p, mask = (
+        torch.randn(1, L, L, 128, device="cuda"),
+        torch.rand(1, L, device="cuda") > 0.2,
+    )
     with torch.no_grad():
         want = ref64(x.double(), c.double(), p.double(), mask)
         with no_module_path():
@@ -648,23 +801,29 @@ def test_inf3_every_cluster_size(inf3, monkeypatch, cl, tail_cl, n_head, d_head,
         with tf32(True):
             base = ref(x, c, p, mask)
     assert inf3
-    assert relative(got - x, want - x.double()) <= 1.5 * relative(base - x, want - x.double()) + 1e-3
+    assert (
+        relative(got - x, want - x.double())
+        <= 1.5 * relative(base - x, want - x.double()) + 1e-3
+    )
 
 
 @pytest.mark.parametrize("da", [768, 1024])
 @pytest.mark.parametrize("cl", [4, 6, 8])
-@pytest.mark.parametrize(("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)])
+@pytest.mark.parametrize(
+    ("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)]
+)
 def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     if cl == 6 and da == 1024:
         pytest.skip("front CL 6: 768 attention channels only")
     """bo_front_tf32.cu alone: v | g = (LN(x) s1 + sh1) [Wv; Wg]^T against fp64 (TF32 products: 3e-3), on a table slice with a
     multi-block row stride; v leaves rounded to TF32 (it is the core's MMA operand), g as accumulated."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_CL", str(cl))
+
+    override_setting(monkeypatch, "bias_only_dit_inf3_cl", str(cl))
     torch.manual_seed(M + da + cl)
     x = 1.5 * torch.randn(M, 768, device="cuda") + 0.3
     tab = _tables(T, seed=M)
-    w = T32.round_tf32(torch.randn(2 * da, 768, device="cuda") / 768 ** 0.5)
+    w = T32.round_tf32(torch.randn(2 * da, 768, device="cuda") / 768**0.5)
     vg = torch.full((M, 2 * da), float("nan"), device="cuda")
     xa = torch.full((M, 768), float("nan"), device="cuda")
     front = T32.FrontTF32(torch.cuda.current_device(), da)
@@ -678,7 +837,9 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     assert torch.isfinite(vg).all()
     assert relative(vg, want) < 3e-3, relative(vg, want)
     assert torch.equal(vg[:, :da], T32.round_tf32(vg[:, :da]))
-    assert torch.isfinite(xa).all() and torch.equal(xa, T32.round_tf32(xa))     # the exchange scratch: every block written, TF32
+    assert torch.isfinite(xa).all() and torch.equal(
+        xa, T32.round_tf32(xa)
+    )  # the exchange scratch: every block written, TF32
     assert relative(xa, xa64) < 2e-3
     again = torch.empty_like(vg)
     front(x, tab[:, 1], w, again, T, xa=xa)
@@ -687,29 +848,34 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
 
 @pytest.mark.parametrize("cl", [8, 6])
 @pytest.mark.parametrize("da", [768, 1024])
-@pytest.mark.parametrize(("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)])
+@pytest.mark.parametrize(
+    ("M", "T"), [(128, 128), (640, 128), (1920, 1920), (3840, 768)]
+)
 def test_tail_kernel_matches_fp64(cl, da, M, T):
     """bo_tail_tf32.cu alone: out = x1 + gate2 (silu(xt Wa^T) (xt Wb^T)) Wsq^T, x1 = x + gate1 a Wo^T, xt = LN(x1) s2 + sh2, against
     fp64 -- the block update out - x within 3e-3 (TF32 products) -- and bit-identical on a rerun."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+
     torch.manual_seed(M + da)
     dev = torch.cuda.current_device()
     a = T32.round_tf32(torch.randn(M, da, device="cuda"))
     x = 1.5 * torch.randn(M, 768, device="cuda") + 0.3
     tab = _tables(T, seed=M + 1)
-    wo = T32.round_tf32(torch.randn(768, da, device="cuda") / da ** 0.5)
-    wab = T32.round_tf32(torch.randn(3072, 768, device="cuda") / 768 ** 0.5)
-    wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536 ** 0.5)
+    wo = T32.round_tf32(torch.randn(768, da, device="cuda") / da**0.5)
+    wab = T32.round_tf32(torch.randn(3072, 768, device="cuda") / 768**0.5)
+    wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536**0.5)
     tail = T32.TailTF32(dev, da)
     nc = 768 // cl
     wop, wsqp = T32.pack_pairs(wo, cl), T32.pack_pairs(wsq, cl)
     k0 = torch.arange(32, device="cuda")
-    assert torch.equal(wop.view(cl, -1, 2, nc, 32)[3, 5, 1, 7], wo[nc * 3 + 7, 64 * 5 + 32 + k0])   # P[((c p) 2 + h) NC + n, k]
+    assert torch.equal(
+        wop.view(cl, -1, 2, nc, 32)[3, 5, 1, 7], wo[nc * 3 + 7, 64 * 5 + 32 + k0]
+    )  # P[((c p) 2 + h) NC + n, k]
     k = tail.kernel(cl)
     assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
     out = torch.full((M, 768), float("nan"), device="cuda")
-    xt = torch.full((M, 768), float("nan"), device="cuda")              # row-major
-    hs = torch.full((M * 48, 32), float("nan"), device="cuda")          # blocked k-block-major
+    xt = torch.full((M, 768), float("nan"), device="cuda")  # row-major
+    hs = torch.full((M * 48, 32), float("nan"), device="cuda")  # blocked k-block-major
     tail(a, x, tab[:, 0], wop, wab, wsqp, out, T, xt=xt, h=hs, cl=cl)
     tok = torch.arange(M, device="cuda") % T
     t64 = tab[:, 0].double()[tok]
@@ -719,9 +885,17 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
     h = torch.nn.functional.silu(ab[:, :1536]) * ab[:, 1536:]
     want = x1 + t64[:, 1] * (h @ wsq.double().t())
     assert torch.isfinite(out).all()
-    assert relative(out - x, want - x.double()) < 3e-3, relative(out - x, want - x.double())
-    assert torch.isfinite(xt).all() and torch.isfinite(hs).all()          # the exchange scratch: every block written
-    rows = lambda t, nk: t.view(M // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(M, 32 * nk)   # noqa: E731  blocked -> rows
+    assert relative(out - x, want - x.double()) < 3e-3, relative(
+        out - x, want - x.double()
+    )
+    assert (
+        torch.isfinite(xt).all() and torch.isfinite(hs).all()
+    )  # the exchange scratch: every block written
+    rows = (
+        lambda t, nk: t.view(M // 128, nk, 128, 32)
+        .permute(0, 2, 1, 3)
+        .reshape(M, 32 * nk)
+    )
     assert relative(xt, xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=cl)
@@ -729,26 +903,31 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
 
 
 @pytest.mark.parametrize("da", [768, 1024])
-@pytest.mark.parametrize(("M", "T"), [(128, 128), (640, 128), (3200, 3200), (3840, 768)])
+@pytest.mark.parametrize(
+    ("M", "T"), [(128, 128), (640, 128), (3200, 3200), (3840, 768)]
+)
 def test_tail2_kernel_matches_fp64(da, M, T):
     """bo_tail2_tf32.cu (the pair tail: two row tiles x 4 column groups per cluster of 8, tcgen05 cta_group::2) alone against fp64 at
     the CL 8 tail's bounds, its padded scratch fully written (an odd tile count: the missing tile writes its own padding rows and no
     output -- M 128, 640, 3200 = A 5 x L640), and bit-identical on a rerun."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+
     torch.manual_seed(M + da + 7)
     dev = torch.cuda.current_device()
     a = T32.round_tf32(torch.randn(M, da, device="cuda"))
     x = 1.5 * torch.randn(M, 768, device="cuda") + 0.3
     tab = _tables(T, seed=M + 3)
-    wo = T32.round_tf32(torch.randn(768, da, device="cuda") / da ** 0.5)
-    wab = T32.round_tf32(torch.randn(3072, 768, device="cuda") / 768 ** 0.5)
-    wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536 ** 0.5)
+    wo = T32.round_tf32(torch.randn(768, da, device="cuda") / da**0.5)
+    wab = T32.round_tf32(torch.randn(3072, 768, device="cuda") / 768**0.5)
+    wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536**0.5)
     tail = T32.TailTF32(dev, da)
     k = tail.kernel(T32.TAIL_PAIR)
     assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
     Mp = T32.tail_rows(M, T32.TAIL_PAIR)
     out = torch.full((M, 768), float("nan"), device="cuda")
-    xt = torch.full((Mp, 800), float("nan"), device="cuda")[:, :768]    # padded rows, as the runner's
+    xt = torch.full((Mp, 800), float("nan"), device="cuda")[
+        :, :768
+    ]  # padded rows, as the runner's
     hs = torch.full((Mp * 48, 32), float("nan"), device="cuda")
     wop, wsqp = T32.pack_pairs(wo, 8), T32.pack_pairs(wsq, 8)
     tail(a, x, tab[:, 0], wop, wab, wsqp, out, T, xt=xt, h=hs, cl=T32.TAIL_PAIR)
@@ -760,9 +939,17 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     h = torch.nn.functional.silu(ab[:, :1536]) * ab[:, 1536:]
     want = x1 + t64[:, 1] * (h @ wsq.double().t())
     assert torch.isfinite(out).all()
-    assert relative(out - x, want - x.double()) < 3e-3, relative(out - x, want - x.double())
-    assert torch.isfinite(xt).all() and torch.isfinite(hs).all()          # every block of every tile, padding included
-    rows = lambda t, nk: t.view(Mp // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(Mp, 32 * nk)[:M]   # noqa: E731
+    assert relative(out - x, want - x.double()) < 3e-3, relative(
+        out - x, want - x.double()
+    )
+    assert (
+        torch.isfinite(xt).all() and torch.isfinite(hs).all()
+    )  # every block of every tile, padding included
+    rows = (
+        lambda t, nk: t.view(Mp // 128, nk, 128, 32)
+        .permute(0, 2, 1, 3)
+        .reshape(Mp, 32 * nk)[:M]
+    )
     assert relative(xt[:M], xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=T32.TAIL_PAIR)
@@ -779,15 +966,24 @@ def _poison(mb=512):
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("L", [128, 384, 640, 768])
 @pytest.mark.parametrize("shared", [True, False])
-def test_inf3_bit_identical_reruns_with_a_poisoned_allocator(inf3, n_head, d_head, L, shared):
+def test_inf3_bit_identical_reruns_with_a_poisoned_allocator(
+    inf3, n_head, d_head, L, shared
+):
     """Three reruns from scratch (the runner's buffers, tables, bound launches and P dropped; the allocator's free memory filled with
     NaN before each): finite and bit-identical -- fixed-order reductions, no atomics, nothing read before it is written."""
     _, fast, _ = blocks(seed=9, n_head=n_head, d_head=d_head)
     fast.eval()
     S = 5
     x = torch.randn(S, 1, L, 768, device="cuda")
-    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
-    p, mask = torch.randn(1, L, L, 128, device="cuda"), torch.rand(1, L, device="cuda") > 0.2
+    c = (
+        torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384)
+        if shared
+        else torch.randn(S, 1, L, 384, device="cuda")
+    )
+    p, mask = (
+        torch.randn(1, L, L, 128, device="cuda"),
+        torch.rand(1, L, device="cuda") > 0.2,
+    )
     outs = []
     for _ in range(3):
         INF._RUNNERS.clear()
@@ -807,12 +1003,18 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
     """The captured step: with the weights and the conditioning declared static (the bench harness's inference mode) exactly the three
     kernels, replaying bit-identically to the eager call and following a new single copied in; without, the hoists (weight pack, P,
     conditioning tables) are recorded too and the three kernels close the graph. The default step's row kernels never appear."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
+
     _, fast, _ = blocks(seed=5, n_head=n_head, d_head=d_head)
     fast.eval()
     L, S = 384, 5
-    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    x, c, p = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+        torch.randn(1, L, L, 128, device="cuda"),
+    )
     xs, cs, ps = x.clone(), c.clone(), p.clone()
     ctx = contextlib.ExitStack()
     if static:
@@ -834,10 +1036,14 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
         graph.replay()
         torch.cuda.synchronize()
         if static:
-            assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+            assert len(names) == 3 and all(
+                k in n for k, n in zip(INF3_NAMES, names, strict=True)
+            ), names
             assert torch.equal(out, eager)
         else:
-            assert all(k in n for k, n in zip(INF3_NAMES, names[-3:], strict=True)), names
+            assert all(k in n for k, n in zip(INF3_NAMES, names[-3:], strict=True)), (
+                names
+            )
             assert sum(any(k in n for k in INF3_NAMES) for n in names) == 3, names
             assert relative(out, eager) < 1e-5
         assert not any(r in n for n in names for r in DEFAULT_ROWS), names
@@ -856,11 +1062,16 @@ def test_inf3_tables_follow_the_conditioning(inf3):
     """The hoisted tables are keyed on the conditioning tensor's version: an in-place change is seen by the next call; a later call
     with the same tensor launches none of the table kernels."""
     from tests.cuda_graph_nodes import launched_kernels
+
     ref, fast, _ = blocks(seed=21)
     for m in (ref, fast):
         m.eval()
     L, S = 256, 5
-    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    x, c, p = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+        torch.randn(1, L, L, 128, device="cuda"),
+    )
     with torch.no_grad(), tf32(True):
         first = fast(x, c, p)
         c.mul_(0.5).add_(0.3)
@@ -868,29 +1079,44 @@ def test_inf3_tables_follow_the_conditioning(inf3):
         assert not torch.equal(first, second)
         assert relative(second, ref(x, c, p)) < 1e-2
     from miniworld_engine.kernels import _capture
+
     with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
         fast(x, c, p)
         names = launched_kernels(lambda: fast(x, c, p))
-    assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+    assert len(names) == 3 and all(
+        k in n for k, n in zip(INF3_NAMES, names, strict=True)
+    ), names
 
 
 def test_inf3_two_blocks_match_two_single_block_steps(inf3, monkeypatch):
     """FusedBiasOnlyDiT over two blocks (the ping-pong residual buffers, per-block table slices) against the 12-launch step's runner and
     against two single-block three-kernel runners."""
     from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+
     b1, b2 = blocks(seed=31)[1], blocks(seed=32)[1]
     L, S = 384, 5
-    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    x, c, p = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+        torch.randn(1, L, L, 128, device="cuda"),
+    )
     with torch.no_grad():
         two = FusedBiasOnlyDiT([b1, b2], dtype=torch.float32)
         P = two.hoist(p.contiguous())
         got = two.step(x, c, P)
-        r1, r2 = FusedBiasOnlyDiT([b1], dtype=torch.float32), FusedBiasOnlyDiT([b2], dtype=torch.float32)
-        seq = r2.step(r1.step(x, c, r1.hoist(p.contiguous())), c, r2.hoist(p.contiguous()))
+        r1, r2 = (
+            FusedBiasOnlyDiT([b1], dtype=torch.float32),
+            FusedBiasOnlyDiT([b2], dtype=torch.float32),
+        )
+        seq = r2.step(
+            r1.step(x, c, r1.hoist(p.contiguous())), c, r2.hoist(p.contiguous())
+        )
     assert len(inf3) == 3
     assert torch.isfinite(got).all()
     assert relative(got, seq) < 1e-3
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3", "0")              # the same runner, the 12-launch step
+    override_setting(
+        monkeypatch, "bias_only_dit_inf3", "0"
+    )  # the same runner, the 12-launch step
     with torch.no_grad():
         default = two.step(x, c, P)
     assert len(inf3) == 3
@@ -904,9 +1130,12 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
     served cubins: the -DTRACE builds (bench_scripts/bo32_inf3_trace.py only) may spill a few bytes for the %globaltimer stamps
     (front CL 4: 4 B), which this does not check."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+
     dev, da = torch.cuda.current_device(), n_head * d_head
     front, tail = T32.FrontTF32(dev, da), T32.TailTF32(dev, da)
-    for k in [front.kernel(cl) for cl in front.clusters()] + [tail.kernel(cl) for cl in (*T32.TAIL_CLUSTERS, T32.TAIL_PAIR)]:
+    for k in [front.kernel(cl) for cl in front.clusters()] + [
+        tail.kernel(cl) for cl in (*T32.TAIL_CLUSTERS, T32.TAIL_PAIR)
+    ]:
         assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
     core = T32.PvGateCoreTF32(dev, nh=n_head, dh=d_head, pdl=True)
     for sg in T32.pv_groups(d_head):
@@ -915,10 +1144,10 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
 
 
 # ------------------------------------------------------------------------------------------------------------ the pair tail (A/B)
-# bo_tail2_tf32 where it saves a round (A = 5: L640 / L768; the default, MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0 keeps CL 8 / CL 6)
+# bo_tail2_tf32 where it saves a round (A = 5: L640 / L768; the default, settings.bias_only_dit_inf3_2cta=0 keeps CL 8 / CL 6)
 @pytest.fixture
 def pair_tail(inf3, monkeypatch):
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA", "1")
+    override_setting(monkeypatch, "bias_only_dit_inf3_2cta", "1")
     return inf3
 
 
@@ -926,14 +1155,20 @@ def pair_tail(inf3, monkeypatch):
 @pytest.mark.parametrize("L", [640, 768])
 @pytest.mark.parametrize("shared", [True, False])
 @pytest.mark.parametrize("masked", [False, True])
-def test_inf3_pair_tail_within_the_pytorch_tf32_error(pair_tail, L, shared, masked, n_head, d_head):
+def test_inf3_pair_tail_within_the_pytorch_tf32_error(
+    pair_tail, L, shared, masked, n_head, d_head
+):
     """The three-kernel step with the pair tail against the fp64 module at the inf3 tests' bounds."""
     ref, fast, ref64 = blocks(seed=23, n_head=n_head, d_head=d_head)
     for m in (ref, fast, ref64):
         m.eval()
     S = 5
     x = torch.randn(S, 1, L, 768, device="cuda")
-    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    c = (
+        torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384)
+        if shared
+        else torch.randn(S, 1, L, 384, device="cuda")
+    )
     p = torch.randn(1, L, L, 128, device="cuda")
     mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
     with torch.no_grad():
@@ -944,20 +1179,31 @@ def test_inf3_pair_tail_within_the_pytorch_tf32_error(pair_tail, L, shared, mask
             base = ref(x, c, p, mask)
     assert pair_tail, "the three-kernel step did not run"
     for g, b, w in ((got, base, want), (got - x, base - x, want - x.double())):
-        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (relative(g, w), relative(b, w))
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (
+            relative(g, w),
+            relative(b, w),
+        )
         assert relative(g, w) < 1e-2
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (16, 64)])
 @pytest.mark.parametrize("L", [640, 768])
-def test_inf3_pair_tail_bit_identical_reruns_with_a_poisoned_allocator(pair_tail, n_head, d_head, L):
+def test_inf3_pair_tail_bit_identical_reruns_with_a_poisoned_allocator(
+    pair_tail, n_head, d_head, L
+):
     """Three steps from scratch (runner, buffers, tables, bound launches dropped; free memory NaN-filled before each): finite and
     bit-identical -- the pair tail reads nothing before writing it, its padding rows included."""
     _, fast, _ = blocks(seed=29, n_head=n_head, d_head=d_head)
     fast.eval()
     S = 5
-    x, c = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda")
-    p, mask = torch.randn(1, L, L, 128, device="cuda"), torch.rand(1, L, device="cuda") > 0.2
+    x, c = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+    )
+    p, mask = (
+        torch.randn(1, L, L, 128, device="cuda"),
+        torch.rand(1, L, device="cuda") > 0.2,
+    )
     outs = []
     for _ in range(3):
         INF._RUNNERS.clear()
@@ -972,13 +1218,16 @@ def test_inf3_pair_tail_bit_identical_reruns_with_a_poisoned_allocator(pair_tail
 
 
 @pytest.mark.parametrize("on", ["1", "0"])
-@pytest.mark.parametrize(("L", "pair_L"), [(768, True), (640, True), (512, False), (384, False)])
+@pytest.mark.parametrize(
+    ("L", "pair_L"), [(768, True), (640, True), (512, False), (384, False)]
+)
 def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     """A = 5: the pair tail at L640 / L768 (25 / 30 tiles: one round of clusters of two tiles instead of two), the CL 6 / CL 8 tail at
-    L512 / L384; MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=0 keeps CL 8 / CL 6 everywhere. Read off the runner's choice (a profiler kernel list came back without kernel names late in
+    L512 / L384; settings.bias_only_dit_inf3_2cta=0 keeps CL 8 / CL 6 everywhere. Read off the runner's choice (a profiler kernel list came back without kernel names late in
     this file's run)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA", on)
+
+    override_setting(monkeypatch, "bias_only_dit_inf3_2cta", on)
     want = pair_L and on == "1"
     picked = []
     orig = T32.TailTF32.cluster
@@ -992,7 +1241,11 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     _, fast, _ = blocks(seed=3)
     fast.eval()
     S = 5
-    x, c, p = torch.randn(S, 1, L, 768, device="cuda"), torch.randn(S, 1, L, 384, device="cuda"), torch.randn(1, L, L, 128, device="cuda")
+    x, c, p = (
+        torch.randn(S, 1, L, 768, device="cuda"),
+        torch.randn(S, 1, L, 384, device="cuda"),
+        torch.randn(1, L, L, 128, device="cuda"),
+    )
     INF._RUNNERS.clear()
     with torch.no_grad():
         out = fast(x, c, p)
@@ -1003,7 +1256,7 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
 
 
 # ------------------------------------------------------------------------------------------------- bias gradient on CTA pairs (TF32)
-# The TF32 build of the bf16 step's dpbx2_sm100.cu: the fp32 default at L768 (MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR=0 keeps dpb32_sm100);
+# The TF32 build of the bf16 step's dpbx2_sm100.cu: the fp32 default at L768 (settings.bias_only_dit_tf32_dpb_pair=0 keeps dpb32_sm100);
 # the tests force it on (=1) to cover every L that 256 divides.
 def _dpb32_case(L, A, H, DH, seed):
     g = torch.Generator(device="cuda").manual_seed(seed)
@@ -1011,13 +1264,16 @@ def _dpb32_case(L, A, H, DH, seed):
     do = torch.randn(M, DA, device="cuda", generator=g)
     v = torch.randn(M, 2 * DA, device="cuda", generator=g)[:, :DA]
     dd = torch.randn(A, H, L, device="cuda", generator=g)
-    P = torch.softmax(2 * torch.randn(H * L, L, device="cuda", generator=g), -1).contiguous()
+    P = torch.softmax(
+        2 * torch.randn(H * L, L, device="cuda", generator=g), -1
+    ).contiguous()
     return do, v, dd, P
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
+
     k = T32.Dpb32(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
     assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
 
@@ -1027,7 +1283,8 @@ def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
 def test_dpb_pair_tf32_matches_fp64(monkeypatch, L, A, n_head, d_head):
     """The TF32 CTA-pair bias gradient where 256 divides L (L384 keeps dpb32_sm100.cu), within 3e-3 of fp64 einsum."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+
+    override_setting(monkeypatch, "bias_only_dit_tf32_dpb_pair", "1")
     H, DH = n_head, d_head
     do, v, dd, P = _dpb32_case(L, A, H, DH, seed=L + A)
     op = T32.Dpb32(torch.cuda.current_device(), nh=H, dh=DH)
@@ -1036,16 +1293,21 @@ def test_dpb_pair_tf32_matches_fp64(monkeypatch, L, A, n_head, d_head):
     torch.cuda.synchronize()
     assert op.last == ("pair" if L % 256 == 0 else "single")
     dh, vh = do.double().view(A, L, H, DH), v.double().reshape(A, L, H, DH)
-    want = P.double().view(H, L, L) * (torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None])
+    want = P.double().view(H, L, L) * (
+        torch.einsum("aihd,ajhd->hij", dh, vh) - dd.double().sum(0)[:, :, None]
+    )
     assert relative(db.view(H, L, L), want) < 3e-3, relative(db.view(H, L, L), want)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
-def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(monkeypatch, n_head, d_head):
+def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(
+    monkeypatch, n_head, d_head
+):
     """20 runs of the TF32 CTA-pair bias gradient (L768, A48), the allocator's free memory filled with NaN before each, dbias
     allocated afresh (the bound launch rebuilt every fifth run): finite and bit-identical."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+
+    override_setting(monkeypatch, "bias_only_dit_tf32_dpb_pair", "1")
     L, A, H, DH = 768, 48, n_head, d_head
     do, v, dd, P = _dpb32_case(L, A, H, DH, seed=9)
     first, op = None, None
@@ -1066,9 +1328,11 @@ def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(monkeypatch, n_he
 
 @pytest.mark.parametrize(("L", "A", "masked"), [(768, 3, True), (768, 2, False)])
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
-def test_dpb_pair_tf32_step_within_the_pytorch_tf32_error(monkeypatch, L, A, masked, n_head, d_head):
+def test_dpb_pair_tf32_step_within_the_pytorch_tf32_error(
+    monkeypatch, L, A, masked, n_head, d_head
+):
     """The fp32 step with the TF32 CTA-pair bias gradient: every gradient within the default step's bound against fp64."""
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR", "1")
+    override_setting(monkeypatch, "bias_only_dit_tf32_dpb_pair", "1")
     ref, fast, ref64 = blocks(seed=5, n_head=n_head, d_head=d_head)
     x, c, p, dy, mask = inputs(L, A, masked)
     want = step(ref64, x, c, p, mask, dy, F64)
@@ -1076,6 +1340,12 @@ def test_dpb_pair_tf32_step_within_the_pytorch_tf32_error(monkeypatch, L, A, mas
         got = step(fast, x, c, p, mask, dy, torch.float32)
     with tf32(True):
         base = step(ref, x, c, p, mask, dy, torch.float32)
-    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    names = ["out", "d single", "d cond", "d pair"] + [
+        n for n, _ in fast.named_parameters()
+    ]
     for n, g, b, w in zip(names, got, base, want, strict=True):
-        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (n, relative(g, w), relative(b, w))
+        assert relative(g, w) <= 1.5 * relative(b, w) + 1e-3, (
+            n,
+            relative(g, w),
+            relative(b, w),
+        )

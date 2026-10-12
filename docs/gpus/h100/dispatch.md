@@ -50,8 +50,8 @@ the separate `[S,N,64]` masked-gradient allocation and HBM write/read.
 
 The existing explicit `engine_backend="triton"` comparison option remains an
 opt-out of these automatic paths, including residual-fused Transition.
-`MINIWORLD_OPM_TRAIN=0`, `MINIWORLD_PWA_TRAIN=0` and
-`MINIWORLD_PWA_INFER=0` disable their respective integrations.
+`settings.opm_train=0`, `settings.pwa_train=0` and
+`settings.pwa_infer=0` disable their respective integrations.
 `trimul_h100_training_widths` can restrict the connected CUDA training widths;
 its default is `(64, 128, 256, 384, 512)`.
 

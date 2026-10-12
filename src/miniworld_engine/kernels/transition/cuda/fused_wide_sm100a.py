@@ -41,16 +41,28 @@ import torch
 
 from ..._compile import opaque
 from .fused_sm100a import _ext, _is_b200, build_cubins
+from miniworld_engine import settings
 
 #: (D, n) with a build here; (128, 4) is ``fused_sm100a``. Each builds its own cubins on first use.
-SHAPES = ((64, 4), (256, 4), (384, 4), (512, 4), (64, 2), (128, 2), (256, 2), (384, 2), (512, 2), (768, 2))
+SHAPES = (
+    (64, 4),
+    (256, 4),
+    (384, 4),
+    (512, 4),
+    (64, 2),
+    (128, 2),
+    (256, 2),
+    (384, 2),
+    (512, 2),
+    (768, 2),
+)
 #: Channel widths with a build for some n (kept for callers that ask by width only).
 WIDTHS = tuple(sorted({d for d, _ in SHAPES}))
 #: Row tile of every persistent grid here. ``M`` must be a whole number of these.
 ROWS = 128
 #: Two-role backward (D = 64, and D = 128 at n = 2): replicas of each 64-unit hidden slice in the weight role; the other CTAs run
 #: the input role. (64, 4) = 20 measured fastest at L384 and L768 on a 148-SM B200 (w1); the n = 2 values are from round n2.
-#: MINIWORLD_TRANSITION_WIDE_REPL overrides them for A/B runs.
+#: settings.transition_wide_repl overrides them for A/B runs.
 REPL = {(64, 4): 20, (64, 2): 30, (128, 2): 14}
 #: D >= 384: the expand + SwiGLU deals (tile pair, chunk) items over all SMs up to this many tiles, whole tile pairs above.
 ITEM_TILES = 1152
@@ -58,12 +70,12 @@ ITEM_TILES = 1152
 HALF = 384
 #: D >= 384 at small M (at most this many 128-row tiles, e.g. a single-stream [B, L, D] activation): whole tile pairs would keep
 #: only tiles / 2 cluster pairs busy, so the backward gate deals its (tile pair, 256-unit block) items over all SMs. Round n2.
-#: MINIWORLD_TRANSITION_WIDE_SMALL_TILES overrides it for A/B runs.
+#: settings.transition_wide_small_tiles overrides it for A/B runs.
 SMALL_TILES = 16
 
 
 def _small(tiles: int) -> bool:
-    return tiles <= int(os.environ.get("MINIWORLD_TRANSITION_WIDE_SMALL_TILES", SMALL_TILES))
+    return tiles <= (settings.current().transition_wide_small_tiles or SMALL_TILES)
 
 
 #: D = 384 forward at small M: one kernel per tile cluster, LayerNorm + expand + SwiGLU + squeeze + residual with the hidden
@@ -71,21 +83,29 @@ def _small(tiles: int) -> bool:
 #: (sm100/widths/tsmall_w.cu, round n2). CL is the largest of SMALL_CLS whose clusters are all resident at once (the driver's
 #: cuOccupancyMaxActiveClusters: 12-CTA clusters do not pack a 148-SM B200 twelve to a wave), up to SMALL_FWD_TILES tiles (the
 #: measured break-even with the per-tile forward: 16 tiles; at 24 the per-tile forward is 1.6x faster).
-#: MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES overrides it (0: off).
+#: settings.transition_wide_small_fwd_tiles overrides it (0: off).
 SMALL_FWD_TILES = 16
 SMALL_CLS = (12, 6, 4, 2)
 
 
 @functools.lru_cache(maxsize=64)
 def _resident_clusters(d: int, n: int, cl: int, index: int) -> int:
-    return int(_load(d, n).max_active_clusters(f"d{d}n{n}_small{cl}", "transition_small_w_sm100", 512, cl))
+    return int(
+        _load(d, n).max_active_clusters(
+            f"d{d}n{n}_small{cl}", "transition_small_w_sm100", 512, cl
+        )
+    )
 
 
 def _small_cl(d: int, n: int, tiles: int, index: int) -> int:
     """Cluster size of the small-M forward for this call, 0 when the per-tile path runs."""
-    if d != 384 or tiles > int(os.environ.get("MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES", SMALL_FWD_TILES)):
+    if d != 384 or tiles > (
+        settings.current().transition_wide_small_fwd_tiles or SMALL_FWD_TILES
+    ):
         return 0
-    return next((c for c in SMALL_CLS if tiles <= _resident_clusters(d, n, c, index)), 0)
+    return next(
+        (c for c in SMALL_CLS if tiles <= _resident_clusters(d, n, c, index)), 0
+    )
 
 
 def _dn(x: torch.Tensor, wa: torch.Tensor) -> tuple[int, int]:
@@ -94,7 +114,7 @@ def _dn(x: torch.Tensor, wa: torch.Tensor) -> tuple[int, int]:
 
 
 def _repl(d: int, n: int) -> int:
-    return int(os.environ.get("MINIWORLD_TRANSITION_WIDE_REPL", REPL[(d, n)]))
+    return settings.current().transition_wide_repl or REPL[(d, n)]
 
 
 def _ndw(d: int, n: int) -> int:
@@ -112,22 +132,54 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
     lpr = f"-DLPR={32 if d in (512, 768) else 16}"
     nd = HALF if d == 768 else d
     lnb = ("lnbwd", "widths/tlnbwd_w.cu", (f"-DDIM={d}", lpr))
-    dxn = ("dxn", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={2 * h}", "-DEPI_PLAIN"))
+    dxn = (
+        "dxn",
+        "widths/tgemm_nd.cu",
+        (f"-DDIM={nd}", f"-DKDIM={2 * h}", "-DEPI_PLAIN"),
+    )
     if d == 256:
-        return (("fwd", "widths/tfwd_d256.cu", hid), ("gate", "widths/tgate_w.cu", ("-DDIM=256", *hid)), dxn, lnb)
+        return (
+            ("fwd", "widths/tfwd_d256.cu", hid),
+            ("gate", "widths/tgate_w.cu", ("-DDIM=256", *hid)),
+            dxn,
+            lnb,
+        )
     dim = (f"-DDIM={d}", *hid)
-    fwd = ((("fwd", "widths/tfwd_d384.cu", hid), ("bwd", "widths/tbwd_d384.cu", hid)) if d == 384 else
-           (("ln", "widths/tln_w.cu", (f"-DDIM={d}", lpr)),
-            ("swiglu", "widths/tswiglu_w.cu", dim), ("swiglu_is", "widths/tswiglu_w.cu", (*dim, "-DITEM_SCHED")),
+    fwd = (
+        (("fwd", "widths/tfwd_d384.cu", hid), ("bwd", "widths/tbwd_d384.cu", hid))
+        if d == 384
+        else (
+            ("ln", "widths/tln_w.cu", (f"-DDIM={d}", lpr)),
+            ("swiglu", "widths/tswiglu_w.cu", dim),
+            ("swiglu_is", "widths/tswiglu_w.cu", (*dim, "-DITEM_SCHED")),
             ("swiglu_ab", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB")),
             ("swiglu_abis", "widths/tswiglu_w.cu", (*dim, "-DSAVE_AB", "-DITEM_SCHED")),
-            ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}"))))
-    return (*fwd,
-            ("gate", "widths/tgate_ab.cu", (*dim, "-DNO_H")), ("gate_is", "widths/tgate_ab.cu", (*dim, "-DNO_H", "-DITEM_SCHED")),
-            dxn, lnb,
-            *((spec for c in SMALL_CLS for spec in (
-                (f"small{c}", "widths/tsmall_w.cu", (*dim, f"-DCL={c}")),
-                (f"small{c}_ab", "widths/tsmall_w.cu", (*dim, f"-DCL={c}", "-DSAVE_AB")))) if d == 384 else ()))
+            ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}")),
+        )
+    )
+    return (
+        *fwd,
+        ("gate", "widths/tgate_ab.cu", (*dim, "-DNO_H")),
+        ("gate_is", "widths/tgate_ab.cu", (*dim, "-DNO_H", "-DITEM_SCHED")),
+        dxn,
+        lnb,
+        *(
+            (
+                spec
+                for c in SMALL_CLS
+                for spec in (
+                    (f"small{c}", "widths/tsmall_w.cu", (*dim, f"-DCL={c}")),
+                    (
+                        f"small{c}_ab",
+                        "widths/tsmall_w.cu",
+                        (*dim, f"-DCL={c}", "-DSAVE_AB"),
+                    ),
+                )
+            )
+            if d == 384
+            else ()
+        ),
+    )
 
 
 @functools.lru_cache(maxsize=16)
@@ -143,18 +195,23 @@ def _load(d: int, n: int):
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """Whether these kernels can run this call: sm_100 (B200), bf16, (D, n) in ``SHAPES`` with hidden n D, whole 128-row tiles,
     and for the two-role backward enough SMs for both roles. The requirements are the kernels' own, not a policy."""
-    if os.environ.get("MINIWORLD_TRANSITION_FUSED_SM100A", "1") == "0":
+    if not settings.current().transition_fused_sm100a:
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
-    index = x.device.index if x.device.index is not None else torch.cuda.current_device()
+    index = (
+        x.device.index if x.device.index is not None else torch.cuda.current_device()
+    )
     if not _is_b200(index):
         return False
     d, n = _dn(x, wa)
     if (d, n) not in SHAPES or wa.shape != (n * d, d) or ws.shape != (d, n * d):
         return False
-    if wa.dtype not in (torch.bfloat16, torch.float32) or ws.dtype not in (torch.bfloat16, torch.float32):
-        return False                   # bf16, or an fp32 master the entry casts to bf16 outside autograd
+    if wa.dtype not in (torch.bfloat16, torch.float32) or ws.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        return False  # bf16, or an fp32 master the entry casts to bf16 outside autograd
     if (d, n) in REPL:
         ndx = _sm_count(index) - _ndw(d, n)
         if ndx < 2 or ndx % 2:
@@ -177,14 +234,19 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         _load(*_dn(x, wa))
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED.add(_dn(x, wa))
-        warnings.warn(f"wide sm100a Transition (D={x.shape[-1]}, n={wa.shape[0] // x.shape[-1]}) unavailable, keeping the existing "
-                      f"path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"wide sm100a Transition (D={x.shape[-1]}, n={wa.shape[0] // x.shape[-1]}) unavailable, keeping the existing "
+            f"path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
 
 def _is_fake(*tensors) -> bool:
     from torch._subclasses.fake_tensor import FakeTensor
+
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
@@ -218,20 +280,30 @@ class _Launch:
         return self.ext.tmap(t, inner, outer, box_inner, box_outer, row_stride)
 
     def run(self, cubin, kernel, grid, args, block=512, cluster=2):
-        self.ext.launch_kernel(f"d{self.d}n{self.n}_{cubin}", kernel, grid, block, cluster, list(args))
+        self.ext.launch_kernel(
+            f"d{self.d}n{self.n}_{cubin}", kernel, grid, block, cluster, list(args)
+        )
 
-    def rows(self, t):                                         # [M, D] activation map
+    def rows(self, t):  # [M, D] activation map
         return self.tmap(t, self.d, self.m)
 
     def halves(self):
         """(first column, width) of each squeeze / d_xn GEMM launch."""
-        return [(c, HALF) for c in range(0, self.d, HALF)] if self.d == 768 else [(0, self.d)]
+        return (
+            [(c, HALF) for c in range(0, self.d, HALF)]
+            if self.d == 768
+            else [(0, self.d)]
+        )
 
-    def cols(self, t, c0, nd):                                 # [M, nd] column slice of an [M, D] activation
-        return self.tmap(t[:, c0:c0 + nd], nd, self.m, row_stride=self.d)
+    def cols(self, t, c0, nd):  # [M, nd] column slice of an [M, D] activation
+        return self.tmap(t[:, c0 : c0 + nd], nd, self.m, row_stride=self.d)
 
 
-_FUSED_FWD = {64: "transition_fwd_d64_sm100", 128: "transition_fwd2_sm100", 256: "transition_fwd_d256_sm100"}
+_FUSED_FWD = {
+    64: "transition_fwd_d64_sm100",
+    128: "transition_fwd2_sm100",
+    256: "transition_fwd_d256_sm100",
+}
 
 
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
@@ -241,15 +313,37 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     rows = m if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
     keep = save and d >= 384
-    hab = [x.new_empty((m, wa.shape[0])) if keep else x.new_empty((1, 1)) for _ in range(3)]
-    return (torch.empty_like(x), torch.empty_like(x) if save else x.new_empty((1, d)),
-            torch.empty((rows,), **f32), torch.empty((rows,), **f32), *hab)
+    hab = [
+        x.new_empty((m, wa.shape[0])) if keep else x.new_empty((1, 1)) for _ in range(3)
+    ]
+    return (
+        torch.empty_like(x),
+        torch.empty_like(x) if save else x.new_empty((1, d)),
+        torch.empty((rows,), **f32),
+        torch.empty((rows,), **f32),
+        *hab,
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="transition_wide_fwd_sm100a")
-def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                ws: torch.Tensor, eps: float, save: bool,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    save: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """x [M, D] bf16, gamma / beta fp32. Returns (out, xn, rstd, c1, h, a, b), out = transition(x) + x; see the fake."""
     if _is_fake(x, wa):
         return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
@@ -260,50 +354,141 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
     rstd = torch.empty((m if save else 1,), **f32)
     c1 = torch.empty_like(rstd)
 
-    def ph():                                                  # distinct placeholders: custom-op outputs must not alias each other
+    def ph():  # distinct placeholders: custom-op outputs must not alias each other
         return x.new_empty((1, 1))
 
     if d in _FUSED_FWD:
         xn = torch.empty_like(x) if save else x.new_empty((1, d))
         mout = k.rows(out)
-        k.run("fwd", _FUSED_FWD[d], k.grid,
-              (k.rows(x), k.tmap(wa, d, h), k.tmap(wb, d, h), k.tmap(ws, h, d, 64, d // 2), mout,
-               k.rows(xn) if save else mout, gamma, beta, rstd, c1, tiles, float(eps), int(save)))
+        k.run(
+            "fwd",
+            _FUSED_FWD[d],
+            k.grid,
+            (
+                k.rows(x),
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                k.tmap(ws, h, d, 64, d // 2),
+                mout,
+                k.rows(xn) if save else mout,
+                gamma,
+                beta,
+                rstd,
+                c1,
+                tiles,
+                float(eps),
+                int(save),
+            ),
+        )
         return out, xn, rstd, c1, ph(), ph(), ph()
     cl = _small_cl(d, k.n, tiles, x.device.index)
     if cl:
         xn = torch.empty_like(x) if save else x.new_empty((1, d))
-        hid, a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(3))
+        hid, a, b = (
+            (torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph())
+            for _ in range(3)
+        )
         part = torch.empty((tiles * cl * 128, d), dtype=torch.float32, device=x.device)
         mx = k.tmap(x, d, m, 64, 128)
-        k.run(f"small{cl}_ab" if save else f"small{cl}", "transition_small_w_sm100", tiles * cl,
-              (mx, k.tmap(wa, d, h), k.tmap(wb, d, h), k.tmap(ws, h, d), k.tmap(xn, d, m, 64, 128) if save else mx,
-               k.tmap(part, d, tiles * cl * 128, 32, 128), x, out, gamma, beta, rstd, c1, hid, a, b, float(eps), int(save)),
-              block=512, cluster=cl)
+        k.run(
+            f"small{cl}_ab" if save else f"small{cl}",
+            "transition_small_w_sm100",
+            tiles * cl,
+            (
+                mx,
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                k.tmap(ws, h, d),
+                k.tmap(xn, d, m, 64, 128) if save else mx,
+                k.tmap(part, d, tiles * cl * 128, 32, 128),
+                x,
+                out,
+                gamma,
+                beta,
+                rstd,
+                c1,
+                hid,
+                a,
+                b,
+                float(eps),
+                int(save),
+            ),
+            block=512,
+            cluster=cl,
+        )
         return out, xn, rstd, c1, hid, a, b
-    if d == 384:                                               # one fused kernel (round n2, tfwd_d384.cu)
+    if d == 384:  # one fused kernel (round n2, tfwd_d384.cu)
         xn = torch.empty_like(x) if save else x.new_empty((1, d))
-        hid, a, b = ((torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph()) for _ in range(3))
+        hid, a, b = (
+            (torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph())
+            for _ in range(3)
+        )
         mout = k.rows(out)
-        k.run("fwd", "transition_fwd_d384_sm100", k.grid,
-              (k.rows(x), k.tmap(wa, d, h, 64, 32), k.tmap(wb, d, h, 64, 32), k.tmap(ws, h, d), k.rows(xn) if save else mout, mout,
-               gamma, beta, rstd, c1, hid, a, b, tiles, float(eps), int(save)))
+        k.run(
+            "fwd",
+            "transition_fwd_d384_sm100",
+            k.grid,
+            (
+                k.rows(x),
+                k.tmap(wa, d, h, 64, 32),
+                k.tmap(wb, d, h, 64, 32),
+                k.tmap(ws, h, d),
+                k.rows(xn) if save else mout,
+                mout,
+                gamma,
+                beta,
+                rstd,
+                c1,
+                hid,
+                a,
+                b,
+                tiles,
+                float(eps),
+                int(save),
+            ),
+        )
         return out, xn, rstd, c1, hid, a, b
-    xn = torch.empty_like(x)                                   # D >= 512: the expand's A operand, always materialised
+    xn = torch.empty_like(x)  # D >= 512: the expand's A operand, always materialised
     hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
-    k.run("ln", "transition_ln_w", min(m // 16, k.nsm * 4), (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save)), 256, 1)
+    k.run(
+        "ln",
+        "transition_ln_w",
+        min(m // 16, k.nsm * 4),
+        (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save)),
+        256,
+        1,
+    )
     item = tiles <= ITEM_TILES
     mh = k.tmap(hid, h, m)
     maps = (k.rows(xn), k.tmap(wa, d, h, 64, 128), k.tmap(wb, d, h, 64, 128), mh)
     if save:
         a, b = torch.empty_like(hid), torch.empty_like(hid)
-        k.run("swiglu_abis" if item else "swiglu_ab", "transition_swiglu_w_sm100", k.nsm if item else k.grid,
-              (*maps, k.tmap(a, h, m), k.tmap(b, h, m), 1, tiles))
+        k.run(
+            "swiglu_abis" if item else "swiglu_ab",
+            "transition_swiglu_w_sm100",
+            k.nsm if item else k.grid,
+            (*maps, k.tmap(a, h, m), k.tmap(b, h, m), 1, tiles),
+        )
     else:
-        k.run("swiglu_is" if item else "swiglu", "transition_swiglu_w_sm100", k.nsm if item else k.grid, (*maps, tiles))
+        k.run(
+            "swiglu_is" if item else "swiglu",
+            "transition_swiglu_w_sm100",
+            k.nsm if item else k.grid,
+            (*maps, tiles),
+        )
     for c0, nd in k.halves():
-        k.run("squeeze", "transition_gemm_nd_sm100", k.grid,
-              (mh, k.tmap(ws[c0:c0 + nd], h, nd), k.cols(x, c0, nd), k.cols(out, c0, nd), tiles))
+        k.run(
+            "squeeze",
+            "transition_gemm_nd_sm100",
+            k.grid,
+            (
+                mh,
+                k.tmap(ws[c0 : c0 + nd], h, nd),
+                k.cols(x, c0, nd),
+                k.cols(out, c0, nd),
+                tiles,
+            ),
+        )
     if not save:
         return out, xn.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
     return out, xn, rstd, c1, hid, a, b
@@ -312,16 +497,33 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
 def _bwd_launch_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b):
     """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32."""
     wdt = torch.float32
-    return (torch.empty_like(x), torch.empty_like(gamma), torch.empty_like(gamma),
-            torch.empty(wa.shape, dtype=wdt, device=wa.device), torch.empty(wb.shape, dtype=wdt, device=wb.device),
-            torch.empty(ws.shape, dtype=wdt, device=ws.device))
+    return (
+        torch.empty_like(x),
+        torch.empty_like(gamma),
+        torch.empty_like(gamma),
+        torch.empty(wa.shape, dtype=wdt, device=wa.device),
+        torch.empty(wb.shape, dtype=wdt, device=wb.device),
+        torch.empty(ws.shape, dtype=wdt, device=ws.device),
+    )
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_wide_bwd_sm100a")
-def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor,
-                gamma: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, hid: torch.Tensor,
-                a: torch.Tensor, b: torch.Tensor,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    hid: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Returns (dx, dgamma, dbeta, dWa, dWb, dWs); ``dx`` already carries the residual branch. ``hid`` / ``a`` / ``b`` are the
     forward's h / a / b at D >= 384 and placeholders otherwise."""
     if _is_fake(dy, x):
@@ -330,63 +532,173 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, rstd: torch
     d, h, m, tiles = k.d, k.h, k.m, k.tiles
     f32 = dict(dtype=torch.float32, device=x.device)
     dx = torch.empty_like(x)
-    if d in (64, 128):                                         # the fused two-role backward
+    if d in (64, 128):  # the fused two-role backward
         ndw = _ndw(d, k.n)
         ndx = k.nsm - ndw
         partab = torch.empty((ndw, 128, d), **f32)
         parts = torch.empty((ndw, d, 64), **f32)
         dgbw = torch.empty((ndx * 4, 2 * d), **f32)
-        dwa, dwb, dws = torch.empty(wa.shape, **f32), torch.empty(wb.shape, **f32), torch.empty(ws.shape, **f32)   # unrounded
+        dwa, dwb, dws = (
+            torch.empty(wa.shape, **f32),
+            torch.empty(wb.shape, **f32),
+            torch.empty(ws.shape, **f32),
+        )  # unrounded
         dgam, dbeta = torch.empty((d,), **f32), torch.empty((d,), **f32)
-        maps = (k.rows(dy), k.rows(xn), k.rows(x), k.tmap(ws, h, d), k.tmap(wa, d, h), k.tmap(wb, d, h), k.rows(dx))
+        maps = (
+            k.rows(dy),
+            k.rows(xn),
+            k.rows(x),
+            k.tmap(ws, h, d),
+            k.tmap(wa, d, h),
+            k.tmap(wb, d, h),
+            k.rows(dx),
+        )
         if d == 64:
-            k.run("bwd", "transition_bwd_d64_sm100", k.nsm, (*maps, rstd, c1, gamma, partab, parts, dgbw, tiles, ndw))
+            k.run(
+                "bwd",
+                "transition_bwd_d64_sm100",
+                k.nsm,
+                (*maps, rstd, c1, gamma, partab, parts, dgbw, tiles, ndw),
+            )
             reduce = "transition_bwd_d64_reduce"
         else:
-            k.run("bwd", "transition_bwd_sm100", k.nsm, (*maps, rstd, c1, gamma, x, partab, parts, dgbw, tiles, ndw))
+            k.run(
+                "bwd",
+                "transition_bwd_sm100",
+                k.nsm,
+                (*maps, rstd, c1, gamma, x, partab, parts, dgbw, tiles, ndw),
+            )
             reduce = "transition_bwd_reduce"
         nred = 3 * h * d + 2 * d
-        k.run("bwd", reduce, (nred + 255) // 256, (partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, ndw, ndx * 4), 256, 1)
+        k.run(
+            "bwd",
+            reduce,
+            (nred + 255) // 256,
+            (partab, parts, dgbw, dwa, dwb, dws, dgam, dbeta, ndw, ndx * 4),
+            256,
+            1,
+        )
         return dx, dgam, dbeta, dwa, dwb, dws
     small = d >= 384 and _small(tiles)
-    if d == 384 and not small:                                 # gate + d_xn + LayerNorm backward in one kernel (round n2, tbwd_d384.cu)
-        wst = ws.t().contiguous()                              # [H, D]
+    if (
+        d == 384 and not small
+    ):  # gate + d_xn + LayerNorm backward in one kernel (round n2, tbwd_d384.cu)
+        wst = ws.t().contiguous()  # [H, D]
         dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
         part = torch.empty((k.grid, 2 * d), **f32)
         dgb = torch.empty((2 * d,), **f32)
-        k.run("bwd", "transition_bwd_d384_sm100", k.grid,
-              (k.rows(dy), k.rows(x), k.tmap(wst, d, h, 64, 32), k.tmap(wa, d, h), k.tmap(wb, d, h), k.tmap(a, h, m), k.tmap(b, h, m),
-               k.rows(dx), rstd, c1, gamma, dab, part, tiles))
-        k.run("bwd", "transition_bwd_d384_reduce", 2 * d // 64, (part, dgb, k.grid), 256, 1)
-        dws = _mm_f32(dy.t(), hid)                            # [D, H]
-        dwab = _mm_f32(dab.t(), xn)                           # [2H, D]: dWa then dWb
+        k.run(
+            "bwd",
+            "transition_bwd_d384_sm100",
+            k.grid,
+            (
+                k.rows(dy),
+                k.rows(x),
+                k.tmap(wst, d, h, 64, 32),
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                k.tmap(a, h, m),
+                k.tmap(b, h, m),
+                k.rows(dx),
+                rstd,
+                c1,
+                gamma,
+                dab,
+                part,
+                tiles,
+            ),
+        )
+        k.run(
+            "bwd",
+            "transition_bwd_d384_reduce",
+            2 * d // 64,
+            (part, dgb, k.grid),
+            256,
+            1,
+        )
+        dws = _mm_f32(dy.t(), hid)  # [D, H]
+        dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb
         return dx, dgb[:d], dgb[d:].clone(), dwab[:h], dwab[h:].clone(), dws
-    wst = ws.t().contiguous()                                  # [H, D]
-    wab = torch.cat((wa, wb), 0)                               # [2H, D]
+    wst = ws.t().contiguous()  # [H, D]
+    wab = torch.cat((wa, wb), 0)  # [2H, D]
     dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
     mdab = k.tmap(dab, 2 * h, m)
     if d == 256:
         hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
-        k.run("gate", "transition_gate_w_sm100", k.grid,
-              (k.rows(dy), k.rows(xn), k.tmap(wst, d, h, 64, 32), k.tmap(wa, d, h), k.tmap(wb, d, h), k.tmap(hid, h, m), mdab,
-               tiles, 1))
+        k.run(
+            "gate",
+            "transition_gate_w_sm100",
+            k.grid,
+            (
+                k.rows(dy),
+                k.rows(xn),
+                k.tmap(wst, d, h, 64, 32),
+                k.tmap(wa, d, h),
+                k.tmap(wb, d, h),
+                k.tmap(hid, h, m),
+                mdab,
+                tiles,
+                1,
+            ),
+        )
     else:
         mh = k.tmap(hid, h, m)
-        k.run("gate_is" if small else "gate", "transition_gate_ab_sm100", k.nsm if small else k.grid,
-              (k.rows(dy), k.tmap(wst, d, h), k.tmap(a, h, m), k.tmap(b, h, m), mh, mdab, tiles, 0))
-    dws = _mm_f32(dy.t(), hid)                                # [D, H]
-    dwab = _mm_f32(dab.t(), xn)                               # [2H, D]: dWa then dWb
+        k.run(
+            "gate_is" if small else "gate",
+            "transition_gate_ab_sm100",
+            k.nsm if small else k.grid,
+            (
+                k.rows(dy),
+                k.tmap(wst, d, h),
+                k.tmap(a, h, m),
+                k.tmap(b, h, m),
+                mh,
+                mdab,
+                tiles,
+                0,
+            ),
+        )
+    dws = _mm_f32(dy.t(), hid)  # [D, H]
+    dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb
     dxn = torch.empty_like(x)
-    wab_t = wab.t().contiguous()                               # [D, 2H]
+    wab_t = wab.t().contiguous()  # [D, 2H]
     for c0, nd in k.halves():
-        mo = k.cols(dxn, c0, nd)                               # (the x slot of the plain-epilogue GEMM is never read)
-        k.run("dxn", "transition_gemm_nd_sm100", k.grid, (mdab, k.tmap(wab_t[c0:c0 + nd], 2 * h, nd), mo, mo, tiles))
+        mo = k.cols(
+            dxn, c0, nd
+        )  # (the x slot of the plain-epilogue GEMM is never read)
+        k.run(
+            "dxn",
+            "transition_gemm_nd_sm100",
+            k.grid,
+            (mdab, k.tmap(wab_t[c0 : c0 + nd], 2 * h, nd), mo, mo, tiles),
+        )
     nb = min(m // 16, k.nsm * 4)
     lpart = torch.empty((nb, 2 * d), **f32)
     dgb = torch.empty((2 * d,), **f32)
-    k.run("lnbwd", "transition_lnbwd_w", nb, (dxn, x, dy, rstd, c1, gamma, dx, lpart, m), 256, 1)
-    k.run("lnbwd", "transition_lnbwd_w_reduce", (2 * d + 255) // 256, (lpart, dgb, nb), 256, 1)
-    return dx, dgb[:d], dgb[d:].clone(), dwab[:h], dwab[h:].clone(), dws   # outputs of a custom op must not alias each other
+    k.run(
+        "lnbwd",
+        "transition_lnbwd_w",
+        nb,
+        (dxn, x, dy, rstd, c1, gamma, dx, lpart, m),
+        256,
+        1,
+    )
+    k.run(
+        "lnbwd",
+        "transition_lnbwd_w_reduce",
+        (2 * d + 255) // 256,
+        (lpart, dgb, nb),
+        256,
+        1,
+    )
+    return (
+        dx,
+        dgb[:d],
+        dgb[d:].clone(),
+        dwab[:h],
+        dwab[h:].clone(),
+        dws,
+    )  # outputs of a custom op must not alias each other
 
 
 class _WideTransitionSM100A(torch.autograd.Function):
@@ -401,7 +713,9 @@ class _WideTransitionSM100A(torch.autograd.Function):
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
-        out, xn, rstd, c1, hid, a, b = _fwd_launch(flat, gf, bf, wa, wb, ws, float(eps), True)
+        out, xn, rstd, c1, hid, a, b = _fwd_launch(
+            flat, gf, bf, wa, wb, ws, float(eps), True
+        )
         ctx.save_for_backward(flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b)
         ctx.shape = shape
         return out.reshape(shape)
@@ -411,19 +725,51 @@ class _WideTransitionSM100A(torch.autograd.Function):
         flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
-            dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b)
-        return (dx.reshape(ctx.shape), dgam.to(gdt), dbeta.to(bdt), dwa.to(adt), dwb.to(bwdt), dws.to(sdt), None)
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            flat,
+            xn,
+            rstd,
+            c1,
+            gf,
+            wa,
+            wb,
+            ws,
+            hid,
+            a,
+            b,
+        )
+        return (
+            dx.reshape(ctx.shape),
+            dgam.to(gdt),
+            dbeta.to(bdt),
+            dwa.to(adt),
+            dwb.to(bwdt),
+            dws.to(sdt),
+            None,
+        )
 
 
 def transition_wide_sm100a(x, gamma, beta, wa, wb, ws, eps):
     """Module-facing entry, same signature as ``fused_sm100a.transition_fused_sm100a``. Call ``available()`` first: this raises
     rather than falling back. Inference (grad mode off, or nothing requiring grad) runs the forward without the saves."""
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
+    if not (
+        torch.is_grad_enabled()
+        and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    ):
         shape = x.shape
         from miniworld_engine.kernels import _capture
 
-        g, b, ww = _capture.param_forms(f"transition_wide_sm100a_{x.dtype}", (gamma, beta, wa, wb, ws), lambda: (
-            gamma.float().contiguous(), beta.float().contiguous(), tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws))))
-        out, *_ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False)
+        g, b, ww = _capture.param_forms(
+            f"transition_wide_sm100a_{x.dtype}",
+            (gamma, beta, wa, wb, ws),
+            lambda: (
+                gamma.float().contiguous(),
+                beta.float().contiguous(),
+                tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws)),
+            ),
+        )
+        out, *_ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(), g, b, *ww, float(eps), False
+        )
         return out.reshape(shape)
     return _WideTransitionSM100A.apply(x, gamma, beta, wa, wb, ws, eps)

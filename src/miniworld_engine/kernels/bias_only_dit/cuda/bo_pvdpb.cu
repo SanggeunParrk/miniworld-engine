@@ -1,5 +1,5 @@
 // bo_pvdpb.cu -- pv dV and the bias gradient of the bias-only DiT's bf16 training backward in ONE launch, sm_100a
-// (MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB; the fused backward's B3):
+// (settings.bias_only_dit_bwd_pvdpb; the fused backward's B3):
 //
 //   CTAs [0, NPV)          pv_gate_inf.cu's body with GATE 0: dV = P^T do into dvg's dV half, on the virtual grid (blockIdx.x, NPV)
 //   CTAs [NPV, gridDim.x)  dpb_sm100.cu's body, dbias = P o (do v^T - D), on the virtual grid (blockIdx.x - NPV, gridDim.x - NPV)

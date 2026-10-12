@@ -55,7 +55,7 @@ the module path.
 
 성능 확인: △ (fastest measured, the step below 70 % SoL). cache build ✓: nothing on these paths autotunes -- the CUDA
 kernels have fixed launch shapes, the sm_100a attention cores are cubins built on first use into
-`MINIWORLD_ENGINE_JIT_ROOT` (keyed by source and flags, one per layout), the row kernels an extension built on first use.
+`settings.engine_jit_root` (keyed by source and flags, one per layout), the row kernels an extension built on first use.
 
 ## Kernels
 

@@ -41,16 +41,14 @@ def randomize(module):
 def policy(monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
-    for name in (
-        "TRIMUL_NATIVE_BUILD_DIR",
-        "OPT_CORE_DIR",
-        "MINIWORLD_PWA_TRAIN",
-        "MINIWORLD_OPM_TRAIN",
-        "MINIWORLD_PWA_INFER",
-    ):
+    for name in ("TRIMUL_NATIVE_BUILD_DIR", "OPT_CORE_DIR"):
         monkeypatch.delenv(name, raising=False)
     old = settings.configure(
-        engine_backend="auto", trimul_h100_training_widths=(64, 128, 256, 384, 512)
+        engine_backend="auto",
+        trimul_h100_training_widths=(64, 128, 256, 384, 512),
+        opm_train=None,
+        pwa_train=None,
+        pwa_infer=None,
     )
     try:
         yield
@@ -135,7 +133,12 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
     ).eval()
     ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
-    x = torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype).transpose(-1, -2).contiguous().transpose(-1, -2)
+    x = (
+        torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)
+        .transpose(-1, -2)
+        .contiguous()
+        .transpose(-1, -2)
+    )
     c = torch.randn(1, 1, 384, 384, device="cuda", dtype=dtype)
     p = torch.randn(1, 384, 384, 256, device="cuda", dtype=dtype)[..., ::2]
     mask = torch.rand(1, 384, device="cuda") > 0.2
@@ -164,15 +167,16 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             captured = m(x, c, p, mask)
-        x.mul_(.9)
+        x.mul_(0.9)
         graph.replay()
         assert relative(captured, m(x, c, p, mask)) < 1e-5
 
 
-
 def test_trimul_d64_training_uses_cuda():
     """D64 trains on its own fused CUDA path by default; the width policy can still opt out."""
-    m = BidirectionalTriangleMultiplication(64, implementation=ImplementationType.MINIWORLD).cuda()
+    m = BidirectionalTriangleMultiplication(
+        64, implementation=ImplementationType.MINIWORLD
+    ).cuda()
     x = torch.randn(1, 384, 384, 64, device="cuda", dtype=torch.bfloat16)
     assert trimul_h100.serves(m, x)
     old = settings.configure(trimul_h100_training_widths=(128, 256, 384, 512))
@@ -244,7 +248,9 @@ def test_trimul_width_training(D, L, monkeypatch):
     y = m(x, mask)
     dy = torch.randn_like(y)
     g = torch.autograd.grad(y, (x, *weights), dy)
-    compiled_ref = torch.compile(ref, fullgraph=True, options={"triton.cudagraphs": False})
+    compiled_ref = torch.compile(
+        ref, fullgraph=True, options={"triton.cudagraphs": False}
+    )
     z = compiled_ref(x, *weights)
     h = torch.autograd.grad(z, (x, *weights), dy)
     e = [
@@ -260,11 +266,18 @@ def test_trimul_width_training(D, L, monkeypatch):
 def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
     """A captured backward must initialize its own scratch and read live weights."""
     torch.compiler.reset()
-    m = randomize(BidirectionalTriangleMultiplication(width, implementation=ImplementationType.MINIWORLD,
-                                                      p_drop=.25).cuda().bfloat16())
-    x = torch.randn(1, 384, 384, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    mask = torch.rand(1, 384, device="cuda") > .2
-    ds = (torch.rand(1, 1, 384, width, device="cuda") > .25).bfloat16() * (4/3)
+    m = randomize(
+        BidirectionalTriangleMultiplication(
+            width, implementation=ImplementationType.MINIWORLD, p_drop=0.25
+        )
+        .cuda()
+        .bfloat16()
+    )
+    x = torch.randn(
+        1, 384, 384, width, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    ds = (torch.rand(1, 1, 384, width, device="cuda") > 0.25).bfloat16() * (4 / 3)
     monkeypatch.setattr(m, "_make_drop_row_scale", lambda pair, p: ds)
     dy = torch.randn_like(x)
     args = (x, *m.parameters())
@@ -283,8 +296,8 @@ def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
     with torch.cuda.graph(graph):
         got, grads = run()
     with torch.no_grad():
-        x.mul_(.91)
-        m.to_left.weight.mul_(.83)
+        x.mul_(0.91)
+        m.to_left.weight.mul_(0.83)
     for _ in range(2):
         graph.replay()
         want, expected = run()
@@ -293,6 +306,8 @@ def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
             assert relative(a, b) < 1e-5
 
 
-@pytest.mark.parametrize(("width", "bidirectional"), [(64,False),(64,True),(256,False),(384,False)])
-def test_trimul_inference_width_coverage(width,bidirectional):
-    test_trimul_inference_without_payload(bidirectional,384,width)
+@pytest.mark.parametrize(
+    ("width", "bidirectional"), [(64, False), (64, True), (256, False), (384, False)]
+)
+def test_trimul_inference_width_coverage(width, bidirectional):
+    test_trimul_inference_without_payload(bidirectional, 384, width)

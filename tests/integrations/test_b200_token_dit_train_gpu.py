@@ -4,13 +4,17 @@ fp32 (the fused path's TF32 kernels) -- (the switch is off in the second run), a
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -55,8 +59,19 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
     ins = [t.detach().clone().to(dtype).requires_grad_() for t in (single, cond, pair)]
     out = m(*ins, mask)
     (out.float() * w).sum().backward()
-    res = {"out": out.detach().float(), "dsingle": ins[0].grad.float(), "dcond": ins[1].grad.float(), "dpair": ins[2].grad.float()}
-    res.update({n.removeprefix("_orig_mod."): p.grad.float() for n, p in m.named_parameters() if p.grad is not None})
+    res = {
+        "out": out.detach().float(),
+        "dsingle": ins[0].grad.float(),
+        "dcond": ins[1].grad.float(),
+        "dpair": ins[2].grad.float(),
+    }
+    res.update(
+        {
+            n.removeprefix("_orig_mod."): p.grad.float()
+            for n, p in m.named_parameters()
+            if p.grad is not None
+        }
+    )
     m.zero_grad(set_to_none=True)
     return res
 
@@ -64,10 +79,14 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-@pytest.mark.parametrize(("A", "L"), [(4, 256), (3, 200)])     # (3, 200): the block pads to an even A and L % 128 == 0
+@pytest.mark.parametrize(
+    ("A", "L"), [(4, 256), (3, 200)]
+)  # (3, 200): the block pads to an even A and L % 128 == 0
 def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatch):
     torch.manual_seed(7)
-    ref = _randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())
+    ref = _randomize(
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda()
+    )
     eng = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
     eng.load_state_dict(ref.state_dict())
     eng = eng.to(dtype)
@@ -81,13 +100,15 @@ def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatc
     truth = _run(ref, single, cond, pair, mask, w, tf32=False)
     calls = []
     orig = token_dit_train._Block.apply
-    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a))
+    monkeypatch.setattr(
+        token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a)
+    )
     # the same regime for both: fp32 is the TF32 recipe (the fused path forces TF32 on its GEMMs; the module path follows
     # allow_tf32, so it is set for its run too)
     tf32 = True if dtype is torch.float32 else None
     fused = _run(eng, single, cond, pair, mask, w, tf32=tf32)
     assert calls, f"the {dtype} training call did not take the fused path"
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
+    override_setting(monkeypatch, "token_dit_train", "0")
     module = _run(eng, single, cond, pair, mask, w, tf32=tf32)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))
     worst = []
@@ -103,7 +124,9 @@ def test_train_block_under_torch_compile(monkeypatch):
     """torch.compile keeps the fused forward / backward as opaque ops: the compiled block takes the path and matches eager."""
     torch.manual_seed(9)
     A, L = 2, 256
-    eng = _randomize(DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()).to(torch.bfloat16)
+    eng = _randomize(
+        DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()
+    ).to(torch.bfloat16)
     g = torch.Generator(device="cuda").manual_seed(10)
     single = torch.randn(A, 1, L, 768, device="cuda", generator=g)
     cond = torch.randn(A, 1, L, 384, device="cuda", generator=g)
@@ -126,7 +149,9 @@ def test_sample_expanded_mask_takes_the_fused_path(dtype, monkeypatch):
     the fused block its [B, L] row (the same result as passing that row); a mask that differs per sample keeps the module path."""
     torch.manual_seed(13)
     A, L = 4, 256
-    eng = _randomize(DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()).to(dtype)
+    eng = _randomize(
+        DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()
+    ).to(dtype)
     g = torch.Generator(device="cuda").manual_seed(14)
     single = torch.randn(A, 1, L, 768, device="cuda", generator=g)
     cond = torch.randn(A, 1, L, 384, device="cuda", generator=g)
@@ -135,11 +160,15 @@ def test_sample_expanded_mask_takes_the_fused_path(dtype, monkeypatch):
     w = torch.randn(A, 1, L, 768, device="cuda", generator=g)
     calls = []
     orig = token_dit_train._Block.apply
-    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a))
+    monkeypatch.setattr(
+        token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a)
+    )
     flat = _run(eng, single, cond, pair, mask, w)
     expanded = _run(eng, single, cond, pair, mask.unsqueeze(0).expand(A, -1, -1), w)
     assert len(calls) == 2, "the [A, B, L] expanded mask did not take the fused path"
-    for k in flat:                           # the same kernels; the backward's dQ reductions are atomic, so not bit-for-bit
+    for k in (
+        flat
+    ):  # the same kernels; the backward's dQ reductions are atomic, so not bit-for-bit
         assert _rel(expanded[k], flat[k]) < 1e-3, k
     per_sample = mask.unsqueeze(0).repeat(A, 1, 1)
     per_sample[1, 0, 5] = ~per_sample[1, 0, 5]

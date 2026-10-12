@@ -47,9 +47,12 @@ import triton.language as tl
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
-_tmn = _dir.parent.parent / "transition" / "cuda" / "anthropic_v5"        # tmn_kernels.cuh (TMA / mbarrier helpers)
+_tmn = (
+    _dir.parent.parent / "transition" / "cuda" / "anthropic_v5"
+)  # tmn_kernels.cuh (TMA / mbarrier helpers)
 
 H, D = 16, 48
 LOG2E = 1.0 / math.log(2.0)
@@ -61,10 +64,21 @@ def _ext(name: str, defs: tuple[str, ...] = ()):
     return load_extension(
         name=f"augattn_sm90_{name}" + "".join("_" + d.replace("=", "") for d in defs),
         sources=[str(_dir / f"{name}.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), f"-I{_tmn}", "--expt-relaxed-constexpr",
-                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-                           "-U__CUDA_NO_BFLOAT162_OPERATORS__", *("-D" + d for d in defs)],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            *gencodes("90a"),
+            f"-I{_tmn}",
+            "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *("-D" + d for d in defs),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 # --------------------------------------------------------------------------------------------------- gate
@@ -73,10 +87,12 @@ def _is_hopper(index: int) -> bool:
     return torch.cuda.get_device_capability(index) == (9, 0)
 
 
-def supported(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False) -> bool:
+def supported(
+    q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
+) -> bool:
     """q [A, 1, L, 16, 48] (any float dtype) and a bias of [1, L, L, 16] (``bias_head_major``: [16, 1, L, L]) on sm_90
     with L a multiple of 128. The requirements are the kernels' own tile shapes, not a policy."""
-    if os.environ.get("MINIWORLD_AUGATTN_BF16_SM90", "1") == "0":
+    if not settings.current().augattn_bf16_sm90:
         return False
     if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
         return False
@@ -85,13 +101,17 @@ def supported(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
         return False
     if tuple(bias.shape) != ((H, 1, L, L) if bias_head_major else (1, L, L, H)):
         return False
-    return _is_hopper(q.device.index if q.device.index is not None else torch.cuda.current_device())
+    return _is_hopper(
+        q.device.index if q.device.index is not None else torch.cuda.current_device()
+    )
 
 
 _BUILD_FAILED = False
 
 
-def available(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False) -> bool:
+def available(
+    q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
+) -> bool:
     """``supported()`` plus successful builds; a build failure warns once and keeps the Triton path."""
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(q, bias, bias_head_major):
@@ -99,14 +119,22 @@ def available(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
     # Under FakeTensorMode (``dev derive``) or while torch.compile traces, keep the Triton path: a native extension
     # cannot run on fake tensors, and the Triton path is the one with fakes and autotune keys to record.
     from torch._subclasses.fake_tensor import FakeTensor
-    if torch.compiler.is_compiling() or isinstance(q, FakeTensor) or isinstance(bias, FakeTensor):
+
+    if (
+        torch.compiler.is_compiling()
+        or isinstance(q, FakeTensor)
+        or isinstance(bias, FakeTensor)
+    ):
         return False
     try:
         _ext("attn_fwd")
     except Exception as exc:  # noqa: BLE001
         _BUILD_FAILED = True
-        warnings.warn(f"sm90 bf16 augmented attention unavailable, keeping the Triton path: {exc!r}",
-                      RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm90 bf16 augmented attention unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -116,7 +144,11 @@ def available(q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
 def _prep_qkv_kernel(q, k, v, qs, kb, vb, n, scale, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
-    tl.store(qs + offs, (tl.load(q + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16), mask=m)
+    tl.store(
+        qs + offs,
+        (tl.load(q + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16),
+        mask=m,
+    )
     tl.store(kb + offs, tl.load(k + offs, mask=m).to(tl.bfloat16), mask=m)
     tl.store(vb + offs, tl.load(v + offs, mask=m).to(tl.bfloat16), mask=m)
 
@@ -124,14 +156,26 @@ def _prep_qkv_kernel(q, k, v, qs, kb, vb, n, scale, BLOCK: tl.constexpr):
 def _prep_qkv(q, k, v, scale):
     q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
     n = q.numel()
-    qs, kb, vb = (torch.empty(n, device=q.device, dtype=torch.bfloat16) for _ in range(3))
+    qs, kb, vb = (
+        torch.empty(n, device=q.device, dtype=torch.bfloat16) for _ in range(3)
+    )
     _prep_qkv_kernel[(triton.cdiv(n, 4096),)](q, k, v, qs, kb, vb, n, scale, BLOCK=4096)
     return qs.view(-1, H * D), kb.view(-1, H * D), vb.view(-1, H * D)
 
 
 @triton.jit
-def _prep_do_kernel(do, o, dob, dd, L, NH: tl.constexpr, DH: tl.constexpr, DP: tl.constexpr, ROWS: tl.constexpr):
-    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)                      # token rows (a * L + l)
+def _prep_do_kernel(
+    do,
+    o,
+    dob,
+    dd,
+    L,
+    NH: tl.constexpr,
+    DH: tl.constexpr,
+    DP: tl.constexpr,
+    ROWS: tl.constexpr,
+):
+    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l)
     hh = tl.arange(0, NH)
     dcol = tl.arange(0, DP)
     ptr = r[:, None, None] * (NH * DH) + (hh[:, None] * DH + dcol[None, :])[None, :, :]
@@ -148,7 +192,9 @@ def _prep_do(do, o, A, L):
     do = do.reshape(A * L, H * D).contiguous()
     dob = torch.empty(A * L, H * D, device=do.device, dtype=torch.bfloat16)
     dd = torch.empty(A, H, L, device=do.device, dtype=torch.float32)
-    _prep_do_kernel[((A * L) // 8,)](do, o.reshape(A * L, H * D), dob, dd, L, NH=H, DH=D, DP=64, ROWS=8)
+    _prep_do_kernel[((A * L) // 8,)](
+        do, o.reshape(A * L, H * D), dob, dd, L, NH=H, DH=D, DP=64, ROWS=8
+    )
     return dob, dd
 
 
@@ -156,7 +202,11 @@ def _prep_do(do, o, A, L):
 def _scale_bf16_kernel(b, out, n, scale, BLOCK: tl.constexpr):
     offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
     m = offs < n
-    tl.store(out + offs, (tl.load(b + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16), mask=m)
+    tl.store(
+        out + offs,
+        (tl.load(b + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16),
+        mask=m,
+    )
 
 
 def _bias_prep(bias_hll):
@@ -179,13 +229,20 @@ FWD_LAUNCHES = [0]
 def _fwd_launch_fake(qs, kb, vb, bb, km):
     """O fp32 [A L, H D] (qs's shape) and the LSE fp32 [A, H, L]."""
     L = bb.shape[1]
-    return (qs.new_empty(qs.shape, dtype=torch.float32),
-            qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32))
+    return (
+        qs.new_empty(qs.shape, dtype=torch.float32),
+        qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32),
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="augmented_attention_bf16_sm90_fwd")
-def _fwd_launch(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.Tensor,
-                km: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    qs: torch.Tensor,
+    kb: torch.Tensor,
+    vb: torch.Tensor,
+    bb: torch.Tensor,
+    km: torch.Tensor | None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Attention forward on the prepared operands: (O fp32, LSE fp32)."""
     FWD_LAUNCHES[0] += 1
     L = bb.shape[1]
@@ -199,8 +256,11 @@ def _fwd_launch(qs: torch.Tensor, kb: torch.Tensor, vb: torch.Tensor, bb: torch.
 # What the checkpoint policy matches: the registered OpOverload under compile_wrap="custom_op" (the default). Under
 # "disable" there is no op to name, so FWD_OP is the plain launcher and the policy recomputes it like everything else --
 # same results, without the saving.
-FWD_OP = (torch.ops.miniworld_engine.augmented_attention_bf16_sm90_fwd.default
-          if hasattr(torch.ops.miniworld_engine, "augmented_attention_bf16_sm90_fwd") else _fwd_launch)
+FWD_OP = (
+    torch.ops.miniworld_engine.augmented_attention_bf16_sm90_fwd.default
+    if hasattr(torch.ops.miniworld_engine, "augmented_attention_bf16_sm90_fwd")
+    else _fwd_launch
+)
 
 
 def checkpoint_context_keeping_attention():
@@ -208,10 +268,17 @@ def checkpoint_context_keeping_attention():
     LSE, 115 MB a call at L768 / A48) and recompute everything else. Under per-block checkpointing the backward's
     recompute then skips the attention forward (334 us a block at L768); the cost is O and LSE held from the forward
     to the backward for every checkpointed block."""
-    from torch.utils.checkpoint import CheckpointPolicy, create_selective_checkpoint_contexts
+    from torch.utils.checkpoint import (
+        CheckpointPolicy,
+        create_selective_checkpoint_contexts,
+    )
 
     def policy(ctx, op, *args, **kwargs):
-        return CheckpointPolicy.MUST_SAVE if op == FWD_OP else CheckpointPolicy.PREFER_RECOMPUTE
+        return (
+            CheckpointPolicy.MUST_SAVE
+            if op == FWD_OP
+            else CheckpointPolicy.PREFER_RECOMPUTE
+        )
 
     return create_selective_checkpoint_contexts(policy)
 
@@ -222,13 +289,23 @@ class _AttentionBf16Sm90(torch.autograd.Function):
     def forward(ctx, q, k, v, bias, mask, bias_head_major):  # noqa: D102
         A, _, L, _, _ = q.shape
         qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(D))
-        bb = _bias_prep(bias.reshape(H, L, L) if bias_head_major else bias[0].permute(2, 0, 1))
+        bb = _bias_prep(
+            bias.reshape(H, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
+        )
         km = None
         if mask is not None:
             km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
         o, lse = FWD_OP(qs, kb, vb, bb, km)
         if torch.is_grad_enabled() or any(ctx.needs_input_grad):
-            ctx.save_for_backward(qs, kb, vb, bb, km if km is not None else torch.empty(0, device=q.device), o, lse)
+            ctx.save_for_backward(
+                qs,
+                kb,
+                vb,
+                bb,
+                km if km is not None else torch.empty(0, device=q.device),
+                o,
+                lse,
+            )
         ctx.has_mask, ctx.head_major, ctx.dims = km is not None, bias_head_major, (A, L)
         return o.view(A, 1, L, H, D)
 
@@ -240,12 +317,18 @@ class _AttentionBf16Sm90(torch.autograd.Function):
         dob, dd = _prep_do(do, o, A, L)
         dq = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
         dk, dv = torch.empty_like(dq), torch.empty_like(dq)
-        if A % 3 == 0:                      # dbias in the dQ pass, three samples summed on chip before the L2 reds
+        if (
+            A % 3 == 0
+        ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
             db = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
             _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, db)
-            _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db)
-        else:                               # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-            _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(qs, kb, vb, dob, bb, km, lse, dd, dq)
+            _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
+                qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
+            )
+        else:  # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
+            _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(
+                qs, kb, vb, dob, bb, km, lse, dd, dq
+            )
             dbt = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
             _ext("attn_dkv").attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
             db = dbt.transpose(1, 2)
@@ -254,7 +337,9 @@ class _AttentionBf16Sm90(torch.autograd.Function):
         return dq.view(shp), dk.view(shp), dv.view(shp), dbias, None, None
 
 
-def augmented_attention_bf16_sm90(q, k, v, bias, mask=None, *, bias_head_major: bool = False):
+def augmented_attention_bf16_sm90(
+    q, k, v, bias, mask=None, *, bias_head_major: bool = False
+):
     """``softmax(q k^T / sqrt(48) + bias) v`` in bf16 with fp32 accumulation; returns fp32 [A, 1, L, 16, 48].
 
     q, k, v: [A, 1, L, 16, 48] (fp32 or bf16). bias: [1, L, L, 16], or [16, 1, L, L] with ``bias_head_major`` (the
@@ -265,4 +350,10 @@ def augmented_attention_bf16_sm90(q, k, v, bias, mask=None, *, bias_head_major: 
     return _AttentionBf16Sm90.apply(q, k, v, bias, mask, bias_head_major)
 
 
-__all__ = ["FWD_OP", "augmented_attention_bf16_sm90", "available", "checkpoint_context_keeping_attention", "supported"]
+__all__ = [
+    "FWD_OP",
+    "augmented_attention_bf16_sm90",
+    "available",
+    "checkpoint_context_keeping_attention",
+    "supported",
+]

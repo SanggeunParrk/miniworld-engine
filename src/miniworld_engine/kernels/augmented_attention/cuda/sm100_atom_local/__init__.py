@@ -28,6 +28,7 @@ import subprocess
 from pathlib import Path
 
 import torch
+from miniworld_engine import settings
 
 NH, DH, DM, DP = 4, 32, 128, 16
 WQ, WK, KOFF = 32, 128, 48
@@ -41,20 +42,39 @@ def cubin(stem: str) -> str:
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}")
+    flags = (
+        *host,
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_100a",
+        "-cubin",
+        "-lineinfo",
+        f"-I{_dir}",
+    )
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (_dir / "local.cuh", _dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
+    for f in (
+        _dir / "local.cuh",
+        _dir.parent / "sm100" / "sm100.cuh",
+        _dir / f"{stem}.cu",
+    ):
         h.update(f.read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "atom_local_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run([nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)], capture_output=True, text=True,
-                             timeout=900, check=False)
+        res = subprocess.run(
+            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
         if res.returncode != 0:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}")
+            raise RuntimeError(
+                f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
+            )
         os.replace(tmp, out)
     return str(out)
 
@@ -146,8 +166,21 @@ def attn_fwd(q, k, v, bias, kmask=None):
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
-    _load("fwd", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows(q, 128), _rows(k, 224), _rows(v, 224), out, bias, km, lse,
-                    int(N), int(A), int(nwin), int(sp))
+    _load("fwd", d)(
+        (nq * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows(q, 128),
+        _rows(k, 224),
+        _rows(v, 224),
+        out,
+        bias,
+        km,
+        lse,
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     return o, lse
 
 
@@ -165,13 +198,50 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
-    sp = max(1, min(A, nsm(d) // (nq * NH)))                         # split the samples when there are few chunks
-    _load("dq", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows(q, 128), _rows(k, 224), _rows(v, 224), _rows(do, 128), _vec(lse, 128), _vec(dd, 128),
-                   out, bias, km, int(N), int(A), int(nwin), int(sp))
+    sp = max(
+        1, min(A, nsm(d) // (nq * NH))
+    )  # split the samples when there are few chunks
+    _load("dq", d)(
+        (nq * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows(q, 128),
+        _rows(k, 224),
+        _rows(v, 224),
+        _rows(do, 128),
+        _vec(lse, 128),
+        _vec(dd, 128),
+        out,
+        bias,
+        km,
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     nk = (N + 112 + 127) // 128
-    sp = 2 if 2 * nk * NH <= nsm(d) and A > 1 else 1                  # two sample halves add into dbias exactly (0 + a + b)
-    _load("dkv", d)((nk * NH * sp, 1, 1), (512, 1, 1), _rows(q, 224), _rows(k, 128), _rows(v, 128), _rows(do, 224), _vec(lse, 224), _vec(dd, 224),
-                    out, bias, km, dkv, dbias, int(ldd), int(N), int(A), int(nwin), int(sp))
+    sp = (
+        2 if 2 * nk * NH <= nsm(d) and A > 1 else 1
+    )  # two sample halves add into dbias exactly (0 + a + b)
+    _load("dkv", d)(
+        (nk * NH * sp, 1, 1),
+        (512, 1, 1),
+        _rows(q, 224),
+        _rows(k, 128),
+        _rows(v, 128),
+        _rows(do, 224),
+        _vec(lse, 224),
+        _vec(dd, 224),
+        out,
+        bias,
+        km,
+        dkv,
+        dbias,
+        int(ldd),
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     return dbias
 
 
@@ -189,7 +259,17 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5):
     wb, gamma, bf = _params(wb, gamma)
     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
     d = _dev(z)
-    _load("pb_f", d)((min(4 * nsm(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z.contiguous(), wb, gamma, out, int(rows), float(eps), bf)
+    _load("pb_f", d)(
+        (min(4 * nsm(d), (rows + 255) // 256), 1, 1),
+        (256, 1, 1),
+        z.contiguous(),
+        wb,
+        gamma,
+        out,
+        int(rows),
+        float(eps),
+        bf,
+    )
     return out
 
 
@@ -203,7 +283,19 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
-    _load("pb_b", d)((nb, 1, 1), (256, 1, 1), z.contiguous(), wb, gamma, dbias.contiguous(), dz, part, int(rows), float(eps), bf)
+    _load("pb_b", d)(
+        (nb, 1, 1),
+        (256, 1, 1),
+        z.contiguous(),
+        wb,
+        gamma,
+        dbias.contiguous(),
+        dz,
+        part,
+        int(rows),
+        float(eps),
+        bf,
+    )
     _load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
     return dz, dgamma, dwb
 
@@ -219,7 +311,15 @@ def cond_ln(c, gamma, eps=1e-5):
     M = c.shape[0]
     out = torch.empty_like(c)
     d = _dev(c)
-    _load("cond_ln", d)((_row_grid(M, d), 1, 1), (256, 1, 1), c, gamma.float().contiguous(), out, int(M), float(eps))
+    _load("cond_ln", d)(
+        (_row_grid(M, d), 1, 1),
+        (256, 1, 1),
+        c,
+        gamma.float().contiguous(),
+        out,
+        int(M),
+        float(eps),
+    )
     return out
 
 
@@ -229,7 +329,18 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):
     M = c.shape[0]
     dc = torch.empty_like(c) if acc is None else acc
     d = _dev(c)
-    _load("cln_b", d)((_row_grid(M, d), 1, 1), (256, 1, 1), c, dcn, gamma.float().contiguous(), dc, acc, dgamma, int(M), float(eps))
+    _load("cln_b", d)(
+        (_row_grid(M, d), 1, 1),
+        (256, 1, 1),
+        c,
+        dcn,
+        gamma.float().contiguous(),
+        dc,
+        acc,
+        dgamma,
+        int(M),
+        float(eps),
+    )
     return dc
 
 
@@ -270,7 +381,9 @@ def _rows32(t, n, swizzle=128):
     head (32 fp32 = 128 B). swizzle 128: the K-major operand layout; "128a32": the 128-B swizzle with 32-B atoms, the MN-major one."""
     A, N, _ = t.shape
     assert t.stride(2) == 1 and t.dtype == torch.float32
-    return _tmap(t, (DM, N, A), (t.stride(1) * 4, t.stride(0) * 4), (DH, n, 1), swizzle, "f32")
+    return _tmap(
+        t, (DM, N, A), (t.stride(1) * 4, t.stride(0) * 4), (DH, n, 1), swizzle, "f32"
+    )
 
 
 def _out32(t):
@@ -290,8 +403,21 @@ def attn_fwd32(q, k, v, bias, kmask=None):
     km = _u8(kmask)
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
-    _load32("fwd32", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 128), _rows32(k, 224), _rows32(v, 224, "128a32"), _out32(o),
-                        bias, km, lse, int(N), int(A), int(nwin), int(sp))
+    _load32("fwd32", d)(
+        (nq * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows32(q, 128),
+        _rows32(k, 224),
+        _rows32(v, 224, "128a32"),
+        _out32(o),
+        bias,
+        km,
+        lse,
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     return o, lse
 
 
@@ -307,14 +433,56 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     out = _out32(dp.view(A, N, dp.shape[1]))
     qcol, kcol, vcol = cols
     nq = (N + 127) // 128
-    sp = max(1, min(A, nsm(d) // (nq * NH)))                         # split the samples when there are few chunks
-    _load32("dq32", d)((nq * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 128), _rows32(k, 224), _rows32(v, 224), _rows32(k, 224, "128a32"),
-                       _rows32(do, 128), _vec(lse, 128), _vec(dd, 128), out, bias, km, int(qcol), int(N), int(A), int(nwin), int(sp))
+    sp = max(
+        1, min(A, nsm(d) // (nq * NH))
+    )  # split the samples when there are few chunks
+    _load32("dq32", d)(
+        (nq * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows32(q, 128),
+        _rows32(k, 224),
+        _rows32(v, 224),
+        _rows32(k, 224, "128a32"),
+        _rows32(do, 128),
+        _vec(lse, 128),
+        _vec(dd, 128),
+        out,
+        bias,
+        km,
+        int(qcol),
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     nk = (N + 112 + 127) // 128
-    sp = 2 if 2 * nk * NH <= nsm(d) and A > 1 else 1                  # two sample halves add into dbias exactly (0 + a + b)
-    _load32("dkv32", d)((nk * NH * sp, 1, 1), (544, 1, 1), _rows32(q, 224), _rows32(q, 224, "128a32"), _rows32(k, 128), _rows32(v, 128),
-                        _rows32(do, 224), _rows32(do, 224, "128a32"), _vec(lse, 224), _vec(dd, 224), out, bias, km, dp, dbias, int(ldd),
-                        int(kcol), int(vcol), int(N), int(A), int(nwin), int(sp))
+    sp = (
+        2 if 2 * nk * NH <= nsm(d) and A > 1 else 1
+    )  # two sample halves add into dbias exactly (0 + a + b)
+    _load32("dkv32", d)(
+        (nk * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows32(q, 224),
+        _rows32(q, 224, "128a32"),
+        _rows32(k, 128),
+        _rows32(v, 128),
+        _rows32(do, 224),
+        _rows32(do, 224, "128a32"),
+        _vec(lse, 224),
+        _vec(dd, 224),
+        out,
+        bias,
+        km,
+        dp,
+        dbias,
+        int(ldd),
+        int(kcol),
+        int(vcol),
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
     return dbias
 
 
@@ -326,7 +494,17 @@ def pair_bias_fwd32(z, gamma, wb, eps=1e-5):
     wb, gamma, bf = _params(wb, gamma)
     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
     d = _dev(z)
-    _load32("pb_f32", d)((min(4 * nsm(d), (rows + 255) // 256), 1, 1), (256, 1, 1), z, wb, gamma, out, int(rows), float(eps), bf)
+    _load32("pb_f32", d)(
+        (min(4 * nsm(d), (rows + 255) // 256), 1, 1),
+        (256, 1, 1),
+        z,
+        wb,
+        gamma,
+        out,
+        int(rows),
+        float(eps),
+        bf,
+    )
     return out
 
 
@@ -341,6 +519,20 @@ def pair_bias_bwd32(z, gamma, wb, dbias, eps=1e-5):
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
-    _load32("pb_b32", d)((nb, 1, 1), (256, 1, 1), z, wb, gamma, dbias.contiguous(), dz, part, int(rows), float(eps), bf)
-    _load32("pb_fin32", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
+    _load32("pb_b32", d)(
+        (nb, 1, 1),
+        (256, 1, 1),
+        z,
+        wb,
+        gamma,
+        dbias.contiguous(),
+        dz,
+        part,
+        int(rows),
+        float(eps),
+        bf,
+    )
+    _load32("pb_fin32", d)(
+        (1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf
+    )
     return dz, dgamma, dwb

@@ -6,7 +6,7 @@
                           with the fp32 residual copy, residual + gate + AdaLN, the last residual written in the output dtype,
                           SwiGLU, and the softmax of the hoisted bias
 
-The core is a cubin built on first use into ``MINIWORLD_ENGINE_JIT_ROOT`` and launched through the sm_100a driver of
+The core is a cubin built on first use into ``settings.engine_jit_root`` and launched through the sm_100a driver of
 ``kernels/augmented_attention/cuda/sm100`` (TMA descriptors, current stream, CUDA-graph capturable); the rows are a
 torch extension. Neither is built at import.
 
@@ -25,9 +25,10 @@ import warnings
 from pathlib import Path
 
 import torch
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
-H, DH = 16, 48                                         # the default heads x width
+H, DH = 16, 48  # the default heads x width
 #: (heads, head width) served: 768 attention channels as 16 x 48, 24 x 32 or 12 x 64, and 1024 as 16 x 64
 LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
@@ -46,10 +47,18 @@ def _ext():
     return load_extension(
         name="bias_only_dit_rows_cuda",
         sources=[str(_dir / "bias_only_dit_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("80", "90", "100", ptx=("100",))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes("80", "90", "100", ptx=("100",)),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def ln_rows(x, out, eps=1e-5):
@@ -64,7 +73,9 @@ def adaln_in_rows(single, x, ms, mb, out, T, eps=1e-5, presig=False):
 
 def resgate_adaln_rows(x, y, gl, ms, mb, out, T, eps=1e-5, presig=False):
     """x += sigmoid(gl[row % T]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
-    _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(T), float(eps), bool(presig))
+    _ext().resgate_adaln_rows_cuda(
+        x, y, gl, ms, mb, out, int(T), float(eps), bool(presig)
+    )
 
 
 def swiglu_rows(ab, out):
@@ -105,8 +116,8 @@ def _pv_vb(L: int, S: int, dh: int = DH) -> int:
     """Keys per v tile: 128 for the inference shapes (few samples; tuned there); 256 at L768 with d_head 48 and S >= 16 (A = 48,
     16 x 48, in-process A/B of VB 192 / 256, us: forward 65.21 / 58.28, dV 55.15 / 49.94 -- fewer v tiles, each costing ~90 ns
     beside its products); else 192 or 256 when one divides L (A = 48, gated / ungated us: L384 26.0 / 23.6 against 27.3 / 25.7 at
-    128). MINIWORLD_BIAS_ONLY_DIT_PV_VB forces one (read per call)."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PV_VB")
+    128). settings.bias_only_dit_pv_vb forces one (read per call)."""
+    forced = settings.current().bias_only_dit_pv_vb
     if forced:
         return int(forced)
     if S < 16:
@@ -123,7 +134,7 @@ _GROUPS = (1, 2, 3, 4, 5, 6, 8, 12, 16, 24, 48)
 def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
     """Samples per work item: the fewest bytes into the busiest SM, rounds x 2 L (128 + 48 SG) (the P tile once, SG samples'
     v tiles); the epilogue hides under the next sample's products, so bytes are the cost."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_SG")
+    forced = settings.current().bias_only_dit_sg
     if forced:
         return max(1, min(int(forced), S))
     best = None
@@ -135,20 +146,34 @@ def pick_group(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
     return best[1]
 
 
-def core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
+def core_supported(
+    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
+) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. MINIWORLD_BIAS_ONLY_DIT_CORE=0 turns it off.
+    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. settings.bias_only_dit_core=0 turns it off.
     fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
-    if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_CORE", "1") == "0":
+    if not settings.current().bias_only_dit_core:
         return False
     if dtype is torch.float32:
-        if not (d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
-                and torch.cuda.get_device_capability(device_index) == (10, 0)):
+        if not (
+            d % h == 0
+            and (h, d // h) in LAYOUTS
+            and L % 128 == 0
+            and 0 < L <= 768
+            and torch.cuda.get_device_capability(device_index) == (10, 0)
+        ):
             return False
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
+
         return tf32_ready(device_index, h, d // h, False)
-    return (dtype is torch.bfloat16 and d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
-            and torch.cuda.get_device_capability(device_index) == (10, 0))
+    return (
+        dtype is torch.bfloat16
+        and d % h == 0
+        and (h, d // h) in LAYOUTS
+        and L % 128 == 0
+        and 0 < L <= 768
+        and torch.cuda.get_device_capability(device_index) == (10, 0)
+    )
 
 
 def _descriptors(*maps):
@@ -160,7 +185,7 @@ def _descriptors(*maps):
     return maps
 
 
-PTR = object()        # a _Launch argument given per call (a tensor's address)
+PTR = object()  # a _Launch argument given per call (a tensor's address)
 
 
 class _Launch:
@@ -172,8 +197,15 @@ class _Launch:
     def __init__(self, kernel, grid, block, *args):
         import ctypes
         from cuda.bindings import driver as cu
-        from miniworld_engine.kernels.augmented_attention.cuda.sm100.driver import TensorMap
-        self._cu, self.k, self.maps = cu, kernel, [a for a in args if isinstance(a, TensorMap)]
+        from miniworld_engine.kernels.augmented_attention.cuda.sm100.driver import (
+            TensorMap,
+        )
+
+        self._cu, self.k, self.maps = (
+            cu,
+            kernel,
+            [a for a in args if isinstance(a, TensorMap)],
+        )
         self.hold, self.dyn, ptrs = [], [], []
         for a in args:
             if isinstance(a, TensorMap):
@@ -193,8 +225,13 @@ class _Launch:
             cfg.sharedMemBytes = kernel.smem
             at = cu.CUlaunchAttribute()
             at.id = cu.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
-            at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = kernel.cluster, 1, 1
-            cfg.attrs = [at]; cfg.numAttrs = 1
+            at.value.clusterDim.x, at.value.clusterDim.y, at.value.clusterDim.z = (
+                kernel.cluster,
+                1,
+                1,
+            )
+            cfg.attrs = [at]
+            cfg.numAttrs = 1
             self.cfg = cfg
 
     def __call__(self, *tensors):
@@ -204,10 +241,22 @@ class _Launch:
         st = cu.CUstream(torch.cuda.current_stream().cuda_stream)
         if self.cfg is not None:
             self.cfg.hStream = st
-            err, = cu.cuLaunchKernelEx(self.cfg, self.k.func, self.argp, 0)
+            (err,) = cu.cuLaunchKernelEx(self.cfg, self.k.func, self.argp, 0)
         else:
             g, b = self.grid, self.block
-            err, = cu.cuLaunchKernel(self.k.func, g[0], g[1], g[2], b[0], b[1], b[2], self.k.smem, st, self.argp, 0)
+            (err,) = cu.cuLaunchKernel(
+                self.k.func,
+                g[0],
+                g[1],
+                g[2],
+                b[0],
+                b[1],
+                b[2],
+                self.k.smem,
+                st,
+                self.argp,
+                0,
+            )
         if err != cu.CUresult.CUDA_SUCCESS:
             raise RuntimeError(f"cuLaunchKernel: {err}")
 
@@ -233,56 +282,114 @@ class PvGateCore:
     the 12-launch step). ``p_early`` (with ``pdl``; the runner's three-kernel inference step only): the ``-DP_EARLY`` build, which
     loads P before griddepcontrol.wait -- only for a P no kernel of the PDL chain writes (the runner's hoisted P, made once per
     sample() before the step); never for the training backward's P^T (softmax_t right before it in the same stream).
-    MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0 (read per call) takes the plain PDL build."""
+    settings.bias_only_dit_inf3_p_early=0 (read per call) takes the plain PDL build."""
 
-    def __init__(self, device_index: int, defs: tuple[str, ...] = (), nh: int = H, dh: int | None = None, pdl: bool = False,
-                 p_early: bool = False):
-        assert pdl or not p_early, "P_EARLY moves P before the PDL wait: a PDL build only"
+    def __init__(
+        self,
+        device_index: int,
+        defs: tuple[str, ...] = (),
+        nh: int = H,
+        dh: int | None = None,
+        pdl: bool = False,
+        p_early: bool = False,
+    ):
+        assert pdl or not p_early, (
+            "P_EARLY moves P before the PDL wait: a PDL build only"
+        )
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._sm100 = sm100
         self._tm = sm100._tm
         self.nh, self.dh = nh, dh or 768 // nh
-        self.device_index, self.defs, self.pdl, self.p_early = device_index, defs + _head_defs(nh, self.dh), pdl, p_early
+        self.device_index, self.defs, self.pdl, self.p_early = (
+            device_index,
+            defs + _head_defs(nh, self.dh),
+            pdl,
+            p_early,
+        )
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
     def early(self) -> bool:
-        """This call takes the P_EARLY build: ``p_early`` and not MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY=0."""
-        return self.p_early and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY", "1") != "0"
+        """This call takes the P_EARLY build: ``p_early`` and not settings.bias_only_dit_inf3_p_early=0."""
+        return self.p_early and settings.current().bias_only_dit_inf3_p_early
 
-    def kernel(self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None):
+    def kernel(
+        self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None
+    ):
         """The cubin for SG samples per item, with or without the gate, VB keys per v tile, the P_EARLY build where ``early``
         (default: ``self.early()``) (built on first use)."""
         vdef = () if vb == 128 else (f"VB={vb}",)
         if self.pdl:
             edef = ("P_EARLY",) if (self.early() if early is None else early) else ()
-            return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, pdl=True, src_dir=str(_dir),
-                                             defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs, "PDL_INF", *edef),
-                                             smem=_pv_smem(vb))
-        return self._sm100._sm100_kernel("pv_gate_inf", "bo_pv_gate_inf_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs), smem=_pv_smem(vb))
+            return self._sm100._sm100_kernel(
+                "pv_gate_inf",
+                "bo_pv_gate_inf_sm100",
+                self.device_index,
+                pdl=True,
+                src_dir=str(_dir),
+                defs=(
+                    f"SG={sg}",
+                    f"GATE={int(gate)}",
+                    *vdef,
+                    *self.defs,
+                    "PDL_INF",
+                    *edef,
+                ),
+                smem=_pv_smem(vb),
+            )
+        return self._sm100._sm100_kernel(
+            "pv_gate_inf",
+            "bo_pv_gate_inf_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=(f"SG={sg}", f"GATE={int(gate)}", *vdef, *self.defs),
+            smem=_pv_smem(vb),
+        )
 
     def _bind(self, v, P, out, S, L, g, vb, early):
         M = v.shape[0]
         tm, es = self._tm, v.element_size()
         nh, dh = self.nh, self.dh
-        maps = _descriptors(tm(P, [L, nh * L], L * 2, [64, 128]), tm(v, [nh * dh, M], v.stride(0) * es, [dh, vb]),
-                            tm(v if g is None else g, [nh * dh, M], (v if g is None else g).stride(0) * es, [dh, 128]),
-                            tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]))
+        maps = _descriptors(
+            tm(P, [L, nh * L], L * 2, [64, 128]),
+            tm(v, [nh * dh, M], v.stride(0) * es, [dh, vb]),
+            tm(
+                v if g is None else g,
+                [nh * dh, M],
+                (v if g is None else g).stride(0) * es,
+                [dh, 128],
+            ),
+            tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]),
+        )
         sg = pick_group(S, L, self.nsm, nh, dh)
         k = self.kernel(sg, g is not None, vb, early)
         grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
         if self.pdl:
             from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+
             return _LaunchPDL(k, grid, (256, 1, 1), *maps, L, S)
         return _Launch(k, grid, (256, 1, 1), *maps, L, S)
 
     def __call__(self, v, P, out, S, g=None):
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         L = v.shape[0] // S
-        vb, early = _pv_vb(L, S, self.dh), self.early()                     # both read per call (the A/B switches): in the key
-        key = (v.data_ptr(), v.stride(0), None if g is None else (g.data_ptr(), g.stride(0)), P.data_ptr(), out.data_ptr(),
-               out.stride(0), S, L, vb, early)
+        vb, early = (
+            _pv_vb(L, S, self.dh),
+            self.early(),
+        )  # both read per call (the A/B switches): in the key
+        key = (
+            v.data_ptr(),
+            v.stride(0),
+            None if g is None else (g.data_ptr(), g.stride(0)),
+            P.data_ptr(),
+            out.data_ptr(),
+            out.stride(0),
+            S,
+            L,
+            vb,
+            early,
+        )
         self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g, vb, early))()
         return out
 
@@ -333,12 +440,12 @@ _DPBX2_FAILED: set = set()
 def dpb_pair_on(L: int, nh: int = H, hp: int = 1, nsm: int = 148) -> bool:
     """The bias gradient on CTA pairs (``dpbx2_sm100.cu``: 256-query x 256-key items, a third less TMA intake per product; L768 A = 48,
     16 x 48: 61.2 -> 47.4 us, in-process A/B) -- the default where 256-key tiles divide L and the pairs' items fill the SM pairs (fewer
-    leave SMs idle that dpb_sm100.cu's 128-query items would use): at L 128-768 that is L768. MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR=0 / 1
+    leave SMs idle that dpb_sm100.cu's 128-query items would use): at L 128-768 that is L768. settings.bias_only_dit_dpb_pair=0 / 1
     (read per call) keeps dpb_sm100.cu / takes the pairs wherever 256 divides L."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR", "")
-    if L % 256 or forced == "0":
+    forced = settings.current().bias_only_dit_dpb_pair
+    if L % 256 or forced is False:
         return False
-    return forced == "1" or (nh // hp) * (L // 256) * (L // 256) >= nsm // 2
+    return forced is True or (nh // hp) * (L // 256) * (L // 256) >= nsm // 2
 
 
 class DpbKernel:
@@ -348,6 +455,7 @@ class DpbKernel:
 
     def __init__(self, device_index: int, nh: int = H, dh: int | None = None):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._sm100, self._tm, self.device_index = sm100, sm100._tm, device_index
         self.nh, self.dh = nh, dh or 768 // nh
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
@@ -356,48 +464,95 @@ class DpbKernel:
 
     def _bind(self, do, v, P, dd, out, A, L):
         nh, dh = self.nh, self.dh
-        hp = 2 if dh == 32 else 1                     # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
+        hp = (
+            2 if dh == 32 else 1
+        )  # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
         nj = _dpb_nj(L, self.nsm, nh // hp, hp)
-        k = self._sm100._sm100_kernel("dpb_sm100", "bo_dpb_sm100", self.device_index, src_dir=str(_dir),
-                                      defs=(f"NJ={nj}", *_head_defs(nh, dh)), smem=_dpb_smem(nj))
+        k = self._sm100._sm100_kernel(
+            "dpb_sm100",
+            "bo_dpb_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=(f"NJ={nj}", *_head_defs(nh, dh)),
+            smem=_dpb_smem(nj),
+        )
         tm, M = self._tm, do.shape[0]
-        maps = _descriptors(tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
-                            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
-                            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64), tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64))
+        maps = _descriptors(
+            tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
+            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
+            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),
+            tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64),
+        )
         grid = (min(self.nsm, nh // hp * (L // 128) * (L // nj)), 1, 1)
 
         return _Launch(k, grid, (256, 1, 1), *maps, PTR, L, A)
 
     def pair_kernel(self):
         """The cubin of dpbx2_sm100.cu for this layout (built on first use)."""
-        return self._sm100._sm100_kernel("dpbx2_sm100", "bo_dpbx2_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=_head_defs(self.nh, self.dh), cluster=2, smem=_dpbx2_smem())
+        return self._sm100._sm100_kernel(
+            "dpbx2_sm100",
+            "bo_dpbx2_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=_head_defs(self.nh, self.dh),
+            cluster=2,
+            smem=_dpbx2_smem(),
+        )
 
     def _bind_pair(self, do, v, P, dd, out, A, L):
         nh, dh = self.nh, self.dh
         hp = 2 if dh == 32 else 1
         k = self._pair_k
         tm, M = self._tm, do.shape[0]
-        mdo, mv = tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]), tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, 128])
-        maps = _descriptors(mdo, mdo, mv, mv, tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),   # (the TF32 build's narrow-box maps unused)
-                            tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64))
+        mdo, mv = (
+            tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
+            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, 128]),
+        )
+        maps = _descriptors(
+            mdo,
+            mdo,
+            mv,
+            mv,
+            tm(
+                P, [L, nh * L], L * 2, [32, 128], swizzle=64
+            ),  # (the TF32 build's narrow-box maps unused)
+            tm(out, [L, nh * L], L * 2, [32, 32], swizzle=64),
+        )
         items = nh // hp * (L // 256) * (L // 256)
-        return _Launch(k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A)
+        return _Launch(
+            k, (min(self.nsm & ~1, 2 * items), 1, 1), (256, 1, 1), *maps, PTR, L, A
+        )
 
     def __call__(self, do, v, P, dd, out, A):
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
-        pair = dpb_pair_on(L, self.nh, hp, self.nsm) and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        pair = (
+            dpb_pair_on(L, self.nh, hp, self.nsm)
+            and (self.device_index, self.nh, self.dh) not in _DPBX2_FAILED
+        )
         if pair and self._pair_k is None:
             try:
                 self._pair_k = self.pair_kernel()
             except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps dpb_sm100.cu
                 _DPBX2_FAILED.add((self.device_index, self.nh, self.dh))
-                warnings.warn(f"bias-only DiT CTA-pair bias gradient (dpbx2_sm100) unavailable, keeping dpb_sm100: {exc!r}",
-                              RuntimeWarning, stacklevel=2)
+                warnings.warn(
+                    f"bias-only DiT CTA-pair bias gradient (dpbx2_sm100) unavailable, keeping dpb_sm100: {exc!r}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
                 pair = False
         self.last = "pair" if pair else "single"
-        key = (pair, do.data_ptr(), do.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(), out.data_ptr(), A, L)
+        key = (
+            pair,
+            do.data_ptr(),
+            do.stride(0),
+            v.data_ptr(),
+            v.stride(0),
+            P.data_ptr(),
+            out.data_ptr(),
+            A,
+            L,
+        )
         bind = self._bind_pair if pair else self._bind
         self.runs.bind(key, lambda: bind(do, v, P, dd, out, A, L))(dd)
         return out
@@ -411,38 +566,80 @@ class PvDpb:
     returns False and launches nothing, unless ``single``: then the fused launch with dpb_sm100.cu (the bwdf7 node A/B against pv dV +
     dpbx2)."""
 
-    def __init__(self, device_index: int, nh: int = H, dh: int | None = None, single: bool = False):
+    def __init__(
+        self,
+        device_index: int,
+        nh: int = H,
+        dh: int | None = None,
+        single: bool = False,
+    ):
         import hashlib
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
-        self._sm100, self._tm, self.device_index, self.single = sm100, sm100._tm, device_index, single
+
+        self._sm100, self._tm, self.device_index, self.single = (
+            sm100,
+            sm100._tm,
+            device_index,
+            single,
+        )
         self.nh, self.dh = nh, dh or 768 // nh
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
-        h = hashlib.sha256()                         # the cubin cache hashes bo_pvdpb.cu only: the included bodies by this define
+        h = (
+            hashlib.sha256()
+        )  # the cubin cache hashes bo_pvdpb.cu only: the included bodies by this define
         for f in ("pv_gate_inf.cu", "dpb_sm100.cu"):
             h.update((_dir / f).read_bytes())
         self._src = f"SRC_HASH={h.hexdigest()[:16]}"
 
     def kernel(self, sg: int, vb: int, nj: int):
         """The cubin for SG samples per pv item, VB keys per v tile, NJ-key bias-gradient tiles."""
-        defs = (f"SG={sg}", *(() if vb == 128 else (f"VB={vb}",)), f"NJ={nj}", *_head_defs(self.nh, self.dh), self._src)
-        return self._sm100._sm100_kernel("bo_pvdpb", "bo_pvdpb_sm100", self.device_index, pdl=True, src_dir=str(_dir), defs=defs,
-                                         smem=max(_pv_smem(vb), _dpb_smem(nj)))
+        defs = (
+            f"SG={sg}",
+            *(() if vb == 128 else (f"VB={vb}",)),
+            f"NJ={nj}",
+            *_head_defs(self.nh, self.dh),
+            self._src,
+        )
+        return self._sm100._sm100_kernel(
+            "bo_pvdpb",
+            "bo_pvdpb_sm100",
+            self.device_index,
+            pdl=True,
+            src_dir=str(_dir),
+            defs=defs,
+            smem=max(_pv_smem(vb), _dpb_smem(nj)),
+        )
 
     def _bind(self, do, pt, dv, v, P, dbias, A, L):
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+
         nh, dh, tm, M = self.nh, self.dh, self._tm, do.shape[0]
         hp = 2 if dh == 32 else 1
         vb, sg = _pv_vb(L, A, dh), pick_group(A, L, self.nsm, nh, dh)
         nj = _dpb_nj(L, self.nsm, nh // hp, hp)
-        maps = _descriptors(tm(pt, [L, nh * L], L * 2, [64, 128]), tm(do, [nh * dh, M], do.stride(0) * 2, [dh, vb]),
-                            tm(do, [nh * dh, M], do.stride(0) * 2, [dh, 128]), tm(dv, [nh * dh, M], dv.stride(0) * 2, [dh, 128]),
-                            tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
-                            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
-                            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64), tm(dbias, [L, nh * L], L * 2, [32, 32], swizzle=64))
+        maps = _descriptors(
+            tm(pt, [L, nh * L], L * 2, [64, 128]),
+            tm(do, [nh * dh, M], do.stride(0) * 2, [dh, vb]),
+            tm(do, [nh * dh, M], do.stride(0) * 2, [dh, 128]),
+            tm(dv, [nh * dh, M], dv.stride(0) * 2, [dh, 128]),
+            tm(do, [nh * dh, M], do.stride(0) * 2, [hp * dh, 128]),
+            tm(v, [nh * dh, M], v.stride(0) * 2, [hp * dh, nj // 2]),
+            tm(P, [L, nh * L], L * 2, [32, 128], swizzle=64),
+            tm(dbias, [L, nh * L], L * 2, [32, 32], swizzle=64),
+        )
         npv = min(self.nsm, nh * (L // 128) * -(-A // sg))
         ndpb = min(self.nsm, nh // hp * (L // 128) * (L // nj))
-        return _LaunchPDL(self.kernel(sg, vb, nj), (npv + ndpb, 1, 1), (256, 1, 1), *maps, PTR, L, A, npv)
+        return _LaunchPDL(
+            self.kernel(sg, vb, nj),
+            (npv + ndpb, 1, 1),
+            (256, 1, 1),
+            *maps,
+            PTR,
+            L,
+            A,
+            npv,
+        )
 
     def __call__(self, do, pt, dv, v, P, dd, dbias, A) -> bool:
         """do [A L, DA] view, pt / P [nh L, L] (P^T, P) contiguous, dv [A L, DA] view (dV out), v [A L, DA] view, dd [A, nh, L] fp32,
@@ -451,8 +648,19 @@ class PvDpb:
         hp = 2 if self.dh == 32 else 1
         if dpb_pair_on(L, self.nh, hp, self.nsm) and not self.single:
             return False
-        key = (do.data_ptr(), do.stride(0), pt.data_ptr(), dv.data_ptr(), dv.stride(0), v.data_ptr(), v.stride(0), P.data_ptr(),
-               dbias.data_ptr(), A, L)
+        key = (
+            do.data_ptr(),
+            do.stride(0),
+            pt.data_ptr(),
+            dv.data_ptr(),
+            dv.stride(0),
+            v.data_ptr(),
+            v.stride(0),
+            P.data_ptr(),
+            dbias.data_ptr(),
+            A,
+            L,
+        )
         self.runs.bind(key, lambda: self._bind(do, pt, dv, v, P, dbias, A, L))(dd)
         return True
 
@@ -469,33 +677,57 @@ class GemmSwigluAB:
     def __init__(self, device_index: int, K: int = 768):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
         from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+
         self._tm, self.K, self.H = sm100._tm, K, 2 * K
-        self.k = sm100._sm100_kernel("gemm_swiglu2_sm100", "gemm_swiglu2_sm100", device_index, src_dir=gemm_swiglu._dir,
-                                     defs=(f"DIM={K}", "HMUL=2", "ITEM_SCHED", "SAVE_AB"), cluster=2, smem=self.SMEM)
+        self.k = sm100._sm100_kernel(
+            "gemm_swiglu2_sm100",
+            "gemm_swiglu2_sm100",
+            device_index,
+            src_dir=gemm_swiglu._dir,
+            defs=(f"DIM={K}", "HMUL=2", "ITEM_SCHED", "SAVE_AB"),
+            cluster=2,
+            smem=self.SMEM,
+        )
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
     def _bind(self, x, w, ab, h):
         M, K, H = x.shape[0], self.K, self.H
         tm = lambda t, rows, cols, box: self._tm(t, [cols, rows], t.stride(0) * 2, box)
-        maps = _descriptors(tm(x, M, K, [64, 64]), tm(w[:H], H, K, [64, 128]), tm(w[H:], H, K, [64, 128]), tm(h, M, H, [64, 64]),
-                            tm(ab[:, :H], M, H, [64, 64]), tm(ab[:, H:], M, H, [64, 64]))
+        maps = _descriptors(
+            tm(x, M, K, [64, 64]),
+            tm(w[:H], H, K, [64, 128]),
+            tm(w[H:], H, K, [64, 128]),
+            tm(h, M, H, [64, 64]),
+            tm(ab[:, :H], M, H, [64, 64]),
+            tm(ab[:, H:], M, H, [64, 64]),
+        )
         grid, tiles = (self.nsm & ~1, 1, 1), (M + 127) // 128
 
         return _Launch(self.k, grid, (512, 1, 1), *maps, 1, tiles)
 
     def __call__(self, x, w, ab, h):
         M, K, H = x.shape[0], self.K, self.H
-        assert x.shape == (M, K) and w.shape == (2 * H, K) and ab.shape == (M, 2 * H) and h.shape == (M, H)
-        assert all(t.is_contiguous() and t.dtype is torch.bfloat16 for t in (x, w, ab, h))
-        self.runs.bind((x.data_ptr(), w.data_ptr(), ab.data_ptr(), h.data_ptr(), M), lambda: self._bind(x, w, ab, h))()
+        assert (
+            x.shape == (M, K)
+            and w.shape == (2 * H, K)
+            and ab.shape == (M, 2 * H)
+            and h.shape == (M, H)
+        )
+        assert all(
+            t.is_contiguous() and t.dtype is torch.bfloat16 for t in (x, w, ab, h)
+        )
+        self.runs.bind(
+            (x.data_ptr(), w.data_ptr(), ab.data_ptr(), h.data_ptr(), M),
+            lambda: self._bind(x, w, ab, h),
+        )()
         return h
 
 
 # --------------------------------------------------------------------------------------------------- GEMM + residual + AdaLN
 def _resln_smem(cl: int = 8) -> int:
     """gemm_resln_sm100.cu's shared memory: the K ring fills what the epilogue slots, the exchange area and the barriers leave."""
-    return _SMEM_MAX - 1024 + 256                              # O_BAR + 256
+    return _SMEM_MAX - 1024 + 256  # O_BAR + 256
 
 
 class ResLnGemm:
@@ -503,8 +735,15 @@ class ResLnGemm:
     out = x in bf16 -- with W [768, K]. A cluster of CL CTAs per 128-row tile (8 while the row tiles x 8 fit the SMs, else 4),
     the LayerNorm statistics exchanged once through distributed shared memory. Bound launches are cached per buffer set."""
 
-    def __init__(self, device_index: int, final: bool = False, defs: tuple[str, ...] = (), presig: bool = False):
+    def __init__(
+        self,
+        device_index: int,
+        final: bool = False,
+        defs: tuple[str, ...] = (),
+        presig: bool = False,
+    ):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._sm100, self._tm, self.final = sm100, sm100._tm, final
         self.defs = (*defs, *(("PRESIG",) if presig else ()))
         self.device_index = device_index
@@ -513,8 +752,15 @@ class ResLnGemm:
 
     def kernel(self, cl: int):
         defs = (f"CL={cl}", *(("FINAL",) if self.final else ()), *self.defs)
-        return self._sm100._sm100_kernel("gemm_resln_sm100", "bo_gemm_resln_sm100", self.device_index, src_dir=str(_dir),
-                                         defs=defs, cluster=cl, smem=_resln_smem(cl))
+        return self._sm100._sm100_kernel(
+            "gemm_resln_sm100",
+            "bo_gemm_resln_sm100",
+            self.device_index,
+            src_dir=str(_dir),
+            defs=defs,
+            cluster=cl,
+            smem=_resln_smem(cl),
+        )
 
     def cluster(self, M: int) -> int:
         return 8 if (M // 128) * 8 <= self.nsm else 4
@@ -525,23 +771,39 @@ class ResLnGemm:
         nc = 768 // cl
         tm = self._tm
         tab = lambda t: tm(t, [768, t.shape[0]], t.stride(0) * 2, [32, 128], swizzle=64)
-        maps = (tm(a, [K, M], K * 2, [64, 128]), tm(w, [K, 768], K * 2, [64, nc]),
-                tm(x, [768, M], 768 * 4, [32, 128], swizzle=128, dtype="f32"), tab(gl),
-                tab(gl if ms is None else ms), tab(gl if mb is None else mb),
-                tm(out, [768, M], 768 * 2, [32, 128], swizzle=64),
-                tm(x, [768, M], 768 * 4, [32, 32], swizzle=128, dtype="f32"), tm(out, [768, M], 768 * 2, [32, 32], swizzle=64))
+        maps = (
+            tm(a, [K, M], K * 2, [64, 128]),
+            tm(w, [K, 768], K * 2, [64, nc]),
+            tm(x, [768, M], 768 * 4, [32, 128], swizzle=128, dtype="f32"),
+            tab(gl),
+            tab(gl if ms is None else ms),
+            tab(gl if mb is None else mb),
+            tm(out, [768, M], 768 * 2, [32, 128], swizzle=64),
+            tm(x, [768, M], 768 * 4, [32, 32], swizzle=128, dtype="f32"),
+            tm(out, [768, M], 768 * 2, [32, 32], swizzle=64),
+        )
         grid, k = (cl * (M // 128), 1, 1), self.kernel(cl)
 
         def run():
             k(grid, (256, 1, 1), *maps, int(K), int(T), float(eps))
+
         run.keep = (maps, a, w, x, gl, ms, mb, out)
         return run
 
     def __call__(self, a, w, x, gl, ms, mb, out, T, eps=1e-5):
         """a [M, K], w [768, K] bf16; x [M, 768] fp32 (updated); gl / ms / mb table views [T, 768] (ms, mb unused when final);
         out [M, 768] bf16: xa, or with ``final`` the block's output."""
-        key = (a.data_ptr(), w.data_ptr(), x.data_ptr(), gl.data_ptr(), None if ms is None else ms.data_ptr(),
-               None if mb is None else mb.data_ptr(), out.data_ptr(), a.shape, T)
+        key = (
+            a.data_ptr(),
+            w.data_ptr(),
+            x.data_ptr(),
+            gl.data_ptr(),
+            None if ms is None else ms.data_ptr(),
+            None if mb is None else mb.data_ptr(),
+            out.data_ptr(),
+            a.shape,
+            T,
+        )
         run = self.runs.get(key)
         if run is None:
             run = self.runs[key] = self._bind(a, w, x, gl, ms, mb, out, T, eps)
@@ -558,26 +820,54 @@ class CondTables:
     on the first ``n_g1`` columns (AdaLN scale / shift, LN(c) folded in algebraically), sig(c W^T + b) on the rest (the output
     gates); sig = sigmoid on the scale and gate columns. c [T, 384] bf16, W [N, 384] bf16, b and colsum [N] fp32."""
 
-    SMEM = 6 * 16384 + 2 * _COND_NT * 128 + 8 * 3 * 2048 + 2 * 2 * _COND_NT * 4 + 2 * 2 * 128 * 4 + 256
+    SMEM = (
+        6 * 16384
+        + 2 * _COND_NT * 128
+        + 8 * 3 * 2048
+        + 2 * 2 * _COND_NT * 4
+        + 2 * 2 * 128 * 4
+        + 256
+    )
 
     def __init__(self, device_index: int):
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
         self._tm = sm100._tm
-        self.k = sm100._sm100_kernel("cond_tables_sm100", "bo_cond_tables_sm100", device_index, src_dir=str(_dir),
-                                     defs=(f"NT={_COND_NT}",), smem=self.SMEM)
+        self.k = sm100._sm100_kernel(
+            "cond_tables_sm100",
+            "bo_cond_tables_sm100",
+            device_index,
+            src_dir=str(_dir),
+            defs=(f"NT={_COND_NT}",),
+            smem=self.SMEM,
+        )
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
         self.runs = _Runs()
 
     def _bind(self, c, w, bias, colsum, out, n_g1, eps):
         T, N = c.shape[0], w.shape[0]
         tm = self._tm
-        maps = (tm(c, [384, T], c.stride(0) * 2, [64, 128]), tm(w, [384, N], 384 * 2, [64, _COND_NT]),
-                tm(out, [N, T], N * 2, [32, 32], swizzle=64))
+        maps = (
+            tm(c, [384, T], c.stride(0) * 2, [64, 128]),
+            tm(w, [384, N], 384 * 2, [64, _COND_NT]),
+            tm(out, [N, T], N * 2, [32, 32], swizzle=64),
+        )
         items = (T // 128) * (N // _COND_NT)
         grid = (min(self.nsm, items), 1, 1)
 
         def run():
-            self.k(grid, (384, 1, 1), *maps, bias, colsum, int(T), int(N), int(n_g1), float(eps))
+            self.k(
+                grid,
+                (384, 1, 1),
+                *maps,
+                bias,
+                colsum,
+                int(T),
+                int(N),
+                int(n_g1),
+                float(eps),
+            )
+
         run.keep = (maps, c, w, bias, colsum, out)
         return run
 
@@ -590,5 +880,23 @@ class CondTables:
         return out
 
 
-__all__ = ["CondTables", "DpbKernel", "dpb_pair_on", "GemmSwigluAB", "PvDpb", "PvGateCore", "ResLnGemm", "gate_bwd_rows", "transpose_hll", "adaln_in_rows", "core_supported", "ln_rows", "pick_group", "resgate_adaln_rows", "resgate_out_rows", "softmax_t",
-           "softmax_rows", "swiglu_rows"]
+__all__ = [
+    "CondTables",
+    "DpbKernel",
+    "dpb_pair_on",
+    "GemmSwigluAB",
+    "PvDpb",
+    "PvGateCore",
+    "ResLnGemm",
+    "gate_bwd_rows",
+    "transpose_hll",
+    "adaln_in_rows",
+    "core_supported",
+    "ln_rows",
+    "pick_group",
+    "resgate_adaln_rows",
+    "resgate_out_rows",
+    "softmax_t",
+    "softmax_rows",
+    "swiglu_rows",
+]

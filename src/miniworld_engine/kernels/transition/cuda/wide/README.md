@@ -1,7 +1,7 @@
 # Wide-width sm_90a Transition kernels (D = 64, 256, 384, 512)
 
 Wired through `../fused_wide_sm90a.py`, dispatched from `modules/transition/module.py::_residual_forward` right after the
-D = 128 path, under the same `transition_fused_sm90a` setting; opt out with `MINIWORLD_TRANSITION_WIDE_SM90A=0`.
+D = 128 path, under the same `transition_fused_sm90a` setting; opt out with `settings.transition_wide_sm90a=0`.
 
 `kernels/` holds the kernel sources exactly as developed in `archive/experiments-20260928:experiments/transition_fused/src/` (record:
 `archive/experiments-20260928:experiments/transition_fused/records/widths.md`); some keep experiment switches that default off. Each `*.cu` at this

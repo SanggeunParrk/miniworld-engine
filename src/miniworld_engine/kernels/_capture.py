@@ -17,7 +17,7 @@ One case no key can catch: an update that writes a tensor without bumping its ``
 
 **Static weights.** A graph whose weights never change between replays (inference: a sampling run, a served model) gains nothing
 from repacking and pays for it: every replay then re-runs the packing kernels (tens of small copies and casts per block -- a token
-DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``MINIWORLD_STATIC_WEIGHTS=1``) declares that contract: the
+DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``settings.static_weights=1``) declares that contract: the
 scoping is off and a capture serves from, and fills, the same caches as an eager call, as the integrations did before the scoping.
 Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
 sampling run inside one. The benchmark harness sets it for ``mode=inference``.
@@ -28,12 +28,13 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import functools
-import os
 
 import torch
 
-_STATIC = [os.environ.get("MINIWORLD_STATIC_WEIGHTS", "0") == "1"]
-_STATIC_INPUTS = [os.environ.get("MINIWORLD_STATIC_CONDITIONING", "0") == "1"]
+from miniworld_engine import settings
+
+_STATIC = [settings.current().static_weights]
+_STATIC_INPUTS = [settings.current().static_conditioning]
 
 
 def set_static_weights(on: bool) -> bool:
@@ -74,8 +75,14 @@ def static_weights(on: bool = True):
 @functools.lru_cache(maxsize=1)
 def _capture_info():
     lib = ctypes.CDLL("libcuda.so.1")
-    fn = lib.cuStreamGetCaptureInfo          # (stream, status *, id *): the driver's original three-argument entry point
-    fn.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_int), ctypes.POINTER(ctypes.c_uint64)]
+    fn = (
+        lib.cuStreamGetCaptureInfo
+    )  # (stream, status *, id *): the driver's original three-argument entry point
+    fn.argtypes = [
+        ctypes.c_void_p,
+        ctypes.POINTER(ctypes.c_int),
+        ctypes.POINTER(ctypes.c_uint64),
+    ]
     fn.restype = ctypes.c_int
     return fn
 
@@ -89,7 +96,15 @@ def _graph_capture_id() -> int | None:
     except (OSError, AttributeError):
         return 0
     status, cid = ctypes.c_int(), ctypes.c_uint64()
-    if fn(ctypes.c_void_p(torch.cuda.current_stream().cuda_stream), ctypes.byref(status), ctypes.byref(cid)) != 0 or status.value != 1:
+    if (
+        fn(
+            ctypes.c_void_p(torch.cuda.current_stream().cuda_stream),
+            ctypes.byref(status),
+            ctypes.byref(cid),
+        )
+        != 0
+        or status.value != 1
+    ):
         return 0
     return int(cid.value) or 0
 
@@ -113,7 +128,11 @@ def prune(store: dict, cid: int | None | bool = False) -> None:
     scopes by something other than ``capture_id()``."""
     if cid is False:
         cid = capture_id()
-    stale = [k for k in store if isinstance(k, tuple) and len(k) == 2 and k[0] is not None and k[0] != cid]
+    stale = [
+        k
+        for k in store
+        if isinstance(k, tuple) and len(k) == 2 and k[0] is not None and k[0] != cid
+    ]
     for k in stale:
         del store[k]
 
@@ -180,7 +199,10 @@ def param_forms(tag: str, params, build):
     alias a different tensor. A fused optimizer step does not bump ``_version`` -- as for every other pack, call
     ``torch.autograd.graph.increment_version(params)`` after it. Inference tensors carry no version counter: not cached."""
     try:
-        key = (tag, tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params))
+        key = (
+            tag,
+            tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params),
+        )
     except RuntimeError:
         return build()
     return lookup(_FORMS, key, lambda: (build(), tuple(params)), limit=64)[0]

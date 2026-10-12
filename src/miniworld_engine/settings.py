@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from pathlib import Path
 from typing import Literal, get_args
 
 #: Kernels whose triton autotuner unlocks its full config grid. Formerly TRITON_AUTOTUNE, which
@@ -270,12 +271,8 @@ class Settings:
     #: einsums, which under autocast run as bf16 matmuls. The angles are then wrong (UID rotations off by up to a whole turn at
     #: ids in the thousands), and a model TRAINED that way has adapted to them: the v2.0.0 phase 2a checkpoint (trained with engine
     #: 135b7966 + 4) has a diffusion loss of 0.13 with the correct fp32 angles and 0.057 with these. Turn this on to resume or
-    #: evaluate such checkpoints; leave it off for anything trained from scratch. Environment fallback for launcher scripts:
-    #: MINIWORLD_ROPE_ANGLES_BF16=1.
-    rope_angles_bf16_compat: bool = dataclasses.field(
-        default_factory=lambda: os.environ.get("MINIWORLD_ROPE_ANGLES_BF16", "").strip()
-        == "1"
-    )
+    #: evaluate such checkpoints; leave it off for anything trained from scratch.
+    rope_angles_bf16_compat: bool = False
     #: Serve the qkvg forward (RMSNorm + adaLN + Q/K/V/gate projections + q/k-norm + RoPE) with the hand-CUDA sm_90a
     #: wgmma kernel on sm_90; off (or any other card, or a failed build) takes the Triton kernel. Formerly SWA_QKVG_FWD.
     swa_dit_qkvg_fwd_cuda: bool = True
@@ -302,6 +299,136 @@ class Settings:
     #: `flash_window_seqused`, whose backward re-runs the flash forward and cleans q/k/v/dq/dk/dv with eager elementwise
     #: kernels (about 11 launches per block and a recomputed forward). Same numbers either way.
     swa_flash_saves_lse: bool = True
+
+    # ---- kernel switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT`` (default on).
+    bias_only_dit: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_HOIST`` (default on).
+    bias_only_dit_hoist: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TRAIN`` (default on).
+    bias_only_dit_train: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1`` (default on).
+    bias_only_dit_train_pack1: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_DG`` (default on).
+    bias_only_dit_bwd_dg: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED`` (default on).
+    bias_only_dit_bwd_fused: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_PBFIN`` (default on).
+    bias_only_dit_bwd_pbfin: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_MID`` (default off).
+    bias_only_dit_bwd_mid: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB`` (default on).
+    bias_only_dit_bwd_pvdpb: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_PVPDL`` (default on).
+    bias_only_dit_bwd_pvpdl: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT`` (default off).
+    bias_only_dit_pair_exact: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_CORE`` (default on).
+    bias_only_dit_core: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3`` (default on).
+    bias_only_dit_inf3: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA`` (default on).
+    bias_only_dit_inf3_2cta: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_BF16`` (default on).
+    bias_only_dit_inf3_bf16: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY`` (default on).
+    bias_only_dit_inf3_p_early: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_PV_BATCH`` (default on).
+    bias_only_dit_pv_batch: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32`` (default on).
+    bias_only_dit_tf32: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_COND`` (default off).
+    bias_only_dit_cond: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_RESLN`` (default off).
+    bias_only_dit_resln: bool = False
+    #: Formerly ``MINIWORLD_LOCAL_DIT_HOIST`` (default on).
+    local_dit_hoist: bool = True
+    #: Formerly ``MINIWORLD_LOCAL_DIT_TF32_FUSED`` (default on).
+    local_dit_tf32_fused: bool = True
+    #: Formerly ``MINIWORLD_LOCAL_DIT_TF32`` (default on).
+    local_dit_tf32: bool = True
+    #: Formerly ``MINIWORLD_LOCAL_DIT_SM100`` (default on).
+    local_dit_sm100: bool = True
+    #: Formerly ``MINIWORLD_OPM_TRAIN_SAVE_O`` (default on).
+    opm_train_save_o: bool = True
+    #: Formerly ``MINIWORLD_TOKEN_DIT_ROWS_CUDA`` (default on).
+    token_dit_rows_cuda: bool = True
+    #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
+    token_dit_train: bool = True
+    #: Formerly ``MINIWORLD_AUGATTN_BF16_SM90`` (default on).
+    augattn_bf16_sm90: bool = True
+    #: Formerly ``MINIWORLD_AUGATTN_BF16_SM100`` (default on).
+    augattn_bf16_sm100: bool = True
+    #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
+    tf32_pdl: bool = True
+    #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
+    swa_dit_sm100: bool = True
+    #: Formerly ``MINIWORLD_SWA_DIT_TF32`` (default on).
+    swa_dit_tf32: bool = True
+    #: Formerly ``MINIWORLD_SWA_FUSED`` (default off).
+    swa_fused: bool = False
+    #: Formerly ``MINIWORLD_SWA_GLOBAL_BF16`` (default off).
+    swa_global_bf16: bool = False
+    #: Formerly ``MINIWORLD_TRANSITION_FUSED_SM100A`` (default on).
+    transition_fused_sm100a: bool = True
+    #: Formerly ``MINIWORLD_TRANSITION_FUSED_SM80`` (default on).
+    transition_fused_sm80: bool = True
+    #: Formerly ``MINIWORLD_TRANSITION_WIDE_SM90A`` (default on).
+    transition_wide_sm90a: bool = True
+    #: Formerly ``MINIWORLD_TRANSITION_WIDE_SAVE_H`` (default off).
+    transition_wide_save_h: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU`` (default off).
+    bias_only_dit_tf32_glu: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD`` (default on).
+    bias_only_dit_tf32_glu_bwd: bool = True
+    #: Formerly ``MINIWORLD_STATIC_WEIGHTS`` (default off).
+    static_weights: bool = False
+    #: Formerly ``MINIWORLD_STATIC_CONDITIONING`` (default off).
+    static_conditioning: bool = False
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_PV_VB``: force this value; None lets the heuristic choose.
+    bias_only_dit_pv_vb: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_SG``: force this value; None lets the heuristic choose.
+    bias_only_dit_sg: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_CL``: force this value; None lets the heuristic choose.
+    bias_only_dit_inf3_cl: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL``: force this value; None lets the heuristic choose.
+    bias_only_dit_inf3_tail_cl: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT``: force this value; None lets the heuristic choose.
+    bias_only_dit_hoist_wsplit: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT``: force this value; None lets the heuristic choose.
+    bias_only_dit_wgrad_split: int | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR``: True / False forces it; None lets the heuristic choose.
+    bias_only_dit_dpb_pair: bool | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR``: True / False forces it; None lets the heuristic choose.
+    bias_only_dit_tf32_dpb_pair: bool | None = None
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL``.
+    bias_only_dit_bwd_tail: str = "split3"
+    #: Formerly ``MINIWORLD_TOKEN_DIT_GEMM_SWIGLU``.
+    token_dit_gemm_swiglu: str = "auto"
+    #: Formerly ``MINIWORLD_TF32_FUSED_UNITS``.
+    tf32_fused_units: str = "auto"
+    #: Formerly ``MINIWORLD_TRANSITION_SM100_REPL``; 0 keeps the built-in value.
+    transition_sm100_repl: int = 0
+    #: Formerly ``MINIWORLD_TRANSITION_WIDE_SMALL_TILES``; 0 keeps the built-in value.
+    transition_wide_small_tiles: int = 0
+    #: Formerly ``MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES``; 0 keeps the built-in value.
+    transition_wide_small_fwd_tiles: int = 0
+    #: Formerly ``MINIWORLD_TRANSITION_WIDE_REPL``; 0 keeps the built-in value.
+    transition_wide_repl: int = 0
+    #: Formerly ``MINIWORLD_PLAN_CACHE_DIR``; empty means unset.
+    plan_cache_dir: str = ""
+    #: Formerly ``MINIWORLD_TRANSITION_SM100_NVCC``; empty means unset.
+    transition_sm100_nvcc: str = ""
+    #: Formerly ``MINIWORLD_ENGINE_JIT_ROOT``: where JIT-built kernels are cached; empty means ``$XDG_CACHE_HOME/miniworld_engine_jit`` (``~/.cache`` when unset). Use :func:`engine_jit_root`.
+    engine_jit_root: str = ""
+    #: Formerly ``MINIWORLD_OPM_TRAIN``: False disables the fused OPM training path; None = automatic.
+    opm_train: bool | None = None
+    #: Formerly ``MINIWORLD_PWA_TRAIN``: False disables the fused PWA training path; None = automatic.
+    pwa_train: bool | None = None
+    #: Formerly ``MINIWORLD_PWA_INFER``: like ``pwa_train`` for inference; None follows ``pwa_train``.
+    pwa_infer: bool | None = None
+    #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
+    token_pair_init_fused: bool = True
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
@@ -367,3 +494,16 @@ def reset() -> None:
     """Restore shipped defaults."""
     global _ACTIVE
     _ACTIVE = Settings()
+
+
+def engine_jit_root() -> Path:
+    """Directory the JIT-built kernels are cached in."""
+    root = current().engine_jit_root
+    if root:
+        return Path(root)
+    xdg = os.environ.get(
+        "XDG_CACHE_HOME"
+    )  # the standard cache location, like the autotune plan cache
+    return (
+        Path(xdg).expanduser() if xdg else Path.home() / ".cache"
+    ) / "miniworld_engine_jit"

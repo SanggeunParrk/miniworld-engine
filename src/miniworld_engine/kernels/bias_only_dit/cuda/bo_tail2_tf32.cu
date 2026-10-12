@@ -1,5 +1,5 @@
 // bo_tail2_tf32.cu -- K3 of the bias-only token DiT's three-kernel fp32 (TF32) inference step, the PAIR form (round 10, A/B switch
-// MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA=1): the same block tail as bo_tail_tf32.cu,
+// settings.bias_only_dit_inf3_2cta=1): the same block tail as bo_tail_tf32.cu,
 //
 //   y = a Wo^T,  x1 = x + gate1 y,  xt = LN(x1) s2 + sh2 (TF32),  a|b = xt [Wa; Wb]^T,  h = silu(a) b (TF32),  out = x1 + gate2 h Wsq^T
 //

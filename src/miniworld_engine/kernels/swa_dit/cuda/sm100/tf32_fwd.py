@@ -25,7 +25,7 @@ bf16 sm_100a saves (``sm100.block_fwd``).
 
 Served (:func:`supported_tf32`): B200, fp32, C = 128 with 4 heads of 32, SwiGLU hidden 256, half window 64 (not global), fp32 eps, the
 atom count a multiple of 128 (else the Triton fp32 path serves the call). The cubins are built on first use by the newest nvcc that knows
-sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``) and cached under ``MINIWORLD_ENGINE_JIT_ROOT`` (``swa_dit_sm100_tf32/``);
+sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``) and cached under ``settings.engine_jit_root`` (``swa_dit_sm100_tf32/``);
 the launches go through the CUDA driver on torch's current stream (programmatic dependent launch between the stages), CUDA-graph
 capturable. Page: ``docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`` ("fp32 (TF32) path").
 """
@@ -42,10 +42,11 @@ import torch
 
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.swa_dit.cuda import sm100 as _sm
+from miniworld_engine import settings
 
 C, H, D, NHID, HW = _sm.C, _sm.H, _sm.D, _sm.NHID, _sm.HW
 EPS = _sm.EPS
-PDL = True                                  # programmatic dependent launch between the forward kernels
+PDL = True  # programmatic dependent launch between the forward kernels
 _dir = Path(__file__).parent
 
 #: cubin name -> (source stem, extra nvcc flags)
@@ -57,11 +58,21 @@ CUBINS = {
     "ffn_fwd_tf32": ("ffn_fwd_tf32", ()),
 }
 #: dynamic shared memory per kernel (the sources' SMEM / SMEM_BYTES)
-SMEM = {"wprep_tf32": 0, "mod_fwd_tf32": 14 * 16384 + 512, "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
-        "attn_fwd_tf32": 2 * 81920 + 2048 + 256, "ffn_fwd_tf32": 8 * 16384 + 12 * 8192 + 2048 + 512}
+SMEM = {
+    "wprep_tf32": 0,
+    "mod_fwd_tf32": 14 * 16384 + 512,
+    "qkvg_fwd_tf32": 8 * 16384 + 10 * 8192 + 16384 + 512,
+    "attn_fwd_tf32": 2 * 81920 + 2048 + 256,
+    "ffn_fwd_tf32": 8 * 16384 + 12 * 8192 + 2048 + 512,
+}
 #: kernel function per cubin
-FUNCS = {"wprep_tf32": "swa_wprep_tf32_sm100", "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100", "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
-         "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100", "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100"}
+FUNCS = {
+    "wprep_tf32": "swa_wprep_tf32_sm100",
+    "mod_fwd_tf32": "swa_mod_fwd_tf32_sm100",
+    "qkvg_fwd_tf32": "swa_qkvg_fwd_tf32_sm100",
+    "attn_fwd_tf32": "swa_attn_fwd_tf32_sm100",
+    "ffn_fwd_tf32": "swa_ffn_fwd_tf32_sm100",
+}
 
 
 # --------------------------------------------------------------------------------------------------- build / load
@@ -72,20 +83,36 @@ def cubin(name: str) -> str:
 
     stem, extra = CUBINS[name]
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", f"-I{_dir}", *extra)
+    flags = (
+        *host,
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_100a",
+        "-cubin",
+        "-lineinfo",
+        f"-I{_dir}",
+        *extra,
+    )
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
         h.update(f.read_bytes())
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     out = root / "swa_dit_sm100_tf32" / f"{name}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run([nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)], capture_output=True, text=True,
-                             timeout=900, check=False)
+        res = subprocess.run(
+            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+            check=False,
+        )
         if res.returncode != 0:
             tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu {' '.join(extra)}:\n{res.stderr[-4000:]}")
+            raise RuntimeError(
+                f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu {' '.join(extra)}:\n{res.stderr[-4000:]}"
+            )
         os.replace(tmp, out)
     return str(out)
 
@@ -140,10 +167,29 @@ class WPrepTf32:
         Wd [C, NHID], all TF32-rounded fp32: views of one packed buffer."""
         wqkv, wg, wo, wu, wd = (w.float().contiguous() for w in (wqkv, wg, wo, wu, wd))
         out = torch.empty(sum(WPACK), device=wqkv.device, dtype=torch.float32)
-        self.kb(((sum(WPACK) // 4 + 255) // 256, 1, 1), (256, 1, 1), wqkv, wg, wo, wu, wd, out)
-        o = (0, WPACK[0], WPACK[0] + WPACK[1], WPACK[0] + WPACK[1] + WPACK[2], sum(WPACK))
-        return (out[o[0]:o[1]].view(4 * C, C), out[o[1]:o[2]].view(C, C), out[o[2]:o[3]].view(2 * NHID, C),
-                out[o[3]:o[4]].view(C, NHID))
+        self.kb(
+            ((sum(WPACK) // 4 + 255) // 256, 1, 1),
+            (256, 1, 1),
+            wqkv,
+            wg,
+            wo,
+            wu,
+            wd,
+            out,
+        )
+        o = (
+            0,
+            WPACK[0],
+            WPACK[0] + WPACK[1],
+            WPACK[0] + WPACK[1] + WPACK[2],
+            sum(WPACK),
+        )
+        return (
+            out[o[0] : o[1]].view(4 * C, C),
+            out[o[1] : o[2]].view(C, C),
+            out[o[2] : o[3]].view(2 * NHID, C),
+            out[o[3] : o[4]].view(C, NHID),
+        )
 
     def round(self, w):
         """w rounded to TF32 (fp32, same shape); numel a multiple of 4."""
@@ -178,15 +224,23 @@ class ModFwdTf32:
 
     def bind(self, c, wmod, out=None):
         R = c.shape[0]
-        out = torch.empty(R, 6 * C, device=c.device, dtype=torch.float32) if out is None else out
-        maps = (_f32map(c, [C, R], C * 4, [32, 128]), _f32map(wmod, [C, 6 * C], C * 4, [32, 128]),
-                _f32map(out, [6 * C, R], 6 * C * 4, [32, 128]))
+        out = (
+            torch.empty(R, 6 * C, device=c.device, dtype=torch.float32)
+            if out is None
+            else out
+        )
+        maps = (
+            _f32map(c, [C, R], C * 4, [32, 128]),
+            _f32map(wmod, [C, 6 * C], C * 4, [32, 128]),
+            _f32map(out, [6 * C, R], 6 * C * 4, [32, 128]),
+        )
         ntile = (R + 127) // 128
         ng = mod_groups(R, _sm.nsm())
         grid = (min(_sm.nsm(), ntile * ng), 1, 1)
 
         def run():
             self.k(grid, (512, 1, 1), *maps, int(ntile), int(ng))
+
         run.keep = maps
         return run, out
 
@@ -205,20 +259,52 @@ class QkvgFwdTf32:
         f32 = torch.float32
         Qh, Kh, Vh = (torch.empty(N, H, S, D, device=dev, dtype=f32) for _ in range(3))
         G = torch.empty(N * S, C, device=dev, dtype=f32)
-        X, PQ, PK = ((torch.empty(N * S, C, device=dev, dtype=f32) for _ in range(3)) if save else (G, G, G))
+        X, PQ, PK = (
+            (torch.empty(N * S, C, device=dev, dtype=f32) for _ in range(3))
+            if save
+            else (G, G, G)
+        )
         assert mod.is_contiguous() and cos.is_contiguous() and sin.is_contiguous()
-        maps = (_rows_map(q, A, B, S, SP, AT), _f32map(W, [C, 4 * C], C * 4, [32, 64]), _mod_map(mod, AT), _rope_map(cos, AT),
-                _rope_map(sin, AT))
+        maps = (
+            _rows_map(q, A, B, S, SP, AT),
+            _f32map(W, [C, 4 * C], C * 4, [32, 64]),
+            _mod_map(mod, AT),
+            _rope_map(cos, AT),
+            _rope_map(sin, AT),
+        )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        NG = 1                                                             # projection groups: spread small problems over the SMs
+        NG = 1  # projection groups: spread small problems over the SMs
         while NG < 4 and ntile * NG * 2 <= _sm.nsm():
             NG *= 2
         grid = (min(_sm.nsm(), ntile * NG), 1, 1)
 
         def run():
-            self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), int(NG),
-                   float(EPS), float(EPS), int(save), Qh, Kh, Vh, G, X, PQ, PK)
+            self.k(
+                grid,
+                (384, 1, 1),
+                *maps,
+                int(S),
+                int(A),
+                int(B),
+                int(SP),
+                int(AT),
+                int(nab),
+                int(nag),
+                int(ntile),
+                int(NG),
+                float(EPS),
+                float(EPS),
+                int(save),
+                Qh,
+                Kh,
+                Vh,
+                G,
+                X,
+                PQ,
+                PK,
+            )
+
         run.keep = (maps, W, mod, cos, sin)
         return run, (Qh, Kh, Vh, G, X, PQ, PK)
 
@@ -232,17 +318,38 @@ class AttnFwdTf32:
     def bind(self, Qh, Kh, Vh, seqused, O=None, LSE=None):
         N, _, S, _ = Qh.shape
         assert S % 128 == 0
-        O = torch.empty(N * S, C, device=Qh.device, dtype=torch.float32) if O is None else O
-        LSE = torch.empty(N, H, S, device=Qh.device, dtype=torch.float32) if LSE is None else LSE
+        O = (
+            torch.empty(N * S, C, device=Qh.device, dtype=torch.float32)
+            if O is None
+            else O
+        )
+        LSE = (
+            torch.empty(N, H, S, device=Qh.device, dtype=torch.float32)
+            if LSE is None
+            else LSE
+        )
         rows = N * H * S
-        maps = (_f32map(Qh.view(rows, D), [D, rows], D * 4, [D, 128]),
-                _f32map(Kh.view(rows, D), [D, rows], D * 4, [D, 256]),
-                _f32map(Vh.view(rows, D), [D, rows], D * 4, [D, 256], swizzle="128a32"))   # MN-major PV operand
+        maps = (
+            _f32map(Qh.view(rows, D), [D, rows], D * 4, [D, 128]),
+            _f32map(Kh.view(rows, D), [D, rows], D * 4, [D, 256]),
+            _f32map(Vh.view(rows, D), [D, rows], D * 4, [D, 256], swizzle="128a32"),
+        )  # MN-major PV operand
         items = N * (S // 128) * H
         grid = (min(_sm.nsm(), items), 1, 1)
 
         def run():
-            self.k(grid, (384, 1, 1), *maps, seqused, O, LSE, int(S), int(N), float(D ** -0.5))
+            self.k(
+                grid,
+                (384, 1, 1),
+                *maps,
+                seqused,
+                O,
+                LSE,
+                int(S),
+                int(N),
+                float(D**-0.5),
+            )
+
         run.keep = maps
         return run, O, LSE
 
@@ -260,17 +367,46 @@ class FfnFwdTf32:
         SP, AT = tiling(A)
         dev = q.device
         out = torch.empty(M, C, device=dev, dtype=torch.float32)
-        Q1, Att, Y, Ff = ((torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4)) if save else (out, out, out, out))
-        maps = (_rows_map(g, A, B, S, SP, AT), _rows_map(o, A, B, S, SP, AT), _rows_map(q, A, B, S, SP, AT),
-                _f32map(wo, [C, C], C * 4, [32, 64]), _f32map(wab, [C, 2 * NHID], C * 4, [32, 64]),
-                _f32map(wd, [NHID, C], NHID * 4, [32, 64]), _mod_map(mod, AT))
+        Q1, Att, Y, Ff = (
+            (torch.empty(M, C, device=dev, dtype=torch.float32) for _ in range(4))
+            if save
+            else (out, out, out, out)
+        )
+        maps = (
+            _rows_map(g, A, B, S, SP, AT),
+            _rows_map(o, A, B, S, SP, AT),
+            _rows_map(q, A, B, S, SP, AT),
+            _f32map(wo, [C, C], C * 4, [32, 64]),
+            _f32map(wab, [C, 2 * NHID], C * 4, [32, 64]),
+            _f32map(wd, [NHID, C], NHID * 4, [32, 64]),
+            _mod_map(mod, AT),
+        )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         grid = (min(_sm.nsm(), ntile), 1, 1)
 
         def run():
-            self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile), float(EPS),
-                   int(save), out, Q1, Att, Y, Ff)
+            self.k(
+                grid,
+                (384, 1, 1),
+                *maps,
+                int(S),
+                int(A),
+                int(B),
+                int(SP),
+                int(AT),
+                int(nab),
+                int(nag),
+                int(ntile),
+                float(EPS),
+                int(save),
+                out,
+                Q1,
+                Att,
+                Y,
+                Ff,
+            )
+
         run.keep = (maps, mod)
         return run, (out, Q1, Att, Y, Ff)
 
@@ -279,13 +415,27 @@ class _Kernels:
     """Every TF32 forward kernel, loaded on one device."""
 
     def __init__(self) -> None:
-        self.prep, self.mod, self.qkvg, self.attn, self.ffn = WPrepTf32(), ModFwdTf32(), QkvgFwdTf32(), AttnFwdTf32(), FfnFwdTf32()
+        self.prep, self.mod, self.qkvg, self.attn, self.ffn = (
+            WPrepTf32(),
+            ModFwdTf32(),
+            QkvgFwdTf32(),
+            AttnFwdTf32(),
+            FfnFwdTf32(),
+        )
 
     def stats(self) -> dict[str, tuple[int, int]]:
         """kernel -> (registers per thread, local memory bytes per thread: > 0 means spills)."""
-        return {name: (k.regs, k.lmem) for name, k in
-                (("wprep_tf32", self.prep.kb), ("round_tf32", self.prep.kr), ("mod_fwd_tf32", self.mod.k), ("qkvg_fwd_tf32", self.qkvg.k),
-                 ("attn_fwd_tf32", self.attn.k), ("ffn_fwd_tf32", self.ffn.k))}
+        return {
+            name: (k.regs, k.lmem)
+            for name, k in (
+                ("wprep_tf32", self.prep.kb),
+                ("round_tf32", self.prep.kr),
+                ("mod_fwd_tf32", self.mod.k),
+                ("qkvg_fwd_tf32", self.qkvg.k),
+                ("attn_fwd_tf32", self.attn.k),
+                ("ffn_fwd_tf32", self.ffn.k),
+            )
+        }
 
 
 @functools.lru_cache(maxsize=16)
@@ -310,8 +460,18 @@ def supported_tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> 
     """The calls the TF32 kernels serve: fp32 q [N, S, 128] on B200 with S a multiple of 128, SwiGLU hidden 256, half window 64 (so
     not global attention), fp32 eps. Tensor metadata and the per-device constant :func:`is_b200` only: traceable under
     ``torch.compile(fullgraph=True)`` and safe on fake tensors. Whether the kernels LOAD is ``dispatch._tf32_ready``."""
-    return (q.is_cuda and q.dtype == torch.float32 and q.dim() == 3 and q.shape[-1] == C and q.shape[1] > 0 and q.shape[1] % 128 == 0
-            and nhid == NHID and half_window == HW and eps == EPS and is_b200(q.device))
+    return (
+        q.is_cuda
+        and q.dtype == torch.float32
+        and q.dim() == 3
+        and q.shape[-1] == C
+        and q.shape[1] > 0
+        and q.shape[1] % 128 == 0
+        and nhid == NHID
+        and half_window == HW
+        and eps == EPS
+        and is_b200(q.device)
+    )
 
 
 # --------------------------------------------------------------------------------------------------- weight forms (cached per version)
@@ -333,7 +493,9 @@ def _tf32_wmod(wmod):
 
 
 # --------------------------------------------------------------------------------------------------- the block
-def block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW):
+def block_fwd_tf32(
+    q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_window=HW
+):
     """The fp32 forward on TF32 tensor cores: [out] or, with ``save``, [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (all
     fp32) -- the layout of ``dispatch.swa_dit_block_fwd``. q [N, S, C] fp32 contiguous, mod [B S, 6C] fp32, cos / sin [B S, D/2] fp32,
     seqused [N] int32, the five weights fp32."""
@@ -346,13 +508,17 @@ def block_fwd_tf32(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, hal
         # the weight forms: one wprep launch on a cache miss (every replay inside a capture, unless the weights are static), the
         # head of the PDL chain -- qkvg / ffn read them after their griddepcontrol.wait
         W, WO, WAB, WD = _sm._cached(_tf32_block_forms, wqkv, wg, wo, wu, wd)
-        run, (Qh, Kh, Vh, G, X, PQ, PK) = K.qkvg.bind(q, mod, cos, sin, W, A, B, save=save)
+        run, (Qh, Kh, Vh, G, X, PQ, PK) = K.qkvg.bind(
+            q, mod, cos, sin, W, A, B, save=save
+        )
         run()
         O = torch.empty(N * S, C, device=q.device, dtype=torch.float32)
         lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
         run, _, _ = K.attn.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
         run()
-        run, (out, q1, att, y, ffn) = K.ffn.bind(q.reshape(N * S, C), G, O, mod, WO, WAB, WD, A, B, save=save)
+        run, (out, q1, att, y, ffn) = K.ffn.bind(
+            q.reshape(N * S, C), G, O, mod, WO, WAB, WD, A, B, save=save
+        )
         run()
     if not save:
         return [out.view(N, S, C)]

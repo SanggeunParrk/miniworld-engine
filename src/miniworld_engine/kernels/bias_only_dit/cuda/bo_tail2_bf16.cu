@@ -1,5 +1,5 @@
 // bo_tail2_bf16.cu -- the pair tail of the bias-only token DiT's bf16-mixed three-kernel inference step on sm_100a
-// (MINIWORLD_BIAS_ONLY_DIT_INF3_BF16=1; where it takes fewer rounds than bo_tail_bf16.cu at CL 8 / 6): bo_tail2_tf32.cu's geometry
+// (settings.bias_only_dit_inf3_bf16=1; where it takes fewer rounds than bo_tail_bf16.cu at CL 8 / 6): bo_tail2_tf32.cu's geometry
 // with bo_tail_bf16.cu's operands,
 //
 //   y = a Wo^T,  x1 = x + gate1 y,  xt = LN(x1) s2 + sh2 (bf16),  a|b = xt [Wa; Wb]^T,  h = silu(a) b (bf16),  out = x1 + gate2 h Wsq^T
