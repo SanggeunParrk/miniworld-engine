@@ -389,8 +389,8 @@ void transpose_hll(at::Tensor in, at::Tensor out) {
 // softmax_rows that also writes P^T (training: the backward's dV = P^T dO wants the keys as rows). A block takes 32 query rows of
 // one head (four per warp, the softmax as above), keeps them in shared memory and writes the [L keys x 32 queries] tile of P^T in
 // 64-byte row pieces. The tile's row pitch is L + 2 elements: the column gathers of the transpose hit distinct banks.
-template <int CPL>
-__global__ void __launch_bounds__(256) softmax_t_kernel(const __nv_bfloat16* __restrict__ BIAS, __nv_bfloat16* P,
+template <int CPL, typename IT = __nv_bfloat16>
+__global__ void __launch_bounds__(256) softmax_t_kernel(const IT* __restrict__ BIAS, __nv_bfloat16* P,
     __nv_bfloat16* __restrict__ PT, const bool* __restrict__ MASK, int L) {
   extern __shared__ __align__(16) uint8_t sm_raw[];
   __nv_bfloat16* tile = reinterpret_cast<__nv_bfloat16*>(sm_raw);
@@ -407,7 +407,7 @@ __global__ void __launch_bounds__(256) softmax_t_kernel(const __nv_bfloat16* __r
     for (int c = 0; c < CPL; ++c) {
       const int ch = lane + 32 * c;
       if (ch < nch) {
-        const float4 lo = V4<__nv_bfloat16>::load(BIAS + row * L + ch * 8), hi = V4<__nv_bfloat16>::load(BIAS + row * L + ch * 8 + 4);
+        const float4 lo = V4<IT>::load(BIAS + row * L + ch * 8), hi = V4<IT>::load(BIAS + row * L + ch * 8 + 4);
         const float e[8] = {lo.x, lo.y, lo.z, lo.w, hi.x, hi.y, hi.z, hi.w};
         unsigned char mk[8];
         if (MASK) *reinterpret_cast<uint2*>(mk) = *reinterpret_cast<const uint2*>(MASK + ch * 8);
@@ -451,9 +451,12 @@ __global__ void __launch_bounds__(256) softmax_t_kernel(const __nv_bfloat16* __r
 }
 
 void softmax_t(at::Tensor bias, at::Tensor p, at::Tensor pt, c10::optional<at::Tensor> mask) {
-  TORCH_CHECK(bias.is_cuda() && bias.scalar_type() == at::kBFloat16 && bias.is_contiguous() && bias.dim() == 2, "softmax_t: bf16 [16 L, L]");
+  const bool f32 = bias.scalar_type() == at::kFloat;       // fp32 logits (Hopper training: the projection's accumulators, unrounded)
+  TORCH_CHECK(bias.is_cuda() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.is_contiguous() && bias.dim() == 2,
+              "softmax_t: bf16 or fp32 [16 L, L]");
   TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes() && pt.sizes() == bias.sizes()
-              && pt.scalar_type() == at::kBFloat16 && pt.is_contiguous() && pt.data_ptr() != bias.data_ptr(), "softmax_t: p, pt like bias");
+              && pt.scalar_type() == at::kBFloat16 && pt.is_contiguous() && pt.data_ptr() != bias.data_ptr(),
+              "softmax_t: p, pt bf16 like bias");
   const int64_t R = bias.size(0), L = bias.size(1);
   TORCH_CHECK(L % 32 == 0 && L <= 1024 && R % L == 0, "softmax_t: L a multiple of 32, at most 1024; [H L, L]");
   const bool* mk = nullptr;
@@ -466,13 +469,22 @@ void softmax_t(at::Tensor bias, at::Tensor p, at::Tensor pt, c10::optional<at::T
   const size_t smem = 32 * (L + 2) * 2;
   static bool attr = [] {
     return cudaFuncSetAttribute(softmax_t_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
-        && cudaFuncSetAttribute(softmax_t_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess;
+        && cudaFuncSetAttribute(softmax_t_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<2, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<4, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "softmax_t: shared memory attribute");
-  const auto* b = ptr<const __nv_bfloat16>(bias);
   auto *o = ptr<__nv_bfloat16>(p), *ot = ptr<__nv_bfloat16>(pt);
-  if (L <= 512) softmax_t_kernel<2><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
-  else softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+  const bool few = L <= 512;
+  if (f32) {
+    const auto* b = ptr<const float>(bias);
+    if (few) softmax_t_kernel<2, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+    else softmax_t_kernel<4, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+  } else {
+    const auto* b = ptr<const __nv_bfloat16>(bias);
+    if (few) softmax_t_kernel<2><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+    else softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

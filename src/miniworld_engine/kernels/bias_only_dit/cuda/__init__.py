@@ -113,7 +113,8 @@ def softmax_rows(bias, p, mask=None):
 
 
 def softmax_t(bias, p, pt, mask=None):
-    """softmax_rows that also writes pt[h] = p[h]^T (bias, p, pt [16 L, L] bf16; p may be bias, pt may not)."""
+    """softmax_rows that also writes pt[h] = p[h]^T (bias, p, pt [16 L, L] bf16; p may be bias, pt may not). bias may also be fp32
+    (the Hopper training logits, not overwritten: p is a separate bf16 buffer)."""
     _ext().softmax_t_cuda(bias, p, pt, mask)
 
 

@@ -46,6 +46,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   `MINIWORLD_PWA_H100_CLUSTER`; `MINIWORLD_PWA_TRAIN`, `MINIWORLD_PWA_INFER` and `MINIWORLD_PWA_H100_CUDA_AUX` remain. Record
   `docs/records/h100_pwa_20261008.md`.
 
+- H100 MSAPairWeightedAveraging and bias-only DiT training keep the pair-bias logits in fp32 until the softmax (they were rounded to
+  bf16 first). PWA: `pair3.cu` rounds the logits only under `-DMW_PWA_ROUND_LOGITS=1` (opt-in A/B), training and inference share the
+  fp32 logits, and every fused gradient now equals the engine path (engine-vs-fused 0.0050 -> 0.0035). Bias-only DiT: `pair_bias_k`
+  writes an fp32 logits buffer that `softmax_t` reads (`MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS=0` restores bf16); the
+  `ln_pair.weight` gradient error against fp64 drops 0.0107 -> 0.0089 (L384) and 0.0106 -> 0.0093 (L768). sm_100a is unchanged.
+
 ### Added
 
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the

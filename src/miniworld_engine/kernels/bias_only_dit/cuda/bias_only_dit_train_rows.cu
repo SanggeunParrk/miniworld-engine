@@ -473,8 +473,8 @@ __device__ __forceinline__ int bcol(int t, int n) { return 8 * (n / 2 + 4 * (t /
 
 // forward: 64 rows per warp item (four 16-row tiles), the bias staged per warp and stored as 128 bytes per head. NH heads (16 or
 // 24; 12 padded to 16 with zero weights) are NHP / 8 n-tiles of the product.
-template <int NH>
-__global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict__ Z, const bf* __restrict__ WF, bf* __restrict__ BIAS,
+template <int NH, typename OT = bf>                  // OT = float: the accumulators stored as they are (no BF16 rounding), straight from the registers
+__global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict__ Z, const bf* __restrict__ WF, OT* __restrict__ BIAS,
     float2* __restrict__ PST, long R, float eps) {
   constexpr int NHP = (NH + 7) / 8 * 8, NT = NHP / 8;
   __shared__ __align__(16) bf stg[WPB][NHP][64 + 8];
@@ -533,18 +533,28 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict_
       for (int t = 0; t < NT; ++t)
 #pragma unroll
         for (int e = 0; e < 2; ++e) {
-          stg[w][8 * t + 2 * q + e][tt * 16 + g] = __float2bfloat16_rn(acc[t][e]);
-          stg[w][8 * t + 2 * q + e][tt * 16 + g + 8] = __float2bfloat16_rn(acc[t][2 + e]);
+          const int h = 8 * t + 2 * q + e;
+          if constexpr (std::is_same_v<OT, float>) {      // 8 consecutive rows per head: full 32-byte sectors
+            if (h < NH) {
+              BIAS[(long)h * R + rb + g] = acc[t][e];
+              BIAS[(long)h * R + rb + g + 8] = acc[t][2 + e];
+            }
+          } else {
+            stg[w][h][tt * 16 + g] = __float2bfloat16_rn(acc[t][e]);
+            stg[w][h][tt * 16 + g + 8] = __float2bfloat16_rn(acc[t][2 + e]);
+          }
         }
       if (q == 0) { PST[rb + g] = make_float2(mean[0], rs[0]); PST[rb + g + 8] = make_float2(mean[1], rs[1]); }
     }
-    __syncwarp();
+    if constexpr (!std::is_same_v<OT, float>) {
+      __syncwarp();
 #pragma unroll
-    for (int i = 0; i < NH / 4; ++i) {
-      const int h = 4 * i + lane / 8, c = lane % 8;
-      *reinterpret_cast<uint4*>(BIAS + (long)h * R + r0 + 8 * c) = *reinterpret_cast<const uint4*>(&stg[w][h][8 * c]);
+      for (int i = 0; i < NH / 4; ++i) {
+        const int h = 4 * i + lane / 8, c = lane % 8;
+        *reinterpret_cast<uint4*>(BIAS + (long)h * R + r0 + 8 * c) = *reinterpret_cast<const uint4*>(&stg[w][h][8 * c]);
+      }
+      __syncwarp();
     }
-    __syncwarp();
   }
 }
 
@@ -1176,10 +1186,16 @@ void pair_bias(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, dou
   const int64_t nh = wf.size(0);
   TORCH_CHECK(z.is_contiguous() && z.size(1) == 128 && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
               && wf.size(1) == 128, "pair_bias: pair [R, 128] (R a multiple of 128), Wf [12, 16 or 24, 128] bf16");
-  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == at::kBFloat16 && bias.numel() == nh * R && pst.is_contiguous()
-              && pst.numel() == 2 * R, "pair_bias: bias [nh, R] bf16, pst [R, 2]");
-  auto k = nh == 12 ? pair_bias_k<12> : nh == 16 ? pair_bias_k<16> : pair_bias_k<24>;
-  k<<<grid(k, R / 64, 1), WPB * 32, 0, S()>>>(CP<bf>(z), CP<bf>(wf), P<bf>(bias), P<float2>(pst), R, (float)eps);
+  const bool f32 = bias.scalar_type() == at::kFloat;            // fp32 logits: the accumulators unrounded (Hopper training)
+  TORCH_CHECK(bias.is_contiguous() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.numel() == nh * R && pst.is_contiguous()
+              && pst.numel() == 2 * R, "pair_bias: bias [nh, R] bf16 or fp32, pst [R, 2]");
+  if (f32) {
+    auto k = nh == 12 ? pair_bias_k<12, float> : nh == 16 ? pair_bias_k<16, float> : pair_bias_k<24, float>;
+    k<<<grid(k, R / 64, 1), WPB * 32, 0, S()>>>(CP<bf>(z), CP<bf>(wf), P<float>(bias), P<float2>(pst), R, (float)eps);
+  } else {
+    auto k = nh == 12 ? pair_bias_k<12> : nh == 16 ? pair_bias_k<16> : pair_bias_k<24>;
+    k<<<grid(k, R / 64, 1), WPB * 32, 0, S()>>>(CP<bf>(z), CP<bf>(wf), P<bf>(bias), P<float2>(pst), R, (float)eps);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

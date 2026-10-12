@@ -138,8 +138,8 @@ def _build(name: str, src_name: str, native: bool | None = None, fp32_logits: bo
     native = (native_aux_enabled() if native is None else native) and src_name in ("pair3.cu", "dgv_bwd.cu", "pwa_glue3.cu")
     if native:
         name += "_native_v1"
-        if src_name == "pair3.cu" and not fp32_logits:
-            name += "_rounded_logits"
+    if src_name == "pair3.cu" and not fp32_logits:           # the opt-in BF16 logit rounding (-DMW_PWA_ROUND_LOGITS), either build
+        name += "_rounded_logits"
     if name in _EXT:
         return _EXT[name]
     from miniworld_engine.kernels._nvcc import load_extension as load
@@ -149,7 +149,7 @@ def _build(name: str, src_name: str, native: bool | None = None, fp32_logits: bo
     _EXT[name] = load(name=name, sources=[str(src)], build_directory=str(build),
                       extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a", "--use_fast_math",
                                          *(["-DMW_PWA_CUDA_AUX=1"] if native else []),
-                                         *(["-DMW_PWA_ROUND_LOGITS=1"] if native and src_name == "pair3.cu" and not fp32_logits else [])], extra_cflags=["-O3"])
+                                         *(["-DMW_PWA_ROUND_LOGITS=1"] if src_name == "pair3.cu" and not fp32_logits else [])], extra_cflags=["-O3"])
     return _EXT[name]
 
 
@@ -177,7 +177,7 @@ def _k(native: bool | None = None, fp32_logits: bool = True):
     `pwa_fwd3.cu` (register-resident y tiles, 48 KB stages) when that file is present, else from `pwa_fwd2.cu`."""
     native = native_aux_enabled() if native is None else native
     key = "all_native" if native else "all"
-    if native and not fp32_logits:
+    if not fp32_logits:
         key += "_rounded_logits"
     if key not in _EXT:
         build = lambda name, src: _build(name, src, native, fp32_logits)
@@ -475,9 +475,8 @@ def _inference_math(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
                                    module.to_out.weight.detach().to(bf).contiguous(), None, 1.0)
         return out[None]
     native = native_inference_enabled(m.device)
-    # The default preserves bitwise parity with the existing training forward.
-    # The opt-in training experiment separately tests FP32 fused logits.
-    k = _k(native, fp32_logits=native_aux_enabled())
+    # FP32 logits, as in the training forward (both builds): bitwise parity with it, and the logits are not rounded to BF16.
+    k = _k(native)
     pm = k["pair3"].mask(m, mask, n) if native else (torch.ones(n, n, dtype=bf, device=m.device) if mask is None else mask[0].to(bf)[None, :].expand(n, n).contiguous())
     if native:
         lnz_w, lnm_w, lnm_b = k["pair3"].cast([module.ln_pair.weight.detach(), module.ln_msa.weight.detach(), module.ln_msa.bias.detach()], [1]*3, False)

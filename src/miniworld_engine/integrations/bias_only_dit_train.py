@@ -145,6 +145,16 @@ def _dg_direct() -> bool:
     return os.environ.get("MINIWORLD_BIAS_ONLY_DIT_BWD_DG", "1") != "0"
 
 
+def _fp32_logits(dev) -> bool:
+    """Hopper: the pair bias leaves the projection as fp32 logits (the mma accumulators, unrounded) into the softmax, instead of
+    being rounded to bf16 first. The rounding was the largest single error of the ln_pair / to_bias / pair gradients (ln_pair.weight
+    against fp64: 0.0107 -> 0.0090 at L384 A3 24 x 32, 0.0106 -> 0.0095 at L768 A16 16 x 64; the bf16 PyTorch block's 0.0088 / 0.0094);
+    it costs one fp32 [H, L, L] buffer (written and read once). MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS=0 (read per call) keeps the
+    bf16 logits. The sm_100a path is unchanged."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+    return h100_enabled(dev) and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS", "1") != "0"
+
+
 def _bwd_fused(dev, H, DA):
     """(TailBwd, Wgrad) of ``kernels/bias_only_dit/cuda/bwd_fused.py`` when the fused bf16 backward is on (the default;
     MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED=0, read per call: the per-step launches) and its kernels built, else None."""
@@ -402,8 +412,12 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     if bias is None:
         p2 = pair.reshape(R, DP)
         pst = torch.empty(R, 2, device=dev)
-        BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)                      # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
-        logits = P.view(H * L, L)                                            # the softmax overwrites it with P
+        if _fp32_logits(dev):                                                # Hopper: fp32 logits beside P (not overwritten)
+            logits = torch.empty(H * L, L, device=dev, dtype=torch.float32)
+            BT.pair_bias_cuda(p2, W["Wf_bf"], logits, pst, EPS)
+        else:
+            BT.pair_bias_cuda(p2, W["Wf_bf"], P, pst, EPS)                  # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
+            logits = P.view(H * L, L)                                        # the softmax overwrites it with P
     else:
         pst, logits = None, bias.reshape(H * L, L)                           # hoisted (pair_bias_all): read, not written
     Pt = torch.empty(H, L, L, device=dev, dtype=BF)                         # P^T for the backward's dV, from the softmax kernel
