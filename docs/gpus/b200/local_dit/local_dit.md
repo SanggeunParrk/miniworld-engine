@@ -68,17 +68,17 @@ Cross-attention block (`cross_attention=True`, the AF3 / Protenix atom block), s
 PyTorch column: the module path does not run these shapes in a comparable graph. The training cells and the static inference cells
 were re-measured on 2026-10-11 through the harness (`bench.py target=local_dit level=module compile=false`, `precision=bf16-mixed` with
 fp32 master parameters or `precision=32`; training `cudagraph=manual`); the plain-graph column is the earlier in-process measurement
-with bf16 parameters. With fp32 master parameters the static inference rows pay a per-call parameter cast: A1 N4096 0.037 ms against
-0.030 ms with bf16 parameters, A5 N2048 0.047 against 0.040 ms.
+with bf16 parameters. This block's inference entry still casts the fp32 weights per call (not yet through `kernels._capture.param_forms`): A1 N4096
+0.035 ms against 0.030 ms with bf16 parameters, A5 N2048 0.047 against 0.040 ms.
 
 | block | bf16 | bf16, static | fp32 | fp32, static |
 |---|---|---|---|---|
 | training A48 N4096 | 1.586 | | 3.854 | |
 | training A48 N8192 | 2.975 | | 7.437 | |
-| inference A48 N4096 | 0.482 | 0.291 | | 0.692 |
-| inference A5 N4096 | 0.126 | 0.059 | 0.161 | 0.117 |
+| inference A48 N4096 | 0.482 | 0.289 | | 0.692 |
+| inference A5 N4096 | 0.126 | 0.061 | 0.161 | 0.119 |
 | inference A5 N2048 | | 0.047 | | 0.072 |
-| inference A1 N4096 | 0.079 | 0.037 | | 0.053 |
+| inference A1 N4096 | 0.079 | 0.035 | | 0.053 |
 
 Training of the cross block started this round at 2.52 ms (bf16) / 4.33 ms (fp32) at A48 N4096.
 

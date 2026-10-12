@@ -34,21 +34,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
 
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
-  harness default; 131 harness runs on 6 cards, one run per cell). Inference rows of the small blocks are 10-50 % slower than the
-  bf16-parameter tables they replace (APB at L128 0.023 -> 0.035 ms, SWA A1 at 1024 atoms 0.031 -> 0.045 ms): the engine paths cast the
-  fp32 weights inside every call and `static_weights` does not cache that cast. Training rows did not move. The no-CUDA-graph training
-  tables, the bias-only DiT page and the kernel-level tables are unchanged.
-- Benchmark harness: `precision=bf16-mixed` is now AMP bf16-mixed -- the parameters stay fp32 (the master copy) and the module's
-  forward runs under `torch.autocast(bfloat16)` over bf16 activations, as MiniWorld's trainer feeds the engine. The previous
-  behaviour (the whole module cast to bf16, norm gammas fp32) is `+param_master=false`; `precision=32` is unchanged. Every table
-  recorded before 2026-10-11 is a bf16-parameter table (`parameter_dtype` in the CSV says which). On B200 the inference rows of APB,
-  TriMul and the SWA block are 10-35 % slower with fp32 parameters (the cast is inside the step); training rows did not move.
-- `benchmarks/runners/main_figure_campaign.py` / `main_figure_plot.py`: the main figure (every module at L = 384 tokens, atom
-  blocks 4096 atoms; the diffusion blocks in bf16-mixed and fp32) as a command; `docs/kernels/gpu-kernel-development-guide.md`:
-  the hand-off guide for developing the blocks on another GPU (shapes, precision policy, harness, tests, deliverables).
-- Benchmark harness, `target=swa_dit`: `+shared_cond=true` gives the samples one conditioning and calls `SWADiTBlock.forward_hoisted`
-  (the model's contract: the adaLN modulation once per batch element, A48 4096 atoms bf16 training 1.22 ms against 3.12 ms with one
-  conditioning per sample), and `+swa_dit_fused=false` runs the per-op path the fused block replaces.
+  harness default; one run per cell, 131 + 82 harness runs on 6 cards). Training rows did not move; the first take of the inference
+  rows was 10-50 % slower than with bf16 parameters because every call cast every fp32 weight, which `kernels._capture.param_forms` now
+  caches (APB, TriMul, Transition, SWA entries); the tables are the second take. The no-CUDA-graph training tables, the bias-only DiT
+  page and the kernel-level tables are unchanged.
+- Inference with fp32 master parameters on B200 caches the bf16 forms of the weights (`kernels._capture.param_forms`, keyed on
+  pointer / version / dtype, scoped to the CUDA-graph capture like the weight packs): APB at L128 0.035 -> 0.025 ms, SWA A1 at 1024
+  atoms 0.045 -> 0.031 ms, TriMul / Transition 4-15 %. Test: `tests/integrations/test_b200_fp32_master_inference_cache_gpu.py`.
 - Bias-only DiT bf16 attention core (`pv_gate_inf.cu`): the three-kernel inference step's core loads P before its PDL wait
   (`-DP_EARLY`, `PvGateCore(p_early=True)` from the runner only; v, g and the output stay after the wait). Safe because P is the
   runner's hoisted / per-call softmax, written before the step, and the step's first front is now launched without the

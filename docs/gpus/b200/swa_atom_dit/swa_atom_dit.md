@@ -159,10 +159,10 @@ bulk shared::cluster copies, summed in rank order.
   `SWADiTBlock.forward_hoisted`, as the model does (its atom conditioning repeats over the augments, so the adaLN modulation is computed
   once per batch element: team-gm's `SWAAtomTransformer` calls `swa_dit_hoist_modulation(c_base, ...)`). Without the flag every
   sample has its own conditioning row per atom and the modulation is computed A times; those rows are in the last table.
-- Parameter policy: all columns except **engine per-op** are fp32 master. The per-op path does not compile with fp32 parameters
-  under autocast (a Triton `CompilationError` in its fused adaLN kernel), so that column is measured with bf16 parameters
-  (`+param_master=false`). Inference with fp32 master pays a per-call parameter cast inside the step: ours at A1 / 1024 atoms is
-  0.045 ms against 0.031 ms with bf16 parameters (A5 4096 atoms 0.090 against 0.078 ms); training is unchanged.
+- Parameter policy: all columns except **engine per-op** are fp32 master (parameters fp32, activations bf16, autocast). The per-op path
+  does not compile with fp32 parameters under autocast (a Triton `CompilationError` in its fused adaLN kernel), so that column is
+  measured with bf16 parameters (`+param_master=false`). The fused entries cache the bf16 forms of the weights
+  (`kernels._capture.param_forms`), so inference with fp32 master equals inference with bf16 parameters.
 - Columns: **PyTorch compiled** = `implementations=[pytorch] compile=true` (the module's reference math, `torch.compile`); **engine per-op**
   = `+swa_dit_fused=false` (the per-op path: RMS-adaLN, FA4 window attention, SwiGLU, as separate ops); **fused Triton** =
   `MINIWORLD_SWA_DIT_SM100=0` (the fused block's Triton kernels; the sm_90a kernels do not build for sm_100); **ours** = the default
@@ -177,10 +177,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0950 | 0.0838 | 0.0592 | 0.0552 | 1.07 |
-| (2048, 128) | 0.2251 | 0.1166 | 0.0675 | 0.0634 | 1.06 |
-| (3072, 128) | 0.3356 | 0.1371 | 0.0716 | 0.0716 | 1.00 |
-| (4096, 128) | 0.5773 | 0.1700 | 0.0956 | 0.0900 | 1.06 |
+| (1024, 128) | 0.0942 | 0.0838 | 0.0511 | 0.0409 | 1.25 |
+| (2048, 128) | 0.2232 | 0.1166 | 0.0613 | 0.0511 | 1.20 |
+| (3072, 128) | 0.3358 | 0.1371 | 0.0654 | 0.0594 | 1.10 |
+| (4096, 128) | 0.5774 | 0.1700 | 0.0900 | 0.0778 | 1.16 |
 
 ![Inference A5, length sweep at D128](figures/swa_atom_dit_inference_a5_length.png) <!-- measure_bars -->
 
@@ -188,10 +188,10 @@ bulk shared::cluster copies, summed in rank order.
 
 | (Length, Dimension) | PyTorch compiled | engine per-op | fused Triton | ours | × |
 |---|---|---|---|---|---|
-| (1024, 128) | 0.0817 | 0.0719 | 0.0511 | 0.0449 | 1.14 |
-| (2048, 128) | 0.1209 | 0.0757 | 0.0512 | 0.0450 | 1.14 |
-| (3072, 128) | 0.1636 | 0.0778 | 0.0531 | 0.0490 | 1.08 |
-| (4096, 128) | 0.2086 | 0.0779 | 0.0532 | 0.0552 | 0.96 |
+| (1024, 128) | 0.0818 | 0.0719 | 0.0431 | 0.0307 | 1.40 |
+| (2048, 128) | 0.1228 | 0.0757 | 0.0450 | 0.0327 | 1.38 |
+| (3072, 128) | 0.1638 | 0.0778 | 0.0471 | 0.0369 | 1.28 |
+| (4096, 128) | 0.2088 | 0.0779 | 0.0471 | 0.0430 | 1.10 |
 
 ![Inference A1, length sweep at D128](figures/swa_atom_dit_inference_a1_length.png) <!-- measure_bars -->
 
@@ -212,19 +212,19 @@ A5 inference
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0552 | 0.0613 | 1.11 |
-| 2048 | 0.0634 | 0.0879 | 1.39 |
-| 3072 | 0.0716 | 0.1043 | 1.46 |
-| 4096 | 0.0900 | 0.1330 | 1.48 |
+| 1024 | 0.0409 | 0.0471 | 1.15 |
+| 2048 | 0.0511 | 0.0716 | 1.40 |
+| 3072 | 0.0594 | 0.0920 | 1.55 |
+| 4096 | 0.0778 | 0.1188 | 1.53 |
 
 A1 inference (one sample: the same call)
 
 | Length (atoms) | ours, shared conditioning | ours, per-sample conditioning | per-sample / shared |
 |---|---|---|---|
-| 1024 | 0.0449 | 0.0449 | 1.00 |
-| 2048 | 0.0450 | 0.0450 | 1.00 |
-| 3072 | 0.0490 | 0.0490 | 1.00 |
-| 4096 | 0.0552 | 0.0552 | 1.00 |
+| 1024 | 0.0307 | 0.0307 | 1.00 |
+| 2048 | 0.0327 | 0.0327 | 1.00 |
+| 3072 | 0.0369 | 0.0369 | 1.00 |
+| 4096 | 0.0430 | 0.0430 | 1.00 |
 
 A48 training
 
