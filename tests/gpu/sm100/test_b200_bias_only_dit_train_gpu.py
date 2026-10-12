@@ -508,6 +508,7 @@ def _run_tail(op, ins, A, L, H, DA):
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A"), [(128, 1), (384, 3), (768, 2), (256, 24)])
 def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
+    _sm100_only()
     """bo_bwd_tail.cu alone on random inputs against fp64: every output it writes (a NaN-filled buffer shows a missing write), the
     column-sum partials, bit-identical on a rerun; no local memory."""
     H, DA, D = n_head, n_head * d_head, 768
@@ -535,6 +536,7 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
 @pytest.mark.parametrize("M", [128, 384, 3072, 18432])
 @pytest.mark.parametrize("f32", [False, True])
 def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
+    _sm100_only()
     """bo_wgrad.cu alone: the six weight gradients (bf16 or fp32 out) and the unfold (dWraw = dWn w, the cond-LN partials over 16
     rows) against fp64; bit-identical on a rerun; no local memory."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
@@ -618,6 +620,7 @@ def test_fused_backward_pbfin_kernel_against_two_launches(nh, L, odt):
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A"), [(128, 8), (384, 3), (512, 2), (768, 4), (768, 48)])
 def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(monkeypatch, L, A, n_head, d_head):
+    _sm100_only()
     """bo_pvdpb.cu (MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB) against PvGateCore (no gate) + DpbKernel (dpb_sm100) on the same inputs: the
     same bodies on the same virtual grids, so dV and dbias are bit-identical (and every element written: NaN-filled outputs), also
     on reruns. Where the bias gradient belongs on CTA pairs (L768) the op launches nothing and returns False; ``single`` forces the
@@ -657,6 +660,7 @@ def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(monkeypatch, 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A"), [(128, 1), (384, 3), (768, 2), (256, 24)])
 def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
+    _sm100_only()
     """bo_bwd_mid.cu (MINIWORLD_BIAS_ONLY_DIT_BWD_MID) alone on random inputs against fp64: dxa and ds1 in dG, dx, the dcg scratch, dc
     and the bs1 partials (NaN-filled outputs show a missing write), dG's transition half untouched; bit-identical on a rerun; no
     local memory."""
@@ -718,6 +722,7 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
                                                                       ("1", "split3", "0", "0", "0"), ("1", "off", "1", "0", "1"),
                                                                       ("1", "split3", "1", "0", "0"), ("0", "split3", "1", "1", "1")])
 def test_fused_backward_launch_count(monkeypatch, n_head, d_head, fused, tail, pbfin, pvdpb, mid):
+    _sm100_only()
     """The captured backward of one block (``_bwd`` under static weights: no repack) at L384: 11 kernel launches at the defaults
     (bo_bwd_tail x 3, bo_pvdpb, the five of dxa / adaln_a_bwd / dchat / dcg / cond_bwd, bo_wgrad, pair_bias_bwd_fin); 9 with
     bo_bwd_mid on (_BWD_MID=1); the per-step path launches 23 (BWD_FUSED=0)."""
