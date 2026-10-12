@@ -109,3 +109,6 @@ src/miniworld_engine/autotune/data/.merge.lock
 
 # Local H100 wiring validation build products (historical verdicts: tag archive/docs-20260928)
 /verdicts/
+
+# local run artifacts (experiments, outputs, results, raw benchmark dumps): one directory, never tracked
+/runs/

@@ -1024,16 +1024,15 @@ def bench_module_triangle_multiplication(
             if raw_implementation == MINIWORLD_IMPL:
                 # Use the real production module (implementation=MINIWORLD): it tries the
                 # hand-written CUDA H100 kernels first and otherwise resolves to the Triton
-                # path on every arch. Pin bf16 (the deployment dtype); load_state_dict
-                # casts the fp32 reference state.
+                # path on every arch. Load the shared fp32 state before _place applies
+                # the requested parameter policy. Casting before loading would round
+                # only this backend's master weights through bf16.
                 self.layers = nn.ModuleList(
                     [
                         make_layer(
                             layer_index,
                             implementation=ImplementationType.MINIWORLD,
                             p_drop=conf.dropout,
-                        ).to(
-                            torch.bfloat16,
                         )
                         for layer_index in range(len(layer_states))
                     ],
@@ -1128,15 +1127,9 @@ def bench_module_triangle_multiplication(
                 pair = pair + update
             return pair
 
-    # Full bf16 for EVERY impl. The old code fed only miniworld a bf16 `pair` and left the others at
-    # fp32, so pytorch/triton/cuequiv were timed as fp32 kernels -- an unfair, much slower floor
-    # (triton 15.8ms fp32 vs 2.8ms bf16). The fix is the bf16 input for all of them: the custom ops
-    # compute in their input dtype, and the torch path follows its inputs. `fabric` here is the
-    # no-op `_NoFabric` shim -- there is NO autocast and no fp32 master anywhere in this harness.
-    # The module cast below is likewise only PARTLY a cast: `_Fp32ParamsMixin._apply`
-    # (modules/primitives.py) deliberately pins norm affine params to fp32 through any
-    # `.to(bfloat16)` (gamma at 1.0 stagnates in bf16 -- its ULP exceeds an Adam step), which is why
-    # `parameter_dtype` still records float32. Trunk weights become bf16; norm gammas stay fp32.
+    # Every backend receives the same activation dtype and seeded fp32 state.
+    # _place retains fp32 master parameters with autocast by default; param_master=False
+    # casts projections to bf16 while the norm mixin keeps affine parameters in fp32.
     bf16 = conf.precision != FP32_PRECISION
     model = MultiTriangleMultiplication(implementation).to(DEVICE)
     model = _place(model, conf, torch.bfloat16 if bf16 else torch.float32)
