@@ -145,7 +145,7 @@ def fixture():
             be=b[:,0].to(dt).masked_fill(~mask[:,0,0,0,None,None,:],torch.finfo(dt).min).contiguous()
             return lambda:triton_triangle_attention_pair_bias(qe,ke,ve,be).permute(0,2,1,3,4),ref,None
         if a.row=="cueq":
-            from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuEquivariance backend
+            from cuequivariance_torch import (  # optional cuEquivariance backend
                 triangle_attention,
             )
             return lambda:triangle_attention(q,k,v,b,mask,D**-.5),ref,None

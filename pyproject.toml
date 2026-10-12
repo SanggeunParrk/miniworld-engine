@@ -226,6 +226,9 @@ ban-relative-imports = "all"
 # test that checks its output.
 "src/miniworld_engine/viz/sweep_page.py" = ["RUF001"]
 "tests/cpu/layout/test_the_sweep_page_matches_the_repo.py" = ["RUF001"]
+# The presentation plots label axes with the multiplication sign, the minus sign
+# (heads × head width, |i−j| ≤ 64); they are typographic characters in figure text, not identifiers.
+"benchmarks/runners/plot_presentation.py" = ["RUF001"]
 # `PT` is flake8-pytest-style: it is about how tests are written, and it has no business in
 # library code. Selected globally it fires PT018 on ordinary `assert a and b` in `src/` and
 # `benchmarks/`, which is a pytest-report-readability rule applied where there is no report.

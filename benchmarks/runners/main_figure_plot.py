@@ -106,7 +106,7 @@ def main() -> None:
     out = Path(sys.argv[1])
     out.mkdir(parents=True, exist_ok=True)
     data = {"bf16-mixed": load(sys.argv[2:separator]), "fp32": load(sys.argv[separator + 1:])}
-    mpl.rcParams.update(RC)
+    mpl.rcParams.update(RC)  # ty: ignore[no-matching-overload]  # matplotlib stubs key RcParams by a Literal union of rc names
     summary: list = []
     for mode in ("inference", "training"):
         draw(mode, data, out, summary)

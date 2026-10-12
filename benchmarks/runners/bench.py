@@ -2352,7 +2352,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
 
     class CueqAttentionPairBias(AttentionPairBias):
         def forward(self, single, pair, mask=None):
-            import cuequivariance_torch as cuet  # ty: ignore[unresolved-import]  # optional cuEquivariance backend
+            import cuequivariance_torch as cuet  # optional cuEquivariance backend
 
             act = single.dtype
 
@@ -4183,14 +4183,14 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                 SWADiTBlock(d_atom=conf.d_single_atom, d_cond=conf.d_single_atom,
                             n_head=n_head, implementation=spec.impl)
                 for _ in range(conf.n_layers)])
-            self.composed = None
+            self.composed: Callable | None = None
 
         def forward(self, x, cond, ap):
             if self.composed is not None:
                 return self.composed(x, cond.expand(x.shape[0], -1, -1), ap)
             for layer in self.layers:
                 # a conditioning with fewer rows than samples repeats over them: the hoisted-modulation entry
-                x = layer(x, cond, ap) if cond.shape[0] == x.shape[0] else layer.forward_hoisted(x, cond, ap)
+                x = layer(x, cond, ap) if cond.shape[0] == x.shape[0] else layer.forward_hoisted(x, cond, ap)  # ty: ignore[call-non-callable]  # nn.Module.__getattr__ types a method as Tensor | Module
             return x
 
     model = MultiSWADiT()
@@ -4240,7 +4240,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                     expected = x.float()
                     for layer in ref_layers:
                         expected = (layer(expected, cond.float(), ap) if cond.shape[0] == n
-                                    else layer.forward_hoisted(expected, cond.float(), ap))
+                                    else layer.forward_hoisted(expected, cond.float(), ap))  # ty: ignore[call-non-callable]  # nn.Module.__getattr__ types a method as Tensor | Module
                 finally:
                     torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
                 del ref_layers
@@ -4318,7 +4318,7 @@ def _anthropic_local_dit_composition(upstream, model, mask, samples: int, length
     def wf(t):
         return t.detach().float().contiguous()
 
-    packs = []
+    packs: list[dict[str, Any]] = []
     for block in blocks:
         at, tr = block.attention, block.transition
         packs.append({
@@ -5379,11 +5379,11 @@ def main(cfg: DictConfig) -> None:
 
     if conf.mode == "inference":
         # inference weights never change between graph replays: no repacking inside the captured graph (kernels/_capture.py)
-        from miniworld_engine.kernels import _capture
+        from miniworld_engine.kernels import _capture as _kernel_capture
 
-        _capture.set_static_weights(True)
+        _kernel_capture.set_static_weights(True)
         # and the conditioning / pair tensors are the sampler's per-item inputs: hoisted tables are served, not recomputed, in a replay
-        _capture.set_static_inputs(True)
+        _kernel_capture.set_static_inputs(True)
 
     gpu_name = torch.cuda.get_device_name(0)
     results_dir = target_dir(conf.level, conf.target) / "artifacts" / gpu_name
