@@ -22,7 +22,7 @@ cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 ## Quickstart
 
 Four steps, and the first three need no GPU. Every command in this section is executed by
-`tests/layout/test_quickstart_runs.py`, so it cannot drift from what the code does.
+`tests/cpu/layout/test_quickstart_runs.py`, so it cannot drift from what the code does.
 
 **1. Install.** The library is a normal wheel; `[bench]` and `[baselines]` are extras you do not need
 to read a number.
@@ -95,7 +95,7 @@ docs/                   see docs/README.md
 third_party/  licenses/ upstream provenance and license texts
 ```
 
-Every kernel family has the same shape, enforced by `tests/layout/test_kernel_layout.py`:
+Every kernel family has the same shape, enforced by `tests/cpu/layout/test_kernel_layout.py`:
 `reference.py` (the torch definition checks compare against), `interface.py` (the family's one
 public door), optional `dispatch.py` (a choice among implementations) and `whole_op.py`
 (a whole layer with weights as arguments), and backend packages `cuda/` / `triton/`.
@@ -130,7 +130,7 @@ Numbers, and the scripts that produced them: `benchmarks/compile_wrap/`.
 ## Supported hardware
 
 Every kernel declares its minimum architecture in `kernels/registry/registry.csv`'s `arch` column, and the
-table below is checked against that column by `tests/registry/test_hardware_support.py` — so it cannot drift
+table below is checked against that column by `tests/cpu/registry/test_hardware_support.py` — so it cannot drift
 from the code.
 
 <!-- BEGIN GENERATED: hardware-support -->

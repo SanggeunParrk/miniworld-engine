@@ -74,5 +74,5 @@ consumer's clone predated it, so half of every fp32 kernel's work was never enum
 coverage reported `missing 0`, because it counted against what the build enumerated rather than
 against the registry. The answer was `git pull`, and no card was needed to find that.
 
-`tests/builder/test_build_matrix.py` now pins the current count, so a regression to 527 fails in
+`tests/cpu/builder/test_build_matrix.py` now pins the current count, so a regression to 527 fails in
 CI rather than in someone else's ten-hour job.
