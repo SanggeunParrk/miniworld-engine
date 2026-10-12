@@ -52,7 +52,29 @@ Compiled with `-ftz=true -prec-sqrt=false -prec-div=false`: the default IEEE `sq
 cost about 20 instructions per pair (a slow-path call and four `FSETP/FSEL/FMUL` rescalings); with the approximate forms the
 neighbour loop is 7 MUFU and about 40 other instructions.
 
+**One exponential and one reciprocal per pair.** With `w = exp(-x)` and `c_t = exp(-t)`, `sigmoid(t - x) = w / (w + c_t)`, so the
+four-threshold score is `0.25 * w * Q'(w) / Q(w)` and its derivative `0.25 * w * N(w) / Q(w)^2` for the quartic
+`Q = prod_t (w + c_t)` and the sextic `N = sum_t c_t prod_{s != t} (w + c_s)^2`. All coefficients are positive (no cancellation, `w` in
+(0, 1] cannot overflow). That takes the pair loop from 7 (forward) / 8 (backward) MUFU operations to 4 (two square roots, `exp`,
+one reciprocal) for a few more FMAs: 15-20 % faster.
+
 ## Measurements (2026-10-12)
+
+Training shapes (real structures padded with unresolved atoms, A = 48, forward + backward, ms): the time follows the number of pairs
+inside the radius (about 0.012 ns per pair and augment; nucleotide atoms use a 30 A radius, so they add many pairs).
+
+| N | resolved atoms | nucleotide atoms | pairs inside the radius | first version | this version |
+|---:|---:|---:|---:|---:|---:|
+| 4096 | 2,500 | 0 | 0.81 M | 1.09 | 0.52 |
+| 4096 | 3,276 | 352 | 2.49 M | 2.93 | 1.50 |
+| 4096 | 3,995 | 0 | 1.82 M | 2.32 | 1.03 |
+| 8192 | 5,501 | 0 | 2.29 M | 2.97 | 1.20 |
+| 8192 | 7,106 | 0 | 3.47 M | 5.53 | 2.18 |
+| 8192 | 7,959 | 0 | 3.54 M | 4.96 | 2.07 |
+
+Whole-structure kernels (N <= 3520) are not used at these two shapes.
+
+Earlier table (structure size, before the rational form):
 
 B200 (sm_100a), torch 2.13.0+cu129; forward + backward, A = 48, B = 1, **real predicted structures** (FoldBench, all atoms resolved):
 

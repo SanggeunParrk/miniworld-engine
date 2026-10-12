@@ -31,6 +31,33 @@ constexpr float NUC_CUT = 30.f, OTHER_CUT = 15.f;
 
 __device__ __forceinline__ float rcp1p(float ex, float c) { return __fdividef(1.f, 1.f + ex * c); }
 
+// With w = exp(-x) in (0, 1] and c_t = exp(-t), sigmoid(t - x) = w / (w + c_t), so the four-threshold score and its derivative are rational
+// functions of w with one denominator Q(w) = prod_t (w + c_t) (all coefficients positive: no cancellation, no overflow for large x):
+//   score   = 0.25 * w * Q'(w) / Q(w)
+//   -dscore/dx = 0.25 * sum_t s_t (1 - s_t) = 0.25 * w * N(w) / Q(w)^2,   N(w) = sum_t c_t prod_{s != t} (w + c_s)^2
+// One exponential and one reciprocal per pair instead of one exponential and four reciprocals (the MUFU pipe was the busiest).
+__device__ __forceinline__ float rat_q(float w) {
+    float q = w + 1.12806102f;
+    q = fmaf(q, w, 0.375327923f);
+    q = fmaf(q, w, 0.036699476f);
+    return fmaf(q, w, 0.00055308437f);
+}
+__device__ __forceinline__ float rat_dq(float w) {
+    float q = fmaf(w, 4.f, 3.38418307f);
+    q = fmaf(q, w, 0.750655846f);
+    return fmaf(q, w, 0.036699476f);
+}
+__device__ __forceinline__ float rat_n(float w) {
+    float n = fmaf(1.12806102f, w, 1.50131169f);
+    n = fmaf(n, w, 0.753688085f);
+    n = fmaf(n, w, 0.174446344f);
+    n = fmaf(n, w, 0.0193895544f);
+    n = fmaf(n, w, 0.000830352031f);
+    return fmaf(n, w, 2.02979066e-05f);
+}
+// sum over the four thresholds of sigmoid(t - x) / 4 for w = exp(-x)
+__device__ __forceinline__ float pair_score(float w) { return 0.25f * w * rat_dq(w) * __fdividef(1.f, rat_q(w)); }
+
 extern "C" __global__ void __launch_bounds__(BLK)
 slddt_prep(const float* __restrict__ G, const int8_t* __restrict__ NUC, const int8_t* __restrict__ M, int8_t* __restrict__ TILE,
            int* __restrict__ ROWCNT, uint32_t* __restrict__ FM, uint32_t* __restrict__ UM, int B, int N, int NB) {
@@ -109,8 +136,7 @@ slddt_fwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
                 const float h0 = gi0 - sg0[k], h1 = gi1 - sg1[k], h2 = gi2 - sg2[k];
                 const float e0 = xi0 - sx0[k], e1 = xi1 - sx1[k], e2 = xi2 - sx2[k];
                 const float diff = fabsf(sqrtf(e0 * e0 + e1 * e1 + e2 * e2) - sqrtf(h0 * h0 + h1 * h1 + h2 * h2));
-                const float ex = __expf(diff);
-                acc += 0.25f * (rcp1p(ex, C05) + rcp1p(ex, C1) + rcp1p(ex, C2) + rcp1p(ex, C4));
+                acc += pair_score(__expf(-diff));
             }
         }
     }
@@ -161,11 +187,10 @@ slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
                 const float e0 = xi0 - sx0[k], e1 = xi1 - sx1[k], e2 = xi2 - sx2[k];
                 const float d = sqrtf(e0 * e0 + e1 * e1 + e2 * e2);
                 const float df = d - sqrtf(g2);
-                const float ex = __expf(fabsf(df));
-                const float s1 = rcp1p(ex, C05), s2 = rcp1p(ex, C1), s3 = rcp1p(ex, C2), s4 = rcp1p(ex, C4);
-                const float dsc = 0.25f * (s1 * (1.f - s1) + s2 * (1.f - s2) + s3 * (1.f - s3) + s4 * (1.f - s4));
+                const float ew = __expf(-fabsf(df));
+                const float qv = rat_q(ew);
                 const float sgn = df > 0.f ? 1.f : (df < 0.f ? -1.f : 0.f);
-                const float coef = wgt * (-sgn) * dsc / fmaxf(d, 1e-6f);
+                const float coef = wgt * (-sgn) * (0.25f * ew * rat_n(ew)) * __fdividef(1.f, qv * qv * fmaxf(d, 1e-6f));
                 a0 += coef * e0; a1 += coef * e1; a2 += coef * e2;
             }
         }
@@ -218,8 +243,7 @@ slddt_fwd_full(const float* __restrict__ X, const float* __restrict__ G, const u
                     const float h0 = gi.x - gj.x, h1 = gi.y - gj.y, h2 = gi.z - gj.z;
                     const float e0 = xi.x - xj.x, e1 = xi.y - xj.y, e2 = xi.z - xj.z;
                     const float diff = fabsf(sqrtf(e0 * e0 + e1 * e1 + e2 * e2) - sqrtf(h0 * h0 + h1 * h1 + h2 * h2));
-                    const float ex = __expf(diff);
-                    acc += 0.25f * (rcp1p(ex, C05) + rcp1p(ex, C1) + rcp1p(ex, C2) + rcp1p(ex, C4));
+                    acc += pair_score(__expf(-diff));
                 }
             }
         }
@@ -272,11 +296,10 @@ slddt_bwd_full(const float* __restrict__ X, const float* __restrict__ G, const i
                 const float e0 = xi.x - xj.x, e1 = xi.y - xj.y, e2 = xi.z - xj.z;
                 const float d = sqrtf(e0 * e0 + e1 * e1 + e2 * e2);
                 const float df = d - sqrtf(g2);
-                const float ex = __expf(fabsf(df));
-                const float s1 = rcp1p(ex, C05), s2 = rcp1p(ex, C1), s3 = rcp1p(ex, C2), s4 = rcp1p(ex, C4);
-                const float dsc = 0.25f * (s1 * (1.f - s1) + s2 * (1.f - s2) + s3 * (1.f - s3) + s4 * (1.f - s4));
+                const float ew = __expf(-fabsf(df));
+                const float qv = rat_q(ew);
                 const float sgn = df > 0.f ? 1.f : (df < 0.f ? -1.f : 0.f);
-                const float coef = wgt * (-sgn) * dsc / fmaxf(d, 1e-6f);
+                const float coef = wgt * (-sgn) * (0.25f * ew * rat_n(ew)) * __fdividef(1.f, qv * qv * fmaxf(d, 1e-6f));
                 a0 += coef * e0; a1 += coef * e1; a2 += coef * e2;
             }
         }
