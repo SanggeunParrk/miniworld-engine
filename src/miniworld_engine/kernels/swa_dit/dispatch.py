@@ -121,7 +121,7 @@ def _native_b200_fusion(q=None, training=None):
 
 
 def _native_h100_extension(which="qkvg"):
-    from miniworld_engine.kernels.swa_dit.cuda.loader import extension, ERRORS
+    from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension
     if settings.current().engine_backend == "triton":
         raise RuntimeError("native H100 SWA rejects a forced Triton backend")
     ext = extension(which)
@@ -156,7 +156,7 @@ def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training)
         raise ValueError("native H100 SWA requires contiguous FP32 RoPE [B*S,16]")
     shapes = ((384, 128), (128, 128), (128, 128), (512, 128), (128, 256))
     if any(t.dtype != q.dtype or not t.is_contiguous() or tuple(t.shape) != shape
-           for t, shape in zip(weights, shapes)):
+           for t, shape in zip(weights, shapes, strict=True)):
         raise ValueError("native H100 SWA requires canonical packed projection weights")
 
 
@@ -268,7 +268,9 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
         rows(12, [dq1, dX, q, mod], [dq, dmod])
     def wgrad(gradient, activation):
         if fusion and bf and os.environ.get("MINIWORLD_SWA_H100_OWNED_LT_WGRAD", "0") == "1":
-            from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import owned_wgrad_hopper
+            from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import (
+                owned_wgrad_hopper,
+            )
             return owned_wgrad_hopper(gradient, activation)
         return _native_mm(gradient.t(), activation)
     return [dq.view_as(q), dmod, wgrad(dp[:, :384], x), wgrad(dp[:, 384:], x),

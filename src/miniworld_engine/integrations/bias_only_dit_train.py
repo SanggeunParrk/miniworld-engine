@@ -235,13 +235,13 @@ def _pack_h100(P):
     projections = [g("attention.ada_ln_in.to_scale.weight"), g("attention.ada_ln_in.to_bias.weight"),
                    g("transition.ada_ln_in.to_scale.weight"), g("transition.ada_ln_in.to_bias.weight")]
     wp, wb = cast(g("attention.ln_pair.weight")), cast(g("attention.to_bias.weight"))
-    W = dict(w1=w1, w2=w2, Wraw=cat(projections, fp32=True), Wn=cat(projections, [w1, w1, w2, w2]),
-             Wg=cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]),
-             Wvg=cat([g("attention.to_value.weight"), g("attention.to_gate.weight")]),
-             wp=wp, Wb=wb, Wf_bf=cat([g("attention.to_bias.weight")], [wp]),
-             Wo=cat([g("attention.to_out.weight")]),
-             Wab=cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]),
-             Wsq=cat([g("transition.squeeze.weight")]))
+    W = {"w1": w1, "w2": w2, "Wraw": cat(projections, fp32=True), "Wn": cat(projections, [w1, w1, w2, w2]),
+         "Wg": cat([g("attention.to_scale.weight"), g("transition.to_scale.weight")]),
+         "Wvg": cat([g("attention.to_value.weight"), g("attention.to_gate.weight")]),
+         "wp": wp, "Wb": wb, "Wf_bf": cat([g("attention.to_bias.weight")], [wp]),
+         "Wo": cat([g("attention.to_out.weight")]),
+         "Wab": cat([g("transition.expand_a.weight"), g("transition.expand_b.weight")]),
+         "Wsq": cat([g("transition.squeeze.weight")])}
     for key, name in (("bs1", "attention.ada_ln_in.to_scale.bias"), ("bs2", "transition.ada_ln_in.to_scale.bias"),
                       ("bg1", "attention.to_scale.bias"), ("bg2", "transition.to_scale.bias")):
         W[key] = cast(g(name))
@@ -261,10 +261,7 @@ def _pack(P, dev):
     if hit is not None and hit[0] == key:
         return hit[1]
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
-    if h100_enabled(dev):
-        W = _pack_h100(P)
-    else:
-        W = _pack_one(P, dev, mid) if one else None
+    W = _pack_h100(P) if h100_enabled(dev) else _pack_one(P, dev, mid) if one else None
     if W is not None:
         if slot is not None:
             _capture.prune(_PACKS)
@@ -1715,7 +1712,9 @@ def block(module, single, cond, pair, mask=None, bias=None):
     if single.dtype is not F32:
         from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
         if h100_enabled(single.device):
-            from .token_dit_train import _native_caller_hooks
+            from miniworld_engine.integrations.token_dit_train import (
+                _native_caller_hooks,
+            )
             _native_caller_hooks(single, cond, pair, *module.parameters(), force=True)
     return out
 

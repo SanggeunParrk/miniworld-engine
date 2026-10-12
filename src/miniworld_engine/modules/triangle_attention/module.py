@@ -5,9 +5,8 @@ triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a k
 32-channel heads, inference and training) serve the whole module."""
 
 import math
-from contextlib import contextmanager
-
 import os
+from contextlib import contextmanager
 
 import torch
 import torch.nn as nn

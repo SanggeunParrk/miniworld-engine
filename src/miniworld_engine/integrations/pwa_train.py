@@ -573,7 +573,9 @@ class _PwaMath(torch.autograd.Function):
         dmask, dscale = None, 1.0
         if p_drop > 0:
             if not sm100 and native_aux_enabled():
-                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
+                from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import (
+                    extension,
+                )
                 dmask = extension("pack").drop_keep(m, N, D, float(p_drop))
             else:
                 dmask = (torch.rand(N, D, device=m.device, dtype=bf) > p_drop).to(bf)

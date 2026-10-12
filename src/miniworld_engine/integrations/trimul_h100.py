@@ -67,7 +67,10 @@ def _selected_d64_training(module, pair):
 
 
 def _selected_native_training(module, pair):
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d128_training, bidi_training
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
+        bidi_training,
+        d128_training,
+    )
     return (_selected_uni_d256(module, pair)
             or (not hasattr(module, "outgoing") and bidi_training(pair))
             or d128_training(pair, getattr(module, "outgoing", False),
@@ -131,11 +134,13 @@ def update(
     dropscale: torch.Tensor | None,
     *, bidirectional: bool = True,
 ) -> torch.Tensor:
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserved_d64_context
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
+        preserved_d64_context,
+    )
     with preserved_d64_context(_selected_d64_training(module, pair)):
         out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
     if _b200style_serves(module, pair) or _native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
-        from .token_dit_train import _native_caller_output
+        from miniworld_engine.integrations.token_dit_train import _native_caller_output
         out = _native_caller_output(out, pair, *module.parameters(), force=True)
     return out
 
@@ -149,11 +154,18 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     )
 
     n, d = pair.shape[1], pair.shape[-1]
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import preserve_training
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
+        preserve_training,
+    )
     preserve = preserve_training(d) or _selected_native_training(module, pair)
     if _native_buckets_enabled() and d != 64 and not preserve:
-        from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import native_buckets, single_trimul
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
+            training_unit_scale,
+        )
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import (
+            native_buckets,
+            single_trimul,
+        )
         empty_mask = torch.empty(0,device=pair.device,dtype=torch.bool) if mask is None else mask
         scale = training_unit_scale(pair) if dropscale is None else dropscale.reshape(n,d)
         args = (pair, module.to_left.weight, module.to_left_gate.weight,
@@ -168,7 +180,9 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
     token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2) and not preserve
     if preserve:
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import owned_training_mask
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
+            owned_training_mask,
+        )
         with torch.no_grad():
             pair_mask = owned_training_mask(pair,mask)
     elif d == 64 and _native_training_enabled():
@@ -189,7 +203,9 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         )
         pair_mask = pair_mask.to(torch.bfloat16).contiguous()
     if dropscale is None and (preserve or (d == 64 and _native_training_enabled())):
-        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
+        from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
+            training_unit_scale,
+        )
         scale = training_unit_scale(pair)
     else:
         scale = (pair.new_ones((n, d)) if dropscale is None
@@ -251,7 +267,9 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
 
 
 def _native_training_enabled():
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import cuda_training_aux_enabled
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
+        cuda_training_aux_enabled,
+    )
     return cuda_training_aux_enabled()
 
 
@@ -288,7 +306,9 @@ def _native_wide_inference_bucket(module, pair):
             or module.d_hidden != pair.shape[-1]
             or module.to_left.weight.shape[0] != 2 * pair.shape[-1]):
         return False
-    from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import native_inference_bucket
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import (
+        native_inference_bucket,
+    )
     return native_inference_bucket(pair.shape[-1], pair.shape[1])
 
 
@@ -318,16 +338,16 @@ def serves_inference(
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
-    if (pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))
-            or _native_wide_inference_bucket(module, pair)):
-        if (pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
-                if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE") == "1"
-                else (128, 256, 384, 512, 640, 768))
-                or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
-                or any(p.dtype != torch.float32 for p in (
-                    module.ln_pair.weight, module.ln_pair.bias,
-                    module.ln_out.weight, module.ln_out.bias))):
-            return False
+    if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))
+            or _native_wide_inference_bucket(module, pair))
+            and (pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
+                 if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE") == "1"
+                 else (128, 256, 384, 512, 640, 768))
+                 or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
+                 or any(p.dtype != torch.float32 for p in (
+                     module.ln_pair.weight, module.ln_pair.bias,
+                     module.ln_out.weight, module.ln_out.bias)))):
+        return False
     if bidirectional and _wide_inference_ok(module, pair):
         return True
     if not bidirectional and _uni_wide_inference_ok(module, pair):
@@ -341,7 +361,9 @@ def serves_inference(
 
 def requires_cuda_inference(module, pair):
     """Promoted inference buckets refuse instead of silently using Triton."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import cuda_aux_enabled
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
+        cuda_aux_enabled,
+    )
     native = cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
     return (module.implementation == ImplementationType.MINIWORLD
             and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
@@ -384,7 +406,8 @@ def update_inference(module, pair, mask, *, bidirectional):
     else:
         matrices = [w.to(pair.dtype) if i < 4 else w.to(pair.dtype).contiguous()
                     for i, w in enumerate(weights)]
-    weights = matrices + [
+    weights = [
+        *matrices,
         module.ln_pair.weight.float().contiguous(),
         module.ln_pair.bias.float().contiguous(),
         module.ln_out.weight.float().contiguous(),

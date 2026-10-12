@@ -761,7 +761,9 @@ def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
 
 
 def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False) -> torch.Tensor:
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import owned_gemm_ext
+    from miniworld_engine.kernels.conditioned_transition.cuda.train import (
+        owned_gemm_ext,
+    )
 
     return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
 
@@ -993,7 +995,9 @@ class _LocalBlock(torch.autograd.Function):
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
         grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved))
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
-            from miniworld_engine.integrations.token_dit_train import _activate_native_caller
+            from miniworld_engine.integrations.token_dit_train import (
+                _activate_native_caller,
+            )
             _activate_native_caller(force=True)
         return (None, *grads)
 

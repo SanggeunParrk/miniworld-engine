@@ -282,15 +282,17 @@ def swa_dit_block(
     Check :func:`refusal` first. A call that records no gradient runs the inference forward (nothing saved).
     """
     from miniworld_engine.kernels.swa_dit.autograd import SWADiTBlockFunction
-    from miniworld_engine.kernels.swa_dit.dispatch import swa_dit_block_fwd
-    from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        native_h100_enabled,
+        swa_dit_block_fwd,
+    )
 
-    if native_h100_enabled(q):
-        if (q.ndim != 3 or q.shape[-1] != 128 or q.numel() == 0
-                or q.dtype not in (torch.bfloat16, torch.float32)
-                or any(not t.is_contiguous() for t in (q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd))
-                or any(w.dtype not in (q.dtype, torch.float32) for w in (wqkv, wg, wo, wu, wd))):
-            raise ValueError("native H100 SWA requires canonical contiguous BF16/FP32 operands")
+    if native_h100_enabled(q) and (
+            q.ndim != 3 or q.shape[-1] != 128 or q.numel() == 0
+            or q.dtype not in (torch.bfloat16, torch.float32)
+            or any(not t.is_contiguous() for t in (q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd))
+            or any(w.dtype not in (q.dtype, torch.float32) for w in (wqkv, wg, wo, wu, wd))):
+        raise ValueError("native H100 SWA requires canonical contiguous BF16/FP32 operands")
 
     s = q.shape[1]
     cos = cos.reshape(-1, cos.shape[-1]).contiguous()

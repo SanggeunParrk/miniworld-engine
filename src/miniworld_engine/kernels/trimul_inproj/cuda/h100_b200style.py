@@ -36,7 +36,7 @@ def _runtime_aux():
     ensure_cuda_home()
     shared = Path(__file__).with_name("b200_sources")
     return load_extension(
-        name="trimul_h100_scalar_tmasave_aux_v1",
+        name="trimul_h100_emitxn_tma_aux_v1",
         sources=[
             str(R / "bind.cpp"),
             str(shared / "wide_aux.cu"),
@@ -132,12 +132,20 @@ def _front_kernel(d, h, backward, cfg):
     a, b, slots, sk, mb = cfg[:5]
     schedule = cfg[5] if len(cfg) > 5 else 1
     name = "mw_b200style_k1wb" if backward else "mw_b200style_k1"
+    headers = _headers(backward)
+    if backward and d == 384:
+        from .h100_b200style_k1_prefetch import headers as prefetch_headers
+
+        name = "mw_b200style_k1wb_emitxn_tma"
+        headers = prefetch_headers(headers)
+        from .h100_b200style_emitxn_tma import headers as emit_headers
+        headers = emit_headers(headers)
     body = (
         f'#include "tmn_kernels.cuh"\n'
         f"using C=tmn::K1Cfg<{d},{h},false,{a},{b},{slots},{sk},{schedule}>;\n"
         'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
         f"void {name}(__grid_constant__ const tmn::K1Params p){{"
-        f"tmn::sm90::k1_body<C,true,1,{str(not backward).lower()},false,1>(p);}}"
+        f"tmn::sm90::k1_body<C,true,1,{str(not backward).lower()},{str(backward and d == 384).lower()},1>(p);}}"
     )
     flags = [
         "-std=c++17",
@@ -145,7 +153,7 @@ def _front_kernel(d, h, backward, cfg):
         "-arch=sm_90a",
         "--cubin",
         "-lineinfo",
-        f"-I{_headers(backward)}",
+        f"-I{headers}",
         f"-DMW_MINB={mb}",
         "-DMW_K1_STREAM=1",
         "-DTMN_MASK_TEMPLATE=1",
@@ -174,6 +182,8 @@ def _front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None, normalized
 
 def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
     n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
+    if d == 384 and dcat is not None and xn is None:
+        raise ValueError("D384 backward K1 requires its normalized-input output")
     cfg = _config(d, dcat is not None)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _front_kernel(d, h, dcat is not None, cfg)
@@ -188,7 +198,7 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         bi,
         ab,
         xs,
-        None,
+        xn,
         n,
         n,
         tj,
@@ -207,6 +217,8 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
             3, I._map(dcat, [64, 64], [dcat.shape[1], n * n], [dcat.shape[1] * 2])
         )
         fields.insert(4, I._map(dpl, [64, 32], [n * n, 2 * h], [n * n * 2]))
+        if d == 384:
+            fields.insert(5, I._map(xn, [64, 64], [d, n * n], [d * 2]))
         fields += [dpl, dcat, dcat.shape[1]]
     kernel.launch(
         (min(tiles, mb * I._sms(x.device.index)), 1, 1),
@@ -214,6 +226,8 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         [T._launch_module().Struct(fields)],
         smem,
     )
+
+    return d == 384 and dcat is not None and xn is not None
 
 
 @T.device_cache
@@ -250,6 +264,9 @@ def _output_kernel(d, h, cfg, save=False):
             from .h100_b200style_tmasave import output_kernel
         else:
             from .h100_b200style_reorder import output_kernel
+        return output_kernel(d, h, cfg)
+    if d == 384 and save:
+        from .h100_b200style_d384_tmasave import output_kernel
         return output_kernel(d, h, cfg)
     if d == 256 and save:
         from .h100_b200style_scalar_tmasave import output_kernel
@@ -336,7 +353,7 @@ def _run_forward(leaves, mask, ds, direction, save):
                     I._map(pv, [64, 64], [d, m], [d * 2]),
                     I._map(gv, [64, 64], [d, m], [d * 2]),
                 ]
-                if save and d in (256, 512)
+                if save and d in (256, 384, 512)
                 else []
             ),
             vec,
@@ -363,7 +380,7 @@ def _run_forward(leaves, mask, ds, direction, save):
         )
 
 
-@opaque(fake=_forward_fake, name="trimul_h100_scalar_tmasave_forward")
+@opaque(fake=_forward_fake, name="trimul_h100_emitxn_tma_forward")
 def forward(
     leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int
 ) -> list[torch.Tensor]:
@@ -376,7 +393,7 @@ def _inference_fake(leaves, mask, ds, direction):
     return torch.empty_like(leaves[0])
 
 
-@opaque(fake=_inference_fake, name="trimul_h100_scalar_tmasave_inference")
+@opaque(fake=_inference_fake, name="trimul_h100_emitxn_tma_inference")
 def inference(
     leaves: list[torch.Tensor],
     mask: torch.Tensor,
@@ -400,7 +417,7 @@ def _backward_fake(leaves, mask, ds, direction, saved, dy, master_mask):
     ]
 
 
-@opaque(fake=_backward_fake, name="trimul_h100_scalar_tmasave_backward")
+@opaque(fake=_backward_fake, name="trimul_h100_emitxn_tma_backward")
 def backward(
     leaves: list[torch.Tensor],
     mask: torch.Tensor,
