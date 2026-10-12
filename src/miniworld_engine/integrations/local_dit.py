@@ -334,7 +334,31 @@ def serves(module, single, cond, pair, mask) -> bool:
     return _kernels32_ready(index) if fp32 else _kernels_ready(index)
 
 
+class _Unserved(NotImplementedError):
+    """A call outside the Hopper native contract: the composed path serves it (re-raised only when native is forced)."""
+
+
 def _serves_hopper_training(module, single, cond, pair, mask):
+    """Hopper training: True (native CUDA), None (not Hopper / not training: the other routes decide) or, for a call outside
+    the native geometry, None as well -- the module's composed path serves it. ``MINIWORLD_LOCAL_DIT_H100_TRAIN=1`` set
+    explicitly keeps the contract error."""
+    try:
+        return _require_hopper_training(module, single, cond, pair, mask)
+    except _Unserved:
+        if os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN") == "1":
+            raise
+        return None
+
+
+def _serves_hopper_inference(module, single, cond, pair, mask):
+    """Hopper inference: True (native CUDA) or None -- a call outside the native cells falls back to the composed path."""
+    try:
+        return _require_hopper_inference(module, single, cond, pair, mask)
+    except _Unserved:
+        return None
+
+
+def _require_hopper_training(module, single, cond, pair, mask):
     """Required Hopper training geometry: native CUDA or an explicit error."""
     from miniworld_engine.modules.dispatch import KernelBackend
 
@@ -348,7 +372,7 @@ def _serves_hopper_training(module, single, cond, pair, mask):
 
     def require(ok, detail):
         if not ok:
-            raise NotImplementedError(f"H100 local atom DiT training requires {detail}; no composed fallback")
+            raise _Unserved(f"H100 local atom DiT training requires {detail}; no composed fallback")
 
     require(settings.current().engine_backend != "triton", "the CUDA engine backend")
     require(module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm")
@@ -378,7 +402,7 @@ def _serves_hopper_training(module, single, cond, pair, mask):
     return True
 
 
-def _serves_hopper_inference(module, single, cond, pair, mask):
+def _require_hopper_inference(module, single, cond, pair, mask):
     """The required inference cells use native CUDA, including recorded losses."""
     from miniworld_engine.modules.dispatch import KernelBackend
 
@@ -389,7 +413,7 @@ def _serves_hopper_inference(module, single, cond, pair, mask):
         return None
     def require(ok, detail):
         if not ok:
-            raise NotImplementedError(f"H100 local atom DiT inference requires {detail}; no composed fallback")
+            raise _Unserved(f"H100 local atom DiT inference requires {detail}; no composed fallback")
 
     require(settings.current().engine_backend != "triton", "the CUDA engine backend")
     require(module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm")

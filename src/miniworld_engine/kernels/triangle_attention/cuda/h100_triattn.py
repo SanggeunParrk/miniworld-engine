@@ -14,6 +14,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import (
     ensure_cuda_home,
     gencodes,
@@ -193,88 +195,122 @@ def _weight_gradient(dy, x):
     return extension("pack").reduce_partials(partial)
 
 
-class H100Triangle(torch.autograd.Function):
-    @staticmethod
-    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, packed, fused_tail):
-        ctx.owned_blas = _owned_blas_enabled()
+def _frontend(C):
+    """Qualified default front end: the one-kernel LN + projection front wins at C128 (64-row tiles) and C256 (128-row
+    tiles) (docs/records/triattn_fuse_20261008.md); wider pairs keep the cuBLAS front."""
+    return os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") or (
+        "fused2" if C == 128 else "fused3" if C == 256 else "grouped"
+    )
+
+
+def _resolve_pack(weights, wall, outweight):
+    """The (wall, outweight) pack: the caller's, or the weights' own -- cached while they are unmodified, scoped to a capture."""
+    if wall is not None and outweight is not None:
+        return wall, outweight
+    return _capture.param_forms("triattn_h100_pack", weights, lambda: pack_weights(*weights))
+
+
+def _forward_op_fake(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, eps, fused_tail, owned_blas):
+    """result [B, L, L, C]; proj [rows, 4C] (cuBLAS front end) or [4, rows, C] (fused front ends); bias [B, H, L, L];
+    stats [rows, 2] fp32; o_rows [rows, C]; lse [B, H, L, L] fp32. All in pair's dtype unless noted; rows = B L L, H = C / 32."""
+    B, L, _, C = pair.shape
+    rows, H = B * L * L, C // 32
+    proj_shape = (rows, 4 * C) if _frontend(C) == "grouped" else (4, rows, C)
+    return (
+        pair.new_empty(pair.shape),
+        pair.new_empty(proj_shape),
+        pair.new_empty((B, H, L, L)),
+        pair.new_empty((rows, 2), dtype=torch.float32),
+        pair.new_empty((rows, C)),
+        pair.new_empty((B, H, L, L), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_forward_op_fake, name="triangle_attention_h100_forward_cuda")
+def _forward_op(
+    pair: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor,
+    wg: torch.Tensor, wb: torch.Tensor, wo: torch.Tensor, mask: torch.Tensor, drop: torch.Tensor,
+    wall: torch.Tensor | None, outweight: torch.Tensor | None, eps: float, fused_tail: bool, owned_blas: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Native H100 TriangleAttention forward (front end, core, tail); also returns what the backward needs."""
+    with _owned_blas_scope(owned_blas):
         B, L, _, C = pair.shape
         vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "1") == "1"
         m = extension("module")
         x = pair.contiguous().view(-1, C)
-        wall, outweight = packed
+        wall, outweight = _resolve_pack((wq, wk, wv, wg, wb, wo), wall, outweight)
         lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
-        # Qualified default: the one-kernel LN + projection front wins at C128 (64-row tiles) and C256 (128-row tiles)
-        # (docs/records/triattn_fuse_20261008.md); wider pairs keep the cuBLAS front.
-        frontend = os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") or (
-            "fused2" if C == 128 else "fused3" if C == 256 else "grouped"
-        )
+        frontend = _frontend(C)
         if frontend == "grouped":
             f = extension("front_grouped")
             z, stats = f.norm(x, lw, lb, eps, vector_rows)
-            projection = _mm(z, wall.T)
-            qr, kr, vr, gr = (projection[:, j * C : (j + 1) * C] for j in range(4))
-            bias = f.bias(projection, mask, C, L)
+            proj = _mm(z, wall.T)
+            qr, kr, vr, gr = (proj[:, j * C : (j + 1) * C] for j in range(4))
+            bias = f.bias(proj, mask, C, L)
         elif frontend == "fused3":
-            p, bias, stats = extension("front_fused3").front(x, lw, lb, wall, mask, L, C // 32, eps)
-            qr, kr, vr, gr = p.unbind(0)
+            proj, bias, stats = extension("front_fused3").front(x, lw, lb, wall, mask, L, C // 32, eps)
+            qr, kr, vr, gr = proj.unbind(0)
         elif frontend == "fused2":
-            p, bias, stats = extension("front_fused2").front(x, lw, lb, wall, mask, L, C // 32, eps)
-            qr, kr, vr, gr = p.unbind(0)
+            proj, bias, stats = extension("front_fused2").front(x, lw, lb, wall, mask, L, C // 32, eps)
+            qr, kr, vr, gr = proj.unbind(0)
         else:
-            p, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps,
-                                     frontend == "fused_reuse")
-            qr, kr, vr, gr = p.unbind(0)
+            proj, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps, frontend == "fused_reuse")
+            qr, kr, vr, gr = proj.unbind(0)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         o, lse = _core_forward(q, k, v, bias)
         o_rows = _rows(o, C)
         tail = os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped")
         if tail == "grouped":
             f = extension("front_grouped")
-            result = f.residual(x, _mm(f.gate(gr, o_rows, vector_rows), outweight.T), drop, L, vector_rows).view_as(
-                pair
-            )
+            result = f.residual(x, _mm(f.gate(gr, o_rows, vector_rows), outweight.T), drop, L, vector_rows).view_as(pair)
         elif tail == "fused3":
             result = extension("tail_fused3").tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
         else:
             result = m.tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
-        if any(ctx.needs_input_grad[:9]):
-            ctx.save_for_backward(
-                x,
-                lw,
-                lb,
-                wall,
-                outweight,
-                qr,
-                kr,
-                vr,
-                gr,
-                bias,
-                stats,
-                o_rows,
-                lse,
-                mask,
-                drop,
-            )
-            ctx.dims = (B, L, C)
-            ctx.dtypes = tuple(w.dtype for w in (lnw, lnb, wq, wk, wv, wg, wb, wo))
-        return result
+        return result, proj, bias, stats, o_rows, lse
 
-    @staticmethod
-    def backward(ctx, dy):
-        with _owned_blas_scope(ctx.owned_blas):
-            return H100Triangle._backward_impl(ctx, dy)
 
-    @staticmethod
-    def _backward_impl(ctx, dy):
-        x, lw, lb, wall, wo, qr, kr, vr, gr, bias, stats, o, lse, mask, drop = (
-            ctx.saved_tensors
-        )
-        B, L, C = ctx.dims
+def _backward_op_fake(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats, o_rows, lse,
+                   owned_blas):
+    """dx [B, L, L, C] in pair's dtype, then the gradients of the ln weight, ln bias, wq, wk, wv, wg, wb and wo, each shaped
+    and typed like its parameter."""
+    return (
+        pair.new_empty(pair.shape),
+        lnw.new_empty(lnw.shape),
+        lnb.new_empty(lnb.shape),
+        wq.new_empty(wq.shape),
+        wk.new_empty(wk.shape),
+        wv.new_empty(wv.shape),
+        wg.new_empty(wg.shape),
+        wb.new_empty(wb.shape),
+        wo.new_empty(wo.shape),
+    )
+
+
+@opaque(fake=_backward_op_fake, name="triangle_attention_h100_backward_cuda")
+def _backward_op(
+    dy: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor,
+    wv: torch.Tensor, wg: torch.Tensor, wb: torch.Tensor, wo: torch.Tensor, mask: torch.Tensor, drop: torch.Tensor,
+    wall: torch.Tensor | None, outweight: torch.Tensor | None, proj: torch.Tensor, bias: torch.Tensor, stats: torch.Tensor,
+    o_rows: torch.Tensor, lse: torch.Tensor, owned_blas: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
+           torch.Tensor]:
+    """Native H100 TriangleAttention backward: the input gradient and the eight parameter gradients (parameters' dtypes)."""
+    with _owned_blas_scope(owned_blas):
+        B, L, _, C = pair.shape
+        x = pair.contiguous().view(-1, C)
+        wall, wo_packed = _resolve_pack((wq, wk, wv, wg, wb, wo), wall, outweight)
+        lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
+        if proj.ndim == 2:
+            qr, kr, vr, gr = (proj[:, j * C : (j + 1) * C] for j in range(4))
+        else:
+            qr, kr, vr, gr = proj.unbind(0)
+        dtypes = tuple(w.dtype for w in (lnw, lnb, wq, wk, wv, wg, wb, wo))
         m, dqe, dve = extension("module"), extension("dq"), extension("bias_fusion")
         dy = dy.contiguous().view(-1, C)
         dys = m.scale(dy, drop, L)
-        du = _mm(dys, wo)
-        do, dg, u, delta = extension("front_grouped").gate_backward(du, gr, o, L)
+        du = _mm(dys, wo_packed)
+        do, dg, u, delta = extension("front_grouped").gate_backward(du, gr, o_rows, L)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         do = _view(do, B, L, C)
         dq, dk, dv, db = [], [], [], []
@@ -294,37 +330,66 @@ class H100Triangle(torch.autograd.Function):
             dv.append(vb)
             db.append(bb)
         dq, dk, dv = (_rows(_join(ts), C) for ts in (dq, dk, dv))
-        dall = extension("front_grouped").pack_backward(
-            dq, dk, dv, dg, _join(db), mask, L
-        )
+        dall = extension("front_grouped").pack_backward(dq, dk, dv, dg, _join(db), mask, L)
         # One grouped projection product instead of five independent dgrad GEMMs.
         if os.environ.get("MINIWORLD_TRIATTN_H100_PROJECT_LN", "0") == "1":
-            dx, z, parts = extension("projection_ln").backward(
-                x, dall, wall, dy, stats, lw, lb
-            )
+            dx, z, parts = extension("projection_ln").backward(x, dall, wall, dy, stats, lw, lb)
         else:
             dz = _mm(dall, wall, out_dtype=torch.float32)
             dx, z, parts = m.ln_backward(x, dz, dy, stats, lw, lb)
         dnorm = extension("pack").reduce_partials(parts)
         grad = _weight_gradient(dall, z)
         dwo = _weight_gradient(dys, u)
-        params = extension("pack").finish(
-            grad, dwo, dnorm, [dt == torch.float32 for dt in ctx.dtypes]
+        p = extension("pack").finish(grad, dwo, dnorm, [dt == torch.float32 for dt in dtypes])
+        return dx.view(B, L, L, C), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]
+
+
+class H100Triangle(torch.autograd.Function):
+    """Autograd owner of the native launches: ``ctx`` lives here, the launches are the opaque ops above."""
+
+    @staticmethod
+    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, wall, outweight, fused_tail, owned_blas):
+        result, proj, bias, stats, o_rows, lse = _forward_op(
+            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, eps, fused_tail, owned_blas
         )
-        return (dx.view(B, L, L, C), *params, None, None, None, None, None)
+        if any(ctx.needs_input_grad[:9]):
+            ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats,
+                                  o_rows, lse)
+            ctx.owned_blas = owned_blas
+        return result
+
+    @staticmethod
+    def backward(ctx, dy):
+        (pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats, o_rows,
+         lse) = ctx.saved_tensors
+        grads = _backward_op(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats,
+                             o_rows, lse, ctx.owned_blas)
+        return (*grads, None, None, None, None, None, None, None)
+
+
+def _drop_scale_fake(pair: torch.Tensor, probability: float) -> torch.Tensor:
+    """The broadcast dropout scale [B, L, C] in pair's dtype."""
+    return pair.new_empty((pair.shape[0], pair.shape[1], pair.shape[3]))
+
+
+@opaque(fake=_drop_scale_fake, name="triangle_attention_h100_drop_scale_cuda")
+def _drop_scale(pair: torch.Tensor, probability: float) -> torch.Tensor:
+    """Row-broadcast dropout scale 0 / 1/(1-p), drawn from the default CUDA generator (graph-capturable)."""
+    return extension("pack").drop_scale(pair, probability)
 
 
 def triangle_attention(
     pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None, packed=None,
-    fused_tail=False,
+    fused_tail=False, owned_blas=None,
 ):
+    """``packed`` (the weights' ``pack_weights``) and ``owned_blas`` (None: the ambient scope / env) are optional; without a
+    pack the op packs the weights itself, cached while they are unmodified."""
     weights = (wq, wk, wv, wg, wb, wo)
     if not supports(pair, weights, lnw, lnb, mask):
         raise ValueError(
             "H100 native candidate requires square BF16 buckets, C64/128/256/384/512, Dhead32, valid parameters"
         )
-    if packed is None:
-        packed = pack_weights(*weights)
+    wall, outweight = packed if packed is not None else (None, None)
     mask = (
         mask.contiguous()
         if mask is not None
@@ -332,8 +397,10 @@ def triangle_attention(
     )
     if drop is None:
         drop = pair.new_empty(0)
+    if owned_blas is None:
+        owned_blas = _owned_blas_enabled()
     return H100Triangle.apply(
-        pair, lnw, lnb, *weights, mask, eps, drop.contiguous(), packed, fused_tail
+        pair, lnw, lnb, *weights, mask, eps, drop.contiguous(), wall, outweight, fused_tail, owned_blas
     )
 
 
@@ -352,11 +419,8 @@ def forward(module, pair, mask=None):
     # mode here: autograd.Function.forward itself always runs with grads disabled.
     fused_tail = (not torch.is_grad_enabled() and not module.training and module.starting
                   and B == 1 and C in (128, 256))
-    drop = (
-        extension("pack").drop_scale(pair, module.p_drop)
-        if module.training and module.p_drop
-        else None
-    )
+    # detached: the scale is a constant of the step, not a function of the pair (the op has no autograd formula)
+    drop = _drop_scale(pair.detach(), module.p_drop) if module.training and module.p_drop else None
     x = pair if module.starting else pair.transpose(1, 2)
     weights = (
         module.to_query.weight,
@@ -366,26 +430,19 @@ def forward(module, pair, mask=None):
         module.to_bias.weight,
         module.to_out.weight,
     )
-    from miniworld_engine.kernels import _capture
-
-    key = _capture.scoped(tuple((w.data_ptr(), w._version) for w in weights))
-    cached = getattr(module, "_h100_b200style_pack", None)
-    if key is None or cached is None or key != cached[0]:
-        with torch.no_grad():
-            cached = (key, pack_weights(*weights))
-        module._h100_b200style_pack = cached
-    with _owned_blas_scope(_owned_blas_for_module(module, pair)):
-        out = triangle_attention(
-            x.contiguous(),
-            module.ln_pair.weight,
-            module.ln_pair.bias,
-            *weights,
-            mask,
-            module.ln_pair.eps,
-            drop,
-            cached[1],
-            fused_tail=fused_tail,
-        )
+    # The weight pack is made (and cached, scoped to a CUDA-graph capture) inside the forward / backward ops.
+    out = triangle_attention(
+        x.contiguous(),
+        module.ln_pair.weight,
+        module.ln_pair.bias,
+        *weights,
+        mask,
+        module.ln_pair.eps,
+        drop,
+        None,
+        fused_tail=fused_tail,
+        owned_blas=_owned_blas_for_module(module, pair),
+    )
     return out if module.starting else out.transpose(1, 2).contiguous()
 
 
