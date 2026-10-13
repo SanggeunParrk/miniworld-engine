@@ -178,8 +178,8 @@ def test_shared_conditioning_reduces_sample_gradients(compiled):
 
 
 def test_the_gate_serves_only_what_the_block_was_built_for(monkeypatch):
-    """Everything the A100 block cannot take keeps the module path: fp32 operands (the TF32 kernels are B200), QK-norm, another head layout, an odd
-    sample count, a length off the 128-row tiles, no autograd, the switches."""
+    """Everything the A100 block cannot take keeps the module path: fp32 operands (the TF32 kernels are B200), QK-norm, another head layout, no autograd,
+    the switches."""
     eng = _randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda()).to(
         torch.bfloat16
     )
@@ -192,8 +192,9 @@ def test_the_gate_serves_only_what_the_block_was_built_for(monkeypatch):
     assert not token_dit_train.serves(
         eng, x.detach().float().requires_grad_(), c.float(), p.float(), None
     )
-    assert not token_dit_train.serves(eng, x[:3], c[:3], p, None)
-    assert not token_dit_train.serves(
+    # any sample count and any length: the block pads A to an even count and L to the 128-row tiles
+    assert token_dit_train.serves(eng, x[:3], c[:3], p, None)
+    assert token_dit_train.serves(
         eng, x[:, :, :200], c[:, :, :200], p[:, :200, :200], None
     )
     assert not token_dit_train.serves(eng, x, c[:, :, :, :256], p, None)

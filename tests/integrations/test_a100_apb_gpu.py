@@ -198,12 +198,10 @@ def test_apb_a100_training(L, masked, shape):
     yg, gg = _train(ours, sb, pb, mask, dy.bfloat16())
     yb, gb = _train(tb, sb, pb, mask, dy.bfloat16())
     assert _rel(yg, yw) < 1.3 * _rel(yb, yw) + 1e-3
-    # ln_pair.bias shifts every logit of a head by one constant: its true gradient is 0 (the fp32 module returns rounding noise)
-    zero = "ln_pair.bias"
-    assert (gg[zero] == 0).all()
-    assert gw[zero].norm() < 1e-4 * gw["ln_pair.weight"].norm()
+    # ln_pair has no offset (it would shift every logit of a head by one constant): no parameter, no gradient
+    assert "ln_pair.bias" not in gw
     worst = []
-    for n in (n for n in gw if n != zero):
+    for n in gw:
         e, e0 = _rel(gg[n], gw[n]), _rel(gb[n], gw[n])
         worst.append((e / max(e0, 1e-3), n, e, e0))
         assert gg[n].dtype == gb[n].dtype
@@ -261,8 +259,12 @@ def test_apb_a100_training_everything_masked_is_finite():
         assert torch.isfinite(g).all(), n
 
 
-def test_apb_24x16_replay_reads_changed_weights_and_mask():
+def test_apb_24x16_replay_reads_changed_weights_and_mask(monkeypatch):
     from miniworld_engine.integrations import attention_pair_bias_sm80 as a100
+
+    override_setting(
+        monkeypatch, "apb_sm80_train16", False
+    )  # the 24 x 16 training path is on by default; this test is about the inference replay
 
     _, m, _ = _modules(shape=(24, 384))
     single, pair, mask = _inputs(208, True)

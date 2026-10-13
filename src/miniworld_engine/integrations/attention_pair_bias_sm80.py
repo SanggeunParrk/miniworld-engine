@@ -134,6 +134,12 @@ def serves_inference(
     return not torch.is_grad_enabled() and _eligible(module, single, pair, mask)
 
 
+def _ln_pair_bias(module) -> torch.Tensor:
+    """``ln_pair`` has no offset (it feeds only the logits, where a constant per head cancels in the softmax); the kernels still take the vector, so they get zeros."""
+    bias = module.ln_pair.bias
+    return torch.zeros_like(module.ln_pair.weight) if bias is None else bias
+
+
 def _leaves(module) -> list[torch.Tensor]:
     """The module's parameters as they are (any float dtype, e.g. an fp32 master): ln_single w / b, Wq, bq, Wk, Wv, Wg, Wo, ln_pair w / b, Wb. The ops cast them
     (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
@@ -147,7 +153,7 @@ def _leaves(module) -> list[torch.Tensor]:
         module.to_gate.weight,
         module.to_out.weight,
         module.ln_pair.weight,
-        module.ln_pair.bias,
+        _ln_pair_bias(module),
         module.to_bias.weight,
     ]
 

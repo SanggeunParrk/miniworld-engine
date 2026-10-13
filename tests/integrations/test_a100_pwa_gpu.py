@@ -46,7 +46,6 @@ PARAMS = (
     "to_value.weight",
     "to_gate.weight",
     "ln_pair.weight",
-    "ln_pair.bias",
     "to_bias.weight",
     "to_out.weight",
 )
@@ -296,7 +295,6 @@ def test_pwa_a100_fused_dropout(shape):
         ours.to_value.weight,
         ours.to_gate.weight,
         ours.ln_pair.weight,
-        ours.ln_pair.bias,
         ours.to_bias.weight,
         ours.to_out.weight,
     ]
@@ -325,8 +323,6 @@ def test_pwa_a100_fused_dropout(shape):
     for n, a, b, wnt in zip(
         ref_names, [got[k] for k in ref_names], gb, gw, strict=True
     ):
-        if n == "ln_pair.bias":
-            continue
         assert _rel(a, wnt) <= max(
             3e-3, (1.15 if n.startswith("d") else 1.25) * _rel(b, wnt)
         ), (n, _rel(a, wnt), _rel(b, wnt))

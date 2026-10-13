@@ -590,6 +590,7 @@ def test_the_generic_path_at_d128_matches_the_dedicated_kernels(starting, monkey
 @pytest.mark.parametrize("geom", [(64, 64, 4), (256, 256, 8)], ids=["d64_hd16", "d256"])
 @pytest.mark.parametrize("starting", [True, False])
 def test_the_compiled_module_matches_eager_in_inference_and_training(geom, starting):
+    torch._dynamo.reset()  # every case compiles the module afresh; the cases share one process and would exhaust the recompile limit
     m = _module(geom, starting)
     pair, mask = _inputs(geom, 128)
     cot = torch.randn(1, 128, 128, geom[0], device="cuda")

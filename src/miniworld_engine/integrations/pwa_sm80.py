@@ -121,6 +121,12 @@ def serves_train(
     ) and _eligible(module, msa, pair, mask)
 
 
+def _ln_pair_bias(module) -> torch.Tensor:
+    """``ln_pair`` has no offset (it feeds only the logits, where a constant per head cancels in the softmax); the kernels still take the vector, so they get zeros."""
+    bias = module.ln_pair.bias
+    return torch.zeros_like(module.ln_pair.weight) if bias is None else bias
+
+
 def _leaves(module) -> list[torch.Tensor]:
     """The module's own parameters (LayerNorm weight / bias of the MSA, Wv, Wg, LayerNorm weight / bias of the pair, Wb, Wo; bf16 or fp32 masters). The opaque ops cast them to the
     kernels' dtypes (``_kernel_leaves``) outside autograd: no cast copy in the graph, and the weight gradients leave the backward unrounded in each parameter's dtype."""
@@ -130,7 +136,7 @@ def _leaves(module) -> list[torch.Tensor]:
         module.to_value.weight,
         module.to_gate.weight,
         module.ln_pair.weight,
-        module.ln_pair.bias,
+        _ln_pair_bias(module),
         module.to_bias.weight,
         module.to_out.weight,
     ]
