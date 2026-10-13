@@ -2,6 +2,7 @@
 import functools,pathlib
 import torch
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home,host_flags,load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -12,14 +13,15 @@ def extension():
         extra_cuda_cflags=[*host_flags(),'-std=c++17','-O3','-gencode=arch=compute_80,code=sm_80',f'-I{d}',f'-I{pathlib.Path(sm80.__file__).parent}','-Xcompiler=-fno-gnu-unique','-Xptxas=-v'],
         extra_cflags=['-std=c++17','-O3','-fno-gnu-unique'],verbose=True)
 
-@torch.library.custom_op('miniworld_swa_a100_inference_rt8_ffn::ffn',mutates_args=())
+def _ffn_fake(qi,g,o,mod,wo,wu,wd,S,B,eps,cfg):
+    """Same shape and dtype as ``qi`` (the block output rows), freshly allocated."""
+    return torch.empty_like(qi)
+
+@opaque(fake=_ffn_fake,name='swa_dit_inference_rt8_ffn_sm80')
 def ffn(qi:torch.Tensor,g:torch.Tensor,o:torch.Tensor,mod:torch.Tensor,
         wo:torch.Tensor,wu:torch.Tensor,wd:torch.Tensor,S:int,B:int,eps:float,cfg:int)->torch.Tensor:
+    """SAVE=false FFN stage (row-tile geometry ``cfg``) of the A100 inference block; returns the block output rows like ``qi``."""
     return extension().compute(qi,g,o,mod,wo,wu,wd,S,B,eps,cfg)
-
-@ffn.register_fake
-def ffn_fake(qi,g,o,mod,wo,wu,wd,S,B,eps,cfg):
-    return torch.empty_like(qi)
 
 # Public owners remain exact; original official MINIWORLD/TRITON enum is not an engine-backend override.
 from miniworld_engine.kernels.swa_dit.cuda import inference_sm80_a100 as baseline

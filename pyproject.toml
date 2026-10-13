@@ -94,7 +94,7 @@ miniworld_engine = ["py.typed", "**/*.json", "**/*.cu", "**/*.cuh", "**/*.cpp", 
 
 [tool.setuptools.exclude-package-data]
 miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebuilt in user cache
-                    "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*",
+                    "kernels/*/notes/*", "kernels/*/notes/*/*", "kernels/*/notes/*/*/*", "kernels/*/notes/*/*/*/*",
                     # Both `default` and opt-in `grid` ship. A/B accuracy/blk*/
                     # warp*/mixed* exist to compare tilings during a sweep and a consumer
                     # never selects one, so 819 CSVs stay out of the wheel.

@@ -225,7 +225,7 @@ def _pack_bwd_fused(weights, wo: torch.Tensor, ln_w: torch.Tensor, cfg: Cfg):
 
 
 # ----------------------------------------------------------------------------------------------------------------------------------- forward
-def _forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save):
+def _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save):
     """[out] and, when ``save``, [xh, stats, y, bias, o, lse]: fresh tensors."""
     cfg = Cfg(x.shape[-1], n_head, hd, fused)
     b, length = x.shape[0], x.shape[1]
@@ -237,7 +237,7 @@ def _forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_h
     return out
 
 
-@opaque(fake=_forward_ops_fake, name="triangle_attention_sm80w_forward")
+@opaque(fake=_original_forward_ops_fake, name="triangle_attention_sm80w_forward")
 def _original_forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, mask: torch.Tensor, ds: torch.Tensor, eps: float,
                 transposed: bool, n_head: int, hd: int, fused: bool, save: bool) -> list[torch.Tensor]:
     """``pair + drop(TriangleAttention(pair))`` at any supported width: ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
@@ -316,7 +316,12 @@ def _original_forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torc
 
 from . import affine_training_sm80 as _accurate_front
 
-@opaque(fake=_forward_ops_fake, name='triangle_attention_sm80w_accurate_training_a100_forward')
+def _accurate_training_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save):
+    """Same outputs as the original forward: [out] and, when ``save``, [xh, stats, y, bias, o, lse]."""
+    return _original_forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_head, hd, fused, save)
+
+
+@opaque(fake=_accurate_training_forward_ops_fake, name='triangle_attention_sm80w_accurate_training_a100_forward')
 def _accurate_training_forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, mask: torch.Tensor, ds: torch.Tensor, eps: float, transposed: bool, n_head: int, hd: int, fused: bool, save: bool) -> list[torch.Tensor]:
     """``pair + drop(TriangleAttention(pair))`` at any supported width: ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
     empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward

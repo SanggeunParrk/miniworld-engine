@@ -134,7 +134,7 @@ def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torc
     if module.training and module.p_drop > 0.0:
         b, length = pair.shape[:2]
         if _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
-            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
             ds = row_scale_sm80.scale(pair, module.p_drop, module._drop_dim).reshape(b, length, pair.shape[-1])
         else:
             ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])

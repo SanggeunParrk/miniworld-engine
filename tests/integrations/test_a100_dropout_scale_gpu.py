@@ -5,7 +5,7 @@ import pytest
 import torch
 from settings_helpers import override_setting
 
-from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication

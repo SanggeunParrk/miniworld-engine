@@ -29,7 +29,7 @@ def _ready(index):
         from miniworld_engine.kernels.augmented_attention.cuda import atom_core_qresident_sm80,atom_core_order_sm80,atom_post_grad_delta_sm80,atom_pair_reduce_vec_sm80,atom_pair_uniform_no_db_sm80,atom_sample_uniform_sm80,atom_qkvg_resident_sm80,atom_output_fused_sm80
         from miniworld_engine.kernels.adaln.cuda import atom_adaln_join_sm80
         from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80
-        from miniworld_engine.kernels.parameter_cast.cuda import sm80 as cast
+        from miniworld_engine.kernels.transition.cuda import parameter_cast_sm80 as cast
         for m in (atom_core_qresident_sm80,atom_core_order_sm80,atom_post_grad_delta_sm80,atom_pair_reduce_vec_sm80,atom_pair_uniform_no_db_sm80,atom_sample_uniform_sm80,atom_qkvg_resident_sm80,atom_output_fused_sm80,atom_adaln_join_sm80,ct_atom_cond_wgrad_fused_sm80,cast):m._ext()
     except Exception as exc:
         _FAILED=True
@@ -68,7 +68,7 @@ def _transition_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: 
     d, nd = x.shape[1], wa.shape[0]
     with torch.cuda.device(x.device):
         if native_cast:
-            from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
             ws1, sb1, wb1, wa, wb, ws, wsc, bsc = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc))
         if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):          # same decomposition as train_fwd and its fake
             dz, dg, dcond2, hh, dab, pbsc = kt.atom_bwd_gate(dy, z, cond, xa, wab, ws, wsc, bsc)
@@ -120,7 +120,7 @@ def _bwd(dy: torch.Tensor,x: torch.Tensor,cond: torch.Tensor,lnw: torch.Tensor,w
     from miniworld_engine.kernels.adaln.cuda import atom_adaln_join_sm80 as fused
     from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80 as wg
     if native:
-        from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+        from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
         ws,sb,wb=result((ws,sb,wb))
     dx,dc,dsc,aff,psb,plw=fused.result(dy,x,cond,xst,cst,lnw,ws,wb,sb,res,dc_transition,dc_attention,not compiled)
     if dsc.shape[0] == 48 * 4096:

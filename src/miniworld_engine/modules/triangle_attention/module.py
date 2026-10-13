@@ -296,7 +296,7 @@ class TriangleAttention(nn.Module):
         """drop_row/drop_col scale = (rand>p)/(1-p), broadcast over i (starting, dim=1) or j
         (ending, dim=2) — matches modules.primitives.Dropout(broadcast_dim=self._drop_dim)."""
         if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
-            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
 
             if row_scale_sm80.supports(pair):
                 return row_scale_sm80.scale(pair, p, self._drop_dim)

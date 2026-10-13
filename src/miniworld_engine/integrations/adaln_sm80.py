@@ -270,10 +270,10 @@ def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.
         packed_weights = None
         if native_cast:
             if save_cast and not k.atom_supported(x, cond) and settings.current().adaln_sm80_pack_param_cast:
-                from miniworld_engine.kernels.parameter_cast.cuda.pack_sm80 import result
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_pack_sm80 import result
                 (ws, sb, wb), (packed_weights,) = result((ws, sb, wb), ((0, 2),))
             else:
-                from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
                 ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):
             y, xst, cst = k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c, stats=True)
@@ -308,7 +308,7 @@ def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.
     d = x.shape[1]
     with torch.cuda.device(x.device):
         if native_cast:
-            from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
             ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):                                        # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
             dx, dcond, dsc, aff, psb, plw = k.atom_bwd(dy, x, cond, xst, cst, lnw, ws, wb, sb)

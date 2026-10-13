@@ -23,7 +23,7 @@ def _bwd(dy: torch.Tensor,x: torch.Tensor,cond: torch.Tensor,lnw: torch.Tensor,w
     from miniworld_engine.kernels.adaln.cuda import atom_adaln_join_sm80 as fused
     from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80 as wg
     if native:
-        from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+        from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
         ws,sb,wb=result((ws,sb,wb))
     dx,dc,dsc,aff,psb,plw=fused.result(dy,x,cond,xst,cst,lnw,ws,wb,sb,res,dc_transition,dc_attention,not compiled)
     if settings.current().adaln_sm80_atom_cond_wgrad_fused:

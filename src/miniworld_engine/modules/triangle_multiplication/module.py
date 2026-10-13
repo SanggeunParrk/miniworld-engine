@@ -305,7 +305,7 @@ class TriangleMultiplication(nn.Module):
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p), broadcast
         over the i-index — matches modules.primitives.Dropout for the pair track."""
         if self.implementation == ImplementationType.MINIWORLD:
-            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
 
             if row_scale_sm80.supports(pair):
                 return row_scale_sm80.scale(pair, p, 1)

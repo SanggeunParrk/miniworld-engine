@@ -1084,15 +1084,16 @@ def swa_dit_block_bwd(
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
-def _swa_dit_block_bwd_typed_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
+def _swa_dit_block_bwd_typed_sm80_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
                                 att, y, ffn, B, half_window, eps, grad_bf16_mask):
+    """Same list as the block backward, but the weight gradients (index 2 onward) are bf16 where ``grad_bf16_mask`` has the bit set, else fp32."""
     grads = _swa_dit_block_bwd_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
                                   att, y, ffn, B, half_window, eps)
     return grads[:2] + [torch.empty_like(g, dtype=torch.bfloat16 if grad_bf16_mask & (1 << i) else torch.float32)
                         for i, g in enumerate(grads[2:])]
 
 
-@opaque(fake=_swa_dit_block_bwd_typed_fake, name="swa_dit_block_bwd_typed_sm80")
+@opaque(fake=_swa_dit_block_bwd_typed_sm80_fake, name="swa_dit_block_bwd_typed_sm80")
 def swa_dit_block_bwd_typed_sm80(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
                                 seqused: torch.Tensor, wqkv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wu: torch.Tensor,
                                 wd: torch.Tensor, qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, g: torch.Tensor, o: torch.Tensor,

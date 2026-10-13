@@ -232,12 +232,12 @@ def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch
         packed_weights = None
         if native_cast:
             if save_cast and settings.current().condtrans_sm80_pack_param_cast:
-                from miniworld_engine.kernels.parameter_cast.cuda.pack_sm80 import result
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_pack_sm80 import result
                 atom = x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)
                 pairs = ((3, 4),) if atom else ((0, 2), (3, 4))
                 (ws1, sb1, wb1, wa, wb, ws, wsc, bsc), packed_weights = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc), pairs)
             else:
-                from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
                 ws1, sb1, wb1, wa, wb, ws, wsc, bsc = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc))
         if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):          # large d = dc = 128 bf16 inputs: fused rows; small inputs use cuBLAS below
             xa, xst, cst = ka.atom_fwd(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c, stats=True)
@@ -272,7 +272,7 @@ def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.
     d, nd = x.shape[1], wa.shape[0]
     with torch.cuda.device(x.device):
         if native_cast:
-            from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
             ws1, sb1, wb1, wa, wb, ws, wsc, bsc = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc))
         if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):          # same decomposition as train_fwd and its fake
             dz, dg, dcond2, hh, dab, pbsc = kt.atom_bwd_gate(dy, z, cond, xa, wab, ws, wsc, bsc)

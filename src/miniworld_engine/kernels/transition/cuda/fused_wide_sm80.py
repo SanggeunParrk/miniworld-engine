@@ -265,12 +265,14 @@ def _bwd_dx(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torch.Te
 
 
 def _master_cast_fake(weights):
+    """One fresh contiguous bf16 tensor per weight, same shapes."""
     return [torch.empty_like(w, dtype=torch.bfloat16, memory_format=torch.contiguous_format) for w in weights]
 
 
 @opaque(fake=_master_cast_fake, name="transition_master_cast_sm80")
 def _master_cast(weights: list[torch.Tensor]) -> list[torch.Tensor]:
-    from miniworld_engine.kernels.parameter_cast.cuda import sm80 as parameter_cast
+    """Batched cast of fp32 master weights to bf16 with the existing CUDA caster."""
+    from miniworld_engine.kernels.transition.cuda import parameter_cast_sm80 as parameter_cast
     return list(parameter_cast.result(weights))
 
 

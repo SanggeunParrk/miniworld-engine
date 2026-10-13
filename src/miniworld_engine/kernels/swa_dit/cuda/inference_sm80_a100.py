@@ -3,6 +3,7 @@ import functools
 from pathlib import Path
 import torch
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -32,10 +33,15 @@ def ffn_extension():
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{d}", f"-I{public}", "-Xcompiler=-fno-gnu-unique", "-Xptxas=-v"],
         extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"], verbose=True)
 
-@torch.library.custom_op("miniworld_swa_a100_inference::block", mutates_args=())
+def _block_fake(x, c, cos, sin, seqused, wmod, wq, wg, wo, wu, wd):
+    """Same shape and dtype as ``x`` ([A, S, 128] block output), freshly allocated."""
+    return torch.empty_like(x)
+
+@opaque(fake=_block_fake, name="swa_dit_inference_block_sm80")
 def block(x: torch.Tensor, c: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, seqused: torch.Tensor,
           wmod: torch.Tensor, wq: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor,
           wu: torch.Tensor, wd: torch.Tensor) -> torch.Tensor:
+    """A100 SAVE=false inference block (modulation, qkvg, attention, FFN) selected by the physical geometry."""
     a, s, _ = x.shape
     b = c.shape[0]
     eps = float(torch.finfo(torch.float32).eps)
@@ -55,10 +61,6 @@ def block(x: torch.Tensor, c: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     else:
         out = ffn_extension().compute(qf, g, o, mod, wo, wu, wd, s, b, eps, 0)
     return out.view(a, s, 128)
-
-@block.register_fake
-def block_fake(x, c, cos, sin, seqused, wmod, wq, wg, wo, wu, wd):
-    return torch.empty_like(x)
 
 def eligible(x, c, ap, weights, n_head, half_window):
     if (torch.is_grad_enabled() or not x.is_cuda or x.dtype != torch.bfloat16

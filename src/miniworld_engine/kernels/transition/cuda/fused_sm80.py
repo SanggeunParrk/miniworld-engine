@@ -214,13 +214,7 @@ def _pack(gamma, beta, wa, wb, ws, save=True):
     gf, bf = gamma.float().contiguous(), beta.float().contiguous()
     out16 = torch.empty(N_W + (N_WDW + N_WX if save else 0), dtype=torch.bfloat16, device=dev)
     gb = torch.empty(N_GB, dtype=torch.float32, device=dev)
-    _pack_launch(
-        *(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)),
-        gf,
-        bf,
-        out16,
-        gb,
-    )
+    _pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)
     return out16[:N_W], gb, out16[N_W : N_W + N_WDW], out16[N_W + N_WDW :], gf, bf
 
 
