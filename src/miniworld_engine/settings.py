@@ -430,6 +430,41 @@ class Settings:
     pwa_infer: bool | None = None
     #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
     token_pair_init_fused: bool = True
+    # ---- H100 native-path switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
+    #: Formerly ``MINIWORLD_APB_H100_TRAIN`` (default on): the native H100 CUDA AttentionPairBias training path
+    #: (`integrations/attention_pair_bias_b200.py`). Off keeps the legacy comparison path (explicit baseline only).
+    apb_h100_train: bool = True
+    #: Formerly ``MINIWORLD_AUGATTN_TF32_SM90`` (default on): serve the fp32 token-DiT inference core with the hand-CUDA TF32 kernel
+    #: (`attn_tf32.cu`) on sm_90; off keeps the Triton core.
+    augattn_tf32_sm90: bool = True
+    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_H100`` (default on): the native Hopper bias-only DiT kernels
+    #: (`kernels/bias_only_dit/cuda`); off takes the sm_100 / composed route.
+    bias_only_dit_h100: bool = True
+    #: Formerly ``MINIWORLD_LOCAL_DIT_H100_TRAIN``: None serves the Hopper local atom DiT training block natively when the
+    #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
+    #: False disables the native Hopper training path.
+    local_dit_h100_train: bool | None = None
+    #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
+    #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
+    swa_dit_h100_native: bool | None = None
+    #: Formerly ``MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32`` (default off): allow the TF32 build of the fused GEMM + SwiGLU for fp32
+    #: activations. Its TMA-fed operands are truncated to TF32 where cuBLAS rounds them (1.6e-3 against 4.2e-4); wins only at M = 3840.
+    token_dit_gemm_swiglu_fp32: bool = False
+    #: Formerly ``MINIWORLD_TRANSITION_D64_REPL``; 0 keeps the built-in value (26 at n = 2, 16 at n = 4): D64 backward weight replicas.
+    transition_d64_repl: int = 0
+    #: Formerly ``MINIWORLD_TRANSITION_DW_REPL``; 0 keeps the built-in value (8 at n = 4, 15 at n = 2): D128 backward weight replicas.
+    transition_dw_repl: int = 0
+    #: Formerly ``MINIWORLD_TRIMUL_H100_B200STYLE`` (default off): serve TriMul on Hopper with the B200-style port
+    #: (`h100_b200style*`, widths 256/384/512 plus the D64 b200gate kernels). Experimental; becomes a B item (bake in or delete)
+    #: when the family is qualified.
+    trimul_h100_b200style: bool = False
+    #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
+    #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
+    #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
+    trimul_h100_native_buckets: bool | None = None
+    #: Formerly ``MINIWORLD_TRIMUL_H100_PRESERVE_D128`` / ``_PRESERVE_D256`` / ``_PRESERVE_WIDE`` (widths 384 and 512 together):
+    #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
+    trimul_h100_preserve_widths: frozenset[int] = frozenset()
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
@@ -595,6 +630,112 @@ _REMOVED_ENVIRONMENT = {
     "MW_SLDDT_TILE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BO_ROWS_BLOCKS_PER_SM": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_ACC_TREE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_BETA_SHADOW": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_EXACT_DWB": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_OWNED_SGEMM": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_SHADOW_DB_ONLY": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_SHADOW_IO": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_SHADOW_PAIR_LN": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_SHADOW_PAIR_PROJECT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_APB_H100_TRAIN": "apb_h100_train",
+    "MINIWORLD_APB_PYTORCH_NULL_BETA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_ATOM_H100_COND_WAVES": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_ATOM_H100_POST_PACKED": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_AUGATTN_TF32_SM90": "augattn_tf32_sm90",
+    "MINIWORLD_BIAS_ONLY_DIT_H100": "bias_only_dit_h100",
+    "MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_H100_INFER_ASYNC": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_H100_PV_GROUP": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_H100_SHADOW_GAMMA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_DIT_H100_CALLER_NATIVE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_LOCAL_DIT_H100": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_LOCAL_DIT_H100_TRAIN": "local_dit_h100_train",
+    "MINIWORLD_OPM_H100_CUBLAS_COUNT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_CUDA_ONLY": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_EPILOGUE_HALF": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_EPILOGUE_TMA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_EPILOGUE_WIDE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_OWNED_BLAS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_OPM_H100_TMA_PROLOGUE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_PWA_H100_CUDA_AUX": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_ATTN_STAGES": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_ATTN_WAVES": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_B200_FUSION": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_CUDA_ONLY": "swa_dit_h100_native",
+    "MINIWORLD_SWA_H100_FUSED_OPROJ_BWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_OWNED_LT_WGRAD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_REUSE_FFN_BWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_H100_TILED_ATTENTION": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32": "token_dit_gemm_swiglu_fp32",
+    "MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_EMPTY_UNIFORM": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_OWNED_GEMMS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_TRAIN_FP32": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_D64_REPL": "transition_d64_repl",
+    "MINIWORLD_TRANSITION_DW_REPL": "transition_dw_repl",
+    "MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_COMPACT_LN": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_COMPACT_LN_D384": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_CUDA_AUX": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_DW_EARLY_RELEASE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_DW_OVERLAP": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_FUSED_D384": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_FUSED_D384_MC": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_GATE_FULL_STAGE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_GATE_K64": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_GATE_MULTICAST": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_OWNED_MM": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_PREPARE_FUSED": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_SAVED_AB_NO_H_STAGE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_SAVED_AB_TMA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_SAVE_AB": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_SPLIT_DX": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_H100_SPLIT_FWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_CANDIDATE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_FRONTEND": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_KV_TILE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_NATIVE_RNG": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_OWNED_BLAS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_PIPELINE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_PROJECT_LN": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_ROW_GROUP": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_ROW_VECTOR": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_SPLIT_WGRAD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_H100_TAIL": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_B200STYLE": "trimul_h100_b200style",
+    "MINIWORLD_TRIMUL_H100_BIDI512_INFER_CANDIDATE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_CUDA_AUX": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_D128_GRAPH_WORKSPACE_CANDIDATE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_D256_REG_SOURCE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_D64_OWNED_BMM": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_FAST_GLUE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_FUSED_GLUE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_INFER_FAST_AUX": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_K3W_NATIVE_RESIDUAL": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS": "trimul_h100_native_buckets",
+    "MINIWORLD_TRIMUL_H100_PRESERVE_D128": "trimul_h100_preserve_widths",
+    "MINIWORLD_TRIMUL_H100_PRESERVE_D256": "trimul_h100_preserve_widths",
+    "MINIWORLD_TRIMUL_H100_PRESERVE_WIDE": "trimul_h100_preserve_widths",
+    "MINIWORLD_TRIMUL_H100_TRAIN_CUDA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_WARP_LN": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS": "",  # removed: the default behaviour is the only one
 }
 
 

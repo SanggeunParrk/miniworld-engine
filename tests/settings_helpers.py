@@ -11,13 +11,16 @@ def _coerce(name: str, value):
     hint = hint if isinstance(hint, str) else getattr(hint, "__name__", str(hint))
     if value is None:
         field = next(f for f in dataclasses.fields(settings.Settings) if f.name == name)
-        return (
-            field.default
-            if field.default is not dataclasses.MISSING
-            else field.default_factory()
-        )
+        if field.default is not dataclasses.MISSING:
+            return field.default
+        factory = field.default_factory
+        return factory() if callable(factory) else None
+    if hint.startswith("frozenset") and not isinstance(value, str):
+        return frozenset(value)
     if not isinstance(value, str):
         return value
+    if hint.startswith("frozenset[int"):
+        return frozenset(int(p) for p in value.replace(",", " ").split())
     if hint.startswith("bool"):
         return value.strip().lower() in ("1", "true", "yes", "on")
     if hint.startswith("int"):
