@@ -284,9 +284,8 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     )
     with _TF32(True):
         fused = _run(eng, single, cond, pair, mask, w)
-        assert calls and all(calls), (
-            "the fp32 training call did not take the fused fp32 path"
-        )
+        assert calls, "the fp32 training call did not take the fused fp32 path"
+        assert all(calls), "the fp32 training call did not take the fused fp32 path"
         override_setting(monkeypatch, "token_dit_train", "0")
         module = _run(eng, single, cond, pair, mask, w)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))

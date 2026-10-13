@@ -340,7 +340,8 @@ SM90 = torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0
 def test_native_inference_default_live_master_graph(module, monkeypatch, length):
     """Default inference preserves old rounding and observes changed master weights."""
     import copy
-    monkeypatch.delenv(pt.ENV, raising=False)
+
+    override_setting(monkeypatch, "pwa_train", None)
     monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
     m = copy.deepcopy(module).eval().float()
     ref = copy.deepcopy(m)
@@ -350,15 +351,19 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
     torch.manual_seed(482)
     x = torch.randn(1, 128, length, D_MSA, device=DEV, dtype=DT)
     z = torch.randn(1, length, length, D_PAIR, device=DEV, dtype=DT)
-    mask = torch.rand(1, length, device=DEV) > .15
+    mask = torch.rand(1, length, device=DEV) > 0.15
     with torch.no_grad():
         actual = m(x, z, mask)
         expected = ref(x.float(), z.float(), mask)
-        cosine = torch.nn.functional.cosine_similarity(actual.float().flatten(), expected.flatten(), dim=0)
-        assert cosine.item() >= .9999
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.float().flatten(), expected.flatten(), dim=0
+        )
+        assert cosine.item() >= 0.9999
         monkeypatch.setenv("MINIWORLD_PWA_H100_CUDA_AUX", "0")
         legacy = m(x, z, mask)
-        if length >= 512:      # the split path (cuBLAS contraction + gate / out pass) rounds o to bf16 before the gate: bf16-level, not bitwise
+        if (
+            length >= 512
+        ):  # the split path (cuBLAS contraction + gate / out pass) rounds o to bf16 before the gate: bf16-level, not bitwise
             assert rel(actual.float() - x.float(), legacy.float() - x.float()) < 1e-2
         else:
             torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
@@ -375,8 +380,8 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
         graph.replay()
         torch.cuda.synchronize()
         torch.testing.assert_close(captured, actual, rtol=0, atol=0)
-        x.add_(.125)
-        m.to_value.weight.add_(.03125)
+        x.add_(0.125)
+        m.to_value.weight.add_(0.03125)
         mask[:, ::7].logical_not_()
         graph.replay()
         torch.cuda.synchronize()
@@ -386,10 +391,14 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
 
 @pytest.mark.skipif(not SM90, reason="H100 native inference")
 def test_native_inference_default_refuses_unserved_shape(module, inputs, monkeypatch):
-    monkeypatch.delenv(pt.ENV, raising=False)
+    override_setting(monkeypatch, "pwa_train", None)
     monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
     with torch.no_grad(), pytest.raises(ValueError, match="H100 CUDA PWA"):
-        module(inputs["msa"][:, :, :320], inputs["pair"][:, :320, :320], inputs["full"][:, :320])
+        module(
+            inputs["msa"][:, :, :320],
+            inputs["pair"][:, :320, :320],
+            inputs["full"][:, :320],
+        )
 
 
 @pytest.mark.skipif(not SM90, reason="the sm_90a glue kernel")

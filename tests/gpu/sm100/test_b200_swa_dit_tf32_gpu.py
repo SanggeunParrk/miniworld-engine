@@ -211,9 +211,7 @@ def tf32_spy(monkeypatch):
         monkeypatch.setattr(
             tf32_fwd,
             name,
-            (lambda o, nm: (lambda *a, **k: calls.append(nm) or o(*a, **k)))(
-                orig, name
-            ),
+            (lambda o, nm: lambda *a, **k: calls.append(nm) or o(*a, **k))(orig, name),
         )
     return calls
 
@@ -233,9 +231,16 @@ def test_fwd_banded_reference_matches_the_dense_one():
     w = (wqkv, wg, wo, wu, wd)
     mod = _mod32(c_base, wmod)
     dense = swa_dit_block_reference(
-        *(t.double() for t in (q, mod, cos, sin)),
+        q.double(),
+        mod.double(),
+        cos.double(),
+        sin.double(),
         seqused,
-        *(t.double() for t in w),
+        wqkv.double(),
+        wg.double(),
+        wo.double(),
+        wu.double(),
+        wd.double(),
         1,
         half_window=HW,
     )
@@ -252,9 +257,9 @@ def test_fwd_modulation_runs_on_tf32(b, s, tf32_spy):
     truth = swa_dit_hoist_modulation_reference(c_base.double(), wmod.double())
     e = _rel(got, truth)
     print(f"modulation B{b} S{s}: TF32 {e:.2e}")
-    assert (
-        got.dtype == F32 and got.shape == (b * s, 6 * C) and torch.isfinite(got).all()
-    )
+    assert got.dtype == F32
+    assert got.shape == (b * s, 6 * C)
+    assert torch.isfinite(got).all()
     assert e < 1e-3, f"modulation TF32 {e:.2e}"
 
 
@@ -275,7 +280,8 @@ def test_fwd_inference_matches_the_reference(a, s, tf32_spy, monkeypatch):
             lambda: swa_dit_block(q, mod, cos, sin, seqused, *w, b, half_window=HW),
             TF32_KERNELS,
         )
-        assert tf32_spy and set(tf32_spy) == {"block_fwd_tf32"}, (
+        assert tf32_spy, tf32_spy
+        assert set(tf32_spy) == {"block_fwd_tf32"}, (
             tf32_spy
         )  # the eager call, its warm-up and its capture
         missing = [k for k in TF32_KERNELS if not any(k in nm for nm in names)]
@@ -284,7 +290,9 @@ def test_fwd_inference_matches_the_reference(a, s, tf32_spy, monkeypatch):
         tf32_spy.clear()
         triton = swa_dit_block(q, mod, cos, sin, seqused, *w, b, half_window=HW)
         assert tf32_spy == [], "settings.swa_dit_tf32=0 did not keep the Triton path"
-    assert got.dtype == F32 and got.shape == q.shape and torch.isfinite(got).all()
+    assert got.dtype == F32
+    assert got.shape == q.shape
+    assert torch.isfinite(got).all()
     ef, et = _rel(got, ref), _rel(triton, ref)
     print(f"inference A{a} S{s}: TF32 {ef:.2e} Triton fp32 {et:.2e}")
     # plain TF32 everywhere (the Triton path runs its FFN as tf32x3): ~1.2x Triton's error is the expected price
@@ -317,18 +325,17 @@ def test_fwd_training_saves_match_the_reference(a, s):
         "Vh": (n, H, s, D),
         "lse": (n, H, s),
     }
-    assert len(saved) == len(SAVES) and len(alone) == 1
+    assert len(saved) == len(SAVES)
+    assert len(alone) == 1
     torch.testing.assert_close(
         saved[0], alone[0], atol=0, rtol=0
     )  # the saves do not change the result
     valid = ref["valid"]
     worst = []
     for name, t in zip(SAVES, saved, strict=True):
-        assert (
-            t.dtype == F32
-            and tuple(t.shape) == shapes.get(name, (m, C))
-            and t.is_contiguous()
-        ), name
+        assert t.dtype == F32, name
+        assert tuple(t.shape) == shapes.get(name, (m, C)), name
+        assert t.is_contiguous(), name
         assert torch.isfinite(t).all(), name
         if name == "lse":  # rows below seqused (padding rows: a convention)
             e = _rel(
@@ -352,7 +359,8 @@ def test_fwd_training_saves_match_the_reference(a, s):
 @pytest.mark.parametrize("save", [False, True])
 def test_fwd_fake_matches_the_launch(save):
     leaves, cos, sin, seqused = _case(5, 1, 256, seed=4)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
     args = (
         q,
         _mod32(c_base, wmod),
@@ -417,7 +425,8 @@ def test_fwd_off_the_128_grid_keeps_the_triton_path(tf32_spy):
         out = swa_dit_block(
             q, _mod32(c_base, wmod), cos, sin, seqused, *w, 1, half_window=HW
         )
-    assert tf32_spy == [] and torch.isfinite(out).all()
+    assert tf32_spy == []
+    assert torch.isfinite(out).all()
 
 
 # ------------------------------------------------------------------------------------------------ forward + backward (needs tf32_bwd)
@@ -474,7 +483,8 @@ def test_bwd_training_matches_the_triton_path(a, b, s, tf32_spy, monkeypatch):
         b,
     )
     fused = _train(_fused, leaves, dy, cos, sin, seqused, b)
-    assert "block_fwd_tf32" in tf32_spy and "mod_fwd_tf32" in tf32_spy, tf32_spy
+    assert "block_fwd_tf32" in tf32_spy, tf32_spy
+    assert "mod_fwd_tf32" in tf32_spy, tf32_spy
     override_setting(monkeypatch, "swa_dit_tf32", "0")
     tf32_spy.clear()
     triton = _train(_fused, leaves, dy, cos, sin, seqused, b)
@@ -483,11 +493,13 @@ def test_bwd_training_matches_the_triton_path(a, b, s, tf32_spy, monkeypatch):
     for name, f, t, e in zip(NAMES, fused, triton, truth, strict=True):
         ef, et = _rel(f, e), _rel(t, e)
         worst.append((ef / max(et, 1e-9), name, ef, et))
-        assert torch.isfinite(f).all() and f.dtype == t.dtype, name
+        assert torch.isfinite(f).all(), name
+        assert f.dtype == t.dtype, name
         if (
             name in WEIGHT_GRADS
         ):  # TF32 GEMMs (unit roundoff 4.9e-4) vs Triton's IEEE fp32 ones
-            assert ef < 1e-3 and ef <= max(1.5 * et, 1e-3), (
+            assert ef < 1e-3, f"{name}: TF32 {ef:.2e} vs Triton fp32 {et:.2e}"
+            assert ef <= max(1.5 * et, 1e-3), (
                 f"{name}: TF32 {ef:.2e} vs Triton fp32 {et:.2e}"
             )
         else:
@@ -573,7 +585,9 @@ def test_fwd_compile_fullgraph_training_matches_eager(tf32_spy, monkeypatch):
         pytest.skip("cuda/sm100/tf32_bwd is not available")
     import copy
 
-    tf32_bwd = importlib.import_module("miniworld_engine.kernels.swa_dit.cuda.sm100.tf32_bwd")
+    tf32_bwd = importlib.import_module(
+        "miniworld_engine.kernels.swa_dit.cuda.sm100.tf32_bwd"
+    )
 
     bwd_calls = []
     for name in ("block_bwd_tf32", "mod_bwd_tf32"):
@@ -581,7 +595,7 @@ def test_fwd_compile_fullgraph_training_matches_eager(tf32_spy, monkeypatch):
         monkeypatch.setattr(
             tf32_bwd,
             name,
-            (lambda o, nm: (lambda *a, **k: bwd_calls.append(nm) or o(*a, **k)))(
+            (lambda o, nm: lambda *a, **k: bwd_calls.append(nm) or o(*a, **k))(
                 orig, name
             ),
         )
@@ -606,7 +620,8 @@ def test_fwd_compile_fullgraph_training_matches_eager(tf32_spy, monkeypatch):
     assert set(tf32_spy) == {"block_fwd_tf32", "mod_fwd_tf32"}, tf32_spy
     assert set(bwd_calls) == {"block_bwd_tf32", "mod_bwd_tf32"}, bwd_calls
     for i, (g, e) in enumerate(zip(got, eager, strict=True)):
-        assert g is not None and e is not None, i
+        assert g is not None, i
+        assert e is not None, i
         torch.testing.assert_close(
             g,
             e,

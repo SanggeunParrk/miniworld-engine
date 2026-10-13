@@ -45,7 +45,9 @@ def _sm100_only():
 
 @pytest.fixture(autouse=True)
 def policy():
-    if torch.cuda.get_device_capability() != (10, 0) and not C.h100_enabled(torch.cuda.current_device()):
+    if torch.cuda.get_device_capability() != (10, 0) and not C.h100_enabled(
+        torch.cuda.current_device()
+    ):
         pytest.skip("Blackwell or explicitly enabled Hopper prototype required")
     old = settings.configure(engine_backend="auto")
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -403,17 +405,13 @@ def test_defaults_and_their_switches(monkeypatch, off):
     assert all(torch.isfinite(g).all() for g in got)
     assert len(alias) == 2, alias
     if off:
-        assert not rows and not any(alias) and dpb.last == "single", (
-            rows,
-            alias,
-            dpb.last,
-        )
+        assert not rows, (rows, alias, dpb.last)
+        assert not any(alias), (rows, alias, dpb.last)
+        assert dpb.last == "single", (rows, alias, dpb.last)
     else:
-        assert rows == ["pack16_cuda"] and all(alias) and dpb.last == "pair", (
-            rows,
-            alias,
-            dpb.last,
-        )
+        assert rows == ["pack16_cuda"], (rows, alias, dpb.last)
+        assert all(alias), (rows, alias, dpb.last)
+        assert dpb.last == "pair", (rows, alias, dpb.last)
 
 
 @pytest.mark.parametrize("mid", ["0", "1"])
@@ -422,6 +420,7 @@ def test_one_launch_weight_pack_matches_the_torch_pack(monkeypatch, fp32_norms, 
     """The one-launch pack (the default; settings.bias_only_dit_train_pack1=0: the torch pack) gives the torch pack's tensors bit
     for bit (bf16 casts, the folded cond-LN and pair-LN weights, the concatenations, fp32 copies); with every parameter bf16 and with
     the LayerNorm weights in fp32 (the engine keeps them fp32 in a bf16 block)."""
+    _sm100_only()
     override_setting(
         monkeypatch, "bias_only_dit_bwd_mid", mid
     )  # mid: + bo_bwd_mid's transposed weights
@@ -441,15 +440,14 @@ def test_one_launch_weight_pack_matches_the_torch_pack(monkeypatch, fp32_norms, 
     ref, one = packs
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
-    assert set(one) == set(ref) and ("WnT3" in ref) == BWF.mid_on(), sorted(
+    assert set(one) == set(ref), sorted(set(one) ^ set(ref))
+    assert ("WnT3" in ref) == BWF.mid_on(), sorted(
         set(one) ^ set(ref)
     )  # + bo_bwd_mid's transposes
     for k, v in ref.items():
-        assert (
-            one[k].dtype is v.dtype
-            and one[k].shape == v.shape
-            and torch.equal(one[k], v)
-        ), k
+        assert one[k].dtype is v.dtype, k
+        assert one[k].shape == v.shape, k
+        assert torch.equal(one[k], v), k
 
 
 # ------------------------------------------------------------------------------------------------- bias gradient on CTA pairs (dpbx2)
@@ -485,6 +483,7 @@ def test_dpb_pair_kernel_does_not_spill(n_head, d_head):
 def test_dpb_pair_matches_einsum(monkeypatch, L, A, n_head, d_head):
     """settings.bias_only_dit_dpb_pair=1 (forced): dpbx2_sm100.cu wherever 256 divides L (L384 keeps dpb_sm100.cu), within 3e-3 of
     fp64 einsum."""
+    _sm100_only()
     override_setting(monkeypatch, "bias_only_dit_dpb_pair", "1")
     H, DH = n_head, d_head
     do, v, dd, P = _dpb_case(L, A, H, DH, seed=L + A)
@@ -506,6 +505,7 @@ def test_dpb_pair_matches_einsum(monkeypatch, L, A, n_head, d_head):
 def test_dpb_pair_bit_identical_with_a_poisoned_allocator(
     monkeypatch, L, A, n_head, d_head
 ):
+    _sm100_only()
     """20 runs of dpbx2_sm100.cu, the allocator's free memory filled with NaN before each, dbias allocated afresh (the bound launch
     rebuilt every fifth run): finite and bit-identical."""
     override_setting(monkeypatch, "bias_only_dit_dpb_pair", "1")
@@ -737,9 +737,8 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
     again = _run_tail(op, ins, A, L, H, DA)
     for k in ("dz", "dGg", "dab", "dx1", "dy", "do", "dd"):
         assert torch.equal(again[k], out[k]), k
-    assert torch.equal(again["dG"][:, 2 * D :], out["dG"][:, 2 * D :]) and torch.equal(
-        again["dvg"][:, DA:], out["dvg"][:, DA:]
-    )
+    assert torch.equal(again["dG"][:, 2 * D :], out["dG"][:, 2 * D :])
+    assert torch.equal(again["dvg"][:, DA:], out["dvg"][:, DA:])
     assert torch.equal(again["part"][:3, : 4 * T], out["part"][:3, : 4 * T])
 
 
@@ -794,11 +793,9 @@ def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
     assert relative64(dwu, dwn * w) < 6e-3
     assert relative64(pw, (dwn * wraw.double()).view(192, 16, DC).sum(1)) < 1e-3
     o2, dwu2, pw2 = run()
-    assert (
-        all(torch.equal(a, b) for a, b in zip(outs, o2, strict=True))
-        and torch.equal(dwu, dwu2)
-        and torch.equal(pw, pw2)
-    )
+    assert all(torch.equal(a, b) for a, b in zip(outs, o2, strict=True))
+    assert torch.equal(dwu, dwu2)
+    assert torch.equal(pw, pw2)
 
 
 @pytest.mark.parametrize("nh", [12, 16, 24])
@@ -866,6 +863,7 @@ def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(
     same bodies on the same virtual grids, so dV and dbias are bit-identical (and every element written: NaN-filled outputs), also
     on reruns. Where the bias gradient belongs on CTA pairs (L768) the op launches nothing and returns False; ``single`` forces the
     fused launch there (compared with DpbKernel at settings.bias_only_dit_dpb_pair=0)."""
+    _sm100_only()
     from miniworld_engine.kernels.bias_only_dit import cuda as C
 
     pair = C.dpb_pair_on(
@@ -906,11 +904,10 @@ def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(
         assert both(do, Ptb, dv[:, :DA], vg[:, :DA], Pb, dd, db, A)
         torch.cuda.synchronize()
         assert dpb.last == "single"
-        assert (
-            torch.isfinite(dv[:, :DA].float()).all()
-            and torch.isfinite(db.float()).all()
-        )
-        assert torch.equal(dv[:, :DA], dv0[:, :DA]) and torch.equal(db, db0)
+        assert torch.isfinite(dv[:, :DA].float()).all()
+        assert torch.isfinite(db.float()).all()
+        assert torch.equal(dv[:, :DA], dv0[:, :DA])
+        assert torch.equal(db, db0)
         assert dv[:, DA:].isnan().all()  # the gate half untouched
     if pair:  # at the step's default the op declines
         override_setting(monkeypatch, "bias_only_dit_dpb_pair", None)
@@ -928,6 +925,7 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
     """bo_bwd_mid.cu (settings.bias_only_dit_bwd_mid) alone on random inputs against fp64: dxa and ds1 in dG, dx, the dcg scratch, dc
     and the bs1 partials (NaN-filled outputs show a missing write), dG's transition half untouched; bit-identical on a rerun; no
     local memory."""
+    _sm100_only()
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
     H, DA, D, DC, M, bf, nan = (
@@ -946,8 +944,8 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
     dGt = rn(M, 2 * D)
     dx1 = torch.randn(M, D, device="cuda", generator=g)
     bs1 = 0.1 * torch.randn(D, device="cuda", generator=g)
-    stat = (
-        lambda t: torch.stack(
+    stat = lambda t: (
+        torch.stack(
             [t.double().mean(1), (t.double().var(1, unbiased=False) + 1e-5).rsqrt()], 1
         )
         .float()
@@ -1065,6 +1063,7 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
 def test_fused_backward_launch_count(
     monkeypatch, n_head, d_head, fused, tail, pbfin, pvdpb, mid
 ):
+    _sm100_only()
     """The captured backward of one block (``_bwd`` under static weights: no repack) at L384: 11 kernel launches at the defaults
     (bo_bwd_tail x 3, bo_pvdpb, the five of dxa / adaln_a_bwd / dchat / dcg / cond_bwd, bo_wgrad, pair_bias_bwd_fin); 9 with
     bo_bwd_mid on (_BWD_MID=1); the per-step path launches 23 (BWD_FUSED=0)."""
@@ -1090,7 +1089,7 @@ def test_fused_backward_launch_count(
     x, c, p, dy = (t.bfloat16() for t in (x, c, p, dy))
     params = [fast.get_parameter(n) for n in TR.NAMES]
     with _capture.static_weights(), torch.no_grad():
-        out, *saved = TR._fwd(x, c, p, mask, params)
+        _, *saved = TR._fwd(x, c, p, mask, params)
         TR._bwd(x, c, p, mask, params, saved, dy)  # eager: packs, tables, counters
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph(keep_graph=True)

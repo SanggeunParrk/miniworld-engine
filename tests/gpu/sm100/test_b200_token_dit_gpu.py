@@ -51,9 +51,16 @@ def policy():
 def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
     torch.manual_seed(811)
     m = randomize(
-        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .to(dtype)
     ).eval()
-    ref = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
+    ref = (
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH)
+        .cuda()
+        .to(dtype)
+        .eval()
+    )
     ref.load_state_dict(m.state_dict())
     x = (
         torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)

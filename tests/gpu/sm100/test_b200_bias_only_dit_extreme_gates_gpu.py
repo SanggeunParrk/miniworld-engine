@@ -189,10 +189,8 @@ def test_training_step_with_saturated_gates(monkeypatch, path, L, scale):
     A = 16
     x, c, p, dy = _inputs(L, A)
     lo, hi = _gate_range(ref, x, c)
-    assert lo < -150 and hi > 150, (
-        lo,
-        hi,
-    )  # the gates really reach saturation (and past -88.7)
+    assert lo < -150, (lo, hi)
+    assert hi > 150, (lo, hi)  # the gates really reach saturation (and past -88.7)
     fast, base, ref64 = (
         _clone(ref, ImplementationType.MINIWORLD, dtype),
         _clone(ref, ImplementationType.PYTORCH, dtype),
@@ -244,7 +242,8 @@ def test_inference_with_saturated_gates(monkeypatch, path, L, scale):
     S = 5
     x, c, p, _ = _inputs(L, S)
     lo, hi = _gate_range(ref, x, c)
-    assert lo < -150 and hi > 150, (lo, hi)
+    assert lo < -150, (lo, hi)
+    assert hi > 150, (lo, hi)
     fast, base, ref64 = (
         _clone(ref, ImplementationType.MINIWORLD, dtype).eval(),
         _clone(ref, ImplementationType.PYTORCH, dtype).eval(),

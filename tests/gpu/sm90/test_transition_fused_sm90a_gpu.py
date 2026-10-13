@@ -49,7 +49,9 @@ def test_native_prepare_compile_and_alias_contract(dtype, strided, transpose):
             if dtype == torch.bfloat16 and not strided:
                 assert output.data_ptr() == source.data_ptr()
         if transpose:
-            torch.testing.assert_close(outputs[3], weights[2].t().bfloat16(), rtol=0, atol=0)
+            torch.testing.assert_close(
+                outputs[3], weights[2].t().bfloat16(), rtol=0, atol=0
+            )
         else:
             assert outputs[3].numel() == 0
 

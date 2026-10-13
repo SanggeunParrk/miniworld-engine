@@ -780,8 +780,10 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
     assert inf3b
     assert torch.isfinite(out.float()).all()
     on = env is None
-    assert early and all(e == on for e in early), early
-    assert serial == [on] * len(serial) and len(serial) == 2, (
+    assert early, early
+    assert all(e == on for e in early), early
+    assert serial == [on] * len(serial), serial
+    assert len(serial) == 2, (
         serial
     )  # one block: its front is the step's first, each step
     dev = torch.cuda.current_device()
@@ -794,15 +796,14 @@ def test_pv_core_served_keys_per_v_tile(monkeypatch):
     """VB (keys per v tile): 128 below 16 samples (inference); 256 at L768 for 16 x 48 with A >= 16 (the training forward and dV at
     A = 48: in-process A/B); 192 / 256 where one divides L otherwise; and the bound launch follows it (a spy on the cache key)."""
     override_setting(monkeypatch, "bias_only_dit_pv_vb", None)
-    assert C._pv_vb(768, 48, 48) == 256 and C._pv_vb(768, 16, 48) == 256
-    assert (
-        C._pv_vb(768, 48, 32) == 192 and C._pv_vb(768, 48, 64) == 192
-    )  # other layouts: unmeasured, unchanged
-    assert (
-        C._pv_vb(384, 48, 48) == 192
-        and C._pv_vb(512, 48, 48) == 256
-        and C._pv_vb(640, 48, 48) == 128
-    )
+    assert C._pv_vb(768, 48, 48) == 256
+    assert C._pv_vb(768, 16, 48) == 256
+    # other layouts: unmeasured, unchanged
+    assert C._pv_vb(768, 48, 32) == 192
+    assert C._pv_vb(768, 48, 64) == 192
+    assert C._pv_vb(384, 48, 48) == 192
+    assert C._pv_vb(512, 48, 48) == 256
+    assert C._pv_vb(640, 48, 48) == 128
     assert all(C._pv_vb(L, 5, 48) == 128 for L in (128, 384, 512, 640, 768))
     P, v, g, out = _pv_inputs(48, 768, 16, 48, seed=2)
     core = C.PvGateCore(torch.cuda.current_device())

@@ -286,10 +286,10 @@ def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross, monkeypat
     assert torch.equal(first, second)
     assert _count(first_names, *TABLE_LAUNCHES) == (3 if cross else 2), first_names
     assert _count(names, *TABLE_LAUNCHES) == 0, names
-    assert (
-        _count(names, "attn_fwd") == 1
-        and _count(names, "pre_fwd", "pre_fwd_kv", "post_fwd") == 2
-    ), "the block's own kernels must still run"
+    assert _count(names, "attn_fwd") == 1, "the block's own kernels must still run"
+    assert _count(names, "pre_fwd", "pre_fwd_kv", "post_fwd") == 2, (
+        "the block's own kernels must still run"
+    )
 
 
 def test_hoist_off_recomputes_every_call(monkeypatch):
@@ -411,7 +411,11 @@ def test_entries_of_freed_tensors_are_dropped():
             eng(single, cond, pair)
             del single, cond, pair
             gc.collect()
-    assert len(local_dit._HOIST_COND) <= 1 and len(local_dit._HOIST_BIAS) <= 1, (
+    assert len(local_dit._HOIST_COND) <= 1, (
+        len(local_dit._HOIST_COND),
+        len(local_dit._HOIST_BIAS),
+    )
+    assert len(local_dit._HOIST_BIAS) <= 1, (
         len(local_dit._HOIST_COND),
         len(local_dit._HOIST_BIAS),
     )

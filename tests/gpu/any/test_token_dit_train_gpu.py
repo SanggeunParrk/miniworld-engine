@@ -79,9 +79,8 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
-@pytest.mark.parametrize(
-    ("A", "L"), [(4, 256), (3, 200)]
-)  # (3, 200): the block pads to an even A and L % 128 == 0
+# (3, 200): the block pads L to a multiple of 128 (and A to an even count on B200; the H100 core takes an odd A as is)
+@pytest.mark.parametrize(("A", "L"), [(4, 256), (6, 256), (3, 200)])
 def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatch):
     torch.manual_seed(7)
     ref = _randomize(
@@ -127,7 +126,7 @@ def test_train_block_under_torch_compile(dtype, monkeypatch):
     A, L = 2, 256
     eng = _randomize(
         DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()
-    ).to(torch.bfloat16)
+    ).to(dtype)
     g = torch.Generator(device="cuda").manual_seed(10)
     single = torch.randn(A, 1, L, 768, device="cuda", generator=g)
     cond = torch.randn(A, 1, L, 384, device="cuda", generator=g)
@@ -184,10 +183,14 @@ def test_fp32_train_block_matches_the_module_path(qk, masked, A, monkeypatch):
     """The fp32 block on H100 (fp32 operands, TF32 attention core): output and every gradient no worse than the engine's
     own fp32 module path, against the fp32 PyTorch block (TF32 off everywhere, as torch defaults)."""
     if torch.cuda.get_device_capability() != (9, 0):
-        pytest.skip("the default-precision fp32 comparison is H100-only (B200 is covered by the TF32-regime test above)")
+        pytest.skip(
+            "the default-precision fp32 comparison is H100-only (B200 is covered by the TF32-regime test above)"
+        )
     torch.manual_seed(7)
     L = 256
-    ref = _randomize(DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda())
+    ref = _randomize(
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda()
+    )
     eng = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
     eng.load_state_dict(ref.state_dict())
     g = torch.Generator(device="cuda").manual_seed(8)
@@ -200,10 +203,12 @@ def test_fp32_train_block_matches_the_module_path(qk, masked, A, monkeypatch):
     truth = _run(ref, single, cond, pair, mask, w)
     calls = []
     orig = token_dit_train._Block.apply
-    monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a))
+    monkeypatch.setattr(
+        token_dit_train._Block, "apply", lambda *a: calls.append(1) or orig(*a)
+    )
     fused = _run(eng, single, cond, pair, mask, w)
     assert calls, "the fp32 training call did not take the fused path"
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
+    override_setting(monkeypatch, "token_dit_train", "0")
     module = _run(eng, single, cond, pair, mask, w)
     worst = []
     for k in truth:

@@ -37,7 +37,8 @@ def test_gate_rejects_everything_it_is_not_built_for(d):
     x = torch.randn(128, d, device="cuda", dtype=torch.bfloat16)
     assert wide.supported(x, wa, ws) is HOPPER
     assert not wide.supported(x.float(), wa, ws)
-    assert not wide.supported(x, *_weights(d, 2 * d))  # hidden must be 4 D
+    # hidden must be 4 D (or 2 D where built), not 3 D
+    assert not wide.supported(x, *_weights(d, 3 * d))
     assert not wide.supported(
         torch.randn(127, d, device="cuda", dtype=torch.bfloat16), wa, ws
     )
@@ -257,6 +258,8 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     module, x, dy = _build((1, 16, 32, d))
     override_setting(monkeypatch, "transition_wide_save_h", "0")
+    # D384 keeps h by default on H100
+    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_SAVE_H", "0")
     recomputed = _run(module, x, dy, fused=True)
     override_setting(monkeypatch, "transition_wide_save_h", "1")
     saved = _run(module, x, dy, fused=True)
@@ -280,10 +283,17 @@ def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="auto", transition_fused_sm90a=True)
     monkeypatch.delenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", raising=False)
-    module = Transition(d, n=3 if bad == "expansion" else 4,                 # n = 2 has native builds now; 3 has none
-                        implementation=ImplementationType.MINIWORLD).cuda()
-    x = torch.randn(127 if bad == "rows" else 128, d, device="cuda",
-                    dtype=torch.float32 if bad == "dtype" else torch.bfloat16)
+    module = Transition(
+        d,
+        n=3 if bad == "expansion" else 4,  # n = 2 has native builds now; 3 has none
+        implementation=ImplementationType.MINIWORLD,
+    ).cuda()
+    x = torch.randn(
+        127 if bad == "rows" else 128,
+        d,
+        device="cuda",
+        dtype=torch.float32 if bad == "dtype" else torch.bfloat16,
+    )
     if bad == "build":
         monkeypatch.setattr(fused_sm90a, "available", lambda *_: False)
         monkeypatch.setattr(fused_wide_sm90a, "available", lambda *_: False)
@@ -292,13 +302,32 @@ def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
 
 
 @needs_hopper
-@pytest.mark.parametrize(("d", "save_ab"), [(64, False), (128, False), (256, False),
-                                      (384, False), (512, False), (384, True), (512, True)],
-                         ids=["D64-save0", "D128-save0", "D256-save0", "D384-save0",
-                              "D512-save0", "D384-save1", "D512-save1"])
+@pytest.mark.parametrize(
+    ("d", "save_ab"),
+    [
+        (64, False),
+        (128, False),
+        (256, False),
+        (384, False),
+        (512, False),
+        (384, True),
+        (512, True),
+    ],
+    ids=[
+        "D64-save0",
+        "D128-save0",
+        "D256-save0",
+        "D384-save0",
+        "D512-save0",
+        "D384-save1",
+        "D512-save1",
+    ],
+)
 @pytest.mark.parametrize("n", [384, 768])
 @pytest.mark.parametrize("master", [False, True])
-def test_native_required_buckets_pytorch_and_live_graph(d, save_ab, n, master, monkeypatch):
+def test_native_required_buckets_pytorch_and_live_graph(
+    d, save_ab, n, master, monkeypatch
+):
     """Every gradient has an independent PyTorch oracle; graph replay uses live leaves."""
     from miniworld_engine import settings
     from miniworld_engine.modules import Transition
@@ -308,7 +337,7 @@ def test_native_required_buckets_pytorch_and_live_graph(d, save_ab, n, master, m
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     monkeypatch.setenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1")
     monkeypatch.setenv("MINIWORLD_TRANSITION_H100_SAVE_AB", str(int(save_ab)))
-    monkeypatch.setenv("MINIWORLD_TRANSITION_WIDE_SAVE_H", "1")
+    settings.configure(transition_wide_save_h=True)
     monkeypatch.delenv("MINIWORLD_TRANSITION_D64_REPL", raising=False)
     module, x, dy = _build((1, n, n, d), seed=702 + d)
     if master:
@@ -329,7 +358,9 @@ def test_native_required_buckets_pytorch_and_live_graph(d, save_ab, n, master, m
     for index, (got, want) in enumerate(zip(actual, expected, strict=True)):
         assert got is not None
         assert want is not None
-        cosine = torch.nn.functional.cosine_similarity(got.float().flatten(), want.float().flatten(), dim=0)
+        cosine = torch.nn.functional.cosine_similarity(
+            got.float().flatten(), want.float().flatten(), dim=0
+        )
         assert cosine >= (0.9999 if index == 0 else 0.999), (index, float(cosine))
     del expected, actual, got, want, reference, yr, xr, y
 

@@ -175,9 +175,8 @@ def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
         ]
         rows = [n for n in names if any(r in n for r in DEFAULT_ROWS)]
         if inf3_env == "1":  # front -> core -> tail, none of the 12-launch rows
-            assert all(any(k in n for n in names) for k in INF3_NAMES) and not rows, (
-                names
-            )
+            assert all(any(k in n for n in names) for k in INF3_NAMES), names
+            assert not rows, names
         else:  # no front / tail kernel
             assert not any(k in n for n in names for k in INF3_NAMES[::2]), names
         compiled = torch.compile(
@@ -664,7 +663,7 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
                 int(i) % err.shape[2] * 32,
                 float(e),
             )
-            for e, i in zip(top.values, top.indices, strict=False)
+            for e, i in zip(top.values, top.indices, strict=True)
         ]
         raise AssertionError(
             f"dpb32 dbias rel {rel:.3e} (NJ {T.DPB32_NJ}); rerun bit-identical: "
@@ -841,9 +840,8 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     assert torch.isfinite(vg).all()
     assert relative(vg, want) < 3e-3, relative(vg, want)
     assert torch.equal(vg[:, :da], T32.round_tf32(vg[:, :da]))
-    assert torch.isfinite(xa).all() and torch.equal(
-        xa, T32.round_tf32(xa)
-    )  # the exchange scratch: every block written, TF32
+    assert torch.isfinite(xa).all()
+    assert torch.equal(xa, T32.round_tf32(xa))
     assert relative(xa, xa64) < 2e-3
     again = torch.empty_like(vg)
     front(x, tab[:, 1], w, again, T, xa=xa)
@@ -893,15 +891,13 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
     assert relative(out - x, want - x.double()) < 3e-3, relative(
         out - x, want - x.double()
     )
-    assert (
-        torch.isfinite(xt).all() and torch.isfinite(hs).all()
-    )  # the exchange scratch: every block written
-    rows = (
-        lambda t, nk: t.view(M // 128, nk, 128, 32)
-        .permute(0, 2, 1, 3)
-        .reshape(M, 32 * nk)
+    assert torch.isfinite(xt).all()
+    assert torch.isfinite(hs).all()
+    rows = lambda t, nk: (
+        t.view(M // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(M, 32 * nk)
     )
-    assert relative(xt, xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
+    assert relative(xt, xt64) < 2e-3
+    assert relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=cl)
     assert torch.equal(again, out)
@@ -948,15 +944,13 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     assert relative(out - x, want - x.double()) < 3e-3, relative(
         out - x, want - x.double()
     )
-    assert (
-        torch.isfinite(xt).all() and torch.isfinite(hs).all()
-    )  # every block of every tile, padding included
-    rows = (
-        lambda t, nk: t.view(Mp // 128, nk, 128, 32)
-        .permute(0, 2, 1, 3)
-        .reshape(Mp, 32 * nk)[:M]
+    assert torch.isfinite(xt).all()
+    assert torch.isfinite(hs).all()
+    rows = lambda t, nk: (
+        t.view(Mp // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(Mp, 32 * nk)[:M]
     )
-    assert relative(xt[:M], xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
+    assert relative(xt[:M], xt64) < 2e-3
+    assert relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=T32.TAIL_PAIR)
     assert torch.equal(again, out)
@@ -1042,9 +1036,8 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
         graph.replay()
         torch.cuda.synchronize()
         if static:
-            assert len(names) == 3 and all(
-                k in n for k, n in zip(INF3_NAMES, names, strict=True)
-            ), names
+            assert len(names) == 3, names
+            assert all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
             assert torch.equal(out, eager)
         else:
             assert all(k in n for k, n in zip(INF3_NAMES, names[-3:], strict=True)), (
@@ -1089,9 +1082,8 @@ def test_inf3_tables_follow_the_conditioning(inf3):
     with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
         fast(x, c, p)
         names = launched_kernels(lambda: fast(x, c, p))
-    assert len(names) == 3 and all(
-        k in n for k, n in zip(INF3_NAMES, names, strict=True)
-    ), names
+    assert len(names) == 3, names
+    assert all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
 
 
 def test_inf3_two_blocks_match_two_single_block_steps(inf3, monkeypatch):
@@ -1142,7 +1134,8 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
     for k in [front.kernel(cl) for cl in front.clusters()] + [
         tail.kernel(cl) for cl in (*T32.TAIL_CLUSTERS, T32.TAIL_PAIR)
     ]:
-        assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+        assert k.lmem == 0, (k.regs, k.lmem)
+        assert k.regs <= 168, (k.regs, k.lmem)
     core = T32.PvGateCoreTF32(dev, nh=n_head, dh=d_head, pdl=True)
     for sg in T32.pv_groups(d_head):
         k = core.kernel(sg, True)

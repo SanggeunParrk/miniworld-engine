@@ -2,6 +2,7 @@
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import token_dit, trimul_h100
@@ -130,9 +131,16 @@ def test_trimul_compile_backward_and_saved_tensor_ownership(monkeypatch):
 def test_token_dit_inference_live_inputs_weights_and_mask(dtype, qk):
     torch.manual_seed(811)
     m = randomize(
-        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .to(dtype)
     ).eval()
-    ref = DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
+    ref = (
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.PYTORCH)
+        .cuda()
+        .to(dtype)
+        .eval()
+    )
     ref.load_state_dict(m.state_dict())
     x = (
         torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)
@@ -311,3 +319,65 @@ def test_trimul_training_graph_replay_live_weights(width, monkeypatch):
 )
 def test_trimul_inference_width_coverage(width, bidirectional):
     test_trimul_inference_without_payload(bidirectional, 384, width)
+
+
+@pytest.mark.parametrize("qk", [False, True])
+def test_token_dit_bf16_step_runs_the_sm90_core(qk, monkeypatch):
+    """The bf16 step on H100 launches the sm_90a gated core (attn_fwd.cu GATED) and matches the Triton gated core it
+    replaces, with QK-norm on and off."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    torch.manual_seed(812)
+    m = randomize(
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .to(torch.bfloat16)
+    ).eval()
+    x = torch.randn(5, 1, 384, 768, device="cuda", dtype=torch.bfloat16)
+    c = torch.randn(1, 1, 384, 384, device="cuda", dtype=torch.bfloat16).expand(
+        5, 1, 384, 384
+    )
+    p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    calls = []
+    orig = sm90.gated_inference
+    monkeypatch.setattr(sm90, "gated_inference", lambda *a: calls.append(1) or orig(*a))
+    token_dit._RUNNERS.clear()
+    with torch.no_grad():
+        got = m(x, c, p, mask)
+        assert calls, "the bf16 step did not take the sm_90a core"
+        override_setting(monkeypatch, "augattn_bf16_sm90", False)
+        token_dit._RUNNERS.clear()
+        tri = m(x, c, p, mask)
+    assert torch.isfinite(got).all()
+    assert relative(got, tri) < 5e-3
+
+
+@pytest.mark.parametrize("qk", [False, True])
+def test_token_dit_fp32_step_runs_the_tf32_core(qk, monkeypatch):
+    """The fp32 step on H100 launches the TF32 wgmma core (attn_tf32.cu; key-permuted bias, v^T GEMM) and matches the
+    Triton TF32 gated core it replaces, with QK-norm on and off and a key mask."""
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    torch.manual_seed(813)
+    m = randomize(
+        DiTBlock(use_qk_norm=qk, implementation=ImplementationType.MINIWORLD).cuda()
+    ).eval()
+    x = torch.randn(5, 1, 384, 768, device="cuda")
+    c = torch.randn(1, 1, 384, 384, device="cuda").expand(5, 1, 384, 384)
+    p = torch.randn(1, 384, 384, 128, device="cuda")
+    mask = torch.rand(1, 384, device="cuda") > 0.2
+    calls = []
+    orig = sm90.tf32_gated_inference
+    monkeypatch.setattr(
+        sm90, "tf32_gated_inference", lambda *a: calls.append(1) or orig(*a)
+    )
+    token_dit._RUNNERS.clear()
+    with torch.no_grad():
+        got = m(x, c, p, mask)
+        assert calls, "the fp32 step did not take the TF32 core"
+        monkeypatch.setenv("MINIWORLD_AUGATTN_TF32_SM90", "0")
+        token_dit._RUNNERS.clear()
+        tri = m(x, c, p, mask)
+    assert torch.isfinite(got).all()
+    assert relative(got, tri) < 3e-3

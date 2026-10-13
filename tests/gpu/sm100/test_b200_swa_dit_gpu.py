@@ -111,7 +111,7 @@ def spy(monkeypatch):
         monkeypatch.setattr(
             sm100,
             name,
-            (lambda o, n: (lambda *a, **k: calls.append(n) or o(*a, **k)))(orig, name),
+            (lambda o, n: lambda *a, **k: calls.append(n) or o(*a, **k))(orig, name),
         )
     return calls
 

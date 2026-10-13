@@ -40,9 +40,8 @@ def test_build_3d_rope_matches_the_fp32_outer_product(device):
         ],
         -1,
     )
-    assert torch.allclose(cos[..., :16], want.cos(), atol=1e-6) and torch.allclose(
-        sin[..., :16], want.sin(), atol=1e-6
-    )
+    assert torch.allclose(cos[..., :16], want.cos(), atol=1e-6)
+    assert torch.allclose(sin[..., :16], want.sin(), atol=1e-6)
 
 
 @pytest.mark.skipif(
@@ -62,9 +61,7 @@ def test_bf16_compat_setting_restores_the_pre_fix_angles():
             cos_compat, _ = build_3d_rope(pos, uid, 32)
         cos_plain, _ = build_3d_rope(pos, uid, 32)
     finally:
-        settings.configure(
-            rope_angles_bf16_compat=previous.rope_angles_bf16_compat
-        )
+        settings.configure(rope_angles_bf16_compat=previous.rope_angles_bf16_compat)
     assert (
         cos_compat - cos_fp32
     ).abs().max() > 0.5  # the whole-turn UID error the fix removed

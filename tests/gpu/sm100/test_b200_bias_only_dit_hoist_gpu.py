@@ -180,9 +180,9 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
     tol = TOL[dtype]
     base = outs[0].untyped_storage().data_ptr()
     for i, (o, w) in enumerate(zip(outs, w_outs, strict=True)):
-        assert (
-            o.dtype is dtype and o.shape == (1, n_head, L, L) and o.is_contiguous()
-        ), i
+        assert o.dtype is dtype, i
+        assert o.shape == (1, n_head, L, L), i
+        assert o.is_contiguous(), i
         assert o.data_ptr() == base + i * n_head * L * L * o.element_size(), (
             i
         )  # slice i of the one [nb H, L L] buffer
@@ -190,10 +190,8 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
     assert dp.dtype is dtype, relative(dp, w_dp)
     assert relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
     for i in range(nb):
-        assert (
-            dgs[i].dtype is attns[i].ln_pair.weight.dtype
-            and dws[i].dtype is attns[i].to_bias.weight.dtype
-        ), i
+        assert dgs[i].dtype is attns[i].ln_pair.weight.dtype, i
+        assert dws[i].dtype is attns[i].to_bias.weight.dtype, i
         assert relative(dgs[i], w_dgs[i]) < tol["dg"], (i, relative(dgs[i], w_dgs[i]))
         assert relative(dws[i], w_dws[i]) < tol["dW"], (i, relative(dws[i], w_dws[i]))
 
@@ -229,16 +227,15 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
     assert torch.count_nonzero(dgs[1]) == 0
     assert torch.count_nonzero(dws[1]) == 0
     for i in (0, 2):
-        assert (
-            relative(dgs[i], w_dgs[i]) < tol["dg"]
-            and relative(dws[i], w_dws[i]) < tol["dW"]
-        ), i
+        assert relative(dgs[i], w_dgs[i]) < tol["dg"], i
+        assert relative(dws[i], w_dws[i]) < tol["dW"], i
 
 
 def test_serves_and_declines(monkeypatch):
     attns = attentions(2, 16, 48, BF)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=BF)
-    assert HO.serves(MW, attns, p) and HO.serves(ImplementationType.TRITON, attns, p)
+    assert HO.serves(MW, attns, p)
+    assert HO.serves(ImplementationType.TRITON, attns, p)
     assert not HO.serves(PT, attns, p)  # the PyTorch implementation: the fold
     assert not HO.serves(MW, attns, p.expand(2, -1, -1, -1))  # B == 1 only
     assert not HO.serves(MW, attns, p.half())  # bf16 / fp32 only
@@ -249,7 +246,7 @@ def test_serves_and_declines(monkeypatch):
         assert not HO.serves(MW, a32, p.float())  # fp32 under autocast: the fold
     override_setting(monkeypatch, "bias_only_dit_hoist", "0")
     assert not HO.serves(MW, attns, p)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must share eps and head count"):
         pair_bias_all(
             [*attns, *attentions(1, 24, 32, BF)], p, implementation=MW
         )  # head counts differ
@@ -394,9 +391,8 @@ def test_hoisted_stack_every_gradient_against_fp64(
         base_m, k, floor = ref, 1.5, 1e-3
     xb, cb, pb = (t.to(dtype).requires_grad_(True) for t in (x, c, p))
     bias0 = pair_bias_all(fast, pb)[0]
-    assert HO.serves(MW, [b.attention for b in fast], pb) and TR.serves(
-        fast[0], xb, cb, None, mask, bias=bias0
-    )
+    assert HO.serves(MW, [b.attention for b in fast], pb)
+    assert TR.serves(fast[0], xb, cb, None, mask, bias=bias0)
     del bias0
     cap, orig = {}, HO._hoist_bwd
 
@@ -579,10 +575,8 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
         nb_ = captured(lambda: bwd(x, c, p, mask, params, saved, dy))
         nbh = captured(lambda: bwdh(x, c, mask, params, saved_h, dy, db))
     assert not any("pair_bias" in n for n in nfh), nfh
-    assert sum("softmax_t" in n for n in nfh) == 1 and len(nfh) == len(nf) - 1, (
-        nf,
-        nfh,
-    )
+    assert sum("softmax_t" in n for n in nfh) == 1, (nf, nfh)
+    assert len(nfh) == len(nf) - 1, (nf, nfh)
     assert not any("pair_bias" in n for n in nbh), nbh
     assert sum("finalize" in n for n in nbh) == 1, nbh
     merged = any("pair_bias_bwd_fin" in n for n in nb_)

@@ -544,9 +544,8 @@ def test_hoisted_fp32_tables_are_made_once_per_conditioning_and_pair(cross):
     assert _count(names, "atom_gemm_tf32", "f32_adaln", "f32_gate") == 0, (
         names
     )  # the fused pre / post kernels only
-    assert (
-        _count(names, "atom_pre_tf32") == 1 and _count(names, "atom_post_tf32") == 1
-    ), names
+    assert _count(names, "atom_pre_tf32") == 1, names
+    assert _count(names, "atom_post_tf32") == 1, names
     assert _count(names, "local_attn_fwd_tf32") == 1
 
 
