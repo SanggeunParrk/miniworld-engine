@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import warnings
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -507,3 +508,113 @@ def engine_jit_root() -> Path:
     return (
         Path(xdg).expanduser() if xdg else Path.home() / ".cache"
     ) / "miniworld_engine_jit"
+
+
+#: Environment variables that used to switch these settings and are not read any more. The value is the setting that replaced
+#: the variable ("" when the switch was removed). Setting one now changes nothing, so it is reported instead of ignored silently.
+_REMOVED_ENVIRONMENT = {
+    "MINIWORLD_AUGATTN_BF16_SM100": "augattn_bf16_sm100",
+    "MINIWORLD_AUGATTN_BF16_SM90": "augattn_bf16_sm90",
+    "MINIWORLD_BIAS_ONLY_DIT": "bias_only_dit",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_DG": "bias_only_dit_bwd_dg",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED": "bias_only_dit_bwd_fused",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_MID": "bias_only_dit_bwd_mid",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_PBFIN": "bias_only_dit_bwd_pbfin",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB": "bias_only_dit_bwd_pvdpb",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_PVPDL": "bias_only_dit_bwd_pvpdl",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL": "bias_only_dit_bwd_tail",
+    "MINIWORLD_BIAS_ONLY_DIT_COND": "bias_only_dit_cond",
+    "MINIWORLD_BIAS_ONLY_DIT_CORE": "bias_only_dit_core",
+    "MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR": "bias_only_dit_dpb_pair",
+    "MINIWORLD_BIAS_ONLY_DIT_HOIST": "bias_only_dit_hoist",
+    "MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT": "bias_only_dit_hoist_wsplit",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3": "bias_only_dit_inf3",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA": "bias_only_dit_inf3_2cta",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3_BF16": "bias_only_dit_inf3_bf16",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3_CL": "bias_only_dit_inf3_cl",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3_P_EARLY": "bias_only_dit_inf3_p_early",
+    "MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL": "bias_only_dit_inf3_tail_cl",
+    "MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT": "bias_only_dit_pair_exact",
+    "MINIWORLD_BIAS_ONLY_DIT_PV_BATCH": "bias_only_dit_pv_batch",
+    "MINIWORLD_BIAS_ONLY_DIT_PV_VB": "bias_only_dit_pv_vb",
+    "MINIWORLD_BIAS_ONLY_DIT_RESLN": "bias_only_dit_resln",
+    "MINIWORLD_BIAS_ONLY_DIT_SG": "bias_only_dit_sg",
+    "MINIWORLD_BIAS_ONLY_DIT_TF32": "bias_only_dit_tf32",
+    "MINIWORLD_BIAS_ONLY_DIT_TF32_DPB_PAIR": "bias_only_dit_tf32_dpb_pair",
+    "MINIWORLD_BIAS_ONLY_DIT_TF32_GLU": "bias_only_dit_tf32_glu",
+    "MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD": "bias_only_dit_tf32_glu_bwd",
+    "MINIWORLD_BIAS_ONLY_DIT_TRAIN": "bias_only_dit_train",
+    "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
+    "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
+    "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
+    "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
+    "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",
+    "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
+    "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
+    "MINIWORLD_LOCAL_DIT_TF32_FUSED": "local_dit_tf32_fused",
+    "MINIWORLD_OPM_TRAIN": "opm_train",
+    "MINIWORLD_OPM_TRAIN_SAVE_O": "opm_train_save_o",
+    "MINIWORLD_PLAN_CACHE_DIR": "plan_cache_dir",
+    "MINIWORLD_PWA_INFER": "pwa_infer",
+    "MINIWORLD_PWA_TRAIN": "pwa_train",
+    "MINIWORLD_ROPE_ANGLES_BF16": "rope_angles_bf16_compat",
+    "MINIWORLD_STATIC_CONDITIONING": "static_conditioning",
+    "MINIWORLD_STATIC_WEIGHTS": "static_weights",
+    "MINIWORLD_SWA_DIT_SM100": "swa_dit_sm100",
+    "MINIWORLD_SWA_DIT_TF32": "swa_dit_tf32",
+    "MINIWORLD_SWA_FUSED": "swa_fused",
+    "MINIWORLD_SWA_GLOBAL_BF16": "swa_global_bf16",
+    "MINIWORLD_TF32_FUSED_UNITS": "tf32_fused_units",
+    "MINIWORLD_TF32_PDL": "tf32_pdl",
+    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU": "token_dit_gemm_swiglu",
+    "MINIWORLD_TOKEN_DIT_ROWS_CUDA": "token_dit_rows_cuda",
+    "MINIWORLD_TOKEN_DIT_TRAIN": "token_dit_train",
+    "MINIWORLD_TRANSITION_FUSED_SM100A": "transition_fused_sm100a",
+    "MINIWORLD_TRANSITION_FUSED_SM80": "transition_fused_sm80",
+    "MINIWORLD_TRANSITION_FUSED_SM90A": "transition_fused_sm90a",
+    "MINIWORLD_TRANSITION_SM100_NVCC": "transition_sm100_nvcc",
+    "MINIWORLD_TRANSITION_SM100_REPL": "transition_sm100_repl",
+    "MINIWORLD_TRANSITION_WIDE_REPL": "transition_wide_repl",
+    "MINIWORLD_TRANSITION_WIDE_SAVE_H": "transition_wide_save_h",
+    "MINIWORLD_TRANSITION_WIDE_SM90A": "transition_wide_sm90a",
+    "MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES": "transition_wide_small_fwd_tiles",
+    "MINIWORLD_TRANSITION_WIDE_SMALL_TILES": "transition_wide_small_tiles",
+    "MINIWORLD_TDIT32_WGRAD_SPLIT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_ATOM_RG_TMA": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL_NST": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_SWA_DIT_SM100_FUSED_BWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_SM80_FLAGS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_SM80_NREP": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_Q_FWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_QG_FWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_QKV_FWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIATTN_TRAINING_FWD": "",  # removed: the default behaviour is the only one
+    "MW_WIDE_INFER_CFG": "",  # removed: the default behaviour is the only one
+    "TRIMUL_NATIVE_DRIVER": "",  # removed: the default behaviour is the only one
+    "TRIMUL_NATIVE_PDL": "",  # removed: the default behaviour is the only one
+    "MW_SLDDT_TILE": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BO_ROWS_BLOCKS_PER_SM": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB": "",  # removed: the default behaviour is the only one
+}
+
+
+def _warn_about_removed_environment() -> None:
+    """Warn once about any variable of ``_REMOVED_ENVIRONMENT`` that is set: its value no longer has any effect."""
+    present = sorted(name for name in _REMOVED_ENVIRONMENT if name in os.environ)
+    if not present:
+        return
+    detail = ", ".join(
+        f"{n} -> settings.{_REMOVED_ENVIRONMENT[n]}"
+        if _REMOVED_ENVIRONMENT[n]
+        else f"{n} (removed)"
+        for n in present
+    )
+    warnings.warn(
+        "miniworld_engine no longer reads these environment variables; use miniworld_engine.settings.configure(...) "
+        f"(MiniWorld: train.engine_settings): {detail}",
+        UserWarning,
+        stacklevel=2,
+    )
+
+
+_warn_about_removed_environment()
