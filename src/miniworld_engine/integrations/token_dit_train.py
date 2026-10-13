@@ -45,6 +45,7 @@ LayerNorm are computed per block rather than once per stack.
 from __future__ import annotations
 
 import contextlib
+import os
 
 import torch
 
@@ -226,6 +227,20 @@ def _pack(P, qk, dev, at):
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
+    native_pack = (os.environ.get("MINIWORLD_TOKEN_DIT_SM80_NATIVE_TRAIN_PACK", "0") == "1"
+                   and not qk and at is BF and torch.cuda.get_device_capability(dev) == (8, 0)
+                   and tuple(P["attention.to_out.weight"].shape) == (768, 768)
+                   and tuple(P["attention.to_bias.weight"].shape) == (16, 128))
+    if native_pack:
+        if os.environ.get("MINIWORLD_TOKEN_DIT_SM80_ALIAS_TRAIN_PACK", "0") == "1":
+            from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_alias_sm80 as pack_kernel
+        else:
+            from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_sm80 as pack_kernel
+        W = pack_kernel.result([P[n] for n in _names_for(False)])
+        if slot is not None:
+            _capture.prune(_PACKS)
+            _PACKS[slot] = (key, W)
+        return W
     g = lambda n: P[n]
     D = g("attention.to_out.weight").shape[0]
     DH = D // g("attention.to_bias.weight").shape[0]
@@ -615,7 +630,21 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         vc = qkvg[:, 2 * D : 3 * D]
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
-    W = _pack(dict(zip(names, params, strict=False)), qk, single.device, at)
+    parameters = dict(zip(names, params, strict=False))
+    W = _pack(parameters, qk, single.device, at)
+    typed_grad = (
+        not fp32
+        and torch.cuda.get_device_capability(single.device) == (8, 0)
+        and os.environ.get("MINIWORLD_TOKEN_DIT_TYPED_GRAD", "0") == "1"
+    )
+
+    def weight_gradient(a, b, *parameter_names):
+        # The B200 bias-only block already emits its large gradients in the
+        # parameter dtype. Keep FP32 masters and folded-LN gradients in FP32.
+        if typed_grad and all(parameters[n].dtype is BF for n in parameter_names):
+            return torch.mm(a, b)
+        return _mm32(a, b)
+
     Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = (
         W["Wn"],
         W["Wraw"],
@@ -646,47 +675,73 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dab = torch.empty_like(ab)
     h = torch.empty_like(dh)
     T.swiglu_bwd(dh, ab, dab, h)
-    dWsq = _mm32(dz.t(), h)
+    dWsq = weight_gradient(dz.t(), h, "transition.squeeze.weight")
     # fp32: the dxt / dxa GEMMs write straight into their column blocks of dG (the row kernels then copy nothing)
     dxt = torch.mm(dab, Wab, out=dG[:, 3 * D :]) if fp32 else torch.mm(dab, Wab)
-    dWab = _mm32(dab.t(), xt)
+    dWab = weight_gradient(
+        dab.t(), xt, "transition.expand_a.weight", "transition.expand_b.weight"
+    )
     dx1 = torch.empty(M, D, device=dev)
     dy = torch.empty(M, D, device=dev, dtype=at)
     T.res_adaln_b_bwd(
         dout, dxt, x1, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2]
     )
     dog = torch.mm(dy, Wo)
-    dWo = _mm32(dy.t(), og)
+    dWo = weight_gradient(dy.t(), og, "attention.to_out.weight")
     dob = torch.empty(M, D, device=dev, dtype=at)
     dd = torch.empty(A, H, L, device=dev)
     dqkvg = torch.empty(M, 4 * D, device=dev, dtype=at)
     T.gate_o_bwd(dog, O, qkvg, dob, dd, dqkvg, L)
-    # fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
-    DQ, DK, DV, DB = (
-        attn.backward_tf32(
-            qn,
-            kn,
-            vc,
-            dob,
-            bias,
-            LSE,
-            dd,
-            A,
-            L,
-            H,
-            DH,
-            dq=dqkvg[:, :D],
-            dk=dqkvg[:, D : 2 * D],
-            dv=dqkvg[:, 2 * D : 3 * D],
-        )
-        if fp32
-        else attn.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH)
+    direct_grad = (
+        not fp32
+        and not qk
+        and (H, D) == (16, 768)
+        and torch.cuda.get_device_capability(dev) == (8, 0)
+        and os.environ.get("MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD", "1") == "1"
     )
-    T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
+    if direct_grad:
+        # The no-QK-norm path rounds the attention gradients directly into the
+        # packed projection gradient, preserving natural bias units and the
+        # original query-bias reduction order. gate_o_bwd already wrote gate.
+        from miniworld_engine.kernels.augmented_attention.cuda import token_grad_sm80
+
+        DB = token_grad_sm80.backward(
+            qn, kn, vc, dob, bias, LSE, dd, dqkvg, part[4], A, L, H
+        )
+    else:
+        # fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums
+        DQ, DK, DV, DB = (
+            attn.backward_tf32(
+                qn,
+                kn,
+                vc,
+                dob,
+                bias,
+                LSE,
+                dd,
+                A,
+                L,
+                H,
+                DH,
+                dq=dqkvg[:, :D],
+                dk=dqkvg[:, D : 2 * D],
+                dv=dqkvg[:, 2 * D : 3 * D],
+            )
+            if fp32
+            else attn.backward(qn, kn, vc, dob, bias, LSE, dd, A, L, H, DH)
+        )
+        T.qknorm_bwd(DQ, DK, DV, qkvg, rqk, nq, nk, dqkvg, part[4], pwqk, qk)
     dxa = (
         torch.mm(dqkvg, Wqkvg, out=dG[:, D : 2 * D]) if fp32 else torch.mm(dqkvg, Wqkvg)
     )
-    dWqkvg = _mm32(dqkvg.t(), xa)
+    dWqkvg = weight_gradient(
+        dqkvg.t(),
+        xa,
+        "attention.to_query.weight",
+        "attention.to_key.weight",
+        "attention.to_value.weight",
+        "attention.to_gate.weight",
+    )
     dx = torch.empty(M, D, device=dev, dtype=sdt)
     T.adaln_a_bwd(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
     sums = (
@@ -701,7 +756,12 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dchat = torch.mm(dG, Wn)
     dWn = _mm32(dG.t(), chat)
     dcg = torch.mm(dGg, Wg)
-    dWg = _mm32(dGg.t(), c2 if cbf.numel() == 0 else cbf)
+    dWg = weight_gradient(
+        dGg.t(),
+        c2 if cbf.numel() == 0 else cbf,
+        "attention.to_scale.weight",
+        "transition.to_scale.weight",
+    )
     dc = torch.empty(M, DC, device=dev, dtype=cdt)
     T.cond_bwd(dchat, dcg, c2, cst, dc)
     dWu = torch.empty_like(dWn)

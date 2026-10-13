@@ -93,7 +93,7 @@ __global__ void __launch_bounds__(EpCfg<CZ, NSTAGE, NMINB, WIDE>::NTHR, EpCfg<CZ
     const int il = tid / C::BJ, jl = tid % C::BJ, i = i0 + il, j = j0 + jl;
     float n = p.norm_const;
     if ((i < p.L) & (j < p.L) && p.norm != nullptr) n = p.norm[(long)i * p.L + j];
-    sinv[tid] = 1.0f / n;
+    sinv[tid] = 1.0f / fmaxf(n, 1.0f); // consume raw mask counts without a separate clamp pass
   }
   for (int v = tid; v < CZ; v += C::NTHR) sbias[v] = p.bias[n0 + v];
 

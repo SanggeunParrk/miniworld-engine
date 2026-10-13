@@ -132,16 +132,65 @@ def inference(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch
     """x [M, d], cond [P, dc] (P divides M: row r of x takes conditioning row r % P) -> x + tail(AdaLN(x, cond)) (residual) or the update alone."""
     ka, kt = _adaln(), _tail()
     with torch.cuda.device(x.device):
-        wcat, wab = _pack(ws1, wb1, wa, wb, True)
-        # Small inputs occupy too few SMs with the persistent atom kernels;
-        # the row passes plus cuBLAS win through 4096 rows on A100.
+        ws1, sb1, wb1, wa, wb, ws, wsc, bsc = cast_params((ws1, sb1, wb1, wa, wb, ws, wsc, bsc), x.dtype, True)
+        clean = os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+        if not clean:
+            wcat, wab = _pack(ws1, wb1, wa, wb, True)
+        # E095 optin: split hidden256 into128-wide FP32 partial products.
+        atom_split_override = os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT")
+        atom_split = (atom_split_override == "1" if atom_split_override is not None
+                      else x.shape[0] in (1024, 2048))
+        if (atom_split and x.shape[0] in (1024, 2048)
+                and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)):
+            from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_split_sm80
+            wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
+            xa, y = torch.empty_like(x), torch.empty_like(x)
+            partial = torch.empty((2, x.shape[0], 128), device=x.device, dtype=torch.float32)
+            gate = torch.empty_like(x, dtype=torch.float32)
+            cfg = int(os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT_CFG", str(1 if x.shape[0] == 1024 else 5)))
+            ct_atom_split_sm80.run(x, cond, (lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc),
+                                  wab, xa, y, partial, gate, cfg, eps_x, eps_c, residual)
+            return y
+        atom_narrow_override = os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_NARROW")
+        atom_narrow = (atom_narrow_override == "1" if atom_narrow_override is not None
+                       else x.shape[0] == 2048)
+        if (atom_narrow
+                and x.shape[0] in (1024, 2048)
+                and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)):
+            from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_narrow_sm80
+            wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
+            xa, y = torch.empty_like(x), torch.empty_like(x)
+            ct_atom_narrow_sm80.run(x, cond, (lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc),
+                                   wab, xa, y, 6, eps_x, eps_c, residual)
+            return y
+        atom_small_override = os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_SMALL")
+        # Seven alternating A100 pairs qualify these four physical row counts.
+        # The 1024/2048-row candidates lose to the existing cuBLAS path.
+        atom_small = (atom_small_override == "1" if atom_small_override is not None
+                      else x.shape[0] in (4096, 5120, 10240, 20480))
+        if (atom_small
+                and x.shape[0] in (1024, 2048, 4096, 5120, 10240, 20480)
+                and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)):
+            from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_small_sm80
+            wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
+            xa, y = torch.empty_like(x), torch.empty_like(x)
+            cfg = 10 if x.shape[0] <= 5120 else 11
+            ct_atom_small_sm80.run(x, cond, (lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc),
+                                  wab, xa, y, cfg, eps_x, eps_c, residual)
+            return y
+        # The original row passes plus cuBLAS remain fastest at 1024/2048
+        # rows; explicit disabling also preserves the previous dispatch.
         if x.shape[0] > 4096 and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):
+            if clean:
+                wab = cached("atom_wab", (wa, wb), lambda: torch.cat([wa, wb]))
             xa = ka.atom_fwd(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c)[0]
             return kt.atom_fwd(xa, x if residual else None, cond, wab, ws, wsc, bsc)[0]
         if kt.atom_tf32_supported(x, cond, wa) and ka.atom_tf32_supported(x, cond):    # d = dc = 128, fp32: the AdaLN in one kernel, the tail in two, all on TF32 tensor cores
             xa = ka.atom_fwd_tf32(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c)
             wab32, wsp = _pack_tf32(wa, wb, ws)
             return kt.atom_fwd_tf32(xa, x if residual else None, cond, wab32, wsp, wsc, bsc)
+        if clean:
+            wcat, wab = _pack(ws1, wb1, wa, wb, True)
         br = Branch(x.device)
         g = br.run(lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc)         # the gate GEMM beside the chain below: nothing needs it before the last pass
         aff, _ = ka.cond_ln(cond, lnw, x.dtype, eps_c)
@@ -161,30 +210,41 @@ def _gate_logits(cond, wsc, bsc):
 
 
 # -------------------------------------------------------------------------------------------------------------- training
-def _train_fwd_fake(x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, eps_x, eps_c, residual):
+def _train_fwd_fake(x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, eps_x, eps_c, residual, native_cast=False, save_cast=False):
     m, d = x.shape
     dc, nd = cond.shape[1], wa.shape[0]
     e = x.new_empty
+    casts = [torch.empty_like(t, dtype=BF) for t in (ws1, sb1, wb1, wa, wb, ws, wsc, bsc)] if save_cast else []
     if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and _tail().atom_supported(x, cond, wa) and _adaln().atom_supported(x, cond):          # the fused atom kernels keep xa, rn(z) and the statistics only
-        return [torch.empty_like(x), e((0,)), e((m, 2), dtype=torch.float32), e((0,)), e((m, 2), dtype=torch.float32), e((m, d)), e((0,)), e((m, d)), e((0,)), e((0,)), e((2 * nd, d))]
+        return [torch.empty_like(x), e((0,)), e((m, 2), dtype=torch.float32), e((0,)), e((m, 2), dtype=torch.float32), e((m, d)), e((0,)), e((m, d)), e((0,)), e((0,)), e((2 * nd, d))] + casts
     return [torch.empty_like(x), e((m, dc)), e((m, 2), dtype=torch.float32), e((m, 2 * d)), e((m, 2), dtype=torch.float32), e((m, d)), e((m, 2 * nd)), e((m, d)), e((m, d)),
-            e((2 * d, dc)), e((2 * nd, d))]
+            e((2 * d, dc)), e((2 * nd, d))] + casts
 
 
 @opaque(fake=_train_fwd_fake, name="conditioned_transition_sm80_train_fwd")
 def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch.Tensor, sb1: torch.Tensor, wb1: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-              ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor, eps_x: float, eps_c: float, residual: bool) -> list[torch.Tensor]:
+              ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor, eps_x: float, eps_c: float, residual: bool, native_cast: bool = False, save_cast: bool = False) -> list[torch.Tensor]:
     """The forward saving what the backward reads: [y, LN(cond) w [M, dc], cond (mean, rstd) [M, 2], [S | B] [M, 2 d], x (mean, rstd) [M, 2], xa [M, d], [a | b] [M, 2 n d], z [M, d],
     g [M, d], [Ws1; Wb1] [2 d, dc], [Wa; Wb] [2 n d, d]]; cond is one row per row of x (the packed weights are read again by the backward: packed once per step)."""
     ka, kt = _adaln(), _tail()
     with torch.cuda.device(x.device):
+        packed_weights = None
+        if native_cast:
+            if save_cast and os.environ.get("MINIWORLD_CONDTRANS_SM80_PACK_PARAM_CAST", "0") == "1":
+                from miniworld_engine.kernels.parameter_cast.cuda.pack_sm80 import result
+                atom = x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond)
+                pairs = ((3, 4),) if atom else ((0, 2), (3, 4))
+                (ws1, sb1, wb1, wa, wb, ws, wsc, bsc), packed_weights = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc), pairs)
+            else:
+                from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+                ws1, sb1, wb1, wa, wb, ws, wsc, bsc = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc))
         if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):          # large d = dc = 128 bf16 inputs: fused rows; small inputs use cuBLAS below
             xa, xst, cst = ka.atom_fwd(x, cond, lnw, ws1, wb1, sb1, eps_x, eps_c, stats=True)
-            wab = torch.cat([wa, wb])
+            wab = packed_weights[0] if packed_weights is not None else torch.cat([wa, wb])
             y, z = kt.atom_fwd(xa, x if residual else None, cond, wab, ws, wsc, bsc, save_z=True)
             e = x.new_empty
-            return [y, e((0,)), cst, e((0,)), xst, xa, e((0,)), z, e((0,)), e((0,)), wab]          # custom-op outputs may not alias: one empty tensor each
-        wcat, wab = _pack(ws1, wb1, wa, wb, False)
+            return [y, e((0,)), cst, e((0,)), xst, xa, e((0,)), z, e((0,)), e((0,)), wab] + ([ws1, sb1, wb1, wa, wb, ws, wsc, bsc] if save_cast else [])  # distinct allocated casts
+        wcat, wab = packed_weights if packed_weights is not None else _pack(ws1, wb1, wa, wb, False)
         br = Branch(x.device)
         g = br.run(lambda: _gate_logits(cond, wsc, bsc), cond, wsc, bsc)         # the gate GEMM beside the chain below
         aff, cst = ka.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
@@ -194,10 +254,10 @@ def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch
         z = _mm_op(kt.swiglu_fwd(ab), ws.t())
         br.join()
         y = kt.gate_res_fwd(x if residual else None, z, g)
-    return [y, aff, cst, sbt, xst, xa, ab, z, g, wcat, wab]
+    return [y, aff, cst, sbt, xst, xa, ab, z, g, wcat, wab] + ([ws1, sb1, wb1, wa, wb, ws, wsc, bsc] if save_cast else [])
 
 
-def _train_bwd_fake(dy, x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, aff, cst, sbt, xst, xa, ab, z, g, wcat, wab, residual, fp32_grads=False):
+def _train_bwd_fake(dy, x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, aff, cst, sbt, xst, xa, ab, z, g, wcat, wab, residual, fp32_grads=False, native_cast=False):
     """Fake of ``train_bwd``: the gradient shapes and dtypes."""
     return [torch.empty_like(x), torch.empty_like(cond)] + [torch.empty(t.shape, dtype=torch.float32 if fp32_grads or t is lnw else t.dtype, device=t.device) for t in (lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc)]
 
@@ -205,17 +265,39 @@ def _train_bwd_fake(dy, x, cond, lnw, ws1, sb1, wb1, wa, wb, ws, wsc, bsc, aff, 
 @opaque(fake=_train_bwd_fake, name="conditioned_transition_sm80_train_bwd")
 def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws1: torch.Tensor, sb1: torch.Tensor, wb1: torch.Tensor, wa: torch.Tensor,
               wb: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor, aff: torch.Tensor, cst: torch.Tensor, sbt: torch.Tensor, xst: torch.Tensor,
-              xa: torch.Tensor, ab: torch.Tensor, z: torch.Tensor, g: torch.Tensor, wcat: torch.Tensor, wab: torch.Tensor, residual: bool, fp32_grads: bool = False) -> list[torch.Tensor]:
+              xa: torch.Tensor, ab: torch.Tensor, z: torch.Tensor, g: torch.Tensor, wcat: torch.Tensor, wab: torch.Tensor, residual: bool, fp32_grads: bool = False, native_cast: bool = False) -> list[torch.Tensor]:
     """[dx, dcond, d lnw, dWs1, d sb1, dWb1, dWa, dWb, dWs, dWsc, d bsc] (each in its input's dtype; the weights' and biases' fp32 when ``fp32_grads``: fp32 master parameters, unrounded) from the gradient dy [M, d] and the forward's saved tensors."""
     ka, kt = _adaln(), _tail()
     d, nd = x.shape[1], wa.shape[0]
     with torch.cuda.device(x.device):
+        if native_cast:
+            from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+            ws1, sb1, wb1, wa, wb, ws, wsc, bsc = result((ws1, sb1, wb1, wa, wb, ws, wsc, bsc))
         if x.shape[0] > _ATOM_TRAIN_ROW_THRESHOLD and kt.atom_supported(x, cond, wa) and ka.atom_supported(x, cond):          # same decomposition as train_fwd and its fake
             dz, dg, dcond2, hh, dab, pbsc = kt.atom_bwd_gate(dy, z, cond, xa, wab, ws, wsc, bsc)
             dxa = kt.atom_bwd_dxa(dab, wab)
-            dws, dwab, dwsc = _wgrad(dz, hh), _wgrad(dab, xa), _wgrad(dg, cond)
+            if (os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_SPLIT", "0") == "1"
+                    and x.shape[0] == 48 * 8192 and dz.dtype is BF
+                    and dz.shape[1] == 128 and hh.shape[1] == 256):
+                if os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_WIDE", "0") == "1":
+                    from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_wgrad_wide_sm80
+                    dws = ct_atom_wgrad_wide_sm80.result(dz, hh)
+                else:
+                    from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_wgrad_split_sm80
+                    dws = ct_atom_wgrad_split_sm80.result(dz, hh)
+            else:
+                dws = _wgrad(dz, hh)
+            fused_cond_wgrad = (os.environ.get("MINIWORLD_CONDTRANS_SM80_ATOM_COND_WGRAD_FUSED", "0") == "1"
+                                and x.shape[0] in (48 * 4096, 48 * 8192))
+            dwab = _wgrad(dab, xa)
+            if not fused_cond_wgrad:
+                dwsc = _wgrad(dg, cond)
             dx, dcond, dsc, aff, psb1, plw = ka.atom_bwd(dxa, x, cond, xst, cst, lnw, ws1, wb1, sb1, dy if residual else None, dcond2)
-            dws1, dwb1 = _wgrad(dsc, aff), _wgrad(dxa, aff)
+            if fused_cond_wgrad:
+                from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80
+                dws1, dwb1, dwsc = ct_atom_cond_wgrad_fused_sm80.result(dsc, dxa, dg, aff, cond)
+            else:
+                dws1, dwb1 = _wgrad(dsc, aff), _wgrad(dxa, aff)
         else:
             dz, dg, pbsc = kt.gate_res_bwd(dy, z, g)
             br = Branch(x.device)                                          # the weight gradients (and the gate's data gradient) beside the data gradient's chain of row passes and GEMMs
@@ -245,8 +327,14 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, residual, eps_x, eps_c, x, cond, *params):
         ctx.fp32_grads = master((params[1],), x.dtype)
-        leaves = [params[0], *cast_params(tuple(params[1:]), x.dtype, False)]
-        y, *saved = train_fwd(x, cond, *leaves, eps_x, eps_c, residual)
+        ctx.save_cast = (ctx.fp32_grads and all(t.dtype is torch.float32 for t in params[1:])
+                         and os.environ.get("MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST", "0") == "1")
+        ctx.native_cast = ctx.fp32_grads and (ctx.save_cast or os.environ.get("MINIWORLD_CONDTRANS_SM80_NATIVE_PARAM_CAST", "0") == "1")
+        leaves = list(params) if ctx.native_cast else [params[0], *cast_params(tuple(params[1:]), x.dtype, False)]
+        y, *saved = train_fwd(x, cond, *leaves, eps_x, eps_c, residual, ctx.native_cast, ctx.save_cast)
+        if ctx.save_cast:
+            leaves = [leaves[0], *saved[-8:]]
+            saved = saved[:-8]
         ctx.save_for_backward(x, cond, *leaves, *saved)
         ctx.residual = residual
         return y
@@ -255,7 +343,7 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        grads = train_bwd(dy.contiguous(), *v, ctx.residual, ctx.fp32_grads)
+        grads = train_bwd(dy.contiguous(), *v, ctx.residual, ctx.fp32_grads, ctx.native_cast and not ctx.save_cast)
         return (None, None, None, *grads)
 
 
@@ -273,5 +361,5 @@ def update(module, x: torch.Tensor, cond: torch.Tensor, residual: bool, compute_
     if grad:
         y = _Training.apply(residual, *eps, xs, cs, *_params(module))
     else:
-        y = inference(xs, cs, *_leaves(module, compute_dtype, True), *eps, residual)
+        y = inference(xs, cs, *_params(module), *eps, residual)
     return y.reshape(x.shape)

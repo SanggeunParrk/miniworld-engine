@@ -168,3 +168,53 @@ def test_fp32_runs_the_tf32_attention_core(monkeypatch):
     assert kinds
     assert all(kind is torch.float32 for kind in kinds)
     assert relative(got, want) < 6e-3
+
+
+def test_cuda_pack_matches_existing_weight_recipe(monkeypatch):
+    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
+        FusedTokenDiT,
+    )
+
+    torch.manual_seed(815)
+    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    m.attention.ada_ln_in.ln_cond.float()
+    m.transition.ada_ln_in.ln_cond.float()
+    m.attention.ln_pair.float()
+    with torch.no_grad():
+        monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "0")
+        old = FusedTokenDiT([m])
+        monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "1")
+        new = FusedTokenDiT([m])
+        for name in ("w1", "b1", "w2", "b2", "pw_t"):
+            assert torch.equal(getattr(old, name), getattr(new, name)), name
+        for name in old.per[0]:
+            assert torch.equal(old.per[0][name], new.per[0][name]), name
+
+
+def test_cuda_preparation_graph_reads_changed_weights_pair_and_mask(monkeypatch):
+    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "1")
+    torch.manual_seed(816)
+    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    x = torch.randn(3, 1, 128, 768, device="cuda", dtype=torch.bfloat16)
+    c = torch.randn(1, 1, 128, 384, device="cuda", dtype=torch.bfloat16).expand(3, -1, -1, -1)
+    p = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.ones(1, 128, device="cuda", dtype=torch.bool)
+    compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+    with torch.no_grad():
+        for _ in range(3):
+            compiled(x, c, p, mask)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = compiled(x, c, p, mask)
+        previous = captured.clone()
+        for iteration in range(2):
+            for parameter in m.parameters():
+                parameter.add_(0.01 * torch.randn_like(parameter))
+            x.add_(0.1 * torch.randn_like(x))
+            c[:1].add_(0.1 * torch.randn_like(c[:1]))
+            p.add_(0.2 * torch.randn_like(p))
+            mask.copy_(torch.rand_like(mask, dtype=torch.float32) > (0.5 if iteration == 0 else 0.1))
+            graph.replay()
+            assert not torch.equal(previous, captured)
+            assert relative(captured, m(x, c, p, mask)) < 1e-5
+            previous = captured.clone()

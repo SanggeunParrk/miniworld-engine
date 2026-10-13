@@ -15,6 +15,7 @@ What each call hoists, and why it may:
 """
 
 import contextlib
+import os
 
 import torch
 import torch.nn.functional as F
@@ -150,6 +151,22 @@ class FusedTokenDiT:
         # QK-norm (RMSNorm of every q / k head after the projection) runs as one in-place CUDA row pass; the
         # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
         self.qk = bool(a0.use_qk_norm)
+        import os
+        if (self.nb == 1 and (self.d, self.dc, self.dp, self.h) == (768, 384, 128, 16)
+                and dtype is torch.bfloat16 and not self.qk and dev.type == "cuda"
+                and torch.cuda.get_device_capability(dev) == (8, 0)
+                and hasattr(self.K, "pack_token")
+                and os.environ.get("MINIWORLD_TOKEN_DIT_PREP", "1") != "0"):
+            scaled = prescale and core in ("gated", "gated2")
+            packed = self.K.pack_token(blocks[0], 48 ** -0.5 * 1.4426950408889634 if scaled else 1.,
+                                       1.4426950408889634 if scaled else 1.)
+            wq, bq, wab, self.w1, self.b1, self.w2, self.b2, self.pw_t = packed
+            self.col = dict(q=0, k=1, v=2, g=3)
+            self.per = [dict(wqkvg=wq, bqkvg=bq, wab=wab,
+                             wo=a0.to_out.weight.detach().to(dtype).contiguous(),
+                             ws=blocks[0].transition.squeeze.weight.detach().to(dtype).contiguous())]
+            self.dtype, self._buf, self.streams, self._streams = dtype, {}, 1, []
+            return
         if self.qk:
             if not hasattr(self.K, "qknorm_rows"):
                 raise NotImplementedError(
@@ -282,8 +299,14 @@ class FusedTokenDiT:
                 h=torch.empty(
                     M, self.per[0]["wab"].shape[0] // 2, device=dev, dtype=self.dtype
                 ),
-                # the attention core allocates and fills an all-true mask per call when handed None
-                keep=torch.ones(S, 1, L, device=dev, dtype=torch.bool),
+                # the attention core allocates and fills an all-true mask per call when handed None; gated2 already
+                # consumes the mask folded into pair bias, so it takes None
+                keep=(
+                    None
+                    if self.core == "gated2"
+                    and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+                    else torch.ones(S, 1, L, device=dev, dtype=torch.bool)
+                ),
                 lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
                 # v2
                 xa=torch.empty(M, self.d, device=dev, dtype=self.dtype),
@@ -420,7 +443,7 @@ class FusedTokenDiT:
                 qkvg.view(-1)[: 3 * M * D].view(M, 3 * D),
                 qkvg.view(-1)[3 * M * D :].view(D, M),
             )
-        keep2 = buf["keep"].view(S, L)
+        keep2 = None if buf["keep"] is None else buf["keep"].view(S, L)
         gsw = self._gemm_swiglu(single.device, xa)
         if self.core == "gated2" and not sm100:
             assert self.prescale, "the v2 core expects pre-scaled logits"

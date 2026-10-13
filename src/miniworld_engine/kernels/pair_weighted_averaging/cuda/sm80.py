@@ -42,6 +42,20 @@ def ext():
         extra_cflags=["-std=c++17", "-O3"], verbose=False)
 
 
+@functools.lru_cache(maxsize=1)
+def _bmm_ext():
+    ensure_cuda_home()
+    return load_extension(
+        name="pwa_broadcast_bmm_sm80", sources=[str(_dir / "broadcast_bmm.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
+        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+
+
+def broadcast_bmm(w: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """cuBLAS O[h, split] = W[h] V[h, split], sharing W through device pointers."""
+    return _bmm_ext().broadcast_bmm(w, v)
+
+
 def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
     """(d_msa, d_pair, heads, per-head width) the kernels are instantiated for. d_msa 128 with 32-wide heads would need a 128 x 256 weight-gradient accumulator per CTA: not built."""
     return n_head == HEADS and d_msa in D_MSA and d_pair in D_PAIR and d_hidden in D_HIDDEN and d_msa * d_hidden <= 16 * 128 and not (d_msa == 128 and d_hidden == 32)
@@ -103,7 +117,7 @@ def reduce_rows(part: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
 
 
 def glue(m: torch.Tensor, dres: torch.Tensor, o: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, keep: torch.Tensor | None,
-         eps: float, dscale: float):
+         eps: float, dscale: float, raw: bool = False):
     """m, dres [S, L, D] (dres: the output gradient, dropout not yet applied), o [8 ns, L, S C / ns] (the saved contraction), wg [8 C, D], wo [D, 8 C], keep [L, D] bf16 (or None) ->
     (do, dgp [8 ns, L, S C / ns] bf16, dWo [D, 8 C], dWg [8 C, D] fp32): the cotangent of o (dv = w^T do, dw = do v^T are the caller's bmm), the gate's pre-activation gradient and
     the two weight gradients of the gate / output projections (fp32 partials of the CTAs summed in a fixed order)."""
@@ -117,6 +131,8 @@ def glue(m: torch.Tensor, dres: torch.Tensor, o: torch.Tensor, lnw: torch.Tensor
     part = m.new_empty((nbx, ng, 2 * d * gch), dtype=torch.float32)
     ext().glue(m, dres, o, lnw, lnb, wg, wo, _none(m, torch.bfloat16) if keep is None else keep, do, dgp, part, eps, dscale)
     total = reduce_rows(part.view(nbx, -1), torch.float32).view(ng, 2 * d * gch)
+    if raw:
+        return do, dgp, total
     dwo = total[:, :d * gch].reshape(ng, d, gch).permute(1, 0, 2).reshape(d, hc)
     dwg = total[:, d * gch:].reshape(hc, d)
     return do, dgp, dwo, dwg
@@ -135,7 +151,7 @@ def dgv_bwd(m: torch.Tensor, dres: torch.Tensor, dgp: torch.Tensor, dv: torch.Te
 
 
 def pair_bwd(z: torch.Tensor, w: torch.Tensor, dw: torch.Tensor, key_mask: torch.Tensor | None, lnw: torch.Tensor, lnb: torch.Tensor, wb: torch.Tensor, eps: float,
-             variant: int | None = None):
+             variant: int | None = None, raw: bool = False):
     """z [L, L, DZ], w [8, L, L] bf16 (the saved softmax), dw [8 ns, L, L] fp32 (the cotangent of w: ns partial products per head, summed in order), key mask [L] uint8 (or None) ->
     (dz bf16 [L, L, DZ], dWb [8, DZ], dgamma, dbeta [DZ]) (fp32 but dz). dbeta is zero up to rounding: a softmax cannot see a shift shared by all keys."""
     length, _, dz_ = z.shape
@@ -147,5 +163,7 @@ def pair_bwd(z: torch.Tensor, w: torch.Tensor, dw: torch.Tensor, key_mask: torch
     ext().pair_bwd(z, w, dw, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, dz, pm, ps, eps, variant)
     big_m = reduce_rows(pm, torch.float32).view(HEADS, dz_)
     s = reduce_rows(ps, torch.float32)
+    if raw:
+        return dz, big_m, s
     wbf = wb.float()
     return dz, lnw[None, :] * big_m + lnb[None, :] * s[:, None], (wbf * big_m).sum(0), (wbf * s[:, None]).sum(0)

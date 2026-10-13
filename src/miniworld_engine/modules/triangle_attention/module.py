@@ -295,10 +295,17 @@ class TriangleAttention(nn.Module):
     def _make_drop_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row/drop_col scale = (rand>p)/(1-p), broadcast over i (starting, dim=1) or j
         (ending, dim=2) — matches modules.primitives.Dropout(broadcast_dim=self._drop_dim)."""
+        if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
+            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+
+            if row_scale_sm80.supports(pair):
+                return row_scale_sm80.scale(pair, p, self._drop_dim)
         shape = list(pair.shape)
         shape[self._drop_dim] = 1
         keep = torch.rand(shape, device=pair.device, dtype=pair.dtype) > p
         return keep.to(pair.dtype) / (1.0 - p)
+
+    _sm80_default_drop_scale = _make_drop_scale
 
     @typecheck
     def forward(

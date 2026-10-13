@@ -13,6 +13,14 @@ Large masked inference (L >= 768, divisible by 384) uses 48-key tiles, a two-sta
 K/V stay in place and padded key loads are zero-filled. Mask packing is part of the measured call. ``MINIWORLD_TRIATTN_SM80_COMPACT=0``
 retains the dense core. Calls saving log-sum-exp for backward keep the dense schedule.
 
+Dense inference at L >= 256 uses 64-query / 64-key tiles and four warps per CTA, with a two-stage K/V ring and a three-CTA
+register budget. ``MINIWORLD_TRIATTN_SM80_INTERNAL=0`` retains the preceding schedule (128 queries, 48 keys at L divisible
+by 384, otherwise 32 keys). ``MINIWORLD_TRIATTN_SM80_TUNED=0`` selects the original 32-key schedule. Training retains its schedule.
+The wide gated path additionally selects dense or compact attention from a device-side live-key count; see ``sm80_wide.py``.
+Inference at L >= 512 can use a fixed first-tile softmax shift, with CTA-local online-softmax recomputation for
+unseeded, zero-sum or non-finite rows. ``MINIWORLD_TRIATTN_SM80_SOFTMAX=0`` retains the preceding online schedule.
+Dense and sparse masked calls keep separately tuned geometries; the current mask selects them on device at every replay.
+
 The front (``f1_sm80.cuh``): the input LayerNorm and the q | k | v | g and pair-bias projections in one pass over the pair tensor (the
 LayerNorm scale folded into the bf16 weights, the shift into an fp32 bias), writing the token-major ``[T, 512]`` buffer the core reads with a
 row stride and the bias planes.
@@ -53,6 +61,16 @@ ROWS = 2
 #: keys per tile (64 or 32) and CTAs per SM the register budget is bounded for (the schedule knobs of the kernel)
 BN, MINB = 32, 2
 _L2E = 1.4426950408889634
+
+
+def _forward_entry(ext, save: bool, *, gate: bool = False):
+    """Select inference specializations inside the opaque op; training keeps its core."""
+    name = "attn_fwd_gate" if gate else "attn_fwd"
+    if not save and os.environ.get("MINIWORLD_TRIATTN_SM80_TUNED", "1") != "0":
+        name += "_internal" if os.environ.get("MINIWORLD_TRIATTN_SM80_INTERNAL", "1") != "0" else "_tuned"
+        if name.endswith("_internal") and os.environ.get("MINIWORLD_TRIATTN_SM80_SOFTMAX", "1") != "0":
+            name = name.removesuffix("_internal") + "_fast"
+    return getattr(ext, name)
 
 
 @functools.lru_cache(maxsize=1)
@@ -150,7 +168,9 @@ def _attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Te
     h = c // D
     out = torch.empty((b, length, length, c), dtype=q.dtype, device=q.device)
     lse = torch.empty((b, h, length, length), dtype=torch.float32, device=q.device) if save_lse else q.new_empty((0,), dtype=torch.float32)
-    _ext().attn_fwd(q, k, v, bias, out, lse, length, h, b, q.stride(2), k.stride(2), v.stride(2), c, sm_scale * _L2E, ROWS, BN, MINB)
+    ext = _ext()
+    fwd = _forward_entry(ext, save_lse)
+    fwd(q, k, v, bias, out, lse, length, h, b, q.stride(2), k.stride(2), v.stride(2), c, sm_scale * _L2E, ROWS, BN, MINB)
     return [out, lse]
 
 
@@ -169,7 +189,10 @@ def _compact_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: 
     indices = torch.empty((b, length), dtype=torch.int32, device=q.device)
     counts = torch.empty((b,), dtype=torch.int32, device=q.device)
     compact_bias = torch.empty_like(bias)
-    _ext().compact_attention(q, k, v, bias, mask, out, indices, counts, compact_bias, sm_scale * _L2E)
+    fast = all(os.environ.get(name, "1") != "0" for name in (
+        "MINIWORLD_TRIATTN_SM80_SOFTMAX", "MINIWORLD_TRIATTN_SM80_INTERNAL", "MINIWORLD_TRIATTN_SM80_TUNED"))
+    entry = "compact_attention_fast" if fast else "compact_attention"
+    getattr(_ext(), entry)(q, k, v, bias, mask, out, indices, counts, compact_bias, sm_scale * _L2E)
     return [out, q.new_empty((0,), dtype=torch.float32)]
 
 
@@ -437,15 +460,27 @@ def _attention_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dov: torch
     b, length, _, c = q.shape
     h = c // D
     t = b * length * length
-    groups = length // DQ_ROWS
+    # Isolated query-tile/row-group candidate, qualified before any default use.
+    # Eight rows halve bias-gradient partial traffic at the large lengths.
+    dq_flag = os.environ.get("MINIWORLD_TRIATTN_SM80_DQ_ROWS")
+    native_dq = (length in (128, 640, 768)
+                 and (dq_flag == "1" or (dq_flag is None and length in (640, 768))))
+    dq_cfg = 3 if length == 128 else 2
+    groups = length // (8 if native_dq and length != 128 else DQ_ROWS)
     dbp = torch.empty((groups, b * h, length, length), dtype=torch.bfloat16, device=q.device)
     buf = dqkvg.view(t, QKVG)
     sm_scale = 1.0 / math.sqrt(D)
     scl = sm_scale * _L2E
-    ext.attn_bwd_dq(q, k, v, dov, bias, lse, delta, buf[:, 0:128], dbp, length, h, b, q.stride(2), k.stride(2), v.stride(2), c, QKVG, scl, sm_scale,
-                    DQ_ROWS, DQ_NKV, DQ_BN, DQ_MINB)
     db = torch.empty((b, h, length, length), dtype=torch.bfloat16, device=q.device)
-    ext.db_reduce(dbp, db, groups)
+    if native_dq:
+        from . import dq_rows_candidate_sm80
+        dq_rows_candidate_sm80.run(q, k, v, dov, bias, lse, delta,
+                                   buf[:, 0:128].view(b, length, length, 128),
+                                   dbp, db, dq_cfg)
+    else:
+        ext.attn_bwd_dq(q, k, v, dov, bias, lse, delta, buf[:, 0:128], dbp, length, h, b, q.stride(2), k.stride(2), v.stride(2), c, QKVG, scl, sm_scale,
+                        DQ_ROWS, DQ_NKV, DQ_BN, DQ_MINB)
+        ext.db_reduce(dbp, db, groups)
     bias_t = torch.empty_like(bias)
     ext.bias_transpose(bias, bias_t, length)
     ext.attn_bwd_dkv(q, k, v, dov, bias_t, lse, delta, buf[:, 128:256], buf[:, 256:384], length, h, b, q.stride(2), k.stride(2), v.stride(2), c, QKVG, QKVG,
@@ -496,14 +531,27 @@ def _wgrad_fake(dqkvg, db, xh, weights, ln_w, ln_b):
     return [*(w.new_empty(w.shape) for w in weights), ln_w.new_empty(ln_w.shape), ln_b.new_empty(ln_b.shape)]
 
 
+def _front_weight_products(dqkvg: torch.Tensor, db: torch.Tensor, xh2: torch.Tensor) -> torch.Tensor:
+    t = xh2.shape[0]
+    front = torch.mm(dqkvg.view(t, QKVG).T, xh2, out_dtype=torch.float32)
+    db2 = db.permute(1, 0, 2, 3).reshape(4, t)
+    length = dqkvg.shape[1]
+    if length in (384, 512, 768) and os.environ.get("MINIWORLD_TRIATTN_SM80_NATIVE_DB", "1" if length == 768 else "0") == "1":
+        from . import native_db_nn_sm80
+        cfg, chunk = {384: (2, 2048), 512: (0, 1024), 768: (0, 2048)}[length]
+        bias = native_db_nn_sm80.matmul(db2, xh2, cfg, chunk)
+    else:
+        bias = torch.mm(db2, xh2, out_dtype=torch.float32)
+    return torch.cat([front, bias])
+
+
 @opaque(fake=_wgrad_fake, name="triangle_attention_sm80_wgrad")
 def _wgrad(dqkvg: torch.Tensor, db: torch.Tensor, xh: torch.Tensor, weights: list[torch.Tensor], ln_w: torch.Tensor, ln_b: torch.Tensor) -> list[torch.Tensor]:
     """The parameters' gradients (see ``front_weight_grads``): the GEMM over the tokens ``G = D^T [xh | 1]`` (cuBLAS, fp32 accumulation and output) and one
     finalize launch (``wgrad_sm80.cuh``)."""
     t = dqkvg.shape[0] * dqkvg.shape[1] * dqkvg.shape[2]
     xh2 = xh.view(t, 136)
-    g = torch.cat([torch.mm(dqkvg.view(t, QKVG).T, xh2, out_dtype=torch.float32),                       # [512, 136]
-                   torch.mm(db.permute(1, 0, 2, 3).reshape(4, t), xh2, out_dtype=torch.float32)])        # [4, 136]
+    g = _front_weight_products(dqkvg, db, xh2)
     dws = [torch.empty_like(w) for w in weights]
     d_gamma, d_beta = torch.empty_like(ln_w), torch.empty_like(ln_b)
     _ext().wgrad_finalize(g, *(w.contiguous() for w in weights), *dws, ln_w.detach().contiguous(), ln_b.detach().contiguous(), d_gamma, d_beta)
@@ -525,6 +573,26 @@ def front_weight_grads(dqkvg: torch.Tensor, db: torch.Tensor, xh: torch.Tensor, 
 
 
 # ------------------------------------------------------------------------------------------------------------------------- training
+def _capture_aware_training_launch(length: int) -> bool | None:
+    # This query runs inside the outer opaque launch, never in its fake or
+    # Dynamo trace. Replay executes the captured CUDA work without this CPU path.
+    if (length in (128, 256)
+            and os.environ.get("MINIWORLD_TRIATTN_SM80_TRAIN_CAPTURE_AWARE", "1") == "1"):
+        return not torch.cuda.is_current_stream_capturing()
+    return None
+
+
+def _training_launch(op, *args, direct: bool | None = None):
+    # The outer training custom op already owns the opaque boundary and fresh
+    # scratch. Calling its launch bodies avoids registering that scratch through
+    # nested custom-op dispatch while keeping the public stage ops unchanged.
+    if direct is None:
+        direct = os.environ.get("MINIWORLD_TRIATTN_SM80_TRAIN_INNER", "0") == "1"
+    if direct:
+        return getattr(op, "__wrapped__", op)(*args)
+    return op(*args)
+
+
 def supports_train(pair: torch.Tensor, weights: Sequence[torch.Tensor], ln_w: torch.Tensor, ln_b: torch.Tensor, wo: torch.Tensor,
                    mask: torch.Tensor | None = None) -> bool:
     """The training path's requirements: those of the forward (front and back), a floating-point LayerNorm affine (its gradient is returned in its dtype)."""
@@ -546,10 +614,11 @@ def forward_train(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tens
     """``pair + drop(TriangleAttention(pair))`` with what the backward needs: ``leaves`` = [pair, wq, wk, wv, wg, wb, wo, ln_w, ln_b], ``mask``
     ``[B, L]`` uint8 or empty, ``ds`` the dropout scale ``[B, L, 128]`` or empty.  Returns [out, qkvg, bias, stats, xh, o, lse]."""
     pair, wq, wk, wv, wg, wb, wo, ln_w, ln_b = leaves
-    qkvg, bias, stats, xh = _front(pair, [wq, wk, wv, wg, wb], ln_w, ln_b, mask, eps, transposed, True, True)
+    launch_direct = _capture_aware_training_launch(pair.shape[1])
+    qkvg, bias, stats, xh = _training_launch(_front, pair, [wq, wk, wv, wg, wb], ln_w, ln_b, mask, eps, transposed, True, True, direct=launch_direct)
     q, k, v, _ = qkv_views(qkvg)
-    out, lse = _attention(_token_major(q), _token_major(k), _token_major(v), bias, 1.0 / math.sqrt(D), True)
-    res = _back(out, qkvg, wo, pair, ds, transposed)
+    out, lse = _training_launch(_attention, _token_major(q), _token_major(k), _token_major(v), bias, 1.0 / math.sqrt(D), True, direct=launch_direct)
+    res = _training_launch(_back, out, qkvg, wo, pair, ds, transposed, direct=launch_direct)
     return [res, qkvg, bias, stats, xh, out, lse]
 
 
@@ -567,15 +636,42 @@ def backward_train(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
     qkvg, bias, stats, xh, o, lse = saved
     b, length = pair.shape[0], pair.shape[1]
     t = b * length * length
+    launch_direct = _capture_aware_training_launch(length)
     weights = [wq, wk, wv, wg, wb]
-    wt, wbt, wot, gamma32 = bwd_pack(weights, wo, ln_w)
+    wt, wbt, wot, gamma32 = _training_launch(_bwd_pack, weights, wo, ln_w, direct=launch_direct)
     dqkvg = torch.empty((b, length, length, QKVG), dtype=torch.bfloat16, device=pair.device)
-    dov, dy, a, delta = back_bwd(dout, o, qkvg, dqkvg, wo, transposed=transposed, ds=ds if ds.numel() else None, wot=wot)
-    d_wo = torch.mm(dy.view(t, 128).T, a.view(t, 128), out_dtype=torch.float32).to(wo.dtype)
+    dov, dy, a, delta = _training_launch(_back_bwd, dout.contiguous(), ds, o, qkvg, dqkvg, wot, bool(transposed), direct=launch_direct)
+    if length in (640, 768) and os.environ.get("MINIWORLD_TRIATTN_SM80_NATIVE_WO", "1" if length == 768 else "0") == "1":
+        from . import native_wo_tn_sm80
+        cfg, chunk = (3, 4096) if length == 640 else (6, 8192)
+        d_wo = native_wo_tn_sm80.matmul(dy.view(t, 128), a.view(t, 128), cfg, chunk)
+    else:
+        d_wo = torch.mm(dy.view(t, 128).T, a.view(t, 128), out_dtype=torch.float32).to(wo.dtype)
     q, k, v, _ = qkv_views(qkvg)
-    db = _attention_bwd(_token_major(q), _token_major(k), _token_major(v), dov, bias, lse, delta, dqkvg)
-    dpair = front_bwd(dqkvg, db, pair, stats, dout, weights, ln_w, transposed=transposed, packed=(wt, wbt, gamma32))
-    grads, d_gamma, d_beta = front_weight_grads(dqkvg, db, xh, weights, ln_w, ln_b)
+    db = _training_launch(_attention_bwd, _token_major(q), _token_major(k), _token_major(v), dov, bias, lse, delta, dqkvg, direct=launch_direct)
+    if (length == 384 and ln_w.dtype == torch.float32
+            and os.environ.get("MINIWORLD_TRIATTN_SM80_EXACT_GAMMA", "2") == "2"):
+        from . import b1_finalize_exact_sm80
+        dpair, grads, d_gamma, d_beta = b1_finalize_exact_sm80.gradients(
+            dqkvg, db, pair, stats, dout.contiguous(), wt, wbt, gamma32, xh,
+            weights, ln_w, ln_b, transposed=transposed,
+        )
+        return [dpair, *grads, d_wo, d_gamma, d_beta]
+    exact_gamma = None
+    if (length == 384 and ln_w.dtype == torch.float32
+            and os.environ.get("MINIWORLD_TRIATTN_SM80_EXACT_GAMMA", "2") == "1"):
+        # Preserve the existing pair derivative while accumulating the scale
+        # derivative from FP32 normalized input before its saved BF16 rounding.
+        from . import b1_gamma_exact_sm80
+        dpair, exact_gamma = b1_gamma_exact_sm80.gradients(
+            dqkvg, db, pair, stats, dout.contiguous(), wt, wbt, gamma32, ln_w,
+            transposed=transposed,
+        )
+    else:
+        dpair = _training_launch(_front_bwd, dqkvg, db, pair, stats, dout.contiguous(), wt, wbt, gamma32, bool(transposed), direct=launch_direct)
+    *grads, d_gamma, d_beta = _training_launch(_wgrad, dqkvg, db, xh, weights, ln_w, ln_b, direct=launch_direct)
+    if exact_gamma is not None:
+        d_gamma = exact_gamma
     return [dpair, *grads, d_wo, d_gamma, d_beta]
 
 

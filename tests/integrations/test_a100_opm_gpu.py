@@ -116,6 +116,12 @@ def test_opm_a100_registry_lengths_inference(d_msa, d_pair, L):
     _check(d_msa, d_pair, S=64, L=L, mask_kind="ragged", norm_first=True, residual=True, grad=False)
 
 
+@pytest.mark.parametrize("S,L", [(1024, 128), (1024, 256), (4096, 128), (4096, 640)])
+@pytest.mark.parametrize("mask_kind", ["ragged", "empty_rows"])
+def test_opm_a100_frozen_mask_counts(S, L, mask_kind):
+    _check(64, 128, S=S, L=L, mask_kind=mask_kind, norm_first=True, residual=True, grad=False)
+
+
 @pytest.mark.parametrize("S", [1, 7, 64, 65, 1024, 1100])
 def test_opm_a100_msa_depth(S):
     """Any MSA depth (the operands of the outer product are [S, 32 L]: no padding of the contraction)."""

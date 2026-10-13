@@ -71,7 +71,7 @@ def _inputs(a, length, masked, seed):
 
 
 @pytest.mark.parametrize("masked", [False, True])
-@pytest.mark.parametrize(("a", "length"), [(4, 256), (6, 128), (8, 384)])
+@pytest.mark.parametrize(("a", "length"), [(4, 256), (6, 128), (8, 384), (48, 384), (48, 768)])
 def test_train_block_matches_the_module_path(a, length, masked, monkeypatch):
     torch.manual_seed(7)
     ref = _randomize(DiTBlock(implementation=ImplementationType.PYTORCH).cuda())

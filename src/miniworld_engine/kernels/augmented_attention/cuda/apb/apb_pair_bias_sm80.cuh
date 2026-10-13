@@ -163,7 +163,7 @@ void pair_bias_fwd80_t(const at::Tensor& z, const at::Tensor& w, const c10::opti
 void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L, double eps, double neg) {
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
   const int64_t nh = w.size(0);
-  TORCH_CHECK(nh == 8 || nh == 12 || nh == 16, "pair_bias (sm_80): 8, 12 or 16 heads");
+  TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias (sm_80): 8, 12, 16 or 24 heads");
   const int64_t LP = (int64_t)std::llround(std::sqrt((double)out.numel() / (double)nh));
   TORCH_CHECK(L >= 1 && LP >= L && LP % 128 == 0 && LP - L < 128 && out.numel() == nh * LP * LP && z.numel() == L * L * DP && w.numel() == nh * DP,
               "pair_bias_fwd shapes: pair [L L, 128], wf [H, 128], bias [H, LP, LP] with LP = L rounded up to 128");
@@ -171,7 +171,8 @@ void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, a
   const at::cuda::CUDAGuard gd(z.device());
   if (nh == 8) pair_bias_fwd80_t<8>(z, w, mask, out, L, LP, eps, neg);
   else if (nh == 12) pair_bias_fwd80_t<12>(z, w, mask, out, L, LP, eps, neg);
-  else pair_bias_fwd80_t<16>(z, w, mask, out, L, LP, eps, neg);
+  else if (nh == 16) pair_bias_fwd80_t<16>(z, w, mask, out, L, LP, eps, neg);
+  else pair_bias_fwd80_t<24>(z, w, mask, out, L, LP, eps, neg);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -443,7 +444,7 @@ void pair_bias_bwd80_t(const at::Tensor& z, const at::Tensor& dbias, const at::T
 void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {
   chk(z, at::kBFloat16, "pair"); chk(dbias, at::kFloat, "dbias"); chk(w, at::kBFloat16, "wf"); chk(dz, at::kBFloat16, "dpair");
   const int64_t nh = w.size(0);
-  TORCH_CHECK(nh == 8 || nh == 12 || nh == 16, "pair_bias_bwd (sm_80): 8, 12 or 16 heads");
+  TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias_bwd (sm_80): 8, 12, 16 or 24 heads");
   const Geo G = geo(nh, d);
   chk_acc(acc, G);
   const int64_t LP = (int64_t)std::llround(std::sqrt((double)dbias.numel() / (double)nh));
@@ -452,7 +453,8 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
   const at::cuda::CUDAGuard gd(z.device());
   if (nh == 8) pair_bias_bwd80_t<8>(z, dbias, w, dz, acc, L, LP, eps, G);
   else if (nh == 12) pair_bias_bwd80_t<12>(z, dbias, w, dz, acc, L, LP, eps, G);
-  else pair_bias_bwd80_t<16>(z, dbias, w, dz, acc, L, LP, eps, G);
+  else if (nh == 16) pair_bias_bwd80_t<16>(z, dbias, w, dz, acc, L, LP, eps, G);
+  else pair_bias_bwd80_t<24>(z, dbias, w, dz, acc, L, LP, eps, G);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

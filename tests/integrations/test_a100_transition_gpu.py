@@ -68,6 +68,29 @@ def test_transition_matches_fp32_forward_and_backward(d, n, stream):
         assert e <= 1.1 * e0 + 1e-4, (name, e, e0)
 
 
+@pytest.mark.parametrize("length", [384, 768])
+@pytest.mark.parametrize("seed", [0, 17])
+def test_d256_protocol_weight_gradients(length, seed, monkeypatch):
+    """Long pair reductions must retain the original BF16-floor gradient band."""
+    monkeypatch.delenv("MINIWORLD_TRANSITION_WIDE_GRAD_FP32", raising=False)
+    monkeypatch.delenv("MINIWORLD_TRANSITION_WIDE_GRAD_CAST", raising=False)
+    previous = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = False
+    try:
+        ref, ours, base = _modules(256, 4, seed=seed)
+        x = torch.randn(1, length, length, 256, device="cuda")
+        dy = torch.randn_like(x)
+        want, wanted_grads = _run(ref, x, dy)
+        floor, floor_grads = _run(base, x.bfloat16(), dy.bfloat16())
+        got, grads = _run(ours, x.bfloat16(), dy.bfloat16())
+        assert _rel(got, want) <= 1.1 * _rel(floor, want) + 1e-4
+        for name in wanted_grads:
+            error, floor_error = _rel(grads[name], wanted_grads[name]), _rel(floor_grads[name], wanted_grads[name])
+            assert error <= 1.1 * floor_error + 1e-4, (name, error, floor_error)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = previous
+
+
 @pytest.mark.parametrize(("d", "n"), SHAPES)
 def test_transition_inference_matches_and_equals_the_training_forward(d, n):
     ref, ours, base = _modules(d, n)

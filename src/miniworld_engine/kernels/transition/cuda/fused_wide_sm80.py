@@ -224,9 +224,16 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torc
     dual, _ = _tiles(m, d, h)
     dh = torch.mm(dy, ws)                                       # [M, H]
     dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)             # dA | dB [M, 2H], h [M, H]
-    mm_w = _mm_f32 if wdt is torch.float32 else torch.mm       # fp32 master: the f32 accumulators unrounded
-    dws = mm_w(dy.t(), hid)                                     # [D, H]
-    dwab = mm_w(dab.t(), a_in)                                  # [2H, D] = [dWa; dWb]
+    # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
+    # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
+    full_precision_grad = d == 256 and os.environ.get("MINIWORLD_TRANSITION_WIDE_GRAD_FP32", "1") == "1"
+    mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
+    dws = mm_w(dy.t(), hid)                                    # [D, H]
+    dwab = mm_w(dab.t(), a_in)                                 # [2H, D] = [dWa; dWb]
+    if full_precision_grad and wdt is torch.bfloat16 and os.environ.get("MINIWORLD_TRANSITION_WIDE_GRAD_CAST", "0") == "1":
+        dwab, dws = ext.grad_cast(dwab, dws)
+    else:
+        dwab, dws = dwab.to(wdt), dws.to(wdt)
     wab = torch.cat((wa, wb), 0)                                # [2H, D]
     if ln:
         dxn = _mm_f32(dab, wab)                                 # [M, D] f32
@@ -257,6 +264,26 @@ def _bwd_dx(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torch.Te
     return dx
 
 
+def _master_cast_fake(weights):
+    return [torch.empty_like(w, dtype=torch.bfloat16, memory_format=torch.contiguous_format) for w in weights]
+
+
+@opaque(fake=_master_cast_fake, name="transition_master_cast_sm80")
+def _master_cast(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    from miniworld_engine.kernels.parameter_cast.cuda import sm80 as parameter_cast
+    return list(parameter_cast.result(weights))
+
+
+def _training_weights(wa, wb, ws, dtype):
+    # The protocol's D256/n4 path keeps unrounded master gradients. Convert
+    # its three projection operands with the existing batched CUDA caster.
+    if (dtype is torch.bfloat16 and tuple(wa.shape) == (1024, 256)
+            and tuple(wb.shape) == (1024, 256) and tuple(ws.shape) == (256, 1024)
+            and all(w.dtype is torch.float32 for w in (wa, wb, ws))):
+        return _master_cast([wa, wb, ws])
+    return tuple(w.to(dtype).contiguous() for w in (wa, wb, ws))
+
+
 class _WideTransitionSM80(torch.autograd.Function):
     """``y = transition(x) + x`` (``ln``) or the bare FFN ``squeeze(silu(a) b)``; the forward saves xn and (mean, rstd) (the FFN saves x only)."""
 
@@ -267,7 +294,7 @@ class _WideTransitionSM80(torch.autograd.Function):
         if not ln:
             gamma = beta = flat.new_empty((0,), dtype=torch.float32)
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))      # the kernels' dtype; cast here, outside autograd
+        wa, wb, ws = _training_weights(wa, wb, ws, x.dtype)
         out, xn, stats = _fwd_launch(flat, gamma, beta, wa, wb, ws, float(eps), True, ln)
         ctx.save_for_backward(flat, xn, stats, gamma, wa, wb, ws)
         ctx.shape, ctx.ln = shape, ln

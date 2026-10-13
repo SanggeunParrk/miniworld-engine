@@ -239,6 +239,7 @@ def inference(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.
     """x [M, d] and cond [P, dc] contiguous rows (P divides M: row r of x takes conditioning row r % P), lnw [dc] fp32, Ws / Wb [d, dc], sb [d] (x's dtype) -> y [M, d]."""
     k = _kernels()
     with torch.cuda.device(x.device):
+        ws, sb, wb = cast_params((ws, sb, wb), x.dtype, True)
         if k.atom_supported(x, cond):                                       # d = dc = 128, bf16: the whole forward in one kernel
             return k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c)[0]
         if k.atom_tf32_supported(x, cond):                                  # d = dc = 128, fp32: the same on TF32 tensor cores
@@ -250,30 +251,39 @@ def inference(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.
 
 
 # -------------------------------------------------------------------------------------------------------------- training
-def _train_fwd_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
+def _train_fwd_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c, native_cast=False, save_cast=False):
     m, d = x.shape
     p, dc = cond.shape
     e = x.new_empty
+    casts = [torch.empty_like(t, dtype=BF) for t in (ws, sb, wb)] if save_cast else []
     if _kernels().atom_supported(x, cond):                                    # the fused atom kernels keep only the statistics
-        return [torch.empty_like(x), e((0,)), e((p, 2), dtype=torch.float32), e((0,)), e((m, 2), dtype=torch.float32), e((0,))]
-    return [torch.empty_like(x), e((p, dc)), e((p, 2), dtype=torch.float32), e((p, 2 * d)), e((m, 2), dtype=torch.float32), e((2 * d, dc))]
+        return [torch.empty_like(x), e((0,)), e((p, 2), dtype=torch.float32), e((0,)), e((m, 2), dtype=torch.float32), e((0,))] + casts
+    return [torch.empty_like(x), e((p, dc)), e((p, 2), dtype=torch.float32), e((p, 2 * d)), e((m, 2), dtype=torch.float32), e((2 * d, dc))] + casts
 
 
 @opaque(fake=_train_fwd_fake, name="adaln_sm80_train_fwd")
 def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, sb: torch.Tensor, wb: torch.Tensor, eps_x: float,
-              eps_c: float) -> list[torch.Tensor]:
+              eps_c: float, native_cast: bool = False, save_cast: bool = False) -> list[torch.Tensor]:
     """The forward saving what the backward reads: [y, aff [M, dc], cond (mean, rstd) [M, 2], [S | B] [M, 2 d], x (mean, rstd) [M, 2], [Ws; Wb] [2 d, dc]]; cond is one row per row of x.
     At d = dc = 128 (bf16) one kernel writes y and the two statistics, and aff / [S | B] / the packed weights are empty (the backward kernel recomputes them)."""
     k = _kernels()
     with torch.cuda.device(x.device):
+        packed_weights = None
+        if native_cast:
+            if save_cast and not k.atom_supported(x, cond) and os.environ.get("MINIWORLD_ADALN_SM80_PACK_PARAM_CAST", "0") == "1":
+                from miniworld_engine.kernels.parameter_cast.cuda.pack_sm80 import result
+                (ws, sb, wb), (packed_weights,) = result((ws, sb, wb), ((0, 2),))
+            else:
+                from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+                ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):
             y, xst, cst = k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c, stats=True)
-            return [y, x.new_empty((0,)), cst, x.new_empty((0,)), xst, x.new_empty((0,))]
+            return [y, x.new_empty((0,)), cst, x.new_empty((0,)), xst, x.new_empty((0,))] + ([ws, sb, wb] if save_cast else [])
         aff, cst = k.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
-        wcat = torch.cat([ws, wb])                                         # the backward's dgrad GEMM reads it again: saved instead of packed twice
+        wcat = packed_weights if packed_weights is not None else torch.cat([ws, wb])  # saved for the backward
         sbt = _mm_op(aff, wcat.t())
         y, xst = k.epilogue(x, sbt, sb, eps_x, stats=True)
-    return [y, aff, cst, sbt, xst, wcat]
+    return [y, aff, cst, sbt, xst, wcat] + ([ws, sb, wb] if save_cast else [])
 
 
 def like(t: torch.Tensor, fp32: bool) -> torch.Tensor:
@@ -283,7 +293,7 @@ def like(t: torch.Tensor, fp32: bool) -> torch.Tensor:
     return torch.empty((), dtype=torch.float32, device=t.device).expand(t.shape)
 
 
-def _train_bwd_fake(dy, x, cond, lnw, ws, sb, wb, aff, cst, sbt, xst, wcat, fp32_grads=False):
+def _train_bwd_fake(dy, x, cond, lnw, ws, sb, wb, aff, cst, sbt, xst, wcat, fp32_grads=False, native_cast=False):
     """Fake of ``train_bwd``: the gradient shapes and dtypes."""
     gd = torch.float32 if fp32_grads else ws.dtype
     return [torch.empty_like(x), torch.empty_like(cond), torch.empty(lnw.shape, dtype=lnw.dtype, device=lnw.device),
@@ -293,14 +303,23 @@ def _train_bwd_fake(dy, x, cond, lnw, ws, sb, wb, aff, cst, sbt, xst, wcat, fp32
 
 @opaque(fake=_train_bwd_fake, name="adaln_sm80_train_bwd")
 def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, sb: torch.Tensor, wb: torch.Tensor, aff: torch.Tensor,
-              cst: torch.Tensor, sbt: torch.Tensor, xst: torch.Tensor, wcat: torch.Tensor, fp32_grads: bool = False) -> list[torch.Tensor]:
+              cst: torch.Tensor, sbt: torch.Tensor, xst: torch.Tensor, wcat: torch.Tensor, fp32_grads: bool = False, native_cast: bool = False) -> list[torch.Tensor]:
     """[dx, dcond, d lnw, dWs, d sb, dWb] (each in its input's dtype; the weights' and the bias' fp32 when ``fp32_grads``: the master parameters' gradients, unrounded) from the gradient dy [M, d] and the forward's saved tensors."""
     k = _kernels()
     d = x.shape[1]
     with torch.cuda.device(x.device):
+        if native_cast:
+            from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
+            ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):                                        # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
             dx, dcond, dsc, aff, psb, plw = k.atom_bwd(dy, x, cond, xst, cst, lnw, ws, wb, sb)
-            dsb, dlnw, dws, dwb = k.finish([psb, plw], [like(sb, fp32_grads), lnw], [_wgrad(dsc, aff), _wgrad(dy, aff)], [like(ws, fp32_grads), like(wb, fp32_grads)])
+            if (os.environ.get("MINIWORLD_ADALN_SM80_ATOM_COND_WGRAD_FUSED", "0") == "1"
+                    and x.shape[0] in (48 * 4096, 48 * 8192)):
+                from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80
+                dws, dwb = ct_atom_cond_wgrad_fused_sm80.result_two(dsc, dy, aff)
+            else:
+                dws, dwb = _wgrad(dsc, aff), _wgrad(dy, aff)
+            dsb, dlnw, dws, dwb = k.finish([psb, plw], [like(sb, fp32_grads), lnw], [dws, dwb], [like(ws, fp32_grads), like(wb, fp32_grads)])
             return [dx, dcond, dlnw, dws, dsb, dwb]
         dm, dx, psb = k.bwd_x(dy, x, xst, sbt, sb, None, x.dtype)
         br = Branch(x.device)
@@ -318,8 +337,15 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, lnw, ws, sb, wb, eps_x, eps_c):
         ctx.fp32_grads = master((ws,), x.dtype)
-        ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
-        y, *saved = train_fwd(x, cond, lnw, ws, sb, wb, eps_x, eps_c)
+        ctx.save_cast = (ctx.fp32_grads and all(t.dtype is torch.float32 for t in (ws, sb, wb))
+                         and os.environ.get("MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST", "0") == "1")
+        ctx.native_cast = ctx.fp32_grads and (ctx.save_cast or os.environ.get("MINIWORLD_ADALN_SM80_NATIVE_PARAM_CAST", "0") == "1")
+        if not ctx.native_cast:
+            ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
+        y, *saved = train_fwd(x, cond, lnw, ws, sb, wb, eps_x, eps_c, ctx.native_cast, ctx.save_cast)
+        if ctx.save_cast:
+            ws, sb, wb = saved[-3:]
+            saved = saved[:-3]
         ctx.save_for_backward(x, cond, lnw, ws, sb, wb, *saved)
         return y
 
@@ -327,7 +353,7 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         x, cond, lnw, ws, sb, wb, *saved = ctx.saved_tensors
-        dx, dcond, dlnw, dws, dsb, dwb = train_bwd(dy.contiguous(), x, cond, lnw, ws, sb, wb, *saved, ctx.fp32_grads)
+        dx, dcond, dlnw, dws, dsb, dwb = train_bwd(dy.contiguous(), x, cond, lnw, ws, sb, wb, *saved, ctx.fp32_grads, ctx.native_cast and not ctx.save_cast)
         return dx, dcond, dlnw, dws, dsb, dwb, None, None
 
 
@@ -346,6 +372,5 @@ def update(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
     if grad:
         y = _Training.apply(xs, cs, module.ln_cond.weight, *ps, *eps)
     else:
-        ws, sb, wb = cast_params(ps, compute_dtype, True)
-        y = inference(xs, cs, module.ln_cond.weight, ws, sb, wb, *eps)
+        y = inference(xs, cs, module.ln_cond.weight, *ps, *eps)
     return y.reshape(x.shape)

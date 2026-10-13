@@ -539,3 +539,103 @@ def test_the_wide_kernels_also_serve_d128_bf16_when_the_fused_d128_path_is_out_o
     for name in ref:
         mine, base = _rel(got[name], ref[name]), _rel(bf16[name], ref[name])
         assert mine <= max(1.25 * base, 2e-3), f"{name}: sm80 wide at D128 {mine:.3e} vs bf16 module {base:.3e}"
+
+
+@needs_ampere
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("n", [64, 128, 384])
+@pytest.mark.parametrize("dropout", [False, True])
+def test_d512_nograd_mask_dropout_and_reference(kind, n, dropout):
+    """D512 inference keeps token masks and no-grad training's broadcast dropout."""
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+    module = _module(kind, 512, ImplementationType.MINIWORLD)
+    z, mask, ds, dy = _inputs(n, 512)
+    ref = _run(module, z, mask, ds, dy, train=False, dtype=torch.float32, implementation=ImplementationType.PYTORCH)
+    base = _run(module, z, mask, ds, dy, train=False, implementation=ImplementationType.PYTORCH)
+    got = _run(module, z, mask, ds, dy, train=False)
+    assert _rel(got["out"], ref["out"]) <= max(1.25 * _rel(base["out"], ref["out"]), 2e-3)
+    m = module.bfloat16().train(dropout)
+    m._make_drop_row_scale = lambda pair, p: ds.to(pair.dtype)
+    zz = z.bfloat16()
+    assert not sm80_wide.supports(zz, 512, mask, hs=m.to_left.weight.shape[0])
+    with torch.no_grad():
+        assert sm80_wide.supports(zz, 512, mask, hs=m.to_left.weight.shape[0])
+        eager = m(zz, mask)
+        # The residual is never dropout-scaled. Its zero-scale limit is exactly x.
+        if dropout:
+            from miniworld_engine.modules.dispatch import (
+                resolve_triangle_multiplication,
+            )
+
+            reference = copy.deepcopy(m).float()
+            reference.implementation = ImplementationType.PYTORCH
+            reference._backend = resolve_triangle_multiplication(ImplementationType.PYTORCH)
+            want = reference(zz.float(), mask)
+            assert _rel(eager.float(), want) < 1e-2
+            m._make_drop_row_scale = lambda pair, p: torch.zeros_like(ds, dtype=pair.dtype)
+            assert torch.equal(m(zz, mask), zz)
+            m._make_drop_row_scale = lambda pair, p: ds.to(pair.dtype)
+        torch._dynamo.reset()
+        compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+        assert torch.equal(compiled(zz, mask), eager)
+
+
+@needs_ampere
+@pytest.mark.parametrize("kind", ["outgoing", "bidir"])
+def test_d512_graph_replay_reads_changed_weights_and_mask(kind):
+    m = _module(kind, 512, ImplementationType.MINIWORLD).bfloat16().eval()
+    z, mask, _, _ = _inputs(128, 512)
+    z = z.bfloat16()
+    with torch.no_grad():
+        m(z, mask)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            m(z, mask)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = m(z, mask)
+        graph.replay()
+        before = out.clone()
+        mask.logical_not_()
+        m.to_out.weight.mul_(0.7)
+        graph.replay()
+        replay = out.clone()
+        want = m(z, mask)
+        assert torch.equal(replay, want)
+        assert not torch.equal(before, want)
+
+
+@needs_ampere
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("n", [128, 384, 768])
+def test_d512_projection_schedule_preserves_output(kind, n, monkeypatch):
+    """Prefetch depth must not change the arithmetic, including live dropout."""
+    m = _module(kind, 512, ImplementationType.MINIWORLD).bfloat16().train()
+    z, mask, ds, _ = _inputs(n, 512)
+    m._make_drop_row_scale = lambda pair, p: ds.to(pair.dtype)
+    z = z.bfloat16()
+    with torch.no_grad():
+        monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_TUNED", "0")
+        before = m(z, mask)
+        monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_TUNED", "1")
+        after = m(z, mask)
+    assert torch.equal(before, after)
+
+
+@needs_ampere
+@pytest.mark.parametrize("kind", KINDS)
+@pytest.mark.parametrize("n", [128, 192, 384, 768])
+def test_d512_row_mask_preserves_empty_sparse_and_unaligned_rows(kind, n, monkeypatch):
+    """Row skipping and hoisted indices preserve both directions; L192 keeps the general indexing."""
+    m = _module(kind, 512, ImplementationType.MINIWORLD).bfloat16().eval()
+    z, mask, _, _ = _inputs(n, 512)
+    z = z.bfloat16()
+    with torch.no_grad():
+        for current_mask in (None, torch.ones_like(mask), torch.zeros_like(mask), mask):
+            monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_ROW_MASK", "0")
+            before = m(z, current_mask)
+            monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_ROW_MASK", "1")
+            after = m(z, current_mask)
+            assert torch.equal(before, after)

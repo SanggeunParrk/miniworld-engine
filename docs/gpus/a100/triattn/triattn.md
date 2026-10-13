@@ -1,5 +1,27 @@
 # TriangleAttention on A100 (sm80)
 
+2026-10-05 Token/TriAttn follow-up: large inference cores can hold their first-tile softmax shift and recompute a CTA with
+online softmax if its seed/sum/accumulators are invalid. Dense and sparse masked work retains separate tile geometries, selected on device.
+The D256 inference front at L >= 512 pads GEMM K264→288 and output stride 1032→1056; zero padding aligns the reduction and Q/K/V reads
+without changing the logical channels. The preceding slow D128/L768 and D256/L512,640,768 now measure **1.05–1.11×** against freshly
+remeasured Anthropic. Other Anthropic-servable shapes also remain ahead in this run. Training keeps its previous layout and online softmax.
+`MINIWORLD_TRIATTN_SM80_SOFTMAX=0` and `MINIWORLD_TRIATTN_SM80_GEMM_PAD=0` restore the preceding inference choices.
+[All shapes, source review, rejected candidates and tests](../../../records/a100-token-triattn-followup-20261005.md).
+
+Internal-kernel follow-up (2026-10-05): dense head_dim=32 inference at L >= 256 uses a 64-query / 64-key CTA with four warps and two K/V stages.
+Wide gated inference with a mask and L divisible by 384 also fuses gate output into an adaptive dense/compact core: the GPU selects compact
+indexing when at least 25% of keys are excluded. No count is copied to the host; each graph replay reads the current mask.
+The changed D64/D128 protocol shapes improve 1.034–1.076× at mask 0%; D256–D512 measure 0.995–1.037× at mask 0% and 1.129–1.239× at mask 50%.
+D256 L384/L768 at mask 0% measured about 0.5% slower; these small differences are retained in the report rather than claimed as gains.
+`MINIWORLD_TRIATTN_SM80_INTERNAL=0` retains the preceding schedule. Training and native 16-channel heads retain their existing paths.
+[Full measurements, rejected candidates and validation](../../../records/a100-trimul-triattn-internal-20261005.md).
+
+2026-10-05 core tuning: dense BF16 inference with 32-channel heads and L divisible by 384 uses 48-key tiles and two K/V pipeline stages
+(previously 32 keys / four stages). Two paired compiled CUDA-graph rounds show 1.008–1.031× **whole-module** speedups on the changed protocol shapes.
+Training, native 16-channel heads and mask compaction retain their schedules; D128 L768 already uses the compact 48-key path.
+`MINIWORLD_TRIATTN_SM80_TUNED=0` restores the previous dense schedule.
+See the [complete shape table and validation](../../../records/a100-trimul-triattn-core-tuning-20261005.md).
+
 Kernel-level status of `TriangleAttention` (`use_self_attention=True`) on A100 at every registered width, and of the `projected_attention` token_pair leaf (the same attention core behind
 `ops.augmented_attention_pair_bias`); the module-level summary is in [a100.md](../a100.md). bf16 only; columns are (Length, Dimension) with Dimension = d_pair. A100 = CUDA for every registered
 geometry: d_pair 64 (hidden 64 with 4 heads of 16 or 2 heads of 32, hidden 128 with 4 heads of 32), 128 (4 × 32), 256 (8 × 32) and 384 (12 × 32), inference and training, starting and ending node, L a multiple of 128

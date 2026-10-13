@@ -36,6 +36,12 @@ def test_the_gate_rejects_what_it_is_not_built_for():
     assert not sm80_wide.shape_ok((2, 128, 128, 256), BF16, 256, mask_shape=(1, 128), mask_dtype=torch.bool)    # a mask for another batch
 
 
+def test_d512_inference_geometry_is_bf16_with_both_hidden_widths():
+    assert sm80_wide.shape_ok((1, 768, 768, 512), BF16, 512)
+    assert sm80_wide.shape_ok((1, 768, 768, 512), BF16, 512, hs=1024)
+    assert not sm80_wide.shape_ok((1, 768, 768, 512), torch.float32, 512)
+
+
 def test_the_registered_triangle_multiplication_widths_all_have_a_kernel():
     """Every ``d_pair`` of a ``triangle_multiplication`` row of the model registry is a width of the unit set (a registry width without a kernel would silently run Triton)."""
     registry = Path(sm80_wide.__file__).resolve().parents[2] / "registry" / "registry_module.csv"

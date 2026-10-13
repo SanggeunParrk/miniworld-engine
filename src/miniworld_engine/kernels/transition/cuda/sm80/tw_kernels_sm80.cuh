@@ -12,6 +12,10 @@
 #pragma once
 #include "tw_gemm_sm80.cuh"
 
+#ifndef TW_ROUND_SWIGLU
+#define TW_ROUND_SWIGLU 0
+#endif
+
 namespace a100 {
 
 // ===================================================================================================================== LayerNorm forward
@@ -277,8 +281,14 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) dual_swiglu_kernel(const Dua
         float hv[2];
 #pragma unroll
         for (int k = 0; k < 2; ++k) {
-          const float av = acc[mt][j][2 * hh + k], bv = acc[mt][C::NT / 2 + j][2 * hh + k];
+          float av = acc[mt][j][2 * hh + k], bv = acc[mt][C::NT / 2 + j][2 * hh + k];
+          if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
+            if (p.K == 256) { av = round_bf16f(av); bv = round_bf16f(bv); }
+          }
           hv[k] = EPI == 0 ? av * sigmoid(av) * bv : av * sigmoid(bv);                 // EPI 0: silu(a) b (SwiGLU);  1: a sigmoid(b) (the triangle-multiplication gate)
+          if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
+            if (p.K == 256) hv[k] = round_bf16f(av * sigmoid(av)) * bv;
+          }
         }
         const uint32_t row = (uint32_t)(wm * C::MT * 16 + 16 * mt + 8 * hh + g8), chunk = (uint32_t)(wn * (C::HPW / 8) + j);
         sts32(smem + swz_off<C::CPH>(row, chunk) + 4 * q, pack_bf16(hv[0], hv[1]));
@@ -323,12 +333,23 @@ __global__ void __launch_bounds__(C::NTHR, C::MINB) gate_bwd_kernel(const DualPa
         float hv[2], av2[2], bv2[2];
 #pragma unroll
         for (int k = 0; k < 2; ++k) {
-          const float av = acc[mt][j][2 * hh + k], bv = acc[mt][C::NT / 2 + j][2 * hh + k];
+          float av = acc[mt][j][2 * hh + k], bv = acc[mt][C::NT / 2 + j][2 * hh + k];
+          if constexpr (TW_ROUND_SWIGLU && EPI == 0) {
+            if (p.K == 256) { av = round_bf16f(av); bv = round_bf16f(bv); }
+          }
           if (EPI == 0) {
             const float sg = sigmoid(av), silu = av * sg;
             hv[k] = silu * bv;
             bv2[k] = dv[k] * silu;
             av2[k] = dv[k] * bv * fmaf(silu, 1.f - sg, sg);
+            if constexpr (TW_ROUND_SWIGLU) {
+              if (p.K == 256) {
+                const float rounded = round_bf16f(silu);
+                hv[k] = rounded * bv;
+                bv2[k] = dv[k] * rounded;
+                av2[k] = round_bf16f(dv[k] * bv) * fmaf(silu, 1.f - sg, sg);
+              }
+            }
           } else {                                                 // out = a sigmoid(b): d_a = d sigmoid(b), d_b = d a sigmoid(b) (1 - sigmoid(b))
             const float sg = sigmoid(bv);
             hv[k] = av * sg;

@@ -154,8 +154,8 @@ __global__ void __launch_bounds__(AF_NW * 32, 2) attn_fwd_kernel(const AttnFwdPa
     if (r1 < S) stg32(orow1 + col, r1 < su ? pack_bf16(o[nt][2] * il1, o[nt][3] * il1) : 0u);
   }
   if (q4 == 0) {
-    if (r0 < S) p.lse[(size_t)nh * S + r0] = l0 > 0.f ? mx0 * p.scale + logf(l0) : 0.f;
-    if (r1 < S) p.lse[(size_t)nh * S + r1] = l1 > 0.f ? mx1 * p.scale + logf(l1) : 0.f;
+    if (p.lse && r0 < S) p.lse[(size_t)nh * S + r0] = l0 > 0.f ? mx0 * p.scale + logf(l0) : 0.f;
+    if (p.lse && r1 < S) p.lse[(size_t)nh * S + r1] = l1 > 0.f ? mx1 * p.scale + logf(l1) : 0.f;
   }
 }
 

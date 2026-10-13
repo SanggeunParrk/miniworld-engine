@@ -164,3 +164,94 @@ def test_inference_is_cuda_graph_capturable_and_deterministic():
         again = fast(x, c, p)
     torch.testing.assert_close(out, eager, atol=0, rtol=0)
     torch.testing.assert_close(again, eager, atol=0, rtol=0)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize("fp32_parameters", [False, True])
+@pytest.mark.parametrize("misaligned", [False, True])
+def test_native_pack_matches_previous_recipe(monkeypatch, n_head, d_head, fp32_parameters, misaligned):
+    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+
+    _, fast, _ = blocks(seed=102, n_head=n_head, d_head=d_head)
+    if fp32_parameters:
+        fast.float()
+    if misaligned:
+        for name, weight in list(fast.named_parameters()):
+            storage = weight.new_empty(weight.numel() + 1)[1:].view_as(weight)
+            storage.copy_(weight.detach())
+            module, attr = name.rsplit(".", 1)
+            setattr(fast.get_submodule(module), attr, torch.nn.Parameter(storage))
+    with torch.no_grad():
+        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "0")
+        old = FusedBiasOnlyDiT([fast])
+        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "1")
+        new = FusedBiasOnlyDiT([fast])
+        for name in ("w1", "b1", "w2", "b2", "pw"):
+            torch.testing.assert_close(getattr(new, name), getattr(old, name), rtol=0, atol=0)
+        for name in ("wvg", "wo", "wab", "ws"):
+            torch.testing.assert_close(new.per[0][name], old.per[0][name], rtol=0, atol=0)
+        # The disabled conditioning experiment must issue no preparation kernels.
+        assert not hasattr(new, "wc")
+        new._conditioning_weights()
+        for name in ("wc", "bc", "csc"):
+            torch.testing.assert_close(getattr(new, name), getattr(old, name), rtol=0, atol=0)
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+def test_fullgraph_replay_reads_changed_inputs_mask_and_all_weights(n_head, d_head):
+    _, fast, ref = blocks(seed=103, n_head=n_head, d_head=d_head)
+    L, S = 256, 3
+    x = torch.randn(S, 1, L, 768, device="cuda", dtype=torch.bfloat16)
+    c = torch.randn(1, 1, L, 384, device="cuda", dtype=torch.bfloat16).expand(S, 1, L, 384)
+    p = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, L, device="cuda") > .2
+    compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
+    with torch.no_grad():
+        compiled(x, c, p, mask)
+        side = torch.cuda.Stream()
+        side.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(side):
+            compiled(x, c, p, mask)
+        torch.cuda.current_stream().wait_stream(side)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = compiled(x, c, p, mask)
+        graph.replay()
+        initial = out.clone()
+        x.normal_(); c[0].normal_(); p.normal_()
+        for name, weight in fast.named_parameters():
+            weight.add_(.02 * torch.randn_like(weight))
+            ref.get_parameter(name).copy_(weight)
+        for mode in ("partial", "empty", "single"):
+            mask.zero_()
+            if mode == "partial":
+                mask[:, ::3] = True
+            elif mode == "single":
+                mask[:, -1] = True
+            graph.replay()
+            live = fast(x, c, p, mask)
+            want = ref(x, c, p, mask)
+            torch.testing.assert_close(out, live, atol=0, rtol=0)
+            assert relative(out, want) < .01
+            assert not torch.equal(initial, out)
+
+
+@pytest.mark.parametrize("n_head", [12, 16])
+def test_multiblock_runner_preserves_previous_result(monkeypatch, n_head):
+    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+
+    _, first, _ = blocks(seed=104, n_head=n_head)
+    _, second, _ = blocks(seed=105, n_head=n_head)
+    x = torch.randn(2, 1, 128, 768, device="cuda", dtype=torch.bfloat16)
+    c = torch.randn(1, 1, 128, 384, device="cuda", dtype=torch.bfloat16)
+    p = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, 128, device="cuda") > .2
+    with torch.no_grad():
+        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "0")
+        old = FusedBiasOnlyDiT([first, second])
+        want = old.step(x, c, old.hoist(p, mask))
+        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "1")
+        new = FusedBiasOnlyDiT([first, second])
+        got = new.step(x, c, new.hoist(p, mask))
+        assert not hasattr(new, "wc")
+        assert relative(got, want) < .001

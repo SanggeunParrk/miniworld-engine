@@ -41,6 +41,7 @@ their backwards, around the SAME window-attention kernels on bf16 operands (what
 from __future__ import annotations
 
 import functools
+import os
 import warnings
 from typing import Any
 
@@ -1032,17 +1033,74 @@ def swa_dit_block_bwd(
             D=D,
             MODW=6 * C,
         )
-    dwqkv = _mm32(dP[:, : 3 * C].t(), x)
-    dwg = _mm32(dP[:, 3 * C :].t(), x)
-    dwo = _mm32(datt.t(), gated)
-    if dwu is None or dwd is None:
+    if (sm80 is not None and N == 48 and S in (4096, 8192)
+            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW", "1" if S == 8192 else "0") == "1"):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped5_sm80 import grouped_weight_gradients5
+
+        dwqkv, dwg, dwu, dwo, dwd = grouped_weight_gradients5(dP, x, dab, y, datt, gated, dffn, hh)
+    elif (sm80 is not None and N == 48 and S in (4096, 8192)
+            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_ALLOC", "0") == "1"):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_alloc_sm80 import grouped_weight_gradients8_alloc
+
+        dwqkv, dwg, dwu, dwo = grouped_weight_gradients8_alloc(dP, x, dab, y, datt, gated)
+    elif (sm80 is not None and N == 48 and S in (4096, 8192)
+            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_DW", "0") == "1"):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_sm80 import grouped_weight_gradients8
+
+        dwqkv, dwg, dwu, dwo = grouped_weight_gradients8(dP, x, dab, y, datt, gated)
+    elif (sm80 is not None and N == 48 and S in (4096, 8192)
+            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED_DW", "1" if S == 4096 else "0") == "1"):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped_sm80 import grouped_weight_gradients
+
+        dwqkv, dwg, dwu, dwo = grouped_weight_gradients(dP, x, dab, y, datt, gated)
+    else:
+        if (sm80 is not None and N == 48 and S in (4096, 8192)
+                and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_QKVG_DW", "0") == "1"):
+            from miniworld_engine.kernels.swa_dit.cuda.wgrad_qkvg_sm80 import qkvg_weight_gradient
+
+            dwqkv, dwg = qkvg_weight_gradient(dP, x)
+        else:
+            dwqkv = _mm32(dP[:, :3 * C].t(), x)
+            dwg = _mm32(dP[:, 3 * C:].t(), x)
+        dwo = _mm32(datt.t(), gated)
+    if dwu is None:
         dwu = _mm32(dab.t(), y)
-        dwd = _mm32(dffn.t(), hh)
+    if dwd is None:
+        if (sm80 is not None and N == 48 and S in (4096, 8192)
+                and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_DWD", "1") == "1"):
+            from miniworld_engine.kernels.swa_dit.cuda.wgrad_split_sm80 import down_weight_gradient
+
+            dwd = down_weight_gradient(dffn, hh)
+        else:
+            dwd = _mm32(dffn.t(), hh)
     if sm80 is not None and mode == sm80.MODE_HOIST:
         dmod = dmod.sum(0)                                    # the A / 16 partial buffers, in a fixed order
     elif sm80 is not None and Bm != B:
         dmod = dmod.view(A, B * S, -1).sum(0)                 # one gradient row per sample (the expanded modulation): summed over the samples, in a fixed order
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+
+
+def _swa_dit_block_bwd_typed_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
+                                att, y, ffn, B, half_window, eps, grad_bf16_mask):
+    grads = _swa_dit_block_bwd_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
+                                  att, y, ffn, B, half_window, eps)
+    return grads[:2] + [torch.empty_like(g, dtype=torch.bfloat16 if grad_bf16_mask & (1 << i) else torch.float32)
+                        for i, g in enumerate(grads[2:])]
+
+
+@opaque(fake=_swa_dit_block_bwd_typed_fake, name="swa_dit_block_bwd_typed_sm80")
+def swa_dit_block_bwd_typed_sm80(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                                seqused: torch.Tensor, wqkv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wu: torch.Tensor,
+                                wd: torch.Tensor, qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, g: torch.Tensor, o: torch.Tensor,
+                                lse: torch.Tensor, q1: torch.Tensor, x: torch.Tensor, pq: torch.Tensor, pk: torch.Tensor,
+                                att: torch.Tensor, y: torch.Tensor, ffn: torch.Tensor, B: int, half_window: int,
+                                eps: float, grad_bf16_mask: int) -> list[torch.Tensor]:
+    """A100 block backward with one own CUDA finalizer to the parameter dtypes."""
+    from miniworld_engine.kernels.swa_dit.cuda.grad_finalize_sm80 import finalize
+
+    grads = swa_dit_block_bwd.__wrapped__(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd,
+                                        qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
+    return grads[:2] + finalize(grads[2:], grad_bf16_mask)
 
 
 def _swa_dit_bwd_fp32_launch(

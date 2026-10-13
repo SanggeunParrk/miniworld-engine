@@ -1,5 +1,13 @@
 # Token DiT on A100 (sm80)
 
+2026-10-05 follow-up: BF16 inference packs one token block's weights in one CUDA launch and uses the tiled APB
+LayerNorm/projection/mask producer for its 16-head pair bias. Both still read current weights and pair/mask on graph replay.
+At A5, shared conditioning and 20% mask, L128–768 improve **1.50–1.67×** over the preceding code and measure
+**1.11–1.52×** against freshly remeasured Anthropic. Non-multiple lengths keep their existing composition.
+`MINIWORLD_TOKEN_DIT_PREP=0` retains the preceding preparation path. The new pack is one-block, BF16, 768/384/128, 16×48, no QK-norm;
+FP32, training and other packed-stack geometries retain their implementations.
+[Paired measurements, Anthropic source review and validation](../../../records/a100-token-triattn-followup-20261005.md).
+
 Kernel-level status of the token DiT block (`DiTBlock`: AF3 Alg. 23 -- AdaLN, attention with the pair bias shared by the samples, a conditioned
 SwiGLU transition; d_single 768, d_cond 384, d_pair 128, 16 heads × 48, transition n = 2) on A100; the module-level summary is in
 [a100.md](../a100.md). bf16 (the kernels' dtype); columns are (Length, Dimension). A100 = CUDA where a hand-written sm_80 kernel runs a step, cuBLAS

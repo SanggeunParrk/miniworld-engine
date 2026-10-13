@@ -132,6 +132,19 @@ class SWADiTBlock(nn.Module):
         self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple,
     ) -> torch.Tensor:
         """The fused block with the modulation computed once per row of ``cond`` ([B, S, d_cond], N % B == 0)."""
+        if not torch.is_grad_enabled():
+            from miniworld_engine.kernels.swa_dit.cuda.inference_rowgrid_sm80_a100 import (
+                block as inference_block,
+                eligible as inference_eligible,
+            )
+
+            weights = (self.adaln_modulation[1].weight, self.attn.Wqkv.weight,
+                       self.attn.gate_proj.weight, self.attn.out_proj.weight,
+                       self.ffn.w_up.weight, self.ffn.w_down.weight)
+            if inference_eligible(x, cond, attention_params, weights,
+                                  self.attn.n_heads, self.attn.half_window):
+                return inference_block(x, cond, *attention_params[:3], *weights)
+
         from miniworld_engine.kernels.swa_dit.interface import (
             swa_dit_block,
             swa_dit_hoist_modulation,

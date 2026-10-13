@@ -52,9 +52,9 @@ void swa_attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   TORCH_CHECK(seqused.scalar_type() == torch::kInt32 && seqused.is_cuda() && seqused.numel() == q.size(0), "seqused must be int32 [N]");
   const int64_t N = q.size(0), S = q.size(1);
   TORCH_CHECK(k.size(0) == N && k.size(1) == S && v.size(0) == N && v.size(1) == S, "q, k, v must have the same [N, S]");
-  TORCH_CHECK(o.numel() == N * S * sw80::AF_C && lse.numel() == N * sw80::AF_H * S && lse.scalar_type() == torch::kFloat32, "bad output sizes");
+  TORCH_CHECK(o.numel() == N * S * sw80::AF_C && (lse.numel() == 0 || lse.numel() == N * sw80::AF_H * S) && lse.scalar_type() == torch::kFloat32, "bad output sizes");
   c10::cuda::CUDAGuard guard(q.device());
-  sw80::AttnFwdParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), lse.data_ptr<float>(), (int)S,
+  sw80::AttnFwdParams p{bptr(q), bptr(k), bptr(v), seqused.data_ptr<int>(), bptr_w(o), lse.numel() ? lse.data_ptr<float>() : nullptr, (int)S,
                         0.17677669529663687f, 0.17677669529663687f * 1.4426950408889634f, qs, ks, vs};
   const dim3 grid((unsigned)((S + sw80::AF_QT - 1) / sw80::AF_QT), (unsigned)(N * sw80::AF_H));
   const bool hm = qs.s == sw80::AF_HD && ks.s == sw80::AF_HD && vs.s == sw80::AF_HD;       // the fused block's head-major planes: the row strides are compile-time

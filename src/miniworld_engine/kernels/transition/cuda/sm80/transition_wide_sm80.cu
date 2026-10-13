@@ -277,7 +277,46 @@ void add_res(torch::Tensor y, torch::Tensor res) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+namespace {
+// Finalize both FP32 weight-gradient accumulators in one launch, rounding once.
+__global__ void transition_grad_cast_kernel(const float* ab, const float* s,
+                                            __nv_bfloat16* out_ab, __nv_bfloat16* out_s,
+                                            int64_t ab_vectors, int64_t total_vectors) {
+  for (int64_t vector = (int64_t)blockIdx.x * blockDim.x + threadIdx.x;
+       vector < total_vectors; vector += (int64_t)blockDim.x * gridDim.x) {
+    const bool is_ab = vector < ab_vectors;
+    const int64_t offset = is_ab ? vector : vector - ab_vectors;
+    const float* source = (is_ab ? ab : s) + offset * 8;
+    const float4 lo = *reinterpret_cast<const float4*>(source);
+    const float4 hi = *reinterpret_cast<const float4*>(source + 4);
+    const uint4 packed = make_uint4(a100::pack_bf16(lo.x, lo.y), a100::pack_bf16(lo.z, lo.w),
+                                    a100::pack_bf16(hi.x, hi.y), a100::pack_bf16(hi.z, hi.w));
+    *reinterpret_cast<uint4*>((is_ab ? out_ab : out_s) + offset * 8) = packed;
+  }
+}
+}  // namespace
+
+std::vector<torch::Tensor> grad_cast(torch::Tensor ab, torch::Tensor s) {
+  TORCH_CHECK(ab.is_cuda() && s.is_cuda() && ab.device() == s.device() &&
+              ab.is_contiguous() && s.is_contiguous() &&
+              ab.scalar_type() == at::kFloat && s.scalar_type() == at::kFloat,
+              "weight accumulators: matching-device contiguous FP32");
+  TORCH_CHECK(ab.numel() % 8 == 0 && s.numel() % 8 == 0, "weight gradient elements % 8");
+  auto out_ab = torch::empty_like(ab, ab.options().dtype(at::kBFloat16));
+  auto out_s = torch::empty_like(s, s.options().dtype(at::kBFloat16));
+  const int64_t ab_vectors = ab.numel() / 8, total_vectors = ab_vectors + s.numel() / 8;
+  if (total_vectors) {
+    const int blocks = (int)std::min<int64_t>((total_vectors + 255) / 256, 4 * (int64_t)num_sms());
+    transition_grad_cast_kernel<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+        cptr<float>(ab), cptr<float>(s), mptr<__nv_bfloat16>(out_ab), mptr<__nv_bfloat16>(out_s),
+        ab_vectors, total_vectors);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  return {out_ab, out_s};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("grad_cast", &grad_cast);
   m.def("add_res", &add_res);
   m.def("gemm_res", &gemm_res);
   m.def("ln_fwd", &ln_fwd);

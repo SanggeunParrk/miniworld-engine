@@ -47,7 +47,7 @@ def _inputs(L, masked, seed=1, d=384):
     return single, pair, mask
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("L", [50, 128, 208, 384, 768])
 def test_apb_a100_inference(L, masked, shape):
@@ -69,11 +69,12 @@ def test_apb_a100_inference(L, masked, shape):
     assert d < 1.3 * d0 + 2e-3, (d, d0)
 
 
-def test_apb_a100_everything_masked_is_the_uniform_softmax():
+@pytest.mark.parametrize("shape", [(8, 384), (24, 384)])
+def test_apb_a100_everything_masked_is_the_uniform_softmax(shape):
     """A sample whose keys are all masked: the kernel's finite fill makes every logit equal (no NaN), so the softmax is uniform and the attention output the
     mean of v over the keys. (The PyTorch module's finfo.min fill is not the uniform softmax here -- its SDPA kernels treat the degenerate row their own way --
     so the reference is the limit itself.)"""
-    ref, ours, _ = _modules()
+    ref, ours, _ = _modules(shape=shape)
     single, pair, _ = _inputs(256, False)
     mask = torch.zeros(1, 256, dtype=torch.bool, device="cuda")
     sb, pb = single.bfloat16(), pair.bfloat16()
@@ -118,7 +119,7 @@ def test_apb_a100_matches_the_triton_module_path():
     assert _rel(got, base) < 1.5e-2
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
 def test_apb_a100_compiled(shape):
     """Inference through torch.compile (fullgraph) matches eager."""
     torch._dynamo.reset()                   # each shape compiles the module's forward afresh (recompile limit)
@@ -158,7 +159,7 @@ def _train(mod, single, pair, mask, dy):
     return y, {"single": s.grad, "pair": p.grad, **{n: q.grad for n, q in mod.named_parameters()}}
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("L", [50, 128, 208, 384])
 def test_apb_a100_training(L, masked, shape):
@@ -204,7 +205,7 @@ def test_apb_a100_training_is_bit_reproducible_except_the_column_sums():
         assert _rel(g1[n], g2[n]) < 1e-2, n
 
 
-@pytest.mark.parametrize("shape", SHAPES)
+@pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
 def test_apb_a100_training_compiled(shape):
     """A training step through torch.compile matches eager."""
     torch._dynamo.reset()
@@ -232,3 +233,30 @@ def test_apb_a100_training_everything_masked_is_finite():
     assert torch.isfinite(y).all()
     for n, g in grads.items():
         assert torch.isfinite(g).all(), n
+
+
+def test_apb_24x16_replay_reads_changed_weights_and_mask():
+    from miniworld_engine.integrations import attention_pair_bias_sm80 as a100
+    _, m, _ = _modules(shape=(24, 384))
+    single, pair, mask = _inputs(208, True)
+    single, pair = single.bfloat16(), pair.bfloat16()
+    assert not a100.serves_train(m, single, pair, mask)
+    with torch.no_grad():
+        assert a100.serves_inference(m, single, pair, mask)
+        m(single, pair, mask)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(stream):
+            m(single, pair, mask)
+        torch.cuda.current_stream().wait_stream(stream)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = m(single, pair, mask)
+        graph.replay()
+        before = out.clone()
+        mask.logical_not_()
+        m.to_query.weight.mul_(0.7)
+        graph.replay()
+        replay = out.clone()
+        assert torch.equal(replay, m(single, pair, mask))
+        assert not torch.equal(replay, before)

@@ -1,6 +1,6 @@
 """Automatic dispatch to the A100 (sm_80) AttentionPairBias: hand CUDA but the plain GEMMs (cuBLAS).
 
-Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32 or 16 x 24 (AF3's Pairformer single attention; run 32 wide per head, as on
+Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 (inference only) or 16 x 24 (AF3's Pairformer single attention; run 32 wide per head, as on
 B200), or d_single 512 as 16 x 32; d_pair 128, no QK-norm, any L, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_80.
 
 Inference (one opaque op), the B200 step with this family's A100 pieces:
@@ -28,7 +28,7 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
-SHAPES = ((8, 384), (12, 384), (16, 384), (16, 512))     # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 16 x 32
+SHAPES = ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
 LOG2E = math.log2(math.e)
 NEG = -1e30                     # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
@@ -130,7 +130,7 @@ def _inference_packs(params, leaves):
     return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8)[:4]
 
 
-def _prep(leaves, qs: float, ws: float):
+def _prep(leaves, qs: float, ws: float, natural: bool = False):
     """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W], Wf = to_bias.weight * ln_pair.weight * ws [H, 128], Wo [D, W] with padded columns
     -- or None when there is no padding (8 x 48, 12 x 32, 16 x 32: to_out.weight as is)), bf16, one launch."""
     _, _, wq, bq, wk, wv, wg, wo, lnpw, _, wb = leaves
@@ -139,6 +139,10 @@ def _prep(leaves, qs: float, ws: float):
     bvec = wq.new_empty((4 * W,))
     wf = wq.new_empty((H, DP))
     wop = wq.new_empty((D, W)) if W != D else None
+    if natural:
+        wf_nat = torch.empty_like(wf)
+        _rows().ext().prep_train(wq, bq, wk, wv, wg, wo if wop is not None else None, wb, lnpw, wpack, bvec, wop, wf, qs, ws, wf_nat)
+        return wpack, bvec, wf, wop, wf_nat
     _rows().ext().prep(wq, bq, wk, wv, wg, wo if wop is not None else None, wb, lnpw, wpack, bvec, wop, wf, qs, ws)
     return wpack, bvec, wf, wop
 
@@ -187,10 +191,12 @@ MASKED = -1e4
 
 
 def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    return torch.is_grad_enabled() and _eligible(module, single, pair, mask)
+    # All twelve 24 x 16 rows improve the old path; zero preserves it for diagnosis.
+    train16 = os.environ.get("MINIWORLD_APB_SM80_TRAIN16", "1") == "1"
+    return torch.is_grad_enabled() and (module.n_head != 24 or train16) and _eligible(module, single, pair, mask)
 
 
-def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
+def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, save_natural=False):
     """y and the saved set: xa, (mean, rstd), qkvg, bias, O, LSE, og, W q | k | v | g (and the padded Wo for 16 x 24)."""
     L = single.shape[1]
     Lp = _pad(L)
@@ -198,12 +204,12 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
     e, f32 = single.new_empty, torch.float32
     out = [torch.empty_like(single), e((Lp, D)), e((L, 2), dtype=f32), e((Lp, 4 * W)), e((H, Lp, Lp)), e((Lp, W)), e((1, H, Lp), dtype=f32), e((L, W)),
            e((4 * W, D))]
-    return out + ([e((D, W))] if W != D else [])
+    return out + ([e((D, W))] if W != D else []) + ([e((H, DP))] if save_natural else [])
 
 
 @opaque(fake=_forward_fake, name="apb_sm80_train_fwd")
 def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-            eps_p: float) -> list[torch.Tensor]:
+            eps_p: float, save_natural: bool = False) -> list[torch.Tensor]:
     L = single.shape[1]
     Lp = _pad(L)
     rows = _rows()
@@ -212,7 +218,8 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
     scale = math.sqrt(hd)
     with torch.cuda.device(single.device):
         x = single.view(L, D)
-        wpack, bvec, wf, wop = _prep(leaves, 1.0, scale)
+        packed = _prep(leaves, 1.0, scale, natural=save_natural)
+        wpack, bvec, wf, wop = packed[:4]
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x) if Lp == L else x.new_zeros((Lp, D))
         st = x.new_empty((L, 2), dtype=torch.float32)
@@ -224,17 +231,19 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
         og = x.new_empty((L, W))
         rows.ext().gate_rows_bf(o, qkvg, og, L)
         y = y.addmm_(og, wo.t()).view(1, L, D)           # in place onto the residual seed: no copy of x into the output
-    return [y, xa, st, qkvg, bias, o, lse, og, wpack] + ([wop] if wop is not None else [])
+    return [y, xa, st, qkvg, bias, o, lse, og, wpack] + ([wop] if wop is not None else []) + ([packed[4]] if save_natural else [])
 
 
-def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
+def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy, parameter_refs):
     """One gradient per input (its dtype) and per leaf (fp32), contiguous."""
-    return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves)]
+    gradients = ([torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs] if parameter_refs
+                 else [torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves])
+    return [torch.empty_like(single), torch.empty_like(pair), *gradients]
 
 
 @opaque(fake=_backward_fake, name="apb_sm80_train_bwd")
 def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float, eps_p: float,
-             saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+             saved: list[torch.Tensor], dy: torch.Tensor, parameter_refs: list[torch.Tensor]) -> list[torch.Tensor]:
     L = single.shape[1]
     Lp = _pad(L)
     rows = _rows()
@@ -261,12 +270,20 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
         dwp = torch.mm(dqkvg.t(), xa[:L], out_dtype=f32)
         dx = torch.empty_like(x)
         E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc)
-        wf_nat = (wb.float() * lnpw.float()[None]).to(torch.bfloat16)      # natural units: db is the gradient of the natural-unit bias
+        # A saved natural-unit pack rounds the unscaled product directly. Dividing
+        # the scaled BF16 forward pack would introduce a second rounding error.
+        natural_index = 9 if W != D else 8
+        wf_nat = (saved[natural_index] if len(saved) > natural_index else
+                  (wb.float() * lnpw.float()[None]).to(torch.bfloat16))
         dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, DP), db, wf_nat, L, eps_p, acc, D)
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel. ln_pair's bias moves a head's logits by one
         # constant: sum_j dbias[h, i, j] = 0 for every query, so its gradient and its share of dWb are exactly 0
-        outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
-        E.finalize(dwp, dwo, acc, wb, lnpw, outs)
+        if parameter_refs:
+            outs = [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs]
+            E.finalize_typed(dwp, dwo, acc, wb, lnpw, outs)
+        else:
+            outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
+            E.finalize(dwp, dwo, acc, wb, lnpw, outs)
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
 
 
@@ -274,18 +291,33 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
+        parameter_refs = leaves
+        ctx.typed_gradients = os.environ.get("MINIWORLD_APB_SM80_TYPED_GRAD", "1") == "1"
         leaves = _kernel_leaves(leaves)
-        y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
+        heads, width, length = leaves[10].shape[0], single.shape[2], single.shape[1]
+        # Every selected shape improved the previous pack in paired module
+        # measurements. Keep the unproven h8d384/L768 and unmeasured shapes.
+        save_natural = (os.environ.get("MINIWORLD_APB_SM80_SAVE_NATURAL", "1") == "1"
+                        and (heads, width) in ((8, 384), (12, 384), (16, 384), (16, 512))
+                        and length in (128, 256, 384, 512, 640, 768)
+                        and not (heads == 8 and width == 384 and length == 768))
+        y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p, save_natural)
         ctx.eps = (eps_s, eps_p)
-        ctx.save_for_backward(mask, single, pair, *leaves, *saved)
+        if ctx.typed_gradients:
+            ctx.save_for_backward(mask, single, pair, *leaves, *parameter_refs, *saved)
+        else:
+            ctx.save_for_backward(mask, single, pair, *leaves, *saved)
         return y
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:14]), list(v[14:])          # saved: 9 or 10 tensors
-        dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
+        mask, single, pair, leaves = v[0], v[1], v[2], list(v[3:14])
+        parameter_refs, saved = (list(v[14:25]), list(v[25:])) if ctx.typed_gradients else ([], list(v[14:]))
+        dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy, parameter_refs if ctx.typed_gradients else [])
+        if ctx.typed_gradients:
+            return (None, None, None, dx, dz, *grads)
         return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
 
 

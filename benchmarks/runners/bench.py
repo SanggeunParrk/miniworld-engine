@@ -702,19 +702,32 @@ def capture_stream() -> "torch.cuda.Stream":
     return _CAPTURE_STREAM
 
 
+@contextlib.contextmanager
 def forward_stream(conf) -> "contextlib.AbstractContextManager":
-    """Build a bench's forward on the capture stream, unless no graph will be captured.
+    """Build each benchmark invocation on its own nondefault capture stream.
 
     cf68bd2c did this inside `_bwd_autograd_result`, which then took the `build` callable. That
     signature is gone -- the three backward benches construct `out` themselves -- so it moves to
     the one place every bench function is invoked. Keeping the forward off the default stream is
-    what the fix needs; where the construction sits is not.
+    what the fix needs; where the construction sits is not. Independent retained graphs also
+    need independent capture streams: sharing one stream across different implementations and
+    shapes produced replay failures after subsequent captures. This scope applies identically
+    to our implementation and external baselines; it changes no timed computation.
     """
     if getattr(conf, "cudagraph", "disabled") == "disabled":
-        return contextlib.nullcontext()
-    side = capture_stream()
+        yield
+        return
+    global _CAPTURE_STREAM
+    previous = _CAPTURE_STREAM
+    side = torch.cuda.Stream()
+    _CAPTURE_STREAM = side
     side.wait_stream(torch.cuda.current_stream())
-    return torch.cuda.stream(side)
+    try:
+        with torch.cuda.stream(side):
+            yield
+    finally:
+        torch.cuda.current_stream().wait_stream(side)
+        _CAPTURE_STREAM = previous
 
 
 def _payload_refusal(exc: BaseException) -> str | None:
@@ -902,6 +915,8 @@ def capture_cudagraph(
     torch.cuda.current_stream().wait_stream(side)
     torch.cuda.synchronize()
     graph = torch.cuda.CUDAGraph()
+    # Keep the capture stream (and its stream-specific library workspace) alive with the graph.
+    graph._miniworld_capture_stream = side
     if is_train:
         # The SAME stream the forward was built on; `torch.cuda.graph` left to
         # itself picks an internal one and reintroduces the split.
@@ -4915,10 +4930,11 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                 f"cond has {cond.shape[0]} samples, single {single.shape[0]}"
             )
         if single.is_cuda and torch.cuda.get_device_capability(single.device) not in (
+            (8, 0),
             (9, 0),
             (10, 0),
         ):
-            reasons.append("not sm_90 / sm_100")
+            reasons.append("not sm_80 / sm_90 / sm_100")
         return "; ".join(reasons) or "integrations.token_dit.serves() declined"
 
     def _dit_module_composition_path(block, single, cond, pair, mask, dtype, is_train, why):
@@ -4941,14 +4957,17 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         return f"modules.dit.DiTBlock[module composition: {attention} + {transition}; fused token runner not taken: {why}]"
 
     if local:
-        from miniworld_engine.integrations import local_dit
+        from miniworld_engine.integrations import local_dit, local_dit_sm80
 
         with torch.set_grad_enabled(is_train):
             local_native = local_dit.serves(model.layers[0], single, cond, pair, mask)
+            local_native_sm80 = local_dit_sm80.serves(model.layers[0], single, cond, pair, mask)
         if anthropic:
             execution_path = "modules.local_dit.LocalDiTBlock[Anthropic fpf_atom 32x128 + DTK + LN + cuBLAS; cross_attention=True]"
         elif local_native:
             execution_path = "modules.local_dit.LocalDiTBlock[B200 sm100_atom_local CUDA + cuBLAS; cross_attention=True]"
+        elif local_native_sm80:
+            execution_path = "modules.local_dit.LocalDiTBlock -> integrations.local_dit_sm80[A100 own CUDA pair bias/window attention/gates + dispatched AdaLN/ConditionedTransition and cuBLAS projections; cross_attention=True]"
         else:
             execution_path = "modules.local_dit.LocalDiTBlock[PyTorch local 32x128 attention + dispatched AdaLN/ConditionedTransition; cross_attention=True]"
     elif anthropic:
@@ -4973,9 +4992,15 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         and spec.impl in (ImplementationType.MINIWORLD, ImplementationType.TRITON)
         and _token_dit_train_serves(model.layers[0], single, cond, pair, mask)
     ):
+        if torch.cuda.get_device_capability(single.device) == (8, 0):
+            attention_core = "A100 sm80 CUDA attention forward/backward"
+            if os.environ.get("MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD", "1") == "1":
+                attention_core += " with direct BF16 q/k/v gradients"
+        else:
+            attention_core = "B200 sm_100a attn_fwd2 / attn_dkv / attn_dqb"
         execution_path = (
-            "modules.dit.DiTBlock -> integrations.token_dit_train.block[fused B200 training block: cuBLAS GEMMs + sm_100a "
-            "attn_fwd2 / attn_dkv / attn_dqb + CUDA row kernels (token_dit_train_rows.cu), one opaque op forward and backward]"
+            f"modules.dit.DiTBlock -> integrations.token_dit_train.block[cuBLAS GEMMs + {attention_core} "
+            "+ CUDA row kernels (token_dit_train_rows.cu), one opaque op forward and backward]"
         )
     elif spec.impl in (
         ImplementationType.MINIWORLD,
@@ -4985,7 +5010,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         execution_path = (
             "modules.dit.DiTBlock -> integrations.token_dit.update -> kernels.conditioned_transition.triton."
             "token_dit_runner.FusedTokenDiT[fused runner: cuBLAS GEMMs + gated core (B200: sm_100a attn_inf bf16 / "
-            "attn_inf_tf32 fp32; Triton gated2 otherwise) + row passes (CUDA on B200, Triton otherwise); weight pack "
+            "attn_inf_tf32 fp32; A100: sm80 CUDA bf16/TF32; Triton gated2 elsewhere) + row passes (CUDA on A100/B200, Triton elsewhere); weight pack "
             "and pair bias cached across calls]"
             if why is None
             else _dit_module_composition_path(
@@ -6238,9 +6263,11 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
       `integrations.bias_only_dit_train` (training; B200 and A100) in bf16, CUDA and cuBLAS only, where they serve the call, else the
       reference composition -- `execution_path` says which one ran.
 
-    No other implementation of this op exists. The fused path computes a pair's attention weights (softmax of every head's
-    pair bias) once and reuses them while the pair tensor is unchanged, as a sampler does over its steps; the timed calls
-    reuse one pair. `+shared_cond=true` gives every sample one conditioning (a sampling step), as in the `dit` target;
+    * anthropic -- the connected APB (zero Q/K) + DTK composition; upstream has no dedicated bias-only block.
+
+    The fused path reuses a pair's attention weights while the pair tensor is unchanged. Its cache is scoped to each CUDA
+    Graph capture: packing and pair preparation are recorded once and run on every replay, preserving live weights/pair/mask.
+    `+shared_cond=true` gives every sample one conditioning (a sampling step), as in the `dit` target;
     `+n_head=24` / `+n_head=12` the 24 heads x 32 / 12 x 64 layouts (default 16 x 48), `+d_head=64` 16 x 64 (1024 attention
     channels).
     Inference rows carry accuracy columns against an fp32 PyTorch block on the same (non-default) weights and inputs.
@@ -6366,7 +6393,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
                 f"softmax_rows / gate_bwd_rows / {core} ({arch})]"
                 if is_train
                 else "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit -> kernels.bias_only_dit.cuda.runner."
-                f"FusedBiasOnlyDiT[cuBLAS GEMMs + {core.split(' / ')[0]} ({arch}) + CUDA rows; weights packed, attention weights hoisted]"
+                f"FusedBiasOnlyDiT[cuBLAS GEMMs + {core.split(' / ')[0]} ({arch}) + CUDA rows; capture-scoped weight and pair preparation]"
             )
             if served
             else "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: integrations.bias_only_dit.serves() declined]"

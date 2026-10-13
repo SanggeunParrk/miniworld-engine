@@ -1,5 +1,22 @@
 # TriangleMultiplication on A100 (sm80)
 
+Internal-kernel follow-up (2026-10-05): D512 BF16 no-grad, L divisible by 128 resolves the pair-row mask and column origin once per CTA,
+removes repeated token-index divisions, and writes zero planes without running the projection GEMM for an excluded pair row.
+Two paired compiled CUDA-graph rounds: whole-module inference is 0.998–1.017× at mask 0% (near parity), 1.045–1.092× at mask 10%,
+and 1.286–1.411× at mask 50%, relative to the preceding five-stage projection version. `MINIWORLD_TRIMUL_SM80_ROW_MASK=0`
+retains the previous kernel. [Full measurements, rejected candidates and validation](../../../records/a100-trimul-triattn-internal-20261005.md).
+
+2026-10-05 update: BF16 **D512 inference** now uses the wide CUDA path, for one direction (hidden 512) and bidirectional
+(hidden 1024). Token masking, channel-major contraction and the fused output gate/dropout/residual replace the general
+composition's materialized masks and layout copies. D512 training and FP32 retain their previous dispatch.
+See the [paired before/after measurements](../../../records/a100-b200-glue-inference-20261005.md); the older measurements below retain their original scope.
+
+Additional core tuning (2026-10-05): D512 BF16 no-grad output projection now uses a five-stage K pipeline;
+the input projection keeps its existing schedule after tile/pipeline/warp sweeps. Two paired compiled CUDA-graph rounds show
+1.004–1.015× for outgoing and 1.006–1.009× for bidirectional **whole-module** inference over L128–768, relative to the preceding wide-path version.
+`MINIWORLD_TRIMUL_SM80_TUNED=0` retains the four-stage output projection for comparison.
+See the [complete measurements and validation](../../../records/a100-trimul-triattn-core-tuning-20261005.md).
+
 Kernel-level status of the TriMul modules on A100; the module-level summary is in [a100.md](../a100.md). Columns are (Length, Dimension) from the shape registry
 (`triangle_multiplication`, `triangle_multiplication_bidirectional`, token-pair stream, L = 128-768). A100 = CUDA where a hand-written sm_80 path exists; a shape without one is 미구현 (it
 runs the Triton path). Dispatch: `integrations/trimul_sm80.py`; kernels: two sets under `kernels/trimul_inproj/cuda/`, each one extension (`mma.sync`, `ldmatrix`, `cp.async`, cuBLAS for the
@@ -607,3 +624,9 @@ Where the training step goes (one direction, L384, Nsight Compute, 2026-10-02): 
 `k3` 187 µs (12 %), `k1` 125 µs (8 %), three cuBLAS GEMMs about 260 µs; all four custom kernels run 8-12 warps per SM
 (250 registers per thread) and are latency-bound (tensor pipe active: k1 53 %, b7j 42 %, b1g 25 %, k3 20 %; stalls: fixed-latency
 dependencies, barriers, long scoreboard), not bandwidth-bound (DRAM 37-41 %).
+
+### 2026-10-06: D512 native training rows
+
+D512 BF16 training now uses the width-generic CUDA pipeline with native gate and LayerNorm backward rows. All 24 frozen unidirectional/bidirectional training rows improve beyond paired noise: 1.74–4.33× the previous path and 1.21–2.18× cuEquivariance. All six lengths, outgoing/incoming/bidirectional, BF16 linear parameters and FP32 masters pass the existing output/gradient bands and live compiled graph checks. [Immutable measurements](../../../records/a100-trimul512-training-20261006.md).
+
+`MINIWORLD_TRIMUL_SM80_WIDE512=0` retains the previous D512 training fallback. cuBLAS contractions/weight gradients and Inductor RNG remain pending, so this is not complete backend replacement.

@@ -35,16 +35,16 @@ def _ext():
     return load_extension(
         name=f"swa_dit_sm80{tag}",
         sources=[str(_dir / "ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", "-Xcompiler=-fno-gnu-unique", *extra],
+        extra_cflags=["-std=c++17", "-O3", "-fno-gnu-unique"], verbose=False,
     )
 
 
-def attn_fwd(qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, seqused: torch.Tensor):
+def attn_fwd(qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, seqused: torch.Tensor, save_lse: bool = True):
     """The window attention forward on head-major Q / K / V [N, 4, S, 32] bf16: returns ``(O [N S, 128] bf16, lse [N, 4, S] fp32)``."""
     n, _, s, _ = qh.shape
     o = torch.empty(n * s, C, device=qh.device, dtype=torch.bfloat16)
-    lse = torch.empty(n, H, s, device=qh.device, dtype=torch.float32)
+    lse = torch.empty((n, H, s) if save_lse else (0,), device=qh.device, dtype=torch.float32)
     _ext().swa_attn_fwd(qh.transpose(1, 2), kh.transpose(1, 2), vh.transpose(1, 2), seqused, o, lse)
     return o, lse
 
@@ -106,6 +106,12 @@ def ffn_fwd(qi: torch.Tensor, g: torch.Tensor, o: torch.Tensor, mod: torch.Tenso
     """The last stage: ``qi`` / ``g`` / ``o`` [M, 128] bf16 (the stage's residual input, the gate projection, the attention output), ``mod`` [b S, 768] fp32.  Returns
     ``(out, q1, Att, Y, FF)``: ``out`` [M, 128] bf16 and the saves of the backward (``out`` itself four times when ``save`` is False)."""
     m = qi.shape[0]
+    if (save and prof is None and cfg == 0 and m == 48 * s and b == 48
+            and s in (4096, 8192)
+            and os.environ.get("MINIWORLD_SWA_DIT_SM80_FFN_TUNED", "1") == "1"):
+        from ..ffn_fwd_tuned_sm80 import ffn_forward
+
+        return ffn_forward(qi, g, o, mod, wo.contiguous(), wu.contiguous(), wd.contiguous(), s, b, eps)
     out = torch.empty_like(qi)
     q1s, atts, ys, ffs = (torch.empty_like(qi) for _ in range(4)) if save else (out, out, out, out)
     _ext().swa_ffn_fwd(qi, g, o, mod, wo.contiguous(), wu.contiguous(), wd.contiguous(), out, q1s, atts, ys, ffs, s, b, eps, save, cfg, torch.empty(0, device=qi.device, dtype=torch.int64) if prof is None else prof)
@@ -228,7 +234,7 @@ def block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.
     qf = q.reshape(n * s, C)
     cos2, sin2 = cos.reshape(-1, D // 2).contiguous(), sin.reshape(-1, D // 2).contiguous()
     qh, kh, vh, g, xs, pqs, pks = qkvg_fwd(qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save)
-    o, lse = attn_fwd(qh, kh, vh, seqused)
+    o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save or os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
     out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save)
     outputs = [out.view(n, s, C)]
     if save:

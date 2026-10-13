@@ -183,11 +183,16 @@ def _wo_padded(wo: torch.Tensor, cfg: Cfg) -> torch.Tensor:
     return out
 
 
-def _pack_folded(weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg) -> torch.Tensor:
-    """Rows engine: the front GEMM's weights ``[N, D + 8]``: row r of q | k | v | g (head h, channel c, padded channels 0) is ``bf16(W diag(gamma))`` | ``b_hi`` | ``b_lo`` | 0 ... with
+def _pack_folded(weights, ln_w: torch.Tensor, ln_b: torch.Tensor, cfg: Cfg, padding: int = 8,
+                 columns: int | None = None) -> torch.Tensor:
+    """Rows engine: the front GEMM's weights ``[N, D + padding]`` (padding 8 or 32): row r of q | k | v | g (head h, channel c, padded channels 0) is ``bf16(W diag(gamma))`` | ``b_hi`` | ``b_lo`` | 0 ... with
     ``b = W beta`` split into two bf16; then the bias heads' rows (padded to 8).  Never cached: a captured CUDA graph must repack after an optimizer step."""
-    wp = torch.empty((4 * cfg.dhp + cfg.hpad, cfg.d + 8), dtype=BF, device=ln_w.device)
-    _rows().w_pack(*(w.contiguous() for w in weights), ln_w.detach().float().contiguous(), ln_b.detach().float().contiguous(), wp, cfg.d, cfg.h, cfg.hd, 1)
+    count = 4 * cfg.dhp + cfg.hpad
+    wp = torch.empty((columns or count, cfg.d + padding), dtype=BF, device=ln_w.device)
+    clean = os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+    _rows().w_pack(*(w.contiguous() for w in weights), ln_w.detach().float().contiguous(), ln_b.detach().float().contiguous(), wp if clean else wp[:count], cfg.d, cfg.h, cfg.hd, 1)
+    if not clean and wp.shape[0] > count:
+        wp[count:].zero_()
     return wp
 
 
@@ -232,7 +237,7 @@ def _forward_ops_fake(x, weights, wo, ln_w, ln_b, mask, ds, eps, transposed, n_h
 
 
 @opaque(fake=_forward_ops_fake, name="triangle_attention_sm80w_forward")
-def forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, mask: torch.Tensor, ds: torch.Tensor, eps: float,
+def _original_forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, mask: torch.Tensor, ds: torch.Tensor, eps: float,
                 transposed: bool, n_head: int, hd: int, fused: bool, save: bool) -> list[torch.Tensor]:
     """``pair + drop(TriangleAttention(pair))`` at any supported width: ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
     empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward
@@ -251,8 +256,14 @@ def forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, 
         xh = torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
         rows.fused_front(x2, wp, bvec, mask, y, bias, stats, xh, length, int(transposed), float(eps), d, dhp, cfg.lhd)
     else:
-        wp = _pack_folded(weights, ln_w, ln_b, cfg)
-        xh = torch.empty((t, d + 8), dtype=BF, device=dev)
+        padding = 32 if (not save and ((d == 256 and length >= 512) or ((d, cfg.h, cfg.hd, length) == (256, 8, 32, 256)) or ((d, cfg.h, cfg.hd, length) == (256, 8, 32, 384)))
+                         and os.environ.get("MINIWORLD_TRIATTN_SM80_GEMM_PAD", "1") != "0") else 8
+        if padding == 32:
+            # Align each Q/K/V row to 64 bytes as well as the GEMM reduction
+            # dimension. The eight bias columns otherwise leave a 16-byte offset.
+            n = -(-n // 32) * 32
+        wp = _pack_folded(weights, ln_w, ln_b, cfg, padding, n)
+        xh = torch.empty((t, d + padding), dtype=BF, device=dev)
         rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
         y = torch.mm(xh, wp.t())                                                         # q | k | v | g | bias heads
         rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length)
@@ -265,18 +276,114 @@ def forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, 
             lay, lay_o = _core2.token_major(length, n, 16), _core2.token_major(length, dhp, 16)
             _core2.forward(q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay, lay, lay, lay_o), length, cfg.h, b, 16, 1.0 / math.sqrt(hd))
         else:
-            core.attn_fwd(q, k, v, bias, o, lse, length, cfg.h, b, n, n, n, dhp, scl, _core.ROWS, _core.BN, _core.MINB)
+            fwd = _core._forward_entry(core, save)
+            fwd(q, k, v, bias, o, lse, length, cfg.h, b, n, n, n, dhp, scl, _core.ROWS, _core.BN, _core.MINB)
         out = torch.empty_like(x)
         rows.fused_back(o, g, _wo_padded(wo, cfg), x2, out.view(t, d), ds, length, int(transposed), d, dhp, cfg.lhd)
     else:
         # the gate is fused into the core's epilogue: a = bf16(sigmoid(g) o) is the output projection's operand, the plain output only when the backward needs it
         o = torch.empty((t, dhp), dtype=BF, device=dev) if save else x.new_empty((0,))
         a = torch.empty((t, dhp), dtype=BF, device=dev)
-        core.attn_fwd_gate(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
-        yo = torch.mm(a, _wo_padded(wo, cfg).t())                                        # [T, D]
+        if (not save and mask.numel() and length >= 384 and length % 384 == 0
+                and os.environ.get("MINIWORLD_TRIATTN_SM80_INTERNAL", "1") != "0"
+                and os.environ.get("MINIWORLD_TRIATTN_SM80_TUNED", "1") != "0"
+                and os.environ.get("MINIWORLD_TRIATTN_SM80_COMPACT", "1") != "0"):
+            indices = torch.empty((b, length), dtype=torch.int32, device=dev)
+            counts = torch.empty((b,), dtype=torch.int32, device=dev)
+            compact_bias = torch.empty_like(bias)
+            shape = (b, length, length, dhp)
+            entry = "compact_attention_gate_fast" if os.environ.get("MINIWORLD_TRIATTN_SM80_SOFTMAX", "1") != "0" else "compact_attention_gate"
+            getattr(core, entry)(q.view(shape), k.view(shape), v.view(shape), bias, mask,
+                                 a.view(shape), indices, counts, compact_bias, scl, g.view(shape))
+        else:
+            fwd = _core._forward_entry(core, save, gate=True)
+            fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
         out = torch.empty_like(x)
-        rows.out_rows(yo, x2, ds, out.view(t, d), length, int(transposed))
+        native_out = os.environ.get("MINIWORLD_TRIATTN_SM80_NATIVE_OUT")
+        if (not save and (d, cfg.h, hd) == (256, 8, 32) and length in (128, 256, 384, 512, 640, 768)
+                and (native_out == "1" or (native_out is None and length == 128))):
+            from . import native_out_fused_sm80
+
+            out_cfg = ({128: 4, 256: 4, 384: 13, 512: 4, 640: 13, 768: 13} if transposed
+                       else {128: 14, 256: 4, 384: 4, 512: 4, 640: 13, 768: 14})[length]
+            native_out_fused_sm80.run(a, _wo_padded(wo, cfg), x2, ds, out.view(t, d), length, transposed, out_cfg)
+        else:
+            yo = torch.mm(a, _wo_padded(wo, cfg).t())                                    # [T, D]
+            rows.out_rows(yo, x2, ds, out.view(t, d), length, int(transposed))
     return [out, xh, stats, y, bias, o, lse] if save else [out]
+
+
+from . import affine_training_sm80 as _accurate_front
+
+@opaque(fake=_forward_ops_fake, name='triangle_attention_sm80w_accurate_training_a100_forward')
+def _accurate_training_forward_ops(x: torch.Tensor, weights: list[torch.Tensor], wo: torch.Tensor, ln_w: torch.Tensor, ln_b: torch.Tensor, mask: torch.Tensor, ds: torch.Tensor, eps: float, transposed: bool, n_head: int, hd: int, fused: bool, save: bool) -> list[torch.Tensor]:
+    """``pair + drop(TriangleAttention(pair))`` at any supported width: ``x`` the contiguous pair stack ``[B, L, L, D]``, ``weights`` = (q, k, v, g, bias), ``mask`` ``[B, L]`` uint8 or
+    empty, ``ds`` the dropout scale ``[B, L, D]`` (indexed by the token's second index) or empty.  Returns [out] and, with ``save``, [xh, stats, y, bias, o, lse] for the backward
+    (``xh`` the normalised input followed by the constant column(s), ``y`` the front's output [T, cfg.n])."""
+    cfg = Cfg(x.shape[-1], n_head, hd, fused)
+    rows, core = (_rows(), None if cfg.native else _core._ext())
+    b, length = (x.shape[0], x.shape[1])
+    t, d, dhp, n = (b * length * length, cfg.d, cfg.dhp, cfg.n)
+    x2 = x.view(t, d)
+    dev = x.device
+    bias = torch.empty((b, cfg.h, length, length), dtype=BF, device=dev)
+    stats = torch.empty((t, 2), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
+    if fused:
+        y = torch.empty((t, n), dtype=BF, device=dev)
+        xh = torch.empty((t, d + 8), dtype=BF, device=dev) if save else x.new_empty((0,))
+        y = _accurate_front.front(x2, weights, ln_w, ln_b, mask, y, bias, stats, xh, length, int(transposed), float(eps), d, dhp, cfg.lhd)
+    else:
+        padding = 32 if not save and d == 256 and (length >= 512) and (os.environ.get('MINIWORLD_TRIATTN_SM80_GEMM_PAD', '1') != '0') else 8
+        if padding == 32:
+            n = -(-n // 32) * 32
+        wp = _pack_folded(weights, ln_w, ln_b, cfg, padding, n)
+        xh = torch.empty((t, d + padding), dtype=BF, device=dev)
+        rows.ln_rows(x2, xh, stats, d, length, int(transposed), float(eps))
+        y = torch.mm(xh, wp.t())
+        rows.bias_planes(y, mask, bias, 4 * dhp, cfg.h, length)
+    lse = torch.empty((b, cfg.h, length, length), dtype=F32, device=dev) if save else x.new_empty((0,), dtype=F32)
+    scl = _core._L2E / math.sqrt(hd)
+    q, k, v, g = (y[:, :dhp], y[:, dhp:2 * dhp], y[:, 2 * dhp:3 * dhp], y[:, 3 * dhp:4 * dhp])
+    if fused:
+        o = torch.empty((t, dhp), dtype=BF, device=dev)
+        if cfg.native:
+            lay, lay_o = (_core2.token_major(length, n, 16), _core2.token_major(length, dhp, 16))
+            _core2.forward(q, k, v, bias, x.new_empty((0,), dtype=torch.uint8), o, lse, (lay, lay, lay, lay_o), length, cfg.h, b, 16, 1.0 / math.sqrt(hd))
+        else:
+            fwd = _core._forward_entry(core, save)
+            fwd(q, k, v, bias, o, lse, length, cfg.h, b, n, n, n, dhp, scl, _core.ROWS, _core.BN, _core.MINB)
+        out = torch.empty_like(x)
+        rows.fused_back(o, g, _wo_padded(wo, cfg), x2, out.view(t, d), ds, length, int(transposed), d, dhp, cfg.lhd)
+    else:
+        o = torch.empty((t, dhp), dtype=BF, device=dev) if save else x.new_empty((0,))
+        a = torch.empty((t, dhp), dtype=BF, device=dev)
+        if not save and mask.numel() and (length >= 384) and (length % 384 == 0) and (os.environ.get('MINIWORLD_TRIATTN_SM80_INTERNAL', '1') != '0') and (os.environ.get('MINIWORLD_TRIATTN_SM80_TUNED', '1') != '0') and (os.environ.get('MINIWORLD_TRIATTN_SM80_COMPACT', '1') != '0'):
+            indices = torch.empty((b, length), dtype=torch.int32, device=dev)
+            counts = torch.empty((b,), dtype=torch.int32, device=dev)
+            compact_bias = torch.empty_like(bias)
+            shape = (b, length, length, dhp)
+            entry = 'compact_attention_gate_fast' if os.environ.get('MINIWORLD_TRIATTN_SM80_SOFTMAX', '1') != '0' else 'compact_attention_gate'
+            getattr(core, entry)(q.view(shape), k.view(shape), v.view(shape), bias, mask, a.view(shape), indices, counts, compact_bias, scl, g.view(shape))
+        else:
+            fwd = _core._forward_entry(core, save, gate=True)
+            fwd(q, k, v, bias, o, lse, g, a, length, cfg.h, b, n, n, n, dhp, n, dhp, scl)
+        out = torch.empty_like(x)
+        native_out = os.environ.get('MINIWORLD_TRIATTN_SM80_NATIVE_OUT')
+        if not save and (d, cfg.h, hd) == (256, 8, 32) and (length in (128, 256, 384, 512, 640, 768)) and (native_out == '1' or (native_out is None and length == 128)):
+            from . import native_out_fused_sm80
+            out_cfg = ({128: 4, 256: 4, 384: 13, 512: 4, 640: 13, 768: 13} if transposed else {128: 14, 256: 4, 384: 4, 512: 4, 640: 13, 768: 14})[length]
+            native_out_fused_sm80.run(a, _wo_padded(wo, cfg), x2, ds, out.view(t, d), length, transposed, out_cfg)
+        else:
+            yo = torch.mm(a, _wo_padded(wo, cfg).t())
+            rows.out_rows(yo, x2, ds, out.view(t, d), length, int(transposed))
+    return [out, xh, stats, y, bias, o, lse] if save else [out]
+
+def forward_ops(x,weights,wo,ln_w,ln_b,mask,ds,eps,transposed,n_head,hd,fused,save):
+    if save and fused:
+        cfg=Cfg(x.shape[-1],n_head,hd,fused)
+        if _accurate_front.eligible(x,weights,ln_w,ln_b,cfg.d,cfg.dhp,cfg.lhd,x.shape[1]):
+            return _accurate_training_forward_ops(x,weights,wo,ln_w,ln_b,mask,ds,eps,transposed,n_head,hd,fused,save)
+    return _original_forward_ops(x,weights,wo,ln_w,ln_b,mask,ds,eps,transposed,n_head,hd,fused,save)
 
 
 def _dropout_scale(ds: torch.Tensor | None, like: torch.Tensor) -> torch.Tensor:

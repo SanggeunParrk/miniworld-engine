@@ -60,6 +60,30 @@ def _ext():
     )
 
 
+@functools.lru_cache(maxsize=1)
+def _pack_ext():
+    from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="bias_only_dit_pack_sm80", sources=[str(_dir / "pack_sm80.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--fmad=false",
+                           "-gencode=arch=compute_80,code=sm_80"],
+        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+
+
+def pack_weights(block, heads, attention_width):
+    from miniworld_engine.integrations.bias_only_dit import WEIGHTS
+
+    weights = []
+    for path in WEIGHTS:
+        node = block
+        for name in path.split("."):
+            node = getattr(node, name)
+        weights.append(node.contiguous())
+    return _pack_ext().pack_weights(weights, heads, attention_width)
+
+
 def ln_rows(x, out, eps=1e-5):
     """out = LN(x), no affine; x [M, 384]."""
     _ext().ln_rows_cuda(x, out, float(eps))

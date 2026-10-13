@@ -304,6 +304,11 @@ class TriangleMultiplication(nn.Module):
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p), broadcast
         over the i-index — matches modules.primitives.Dropout for the pair track."""
+        if self.implementation == ImplementationType.MINIWORLD:
+            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+
+            if row_scale_sm80.supports(pair):
+                return row_scale_sm80.scale(pair, p, 1)
         b, _l1, l2, d = pair.shape
         keep = torch.rand(b, 1, l2, d, device=pair.device, dtype=pair.dtype) > p
         return keep.to(pair.dtype) / (1.0 - p)

@@ -17,7 +17,7 @@ own kernels) and hands the normalised stream to ONE autograd Function here, whos
               gradient, the bias gradient summed over the samples from bf16 partials in a fixed order), GEMMs for dx / dW | dcond / dWs, the pair bias's backward.
 
 A key mask [B, L] shared by the samples is folded into the bias (masked keys carry a very negative FINITE bias: a sample with no valid key gets the uniform softmax); a
-mask that differs per sample [A, B, L] goes through the kernels' per-key penalties (a sample with no valid key gets a zero output, as the Triton kernel's finite guard).
+mask that differs per sample [A, B, L] goes through the kernels' per-key penalties. The Dense bf16 inference path corrects samples with no valid key to the original finite-min uniform softmax; other existing paths keep their current behavior.
 L is padded to a multiple of 128 inside the call (zero rows, the padded keys masked), B > 1 runs one core call per batch element on b-major staged streams.
 
 ``serves()`` is the whole gate: the engine's kernel backend (implementation TRITON or MINIWORLD), A100 (sm_80), single / cond / pair and module weights all bf16 or all fp32
@@ -213,12 +213,13 @@ def _penalties(kmask: torch.Tensor, a: int, batch: int, length: int, padded: int
 _PACKS: dict = {}
 
 
-def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype):
+def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = True):
     """The module's weights in the kernels' layouts (``dt``), rebuilt only when a parameter changes (an optimizer step bumps ``_version``): W q | k | v | g [4 d, d] and its bias
     [4 d] (bq, then zeros), then the folded pair-bias weights: wf = to_bias.weight x ln_pair.weight (natural units, ``dt``), wfr = wf x sqrt(hd) (the core's raw units, ``dt``) and
     w32 = the same product in fp32 (the atom width's kernels).  ``params`` are the module's own parameters (any dtype): the cache keys on them, not on casts (fresh tensors per
     call for fp32), and is scoped to the CUDA-graph capture (``kernels._capture``: a capture packs once, recorded, and replays repack the current weights)."""
     wq, bq, wk, wv, wg, _, _, _, lnw, wb = params
+    atom_inference = not save and _kind(wb.shape[1], heads, dt) == "atom" and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
 
     def build():
         d = wq.shape[0]
@@ -226,9 +227,12 @@ def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype):
         wqkvg = torch.cat([wq.to(dt), wk.to(dt), wv.to(dt), wg.to(dt)])
         bvec = torch.cat([bq.to(dt), bq.new_zeros(3 * d, dtype=dt)])
         w32 = (wb.float() * lnw.float()[None]).contiguous()
+        if atom_inference:
+            # The atom producer reads only w32; no natural/scaled BF16 or transposed copies.
+            return wqkvg, bvec, None, None, w32, None
         return (wqkvg, bvec, w32.to(dt), (w32 * math.sqrt(hd)).to(dt), w32, w32.t().contiguous())
 
-    key = (wq.device.index, heads, dt, *((t.data_ptr(), t._version) for t in (wq, bq, wk, wv, wg, lnw, wb)))
+    key = (wq.device.index, heads, dt, atom_inference, *((t.data_ptr(), t._version) for t in (wq, bq, wk, wv, wg, lnw, wb)))
     return _capture.lookup(_PACKS, key, build, limit=64)
 
 
@@ -289,11 +293,28 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
     n = a * padded                                                             # rows of one batch element
     dev = x.device
     wo, ws, bs = params[5].to(dt), params[6].to(dt), params[7].to(dt)             # no copies for bf16 parameters (the autograd function hands cast ones for fp32)
-    pack = _pack(params, heads, dt)
+    pack = _pack(params, heads, dt, save=save)
     wqkvg, bvec = pack[0], pack[1]
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
     rs = None if res is None else _stage(res, batch, padded)
-    qkvg = torch.addmm(bvec, xs, wqkvg.t())                                   # [M, 4 d]
+    qkvg_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG")
+    qkvg_native = (qkvg_override == "1" if qkvg_override is not None else
+                   not save and batch == 1 and a == 5 and length in (2048, 4096))
+    tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED")
+    tiled_qkvg = (dt is BF and d == 128 and hd == 32
+                  and (tiled_override == "1" if tiled_override is not None else
+                       not save and batch == 1 and (a, length) in
+                       ((1, 1024), (1, 2048), (1, 4096), (5, 1024), (5, 2048))))
+    if tiled_qkvg:
+        from miniworld_engine.kernels.augmented_attention.cuda import atom_qkvg_tiled_sm80
+        cfg = {1024: 7, 2048: 6, 4096: 10, 5120: 10, 10240: 11, 20480: 11}.get(m, 10)
+        qkvg = atom_qkvg_tiled_sm80.result(xs, wqkvg, bvec, cfg)
+    elif dt is BF and d == 128 and qkvg_native:
+        from miniworld_engine.kernels.augmented_attention.cuda import atom_qkvg_resident_sm80
+        cfg = 1 if m == 10240 or m >= 393216 else 3 if m >= 20480 else 0
+        qkvg = atom_qkvg_resident_sm80.result(xs, wqkvg, bvec, cfg)
+    else:
+        qkvg = torch.addmm(bvec, xs, wqkvg.t())                               # [M, 4 d]
     q, k, v, g = (qkvg[:, i * d:(i + 1) * d] for i in range(4))
     if bias_in is not None:
         bias = bias_in
@@ -308,7 +329,23 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
         kp = None if kpen is None else kpen[b]
-        if f32 and save:
+        shared_core = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
+                       and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_CORE", "0") == "1")
+        shared_score = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
+                        and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_SCORE", "0") == "1")
+        if shared_score:
+            from miniworld_engine.kernels.augmented_attention.cuda import shared_score_core_sm80
+            shared_score_core_sm80.forward(q[rows], k[rows], v[rows], None if save else g[rows],
+                                          bias[b], kmask[b], length, padded, a, heads, hd, save,
+                                          o[rows] if save else q[rows],
+                                          lse[b * a:(b + 1) * a] if save else None)
+        elif shared_core:
+            from miniworld_engine.kernels.augmented_attention.cuda import shared_uniform_core_sm80
+            shared_uniform_core_sm80.forward(q[rows], k[rows], v[rows], None if save else g[rows],
+                                            bias[b], kmask[b], length, padded, a, heads, hd, save,
+                                            o[rows] if save else q[rows],
+                                            lse[b * a:(b + 1) * a] if save else None)
+        elif f32 and save:
             sm80.tf32_forward(q[rows], k[rows], v[rows], bias[b], a, padded, heads, hd, kpen=kp, out=o[rows], lse=lse[b * a:(b + 1) * a])
         elif f32:
             sm80.tf32_forward(q[rows], k[rows], v[rows], bias[b], a, padded, heads, hd, gate=g[rows], out=q[rows], kpen=kp)
@@ -316,15 +353,48 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
             sm80.plain_forward(q[rows], k[rows], v[rows], bias[b], a, padded, heads, hd, save_lse=True, kpen=kp, out=o[rows], lse=lse[b * a:(b + 1) * a])
         else:
             sm80.pgate_forward(q[rows], k[rows], v[rows], g[rows], bias[b], a, padded, heads, hd, kpen=kp, out=q[rows])
+        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
+        if mask_kind == 1 and not shared_core and not shared_score and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+            from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
+            shared_mask_uniform_sm80.forward(kmask[b], v[rows], None if save else g[rows],
+                                             o[rows] if save else q[rows],
+                                             lse[b * a:(b + 1) * a] if save else None,
+                                             length, padded, a, heads)
+        # Dense inference follows the original finite-min softmax: a fully
+        # masked sample has uniform attention over its actual V rows. Read
+        # validity on the GPU so replay observes updated masks and weights.
+        if not save and mask_kind == 2 and dt is BF and (d, heads, hd, pair.shape[-1]) == (128, 4, 32, 16):
+            from miniworld_engine.kernels.augmented_attention.cuda import atom_sample_uniform_sm80
+            atom_sample_uniform_sm80.forward(kmask[:, b], v[rows], g[rows], q[rows],
+                                             None, length, padded, a, heads)
     if save:
         og = torch.empty(m, d, device=dev, dtype=dt)
         sm80.gate_rows(o, g, og)
     else:
         og = q                                                                 # sigmoid(g) o, written over q's columns
-    y = torch.mm(og, wo.t())
-    g2 = torch.addmm(bs, cs, ws.t())
-    out = torch.empty(m, d, device=dev, dtype=dt)
-    sm80.res_gate(y, g2, rs, out)
+    output_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED")
+    output_fused = (output_override == "1" if output_override is not None else
+                    not save and batch == 1 and rs is not None
+                    and (a, length) in ((1, 4096), (5, 1024), (5, 2048), (5, 4096)))
+    output_tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED")
+    # The small A1 inference rows qualify own 32-channel output tiles;
+    # larger rows retain the existing faster full-output fusion.
+    output_tiled = ((output_tiled_override == "1" if output_tiled_override is not None else True)
+                    and not save and batch == 1 and hd == 32
+                    and (a, length) in ((1, 1024), (1, 2048)))
+    if dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
+        from miniworld_engine.kernels.augmented_attention.cuda import atom_output_tiled_sm80
+        cfg = 1 if m == 1024 else 3
+        out, y, g2 = atom_output_tiled_sm80.result(og, cs, wo, ws, bs, rs, save, cfg)
+    elif dt is BF and d == 128 and cs.shape[1] == 128 and output_fused:
+        from miniworld_engine.kernels.augmented_attention.cuda import atom_output_fused_sm80
+        cfg = 1 if save else (0 if m <= 5120 else 2 if m <= 10240 else 4)
+        out, y, g2 = atom_output_fused_sm80.result(og, cs, wo, ws, bs, rs, save, cfg)
+    else:
+        y = torch.mm(og, wo.t())
+        g2 = torch.addmm(bs, cs, ws.t())
+        out = torch.empty(m, d, device=dev, dtype=dt)
+        sm80.res_gate(y, g2, rs, out)
     outs = [_unstage(out, a, batch, length, padded, d)]
     if save:
         outs += [qkvg, o, lse, og, y, g2, bias]
@@ -378,6 +448,11 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
         core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(sm80.plain_backward, db_natural=True)
         _, _, _, db = core_bwd(qkvg[rows, :d], qkvg[rows, d:2 * d], qkvg[rows, 2 * d:3 * d], dob[rows], bias[b], o[rows], lse[b * a:(b + 1) * a], a, padded, heads, hd,
                                kpen=None if kpen is None else kpen[b], dq=dqkvg[rows, :d], dk=dqkvg[rows, d:2 * d], dv=dqkvg[rows, 2 * d:3 * d])
+        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
+        if mask_kind == 1 and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+            from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
+            shared_mask_uniform_sm80.backward(kmask[b], dob[rows], dqkvg[rows, :d], dqkvg[rows, d:2 * d],
+                                              dqkvg[rows, 2 * d:3 * d], db, length, padded, a, heads)
         mask_b = kmask[b] if mask_kind == 1 else None
         pair_b = pair[b]
         if kind == "atom":

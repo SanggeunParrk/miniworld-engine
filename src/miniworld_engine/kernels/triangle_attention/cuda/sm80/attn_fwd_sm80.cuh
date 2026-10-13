@@ -40,18 +40,20 @@ struct AttnParams {
   __nv_bfloat16* aout;              // token-major [z * L * L][ldao]
   long long ldgate, ldao;
   const int *indices = nullptr, *counts = nullptr;  // optional compact key order and live counts, [Z, L] / [Z]
+  const __nv_bfloat16* dense_bias = nullptr;        // unpermuted bias for the adaptive gated inference core
 };
 
-template <int R_, int NKV_, int BN_, int MINB_, bool GATE_ = false, bool COMPACT_ = false>
+template <int R_, int NKV_, int BN_, int MINB_, bool GATE_ = false, bool COMPACT_ = false, int BM_ = 128, bool FIXED_SHIFT_ = false>
 struct AttnCfg {
-  static constexpr bool GATE = GATE_, COMPACT = COMPACT_;
-  static constexpr int R = R_, NKV = NKV_, BN = BN_, MINB = MINB_, NTHR = 256;
+  static constexpr bool GATE = GATE_, COMPACT = COMPACT_, FIXED_SHIFT = FIXED_SHIFT_;
+  static constexpr int R = R_, NKV = NKV_, BN = BN_, MINB = MINB_, BM = BM_, NTHR = 2 * BM;
+  static_assert(BM == 64 || BM == 128, "16 queries per warp");
   static_assert(BN == 64 || BN == 48 || BN == 32, "BN");
   static constexpr int NT = BN / 8;                          // S n-tiles (8 keys each)
   static constexpr int KB = BN / 16;                         // 16-key blocks: the PV k-steps
-  static constexpr int Q_BYTES = TA_BM * TA_D * 2;           // one row's Q tile: 8 KiB
+  static constexpr int Q_BYTES = BM * TA_D * 2;
   static constexpr int KV_BYTES = 2 * BN * TA_D * 2;         // K | V of one sub-step
-  static constexpr int B_BYTES = TA_BM * (BN == 48 ? 64 : BN) * 2;  // 48-key rows use the 128-byte swizzle
+  static constexpr int B_BYTES = BM * (BN == 48 ? 64 : BN) * 2;  // 48-key rows use the 128-byte swizzle
   static constexpr int OFF_Q = 0, OFF_KV = OFF_Q + R * Q_BYTES, OFF_B = OFF_KV + NKV * KV_BYTES;
   static constexpr int SMEM = OFF_B + 2 * B_BYTES;
 };
@@ -73,7 +75,7 @@ DEVI float ex2f(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;\n" : "=f"(y)
 // 0)) is made once in the constructor, so the loop pays one 64-bit address update per chunk instead of the whole index computation.  G: AttnCfg or DqCfg.
 template <class G, bool COMPACT = false>
 struct KVBiasLoader {
-  static constexpr int BN = G::BN, R = G::R, NKV = G::NKV, KVN = (8 * BN + 255) / 256, BI = BN / 16;
+  static constexpr int BN = G::BN, R = G::R, NKV = G::NKV, KVN = (8 * BN + G::NTHR - 1) / G::NTHR, BI = BN / 16;
   uint32_t kv_dst[KVN], b_dst[BI];
   const __nv_bfloat16 *kv_src[KVN], *b_src[BI];
   int kv_ld[KVN];
@@ -85,7 +87,7 @@ struct KVBiasLoader {
                     int z, int H, int qt, int tid, const int* idx = nullptr) : indices(idx) {
 #pragma unroll
     for (int i = 0; i < KVN; ++i) {                          // K | V: 2 x BN tokens x 4 granules of 16 B
-      const int c = tid + 256 * i, which = c / (4 * BN), w = c - which * 4 * BN, token = w >> 2, g = w & 3;
+      const int c = tid + G::NTHR * i, which = c / (4 * BN), w = c - which * 4 * BN, token = w >> 2, g = w & 3;
       tokens[i] = token;
       kv_ok[i] = c < 8 * BN;
       kv_dst[i] = which * (G::KV_BYTES / 2) + swz64(token, g);
@@ -94,9 +96,9 @@ struct KVBiasLoader {
     }
 #pragma unroll
     for (int i = 0; i < BI; ++i) {                           // bias tile: 128 rows x BN / 8 granules
-      const int c = tid + 256 * i, row = c / (BN / 8), gg = c % (BN / 8);
+      const int c = tid + G::NTHR * i, row = c / (BN / 8), gg = c % (BN / 8);
       b_dst[i] = bias_off<BN>(row, gg);
-      b_src[i] = bias + ((long long)(z * H + h) * L + qt * TA_BM + row) * L + gg * 8;
+      b_src[i] = bias + ((long long)(z * H + h) * L + qt * (G::Q_BYTES / (TA_D * 2)) + row) * L + gg * 8;
     }
   }
 
@@ -124,8 +126,8 @@ struct KVBiasLoader {
 };
 
 template <class G>
-__global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams p) {
-  constexpr int R = G::R, NKV = G::NKV, BN = G::BN, NT = G::NT, KB = G::KB;
+DEVI bool attn_fwd_body(const AttnParams p) {
+  constexpr int R = G::R, NKV = G::NKV, BN = G::BN, NT = G::NT, KB = G::KB, BM = G::BM;
   extern __shared__ __align__(128) unsigned char smem_raw[];
   const uint32_t sbase = smem_u32(smem_raw);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
@@ -144,9 +146,9 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
   for (int r = 0; r < R; ++r) {
 #pragma unroll
     for (int i = 0; i < 2; ++i) {
-      const int c = tid + 256 * i, token = c >> 2, g = c & 3;
+      const int c = tid + G::NTHR * i, token = c >> 2, g = c & 3;
       cp_async16(sbase + G::OFF_Q + r * G::Q_BYTES + swz64(token, g),
-                 p.q + (tok0 + (long long)(row0 + r) * L + qt * TA_BM + token) * p.ldq + h * TA_D + g * 8);
+                 p.q + (tok0 + (long long)(row0 + r) * L + qt * BM + token) * p.ldq + h * TA_D + g * 8);
     }
   }
 #pragma unroll
@@ -205,18 +207,25 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
         sacc[nt][1] = fmaf(sacc[nt][1], p.scl, b2[nt][1]);
         sacc[nt][2] = fmaf(sacc[nt][2], p.scl, b2[nt][2]);
         sacc[nt][3] = fmaf(sacc[nt][3], p.scl, b2[nt][3]);
-        mx[0] = fmaxf(mx[0], fmaxf(sacc[nt][0], sacc[nt][1]));
-        mx[1] = fmaxf(mx[1], fmaxf(sacc[nt][2], sacc[nt][3]));
+        if (!G::FIXED_SHIFT || j == 0) {
+          mx[0] = fmaxf(mx[0], fmaxf(sacc[nt][0], sacc[nt][1]));
+          mx[1] = fmaxf(mx[1], fmaxf(sacc[nt][2], sacc[nt][3]));
+        }
       }
       float mu[2], alpha[2];
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
-        mx[hh] = fmaxf(mx[hh], __shfl_xor_sync(0xffffffffu, mx[hh], 1));
-        mx[hh] = fmaxf(mx[hh], __shfl_xor_sync(0xffffffffu, mx[hh], 2));
-        const float mnew = fmaxf(m[r][hh], mx[hh]);
-        mu[hh] = mnew == -INFINITY ? 0.f : mnew;         // a fully masked key tile: subtract 0, every weight is 2^-inf = 0
-        alpha[hh] = ex2f(m[r][hh] - mu[hh]);
-        m[r][hh] = mnew;
+        if (!G::FIXED_SHIFT || j == 0) {
+          mx[hh] = fmaxf(mx[hh], __shfl_xor_sync(0xffffffffu, mx[hh], 1));
+          mx[hh] = fmaxf(mx[hh], __shfl_xor_sync(0xffffffffu, mx[hh], 2));
+          const float mnew = fmaxf(m[r][hh], mx[hh]);
+          mu[hh] = mnew == -INFINITY ? 0.f : mnew;
+          alpha[hh] = ex2f(m[r][hh] - mu[hh]);
+          m[r][hh] = mnew;
+        } else {
+          mu[hh] = m[r][hh] == -INFINITY ? 0.f : m[r][hh];
+          alpha[hh] = 1.f;
+        }
       }
       uint32_t pa[KB][4];
       float rs[2] = {0.f, 0.f};
@@ -229,12 +238,16 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
         pa[nt >> 1][(nt & 1) * 2] = pack_bf16(p0, p1);
         pa[nt >> 1][(nt & 1) * 2 + 1] = pack_bf16(p2, p3);
       }
-      l[r][0] = fmaf(l[r][0], alpha[0], rs[0]);
-      l[r][1] = fmaf(l[r][1], alpha[1], rs[1]);
+      if constexpr (G::FIXED_SHIFT) {
+        l[r][0] += rs[0]; l[r][1] += rs[1];
+      } else {
+        l[r][0] = fmaf(l[r][0], alpha[0], rs[0]);
+        l[r][1] = fmaf(l[r][1], alpha[1], rs[1]);
 #pragma unroll
-      for (int nt = 0; nt < 4; ++nt) {
-        acc[r][nt][0] *= alpha[0]; acc[r][nt][1] *= alpha[0];
-        acc[r][nt][2] *= alpha[1]; acc[r][nt][3] *= alpha[1];
+        for (int nt = 0; nt < 4; ++nt) {
+          acc[r][nt][0] *= alpha[0]; acc[r][nt][1] *= alpha[0];
+          acc[r][nt][2] *= alpha[1]; acc[r][nt][3] *= alpha[1];
+        }
       }
       // ---- O += P V
       const uint32_t vbase = kbase + G::KV_BYTES / 2;
@@ -253,13 +266,14 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
   // A fully masked batch has no key iterations to wait on the prologue's Q copies.
   if constexpr (G::COMPACT) cp_async_wait<0>();
   // ---- epilogue: O / l (a zero sum -> zero output), bf16 stores, optionally the log-sum-exp
+  bool bad = false;
   uint32_t gate_w[G::GATE ? R : 1][2][4];                            // the gated variant reads g first, all of it before the first store (the stores are volatile asm: a load after one would wait for it)
   if constexpr (G::GATE) {
 #pragma unroll
     for (int r = 0; r < R; ++r)
 #pragma unroll
       for (int hh = 0; hh < 2; ++hh) {
-        const long long tok = tok0 + (long long)(row0 + r) * L + qt * TA_BM + warp * 16 + (lane >> 2) + 8 * hh;
+        const long long tok = tok0 + (long long)(row0 + r) * L + qt * BM + warp * 16 + (lane >> 2) + 8 * hh;
 #pragma unroll
         for (int nt = 0; nt < 4; ++nt) gate_w[r][hh][nt] = *reinterpret_cast<const uint32_t*>(p.gate + tok * p.ldgate + h * TA_D + 8 * nt + 2 * (lane & 3));
       }
@@ -271,8 +285,16 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
       float lt = l[r][hh];
       lt += __shfl_xor_sync(0xffffffffu, lt, 1);
       lt += __shfl_xor_sync(0xffffffffu, lt, 2);
+      if constexpr (G::FIXED_SHIFT) {
+        // No finite seed in the first tile: use the online path even if later
+        // exponentials happened to stay finite (one live key must return V).
+        bad |= !isfinite(lt) || lt <= 0.f || m[r][hh] == -INFINITY;
+#pragma unroll
+        for (int nt = 0; nt < 4; ++nt)
+          bad |= !isfinite(acc[r][nt][2 * hh]) || !isfinite(acc[r][nt][2 * hh + 1]);
+      }
       const float inv = lt > 0.f ? 1.f / lt : 1.f;
-      const int query = qt * TA_BM + warp * 16 + (lane >> 2) + 8 * hh;
+      const int query = qt * BM + warp * 16 + (lane >> 2) + 8 * hh;
       const long long tok = tok0 + (long long)(row0 + r) * L + query;
 #pragma unroll
       for (int nt = 0; nt < 4; ++nt) {
@@ -288,6 +310,53 @@ __global__ void __launch_bounds__(256, G::MINB) attn_fwd_kernel(const AttnParams
         p.lse[((long long)(z * p.H + h) * L + (row0 + r)) * L + query] = mm + log2f(lt > 0.f ? lt : 1.f);
       }
     }
+  }
+  if constexpr (G::FIXED_SHIFT) {
+    cp_async_wait<0>();
+    return __syncthreads_or(bad);
+  }
+  return false;
+}
+
+// A fixed first-tile shift removes repeated max reductions and accumulator
+// rescaling. Extreme logits (or a fully masked tile) can overflow or produce a
+// zero sum: the entire CTA then recomputes with the original online softmax.
+// No host read, fix-list allocation, clipping, or assumption about logit range.
+template <class G>
+DEVI void attn_checked_body(const AttnParams p) {
+  if (attn_fwd_body<G>(p)) {
+    using Safe = AttnCfg<G::R, G::NKV, G::BN, G::MINB, G::GATE, G::COMPACT, G::BM>;
+    attn_fwd_body<Safe>(p);
+  }
+}
+
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, G::MINB) attn_fwd_kernel(const AttnParams p) {
+  attn_checked_body<G>(p);
+}
+
+// Disjoint dense/sparse launches retain their own tile geometries. Each CTA
+// reads the current device count, so a captured graph can change mask density.
+template <class G, bool DENSE>
+__global__ void __launch_bounds__(G::NTHR, G::MINB) attn_density_fwd_kernel(const AttnParams p) {
+  const bool dense = p.counts[blockIdx.z / p.H] * 4 > p.L * 3;
+  if (dense != DENSE) return;
+  attn_checked_body<G>(p);
+}
+
+// Dense and compact branches have the same CTA geometry and shared-memory budget.
+// Sparse indexing pays only when at least a quarter of the keys are excluded;
+// the device count is read on every graph replay, separately for each batch item.
+template <class G>
+__global__ void __launch_bounds__(G::NTHR, G::MINB) attn_adaptive_fwd_kernel(const AttnParams p) {
+  static_assert(G::COMPACT, "adaptive core requires compact indices");
+  if (p.counts[blockIdx.z / p.H] * 4 > p.L * 3) {
+    using Dense = AttnCfg<G::R, G::NKV, G::BN, G::MINB, G::GATE, false, G::BM>;
+    AttnParams dense = p;
+    dense.bias = p.dense_bias;
+    attn_fwd_body<Dense>(dense);
+  } else {
+    attn_fwd_body<G>(p);
   }
 }
 
