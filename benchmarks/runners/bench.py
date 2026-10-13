@@ -5221,7 +5221,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                     for _ in range(conf.n_layers)
                 ]
             )
-            self.composed = None
+            self.composed: Callable | None = None
 
         def forward(self, x, cond, ap):
             if self.composed is not None:
@@ -5231,7 +5231,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                 x = (
                     layer(x, cond, ap)
                     if cond.shape[0] == x.shape[0]
-                    else layer.forward_hoisted(x, cond, ap)
+                    else layer.forward_hoisted(x, cond, ap)  # ty: ignore[call-non-callable]
                 )
             return x
 
@@ -5316,7 +5316,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
                         expected = (
                             layer(expected, cond.float(), ap)
                             if cond.shape[0] == n
-                            else layer.forward_hoisted(expected, cond.float(), ap)
+                            else layer.forward_hoisted(expected, cond.float(), ap)  # ty: ignore[call-non-callable]
                         )
                 finally:
                     (
