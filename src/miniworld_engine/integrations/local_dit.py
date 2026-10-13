@@ -705,7 +705,8 @@ def _block_fwd(
         )
         if cross:  # keys and values from a second AdaLN of x1, inside pre_fwd
             bs = _kv_pack(weights)[1]
-            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, *wp, mkv, bs, save=save)
+            w_pre, b_pre = wp
+            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save)
         else:
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
         bias = _pair_bias(pair, n, weights, save)
@@ -1482,8 +1483,12 @@ def _block_fwd32(
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
+    assert y is not None and u is not None and t is not None   # allocated above: `save` is true here
     saved = [out, mod, cn1, cn2, x1, p, bias, o, lse, gated, y, a1, x2, u, t]
-    return [*saved, cnkv, mkv, xkv] if cross else saved
+    if not cross:
+        return saved
+    assert cnkv is not None and mkv is not None and xkv is not None   # the cross mode built all three
+    return [*saved, cnkv, mkv, xkv]
 
 
 def _mm32(dout, x):
