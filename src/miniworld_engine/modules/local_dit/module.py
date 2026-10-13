@@ -90,7 +90,7 @@ class LocalDiTBlock(DiTBlock):
             z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
         bias = (_master.linear(z, att.to_bias, wb) if master else F.linear(z, att.to_bias.weight.to(z.dtype))).permute(0, 4, 1, 2, 3)
         q = _master.linear(x, att.to_query, wq, bq) if master else att.to_query(x)
-        xkv = att.ada_ln_kv(x, cond) if self.cross_attention else x          # AF3 cross-attention mode: a second AdaLN for K / V
+        xkv = att.ada_ln_kv(x, cond) if self.cross_attention else x  # ty: ignore[call-non-callable]  # AF3 cross-attention mode: a second AdaLN for K / V (ty types the nn.Module attribute as Tensor)
         k = _master.linear(xkv, att.to_key, wk) if master else att.to_key(xkv)
         v = _master.linear(xkv, att.to_value, wv) if master else att.to_value(xkv)
         gate = _master.linear(x, att.to_gate, wg) if master else att.to_gate(x)

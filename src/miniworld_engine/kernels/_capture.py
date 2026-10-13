@@ -108,7 +108,7 @@ def scoped(key):
     return (cid, key)
 
 
-def prune(store: dict, cid: int | None | bool = False) -> None:
+def prune(store: dict, cid: int | bool | None = False) -> None:
     """Drop the entries of captures other than the current one (eager entries stay). ``cid``: the current scope, when the caller
     scopes by something other than ``capture_id()``."""
     if cid is False:

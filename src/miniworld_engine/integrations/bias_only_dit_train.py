@@ -267,8 +267,8 @@ def _pack_one(P, dev, mid=False):
     """``_pack`` in one launch (``bias_only_dit_train_rows.cu`` pack16): the same tensors, bit for bit (a parameter that already has
     the wanted dtype and layout is used as it is); ``mid``: with bo_bwd_mid.cu's transposed weights."""
     from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
-    g = lambda n: P[n].detach().contiguous()                                 # noqa: E731
-    e = lambda *shape, dt: torch.empty(*shape, device=dev, dtype=dt)        # noqa: E731
+    g = lambda n: P[n].detach().contiguous()
+    e = lambda *shape, dt: torch.empty(*shape, device=dev, dtype=dt)
     src, dst, scale, tr = [], [], [], []
     none = torch.empty(0, device=dev)
 
@@ -624,7 +624,7 @@ def _pvdpb(dev, H, DA, *args):
         return False
     try:
         return _op("pvdpb", dev, H, DA // H)(*args)                 # False where the bias gradient runs on CTA pairs (dpbx2)
-    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps pv dV + dpb
+    except Exception as exc:  # a toolchain or driver problem keeps pv dV + dpb
         _PVDPB_FAILED.add((idx, H, DA))
         warnings.warn(f"bias-only DiT pv dV + dbias launch (bo_pvdpb) unavailable, keeping the two launches: {exc!r}", RuntimeWarning,
                       stacklevel=2)
@@ -694,16 +694,16 @@ def _bwd_fused_step(fused, BT, C, single, cond, pair, x, c2, p2, dout, W, saved,
     wgr((dz, dab, dy, dvg, dG, dGg), (h, xt, og, xa, chat, c2), (dWsq, dWab, dWo, dWvg, dWgg), flat[:_U].view(4 * D, DC), pw,
         W["Wraw"], W["w1"], W["w2"])
     if dbias_out is not None:                          # hoisted: no pair_bias_bwd; finalize's ln_pair / to_bias jobs see no rows
-        BT.finalize_cuda(part, counts + [n3], pw, pw, 0, W["Wb"], W["wp"], flat[_U:], norms)
+        BT.finalize_cuda(part, [*counts, n3], pw, pw, 0, W["Wb"], W["wp"], flat[_U:], norms)
         return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
     dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
     pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)
     if BWF.pbfin_on():                                                               # one launch: grid barrier, then finalize's jobs
-        BT.pair_bias_bwd_fin_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf, part, counts + [n3], pw, W["Wb"], W["wp"], flat[_U:],
+        BT.pair_bias_bwd_fin_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf, part, [*counts, n3], pw, W["Wb"], W["wp"], flat[_U:],
                                   norms, BWF.pb_bar(dev))
     else:
         nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
-        BT.finalize_cuda(part, counts + [n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U:], norms)
+        BT.finalize_cuda(part, [*counts, n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U:], norms)
     return [dx.view(A, 1, L, D), dc.view(A, 1, L, DC), dpair.view(1, L, L, DP), dWvg, dWab, dWgg, dWsq, dWo, flat, norms]
 
 
@@ -986,7 +986,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         else:                                                                # hoisted: the pair's backward is the hoist's
             BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pw, 0, Wb, wp, flat[_U:], norms)   # no dWf rows: those jobs write zeros
     big = [dWvg, dWab, dWgg, dWsq, dWo]
-    big = [b if b.dtype == params[NAMES.index(g[0])].dtype else b.to(params[NAMES.index(g[0])].dtype) for b, g in zip(big, _BIG)]
+    big = [b if b.dtype == params[NAMES.index(g[0])].dtype else b.to(params[NAMES.index(g[0])].dtype) for b, g in zip(big, _BIG, strict=True)]
     lead = [dx.view(A, 1, L, D).to(single.dtype), dc.view(A, 1, L, DC).to(cond.dtype)]
     if dbias_out is not None:
         return [*lead, *big, flat, norms]

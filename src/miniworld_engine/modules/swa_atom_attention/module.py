@@ -166,7 +166,7 @@ def _flash_window_core(
     # FA4 has seqused but no max_seqlen_q/k arguments. FA2 uses the packed path
     # below, whose API requires explicit maximum sequence lengths instead.
     if backend == "fa4":
-        from flash_attn.cute import (  # lazy — pulls CUTLASS  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+        from flash_attn.cute import (  # lazy — pulls CUTLASS  # optional FlashAttention backend
             flash_attn_varlen_func as fa4_varlen,
         )
 
@@ -282,7 +282,7 @@ def _flash_window_fa4_backward(
     Calling nested autograd inside a custom op would also be incorrect: its backend
     runs below autograd dispatch, so enable_grad alone cannot build a nested graph.
     """
-    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+    from flash_attn.cute.interface import (  # optional FlashAttention backend
         _flash_attn_bwd,
         _flash_attn_fwd,
     )
@@ -368,7 +368,7 @@ def _fa4_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.T
              half_window: int) -> list[torch.Tensor]:
     """FA4 forward launch on [N, S, H, D] bf16 with ``seqused`` for both q and k: [out, lse]. Rows at or past ``seqused`` are
     skipped by flash and come back unwritten (the caller selects them away)."""
-    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+    from flash_attn.cute.interface import (  # optional FlashAttention backend
         _flash_attn_fwd,
     )
 
@@ -387,7 +387,7 @@ def _fa4_bwd_fake(q, k, v, out, lse, dout, seqused, scale, half_window):
 def _fa4_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, lse: torch.Tensor, dout: torch.Tensor,
              seqused: torch.Tensor, scale: float, half_window: int) -> list[torch.Tensor]:
     """FA4 backward launch from the forward's saved output and lse: [dq, dk, dv] (rows past ``seqused`` unwritten)."""
-    from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
+    from flash_attn.cute.interface import (  # optional FlashAttention backend
         _flash_attn_bwd,
     )
 

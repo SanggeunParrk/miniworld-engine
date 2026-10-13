@@ -190,7 +190,7 @@ class TriangleAttention(nn.Module):
 
         if backend == KernelBackend.CUEQUIVARIANCE:
             # cuequiv backend (opt-in): lazy import so the default path never needs cuequiv.
-            from cuequivariance_torch import (  # ty: ignore[unresolved-import]  # optional cuequivariance backend
+            from cuequivariance_torch import (  # optional cuequivariance backend
                 triangle_attention,
             )
             # Feed cuequiv CONTIGUOUS inputs in its native (B, L1, H, L2, D) layout: its kernel is
@@ -201,7 +201,8 @@ class TriangleAttention(nn.Module):
             k = rearrange(key, "B H L1 L2 D -> B L1 H L2 D").contiguous()
             v = rearrange(value, "B H L1 L2 D -> B L1 H L2 D").contiguous()
             out = triangle_attention(q, k, v, bias.unsqueeze(1).float())
-            return rearrange(out, "B L1 H L2 D -> B H L1 L2 D")
+            assert isinstance(out, torch.Tensor)   # cuequivariance returns the attention output alone (no LSE here)
+            return out.permute(0, 2, 1, 3, 4)  # B L1 H L2 D -> B H L1 L2 D
 
         raise InvalidImplementationError(self.implementation)
 

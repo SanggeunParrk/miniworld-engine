@@ -486,7 +486,7 @@ def _kv_pack(weights, packed_pre=None):
         wk, wv = wk.to(BF), wv.to(BF)
         return torch.cat([w_scale, w_bias]).to(BF), b_scale.float(), gamma.float(), wk, wv, torch.cat([wk, wv])
 
-    tail = weights[len(WEIGHTS):] + [weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]]
+    tail = [*weights[len(WEIGHTS):], weights[WEIGHTS.index("attention.to_key.weight")], weights[WEIGHTS.index("attention.to_value.weight")]]
     return _capture.lookup(_KV, (hopper, *((t.data_ptr(), t._version) for t in tail)), build, limit=16)
 
 
@@ -584,7 +584,8 @@ def _block_fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, mas
             k, v = _mm(xkv, wk.t(), owned), _mm(xkv, wv.t(), owned)
         elif cross:     # keys and values from a second AdaLN of x1, inside pre_fwd
             bs = _kv_pack(weights)[1]
-            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, *wp, mkv, bs, save=save)
+            w_pre, b_pre = wp
+            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save)
         else:
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
         bias = _pair_bias(pair, n, weights, save)
@@ -1091,8 +1092,12 @@ def _block_fwd32(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, m
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
+    assert y is not None and u is not None and t is not None   # allocated above: `save` is true here
     saved = [out, mod, cn1, cn2, x1, p, bias, o, lse, gated, y, a1, x2, u, t]
-    return [*saved, cnkv, mkv, xkv] if cross else saved
+    if not cross:
+        return saved
+    assert cnkv is not None and mkv is not None and xkv is not None   # the cross mode built all three
+    return [*saved, cnkv, mkv, xkv]
 
 
 def _mm32(dout, x):
@@ -1151,7 +1156,7 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
         dgc = rows.ln_bwd32(c2, dc, dcn1, pk.g1, dcn2, pk.g2, dcn3, pk.gkv)                  # dc += the LayerNorm backwards
         dcols = rows.colsum32(dmod)
         dbq = rows.colsum32(dp[:, qc:qc + DS_])
-        dbkv = rows.colsum32(dmkv[:, :DS_]) if cross else None
+        dbkv = rows.colsum32(dmkv[:, :DS_]) if dmkv is not None else None
         names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
         A_ = "attention."
         spec = [(dt, hh, [("transition.squeeze.weight", 0)]),
@@ -1168,13 +1173,14 @@ def _block_bwd32(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pai
         else:
             spec += [(dp, x1, [(A_ + "to_query.weight", 0), (A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0), (A_ + "to_gate.weight", 0)])]
         fused = _fused_wgrads(spec, weights, names, True, dev, m)
-    grads = {
+    grads: dict[str, torch.Tensor] = {
         "attention.ada_ln_in.ln_cond.weight": dgc[0:128], "attention.ada_ln_in.to_scale.bias": dcols[0:128],
         "attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb,
         "attention.to_scale.bias": dcols[512:640], "transition.ada_ln_in.ln_cond.weight": dgc[128:256],
         "transition.ada_ln_in.to_scale.bias": dcols[256:384], "transition.to_scale.bias": dcols[640:768],
     }
     if cross:
+        assert dbkv is not None   # computed above from dmkv, which the cross mode allocated
         grads.update({"attention.ada_ln_kv.ln_cond.weight": dgc[256:384], "attention.ada_ln_kv.to_scale.bias": dbkv})
     per_weight = [fused[name] if name in fused else grads[name].to(w.dtype).reshape(w.shape).clone()
                   for name, w in zip(names, weights, strict=True)]

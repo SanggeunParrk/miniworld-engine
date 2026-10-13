@@ -145,7 +145,7 @@ class _Sink:
     time); a gradient that does not sit in its slot (autograd summed it with another, a reentrant checkpoint copied the input) is
     copied in, a missing one is zero."""
 
-    __slots__ = ("nb", "h", "r", "dtype", "device", "buf", "given")
+    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "r")
 
     def __init__(self, nb, h, r, dtype, device):
         self.nb, self.h, self.r, self.dtype, self.device = nb, h, r, dtype, device
@@ -185,7 +185,7 @@ def _fold(params, dt):
 
 class _Hoist(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, pair, eps, nb, sink, *params):  # noqa: D102 -- params: ln_pair.weight, to_bias.weight of each block
+    def forward(ctx, pair, eps, nb, sink, *params):  # params: ln_pair.weight, to_bias.weight of each block
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
         gam, wts, wf = _fold(params, pair.dtype)
@@ -196,7 +196,7 @@ class _Hoist(torch.autograd.Function):
         return tuple(ball[i * H:(i + 1) * H].view(1, H, L, L) for i in range(nb))
 
     @staticmethod
-    def backward(ctx, *grads):  # noqa: D102
+    def backward(ctx, *grads):
         pair, wf, gam, wts = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]

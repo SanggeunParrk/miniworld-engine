@@ -221,26 +221,26 @@ def _pair_fwd_kernel(Z, MASK, LNW, WBT, W, N, eps, DZ: tl.constexpr, HP: tl.cons
     wbt = tl.load(WBT + d[:, None] * HP + hh[None, :])                                  # [DZ, HP] bf16, columns >= H are zero
     # pass 1: online max / rescaled sum per head
     mx = tl.full((HP,), -1e30, dtype=tl.float32)
-    den = tl.zeros((HP,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    den = tl.zeros((HP,), dtype=tl.float32)
     for j0 in range(0, N, BJ):
         j = j0 + tl.arange(0, BJ)
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)          # [BJ, DZ]
-        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        mean = tl.sum(x, 1) / DZ
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
         zn = (xc * rstd[:, None] * lw[None, :]).to(tl.bfloat16)
         b = tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)                              # [BJ, HP]: the stock proj_z output is bf16
         m = tl.load(MASK + i * N + j).to(tl.float32)
         b = tl.where(m[:, None] > 0.5, b, -1e30)
-        mn = tl.maximum(mx, tl.max(b, 0))  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-        den = den * tl.exp(mx - mn) + tl.sum(tl.exp(b - mn[None, :]), 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        mn = tl.maximum(mx, tl.max(b, 0))
+        den = den * tl.exp(mx - mn) + tl.sum(tl.exp(b - mn[None, :]), 0)
         mx = mn
     for j0 in range(jo * BJO, (jo + 1) * BJO, BJ):
         j = j0 + tl.arange(0, BJ)
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)
-        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        mean = tl.sum(x, 1) / DZ
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
         zn = (xc * rstd[:, None] * lw[None, :]).to(tl.bfloat16)
         b = tl.dot(zn, wbt).to(tl.bfloat16).to(tl.float32)
         m = tl.load(MASK + i * N + j).to(tl.float32)
@@ -263,15 +263,15 @@ def _pair_bwd_kernel(Z, W, DW, SDOT, LNW, WB, DZO, PWB, PLN, N, eps, DZ: tl.cons
     if HAS_SDOT:
         sdot = tl.load(SDOT + hh * N + i, mask=hmask, other=0.0)
     else:
-        sdot = tl.zeros((HP,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        sdot = tl.zeros((HP,), dtype=tl.float32)
         for j0 in range(0, N, BJ):
             j = j0 + tl.arange(0, BJ)
             off = (hh * N + i)[None, :] * N + j[:, None]
             w = tl.load(W + off, mask=hmask[None, :], other=0.0).to(tl.float32)
             dw = tl.load(DW + off, mask=hmask[None, :], other=0.0)
-            sdot += tl.sum(w * dw, 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-    pwb = tl.zeros((HP, DZ), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-    pg = tl.zeros((DZ,), dtype=tl.float32)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+            sdot += tl.sum(w * dw, 0)
+    pwb = tl.zeros((HP, DZ), dtype=tl.float32)
+    pg = tl.zeros((DZ,), dtype=tl.float32)
     for j0 in range(jo * BJO, (jo + 1) * BJO, BJ):
         j = j0 + tl.arange(0, BJ)
         off = (hh * N + i)[None, :] * N + j[:, None]
@@ -279,18 +279,18 @@ def _pair_bwd_kernel(Z, W, DW, SDOT, LNW, WB, DZO, PWB, PLN, N, eps, DZ: tl.cons
         dw = tl.load(DW + off, mask=hmask[None, :], other=0.0)
         db = w * (dw - sdot[None, :])                                                     # [BJ, HP] softmax backward
         x = tl.load(Z + (i * N + j)[:, None] * DZ + d[None, :]).to(tl.float32)            # [BJ, DZ]
-        mean = tl.sum(x, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        mean = tl.sum(x, 1) / DZ
         xc = x - mean[:, None]
-        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        rstd = 1.0 / tl.sqrt(tl.sum(xc * xc, 1) / DZ + eps)
         xh = xc * rstd[:, None]
         zn = (xh * lw[None, :]).to(tl.bfloat16)
         db16 = db.to(tl.bfloat16)
         dzn = tl.dot(db16, wb).to(tl.float32)                                             # [BJ, DZ] = db Wb  (the stock proj_z is a bf16 GEMM)
         pwb += tl.dot(tl.trans(db16), zn)                                                 # [HP, DZ] += db^T zn
-        pg += tl.sum(dzn * xh, 0)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        pg += tl.sum(dzn * xh, 0)
         g = dzn * lw[None, :]
-        gs = tl.sum(g, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
-        gx = tl.sum(g * xh, 1) / DZ  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        gs = tl.sum(g, 1) / DZ
+        gx = tl.sum(g * xh, 1) / DZ
         dz = rstd[:, None] * (g - gs[:, None] - xh * gx[:, None])
         tl.store(DZO + (i * N + j)[:, None] * DZ + d[None, :], dz.to(DZO.dtype.element_ty))
     tl.store(PWB + pid * HP * DZ + hh[:, None] * DZ + d[None, :], pwb)
