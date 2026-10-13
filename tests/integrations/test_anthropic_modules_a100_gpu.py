@@ -31,7 +31,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
     not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"), reason="needs pinned Anthropic payload")]
 
 FAMILIES = ("layernorm", "rmsnorm", "transition", "triattn", "adaln", "conditioned_transition",
-            "attention_pair_bias", "augmented_attention", "dit_token", "dit_atom", "opm", "pwa",
+            "attention_pair_bias", "augmented_attention", "dit_token", "opm", "pwa",
             "swa_attention", "swa_dit", "swiglu_ffn", "bias_only_dit", "opm_post",
             "triattn_bias_start", "triattn_bias_end", "triattn_bidir_bias", "triattn_bidir_sa")
 
@@ -64,8 +64,8 @@ def fixture(family, length, impl):
         return cls(128, 128, **kw), (rand(2, 1, length, 128), rand(1, 1, length, 128))
     if family == "attention_pair_bias":
         return AttentionPairBias(384, 128, 8, **kw), (rand(1, length, 384), rand(1, length, length, 128), mask)
-    if family in ("augmented_attention", "dit_token", "dit_atom"):
-        d, c, p, h = (128, 128, 16, 4) if family == "dit_atom" else (768, 384, 128, 16)
+    if family in ("augmented_attention", "dit_token"):
+        d, c, p, h = 768, 384, 128, 16
         cls = AugmentedAttentionPairBias if family == "augmented_attention" else DiTBlock
         return cls(d, c, p, h, **kw), (rand(2, 1, length, d), rand(1, 1, length, c), rand(1, length, length, p), mask)
     if family == "opm":
@@ -114,7 +114,7 @@ def test_module_reference_and_graph(family, length):
             assert torch.isfinite(got).all()
             assert rel < .04, (family, float(rel))
             if family in {"transition", "triattn", "conditioned_transition", "attention_pair_bias",
-                          "augmented_attention", "dit_token", "dit_atom", "pwa", "swa_dit"}:
+                          "augmented_attention", "dit_token", "pwa", "swa_dit"}:
                 delta = want - inputs[0].float()
                 assert (got.float() - want).norm() / delta.norm().clamp_min(1e-8) < .06
             assert any(hasattr(m, "anthropic_selection") for m in actual.modules())

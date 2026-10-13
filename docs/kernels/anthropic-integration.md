@@ -332,7 +332,7 @@ source .validation/anthropic-a100.env
 python -m pytest tests/integrations/test_anthropic_modules_a100_gpu.py \
   tests/integrations/test_anthropic_trimul_a100_gpu.py \
   tests/integrations/test_anthropic_triattn_a100_gpu.py -q
-python benchmarks/runners/bench.py target=dit_atom level=module mode=inference \
+python benchmarks/runners/bench.py target=dit_atom_local level=module mode=inference \
   'implementations=[anthropic]' compile=false min_seq_len=16 max_seq_len=16
 ```
 

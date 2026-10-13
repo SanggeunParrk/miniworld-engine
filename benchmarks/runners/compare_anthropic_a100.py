@@ -54,7 +54,7 @@ FAMILIES = (
     "layernorm", "rmsnorm", "transition", "trimul", "trimul_incoming", "trimul_bidir",
     "triattn", "triattn_ending", "triattn_bias_start", "triattn_bias_end",
     "triattn_bidir_bias", "triattn_bidir_sa", "adaln", "conditioned_transition",
-    "attention_pair_bias", "augmented_attention", "dit_token", "dit_atom", "dit_atom_local", "bias_only_dit",
+    "attention_pair_bias", "augmented_attention", "dit_token", "dit_atom_local", "bias_only_dit",
     "opm", "opm_post", "pwa", "swiglu_ffn", "swa_attention", "swa_dit",
     "pairformer", "pairformer_bias", "pairformer_bidir", "pairformer_bidir_bias",
 )
@@ -98,8 +98,8 @@ def fixture(family, length, impl, samples=2):
         return LocalDiTBlock(cross_attention=True, **kw), (
             rand(samples, 1, length, 128), rand(1, 1, length, 128),
             rand(1, windows(length), 32, 128, 16), mask)
-    if family in {"augmented_attention", "dit_token", "dit_atom", "bias_only_dit"}:
-        d, c, p, h = (128, 128, 16, 4) if family == "dit_atom" else (768, 384, 128, 16)
+    if family in {"augmented_attention", "dit_token", "bias_only_dit"}:
+        d, c, p, h = 768, 384, 128, 16
         cls = (BiasOnlyDiTBlock if family == "bias_only_dit" else
                AugmentedAttentionPairBias if family == "augmented_attention" else DiTBlock)
         return cls(d, c, p, h, **kw), (rand(samples, 1, length, d), rand(1, 1, length, c), rand(1, length, length, p), mask)

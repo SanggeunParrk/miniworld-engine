@@ -3,7 +3,7 @@
     a = AugmentedAttentionPairBias(a, s, z, mask)     # a + attention(a, s, z)
     a = ConditionedTransition(a, s)                  # a + transition(a, s)
 
-Token and ordinary atom DiT share this algorithm, with different widths and head counts.
+This is the token DiT (the dense, all-positions atom variant was removed: the AF3 atom transformer is the block-local ``local_dit``).
 Attention covers the full sequence with a pair bias, and owns its AdaLN conditioning.
 The separate ``modules/local_dit`` block implements AF3-like 32-query by 128-key
 atom attention with a windowed pair bias (benchmark target ``dit_atom_local``).
@@ -48,7 +48,7 @@ def _shared_key_mask(mask: torch.Tensor | None) -> tuple[torch.Tensor | None, bo
 
 
 class DiTBlock(nn.Module):
-    """Token or ordinary atom DiT: pair-bias attention, then conditioned transition.
+    """Token DiT: pair-bias attention, then conditioned transition.
 
     ``forward(single, cond, pair, mask)`` -> ``single``'s shape. ``single`` and ``cond`` carry the
     augmentation axis (``A, B, L, d``); ``pair`` does not (``B, L, L, d_pair``), because the pair
@@ -97,12 +97,9 @@ class DiTBlock(nn.Module):
             return _h100.update(self, single, cond, pair, key_mask)
         if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype):
             return _train.block(self, single, cond, pair, key_mask, compute_dtype)
-        from miniworld_engine.integrations import atom_dit_sm80_a100 as _atom_sm80
-
-        if _atom_sm80.serves(self, single, cond, pair, mask, compute_dtype):
-            return _atom_sm80.block(self, single, cond, pair, mask)
         if (
-            not torch.is_grad_enabled()
+            shared
+            and not torch.is_grad_enabled()
             and single.ndim == 4
             and single.shape[0] == 5
             and single.shape[1] == 1
@@ -111,16 +108,18 @@ class DiTBlock(nn.Module):
         ):
             from miniworld_engine.integrations import token_padded_sm80 as _token_padded
 
-            if _token_padded.serves(self, single, cond, pair, mask, compute_dtype):
-                return _token_padded.block(self, single, cond, pair, mask)
+            if _token_padded.serves(self, single, cond, pair, key_mask, compute_dtype):
+                return _token_padded.block(self, single, cond, pair, key_mask)
         # A100: the dedicated hand-CUDA attention / transition paths of the two modules first (they are asked inside `self.attention` /
         # `self.transition`); the general CUDA composition only for what they decline (QK-norm, other head widths).
         from miniworld_engine.integrations import a100_families, augattn_sm80
 
-        if not augattn_sm80.serves(
-            self.attention, single, pair, mask, compute_dtype, cond
-        ) and a100_families.serves(self.attention, single):
-            return a100_families.token(self, single, cond, pair, mask, compute_dtype)
+        if (
+            shared
+            and not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond)
+            and a100_families.serves(self.attention, single)
+        ):
+            return a100_families.token(self, single, cond, pair, key_mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

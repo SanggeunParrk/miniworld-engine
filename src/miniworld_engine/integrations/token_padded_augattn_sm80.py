@@ -24,7 +24,7 @@ L is padded to a multiple of 128 inside the call (zero rows, the padded keys mas
 (``compute_dtype`` None or that dtype; bf16 activations also take fp32 master parameters: cast to bf16 inside the ops, unrounded fp32 weight gradients), no QK-norm, head dim 32 or 48, any A, B and L, a key mask [B, L] or [A, B, L] (bool) or none, LayerNorm eps 1e-5. Anything else
 keeps the module path. ``settings.augattn_sm80 = False`` turns the path off, ``settings.augattn_sm80_fused = False`` keeps the earlier composition (bf16 only: the module's own
 projections and PyTorch gates around the core; the pair-bias cache and the fused atom pair bias stay), and a failed extension build warns once and keeps the module path.
-Numerics and timings: ``docs/gpus/a100/atom_dit/atom_dit.md``, ``docs/gpus/a100/token_dit/token_dit.md``, ``docs/gpus/a100/a100.md``.
+Numerics and timings: ``docs/gpus/a100/token_dit/token_dit.md``, ``docs/gpus/a100/a100.md``.
 
 fp32 (all four tensors and the weights): the same flow with the TF32 tensor-core core (``kernels/augmented_attention/cuda/sm80/*_tf32_sm80.cuh``: fp32 operands rounded to
 TF32 inside the mma, fp32 accumulation and softmax -- what the Triton kernel does), the bias in natural units (fp32, masked keys -1e4), and the GEMMs on cuBLAS under the

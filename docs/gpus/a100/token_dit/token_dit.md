@@ -42,7 +42,7 @@ is bit-identical) and the key side (dk, dv, on the transposed bias). The cp.asyn
 half of the loops' instructions): at head dim 32 (the atom width, N = 3072, A = 48) forward 3.16 → 2.87 ms, query side 4.50 → 3.91, key side 4.14 → 3.92; at head dim 48
 the block profiles before and after (different nodes) show the forward 283 → 255 µs and the query side 467 → 431 µs at L384, A = 48, and no change in the key side (392 → 399 µs,
 inside the node spread). The fused steps here keep their bias as it is (natural or pre-scaled units, `-inf` on masked keys, added in fp32); the module-level core of the
-atom / token `AugmentedAttentionPairBias` ([../atom_dit/atom_dit.md](../atom_dit/atom_dit.md)) stores it in raw units and adds it through the tensor core.
+atom / token `AugmentedAttentionPairBias` (the removed `atom_dit.md` page (git history)) stores it in raw units and adds it through the tensor core.
 
 Tests: `tests/integrations/test_a100_token_dit_gpu.py` (inference: live inputs / weights / mask, the pair-bias cache, CUDA-graph replay, per-sample
 conditioning, S = 1-8 at L128-640, bf16 and fp32, the gate, and that the fp32 step runs the TF32 attention core: 11 tests, job 63040), `tests/integrations/test_a100_token_dit_train_gpu.py` (the output and every input /
@@ -131,7 +131,7 @@ The three kernels against fp32 autograd (`dq`, `dk`, `dv`, `dbias`; A = 2-6, L =
 ## AugmentedAttentionPairBias at the token widths · the module path (2026-10-04)
 
 The attention part of the block (`modules/augmented_attention`, registry `augmented_attention`, token stream: d_single 768, **d_cond 384 or 768, d_pair 128 or 256**, 16 heads × 48; bf16 and fp32; `bench.py
-target=augmented_attention_token`) is a module of its own and the attention part of `DiTBlock`'s per-op path. It runs the same hand-CUDA path as the atom width ([../atom_dit/atom_dit.md](../atom_dit/atom_dit.md): one autograd
+target=augmented_attention_token`) is a module of its own and the attention part of `DiTBlock`'s per-op path. It runs the same hand-CUDA path as the atom width (the removed `atom_dit.md` page (git history): one autograd
 Function, `integrations/augattn_sm80.py`, forward and backward each one opaque op, any A / B / L, a shared or per-sample key mask, bf16 and fp32), so this section covers only what is specific to the token widths:
 
 - **The pair bias at 128 and 256 channels.** bf16 d_pair 128 with 8 / 12 / 16 heads is AttentionPairBias's tensor-core kernel (`apb_rows.cu`: LayerNorm folded into the projection, mma on the raw bf16 words, 115-120 µs at L = 768).

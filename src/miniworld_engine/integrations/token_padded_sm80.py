@@ -1,7 +1,7 @@
 """A100 Token450/700 inference only; generic shared AA remains unchanged.
 
-The dispatcher reads physical metadata only.  The original DiT fused/train/
-atom routes run first.  This path owns a separate registered attention copy,
+The dispatcher reads physical metadata only.  The original DiT fused/train
+routes run first.  This path owns a separate registered attention copy,
 cache and original seven source Tensor owners; the transition instance and
 all physical parameters are passed unchanged.  Unsupported paths keep the
 literal original DiT fallback.  This source makes no runtime qualification.
@@ -34,7 +34,7 @@ def _typed_eligible(module, single, cond, pair, mask, compute_dtype):
     if mask is not None:
         if not isinstance(mask, torch.Tensor) or not mask.is_cuda or mask.dtype is not torch.bool or mask.device != single.device:
             return False
-        if tuple(mask.shape) not in ((1, length), (5, 1, length)):
+        if tuple(mask.shape) not in ((1, length),):
             return False
     if tuple(module.transition.expand_a.weight.shape) != (1536, 768) or tuple(module.transition.expand_b.weight.shape) != (1536, 768) or tuple(module.transition.squeeze.weight.shape) != (768, 1536):
         return False

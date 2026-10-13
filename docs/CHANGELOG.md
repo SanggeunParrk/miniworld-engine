@@ -16,6 +16,13 @@ The public surface is enforced by `tests/compile/test_public_api.py`.
   `dit_atom` benchmark target and its A6000 tables, `tests/integrations/test_b200_atom_dit_gpu.py` and the B200 page
   `docs/gpus/b200/atom_dit/`. `modules.dit.DiTBlock` at atom widths runs the PyTorch / Triton path as before. Earlier entries below
   that name `integrations/atom_dit` describe the removed module.
+- The A100 side of the dense atom DiT, following the same decision: the 12 `integrations/atom_dit_sm80_*.py` training routes, the nine
+  `integrations/atom_augattn_sm80_*.py` variants only they used, the `atom_dit_sm80*` settings (`atom_dit_sm80`,
+  `atom_dit_sm80_join_{two,three}_cfg`), the `augmented_attention` / `conditioned_transition` / `adaln` sm80 atom kernels that nothing else launched
+  (`atom_core_*`, `atom_plain_*`, `atom_post_grad_*`, `atom_pair_reduce_*`, `atom_qkvg{,_lean}`, `atom_fwd_qresident`, `atom_gradient_join*`,
+  `atom_adaln_join*`, `ct_atom_cond_wgrad_shared`, the unused `ct_atom_wgrad_*` variants), the `dit_atom` benchmark target and
+  `docs/gpus/a100/atom_dit/`. The A100 token DiT route (`token_padded_sm80`, `a100_families.token`) now receives the shared `[B, L]` key mask
+  from `_shared_key_mask`, like the H100 / training routes; a per-sample `[A, B, L]` mask takes the module path there.
 - B200 fp32 SWA atom DiT backward (`kernels/swa_dit/cuda/sm100/tf32_bwd.py` and its `*_bwd_tf32.cu`, `attn_dq_tf32.cu`,
   `attn_dkv_tf32.cu`, `bwd_prep_tf32.cu`, `mod_bwd_tf32.cu`): identical training steps gave different gradients (a 2-row x 32-column
   dP fragment of `qkvg_bwd_tf32`, ~2e-2 on dq / dWqkv), and it faulted on poisoned memory. fp32 training takes the Triton fp32 path

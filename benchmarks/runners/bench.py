@@ -148,7 +148,7 @@ class BenchConfig(BaseModel):
     #: transition anthropic row override (upstream word: v2 | esm_t16 | pf ...); "" = the qualified row per width. The A100 has no
     #: measured launch for `v2` at 128 x 512: `+transition_anthropic_row=pf`.
     transition_anthropic_row: str = ""
-    #: dit / dit_atom anthropic attention core inside the release's DiT composition: fpf_apb (`fpf_apb.apb_views`, the kits' recipe) |
+    #: dit anthropic attention core inside the release's DiT composition: fpf_apb (`fpf_apb.apb_views`, the kits' recipe) |
     #: apb_attn (`apb.pair_bias_attention`; the core the release's own A100 cells name for the token DiT's 16 x 48 heads).
     #: Not a yaml key: `+dit_anthropic_core=apb_attn`.
     dit_anthropic_core: str = "fpf_apb"
@@ -4733,7 +4733,7 @@ KERNEL_TARGETS = {
 
 
 def bench_module_dit(conf, seq_len, implementation, fabric):
-    """Pair-bias DiT block: token by default, dense atom for ``dit_atom``, or
+    """Pair-bias DiT block: token by default, or
     AF3-like 32-query by 128-key atom attention for ``dit_atom_local``. The local
     target uses ``LocalDiTBlock(cross_attention=True)`` with trunked pair features;
     its Anthropic path composes upstream ``fpf_atom``, DTK, LN and cuBLAS. Atom
@@ -4762,7 +4762,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
       rows do. With `+shared_cond=true` every sample reads one conditioning (a sampling step) and
       the dedup is ON (Ns = L), as the fused token runner's is. Forward-only, so training is `unsupported`.
       At atom widths, separate upstream LN and cuBLAS produce the narrow pair bias;
-      ``dit_atom`` uses dense ``apb_attn`` and ``dit_atom_local`` uses ``fpf_atom``.
+      ``dit_atom_local`` uses ``fpf_atom``.
 
     Inference rows carry accuracy columns against an fp32 `DiTBlock(implementation=PYTORCH)` on
     the same (non-default) weights and inputs.
@@ -4771,7 +4771,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     from miniworld_engine.modules.local_dit import LocalDiTBlock, windows
 
     local = conf.target == "dit_atom_local"
-    atom = conf.target in {"dit_atom", "dit_atom_local"}
+    atom = local
     if local and conf.dit_qk_norm:
         raise UnsupportedBenchmark("AF3 local atom DiT has no QK-norm option")
     length = seq_len * 8 if atom else seq_len
@@ -4972,19 +4972,16 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
             execution_path = "modules.local_dit.LocalDiTBlock[PyTorch local 32x128 attention + dispatched AdaLN/ConditionedTransition; cross_attention=True]"
     elif anthropic:
         assert upstream is not None
-        if atom:
-            execution_path = "modules.dit.DiTBlock[Anthropic apb_attn + DTK + LN + cuBLAS; dense atom attention]"
-        else:
-            execution_path = _anthropic_dit_composition(
-                upstream,
-                model,
-                mask,
-                conf.n_augment,
-                length,
-                dtype,
-                shared=conf.shared_cond,
-                core_row=conf.dit_anthropic_core,
-            )
+        execution_path = _anthropic_dit_composition(
+            upstream,
+            model,
+            mask,
+            conf.n_augment,
+            length,
+            dtype,
+            shared=conf.shared_cond,
+            core_row=conf.dit_anthropic_core,
+        )
     elif spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     elif (
@@ -5310,11 +5307,6 @@ def _anthropic_dit_composition(
         )
         + "; weights packed once"
     )
-
-
-def bench_module_dit_atom(conf, seq_len, implementation, fabric):
-    """Full pair-bias atom DiT, at 8 * seq_len and atom widths; shares the token algorithm."""
-    return bench_module_dit(conf, seq_len, implementation, fabric)
 
 
 def bench_module_dit_atom_local(conf, seq_len, implementation, fabric):
@@ -6480,7 +6472,6 @@ MODULE_TARGETS = {
     "augmented_attention_token": bench_module_augmented_attention_token,
     "augmented_attention_atom": bench_module_augmented_attention_atom,
     "dit": bench_module_dit,
-    "dit_atom": bench_module_dit_atom,
     "dit_atom_local": bench_module_dit_atom_local,
     "swa_dit": bench_module_swa_dit,
     "local_dit": bench_module_local_dit,
@@ -6600,8 +6591,6 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             ),
             "swa_atom_attention": ("pytorch", "miniworld", ANTHROPIC_IMPL),
             "dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
-            # Dense atom DiT uses separate upstream LN + projection for C_pair=16.
-            "dit_atom": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
             "dit_atom_local": ("pytorch", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the kit's fused ESMFold2 atom block (ef2_atom, gemm=bf16) on the module's weights; inference only
             "swa_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),

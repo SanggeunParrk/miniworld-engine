@@ -734,12 +734,6 @@ class Settings:
     transition_wide_sm80: bool = True
     #: Extra nvcc flags for the wide sm_80 Transition extension (own build). Formerly ``MINIWORLD_TRANSITION_WIDE_SM80_FLAGS``.
     transition_wide_sm80_flags: str = ""
-    #: Serve the qualified A100 atom DiT block training path; off keeps the module composition. Formerly MINIWORLD_ATOM_DIT_SM80.
-    atom_dit_sm80: bool = True
-    #: Config index of the private three-output gradient-join experiment (atom_dit_sm80_gradient_join). Formerly MINIWORLD_ATOM_DIT_SM80_JOIN_THREE_CFG.
-    atom_dit_sm80_join_three_cfg: int = 0
-    #: Config index of the private two-output gradient-join experiment (atom_dit_sm80_gradient_join). Formerly MINIWORLD_ATOM_DIT_SM80_JOIN_TWO_CFG.
-    atom_dit_sm80_join_two_cfg: int = 0
     #: Use the A100 native 32x128 local DiT block path; off retains the previous module composition. Formerly MINIWORLD_LOCAL_DIT_SM80.
     local_dit_sm80: bool = True
     #: Extra nvcc flags (-DNAME=value) for the A100 MPNN edge-tail kernel build, for A/B experiments; part of the build's name. Formerly MINIWORLD_MPNN_EDGE_FLAGS.
@@ -970,9 +964,6 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_APB_SM80_SAVE_NATURAL": "apb_sm80_save_natural",
     "MINIWORLD_APB_SM80_TRAIN16": "apb_sm80_train16",
     "MINIWORLD_APB_SM80_TYPED_GRAD": "apb_sm80_typed_grad",
-    "MINIWORLD_ATOM_DIT_SM80": "atom_dit_sm80",
-    "MINIWORLD_ATOM_DIT_SM80_JOIN_THREE_CFG": "atom_dit_sm80_join_three_cfg",
-    "MINIWORLD_ATOM_DIT_SM80_JOIN_TWO_CFG": "atom_dit_sm80_join_two_cfg",
     "MINIWORLD_AUGATTN_SM80": "augattn_sm80",
     "MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED": "augattn_sm80_atom_output_fused",
     "MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED": "augattn_sm80_atom_output_tiled",

@@ -1109,10 +1109,10 @@ the byte floor), `out_rows_kernel` 135 µs (226 MB, at its byte floor) and `bias
 
 - **Kept: the cp.async index arithmetic of a pipeline stage is made once per thread** (`KVBiasLoader` in the forward and the query side, `QdLoader` in the key side: the shared-memory
   offsets and the 64-bit global pointers of a thread's 16-byte chunks are computed before the key loop, one add per chunk inside it, as in the AugmentedAttention kernels
-  of [../atom_dit/atom_dit.md](../atom_dit/atom_dit.md)). Kernel-only CUDA-graph replays of the old and the new kernels, one after the other on gpu09 (job 61745), L384 / L768: forward 358 → 334 µs / 2822 → 2689
+  of the removed `atom_dit.md` page (git history)). Kernel-only CUDA-graph replays of the old and the new kernels, one after the other on gpu09 (job 61745), L384 / L768: forward 358 → 334 µs / 2822 → 2689
   (7 % / 5 %), query side 593 → 577 / 4175 → 3977 (3 % / 5 %), key side 562 → 523 / 4096 → 3795 (7 % / 7 %); the outputs are bit-identical. The module-level tables above are
   with it.
-- **Dropped: the bias in raw units through the tensor core** (what the AugmentedAttention core does, [../atom_dit/atom_dit.md](../atom_dit/atom_dit.md): the bf16 bias stored as
+- **Dropped: the bias in raw units through the tensor core** (what the AugmentedAttention core does, the removed `atom_dit.md` page (git history): the bf16 bias stored as
   `bias · sqrt(32)` and added to the score tile by an identity `mma`, the softmax on the raw scores). Here the old and the new kernels in turn on gpu09 (job 61770), L384 / L768:
   forward 337 / 2663 vs 340 / 2687 µs (1-3 % slower), query side 564 / 3933 vs 558 / 3884 (1 % faster), key side 526 / 3785 vs 510 / 3702 (3 % / 2 % faster), all inside the 2-8 %
   spread of those runs and with the forward losing; the sources were reverted to the natural-unit bias.
