@@ -36,7 +36,7 @@ def _runtime_aux():
     ensure_cuda_home()
     shared = Path(__file__).with_name("b200_sources")
     return load_extension(
-        name="trimul_h100_emitxn_tma_aux_v1",
+        name="trimul_h100_schedule256_aux_v1",
         sources=[
             str(R / "bind.cpp"),
             str(shared / "wide_aux.cu"),
@@ -140,12 +140,20 @@ def _front_kernel(d, h, backward, cfg):
         headers = prefetch_headers(headers)
         from .h100_b200style_emitxn_tma import headers as emit_headers
         headers = emit_headers(headers)
+    if backward and d == 256:
+        name = "mw_b200style_k1wb_d256_dplpipe"
+        from .h100_b200style_k1_prefetch import headers as prefetch256_headers
+        headers = prefetch256_headers(headers)
+        from .h100_b200style_dpl_pipeline import headers as pipe_headers
+        headers = pipe_headers(headers)
+        from .h100_b200style_emitxn_tma import headers as emit256_headers
+        headers = emit256_headers(headers)
     body = (
         f'#include "tmn_kernels.cuh"\n'
         f"using C=tmn::K1Cfg<{d},{h},false,{a},{b},{slots},{sk},{schedule}>;\n"
         'extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB) '
         f"void {name}(__grid_constant__ const tmn::K1Params p){{"
-        f"tmn::sm90::k1_body<C,true,1,{str(not backward).lower()},{str(backward and d == 384).lower()},1>(p);}}"
+        f"tmn::sm90::k1_body<C,true,1,{str(not backward).lower()},{str(backward and d in (256, 384)).lower()},1>(p);}}"
     )
     flags = [
         "-std=c++17",
@@ -162,6 +170,8 @@ def _front_kernel(d, h, backward, cfg):
         f"-DTMN_K1_BULK_STORE={int(not backward)}",
     ]
     smem = I._k1_smem(d, (*cfg[:5], 2))
+    if backward and d == 256:
+        smem += a * b // 64 * 4096
     kernel = T.load_unit(str(T.compile_text(body, flags)), "b200style_k1").kernel(name)
     kernel.set_max_dynamic_smem(smem)
     return kernel, smem
@@ -182,8 +192,8 @@ def _front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None, normalized
 
 def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
     n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
-    if d == 384 and dcat is not None and xn is None:
-        raise ValueError("D384 backward K1 requires its normalized-input output")
+    if d in (256, 384) and dcat is not None and xn is None:
+        raise ValueError("D256/D384 backward K1 requires its normalized-input output")
     cfg = _config(d, dcat is not None)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _front_kernel(d, h, dcat is not None, cfg)
@@ -217,7 +227,7 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
             3, I._map(dcat, [64, 64], [dcat.shape[1], n * n], [dcat.shape[1] * 2])
         )
         fields.insert(4, I._map(dpl, [64, 32], [n * n, 2 * h], [n * n * 2]))
-        if d == 384:
+        if d in (256, 384):
             fields.insert(5, I._map(xn, [64, 64], [d, n * n], [d * 2]))
         fields += [dpl, dcat, dcat.shape[1]]
     kernel.launch(
@@ -227,7 +237,7 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         smem,
     )
 
-    return d == 384 and dcat is not None and xn is not None
+    return d in (256, 384) and dcat is not None and xn is not None
 
 
 @T.device_cache
@@ -380,7 +390,7 @@ def _run_forward(leaves, mask, ds, direction, save):
         )
 
 
-@opaque(fake=_forward_fake, name="trimul_h100_emitxn_tma_forward")
+@opaque(fake=_forward_fake, name="trimul_h100_schedule256_forward")
 def forward(
     leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int
 ) -> list[torch.Tensor]:
@@ -393,7 +403,7 @@ def _inference_fake(leaves, mask, ds, direction):
     return torch.empty_like(leaves[0])
 
 
-@opaque(fake=_inference_fake, name="trimul_h100_emitxn_tma_inference")
+@opaque(fake=_inference_fake, name="trimul_h100_schedule256_inference")
 def inference(
     leaves: list[torch.Tensor],
     mask: torch.Tensor,
@@ -417,7 +427,7 @@ def _backward_fake(leaves, mask, ds, direction, saved, dy, master_mask):
     ]
 
 
-@opaque(fake=_backward_fake, name="trimul_h100_emitxn_tma_backward")
+@opaque(fake=_backward_fake, name="trimul_h100_schedule256_backward")
 def backward(
     leaves: list[torch.Tensor],
     mask: torch.Tensor,

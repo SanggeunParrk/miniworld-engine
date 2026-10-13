@@ -128,7 +128,11 @@ def qualify(
         xi = xi.clone().requires_grad_(training)
         torch.manual_seed(123)
         with torch.set_grad_enabled(training):
-            y = native.forward(m, xi, mask) if m is ours else reference(m, xi, mask, drop)
+            y = (
+                native.forward(m, xi, mask)
+                if m is ours
+                else reference(m, xi, mask, drop)
+            )
             if training:
                 y.backward(dy.to(y.dtype))
         outcomes.append(y.detach())
@@ -261,14 +265,7 @@ def test_cuda_dispatch_has_no_triton():
         "grouped_dkdv",
     ]:
         assert any(kernel in n for n in names), (kernel, names)
-    import os
-
-    head = (
-        "projection_ln"
-        if os.environ.get("MINIWORLD_TRIATTN_H100_PROJECT_LN", "0") == "1"
-        else "ln_rows"
-    )
-    assert any(head in n for n in names), names
+    assert any("ln_rows" in n for n in names), names
     assert not any("triton" in n.lower() or n.startswith("_attn_fwd") for n in names), (
         names
     )

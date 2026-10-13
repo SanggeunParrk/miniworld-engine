@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as K
 
@@ -152,6 +153,7 @@ def test_changed_graph_inputs_weights_mask_dropout_dy(d, direction):
 def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch):
     from miniworld_engine import settings
     from miniworld_engine.integrations import trimul_h100
+    from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -160,11 +162,15 @@ def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch
     cls = (
         BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
     )
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_B200STYLE", "1")
+    override_setting(monkeypatch, "trimul_h100_b200style", True)
     old = settings.configure(engine_backend="auto")
     try:
         leaves, mask, ds, dy = fixture(d, 128, 0 if bidirectional else 1, master)
-        module = cls(d, p_drop=0.25, implementation="miniworld").cuda().train()
+        module = (
+            cls(d, p_drop=0.25, implementation=ImplementationType.MINIWORLD)
+            .cuda()
+            .train()
+        )
         actual = [
             module.to_left.weight,
             module.to_left_gate.weight,
@@ -247,7 +253,6 @@ def test_changed_inference_graph_without_scale(d, direction):
         assert relative(y, want) < 0.006
 
 
-
 @pytest.mark.parametrize("d", K.WIDTHS)
 @pytest.mark.parametrize("training", [False, True])
 def test_selected_output_storage_dispatch(d, training):
@@ -266,17 +271,38 @@ def test_selected_output_storage_dispatch(d, training):
     step()
     torch.cuda.synchronize()
     with torch.profiler.profile(
-        activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
     ) as profile:
         for _ in range(3):
             step()
             torch.cuda.synchronize()
-    names = [event.name for event in profile.events()
-             if event.device_type == torch.autograd.DeviceType.CUDA]
+    names = [
+        event.name
+        for event in profile.events()
+        if event.device_type == torch.autograd.DeviceType.CUDA
+    ]
     if training:
-        expected = {256: "mw_b200style_k3_scalar_tmasave",
-                    384: "mw_b200style_k3", 512: "mw_b200style_k3tmasave"}[d]
+        expected = {
+            256: "mw_b200style_k3_scalar_tmasave",
+            384: "mw_b200style_k3_d384_tmasave",
+            512: "mw_b200style_k3tmasave",
+        }[d]
     else:
         expected = "mw_b200style_k3_static"
-    assert any(name == expected or name.startswith(expected + "(") for name in names), names
+    assert any(name == expected or name.startswith(expected + "(") for name in names), (
+        names
+    )
+    if training and d in (256, 384):
+        expected_k1 = (
+            "mw_b200style_k1wb_d256_dplpipe"
+            if d == 256
+            else "mw_b200style_k1wb_emitxn_tma"
+        )
+        assert any(name.split("(")[0] == expected_k1 for name in names), names
+        assert not any(
+            name.split("(")[0] == f"mw_b200style_apply_{d}" for name in names
+        ), names
     assert all("triton" not in name.lower() for name in names), names
