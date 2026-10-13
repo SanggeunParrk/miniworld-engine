@@ -41,7 +41,7 @@ under autocast or with bf16 weights -- runs the module's PyTorch composition. Ea
 **Switches** (default on): `settings.bias_only_dit` (inference), `settings.bias_only_dit_train` (training),
 `settings.bias_only_dit_core` (the sm_100a core). Experiment knobs: `settings.bias_only_dit_sg` (samples per core work item),
 `settings.bias_only_dit_pv_vb` (keys per v tile), `settings.bias_only_dit_resln` / `_COND` (inference GEMM-epilogue experiments,
-off: slower, see below), `MINIWORLD_BO_ROWS_BLOCKS_PER_SM` (cap on the training row kernels' resident blocks),
+off: slower, see below),
 `settings.bias_only_dit_inf3` (fp32 inference as three kernels per block, default on; 0: the 12-launch step:
 [F5](#f5--three-kernel-fp32-inference-step-the-default)) and `settings.bias_only_dit_inf3_bf16` (bf16 inference as three kernels
 per block, default on; 0: the 12-launch step: [I0](#i0--bf16-three-kernel-step-the-default)), both with

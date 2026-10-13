@@ -2,7 +2,7 @@
 
 Kernel-level status of `kernels/smooth_lddt`; the module-level summary is in [b200.md](../b200.md). The op is **not in the completion tables
 yet**: it has no row in the shape registry and no bench target, so there is no **성능 확인** to give (the maintainer's call). **cache build ✓**:
-nothing on this path autotunes (fixed launch shapes, a cubin built on first use into `MINIWORLD_ENGINE_JIT_ROOT`).
+nothing on this path autotunes (fixed launch shapes, a cubin built on first use into `settings.engine_jit_root()`).
 
 The op is the auxiliary structure loss of AlphaFold 3's diffusion module (SI Algorithm 27), the term MiniWorld adds inside `alpha_diffusion`:
 

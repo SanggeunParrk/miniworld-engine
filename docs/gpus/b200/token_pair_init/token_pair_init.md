@@ -20,7 +20,7 @@ fp32 (the reference's TF32 Linears round the weights).
 fp32, d_pair 128, any B and any L (ragged lengths included), five id tensors [B, L] of any integer dtype, `bond` [B, L, L] (bool,
 integer or float: any nonzero is a bond), bins that fit 8 bits (`r_max` 32 / `s_max` 2 use 139 - 2). `token_pair_init.refusal(...)`
 returns `None` when the op serves a call and otherwise the reason; it reads metadata only, so it traces under `torch.compile`. A
-refused call runs the caller's unfused ops: MiniWorld's `InputEmbedder` asks it first, and `MINIWORLD_FUSED_PAIR_INIT=0` turns the
+refused call runs the caller's unfused ops: MiniWorld's `InputEmbedder` asks it first, and the `token_pair_init_fused` setting turns the
 op off there.
 
 Plain CUDA-core kernels, no tensor cores: the op is bandwidth bound. The cubin is built on first use by the newest nvcc that knows

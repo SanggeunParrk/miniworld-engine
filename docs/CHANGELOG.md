@@ -31,10 +31,28 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   `docs/gpus/b200/swa_atom_dit/swa_atom_dit.md` ("Fixed (2026-10-11)").
 ### Changed
 
+- H100 kernel and integration switches moved from `MINIWORLD_*` environment variables to typed fields of
+  `miniworld_engine.settings.Settings`, read through `settings.current()` and set with `settings.configure(...)` (or a
+  `Settings(...)` instance); the environment variables are no longer read, and a set old variable is reported through
+  `_REMOVED_ENVIRONMENT` like the other migrated ones. Eleven new fields: `apb_h100_train` (`MINIWORLD_APB_H100_TRAIN`),
+  `augattn_tf32_sm90` (`..._AUGATTN_TF32_SM90`), `bias_only_dit_h100` (`..._BIAS_ONLY_DIT_H100`), `local_dit_h100_train`
+  (`..._LOCAL_DIT_H100_TRAIN`), `swa_dit_h100_native` (`..._SWA_H100_CUDA_ONLY`), `token_dit_gemm_swiglu_fp32`
+  (`..._TOKEN_DIT_GEMM_SWIGLU_FP32`), `transition_d64_repl` (`..._TRANSITION_D64_REPL`), `transition_dw_repl`
+  (`..._TRANSITION_DW_REPL`), `trimul_h100_b200style` (`..._TRIMUL_H100_B200STYLE`), `trimul_h100_native_buckets`
+  (`..._TRIMUL_H100_NATIVE_BUCKETS`) and `trimul_h100_preserve_widths` (`..._TRIMUL_H100_PRESERVE_D128` / `_D256` / `_WIDE`).
+  The remaining experimental H100 switches (the OPM, PWA, APB, token DiT, Transition, TriAttn and TriMul candidates) were baked in:
+  the default behaviour is hard-wired, the kernels stay compiled and loadable, and the switch variables were deleted. The JIT cache
+  root is read through `settings.engine_jit_root()` (field `engine_jit_root`) everywhere, including the H100 OPM, PWA, TriAttn,
+  TriMul and conditioned-transition sources, which read `MINIWORLD_ENGINE_JIT_ROOT` directly before and so ignored it. The
+  environment variables that stay are the build / driver / config-dir ones (`MINIWORLD_CONFIG_DIR`, `MINIWORLD_BUILD_SCOPE`,
+  `MINIWORLD_BUILD_MODE`, `MINIWORLD_SMEM_LOG`, `MINIWORLD_DRIVER_*`, `MINIWORLD_SHAPE_MODE`, `MINIWORLD_ANTHROPIC_ROOT`,
+  `MINIWORLD_MATHDX_HOME`). No change at the default settings.
+
 - H100 OuterProductMean training: the persistent TMA prologue now serves every training cell at S 1024 / 2048 / 4096 (it was only
   (1024, 384) and (1024, 768)); the non-TMA prologue was 5-6x slower than the legacy Triton one. Training is up to 19 % faster (L128 S1024) and 6-10 % at S >= 2048; the two
   cells that already used it are unchanged. It now runs at 80-100 % of the H100 speed-of-light floor. The mask count comes from the bit mask with one new kernel (`opm_count_tiled`,
-  exact) instead of the four-launch fp32 cuBLAS product; `MINIWORLD_OPM_H100_CUBLAS_COUNT=1` restores it. Training and inference
+  exact) instead of the four-launch fp32 cuBLAS product (the cuBLAS count is gone; the switch that restored it was removed).
+  Training and inference
   forwards are not bitwise equal at the cells whose inference path is the legacy Triton prologue. Page `docs/gpus/h100/opm/opm.md`,
   record `docs/records/h100_opm_sol_20261007.md`.
 
@@ -43,13 +61,14 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   `ln_pair.bias` is ignored when loading. dv runs on cuBLAS, and from N = 512 the contraction does too, followed by a new gate / out
   kernel (`pwa_gateout.cu`): inference L768 -18 %, training L768 -7 %. The forward output at N >= 512 is no longer bit-identical to the
   fused kernel's (o is rounded to bf16 before the gate); every gradient is. Removed the beta-shadow environment variables and
-  `MINIWORLD_PWA_H100_CLUSTER`; `MINIWORLD_PWA_TRAIN`, `MINIWORLD_PWA_INFER` and `MINIWORLD_PWA_H100_CUDA_AUX` remain. Record
+  `MINIWORLD_PWA_H100_CLUSTER`; the `pwa_train` and `pwa_infer` settings fields remain, and the former `MINIWORLD_PWA_H100_CUDA_AUX`
+  switch is gone (the CUDA aux path is the only one). Record
   `docs/records/h100_pwa_20261008.md`.
 
 - H100 MSAPairWeightedAveraging and bias-only DiT training keep the pair-bias logits in fp32 until the softmax (they were rounded to
   bf16 first). PWA: `pair3.cu` rounds the logits only under `-DMW_PWA_ROUND_LOGITS=1` (opt-in A/B), training and inference share the
   fp32 logits, and every fused gradient now equals the engine path (engine-vs-fused 0.0050 -> 0.0035). Bias-only DiT: `pair_bias_k`
-  writes an fp32 logits buffer that `softmax_t` reads (`MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS=0` restores bf16); the
+  writes an fp32 logits buffer that `softmax_t` reads (fp32 logits are the only path; the former bf16 switch was removed); the
   `ln_pair.weight` gradient error against fp64 drops 0.0107 -> 0.0089 (L384) and 0.0106 -> 0.0093 (L768). sm_100a is unchanged.
 
 ### Added

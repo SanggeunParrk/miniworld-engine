@@ -22,7 +22,7 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
     one GEMM, v^T from a second (TF32 wgmma takes v K-major), the hoisted pair bias written key-permuted (below);
   - expand + SwiGLU, **bf16**: `kernels/conditioned_transition/cuda/gemm_swiglu_sm90.cu`, one sm_90a GEMM (128 x 256 tiles
     whose B rows are 128 of Wa then the same 128 of Wb, wgmma m64n256, SwiGLU in the epilogue): [a | b] never reaches HBM.
-    Its TF32 build is opt-in (`MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32=1`; see below);
+    Its TF32 build is opt-in (`settings.token_dit_gemm_swiglu_fp32`, default off; see below);
   - the other GEMMs cuBLAS (fp32: TF32 under the caller's `allow_tf32`).
 - **Training** (`integrations/token_dit_train.py`): `DiTBlock` calls under autograd, B == 1, L % 128 == 0, key mask [B, L]
   or none. One autograd Function per block whose forward and backward are each one opaque op (torch.compile keeps them
@@ -36,9 +36,10 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
   - **fp32**: `attn_tf32.cu` forward (og, fp32), `attn_tf32_dqb` (dQ; dbias as one TMA bulk reduce-add per 64 x 64 dS tile) and
     `attn_tf32_dkv` (dK, dV); q, k, dO transposed by a tiled CUDA transpose for the products that contract over tokens.
 
-Switches (all default on): `MINIWORLD_TOKEN_DIT_ROWS_CUDA` (inference rows), `MINIWORLD_AUGATTN_BF16_SM90` (bf16 cores),
-`MINIWORLD_AUGATTN_TF32_SM90` (fp32 inference core), `MINIWORLD_TOKEN_DIT_TRAIN` (training block),
-`MINIWORLD_TOKEN_DIT_TRAIN_FP32` (the fp32 training block). `MINIWORLD_TOKEN_DIT_GEMM_SWIGLU=0` keeps cuBLAS + the row pass.
+Switches are `Settings` fields (all default on; set with `settings.configure(...)`): `token_dit_rows_cuda` (inference rows),
+`augattn_bf16_sm90` (bf16 cores), `augattn_tf32_sm90` (fp32 inference core), `token_dit_train` (training block).
+The fp32 training block has no switch any more (it is always served when the training block is). `token_dit_gemm_swiglu=False`
+keeps cuBLAS + the row pass.
 
 Every attention kernel here is bitwise deterministic run to run (6 runs, `torch.equal`, every output without atomics);
 the bf16 kernels now issue `fence.proxy.async` before releasing a TMA stage (or the parked q tile) they read with
@@ -108,7 +109,7 @@ bf16 and fp32, QK-norm on / off, shared conditioning, S = 5 (the sampler's diffu
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 "미검증" = the kernels accept the shape (L % 128 == 0) but no test or measurement has run there. cache build ✓: nothing on
-these paths autotunes (fixed launch shapes; the CUDA extensions build on first use into `MINIWORLD_ENGINE_JIT_ROOT`).
+these paths autotunes (fixed launch shapes; the CUDA extensions build on first use into `settings.engine_jit_root()`).
 
 Tests: `tests/gpu/any/test_token_dit_train_gpu.py` (bf16 and fp32 blocks against the fp32 PyTorch block, qk-norm and
 mask on / off, A = 4 and 6, torch.compile), `tests/gpu/sm90/test_h100_module_wiring_gpu.py` (inference: live inputs /

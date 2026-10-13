@@ -8,7 +8,7 @@ the same, the instructions are not (see [Against B200](#against-b200)).
 Dispatch: `integrations/opm_train.py` (`_h100_path`); kernels: `integrations/csrc/opm_epilogue.cu` (one extension, built by JIT for sm_90a).
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, `normalize_before_proj` (the AF3 order), no interchain
 masking, N (length) a multiple of 64 and S (MSA depth) a multiple of 256, inference and training alike; the pair residual is added in
-the epilogue (its gradient is `dz`). `MINIWORLD_OPM_TRAIN=0` turns the path off. Every other call runs the portable Triton path.
+the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call runs the portable Triton path.
 Not served on H100: other widths (MSA 128 with pair 256 / 384 in Protenix-v2, ESMFold2 and OpenDDE) and `normalize_before_proj=False`
 ([todo.md](../todo.md) item 5).
 
@@ -19,14 +19,14 @@ Per call (training adds the right-hand column), the same three kernel boundaries
 | stage | forward | backward |
 |---|---|---|
 | F1 / B4 | prologue: LayerNorm + both projections + mask straight into the grouped layouts A2 `[(i,c), s]` and BT `[(j,e), s]` (+ LN statistics, bit mask) | prologue backward: mask, both projections and the LayerNorm backward in one pass -> dm, dWa, dWb, dgamma, dbeta |
-| GEMM | O = A2 . BT^T, cuBLAS | dA, dB: cuBLAS on the grouped dO (plus O again when `MINIWORLD_OPM_TRAIN_SAVE_O=0`) |
+| GEMM | O = A2 . BT^T, cuBLAS | dA, dB: cuBLAS on the grouped dO (plus O again when the `opm_train_save_o` setting is off) |
 | F3 / B1, B3 | epilogue: permute `[i,j,c,e] -> [(i,j),(c,e)]`, `/ n`, `W_o`, bias, residual, bf16 | dgrad: `dz / n . W_o` into the grouped layout (+ dbias); dWo off the grouped O |
 | count | `n[i,j] = max(1, sum_s mask[s,i] mask[s,j])` from the bit mask (`opm_count_tiled`, exact) | reused |
 
 Kernels (`opm_epilogue.cu`): `opm_prologue_tma_hopper` (persistent, TMA + WGMMA), `opm_prologue_wgmma_native` (non-TMA),
 `opm_epilogue_kernel`, `opm_dgrad_kernel`, `opm_dwo_kernel` + `opm_reduce_partials_chunked`, `opm_prologue_bwd_kernel`,
-`opm_count_tiled`, `opm_pack_native`, `opm_finish_native`. The "legacy" composition (`MINIWORLD_OPM_H100_CUDA_ONLY=0`) keeps the
-Triton prologue of MiniWorld's `runs/msa_bench_20260921` and the same epilogue / backward kernels.
+`opm_count_tiled`, `opm_pack_native`, `opm_finish_native`. The Triton prologue of MiniWorld's `runs/msa_bench_20260921` still serves the inference cells above; the legacy-composition switch
+(`MINIWORLD_OPM_H100_CUDA_ONLY`) was removed, so the native CUDA path is the only training route on H100.
 
 ## Dispatch (`_h100_path`)
 
@@ -82,7 +82,7 @@ Rows: **implementation** (what the default dispatch runs; "CUDA + Triton" = the 
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-The tables have no cache-build row: the CUDA path is built by JIT (`MINIWORLD_ENGINE_JIT_ROOT`), and the Triton prologue of the
+The tables have no cache-build row: the CUDA path is built by JIT (cache root: `settings.engine_jit_root()`, field `engine_jit_root`), and the Triton prologue of the
 inference cells was not checked with `dev cache-status`. Figures are not generated yet (B200's come from `viz.kernel_flow`).
 
 ## Speed of light
@@ -157,7 +157,7 @@ re-run of the training table has not been done, so no current ratio is stated.
 | operands | TMA in the persistent prologue and the TMA epilogue variants; other kernels load through threads | every operand by TMA, warp-specialized roles |
 | epilogue permute | gathered-TMA / half-row variants, selected per cell | one 4-D TMA box absorbs the permute |
 | prologue | TMA prologue; the legacy Triton prologue still serves inference cells above | CUDA prologue in every cell (projection run transposed so a TMEM lane is an output channel) |
-| mask count | bit mask from the prologue, `opm_count_tiled` (separate launch); fp32 cuBLAS count with `MINIWORLD_OPM_H100_CUBLAS_COUNT=1` | `opm_norm_sm100` from the prologue's bit mask |
+| mask count | bit mask from the prologue, `opm_count_tiled` (separate launch; the fp32 cuBLAS count was removed) | `opm_norm_sm100` from the prologue's bit mask |
 | dgrad rounding | `dz / n` rounded to bf16 first | `1 / n` in fp32, one bf16 rounding |
 | dWo | split-K partials + `opm_reduce_partials_chunked` | one CTA owns the K range in TMEM, partials folded by a column-sum GEMV in split order |
 | dispatch | measured table per cell (above) | one CUDA path |
