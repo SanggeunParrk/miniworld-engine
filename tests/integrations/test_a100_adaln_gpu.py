@@ -12,9 +12,16 @@ from miniworld_engine.integrations import adaln_sm80
 from miniworld_engine.modules import AdaptiveLayerNorm
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
-WIDTHS = [(128, 128), (768, 384), (768, 768)]               # (d_hidden, d_cond): atom, token, ESMFold2 token
+WIDTHS = [
+    (128, 128),
+    (768, 384),
+    (768, 768),
+]  # (d_hidden, d_cond): atom, token, ESMFold2 token
 BF = torch.bfloat16
 
 
@@ -31,7 +38,9 @@ def _rel(a, b):
 def _modules(d, dc, dtype, seed=0):
     torch.manual_seed(seed)
     ref = AdaptiveLayerNorm(d, dc, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised to_bias, the unit norm weight
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised to_bias, the unit norm weight
         for p in ref.parameters():
             p.add_(torch.randn_like(p) * 0.3)
         ref.ln_cond.weight.add_(1.0)
@@ -43,7 +52,9 @@ def _modules(d, dc, dtype, seed=0):
 def _inputs(A, L, d, dc, shared=False, seed=1):
     g = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(A, 1, L, d, device="cuda", generator=g)
-    c = torch.randn(1 if shared else A, 1, L, dc, device="cuda", generator=g).expand(A, 1, L, dc)
+    c = torch.randn(1 if shared else A, 1, L, dc, device="cuda", generator=g).expand(
+        A, 1, L, dc
+    )
     return x, c
 
 
@@ -68,7 +79,9 @@ def test_adaln_a100_inference_bf16(d, dc, L, shared):
 @pytest.mark.parametrize(("d", "dc"), WIDTHS)
 def test_adaln_a100_inference_fp32_tf32(d, dc, L, shared, monkeypatch):
     """fp32 on TF32 tensor cores (at d = dc = 128 the fused kernel: ragged row counts L = 50, 5 x 1024; one conditioning shared by the samples) within TF32 accuracy of the fp32 module."""
-    override_setting(monkeypatch, "adaln_fp32_atom_min_rows", "0")          # the row gate (below) would leave these small shapes to Triton
+    override_setting(
+        monkeypatch, "adaln_fp32_atom_min_rows", "0"
+    )  # the row gate (below) would leave these small shapes to Triton
     ref, ours, _ = _modules(d, dc, torch.float32)
     x, c = _inputs(5, L, d, dc, shared)
     with torch.no_grad():
@@ -94,10 +107,17 @@ def test_adaln_a100_fp32_atom_inference_of_few_rows_is_left_to_triton(monkeypatc
 def _train(mod, x, c, dy, dt):
     for p in mod.parameters():
         p.grad = None
-    xx, cc = x.to(dt).detach().clone().requires_grad_(), c.to(dt).detach().clone().requires_grad_()
+    xx, cc = (
+        x.to(dt).detach().clone().requires_grad_(),
+        c.to(dt).detach().clone().requires_grad_(),
+    )
     y = mod(xx, cc)
     y.backward(dy.to(dt))
-    return y.detach(), {"x": xx.grad, "cond": cc.grad, **{n: p.grad.clone() for n, p in mod.named_parameters()}}
+    return y.detach(), {
+        "x": xx.grad,
+        "cond": cc.grad,
+        **{n: p.grad.clone() for n, p in mod.named_parameters()},
+    }
 
 
 @pytest.mark.parametrize("L", [64, 128, 200, 384])
@@ -141,7 +161,9 @@ def test_adaln_a100_gate_conditions():
     assert not adaln_sm80.serves(ours, xb, cb[:, :, :32], BF, False)
     assert not adaln_sm80.serves(ours, xb.cpu(), cb.cpu(), BF, False)
     one = cb[:1]
-    assert adaln_sm80.serves(ours, xb, one, BF, False)             # a size-1 leading dim: one conditioning for the samples (inference only)
+    assert adaln_sm80.serves(
+        ours, xb, one, BF, False
+    )  # a size-1 leading dim: one conditioning for the samples (inference only)
     assert not adaln_sm80.serves(ours, xb, one, BF, True)
 
 
@@ -229,10 +251,14 @@ def triton_launches(monkeypatch):
 
 @pytest.mark.parametrize("dtype", [BF, torch.float32])
 @pytest.mark.parametrize(("d", "dc"), WIDTHS)
-def test_adaln_a100_default_dispatch_launches_no_triton_kernel(d, dc, dtype, triton_launches):
+def test_adaln_a100_default_dispatch_launches_no_triton_kernel(
+    d, dc, dtype, triton_launches
+):
     """The registry widths in both dtypes: inference (a conditioning per sample, one shared) and a training step never reach a Triton kernel."""
     _, ours, _ = _modules(d, dc, dtype)
-    L = 2816 if (d == 128 and dtype is torch.float32) else 128             # fp32 at the atom width: 3 x 2816 rows, above the gate that leaves fewer than 8192 rows to Triton
+    L = (
+        2816 if (d == 128 and dtype is torch.float32) else 128
+    )  # fp32 at the atom width: 3 x 2816 rows, above the gate that leaves fewer than 8192 rows to Triton
     x, c = _inputs(3, L, d, dc)
     shared = _inputs(3, L, d, dc, shared=True)[1].to(dtype)
     with torch.no_grad():

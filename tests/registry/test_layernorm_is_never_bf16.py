@@ -26,6 +26,7 @@ with misses.
 What this does NOT claim is that the surrounding stream is fp32. It is not: token and pair
 activations are bf16 and stay bf16. The normalisation over them is what has to be wide.
 """
+
 from __future__ import annotations
 
 import ast
@@ -36,6 +37,8 @@ from paths import ROOT, registry_rows
 PKG = ROOT / "src" / "miniworld_engine"
 
 KERNELS = PKG / "kernels"
+
+
 #: Where a LayerNorm actually lives -- DERIVED, not listed. It was `("layernorm", "layernorm_linear")`
 #: written out, which covered two of the seven families that normalise: `adaln` computes the
 #: statistics for the DiT, `fused_ln_mask` (removed in v2.2.0) was layernorm_fwd with a row
@@ -48,8 +51,15 @@ KERNELS = PKG / "kernels"
 #: neither is a path production takes.
 def _dirs() -> tuple[str, ...]:
     """Every family owning a registry kernel whose name carries the `layernorm` role."""
-    return tuple(sorted({r["file"].split("kernels/")[1].split("/")[0]
-                         for r in registry_rows() if "layernorm" in r["kernel"]}))
+    return tuple(
+        sorted(
+            {
+                r["file"].split("kernels/")[1].split("/")[0]
+                for r in registry_rows()
+                if "layernorm" in r["kernel"]
+            }
+        )
+    )
 
 
 DIRS = _dirs()
@@ -66,69 +76,89 @@ NARROW = re.compile(r"\.to\(\s*torch\.bfloat16\s*\)|\.bfloat16\(\)")
 #: that file learned to read their width from a tensor. A key that a reformat invalidates is a key
 #: that gets bulk-updated without anyone rereading the judgement.
 NOT_A_NORMALISATION = {
-    ("pair_weighted_averaging/triton/main.py",
-     "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),"):
-        "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",
-    ("trimul_inproj/cuda/h100_b7.py",
-     'self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)'):
-        "Mask storage for the H100 projection path, not a normalized activation.",
-    ("trimul_inproj/cuda/h100_uni_wide_inference.py",
-     "mask.to(torch.bfloat16).contiguous(), outgoing)"):
-        "The [L, L] pair mask handed to the one-direction wide inference kernels, not a normalized activation.",
-    ("trimul_inproj/cuda/h100_wide_training.py",
-     "return mask.reshape(n, n).to(torch.bfloat16).contiguous()"):
-        "The [L, L] pair mask for the wide training kernels, not a normalized activation.",
-    ("trimul_inproj/cuda/h100_single.py",
-     "self.mask = mask.reshape(n, n).bfloat16().contiguous()"):
-        "Mask storage for the H100 projection path, not a normalized activation.",
-    ("trimul_inproj/cuda/h100_single_b7.py",
-     'self.mask = d["mask"].bfloat16().reshape(-1)'):
-        "Mask storage for the H100 projection path, not a normalized activation.",
-    ("adaln/triton/inference.py",
-     "sb = torch.matmul(cond_aff.to(torch.bfloat16), weight_cat.t().to(torch.bfloat16))"):
-        "GEMM operands: the conditioning matmul that PRODUCES scale and bias, cast the way every "
-        "other GEMM in the package casts its operands. The normalisation it feeds is fp32.",
-    ("adaln/triton/training.py",
-     "return torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16)).float()"):
-        "the same matmul on the training path, and it widens the result back with .float() on the "
-        "same line.",
-    ("mpnn_edge_tail/triton/main.py",
-     "grad_hidden_bias.to(torch.bfloat16).to(hidden_bias_dtype),"):
-        "autocast's own boundary: Linear rounds a BIAS GRADIENT to bf16 before the fp32 parameter "
-        "gradient, and this reproduces it deliberately. Not an activation, and not an input.",
-    ("mpnn_edge_tail/triton/main.py",
-     "grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),"):
-        "the second of that pair, for the output bias.",
-    ("trimul_inproj/cuda/sm80.py",
-     "w1 = (0.5 * w_rows).to(torch.bfloat16).view(nstep, 64, 16, 8).transpose(1, 2).contiguous()   # [block][16 B k-granule][64 rows][8]"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "wo_k3 = (0.5 * f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "wg_k3 = (0.5 * f(wg) * f(gi)[None, :]).to(torch.bfloat16).contiguous()"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "wo_b1 = (f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "wg_b1 = (f(wg) * f(gi)[None, :]).to(torch.bfloat16)"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "pk.update(wdx=torch.cat([w_rows.to(torch.bfloat16), wg.detach().to(torch.bfloat16)], 0).contiguous(),   # [K1 rows ; W_og]"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "wo_b1=wo_b1, wg_b1=wg.detach().to(torch.bfloat16).contiguous(),   # B1's gate runs on the saved x_n: raw W_og"):
-        "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
-    ("trimul_inproj/cuda/sm80.py",
-     "dyf = dy.reshape(T, C).to(torch.bfloat16).contiguous()"):
-        "The incoming output gradient as the bf16 operand of the backward GEMMs; a gradient, not a normalisation's input.",
-    ("transition/cuda/fused_fwd_sm80.py",
-     "_ext().pack(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), g, b, idx16, idx32, out16, gb)"):
-        "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine g / b stay fp32.",
-    ("transition/cuda/fused_sm80.py",
-     "_pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)"):
-        "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine gf / bf stay fp32.",
+    (
+        "pair_weighted_averaging/triton/main.py",
+        "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),",
+    ): "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",
+    (
+        "trimul_inproj/cuda/h100_b7.py",
+        'self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)',
+    ): "Mask storage for the H100 projection path, not a normalized activation.",
+    (
+        "trimul_inproj/cuda/h100_uni_wide_inference.py",
+        "mask.to(torch.bfloat16).contiguous(), outgoing)",
+    ): "The [L, L] pair mask handed to the one-direction wide inference kernels, not a normalized activation.",
+    (
+        "trimul_inproj/cuda/h100_wide_training.py",
+        "return mask.reshape(n, n).to(torch.bfloat16).contiguous()",
+    ): "The [L, L] pair mask for the wide training kernels, not a normalized activation.",
+    (
+        "trimul_inproj/cuda/h100_single.py",
+        "self.mask = mask.reshape(n, n).bfloat16().contiguous()",
+    ): "Mask storage for the H100 projection path, not a normalized activation.",
+    (
+        "trimul_inproj/cuda/h100_single_b7.py",
+        'self.mask = d["mask"].bfloat16().reshape(-1)',
+    ): "Mask storage for the H100 projection path, not a normalized activation.",
+    (
+        "adaln/triton/inference.py",
+        "sb = torch.matmul(cond_aff.to(torch.bfloat16), weight_cat.t().to(torch.bfloat16))",
+    ): "GEMM operands: the conditioning matmul that PRODUCES scale and bias, cast the way every "
+    "other GEMM in the package casts its operands. The normalisation it feeds is fp32.",
+    (
+        "adaln/triton/training.py",
+        "return torch.matmul(a.to(torch.bfloat16), b.to(torch.bfloat16)).float()",
+    ): "the same matmul on the training path, and it widens the result back with .float() on the "
+    "same line.",
+    (
+        "mpnn_edge_tail/triton/main.py",
+        "grad_hidden_bias.to(torch.bfloat16).to(hidden_bias_dtype),",
+    ): "autocast's own boundary: Linear rounds a BIAS GRADIENT to bf16 before the fp32 parameter "
+    "gradient, and this reproduces it deliberately. Not an activation, and not an input.",
+    (
+        "mpnn_edge_tail/triton/main.py",
+        "grad_output_bias.to(torch.bfloat16).to(output_bias_dtype),",
+    ): "the second of that pair, for the output bias.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "w1 = (0.5 * w_rows).to(torch.bfloat16).view(nstep, 64, 16, 8).transpose(1, 2).contiguous()   # [block][16 B k-granule][64 rows][8]",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "wo_k3 = (0.5 * f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "wg_k3 = (0.5 * f(wg) * f(gi)[None, :]).to(torch.bfloat16).contiguous()",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "wo_b1 = (f(wo) * f(go)[None, :]).to(torch.bfloat16).contiguous()",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "wg_b1 = (f(wg) * f(gi)[None, :]).to(torch.bfloat16)",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "pk.update(wdx=torch.cat([w_rows.to(torch.bfloat16), wg.detach().to(torch.bfloat16)], 0).contiguous(),   # [K1 rows ; W_og]",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "wo_b1=wo_b1, wg_b1=wg.detach().to(torch.bfloat16).contiguous(),   # B1's gate runs on the saved x_n: raw W_og",
+    ): "A GEMM weight operand of the sm_80 TriMul pack (the LayerNorm affine folded into it), rounded to bf16 per call like every other GEMM weight in the package; a weight, not a normalisation's input.",
+    (
+        "trimul_inproj/cuda/sm80.py",
+        "dyf = dy.reshape(T, C).to(torch.bfloat16).contiguous()",
+    ): "The incoming output gradient as the bf16 operand of the backward GEMMs; a gradient, not a normalisation's input.",
+    (
+        "transition/cuda/fused_fwd_sm80.py",
+        "_ext().pack(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), g, b, idx16, idx32, out16, gb)",
+    ): "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine g / b stay fp32.",
+    (
+        "transition/cuda/fused_sm80.py",
+        "_pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)",
+    ): "The three GEMM weight operands of the sm_80 Transition pack (an fp32 master parameter cast for the bf16 kernel, outside autograd); the LayerNorm affine gf / bf stay fp32.",
 }
 
 #: A driver naming a fixed precision. `BF16` is NOT one: it is the name
@@ -161,8 +191,10 @@ def test_no_layernorm_driver_builds_a_bf16_activation() -> None:
                 continue
             if PINNED.search(line):
                 bad.append(f"{name}:{i}: {stripped}")
-    assert not bad, ("a layernorm driver naming bf16 -- it would tune the kernel at a precision "
-                     "registry.csv does not declare:\n  " + "\n  ".join(bad))
+    assert not bad, (
+        "a layernorm driver naming bf16 -- it would tune the kernel at a precision "
+        "registry.csv does not declare:\n  " + "\n  ".join(bad)
+    )
 
 
 def test_no_layernorm_kernel_narrows_an_activation_to_bf16() -> None:
@@ -177,9 +209,13 @@ def test_no_layernorm_kernel_narrows_an_activation_to_bf16() -> None:
                 stripped = line.strip()
                 if stripped.startswith("#"):
                     continue
-                if NARROW.search(line) and (str(f.relative_to(KERNELS)), stripped) not in NOT_A_NORMALISATION:
+                if (
+                    NARROW.search(line)
+                    and (str(f.relative_to(KERNELS)), stripped)
+                    not in NOT_A_NORMALISATION
+                ):
                     bad.append(f"{f.relative_to(KERNELS)}:{i}: {stripped}")
-    assert not bad, ("a layernorm kernel narrowing to bf16:\n  " + "\n  ".join(bad))
+    assert not bad, "a layernorm kernel narrowing to bf16:\n  " + "\n  ".join(bad)
 
 
 def test_no_layernorm_kernel_saves_a_narrowed_activation() -> None:
@@ -200,10 +236,17 @@ def test_no_layernorm_kernel_saves_a_narrowed_activation() -> None:
                 continue
             tree = ast.parse(f.read_text())
             for node in ast.walk(tree):
-                if not (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                        and node.func.attr == "save_for_backward"):
+                if not (
+                    isinstance(node, ast.Call)
+                    and isinstance(node.func, ast.Attribute)
+                    and node.func.attr == "save_for_backward"
+                ):
                     continue
-                bad.extend(f"{f.relative_to(KERNELS)}:{node.lineno}: {ast.unparse(arg)}"
-                           for arg in node.args if NARROW.search(ast.unparse(arg)))
-    assert not bad, ("a narrowed activation saved for a layernorm backward:\n  "
-                     + "\n  ".join(bad))
+                bad.extend(
+                    f"{f.relative_to(KERNELS)}:{node.lineno}: {ast.unparse(arg)}"
+                    for arg in node.args
+                    if NARROW.search(ast.unparse(arg))
+                )
+    assert not bad, (
+        "a narrowed activation saved for a layernorm backward:\n  " + "\n  ".join(bad)
+    )

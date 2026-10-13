@@ -94,14 +94,31 @@ class FusedBiasOnlyDiT:
         self.dp = a0.ln_pair.weight.shape[0]
         self.fp32 = dtype is torch.float32
         dev = a0.to_value.weight.device
-        self._fast_prep = (settings.current().bias_only_dit_prep
-                           and torch.cuda.get_device_capability(dev) == (8, 0))
-        if (self._fast_prep and self.nb == 1 and (self.d, self.dc, self.dp) == (768, 384, 128)
-                and (self.h, self.da // self.h) in C.LAYOUTS
-                and tuple(blocks[0].transition.expand_a.weight.shape) == (1536, 768)):
-            wvg, wab, self.w1, self.b1, self.w2, self.b2, self.pw = C.pack_weights(blocks[0], self.h, self.da)
-            self.per = [dict(wvg=wvg, wab=wab, wo=a0.to_out.weight.detach().to(dtype).contiguous(),
-                             ws=blocks[0].transition.squeeze.weight.detach().to(dtype).contiguous())]
+        self._fast_prep = (
+            settings.current().bias_only_dit_prep
+            and torch.cuda.get_device_capability(dev) == (8, 0)
+        )
+        if (
+            self._fast_prep
+            and self.nb == 1
+            and (self.d, self.dc, self.dp) == (768, 384, 128)
+            and (self.h, self.da // self.h) in C.LAYOUTS
+            and tuple(blocks[0].transition.expand_a.weight.shape) == (1536, 768)
+        ):
+            wvg, wab, self.w1, self.b1, self.w2, self.b2, self.pw = C.pack_weights(
+                blocks[0], self.h, self.da
+            )
+            self.per = [
+                dict(
+                    wvg=wvg,
+                    wab=wab,
+                    wo=a0.to_out.weight.detach().to(dtype).contiguous(),
+                    ws=blocks[0]
+                    .transition.squeeze.weight.detach()
+                    .to(dtype)
+                    .contiguous(),
+                )
+            ]
             self.n_g1 = self.w1.shape[0]
             self.dtype = dtype
             self._buf = {}
@@ -170,7 +187,13 @@ class FusedBiasOnlyDiT:
             return
         self.wc = torch.cat([self.w1, self.w2], 0).contiguous()
         self.bc = torch.cat([self.b1, self.b2], 0).float().contiguous()
-        self.csc = torch.cat([self.w1.float().sum(1), self.w2.new_zeros(self.w2.shape[0], dtype=torch.float32)], 0).contiguous()
+        self.csc = torch.cat(
+            [
+                self.w1.float().sum(1),
+                self.w2.new_zeros(self.w2.shape[0], dtype=torch.float32),
+            ],
+            0,
+        ).contiguous()
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):

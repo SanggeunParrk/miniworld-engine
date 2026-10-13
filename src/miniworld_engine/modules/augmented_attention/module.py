@@ -27,14 +27,20 @@ def _bf16_sm90_enabled() -> bool:
     """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm90)."""
     from miniworld_engine import settings
 
-    return settings.current().augmented_attention_bf16_sm90 and settings.current().engine_backend != "triton"
+    return (
+        settings.current().augmented_attention_bf16_sm90
+        and settings.current().engine_backend != "triton"
+    )
 
 
 def _bf16_sm100_enabled() -> bool:
     """Whether a bf16 attention core on sm_100 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm100)."""
     from miniworld_engine import settings
 
-    return settings.current().augmented_attention_bf16_sm100 and settings.current().engine_backend != "triton"
+    return (
+        settings.current().augmented_attention_bf16_sm100
+        and settings.current().engine_backend != "triton"
+    )
 
 
 class AugmentedAttentionPairBias(nn.Module):
@@ -67,7 +73,9 @@ class AugmentedAttentionPairBias(nn.Module):
         n_head: int,
         *,
         use_qk_norm: bool = False,
-        kernel_type: Literal["compute_efficient", "memory_efficient"] = "compute_efficient",
+        kernel_type: Literal[
+            "compute_efficient", "memory_efficient"
+        ] = "compute_efficient",
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
@@ -83,7 +91,9 @@ class AugmentedAttentionPairBias(nn.Module):
         d_hidden = d_single // n_head
 
         self.ada_ln_in = AdaptiveLayerNorm(
-            d_single, d_cond, implementation=self.implementation,
+            d_single,
+            d_cond,
+            implementation=self.implementation,
         )
         self.to_query = Linear(d_single, d_hidden * n_head, bias=True)
         self.to_key = Linear(d_single, d_hidden * n_head, bias=False)
@@ -134,23 +144,35 @@ class AugmentedAttentionPairBias(nn.Module):
         kernel actually received (``tensor_dtype_of("Q")``), so casting here is what makes a bf16
         run and an fp32 run land in different cache buckets instead of overwriting each other.
         """
-        if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
-                and _bf16_sm90_enabled()):
+        if (
+            compute_dtype is torch.bfloat16
+            and self._backend == KernelBackend.TRITON
+            and _bf16_sm90_enabled()
+        ):
             from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
             if cuda_sm90.available(query, bias):
                 # Takes the fp32 (or bf16) tensors as they are: the bf16 cast happens in the kernels' one prep pass.
-                return cuda_sm90.augmented_attention_bf16_sm90(query, key, value, bias, mask)
-        if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.TRITON
-                and _bf16_sm100_enabled()):
+                return cuda_sm90.augmented_attention_bf16_sm90(
+                    query, key, value, bias, mask
+                )
+        if (
+            compute_dtype is torch.bfloat16
+            and self._backend == KernelBackend.TRITON
+            and _bf16_sm100_enabled()
+        ):
             from miniworld_engine.kernels.augmented_attention.cuda import (
                 sm100 as cuda_sm100,
             )
 
             if cuda_sm100.available(query, bias, mask):
-                return cuda_sm100.augmented_attention_bf16_sm100(query, key, value, bias)
+                return cuda_sm100.augmented_attention_bf16_sm100(
+                    query, key, value, bias
+                )
         if compute_dtype is not None:
-            query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
+            query, key, value, bias = (
+                t.to(compute_dtype) for t in (query, key, value, bias)
+            )
 
         if self._backend == KernelBackend.PYTORCH:
             query = query * query.shape[-1] ** -0.5
@@ -180,7 +202,11 @@ class AugmentedAttentionPairBias(nn.Module):
 
         raise InvalidImplementationError(self.implementation)
 
-    def cache_pair_bias(self, pair: Float[torch.Tensor, "B L L d_pair"], mask: Bool[torch.Tensor, "B L"] | None = None) -> bool:
+    def cache_pair_bias(
+        self,
+        pair: Float[torch.Tensor, "B L L d_pair"],
+        mask: Bool[torch.Tensor, "B L"] | None = None,
+    ) -> bool:
         """Keep the pair bias of ``pair`` / ``mask`` for the no-grad calls that follow with the same tensors (A100 hand-CUDA path, atom width: the bias is a third of
         an inference call, and a sampling loop recomputes it every step). Opt-in and explicit: call it again whenever ``pair`` / ``mask`` / the weights change (a CUDA graph
         that captured a call reads the module's buffer, which this call refreshes in place); an in-place change seen by PyTorch makes the next call recompute instead.
@@ -206,10 +232,16 @@ class AugmentedAttentionPairBias(nn.Module):
         A caller that composes the update some other way (a magnitude-preserving sum, a released
         checkpoint's own residual) takes :meth:`delta`."""
         if self._backend == KernelBackend.ANTHROPIC:
-            return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
-        if _sm80.serves(self, single, pair, mask, compute_dtype, cond=cond):         # A100: hand CUDA from the AdaLN output to the result, the residual inside the last pass
+            return single + self.delta(
+                single, cond, pair, mask, compute_dtype=compute_dtype
+            )
+        if _sm80.serves(
+            self, single, pair, mask, compute_dtype, cond=cond
+        ):  # A100: hand CUDA from the AdaLN output to the result, the residual inside the last pass
             return _sm80.forward(self, single, cond, pair, mask)
-        return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
+        return single + self.delta(
+            single, cond, pair, mask, compute_dtype=compute_dtype
+        )
 
     @typecheck
     def delta(
@@ -238,8 +270,11 @@ class AugmentedAttentionPairBias(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 augmented_attention,
             )
+
             return augmented_attention(self, single, cond, pair, mask, compute_dtype)
-        if _sm80.serves(self, single, pair, mask, compute_dtype, cond=cond):          # A100: hand CUDA from the AdaLN output to the update
+        if _sm80.serves(
+            self, single, pair, mask, compute_dtype, cond=cond
+        ):  # A100: hand CUDA from the AdaLN output to the update
             return _sm80.delta(self, single, cond, pair, mask)
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)

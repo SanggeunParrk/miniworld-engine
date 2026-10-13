@@ -20,14 +20,14 @@ import torch.nn.functional as F
 
 
 def conditioned_transition(
-    x: torch.Tensor,                     # (..., d_hidden) — already (adaptive-)normalized
-    cond: torch.Tensor,                  # (..., d_cond)
+    x: torch.Tensor,  # (..., d_hidden) — already (adaptive-)normalized
+    cond: torch.Tensor,  # (..., d_cond)
     *,
-    expand_a_weight: torch.Tensor,       # (n*d_hidden, d_hidden)
-    expand_b_weight: torch.Tensor,       # (n*d_hidden, d_hidden)
-    squeeze_weight: torch.Tensor,        # (d_hidden, n*d_hidden)
-    to_scale_weight: torch.Tensor,       # (d_hidden, d_cond)
-    to_scale_bias: torch.Tensor,         # (d_hidden,)
+    expand_a_weight: torch.Tensor,  # (n*d_hidden, d_hidden)
+    expand_b_weight: torch.Tensor,  # (n*d_hidden, d_hidden)
+    squeeze_weight: torch.Tensor,  # (d_hidden, n*d_hidden)
+    to_scale_weight: torch.Tensor,  # (d_hidden, d_cond)
+    to_scale_bias: torch.Tensor,  # (d_hidden,)
     n: int,
 ) -> torch.Tensor:
     """Conditioned SwiGLU tail — whole-op call. Returns ``(..., d_hidden)``.
@@ -39,9 +39,18 @@ def conditioned_transition(
 
     if cuda_native.enabled(x):
         from miniworld_engine.integrations.a100_families import conditioned_tail
+
         if n * x.shape[-1] != expand_a_weight.shape[0]:
             raise ValueError("expansion ratio does not match expand_a_weight")
-        return conditioned_tail(x, cond, expand_a_weight, expand_b_weight, squeeze_weight, to_scale_weight, to_scale_bias)
+        return conditioned_tail(
+            x,
+            cond,
+            expand_a_weight,
+            expand_b_weight,
+            squeeze_weight,
+            to_scale_weight,
+            to_scale_bias,
+        )
 
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 

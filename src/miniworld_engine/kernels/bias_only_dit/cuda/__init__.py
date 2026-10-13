@@ -66,10 +66,18 @@ def _pack_ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="bias_only_dit_pack_sm80", sources=[str(_dir / "pack_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--fmad=false",
-                           "-gencode=arch=compute_80,code=sm_80"],
-        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+        name="bias_only_dit_pack_sm80",
+        sources=[str(_dir / "pack_sm80.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "--fmad=false",
+            "-gencode=arch=compute_80,code=sm_80",
+        ],
+        extra_cflags=["-O3", "-std=c++17"],
+        verbose=False,
+    )
 
 
 def pack_weights(block, heads, attention_width):

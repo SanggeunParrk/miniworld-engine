@@ -134,9 +134,12 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         0
     ] != 2 * d:
         return False
-    if cap == (
-        8,
-        0,
+    if (
+        cap
+        == (
+            8,
+            0,
+        )
     ):  # A100: bf16 operands, 16 x 48, no QK-norm (the sm_80 core and the rows of this block)
         from miniworld_engine.kernels.augmented_attention.cuda import sm80
 
@@ -226,15 +229,23 @@ def _pack(P, qk, dev, at):
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    native_pack = (settings.current().token_dit_sm80_native_train_pack
-                   and not qk and at is BF and torch.cuda.get_device_capability(dev) == (8, 0)
-                   and tuple(P["attention.to_out.weight"].shape) == (768, 768)
-                   and tuple(P["attention.to_bias.weight"].shape) == (16, 128))
+    native_pack = (
+        settings.current().token_dit_sm80_native_train_pack
+        and not qk
+        and at is BF
+        and torch.cuda.get_device_capability(dev) == (8, 0)
+        and tuple(P["attention.to_out.weight"].shape) == (768, 768)
+        and tuple(P["attention.to_bias.weight"].shape) == (16, 128)
+    )
     if native_pack:
         if settings.current().token_dit_sm80_alias_train_pack:
-            from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_alias_sm80 as pack_kernel
+            from miniworld_engine.kernels.conditioned_transition.cuda import (
+                token_train_pack_alias_sm80 as pack_kernel,
+            )
         else:
-            from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_sm80 as pack_kernel
+            from miniworld_engine.kernels.conditioned_transition.cuda import (
+                token_train_pack_sm80 as pack_kernel,
+            )
         W = pack_kernel.result([P[n] for n in _names_for(False)])
         if slot is not None:
             _capture.prune(_PACKS)
@@ -318,8 +329,10 @@ def _attention_backend(device):
     sm_100a one on B200 (imported only there: it needs the Blackwell driver)."""
     if torch.cuda.get_device_capability(device) == (8, 0):
         from miniworld_engine.kernels.augmented_attention.cuda import sm80
+
         return sm80
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
     return sm100
 
 

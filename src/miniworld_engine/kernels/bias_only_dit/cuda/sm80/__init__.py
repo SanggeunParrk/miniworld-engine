@@ -4,6 +4,7 @@ The inference runner of ``cuda/runner.py`` is cuBLAS and the family's CUDA row k
 tcgen05 ``pv_gate_inf`` (``PvGateCore``), here it is :class:`PvGate`: the same call, the same layouts, bf16 operands with fp32 accumulation, the gate and one rounding to bf16 in the epilogue.
 Built on first use (``load_extension``), never at import.
 """
+
 from __future__ import annotations
 
 import functools
@@ -27,8 +28,15 @@ def _ext():
     return load_extension(
         name="bias_only_dit_sm80",
         sources=[str(_dir / "ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}"],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
 
 
@@ -51,14 +59,34 @@ class PvGate:
     def __init__(self, nh: int, dh: int):
         assert dh in HEAD_WIDTHS, dh
         self.nh, self.dh = nh, dh
-        self.nsm = torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+        self.nsm = torch.cuda.get_device_properties(
+            torch.cuda.current_device()
+        ).multi_processor_count
 
-    def __call__(self, v: torch.Tensor, P: torch.Tensor, out: torch.Tensor, S: int, g: torch.Tensor | None = None, stages: int | None = None, sg: int | None = None) -> torch.Tensor:
+    def __call__(
+        self,
+        v: torch.Tensor,
+        P: torch.Tensor,
+        out: torch.Tensor,
+        S: int,
+        g: torch.Tensor | None = None,
+        stages: int | None = None,
+        sg: int | None = None,
+    ) -> torch.Tensor:
         """v [S L, W] view, P [nh L, L] contiguous, out [S L, W] view, g [S L, W] view or None; all bf16 (v, g, out: any row stride, unit column stride).
         ``stages`` (2 or 3; default :data:`STAGES`) is the depth of the cp.async ring, ``sg`` (1 .. 4; default :func:`pick_group`) the samples a CTA takes."""
         L = P.shape[1]
-        _ext().pv_gate(v, P, out, g if g is not None else v.new_empty(0), S, self.nh, self.dh, STAGES if stages is None else stages,
-                       pick_group(S, L, self.nh, self.nsm) if sg is None else sg)
+        _ext().pv_gate(
+            v,
+            P,
+            out,
+            g if g is not None else v.new_empty(0),
+            S,
+            self.nh,
+            self.dh,
+            STAGES if stages is None else stages,
+            pick_group(S, L, self.nh, self.nsm) if sg is None else sg,
+        )
         return out
 
 
@@ -74,28 +102,85 @@ class Dpb:
         assert dh in HEAD_WIDTHS, dh
         self.nh, self.dh = nh, dh
 
-    def __call__(self, do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, A: int, cfg: int | None = None) -> torch.Tensor:
-        _ext().dpb(do, v, P, dd, out, A, self.nh, self.dh, (DPB_CFG or 0) if cfg is None else cfg)
+    def __call__(
+        self,
+        do: torch.Tensor,
+        v: torch.Tensor,
+        P: torch.Tensor,
+        dd: torch.Tensor,
+        out: torch.Tensor,
+        A: int,
+        cfg: int | None = None,
+    ) -> torch.Tensor:
+        _ext().dpb(
+            do,
+            v,
+            P,
+            dd,
+            out,
+            A,
+            self.nh,
+            self.dh,
+            (DPB_CFG or 0) if cfg is None else cfg,
+        )
         return out
 
 
 # ------------------------------------------------------------------------------------------------- head planes (the bias-only ATTENTION family, ``kernels/bias_only_attention``)
-def pv_planes(v: torch.Tensor, P: torch.Tensor, out: torch.Tensor, samples: int, planes: int, dh: int, stages: int | None = None, sg: int | None = None) -> torch.Tensor:
+def pv_planes(
+    v: torch.Tensor,
+    P: torch.Tensor,
+    out: torch.Tensor,
+    samples: int,
+    planes: int,
+    dh: int,
+    stages: int | None = None,
+    sg: int | None = None,
+) -> torch.Tensor:
     """``out = P v`` per head plane for ``samples`` problems that share the plane's ``P``: ``v`` / ``out`` bf16 ``[planes samples L, dh]`` contiguous (plane h = ``[samples L][dh]``, one after
     the other: the bias-only attention's ``[B, H, L (t), L (n), D]``), ``P`` bf16 ``[planes L, L]``."""
     L = P.shape[1]
     nsm = torch.cuda.get_device_properties(v.device).multi_processor_count
-    _ext().pv_planes(v, P, out, samples, planes, dh, STAGES if stages is None else stages, pick_group(samples, L, planes, nsm) if sg is None else sg)
+    _ext().pv_planes(
+        v,
+        P,
+        out,
+        samples,
+        planes,
+        dh,
+        STAGES if stages is None else stages,
+        pick_group(samples, L, planes, nsm) if sg is None else sg,
+    )
     return out
 
 
-def delta_planes(do: torch.Tensor, o: torch.Tensor, dd: torch.Tensor, samples: int, length: int, planes: int, dh: int) -> torch.Tensor:
+def delta_planes(
+    do: torch.Tensor,
+    o: torch.Tensor,
+    dd: torch.Tensor,
+    samples: int,
+    length: int,
+    planes: int,
+    dh: int,
+) -> torch.Tensor:
     """``dd[a, h, i] = sum_d do o`` over bf16 ``[planes samples L, dh]`` operands (``dd`` fp32 ``[samples, planes, L]``): the backward's row term."""
     _ext().delta_planes(do, o, dd, samples, length, planes, dh)
     return dd
 
 
-def dpb_planes(do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, samples: int, planes: int, dh: int, cfg: int | None = None) -> torch.Tensor:
+def dpb_planes(
+    do: torch.Tensor,
+    v: torch.Tensor,
+    P: torch.Tensor,
+    dd: torch.Tensor,
+    out: torch.Tensor,
+    samples: int,
+    planes: int,
+    dh: int,
+    cfg: int | None = None,
+) -> torch.Tensor:
     """``out [planes L, L] = P (sum_a do v^T - D)`` per head plane, ``D[h, i] = sum_a dd[a, h, i]``: ``do`` / ``v`` bf16 ``[planes samples L, dh]``, ``P`` / ``out`` bf16 ``[planes L, L]``."""
-    _ext().dpb_planes(do, v, P, dd, out, samples, planes, dh, (DPB_CFG or 0) if cfg is None else cfg)
+    _ext().dpb_planes(
+        do, v, P, dd, out, samples, planes, dh, (DPB_CFG or 0) if cfg is None else cfg
+    )
     return out

@@ -12,7 +12,10 @@ from settings_helpers import override_setting
 from miniworld_engine.modules import Transition
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -22,8 +25,23 @@ def ampere():
 
 
 #: (d_hidden, n) of the registry's Transition rows (D = 128 / n = 4 is the fused_sm80 kernel when the rows are a multiple of 256, else the wide one)
-SHAPES = [(64, 2), (64, 4), (128, 2), (128, 4), (256, 2), (256, 4), (384, 2), (384, 4), (768, 2)]
-STREAMS = {"pair": lambda d: (1, 24, 24, d), "single": lambda d: (1, 130, d), "msa": lambda d: (1, 8, 40, d), "ragged": lambda d: (3, 77, d)}
+SHAPES = [
+    (64, 2),
+    (64, 4),
+    (128, 2),
+    (128, 4),
+    (256, 2),
+    (256, 4),
+    (384, 2),
+    (384, 4),
+    (768, 2),
+]
+STREAMS = {
+    "pair": lambda d: (1, 24, 24, d),
+    "single": lambda d: (1, 130, d),
+    "msa": lambda d: (1, 8, 40, d),
+    "ragged": lambda d: (3, 77, d),
+}
 
 
 def _rel(a, b):
@@ -36,20 +54,29 @@ def _modules(d, n, seed=0):
     base = Transition(d, n=n, implementation=ImplementationType.PYTORCH)
     with torch.no_grad():
         for p in base.parameters():
-            if p.ndim == 2:                       # the zero-initialised squeeze would make four of the six gradients exactly zero
+            if (
+                p.ndim == 2
+            ):  # the zero-initialised squeeze would make four of the six gradients exactly zero
                 p.normal_(std=p.shape[1] ** -0.5)
             else:
                 p.add_(torch.randn_like(p) * 0.1)
     ours = Transition(d, n=n, implementation=ImplementationType.MINIWORLD)
     ours.load_state_dict(base.state_dict())
-    return copy.deepcopy(base).cuda().float(), ours.cuda().to(torch.bfloat16), base.cuda().to(torch.bfloat16)
+    return (
+        copy.deepcopy(base).cuda().float(),
+        ours.cuda().to(torch.bfloat16),
+        base.cuda().to(torch.bfloat16),
+    )
 
 
 def _run(mod, x, dy):
     xx = x.detach().clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
-    return y.detach().float(), {"dx": xx.grad.float(), **{k: p.grad.float() for k, p in mod.named_parameters()}}
+    return y.detach().float(), {
+        "dx": xx.grad.float(),
+        **{k: p.grad.float() for k, p in mod.named_parameters()},
+    }
 
 
 @pytest.mark.parametrize("stream", sorted(STREAMS))
@@ -63,7 +90,11 @@ def test_transition_matches_fp32_forward_and_backward(d, n, stream):
     yw, gw = _run(ref, x, dy)
     yg, gg = _run(ours, x.bfloat16(), dy.bfloat16())
     yb, gb = _run(base, x.bfloat16(), dy.bfloat16())
-    assert _rel(yg, yw) <= 1.1 * _rel(yb, yw) + 1e-4, ("out", _rel(yg, yw), _rel(yb, yw))
+    assert _rel(yg, yw) <= 1.1 * _rel(yb, yw) + 1e-4, (
+        "out",
+        _rel(yg, yw),
+        _rel(yb, yw),
+    )
     for name in gw:
         e, e0 = _rel(gg[name], gw[name]), _rel(gb[name], gw[name])
         assert e <= 1.1 * e0 + 1e-4, (name, e, e0)
@@ -86,7 +117,10 @@ def test_d256_protocol_weight_gradients(length, seed, monkeypatch):
         got, grads = _run(ours, x.bfloat16(), dy.bfloat16())
         assert _rel(got, want) <= 1.1 * _rel(floor, want) + 1e-4
         for name in wanted_grads:
-            error, floor_error = _rel(grads[name], wanted_grads[name]), _rel(floor_grads[name], wanted_grads[name])
+            error, floor_error = (
+                _rel(grads[name], wanted_grads[name]),
+                _rel(floor_grads[name], wanted_grads[name]),
+            )
             assert error <= 1.1 * floor_error + 1e-4, (name, error, floor_error)
     finally:
         torch.backends.cuda.matmul.allow_tf32 = previous
@@ -103,7 +137,7 @@ def test_transition_inference_matches_and_equals_the_training_forward(d, n):
     assert got.shape == x.shape
     assert _rel(got, want) <= 1.1 * _rel(b, want) + 1e-4
     train = ours(x.bfloat16().requires_grad_())
-    assert torch.equal(got, train.detach())                                      # the no-grad forward skips only the saves
+    assert torch.equal(got, train.detach())  # the no-grad forward skips only the saves
     assert torch.equal(got, again)
 
 
@@ -122,10 +156,10 @@ def test_frozen_transition_input_gradient(d, compiled):
     fn = torch.compile(ours, fullgraph=True) if compiled else ours
     try:
         y, yr = fn(x), reference(xr)
-        dx, = torch.autograd.grad(y, x, dy)
-        dxr, = torch.autograd.grad(yr, xr, dy.float())
-        assert _rel(y, yr) < .015
-        assert _rel(dx, dxr) < .02
+        (dx,) = torch.autograd.grad(y, x, dy)
+        (dxr,) = torch.autograd.grad(yr, xr, dy.float())
+        assert _rel(y, yr) < 0.015
+        assert _rel(dx, dxr) < 0.02
         assert all(p.grad is None for p in ours.parameters())
         ours.squeeze.weight.requires_grad_(True)
         fn(x).backward(dy)
@@ -140,12 +174,25 @@ def test_the_module_dispatches_to_the_cuda_paths(monkeypatch):
     from miniworld_engine.kernels.transition.cuda import fused_sm80, fused_wide_sm80
 
     calls = []
-    for mod, name in ((fused_sm80, "transition_fused_sm80"), (fused_wide_sm80, "transition_wide_sm80")):
+    for mod, name in (
+        (fused_sm80, "transition_fused_sm80"),
+        (fused_wide_sm80, "transition_wide_sm80"),
+    ):
         original = getattr(mod, name)
-        monkeypatch.setattr(mod, name, lambda *a, _o=original, _n=name, **k: (calls.append(_n), _o(*a, **k))[1])
+        monkeypatch.setattr(
+            mod,
+            name,
+            lambda *a, _o=original, _n=name, **k: (calls.append(_n), _o(*a, **k))[1],
+        )
     with torch.no_grad():
-        for (d, n), rows, expect in (((128, 4), 9216, "transition_fused_sm80"), ((128, 4), 1024, "transition_wide_sm80"), ((128, 4), 9000, "transition_wide_sm80"),
-                                     ((256, 4), 1024, "transition_wide_sm80"), ((64, 2), 130, "transition_wide_sm80"), ((768, 2), 130, "transition_wide_sm80")):
+        for (d, n), rows, expect in (
+            ((128, 4), 9216, "transition_fused_sm80"),
+            ((128, 4), 1024, "transition_wide_sm80"),
+            ((128, 4), 9000, "transition_wide_sm80"),
+            ((256, 4), 1024, "transition_wide_sm80"),
+            ((64, 2), 130, "transition_wide_sm80"),
+            ((768, 2), 130, "transition_wide_sm80"),
+        ):
             _, ours, _ = _modules(d, n)
             calls.clear()
             ours(torch.randn(rows, d, device="cuda", dtype=torch.bfloat16))
@@ -159,10 +206,16 @@ def test_the_switches_and_the_gates(monkeypatch):
     ws = torch.randn(256, 1024, device="cuda", dtype=torch.bfloat16)
     x = torch.randn(1000, 256, device="cuda", dtype=torch.bfloat16)
     assert fw.supported(x, wa, ws)
-    assert not fw.supported(x.float(), wa, ws)                                                                      # dtype
-    assert not fw.supported(x.cpu(), wa.cpu(), ws.cpu())                                                            # device
-    assert not fw.supported(torch.randn(10, 200, device="cuda", dtype=torch.bfloat16), wa[:, :200].contiguous(), ws[:200])  # width without a build
-    assert not fw.supported(x, wa[:1000].contiguous(), ws[:, :1000].contiguous())                                      # hidden not a multiple of 64
+    assert not fw.supported(x.float(), wa, ws)  # dtype
+    assert not fw.supported(x.cpu(), wa.cpu(), ws.cpu())  # device
+    assert not fw.supported(
+        torch.randn(10, 200, device="cuda", dtype=torch.bfloat16),
+        wa[:, :200].contiguous(),
+        ws[:200],
+    )  # width without a build
+    assert not fw.supported(
+        x, wa[:1000].contiguous(), ws[:, :1000].contiguous()
+    )  # hidden not a multiple of 64
     assert not fw.supported(x[:0], wa, ws)
     for name in ("transition_wide_sm80", "transition_fused_sm80"):
         override_setting(monkeypatch, name, "0")
@@ -229,7 +282,9 @@ def test_cuda_graph_capture_and_replay(d, n):
         y.backward(dy)
         return y, [xx.grad, *[p.grad for p in ours.parameters()]]
 
-    stream = torch.cuda.Stream()                                      # eager steps and the capture share one stream (the autograd nodes remember it)
+    stream = (
+        torch.cuda.Stream()
+    )  # eager steps and the capture share one stream (the autograd nodes remember it)
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
         step()
@@ -261,16 +316,19 @@ def test_swiglu_ffn_frozen_input_gradient():
 
     torch.manual_seed(23)
     x = torch.randn(137, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
-    wa, wb = (torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16) / 16 for _ in range(2))
+    wa, wb = (
+        torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16) / 16
+        for _ in range(2)
+    )
     ws = torch.randn(256, 1024, device="cuda", dtype=torch.bfloat16) / 32
     xr = x.detach().float().requires_grad_()
     dy = torch.randn_like(x)
     y = ops.swiglu_ffn(x, wa, wb, ws)
     reference = _ffn_ref(xr, wa.float(), wb.float(), ws.float())
-    dx, = torch.autograd.grad(y, x, dy)
-    dxr, = torch.autograd.grad(reference, xr, dy.float())
-    assert _rel(y, reference) < .015
-    assert _rel(dx, dxr) < .02
+    (dx,) = torch.autograd.grad(y, x, dy)
+    (dxr,) = torch.autograd.grad(reference, xr, dy.float())
+    assert _rel(y, reference) < 0.015
+    assert _rel(dx, dxr) < 0.02
 
 
 @pytest.mark.parametrize("shape", [(5, 77), (1, 20, 20), (3, 130)])
@@ -293,7 +351,11 @@ def test_swiglu_ffn_matches_fp32_forward_and_backward(d, h, shape):
     want = grads(torch.float32, _ffn_ref)
     base = grads(torch.bfloat16, _ffn_ref)
     got = grads(torch.bfloat16, ops.swiglu_ffn)
-    for e, e0 in zip((_rel(a, w) for a, w in zip(got, want, strict=True)), (_rel(a, w) for a, w in zip(base, want, strict=True)), strict=True):
+    for e, e0 in zip(
+        (_rel(a, w) for a, w in zip(got, want, strict=True)),
+        (_rel(a, w) for a, w in zip(base, want, strict=True)),
+        strict=True,
+    ):
         assert e <= 1.1 * e0 + 1e-4, (e, e0)
 
 
@@ -303,8 +365,13 @@ def test_swiglu_ffn_dispatch_switch_and_fallback(monkeypatch):
 
     calls = []
     original = fw.swiglu_ffn_sm80
-    monkeypatch.setattr(fw, "swiglu_ffn_sm80", lambda *a, **k: (calls.append(1), original(*a, **k))[1])
-    wa, wb = (torch.randn(256, 128, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(2))
+    monkeypatch.setattr(
+        fw, "swiglu_ffn_sm80", lambda *a, **k: (calls.append(1), original(*a, **k))[1]
+    )
+    wa, wb = (
+        torch.randn(256, 128, device="cuda", dtype=torch.bfloat16) * 0.1
+        for _ in range(2)
+    )
     ws = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16) * 0.1
     x = torch.randn(1, 300, 128, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
@@ -312,23 +379,35 @@ def test_swiglu_ffn_dispatch_switch_and_fallback(monkeypatch):
         assert calls == [1]
         override_setting(monkeypatch, "transition_fused_sm80", "0")
         want = ops.swiglu_ffn(x, wa, wb, ws)
-        assert calls == [1]                                                                                     # the switch hands the call to Triton
+        assert calls == [1]  # the switch hands the call to Triton
         assert _rel(got, want) < 6e-3
         override_setting(monkeypatch, "transition_fused_sm80", None)
-        assert _rel(ops.swiglu_ffn(x.float(), wa.float(), wb.float(), ws.float()), want.float()) < 1e-2      # fp32 operands: not this path
+        assert (
+            _rel(
+                ops.swiglu_ffn(x.float(), wa.float(), wb.float(), ws.float()),
+                want.float(),
+            )
+            < 1e-2
+        )  # fp32 operands: not this path
     assert calls == [1]
 
 
 def test_swiglu_ffn_compiled_and_graph_replay():
     from miniworld_engine import ops
 
-    wa, wb = (torch.randn(256, 128, device="cuda", dtype=torch.bfloat16) * 0.1 for _ in range(2))
+    wa, wb = (
+        torch.randn(256, 128, device="cuda", dtype=torch.bfloat16) * 0.1
+        for _ in range(2)
+    )
     ws = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16) * 0.1
     x = torch.randn(2, 300, 128, device="cuda", dtype=torch.bfloat16)
     torch._dynamo.reset()
     with torch.no_grad():
         want = ops.swiglu_ffn(x, wa, wb, ws)
-        assert torch.equal(torch.compile(lambda a: ops.swiglu_ffn(a, wa, wb, ws), fullgraph=True)(x), want)
+        assert torch.equal(
+            torch.compile(lambda a: ops.swiglu_ffn(a, wa, wb, ws), fullgraph=True)(x),
+            want,
+        )
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):

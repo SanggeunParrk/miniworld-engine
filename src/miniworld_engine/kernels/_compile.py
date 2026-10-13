@@ -162,7 +162,8 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=(), tags=()):
             raise ValueError(
                 f"compile_wrap='custom_op' needs a fake implementation for "
                 f"{getattr(fn, '__qualname__', fn.__name__)}; pass opaque(fake=...) or run with "
-                f"compile_wrap='disable'")
+                f"compile_wrap='disable'"
+            )
         qualname = f"miniworld_engine::{_op_name(fn, name)}"
         cached = _REGISTERED.get(qualname)
         if cached is not None:

@@ -38,12 +38,24 @@ def _ext():
     ensure_cuda_home()
     # settings.transition_wide_sm80_flags: extra nvcc flags for experiments (their own build; "-Xptxas -v" shows the registers / spills)
     extra = settings.current().transition_wide_sm80_flags.split()
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
         name=f"transition_wide_sm80{tag}",
         sources=[str(_dir / "transition_wide_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=bool(extra),
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=bool(extra),
     )
 
 
@@ -60,14 +72,21 @@ def _loads() -> bool:
         _ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"wide sm80 Transition unavailable, keeping the existing path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"wide sm80 Transition unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
 
 def switched_off() -> bool:
     """``settings.transition_wide_sm80=0`` or ``settings.transition_fused_sm80=0`` (the one switch of every A100 Transition path)."""
-    return not settings.current().transition_wide_sm80 or not settings.current().transition_fused_sm80
+    return (
+        not settings.current().transition_wide_sm80
+        or not settings.current().transition_fused_sm80
+    )
 
 
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
@@ -78,9 +97,16 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     ``settings.transition_fused_sm80=0`` turn it off."""
     if switched_off():
         return False
-    if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
+    if (
+        not x.is_cuda
+        or x.dtype is not torch.bfloat16
+        or wa.dtype not in _WEIGHT_DTYPES
+        or ws.dtype not in _WEIGHT_DTYPES
+    ):
         return False
-    if not _is_ampere(x.device.index if x.device.index is not None else torch.cuda.current_device()):
+    if not _is_ampere(
+        x.device.index if x.device.index is not None else torch.cuda.current_device()
+    ):
         return False
     d, h = x.shape[-1], wa.shape[0]
     if d not in WIDTHS or wa.shape != (h, d) or ws.shape != (d, h) or h % 64:
@@ -112,9 +138,9 @@ def _tiles(m: int, d: int, h: int) -> tuple[int, int]:
     """(dual-GEMM tile config, residual-GEMM tile config) of the extension for an M-row call (measured: docs page)."""
     dual = 0 if m > 4096 else 2
     if d <= 128:
-        res = 3             # 128 x 64 tile: the best at D <= 128
+        res = 3  # 128 x 64 tile: the best at D <= 128
     elif d == 256 and m < 32768:
-        res = 2             # 64 x 128: 256 CTAs of the 128-row tile are 1.2 waves of the 216 resident slots, 512 are 2.4
+        res = 2  # 64 x 128: 256 CTAs of the 128-row tile are 1.2 waves of the 216 resident slots, 512 are 2.4
     else:
         res = 0
     return dual, res
@@ -141,7 +167,9 @@ def _f32(t: torch.Tensor, cache: bool) -> torch.Tensor:
         return t.float().contiguous()
     key = (t.data_ptr(), t._version)
     # keyed on the parameter and scoped by ``_capture``; the parameter stays alive with its cast: a recycled data_ptr cannot alias it
-    return _capture.lookup(_affine, key, lambda: (t.float().contiguous(), t), limit=16)[0]
+    return _capture.lookup(_affine, key, lambda: (t.float().contiguous(), t), limit=16)[
+        0
+    ]
 
 
 #: Squeeze projections with the residual (the Transition) run the hand GEMM with the residual in its epilogue from HAND_SQUEEZE_MIN_ROWS rows on: with the lean pipelined
@@ -155,7 +183,9 @@ def _hand_squeeze(m: int, d: int, ln: bool) -> bool:
     return ln and m >= HAND_SQUEEZE_MIN_ROWS
 
 
-def _squeeze(ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool, res_cfg: int) -> torch.Tensor:
+def _squeeze(
+    ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool, res_cfg: int
+) -> torch.Tensor:
     """h Ws^T (+ x): the hand GEMM with the residual folded in where ``_hand_squeeze``, else cuBLAS and ``add_res``."""
     if _hand_squeeze(hid.shape[0], ws.shape[0], ln):
         return ext.gemm_res(hid, ws, x, res_cfg)
@@ -168,13 +198,27 @@ def _squeeze(ext, hid: torch.Tensor, ws: torch.Tensor, x: torch.Tensor, ln: bool
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, ln):
     """(out like x, xn [M, D] when ``save`` and ``ln`` else empty, stats [M, 2] f32 when ``save`` and ``ln`` else empty)."""
     keep = save and ln
-    return (torch.empty_like(x), x.new_empty(x.shape) if keep else x.new_empty((0,)),
-            torch.empty((x.shape[0] if keep else 0, 2), dtype=torch.float32, device=x.device))
+    return (
+        torch.empty_like(x),
+        x.new_empty(x.shape) if keep else x.new_empty((0,)),
+        torch.empty(
+            (x.shape[0] if keep else 0, 2), dtype=torch.float32, device=x.device
+        ),
+    )
 
 
 @opaque(fake=_fwd_launch_fake, name="transition_wide_fwd_sm80")
-def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-                eps: float, save: bool, ln: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def _fwd_launch(
+    x: torch.Tensor,
+    gamma: torch.Tensor,
+    beta: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    eps: float,
+    save: bool,
+    ln: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """x [M, D] -> out = x + Ws (silu(Wa xn) * (Wb xn)), xn = LN(x) (``ln``; the FFN has neither the LayerNorm nor the residual; gamma / beta are the module's affine
     parameters in any float dtype).  Training also returns xn and (mean, rstd)."""
     if _is_fake(x, wa):
@@ -185,7 +229,9 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
     # the weights are bf16 or fp32 (a master); the fused forward casts (and packs, cached by the parameters' version) itself, the other path casts here
     if fused_fwd_sm80.supports(d, wa.shape[0], m) and fused_fwd_sm80.loads():
         # D = 64 / 128: the whole forward in one kernel (a warp owns 32 rows for the whole hidden dimension)
-        out, xn, stats = fused_fwd_sm80.forward(x, gamma, beta, wa, wb, ws, eps, save, cache=not save, ln=ln)
+        out, xn, stats = fused_fwd_sm80.forward(
+            x, gamma, beta, wa, wb, ws, eps, save, cache=not save, ln=ln
+        )
         return out, xn if save and ln else x.new_empty((0,)), stats
     ext = _ext()
     wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
@@ -201,14 +247,29 @@ def _fwd_launch(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, wa: to
 def _bwd_launch_fake(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt):
     """(dx like x, dgamma, dbeta [D] in ``gdt`` (empty without ``ln``), dW = [dWa; dWb] [2H, D], dWs [D, H] in ``wdt``)."""
     d = x.shape[1]
-    return (torch.empty_like(x), torch.empty((d if ln else 0,), dtype=gdt, device=x.device), torch.empty((d if ln else 0,), dtype=gdt, device=x.device),
-            torch.empty((2 * wa.shape[0], d), dtype=wdt, device=x.device), torch.empty((d, wa.shape[0]), dtype=wdt, device=x.device))
+    return (
+        torch.empty_like(x),
+        torch.empty((d if ln else 0,), dtype=gdt, device=x.device),
+        torch.empty((d if ln else 0,), dtype=gdt, device=x.device),
+        torch.empty((2 * wa.shape[0], d), dtype=wdt, device=x.device),
+        torch.empty((d, wa.shape[0]), dtype=wdt, device=x.device),
+    )
 
 
 @opaque(fake=_bwd_launch_fake, name="transition_wide_bwd_sm80")
-def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torch.Tensor, gamma: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
-                ws: torch.Tensor, ln: bool, gdt: torch.dtype, wdt: torch.dtype,
-                ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+def _bwd_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    stats: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    ln: bool,
+    gdt: torch.dtype,
+    wdt: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dx, dgamma, dbeta, [dWa; dWb], dWs); dx carries the residual branch (``ln``); dgamma / dbeta come out in ``gdt``, the weight gradients in ``wdt`` (f32: the accumulators unrounded, for an fp32 master).  a, b are recomputed from xn (x for the FFN)."""
     if _is_fake(dy, x):
         return _bwd_launch_fake(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt)
@@ -218,29 +279,37 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torc
         gamma = _f32(gamma, False)
     if fused_bwd_sm80.supports(d, h, m) and fused_bwd_sm80.loads():
         # D = 64 / 128, whole 256-row tiles: PW (a, b, dh, SwiGLU backward, dW partials, dA | dB blocks) + X (d_xn, LayerNorm backward) + the partial sums
-        return fused_bwd_sm80.backward(dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt)
+        return fused_bwd_sm80.backward(
+            dy, x, xn, stats, gamma, wa, wb, ws, ln, gdt, wdt
+        )
     ext = _ext()
     a_in = xn if ln else x
     dual, _ = _tiles(m, d, h)
-    dh = torch.mm(dy, ws)                                       # [M, H]
-    dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)             # dA | dB [M, 2H], h [M, H]
+    dh = torch.mm(dy, ws)  # [M, H]
+    dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)  # dA | dB [M, 2H], h [M, H]
     # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
     # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
     full_precision_grad = d == 256 and settings.current().transition_wide_grad_fp32
     mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
-    dws = mm_w(dy.t(), hid)                                    # [D, H]
-    dwab = mm_w(dab.t(), a_in)                                 # [2H, D] = [dWa; dWb]
-    if full_precision_grad and wdt is torch.bfloat16 and settings.current().transition_wide_grad_cast:
+    dws = mm_w(dy.t(), hid)  # [D, H]
+    dwab = mm_w(dab.t(), a_in)  # [2H, D] = [dWa; dWb]
+    if (
+        full_precision_grad
+        and wdt is torch.bfloat16
+        and settings.current().transition_wide_grad_cast
+    ):
         dwab, dws = ext.grad_cast(dwab, dws)
     else:
         dwab, dws = dwab.to(wdt), dws.to(wdt)
-    wab = torch.cat((wa, wb), 0)                                # [2H, D]
+    wab = torch.cat((wa, wb), 0)  # [2H, D]
     if ln:
-        dxn = _mm_f32(dab, wab)                                 # [M, D] f32
+        dxn = _mm_f32(dab, wab)  # [M, D] f32
         dx, dgam, dbeta = ext.ln_bwd(dxn, x, stats, gamma, dy, gdt)
     else:
         dx = torch.mm(dab, wab)
-        dgam, dbeta = (torch.empty((0,), dtype=gdt, device=x.device) for _ in range(2))   # distinct placeholders: custom-op outputs must not alias
+        dgam, dbeta = (
+            torch.empty((0,), dtype=gdt, device=x.device) for _ in range(2)
+        )  # distinct placeholders: custom-op outputs must not alias
     return dx, dgam, dbeta, dwab, dws
 
 
@@ -250,9 +319,17 @@ def _bwd_dx_fake(dy, x, xn, stats, gamma, wa, wb, ws, ln):
 
 
 @opaque(fake=_bwd_dx_fake, name="transition_wide_bwd_dx_sm80")
-def _bwd_dx(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torch.Tensor,
-            gamma: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
-            ln: bool) -> torch.Tensor:
+def _bwd_dx(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    stats: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    ln: bool,
+) -> torch.Tensor:
     """Input gradient for frozen parameters; omit the two weight-gradient GEMMs."""
     ext = _ext()
     dual, _ = _tiles(x.shape[0], x.shape[1], wa.shape[0])
@@ -260,28 +337,40 @@ def _bwd_dx(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torch.Te
     wab = torch.cat((wa, wb), 0)
     if not ln:
         return torch.mm(dab, wab)
-    dx, _, _ = ext.ln_bwd(_mm_f32(dab, wab), x, stats, _f32(gamma, False), dy, gamma.dtype)
+    dx, _, _ = ext.ln_bwd(
+        _mm_f32(dab, wab), x, stats, _f32(gamma, False), dy, gamma.dtype
+    )
     return dx
 
 
 def _master_cast_fake(weights):
     """One fresh contiguous bf16 tensor per weight, same shapes."""
-    return [torch.empty_like(w, dtype=torch.bfloat16, memory_format=torch.contiguous_format) for w in weights]
+    return [
+        torch.empty_like(w, dtype=torch.bfloat16, memory_format=torch.contiguous_format)
+        for w in weights
+    ]
 
 
 @opaque(fake=_master_cast_fake, name="transition_master_cast_sm80")
 def _master_cast(weights: list[torch.Tensor]) -> list[torch.Tensor]:
     """Batched cast of fp32 master weights to bf16 with the existing CUDA caster."""
-    from miniworld_engine.kernels.transition.cuda import parameter_cast_sm80 as parameter_cast
+    from miniworld_engine.kernels.transition.cuda import (
+        parameter_cast_sm80 as parameter_cast,
+    )
+
     return list(parameter_cast.result(weights))
 
 
 def _training_weights(wa, wb, ws, dtype):
     # The protocol's D256/n4 path keeps unrounded master gradients. Convert
     # its three projection operands with the existing batched CUDA caster.
-    if (dtype is torch.bfloat16 and tuple(wa.shape) == (1024, 256)
-            and tuple(wb.shape) == (1024, 256) and tuple(ws.shape) == (256, 1024)
-            and all(w.dtype is torch.float32 for w in (wa, wb, ws))):
+    if (
+        dtype is torch.bfloat16
+        and tuple(wa.shape) == (1024, 256)
+        and tuple(wb.shape) == (1024, 256)
+        and tuple(ws.shape) == (256, 1024)
+        and all(w.dtype is torch.float32 for w in (wa, wb, ws))
+    ):
         return _master_cast([wa, wb, ws])
     return tuple(w.to(dtype).contiguous() for w in (wa, wb, ws))
 
@@ -297,7 +386,9 @@ class _WideTransitionSM80(torch.autograd.Function):
             gamma = beta = flat.new_empty((0,), dtype=torch.float32)
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         wa, wb, ws = _training_weights(wa, wb, ws, x.dtype)
-        out, xn, stats = _fwd_launch(flat, gamma, beta, wa, wb, ws, float(eps), True, ln)
+        out, xn, stats = _fwd_launch(
+            flat, gamma, beta, wa, wb, ws, float(eps), True, ln
+        )
         ctx.save_for_backward(flat, xn, stats, gamma, wa, wb, ws)
         ctx.shape, ctx.ln = shape, ln
         return out.reshape(shape)
@@ -306,19 +397,55 @@ class _WideTransitionSM80(torch.autograd.Function):
     def backward(ctx, dy):
         flat, xn, stats, gamma, wa, wb, ws = ctx.saved_tensors
         if not any(ctx.needs_input_grad[1:6]):
-            dx = _bwd_dx(dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, stats, gamma, wa, wb, ws, ctx.ln)
+            dx = _bwd_dx(
+                dy.reshape(-1, dy.shape[-1]).contiguous(),
+                flat,
+                xn,
+                stats,
+                gamma,
+                wa,
+                wb,
+                ws,
+                ctx.ln,
+            )
             return dx.reshape(ctx.shape), None, None, None, None, None, None, None
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
-        wdt = adt if adt in (torch.float32, torch.bfloat16) and adt == bwdt == sdt else torch.float32
-        dx, dgam, dbeta, dwab, dws = _bwd_launch(dy.reshape(-1, dy.shape[-1]).contiguous(), flat, xn, stats, gamma, wa, wb, ws, ctx.ln, gdt, wdt)
+        wdt = (
+            adt
+            if adt in (torch.float32, torch.bfloat16) and adt == bwdt == sdt
+            else torch.float32
+        )
+        dx, dgam, dbeta, dwab, dws = _bwd_launch(
+            dy.reshape(-1, dy.shape[-1]).contiguous(),
+            flat,
+            xn,
+            stats,
+            gamma,
+            wa,
+            wb,
+            ws,
+            ctx.ln,
+            gdt,
+            wdt,
+        )
         h = wa.shape[0]
         dbeta = dbeta if bdt == gdt else dbeta.to(bdt)
-        return (dx.reshape(ctx.shape), dgam if ctx.ln else None, dbeta if ctx.ln else None,
-                dwab[:h].to(adt), dwab[h:].to(bwdt), dws.to(sdt), None, None)
+        return (
+            dx.reshape(ctx.shape),
+            dgam if ctx.ln else None,
+            dbeta if ctx.ln else None,
+            dwab[:h].to(adt),
+            dwab[h:].to(bwdt),
+            dws.to(sdt),
+            None,
+            None,
+        )
 
 
 def _needs_grad(*tensors) -> bool:
-    return torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in tensors)
+    return torch.is_grad_enabled() and any(
+        t is not None and t.requires_grad for t in tensors
+    )
 
 
 def transition_wide_sm80(x, gamma, beta, wa, wb, ws, eps):
@@ -326,7 +453,17 @@ def transition_wide_sm80(x, gamma, beta, wa, wb, ws, eps):
     runs without the xn / statistics saves."""
     if not _needs_grad(x, gamma, beta, wa, wb, ws):
         shape = x.shape
-        out, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), gamma, beta, wa, wb, ws, float(eps), False, True)
+        out, _, _ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(),
+            gamma,
+            beta,
+            wa,
+            wb,
+            ws,
+            float(eps),
+            False,
+            True,
+        )
         return out.reshape(shape)
     return _WideTransitionSM80.apply(x, gamma, beta, wa, wb, ws, eps, True)
 
@@ -336,6 +473,16 @@ def swiglu_ffn_sm80(x, wa, wb, ws):
     if not _needs_grad(x, wa, wb, ws):
         shape = x.shape
         empty = x.new_empty((0,), dtype=torch.float32)
-        out, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), empty, empty, wa, wb, ws, 0.0, False, False)
+        out, _, _ = _fwd_launch(
+            x.reshape(-1, shape[-1]).contiguous(),
+            empty,
+            empty,
+            wa,
+            wb,
+            ws,
+            0.0,
+            False,
+            False,
+        )
         return out.reshape(shape)
     return _WideTransitionSM80.apply(x, None, None, wa, wb, ws, 0.0, False)

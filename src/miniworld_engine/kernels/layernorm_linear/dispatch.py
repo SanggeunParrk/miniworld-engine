@@ -13,7 +13,12 @@ from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
 )
 
 
-def layer_norm_linear(x: torch.Tensor, ln_weight: torch.Tensor, proj_weight: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+def layer_norm_linear(
+    x: torch.Tensor,
+    ln_weight: torch.Tensor,
+    proj_weight: torch.Tensor,
+    eps: float = 1e-5,
+) -> torch.Tensor:
     """``Linear(LayerNorm(x))`` over the last dim: ``x`` ``[..., d]``, ``ln_weight`` the LayerNorm scale ``[d]`` (no beta), ``proj_weight`` ``[n_head, d]`` (no bias);
     returns ``[..., n_head]``.  Autograd-transparent (``dx``, the scale's and the projection's gradients)."""
     from miniworld_engine.kernels.layernorm_linear.cuda import sm80

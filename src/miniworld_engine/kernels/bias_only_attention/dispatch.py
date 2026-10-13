@@ -53,6 +53,7 @@ _CACHE_ROOT = Path(__file__).resolve().parents[2] / "autotune" / "data"
 
 def autotune_mode() -> str:
     from miniworld_engine import settings
+
     return settings.current().biasonly_dispatch
 
 
@@ -112,8 +113,9 @@ def use_infer_concat(d_hidden: int) -> bool:
     return d_hidden <= INFER_CONCAT_MAX_DH
 
 
-def _calibrate_gate(d_hidden: int, n_out: int, M: int, device: torch.device,
-                    dtype: torch.dtype) -> tuple[str, dict[str, float]]:
+def _calibrate_gate(
+    d_hidden: int, n_out: int, M: int, device: torch.device, dtype: torch.dtype
+) -> tuple[str, dict[str, float]]:
     """Time fused vs split gate+to_out (forward) on dummy tensors; return the winner."""
     import triton
 
@@ -145,8 +147,9 @@ def _calibrate_gate(d_hidden: int, n_out: int, M: int, device: torch.device,
 
 
 @device_constant
-def gate_use_fused(d_hidden: int, n_out: int, M: int, device: torch.device,
-                   dtype: torch.dtype) -> bool:
+def gate_use_fused(
+    d_hidden: int, n_out: int, M: int, device: torch.device, dtype: torch.dtype
+) -> bool:
     """True -> fused_gate_out; False -> split. Static H100 by DH; calibrated+cached
     per GPU on other arches (or when forced)."""
     from miniworld_engine import settings

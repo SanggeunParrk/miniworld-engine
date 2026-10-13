@@ -1,4 +1,5 @@
 """Exercise every kernel target's dtype contract using real CPU baseline tensors."""
+
 from __future__ import annotations
 
 import ast
@@ -11,9 +12,19 @@ import pytest
 import torch
 
 BENCH = Path(__file__).resolve().parents[2] / "benchmarks" / "runners" / "bench.py"
-FIXED_BEFORE = {"dual_gemm_epilogue", "gemm_epilogue", "transition_b2b", "triangle_attention",
-                "bias_only_attention", "augmented_attention", "gemm_gate",
-                "gemm_gate_bwd", "dual_gemm_epilogue_bwd", "transition_b2b_bwd", "gemm_epilogue_bwd"}
+FIXED_BEFORE = {
+    "dual_gemm_epilogue",
+    "gemm_epilogue",
+    "transition_b2b",
+    "triangle_attention",
+    "bias_only_attention",
+    "augmented_attention",
+    "gemm_gate",
+    "gemm_gate_bwd",
+    "dual_gemm_epilogue_bwd",
+    "transition_b2b_bwd",
+    "gemm_epilogue_bwd",
+}
 AUTOGRAD = {"adaln_bwd", "transition_b2b_bwd", "gemm_epilogue_bwd"}
 
 
@@ -40,35 +51,67 @@ def sources():
 
 
 FUNCTIONS = sources()
-TARGETS = sorted(name.removeprefix("bench_kernel_") for name in FUNCTIONS if name.startswith("bench_kernel_"))
+TARGETS = sorted(
+    name.removeprefix("bench_kernel_")
+    for name in FUNCTIONS
+    if name.startswith("bench_kernel_")
+)
 
 
 def implementations(target):
     labels = set()
     for node in ast.walk(FUNCTIONS[f"bench_kernel_{target}"]):
-        if isinstance(node, ast.Compare) and isinstance(node.left, ast.Name) and node.left.id == "implementation":
+        if (
+            isinstance(node, ast.Compare)
+            and isinstance(node.left, ast.Name)
+            and node.left.id == "implementation"
+        ):
             for comparator in node.comparators:
-                values = comparator.elts if isinstance(comparator, (ast.Set, ast.List, ast.Tuple)) else [comparator]
-                labels.update(value.value for value in values if isinstance(value, ast.Constant)
-                              and isinstance(value.value, str))
+                values = (
+                    comparator.elts
+                    if isinstance(comparator, (ast.Set, ast.List, ast.Tuple))
+                    else [comparator]
+                )
+                labels.update(
+                    value.value
+                    for value in values
+                    if isinstance(value, ast.Constant) and isinstance(value.value, str)
+                )
     return labels
 
 
 @pytest.fixture
 def runner():
-    helper_names = {"_fwd_result", "_bwd_autograd_result", "_acc_grad", "_acc_fwd", "_flat", "tensor_metrics"}
-    body: list[ast.stmt] = [node for name, node in sources().items()
-                           if name in helper_names or name.startswith("bench_kernel_")]
-    namespace: dict[str, Any] = {"torch": torch, "BF16": torch.bfloat16, "FP32_PRECISION": 32,
-                                 "DEVICE": torch.device("cpu"), "AccuracyFields": dict,
-                                 "UnsupportedBenchmark": UnsupportedBenchmark}
+    helper_names = {
+        "_fwd_result",
+        "_bwd_autograd_result",
+        "_acc_grad",
+        "_acc_fwd",
+        "_flat",
+        "tensor_metrics",
+    }
+    body: list[ast.stmt] = [
+        node
+        for name, node in sources().items()
+        if name in helper_names or name.startswith("bench_kernel_")
+    ]
+    namespace: dict[str, Any] = {
+        "torch": torch,
+        "BF16": torch.bfloat16,
+        "FP32_PRECISION": 32,
+        "DEVICE": torch.device("cpu"),
+        "AccuracyFields": dict,
+        "UnsupportedBenchmark": UnsupportedBenchmark,
+    }
     seen = []
 
     def measured_result(**kwargs):
         with torch.set_grad_enabled(kwargs["is_train"]):
             outputs = kwargs["func"]()
         seen.append((kwargs, outputs))
-        return Result(input_dtype=kwargs["input_dtype"], parameter_dtype=kwargs["parameter_dtype"])
+        return Result(
+            input_dtype=kwargs["input_dtype"], parameter_dtype=kwargs["parameter_dtype"]
+        )
 
     namespace["measured_result"] = measured_result
     exec(compile(ast.Module(body=body, type_ignores=[]), str(BENCH), "exec"), namespace)
@@ -76,9 +119,17 @@ def runner():
 
 
 def config(target, **kwargs):
-    defaults: dict[str, Any] = {"target": target, "precision": 32, "compile": False,
-                                "cudagraph": "disabled", "d_pair": 32, "d_single_atom": 32,
-                                "n_augment": 2, "mask_prob": 0.2, "layernorm_weight_precision": None}
+    defaults: dict[str, Any] = {
+        "target": target,
+        "precision": 32,
+        "compile": False,
+        "cudagraph": "disabled",
+        "d_pair": 32,
+        "d_single_atom": 32,
+        "n_augment": 2,
+        "mask_prob": 0.2,
+        "layernorm_weight_precision": None,
+    }
     defaults.update(kwargs)
     return SimpleNamespace(**defaults)
 
@@ -88,18 +139,29 @@ def test_every_pytorch_baseline_executes_requested_fp32(target, runner):
     namespace, seen = runner
     result = namespace[f"bench_kernel_{target}"](config(target), 2, "pytorch", None)
     assert result.input_dtype == "float32"
-    assert result.parameter_dtype == ("" if target in {"triangle_attention", "bias_only_attention",
-                                                       "augmented_attention"} else "float32")
+    assert result.parameter_dtype == (
+        ""
+        if target
+        in {"triangle_attention", "bias_only_attention", "augmented_attention"}
+        else "float32"
+    )
     outputs = seen[-1][1]
     tensors = (outputs,) if isinstance(outputs, torch.Tensor) else outputs
     assert tensors
     assert all(t.dtype == torch.float32 for t in tensors)
 
 
-@pytest.mark.parametrize(("target", "implementation"),
-                         [(target, impl) for target in sorted(FIXED_BEFORE)
-                          for impl in sorted(implementations(target) - {"pytorch"})])
-def test_unverified_backend_fp32_is_explicitly_rejected_before_allocation(target, implementation, runner, monkeypatch):
+@pytest.mark.parametrize(
+    ("target", "implementation"),
+    [
+        (target, impl)
+        for target in sorted(FIXED_BEFORE)
+        for impl in sorted(implementations(target) - {"pytorch"})
+    ],
+)
+def test_unverified_backend_fp32_is_explicitly_rejected_before_allocation(
+    target, implementation, runner, monkeypatch
+):
     namespace, seen = runner
 
     def no_allocation(*args, **kwargs):
@@ -112,7 +174,9 @@ def test_unverified_backend_fp32_is_explicitly_rejected_before_allocation(target
 
 
 @pytest.mark.parametrize("target", sorted(AUTOGRAD))
-def test_prebuilt_autograd_compile_is_rejected_before_allocating(target, runner, monkeypatch):
+def test_prebuilt_autograd_compile_is_rejected_before_allocating(
+    target, runner, monkeypatch
+):
     namespace, seen = runner
 
     def no_allocation(*args, **kwargs):
@@ -120,30 +184,38 @@ def test_prebuilt_autograd_compile_is_rejected_before_allocating(target, runner,
 
     monkeypatch.setattr(torch, "randn", no_allocation)
     with pytest.raises(UnsupportedBenchmark, match="compiled backward"):
-        namespace[f"bench_kernel_{target}"](config(target, compile=True), 2, "pytorch", None)
+        namespace[f"bench_kernel_{target}"](
+            config(target, compile=True), 2, "pytorch", None
+        )
     assert not seen
 
 
 def test_augmented_attention_uses_requested_axes_and_reports_actual_shapes(runner):
     namespace, _ = runner
     result = namespace["bench_kernel_augmented_attention"](
-        config("augmented_attention", n_augment=3, d_pair=64), 2, "pytorch", None)
+        config("augmented_attention", n_augment=3, d_pair=64), 2, "pytorch", None
+    )
     shapes = json.loads(result.input_shapes)
     assert shapes["arg0"] == [3, 1, 2, 2, 32]
     assert shapes["arg3"] == [1, 2, 2, 2]
 
 
-@pytest.mark.parametrize("target", ["triangle_attention", "bias_only_attention", "augmented_attention"])
+@pytest.mark.parametrize(
+    "target", ["triangle_attention", "bias_only_attention", "augmented_attention"]
+)
 def test_attention_does_not_silently_round_requested_width(target, runner):
     namespace, _ = runner
     with pytest.raises(UnsupportedBenchmark, match="multiple"):
-        namespace[f"bench_kernel_{target}"](config(target, d_pair=33), 2, "pytorch", None)
+        namespace[f"bench_kernel_{target}"](
+            config(target, d_pair=33), 2, "pytorch", None
+        )
 
 
 def test_tail_normalizes_during_setup_only(runner, monkeypatch):
     from miniworld_engine.modules.conditioned_transition.module import (
         ConditionedTransition,
     )
+
     namespace, _ = runner
     original = ConditionedTransition.__init__
     calls = []
@@ -154,7 +226,8 @@ def test_tail_normalizes_during_setup_only(runner, monkeypatch):
 
     monkeypatch.setattr(ConditionedTransition, "__init__", init)
     namespace["bench_kernel_conditioned_transition_tail"](
-        config("conditioned_transition_tail"), 2, "pytorch", None)
+        config("conditioned_transition_tail"), 2, "pytorch", None
+    )
     assert calls == ["adaln"]
 
 
@@ -164,17 +237,28 @@ def test_autograd_helper_detects_parameter_gradient_error_with_correct_dx(runner
     w = torch.tensor([3.0], requires_grad=True)
     out = x * w
     result = namespace["_bwd_autograd_result"](
-        config("test"), out, [x, w], torch.ones_like(out),
-        [torch.tensor([3.0]), torch.tensor([0.0])], path="probe", ref="probe", dtype="float32")
+        config("test"),
+        out,
+        [x, w],
+        torch.ones_like(out),
+        [torch.tensor([3.0]), torch.tensor([0.0])],
+        path="probe",
+        ref="probe",
+        dtype="float32",
+    )
     assert result.grad_max_abs == 2.0
 
 
 def test_audit_covers_every_registered_target_and_implementation():
     assert len(TARGETS) == 17
-    assert sum(len(implementations(target)) for target in TARGETS) == 55     # 40 + windowed_atom_attention pytorch, anthropic, swa_window_cuda (3) + the A100 hand-CUDA rows of transition_b2b[_bwd], dual_gemm_epilogue[_bwd], gemm_epilogue[_bwd] (6), cuda_tm1 / cuda_tm2 / cuda_gate_elem_bwd (3) and projected_attention, projected_attention_pytorch, bias_only_attention (3)
+    assert (
+        sum(len(implementations(target)) for target in TARGETS) == 55
+    )  # 40 + windowed_atom_attention pytorch, anthropic, swa_window_cuda (3) + the A100 hand-CUDA rows of transition_b2b[_bwd], dual_gemm_epilogue[_bwd], gemm_epilogue[_bwd] (6), cuda_tm1 / cuda_tm2 / cuda_gate_elem_bwd (3) and projected_attention, projected_attention_pytorch, bias_only_attention (3)
 
 
-def test_gate_backward_passes_required_row_scale_and_sequence_length(runner, monkeypatch):
+def test_gate_backward_passes_required_row_scale_and_sequence_length(
+    runner, monkeypatch
+):
     import sys
     from types import ModuleType
 
@@ -190,14 +274,18 @@ def test_gate_backward_passes_required_row_scale_and_sequence_length(runner, mon
         calls.append(seq_len)
         d_proj = dy.float() * gate.float()
         d_glog = dy.float() * proj.float() * gate.float() * (1 - gate.float())
-        return (d_proj.to(dy.dtype), (d_glog @ weight.float().t()).to(dy.dtype),
-                (x_n.float().t() @ d_glog).to(dy.dtype))
+        return (
+            d_proj.to(dy.dtype),
+            (d_glog @ weight.float().t()).to(dy.dtype),
+            (x_n.float().t() @ d_glog).to(dy.dtype),
+        )
 
     module.__dict__["gate_elem_bwd"] = gate_elem_bwd
     monkeypatch.setitem(sys.modules, name, module)
     namespace, seen = runner
     result = namespace["bench_kernel_gemm_gate_bwd"](
-        config("gemm_gate_bwd", precision="bf16-mixed"), 2, "gate_elem_bwd", None)
+        config("gemm_gate_bwd", precision="bf16-mixed"), 2, "gate_elem_bwd", None
+    )
     assert calls == [2, 2]
     assert result.grad_rel_frob == 0
     assert len(seen[-1][1]) == 3
@@ -207,11 +295,16 @@ def test_direct_ktiled_compile_is_rejected_before_allocation(runner, monkeypatch
     namespace, seen = runner
 
     def no_allocation(*args, **kwargs):
-        raise AssertionError("known unsupported compilation must reject before allocation")
+        raise AssertionError(
+            "known unsupported compilation must reject before allocation"
+        )
 
     monkeypatch.setattr(torch, "randn", no_allocation)
     with pytest.raises(UnsupportedBenchmark, match="no opaque compile entry"):
         namespace["bench_kernel_transition_b2b"](
             config("transition_b2b", precision="bf16-mixed", compile=True),
-            2, "transition_b2b_ktiled", None)
+            2,
+            "transition_b2b_ktiled",
+            None,
+        )
     assert not seen

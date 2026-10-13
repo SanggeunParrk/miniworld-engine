@@ -3,8 +3,8 @@
 from dataclasses import asdict
 
 import pytest
-from settings_helpers import override_setting
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -56,13 +56,17 @@ def test_projection_contract_is_preserved(gpu_settings, variant, monkeypatch):
         build_attention_params,
     )
 
-    override_setting(monkeypatch, "sigmoid_gate_sm80", "0")  # this is the Triton fused kernel's contract; on an A100 the module takes the CUDA gate first
+    override_setting(
+        monkeypatch, "sigmoid_gate_sm80", "0"
+    )  # this is the Triton fused kernel's contract; on an A100 the module takes the CUDA gate first
     dtype = torch.float32 if variant == "fp32" else torch.bfloat16
     model = (
         SWA3DRoPEAttention(
             128,
             4,
-            implementation=ImplementationType.PYTORCH if variant == "pytorch" else ImplementationType.MINIWORLD,
+            implementation=ImplementationType.PYTORCH
+            if variant == "pytorch"
+            else ImplementationType.MINIWORLD,
             mp_full=variant == "mp",
         )
         .cuda()

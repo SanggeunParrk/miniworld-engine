@@ -1,14 +1,25 @@
 """D512 native training dispatch, original accuracy bands, and live graph state."""
+
 import pytest
 import torch
 from settings_helpers import override_setting
+from tests.integrations.test_a100_trimul_gpu import (
+    KINDS,
+    NAMES,
+    _inputs,
+    _module,
+    _rel,
+    _run,
+)
 
 from miniworld_engine.integrations import trimul_sm80
 from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide, sm80_wide512
 from miniworld_engine.modules.exceptions import ImplementationType
-from tests.integrations.test_a100_trimul_gpu import KINDS, NAMES, _inputs, _module, _rel, _run
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 AMPERE = torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0)
 
 
@@ -18,7 +29,15 @@ AMPERE = torch.cuda.is_available() and torch.cuda.get_device_capability() == (8,
 def test_d512_module_dispatch_preserves_every_gradient(kind, masters, monkeypatch):
     module = _module(kind, 512, ImplementationType.MINIWORLD)
     z, mask, ds, dy = _inputs(128, 512)
-    reference = _run(module, z, mask, ds, dy, dtype=torch.float32, implementation=ImplementationType.PYTORCH)
+    reference = _run(
+        module,
+        z,
+        mask,
+        ds,
+        dy,
+        dtype=torch.float32,
+        implementation=ImplementationType.PYTORCH,
+    )
     floor = _run(module, z, mask, ds, dy, implementation=ImplementationType.PYTORCH)
     module = module.to(masters).train()
     module._make_drop_row_scale = lambda pair, p: ds.to(pair.dtype)
@@ -27,11 +46,19 @@ def test_d512_module_dispatch_preserves_every_gradient(kind, masters, monkeypatc
     assert trimul_sm80._wide_kernels(pair) is sm80_wide512
     y = module(pair, mask)
     parameters = dict(module.named_parameters())
-    gradients = torch.autograd.grad(y, [pair, *[parameters[name] for name in NAMES]], dy.bfloat16())
-    result = {"out": y.detach(), "dz": gradients[0], **dict(zip(NAMES, gradients[1:]))}
+    gradients = torch.autograd.grad(
+        y, [pair, *[parameters[name] for name in NAMES]], dy.bfloat16()
+    )
+    result = {
+        "out": y.detach(),
+        "dz": gradients[0],
+        **dict(zip(NAMES, gradients[1:], strict=False)),
+    }
     for name, want in reference.items():
-        assert _rel(result[name].float(), want) <= max(1.25 * _rel(floor[name], want), 2e-3), name
-    for name, gradient in zip(NAMES, gradients[1:]):
+        assert _rel(result[name].float(), want) <= max(
+            1.25 * _rel(floor[name], want), 2e-3
+        ), name
+    for name, gradient in zip(NAMES, gradients[1:], strict=False):
         assert gradient.dtype == parameters[name].dtype
     override_setting(monkeypatch, "trimul_sm80_wide512", "0")
     assert trimul_sm80._wide_kernels(pair) is sm80_wide
@@ -50,7 +77,9 @@ def test_d512_compiled_training_graph_reads_live_input_mask_weights(kind):
     ds = ds.bfloat16()
     pair, cotangent = z.bfloat16().requires_grad_(), dy.bfloat16()
     module._make_drop_row_scale = lambda value, p: ds.to(value.dtype)
-    compiled = torch.compile(module, fullgraph=True, options={"triton.cudagraphs": False})
+    compiled = torch.compile(
+        module, fullgraph=True, options={"triton.cudagraphs": False}
+    )
     values = [pair, *module.parameters()]
 
     def step():
@@ -78,12 +107,21 @@ def test_d512_compiled_training_graph_reads_live_input_mask_weights(kind):
     actual = [x.clone() for x in outputs]
     expected = step()
     assert not torch.equal(actual[0], before)
-    assert all(torch.equal(a, b) for a, b in zip(actual, expected))
-    with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]) as profiler:
+    assert all(torch.equal(a, b) for a, b in zip(actual, expected, strict=False))
+    with torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ]
+    ) as profiler:
         for _ in range(5):
             graph.replay()
         torch.cuda.synchronize()
-    kernels = [event.name for event in profiler.events() if event.device_type == torch.autograd.DeviceType.CUDA]
+    kernels = [
+        event.name
+        for event in profiler.events()
+        if event.device_type == torch.autograd.DeviceType.CUDA
+    ]
     assert any("gate_bwd_kernel<512" in name for name in kernels)
     assert not any("triton" in name.lower() for name in kernels)
     # The measured backend still contains cuBLAS GEMMs; no whole-CUDA claim here.

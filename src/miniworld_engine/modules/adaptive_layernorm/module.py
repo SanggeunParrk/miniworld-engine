@@ -57,6 +57,7 @@ class AdaptiveLayerNorm(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 adaptive_layer_norm,
             )
+
             return adaptive_layer_norm(self, x, cond)
         if self._backend == KernelBackend.PYTORCH:
             x_norm = self.ln_in(x)
@@ -77,8 +78,11 @@ class AdaptiveLayerNorm(nn.Module):
             # their saved backward operands in one dtype, with FP32 master params
             # connected through differentiable casts. Norm affine stays FP32.
             device_type = x.device.type
-            compute_dtype = (torch.get_autocast_dtype(device_type)
-                             if torch.is_autocast_enabled(device_type) else x.dtype)
+            compute_dtype = (
+                torch.get_autocast_dtype(device_type)
+                if torch.is_autocast_enabled(device_type)
+                else x.dtype
+            )
             with torch.autocast(device_type=device_type, enabled=False):
                 # A100: hand-CUDA row passes + cuBLAS (integrations.adaln_sm80 states its contract; settings.adaln_sm80=0 keeps the Triton kernels below).
                 if _sm80.serves(self, x, cond, compute_dtype, backward):

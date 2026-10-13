@@ -51,13 +51,25 @@ class BiasOnlyAttention(nn.Module):
     ``pair_bias_all``): those are the logits, and ``ln_pair`` / ``to_bias`` / ``pair`` are not read.
     """
 
-    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None,
-                 *, implementation: ImplementationType = _REF) -> None:
+    def __init__(
+        self,
+        d_single: int,
+        d_cond: int,
+        d_pair: int,
+        n_head: int,
+        d_head: int | None = None,
+        *,
+        implementation: ImplementationType = _REF,
+    ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
         self.n_head = n_head
-        d_hidden = d_head or d_single // n_head          # the head width; n_head x d_head may differ from d_single
-        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond, implementation=self.implementation)
+        d_hidden = (
+            d_head or d_single // n_head
+        )  # the head width; n_head x d_head may differ from d_single
+        self.ada_ln_in = AdaptiveLayerNorm(
+            d_single, d_cond, implementation=self.implementation
+        )
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         # no offset, as in AugmentedAttentionPairBias: a per-head constant on every logit cancels in the softmax
@@ -85,17 +97,25 @@ class BiasOnlyAttention(nn.Module):
                 augmented_attention,
             )
 
-            return single + augmented_attention(self, single, cond, pair, mask, bias_only=True)
-        single_res = single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
+            return single + augmented_attention(
+                self, single, cond, pair, mask, bias_only=True
+            )
+        single_res = (
+            single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
+        )
         single = self.ada_ln_in(single, cond)
         value, gate = self.to_value(single), self.to_gate(single)
         if bias is None:
-            logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
+            logits = self.to_bias(self.ln_pair(pair)).permute(
+                0, 3, 1, 2
+            )  # (B, H, L, L)
         else:
-            logits = bias.to(value.dtype)                                # hoisted (pair_bias_all), head-major already
+            logits = bias.to(value.dtype)  # hoisted (pair_bias_all), head-major already
         value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
         if mask is not None:
-            logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+            logits = logits.masked_fill(
+                ~mask[:, None, None, :], torch.finfo(logits.dtype).min
+            )
         # one softmax for every sample: the logits carry no augmentation axis
         attention = torch.softmax(logits, dim=-1)
         out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
@@ -125,10 +145,22 @@ class BiasOnlyDiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
-        child_impl = self.implementation if self.implementation == ImplementationType.ANTHROPIC else _REF
-        self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head,
-                                           d_head=d_head, implementation=child_impl)
-        self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=child_impl)
+        child_impl = (
+            self.implementation
+            if self.implementation == ImplementationType.ANTHROPIC
+            else _REF
+        )
+        self.attention = BiasOnlyAttention(
+            d_single=d_single,
+            d_cond=d_cond,
+            d_pair=d_pair,
+            n_head=n_head,
+            d_head=d_head,
+            implementation=child_impl,
+        )
+        self.transition = ConditionedTransition(
+            d_hidden=d_single, d_cond=d_cond, n=n, implementation=child_impl
+        )
 
     def forward(
         self,
@@ -142,7 +174,9 @@ class BiasOnlyDiTBlock(nn.Module):
         """Each part returns its residual output (stream in, stream out); the fused paths fold both residuals in. ``bias``: this
         block's hoisted pair bias (``pair_bias_all``) in place of ``to_bias(ln_pair(pair))``."""
         if bias is None and pair is None:
-            raise ValueError("BiasOnlyDiTBlock: pass the pair or the block's precomputed bias")
+            raise ValueError(
+                "BiasOnlyDiTBlock: pass the pair or the block's precomputed bias"
+            )
         if self.implementation == ImplementationType.ANTHROPIC:
             if bias is None:
                 single = self.attention(single, cond, pair, mask)

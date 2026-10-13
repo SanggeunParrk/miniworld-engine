@@ -15,12 +15,15 @@ from miniworld_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0), reason="A100 (sm_80)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+        reason="A100 (sm_80)",
+    ),
 ]
 
-ATOM = (128, 128, 16, 4)             # d_single, d_cond, d_pair, heads: head dim 32
-TOKEN = (768, 384, 128, 16)          # head dim 48
-TOKEN2 = (768, 768, 256, 16)         # the ESMFold2 token row: d_cond 768, d_pair 256
+ATOM = (128, 128, 16, 4)  # d_single, d_cond, d_pair, heads: head dim 32
+TOKEN = (768, 384, 128, 16)  # head dim 48
+TOKEN2 = (768, 768, 256, 16)  # the ESMFold2 token row: d_cond 768, d_pair 256
 BF, F32 = torch.bfloat16, torch.float32
 
 
@@ -38,13 +41,20 @@ def policy():
 def _modules(shape, seed=0, dtype=BF):
     torch.manual_seed(seed)
     ref = AugmentedAttentionPairBias(*shape, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():  # the zero inits (to_out, to_bias) would make the module an identity
+    with (
+        torch.no_grad()
+    ):  # the zero inits (to_out, to_bias) would make the module an identity
         for name, p in ref.named_parameters():
             if p.ndim > 1:
                 p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5)
             else:
-                p.copy_(torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
-    eng = AugmentedAttentionPairBias(*shape, implementation=ImplementationType.MINIWORLD)
+                p.copy_(
+                    torch.randn_like(p) * 0.1
+                    + (1.0 if name.endswith("weight") else 0.0)
+                )
+    eng = AugmentedAttentionPairBias(
+        *shape, implementation=ImplementationType.MINIWORLD
+    )
     eng.load_state_dict(ref.state_dict())
     return ref.cuda().double(), eng.cuda().to(dtype)
 
@@ -52,15 +62,21 @@ def _modules(shape, seed=0, dtype=BF):
 def _inputs(shape, a, n, seed=1, b=1):
     g = torch.Generator(device="cuda").manual_seed(seed)
     ds, dc, dp, _ = shape
-    return (torch.randn(a, b, n, ds, device="cuda", generator=g), torch.randn(a, b, n, dc, device="cuda", generator=g),
-            torch.randn(b, n, n, dp, device="cuda", generator=g))
+    return (
+        torch.randn(a, b, n, ds, device="cuda", generator=g),
+        torch.randn(a, b, n, dc, device="cuda", generator=g),
+        torch.randn(b, n, n, dp, device="cuda", generator=g),
+    )
 
 
 def _mask(n, seed, b=1, a=None):
     """A [B, N] key mask with scattered masked atoms and a masked tail (as a padded structure has); ``a``: one per sample [A, B, N] instead."""
     g = torch.Generator(device="cuda").manual_seed(seed)
-    m = torch.rand((b, n) if a is None else (a, b, n), device="cuda", generator=g) > 0.15
-    m[..., n - n // 8:] = False
+    m = (
+        torch.rand((b, n) if a is None else (a, b, n), device="cuda", generator=g)
+        > 0.15
+    )
+    m[..., n - n // 8 :] = False
     m[..., :8] = True
     return m
 
@@ -74,8 +90,19 @@ def _train(m, ins, dtype, w, mask=None):
     leaves = [t.detach().clone().to(dtype).requires_grad_() for t in ins]
     out = m(*leaves, mask)
     (out.double() * w).sum().backward()
-    res = {"out": out.detach(), "dsingle": leaves[0].grad, "dcond": leaves[1].grad, "dpair": leaves[2].grad}
-    res.update({n.removeprefix("_orig_mod."): p.grad.clone() for n, p in m.named_parameters() if p.grad is not None})
+    res = {
+        "out": out.detach(),
+        "dsingle": leaves[0].grad,
+        "dcond": leaves[1].grad,
+        "dpair": leaves[2].grad,
+    }
+    res.update(
+        {
+            n.removeprefix("_orig_mod."): p.grad.clone()
+            for n, p in m.named_parameters()
+            if p.grad is not None
+        }
+    )
     m.zero_grad(set_to_none=True)
     return res
 
@@ -85,7 +112,11 @@ def _spy(monkeypatch):
     calls = []
     for name in ("forward", "delta"):
         orig = getattr(augattn_sm80, name)
-        monkeypatch.setattr(augattn_sm80, name, (lambda o: lambda *a, **k: calls.append(1) or o(*a, **k))(orig))
+        monkeypatch.setattr(
+            augattn_sm80,
+            name,
+            (lambda o: lambda *a, **k: calls.append(1) or o(*a, **k))(orig),
+        )
     return calls
 
 
@@ -96,16 +127,33 @@ def _tol(dtype):
 
 # ---------------------------------------------------------------------------------------------------------------------------------- numerics
 @pytest.mark.parametrize("dtype", [BF, F32])
-@pytest.mark.parametrize(("shape", "a", "b", "n", "mask_kind"), [
-    (ATOM, 4, 1, 256, "none"), (ATOM, 3, 1, 384, "shared"), (ATOM, 2, 1, 200, "shared"), (ATOM, 5, 1, 128, "none"), (ATOM, 3, 1, 300, "sample"), (ATOM, 2, 2, 256, "shared"),
-    (TOKEN, 2, 1, 256, "none"), (TOKEN, 3, 1, 384, "shared"), (TOKEN, 2, 1, 200, "sample"), (TOKEN, 2, 2, 128, "shared"), (TOKEN2, 2, 1, 256, "none"), (TOKEN2, 2, 1, 200, "shared"),
-])
-def test_training_matches_the_module_path(shape, a, b, n, mask_kind, dtype, monkeypatch):
+@pytest.mark.parametrize(
+    ("shape", "a", "b", "n", "mask_kind"),
+    [
+        (ATOM, 4, 1, 256, "none"),
+        (ATOM, 3, 1, 384, "shared"),
+        (ATOM, 2, 1, 200, "shared"),
+        (ATOM, 5, 1, 128, "none"),
+        (ATOM, 3, 1, 300, "sample"),
+        (ATOM, 2, 2, 256, "shared"),
+        (TOKEN, 2, 1, 256, "none"),
+        (TOKEN, 3, 1, 384, "shared"),
+        (TOKEN, 2, 1, 200, "sample"),
+        (TOKEN, 2, 2, 128, "shared"),
+        (TOKEN2, 2, 1, 256, "none"),
+        (TOKEN2, 2, 1, 200, "shared"),
+    ],
+)
+def test_training_matches_the_module_path(
+    shape, a, b, n, mask_kind, dtype, monkeypatch
+):
     if dtype is F32:
         torch.backends.cuda.matmul.allow_tf32 = True
     ref, eng = _modules(shape, dtype=dtype)
     ins = _inputs(shape, a, n, b=b)
-    mask = {"none": None, "shared": _mask(n, 11, b), "sample": _mask(n, 12, b, a)}[mask_kind]
+    mask = {"none": None, "shared": _mask(n, 11, b), "sample": _mask(n, 12, b, a)}[
+        mask_kind
+    ]
     w = torch.randn(a, b, n, shape[0], device="cuda", dtype=torch.float64)
     truth = _train(ref, ins, torch.float64, w, mask)
     calls = _spy(monkeypatch)
@@ -125,16 +173,29 @@ def test_training_matches_the_module_path(shape, a, b, n, mask_kind, dtype, monk
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
-@pytest.mark.parametrize(("shape", "a", "b", "n", "mask_kind"), [
-    (ATOM, 5, 1, 1024, "none"), (ATOM, 5, 1, 300, "shared"), (ATOM, 1, 1, 1000, "shared"), (ATOM, 3, 1, 256, "sample"), (TOKEN, 5, 1, 384, "shared"), (TOKEN, 5, 1, 200, "none"),
-    (TOKEN, 3, 2, 256, "sample"), (TOKEN2, 5, 1, 384, "shared"),
-])
-def test_inference_matches_the_module_path(shape, a, b, n, mask_kind, dtype, monkeypatch):
+@pytest.mark.parametrize(
+    ("shape", "a", "b", "n", "mask_kind"),
+    [
+        (ATOM, 5, 1, 1024, "none"),
+        (ATOM, 5, 1, 300, "shared"),
+        (ATOM, 1, 1, 1000, "shared"),
+        (ATOM, 3, 1, 256, "sample"),
+        (TOKEN, 5, 1, 384, "shared"),
+        (TOKEN, 5, 1, 200, "none"),
+        (TOKEN, 3, 2, 256, "sample"),
+        (TOKEN2, 5, 1, 384, "shared"),
+    ],
+)
+def test_inference_matches_the_module_path(
+    shape, a, b, n, mask_kind, dtype, monkeypatch
+):
     if dtype is F32:
         torch.backends.cuda.matmul.allow_tf32 = True
     ref, eng = _modules(shape, 2, dtype)
     s, c, z = _inputs(shape, a, n, 3, b)
-    mask = {"none": None, "shared": _mask(n, 13, b), "sample": _mask(n, 14, b, a)}[mask_kind]
+    mask = {"none": None, "shared": _mask(n, 13, b), "sample": _mask(n, 14, b, a)}[
+        mask_kind
+    ]
     with torch.no_grad():
         truth = ref(s.double(), c.double(), z.double(), mask)
         calls = _spy(monkeypatch)
@@ -174,7 +235,9 @@ def test_a_fully_masked_sample_gets_a_zero_output_with_a_per_sample_mask_and_a_f
         update = eng.delta(s, c, z, per_sample)
     assert torch.isfinite(out).all()
     assert torch.isfinite(out_shared).all()
-    assert not update[1].any(), "a sample with no valid key: the attention contributes nothing"
+    assert not update[1].any(), (
+        "a sample with no valid key: the attention contributes nothing"
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- determinism, compile, graphs
@@ -223,7 +286,7 @@ def test_a_captured_cuda_graph_replays_to_eager(dtype):
         want = eng(s, c, z, mask)
     ss, cs, zs = s.clone(), c.clone(), z.clone()
     with torch.no_grad():
-        eng(ss, cs, zs, mask)                                              # warm-up outside the capture (kernels build, allocator)
+        eng(ss, cs, zs, mask)  # warm-up outside the capture (kernels build, allocator)
     graph = torch.cuda.CUDAGraph()
     with torch.no_grad(), torch.cuda.graph(graph):
         out = eng(ss, cs, zs, mask)
@@ -265,7 +328,12 @@ def test_the_dit_block_at_atom_widths_takes_it(monkeypatch):
     ref = DiTBlock(128, 128, 16, 4, implementation=ImplementationType.PYTORCH)
     with torch.no_grad():
         for name, p in ref.named_parameters():
-            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
+            p.copy_(
+                torch.randn_like(p) / p.shape[-1] ** 0.5
+                if p.ndim > 1
+                else torch.randn_like(p) * 0.1
+                + (1.0 if name.endswith("weight") else 0.0)
+            )
     eng = DiTBlock(128, 128, 16, 4, implementation=ImplementationType.MINIWORLD)
     eng.load_state_dict(ref.state_dict())
     ref, eng = ref.cuda().double(), eng.cuda().bfloat16()
@@ -291,7 +359,9 @@ def test_the_pair_bias_cache_is_explicit_and_never_stale_in_eager_mode(monkeypat
     mask = _mask(384, 29)
     runs = []
     orig = augattn_sm80._bias_into
-    monkeypatch.setattr(augattn_sm80, "_bias_into", lambda *a, **k: runs.append(1) or orig(*a, **k))
+    monkeypatch.setattr(
+        augattn_sm80, "_bias_into", lambda *a, **k: runs.append(1) or orig(*a, **k)
+    )
 
     def call(zz, mm=mask):
         with torch.no_grad():
@@ -304,7 +374,7 @@ def test_the_pair_bias_cache_is_explicit_and_never_stale_in_eager_mode(monkeypat
     assert len(runs) == 1, "a cached call recomputed the bias"
     zz = zb.clone()
     assert eng.cache_pair_bias(zz, mask)
-    zz.add_(0.25)                                                       # PyTorch sees the change: the cache is stale
+    zz.add_(0.25)  # PyTorch sees the change: the cache is stale
     fresh = call(zz)
     assert len(runs) == 2
     assert not torch.equal(fresh, base)
@@ -328,7 +398,9 @@ def test_the_pair_bias_cache_is_explicit_and_never_stale_in_eager_mode(monkeypat
     eng.clear_pair_bias()
     assert eng.cache_pair_bias(static, mask)
     with torch.no_grad():
-        warm = eng(sb, cb, static, mask)                                # warm-up outside the capture (kernels build, allocator)
+        warm = eng(
+            sb, cb, static, mask
+        )  # warm-up outside the capture (kernels build, allocator)
     graph = torch.cuda.CUDAGraph()
     with torch.no_grad(), torch.cuda.graph(graph):
         out = eng(sb, cb, static, mask)
@@ -340,11 +412,15 @@ def test_the_pair_bias_cache_is_explicit_and_never_stale_in_eager_mode(monkeypat
     graph.replay()
     torch.cuda.synchronize()
     eng.clear_pair_bias()
-    assert torch.equal(out, call(static)), "the replay after a refresh differs from an uncached call"
+    assert torch.equal(out, call(static)), (
+        "the replay after a refresh differs from an uncached call"
+    )
 
 
 # ---------------------------------------------------------------------------------------------------------------------------------- the gate
-def test_the_gate_serves_what_the_core_was_built_for_and_keeps_the_module_path_for_the_rest(monkeypatch):
+def test_the_gate_serves_what_the_core_was_built_for_and_keeps_the_module_path_for_the_rest(
+    monkeypatch,
+):
     """Served: bf16 or fp32 (all tensors and the weights alike), any A / B / L, a key mask [B, L] or [A, B, L], d_pair 16 / 128 / 256.  Not served: mixed dtypes, a non-bool mask, QK-norm, another head
     dim, a core precision other than the module's, the switches."""
     _, eng = _modules(ATOM)
@@ -353,24 +429,56 @@ def test_the_gate_serves_what_the_core_was_built_for_and_keeps_the_module_path_f
     mask = _mask(256, 1)
     assert augattn_sm80.serves(eng, sb, zb, None, cond=cb)
     assert augattn_sm80.serves(eng, sb, zb, mask, cond=cb)
-    assert augattn_sm80.serves(eng, sb, zb, mask.expand(2, 1, 256), cond=cb), "the same mask for every sample"
-    assert augattn_sm80.serves(eng, sb, zb, _mask(256, 2, 1, 2), cond=cb), "a mask per sample"
-    assert augattn_sm80.serves(eng, sb.expand(2, 2, 256, 128), zb.expand(2, 256, 256, 16), None, cond=cb.expand(2, 2, 256, 128)), "B > 1"
-    assert not augattn_sm80.serves(eng, s, z, None, cond=c), "fp32 inputs on bf16 weights"
-    assert not augattn_sm80.serves(eng, sb, zb, mask.to(torch.uint8), cond=cb), "a non-bool mask"
-    assert not augattn_sm80.serves(eng, sb, zb, None, compute_dtype=torch.float32, cond=cb), "a core precision other than the module's"
+    assert augattn_sm80.serves(eng, sb, zb, mask.expand(2, 1, 256), cond=cb), (
+        "the same mask for every sample"
+    )
+    assert augattn_sm80.serves(eng, sb, zb, _mask(256, 2, 1, 2), cond=cb), (
+        "a mask per sample"
+    )
+    assert augattn_sm80.serves(
+        eng,
+        sb.expand(2, 2, 256, 128),
+        zb.expand(2, 256, 256, 16),
+        None,
+        cond=cb.expand(2, 2, 256, 128),
+    ), "B > 1"
+    assert not augattn_sm80.serves(eng, s, z, None, cond=c), (
+        "fp32 inputs on bf16 weights"
+    )
+    assert not augattn_sm80.serves(eng, sb, zb, mask.to(torch.uint8), cond=cb), (
+        "a non-bool mask"
+    )
+    assert not augattn_sm80.serves(
+        eng, sb, zb, None, compute_dtype=torch.float32, cond=cb
+    ), "a core precision other than the module's"
     assert not augattn_sm80.serves(eng, sb[..., :96], zb, None), "another width"
     assert not augattn_sm80.serves(eng, sb, z, None, cond=cb), "mixed pair dtype"
-    qk = AugmentedAttentionPairBias(*ATOM, use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    qk = (
+        AugmentedAttentionPairBias(
+            *ATOM, use_qk_norm=True, implementation=ImplementationType.MINIWORLD
+        )
+        .cuda()
+        .bfloat16()
+    )
     assert not augattn_sm80.serves(qk, sb, zb, None), "QK-norm"
-    odd = AugmentedAttentionPairBias(96, 128, 16, 4, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()      # head dim 24
+    odd = (
+        AugmentedAttentionPairBias(
+            96, 128, 16, 4, implementation=ImplementationType.MINIWORLD
+        )
+        .cuda()
+        .bfloat16()
+    )  # head dim 24
     assert not augattn_sm80.serves(odd, sb[..., :96], zb, None), "head dim 24"
     _, eng32 = _modules(TOKEN2, dtype=F32)
     s2, c2, z2 = (t for t in _inputs(TOKEN2, 2, 256))
     assert augattn_sm80.serves(eng32, s2, z2, None, cond=c2), "fp32 module and inputs"
-    assert augattn_sm80.serves(eng32, s2.bfloat16(), z2.bfloat16(), None, cond=c2.bfloat16()), "bf16 inputs on fp32 master weights (AMP bf16-mixed)"
+    assert augattn_sm80.serves(
+        eng32, s2.bfloat16(), z2.bfloat16(), None, cond=c2.bfloat16()
+    ), "bf16 inputs on fp32 master weights (AMP bf16-mixed)"
     override_setting(monkeypatch, "augattn_sm80_fused", "0")
-    assert not augattn_sm80.serves(eng32, s2, z2, None, cond=c2), "the earlier composition is bf16 only"
+    assert not augattn_sm80.serves(eng32, s2, z2, None, cond=c2), (
+        "the earlier composition is bf16 only"
+    )
     assert augattn_sm80.serves(eng, sb, zb, None)
     override_setting(monkeypatch, "augattn_sm80_fused", None)
     override_setting(monkeypatch, "augattn_sm80", "0")
@@ -385,7 +493,9 @@ def test_the_pair_bias_cache_serves_fp32_too(monkeypatch):
     mask = _mask(300, 33)
     runs = []
     orig = augattn_sm80._bias_into
-    monkeypatch.setattr(augattn_sm80, "_bias_into", lambda *a, **k: runs.append(1) or orig(*a, **k))
+    monkeypatch.setattr(
+        augattn_sm80, "_bias_into", lambda *a, **k: runs.append(1) or orig(*a, **k)
+    )
     with torch.no_grad():
         base = eng(s, c, z, mask)
         assert len(runs) == 1
@@ -397,34 +507,61 @@ def test_the_pair_bias_cache_serves_fp32_too(monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [BF, F32])
-@pytest.mark.parametrize(("dp", "heads", "length", "masked"), [(128, 16, 256, False), (128, 16, 200, True), (256, 16, 384, True), (64, 8, 130, True), (512, 12, 128, False), (256, 24, 200, False), (128, 4, 128, True)])
+@pytest.mark.parametrize(
+    ("dp", "heads", "length", "masked"),
+    [
+        (128, 16, 256, False),
+        (128, 16, 200, True),
+        (256, 16, 384, True),
+        (64, 8, 130, True),
+        (512, 12, 128, False),
+        (256, 24, 200, False),
+        (128, 4, 128, True),
+    ],
+)
 def test_the_generic_pair_bias_kernels_match_autograd(dp, heads, length, masked, dtype):
     """``pair_bias_generic`` (any width, the pair read once) and its backward (``dz`` and the folded weight's gradient in one pass) against fp64 autograd of ``LayerNorm(z) W'^T``: the bias,
     its keys masked / padded as the module path needs them, dz, dW'."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm80
 
     g = torch.Generator(device="cuda").manual_seed(dp + heads + length)
-    z = (torch.randn(length, length, dp, device="cuda", generator=g) * 1.5 + 0.3).to(dtype)
-    w = torch.randn(heads, dp, device="cuda", generator=g) * dp ** -0.5
+    z = (torch.randn(length, length, dp, device="cuda", generator=g) * 1.5 + 0.3).to(
+        dtype
+    )
+    w = torch.randn(heads, dp, device="cuda", generator=g) * dp**-0.5
     mask = (torch.rand(length, device="cuda", generator=g) > 0.2) if masked else None
     padded = -(-length // 128) * 128
     zd, wd = z.double().requires_grad_(), w.double().requires_grad_()
-    truth = torch.einsum("ijc,hc->hij", torch.nn.functional.layer_norm(zd, (dp,), eps=1e-5), wd)
+    truth = torch.einsum(
+        "ijc,hc->hij", torch.nn.functional.layer_norm(zd, (dp,), eps=1e-5), wd
+    )
     db = torch.randn(heads, padded, padded, device="cuda", generator=g)
     keep = torch.ones(length, dtype=torch.bool, device="cuda") if mask is None else mask
-    truth.backward(db[:, :length, :length].double() * keep[None, None, :])               # a masked key's gradient is dropped
-    assert sm80.pair_bias_generic_supported(dp, heads, dtype) == (heads in sm80.GEN_HEADS)
+    truth.backward(
+        db[:, :length, :length].double() * keep[None, None, :]
+    )  # a masked key's gradient is dropped
+    assert sm80.pair_bias_generic_supported(dp, heads, dtype) == (
+        heads in sm80.GEN_HEADS
+    )
     oscale = 1.0 if dtype is F32 else 2.0
     out = sm80.pair_bias_generic(z, w.t().contiguous(), mask, padded, oscale=oscale)
     got = out[:, :length, :length].double() / oscale
     tol = 4e-3 if dtype is BF else 1e-5
     assert _rel(got[:, :, keep], truth.detach()[:, :, keep]) < tol
-    assert padded == length or (out[:, :length, length:].double() / oscale < -9000).all()                    # padded keys: the fill
-    assert not out[:, length:, :length][:, :, keep].any(), "padded query rows are zero on the valid keys"
+    assert (
+        padded == length or (out[:, :length, length:].double() / oscale < -9000).all()
+    )  # padded keys: the fill
+    assert not out[:, length:, :length][:, :, keep].any(), (
+        "padded query rows are zero on the valid keys"
+    )
     if masked:
-        assert (out[:, :length, :length][:, :, ~keep].double() / oscale < -9000).all(), "masked keys carry the fill"
+        assert (
+            out[:, :length, :length][:, :, ~keep].double() / oscale < -9000
+        ).all(), "masked keys carry the fill"
     if sm80.pair_bias_generic_bwd_supported(dp, heads, dtype):
-        dz, dw = sm80.pair_bias_generic_backward(z, w.t().contiguous(), db, mask, padded)
+        dz, dw = sm80.pair_bias_generic_backward(
+            z, w.t().contiguous(), db, mask, padded
+        )
         assert dz.dtype is dtype
         assert dz.shape == z.shape
         assert _rel(dz, zd.grad) < (6e-3 if dtype is BF else 2e-5)

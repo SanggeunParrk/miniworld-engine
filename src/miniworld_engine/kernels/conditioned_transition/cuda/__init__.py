@@ -16,7 +16,9 @@ from pathlib import Path
 import torch
 
 _dir = Path(__file__).parent
-STAT_W = 128          # kept for the runner's buffer layout (the Triton module's statistics width)
+STAT_W = (
+    128  # kept for the runner's buffer layout (the Triton module's statistics width)
+)
 
 
 @functools.lru_cache(maxsize=None)
@@ -27,10 +29,18 @@ def _ext():
     return load_extension(
         name="token_dit_rows_cuda",
         sources=[str(_dir / "token_dit_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes("80", "90", "100", ptx=("100",))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes("80", "90", "100", ptx=("100",)),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def available() -> bool:
@@ -45,10 +55,18 @@ def _pack_ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="token_dit_pack_sm80", sources=[str(_dir / "token_dit_pack.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--fmad=false",
-                           "-gencode=arch=compute_80,code=sm_80"],
-        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+        name="token_dit_pack_sm80",
+        sources=[str(_dir / "token_dit_pack.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "--fmad=false",
+            "-gencode=arch=compute_80,code=sm_80",
+        ],
+        extra_cflags=["-O3", "-std=c++17"],
+        verbose=False,
+    )
 
 
 def pack_token(block, qscale, bscale):
@@ -117,12 +135,20 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None):
     nb = wt.shape[1]
     m = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
     from miniworld_engine import settings
-    if (z2d.dtype is torch.bfloat16 and wt.dtype is torch.bfloat16 and nb == 16
-            and L % 128 == 0 and torch.cuda.get_device_capability(z2d.device) == (8, 0)
-            and settings.current().token_dit_prep):
+
+    if (
+        z2d.dtype is torch.bfloat16
+        and wt.dtype is torch.bfloat16
+        and nb == 16
+        and L % 128 == 0
+        and torch.cuda.get_device_capability(z2d.device) == (8, 0)
+        and settings.current().token_dit_prep
+    ):
         from miniworld_engine.kernels.augmented_attention.cuda import apb
 
-        apb.ext().pair_bias_fwd(z2d, wt.t().contiguous(), m, out, L, float(eps), float("-inf"))
+        apb.ext().pair_bias_fwd(
+            z2d, wt.t().contiguous(), m, out, L, float(eps), float("-inf")
+        )
         return
     zh = torch.empty(z2d.shape[0], 128, device=z2d.device, dtype=wt.dtype)
     _ext().layernorm128_rows(z2d, zh, float(eps))
@@ -131,4 +157,12 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None):
         out.view(nb, L, L)[:, :, ~m] = float("-inf")
 
 
-__all__ = ["STAT_W", "adaln_rows", "available", "gate_rows", "pair_bias_all", "resgate_adaln_rows", "swiglu_rows"]
+__all__ = [
+    "STAT_W",
+    "adaln_rows",
+    "available",
+    "gate_rows",
+    "pair_bias_all",
+    "resgate_adaln_rows",
+    "swiglu_rows",
+]

@@ -24,7 +24,12 @@ def _fwd_fake(glogit, proj, residual, dropscale):
 
 
 @opaque(fake=_fwd_fake, name="trimul_sm80_gate_elem_fwd")
-def _fwd(glogit: torch.Tensor, proj: torch.Tensor, residual: torch.Tensor, dropscale: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+def _fwd(
+    glogit: torch.Tensor,
+    proj: torch.Tensor,
+    residual: torch.Tensor,
+    dropscale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """y = residual + dropscale ⊙ (proj ⊙ sigmoid(glogit)) and gate = sigmoid(glogit), flat (M, N) operands, dropscale [L, N]."""
     y, gate = torch.empty_like(glogit), torch.empty_like(glogit)
     with torch.cuda.device(glogit.device):
@@ -32,13 +37,24 @@ def _fwd(glogit: torch.Tensor, proj: torch.Tensor, residual: torch.Tensor, drops
     return y, gate
 
 
-def gate_elem_train(x_n: torch.Tensor, proj: torch.Tensor, Wg: torch.Tensor, residual: torch.Tensor, dropscale: torch.Tensor,
-                    seq_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor]:
+def gate_elem_train(
+    x_n: torch.Tensor,
+    proj: torch.Tensor,
+    Wg: torch.Tensor,
+    residual: torch.Tensor,
+    dropscale: torch.Tensor,
+    seq_len: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """TRAINING gate ``y = residual + dropscale ⊙ (proj ⊙ sigmoid(x_n @ Wg))`` and the saved gate; the operands as ``gate_elem.gate_elem_train``."""
     xn_flat = x_n.reshape(-1, x_n.shape[-1])
     m, n = xn_flat.shape[0], proj.shape[-1]
     glogit = xn_flat @ Wg
-    return _fwd(glogit.contiguous(), proj.reshape(m, n).contiguous(), residual.reshape(m, n).contiguous(), dropscale.reshape(-1, n).contiguous())
+    return _fwd(
+        glogit.contiguous(),
+        proj.reshape(m, n).contiguous(),
+        residual.reshape(m, n).contiguous(),
+        dropscale.reshape(-1, n).contiguous(),
+    )
 
 
 def _bwd_ew_fake(dy, proj, gate, dropscale, from_preact):
@@ -48,7 +64,13 @@ def _bwd_ew_fake(dy, proj, gate, dropscale, from_preact):
 
 
 @opaque(fake=_bwd_ew_fake, name="trimul_sm80_gate_elem_bwd_ew")
-def _bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, dropscale: torch.Tensor, from_preact: bool) -> tuple[torch.Tensor, torch.Tensor]:
+def _bwd_ew(
+    dy: torch.Tensor,
+    proj: torch.Tensor,
+    gate: torch.Tensor,
+    dropscale: torch.Tensor,
+    from_preact: bool,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """d_proj = dy ds gate, d_glogit = dy ds proj gate (1 - gate), flat (M, N) operands, dropscale [L, N]."""
     dproj, dglogit = torch.empty_like(dy), torch.empty_like(dy)
     with torch.cuda.device(dy.device):
@@ -56,16 +78,35 @@ def _bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, dropscale:
     return dproj, dglogit
 
 
-def gate_elem_bwd_ew(dy: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, dropscale: torch.Tensor, seq_len: int | None = None,
-                     from_preact: bool = False) -> tuple[torch.Tensor, torch.Tensor]:
+def gate_elem_bwd_ew(
+    dy: torch.Tensor,
+    proj: torch.Tensor,
+    gate: torch.Tensor,
+    dropscale: torch.Tensor,
+    seq_len: int | None = None,
+    from_preact: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Just the elementwise backward: ``(d_proj, d_glogit)``, both (M, N)."""
     n = dy.shape[-1]
     m = dy.numel() // n
-    return _bwd_ew(dy.reshape(m, n).contiguous(), proj.reshape(m, n).contiguous(), gate.reshape(m, n).contiguous(), dropscale.reshape(-1, n).contiguous(), from_preact)
+    return _bwd_ew(
+        dy.reshape(m, n).contiguous(),
+        proj.reshape(m, n).contiguous(),
+        gate.reshape(m, n).contiguous(),
+        dropscale.reshape(-1, n).contiguous(),
+        from_preact,
+    )
 
 
-def gate_elem_bwd(dy: torch.Tensor, x_n: torch.Tensor, proj: torch.Tensor, gate: torch.Tensor, Wg: torch.Tensor, dropscale: torch.Tensor,
-                  seq_len: int | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def gate_elem_bwd(
+    dy: torch.Tensor,
+    x_n: torch.Tensor,
+    proj: torch.Tensor,
+    gate: torch.Tensor,
+    Wg: torch.Tensor,
+    dropscale: torch.Tensor,
+    seq_len: int | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Backward of the gate: ``(d_proj, dx_gate, dWg)`` (dy / proj / gate (M, N), x_n (M, K), Wg (K, N))."""
     d_proj, d_glogit = gate_elem_bwd_ew(dy, proj, gate, dropscale, seq_len)
     return d_proj, d_glogit @ Wg.t(), x_n.reshape(d_glogit.shape[0], -1).t() @ d_glogit

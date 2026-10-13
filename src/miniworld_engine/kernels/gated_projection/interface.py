@@ -20,4 +20,9 @@ from miniworld_engine.kernels.gated_projection.triton.main import (
     triton_gated_projection,
 )
 
-__all__ = ["fused_gate_out", "gated_residual", "sigmoid_gate_fused", "triton_gated_projection"]
+__all__ = [
+    "fused_gate_out",
+    "gated_residual",
+    "sigmoid_gate_fused",
+    "triton_gated_projection",
+]

@@ -15,13 +15,19 @@ from miniworld_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0), reason="A100 (sm_80)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+        reason="A100 (sm_80)",
+    ),
 ]
 LAYOUTS = [(16, 48), (24, 32), (12, 64), (16, 64)]
 
 
 def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-12))
+    return float(
+        (a.detach().float() - b.detach().float()).norm()
+        / b.detach().float().norm().clamp_min(1e-12)
+    )
 
 
 def randomize(module):
@@ -47,10 +53,22 @@ def policy():
 
 def blocks(seed=811, n_head=16, d_head=None):
     torch.manual_seed(seed)
-    ref = randomize(BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH)).cuda().eval()
-    fast = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD).cuda()
+    ref = (
+        randomize(
+            BiasOnlyDiTBlock(
+                n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+            )
+        )
+        .cuda()
+        .eval()
+    )
+    fast = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD
+    ).cuda()
     fast.load_state_dict(ref.state_dict())
-    ref_bf = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH).cuda()
+    ref_bf = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+    ).cuda()
     ref_bf.load_state_dict(ref.state_dict())
     return ref, fast.to(torch.bfloat16).eval(), ref_bf.to(torch.bfloat16).eval()
 
@@ -62,7 +80,11 @@ def blocks(seed=811, n_head=16, d_head=None):
 def test_block_matches_the_pytorch_block(L, S, shared, masked, n_head, d_head):
     ref, fast, ref_bf = blocks(n_head=n_head, d_head=d_head)
     x = torch.randn(S, 1, L, 768, device="cuda")
-    c = torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384) if shared else torch.randn(S, 1, L, 384, device="cuda")
+    c = (
+        torch.randn(1, 1, L, 384, device="cuda").expand(S, 1, L, 384)
+        if shared
+        else torch.randn(S, 1, L, 384, device="cuda")
+    )
     p = torch.randn(1, L, L, 128, device="cuda")
     mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -73,7 +95,10 @@ def test_block_matches_the_pytorch_block(L, S, shared, masked, n_head, d_head):
         got = fast(*args)
         base = ref_bf(*args)
     # against fp32: within the PyTorch bf16 block's own error
-    assert relative(got, want) <= 1.05 * relative(base, want) + 1e-4, (relative(got, want), relative(base, want))
+    assert relative(got, want) <= 1.05 * relative(base, want) + 1e-4, (
+        relative(got, want),
+        relative(base, want),
+    )
     assert relative(got, base) < 0.01
 
 
@@ -86,7 +111,9 @@ def test_caches_follow_live_weights_and_pair():
     with torch.no_grad():
         got = fast(x, c, p)
         assert relative(got, ref_bf(x, c, p)) < 0.01
-        compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
+        compiled = torch.compile(
+            fast, fullgraph=True, options={"triton.cudagraphs": False}
+        )
         assert relative(compiled(x, c, p), got) < 1e-5
         # a weight updated in place bumps its version: the pack misses
         fast.transition.squeeze.weight.mul_(0.8)
@@ -106,10 +133,16 @@ def test_declines_what_it_does_not_serve():
     p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert bias_only_dit.serves(fast, x, c, p)
-        assert not bias_only_dit.serves(fast, x.float(), c.float(), p.float())             # bf16 only
-        assert not bias_only_dit.serves(fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200])   # L % 128
-        assert not bias_only_dit.serves(fast, x, c, p, torch.ones(5, 384, device="cuda", dtype=torch.bool))  # a mask per sample
-    assert not bias_only_dit.serves(fast, x, c, p)                                          # autograd on
+        assert not bias_only_dit.serves(
+            fast, x.float(), c.float(), p.float()
+        )  # bf16 only
+        assert not bias_only_dit.serves(
+            fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200]
+        )  # L % 128
+        assert not bias_only_dit.serves(
+            fast, x, c, p, torch.ones(5, 384, device="cuda", dtype=torch.bool)
+        )  # a mask per sample
+    assert not bias_only_dit.serves(fast, x, c, p)  # autograd on
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -127,14 +160,29 @@ def test_core_and_softmax_match_their_references(L, S, n_head, d_head):
     a = torch.empty(M, DA, device="cuda", dtype=torch.bfloat16)
     sm80.PvGate(n_head, d_head)(vg[:, :DA], P, a, S, g=vg[:, DA:])
     assert relative(a, R.pv_gate(vg, P, S)) < 1e-3
-    for stages, sg in ((2, 1), (2, 3), (3, 2), (3, 4)):                                       # every schedule (a short last group of samples included) computes the same function
+    for stages, sg in (
+        (2, 1),
+        (2, 3),
+        (3, 2),
+        (3, 4),
+    ):  # every schedule (a short last group of samples included) computes the same function
         b = torch.empty_like(a)
-        sm80.PvGate(n_head, d_head)(vg[:, :DA], P, b, S, g=vg[:, DA:], stages=stages, sg=sg)
+        sm80.PvGate(n_head, d_head)(
+            vg[:, :DA], P, b, S, g=vg[:, DA:], stages=stages, sg=sg
+        )
         assert relative(b, a) < 1e-6, (stages, sg)
-    plain = torch.empty(M, DA, device="cuda", dtype=torch.bfloat16)                          # without the gate: the product alone
+    plain = torch.empty(
+        M, DA, device="cuda", dtype=torch.bfloat16
+    )  # without the gate: the product alone
     sm80.PvGate(n_head, d_head)(vg[:, :DA], P, plain, S)
-    want = torch.einsum("hij,sjhd->sihd", P.float().view(n_head, L, L), vg[:, :DA].float().view(S, L, n_head, d_head)).reshape(M, DA)
-    assert relative(plain, want.bfloat16()) < 1e-3                                           # the same single rounding to bf16 as the kernel's
+    want = torch.einsum(
+        "hij,sjhd->sihd",
+        P.float().view(n_head, L, L),
+        vg[:, :DA].float().view(S, L, n_head, d_head),
+    ).reshape(M, DA)
+    assert (
+        relative(plain, want.bfloat16()) < 1e-3
+    )  # the same single rounding to bf16 as the kernel's
 
 
 def test_fully_masked_rows_are_uniform():
@@ -148,7 +196,9 @@ def test_inference_is_cuda_graph_capturable_and_deterministic():
     _, fast, _ = blocks(seed=9)
     L = 256
     x = torch.randn(5, 1, L, 768, device="cuda", dtype=torch.bfloat16)
-    c = torch.randn(1, 1, L, 384, device="cuda", dtype=torch.bfloat16).expand(5, 1, L, 384)
+    c = torch.randn(1, 1, L, 384, device="cuda", dtype=torch.bfloat16).expand(
+        5, 1, L, 384
+    )
     p = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         eager = fast(x, c, p)
@@ -170,7 +220,9 @@ def test_inference_is_cuda_graph_capturable_and_deterministic():
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 @pytest.mark.parametrize("fp32_parameters", [False, True])
 @pytest.mark.parametrize("misaligned", [False, True])
-def test_native_pack_matches_previous_recipe(monkeypatch, n_head, d_head, fp32_parameters, misaligned):
+def test_native_pack_matches_previous_recipe(
+    monkeypatch, n_head, d_head, fp32_parameters, misaligned
+):
     from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
 
     _, fast, _ = blocks(seed=102, n_head=n_head, d_head=d_head)
@@ -188,14 +240,20 @@ def test_native_pack_matches_previous_recipe(monkeypatch, n_head, d_head, fp32_p
         override_setting(monkeypatch, "bias_only_dit_prep", "1")
         new = FusedBiasOnlyDiT([fast])
         for name in ("w1", "b1", "w2", "b2", "pw"):
-            torch.testing.assert_close(getattr(new, name), getattr(old, name), rtol=0, atol=0)
+            torch.testing.assert_close(
+                getattr(new, name), getattr(old, name), rtol=0, atol=0
+            )
         for name in ("wvg", "wo", "wab", "ws"):
-            torch.testing.assert_close(new.per[0][name], old.per[0][name], rtol=0, atol=0)
+            torch.testing.assert_close(
+                new.per[0][name], old.per[0][name], rtol=0, atol=0
+            )
         # The disabled conditioning experiment must issue no preparation kernels.
         assert not hasattr(new, "wc")
         new._conditioning_weights()
         for name in ("wc", "bc", "csc"):
-            torch.testing.assert_close(getattr(new, name), getattr(old, name), rtol=0, atol=0)
+            torch.testing.assert_close(
+                getattr(new, name), getattr(old, name), rtol=0, atol=0
+            )
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -203,9 +261,11 @@ def test_fullgraph_replay_reads_changed_inputs_mask_and_all_weights(n_head, d_he
     _, fast, ref = blocks(seed=103, n_head=n_head, d_head=d_head)
     L, S = 256, 3
     x = torch.randn(S, 1, L, 768, device="cuda", dtype=torch.bfloat16)
-    c = torch.randn(1, 1, L, 384, device="cuda", dtype=torch.bfloat16).expand(S, 1, L, 384)
+    c = torch.randn(1, 1, L, 384, device="cuda", dtype=torch.bfloat16).expand(
+        S, 1, L, 384
+    )
     p = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16)
-    mask = torch.rand(1, L, device="cuda") > .2
+    mask = torch.rand(1, L, device="cuda") > 0.2
     compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
     with torch.no_grad():
         compiled(x, c, p, mask)
@@ -219,9 +279,11 @@ def test_fullgraph_replay_reads_changed_inputs_mask_and_all_weights(n_head, d_he
             out = compiled(x, c, p, mask)
         graph.replay()
         initial = out.clone()
-        x.normal_(); c[0].normal_(); p.normal_()
+        x.normal_()
+        c[0].normal_()
+        p.normal_()
         for name, weight in fast.named_parameters():
-            weight.add_(.02 * torch.randn_like(weight))
+            weight.add_(0.02 * torch.randn_like(weight))
             ref.get_parameter(name).copy_(weight)
         for mode in ("partial", "empty", "single"):
             mask.zero_()
@@ -233,7 +295,7 @@ def test_fullgraph_replay_reads_changed_inputs_mask_and_all_weights(n_head, d_he
             live = fast(x, c, p, mask)
             want = ref(x, c, p, mask)
             torch.testing.assert_close(out, live, atol=0, rtol=0)
-            assert relative(out, want) < .01
+            assert relative(out, want) < 0.01
             assert not torch.equal(initial, out)
 
 
@@ -246,7 +308,7 @@ def test_multiblock_runner_preserves_previous_result(monkeypatch, n_head):
     x = torch.randn(2, 1, 128, 768, device="cuda", dtype=torch.bfloat16)
     c = torch.randn(1, 1, 128, 384, device="cuda", dtype=torch.bfloat16)
     p = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
-    mask = torch.rand(1, 128, device="cuda") > .2
+    mask = torch.rand(1, 128, device="cuda") > 0.2
     with torch.no_grad():
         override_setting(monkeypatch, "bias_only_dit_prep", "0")
         old = FusedBiasOnlyDiT([first, second])
@@ -255,4 +317,4 @@ def test_multiblock_runner_preserves_previous_result(monkeypatch, n_head):
         new = FusedBiasOnlyDiT([first, second])
         got = new.step(x, c, new.hoist(p, mask))
         assert not hasattr(new, "wc")
-        assert relative(got, want) < .001
+        assert relative(got, want) < 0.001

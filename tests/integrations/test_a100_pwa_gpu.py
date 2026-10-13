@@ -14,7 +14,10 @@ from miniworld_engine.kernels.pair_weighted_averaging.reference import (
 from miniworld_engine.modules import MSAPairWeightedAveraging
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -28,14 +31,35 @@ def _rel(a, b):
 
 
 # (d_msa, d_pair, per-head width): the registry's rows (MiniWorld's 64 / 128 with 8- or 32-wide heads, ESMFold2's 128 / 256, Protenix-v2 / OpenDDE's d_hidden = 8) and the 128 / 128 corner
-SHAPES = [(64, 128, 32), (64, 128, 8), (64, 128, 16), (128, 256, 16), (128, 256, 8), (128, 384, 8), (128, 128, 8)]
-PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "ln_pair.weight", "ln_pair.bias", "to_bias.weight", "to_out.weight")
+SHAPES = [
+    (64, 128, 32),
+    (64, 128, 8),
+    (64, 128, 16),
+    (128, 256, 16),
+    (128, 256, 8),
+    (128, 384, 8),
+    (128, 128, 8),
+]
+PARAMS = (
+    "ln_msa.weight",
+    "ln_msa.bias",
+    "to_value.weight",
+    "to_gate.weight",
+    "ln_pair.weight",
+    "ln_pair.bias",
+    "to_bias.weight",
+    "to_out.weight",
+)
 
 
 def _modules(d_msa, d_pair, c, seed=0):
     torch.manual_seed(seed)
-    ref = MSAPairWeightedAveraging(d_msa, d_pair, 8, c, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised to_out, unit LayerNorms
+    ref = MSAPairWeightedAveraging(
+        d_msa, d_pair, 8, c, implementation=ImplementationType.PYTORCH
+    )
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised to_out, unit LayerNorms
         for n, p in ref.named_parameters():
             if n.endswith(("ln_msa.weight", "ln_pair.weight")):
                 p.copy_(1.0 + 0.2 * torch.randn_like(p))
@@ -77,13 +101,24 @@ def _run(mod, dtype, msa, pair, mask, dy, grad):
 
 def _compare(got, base, want, msa, strict=1.15):
     for n in want:
-        if n == "ln_pair.bias":             # identically zero in exact arithmetic (a softmax cannot see a shift shared by all keys): rounding noise on both sides
+        if (
+            n == "ln_pair.bias"
+        ):  # identically zero in exact arithmetic (a softmax cannot see a shift shared by all keys): rounding noise on both sides
             assert got[n].norm() < 0.1 * want["ln_pair.weight"].norm() + 1e-6
             continue
         ea, eb = _rel(got[n], want[n]), _rel(base[n], want[n])
-        assert ea <= max(3e-3, (strict if n in ("out", "dmsa", "dpair") else 1.25) * eb), (n, ea, eb)          # parameter gradients are sums over every token: a noisier statistic
-        if n == "out":                      # the update is small against the residual: judge it on its own
-            ua, ub = _rel(got[n] - msa.bfloat16().float(), want[n] - msa), _rel(base[n] - msa.bfloat16().float(), want[n] - msa)
+        assert ea <= max(
+            3e-3, (strict if n in ("out", "dmsa", "dpair") else 1.25) * eb
+        ), (
+            n,
+            ea,
+            eb,
+        )  # parameter gradients are sums over every token: a noisier statistic
+        if n == "out":  # the update is small against the residual: judge it on its own
+            ua, ub = (
+                _rel(got[n] - msa.bfloat16().float(), want[n] - msa),
+                _rel(base[n] - msa.bfloat16().float(), want[n] - msa),
+            )
             assert ua <= max(3e-3, strict * ub), ("update", ua, ub)
 
 
@@ -97,7 +132,9 @@ def _check(shape, S, L, masked, grad):
         m.drop_msa.p_drop = 0.0
     msa, pair, mask, dy = _inputs(S, L, d_msa, d_pair, masked)
     with torch.set_grad_enabled(grad):
-        assert (pwa_sm80.serves_train if grad else pwa_sm80.serves_inference)(ours, msa.bfloat16(), pair.bfloat16(), mask)
+        assert (pwa_sm80.serves_train if grad else pwa_sm80.serves_inference)(
+            ours, msa.bfloat16(), pair.bfloat16(), mask
+        )
     _, want = _run(ref, torch.float32, msa, pair, mask, dy, grad)
     _, base = _run(twin, torch.bfloat16, msa, pair, mask, dy, grad)
     y, got = _run(ours, torch.bfloat16, msa, pair, mask, dy, grad)
@@ -159,14 +196,18 @@ def test_pwa_a100_chunked_depth_training(S):
     _check((64, 128, 32), S=S, L=32, masked=True, grad=True)
     _check((128, 256, 16), S=S, L=48, masked=False, grad=True)
     _check((128, 384, 8), S=S, L=16, masked=True, grad=True)
-    _check((64, 128, 32), S=S, L=32, masked=True, grad=False)                 # inference reads the same chunked layout
+    _check(
+        (64, 128, 32), S=S, L=32, masked=True, grad=False
+    )  # inference reads the same chunked layout
     _check((128, 256, 16), S=S, L=48, masked=False, grad=False)
 
 
 def test_pwa_a100_split_choice_and_switch(monkeypatch):
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
-    assert [sm80.pick_split(s) for s in (1, 200, 255, 256, 384, 512, 1000, 1024, 3072)] == [1, 1, 1, 2, 1, 4, 1, 4, 4]
+    assert [
+        sm80.pick_split(s) for s in (1, 200, 255, 256, 384, 512, 1000, 1024, 3072)
+    ] == [1, 1, 1, 2, 1, 4, 1, 4, 4]
     override_setting(monkeypatch, "pwa_sm80_split", "1")
     assert sm80.pick_split(1024) == 1
     override_setting(monkeypatch, "pwa_sm80_split", "4")
@@ -178,7 +219,6 @@ def test_pwa_a100_split_choice_and_switch(monkeypatch):
 @pytest.mark.parametrize("ns", [2, 4, 8])
 def test_pwa_a100_split_matches_unsplit(monkeypatch, ns):
     """The chunked contractions change only the summation order of dw (and the layout of the intermediates): the gradients agree with the unsplit run to bf16 rounding."""
-    from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     def run(n):
         override_setting(monkeypatch, "pwa_sm80_split", str(n))
@@ -189,9 +229,13 @@ def test_pwa_a100_split_matches_unsplit(monkeypatch, ns):
         return _run(ours, torch.bfloat16, msa, pair, mask, dy, True)
 
     (y1, g1), (yn, gn) = run(1), run(ns)
-    assert _rel(yn.float(), y1.float()) < 5e-3                      # the forward changes at most the cuBLAS tile order inside a bf16 rounding
+    assert (
+        _rel(yn.float(), y1.float()) < 5e-3
+    )  # the forward changes at most the cuBLAS tile order inside a bf16 rounding
     for name in g1:
-        if name != "ln_pair.bias":                                  # (identically zero in exact arithmetic: rounding noise on both sides)
+        if (
+            name != "ln_pair.bias"
+        ):  # (identically zero in exact arithmetic: rounding noise on both sides)
             assert _rel(gn[name], g1[name]) < 2e-2, name
 
 
@@ -207,7 +251,7 @@ def test_pwa_a100_short_lengths(L):
     _check((64, 128, 8), S=100, L=L, masked=True, grad=True)
 
 
-@pytest.mark.parametrize("S,L", [(96, 64), (1024, 128)])
+@pytest.mark.parametrize(("S", "L"), [(96, 64), (1024, 128)])
 def test_pwa_a100_everything_masked_is_finite(S, L):
     """A key mask without a valid key: the softmax is uniform (the module's finfo.min fill makes every logit equal), finite in both directions."""
     _, ours, _ = _modules(64, 128, 32)
@@ -239,28 +283,53 @@ def test_pwa_a100_fused_dropout(shape):
     y = ours(x, z, mask)
     y.backward(dy.bfloat16())
     upd = y.detach().float() - msa.bfloat16().float()
-    keep = (upd.abs().sum(dim=1) > 0)                                                   # [1, L, d_msa]: dropped (token, channel) pairs have exactly zero update
+    keep = (
+        upd.abs().sum(dim=1) > 0
+    )  # [1, L, d_msa]: dropped (token, channel) pairs have exactly zero update
     assert 0.65 < keep.float().mean().item() < 0.85
-    assert ((upd != 0).float().mean(dim=1)[keep] > 0.9).all()                           # a kept position is nonzero on (almost) every MSA row: the mask is shared by the rows
-    w = [ours.ln_msa.weight, ours.ln_msa.bias, ours.to_value.weight, ours.to_gate.weight, ours.ln_pair.weight, ours.ln_pair.bias, ours.to_bias.weight, ours.to_out.weight]
+    assert (
+        (upd != 0).float().mean(dim=1)[keep] > 0.9
+    ).all()  # a kept position is nonzero on (almost) every MSA row: the mask is shared by the rows
+    w = [
+        ours.ln_msa.weight,
+        ours.ln_msa.bias,
+        ours.to_value.weight,
+        ours.to_gate.weight,
+        ours.ln_pair.weight,
+        ours.ln_pair.bias,
+        ours.to_bias.weight,
+        ours.to_out.weight,
+    ]
 
     def reference(dtype):
         xs = msa.to(dtype).clone().requires_grad_()
         zs = pair.to(dtype).clone().requires_grad_()
         ws = [t.detach().to(dtype).clone().requires_grad_() for t in w]
-        out = pair_weighted_averaging_reference(xs, zs, mask, *ws, keep=keep.to(dtype), p_drop=p_drop)
+        out = pair_weighted_averaging_reference(
+            xs, zs, mask, *ws, keep=keep.to(dtype), p_drop=p_drop
+        )
         grads = torch.autograd.grad(out, [xs, zs, *ws], dy.to(dtype))
         return out.detach().float(), [g.float() for g in grads]
 
     want, gw = reference(torch.float32)
     base, gb = reference(torch.bfloat16)
-    assert _rel(y.detach().float() - msa.bfloat16().float(), want - msa) <= max(3e-3, 1.15 * _rel(base - msa.bfloat16().float(), want - msa))
-    got = {"dmsa": x.grad.float(), "dpair": z.grad.float(), **{n: p.grad.float() for n, p in ours.named_parameters()}}
-    ref_names = ["dmsa", "dpair", *PARAMS]                                              # the reference function's argument order
-    for n, a, b, wnt in zip(ref_names, [got[k] for k in ref_names], gb, gw, strict=True):
+    assert _rel(y.detach().float() - msa.bfloat16().float(), want - msa) <= max(
+        3e-3, 1.15 * _rel(base - msa.bfloat16().float(), want - msa)
+    )
+    got = {
+        "dmsa": x.grad.float(),
+        "dpair": z.grad.float(),
+        **{n: p.grad.float() for n, p in ours.named_parameters()},
+    }
+    ref_names = ["dmsa", "dpair", *PARAMS]  # the reference function's argument order
+    for n, a, b, wnt in zip(
+        ref_names, [got[k] for k in ref_names], gb, gw, strict=True
+    ):
         if n == "ln_pair.bias":
             continue
-        assert _rel(a, wnt) <= max(3e-3, (1.15 if n.startswith("d") else 1.25) * _rel(b, wnt)), (n, _rel(a, wnt), _rel(b, wnt))
+        assert _rel(a, wnt) <= max(
+            3e-3, (1.15 if n.startswith("d") else 1.25) * _rel(b, wnt)
+        ), (n, _rel(a, wnt), _rel(b, wnt))
 
 
 def test_pwa_a100_dropout_off_in_eval_and_without_grad():
@@ -280,7 +349,9 @@ def test_pwa_a100_dropout_off_in_eval_and_without_grad():
         assert not pwa_sm80.serves_inference(ours, mb, zb, mask)
         assert pwa_sm80.serves_train(ours, mb, zb, mask)
         y = ours(mb, zb, mask)
-    assert (y == mb).float().mean().item() > 0.05                                    # dropped channels leave the residual untouched
+    assert (
+        y == mb
+    ).float().mean().item() > 0.05  # dropped channels leave the residual untouched
 
 
 def test_pwa_a100_gate_conditions():
@@ -293,17 +364,26 @@ def test_pwa_a100_gate_conditions():
     mb, zb = msa.bfloat16(), pair.bfloat16()
     with torch.no_grad():
         assert pwa_sm80.serves_inference(ours, mb, zb, mask)
-        assert not pwa_sm80.serves_inference(ours, msa, pair, mask)                              # fp32
-        assert not pwa_sm80.serves_inference(ours, mb.expand(2, -1, -1, -1), zb.expand(2, -1, -1, -1), mask.expand(2, -1))   # B = 2
-        assert not pwa_sm80.serves_inference(ours, mb[:, :, :60], zb[:, :60, :60], mask[:, :60])  # L not a multiple of 16
-        assert not pwa_sm80.serves_inference(ours, mb, zb, mask.float())                          # a float mask
-        assert not pwa_sm80.serves_inference(ours, mb, zb[..., :96], mask)                        # d_pair 96
-        _, big, _ = _modules(128, 256, 32)                                                        # d_msa 128 with 32-wide heads: not built
-        assert not pwa_sm80.serves_inference(big, torch.randn(1, 8, 64, 128, device="cuda", dtype=torch.bfloat16), torch.randn(1, 64, 64, 256, device="cuda", dtype=torch.bfloat16), None)
+        assert not pwa_sm80.serves_inference(ours, msa, pair, mask)  # fp32
+        assert not pwa_sm80.serves_inference(
+            ours, mb.expand(2, -1, -1, -1), zb.expand(2, -1, -1, -1), mask.expand(2, -1)
+        )  # B = 2
+        assert not pwa_sm80.serves_inference(
+            ours, mb[:, :, :60], zb[:, :60, :60], mask[:, :60]
+        )  # L not a multiple of 16
+        assert not pwa_sm80.serves_inference(ours, mb, zb, mask.float())  # a float mask
+        assert not pwa_sm80.serves_inference(ours, mb, zb[..., :96], mask)  # d_pair 96
+        _, big, _ = _modules(128, 256, 32)  # d_msa 128 with 32-wide heads: not built
+        assert not pwa_sm80.serves_inference(
+            big,
+            torch.randn(1, 8, 64, 128, device="cuda", dtype=torch.bfloat16),
+            torch.randn(1, 64, 64, 256, device="cuda", dtype=torch.bfloat16),
+            None,
+        )
         pt = copy.deepcopy(ours)
         pt.implementation = ImplementationType.PYTORCH
         assert not pwa_sm80.serves_inference(pt, mb, zb, mask)
-    assert not pwa_sm80.serves_inference(ours, mb, zb, mask)                                      # grad enabled
+    assert not pwa_sm80.serves_inference(ours, mb, zb, mask)  # grad enabled
     assert pwa_sm80.serves_train(ours, mb, zb, mask)
 
 
@@ -320,7 +400,9 @@ def test_pwa_a100_env_switch_and_triton_agreement(monkeypatch):
         override_setting(monkeypatch, "pwa_sm80", "0")
         assert not pwa_sm80.serves_inference(ours, mb, zb, mask)
         base = ours(mb, zb, mask)
-    assert _rel(got - mb, base - mb) < 3e-2                                                   # the update alone (Triton and ours round at different points)
+    assert (
+        _rel(got - mb, base - mb) < 3e-2
+    )  # the update alone (Triton and ours round at different points)
 
 
 def test_pwa_a100_training_is_bit_reproducible():
@@ -341,7 +423,9 @@ def test_pwa_a100_pair_bwd_schedules_agree(ns):
     length, dz_ = 96, 128
     g = torch.Generator(device="cuda").manual_seed(5)
     z = torch.randn(length, length, dz_, device="cuda", generator=g).bfloat16()
-    w = torch.softmax(torch.randn(8, length, length, device="cuda", generator=g), -1).bfloat16()
+    w = torch.softmax(
+        torch.randn(8, length, length, device="cuda", generator=g), -1
+    ).bfloat16()
     dw = torch.randn(8 * ns, length, length, device="cuda", generator=g)
     lnw = 1.0 + 0.1 * torch.randn(dz_, device="cuda", generator=g)
     lnb = 0.1 * torch.randn(dz_, device="cuda", generator=g)

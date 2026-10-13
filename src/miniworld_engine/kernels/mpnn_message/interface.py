@@ -120,7 +120,9 @@ def message_hidden_reduce(
         from miniworld_engine.integrations import mpnn_msg_sm80
 
         if mpnn_msg_sm80.serves_message(preactivation, backend):
-            return mpnn_msg_sm80.message_hidden_reduce(preactivation, weight, bias, edge_mask, neighbor_scale)
+            return mpnn_msg_sm80.message_hidden_reduce(
+                preactivation, weight, bias, edge_mask, neighbor_scale
+            )
         if not torch.is_grad_enabled():
             from miniworld_engine.kernels.mpnn_message.triton.inference import (
                 _int32_offsets_supported,

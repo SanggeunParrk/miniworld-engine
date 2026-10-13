@@ -55,6 +55,7 @@ from miniworld_engine.modules.exceptions import (
 if sys.version_info >= (3, 11):
     from enum import StrEnum as _StrEnum
 else:  # pragma: no cover -- exercised only on 3.10
+
     class _StrEnum(str, Enum):
         pass
 
@@ -108,9 +109,11 @@ def needs_backward(module: torch.nn.Module, *inputs: torch.Tensor) -> bool:
     """
     if not torch.is_grad_enabled():
         return False
-    return (module.training
-            or any(isinstance(t, torch.Tensor) and t.requires_grad for t in inputs)
-            or any(p.requires_grad for p in module.parameters()))
+    return (
+        module.training
+        or any(isinstance(t, torch.Tensor) and t.requires_grad for t in inputs)
+        or any(p.requires_grad for p in module.parameters())
+    )
 
 
 # --------------------------------------------------------------------------- #
@@ -240,7 +243,9 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     return KernelBackend.TRITON
 
 
-def _torch_on_b200(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
+def _torch_on_b200(
+    default: KernelBackend,
+) -> Callable[[torch.device | None], KernelBackend]:
     """B200 runs this op as PyTorch ops that ``torch.compile`` fuses; every other card keeps ``default``.
     ``settings.b200_engine_triton`` brings the engine's Triton kernels back on B200 (A/B). Resolved once, when the module is built."""
 
@@ -248,7 +253,9 @@ def _torch_on_b200(default: KernelBackend) -> Callable[[torch.device | None], Ke
         from miniworld_engine import settings
 
         if torch.cuda.is_available() and not settings.current().b200_engine_triton:
-            index = device.index if device is not None and device.type == "cuda" else None
+            index = (
+                device.index if device is not None and device.type == "cuda" else None
+            )
             if torch.cuda.get_device_capability(index) == (10, 0):
                 return KernelBackend.PYTORCH
         return default
@@ -292,6 +299,7 @@ def resolve(
     ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
     impl = _coerce(impl)
     from miniworld_engine import settings
+
     if settings.current().engine_backend == "triton":
         if impl in {ImplementationType.CUDA, ImplementationType.ANTHROPIC}:
             raise ValueError(f"{op}: {impl.value} conflicts with engine_backend=triton")
@@ -304,8 +312,14 @@ def resolve(
     # Only explicitly integrated operations may claim the Anthropic backend.
     # MSA modules enter their adapter before consulting this resolver.
     if impl == ImplementationType.ANTHROPIC and op not in {
-        "triangle_multiplication", "triangle_attention", "transition", "layernorm", "rmsnorm",
-        "adaptive_layernorm", "conditioned_transition", "augmented_attention",
+        "triangle_multiplication",
+        "triangle_attention",
+        "transition",
+        "layernorm",
+        "rmsnorm",
+        "adaptive_layernorm",
+        "conditioned_transition",
+        "augmented_attention",
     }:
         raise ValueError(f"{op}: no Anthropic adapter for this operation")
     if impl != ImplementationType.MINIWORLD:

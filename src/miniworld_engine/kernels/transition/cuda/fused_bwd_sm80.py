@@ -27,12 +27,28 @@ MIN_ROWS = {(64, 128): 8192, (64, 256): 2048, (128, 256): 8192, (128, 512): 8192
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    extra = settings.current().transition_bwd_sm80_flags.split()      # experiments: extra nvcc flags (their own build)
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    extra = (
+        settings.current().transition_bwd_sm80_flags.split()
+    )  # experiments: extra nvcc flags (their own build)
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
-        name=f"transition_bwd_sm80{tag}", sources=[str(_dir / "transition_bwd_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", "-DPW_XN", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=bool(extra),
+        name=f"transition_bwd_sm80{tag}",
+        sources=[str(_dir / "transition_bwd_sm80.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            "-DPW_XN",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=bool(extra),
     )
 
 
@@ -49,7 +65,11 @@ def loads() -> bool:
         _ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"fused sm80 Transition backward unavailable, keeping the wide path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"fused sm80 Transition backward unavailable, keeping the wide path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -67,7 +87,12 @@ def _layout_bwd(wa, wb, ws, dev, d, h):
     su = 8192 // d
     nsl, nchunk = h // su, h // 32
     op = _o_perm(dev, d)
-    w1s = torch.stack([wa.view(nsl, su // 16, 16, d), wb.view(nsl, su // 16, 16, d)], 2).reshape(nsl, 2 * su, d).view(nsl, 2 * su, d // 8, 8).transpose(1, 2)
+    w1s = (
+        torch.stack([wa.view(nsl, su // 16, 16, d), wb.view(nsl, su // 16, 16, d)], 2)
+        .reshape(nsl, 2 * su, d)
+        .view(nsl, 2 * su, d // 8, 8)
+        .transpose(1, 2)
+    )
     w3s = ws.t().reshape(nsl, su, d // 8, 8).transpose(1, 2)
     wdw = torch.cat([w1s.reshape(nsl, -1), w3s.reshape(nsl, -1)], 1).reshape(-1)
     xa = wa[:, op].reshape(nchunk, 32, d // 8, 8).transpose(1, 2).reshape(nchunk, -1)
@@ -79,13 +104,27 @@ def _layout_bwd(wa, wb, ws, dev, d, h):
 def _tables(dev, d, h):
     """Gather table of the pack kernel for [wdw | wx] (element | source << 26 (Wa, Wb, Ws) | x0.5 << 28) and the length of the wdw part."""
     n = h * d
-    code = lambda src: (torch.arange(n, device=dev, dtype=torch.int64) | (src << 26))  # noqa: E731
+    code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb, ws = code(0).view(h, d), code(1).view(h, d), code(2).view(d, h)
-    wdw, wx = _layout_bwd(wa | (1 << 28), wb, ws, dev, d, h)                           # Wa carries the 1/2 in both roles (PW's dA tile holds 2 dA)
+    wdw, wx = _layout_bwd(
+        wa | (1 << 28), wb, ws, dev, d, h
+    )  # Wa carries the 1/2 in both roles (PW's dA tile holds 2 dA)
     return torch.cat([wdw, wx]).to(torch.int32).contiguous(), wdw.numel()
 
 
-def backward(dy, x, xn, stats, gamma, wa, wb, ws, ln: bool, gdt: torch.dtype = torch.float32, wdt: torch.dtype = torch.bfloat16):
+def backward(
+    dy,
+    x,
+    xn,
+    stats,
+    gamma,
+    wa,
+    wb,
+    ws,
+    ln: bool,
+    gdt: torch.dtype = torch.float32,
+    wdt: torch.dtype = torch.bfloat16,
+):
     """(dx, dgamma, dbeta [``gdt``; empty without ``ln``], [dWa; dWb] [2H, D], dWs [D, H] in ``wdt``: bf16, or f32 unrounded for an fp32 master) of x [M, D] bf16; ``xn`` is the saved LayerNorm output (the FFN: unused,
     x feeds PW); gamma f32."""
     d, h = x.shape[1], wa.shape[0]
@@ -94,4 +133,20 @@ def backward(dy, x, xn, stats, gamma, wa, wb, ws, ln: bool, gdt: torch.dtype = t
     ext = _ext()
     ext.pack(wa, wb, ws, idx16, packed)
     nrep = settings.current().transition_bwd_sm80_nrep
-    return tuple(ext.bwd(d, h, ln, dy, x, xn if ln else x, stats, packed[:n_wdw], packed[n_wdw:], gamma, nrep, gdt, wdt))
+    return tuple(
+        ext.bwd(
+            d,
+            h,
+            ln,
+            dy,
+            x,
+            xn if ln else x,
+            stats,
+            packed[:n_wdw],
+            packed[n_wdw:],
+            gamma,
+            nrep,
+            gdt,
+            wdt,
+        )
+    )

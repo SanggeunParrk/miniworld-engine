@@ -145,7 +145,9 @@ def edge_tail_update(
         # The A100 hand-CUDA kernels (lazy: never imported off sm_80, never built until used); the Triton kernels keep every other card, the switch off and a failed build.
         from miniworld_engine.integrations import mpnn_edge_sm80
 
-        if mpnn_edge_sm80.tail_serves(edge_states, edge_weight, hidden_weight, output_weight):
+        if mpnn_edge_sm80.tail_serves(
+            edge_states, edge_weight, hidden_weight, output_weight
+        ):
             return mpnn_edge_sm80.edge_tail_update(
                 edge_states,
                 query_projection,
@@ -164,7 +166,9 @@ def edge_tail_update(
                 recompute=backend == "triton",
             )
         if backend == "cuda":
-            raise ValueError("the sm_80 CUDA MPNN edge tail needs an A100 (capability 8.0), 16-byte aligned weight rows and a loadable extension")
+            raise ValueError(
+                "the sm_80 CUDA MPNN edge tail needs an A100 (capability 8.0), 16-byte aligned weight rows and a loadable extension"
+            )
     if backend == "triton_compute":
         # The compute path is written against a flat [rows, 128] view; the contract
         # checked above already guarantees the activations are contiguous, so these are

@@ -4,6 +4,7 @@ The paths themselves need an H100 and OPT_CORE_DIR; these cover the contract aro
 payload refuses with its reason instead of quietly running something else, the auto option falls back, and the
 refusals that do not need a GPU (dtype, batch, the epilogue's fixed dims) name what they refused.
 """
+
 import pytest
 import torch
 
@@ -25,7 +26,7 @@ def _no_payload(monkeypatch):
 def test_only_the_named_and_the_auto_option_ask_for_it(monkeypatch):
     assert msa.wanted(ImplementationType.ANTHROPIC)
     assert not msa.wanted(ImplementationType.PYTORCH)
-    assert not msa.wanted(ImplementationType.MINIWORLD)             # no payload named
+    assert not msa.wanted(ImplementationType.MINIWORLD)  # no payload named
     monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")
     assert msa.wanted(ImplementationType.MINIWORLD)
 
@@ -53,7 +54,7 @@ def test_an_absent_payload_is_a_reason_not_a_crash(monkeypatch):
     ],
 )
 def test_the_opm_refusals_name_what_they_refused(monkeypatch, kwargs, dims, word):
-    monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")           # past the "not set" check
+    monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")  # past the "not set" check
     reason = msa.opm_refusal(BF16, *dims, **kwargs)
     assert reason is not None
     assert word in reason
@@ -85,7 +86,9 @@ def test_the_explicit_option_raises_instead_of_rerouting():
 def test_the_modules_build_under_the_option_and_keep_their_own_primitives():
     """The option names an MSA payload, not a LayerNorm one, so the primitives take the engine's auto choice."""
     opm = OuterProductMean(64, 128, 32, implementation=ImplementationType.ANTHROPIC)
-    pwa = MSAPairWeightedAveraging(64, 128, 8, 32, implementation=ImplementationType.ANTHROPIC)
+    pwa = MSAPairWeightedAveraging(
+        64, 128, 8, 32, implementation=ImplementationType.ANTHROPIC
+    )
     assert opm.implementation is ImplementationType.ANTHROPIC
     assert pwa.implementation is ImplementationType.ANTHROPIC
 

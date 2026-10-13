@@ -30,8 +30,14 @@ def native_triangle_attention(
     from opt_core.attn import pair_fused
 
     form = "mask_bias" if mask is not None else "bias_only"
-    selection = pair_fused.resolve_tier_core(row, *pair_fused._call_class(q, k), form=form, direction=face.FWD)
+    selection = pair_fused.resolve_tier_core(
+        row, *pair_fused._call_class(q, k), form=form, direction=face.FWD
+    )
     if selection.row != "triattn_native":
-        raise RuntimeError("Native compile boundary received a different upstream selection")
+        raise RuntimeError(
+            "Native compile boundary received a different upstream selection"
+        )
     with torch.no_grad():
-        return face.triangle_attention(q, k, v, bias, mask, scale, word=row, selection=selection, form=form)
+        return face.triangle_attention(
+            q, k, v, bias, mask, scale, word=row, selection=selection, form=form
+        )

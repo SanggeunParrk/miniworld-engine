@@ -29,7 +29,7 @@ from miniworld_engine.modules.exceptions import ImplementationType
 DP = 128
 SHAPES = ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
 LOG2E = math.log2(math.e)
-NEG = -1e30                     # masked keys: finite, so a fully masked sample stays NaN-free
+NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
 _FAILED = False
@@ -48,7 +48,11 @@ def _loads() -> bool:
         _sm80()._ext()
     except Exception as exc:  # a toolchain problem keeps the module path
         _FAILED = True
-        warnings.warn(f"sm_80 AttentionPairBias kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 AttentionPairBias kernels unavailable, keeping the module path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -59,27 +63,51 @@ def _pad(length: int) -> int:
 
 def _rows():
     from miniworld_engine.kernels.augmented_attention.cuda import apb as rows
+
     return rows
 
 
 def _sm80():
     from miniworld_engine.kernels.augmented_attention.cuda import sm80
+
     return sm80
 
 
-def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
+def _eligible(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> bool:
     if not settings.current().apb_sm80:
         return False
-    if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
+    if (
+        module.implementation != ImplementationType.MINIWORLD
+        or settings.current().engine_backend == "triton"
+    ):
         return False
     H, D = module.n_head, single.shape[-1]
-    if module.use_qk_norm or (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
+    if (
+        module.use_qk_norm
+        or (H, D) not in SHAPES
+        or tuple(module.to_query.weight.shape) != (D, D)
+    ):
         return False
-    if tuple(module.to_bias.weight.shape) != (H, DP) or module.ln_single.weight is None or module.ln_pair.weight is None:
+    if (
+        tuple(module.to_bias.weight.shape) != (H, DP)
+        or module.ln_single.weight is None
+        or module.ln_pair.weight is None
+    ):
         return False
-    if not single.is_cuda or single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+    if (
+        not single.is_cuda
+        or single.dtype != torch.bfloat16
+        or pair.dtype != torch.bfloat16
+    ):
         return False
-    if single.ndim != 3 or single.shape[0] != 1 or single.shape[2] != D or not single.is_contiguous():
+    if (
+        single.ndim != 3
+        or single.shape[0] != 1
+        or single.shape[2] != D
+        or not single.is_contiguous()
+    ):
         return False
     L = single.shape[1]
     if L < 1 or tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
@@ -89,26 +117,58 @@ def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tens
     if torch.cuda.get_device_capability(single.device) != (8, 0):
         return False
     heads_dim = _rows().GEOMETRY[(H, D)][1]
-    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
-    return _sm80().supported_gate(torch.bfloat16, _pad(L), H * heads_dim, H, idx) and _loads()
+    idx = (
+        single.device.index
+        if single.device.index is not None
+        else torch.cuda.current_device()
+    )
+    return (
+        _sm80().supported_gate(torch.bfloat16, _pad(L), H * heads_dim, H, idx)
+        and _loads()
+    )
 
 
-def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
+def serves_inference(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
+) -> bool:
     return not torch.is_grad_enabled() and _eligible(module, single, pair, mask)
 
 
 def _leaves(module) -> list[torch.Tensor]:
     """The module's parameters as they are (any float dtype, e.g. an fp32 master): ln_single w / b, Wq, bq, Wk, Wv, Wg, Wo, ln_pair w / b, Wb. The ops cast them
     (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
-    return [module.ln_single.weight, module.ln_single.bias, module.to_query.weight, module.to_query.bias, module.to_key.weight, module.to_value.weight,
-            module.to_gate.weight, module.to_out.weight, module.ln_pair.weight, module.ln_pair.bias, module.to_bias.weight]
+    return [
+        module.ln_single.weight,
+        module.ln_single.bias,
+        module.to_query.weight,
+        module.to_query.bias,
+        module.to_key.weight,
+        module.to_value.weight,
+        module.to_gate.weight,
+        module.to_out.weight,
+        module.ln_pair.weight,
+        module.ln_pair.bias,
+        module.to_bias.weight,
+    ]
 
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
     """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
     bf = torch.bfloat16
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, lnpb, wb = leaves
-    return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(), lnpb.float(), wb.to(bf)]
+    return [
+        lnw.float(),
+        lnb.float(),
+        wq.to(bf),
+        bq.to(bf),
+        wk.to(bf),
+        wv.to(bf),
+        wg.to(bf),
+        wo.to(bf),
+        lnpw.float(),
+        lnpb.float(),
+        wb.to(bf),
+    ]
 
 
 def _mask(mask: torch.Tensor | None, L: int) -> torch.Tensor | None:
@@ -125,8 +185,13 @@ def _geometry(leaves):
 def _inference_packs(params, leaves):
     """``_prep`` with q scaled into exp2 units and Wf in exp2 units, cached per parameter version (the step reads them every call; repacking costs a launch).
     Keyed on the parameters, not on ``leaves`` (their kernel-dtype casts: fresh tensors per call for fp32), and scoped to the CUDA-graph capture."""
-    build = lambda: (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), params)
-    return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8)[:4]
+    build = lambda: (
+        *_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E),
+        params,
+    )
+    return _capture.lookup(
+        _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8
+    )[:4]
 
 
 def _prep(leaves, qs: float, ws: float, natural: bool = False):
@@ -140,9 +205,40 @@ def _prep(leaves, qs: float, ws: float, natural: bool = False):
     wop = wq.new_empty((D, W)) if W != D else None
     if natural:
         wf_nat = torch.empty_like(wf)
-        _rows().ext().prep_train(wq, bq, wk, wv, wg, wo if wop is not None else None, wb, lnpw, wpack, bvec, wop, wf, qs, ws, wf_nat)
+        _rows().ext().prep_train(
+            wq,
+            bq,
+            wk,
+            wv,
+            wg,
+            wo if wop is not None else None,
+            wb,
+            lnpw,
+            wpack,
+            bvec,
+            wop,
+            wf,
+            qs,
+            ws,
+            wf_nat,
+        )
         return wpack, bvec, wf, wop, wf_nat
-    _rows().ext().prep(wq, bq, wk, wv, wg, wo if wop is not None else None, wb, lnpw, wpack, bvec, wop, wf, qs, ws)
+    _rows().ext().prep(
+        wq,
+        bq,
+        wk,
+        wv,
+        wg,
+        wo if wop is not None else None,
+        wb,
+        lnpw,
+        wpack,
+        bvec,
+        wop,
+        wf,
+        qs,
+        ws,
+    )
     return wpack, bvec, wf, wop
 
 
@@ -151,8 +247,14 @@ def _inference_fake(single, pair, mask, leaves, eps_s, eps_p):
 
 
 @opaque(fake=_inference_fake, name="apb_sm80_inference")
-def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-              eps_p: float) -> torch.Tensor:
+def inference(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+) -> torch.Tensor:
     """single [1, L, d], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     L = single.shape[1]
     Lp = _pad(L)
@@ -166,20 +268,33 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
         wo = leaves[7] if wop is None else wop
         # padded rows are zero: their k / v rows must be finite (a masked key still multiplies its v row by probability 0)
         xa = torch.empty_like(x) if Lp == L else x.new_zeros((Lp, D))
-        y = torch.empty_like(x)                   # residual seed, written by ln_rows; to_out accumulates onto it
+        y = torch.empty_like(
+            x
+        )  # residual seed, written by ln_rows; to_out accumulates onto it
         rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
         bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, NEG, padded=Lp)
         key = (dev.index, H, W // H)
         core = _cores.get(key)
         if core is None:
-            core = _cores[key] = _sm80().GatedInferenceCore(dev.index, torch.bfloat16, H, W // H)
+            core = _cores[key] = _sm80().GatedInferenceCore(
+                dev.index, torch.bfloat16, H, W // H
+            )
         core(qkvg, bias, 0, 1)
         return y.addmm_(qkvg[:L, :W], wo.t()).view(1, L, D)
 
 
-def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    return inference(single, pair, _mask(mask, single.shape[1]), _leaves(module), module.ln_single.eps, module.ln_pair.eps)
+def update_inference(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
+    return inference(
+        single,
+        pair,
+        _mask(mask, single.shape[1]),
+        _leaves(module),
+        module.ln_single.eps,
+        module.ln_pair.eps,
+    )
 
 
 # ------------------------------------------------------------------------------------------------------------- training
@@ -189,10 +304,16 @@ def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: tor
 MASKED = -1e4
 
 
-def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
+def serves_train(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
+) -> bool:
     # All twelve 24 x 16 rows improve the old path; zero preserves it for diagnosis.
     train16 = settings.current().apb_sm80_train16
-    return torch.is_grad_enabled() and (module.n_head != 24 or train16) and _eligible(module, single, pair, mask)
+    return (
+        torch.is_grad_enabled()
+        and (module.n_head != 24 or train16)
+        and _eligible(module, single, pair, mask)
+    )
 
 
 def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, save_natural=False):
@@ -201,14 +322,32 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, save_natural=False):
     Lp = _pad(L)
     H, _, W, D = _geometry(leaves)
     e, f32 = single.new_empty, torch.float32
-    out = [torch.empty_like(single), e((Lp, D)), e((L, 2), dtype=f32), e((Lp, 4 * W)), e((H, Lp, Lp)), e((Lp, W)), e((1, H, Lp), dtype=f32), e((L, W)),
-           e((4 * W, D))]
-    return out + ([e((D, W))] if W != D else []) + ([e((H, DP))] if save_natural else [])
+    out = [
+        torch.empty_like(single),
+        e((Lp, D)),
+        e((L, 2), dtype=f32),
+        e((Lp, 4 * W)),
+        e((H, Lp, Lp)),
+        e((Lp, W)),
+        e((1, H, Lp), dtype=f32),
+        e((L, W)),
+        e((4 * W, D)),
+    ]
+    return (
+        out + ([e((D, W))] if W != D else []) + ([e((H, DP))] if save_natural else [])
+    )
 
 
 @opaque(fake=_forward_fake, name="apb_sm80_train_fwd")
-def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-            eps_p: float, save_natural: bool = False) -> list[torch.Tensor]:
+def forward(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+    save_natural: bool = False,
+) -> list[torch.Tensor]:
     L = single.shape[1]
     Lp = _pad(L)
     rows = _rows()
@@ -225,24 +364,57 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
         y = torch.empty_like(x)
         rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
-        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, MASKED * scale, padded=Lp)
-        o, lse = _sm80().plain_forward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], bias, 1, Lp, H, W // H, save_lse=True, sm_scale=1.0 / scale)
+        bias = rows.pair_bias(
+            pair.view(L * L, DP), wf, mask, L, eps_p, MASKED * scale, padded=Lp
+        )
+        o, lse = _sm80().plain_forward(
+            qkvg[:, :W],
+            qkvg[:, W : 2 * W],
+            qkvg[:, 2 * W : 3 * W],
+            bias,
+            1,
+            Lp,
+            H,
+            W // H,
+            save_lse=True,
+            sm_scale=1.0 / scale,
+        )
         og = x.new_empty((L, W))
         rows.ext().gate_rows_bf(o, qkvg, og, L)
-        y = y.addmm_(og, wo.t()).view(1, L, D)           # in place onto the residual seed: no copy of x into the output
-    return [y, xa, st, qkvg, bias, o, lse, og, wpack] + ([wop] if wop is not None else []) + ([packed[4]] if save_natural else [])
+        y = y.addmm_(og, wo.t()).view(
+            1, L, D
+        )  # in place onto the residual seed: no copy of x into the output
+    return (
+        [y, xa, st, qkvg, bias, o, lse, og, wpack]
+        + ([wop] if wop is not None else [])
+        + ([packed[4]] if save_natural else [])
+    )
 
 
 def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy, parameter_refs):
     """One gradient per input (its dtype) and per leaf (fp32), contiguous."""
-    gradients = ([torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs] if parameter_refs
-                 else [torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves])
+    gradients = (
+        [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs]
+        if parameter_refs
+        else [
+            torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves
+        ]
+    )
     return [torch.empty_like(single), torch.empty_like(pair), *gradients]
 
 
 @opaque(fake=_backward_fake, name="apb_sm80_train_bwd")
-def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float, eps_p: float,
-             saved: list[torch.Tensor], dy: torch.Tensor, parameter_refs: list[torch.Tensor]) -> list[torch.Tensor]:
+def backward(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+    parameter_refs: list[torch.Tensor],
+) -> list[torch.Tensor]:
     L = single.shape[1]
     Lp = _pad(L)
     rows = _rows()
@@ -250,19 +422,38 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
     lnw, lnpw, wb = leaves[0], leaves[8], leaves[10]
     H, hd, W, D = _geometry(leaves)
     xa, st, qkvg, bias, o, lse, og, wpack = saved[:8]
-    wo = saved[8] if W != D else leaves[7]                 # [D, W]
+    wo = saved[8] if W != D else leaves[7]  # [D, W]
     f32 = torch.float32
     with torch.cuda.device(single.device):
         x = single.view(L, D)
         dy2 = dy.contiguous().view(L, D)
-        acc = torch.zeros(rows.acc_n(H, D), device=x.device)    # dlnw | dlnb | dbq | dWf | head sums, added by the kernels
-        dog = dy2 @ wo                                       # [L, W]: zero in the pads (Wo's pad columns are zero)
-        dwo = torch.mm(dy2.t(), og, out_dtype=f32)           # [D, W]; finalize keeps the real columns
-        dob = x.new_empty((Lp, W)) if Lp == L else x.new_zeros((Lp, W))     # the padded queries' gradient is 0
+        acc = torch.zeros(
+            rows.acc_n(H, D), device=x.device
+        )  # dlnw | dlnb | dbq | dWf | head sums, added by the kernels
+        dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
+        dwo = torch.mm(
+            dy2.t(), og, out_dtype=f32
+        )  # [D, W]; finalize keeps the real columns
+        dob = (
+            x.new_empty((Lp, W)) if Lp == L else x.new_zeros((Lp, W))
+        )  # the padded queries' gradient is 0
         dqkvg = x.new_empty((L, 4 * W))
         E.gate_bwd_bf(dog, o, qkvg, dob, dqkvg, L)
-        dq, dk, dv, db = _sm80().plain_backward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], dob, bias, o, lse, 1, Lp, H, W // H, db_natural=True,
-                                                sm_scale=1.0 / math.sqrt(hd))
+        dq, dk, dv, db = _sm80().plain_backward(
+            qkvg[:, :W],
+            qkvg[:, W : 2 * W],
+            qkvg[:, 2 * W : 3 * W],
+            dob,
+            bias,
+            o,
+            lse,
+            1,
+            Lp,
+            H,
+            W // H,
+            db_natural=True,
+            sm_scale=1.0 / math.sqrt(hd),
+        )
         E.qkv_bwd_bf(dq, dk, dv, dqkvg, acc, D, L)
         del dq, dk, dv
         dxa = dqkvg @ wpack
@@ -272,13 +463,21 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
         # A saved natural-unit pack rounds the unscaled product directly. Dividing
         # the scaled BF16 forward pack would introduce a second rounding error.
         natural_index = 9 if W != D else 8
-        wf_nat = (saved[natural_index] if len(saved) > natural_index else
-                  (wb.float() * lnpw.float()[None]).to(torch.bfloat16))
-        dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, DP), db, wf_nat, L, eps_p, acc, D)
+        wf_nat = (
+            saved[natural_index]
+            if len(saved) > natural_index
+            else (wb.float() * lnpw.float()[None]).to(torch.bfloat16)
+        )
+        dz, _, _ = rows.pair_bias_bwd(
+            pair.view(L * L, DP), db, wf_nat, L, eps_p, acc, D
+        )
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel. ln_pair's bias moves a head's logits by one
         # constant: sum_j dbias[h, i, j] = 0 for every query, so its gradient and its share of dWb are exactly 0
         if parameter_refs:
-            outs = [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in parameter_refs]
+            outs = [
+                torch.empty(t.shape, dtype=t.dtype, device=t.device)
+                for t in parameter_refs
+            ]
             E.finalize_typed(dwp, dwo, acc, wb, lnpw, outs)
         else:
             outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
@@ -296,10 +495,12 @@ class _Training(torch.autograd.Function):
         heads, width, length = leaves[10].shape[0], single.shape[2], single.shape[1]
         # Every selected shape improved the previous pack in paired module
         # measurements. Keep the unproven h8d384/L768 and unmeasured shapes.
-        save_natural = (settings.current().apb_sm80_save_natural
-                        and (heads, width) in ((8, 384), (12, 384), (16, 384), (16, 512))
-                        and length in (128, 256, 384, 512, 640, 768)
-                        and not (heads == 8 and width == 384 and length == 768))
+        save_natural = (
+            settings.current().apb_sm80_save_natural
+            and (heads, width) in ((8, 384), (12, 384), (16, 384), (16, 512))
+            and length in (128, 256, 384, 512, 640, 768)
+            and not (heads == 8 and width == 384 and length == 768)
+        )
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p, save_natural)
         ctx.eps = (eps_s, eps_p)
         if ctx.typed_gradients:
@@ -313,12 +514,41 @@ class _Training(torch.autograd.Function):
     def backward(ctx, dy):
         v = ctx.saved_tensors
         mask, single, pair, leaves = v[0], v[1], v[2], list(v[3:14])
-        parameter_refs, saved = (list(v[14:25]), list(v[25:])) if ctx.typed_gradients else ([], list(v[14:]))
-        dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy, parameter_refs if ctx.typed_gradients else [])
+        parameter_refs, saved = (
+            (list(v[14:25]), list(v[25:]))
+            if ctx.typed_gradients
+            else ([], list(v[14:]))
+        )
+        dx, dz, *grads = backward(
+            single,
+            pair,
+            mask,
+            leaves,
+            *ctx.eps,
+            saved,
+            dy,
+            parameter_refs if ctx.typed_gradients else [],
+        )
         if ctx.typed_gradients:
             return (None, None, None, dx, dz, *grads)
-        return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
+        return (
+            None,
+            None,
+            None,
+            dx,
+            dz,
+            *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)),
+        )
 
 
-def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    return _Training.apply(module.ln_single.eps, module.ln_pair.eps, _mask(mask, single.shape[1]), single, pair, *_leaves(module))
+def update_train(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
+    return _Training.apply(
+        module.ln_single.eps,
+        module.ln_pair.eps,
+        _mask(mask, single.shape[1]),
+        single,
+        pair,
+        *_leaves(module),
+    )

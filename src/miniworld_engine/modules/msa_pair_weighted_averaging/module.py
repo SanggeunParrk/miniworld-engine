@@ -45,8 +45,11 @@ class MSAPairWeightedAveraging(nn.Module):
         self.implementation = ImplementationType(implementation)
         # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
         # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
-        implementation = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
-                          else self.implementation)
+        implementation = (
+            ImplementationType.MINIWORLD
+            if self.implementation == ImplementationType.ANTHROPIC
+            else self.implementation
+        )
         # This layer ALWAYS applies the residual: msa + drop_msa(pwa(msa, pair)). The residual is
         # UNCONDITIONAL (domain standard); the row-broadcast dropout (drop_msa, broadcast_dim=1) is
         # OPTIONAL via p_drop and active only in training. Applied EXPLICITLY (team-gm layer, not
@@ -89,54 +92,105 @@ class MSAPairWeightedAveraging(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 pair_weighted_averaging,
             )
+
             return pair_weighted_averaging(self, msa, pair, mask)
         # The packaged H100 forward/backward is automatic for supported module inputs;
         # its output already carries the residual and training dropout.
         # Inference takes the same forward kernels (no o kept, no dropout) -- faster than the upstream cell and payload-free.
         if _pwa_train.wanted(self.implementation):
-            _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
-                     self.to_value.weight.shape[0] // self.n_head)
-            if _pwa_train.serves(msa, pair, *_dims):                # drop_msa is fused into the path (training only)
-                if torch.is_grad_enabled() or (self.training and self.drop_msa.p_drop > 0):
+            _dims = (
+                self.to_value.weight.shape[1],
+                self.to_bias.weight.shape[1],
+                self.n_head,
+                self.to_value.weight.shape[0] // self.n_head,
+            )
+            if _pwa_train.serves(
+                msa, pair, *_dims
+            ):  # drop_msa is fused into the path (training only)
+                if torch.is_grad_enabled() or (
+                    self.training and self.drop_msa.p_drop > 0
+                ):
                     return _pwa_train.pair_weighted_averaging(self, msa, pair, mask)
-                return _pwa_train.pair_weighted_averaging_inference(self, msa, pair, mask)
+                return _pwa_train.pair_weighted_averaging_inference(
+                    self, msa, pair, mask
+                )
         # Hand-CUDA A100 (integrations.pwa_sm80: pair softmax, value projection, cuBLAS contraction, gate / output / dropout / residual; inference and training);
         # the H100 hook above declines on sm_80 and this one on every other card.
         if _pwa_sm80.serves_inference(self, msa, pair, mask):
             return _pwa_sm80.update_inference(self, msa, pair, mask)
-        if _pwa_sm80.serves_train(self, msa, pair, mask):         # grad-enabled, or the module's row dropout is live: one step, dropout and residual fused
+        if _pwa_sm80.serves_train(
+            self, msa, pair, mask
+        ):  # grad-enabled, or the module's row dropout is live: one step, dropout and residual fused
             return _pwa_sm80.update_train(self, msa, pair, mask)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):
-            _dims = (self.to_value.weight.shape[1], self.to_bias.weight.shape[1], self.n_head,
-                     self.to_value.weight.shape[0] // self.n_head)
-            _fused = {"grad": torch.is_grad_enabled(), "dropout": bool(self.training and self.drop_msa.p_drop)}
+            _dims = (
+                self.to_value.weight.shape[1],
+                self.to_bias.weight.shape[1],
+                self.n_head,
+                self.to_value.weight.shape[0] // self.n_head,
+            )
+            _fused = {
+                "grad": torch.is_grad_enabled(),
+                "dropout": bool(self.training and self.drop_msa.p_drop),
+            }
             if self.implementation == ImplementationType.ANTHROPIC:
-                _anthropic.require_pwa(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
+                _anthropic.require_pwa(
+                    msa, *_dims, **_fused
+                )  # explicit: the reason, never a reroute
             if _anthropic.serves_pwa(msa, *_dims, **_fused):
                 return msa + _anthropic.pair_weighted_averaging(self, msa, pair, mask)
         # The portable Triton path (kernels.pair_weighted_averaging) for every call the native paths above did not take:
         # other GPUs, other widths, engine_backend="triton". The residual and the row dropout are fused into it; the keep-mask
         # is drawn here exactly as Dropout(broadcast_dim=1) draws it. An explicit implementation="triton" refuses with the reason.
-        if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON) and (
-                resolve("msa_pair_weighted_averaging", self.implementation, msa.device) == KernelBackend.TRITON):
+        if self.implementation in (
+            ImplementationType.MINIWORLD,
+            ImplementationType.TRITON,
+        ) and (
+            resolve("msa_pair_weighted_averaging", self.implementation, msa.device)
+            == KernelBackend.TRITON
+        ):
             from miniworld_engine.kernels.pair_weighted_averaging.interface import (
                 refusal,
                 triton_pair_weighted_averaging,
             )
-            why = refusal(msa, pair, self.n_head, self.to_value.weight.shape[0] // self.n_head)
+
+            why = refusal(
+                msa, pair, self.n_head, self.to_value.weight.shape[0] // self.n_head
+            )
             if why is None:
                 p_drop = float(self.drop_msa.p_drop) if self.training else 0.0
                 keep = None
                 if p_drop > 0:
-                    keep = torch.rand((msa.shape[0], msa.shape[2], msa.shape[3]), device=msa.device, dtype=msa.dtype) > p_drop
-                return triton_pair_weighted_averaging(msa, pair, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_value.weight,
-                                                      self.to_gate.weight, self.ln_pair.weight,
-                                                      self.to_bias.weight, self.to_out.weight, eps_msa=float(self.ln_msa.eps),
-                                                      eps_pair=float(self.ln_pair.eps), keep=keep, p_drop=p_drop)
+                    keep = (
+                        torch.rand(
+                            (msa.shape[0], msa.shape[2], msa.shape[3]),
+                            device=msa.device,
+                            dtype=msa.dtype,
+                        )
+                        > p_drop
+                    )
+                return triton_pair_weighted_averaging(
+                    msa,
+                    pair,
+                    mask,
+                    self.ln_msa.weight,
+                    self.ln_msa.bias,
+                    self.to_value.weight,
+                    self.to_gate.weight,
+                    self.ln_pair.weight,
+                    self.to_bias.weight,
+                    self.to_out.weight,
+                    eps_msa=float(self.ln_msa.eps),
+                    eps_pair=float(self.ln_pair.eps),
+                    keep=keep,
+                    p_drop=p_drop,
+                )
             if self.implementation == ImplementationType.TRITON:
-                raise NotImplementedError(f"MSAPairWeightedAveraging(implementation='triton'): {why}")
+                raise NotImplementedError(
+                    f"MSAPairWeightedAveraging(implementation='triton'): {why}"
+                )
         msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
         msa = self.ln_msa(msa)
         value = self.to_value(msa)

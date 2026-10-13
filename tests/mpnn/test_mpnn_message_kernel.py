@@ -3,10 +3,10 @@ from __future__ import annotations
 from typing import Any
 
 import pytest
-from settings_helpers import override_setting
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.mpnn_message import (
     MessageBackend,
@@ -21,6 +21,7 @@ from miniworld_engine.modules.mpnn import ProteinMPNN, ProteinMPNNConfig
 # on a login node and reports "Found no NVIDIA driver" as a FAILURE -- eleven red lines whose
 # content is the absence of hardware, which is what conftest's skip exists to prevent.
 pytestmark = pytest.mark.gpu
+
 
 def test_mpnn_message_reference_contract_and_fallback() -> None:
     torch.manual_seed(0)
@@ -220,7 +221,10 @@ def test_mpnn_message_memory_backend_does_not_save_projected() -> None:
         saved.append(tensor)
         return tensor
 
-    with torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor), torch.autocast("cuda", dtype=torch.bfloat16):
+    with (
+        torch.autograd.graph.saved_tensors_hooks(pack, lambda tensor: tensor),
+        torch.autocast("cuda", dtype=torch.bfloat16),
+    ):
         output = message_hidden_reduce(
             preactivation,
             weight,
@@ -503,29 +507,43 @@ def test_mpnn_message_backend_matches_full_model_gradients(
 
 
 @pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is required")
-def test_message_bias_gradient_survives_first_autotune(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_message_bias_gradient_survives_first_autotune(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Cold tuning trials must not be added to the first real bias gradient."""
     import triton
 
     from miniworld_engine.kernels.mpnn_message.triton import main
 
     kernel = main._gelu_reduce_db_bwd_kernel
-    monkeypatch.setattr(kernel, "configs", [
-        triton.Config({"BLOCK_N": 64, "GROUP_M": 1}, num_warps=4, num_stages=1),
-        triton.Config({"BLOCK_N": 128, "GROUP_M": 1}, num_warps=4, num_stages=1),
-    ])
+    monkeypatch.setattr(
+        kernel,
+        "configs",
+        [
+            triton.Config({"BLOCK_N": 64, "GROUP_M": 1}, num_warps=4, num_stages=1),
+            triton.Config({"BLOCK_N": 128, "GROUP_M": 1}, num_warps=4, num_stages=1),
+        ],
+    )
     monkeypatch.setattr(kernel, "cache", {})
     torch.manual_seed(739)
-    projected = torch.randn(17, 48, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    projected = torch.randn(
+        17, 48, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     mask = (torch.rand(17, 48, device="cuda") > 0.2).float()
     upstream = torch.randn(17, 128, device="cuda") * 0.01
-    expected = (F.gelu(projected.float()).to(torch.bfloat16).float() * mask[..., None]).sum(-2) / 48
+    expected = (
+        F.gelu(projected.float()).to(torch.bfloat16).float() * mask[..., None]
+    ).sum(-2) / 48
     (expected_dp,) = torch.autograd.grad(expected, projected, upstream)
     expected_db = expected_dp.float().sum((0, 1))
     for _ in range(2):
-        actual_dp, actual_db = main._reduce_backward_atomic_op(upstream, projected.detach(), mask, 48)
+        actual_dp, actual_db = main._reduce_backward_atomic_op(
+            upstream, projected.detach(), mask, 48
+        )
         for actual, reference in ((actual_dp, expected_dp), (actual_db, expected_db)):
-            error = (actual.float() - reference.float()).norm() / reference.float().norm()
+            error = (
+                actual.float() - reference.float()
+            ).norm() / reference.float().norm()
             assert error.item() < 0.01
 
 
@@ -533,7 +551,9 @@ def test_message_bias_gradient_survives_first_autotune(monkeypatch: pytest.Monke
 @pytest.mark.parametrize("chunk_rows", [256, 262144])
 @pytest.mark.parametrize("wide_offsets", [False, True])
 def test_message_weight_gradient_single_and_multiple_chunks(
-    monkeypatch: pytest.MonkeyPatch, chunk_rows: int, wide_offsets: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    chunk_rows: int,
+    wide_offsets: bool,
 ) -> None:
     """Preserve dX/dW with one or several chunks and both offset widths."""
     import triton
@@ -542,13 +562,22 @@ def test_message_weight_gradient_single_and_multiple_chunks(
 
     monkeypatch.setattr(main, "_DX_CHUNK_ROWS", chunk_rows)
     monkeypatch.setattr(main, "_requires_i64_indexing", lambda _elements: wide_offsets)
-    monkeypatch.setattr(main._projection_dx_kernel, "configs", [
-        triton.Config({"BLOCK_M1": 32, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 4},
-                      num_warps=4, num_stages=1),
-    ])
+    monkeypatch.setattr(
+        main._projection_dx_kernel,
+        "configs",
+        [
+            triton.Config(
+                {"BLOCK_M1": 32, "BLOCK_N": 64, "BLOCK_K": 64, "GROUP_M": 4},
+                num_warps=4,
+                num_stages=1,
+            ),
+        ],
+    )
     monkeypatch.setattr(main._projection_dx_kernel, "cache", {})
     torch.manual_seed(740)
-    x = torch.randn(17, 48, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        17, 48, 128, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     w = (torch.randn(128, 128, device="cuda") / 128**0.5).requires_grad_()
     dy = torch.randn_like(x) * 0.01
     with torch.autocast("cuda", dtype=torch.bfloat16):

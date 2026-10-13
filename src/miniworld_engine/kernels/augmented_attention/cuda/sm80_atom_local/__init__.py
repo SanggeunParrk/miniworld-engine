@@ -3,6 +3,7 @@
 Uses direct token loads, shared pair bias, and key-centric backward without window gathers.
 The block dispatches here after full-module accuracy and paired performance validation.
 """
+
 import functools
 from miniworld_engine import settings
 import hashlib
@@ -10,101 +11,244 @@ import os
 from pathlib import Path
 import subprocess
 import torch
-from miniworld_engine.kernels._nvcc import host_flags,nvcc_path
+from miniworld_engine.kernels._nvcc import host_flags, nvcc_path
 
-NH,DH,DM,DP,WQ,WK=4,32,128,16,32,128
-_dir=Path(__file__).parent
-KERNELS={'fwd':('lattn_fwd','local_attn_fwd',91648),
-         'dq':('lattn_dq','local_attn_dq',99840),
-         'dkv':('lattn_dkv','local_attn_dkv',101376),
-         'pb_f':('lbias','local_bias_fwd',0),'pb_b':('lbias','local_bias_bwd',0),
-         'pb_fin':('lbias','local_bias_fin',0),'delta':('glue','local_attn_delta',0),
-         'gate_f':('glue','local_gate_fwd',0),'gate_b':('glue','local_gate_bwd',0)}
+NH, DH, DM, DP, WQ, WK = 4, 32, 128, 16, 32, 128
+_dir = Path(__file__).parent
+KERNELS = {
+    "fwd": ("lattn_fwd", "local_attn_fwd", 91648),
+    "dq": ("lattn_dq", "local_attn_dq", 99840),
+    "dkv": ("lattn_dkv", "local_attn_dkv", 101376),
+    "pb_f": ("lbias", "local_bias_fwd", 0),
+    "pb_b": ("lbias", "local_bias_bwd", 0),
+    "pb_fin": ("lbias", "local_bias_fin", 0),
+    "delta": ("glue", "local_attn_delta", 0),
+    "gate_f": ("glue", "local_gate_fwd", 0),
+    "gate_b": ("glue", "local_gate_bwd", 0),
+}
+
 
 @functools.lru_cache(maxsize=None)
 def cubin(stem):
-    nvcc=nvcc_path()
-    if nvcc is None:raise RuntimeError('A100 local attention needs nvcc')
-    flags=[*host_flags(),'-std=c++17','-O3','-arch=sm_80','-cubin','-lineinfo',f'-I{_dir}']
-    digest=hashlib.sha256(' '.join([nvcc,*flags]).encode())
-    for source in [_dir/'local.cuh',_dir/f'{stem}.cu']:digest.update(source.read_bytes())
-    root=settings.engine_jit_root()
-    output=root/'atom_local_sm80'/f'{stem}_{digest.hexdigest()[:16]}.cubin'
+    nvcc = nvcc_path()
+    if nvcc is None:
+        raise RuntimeError("A100 local attention needs nvcc")
+    flags = [
+        *host_flags(),
+        "-std=c++17",
+        "-O3",
+        "-arch=sm_80",
+        "-cubin",
+        "-lineinfo",
+        f"-I{_dir}",
+    ]
+    digest = hashlib.sha256(" ".join([nvcc, *flags]).encode())
+    for source in [_dir / "local.cuh", _dir / f"{stem}.cu"]:
+        digest.update(source.read_bytes())
+    root = settings.engine_jit_root()
+    output = root / "atom_local_sm80" / f"{stem}_{digest.hexdigest()[:16]}.cubin"
     if not output.exists():
-        output.parent.mkdir(parents=True,exist_ok=True)
-        temporary=output.with_suffix(f'.{os.getpid()}.tmp')
-        process=subprocess.run([nvcc,*flags,str(_dir/f'{stem}.cu'),'-o',str(temporary)],capture_output=True,text=True,timeout=900)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        temporary = output.with_suffix(f".{os.getpid()}.tmp")
+        process = subprocess.run(
+            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(temporary)],
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
         if process.returncode:
             temporary.unlink(missing_ok=True)
-            raise RuntimeError(f'A100 {stem} CUDA build failed:\n{process.stderr[-4000:]}')
-        os.replace(temporary,output)
+            raise RuntimeError(
+                f"A100 {stem} CUDA build failed:\n{process.stderr[-4000:]}"
+            )
+        os.replace(temporary, output)
     return str(output)
 
+
 @functools.lru_cache(maxsize=None)
-def _load(name,device):
+def _load(name, device):
     # Kernel is a general CUDA driver launcher; this path never creates a B200 TensorMap.
     from miniworld_engine.kernels.augmented_attention.cuda.sm100.driver import Kernel
-    stem,function,smem=KERNELS[name]
-    with torch.cuda.device(device):return Kernel(cubin(stem),function,smem)
 
-def _dev(t):return t.device.index if t.device.index is not None else torch.cuda.current_device()
-def _nsm(t):return torch.cuda.get_device_properties(_dev(t)).multi_processor_count
+    stem, function, smem = KERNELS[name]
+    with torch.cuda.device(device):
+        return Kernel(cubin(stem), function, smem)
+
+
+def _dev(t):
+    return t.device.index if t.device.index is not None else torch.cuda.current_device()
+
+
+def _nsm(t):
+    return torch.cuda.get_device_properties(_dev(t)).multi_processor_count
+
+
 def ready(device):
-    for name in KERNELS:_load(name,device)
+    for name in KERNELS:
+        _load(name, device)
 
-def attn_fwd(q,k,v,bias,mask=None):
-    samples,n,_=q.shape
-    windows=(n+WQ-1)//WQ
-    out=torch.empty_like(q)
-    lse=torch.empty(samples,NH,n,device=q.device,dtype=torch.float32)
-    split=max(1,min((samples+1)//2,(_nsm(q)+windows*NH-1)//(windows*NH)))
-    _load('fwd',_dev(q))((windows,NH,split),(128,1,1),q,k,v,bias,mask,out,lse,n,samples,windows,split)
-    return out,lse
 
-def attn_bwd(q,k,v,dout,bias,out,lse,mask=None,*,packed_output=False):
-    samples,n,_=q.shape
-    windows=(n+WQ-1)//WQ
-    delta=torch.empty_like(lse)
-    packed=torch.empty(samples*n,4*DM,device=q.device,dtype=q.dtype)
-    dbias=torch.zeros_like(bias)
-    split=max(1,min((samples+1)//2,(_nsm(q)+windows*NH-1)//(windows*NH)))
-    device=_dev(q)
-    _load('delta',device)(((samples*n*NH+7)//8,1,1),(256,1,1),out,dout,delta,n,samples)
-    _load('dq',device)((windows,NH,split),(128,1,1),q,k,v,dout,bias,mask,lse,delta,packed,4*DM,n,samples,windows,split)
-    _load('dkv',device)((((n+15)//16+3)//4,NH,1),(128,1,1),q,k,v,dout,bias,mask,lse,delta,packed,dbias,4*DM,n,samples,windows)
-    if packed_output:return packed,dbias
-    return packed[:,0:DM].view(samples,n,DM),packed[:,DM:2*DM].view(samples,n,DM),packed[:,2*DM:3*DM].view(samples,n,DM),dbias
+def attn_fwd(q, k, v, bias, mask=None):
+    samples, n, _ = q.shape
+    windows = (n + WQ - 1) // WQ
+    out = torch.empty_like(q)
+    lse = torch.empty(samples, NH, n, device=q.device, dtype=torch.float32)
+    split = max(
+        1, min((samples + 1) // 2, (_nsm(q) + windows * NH - 1) // (windows * NH))
+    )
+    _load("fwd", _dev(q))(
+        (windows, NH, split),
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        bias,
+        mask,
+        out,
+        lse,
+        n,
+        samples,
+        windows,
+        split,
+    )
+    return out, lse
 
-def gate_fwd(gate,x):
-    out=torch.empty_like(x);sigmoid=torch.empty_like(x)
-    _load('gate_f',_dev(x))(((x.numel()+255)//256,1,1),(256,1,1),gate,x,out,sigmoid,x.numel())
-    return out,sigmoid
 
-def gate_bwd(dy,sigmoid,x):
-    dgate=torch.empty_like(x);dx=torch.empty_like(x)
-    _load('gate_b',_dev(x))(((x.numel()+255)//256,1,1),(256,1,1),dy,sigmoid,x,dgate,dx,x.numel())
-    return dgate,dx
+def attn_bwd(q, k, v, dout, bias, out, lse, mask=None, *, packed_output=False):
+    samples, n, _ = q.shape
+    windows = (n + WQ - 1) // WQ
+    delta = torch.empty_like(lse)
+    packed = torch.empty(samples * n, 4 * DM, device=q.device, dtype=q.dtype)
+    dbias = torch.zeros_like(bias)
+    split = max(
+        1, min((samples + 1) // 2, (_nsm(q) + windows * NH - 1) // (windows * NH))
+    )
+    device = _dev(q)
+    _load("delta", device)(
+        ((samples * n * NH + 7) // 8, 1, 1), (256, 1, 1), out, dout, delta, n, samples
+    )
+    _load("dq", device)(
+        (windows, NH, split),
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        dout,
+        bias,
+        mask,
+        lse,
+        delta,
+        packed,
+        4 * DM,
+        n,
+        samples,
+        windows,
+        split,
+    )
+    _load("dkv", device)(
+        (((n + 15) // 16 + 3) // 4, NH, 1),
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        dout,
+        bias,
+        mask,
+        lse,
+        delta,
+        packed,
+        dbias,
+        4 * DM,
+        n,
+        samples,
+        windows,
+    )
+    if packed_output:
+        return packed, dbias
+    return (
+        packed[:, 0:DM].view(samples, n, DM),
+        packed[:, DM : 2 * DM].view(samples, n, DM),
+        packed[:, 2 * DM : 3 * DM].view(samples, n, DM),
+        dbias,
+    )
 
-def _params(wb,gamma):
-    if wb.dtype not in (torch.bfloat16,torch.float32) or gamma.dtype not in (torch.bfloat16,torch.float32):
-        raise ValueError('BF16 or FP32 parameters required')
-    if not wb.is_contiguous() or not gamma.is_contiguous():raise ValueError('contiguous parameters required')
-    return int(wb.dtype==torch.bfloat16)+2*int(gamma.dtype==torch.bfloat16)
 
-def pair_bias_fwd(z,gamma,wb,eps=1e-5):
-    rows=z.numel()//DP
-    bias=torch.empty(NH,z.shape[0],WQ,WK,device=z.device,dtype=torch.float32)
-    _load('pb_f',_dev(z))((min(4*_nsm(z),(rows+255)//256),1,1),(256,1,1),z,wb,gamma,bias,rows,float(eps),_params(wb,gamma))
+def gate_fwd(gate, x):
+    out = torch.empty_like(x)
+    sigmoid = torch.empty_like(x)
+    _load("gate_f", _dev(x))(
+        ((x.numel() + 255) // 256, 1, 1), (256, 1, 1), gate, x, out, sigmoid, x.numel()
+    )
+    return out, sigmoid
+
+
+def gate_bwd(dy, sigmoid, x):
+    dgate = torch.empty_like(x)
+    dx = torch.empty_like(x)
+    _load("gate_b", _dev(x))(
+        ((x.numel() + 255) // 256, 1, 1),
+        (256, 1, 1),
+        dy,
+        sigmoid,
+        x,
+        dgate,
+        dx,
+        x.numel(),
+    )
+    return dgate, dx
+
+
+def _params(wb, gamma):
+    if wb.dtype not in (torch.bfloat16, torch.float32) or gamma.dtype not in (
+        torch.bfloat16,
+        torch.float32,
+    ):
+        raise ValueError("BF16 or FP32 parameters required")
+    if not wb.is_contiguous() or not gamma.is_contiguous():
+        raise ValueError("contiguous parameters required")
+    return int(wb.dtype == torch.bfloat16) + 2 * int(gamma.dtype == torch.bfloat16)
+
+
+def pair_bias_fwd(z, gamma, wb, eps=1e-5):
+    rows = z.numel() // DP
+    bias = torch.empty(NH, z.shape[0], WQ, WK, device=z.device, dtype=torch.float32)
+    _load("pb_f", _dev(z))(
+        (min(4 * _nsm(z), (rows + 255) // 256), 1, 1),
+        (256, 1, 1),
+        z,
+        wb,
+        gamma,
+        bias,
+        rows,
+        float(eps),
+        _params(wb, gamma),
+    )
     return bias
 
-def pair_bias_bwd(z,gamma,wb,dbias,eps=1e-5):
-    rows=z.numel()//DP
-    blocks=min(_nsm(z),(rows+255)//256)
-    part=torch.empty(blocks,NH*DP,device=z.device,dtype=torch.float32)
-    dz=torch.empty_like(z)
-    dgamma=torch.empty(DP,device=z.device,dtype=torch.float32)
-    dwb=torch.empty(NH,DP,device=z.device,dtype=torch.float32)
-    flags=_params(wb,gamma);device=_dev(z)
-    _load('pb_b',device)((blocks,1,1),(256,1,1),z,wb,gamma,dbias,dz,part,rows,float(eps),flags)
-    _load('pb_fin',device)((1,1,1),(64,1,1),part,blocks,wb,gamma,dgamma,dwb,flags)
-    return dz,dgamma,dwb
+
+def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
+    rows = z.numel() // DP
+    blocks = min(_nsm(z), (rows + 255) // 256)
+    part = torch.empty(blocks, NH * DP, device=z.device, dtype=torch.float32)
+    dz = torch.empty_like(z)
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    flags = _params(wb, gamma)
+    device = _dev(z)
+    _load("pb_b", device)(
+        (blocks, 1, 1),
+        (256, 1, 1),
+        z,
+        wb,
+        gamma,
+        dbias,
+        dz,
+        part,
+        rows,
+        float(eps),
+        flags,
+    )
+    _load("pb_fin", device)(
+        (1, 1, 1), (64, 1, 1), part, blocks, wb, gamma, dgamma, dwb, flags
+    )
+    return dz, dgamma, dwb

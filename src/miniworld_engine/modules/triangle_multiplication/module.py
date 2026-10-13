@@ -1,4 +1,3 @@
-
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle multiplicative update — the model-level op over the hand-CUDA H100 kernels, the
 Triton fused pipeline (portable fallback), the PyTorch reference and the cuequivariance /
@@ -150,21 +149,34 @@ class TriangleMultiplication(nn.Module):
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             from miniworld_engine.integrations import a100_families
-            backend = self._backend if a100_families.serves(self, pair) else _dispatch.guard_dtype(
-                self._backend, pair.dtype, op="TriangleMultiplication"
+
+            backend = (
+                self._backend
+                if a100_families.serves(self, pair)
+                else _dispatch.guard_dtype(
+                    self._backend, pair.dtype, op="TriangleMultiplication"
+                )
             )
             _pair_in = pair  # original (pre-LN) input == the residual; torch path rebinds `pair`
             # row-broadcast dropout scale (== drop_row mask/(1-p), [B,1,L,D]); training only.
-            _ds = (self._make_drop_row_scale(pair, dropout_p)
-                   if dropout_p and dropout_p > 0.0 and self.training else None)
-            def _r(out):  # explicit residual+dropout for paths that don't fold it in-kernel
+            _ds = (
+                self._make_drop_row_scale(pair, dropout_p)
+                if dropout_p and dropout_p > 0.0 and self.training
+                else None
+            )
+
+            def _r(
+                out,
+            ):  # explicit residual+dropout for paths that don't fold it in-kernel
                 if _ds is not None:
                     out = out * _ds
                 return out + _pair_in
 
             # Hand-CUDA B200 inference (integrations.trimul_b200 states its contract).
             if _b200.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
-                return _b200.update_inference(self, pair, mask, _ds, bidirectional=False)
+                return _b200.update_inference(
+                    self, pair, mask, _ds, bidirectional=False
+                )
             if _b200.serves_train(self, pair, bidirectional=False):
                 return _b200.update_train(self, pair, mask, _ds, bidirectional=False)
             # Hand-CUDA H100 kernels first (integrations.trimul_h100 states their contract).
@@ -184,7 +196,9 @@ class TriangleMultiplication(nn.Module):
             if _anthropic.wanted(self.implementation):
                 _native = {"grad": torch.is_grad_enabled(), "dropout": _ds is not None}
                 if self.implementation == ImplementationType.ANTHROPIC:
-                    _anthropic.require(pair, pair.shape[-1], self.d_hidden, **_native)   # explicit: the reason, never a reroute
+                    _anthropic.require(
+                        pair, pair.shape[-1], self.d_hidden, **_native
+                    )  # explicit: the reason, never a reroute
                 if _anthropic.serves(pair, pair.shape[-1], self.d_hidden, **_native):
                     return _anthropic.update_unidirectional(self, pair, mask)
 
@@ -241,27 +255,42 @@ class TriangleMultiplication(nn.Module):
         The Triton back half takes one square plane (B=1, ``trimul_back_triton``); a batched
         input is run plane by plane here so the module keeps its ``[B, L, L, d]`` contract."""
         if pair.shape[0] > 1:
-            return torch.cat([
-                self._forward_triton(
-                    pair[i:i + 1],
-                    None if mask is None else mask[i:i + 1],
-                    None if dropscale is None else
-                    (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
-                ) for i in range(pair.shape[0])
-            ], dim=0)
+            return torch.cat(
+                [
+                    self._forward_triton(
+                        pair[i : i + 1],
+                        None if mask is None else mask[i : i + 1],
+                        None
+                        if dropscale is None
+                        else (
+                            dropscale
+                            if dropscale.shape[0] == 1
+                            else dropscale[i : i + 1]
+                        ),
+                    )
+                    for i in range(pair.shape[0])
+                ],
+                dim=0,
+            )
         from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
             trimul_triton,
         )
 
         return trimul_triton(
             pair,
-            self.to_left.weight, self.to_left_gate.weight,
-            self.to_right.weight, self.to_right_gate.weight,
-            self.to_gate.weight, self.to_out.weight,
-            self.ln_pair.weight, self.ln_pair.bias,
-            self.ln_out.weight, self.ln_out.bias,
-            self.ln_pair.eps, self.ln_out.eps,
-            self.to_left.weight.shape[0],   # d_hidden
+            self.to_left.weight,
+            self.to_left_gate.weight,
+            self.to_right.weight,
+            self.to_right_gate.weight,
+            self.to_gate.weight,
+            self.to_out.weight,
+            self.ln_pair.weight,
+            self.ln_pair.bias,
+            self.ln_out.weight,
+            self.ln_out.bias,
+            self.ln_pair.eps,
+            self.ln_out.eps,
+            self.to_left.weight.shape[0],  # d_hidden
             self.outgoing,
             mask=mask,
             dropscale=dropscale,
@@ -305,7 +334,9 @@ class TriangleMultiplication(nn.Module):
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p), broadcast
         over the i-index — matches modules.primitives.Dropout for the pair track."""
         if self.implementation == ImplementationType.MINIWORLD:
-            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
+            from miniworld_engine.kernels.triangle_attention.cuda import (
+                dropout_row_scale_sm80 as row_scale_sm80,
+            )
 
             if row_scale_sm80.supports(pair):
                 return row_scale_sm80.scale(pair, p, 1)

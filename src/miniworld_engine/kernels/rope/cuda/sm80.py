@@ -27,7 +27,9 @@ from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_ex
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
 
 _dir = Path(__file__).parent / "sm80"
-_common = Path(_rows.__file__).parent / "sm80"       # norm_common.cuh: the helpers shared with the row kernels
+_common = (
+    Path(_rows.__file__).parent / "sm80"
+)  # norm_common.cuh: the helpers shared with the row kernels
 _FAILED = False
 HEAD_DIMS = (32, 64, 128)
 
@@ -37,12 +39,24 @@ def ext():
     """The RoPE extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
     ensure_cuda_home()
     extra = settings.current().norms_sm80_flags.split()
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
         name=f"rope_sm80{tag}",
         sources=[str(_dir / "rope_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_common}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_common}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
 
 
@@ -56,7 +70,11 @@ def loads() -> bool:
         ext()
     except Exception as exc:  # noqa: BLE001 -- any toolchain problem keeps the Triton path
         _FAILED = True
-        warnings.warn(f"sm_80 RoPE kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 RoPE kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -70,30 +88,66 @@ def _view_ok(t: Tensor, ce: int) -> bool:
 
 def _readable(t: Tensor) -> Tensor:
     """``t`` itself when its base address is 16-byte aligned (its strides were checked by the gate), else a fresh contiguous copy.  Runs inside the op bodies, on real tensors."""
-    return t if t.data_ptr() % 16 == 0 else t.clone(memory_format=torch.contiguous_format)
+    return (
+        t if t.data_ptr() % 16 == 0 else t.clone(memory_format=torch.contiguous_format)
+    )
 
 
 def _angles_ok(cos: Tensor, sin: Tensor, n: int, s: int, d: int, ce: int) -> bool:
-    if cos.dtype != torch.float32 or sin.dtype != torch.float32 or cos.ndim != 3 or cos.shape != sin.shape or cos.stride() != sin.stride():
+    if (
+        cos.dtype != torch.float32
+        or sin.dtype != torch.float32
+        or cos.ndim != 3
+        or cos.shape != sin.shape
+        or cos.stride() != sin.stride()
+    ):
         return False
-    if cos.shape[0] not in (1, n) or cos.shape[1] != s or cos.requires_grad or sin.requires_grad:
+    if (
+        cos.shape[0] not in (1, n)
+        or cos.shape[1] != s
+        or cos.requires_grad
+        or sin.requires_grad
+    ):
         return False
     half = cos.shape[2]
     st = cos.stride()
-    return half % ce == 0 and 2 * half <= d and st[2] == 1 and st[0] % 4 == 0 and st[1] % 4 == 0 and cos.is_cuda and sin.device == cos.device
+    return (
+        half % ce == 0
+        and 2 * half <= d
+        and st[2] == 1
+        and st[0] % 4 == 0
+        and st[1] % 4 == 0
+        and cos.is_cuda
+        and sin.device == cos.device
+    )
 
 
 def _shape_ok(x: Tensor) -> bool:
-    return (x.is_cuda and x.ndim == 4 and x.dtype in (torch.bfloat16, torch.float32) and x.shape[3] in HEAD_DIMS and x.numel() > 0
-            and 2 * x.shape[0] * x.shape[1] * x.shape[2] < 2**31)
+    return (
+        x.is_cuda
+        and x.ndim == 4
+        and x.dtype in (torch.bfloat16, torch.float32)
+        and x.shape[3] in HEAD_DIMS
+        and x.numel() > 0
+        and 2 * x.shape[0] * x.shape[1] * x.shape[2] < 2**31
+    )
 
 
 def supports_qk(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor) -> bool:
     """Whether the kernels run ``qk_norm_rope_3d(q, k, cos, sin)``: q, k [N, S, H, D] views of one shape and dtype, the angle tables constants fp32 [N or 1, S, HALF]."""
-    if not _shape_ok(q) or q.shape != k.shape or q.dtype != k.dtype or k.device != q.device:
+    if (
+        not _shape_ok(q)
+        or q.shape != k.shape
+        or q.dtype != k.dtype
+        or k.device != q.device
+    ):
         return False
     ce = 16 // q.element_size()
-    if not (_view_ok(q, ce) and _view_ok(k, ce) and _angles_ok(cos, sin, q.shape[0], q.shape[1], q.shape[3], ce)):
+    if not (
+        _view_ok(q, ce)
+        and _view_ok(k, ce)
+        and _angles_ok(cos, sin, q.shape[0], q.shape[1], q.shape[3], ce)
+    ):
         return False
     return _rows.enabled(q.device) and loads()
 
@@ -103,33 +157,49 @@ def supports_rope(x: Tensor, cos: Tensor, sin: Tensor) -> bool:
     if not _shape_ok(x):
         return False
     ce = 16 // x.element_size()
-    if not (_view_ok(x, ce) and _angles_ok(cos, sin, x.shape[0], x.shape[1], x.shape[3], ce)):
+    if not (
+        _view_ok(x, ce) and _angles_ok(cos, sin, x.shape[0], x.shape[1], x.shape[3], ce)
+    ):
         return False
     return _rows.enabled(x.device) and loads()
 
 
 # ------------------------------------------------------------------------------------------------------------------ the fused norm + rotation
-def _qk_norm_rope_fwd_fake(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, eps: float) -> tuple[Tensor, Tensor]:
+def _qk_norm_rope_fwd_fake(
+    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, eps: float
+) -> tuple[Tensor, Tensor]:
     """The normalised and rotated q and k: contiguous, like the inputs' shape and dtype."""
-    return torch.empty_like(q, memory_format=torch.contiguous_format), torch.empty_like(k, memory_format=torch.contiguous_format)
+    return torch.empty_like(q, memory_format=torch.contiguous_format), torch.empty_like(
+        k, memory_format=torch.contiguous_format
+    )
 
 
 @opaque(fake=_qk_norm_rope_fwd_fake, name="qk_norm_rope_sm80_fwd")
-def _qk_norm_rope_fwd(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, eps: float) -> tuple[Tensor, Tensor]:
+def _qk_norm_rope_fwd(
+    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, eps: float
+) -> tuple[Tensor, Tensor]:
     """Paired q / k RMSNorm (over the head dim, no weight) and 3D RoPE: ``(oq, ok)``, one launch."""
     oq = torch.empty_like(q, memory_format=torch.contiguous_format)
     ok = torch.empty_like(k, memory_format=torch.contiguous_format)
-    ext().qk_norm_rope_fwd(_readable(q), _readable(k), _readable(cos), _readable(sin), oq, ok, eps)
+    ext().qk_norm_rope_fwd(
+        _readable(q), _readable(k), _readable(cos), _readable(sin), oq, ok, eps
+    )
     return oq, ok
 
 
-def _qk_norm_rope_bwd_fake(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, gq: Tensor, gk: Tensor, eps: float) -> tuple[Tensor, Tensor]:
+def _qk_norm_rope_bwd_fake(
+    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, gq: Tensor, gk: Tensor, eps: float
+) -> tuple[Tensor, Tensor]:
     """The input gradients of q and k: contiguous, with the forward inputs' shape and dtype."""
-    return torch.empty_like(q, memory_format=torch.contiguous_format), torch.empty_like(k, memory_format=torch.contiguous_format)
+    return torch.empty_like(q, memory_format=torch.contiguous_format), torch.empty_like(
+        k, memory_format=torch.contiguous_format
+    )
 
 
 @opaque(fake=_qk_norm_rope_bwd_fake, name="qk_norm_rope_sm80_bwd")
-def _qk_norm_rope_bwd(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, gq: Tensor, gk: Tensor, eps: float) -> tuple[Tensor, Tensor]:
+def _qk_norm_rope_bwd(
+    q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, gq: Tensor, gk: Tensor, eps: float
+) -> tuple[Tensor, Tensor]:
     """The fused input backward of :func:`_qk_norm_rope_fwd`: ``(dq, dk)`` from the inputs and the gradients of the rotated outputs, one launch.  The gradients may arrive in any
     layout (an expanded or transposed view): they are made readable here."""
     dq = torch.empty_like(q, memory_format=torch.contiguous_format)
@@ -137,7 +207,17 @@ def _qk_norm_rope_bwd(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, gq: Tensor
     ce = 16 // q.element_size()
     gq = gq if _view_ok(gq, ce) else gq.contiguous()
     gk = gk if _view_ok(gk, ce) else gk.contiguous()
-    ext().qk_norm_rope_bwd(_readable(q), _readable(k), _readable(cos), _readable(sin), _readable(gq), _readable(gk), dq, dk, eps)
+    ext().qk_norm_rope_bwd(
+        _readable(q),
+        _readable(k),
+        _readable(cos),
+        _readable(sin),
+        _readable(gq),
+        _readable(gk),
+        dq,
+        dk,
+        eps,
+    )
     return dq, dk
 
 
@@ -159,7 +239,13 @@ class _QKNormRoPE(torch.autograd.Function):
         return dq, dk, None, None, None
 
 
-def qk_norm_rope_3d(q: Tensor, k: Tensor, cos: Tensor, sin: Tensor, eps: float = torch.finfo(torch.float32).eps) -> tuple[Tensor, Tensor]:
+def qk_norm_rope_3d(
+    q: Tensor,
+    k: Tensor,
+    cos: Tensor,
+    sin: Tensor,
+    eps: float = torch.finfo(torch.float32).eps,
+) -> tuple[Tensor, Tensor]:
     """Normalise (RMSNorm over the head dim, no weight) and rotate q and k, autograd-aware.  The caller checked :func:`supports_qk`."""
     return _QKNormRoPE.apply(q, k, cos, sin, eps)
 
@@ -174,7 +260,9 @@ def _rope_rotate_fake(x: Tensor, cos: Tensor, sin: Tensor, sign: float) -> Tenso
 def _rope_rotate(x: Tensor, cos: Tensor, sin: Tensor, sign: float) -> Tensor:
     """Rotate the leading ``2 HALF`` channels of every head of x [N, S, H, D] by the position's angles (``sign`` = -1: by the opposite angle, the backward)."""
     y = torch.empty_like(x, memory_format=torch.contiguous_format)
-    x = x if _view_ok(x, 16 // x.element_size()) else x.contiguous()       # a gradient may arrive in any layout
+    x = (
+        x if _view_ok(x, 16 // x.element_size()) else x.contiguous()
+    )  # a gradient may arrive in any layout
     ext().rope_apply(_readable(x), _readable(cos), _readable(sin), y, sign)
     return y
 

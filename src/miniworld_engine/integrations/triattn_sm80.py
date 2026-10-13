@@ -29,7 +29,13 @@ def _contract(module) -> bool:
     )
 
 
-def serves(module, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor) -> bool:
+def serves(
+    module,
+    query: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    bias: torch.Tensor,
+) -> bool:
     """The attention core only (inference): the module's contract, no autograd (the backward of the core alone is not written), then the kernel's gate."""
     if not _contract(module) or torch.is_grad_enabled():
         return False
@@ -38,7 +44,9 @@ def serves(module, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, 
     return sm80.available(query, key, value, bias)
 
 
-def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+def attention(
+    query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
     """``[B, H, L, L2, D]`` out, the layout the module's Triton attention returns; a view of a fresh token-major tensor."""
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
@@ -46,7 +54,13 @@ def attention(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias:
 
 
 def _weights(module) -> tuple[torch.Tensor, ...]:
-    return (module.to_query.weight, module.to_key.weight, module.to_value.weight, module.to_gate.weight, module.to_bias.weight)
+    return (
+        module.to_query.weight,
+        module.to_key.weight,
+        module.to_value.weight,
+        module.to_gate.weight,
+        module.to_bias.weight,
+    )
 
 
 def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
@@ -55,12 +69,18 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
         return None
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4:
         return None
-    if mask is not None and not (mask.dtype == torch.bool and mask.shape == pair.shape[:2]):
+    if mask is not None and not (
+        mask.dtype == torch.bool and mask.shape == pair.shape[:2]
+    ):
         return None
     d_hidden, d_pair = module.to_query.weight.shape
     if pair.shape[-1] != d_pair:
         return None
-    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) and not settings.current().triattn_sm80_wide:
+    if (d_pair, d_hidden, module.n_head) == (
+        128,
+        128,
+        4,
+    ) and not settings.current().triattn_sm80_wide:
         return ("fused", None)
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -68,7 +88,9 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
     return None if cfg is None else ("wide", cfg)
 
 
-def _serves_kind(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool) -> bool:
+def _serves_kind(
+    module, pair: torch.Tensor, mask: torch.Tensor | None, *, train: bool
+) -> bool:
     kind = _kind(module, pair, mask)
     if kind is None:
         return False
@@ -78,15 +100,25 @@ def _serves_kind(module, pair: torch.Tensor, mask: torch.Tensor | None, *, train
     wo = module.to_out.weight
     if kind[0] == "fused":
         if train:
-            return sm80.supports_train(pair, _weights(module), ln.weight, ln.bias, wo, mask) and sm80._built(pair)
-        return sm80.available_module(pair, _weights(module), ln.weight, ln.bias, wo, mask)
-    return sm80_wide.supports(pair, kind[1], _weights(module), wo, ln.weight, ln.bias, mask, train=train) and sm80_wide.loads(kind[1])
+            return sm80.supports_train(
+                pair, _weights(module), ln.weight, ln.bias, wo, mask
+            ) and sm80._built(pair)
+        return sm80.available_module(
+            pair, _weights(module), ln.weight, ln.bias, wo, mask
+        )
+    return sm80_wide.supports(
+        pair, kind[1], _weights(module), wo, ln.weight, ln.bias, mask, train=train
+    ) and sm80_wide.loads(kind[1])
 
 
 def serves_module(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     """The whole module in inference, ``pair + TriangleAttention(pair)``: the module's contract, no autograd, a self-attention module without q/k norm
     (dropout off), then the gates of the path its geometry selects."""
-    if not _contract(module) or torch.is_grad_enabled() or (module.training and module.p_drop > 0.0):
+    if (
+        not _contract(module)
+        or torch.is_grad_enabled()
+        or (module.training and module.p_drop > 0.0)
+    ):
         return False
     return _serves_kind(module, pair, mask, train=False)
 
@@ -101,14 +133,28 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     if kind is not None and kind[0] == "wide":
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
-        return sm80_wide.forward(pair, kind[1], _weights(module), module.to_out.weight, ln.weight, ln.bias, ln.eps, mask, transposed=ending)
+        return sm80_wide.forward(
+            pair,
+            kind[1],
+            _weights(module),
+            module.to_out.weight,
+            ln.weight,
+            ln.bias,
+            ln.eps,
+            mask,
+            transposed=ending,
+        )
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
-    qkvg, bias, _ = sm80.front(pair, _weights(module), ln.weight, ln.bias, ln.eps, mask, transposed=ending)
+    qkvg, bias, _ = sm80.front(
+        pair, _weights(module), ln.weight, ln.bias, ln.eps, mask, transposed=ending
+    )
     q, k, v, _ = sm80.qkv_views(qkvg)
     out, _ = sm80.attention(q, k, v, bias, compact_key_mask=mask)
     b, length = pair.shape[:2]
-    o = out.permute(0, 2, 3, 1, 4).reshape(b, length, length, 128)         # "B H L L2 D -> B L L2 (H D)": a view of the core's token-major result
+    o = out.permute(0, 2, 3, 1, 4).reshape(
+        b, length, length, 128
+    )  # "B H L L2 D -> B L L2 (H D)": a view of the core's token-major result
     return sm80.back(o, qkvg, module.to_out.weight, pair, transposed=ending)
 
 
@@ -118,12 +164,18 @@ def serves_train(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -
     if not _contract(module) or not torch.is_grad_enabled():
         return False
     wo = module.to_out.weight
-    if not (pair.requires_grad or wo.requires_grad or any(w.requires_grad for w in _weights(module))):
+    if not (
+        pair.requires_grad
+        or wo.requires_grad
+        or any(w.requires_grad for w in _weights(module))
+    ):
         return False
     return _serves_kind(module, pair, mask, train=True)
 
 
-def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+def forward_train(
+    module, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
     """``pair + drop(TriangleAttention(pair))`` with autograd.  The dropout scale is the module's own draw on the original layout (``[B, 1, L, C]`` starting /
     ``[B, L, 1, C]`` ending); in the kernels' starting frame both index the token's second index, so either is ``[B, L, C]`` as it is."""
     kind = _kind(module, pair, mask)
@@ -134,18 +186,48 @@ def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torc
     if module.training and module.p_drop > 0.0:
         b, length = pair.shape[:2]
         if _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
-            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
-            ds = row_scale_sm80.scale(pair, module.p_drop, module._drop_dim).reshape(b, length, pair.shape[-1])
+            from miniworld_engine.kernels.triangle_attention.cuda import (
+                dropout_row_scale_sm80 as row_scale_sm80,
+            )
+
+            ds = row_scale_sm80.scale(pair, module.p_drop, module._drop_dim).reshape(
+                b, length, pair.shape[-1]
+            )
         else:
-            ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
-    if kind is not None and kind[0] == 'wide':
+            ds = module._make_drop_scale(pair, module.p_drop).reshape(
+                b, length, pair.shape[-1]
+            )
+    if kind is not None and kind[0] == "wide":
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
-        return sm80_wide.trainable(pair, kind[1], weights, wo, ln.weight, ln.bias, ln.eps, mask, transposed=not module.starting, ds=ds)
+
+        return sm80_wide.trainable(
+            pair,
+            kind[1],
+            weights,
+            wo,
+            ln.weight,
+            ln.bias,
+            ln.eps,
+            mask,
+            transposed=not module.starting,
+            ds=ds,
+        )
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
-    return sm80.trainable(pair, weights, ln.weight, ln.bias, wo, ln.eps, mask, transposed=not module.starting, ds=ds)
+
+    return sm80.trainable(
+        pair,
+        weights,
+        ln.weight,
+        ln.bias,
+        wo,
+        ln.eps,
+        mask,
+        transposed=not module.starting,
+        ds=ds,
+    )
 
 
-def _native_dropout_after_serves(module,pair,kind,weights,wo,ln):
+def _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
     """Called only inside forward_train after the original serves_train gate.
 
     That gate already proves own SM80, contiguous BF16 square pair, every
@@ -156,9 +238,10 @@ def _native_dropout_after_serves(module,pair,kind,weights,wo,ln):
     callback = module._make_drop_scale
     if not isinstance(callback, types.MethodType):
         return False
-    if '_make_drop_scale' in module.__dict__:
+    if "_make_drop_scale" in module.__dict__:
         return False
     from miniworld_engine.modules.triangle_attention.module import TriangleAttention
+
     if callback.__func__ is not TriangleAttention._sm80_default_drop_scale:
         return False
     if settings.current().dropout_scale_sm80:
@@ -166,21 +249,29 @@ def _native_dropout_after_serves(module,pair,kind,weights,wo,ln):
     if not settings.current().triattn_sm80_native_rng:
         return False
     from miniworld_engine.modules.exceptions import ImplementationType
-    if module.implementation not in (ImplementationType.MINIWORLD,ImplementationType.TRITON):
+
+    if module.implementation not in (
+        ImplementationType.MINIWORLD,
+        ImplementationType.TRITON,
+    ):
         return False
-    if not module.training or module.p_drop != .25 or kind is None:
+    if not module.training or module.p_drop != 0.25 or kind is None:
         return False
-    b,length,_,d = pair.shape
-    if b != 1 or length not in (128,256,384,512,640,768) or d not in (64,128,256,384,512):
+    b, length, _, d = pair.shape
+    if (
+        b != 1
+        or length not in (128, 256, 384, 512, 640, 768)
+        or d not in (64, 128, 256, 384, 512)
+    ):
         return False
     if ln.weight.dtype != torch.float32 or ln.bias.dtype != torch.float32:
         return False
     # supports() permits strided parameters and makes them contiguous in its
     # launch bodies. These checks were NOT proven by serves_train, so retain
     # them instead of widening the old private policy's eligible domain.
-    if not all(t.is_contiguous() for t in (*weights,wo,ln.weight,ln.bias)):
+    if not all(t.is_contiguous() for t in (*weights, wo, ln.weight, ln.bias)):
         return False
-    if kind[0] == 'fused':
+    if kind[0] == "fused":
         return True
     cfg = kind[1]
     return cfg.d == d and cfg.dhp == d and cfg.hd == 32

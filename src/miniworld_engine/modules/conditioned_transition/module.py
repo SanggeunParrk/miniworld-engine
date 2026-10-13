@@ -97,9 +97,15 @@ class ConditionedTransition(nn.Module):
         # have the same dtype" no matter what the caller did with .to(). fp32 stays the DEFAULT so
         # existing callers and checkpoints are unaffected; bf16 is now reachable by asking for it.
         self.dtype = dtype
-        self.expand_a = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype)
-        self.expand_b = Linear(d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype)
-        self.squeeze = Linear(d_hidden * n, d_hidden, bias=False, init="zero", dtype=dtype)
+        self.expand_a = Linear(
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype
+        )
+        self.expand_b = Linear(
+            d_hidden, d_hidden * n, bias=False, init="relu", dtype=dtype
+        )
+        self.squeeze = Linear(
+            d_hidden * n, d_hidden, bias=False, init="zero", dtype=dtype
+        )
         self.to_scale = Linear(d_cond, d_hidden, bias=True, init="default", dtype=dtype)
 
     def _reference(
@@ -127,26 +133,37 @@ class ConditionedTransition(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 conditioned_transition,
             )
+
             return conditioned_transition(self, x, cond, residual=True)
-        updated = self._sm80_update(x, cond, residual=True)       # A100: the AdaLN, the tail and the residual in one op
+        updated = self._sm80_update(
+            x, cond, residual=True
+        )  # A100: the AdaLN, the tail and the residual in one op
         return x + self.delta(x, cond) if updated is None else updated
 
-    def _sm80_update(self, x: torch.Tensor, cond: torch.Tensor, residual: bool) -> torch.Tensor | None:
+    def _sm80_update(
+        self, x: torch.Tensor, cond: torch.Tensor, residual: bool
+    ) -> torch.Tensor | None:
         """The A100 hand-CUDA path (``integrations.conditioned_transition_sm80`` states its contract; ``settings.condtrans_sm80=0`` keeps the Triton tail), or None when it does
         not serve this call."""
         if self._backend not in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             return None
         device_type = x.device.type
-        compute_dtype = (torch.get_autocast_dtype(device_type)
-                         if torch.is_autocast_enabled(device_type) else self.expand_a.weight.dtype)
+        compute_dtype = (
+            torch.get_autocast_dtype(device_type)
+            if torch.is_autocast_enabled(device_type)
+            else self.expand_a.weight.dtype
+        )
         if compute_dtype is torch.float32 and x.dtype is torch.bfloat16:
-            compute_dtype = torch.bfloat16          # fp32 master parameters over bf16 activations (AMP): the bf16 kernels, the parameters cast inside the op
+            compute_dtype = torch.bfloat16  # fp32 master parameters over bf16 activations (AMP): the bf16 kernels, the parameters cast inside the op
         backward = needs_backward(self, x, cond)
         if not _sm80.serves(self, x, cond, compute_dtype, backward):
             from miniworld_engine.integrations import a100_families
+
             if a100_families.serves(self, x):
                 with torch.autocast(device_type=device_type, enabled=False):
-                    return a100_families.conditioned(self, x.to(compute_dtype), cond.to(compute_dtype), residual)
+                    return a100_families.conditioned(
+                        self, x.to(compute_dtype), cond.to(compute_dtype), residual
+                    )
             return None
         with torch.autocast(device_type=device_type, enabled=False):
             return _sm80.update(self, x, cond, residual, compute_dtype, backward)
@@ -169,6 +186,7 @@ class ConditionedTransition(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 conditioned_transition,
             )
+
             return conditioned_transition(self, x, cond, residual=False)
         updated = self._sm80_update(x, cond, residual=False)
         if updated is not None:
@@ -188,15 +206,22 @@ class ConditionedTransition(nn.Module):
             # Native Triton dot operands must agree, and backward must save tensors
             # in that same compute dtype. Cast through autograd, never mutate params.
             device_type = x.device.type
-            compute_dtype = (torch.get_autocast_dtype(device_type)
-                             if torch.is_autocast_enabled(device_type)
-                             else self.expand_a.weight.dtype)
+            compute_dtype = (
+                torch.get_autocast_dtype(device_type)
+                if torch.is_autocast_enabled(device_type)
+                else self.expand_a.weight.dtype
+            )
             x2 = x.reshape(-1, d).to(compute_dtype)
             cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
             wa, wb, ws, wsc, bsc = (
-                p.to(compute_dtype) for p in (self.expand_a.weight, self.expand_b.weight,
-                                             self.squeeze.weight, self.to_scale.weight,
-                                             self.to_scale.bias)
+                p.to(compute_dtype)
+                for p in (
+                    self.expand_a.weight,
+                    self.expand_b.weight,
+                    self.squeeze.weight,
+                    self.to_scale.weight,
+                    self.to_scale.bias,
+                )
             )
             # `x2.requires_grad` alone missed the conditioning tensor AND the projection
             # weights, which are parameters -- so a detached x with live weights took the
@@ -206,14 +231,24 @@ class ConditionedTransition(nn.Module):
             with torch.autocast(device_type=device_type, enabled=False):
                 if needs_backward(self, x2, cond2):
                     y = kernels.cond_transition_train(
-                        x2, cond2,
-                        wa, wb, ws, wsc, bsc,
+                        x2,
+                        cond2,
+                        wa,
+                        wb,
+                        ws,
+                        wsc,
+                        bsc,
                         length,
                     )
                 else:
                     y = kernels.cond_transition_inference_dispatch(
-                        x2, cond2,
-                        wa, wb, ws, wsc, bsc,
+                        x2,
+                        cond2,
+                        wa,
+                        wb,
+                        ws,
+                        wsc,
+                        bsc,
                         length,
                     )
             return y.reshape(*x.shape[:-1], self.d_hidden)

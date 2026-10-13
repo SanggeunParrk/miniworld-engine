@@ -4,8 +4,8 @@ the env switch, and what it declines."""
 
 import pytest
 import torch
-
 from settings_helpers import override_setting
+
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit_train as TR
 from miniworld_engine.kernels.bias_only_dit import cuda as C
@@ -15,12 +15,18 @@ from miniworld_engine.modules.exceptions import ImplementationType
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0), reason="A100 (sm_80)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+        reason="A100 (sm_80)",
+    ),
 ]
 
 
 def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-30))
+    return float(
+        (a.detach().float() - b.detach().float()).norm()
+        / b.detach().float().norm().clamp_min(1e-30)
+    )
 
 
 def randomize(module):
@@ -49,10 +55,18 @@ def policy():
 
 def blocks(seed=3, n_head=16, d_head=None):
     torch.manual_seed(seed)
-    ref = randomize(BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH)).cuda()
-    fast = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD).cuda()
+    ref = randomize(
+        BiasOnlyDiTBlock(
+            n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+        )
+    ).cuda()
+    fast = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.MINIWORLD
+    ).cuda()
     fast.load_state_dict(ref.state_dict())
-    ref_bf = BiasOnlyDiTBlock(n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH).cuda()
+    ref_bf = BiasOnlyDiTBlock(
+        n_head=n_head, d_head=d_head, implementation=ImplementationType.PYTORCH
+    ).cuda()
     ref_bf.load_state_dict(ref.state_dict())
     return ref, fast.to(torch.bfloat16), ref_bf.to(torch.bfloat16)
 
@@ -76,7 +90,13 @@ def step(m, x, c, p, mask, dy, dtype):
 
 
 # L / A pick the cores' branches: the P v core's sample groups (A = 1 .. 48 over 108 SMs), the dpb core's sample loop (a short last stage at odd A); every head layout
-SHAPES = [(128, 8, False), (256, 16, True), (384, 48, True), (640, 5, False), (768, 16, True)]
+SHAPES = [
+    (128, 8, False),
+    (256, 16, True),
+    (384, 48, True),
+    (640, 5, False),
+    (768, 16, True),
+]
 LAYOUTS = [(16, 48), (24, 32), (12, 64), (16, 64)]
 
 
@@ -90,7 +110,9 @@ def test_every_gradient_within_the_pytorch_bf16_error(L, A, masked, n_head, d_he
     want = step(ref, x, c, p, mask, dy, torch.float32)
     got = step(fast, x, c, p, mask, dy, torch.bfloat16)
     base = step(ref_bf, x, c, p, mask, dy, torch.bfloat16)
-    names = ["out", "d single", "d cond", "d pair"] + [n for n, _ in fast.named_parameters()]
+    names = ["out", "d single", "d cond", "d pair"] + [
+        n for n, _ in fast.named_parameters()
+    ]
     for n, g, b, w in zip(names, got, base, want, strict=True):
         assert relative(g, w) <= 1.1 * relative(b, w) + 1e-4, n
 
@@ -109,7 +131,9 @@ def test_attention_backward_kernels_match_einsum(L, A, cfg, n_head, d_head):
     # the training softmax writes P^T beside P: the same values, transposed
     bias = 2 * torch.randn(H * L, L, device="cuda", dtype=torch.bfloat16)
     mask = torch.rand(L, device="cuda") > 0.2
-    P, Pt, P_rows = (torch.empty(H, L, L, device="cuda", dtype=torch.bfloat16) for _ in range(3))
+    P, Pt, P_rows = (
+        torch.empty(H, L, L, device="cuda", dtype=torch.bfloat16) for _ in range(3)
+    )
     C.softmax_t(bias, P.view(H * L, L), Pt.view(H * L, L), mask)
     C.softmax_rows(bias, P_rows.view(H * L, L), mask)
     assert torch.equal(P, P_rows)
@@ -117,10 +141,15 @@ def test_attention_backward_kernels_match_einsum(L, A, cfg, n_head, d_head):
     dv = torch.empty(M, 2 * DA, device="cuda", dtype=torch.bfloat16)[:, :DA]
     sm80.PvGate(H, DH)(do, Pt.view(H * L, L), dv, A)
     dh, vh = do.float().view(A, L, H, DH), v.float().reshape(A, L, H, DH)
-    assert relative(dv, torch.einsum("hij,aihd->ajhd", P.float(), dh).reshape(M, DA)) < 3e-3
+    assert (
+        relative(dv, torch.einsum("hij,aihd->ajhd", P.float(), dh).reshape(M, DA))
+        < 3e-3
+    )
     db = torch.empty(H * L, L, device="cuda", dtype=torch.bfloat16)
     if cfg == 3 and DH == 48:
-        with pytest.raises(RuntimeError, match="shared memory"):                              # 3 stages x 2 samples of head width 48 do not fit
+        with pytest.raises(
+            RuntimeError, match="shared memory"
+        ):  # 3 stages x 2 samples of head width 48 do not fit
             sm80.Dpb(H, DH)(do, v, P.view(H * L, L), dd, db, A, cfg=cfg)
         return
     if cfg == 3 and DH == 64:
@@ -130,7 +159,9 @@ def test_attention_backward_kernels_match_einsum(L, A, cfg, n_head, d_head):
     sm80.Dpb(H, DH)(do, v, P.view(H * L, L), dd, db, A, cfg=cfg)
     want = P.float() * (torch.einsum("aihd,ajhd->hij", dh, vh) - dd.sum(0)[:, :, None])
     assert relative(db.view(H, L, L), want) < 3e-3
-    assert bool((db.view(H, L, L)[:, :, ~mask] == 0).all())                                  # a masked key has no gradient
+    assert bool(
+        (db.view(H, L, L)[:, :, ~mask] == 0).all()
+    )  # a masked key has no gradient
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -149,7 +180,9 @@ def test_graph_capture_compile_and_steady_memory(n_head, d_head):
             if q.grad is not None:
                 q.grad.zero_()
         m(xs, cs, ps).backward(dy)
-        return [t.grad.clone() for t in (xs, cs, ps)] + [q.grad.clone() for q in m.parameters()]
+        return [t.grad.clone() for t in (xs, cs, ps)] + [
+            q.grad.clone() for q in m.parameters()
+        ]
 
     eager = run(fast)
     # the activations are allocated afresh each step: nothing may pile up
@@ -188,7 +221,9 @@ def test_graph_capture_compile_and_steady_memory(n_head, d_head):
 
 def test_env_switch_keeps_the_composition(monkeypatch):
     _, fast, _ = blocks()
-    x = torch.randn(4, 1, 384, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        4, 1, 384, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     c = torch.randn(4, 1, 384, 384, device="cuda", dtype=torch.bfloat16)
     p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
     assert TR.serves(fast, x, c, p)
@@ -198,17 +233,23 @@ def test_env_switch_keeps_the_composition(monkeypatch):
 
 def test_declines_what_it_does_not_serve():
     _, fast, _ = blocks()
-    x = torch.randn(4, 1, 384, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        4, 1, 384, 768, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     c = torch.randn(4, 1, 384, 384, device="cuda", dtype=torch.bfloat16)
     p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
     assert TR.serves(fast, x, c, p)
-    assert not TR.serves(fast, x.float(), c.float(), p.float())                                  # bf16 only
-    assert not TR.serves(fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200])                    # L % 128
-    assert not TR.serves(fast, x, c[:1], p)                                                       # a conditioning per sample
-    assert not TR.serves(fast, x, c, p, torch.ones(4, 384, device="cuda", dtype=torch.bool))      # a mask per sample
-    assert TR.serves(blocks(n_head=24)[1], x, c, p)                                               # 24 heads x 32
-    assert TR.serves(blocks(n_head=12)[1], x, c, p)                                               # 12 x 64
-    assert TR.serves(blocks(n_head=16, d_head=64)[1], x, c, p)                                    # 16 x 64
-    assert not TR.serves(blocks(n_head=8)[1], x, c, p)                                            # 8 x 96: no kernels
+    assert not TR.serves(fast, x.float(), c.float(), p.float())  # bf16 only
+    assert not TR.serves(
+        fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200]
+    )  # L % 128
+    assert not TR.serves(fast, x, c[:1], p)  # a conditioning per sample
+    assert not TR.serves(
+        fast, x, c, p, torch.ones(4, 384, device="cuda", dtype=torch.bool)
+    )  # a mask per sample
+    assert TR.serves(blocks(n_head=24)[1], x, c, p)  # 24 heads x 32
+    assert TR.serves(blocks(n_head=12)[1], x, c, p)  # 12 x 64
+    assert TR.serves(blocks(n_head=16, d_head=64)[1], x, c, p)  # 16 x 64
+    assert not TR.serves(blocks(n_head=8)[1], x, c, p)  # 8 x 96: no kernels
     with torch.no_grad():
-        assert not TR.serves(fast, x, c, p)                                                       # inference: the other path
+        assert not TR.serves(fast, x, c, p)  # inference: the other path

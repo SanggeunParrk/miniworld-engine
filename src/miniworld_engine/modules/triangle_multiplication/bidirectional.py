@@ -54,7 +54,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # with the resolved backend). 'miniworld' (auto) -> concrete backend for the running
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
-        self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
+        self._backend = _resolve_trimul_backend(
+            implementation
+        )  # concrete KernelBackend
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
@@ -78,8 +80,11 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         # The LayerNorm primitives are plumbing for the non-native paths; "anthropic" names a TriMul payload,
         # not a LayerNorm one, so they take the engine's own auto choice in that case.
-        ln_impl = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
-                   else self.implementation)
+        ln_impl = (
+            ImplementationType.MINIWORLD
+            if self.implementation == ImplementationType.ANTHROPIC
+            else self.implementation
+        )
         self.ln_pair = LayerNorm(d_pair, implementation=ln_impl)
         # Doubled-width left/right projections: [outgoing | incoming] channels.
         self.to_left = Linear(d_pair, d2, bias=False, init="default")
@@ -91,23 +96,34 @@ class BidirectionalTriangleMultiplication(nn.Module):
         self.to_gate = Linear(d_pair, d_pair, bias=False, init="zero")
         self.to_out = Linear(d2, d_pair, bias=False, init="zero")
 
-        if self.implementation == ImplementationType.MINIWORLD and d_pair == self.d_hidden == 128:
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and d_pair == self.d_hidden == 128
+        ):
             # Keep the public [out, in] shapes and checkpoint keys, but store
             # the four front matrices in the [in, out] order consumed by the
             # native backward and Triton GEMMs. Their transpose is now a view.
             # Construct real leaf Parameters before the optimizer is created;
             # no detached copies or first-forward parameter replacement.
-            for projection in (self.to_left, self.to_left_gate, self.to_right, self.to_right_gate):
+            for projection in (
+                self.to_left,
+                self.to_left_gate,
+                self.to_right,
+                self.to_right_gate,
+            ):
                 weight = projection.weight
                 projection.weight = nn.Parameter(
-                    weight.detach().t().contiguous().t(), requires_grad=weight.requires_grad
+                    weight.detach().t().contiguous().t(),
+                    requires_grad=weight.requires_grad,
                 )
 
     @typecheck
     def _make_drop_row_scale(self, pair: torch.Tensor, p: float) -> torch.Tensor:
         """drop_row (``Dropout(broadcast_dim=1)``) scale [B,1,L,D] = (rand>p)/(1-p)."""
         if self.implementation == ImplementationType.MINIWORLD:
-            from miniworld_engine.kernels.triangle_attention.cuda import dropout_row_scale_sm80 as row_scale_sm80
+            from miniworld_engine.kernels.triangle_attention.cuda import (
+                dropout_row_scale_sm80 as row_scale_sm80,
+            )
 
             if row_scale_sm80.supports(pair):
                 return row_scale_sm80.scale(pair, p, 1)
@@ -131,8 +147,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
         not a flag on this module."""
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         _pair_in = pair
-        _ds = (self._make_drop_row_scale(pair, dropout_p)
-               if dropout_p and dropout_p > 0.0 and self.training else None)
+        _ds = (
+            self._make_drop_row_scale(pair, dropout_p)
+            if dropout_p and dropout_p > 0.0 and self.training
+            else None
+        )
+
         def _r(out):
             if _ds is not None:
                 out = out * _ds
@@ -153,8 +173,11 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if _sm80.serves(self, pair, mask):
             return _sm80.update(self, pair, mask, _ds, bidirectional=True)
         from miniworld_engine.integrations import a100_families
+
         if a100_families.serves(self, pair):
-            return a100_families.trimul_module(self, pair, mask, _ds, bidirectional=True)
+            return a100_families.trimul_module(
+                self, pair, mask, _ds, bidirectional=True
+            )
 
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
@@ -163,7 +186,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if _anthropic.wanted(self.implementation):
             _native = {"grad": torch.is_grad_enabled(), "dropout": _ds is not None}
             if self.implementation == ImplementationType.ANTHROPIC:
-                _anthropic.require(pair, pair.shape[-1], 2 * self.d_hidden, **_native)   # explicit: the reason, never a reroute
+                _anthropic.require(
+                    pair, pair.shape[-1], 2 * self.d_hidden, **_native
+                )  # explicit: the reason, never a reroute
             if _anthropic.serves(pair, pair.shape[-1], 2 * self.d_hidden, **_native):
                 return _anthropic.update_bidirectional(self, pair, mask)
 
@@ -222,22 +247,32 @@ class BidirectionalTriangleMultiplication(nn.Module):
         )
 
         normalized = layer_norm_transpose(
-            pair, self.ln_pair.weight, self.ln_pair.bias,
-            eps=self.ln_pair.eps, layout="bijd->bijd")
+            pair,
+            self.ln_pair.weight,
+            self.ln_pair.bias,
+            eps=self.ln_pair.eps,
+            layout="bijd->bijd",
+        )
         pair_mask = None if mask is None else mask.unsqueeze(-1) & mask.unsqueeze(-2)
         projected = fused_sigmoid_gated_dual_gemm(
             normalized,
             torch.cat((self.to_left_gate.weight, self.to_right_gate.weight)),
             torch.cat((self.to_left.weight, self.to_right.weight)),
-            mask=pair_mask, transpose_out=True)
+            mask=pair_mask,
+            transpose_out=True,
+        )
         left, right = projected.chunk(2, dim=0)
         h = self.d_hidden
         outgoing = torch.einsum("dbik,dbjk->dbij", left[:h], right[:h])
         incoming = torch.einsum("dbki,dbkj->dbij", left[h:], right[h:])
         contraction = torch.cat((outgoing, incoming), dim=0)
         output = layer_norm_transpose(
-            contraction, self.ln_out.weight, self.ln_out.bias,
-            eps=self.ln_out.eps, layout="dbij->bijd")
+            contraction,
+            self.ln_out.weight,
+            self.ln_out.bias,
+            eps=self.ln_out.eps,
+            layout="dbij->bijd",
+        )
         return sigmoid_gate(self.to_gate(normalized), self.to_out(output))
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
@@ -259,26 +294,42 @@ class BidirectionalTriangleMultiplication(nn.Module):
         The Triton kernels take one square plane (B=1); a batched input is run plane by plane
         here so the public module keeps its ``[B, L, L, d]`` contract on every arch."""
         if pair.shape[0] > 1:
-            return torch.cat([
-                self._forward_triton(
-                    pair[i:i + 1],
-                    None if mask is None else mask[i:i + 1],
-                    None if dropscale is None else
-                    (dropscale if dropscale.shape[0] == 1 else dropscale[i:i + 1]),
-                ) for i in range(pair.shape[0])
-            ], dim=0)
+            return torch.cat(
+                [
+                    self._forward_triton(
+                        pair[i : i + 1],
+                        None if mask is None else mask[i : i + 1],
+                        None
+                        if dropscale is None
+                        else (
+                            dropscale
+                            if dropscale.shape[0] == 1
+                            else dropscale[i : i + 1]
+                        ),
+                    )
+                    for i in range(pair.shape[0])
+                ],
+                dim=0,
+            )
         from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
             bidirectional_trimul_triton,
         )
 
         return bidirectional_trimul_triton(
             pair,
-            self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
-            self.to_right.weight.to(pair.dtype), self.to_right_gate.weight.to(pair.dtype),
-            self.to_gate.weight.to(pair.dtype), self.to_out.weight.to(pair.dtype),
-            self.ln_pair.weight, self.ln_pair.bias,
-            self.ln_out.weight, self.ln_out.bias,
-            self.ln_pair.eps, self.ln_out.eps, self.d_hidden,
+            self.to_left.weight.to(pair.dtype),
+            self.to_left_gate.weight.to(pair.dtype),
+            self.to_right.weight.to(pair.dtype),
+            self.to_right_gate.weight.to(pair.dtype),
+            self.to_gate.weight.to(pair.dtype),
+            self.to_out.weight.to(pair.dtype),
+            self.ln_pair.weight,
+            self.ln_pair.bias,
+            self.ln_out.weight,
+            self.ln_out.bias,
+            self.ln_pair.eps,
+            self.ln_out.eps,
+            self.d_hidden,
             mask=mask,
             dropscale=dropscale,
         )

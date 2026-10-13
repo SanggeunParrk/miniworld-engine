@@ -159,7 +159,9 @@ def edge_mlp_update(
                 memory=backend == "triton_memory",
             )
     if backend == "cuda":
-        raise ValueError("the sm_80 CUDA MPNN edge MLP needs an A100 (capability 8.0), 16-byte aligned weights and a loadable extension")
+        raise ValueError(
+            "the sm_80 CUDA MPNN edge MLP needs an A100 (capability 8.0), 16-byte aligned weights and a loadable extension"
+        )
     selected = _select_backend(preactivation, backend, supported=supported)
     if selected == "triton_memory":
         from miniworld_engine.kernels.mpnn_edge_mlp.triton import triton_edge_mlp_update

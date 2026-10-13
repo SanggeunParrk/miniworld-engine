@@ -24,9 +24,20 @@ HEAD_DIMS = (32, 48, 64)
 
 
 def serves(v: torch.Tensor, bias: torch.Tensor) -> bool:
-    if settings.current().bias_only_attn_sm80 == "0" or not v.is_cuda or v.dtype is not torch.bfloat16 or bias.dtype is not torch.bfloat16:
+    if (
+        settings.current().bias_only_attn_sm80 == "0"
+        or not v.is_cuda
+        or v.dtype is not torch.bfloat16
+        or bias.dtype is not torch.bfloat16
+    ):
         return False
-    if v.ndim != 5 or bias.ndim != 4 or v.shape[2] != v.shape[3] or tuple(bias.shape) != tuple(v.shape[:4]) or v.shape[-1] not in HEAD_DIMS:
+    if (
+        v.ndim != 5
+        or bias.ndim != 4
+        or v.shape[2] != v.shape[3]
+        or tuple(bias.shape) != tuple(v.shape[:4])
+        or v.shape[-1] not in HEAD_DIMS
+    ):
         return False
     length = v.shape[2]
     if length % 128 or length > 1024:
@@ -47,7 +58,11 @@ def wanted(v: torch.Tensor, bias: torch.Tensor) -> bool:
         return False
     if settings.current().bias_only_attn_sm80 == "all":
         return True
-    return not (torch.is_grad_enabled() and (v.requires_grad or bias.requires_grad) and v.shape[2] < MIN_TRAIN_LENGTH)
+    return not (
+        torch.is_grad_enabled()
+        and (v.requires_grad or bias.requires_grad)
+        and v.shape[2] < MIN_TRAIN_LENGTH
+    )
 
 
 @torch.compiler.assume_constant_result
@@ -66,7 +81,11 @@ def _loads() -> bool:
         import warnings
 
         _FAILED = True
-        warnings.warn(f"sm_80 bias-only attention kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 bias-only attention kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -90,7 +109,14 @@ def _fwd(v: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
     p = torch.empty(planes * length, length, device=v.device, dtype=torch.bfloat16)
     rows.softmax_rows(bias.contiguous().view(planes * length, length), p, None)
     out = torch.empty_like(v)
-    core.pv_planes(v.contiguous().view(planes * length * length, d), p, out.view(planes * length * length, d), length, planes, d)
+    core.pv_planes(
+        v.contiguous().view(planes * length * length, d),
+        p,
+        out.view(planes * length * length, d),
+        length,
+        planes,
+        d,
+    )
     return out
 
 
@@ -100,7 +126,9 @@ def _bwd_fake(v, bias, out, dout):
 
 
 @opaque(fake=_bwd_fake, name="bias_only_attention_sm80_bwd")
-def _bwd(v: torch.Tensor, bias: torch.Tensor, out: torch.Tensor, dout: torch.Tensor) -> list[torch.Tensor]:
+def _bwd(
+    v: torch.Tensor, bias: torch.Tensor, out: torch.Tensor, dout: torch.Tensor
+) -> list[torch.Tensor]:
     """``[dv, dbias]`` of ``_fwd`` (bf16, shaped like v and bias)."""
     from miniworld_engine.kernels.bias_only_dit import cuda as rows
     from miniworld_engine.kernels.bias_only_dit.cuda import sm80 as core
@@ -111,9 +139,13 @@ def _bwd(v: torch.Tensor, bias: torch.Tensor, out: torch.Tensor, dout: torch.Ten
     p = torch.empty(planes * length, length, device=dev, dtype=torch.bfloat16)
     pt = torch.empty_like(p)
     rows.softmax_t(bias.contiguous().view(planes * length, length), p, pt, None)
-    v2, do2, o2 = (t.contiguous().view(planes * length * length, d) for t in (v, dout, out))
+    v2, do2, o2 = (
+        t.contiguous().view(planes * length * length, d) for t in (v, dout, out)
+    )
     dv = torch.empty_like(v)
-    core.pv_planes(do2, pt, dv.view(planes * length * length, d), length, planes, d)           # dv[t, n] = sum_m P[m, n] dout[t, m]
+    core.pv_planes(
+        do2, pt, dv.view(planes * length * length, d), length, planes, d
+    )  # dv[t, n] = sum_m P[m, n] dout[t, m]
     dd = torch.empty(length, planes, length, device=dev, dtype=torch.float32)
     core.delta_planes(do2, o2, dd, length, length, planes, d)
     dbias = torch.empty(planes * length, length, device=dev, dtype=torch.bfloat16)
@@ -132,7 +164,9 @@ class BiasOnlyAttentionSm80Function(torch.autograd.Function):
     def backward(ctx, dout):
         v, bias, out = ctx.saved_tensors
         dv, dbias = _bwd(v, bias, out, dout.contiguous().to(v.dtype))
-        return dv if ctx.needs_input_grad[0] else None, dbias if ctx.needs_input_grad[1] else None
+        return dv if ctx.needs_input_grad[0] else None, dbias if ctx.needs_input_grad[
+            1
+        ] else None
 
 
 def bias_only_attention_sm80(v: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:

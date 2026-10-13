@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import torch
-
 from settings_helpers import override_setting
+
 from miniworld_engine import settings
 from miniworld_engine.integrations import mpnn_edge_sm80 as sm80
 from miniworld_engine.kernels.mpnn_edge_tail.cuda import sm80 as loader
@@ -37,7 +37,9 @@ def test_the_kernel_sources_are_staged_by_content(tmp_path, monkeypatch) -> None
     assert first == again
     assert tag == tag_again
     assert first.parent == tmp_path
-    originals = sorted(p.name for p in loader._dir.iterdir() if p.suffix in {".cu", ".cuh"})
+    originals = sorted(
+        p.name for p in loader._dir.iterdir() if p.suffix in {".cu", ".cuh"}
+    )
     assert originals
     assert sorted(p.name for p in first.iterdir()) == originals
     assert "ops.cu" in originals

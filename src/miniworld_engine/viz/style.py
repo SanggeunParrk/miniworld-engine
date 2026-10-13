@@ -84,18 +84,18 @@ DISPLAY: dict[str, str] = {
 # Canonical colour per identity. Hex strings (no matplotlib needed to read them).
 PALETTE: dict[str, str] = {
     # baselines — cool, recede
-    "pytorch": "#B9C0CC",        # light grey — naive reference
+    "pytorch": "#B9C0CC",  # light grey — naive reference
     "torch.compile": "#6E7B91",  # slate
-    "triton": "#2E6FDB",         # blue
+    "triton": "#2E6FDB",  # blue
     "triton-atomic": "#5B8FF9",  # lighter blue variant for the atomic path
     "triton-atomic-compile": "#1F4AA8",  # dark blue compiled atomic path
     "triton-partial": "#F29A38",  # warm orange for the partial-reduction variant
     "triton-partial-compile": "#C66A12",  # darker orange compiled partial path
     # NVIDIA family — greens / teal
-    "te": "#3F6B1B",             # dark green (Transformer Engine)
+    "te": "#3F6B1B",  # dark green (Transformer Engine)
     "cuequivariance": "#11A6A0",  # teal (cuEquivariance lib)
-    "dtv1": "#76B900",           # NVIDIA brand green
-    "cuda": "#9CCC3C",           # light green (generic CUDA path)
+    "dtv1": "#76B900",  # NVIDIA brand green
+    "cuda": "#9CCC3C",  # light green (generic CUDA path)
     "layernorm-dispatch": "#E8412B",  # hero red-orange for the shipped dispatch path
     "layernorm-dispatch-compile": "#A8281A",  # darker compiled dispatch path
     # This repo's kernels (ours) — gold, fixed across every figure.
@@ -109,7 +109,7 @@ PALETTE: dict[str, str] = {
 #: A named style (``"-"``) or an explicit ``(offset, (on, off))`` dash pattern -- both are
 #: what matplotlib's ``linestyle=`` takes.
 LINESTYLE: dict[str, str | tuple[int, tuple[int, int]]] = {
-    "pytorch": (0, (1, 1)),       # dotted
+    "pytorch": (0, (1, 1)),  # dotted
     "torch.compile": (0, (4, 2)),  # dashed
     "triton": "-",
     "triton-atomic": "-",
@@ -131,18 +131,29 @@ LINESTYLE: dict[str, str | tuple[int, tuple[int, int]]] = {
 # a stable hash of the name (not its position in a list) guarantees the same
 # unknown label gets the same colour in every figure it appears in.
 _EXTRAS: list[str] = [
-    "#8E5BD0", "#D14F8F", "#5BB0D1", "#C9A227", "#7A9E3A", "#C4633A",
+    "#8E5BD0",
+    "#D14F8F",
+    "#5BB0D1",
+    "#C9A227",
+    "#7A9E3A",
+    "#C4633A",
 ]
 
 # Alias table: normalised raw label -> canonical identity. Lookups are done on a
 # lowercased, whitespace/underscore/hyphen-collapsed key (see _norm).
 _ALIASES: dict[str, str] = {
     # pytorch
-    "pytorch": "pytorch", "torch": "pytorch", "pt": "pytorch", "eager": "pytorch",
-    "pytorchnaive": "pytorch", "naive": "pytorch",
+    "pytorch": "pytorch",
+    "torch": "pytorch",
+    "pt": "pytorch",
+    "eager": "pytorch",
+    "pytorchnaive": "pytorch",
+    "naive": "pytorch",
     # torch.compile
-    "torchcompile": "torch.compile", "compile": "torch.compile",
-    "compiled": "torch.compile", "inductor": "torch.compile",
+    "torchcompile": "torch.compile",
+    "compile": "torch.compile",
+    "compiled": "torch.compile",
+    "inductor": "torch.compile",
     # triton
     "triton": "triton",
     "tritonatomic": "triton-atomic",
@@ -156,25 +167,41 @@ _ALIASES: dict[str, str] = {
     "tritonlndispatch": "layernorm-dispatch",
     "tritonpytorchln": "triton",
     # transformer engine
-    "te": "te", "transformerengine": "te", "transformer engine": "te",
+    "te": "te",
+    "transformerengine": "te",
+    "transformer engine": "te",
     # cuequivariance
-    "cuequivariance": "cuequivariance", "cuequiv": "cuequivariance",
-    "cueq": "cuequivariance", "cue": "cuequivariance",
+    "cuequivariance": "cuequivariance",
+    "cuequiv": "cuequivariance",
+    "cueq": "cuequivariance",
+    "cue": "cuequivariance",
     # nvidia dtv1
-    "dtv1": "dtv1", "nvidiadtv1": "dtv1", "nvidia": "dtv1", "dt": "dtv1",
+    "dtv1": "dtv1",
+    "nvidiadtv1": "dtv1",
+    "nvidia": "dtv1",
+    "dt": "dtv1",
     # generic cuda
     "cuda": "cuda",
     # miniworld family (canonical = miniworld, displayed "ours"; variants -alt / -alt2).
     # Every authorship spelling we've ever emitted resolves here, so old .out logs and
     # the one-off bench scripts that print "ours"/"v4"/... need no changes.
-    "miniworld": "miniworld", "mwk": "miniworld", "miniworldkernels": "miniworld",
-    "ours": "miniworld", "oursv4": "miniworld",
-    "v4": "miniworld", "layernormkernel": "miniworld",
-    "layernormdispatch": "layernorm-dispatch", "autodispatch": "layernorm-dispatch",
+    "miniworld": "miniworld",
+    "mwk": "miniworld",
+    "miniworldkernels": "miniworld",
+    "ours": "miniworld",
+    "oursv4": "miniworld",
+    "v4": "miniworld",
+    "layernormkernel": "miniworld",
+    "layernormdispatch": "layernorm-dispatch",
+    "autodispatch": "layernorm-dispatch",
     "layernormdispatchcompile": "layernorm-dispatch-compile",
-    "oursv5": "miniworld-alt", "v5": "miniworld-alt",
-    "partialbuffer": "triton-partial", "partialreduction": "triton-partial",
-    "v2": "miniworld-alt2", "oursv2": "miniworld-alt2", "v3": "miniworld-alt2",
+    "oursv5": "miniworld-alt",
+    "v5": "miniworld-alt",
+    "partialbuffer": "triton-partial",
+    "partialreduction": "triton-partial",
+    "v2": "miniworld-alt2",
+    "oursv2": "miniworld-alt2",
+    "v3": "miniworld-alt2",
 }
 
 # --------------------------------------------------------------------------- #
@@ -194,8 +221,16 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "layernormlinearte": ("layernorm-linear-te", "TE-style", "#3F6B1B"),
     "tritontm2": ("triton-tm2", "Triton tm2", "#2E6FDB"),
     # transition_b2b
-    "tritontransitionfused": ("triton-transition-fused", "Triton transition", "#2E6FDB"),
-    "transitionb2bktiled": ("transition-b2b-ktiled", "Triton k-tiled (unver)", "#7FB0FF"),
+    "tritontransitionfused": (
+        "triton-transition-fused",
+        "Triton transition",
+        "#2E6FDB",
+    ),
+    "transitionb2bktiled": (
+        "transition-b2b-ktiled",
+        "Triton k-tiled (unver)",
+        "#7FB0FF",
+    ),
     # the A100 hand-CUDA rows of the Transition family's kernel targets (kernels/transition/cuda/{fused_sm80,fused_wide_sm80,gemm_epilogue_sm80}.py)
     # windowed_atom_attention: the Anthropic release's fpf_atom row and the engine's A100 sliding-window core
     "anthropic": ("anthropic", "Anthropic", "#7A4EAB"),
@@ -205,7 +240,11 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "dualgemmgatecuda": ("dual-gemm-gate-cuda", "CUDA dual gate", "#DAA520"),
     # layernorm (+ bwd)
     "tritonlayernorm": ("triton-layernorm", "Triton LN", "#2E6FDB"),
-    "tritonlayernormlowreg": ("triton-layernorm-lowreg", "Triton LN low-reg (dep)", "#7A86A1"),
+    "tritonlayernormlowreg": (
+        "triton-layernorm-lowreg",
+        "Triton LN low-reg (dep)",
+        "#7A86A1",
+    ),
     "tritonpersistent": ("triton-persistent", "Triton persistent", "#11A6A0"),
     # adaln (+ bwd)
     "adalninference": ("adaln-inference", "Triton adaLN inf", "#2E6FDB"),
@@ -213,41 +252,93 @@ _KERNEL_VARIANTS: dict[str, tuple[str, str, str]] = {
     "adalnfused3": ("adaln-fused3", "Triton adaLN fused3", "#7FB0FF"),
     "adalntrain": ("adaln-train", "Triton adaLN train", "#5B8FF9"),
     # attentions
-    "tritontriangleattention": ("triton-triangle-attention", "Triton tri-attn", "#2E6FDB"),
-    "tritontriangleattentionatomic":
-        ("triton-triangle-attention-atomic", "Triton tri-attn (atomic)", "#5B8FF9"),
+    "tritontriangleattention": (
+        "triton-triangle-attention",
+        "Triton tri-attn",
+        "#2E6FDB",
+    ),
+    "tritontriangleattentionatomic": (
+        "triton-triangle-attention-atomic",
+        "Triton tri-attn (atomic)",
+        "#5B8FF9",
+    ),
     # The two below MUST stay catalogued even though no current code path produces them: they
     # appear in committed tables, and without an alias `..._miniworld` falls through to the
     # "miniworld" substring heuristic and collides with the real miniworld series.
-    "tritontriangleattentionminiworld":
-        ("triton-triangle-attention-miniworld", "Triton tri-attn (old)", "#7A86A1"),
-    "tritontriangleattentionperf":
-        ("triton-triangle-attention-perf", "Triton tri-attn (perf)", "#9AA7BF"),
-    "tritonbiasonlyattention": ("triton-bias-only-attention", "Triton bias-attn", "#2E6FDB"),
+    "tritontriangleattentionminiworld": (
+        "triton-triangle-attention-miniworld",
+        "Triton tri-attn (old)",
+        "#7A86A1",
+    ),
+    "tritontriangleattentionperf": (
+        "triton-triangle-attention-perf",
+        "Triton tri-attn (perf)",
+        "#9AA7BF",
+    ),
+    "tritonbiasonlyattention": (
+        "triton-bias-only-attention",
+        "Triton bias-attn",
+        "#2E6FDB",
+    ),
     # the family's default dispatch (A100: hand CUDA, elsewhere Triton) and the registry's projected_attention rows (``ops.augmented_attention_pair_bias``): golds
     "biasonlyattention": ("bias-only-attention", "bias-attn (dispatch)", "#D4AF37"),
-    "projectedattention": ("projected-attention", "Projected attn (dispatch)", "#F2C94C"),
-    "projectedattentionpytorch": ("projected-attention-pytorch", "PyTorch head-major", "#7A86A1"),
+    "projectedattention": (
+        "projected-attention",
+        "Projected attn (dispatch)",
+        "#F2C94C",
+    ),
+    "projectedattentionpytorch": (
+        "projected-attention-pytorch",
+        "PyTorch head-major",
+        "#7A86A1",
+    ),
     "biasonlyfused": ("bias-only-fused", "Triton bias fused (dep)", "#C66A12"),
-    "tritonaugmentedattention": ("triton-augmented-attention", "Triton aug-attn", "#2E6FDB"),
-    "augmentedattentionmemoryefficient":
-        ("augmented-attention-memory-efficient", "Triton aug (mem-eff)", "#5B8FF9"),
+    "tritonaugmentedattention": (
+        "triton-augmented-attention",
+        "Triton aug-attn",
+        "#2E6FDB",
+    ),
+    "augmentedattentionmemoryefficient": (
+        "augmented-attention-memory-efficient",
+        "Triton aug (mem-eff)",
+        "#5B8FF9",
+    ),
     # `aug_attn_compute_efficient` keeps its old spelling: it is a historical label in the
     # committed tables with no code path today, so renaming it would orphan those rows.
-    "augattncomputeefficient": ("aug-attn-compute-efficient", "Triton aug (comp-eff)", "#7A86A1"),
+    "augattncomputeefficient": (
+        "aug-attn-compute-efficient",
+        "Triton aug (comp-eff)",
+        "#7A86A1",
+    ),
     # Retired in v2.2.0 (the CuTe DSL / quack backend was removed). These labels exist only in the
     # committed historical result tables; they keep a pinned, muted identity so old figures still
     # draw them distinctly instead of letting `canonical()` guess.
     "trimulinprojcute": ("trimul-inproj-cute", "cute front (retired)", "#9A8F6A"),
     "tm1cute": ("tm1-cute", "cute tm1 (retired)", "#B3A77E"),
     "trimulfrontsm100": ("trimul-front-sm100", "cute SM100 (retired)", "#8A7F5A"),
-    "layernormlinearcute": ("layernorm-linear-cute", "cute LN+linear M1 (retired)", "#9A8F6A"),
-    "layernormlinearcutefused": ("layernorm-linear-cute-fused", "cute LN+linear M2 (retired)", "#B3A77E"),
+    "layernormlinearcute": (
+        "layernorm-linear-cute",
+        "cute LN+linear M1 (retired)",
+        "#9A8F6A",
+    ),
+    "layernormlinearcutefused": (
+        "layernorm-linear-cute-fused",
+        "cute LN+linear M2 (retired)",
+        "#B3A77E",
+    ),
     "tm2cute": ("tm2-cute", "cute tm2 (retired)", "#9A8F6A"),
-    "cutetransitionfused": ("cute-transition-fused", "cute transition (retired)", "#9A8F6A"),
+    "cutetransitionfused": (
+        "cute-transition-fused",
+        "cute transition (retired)",
+        "#9A8F6A",
+    ),
     "quackcute": ("quack-cute", "quack cute (retired)", "#9A8F6A"),
     # conditioned_transition_tail, misc bwd
-    "tritoncondtransition": ("triton-cond-transition", "Triton cond-transition", "#2E6FDB"),
+    "tritoncondtransition": (
+        "triton-cond-transition",
+        "Triton cond-transition",
+        "#2E6FDB",
+    ),
     "gateelembwd": ("gate-elem-bwd", "Triton gate bwd", "#2E6FDB"),
     "frontbwdfused": ("front-bwd-fused", "Triton front bwd", "#2E6FDB"),
     # A100 (sm_80) hand-CUDA arms of the kernel-level targets: the gold of this repo's kernels.
@@ -338,38 +429,40 @@ def apply_theme() -> None:
     """Install the repo's publication-grade matplotlib rcParams (idempotent)."""
     import matplotlib as mpl
 
-    mpl.rcParams.update({
-        "figure.facecolor": "white",
-        "figure.dpi": 120,
-        "savefig.dpi": 200,
-        "savefig.bbox": "tight",
-        "savefig.facecolor": "white",
-        # typography — DejaVu Sans ships with matplotlib (no font hunting)
-        "font.family": "sans-serif",
-        "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica"],
-        "font.size": 11,
-        "axes.titlesize": 12,
-        "axes.titleweight": "bold",
-        "axes.labelsize": 11,
-        "legend.fontsize": 9.5,
-        "xtick.labelsize": 9.5,
-        "ytick.labelsize": 9.5,
-        # clean axes: drop the top/right box, light y-grid behind the data
-        "axes.spines.top": False,
-        "axes.spines.right": False,
-        "axes.grid": True,
-        "axes.grid.axis": "y",
-        "axes.axisbelow": True,
-        "grid.color": "#D7DCE3",
-        "grid.linewidth": 0.8,
-        "axes.edgecolor": "#5A6473",
-        "axes.linewidth": 1.0,
-        "legend.frameon": True,
-        "legend.framealpha": 0.95,
-        "legend.edgecolor": "#D7DCE3",
-        # vector text stays text (selectable / searchable in the SVG)
-        "svg.fonttype": "none",
-    })
+    mpl.rcParams.update(
+        {
+            "figure.facecolor": "white",
+            "figure.dpi": 120,
+            "savefig.dpi": 200,
+            "savefig.bbox": "tight",
+            "savefig.facecolor": "white",
+            # typography — DejaVu Sans ships with matplotlib (no font hunting)
+            "font.family": "sans-serif",
+            "font.sans-serif": ["DejaVu Sans", "Arial", "Helvetica"],
+            "font.size": 11,
+            "axes.titlesize": 12,
+            "axes.titleweight": "bold",
+            "axes.labelsize": 11,
+            "legend.fontsize": 9.5,
+            "xtick.labelsize": 9.5,
+            "ytick.labelsize": 9.5,
+            # clean axes: drop the top/right box, light y-grid behind the data
+            "axes.spines.top": False,
+            "axes.spines.right": False,
+            "axes.grid": True,
+            "axes.grid.axis": "y",
+            "axes.axisbelow": True,
+            "grid.color": "#D7DCE3",
+            "grid.linewidth": 0.8,
+            "axes.edgecolor": "#5A6473",
+            "axes.linewidth": 1.0,
+            "legend.frameon": True,
+            "legend.framealpha": 0.95,
+            "legend.edgecolor": "#D7DCE3",
+            # vector text stays text (selectable / searchable in the SVG)
+            "svg.fonttype": "none",
+        }
+    )
 
 
 def save_figure(fig, out_path: Path, formats: tuple[str, ...] = FORMATS) -> list[Path]:

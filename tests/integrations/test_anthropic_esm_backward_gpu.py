@@ -2,6 +2,7 @@
 
 Requires the isolated ESMFold2 Transformers fork, pinned by upstream.
 """
+
 import os
 
 import pytest
@@ -9,8 +10,12 @@ import torch
 
 from miniworld_engine.integrations import anthropic as A
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
-    not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"), reason="needs pinned upstream")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"), reason="needs pinned upstream"
+    ),
+]
 pytest.importorskip("transformers.models.esmfold2.modeling_esmfold2_common")
 
 
@@ -20,21 +25,30 @@ def test_frozen_transition_input_gradient(row):
     provider = A.provider("transition")
     carried = provider.carried_module("esm_kd3")
     eps = float(carried.C._EPS)
-    x = torch.randn(128 * 128, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+    x = torch.randn(
+        128 * 128, 256, device="cuda", dtype=torch.bfloat16, requires_grad=True
+    )
     weights = provider.pack(
         w_a=torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16) / 16,
         w_b=torch.randn(1024, 256, device="cuda", dtype=torch.bfloat16) / 16,
         w_o=torch.randn(256, 1024, device="cuda", dtype=torch.bfloat16) / 32,
-        ln_w=torch.ones(256, device="cuda"), ln_b=torch.zeros(256, device="cuda"), eps=eps)
+        ln_w=torch.ones(256, device="cuda"),
+        ln_b=torch.zeros(256, device="cuda"),
+        eps=eps,
+    )
     got, selection = A.transition_autograd(x, weights, row=row, n_tokens=128)
     ref_x = x.detach().float().requires_grad_()
-    norm = torch.nn.functional.layer_norm(ref_x, (256,), weights.ln_w, weights.ln_b, eps)
+    norm = torch.nn.functional.layer_norm(
+        ref_x, (256,), weights.ln_w, weights.ln_b, eps
+    )
     a = torch.nn.functional.linear(norm, weights.w_a.float())
     b = torch.nn.functional.linear(norm, weights.w_b.float())
-    want = ref_x + torch.nn.functional.linear(torch.nn.functional.silu(a) * b, weights.w_o.float())
+    want = ref_x + torch.nn.functional.linear(
+        torch.nn.functional.silu(a) * b, weights.w_o.float()
+    )
     dy = torch.randn_like(x)
-    actual_dx, = torch.autograd.grad(got, x, dy)
-    expected_dx, = torch.autograd.grad(want, ref_x, dy.float())
+    (actual_dx,) = torch.autograd.grad(got, x, dy)
+    (expected_dx,) = torch.autograd.grad(want, ref_x, dy.float())
     assert selection.row == row.split(":")[0]
-    assert (got.float() - want).norm() / want.norm() < .02
-    assert (actual_dx.float() - expected_dx).norm() / expected_dx.norm() < .03
+    assert (got.float() - want).norm() / want.norm() < 0.02
+    assert (actual_dx.float() - expected_dx).norm() / expected_dx.norm() < 0.03

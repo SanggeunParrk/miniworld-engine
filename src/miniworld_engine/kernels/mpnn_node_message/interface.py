@@ -89,7 +89,8 @@ def node_message_reduce(
     hidden_bias: torch.Tensor,
     edge_mask: torch.Tensor,
     neighbor_scale: int,
-    *, backend: NodeMessageBackend = "triton",
+    *,
+    backend: NodeMessageBackend = "triton",
 ) -> torch.Tensor:
     """Run the memory or saved-projection compute policy of the fused node message."""
     if backend not in {"triton", "triton_compute"}:
@@ -133,7 +134,11 @@ def node_message_reduce(
         triton_node_message_reduce_compute,
     )
 
-    fn = triton_node_message_reduce_compute if backend == "triton_compute" else triton_node_message_reduce
+    fn = (
+        triton_node_message_reduce_compute
+        if backend == "triton_compute"
+        else triton_node_message_reduce
+    )
     return fn(
         edge_states,
         query_projection,

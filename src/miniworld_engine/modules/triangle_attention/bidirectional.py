@@ -89,9 +89,7 @@ class BidirectionalTriangleAttention(nn.Module):
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
     def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:
-        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
-            pair.shape[1]
-        ):
+        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(pair.shape[1]):
             return kernels.layernorm_kernel(
                 pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps
             )
@@ -103,8 +101,9 @@ class BidirectionalTriangleAttention(nn.Module):
         at d_pair<=128 the fused kernel is used even though d_hidden=2h is large."""
         dh = gate.shape[-1]
         m = math.prod(gate.shape[:-1])
-        if _bo_dispatch.gate_use_fused(dh, self.to_out.weight.shape[0], m,
-                                       gate.device, gate.dtype):
+        if _bo_dispatch.gate_use_fused(
+            dh, self.to_out.weight.shape[0], m, gate.device, gate.dtype
+        ):
             return kernels.fused_gate_out(gate, out, self.to_out.weight)
         return self.to_out(kernels.sigmoid_gate_fused(gate, out))
 
@@ -112,7 +111,9 @@ class BidirectionalTriangleAttention(nn.Module):
         """Concatenated [value|bias|gate] projection weight for the fused inference
         path, cached and rebuilt only when a projection weight changes."""
         w = (self.to_value.weight, self.to_bias.weight, self.to_gate.weight)
-        ver = _capture.scoped(tuple(t._version for t in w))     # never an eager copy inside a CUDA-graph capture
+        ver = _capture.scoped(
+            tuple(t._version for t in w)
+        )  # never an eager copy inside a CUDA-graph capture
         if ver is None or getattr(self, "_wcat_ver", None) != ver:
             self._wcat = torch.cat(w, dim=0)
             self._wcat_ver = ver
@@ -188,7 +189,9 @@ class BidirectionalTriangleAttention(nn.Module):
                 bs = bias[..., :H].masked_fill(~mask[:, None, :, None], float("-inf"))
                 be = bias[..., H:].masked_fill(~mask[:, :, None, None], float("-inf"))
                 bias = torch.cat([bs, be], dim=-1)
-            return bidir_triangle_attention_pair_bias(q, k, v, bias, H)  # [B, L, L, 2*d_hidden]
+            return bidir_triangle_attention_pair_bias(
+                q, k, v, bias, H
+            )  # [B, L, L, 2*d_hidden]
 
         q = rearrange(self.to_query(pln), "B L L2 (G D) -> B G L L2 D", G=2 * H)
         k = rearrange(self.to_key(pln), "B L L2 (G D) -> B G L L2 D", G=2 * H)
@@ -228,8 +231,12 @@ class BidirectionalTriangleAttention(nn.Module):
         # every sequence length shared one cached config. Measured here at L=384: M = 147,456
         # recorded as shape_key=8192.
         proj = layernorm_linear_triton(
-            pair, self.ln_pair.weight, self.ln_pair.bias,
-            self._inproj_weight(), None, self.ln_pair.eps,
+            pair,
+            self.ln_pair.weight,
+            self.ln_pair.bias,
+            self._inproj_weight(),
+            None,
+            self.ln_pair.eps,
         )
         value, bias, gate = proj.split([dv, db, dg], dim=-1)
         out = self._attend(value.view(B, L, L, dv), bias.view(B, L, L, db), mask)
@@ -251,6 +258,7 @@ class BidirectionalTriangleAttention(nn.Module):
 
             return triangle_attention_composition(self, pair, mask, bidirectional=True)
         from miniworld_engine.integrations import a100_families
+
         if a100_families.serves(self, pair):
             return a100_families.triangle_bidir(self, pair, mask)
         backend = _dispatch.guard_dtype(

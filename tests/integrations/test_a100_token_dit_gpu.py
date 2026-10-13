@@ -3,8 +3,8 @@ passes, cuBLAS GEMMs -- serves the block on sm_80 under the same contract as on 
 L a multiple of 128)."""
 
 import pytest
-from settings_helpers import override_setting
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import token_dit
@@ -50,10 +50,17 @@ def policy():
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
     torch.manual_seed(811)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+    ).eval()
     ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
-    x = torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype).transpose(-1, -2).contiguous().transpose(-1, -2)
+    x = (
+        torch.randn(1, 1, 384, 768, device="cuda", dtype=dtype)
+        .transpose(-1, -2)
+        .contiguous()
+        .transpose(-1, -2)
+    )
     c = torch.randn(1, 1, 384, 384, device="cuda", dtype=dtype)
     p = torch.randn(1, 384, 384, 256, device="cuda", dtype=dtype)[..., ::2]
     mask = torch.rand(1, 384, device="cuda") > 0.2
@@ -62,7 +69,9 @@ def test_token_dit_inference_live_inputs_weights_and_mask(dtype):
         got = m(x, c, p, mask)
         want = ref(x, c, p, mask)
         assert relative(got, want) < 0.025
-        compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+        compiled = torch.compile(
+            m, fullgraph=True, options={"triton.cudagraphs": False}
+        )
         assert relative(compiled(x, c, p, mask), got) < 1e-5
         old = got.clone()
         m.transition.squeeze.weight.mul_(0.8)
@@ -89,7 +98,9 @@ def test_token_dit_per_sample_conditioning(dtype):
     """A different conditioning per sample takes the fused step too (S L table rows), matches the reference, and each sample reads its
     own conditioning (sample i's output equals a one-sample call with cond i)."""
     torch.manual_seed(813)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().to(dtype)
+    ).eval()
     ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().to(dtype).eval()
     ref.load_state_dict(m.state_dict())
     s, length = 4, 256
@@ -102,20 +113,30 @@ def test_token_dit_per_sample_conditioning(dtype):
         got = m(x, c, p, mask)
         assert relative(got, ref(x, c, p, mask)) < 0.025
         for i in (0, s - 1):
-            one = m(x[i:i + 1], c[i:i + 1], p, mask)
-            assert relative(got[i:i + 1], one) < 1e-2
+            one = m(x[i : i + 1], c[i : i + 1], p, mask)
+            assert relative(got[i : i + 1], one) < 1e-2
 
 
-@pytest.mark.parametrize(("s", "length", "shared"), [(1, 128, True), (5, 256, True), (8, 384, True), (5, 512, False), (2, 640, True)])
+@pytest.mark.parametrize(
+    ("s", "length", "shared"),
+    [(1, 128, True), (5, 256, True), (8, 384, True), (5, 512, False), (2, 640, True)],
+)
 def test_token_dit_samples_and_lengths(s, length, shared):
     """The sampling shapes: S samples with one shared conditioning (a stride-0 expand) or one per sample, L a multiple of 128; no mask."""
     torch.manual_seed(814)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    ).eval()
     ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().bfloat16().eval()
     ref.load_state_dict(m.state_dict())
     x = torch.randn(s, 1, length, 768, device="cuda", dtype=torch.bfloat16)
-    c = (torch.randn(1, 1, length, 384, device="cuda", dtype=torch.bfloat16).expand(s, 1, length, 384) if shared
-         else torch.randn(s, 1, length, 384, device="cuda", dtype=torch.bfloat16))
+    c = (
+        torch.randn(1, 1, length, 384, device="cuda", dtype=torch.bfloat16).expand(
+            s, 1, length, 384
+        )
+        if shared
+        else torch.randn(s, 1, length, 384, device="cuda", dtype=torch.bfloat16)
+    )
     p = torch.randn(1, length, length, 128, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert token_dit.serves(m, x, c, p)
@@ -125,7 +146,9 @@ def test_token_dit_samples_and_lengths(s, length, shared):
 def test_the_gate_serves_only_what_the_runner_was_built_for():
     """Everything the fused step cannot take keeps the module path: autograd, a length off the 128-row tiles, another head layout,
     QK-norm blocks (the QK-norm pass is a B200 row kernel), another conditioning width, another dtype."""
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    ).eval()
     x = torch.randn(2, 1, 256, 768, device="cuda", dtype=torch.bfloat16)
     c = torch.randn(2, 1, 256, 384, device="cuda", dtype=torch.bfloat16)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=torch.bfloat16)
@@ -136,8 +159,18 @@ def test_the_gate_serves_only_what_the_runner_was_built_for():
         assert not token_dit.serves(m, x, c[:, :, :, :256], p)
         assert not token_dit.serves(m, x, c[:1].expand(3, 1, 256, 384), p)
     assert not token_dit.serves(m, x, c, p), "autograd: the runner is inference-only"
-    qk = DiTBlock(implementation=ImplementationType.MINIWORLD, use_qk_norm=True).cuda().bfloat16().eval()
-    wide = DiTBlock(d_single=768, n_head=24, implementation=ImplementationType.MINIWORLD).cuda().bfloat16().eval()
+    qk = (
+        DiTBlock(implementation=ImplementationType.MINIWORLD, use_qk_norm=True)
+        .cuda()
+        .bfloat16()
+        .eval()
+    )
+    wide = (
+        DiTBlock(d_single=768, n_head=24, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .bfloat16()
+        .eval()
+    )
     with torch.no_grad():
         assert not token_dit.serves(qk, x, c, p)
         assert not token_dit.serves(wide, x, c, p)
@@ -148,7 +181,9 @@ def test_fp32_runs_the_tf32_attention_core(monkeypatch):
     from miniworld_engine.kernels.augmented_attention.cuda import sm80
 
     torch.manual_seed(7)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().float()).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().float()
+    ).eval()
     ref = DiTBlock(implementation=ImplementationType.PYTORCH).cuda().float().eval()
     ref.load_state_dict(m.state_dict())
     x = torch.randn(3, 1, 256, 768, device="cuda")
@@ -157,7 +192,11 @@ def test_fp32_runs_the_tf32_attention_core(monkeypatch):
     mask = torch.rand(1, 256, device="cuda") > 0.15
     kinds = []
     orig = sm80.GatedInferenceCore.__call__
-    monkeypatch.setattr(sm80.GatedInferenceCore, "__call__", lambda self, *a, **k: kinds.append(self.dtype) or orig(self, *a, **k))
+    monkeypatch.setattr(
+        sm80.GatedInferenceCore,
+        "__call__",
+        lambda self, *a, **k: kinds.append(self.dtype) or orig(self, *a, **k),
+    )
     tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
@@ -177,7 +216,9 @@ def test_cuda_pack_matches_existing_weight_recipe(monkeypatch):
     )
 
     torch.manual_seed(815)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    ).eval()
     m.attention.ada_ln_in.ln_cond.float()
     m.transition.ada_ln_in.ln_cond.float()
     m.attention.ln_pair.float()
@@ -195,9 +236,13 @@ def test_cuda_pack_matches_existing_weight_recipe(monkeypatch):
 def test_cuda_preparation_graph_reads_changed_weights_pair_and_mask(monkeypatch):
     override_setting(monkeypatch, "token_dit_prep", "1")
     torch.manual_seed(816)
-    m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
+    m = randomize(
+        DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    ).eval()
     x = torch.randn(3, 1, 128, 768, device="cuda", dtype=torch.bfloat16)
-    c = torch.randn(1, 1, 128, 384, device="cuda", dtype=torch.bfloat16).expand(3, -1, -1, -1)
+    c = torch.randn(1, 1, 128, 384, device="cuda", dtype=torch.bfloat16).expand(
+        3, -1, -1, -1
+    )
     p = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
     mask = torch.ones(1, 128, device="cuda", dtype=torch.bool)
     compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
@@ -214,7 +259,10 @@ def test_cuda_preparation_graph_reads_changed_weights_pair_and_mask(monkeypatch)
             x.add_(0.1 * torch.randn_like(x))
             c[:1].add_(0.1 * torch.randn_like(c[:1]))
             p.add_(0.2 * torch.randn_like(p))
-            mask.copy_(torch.rand_like(mask, dtype=torch.float32) > (0.5 if iteration == 0 else 0.1))
+            mask.copy_(
+                torch.rand_like(mask, dtype=torch.float32)
+                > (0.5 if iteration == 0 else 0.1)
+            )
             graph.replay()
             assert not torch.equal(previous, captured)
             assert relative(captured, m(x, c, p, mask)) < 1e-5

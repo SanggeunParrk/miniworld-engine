@@ -62,7 +62,9 @@ def _row_kernels(device):
             return cuda_rows
         except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows
             if torch.cuda.get_device_capability(device) == (8, 0):
-                raise RuntimeError("A100 Token DiT requires the CUDA row extension; refusing a silent Triton fallback") from exc
+                raise RuntimeError(
+                    "A100 Token DiT requires the CUDA row extension; refusing a silent Triton fallback"
+                ) from exc
             import warnings
 
             warnings.warn(
@@ -151,19 +153,37 @@ class FusedTokenDiT:
         # sm_scale log2 e fold then moves from Wq / bq, which the norm would cancel, into the q norm's weight
         self.qk = bool(a0.use_qk_norm)
         import os
-        if (self.nb == 1 and (self.d, self.dc, self.dp, self.h) == (768, 384, 128, 16)
-                and dtype is torch.bfloat16 and not self.qk and dev.type == "cuda"
-                and torch.cuda.get_device_capability(dev) == (8, 0)
-                and hasattr(self.K, "pack_token")
-                and settings.current().token_dit_prep):
+
+        if (
+            self.nb == 1
+            and (self.d, self.dc, self.dp, self.h) == (768, 384, 128, 16)
+            and dtype is torch.bfloat16
+            and not self.qk
+            and dev.type == "cuda"
+            and torch.cuda.get_device_capability(dev) == (8, 0)
+            and hasattr(self.K, "pack_token")
+            and settings.current().token_dit_prep
+        ):
             scaled = prescale and core in ("gated", "gated2")
-            packed = self.K.pack_token(blocks[0], 48 ** -0.5 * 1.4426950408889634 if scaled else 1.,
-                                       1.4426950408889634 if scaled else 1.)
+            packed = self.K.pack_token(
+                blocks[0],
+                48**-0.5 * 1.4426950408889634 if scaled else 1.0,
+                1.4426950408889634 if scaled else 1.0,
+            )
             wq, bq, wab, self.w1, self.b1, self.w2, self.b2, self.pw_t = packed
             self.col = dict(q=0, k=1, v=2, g=3)
-            self.per = [dict(wqkvg=wq, bqkvg=bq, wab=wab,
-                             wo=a0.to_out.weight.detach().to(dtype).contiguous(),
-                             ws=blocks[0].transition.squeeze.weight.detach().to(dtype).contiguous())]
+            self.per = [
+                dict(
+                    wqkvg=wq,
+                    bqkvg=bq,
+                    wab=wab,
+                    wo=a0.to_out.weight.detach().to(dtype).contiguous(),
+                    ws=blocks[0]
+                    .transition.squeeze.weight.detach()
+                    .to(dtype)
+                    .contiguous(),
+                )
+            ]
             self.dtype, self._buf, self.streams, self._streams = dtype, {}, 1, []
             return
         if self.qk:
@@ -179,8 +199,15 @@ class FusedTokenDiT:
         f32 = lambda t: t.detach().float()
         # column blocks of the projection GEMM output. fp32 packs q | k | g | v: its sm_100a core (TF32) takes q | k | g and
         # v^T from a second GEMM over the last quarter of the weight (see _run), with no copy of the pack
-        ampere = dev.type == "cuda" and torch.cuda.get_device_capability(dev) == (8, 0)       # the A100 cores (bf16 and TF32) take q | k | v | g in one block
-        order = ("q", "k", "g", "v") if dtype is torch.float32 and not ampere else ("q", "k", "v", "g")
+        ampere = dev.type == "cuda" and torch.cuda.get_device_capability(dev) == (
+            8,
+            0,
+        )  # the A100 cores (bf16 and TF32) take q | k | v | g in one block
+        order = (
+            ("q", "k", "g", "v")
+            if dtype is torch.float32 and not ampere
+            else ("q", "k", "v", "g")
+        )
         self.col = {n: i for i, n in enumerate(order)}
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
@@ -302,8 +329,7 @@ class FusedTokenDiT:
                 # consumes the mask folded into pair bias, so it takes None
                 keep=(
                     None
-                    if self.core == "gated2"
-                    and settings.current().a100_cleanup
+                    if self.core == "gated2" and settings.current().a100_cleanup
                     else torch.ones(S, 1, L, device=dev, dtype=torch.bool)
                 ),
                 lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),
@@ -571,12 +597,18 @@ class FusedTokenDiT:
         cores = self.__dict__.setdefault("_sm100_cores", {})
         if idx not in cores and torch.cuda.get_device_capability(device) == (8, 0):
             from miniworld_engine.kernels.augmented_attention.cuda import sm80
+
             core = None
-            if sm80.supported(self.dtype, L, D, H, idx) and not torch.compiler.is_compiling():
+            if (
+                sm80.supported(self.dtype, L, D, H, idx)
+                and not torch.compiler.is_compiling()
+            ):
                 try:
                     core = sm80.GatedInferenceCore(idx, self.dtype, H, D // H)
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
-                    raise RuntimeError("A100 Token DiT requires the CUDA attention extension; refusing a silent Triton fallback") from exc
+                    raise RuntimeError(
+                        "A100 Token DiT requires the CUDA attention extension; refusing a silent Triton fallback"
+                    ) from exc
             cores[idx] = core
         if idx not in cores:
             from miniworld_engine.kernels.augmented_attention.cuda import sm100

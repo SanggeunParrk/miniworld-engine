@@ -20,6 +20,7 @@ whose body calls ``Function.apply``. An op is opaque to AUTOGRAD as well as to D
 an ``.apply`` returns a tensor with no ``grad_fn``: the forward numbers stay right and training
 quietly stops learning through it.
 """
+
 from __future__ import annotations
 
 import ast
@@ -29,7 +30,13 @@ from pathlib import Path
 
 import pytest
 
-SRC = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()) / "src" / "miniworld_engine"
+SRC = (
+    next(
+        p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file()
+    )
+    / "src"
+    / "miniworld_engine"
+)
 
 
 def _decorator_sites(tree: ast.AST, name: str) -> list[ast.expr]:
@@ -48,8 +55,12 @@ def _decorator_sites(tree: ast.AST, name: str) -> list[ast.expr]:
 #: version was measured with. It ships nothing (no __init__.py) and Dynamo never reaches it, so a
 #: kernel launched there is not a launcher this file is about. Every scan below goes through here.
 def _python_files() -> list[Path]:
-    return sorted(p for d in ("kernels", "modules") for p in (SRC / d).rglob("*.py")
-                  if "notes" not in p.parts)
+    return sorted(
+        p
+        for d in ("kernels", "modules")
+        for p in (SRC / d).rglob("*.py")
+        if "notes" not in p.parts
+    )
 
 
 def test_no_bare_opaque_site_remains() -> None:
@@ -57,12 +68,15 @@ def test_no_bare_opaque_site_remains() -> None:
     bare: list[str] = []
     for path in _python_files():
         tree = ast.parse(path.read_text())
-        bare.extend(f"{path.relative_to(SRC)}:{dec.lineno}"
-                    for dec in _decorator_sites(tree, "opaque")
-                    if isinstance(dec, ast.Call) and not dec.args and not dec.keywords)
+        bare.extend(
+            f"{path.relative_to(SRC)}:{dec.lineno}"
+            for dec in _decorator_sites(tree, "opaque")
+            if isinstance(dec, ast.Call) and not dec.args and not dec.keywords
+        )
     assert not bare, (
         "these @opaque() sites have no fake, so compile_wrap='custom_op' cannot register them:\n  "
-        + "\n  ".join(bare))
+        + "\n  ".join(bare)
+    )
 
 
 def _is_launch(node: ast.AST) -> bool:
@@ -72,13 +86,17 @@ def _is_launch(node: ast.AST) -> bool:
     config dispatcher is that too, and it is a thunk, not a launch. A launch subscripts a plain NAME (the
     kernel) and is called WITH arguments.
     """
-    return (isinstance(node, ast.Call)
-            and isinstance(node.func, ast.Subscript)
-            and isinstance(node.func.value, (ast.Name, ast.Attribute))
-            # nn.Sequential[0](x) is a module call, not kernel[grid](x).
-            and not (isinstance(node.func.slice, ast.Constant)
-                     and isinstance(node.func.slice.value, int))
-            and bool(node.args or node.keywords))
+    return (
+        isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Subscript)
+        and isinstance(node.func.value, (ast.Name, ast.Attribute))
+        # nn.Sequential[0](x) is a module call, not kernel[grid](x).
+        and not (
+            isinstance(node.func.slice, ast.Constant)
+            and isinstance(node.func.slice.value, int)
+        )
+        and bool(node.args or node.keywords)
+    )
 
 
 def _launchers_and_ops(paths):
@@ -92,7 +110,9 @@ def _launchers_and_ops(paths):
             names = []
             for dec in node.decorator_list:
                 f = dec.func if isinstance(dec, ast.Call) else dec
-                names.append(f.id if isinstance(f, ast.Name) else getattr(f, "attr", ""))
+                names.append(
+                    f.id if isinstance(f, ast.Name) else getattr(f, "attr", "")
+                )
             # A callback defined inside a function executes within that enclosing
             # call chain even when the autotuner invokes it through a parameter.
             for child in ast.walk(node):
@@ -148,12 +168,15 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
         if not grew:
             break
 
-    bad = [f"{path.relative_to(SRC)}:{lineno} {name}"
-           for _key, (name, is_op, lineno, path) in sorted(launchers.items())
-           if not is_op and name not in covered]
+    bad = [
+        f"{path.relative_to(SRC)}:{lineno} {name}"
+        for _key, (name, is_op, lineno, path) in sorted(launchers.items())
+        if not is_op and name not in covered
+    ]
     assert not bad, (
         "these launch a kernel on a path Dynamo can reach, but are not opaque ops:\n  "
-        + "\n  ".join(bad))
+        + "\n  ".join(bad)
+    )
 
 
 #: The op namespace is public API: ``torch.ops.miniworld_engine.<name>`` is global and flat, and
@@ -179,25 +202,24 @@ OP_FAMILIES = (
     "mpnn_node_message",
     "mpnn_relative_position",
     "mpnn_features",  # fixed-geometry RBF dW boundary enforces activation lifetime under AOT
-
     "augmented_attention",
     "bias_only_attention",
     "conditioned_transition",
     "gated_projection",
-    "gated_residual",      # adaLN-Zero residual multiply/add, without a projection
-    "layernorm_linear",     # before "layernorm": it is the longer, more specific prefix
+    "gated_residual",  # adaLN-Zero residual multiply/add, without a projection
+    "layernorm_linear",  # before "layernorm": it is the longer, more specific prefix
     "layernorm",
-    "outer_product_mean",       # MSA -> pair (kernels/outer_product_mean)
+    "outer_product_mean",  # MSA -> pair (kernels/outer_product_mean)
     "pair_weighted_averaging",  # MSA pair-weighted averaging (kernels/pair_weighted_averaging)
     "rmsnorm",
-    "rope",           # covers rmsnorm_adamod_* too: same prefix
+    "rope",  # covers rmsnorm_adamod_* too: same prefix
     "swa_atom_attention",
-    "qk_norm_rope",    # paired RMSNorm/RoPE preprocessing, distinct from standalone rope
-    "swa_gate_out",    # SWA-specific row-keyed gated output projection
-    "swa_dit",         # the fused SWA atom DiT block (kernels/swa_dit): one forward op, one backward op
-    "token_pair_init", # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
-    "smooth_lddt",     # AF3 Alg. 27 smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep, forward and backward ops
-    "local_dit",       # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
+    "qk_norm_rope",  # paired RMSNorm/RoPE preprocessing, distinct from standalone rope
+    "swa_gate_out",  # SWA-specific row-keyed gated output projection
+    "swa_dit",  # the fused SWA atom DiT block (kernels/swa_dit): one forward op, one backward op
+    "token_pair_init",  # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
+    "smooth_lddt",  # AF3 Alg. 27 smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep, forward and backward ops
+    "local_dit",  # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
     "tm1",
     "tm2",
     "transition",
@@ -237,19 +259,27 @@ def _declared_op_names() -> dict[str, str]:
 
 
 def test_op_names_are_lower_snake_case() -> None:
-    bad = {n: f for n, f in _declared_op_names().items()
-           if n != n.lower() or not n.replace("_", "").isalnum()}
-    assert not bad, ("op names are public and must be lower_snake_case:\n  "
-                     + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items())))
+    bad = {
+        n: f
+        for n, f in _declared_op_names().items()
+        if n != n.lower() or not n.replace("_", "").isalnum()
+    }
+    assert not bad, (
+        "op names are public and must be lower_snake_case:\n  "
+        + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items()))
+    )
 
 
 def test_op_names_start_with_their_family() -> None:
     """A name's first token says which kernel family it belongs to -- see ``OP_FAMILIES``."""
-    bad = {n: f for n, f in _declared_op_names().items() if not n.startswith(OP_FAMILIES)}
+    bad = {
+        n: f for n, f in _declared_op_names().items() if not n.startswith(OP_FAMILIES)
+    }
     assert not bad, (
         "these op names do not start with a known family; either rename them or add the family "
         "to OP_FAMILIES (and say why it is a family):\n  "
-        + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items())))
+        + "\n  ".join(f"{n}  ({f})" for n, f in sorted(bad.items()))
+    )
 
 
 def test_nothing_bypasses_the_compile_wrap_switch() -> None:
@@ -265,11 +295,13 @@ def test_nothing_bypasses_the_compile_wrap_switch() -> None:
     offenders = []
     for path in _python_files():
         if path.name == "_compile.py":
-            continue                      # the switch's own implementation
+            continue  # the switch's own implementation
         if "torch.library.custom_op(" in path.read_text():
             offenders.append(str(path.relative_to(SRC)))
-    assert not offenders, ("these register ops outside kernels._compile.opaque, so compile_wrap "
-                           "does not reach them:\n  " + "\n  ".join(offenders))
+    assert not offenders, (
+        "these register ops outside kernels._compile.opaque, so compile_wrap "
+        "does not reach them:\n  " + "\n  ".join(offenders)
+    )
 
 
 @pytest.mark.parametrize("wrap", ["disable", "custom_op"])
@@ -289,10 +321,12 @@ def test_opaque_with_register_autograd_imports_under_both_wraps(wrap: str) -> No
     modes for every module that calls ``register_autograd`` at import.
     """
     callers = [p for p in _python_files() if ".register_autograd(" in p.read_text()]
-    assert callers, "no register_autograd sites found -- the test is looking in the wrong place"
+    assert callers, (
+        "no register_autograd sites found -- the test is looking in the wrong place"
+    )
     mods = [
-        "miniworld_engine." + ".".join(
-            p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
+        "miniworld_engine."
+        + ".".join(p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
         for p in callers
     ]
     script = f"""
@@ -312,10 +346,16 @@ for m in bad:
     print("  " + m)
 sys.exit(1 if bad else 0)
 """
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                       timeout=900, check=False)
+    r = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        check=False,
+    )
     assert r.returncode == 0, (
-        f"compile_wrap={wrap!r}: a register_autograd site fails to import:\n{r.stdout}")
+        f"compile_wrap={wrap!r}: a register_autograd site fails to import:\n{r.stdout}"
+    )
 
 
 @pytest.mark.parametrize("wrap", ["disable", "custom_op"])
@@ -344,8 +384,8 @@ def test_custom_op_mode_registers_every_site(wrap: str) -> None:
     sites = [p for p in _python_files() if "@opaque" in p.read_text()]
     assert sites, "no @opaque sites found -- the test is looking in the wrong place"
     mods = [
-        "miniworld_engine." + ".".join(
-            p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
+        "miniworld_engine."
+        + ".".join(p.relative_to(SRC).with_suffix("").parts).removesuffix(".__init__")
         for p in sites
     ]
     script = f"""
@@ -384,6 +424,13 @@ for m in bad:
     print("  " + m)
 sys.exit(1 if bad else 0)
 """
-    r = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True,
-                       timeout=1800, check=False)
-    assert r.returncode == 0, f"compile_wrap={wrap!r} could not register every site:\n{r.stdout}"
+    r = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        timeout=1800,
+        check=False,
+    )
+    assert r.returncode == 0, (
+        f"compile_wrap={wrap!r} could not register every site:\n{r.stdout}"
+    )

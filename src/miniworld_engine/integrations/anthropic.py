@@ -43,20 +43,39 @@ def module_pair_bias_attention(q, k, v, bias, key_mask=None, gate=None):
     remains explicit and must not be described as a measured release winner.
     """
     import torch
+
     _inference()
     face = provider("apb")
     heads, head_dim = q.shape[-2:]
-    cell = next((c for kind in ("dit", "pf", "msarow")
-                 if (c := face.cell_word(kind, heads=heads, head_dim=head_dim)) is not None), None)
+    cell = next(
+        (
+            c
+            for kind in ("dit", "pf", "msarow")
+            if (c := face.cell_word(kind, heads=heads, head_dim=head_dim)) is not None
+        ),
+        None,
+    )
     word = "fast" if cell is not None else "apb_attn"
     timing = _TIMING.get()
-    selection = face.select(torch.cuda.get_device_capability(q.device), q.dtype, cell, q.shape[1],
-                            word=word, samples=q.shape[0], heads=heads, head_dim=head_dim,
-                            capture=timing == "graph", timing=timing)
+    selection = face.select(
+        torch.cuda.get_device_capability(q.device),
+        q.dtype,
+        cell,
+        q.shape[1],
+        word=word,
+        samples=q.shape[0],
+        heads=heads,
+        head_dim=head_dim,
+        capture=timing == "graph",
+        timing=timing,
+    )
     if torch.cuda.is_current_stream_capturing() and not selection.capture_safe:
-        raise RuntimeError("Anthropic row is not capture-safe; warm up with execution_policy(timing='graph')")
-    return face.pair_bias_attention(q, k, v, bias, key_mask, gate, word=word,
-                                   cell=cell, selection=selection)
+        raise RuntimeError(
+            "Anthropic row is not capture-safe; warm up with execution_policy(timing='graph')"
+        )
+    return face.pair_bias_attention(
+        q, k, v, bias, key_mask, gate, word=word, cell=cell, selection=selection
+    )
 
 
 def configure(root=None):
@@ -143,8 +162,15 @@ def pallas_call(op, *args, **kwargs):
     Arrays remain JAX arrays. ``word`` names the actual row; strict serving
     propagates refusal instead of silently selecting a different algorithm.
     """
-    if op not in {"attention", "triangle_attention_block", "triangle_multiplication",
-                  "glu_transposed_masked", "transition", "layer_norm", "outer_product_mean"}:
+    if op not in {
+        "attention",
+        "triangle_attention_block",
+        "triangle_multiplication",
+        "glu_transposed_masked",
+        "transition",
+        "layer_norm",
+        "outer_product_mean",
+    }:
         raise ValueError(f"Unknown Pallas operation: {op}")
     if _ROOT is None:
         configure()
@@ -178,9 +204,13 @@ def transition_autograd(x, weights, *, row, **kwargs):
     return provider("transition").transition_autograd(x, weights, word=row, **kwargs)
 
 
-def layer_norm_backward_dx(grad_y, x, weight, mean, rstd, *, row="ef2_ln_bwd_dx", **kwargs):
+def layer_norm_backward_dx(
+    grad_y, x, weight, mean, rstd, *, row="ef2_ln_bwd_dx", **kwargs
+):
     """The release's LN input-gradient kernel; affine gradients are not implied."""
-    return provider("ln").layer_norm_backward_dx(grad_y, x, weight, mean, rstd, word=row, **kwargs)
+    return provider("ln").layer_norm_backward_dx(
+        grad_y, x, weight, mean, rstd, word=row, **kwargs
+    )
 
 
 def module_triangle_attention(module, pair, mask):
@@ -247,9 +277,7 @@ def module_triangle_attention(module, pair, mask):
                 native_triangle_attention,
             )
 
-            result = native_triangle_attention(
-                q, k, v, bias, mask, float(scale), row
-            )
+            result = native_triangle_attention(q, k, v, bias, mask, float(scale), row)
         else:
             result = triattn.triangle_attention(
                 q, k, v, bias, mask, scale, word=row, selection=selection, form=form

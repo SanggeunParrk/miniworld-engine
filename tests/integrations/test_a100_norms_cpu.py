@@ -48,7 +48,9 @@ def test_layernorm_kernel_on_cpu_is_the_reference():
     x = torch.randn(4, 7, 96)
     w, b = torch.randn(96), torch.randn(96)
     y = layernorm_kernel(x, w, b, 1e-5)
-    assert torch.allclose(y, torch.nn.functional.layer_norm(x, (96,), w, b, 1e-5), atol=1e-6)
+    assert torch.allclose(
+        y, torch.nn.functional.layer_norm(x, (96,), w, b, 1e-5), atol=1e-6
+    )
 
 
 def test_rms_norm_modulation_is_the_dispatching_op():
@@ -61,5 +63,10 @@ def test_rms_norm_modulation_is_the_dispatching_op():
 def test_the_public_triton_entries_keep_their_names():
     from miniworld_engine import kernels
 
-    for name in ("triton_layernorm", "triton_rmsnorm", "triton_rmsnorm_adamod", "triton_rope_3d"):
+    for name in (
+        "triton_layernorm",
+        "triton_rmsnorm",
+        "triton_rmsnorm_adamod",
+        "triton_rope_3d",
+    ):
         assert callable(getattr(kernels, name))

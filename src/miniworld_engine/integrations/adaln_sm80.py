@@ -45,13 +45,18 @@ def _loads() -> bool:
         _kernels().available()
     except Exception as exc:  # a toolchain problem keeps the module path
         _FAILED = True
-        warnings.warn(f"sm_80 AdaLN kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 AdaLN kernels unavailable, keeping the module path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
 
 def _kernels():
     from miniworld_engine.kernels.adaln.cuda import sm80
+
     return sm80
 
 
@@ -65,26 +70,47 @@ def _period(x: torch.Tensor, cond: torch.Tensor, grad: bool) -> int | None:
     if clead == lead:
         shared = len(lead) > 1 and lead[0] > 1 and cond.stride(0) == 0
         return m if (grad or not shared) else m // lead[0]
-    if not grad and len(lead) > 1 and lead[0] > 1 and clead[0] == 1 and clead[1:] == lead[1:]:
+    if (
+        not grad
+        and len(lead) > 1
+        and lead[0] > 1
+        and clead[0] == 1
+        and clead[1:] == lead[1:]
+    ):
         return m // lead[0]
     return None
 
 
-def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> bool:
+def serves(
+    module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool
+) -> bool:
     """Whether ``module`` (an ``AdaptiveLayerNorm`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
-    if not settings.current().adaln_sm80 or settings.current().engine_backend == "triton":
+    if (
+        not settings.current().adaln_sm80
+        or settings.current().engine_backend == "triton"
+    ):
         return False
     if not x.is_cuda or not cond.is_cuda or compute_dtype not in (BF, torch.float32):
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
-    if module.ln_cond.weight is None or module.to_scale.bias is None or module.to_bias.bias is not None:
+    if (
+        module.ln_cond.weight is None
+        or module.to_scale.bias is None
+        or module.to_bias.bias is not None
+    ):
         return False
     if torch.cuda.get_device_capability(x.device) != (8, 0):
         return False
-    if compute_dtype is torch.float32 and not grad and x.shape[-1] == 128 and cond.shape[-1] == 128 and x.numel() // 128 < fp32_atom_min_rows():
-        return False                 # fp32 inference of a few rows at the atom width: Triton's fused kernel is 10-12 % faster there than the TF32 kernel's launch + weight-staging prologue (the registry's N = 1024, A = 5)
+    if (
+        compute_dtype is torch.float32
+        and not grad
+        and x.shape[-1] == 128
+        and cond.shape[-1] == 128
+        and x.numel() // 128 < fp32_atom_min_rows()
+    ):
+        return False  # fp32 inference of a few rows at the atom width: Triton's fused kernel is 10-12 % faster there than the TF32 kernel's launch + weight-staging prologue (the registry's N = 1024, A = 5)
     return _period(x, cond, grad) is not None and _loads()
 
 
@@ -191,14 +217,18 @@ def cached(tag: str, tensors: tuple, build):
     a temporary -- the cast of a master weight under autocast -- never hits a stale entry through a recycled address, and no entry keeps a tensor alive).  Inference reads the packs on every
     call, and repacking costs launches."""
     key = _capture.scoped((tag, *[(t.data_ptr(), t._version) for t in tensors]))
-    if key is None:                  # inside a capture of unknown id: no caching
+    if key is None:  # inside a capture of unknown id: no caching
         return build()
     hit = _packs.get(key)
     if hit is not None and all(r() is t for r, t in zip(hit[0], tensors, strict=True)):
         return hit[1]
-    _capture.prune(_packs)           # an eager entry serves eager calls only; a capture packs once, recorded; finished captures' entries go
+    _capture.prune(
+        _packs
+    )  # an eager entry serves eager calls only; a capture packs once, recorded; finished captures' entries go
     if len(_packs) >= 256:
-        for k in [k for k, (refs, _) in _packs.items() if any(r() is None for r in refs)]:
+        for k in [
+            k for k, (refs, _) in _packs.items() if any(r() is None for r in refs)
+        ]:
             del _packs[k]
         if len(_packs) >= 256:
             _packs.clear()
@@ -217,6 +247,7 @@ def cast_params(params: tuple, dt: torch.dtype, cache: bool) -> tuple:
     each call), so the packs built from them hit too."""
     if all(p.dtype is dt for p in params):
         return tuple(params)
+
     def build():
         return tuple(p if p.dtype is dt else p.to(dt) for p in params)
 
@@ -225,7 +256,11 @@ def cast_params(params: tuple, dt: torch.dtype, cache: bool) -> tuple:
 
 def _wcat(ws: torch.Tensor, wb: torch.Tensor, cache: bool) -> torch.Tensor:
     """[Ws; Wb] [2 d, dc]; with ``cache`` kept per parameter version."""
-    return cached("wcat", (ws, wb), lambda: torch.cat([ws, wb])) if cache else torch.cat([ws, wb])
+    return (
+        cached("wcat", (ws, wb), lambda: torch.cat([ws, wb]))
+        if cache
+        else torch.cat([ws, wb])
+    )
 
 
 def _inference_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
@@ -233,15 +268,27 @@ def _inference_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c):
 
 
 @opaque(fake=_inference_fake, name="adaln_sm80_inference")
-def inference(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, sb: torch.Tensor, wb: torch.Tensor, eps_x: float,
-              eps_c: float) -> torch.Tensor:
+def inference(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    ws: torch.Tensor,
+    sb: torch.Tensor,
+    wb: torch.Tensor,
+    eps_x: float,
+    eps_c: float,
+) -> torch.Tensor:
     """x [M, d] and cond [P, dc] contiguous rows (P divides M: row r of x takes conditioning row r % P), lnw [dc] fp32, Ws / Wb [d, dc], sb [d] (x's dtype) -> y [M, d]."""
     k = _kernels()
     with torch.cuda.device(x.device):
         ws, sb, wb = cast_params((ws, sb, wb), x.dtype, True)
-        if k.atom_supported(x, cond):                                       # d = dc = 128, bf16: the whole forward in one kernel
+        if k.atom_supported(
+            x, cond
+        ):  # d = dc = 128, bf16: the whole forward in one kernel
             return k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c)[0]
-        if k.atom_tf32_supported(x, cond):                                  # d = dc = 128, fp32: the same on TF32 tensor cores
+        if k.atom_tf32_supported(
+            x, cond
+        ):  # d = dc = 128, fp32: the same on TF32 tensor cores
             return k.atom_fwd_tf32(x, cond, lnw, ws, wb, sb, eps_x, eps_c)
         aff, _ = k.cond_ln(cond, lnw, x.dtype, eps_c)
         sbt = _mm_op(aff, _wcat(ws, wb, True).t())
@@ -250,36 +297,85 @@ def inference(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.
 
 
 # -------------------------------------------------------------------------------------------------------------- training
-def _train_fwd_fake(x, cond, lnw, ws, sb, wb, eps_x, eps_c, native_cast=False, save_cast=False):
+def _train_fwd_fake(
+    x, cond, lnw, ws, sb, wb, eps_x, eps_c, native_cast=False, save_cast=False
+):
     m, d = x.shape
     p, dc = cond.shape
     e = x.new_empty
     casts = [torch.empty_like(t, dtype=BF) for t in (ws, sb, wb)] if save_cast else []
-    if _kernels().atom_supported(x, cond):                                    # the fused atom kernels keep only the statistics
-        return [torch.empty_like(x), e((0,)), e((p, 2), dtype=torch.float32), e((0,)), e((m, 2), dtype=torch.float32), e((0,))] + casts
-    return [torch.empty_like(x), e((p, dc)), e((p, 2), dtype=torch.float32), e((p, 2 * d)), e((m, 2), dtype=torch.float32), e((2 * d, dc))] + casts
+    if _kernels().atom_supported(
+        x, cond
+    ):  # the fused atom kernels keep only the statistics
+        return [
+            torch.empty_like(x),
+            e((0,)),
+            e((p, 2), dtype=torch.float32),
+            e((0,)),
+            e((m, 2), dtype=torch.float32),
+            e((0,)),
+            *casts,
+        ]
+    return [
+        torch.empty_like(x),
+        e((p, dc)),
+        e((p, 2), dtype=torch.float32),
+        e((p, 2 * d)),
+        e((m, 2), dtype=torch.float32),
+        e((2 * d, dc)),
+        *casts,
+    ]
 
 
 @opaque(fake=_train_fwd_fake, name="adaln_sm80_train_fwd")
-def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, sb: torch.Tensor, wb: torch.Tensor, eps_x: float,
-              eps_c: float, native_cast: bool = False, save_cast: bool = False) -> list[torch.Tensor]:
+def train_fwd(
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    ws: torch.Tensor,
+    sb: torch.Tensor,
+    wb: torch.Tensor,
+    eps_x: float,
+    eps_c: float,
+    native_cast: bool = False,
+    save_cast: bool = False,
+) -> list[torch.Tensor]:
     """The forward saving what the backward reads: [y, aff [M, dc], cond (mean, rstd) [M, 2], [S | B] [M, 2 d], x (mean, rstd) [M, 2], [Ws; Wb] [2 d, dc]]; cond is one row per row of x.
     At d = dc = 128 (bf16) one kernel writes y and the two statistics, and aff / [S | B] / the packed weights are empty (the backward kernel recomputes them)."""
     k = _kernels()
     with torch.cuda.device(x.device):
         packed_weights = None
         if native_cast:
-            if save_cast and not k.atom_supported(x, cond) and settings.current().adaln_sm80_pack_param_cast:
-                from miniworld_engine.kernels.transition.cuda.parameter_cast_pack_sm80 import result
+            if (
+                save_cast
+                and not k.atom_supported(x, cond)
+                and settings.current().adaln_sm80_pack_param_cast
+            ):
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_pack_sm80 import (
+                    result,
+                )
+
                 (ws, sb, wb), (packed_weights,) = result((ws, sb, wb), ((0, 2),))
             else:
-                from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
+                from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import (
+                    result,
+                )
+
                 ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):
             y, xst, cst = k.atom_fwd(x, cond, lnw, ws, wb, sb, eps_x, eps_c, stats=True)
-            return [y, x.new_empty((0,)), cst, x.new_empty((0,)), xst, x.new_empty((0,))] + ([ws, sb, wb] if save_cast else [])
+            return [
+                y,
+                x.new_empty((0,)),
+                cst,
+                x.new_empty((0,)),
+                xst,
+                x.new_empty((0,)),
+            ] + ([ws, sb, wb] if save_cast else [])
         aff, cst = k.cond_ln(cond, lnw, x.dtype, eps_c, stats=True)
-        wcat = packed_weights if packed_weights is not None else torch.cat([ws, wb])  # saved for the backward
+        wcat = (
+            packed_weights if packed_weights is not None else torch.cat([ws, wb])
+        )  # saved for the backward
         sbt = _mm_op(aff, wcat.t())
         y, xst = k.epilogue(x, sbt, sb, eps_x, stats=True)
     return [y, aff, cst, sbt, xst, wcat] + ([ws, sb, wb] if save_cast else [])
@@ -292,41 +388,99 @@ def like(t: torch.Tensor, fp32: bool) -> torch.Tensor:
     return torch.empty((), dtype=torch.float32, device=t.device).expand(t.shape)
 
 
-def _train_bwd_fake(dy, x, cond, lnw, ws, sb, wb, aff, cst, sbt, xst, wcat, fp32_grads=False, native_cast=False):
+def _train_bwd_fake(
+    dy,
+    x,
+    cond,
+    lnw,
+    ws,
+    sb,
+    wb,
+    aff,
+    cst,
+    sbt,
+    xst,
+    wcat,
+    fp32_grads=False,
+    native_cast=False,
+):
     """Fake of ``train_bwd``: the gradient shapes and dtypes."""
     gd = torch.float32 if fp32_grads else ws.dtype
-    return [torch.empty_like(x), torch.empty_like(cond), torch.empty(lnw.shape, dtype=lnw.dtype, device=lnw.device),
-            torch.empty(ws.shape, dtype=gd, device=ws.device), torch.empty(sb.shape, dtype=gd, device=sb.device),
-            torch.empty(wb.shape, dtype=gd, device=wb.device)]
+    return [
+        torch.empty_like(x),
+        torch.empty_like(cond),
+        torch.empty(lnw.shape, dtype=lnw.dtype, device=lnw.device),
+        torch.empty(ws.shape, dtype=gd, device=ws.device),
+        torch.empty(sb.shape, dtype=gd, device=sb.device),
+        torch.empty(wb.shape, dtype=gd, device=wb.device),
+    ]
 
 
 @opaque(fake=_train_bwd_fake, name="adaln_sm80_train_bwd")
-def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, sb: torch.Tensor, wb: torch.Tensor, aff: torch.Tensor,
-              cst: torch.Tensor, sbt: torch.Tensor, xst: torch.Tensor, wcat: torch.Tensor, fp32_grads: bool = False, native_cast: bool = False) -> list[torch.Tensor]:
+def train_bwd(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    cond: torch.Tensor,
+    lnw: torch.Tensor,
+    ws: torch.Tensor,
+    sb: torch.Tensor,
+    wb: torch.Tensor,
+    aff: torch.Tensor,
+    cst: torch.Tensor,
+    sbt: torch.Tensor,
+    xst: torch.Tensor,
+    wcat: torch.Tensor,
+    fp32_grads: bool = False,
+    native_cast: bool = False,
+) -> list[torch.Tensor]:
     """[dx, dcond, d lnw, dWs, d sb, dWb] (each in its input's dtype; the weights' and the bias' fp32 when ``fp32_grads``: the master parameters' gradients, unrounded) from the gradient dy [M, d] and the forward's saved tensors."""
     k = _kernels()
     d = x.shape[1]
     with torch.cuda.device(x.device):
         if native_cast:
-            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import result
+            from miniworld_engine.kernels.transition.cuda.parameter_cast_sm80 import (
+                result,
+            )
+
             ws, sb, wb = result((ws, sb, wb))
-        if k.atom_supported(x, cond):                                        # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
-            dx, dcond, dsc, aff, psb, plw = k.atom_bwd(dy, x, cond, xst, cst, lnw, ws, wb, sb)
-            if (settings.current().adaln_sm80_atom_cond_wgrad_fused
-                    and x.shape[0] in (48 * 4096, 48 * 8192)):
-                from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80
+        if k.atom_supported(
+            x, cond
+        ):  # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
+            dx, dcond, dsc, aff, psb, plw = k.atom_bwd(
+                dy, x, cond, xst, cst, lnw, ws, wb, sb
+            )
+            if settings.current().adaln_sm80_atom_cond_wgrad_fused and x.shape[0] in (
+                48 * 4096,
+                48 * 8192,
+            ):
+                from miniworld_engine.kernels.conditioned_transition.cuda import (
+                    ct_atom_cond_wgrad_fused_sm80,
+                )
+
                 dws, dwb = ct_atom_cond_wgrad_fused_sm80.result_two(dsc, dy, aff)
             else:
                 dws, dwb = _wgrad(dsc, aff), _wgrad(dy, aff)
-            dsb, dlnw, dws, dwb = k.finish([psb, plw], [like(sb, fp32_grads), lnw], [dws, dwb], [like(ws, fp32_grads), like(wb, fp32_grads)])
+            dsb, dlnw, dws, dwb = k.finish(
+                [psb, plw],
+                [like(sb, fp32_grads), lnw],
+                [dws, dwb],
+                [like(ws, fp32_grads), like(wb, fp32_grads)],
+            )
             return [dx, dcond, dlnw, dws, dsb, dwb]
         dm, dx, psb = k.bwd_x(dy, x, xst, sbt, sb, None, x.dtype)
         br = Branch(x.device)
-        dw = br.run(lambda: _wgrad(dm, aff), dm, aff)                        # [2 d, dc] fp32: [dWs; dWb], beside the data gradient's GEMM and the cond row pass
-        dca = _mm(dm, wcat)                                                  # [M, dc] fp32: dcond_aff
+        dw = br.run(
+            lambda: _wgrad(dm, aff), dm, aff
+        )  # [2 d, dc] fp32: [dWs; dWb], beside the data gradient's GEMM and the cond row pass
+        dca = _mm(dm, wcat)  # [M, dc] fp32: dcond_aff
         dcond, pw = k.cond_bwd(dca, cond, cst, lnw, None)
         br.join()
-        dsb, dlnw, dws, dwb = k.finish([psb, pw], [like(sb, fp32_grads), lnw], [dw[:d], dw[d:]], [like(ws, fp32_grads), like(wb, fp32_grads)])
+        dsb, dlnw, dws, dwb = k.finish(
+            [psb, pw],
+            [like(sb, fp32_grads), lnw],
+            [dw[:d], dw[d:]],
+            [like(ws, fp32_grads), like(wb, fp32_grads)],
+        )
     return [dx, dcond, dlnw, dws, dsb, dwb]
 
 
@@ -336,12 +490,19 @@ class _Training(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, lnw, ws, sb, wb, eps_x, eps_c):
         ctx.fp32_grads = master((ws,), x.dtype)
-        ctx.save_cast = (ctx.fp32_grads and all(t.dtype is torch.float32 for t in (ws, sb, wb))
-                         and settings.current().adaln_sm80_save_param_cast)
-        ctx.native_cast = ctx.fp32_grads and (ctx.save_cast or settings.current().adaln_sm80_native_param_cast)
+        ctx.save_cast = (
+            ctx.fp32_grads
+            and all(t.dtype is torch.float32 for t in (ws, sb, wb))
+            and settings.current().adaln_sm80_save_param_cast
+        )
+        ctx.native_cast = ctx.fp32_grads and (
+            ctx.save_cast or settings.current().adaln_sm80_native_param_cast
+        )
         if not ctx.native_cast:
             ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
-        y, *saved = train_fwd(x, cond, lnw, ws, sb, wb, eps_x, eps_c, ctx.native_cast, ctx.save_cast)
+        y, *saved = train_fwd(
+            x, cond, lnw, ws, sb, wb, eps_x, eps_c, ctx.native_cast, ctx.save_cast
+        )
         if ctx.save_cast:
             ws, sb, wb = saved[-3:]
             saved = saved[:-3]
@@ -352,19 +513,39 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         x, cond, lnw, ws, sb, wb, *saved = ctx.saved_tensors
-        dx, dcond, dlnw, dws, dsb, dwb = train_bwd(dy.contiguous(), x, cond, lnw, ws, sb, wb, *saved, ctx.fp32_grads, ctx.native_cast and not ctx.save_cast)
+        dx, dcond, dlnw, dws, dsb, dwb = train_bwd(
+            dy.contiguous(),
+            x,
+            cond,
+            lnw,
+            ws,
+            sb,
+            wb,
+            *saved,
+            ctx.fp32_grads,
+            ctx.native_cast and not ctx.save_cast,
+        )
         return dx, dcond, dlnw, dws, dsb, dwb, None, None
 
 
 # ------------------------------------------------------------------------------------------------------------ module entry
-def update(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> torch.Tensor:
+def update(
+    module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool
+) -> torch.Tensor:
     """``AdaptiveLayerNorm`` forward on the sm_80 path (``serves`` must have accepted the call); ``grad`` = ``needs_backward``."""
     d, dc = x.shape[-1], cond.shape[-1]
     xs = x.to(compute_dtype).reshape(-1, d).contiguous()
-    if grad:                         # one conditioning per row (a shared one is expanded: autograd sums the per-row gradients)
-        cs = cond.to(compute_dtype).expand(*x.shape[:-1], dc).reshape(-1, dc).contiguous()
+    if grad:  # one conditioning per row (a shared one is expanded: autograd sums the per-row gradients)
+        cs = (
+            cond.to(compute_dtype)
+            .expand(*x.shape[:-1], dc)
+            .reshape(-1, dc)
+            .contiguous()
+        )
     else:
-        cs = cond if _period(x, cond, False) == xs.shape[0] else cond[0]          # shared: the first sample's rows are the table
+        cs = (
+            cond if _period(x, cond, False) == xs.shape[0] else cond[0]
+        )  # shared: the first sample's rows are the table
         cs = cs.to(compute_dtype).reshape(-1, dc).contiguous()
     ps = (module.to_scale.weight, module.to_scale.bias, module.to_bias.weight)
     eps = (float(module.ln_in.eps), float(module.ln_cond.eps))

@@ -96,7 +96,7 @@ _FA2_SPEC = _has_submodule("flash_attn", "flash_attn_interface")
 
 
 def _flash_backend(device: torch.device | None = None) -> str | None:
-    """"fa4" | "fa2" | None for `device` (default: the current CUDA device)."""
+    """ "fa4" | "fa2" | None for `device` (default: the current CUDA device)."""
     if device is not None and device.type != "cuda":
         return None
     if not torch.cuda.is_available():
@@ -112,6 +112,7 @@ def _flash_backend(device: torch.device | None = None) -> str | None:
 #: Kept for callers that only ask "is there any flash path at all".
 _FLASH_AVAILABLE = _FA4_SPEC or _FA2_SPEC
 
+
 # Opt-in runtime guard (``settings.swa_check_front_packed``) that asserts the seqused_k
 # precondition — valid atoms are front-packed in each row. Off by default so it
 # adds no per-step GPU sync / torch.compile graph break in production.
@@ -120,8 +121,9 @@ def _check_front_packed() -> bool:
     return settings.current().swa_check_front_packed
 
 
-def _flash_window_seqused_fake(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale,
-                               half_window):
+def _flash_window_seqused_fake(
+    q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window
+):
     """[N, S, H, D] — the attention output carries q's shape and dtype."""
     return torch.empty_like(q)
 
@@ -131,9 +133,17 @@ def _flash_window_seqused_fake(q, k, v, cu_seqlens, seqused, max_seqlen, valid, 
 # and CUDA graphs (reduce-overhead) capture the compiled regions around it; under
 # "custom_op" it is an opaque graph node instead and nothing breaks at all.
 def _flash_window_core(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,
-    valid: torch.Tensor, n: int, s: int, scale: float, half_window: int,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seqused: torch.Tensor,
+    max_seqlen: int,
+    valid: torch.Tensor,
+    n: int,
+    s: int,
+    scale: float,
+    half_window: int,
 ) -> torch.Tensor:
     """The flash windowed attention itself -- eager and DIFFERENTIABLE.
 
@@ -159,6 +169,7 @@ def _flash_window_core(
     def _clean(t):
         t = t.reshape(n * s, nh, hd).to(torch.bfloat16)
         return torch.where(row_mask, t, torch.zeros_like(t))
+
     q, k, v = _clean(q), _clean(k), _clean(v)
     # half_window < 0 -> global attention (no sliding window).
     window = (-1, -1) if half_window < 0 else (half_window, half_window)
@@ -173,9 +184,13 @@ def _flash_window_core(
         )
 
         out = fa4_varlen(
-            q, k, v,
-            cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-            seqused_q=seqused, seqused_k=seqused,
+            q,
+            k,
+            v,
+            cu_seqlens_q=cu_seqlens,
+            cu_seqlens_k=cu_seqlens,
+            seqused_q=seqused,
+            seqused_k=seqused,
             softmax_scale=scale,
             window_size=window,
         )
@@ -217,9 +232,13 @@ def _flash_window_core(
         q_un, k_un, v_un = _pack(q), _pack(k), _pack(v)
         max_var = s  # static upper bound; cu_var carries the actual lengths
         out = fa2_varlen(
-            q_un, k_un, v_un,
-            cu_seqlens_q=cu_var, cu_seqlens_k=cu_var,
-            max_seqlen_q=max_var, max_seqlen_k=max_var,
+            q_un,
+            k_un,
+            v_un,
+            cu_seqlens_q=cu_var,
+            cu_seqlens_k=cu_var,
+            max_seqlen_q=max_var,
+            max_seqlen_k=max_var,
             softmax_scale=scale,
             window_size=window,
         )
@@ -235,9 +254,17 @@ def _flash_window_core(
 
 @opaque(fake=_flash_window_seqused_fake, name="swa_atom_attention_flash_window")
 def flash_window_seqused(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    cu_seqlens: torch.Tensor, seqused: torch.Tensor, max_seqlen: int,
-    valid: torch.Tensor, n: int, s: int, scale: float, half_window: int,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seqused: torch.Tensor,
+    max_seqlen: int,
+    valid: torch.Tensor,
+    n: int,
+    s: int,
+    scale: float,
+    half_window: int,
 ) -> torch.Tensor:
     """Static-shape sliding-window attention via FA4/FA2. q/k/v: [N,S,H,D]->[N,S,H,D].
 
@@ -254,10 +281,12 @@ def flash_window_seqused(
     """
     if settings.current().compile_wrap == "disable":
         return _flash_window_core(
-            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
+            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window
+        )
     with torch.no_grad():
         return _flash_window_core(
-            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
+            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window
+        )
 
 
 def _flash_window_setup_context(ctx, inputs, output):
@@ -266,16 +295,31 @@ def _flash_window_setup_context(ctx, inputs, output):
     ctx.meta = (max_seqlen, n, s, scale, half_window)
 
 
-def _flash_window_fa4_backward_fake(q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out):
+def _flash_window_fa4_backward_fake(
+    q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out
+):
     """Allocate outputs with the same shape, dtype and strides as _flash_window_fa4_backward."""
-    return tuple(torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v))
+    return tuple(
+        torch.empty_like(t, memory_format=torch.contiguous_format) for t in (q, k, v)
+    )
 
 
-@opaque(fake=_flash_window_fa4_backward_fake, name="swa_atom_attention_flash_window_fa4_backward")
+@opaque(
+    fake=_flash_window_fa4_backward_fake,
+    name="swa_atom_attention_flash_window_fa4_backward",
+)
 def _flash_window_fa4_backward(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor,
-    cu_seqlens: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
-    n: int, s: int, scale: float, half_window: int, grad_out: torch.Tensor,
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    seqused: torch.Tensor,
+    valid: torch.Tensor,
+    n: int,
+    s: int,
+    scale: float,
+    half_window: int,
+    grad_out: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Recompute + native FA4 backward behind one compiler boundary.
 
@@ -291,26 +335,50 @@ def _flash_window_fa4_backward(
 
     nh, hd = q.shape[2:]
     row_mask = valid.reshape(n * s, 1, 1)
+
     def clean(t):
         flat = t.reshape(n * s, nh, hd).to(torch.bfloat16)
         return torch.where(row_mask, flat, torch.zeros_like(flat))
+
     qf, kf, vf = clean(q), clean(k), clean(v)
     dout = clean(grad_out)
     half = -1 if half_window < 0 else half_window
     out, lse, _, _ = _flash_attn_fwd(
-        qf, kf, vf, cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-        seqused_q=seqused, seqused_k=seqused, softmax_scale=scale,
-        causal=False, softcap=0.0, window_size_left=half,
-        window_size_right=half, return_lse=True,
+        qf,
+        kf,
+        vf,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        seqused_q=seqused,
+        seqused_k=seqused,
+        softmax_scale=scale,
+        causal=False,
+        softcap=0.0,
+        window_size_left=half,
+        window_size_right=half,
+        return_lse=True,
     )
     grads = _flash_attn_bwd(
-        qf, kf, vf, out, dout, lse, softmax_scale=scale, causal=False,
-        softcap=0.0, window_size_left=half, window_size_right=half,
-        cu_seqlens_q=cu_seqlens, cu_seqlens_k=cu_seqlens,
-        seqused_q=seqused, seqused_k=seqused,
+        qf,
+        kf,
+        vf,
+        out,
+        dout,
+        lse,
+        softmax_scale=scale,
+        causal=False,
+        softcap=0.0,
+        window_size_left=half,
+        window_size_right=half,
+        cu_seqlens_q=cu_seqlens,
+        cu_seqlens_k=cu_seqlens,
+        seqused_q=seqused,
+        seqused_k=seqused,
     )
-    dq, dk, dv = (torch.where(row_mask, g, torch.zeros_like(g)).reshape_as(t).to(t.dtype)
-                  for g, t in zip(grads, (q, k, v), strict=True))
+    dq, dk, dv = (
+        torch.where(row_mask, g, torch.zeros_like(g)).reshape_as(t).to(t.dtype)
+        for g, t in zip(grads, (q, k, v), strict=True)
+    )
     return dq, dk, dv
 
 
@@ -325,17 +393,23 @@ def _flash_window_backward(ctx, grad_out):
     max_seqlen, n, s, scale, half_window = ctx.meta
     if _flash_backend(q.device) == "fa4":
         grads = _flash_window_fa4_backward(
-            q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out)
-        dq, dk, dv = (g if need else None for g, need in
-                      zip(grads, ctx.needs_input_grad[:3], strict=True))
+            q, k, v, cu_seqlens, seqused, valid, n, s, scale, half_window, grad_out
+        )
+        dq, dk, dv = (
+            g if need else None
+            for g, need in zip(grads, ctx.needs_input_grad[:3], strict=True)
+        )
         return dq, dk, dv, None, None, None, None, None, None, None, None
     qd = q.detach().requires_grad_(ctx.needs_input_grad[0])
     kd = k.detach().requires_grad_(ctx.needs_input_grad[1])
     vd = v.detach().requires_grad_(ctx.needs_input_grad[2])
     with torch.enable_grad():
         out = _flash_window_core(
-            qd, kd, vd, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window)
-    wanted = [t for t, g in zip((qd, kd, vd), ctx.needs_input_grad[:3], strict=True) if g]
+            qd, kd, vd, cu_seqlens, seqused, max_seqlen, valid, n, s, scale, half_window
+        )
+    wanted = [
+        t for t, g in zip((qd, kd, vd), ctx.needs_input_grad[:3], strict=True) if g
+    ]
     grads = torch.autograd.grad(out, wanted, grad_out) if wanted else ()
     it = iter(grads)
     dq = next(it) if ctx.needs_input_grad[0] else None
@@ -350,7 +424,8 @@ def _flash_window_backward(ctx, grad_out):
 # returned a plain torch.compiler.disable(fn), which is differentiable on its own (see the forward).
 if hasattr(flash_window_seqused, "register_autograd"):
     flash_window_seqused.register_autograd(
-        _flash_window_backward, setup_context=_flash_window_setup_context)
+        _flash_window_backward, setup_context=_flash_window_setup_context
+    )
 
 
 def _fa4_window(half_window: int, s: int) -> int:
@@ -362,12 +437,21 @@ def _fa4_window(half_window: int, s: int) -> int:
 def _fa4_fwd_fake(q, k, v, seqused, scale, half_window):
     """[out [N, S, H, D] in q's dtype, lse [N, H, S] fp32]."""
     n, s, h, _ = q.shape
-    return [torch.empty(q.shape, dtype=q.dtype, device=q.device), torch.empty((n, h, s), dtype=torch.float32, device=q.device)]
+    return [
+        torch.empty(q.shape, dtype=q.dtype, device=q.device),
+        torch.empty((n, h, s), dtype=torch.float32, device=q.device),
+    ]
 
 
 @opaque(fake=_fa4_fwd_fake, name="swa_atom_attention_fa4_fwd")
-def _fa4_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor, scale: float,
-             half_window: int) -> list[torch.Tensor]:
+def _fa4_fwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seqused: torch.Tensor,
+    scale: float,
+    half_window: int,
+) -> list[torch.Tensor]:
     """FA4 forward launch on [N, S, H, D] bf16 with ``seqused`` for both q and k: [out, lse]. Rows at or past ``seqused`` are
     skipped by flash and come back unwritten (the caller selects them away)."""
     from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
@@ -375,8 +459,19 @@ def _fa4_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.T
     )
 
     w = _fa4_window(half_window, q.shape[1])
-    out, lse, _, _ = _flash_attn_fwd(q, k, v, seqused_q=seqused, seqused_k=seqused, softmax_scale=scale, causal=False, softcap=0.0,
-                                     window_size_left=w, window_size_right=w, return_lse=True)
+    out, lse, _, _ = _flash_attn_fwd(
+        q,
+        k,
+        v,
+        seqused_q=seqused,
+        seqused_k=seqused,
+        softmax_scale=scale,
+        causal=False,
+        softcap=0.0,
+        window_size_left=w,
+        window_size_right=w,
+        return_lse=True,
+    )
     return [out, lse]
 
 
@@ -386,16 +481,38 @@ def _fa4_bwd_fake(q, k, v, out, lse, dout, seqused, scale, half_window):
 
 
 @opaque(fake=_fa4_bwd_fake, name="swa_atom_attention_fa4_bwd")
-def _fa4_bwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, lse: torch.Tensor, dout: torch.Tensor,
-             seqused: torch.Tensor, scale: float, half_window: int) -> list[torch.Tensor]:
+def _fa4_bwd(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    lse: torch.Tensor,
+    dout: torch.Tensor,
+    seqused: torch.Tensor,
+    scale: float,
+    half_window: int,
+) -> list[torch.Tensor]:
     """FA4 backward launch from the forward's saved output and lse: [dq, dk, dv] (rows past ``seqused`` unwritten)."""
     from flash_attn.cute.interface import (  # ty: ignore[unresolved-import]  # optional FlashAttention backend
         _flash_attn_bwd,
     )
 
     w = _fa4_window(half_window, q.shape[1])
-    dq, dk, dv = _flash_attn_bwd(q, k, v, out, dout, lse, softmax_scale=scale, causal=False, softcap=0.0, window_size_left=w,
-                                 window_size_right=w, seqused_q=seqused, seqused_k=seqused)[:3]
+    dq, dk, dv = _flash_attn_bwd(
+        q,
+        k,
+        v,
+        out,
+        dout,
+        lse,
+        softmax_scale=scale,
+        causal=False,
+        softcap=0.0,
+        window_size_left=w,
+        window_size_right=w,
+        seqused_q=seqused,
+        seqused_k=seqused,
+    )[:3]
     return [dq, dk, dv]
 
 
@@ -414,12 +531,21 @@ class _FA4Attention(torch.autograd.Function):
     def backward(ctx, dout):
         q, k, v, out, lse, seqused = ctx.saved_tensors
         scale, half_window = ctx.meta
-        dq, dk, dv = _fa4_bwd(q, k, v, out, lse, dout.contiguous(), seqused, scale, half_window)
+        dq, dk, dv = _fa4_bwd(
+            q, k, v, out, lse, dout.contiguous(), seqused, scale, half_window
+        )
         return dq, dk, dv, None, None, None
 
 
-def flash_window_fa4(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor, valid: torch.Tensor,
-                     scale: float, half_window: int) -> torch.Tensor:
+def flash_window_fa4(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seqused: torch.Tensor,
+    valid: torch.Tensor,
+    scale: float,
+    half_window: int,
+) -> torch.Tensor:
     """Sliding-window / global attention on FA4, [N, S, H, D] -> [N, S, H, D] in q's dtype.
 
     The same attention as :func:`flash_window_seqused` -- bf16 operands, rows at or past ``seqused`` zero in q / k / v going in
@@ -464,7 +590,9 @@ def sparse_neighbor_attention(
     v_attn = v.to(attn_dtype)
     k_flat = k_attn.reshape(n * s, h, d)
     v_flat = v_attn.reshape(n * s, h, d)
-    batch_offset = (torch.arange(n, device=q.device, dtype=torch.long) * s).view(n, 1, 1)
+    batch_offset = (torch.arange(n, device=q.device, dtype=torch.long) * s).view(
+        n, 1, 1
+    )
     out = q.new_zeros(n, s, h, d)
 
     for start in range(0, s, query_chunk_size):
@@ -514,7 +642,9 @@ def build_local_structure_neighbor_indices(
     n, s = valid.shape
     device = valid.device
     if seq_neighbors < 1:
-        raise ValueError("seq_neighbors must be >= 1 so every valid atom includes self.")
+        raise ValueError(
+            "seq_neighbors must be >= 1 so every valid atom includes self."
+        )
     if structure_neighbors < 0:
         raise ValueError("structure_neighbors must be >= 0.")
 
@@ -553,7 +683,9 @@ def build_local_structure_neighbor_indices(
             q_stop = min(q_start + query_chunk_size, m)
             q_pos = valid_pos[q_start:q_stop]
             d2 = torch.cdist(row_coords[q_start:q_stop], row_coords, p=2).square()
-            seq_excluded = torch.zeros(q_stop - q_start, m, dtype=torch.bool, device=device)
+            seq_excluded = torch.zeros(
+                q_stop - q_start, m, dtype=torch.bool, device=device
+            )
             seq_excluded.scatter_(1, seq_rank_idx[q_start:q_stop, :row_seq_k], True)
             d2 = d2.masked_fill(seq_excluded, float("inf"))
             d2 = d2 + valid_pos.view(1, m).to(torch.float32) * 1e-6
@@ -561,10 +693,10 @@ def build_local_structure_neighbor_indices(
                 d2, k=row_struct_k, dim=-1, largest=False
             )
             offset = seq_k
-            neighbor_idx[b, q_pos, offset:offset + row_struct_k] = valid_pos[
+            neighbor_idx[b, q_pos, offset : offset + row_struct_k] = valid_pos[
                 struct_rank_idx
             ].to(torch.int32)
-            neighbor_mask[b, q_pos, offset:offset + row_struct_k] = torch.isfinite(
+            neighbor_mask[b, q_pos, offset : offset + row_struct_k] = torch.isfinite(
                 struct_vals
             )
 
@@ -627,11 +759,17 @@ def build_3d_rope(
 
     spatial_inv_freq = 1.0 / (
         spatial_base_freq
-        ** (torch.arange(0, n_spatial_per_axis, dtype=torch.float32, device=device) / n_spatial_per_axis)
+        ** (
+            torch.arange(0, n_spatial_per_axis, dtype=torch.float32, device=device)
+            / n_spatial_per_axis
+        )
     )
     uid_inv_freq = 1.0 / (
         uid_base_freq
-        ** (torch.arange(0, n_uid_pairs, dtype=torch.float32, device=device) / n_uid_pairs)
+        ** (
+            torch.arange(0, n_uid_pairs, dtype=torch.float32, device=device)
+            / n_uid_pairs
+        )
     )
 
     # Broadcast multiplies, not einsums: these are outer products, and under an autocast region ``einsum`` runs them as bf16 matmuls
@@ -720,7 +858,12 @@ class SWA3DRoPEAttention(nn.Module):
             msg = f"d_model ({d_model}) must be divisible by n_heads ({n_heads})."
             raise ValueError(msg)
         self.implementation = ImplementationType(implementation)
-        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON, ImplementationType.ANTHROPIC}:
+        if self.implementation not in {
+            ImplementationType.PYTORCH,
+            ImplementationType.MINIWORLD,
+            ImplementationType.TRITON,
+            ImplementationType.ANTHROPIC,
+        }:
             raise InvalidImplementationError(self.implementation)
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
@@ -749,12 +892,21 @@ class SWA3DRoPEAttention(nn.Module):
 
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
-        engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
+        engine_pointwise = (
+            self.implementation != ImplementationType.PYTORCH
+            and not getattr(self, "torch_pointwise", False)
+        )
         if q.is_cuda and engine_pointwise:
             from miniworld_engine.kernels.rope.cuda import sm80 as _rope_sm80
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
-            if self.implementation == ImplementationType.MINIWORLD and _rope_sm80.supports_qk(q, k, cos, sin):
-                q, k = _rope_sm80.qk_norm_rope_3d(q, k, cos, sin)   # A100: the hand-CUDA fused norm + rotation (settings.norms_sm80=False keeps Triton)
+
+            if (
+                self.implementation == ImplementationType.MINIWORLD
+                and _rope_sm80.supports_qk(q, k, cos, sin)
+            ):
+                q, k = _rope_sm80.qk_norm_rope_3d(
+                    q, k, cos, sin
+                )  # A100: the hand-CUDA fused norm + rotation (settings.norms_sm80=False keeps Triton)
             else:
                 q, k = qk_norm_rope_3d(q, k, cos, sin)
         else:
@@ -771,7 +923,9 @@ class SWA3DRoPEAttention(nn.Module):
                 swa_dit_window_attention,
             )
 
-            sm80_out = swa_dit_window_attention(q, k, v, seqused, self.n_heads, self.half_window)
+            sm80_out = swa_dit_window_attention(
+                q, k, v, seqused, self.n_heads, self.half_window
+            )
 
         # Otherwise FA4 (sm90+) or FA2 (sm80+) on CUDA -- see `_flash_backend`. There is NO silent CUDA fallback:
         # the dense `_sdpa_band` is an O(S^2) CPU/test reference with a different launch profile, and
@@ -782,7 +936,9 @@ class SWA3DRoPEAttention(nn.Module):
         elif sm80_out is not None:
             out = sm80_out
         elif _flash_backend(x.device) is not None:
-            out = self._flash_window(q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s)
+            out = self._flash_window(
+                q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s
+            )
         elif x.is_cuda:
             msg = (
                 "swa_atom_attention needs a flash-attention backend on CUDA (FA2 for sm80+, FA4 for "
@@ -792,14 +948,18 @@ class SWA3DRoPEAttention(nn.Module):
             )
             raise RuntimeError(msg)
         else:
-            out = self._sdpa_band(q, k, v, valid)  # CPU unit tests only (no CUDA, no flash)
+            out = self._sdpa_band(
+                q, k, v, valid
+            )  # CPU unit tests only (no CUDA, no flash)
 
         out = out.reshape(n, s, -1)
         gate = self.gate_proj(x)
         if engine_pointwise and out.is_cuda:
             from miniworld_engine.integrations import sigmoid_gate_sm80
 
-            if sigmoid_gate_sm80.serves(gate, out):      # A100: the gate (and its backward) as one hand-CUDA pass, then cuBLAS out_proj
+            if sigmoid_gate_sm80.serves(
+                gate, out
+            ):  # A100: the gate (and its backward) as one hand-CUDA pass, then cuBLAS out_proj
                 return self.out_proj(sigmoid_gate_sm80.sigmoid_gate(gate, out))
         if engine_pointwise and self._can_fuse_output_projection(gate, out):
             from miniworld_engine.kernels.gated_projection.triton.swa import (
@@ -851,10 +1011,21 @@ class SWA3DRoPEAttention(nn.Module):
         s: int,
     ) -> torch.Tensor:
         if _flash_backend(q.device) == "fa4" and settings.current().swa_flash_saves_lse:
-            return flash_window_fa4(q, k, v, seqused, valid, self.scale, self.half_window)
+            return flash_window_fa4(
+                q, k, v, seqused, valid, self.scale, self.half_window
+            )
         return flash_window_seqused(
-            q, k, v, cu_seqlens, seqused, max_seqlen, valid, n, s,
-            self.scale, self.half_window,
+            q,
+            k,
+            v,
+            cu_seqlens,
+            seqused,
+            max_seqlen,
+            valid,
+            n,
+            s,
+            self.scale,
+            self.half_window,
         )
 
     def _sdpa_band(
@@ -911,7 +1082,9 @@ def build_attention_params(
     cu_seqlens = torch.arange(0, (n + 1) * s, s, dtype=torch.int32, device=valid.device)
     max_seqlen = s
     if _check_front_packed():
-        expected = torch.arange(s, device=valid.device).unsqueeze(0) < seqused.unsqueeze(1)
+        expected = torch.arange(s, device=valid.device).unsqueeze(
+            0
+        ) < seqused.unsqueeze(1)
         if not torch.equal(valid, expected):
             raise RuntimeError(
                 "SWA seqused_k attention requires front-packed valid atoms, but the "

@@ -177,7 +177,7 @@ def _pack_tables(dev, save=True):
     """Gather tables of the one-launch pack kernel: out16 = [w | wdw | wx], out32 = gb (LN affine float4 slots).
     idx16: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29; idx32: element | beta << 26."""
     n = H * D
-    code = lambda src: (torch.arange(n, device=dev, dtype=torch.int64) | (src << 26))  # noqa: E731
+    code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     half = 1 << 28
     wa, wb = code(0).view(H, D), code(1).view(H, D)
     ws = code(2).view(D, H)
@@ -210,11 +210,16 @@ def _pack(gamma, beta, wa, wb, ws, save=True):
     """All kernel weight layouts in one launch -> (w, gb, wdw, wx, gamma f32, beta f32).  The gather tables are built (and cached) inside the
     launch op, never in the traced region: ``torch.compile`` ignores ``lru_cache`` and would compile their 524288-element integer
     computation into every graph (Inductor's value-range analysis asserts on it)."""
-    dev = wa.device     # wa, wb, ws: bf16, or fp32 masters (cast here)
+    dev = wa.device  # wa, wb, ws: bf16, or fp32 masters (cast here)
     gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-    out16 = torch.empty(N_W + (N_WDW + N_WX if save else 0), dtype=torch.bfloat16, device=dev)
+    out16 = torch.empty(
+        N_W + (N_WDW + N_WX if save else 0), dtype=torch.bfloat16, device=dev
+    )
     gb = torch.empty(N_GB, dtype=torch.float32, device=dev)
+    # tests/registry/test_layernorm_is_never_bf16.py allow-lists this call by its source line, so it stays on one.
+    # fmt: off
     _pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)
+    # fmt: on
     return out16[:N_W], gb, out16[N_W : N_W + N_WDW], out16[N_W + N_WDW :], gf, bf
 
 

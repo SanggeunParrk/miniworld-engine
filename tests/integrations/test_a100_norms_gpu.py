@@ -13,7 +13,10 @@ from miniworld_engine import settings
 from miniworld_engine.modules import LayerNorm, RMSNorm
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 MW = ImplementationType.MINIWORLD
 BF, F32 = torch.bfloat16, torch.float32
@@ -31,7 +34,9 @@ def ampere(monkeypatch):
 def restore_settings():
     previous = settings.current()
     yield
-    settings.configure(**{f.name: getattr(previous, f.name) for f in dataclasses.fields(previous)})
+    settings.configure(
+        **{f.name: getattr(previous, f.name) for f in dataclasses.fields(previous)}
+    )
 
 
 def _rel(a, b):
@@ -57,6 +62,7 @@ def spy(monkeypatch):
         def counted(*args, **kwargs):
             calls[key] += 1
             return real(*args, **kwargs)
+
         monkeypatch.setattr(module, name, counted)
 
     wrap(ln, "layernorm", "layernorm")
@@ -68,7 +74,24 @@ def spy(monkeypatch):
 
 # ------------------------------------------------------------------------------------------------------------------------------ LayerNorm
 # the registry's layernorm_native rows: (width, has_bias) and one activation shape per stream (small lengths; the staged odd-width kernels need >= 4096 rows)
-WIDTHS = [(16, 0), (64, 1), (128, 0), (128, 1), (256, 0), (256, 1), (267, 0), (384, 0), (384, 1), (451, 1), (512, 1), (768, 0), (768, 1), (831, 0), (833, 0), (2560, 1)]
+WIDTHS = [
+    (16, 0),
+    (64, 1),
+    (128, 0),
+    (128, 1),
+    (256, 0),
+    (256, 1),
+    (267, 0),
+    (384, 0),
+    (384, 1),
+    (451, 1),
+    (512, 1),
+    (768, 0),
+    (768, 1),
+    (831, 0),
+    (833, 0),
+    (2560, 1),
+]
 STREAMS = {
     "token_pair": lambda d: (1, 72, 72, d),
     "token_single": lambda d: (2, 96, d),
@@ -82,7 +105,7 @@ STREAMS = {
 def _norm(d, bias, seed=0):
     torch.manual_seed(seed)
     ref = LayerNorm(d, bias=bool(bias), implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                                   # non-default affine parameters
+    with torch.no_grad():  # non-default affine parameters
         ref.weight.copy_(torch.randn(d) * 0.5 + 1.0)
         if ref.bias is not None:
             ref.bias.copy_(torch.randn(d) * 0.3)
@@ -111,9 +134,11 @@ def test_layernorm_module_forward_and_gradients(d, bias, stream, spy):
     yr.backward(dy)
     yo = ours(xo)
     yo.backward(dy.to(BF))
-    wb = ours.weight.detach().clone().requires_grad_()                 # the bf16 path on copies of the parameters: it must not accumulate into the module's gradients
+    wb = (
+        ours.weight.detach().clone().requires_grad_()
+    )  # the bf16 path on copies of the parameters: it must not accumulate into the module's gradients
     bb = None if ours.bias is None else ours.bias.detach().clone().requires_grad_()
-    yb = F.layer_norm(xb.float(), (d,), wb, bb, ours.eps).to(BF)        # the bf16 module path
+    yb = F.layer_norm(xb.float(), (d,), wb, bb, ours.eps).to(BF)  # the bf16 module path
     yb.backward(dy.to(BF))
     assert spy["layernorm"] == 1, "the A100 kernels did not serve the call"
     assert yo.dtype == BF
@@ -123,12 +148,16 @@ def test_layernorm_module_forward_and_gradients(d, bias, stream, spy):
     assert e < 1.1 * e0 + 1e-6, (e, e0)
     e, e0 = _rel(xo.grad, xr.grad), _rel(xb.grad, xr.grad)
     assert e < 1.1 * e0 + 1e-6, (e, e0)
-    assert _rel(ours.weight.grad, ref.weight.grad) < 2.1e-2      # bf16 operands of the column sums: the same bound the Triton path meets
+    assert (
+        _rel(ours.weight.grad, ref.weight.grad) < 2.1e-2
+    )  # bf16 operands of the column sums: the same bound the Triton path meets
     if bias:
         assert _rel(ours.bias.grad, ref.bias.grad) < 2.1e-2
 
 
-@pytest.mark.parametrize("shape", [(1, 100, 100, 267), (3, 1500, 451), (2, 1, 256), (1, 130, 130, 64)])
+@pytest.mark.parametrize(
+    "shape", [(1, 100, 100, 267), (3, 1500, 451), (2, 1, 256), (1, 130, 130, 64)]
+)
 def test_layernorm_dx_is_reproducible(shape):
     """The input gradient (and the forward) are bit-reproducible; the parameter gradients are fixed-order sums (equal to fp32 rounding between runs: a dynamic work counter
     decides which CTA takes which rows at large M)."""
@@ -142,7 +171,9 @@ def test_layernorm_dx_is_reproducible(shape):
         ours.zero_grad()
         y = ours(xx)
         y.backward(dy)
-        outs.append((y.detach(), xx.grad, ours.weight.grad.clone(), ours.bias.grad.clone()))
+        outs.append(
+            (y.detach(), xx.grad, ours.weight.grad.clone(), ours.bias.grad.clone())
+        )
     for o in outs[1:]:
         assert torch.equal(o[0], outs[0][0])
         assert torch.equal(o[1], outs[0][1])
@@ -150,11 +181,15 @@ def test_layernorm_dx_is_reproducible(shape):
         assert _rel(o[3], outs[0][3]) < 1e-5
 
 
-@pytest.mark.parametrize(("d", "bias"), [(64, 1), (128, 0), (267, 0), (384, 1), (768, 1)])
+@pytest.mark.parametrize(
+    ("d", "bias"), [(64, 1), (128, 0), (267, 0), (384, 1), (768, 1)]
+)
 def test_layernorm_and_rmsnorm_fp32_modules(d, bias, spy):
     """fp32 activations (the rows read as 4-element chunks): forward and gradients against the fp32 PyTorch module to fp32 rounding."""
     torch.manual_seed(0)
-    ref = LayerNorm(d, bias=bool(bias), implementation=ImplementationType.PYTORCH).cuda()
+    ref = LayerNorm(
+        d, bias=bool(bias), implementation=ImplementationType.PYTORCH
+    ).cuda()
     ours = LayerNorm(d, bias=bool(bias), implementation=MW).cuda()
     with torch.no_grad():
         ref.weight.copy_(torch.randn(d) * 0.5 + 1.0)
@@ -204,10 +239,18 @@ def test_layernorm_without_affine_and_with_bf16_parameters():
     F.layer_norm(xr, (384,), eps=1e-5).backward(dy.double())
     assert _rel(x.grad, xr.grad) < 5e-3
     # bf16 weight and bias (the kernel-level bench's contract)
-    w, b = torch.randn(384, device="cuda").to(BF), torch.randn(384, device="cuda").to(BF)
+    w, b = (
+        torch.randn(384, device="cuda").to(BF),
+        torch.randn(384, device="cuda").to(BF),
+    )
     assert sm80.supports(x, w, b)
     y2 = sm80.layernorm(x.detach(), w, b, 1e-5)
-    assert _rel(y2, F.layer_norm(x.detach().double(), (384,), w.double(), b.double(), 1e-5)) < 5e-3
+    assert (
+        _rel(
+            y2, F.layer_norm(x.detach().double(), (384,), w.double(), b.double(), 1e-5)
+        )
+        < 5e-3
+    )
 
 
 def test_layernorm_row_scale():
@@ -216,12 +259,19 @@ def test_layernorm_row_scale():
 
     torch.manual_seed(0)
     x = torch.randn(1, 40, 40, 128, device="cuda").to(BF).requires_grad_()
-    w, b = torch.randn(128, device="cuda").requires_grad_(), torch.randn(128, device="cuda").requires_grad_()
+    w, b = (
+        torch.randn(128, device="cuda").requires_grad_(),
+        torch.randn(128, device="cuda").requires_grad_(),
+    )
     rs = (torch.rand(1, 40, 40, device="cuda") > 0.3).to(BF)
     dy = torch.randn_like(x)
     y = sm80.layernorm(x, w, b, 1e-5, rs)
     dx, dw, db = torch.autograd.grad(y, [x, w, b], dy)
-    xr, wr, br = x.detach().double().requires_grad_(), w.detach().double().requires_grad_(), b.detach().double().requires_grad_()
+    xr, wr, br = (
+        x.detach().double().requires_grad_(),
+        w.detach().double().requires_grad_(),
+        b.detach().double().requires_grad_(),
+    )
     yr = F.layer_norm(xr, (128,), wr, br, 1e-5) * rs.double()[..., None]
     gx, gw, gb = torch.autograd.grad(yr, [xr, wr, br], dy.double())
     assert _rel(y, yr) < 5e-3
@@ -241,9 +291,13 @@ def test_layernorm_gate_conditions(monkeypatch):
     assert sm80.supports(x, None, None)
     assert not sm80.supports(x.half(), w, w)
     assert not sm80.supports(x.cpu(), w.cpu(), w.cpu())
-    assert not sm80.supports(torch.randn(2, 4097, device="cuda").to(BF), torch.ones(4097, device="cuda"), None)
-    assert not sm80.supports(x, w, w.to(BF))                                  # one dtype for weight and bias
-    assert not sm80.supports(x, torch.ones(64, device="cuda"), None)          # wrong width
+    assert not sm80.supports(
+        torch.randn(2, 4097, device="cuda").to(BF),
+        torch.ones(4097, device="cuda"),
+        None,
+    )
+    assert not sm80.supports(x, w, w.to(BF))  # one dtype for weight and bias
+    assert not sm80.supports(x, torch.ones(64, device="cuda"), None)  # wrong width
     assert not sm80.supports(x[:0], w, w)
     settings.configure(engine_backend="triton")
     assert not sm80.supports(x, w, w)
@@ -256,18 +310,18 @@ def test_layernorm_tiny_training_steps_keep_the_triton_path(monkeypatch, spy):
     """A training step over 20 - 100 K elements of a vector width is launch-bound and the Triton path wins it: routed away by default; inference, larger steps and ``settings.norms_sm80=force`` run the CUDA rows."""
     override_setting(monkeypatch, "norms_sm80", None)
     _, ours = _norm(384, 1)
-    small = torch.randn(2, 96, 384, device="cuda").to(BF)            # 73.7 K elements
-    large = torch.randn(2, 400, 384, device="cuda").to(BF)           # 307 K elements
+    small = torch.randn(2, 96, 384, device="cuda").to(BF)  # 73.7 K elements
+    large = torch.randn(2, 400, 384, device="cuda").to(BF)  # 307 K elements
     ours(small.clone().requires_grad_()).sum().backward()
     assert spy["layernorm"] == 0
     with torch.no_grad():
         ours(small)
-    assert spy["layernorm"] == 1                                      # inference: the CUDA rows
+    assert spy["layernorm"] == 1  # inference: the CUDA rows
     ours(large.clone().requires_grad_()).sum().backward()
-    assert spy["layernorm"] == 2                                      # a larger step: the CUDA rows
+    assert spy["layernorm"] == 2  # a larger step: the CUDA rows
     override_setting(monkeypatch, "norms_sm80", "force")
     ours(small.clone().requires_grad_()).sum().backward()
-    assert spy["layernorm"] == 3                                      # forced
+    assert spy["layernorm"] == 3  # forced
 
 
 def test_layernorm_env_switch_keeps_the_triton_path(monkeypatch, spy):
@@ -284,7 +338,10 @@ def test_layernorm_env_switch_keeps_the_triton_path(monkeypatch, spy):
     assert _rel(y, y0) < 1e-2
 
 
-@pytest.mark.parametrize(("d", "bias", "shape"), [(128, 1, (1, 64, 64, 128)), (267, 0, (1, 72, 72, 267)), (451, 1, (2, 96, 451))])
+@pytest.mark.parametrize(
+    ("d", "bias", "shape"),
+    [(128, 1, (1, 64, 64, 128)), (267, 0, (1, 72, 72, 267)), (451, 1, (2, 96, 451))],
+)
 def test_layernorm_compiled_matches_eager(d, bias, shape):
     """torch.compile(fullgraph=True) over a training step equals eager: the forward and dx bit for bit, the parameter gradients to fp32 rounding."""
     torch._dynamo.reset()
@@ -334,7 +391,10 @@ def test_layernorm_cuda_graph_step():
     graph.replay()
     torch.cuda.synchronize()
     xr = x2.double().requires_grad_()
-    w, b = ours.weight.detach().double().requires_grad_(), ours.bias.detach().double().requires_grad_()
+    w, b = (
+        ours.weight.detach().double().requires_grad_(),
+        ours.bias.detach().double().requires_grad_(),
+    )
     yr = F.layer_norm(xr, (384,), w, b, 1e-5)
     gx, gw, gb = torch.autograd.grad(yr, [xr, w, b], dy.double())
     assert _rel(out, yr) < 5e-3
@@ -349,7 +409,9 @@ def test_layernorm_cuda_graph_step():
 def test_rmsnorm_module(d, affine, spy):
     """The q / k head norms (32..128) and the DiT width: forward, dx and dweight against fp32, as accurate as the bf16 module."""
     torch.manual_seed(0)
-    ref = RMSNorm(d, elementwise_affine=affine, implementation=ImplementationType.PYTORCH)
+    ref = RMSNorm(
+        d, elementwise_affine=affine, implementation=ImplementationType.PYTORCH
+    )
     if affine:
         with torch.no_grad():
             ref.weight.copy_(torch.randn(d) * 0.5 + 1.0)
@@ -366,7 +428,9 @@ def test_rmsnorm_module(d, affine, spy):
     yo = ours(xo)
     yo.backward(dy.to(BF))
     eps = ours.effective_eps(BF)
-    wb = ours.weight.detach().clone().requires_grad_() if affine else None      # copies: the bf16 path must not accumulate into the module's gradient
+    wb = (
+        ours.weight.detach().clone().requires_grad_() if affine else None
+    )  # copies: the bf16 path must not accumulate into the module's gradient
     yb = F.rms_norm(xb.float(), (d,), wb, eps).to(BF)
     yb.backward(dy.to(BF))
     assert spy["rmsnorm"] == 1, "the A100 kernels did not serve the call"
@@ -426,12 +490,18 @@ def _angles(n, s, half, bcast):
 def _rot_ref(x, cos, sin):
     half = cos.shape[-1]
     n = x.shape[0]
-    c, s = cos.double().expand(n, -1, -1)[:, :, None, :], sin.double().expand(n, -1, -1)[:, :, None, :]
-    lo, hi = x[..., :half], x[..., half:2 * half]
-    return torch.cat([lo * c - hi * s, hi * c + lo * s, x[..., 2 * half:]], -1)
+    c, s = (
+        cos.double().expand(n, -1, -1)[:, :, None, :],
+        sin.double().expand(n, -1, -1)[:, :, None, :],
+    )
+    lo, hi = x[..., :half], x[..., half : 2 * half]
+    return torch.cat([lo * c - hi * s, hi * c + lo * s, x[..., 2 * half :]], -1)
 
 
-@pytest.mark.parametrize(("n", "s", "h", "d"), [(5, 100, 4, 32), (48, 17, 4, 32), (2, 50, 2, 64), (1, 33, 1, 128)])
+@pytest.mark.parametrize(
+    ("n", "s", "h", "d"),
+    [(5, 100, 4, 32), (48, 17, 4, 32), (2, 50, 2, 64), (1, 33, 1, 128)],
+)
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize("bcast", [False, True])
 def test_qk_norm_rope_fused(n, s, h, d, dtype, bcast):
@@ -446,12 +516,17 @@ def test_qk_norm_rope_fused(n, s, h, d, dtype, bcast):
     q, k, _ = qkv.view(n, s, 3, h, d).permute(2, 0, 1, 3, 4).unbind(0)
     cos, sin = _angles(n, s, d // 2, bcast)
     assert rope.supports_qk(q, k, cos, sin)
-    gq, gk = torch.randn(n, s, h, d, device="cuda").to(dtype), torch.randn(n, s, h, d, device="cuda").to(dtype)
+    gq, gk = (
+        torch.randn(n, s, h, d, device="cuda").to(dtype),
+        torch.randn(n, s, h, d, device="cuda").to(dtype),
+    )
     eps = torch.finfo(F32).eps
 
     def norm_rot(t):
         td = t.double().requires_grad_()
-        return td, _rot_ref(td * torch.rsqrt(td.pow(2).mean(-1, keepdim=True) + eps), cos, sin)
+        return td, _rot_ref(
+            td * torch.rsqrt(td.pow(2).mean(-1, keepdim=True) + eps), cos, sin
+        )
 
     qd, oqd = norm_rot(q)
     kd, okd = norm_rot(k)
@@ -498,10 +573,10 @@ def test_rope_standalone(dtype):
     assert rope.supports_rope(x, cos, sin)
     g = torch.randn_like(x)
     y = rope.rope_3d(x, cos, sin)
-    dx, = torch.autograd.grad(y, x, g)
+    (dx,) = torch.autograd.grad(y, x, g)
     xd = x.detach().double().requires_grad_()
     yd = _rot_ref(xd, cos, sin)
-    gd, = torch.autograd.grad(yd, xd, g.double())
+    (gd,) = torch.autograd.grad(yd, xd, g.double())
     tol = 5e-3 if dtype is BF else 1e-6
     assert _rel(y, yd) < tol
     assert _rel(dx, gd) < tol
@@ -510,22 +585,38 @@ def test_rope_standalone(dtype):
 def test_rope_gate_conditions():
     from miniworld_engine.kernels.rope.cuda import sm80 as rope
 
-    qkv = torch.randn(2, 8, 3 * 4 * 32 + 8, device="cuda").to(BF)         # a row of the projection padded by one chunk
+    qkv = torch.randn(2, 8, 3 * 4 * 32 + 8, device="cuda").to(
+        BF
+    )  # a row of the projection padded by one chunk
     cos, sin = _angles(2, 8, 16, False)
     q = qkv[..., :128].reshape(2, 8, 4, 32)
     assert rope.supports_qk(q, q, cos, sin)
-    odd = qkv[..., 1:129].reshape(2, 8, 4, 32)             # a storage offset of one element: the op copies it before it reads with 16-byte loads (the gate cannot tell: torch.compile traces it)
+    odd = qkv[
+        ..., 1:129
+    ].reshape(
+        2, 8, 4, 32
+    )  # a storage offset of one element: the op copies it before it reads with 16-byte loads (the gate cannot tell: torch.compile traces it)
     assert rope.supports_qk(odd, odd, cos, sin)
     oq, ok = rope.qk_norm_rope_3d(odd, odd, cos, sin)
-    wq, wk = rope.qk_norm_rope_3d(odd.contiguous().clone(), odd.contiguous().clone(), cos, sin)
+    wq, wk = rope.qk_norm_rope_3d(
+        odd.contiguous().clone(), odd.contiguous().clone(), cos, sin
+    )
     assert torch.equal(oq, wq)
     assert torch.equal(ok, wk)
-    ragged = torch.randn(2, 8, 3 * 4 * 32 + 1, device="cuda").to(BF)[..., :128].reshape(2, 8, 4, 32)      # a row stride of 385 elements: not whole 16-byte chunks
+    ragged = (
+        torch.randn(2, 8, 3 * 4 * 32 + 1, device="cuda")
+        .to(BF)[..., :128]
+        .reshape(2, 8, 4, 32)
+    )  # a row stride of 385 elements: not whole 16-byte chunks
     assert not rope.supports_qk(ragged, ragged, cos, sin)
     assert not rope.supports_qk(q, q, cos.double(), sin.double())
     assert not rope.supports_qk(q.half(), q.half(), cos, sin)
-    assert not rope.supports_qk(q[..., :24], q[..., :24], cos[..., :12], sin[..., :12])      # head dim 24
-    assert not rope.supports_qk(q, q, cos[:, :4], sin[:, :4])                                 # table shorter than the sequence
+    assert not rope.supports_qk(
+        q[..., :24], q[..., :24], cos[..., :12], sin[..., :12]
+    )  # head dim 24
+    assert not rope.supports_qk(
+        q, q, cos[:, :4], sin[:, :4]
+    )  # table shorter than the sequence
     cos.requires_grad_()
     assert not rope.supports_qk(q, q, cos, sin)
 
@@ -543,7 +634,11 @@ def _swa_params(n_atoms, a):
         build_attention_params,
     )
 
-    cos, sin = build_3d_rope(torch.randn(1, n_atoms, 3, device="cuda") * 10, torch.zeros(1, n_atoms, dtype=torch.long, device="cuda"), 32)
+    cos, sin = build_3d_rope(
+        torch.randn(1, n_atoms, 3, device="cuda") * 10,
+        torch.zeros(1, n_atoms, dtype=torch.long, device="cuda"),
+        32,
+    )
     valid = torch.ones(a, n_atoms, dtype=torch.bool, device="cuda")
     return build_attention_params(cos, sin, valid, a)
 
@@ -584,7 +679,10 @@ def test_qk_norm_rope_compiled_and_graph_replay():
     n, s, h, d = 5, 64, 4, 32
     qkv = torch.randn(n, s, 3 * h * d, device="cuda").to(BF)
     cos, sin = _angles(n, s, d // 2, False)
-    gq, gk = torch.randn(n, s, h, d, device="cuda").to(BF), torch.randn(n, s, h, d, device="cuda").to(BF)
+    gq, gk = (
+        torch.randn(n, s, h, d, device="cuda").to(BF),
+        torch.randn(n, s, h, d, device="cuda").to(BF),
+    )
 
     def forward(qkv_):
         q, k, _ = qkv_.view(n, s, 3, h, d).permute(2, 0, 1, 3, 4).unbind(0)
@@ -592,7 +690,11 @@ def test_qk_norm_rope_compiled_and_graph_replay():
 
     def step(qkv_, fwd=forward):
         oq, ok = fwd(qkv_)
-        return oq, ok, *torch.autograd.grad([oq, ok], [qkv_], [gq, gk])      # the backward runs outside the compiled region
+        return (
+            oq,
+            ok,
+            *torch.autograd.grad([oq, ok], [qkv_], [gq, gk]),
+        )  # the backward runs outside the compiled region
 
     eager = step(qkv.clone().requires_grad_())
     got = step(qkv.clone().requires_grad_(), fwd=torch.compile(forward, fullgraph=True))
@@ -623,10 +725,20 @@ def test_norms_env_switch_is_read_at_call_time(monkeypatch):
     x = torch.randn(4, 8, 4, 32, device="cuda").to(BF)
     cos, sin = _angles(4, 8, 16, False)
     w = torch.ones(32, device="cuda")
-    served = (ln.supports(x, w, w), rms.supports(x, w), rope.supports_qk(x, x, cos, sin), rope.supports_rope(x, cos, sin))
+    served = (
+        ln.supports(x, w, w),
+        rms.supports(x, w),
+        rope.supports_qk(x, x, cos, sin),
+        rope.supports_rope(x, cos, sin),
+    )
     assert all(served)
     override_setting(monkeypatch, "norms_sm80", "0")
-    refused = (ln.supports(x, w, w), rms.supports(x, w), rope.supports_qk(x, x, cos, sin), rope.supports_rope(x, cos, sin))
+    refused = (
+        ln.supports(x, w, w),
+        rms.supports(x, w),
+        rope.supports_qk(x, x, cos, sin),
+        rope.supports_rope(x, cos, sin),
+    )
     assert not any(refused)
     override_setting(monkeypatch, "norms_sm80", None)
     assert ln.supports(x, w, w)
@@ -637,8 +749,11 @@ def _modulation_inputs(m, seed=0):
     torch.manual_seed(seed)
     q = (torch.randn(m, 128, device="cuda") * 2 + 0.3).to(BF)
     c = F.silu(torch.randn(m, 128, device="cuda")).to(BF)
-    ws = [(torch.randn(128, 128, device="cuda") * 128 ** -0.5).to(BF) for _ in range(3)]
-    dy, dg = torch.randn(m, 128, device="cuda").to(BF), torch.randn(m, 128, device="cuda").to(BF)
+    ws = [(torch.randn(128, 128, device="cuda") * 128**-0.5).to(BF) for _ in range(3)]
+    dy, dg = (
+        torch.randn(m, 128, device="cuda").to(BF),
+        torch.randn(m, 128, device="cuda").to(BF),
+    )
     return q, c, ws, dy, dg
 
 
@@ -670,17 +785,23 @@ def test_rms_norm_modulation_forward_and_gradients(m, wdtype, spy):
     q, c, ws, dy, dg = _modulation_inputs(m)
     w = None if wdtype is None else torch.randn(128, device="cuda").to(wdtype)
     eps = torch.finfo(F32).eps
-    leaves = [t.double().requires_grad_() for t in (q, c, *ws)] + ([] if w is None else [w.double().requires_grad_()])
+    leaves = [t.double().requires_grad_() for t in (q, c, *ws)] + (
+        [] if w is None else [w.double().requires_grad_()]
+    )
     yd, gd = _modulation_reference(*leaves[:5], None if w is None else leaves[5], eps)
     want = torch.autograd.grad([yd, gd], leaves, [dy.double(), dg.double()])
 
     def run(fn):
-        ls = [t.clone().requires_grad_() for t in (q, c, *ws)] + ([] if w is None else [w.clone().requires_grad_()])
+        ls = [t.clone().requires_grad_() for t in (q, c, *ws)] + (
+            [] if w is None else [w.clone().requires_grad_()]
+        )
         y, g = fn(ls[0], ls[1], ls[2], ls[3], ls[4], None if w is None else ls[5], eps)
         return y, g, torch.autograd.grad([y, g], ls, [dy, dg])
 
     def engine(*a):
-        y, g = ops.rms_norm_modulation(a[0].view(1, -1, 128), a[1].view(1, -1, 128), a[2], a[3], a[4], a[5], a[6])
+        y, g = ops.rms_norm_modulation(
+            a[0].view(1, -1, 128), a[1].view(1, -1, 128), a[2], a[3], a[4], a[5], a[6]
+        )
         return y.view(m, 128), g.view(m, 128)
 
     yo, go, gradso = run(engine)
@@ -722,12 +843,14 @@ def test_rms_norm_modulation_gate_conditions(monkeypatch):
     assert sm80.supports_adamod(q, c, *ws, torch.ones(128, device="cuda").to(BF))
     projection = torch.randn(6 * 128, 128, device="cuda").to(BF)
     sh_a, sc_a, g_a, *_ = projection.chunk(6, dim=0)
-    assert sm80.supports_adamod(q, c, sc_a, sh_a, g_a)                      # row slices of one projection: offsets are whole tiles
+    assert sm80.supports_adamod(
+        q, c, sc_a, sh_a, g_a
+    )  # row slices of one projection: offsets are whole tiles
     assert not sm80.supports_adamod(q.float(), c, *ws)
     assert not sm80.supports_adamod(q[:, :64], c[:, :64], *ws)
     assert not sm80.supports_adamod(q, c[:32], *ws)
     assert not sm80.supports_adamod(q[:0], c[:0], *ws)
-    assert not sm80.supports_adamod(q, c, ws[0], ws[1].T, ws[2])           # a transposed weight
+    assert not sm80.supports_adamod(q, c, ws[0], ws[1].T, ws[2])  # a transposed weight
     assert not sm80.supports_adamod(q, c, *ws, torch.ones(64, device="cuda"))
     settings.configure(engine_backend="triton")
     assert not sm80.supports_adamod(q, c, *ws)
@@ -740,7 +863,10 @@ def test_rms_norm_modulation_env_switch_keeps_the_triton_path(monkeypatch, spy):
     from miniworld_engine import ops
 
     q, c, ws, _, _ = _modulation_inputs(200)
-    q, c = q.view(1, 200, 128), c.view(1, 200, 128)                 # (B, L, D): what the Triton launcher keys on
+    q, c = (
+        q.view(1, 200, 128),
+        c.view(1, 200, 128),
+    )  # (B, L, D): what the Triton launcher keys on
     with torch.no_grad():
         y, g = ops.rms_norm_modulation(q, c, *ws, None, 1e-5)
     assert spy["modulation"] == 1
@@ -767,12 +893,16 @@ def test_rms_norm_modulation_compiled_matches_eager_and_graph_replay():
     def step(*xs, fwd=forward):
         ls = [t.clone().requires_grad_() for t in xs]
         y, g = fwd(*ls)
-        return y, g, *torch.autograd.grad([y, g], ls, [dy, dg])      # the backward runs outside the compiled region
+        return (
+            y,
+            g,
+            *torch.autograd.grad([y, g], ls, [dy, dg]),
+        )  # the backward runs outside the compiled region
 
     eager = step(*leaves)
     got = step(*leaves, fwd=torch.compile(forward, fullgraph=True))
     for i, (a, b) in enumerate(zip(got, eager, strict=True)):
-        if i == 7:                                                          # the norm-weight gradient: fp32 atomics, equal to rounding
+        if i == 7:  # the norm-weight gradient: fp32 atomics, equal to rounding
             assert _rel(a, b) < 1e-5
         else:
             assert torch.equal(a, b)

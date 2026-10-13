@@ -27,10 +27,10 @@ from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
 
-CH = 32                                    # d_hidden
+CH = 32  # d_hidden
 D_MSA = (64, 128)
 D_PAIR = (128, 256, 384)
-SPLITS = {128: 24, 256: 12, 384: 8}        # dWo: splits over rows of i (CTAs ~ 192 per card)
+SPLITS = {128: 24, 256: 12, 384: 8}  # dWo: splits over rows of i (CTAs ~ 192 per card)
 
 
 @functools.lru_cache(maxsize=1)
@@ -38,10 +38,22 @@ def ext():
     """The extension (built on first use into ``TORCH_EXTENSIONS_DIR``)."""
     ensure_cuda_home()
     return load_extension(
-        name="opm_sm80", sources=[str(_dir / "ops.cu")], extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-lineinfo", *gencodes("80"), "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False)
+        name="opm_sm80",
+        sources=[str(_dir / "ops.cu")],
+        extra_include_paths=[str(_dir)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-lineinfo",
+            *gencodes("80"),
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
 
 
 def supported(d_msa: int, d_hidden: int, d_pair: int) -> bool:
@@ -52,40 +64,105 @@ def _none(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return t.new_empty((0,), dtype=dtype)
 
 
-def prologue(m: torch.Tensor, mask: torch.Tensor | None, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, eps: float,
-             save_stats: bool, variant: int | None = None):
+def prologue(
+    m: torch.Tensor,
+    mask: torch.Tensor | None,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    eps: float,
+    save_stats: bool,
+    variant: int | None = None,
+):
     """m [S, L, CM] bf16, mask [S, L] uint8 (or None), lnw / lnb fp32 [CM], wl / wr bf16 [32, CM] -> (A, B [S, 32 L] bf16, stats [S, L, 2] fp32 or an empty tensor)."""
     S, L, _ = m.shape
     a = m.new_empty((S, L * CH))
     b = m.new_empty((S, L * CH))
-    stats = m.new_empty((S, L, 2), dtype=torch.float32) if save_stats else _none(m, torch.float32)
+    stats = (
+        m.new_empty((S, L, 2), dtype=torch.float32)
+        if save_stats
+        else _none(m, torch.float32)
+    )
     if variant is None:
-        variant = settings.current().opm_sm80_pl       # schedule experiments (tile buffers); 0 is the shipped one
-    ext().prologue(m, _none(m, torch.uint8) if mask is None else mask, lnw, lnb, wl, wr, a, b, stats, eps, variant)
+        variant = (
+            settings.current().opm_sm80_pl
+        )  # schedule experiments (tile buffers); 0 is the shipped one
+    ext().prologue(
+        m,
+        _none(m, torch.uint8) if mask is None else mask,
+        lnw,
+        lnb,
+        wl,
+        wr,
+        a,
+        b,
+        stats,
+        eps,
+        variant,
+    )
     return a, b, stats
 
 
-def epilogue(o: torch.Tensor, norm: torch.Tensor | None, norm_const: float, wo: torch.Tensor, bias: torch.Tensor, residual: torch.Tensor | None,
-             norm_first: bool, variant: int | None = None) -> torch.Tensor:
+def epilogue(
+    o: torch.Tensor,
+    norm: torch.Tensor | None,
+    norm_const: float,
+    wo: torch.Tensor,
+    bias: torch.Tensor,
+    residual: torch.Tensor | None,
+    norm_first: bool,
+    variant: int | None = None,
+) -> torch.Tensor:
     """O [32 L, 32 L] bf16, norm fp32 [L, L] (None: the constant ``norm_const``), wo bf16 [CZ, 1024], bias fp32 [CZ], residual bf16 [L, L, CZ] (or None) -> [L, L, CZ] bf16."""
     length = o.shape[0] // CH
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
-        variant = settings.current().opm_sm80_epi      # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
-    ext().epilogue(o, _none(o, torch.float32) if norm is None else norm, norm_const, wo, bias, _none(o, torch.bfloat16) if residual is None else residual, out,
-                   int(norm_first), variant)
+        variant = (
+            settings.current().opm_sm80_epi
+        )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+    ext().epilogue(
+        o,
+        _none(o, torch.float32) if norm is None else norm,
+        norm_const,
+        wo,
+        bias,
+        _none(o, torch.bfloat16) if residual is None else residual,
+        out,
+        int(norm_first),
+        variant,
+    )
     return out
 
 
-def dgrad(dz: torch.Tensor, norm: torch.Tensor | None, norm_const: float, wo: torch.Tensor, norm_first: bool, variant: int | None = None):
+def dgrad(
+    dz: torch.Tensor,
+    norm: torch.Tensor | None,
+    norm_const: float,
+    wo: torch.Tensor,
+    norm_first: bool,
+    variant: int | None = None,
+):
     """dz [L, L, CZ] bf16 -> (dO [32 L, 32 L] bf16, dzn [L, L, CZ] bf16, dbo fp32 [CZ])."""
     length, _, cz = dz.shape
     dO = dz.new_empty((length * CH, length * CH))
     dzn = torch.empty_like(dz)
     parts = dz.new_empty((-(-length // 32) * -(-length // 4), cz), dtype=torch.float32)
     if variant is None:
-        variant = settings.current().opm_sm80_dg        # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
-    ext().dgrad(dz, _none(dz, torch.float32) if norm is None else norm, norm_const, wo, dO, dzn, parts, int(norm_first), variant)
+        variant = (
+            settings.current().opm_sm80_dg
+        )  # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+    ext().dgrad(
+        dz,
+        _none(dz, torch.float32) if norm is None else norm,
+        norm_const,
+        wo,
+        dO,
+        dzn,
+        parts,
+        int(norm_first),
+        variant,
+    )
     return dO, dzn, reduce_rows(parts, torch.float32)
 
 
@@ -99,19 +176,54 @@ def dwo(dzn: torch.Tensor, o: torch.Tensor, out_dtype: torch.dtype) -> torch.Ten
     return reduce_rows(part.view(splits, -1), out_dtype).view(cz, CH * CH)
 
 
-def prologue_bwd(da: torch.Tensor, db: torch.Tensor, m: torch.Tensor, stats: torch.Tensor, mask: torch.Tensor | None, lnw: torch.Tensor, lnb: torch.Tensor,
-                 wl: torch.Tensor, wr: torch.Tensor, variant: int | None = None):
+def prologue_bwd(
+    da: torch.Tensor,
+    db: torch.Tensor,
+    m: torch.Tensor,
+    stats: torch.Tensor,
+    mask: torch.Tensor | None,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wl: torch.Tensor,
+    wr: torch.Tensor,
+    variant: int | None = None,
+):
     """dA, dB [S, 32 L] bf16 (the cuBLAS products dA = B dO^T, dB = A dO), m [S, L, CM], stats [S, L, 2], ... -> (dm bf16, dWl, dWr [32, CM], dgamma, dbeta [CM]) all fp32 but dm."""
     S, L, cm = m.shape
     if variant is None:
-        variant = settings.current().opm_sm80_pb       # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
+        variant = (
+            settings.current().opm_sm80_pb
+        )  # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
     ntile = -(-S // 64) * -(-L // 2)
-    nblk = min(ntile, torch.cuda.get_device_properties(m.device).multi_processor_count * (1 if variant == 1 or cm != 64 else 2))
+    nblk = min(
+        ntile,
+        torch.cuda.get_device_properties(m.device).multi_processor_count
+        * (1 if variant == 1 or cm != 64 else 2),
+    )
     dm = torch.empty_like(m)
     part = m.new_empty((nblk, 66 * cm), dtype=torch.float32)
-    ext().prologue_bwd(da, db, m, stats, _none(m, torch.uint8) if mask is None else mask, lnw, lnb, wl, wr, dm, part, variant)
+    ext().prologue_bwd(
+        da,
+        db,
+        m,
+        stats,
+        _none(m, torch.uint8) if mask is None else mask,
+        lnw,
+        lnb,
+        wl,
+        wr,
+        dm,
+        part,
+        variant,
+    )
     total = reduce_rows(part, torch.float32)
-    return dm, total[:32 * cm].view(32, cm), total[32 * cm:64 * cm].view(32, cm), total[64 * cm:65 * cm], total[65 * cm:]
+    return (
+        dm,
+        total[: 32 * cm].view(32, cm),
+        total[32 * cm : 64 * cm].view(32, cm),
+        total[64 * cm : 65 * cm],
+        total[65 * cm :],
+    )
 
 
 def reduce_rows(part: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:

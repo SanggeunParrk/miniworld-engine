@@ -27,27 +27,52 @@ def _ext():
     ensure_cuda_home()
     # settings.mpnn_msg_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
     extra = settings.current().mpnn_msg_sm80_flags.split()
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
         name=f"mpnn_message_sm80{tag}",
         sources=[str(_dir / "ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=bool(extra),
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=bool(extra),
     )
 
 
-def forward(p: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, mask: torch.Tensor, scale: int) -> torch.Tensor:
+def forward(
+    p: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    scale: int,
+) -> torch.Tensor:
     """``reduced`` [groups, 128] fp32 from P [groups * 48, 128] bf16 (contiguous), weight [128, 128] / bias [128] bf16, mask [groups * 48] fp32."""
     return _ext().msg_fwd(p, weight, bias, mask, float(scale))
 
 
 #: groups per backward launch of the split variant: the two temporaries of the weight-gradient GEMM (a = bf16(gelu(P)) and dproj) are chunk-sized, not edge-tensor-sized (the Triton path chunks at 262144 rows)
 CHUNK_GROUPS = 8192
-FUSED_TILES_PER_STAGE = 8     # msg_bwd_fused_sm80.cuh: MsgBwdFCfg::NW
+FUSED_TILES_PER_STAGE = 8  # msg_bwd_fused_sm80.cuh: MsgBwdFCfg::NW
 
 
-def backward(p: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, mask: torch.Tensor, grad_reduced: torch.Tensor,
-             scale: int, fused: bool | None = None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+def backward(
+    p: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor,
+    grad_reduced: torch.Tensor,
+    scale: int,
+    fused: bool | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """``(dP [rows, 128] bf16, dW [128, 128] fp32, db [128] fp32)`` of :func:`forward`, from P [groups * 48, 128] and ``grad_reduced`` [groups, 128] fp32.
 
     One kernel (``msg_bwd_fused_sm80.cuh``): it replays the forward (nothing was saved), writes dP, and accumulates dW = dproj^T a on the tensor cores in registers (per-CTA slices of fp32, summed in CTA order by a
@@ -68,7 +93,9 @@ def _backward_fused(p, weight, bias, mask, grad_reduced, scale):
     dp = torch.empty_like(p)
     dw_part = torch.empty((ctas, WIDTH * WIDTH), device=p.device, dtype=torch.float32)
     db_part = torch.empty((ctas, WIDTH), device=p.device, dtype=torch.float32)
-    ext.msg_bwd_fused(p, weight, bias, mask, grad_reduced, dp, dw_part, db_part, float(scale))
+    ext.msg_bwd_fused(
+        p, weight, bias, mask, grad_reduced, dp, dw_part, db_part, float(scale)
+    )
     return dp, ext.dw_reduce(dw_part, ctas), db_part.sum(dim=0)
 
 
@@ -81,13 +108,26 @@ def _backward_split(p, weight, bias, mask, grad_reduced, scale):
     nchunks = -(-groups // chunk)
     a_buf = p.new_empty((chunk * NEIGHBORS, WIDTH))
     d_buf = p.new_empty((chunk * NEIGHBORS, WIDTH))
-    db_part = torch.zeros((nchunks, num_sms, WIDTH), device=p.device, dtype=torch.float32)
+    db_part = torch.zeros(
+        (nchunks, num_sms, WIDTH), device=p.device, dtype=torch.float32
+    )
     dw = None
     for c in range(nchunks):
         g0, g1 = c * chunk, min(groups, (c + 1) * chunk)
         r0, r1 = g0 * NEIGHBORS, g1 * NEIGHBORS
         n = r1 - r0
-        ext.msg_bwd(p[r0:r1], weight, bias, mask[r0:r1], grad_reduced[g0:g1], dp[r0:r1], a_buf[:n], d_buf[:n], db_part[c], float(scale))
+        ext.msg_bwd(
+            p[r0:r1],
+            weight,
+            bias,
+            mask[r0:r1],
+            grad_reduced[g0:g1],
+            dp[r0:r1],
+            a_buf[:n],
+            d_buf[:n],
+            db_part[c],
+            float(scale),
+        )
         part = torch.mm(d_buf[:n].t(), a_buf[:n], out_dtype=torch.float32)
         dw = part if dw is None else dw.add_(part)
     return dp, dw, db_part.sum(dim=(0, 1))

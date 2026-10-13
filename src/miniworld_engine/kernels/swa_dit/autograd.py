@@ -7,6 +7,7 @@ opaque ops (``kernels._compile``); Dynamo traces through this Function and stops
 Differentiable inputs: ``q``, ``mod`` (the hoisted modulation -- its gradient flows on to the conditioning and the adaLN
 weight through ``swa_dit_hoist_modulation``) and the five block weights. cos / sin / seqused get no gradient.
 """
+
 from __future__ import annotations
 
 import torch
@@ -51,14 +52,38 @@ class SWADiTBlockFunction(torch.autograd.Function):
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
         ctx.native_grad_cast = (
             _native_grad_cast_wanted(q.shape[1])
-            and q.is_cuda and q.dtype == torch.bfloat16
-            and q.shape[0] == 48 and q.shape[1] in (4096, 8192) and q.shape[2] == 128
+            and q.is_cuda
+            and q.dtype == torch.bfloat16
+            and q.shape[0] == 48
+            and q.shape[1] in (4096, 8192)
+            and q.shape[2] == 128
             and all(dt in (torch.bfloat16, torch.float32) for dt in ctx.param_dtypes)
-            and _grad_cast_is_a100(q.device.index if q.device.index is not None else torch.cuda.current_device())
+            and _grad_cast_is_a100(
+                q.device.index
+                if q.device.index is not None
+                else torch.cuda.current_device()
+            )
         )
         wqkv, wg, wo, wu, wd = (w.to(q.dtype) for w in (wqkv, wg, wo, wu, wd))
-        outputs = swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, FP32_EPS, True)
-        ctx.save_for_backward(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, *outputs[1:])
+        outputs = swa_dit_block_fwd(
+            q,
+            mod,
+            cos,
+            sin,
+            seqused,
+            wqkv,
+            wg,
+            wo,
+            wu,
+            wd,
+            B,
+            half_window,
+            FP32_EPS,
+            True,
+        )
+        ctx.save_for_backward(
+            q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, *outputs[1:]
+        )
         ctx.meta = (B, half_window)
         return outputs[0]
 
@@ -66,12 +91,20 @@ class SWADiTBlockFunction(torch.autograd.Function):
     def backward(ctx, dy):
         B, half_window = ctx.meta
         if ctx.native_grad_cast:
-            mask = sum(1 << i for i, dt in enumerate(ctx.param_dtypes) if dt == torch.bfloat16)
-            grads = swa_dit_block_bwd_typed_sm80(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS, mask)
+            mask = sum(
+                1 << i for i, dt in enumerate(ctx.param_dtypes) if dt == torch.bfloat16
+            )
+            grads = swa_dit_block_bwd_typed_sm80(
+                dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS, mask
+            )
         else:
-            grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS)
+            grads = swa_dit_block_bwd(
+                dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS
+            )
         dq, dmod, *dw = grads
-        dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
+        dwqkv, dwg, dwo, dwu, dwd = (
+            g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True)
+        )
         return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
 
 
@@ -104,7 +137,9 @@ class SWADiTWindowAttentionSm80(torch.autograd.Function):
     @staticmethod
     def backward(ctx, d_out):
         q, k, v, out, lse, seqused = ctx.saved_tensors
-        dq, dk, dv = swa_dit_window_attn_bwd_sm80(q, k, v, out, d_out.contiguous(), lse, seqused)
+        dq, dk, dv = swa_dit_window_attn_bwd_sm80(
+            q, k, v, out, d_out.contiguous(), lse, seqused
+        )
         return dq, dk, dv, None
 
 

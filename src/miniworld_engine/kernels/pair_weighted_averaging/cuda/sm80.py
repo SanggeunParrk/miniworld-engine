@@ -29,7 +29,7 @@ HEADS = 8
 D_MSA = (64, 128)
 D_PAIR = (128, 256, 384)
 D_HIDDEN = (8, 16, 32)
-MAX_LEN = 1024                             # the pair kernel keeps a row of logits per head in shared memory
+MAX_LEN = 1024  # the pair kernel keeps a row of logits per head in shared memory
 
 
 @functools.lru_cache(maxsize=1)
@@ -37,19 +37,34 @@ def ext():
     """The extension (built on first use into ``TORCH_EXTENSIONS_DIR``)."""
     ensure_cuda_home()
     return load_extension(
-        name="pwa_sm80", sources=[str(_dir / "ops.cu")], extra_include_paths=[str(_dir)],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-lineinfo", *gencodes("80"), "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__"],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False)
+        name="pwa_sm80",
+        sources=[str(_dir / "ops.cu")],
+        extra_include_paths=[str(_dir)],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-lineinfo",
+            *gencodes("80"),
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
+    )
 
 
 @functools.lru_cache(maxsize=1)
 def _bmm_ext():
     ensure_cuda_home()
     return load_extension(
-        name="pwa_broadcast_bmm_sm80", sources=[str(_dir / "broadcast_bmm.cu")],
+        name="pwa_broadcast_bmm_sm80",
+        sources=[str(_dir / "broadcast_bmm.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("80")],
-        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+        extra_cflags=["-O3", "-std=c++17"],
+        verbose=False,
+    )
 
 
 def broadcast_bmm(w: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
@@ -59,18 +74,34 @@ def broadcast_bmm(w: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
 
 def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
     """(d_msa, d_pair, heads, per-head width) the kernels are instantiated for. d_msa 128 with 32-wide heads would need a 128 x 256 weight-gradient accumulator per CTA: not built."""
-    return n_head == HEADS and d_msa in D_MSA and d_pair in D_PAIR and d_hidden in D_HIDDEN and d_msa * d_hidden <= 16 * 128 and not (d_msa == 128 and d_hidden == 32)
+    return (
+        n_head == HEADS
+        and d_msa in D_MSA
+        and d_pair in D_PAIR
+        and d_hidden in D_HIDDEN
+        and d_msa * d_hidden <= 16 * 128
+        and not (d_msa == 128 and d_hidden == 32)
+    )
 
 
 def _none(t: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return t.new_empty((0,), dtype=dtype)
 
 
-def pair_fwd(z: torch.Tensor, key_mask: torch.Tensor | None, lnw: torch.Tensor, lnb: torch.Tensor, wb: torch.Tensor, eps: float) -> torch.Tensor:
+def pair_fwd(
+    z: torch.Tensor,
+    key_mask: torch.Tensor | None,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wb: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
     """z [L, L, DZ] bf16, key_mask [L] uint8 (or None), lnw / lnb fp32 [DZ], wb [8, DZ] bf16 -> w [8, L, L] bf16 (softmax over the last axis)."""
     length = z.shape[0]
     w = z.new_empty((HEADS, length, length))
-    ext().pair_fwd(z, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, w, eps)
+    ext().pair_fwd(
+        z, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, w, eps
+    )
     return w
 
 
@@ -88,21 +119,53 @@ def pick_split(depth: int) -> int:
     return 1
 
 
-def ln_v(m: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wv: torch.Tensor, eps: float, save_stats: bool, ns: int = 1):
+def ln_v(
+    m: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wv: torch.Tensor,
+    eps: float,
+    save_stats: bool,
+    ns: int = 1,
+):
     """m [S, L, D] bf16, wv [8 C, D] bf16 -> (v [8 ns, L, S C / ns] bf16 (ns = 1: [8, L, S C]), stats [S, L, 2] fp32 or an empty tensor)."""
     depth, length, _ = m.shape
     c = wv.shape[0] // HEADS
     v = m.new_empty((HEADS * ns, length, depth // ns * c))
-    stats = m.new_empty((depth, length, 2), dtype=torch.float32) if save_stats else _none(m, torch.float32)
+    stats = (
+        m.new_empty((depth, length, 2), dtype=torch.float32)
+        if save_stats
+        else _none(m, torch.float32)
+    )
     ext().ln_v(m, lnw, lnb, wv, v, stats, eps)
     return v, stats
 
 
-def gate_out(m: torch.Tensor, o: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, keep: torch.Tensor | None, eps: float,
-             dscale: float) -> torch.Tensor:
+def gate_out(
+    m: torch.Tensor,
+    o: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    keep: torch.Tensor | None,
+    eps: float,
+    dscale: float,
+) -> torch.Tensor:
     """m [S, L, D], o [8 ns, L, S C / ns] (= w v; ns = 1: [8, L, S C]), wg [8 C, D], wo [D, 8 C], keep [L, D] bf16 0 / 1 (or None) -> m + dropout(Wo (sigmoid(LN(m) Wg^T) o)) [S, L, D] bf16."""
     out = torch.empty_like(m)
-    ext().gate_out(m, o, lnw, lnb, wg, wo, _none(m, torch.bfloat16) if keep is None else keep, out, eps, dscale)
+    ext().gate_out(
+        m,
+        o,
+        lnw,
+        lnb,
+        wg,
+        wo,
+        _none(m, torch.bfloat16) if keep is None else keep,
+        out,
+        eps,
+        dscale,
+    )
     return out
 
 
@@ -114,8 +177,19 @@ def reduce_rows(part: torch.Tensor, dtype: torch.dtype) -> torch.Tensor:
     return out
 
 
-def glue(m: torch.Tensor, dres: torch.Tensor, o: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, keep: torch.Tensor | None,
-         eps: float, dscale: float, raw: bool = False):
+def glue(
+    m: torch.Tensor,
+    dres: torch.Tensor,
+    o: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    keep: torch.Tensor | None,
+    eps: float,
+    dscale: float,
+    raw: bool = False,
+):
     """m, dres [S, L, D] (dres: the output gradient, dropout not yet applied), o [8 ns, L, S C / ns] (the saved contraction), wg [8 C, D], wo [D, 8 C], keep [L, D] bf16 (or None) ->
     (do, dgp [8 ns, L, S C / ns] bf16, dWo [D, 8 C], dWg [8 C, D] fp32): the cotangent of o (dv = w^T do, dw = do v^T are the caller's bmm), the gate's pre-activation gradient and
     the two weight gradients of the gate / output projections (fp32 partials of the CTAs summed in a fixed order)."""
@@ -127,16 +201,40 @@ def glue(m: torch.Tensor, dres: torch.Tensor, o: torch.Tensor, lnw: torch.Tensor
     do = torch.empty_like(o)
     dgp = torch.empty_like(o)
     part = m.new_empty((nbx, ng, 2 * d * gch), dtype=torch.float32)
-    ext().glue(m, dres, o, lnw, lnb, wg, wo, _none(m, torch.bfloat16) if keep is None else keep, do, dgp, part, eps, dscale)
+    ext().glue(
+        m,
+        dres,
+        o,
+        lnw,
+        lnb,
+        wg,
+        wo,
+        _none(m, torch.bfloat16) if keep is None else keep,
+        do,
+        dgp,
+        part,
+        eps,
+        dscale,
+    )
     total = reduce_rows(part.view(nbx, -1), torch.float32).view(ng, 2 * d * gch)
     if raw:
         return do, dgp, total
-    dwo = total[:, :d * gch].reshape(ng, d, gch).permute(1, 0, 2).reshape(d, hc)
-    dwg = total[:, d * gch:].reshape(hc, d)
+    dwo = total[:, : d * gch].reshape(ng, d, gch).permute(1, 0, 2).reshape(d, hc)
+    dwg = total[:, d * gch :].reshape(hc, d)
     return do, dgp, dwo, dwg
 
 
-def dgv_bwd(m: torch.Tensor, dres: torch.Tensor, dgp: torch.Tensor, dv: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wg: torch.Tensor, wv: torch.Tensor, eps: float):
+def dgv_bwd(
+    m: torch.Tensor,
+    dres: torch.Tensor,
+    dgp: torch.Tensor,
+    dv: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wg: torch.Tensor,
+    wv: torch.Tensor,
+    eps: float,
+):
     """dgp, dv [8 ns, L, S C / ns] -> (dm bf16 [S, L, D] = LN_backward(dgp Wg + dv Wv) + dres, dWv [8 C, D], dgamma [D], dbeta [D]) (fp32 but dm)."""
     depth, length, d = m.shape
     hc = wg.shape[0]
@@ -145,11 +243,26 @@ def dgv_bwd(m: torch.Tensor, dres: torch.Tensor, dgp: torch.Tensor, dv: torch.Te
     part = m.new_empty((nb, hc * d + 2 * d), dtype=torch.float32)
     ext().dgv_bwd(m, dres, dgp, dv, lnw, lnb, wg, wv, dm, part, eps)
     total = reduce_rows(part, torch.float32)
-    return dm, total[:hc * d].view(hc, d), total[hc * d:hc * d + d], total[hc * d + d:]
+    return (
+        dm,
+        total[: hc * d].view(hc, d),
+        total[hc * d : hc * d + d],
+        total[hc * d + d :],
+    )
 
 
-def pair_bwd(z: torch.Tensor, w: torch.Tensor, dw: torch.Tensor, key_mask: torch.Tensor | None, lnw: torch.Tensor, lnb: torch.Tensor, wb: torch.Tensor, eps: float,
-             variant: int | None = None, raw: bool = False):
+def pair_bwd(
+    z: torch.Tensor,
+    w: torch.Tensor,
+    dw: torch.Tensor,
+    key_mask: torch.Tensor | None,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wb: torch.Tensor,
+    eps: float,
+    variant: int | None = None,
+    raw: bool = False,
+):
     """z [L, L, DZ], w [8, L, L] bf16 (the saved softmax), dw [8 ns, L, L] fp32 (the cotangent of w: ns partial products per head, summed in order), key mask [L] uint8 (or None) ->
     (dz bf16 [L, L, DZ], dWb [8, DZ], dgamma, dbeta [DZ]) (fp32 but dz). dbeta is zero up to rounding: a softmax cannot see a shift shared by all keys."""
     length, _, dz_ = z.shape
@@ -157,11 +270,31 @@ def pair_bwd(z: torch.Tensor, w: torch.Tensor, dw: torch.Tensor, key_mask: torch
     pm = z.new_empty((length, HEADS * dz_), dtype=torch.float32)
     ps = z.new_empty((length, HEADS), dtype=torch.float32)
     if variant is None:
-        variant = settings.current().pwa_sm80_pb         # schedule experiments (CTAs per SM); 0 is the shipped one
-    ext().pair_bwd(z, w, dw, _none(z, torch.uint8) if key_mask is None else key_mask, lnw, lnb, wb, dz, pm, ps, eps, variant)
+        variant = (
+            settings.current().pwa_sm80_pb
+        )  # schedule experiments (CTAs per SM); 0 is the shipped one
+    ext().pair_bwd(
+        z,
+        w,
+        dw,
+        _none(z, torch.uint8) if key_mask is None else key_mask,
+        lnw,
+        lnb,
+        wb,
+        dz,
+        pm,
+        ps,
+        eps,
+        variant,
+    )
     big_m = reduce_rows(pm, torch.float32).view(HEADS, dz_)
     s = reduce_rows(ps, torch.float32)
     if raw:
         return dz, big_m, s
     wbf = wb.float()
-    return dz, lnw[None, :] * big_m + lnb[None, :] * s[:, None], (wbf * big_m).sum(0), (wbf * s[:, None]).sum(0)
+    return (
+        dz,
+        lnw[None, :] * big_m + lnb[None, :] * s[:, None],
+        (wbf * big_m).sum(0),
+        (wbf * s[:, None]).sum(0),
+    )

@@ -10,7 +10,10 @@ from settings_helpers import override_setting
 from miniworld_engine.modules import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -23,19 +26,32 @@ def _rel(a, b):
     return float((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30))
 
 
-SHAPES = [(8, 384), (12, 384), (16, 384), (16, 512)]          # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 16 x 32
+SHAPES = [
+    (8, 384),
+    (12, 384),
+    (16, 384),
+    (16, 512),
+]  # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 16 x 32
 
 
 def _modules(seed=0, shape=(8, 384)):
     torch.manual_seed(seed)
-    ref = AttentionPairBias(shape[1], 128, shape[0], implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised to_out, unit LayerNorms
+    ref = AttentionPairBias(
+        shape[1], 128, shape[0], implementation=ImplementationType.PYTORCH
+    )
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised to_out, unit LayerNorms
         for p in ref.parameters():
             p.add_(torch.randn_like(p) * 0.1)
     ours = copy.deepcopy(ref)
     ours.implementation = ImplementationType.MINIWORLD
     torch_bf = copy.deepcopy(ref)
-    return ref.cuda(), ours.cuda().to(torch.bfloat16), torch_bf.cuda().to(torch.bfloat16)
+    return (
+        ref.cuda(),
+        ours.cuda().to(torch.bfloat16),
+        torch_bf.cuda().to(torch.bfloat16),
+    )
 
 
 def _inputs(L, masked, seed=1, d=384):
@@ -66,7 +82,10 @@ def test_apb_a100_inference(L, masked, shape):
     assert got.shape == single.shape
     e, e0 = _rel(got, want), _rel(base, want)
     assert e < 1.3 * e0 + 1e-3, (e, e0)
-    d, d0 = _rel(got - sb, want - single), _rel(base - sb, want - single)   # the attention branch alone
+    d, d0 = (
+        _rel(got - sb, want - single),
+        _rel(base - sb, want - single),
+    )  # the attention branch alone
     assert d < 1.3 * d0 + 2e-3, (d, d0)
 
 
@@ -97,10 +116,14 @@ def test_apb_a100_gate_conditions():
     sb, pb = single.bfloat16(), pair.bfloat16()
     with torch.no_grad():
         assert a100.serves_inference(ours, sb, pb, mask)
-        assert not a100.serves_inference(ours, single, pair, mask)                  # fp32 operands
-        assert not a100.serves_inference(ours, sb.expand(2, -1, -1), pb.expand(2, -1, -1, -1), mask)   # B = 2
-        assert not a100.serves_inference(ours, sb, pb, torch.ones(2, 128, dtype=torch.bool, device="cuda"))
-    assert not a100.serves_inference(ours, sb, pb, mask)                           # gradients enabled
+        assert not a100.serves_inference(ours, single, pair, mask)  # fp32 operands
+        assert not a100.serves_inference(
+            ours, sb.expand(2, -1, -1), pb.expand(2, -1, -1, -1), mask
+        )  # B = 2
+        assert not a100.serves_inference(
+            ours, sb, pb, torch.ones(2, 128, dtype=torch.bool, device="cuda")
+        )
+    assert not a100.serves_inference(ours, sb, pb, mask)  # gradients enabled
 
 
 def test_apb_a100_matches_the_triton_module_path(monkeypatch):
@@ -119,7 +142,7 @@ def test_apb_a100_matches_the_triton_module_path(monkeypatch):
 @pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
 def test_apb_a100_compiled(shape):
     """Inference through torch.compile (fullgraph) matches eager."""
-    torch._dynamo.reset()                   # each shape compiles the module's forward afresh (recompile limit)
+    torch._dynamo.reset()  # each shape compiles the module's forward afresh (recompile limit)
     _, ours, _ = _modules(shape=shape)
     single, pair, mask = _inputs(384, True, d=shape[1])
     sb, pb = single.bfloat16(), pair.bfloat16()
@@ -153,7 +176,11 @@ def _train(mod, single, pair, mask, dy):
     p = pair.detach().clone().requires_grad_()
     y = mod(s, p, mask)
     y.backward(dy)
-    return y, {"single": s.grad, "pair": p.grad, **{n: q.grad for n, q in mod.named_parameters()}}
+    return y, {
+        "single": s.grad,
+        "pair": p.grad,
+        **{n: q.grad for n, q in mod.named_parameters()},
+    }
 
 
 @pytest.mark.parametrize("shape", [*SHAPES, (24, 384)])
@@ -216,7 +243,9 @@ def test_apb_a100_training_compiled(shape):
         p.grad = None
     yc, gc = _train(comp, sb, pb, mask, dy)
     assert _rel(yc, ye) < 1e-6
-    for n in ge:                            # the column sums (dWf, ln weights, dbq) add per-block partials atomically
+    for (
+        n
+    ) in ge:  # the column sums (dWf, ln weights, dbq) add per-block partials atomically
         assert _rel(gc.get(n, gc.get("_orig_mod." + n)), ge[n]) < 1e-3, n
 
 
@@ -234,6 +263,7 @@ def test_apb_a100_training_everything_masked_is_finite():
 
 def test_apb_24x16_replay_reads_changed_weights_and_mask():
     from miniworld_engine.integrations import attention_pair_bias_sm80 as a100
+
     _, m, _ = _modules(shape=(24, 384))
     single, pair, mask = _inputs(208, True)
     single, pair = single.bfloat16(), pair.bfloat16()

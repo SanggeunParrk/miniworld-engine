@@ -43,19 +43,38 @@ def _ext():
     extra = settings.current().trimul_sm80_wide_flags.split()
     import hashlib
 
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
         name=f"trimul_sm80_wide{tag}",
         sources=[str(_dir / "wide_ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
 
 
-def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None) -> bool:
+def shape_ok(
+    shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None, mask_dtype=None
+) -> bool:
     """The kernels' shape / dtype requirements, device-free (the CPU tests of the gate call this): bf16 or fp32 (TF32), width in WIDTHS with hidden channels ``hs`` = D
     (one direction) or 2 D (bidirectional), a square plane with L % 16 == 0, and a [B, L] bool token mask if any."""
-    if dtype not in (torch.bfloat16, torch.float32) or len(shape) != 4 or shape[0] < 1 or shape[1] != shape[2]:
+    if (
+        dtype not in (torch.bfloat16, torch.float32)
+        or len(shape) != 4
+        or shape[0] < 1
+        or shape[1] != shape[2]
+    ):
         return False
     d, n = shape[-1], shape[1]
     hs = d_hidden if hs is None else hs
@@ -63,10 +82,18 @@ def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None
         return False
     if d == 512 and dtype is not torch.bfloat16:
         return False
-    return mask_shape is None or (tuple(mask_shape) == (shape[0], n) and mask_dtype is torch.bool)
+    return mask_shape is None or (
+        tuple(mask_shape) == (shape[0], n) and mask_dtype is torch.bool
+    )
 
 
-def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None, *, hs: int | None = None) -> bool:
+def supports(
+    pair: torch.Tensor,
+    d_hidden: int,
+    mask: torch.Tensor | None = None,
+    *,
+    hs: int | None = None,
+) -> bool:
     """The kernels' own requirements: sm_80, ``shape_ok``, one contiguous plane per call (a batch runs plane by plane in the integration)."""
     if not settings.current().trimul_sm80 or not settings.current().trimul_sm80_wide:
         return False
@@ -75,9 +102,20 @@ def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
     # D512 extends the BF16 inference path only; its backward keeps the general path.
     if pair.ndim == 4 and pair.shape[-1] == 512 and torch.is_grad_enabled():
         return False
-    if not shape_ok(tuple(pair.shape), pair.dtype, d_hidden, hs, None if mask is None else tuple(mask.shape), None if mask is None else mask.dtype):
+    if not shape_ok(
+        tuple(pair.shape),
+        pair.dtype,
+        d_hidden,
+        hs,
+        None if mask is None else tuple(mask.shape),
+        None if mask is None else mask.dtype,
+    ):
         return False
-    return _d128._is_ampere(pair.device.index if pair.device.index is not None else torch.cuda.current_device())
+    return _d128._is_ampere(
+        pair.device.index
+        if pair.device.index is not None
+        else torch.cuda.current_device()
+    )
 
 
 _BUILD_FAILED = False
@@ -95,12 +133,22 @@ def _loads() -> bool:
         _ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"sm80 wide TriMul unavailable, keeping the existing path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm80 wide TriMul unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
 
-def available(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None, *, hs: int | None = None) -> bool:
+def available(
+    pair: torch.Tensor,
+    d_hidden: int,
+    mask: torch.Tensor | None = None,
+    *,
+    hs: int | None = None,
+) -> bool:
     """``supports()`` plus a successful (cached) build."""
     return supports(pair, d_hidden, mask, hs=hs) and _loads()
 
@@ -114,17 +162,34 @@ def _pack(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, *, train: bool = False) -> d
     ln = [t.detach().float().contiguous() for t in (gi, bi, go, bo)]
     ws = [*(wl, wlg, wr, wrg), *(w.contiguous() for w in (wg, wo))]
     f32 = dict(dtype=torch.float32, device=dev)
-    wd = wl.dtype                                            # the folded weights are stored in the activations' dtype (bf16, or TF32-rounded fp32)
+    wd = wl.dtype  # the folded weights are stored in the activations' dtype (bf16, or TF32-rounded fp32)
     w1 = torch.empty((4 * hs, d), dtype=wd, device=dev)
     wo3 = torch.empty((d, hs), dtype=wd, device=dev)
     wg3 = torch.empty((d, d), dtype=wd, device=dev)
     vec = torch.empty((2 * 4 * hs + 4 * d + (d if train else 0),), **f32)
-    vs, vb = vec[:4 * hs], vec[4 * hs:8 * hs]
-    so, eo, sg, eg = vec[8 * hs:8 * hs + 4 * d].view(4, d).unbind(0)
-    spx = vec[8 * hs + 4 * d:] if train else vec.new_empty((0,))
-    wdx = torch.empty((4 * hs + d, d), dtype=wd, device=dev) if train else w1.new_empty((0,))
+    vs, vb = vec[: 4 * hs], vec[4 * hs : 8 * hs]
+    so, eo, sg, eg = vec[8 * hs : 8 * hs + 4 * d].view(4, d).unbind(0)
+    spx = vec[8 * hs + 4 * d :] if train else vec.new_empty((0,))
+    wdx = (
+        torch.empty((4 * hs + d, d), dtype=wd, device=dev)
+        if train
+        else w1.new_empty((0,))
+    )
     _ext().wpack(*ws, *ln, w1, vs, vb, wo3, so, eo, wg3, sg, eg, wdx, spx)
-    pk = dict(hs=hs, d=d, w1=w1, vs=vs, vb=vb, wo=wo3, wg=wg3, so=so, eo=eo, sg=sg, eg=eg, ln=ln)
+    pk = dict(
+        hs=hs,
+        d=d,
+        w1=w1,
+        vs=vs,
+        vb=vb,
+        wo=wo3,
+        wg=wg3,
+        so=so,
+        eo=eo,
+        sg=sg,
+        eg=eg,
+        ln=ln,
+    )
     if train:
         pk.update(wdx=wdx, spx=spx)
     return pk
@@ -141,16 +206,29 @@ def _pack_reference(wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo) -> dict:
     """``_pack`` in torch operations (the layouts' definition; the tests compare the two)."""
     f = lambda t: t.detach().float()  # noqa: E731
     hs, d = wl.shape
-    wg_all = torch.cat([f(wlg), f(wrg)], 0)                                                   # [2 Hs, D]
+    wg_all = torch.cat([f(wlg), f(wrg)], 0)  # [2 Hs, D]
     wp_all = torch.cat([f(wl), f(wr)], 0)
-    rows = torch.stack([wg_all.view(2 * hs // 8, 8, d), wp_all.view(2 * hs // 8, 8, d)], 1).reshape(4 * hs, d)   # 16 j + i: gate (i < 8) | projection
+    rows = torch.stack(
+        [wg_all.view(2 * hs // 8, 8, d), wp_all.view(2 * hs // 8, 8, d)], 1
+    ).reshape(4 * hs, d)  # 16 j + i: gate (i < 8) | projection
     wd = wl.dtype
-    rnd = _tf32_round if wd is torch.float32 else (lambda t: t.to(wd))    # noqa: E731
+    rnd = _tf32_round if wd is torch.float32 else (lambda t: t.to(wd))  # noqa: E731
     w1 = rnd(0.5 * rows * f(gi)[None, :])
     wo3 = rnd(0.5 * f(wo) * f(go)[None, :])
     wg3 = rnd(0.5 * f(wg) * f(gi)[None, :])
-    return dict(hs=hs, d=d, w1=w1, vs=w1.float().sum(1), vb=0.5 * (rows @ f(bi)), wo=wo3, wg=wg3, so=wo3.float().sum(1), eo=0.5 * (f(wo) @ f(bo)),
-                sg=wg3.float().sum(1), eg=0.5 * (f(wg) @ f(bi)))
+    return dict(
+        hs=hs,
+        d=d,
+        w1=w1,
+        vs=w1.float().sum(1),
+        vb=0.5 * (rows @ f(bi)),
+        wo=wo3,
+        wg=wg3,
+        so=wo3.float().sum(1),
+        eo=0.5 * (f(wo) @ f(bo)),
+        sg=wg3.float().sum(1),
+        eg=0.5 * (f(wg) @ f(bi)),
+    )
 
 
 def _tf32_round(t: torch.Tensor) -> torch.Tensor:
@@ -203,13 +281,19 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     hs = pk["hs"]
     # bf16, hidden width <= 128: k1w computes the input rows' statistics from its own tile and k3w the output stage's LayerNorm_out statistics -- the two statistics kernels and
     # their reads of z / X are gone (every k-tile of both operands is still in its ring slot when its GEMM ends)
-    fuse_z = _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128           # <= 4 CTAs share a token tile: the redundant per-CTA statistics are cheaper than the kernels
+    fuse_z = (
+        _FUSE_STATS and z.dtype is torch.bfloat16 and hs <= 128
+    )  # <= 4 CTAs share a token tile: the redundant per-CTA statistics are cheaper than the kernels
     fuse_x = fuse_z
     st_in = torch.empty((T, 2), dtype=torch.float32, device=z.device)
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
     planes = zf.new_empty((2 * hs, T))
-    k1 = E.k1w_row_mask if not save and settings.current().trimul_sm80_row_mask else E.k1w
+    k1 = (
+        E.k1w_row_mask
+        if not save and settings.current().trimul_sm80_row_mask
+        else E.k1w
+    )
     k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
@@ -223,7 +307,25 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     else:
         ps = gs = zf.new_empty((0,))
     k3 = E.k3w_tuned if not save and settings.current().trimul_sm80_tuned else E.k3w
-    k3(x.view(hs, T), zf, pk["wo"], pk["wg"], pk["so"], pk["eo"], pk["sg"], pk["eg"], st_out, st_in, ds, out, ps, gs, n, eps_out, fuse_x)
+    k3(
+        x.view(hs, T),
+        zf,
+        pk["wo"],
+        pk["wg"],
+        pk["so"],
+        pk["eo"],
+        pk["sg"],
+        pk["eg"],
+        st_out,
+        st_in,
+        ds,
+        out,
+        ps,
+        gs,
+        n,
+        eps_out,
+        fuse_x,
+    )
     return out.view_as(z), ((planes, x, st_in, st_out, ps, gs) if save else None)
 
 
@@ -233,7 +335,14 @@ def _forward_nograd_fake(leaves, mask, ds, direction, eps_in, eps_out):
 
 
 @opaque(fake=_forward_nograd_fake, name="trimul_sm80_wide_forward")
-def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int, eps_in: float, eps_out: float) -> torch.Tensor:
+def forward_nograd(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    direction: int,
+    eps_in: float,
+    eps_out: float,
+) -> torch.Tensor:
     """z + drop_row(trimul(z)) without the backward's saves.  ``mask`` [L] uint8 or empty, ``ds`` [L, D] bf16 or empty."""
     return _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=False)[0]
 
@@ -244,21 +353,41 @@ def _forward_train_fake(leaves, mask, ds, direction, eps_in, eps_out):
     n, d, hs = z.shape[1], z.shape[-1], leaves[1].shape[0]
     T = n * n
     f32 = torch.float32
-    return [torch.empty_like(z), z.new_empty((2 * hs, T)), z.new_empty((hs, n, n)), torch.empty((T, 2), dtype=f32, device=z.device),
-            torch.empty((T, 2), dtype=f32, device=z.device), z.new_empty((T, d)), z.new_empty((T, d))]
+    return [
+        torch.empty_like(z),
+        z.new_empty((2 * hs, T)),
+        z.new_empty((hs, n, n)),
+        torch.empty((T, 2), dtype=f32, device=z.device),
+        torch.empty((T, 2), dtype=f32, device=z.device),
+        z.new_empty((T, d)),
+        z.new_empty((T, d)),
+    ]
 
 
 @opaque(fake=_forward_train_fake, name="trimul_sm80_wide_train_fwd")
-def forward_train(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int, eps_in: float, eps_out: float) -> list[torch.Tensor]:
+def forward_train(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    direction: int,
+    eps_in: float,
+    eps_out: float,
+) -> list[torch.Tensor]:
     """[out, planes, X, LN_in statistics, LN_out statistics, p', g']."""
-    out, (planes, x, st_in, st_out, ps, gs) = _run_forward(leaves, mask, ds, direction, eps_in, eps_out, save=True)
+    out, (planes, x, st_in, st_out, ps, gs) = _run_forward(
+        leaves, mask, ds, direction, eps_in, eps_out, save=True
+    )
     return [out, planes, x, st_in, st_out, ps, gs]
 
 
-def trimul_inference(z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out):
+def trimul_inference(
+    z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out
+):
     """z + drop_row(trimul(z)), no gradients (probe entry)."""
     leaves = (z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo)
-    return forward_nograd(list(leaves), mask, ds, direction, float(eps_in), float(eps_out))
+    return forward_nograd(
+        list(leaves), mask, ds, direction, float(eps_in), float(eps_out)
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------------------- backward
@@ -271,7 +400,9 @@ def _gemm_tk(a, b):
     s = next((c for c in (32, 16, 8, 4, 2) if t % c == 0 and t // c >= 256), 1)
     if s == 1:
         return a.t() @ b
-    return torch.bmm(a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))).sum(0)
+    return torch.bmm(
+        a.unflatten(0, (s, t // s)).transpose(1, 2), b.unflatten(0, (s, t // s))
+    ).sum(0)
 
 
 def _contract_bwd(planes, dx, dplanes, hs, n, direction):
@@ -289,7 +420,9 @@ def _contract_bwd(planes, dx, dplanes, hs, n, direction):
 
 def _run_backward(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     with _tf32(leaves[0]):
-        return _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out)
+        return _run_backward_body(
+            leaves, mask, ds, saved, dy, direction, eps_in, eps_out
+        )
 
 
 def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
@@ -311,34 +444,52 @@ def _run_backward_body(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
     xcm = x.view(hs, T)
     # ---- output side: gate gradients, LayerNorm_out backward
     nb = E.gate_bwd_blocks(T, d, is32)
-    dcat = zf.new_empty((T, 4 * hs + d))                    # [dpre (k1w packed order) | dg of the output gate]
+    dcat = zf.new_empty(
+        (T, 4 * hs + d)
+    )  # [dpre (k1w packed order) | dg of the output gate]
     dpr = torch.empty_like(zf)
     s12 = torch.empty((T, 2), **f32)
     part = torch.empty((nb, 2 * d), **f32)
-    E.gate_bwd(dyf, ps, gs, ds, pk["spx"], 2.0 * pk["eo"], st_out, dpr, dcat, 4 * hs, s12, part, n)
+    E.gate_bwd(
+        dyf,
+        ps,
+        gs,
+        ds,
+        pk["spx"],
+        2.0 * pk["eo"],
+        st_out,
+        dpr,
+        dcat,
+        4 * hs,
+        s12,
+        part,
+        n,
+    )
     r01 = torch.empty(2 * d, **f32)
     E.colsum(part, r01)
-    dor = torch.mm(cw[5].t(), dpr.t())                         # [Hs, T] = r_o dy_o, channel-major like X
+    dor = torch.mm(cw[5].t(), dpr.t())  # [Hs, T] = r_o dy_o, channel-major like X
     dt = torch.empty_like(xcm)
     part_o = torch.empty((T // (128 if is32 else 256), 2 * hs), **f32)
     E.lnout_bwd(dor, xcm, st_out, s12, go32, dt, part_o)
     del dor
     gout = torch.empty(2 * hs, **f32)
     E.colsum(part_o, gout)
-    G = _gemm_tk(dpr, xcm.t())                              # [D, Hs] = dpr^T X^T
+    G = _gemm_tk(dpr, xcm.t())  # [D, Hs] = dpr^T X^T
     del dpr
     # ---- contraction backward -> the plane gradients
     dplanes = planes.new_empty((2 * hs, n, n))
     _contract_bwd(planes, dt.view(hs, n, n), dplanes, hs, n, direction)
     del dt
     # ---- input side: pre-activation gradients (k1wb), weight and input gradients
-    E.k1wb(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, dplanes.view(2 * hs, T), dcat, n)
+    E.k1wb(
+        zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, dplanes.view(2 * hs, T), dcat, n
+    )
     del dplanes
     xn = torch.empty_like(zf)
     E.ln_apply(zf, st_in, gi32, bi32, xn)
-    dw1 = _gemm_tk(dcat, xn)                                # [4 Hs + D, D] fp32, k1w packed order then W_g
+    dw1 = _gemm_tk(dcat, xn)  # [4 Hs + D, D] fp32, k1w packed order then W_g
     del xn
-    dxn = dcat @ pk["wdx"]                                  # [T, D]
+    dxn = dcat @ pk["wdx"]  # [T, D]
     del dcat
     dx = torch.empty_like(zf)
     nbi = E.lnin_bwd_blocks(T, d, is32)
@@ -363,8 +514,16 @@ def _backward_fake(leaves, mask, ds, saved, dy, direction, eps_in, eps_out):
 
 
 @opaque(fake=_backward_fake, name="trimul_sm80_wide_train_bwd")
-def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, saved: list[torch.Tensor], dy: torch.Tensor, direction: int, eps_in: float,
-             eps_out: float) -> list[torch.Tensor]:
+def backward(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+    direction: int,
+    eps_in: float,
+    eps_out: float,
+) -> list[torch.Tensor]:
     """Gradients of every leaf (z, W_l, W_lg, W_r, W_rg, W_g, W_o, ln_in weight / bias, ln_out weight / bias), in the leaves' dtypes."""
     return _run_backward(leaves, mask, ds, list(saved), dy, direction, eps_in, eps_out)
 
@@ -383,13 +542,24 @@ class _Training(torch.autograd.Function):
     @torch.autograd.function.once_differentiable
     def backward(ctx, dy):
         vals = ctx.saved_tensors
-        grads = backward(list(vals[:11]), vals[11], vals[12], list(vals[13:]), dy.contiguous(), *ctx.cfg)
+        grads = backward(
+            list(vals[:11]),
+            vals[11],
+            vals[12],
+            list(vals[13:]),
+            dy.contiguous(),
+            *ctx.cfg,
+        )
         return (*grads, None, None, None, None, None)
 
 
-def trimul(z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out):
+def trimul(
+    z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo, mask, ds, direction, eps_in, eps_out
+):
     """z + drop_row(trimul(z)).  ``mask`` [L] uint8 or empty (``sm80.token_mask``), ``ds`` [L, D] bf16 or empty.  Call ``available()`` first."""
     leaves = (z, wl, wlg, wr, wrg, wg, wo, gi, bi, go, bo)
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in leaves)):
-        return forward_nograd(list(leaves), mask, ds, direction, float(eps_in), float(eps_out))
+        return forward_nograd(
+            list(leaves), mask, ds, direction, float(eps_in), float(eps_out)
+        )
     return _Training.apply(*leaves, mask, ds, direction, float(eps_in), float(eps_out))

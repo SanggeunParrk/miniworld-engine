@@ -1,4 +1,5 @@
 """Public Anthropic module routes: independent reference and live CUDA graphs."""
+
 import os
 
 import pytest
@@ -27,23 +28,52 @@ from miniworld_engine.modules.triangle_attention.bidirectional import (
     BidirectionalTriangleAttention,
 )
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
-    not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"), reason="needs pinned Anthropic payload")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"),
+        reason="needs pinned Anthropic payload",
+    ),
+]
 
-FAMILIES = ("layernorm", "rmsnorm", "transition", "triattn", "adaln", "conditioned_transition",
-            "attention_pair_bias", "augmented_attention", "dit_token", "opm", "pwa",
-            "swa_attention", "swa_dit", "swiglu_ffn", "bias_only_dit", "opm_post",
-            "triattn_bias_start", "triattn_bias_end", "triattn_bidir_bias", "triattn_bidir_sa")
+FAMILIES = (
+    "layernorm",
+    "rmsnorm",
+    "transition",
+    "triattn",
+    "adaln",
+    "conditioned_transition",
+    "attention_pair_bias",
+    "augmented_attention",
+    "dit_token",
+    "opm",
+    "pwa",
+    "swa_attention",
+    "swa_dit",
+    "swiglu_ffn",
+    "bias_only_dit",
+    "opm_post",
+    "triattn_bias_start",
+    "triattn_bias_end",
+    "triattn_bidir_bias",
+    "triattn_bidir_sa",
+)
 
 
 def fixture(family, length, impl):
     kw = {"implementation": impl}
+
     def rand(*shape):
         return torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+
     mask = torch.arange(length, device="cuda")[None, :] % 7 != 0
     if family.startswith("pairformer"):
-        cfg = PairformerConfig(n_block=1, p_drop=0, use_self_attention="bias" not in family,
-                               bidirectional_trimul="bidir" in family)
+        cfg = PairformerConfig(
+            n_block=1,
+            p_drop=0,
+            use_self_attention="bias" not in family,
+            bidirectional_trimul="bidir" in family,
+        )
         return PairformerBlock(cfg, **kw), (rand(1, length, length, 128), mask)
     if family == "layernorm":
         return LayerNorm(128, **kw), (rand(1, length, 128),)
@@ -52,41 +82,83 @@ def fixture(family, length, impl):
     if family == "transition":
         return Transition(128, **kw), (rand(1, length, length, 128),)
     if family == "triattn":
-        return TriangleAttention(128, 4, anthropic_row="block:triattn_native", **kw), (rand(1, length, length, 128), mask)
+        return TriangleAttention(128, 4, anthropic_row="block:triattn_native", **kw), (
+            rand(1, length, length, 128),
+            mask,
+        )
     if family.startswith("triattn_bias"):
-        return TriangleAttention(128, 4, use_self_attention=False, starting=family.endswith("start"), **kw), (rand(1, length, length, 128), mask)
+        return TriangleAttention(
+            128, 4, use_self_attention=False, starting=family.endswith("start"), **kw
+        ), (rand(1, length, length, 128), mask)
     if family.startswith("triattn_bidir"):
-        return BidirectionalTriangleAttention(128, 4, use_self_attention=family.endswith("sa"), **kw), (rand(1, length, length, 128), mask)
+        return BidirectionalTriangleAttention(
+            128, 4, use_self_attention=family.endswith("sa"), **kw
+        ), (rand(1, length, length, 128), mask)
     if family == "bias_only_dit":
-        return BiasOnlyDiTBlock(768, 384, 128, 16, **kw), (rand(2, 1, length, 768), rand(1, 1, length, 384), rand(1, length, length, 128), mask)
+        return BiasOnlyDiTBlock(768, 384, 128, 16, **kw), (
+            rand(2, 1, length, 768),
+            rand(1, 1, length, 384),
+            rand(1, length, length, 128),
+            mask,
+        )
     if family in ("adaln", "conditioned_transition"):
         cls = AdaptiveLayerNorm if family == "adaln" else ConditionedTransition
         return cls(128, 128, **kw), (rand(2, 1, length, 128), rand(1, 1, length, 128))
     if family == "attention_pair_bias":
-        return AttentionPairBias(384, 128, 8, **kw), (rand(1, length, 384), rand(1, length, length, 128), mask)
+        return AttentionPairBias(384, 128, 8, **kw), (
+            rand(1, length, 384),
+            rand(1, length, length, 128),
+            mask,
+        )
     if family in ("augmented_attention", "dit_token"):
         d, c, p, h = 768, 384, 128, 16
-        cls = AugmentedAttentionPairBias if family == "augmented_attention" else DiTBlock
-        return cls(d, c, p, h, **kw), (rand(2, 1, length, d), rand(1, 1, length, c), rand(1, length, length, p), mask)
+        cls = (
+            AugmentedAttentionPairBias if family == "augmented_attention" else DiTBlock
+        )
+        return cls(d, c, p, h, **kw), (
+            rand(2, 1, length, d),
+            rand(1, 1, length, c),
+            rand(1, length, length, p),
+            mask,
+        )
     if family == "opm":
         m = rand(1, 64, length, 64)
         return OuterProductMean(64, 128, **kw), (m, mask[:, None].expand(1, 64, length))
     if family == "opm_post":
-        return OuterProductMean(64, 256, normalize_before_proj=False, **kw), (rand(1, 64, length, 64), mask[:, None].expand(1, 64, length))
+        return OuterProductMean(64, 256, normalize_before_proj=False, **kw), (
+            rand(1, 64, length, 64),
+            mask[:, None].expand(1, 64, length),
+        )
     if family == "swiglu_ffn":
         return SwiGLUFFN(128, **kw), (rand(2, length, 128),)
     if family.startswith("swa_"):
         angles = torch.randn(1, length, 16, device="cuda")
-        valid = torch.arange(length, device="cuda")[None] < torch.tensor([length, length-17, 0], device="cuda")[:, None]
+        valid = (
+            torch.arange(length, device="cuda")[None]
+            < torch.tensor([length, length - 17, 0], device="cuda")[:, None]
+        )
         ap = build_attention_params(angles.cos(), angles.sin(), valid, 3)
         if family == "swa_attention":
             return SWA3DRoPEAttention(128, 4, **kw), (rand(3, length, 128), ap)
         return SWADiTBlock(**kw), (rand(3, length, 128), rand(3, length, 128), ap)
-    return MSAPairWeightedAveraging(64, 128, 8, 32, **kw), (rand(1, 64, length, 64), rand(1, length, length, 128), mask)
+    return MSAPairWeightedAveraging(64, 128, 8, 32, **kw), (
+        rand(1, 64, length, 64),
+        rand(1, length, length, 128),
+        mask,
+    )
 
 
 @pytest.mark.parametrize("length", [128, 384])
-@pytest.mark.parametrize("family", [*FAMILIES, "pairformer", "pairformer_bias", "pairformer_bidir", "pairformer_bidir_bias"])
+@pytest.mark.parametrize(
+    "family",
+    [
+        *FAMILIES,
+        "pairformer",
+        "pairformer_bias",
+        "pairformer_bidir",
+        "pairformer_bidir_bias",
+    ],
+)
 def test_module_reference_and_graph(family, length):
     if torch.cuda.get_device_capability() != (8, 0):
         pytest.skip("requires A100")
@@ -96,11 +168,11 @@ def test_module_reference_and_graph(family, length):
     with torch.no_grad():
         for name, param in actual.named_parameters():
             if param.ndim > 1:
-                param.normal_(std=param.shape[-1] ** -.5)
+                param.normal_(std=param.shape[-1] ** -0.5)
             elif name.endswith("weight"):
-                param.normal_(mean=1, std=.1)
+                param.normal_(mean=1, std=0.1)
             else:
-                param.normal_(std=.1)
+                param.normal_(std=0.1)
     reference, _ = fixture(family, length, "pytorch")
     reference = reference.cuda().float().eval()
     reference.load_state_dict(actual.state_dict())
@@ -108,15 +180,30 @@ def test_module_reference_and_graph(family, length):
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
         with torch.no_grad():
-            want = reference(*(x.float() if isinstance(x, torch.Tensor) and x.is_floating_point() else x for x in inputs))
+            want = reference(
+                *(
+                    x.float()
+                    if isinstance(x, torch.Tensor) and x.is_floating_point()
+                    else x
+                    for x in inputs
+                )
+            )
             got = actual(*inputs)
             rel = (got.float() - want).norm() / want.norm().clamp_min(1e-8)
             assert torch.isfinite(got).all()
-            assert rel < .04, (family, float(rel))
-            if family in {"transition", "triattn", "conditioned_transition", "attention_pair_bias",
-                          "augmented_attention", "dit_token", "pwa", "swa_dit"}:
+            assert rel < 0.04, (family, float(rel))
+            if family in {
+                "transition",
+                "triattn",
+                "conditioned_transition",
+                "attention_pair_bias",
+                "augmented_attention",
+                "dit_token",
+                "pwa",
+                "swa_dit",
+            }:
                 delta = want - inputs[0].float()
-                assert (got.float() - want).norm() / delta.norm().clamp_min(1e-8) < .06
+                assert (got.float() - want).norm() / delta.norm().clamp_min(1e-8) < 0.06
             assert any(hasattr(m, "anthropic_selection") for m in actual.modules())
             stream = torch.cuda.Stream()
             stream.wait_stream(torch.cuda.current_stream())
@@ -129,7 +216,7 @@ def test_module_reference_and_graph(family, length):
                 output = actual(*inputs)
             graph.replay()
             torch.testing.assert_close(output, got, rtol=0, atol=0)
-            inputs[0].mul_(.5)
+            inputs[0].mul_(0.5)
             graph.replay()
             torch.testing.assert_close(output, actual(*inputs), rtol=0, atol=0)
         with pytest.raises(RuntimeError, match=r"inference-only|forward-only"):
@@ -138,15 +225,29 @@ def test_module_reference_and_graph(family, length):
         torch.backends.cuda.matmul.allow_tf32 = old
 
 
-@pytest.mark.parametrize("family", ["attention_pair_bias", "augmented_attention", "opm", "pwa",
-                                    "bias_only_dit", "opm_post", "triattn_bias_start", "triattn_bias_end",
-                                    "triattn_bidir_bias", "triattn_bidir_sa"])
+@pytest.mark.parametrize(
+    "family",
+    [
+        "attention_pair_bias",
+        "augmented_attention",
+        "opm",
+        "pwa",
+        "bias_only_dit",
+        "opm_post",
+        "triattn_bias_start",
+        "triattn_bias_end",
+        "triattn_bidir_bias",
+        "triattn_bidir_sa",
+    ],
+)
 @pytest.mark.parametrize("mask_kind", ["none", "empty", "per_sample"])
 def test_masks_batches_and_changed_weights(family, mask_kind):
     if torch.cuda.get_device_capability() != (8, 0):
         pytest.skip("requires A100")
     if family.startswith("triattn_bidir") and mask_kind == "empty":
-        pytest.skip("existing bidirectional reference uses -inf softmax and returns NaN for empty keys")
+        pytest.skip(
+            "existing bidirectional reference uses -inf softmax and returns NaN for empty keys"
+        )
     torch.manual_seed(153)
     mod, original = fixture(family, 128, "anthropic")
     ref, _ = fixture(family, 128, "pytorch")
@@ -154,7 +255,7 @@ def test_masks_batches_and_changed_weights(family, mask_kind):
     args = list(original)
     for i, t in enumerate(args[:-1]):
         axis = 1 if family in {"augmented_attention", "bias_only_dit"} and i < 2 else 0
-        args[i] = torch.cat((t, t * .7), axis)
+        args[i] = torch.cat((t, t * 0.7), axis)
     if mask_kind == "none":
         args[-1] = None
     else:
@@ -170,30 +271,46 @@ def test_masks_batches_and_changed_weights(family, mask_kind):
         for _ in range(2):
             for p in mod.parameters():
                 if p.ndim > 1:
-                    p.normal_(std=p.shape[-1] ** -.5)
+                    p.normal_(std=p.shape[-1] ** -0.5)
             ref.load_state_dict(mod.state_dict())
             got = mod(*args)
             # torch 2.13's fused fp32 SDPA returns zero at an all-finite-min
             # bias. The mathematical module contract is a uniform average;
             # use independent math SDPA rather than that GPU backend as oracle.
             with torch.nn.attention.sdpa_kernel(torch.nn.attention.SDPBackend.MATH):
-                want = ref(*(t.float() if isinstance(t, torch.Tensor) and t.is_floating_point() else t for t in args))
+                want = ref(
+                    *(
+                        t.float()
+                        if isinstance(t, torch.Tensor) and t.is_floating_point()
+                        else t
+                        for t in args
+                    )
+                )
             assert torch.isfinite(got).all()
-            assert (got.float() - want).norm() / want.norm().clamp_min(1e-8) < .04
+            assert (got.float() - want).norm() / want.norm().clamp_min(1e-8) < 0.04
 
 
-@pytest.mark.parametrize("cond_shape", [(1, 1, 33, 128), (1, 2, 33, 128), (3, 1, 33, 128)])
+@pytest.mark.parametrize(
+    "cond_shape", [(1, 1, 33, 128), (1, 2, 33, 128), (3, 1, 33, 128)]
+)
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 def test_conditioning_period_and_graph_updates(cond_shape, dtype):
     torch.manual_seed(41)
-    mod = ConditionedTransition(128, 128, implementation="anthropic").cuda().to(dtype).eval()
-    ref = ConditionedTransition(128, 128, implementation="pytorch").cuda().float().eval()
+    mod = (
+        ConditionedTransition(128, 128, implementation="anthropic")
+        .cuda()
+        .to(dtype)
+        .eval()
+    )
+    ref = (
+        ConditionedTransition(128, 128, implementation="pytorch").cuda().float().eval()
+    )
     x = torch.randn(3, 2, 33, 128, device="cuda", dtype=dtype)
     cond = torch.randn(cond_shape, device="cuda", dtype=dtype)
     with torch.no_grad():
         for p in mod.parameters():
             if p.ndim > 1:
-                p.normal_(std=p.shape[-1] ** -.5)
+                p.normal_(std=p.shape[-1] ** -0.5)
         ref.load_state_dict(mod.state_dict())
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
@@ -205,10 +322,12 @@ def test_conditioning_period_and_graph_updates(cond_shape, dtype):
         with torch.cuda.graph(graph):
             out = mod(x, cond)
         for _ in range(2):
-            cond.mul_(.6)
+            cond.mul_(0.6)
             graph.replay()
             want = ref(x.float(), cond.float())
-            assert (out.float() - want).norm() / want.norm() < .01
+            assert (out.float() - want).norm() / want.norm() < 0.01
             torch.testing.assert_close(out, mod(x, cond), rtol=0, atol=0)
-        expected_period = 33 if cond_shape[:2] == (1, 1) else 66 if cond_shape[:2] == (1, 2) else 198
+        expected_period = (
+            33 if cond_shape[:2] == (1, 1) else 66 if cond_shape[:2] == (1, 2) else 198
+        )
         assert mod.anthropic_selection["gate_period"] == expected_period

@@ -20,11 +20,19 @@ def test_period_is_the_rows_per_conditioning_row():
     period = adaln_sm80._period
     assert period(x, per_sample, False) == 35
     assert period(x, per_sample, True) == 35
-    assert period(x, shared, False) == 7                       # no gradient: the L rows of one sample are the table
-    assert period(x, shared, True) == 35                       # gradient: one conditioning per row (autograd sums the expanded gradient)
-    assert period(x, one_row, False) == 7                      # a size-1 leading dim broadcasts like the PyTorch module
-    assert period(x, one_row, True) is None                    # ... which the training path does not take
-    assert period(x, torch.empty(5, 1, 6, 4), False) is None   # a conditioning that does not describe the rows
+    assert (
+        period(x, shared, False) == 7
+    )  # no gradient: the L rows of one sample are the table
+    assert (
+        period(x, shared, True) == 35
+    )  # gradient: one conditioning per row (autograd sums the expanded gradient)
+    assert (
+        period(x, one_row, False) == 7
+    )  # a size-1 leading dim broadcasts like the PyTorch module
+    assert period(x, one_row, True) is None  # ... which the training path does not take
+    assert (
+        period(x, torch.empty(5, 1, 6, 4), False) is None
+    )  # a conditioning that does not describe the rows
     assert period(x, torch.empty(4, 1, 7, 4), False) is None
     assert period(torch.empty(3, 8), torch.empty(3, 4), False) == 3
     assert period(torch.empty(1, 7, 8), torch.empty(1, 7, 4), False) == 7
@@ -53,12 +61,20 @@ def test_the_atom_gate_reads_dtype_and_width_only():
     x, c = torch.empty(4, 128, dtype=BF), torch.empty(4, 128, dtype=BF)
     assert ka.atom_supported(x, c)
     assert kt.atom_supported(x, c, torch.empty(256, 128))
-    assert not ka.atom_supported(x.float(), c.float())                              # fp32 has its own (TF32) kernels
-    assert not ka.atom_supported(torch.empty(4, 768, dtype=BF), torch.empty(4, 384, dtype=BF))
-    assert not kt.atom_supported(x, c, torch.empty(512, 128))                       # expansion 4 is not the fused tail's contract
+    assert not ka.atom_supported(
+        x.float(), c.float()
+    )  # fp32 has its own (TF32) kernels
+    assert not ka.atom_supported(
+        torch.empty(4, 768, dtype=BF), torch.empty(4, 384, dtype=BF)
+    )
+    assert not kt.atom_supported(
+        x, c, torch.empty(512, 128)
+    )  # expansion 4 is not the fused tail's contract
     xf, cf = x.float(), c.float()
-    assert ka.atom_tf32_supported(xf, cf)                                           # fp32 at the atom width: the fused TF32 kernels (inference)
+    assert ka.atom_tf32_supported(
+        xf, cf
+    )  # fp32 at the atom width: the fused TF32 kernels (inference)
     assert kt.atom_tf32_supported(xf, cf, torch.empty(256, 128))
-    assert not ka.atom_tf32_supported(x, c)                                         # bf16 has its own kernels
+    assert not ka.atom_tf32_supported(x, c)  # bf16 has its own kernels
     assert not ka.atom_tf32_supported(torch.empty(4, 768), torch.empty(4, 384))
     assert not kt.atom_tf32_supported(xf, cf, torch.empty(512, 128))

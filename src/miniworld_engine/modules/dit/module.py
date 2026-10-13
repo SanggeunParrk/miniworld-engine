@@ -71,11 +71,18 @@ class DiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.attention = AugmentedAttentionPairBias(
-            d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head,
-            use_qk_norm=use_qk_norm, implementation=implementation,
+            d_single=d_single,
+            d_cond=d_cond,
+            d_pair=d_pair,
+            n_head=n_head,
+            use_qk_norm=use_qk_norm,
+            implementation=implementation,
         )
         self.transition = ConditionedTransition(
-            d_hidden=d_single, d_cond=d_cond, n=n, implementation=implementation,
+            d_hidden=d_single,
+            d_cond=d_cond,
+            n=n,
+            implementation=implementation,
         )
 
     def forward(
@@ -116,10 +123,14 @@ class DiTBlock(nn.Module):
 
         if (
             shared
-            and not augattn_sm80.serves(self.attention, single, pair, mask, compute_dtype, cond)
+            and not augattn_sm80.serves(
+                self.attention, single, pair, mask, compute_dtype, cond
+            )
             and a100_families.serves(self.attention, single)
         ):
-            return a100_families.token(self, single, cond, pair, key_mask, compute_dtype)
+            return a100_families.token(
+                self, single, cond, pair, key_mask, compute_dtype
+            )
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)

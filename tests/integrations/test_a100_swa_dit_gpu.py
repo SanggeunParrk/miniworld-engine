@@ -8,8 +8,8 @@ from __future__ import annotations
 import copy
 
 import pytest
-from settings_helpers import override_setting
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.kernels.swa_dit.cuda import sm80
@@ -27,7 +27,10 @@ from miniworld_engine.modules.swa_dit import SWADiTBlock
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0), reason="A100 (sm_80)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+        reason="A100 (sm_80)",
+    ),
 ]
 DEV, BF = "cuda", torch.bfloat16
 C, H, HIDDEN, HW = 128, 4, 256, 64
@@ -40,22 +43,55 @@ def _case(a, b, s, seed=0):
         return (torch.randn(*shape, generator=g) * scale).to(DEV, BF)
 
     n = a * b
-    leaves = [r(n, s, C), r(b, s, C), r(6 * C, C, scale=0.05), r(3 * C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5),
-              r(C, C, scale=C ** -0.5), r(2 * HIDDEN, C, scale=C ** -0.5), r(C, HIDDEN, scale=HIDDEN ** -0.5)]
+    leaves = [
+        r(n, s, C),
+        r(b, s, C),
+        r(6 * C, C, scale=0.05),
+        r(3 * C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(C, C, scale=C**-0.5),
+        r(2 * HIDDEN, C, scale=C**-0.5),
+        r(C, HIDDEN, scale=HIDDEN**-0.5),
+    ]
     angles = torch.randn(b, s, C // H // 2, generator=g) * 3.0
-    lengths = [s, max(1, s - 17), 5, s - 1] * n                       # ragged, front-packed, one row shorter than the window
-    return leaves, angles.cos().to(DEV), angles.sin().to(DEV), torch.tensor(lengths[:n], dtype=torch.int32, device=DEV)
+    lengths = [
+        s,
+        max(1, s - 17),
+        5,
+        s - 1,
+    ] * n  # ragged, front-packed, one row shorter than the window
+    return (
+        leaves,
+        angles.cos().to(DEV),
+        angles.sin().to(DEV),
+        torch.tensor(lengths[:n], dtype=torch.int32, device=DEV),
+    )
 
 
 def _fused(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
-    return swa_dit_block(q, swa_dit_hoist_modulation(c_base, wmod), cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block(
+        q,
+        swa_dit_hoist_modulation(c_base, wmod),
+        cos,
+        sin,
+        seqused,
+        wqkv,
+        wg,
+        wo,
+        wu,
+        wd,
+        b,
+        half_window=HW,
+    )
 
 
 def _reference(leaves, cos, sin, seqused, b):
     q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
     mod = swa_dit_hoist_modulation_reference(c_base, wmod)
-    return swa_dit_block_reference(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW)
+    return swa_dit_block_reference(
+        q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, b, half_window=HW
+    )
 
 
 def _train(fn, leaves, dy, *args):
@@ -82,19 +118,43 @@ def spy(monkeypatch):
     calls = []
     for name in STAGES:
         orig = getattr(sm80, name)
-        monkeypatch.setattr(sm80, name, (lambda o, n: (lambda *a, **k: calls.append(n) or o(*a, **k)))(orig, name))
+        monkeypatch.setattr(
+            sm80,
+            name,
+            (lambda o, n: lambda *a, **k: calls.append(n) or o(*a, **k))(orig, name),
+        )
     return calls
 
 
 # (A, B, S): A = 1 (the conditioning per sample) / 16 / 32 / 48 (shared by a multiple of 16 samples) or 3 / 5 / 8 (the modulation expanded to one row per sample, its gradient summed), B = 1 / 2 / 3 / 4,
 # S off the 16 grid (200) and on it: every one runs the five sm_80 stages
-@pytest.mark.parametrize(("a", "b", "s"), [(3, 2, 256), (8, 2, 128), (5, 1, 200), (48, 1, 256), (16, 2, 200), (32, 1, 130), (1, 4, 256), (1, 3, 200), (1, 2, 1040), (7, 3, 130)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"),
+    [
+        (3, 2, 256),
+        (8, 2, 128),
+        (5, 1, 200),
+        (48, 1, 256),
+        (16, 2, 200),
+        (32, 1, 130),
+        (1, 4, 256),
+        (1, 3, 200),
+        (1, 2, 1040),
+        (7, 3, 130),
+    ],
+)
 def test_training_matches_the_triton_path(a, b, s, spy, monkeypatch):
     leaves, cos, sin, seqused = _case(a, b, s)
     dy = torch.randn(a * b, s, C, device=DEV)
     truth = _train(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b)
     fused = _train(_fused, leaves, dy, cos, sin, seqused, b)
-    assert sorted(set(spy)) == ["attn_bwd", "block_fwd", "ffn_bwd", "oproj_bwd", "qkvg_bwd"], spy
+    assert sorted(set(spy)) == [
+        "attn_bwd",
+        "block_fwd",
+        "ffn_bwd",
+        "oproj_bwd",
+        "qkvg_bwd",
+    ], spy
     override_setting(monkeypatch, "swa_dit_sm80", "0")
     spy.clear()
     triton = _train(_fused, leaves, dy, cos, sin, seqused, b)
@@ -109,7 +169,9 @@ def test_training_matches_the_triton_path(a, b, s, spy, monkeypatch):
     print(f"training A{a} B{b} S{s} worst:", sorted(worst, reverse=True)[:2])
 
 
-@pytest.mark.parametrize(("a", "b", "s"), [(1, 1, 256), (5, 1, 1024), (1, 3, 384), (5, 2, 200), (2, 1, 33)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"), [(1, 1, 256), (5, 1, 1024), (1, 3, 384), (5, 2, 200), (2, 1, 33)]
+)
 def test_inference_matches_the_triton_path(a, b, s, spy, monkeypatch):
     leaves, cos, sin, seqused = _case(a, b, s, seed=1)
     with torch.no_grad():
@@ -133,8 +195,12 @@ def test_the_sm80_stages_reproduce_the_triton_stages_closely(monkeypatch):
         triton = _fused(leaves, cos, sin, seqused, 1)
     rel = _rel(fused, triton)
     differ = float((fused.float() != triton.float()).float().mean())
-    print(f"sm_80 vs Triton: relative difference {rel:.2e}, {100 * differ:.2f} % of the elements differ")
-    assert rel < 2e-3, f"relative difference {rel:.2e} ({100 * differ:.2f} % of the elements differ)"
+    print(
+        f"sm_80 vs Triton: relative difference {rel:.2e}, {100 * differ:.2f} % of the elements differ"
+    )
+    assert rel < 2e-3, (
+        f"relative difference {rel:.2e} ({100 * differ:.2f} % of the elements differ)"
+    )
 
 
 def _mod_case(rows, seed):
@@ -150,7 +216,9 @@ def test_the_modulation_forward_is_the_fp32_gemm(rows, monkeypatch):
     c, w = _mod_case(rows, rows)
     calls = []
     orig = sm80.mod_fwd
-    monkeypatch.setattr(sm80, "mod_fwd", lambda *a, **k: calls.append(1) or orig(*a, **k))
+    monkeypatch.setattr(
+        sm80, "mod_fwd", lambda *a, **k: calls.append(1) or orig(*a, **k)
+    )
     with torch.no_grad():
         fused = swa_dit_hoist_modulation(c.reshape(1, rows, C), w)
         assert calls, "the sm_80 kernel did not serve the modulation"
@@ -162,10 +230,15 @@ def test_the_modulation_forward_is_the_fp32_gemm(rows, monkeypatch):
     assert _rel(fused, truth) < 2e-4, _rel(fused, truth)
 
 
-@pytest.mark.parametrize(("rows", "need_c"), [(1, True), (47, True), (130, False), (3072, True), (15377, True), (45001, True)])
+@pytest.mark.parametrize(
+    ("rows", "need_c"),
+    [(1, True), (47, True), (130, False), (3072, True), (15377, True), (45001, True)],
+)
 def test_the_modulation_backward_matches_autograd(rows, need_c, monkeypatch):
     c, w = _mod_case(rows, rows + 1)
-    g = torch.randn(rows, 6 * C, generator=torch.Generator().manual_seed(rows + 2)).to(DEV)
+    g = torch.randn(rows, 6 * C, generator=torch.Generator().manual_seed(rows + 2)).to(
+        DEV
+    )
 
     def run():
         cc, ww = c.clone().requires_grad_(need_c), w.clone().requires_grad_()
@@ -193,7 +266,9 @@ def test_the_modulation_saves_the_bf16_silu_and_its_backward_is_deterministic():
     _, act = sm80.mod_fwd(c, w, True)
     ref = torch.nn.functional.silu(c)
     assert act.dtype == BF
-    assert (act != ref).float().mean() < 1e-3          # the framework's bf16 silu (fast exp: ~1 in 1e4 differ in the last place)
+    assert (
+        (act != ref).float().mean() < 1e-3
+    )  # the framework's bf16 silu (fast exp: ~1 in 1e4 differ in the last place)
     first = sm80.mod_bwd(g, c, act, w)
     second = sm80.mod_bwd(g, c, act, w)
     for a, b in zip(first, second, strict=True):
@@ -225,13 +300,20 @@ def _module_train(block, fn, x, c, ap, dy):
     return out.detach(), [x.grad, c.grad, *(p.grad for p in block.parameters())]
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 @pytest.mark.parametrize(("a", "b", "hoisted"), [(3, 2, False), (16, 1, True)])
-def test_the_module_compiles_fullgraph_on_the_sm80_stages(a, b, hoisted, spy, monkeypatch):
+def test_the_module_compiles_fullgraph_on_the_sm80_stages(
+    a, b, hoisted, spy, monkeypatch
+):
     """``torch.compile(fullgraph=True)`` traces the module without a break (the kernel gate, the modulation autograd Function and the opaque stage ops), the compiled forward and backward run
     the sm_80 stages (the extension loads at trace time, outside the graph), and they agree with the eager run: only the plain torch ops around the opaque ones are Inductor's."""
     torch.manual_seed(11)
-    block = SWADiTBlock(C, C, H, implementation=ImplementationType.MINIWORLD).to(DEV, BF)
+    block = SWADiTBlock(C, C, H, implementation=ImplementationType.MINIWORLD).to(
+        DEV, BF
+    )
     with torch.no_grad():
         block.adaln_modulation[1].weight.normal_(std=0.05)
     s = 200
@@ -239,20 +321,45 @@ def test_the_module_compiles_fullgraph_on_the_sm80_stages(a, b, hoisted, spy, mo
     x = torch.randn(a * b, s, C, generator=g).to(DEV, BF)
     c_base = torch.randn(b, s, C, generator=g).to(DEV, BF)
     angles = torch.randn(b, s, C // H // 2, generator=g).to(DEV) * 3.0
-    lengths = torch.tensor([s, s - 9, 7][:a * b] + [s] * max(0, a * b - 3), device=DEV)
+    lengths = torch.tensor([s, s - 9, 7][: a * b] + [s] * max(0, a * b - 3), device=DEV)
     valid = torch.arange(s, device=DEV)[None] < lengths[:, None]
     ap = build_attention_params(angles.cos(), angles.sin(), valid, a)
     c = c_base if hoisted else c_base.repeat(a, 1, 1)
     dy = torch.randn(a * b, s, C, device=DEV, dtype=BF)
-    run = (lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_)) if hoisted else (lambda m, x_, c_, ap_: m(x_, c_, ap_))
-    build = (lambda m: torch.compile(m.forward_hoisted, fullgraph=True)) if hoisted else (lambda m: torch.compile(m, fullgraph=True))
+    run = (
+        (lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_))
+        if hoisted
+        else (lambda m, x_, c_, ap_: m(x_, c_, ap_))
+    )
+    build = (
+        (lambda m: torch.compile(m.forward_hoisted, fullgraph=True))
+        if hoisted
+        else (lambda m: torch.compile(m, fullgraph=True))
+    )
     assert block.fused_refusal(x, c, ap) is None
     eager, eager_grads = _module_train(block, run, x, c, ap, dy)
     spy.clear()
-    compiled, compiled_grads = _module_train(block, lambda m, x_, c_, ap_: build(m)(x_, c_, ap_), x, c, ap, dy)
-    assert sorted(set(spy)) == ["attn_bwd", "block_fwd", "ffn_bwd", "oproj_bwd", "qkvg_bwd"], spy
-    rel = [_rel(compiled, eager), *(_rel(got, want) for got, want in zip(compiled_grads, eager_grads, strict=True))]
-    print(f"compiled vs eager (A{a} B{b} hoisted={hoisted}): out and gradients, relative Frobenius", [f"{r:.1e}" for r in rel])
+    compiled, compiled_grads = _module_train(
+        block, lambda m, x_, c_, ap_: build(m)(x_, c_, ap_), x, c, ap, dy
+    )
+    assert sorted(set(spy)) == [
+        "attn_bwd",
+        "block_fwd",
+        "ffn_bwd",
+        "oproj_bwd",
+        "qkvg_bwd",
+    ], spy
+    rel = [
+        _rel(compiled, eager),
+        *(
+            _rel(got, want)
+            for got, want in zip(compiled_grads, eager_grads, strict=True)
+        ),
+    ]
+    print(
+        f"compiled vs eager (A{a} B{b} hoisted={hoisted}): out and gradients, relative Frobenius",
+        [f"{r:.1e}" for r in rel],
+    )
     assert max(rel) < 1e-4, rel
 
 
@@ -265,7 +372,9 @@ def test_non_contiguous_weights_give_the_same_bits():
     base = _train(_fused, leaves, dy, cos, sin, seqused, 2)
     other = _train(_fused, strided, dy, cos, sin, seqused, 2)
     for name, a, b in zip(NAMES, base, other, strict=True):
-        torch.testing.assert_close(b, a, atol=0, rtol=0, msg=lambda m, name=name: f"{name}: {m}")
+        torch.testing.assert_close(
+            b, a, atol=0, rtol=0, msg=lambda m, name=name: f"{name}: {m}"
+        )
 
 
 def test_fp32_and_other_widths_keep_the_triton_stages(spy):

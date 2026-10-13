@@ -89,7 +89,9 @@ def edge_dropout(
         if mpnn_edge_sm80.dropout_serves(values):
             return mpnn_edge_sm80.edge_dropout_bitpack(values, probability)
         if backend == "cuda":
-            raise ValueError("the sm_80 CUDA MPNN edge dropout needs an A100 (capability 8.0) and a loadable extension")
+            raise ValueError(
+                "the sm_80 CUDA MPNN edge dropout needs an A100 (capability 8.0) and a loadable extension"
+            )
         # Keep Triton out of imports and every native fallback path.
         from miniworld_engine.kernels.mpnn_edge_dropout.triton import (
             edge_dropout_bitpack,

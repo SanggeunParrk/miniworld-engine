@@ -123,7 +123,11 @@ def _sm80_loads() -> bool:
         sm80._ext()
     except Exception as exc:  # a toolchain problem keeps the Triton path
         _SM80_FAILED = True
-        warnings.warn(f"sm_80 SWA atom DiT kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 SWA atom DiT kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -386,9 +390,7 @@ def swa_dit_block_fwd(
             PKs = torch.empty_like(qf)
         else:
             Xs = PQs = PKs = G
-        _swa_qkvg_fwd_kernel[
-            lambda m: (triton.cdiv(M, m["BR"]),)
-        ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf,
             mod,
             cos,
@@ -417,9 +419,7 @@ def swa_dit_block_fwd(
         )
     O = torch.empty_like(qf)
     lse = torch.empty(N, H, S, device=q.device, dtype=torch.float32)
-    _swa_attn_fwd_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         Qh,
         Kh,
         Vh,
@@ -457,9 +457,7 @@ def swa_dit_block_fwd(
             FFs = torch.empty_like(qf)
         else:
             Att = Ys = ABs = FFs = q2
-        _swa_oproj_ffn_fwd_kernel[
-            lambda m: (triton.cdiv(M, m["BR"]),)
-        ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        _swa_oproj_ffn_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf,
             O,
             G,
@@ -514,9 +512,7 @@ def _swa_dit_fwd_fp32_launch(
         PKs = torch.empty_like(qf)
     else:
         Xs = PQs = PKs = G
-    _swa_qkvg_fwd_fp32_kernel[
-        lambda m: (triton.cdiv(M, m["BR"]),)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_qkvg_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf,
         mod,
         cos,
@@ -545,9 +541,7 @@ def _swa_dit_fwd_fp32_launch(
     )
     O = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
     lse = torch.empty(N, H, S, device=dev, dtype=torch.float32)
-    _swa_attn_fwd_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_fwd_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         Qh,
         Kh,
         Vh,
@@ -571,9 +565,7 @@ def _swa_dit_fwd_fp32_launch(
         FFs = torch.empty_like(qf)
     else:
         Att = Ys = FFs = q2
-    _swa_oproj_ffn_fwd_fp32_kernel[
-        lambda m: (triton.cdiv(M, m["BR"]),)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_oproj_ffn_fwd_fp32_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qf,
         O,
         G,
@@ -799,7 +791,11 @@ def swa_dit_block_bwd(
     # A100 (sm_80) stages of the backward (bf16, the dW operands materialised): they serve a call whose rows each have their own modulation row (A = N / B = 1, the conditioning per sample) or whose
     # conditioning is shared by a multiple of 16 samples (``cuda.sm80.bwd_mode``).  Each writes its columns of the modulation gradient once (no atomics, no zeroing; MODE_HOIST: one partial buffer per
     # block of 16 samples, added below); the Triton stages add atomically onto zeros.
-    sm80 = _sm80(q, NHID, half_window, eps) if dq1_dtype == torch.bfloat16 and not fused_dw else None
+    sm80 = (
+        _sm80(q, NHID, half_window, eps)
+        if dq1_dtype == torch.bfloat16 and not fused_dw
+        else None
+    )
     mode = sm80.bwd_mode(N, B) if sm80 is not None else None
     # An A that is neither 1 nor a multiple of 16 (the batch carries the conditioning of B elements): the stages run MODE_SINGLE with one modulation row per SAMPLE (the rows of mod, cos and sin
     # repeated A times, sample n = a B + b taking batch element n % B's) and the gradient of those rows is summed over the samples at the end.
@@ -807,10 +803,16 @@ def swa_dit_block_bwd(
     if sm80 is not None and mode is None and N % B == 0:
         mode, Bm = sm80.MODE_SINGLE, N
         mod_s = mod.reshape(B, S, -1).repeat(A, 1, 1).reshape(N * S, -1)
-        cos_s, sin_s = (t.reshape(B, S, -1).repeat(A, 1, 1).reshape(N * S, -1) for t in (cos, sin))
+        cos_s, sin_s = (
+            t.reshape(B, S, -1).repeat(A, 1, 1).reshape(N * S, -1) for t in (cos, sin)
+        )
     if mode is None:
         sm80 = None
-    dmod = sm80.dmod_buffer(mode, N, Bm, S, dev) if sm80 is not None else torch.zeros(B * S, 6 * C, device=dev, dtype=torch.float32)
+    dmod = (
+        sm80.dmod_buffer(mode, N, Bm, S, dev)
+        if sm80 is not None
+        else torch.zeros(B * S, 6 * C, device=dev, dtype=torch.float32)
+    )
     dq1 = torch.empty(M, C, device=dev, dtype=dq1_dtype)
     if fused_dw:
         dab = hh = dffn = dq1
@@ -818,9 +820,7 @@ def swa_dit_block_bwd(
         dab = torch.empty(M, 2 * NHID, device=dev, dtype=torch.bfloat16)
         hh = torch.empty(M, NHID, device=dev, dtype=torch.bfloat16)
         dffn = torch.empty(M, C, device=dev, dtype=torch.bfloat16)
-    grid_t = (
-        lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     dy2 = dy.reshape(M, C)
     dwu: torch.Tensor | None = None
     dwd: torch.Tensor | None = None
@@ -881,10 +881,8 @@ def swa_dit_block_bwd(
             sms = _sm_count(
                 dev.index if dev.index is not None else torch.cuda.current_device()
             )
-            ns = (
-                lambda m: max(
-                    1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"]))
-                )
+            ns = lambda m: max(
+                1, min(triton.cdiv(M, m["BR"]), 2 * sms // (NHID // m["HS"]))
             )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             _swa_ffn_dw_kernel[lambda m: (ns(m), NHID // m["HS"])](
                 dy2,
@@ -945,9 +943,7 @@ def swa_dit_block_bwd(
         dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
         dKh = torch.empty_like(dQh)
         dVh = torch.empty_like(dQh)
-        _swa_attn_bwd_dq_kernel[
-            lambda m: (triton.cdiv(S, m["BM"]), N * H)
-        ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qh,
             kh,
             vh,
@@ -964,9 +960,7 @@ def swa_dit_block_bwd(
             D=D,
             HW=half_window,
         )
-        _swa_attn_bwd_dkv_kernel[
-            lambda m: (triton.cdiv(S, m["BN"]), N * H)
-        ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+        _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qh,
             kh,
             vh,
@@ -1037,74 +1031,232 @@ def swa_dit_block_bwd(
             D=D,
             MODW=6 * C,
         )
-    if (sm80 is not None and N == 48 and S in (4096, 8192)
-            and _native_default(settings.current().swa_dit_sm80_native_grouped5_dw, S == 8192)):
-        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped5_sm80 import grouped_weight_gradients5
+    if (
+        sm80 is not None
+        and N == 48
+        and S in (4096, 8192)
+        and _native_default(
+            settings.current().swa_dit_sm80_native_grouped5_dw, S == 8192
+        )
+    ):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped5_sm80 import (
+            grouped_weight_gradients5,
+        )
 
-        dwqkv, dwg, dwu, dwo, dwd = grouped_weight_gradients5(dP, x, dab, y, datt, gated, dffn, hh)
-    elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and settings.current().swa_dit_sm80_native_grouped8_alloc):
-        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_alloc_sm80 import grouped_weight_gradients8_alloc
+        dwqkv, dwg, dwu, dwo, dwd = grouped_weight_gradients5(
+            dP, x, dab, y, datt, gated, dffn, hh
+        )
+    elif (
+        sm80 is not None
+        and N == 48
+        and S in (4096, 8192)
+        and settings.current().swa_dit_sm80_native_grouped8_alloc
+    ):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_alloc_sm80 import (
+            grouped_weight_gradients8_alloc,
+        )
 
-        dwqkv, dwg, dwu, dwo = grouped_weight_gradients8_alloc(dP, x, dab, y, datt, gated)
-    elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and settings.current().swa_dit_sm80_native_grouped8_dw):
-        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_sm80 import grouped_weight_gradients8
+        dwqkv, dwg, dwu, dwo = grouped_weight_gradients8_alloc(
+            dP, x, dab, y, datt, gated
+        )
+    elif (
+        sm80 is not None
+        and N == 48
+        and S in (4096, 8192)
+        and settings.current().swa_dit_sm80_native_grouped8_dw
+    ):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_sm80 import (
+            grouped_weight_gradients8,
+        )
 
         dwqkv, dwg, dwu, dwo = grouped_weight_gradients8(dP, x, dab, y, datt, gated)
-    elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and _native_default(settings.current().swa_dit_sm80_native_grouped_dw, S == 4096)):
-        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped_sm80 import grouped_weight_gradients
+    elif (
+        sm80 is not None
+        and N == 48
+        and S in (4096, 8192)
+        and _native_default(
+            settings.current().swa_dit_sm80_native_grouped_dw, S == 4096
+        )
+    ):
+        from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped_sm80 import (
+            grouped_weight_gradients,
+        )
 
         dwqkv, dwg, dwu, dwo = grouped_weight_gradients(dP, x, dab, y, datt, gated)
     else:
-        if (sm80 is not None and N == 48 and S in (4096, 8192)
-                and settings.current().swa_dit_sm80_native_qkvg_dw):
-            from miniworld_engine.kernels.swa_dit.cuda.wgrad_qkvg_sm80 import qkvg_weight_gradient
+        if (
+            sm80 is not None
+            and N == 48
+            and S in (4096, 8192)
+            and settings.current().swa_dit_sm80_native_qkvg_dw
+        ):
+            from miniworld_engine.kernels.swa_dit.cuda.wgrad_qkvg_sm80 import (
+                qkvg_weight_gradient,
+            )
 
             dwqkv, dwg = qkvg_weight_gradient(dP, x)
         else:
-            dwqkv = _mm32(dP[:, :3 * C].t(), x)
-            dwg = _mm32(dP[:, 3 * C:].t(), x)
+            dwqkv = _mm32(dP[:, : 3 * C].t(), x)
+            dwg = _mm32(dP[:, 3 * C :].t(), x)
         dwo = _mm32(datt.t(), gated)
     if dwu is None:
         dwu = _mm32(dab.t(), y)
     if dwd is None:
-        if (sm80 is not None and N == 48 and S in (4096, 8192)
-                and settings.current().swa_dit_sm80_native_dwd):
-            from miniworld_engine.kernels.swa_dit.cuda.wgrad_split_sm80 import down_weight_gradient
+        if (
+            sm80 is not None
+            and N == 48
+            and S in (4096, 8192)
+            and settings.current().swa_dit_sm80_native_dwd
+        ):
+            from miniworld_engine.kernels.swa_dit.cuda.wgrad_split_sm80 import (
+                down_weight_gradient,
+            )
 
             dwd = down_weight_gradient(dffn, hh)
         else:
             dwd = _mm32(dffn.t(), hh)
     if sm80 is not None and mode == sm80.MODE_HOIST:
-        dmod = dmod.sum(0)                                    # the A / 16 partial buffers, in a fixed order
+        dmod = dmod.sum(0)  # the A / 16 partial buffers, in a fixed order
     elif sm80 is not None and Bm != B:
-        dmod = dmod.view(A, B * S, -1).sum(0)                 # one gradient row per sample (the expanded modulation): summed over the samples, in a fixed order
+        dmod = dmod.view(
+            A, B * S, -1
+        ).sum(
+            0
+        )  # one gradient row per sample (the expanded modulation): summed over the samples, in a fixed order
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
-def _swa_dit_block_bwd_typed_sm80_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
-                                att, y, ffn, B, half_window, eps, grad_bf16_mask):
+def _swa_dit_block_bwd_typed_sm80_fake(
+    dy,
+    q,
+    mod,
+    cos,
+    sin,
+    seqused,
+    wqkv,
+    wg,
+    wo,
+    wu,
+    wd,
+    qh,
+    kh,
+    vh,
+    g,
+    o,
+    lse,
+    q1,
+    x,
+    pq,
+    pk,
+    att,
+    y,
+    ffn,
+    B,
+    half_window,
+    eps,
+    grad_bf16_mask,
+):
     """Same list as the block backward, but the weight gradients (index 2 onward) are bf16 where ``grad_bf16_mask`` has the bit set, else fp32."""
-    grads = _swa_dit_block_bwd_fake(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
-                                  att, y, ffn, B, half_window, eps)
-    return grads[:2] + [torch.empty_like(g, dtype=torch.bfloat16 if grad_bf16_mask & (1 << i) else torch.float32)
-                        for i, g in enumerate(grads[2:])]
+    grads = _swa_dit_block_bwd_fake(
+        dy,
+        q,
+        mod,
+        cos,
+        sin,
+        seqused,
+        wqkv,
+        wg,
+        wo,
+        wu,
+        wd,
+        qh,
+        kh,
+        vh,
+        g,
+        o,
+        lse,
+        q1,
+        x,
+        pq,
+        pk,
+        att,
+        y,
+        ffn,
+        B,
+        half_window,
+        eps,
+    )
+    return grads[:2] + [
+        torch.empty_like(
+            g, dtype=torch.bfloat16 if grad_bf16_mask & (1 << i) else torch.float32
+        )
+        for i, g in enumerate(grads[2:])
+    ]
 
 
 @opaque(fake=_swa_dit_block_bwd_typed_sm80_fake, name="swa_dit_block_bwd_typed_sm80")
-def swa_dit_block_bwd_typed_sm80(dy: torch.Tensor, q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
-                                seqused: torch.Tensor, wqkv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wu: torch.Tensor,
-                                wd: torch.Tensor, qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, g: torch.Tensor, o: torch.Tensor,
-                                lse: torch.Tensor, q1: torch.Tensor, x: torch.Tensor, pq: torch.Tensor, pk: torch.Tensor,
-                                att: torch.Tensor, y: torch.Tensor, ffn: torch.Tensor, B: int, half_window: int,
-                                eps: float, grad_bf16_mask: int) -> list[torch.Tensor]:
+def swa_dit_block_bwd_typed_sm80(
+    dy: torch.Tensor,
+    q: torch.Tensor,
+    mod: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    seqused: torch.Tensor,
+    wqkv: torch.Tensor,
+    wg: torch.Tensor,
+    wo: torch.Tensor,
+    wu: torch.Tensor,
+    wd: torch.Tensor,
+    qh: torch.Tensor,
+    kh: torch.Tensor,
+    vh: torch.Tensor,
+    g: torch.Tensor,
+    o: torch.Tensor,
+    lse: torch.Tensor,
+    q1: torch.Tensor,
+    x: torch.Tensor,
+    pq: torch.Tensor,
+    pk: torch.Tensor,
+    att: torch.Tensor,
+    y: torch.Tensor,
+    ffn: torch.Tensor,
+    B: int,
+    half_window: int,
+    eps: float,
+    grad_bf16_mask: int,
+) -> list[torch.Tensor]:
     """A100 block backward with one own CUDA finalizer to the parameter dtypes."""
     from miniworld_engine.kernels.swa_dit.cuda.grad_finalize_sm80 import finalize
 
-    grads = swa_dit_block_bwd.__wrapped__(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd,
-                                        qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
+    grads = swa_dit_block_bwd.__wrapped__(
+        dy,
+        q,
+        mod,
+        cos,
+        sin,
+        seqused,
+        wqkv,
+        wg,
+        wo,
+        wu,
+        wd,
+        qh,
+        kh,
+        vh,
+        g,
+        o,
+        lse,
+        q1,
+        x,
+        pq,
+        pk,
+        att,
+        y,
+        ffn,
+        B,
+        half_window,
+        eps,
+    )
     return grads[:2] + finalize(grads[2:], grad_bf16_mask)
 
 
@@ -1159,9 +1311,7 @@ def _swa_dit_bwd_fp32_launch(
     dffn = torch.empty(M, C, device=dev, dtype=f32)
     datt = torch.empty(M, C, device=dev, dtype=f32)
     gated = torch.empty(M, C, device=dev, dtype=f32)
-    grid_t = (
-        lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    grid_t = lambda m: (triton.cdiv(S, m["AT"]), triton.cdiv(A, m["SP"]), B)  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
     _swa_ffn_bwd_fp32_kernel[grid_t](
         dy.reshape(M, C),
         q1,
@@ -1209,9 +1359,7 @@ def _swa_dit_bwd_fp32_launch(
     dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
     dKh = torch.empty_like(dQh)
     dVh = torch.empty_like(dQh)
-    _swa_attn_bwd_dq_kernel[
-        lambda m: (triton.cdiv(S, m["BM"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dq_kernel[lambda m: (triton.cdiv(S, m["BM"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1228,9 +1376,7 @@ def _swa_dit_bwd_fp32_launch(
         D=D,
         HW=half_window,
     )
-    _swa_attn_bwd_dkv_kernel[
-        lambda m: (triton.cdiv(S, m["BN"]), N * H)
-    ](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    _swa_attn_bwd_dkv_kernel[lambda m: (triton.cdiv(S, m["BN"]), N * H)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
         qh,
         kh,
         vh,
@@ -1286,27 +1432,35 @@ def _swa_dit_bwd_fp32_launch(
     return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
 
 
-def _swa_dit_mod_fwd_sm80_fake(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
+def _swa_dit_mod_fwd_sm80_fake(
+    c: torch.Tensor, wmod: torch.Tensor, save: bool
+) -> list[torch.Tensor]:
     """Shapes of the outputs: [mod [R, 6C] fp32], with ``save`` also a = rn(silu(c)) like c."""
     out = [c.new_empty((c.shape[0], wmod.shape[0]), dtype=torch.float32)]
     return [*out, torch.empty_like(c)] if save else out
 
 
 @opaque(fake=_swa_dit_mod_fwd_sm80_fake, name="swa_dit_mod_fwd_sm80")
-def swa_dit_mod_fwd_sm80(c: torch.Tensor, wmod: torch.Tensor, save: bool) -> list[torch.Tensor]:
+def swa_dit_mod_fwd_sm80(
+    c: torch.Tensor, wmod: torch.Tensor, save: bool
+) -> list[torch.Tensor]:
     """[mod] = [rn(silu(c)) Wmod^T] ([R, 6C] fp32) on the sm_80 ``mod_fwd`` kernel, with ``save`` also a = rn(silu(c)) (the backward's operand); c [R, C] bf16 contiguous, Wmod [6C, C] bf16."""
     from miniworld_engine.kernels.swa_dit.cuda import sm80
 
     return sm80.mod_fwd(c, wmod, save)
 
 
-def _swa_dit_mod_bwd_sm80_fake(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+def _swa_dit_mod_bwd_sm80_fake(
+    g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor
+) -> list[torch.Tensor]:
     """Shapes of the outputs: dc like c, dWmod like Wmod."""
     return [torch.empty_like(c), torch.empty_like(wmod)]
 
 
 @opaque(fake=_swa_dit_mod_bwd_sm80_fake, name="swa_dit_mod_bwd_sm80")
-def swa_dit_mod_bwd_sm80(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor) -> list[torch.Tensor]:
+def swa_dit_mod_bwd_sm80(
+    g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod: torch.Tensor
+) -> list[torch.Tensor]:
     """[dc, dWmod] (bf16) of :func:`swa_dit_mod_fwd_sm80` from g = d mod [R, 6C] fp32 (contiguous) and a = rn(silu(c))."""
     from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -1314,29 +1468,52 @@ def swa_dit_mod_bwd_sm80(g: torch.Tensor, c: torch.Tensor, a: torch.Tensor, wmod
     return [dc, dw]
 
 
-def _swa_dit_window_attn_fwd_sm80_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor) -> list[torch.Tensor]:
+def _swa_dit_window_attn_fwd_sm80_fake(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor
+) -> list[torch.Tensor]:
     """Shapes of the outputs: [out [N, S, H, D] bf16, lse [N, H, S] fp32]."""
     n, s, h, d = q.shape
-    return [torch.empty((n, s, h, d), dtype=torch.bfloat16, device=q.device), torch.empty((n, h, s), dtype=torch.float32, device=q.device)]
+    return [
+        torch.empty((n, s, h, d), dtype=torch.bfloat16, device=q.device),
+        torch.empty((n, h, s), dtype=torch.float32, device=q.device),
+    ]
 
 
 @opaque(fake=_swa_dit_window_attn_fwd_sm80_fake, name="swa_dit_window_attn_fwd_sm80")
-def swa_dit_window_attn_fwd_sm80(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor) -> list[torch.Tensor]:
+def swa_dit_window_attn_fwd_sm80(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor
+) -> list[torch.Tensor]:
     """[out, lse] of the sm_80 window attention on q, k, v [N, S, 4, 32] bf16 (any strides with unit channel stride: the module path of ``modules/swa_atom_attention``) and ``seqused`` [N] int32."""
     from miniworld_engine.kernels.swa_dit.cuda import sm80
 
     return list(sm80.window_fwd(q, k, v, seqused))
 
 
-def _swa_dit_window_attn_bwd_sm80_fake(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, d_out: torch.Tensor, lse: torch.Tensor,
-                                       seqused: torch.Tensor) -> list[torch.Tensor]:
+def _swa_dit_window_attn_bwd_sm80_fake(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    d_out: torch.Tensor,
+    lse: torch.Tensor,
+    seqused: torch.Tensor,
+) -> list[torch.Tensor]:
     """Shapes of the outputs: dq, dk, dv, each [N, S, H, D] bf16 contiguous."""
-    return [torch.empty(q.shape, dtype=torch.bfloat16, device=q.device) for _ in range(3)]
+    return [
+        torch.empty(q.shape, dtype=torch.bfloat16, device=q.device) for _ in range(3)
+    ]
 
 
 @opaque(fake=_swa_dit_window_attn_bwd_sm80_fake, name="swa_dit_window_attn_bwd_sm80")
-def swa_dit_window_attn_bwd_sm80(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, out: torch.Tensor, d_out: torch.Tensor, lse: torch.Tensor,
-                                 seqused: torch.Tensor) -> list[torch.Tensor]:
+def swa_dit_window_attn_bwd_sm80(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    out: torch.Tensor,
+    d_out: torch.Tensor,
+    lse: torch.Tensor,
+    seqused: torch.Tensor,
+) -> list[torch.Tensor]:
     """[dq, dk, dv] of :func:`swa_dit_window_attn_fwd_sm80` from the forward's ``out`` and ``lse`` and the gradient ``d_out`` (all [N, S, 4, 32] bf16 contiguous, lse [N, 4, S] fp32)."""
     from miniworld_engine.kernels.swa_dit.cuda import sm80
 

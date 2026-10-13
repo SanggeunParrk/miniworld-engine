@@ -1,4 +1,5 @@
 """A named upstream block must never time pair_fused's fallback as that row."""
+
 from collections import namedtuple
 from types import SimpleNamespace
 
@@ -32,14 +33,23 @@ def test_block_propagates_named_refusal(monkeypatch, failure):
         assert callable(core), "tier:<word> would silently substitute flash on refusal"
         return core(pair, pair, pair, None, mask, 1.0)
 
-    pf = SimpleNamespace(pack_triattn_weights=lambda **kw: None,
-                         _plan_triattn=lambda *a, **kw: {"impl": "fpf"},
-                         resolve_tier_core=resolve, _call_class=lambda q, k: ((8, 0), "bf16", 32, 4, 2),
-                         tri_attn_block=block)
+    pf = SimpleNamespace(
+        pack_triattn_weights=lambda **kw: None,
+        _plan_triattn=lambda *a, **kw: {"impl": "fpf"},
+        resolve_tier_core=resolve,
+        _call_class=lambda q, k: ((8, 0), "bf16", 32, 4, 2),
+        tri_attn_block=block,
+    )
     monkeypatch.setattr(anthropic, "_ROOT", "configured")
     monkeypatch.setattr(anthropic, "import_module", lambda name: pf)
-    monkeypatch.setattr(anthropic, "provider", lambda name: SimpleNamespace(FWD="fwd", triangle_attention=serve))
-    module = TriangleAttention(128, 4, implementation="pytorch", anthropic_row="block:triattn_native").eval()
+    monkeypatch.setattr(
+        anthropic,
+        "provider",
+        lambda name: SimpleNamespace(FWD="fwd", triangle_attention=serve),
+    )
+    module = TriangleAttention(
+        128, 4, implementation="pytorch", anthropic_row="block:triattn_native"
+    ).eval()
     pair = torch.randn(1, 2, 2, 128)
     with torch.no_grad():
         if failure:

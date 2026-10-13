@@ -34,7 +34,10 @@ _NEIGHBORS = 48
 
 
 def _enabled() -> bool:
-    return settings.current().mpnn_msg_sm80 and settings.current().engine_backend != "triton"
+    return (
+        settings.current().mpnn_msg_sm80
+        and settings.current().engine_backend != "triton"
+    )
 
 
 def _a100(device: torch.device) -> bool:
@@ -51,7 +54,11 @@ def _load(name: str, module: str) -> bool:
         importlib.import_module(module)._ext()
     except Exception as exc:  # a toolchain problem keeps the old path
         _FAILED[name] = True
-        warnings.warn(f"sm_80 MPNN {name} kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=3)
+        warnings.warn(
+            f"sm_80 MPNN {name} kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=3,
+        )
         return False
     return True
 
@@ -69,7 +76,9 @@ def _node_loads() -> bool:
 
 @torch.compiler.assume_constant_result
 def _relpos_loads() -> bool:
-    return _load("relative_position", "miniworld_engine.kernels.mpnn_relative_position.cuda.sm80")
+    return _load(
+        "relative_position", "miniworld_engine.kernels.mpnn_relative_position.cuda.sm80"
+    )
 
 
 def _node():
@@ -98,32 +107,70 @@ def _aligned(t: torch.Tensor) -> torch.Tensor:
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- hidden message
 def serves_message(preactivation: torch.Tensor, backend: str) -> bool:
     """The gate of ``message_hidden_reduce`` after its own contract check passed (bf16 [..., 48, 128] contiguous, [128, 128] / [128] projection, fp32 mask): an A100 and the extension builds."""
-    return backend != "pytorch" and _enabled() and _a100(preactivation.device) and _message_loads()
+    return (
+        backend != "pytorch"
+        and _enabled()
+        and _a100(preactivation.device)
+        and _message_loads()
+    )
 
 
 def _message_fwd_fake(preactivation, weight, bias, edge_mask, neighbor_scale):
     """reduced: the leading shape with 128 FP32 channels."""
-    return preactivation.new_empty(*preactivation.shape[:-2], _WIDTH, dtype=torch.float32)
+    return preactivation.new_empty(
+        *preactivation.shape[:-2], _WIDTH, dtype=torch.float32
+    )
 
 
 @opaque(fake=_message_fwd_fake, name="mpnn_msg_sm80_message_fwd")
-def _message_fwd(preactivation: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> torch.Tensor:
+def _message_fwd(
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
     """P [..., 48, 128] bf16 -> reduced [..., 128] fp32 (one kernel)."""
     bf = torch.bfloat16
-    out = _msg().forward(_aligned(preactivation.reshape(-1, _WIDTH)), _aligned(weight.to(bf).contiguous()), bias.to(bf).contiguous(), _aligned(edge_mask.reshape(-1)), neighbor_scale)
+    out = _msg().forward(
+        _aligned(preactivation.reshape(-1, _WIDTH)),
+        _aligned(weight.to(bf).contiguous()),
+        bias.to(bf).contiguous(),
+        _aligned(edge_mask.reshape(-1)),
+        neighbor_scale,
+    )
     return out.reshape(*preactivation.shape[:-2], _WIDTH)
 
 
-def _message_bwd_fake(grad_reduced, preactivation, weight, bias, edge_mask, neighbor_scale):
+def _message_bwd_fake(
+    grad_reduced, preactivation, weight, bias, edge_mask, neighbor_scale
+):
     """dP like P; dW (128, 128) and db (128,) in FP32 (the caller casts them to the parameters' dtype)."""
-    return [torch.empty_like(preactivation), preactivation.new_empty(_WIDTH, _WIDTH, dtype=torch.float32), preactivation.new_empty(_WIDTH, dtype=torch.float32)]
+    return [
+        torch.empty_like(preactivation),
+        preactivation.new_empty(_WIDTH, _WIDTH, dtype=torch.float32),
+        preactivation.new_empty(_WIDTH, dtype=torch.float32),
+    ]
 
 
 @opaque(fake=_message_bwd_fake, name="mpnn_msg_sm80_message_bwd")
-def _message_bwd(grad_reduced: torch.Tensor, preactivation: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> list[torch.Tensor]:
+def _message_bwd(
+    grad_reduced: torch.Tensor,
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> list[torch.Tensor]:
     bf = torch.bfloat16
-    dp, dw, db = _msg().backward(_aligned(preactivation.reshape(-1, _WIDTH)), _aligned(weight.to(bf).contiguous()), bias.to(bf).contiguous(), _aligned(edge_mask.reshape(-1)),
-                                 grad_reduced.reshape(-1, _WIDTH).contiguous(), neighbor_scale)
+    dp, dw, db = _msg().backward(
+        _aligned(preactivation.reshape(-1, _WIDTH)),
+        _aligned(weight.to(bf).contiguous()),
+        bias.to(bf).contiguous(),
+        _aligned(edge_mask.reshape(-1)),
+        grad_reduced.reshape(-1, _WIDTH).contiguous(),
+        neighbor_scale,
+    )
     return [dp.reshape(preactivation.shape), dw, db]
 
 
@@ -140,11 +187,24 @@ class _Message(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, grad_reduced):
         preactivation, weight, bias, edge_mask = ctx.saved_tensors
-        dp, dw, db = _message_bwd(grad_reduced.contiguous(), preactivation, weight, bias, edge_mask, ctx.neighbor_scale)
+        dp, dw, db = _message_bwd(
+            grad_reduced.contiguous(),
+            preactivation,
+            weight,
+            bias,
+            edge_mask,
+            ctx.neighbor_scale,
+        )
         return dp, dw.to(weight.dtype), db.to(bias.dtype), None, None
 
 
-def message_hidden_reduce(preactivation: torch.Tensor, weight: torch.Tensor, bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> torch.Tensor:
+def message_hidden_reduce(
+    preactivation: torch.Tensor,
+    weight: torch.Tensor,
+    bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
     if not torch.is_grad_enabled():
         return _message_fwd(preactivation, weight, bias, edge_mask, neighbor_scale)
     return _Message.apply(preactivation, weight, bias, edge_mask, neighbor_scale)
@@ -157,89 +217,289 @@ def serves_node(edge_states: torch.Tensor, backend: str) -> bool:
     return _enabled() and _a100(edge_states.device) and _node_loads()
 
 
-def _node_prep(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask):
+def _node_prep(
+    edge_states,
+    query_projection,
+    neighbor_projection,
+    flat_neighbor_indices,
+    edge_weight,
+    hidden_weight,
+    hidden_bias,
+    edge_mask,
+):
     """The kernels' operands: flat rows, contiguous bf16 weights (the edge block of the packed W1 is a strided slice), 16-byte aligned."""
     bf = torch.bfloat16
     k = edge_states.shape[-2]
-    return (_aligned(edge_states.reshape(-1, _WIDTH)), _aligned(query_projection.reshape(-1, _WIDTH)), _aligned(neighbor_projection.reshape(-1, _WIDTH)), flat_neighbor_indices.reshape(-1),
-            _aligned(edge_weight.to(bf).contiguous()), _aligned(hidden_weight.to(bf).contiguous()), hidden_bias.to(bf).contiguous(), edge_mask.reshape(-1), k)
+    return (
+        _aligned(edge_states.reshape(-1, _WIDTH)),
+        _aligned(query_projection.reshape(-1, _WIDTH)),
+        _aligned(neighbor_projection.reshape(-1, _WIDTH)),
+        flat_neighbor_indices.reshape(-1),
+        _aligned(edge_weight.to(bf).contiguous()),
+        _aligned(hidden_weight.to(bf).contiguous()),
+        hidden_bias.to(bf).contiguous(),
+        edge_mask.reshape(-1),
+        k,
+    )
 
 
-def _node_fwd_fake(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale):
+def _node_fwd_fake(
+    edge_states,
+    query_projection,
+    neighbor_projection,
+    flat_neighbor_indices,
+    edge_weight,
+    hidden_weight,
+    hidden_bias,
+    edge_mask,
+    neighbor_scale,
+):
     """One FP32 row per node: the query projection's leading shape with 128 channels."""
-    return query_projection.new_empty(*query_projection.shape[:-1], _WIDTH, dtype=torch.float32)
+    return query_projection.new_empty(
+        *query_projection.shape[:-1], _WIDTH, dtype=torch.float32
+    )
 
 
 @opaque(fake=_node_fwd_fake, name="mpnn_msg_sm80_node_fwd")
-def _node_fwd(edge_states: torch.Tensor, query_projection: torch.Tensor, neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor, edge_weight: torch.Tensor,
-              hidden_weight: torch.Tensor, hidden_bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> torch.Tensor:
+def _node_fwd(
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
     """One kernel: the edge projection, both GELUs, the second projection and the masked neighbour sum."""
-    e, q, nb, idx, w1, w2, b2, mask, k = _node_prep(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask)
+    e, q, nb, idx, w1, w2, b2, mask, k = _node_prep(
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+    )
     out = _node().forward(e, q, nb, idx, w1, w2, b2, mask, k, neighbor_scale)
     return out.reshape(*query_projection.shape[:-1], _WIDTH)
 
 
-def _node_bwd_fake(grad_reduced, edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale):
+def _node_bwd_fake(
+    grad_reduced,
+    edge_states,
+    query_projection,
+    neighbor_projection,
+    flat_neighbor_indices,
+    edge_weight,
+    hidden_weight,
+    hidden_bias,
+    edge_mask,
+    neighbor_scale,
+):
     """The six gradients in the order the autograd boundary unpacks them: the edge states (their dtype), the query and neighbour projections (theirs), the two (128, 128) weights and the (128,) bias in FP32."""
     f32 = torch.float32
-    return [torch.empty_like(edge_states), torch.empty_like(query_projection), torch.empty_like(neighbor_projection), edge_states.new_empty(_WIDTH, _WIDTH, dtype=f32),
-            edge_states.new_empty(_WIDTH, _WIDTH, dtype=f32), edge_states.new_empty(_WIDTH, dtype=f32)]
+    return [
+        torch.empty_like(edge_states),
+        torch.empty_like(query_projection),
+        torch.empty_like(neighbor_projection),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=f32),
+        edge_states.new_empty(_WIDTH, _WIDTH, dtype=f32),
+        edge_states.new_empty(_WIDTH, dtype=f32),
+    ]
 
 
 @opaque(fake=_node_bwd_fake, name="mpnn_msg_sm80_node_bwd")
-def _node_bwd(grad_reduced: torch.Tensor, edge_states: torch.Tensor, query_projection: torch.Tensor, neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor, edge_weight: torch.Tensor,
-              hidden_weight: torch.Tensor, hidden_bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> list[torch.Tensor]:
+def _node_bwd(
+    grad_reduced: torch.Tensor,
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> list[torch.Tensor]:
     """Replays the forward (nothing was saved) and differentiates it: see ``kernels/mpnn_node_message/cuda/sm80.py``."""
-    e, q, nb, idx, w1, w2, b2, mask, k = _node_prep(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask)
-    dedge, dquery, dnb, dw1, dw2, db2 = _node().backward(e, q, nb, idx, w1, w2, b2, mask, _aligned(grad_reduced.reshape(-1, _WIDTH).contiguous()), k, neighbor_scale)
+    e, q, nb, idx, w1, w2, b2, mask, k = _node_prep(
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+    )
+    dedge, dquery, dnb, dw1, dw2, db2 = _node().backward(
+        e,
+        q,
+        nb,
+        idx,
+        w1,
+        w2,
+        b2,
+        mask,
+        _aligned(grad_reduced.reshape(-1, _WIDTH).contiguous()),
+        k,
+        neighbor_scale,
+    )
     # Autocast's Linear rounds a bias gradient to BF16 before the FP32 parameter gradient (the Triton path keeps that boundary). The rounding lives HERE, inside the op: a bf16 round trip in the traced
     # graph would be fused away by Inductor (it keeps fused intermediates in fp32), and compiled would no longer equal eager.
     db2 = db2.to(torch.bfloat16).to(torch.float32)
-    return [dedge.reshape(edge_states.shape), dquery.reshape(query_projection.shape), dnb.reshape(neighbor_projection.shape), dw1, dw2, db2]
+    return [
+        dedge.reshape(edge_states.shape),
+        dquery.reshape(query_projection.shape),
+        dnb.reshape(neighbor_projection.shape),
+        dw1,
+        dw2,
+        db2,
+    ]
 
 
 class _NodeMessage(torch.autograd.Function):
     """The autograd boundary of the fused node message: forward and backward are one opaque op each; only the inputs are saved."""
 
     @staticmethod
-    def forward(ctx, edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale):
-        ctx.save_for_backward(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask)
+    def forward(
+        ctx,
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+        neighbor_scale,
+    ):
+        ctx.save_for_backward(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+        )
         ctx.neighbor_scale = neighbor_scale
-        ctx.dtypes = (query_projection.dtype, neighbor_projection.dtype, edge_weight.dtype, hidden_weight.dtype, hidden_bias.dtype)
-        return _node_fwd(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale)
+        ctx.dtypes = (
+            query_projection.dtype,
+            neighbor_projection.dtype,
+            edge_weight.dtype,
+            hidden_weight.dtype,
+            hidden_bias.dtype,
+        )
+        return _node_fwd(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            neighbor_scale,
+        )
 
     @staticmethod
     @once_differentiable
     def backward(ctx, grad_reduced):
         saved = ctx.saved_tensors
         query_dtype, neighbor_dtype, edge_dtype, hidden_dtype, bias_dtype = ctx.dtypes
-        grad_edge, grad_query, grad_neighbor, grad_edge_weight, grad_hidden_weight, grad_hidden_bias = _node_bwd(grad_reduced.contiguous(), *saved, ctx.neighbor_scale)
-        return (grad_edge, grad_query.to(query_dtype), grad_neighbor.to(neighbor_dtype), None, grad_edge_weight.to(edge_dtype), grad_hidden_weight.to(hidden_dtype),
-                grad_hidden_bias.to(bias_dtype), None, None)
+        (
+            grad_edge,
+            grad_query,
+            grad_neighbor,
+            grad_edge_weight,
+            grad_hidden_weight,
+            grad_hidden_bias,
+        ) = _node_bwd(grad_reduced.contiguous(), *saved, ctx.neighbor_scale)
+        return (
+            grad_edge,
+            grad_query.to(query_dtype),
+            grad_neighbor.to(neighbor_dtype),
+            None,
+            grad_edge_weight.to(edge_dtype),
+            grad_hidden_weight.to(hidden_dtype),
+            grad_hidden_bias.to(bias_dtype),
+            None,
+            None,
+        )
 
 
-def node_message_reduce(edge_states: torch.Tensor, query_projection: torch.Tensor, neighbor_projection: torch.Tensor, flat_neighbor_indices: torch.Tensor, edge_weight: torch.Tensor,
-                        hidden_weight: torch.Tensor, hidden_bias: torch.Tensor, edge_mask: torch.Tensor, neighbor_scale: int) -> torch.Tensor:
+def node_message_reduce(
+    edge_states: torch.Tensor,
+    query_projection: torch.Tensor,
+    neighbor_projection: torch.Tensor,
+    flat_neighbor_indices: torch.Tensor,
+    edge_weight: torch.Tensor,
+    hidden_weight: torch.Tensor,
+    hidden_bias: torch.Tensor,
+    edge_mask: torch.Tensor,
+    neighbor_scale: int,
+) -> torch.Tensor:
     if not torch.is_grad_enabled():
-        return _node_fwd(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale)
-    return _NodeMessage.apply(edge_states, query_projection, neighbor_projection, flat_neighbor_indices, edge_weight, hidden_weight, hidden_bias, edge_mask, neighbor_scale)
+        return _node_fwd(
+            edge_states,
+            query_projection,
+            neighbor_projection,
+            flat_neighbor_indices,
+            edge_weight,
+            hidden_weight,
+            hidden_bias,
+            edge_mask,
+            neighbor_scale,
+        )
+    return _NodeMessage.apply(
+        edge_states,
+        query_projection,
+        neighbor_projection,
+        flat_neighbor_indices,
+        edge_weight,
+        hidden_weight,
+        hidden_bias,
+        edge_mask,
+        neighbor_scale,
+    )
 
 
 # ------------------------------------------------------------------------------------------------------------------------------------------------------------------- relative position
-def serves_relpos(bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor) -> bool:
+def serves_relpos(
+    bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor
+) -> bool:
     """The gate of ``relative_position_embed`` (backend ``triton``) after its contract check passed: an A100, a 16-channel table of at most 79 buckets, bf16 or fp32."""
-    return (_enabled() and _a100(bucket.device) and table.shape[1] == _rp().WIDTH and table.shape[0] <= _rp().MAX_BUCKETS and bucket.numel() > 0 and _relpos_loads())
+    return (
+        _enabled()
+        and _a100(bucket.device)
+        and table.shape[1] == _rp().WIDTH
+        and table.shape[0] <= _rp().MAX_BUCKETS
+        and bucket.numel() > 0
+        and _relpos_loads()
+    )
 
 
 def _relpos_reduce_fake(grad_output, bucket, buckets):
     """(buckets, width) and (width,) FP32."""
     width = grad_output.shape[-1]
-    return [grad_output.new_empty((buckets, width), dtype=torch.float32), grad_output.new_empty((width,), dtype=torch.float32)]
+    return [
+        grad_output.new_empty((buckets, width), dtype=torch.float32),
+        grad_output.new_empty((width,), dtype=torch.float32),
+    ]
 
 
 @opaque(fake=_relpos_reduce_fake, name="mpnn_msg_sm80_relpos_reduce")
-def _relpos_reduce(grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int) -> list[torch.Tensor]:
-    table, bias = _rp().bucket_reduce(_aligned(grad_output.contiguous()), bucket, buckets)
+def _relpos_reduce(
+    grad_output: torch.Tensor, bucket: torch.Tensor, buckets: int
+) -> list[torch.Tensor]:
+    table, bias = _rp().bucket_reduce(
+        _aligned(grad_output.contiguous()), bucket, buckets
+    )
     return [table, bias]
 
 
@@ -262,5 +522,7 @@ class _RelativePosition(torch.autograd.Function):
         return None, grad_table.to(table_dtype), grad_bias.to(bias_dtype)
 
 
-def relative_position_embed(bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor) -> torch.Tensor:
+def relative_position_embed(
+    bucket: torch.Tensor, table: torch.Tensor, bias: torch.Tensor
+) -> torch.Tensor:
     return _RelativePosition.apply(bucket, table, bias)

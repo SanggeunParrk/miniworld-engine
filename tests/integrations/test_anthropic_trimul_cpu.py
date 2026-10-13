@@ -3,6 +3,7 @@
 The payload itself needs an H100 and TRIMUL_NATIVE_BUILD_DIR; these cover the contract around it: a named-but-absent payload refuses with
 its reason instead of quietly running something else, the auto option falls back, and no other op accepts the name.
 """
+
 import pytest
 import torch
 
@@ -14,7 +15,7 @@ from miniworld_engine.modules import (
 )
 from miniworld_engine.modules.exceptions import ImplementationType
 
-PAIR = torch.zeros(1, 8, 8, 128)                    # fp32: also exercises the dtype refusal
+PAIR = torch.zeros(1, 8, 8, 128)  # fp32: also exercises the dtype refusal
 BF16 = torch.zeros(1, 8, 8, 128, dtype=torch.bfloat16)
 
 
@@ -24,9 +25,20 @@ def _no_payload(monkeypatch):
 
 
 def test_the_option_resolves_only_for_integrated_operations():
-    for op in ("triangle_multiplication", "layernorm", "rmsnorm", "transition", "triangle_attention",
-               "adaptive_layernorm", "conditioned_transition", "augmented_attention"):
-        assert dispatch.resolve(op, ImplementationType.ANTHROPIC) is dispatch.KernelBackend.ANTHROPIC
+    for op in (
+        "triangle_multiplication",
+        "layernorm",
+        "rmsnorm",
+        "transition",
+        "triangle_attention",
+        "adaptive_layernorm",
+        "conditioned_transition",
+        "augmented_attention",
+    ):
+        assert (
+            dispatch.resolve(op, ImplementationType.ANTHROPIC)
+            is dispatch.KernelBackend.ANTHROPIC
+        )
     with pytest.raises(ValueError, match="no Anthropic adapter"):
         dispatch.resolve("unknown_operation", ImplementationType.ANTHROPIC)
 
@@ -34,13 +46,16 @@ def test_the_option_resolves_only_for_integrated_operations():
 def test_only_the_named_and_the_auto_option_ask_for_it(monkeypatch):
     assert native.wanted(ImplementationType.ANTHROPIC)
     assert not native.wanted(ImplementationType.PYTORCH)
-    assert not native.wanted(ImplementationType.MINIWORLD)          # no payload named
+    assert not native.wanted(ImplementationType.MINIWORLD)  # no payload named
     monkeypatch.setenv(native.ENV, "/nonexistent/build")
     assert native.wanted(ImplementationType.MINIWORLD)
 
 
 def test_the_refusal_says_why(monkeypatch):
-    assert native.refusal(BF16, 128, 128, grad=False, dropout=False) == f"{native.ENV} is not set"
+    assert (
+        native.refusal(BF16, 128, 128, grad=False, dropout=False)
+        == f"{native.ENV} is not set"
+    )
     monkeypatch.setenv(native.ENV, "/nonexistent/build")
     reason = native.refusal(BF16, 128, 128, grad=True, dropout=False)
     assert reason is not None
@@ -63,22 +78,31 @@ def test_an_unusable_payload_is_a_refusal_not_a_crash(monkeypatch):
         native._load()
 
 
-@pytest.mark.parametrize("cls", [TriangleMultiplication, BidirectionalTriangleMultiplication])
+@pytest.mark.parametrize(
+    "cls", [TriangleMultiplication, BidirectionalTriangleMultiplication]
+)
 def test_the_named_option_refuses_rather_than_reroute(cls):
     with pytest.raises(native.PayloadUnavailable, match="cannot serve this call"):
         cls(128, implementation="anthropic")(PAIR)
 
 
-@pytest.mark.parametrize("cls", [TriangleMultiplication, BidirectionalTriangleMultiplication])
+@pytest.mark.parametrize(
+    "cls", [TriangleMultiplication, BidirectionalTriangleMultiplication]
+)
 def test_the_module_still_builds_its_own_primitives_under_the_option(cls):
     m = cls(128, implementation="anthropic")
-    assert m.implementation is ImplementationType.ANTHROPIC          # the public option survives construction
-    assert m.ln_pair.implementation is not ImplementationType.ANTHROPIC   # the payload is a TriMul one, not a LayerNorm one
+    assert (
+        m.implementation is ImplementationType.ANTHROPIC
+    )  # the public option survives construction
+    assert (
+        m.ln_pair.implementation is not ImplementationType.ANTHROPIC
+    )  # the payload is a TriMul one, not a LayerNorm one
 
 
 def test_the_mask_element_type_follows_the_payload():
     """A payload without the templated mask has only the fp32 kernel, and it reads whatever buffer it is given AS fp32:
     handing that one a bool mask is a four-times-too-long read (wrong numbers at L384, an illegal access at L768)."""
+
     class Templated:
         MASK_NATIVE_DTYPES = (torch.float32, torch.bfloat16, torch.bool, torch.uint8)
 

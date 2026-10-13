@@ -2,6 +2,7 @@
 
 The inputs come from this family's DRIVER, so the reference answers the question the build measured.
 """
+
 from __future__ import annotations
 
 import contextlib
@@ -34,9 +35,11 @@ def _pair():
     preactivation, weight, bias, mask = _inputs(grad=False)
     with _triton_engine(), torch.autocast("cuda", dtype=torch.bfloat16):
         out = message_hidden_reduce(
-            preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
+            preactivation, weight, bias, mask, _NEIGHBORS, backend="triton"
+        )
     ref = message_hidden_reduce_pytorch(
-        preactivation.float(), weight.float(), bias.float(), mask, _NEIGHBORS)
+        preactivation.float(), weight.float(), bias.float(), mask, _NEIGHBORS
+    )
     return out, ref
 
 
@@ -53,11 +56,13 @@ def _gradients():
     def kernel(preactivation, weight, bias):
         with _triton_engine(), torch.autocast("cuda", dtype=torch.bfloat16):
             return message_hidden_reduce(
-                preactivation, weight, bias, mask, _NEIGHBORS, backend="triton")
+                preactivation, weight, bias, mask, _NEIGHBORS, backend="triton"
+            )
 
     def reference(preactivation, weight, bias):
         return message_hidden_reduce_pytorch(
-            preactivation, weight, bias, mask, _NEIGHBORS)
+            preactivation, weight, bias, mask, _NEIGHBORS
+        )
 
     return _grads(kernel, [preactivation, weight, bias], reference, names)
 

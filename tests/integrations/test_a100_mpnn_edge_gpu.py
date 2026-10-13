@@ -24,7 +24,10 @@ from miniworld_engine.kernels.mpnn_edge_tail import (
     edge_tail_update_pytorch,
 )
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 W = 128
 
@@ -37,7 +40,10 @@ def ampere(monkeypatch):
 
 
 def _rel(a, b):
-    return float((a.detach().double() - b.detach().double()).norm() / b.detach().double().norm().clamp_min(1e-30))
+    return float(
+        (a.detach().double() - b.detach().double()).norm()
+        / b.detach().double().norm().clamp_min(1e-30)
+    )
 
 
 def _mean_rel(a, b):
@@ -73,7 +79,9 @@ def _tail_inputs(batch, length, k, *, fp32_params, seed=3):
         "norm_weight": (torch.rand(W, device="cuda", generator=g) + 0.5),
         "norm_bias": n(W, scale=0.05),
     }
-    index = torch.randint(0, batch * length, (batch, length, k), device="cuda", generator=g)
+    index = torch.randint(
+        0, batch * length, (batch, length, k), device="cuda", generator=g
+    )
     return vals, index
 
 
@@ -81,22 +89,67 @@ def _tail_apply(v, index, seed, p, impl, *, autocast):
     """impl: 'cuda' | 'torch' (the bf16 reference chain, mask given) | 'exact' (fp64)."""
     node, packed, pb = v["node"], v["packed"], v["packed_bias"]
     query = F.linear(node, packed[:, :W], pb)
-    neighbor = F.linear(node, packed[:, 2 * W:])
-    edge_weight = packed[:, W:2 * W]
+    neighbor = F.linear(node, packed[:, 2 * W :])
+    edge_weight = packed[:, W : 2 * W]
     if impl == "cuda":
-        return edge_tail_update(v["edge"], query, neighbor, index, edge_weight, v["hidden_weight"], v["hidden_bias"], v["output_weight"], v["output_bias"],
-                                v["norm_weight"], v["norm_bias"], seed, 1e-5, p, "cuda")
+        return edge_tail_update(
+            v["edge"],
+            query,
+            neighbor,
+            index,
+            edge_weight,
+            v["hidden_weight"],
+            v["hidden_bias"],
+            v["output_weight"],
+            v["output_bias"],
+            v["norm_weight"],
+            v["norm_bias"],
+            seed,
+            1e-5,
+            p,
+            "cuda",
+        )
     rows = index.numel()
     keep = _keep_mask(seed, rows, p).reshape(*index.shape, W) if p > 0 else None
-    return edge_tail_update_pytorch(v["edge"], query, neighbor, index, edge_weight, v["hidden_weight"], v["hidden_bias"], v["output_weight"], v["output_bias"],
-                                    v["norm_weight"], v["norm_bias"], keep, 1e-5, p)
+    return edge_tail_update_pytorch(
+        v["edge"],
+        query,
+        neighbor,
+        index,
+        edge_weight,
+        v["hidden_weight"],
+        v["hidden_bias"],
+        v["output_weight"],
+        v["output_bias"],
+        v["norm_weight"],
+        v["norm_bias"],
+        keep,
+        1e-5,
+        p,
+    )
 
 
 def _leaves(vals, dtype=None):
-    return {n: (t.detach().clone() if dtype is None else t.detach().to(dtype)).requires_grad_(True) for n, t in vals.items()}
+    return {
+        n: (
+            t.detach().clone() if dtype is None else t.detach().to(dtype)
+        ).requires_grad_(True)
+        for n, t in vals.items()
+    }
 
 
-GRAD_NAMES = ("edge", "node", "packed", "packed_bias", "hidden_weight", "hidden_bias", "output_weight", "output_bias", "norm_weight", "norm_bias")
+GRAD_NAMES = (
+    "edge",
+    "node",
+    "packed",
+    "packed_bias",
+    "hidden_weight",
+    "hidden_bias",
+    "output_weight",
+    "output_bias",
+    "norm_weight",
+    "norm_bias",
+)
 
 
 def _tail_errors(batch, length, k, p, fp32_params):
@@ -105,7 +158,11 @@ def _tail_errors(batch, length, k, p, fp32_params):
     ours_l = _leaves({n: vals[n] for n in GRAD_NAMES})
     torch_l = _leaves({n: vals[n] for n in GRAD_NAMES})
     exact_l = _leaves({n: vals[n] for n in GRAD_NAMES}, torch.float64)
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if fp32_params else torch.autocast("cuda", enabled=False)
+    ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if fp32_params
+        else torch.autocast("cuda", enabled=False)
+    )
     with ctx:
         ours = _tail_apply(ours_l, index, seed, p, "cuda", autocast=fp32_params)
         ref = _tail_apply(torch_l, index, seed, p, "torch", autocast=fp32_params)
@@ -116,14 +173,19 @@ def _tail_errors(batch, length, k, p, fp32_params):
     exact.mul(up.double()).sum().backward()
     errors = {"output": (_mean_rel(ours, exact), _mean_rel(ref, exact))}
     for n in GRAD_NAMES:
-        errors[n] = (_mean_rel(ours_l[n].grad, exact_l[n].grad), _mean_rel(torch_l[n].grad, exact_l[n].grad))
+        errors[n] = (
+            _mean_rel(ours_l[n].grad, exact_l[n].grad),
+            _mean_rel(torch_l[n].grad, exact_l[n].grad),
+        )
     return errors, ours, ref
 
 
 @pytest.mark.parametrize("fp32_params", [False, True])
 @pytest.mark.parametrize("shape", [(1, 37, 5), (2, 256, 48), (1, 130, 32)])
 @pytest.mark.parametrize("p", [0.0, 0.1])
-def test_tail_forward_and_gradients_are_as_accurate_as_the_bf16_chain(shape, p, fp32_params):
+def test_tail_forward_and_gradients_are_as_accurate_as_the_bf16_chain(
+    shape, p, fp32_params
+):
     """Against FP64: the CUDA tail's output and ten gradients (the dropout mask replayed from the kernel's own draw) stay within the bf16 chain's error
     (2x and an absolute 5e-3 floor, the band of the Triton path's test; the output and the edge-state gradient carry the bf16 rounding of the LayerNorm output the fp32 reference
     does not have)."""
@@ -140,7 +202,13 @@ def test_tail_dropout_masks_are_bernoulli_and_independent():
         m = _keep_mask(seed, rows, p).float()
         assert abs(m.mean().item() - (1 - p)) < 2e-3
         x = m - m.mean()
-        for shifted in (x.roll(1, dims=1), x.roll(2, dims=1), x.roll(8, dims=1), x.roll(1, dims=0), x.roll(48, dims=0)):
+        for shifted in (
+            x.roll(1, dims=1),
+            x.roll(2, dims=1),
+            x.roll(8, dims=1),
+            x.roll(1, dims=0),
+            x.roll(48, dims=0),
+        ):
             assert abs((x * shifted).mean().item() / x.var().item()) < 5e-3
         other = _keep_mask(seed + 1, rows, p).float()
         assert abs(((other - other.mean()) * x).mean().item() / x.var().item()) < 5e-3
@@ -159,7 +227,9 @@ def test_tail_dropout_replays_the_same_mask_in_backward_and_is_deterministic():
 
     a, b = run(seed), run(seed)
     assert torch.equal(a[0], b[0])
-    torch.testing.assert_close(a[1].float(), b[1].float(), atol=0, rtol=0)         # the dX path has no reduction whose order varies
+    torch.testing.assert_close(
+        a[1].float(), b[1].float(), atol=0, rtol=0
+    )  # the dX path has no reduction whose order varies
     c = run(seed + 1)
     assert not torch.equal(a[0], c[0])
 
@@ -169,15 +239,39 @@ def test_tail_gate_and_switch():
     vals, index = _tail_inputs(1, 128, 48, fp32_params=False)
     seed = torch.zeros(1, device="cuda", dtype=torch.int64)
     node, packed, pb = vals["node"], vals["packed"], vals["packed_bias"]
-    query, neighbor = F.linear(node, packed[:, :W], pb), F.linear(node, packed[:, 2 * W:])
-    args = (vals["edge"], query, neighbor, index, packed[:, W:2 * W], vals["hidden_weight"], vals["hidden_bias"], vals["output_weight"], vals["output_bias"], vals["norm_weight"],
-            vals["norm_bias"], seed, 1e-5, 0.0)
-    assert sm80.tail_serves(vals["edge"], packed[:, W:2 * W], vals["hidden_weight"], vals["output_weight"])
+    query, neighbor = (
+        F.linear(node, packed[:, :W], pb),
+        F.linear(node, packed[:, 2 * W :]),
+    )
+    args = (
+        vals["edge"],
+        query,
+        neighbor,
+        index,
+        packed[:, W : 2 * W],
+        vals["hidden_weight"],
+        vals["hidden_bias"],
+        vals["output_weight"],
+        vals["output_bias"],
+        vals["norm_weight"],
+        vals["norm_bias"],
+        seed,
+        1e-5,
+        0.0,
+    )
+    assert sm80.tail_serves(
+        vals["edge"], packed[:, W : 2 * W], vals["hidden_weight"], vals["output_weight"]
+    )
     with torch.no_grad():
         ours = edge_tail_update(*args, "triton_compute")
         settings.configure(mpnn_edge_sm80=False)
         try:
-            assert not sm80.tail_serves(vals["edge"], packed[:, W:2 * W], vals["hidden_weight"], vals["output_weight"])
+            assert not sm80.tail_serves(
+                vals["edge"],
+                packed[:, W : 2 * W],
+                vals["hidden_weight"],
+                vals["output_weight"],
+            )
             triton = edge_tail_update(*args, "triton_compute")
             with pytest.raises(ValueError, match="sm_80 CUDA MPNN edge tail"):
                 edge_tail_update(*args, "cuda")
@@ -189,11 +283,29 @@ def test_tail_gate_and_switch():
 def test_tail_fp32_activations_are_not_served():
     vals, index = _tail_inputs(1, 64, 8, fp32_params=False)
     node, packed, pb = vals["node"], vals["packed"], vals["packed_bias"]
-    query, neighbor = F.linear(node, packed[:, :W], pb), F.linear(node, packed[:, 2 * W:])
+    query, neighbor = (
+        F.linear(node, packed[:, :W], pb),
+        F.linear(node, packed[:, 2 * W :]),
+    )
     seed = torch.zeros(1, device="cuda", dtype=torch.int64)
     with pytest.raises(ValueError, match="requires contiguous CUDA BF16"):
-        edge_tail_update(vals["edge"].float(), query, neighbor, index, packed[:, W:2 * W], vals["hidden_weight"], vals["hidden_bias"], vals["output_weight"], vals["output_bias"],
-                         vals["norm_weight"], vals["norm_bias"], seed, 1e-5, 0.0, "cuda")
+        edge_tail_update(
+            vals["edge"].float(),
+            query,
+            neighbor,
+            index,
+            packed[:, W : 2 * W],
+            vals["hidden_weight"],
+            vals["hidden_bias"],
+            vals["output_weight"],
+            vals["output_bias"],
+            vals["norm_weight"],
+            vals["norm_bias"],
+            seed,
+            1e-5,
+            0.0,
+            "cuda",
+        )
 
 
 @pytest.mark.parametrize("p", [0.0, 0.1])
@@ -204,7 +316,14 @@ def test_tail_compiled_matches_eager(p):
     seed = torch.tensor([11], device="cuda", dtype=torch.int64)
 
     def forward(*ts):
-        return _tail_apply(dict(zip(GRAD_NAMES, ts, strict=True)), index, seed, p, "cuda", autocast=False)
+        return _tail_apply(
+            dict(zip(GRAD_NAMES, ts, strict=True)),
+            index,
+            seed,
+            p,
+            "cuda",
+            autocast=False,
+        )
 
     def run(fn):
         leaves = _leaves({n: vals[n] for n in GRAD_NAMES})
@@ -254,18 +373,47 @@ def _tail_policy_run(vals, index, seed, p, backend):
     """forward + backward of the public tail under one policy name; (output, gradients by name, bytes the forward left allocated beyond its inputs, peak bytes of the whole step beyond them)."""
     leaves = _leaves({n: vals[n] for n in GRAD_NAMES})
     node, packed, pb = leaves["node"], leaves["packed"], leaves["packed_bias"]
-    query, neighbor = F.linear(node, packed[:, :W], pb), F.linear(node, packed[:, 2 * W:])
-    up = torch.randn(*index.shape, W, device="cuda", dtype=torch.bfloat16, generator=torch.Generator(device="cuda").manual_seed(41))
+    query, neighbor = (
+        F.linear(node, packed[:, :W], pb),
+        F.linear(node, packed[:, 2 * W :]),
+    )
+    up = torch.randn(
+        *index.shape,
+        W,
+        device="cuda",
+        dtype=torch.bfloat16,
+        generator=torch.Generator(device="cuda").manual_seed(41),
+    )
     torch.cuda.synchronize()
     before = torch.cuda.memory_allocated()
     torch.cuda.reset_peak_memory_stats()
-    out = edge_tail_update(leaves["edge"], query, neighbor, index, packed[:, W:2 * W], leaves["hidden_weight"], leaves["hidden_bias"], leaves["output_weight"],
-                           leaves["output_bias"], leaves["norm_weight"], leaves["norm_bias"], seed, 1e-5, p, backend)
+    out = edge_tail_update(
+        leaves["edge"],
+        query,
+        neighbor,
+        index,
+        packed[:, W : 2 * W],
+        leaves["hidden_weight"],
+        leaves["hidden_bias"],
+        leaves["output_weight"],
+        leaves["output_bias"],
+        leaves["norm_weight"],
+        leaves["norm_bias"],
+        seed,
+        1e-5,
+        p,
+        backend,
+    )
     torch.cuda.synchronize()
     kept = torch.cuda.memory_allocated() - before
     out.backward(up)
     torch.cuda.synchronize()
-    return out.detach(), {n: t.grad for n, t in leaves.items()}, kept, torch.cuda.max_memory_allocated() - before
+    return (
+        out.detach(),
+        {n: t.grad for n, t in leaves.items()},
+        kept,
+        torch.cuda.max_memory_allocated() - before,
+    )
 
 
 @pytest.mark.parametrize("p", [0.0, 0.25])
@@ -287,13 +435,19 @@ def test_tail_recompute_policy_replays_the_forward_and_keeps_less(p):
 
 @pytest.mark.parametrize("p", [0.0, 0.25])
 @pytest.mark.parametrize("fp32_params", [False, True])
-def test_tail_recompute_in_slices_matches_the_saved_activations(monkeypatch, p, fp32_params):
+def test_tail_recompute_in_slices_matches_the_saved_activations(
+    monkeypatch, p, fp32_params
+):
     """The recompute policy replays the forward in slices of whole nodes (here 16 nodes = 768 rows of 24,576): the slice at row r0 draws the dropout decisions of rows r0 ..., so the gradients equal the
     saved-activation policy's (fp32 sums of the slices, rounded once); the neighbour scatter and the parameter gradients agree to the order of the sums."""
     monkeypatch.setattr(sm80, "_RECOMPUTE_CHUNK_ROWS", 16 * 48)
     vals, index = _tail_inputs(2, 256, 48, fp32_params=fp32_params)
     seed = torch.tensor([17], device="cuda", dtype=torch.int64)
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if fp32_params else torch.autocast("cuda", enabled=False)
+    ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if fp32_params
+        else torch.autocast("cuda", enabled=False)
+    )
     with ctx:
         out_s, grads_s, _, _ = _tail_policy_run(vals, index, seed, p, "triton_compute")
         out_r, grads_r, _, _ = _tail_policy_run(vals, index, seed, p, "triton")
@@ -319,7 +473,10 @@ def _mlp_inputs(rows, fp32_params):
     torch.manual_seed(29)
     x = torch.randn(rows, W, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     pdt = torch.float32 if fp32_params else torch.bfloat16
-    ps = [(torch.randn(*s, device="cuda") / W**0.5).to(pdt).requires_grad_(True) for s in ((W, W), (W,), (W, W), (W,))]
+    ps = [
+        (torch.randn(*s, device="cuda") / W**0.5).to(pdt).requires_grad_(True)
+        for s in ((W, W), (W,), (W, W), (W,))
+    ]
     return x, ps, torch.randn_like(x)
 
 
@@ -330,7 +487,11 @@ def test_mlp_matches_the_bf16_chain(rows, backend, fp32_params):
     x, ps, up = _mlp_inputs(rows, fp32_params)
     ref_in = [t.detach().clone().requires_grad_(True) for t in (x, *ps)]
     exact_in = [t.detach().double().requires_grad_(True) for t in (x, *ps)]
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if fp32_params else torch.autocast("cuda", enabled=False)
+    ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if fp32_params
+        else torch.autocast("cuda", enabled=False)
+    )
     with ctx:
         out = edge_mlp_update(x, *ps, backend=backend)
         ref = edge_mlp_update_pytorch(*ref_in)
@@ -341,7 +502,9 @@ def test_mlp_matches_the_bf16_chain(rows, backend, fp32_params):
     # a single row (128 numbers) is a noisy sample of the error: the band is wider there
     factor, floor = (1.1, 5e-4) if rows > 17 else (1.4, 1.5e-3)
     assert _rel(out, exact) <= factor * _rel(ref, exact) + 1e-4
-    for n, a, b, e in zip(["x", "Wh", "bh", "Wo", "bo"], grads, ref_grads, exact_grads, strict=True):
+    for n, a, b, e in zip(
+        ["x", "Wh", "bh", "Wo", "bo"], grads, ref_grads, exact_grads, strict=True
+    ):
         assert _rel(a, e) <= factor * _rel(b, e) + floor, n
 
 
@@ -408,12 +571,20 @@ def test_mlp_compiled_matches_eager():
 @pytest.mark.parametrize("autocast", [False, True])
 def test_layernorm_memory_backward_matches_torch(rows, autocast):
     torch.manual_seed(6)
-    x = (torch.randn(rows, W, device="cuda") * 2 + 0.3).to(torch.bfloat16).requires_grad_(True)
+    x = (
+        (torch.randn(rows, W, device="cuda") * 2 + 0.3)
+        .to(torch.bfloat16)
+        .requires_grad_(True)
+    )
     w = (torch.rand(W, device="cuda") + 0.5).requires_grad_(True)
     b = torch.randn(W, device="cuda").requires_grad_(True)
     up = torch.randn(rows, W, device="cuda")
     ref_in = [t.detach().clone().requires_grad_(True) for t in (x, w, b)]
-    ctx = torch.autocast("cuda", dtype=torch.bfloat16) if autocast else torch.autocast("cuda", enabled=False)
+    ctx = (
+        torch.autocast("cuda", dtype=torch.bfloat16)
+        if autocast
+        else torch.autocast("cuda", enabled=False)
+    )
     with ctx:
         out = edge_layer_norm(x, w, b, 1e-5, backend="cuda")
         ref = edge_layer_norm_pytorch(*ref_in, 1e-5)
@@ -459,7 +630,9 @@ def test_dropout_bitpack_is_bitwise_native(n, dtype):
     ref = F.dropout(ref_in, p=0.25, training=True)
     up = torch.randn(n, device="cuda", dtype=dtype)
     assert torch.equal(out, ref)
-    assert torch.equal(torch.autograd.grad(out, x, up)[0], torch.autograd.grad(ref, ref_in, up)[0])
+    assert torch.equal(
+        torch.autograd.grad(out, x, up)[0], torch.autograd.grad(ref, ref_in, up)[0]
+    )
 
 
 def test_dropout_compiled_matches_compiled_native():
@@ -468,8 +641,12 @@ def test_dropout_compiled_matches_compiled_native():
     x = torch.randn(1 << 20, device="cuda", dtype=torch.bfloat16, requires_grad=True)
     x2 = x.detach().clone().requires_grad_()
     up = torch.randn_like(x)
-    native = torch.compile(lambda t: F.dropout(t, p=0.25, training=True), fullgraph=True)
-    candidate = torch.compile(lambda t: edge_dropout(t, 0.25, training=True, backend="cuda"), fullgraph=True)
+    native = torch.compile(
+        lambda t: F.dropout(t, p=0.25, training=True), fullgraph=True
+    )
+    candidate = torch.compile(
+        lambda t: edge_dropout(t, 0.25, training=True, backend="cuda"), fullgraph=True
+    )
     torch.cuda.manual_seed_all(109)
     expected = native(x)
     (expected_grad,) = torch.autograd.grad(expected, x, up)
@@ -499,15 +676,28 @@ def test_mlp_and_layernorm_cuda_graph_replay():
     rows = 4096
     names = ("x", "wh", "bh", "wo", "bo", "gamma", "beta")
     shapes = ((rows, W), (W, W), (W,), (W, W), (W,), (W,), (W,))
-    leaves = {n: (torch.randn(*s, device="cuda") * (0.5 if n == "x" else 0.08)).to(torch.float32 if n in ("gamma", "beta") else torch.bfloat16).requires_grad_(True)
-              for n, s in zip(names, shapes, strict=True)}
+    leaves = {
+        n: (torch.randn(*s, device="cuda") * (0.5 if n == "x" else 0.08))
+        .to(torch.float32 if n in ("gamma", "beta") else torch.bfloat16)
+        .requires_grad_(True)
+        for n, s in zip(names, shapes, strict=True)
+    }
     up = torch.randn(rows, W, device="cuda", dtype=torch.bfloat16)
 
     def step():
         for t in leaves.values():
             t.grad = None
-        hidden = edge_mlp_update(leaves["x"], leaves["wh"], leaves["bh"], leaves["wo"], leaves["bo"], backend="cuda")
-        out = edge_layer_norm(hidden, leaves["gamma"], leaves["beta"], 1e-5, backend="cuda")
+        hidden = edge_mlp_update(
+            leaves["x"],
+            leaves["wh"],
+            leaves["bh"],
+            leaves["wo"],
+            leaves["bo"],
+            backend="cuda",
+        )
+        out = edge_layer_norm(
+            hidden, leaves["gamma"], leaves["beta"], 1e-5, backend="cuda"
+        )
         out.backward(up)
         return out
 
@@ -524,7 +714,9 @@ def test_mlp_and_layernorm_cuda_graph_replay():
 def test_dropout_cuda_graph_replay():
     """A captured bit-packed dropout (forward and backward) replays with a fresh draw whose backward is consistent with its own forward: the gradient is ``grad / (1 - p)`` exactly where the output is kept."""
     p = 0.25
-    x = (torch.randn(1 << 18, device="cuda", dtype=torch.bfloat16).abs() + 1.0).requires_grad_(True)       # >= 1: a kept element is non-zero in the output
+    x = (
+        torch.randn(1 << 18, device="cuda", dtype=torch.bfloat16).abs() + 1.0
+    ).requires_grad_(True)  # >= 1: a kept element is non-zero in the output
     up = torch.randn_like(x)
 
     def step():
@@ -539,7 +731,11 @@ def test_dropout_cuda_graph_replay():
         torch.cuda.synchronize()
         kept = out != 0
         assert 0.7 < kept.float().mean().item() < 0.8
-        expected = torch.where(kept, (up.float() * (1.0 / (1.0 - p))).to(torch.bfloat16), torch.zeros_like(up))
+        expected = torch.where(
+            kept,
+            (up.float() * (1.0 / (1.0 - p))).to(torch.bfloat16),
+            torch.zeros_like(up),
+        )
         assert torch.equal(x.grad, expected)
 
 
@@ -550,26 +746,53 @@ def test_encoder_with_the_fused_tail_matches_the_separate_operations():
 
     def build(backend):
         torch.manual_seed(5)
-        model = ProteinMPNN(ProteinMPNNConfig(encoder_depth=2, decoder_depth=2, k_neighbors=48, coordinate_noise=0.0, dropout=0.0, message_backend="pytorch",
-                                              edge_mlp_backend="pytorch", feature_backend="pytorch", edge_tail_backend=backend)).cuda().train()
+        model = (
+            ProteinMPNN(
+                ProteinMPNNConfig(
+                    encoder_depth=2,
+                    decoder_depth=2,
+                    k_neighbors=48,
+                    coordinate_noise=0.0,
+                    dropout=0.0,
+                    message_backend="pytorch",
+                    edge_mlp_backend="pytorch",
+                    feature_backend="pytorch",
+                    edge_tail_backend=backend,
+                )
+            )
+            .cuda()
+            .train()
+        )
         with torch.no_grad():
             model.output_projection.weight.normal_(0.0, 0.05)
         return model.bfloat16()
 
     length = 256
     torch.manual_seed(7)
-    inputs = (torch.randn(1, length, 4, 3, device="cuda") * 20.0, torch.randint(0, 21, (1, length), device="cuda"), torch.ones(1, length, device="cuda"),
-              torch.arange(length, device="cuda").unsqueeze(0), torch.zeros(1, length, dtype=torch.long, device="cuda"), torch.randperm(length, device="cuda").unsqueeze(0),
-              (torch.arange(length, device="cuda") // 8).unsqueeze(0).contiguous())
+    inputs = (
+        torch.randn(1, length, 4, 3, device="cuda") * 20.0,
+        torch.randint(0, 21, (1, length), device="cuda"),
+        torch.ones(1, length, device="cuda"),
+        torch.arange(length, device="cuda").unsqueeze(0),
+        torch.zeros(1, length, dtype=torch.long, device="cuda"),
+        torch.randperm(length, device="cuda").unsqueeze(0),
+        (torch.arange(length, device="cuda") // 8).unsqueeze(0).contiguous(),
+    )
     outputs, grads = {}, {}
     for backend in ("off", "triton_compute"):
         model = build(backend)
         logits = model(*inputs)
         logits.float().square().mean().backward()
         outputs[backend] = logits.float()
-        grads[backend] = {n: p.grad.detach().float().clone() for n, p in model.named_parameters() if p.grad is not None}
+        grads[backend] = {
+            n: p.grad.detach().float().clone()
+            for n, p in model.named_parameters()
+            if p.grad is not None
+        }
     assert _mean_rel(outputs["triton_compute"], outputs["off"]) < 5e-2
     comparable = [n for n in grads["off"] if grads["off"][n].abs().mean() > 0]
     assert len(comparable) > 10
-    worst = max(_mean_rel(grads["triton_compute"][n], grads["off"][n]) for n in comparable)
+    worst = max(
+        _mean_rel(grads["triton_compute"][n], grads["off"][n]) for n in comparable
+    )
     assert worst < 0.25

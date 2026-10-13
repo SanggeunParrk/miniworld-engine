@@ -1,4 +1,5 @@
 """AF3 atom block: exact window geometry, cross AdaLN, batch biases and live masks."""
+
 import os
 
 import pytest
@@ -6,27 +7,44 @@ import torch
 
 from miniworld_engine.modules.local_dit import LocalDiTBlock, windows
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
-    not torch.cuda.is_available() or not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"),
-    reason="needs CUDA and the carried Anthropic release")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or not os.environ.get("MINIWORLD_ANTHROPIC_ROOT"),
+        reason="needs CUDA and the carried Anthropic release",
+    ),
+]
 
 
 def _case(samples, batch, length, cross):
     torch.manual_seed(433)
-    model = LocalDiTBlock(cross_attention=cross, implementation="anthropic").cuda().bfloat16().eval()
+    model = (
+        LocalDiTBlock(cross_attention=cross, implementation="anthropic")
+        .cuda()
+        .bfloat16()
+        .eval()
+    )
     with torch.no_grad():
         for name, p in model.named_parameters():
             if p.ndim > 1:
-                p.normal_(std=p.shape[-1] ** -.5)
+                p.normal_(std=p.shape[-1] ** -0.5)
             elif name.endswith("weight"):
-                p.normal_(mean=1, std=.1)
+                p.normal_(mean=1, std=0.1)
             else:
-                p.normal_(std=.1)
-    ref = LocalDiTBlock(cross_attention=cross, implementation="pytorch").cuda().float().eval()
+                p.normal_(std=0.1)
+    ref = (
+        LocalDiTBlock(cross_attention=cross, implementation="pytorch")
+        .cuda()
+        .float()
+        .eval()
+    )
     ref.load_state_dict(model.state_dict())
     rand = lambda *s: torch.randn(*s, device="cuda", dtype=torch.bfloat16)
-    inputs = (rand(samples, batch, length, 128), rand(1, batch, length, 128),
-              rand(batch, windows(length), 32, 128, 16))
+    inputs = (
+        rand(samples, batch, length, 128),
+        rand(1, batch, length, 128),
+        rand(batch, windows(length), 32, 128, 16),
+    )
     return model, ref, inputs
 
 
@@ -34,14 +52,18 @@ def _check(model, ref, inputs, mask):
     got = model(*inputs, mask)
     want = ref(*(x.float() for x in inputs), mask)
     assert torch.isfinite(got).all()
-    assert ((got.float() - want).norm() / want.norm().clamp_min(1e-8)).item() < .04
-    assert ((got.float() - want).norm() / (want - inputs[0].float()).norm().clamp_min(1e-8)).item() < .08
+    assert ((got.float() - want).norm() / want.norm().clamp_min(1e-8)).item() < 0.04
+    assert (
+        (got.float() - want).norm() / (want - inputs[0].float()).norm().clamp_min(1e-8)
+    ).item() < 0.08
     assert model.anthropic_selection["window"] == "32x128"
     assert all("fpf_atom" in s for s in model.anthropic_selection["attention"])
     return got
 
 
-@pytest.mark.parametrize(("samples", "batch", "length"), [(1, 1, 31), (2, 2, 65), (5, 1, 129)])
+@pytest.mark.parametrize(
+    ("samples", "batch", "length"), [(1, 1, 31), (2, 2, 65), (5, 1, 129)]
+)
 @pytest.mark.parametrize("cross", [False, True])
 @pytest.mark.parametrize("mask_kind", ["none", "partial", "empty_window", "all_masked"])
 @torch.no_grad()

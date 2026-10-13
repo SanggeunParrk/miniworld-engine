@@ -27,12 +27,27 @@ CH = 32
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    extra = settings.current().transition_fwd_sm80_flags.split()      # experiments: extra nvcc flags (their own build)
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    extra = (
+        settings.current().transition_fwd_sm80_flags.split()
+    )  # experiments: extra nvcc flags (their own build)
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
-        name=f"transition_fwd_sm80{tag}", sources=[str(_dir / "transition_fwd_sm80.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=bool(extra),
+        name=f"transition_fwd_sm80{tag}",
+        sources=[str(_dir / "transition_fwd_sm80.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=bool(extra),
     )
 
 
@@ -49,7 +64,11 @@ def loads() -> bool:
         _ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"fused sm80 Transition forward unavailable, keeping the wide path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"fused sm80 Transition forward unavailable, keeping the wide path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -72,7 +91,9 @@ def _k_perm(dev, d):
     """Physical GEMM1 k index 16 s + kk -> input column (thread q of a quad holds the 16 B vectors at 32 i + 8 q)."""
     s = torch.arange(d // 16, device=dev).view(-1, 1)
     kk = torch.arange(16, device=dev).view(1, -1)
-    return (32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2).reshape(-1)
+    return (
+        32 * (s // 2) + 8 * ((kk % 8) // 2) + 4 * (s % 2) + 2 * (kk // 8) + kk % 2
+    ).reshape(-1)
 
 
 def _o_perm(dev, d):
@@ -88,7 +109,9 @@ def _layout_fwd(wa, wb, ws, dev, d, h):
     wa_p, wb_p = wa[:, kp], wb[:, kp]
     ws_p = ws[_o_perm(dev, d)]
     nstep, nchunk = CH // 16, h // CH
-    w1 = torch.stack([wa_p.view(nchunk, nstep, 16, d), wb_p.view(nchunk, nstep, 16, d)], 2).reshape(nchunk, 2 * CH, d)
+    w1 = torch.stack(
+        [wa_p.view(nchunk, nstep, 16, d), wb_p.view(nchunk, nstep, 16, d)], 2
+    ).reshape(nchunk, 2 * CH, d)
     w1 = w1.view(nchunk, 2 * CH, d // 8, 8).transpose(1, 2).reshape(nchunk, -1)
     w2 = ws_p.view(d, nchunk, CH // 8, 8).permute(1, 2, 0, 3).reshape(nchunk, -1)
     return w1, w2
@@ -99,14 +122,25 @@ def _tables(dev, d, h):
     """Gather tables of the pack kernel: idx16 (the packed weights [nchunk][W1 | W2]: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29) and idx32 (the
     LayerNorm affine as float4 slots: element | beta << 26)."""
     n = h * d
-    code = lambda src: (torch.arange(n, device=dev, dtype=torch.int64) | (src << 26))  # noqa: E731
+    code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     wa, wb = code(0).view(h, d), code(1).view(h, d)
     ws = code(2).view(d, h)
-    w1, w2 = _layout_fwd(wa | (1 << 28), wb, ws | (1 << 29), dev, d, h)             # W1 carries 0.5 Wa; W2 runs in f16
+    w1, w2 = _layout_fwd(
+        wa | (1 << 28), wb, ws | (1 << 29), dev, d, h
+    )  # W1 carries 0.5 Wa; W2 runs in f16
     idx16 = torch.cat([w1, w2], 1).reshape(-1).to(torch.int32).contiguous()
-    s_, q_ = torch.arange(d // 16, device=dev).view(-1, 1), torch.arange(4, device=dev).view(1, -1)
-    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(4, device=dev).view(1, -1)
-    idx32 = torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)]).to(torch.int32).contiguous()
+    s_, q_ = (
+        torch.arange(d // 16, device=dev).view(-1, 1),
+        torch.arange(4, device=dev).view(1, -1),
+    )
+    c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(
+        4, device=dev
+    ).view(1, -1)
+    idx32 = (
+        torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)])
+        .to(torch.int32)
+        .contiguous()
+    )
     return idx16, idx32
 
 
@@ -128,16 +162,27 @@ def pack(gamma, beta, wa, wb, ws, cache: bool):
             g = b = wa.new_empty((0,), dtype=torch.float32)
         out16 = torch.empty(idx16.numel(), dtype=torch.bfloat16, device=wa.device)
         gb = torch.empty(idx32.numel(), dtype=torch.float32, device=wa.device)
+        # fmt: off
         _ext().pack(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), g, b, idx16, idx32, out16, gb)
-        return out16, gb, (gamma, beta, wa, wb, ws)      # the parameters stay alive with their pack: a recycled data_ptr cannot alias it
+        # fmt: on
+        return (
+            out16,
+            gb,
+            (gamma, beta, wa, wb, ws),
+        )  # the parameters stay alive with their pack: a recycled data_ptr cannot alias it
 
     if not cache:
         return build()[:2]
-    key = tuple((t.data_ptr(), t._version, t.dtype) for t in ((gamma, beta, wa, wb, ws) if ln else (wa, wb, ws))) + (d, h, ln)
+    key = tuple(
+        (t.data_ptr(), t._version, t.dtype)
+        for t in ((gamma, beta, wa, wb, ws) if ln else (wa, wb, ws))
+    ) + (d, h, ln)
     return _capture.lookup(_packs, key, build, limit=8)[:2]
 
 
-def forward(x, gamma, beta, wa, wb, ws, eps: float, save: bool, cache: bool, ln: bool = True):
+def forward(
+    x, gamma, beta, wa, wb, ws, eps: float, save: bool, cache: bool, ln: bool = True
+):
     """(out, xn, stats) of the fused forward: x [M, D] bf16, gamma / beta f32 [D], weights bf16 or fp32 (cast in ``pack``); xn / stats are empty unless ``save`` (and ``ln``).
     Not ``ln``: the bare SwiGLU FFN (no LayerNorm, no residual); gamma / beta are ignored."""
     d, h = x.shape[1], wa.shape[0]

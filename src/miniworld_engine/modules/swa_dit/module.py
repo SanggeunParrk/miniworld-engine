@@ -22,7 +22,10 @@ class SwiGLUFFN(nn.Module):
     """ESMFold2 SwiGLU with the hidden width rounded up to a multiple of 256."""
 
     def __init__(
-        self, d_model: int, expansion_ratio: int = 2, *,
+        self,
+        d_model: int,
+        expansion_ratio: int = 2,
+        *,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
@@ -86,12 +89,20 @@ class SWADiTBlock(nn.Module):
             Linear(d_cond, 6 * d_atom, bias=False, init="zero"),
         )
         self.attn = SWA3DRoPEAttention(
-            d_atom, n_head, half_window=half_window, implementation=implementation,
+            d_atom,
+            n_head,
+            half_window=half_window,
+            implementation=implementation,
         )
-        self.ffn = SwiGLUFFN(d_atom, expansion_ratio=n, implementation=self.implementation)
+        self.ffn = SwiGLUFFN(
+            d_atom, expansion_ratio=n, implementation=self.implementation
+        )
 
     def fused_refusal(
-        self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple,
+        self,
+        x: torch.Tensor,
+        cond: torch.Tensor,
+        attention_params: tuple,
     ) -> str | None:
         """None if the fused block (``kernels.swa_dit``) can run this call, else why not.
 
@@ -111,38 +122,71 @@ class SWADiTBlock(nn.Module):
         projection = self.adaln_modulation[1]
         if not isinstance(projection, nn.Linear):
             return "the adaLN projection is not a Linear"
-        linears = (projection, self.attn.Wqkv, self.attn.gate_proj, self.attn.out_proj,
-                   self.ffn.w_up, self.ffn.w_down)
+        linears = (
+            projection,
+            self.attn.Wqkv,
+            self.attn.gate_proj,
+            self.attn.out_proj,
+            self.ffn.w_up,
+            self.ffn.w_down,
+        )
         if any(type(m) is not Linear or m.bias is not None for m in linears):
             return "the fused block reads bias-free engine Linear weights"
-        if any(m._forward_hooks or m._forward_pre_hooks
-               for m in (self.attn, self.ffn, *linears)):
+        if any(
+            m._forward_hooks or m._forward_pre_hooks
+            for m in (self.attn, self.ffn, *linears)
+        ):
             return "a forward hook is registered on the attention / FFN / a projection"
         from miniworld_engine.kernels.swa_dit.interface import refusal
 
         cos, sin, seqused = attention_params[:3]
         return refusal(
-            x, cos, sin, seqused, self.attn.Wqkv.weight, self.attn.gate_proj.weight,
-            self.attn.out_proj.weight, self.ffn.w_up.weight, self.ffn.w_down.weight,
-            n_head=self.attn.n_heads, half_window=self.attn.half_window,
-            cond=cond, wmod=projection.weight,
+            x,
+            cos,
+            sin,
+            seqused,
+            self.attn.Wqkv.weight,
+            self.attn.gate_proj.weight,
+            self.attn.out_proj.weight,
+            self.ffn.w_up.weight,
+            self.ffn.w_down.weight,
+            n_head=self.attn.n_heads,
+            half_window=self.attn.half_window,
+            cond=cond,
+            wmod=projection.weight,
         )
 
     def _fused(
-        self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple,
+        self,
+        x: torch.Tensor,
+        cond: torch.Tensor,
+        attention_params: tuple,
     ) -> torch.Tensor:
         """The fused block with the modulation computed once per row of ``cond`` ([B, S, d_cond], N % B == 0)."""
         if not torch.is_grad_enabled():
             from miniworld_engine.kernels.swa_dit.cuda.inference_rowgrid_sm80_a100 import (
                 block as inference_block,
+            )
+            from miniworld_engine.kernels.swa_dit.cuda.inference_rowgrid_sm80_a100 import (
                 eligible as inference_eligible,
             )
 
-            weights = (self.adaln_modulation[1].weight, self.attn.Wqkv.weight,
-                       self.attn.gate_proj.weight, self.attn.out_proj.weight,
-                       self.ffn.w_up.weight, self.ffn.w_down.weight)
-            if inference_eligible(x, cond, attention_params, weights,
-                                  self.attn.n_heads, self.attn.half_window):
+            weights = (
+                self.adaln_modulation[1].weight,
+                self.attn.Wqkv.weight,
+                self.attn.gate_proj.weight,
+                self.attn.out_proj.weight,
+                self.ffn.w_up.weight,
+                self.ffn.w_down.weight,
+            )
+            if inference_eligible(
+                x,
+                cond,
+                attention_params,
+                weights,
+                self.attn.n_heads,
+                self.attn.half_window,
+            ):
                 return inference_block(x, cond, *attention_params[:3], *weights)
 
         from miniworld_engine.kernels.swa_dit.interface import (
@@ -157,9 +201,18 @@ class SWADiTBlock(nn.Module):
         # build_attention_params repeats the per-batch RoPE over the augments, so rows [:B] are the per-batch angles.
         mod = swa_dit_hoist_modulation(cond, projection.weight)
         return swa_dit_block(
-            x, mod, cos[:b], sin[:b], seqused, self.attn.Wqkv.weight,
-            self.attn.gate_proj.weight, self.attn.out_proj.weight, self.ffn.w_up.weight,
-            self.ffn.w_down.weight, b, half_window=self.attn.half_window,
+            x,
+            mod,
+            cos[:b],
+            sin[:b],
+            seqused,
+            self.attn.Wqkv.weight,
+            self.attn.gate_proj.weight,
+            self.attn.out_proj.weight,
+            self.ffn.w_up.weight,
+            self.ffn.w_down.weight,
+            b,
+            half_window=self.attn.half_window,
         )
 
     def forward_hoisted(
@@ -176,7 +229,9 @@ class SWADiTBlock(nn.Module):
         """
         if self.fused_refusal(x, c_base, attention_params) is None:
             return self._fused(x, c_base, attention_params)
-        return self(x, c_base.repeat(x.shape[0] // c_base.shape[0], 1, 1), attention_params)
+        return self(
+            x, c_base.repeat(x.shape[0] // c_base.shape[0], 1, 1), attention_params
+        )
 
     def forward(
         self,
@@ -199,19 +254,31 @@ class SWADiTBlock(nn.Module):
             assert isinstance(projection, nn.Linear)
             sh_a, sc_a, g_a, sh_f, sc_f, g_f = projection.weight.chunk(6, dim=0)
             # nn.RMSNorm(eps=None) uses the opmath epsilon (fp32 for BF16).
-            eps = torch.finfo(torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype).eps
+            eps = torch.finfo(
+                torch.float32 if x.dtype in (torch.float16, torch.bfloat16) else x.dtype
+            ).eps
             attn_in, gate_a = ops.rms_norm_modulation(
-                x, activated, sc_a, sh_a, g_a, eps=eps,
+                x,
+                activated,
+                sc_a,
+                sh_a,
+                g_a,
+                eps=eps,
             )
             x = ops.gated_residual(x, gate_a, self.attn(attn_in, attention_params))
             ffn_in, gate_f = ops.rms_norm_modulation(
-                x, activated, sc_f, sh_f, g_f, eps=eps,
+                x,
+                activated,
+                sc_f,
+                sh_f,
+                g_f,
+                eps=eps,
             )
             return ops.gated_residual(x, gate_f, self.ffn(ffn_in))
 
-        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (
-            self.adaln_modulation(cond).chunk(6, dim=-1)
-        )
+        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.adaln_modulation(
+            cond
+        ).chunk(6, dim=-1)
         attn_in = self.attn_norm(x) * (1 + scale_a) + shift_a
         x = x + gate_a * self.attn(attn_in, attention_params)
         ffn_in = self.ffn_norm(x) * (1 + scale_f) + shift_f

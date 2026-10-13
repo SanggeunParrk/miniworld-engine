@@ -10,7 +10,10 @@ from settings_helpers import override_setting
 from miniworld_engine.modules import OuterProductMean
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -23,13 +26,25 @@ def _rel(a, b):
     return float((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30))
 
 
-WIDTHS = [(64, 128), (128, 256), (128, 384)]                      # (d_msa, d_pair): the registry's OuterProductMean rows (d_hidden 32)
+WIDTHS = [
+    (64, 128),
+    (128, 256),
+    (128, 384),
+]  # (d_msa, d_pair): the registry's OuterProductMean rows (d_hidden 32)
 
 
 def _modules(d_msa, d_pair, norm_first=True, seed=0):
     torch.manual_seed(seed)
-    ref = OuterProductMean(d_msa, d_pair, 32, normalize_before_proj=norm_first, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised to_out, unit LayerNorm
+    ref = OuterProductMean(
+        d_msa,
+        d_pair,
+        32,
+        normalize_before_proj=norm_first,
+        implementation=ImplementationType.PYTORCH,
+    )
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised to_out, unit LayerNorm
         for n, p in ref.named_parameters():
             if "ln_msa.weight" in n:
                 p.copy_(1.0 + 0.2 * torch.randn_like(p))
@@ -78,7 +93,9 @@ def _check(d_msa, d_pair, S, L, mask_kind, norm_first, residual, grad, strict=1.
     ref, ours, twin = _modules(d_msa, d_pair, norm_first)
     msa, mask, res, dy = _inputs(S, L, d_msa, d_pair, mask_kind, residual)
     with torch.set_grad_enabled(grad):
-        assert (opm_sm80.serves_train if grad else opm_sm80.serves_inference)(ours, msa.bfloat16(), mask, None, None if res is None else res.bfloat16())
+        assert (opm_sm80.serves_train if grad else opm_sm80.serves_inference)(
+            ours, msa.bfloat16(), mask, None, None if res is None else res.bfloat16()
+        )
     _, want = _run(ref, torch.float32, msa, mask, res, dy, grad)
     _, base = _run(twin, torch.bfloat16, msa, mask, res, dy, grad)
     y, got = _run(ours, torch.bfloat16, msa, mask, res, dy, grad)
@@ -86,53 +103,124 @@ def _check(d_msa, d_pair, S, L, mask_kind, norm_first, residual, grad, strict=1.
     assert tuple(y.shape) == (1, L, L, d_pair)
     for n in want:
         ea, eb = _rel(got[n], want[n]), _rel(base[n], want[n])
-        assert ea <= max(2e-3, (strict if n in ("out", "dmsa", "dres") else 1.25) * eb), (n, ea, eb)     # parameter gradients are sums over every token: a noisier statistic
+        assert ea <= max(
+            2e-3, (strict if n in ("out", "dmsa", "dres") else 1.25) * eb
+        ), (
+            n,
+            ea,
+            eb,
+        )  # parameter gradients are sums over every token: a noisier statistic
 
 
 @pytest.mark.parametrize(("d_msa", "d_pair"), WIDTHS)
 @pytest.mark.parametrize("mask_kind", ["none", "ragged", "empty_rows"])
 def test_opm_a100_inference(d_msa, d_pair, mask_kind):
-    _check(d_msa, d_pair, S=200, L=136, mask_kind=mask_kind, norm_first=True, residual=True, grad=False)
+    _check(
+        d_msa,
+        d_pair,
+        S=200,
+        L=136,
+        mask_kind=mask_kind,
+        norm_first=True,
+        residual=True,
+        grad=False,
+    )
 
 
 @pytest.mark.parametrize(("d_msa", "d_pair"), WIDTHS)
 @pytest.mark.parametrize("mask_kind", ["none", "ragged"])
 @pytest.mark.parametrize("residual", [False, True])
 def test_opm_a100_training(d_msa, d_pair, mask_kind, residual):
-    _check(d_msa, d_pair, S=200, L=136, mask_kind=mask_kind, norm_first=True, residual=residual, grad=True)
+    _check(
+        d_msa,
+        d_pair,
+        S=200,
+        L=136,
+        mask_kind=mask_kind,
+        norm_first=True,
+        residual=residual,
+        grad=True,
+    )
 
 
 @pytest.mark.parametrize(("d_msa", "d_pair"), WIDTHS)
 @pytest.mark.parametrize("grad", [False, True])
 def test_opm_a100_esmfold2_order(d_msa, d_pair, grad):
     """normalize_before_proj = False divides after the projection, bias included."""
-    _check(d_msa, d_pair, S=130, L=48, mask_kind="empty_rows", norm_first=False, residual=True, grad=grad)
+    _check(
+        d_msa,
+        d_pair,
+        S=130,
+        L=48,
+        mask_kind="empty_rows",
+        norm_first=False,
+        residual=True,
+        grad=grad,
+    )
 
 
 @pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize(("d_msa", "d_pair"), WIDTHS)
 def test_opm_a100_registry_lengths_inference(d_msa, d_pair, L):
     """Every registry length at the three registry widths (a shallow MSA keeps the fp32 reference cheap)."""
-    _check(d_msa, d_pair, S=64, L=L, mask_kind="ragged", norm_first=True, residual=True, grad=False)
+    _check(
+        d_msa,
+        d_pair,
+        S=64,
+        L=L,
+        mask_kind="ragged",
+        norm_first=True,
+        residual=True,
+        grad=False,
+    )
 
 
-@pytest.mark.parametrize("S,L", [(1024, 128), (1024, 256), (4096, 128), (4096, 640)])
+@pytest.mark.parametrize(
+    ("S", "L"), [(1024, 128), (1024, 256), (4096, 128), (4096, 640)]
+)
 @pytest.mark.parametrize("mask_kind", ["ragged", "empty_rows"])
 def test_opm_a100_frozen_mask_counts(S, L, mask_kind):
-    _check(64, 128, S=S, L=L, mask_kind=mask_kind, norm_first=True, residual=True, grad=False)
+    _check(
+        64,
+        128,
+        S=S,
+        L=L,
+        mask_kind=mask_kind,
+        norm_first=True,
+        residual=True,
+        grad=False,
+    )
 
 
 @pytest.mark.parametrize("S", [1, 7, 64, 65, 1024, 1100])
 def test_opm_a100_msa_depth(S):
     """Any MSA depth (the operands of the outer product are [S, 32 L]: no padding of the contraction)."""
-    _check(64, 128, S=S, L=64, mask_kind="ragged", norm_first=True, residual=True, grad=True)
+    _check(
+        64,
+        128,
+        S=S,
+        L=64,
+        mask_kind="ragged",
+        norm_first=True,
+        residual=True,
+        grad=True,
+    )
 
 
 @pytest.mark.parametrize("L", [1, 5, 33, 70, 100])
 @pytest.mark.parametrize(("d_msa", "d_pair"), WIDTHS)
 def test_opm_a100_tiny_and_odd_lengths(d_msa, d_pair, L):
     """L that is not a multiple of the 4 x 32 pair tile of any kernel (tails are zero-filled / masked), at every registry width."""
-    _check(d_msa, d_pair, S=96, L=L, mask_kind="none", norm_first=True, residual=False, grad=True)
+    _check(
+        d_msa,
+        d_pair,
+        S=96,
+        L=L,
+        mask_kind="none",
+        norm_first=True,
+        residual=False,
+        grad=True,
+    )
 
 
 @pytest.mark.parametrize("d_pair", [128, 256, 384])
@@ -149,7 +237,9 @@ def test_opm_a100_epilogue_schedules_agree(d_pair):
     norm = torch.rand(L, L, device="cuda", generator=g) * 900 + 1
     want = sm80.epilogue(o, norm, 1.0, wo, bias, res, True, variant=0)
     for variant in (1, 2):
-        assert torch.equal(sm80.epilogue(o, norm, 1.0, wo, bias, res, True, variant=variant), want), variant
+        assert torch.equal(
+            sm80.epilogue(o, norm, 1.0, wo, bias, res, True, variant=variant), want
+        ), variant
 
 
 def test_opm_a100_gate_conditions():
@@ -161,26 +251,54 @@ def test_opm_a100_gate_conditions():
     mb, rb = msa.bfloat16(), res.bfloat16()
     with torch.no_grad():
         assert opm_sm80.serves_inference(ours, mb, mask, None, rb)
-        assert not opm_sm80.serves_inference(ours, msa, mask, None, rb)                          # fp32 MSA
-        assert not opm_sm80.serves_inference(ours, mb.expand(2, -1, -1, -1), mask.expand(2, -1, -1), None, rb.expand(2, -1, -1, -1))   # B = 2
-        assert not opm_sm80.serves_inference(ours, mb, mask, None, res)                           # fp32 residual
-        assert not opm_sm80.serves_inference(ours, mb, mask.float(), None, rb)                    # a float mask
+        assert not opm_sm80.serves_inference(ours, msa, mask, None, rb)  # fp32 MSA
+        assert not opm_sm80.serves_inference(
+            ours,
+            mb.expand(2, -1, -1, -1),
+            mask.expand(2, -1, -1),
+            None,
+            rb.expand(2, -1, -1, -1),
+        )  # B = 2
+        assert not opm_sm80.serves_inference(ours, mb, mask, None, res)  # fp32 residual
+        assert not opm_sm80.serves_inference(
+            ours, mb, mask.float(), None, rb
+        )  # a float mask
         ours.mask_interchain = True
-        assert not opm_sm80.serves_inference(ours, mb, mask, torch.zeros(1, 64, dtype=torch.long, device="cuda"), rb)   # interchain masking
+        assert not opm_sm80.serves_inference(
+            ours, mb, mask, torch.zeros(1, 64, dtype=torch.long, device="cuda"), rb
+        )  # interchain masking
         ours.mask_interchain = False
-        assert not opm_sm80.serves_train(ours, mb, mask, None, rb)                                # grad disabled: the inference gate
-    assert not opm_sm80.serves_inference(ours, mb, mask, None, rb)                                # grad enabled
+        assert not opm_sm80.serves_train(
+            ours, mb, mask, None, rb
+        )  # grad disabled: the inference gate
+    assert not opm_sm80.serves_inference(ours, mb, mask, None, rb)  # grad enabled
     assert opm_sm80.serves_train(ours, mb, mask, None, rb)
-    wide = OuterProductMean(64, 128, 16, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+    wide = (
+        OuterProductMean(64, 128, 16, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .bfloat16()
+    )
     with torch.no_grad():
-        assert not opm_sm80.serves_inference(wide, mb, mask, None, rb)                            # d_hidden 16
-    other = OuterProductMean(96, 128, 32, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
+        assert not opm_sm80.serves_inference(wide, mb, mask, None, rb)  # d_hidden 16
+    other = (
+        OuterProductMean(96, 128, 32, implementation=ImplementationType.MINIWORLD)
+        .cuda()
+        .bfloat16()
+    )
     with torch.no_grad():
-        assert not opm_sm80.serves_inference(other, torch.randn(1, 8, 16, 96, device="cuda", dtype=torch.bfloat16), None, None, None)   # d_msa 96
+        assert not opm_sm80.serves_inference(
+            other,
+            torch.randn(1, 8, 16, 96, device="cuda", dtype=torch.bfloat16),
+            None,
+            None,
+            None,
+        )  # d_msa 96
     pt = copy.deepcopy(ours)
     pt.implementation = ImplementationType.PYTORCH
     with torch.no_grad():
-        assert not opm_sm80.serves_inference(pt, mb, mask, None, rb)                              # not the miniworld implementation
+        assert not opm_sm80.serves_inference(
+            pt, mb, mask, None, rb
+        )  # not the miniworld implementation
 
 
 def test_opm_a100_env_switch_and_triton_agreement(monkeypatch):
@@ -195,7 +313,7 @@ def test_opm_a100_env_switch_and_triton_agreement(monkeypatch):
         override_setting(monkeypatch, "opm_sm80", "0")
         assert not opm_sm80.serves_inference(ours, mb, mask, None, rb)
         base = ours(mb, mask, residual=rb)
-    assert _rel(got - rb, base - rb) < 1e-2                         # the update alone
+    assert _rel(got - rb, base - rb) < 1e-2  # the update alone
 
 
 def test_opm_a100_training_is_bit_reproducible():

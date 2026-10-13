@@ -25,6 +25,7 @@ from numbers being wrong -- resetting on them cost this repository 32 of 38 tune
 To fix a failure: rebuild the named op(s) for the named GPU and `dev merge` the result, or run
 ``miniworld-engine dev cache-status --gpu <key>`` locally to see the same list.
 """
+
 from __future__ import annotations
 
 from miniworld_engine.autotune import cache_status
@@ -66,4 +67,5 @@ def test_the_unrebuildable_list_is_still_needed_and_still_honest():
     dead = [g for g in CANNOT_REBUILD_HERE if g not in stale_gpus]
     assert not dead, (
         f"CANNOT_REBUILD_HERE names GPUs whose caches are no longer stale: {dead}. Remove them -- "
-        f"the exemption has been earned back and the gate should cover them again.")
+        f"the exemption has been earned back and the gate should cover them again."
+    )

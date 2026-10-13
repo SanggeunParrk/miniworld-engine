@@ -42,21 +42,41 @@ def _staged() -> tuple[Path, str]:
             shutil.copy2(path, tmp / path.name)
         try:
             tmp.rename(dst)
-        except OSError:                      # another process staged the same content first
+        except OSError:  # another process staged the same content first
             shutil.rmtree(tmp, ignore_errors=True)
     return dst, tag
 
 
 @functools.lru_cache(maxsize=1)
 def ext():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        gencodes,
+        host_flags,
+        load_extension,
+    )
 
     ensure_cuda_home()
     src, tag = _staged()
-    flags = [*host_flags(), "-O3", "-std=c++17", "-lineinfo", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-             "-U__CUDA_NO_BFLOAT162_OPERATORS__", *gencodes("80"), *_extra_flags()]
+    flags = [
+        *host_flags(),
+        "-O3",
+        "-std=c++17",
+        "-lineinfo",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        *gencodes("80"),
+        *_extra_flags(),
+    ]
     verbose = settings.current().mpnn_edge_ptxas
     if verbose:
         flags += ["-Xptxas", "-v"]
-    return load_extension(name=f"mpnn_edge_sm80_{tag}", sources=[str(src / "ops.cu")], extra_include_paths=[str(src)], extra_cuda_cflags=flags,
-                          extra_cflags=["-std=c++17", "-O3"], verbose=verbose)
+    return load_extension(
+        name=f"mpnn_edge_sm80_{tag}",
+        sources=[str(src / "ops.cu")],
+        extra_include_paths=[str(src)],
+        extra_cuda_cflags=flags,
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=verbose,
+    )

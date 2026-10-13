@@ -482,7 +482,12 @@ def test_compiled_general_families(family):
     try:
         # The token block's fp32 attention / AdaLN / transition run the dedicated TF32 tensor-core kernels first (integrations.augattn_sm80 and friends, as the
         # Triton path's tl.dot does); the exact-fp32 composition of a100_families only takes what they decline, so the token block is held to TF32 accuracy.
-        check(torch.compile(m, fullgraph=True), ref, args, tol=5e-4 if family == "token" else 2e-5)
+        check(
+            torch.compile(m, fullgraph=True),
+            ref,
+            args,
+            tol=5e-4 if family == "token" else 2e-5,
+        )
     finally:
         torch._dynamo.reset()
 

@@ -31,8 +31,15 @@ def ext():
     return load_extension(
         name="triattn_sm80_core2",
         sources=[str(_dir / "attn2_ops.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}"],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
 
 
@@ -50,7 +57,11 @@ def loads() -> bool:
         ext()
     except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
         _BUILD_FAILED = True
-        warnings.warn(f"sm80 triangle-attention core (head dim 16 / 32) unavailable, keeping the existing path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm80 triangle-attention core (head dim 16 / 32) unavailable, keeping the existing path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -62,14 +73,38 @@ def token_major(length: int, ld: int, head_dim: int) -> Layout:
 
 def head_major(heads: int, length: int, head_dim: int, batch: int) -> Layout:
     """The layout of a contiguous ``[A, B, H, L, D]`` tensor (``A`` = the pair rows): token j of row a, batch b, head h at ``(((a B + b) H + h) L + j) D``."""
-    return (head_dim, batch * heads * length * head_dim, heads * length * head_dim, length * head_dim)
+    return (
+        head_dim,
+        batch * heads * length * head_dim,
+        heads * length * head_dim,
+        length * head_dim,
+    )
 
 
-def forward(q, k, v, bias, rowmask, out, lse, lays, length, heads, batch, head_dim, sm_scale) -> None:
+def forward(
+    q, k, v, bias, rowmask, out, lse, lays, length, heads, batch, head_dim, sm_scale
+) -> None:
     """``out = softmax(sm_scale q k^T + bias [+ the per-row key mask]) v`` for q / k / v / out the strided views ``lays = (lq, lk, lv, lo)``; ``bias`` ``[B, H, L, L]`` bf16 contiguous,
     ``rowmask`` ``[B, L, L]`` uint8 or an empty tensor, ``lse`` ``[B, H, L, L]`` fp32 or an empty tensor (the base-2 log-sum-exp the backward reads)."""
     lq, lk, lv, lo = lays
-    ext().attn2_fwd(q, k, v, bias, rowmask, out, lse, list(lq), list(lk), list(lv), list(lo), length, heads, batch, head_dim, sm_scale * _L2E)
+    ext().attn2_fwd(
+        q,
+        k,
+        v,
+        bias,
+        rowmask,
+        out,
+        lse,
+        list(lq),
+        list(lk),
+        list(lv),
+        list(lo),
+        length,
+        heads,
+        batch,
+        head_dim,
+        sm_scale * _L2E,
+    )
 
 
 def delta_rows(o, dov, out, lays, length, heads, batch, head_dim) -> None:
@@ -91,21 +126,86 @@ def dbp_fits(length: int, heads: int, batch: int) -> bool:
     return dbp_bytes(length, heads, batch) <= MAX_DBP_BYTES
 
 
-def backward(q, k, v, dov, bias, rowmask, lse, delta, dq, dk, dv, lays, length, heads, batch, head_dim, sm_scale) -> torch.Tensor:
+def backward(
+    q,
+    k,
+    v,
+    dov,
+    bias,
+    rowmask,
+    lse,
+    delta,
+    dq,
+    dk,
+    dv,
+    lays,
+    length,
+    heads,
+    batch,
+    head_dim,
+    sm_scale,
+) -> torch.Tensor:
     """The backward of ``forward``: dq / dk / dv are written into the strided views ``lays = (lq, lk, lv, ld, ldq, ldk, ldv)`` and the pair bias' gradient ``[B, H, L, L]`` bf16
     (the sum over the pair rows of dS, from bf16 partials over groups of ``DQ_ROWS`` rows and a fixed-order reduction) is returned.  ``delta`` = sum_d o do per (b, h, row, query)."""
     lq, lk, lv, ld, ldq, ldk, ldv = lays
     e = ext()
     scl = sm_scale * _L2E
     groups = length // DQ_ROWS
-    dbp = torch.empty((groups, batch * heads, length, length), dtype=BF, device=q.device)
-    e.attn2_bwd_dq(q, k, v, dov, bias, rowmask, lse, delta, dq, dbp, list(lq), list(lk), list(lv), list(ld), list(ldq), length, heads, batch, head_dim, scl, sm_scale)
+    dbp = torch.empty(
+        (groups, batch * heads, length, length), dtype=BF, device=q.device
+    )
+    e.attn2_bwd_dq(
+        q,
+        k,
+        v,
+        dov,
+        bias,
+        rowmask,
+        lse,
+        delta,
+        dq,
+        dbp,
+        list(lq),
+        list(lk),
+        list(lv),
+        list(ld),
+        list(ldq),
+        length,
+        heads,
+        batch,
+        head_dim,
+        scl,
+        sm_scale,
+    )
     db = torch.empty((batch, heads, length, length), dtype=BF, device=q.device)
     e.attn2_db_reduce(dbp, db, groups)
     del dbp
     bias_t = torch.empty_like(bias)
     e.attn2_bias_transpose(bias, bias_t, length)
-    e.attn2_bwd_dkv(q, k, v, dov, bias_t, rowmask, lse, delta, dk, dv, list(lq), list(lk), list(lv), list(ld), list(ldk), list(ldv), length, heads, batch, head_dim, scl, sm_scale)
+    e.attn2_bwd_dkv(
+        q,
+        k,
+        v,
+        dov,
+        bias_t,
+        rowmask,
+        lse,
+        delta,
+        dk,
+        dv,
+        list(lq),
+        list(lk),
+        list(lv),
+        list(ld),
+        list(ldk),
+        list(ldv),
+        length,
+        heads,
+        batch,
+        head_dim,
+        scl,
+        sm_scale,
+    )
     return db
 
 

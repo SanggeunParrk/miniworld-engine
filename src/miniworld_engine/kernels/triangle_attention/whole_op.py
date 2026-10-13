@@ -20,20 +20,21 @@ from einops import rearrange
 
 
 def triangle_attention(
-    pair: torch.Tensor,                       # (B, L, L, d_pair)
-    mask: torch.Tensor | None = None,         # (B, L) residue mask
+    pair: torch.Tensor,  # (B, L, L, d_pair)
+    mask: torch.Tensor | None = None,  # (B, L) residue mask
     *,
     n_head: int,
     ln_pair_weight: torch.Tensor,
     ln_pair_bias: torch.Tensor,
-    to_value_weight: torch.Tensor,            # (d_hidden, d_pair)
-    to_bias_weight: torch.Tensor,             # (n_head, d_pair)
-    to_gate_weight: torch.Tensor,             # (d_hidden, d_pair)
-    to_out_weight: torch.Tensor,              # (d_pair, d_hidden)
-    to_query_weight: torch.Tensor | None = None,   # (d_hidden, d_pair) — enables self-attn
-    to_key_weight: torch.Tensor | None = None,     # (d_hidden, d_pair)
+    to_value_weight: torch.Tensor,  # (d_hidden, d_pair)
+    to_bias_weight: torch.Tensor,  # (n_head, d_pair)
+    to_gate_weight: torch.Tensor,  # (d_hidden, d_pair)
+    to_out_weight: torch.Tensor,  # (d_pair, d_hidden)
+    to_query_weight: torch.Tensor
+    | None = None,  # (d_hidden, d_pair) — enables self-attn
+    to_key_weight: torch.Tensor | None = None,  # (d_hidden, d_pair)
     norm_query_weight: torch.Tensor | None = None,  # (d_head,) — enables qk-norm
-    norm_key_weight: torch.Tensor | None = None,    # (d_head,)
+    norm_key_weight: torch.Tensor | None = None,  # (d_head,)
     starting: bool = True,
     eps: float = 1e-5,
 ) -> torch.Tensor:
@@ -53,29 +54,51 @@ def triangle_attention(
     use_qk_norm = norm_query_weight is not None
 
     from miniworld_engine.kernels import cuda_native
+
     if cuda_native.enabled(pair):
         from miniworld_engine.integrations.a100_families import triangle
-        return triangle(pair, mask, n_head=n_head, ln_pair_weight=ln_pair_weight, ln_pair_bias=ln_pair_bias,
-                        to_value_weight=to_value_weight, to_bias_weight=to_bias_weight, to_gate_weight=to_gate_weight,
-                        to_out_weight=to_out_weight, to_query_weight=to_query_weight, to_key_weight=to_key_weight,
-                        norm_query_weight=norm_query_weight, norm_key_weight=norm_key_weight, starting=starting, eps=eps)
+
+        return triangle(
+            pair,
+            mask,
+            n_head=n_head,
+            ln_pair_weight=ln_pair_weight,
+            ln_pair_bias=ln_pair_bias,
+            to_value_weight=to_value_weight,
+            to_bias_weight=to_bias_weight,
+            to_gate_weight=to_gate_weight,
+            to_out_weight=to_out_weight,
+            to_query_weight=to_query_weight,
+            to_key_weight=to_key_weight,
+            norm_query_weight=norm_query_weight,
+            norm_key_weight=norm_key_weight,
+            starting=starting,
+            eps=eps,
+        )
 
     from miniworld_engine.kernels.triangle_attention.triton.main import (
         triton_triangle_attention_pair_bias,
     )
+
     if not starting:
         pair = rearrange(pair, "B I J D -> B J I D").contiguous()
 
     x = F.layer_norm(pair, (pair.shape[-1],), ln_pair_weight, ln_pair_bias, eps)
 
-    value = rearrange(F.linear(x, to_value_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
+    value = rearrange(
+        F.linear(x, to_value_weight), "B L L2 (H D) -> B H L L2 D", H=n_head
+    )
     bias = rearrange(F.linear(x, to_bias_weight), "B L L2 H -> B H L L2")
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
 
     if use_self_attention:
-        query = rearrange(F.linear(x, to_query_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
-        key = rearrange(F.linear(x, to_key_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
+        query = rearrange(
+            F.linear(x, to_query_weight), "B L L2 (H D) -> B H L L2 D", H=n_head
+        )
+        key = rearrange(
+            F.linear(x, to_key_weight), "B L L2 (H D) -> B H L L2 D", H=n_head
+        )
         if use_qk_norm:
             # No `d_head` here any more: the kernel normalizes over the LAST axis and reads its
             # width from the tensor, where F.rms_norm wanted it restated as `normalized_shape`.

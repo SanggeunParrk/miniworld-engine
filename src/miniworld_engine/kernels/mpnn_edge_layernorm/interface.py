@@ -108,7 +108,9 @@ def edge_layer_norm(
         if mpnn_edge_sm80.norm_serves(values, weight):
             return mpnn_edge_sm80.edge_layer_norm_memory(values, weight, bias, eps)
         if backend == "cuda":
-            raise ValueError("the sm_80 CUDA MPNN edge LayerNorm backward needs an A100 (capability 8.0) and a loadable extension")
+            raise ValueError(
+                "the sm_80 CUDA MPNN edge LayerNorm backward needs an A100 (capability 8.0) and a loadable extension"
+            )
         # Keep Triton and the standalone LayerNorm backend out of CPU/import-only
         # users. This branch is reached only by supported CUDA training tensors.
         from miniworld_engine.kernels.mpnn_edge_layernorm.triton import (

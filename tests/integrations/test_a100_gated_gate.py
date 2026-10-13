@@ -1,5 +1,6 @@
 """The shape / dtype gate of the A100 hand-CUDA gated projections (``gated_projection/cuda/sm80.shape_ok`` and the tm1 / tm2 / gate wrappers' ``serves``) without a
 device: every ``gated_linear`` row of the model registry is served, and what the 64-column tiles do not divide keeps the existing path."""
+
 import csv
 from pathlib import Path
 
@@ -14,7 +15,9 @@ BF16 = torch.bfloat16
 
 
 def _gated_linear_rows():
-    registry = Path(gated.__file__).resolve().parents[2] / "registry" / "registry_module.csv"
+    registry = (
+        Path(gated.__file__).resolve().parents[2] / "registry" / "registry_module.csv"
+    )
     rows = []
     for row in csv.DictReader(registry.open()):
         if row["module"] == "gated_linear":
@@ -34,7 +37,9 @@ def test_the_gate_rejects_what_it_is_not_built_for():
     assert gated.shape_ok(BF16, 128, 128)
     assert not gated.shape_ok(torch.float32, 128, 128)
     assert not gated.shape_ok(torch.float16, 128, 128)
-    assert not gated.shape_ok(BF16, 96, 128)                  # the 64-column tiles must divide both widths
+    assert not gated.shape_ok(
+        BF16, 96, 128
+    )  # the 64-column tiles must divide both widths
     assert not gated.shape_ok(BF16, 128, 100)
     assert not gated.shape_ok(BF16, 0, 128)
     assert not gated.shape_ok(BF16, 128, 0)
@@ -44,9 +49,9 @@ def test_the_gate_rejects_what_it_is_not_built_for():
 def test_tm1_and_tm2_need_a_cuda_tensor_of_one_dtype_and_square_weights(d):
     x = torch.zeros(4, d, dtype=BF16)
     w = torch.zeros(d, d, dtype=BF16)
-    assert not tm2.serves(x, x, w, w)                         # a CPU tensor
+    assert not tm2.serves(x, x, w, w)  # a CPU tensor
     assert not tm1.serves(x, w, w, w, w)
-    assert not tm2.serves(x, x[:2], w, w)                     # shapes differ
-    assert not tm2.serves(x, x, w[:, :-1], w)                 # a non-square weight
-    assert not tm1.serves(x, w, w, w)                         # four weights
+    assert not tm2.serves(x, x[:2], w, w)  # shapes differ
+    assert not tm2.serves(x, x, w[:, :-1], w)  # a non-square weight
+    assert not tm1.serves(x, w, w, w)  # four weights
     assert not tm2.serves(x.float(), x.float(), w.float(), w.float())

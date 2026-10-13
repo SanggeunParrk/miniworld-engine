@@ -254,7 +254,9 @@ def _pack(P, dev):
     eager pack is never reused inside a capture, whose replays would otherwise run on the weights of capture time."""
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
 
-    sm80 = _is_sm80(dev)  # A100: the torch pack, the five-launch middle (the fused ones are sm_100a only)
+    sm80 = _is_sm80(
+        dev
+    )  # A100: the torch pack, the five-launch middle (the fused ones are sm_100a only)
     one, mid = _pack1() and not sm80, BWF.mid_on() and not sm80
     key = (tuple((t.data_ptr(), t._version) for t in P.values()), one, mid)
     slot = _capture.scoped(next(iter(P.values())).data_ptr())
@@ -623,7 +625,9 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
         torch.mm(xt, W["Wab"].t(), out=ab)
         C.swiglu_rows(ab, h)
     else:
-        _op("swiglu", dev)(xt, W["Wab"], ab, h)  # the SwiGLU in the expand GEMM's epilogue
+        _op("swiglu", dev)(
+            xt, W["Wab"], ab, h
+        )  # the SwiGLU in the expand GEMM's epilogue
     z = torch.mm(h, W["Wsq"].t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     BT.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
@@ -829,8 +833,8 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             L,
             dbias_out,
         )
-    wgrad = (
-        lambda n, a, b: torch.mm(a.t(), b, out_dtype=torch.float32)
+    wgrad = lambda n, a, b: (
+        torch.mm(a.t(), b, out_dtype=torch.float32)
         if pdt[n] is torch.float32
         else torch.mm(a.t(), b)
     )
@@ -1153,7 +1157,7 @@ def _bwd_fused_step(
         dbias_out is not None
     ):  # hoisted: no pair_bias_bwd; finalize's ln_pair / to_bias jobs see no rows
         BT.finalize_cuda(
-            part, counts + [n3], pw, pw, 0, W["Wb"], W["wp"], flat[_U:], norms
+            part, [*counts, n3], pw, pw, 0, W["Wb"], W["wp"], flat[_U:], norms
         )
         return [
             dx.view(A, 1, L, D),
@@ -1177,7 +1181,7 @@ def _bwd_fused_step(
             dpair,
             pwf,
             part,
-            counts + [n3],
+            [*counts, n3],
             pw,
             W["Wb"],
             W["wp"],
@@ -1188,7 +1192,7 @@ def _bwd_fused_step(
     else:
         nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
         BT.finalize_cuda(
-            part, counts + [n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U:], norms
+            part, [*counts, n3], pw, pwf, nwf, W["Wb"], W["wp"], flat[_U:], norms
         )
     return [
         dx.view(A, 1, L, D),

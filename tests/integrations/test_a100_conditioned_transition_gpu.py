@@ -12,9 +12,16 @@ from miniworld_engine.integrations import conditioned_transition_sm80 as ct80
 from miniworld_engine.modules import ConditionedTransition
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
-WIDTHS = [(128, 128), (768, 384), (768, 768)]               # (d_hidden, d_cond): atom, token, ESMFold2 token
+WIDTHS = [
+    (128, 128),
+    (768, 384),
+    (768, 768),
+]  # (d_hidden, d_cond): atom, token, ESMFold2 token
 BF = torch.bfloat16
 
 
@@ -31,9 +38,13 @@ def _rel(a, b):
 def _modules(d, dc, dtype, n=2, seed=0):
     torch.manual_seed(seed)
     ref = ConditionedTransition(d, dc, n, implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised squeeze, the unit norm weight
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised squeeze, the unit norm weight
         for p in ref.parameters():
-            p.add_(torch.randn_like(p) * (0.3 if p.ndim == 1 else 0.5 * p.shape[1] ** -0.5))
+            p.add_(
+                torch.randn_like(p) * (0.3 if p.ndim == 1 else 0.5 * p.shape[1] ** -0.5)
+            )
         ref.ada_ln_in.ln_cond.weight.add_(1.0)
     ours = ConditionedTransition(d, dc, n, implementation=ImplementationType.MINIWORLD)
     ours.load_state_dict(ref.state_dict())
@@ -43,7 +54,9 @@ def _modules(d, dc, dtype, n=2, seed=0):
 def _inputs(A, L, d, dc, shared=False, seed=1):
     g = torch.Generator(device="cuda").manual_seed(seed)
     x = torch.randn(A, 1, L, d, device="cuda", generator=g)
-    c = torch.randn(1 if shared else A, 1, L, dc, device="cuda", generator=g).expand(A, 1, L, dc)
+    c = torch.randn(1 if shared else A, 1, L, dc, device="cuda", generator=g).expand(
+        A, 1, L, dc
+    )
     return x, c
 
 
@@ -82,10 +95,17 @@ def test_ct_a100_inference_fp32_tf32(d, dc, L, shared, delta):
 def _train(mod, x, c, dy, dt, delta=False):
     for p in mod.parameters():
         p.grad = None
-    xx, cc = x.to(dt).detach().clone().requires_grad_(), c.to(dt).detach().clone().requires_grad_()
+    xx, cc = (
+        x.to(dt).detach().clone().requires_grad_(),
+        c.to(dt).detach().clone().requires_grad_(),
+    )
     y = mod.delta(xx, cc) if delta else mod(xx, cc)
     y.backward(dy.to(dt))
-    return y.detach(), {"x": xx.grad, "cond": cc.grad, **{n: p.grad.clone() for n, p in mod.named_parameters()}}
+    return y.detach(), {
+        "x": xx.grad,
+        "cond": cc.grad,
+        **{n: p.grad.clone() for n, p in mod.named_parameters()},
+    }
 
 
 @pytest.mark.parametrize("delta", [False, True])
@@ -240,7 +260,9 @@ def triton_launches(monkeypatch):
 
 @pytest.mark.parametrize("dtype", [BF, torch.float32])
 @pytest.mark.parametrize(("d", "dc"), WIDTHS)
-def test_ct_a100_default_dispatch_launches_no_triton_kernel(d, dc, dtype, triton_launches):
+def test_ct_a100_default_dispatch_launches_no_triton_kernel(
+    d, dc, dtype, triton_launches
+):
     """The registry widths in both dtypes: ``forward`` and ``delta`` in inference (a conditioning per sample, one shared) and a training step never reach a Triton kernel."""
     _, ours, _ = _modules(d, dc, dtype)
     x, c = _inputs(3, 128, d, dc)
@@ -301,7 +323,9 @@ def test_ct_a100_side_stream_branches_change_nothing(monkeypatch):
         y = ours(xg, cg)
         y.backward(dy)
         torch.cuda.synchronize()
-        return [y.detach().clone()] + [t.grad.clone() for t in (xg, cg, *ours.parameters())]
+        return [y.detach().clone()] + [
+            t.grad.clone() for t in (xg, cg, *ours.parameters())
+        ]
 
     on = run()
     override_setting(monkeypatch, "adaln_branch", "0")
@@ -362,5 +386,7 @@ def test_ct_a100_fp32_inference_follows_updated_weights(d, monkeypatch):
             override_setting(monkeypatch, "condtrans_sm80", None)
             override_setting(monkeypatch, "adaln_sm80", None)
     assert not torch.equal(y1, y2)
-    assert _rel(y1, y2) > 0.05                      # the update moved the output ...
-    assert _rel(y2, want) < 1e-2                    # ... and the fused kernels follow it as the Triton path (both TF32, weights scaled 1.5x: a stale pack would differ by O(1))
+    assert _rel(y1, y2) > 0.05  # the update moved the output ...
+    assert (
+        _rel(y2, want) < 1e-2
+    )  # ... and the fused kernels follow it as the Triton path (both TF32, weights scaled 1.5x: a stale pack would differ by O(1))

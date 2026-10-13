@@ -34,7 +34,11 @@ def windows(n: int) -> int:
 def _key_windows(t: torch.Tensor, n: int, value: float = 0.0) -> torch.Tensor:
     """[..., N, C] -> [..., nwin, KEYS, C]: the key window of every query window (out-of-range positions are ``value``)."""
     nwin = windows(n)
-    padded = F.pad(t, (0, 0, KEY_OFFSET, nwin * QUERIES + KEYS - QUERIES - KEY_OFFSET - n), value=value)
+    padded = F.pad(
+        t,
+        (0, 0, KEY_OFFSET, nwin * QUERIES + KEYS - QUERIES - KEY_OFFSET - n),
+        value=value,
+    )
     return padded.unfold(-2, KEYS, QUERIES).transpose(-1, -2)
 
 
@@ -43,7 +47,11 @@ def to_windows(pair: torch.Tensor) -> torch.Tensor:
     n = pair.shape[1]
     nwin = windows(n)
     query = torch.arange(nwin * QUERIES, device=pair.device).view(nwin, QUERIES)
-    key = torch.arange(nwin, device=pair.device)[:, None] * QUERIES - KEY_OFFSET + torch.arange(KEYS, device=pair.device)[None]
+    key = (
+        torch.arange(nwin, device=pair.device)[:, None] * QUERIES
+        - KEY_OFFSET
+        + torch.arange(KEYS, device=pair.device)[None]
+    )
     valid = (query < n)[:, :, None] & ((key >= 0) & (key < n))[:, None, :]
     out = pair[:, query.clamp(max=n - 1)[:, :, None], key.clamp(0, n - 1)[:, None, :]]
     return out * valid[None, :, :, :, None].to(pair.dtype)
@@ -63,12 +71,19 @@ class LocalDiTBlock(DiTBlock):
         cross_attention: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
-        super().__init__(d_single, d_cond, d_pair, n_head, n, implementation=implementation)
+        super().__init__(
+            d_single, d_cond, d_pair, n_head, n, implementation=implementation
+        )
         self.cross_attention = cross_attention
         if cross_attention:
-            self.attention.ada_ln_kv = AdaptiveLayerNorm(d_single, d_cond, implementation=implementation)
+            self.attention.ada_ln_kv = AdaptiveLayerNorm(
+                d_single, d_cond, implementation=implementation
+            )
         if implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
-            from miniworld_engine.integrations.local_dit_sm80 import prepare_projection_modules
+            from miniworld_engine.integrations.local_dit_sm80 import (
+                prepare_projection_modules,
+            )
+
             prepare_projection_modules(self.attention)
 
     def attention_delta(self, single, cond, pair, mask=None) -> torch.Tensor:
@@ -89,20 +104,35 @@ class LocalDiTBlock(DiTBlock):
         h, d = att.n_head, x.shape[-1] // att.n_head
         nwin = windows(n)
         if tuple(pair.shape[:4]) != (b, nwin, QUERIES, KEYS):
-            raise ValueError(f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}")
-        z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
-        bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(0, 4, 1, 2, 3)           # [B, H, nwin, 32, 128]
+            raise ValueError(
+                f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {KEYS}, d_pair], got {tuple(pair.shape)}"
+            )
+        z = F.layer_norm(
+            pair,
+            (pair.shape[-1],),
+            att.ln_pair.weight.to(pair.dtype),
+            None,
+            att.ln_pair.eps,
+        )
+        bias = F.linear(z, att.to_bias.weight.to(z.dtype)).permute(
+            0, 4, 1, 2, 3
+        )  # [B, H, nwin, 32, 128]
         q = att.to_query(x)
-        xkv = att.ada_ln_kv(x, cond) if self.cross_attention else x          # AF3 cross-attention mode: a second AdaLN for K / V
+        xkv = (
+            att.ada_ln_kv(x, cond) if self.cross_attention else x
+        )  # AF3 cross-attention mode: a second AdaLN for K / V
         k, v = att.to_key(xkv), att.to_value(xkv)
         gate = att.to_gate(x)
         qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
         kw = _key_windows(k, n).reshape(a, b, nwin, KEYS, h, d)
         vw = _key_windows(v, n).reshape(a, b, nwin, KEYS, h, d)
         wide = torch.float64 if x.dtype == torch.float64 else torch.float32
-        scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
+        scores = (
+            torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5
+            + bias.to(wide)[None]
+        )
         keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
-        valid = _key_windows(keep[..., None], n)[..., 0] > 0                    # [B, nwin, 128]
+        valid = _key_windows(keep[..., None], n)[..., 0] > 0  # [B, nwin, 128]
         scores = scores.masked_fill(~valid[None, :, None, :, None, :], float("-inf"))
         probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
         out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(wide)).to(x.dtype)
@@ -116,7 +146,10 @@ class LocalDiTBlock(DiTBlock):
         if _local.serves(self, single, cond, pair, mask):
             return _local.block(self, single, cond, pair, mask)
         from miniworld_engine.integrations import local_dit_sm80
-        if not torch.is_grad_enabled() and local_dit_sm80.serves(self, single, cond, pair, mask):
+
+        if not torch.is_grad_enabled() and local_dit_sm80.serves(
+            self, single, cond, pair, mask
+        ):
             return local_dit_sm80.inference_block(self, single, cond, pair, mask)
         single = single + self.attention_delta(single, cond, pair, mask)
         return self.transition(single, cond)

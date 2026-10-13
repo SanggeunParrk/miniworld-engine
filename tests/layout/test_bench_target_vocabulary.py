@@ -18,6 +18,7 @@ coverage report looked them up, found nothing, and reported their kernels as nev
 bench.py cannot be imported without a GPU (it raises at import), so the two tables in it are read
 out of its source with `ast`, the same way tests/compile/test_compiled_flag_is_what_ran.py does.
 """
+
 from __future__ import annotations
 
 import ast
@@ -40,15 +41,20 @@ def _target_table(name: str) -> dict[str, str]:
             continue
         if not any(isinstance(t, ast.Name) and t.id == name for t in node.targets):
             continue
-        return {str(k.value): v.id for k, v in zip(node.value.keys, node.value.values, strict=False)
-                if isinstance(k, ast.Constant) and isinstance(v, ast.Name)}
+        return {
+            str(k.value): v.id
+            for k, v in zip(node.value.keys, node.value.values, strict=False)
+            if isinstance(k, ast.Constant) and isinstance(v, ast.Name)
+        }
     raise AssertionError(f"{name} not found in {BENCH}")
 
 
 BENCH_KERNEL = _target_table("KERNEL_TARGETS")
 BENCH_MODULE = _target_table("MODULE_TARGETS")
-LEVELS = {"kernel": (BENCH_KERNEL, cli.KERNEL_TARGETS),
-          "module": (BENCH_MODULE, cli.MODULE_TARGETS)}
+LEVELS = {
+    "kernel": (BENCH_KERNEL, cli.KERNEL_TARGETS),
+    "module": (BENCH_MODULE, cli.MODULE_TARGETS),
+}
 
 
 @pytest.mark.parametrize("level", sorted(LEVELS))
@@ -95,35 +101,55 @@ def test_no_bench_target_abbreviates_a_name_the_engine_spells_out() -> None:
     """
     import csv
 
-    with (REPO / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv").open() as fh:
+    with (
+        REPO / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
+    ).open() as fh:
         families = {row["family"] for row in csv.DictReader(fh)}
     #: Targets that bench a fused GEMM/epilogue shape rather than one family. They are named after
     #: the shape because more than one family implements it, so no family name would be right.
-    shape_named = {"dual_gemm_epilogue", "dual_gemm_epilogue_bwd", "gemm_epilogue",
-                   "gemm_epilogue_bwd", "gemm_gate", "gemm_gate_bwd", "transition_b2b",
-                   "transition_b2b_bwd", "conditioned_transition_tail", "windowed_atom_attention"}
+    shape_named = {
+        "dual_gemm_epilogue",
+        "dual_gemm_epilogue_bwd",
+        "gemm_epilogue",
+        "gemm_epilogue_bwd",
+        "gemm_gate",
+        "gemm_gate_bwd",
+        "transition_b2b",
+        "transition_b2b_bwd",
+        "conditioned_transition_tail",
+        "windowed_atom_attention",
+    }
     for target in BENCH_KERNEL:
         if target in shape_named:
             continue
         stem = target.removesuffix("_bwd")
         assert stem in families, (
             f"kernel target {target!r} names neither a registry family nor a declared op shape; "
-            f"families: {sorted(families)}")
+            f"families: {sorted(families)}"
+        )
 
 
 def test_every_target_builds_from_a_real_case() -> None:
     """The CLI's target -> build-case mapping is the one place the two name spaces meet. A case
     name that no longer exists makes the pre-bench build fill nothing, and the bench then measures
     an untuned kernel."""
-    for level, table in (("kernel", cli.KERNEL_TARGETS),
-                         ("module", {k: v.cases for k, v in cli.MODULE_TARGETS.items()})):
+    for level, table in (
+        ("kernel", cli.KERNEL_TARGETS),
+        ("module", {k: v.cases for k, v in cli.MODULE_TARGETS.items()}),
+    ):
         for target, cases in table.items():
-            if level == "module" and target in cli.BUILDLESS:     # declared: launches no autotuned kernel
-                assert not cases, f"module target {target!r} is BUILDLESS but maps build cases {cases}"
+            if (
+                level == "module" and target in cli.BUILDLESS
+            ):  # declared: launches no autotuned kernel
+                assert not cases, (
+                    f"module target {target!r} is BUILDLESS but maps build cases {cases}"
+                )
                 continue
             assert cases, f"{level} target {target!r} has no build case"
             unknown = [c for c in cases if c not in CASE_NAMES]
-            assert not unknown, f"{level} target {target!r} -> unknown case(s) {unknown}"
+            assert not unknown, (
+                f"{level} target {target!r} -> unknown case(s) {unknown}"
+            )
 
 
 def test_every_group_is_made_of_module_targets_and_all_means_all() -> None:

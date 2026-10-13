@@ -223,23 +223,44 @@ def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
 
 def _mod_sm80(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     """Whether the hoisted modulation runs on the sm_80 kernels: A100, bf16 c and Wmod, d_cond = C = 128 (``settings.swa_dit_sm80=False`` or ``engine_backend="triton"`` keep the fp32 GEMM)."""
-    if not (c_base.is_cuda and c_base.dtype == torch.bfloat16 and wmod.dtype == torch.bfloat16):
+    if not (
+        c_base.is_cuda
+        and c_base.dtype == torch.bfloat16
+        and wmod.dtype == torch.bfloat16
+    ):
         return False
-    if c_base.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or c_base.numel() == 0:
+    if (
+        c_base.shape[-1] != D_ATOM
+        or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM)
+        or c_base.numel() == 0
+    ):
         return False
     from miniworld_engine.kernels.swa_dit.dispatch import _sm80
 
-    return _sm80(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS) is not None
+    return (
+        _sm80(c_base.reshape(1, -1, D_ATOM), N_HIDDEN, HALF_WINDOW, FP32_EPS)
+        is not None
+    )
 
 
-def swa_dit_window_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, seqused: torch.Tensor, n_heads: int, half_window: int) -> torch.Tensor | None:
+def swa_dit_window_attention(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    v: torch.Tensor,
+    seqused: torch.Tensor,
+    n_heads: int,
+    half_window: int,
+) -> torch.Tensor | None:
     """The sliding-window attention of ``modules/swa_atom_attention.SWA3DRoPEAttention`` on the A100 hand-CUDA kernels of ``cuda/sm80``, or None when this call is not served (the module then takes flash).
 
     q / k / v [N, S, H, D] (any strides with unit channel stride: the slices of the fused qkv projection go in without a copy), ``seqused`` [N] int32 (valid atoms front-packed in every row, as the FA4 path
     needs): [N, S, H, D] in q's dtype, rows at or past ``seqused`` zero in the output and in every gradient; differentiable in q, k, v. Served: an A100, 4 heads x 32, half window 64, floating-point
     q / k / v (cast to bf16, as the flash path does), ``engine_backend != "triton"``, ``settings.swa_dit_sm80``.
     """
-    if not q.is_cuda or torch.cuda.get_device_capability(q.device) != (8, 0):          # nothing else is imported on any other card
+    if not q.is_cuda or torch.cuda.get_device_capability(q.device) != (
+        8,
+        0,
+    ):  # nothing else is imported on any other card
         return None
     from miniworld_engine.kernels.swa_dit.autograd import SWADiTWindowAttentionSm80
     from miniworld_engine.kernels.swa_dit.dispatch import _sm80_window
@@ -247,7 +268,9 @@ def swa_dit_window_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, 
     if _sm80_window(q, n_heads, half_window) is None:
         return None
     bf = torch.bfloat16
-    return SWADiTWindowAttentionSm80.apply(q.to(bf), k.to(bf), v.to(bf), seqused).to(q.dtype)
+    return SWADiTWindowAttentionSm80.apply(q.to(bf), k.to(bf), v.to(bf), seqused).to(
+        q.dtype
+    )
 
 
 def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:

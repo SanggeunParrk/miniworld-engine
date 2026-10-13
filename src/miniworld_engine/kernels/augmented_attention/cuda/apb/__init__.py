@@ -11,10 +11,16 @@ from pathlib import Path
 import torch
 
 _dir = Path(__file__).parent
-RW = 4                    # rows per block of the row kernels (a warp each)
-DP = 128                  # d_pair
+RW = 4  # rows per block of the row kernels (a warp each)
+DP = 128  # d_pair
 # (heads, d_single) -> (real head dim, head width in memory: 16 x 24 is padded to 32)
-GEOMETRY = {(8, 384): (48, 48), (12, 384): (32, 32), (16, 384): (24, 32), (24, 384): (16, 16), (16, 512): (32, 32)}
+GEOMETRY = {
+    (8, 384): (48, 48),
+    (12, 384): (32, 32),
+    (16, 384): (24, 32),
+    (24, 384): (16, 16),
+    (16, 512): (32, 32),
+}
 
 
 def width(heads: int, d: int = 384) -> int:
@@ -34,19 +40,41 @@ def _build(arch: int):
     from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
-    flags = [*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__",
-             "-U__CUDA_NO_BFLOAT162_OPERATORS__"]
+    flags = [
+        *host_flags(),
+        "-O3",
+        "-std=c++17",
+        "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+        "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+    ]
     if arch == 80:
-        return load_extension(name="apb_rows_cuda_sm80", sources=[str(_dir / "apb_rows.cu")], extra_include_paths=[str(_dir)],
-                              extra_cuda_cflags=[*flags, "-DAPB_SM80", *gencodes("80")], extra_cflags=["-std=c++17"], verbose=False)
-    return load_extension(name="apb_rows_cuda", sources=[str(_dir / "apb_rows.cu")], extra_cuda_cflags=[*flags, *gencodes("100", ptx=("100",))],
-                          extra_cflags=["-std=c++17"], verbose=False)
+        return load_extension(
+            name="apb_rows_cuda_sm80",
+            sources=[str(_dir / "apb_rows.cu")],
+            extra_include_paths=[str(_dir)],
+            extra_cuda_cflags=[*flags, "-DAPB_SM80", *gencodes("80")],
+            extra_cflags=["-std=c++17"],
+            verbose=False,
+        )
+    return load_extension(
+        name="apb_rows_cuda",
+        sources=[str(_dir / "apb_rows.cu")],
+        extra_cuda_cflags=[*flags, *gencodes("100", ptx=("100",))],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def ext(arch: int | None = None):
     """The extension of ``arch`` (80 or 100); by default of the current device (an A100 gets the sm_80 build, everything else the B200 one)."""
     if arch is None:
-        arch = 80 if torch.cuda.is_available() and torch.cuda.get_device_capability() == (8, 0) else 100
+        arch = (
+            80
+            if torch.cuda.is_available()
+            and torch.cuda.get_device_capability() == (8, 0)
+            else 100
+        )
     return _build(arch)
 
 
@@ -55,8 +83,15 @@ def available() -> bool:
     return True
 
 
-def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float,
-              padded: int | None = None) -> torch.Tensor:
+def pair_bias(
+    pair2d: torch.Tensor,
+    wf: torch.Tensor,
+    mask: torch.Tensor | None,
+    L: int,
+    eps: float,
+    neg: float,
+    padded: int | None = None,
+) -> torch.Tensor:
     """bias [H, L, L] bf16 = wf . LN(pair) (no LN affine: fold its weight into ``wf`` [H, 128] bf16, H = 8, 16 or 24), ``neg`` on the
     keys where ``mask`` [L] is False. pair2d [L L, 128] bf16 contiguous, L a multiple of 16.
 
@@ -68,8 +103,15 @@ def pair_bias(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None,
     return out
 
 
-def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L: int, eps: float, acc: torch.Tensor | None = None,
-                  d: int = 384):
+def pair_bias_bwd(
+    pair2d: torch.Tensor,
+    dbias: torch.Tensor,
+    wf: torch.Tensor,
+    L: int,
+    eps: float,
+    acc: torch.Tensor | None = None,
+    d: int = 384,
+):
     """(dpair [L L, 128] bf16, dWf [H, 128] fp32, per-head dbias sums [H]) of ``pair_bias`` (without the mask: masked keys
     carry zero dbias). dWf and the sums are added into ``acc`` (``acc_n(H)`` floats, zeroed by the caller) when given; the
     returned dWf / sums are views of it."""
@@ -77,9 +119,21 @@ def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L
     if acc is None:
         acc = torch.zeros(acc_n(heads, d), device=pair2d.device)
     dz = torch.empty_like(pair2d)
-    ext().pair_bias_bwd(pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d))
+    ext().pair_bias_bwd(
+        pair2d, dbias.contiguous(), wf, dz, acc, int(L), float(eps), int(d)
+    )
     o = 2 * d + width(heads, d)
-    return dz, acc[o:o + heads * DP].view(heads, DP), acc[o + heads * DP:]
+    return dz, acc[o : o + heads * DP].view(heads, DP), acc[o + heads * DP :]
 
 
-__all__ = ["DP", "GEOMETRY", "RW", "acc_n", "available", "ext", "pair_bias", "pair_bias_bwd", "width"]
+__all__ = [
+    "DP",
+    "GEOMETRY",
+    "RW",
+    "acc_n",
+    "available",
+    "ext",
+    "pair_bias",
+    "pair_bias_bwd",
+    "width",
+]

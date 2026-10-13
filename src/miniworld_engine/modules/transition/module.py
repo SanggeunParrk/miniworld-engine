@@ -89,7 +89,9 @@ class Transition(nn.Module):
         # (resolve() maps cueq->pytorch for non-trimul ops).
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
-        self.anthropic_row = anthropic_row or getattr(self, "anthropic_row", "v2@bm32bh32w4s2il1" if d_hidden == 384 else "pf")
+        self.anthropic_row = anthropic_row or getattr(
+            self, "anthropic_row", "v2@bm32bh32w4s2il1" if d_hidden == 384 else "pf"
+        )
         self._backend = resolve_transition(self.implementation)
 
         self.ln_in = LayerNorm(
@@ -116,6 +118,7 @@ class Transition(nn.Module):
         """
         if self._backend == KernelBackend.ANTHROPIC:
             from miniworld_engine.integrations.anthropic import module_transition
+
             return module_transition(self, x)
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
@@ -171,10 +174,12 @@ class Transition(nn.Module):
             route = fused_wide_sm80.route(x, pa, ps)
             if route == "fused":
                 return fused_sm80.transition_fused_sm80(
-                    x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps
+                )
             if route == "wide":
                 return fused_wide_sm80.transition_wide_sm80(
-                    x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps
+                )
 
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)

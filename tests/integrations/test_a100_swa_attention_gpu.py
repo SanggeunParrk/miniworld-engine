@@ -7,8 +7,8 @@ from __future__ import annotations
 import copy
 
 import pytest
-from settings_helpers import override_setting
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.kernels.swa_dit.cuda import sm80
@@ -21,7 +21,10 @@ from miniworld_engine.modules.swa_atom_attention import (
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0), reason="A100 (sm_80)"),
+    pytest.mark.skipif(
+        not torch.cuda.is_available() or torch.cuda.get_device_capability() != (8, 0),
+        reason="A100 (sm_80)",
+    ),
 ]
 DEV, BF = "cuda", torch.bfloat16
 C, H, D, HW = 128, 4, 32, 64
@@ -29,7 +32,9 @@ C, H, D, HW = 128, 4, 32, 64
 
 def _lengths(n, s):
     """Front-packed valid counts: full rows, a short one, a row shorter than the window, one with a single atom, an empty one."""
-    return torch.tensor(([s, max(1, s - 17), 5, 1, 0, s - 1] * n)[:n], dtype=torch.int32, device=DEV)
+    return torch.tensor(
+        ([s, max(1, s - 17), 5, 1, 0, s - 1] * n)[:n], dtype=torch.int32, device=DEV
+    )
 
 
 def _band_reference(q, k, v, seqused, d_out=None):
@@ -40,8 +45,10 @@ def _band_reference(q, k, v, seqused, d_out=None):
     valid = pos[None, :] < seqused[:, None]
     band = (pos[None, :, None] - pos[None, None, :]).abs() <= HW
     allowed = band & valid[:, :, None] & valid[:, None, :]
-    scores = torch.einsum("nihd,njhd->nhij", q, k) * D ** -0.5
-    scores = scores.masked_fill(~allowed[:, None], -1e30)                  # finite: a row without a valid key softmaxes to a uniform row that the validity mask below zeroes (no NaN in the backward)
+    scores = torch.einsum("nihd,njhd->nhij", q, k) * D**-0.5
+    scores = scores.masked_fill(
+        ~allowed[:, None], -1e30
+    )  # finite: a row without a valid key softmaxes to a uniform row that the validity mask below zeroes (no NaN in the backward)
     p = torch.softmax(scores, dim=-1)
     out = torch.einsum("nhij,njhd->nihd", p, v) * valid[:, :, None, None]
     if d_out is None:
@@ -58,13 +65,23 @@ def _rel(a, e):
 @pytest.mark.parametrize(("n", "s"), [(1, 64), (2, 200), (3, 333), (4, 1040), (6, 130)])
 def test_the_kernels_match_the_dense_band_attention(n, s):
     g = torch.Generator().manual_seed(n * 1000 + s)
-    q, k, v, d_out = (torch.randn(n, s, H, D, generator=g).to(DEV, BF) for _ in range(4))
+    q, k, v, d_out = (
+        torch.randn(n, s, H, D, generator=g).to(DEV, BF) for _ in range(4)
+    )
     seqused = _lengths(n, s)
     out, lse = sm80.window_fwd(q, k, v, seqused)
     truth, dq_t, dk_t, dv_t = _band_reference(q, k, v, seqused, d_out)
     dq, dk, dv = sm80.window_bwd(q, k, v, out, d_out, lse, seqused)
-    errs = {"out": _rel(out, truth), "dq": _rel(dq, dq_t), "dk": _rel(dk, dk_t), "dv": _rel(dv, dv_t)}
-    print(f"window kernels N{n} S{s}: relative Frobenius error against the dense fp32 band attention", {k_: f"{e:.1e}" for k_, e in errs.items()})
+    errs = {
+        "out": _rel(out, truth),
+        "dq": _rel(dq, dq_t),
+        "dk": _rel(dk, dk_t),
+        "dv": _rel(dv, dv_t),
+    }
+    print(
+        f"window kernels N{n} S{s}: relative Frobenius error against the dense fp32 band attention",
+        {k_: f"{e:.1e}" for k_, e in errs.items()},
+    )
     assert max(errs.values()) < 8e-3, errs
     pad = torch.arange(s, device=DEV)[None, :] >= seqused[:, None]
     for name, t in (("out", out), ("dq", dq), ("dk", dk), ("dv", dv)):
@@ -79,8 +96,12 @@ def test_strided_views_and_head_major_planes_give_the_same_bits():
     q, k, v = qkv.unbind(2)
     seqused = _lengths(n, s)
     out0, lse0 = sm80.window_fwd(q, k, v, seqused)
-    out1, lse1 = sm80.window_fwd(q.contiguous(), k.contiguous(), v.contiguous(), seqused)
-    qh, kh, vh = (t.permute(0, 2, 1, 3).contiguous() for t in (q, k, v))           # head-major [N, H, S, D]
+    out1, lse1 = sm80.window_fwd(
+        q.contiguous(), k.contiguous(), v.contiguous(), seqused
+    )
+    qh, kh, vh = (
+        t.permute(0, 2, 1, 3).contiguous() for t in (q, k, v)
+    )  # head-major [N, H, S, D]
     o2, lse2 = sm80.attn_fwd(qh, kh, vh, seqused)
     torch.testing.assert_close(out1, out0, atol=0, rtol=0)
     torch.testing.assert_close(lse1, lse0, atol=0, rtol=0)
@@ -88,12 +109,16 @@ def test_strided_views_and_head_major_planes_give_the_same_bits():
     torch.testing.assert_close(lse2, lse0, atol=0, rtol=0)
     d_out = torch.randn(n, s, H, D, generator=g).to(DEV, BF)
     g0 = sm80.window_bwd(q, k, v, out0, d_out, lse0, seqused)
-    g1 = sm80.window_bwd(q.contiguous(), k.contiguous(), v.contiguous(), out0, d_out, lse0, seqused)
+    g1 = sm80.window_bwd(
+        q.contiguous(), k.contiguous(), v.contiguous(), out0, d_out, lse0, seqused
+    )
     dvv = (d_out.float() * out0.float()).sum(-1).permute(0, 2, 1).contiguous()
     g2 = sm80.attn_bwd(qh, kh, vh, d_out.view(n * s, C), lse0, dvv, seqused)
     for a, b, c in zip(g0, g1, g2, strict=True):
         torch.testing.assert_close(b, a, atol=0, rtol=0)
-        torch.testing.assert_close(c.permute(0, 2, 1, 3), a, atol=1e-2, rtol=2e-2)   # D from torch's fp32 sum here: the same up to the sum's order (rare one-ulp bf16 flips)
+        torch.testing.assert_close(
+            c.permute(0, 2, 1, 3), a, atol=1e-2, rtol=2e-2
+        )  # D from torch's fp32 sum here: the same up to the sum's order (rare one-ulp bf16 flips)
 
 
 def _module(implementation, dtype=BF):
@@ -124,7 +149,13 @@ def spy(monkeypatch):
     calls = []
     for name in ("window_fwd", "window_bwd"):
         orig = getattr(sm80, name)
-        monkeypatch.setattr(sm80, name, (lambda o, nm: (lambda *a, **kw: calls.append(nm) or o(*a, **kw)))(orig, name))
+        monkeypatch.setattr(
+            sm80,
+            name,
+            (lambda o, nm: lambda *a, **kw: calls.append(nm) or o(*a, **kw))(
+                orig, name
+            ),
+        )
     return calls
 
 
@@ -142,13 +173,24 @@ def test_the_module_takes_the_kernels_and_matches_its_pytorch_path(n, s, spy):
     out_t, grads_t = _train(truth, x.float(), ap, dy.float())
     names = ("x", "w_qkv", "w_gate", "w_out")
     worst = []
-    for name, go, gr, gt in zip(("out", *names), (out_o, *grads_o), (out_r, *grads_r), (out_t, *grads_t), strict=True):
+    for name, go, gr, gt in zip(
+        ("out", *names),
+        (out_o, *grads_o),
+        (out_r, *grads_r),
+        (out_t, *grads_t),
+        strict=True,
+    ):
         eo, er = _rel(go, gt), _rel(gr, gt)
         worst.append((eo / max(er, 1e-6), name, eo, er))
         assert go.dtype == gr.dtype, name
         assert torch.isfinite(go).all(), name
-        assert eo < 1.5 * er + 3e-3, f"{name}: sm_80 {eo:.2e} vs the module's PyTorch path {er:.2e} (both against fp32)"
-    print(f"module N{n} S{s}: worst ratio to the PyTorch path", sorted(worst, reverse=True)[:2])
+        assert eo < 1.5 * er + 3e-3, (
+            f"{name}: sm_80 {eo:.2e} vs the module's PyTorch path {er:.2e} (both against fp32)"
+        )
+    print(
+        f"module N{n} S{s}: worst ratio to the PyTorch path",
+        sorted(worst, reverse=True)[:2],
+    )
 
 
 def test_the_gate_and_the_fp32_cast(monkeypatch):
@@ -157,11 +199,18 @@ def test_the_gate_and_the_fp32_cast(monkeypatch):
     q, k, v = (torch.randn(n, s, H, D, generator=g).to(DEV, BF) for _ in range(3))
     seqused = _lengths(n, s)
     assert swa_dit_window_attention(q, k, v, seqused, H, HW) is not None
-    assert swa_dit_window_attention(q, k, v, seqused, 8, HW) is None                  # other head counts and windows are not served
+    assert (
+        swa_dit_window_attention(q, k, v, seqused, 8, HW) is None
+    )  # other head counts and windows are not served
     assert swa_dit_window_attention(q, k, v, seqused, H, 32) is None
-    assert swa_dit_window_attention(q[..., :16], k[..., :16], v[..., :16], seqused, H, HW) is None
+    assert (
+        swa_dit_window_attention(q[..., :16], k[..., :16], v[..., :16], seqused, H, HW)
+        is None
+    )
     out32 = swa_dit_window_attention(q.float(), k.float(), v.float(), seqused, H, HW)
-    assert out32.dtype == torch.float32                                                # cast to bf16 inside, back to the caller's dtype
+    assert (
+        out32.dtype == torch.float32
+    )  # cast to bf16 inside, back to the caller's dtype
     override_setting(monkeypatch, "swa_dit_sm80", "0")
     assert swa_dit_window_attention(q, k, v, seqused, H, HW) is None
 
@@ -187,7 +236,10 @@ def test_inference_is_cuda_graph_capturable_and_deterministic():
     torch.testing.assert_close(again, eager, atol=0, rtol=0)
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 def test_the_module_compiles_fullgraph(spy):
     n, s = 3, 200
     x, ap, dy = _case(n, s)
@@ -202,7 +254,10 @@ def test_the_module_compiles_fullgraph(spy):
     got = [out.detach(), xc.grad, *(p.grad for p in compiled_module.parameters())]
     want = [eager, *eager_grads]
     rel = [_rel(a, b) for a, b in zip(got, want, strict=True)]
-    print("compiled vs eager: out, dx, parameter gradients, relative Frobenius", [f"{r:.1e}" for r in rel])
+    print(
+        "compiled vs eager: out, dx, parameter gradients, relative Frobenius",
+        [f"{r:.1e}" for r in rel],
+    )
     assert max(rel) < 1e-2, rel
 
 
@@ -220,7 +275,9 @@ def test_the_a100_path_needs_no_flash_install(spy, monkeypatch):
 
 
 @pytest.mark.parametrize("dtype", [BF, torch.float32])
-def test_the_output_gate_is_one_hand_cuda_pass_and_matches_sigmoid_times_x(dtype, monkeypatch):
+def test_the_output_gate_is_one_hand_cuda_pass_and_matches_sigmoid_times_x(
+    dtype, monkeypatch
+):
     from miniworld_engine.integrations import sigmoid_gate_sm80
 
     g = torch.Generator().manual_seed(5)
@@ -233,22 +290,34 @@ def test_the_output_gate_is_one_hand_cuda_pass_and_matches_sigmoid_times_x(dtype
     gt, xt = (t.detach().double().requires_grad_() for t in (gate, x))
     want = torch.sigmoid(gt) * xt
     want.backward(dy.double())
-    tol = 1e-2 if dtype is BF else 1e-5                      # fp32: the sigmoid is one tanh.approx (2e-6 relative)
+    tol = (
+        1e-2 if dtype is BF else 1e-5
+    )  # fp32: the sigmoid is one tanh.approx (2e-6 relative)
     for got, ref in ((out, want), (gate.grad, gt.grad), (x.grad, xt.grad)):
         assert got.dtype == dtype
         assert _rel(got, ref.detach()) < tol
-    assert not sigmoid_gate_sm80.serves(gate, x.to(torch.float32 if dtype is BF else BF)), "mixed dtypes"
-    assert not sigmoid_gate_sm80.serves(gate[..., :100], x[..., :100]), "a width that is not a multiple of 8"
+    assert not sigmoid_gate_sm80.serves(
+        gate, x.to(torch.float32 if dtype is BF else BF)
+    ), "mixed dtypes"
+    assert not sigmoid_gate_sm80.serves(gate[..., :100], x[..., :100]), (
+        "a width that is not a multiple of 8"
+    )
     override_setting(monkeypatch, "sigmoid_gate_sm80", "0")
     assert not sigmoid_gate_sm80.serves(gate, x)
 
 
-def test_the_module_takes_the_gate_pass_and_the_switch_keeps_the_triton_one(monkeypatch):
+def test_the_module_takes_the_gate_pass_and_the_switch_keeps_the_triton_one(
+    monkeypatch,
+):
     from miniworld_engine.integrations import sigmoid_gate_sm80
 
     calls = []
     orig = sigmoid_gate_sm80.sigmoid_gate
-    monkeypatch.setattr(sigmoid_gate_sm80, "sigmoid_gate", lambda *a, **k: calls.append(1) or orig(*a, **k))
+    monkeypatch.setattr(
+        sigmoid_gate_sm80,
+        "sigmoid_gate",
+        lambda *a, **k: calls.append(1) or orig(*a, **k),
+    )
     x, ap, dy = _case(2, 256)
     out_on, grads_on = _train(_module(ImplementationType.MINIWORLD), x, ap, dy)
     assert calls, "the module did not take the sm_80 gate"

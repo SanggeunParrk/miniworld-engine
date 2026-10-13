@@ -33,17 +33,17 @@ import torch
 
 
 def triangle_multiplicative_update(
-    x: torch.Tensor,                    # (B, L, L, d_pair) pair representation
-    direction: str,                     # "outgoing" | "incoming"
-    mask: torch.Tensor | None = None,   # (B, L, L) pair mask OR (B, L) residue mask
-    norm_in_weight: torch.Tensor | None = None,   # (d_pair,)
-    norm_in_bias: torch.Tensor | None = None,     # (d_pair,)
-    p_in_weight: torch.Tensor | None = None,      # (2*d_hidden, d_pair)
-    g_in_weight: torch.Tensor | None = None,      # (2*d_hidden, d_pair)
+    x: torch.Tensor,  # (B, L, L, d_pair) pair representation
+    direction: str,  # "outgoing" | "incoming"
+    mask: torch.Tensor | None = None,  # (B, L, L) pair mask OR (B, L) residue mask
+    norm_in_weight: torch.Tensor | None = None,  # (d_pair,)
+    norm_in_bias: torch.Tensor | None = None,  # (d_pair,)
+    p_in_weight: torch.Tensor | None = None,  # (2*d_hidden, d_pair)
+    g_in_weight: torch.Tensor | None = None,  # (2*d_hidden, d_pair)
     norm_out_weight: torch.Tensor | None = None,  # (d_hidden,)
-    norm_out_bias: torch.Tensor | None = None,    # (d_hidden,)
-    p_out_weight: torch.Tensor | None = None,     # (d_pair, d_hidden)
-    g_out_weight: torch.Tensor | None = None,     # (d_pair, d_pair)
+    norm_out_bias: torch.Tensor | None = None,  # (d_hidden,)
+    p_out_weight: torch.Tensor | None = None,  # (d_pair, d_hidden)
+    g_out_weight: torch.Tensor | None = None,  # (d_pair, d_pair)
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Fused triangle multiplicative update — whole-op call, cuequiv argument-compatible.
@@ -79,15 +79,30 @@ def triangle_multiplicative_update(
     # so the argument order can stay keyword-friendly. Say which one is missing instead.
     # Written as an explicit `or` chain rather than a comprehension over a dict so a type checker
     # narrows all six to Tensor past this point -- a comprehension proves nothing about the names.
-    if (p_in_weight is None or g_in_weight is None or norm_out_weight is None
-            or norm_out_bias is None or p_out_weight is None or g_out_weight is None):
-        absent = [k for k, v in (("p_in_weight", p_in_weight), ("g_in_weight", g_in_weight),
-                                 ("norm_out_weight", norm_out_weight),
-                                 ("norm_out_bias", norm_out_bias),
-                                 ("p_out_weight", p_out_weight), ("g_out_weight", g_out_weight))
-                  if v is None]
-        msg = (f"triangle_multiplicative_update requires {', '.join(absent)}; they default to "
-               f"None only to keep the argument order keyword-friendly.")
+    if (
+        p_in_weight is None
+        or g_in_weight is None
+        or norm_out_weight is None
+        or norm_out_bias is None
+        or p_out_weight is None
+        or g_out_weight is None
+    ):
+        absent = [
+            k
+            for k, v in (
+                ("p_in_weight", p_in_weight),
+                ("g_in_weight", g_in_weight),
+                ("norm_out_weight", norm_out_weight),
+                ("norm_out_bias", norm_out_bias),
+                ("p_out_weight", p_out_weight),
+                ("g_out_weight", g_out_weight),
+            )
+            if v is None
+        ]
+        msg = (
+            f"triangle_multiplicative_update requires {', '.join(absent)}; they default to "
+            f"None only to keep the argument order keyword-friendly."
+        )
         raise TypeError(msg)
 
     # Unstack the packed cuequiv in-projection weights into the four (d_hidden, d_pair)
@@ -102,30 +117,48 @@ def triangle_multiplicative_update(
     w_left_gate, w_right_gate = g_in_weight[:d_hidden], g_in_weight[d_hidden:]
 
     from miniworld_engine.kernels import cuda_native
+
     if cuda_native.enabled(x):
         from miniworld_engine.integrations.a100_families import trimul
-        return trimul(x, w_left, w_left_gate, w_right, w_right_gate, g_out_weight, p_out_weight,
-                      norm_in_weight, norm_in_bias, norm_out_weight, norm_out_bias, eps, eps, outgoing, mask)
+
+        return trimul(
+            x,
+            w_left,
+            w_left_gate,
+            w_right,
+            w_right_gate,
+            g_out_weight,
+            p_out_weight,
+            norm_in_weight,
+            norm_in_bias,
+            norm_out_weight,
+            norm_out_bias,
+            eps,
+            eps,
+            outgoing,
+            mask,
+        )
 
     # Grads flow to every weight arg because the unpacked weights above are differentiable
     # slice+transpose VIEWS of the packed inputs.
     from miniworld_engine.kernels.trimul_inproj.triton.unidirectional import (
         trimul_triton,
     )
+
     return trimul_triton(
         x,
         w_left,
         w_left_gate,
         w_right,
         w_right_gate,
-        g_out_weight,        # Wg  (d_pair, d_pair)
-        p_out_weight,        # Wout (d_pair, d_hidden)
+        g_out_weight,  # Wg  (d_pair, d_pair)
+        p_out_weight,  # Wout (d_pair, d_hidden)
         norm_in_weight,
         norm_in_bias,
         norm_out_weight,
         norm_out_bias,
-        eps,                 # eps_in
-        eps,                 # eps_out
+        eps,  # eps_in
+        eps,  # eps_out
         d_hidden,
         outgoing,
         mask=mask,
@@ -133,19 +166,19 @@ def triangle_multiplicative_update(
 
 
 def bidirectional_triangle_multiplicative_update(
-    x: torch.Tensor,                        # (B, L, L, d_pair)
-    mask: torch.Tensor | None = None,       # (B, L) residue mask
+    x: torch.Tensor,  # (B, L, L, d_pair)
+    mask: torch.Tensor | None = None,  # (B, L) residue mask
     *,
-    norm_in_weight: torch.Tensor,           # (d_pair,)
-    norm_in_bias: torch.Tensor,             # (d_pair,)
-    to_left_weight: torch.Tensor,           # (2*d_hidden, d_pair)
-    to_left_gate_weight: torch.Tensor,      # (2*d_hidden, d_pair)
-    to_right_weight: torch.Tensor,          # (2*d_hidden, d_pair)
-    to_right_gate_weight: torch.Tensor,     # (2*d_hidden, d_pair)
-    norm_out_weight: torch.Tensor,          # (2*d_hidden,)
-    norm_out_bias: torch.Tensor,            # (2*d_hidden,)
-    to_out_weight: torch.Tensor,            # (d_pair, 2*d_hidden)
-    to_gate_weight: torch.Tensor,           # (d_pair, d_pair)
+    norm_in_weight: torch.Tensor,  # (d_pair,)
+    norm_in_bias: torch.Tensor,  # (d_pair,)
+    to_left_weight: torch.Tensor,  # (2*d_hidden, d_pair)
+    to_left_gate_weight: torch.Tensor,  # (2*d_hidden, d_pair)
+    to_right_weight: torch.Tensor,  # (2*d_hidden, d_pair)
+    to_right_gate_weight: torch.Tensor,  # (2*d_hidden, d_pair)
+    norm_out_weight: torch.Tensor,  # (2*d_hidden,)
+    norm_out_bias: torch.Tensor,  # (2*d_hidden,)
+    to_out_weight: torch.Tensor,  # (d_pair, 2*d_hidden)
+    to_gate_weight: torch.Tensor,  # (d_pair, d_pair)
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Bidirectional (outgoing+incoming, one fused block) triangle multiplicative
@@ -162,28 +195,46 @@ def bidirectional_triangle_multiplicative_update(
     # Grads flow to every weight arg (differentiable .t() views) and x (autograd-transparent LN_in).
     d_hidden = to_left_weight.shape[0] // 2  # to_left: (2*d_hidden, d_pair)
     from miniworld_engine.kernels import cuda_native
+
     if cuda_native.enabled(x):
         from miniworld_engine.integrations.a100_families import trimul
-        return trimul(x, to_left_weight, to_left_gate_weight, to_right_weight, to_right_gate_weight,
-                      to_gate_weight, to_out_weight, norm_in_weight, norm_in_bias, norm_out_weight,
-                      norm_out_bias, eps, eps, True, mask, bidirectional=True)
+
+        return trimul(
+            x,
+            to_left_weight,
+            to_left_gate_weight,
+            to_right_weight,
+            to_right_gate_weight,
+            to_gate_weight,
+            to_out_weight,
+            norm_in_weight,
+            norm_in_bias,
+            norm_out_weight,
+            norm_out_bias,
+            eps,
+            eps,
+            True,
+            mask,
+            bidirectional=True,
+        )
     from miniworld_engine.kernels.trimul_inproj.triton.bidirectional import (
         bidirectional_trimul_triton,
     )
+
     return bidirectional_trimul_triton(
         x,
         to_left_weight,
         to_left_gate_weight,
         to_right_weight,
         to_right_gate_weight,
-        to_gate_weight,       # Wg  (d_pair, d_pair)
-        to_out_weight,        # Wout (d_pair, 2*d_hidden)
+        to_gate_weight,  # Wg  (d_pair, d_pair)
+        to_out_weight,  # Wout (d_pair, 2*d_hidden)
         norm_in_weight,
         norm_in_bias,
         norm_out_weight,
         norm_out_bias,
-        eps,                  # eps_in
-        eps,                  # eps_out
+        eps,  # eps_in
+        eps,  # eps_out
         d_hidden,
         mask=mask,
     )

@@ -19,6 +19,7 @@ from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
 __all__ = ["layernorm_kernel", "triton_layernorm"]
 
+
 def layernorm_kernel(
     x: torch.Tensor,
     weight: torch.Tensor | None,

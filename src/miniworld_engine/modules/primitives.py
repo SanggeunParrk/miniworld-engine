@@ -166,9 +166,15 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
         backend = self._backend
         if backend == KernelBackend.ANTHROPIC:
             from miniworld_engine.integrations.anthropic import layer_norm
+
             output, self.anthropic_selection = layer_norm(
-                input, self.normalized_shape, self.weight, self.bias, self.eps,
-                out_dtype=input.dtype)
+                input,
+                self.normalized_shape,
+                self.weight,
+                self.bias,
+                self.eps,
+                out_dtype=input.dtype,
+            )
             return output
         if backend == KernelBackend.PYTORCH:
             # Compute in fp32 so a fp32-pinned affine weight never dtype-mismatches a bf16
@@ -202,9 +208,19 @@ class RMSNorm(nn.RMSNorm):
     accumulate in FP32. Input-dtype epsilon would materially change small inputs.
     """
 
-    def __init__(self, normalized_shape, eps=None, elementwise_affine=True,
-                 device=None, dtype=None, *, implementation=ImplementationType.PYTORCH):
-        super().__init__(normalized_shape, eps, elementwise_affine, device=device, dtype=dtype)
+    def __init__(
+        self,
+        normalized_shape,
+        eps=None,
+        elementwise_affine=True,
+        device=None,
+        dtype=None,
+        *,
+        implementation=ImplementationType.PYTORCH,
+    ):
+        super().__init__(
+            normalized_shape, eps, elementwise_affine, device=device, dtype=dtype
+        )
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_rmsnorm(self.implementation)
         # A MINIWORLD request that the B200 policy (``dispatch._torch_on_b200``) resolved to PYTORCH stands in for the kernel and
@@ -212,7 +228,8 @@ class RMSNorm(nn.RMSNorm):
         # (torch 2.13): a qk-norm then hands the attention kernels an fp32 q next to a bf16 k. An explicit PYTORCH request
         # keeps torch's behaviour.
         self._returns_input_dtype = (
-            self.implementation == ImplementationType.MINIWORLD and self._backend == KernelBackend.PYTORCH
+            self.implementation == ImplementationType.MINIWORLD
+            and self._backend == KernelBackend.PYTORCH
         )
         if len(self.normalized_shape) != 1 and self._backend != KernelBackend.PYTORCH:
             raise ValueError("Engine RMSNorm supports one normalized dimension")
@@ -220,6 +237,7 @@ class RMSNorm(nn.RMSNorm):
     def forward(self, x):
         if self._backend == KernelBackend.ANTHROPIC:
             from miniworld_engine.integrations.anthropic_modules import rms_norm
+
             return rms_norm(self, x)
         if self._backend == KernelBackend.PYTORCH or not x.is_cuda:
             out = super().forward(x)
@@ -238,7 +256,9 @@ class RMSNorm(nn.RMSNorm):
     def effective_eps(self, dtype):
         if self.eps is not None:
             return self.eps
-        return torch.finfo(torch.float32 if dtype in (torch.bfloat16, torch.float16) else dtype).eps
+        return torch.finfo(
+            torch.float32 if dtype in (torch.bfloat16, torch.float16) else dtype
+        ).eps
 
 
 class Linear(nn.Linear):

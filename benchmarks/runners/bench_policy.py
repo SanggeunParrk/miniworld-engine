@@ -28,6 +28,7 @@ Two namespaces resolve differently:
   where it DELIBERATELY differs (:data:`MODULE_REGISTRY_EXCEPTIONS`), and a test pins that list: a
   new divergence has to be declared, it cannot appear by accident.
 """
+
 from __future__ import annotations
 
 import csv
@@ -39,7 +40,11 @@ BF16 = "bf16"
 
 _REGISTRY = (
     Path(__file__).resolve().parents[2]
-    / "src" / "miniworld_engine" / "kernels" / "registry" / "registry.csv"
+    / "src"
+    / "miniworld_engine"
+    / "kernels"
+    / "registry"
+    / "registry.csv"
 )
 
 # kernel bench target -> registry family whose dtypes it inherits. A target absent here (the gemm
@@ -62,28 +67,28 @@ KERNEL_TARGET_FAMILY: dict[str, str] = {
 #: precisions is whether *miniworld itself* has an fp32 kernel END TO END.
 MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "transition": "family declares bf16|fp32 (the cuda backward), but the fused forward is "
-                  "bf16-only -- an fp32 run falls to torch, so the module has no fp32 path",
+    "bf16-only -- an fp32 run falls to torch, so the module has no fp32 path",
     "triangle_multiplication": "pulls in layernorm (bf16|fp32) but its own tm1/tm2/trimul_inproj "
-                               "GEMMs are bf16-only",
+    "GEMMs are bf16-only",
     "triangle_multiplication_bidirectional": "same as triangle_multiplication",
     "triangle_attention": "pulls in layernorm (bf16|fp32); its own attention kernels are bf16-only",
     "swa_atom_attention": "flash-backed; bf16-only, and it has no registry family of its own",
     "dit": "a BLOCK, not a family: augmented_attention + conditioned_transition. Both are "
-           "bf16|fp32 end to end, so the block is -- but no single registry family names it",
+    "bf16|fp32 end to end, so the block is -- but no single registry family names it",
     "dit_atom_local": "AF3 32x128 local atom block; its dedicated B200 CUDA path is bf16-only",
     "swa_dit": "the SWA atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "
-               "core even though the adaLN and the transition around it are bf16|fp32",
+    "core even though the adaLN and the transition around it are bf16|fp32",
     "local_dit": "the AF3 atom transformer block (32 x 128 windows): its sm_100a kernels are bf16-only; fp32 falls to the "
-                 "module's PyTorch composition",
+    "module's PyTorch composition",
     "outer_product": "no registry family of its own: the fused path (integrations/opm_train.py, "
-                     "csrc/opm_epilogue.cu) and the Anthropic path are bf16-only; fp32 falls to "
-                     "the module's statements",
+    "csrc/opm_epilogue.cu) and the Anthropic path are bf16-only; fp32 falls to "
+    "the module's statements",
     "msa_pair_weighted_averaging": "no registry family of its own: integrations/pwa_train.py and "
-                                   "the Anthropic msa_pwa cell are bf16-only",
+    "the Anthropic msa_pwa cell are bf16-only",
     "attention_pair_bias": "no registry family of its own; benched at bf16 like the trunk it sits "
-                           "in (cuequivariance's compiled whole-op route is a BF16 contract)",
+    "in (cuequivariance's compiled whole-op route is a BF16 contract)",
     "bias_only_dit": "no registry family of its own: the fused path (integrations/bias_only_dit.py, "
-                     "kernels/bias_only_dit/cuda) is bf16-only; fp32 falls to the module's PyTorch composition",
+    "kernels/bias_only_dit/cuda) is bf16-only; fp32 falls to the module's PyTorch composition",
 }
 
 # module bench target -> does miniworld have an end-to-end fp32 kernel? The diffusion blocks do
@@ -117,7 +122,9 @@ def _family_dtypes() -> dict[str, set[str]]:
     out: dict[str, set[str]] = {}
     with _REGISTRY.open(encoding="utf-8") as handle:
         for row in csv.DictReader(handle):
-            toks = {t.strip() for t in (row.get("dtypes") or "bf16").split("|") if t.strip()}
+            toks = {
+                t.strip() for t in (row.get("dtypes") or "bf16").split("|") if t.strip()
+            }
             out.setdefault(row["family"], set()).update(toks)
     return out
 
@@ -145,8 +152,15 @@ def declared_precisions(level: str, target: str) -> list[int | str]:
     return [FP32_PRECISION, BF16] if both else [BF16]
 
 
-def graph_regimes(level: str, mode: str, metric: str, requested: str) -> tuple[str, ...]:
+def graph_regimes(
+    level: str, mode: str, metric: str, requested: str
+) -> tuple[str, ...]:
     """Automatic module training latency reports both host-dispatched and graphed steps."""
-    if requested == "auto" and level == "module" and mode == "training" and metric == "time":
+    if (
+        requested == "auto"
+        and level == "module"
+        and mode == "training"
+        and metric == "time"
+    ):
         return ("disabled", "manual")
     return (requested,)

@@ -2,7 +2,6 @@
 dim 16 / 32 / 32), 256 (8 x 32), 384 (12 x 32) and the d_pair-128 geometry through the generic path, inference and training, starting and ending node, against the fp32 PyTorch
 module.  The errors are held to the Triton path's own error in the same regime (the kernels compute in bf16 with fp32 accumulation, as the Triton path does)."""
 
-
 import pytest
 import torch
 from settings_helpers import override_setting
@@ -11,7 +10,10 @@ from miniworld_engine import settings
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 #: (d_pair, d_hidden, n_head): the registered geometries (head dim 16 / 32 / 32 / 32 / 32)
 GEOMETRIES = [(64, 64, 4), (64, 128, 4), (64, 64, 2), (256, 256, 8), (384, 384, 12)]
@@ -25,15 +27,26 @@ def ampere():
 
 
 def _rel(got, want):
-    return float((got.float() - want.float()).norm() / want.float().norm().clamp_min(1e-20))
+    return float(
+        (got.float() - want.float()).norm() / want.float().norm().clamp_min(1e-20)
+    )
 
 
 def _module(geom, starting, *, ln_fp32=True, p_drop=0.0, seed=5):
     d, hidden, heads = geom
     torch.manual_seed(seed)
-    m = TriangleAttention(d, heads, d_hidden=hidden, starting=starting, implementation=ImplementationType.MINIWORLD, p_drop=p_drop).cuda()
+    m = TriangleAttention(
+        d,
+        heads,
+        d_hidden=hidden,
+        starting=starting,
+        implementation=ImplementationType.MINIWORLD,
+        p_drop=p_drop,
+    ).cuda()
     for lin in (m.to_query, m.to_key, m.to_value, m.to_gate, m.to_bias, m.to_out):
-        torch.nn.init.normal_(lin.weight, std=d ** -0.5)          # to_out is zero-initialised: a zero update would make every comparison vacuous
+        torch.nn.init.normal_(
+            lin.weight, std=d**-0.5
+        )  # to_out is zero-initialised: a zero update would make every comparison vacuous
     m.ln_pair.weight.data.uniform_(0.7, 1.3)
     m.ln_pair.bias.data.normal_(0, 0.3)
     m = m.to(torch.bfloat16)
@@ -44,14 +57,27 @@ def _module(geom, starting, *, ln_fp32=True, p_drop=0.0, seed=5):
 
 def _reference(m, geom, starting, p_drop=0.0):
     d, hidden, heads = geom
-    ref = TriangleAttention(d, heads, d_hidden=hidden, starting=starting, implementation=ImplementationType.PYTORCH, p_drop=p_drop).cuda().float()
+    ref = (
+        TriangleAttention(
+            d,
+            heads,
+            d_hidden=hidden,
+            starting=starting,
+            implementation=ImplementationType.PYTORCH,
+            p_drop=p_drop,
+        )
+        .cuda()
+        .float()
+    )
     ref.load_state_dict({k: v.float() for k, v in m.state_dict().items()})
     return ref
 
 
 def _inputs(geom, length, batch=1, masked=True, seed=3):
     torch.manual_seed(seed)
-    pair = torch.randn(batch, length, length, geom[0], device="cuda", dtype=torch.bfloat16)
+    pair = torch.randn(
+        batch, length, length, geom[0], device="cuda", dtype=torch.bfloat16
+    )
     mask = (torch.rand(batch, length, device="cuda") > 0.1) if masked else None
     return pair, mask
 
@@ -70,7 +96,9 @@ def _serves(m, pair, mask, *, train):
     from miniworld_engine.integrations import triattn_sm80
 
     if train:
-        return triattn_sm80.serves_train(m, pair.detach().clone().requires_grad_(), mask)
+        return triattn_sm80.serves_train(
+            m, pair.detach().clone().requires_grad_(), mask
+        )
     with torch.no_grad():
         return triattn_sm80.serves_module(m, pair, mask)
 
@@ -86,16 +114,22 @@ def _spy(monkeypatch, module, name, calls):
 
 
 @pytest.mark.parametrize("gated", [False, True])
-@pytest.mark.parametrize("pattern", ["ordinary", "late_peak", "masked_first", "all_masked"])
+@pytest.mark.parametrize(
+    "pattern", ["ordinary", "late_peak", "masked_first", "all_masked"]
+)
 def test_fixed_shift_core_and_safe_recompute(gated, pattern):
     """Check the inference softmax independently, including forced overflow repair."""
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
     torch.manual_seed(819)
     length, heads, width = 512, 1, 32
-    q, k, v, gate = [torch.randn(length * length, width, device="cuda", dtype=torch.bfloat16) * 0.3
-                     for _ in range(4)]
-    bias = torch.randn(1, heads, length, length, device="cuda", dtype=torch.bfloat16) * 0.2
+    q, k, v, gate = [
+        torch.randn(length * length, width, device="cuda", dtype=torch.bfloat16) * 0.3
+        for _ in range(4)
+    ]
+    bias = (
+        torch.randn(1, heads, length, length, device="cuda", dtype=torch.bfloat16) * 0.2
+    )
     if pattern == "late_peak":
         bias[..., :64] = -1000
     elif pattern == "masked_first":
@@ -107,17 +141,52 @@ def test_fixed_shift_core_and_safe_recompute(gated, pattern):
     empty = q.new_empty(0)
     lse = q.new_empty(0, dtype=torch.float32)
     ext = sm80._ext()
-    scale = 1.4426950408889634 / width ** 0.5
+    scale = 1.4426950408889634 / width**0.5
 
     def run(dst, fast):
         if gated:
             fn = ext.attn_fwd_gate_fast if fast else ext.attn_fwd_gate_internal
-            fn(q, k, v, bias, empty, lse, gate, dst, length, heads, 1,
-               width, width, width, width, width, width, scale)
+            fn(
+                q,
+                k,
+                v,
+                bias,
+                empty,
+                lse,
+                gate,
+                dst,
+                length,
+                heads,
+                1,
+                width,
+                width,
+                width,
+                width,
+                width,
+                width,
+                scale,
+            )
         else:
             fn = ext.attn_fwd_fast if fast else ext.attn_fwd_internal
-            fn(q, k, v, bias, dst, lse, length, heads, 1,
-               width, width, width, width, scale, 2, 32, 2)
+            fn(
+                q,
+                k,
+                v,
+                bias,
+                dst,
+                lse,
+                length,
+                heads,
+                1,
+                width,
+                width,
+                width,
+                width,
+                scale,
+                2,
+                32,
+                2,
+            )
 
     with torch.no_grad():
         run(out, True)
@@ -129,10 +198,14 @@ def test_fixed_shift_core_and_safe_recompute(gated, pattern):
         else:
             for row in (0, length - 1):
                 sl = slice(row * length, (row + 1) * length)
-                logits = q[sl].float() @ k[sl].float().T / width ** 0.5 + bias[0, 0].float()
+                logits = (
+                    q[sl].float() @ k[sl].float().T / width**0.5 + bias[0, 0].float()
+                )
                 expected = (logits.softmax(-1) @ v[sl].float()).bfloat16()
                 if gated:
-                    expected = (expected.float() * gate[sl].float().sigmoid()).bfloat16()
+                    expected = (
+                        expected.float() * gate[sl].float().sigmoid()
+                    ).bfloat16()
                 assert _rel(out[sl], expected) < 0.006
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
@@ -162,7 +235,9 @@ def test_aligned_front_preserves_reference_and_live_graph(starting, monkeypatch)
         assert _rel(after, before) < 0.003
         assert _rel(after, want) <= max(1.25 * _rel(before, want), 0.003)
         assert _rel(after.float() - pair.float(), want - pair.float()) < 0.03
-        compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+        compiled = torch.compile(
+            m, fullgraph=True, options={"triton.cudagraphs": False}
+        )
         for _ in range(3):
             compiled(pair, mask)
         graph = torch.cuda.CUDAGraph()
@@ -184,23 +259,55 @@ def test_gate_declines_what_it_is_not_built_for(monkeypatch):
     m = _module(geom, True)
     pair, mask = _inputs(geom, 128)
     ln = m.ln_pair
-    weights = (m.to_query.weight, m.to_key.weight, m.to_value.weight, m.to_gate.weight, m.to_bias.weight)
+    weights = (
+        m.to_query.weight,
+        m.to_key.weight,
+        m.to_value.weight,
+        m.to_gate.weight,
+        m.to_bias.weight,
+    )
     cfg = w.cfg_for(*geom)
     assert w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)
-    assert not w.supports(pair.float(), cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)               # fp32 activations
-    assert not w.supports(pair[:, :, :96].contiguous(), cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)  # not square
-    assert not w.supports(pair.transpose(1, 2), cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)         # not contiguous
+    assert not w.supports(
+        pair.float(), cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask
+    )  # fp32 activations
+    assert not w.supports(
+        pair[:, :, :96].contiguous(),
+        cfg,
+        weights,
+        m.to_out.weight,
+        ln.weight,
+        ln.bias,
+        mask,
+    )  # not square
+    assert not w.supports(
+        pair.transpose(1, 2), cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask
+    )  # not contiguous
     p2, mk2 = _inputs(geom, 192)
-    assert not w.supports(p2, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mk2)                          # L is not a multiple of 128
-    assert not w.supports(pair, cfg, weights, m.to_out.weight.float(), ln.weight, ln.bias, mask)               # fp32 weight
-    assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias.bfloat16(), mask)            # mixed LayerNorm dtypes
-    assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask.float())              # mask dtype
-    assert not w.supports(pair, None, weights, m.to_out.weight, ln.weight, ln.bias, mask)
+    assert not w.supports(
+        p2, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mk2
+    )  # L is not a multiple of 128
+    assert not w.supports(
+        pair, cfg, weights, m.to_out.weight.float(), ln.weight, ln.bias, mask
+    )  # fp32 weight
+    assert not w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias.bfloat16(), mask
+    )  # mixed LayerNorm dtypes
+    assert not w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask.float()
+    )  # mask dtype
+    assert not w.supports(
+        pair, None, weights, m.to_out.weight, ln.weight, ln.bias, mask
+    )
     override_setting(monkeypatch, "triattn_sm80", "0")
-    assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)                       # the switch
+    assert not w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask
+    )  # the switch
 
 
-def test_the_training_gate_declines_when_the_bias_gradient_partials_do_not_fit(monkeypatch):
+def test_the_training_gate_declines_when_the_bias_gradient_partials_do_not_fit(
+    monkeypatch,
+):
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_core2
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide as w
 
@@ -208,12 +315,26 @@ def test_the_training_gate_declines_when_the_bias_gradient_partials_do_not_fit(m
     m = _module(geom, True)
     pair, mask = _inputs(geom, 128)
     ln = m.ln_pair
-    weights = (m.to_query.weight, m.to_key.weight, m.to_value.weight, m.to_gate.weight, m.to_bias.weight)
+    weights = (
+        m.to_query.weight,
+        m.to_key.weight,
+        m.to_value.weight,
+        m.to_gate.weight,
+        m.to_bias.weight,
+    )
     cfg = w.cfg_for(*geom)
-    assert w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask, train=True)
-    monkeypatch.setattr(sm80_core2, "MAX_DBP_BYTES", 1 << 20)                                        # the partials of this step: 128 / 4 groups x 8 heads x 128^2 x 2 B = 8 MiB
-    assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask, train=True)
-    assert w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)                 # inference does not need them
+    assert w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask, train=True
+    )
+    monkeypatch.setattr(
+        sm80_core2, "MAX_DBP_BYTES", 1 << 20
+    )  # the partials of this step: 128 / 4 groups x 8 heads x 128^2 x 2 B = 8 MiB
+    assert not w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask, train=True
+    )
+    assert w.supports(
+        pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask
+    )  # inference does not need them
 
 
 def test_the_module_gate_keeps_the_triton_path_for_what_the_kernels_do_not_serve():
@@ -221,11 +342,11 @@ def test_the_module_gate_keeps_the_triton_path_for_what_the_kernels_do_not_serve
     pair, mask = _inputs((64, 128, 4), 128)
     assert _serves(m, pair, mask, train=False)
     assert _serves(m, pair, mask, train=True)
-    assert not _serves(m, pair.float(), mask, train=False)                            # fp32 activations
+    assert not _serves(m, pair.float(), mask, train=False)  # fp32 activations
     p2, mk2 = _inputs((64, 128, 4), 192)
-    assert not _serves(m, p2, mk2, train=False)                                       # L % 128
+    assert not _serves(m, p2, mk2, train=False)  # L % 128
     m._sm80_cuda = False
-    assert not _serves(m, pair, mask, train=False)                                    # the module's own switch
+    assert not _serves(m, pair, mask, train=False)  # the module's own switch
     m._sm80_cuda = True
     q = _module((64, 128, 4), True)
     q.use_qk_norm = True
@@ -233,7 +354,9 @@ def test_the_module_gate_keeps_the_triton_path_for_what_the_kernels_do_not_serve
     m.train()
     m.p_drop = 0.25
     with torch.no_grad():
-        assert not triattn_serves(m, pair, mask)                                      # dropout active without autograd keeps the Triton path
+        assert not triattn_serves(
+            m, pair, mask
+        )  # dropout active without autograd keeps the Triton path
 
 
 def triattn_serves(m, pair, mask):
@@ -258,7 +381,9 @@ def test_env_switch_turns_every_geometry_off(monkeypatch):
 @pytest.mark.parametrize("starting", [True, False])
 @pytest.mark.parametrize("masked", [False, True])
 @pytest.mark.parametrize("length", [128, 256])
-def test_inference_is_no_less_accurate_than_the_triton_path(geom, starting, masked, length):
+def test_inference_is_no_less_accurate_than_the_triton_path(
+    geom, starting, masked, length
+):
     m = _module(geom, starting).eval()
     ref = _reference(m, geom, starting).eval()
     pair, mask = _inputs(geom, length, masked=masked)
@@ -275,7 +400,11 @@ def test_inference_is_no_less_accurate_than_the_triton_path(geom, starting, mask
     assert mine <= max(1.25 * base, 3e-3), f"cuda {mine:.3e} vs triton path {base:.3e}"
 
 
-@pytest.mark.parametrize("geom", [(64, 64, 4), (64, 128, 4), (256, 256, 8)], ids=["d64_hd16", "d64_hd32", "d256"])
+@pytest.mark.parametrize(
+    "geom",
+    [(64, 64, 4), (64, 128, 4), (256, 256, 8)],
+    ids=["d64_hd16", "d64_hd32", "d256"],
+)
 @pytest.mark.parametrize("starting", [True, False])
 def test_a_batch_of_two_and_a_length_that_is_not_a_power_of_two(geom, starting):
     m = _module(geom, starting).eval()
@@ -289,10 +418,10 @@ def test_a_batch_of_two_and_a_length_that_is_not_a_power_of_two(geom, starting):
         m._sm80_cuda = True
         want = ref(pair.float(), mask)
     assert _rel(got, want) <= max(1.25 * _rel(tri, want), 3e-3)
-    for b in range(2):                                                            # a batch element does not see the other
+    for b in range(2):  # a batch element does not see the other
         with torch.no_grad():
-            alone = m(pair[b:b + 1].contiguous(), mask[b:b + 1].contiguous())
-        assert _rel(got[b:b + 1], alone) < 3e-3
+            alone = m(pair[b : b + 1].contiguous(), mask[b : b + 1].contiguous())
+        assert _rel(got[b : b + 1], alone) < 3e-3
 
 
 @pytest.mark.parametrize("geom", GEOMETRIES, ids=IDS)
@@ -335,7 +464,9 @@ def test_a_fully_masked_row_of_keys_gives_finite_output(geom):
 @pytest.mark.parametrize("geom", GEOMETRIES, ids=IDS)
 @pytest.mark.parametrize("starting", [True, False])
 @pytest.mark.parametrize(("batch", "length"), [(1, 128), (2, 128), (1, 256)])
-def test_training_matches_the_fp32_module_as_well_as_the_triton_path(geom, starting, batch, length, monkeypatch):
+def test_training_matches_the_fp32_module_as_well_as_the_triton_path(
+    geom, starting, batch, length, monkeypatch
+):
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
     m = _module(geom, starting)
@@ -356,11 +487,19 @@ def test_training_matches_the_fp32_module_as_well_as_the_triton_path(geom, start
     names = ["pair", *(n for n, _ in m.named_parameters())]
     for name, mine_g, tri_g, ref_g in zip(names, grads, grads_t, grads_r, strict=True):
         mine, base = _rel(mine_g, ref_g), _rel(tri_g, ref_g)
-        assert mine <= max(1.25 * base, 6e-3), f"d{name}: cuda {mine:.3e} vs triton path {base:.3e}"
-        assert mine_g.dtype == tri_g.dtype, name                                  # gradients come back in the parameters' dtypes (fp32 LayerNorm affine)
+        assert mine <= max(1.25 * base, 6e-3), (
+            f"d{name}: cuda {mine:.3e} vs triton path {base:.3e}"
+        )
+        assert mine_g.dtype == tri_g.dtype, (
+            name
+        )  # gradients come back in the parameters' dtypes (fp32 LayerNorm affine)
 
 
-@pytest.mark.parametrize("geom", [(64, 64, 4), (64, 128, 4), (256, 256, 8)], ids=["d64_hd16", "d64_hd32", "d256"])
+@pytest.mark.parametrize(
+    "geom",
+    [(64, 64, 4), (64, 128, 4), (256, 256, 8)],
+    ids=["d64_hd16", "d64_hd32", "d256"],
+)
 @pytest.mark.parametrize("starting", [True, False])
 def test_training_with_the_broadcast_dropout_matches_the_triton_path(geom, starting):
     m = _module(geom, starting, p_drop=0.25).train()
@@ -368,7 +507,9 @@ def test_training_with_the_broadcast_dropout_matches_the_triton_path(geom, start
     cot = torch.randn(1, 128, 128, geom[0], device="cuda")
     out, grads = _loss_and_grads(m, pair, mask, cot, 5)
     m._sm80_cuda = False
-    out_t, grads_t = _loss_and_grads(m, pair, mask, cot, 5)             # the same draw: the same dropped channels
+    out_t, grads_t = _loss_and_grads(
+        m, pair, mask, cot, 5
+    )  # the same draw: the same dropped channels
     m._sm80_cuda = True
     assert _rel(out, out_t) < 6e-3
     names = ["pair", *(n for n, _ in m.named_parameters())]
@@ -397,15 +538,17 @@ def test_only_the_parameters_or_only_the_pair_want_gradients(geom, monkeypatch):
     cot = torch.randn(1, 128, 128, geom[0], device="cuda")
     for p in m.parameters():
         p.requires_grad_(False)
-    assert not triattn_sm80.serves_train(m, pair.requires_grad_(False), mask)             # nothing wants a gradient: the inference path serves it
+    assert not triattn_sm80.serves_train(
+        m, pair.requires_grad_(False), mask
+    )  # nothing wants a gradient: the inference path serves it
     p1 = pair.detach().clone().requires_grad_()
-    out = m(p1, mask)                                                                    # only the pair tensor
-    g, = torch.autograd.grad((out.float() * cot).sum(), [p1])
+    out = m(p1, mask)  # only the pair tensor
+    (g,) = torch.autograd.grad((out.float() * cot).sum(), [p1])
     assert torch.isfinite(g.float()).all()
     for p in m.parameters():
         p.requires_grad_(True)
     pair2 = pair.detach().clone()
-    out = m(pair2, mask)                                                                 # only the parameters
+    out = m(pair2, mask)  # only the parameters
     gs = torch.autograd.grad((out.float() * cot).sum(), list(m.parameters()))
     assert all(torch.isfinite(t.float()).all() for t in gs)
 
@@ -553,7 +696,9 @@ def test_d512_width_inference_and_training_match_the_fp32_module():
     assert _rel(out, out_r) <= max(1.5 * _rel(out_t, out_r), 3e-3)
     names = ["pair", *(n for n, _ in m.named_parameters())]
     for name, g, gt, gr in zip(names, grads, grads_t, grads_r, strict=True):
-        assert _rel(g, gr) <= max(1.5 * _rel(gt, gr), 6e-3), f"d{name}: cuda {_rel(g, gr):.3e} vs triton path {_rel(gt, gr):.3e}"
+        assert _rel(g, gr) <= max(1.5 * _rel(gt, gr), 6e-3), (
+            f"d{name}: cuda {_rel(g, gr):.3e} vs triton path {_rel(gt, gr):.3e}"
+        )
 
 
 @pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
@@ -567,7 +712,11 @@ def test_inference_core_schedule_preserves_mask_and_reference(d, starting, monke
         for length in (384, 768):
             pair, _ = _inputs(geom, length)
             for probability in (None, 0.5, 1.0):
-                mask = None if probability is None else torch.rand(1, length, device="cuda") > probability
+                mask = (
+                    None
+                    if probability is None
+                    else torch.rand(1, length, device="cuda") > probability
+                )
                 override_setting(monkeypatch, "triattn_sm80_tuned", "0")
                 before = m(pair, mask)
                 override_setting(monkeypatch, "triattn_sm80_tuned", "1")
@@ -603,7 +752,9 @@ def test_tuned_core_fullgraph_replay_reads_updated_inputs(d, starting):
 
 @pytest.mark.parametrize("d", [256, 384, 512])
 @pytest.mark.parametrize("starting", [True, False])
-def test_adaptive_gated_core_handles_tail_keys_and_mixed_batch_counts(d, starting, monkeypatch):
+def test_adaptive_gated_core_handles_tail_keys_and_mixed_batch_counts(
+    d, starting, monkeypatch
+):
     """Each batch item independently chooses dense or compact, including both sides of the threshold."""
     geom = (d, d, d // 32)
     m = _module(geom, starting).eval()
@@ -612,7 +763,7 @@ def test_adaptive_gated_core_handles_tail_keys_and_mixed_batch_counts(d, startin
         for valid in (0, 1, 63, 64, 65, 288, 289, 384):
             mask.zero_()
             mask[0, :valid] = True
-            mask[1, :384 - valid] = True
+            mask[1, : 384 - valid] = True
             override_setting(monkeypatch, "triattn_sm80_internal", "0")
             before = m(pair, mask)
             override_setting(monkeypatch, "triattn_sm80_internal", "1")

@@ -15,7 +15,8 @@ from miniworld_engine.integrations import anthropic as upstream
 @torch.library.custom_op("miniworld_anthropic::swa_rms", mutates_args=())
 def rms(x: Tensor, scale: Tensor | None, shift: Tensor | None, eps: float) -> Tensor:
     return upstream.carried_kernel("dtk_kernels").ln_modulate(
-        x, scale, shift, rms=True, eps=eps, sigmoid_scale=False)
+        x, scale, shift, rms=True, eps=eps, sigmoid_scale=False
+    )
 
 
 @rms.register_fake
@@ -26,7 +27,8 @@ def _rms_fake(x, scale, shift, eps):
 @torch.library.custom_op("miniworld_anthropic::swa_gate", mutates_args=())
 def gate(x: Tensor, gate: Tensor, res: Tensor | None, sigmoid: bool) -> Tensor:
     return upstream.carried_kernel("dtk_kernels").gate_residual(
-        x, gate=gate, res=res, sigmoid_gate=sigmoid)
+        x, gate=gate, res=res, sigmoid_gate=sigmoid
+    )
 
 
 @gate.register_fake
@@ -45,11 +47,26 @@ def _swiglu_fake(ab):
 
 
 @torch.library.custom_op("miniworld_anthropic::swa_gather", mutates_args=())
-def gather(q: Tensor, k: Tensor, v: Tensor, bias: Tensor, indices: Tensor,
-           heads: int, scale: float) -> Tensor:
+def gather(
+    q: Tensor,
+    k: Tensor,
+    v: Tensor,
+    bias: Tensor,
+    indices: Tensor,
+    heads: int,
+    scale: float,
+) -> Tensor:
     return upstream.carried_kernel("gather_attn").gather_attn(
-        q, k, v, bias, indices, heads, scale=scale,
-        ensure_sorted=False, allow_candidate=True)
+        q,
+        k,
+        v,
+        bias,
+        indices,
+        heads,
+        scale=scale,
+        ensure_sorted=False,
+        allow_candidate=True,
+    )
 
 
 @gather.register_fake

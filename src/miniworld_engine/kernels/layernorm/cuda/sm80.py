@@ -45,12 +45,24 @@ def ext():
     """The row-kernel extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
     ensure_cuda_home()
     extra = settings.current().norms_sm80_flags.split()
-    tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    tag = (
+        ""
+        if not extra
+        else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
+    )
     return load_extension(
         name=f"norm_rows_sm80{tag}",
         sources=[str(_dir / "norm_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", "-gencode=arch=compute_80,code=sm_80", f"-I{_dir}", *extra],
-        extra_cflags=["-std=c++17", "-O3"], verbose=False,
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-std=c++17",
+            "-O3",
+            "-gencode=arch=compute_80,code=sm_80",
+            f"-I{_dir}",
+            *extra,
+        ],
+        extra_cflags=["-std=c++17", "-O3"],
+        verbose=False,
     )
 
 
@@ -66,7 +78,11 @@ def loads() -> bool:
         ext()
     except Exception as exc:  # noqa: BLE001 -- any toolchain problem keeps the Triton path
         _FAILED = True
-        warnings.warn(f"sm_80 norm kernels unavailable, keeping the Triton path: {exc!r}", RuntimeWarning, stacklevel=2)
+        warnings.warn(
+            f"sm_80 norm kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
         return False
     return True
 
@@ -79,9 +95,14 @@ def _is_a100(index: int) -> bool:
 
 def enabled(device: torch.device) -> bool:
     """The switches every norm kernel of this card shares: ``settings.norms_sm80`` not 0, the engine backend not forced to Triton, capability exactly 8.0."""
-    if settings.current().norms_sm80 == "0" or settings.current().engine_backend == "triton":
+    if (
+        settings.current().norms_sm80 == "0"
+        or settings.current().engine_backend == "triton"
+    ):
         return False
-    return _is_a100(device.index if device.index is not None else torch.cuda.current_device())
+    return _is_a100(
+        device.index if device.index is not None else torch.cuda.current_device()
+    )
 
 
 def _params_ok(n: int, *params: Tensor | None) -> bool:
@@ -89,7 +110,9 @@ def _params_ok(n: int, *params: Tensor | None) -> bool:
     seen = {p.dtype for p in params if p is not None}
     if len(seen) > 1 or not seen <= {torch.float32, torch.bfloat16}:
         return False
-    return all(p is None or (p.is_cuda and p.ndim == 1 and p.shape[0] == n) for p in params)
+    return all(
+        p is None or (p.is_cuda and p.ndim == 1 and p.shape[0] == n) for p in params
+    )
 
 
 #: Training steps this small are launch-bound: the forward, the backward and the dw / db reduction are three kernels of ~3 us each, and the Triton path's forward + one atomic backward wins by 3-35 % there
@@ -102,17 +125,38 @@ _TINY_TRAIN_WIDTHS = (64, 768)
 def _triton_wins(x: Tensor, weight: Tensor | None, bias: Tensor | None) -> bool:
     """A training call (a gradient is needed) of a vector-path width over so few elements that the Triton path is faster; False otherwise.  Shapes and flags only: ``torch.compile`` traces it."""
     n = x.shape[-1]
-    if n % 8 or not _TINY_TRAIN_WIDTHS[0] <= n <= _TINY_TRAIN_WIDTHS[1] or not _TINY_TRAIN_ELEMS[0] <= x.numel() <= _TINY_TRAIN_ELEMS[1]:
+    if (
+        n % 8
+        or not _TINY_TRAIN_WIDTHS[0] <= n <= _TINY_TRAIN_WIDTHS[1]
+        or not _TINY_TRAIN_ELEMS[0] <= x.numel() <= _TINY_TRAIN_ELEMS[1]
+    ):
         return False
-    return torch.is_grad_enabled() and (x.requires_grad or (weight is not None and weight.requires_grad) or (bias is not None and bias.requires_grad))
+    return torch.is_grad_enabled() and (
+        x.requires_grad
+        or (weight is not None and weight.requires_grad)
+        or (bias is not None and bias.requires_grad)
+    )
 
 
-def supports(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None = None) -> bool:
+def supports(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None = None,
+) -> bool:
     """Whether the kernels run this call: a CUDA bf16 / fp32 activation of width 1..4096, an fp32 / bf16 affine (or none), A100, switches on, extension built, and not one of the tiny training
     steps the Triton path wins (:func:`_triton_wins`; ``settings.norms_sm80=force`` serves those too)."""
-    if not x.is_cuda or x.dtype not in (torch.bfloat16, torch.float32) or x.ndim < 1 or not 1 <= x.shape[-1] <= MAX_N or x.numel() == 0:
+    if (
+        not x.is_cuda
+        or x.dtype not in (torch.bfloat16, torch.float32)
+        or x.ndim < 1
+        or not 1 <= x.shape[-1] <= MAX_N
+        or x.numel() == 0
+    ):
         return False
-    if not _params_ok(x.shape[-1], weight, bias) or (row_scale is not None and row_scale.numel() != x.numel() // x.shape[-1]):
+    if not _params_ok(x.shape[-1], weight, bias) or (
+        row_scale is not None and row_scale.numel() != x.numel() // x.shape[-1]
+    ):
         return False
     if _triton_wins(x, weight, bias) and settings.current().norms_sm80 != "force":
         return False
@@ -120,27 +164,55 @@ def supports(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: T
 
 
 # ------------------------------------------------------------------------------------------------------------------ forward ops
-def _layernorm_fwd_fake(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, eps: float) -> Tensor:
+def _layernorm_fwd_fake(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    eps: float,
+) -> Tensor:
     """y: the normalised rows, like x."""
     return torch.empty_like(x)
 
 
 @opaque(fake=_layernorm_fwd_fake, name="layernorm_sm80_fwd")
-def _layernorm_fwd(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, eps: float) -> Tensor:
+def _layernorm_fwd(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    eps: float,
+) -> Tensor:
     """Inference forward over the rows of x [M, N] (contiguous): ``y = LN(x) w + b`` (times ``row_scale`` [M] in x's dtype when given), no statistics saved."""
     y = torch.empty_like(x)
     ext().norm_fwd(x, weight, bias, row_scale, y, None, None, eps, False)
     return y
 
 
-def _layernorm_train_fwd_fake(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, eps: float) -> tuple[Tensor, Tensor, Tensor]:
+def _layernorm_train_fwd_fake(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor]:
     """(y like x, mean [M], rstd [M]): the statistics are fp32 whatever x's dtype is."""
     m = x.shape[0]
-    return torch.empty_like(x), x.new_empty((m,), dtype=torch.float32), x.new_empty((m,), dtype=torch.float32)
+    return (
+        torch.empty_like(x),
+        x.new_empty((m,), dtype=torch.float32),
+        x.new_empty((m,), dtype=torch.float32),
+    )
 
 
 @opaque(fake=_layernorm_train_fwd_fake, name="layernorm_sm80_train_fwd")
-def _layernorm_train_fwd(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, eps: float) -> tuple[Tensor, Tensor, Tensor]:
+def _layernorm_train_fwd(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    eps: float,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Training forward: ``(y, mean, rstd)`` of the rows of x [M, N]; the statistics are what the backward reads."""
     m = x.shape[0]
     y = torch.empty_like(x)
@@ -150,8 +222,17 @@ def _layernorm_train_fwd(x: Tensor, weight: Tensor | None, bias: Tensor | None, 
     return y, mean, rstd
 
 
-def _layernorm_train_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, mean: Tensor, rstd: Tensor,
-                              need_dw: bool, need_db: bool) -> tuple[Tensor, Tensor, Tensor]:
+def _layernorm_train_bwd_fake(
+    dy: Tensor,
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    mean: Tensor,
+    rstd: Tensor,
+    need_dw: bool,
+    need_db: bool,
+) -> tuple[Tensor, Tensor, Tensor]:
     """(dx like x, dweight, dbias): the parameter gradients are [N] in the parameters' dtype, and empty when not asked for."""
     n = x.shape[1]
     dw = weight.new_empty((n,)) if need_dw and weight is not None else x.new_empty((0,))
@@ -160,15 +241,35 @@ def _layernorm_train_bwd_fake(dy: Tensor, x: Tensor, weight: Tensor | None, bias
 
 
 @opaque(fake=_layernorm_train_bwd_fake, name="layernorm_sm80_train_bwd")
-def _layernorm_train_bwd(dy: Tensor, x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None, mean: Tensor, rstd: Tensor, need_dw: bool,
-                         need_db: bool) -> tuple[Tensor, Tensor, Tensor]:
+def _layernorm_train_bwd(
+    dy: Tensor,
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    row_scale: Tensor | None,
+    mean: Tensor,
+    rstd: Tensor,
+    need_dw: bool,
+    need_db: bool,
+) -> tuple[Tensor, Tensor, Tensor]:
     """Backward of the rows of x [M, N] from dy [M, N] and the forward's statistics: ``(dx, dweight, dbias)``; one persistent kernel and a fixed-order reduction of its
     per-CTA partial sums (``dx`` is bit-reproducible; ``dweight`` / ``dbias`` agree between runs to fp32 rounding when the rows are handed out dynamically, at large M)."""
     n = x.shape[1]
     dx = torch.empty_like(x)
     dw = weight.new_empty((n,)) if need_dw and weight is not None else x.new_empty((0,))
     db = bias.new_empty((n,)) if need_db and bias is not None else x.new_empty((0,))
-    ext().norm_bwd(dy, x, weight, row_scale, mean, rstd, dx, dw if need_dw and weight is not None else None, db if need_db and bias is not None else None, False)
+    ext().norm_bwd(
+        dy,
+        x,
+        weight,
+        row_scale,
+        mean,
+        rstd,
+        dx,
+        dw if need_dw and weight is not None else None,
+        db if need_db and bias is not None else None,
+        False,
+    )
     return dx, dw, db
 
 
@@ -188,26 +289,62 @@ class _LayerNormTrain(torch.autograd.Function):
         x, weight, bias, row_scale, mean, rstd = ctx.saved_tensors
         need_dw = weight is not None and ctx.needs_input_grad[1]
         need_db = bias is not None and ctx.needs_input_grad[2]
-        dx, dw, db = _layernorm_train_bwd(dy.contiguous().to(x.dtype), x, weight, bias, row_scale, mean, rstd, need_dw, need_db)
+        dx, dw, db = _layernorm_train_bwd(
+            dy.contiguous().to(x.dtype),
+            x,
+            weight,
+            bias,
+            row_scale,
+            mean,
+            rstd,
+            need_dw,
+            need_db,
+        )
         return dx, (dw if need_dw else None), (db if need_db else None), None, None
 
 
-def layernorm(x: Tensor, weight: Tensor | None, bias: Tensor | None, eps: float = 1e-5, row_scale: Tensor | None = None) -> Tensor:
+def layernorm(
+    x: Tensor,
+    weight: Tensor | None,
+    bias: Tensor | None,
+    eps: float = 1e-5,
+    row_scale: Tensor | None = None,
+) -> Tensor:
     """``LayerNorm(x) * weight + bias`` over the last axis (optionally times ``row_scale``, one factor per row), autograd-aware.  The caller checked :func:`supports`."""
     shape = x.shape
     x2 = x.reshape(-1, shape[-1])
     if not x2.is_contiguous():
         x2 = x2.contiguous()
     rs = None if row_scale is None else row_scale.reshape(-1).to(x2.dtype).contiguous()
-    grad = torch.is_grad_enabled() and (x.requires_grad or (weight is not None and weight.requires_grad) or (bias is not None and bias.requires_grad))
-    y = _LayerNormTrain.apply(x2, weight, bias, rs, eps) if grad else _layernorm_fwd(x2, weight, bias, rs, eps)
+    grad = torch.is_grad_enabled() and (
+        x.requires_grad
+        or (weight is not None and weight.requires_grad)
+        or (bias is not None and bias.requires_grad)
+    )
+    y = (
+        _LayerNormTrain.apply(x2, weight, bias, rs, eps)
+        if grad
+        else _layernorm_fwd(x2, weight, bias, rs, eps)
+    )
     return y.view(shape)
 
 
-def layernorm_backward(dy: Tensor, x: Tensor, weight: Tensor, mean: Tensor, rstd: Tensor, row_scale: Tensor | None = None) -> tuple[Tensor, Tensor, Tensor]:
+def layernorm_backward(
+    dy: Tensor,
+    x: Tensor,
+    weight: Tensor,
+    mean: Tensor,
+    rstd: Tensor,
+    row_scale: Tensor | None = None,
+) -> tuple[Tensor, Tensor, Tensor]:
     """``(dx, dweight, dbias)`` of the rows of x from dy and the statistics (``mean`` / ``rstd`` [M] fp32): the kernel the training backward runs, without autograd (the
     kernel-level bench).  ``weight`` fixes the dtype of the two parameter gradients."""
     shape = x.shape
-    x2, dy2 = x.reshape(-1, shape[-1]).contiguous(), dy.reshape(-1, shape[-1]).contiguous()
-    dx, dw, db = _layernorm_train_bwd(dy2, x2, weight, weight, row_scale, mean, rstd, True, True)
+    x2, dy2 = (
+        x.reshape(-1, shape[-1]).contiguous(),
+        dy.reshape(-1, shape[-1]).contiguous(),
+    )
+    dx, dw, db = _layernorm_train_bwd(
+        dy2, x2, weight, weight, row_scale, mean, rstd, True, True
+    )
     return dx.view(shape), dw, db

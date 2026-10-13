@@ -90,6 +90,7 @@ class AttentionPairBias(nn.Module):
             from miniworld_engine.integrations.anthropic_modules import (
                 attention_pair_bias,
             )
+
             return attention_pair_bias(self, single, pair, mask)
         # Hand-CUDA B200 (integrations.attention_pair_bias_b200 states its contract; the residual is folded there).
         if _b200.serves_inference(self, single, pair, mask):
@@ -101,7 +102,9 @@ class AttentionPairBias(nn.Module):
             return _sm80.update_inference(self, single, pair, mask)
         if _sm80.serves_train(self, single, pair, mask):
             return _sm80.update_train(self, single, pair, mask)
-        single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
+        single_res = (
+            single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
+        )
         single = self.ln_single(single)
         query = self.to_query(single)
         key = self.to_key(single)
@@ -128,10 +131,17 @@ class AttentionPairBias(nn.Module):
             # Reuse the existing QK + pair-bias kernel with one augmentation.
             # Bias-only attention is a different operation and cannot replace QK.
             q, k, v = (t.transpose(1, 2).unsqueeze(0) for t in (query, key, value))
-            out = kernels.triton_augmented_attention_pair_bias(
-                q, k, v, bias.permute(0, 2, 3, 1),
-                None if mask is None else mask.unsqueeze(0),
-            ).squeeze(0).transpose(1, 2)
+            out = (
+                kernels.triton_augmented_attention_pair_bias(
+                    q,
+                    k,
+                    v,
+                    bias.permute(0, 2, 3, 1),
+                    None if mask is None else mask.unsqueeze(0),
+                )
+                .squeeze(0)
+                .transpose(1, 2)
+            )
         else:
             raise InvalidImplementationError(self.implementation)
 

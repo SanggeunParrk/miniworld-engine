@@ -10,6 +10,7 @@ the backward reaches the dX and the bias reduce. That is not a shortcut -- those
 only way production reaches these kernels, so a driver that got to them any other way would be
 tuning a launch nothing makes.
 """
+
 from __future__ import annotations
 
 import torch
@@ -38,7 +39,12 @@ def _message(*, backward: bool) -> None:
     try:
         with torch.autocast("cuda", dtype=torch.bfloat16):
             out = message_hidden_reduce(
-                preactivation, weight, bias, mask, _NEIGHBORS, backend="triton",
+                preactivation,
+                weight,
+                bias,
+                mask,
+                _NEIGHBORS,
+                backend="triton",
             )
         if backward:
             out.sum().backward()
