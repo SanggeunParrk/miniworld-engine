@@ -19,7 +19,8 @@ def test_build_3d_rope_is_independent_of_autocast(device):
     with torch.autocast(device, dtype=torch.bfloat16):
         cos1, sin1 = build_3d_rope(pos, uid, 32)
     assert cos1.dtype == sin1.dtype == torch.float32
-    assert torch.equal(cos1, cos0) and torch.equal(sin1, sin0)
+    assert torch.equal(cos1, cos0)
+    assert torch.equal(sin1, sin0)
 
 
 @pytest.mark.parametrize("device", DEVICES)

@@ -462,7 +462,8 @@ def test_every_sample_group_of_the_core(monkeypatch, n_head, d_head, batch):
         core(v, P, out, S)  # ungated (the training dV)
         assert relative(out, o) < 3e-3, sg
         for k in (core.kernel(sg, True), core.kernel(sg, False)):
-            assert k.regs <= 128 and k.lmem == 0, (sg, k.regs, k.lmem)
+            assert k.regs <= 128, (sg, k.regs, k.lmem)
+            assert k.lmem == 0, (sg, k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -476,7 +477,8 @@ def test_dpb32_repeatable(L, n_head, d_head):
     DA, M = H * DH, A * L
     dpb = T.Dpb32(dev, nh=H, dh=DH)
     k = dpb.kernel()
-    assert k.regs <= 128 and k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 128, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
     for seed in range(4):
         torch.manual_seed(1000 * L + seed)
         P = torch.softmax(2 * torch.randn(H * L, L, device="cuda"), -1)
@@ -539,7 +541,8 @@ def test_swiglu_gemms_match_fp64(M):
     )
     fwd, bwd = T.GemmGluTF32(dev), T.GemmGluTF32(dev, bwd=True)
     for k in (fwd.k, bwd.k):
-        assert k.regs <= 128 and k.lmem == 0, (k.regs, k.lmem)
+        assert k.regs <= 128, (k.regs, k.lmem)
+        assert k.lmem == 0, (k.regs, k.lmem)
     ab, h = torch.empty(M, 2 * H, device="cuda"), torch.empty(M, H, device="cuda")
     fwd(x, w, ab, h)
     ab64 = x.double() @ w.double().t()
@@ -828,7 +831,8 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     xa = torch.full((M, 768), float("nan"), device="cuda")
     front = T32.FrontTF32(torch.cuda.current_device(), da)
     k = front.kernel(cl)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     front(x, tab[:, 1], w, vg, T, xa=xa)
     tok = torch.arange(M, device="cuda") % T
     t64 = tab[:, 1].double()[tok]
@@ -872,7 +876,8 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
         wop.view(cl, -1, 2, nc, 32)[3, 5, 1, 7], wo[nc * 3 + 7, 64 * 5 + 32 + k0]
     )  # P[((c p) 2 + h) NC + n, k]
     k = tail.kernel(cl)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     out = torch.full((M, 768), float("nan"), device="cuda")
     xt = torch.full((M, 768), float("nan"), device="cuda")  # row-major
     hs = torch.full((M * 48, 32), float("nan"), device="cuda")  # blocked k-block-major
@@ -922,7 +927,8 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536**0.5)
     tail = T32.TailTF32(dev, da)
     k = tail.kernel(T32.TAIL_PAIR)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     Mp = T32.tail_rows(M, T32.TAIL_PAIR)
     out = torch.full((M, 768), float("nan"), device="cuda")
     xt = torch.full((Mp, 800), float("nan"), device="cuda")[
@@ -1140,7 +1146,8 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
     core = T32.PvGateCoreTF32(dev, nh=n_head, dh=d_head, pdl=True)
     for sg in T32.pv_groups(d_head):
         k = core.kernel(sg, True)
-        assert k.lmem == 0 and k.regs <= 128, (sg, k.regs, k.lmem)
+        assert k.lmem == 0, (sg, k.regs, k.lmem)
+        assert k.regs <= 128, (sg, k.regs, k.lmem)
 
 
 # ------------------------------------------------------------------------------------------------------------ the pair tail (A/B)
@@ -1250,7 +1257,8 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     with torch.no_grad():
         out = fast(x, c, p)
     torch.cuda.synchronize()
-    assert inf3 and picked, (len(inf3), picked)
+    assert inf3, (len(inf3), picked)
+    assert picked, (len(inf3), picked)
     assert torch.isfinite(out).all()
     assert all((cl == T32.TAIL_PAIR) is want for cl in picked), picked
 
@@ -1275,7 +1283,8 @@ def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
 
     k = T32.Dpb32(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
-    assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 255, (k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -1316,6 +1325,7 @@ def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(
             op = T32.Dpb32(torch.cuda.current_device(), nh=H, dh=DH)
         _poison()
         db = torch.empty(H * L, L, device="cuda")
+        assert op is not None
         op(do, v, P, dd, db, A)
         torch.cuda.synchronize()
         assert op.last == "pair"

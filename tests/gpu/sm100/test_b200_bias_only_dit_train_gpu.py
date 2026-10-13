@@ -476,7 +476,8 @@ def _dpb_case(L, A, H, DH, seed):
 def test_dpb_pair_kernel_does_not_spill(n_head, d_head):
     _sm100_only()
     k = C.DpbKernel(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
-    assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 255, (k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -516,6 +517,7 @@ def test_dpb_pair_bit_identical_with_a_poisoned_allocator(
             op = C.DpbKernel(torch.cuda.current_device(), nh=H, dh=DH)
         _poison()
         db = torch.empty(H * L, L, device="cuda", dtype=torch.bfloat16)
+        assert op is not None
         op(do, v, P.view(H * L, L), dd, db, A)
         torch.cuda.synchronize()
         assert op.last == "pair"
@@ -693,7 +695,8 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
     H, DA, D = n_head, n_head * d_head, 768
     ins, want, BWF = _tail_case(L, A, H, d_head, L + A + H)
     op = BWF.TailBwd(torch.cuda.current_device(), H, d_head)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
     out = _run_tail(op, ins, A, L, H, DA)
     T = A * L // 128
     got = {
@@ -769,7 +772,8 @@ def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
         1 + 0.1 * torch.randn(DC, device="cuda", generator=g),
     )
     op = BWF.Wgrad(torch.cuda.current_device(), da)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
 
     def run():
         outs = tuple(
@@ -964,7 +968,8 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
         **{f"WnT{i}": Wn[i * D : (i + 1) * D].t().contiguous() for i in range(4)},
     }
     op = BWF.MidBwd(torch.cuda.current_device(), H, d_head)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
 
     def run():
         dG = torch.full((M, 4 * D), nan, device="cuda", dtype=bf)

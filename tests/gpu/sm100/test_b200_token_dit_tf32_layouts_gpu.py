@@ -104,6 +104,7 @@ def test_training_core_tf32(heads, L, masked):
     )
     torch.cuda.synchronize()
     want.backward(dO.double())
+    assert bd.grad is not None
     bgrad = bd.grad.masked_fill(torch.isinf(bias.double()), 0.0)
     errs = {
         "O": _rel(O.view(A, L, H, dh), want),
@@ -215,7 +216,7 @@ class _TF32:
 def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
     from miniworld_engine.integrations import token_dit
 
-    H, d = layout
+    _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=11)
     ref.eval()
     eng.eval()
@@ -234,7 +235,8 @@ def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
         with _TF32(True):
             module = eng(x, c, p, mask)
     token_dit._RUNNERS.clear()
-    assert got.dtype is torch.float32 and torch.isfinite(got).all()
+    assert got.dtype is torch.float32
+    assert torch.isfinite(got).all()
     ef, em = _rel(got, truth), _rel(module, truth)
     assert ef < 1.5 * em + 2e-3, f"fused {ef:.2e} vs module path {em:.2e}"
 
@@ -265,7 +267,7 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     block: output and every gradient within 1.5x the module path's error in the same TF32 regime."""
     from miniworld_engine.integrations import token_dit_train
 
-    H, d = layout
+    _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=21)
     g = torch.Generator(device="cuda").manual_seed(22)
     single = torch.randn(A, 1, L, d, device="cuda", generator=g)
@@ -303,7 +305,7 @@ def test_fused_training_fp32_under_bf16_autocast(layout, monkeypatch):
     precision follows the tensors -- with the same result as without autocast."""
     from miniworld_engine.integrations import token_dit_train
 
-    H, d = layout
+    _, d = layout
     _, eng = _pair_of_blocks(layout, True, seed=31)
     A, L = 4, 256
     g = torch.Generator(device="cuda").manual_seed(32)

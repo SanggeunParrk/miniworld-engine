@@ -33,7 +33,11 @@ def _rel(a, b):
 
 
 def _cases():
-    from miniworld_engine.modules import AttentionPairBias, Transition, TriangleMultiplication
+    from miniworld_engine.modules import (
+        AttentionPairBias,
+        Transition,
+        TriangleMultiplication,
+    )
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     return {

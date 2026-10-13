@@ -299,7 +299,8 @@ def test_hoist_off_recomputes_every_call(monkeypatch):
     with torch.no_grad():
         eng(single, cond, pair)
         names = _kernel_names(lambda: eng(single, cond, pair), monkeypatch)
-    assert _count(names, "cond_fwd") == 1 and _count(names, "pair_bias_fwd") == 1, names
+    assert _count(names, "cond_fwd") == 1, names
+    assert _count(names, "pair_bias_fwd") == 1, names
 
 
 @pytest.mark.parametrize("cross", [False, True])

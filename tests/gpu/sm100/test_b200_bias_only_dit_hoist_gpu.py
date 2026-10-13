@@ -95,7 +95,7 @@ def fused_only():
 
     old_fwd, old_ref = bo_module.BiasOnlyAttention.forward, hoist_mod._reference
     bo_module.BiasOnlyAttention.forward = boom
-    hoist_mod._reference = boom
+    hoist_mod._reference = boom  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         yield
     finally:
@@ -187,7 +187,8 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
             i
         )  # slice i of the one [nb H, L L] buffer
         assert relative(o, w) < tol["bias"], (i, relative(o, w))
-    assert dp.dtype is dtype and relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
+    assert dp.dtype is dtype, relative(dp, w_dp)
+    assert relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
     for i in range(nb):
         assert (
             dgs[i].dtype is attns[i].ln_pair.weight.dtype
@@ -212,10 +213,12 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
     outs, dp, dgs, dws = hoist_run(attns, pair, dbs, implementation=PT)
     bound = 2e-2 if dtype is BF else 3e-3
     for o, w in zip(outs, w_outs, strict=True):
-        assert o.shape == (1, H, L, L) and relative(o, w) < bound
+        assert o.shape == (1, H, L, L)
+        assert relative(o, w) < bound
     assert relative(dp, w_dp) < bound
     for a, b, c, d in zip(dgs, w_dgs, dws, w_dws, strict=True):
-        assert relative(a, b) < bound and relative(c, d) < bound
+        assert relative(a, b) < bound
+        assert relative(c, d) < bound
     # unused bias 1, fused
     zero = [dbs[0], torch.zeros_like(dbs[1]), dbs[2]]
     w_outs, w_dp, w_dgs, w_dws = hoist_ref64(attns, pair, zero)
@@ -223,7 +226,8 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
         outs, dp, dgs, dws = hoist_run(attns, pair, dbs, use=[0, 2])
     tol = TOL[dtype]
     assert relative(dp, w_dp) < tol["dpair"]
-    assert torch.count_nonzero(dgs[1]) == 0 and torch.count_nonzero(dws[1]) == 0
+    assert torch.count_nonzero(dgs[1]) == 0
+    assert torch.count_nonzero(dws[1]) == 0
     for i in (0, 2):
         assert (
             relative(dgs[i], w_dgs[i]) < tol["dg"]
@@ -260,7 +264,8 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
     for name, regs, lmem in HK.kernel_attrs():
-        assert lmem == 0 and regs <= 128, (name, regs, lmem)
+        assert lmem == 0, (name, regs, lmem)
+        assert regs <= 128, (name, regs, lmem)
     g = torch.Generator(device="cuda").manual_seed(R)
     x = (3 * torch.randn(R, 128, device="cuda", generator=g) + 0.5).to(xdt)
     dy = torch.randn(R, 128, device="cuda", generator=g)
@@ -276,7 +281,8 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
         torch.cuda.synchronize()
         outs.append((dx, y))
     dx, y = outs[0]
-    assert torch.isfinite(dx.float()).all() and torch.isfinite(y.float()).all()
+    assert torch.isfinite(dx.float()).all()
+    assert torch.isfinite(y.float()).all()
     assert relative(dx, xd.grad) < (6e-3 if odt is BF else 1e-5), relative(dx, xd.grad)
     ln = y.double() if K == 128 else y[:, :128].double() + y[:, 128:].double()
     assert relative(ln, ln64) < 3e-5, relative(ln, ln64)
@@ -330,7 +336,7 @@ def stack_step(blocks, x, c, p, mask, dy, dtype, hoist, wrap=None):
     leaves = [t.detach().to(dtype).requires_grad_(True) for t in (x, c, p)]
     for b in blocks:
         b.zero_grad(set_to_none=True)
-    y = forward(blocks, *leaves, mask, hoist, wrap)
+    y = forward(blocks, leaves[0], leaves[1], leaves[2], mask, hoist, wrap)
     y.backward(dy.to(dtype))
     return (
         [y.detach()]

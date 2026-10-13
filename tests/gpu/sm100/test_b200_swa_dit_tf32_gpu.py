@@ -8,6 +8,8 @@ training step) against eager. ``-k fwd`` selects the forward tests; ``test_bwd_*
 
 from __future__ import annotations
 
+import importlib
+
 import pytest
 import torch
 import torch.nn.functional as F
@@ -227,7 +229,8 @@ def test_fwd_kernels_build_without_spills():
 
 def test_fwd_banded_reference_matches_the_dense_one():
     leaves, cos, sin, seqused = _case(3, 1, 384, seed=7)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
     mod = _mod32(c_base, wmod)
     dense = swa_dit_block_reference(
         *(t.double() for t in (q, mod, cos, sin)),
@@ -259,7 +262,8 @@ def test_fwd_modulation_runs_on_tf32(b, s, tf32_spy):
 def test_fwd_inference_matches_the_reference(a, s, tf32_spy, monkeypatch):
     b = 1
     leaves, cos, sin, seqused = _case(a, b, s, seed=1)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
     mod = _mod32(c_base, wmod)
     ref = _ref64(q, mod, cos, sin, seqused, *w, b)["out"]
     with torch.no_grad():
@@ -297,7 +301,8 @@ def test_fwd_inference_matches_the_reference(a, s, tf32_spy, monkeypatch):
 def test_fwd_training_saves_match_the_reference(a, s):
     b = 1
     leaves, cos, sin, seqused = _case(a, b, s, seed=2)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
     mod = _mod32(c_base, wmod)
     cs, sn = cos.reshape(-1, D // 2).contiguous(), sin.reshape(-1, D // 2).contiguous()
     ref = _ref64(q, mod, cos, sin, seqused, *w, b)
@@ -374,7 +379,8 @@ def test_fwd_fake_matches_the_launch(save):
 
 def test_fwd_inference_is_cuda_graph_capturable():
     leaves, cos, sin, seqused = _case(5, 1, 256, seed=5)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
 
     def fused():
         return swa_dit_block(
@@ -405,7 +411,8 @@ def test_fwd_inference_is_cuda_graph_capturable():
 
 def test_fwd_off_the_128_grid_keeps_the_triton_path(tf32_spy):
     leaves, cos, sin, seqused = _case(2, 1, 200, seed=6)
-    q, c_base, wmod, *w = leaves
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = leaves
+    w = (wqkv, wg, wo, wu, wd)
     with torch.no_grad():
         out = swa_dit_block(
             q, _mod32(c_base, wmod), cos, sin, seqused, *w, 1, half_window=HW
@@ -505,7 +512,10 @@ def _stack(n_blocks, seed):
     ).to(DEV, F32)
     with torch.no_grad():
         for blk in blocks:
-            blk.adaln_modulation[1].weight.normal_(std=0.05)
+            assert isinstance(blk, SWADiTBlock)
+            projection = blk.adaln_modulation[1]
+            assert isinstance(projection, torch.nn.Linear)
+            projection.weight.normal_(std=0.05)
     return blocks
 
 
@@ -563,7 +573,7 @@ def test_fwd_compile_fullgraph_training_matches_eager(tf32_spy, monkeypatch):
         pytest.skip("cuda/sm100/tf32_bwd is not available")
     import copy
 
-    from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_bwd
+    tf32_bwd = importlib.import_module("miniworld_engine.kernels.swa_dit.cuda.sm100.tf32_bwd")
 
     bwd_calls = []
     for name in ("block_bwd_tf32", "mod_bwd_tf32"):

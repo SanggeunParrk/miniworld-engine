@@ -45,7 +45,7 @@ def test_atom_dw_matches_fp64(R, f32):
     rows.atom_dw(torch.cuda.current_device(), f32)(problems, R)
     torch.cuda.synchronize()
     tol = 3e-3 if f32 else 1e-2                   # tf32 operands (2^-11); bf16 destinations (2^-9)
-    for (A, B, dests), ref in zip(problems, refs):
+    for (A, B, dests), ref in zip(problems, refs, strict=True):
         got = torch.cat([d.double() for d in dests], 0)
         assert got.shape == ref.shape
         assert float((got - ref).norm() / ref.norm()) < tol, (tuple(A.shape), tuple(B.shape))
@@ -60,7 +60,7 @@ def test_atom_dw_is_deterministic(R):
     dw(problems, R)
     first = [torch.cat(d, 0).clone() for _, _, d in problems]
     dw(problems, R)
-    for (_, _, d), f in zip(problems, first):
+    for (_, _, d), f in zip(problems, first, strict=True):
         assert torch.equal(torch.cat(d, 0), f)
 
 

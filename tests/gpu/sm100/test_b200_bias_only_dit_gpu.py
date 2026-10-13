@@ -712,7 +712,8 @@ def test_pv_core_p_early_within_fp64_and_bitwise_the_plain_builds(S, L, n_head, 
         core(v, P, out, S, g=g)
         torch.cuda.synchronize()
         outs.append(out.clone())
-    assert torch.equal(outs[2], outs[1]) and torch.equal(outs[2], outs[0])
+    assert torch.equal(outs[2], outs[1])
+    assert torch.equal(outs[2], outs[0])
     _pv_within_fp64(outs[2], P, v, g, S, L, n_head, d_head)
 
 
@@ -776,7 +777,8 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
         for _ in range(2):  # a P-cache miss (hoist right before), then a hit
             out = fast(x, c, p)
     torch.cuda.synchronize()
-    assert inf3b and torch.isfinite(out.float()).all()
+    assert inf3b
+    assert torch.isfinite(out.float()).all()
     on = env is None
     assert early and all(e == on for e in early), early
     assert serial == [on] * len(serial) and len(serial) == 2, (
@@ -785,7 +787,7 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
     dev = torch.cuda.current_device()
     for kind in ("pv", "pvpdl"):
         assert not TR._op(kind, torch.device("cuda", dev)).p_early, kind
-    assert "P_EARLY" not in open(C._dir / "bo_pvdpb.cu").read()
+    assert "P_EARLY" not in (C._dir / "bo_pvdpb.cu").read_text()
 
 
 def test_pv_core_served_keys_per_v_tile(monkeypatch):

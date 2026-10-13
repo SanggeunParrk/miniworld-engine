@@ -60,7 +60,7 @@ def _reproduce_keep_mask(
         # ty cannot model Triton's JITFunction/ConstexprFunction/constexpr stubs: calling one
         # jitted function from another, `triton.cdiv`, and launch-time constexpr/`num_warps`
         # keywords are all reported as mismatches even though Triton accepts them.
-        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=ROUNDS) < keep_probability  # ty: ignore[invalid-argument-type]
+        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=ROUNDS) < keep_probability
         tl.store(mask_ptr + offsets, keep, mask=offsets < elements)
 
     elements = 1
@@ -68,7 +68,7 @@ def _reproduce_keep_mask(
         elements *= size
     flat = torch.empty(elements, dtype=torch.bool, device=seed.device)
     block = 1024
-    _keep_mask_kernel[(triton.cdiv(elements, block),)](  # ty: ignore[invalid-argument-type]
+    _keep_mask_kernel[(triton.cdiv(elements, block),)](
         seed,
         flat,
         elements,
@@ -456,11 +456,11 @@ def test_mpnn_edge_tail_shared_gelu_matches_the_unshared_form_bitwise() -> None:
     def _probe(x_ptr, plain_ptr, shared_ptr, dplain_ptr, dshared_ptr, N: tl.constexpr):
         columns = tl.arange(0, N)
         x = tl.load(x_ptr + columns)
-        erf_term = _gelu_erf(x)  # ty: ignore[invalid-argument-type]
-        tl.store(plain_ptr + columns, _gelu(x))  # ty: ignore[invalid-argument-type]
-        tl.store(shared_ptr + columns, _gelu_from_erf(x, erf_term))  # ty: ignore[invalid-argument-type]
-        tl.store(dplain_ptr + columns, _gelu_grad(x))  # ty: ignore[invalid-argument-type]
-        tl.store(dshared_ptr + columns, _gelu_grad_from_erf(x, erf_term))  # ty: ignore[invalid-argument-type]
+        erf_term = _gelu_erf(x)
+        tl.store(plain_ptr + columns, _gelu(x))
+        tl.store(shared_ptr + columns, _gelu_from_erf(x, erf_term))
+        tl.store(dplain_ptr + columns, _gelu_grad(x))
+        tl.store(dshared_ptr + columns, _gelu_grad_from_erf(x, erf_term))
 
     width = 1024
     generator = torch.Generator(device="cuda").manual_seed(7)

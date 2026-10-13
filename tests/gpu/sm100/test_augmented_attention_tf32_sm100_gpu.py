@@ -94,8 +94,10 @@ def test_backward_tf32_into_column_blocks_and_sample_groups(A, L):
     DQ, DK, DV, DB = sm100.backward_tf32(q, k, v, do, bias, LSE, Dd, A, L, dq=buf[:, :W], dk=buf[:, W:2 * W], dv=buf[:, 2 * W:3 * W])
     DQ0, DK0, DV0, DB0 = sm100.backward_tf32(q, k, v, do, bias, LSE, Dd, A, L)
     torch.cuda.synchronize()
-    assert DQ.data_ptr() == buf.data_ptr() and torch.isnan(buf[:, 3 * W:]).all(), "outputs left their column blocks"
-    assert _rel(DK, DK0) < 1e-5 and _rel(DV, DV0) < 1e-5, (_rel(DK, DK0), _rel(DV, DV0))
+    assert DQ.data_ptr() == buf.data_ptr(), "outputs left their column blocks"
+    assert torch.isnan(buf[:, 3 * W:]).all(), "outputs left their column blocks"
+    assert _rel(DK, DK0) < 1e-5, (_rel(DK, DK0), _rel(DV, DV0))
+    assert _rel(DV, DV0) < 1e-5, (_rel(DK, DK0), _rel(DV, DV0))
     leaves = [t.double().requires_grad_() for t in (q, k, v)]
     bd = bias.double().requires_grad_()
     o, _, _ = _reference(leaves[0], leaves[1], leaves[2], bd, A, L)

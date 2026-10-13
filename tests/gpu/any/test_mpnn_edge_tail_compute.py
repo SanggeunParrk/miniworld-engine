@@ -214,7 +214,7 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     @triton.jit
     def draws(seed_ptr, out_ptr, n: tl.constexpr, probability: tl.constexpr):
         offsets = tl.program_id(0) * 256 + tl.arange(0, 256)
-        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < probability  # ty: ignore[invalid-argument-type]
+        keep = tl.rand(tl.load(seed_ptr), offsets, n_rounds=7) < probability
         tl.store(out_ptr + offsets, keep, offsets < n)
 
     width = 128
@@ -225,7 +225,7 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     one = torch.ones(width, device="cuda")
     out, saved = torch.empty_like(values), torch.empty_like(values)
     packed = torch.empty(rows * 4, device="cuda", dtype=torch.int32)
-    compute._project_output.fn[(triton.cdiv(rows, 32),)](  # ty: ignore[invalid-argument-type]
+    compute._project_output.fn[(triton.cdiv(rows, 32),)](
         values, weight, zero, values, one, zero, seed, out, saved, packed,
         rows, 0, probability, 1.0, 1e-5,
         WIDTH=width, BLOCK_M1=32, BLOCK_K=32, DROPOUT=True,
@@ -241,7 +241,7 @@ def test_compute_tail_packed_mask_matches_philox(rows, probability):
     grad_out = torch.randn_like(values)
     grad_values, grad_update = torch.empty_like(values), torch.empty_like(values)
     dg, db, du = (torch.zeros_like(one) for _ in range(3))
-    compute._norm_backward.fn[(triton.cdiv(rows, 32),)](  # ty: ignore[invalid-argument-type]
+    compute._norm_backward.fn[(triton.cdiv(rows, 32),)](
         grad_out, saved, packed, one, grad_values, grad_update, dg, db, du,
         rows, 0, 1.0, 1e-5, WIDTH=128, BLOCK_M1=32, DROPOUT=True,
         num_warps=4, num_stages=1,

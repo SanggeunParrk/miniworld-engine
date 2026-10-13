@@ -48,7 +48,8 @@ def test_apb_h100_inference_graph(shape, L, master, monkeypatch):
         want = ref(single.float(), pair.float(), mask)
         a, b = got.float().flatten(), want.float().flatten()
         cosine = float(a.dot(b) / (a.norm() * b.norm()))
-        assert torch.isfinite(got).all() and cosine >= 0.9999, cosine
+        assert torch.isfinite(got).all(), cosine
+        assert cosine >= 0.9999, cosine
 
     with torch.no_grad():
         assert native.serves_inference(ours, single, pair, mask)
