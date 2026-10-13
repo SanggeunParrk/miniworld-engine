@@ -32,6 +32,7 @@ import subprocess
 from pathlib import Path
 
 import torch
+
 from miniworld_engine import settings
 
 NH, DH, DM, DP = 4, 32, 128, 16
@@ -45,12 +46,25 @@ def cubin(stem: str, hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a; rebuilt only when a source or a flag changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
-    nvcc, rel, host = kernel_toolchain()
+    if hopper:
+        from miniworld_engine.kernels._nvcc import (
+            ensure_cuda_home,
+            host_flags,
+            nvcc_path,
+        )
+
+        ensure_cuda_home()
+        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
+        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+            raise RuntimeError("Local Hopper kernels require matching CUDA <= 12.9")
+    else:
+        nvcc, rel, host = kernel_toolchain()
     flags = (
         *host,
         "-std=c++17",
         "-O3",
-        "-arch=sm_100a",
+        "-arch=sm_90a" if hopper else "-arch=sm_100a",
+        *(("-DATOM_HOPPER=1",) if hopper else ()),
         "-cubin",
         "-lineinfo",
         f"-I{_dir}",
@@ -62,8 +76,19 @@ def cubin(stem: str, hopper: bool = False) -> str:
         _dir / f"{stem}.cu",
     ):
         h.update(f.read_bytes())
+    if hopper:
+        h.update((_dir.parent / "sm100_atom" / "sm100.cuh").read_bytes())
+        h.update(
+            (
+                _dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc"
+            ).read_bytes()
+        )
     root = settings.engine_jit_root()
-    out = root / "atom_local_sm100" / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    out = (
+        root
+        / ("atom_local_sm90" if hopper else "atom_local_sm100")
+        / f"{stem}_{h.hexdigest()[:16]}.cubin"
+    )
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -106,11 +131,13 @@ _HOPPER_CROSS = {
     "cln_b": "local_cond_ln_bwd_sm90",
 }
 
+
 @functools.lru_cache(maxsize=None)
 def _load(name: str, device_index: int):
     from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
 
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+
     hopper = _hopper(device_index)
     if hopper and name == "fwd":
         stem, func, smem = "lattn_fwd", "local_attn_fwd_sm90", 57376
@@ -118,9 +145,18 @@ def _load(name: str, device_index: int):
         stem, func, smem = f"lattn_{name}", f"local_attn_{name}_sm90", 65568
     elif hopper and name == "db_samples":
         stem, func, smem = "lattn_dkv", "local_bias_samples_sm90", 0
-    elif hopper and name in ("kv_bias_part", "reduce_columns", "zero_kv", "add_cond", "cross_grad_pack", "kv_pack"):
+    elif hopper and name in (
+        "kv_bias_part",
+        "reduce_columns",
+        "zero_kv",
+        "add_cond",
+        "cross_grad_pack",
+        "kv_pack",
+    ):
         stem, func, smem = "lcross", f"local_{name}_sm90", 0
-    elif hopper and name in _HOPPER_CROSS:      # the K / V AdaLN row kernels (sm_100a has them inside sm100_atom's pre_fwd_kv / pre_bwd_kv)
+    elif (
+        hopper and name in _HOPPER_CROSS
+    ):  # the K / V AdaLN row kernels (sm_100a has them inside sm100_atom's pre_fwd_kv / pre_bwd_kv)
         stem, func, smem = "lcross", _HOPPER_CROSS[name], 0
     elif name not in KERNELS:
         raise NotImplementedError(f"local atom kernel {name!r} exists on sm_90a only")
@@ -193,11 +229,19 @@ def attn_fwd(q, k, v, bias, kmask=None):
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     km = _u8(kmask)
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
-    if _hopper(d):      # sm_90a: a CTA (4 warps of mma + a TMA warp) per (64 queries, head, sample); register softmax, wgmma P V
+
+    if _hopper(
+        d
+    ):  # sm_90a: a CTA (4 warps of mma + a TMA warp) per (64 queries, head, sample); register softmax, wgmma P V
         if N % 64:
             raise ValueError("Local Hopper attention requires padded N divisible by 64")
-        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v))
-        _load("fwd", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A))
+        maps = tuple(
+            _tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128)
+            for t in (q, k, v)
+        )
+        _load("fwd", d)(
+            (N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, o, lse, int(N), int(A)
+        )
         return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, nsm(d) // (nq * NH)))
@@ -232,15 +276,57 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     ldd = dkv.stride(0)
     km = _u8(kmask)
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
-    if _hopper(d):      # sm_90a: dQ, dK / dV (+ per-sample dbias partials) as two wgmma kernels, then the fixed-order sample sum
-        if N % 64 or any(t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)):
-            raise ValueError("Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64")
+
+    if _hopper(
+        d
+    ):  # sm_90a: dQ, dK / dV (+ per-sample dbias partials) as two wgmma kernels, then the fixed-order sample sum
+        if N % 64 or any(
+            t.dtype != torch.bfloat16 or not t.is_contiguous() for t in (q, k, v, do)
+        ):
+            raise ValueError(
+                "Local Hopper backward requires contiguous bf16 operands and padded N divisible by 64"
+            )
         dbias = torch.empty(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
         partial = torch.empty(A, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
-        maps = tuple(_tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128) for t in (q, k, v, do))
-        _load("dq", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, int(ldd), int(N), int(A))
-        _load("dkv", d)((N // 64, A * NH, 1), (160, 1, 1), *maps, bias, km, lse, dd, dkv, partial, int(ldd), int(N), int(A))
-        _load("db_samples", d)((min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1), (256, 1, 1), partial, dbias, int(N), int(A))
+        maps = tuple(
+            _tmap(t, (DM, N, A), (DM * 2, N * DM * 2), (64, 64, 1), 128)
+            for t in (q, k, v, do)
+        )
+        _load("dq", d)(
+            (N // 64, A * NH, 1),
+            (160, 1, 1),
+            *maps,
+            bias,
+            km,
+            lse,
+            dd,
+            dkv,
+            int(ldd),
+            int(N),
+            int(A),
+        )
+        _load("dkv", d)(
+            (N // 64, A * NH, 1),
+            (160, 1, 1),
+            *maps,
+            bias,
+            km,
+            lse,
+            dd,
+            dkv,
+            partial,
+            int(ldd),
+            int(N),
+            int(A),
+        )
+        _load("db_samples", d)(
+            (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+            (256, 1, 1),
+            partial,
+            dbias,
+            int(N),
+            int(A),
+        )
         return dbias
     dbias = torch.zeros(NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
@@ -295,10 +381,18 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
 def _params(wb, gamma):
     """Wb [4, 16] and gamma [16] as the kernels read them: contiguous, bf16 or fp32 (anything else is converted to fp32)."""
     from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+
     if _hopper(_dev(wb)):
-        if wb.dtype not in (torch.bfloat16, torch.float32) or gamma.dtype not in (torch.bfloat16, torch.float32):
+        if wb.dtype not in (torch.bfloat16, torch.float32) or gamma.dtype not in (
+            torch.bfloat16,
+            torch.float32,
+        ):
             raise ValueError("Local Hopper pair parameters require BF16 or FP32")
-        return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1)
+        return (
+            wb.contiguous(),
+            gamma.contiguous(),
+            int(wb.dtype == torch.bfloat16) | (int(gamma.dtype == torch.bfloat16) << 1),
+        )
     if wb.dtype != gamma.dtype or wb.dtype not in (torch.bfloat16, torch.float32):
         wb, gamma = wb.float(), gamma.float()
     return wb.contiguous(), gamma.contiguous(), int(wb.dtype == torch.bfloat16)
@@ -329,7 +423,9 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
     """dbias [4, nwin, 32, 128] fp32 -> dz (z's shape and dtype, contiguous), dgamma [16], dWb [4, 16] (fp32)."""
     rows = z.numel() // DP
     wb, gamma, bf = _params(wb, gamma)
-    dz = torch.empty(z.shape, device=z.device, dtype=z.dtype)    # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
+    dz = torch.empty(
+        z.shape, device=z.device, dtype=z.dtype
+    )  # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
     d = _dev(z)
     nb = min(nsm(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
@@ -384,6 +480,25 @@ def cond_ln_bwd(c, dcn, gamma, dgamma, eps=1e-5, acc=None):
     M = c.shape[0]
     dc = torch.empty_like(c) if acc is None else acc
     d = _dev(c)
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import _hopper
+
+    if _hopper(d):
+        nb = _row_grid(M, d)
+        part = torch.empty(nb, DM, device=c.device, dtype=torch.float32)
+        _load("cln_b", d)(
+            (nb, 1, 1),
+            (256, 1, 1),
+            c,
+            dcn,
+            gamma.float().contiguous(),
+            dc,
+            acc,
+            part,
+            int(M),
+            float(eps),
+        )
+        _load("reduce_columns", d)((1, 1, 1), (128, 1, 1), part, dgamma, int(nb))
+        return dc
     _load("cln_b", d)(
         (_row_grid(M, d), 1, 1),
         (256, 1, 1),
@@ -405,7 +520,16 @@ def kv_fwd(x1, mkv, bs, eps=1e-5):
     """sm_90a. xkv = LN(x1) * sigmoid(mkv[:, :128] + bs) + mkv[:, 128:]  ([M, 128] bf16)."""
     M = x1.shape[0]
     out = torch.empty_like(x1)
-    _load("kv_f", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), out, int(M), float(eps))
+    _load("kv_f", _dev(x1))(
+        ((M + 7) // 8, 1, 1),
+        (256, 1, 1),
+        x1,
+        mkv,
+        bs.float().contiguous(),
+        out,
+        int(M),
+        float(eps),
+    )
     return out
 
 
@@ -414,7 +538,18 @@ def kv_bwd(x1, mkv, bs, dxkv, eps=1e-5):
     M = x1.shape[0]
     dx1 = torch.empty_like(x1)
     dmkv = torch.empty(M, 2 * DM, device=x1.device, dtype=torch.bfloat16)
-    _load("kv_b", _dev(x1))(((M + 7) // 8, 1, 1), (256, 1, 1), x1, mkv, bs.float().contiguous(), dxkv, dx1, dmkv, int(M), float(eps))
+    _load("kv_b", _dev(x1))(
+        ((M + 7) // 8, 1, 1),
+        (256, 1, 1),
+        x1,
+        mkv,
+        bs.float().contiguous(),
+        dxkv,
+        dx1,
+        dmkv,
+        int(M),
+        float(eps),
+    )
     return dx1, dmkv
 
 
@@ -423,7 +558,18 @@ def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
     scale-bias column sums come from ``sm100_atom.finish_columns_hopper`` (it reduces dmod after this call)."""
     M = a.shape[0]
     d = _dev(a)
-    _load("a1x", d)((min(nsm(d) * 4, (M + 7) // 8), 1, 1), (256, 1, 1), a, mod, dx1, ds, dmod, dbias, int(M), float(eps))
+    _load("a1x", d)(
+        (min(nsm(d) * 4, (M + 7) // 8), 1, 1),
+        (256, 1, 1),
+        a,
+        mod,
+        dx1,
+        ds,
+        dmod,
+        dbias,
+        int(M),
+        float(eps),
+    )
 
 
 def kv_bias_hopper(dmkv):
@@ -448,11 +594,17 @@ def add_cond_hopper(dc, extra):
 
 def cross_grad_pack_hopper(grads, weights):
     """sm_90a. The four cross-mode parameter gradients (fp32, contiguous) -> tensors of the weights' shapes and dtypes."""
-    if len(grads) != 4 or any(g.dtype != torch.float32 or not g.is_contiguous() for g in grads):
-        raise ValueError("Local Hopper cross gradient pack requires four contiguous FP32 gradients")
+    if len(grads) != 4 or any(
+        g.dtype != torch.float32 or not g.is_contiguous() for g in grads
+    ):
+        raise ValueError(
+            "Local Hopper cross gradient pack requires four contiguous FP32 gradients"
+        )
     out = [torch.empty_like(w) for w in weights]
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    _load("cross_grad_pack", _dev(weights[0]))((128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask))
+    _load("cross_grad_pack", _dev(weights[0]))(
+        (128, 1, 1), (256, 1, 1), *grads, *out, int(bfmask)
+    )
     return out
 
 
@@ -463,10 +615,17 @@ def kv_pack_hopper(weights, packed_pre):
     dev = gamma.device
     wm = torch.empty(256, 128, device=dev, dtype=torch.bfloat16)
     bs, gg = (torch.empty(128, device=dev, dtype=torch.float32) for _ in range(2))
-    if any(w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous() for w in weights):
-        raise ValueError("Local Hopper KV pack requires contiguous BF16/FP32 parameters")
+    if any(
+        w.dtype not in (torch.bfloat16, torch.float32) or not w.is_contiguous()
+        for w in weights
+    ):
+        raise ValueError(
+            "Local Hopper KV pack requires contiguous BF16/FP32 parameters"
+        )
     bfmask = sum((w.dtype == torch.bfloat16) << i for i, w in enumerate(weights))
-    _load("kv_pack", _dev(gamma))((128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, int(bfmask))
+    _load("kv_pack", _dev(gamma))(
+        (128, 1, 1), (256, 1, 1), *weights, wm, bs, gg, int(bfmask)
+    )
     return wm, bs, gg, packed_pre[0][128:256], packed_pre[0][256:384]
 
 

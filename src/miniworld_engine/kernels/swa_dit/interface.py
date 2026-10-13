@@ -233,6 +233,26 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable. On B200 a
     bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call without a gradient the TF32 mod_fwd_tf32 kernel.
     """
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        native_h100_enabled,
+        native_h100_mod_fwd,
+    )
+    if native_h100_enabled(c_base):
+        from miniworld_engine.kernels.swa_dit.autograd import SWADiTModulationH100
+        if (c_base.ndim != 3 or c_base.shape[-1] != 128 or c_base.numel() == 0
+                or not c_base.is_contiguous() or not wmod.is_contiguous()
+                or c_base.dtype not in (torch.bfloat16, torch.float32)
+                or wmod.dtype not in (c_base.dtype, torch.float32)
+                or tuple(wmod.shape) != (768, 128) or wmod.device != c_base.device):
+            raise ValueError("native H100 SWA modulation requires contiguous BF16/FP32 width128 and [768,128] weights")
+        c = c_base.reshape(-1, c_base.shape[-1])
+        if torch.is_grad_enabled() and (c.requires_grad or wmod.requires_grad):
+            from miniworld_engine.integrations.token_dit_train import (
+                _native_caller_output,
+            )
+            out = SWADiTModulationH100.apply(c, wmod)
+            return _native_caller_output(out, c_base, wmod, force=True)
+        return native_h100_mod_fwd(c, wmod)[0]
     if _mod_sm100(
         c_base, wmod
     ):  # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels

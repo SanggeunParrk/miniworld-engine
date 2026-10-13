@@ -56,6 +56,7 @@ turns it off).
 from __future__ import annotations
 
 import contextlib
+import os
 import warnings
 import weakref
 from types import SimpleNamespace
@@ -125,7 +126,11 @@ def _pack(weights, backward=False):
     transposes)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as sm100
 
-    if sm100._hopper(weights[0].device.index if weights[0].device.index is not None else torch.cuda.current_device()):
+    if sm100._hopper(
+        weights[0].device.index
+        if weights[0].device.index is not None
+        else torch.cuda.current_device()
+    ):
         return sm100.pack_hopper(weights, backward=backward)
     block = _namespace(weights)
     with torch.no_grad():
@@ -161,8 +166,8 @@ def _weights(weights, backward=False):
     except (
         RuntimeError
     ):  # inference tensors carry no version counter: nothing could invalidate an entry
-        return _pack(weights)
-    key = _capture.scoped(tuple(id(w) for w in weights))
+        return _pack(weights, backward)
+    key = _capture.scoped((bool(backward), *(id(w) for w in weights)))
     if key is None:
         return _pack(weights, backward)
     hit = _PACKS.get(key)
@@ -178,13 +183,6 @@ def _weights(weights, backward=False):
     pack = _pack(weights, backward)
     _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
     return pack
-
-
-def _padded(t, n):
-    """[A, 1, N, d] -> [A, 1, n, d], zero rows appended (the tensor itself when n == N)."""
-    return (
-        t if t.shape[2] == n else torch.nn.functional.pad(t, (0, 0, 0, n - t.shape[2]))
-    )
 
 
 def _padded(t, n):
@@ -244,9 +242,11 @@ def _kernels_ready(index: int) -> bool:
 
     try:
         hopper = rows._hopper(index)
-        for name in (("cond", "pre", "post", "pack") if hopper else _ROW_KERNELS):
+        for name in ("cond", "pre", "post", "pack") if hopper else _ROW_KERNELS:
             rows.atom_kernel(name, index)
-        for name in (("fwd", "pb_f", "cond_ln", "kv_f", "kv_pack") if hopper else local.KERNELS):
+        for name in (
+            ("fwd", "pb_f", "cond_ln", "kv_f", "kv_pack") if hopper else local.KERNELS
+        ):
             local._load(name, index)
     except Exception as exc:  # a toolchain or driver problem keeps the module path
         if rows._hopper(index):
@@ -348,11 +348,19 @@ def serves(module, single, cond, pair, mask) -> bool:
     a, tr = module.attention, module.transition
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
-    if not (
-        single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
+    cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
+    hopper = cap == (9, 0) and os.environ.get("MINIWORLD_LOCAL_DIT_H100", "0") == "1"
+    if (
+        hopper
+        and torch.is_grad_enabled()
+        and os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN", "0") != "1"
     ):
         return False
+    if not (cap == (10, 0) or hopper):
+        return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) and not fp32:
+        return False
+    if hopper and fp32:  # the fp32 kernels are tcgen05 (sm_100a) only
         return False
     if (
         single.ndim != 4
@@ -362,6 +370,15 @@ def serves(module, single, cond, pair, mask) -> bool:
     ):
         return False
     n = single.shape[2]
+    if (
+        hopper
+        and torch.is_grad_enabled()
+        and (
+            n not in (4096, 8192)
+            or not all(t.is_contiguous() for t in (single, cond, pair))
+        )
+    ):
+        return False
     if mask is not None and (
         mask.dtype != torch.bool
         or tuple(mask.shape) != (1, n)
@@ -431,8 +448,12 @@ def _require_hopper_training(module, single, cond, pair, mask):
     from miniworld_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
-    if (a._backend != KernelBackend.TRITON or not torch.is_grad_enabled()
-            or not single.is_cuda or torch.cuda.get_device_capability(single.device) != (9, 0)):
+    if (
+        a._backend != KernelBackend.TRITON
+        or not torch.is_grad_enabled()
+        or not single.is_cuda
+        or torch.cuda.get_device_capability(single.device) != (9, 0)
+    ):
         return None
     # Preserve the explicit diagnostic comparison switch, outside production.
     if os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN", "1") == "0":
@@ -440,33 +461,86 @@ def _require_hopper_training(module, single, cond, pair, mask):
 
     def require(ok, detail):
         if not ok:
-            raise _Unserved(f"H100 local atom DiT training requires {detail}; no composed fallback")
+            raise _Unserved(
+                f"H100 local atom DiT training requires {detail}; no composed fallback"
+            )
 
     require(settings.current().engine_backend != "triton", "the CUDA engine backend")
-    require(module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm")
-    require(single.ndim == 4 and single.shape[0] in (1, 5, 48) and single.shape[1] == 1
-            and single.shape[2] in (4096, 8192) and single.shape[3] == DS_,
-            "[A,1,N,128] input with A=1/5/48 and N=4096/8192")
+    require(
+        module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
+    )
+    require(
+        single.ndim == 4
+        and single.shape[0] in (1, 5, 48)
+        and single.shape[1] == 1
+        and single.shape[2] in (4096, 8192)
+        and single.shape[3] == DS_,
+        "[A,1,N,128] input with A=1/5/48 and N=4096/8192",
+    )
     augment, _, n, _ = single.shape
-    require(tuple(cond.shape) == (augment, 1, n, DC_)
-            and tuple(pair.shape) == (1, n // QUERIES, QUERIES, KEYS, DP_),
-            "canonical conditioning and trunked pair shapes")
-    require(all(t.dtype == BF and t.device == single.device and t.is_contiguous() for t in (single, cond, pair)),
-            "contiguous bf16 activations on one CUDA device")
-    require((a.n_head, a.to_query.weight.shape[0], a.to_query.weight.shape[1],
-             a.to_bias.weight.shape[1], a.ada_ln_in.to_scale.weight.shape[1], tr.expand_a.weight.shape[0])
-            == (NH_, DS_, DS_, DP_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
+    require(
+        tuple(cond.shape) == (augment, 1, n, DC_)
+        and tuple(pair.shape) == (1, n // QUERIES, QUERIES, KEYS, DP_),
+        "canonical conditioning and trunked pair shapes",
+    )
+    require(
+        all(
+            t.dtype == BF and t.device == single.device and t.is_contiguous()
+            for t in (single, cond, pair)
+        ),
+        "contiguous bf16 activations on one CUDA device",
+    )
+    require(
+        (
+            a.n_head,
+            a.to_query.weight.shape[0],
+            a.to_query.weight.shape[1],
+            a.to_bias.weight.shape[1],
+            a.ada_ln_in.to_scale.weight.shape[1],
+            tr.expand_a.weight.shape[0],
+        )
+        == (NH_, DS_, DS_, DP_, DC_, 2 * DS_),
+        "128/128/16 widths, four heads, transition n=2",
+    )
     weights = tuple(module.get_parameter(name) for name in (*WEIGHTS, *CROSS_WEIGHTS))
-    require(all(w.dtype in (BF, torch.float32) and w.device == single.device and w.is_contiguous() for w in weights),
-            "contiguous bf16 or fp32 parameters on the input device")
-    require(mask is None or (mask.dtype == torch.bool and tuple(mask.shape) == (1, n)
-            and mask.device == single.device and mask.is_contiguous()), "a contiguous [1,N] bool mask or None")
-    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, tr.ada_ln_in.ln_in,
-             tr.ada_ln_in.ln_cond, a.ada_ln_kv.ln_in, a.ada_ln_kv.ln_cond)
+    require(
+        all(
+            w.dtype in (BF, torch.float32)
+            and w.device == single.device
+            and w.is_contiguous()
+            for w in weights
+        ),
+        "contiguous bf16 or fp32 parameters on the input device",
+    )
+    require(
+        mask is None
+        or (
+            mask.dtype == torch.bool
+            and tuple(mask.shape) == (1, n)
+            and mask.device == single.device
+            and mask.is_contiguous()
+        ),
+        "a contiguous [1,N] bool mask or None",
+    )
+    norms = (
+        a.ada_ln_in.ln_in,
+        a.ada_ln_in.ln_cond,
+        a.ln_pair,
+        tr.ada_ln_in.ln_in,
+        tr.ada_ln_in.ln_cond,
+        a.ada_ln_kv.ln_in,
+        a.ada_ln_kv.ln_cond,
+    )
     require(all(norm.eps == EPS for norm in norms), "LayerNorm eps=1e-5")
-    index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    index = (
+        single.device.index
+        if single.device.index is not None
+        else torch.cuda.current_device()
+    )
     if not _kernels_ready(index):
-        raise RuntimeError("H100 local atom DiT CUDA kernels unavailable; no composed fallback")
+        raise RuntimeError(
+            "H100 local atom DiT CUDA kernels unavailable; no composed fallback"
+        )
     return True
 
 
@@ -475,38 +549,96 @@ def _require_hopper_inference(module, single, cond, pair, mask):
     from miniworld_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
-    if a._backend != KernelBackend.TRITON or torch.is_grad_enabled() or not single.is_cuda:
+    if (
+        a._backend != KernelBackend.TRITON
+        or torch.is_grad_enabled()
+        or not single.is_cuda
+    ):
         return None
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return None
+
     def require(ok, detail):
         if not ok:
-            raise _Unserved(f"H100 local atom DiT inference requires {detail}; no composed fallback")
+            raise _Unserved(
+                f"H100 local atom DiT inference requires {detail}; no composed fallback"
+            )
 
     require(settings.current().engine_backend != "triton", "the CUDA engine backend")
-    require(module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm")
-    require(single.ndim == 4 and (single.shape[0], single.shape[2])
-            in ((1, 4096), (5, 2048), (5, 4096), (48, 4096)),
-            "(A,N)=(1,4096),(5,2048),(5,4096),(48,4096)")
+    require(
+        module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
+    )
+    require(
+        single.ndim == 4
+        and (single.shape[0], single.shape[2])
+        in ((1, 4096), (5, 2048), (5, 4096), (48, 4096)),
+        "(A,N)=(1,4096),(5,2048),(5,4096),(48,4096)",
+    )
     augment, _, n, _ = single.shape
-    require((a.n_head, a.to_query.weight.shape[0], a.to_query.weight.shape[1],
-             a.to_bias.weight.shape[1], a.ada_ln_in.to_scale.weight.shape[1], tr.expand_a.weight.shape[0])
-            == (NH_, DS_, DS_, DP_, DC_, 2 * DS_), "128/128/16 widths, four heads, transition n=2")
-    require(tuple(single.shape) == (augment, 1, n, DS_) and tuple(cond.shape) == (augment, 1, n, DC_)
-            and tuple(pair.shape) == (1, n // QUERIES, QUERIES, KEYS, DP_), "canonical single, conditioning and trunked pair shapes")
-    require(all(t.dtype == BF and t.device == single.device and t.is_contiguous() for t in (single, cond, pair)),
-            "contiguous bf16 activations on one CUDA device")
+    require(
+        (
+            a.n_head,
+            a.to_query.weight.shape[0],
+            a.to_query.weight.shape[1],
+            a.to_bias.weight.shape[1],
+            a.ada_ln_in.to_scale.weight.shape[1],
+            tr.expand_a.weight.shape[0],
+        )
+        == (NH_, DS_, DS_, DP_, DC_, 2 * DS_),
+        "128/128/16 widths, four heads, transition n=2",
+    )
+    require(
+        tuple(single.shape) == (augment, 1, n, DS_)
+        and tuple(cond.shape) == (augment, 1, n, DC_)
+        and tuple(pair.shape) == (1, n // QUERIES, QUERIES, KEYS, DP_),
+        "canonical single, conditioning and trunked pair shapes",
+    )
+    require(
+        all(
+            t.dtype == BF and t.device == single.device and t.is_contiguous()
+            for t in (single, cond, pair)
+        ),
+        "contiguous bf16 activations on one CUDA device",
+    )
     weights = tuple(module.get_parameter(name) for name in (*WEIGHTS, *CROSS_WEIGHTS))
-    require(all(w.dtype in (BF, torch.float32) and w.device == single.device and w.is_contiguous() for w in weights),
-            "contiguous bf16 or fp32 parameters on the input device")
-    require(mask is None or (mask.dtype == torch.bool and tuple(mask.shape) == (1, n)
-            and mask.device == single.device and mask.is_contiguous()), "a contiguous [1,N] bool mask or None")
-    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, tr.ada_ln_in.ln_in,
-             tr.ada_ln_in.ln_cond, a.ada_ln_kv.ln_in, a.ada_ln_kv.ln_cond)
+    require(
+        all(
+            w.dtype in (BF, torch.float32)
+            and w.device == single.device
+            and w.is_contiguous()
+            for w in weights
+        ),
+        "contiguous bf16 or fp32 parameters on the input device",
+    )
+    require(
+        mask is None
+        or (
+            mask.dtype == torch.bool
+            and tuple(mask.shape) == (1, n)
+            and mask.device == single.device
+            and mask.is_contiguous()
+        ),
+        "a contiguous [1,N] bool mask or None",
+    )
+    norms = (
+        a.ada_ln_in.ln_in,
+        a.ada_ln_in.ln_cond,
+        a.ln_pair,
+        tr.ada_ln_in.ln_in,
+        tr.ada_ln_in.ln_cond,
+        a.ada_ln_kv.ln_in,
+        a.ada_ln_kv.ln_cond,
+    )
     require(all(norm.eps == EPS for norm in norms), "LayerNorm eps=1e-5")
-    index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    index = (
+        single.device.index
+        if single.device.index is not None
+        else torch.cuda.current_device()
+    )
     if not _kernels_ready(index):
-        raise RuntimeError("H100 local atom DiT CUDA kernels unavailable; no composed fallback")
+        raise RuntimeError(
+            "H100 local atom DiT CUDA kernels unavailable; no composed fallback"
+        )
     return True
 
 
@@ -544,9 +676,19 @@ def _tkey(t):
 
 def _kv_pack(weights, packed_pre=None):
     """The cross-attention mode's operands: Wm [256, 128] = [to_scale; to_bias] bf16, the scale bias and the LN weight (fp32), Wk, Wv (bf16) and [Wk; Wv] [256, 128].
-    Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack."""
+    Packed once per set of weights (pointer and version), scoped to the CUDA-graph capture like every weight pack.
+    Hopper (``packed_pre`` = the pack's ``wp``): the live CUDA pack, Wk / Wv views of ``packed_pre`` and no [Wk; Wv] (None)."""
+    hopper = packed_pre is not None and torch.cuda.get_device_capability(
+        weights[len(WEIGHTS)].device
+    ) == (9, 0)
 
     def build():
+        if hopper:
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                sm100_atom_local as local,
+            )
+
+            return (*local.kv_pack_hopper(weights[len(WEIGHTS) :], packed_pre), None)
         gamma, w_scale, b_scale, w_bias = weights[len(WEIGHTS) :]
         wk, wv = (
             weights[WEIGHTS.index("attention.to_key.weight")],
@@ -562,16 +704,19 @@ def _kv_pack(weights, packed_pre=None):
             torch.cat([wk, wv]),
         )
 
-    tail = weights[len(WEIGHTS) :] + [
+    tail = [
+        *weights[len(WEIGHTS) :],
         weights[WEIGHTS.index("attention.to_key.weight")],
         weights[WEIGHTS.index("attention.to_value.weight")],
     ]
     return _capture.lookup(
-        _KV, tuple((t.data_ptr(), t._version) for t in tail), build, limit=16
+        _KV, (hopper, *((t.data_ptr(), t._version) for t in tail)), build, limit=16
     )
 
 
-def _cond_tables(cond, c2_fn, n, weights, wc, cross, save, wp=None, owned=False, packed_infer=False):
+def _cond_tables(
+    cond, c2_fn, n, weights, wc, cross, save, wp=None, owned=False, packed_infer=False
+):
     """The conditioning tables of a call: mod [rows, 768] (cond_fwd) and, in the cross-attention mode, cn (the LN of the conditioning) and the
     key / value modulation mkv [rows, 256]. They depend on the conditioning tensor and the weights only -- the same at every block call that
     reads one conditioning (a sampler's steps), so an inference call (``save`` False) takes them from the hoist: made once per conditioning
@@ -585,7 +730,13 @@ def _cond_tables(cond, c2_fn, n, weights, wc, cross, save, wp=None, owned=False,
 
     def build():
         c2 = c2_fn()
-        mod = rows.cond_fwd(c2, *wc, **({"hopper_waves": .5 if packed_infer else 2.} if wp is not None else {}))
+        mod = rows.cond_fwd(
+            c2,
+            *wc,
+            **(
+                {"hopper_waves": 0.5 if packed_infer else 2.0} if wp is not None else {}
+            ),
+        )
         if not cross:
             return mod, None, None
         wm, _, gkv, *_ = _kv_pack(weights, wp)
@@ -686,11 +837,18 @@ def _block_fwd(
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
-    owned = (_owned_blas_enabled(single, save)
-             and (a, n0) in ((5, 8192), (48, 4096), (48, 8192)))
+    owned = _owned_blas_enabled(single, save) and (a, n0) in (
+        (5, 8192),
+        (48, 4096),
+        (48, 8192),
+    )
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
-        hopper = rows._hopper(single.device.index if single.device.index is not None else torch.cuda.current_device())
+        hopper = rows._hopper(
+            single.device.index
+            if single.device.index is not None
+            else torch.cuda.current_device()
+        )
         packed_infer = not save and cross and a == 5 and n0 in (2048, 4096) and hopper
         wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)], backward=save)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
@@ -702,11 +860,23 @@ def _block_fwd(
             wc,
             cross,
             save,
+            wp=wp if hopper else None,
+            owned=owned,
+            packed_infer=packed_infer,
         )
-        if cross:  # keys and values from a second AdaLN of x1, inside pre_fwd
+        if (
+            cross and hopper
+        ):  # Hopper: pre_fwd's own k / v are not used; keys and values from a second AdaLN of x1 (kv_fwd) and cuBLAS
+            _, bs, _, wk, wv, _ = _kv_pack(weights, wp)
+            q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=True, cross=True)
+            xkv = local.kv_fwd(x1, mkv, bs)
+            k, v = _mm(xkv, wk.t(), owned), _mm(xkv, wv.t(), owned)
+        elif cross:  # keys and values from a second AdaLN of x1, inside pre_fwd
             bs = _kv_pack(weights)[1]
             w_pre, b_pre = wp
-            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, w_pre, b_pre, mkv, bs, save=save)
+            q, k, v, sg, x1, xkv = rows.pre_fwd_kv(
+                s2, mod, w_pre, b_pre, mkv, bs, save=save
+            )
         else:
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
         bias = _pair_bias(pair, n, weights, save)
@@ -717,7 +887,15 @@ def _block_fwd(
             bias,
             _keys(mask, n0, n),
         )
-        out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=save)
+        out, u, a2, x2, t = rows.post_fwd(
+            s2,
+            o.view(m, DS_),
+            sg,
+            mod,
+            *wo,
+            save=save,
+            **({"packed_hopper": packed_infer} if hopper else {}),
+        )
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
@@ -756,17 +934,25 @@ def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
 def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
     """Opt-in graph workspace ownership; defaults require paired qualification."""
     scope = (training and single.shape[2] in (4096, 8192)) or (
-        not training and (single.shape[0], single.shape[2]) == (48, 4096))
-    return (scope and torch.cuda.get_device_capability(single.device) == (9, 0)
-            and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1")
+        not training and (single.shape[0], single.shape[2]) == (48, 4096)
+    )
+    return (
+        scope
+        and torch.cuda.get_device_capability(single.device) == (9, 0)
+        and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1"
+    )
 
 
-def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False) -> torch.Tensor:
+def _owned_mm(
+    a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False
+) -> torch.Tensor:
     from miniworld_engine.kernels.conditioned_transition.cuda.train import (
         owned_gemm_ext,
     )
 
-    return owned_gemm_ext().owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output)
+    return owned_gemm_ext().owned_mm(
+        a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output
+    )
 
 
 def _mm(a: torch.Tensor, b: torch.Tensor, owned: bool) -> torch.Tensor:
@@ -775,8 +961,11 @@ def _mm(a: torch.Tensor, b: torch.Tensor, owned: bool) -> torch.Tensor:
 
 def _wgrad(dout, x, owned: bool = False):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
-    return (_owned_mm(dout.t(), x, True) if owned else
-            torch.mm(dout.t(), x, out_dtype=torch.float32))
+    return (
+        _owned_mm(dout.t(), x, True)
+        if owned
+        else torch.mm(dout.t(), x, out_dtype=torch.float32)
+    )
 
 
 def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
@@ -812,9 +1001,18 @@ def _block_bwd(
     dev = single.device
     owned = _owned_blas_enabled(single, True)
     with torch.cuda.device(dev):
-        hopper = rows._hopper(dev.index if dev.index is not None else torch.cuda.current_device())
-        if hopper and (dy.dtype != BF or dy.device != dev or dy.shape != single.shape or not dy.is_contiguous()):
-            raise NotImplementedError("H100 local DiT backward requires a contiguous bf16 upstream gradient matching single")
+        hopper = rows._hopper(
+            dev.index if dev.index is not None else torch.cuda.current_device()
+        )
+        if hopper and (
+            dy.dtype != BF
+            or dy.device != dev
+            or dy.shape != single.shape
+            or not dy.is_contiguous()
+        ):
+            raise NotImplementedError(
+                "H100 local DiT backward requires a contiguous bf16 upstream gradient matching single"
+            )
         wc, wp, wo, wb = _weights(weights[: len(WEIGHTS)], backward=True)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         c2 = _padded(cond, n).reshape(m, DC_).contiguous()
@@ -823,9 +1021,13 @@ def _block_bwd(
             m, 6 * DS_, device=dev, dtype=BF
         )  # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts]
         dp = torch.empty(m, 4 * DS_, device=dev, dtype=BF)  # [dq | dk | dv | dg]
-        dbias_cols = torch.zeros(6 * DS_, device=dev)
-        dbq = torch.zeros(DS_, device=dev)
-        dgamma_cond = torch.zeros(2 * DS_, device=dev)
+        allocate = torch.empty if hopper else torch.zeros
+        dbias_cols = allocate(6 * DS_, device=dev)
+        dbq = allocate(DS_, device=dev)
+        dgamma_cond = allocate(2 * DS_, device=dev)
+        dgparts = (
+            torch.empty((m + 63) // 64, 2 * DS_, device=dev) if hopper else dgamma_cond
+        )
         dd = torch.empty(a, NH_, n, device=dev)
         dt, hh, dab = rows.tr_bwd_gate(
             dy, t, mod, x2, wo[1], wb["WsT"], dmod, dbias_cols[640:]
@@ -860,92 +1062,129 @@ def _block_bwd(
         dz, dgamma, dwb = local.pair_bias_bwd(
             _trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db
         )
+        dmkv = dbs = dg_kv = None
         if cross:  # the K / V branch: dxkv -> its AdaLN -> dx1 (through AdaLN 1 below) and the conditioning
             cn, mkv, xkv = extra
-            wm, bs, gkv, *_ = _kv_pack(weights)
-            dbs = torch.zeros(DS_, device=dev)
-            dg_kv = torch.zeros(DS_, device=dev)
-            # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
-            ds, dmkv = rows.pre_bwd_kv(
-                dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs
+        if hopper:
+            if cross:
+                wm, bs, gkv, wk, wv, _ = _kv_pack(weights, wp)
+                dk, dv = dp[:, DS_ : 2 * DS_], dp[:, 2 * DS_ : 3 * DS_]
+                dxkv = torch.addmm(dk @ wk, dv, wv)
+                dwk, dwv = _wgrad(dk, xkv, owned), _wgrad(dv, xkv, owned)
+                dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
+                dwm = _wgrad(dmkv, cn, owned)
+                dbs = local.kv_bias_hopper(dmkv)
+                dg_kv = allocate(DS_, device=dev)
+                dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
+                local.zero_kv_hopper(
+                    dp
+                )  # pre_bwd's dgrad then covers q and the gate only
+            ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
+            if cross:
+                local.adaln1_extra(s2, mod, dx1_kv, ds, dmod, dbias_cols[0:DS_])
+            dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgparts)
+            if cross:
+                local.add_cond_hopper(dc, dc_kv)
+            rows.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
+            dws, dwu, dwo, dwp = (
+                _wgrad(dt, hh, owned),
+                _wgrad(dab, x2, owned),
+                _wgrad(du, gated, owned),
+                _wgrad(dp, x1, owned),
+            )
+            dw1, dw2, dw3 = (
+                _wgrad(dmod[:, 0:256], cn1, owned),
+                _wgrad(dmod[:, 256:512], cn2, owned),
+                _wgrad(dmod[:, 512:768], c2, owned),
             )
         else:
-            ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
-        dc, cn1, cn2 = rows.cond_bwd(dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond)
-        if cross:
-            local.cond_ln_bwd(
-                c2, dmkv @ wm, gkv, dg_kv, acc=dc
-            )  # dc += the K / V modulation's gradient through LN(c) * gamma
-        names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
-        A_ = "attention."
-        spec = [
-            (dt, hh, [("transition.squeeze.weight", 0)]),
-            (
-                dab,
-                x2,
-                [
-                    ("transition.expand_a.weight", 0),
-                    ("transition.expand_a.weight", 1),
-                    ("transition.expand_b.weight", 0),
-                    ("transition.expand_b.weight", 1),
-                ],
-            ),
-            (du, gated, [(A_ + "to_out.weight", 0)]),
-            (
-                dmod[:, 0:256],
-                cn1,
-                [
-                    (A_ + "ada_ln_in.to_scale.weight", 0),
-                    (A_ + "ada_ln_in.to_bias.weight", 0),
-                ],
-            ),
-            (
-                dmod[:, 256:512],
-                cn2,
-                [
-                    ("transition.ada_ln_in.to_scale.weight", 0),
-                    ("transition.ada_ln_in.to_bias.weight", 0),
-                ],
-            ),
-            (
-                dmod[:, 512:768],
-                c2,
-                [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)],
-            ),
-        ]
-        if cross:
-            spec += [
-                (dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]),
-                (dp[:, 3 * DS_ : 4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
-                (
-                    dp[:, DS_ : 3 * DS_],
-                    xkv,
-                    [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)],
-                ),
-                (
-                    dmkv,
-                    cn,
-                    [
-                        (A_ + "ada_ln_kv.to_scale.weight", 0),
-                        (A_ + "ada_ln_kv.to_bias.weight", 0),
-                    ],
-                ),
-            ]
-        else:
-            spec += [
-                (
-                    dp,
-                    x1,
-                    [
-                        (A_ + "to_query.weight", 0),
-                        (A_ + "to_key.weight", 0),
-                        (A_ + "to_value.weight", 0),
-                        (A_ + "to_gate.weight", 0),
-                    ],
+            if cross:
+                wm, bs, gkv, *_ = _kv_pack(weights)
+                dbs = torch.zeros(DS_, device=dev)
+                dg_kv = torch.zeros(DS_, device=dev)
+                # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
+                ds, dmkv = rows.pre_bwd_kv(
+                    dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs
                 )
+            else:
+                ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
+            dc, cn1, cn2 = rows.cond_bwd(
+                dmod, c2, wb["WmodT"], wc[2], wc[3], dgamma_cond
+            )
+            if cross:
+                local.cond_ln_bwd(
+                    c2, dmkv @ wm, gkv, dg_kv, acc=dc
+                )  # dc += the K / V modulation's gradient through LN(c) * gamma
+            A_ = "attention."
+            spec = [
+                (dt, hh, [("transition.squeeze.weight", 0)]),
+                (
+                    dab,
+                    x2,
+                    [
+                        ("transition.expand_a.weight", 0),
+                        ("transition.expand_a.weight", 1),
+                        ("transition.expand_b.weight", 0),
+                        ("transition.expand_b.weight", 1),
+                    ],
+                ),
+                (du, gated, [(A_ + "to_out.weight", 0)]),
+                (
+                    dmod[:, 0:256],
+                    cn1,
+                    [
+                        (A_ + "ada_ln_in.to_scale.weight", 0),
+                        (A_ + "ada_ln_in.to_bias.weight", 0),
+                    ],
+                ),
+                (
+                    dmod[:, 256:512],
+                    cn2,
+                    [
+                        ("transition.ada_ln_in.to_scale.weight", 0),
+                        ("transition.ada_ln_in.to_bias.weight", 0),
+                    ],
+                ),
+                (
+                    dmod[:, 512:768],
+                    c2,
+                    [(A_ + "to_scale.weight", 0), ("transition.to_scale.weight", 0)],
+                ),
             ]
-        fused = _fused_wgrads(spec, weights, names, False, dev, m)
-    grads = {
+            if cross:
+                spec += [
+                    (dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]),
+                    (dp[:, 3 * DS_ : 4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
+                    (
+                        dp[:, DS_ : 3 * DS_],
+                        xkv,
+                        [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)],
+                    ),
+                    (
+                        dmkv,
+                        cn,
+                        [
+                            (A_ + "ada_ln_kv.to_scale.weight", 0),
+                            (A_ + "ada_ln_kv.to_bias.weight", 0),
+                        ],
+                    ),
+                ]
+            else:
+                spec += [
+                    (
+                        dp,
+                        x1,
+                        [
+                            (A_ + "to_query.weight", 0),
+                            (A_ + "to_key.weight", 0),
+                            (A_ + "to_value.weight", 0),
+                            (A_ + "to_gate.weight", 0),
+                        ],
+                    )
+                ]
+            names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+            fused = _fused_wgrads(spec, weights, names, False, dev, m)
+    grads: dict[str, torch.Tensor] = {
         "attention.ada_ln_in.ln_cond.weight": dgamma_cond[:128],
         "attention.ada_ln_in.to_scale.bias": dbias_cols[0:128],
         "attention.to_query.bias": dbq,
@@ -956,20 +1195,68 @@ def _block_bwd(
         "transition.ada_ln_in.to_scale.bias": dbias_cols[256:384],
         "transition.to_scale.bias": dbias_cols[640:768],
     }
-    if cross:
+    names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
+    if hopper:
         grads.update(
             {
-                "attention.ada_ln_kv.ln_cond.weight": dg_kv,
-                "attention.ada_ln_kv.to_scale.bias": dbs,
+                "attention.ada_ln_in.to_scale.weight": dw1[:128],
+                "attention.ada_ln_in.to_bias.weight": dw1[128:],
+                "attention.to_query.weight": dwp[0:128],
+                "attention.to_key.weight": dwp[128:256],
+                "attention.to_value.weight": dwp[256:384],
+                "attention.to_gate.weight": dwp[384:512],
+                "attention.to_out.weight": dwo,
+                "attention.to_scale.weight": dw3[:128],
+                "transition.ada_ln_in.to_scale.weight": dw2[:128],
+                "transition.ada_ln_in.to_bias.weight": dw2[128:],
+                "transition.expand_a.weight": dwu[:256],
+                "transition.expand_b.weight": dwu[256:],
+                "transition.squeeze.weight": dws,
+                "transition.to_scale.weight": dw3[128:],
             }
         )
-    per_weight = [
-        fused[name]
-        if name in fused
-        else grads[name].to(w.dtype).reshape(w.shape).clone()
-        for name, w in zip(names, weights, strict=True)
-    ]
-    dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
+        if cross:
+            grads["attention.to_key.weight"], grads["attention.to_value.weight"] = (
+                dwk,
+                dwv,
+            )
+            assert (
+                dbs is not None and dg_kv is not None
+            )  # both are set by the cross branch above
+            grads.update(
+                {
+                    "attention.ada_ln_kv.ln_cond.weight": dg_kv,
+                    "attention.ada_ln_kv.to_scale.weight": dwm[:DS_],
+                    "attention.ada_ln_kv.to_scale.bias": dbs,
+                    "attention.ada_ln_kv.to_bias.weight": dwm[DS_:],
+                }
+            )
+        per_weight = rows.grad_pack_hopper(
+            [grads[name] for name in WEIGHTS], weights[: len(WEIGHTS)]
+        )
+        if cross:
+            per_weight += local.cross_grad_pack_hopper(
+                [grads[name] for name in CROSS_WEIGHTS], weights[len(WEIGHTS) :]
+            )
+        dpair = dz.view(pair.shape)
+    else:
+        if cross:
+            assert (
+                dbs is not None and dg_kv is not None
+            )  # both are set by the cross branch above
+            grads.update(
+                {
+                    "attention.ada_ln_kv.ln_cond.weight": dg_kv,
+                    "attention.ada_ln_kv.to_scale.bias": dbs,
+                }
+            )
+        per_weight = [
+            fused[name]
+            if name in fused
+            else grads[name].to(w.dtype).reshape(w.shape).clone()
+            for name, w in zip(names, weights, strict=True)
+        ]
+        dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [
         _unpadded(ds.view(a, 1, n, DS_), single.shape),
         _unpadded(dc.view(a, 1, n, DC_), cond.shape),
@@ -999,6 +1286,7 @@ class _LocalBlock(torch.autograd.Function):
             from miniworld_engine.integrations.token_dit_train import (
                 _activate_native_caller,
             )
+
             _activate_native_caller(force=True)
         return (None, *grads)
 
@@ -1022,7 +1310,14 @@ def block(module, single, cond, pair, mask=None):
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (single, cond, pair, *weights)
     ):
-        return _LocalBlock.apply(mask, single, cond, pair, *weights)
+        out = _LocalBlock.apply(mask, single, cond, pair, *weights)
+        if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
+            from miniworld_engine.integrations.token_dit_train import (
+                _native_caller_hooks,
+            )
+
+            _native_caller_hooks(single, cond, pair, *weights, force=True)
+        return out
     return _infer(single, cond, pair, mask, weights)
 
 
@@ -1483,11 +1778,15 @@ def _block_fwd32(
     out = _unpadded(out.view(a, 1, n, DS_), single.shape)
     if not save:
         return [out]
-    assert y is not None and u is not None and t is not None   # allocated above: `save` is true here
+    assert (
+        y is not None and u is not None and t is not None
+    )  # allocated above: `save` is true here
     saved = [out, mod, cn1, cn2, x1, p, bias, o, lse, gated, y, a1, x2, u, t]
     if not cross:
         return saved
-    assert cnkv is not None and mkv is not None and xkv is not None   # the cross mode built all three
+    assert (
+        cnkv is not None and mkv is not None and xkv is not None
+    )  # the cross mode built all three
     return [*saved, cnkv, mkv, xkv]
 
 
@@ -1590,7 +1889,7 @@ def _block_bwd32(
         )  # dc += the LayerNorm backwards
         dcols = rows.colsum32(dmod)
         dbq = rows.colsum32(dp[:, qc : qc + DS_])
-        dbkv = rows.colsum32(dmkv[:, :DS_]) if cross else None
+        dbkv = rows.colsum32(dmkv[:, :DS_]) if dmkv is not None else None
         names = WEIGHTS + CROSS_WEIGHTS[: len(weights) - len(WEIGHTS)]
         A_ = "attention."
         spec = [
@@ -1663,7 +1962,7 @@ def _block_bwd32(
                 )
             ]
         fused = _fused_wgrads(spec, weights, names, True, dev, m)
-    grads = {
+    grads: dict[str, torch.Tensor] = {
         "attention.ada_ln_in.ln_cond.weight": dgc[0:128],
         "attention.ada_ln_in.to_scale.bias": dcols[0:128],
         "attention.to_query.bias": dbq,
@@ -1675,6 +1974,9 @@ def _block_bwd32(
         "transition.to_scale.bias": dcols[640:768],
     }
     if cross:
+        assert (
+            dbkv is not None
+        )  # computed above from dmkv, which the cross mode allocated
         grads.update(
             {
                 "attention.ada_ln_kv.ln_cond.weight": dgc[256:384],

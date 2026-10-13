@@ -164,7 +164,11 @@ def _normalize_stats_into(dst, stats, x, g, b):
 
 
 def _selection(D, N):
-    return dict(T.read_config("wide_forward/selection.json")[f"{D}-{N}"])
+    # Tile geometry is independent of length; the candidate extends the same
+    # pipeline to the other 128-aligned required buckets before retuning it.
+    key_length = N if N in LENGTHS else (384 if N < 384 else 768)
+    sel = dict(T.read_config("wide_forward/selection.json")[f"{D}-{key_length}"])
+    return sel
 
 
 def _map(t, box, dims, strides):
@@ -253,7 +257,7 @@ def _run(x, weights, mask):
         fold_into(wp, go, bo, wpf, wg, gi, bi, wgf, uv, gfold)
     else:
         _fold[(D, 2 if gfold else 1)](wp, go, bo, wpf, wg, gi, bi, wgf, uv, D,
-                                      BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)
+                                      BLOCK=triton.next_power_of_2(H), GATE=gfold, num_warps=4)  # ty: ignore[unknown-argument]
     k3, smem3 = _compile("k3", D, (bn, stages, gfold))
     p3 = launch.Struct([
         _map(tri, [64, 64], [M, H], [M * 2]),

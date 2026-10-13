@@ -35,31 +35,47 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 def h100_enabled(device) -> bool:
     """Native Hopper kernels; per-shape speed qualification is recorded separately."""
-    return (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100", "1") == "1"
-            and torch.cuda.get_device_capability(device) == (9, 0))
+    return os.environ.get(
+        "MINIWORLD_BIAS_ONLY_DIT_H100", "1"
+    ) == "1" and torch.cuda.get_device_capability(device) == (9, 0)
 
 
 def _h100_group(samples, length, heads, width, sms):
     """P bytes are reused across the group; at most two resident CTAs are scheduled."""
     residents = 2 if length * 128 + 3 * 8192 + 1024 <= 232448 // 2 else 1
-    return min((g for g in _GROUPS if g <= samples), key=lambda g:
-               -(-heads * (length // 64) * -(-samples // g) // (sms * residents))
-               * length * (64 + width * g))
+    return min(
+        (g for g in _GROUPS if g <= samples),
+        key=lambda g: (
+            -(-heads * (length // 64) * -(-samples // g) // (sms * residents))
+            * length
+            * (64 + width * g)
+        ),
+    )
 
 
 @functools.lru_cache(maxsize=None)
 def h100_ext():
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
     ensure_cuda_home()
     k = _dir.parent.parent
     return load_extension(
-        name="bias_only_dit_sm90a", sources=[str(_dir / "pv_gate_inf.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a"),
-                           "--expt-relaxed-constexpr", "-DMINIWORLD_BO_SM90=1",
-                           f"-I{k / 'transition' / 'cuda' / 'anthropic_v5'}",
-                           f"-I{k / 'transition' / 'cuda' / 'wide' / 'kernels'}",
-                           "-U__CUDA_NO_BFLOAT16_CONVERSIONS__"],
-        extra_cflags=["-std=c++17"], verbose=False)
+        name="bias_only_dit_sm90a",
+        sources=[str(_dir / "pv_gate_inf.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            *gencodes("90a"),
+            "--expt-relaxed-constexpr",
+            "-DMINIWORLD_BO_SM90=1",
+            f"-I{k / 'transition' / 'cuda' / 'anthropic_v5'}",
+            f"-I{k / 'transition' / 'cuda' / 'wide' / 'kernels'}",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def _head_defs(nh: int, dh: int) -> tuple[str, ...]:
@@ -84,7 +100,7 @@ def _ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *gencodes("80", "90", "100", ptx=("100",)),
+            *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
@@ -203,7 +219,10 @@ def core_supported(
         and (h, d // h) in LAYOUTS
         and L % 128 == 0
         and 0 < L <= 768
-        and torch.cuda.get_device_capability(device_index) == (10, 0)
+        and (
+            torch.cuda.get_device_capability(device_index) == (10, 0)
+            or h100_enabled(device_index)
+        )
     )
 
 
@@ -407,7 +426,11 @@ class PvGateCore:
         if h100_enabled(self.device_index):
             sg = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PV_GROUP", "0"))
             if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1":
-                sg = min(S, sg) if sg else _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
+                sg = (
+                    min(S, sg)
+                    if sg
+                    else _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
+                )
                 h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
             elif sg > 0:
                 h100_ext().grouped_pv(v, P, out, S, g, self.nh, self.dh, min(S, sg))
@@ -566,8 +589,11 @@ class DpbKernel:
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
-            op = (h100_ext().dpb_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
-                  else h100_ext().dpb)
+            op = (
+                h100_ext().dpb_pipeline
+                if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
+                else h100_ext().dpb
+            )
             op(do, v, P, dd, out, A, self.nh, self.dh)
             return out
         L = do.shape[0] // A
@@ -758,8 +784,11 @@ class GemmSwigluAB:
 
     def __call__(self, x, w, ab, h):
         if h100_enabled(self.device_index):
-            op = (h100_ext().swiglu_pipeline if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
-                  else h100_ext().swiglu)
+            op = (
+                h100_ext().swiglu_pipeline
+                if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
+                else h100_ext().swiglu
+            )
             op(x, w, ab, h)
             return h
         M, K, H = x.shape[0], self.K, self.H

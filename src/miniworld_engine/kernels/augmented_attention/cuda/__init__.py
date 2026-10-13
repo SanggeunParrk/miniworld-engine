@@ -45,9 +45,10 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine import settings
+
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 _tmn = (
@@ -62,7 +63,10 @@ LOG2E = 1.0 / math.log(2.0)
 def _ext(name: str, defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     return load_extension(
-        name=f"augattn_sm90_{name}" + "".join("_" + d.replace("=", "").replace(".", "p").replace("-", "m") for d in defs),
+        name=f"augattn_sm90_{name}"
+        + "".join(
+            "_" + d.replace("=", "").replace(".", "p").replace("-", "m") for d in defs
+        ),
         sources=[str(_dir / f"{name}.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -94,11 +98,15 @@ class ApbInferenceCore:
         _, dh = GEOMETRY[(heads, d)]
         self.heads = heads
         with torch.cuda.device(device_index):
-            self.extension = _ext("attn_fwd", (f"DHP={dh}", f"ROW_WIDTH={width(heads, d)}", "NWG=1"))
+            self.extension = _ext(
+                "attn_fwd", (f"DHP={dh}", f"ROW_WIDTH={width(heads, d)}", "NWG=1")
+            )
 
     def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor):
         if bias.shape[0] != self.heads or qkvg.shape[0] != bias.shape[1]:
-            raise ValueError("Hopper APB inference requires one sample and head-major bias")
+            raise ValueError(
+                "Hopper APB inference requires one sample and head-major bias"
+            )
         self.extension.attn_inf(qkvg, bias, 0, 1)
         return qkvg
 
@@ -107,8 +115,13 @@ def _apb_training_defs(heads: int, d: int):
     from .apb import GEOMETRY, width
 
     real, padded = GEOMETRY[(heads, d)]
-    return (f"DHP={padded}", f"ROW_WIDTH={width(heads, d)}", "NWG=1", "APB_NATURAL=1",
-            f"RSQDV={real ** -0.5!r}f")
+    return (
+        f"DHP={padded}",
+        f"ROW_WIDTH={width(heads, d)}",
+        "NWG=1",
+        "APB_NATURAL=1",
+        f"RSQDV={real**-0.5!r}f",
+    )
 
 
 def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
@@ -126,11 +139,15 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
     DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
     defs = _apb_training_defs(heads, d)
     _ext("attn_dq", defs).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DB)
-    _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB)
+    _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(
+        q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB
+    )
     return DQ, DK, DV, DB
 
 
-def natural_forward(q, k, v, bias, *, heads: int, head_dim: int, output_bf16: bool = False):
+def natural_forward(
+    q, k, v, bias, *, heads: int, head_dim: int, output_bf16: bool = False
+):
     """Generic B1 natural-unit attention for fused callers; q/k/v [A*L,W].
 
     Returns O [A*L,W] (FP32, or BF16 directly from the epilogue when requested)
@@ -138,19 +155,44 @@ def natural_forward(q, k, v, bias, *, heads: int, head_dim: int, output_bf16: bo
     """
     L, W = bias.shape[1], q.shape[1]
     if q.ndim != 2 or W % heads or W // heads not in (16, 32, 48) or L % 128:
-        raise ValueError("Hopper natural attention requires packed bucketed head geometry")
-    defs = (f"DHP={W // heads}", f"ROW_WIDTH={W}", "NWG=1", "APB_NATURAL=1", f"RSQDV={head_dim ** -0.5!r}f")
+        raise ValueError(
+            "Hopper natural attention requires packed bucketed head geometry"
+        )
+    defs = (
+        f"DHP={W // heads}",
+        f"ROW_WIDTH={W}",
+        "NWG=1",
+        "APB_NATURAL=1",
+        f"RSQDV={head_dim**-0.5!r}f",
+    )
     if output_bf16:
         defs += ("FWD_BF16=1",)
-    O = torch.empty_like(q, memory_format=torch.contiguous_format, dtype=torch.bfloat16 if output_bf16 else torch.float32)
+    O = torch.empty_like(
+        q,
+        memory_format=torch.contiguous_format,
+        dtype=torch.bfloat16 if output_bf16 else torch.float32,
+    )
     LSE = torch.empty(q.shape[0] // L, heads, L, device=q.device, dtype=torch.float32)
     _ext("attn_fwd", defs).attn_fwd(q, k, v, bias, None, O, LSE)
     return O, LSE
 
 
-def natural_backward(q, k, v, dob, bias, LSE, Dd, *, heads: int, head_dim: int, output_bf16: bool = False,
-                     out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
-                     return_bias: bool = True, bias_transposed: bool = True):
+def natural_backward(
+    q,
+    k,
+    v,
+    dob,
+    bias,
+    LSE,
+    Dd,
+    *,
+    heads: int,
+    head_dim: int,
+    output_bf16: bool = False,
+    out: tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None = None,
+    return_bias: bool = True,
+    bias_transposed: bool = True,
+):
     """dQ/dK/dV and deterministic FP32 per-sample dBiasT [A,H,key,query].
 
     Caller reduces the sample axis in fixed order. ``output_bf16`` writes the
@@ -161,37 +203,78 @@ def natural_backward(q, k, v, dob, bias, LSE, Dd, *, heads: int, head_dim: int, 
     in query/key order directly in the dQ pass.
     """
     L, W = bias.shape[1], q.shape[1]
-    if q.ndim != 2 or W % heads or W // heads not in (16, 32, 48) or L % 128 or q.shape[0] % L:
-        raise ValueError("Hopper natural attention requires packed bucketed head geometry")
+    if (
+        q.ndim != 2
+        or W % heads
+        or W // heads not in (16, 32, 48)
+        or L % 128
+        or q.shape[0] % L
+    ):
+        raise ValueError(
+            "Hopper natural attention requires packed bucketed head geometry"
+        )
     A = q.shape[0] // L
     if return_bias and not bias_transposed and A != 1:
         raise ValueError("Direct query/key dBias requires one sample")
-    defs = (f"DHP={W // heads}", f"ROW_WIDTH={W}", "NWG=1", "APB_NATURAL=1", f"RSQDV={head_dim ** -0.5!r}f")
+    defs = (
+        f"DHP={W // heads}",
+        f"ROW_WIDTH={W}",
+        "NWG=1",
+        "APB_NATURAL=1",
+        f"RSQDV={head_dim**-0.5!r}f",
+    )
     if output_bf16:
         defs += ("BWD_BF16=1",)
     dtype = torch.bfloat16 if output_bf16 else torch.float32
     if out is None:
-        DQ, DK, DV = (torch.empty_like(q, memory_format=torch.contiguous_format, dtype=dtype) for _ in range(3))
+        DQ, DK, DV = (
+            torch.empty_like(q, memory_format=torch.contiguous_format, dtype=dtype)
+            for _ in range(3)
+        )
     else:
-        if len(out) != 3 or any(t.shape != q.shape or t.device != q.device or t.dtype != dtype or t.stride(1) != 1
-                               or t.stride(0) != out[0].stride(0) or t.stride(0) < W for t in out):
-            raise ValueError("Gradient outputs must be matching packed column views with a common row stride")
+        if len(out) != 3 or any(
+            t.shape != q.shape
+            or t.device != q.device
+            or t.dtype != dtype
+            or t.stride(1) != 1
+            or t.stride(0) != out[0].stride(0)
+            or t.stride(0) < W
+            for t in out
+        ):
+            raise ValueError(
+                "Gradient outputs must be matching packed column views with a common row stride"
+            )
         DQ, DK, DV = out
         if DQ.stride(0) != W:
             defs += (f"BWD_ROW_STRIDE={DQ.stride(0)}",)
     direct_bias = return_bias and not bias_transposed
-    DBT = (torch.empty((heads, L, L) if direct_bias else (A, heads, L, L), device=q.device, dtype=torch.float32)
-           if return_bias else None)
+    DBT = (
+        torch.empty(
+            (heads, L, L) if direct_bias else (A, heads, L, L),
+            device=q.device,
+            dtype=torch.float32,
+        )
+        if return_bias
+        else None
+    )
     if direct_bias:
-        _ext("attn_dq", defs + ("DQ_BIAS=1",)).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DBT)
+        _ext("attn_dq", defs + ("DQ_BIAS=1",)).apb_dqb(
+            q, k, v, dob, bias, LSE, Dd, DQ, DBT
+        )
     else:
-        _ext("attn_dq", defs + ("DQ_BIAS=0",)).attn_dq(q, k, v, dob, bias, None, LSE, Dd, DQ)
+        _ext("attn_dq", defs + ("DQ_BIAS=0",)).attn_dq(
+            q, k, v, dob, bias, None, LSE, Dd, DQ
+        )
     if return_bias and bias_transposed:
-        _ext("attn_dkv", defs + ("DB_PER_SAMPLE=1",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, DBT)
+        _ext("attn_dkv", defs + ("DB_PER_SAMPLE=1",)).attn_dkv(
+            q, k, v, dob, bias, None, LSE, Dd, DK, DV, DBT
+        )
     else:
         # DBIAS=0 never reads/writes this pointer; reuse an existing contiguous
         # FP32 tensor instead of allocating or initializing a bias workspace.
-        _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(q, k, v, dob, bias, None, LSE, Dd, DK, DV, LSE)
+        _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(
+            q, k, v, dob, bias, None, LSE, Dd, DK, DV, LSE
+        )
     return DQ, DK, DV, DBT
 
 
@@ -379,10 +462,17 @@ def forward(qs, kb, vb, bb, km, A, L, qkvg=None):
     return o, lse
 
 
-def inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
+def inference_core_supported(
+    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
+) -> bool:
     """The fused token DiT step's gated core fits: bf16, 16 heads x 48, L a multiple of 128, H100."""
-    return (os.environ.get("MINIWORLD_AUGATTN_BF16_SM90", "1") != "0" and dtype is torch.bfloat16 and (d, h) == (H * D, H)
-            and L % 128 == 0 and _is_hopper(device_index))
+    return (
+        settings.current().augattn_bf16_sm90
+        and dtype is torch.bfloat16
+        and (d, h) == (H * D, H)
+        and L % 128 == 0
+        and _is_hopper(device_index)
+    )
 
 
 def gated_inference(qkvg, bias_all, block, S):
@@ -392,11 +482,18 @@ def gated_inference(qkvg, bias_all, block, S):
     _ext("attn_fwd").attn_inf(qkvg, bias_all, int(block), int(S))
 
 
-def tf32_inference_core_supported(dtype: torch.dtype, L: int, d: int, h: int, device_index: int) -> bool:
+def tf32_inference_core_supported(
+    dtype: torch.dtype, L: int, d: int, h: int, device_index: int
+) -> bool:
     """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, 16 heads x 48, L a multiple of 128, H100.
     MINIWORLD_AUGATTN_TF32_SM90=0 keeps the Triton core."""
-    return (os.environ.get("MINIWORLD_AUGATTN_TF32_SM90", "1") != "0" and dtype is torch.float32 and (d, h) == (H * D, H)
-            and L % 128 == 0 and _is_hopper(device_index))
+    return (
+        os.environ.get("MINIWORLD_AUGATTN_TF32_SM90", "1") != "0"
+        and dtype is torch.float32
+        and (d, h) == (H * D, H)
+        and L % 128 == 0
+        and _is_hopper(device_index)
+    )
 
 
 def tf32_gated_inference(qkg, vt, bias_all, block, S, goff):
@@ -419,7 +516,9 @@ def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None):
     return o, lse
 
 
-def tf32_backward(qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L):
+def tf32_backward(
+    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L
+):
     """The TF32 attention backward (attn_tf32.cu dqb + dkv). qs (q in exp2 units), k, v, dob = dO [A L, 768] fp32 and their
     transposes qt, kt, dot [768, A L]; bias_p the forward's key-permuted bias [16, L, L]; bias_tp [16, L(key), L] the bias
     transposed with its query columns permuted; lse, dd [A, 16, L] and lse_p, dd_p their query-permuted copies; km / km_p the
@@ -438,13 +537,19 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L):
     a transposed view when A is not a multiple of 3). dob [A L, 768] bf16 and dd = rowsum(dO O) [A, 16, L] fp32; the other operands as ``forward`` took them."""
     dq = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
-    if A % 3 == 0:                      # dbias in the dQ pass, three samples summed on chip before the L2 reds
+    if (
+        A % 3 == 0
+    ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
         db = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
         _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, db)
-        _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db)
+        _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
+            qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
+        )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(qs, kb, vb, dob, bb, km, lse, dd, dq)
+    _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(
+        qs, kb, vb, dob, bb, km, lse, dd, dq
+    )
     dbt = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
     _ext("attn_dkv").attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
@@ -512,23 +617,7 @@ class _AttentionBf16Sm90(torch.autograd.Function):
         km = km if ctx.has_mask else None
         A, L = ctx.dims
         dob, dd = _prep_do(do, o, A, L)
-        dq = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
-        dk, dv = torch.empty_like(dq), torch.empty_like(dq)
-        if (
-            A % 3 == 0
-        ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
-            db = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-            _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, db)
-            _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
-                qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
-            )
-        else:  # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-            _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(
-                qs, kb, vb, dob, bb, km, lse, dd, dq
-            )
-            dbt = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-            _ext("attn_dkv").attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
-            db = dbt.transpose(1, 2)
+        dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L)
         shp = (A, 1, L, H, D)
         dbias = db.unsqueeze(1) if ctx.head_major else db.permute(1, 2, 0).unsqueeze(0)
         return dq.view(shp), dk.view(shp), dv.view(shp), dbias, None, None
@@ -551,6 +640,14 @@ __all__ = [
     "FWD_OP",
     "augmented_attention_bf16_sm90",
     "available",
+    "backward",
     "checkpoint_context_keeping_attention",
+    "forward",
+    "gated_inference",
+    "inference_core_supported",
     "supported",
+    "tf32_forward",
+    "tf32_gated_inference",
+    "tf32_backward",
+    "tf32_inference_core_supported",
 ]

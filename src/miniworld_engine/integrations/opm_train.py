@@ -30,6 +30,7 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -49,6 +50,9 @@ def _enabled() -> bool:
 
     value = settings.current().opm_train
     return True if value is None else value
+def native_aux_enabled() -> bool:
+    """Default H100 CUDA prologue/packing; explicit zero keeps the historical diagnostic path."""
+    return os.environ.get("MINIWORLD_OPM_H100_CUDA_ONLY", "1") == "1"
 
 
 def tma_prologue_enabled() -> bool:
@@ -246,13 +250,14 @@ def _ext(device=None, *, native=None, tma=None, epi_tma=None, epi_half=None, own
             suffix += "_owned_blas"
         build = root / ("opm_epilogue" + suffix)
         build.mkdir(parents=True, exist_ok=True)
-        _EXT[key] = load(
-            name="miniworld_opm_epilogue",
-            sources=[str(csrc / "opm_epilogue.cu")],
-            build_directory=str(build),
-            extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"],
-            extra_cflags=["-O3"],
-        )
+        _EXT[key] = load(name="miniworld_opm_epilogue" + suffix, sources=[str(csrc / "opm_epilogue.cu")], build_directory=str(build),
+                         extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
+                         + (["-DMINIWORLD_OPM_CUBLAS_COUNT=1"] if count else [])
+                         + (["-DMINIWORLD_OPM_OWNED_BLAS=1"] if owned else [])
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
+                         + (["-DMINIWORLD_OPM_EPILOGUE_TMA_WIDE=1"] if epi_wide else []),
+                         extra_cflags=["-O3"], extra_ldflags=["-lcublas"] if owned else [])
     return _EXT[key]
 
 
@@ -314,13 +319,9 @@ def _opm_prologue_kernel(
         mask=valid[:, None],
         other=0.0,
     ).to(tl.float32)  # [R, CM]
-    mean = (
-        tl.sum(x, axis=1) / CM
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    mean = tl.sum(x, axis=1) / CM
     xc = x - mean[:, None]
-    var = (
-        tl.sum(xc * xc, axis=1) / CM
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    var = tl.sum(xc * xc, axis=1) / CM
     rstd = 1.0 / tl.sqrt(var + eps)
     if SAVE_STATS:  # the LayerNorm statistics, for a backward that would otherwise re-derive them from m: STATS[s, i] = (mean, rstd)
         tl.store(STATS + (r_s * N + r_i) * 2, mean, mask=valid)
@@ -380,16 +381,11 @@ def fused_prologue(
     S, N, cm = m.shape
     NA = triton.cdiv(N, BI) * BI
     NBj = triton.cdiv(N, BJ) * BJ
-    SK = (
-        triton.cdiv(S, BK) * BK
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    SK = triton.cdiv(S, BK) * BK
     A2 = torch.empty(NA * CH, SK, device=m.device, dtype=torch.bfloat16)
     BT = torch.empty(NBj * CH, SK, device=m.device, dtype=torch.bfloat16)
     assert SK % BS == 0 and m.stride(2) == 1, (SK, BS, m.stride())
-    grid = (
-        SK // BS,
-        triton.cdiv(max(NA, NBj), BIP),
-    )  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
+    grid = (SK // BS, triton.cdiv(max(NA, NBj), BIP))
     mask_c = mask.contiguous()
     stats = (
         torch.empty(S, N, 2, device=m.device, dtype=torch.float32)
@@ -471,22 +467,12 @@ class _OpmMath(torch.autograd.Function):
 
     @staticmethod
     @torch.autocast("cuda", enabled=False)
-    def forward(
-        ctx,
-        msa,
-        mask,
-        lnw,
-        lnb,
-        wa,
-        wb,
-        wo,
-        bo,
-        eps,
-        save_o,
-        residual=None,
-        save_stats=True,
-    ):
-        ext = _ext(msa.device)
+    def forward(ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual=None, save_stats=True):
+        path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
+        owned = _owned_blas_for(msa.shape[1], msa.shape[2], training=save_stats)
+        ext = _ext(msa.device, native=path != "legacy", tma=path == "tma",
+                   epi_tma=_epilogue_tma_enabled(msa.shape[1], msa.shape[2], training=save_stats),
+                   epi_half=_epilogue_half_enabled(msa.shape[1], msa.shape[2], training=save_stats), owned=owned)
         if torch.cuda.get_device_capability(msa.device) == (10, 0):
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
                 ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats
@@ -510,8 +496,19 @@ class _OpmMath(torch.autograd.Function):
             ctx.eps = eps
             return z
         bf = torch.bfloat16
-        m = msa[0].contiguous()
-        mask16 = mask[0].to(bf).contiguous()
+        if path != "legacy":
+            m = msa[0]
+            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            prologue = ext.opm_native_prologue_tma if path == "tma" else ext.opm_native_prologue
+            a2, bt, stats, mask16, norm = prologue(m, mask[0], packed, float(eps), save_stats)
+            o = _owned_mm(a2, bt.t(), owned)
+            n = m.shape[1]
+            z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
+            ctx.save_o = bool(save_o)
+            ctx.save_for_backward(m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo, *((o,) if save_o else ()))
+            ctx.eps = eps
+            return z
+        m = msa[0].contiguous(); mask16 = mask[0].to(bf).contiguous()
         _s, n = m.shape[0], m.shape[1]
         a2, bt, stats = fused_prologue(
             m,
@@ -590,39 +587,28 @@ class _OpmMath(torch.autograd.Function):
                 dzp, o, n, n, int(wo.dtype == bf)
             )  # gradients come back in the parameters' dtype
             del o
+            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw.detach(), lnb.detach(),
+                                                            wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous())
+            return (dm, None, dgam.to(lnw.dtype), dbet.to(lnb.dtype), dWa.to(wa.dtype), dWb.to(wb.dtype),
+                    dWo.to(wo.dtype), dbo.to(bo.dtype), None, None)
+        if path != "legacy":
+            if dz.dtype != bf or not dz.is_contiguous():
+                raise ValueError("native OPM requires contiguous BF16 upstream gradients")
+            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            dO, dzp, dbo = ext.opm_dgrad(dz[0], norm, packed[6], n, n)
+            dA = _owned_mm(bt.t(), dO.t(), owned)
+            dB = _owned_mm(a2.t(), dO, owned)
+            if o is None:
+                o = _owned_mm(a2, bt.t(), owned)
+            dWo = ext.opm_dwo(dzp, o, n, n)
             dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(
-                dA,
-                dB,
-                m,
-                stats,
-                mask16,
-                lnw.detach(),
-                lnb.detach(),
-                wa.detach().to(bf).contiguous(),
-                wb.detach().to(bf).contiguous(),
-            )
-            return (
-                dm,
-                None,
-                dgam.to(lnw.dtype),
-                dbet.to(lnb.dtype),
-                dWa.to(wa.dtype),
-                dWb.to(wb.dtype),
-                dWo.to(wo.dtype),
-                dbo.to(bo.dtype),
-                None,
-                None,
-            )
-        bw = (
-            wo.detach().t().contiguous().to(bf)
-        )  # Wo^T [CH*CH, CZ]: wgmma wants k = z contiguous
-        dO, dzp, dbo = ext.opm_dgrad(
-            dz[0].contiguous(), norm, bw, n, n
-        )  # (dz / norm) . Wo in the grouped layout; dbo falls out
-        dA = torch.mm(
-            bt.t(), dO.t()
-        )  # [s, (i,c)]: the prologue backward wants a row's channels contiguous
-        dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
+                dA, dB, m, stats, mask16, packed[0], packed[1], float(ctx.eps), packed[7], n, s, True, packed[2:4])
+            grads = ext.opm_native_cast_grads([dgam, dbet, dWa, dWb, dWo, dbo], [lnw, lnb, wa, wb, wo, bo])
+            return (dm, None, *grads, None, None)
+        bw = wo.detach().t().contiguous().to(bf)                                     # Wo^T [CH*CH, CZ]: wgmma wants k = z contiguous
+        dO, dzp, dbo = ext.opm_dgrad(dz[0].contiguous(), norm, bw, n, n)             # (dz / norm) . Wo in the grouped layout; dbo falls out
+        dA = torch.mm(bt.t(), dO.t())                                                # [s, (i,c)]: the prologue backward wants a row's channels contiguous
+        dB = torch.mm(a2.t(), dO)                                                    # [s, (j,e)]
         del dO
         if o is None:
             o = torch.matmul(

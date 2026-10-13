@@ -218,7 +218,7 @@ def _fold(params, dt):
 
 class _Hoist(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, pair, eps, nb, sink, *params):
+    def forward(ctx, pair, eps, nb, sink, *params):  # params: ln_pair.weight, to_bias.weight of each block
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
         gam, wts, wf = _fold(params, pair.dtype)

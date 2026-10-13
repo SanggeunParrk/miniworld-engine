@@ -391,7 +391,7 @@ class FusedBiasOnlyDiT:
         tab = self._tables3(cond, S, L)
         T = tab.shape[0]
         _, _, packs = self._pack3()
-        front, core, tail = self._ops3(dev)
+        front_op, core, tail = self._ops3(dev)
         tcl = tail.cluster(
             M // 128
         )  # 8, or 6 / the pair tail where it takes fewer rounds
@@ -407,7 +407,7 @@ class FusedBiasOnlyDiT:
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["x"][b % 2]
             tb = tab[:, b]
-            front(x, tb, p["wvg"], vg, T, xa=buf["xa"])
+            front_op(x, tb, p["wvg"], vg, T, xa=buf["xa"])
             core(
                 vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:]
             )  # sigmoid(g) * (P v), TF32-rounded
@@ -576,7 +576,7 @@ class FusedBiasOnlyDiT:
         tab = self._tables3b(cond, S, L)
         T = tab.shape[0]
         _, _, packs = self._pack3b()
-        front, core, tail = self._ops3b(dev)
+        front_op, core, tail = self._ops3b(dev)
         tcl = tail.cluster(
             M // 128
         )  # 8, 6, or the pair tail where it takes fewer rounds
@@ -592,7 +592,7 @@ class FusedBiasOnlyDiT:
         for b, p in enumerate(packs):
             y = out if b + 1 == self.nb else buf["xn"][b % 2]
             tb = tab[:, b]
-            front(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
+            front_op(xin, tb, p["wvg"], vg, T, xa=xa, serial=early and b == 0)
             core(
                 vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:]
             )  # sigmoid(g) * (P v)
@@ -736,20 +736,35 @@ def h100_inference(single, cond, pair, mask, weights):
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
 
     A, B, L, D = single.shape
-    if (torch.is_grad_enabled() or single.dtype is not torch.bfloat16
-            or cond.dtype is not torch.bfloat16 or pair.dtype is not torch.bfloat16
-            or B != 1 or D != 768 or L % 128 or not 128 <= L <= 768
-            or tuple(pair.shape) != (1, L, L, 128) or not pair.is_contiguous()
-            or tuple(cond.shape[1:]) != (1, L, 384) or cond.shape[0] not in (1, A)
-            or torch.cuda.get_device_capability(single.device) != (9, 0)):
-        raise ValueError("Hopper bias-only CUDA inference requires BF16 buckets128..768, B1, 768/384/128")
+    if (
+        torch.is_grad_enabled()
+        or single.dtype is not torch.bfloat16
+        or cond.dtype is not torch.bfloat16
+        or pair.dtype is not torch.bfloat16
+        or B != 1
+        or D != 768
+        or L % 128
+        or not 128 <= L <= 768
+        or tuple(pair.shape) != (1, L, L, 128)
+        or not pair.is_contiguous()
+        or tuple(cond.shape[1:]) != (1, L, 384)
+        or cond.shape[0] not in (1, A)
+        or torch.cuda.get_device_capability(single.device) != (9, 0)
+    ):
+        raise ValueError(
+            "Hopper bias-only CUDA inference requires BF16 buckets128..768, B1, 768/384/128"
+        )
     asynchronous = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_INFER_ASYNC", "0"))
     key = (asynchronous, *((w.data_ptr(), w._version) for w in weights))
 
     def prepare():
         if not asynchronous:
             return C._ext().infer_pack90(weights), weights, None, None
-        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+        idx = (
+            single.device.index
+            if single.device.index is not None
+            else torch.cuda.current_device()
+        )
         if idx not in _H100_INFER_STREAMS:
             _H100_INFER_STREAMS[idx] = torch.cuda.Stream(device=single.device)
         stream = _H100_INFER_STREAMS[idx]
@@ -768,20 +783,30 @@ def h100_inference(single, cond, pair, mask, weights):
         C._ext().infer_stage90(weights, packed, 4 if cond_ready is not None else 0, 5)
         return packed, weights, ready, cond_ready
 
-    packed, _, ready, cond_ready = _capture.lookup(_H100_INFER_PACKS, key, prepare, limit=8)
+    packed, _, ready, cond_ready = _capture.lookup(
+        _H100_INFER_PACKS, key, prepare, limit=8
+    )
     w1, b1, w2, b2, wf, wvg, wo, ws, wab = packed
     mask = None if mask is None else mask.view(L)
 
     def probability():
         from miniworld_engine.kernels.augmented_attention.cuda import apb
+
         # The save-free producer normalizes and projects without materializing
         # L^2 x 128 normalized rows; Wf here is in natural softmax units.
-        prob = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, EPS, -1e30).view(16 * L, L)
+        prob = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, EPS, -1e30).view(
+            16 * L, L
+        )
         C.softmax_rows(prob, prob, mask)
         return prob
 
-    pkey = (key, pair.data_ptr(), pair._version, L,
-            None if mask is None else (mask.data_ptr(), mask._version))
+    pkey = (
+        key,
+        pair.data_ptr(),
+        pair._version,
+        L,
+        None if mask is None else (mask.data_ptr(), mask._version),
+    )
     prob = _capture.lookup(_H100_INFER_PROBS, pkey, probability, limit=8)
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(A * L, 384)
@@ -799,7 +824,11 @@ def h100_inference(single, cond, pair, mask, weights):
         torch.cuda.current_stream(single.device).wait_event(ready)
     vg = torch.mm(xa, wvg.t())
     og = torch.empty_like(xa)
-    idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    idx = (
+        single.device.index
+        if single.device.index is not None
+        else torch.cuda.current_device()
+    )
     core = _h100_infer_core(idx)
     core(vg[:, :D], prob, og, A, g=vg[:, D:])
     y = torch.mm(og, wo.t())

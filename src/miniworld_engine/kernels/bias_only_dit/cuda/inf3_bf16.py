@@ -312,76 +312,36 @@ class TailBF16:
 
         if cl == TAIL_PAIR:
             return self._bind_pair(a, x, tab, wo, wab, wsq, xt, h, M, T, xbf, obf)
-        tm, da, nc, nhp = (
-            self._tm,
-            self.da,
-            768 // cl,
-            1536 // cl // (2 if cl == 6 else 1),
-        )
-        xmap = (
-            tm(x, [768, M], 768 * 2, [32, 128], swizzle=64)
-            if xbf
-            else tm(x, [768, M], 768 * 4, [32, 128], dtype="f32")
-        )
-        maps = [
-            tm(a, [da, M], da * 2, [64, 128]),
-            xmap,
-            tm(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
-            tm(wo, [64, wo.shape[0]], 128, [64, 2 * nc]),
-            tm(wab, [768, 3072], 768 * 2, [64, nhp]),
-            tm(wsq, [64, wsq.shape[0]], 128, [64, 2 * nc]),
-            tm(xt, [768, M], xt.stride(0) * 2, [64, 128]),
-            tm(h, [64, h.shape[0]], 128, [64, 128]),
-            tm(h, [64, h.shape[0]], 128, [64, 256]),
-        ]  # h: one / two k-blocks a box
-        return _LaunchPDL(
-            self.kernel(cl, xbf, obf),
-            ((M // 128) * cl, 1, 1),
-            (384, 1, 1),
-            *_descriptors(*maps),
-            PTR,
-            xt,
-            h,
-            int(xt.stride(0)),
-            int(T),
-            1e-5,
-        )
+        tma_desc, da, nc, nhp = self._tm, self.da, 768 // cl, 1536 // cl // (2 if cl == 6 else 1)
+        xmap = (tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else
+                tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32"))
+        maps = [tma_desc(a, [da, M], da * 2, [64, 128]), xmap,
+                tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
+                tma_desc(wo, [64, wo.shape[0]], 128, [64, 2 * nc]),
+                tma_desc(wab, [768, 3072], 768 * 2, [64, nhp]),
+                tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 2 * nc]),
+                tma_desc(xt, [768, M], xt.stride(0) * 2, [64, 128]),
+                tma_desc(h, [64, h.shape[0]], 128, [64, 128]), tma_desc(h, [64, h.shape[0]], 128, [64, 256])]   # h: one / two k-blocks a box
+        return _LaunchPDL(self.kernel(cl, xbf, obf), ((M // 128) * cl, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
+                          int(xt.stride(0)), int(T), 1e-5)
 
     def _bind_pair(self, a, x, tab, wo, wab, wsq, xt, h, M, T, xbf, obf):
         """bo_tail2_bf16.cu: clusters of 8 = two row tiles x 4 column groups; each CTA's W boxes its half (96 rows of the CL 8 packs,
         natural k order; 128 rows of Wa or Wb); the scratch covers whole tile pairs."""
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
-
-        tm, da = self._tm, self.da
+        tma_desc, da = self._tm, self.da
         Mp = tail_rows(M, TAIL_PAIR)
-        xmap = (
-            tm(x, [768, M], 768 * 2, [32, 128], swizzle=64)
-            if xbf
-            else tm(x, [768, M], 768 * 4, [32, 128], dtype="f32")
-        )
-        maps = [
-            tm(a, [da, M], da * 2, [64, 128]),
-            xmap,
-            tm(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
-            tm(wo, [64, wo.shape[0]], 128, [64, 192]),
-            tm(wab, [768, 3072], 768 * 2, [64, 128]),
-            tm(wsq, [64, wsq.shape[0]], 128, [64, 192]),
-            tm(xt, [768, Mp], xt.stride(0) * 2, [64, 128]),
-            tm(h, [64, Mp * 24], 128, [64, 256]),
-        ]  # two h k-blocks per box
-        return _LaunchPDL(
-            self.kernel(TAIL_PAIR, xbf, obf),
-            ((Mp // 256) * 8, 1, 1),
-            (384, 1, 1),
-            *_descriptors(*maps),
-            PTR,
-            xt,
-            h,
-            int(xt.stride(0)),
-            int(T),
-            int(M // 128),
-            1e-5,
-        )
+        xmap = (tma_desc(x, [768, M], 768 * 2, [32, 128], swizzle=64) if xbf else
+                tma_desc(x, [768, M], 768 * 4, [32, 128], dtype="f32"))
+        maps = [tma_desc(a, [da, M], da * 2, [64, 128]), xmap,
+                tma_desc(tab, [6 * 768, T], tab.stride(0) * 2, [32, 128], swizzle=64),
+                tma_desc(wo, [64, wo.shape[0]], 128, [64, 192]),
+                tma_desc(wab, [768, 3072], 768 * 2, [64, 128]),
+                tma_desc(wsq, [64, wsq.shape[0]], 128, [64, 192]),
+                tma_desc(xt, [768, Mp], xt.stride(0) * 2, [64, 128]),
+                tma_desc(h, [64, Mp * 24], 128, [64, 256])]                 # two h k-blocks per box
+        return _LaunchPDL(self.kernel(TAIL_PAIR, xbf, obf), ((Mp // 256) * 8, 1, 1), (384, 1, 1), *_descriptors(*maps), PTR, xt, h,
+                          int(xt.stride(0)), int(T), int(M // 128), 1e-5)
 
     def __call__(self, a, x, tab, wo, wab, wsq, out, T, xt, h, cl=None):
         """wo / wsq: ``pack_pairs_bf16(wo, cl)`` / ``pack_pairs_bf16(wsq, cl, z_order=True)`` for ``cl`` (default:

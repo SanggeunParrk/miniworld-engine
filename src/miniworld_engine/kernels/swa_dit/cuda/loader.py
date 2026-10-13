@@ -106,8 +106,10 @@ def extension(which: str) -> Any:
                 "-O3",
                 "-gencode=arch=compute_90a,code=sm_90a",
                 "--use_fast_math",
+                *_VARIANT_FLAGS.get(which, []),
             ],
             extra_cflags=["-O3"],
+            extra_ldflags=["-lcublas"],
             verbose=False,
         )
     except Exception as ex:  # noqa: BLE001 -- fall back to Triton
