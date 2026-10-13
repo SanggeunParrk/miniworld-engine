@@ -228,7 +228,7 @@ class RMSNorm(nn.RMSNorm):
             raise InvalidImplementationError(self.implementation)
         eps = self.effective_eps(x.dtype)
         if self.implementation == ImplementationType.MINIWORLD:
-            # A100: the engine's own choice is the hand-CUDA row kernel (kernels/rmsnorm/cuda/sm80.py; MINIWORLD_NORMS_SM80=0 keeps Triton); an explicit TRITON request is Triton
+            # A100: the engine's own choice is the hand-CUDA row kernel (kernels/rmsnorm/cuda/sm80.py; settings.norms_sm80=False keeps Triton); an explicit TRITON request is Triton
             from miniworld_engine.kernels.rmsnorm.cuda import sm80 as _sm80
 
             if _sm80.supports(x, self.weight):

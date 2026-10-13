@@ -1,8 +1,9 @@
 """E274 private Dense atom AA fixed mixed Qresident dQ/E237 dKV with preserved E205delta/E221pair fusion."""
 from __future__ import annotations
 import functools
-import os
 import torch
+
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.augmented_attention.cuda import atom_plain_partials_delta_mixed_sm80,atom_pair_reduce_vec_sm80,atom_pair_uniform_no_db_sm80
 from .augattn_sm80 import (_bwd_fake,_sm80,_pad,_pack,_stage,_penalties,_kind,_apb,_generic_kernel,_mm32,_unstage,EPS,BF,F32)
@@ -47,11 +48,13 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
     dzs, dw_sum = [], None
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
-        core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(atom_plain_partials_delta_mixed_sm80.plain_backward_partials_delta_mixed, db_natural=True, delta=delta, dq_order=int(os.environ.get("MINIWORLD_DENSE_E274_DQ_ORDER","0")), dkv_order=int(os.environ.get("MINIWORLD_DENSE_E274_DKV_ORDER","0")))
+        core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(atom_plain_partials_delta_mixed_sm80.plain_backward_partials_delta_mixed, db_natural=True, delta=delta, dq_order=settings.current().dense_e274_dq_order, dkv_order=settings.current().dense_e274_dkv_order)
         _, _, _, db = core_bwd(qkvg[rows, :d], qkvg[rows, d:2 * d], qkvg[rows, 2 * d:3 * d], dob[rows], bias[b], o[rows], lse[b * a:(b + 1) * a], a, padded, heads, hd,
                                kpen=None if kpen is None else kpen[b], dq=dqkvg[rows, :d], dk=dqkvg[rows, d:2 * d], dv=dqkvg[rows, 2 * d:3 * d])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and shared_uniform:
             atom_pair_uniform_no_db_sm80.backward(kmask[b], dob[rows], dqkvg[rows, :d], dqkvg[rows, d:2 * d],
                                                   dqkvg[rows, 2 * d:3 * d], length, padded, a, heads)
         mask_b = kmask[b] if mask_kind == 1 else None

@@ -17,10 +17,11 @@ it (and the two gradient GEMMs), and the hand kernels (``sm80/``) are everything
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
@@ -59,7 +60,7 @@ def prologue(m: torch.Tensor, mask: torch.Tensor | None, lnw: torch.Tensor, lnb:
     b = m.new_empty((S, L * CH))
     stats = m.new_empty((S, L, 2), dtype=torch.float32) if save_stats else _none(m, torch.float32)
     if variant is None:
-        variant = int(os.environ.get("MINIWORLD_OPM_SM80_PL", "0"))       # schedule experiments (tile buffers); 0 is the shipped one
+        variant = settings.current().opm_sm80_pl       # schedule experiments (tile buffers); 0 is the shipped one
     ext().prologue(m, _none(m, torch.uint8) if mask is None else mask, lnw, lnb, wl, wr, a, b, stats, eps, variant)
     return a, b, stats
 
@@ -70,7 +71,7 @@ def epilogue(o: torch.Tensor, norm: torch.Tensor | None, norm_const: float, wo: 
     length = o.shape[0] // CH
     out = o.new_empty((length, length, wo.shape[0]))
     if variant is None:
-        variant = int(os.environ.get("MINIWORLD_OPM_SM80_EPI", "0"))      # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = settings.current().opm_sm80_epi      # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     ext().epilogue(o, _none(o, torch.float32) if norm is None else norm, norm_const, wo, bias, _none(o, torch.bfloat16) if residual is None else residual, out,
                    int(norm_first), variant)
     return out
@@ -83,7 +84,7 @@ def dgrad(dz: torch.Tensor, norm: torch.Tensor | None, norm_const: float, wo: to
     dzn = torch.empty_like(dz)
     parts = dz.new_empty((-(-length // 32) * -(-length // 4), cz), dtype=torch.float32)
     if variant is None:
-        variant = int(os.environ.get("MINIWORLD_OPM_SM80_DG", "0"))        # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
+        variant = settings.current().opm_sm80_dg        # schedule experiments (ring depth / CTAs per SM); 0 is the shipped one
     ext().dgrad(dz, _none(dz, torch.float32) if norm is None else norm, norm_const, wo, dO, dzn, parts, int(norm_first), variant)
     return dO, dzn, reduce_rows(parts, torch.float32)
 
@@ -103,7 +104,7 @@ def prologue_bwd(da: torch.Tensor, db: torch.Tensor, m: torch.Tensor, stats: tor
     """dA, dB [S, 32 L] bf16 (the cuBLAS products dA = B dO^T, dB = A dO), m [S, L, CM], stats [S, L, 2], ... -> (dm bf16, dWl, dWr [32, CM], dgamma, dbeta [CM]) all fp32 but dm."""
     S, L, cm = m.shape
     if variant is None:
-        variant = int(os.environ.get("MINIWORLD_OPM_SM80_PB", "0"))       # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
+        variant = settings.current().opm_sm80_pb       # schedule experiments (buffers / CTAs per SM); 0 is the shipped one
     ntile = -(-S // 64) * -(-L // 2)
     nblk = min(ntile, torch.cuda.get_device_properties(m.device).multi_processor_count * (1 if variant == 1 or cm != 64 else 2))
     dm = torch.empty_like(m)

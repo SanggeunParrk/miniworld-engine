@@ -1,6 +1,7 @@
 """D512 native training dispatch, original accuracy bands, and live graph state."""
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.integrations import trimul_sm80
 from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide, sm80_wide512
@@ -32,7 +33,7 @@ def test_d512_module_dispatch_preserves_every_gradient(kind, masters, monkeypatc
         assert _rel(result[name].float(), want) <= max(1.25 * _rel(floor[name], want), 2e-3), name
     for name, gradient in zip(NAMES, gradients[1:]):
         assert gradient.dtype == parameters[name].dtype
-    monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_WIDE512", "0")
+    override_setting(monkeypatch, "trimul_sm80_wide512", "0")
     assert trimul_sm80._wide_kernels(pair) is sm80_wide
     assert not trimul_sm80.serves(module, pair, mask)
     with torch.no_grad():

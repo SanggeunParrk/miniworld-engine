@@ -13,7 +13,7 @@ into the epilogue).  A row is read once and written once (the byte floor of the 
   chunks of rows from a work counter, so which rows land in which partial row varies and ``dw`` / ``db`` agree between runs to fp32 rounding (``dx`` and the forward are always
   bit-reproducible).
 
-``supports`` is the whole gate (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_NORMS_SM80`` not 0, a bf16 / fp32 activation, widths up to 4096); everything it
+``supports`` is the whole gate (capability 8.0, engine backend not forced to Triton, ``settings.norms_sm80`` not 0, a bf16 / fp32 activation, widths up to 4096); everything it
 refuses keeps the Triton path.  A failed extension build warns once and keeps it too.  Training is an autograd function over two opaque ops (the forward saves x and the
 row statistics; the backward needs no recomputation); parameter gradients come back in the parameters' dtype.  ``kernels/rmsnorm/cuda/sm80.py`` drives the RMSNorm side.
 """
@@ -22,7 +22,6 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
@@ -43,9 +42,9 @@ _FAILED = False
 
 @functools.lru_cache(maxsize=1)
 def ext():
-    """The row-kernel extension, built on first use (``MINIWORLD_NORMS_SM80_FLAGS``: extra nvcc flags for A/B experiments, their own build)."""
+    """The row-kernel extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
     ensure_cuda_home()
-    extra = os.environ.get("MINIWORLD_NORMS_SM80_FLAGS", "").split()
+    extra = settings.current().norms_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"norm_rows_sm80{tag}",
@@ -79,8 +78,8 @@ def _is_a100(index: int) -> bool:
 
 
 def enabled(device: torch.device) -> bool:
-    """The switches every norm kernel of this card shares: ``MINIWORLD_NORMS_SM80`` not 0, the engine backend not forced to Triton, capability exactly 8.0."""
-    if os.environ.get("MINIWORLD_NORMS_SM80", "1") == "0" or settings.current().engine_backend == "triton":
+    """The switches every norm kernel of this card shares: ``settings.norms_sm80`` not 0, the engine backend not forced to Triton, capability exactly 8.0."""
+    if settings.current().norms_sm80 == "0" or settings.current().engine_backend == "triton":
         return False
     return _is_a100(device.index if device.index is not None else torch.cuda.current_device())
 
@@ -95,7 +94,7 @@ def _params_ok(n: int, *params: Tensor | None) -> bool:
 
 #: Training steps this small are launch-bound: the forward, the backward and the dw / db reduction are three kernels of ~3 us each, and the Triton path's forward + one atomic backward wins by 3-35 % there
 #: (measured 2026-10-04, one process, CUDA graph: token_single L128 at 384 / 768 wide, the MSA stream at L128 / 64 wide; no cell above 100 K elements, none below 20 K, was slower).  Those calls keep the Triton path;
-#: ``MINIWORLD_NORMS_SM80=force`` runs the CUDA rows at every size (the kernels are reachable, and tested, for them).
+#: ``settings.norms_sm80=force`` runs the CUDA rows at every size (the kernels are reachable, and tested, for them).
 _TINY_TRAIN_ELEMS = (20_000, 100_000)
 _TINY_TRAIN_WIDTHS = (64, 768)
 
@@ -110,12 +109,12 @@ def _triton_wins(x: Tensor, weight: Tensor | None, bias: Tensor | None) -> bool:
 
 def supports(x: Tensor, weight: Tensor | None, bias: Tensor | None, row_scale: Tensor | None = None) -> bool:
     """Whether the kernels run this call: a CUDA bf16 / fp32 activation of width 1..4096, an fp32 / bf16 affine (or none), A100, switches on, extension built, and not one of the tiny training
-    steps the Triton path wins (:func:`_triton_wins`; ``MINIWORLD_NORMS_SM80=force`` serves those too)."""
+    steps the Triton path wins (:func:`_triton_wins`; ``settings.norms_sm80=force`` serves those too)."""
     if not x.is_cuda or x.dtype not in (torch.bfloat16, torch.float32) or x.ndim < 1 or not 1 <= x.shape[-1] <= MAX_N or x.numel() == 0:
         return False
     if not _params_ok(x.shape[-1], weight, bias) or (row_scale is not None and row_scale.numel() != x.numel() // x.shape[-1]):
         return False
-    if _triton_wins(x, weight, bias) and os.environ.get("MINIWORLD_NORMS_SM80", "1") != "force":
+    if _triton_wins(x, weight, bias) and settings.current().norms_sm80 != "force":
         return False
     return enabled(x.device) and loads()
 

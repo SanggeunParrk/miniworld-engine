@@ -14,11 +14,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent
@@ -29,8 +29,8 @@ C, H, D, NHID, HW = 128, 4, 32, 256, 64
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_SWA_DIT_SM80_FLAGS: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_SWA_DIT_SM80_FLAGS", "").split()
+    # settings.swa_dit_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
+    extra = settings.current().swa_dit_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"swa_dit_sm80{tag}",
@@ -58,8 +58,8 @@ def attn_bwd(qh: torch.Tensor, kh: torch.Tensor, vh: torch.Tensor, d_o: torch.Te
 
 
 def window_supported(q: torch.Tensor, n_heads: int, half_window: int) -> bool:
-    """Whether the window attention of ``modules/swa_atom_attention`` ([N, S, H, D] q) runs on these kernels: an A100, 4 heads x 32, half window 64 (``MINIWORLD_SWA_DIT_SM80=0`` keeps flash)."""
-    if os.environ.get("MINIWORLD_SWA_DIT_SM80", "1") == "0":
+    """Whether the window attention of ``modules/swa_atom_attention`` ([N, S, H, D] q) runs on these kernels: an A100, 4 heads x 32, half window 64 (``settings.swa_dit_sm80=False`` keeps flash)."""
+    if not settings.current().swa_dit_sm80:
         return False
     if not q.is_cuda or q.dim() != 4 or q.shape[2] != H or q.shape[3] != D or n_heads != H or half_window != HW or not q.dtype.is_floating_point:
         return False
@@ -108,7 +108,7 @@ def ffn_fwd(qi: torch.Tensor, g: torch.Tensor, o: torch.Tensor, mod: torch.Tenso
     m = qi.shape[0]
     if (save and prof is None and cfg == 0 and m == 48 * s and b == 48
             and s in (4096, 8192)
-            and os.environ.get("MINIWORLD_SWA_DIT_SM80_FFN_TUNED", "1") == "1"):
+            and settings.current().swa_dit_sm80_ffn_tuned):
         from ..ffn_fwd_tuned_sm80 import ffn_forward
 
         return ffn_forward(qi, g, o, mod, wo.contiguous(), wu.contiguous(), wd.contiguous(), s, b, eps)
@@ -218,8 +218,8 @@ def _capability(index: int) -> tuple[int, int]:
 
 def supported(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> bool:
     """Whether these kernels serve a forward / backward call: an A100 (cc 8.0), a bf16 ``q`` [N, S, 128], SwiGLU hidden 256, half window 64 (the fp32 eps is the contract of the
-    block).  ``MINIWORLD_SWA_DIT_SM80=0`` keeps the Triton stages."""
-    if os.environ.get("MINIWORLD_SWA_DIT_SM80", "1") == "0":
+    block).  ``settings.swa_dit_sm80=False`` keeps the Triton stages."""
+    if not settings.current().swa_dit_sm80:
         return False
     if not q.is_cuda or q.dtype != torch.bfloat16 or q.dim() != 3 or q.shape[-1] != C or nhid != NHID or half_window != HW:
         return False
@@ -234,7 +234,7 @@ def block_fwd(q: torch.Tensor, mod: torch.Tensor, cos: torch.Tensor, sin: torch.
     qf = q.reshape(n * s, C)
     cos2, sin2 = cos.reshape(-1, D // 2).contiguous(), sin.reshape(-1, D // 2).contiguous()
     qh, kh, vh, g, xs, pqs, pks = qkvg_fwd(qf, mod, cos2, sin2, wqkv, wg, b, s, eps, qk_eps, save)
-    o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save or os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
+    o, lse = attn_fwd(qh, kh, vh, seqused, save_lse=save or not settings.current().a100_cleanup)
     out, q1s, atts, ys, ffs = ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, save)
     outputs = [out.view(n, s, C)]
     if save:

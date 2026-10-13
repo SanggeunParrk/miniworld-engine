@@ -11,7 +11,7 @@ from miniworld_engine.kernels.mpnn_edge_layernorm.reference import (
 )
 
 # ``cuda`` is the memory policy on the hand-written A100 (sm_80) backward (``integrations/mpnn_edge_sm80.py``); on an A100 ``memory`` runs it too, unless
-# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton backward.
+# ``settings.mpnn_edge_sm80=0`` or ``engine_backend="triton"`` keeps the Triton backward.
 EdgeNormBackend = Literal["auto", "pytorch", "memory", "cuda"]
 
 #: The one width this policy is measured for, asserted rather than assumed. It is not a kernel

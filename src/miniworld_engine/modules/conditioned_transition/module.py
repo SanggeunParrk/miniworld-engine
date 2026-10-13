@@ -132,7 +132,7 @@ class ConditionedTransition(nn.Module):
         return x + self.delta(x, cond) if updated is None else updated
 
     def _sm80_update(self, x: torch.Tensor, cond: torch.Tensor, residual: bool) -> torch.Tensor | None:
-        """The A100 hand-CUDA path (``integrations.conditioned_transition_sm80`` states its contract; ``MINIWORLD_CONDTRANS_SM80=0`` keeps the Triton tail), or None when it does
+        """The A100 hand-CUDA path (``integrations.conditioned_transition_sm80`` states its contract; ``settings.condtrans_sm80=0`` keeps the Triton tail), or None when it does
         not serve this call."""
         if self._backend not in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             return None

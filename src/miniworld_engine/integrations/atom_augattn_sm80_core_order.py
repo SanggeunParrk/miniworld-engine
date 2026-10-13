@@ -1,8 +1,9 @@
 """E237 private Dense atom AA backward: unchanged E187 body, only dQ/dKV CTA ownership order."""
 from __future__ import annotations
 import functools
-import os
 import torch
+
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from .augattn_sm80 import (_bwd_fake,_sm80,_pad,_pack,_stage,_penalties,_kind,_apb,_generic_kernel,_mm32,_unstage,EPS,BF,F32)
 
@@ -45,11 +46,13 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
         rows = slice(b * n, (b + 1) * n)
         from miniworld_engine.kernels.augmented_attention.cuda.atom_plain_core_order_sm80 import plain_backward_core_order
         assert dt is BF
-        core_bwd = functools.partial(plain_backward_core_order, db_natural=True, dq_order=int(os.environ.get('MINIWORLD_DENSE_CORE_DQ_ORDER','0')), dkv_order=int(os.environ.get('MINIWORLD_DENSE_CORE_DKV_ORDER','0')))
+        core_bwd = functools.partial(plain_backward_core_order, db_natural=True, dq_order=settings.current().dense_core_dq_order, dkv_order=settings.current().dense_core_dkv_order)
         _, _, _, db = core_bwd(qkvg[rows, :d], qkvg[rows, d:2 * d], qkvg[rows, 2 * d:3 * d], dob[rows], bias[b], o[rows], lse[b * a:(b + 1) * a], a, padded, heads, hd,
                                kpen=None if kpen is None else kpen[b], dq=dqkvg[rows, :d], dk=dqkvg[rows, d:2 * d], dv=dqkvg[rows, 2 * d:3 * d])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and shared_uniform:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
             shared_mask_uniform_sm80.backward(kmask[b], dob[rows], dqkvg[rows, :d], dqkvg[rows, d:2 * d],
                                               dqkvg[rows, 2 * d:3 * d], db, length, padded, a, heads)

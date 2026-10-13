@@ -22,7 +22,7 @@ L is padded to a multiple of 128 inside the call (zero rows, the padded keys mas
 
 ``serves()`` is the whole gate: the engine's kernel backend (implementation TRITON or MINIWORLD), A100 (sm_80), single / cond / pair and module weights all bf16 or all fp32
 (``compute_dtype`` None or that dtype; bf16 activations also take fp32 master parameters: cast to bf16 inside the ops, unrounded fp32 weight gradients), no QK-norm, head dim 32 or 48, any A, B and L, a key mask [B, L] or [A, B, L] (bool) or none, LayerNorm eps 1e-5. Anything else
-keeps the module path. ``MINIWORLD_AUGATTN_SM80=0`` turns the path off, ``MINIWORLD_AUGATTN_SM80_FUSED=0`` keeps the earlier composition (bf16 only: the module's own
+keeps the module path. ``settings.augattn_sm80 = False`` turns the path off, ``settings.augattn_sm80_fused = False`` keeps the earlier composition (bf16 only: the module's own
 projections and PyTorch gates around the core; the pair-bias cache and the fused atom pair bias stay), and a failed extension build warns once and keeps the module path.
 Numerics and timings: ``docs/gpus/a100/atom_dit/atom_dit.md``, ``docs/gpus/a100/token_dit/token_dit.md``, ``docs/gpus/a100/a100.md``.
 
@@ -35,7 +35,6 @@ from __future__ import annotations
 
 import functools
 import math
-import os
 import warnings
 
 import torch
@@ -110,12 +109,12 @@ def _apb():
 
 
 def _fused() -> bool:
-    return os.environ.get("MINIWORLD_AUGATTN_SM80_FUSED", "1") != "0"
+    return settings.current().augattn_sm80_fused
 
 
 def _generic_kernel() -> bool:
-    """The streaming pair-bias kernel for the widths without a dedicated one (MINIWORLD_AUGATTN_SM80_PBGEN=0: ATen LayerNorm + cuBLAS)."""
-    return os.environ.get("MINIWORLD_AUGATTN_SM80_PBGEN", "1") != "0"
+    """The streaming pair-bias kernel for the widths without a dedicated one (settings.augattn_sm80_pbgen = False: ATen LayerNorm + cuBLAS)."""
+    return settings.current().augattn_sm80_pbgen
 
 
 def _mask_kind(mask, a: int, b: int, length: int) -> int | None:
@@ -132,7 +131,7 @@ def _mask_kind(mask, a: int, b: int, length: int) -> int | None:
 
 
 def serves(module, single, pair, mask, compute_dtype=None, cond=None) -> bool:
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0" or settings.current().engine_backend == "triton":
+    if not settings.current().augattn_sm80 or settings.current().engine_backend == "triton":
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
     if module._backend != KernelBackend.TRITON or module.use_qk_norm:
@@ -219,7 +218,7 @@ def _pack(params: list[torch.Tensor], heads: int, dt: torch.dtype, save: bool = 
     w32 = the same product in fp32 (the atom width's kernels).  ``params`` are the module's own parameters (any dtype): the cache keys on them, not on casts (fresh tensors per
     call for fp32), and is scoped to the CUDA-graph capture (``kernels._capture``: a capture packs once, recorded, and replays repack the current weights)."""
     wq, bq, wk, wv, wg, _, _, _, lnw, wb = params
-    atom_inference = not save and _kind(wb.shape[1], heads, dt) == "atom" and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+    atom_inference = not save and _kind(wb.shape[1], heads, dt) == "atom" and settings.current().a100_cleanup
 
     def build():
         d = wq.shape[0]
@@ -316,12 +315,12 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
     if shared_scale:
         from miniworld_engine.kernels.augmented_attention.cuda import token_shared_scale_sm80
     rs = None if res is None else _stage(res, batch, padded)
-    qkvg_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG")
-    qkvg_native = (qkvg_override == "1" if qkvg_override is not None else
+    qkvg_override = settings.current().augattn_sm80_atom_qkvg
+    qkvg_native = (qkvg_override if qkvg_override is not None else
                    not save and batch == 1 and a == 5 and length in (2048, 4096))
-    tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED")
+    tiled_override = settings.current().augattn_sm80_atom_qkvg_tiled
     tiled_qkvg = (dt is BF and d == 128 and hd == 32
-                  and (tiled_override == "1" if tiled_override is not None else
+                  and (tiled_override if tiled_override is not None else
                        not save and batch == 1 and (a, length) in
                        ((1, 1024), (1, 2048), (1, 4096), (5, 1024), (5, 2048))))
     if tiled_qkvg:
@@ -349,9 +348,9 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
         rows = slice(b * n, (b + 1) * n)
         kp = None if kpen is None else kpen[b]
         shared_core = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
-                       and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_CORE", "0") == "1")
+                       and settings.current().augattn_sm80_shared_core)
         shared_score = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
-                        and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_SCORE", "0") == "1")
+                        and settings.current().augattn_sm80_shared_score)
         if shared_score:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_score_core_sm80
             shared_score_core_sm80.forward(q[rows], k[rows], v[rows], None if save else g[rows],
@@ -372,8 +371,10 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
             sm80.plain_forward(q[rows], k[rows], v[rows], bias[b], a, padded, heads, hd, save_lse=True, kpen=kp, out=o[rows], lse=lse[b * a:(b + 1) * a])
         else:
             sm80.pgate_forward(q[rows], k[rows], v[rows], g[rows], bias[b], a, padded, heads, hd, kpen=kp, out=q[rows])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and not shared_core and not shared_score and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and not shared_core and not shared_score and shared_uniform:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
             shared_mask_uniform_sm80.forward(kmask[b], v[rows], None if save else g[rows],
                                              o[rows] if save else q[rows],
@@ -393,14 +394,14 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
         sm80.gate_rows(o, g, og)
     else:
         og = q                                                                 # sigmoid(g) o, written over q's columns
-    output_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED")
-    output_fused = (output_override == "1" if output_override is not None else
+    output_override = settings.current().augattn_sm80_atom_output_fused
+    output_fused = (output_override if output_override is not None else
                     not save and batch == 1 and rs is not None
                     and (a, length) in ((1, 4096), (5, 1024), (5, 2048), (5, 4096)))
-    output_tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED")
+    output_tiled_override = settings.current().augattn_sm80_atom_output_tiled
     # The small A1 inference rows qualify own 32-channel output tiles;
     # larger rows retain the existing faster full-output fusion.
-    output_tiled = ((output_tiled_override == "1" if output_tiled_override is not None else True)
+    output_tiled = ((output_tiled_override if output_tiled_override is not None else True)
                     and not save and batch == 1 and hd == 32
                     and (a, length) in ((1, 1024), (1, 2048)))
     if dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
@@ -471,8 +472,10 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
         core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(sm80.plain_backward, db_natural=True)
         _, _, _, db = core_bwd(qkvg[rows, :d], qkvg[rows, d:2 * d], qkvg[rows, 2 * d:3 * d], dob[rows], bias[b], o[rows], lse[b * a:(b + 1) * a], a, padded, heads, hd,
                                kpen=None if kpen is None else kpen[b], dq=dqkvg[rows, :d], dk=dqkvg[rows, d:2 * d], dv=dqkvg[rows, 2 * d:3 * d])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and shared_uniform:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
             shared_mask_uniform_sm80.backward(kmask[b], dob[rows], dqkvg[rows, :d], dqkvg[rows, d:2 * d],
                                               dqkvg[rows, 2 * d:3 * d], db, length, padded, a, heads)
@@ -590,12 +593,12 @@ def _dpad(dim: int) -> int:
 #: The whole-op path stages q / k / v / the bias / the output around the core (layout copies, a bias pack); the Triton kernel reads the head-major tensors in place. Measured on the A100 (2026-10-04,
 #: ``bench.py target=augmented_attention``, the ``projected_attention`` rows): inference is 13-71 % slower than Triton at every registry size; training is faster from A * B * H * L^2 >= 2e6
 #: (16 x 768, A = 48: 1.3-1.95x) and at head dim 24 (1.1-1.6x), slower below that at head dim 48 (8 x 384, A = 1, L <= 384: 9-13 %).  So the default (``auto``) serves the calls that need gradients above
-#: that size and the Triton kernel keeps the rest; ``MINIWORLD_AUGATTN_SM80_OPS=all`` serves every call, ``0`` none.
+#: that size and the Triton kernel keeps the rest; ``settings.augattn_sm80_ops=all`` serves every call, ``0`` none.
 _OPS_MIN_WORK = 2_000_000
 
 
 def _ops_wanted(query, key, value, bias, work: int, dim: int) -> bool:
-    mode = os.environ.get("MINIWORLD_AUGATTN_SM80_OPS", "auto")
+    mode = settings.current().augattn_sm80_ops
     if mode in ("all", "0"):
         return mode == "all"
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (query, key, value, bias))):
@@ -605,8 +608,8 @@ def _ops_wanted(query, key, value, bias, work: int, dim: int) -> bool:
 
 def serves_ops(query, key, value, bias, mask, kernel_type="compute_efficient") -> bool:
     """The gate of the whole-op path: A100, engine backend not forced to Triton, bf16 q / k / v / bias, [A, B, H, L, D] with head dim 24 / 32 / 48, a bool key mask [A, B, L] / [B, L]
-    or none, the compute-efficient kernel type, and (``MINIWORLD_AUGATTN_SM80_OPS``, default ``auto``) a call that needs gradients and is large enough for the core to win (see ``_OPS_MIN_WORK``)."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0" or settings.current().engine_backend == "triton" or kernel_type != "compute_efficient":
+    or none, the compute-efficient kernel type, and (``settings.augattn_sm80_ops``, default ``auto``) a call that needs gradients and is large enough for the core to win (see ``_OPS_MIN_WORK``)."""
+    if not settings.current().augattn_sm80 or settings.current().engine_backend == "triton" or kernel_type != "compute_efficient":
         return False
     if not query.is_cuda or query.ndim != 5 or any(t.dtype is not BF for t in (query, key, value, bias)):
         return False
@@ -736,7 +739,7 @@ def attention_ops(query, key, value, bias, mask):
         return _OpsAttention.apply(query, key, value, bias, kmask, a, batch, length, heads, dim, kind)
     return _ops_fwd(query, key, value, bias, kmask, a, batch, length, heads, dim, kind, False)[0]
 # ================================================================================================================================ the earlier composition
-# (kept: MINIWORLD_AUGATTN_SM80_FUSED=0 -- the module's own projections and PyTorch gates around the core; the atom width's fused pair bias, the pair-bias cache)
+# (kept: settings.augattn_sm80_fused = False -- the module's own projections and PyTorch gates around the core; the atom width's fused pair bias, the pair-bias cache)
 # ---------------------------------------------------------------------------------------------------------------------------------- opaque ops
 def _attn_fwd_fake(q, k, v, bias, samples, length, heads, head_dim, save_lse):
     lse = q.new_empty((samples, heads, length), dtype=torch.float32) if save_lse else q.new_empty((0,), dtype=torch.float32)
@@ -906,7 +909,7 @@ def _atom_pair(module, pair) -> bool:
 def cache_pair_bias(module, pair, mask=None) -> bool:
     """Compute and keep the pair bias of ``pair`` / ``mask`` for ``module`` (see above); returns False, caching nothing, when the call would not take this path (not the
     atom width, not an A100, not bf16 / fp32)."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0" or not _atom_pair(module, pair):
+    if not settings.current().augattn_sm80 or not _atom_pair(module, pair):
         return False
     length = pair.shape[1]
     padded = _pad(length)

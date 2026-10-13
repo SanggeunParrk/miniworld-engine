@@ -1,7 +1,7 @@
 """Fused bias-only token DiT inference over a stack of ``modules.bias_only_dit.BiasOnlyDiTBlock``: CUDA and cuBLAS only (B200: the tcgen05 core, A100: the mma.sync core of ``cuda/sm80``).
 
 A100's one-block token layouts use a single CUDA weight pack and fused pair LayerNorm/projection. The optional B200
-conditioning experiment's tables are prepared only on demand there. ``MINIWORLD_BIAS_ONLY_DIT_PREP=0`` restores the earlier
+conditioning experiment's tables are prepared only on demand there. ``settings.bias_only_dit_prep = False`` restores the earlier
 preparation. The integration scopes caches to capture, so weight and pair preparation stay live on every graph replay.
 
     runner = FusedBiasOnlyDiT(blocks)          # packs every weight once
@@ -53,7 +53,6 @@ output-gate table GEMM on a side stream (no change).
 
 from __future__ import annotations
 
-import os
 import weakref
 
 import torch
@@ -95,7 +94,7 @@ class FusedBiasOnlyDiT:
         self.dp = a0.ln_pair.weight.shape[0]
         self.fp32 = dtype is torch.float32
         dev = a0.to_value.weight.device
-        self._fast_prep = (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PREP", "1") != "0"
+        self._fast_prep = (settings.current().bias_only_dit_prep
                            and torch.cuda.get_device_capability(dev) == (8, 0))
         if (self._fast_prep and self.nb == 1 and (self.d, self.dc, self.dp) == (768, 384, 128)
                 and (self.h, self.da // self.h) in C.LAYOUTS
@@ -252,7 +251,7 @@ class FusedBiasOnlyDiT:
     def _cond(self, device):
         """The one-kernel conditioning tables (settings.bias_only_dit_cond=1); off by default: slower than LayerNorm rows + two
         cuBLAS GEMMs at every measured shape (the sigmoids of the tables on 256 epilogue threads per SM dominate its time)."""
-        if (not settings.current().bias_only_dit_cond) or self.fp32:
+        if not settings.current().bias_only_dit_cond or self.fp32:
             return None
         idx = device.index if device.index is not None else torch.cuda.current_device()
         if ("cond", idx) not in self._ops:
@@ -262,7 +261,7 @@ class FusedBiasOnlyDiT:
     def _resln(self, device, final, presig):
         """The width-768 GEMM with residual + gate + AdaLN (or the final output) in its epilogue; None: cuBLAS + rows.
         Off by default until the conditioning tables carry their sigmoids (settings.bias_only_dit_resln=1 turns it on)."""
-        if (not settings.current().bias_only_dit_resln) or self.fp32:
+        if not settings.current().bias_only_dit_resln or self.fp32:
             return None
         idx = device.index if device.index is not None else torch.cuda.current_device()
         key = ("resln", idx, final, presig)

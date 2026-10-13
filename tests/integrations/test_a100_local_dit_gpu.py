@@ -1,6 +1,7 @@
 """A100 native 32x128 attention inside the AF3 local block, including cross AdaLN and live graph operands."""
 import copy
 import pytest
+from settings_helpers import override_setting
 import torch
 from miniworld_engine.integrations import local_dit_sm80
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -11,7 +12,7 @@ pytestmark=[pytest.mark.gpu,pytest.mark.skipif(not torch.cuda.is_available() or 
 
 @pytest.fixture(autouse=True)
 def enable_candidate(monkeypatch):
-    monkeypatch.setenv('MINIWORLD_LOCAL_DIT_SM80','1')
+    override_setting(monkeypatch, "local_dit_sm80", '1')
 
 @pytest.mark.parametrize('samples,n,cross,masked',[(1,65,True,True),(3,130,True,False),(2,300,True,True),(4,384,False,True)])
 def test_training_matches_existing_b200_accuracy_band(samples,n,cross,masked):

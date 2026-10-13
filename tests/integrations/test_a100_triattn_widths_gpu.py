@@ -2,11 +2,12 @@
 dim 16 / 32 / 32), 256 (8 x 32), 384 (12 x 32) and the d_pair-128 geometry through the generic path, inference and training, starting and ending node, against the fp32 PyTorch
 module.  The errors are held to the Triton path's own error in the same regime (the kernels compute in bf16 with fp32 accumulation, as the Triton path does)."""
 
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
+from miniworld_engine import settings
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 
@@ -153,9 +154,9 @@ def test_aligned_front_preserves_reference_and_live_graph(starting, monkeypatch)
     ref = _reference(m, geom, starting).eval()
     pair, mask = _inputs(geom, 512)
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_GEMM_PAD", "0")
+        override_setting(monkeypatch, "triattn_sm80_gemm_pad", "0")
         before = m(pair, mask)
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_GEMM_PAD", "1")
+        override_setting(monkeypatch, "triattn_sm80_gemm_pad", "1")
         after = m(pair, mask)
         want = ref(pair.float(), mask)
         assert _rel(after, before) < 0.003
@@ -195,7 +196,7 @@ def test_gate_declines_what_it_is_not_built_for(monkeypatch):
     assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias.bfloat16(), mask)            # mixed LayerNorm dtypes
     assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask.float())              # mask dtype
     assert not w.supports(pair, None, weights, m.to_out.weight, ln.weight, ln.bias, mask)
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+    override_setting(monkeypatch, "triattn_sm80", "0")
     assert not w.supports(pair, cfg, weights, m.to_out.weight, ln.weight, ln.bias, mask)                       # the switch
 
 
@@ -246,10 +247,10 @@ def test_env_switch_turns_every_geometry_off(monkeypatch):
         m = _module(geom, True)
         pair, mask = _inputs(geom, 128)
         assert _serves(m, pair, mask, train=False)
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+        override_setting(monkeypatch, "triattn_sm80", "0")
         assert not _serves(m, pair, mask, train=False)
         assert not _serves(m, pair, mask, train=True)
-        monkeypatch.delenv("MINIWORLD_TRIATTN_SM80")
+        override_setting(monkeypatch, "triattn_sm80", None)
 
 
 # --------------------------------------------------------------------------------------------------------------------------------------------- inference
@@ -419,7 +420,7 @@ def test_the_two_engines_agree_at_d64(starting, monkeypatch):
     pair, mask = _inputs(geom, 256)
     with torch.no_grad():
         fused = m(pair, mask)
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_ROWS", "1")
+        override_setting(monkeypatch, "triattn_sm80_rows", "1")
         rows = m(pair, mask)
         want = ref(pair.float(), mask)
     assert _rel(fused, want) < 3e-3
@@ -434,9 +435,9 @@ def test_the_generic_path_at_d128_matches_the_dedicated_kernels(starting, monkey
     pair, mask = _inputs(geom, 256)
     with torch.no_grad():
         dedicated = m(pair, mask)
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_WIDE", "1")
+        override_setting(monkeypatch, "triattn_sm80_wide", "1")
         generic = m(pair, mask)
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_ROWS", "1")
+        override_setting(monkeypatch, "triattn_sm80_rows", "1")
         rows = m(pair, mask)
     assert _rel(generic, dedicated) < 2e-3
     assert _rel(rows, dedicated) < 4e-3
@@ -528,10 +529,10 @@ def test_the_env_switch_leaves_the_triton_numbers_untouched(monkeypatch):
         m._sm80_cuda = False
         a = m(pair, mask)
         m._sm80_cuda = True
-        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+        override_setting(monkeypatch, "triattn_sm80", "0")
         b = m(pair, mask)
     assert torch.equal(a, b)
-    assert os.environ["MINIWORLD_TRIATTN_SM80"] == "0"
+    assert settings.current().triattn_sm80 is False
 
 
 # ------------------------------------------------------------------------------------------------------------------ the widest width the gate accepts
@@ -567,9 +568,9 @@ def test_inference_core_schedule_preserves_mask_and_reference(d, starting, monke
             pair, _ = _inputs(geom, length)
             for probability in (None, 0.5, 1.0):
                 mask = None if probability is None else torch.rand(1, length, device="cuda") > probability
-                monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_TUNED", "0")
+                override_setting(monkeypatch, "triattn_sm80_tuned", "0")
                 before = m(pair, mask)
-                monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_TUNED", "1")
+                override_setting(monkeypatch, "triattn_sm80_tuned", "1")
                 after = m(pair, mask)
                 assert torch.isfinite(after).all()
                 assert _rel(after, before) < 3e-3
@@ -612,9 +613,9 @@ def test_adaptive_gated_core_handles_tail_keys_and_mixed_batch_counts(d, startin
             mask.zero_()
             mask[0, :valid] = True
             mask[1, :384 - valid] = True
-            monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_INTERNAL", "0")
+            override_setting(monkeypatch, "triattn_sm80_internal", "0")
             before = m(pair, mask)
-            monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_INTERNAL", "1")
+            override_setting(monkeypatch, "triattn_sm80_internal", "1")
             after = m(pair, mask)
             assert torch.isfinite(after).all()
             assert _rel(after, before) < 3e-3

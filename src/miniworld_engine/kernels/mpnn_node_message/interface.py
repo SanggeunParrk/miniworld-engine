@@ -113,7 +113,7 @@ def node_message_reduce(
             "in signed 32-bit indexing"
         )
     # An A100 runs the hand-CUDA kernels of ``cuda/sm80`` for both policies (one forward kernel; a backward that replays it, so nothing edge-sized is saved): the gate is
-    # ``integrations/mpnn_msg_sm80.py``'s (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps the Triton kernels).
+    # ``integrations/mpnn_msg_sm80.py``'s (capability 8.0, engine backend not forced to Triton, ``settings.mpnn_msg_sm80=False`` keeps the Triton kernels).
     from miniworld_engine.integrations import mpnn_msg_sm80
 
     if mpnn_msg_sm80.serves_node(edge_states, backend):

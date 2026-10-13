@@ -100,7 +100,7 @@ def swiglu_ffn(
 ) -> torch.Tensor:
     """``squeeze(silu(x Wa^T) * (x Wb^T))`` -- a bare SwiGLU FFN (no LayerNorm, no residual), forward and backward; the dispatch behind
     ``ops.swiglu_ffn``: the A100 hand-CUDA path (``cuda/fused_wide_sm80``) where it applies (bf16, sm_80, width 64 .. 768, hidden a multiple of 64,
-    ``MINIWORLD_TRANSITION_FUSED_SM80`` / ``MINIWORLD_TRANSITION_WIDE_SM80`` not 0, engine backend not forced to Triton), else the Triton path
+    ``settings.transition_fused_sm80`` / ``settings.transition_wide_sm80`` not 0, engine backend not forced to Triton), else the Triton path
     (``kernels.triton_swiglu_ffn``)."""
     from miniworld_engine import settings
 

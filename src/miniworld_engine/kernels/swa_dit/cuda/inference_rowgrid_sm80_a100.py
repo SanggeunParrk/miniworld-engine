@@ -1,5 +1,6 @@
 """Private A1 row-grid inference, all other qualified E517 providers preserved."""
 import torch
+from miniworld_engine import settings
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 from miniworld_engine.kernels.swa_dit.cuda import inference_rowgrid_ffn_sm80_a100 as rowgrid
 from miniworld_engine.kernels.swa_dit.cuda import inference_rt8_ffn_sm80_a100 as rt8
@@ -25,7 +26,7 @@ def block(x:torch.Tensor,c:torch.Tensor,cos:torch.Tensor,sin:torch.Tensor,sequse
     assert qkv_kind=='singlehead' and qkv_cfg==0 and ffn_kind=='tuned'
     qh,kh,vh,g=baseline.qkvg_extension().singlehead(qf,mod,cos2,sin2,wq,wg,s,b,eps,eps,False,qkv_cfg)
     import os
-    o,_=sm80.attn_fwd(qh,kh,vh,seqused,save_lse=os.environ.get('MINIWORLD_A100_CLEANUP','1')=='0')
+    o,_=sm80.attn_fwd(qh,kh,vh,seqused,save_lse=not settings.current().a100_cleanup)
     out=rowgrid.ffn(qf,g,o,mod,wo,wu,wd,s,b,eps,_ROWGRID[(a,s)])
     return out.view(a,s,128)
 

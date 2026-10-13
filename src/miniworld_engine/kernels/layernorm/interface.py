@@ -1,7 +1,7 @@
 """The LayerNorm family's public entry point.
 
 ``layernorm_kernel`` is the dispatching entry: on an A100 the hand-CUDA rows of ``cuda/sm80.py`` (inference and training, every width, with or without weight / bias),
-elsewhere (and for what that gate refuses, or with ``MINIWORLD_NORMS_SM80=0``) the Triton forward with a backward path picked per GPU via ``dispatch.py``;
+elsewhere (and for what that gate refuses, or with ``settings.norms_sm80=0``) the Triton forward with a backward path picked per GPU via ``dispatch.py``;
 ``triton_layernorm`` is the plain autograd Triton entry that callers who want
 that specific path -- ``transition``'s split fallback, the trimul front -- ask for by name.
 """

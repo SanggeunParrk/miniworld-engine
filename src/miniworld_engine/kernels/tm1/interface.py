@@ -6,7 +6,7 @@ so the four GEMMs share one read of ``x`` and the gates never round-trip through
 :mod:`.reference` holds the PyTorch definition the kernel is checked against.
 
 ``triton_tm1`` is the Triton path; on an A100 (sm_80) ``cuda_tm1`` is the hand-CUDA one (bf16, forward + backward; ``cuda_tm1_serves`` is its gate: bf16, widths the
-64-column tiles divide, capability 8.0, ``MINIWORLD_GATED_SM80`` not 0). Nothing dispatches between them: no module calls tm1 (the triangle-multiplication modules run
+64-column tiles divide, capability 8.0, ``settings.gated_sm80`` not 0). Nothing dispatches between them: no module calls tm1 (the triangle-multiplication modules run
 the fused front), so the caller picks. Import is side-effect free: the extension builds on the first ``cuda_tm1`` call.
 """
 

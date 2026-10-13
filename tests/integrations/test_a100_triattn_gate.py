@@ -2,12 +2,13 @@
 Pure Python, runs without a GPU."""
 
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide as w
 
 
 def test_geometry_gate(monkeypatch):
-    monkeypatch.delenv("MINIWORLD_TRIATTN_SM80_ROWS", raising=False)
+    override_setting(monkeypatch, "triattn_sm80_rows", None)
     assert w.cfg_for(64, 64, 4) == w.Cfg(64, 4, 16, True)                    # a 16-channel head is padded to 32 by the packed weights
     assert w.cfg_for(64, 128, 4).hd == 32
     assert w.cfg_for(64, 128, 4).fused
@@ -36,7 +37,7 @@ def test_geometry_gate(monkeypatch):
 
 
 def test_the_row_kernels_engine_can_be_forced_at_the_narrow_widths(monkeypatch):
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_ROWS", "1")
+    override_setting(monkeypatch, "triattn_sm80_rows", "1")
     assert not w.cfg_for(64, 128, 4).fused
     assert not w.cfg_for(128, 128, 4).fused
     assert w.cfg_for(64, 128, 4).n == 4 * 128 + 8
@@ -49,7 +50,7 @@ def test_the_gate_rejects_cpu_tensors_and_the_switch(monkeypatch):
     wo, ln = torch.zeros(64, 128, dtype=torch.bfloat16), torch.zeros(64)
     assert not w.supports(pair, cfg, ws, wo, ln, ln)                          # not CUDA tensors
     assert not w.supports(pair, None, ws, wo, ln, ln)
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+    override_setting(monkeypatch, "triattn_sm80", "0")
     assert not w.enabled()
 
 
@@ -60,9 +61,9 @@ def test_the_projected_attention_gate_rejects_cpu_tensors_and_the_switch(monkeyp
     q = torch.zeros(128, 1, 4, 128, 32, dtype=torch.bfloat16)
     bias = torch.zeros(1, 4, 128, 128, dtype=torch.bfloat16)
     assert not sp.serves(q, q, q, bias, None)                                  # not CUDA tensors: the op keeps its Triton path
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+    override_setting(monkeypatch, "triattn_sm80", "0")
     assert not sp.enabled()
-    monkeypatch.delenv("MINIWORLD_TRIATTN_SM80")
+    override_setting(monkeypatch, "triattn_sm80", None)
     assert sp.enabled()
 
 

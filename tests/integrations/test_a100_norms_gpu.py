@@ -1,12 +1,13 @@
 """LayerNorm, RMSNorm, 3D RoPE and the fused Q/K norm + RoPE on A100 (``kernels/{layernorm,rmsnorm,rope}/cuda/sm80.py``) through the modules and kernel entry points that dispatch to
 them: numerics (forward and every gradient) against the fp32 reference and as accurate as the bf16 PyTorch path, eager and ``torch.compile(fullgraph=True)``, a CUDA-graph step, the
-``MINIWORLD_NORMS_SM80`` switch and the gates.  Errors are held to the bf16 PyTorch module's own error in the same regime."""
+``settings.norms_sm80`` switch and the gates.  Errors are held to the bf16 PyTorch module's own error in the same regime."""
 
 import dataclasses
 
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.modules import LayerNorm, RMSNorm
@@ -23,7 +24,7 @@ def ampere(monkeypatch):
     if torch.cuda.get_device_capability() != (8, 0):
         pytest.skip("Ampere (sm_80) required")
     # the small shapes of these tests include the tiny training steps the Triton path wins (routed away by default): the tests exercise the CUDA rows themselves
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "force")
+    override_setting(monkeypatch, "norms_sm80", "force")
 
 
 @pytest.fixture(autouse=True)
@@ -247,13 +248,13 @@ def test_layernorm_gate_conditions(monkeypatch):
     settings.configure(engine_backend="triton")
     assert not sm80.supports(x, w, w)
     settings.configure(engine_backend="auto")
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     assert not sm80.supports(x, w, w)
 
 
 def test_layernorm_tiny_training_steps_keep_the_triton_path(monkeypatch, spy):
-    """A training step over 20 - 100 K elements of a vector width is launch-bound and the Triton path wins it: routed away by default; inference, larger steps and ``MINIWORLD_NORMS_SM80=force`` run the CUDA rows."""
-    monkeypatch.delenv("MINIWORLD_NORMS_SM80")
+    """A training step over 20 - 100 K elements of a vector width is launch-bound and the Triton path wins it: routed away by default; inference, larger steps and ``settings.norms_sm80=force`` run the CUDA rows."""
+    override_setting(monkeypatch, "norms_sm80", None)
     _, ours = _norm(384, 1)
     small = torch.randn(2, 96, 384, device="cuda").to(BF)            # 73.7 K elements
     large = torch.randn(2, 400, 384, device="cuda").to(BF)           # 307 K elements
@@ -264,19 +265,19 @@ def test_layernorm_tiny_training_steps_keep_the_triton_path(monkeypatch, spy):
     assert spy["layernorm"] == 1                                      # inference: the CUDA rows
     ours(large.clone().requires_grad_()).sum().backward()
     assert spy["layernorm"] == 2                                      # a larger step: the CUDA rows
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "force")
+    override_setting(monkeypatch, "norms_sm80", "force")
     ours(small.clone().requires_grad_()).sum().backward()
     assert spy["layernorm"] == 3                                      # forced
 
 
 def test_layernorm_env_switch_keeps_the_triton_path(monkeypatch, spy):
-    """MINIWORLD_NORMS_SM80=0: the same module call runs the Triton kernels (the A100 kernels see no call) and agrees to bf16 accuracy."""
+    """settings.norms_sm80=0: the same module call runs the Triton kernels (the A100 kernels see no call) and agrees to bf16 accuracy."""
     _, ours = _norm(384, 1)
     x = torch.randn(2, 128, 384, device="cuda").to(BF)
     with torch.no_grad():
         y = ours(x)
     assert spy["layernorm"] == 1
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     with torch.no_grad():
         y0 = ours(x)
     assert spy["layernorm"] == 1
@@ -624,10 +625,10 @@ def test_norms_env_switch_is_read_at_call_time(monkeypatch):
     w = torch.ones(32, device="cuda")
     served = (ln.supports(x, w, w), rms.supports(x, w), rope.supports_qk(x, x, cos, sin), rope.supports_rope(x, cos, sin))
     assert all(served)
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     refused = (ln.supports(x, w, w), rms.supports(x, w), rope.supports_qk(x, x, cos, sin), rope.supports_rope(x, cos, sin))
     assert not any(refused)
-    monkeypatch.delenv("MINIWORLD_NORMS_SM80")
+    override_setting(monkeypatch, "norms_sm80", None)
     assert ln.supports(x, w, w)
 
 
@@ -731,7 +732,7 @@ def test_rms_norm_modulation_gate_conditions(monkeypatch):
     settings.configure(engine_backend="triton")
     assert not sm80.supports_adamod(q, c, *ws)
     settings.configure(engine_backend="auto")
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     assert not sm80.supports_adamod(q, c, *ws)
 
 
@@ -743,7 +744,7 @@ def test_rms_norm_modulation_env_switch_keeps_the_triton_path(monkeypatch, spy):
     with torch.no_grad():
         y, g = ops.rms_norm_modulation(q, c, *ws, None, 1e-5)
     assert spy["modulation"] == 1
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     with torch.no_grad():
         y0, g0 = ops.rms_norm_modulation(q, c, *ws, None, 1e-5)
     assert spy["modulation"] == 1

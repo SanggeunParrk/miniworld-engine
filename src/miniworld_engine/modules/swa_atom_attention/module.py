@@ -754,7 +754,7 @@ class SWA3DRoPEAttention(nn.Module):
             from miniworld_engine.kernels.rope.cuda import sm80 as _rope_sm80
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
             if self.implementation == ImplementationType.MINIWORLD and _rope_sm80.supports_qk(q, k, cos, sin):
-                q, k = _rope_sm80.qk_norm_rope_3d(q, k, cos, sin)   # A100: the hand-CUDA fused norm + rotation (MINIWORLD_NORMS_SM80=0 keeps Triton)
+                q, k = _rope_sm80.qk_norm_rope_3d(q, k, cos, sin)   # A100: the hand-CUDA fused norm + rotation (settings.norms_sm80=False keeps Triton)
             else:
                 q, k = qk_norm_rope_3d(q, k, cos, sin)
         else:

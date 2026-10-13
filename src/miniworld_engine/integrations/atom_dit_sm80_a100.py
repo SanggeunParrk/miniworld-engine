@@ -8,7 +8,7 @@ Native casts, graph-live packs, fixed dQ/dKV schedules and both eager/compiled
 fanout rounding are explicit; no benchmark environment flags enable this path.
 """
 from __future__ import annotations
-import os,warnings
+import warnings
 import torch
 from torch.autograd.function import once_differentiable
 from miniworld_engine import settings
@@ -39,7 +39,7 @@ def _ready(index):
 
 def serves(module,single,cond,pair,mask,compute_dtype=None):
     from miniworld_engine.modules.dispatch import KernelBackend
-    if _FAILED or os.environ.get('MINIWORLD_ATOM_DIT_SM80','1')=='0' or settings.current().engine_backend=='triton':return False
+    if _FAILED or not settings.current().atom_dit_sm80 or settings.current().engine_backend=='triton':return False
     if not torch.is_grad_enabled() or module.attention._backend != KernelBackend.TRITON:return False
     if module.attention.use_qk_norm or compute_dtype not in (None,torch.bfloat16):return False
     if not single.is_cuda or torch.cuda.get_device_capability(single.device)!=(8,0):return False
@@ -52,11 +52,11 @@ def serves(module,single,cond,pair,mask,compute_dtype=None):
     if dtype not in (torch.bfloat16,torch.float32):return False
     for name,p in module.named_parameters():
         if p.device!=single.device or p.dtype is not (torch.float32 if name.endswith('ln_cond.weight') or name=='attention.ln_pair.weight' else dtype):return False
-    if os.environ.get('MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST','0')!='0' or os.environ.get('MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST','0')!='0':return False
+    if settings.current().condtrans_sm80_save_param_cast or settings.current().adaln_sm80_save_param_cast:return False
     # These two standard debug projection overrides must agree with the
     # fixed qualified schedules; otherwise retain the original module route.
-    for flag,want in [('MINIWORLD_AUGATTN_SM80_ATOM_QKVG','1'),('MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED','0'),('MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED','1')]:
-        if os.environ.get(flag,want)!=want:return False
+    s=settings.current()
+    if s.augattn_sm80_atom_qkvg not in (None,True) or s.augattn_sm80_atom_qkvg_tiled not in (None,False) or s.augattn_sm80_atom_output_fused not in (None,True):return False
     return aa.serves(module.attention,single,pair,mask,compute_dtype,cond) and _ready(single.device.index if single.device.index is not None else torch.cuda.current_device())
 
 @opaque(fake=ct._train_bwd_fake, name="atom_dit_sm80_transition_bwd")
@@ -168,8 +168,8 @@ def block(module,single,cond,pair,mask=None):
     assert single.shape[:2]==(48,1) and single.shape[2] == 4096
     assert single.shape[-1]==128 and cond.shape==single.shape and cond.dtype is single.dtype is torch.bfloat16
     assert pair.shape==(1,single.shape[2],single.shape[2],16)
-    assert os.environ.get('MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST','0')=='0'
-    assert os.environ.get('MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST','0')=='0'
+    assert not settings.current().condtrans_sm80_save_param_cast
+    assert not settings.current().adaln_sm80_save_param_cast
     ada=module.attention.ada_ln_in
     aps=[ada.ln_cond.weight,ada.to_scale.weight,ada.to_scale.bias,ada.to_bias.weight]
     kind=aa._mask_kind(mask,*single.shape[:3])

@@ -1,6 +1,7 @@
 """Private opaque SAVEfalse FFN geometry; no module dispatch change."""
 import functools,pathlib
 import torch
+from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home,host_flags,load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -41,6 +42,6 @@ def forward(x: torch.Tensor, c: torch.Tensor, cos: torch.Tensor, sin: torch.Tens
         qh, kh, vh, g = qkvg_extension().singlehead(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
     else:
         qh, kh, vh, g = qkvg_extension().headgroup(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
-    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=os.environ.get('MINIWORLD_A100_CLEANUP', '1') == '0')
+    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=not settings.current().a100_cleanup)
     out = ffn(qf, g, o, mod, wo, wu, wd, s, b, eps, _SELECT[a, s])
     return out.view(a, s, 128)

@@ -14,7 +14,7 @@ import torch
 # outputs instead. Both take the edge weight as a slice of the packed input projection,
 # so both read its row stride rather than assuming one.
 # ``cuda`` names the hand-written A100 (sm_80) kernels explicitly (``integrations/mpnn_edge_sm80.py``, saved activations): on an A100 the two Triton policies run them too, unless
-# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels; ``triton_compute`` (save) maps onto the saving kernels, ``triton`` (recompute) onto the same
+# ``settings.mpnn_edge_sm80=False`` or ``engine_backend="triton"`` keeps the Triton kernels; ``triton_compute`` (save) maps onto the saving kernels, ``triton`` (recompute) onto the same
 # kernels replayed in the backward.
 EdgeTailBackend = Literal["off", "triton", "triton_compute", "cuda"]
 

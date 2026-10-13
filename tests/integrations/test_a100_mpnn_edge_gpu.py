@@ -3,12 +3,12 @@ evaluation and the bf16 PyTorch chain, eager and compiled, replayed from a CUDA 
 
 from __future__ import annotations
 
-import os
-
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
+from miniworld_engine import settings
 from miniworld_engine.integrations import mpnn_edge_sm80 as sm80
 from miniworld_engine.kernels.mpnn_edge_dropout import edge_dropout
 from miniworld_engine.kernels.mpnn_edge_layernorm import edge_layer_norm
@@ -33,7 +33,7 @@ W = 128
 def ampere(monkeypatch):
     if torch.cuda.get_device_capability() != (8, 0):
         pytest.skip("Ampere (sm_80) required")
-    monkeypatch.setenv(sm80.ENV, "1")
+    override_setting(monkeypatch, "mpnn_edge_sm80", True)
 
 
 def _rel(a, b):
@@ -165,7 +165,7 @@ def test_tail_dropout_replays_the_same_mask_in_backward_and_is_deterministic():
 
 
 def test_tail_gate_and_switch():
-    """The CUDA path serves the A100 call; ``MINIWORLD_MPNN_EDGE_SM80=0`` hands it to the Triton kernel (both agree to bf16 accuracy); an explicit ``cuda`` refuses what it does not serve."""
+    """The CUDA path serves the A100 call; ``settings.mpnn_edge_sm80=False`` hands it to the Triton kernel (both agree to bf16 accuracy); an explicit ``cuda`` refuses what it does not serve."""
     vals, index = _tail_inputs(1, 128, 48, fp32_params=False)
     seed = torch.zeros(1, device="cuda", dtype=torch.int64)
     node, packed, pb = vals["node"], vals["packed"], vals["packed_bias"]
@@ -175,14 +175,14 @@ def test_tail_gate_and_switch():
     assert sm80.tail_serves(vals["edge"], packed[:, W:2 * W], vals["hidden_weight"], vals["output_weight"])
     with torch.no_grad():
         ours = edge_tail_update(*args, "triton_compute")
-        os.environ[sm80.ENV] = "0"
+        settings.configure(mpnn_edge_sm80=False)
         try:
             assert not sm80.tail_serves(vals["edge"], packed[:, W:2 * W], vals["hidden_weight"], vals["output_weight"])
             triton = edge_tail_update(*args, "triton_compute")
             with pytest.raises(ValueError, match="sm_80 CUDA MPNN edge tail"):
                 edge_tail_update(*args, "cuda")
         finally:
-            os.environ[sm80.ENV] = "1"
+            settings.configure(mpnn_edge_sm80=True)
     assert _rel(ours, triton) < 1.5e-2
 
 
@@ -364,13 +364,13 @@ def test_mlp_follows_the_triton_paths_rounding_points():
     x, ps, up = _mlp_inputs(2048 * 4, False)
     out = edge_mlp_update(x, *ps, backend="triton_compute")
     grads = torch.autograd.grad(out, [x, *ps], up)
-    os.environ[sm80.ENV] = "0"
+    settings.configure(mpnn_edge_sm80=False)
     try:
         leaves = [t.detach().clone().requires_grad_(True) for t in (x, *ps)]
         ref = edge_mlp_update(*leaves, backend="triton_compute")
         ref_grads = torch.autograd.grad(ref, leaves, up)
     finally:
-        os.environ[sm80.ENV] = "1"
+        settings.configure(mpnn_edge_sm80=True)
     assert _rel(out, ref) < 1e-4
     for n, a, b in zip(["x", "Wh", "bh", "Wo", "bo"], grads, ref_grads, strict=True):
         assert _rel(a, b) < (5e-3 if n in ("Wh", "Wo") else 1e-3), n

@@ -6,12 +6,11 @@ Two whole-module paths, picked by the module's geometry:
 
   * ``fused``: d_pair 128, 4 heads x 32 (``sm80.py``): the front, the core and the back are three persistent kernels with the weights resident in shared memory;
   * ``wide``: every other width the model code uses (``sm80_wide.py``): d_pair 64 .. 512 (a multiple of 64), 1 .. 16 heads of 16 or 32 channels: hand-CUDA row kernels around cuBLAS GEMMs
-    and the same core.  ``MINIWORLD_TRIATTN_SM80_WIDE=1`` makes d_pair 128 take this path too (tests, A/B).
+    and the same core.  ``settings.triattn_sm80_wide = True`` makes d_pair 128 take this path too (tests, A/B).
 """
 
 from __future__ import annotations
 
-import os
 import types
 
 import torch
@@ -61,7 +60,7 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None):
     d_hidden, d_pair = module.to_query.weight.shape
     if pair.shape[-1] != d_pair:
         return None
-    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) and os.environ.get("MINIWORLD_TRIATTN_SM80_WIDE", "0") != "1":
+    if (d_pair, d_hidden, module.n_head) == (128, 128, 4) and not settings.current().triattn_sm80_wide:
         return ("fused", None)
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
 
@@ -162,9 +161,9 @@ def _native_dropout_after_serves(module,pair,kind,weights,wo,ln):
     from miniworld_engine.modules.triangle_attention.module import TriangleAttention
     if callback.__func__ is not TriangleAttention._sm80_default_drop_scale:
         return False
-    if os.environ.get('MINIWORLD_DROPOUT_SCALE_SM80') is not None:
+    if settings.current().dropout_scale_sm80:
         return False
-    if os.environ.get('MINIWORLD_TRIATTN_SM80_NATIVE_RNG','1') == '0':
+    if not settings.current().triattn_sm80_native_rng:
         return False
     from miniworld_engine.modules.exceptions import ImplementationType
     if module.implementation not in (ImplementationType.MINIWORLD,ImplementationType.TRITON):

@@ -3,6 +3,7 @@ dispatching entry points fall back to the PyTorch / Triton paths, and ``rms_norm
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import ops, settings
 from miniworld_engine.kernels.layernorm.cuda import sm80 as ln
@@ -34,9 +35,9 @@ def test_cpu_tensors_are_never_served():
 
 def test_the_switch_and_the_backend_are_read_at_call_time(monkeypatch):
     """``enabled`` needs a CUDA device only for the capability: the two switches answer first."""
-    monkeypatch.setenv("MINIWORLD_NORMS_SM80", "0")
+    override_setting(monkeypatch, "norms_sm80", "0")
     assert not ln.enabled(torch.device("cuda", 0))
-    monkeypatch.delenv("MINIWORLD_NORMS_SM80")
+    override_setting(monkeypatch, "norms_sm80", None)
     settings.configure(engine_backend="triton")
     assert not ln.enabled(torch.device("cuda", 0))
 

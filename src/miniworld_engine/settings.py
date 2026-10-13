@@ -430,6 +430,364 @@ class Settings:
     pwa_infer: bool | None = None
     #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
     token_pair_init_fused: bool = True
+    # --- A100 (sm_80) kernel switches, formerly MINIWORLD_*_SM80 environment variables ---
+    #: The A100 sm_80 cleanup shortcuts of the attention / OPM / PWA / TriAttn glue (off: the earlier
+    #: packed-weight and saved-intermediate path). Formerly MINIWORLD_A100_CLEANUP.
+    a100_cleanup: bool = True
+    #: The A100 hand-CUDA augmented-attention integration (off: the module's Triton path serves).
+    #: Formerly MINIWORLD_AUGATTN_SM80.
+    augattn_sm80: bool = True
+    #: The fused projection + pair-bias composition of the A100 augmented attention (off: the module's
+    #: own projections and PyTorch gates around the core; bf16 only). Formerly
+    #: MINIWORLD_AUGATTN_SM80_FUSED.
+    augattn_sm80_fused: bool = True
+    #: The streaming pair-bias kernel for widths without a dedicated one (off: ATen LayerNorm +
+    #: cuBLAS). Formerly MINIWORLD_AUGATTN_SM80_PBGEN.
+    augattn_sm80_pbgen: bool = True
+    #: Rows a thread of the generic pair-bias kernel takes (1, 2 or 4), for A/B runs. Read at IMPORT of
+    #: kernels.augmented_attention.cuda.sm80. Formerly MINIWORLD_AUGATTN_SM80_PBGEN_ROWS.
+    augattn_sm80_pbgen_rows: int = 2
+    #: Extra -D / nvcc flags for the sm_80 augmented-attention extension (A/B experiments; their own
+    #: build). Formerly MINIWORLD_AUGATTN_SM80_FLAGS.
+    augattn_sm80_flags: str = ""
+    #: Which calls the A100 whole-op augmented-attention core serves: "auto" (training calls the core
+    #: wins), "all", or "0" (none). Formerly MINIWORLD_AUGATTN_SM80_OPS.
+    augattn_sm80_ops: str = "auto"
+    #: Opt-in: the shared-mask uniform core of the atom augmented-attention forward (bf16, d 128, head
+    #: dim 32). Formerly MINIWORLD_AUGATTN_SM80_SHARED_CORE.
+    augattn_sm80_shared_core: bool = False
+    #: Opt-in: the shared-mask score core of the atom augmented-attention forward (bf16, d 128, head
+    #: dim 32). Formerly MINIWORLD_AUGATTN_SM80_SHARED_SCORE.
+    augattn_sm80_shared_score: bool = False
+    #: Force the shared-mask uniform-softmax kernel of the atom augmented attention on or off; None
+    #: picks it for bf16, d 128, head dim 32. Formerly MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM.
+    augattn_sm80_shared_uniform: bool | None = None
+    #: Force the native resident qkvg projection of the atom augmented attention on or off; None picks
+    #: it per shape. Formerly MINIWORLD_AUGATTN_SM80_ATOM_QKVG.
+    augattn_sm80_atom_qkvg: bool | None = None
+    #: Force the tiled qkvg projection of the atom augmented attention on or off; None picks it per
+    #: shape (bf16 inference). Formerly MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED.
+    augattn_sm80_atom_qkvg_tiled: bool | None = None
+    #: Force the fused output projection of the atom augmented attention on or off; None picks it per
+    #: shape. Formerly MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED.
+    augattn_sm80_atom_output_fused: bool | None = None
+    #: Force the tiled output projection of the small A1 atom inference rows on or off; None means on.
+    #: Formerly MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED.
+    augattn_sm80_atom_output_tiled: bool | None = None
+    #: dQ accumulation order variant of the plain backward core of the atom augmented attention (0: the
+    #: shipped one). Formerly MINIWORLD_DENSE_CORE_DQ_ORDER.
+    dense_core_dq_order: int = 0
+    #: dK/dV accumulation order variant of the plain backward core of the atom augmented attention (0:
+    #: the shipped one). Formerly MINIWORLD_DENSE_CORE_DKV_ORDER.
+    dense_core_dkv_order: int = 0
+    #: dQ accumulation order variant of the mixed-precision backward core of the atom augmented
+    #: attention (0: the shipped one). Formerly MINIWORLD_DENSE_E274_DQ_ORDER.
+    dense_e274_dq_order: int = 0
+    #: dK/dV accumulation order variant of the mixed-precision backward core of the atom augmented
+    #: attention (0: the shipped one). Formerly MINIWORLD_DENSE_E274_DKV_ORDER.
+    dense_e274_dkv_order: int = 0
+    #: The A100 hand-CUDA AttentionPairBias integration (off: the module's Triton path serves).
+    #: Formerly MINIWORLD_APB_SM80.
+    apb_sm80: bool = True
+    #: The 16-bit training path of the A100 AttentionPairBias. Formerly MINIWORLD_APB_SM80_TRAIN16.
+    apb_sm80_train16: bool = True
+    #: Typed (bf16) gradient outputs of the A100 AttentionPairBias backward. Formerly
+    #: MINIWORLD_APB_SM80_TYPED_GRAD.
+    apb_sm80_typed_grad: bool = True
+    #: Save the natural-layout activations for the A100 AttentionPairBias backward. Formerly
+    #: MINIWORLD_APB_SM80_SAVE_NATURAL.
+    apb_sm80_save_natural: bool = True
+    #: The A100 bias-only attention door: "1" serves it (small-L training excepted), "all" serves every
+    #: call `serves` accepts, "0" turns it off. Formerly MINIWORLD_BIAS_ONLY_ATTN_SM80.
+    bias_only_attn_sm80: str = "1"
+    #: The A100 single-block weight pack and fused pair LayerNorm / projection of the bias-only DiT
+    #: runner (off: the earlier preparation). Formerly MINIWORLD_BIAS_ONLY_DIT_PREP.
+    bias_only_dit_prep: bool = True
+    #: Depth of the cp.async ring of the sm_80 bias-only DiT core, for A/B runs. Read at IMPORT of
+    #: kernels.bias_only_dit.cuda.sm80. Formerly MINIWORLD_BIAS_ONLY_DIT_SM80_STAGES.
+    bias_only_dit_sm80_stages: int = 2
+    #: Forced samples per CTA (1..4) of the sm_80 bias-only DiT core; None picks the fewest CTAs that
+    #: fill the card. Formerly MINIWORLD_BIAS_ONLY_DIT_SM80_SG.
+    bias_only_dit_sm80_sg: int | None = None
+    #: Schedule of the sm_80 bias-gradient core (0..3); None is 0. Read at IMPORT of
+    #: kernels.bias_only_dit.cuda.sm80. Formerly MINIWORLD_BIAS_ONLY_DIT_SM80_DPB.
+    bias_only_dit_sm80_dpb: int | None = None
+    #: The A100 hand-CUDA OuterProductMean integration (off: the module's Triton path serves). Formerly
+    #: MINIWORLD_OPM_SM80.
+    opm_sm80: bool = True
+    #: Keep O for the OPM backward (off: recompute it; saves 1.2 GB at L768). Formerly
+    #: MINIWORLD_OPM_SM80_SAVE_O.
+    opm_sm80_save_o: bool = True
+    #: Opt-in: the C++ host-overhead pipeline of the short OPM training path (S 1024, d_msa 64).
+    #: Formerly MINIWORLD_OPM_SM80_PIPELINE.
+    opm_sm80_pipeline: bool = False
+    #: The native pipeline of the L128 OPM training path (off: the previous short training
+    #: implementation). Formerly MINIWORLD_OPM_SM80_NATIVE128_PIPELINE.
+    opm_sm80_native128_pipeline: bool = True
+    #: Opt-in: typed (bf16) gradient outputs of the OPM backward. Formerly
+    #: MINIWORLD_OPM_SM80_TYPED_GRAD.
+    opm_sm80_typed_grad: bool = False
+    #: Force the native mask-count kernel of the OPM on or off; None picks it per shape (inference
+    #: only). Formerly MINIWORLD_OPM_SM80_MASK_COUNT_NATIVE.
+    opm_sm80_mask_count_native: bool | None = None
+    #: Force the mask epilogue of the OPM on or off; None picks it per shape (inference only). Formerly
+    #: MINIWORLD_OPM_SM80_MASK_EPILOGUE.
+    opm_sm80_mask_epilogue: bool | None = None
+    #: Schedule variant (tile buffers) of the OPM forward kernels, for experiments (0: the shipped
+    #: one). Formerly MINIWORLD_OPM_SM80_PL.
+    opm_sm80_pl: int = 0
+    #: Schedule variant (ring depth / CTAs per SM) of the OPM epilogue, for experiments (0: the shipped
+    #: one). Formerly MINIWORLD_OPM_SM80_EPI.
+    opm_sm80_epi: int = 0
+    #: Schedule variant (ring depth / CTAs per SM) of the OPM dG kernel, for experiments (0: the
+    #: shipped one). Formerly MINIWORLD_OPM_SM80_DG.
+    opm_sm80_dg: int = 0
+    #: Schedule variant (buffers / CTAs per SM) of the OPM pair backward, for experiments (0: the
+    #: shipped one). Formerly MINIWORLD_OPM_SM80_PB.
+    opm_sm80_pb: int = 0
+    #: The A100 hand-CUDA MSAPairWeightedAveraging integration (off: the module's previous path
+    #: serves). Formerly MINIWORLD_PWA_SM80.
+    pwa_sm80: bool = True
+    #: Native broadcast contractions for the qualified L128 PWA training rows. Formerly
+    #: MINIWORLD_PWA_SM80_BROADCAST_NATIVE.
+    pwa_sm80_broadcast_native: bool = True
+    #: Short-row broadcast contraction variant of the PWA: "1" pipeline, "2" / "3" capture variants,
+    #: "0" none. Formerly MINIWORLD_PWA_SM80_BROADCAST_PIPELINE.
+    pwa_sm80_broadcast_pipeline: str = "0"
+    #: Force the fused contract + gate kernel of the PWA on or off; None means off for training and on
+    #: for inference. Formerly MINIWORLD_PWA_SM80_CONTRACT_GATE_FUSED.
+    pwa_sm80_contract_gate_fused: bool | None = None
+    #: Opt-in: the early-exit native dw kernel of the short PWA rows. Formerly
+    #: MINIWORLD_PWA_SM80_DW_SHORT.
+    pwa_sm80_dw_short: bool = False
+    #: Force the native dw kernel of the PWA on or off; None picks it for depth 384 / 640. Formerly
+    #: MINIWORLD_PWA_SM80_DW_NATIVE.
+    pwa_sm80_dw_native: bool | None = None
+    #: Force typed (bf16) gradient outputs of the PWA backward on or off; None picks it for depth 128 /
+    #: 256 / 384. Formerly MINIWORLD_PWA_SM80_TYPED_GRAD.
+    pwa_sm80_typed_grad: bool | None = None
+    #: Force the tuned glue kernel of the PWA backward on or off; None picks it for depth 256 .. 768.
+    #: Formerly MINIWORLD_PWA_SM80_GLUE_TUNED.
+    pwa_sm80_glue_tuned: bool | None = None
+    #: Force the fused gradient-reduce of the PWA backward on or off; None picks it for the (1024, 128,
+    #: 64) / L128 row. Formerly MINIWORLD_PWA_SM80_GRAD_REDUCE.
+    pwa_sm80_grad_reduce: bool | None = None
+    #: The partial-sum pair gradient of the PWA backward. Formerly MINIWORLD_PWA_SM80_PAIR_PARTIAL.
+    pwa_sm80_pair_partial: bool = True
+    #: Forced number of chunks (1, 2, 4, 8) the PWA splits the MSA rows in; None picks it from the
+    #: depth. Formerly MINIWORLD_PWA_SM80_SPLIT.
+    pwa_sm80_split: int | None = None
+    #: Schedule variant (CTAs per SM) of the PWA pair backward, for experiments (0: the shipped one).
+    #: Formerly MINIWORLD_PWA_SM80_PB.
+    pwa_sm80_pb: int = 0
+    #: The A100 hand-CUDA TriangleAttention integration (off: the Triton path serves). Formerly
+    #: MINIWORLD_TRIATTN_SM80.
+    triattn_sm80: bool = True
+    #: The compact (masked-row gather) inference schedule of the sm_80 triangle attention. Formerly
+    #: MINIWORLD_TRIATTN_SM80_COMPACT.
+    triattn_sm80_compact: bool = True
+    #: The internal-tile inference schedule (128 queries, 48 keys at L divisible by 384); off keeps the
+    #: preceding schedule. Formerly MINIWORLD_TRIATTN_SM80_INTERNAL.
+    triattn_sm80_internal: bool = True
+    #: The tuned inference schedules of the sm_80 triangle attention (off: the original 32-key
+    #: schedule). Formerly MINIWORLD_TRIATTN_SM80_TUNED.
+    triattn_sm80_tuned: bool = True
+    #: The fixed-shift softmax of the sm_80 triangle attention inference at L >= 512 (off: the online
+    #: schedule). Formerly MINIWORLD_TRIATTN_SM80_SOFTMAX.
+    triattn_sm80_softmax: bool = True
+    #: 32-wide padding of the d 256 projection GEMMs at L >= 512 (off: 8). Formerly
+    #: MINIWORLD_TRIATTN_SM80_GEMM_PAD.
+    triattn_sm80_gemm_pad: bool = True
+    #: The native dropout RNG of the sm_80 triangle attention training path. Formerly
+    #: MINIWORLD_TRIATTN_SM80_NATIVE_RNG.
+    triattn_sm80_native_rng: bool = True
+    #: Capture-aware launches of the sm_80 triangle attention training path. Formerly
+    #: MINIWORLD_TRIATTN_SM80_TRAIN_CAPTURE_AWARE.
+    triattn_sm80_train_capture_aware: bool = True
+    #: Opt-in: direct inner launches of the sm_80 triangle attention training path. Formerly
+    #: MINIWORLD_TRIATTN_SM80_TRAIN_INNER.
+    triattn_sm80_train_inner: bool = False
+    #: Opt-in: the row engine instead of the fused one at d_pair 64 / 128 with 2 / 4 heads (A/B).
+    #: Formerly MINIWORLD_TRIATTN_SM80_ROWS.
+    triattn_sm80_rows: bool = False
+    #: Opt-in: d_pair 128 (hidden 128, 4 heads) takes the wide path too (tests, A/B). Formerly
+    #: MINIWORLD_TRIATTN_SM80_WIDE.
+    triattn_sm80_wide: bool = False
+    #: Force the 8-row native dQ kernel of the sm_80 triangle attention backward on or off; None picks
+    #: it for L 640 / 768. Formerly MINIWORLD_TRIATTN_SM80_DQ_ROWS.
+    triattn_sm80_dq_rows: bool | None = None
+    #: Force the native bias-gradient GEMM of the sm_80 triangle attention backward on or off; None
+    #: picks it for L 768. Formerly MINIWORLD_TRIATTN_SM80_NATIVE_DB.
+    triattn_sm80_native_db: bool | None = None
+    #: Force the native Wo-gradient GEMM of the sm_80 triangle attention backward on or off; None picks
+    #: it for L 768. Formerly MINIWORLD_TRIATTN_SM80_NATIVE_WO.
+    triattn_sm80_native_wo: bool | None = None
+    #: Force the native fused output projection of the sm_80 triangle attention inference on or off;
+    #: None picks it for L 128. Formerly MINIWORLD_TRIATTN_SM80_NATIVE_OUT.
+    triattn_sm80_native_out: bool | None = None
+    #: Gamma-gradient mode of the L384 sm_80 triangle attention backward: "2" exact finalize, "1" exact
+    #: gamma only, otherwise the plain path. Formerly MINIWORLD_TRIATTN_SM80_EXACT_GAMMA.
+    triattn_sm80_exact_gamma: str = "2"
+    #: Extra -D / nvcc flags for the sm_80 triangle-attention extension (A/B experiments; their own
+    #: build). Formerly MINIWORLD_TRIATTN_SM80_FLAGS.
+    triattn_sm80_flags: str = ""
+    #: The A100 hand-CUDA TriangleMultiplication in-projection (off: the Triton path serves; shared by
+    #: the D128 and wide paths). Formerly MINIWORLD_TRIMUL_SM80.
+    trimul_sm80: bool = True
+    #: The wide (D256 / D512) set of the A100 TriangleMultiplication (off: that set alone). Formerly
+    #: MINIWORLD_TRIMUL_SM80_WIDE.
+    trimul_sm80_wide: bool = True
+    #: The D512 native training path (off: the previous D512 training fallback). Formerly
+    #: MINIWORLD_TRIMUL_SM80_WIDE512.
+    trimul_sm80_wide512: bool = True
+    #: The row-mask k1 kernel of the wide TriangleMultiplication inference. Formerly
+    #: MINIWORLD_TRIMUL_SM80_ROW_MASK.
+    trimul_sm80_row_mask: bool = True
+    #: The tuned k3 kernel of the wide TriangleMultiplication inference. Formerly
+    #: MINIWORLD_TRIMUL_SM80_TUNED.
+    trimul_sm80_tuned: bool = True
+    #: Extra -D flags for the sm_80 TriangleMultiplication extension (A/B experiments; their own
+    #: build). Formerly MINIWORLD_TRIMUL_SM80_FLAGS.
+    trimul_sm80_flags: str = ""
+    #: Extra -D flags for the wide sm_80 TriangleMultiplication extensions (A/B experiments; their own
+    #: build). Formerly MINIWORLD_TRIMUL_SM80_WIDE_FLAGS.
+    trimul_sm80_wide_flags: str = ""
+    #: The fused atom-width (d = dc = 128) AdaLN kernels of the sm_80 path. Formerly ``MINIWORLD_ADALN_ATOM``.
+    adaln_atom: bool = True
+    #: Forced launch config of the atom AdaLN forward (-1: picked by row count). Formerly ``MINIWORLD_ADALN_ATOM_CFG``.
+    adaln_atom_cfg: int = -1
+    #: The fp32 (TF32) fused atom AdaLN forward. Formerly ``MINIWORLD_ADALN_ATOM_TF32``.
+    adaln_atom_tf32: bool = True
+    #: Side-stream branches of the sm_80 AdaLN backward (off: everything on the current stream). Formerly ``MINIWORLD_ADALN_BRANCH``.
+    adaln_branch: bool = True
+    #: Fewest rows of fp32 atom-width AdaLN inference served by the sm_80 path (0: all). Formerly ``MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS``.
+    adaln_fp32_atom_min_rows: int = 8192
+    #: The A100 hand-CUDA AdaLN path (off: the Triton kernels). Formerly ``MINIWORLD_ADALN_SM80``.
+    adaln_sm80: bool = True
+    #: Fused conditioning weight-gradient of the sm_80 atom AdaLN backward (opt-in). Formerly ``MINIWORLD_ADALN_SM80_ATOM_COND_WGRAD_FUSED``.
+    adaln_sm80_atom_cond_wgrad_fused: bool = False
+    #: Extra nvcc / -D flags for the sm_80 AdaLN extension (A/B experiments; own build). Formerly ``MINIWORLD_ADALN_SM80_FLAGS``.
+    adaln_sm80_flags: str = ""
+    #: Native fp32 parameter-gradient cast in the sm_80 AdaLN backward (opt-in). Formerly ``MINIWORLD_ADALN_SM80_NATIVE_PARAM_CAST``.
+    adaln_sm80_native_param_cast: bool = False
+    #: Packed parameter cast in the sm_80 AdaLN forward (opt-in). Formerly ``MINIWORLD_ADALN_SM80_PACK_PARAM_CAST``.
+    adaln_sm80_pack_param_cast: bool = False
+    #: Save the bf16 parameter cast for the sm_80 AdaLN backward (opt-in). Formerly ``MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST``.
+    adaln_sm80_save_param_cast: bool = False
+    #: Blocks per SM of the sm_80 AdaLN column-sum kernels. Read at import of kernels.adaln.cuda.sm80. Formerly ``MINIWORLD_ADALN_WARP_BLOCKS``.
+    adaln_warp_blocks: int = 4
+    #: The fused atom-width ConditionedTransition kernels of the sm_80 path. Formerly ``MINIWORLD_CONDTRANS_ATOM``.
+    condtrans_atom: bool = True
+    #: The fp32 (TF32) fused atom ConditionedTransition forward. Formerly ``MINIWORLD_CONDTRANS_ATOM_TF32``.
+    condtrans_atom_tf32: bool = True
+    #: The A100 hand-CUDA ConditionedTransition path (off: the Triton tail). Formerly ``MINIWORLD_CONDTRANS_SM80``.
+    condtrans_sm80: bool = True
+    #: Fused conditioning weight-gradient of the sm_80 atom ConditionedTransition backward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_COND_WGRAD_FUSED``.
+    condtrans_sm80_atom_cond_wgrad_fused: bool = False
+    #: Force (True/False) the narrow atom ConditionedTransition kernel; None: by row count. Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_NARROW``.
+    condtrans_sm80_atom_narrow: bool | None = None
+    #: Force (True/False) the small-rows atom ConditionedTransition kernel; None: by row count. Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_SMALL``.
+    condtrans_sm80_atom_small: bool | None = None
+    #: Force (True/False) the split-hidden atom ConditionedTransition kernel; None: by row count. Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT``.
+    condtrans_sm80_atom_split: bool | None = None
+    #: Launch config of the split atom kernel; None: 1 at 1024 rows, else 5. Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT_CFG``.
+    condtrans_sm80_atom_split_cfg: int | None = None
+    #: Split weight-gradient of the sm_80 atom ConditionedTransition backward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_SPLIT``.
+    condtrans_sm80_atom_wgrad_split: bool = False
+    #: Wide weight-gradient variant of the split atom backward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_WIDE``.
+    condtrans_sm80_atom_wgrad_wide: bool = False
+    #: Extra nvcc / -D flags for the sm_80 ConditionedTransition extension (A/B experiments; own build). Formerly ``MINIWORLD_CONDTRANS_SM80_FLAGS``.
+    condtrans_sm80_flags: str = ""
+    #: Native fp32 parameter-gradient cast in the sm_80 ConditionedTransition backward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_NATIVE_PARAM_CAST``.
+    condtrans_sm80_native_param_cast: bool = False
+    #: Packed parameter cast in the sm_80 ConditionedTransition forward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_PACK_PARAM_CAST``.
+    condtrans_sm80_pack_param_cast: bool = False
+    #: Save the bf16 parameter cast for the sm_80 ConditionedTransition backward (opt-in). Formerly ``MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST``.
+    condtrans_sm80_save_param_cast: bool = False
+    #: The A100 row-scale dropout CUDA kernel (opt-in). Formerly ``MINIWORLD_DROPOUT_SCALE_SM80``.
+    dropout_scale_sm80: bool = False
+    #: The A100 hand-CUDA gated-projection kernels (off: Triton). Formerly ``MINIWORLD_GATED_SM80``.
+    gated_sm80: bool = True
+    #: The A100 hand-CUDA LayerNorm + Linear kernels (off: Triton). Formerly ``MINIWORLD_LNLINEAR_SM80``.
+    lnlinear_sm80: bool = True
+    #: The A100 hand-CUDA LayerNorm / RMSNorm / RoPE rows: "0" off, "force" at every size, anything else on (small training steps stay on Triton). Formerly ``MINIWORLD_NORMS_SM80``.
+    norms_sm80: str = "1"
+    #: Extra nvcc flags for the sm_80 norm / RMSNorm / RoPE extensions (A/B experiments; own build). Formerly ``MINIWORLD_NORMS_SM80_FLAGS``.
+    norms_sm80_flags: str = ""
+    #: The token-DiT conditioned-transition prep kernels. Formerly ``MINIWORLD_TOKEN_DIT_PREP``.
+    token_dit_prep: bool = True
+    #: Extra nvcc flags for the sm_80 fused Transition backward extension (own build). Formerly ``MINIWORLD_TRANSITION_BWD_SM80_FLAGS``.
+    transition_bwd_sm80_flags: str = ""
+    #: Replication count of the sm_80 fused Transition backward (0: the kernel default). Formerly ``MINIWORLD_TRANSITION_BWD_SM80_NREP``.
+    transition_bwd_sm80_nrep: int = 0
+    #: The sm_80 fused Transition backward (off: the unfused path). Formerly ``MINIWORLD_TRANSITION_FUSED_BWD_SM80``.
+    transition_fused_bwd_sm80: bool = True
+    #: The sm_80 fused Transition forward (off: the unfused path). Formerly ``MINIWORLD_TRANSITION_FUSED_FWD_SM80``.
+    transition_fused_fwd_sm80: bool = True
+    #: Extra nvcc flags for the sm_80 fused Transition forward extension (own build). Formerly ``MINIWORLD_TRANSITION_FWD_SM80_FLAGS``.
+    transition_fwd_sm80_flags: str = ""
+    #: Cast the wide sm_80 Transition weight gradients with the grad_cast kernel at D256 (opt-in). Formerly ``MINIWORLD_TRANSITION_WIDE_GRAD_CAST``.
+    transition_wide_grad_cast: bool = False
+    #: FP32 weight-gradient accumulation of the wide sm_80 Transition backward at D256. Formerly ``MINIWORLD_TRANSITION_WIDE_GRAD_FP32``.
+    transition_wide_grad_fp32: bool = True
+    #: The wide (D up to 768) sm_80 Transition kernels (off: Triton). Formerly ``MINIWORLD_TRANSITION_WIDE_SM80``.
+    transition_wide_sm80: bool = True
+    #: Extra nvcc flags for the wide sm_80 Transition extension (own build). Formerly ``MINIWORLD_TRANSITION_WIDE_SM80_FLAGS``.
+    transition_wide_sm80_flags: str = ""
+    #: Serve the qualified A100 atom DiT block training path; off keeps the module composition. Formerly MINIWORLD_ATOM_DIT_SM80.
+    atom_dit_sm80: bool = True
+    #: Config index of the private three-output gradient-join experiment (atom_dit_sm80_gradient_join). Formerly MINIWORLD_ATOM_DIT_SM80_JOIN_THREE_CFG.
+    atom_dit_sm80_join_three_cfg: int = 0
+    #: Config index of the private two-output gradient-join experiment (atom_dit_sm80_gradient_join). Formerly MINIWORLD_ATOM_DIT_SM80_JOIN_TWO_CFG.
+    atom_dit_sm80_join_two_cfg: int = 0
+    #: Use the A100 native 32x128 local DiT block path; off retains the previous module composition. Formerly MINIWORLD_LOCAL_DIT_SM80.
+    local_dit_sm80: bool = True
+    #: Extra nvcc flags (-DNAME=value) for the A100 MPNN edge-tail kernel build, for A/B experiments; part of the build's name. Formerly MINIWORLD_MPNN_EDGE_FLAGS.
+    mpnn_edge_flags: str = ""
+    #: Print the ptxas resource report of the A100 MPNN edge-tail build. Formerly MINIWORLD_MPNN_EDGE_PTXAS.
+    mpnn_edge_ptxas: bool = False
+    #: Run the A100 (sm_80) CUDA MPNN edge kernels; off keeps the Triton ones. Formerly MINIWORLD_MPNN_EDGE_SM80.
+    mpnn_edge_sm80: bool = True
+    #: Run the A100 (sm_80) CUDA MPNN message-side kernels; off keeps the Triton ones. Formerly MINIWORLD_MPNN_MSG_SM80.
+    mpnn_msg_sm80: bool = True
+    #: Backward form of the A100 MPNN message kernel: "fused" (default) or "split" (the older two-step form, for A/B runs). Formerly MINIWORLD_MPNN_MSG_SM80_BWD.
+    mpnn_msg_sm80_bwd: str = "fused"
+    #: Extra nvcc flags for the A100 MPNN message kernel build, for A/B experiments. Formerly MINIWORLD_MPNN_MSG_SM80_FLAGS.
+    mpnn_msg_sm80_flags: str = ""
+    #: Extra nvcc flags for the A100 MPNN node-message kernel build, for A/B experiments. Formerly MINIWORLD_MPNN_NODE_SM80_FLAGS.
+    mpnn_node_sm80_flags: str = ""
+    #: Use the A100 CUDA sigmoid gate; off takes the Triton sigmoid_gate_fused. Formerly MINIWORLD_SIGMOID_GATE_SM80.
+    sigmoid_gate_sm80: bool = True
+    #: Run the A100 (sm_80) CUDA SWA DiT / window-attention kernels; off keeps flash / the Triton stages. Formerly MINIWORLD_SWA_DIT_SM80.
+    swa_dit_sm80: bool = True
+    #: Use the tuned sm_80 SWA DiT FFN forward. Formerly MINIWORLD_SWA_DIT_SM80_FFN_TUNED.
+    swa_dit_sm80_ffn_tuned: bool = True
+    #: Extra nvcc flags for the A100 SWA DiT kernel build, for A/B experiments. Formerly MINIWORLD_SWA_DIT_SM80_FLAGS.
+    swa_dit_sm80_flags: str = ""
+    #: Use the tuned sm_80 SWA DiT inference path. Formerly MINIWORLD_SWA_DIT_SM80_INFER_TUNED.
+    swa_dit_sm80_infer_tuned: bool = True
+    #: Native sm_80 down-projection weight gradient in the SWA DiT backward. Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_DWD.
+    swa_dit_sm80_native_dwd: bool = True
+    #: Native sm_80 gradient cast in the SWA DiT backward. None = on at S = 4096 and wherever the grouped5 weight gradient is on. Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_GRAD_CAST.
+    swa_dit_sm80_native_grad_cast: bool | None = None
+    #: Grouped five-weight native weight gradient in the SWA DiT backward. None = on at S = 8192, off otherwise. Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW.
+    swa_dit_sm80_native_grouped5_dw: bool | None = None
+    #: Grouped eight-weight native weight gradient with allocation (opt-in). Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_ALLOC.
+    swa_dit_sm80_native_grouped8_alloc: bool = False
+    #: Grouped eight-weight native weight gradient (opt-in). Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_DW.
+    swa_dit_sm80_native_grouped8_dw: bool = False
+    #: Grouped native weight gradient in the SWA DiT backward. None = on at S = 4096, off otherwise. Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED_DW.
+    swa_dit_sm80_native_grouped_dw: bool | None = None
+    #: Native qkvg weight gradient in the SWA DiT backward (opt-in). Formerly MINIWORLD_SWA_DIT_SM80_NATIVE_QKVG_DW.
+    swa_dit_sm80_native_qkvg_dw: bool = False
+    #: Use the aliasing variant of the native A100 token DiT training weight pack (opt-in; needs token_dit_sm80_native_train_pack). Formerly MINIWORLD_TOKEN_DIT_SM80_ALIAS_TRAIN_PACK.
+    token_dit_sm80_alias_train_pack: bool = False
+    #: Direct BF16 q/k/v gradients in the A100 token DiT training attention backward. Formerly MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD.
+    token_dit_sm80_direct_grad: bool = True
+    #: Native CUDA weight pack for the A100 token DiT training path (opt-in). Formerly MINIWORLD_TOKEN_DIT_SM80_NATIVE_TRAIN_PACK.
+    token_dit_sm80_native_train_pack: bool = False
+    #: Typed-gradient variant of the A100 token DiT training path (opt-in). Formerly MINIWORLD_TOKEN_DIT_TYPED_GRAD.
+    token_dit_typed_grad: bool = False
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
@@ -595,6 +953,148 @@ _REMOVED_ENVIRONMENT = {
     "MW_SLDDT_TILE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BO_ROWS_BLOCKS_PER_SM": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_F32_RESB_MINB": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_A100_CLEANUP": "a100_cleanup",
+    "MINIWORLD_ADALN_ATOM": "adaln_atom",
+    "MINIWORLD_ADALN_ATOM_CFG": "adaln_atom_cfg",
+    "MINIWORLD_ADALN_ATOM_TF32": "adaln_atom_tf32",
+    "MINIWORLD_ADALN_BRANCH": "adaln_branch",
+    "MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS": "adaln_fp32_atom_min_rows",
+    "MINIWORLD_ADALN_SM80": "adaln_sm80",
+    "MINIWORLD_ADALN_SM80_ATOM_COND_WGRAD_FUSED": "adaln_sm80_atom_cond_wgrad_fused",
+    "MINIWORLD_ADALN_SM80_FLAGS": "adaln_sm80_flags",
+    "MINIWORLD_ADALN_SM80_NATIVE_PARAM_CAST": "adaln_sm80_native_param_cast",
+    "MINIWORLD_ADALN_SM80_PACK_PARAM_CAST": "adaln_sm80_pack_param_cast",
+    "MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST": "adaln_sm80_save_param_cast",
+    "MINIWORLD_ADALN_WARP_BLOCKS": "adaln_warp_blocks",
+    "MINIWORLD_APB_SM80": "apb_sm80",
+    "MINIWORLD_APB_SM80_SAVE_NATURAL": "apb_sm80_save_natural",
+    "MINIWORLD_APB_SM80_TRAIN16": "apb_sm80_train16",
+    "MINIWORLD_APB_SM80_TYPED_GRAD": "apb_sm80_typed_grad",
+    "MINIWORLD_ATOM_DIT_SM80": "atom_dit_sm80",
+    "MINIWORLD_ATOM_DIT_SM80_JOIN_THREE_CFG": "atom_dit_sm80_join_three_cfg",
+    "MINIWORLD_ATOM_DIT_SM80_JOIN_TWO_CFG": "atom_dit_sm80_join_two_cfg",
+    "MINIWORLD_AUGATTN_SM80": "augattn_sm80",
+    "MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED": "augattn_sm80_atom_output_fused",
+    "MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED": "augattn_sm80_atom_output_tiled",
+    "MINIWORLD_AUGATTN_SM80_ATOM_QKVG": "augattn_sm80_atom_qkvg",
+    "MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED": "augattn_sm80_atom_qkvg_tiled",
+    "MINIWORLD_AUGATTN_SM80_FLAGS": "augattn_sm80_flags",
+    "MINIWORLD_AUGATTN_SM80_FUSED": "augattn_sm80_fused",
+    "MINIWORLD_AUGATTN_SM80_OPS": "augattn_sm80_ops",
+    "MINIWORLD_AUGATTN_SM80_PBGEN": "augattn_sm80_pbgen",
+    "MINIWORLD_AUGATTN_SM80_PBGEN_ROWS": "augattn_sm80_pbgen_rows",
+    "MINIWORLD_AUGATTN_SM80_SHARED_CORE": "augattn_sm80_shared_core",
+    "MINIWORLD_AUGATTN_SM80_SHARED_SCORE": "augattn_sm80_shared_score",
+    "MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM": "augattn_sm80_shared_uniform",
+    "MINIWORLD_BIAS_ONLY_ATTN_SM80": "bias_only_attn_sm80",
+    "MINIWORLD_BIAS_ONLY_DIT_PREP": "bias_only_dit_prep",
+    "MINIWORLD_BIAS_ONLY_DIT_SM80_DPB": "bias_only_dit_sm80_dpb",
+    "MINIWORLD_BIAS_ONLY_DIT_SM80_SG": "bias_only_dit_sm80_sg",
+    "MINIWORLD_BIAS_ONLY_DIT_SM80_STAGES": "bias_only_dit_sm80_stages",
+    "MINIWORLD_CONDTRANS_ATOM": "condtrans_atom",
+    "MINIWORLD_CONDTRANS_ATOM_TF32": "condtrans_atom_tf32",
+    "MINIWORLD_CONDTRANS_SM80": "condtrans_sm80",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_COND_WGRAD_FUSED": "condtrans_sm80_atom_cond_wgrad_fused",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_NARROW": "condtrans_sm80_atom_narrow",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_SMALL": "condtrans_sm80_atom_small",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT": "condtrans_sm80_atom_split",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_SPLIT_CFG": "condtrans_sm80_atom_split_cfg",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_SPLIT": "condtrans_sm80_atom_wgrad_split",
+    "MINIWORLD_CONDTRANS_SM80_ATOM_WGRAD_WIDE": "condtrans_sm80_atom_wgrad_wide",
+    "MINIWORLD_CONDTRANS_SM80_FLAGS": "condtrans_sm80_flags",
+    "MINIWORLD_CONDTRANS_SM80_NATIVE_PARAM_CAST": "condtrans_sm80_native_param_cast",
+    "MINIWORLD_CONDTRANS_SM80_PACK_PARAM_CAST": "condtrans_sm80_pack_param_cast",
+    "MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST": "condtrans_sm80_save_param_cast",
+    "MINIWORLD_DENSE_CORE_DKV_ORDER": "dense_core_dkv_order",
+    "MINIWORLD_DENSE_CORE_DQ_ORDER": "dense_core_dq_order",
+    "MINIWORLD_DENSE_E274_DKV_ORDER": "dense_e274_dkv_order",
+    "MINIWORLD_DENSE_E274_DQ_ORDER": "dense_e274_dq_order",
+    "MINIWORLD_DROPOUT_SCALE_SM80": "dropout_scale_sm80",
+    "MINIWORLD_GATED_SM80": "gated_sm80",
+    "MINIWORLD_LNLINEAR_SM80": "lnlinear_sm80",
+    "MINIWORLD_LOCAL_DIT_SM80": "local_dit_sm80",
+    "MINIWORLD_MPNN_EDGE_FLAGS": "mpnn_edge_flags",
+    "MINIWORLD_MPNN_EDGE_PTXAS": "mpnn_edge_ptxas",
+    "MINIWORLD_MPNN_EDGE_SM80": "mpnn_edge_sm80",
+    "MINIWORLD_MPNN_MSG_SM80": "mpnn_msg_sm80",
+    "MINIWORLD_MPNN_MSG_SM80_BWD": "mpnn_msg_sm80_bwd",
+    "MINIWORLD_MPNN_MSG_SM80_FLAGS": "mpnn_msg_sm80_flags",
+    "MINIWORLD_MPNN_NODE_SM80_FLAGS": "mpnn_node_sm80_flags",
+    "MINIWORLD_NORMS_SM80": "norms_sm80",
+    "MINIWORLD_NORMS_SM80_FLAGS": "norms_sm80_flags",
+    "MINIWORLD_OPM_SM80": "opm_sm80",
+    "MINIWORLD_OPM_SM80_DG": "opm_sm80_dg",
+    "MINIWORLD_OPM_SM80_EPI": "opm_sm80_epi",
+    "MINIWORLD_OPM_SM80_MASK_COUNT_NATIVE": "opm_sm80_mask_count_native",
+    "MINIWORLD_OPM_SM80_MASK_EPILOGUE": "opm_sm80_mask_epilogue",
+    "MINIWORLD_OPM_SM80_NATIVE128_PIPELINE": "opm_sm80_native128_pipeline",
+    "MINIWORLD_OPM_SM80_PB": "opm_sm80_pb",
+    "MINIWORLD_OPM_SM80_PIPELINE": "opm_sm80_pipeline",
+    "MINIWORLD_OPM_SM80_PL": "opm_sm80_pl",
+    "MINIWORLD_OPM_SM80_SAVE_O": "opm_sm80_save_o",
+    "MINIWORLD_OPM_SM80_TYPED_GRAD": "opm_sm80_typed_grad",
+    "MINIWORLD_PWA_SM80": "pwa_sm80",
+    "MINIWORLD_PWA_SM80_BROADCAST_NATIVE": "pwa_sm80_broadcast_native",
+    "MINIWORLD_PWA_SM80_BROADCAST_PIPELINE": "pwa_sm80_broadcast_pipeline",
+    "MINIWORLD_PWA_SM80_CONTRACT_GATE_FUSED": "pwa_sm80_contract_gate_fused",
+    "MINIWORLD_PWA_SM80_DW_NATIVE": "pwa_sm80_dw_native",
+    "MINIWORLD_PWA_SM80_DW_SHORT": "pwa_sm80_dw_short",
+    "MINIWORLD_PWA_SM80_GLUE_TUNED": "pwa_sm80_glue_tuned",
+    "MINIWORLD_PWA_SM80_GRAD_REDUCE": "pwa_sm80_grad_reduce",
+    "MINIWORLD_PWA_SM80_PAIR_PARTIAL": "pwa_sm80_pair_partial",
+    "MINIWORLD_PWA_SM80_PB": "pwa_sm80_pb",
+    "MINIWORLD_PWA_SM80_SPLIT": "pwa_sm80_split",
+    "MINIWORLD_PWA_SM80_TYPED_GRAD": "pwa_sm80_typed_grad",
+    "MINIWORLD_SIGMOID_GATE_SM80": "sigmoid_gate_sm80",
+    "MINIWORLD_SWA_DIT_SM80": "swa_dit_sm80",
+    "MINIWORLD_SWA_DIT_SM80_FFN_TUNED": "swa_dit_sm80_ffn_tuned",
+    "MINIWORLD_SWA_DIT_SM80_FLAGS": "swa_dit_sm80_flags",
+    "MINIWORLD_SWA_DIT_SM80_INFER_TUNED": "swa_dit_sm80_infer_tuned",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_DWD": "swa_dit_sm80_native_dwd",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_GRAD_CAST": "swa_dit_sm80_native_grad_cast",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW": "swa_dit_sm80_native_grouped5_dw",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_ALLOC": "swa_dit_sm80_native_grouped8_alloc",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_DW": "swa_dit_sm80_native_grouped8_dw",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED_DW": "swa_dit_sm80_native_grouped_dw",
+    "MINIWORLD_SWA_DIT_SM80_NATIVE_QKVG_DW": "swa_dit_sm80_native_qkvg_dw",
+    "MINIWORLD_TOKEN_DIT_PREP": "token_dit_prep",
+    "MINIWORLD_TOKEN_DIT_SM80_ALIAS_TRAIN_PACK": "token_dit_sm80_alias_train_pack",
+    "MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD": "token_dit_sm80_direct_grad",
+    "MINIWORLD_TOKEN_DIT_SM80_NATIVE_TRAIN_PACK": "token_dit_sm80_native_train_pack",
+    "MINIWORLD_TOKEN_DIT_TYPED_GRAD": "token_dit_typed_grad",
+    "MINIWORLD_TRANSITION_BWD_SM80_FLAGS": "transition_bwd_sm80_flags",
+    "MINIWORLD_TRANSITION_BWD_SM80_NREP": "transition_bwd_sm80_nrep",
+    "MINIWORLD_TRANSITION_FUSED_BWD_SM80": "transition_fused_bwd_sm80",
+    "MINIWORLD_TRANSITION_FUSED_FWD_SM80": "transition_fused_fwd_sm80",
+    "MINIWORLD_TRANSITION_FWD_SM80_FLAGS": "transition_fwd_sm80_flags",
+    "MINIWORLD_TRANSITION_WIDE_GRAD_CAST": "transition_wide_grad_cast",
+    "MINIWORLD_TRANSITION_WIDE_GRAD_FP32": "transition_wide_grad_fp32",
+    "MINIWORLD_TRANSITION_WIDE_SM80": "transition_wide_sm80",
+    "MINIWORLD_TRANSITION_WIDE_SM80_FLAGS": "transition_wide_sm80_flags",
+    "MINIWORLD_TRIATTN_SM80": "triattn_sm80",
+    "MINIWORLD_TRIATTN_SM80_COMPACT": "triattn_sm80_compact",
+    "MINIWORLD_TRIATTN_SM80_DQ_ROWS": "triattn_sm80_dq_rows",
+    "MINIWORLD_TRIATTN_SM80_EXACT_GAMMA": "triattn_sm80_exact_gamma",
+    "MINIWORLD_TRIATTN_SM80_FLAGS": "triattn_sm80_flags",
+    "MINIWORLD_TRIATTN_SM80_GEMM_PAD": "triattn_sm80_gemm_pad",
+    "MINIWORLD_TRIATTN_SM80_INTERNAL": "triattn_sm80_internal",
+    "MINIWORLD_TRIATTN_SM80_NATIVE_DB": "triattn_sm80_native_db",
+    "MINIWORLD_TRIATTN_SM80_NATIVE_OUT": "triattn_sm80_native_out",
+    "MINIWORLD_TRIATTN_SM80_NATIVE_RNG": "triattn_sm80_native_rng",
+    "MINIWORLD_TRIATTN_SM80_NATIVE_WO": "triattn_sm80_native_wo",
+    "MINIWORLD_TRIATTN_SM80_ROWS": "triattn_sm80_rows",
+    "MINIWORLD_TRIATTN_SM80_SOFTMAX": "triattn_sm80_softmax",
+    "MINIWORLD_TRIATTN_SM80_TRAIN_CAPTURE_AWARE": "triattn_sm80_train_capture_aware",
+    "MINIWORLD_TRIATTN_SM80_TRAIN_INNER": "triattn_sm80_train_inner",
+    "MINIWORLD_TRIATTN_SM80_TUNED": "triattn_sm80_tuned",
+    "MINIWORLD_TRIATTN_SM80_WIDE": "triattn_sm80_wide",
+    "MINIWORLD_TRIMUL_SM80": "trimul_sm80",
+    "MINIWORLD_TRIMUL_SM80_FLAGS": "trimul_sm80_flags",
+    "MINIWORLD_TRIMUL_SM80_ROW_MASK": "trimul_sm80_row_mask",
+    "MINIWORLD_TRIMUL_SM80_TUNED": "trimul_sm80_tuned",
+    "MINIWORLD_TRIMUL_SM80_WIDE": "trimul_sm80_wide",
+    "MINIWORLD_TRIMUL_SM80_WIDE512": "trimul_sm80_wide512",
+    "MINIWORLD_TRIMUL_SM80_WIDE_FLAGS": "trimul_sm80_wide_flags",
 }
 
 

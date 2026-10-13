@@ -38,7 +38,7 @@ def _fused_sm100a_enabled() -> bool:
 def _fused_sm80_enabled() -> bool:
     """Whether to route the bf16 residual path on sm_80 (A100) through the hand-CUDA kernels: ``fused_sm80`` at d=128/n=4 (fused forward and
     two-kernel backward, training step ~1.44x the Triton residual path) and ``fused_wide_sm80`` at every other width (D = 64 .. 768, any n).
-    Default on; settings.transition_fused_sm80=0 (every A100 path) or MINIWORLD_TRANSITION_WIDE_SM80=0 (the wide ones) to A/B against Triton."""
+    Default on; settings.transition_fused_sm80=0 (every A100 path) or settings.transition_wide_sm80=0 (the wide ones) to A/B against Triton."""
     from miniworld_engine import settings
 
     return settings.current().engine_backend != "triton"

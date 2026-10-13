@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -28,8 +28,8 @@ MAX_NEIGHBORS = 128
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_MPNN_NODE_SM80_FLAGS: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_MPNN_NODE_SM80_FLAGS", "").split()
+    # settings.mpnn_node_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
+    extra = settings.current().mpnn_node_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"mpnn_node_message_sm80{tag}",

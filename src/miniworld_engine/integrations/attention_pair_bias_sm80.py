@@ -11,13 +11,12 @@ Inference (one opaque op), the B200 step with this family's A100 pieces:
 The attention core wants L in tiles of 128: the single is padded with zero rows (their k / v are finite and every padded key is masked) and the bias is
 written [H, Lp, Lp]; the pair is read in place. ln_pair's bias adds Wb . b to every (i, j) of a head: the softmax cancels it, so the forward drops it.
 
-``serves_*`` is the whole gate; ``MINIWORLD_APB_SM80=0`` turns the path off. Numerics and timings: ``docs/gpus/a100/attention_pair_bias/``.
+``serves_*`` is the whole gate; ``settings.apb_sm80 = False`` turns the path off. Numerics and timings: ``docs/gpus/a100/attention_pair_bias/``.
 """
 
 from __future__ import annotations
 
 import math
-import os
 import warnings
 
 import torch
@@ -69,7 +68,7 @@ def _sm80():
 
 
 def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
-    if os.environ.get("MINIWORLD_APB_SM80", "1") == "0":
+    if not settings.current().apb_sm80:
         return False
     if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
         return False
@@ -192,7 +191,7 @@ MASKED = -1e4
 
 def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     # All twelve 24 x 16 rows improve the old path; zero preserves it for diagnosis.
-    train16 = os.environ.get("MINIWORLD_APB_SM80_TRAIN16", "1") == "1"
+    train16 = settings.current().apb_sm80_train16
     return torch.is_grad_enabled() and (module.n_head != 24 or train16) and _eligible(module, single, pair, mask)
 
 
@@ -292,12 +291,12 @@ class _Training(torch.autograd.Function):
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
         parameter_refs = leaves
-        ctx.typed_gradients = os.environ.get("MINIWORLD_APB_SM80_TYPED_GRAD", "1") == "1"
+        ctx.typed_gradients = settings.current().apb_sm80_typed_grad
         leaves = _kernel_leaves(leaves)
         heads, width, length = leaves[10].shape[0], single.shape[2], single.shape[1]
         # Every selected shape improved the previous pack in paired module
         # measurements. Keep the unproven h8d384/L768 and unmeasured shapes.
-        save_natural = (os.environ.get("MINIWORLD_APB_SM80_SAVE_NATURAL", "1") == "1"
+        save_natural = (settings.current().apb_sm80_save_natural
                         and (heads, width) in ((8, 384), (12, 384), (16, 384), (16, 512))
                         and length in (128, 256, 384, 512, 640, 768)
                         and not (heads == 8 and width == 384 and length == 768))

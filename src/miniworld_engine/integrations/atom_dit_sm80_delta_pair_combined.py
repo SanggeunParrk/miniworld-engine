@@ -1,8 +1,8 @@
 """E187 private Dense block: E139 fanout and unchanged forward with E168 rolled DOG/gate backward."""
 from __future__ import annotations
-import os
 import torch
 from torch.autograd.function import once_differentiable
+from miniworld_engine import settings
 from miniworld_engine.integrations import adaln_sm80 as ad
 from miniworld_engine.integrations import augattn_sm80 as aa
 from miniworld_engine.integrations import conditioned_transition_sm80 as ct
@@ -47,8 +47,8 @@ def block(module,single,cond,pair,mask=None):
     assert single.shape[:2]==(48,1) and single.shape[2] in (4096,8192)
     assert single.shape[-1]==128 and cond.shape==single.shape and cond.dtype is single.dtype is torch.bfloat16
     assert pair.shape==(1,single.shape[2],single.shape[2],16)
-    assert os.environ.get('MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST','0')=='0'
-    assert os.environ.get('MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST','0')=='0'
+    assert not settings.current().condtrans_sm80_save_param_cast
+    assert not settings.current().adaln_sm80_save_param_cast
     ada=module.attention.ada_ln_in
     aps=[ada.ln_cond.weight,ada.to_scale.weight,ada.to_scale.bias,ada.to_bias.weight]
     kind=aa._mask_kind(mask,*single.shape[:3])

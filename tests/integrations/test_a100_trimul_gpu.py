@@ -7,6 +7,7 @@ import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -121,12 +122,12 @@ def test_the_modules_dispatch_to_it_and_the_switches_turn_it_off(kind, d, monkey
     _run(module, z, mask, ds, dy)
     _run(module, z, mask, ds, dy, train=False)
     assert len(calls) == 2, "the wide path was not entered for both training and inference"
-    for switch in ("MINIWORLD_TRIMUL_SM80", "MINIWORLD_TRIMUL_SM80_WIDE"):
-        monkeypatch.setenv(switch, "0")
+    for switch in ("trimul_sm80", "trimul_sm80_wide"):
+        override_setting(monkeypatch, switch, "0")
         got = _run(module, z, mask, ds, dy, train=False)
         assert len(calls) == 2, f"{switch}=0 still entered the wide path"
         assert torch.isfinite(got["out"]).all()                      # the Triton path serves
-        monkeypatch.delenv(switch)
+        override_setting(monkeypatch, switch, None)
 
 
 @needs_ampere
@@ -386,12 +387,12 @@ def test_fp32_modules_dispatch_to_the_wide_path_and_the_switches_turn_it_off(d, 
     _run(module, z, mask, ds, dy, train=False, dtype=torch.float32)
     assert len(wide) == 2, "fp32 must run the wide path"
     assert not fused, "the fused D128 kernels are bf16 only"
-    for switch in ("MINIWORLD_TRIMUL_SM80", "MINIWORLD_TRIMUL_SM80_WIDE"):
-        monkeypatch.setenv(switch, "0")
+    for switch in ("trimul_sm80", "trimul_sm80_wide"):
+        override_setting(monkeypatch, switch, "0")
         got = _run(module, z, mask, ds, dy, train=False, dtype=torch.float32)
         assert len(wide) == 2, f"{switch}=0 still entered the wide path"
         assert torch.isfinite(got["out"]).all()
-        monkeypatch.delenv(switch)
+        override_setting(monkeypatch, switch, None)
 
 
 @needs_ampere
@@ -617,9 +618,9 @@ def test_d512_projection_schedule_preserves_output(kind, n, monkeypatch):
     m._make_drop_row_scale = lambda pair, p: ds.to(pair.dtype)
     z = z.bfloat16()
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_TUNED", "0")
+        override_setting(monkeypatch, "trimul_sm80_tuned", "0")
         before = m(z, mask)
-        monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_TUNED", "1")
+        override_setting(monkeypatch, "trimul_sm80_tuned", "1")
         after = m(z, mask)
     assert torch.equal(before, after)
 
@@ -634,8 +635,8 @@ def test_d512_row_mask_preserves_empty_sparse_and_unaligned_rows(kind, n, monkey
     z = z.bfloat16()
     with torch.no_grad():
         for current_mask in (None, torch.ones_like(mask), torch.zeros_like(mask), mask):
-            monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_ROW_MASK", "0")
+            override_setting(monkeypatch, "trimul_sm80_row_mask", "0")
             before = m(z, current_mask)
-            monkeypatch.setenv("MINIWORLD_TRIMUL_SM80_ROW_MASK", "1")
+            override_setting(monkeypatch, "trimul_sm80_row_mask", "1")
             after = m(z, current_mask)
             assert torch.equal(before, after)

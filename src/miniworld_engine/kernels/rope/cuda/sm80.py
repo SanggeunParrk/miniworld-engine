@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
@@ -22,6 +21,7 @@ import torch
 from torch import Tensor
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.layernorm.cuda import sm80 as _rows
@@ -34,9 +34,9 @@ HEAD_DIMS = (32, 64, 128)
 
 @functools.lru_cache(maxsize=1)
 def ext():
-    """The RoPE extension, built on first use (``MINIWORLD_NORMS_SM80_FLAGS``: extra nvcc flags for A/B experiments, their own build)."""
+    """The RoPE extension, built on first use (``settings.norms_sm80_flags``: extra nvcc flags for A/B experiments, their own build)."""
     ensure_cuda_home()
-    extra = os.environ.get("MINIWORLD_NORMS_SM80_FLAGS", "").split()
+    extra = settings.current().norms_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"rope_sm80{tag}",

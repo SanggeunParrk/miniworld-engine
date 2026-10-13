@@ -6,9 +6,9 @@ into its final stores, preserving eager and compiled rounding independently of
 CUDA graph capture. This entry requires the physical atom training shape.
 """
 from __future__ import annotations
-import os
 import torch
 from torch.autograd.function import once_differentiable
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.integrations import adaln_sm80 as ad
 from miniworld_engine.integrations import augattn_sm80 as aa
@@ -26,7 +26,7 @@ def _bwd(dy: torch.Tensor,x: torch.Tensor,cond: torch.Tensor,lnw: torch.Tensor,w
         from miniworld_engine.kernels.parameter_cast.cuda.sm80 import result
         ws,sb,wb=result((ws,sb,wb))
     dx,dc,dsc,aff,psb,plw=fused.result(dy,x,cond,xst,cst,lnw,ws,wb,sb,res,dc_transition,dc_attention,not compiled)
-    if os.environ.get('MINIWORLD_ADALN_SM80_ATOM_COND_WGRAD_FUSED','0')=='1':
+    if settings.current().adaln_sm80_atom_cond_wgrad_fused:
         dws,dwb=wg.result_two(dsc,dy,aff)
     else:
         dws,dwb=ad._wgrad(dsc,aff),ad._wgrad(dy,aff)
@@ -71,8 +71,8 @@ def block(module,single,cond,pair,mask=None):
     assert single.shape[:2]==(48,1) and single.shape[2] in (4096,8192)
     assert single.shape[-1]==128 and cond.shape==single.shape and cond.dtype is single.dtype is torch.bfloat16
     assert pair.shape==(1,single.shape[2],single.shape[2],16)
-    assert os.environ.get('MINIWORLD_CONDTRANS_SM80_SAVE_PARAM_CAST','0')=='0'
-    assert os.environ.get('MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST','0')=='0'
+    assert not settings.current().condtrans_sm80_save_param_cast
+    assert not settings.current().adaln_sm80_save_param_cast
     ada=module.attention.ada_ln_in
     aps=[ada.ln_cond.weight,ada.to_scale.weight,ada.to_scale.bias,ada.to_bias.weight]
     kind=aa._mask_kind(mask,*single.shape[:3])

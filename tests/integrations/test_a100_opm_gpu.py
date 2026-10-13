@@ -2,10 +2,10 @@
 residual, both normalisation orders, eager / compiled / CUDA graph, the env switch and the gate. Errors are held to the bf16 PyTorch module's own error in the same regime."""
 
 import copy
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules import OuterProductMean
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -137,7 +137,7 @@ def test_opm_a100_tiny_and_odd_lengths(d_msa, d_pair, L):
 
 @pytest.mark.parametrize("d_pair", [128, 256, 384])
 def test_opm_a100_epilogue_schedules_agree(d_pair):
-    """The schedules of the epilogue (CTA shape, ring depth; `MINIWORLD_OPM_SM80_EPI`) accumulate in the same order: bit-identical outputs, at an L that is no multiple of the tile."""
+    """The schedules of the epilogue (CTA shape, ring depth; `settings.opm_sm80_epi`) accumulate in the same order: bit-identical outputs, at an L that is no multiple of the tile."""
     from miniworld_engine.kernels.outer_product_mean.cuda import sm80
 
     L = 70
@@ -183,8 +183,8 @@ def test_opm_a100_gate_conditions():
         assert not opm_sm80.serves_inference(pt, mb, mask, None, rb)                              # not the miniworld implementation
 
 
-def test_opm_a100_env_switch_and_triton_agreement():
-    """MINIWORLD_OPM_SM80=0 runs the module's previous (Triton) path: the two agree to bf16 accuracy."""
+def test_opm_a100_env_switch_and_triton_agreement(monkeypatch):
+    """settings.opm_sm80 = False runs the module's previous (Triton) path: the two agree to bf16 accuracy."""
     from miniworld_engine.integrations import opm_sm80
 
     _, ours, _ = _modules(64, 128)
@@ -192,12 +192,9 @@ def test_opm_a100_env_switch_and_triton_agreement():
     mb, rb = msa.bfloat16(), res.bfloat16()
     with torch.no_grad():
         got = ours(mb, mask, residual=rb)
-        os.environ["MINIWORLD_OPM_SM80"] = "0"
-        try:
-            assert not opm_sm80.serves_inference(ours, mb, mask, None, rb)
-            base = ours(mb, mask, residual=rb)
-        finally:
-            del os.environ["MINIWORLD_OPM_SM80"]
+        override_setting(monkeypatch, "opm_sm80", "0")
+        assert not opm_sm80.serves_inference(ours, mb, mask, None, rb)
+        base = ours(mb, mask, residual=rb)
     assert _rel(got - rb, base - rb) < 1e-2                         # the update alone
 
 

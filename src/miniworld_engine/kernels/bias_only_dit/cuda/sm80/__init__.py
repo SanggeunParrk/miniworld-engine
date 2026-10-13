@@ -7,18 +7,18 @@ Built on first use (``load_extension``), never at import.
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent
 #: head widths the kernel is instantiated for
 HEAD_WIDTHS = (32, 48, 64)
-#: depth of the cp.async ring (MINIWORLD_BIAS_ONLY_DIT_SM80_STAGES overrides it, for A/B runs)
-STAGES = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_SM80_STAGES", "2"))
+#: depth of the cp.async ring (settings.bias_only_dit_sm80_stages overrides it, for A/B runs)
+STAGES = settings.current().bias_only_dit_sm80_stages
 
 
 @functools.lru_cache(maxsize=1)
@@ -35,9 +35,9 @@ def _ext():
 def pick_group(S: int, L: int, nh: int, nsm: int) -> int:
     """Samples per CTA (1 .. 4): the fewest CTAs that still fill the card -- a group reads P once for all its samples, and a CTA alone on its SM is request-bound -- i.e. the smallest g with
     ``nh (L / 128) ceil(S / g) <= nsm``, else 4 when even that leaves a second wave."""
-    forced = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_SM80_SG")
-    if forced:
-        return max(1, min(int(forced), 4))
+    forced = settings.current().bias_only_dit_sm80_sg
+    if forced is not None:
+        return max(1, min(forced, 4))
     tiles = nh * (L // 128)
     for g in (1, 2, 3, 4):
         if tiles * -(-S // g) <= nsm:
@@ -62,8 +62,8 @@ class PvGate:
         return out
 
 
-#: schedule of the bias-gradient core (``dpb``): 0 two stages x one sample with two CTAs per SM, 1 three x one, 2 two x two, 3 three x two (MINIWORLD_BIAS_ONLY_DIT_SM80_DPB overrides)
-DPB_CFG = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_SM80_DPB")
+#: schedule of the bias-gradient core (``dpb``): 0 two stages x one sample with two CTAs per SM, 1 three x one, 2 two x two, 3 three x two (settings.bias_only_dit_sm80_dpb overrides)
+DPB_CFG = settings.current().bias_only_dit_sm80_dpb
 
 
 class Dpb:
@@ -75,7 +75,7 @@ class Dpb:
         self.nh, self.dh = nh, dh
 
     def __call__(self, do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, A: int, cfg: int | None = None) -> torch.Tensor:
-        _ext().dpb(do, v, P, dd, out, A, self.nh, self.dh, (int(DPB_CFG) if DPB_CFG else 0) if cfg is None else cfg)
+        _ext().dpb(do, v, P, dd, out, A, self.nh, self.dh, (DPB_CFG or 0) if cfg is None else cfg)
         return out
 
 
@@ -97,5 +97,5 @@ def delta_planes(do: torch.Tensor, o: torch.Tensor, dd: torch.Tensor, samples: i
 
 def dpb_planes(do: torch.Tensor, v: torch.Tensor, P: torch.Tensor, dd: torch.Tensor, out: torch.Tensor, samples: int, planes: int, dh: int, cfg: int | None = None) -> torch.Tensor:
     """``out [planes L, L] = P (sum_a do v^T - D)`` per head plane, ``D[h, i] = sum_a dd[a, h, i]``: ``do`` / ``v`` bf16 ``[planes samples L, dh]``, ``P`` / ``out`` bf16 ``[planes L, L]``."""
-    _ext().dpb_planes(do, v, P, dd, out, samples, planes, dh, (int(DPB_CFG) if DPB_CFG else 0) if cfg is None else cfg)
+    _ext().dpb_planes(do, v, P, dd, out, samples, planes, dh, (DPB_CFG or 0) if cfg is None else cfg)
     return out

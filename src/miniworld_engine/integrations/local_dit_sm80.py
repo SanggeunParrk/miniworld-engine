@@ -1,9 +1,8 @@
 """A100 AF3 local attention. Surrounding AdaLN/projections/transition keep their measured paths.
 
-MINIWORLD_LOCAL_DIT_SM80=0 retains the previous module composition for comparisons.
+settings.local_dit_sm80=False retains the previous module composition for comparisons.
 The core and pair bias are own CUDA; the surrounding GEMMs remain separate backend work.
 """
-import os
 import torch
 from torch.autograd.function import once_differentiable
 from miniworld_engine import settings
@@ -16,7 +15,7 @@ def _ready(index):
     return True
 
 def serves(block,single,cond,pair,mask):
-    if os.environ.get('MINIWORLD_LOCAL_DIT_SM80','1')!='1' or settings.current().engine_backend=='triton':return False
+    if not settings.current().local_dit_sm80 or settings.current().engine_backend=='triton':return False
     from miniworld_engine.modules.dispatch import KernelBackend
     att=block.attention
     if att._backend!=KernelBackend.TRITON or att.use_qk_norm:return False

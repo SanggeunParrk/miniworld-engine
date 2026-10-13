@@ -80,7 +80,7 @@ class AdaptiveLayerNorm(nn.Module):
             compute_dtype = (torch.get_autocast_dtype(device_type)
                              if torch.is_autocast_enabled(device_type) else x.dtype)
             with torch.autocast(device_type=device_type, enabled=False):
-                # A100: hand-CUDA row passes + cuBLAS (integrations.adaln_sm80 states its contract; MINIWORLD_ADALN_SM80=0 keeps the Triton kernels below).
+                # A100: hand-CUDA row passes + cuBLAS (integrations.adaln_sm80 states its contract; settings.adaln_sm80=0 keeps the Triton kernels below).
                 if _sm80.serves(self, x, cond, compute_dtype, backward):
                     return _sm80.update(self, x, cond, compute_dtype, backward)
                 return fn(

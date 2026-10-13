@@ -7,6 +7,7 @@ from __future__ import annotations
 import copy
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import settings
@@ -161,7 +162,7 @@ def test_the_gate_and_the_fp32_cast(monkeypatch):
     assert swa_dit_window_attention(q[..., :16], k[..., :16], v[..., :16], seqused, H, HW) is None
     out32 = swa_dit_window_attention(q.float(), k.float(), v.float(), seqused, H, HW)
     assert out32.dtype == torch.float32                                                # cast to bf16 inside, back to the caller's dtype
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+    override_setting(monkeypatch, "swa_dit_sm80", "0")
     assert swa_dit_window_attention(q, k, v, seqused, H, HW) is None
 
 
@@ -238,7 +239,7 @@ def test_the_output_gate_is_one_hand_cuda_pass_and_matches_sigmoid_times_x(dtype
         assert _rel(got, ref.detach()) < tol
     assert not sigmoid_gate_sm80.serves(gate, x.to(torch.float32 if dtype is BF else BF)), "mixed dtypes"
     assert not sigmoid_gate_sm80.serves(gate[..., :100], x[..., :100]), "a width that is not a multiple of 8"
-    monkeypatch.setenv("MINIWORLD_SIGMOID_GATE_SM80", "0")
+    override_setting(monkeypatch, "sigmoid_gate_sm80", "0")
     assert not sigmoid_gate_sm80.serves(gate, x)
 
 
@@ -252,7 +253,7 @@ def test_the_module_takes_the_gate_pass_and_the_switch_keeps_the_triton_one(monk
     out_on, grads_on = _train(_module(ImplementationType.MINIWORLD), x, ap, dy)
     assert calls, "the module did not take the sm_80 gate"
     n = len(calls)
-    monkeypatch.setenv("MINIWORLD_SIGMOID_GATE_SM80", "0")
+    override_setting(monkeypatch, "sigmoid_gate_sm80", "0")
     out_off, grads_off = _train(_module(ImplementationType.MINIWORLD), x, ap, dy)
     assert len(calls) == n, "the switch did not keep the old gate"
     assert _rel(out_on, out_off) < 2e-2

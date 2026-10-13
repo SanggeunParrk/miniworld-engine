@@ -1,9 +1,9 @@
 """Native Philox row dropout, module gradients and live compiled graph replay."""
 
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -20,7 +20,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 def ampere(monkeypatch):
     if torch.cuda.get_device_capability() != (8, 0):
         pytest.skip("A100 required")
-    monkeypatch.setenv("MINIWORLD_DROPOUT_SCALE_SM80", "1")
+    override_setting(monkeypatch, "dropout_scale_sm80", "1")
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -76,7 +76,7 @@ def test_seeded_module_output_and_all_gradients_are_bitwise_preserved(kind, widt
     values = [pair, *module.parameters()]
     results = []
     for flag in ("0", "1"):
-        monkeypatch.setenv("MINIWORLD_DROPOUT_SCALE_SM80", flag)
+        override_setting(monkeypatch, "dropout_scale_sm80", flag)
         torch.manual_seed(812)
         output = module(pair, mask)
         gradients = torch.autograd.grad(output, values, cotangent)

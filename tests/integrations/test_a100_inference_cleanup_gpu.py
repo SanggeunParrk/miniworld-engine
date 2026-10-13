@@ -1,5 +1,6 @@
 """Inference-only preparation changes: numerical equivalence and live graph inputs."""
 import pytest
+from settings_helpers import override_setting
 import torch
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(
@@ -46,7 +47,7 @@ def test_transition_inference_does_not_pack_backward_operands():
 def test_atom_pack_skips_unused_layouts_and_replays_live_weights(dtype, monkeypatch):
     from miniworld_engine.integrations import augattn_sm80 as k
 
-    monkeypatch.setenv("MINIWORLD_A100_CLEANUP", "1")
+    override_setting(monkeypatch, "a100_cleanup", "1")
     shapes = [(128, 128), (128,), (128, 128), (128, 128), (128, 128),
               (128, 128), (128, 128), (128,), (16,), (4, 16)]
     weights = [torch.randn(shape, device="cuda", dtype=dtype) for shape in shapes]

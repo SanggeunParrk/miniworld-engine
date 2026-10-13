@@ -1,8 +1,9 @@
 """E274 private Dense atom AA fixed mixed Qresident dQ/E237 dKV with preserved E205delta/E221pair fusion."""
 from __future__ import annotations
 import functools
-import os
 import torch
+
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.augmented_attention.cuda import atom_plain_partials_delta_mixed_sm80,atom_pair_reduce_vec_sm80,atom_pair_uniform_no_db_sm80
 from miniworld_engine.kernels.augmented_attention.cuda import atom_sample_uniform_sm80
@@ -29,12 +30,12 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
     wqkvg, bvec = pack[0], pack[1]
     xs, cs = _stage(x, batch, padded), _stage(cond, batch, padded)
     rs = None if res is None else _stage(res, batch, padded)
-    qkvg_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG")
-    qkvg_native = (qkvg_override == "1" if qkvg_override is not None else
+    qkvg_override = settings.current().augattn_sm80_atom_qkvg
+    qkvg_native = (qkvg_override if qkvg_override is not None else
                    not save and batch == 1 and a == 5 and length in (2048, 4096))
-    tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_QKVG_TILED")
+    tiled_override = settings.current().augattn_sm80_atom_qkvg_tiled
     tiled_qkvg = (dt is BF and d == 128 and hd == 32
-                  and (tiled_override == "1" if tiled_override is not None else
+                  and (tiled_override if tiled_override is not None else
                        not save and batch == 1 and (a, length) in
                        ((1, 1024), (1, 2048), (1, 4096), (5, 1024), (5, 2048))))
     if tiled_qkvg:
@@ -62,9 +63,9 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
         rows = slice(b * n, (b + 1) * n)
         kp = None if kpen is None else kpen[b]
         shared_core = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
-                       and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_CORE", "0") == "1")
+                       and settings.current().augattn_sm80_shared_core)
         shared_score = (dt is BF and d == 128 and hd == 32 and mask_kind == 1
-                        and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_SCORE", "0") == "1")
+                        and settings.current().augattn_sm80_shared_score)
         if shared_score:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_score_core_sm80
             shared_score_core_sm80.forward(q[rows], k[rows], v[rows], None if save else g[rows],
@@ -85,8 +86,10 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
             sm80.plain_forward(q[rows], k[rows], v[rows], bias[b], a, padded, heads, hd, save_lse=True, kpen=kp, out=o[rows], lse=lse[b * a:(b + 1) * a])
         else:
             sm80.pgate_forward(q[rows], k[rows], v[rows], g[rows], bias[b], a, padded, heads, hd, kpen=kp, out=q[rows])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and not shared_core and not shared_score and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and not shared_core and not shared_score and shared_uniform:
             from miniworld_engine.kernels.augmented_attention.cuda import shared_mask_uniform_sm80
             shared_mask_uniform_sm80.forward(kmask[b], v[rows], None if save else g[rows],
                                              o[rows] if save else q[rows],
@@ -104,14 +107,14 @@ def _fwd(x: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, res: torch.Ten
         sm80.gate_rows(o, g, og)
     else:
         og = q                                                                 # sigmoid(g) o, written over q's columns
-    output_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_FUSED")
-    output_fused = (output_override == "1" if output_override is not None else
+    output_override = settings.current().augattn_sm80_atom_output_fused
+    output_fused = (output_override if output_override is not None else
                     not save and batch == 1 and rs is not None
                     and (a, length) in ((1, 4096), (5, 1024), (5, 2048), (5, 4096)))
-    output_tiled_override = os.environ.get("MINIWORLD_AUGATTN_SM80_ATOM_OUTPUT_TILED")
+    output_tiled_override = settings.current().augattn_sm80_atom_output_tiled
     # The small A1 inference rows qualify own 32-channel output tiles;
     # larger rows retain the existing faster full-output fusion.
-    output_tiled = ((output_tiled_override == "1" if output_tiled_override is not None else True)
+    output_tiled = ((output_tiled_override if output_tiled_override is not None else True)
                     and not save and batch == 1 and hd == 32
                     and (a, length) in ((1, 1024), (1, 2048)))
     if dt is BF and d == 128 and cs.shape[1] == 128 and output_tiled:
@@ -173,11 +176,13 @@ def _bwd(dout: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, pair: torch.Te
     dzs, dw_sum = [], None
     for b in range(batch):
         rows = slice(b * n, (b + 1) * n)
-        core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(atom_plain_partials_delta_mixed_sm80.plain_backward_partials_delta_mixed, db_natural=True, delta=delta, dq_order=int(os.environ.get("MINIWORLD_DENSE_E274_DQ_ORDER","0")), dkv_order=int(os.environ.get("MINIWORLD_DENSE_E274_DKV_ORDER","0")))
+        core_bwd = sm80.tf32_backward if dt is F32 else functools.partial(atom_plain_partials_delta_mixed_sm80.plain_backward_partials_delta_mixed, db_natural=True, delta=delta, dq_order=settings.current().dense_e274_dq_order, dkv_order=settings.current().dense_e274_dkv_order)
         _, _, _, db = core_bwd(qkvg[rows, :d], qkvg[rows, d:2 * d], qkvg[rows, 2 * d:3 * d], dob[rows], bias[b], o[rows], lse[b * a:(b + 1) * a], a, padded, heads, hd,
                                kpen=None if kpen is None else kpen[b], dq=dqkvg[rows, :d], dk=dqkvg[rows, d:2 * d], dv=dqkvg[rows, 2 * d:3 * d])
-        uniform_default = "1" if dt is BF and d == 128 and hd == 32 else "0"
-        if mask_kind == 1 and os.environ.get("MINIWORLD_AUGATTN_SM80_SHARED_UNIFORM", uniform_default) == "1":
+        shared_uniform = settings.current().augattn_sm80_shared_uniform
+        if shared_uniform is None:
+            shared_uniform = dt is BF and d == 128 and hd == 32
+        if mask_kind == 1 and shared_uniform:
             atom_pair_uniform_no_db_sm80.backward(kmask[b], dob[rows], dqkvg[rows, :d], dqkvg[rows, d:2 * d],
                                                   dqkvg[rows, 2 * d:3 * d], length, padded, a, heads)
         if mask_kind == 2:

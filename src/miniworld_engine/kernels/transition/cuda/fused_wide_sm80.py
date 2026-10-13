@@ -9,18 +9,18 @@ wgmma / tcgen05.  What is hand CUDA and what cuBLAS was decided by measurement (
               (cuBLAS, fp32 d_xn)  ->  ln_bwd (row kernel: dx = LN backward + dy, dgamma / dbeta partials per CTA, reduced in a fixed order)
 
 ``supported()`` is the whole gate: sm_80, bf16, width D in ``WIDTHS`` with hidden H a multiple of 64, any row count.  The reductions run in a
-fixed order (no atomics), so a replay is bit-identical.  ``MINIWORLD_TRANSITION_WIDE_SM80=0`` (or ``MINIWORLD_TRANSITION_FUSED_SM80=0``, the one switch
+fixed order (no atomics), so a replay is bit-identical.  ``settings.transition_wide_sm80=0`` (or ``settings.transition_fused_sm80=0``, the one switch
 of every A100 Transition path) turns it off.
 """
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from ... import _capture
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -36,8 +36,8 @@ WIDTHS = (64, 128, 256, 384, 512, 768)
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_TRANSITION_WIDE_SM80_FLAGS: extra nvcc flags for experiments (their own build; "-Xptxas -v" shows the registers / spills)
-    extra = os.environ.get("MINIWORLD_TRANSITION_WIDE_SM80_FLAGS", "").split()
+    # settings.transition_wide_sm80_flags: extra nvcc flags for experiments (their own build; "-Xptxas -v" shows the registers / spills)
+    extra = settings.current().transition_wide_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"transition_wide_sm80{tag}",
@@ -66,16 +66,16 @@ def _loads() -> bool:
 
 
 def switched_off() -> bool:
-    """``MINIWORLD_TRANSITION_WIDE_SM80=0`` or ``MINIWORLD_TRANSITION_FUSED_SM80=0`` (the one switch of every A100 Transition path)."""
-    return os.environ.get("MINIWORLD_TRANSITION_WIDE_SM80", "1") == "0" or os.environ.get("MINIWORLD_TRANSITION_FUSED_SM80", "1") == "0"
+    """``settings.transition_wide_sm80=0`` or ``settings.transition_fused_sm80=0`` (the one switch of every A100 Transition path)."""
+    return not settings.current().transition_wide_sm80 or not settings.current().transition_fused_sm80
 
 
 _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd); ``MINIWORLD_TRANSITION_WIDE_SM80=0`` /
-    ``MINIWORLD_TRANSITION_FUSED_SM80=0`` turn it off."""
+    """The kernels' own requirements: sm_80, bf16, D in WIDTHS, H % 64 == 0, any row count; the weights bf16 or fp32 (an fp32 master: the entries cast them to bf16 outside autograd); ``settings.transition_wide_sm80=0`` /
+    ``settings.transition_fused_sm80=0`` turn it off."""
     if switched_off():
         return False
     if not x.is_cuda or x.dtype is not torch.bfloat16 or wa.dtype not in _WEIGHT_DTYPES or ws.dtype not in _WEIGHT_DTYPES:
@@ -226,11 +226,11 @@ def _bwd_launch(dy: torch.Tensor, x: torch.Tensor, xn: torch.Tensor, stats: torc
     dab, hid = ext.gate_bwd(a_in, wa, wb, dh, dual)             # dA | dB [M, 2H], h [M, H]
     # B200's wide backward also keeps weight accumulators in FP32. Direct BF16
     # GEMM outputs fail the existing expand-weight gradient band at protocol D256.
-    full_precision_grad = d == 256 and os.environ.get("MINIWORLD_TRANSITION_WIDE_GRAD_FP32", "1") == "1"
+    full_precision_grad = d == 256 and settings.current().transition_wide_grad_fp32
     mm_w = _mm_f32 if wdt is torch.float32 or full_precision_grad else torch.mm
     dws = mm_w(dy.t(), hid)                                    # [D, H]
     dwab = mm_w(dab.t(), a_in)                                 # [2H, D] = [dWa; dWb]
-    if full_precision_grad and wdt is torch.bfloat16 and os.environ.get("MINIWORLD_TRANSITION_WIDE_GRAD_CAST", "0") == "1":
+    if full_precision_grad and wdt is torch.bfloat16 and settings.current().transition_wide_grad_cast:
         dwab, dws = ext.grad_cast(dwab, dws)
     else:
         dwab, dws = dwab.to(wdt), dws.to(wdt)

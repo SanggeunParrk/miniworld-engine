@@ -11,11 +11,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 from ...adaln.cuda.sm80 import ROWS_PER_BLOCK, WIDTHS, blocks_for
 
@@ -26,8 +26,8 @@ _adaln_dir = Path(__file__).parents[2] / "adaln" / "cuda" / "sm80"       # adaln
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_CONDTRANS_SM80_FLAGS: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_CONDTRANS_SM80_FLAGS", "").split()
+    # settings.condtrans_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
+    extra = settings.current().condtrans_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"conditioned_transition_sm80{tag}",
@@ -81,7 +81,7 @@ def gate_res_bwd(dy: torch.Tensor, z: torch.Tensor, g: torch.Tensor) -> tuple[to
 def atom_supported(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor) -> bool:
     """The fused atom kernels' contract: bf16 rows, d_hidden = d_cond = 128, expansion 2 (hidden 256)."""
     return (x.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and x.shape[-1] == 128 and cond.shape[-1] == 128 and tuple(wa.shape) == (256, 128)
-            and os.environ.get("MINIWORLD_CONDTRANS_ATOM", "1") != "0")
+            and settings.current().condtrans_atom)
 
 
 def atom_fwd(xa: torch.Tensor, xin: torch.Tensor | None, cond: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
@@ -112,7 +112,7 @@ def atom_bwd_gate(dy: torch.Tensor, z: torch.Tensor, cond: torch.Tensor, xa: tor
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor) -> bool:
     """The fp32 (TF32) fused tail's contract: fp32 rows, d_hidden = d_cond = 128, expansion 2 (inference only)."""
     return (x.dtype is torch.float32 and cond.dtype is torch.float32 and x.shape[-1] == 128 and cond.shape[-1] == 128 and tuple(wa.shape) == (256, 128)
-            and os.environ.get("MINIWORLD_CONDTRANS_ATOM", "1") != "0" and os.environ.get("MINIWORLD_CONDTRANS_ATOM_TF32", "1") != "0")
+            and settings.current().condtrans_atom and settings.current().condtrans_atom_tf32)
 
 
 def tf32_round(t: torch.Tensor) -> torch.Tensor:

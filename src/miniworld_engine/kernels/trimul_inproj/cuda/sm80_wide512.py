@@ -9,8 +9,8 @@ The width-generic sibling of ``sm80.py`` (whose fused kernels are literals for D
   contraction planes and the gate GEMM of the raw input rows with both LayerNorms folded into the weights; gate, dropout row scale and residual in the epilogue).
   Training saves the planes, the contraction output, both statistics and p' / g' (bf16, the 0.5-scaled units of the fold).  bf16 with a hidden width <= 128 (D64 in both modules, D128
   one direction) computes both statistics inside k1w / k3w from the operand tiles still resident in their rings: the two statistics kernels are not launched.
-* ``supports()`` is the whole gate; everything it rejects keeps the existing path.  ``MINIWORLD_TRIMUL_SM80=0`` (shared with the D128 path) or
-  ``MINIWORLD_TRIMUL_SM80_WIDE=0`` turns it off.
+* ``supports()`` is the whole gate; everything it rejects keeps the existing path.  ``settings.trimul_sm80 = False`` (shared with the D128 path) or
+  ``settings.trimul_sm80_wide = False`` turns it off.
 
 Numerics follow the D128 path (``sm80.py``): the same bf16 rounding points, the 0.5 folded into the weights (``sigmoid(g) p = p' (1 + tanh g')``).  fp32 operands run the same stages
 on TF32 MMAs (``wide_gemm32.cuh``) with fp32 storage, nothing rounded to a narrower type; the folded weights are TF32-rounded, and every cuBLAS GEMM of the fp32 path is
@@ -19,11 +19,12 @@ issued with TF32 enabled whatever ``torch.backends.cuda.matmul.allow_tf32`` says
 
 import contextlib
 import functools
-import os
 import warnings
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -38,8 +39,8 @@ BIDIR, OUTGOING, INCOMING = _d128.BIDIR, _d128.OUTGOING, _d128.INCOMING
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_TRIMUL_SM80_WIDE_FLAGS: extra -D flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_TRIMUL_SM80_WIDE_FLAGS", "").split()
+    # settings.trimul_sm80_wide_flags: extra -D flags for A/B experiments (their own build)
+    extra = settings.current().trimul_sm80_wide_flags.split()
     import hashlib
 
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
@@ -68,7 +69,7 @@ def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None
 
 def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None, *, hs: int | None = None) -> bool:
     """The kernels' own requirements: sm_80, ``shape_ok``, one contiguous plane per call (a batch runs plane by plane in the integration)."""
-    if os.environ.get("MINIWORLD_TRIMUL_SM80", "1") == "0" or os.environ.get("MINIWORLD_TRIMUL_SM80_WIDE", "1") == "0":
+    if not settings.current().trimul_sm80 or not settings.current().trimul_sm80_wide:
         return False
     if not pair.is_cuda or not pair.is_contiguous():
         return False
@@ -207,7 +208,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
     planes = zf.new_empty((2 * hs, T))
-    k1 = E.k1w_row_mask if not save and os.environ.get("MINIWORLD_TRIMUL_SM80_ROW_MASK", "1") != "0" else E.k1w
+    k1 = E.k1w_row_mask if not save and settings.current().trimul_sm80_row_mask else E.k1w
     k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
@@ -220,7 +221,7 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         ps, gs = torch.empty_like(zf), torch.empty_like(zf)
     else:
         ps = gs = zf.new_empty((0,))
-    k3 = E.k3w_tuned if not save and os.environ.get("MINIWORLD_TRIMUL_SM80_TUNED", "1") != "0" else E.k3w
+    k3 = E.k3w_tuned if not save and settings.current().trimul_sm80_tuned else E.k3w
     k3(x.view(hs, T), zf, pk["wo"], pk["wg"], pk["so"], pk["eo"], pk["sg"], pk["eg"], st_out, st_in, ds, out, ps, gs, n, eps_out, fuse_x)
     return out.view_as(z), ((planes, x, st_in, st_out, ps, gs) if save else None)
 

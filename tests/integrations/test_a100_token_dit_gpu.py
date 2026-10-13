@@ -3,6 +3,7 @@ passes, cuBLAS GEMMs -- serves the block on sm_80 under the same contract as on 
 L a multiple of 128)."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import settings
@@ -181,9 +182,9 @@ def test_cuda_pack_matches_existing_weight_recipe(monkeypatch):
     m.transition.ada_ln_in.ln_cond.float()
     m.attention.ln_pair.float()
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "0")
+        override_setting(monkeypatch, "token_dit_prep", "0")
         old = FusedTokenDiT([m])
-        monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "1")
+        override_setting(monkeypatch, "token_dit_prep", "1")
         new = FusedTokenDiT([m])
         for name in ("w1", "b1", "w2", "b2", "pw_t"):
             assert torch.equal(getattr(old, name), getattr(new, name)), name
@@ -192,7 +193,7 @@ def test_cuda_pack_matches_existing_weight_recipe(monkeypatch):
 
 
 def test_cuda_preparation_graph_reads_changed_weights_pair_and_mask(monkeypatch):
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_PREP", "1")
+    override_setting(monkeypatch, "token_dit_prep", "1")
     torch.manual_seed(816)
     m = randomize(DiTBlock(implementation=ImplementationType.MINIWORLD).cuda().bfloat16()).eval()
     x = torch.randn(3, 1, 128, 768, device="cuda", dtype=torch.bfloat16)

@@ -9,7 +9,7 @@ import torch
 from miniworld_engine.kernels.mpnn_edge_dropout.reference import edge_dropout_pytorch
 
 # ``cuda`` is the bit-packed mask on the hand-written A100 (sm_80) kernels (``integrations/mpnn_edge_sm80.py``); on an A100 ``bitpack`` runs them too, unless
-# ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels.
+# ``settings.mpnn_edge_sm80=0`` or ``engine_backend="triton"`` keeps the Triton kernels.
 EdgeDropoutBackend = Literal["auto", "pytorch", "bitpack", "cuda"]
 
 _INT32_MAX = 2**31 - 1

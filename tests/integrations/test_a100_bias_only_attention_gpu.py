@@ -4,6 +4,7 @@ capture, the gate and the switch."""
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.bias_only_attention.cuda import sm80
 from miniworld_engine.kernels.bias_only_attention.interface import (
@@ -105,7 +106,7 @@ def test_the_gate_and_the_switch(monkeypatch):
     assert not sm80.serves(torch.randn(1, 2, 128, 64, 32, device="cuda", dtype=BF), bb), "v must be [B, H, L, L, D]"
     assert not sm80.serves(vb.cpu(), bb.cpu()), "CPU tensors"
     assert not sm80.serves(torch.empty(1, 2, 1152, 1152, 32, device="meta", dtype=BF), torch.empty(1, 2, 1152, 1152, device="meta", dtype=BF)), "L above 1024"
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_ATTN_SM80", "0")
+    override_setting(monkeypatch, "bias_only_attn_sm80", "0")
     assert not sm80.serves(vb, bb)
     torch.testing.assert_close(bias_only_attention(vb, bb), triton_bias_only_attention(vb, bb), atol=0, rtol=0)      # the switch: the Triton kernels
 
@@ -126,5 +127,5 @@ def test_the_door_keeps_triton_for_a_small_training_call(monkeypatch):
     assert run(128, False) == 1, "inference at L = 128 takes the CUDA path"
     assert run(128, True) == 0, "a training call at L = 128 keeps Triton"
     assert run(256, True) == 1, "training from L = 256 takes the CUDA path"
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_ATTN_SM80", "all")
+    override_setting(monkeypatch, "bias_only_attn_sm80", "all")
     assert run(128, True) == 1

@@ -4,6 +4,7 @@ Uses direct token loads, shared pair bias, and key-centric backward without wind
 The block dispatches here after full-module accuracy and paired performance validation.
 """
 import functools
+from miniworld_engine import settings
 import hashlib
 import os
 from pathlib import Path
@@ -27,7 +28,7 @@ def cubin(stem):
     flags=[*host_flags(),'-std=c++17','-O3','-arch=sm_80','-cubin','-lineinfo',f'-I{_dir}']
     digest=hashlib.sha256(' '.join([nvcc,*flags]).encode())
     for source in [_dir/'local.cuh',_dir/f'{stem}.cu']:digest.update(source.read_bytes())
-    root=Path(os.environ.get('MINIWORLD_ENGINE_JIT_ROOT',Path.home()/'.cache/miniworld_engine_jit'))
+    root=settings.engine_jit_root()
     output=root/'atom_local_sm80'/f'{stem}_{digest.hexdigest()[:16]}.cubin'
     if not output.exists():
         output.parent.mkdir(parents=True,exist_ok=True)

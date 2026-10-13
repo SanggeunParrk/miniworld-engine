@@ -1,7 +1,10 @@
 """L128 two native gradient GEMMs; the forward outer product still uses cuBLAS."""
-import functools,os
+import functools
 from pathlib import Path
 import torch
+
+from miniworld_engine import settings
+
 from ..._nvcc import ensure_cuda_home,host_flags,load_extension
 
 @functools.lru_cache(maxsize=1)
@@ -12,9 +15,9 @@ def _ext():
 def forward(m,mask,residual,leaves,eps,norm_first,training,save_o):
     if mask is None:mask=m.new_empty((0,),dtype=torch.uint8)
     if residual is None:residual=m.new_empty((0,))
-    return _ext().forward(m,mask,residual,leaves,eps,norm_first,training,save_o,int(os.environ.get('MINIWORLD_OPM_SM80_PL','0')),int(os.environ.get('MINIWORLD_OPM_SM80_EPI','0')))
+    return _ext().forward(m,mask,residual,leaves,eps,norm_first,training,save_o,settings.current().opm_sm80_pl,settings.current().opm_sm80_epi)
 
 def backward(m,mask,leaves,saved,dz,norm_first):
     if mask is None:mask=m.new_empty((0,),dtype=torch.uint8)
     a,b,stats,o,norm=saved
-    return _ext().backward(m,mask,leaves,a,b,stats,o,norm,dz,norm_first,int(os.environ.get('MINIWORLD_OPM_SM80_DG','0')),int(os.environ.get('MINIWORLD_OPM_SM80_PB','0')))
+    return _ext().backward(m,mask,leaves,a,b,stats,o,norm,dz,norm_first,settings.current().opm_sm80_dg,settings.current().opm_sm80_pb)

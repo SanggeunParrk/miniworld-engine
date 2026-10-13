@@ -4,6 +4,7 @@ five projections in one pass) does the same."""
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 pytestmark = pytest.mark.gpu
 
@@ -223,7 +224,7 @@ def test_gate_rejects_everything_it_is_not_built_for():
 def test_env_switch_turns_the_gate_off(monkeypatch):
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
 
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+    override_setting(monkeypatch, "triattn_sm80", "0")
     assert not sm80.supports(*_inputs(128, False))
 
 

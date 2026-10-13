@@ -8,7 +8,7 @@ HBM passes and holds the normalized activation for the backward:
 entry, not the ``torch.autograd.Function`` behind it.
 
 ``rms_norm_modulation`` is the dispatching entry of the RMSNorm + adaLN modulation (``ops.rms_norm_modulation``): on an A100 the hand-CUDA kernels of
-``cuda/sm80.py`` where they serve the call (atom width 128, bf16), the Triton kernels elsewhere and for everything they refuse (``MINIWORLD_NORMS_SM80=0``
+``cuda/sm80.py`` where they serve the call (atom width 128, bf16), the Triton kernels elsewhere and for everything they refuse (``settings.norms_sm80=0``
 keeps Triton).  ``triton_rmsnorm`` / ``triton_rmsnorm_adamod`` are the Triton entries by name.
 """
 

@@ -11,16 +11,15 @@ The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean
   backward  dgrad (dz / n -> dO in the grouped layout, dbo) -> dA = B dO^T, dB = A dO (own CUDA at S1024/L128/CM64/CZ128; cuBLAS elsewhere) -> dwo (split over rows of i, fixed-order sum off the kept O)
             -> prologue_bwd (mask, both projection gradients, the LayerNorm backward -> dmsa, dWl, dWr, dgamma, dbeta).
 
-Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``MINIWORLD_OPM_SM80=0`` turns the path off
-(``MINIWORLD_OPM_SM80_SAVE_O=0`` recomputes O in the backward instead of keeping it: 1.2 GB at L768). Numerics and timings: ``docs/gpus/a100/outer_product/``.
+Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``settings.opm_sm80 = False`` turns the path off
+(``settings.opm_sm80_save_o = False`` recomputes O in the backward instead of keeping it: 1.2 GB at L768). Numerics and timings: ``docs/gpus/a100/outer_product/``.
 
 The qualified short training pipeline uses C++ stage dispatch and two own-CUDA gradient GEMMs; its forward outer product still uses cuBLAS.
-``MINIWORLD_OPM_SM80_NATIVE128_PIPELINE=0`` selects the previous short training implementation.
+``settings.opm_sm80_native128_pipeline = False`` selects the previous short training implementation.
 """
 
 from __future__ import annotations
 
-import os
 import warnings
 
 import torch
@@ -29,8 +28,6 @@ from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
-ENV = "MINIWORLD_OPM_SM80"
-SAVE_O_ENV = "MINIWORLD_OPM_SM80_SAVE_O"
 _FAILED = False
 CH = 32
 
@@ -58,7 +55,7 @@ def _sm80():
 
 
 def _eligible(module, msa: torch.Tensor, mask: torch.Tensor | None, token_asym_id: torch.Tensor | None, residual: torch.Tensor | None) -> bool:
-    if os.environ.get(ENV, "1") == "0":
+    if not settings.current().opm_sm80:
         return False
     if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
         return False
@@ -107,8 +104,8 @@ def _norm(mask: torch.Tensor | None, depth: int, clamp: bool = True, training: b
     """The mask counts n_ij = sum_s mask[s, i] mask[s, j] clamped to >= 1 (fp32 [L, L], exact: a bf16 0 / 1 product with fp32 accumulation), or (None, S) without a mask."""
     if mask is None:
         return None, float(depth)
-    override = os.environ.get("MINIWORLD_OPM_SM80_MASK_COUNT_NATIVE")
-    native = (override == "1" if override is not None else
+    override = settings.current().opm_sm80_mask_count_native
+    native = (override if override is not None else
               not training and (depth, mask.shape[1]) in ((1024, 128), (1024, 256), (2048, 128), (2048, 768), (4096, 128), (4096, 640)))
     if native:
         from miniworld_engine.kernels.outer_product_mean.cuda import mask_count_ballot_sm80
@@ -124,9 +121,9 @@ def _mask_u8(mask: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def _mask_epilogue_enabled(m: torch.Tensor, wo: torch.Tensor, training: bool = False) -> bool:
-    override = os.environ.get("MINIWORLD_OPM_SM80_MASK_EPILOGUE")
+    override = settings.current().opm_sm80_mask_epilogue
     if override is not None:
-        return override == "1"
+        return override
     return (not training and m.shape[-1] == 64 and wo.shape[0] == 128
             and (m.shape[0], m.shape[1]) in ((1024, 128), (1024, 256), (1024, 512),
                                            (2048, 256), (2048, 768), (4096, 640)))
@@ -134,13 +131,13 @@ def _mask_epilogue_enabled(m: torch.Tensor, wo: torch.Tensor, training: bool = F
 
 def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
     # E053 measures host dispatch overhead. The grouped GEMMs still use cuBLAS.
-    return (os.environ.get("MINIWORLD_OPM_SM80_PIPELINE", "0") == "1"
+    return (settings.current().opm_sm80_pipeline
             and msa.shape[1] == 1024 and msa.shape[-1] == 64
             and leaves[4].shape[0] == 128)
 
 
 def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
-    return (os.environ.get("MINIWORLD_OPM_SM80_NATIVE128_PIPELINE", "1") == "1"
+    return (settings.current().opm_sm80_native128_pipeline
             and msa.shape[1:3] == (1024, 128) and msa.shape[-1] == 64
             and leaves[4].shape[0] == 128)
 
@@ -167,7 +164,7 @@ def inference(msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tens
             from miniworld_engine.kernels.outer_product_mean.cuda import mask_epilogue_sm80
             out, _ = mask_epilogue_sm80.result(o, mk, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
         else:
-            norm, nconst = _norm(None if mk is None else mk, m.shape[0], clamp=os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
+            norm, nconst = _norm(None if mk is None else mk, m.shape[0], clamp=(not settings.current().a100_cleanup))
             out = sm.epilogue(o, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
     return out.unsqueeze(0)
 
@@ -257,7 +254,7 @@ def backward(msa: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Te
         dwo = sm.dwo(dzn, o, pdt[4])
         del o, dzn
         dm, dwl, dwr, dg, dbt = sm.prologue_bwd(da, db, msa[0], stats, mk, lnw, lnb, wl, wr)
-    if os.environ.get("MINIWORLD_OPM_SM80_TYPED_GRAD", "0") == "1":
+    if settings.current().opm_sm80_typed_grad:
         from miniworld_engine.kernels.outer_product_mean.cuda import finalize_typed_sm80
         typed = finalize_typed_sm80.result([dg, dbt, dwl, dwr, dbo], [leaves[i] for i in (0, 1, 2, 3, 5)])
         return [dm.unsqueeze(0), *typed[:4], dwo, typed[4]]
@@ -284,5 +281,5 @@ class _Training(torch.autograd.Function):
 
 
 def update_train(module, msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tensor | None) -> torch.Tensor:
-    save_o = os.environ.get(SAVE_O_ENV, "1") != "0"
+    save_o = settings.current().opm_sm80_save_o
     return _Training.apply(float(module.ln_msa.eps), bool(module.normalize_before_proj), save_o, msa.contiguous(), mask, residual, *_leaves(module))

@@ -3,10 +3,10 @@ module: the registry widths, bf16 and fp32 (TF32), ``forward`` (the residual out
 compiled, CUDA-graph replay, the env switches.  Errors are held to the bf16 PyTorch module's own error in the same regime (fp32: to TF32 accuracy)."""
 
 import copy
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.integrations import conditioned_transition_sm80 as ct80
 from miniworld_engine.modules import ConditionedTransition
@@ -154,18 +154,20 @@ def test_ct_a100_expansion_four_and_the_gate_conditions():
     assert ct80.serves(ours, xb, cb[:1], BF, True)
 
 
-def test_ct_a100_env_switches_keep_the_triton_path():
+def test_ct_a100_env_switches_keep_the_triton_path(monkeypatch):
     ours = _modules(128, 128, BF)[1]
     x, c = _inputs(5, 256, 128, 128)
     xb, cb = x.to(BF), c.to(BF)
     with torch.no_grad():
         got = ours(xb, cb)
-        os.environ["MINIWORLD_CONDTRANS_SM80"] = os.environ["MINIWORLD_ADALN_SM80"] = "0"
+        override_setting(monkeypatch, "condtrans_sm80", "0")
+        override_setting(monkeypatch, "adaln_sm80", "0")
         try:
             assert not ct80.serves(ours, xb, cb, BF, False)
             base = ours(xb, cb)
         finally:
-            del os.environ["MINIWORLD_CONDTRANS_SM80"], os.environ["MINIWORLD_ADALN_SM80"]
+            override_setting(monkeypatch, "condtrans_sm80", None)
+            override_setting(monkeypatch, "adaln_sm80", None)
     assert _rel(got, base) < 1.5e-2
 
 
@@ -286,8 +288,8 @@ def test_ct_a100_training_step_in_a_cuda_graph(d, dc, dtype):
         assert torch.equal(a, t.grad)
 
 
-def test_ct_a100_side_stream_branches_change_nothing():
-    """``MINIWORLD_ADALN_BRANCH=0`` runs the gate and the weight-gradient GEMMs on the current stream: the same bits."""
+def test_ct_a100_side_stream_branches_change_nothing(monkeypatch):
+    """``settings.adaln_branch=0`` runs the gate and the weight-gradient GEMMs on the current stream: the same bits."""
     _, ours, _ = _modules(768, 384, BF)
     x, c = _inputs(4, 128, 768, 384)
     xg, cg = x.to(BF).requires_grad_(), c.to(BF).contiguous().requires_grad_()
@@ -302,18 +304,18 @@ def test_ct_a100_side_stream_branches_change_nothing():
         return [y.detach().clone()] + [t.grad.clone() for t in (xg, cg, *ours.parameters())]
 
     on = run()
-    os.environ["MINIWORLD_ADALN_BRANCH"] = "0"
+    override_setting(monkeypatch, "adaln_branch", "0")
     try:
         off = run()
     finally:
-        del os.environ["MINIWORLD_ADALN_BRANCH"]
+        override_setting(monkeypatch, "adaln_branch", None)
     for a, b in zip(on, off, strict=True):
         assert torch.equal(a, b)
 
 
 @pytest.mark.parametrize("autocast", [False, True])
 @pytest.mark.parametrize(("d", "dc"), [(128, 128), (768, 384)])
-def test_ct_a100_inference_follows_updated_weights(autocast, d, dc):
+def test_ct_a100_inference_follows_updated_weights(autocast, d, dc, monkeypatch):
     """The packed weights are cached per parameter version: an in-place update (an optimizer step, a checkpoint load) must reach the next call -- also when the weights are the temporary casts of fp32 master
     parameters under autocast, and at fp32 (the TF32 packs)."""
     _, ours, _ = _modules(d, dc, torch.float32 if autocast else BF)
@@ -330,17 +332,19 @@ def test_ct_a100_inference_follows_updated_weights(autocast, d, dc):
         for p in ours.parameters():
             p.mul_(1.5)
     y2 = call()
-    os.environ["MINIWORLD_CONDTRANS_SM80"] = os.environ["MINIWORLD_ADALN_SM80"] = "0"
+    override_setting(monkeypatch, "condtrans_sm80", "0")
+    override_setting(monkeypatch, "adaln_sm80", "0")
     try:
         want = call()
     finally:
-        del os.environ["MINIWORLD_CONDTRANS_SM80"], os.environ["MINIWORLD_ADALN_SM80"]
+        override_setting(monkeypatch, "condtrans_sm80", None)
+        override_setting(monkeypatch, "adaln_sm80", None)
     assert not torch.equal(y1, y2)
     assert _rel(y2, want) < 3e-2
 
 
 @pytest.mark.parametrize("d", [128, 768])
-def test_ct_a100_fp32_inference_follows_updated_weights(d):
+def test_ct_a100_fp32_inference_follows_updated_weights(d, monkeypatch):
     """The fp32 fused tail's TF32 packs follow an in-place weight update too."""
     dc = 128 if d == 128 else 384
     _, ours, _ = _modules(d, dc, torch.float32)
@@ -350,11 +354,13 @@ def test_ct_a100_fp32_inference_follows_updated_weights(d):
         for p in ours.parameters():
             p.mul_(1.5)
         y2 = ours(x, c)
-        os.environ["MINIWORLD_CONDTRANS_SM80"] = os.environ["MINIWORLD_ADALN_SM80"] = "0"
+        override_setting(monkeypatch, "condtrans_sm80", "0")
+        override_setting(monkeypatch, "adaln_sm80", "0")
         try:
             want = ours(x, c)
         finally:
-            del os.environ["MINIWORLD_CONDTRANS_SM80"], os.environ["MINIWORLD_ADALN_SM80"]
+            override_setting(monkeypatch, "condtrans_sm80", None)
+            override_setting(monkeypatch, "adaln_sm80", None)
     assert not torch.equal(y1, y2)
     assert _rel(y1, y2) > 0.05                      # the update moved the output ...
     assert _rel(y2, want) < 1e-2                    # ... and the fused kernels follow it as the Triton path (both TF32, weights scaled 1.5x: a stale pack would differ by O(1))

@@ -3,6 +3,7 @@ regime and against fp32, the attention core and the softmax against their refere
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit
@@ -182,9 +183,9 @@ def test_native_pack_matches_previous_recipe(monkeypatch, n_head, d_head, fp32_p
             module, attr = name.rsplit(".", 1)
             setattr(fast.get_submodule(module), attr, torch.nn.Parameter(storage))
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "0")
+        override_setting(monkeypatch, "bias_only_dit_prep", "0")
         old = FusedBiasOnlyDiT([fast])
-        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "1")
+        override_setting(monkeypatch, "bias_only_dit_prep", "1")
         new = FusedBiasOnlyDiT([fast])
         for name in ("w1", "b1", "w2", "b2", "pw"):
             torch.testing.assert_close(getattr(new, name), getattr(old, name), rtol=0, atol=0)
@@ -247,10 +248,10 @@ def test_multiblock_runner_preserves_previous_result(monkeypatch, n_head):
     p = torch.randn(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
     mask = torch.rand(1, 128, device="cuda") > .2
     with torch.no_grad():
-        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "0")
+        override_setting(monkeypatch, "bias_only_dit_prep", "0")
         old = FusedBiasOnlyDiT([first, second])
         want = old.step(x, c, old.hoist(p, mask))
-        monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_PREP", "1")
+        override_setting(monkeypatch, "bias_only_dit_prep", "1")
         new = FusedBiasOnlyDiT([first, second])
         got = new.step(x, c, new.hoist(p, mask))
         assert not hasattr(new, "wc")

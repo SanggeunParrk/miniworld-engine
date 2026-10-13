@@ -15,7 +15,6 @@ What each call hoists, and why it may:
 """
 
 import contextlib
-import os
 
 import torch
 import torch.nn.functional as F
@@ -156,7 +155,7 @@ class FusedTokenDiT:
                 and dtype is torch.bfloat16 and not self.qk and dev.type == "cuda"
                 and torch.cuda.get_device_capability(dev) == (8, 0)
                 and hasattr(self.K, "pack_token")
-                and os.environ.get("MINIWORLD_TOKEN_DIT_PREP", "1") != "0"):
+                and settings.current().token_dit_prep):
             scaled = prescale and core in ("gated", "gated2")
             packed = self.K.pack_token(blocks[0], 48 ** -0.5 * 1.4426950408889634 if scaled else 1.,
                                        1.4426950408889634 if scaled else 1.)
@@ -304,7 +303,7 @@ class FusedTokenDiT:
                 keep=(
                     None
                     if self.core == "gated2"
-                    and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+                    and settings.current().a100_cleanup
                     else torch.ones(S, 1, L, device=dev, dtype=torch.bool)
                 ),
                 lse=torch.empty(S, 1, self.h, L, device=dev, dtype=torch.float32),

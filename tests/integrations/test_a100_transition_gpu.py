@@ -7,6 +7,7 @@ import copy
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 from miniworld_engine.modules import Transition
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -72,8 +73,8 @@ def test_transition_matches_fp32_forward_and_backward(d, n, stream):
 @pytest.mark.parametrize("seed", [0, 17])
 def test_d256_protocol_weight_gradients(length, seed, monkeypatch):
     """Long pair reductions must retain the original BF16-floor gradient band."""
-    monkeypatch.delenv("MINIWORLD_TRANSITION_WIDE_GRAD_FP32", raising=False)
-    monkeypatch.delenv("MINIWORLD_TRANSITION_WIDE_GRAD_CAST", raising=False)
+    override_setting(monkeypatch, "transition_wide_grad_fp32", None)
+    override_setting(monkeypatch, "transition_wide_grad_cast", None)
     previous = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
@@ -163,10 +164,10 @@ def test_the_switches_and_the_gates(monkeypatch):
     assert not fw.supported(torch.randn(10, 200, device="cuda", dtype=torch.bfloat16), wa[:, :200].contiguous(), ws[:200])  # width without a build
     assert not fw.supported(x, wa[:1000].contiguous(), ws[:, :1000].contiguous())                                      # hidden not a multiple of 64
     assert not fw.supported(x[:0], wa, ws)
-    for name in ("MINIWORLD_TRANSITION_WIDE_SM80", "MINIWORLD_TRANSITION_FUSED_SM80"):
-        monkeypatch.setenv(name, "0")
+    for name in ("transition_wide_sm80", "transition_fused_sm80"):
+        override_setting(monkeypatch, name, "0")
         assert not fw.supported(x, wa, ws)
-        monkeypatch.delenv(name)
+        override_setting(monkeypatch, name, None)
     assert fw.supported(x, wa, ws)
 
 
@@ -177,7 +178,7 @@ def test_with_the_switch_off_the_module_runs_triton_and_agrees(monkeypatch):
     x = torch.randn(1, 24, 24, 256, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         got = ours(x)
-        monkeypatch.setenv("MINIWORLD_TRANSITION_FUSED_SM80", "0")
+        override_setting(monkeypatch, "transition_fused_sm80", "0")
         calls = []
         monkeypatch.setattr(fw, "transition_wide_sm80", lambda *a, **k: calls.append(1))
         want = ours(x)
@@ -309,11 +310,11 @@ def test_swiglu_ffn_dispatch_switch_and_fallback(monkeypatch):
     with torch.no_grad():
         got = ops.swiglu_ffn(x, wa, wb, ws)
         assert calls == [1]
-        monkeypatch.setenv("MINIWORLD_TRANSITION_FUSED_SM80", "0")
+        override_setting(monkeypatch, "transition_fused_sm80", "0")
         want = ops.swiglu_ffn(x, wa, wb, ws)
         assert calls == [1]                                                                                     # the switch hands the call to Triton
         assert _rel(got, want) < 6e-3
-        monkeypatch.delenv("MINIWORLD_TRANSITION_FUSED_SM80")
+        override_setting(monkeypatch, "transition_fused_sm80", None)
         assert _rel(ops.swiglu_ffn(x.float(), wa.float(), wb.float(), ws.float()), want.float()) < 1e-2      # fp32 operands: not this path
     assert calls == [1]
 

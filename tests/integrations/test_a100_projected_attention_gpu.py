@@ -4,6 +4,7 @@ and the gradients of q, k, v and the bias no worse against an fp64 PyTorch refer
 graph replaying to eager, and the calls it does not take keeping the Triton path."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import ops, settings
@@ -22,7 +23,7 @@ BF = torch.bfloat16
 @pytest.fixture(autouse=True)
 def policy(monkeypatch):
     old = settings.configure(engine_backend="auto")
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80_OPS", "all")      # these tests exercise the sm_80 core on every shape; the default dispatch is tested below
+    override_setting(monkeypatch, "augattn_sm80_ops", "all")      # these tests exercise the sm_80 core on every shape; the default dispatch is tested below
     try:
         yield
     finally:
@@ -81,7 +82,7 @@ def test_output_and_gradients_match_the_triton_path(a, b, h, length, d, kind, mo
     monkeypatch.setattr(augattn_sm80, "attention_ops", lambda *a_, **k_: calls.append(1) or orig(*a_, **k_))
     got = _run(*args)
     assert calls, "the call did not take the sm_80 core"
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+    override_setting(monkeypatch, "augattn_sm80", "0")
     n = len(calls)
     triton = _run(*args)
     assert len(calls) == n, "the switch did not keep the Triton path"
@@ -141,14 +142,14 @@ def test_the_gate_serves_only_what_the_core_was_built_for(monkeypatch):
     assert not augattn_sm80.serves_ops(qb, kb, vb, bb, mask, "memory_efficient")
     assert not augattn_sm80.serves_ops(qb[..., :40], kb[..., :40], vb[..., :40], bb, mask), "head dim 40"
     assert not augattn_sm80.serves_ops(qb.cpu(), kb.cpu(), vb.cpu(), bb.cpu(), None), "CPU tensors"
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+    override_setting(monkeypatch, "augattn_sm80", "0")
     assert not augattn_sm80.serves_ops(qb, kb, vb, bb, mask)
 
 
 def test_the_default_dispatch_serves_the_calls_the_core_wins(monkeypatch):
     """The whole-op path stages q / k / v / bias / the output around the core: at the registry's sizes that loses to the Triton kernel in inference (13-71 % slower, measured 2026-10-04) and in small
-    training calls, and wins in training from A B H L^2 >= 2e6 (16 x 768, A = 48: 1.3-1.95x) and at head dim 24. MINIWORLD_AUGATTN_SM80_OPS=all serves every call, 0 none."""
-    monkeypatch.delenv("MINIWORLD_AUGATTN_SM80_OPS")
+    training calls, and wins in training from A B H L^2 >= 2e6 (16 x 768, A = 48: 1.3-1.95x) and at head dim 24. settings.augattn_sm80_ops='all' serves every call, 0 none."""
+    override_setting(monkeypatch, "augattn_sm80_ops", None)
 
     def call(a, h, length, d, grad):
         q, k, v, bias, _, _ = _case(a, 1, h, length, d, "none")
@@ -161,7 +162,7 @@ def test_the_default_dispatch_serves_the_calls_the_core_wins(monkeypatch):
     assert not augattn_sm80.serves_ops(*call(1, 8, 256, 48, True), None), "a small training call keeps Triton"
     assert augattn_sm80.serves_ops(*call(1, 8, 768, 48, True), None)
     assert augattn_sm80.serves_ops(*call(1, 16, 256, 24, True), None), "head dim 24"
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80_OPS", "all")
+    override_setting(monkeypatch, "augattn_sm80_ops", "all")
     assert augattn_sm80.serves_ops(*call(5, 16, 384, 48, False), None)
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80_OPS", "0")
+    override_setting(monkeypatch, "augattn_sm80_ops", "0")
     assert not augattn_sm80.serves_ops(*call(48, 16, 384, 48, True), None)

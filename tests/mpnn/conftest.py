@@ -5,8 +5,9 @@ have their own tests (``tests/integrations/test_a100_mpnn_edge_gpu.py``): here t
 """
 
 import pytest
+from settings_helpers import override_setting
 
 
 @pytest.fixture(autouse=True)
 def _triton_edge_kernels(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("MINIWORLD_MPNN_EDGE_SM80", "0")
+    override_setting(monkeypatch, "mpnn_edge_sm80", "0")

@@ -3,10 +3,10 @@ bf16 and fp32 (TF32), a conditioning per sample and one shared by the samples, f
 bf16 PyTorch module's own error in the same regime (fp32: to TF32 accuracy)."""
 
 import copy
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.integrations import adaln_sm80
 from miniworld_engine.modules import AdaptiveLayerNorm
@@ -68,7 +68,7 @@ def test_adaln_a100_inference_bf16(d, dc, L, shared):
 @pytest.mark.parametrize(("d", "dc"), WIDTHS)
 def test_adaln_a100_inference_fp32_tf32(d, dc, L, shared, monkeypatch):
     """fp32 on TF32 tensor cores (at d = dc = 128 the fused kernel: ragged row counts L = 50, 5 x 1024; one conditioning shared by the samples) within TF32 accuracy of the fp32 module."""
-    monkeypatch.setenv("MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS", "0")          # the row gate (below) would leave these small shapes to Triton
+    override_setting(monkeypatch, "adaln_fp32_atom_min_rows", "0")          # the row gate (below) would leave these small shapes to Triton
     ref, ours, _ = _modules(d, dc, torch.float32)
     x, c = _inputs(5, L, d, dc, shared)
     with torch.no_grad():
@@ -78,8 +78,8 @@ def test_adaln_a100_inference_fp32_tf32(d, dc, L, shared, monkeypatch):
 
 def test_adaln_a100_fp32_atom_inference_of_few_rows_is_left_to_triton(monkeypatch):
     """fp32 inference at the atom width with fewer than 8192 rows (the registry's N = 1024, A = 5) is faster on Triton's fused kernel than on the TF32 kernel's launch + staging prologue: not served, unless
-    ``MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS`` says otherwise; bf16, training and wider rows are unaffected."""
-    monkeypatch.delenv("MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS", raising=False)
+    ``settings.adaln_fp32_atom_min_rows`` says otherwise; bf16, training and wider rows are unaffected."""
+    override_setting(monkeypatch, "adaln_fp32_atom_min_rows", None)
     _, ours, _ = _modules(128, 128, torch.float32)
     _, ours_bf, _ = _modules(128, 128, BF)
     few, many = _inputs(5, 1024, 128, 128), _inputs(5, 2048, 128, 128)
@@ -87,7 +87,7 @@ def test_adaln_a100_fp32_atom_inference_of_few_rows_is_left_to_triton(monkeypatc
     assert adaln_sm80.serves(ours, *many, torch.float32, False)
     assert adaln_sm80.serves(ours, *few, torch.float32, True)
     assert adaln_sm80.serves(ours_bf, few[0].to(BF), few[1].to(BF), BF, False)
-    monkeypatch.setenv("MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS", "0")
+    override_setting(monkeypatch, "adaln_fp32_atom_min_rows", "0")
     assert adaln_sm80.serves(ours, *few, torch.float32, False)
 
 
@@ -145,18 +145,18 @@ def test_adaln_a100_gate_conditions():
     assert not adaln_sm80.serves(ours, xb, one, BF, True)
 
 
-def test_adaln_a100_env_switch_keeps_the_triton_path():
+def test_adaln_a100_env_switch_keeps_the_triton_path(monkeypatch):
     ours = _modules(128, 128, BF)[1]
     x, c = _inputs(5, 256, 128, 128)
     xb, cb = x.to(BF), c.to(BF)
     with torch.no_grad():
         got = ours(xb, cb)
-        os.environ["MINIWORLD_ADALN_SM80"] = "0"
+        override_setting(monkeypatch, "adaln_sm80", "0")
         try:
             assert not adaln_sm80.serves(ours, xb, cb, BF, False)
             base = ours(xb, cb)
         finally:
-            del os.environ["MINIWORLD_ADALN_SM80"]
+            override_setting(monkeypatch, "adaln_sm80", None)
     assert _rel(got, base) < 1.5e-2
 
 
@@ -277,8 +277,8 @@ def test_adaln_a100_training_step_in_a_cuda_graph(d, dc, dtype):
         assert torch.equal(a, t.grad)
 
 
-def test_adaln_a100_side_stream_branches_change_nothing():
-    """``MINIWORLD_ADALN_BRANCH=0`` runs the weight-gradient GEMMs on the current stream: the same bits."""
+def test_adaln_a100_side_stream_branches_change_nothing(monkeypatch):
+    """``settings.adaln_branch=0`` runs the weight-gradient GEMMs on the current stream: the same bits."""
     _, ours, _ = _modules(768, 384, BF)
     x, c = _inputs(4, 128, 768, 384)
     xg, cg = x.to(BF).requires_grad_(), c.to(BF).contiguous().requires_grad_()
@@ -292,17 +292,17 @@ def test_adaln_a100_side_stream_branches_change_nothing():
         return [t.grad.clone() for t in (xg, cg, *ours.parameters())]
 
     on = grads()
-    os.environ["MINIWORLD_ADALN_BRANCH"] = "0"
+    override_setting(monkeypatch, "adaln_branch", "0")
     try:
         off = grads()
     finally:
-        del os.environ["MINIWORLD_ADALN_BRANCH"]
+        override_setting(monkeypatch, "adaln_branch", None)
     for a, b in zip(on, off, strict=True):
         assert torch.equal(a, b)
 
 
 @pytest.mark.parametrize("autocast", [False, True])
-def test_adaln_a100_inference_follows_updated_weights(autocast):
+def test_adaln_a100_inference_follows_updated_weights(autocast, monkeypatch):
     """The packed weights are cached per parameter version: an in-place update (an optimizer step, a checkpoint load) must reach the next call -- also when the weights are the temporary casts of fp32 master
     parameters under autocast."""
     _, ours, _ = _modules(768, 384, torch.float32 if autocast else BF)
@@ -319,10 +319,10 @@ def test_adaln_a100_inference_follows_updated_weights(autocast):
         for p in ours.parameters():
             p.mul_(1.5)
     y2 = call()
-    os.environ["MINIWORLD_ADALN_SM80"] = "0"
+    override_setting(monkeypatch, "adaln_sm80", "0")
     try:
         want = call()
     finally:
-        del os.environ["MINIWORLD_ADALN_SM80"]
+        override_setting(monkeypatch, "adaln_sm80", None)
     assert not torch.equal(y1, y2)
     assert _rel(y2, want) < 2e-2

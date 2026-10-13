@@ -5,6 +5,9 @@ buffers are fresh; their original deterministic reduction is performed by
 grad_reduce_fused_sm80 at the end of backward.
 """
 import torch
+
+from miniworld_engine import settings
+
 from . import sm80
 
 def glue(m,dres,o,lnw,lnb,wg,wo,keep,eps,dscale,tuned):
@@ -33,7 +36,6 @@ def pair(z,w,dw,mask,lnw,lnb,wb,eps):
     dz=torch.empty_like(z)
     pm=z.new_empty((z.shape[0],1024),dtype=torch.float32)
     ps=z.new_empty((z.shape[0],8),dtype=torch.float32)
-    import os
-    variant=int(os.environ.get("MINIWORLD_PWA_SM80_PB","0"))
+    variant=settings.current().pwa_sm80_pb
     sm80.ext().pair_bwd(z,w,dw,mask_tensor,lnw,lnb,wb,dz,pm,ps,eps,variant)
     return dz,pm,ps

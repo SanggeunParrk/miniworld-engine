@@ -49,7 +49,7 @@ def augmented_attention_pair_bias(
     if kernel_type == "compute_efficient" and _sm80_rows.serves(query, key, value, bias, mask):
         return _sm80_rows.attention(query, key, value, bias, mask)
     # A100: the hand-CUDA core (bf16, head dim 24 / 32 / 48, any L, A, B, a key mask per sample or none) instead of the Triton kernel, for the calls it wins
-    # (MINIWORLD_AUGATTN_SM80_OPS); every other call falls through to the Triton path
+    # (settings.augattn_sm80_ops); every other call falls through to the Triton path
     if _sm80.serves_ops(query, key, value, bias, mask, kernel_type):
         return _sm80.attention_ops(query, key, value, bias, mask)
 

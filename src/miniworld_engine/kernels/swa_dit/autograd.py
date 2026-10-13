@@ -9,10 +9,9 @@ weight through ``swa_dit_hoist_modulation``) and the five block weights. cos / s
 """
 from __future__ import annotations
 
-import os
-
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_block_bwd,
@@ -29,6 +28,15 @@ from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
 
 
 @device_constant
+def _native_grad_cast_wanted(S: int) -> bool:
+    """``settings.swa_dit_sm80_native_grad_cast`` when set; else on at S = 4096 and wherever the grouped5 wgrad is on."""
+    s = settings.current()
+    if s.swa_dit_sm80_native_grad_cast is not None:
+        return s.swa_dit_sm80_native_grad_cast
+    grouped5 = s.swa_dit_sm80_native_grouped5_dw
+    return S == 4096 or (S == 8192 if grouped5 is None else grouped5)
+
+
 def _grad_cast_is_a100(index: int) -> bool:
     return torch.cuda.get_device_capability(index) == (8, 0)
 
@@ -42,8 +50,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
         ctx.native_grad_cast = (
-            os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GRAD_CAST",
-                           "1" if q.shape[1] == 4096 or os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW", "1" if q.shape[1] == 8192 else "0") == "1" else "0") == "1"
+            _native_grad_cast_wanted(q.shape[1])
             and q.is_cuda and q.dtype == torch.bfloat16
             and q.shape[0] == 48 and q.shape[1] in (4096, 8192) and q.shape[2] == 128
             and all(dt in (torch.bfloat16, torch.float32) for dt in ctx.param_dtypes)

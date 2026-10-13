@@ -41,7 +41,6 @@ their backwards, around the SAME window-attention kernels on bf16 operands (what
 from __future__ import annotations
 
 import functools
-import os
 import warnings
 from typing import Any
 
@@ -84,6 +83,11 @@ from miniworld_engine.kernels.swa_dit.triton.forward_fp32 import (
 
 #: ``pack`` keys an axis only below 4096; an augment count at or above it shares the top key.
 _A_KEY_MAX = 4095
+
+
+def _native_default(forced: bool | None, shape_default: bool) -> bool:
+    """A native-wgrad switch: ``forced`` when the setting is set, else the shape's default."""
+    return shape_default if forced is None else forced
 
 
 def _augments(N: int, B: int) -> int:
@@ -1034,28 +1038,28 @@ def swa_dit_block_bwd(
             MODW=6 * C,
         )
     if (sm80 is not None and N == 48 and S in (4096, 8192)
-            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW", "1" if S == 8192 else "0") == "1"):
+            and _native_default(settings.current().swa_dit_sm80_native_grouped5_dw, S == 8192)):
         from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped5_sm80 import grouped_weight_gradients5
 
         dwqkv, dwg, dwu, dwo, dwd = grouped_weight_gradients5(dP, x, dab, y, datt, gated, dffn, hh)
     elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_ALLOC", "0") == "1"):
+            and settings.current().swa_dit_sm80_native_grouped8_alloc):
         from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_alloc_sm80 import grouped_weight_gradients8_alloc
 
         dwqkv, dwg, dwu, dwo = grouped_weight_gradients8_alloc(dP, x, dab, y, datt, gated)
     elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED8_DW", "0") == "1"):
+            and settings.current().swa_dit_sm80_native_grouped8_dw):
         from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped8_sm80 import grouped_weight_gradients8
 
         dwqkv, dwg, dwu, dwo = grouped_weight_gradients8(dP, x, dab, y, datt, gated)
     elif (sm80 is not None and N == 48 and S in (4096, 8192)
-            and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED_DW", "1" if S == 4096 else "0") == "1"):
+            and _native_default(settings.current().swa_dit_sm80_native_grouped_dw, S == 4096)):
         from miniworld_engine.kernels.swa_dit.cuda.wgrad_grouped_sm80 import grouped_weight_gradients
 
         dwqkv, dwg, dwu, dwo = grouped_weight_gradients(dP, x, dab, y, datt, gated)
     else:
         if (sm80 is not None and N == 48 and S in (4096, 8192)
-                and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_QKVG_DW", "0") == "1"):
+                and settings.current().swa_dit_sm80_native_qkvg_dw):
             from miniworld_engine.kernels.swa_dit.cuda.wgrad_qkvg_sm80 import qkvg_weight_gradient
 
             dwqkv, dwg = qkvg_weight_gradient(dP, x)
@@ -1067,7 +1071,7 @@ def swa_dit_block_bwd(
         dwu = _mm32(dab.t(), y)
     if dwd is None:
         if (sm80 is not None and N == 48 and S in (4096, 8192)
-                and os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_DWD", "1") == "1"):
+                and settings.current().swa_dit_sm80_native_dwd):
             from miniworld_engine.kernels.swa_dit.cuda.wgrad_split_sm80 import down_weight_gradient
 
             dwd = down_weight_gradient(dffn, hh)

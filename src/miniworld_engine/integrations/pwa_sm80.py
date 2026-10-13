@@ -10,13 +10,12 @@ The step (``kernels/pair_weighted_averaging/cuda/sm80``; ``.../cuda/sm80.py`` do
             ->  gate_out (sigmoid gate, output projection, dropout, residual -> out)
   backward  see ``backward`` below.
 
-Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``MINIWORLD_PWA_SM80=0`` turns the path off.
+Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``settings.pwa_sm80 = False`` turns the path off.
 Numerics and timings: ``docs/gpus/a100/msa_pair_weighted_averaging/``.
 """
 
 from __future__ import annotations
 
-import os
 import warnings
 
 import torch
@@ -25,7 +24,6 @@ from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
-ENV = "MINIWORLD_PWA_SM80"
 _FAILED = False
 
 
@@ -52,7 +50,7 @@ def _sm80():
 
 
 def _eligible(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
-    if os.environ.get(ENV, "1") == "0":
+    if not settings.current().pwa_sm80:
         return False
     if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
         return False
@@ -105,7 +103,10 @@ def _key_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
 
 
 def _fused_contract_enabled(m: torch.Tensor, wg: torch.Tensor, training: bool) -> bool:
-    return (os.environ.get("MINIWORLD_PWA_SM80_CONTRACT_GATE_FUSED", "0" if training else "1") == "1"
+    fused = settings.current().pwa_sm80_contract_gate_fused
+    if fused is None:
+        fused = not training
+    return (fused
             and m.shape[1] == 128 and m.shape[2] == 64 and wg.shape[0] == 256
             and m.shape[0] in ((1024,) if training else (1024, 2048, 4096)))
 
@@ -130,7 +131,7 @@ def inference(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, 
             from miniworld_engine.kernels.pair_weighted_averaging.cuda import contract_gate_fused_sm80
             out, _ = contract_gate_fused_sm80.result(m, w, v, lnm_w, lnm_b, wg, wo, eps=eps_m, mode=1)
         else:
-            o = (sm.broadcast_bmm(w, v) if ns > 1 and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+            o = (sm.broadcast_bmm(w, v) if ns > 1 and settings.current().a100_cleanup
                  else torch.bmm(_expand(w, ns), v))
             del v, w
             out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), None, eps_m, 1.0)
@@ -154,11 +155,11 @@ def _expand(w: torch.Tensor, ns: int) -> torch.Tensor:
 
 def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = False) -> torch.Tensor:
     """Native contractions for qualified L128 training rows; preserve the faster path elsewhere."""
-    if (os.environ.get("MINIWORLD_PWA_SM80_BROADCAST_NATIVE", "1") == "1"
+    if (settings.current().pwa_sm80_broadcast_native
             and w.shape[1] == 128 and v.shape[2] % 128 == 0
             and w.is_contiguous() and v.is_contiguous()
             and w.dtype == torch.bfloat16 and v.dtype == torch.bfloat16):
-        short_mode = os.environ.get("MINIWORLD_PWA_SM80_BROADCAST_PIPELINE", "0")
+        short_mode = settings.current().pwa_sm80_broadcast_pipeline
         if (short_mode in ("1", "2", "3")
                 and w.shape[0] == 8 and v.shape[0] == 32 and v.shape[2] == 8192):
             if short_mode in ("2", "3"):
@@ -174,14 +175,14 @@ def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = Fals
 
 def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
     """Native dw for qualified L384/640 rows; explicit1 tests other candidates."""
-    if (os.environ.get("MINIWORLD_PWA_SM80_DW_SHORT", "0") == "1"
+    if (settings.current().pwa_sm80_dw_short
             and do.shape == v.shape and do.shape == (32, 128, 8192)
             and do.is_contiguous() and v.is_contiguous()
             and do.dtype == torch.bfloat16 and v.dtype == torch.bfloat16):
         from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_early_sm80
         return dw_early_sm80.result(do, v, 2, 9)
-    override = os.environ.get("MINIWORLD_PWA_SM80_DW_NATIVE")
-    native = override == "1" if override is not None else do.shape[1] in (384, 640)
+    override = settings.current().pwa_sm80_dw_native
+    native = override if override is not None else do.shape[1] in (384, 640)
     if (native
             and do.shape[0] == 32 and do.shape[1] in (256, 384, 512, 640, 768)
             and do.shape[2] == 8192 and do.shape == v.shape
@@ -241,17 +242,20 @@ def backward(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, l
     with torch.cuda.device(msa.device):
         m, z = msa[0], pair[0]
         dres = dy[0].contiguous()
-        typed_override = os.environ.get("MINIWORLD_PWA_SM80_TYPED_GRAD")
-        typed = typed_override == "1" if typed_override is not None else m.shape[1] in (128, 256, 384)
+        typed_override = settings.current().pwa_sm80_typed_grad
+        typed = typed_override if typed_override is not None else m.shape[1] in (128, 256, 384)
         glue = sm.glue
-        glue_override = os.environ.get("MINIWORLD_PWA_SM80_GLUE_TUNED")
-        tuned_glue = glue_override == "1" if glue_override is not None else m.shape[1] in (256, 384, 512, 640, 768)
+        glue_override = settings.current().pwa_sm80_glue_tuned
+        tuned_glue = glue_override if glue_override is not None else m.shape[1] in (256, 384, 512, 640, 768)
         if (tuned_glue
                 and m.shape[0] == 1024 and m.shape[2] == 64 and wg.shape[0] == 256
                 and m.shape[1] in (128, 256, 384, 512, 640, 768)):
             from miniworld_engine.kernels.pair_weighted_averaging.cuda import glue_tuned_sm80
             glue = lambda *args, **kwargs: glue_tuned_sm80.glue(*args, **kwargs, mode=1)
-        grad_reduce = (os.environ.get("MINIWORLD_PWA_SM80_GRAD_REDUCE", "1" if m.shape == (1024, 128, 64) and wg.shape == (256, 64) and z.shape == (128, 128, 128) else "0") == "1"
+        grad_reduce_forced = settings.current().pwa_sm80_grad_reduce
+        if grad_reduce_forced is None:
+            grad_reduce_forced = m.shape == (1024, 128, 64) and wg.shape == (256, 64) and z.shape == (128, 128, 128)
+        grad_reduce = (grad_reduce_forced
                        and m.shape[0] == 1024 and m.shape[2] == 64
                        and wg.shape == (256, 64) and z.shape[-1] == 128
                        and m.shape[1] in (128, 256, 384, 512, 640, 768))
@@ -263,7 +267,7 @@ def backward(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, l
             glued = glue(m, dres, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep_t, eps_m, dscale, raw=typed)
         do, dgp = glued[:2]
         dv = _broadcast_contract(w, do, transpose=True)                                # [8 ns, L(j), S C / ns]
-        partial_pair = (os.environ.get("MINIWORLD_PWA_SM80_PAIR_PARTIAL", "1") == "1"
+        partial_pair = (settings.current().pwa_sm80_pair_partial
                         and do.shape == v.shape == (32, 128, 8192)
                         and do.dtype == v.dtype == torch.bfloat16
                         and do.is_contiguous() and v.is_contiguous()

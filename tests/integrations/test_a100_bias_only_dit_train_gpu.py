@@ -5,6 +5,7 @@ the env switch, and what it declines."""
 import pytest
 import torch
 
+from settings_helpers import override_setting
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit_train as TR
 from miniworld_engine.kernels.bias_only_dit import cuda as C
@@ -191,7 +192,7 @@ def test_env_switch_keeps_the_composition(monkeypatch):
     c = torch.randn(4, 1, 384, 384, device="cuda", dtype=torch.bfloat16)
     p = torch.randn(1, 384, 384, 128, device="cuda", dtype=torch.bfloat16)
     assert TR.serves(fast, x, c, p)
-    monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_TRAIN", "0")
+    override_setting(monkeypatch, "bias_only_dit_train", False)
     assert not TR.serves(fast, x, c, p)
 
 

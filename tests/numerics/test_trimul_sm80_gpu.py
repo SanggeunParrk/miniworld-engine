@@ -5,6 +5,7 @@ import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -95,7 +96,7 @@ def test_gate_rejects_everything_it_is_not_built_for():
 def test_env_switch_turns_the_gate_off(monkeypatch):
     from miniworld_engine.kernels.trimul_inproj.cuda import sm80
 
-    monkeypatch.setenv("MINIWORLD_TRIMUL_SM80", "0")
+    override_setting(monkeypatch, "trimul_sm80", "0")
     assert not sm80.supports(torch.randn(1, 64, 64, 128, device="cuda", dtype=torch.bfloat16), 128)
 
 

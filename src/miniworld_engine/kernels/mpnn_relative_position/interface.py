@@ -73,7 +73,7 @@ def relative_position_embed(
         )
     if backend == "triton":
         # An A100 reduces the backward on tensor cores (``cuda/sm80``): a one-hot matmul, deterministic; the gate is ``integrations/mpnn_msg_sm80.py``'s
-        # (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps the Triton reduction).
+        # (capability 8.0, engine backend not forced to Triton, ``settings.mpnn_msg_sm80=False`` keeps the Triton reduction).
         from miniworld_engine.integrations import mpnn_msg_sm80
 
         if mpnn_msg_sm80.serves_relpos(bucket, table, bias):

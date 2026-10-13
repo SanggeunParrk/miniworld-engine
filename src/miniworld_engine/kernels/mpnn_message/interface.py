@@ -116,7 +116,7 @@ def message_hidden_reduce(
     # denotes the compute policy.
     if _should_use_triton(supported, backend):
         # An A100 runs the hand-CUDA kernels of ``cuda/sm80`` for every one of these policies (one forward kernel, a backward that replays it):
-        # ``integrations/mpnn_msg_sm80.py`` owns the gate (capability 8.0, engine backend not forced to Triton, ``MINIWORLD_MPNN_MSG_SM80=0`` keeps Triton).
+        # ``integrations/mpnn_msg_sm80.py`` owns the gate (capability 8.0, engine backend not forced to Triton, ``settings.mpnn_msg_sm80=False`` keeps Triton).
         from miniworld_engine.integrations import mpnn_msg_sm80
 
         if mpnn_msg_sm80.serves_message(preactivation, backend):

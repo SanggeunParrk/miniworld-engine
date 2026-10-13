@@ -1,8 +1,8 @@
 """A100 BF inference paths selected by physical geometry and layout."""
 import functools
-import os
 from pathlib import Path
 import torch
+from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, load_extension
 from miniworld_engine.kernels.swa_dit.cuda import sm80
 
@@ -49,7 +49,7 @@ def block(x: torch.Tensor, c: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
         qh, kh, vh, g = qkvg_extension().singlehead(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
     else:
         qh, kh, vh, g = qkvg_extension().headgroup(qf, mod, cos2, sin2, wq, wg, s, b, eps, eps, False, qkv_cfg)
-    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
+    o, _ = sm80.attn_fwd(qh, kh, vh, seqused, save_lse=not settings.current().a100_cleanup)
     if ffn_kind == "original":
         out, *_ = sm80.ffn_fwd(qf, g, o, mod, wo, wu, wd, b, s, eps, False)
     else:
@@ -66,7 +66,7 @@ def eligible(x, c, ap, weights, n_head, half_window):
             or (x.shape[0], x.shape[1]) not in _GEOMETRY_KERNELS
             or c.shape != x.shape or c.dtype != torch.bfloat16
             or n_head != 4 or half_window != 64 or len(ap) != 6
-            or os.environ.get("MINIWORLD_SWA_DIT_SM80_INFER_TUNED", "1") == "0"):
+            or not settings.current().swa_dit_sm80_infer_tuned):
         return False
     if any(t.device != x.device or t.dtype != torch.bfloat16 or not t.is_contiguous()
            for t in (x, c, *weights)):

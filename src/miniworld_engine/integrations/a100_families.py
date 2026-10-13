@@ -8,8 +8,7 @@ torch.compile; the compiler still owns surrounding view/gradient bookkeeping.
 
 from __future__ import annotations
 
-import os
-
+from miniworld_engine import settings
 from miniworld_engine.kernels import cuda_native as C
 
 
@@ -19,17 +18,17 @@ def serves(module, x):
 
     if (
         hasattr(module, "use_self_attention")
-        and os.environ.get("MINIWORLD_TRIATTN_SM80", "1") == "0"
+        and not settings.current().triattn_sm80
     ):
         return False
     if (
         hasattr(module, "to_left_gate")
-        and os.environ.get("MINIWORLD_TRIMUL_SM80", "1") == "0"
+        and not settings.current().trimul_sm80
     ):
         return False
     if (
         hasattr(module, "expand_a")
-        and os.environ.get("MINIWORLD_CONDTRANS_SM80", "1") == "0"
+        and not settings.current().condtrans_sm80
     ):
         return False
     return (

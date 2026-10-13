@@ -5,6 +5,7 @@ the compiled module equal to eager, a captured CUDA graph replaying to eager, an
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import augattn_sm80
@@ -110,7 +111,7 @@ def test_training_matches_the_module_path(shape, a, b, n, mask_kind, dtype, monk
     calls = _spy(monkeypatch)
     fused = _train(eng, ins, dtype, w, mask)
     assert calls, "the call did not take the sm_80 path"
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+    override_setting(monkeypatch, "augattn_sm80", "0")
     n_calls = len(calls)
     module = _train(eng, ins, dtype, w, mask)
     assert len(calls) == n_calls, "the switch did not keep the module path"
@@ -139,7 +140,7 @@ def test_inference_matches_the_module_path(shape, a, b, n, mask_kind, dtype, mon
         calls = _spy(monkeypatch)
         fused = eng(s.to(dtype), c.to(dtype), z.to(dtype), mask)
         assert calls, "the call did not take the sm_80 path"
-        monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+        override_setting(monkeypatch, "augattn_sm80", "0")
         module = eng(s.to(dtype), c.to(dtype), z.to(dtype), mask)
     assert fused.dtype == dtype
     assert fused.shape == s.shape
@@ -275,7 +276,7 @@ def test_the_dit_block_at_atom_widths_takes_it(monkeypatch):
         truth = ref(s.double(), c.double(), z.double(), mask)
         fused = eng(s.bfloat16(), c.bfloat16(), z.bfloat16(), mask)
         assert calls
-        monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+        override_setting(monkeypatch, "augattn_sm80", "0")
         module = eng(s.bfloat16(), c.bfloat16(), z.bfloat16(), mask)
     assert _rel(fused, truth) < 1.5 * _rel(module, truth) + 3e-3
 
@@ -368,11 +369,11 @@ def test_the_gate_serves_what_the_core_was_built_for_and_keeps_the_module_path_f
     s2, c2, z2 = (t for t in _inputs(TOKEN2, 2, 256))
     assert augattn_sm80.serves(eng32, s2, z2, None, cond=c2), "fp32 module and inputs"
     assert augattn_sm80.serves(eng32, s2.bfloat16(), z2.bfloat16(), None, cond=c2.bfloat16()), "bf16 inputs on fp32 master weights (AMP bf16-mixed)"
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80_FUSED", "0")
+    override_setting(monkeypatch, "augattn_sm80_fused", "0")
     assert not augattn_sm80.serves(eng32, s2, z2, None, cond=c2), "the earlier composition is bf16 only"
     assert augattn_sm80.serves(eng, sb, zb, None)
-    monkeypatch.delenv("MINIWORLD_AUGATTN_SM80_FUSED")
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+    override_setting(monkeypatch, "augattn_sm80_fused", None)
+    override_setting(monkeypatch, "augattn_sm80", "0")
     assert not augattn_sm80.serves(eng, sb, zb, None, cond=cb)
 
 

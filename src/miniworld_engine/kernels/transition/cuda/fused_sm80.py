@@ -25,7 +25,6 @@ summed in a fixed order (no atomics), so a replay is bit-identical.
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
@@ -386,7 +385,7 @@ def transition_fused_sm80(x, gamma, beta, wa, wb, ws, eps):
             wa,
             wb,
             ws,
-            save=os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0",
+            save=not settings.current().a100_cleanup,
         )
         out, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(), w, gb, float(eps), False

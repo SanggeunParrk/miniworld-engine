@@ -3,6 +3,7 @@
 worse than the engine's own module path in the same regime (the switch is off in the second run), and the path actually taken."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import settings
@@ -85,7 +86,7 @@ def test_train_block_matches_the_module_path(a, length, masked, monkeypatch):
     monkeypatch.setattr(token_dit_train._Block, "apply", lambda *args: calls.append(1) or orig(*args))
     fused = _run(eng, single, cond, pair, mask, w)
     assert calls, "the bf16 training call did not take the fused path"
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
+    override_setting(monkeypatch, "token_dit_train", "0")
     module = _run(eng, single, cond, pair, mask, w)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))
     for k in truth:
@@ -161,8 +162,8 @@ def test_the_gate_serves_only_what_the_block_was_built_for(monkeypatch):
     wide = DiTBlock(n_head=24, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     assert not token_dit_train.serves(qk, x, c, p, None)
     assert not token_dit_train.serves(wide, x, c, p, None)
-    monkeypatch.setenv("MINIWORLD_AUGATTN_SM80", "0")
+    override_setting(monkeypatch, "augattn_sm80", "0")
     assert not token_dit_train.serves(eng, x, c, p, None)
-    monkeypatch.delenv("MINIWORLD_AUGATTN_SM80")
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
+    override_setting(monkeypatch, "augattn_sm80", None)
+    override_setting(monkeypatch, "token_dit_train", "0")
     assert not token_dit_train.serves(eng, x, c, p, None)

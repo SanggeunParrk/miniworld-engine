@@ -9,10 +9,9 @@ the op's per-row ``[A, B, L]`` mask (a row's keys as bits, a key tile without a 
 the core's backward (``sm80_core2.backward``: dq / dk / dv, the pair bias' gradient summed over the rows from bf16 partials in a fixed order) after a row-term kernel (``delta = sum_d o . do``).
 
 Shapes the core does not serve (other row counts, head dims, dtypes, a bias in fp32, ``kernel_type="memory_efficient"``) keep the op's Triton path: ``serves()`` is the whole gate.
-``MINIWORLD_TRIATTN_SM80=0`` turns the path off (the switch of the triangle-attention kernels).
+``settings.triattn_sm80 = False`` turns the path off (the switch of the triangle-attention kernels).
 """
 
-import os
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -31,7 +30,7 @@ MAX_L = 8192
 
 
 def enabled() -> bool:
-    return os.environ.get("MINIWORLD_TRIATTN_SM80", "1") != "0"
+    return settings.current().triattn_sm80
 
 
 def _needs_grad(*tensors: torch.Tensor) -> bool:
@@ -40,7 +39,7 @@ def _needs_grad(*tensors: torch.Tensor) -> bool:
 
 def serves(query: torch.Tensor, key: torch.Tensor, value: torch.Tensor, bias: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     """The path's whole gate: sm_80 (exactly), bf16 ``[A, B, H, L, D]`` operands with ``A == L`` (a multiple of 128, at most ``MAX_L``) and D = 16 or 32, a bf16 bias ``[B, H, L, L]``, a bool
-    ``[A, B, L]`` key mask if any, the engine's backend not forced to Triton, ``MINIWORLD_TRIATTN_SM80`` not 0; a gradient wanted by an operand needs the bias-gradient partials to fit
+    ``[A, B, L]`` key mask if any, the engine's backend not forced to Triton, ``settings.triattn_sm80`` not 0; a gradient wanted by an operand needs the bias-gradient partials to fit
     ``sm80_core2.MAX_DBP_BYTES``."""
     if not enabled() or settings.current().engine_backend == "triton":
         return False

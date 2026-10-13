@@ -25,7 +25,7 @@ fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32
 the token widths (cond 384 / pair 128 / transition n = 2) at a head layout of LAYOUTS (16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at
 d 1024; bf16 and fp32 alike on B200), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
 over as its [B, L] row), per-sample conditioning (or, on A100, shared conditioning: ``block`` expands it), LayerNorm eps 1e-5.
-Anything else keeps the module path. settings.token_dit_train=0 turns it off (MINIWORLD_AUGATTN_SM80=0 takes the A100 out: its
+Anything else keeps the module path. settings.token_dit_train=0 turns it off (settings.augattn_sm80=False takes the A100 out: its
 attention core is the one thing the block does not share).
 
 Any A and L: the kernels tile L by 128 and pair the samples, so ``block`` pads L to the next multiple of 128 and A to an even
@@ -45,7 +45,6 @@ LayerNorm are computed per block rather than once per stack.
 from __future__ import annotations
 
 import contextlib
-import os
 
 import torch
 
@@ -227,12 +226,12 @@ def _pack(P, qk, dev, at):
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
         return hit[1]
-    native_pack = (os.environ.get("MINIWORLD_TOKEN_DIT_SM80_NATIVE_TRAIN_PACK", "0") == "1"
+    native_pack = (settings.current().token_dit_sm80_native_train_pack
                    and not qk and at is BF and torch.cuda.get_device_capability(dev) == (8, 0)
                    and tuple(P["attention.to_out.weight"].shape) == (768, 768)
                    and tuple(P["attention.to_bias.weight"].shape) == (16, 128))
     if native_pack:
-        if os.environ.get("MINIWORLD_TOKEN_DIT_SM80_ALIAS_TRAIN_PACK", "0") == "1":
+        if settings.current().token_dit_sm80_alias_train_pack:
             from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_alias_sm80 as pack_kernel
         else:
             from miniworld_engine.kernels.conditioned_transition.cuda import token_train_pack_sm80 as pack_kernel
@@ -635,7 +634,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     typed_grad = (
         not fp32
         and torch.cuda.get_device_capability(single.device) == (8, 0)
-        and os.environ.get("MINIWORLD_TOKEN_DIT_TYPED_GRAD", "0") == "1"
+        and settings.current().token_dit_typed_grad
     )
 
     def weight_gradient(a, b, *parameter_names):
@@ -697,7 +696,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         and not qk
         and (H, D) == (16, 768)
         and torch.cuda.get_device_capability(dev) == (8, 0)
-        and os.environ.get("MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD", "1") == "1"
+        and settings.current().token_dit_sm80_direct_grad
     )
     if direct_grad:
         # The no-QK-norm path rounds the attention gradients directly into the

@@ -6,12 +6,11 @@
 * ``sigmoid_gate_fused(gate, out)`` / ``gated_residual(x, gate, branch)``: the one-pass elementwise gates, forward and backward.
 * the triangle-multiplication stages ``tm1`` / ``tm2`` are in ``kernels/tm1/cuda`` and ``kernels/tm2/cuda`` (one extension, this one).
 
-Gate: sm_80, bf16, ``d_hidden`` and ``d_out`` multiples of 64, the engine backend not forced to Triton; ``MINIWORLD_GATED_SM80=0`` turns it off.  The GEMM tile is the
+Gate: sm_80, bf16, ``d_hidden`` and ``d_out`` multiples of 64, the engine backend not forced to Triton; ``settings.gated_sm80=0`` turns it off.  The GEMM tile is the
 TriMul's (``kernels/trimul_inproj/cuda/sm80/wide_gemm.cuh``).
 """
 
 import functools
-import os
 import warnings
 from pathlib import Path
 
@@ -66,7 +65,7 @@ def shape_ok(dtype, d_hidden: int, d_out: int) -> bool:
 
 
 def enabled() -> bool:
-    return os.environ.get("MINIWORLD_GATED_SM80", "1") != "0" and settings.current().engine_backend != "triton"
+    return settings.current().gated_sm80 and settings.current().engine_backend != "triton"
 
 
 def serves(d_hidden: int, d_out: int, device: torch.device, dtype) -> bool:

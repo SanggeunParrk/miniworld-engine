@@ -8,6 +8,7 @@ from __future__ import annotations
 import copy
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import settings
@@ -94,7 +95,7 @@ def test_training_matches_the_triton_path(a, b, s, spy, monkeypatch):
     truth = _train(_reference, [t.float() for t in leaves], dy, cos, sin, seqused, b)
     fused = _train(_fused, leaves, dy, cos, sin, seqused, b)
     assert sorted(set(spy)) == ["attn_bwd", "block_fwd", "ffn_bwd", "oproj_bwd", "qkvg_bwd"], spy
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+    override_setting(monkeypatch, "swa_dit_sm80", "0")
     spy.clear()
     triton = _train(_fused, leaves, dy, cos, sin, seqused, b)
     assert spy == [], "the switch did not keep the Triton path"
@@ -115,7 +116,7 @@ def test_inference_matches_the_triton_path(a, b, s, spy, monkeypatch):
         truth = _reference([t.float() for t in leaves], cos, sin, seqused, b)
         fused = _fused(leaves, cos, sin, seqused, b)
         assert sorted(set(spy)) == ["block_fwd"], spy
-        monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+        override_setting(monkeypatch, "swa_dit_sm80", "0")
         triton = _fused(leaves, cos, sin, seqused, b)
     ef, et = _rel(fused, truth), _rel(triton, truth)
     print(f"inference A{a} B{b} S{s}: sm_80 {ef:.2e} Triton {et:.2e}")
@@ -128,7 +129,7 @@ def test_the_sm80_stages_reproduce_the_triton_stages_closely(monkeypatch):
     leaves, cos, sin, seqused = _case(5, 1, 1024, seed=4)
     with torch.no_grad():
         fused = _fused(leaves, cos, sin, seqused, 1)
-        monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+        override_setting(monkeypatch, "swa_dit_sm80", "0")
         triton = _fused(leaves, cos, sin, seqused, 1)
     rel = _rel(fused, triton)
     differ = float((fused.float() != triton.float()).float().mean())
@@ -153,7 +154,7 @@ def test_the_modulation_forward_is_the_fp32_gemm(rows, monkeypatch):
     with torch.no_grad():
         fused = swa_dit_hoist_modulation(c.reshape(1, rows, C), w)
         assert calls, "the sm_80 kernel did not serve the modulation"
-        monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+        override_setting(monkeypatch, "swa_dit_sm80", "0")
         truth = swa_dit_hoist_modulation(c.reshape(1, rows, C), w)
     assert fused.dtype == torch.float32
     assert fused.shape == (rows, 6 * C)
@@ -172,7 +173,7 @@ def test_the_modulation_backward_matches_autograd(rows, need_c, monkeypatch):
         return cc.grad, ww.grad
 
     dc, dw = run()
-    monkeypatch.setenv("MINIWORLD_SWA_DIT_SM80", "0")
+    override_setting(monkeypatch, "swa_dit_sm80", "0")
     dc_ref, dw_ref = run()
     if need_c:
         assert dc.dtype == BF

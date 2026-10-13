@@ -3,7 +3,7 @@
 ``AdaptiveLayerNorm`` computes ``y = sigmoid(scale) LN(x) + bias`` with ``[scale | bias] = (LN(cond) w) [Ws | Wb]^T + [sb | 0]`` (LN of x without affine, ``w`` the cond
 norm's weight, ``Wb`` has no bias).  Contract: the engine's kernel backend (implementation TRITON or MINIWORLD) with the engine backend not forced to Triton, sm_80, bf16 or
 fp32 operands (the module's compute dtype; fp32 runs on TF32 tensor cores), ``d_hidden`` and ``d_cond`` each one of 128 / 384 / 768, ``cond`` with the leading dims of ``x`` (one
-conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  ``MINIWORLD_ADALN_SM80=0`` turns it
+conditioning per row) or, with no gradient, one conditioning shared by the samples of ``x`` (the first dim expanded: stride 0, or size 1).  ``settings.adaln_sm80=0`` turns it
 off; a failed extension build warns once and keeps the module's path.
 
 Inference (one opaque op): ``cond_ln`` (aff = LN(cond) w, one pass over the cond rows -- the L rows of a shared conditioning) -> one cuBLAS GEMM [S | B] = aff [Ws | Wb]^T (the weights
@@ -18,7 +18,6 @@ Numerics and timings: ``docs/gpus/a100/adaptive_layernorm/adaptive_layernorm.md`
 from __future__ import annotations
 
 import contextlib
-import os
 import warnings
 import weakref
 
@@ -74,7 +73,7 @@ def _period(x: torch.Tensor, cond: torch.Tensor, grad: bool) -> int | None:
 def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dtype, grad: bool) -> bool:
     """Whether ``module`` (an ``AdaptiveLayerNorm`` whose backend resolved to the engine's kernels) runs this call on the sm_80 path: ``compute_dtype`` is the dtype the module
     casts x / cond / the weights to, ``grad`` its ``needs_backward``."""
-    if os.environ.get("MINIWORLD_ADALN_SM80", "1") == "0" or settings.current().engine_backend == "triton":
+    if not settings.current().adaln_sm80 or settings.current().engine_backend == "triton":
         return False
     if not x.is_cuda or not cond.is_cuda or compute_dtype not in (BF, torch.float32):
         return False
@@ -90,8 +89,8 @@ def serves(module, x: torch.Tensor, cond: torch.Tensor, compute_dtype: torch.dty
 
 
 def fp32_atom_min_rows() -> int:
-    """Fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (default 8192; ``MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS=0`` serves them all: the fused TF32 kernel runs at any row count)."""
-    return int(os.environ.get("MINIWORLD_ADALN_FP32_ATOM_MIN_ROWS", "8192"))
+    """Fewest rows of fp32 inference at the atom width (d = dc = 128) the sm_80 path serves (default 8192; ``settings.adaln_fp32_atom_min_rows=0`` serves them all: the fused TF32 kernel runs at any row count)."""
+    return settings.current().adaln_fp32_atom_min_rows
 
 
 @contextlib.contextmanager
@@ -133,11 +132,11 @@ class Branch:
     gradients (nothing needs them until the closing pass) are tensor-bound, the row kernels between them memory-bound, and the small-M GEMMs leave SMs idle in their last wave.  Every ``run`` starts after
     everything queued on the current stream so far; ``join`` (or ``wait`` for one result) makes the current stream wait.  The pattern of ``kernels/trimul_inproj/cuda/sm80.py``'s backward: the inputs
     are ``record_stream``-ed to the side stream, the outputs to the current stream at the join, so the caching allocator never recycles a tensor one stream still uses; CUDA-graph capture and replay fork
-    and join as they do eagerly.  ``MINIWORLD_ADALN_BRANCH=0`` runs everything on the current stream."""
+    and join as they do eagerly.  ``settings.adaln_branch=0`` runs everything on the current stream."""
 
     def __init__(self, device: torch.device):
         self.main = torch.cuda.current_stream(device)
-        self.enabled = os.environ.get("MINIWORLD_ADALN_BRANCH", "1") != "0"
+        self.enabled = settings.current().adaln_branch
         if self.enabled:
             if device not in _SIDE:
                 _SIDE[device] = torch.cuda.Stream(device=device)
@@ -270,7 +269,7 @@ def train_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.
     with torch.cuda.device(x.device):
         packed_weights = None
         if native_cast:
-            if save_cast and not k.atom_supported(x, cond) and os.environ.get("MINIWORLD_ADALN_SM80_PACK_PARAM_CAST", "0") == "1":
+            if save_cast and not k.atom_supported(x, cond) and settings.current().adaln_sm80_pack_param_cast:
                 from miniworld_engine.kernels.parameter_cast.cuda.pack_sm80 import result
                 (ws, sb, wb), (packed_weights,) = result((ws, sb, wb), ((0, 2),))
             else:
@@ -313,7 +312,7 @@ def train_bwd(dy: torch.Tensor, x: torch.Tensor, cond: torch.Tensor, lnw: torch.
             ws, sb, wb = result((ws, sb, wb))
         if k.atom_supported(x, cond):                                        # d = dc = 128, bf16: the backward in one kernel, the two weight gradients on cuBLAS
             dx, dcond, dsc, aff, psb, plw = k.atom_bwd(dy, x, cond, xst, cst, lnw, ws, wb, sb)
-            if (os.environ.get("MINIWORLD_ADALN_SM80_ATOM_COND_WGRAD_FUSED", "0") == "1"
+            if (settings.current().adaln_sm80_atom_cond_wgrad_fused
                     and x.shape[0] in (48 * 4096, 48 * 8192)):
                 from miniworld_engine.kernels.conditioned_transition.cuda import ct_atom_cond_wgrad_fused_sm80
                 dws, dwb = ct_atom_cond_wgrad_fused_sm80.result_two(dsc, dy, aff)
@@ -338,8 +337,8 @@ class _Training(torch.autograd.Function):
     def forward(ctx, x, cond, lnw, ws, sb, wb, eps_x, eps_c):
         ctx.fp32_grads = master((ws,), x.dtype)
         ctx.save_cast = (ctx.fp32_grads and all(t.dtype is torch.float32 for t in (ws, sb, wb))
-                         and os.environ.get("MINIWORLD_ADALN_SM80_SAVE_PARAM_CAST", "0") == "1")
-        ctx.native_cast = ctx.fp32_grads and (ctx.save_cast or os.environ.get("MINIWORLD_ADALN_SM80_NATIVE_PARAM_CAST", "0") == "1")
+                         and settings.current().adaln_sm80_save_param_cast)
+        ctx.native_cast = ctx.fp32_grads and (ctx.save_cast or settings.current().adaln_sm80_native_param_cast)
         if not ctx.native_cast:
             ws, sb, wb = cast_params((ws, sb, wb), x.dtype, False)
         y, *saved = train_fwd(x, cond, lnw, ws, sb, wb, eps_x, eps_c, ctx.native_cast, ctx.save_cast)

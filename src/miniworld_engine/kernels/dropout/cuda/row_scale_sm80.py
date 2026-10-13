@@ -1,8 +1,8 @@
 """Own CUDA row/column dropout candidate with graph-aware Philox state."""
 import functools
-import os
 from pathlib import Path
 import torch
+from miniworld_engine import settings
 from ..._compile import opaque,device_constant
 from ..._nvcc import ensure_cuda_home,host_flags,load_extension
 
@@ -17,7 +17,7 @@ def _ext():
 def _ready():_ext();return True
 
 def supports(reference):
-    return (os.environ.get('MINIWORLD_DROPOUT_SCALE_SM80','0')=='1' and reference.is_cuda
+    return (settings.current().dropout_scale_sm80 and reference.is_cuda
             and reference.dtype in (torch.bfloat16,torch.float32)
             and torch.cuda.get_device_capability(reference.device)==(8,0) and _ready())
 

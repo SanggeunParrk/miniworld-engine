@@ -5,6 +5,7 @@ import copy
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -102,20 +103,16 @@ def test_apb_a100_gate_conditions():
     assert not a100.serves_inference(ours, sb, pb, mask)                           # gradients enabled
 
 
-def test_apb_a100_matches_the_triton_module_path():
+def test_apb_a100_matches_the_triton_module_path(monkeypatch):
     """With the A100 path off the module runs its Triton composition: the two agree to bf16 accuracy."""
-    import os
 
     _, ours, _ = _modules()
     single, pair, mask = _inputs(384, True)
     sb, pb = single.bfloat16(), pair.bfloat16()
     with torch.no_grad():
         got = ours(sb, pb, mask)
-        os.environ["MINIWORLD_APB_SM80"] = "0"
-        try:
-            base = ours(sb, pb, mask)
-        finally:
-            del os.environ["MINIWORLD_APB_SM80"]
+        override_setting(monkeypatch, "apb_sm80", "0")
+        base = ours(sb, pb, mask)
     assert _rel(got, base) < 1.5e-2
 
 

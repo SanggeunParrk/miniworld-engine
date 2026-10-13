@@ -3,10 +3,10 @@ shapes (d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads of 8 / 16 / 32), key mas
 PyTorch module's own error in the same regime."""
 
 import copy
-import os
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.kernels.pair_weighted_averaging.reference import (
     pair_weighted_averaging_reference,
@@ -167,11 +167,11 @@ def test_pwa_a100_split_choice_and_switch(monkeypatch):
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     assert [sm80.pick_split(s) for s in (1, 200, 255, 256, 384, 512, 1000, 1024, 3072)] == [1, 1, 1, 2, 1, 4, 1, 4, 4]
-    monkeypatch.setenv(sm80.SPLIT_ENV, "1")
+    override_setting(monkeypatch, "pwa_sm80_split", "1")
     assert sm80.pick_split(1024) == 1
-    monkeypatch.setenv(sm80.SPLIT_ENV, "4")
+    override_setting(monkeypatch, "pwa_sm80_split", "4")
     assert [sm80.pick_split(s) for s in (200, 512, 1024)] == [1, 4, 4]
-    monkeypatch.setenv(sm80.SPLIT_ENV, "3")
+    override_setting(monkeypatch, "pwa_sm80_split", "3")
     assert sm80.pick_split(1024) == 1
 
 
@@ -181,7 +181,7 @@ def test_pwa_a100_split_matches_unsplit(monkeypatch, ns):
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     def run(n):
-        monkeypatch.setenv(sm80.SPLIT_ENV, str(n))
+        override_setting(monkeypatch, "pwa_sm80_split", str(n))
         _, ours, _ = _modules(64, 128, 32)
         ours.train(True)
         ours.drop_msa.p_drop = 0.0
@@ -307,8 +307,8 @@ def test_pwa_a100_gate_conditions():
     assert pwa_sm80.serves_train(ours, mb, zb, mask)
 
 
-def test_pwa_a100_env_switch_and_triton_agreement():
-    """MINIWORLD_PWA_SM80=0 runs the module's previous path: the two agree to bf16 accuracy."""
+def test_pwa_a100_env_switch_and_triton_agreement(monkeypatch):
+    """settings.pwa_sm80 = False runs the module's previous path: the two agree to bf16 accuracy."""
     from miniworld_engine.integrations import pwa_sm80
 
     _, ours, _ = _modules(64, 128, 32)
@@ -317,12 +317,9 @@ def test_pwa_a100_env_switch_and_triton_agreement():
     mb, zb = msa.bfloat16(), pair.bfloat16()
     with torch.no_grad():
         got = ours(mb, zb, mask)
-        os.environ["MINIWORLD_PWA_SM80"] = "0"
-        try:
-            assert not pwa_sm80.serves_inference(ours, mb, zb, mask)
-            base = ours(mb, zb, mask)
-        finally:
-            del os.environ["MINIWORLD_PWA_SM80"]
+        override_setting(monkeypatch, "pwa_sm80", "0")
+        assert not pwa_sm80.serves_inference(ours, mb, zb, mask)
+        base = ours(mb, zb, mask)
     assert _rel(got - mb, base - mb) < 3e-2                                                   # the update alone (Triton and ours round at different points)
 
 
@@ -338,7 +335,7 @@ def test_pwa_a100_training_is_bit_reproducible():
 
 @pytest.mark.parametrize("ns", [1, 8])
 def test_pwa_a100_pair_bwd_schedules_agree(ns):
-    """One and two CTAs per SM of the pair backward (`MINIWORLD_PWA_SM80_PB`, d_pair 128) sum the same partials in the same order: bit-identical gradients."""
+    """One and two CTAs per SM of the pair backward (`settings.pwa_sm80_pb`, d_pair 128) sum the same partials in the same order: bit-identical gradients."""
     from miniworld_engine.kernels.pair_weighted_averaging.cuda import sm80
 
     length, dz_ = 96, 128

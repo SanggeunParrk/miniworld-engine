@@ -1,10 +1,10 @@
 """Automatic dispatch of the ProteinMPNN encoder edge side to the A100 (sm_80) hand-CUDA kernels (``kernels/mpnn_edge_tail/cuda``): the fused edge tail, the edge MLP, the
 edge LayerNorm's compressed-save backward and the edge dropout's bit-packed mask.
 
-The family interfaces (``kernels/mpnn_edge_*/interface.py``) ask this module whether a call is served: capability exactly 8.0, ``MINIWORLD_MPNN_EDGE_SM80`` not 0, the engine
+The family interfaces (``kernels/mpnn_edge_*/interface.py``) ask this module whether a call is served: capability exactly 8.0, ``settings.mpnn_edge_sm80`` on, the engine
 backend not forced to Triton, the Triton contract of the family met (``edge_tail_supported`` ...) and the extension loadable (a failed build warns once and keeps the Triton / PyTorch
 path).  On a served call the Triton policies ``triton`` / ``triton_compute`` / ``triton_memory`` / ``memory`` / ``bitpack`` run the CUDA kernels instead (``backend="cuda"`` names
-them explicitly; ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` give the Triton kernels back).
+them explicitly; ``settings.mpnn_edge_sm80=False`` or ``engine_backend="triton"`` give the Triton kernels back).
 
 Edge tail contract: bf16 ``[B, T, K, 128]`` edge states, ``[B, T, 128]`` query / neighbour projections, int64 flat neighbour indices, an edge block that is a slice of the packed
 projection (any row stride that is a multiple of 8), hidden / output weights and biases bf16 or fp32 (autocast), LayerNorm affine bf16 or fp32, any K, dropout p in [0, 1).
@@ -15,7 +15,6 @@ Training (``save``) keeps the GELU outputs ``act1`` / ``act2`` (bf16), their der
 
 from __future__ import annotations
 
-import os
 import warnings
 
 import torch
@@ -23,14 +22,13 @@ import torch
 from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
-ENV = "MINIWORLD_MPNN_EDGE_SM80"
 _FAILED = False
 _WIDTH = 128
 
 
 def wanted() -> bool:
     """The switch and the engine backend; everything else about a call is `serves_*`."""
-    return os.environ.get(ENV, "1") != "0" and settings.current().engine_backend != "triton"
+    return settings.current().mpnn_edge_sm80 and settings.current().engine_backend != "triton"
 
 
 def _ext():

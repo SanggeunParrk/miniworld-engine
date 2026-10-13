@@ -1,10 +1,11 @@
 """The A100 (sm_80) hand-CUDA gated projections: ``fused_gate_out`` / ``ops.gated_linear`` (the registry's ``gated_linear`` rows), the one-pass gates
 (``sigmoid_gate_fused``, ``gated_residual``), the triangle-multiplication stages ``tm1`` / ``tm2`` and the TriMul output gate (``trimul_inproj/cuda/sm80_gate``), forward
-and backward, bf16.  Each is held to the bf16 PyTorch composition's own error against the fp32 reference; the dispatch really reaches the kernels; ``MINIWORLD_GATED_SM80=0``
+and backward, bf16.  Each is held to the bf16 PyTorch composition's own error against the fp32 reference; the dispatch really reaches the kernels; ``settings.gated_sm80=0``
 and a Triton-forced engine route elsewhere; compiled and graph-captured calls equal eager."""
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
@@ -183,11 +184,11 @@ def test_the_env_switch_routes_the_dispatcher_to_the_triton_kernels(monkeypatch)
     g, v, w = _gate_out_inputs()
     got = dispatch.fused_gate_out(g, v, w)
     assert calls == {"cuda": 1, "triton": 0}
-    monkeypatch.setenv("MINIWORLD_GATED_SM80", "0")
+    override_setting(monkeypatch, "gated_sm80", "0")
     other = dispatch.fused_gate_out(g, v, w)
     assert calls == {"cuda": 1, "triton": 1}
     assert _rel(other, got) < 1e-2
-    monkeypatch.delenv("MINIWORLD_GATED_SM80")
+    override_setting(monkeypatch, "gated_sm80", None)
     dispatch.fused_gate_out(g, v, w)
     assert calls == {"cuda": 2, "triton": 1}
 

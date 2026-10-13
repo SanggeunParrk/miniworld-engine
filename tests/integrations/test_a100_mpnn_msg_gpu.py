@@ -1,8 +1,9 @@
 """ProteinMPNN message-side kernels on A100 (integrations/mpnn_msg_sm80.py): the hidden-message reduction, the fused encoder node message and the relative-position backward,
 against an fp64 evaluation. Errors are held to the bf16 PyTorch path's own error in the same regime (ratio <= 1.1 plus a small absolute floor); the CUDA paths are deterministic (bit-for-bit repeatable),
-equal under ``torch.compile(fullgraph=True)`` and under CUDA-graph capture, and switched off by ``MINIWORLD_MPNN_MSG_SM80=0``."""
+equal under ``torch.compile(fullgraph=True)`` and under CUDA-graph capture, and switched off by ``settings.mpnn_msg_sm80=False``."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -206,7 +207,7 @@ def test_message_repeats_bit_for_bit_and_compiled_graphed_equal_eager():
 
 
 def test_message_fused_and_split_backward_agree(monkeypatch):
-    """The two-step form (kernel + cuBLAS dW, ``MINIWORLD_MPNN_MSG_SM80_BWD=split``) stays reachable: same dP bit for bit, dW / db the same fp32 sums in another order."""
+    """The two-step form (kernel + cuBLAS dW, ``settings.mpnn_msg_sm80_bwd='split'``) stays reachable: same dP bit for bit, dW / db the same fp32 sums in another order."""
     from miniworld_engine.kernels.mpnn_message.cuda import sm80 as kernels
 
     p, w, b, mask, up = _msg_inputs(130, False)
@@ -216,7 +217,7 @@ def test_message_fused_and_split_backward_agree(monkeypatch):
     assert torch.equal(fused[0], split[0])
     assert _rel(fused[1], split[1]) < 1e-5
     assert _rel(fused[2], split[2]) < 1e-5
-    monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80_BWD", "split")
+    override_setting(monkeypatch, "mpnn_msg_sm80_bwd", "split")
     switched = kernels.backward(flat_p, w, b, flat_mask, up, 48)
     assert all(torch.equal(x, y) for x, y in zip(switched, split, strict=True))
 
@@ -227,10 +228,10 @@ def test_message_inference_runs_the_single_kernel_and_the_switch_keeps_triton(mo
         out = message_hidden_reduce(p, w, b, mask, 48, backend="auto")
         out64 = message_hidden_reduce_pytorch(p.double(), w.double(), b.double(), mask.double(), 48)
         assert _rel(out, out64) < 3e-3
-        monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80", "0")
+        override_setting(monkeypatch, "mpnn_msg_sm80", "0")
         assert not sm80.serves_message(p, "auto")
         assert _rel(message_hidden_reduce(p, w, b, mask, 48, backend="auto"), out64) < 3e-3          # the Triton kernel still serves
-        monkeypatch.delenv("MINIWORLD_MPNN_MSG_SM80")
+        override_setting(monkeypatch, "mpnn_msg_sm80", None)
         assert sm80.serves_message(p, "auto")
         assert not sm80.serves_message(p, "pytorch")
         previous = settings.configure(engine_backend="triton")
@@ -330,7 +331,7 @@ def test_node_message_repeats_bit_for_bit_and_compiled_graphed_equal_eager(monke
     torch.cuda.synchronize()
     assert torch.equal(out, first[0])
     assert all(torch.equal(x, y) for x, y in zip(grads, first[1], strict=True))
-    monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80", "0")
+    override_setting(monkeypatch, "mpnn_msg_sm80", "0")
     assert not sm80.serves_node(edge, "triton")
 
 

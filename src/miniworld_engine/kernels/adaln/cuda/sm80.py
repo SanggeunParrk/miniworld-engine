@@ -13,11 +13,11 @@ from __future__ import annotations
 
 import functools
 import hashlib
-import os
 from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
 _dir = Path(__file__).parent / "sm80"
@@ -30,8 +30,8 @@ WIDTHS = tuple(ROWS_PER_BLOCK)
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_ADALN_SM80_FLAGS: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_ADALN_SM80_FLAGS", "").split()
+    # settings.adaln_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
+    extra = settings.current().adaln_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"adaln_sm80{tag}",
@@ -61,7 +61,7 @@ def blocks_for(rows: int, width: int, device: torch.device) -> int:
 
 #: the warp-per-row kernels (``adaln_rows.cuh``): warps (rows) per block, and blocks per SM of the column-sum kernels (each block leaves one row of the partial buffer)
 WARPS_PER_BLOCK = 4
-WARP_BLOCKS_PER_SM = int(os.environ.get("MINIWORLD_ADALN_WARP_BLOCKS", "4"))
+WARP_BLOCKS_PER_SM = settings.current().adaln_warp_blocks
 
 
 def warp_blocks_for(rows: int, device: torch.device) -> int:
@@ -119,7 +119,7 @@ ATOM_FWD_PREFETCH_CFG, ATOM_FWD_PREFETCH_ROWS, ATOM_FWD_SMALL_ROWS = 2, 24576, 8
 
 def atom_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The fused atom kernels' contract: bf16 rows, d_hidden = d_cond = 128."""
-    return x.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH and os.environ.get("MINIWORLD_ADALN_ATOM", "1") != "0"
+    return x.dtype is torch.bfloat16 and cond.dtype is torch.bfloat16 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH and settings.current().adaln_atom
 
 
 def atom_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, wb: torch.Tensor, sb: torch.Tensor, eps_x: float, eps_c: float,
@@ -131,7 +131,7 @@ def atom_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.T
     xst = torch.empty(m, 2, device=x.device, dtype=torch.float32) if stats else None
     cst = torch.empty(cond.shape[0], 2, device=x.device, dtype=torch.float32) if stats else None
     if cfg is None:
-        cfg = int(os.environ.get("MINIWORLD_ADALN_ATOM_CFG", "-1"))
+        cfg = settings.current().adaln_atom_cfg
     if cfg < 0:
         cfg = ATOM_FWD_PREFETCH_CFG if (m >= ATOM_FWD_PREFETCH_ROWS or m < ATOM_FWD_SMALL_ROWS) else 0      # a warp with a second tile in sight prefetches it; at 8192 .. 24575 rows one tile a warp: two CTAs of 8 warps hide the latency better; at 5120 rows (the registry's N = 1024, A = 5) the prefetch kernel is 12.9 against 13.7 us, level with Triton's 12.9
     _ext().adaln_atom_fwd(x, cond, lnw, ws, wb, sb, y, xst, cst, float(eps_x), float(eps_c), cfg)
@@ -141,7 +141,7 @@ def atom_fwd(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.T
 def atom_tf32_supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The fp32 (TF32) fused forward's contract: fp32 rows, d_hidden = d_cond = 128 (inference only: nothing is saved for a backward)."""
     return (x.dtype is torch.float32 and cond.dtype is torch.float32 and x.shape[-1] == ATOM_WIDTH and cond.shape[-1] == ATOM_WIDTH
-            and os.environ.get("MINIWORLD_ADALN_ATOM", "1") != "0" and os.environ.get("MINIWORLD_ADALN_ATOM_TF32", "1") != "0")
+            and settings.current().adaln_atom and settings.current().adaln_atom_tf32)
 
 
 def atom_fwd_tf32(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, ws: torch.Tensor, wb: torch.Tensor, sb: torch.Tensor, eps_x: float, eps_c: float) -> torch.Tensor:

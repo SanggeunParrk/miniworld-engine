@@ -1,7 +1,8 @@
-"""The gates of the A100 MPNN message-side CUDA paths (integrations/mpnn_msg_sm80.py) without a GPU: nothing is served off a CUDA device, ``MINIWORLD_MPNN_MSG_SM80=0`` and a forced Triton engine
+"""The gates of the A100 MPNN message-side CUDA paths (integrations/mpnn_msg_sm80.py) without a GPU: nothing is served off a CUDA device, ``settings.mpnn_msg_sm80=False`` and a forced Triton engine
 backend switch the paths off, and the Triton / PyTorch paths keep serving a CPU call."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import settings
@@ -24,11 +25,11 @@ def test_nothing_is_served_off_a_cuda_device():
 
 
 def test_the_switch_and_the_engine_backend_turn_the_paths_off(monkeypatch):
-    monkeypatch.delenv("MINIWORLD_MPNN_MSG_SM80", raising=False)
+    override_setting(monkeypatch, "mpnn_msg_sm80", None)
     assert sm80._enabled() == (settings.current().engine_backend != "triton")
-    monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80", "0")
+    override_setting(monkeypatch, "mpnn_msg_sm80", "0")
     assert not sm80._enabled()
-    monkeypatch.delenv("MINIWORLD_MPNN_MSG_SM80")
+    override_setting(monkeypatch, "mpnn_msg_sm80", None)
     previous = settings.configure(engine_backend="triton")
     try:
         assert not sm80._enabled()
@@ -49,7 +50,7 @@ def test_the_message_and_relative_position_references_serve_a_cpu_call():
     torch.testing.assert_close(relative_position_embed(bucket, table, bias, backend="off"), relative_position_embed_pytorch(bucket, table, bias))
 
 
-@pytest.mark.parametrize("value", ["1", ""])
-def test_any_other_switch_value_leaves_the_path_on(monkeypatch, value):
-    monkeypatch.setenv("MINIWORLD_MPNN_MSG_SM80", value)
+@pytest.mark.parametrize("value", [True, None])
+def test_the_switch_on_or_unset_leaves_the_path_on(monkeypatch, value):
+    override_setting(monkeypatch, "mpnn_msg_sm80", value)
     assert sm80._enabled() == (settings.current().engine_backend != "triton")

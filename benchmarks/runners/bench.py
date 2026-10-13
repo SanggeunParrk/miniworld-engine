@@ -3529,7 +3529,7 @@ def bench_kernel_transition_b2b(conf, seq_len, implementation, fabric):
 def bench_kernel_layernorm(conf, seq_len, implementation, fabric):
     """LayerNorm forward: y = LN(x)*w + b. Rows: pytorch, triton_layernorm, layernorm_dispatch,
     triton_layernorm_lowreg(dep). `layernorm_dispatch` is the shipped entry: on an A100 the sm_80 hand-CUDA rows
-    (`MINIWORLD_NORMS_SM80=0` keeps Triton); `triton_layernorm` always the Triton kernel."""
+    (`settings.norms_sm80=False` keeps Triton); `triton_layernorm` always the Triton kernel."""
     import torch.nn.functional as F
 
     D, L = conf.d_pair, seq_len
@@ -3934,7 +3934,7 @@ def _bench_projected_attention(conf, L, implementation):
     """The registry's ``projected_attention`` rows: the attention core on ALREADY-PROJECTED q / k / v, ``ops.augmented_attention_pair_bias`` (A100: hand CUDA; elsewhere its own
     dispatch) in inference and in a training step (forward + backward), against the PyTorch composition (``projected_attention_pytorch``, compiled with the run).
     Width ``d_pair`` (= H x head dim) and heads ``+n_head`` (default 16): ``d_pair=768`` -> 16 x 48, ``d_pair=384 +n_head=8`` -> 8 x 48, ``d_pair=384`` -> 16 x 24; ``n_augment`` samples
-    (5 / 48 for the token DiT's rows, 1 for the others), no mask. Triton reference column: the same row under ``MINIWORLD_AUGATTN_SM80=0``."""
+    (5 / 48 for the token DiT's rows, 1 for the others), no mask. Triton reference column: the same row under ``settings.augattn_sm80=False``."""
     if conf.precision == FP32_PRECISION:
         raise UnsupportedBenchmark("projected_attention is benched in bf16")
     from miniworld_engine import ops
@@ -4994,7 +4994,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     ):
         if torch.cuda.get_device_capability(single.device) == (8, 0):
             attention_core = "A100 sm80 CUDA attention forward/backward"
-            if os.environ.get("MINIWORLD_TOKEN_DIT_SM80_DIRECT_GRAD", "1") == "1":
+            if settings.current().token_dit_sm80_direct_grad:
                 attention_core += " with direct BF16 q/k/v gradients"
         else:
             attention_core = "B200 sm_100a attn_fwd2 / attn_dkv / attn_dqb"

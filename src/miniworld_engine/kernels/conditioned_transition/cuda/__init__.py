@@ -116,10 +116,10 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None):
     the older one-thread-per-row fused experiment was slower and is not used."""
     nb = wt.shape[1]
     m = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
-    import os
+    from miniworld_engine import settings
     if (z2d.dtype is torch.bfloat16 and wt.dtype is torch.bfloat16 and nb == 16
             and L % 128 == 0 and torch.cuda.get_device_capability(z2d.device) == (8, 0)
-            and os.environ.get("MINIWORLD_TOKEN_DIT_PREP", "1") != "0"):
+            and settings.current().token_dit_prep):
         from miniworld_engine.kernels.augmented_attention.cuda import apb
 
         apb.ext().pair_bias_fwd(z2d, wt.t().contiguous(), m, out, L, float(eps), float("-inf"))

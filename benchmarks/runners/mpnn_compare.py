@@ -15,7 +15,6 @@ import contextlib
 import gc
 import hashlib
 import json
-import os
 import time
 from pathlib import Path
 from typing import Any, cast
@@ -29,6 +28,7 @@ from benchmarks.runners.measurement import (
     require_source_identity,
 )
 
+from miniworld_engine import settings
 from miniworld_engine.kernels.mpnn_edge_dropout import EdgeDropoutBackend, edge_dropout
 from miniworld_engine.kernels.mpnn_edge_layernorm import (
     EdgeNormBackend,
@@ -59,7 +59,7 @@ BACKENDS = {
     "edge_dropout": ("pytorch", "bitpack"),
 }
 # A100 hand-CUDA columns of the edge families (mpnn_edge_sm80): "cuda" names the kernels explicitly (the saved-activation policy), "cuda_memory" / "cuda_recompute" are the edge MLP's / edge tail's
-# recompute policies (the Triton policy names run the same kernels on an A100); the Triton columns run with MINIWORLD_MPNN_EDGE_SM80=0, so they stay the Triton kernels there.
+# recompute policies (the Triton policy names run the same kernels on an A100); the Triton columns run with settings.mpnn_edge_sm80=False, so they stay the Triton kernels there.
 BACKENDS["edge_mlp"] += ("cuda", "cuda_memory")
 BACKENDS["edge_tail"] += ("cuda", "cuda_recompute")
 BACKENDS["edge_layernorm"] += ("cuda",)
@@ -191,7 +191,7 @@ def evaluate(family, nodes, backend, training, repeats, compiled, source, metric
     if family == "edge_layernorm" and not training and backend != "pytorch":
         return {"status": "not_applicable", "reason": "compressed saves are training-only; inference uses PyTorch", "samples": []}
     # the CUDA columns run the sm_80 kernels, every other column keeps the Triton / PyTorch kernels even on an A100 (the switch is read when the case is traced; Dynamo is reset between cases)
-    os.environ["MINIWORLD_MPNN_EDGE_SM80"] = "1" if backend.startswith("cuda") else "0"
+    settings.configure(mpnn_edge_sm80=backend.startswith("cuda"))
     forward, leaves, probability, dtypes = make_case(family, nodes, backend, training, precision)
     guard = contextlib.nullcontext if training else torch.no_grad
     with guard():

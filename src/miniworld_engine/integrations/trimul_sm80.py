@@ -7,13 +7,12 @@ Two kernel sets, one gate (``serves``):
   GEMM kernels ``k1w`` / ``k3w`` with the cuBLAS contraction, and the backward as cuBLAS GEMMs between row kernels.
   D512 uses this set for bf16 inference; ``sm80_wide512`` adds native backward rows at hidden 512 or 1024.
 
-``MINIWORLD_TRIMUL_SM80=0`` turns both off (the Triton path serves); ``MINIWORLD_TRIMUL_SM80_WIDE=0`` turns the wide set off alone.
-``MINIWORLD_TRIMUL_SM80_WIDE512=0`` preserves the previous D512 training fallback.
+``settings.trimul_sm80 = False`` turns both off (the Triton path serves); ``settings.trimul_sm80_wide = False`` turns the wide set off alone.
+``settings.trimul_sm80_wide512 = False`` preserves the previous D512 training fallback.
 """
 
 from __future__ import annotations
 
-import os
 import torch
 
 from miniworld_engine import settings
@@ -28,7 +27,7 @@ def _wide_hs(module) -> int:
 def _wide_kernels(pair):
     from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
 
-    if pair.shape[-1] == 512 and torch.is_grad_enabled() and os.environ.get("MINIWORLD_TRIMUL_SM80_WIDE512", "1") != "0":
+    if pair.shape[-1] == 512 and torch.is_grad_enabled() and settings.current().trimul_sm80_wide512:
         from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide512
 
         return sm80_wide512

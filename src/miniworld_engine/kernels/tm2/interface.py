@@ -2,7 +2,7 @@
 
 ``triton_tm2`` is the Triton path: ``sigmoid(x_gate @ W_gate) * (x_out @ W_out)`` with the weights in ``(D, D)`` matmul form (``x @ W``), matching ``reference.py``.
 On an A100 (sm_80) ``cuda_tm2`` is the hand-CUDA one (bf16, forward + backward; ``cuda_tm2_serves`` is its gate: bf16, widths the 64-column tiles divide, capability
-8.0, ``MINIWORLD_GATED_SM80`` not 0). Nothing dispatches between them: no module calls tm2 (the triangle-multiplication modules run the fused back half), so the caller
+8.0, ``settings.gated_sm80`` not 0). Nothing dispatches between them: no module calls tm2 (the triangle-multiplication modules run the fused back half), so the caller
 picks.
 """
 

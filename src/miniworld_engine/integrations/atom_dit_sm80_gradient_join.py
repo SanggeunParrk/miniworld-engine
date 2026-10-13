@@ -6,9 +6,9 @@ original compiled F32 add/add with a single final BF conversion. Graph capture m
 does not select arithmetic. This module is not enabled until whole proof completes.
 """
 from __future__ import annotations
-import os
 import torch
 from torch.autograd.function import once_differentiable
+from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 def _join_fake(a,b,c,planes,compiled,cfg):
@@ -58,8 +58,8 @@ def block(module,single,cond,pair,mask=None):
     assert single.shape[-1]==128 and cond.shape==single.shape and single.dtype is torch.bfloat16
     assert cond.dtype is torch.bfloat16 and pair.shape==(1,single.shape[2],single.shape[2],16)
     compiled=torch.compiler.is_compiling()
-    cfg2=int(os.environ.get('MINIWORLD_ATOM_DIT_SM80_JOIN_TWO_CFG','0'))
-    cfg3=int(os.environ.get('MINIWORLD_ATOM_DIT_SM80_JOIN_THREE_CFG','0'))
+    cfg2=settings.current().atom_dit_sm80_join_two_cfg
+    cfg3=settings.current().atom_dit_sm80_join_three_cfg
     s_norm,s_res=_Two.apply(single,compiled,cfg2)
     c_transition,c_attention,c_norm=_Three.apply(cond,compiled,cfg3)
     normalized=module.attention.ada_ln_in(s_norm,c_norm)

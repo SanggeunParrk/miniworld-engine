@@ -9,7 +9,7 @@ import torch
 from miniworld_engine.kernels.mpnn_edge_mlp.reference import edge_mlp_update_pytorch
 
 # ``cuda`` names the hand-written A100 (sm_80) kernels (``integrations/mpnn_edge_sm80.py``): on an A100 ``auto`` (calibrated sizes), ``triton_compute`` (the saved projection) and
-# ``triton_memory`` (recompute) run them too, unless ``MINIWORLD_MPNN_EDGE_SM80=0`` or ``engine_backend="triton"`` keeps the Triton kernels.
+# ``triton_memory`` (recompute) run them too, unless ``settings.mpnn_edge_sm80=False`` or ``engine_backend="triton"`` keeps the Triton kernels.
 EdgeMLPBackend = Literal[
     "auto",
     "pytorch",

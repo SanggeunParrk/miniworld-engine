@@ -22,10 +22,11 @@ Built on first use (``load_extension``), never at import.
 import functools
 import hashlib
 import math
-import os
 from pathlib import Path
 
 import torch
+
+from miniworld_engine import settings
 
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
 
@@ -48,8 +49,8 @@ def _fwd_schedule(samples: int) -> tuple[int, int, int]:
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_AUGATTN_SM80_FLAGS: extra -D / nvcc flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_AUGATTN_SM80_FLAGS", "").split()
+    # settings.augattn_sm80_flags: extra -D / nvcc flags for A/B experiments (their own build)
+    extra = settings.current().augattn_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"augmented_attention_sm80{tag}",
@@ -107,7 +108,7 @@ def _is_ampere(index: int) -> bool:
 
 def supported(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The gated inference core's requirements: sm_80, bf16 (the mma.sync core) or fp32 (the TF32 core), head dim 48 (bf16) or 32 / 48 (fp32), L a multiple of 128."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0":
+    if not settings.current().augattn_sm80:
         return False
     if dtype is torch.float32:
         return d % heads == 0 and d // heads in TF32_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
@@ -154,7 +155,7 @@ GATE_HEAD_DIMS = (16, 32, 48)
 
 def supported_gate(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The gated core's requirements: sm_80, bf16, head dim 16, 32 or 48 (``d`` = ``heads`` x head dim), L a multiple of 128."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0":
+    if not settings.current().augattn_sm80:
         return False
     return dtype is torch.bfloat16 and d % heads == 0 and d // heads in GATE_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
 
@@ -223,7 +224,7 @@ PAIR_C, PAIR_H, PAIR_HD, MASKED_BIAS = 16, 4, 32, -1e4
 
 def supported_plain(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The module-level core's requirements: sm_80, bf16, head dim 32 or 48, L a multiple of 128."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0":
+    if not settings.current().augattn_sm80:
         return False
     return dtype is torch.bfloat16 and d // heads in HEAD_DIMS and d % heads == 0 and length % 128 == 0 and _is_ampere(index)
 
@@ -324,8 +325,8 @@ def pair_bias_forward(z: torch.Tensor, ln_weight: torch.Tensor, bias_weight: tor
 
 #: head counts of the generic pair-bias kernel (``pair_bias_gen``)
 GEN_HEADS = (4, 8, 12, 16, 24, 32)
-#: rows a thread of the generic kernel takes (1, 2 or 4; MINIWORLD_AUGATTN_SM80_PBGEN_ROWS overrides it for A/B runs)
-_GEN_ROWS = int(os.environ.get("MINIWORLD_AUGATTN_SM80_PBGEN_ROWS", "2"))
+#: rows a thread of the generic kernel takes (1, 2 or 4; settings.augattn_sm80_pbgen_rows overrides it for A/B runs)
+_GEN_ROWS = settings.current().augattn_sm80_pbgen_rows
 
 
 def pair_bias_generic_supported(dp: int, heads: int, dtype: torch.dtype) -> bool:
@@ -415,7 +416,7 @@ def _tf32_ext():
 
 def supported_tf32(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
     """The TF32 kernels' requirements: sm_80, fp32 operands, head dim 32 or 48, L a multiple of 128."""
-    if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0":
+    if not settings.current().augattn_sm80:
         return False
     return dtype is torch.float32 and d % heads == 0 and d // heads in TF32_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
 

@@ -3,6 +3,7 @@ generalised hand-CUDA core, head dim 16 / 32, A == L pair rows sharing one pair 
 the Triton path's own error in the same regime (bf16 operands, fp32 accumulation)."""
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine import ops
@@ -64,7 +65,7 @@ def _run(q, k, v, bias, mask, cot, *, grads=True):
 
 def _triton_run(q, k, v, bias, mask, cot, monkeypatch, *, grads=True):
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_SM80", "0")
+        override_setting(m, "triattn_sm80", "0")
         return _run(q, k, v, bias, mask, cot, grads=grads)
 
 
@@ -93,7 +94,7 @@ def test_the_gate_serves_the_registry_geometries_and_declines_the_rest(monkeypat
     q3, k3, v3, b3, m3 = _inputs(4, 128, 192)                                                    # L is not a multiple of 128
     assert not _serves(q3, k3, v3, b3, m3)
     assert not _serves(q.cpu(), k.cpu(), v.cpu(), bias.cpu(), None)
-    monkeypatch.setenv("MINIWORLD_TRIATTN_SM80", "0")
+    override_setting(monkeypatch, "triattn_sm80", "0")
     assert not _serves(q, k, v, bias, mask)                                                      # the switch
 
 
@@ -327,7 +328,7 @@ def test_the_env_switch_leaves_the_triton_numbers_untouched(monkeypatch):
     q, k, v, bias, mask = _inputs(4, 128, 128, mask_kind="random")
     a, _ = _triton_run(q, k, v, bias, mask, None, monkeypatch, grads=False)
     with monkeypatch.context() as m:
-        m.setenv("MINIWORLD_TRIATTN_SM80", "0")
+        override_setting(m, "triattn_sm80", "0")
         b, _ = _run(q, k, v, bias, mask, None, grads=False)
     c, _ = _run(q, k, v, bias, mask, None, grads=False)
     assert torch.equal(a, b)

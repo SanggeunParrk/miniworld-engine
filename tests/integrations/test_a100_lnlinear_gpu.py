@@ -5,6 +5,7 @@ to the bf16 PyTorch module's own error; dispatch, the env switch, ``torch.compil
 import pytest
 import torch
 import torch.nn.functional as F
+from settings_helpers import override_setting
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
@@ -173,7 +174,7 @@ def test_the_op_runs_the_cuda_kernels_and_falls_back_to_triton_where_they_do_not
     ops.layer_norm_linear(x.float(), lnw, pw.float(), EPS)                     # fp32 activations: the Triton op
     x2, lnw2, pw2, _ = _case((1, 64, 64), 96, 4)                               # a width without a kernel
     ops.layer_norm_linear(x2, lnw2, pw2, EPS)
-    monkeypatch.setenv("MINIWORLD_LNLINEAR_SM80", "0")
+    override_setting(monkeypatch, "lnlinear_sm80", "0")
     ops.layer_norm_linear(x, lnw, pw, EPS)                                     # the switch
     assert calls == ["cuda", "triton", "triton", "triton"], calls
 

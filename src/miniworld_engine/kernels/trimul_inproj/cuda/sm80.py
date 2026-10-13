@@ -23,12 +23,13 @@ plane), L a multiple of 16.
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
 import torch
 from torch.autograd.function import once_differentiable
+
+from miniworld_engine import settings
 
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, host_flags, load_extension
@@ -49,8 +50,8 @@ _CUSTOM_CONTRACT_MAX_L = 512
 @functools.lru_cache(maxsize=1)
 def _ext():
     ensure_cuda_home()
-    # MINIWORLD_TRIMUL_SM80_FLAGS: extra -D flags for A/B experiments (their own build)
-    extra = os.environ.get("MINIWORLD_TRIMUL_SM80_FLAGS", "").split()
+    # settings.trimul_sm80_flags: extra -D flags for A/B experiments (their own build)
+    extra = settings.current().trimul_sm80_flags.split()
     tag = "" if not extra else "_" + hashlib.sha1(" ".join(extra).encode()).hexdigest()[:8]
     return load_extension(
         name=f"trimul_sm80{tag}",
@@ -68,7 +69,7 @@ def _is_ampere(index: int) -> bool:
 def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None) -> bool:
     """The kernels' own requirements: sm_80, bf16, d_pair = d_hidden = 128 (tile shapes are literals), one square contiguous plane with
     L % 16 == 0 (whole 128-token tiles for the joint backward), and a [B, L] token mask if any.  A batch is run plane by plane by the integration."""
-    if os.environ.get("MINIWORLD_TRIMUL_SM80", "1") == "0":
+    if not settings.current().trimul_sm80:
         return False
     if not pair.is_cuda or pair.dtype is not torch.bfloat16 or not pair.is_contiguous():
         return False
