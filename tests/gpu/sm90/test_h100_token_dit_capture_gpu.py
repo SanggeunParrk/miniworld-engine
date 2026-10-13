@@ -15,7 +15,10 @@ from miniworld_engine.integrations import token_dit, token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
@@ -23,15 +26,18 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 required")
-    monkeypatch.setenv("MINIWORLD_TOKEN_DIT_H100_CANDIDATE", "1")
     torch.manual_seed(425)
-    model = _randomize(DiTBlock(use_qk_norm=False, implementation=ImplementationType.MINIWORLD).cuda())
+    model = _randomize(
+        DiTBlock(use_qk_norm=False, implementation=ImplementationType.MINIWORLD).cuda()
+    )
     if not master:
         model.bfloat16()
     ref = DiTBlock(use_qk_norm=False, implementation=ImplementationType.PYTORCH).cuda()
     ref.load_state_dict(model.state_dict())
-    args = [torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
-            for shape in ((5, 1, L, 768), (1, 1, L, 384), (1, L, L, 128))]
+    args = [
+        torch.randn(*shape, device="cuda", dtype=torch.bfloat16)
+        for shape in ((5, 1, L, 768), (1, 1, L, 384), (1, L, L, 128))
+    ]
     args[1] = args[1].expand(5, -1, -1, -1)
     mask = torch.rand(1, L, device="cuda") > 0.2
     mask[:, 0] = True
@@ -54,7 +60,9 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             got = model(*args, mask)
-        graph.replay(); first = got.clone(); graph.replay()
+        graph.replay()
+        first = got.clone()
+        graph.replay()
         assert torch.equal(first, got)
         cos = check(got)
         for a in (args[0], args[2]):
@@ -68,20 +76,46 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
         graph.replay()
         changed = check(got)
         assert not torch.equal(first, got)
-        graph.replay(); second = got.clone(); graph.replay()
+        graph.replay()
+        second = got.clone()
+        graph.replay()
         assert torch.equal(second, got)
-        mask.zero_(); graph.replay(); check(got)
-        print(json.dumps({"audit": "token_native_graph", "job": os.environ.get("SLURM_JOB_ID"),
-                          "L": L, "master": master, "cos": cos, "changed_cos": changed, "deterministic": True}), flush=True)
+        mask.zero_()
+        graph.replay()
+        check(got)
+        print(
+            json.dumps(
+                {
+                    "audit": "token_native_graph",
+                    "job": os.environ.get("SLURM_JOB_ID"),
+                    "L": L,
+                    "master": master,
+                    "cos": cos,
+                    "changed_cos": changed,
+                    "deterministic": True,
+                }
+            ),
+            flush=True,
+        )
         if L == 768 and master:
             from torch.profiler import ProfilerActivity, profile
+
             with profile(activities=[ProfilerActivity.CUDA]) as prof:
                 graph.replay()
                 torch.cuda.synchronize()
-            events = [(e.name, e.device_time_total) for e in prof.events()
-                      if str(e.device_type).endswith("CUDA")]
-            assert all("at::native::" not in name and "triton" not in name.lower() for name, _ in events), events
-            print(json.dumps({"audit": "token_native_profile", "events": events}), flush=True)
+            events = [
+                (e.name, e.device_time_total)
+                for e in prof.events()
+                if str(e.device_type).endswith("CUDA")
+            ]
+            assert all(
+                "at::native::" not in name and "triton" not in name.lower()
+                for name, _ in events
+            ), events
+            print(
+                json.dumps({"audit": "token_native_profile", "events": events}),
+                flush=True,
+            )
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
@@ -103,9 +137,15 @@ def test_token_replay_uses_updated_weights_and_inputs(dtype, training):
     old = settings.configure(engine_backend="auto")
     try:
         torch.manual_seed(23)
-        model = _randomize(DiTBlock(use_qk_norm=True, implementation=ImplementationType.MINIWORLD).cuda()).to(dtype)
-        args = [torch.randn(*shape, device="cuda", dtype=dtype).requires_grad_(training)
-                for shape in ((2, 1, 256, 768), (2, 1, 256, 384), (1, 256, 256, 128))]
+        model = _randomize(
+            DiTBlock(
+                use_qk_norm=True, implementation=ImplementationType.MINIWORLD
+            ).cuda()
+        ).to(dtype)
+        args = [
+            torch.randn(*shape, device="cuda", dtype=dtype).requires_grad_(training)
+            for shape in ((2, 1, 256, 768), (2, 1, 256, 384), (1, 256, 256, 128))
+        ]
         mask = torch.rand(1, 256, device="cuda") > 0.15
         probe = torch.randn_like(args[0], dtype=torch.float32)
         wrt = args + list(model.parameters())
@@ -113,7 +153,9 @@ def test_token_replay_uses_updated_weights_and_inputs(dtype, training):
         def step():
             with torch.set_grad_enabled(training):
                 if training:
-                    assert token_dit_train.serves(model, args[0], args[1], args[2], mask)
+                    assert token_dit_train.serves(
+                        model, args[0], args[1], args[2], mask
+                    )
                 else:
                     assert token_dit.serves(model, args[0], args[1], args[2])
                 y = model(*args, mask)
@@ -144,7 +186,9 @@ def test_token_replay_uses_updated_weights_and_inputs(dtype, training):
         torch.cuda.synchronize()
         replayed = [t.clone() for t in out]
         eager = step()
-        assert not torch.allclose(eager[0], before[0]), "mutation must change the output"
+        assert not torch.allclose(eager[0], before[0]), (
+            "mutation must change the output"
+        )
         for i, (r, e) in enumerate(zip(replayed, eager, strict=True)):
             assert torch.isfinite(r).all(), i
             error = (r.float() - e.float()).norm() / e.float().norm().clamp_min(1e-12)

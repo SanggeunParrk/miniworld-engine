@@ -224,6 +224,7 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
     import os
 
     from miniworld_engine.integrations import trimul_h100 as I
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication.bidirectional import (
         BidirectionalTriangleMultiplication,
@@ -231,7 +232,8 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
     from miniworld_engine.modules.triangle_multiplication.module import (
         TriangleMultiplication,
     )
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1")
+
+    monkeypatch.setattr(T, "_TRAIN_CUDA_UNSCOPED", True)
     kind = "uni"
     cls = TriangleMultiplication if kind == "uni" else BidirectionalTriangleMultiplication
 
@@ -285,11 +287,13 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
 
 def test_native_training_refuses_unbucketed_length(monkeypatch):
     _hopper()
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
     from miniworld_engine.modules.exceptions import ImplementationType
     from miniworld_engine.modules.triangle_multiplication.module import (
         TriangleMultiplication,
     )
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1")
+
+    monkeypatch.setattr(T, "_TRAIN_CUDA_UNSCOPED", True)
     module = TriangleMultiplication(64, implementation=ImplementationType.MINIWORLD, p_drop=0.0).cuda().train()
     pair = torch.empty((1, 64, 64, 64), device="cuda", dtype=torch.bfloat16)
     with pytest.raises(ValueError, match="native H100 TriMul training requires a supported B1 BF16 bucket"):

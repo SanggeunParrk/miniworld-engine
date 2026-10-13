@@ -70,7 +70,6 @@ def test_cuda_live_pack_strides_and_graph(d, master, monkeypatch):
         pytest.skip("Hopper required")
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P
 
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
     dtype = torch.float32 if master else torch.bfloat16
     weights = [torch.randn(d, d, device="cuda", dtype=dtype).t() for _ in range(4)]
     packed = torch.empty(4 * d, d, device="cuda", dtype=torch.bfloat16)
@@ -110,12 +109,12 @@ def test_cuda_inference_required_buckets_pytorch_and_live_graph(d, n, master, bi
 
     if d in (64, 128):
         from miniworld_engine.kernels.trimul_inproj.cuda import _h100_pack as P
-        monkeypatch.delenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", raising=False)
         def reject_triton(*args):
             raise AssertionError("promoted inference used Triton weight packing")
         monkeypatch.setattr(P, "pack_into_triton", reject_triton)
     else:
-        monkeypatch.setenv("MINIWORLD_TRIMUL_H100_CUDA_AUX", "1")
+        from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+        monkeypatch.setattr(T, "_CUDA_AUX_UNSCOPED", True)
     cls = BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
     m = _module(d, cls)
     if master:

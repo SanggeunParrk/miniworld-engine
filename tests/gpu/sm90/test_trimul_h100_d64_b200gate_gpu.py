@@ -1,10 +1,10 @@
 """The explicit D64 B200-style flag changes gate-gradient placement only."""
-import os
 import runpy
 from pathlib import Path
 
 import pytest
 import torch
+from settings_helpers import override_setting
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
@@ -24,9 +24,12 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
     )
 
     helpers = runpy.run_path(str(Path(__file__).with_name("test_trimul_h100_b200style_gpu.py")))
-    for key in ("NATIVE_BUCKETS", "TRAIN_CUDA", "TRAIN_FUSED_PREP", "CUDA_AUX"):
-        monkeypatch.setenv("MINIWORLD_TRIMUL_H100_" + key, "1")
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_B200STYLE", str(int(enabled)))
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+
+    override_setting(monkeypatch, "trimul_h100_native_buckets", True)
+    override_setting(monkeypatch, "trimul_h100_b200style", enabled)
+    for constant in ("_TRAIN_CUDA_UNSCOPED", "_TRAIN_FUSED_PREP_UNSCOPED", "_CUDA_AUX_UNSCOPED"):
+        monkeypatch.setattr(T, constant, True)
     previous = settings.configure(engine_backend="auto")
     try:
         leaves, mask, ds, dy = helpers["fixture"](64, length, direction, master)
@@ -62,7 +65,7 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
         assert any("_b2w" in n for n in names), names
         pipelined = enabled and not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
         affine_registers = pipelined and direction != 0 and not (
-            direction == 1 and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") == "1")
+            direction == 1 and T._D64_UNI_AFFINE_FORCED)
         assert any("_b2w_affinereg" in n for n in names) == affine_registers, names
         assert any("_b2w_gatepipe" in n for n in names) == (pipelined and not affine_registers), names
         assert any("_b2w_b7gate" in n for n in names) == (enabled and not pipelined), names
@@ -85,5 +88,7 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
 @pytest.mark.parametrize("length", [384, 768])
 @pytest.mark.parametrize("master", [False, True])
 def test_forced_affine_split_keeps_qualified_pipeline(length, master, monkeypatch):
-    monkeypatch.setenv("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT", "1")
+    from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
+
+    monkeypatch.setattr(T, "_D64_UNI_AFFINE_FORCED", True)
     test_flag_dispatch_and_all_gradients(length, 1, master, True, monkeypatch)

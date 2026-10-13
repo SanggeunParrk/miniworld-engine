@@ -342,7 +342,6 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
     import copy
 
     override_setting(monkeypatch, "pwa_train", None)
-    monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
     m = copy.deepcopy(module).eval().float()
     ref = copy.deepcopy(m)
     ref.implementation = ImplementationType.PYTORCH
@@ -359,15 +358,6 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
             actual.float().flatten(), expected.flatten(), dim=0
         )
         assert cosine.item() >= 0.9999
-        monkeypatch.setenv("MINIWORLD_PWA_H100_CUDA_AUX", "0")
-        legacy = m(x, z, mask)
-        if (
-            length >= 512
-        ):  # the split path (cuBLAS contraction + gate / out pass) rounds o to bf16 before the gate: bf16-level, not bitwise
-            assert rel(actual.float() - x.float(), legacy.float() - x.float()) < 1e-2
-        else:
-            torch.testing.assert_close(actual, legacy, rtol=0, atol=0)
-        monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX")
         stream = torch.cuda.Stream()
         stream.wait_stream(torch.cuda.current_stream())
         with torch.cuda.stream(stream):
@@ -392,7 +382,6 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
 @pytest.mark.skipif(not SM90, reason="H100 native inference")
 def test_native_inference_default_refuses_unserved_shape(module, inputs, monkeypatch):
     override_setting(monkeypatch, "pwa_train", None)
-    monkeypatch.delenv("MINIWORLD_PWA_H100_CUDA_AUX", raising=False)
     with torch.no_grad(), pytest.raises(ValueError, match="H100 CUDA PWA"):
         module(
             inputs["msa"][:, :, :320],

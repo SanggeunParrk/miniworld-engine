@@ -9,7 +9,10 @@ import torch
 from miniworld_engine.modules import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
+pytestmark = [
+    pytest.mark.gpu,
+    pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
+]
 
 
 @pytest.fixture(autouse=True)
@@ -26,17 +29,18 @@ def _rel(a, b):
     return float((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30))
 
 
-SHAPES = [(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)]          # (heads, d_single)
+SHAPES = [(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)]  # (heads, d_single)
 
 
-@pytest.mark.parametrize("shape", [pytest.param(s, id=f"h{s[0]}d{s[1]}") for s in SHAPES])
+@pytest.mark.parametrize(
+    "shape", [pytest.param(s, id=f"h{s[0]}d{s[1]}") for s in SHAPES]
+)
 @pytest.mark.parametrize("L", [128, 256, 384, 512, 640, 768])
 @pytest.mark.parametrize("master", [False, True], ids=["bf16", "master"])
-def test_apb_h100_inference_graph(shape, L, master, monkeypatch):
+def test_apb_h100_inference_graph(shape, L, master):
     """Strict PyTorch cosine, repeat equality and live graph inputs/parameters."""
     from miniworld_engine.integrations import attention_pair_bias_b200 as native
 
-    monkeypatch.setenv("MINIWORLD_APB_H100_CANDIDATE", "1")
     ref, ours, _ = _modules(seed=419, shape=shape)
     if master:
         ours = copy.deepcopy(ref)
@@ -88,14 +92,22 @@ def test_apb_h100_inference_graph(shape, L, master, monkeypatch):
 
 def _modules(seed=0, shape=(8, 384)):
     torch.manual_seed(seed)
-    ref = AttentionPairBias(shape[1], 128, shape[0], implementation=ImplementationType.PYTORCH)
-    with torch.no_grad():                   # non-default parameters: the zero-initialised to_out, unit LayerNorms
+    ref = AttentionPairBias(
+        shape[1], 128, shape[0], implementation=ImplementationType.PYTORCH
+    )
+    with (
+        torch.no_grad()
+    ):  # non-default parameters: the zero-initialised to_out, unit LayerNorms
         for p in ref.parameters():
             p.add_(torch.randn_like(p) * 0.1)
     ours = copy.deepcopy(ref)
     ours.implementation = ImplementationType.MINIWORLD
     torch_bf = copy.deepcopy(ref)
-    return ref.cuda(), ours.cuda().to(torch.bfloat16), torch_bf.cuda().to(torch.bfloat16)
+    return (
+        ref.cuda(),
+        ours.cuda().to(torch.bfloat16),
+        torch_bf.cuda().to(torch.bfloat16),
+    )
 
 
 def _inputs(L, masked, seed=1, d=384):
@@ -126,7 +138,10 @@ def test_apb_b200_inference(L, masked, shape):
     assert got.shape == single.shape
     e, e0 = _rel(got, want), _rel(base, want)
     assert e < 1.3 * e0 + 1e-3, (e, e0)
-    d, d0 = _rel(got - sb, want - single), _rel(base - sb, want - single)   # the attention branch alone
+    d, d0 = (
+        _rel(got - sb, want - single),
+        _rel(base - sb, want - single),
+    )  # the attention branch alone
     assert d < 1.3 * d0 + 2e-3, (d, d0)
 
 
@@ -135,7 +150,11 @@ def _train(mod, single, pair, mask, dy):
     p = pair.detach().clone().requires_grad_()
     y = mod(s, p, mask)
     y.backward(dy)
-    return y, {"single": s.grad, "pair": p.grad, **{n: q.grad for n, q in mod.named_parameters()}}
+    return y, {
+        "single": s.grad,
+        "pair": p.grad,
+        **{n: q.grad for n, q in mod.named_parameters()},
+    }
 
 
 @pytest.mark.parametrize("shape", SHAPES)
@@ -170,7 +189,7 @@ def test_apb_b200_training(L, masked, shape):
 @pytest.mark.parametrize("shape", SHAPES)
 def test_apb_b200_compiled(shape):
     """Inference and a training step through torch.compile match eager."""
-    torch._dynamo.reset()                   # each shape compiles the module's forward afresh (recompile limit)
+    torch._dynamo.reset()  # each shape compiles the module's forward afresh (recompile limit)
     _, ours, _ = _modules(shape=shape)
     single, pair, mask = _inputs(384, True, d=shape[1])
     sb, pb = single.bfloat16(), pair.bfloat16()
@@ -183,5 +202,7 @@ def test_apb_b200_compiled(shape):
         p.grad = None
     yc, gc = _train(comp, sb, pb, mask, dy)
     assert _rel(yc, ye) < 1e-6
-    for n in ge:                            # the column sums (dWf, ln weights, dbq) add per-block partials atomically
+    for (
+        n
+    ) in ge:  # the column sums (dWf, ln weights, dbq) add per-block partials atomically
         assert _rel(gc.get(n, gc.get("_orig_mod." + n)), ge[n]) < 1e-3, n

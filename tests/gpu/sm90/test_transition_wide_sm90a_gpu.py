@@ -254,12 +254,13 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
     the forward's h comes from a different GEMM tiling than the gate kernel's recomputed one (same bf16 xn and weights, another
     fp32 summation order), so dWs may move in the last bits; everything else is bit-identical."""
     from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     module, x, dy = _build((1, 16, 32, d))
     override_setting(monkeypatch, "transition_wide_save_h", "0")
-    # D384 keeps h by default on H100
-    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_SAVE_H", "0")
+    # D384 keeps h by default on H100; force the recompute cell through the private constant
+    monkeypatch.setattr(fused_wide_sm90a, "_SAVE_H_D384", False)
     recomputed = _run(module, x, dy, fused=True)
     override_setting(monkeypatch, "transition_wide_save_h", "1")
     saved = _run(module, x, dy, fused=True)
@@ -282,7 +283,6 @@ def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="auto", transition_fused_sm90a=True)
-    monkeypatch.delenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", raising=False)
     module = Transition(
         d,
         n=3 if bad == "expansion" else 4,  # n = 2 has native builds now; 3 has none
@@ -330,15 +330,19 @@ def test_native_required_buckets_pytorch_and_live_graph(
 ):
     """Every gradient has an independent PyTorch oracle; graph replay uses live leaves."""
     from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="auto", transition_fused_sm90a=True)
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
-    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1")
-    monkeypatch.setenv("MINIWORLD_TRANSITION_H100_SAVE_AB", str(int(save_ab)))
+    # Force the retained-a/b cell (the shape default retains them only for D512 at 768 * 768 rows).
+    monkeypatch.setattr(
+        fused_wide_sm90a,
+        "save_ab_enabled",
+        lambda d, rows=0: d == 768 or save_ab,
+    )
     settings.configure(transition_wide_save_h=True)
-    monkeypatch.delenv("MINIWORLD_TRANSITION_D64_REPL", raising=False)
     module, x, dy = _build((1, n, n, d), seed=702 + d)
     if master:
         with torch.no_grad():

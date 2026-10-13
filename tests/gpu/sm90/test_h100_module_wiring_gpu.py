@@ -376,7 +376,7 @@ def test_token_dit_fp32_step_runs_the_tf32_core(qk, monkeypatch):
     with torch.no_grad():
         got = m(x, c, p, mask)
         assert calls, "the fp32 step did not take the TF32 core"
-        monkeypatch.setenv("MINIWORLD_AUGATTN_TF32_SM90", "0")
+        override_setting(monkeypatch, "augattn_tf32_sm90", False)
         token_dit._RUNNERS.clear()
         tri = m(x, c, p, mask)
     assert torch.isfinite(got).all()
