@@ -23,7 +23,7 @@ void launch_attn_fwd(const a100::AttnParams& p, int z) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_fwd_kernel<G>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
     set[dev] = true;
   }
-  dim3 grid(p.L / a100::TA_BM, p.L / G::R, z * p.H);
+  dim3 grid(p.L / G::BM, p.L / G::R, z * p.H);
   a100::attn_fwd_kernel<G><<<grid, G::NTHR, G::SMEM, at::cuda::getCurrentCUDAStream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -59,7 +59,7 @@ void launch_back(const a100::F3Params& p, int nsm) {
 }  // namespace
 
 // One warp per batch constructs a stable key order. No host count or dynamic allocation.
-__global__ void compact_mask_kernel(const bool* mask, int* indices, int* counts, int L) {
+__global__ void compact_mask_kernel(const uint8_t* mask, int* indices, int* counts, int L) {
   const int z = blockIdx.x, lane = threadIdx.x;
   int n = 0;
   for (int j = lane; j < L; j += 32) {
@@ -83,11 +83,27 @@ __global__ void compact_bias_kernel(const __nv_bfloat16* in, __nv_bfloat16* out,
 
 // The module has already applied this global key mask to bias. Only the small bias
 // planes are gathered; K/V retain their original layout and are indexed by the core.
-void compact_attention(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor mask,
-                       torch::Tensor out, torch::Tensor indices, torch::Tensor counts, torch::Tensor compact_bias, double scl) {
+template <class G, bool DENSE>
+void launch_density(const a100::AttnParams& p, int Z) {
+  a100::AttnParams args = p;
+  if constexpr (DENSE) args.bias = p.dense_bias;
+  static bool set[64] = {};
+  const int dev = at::cuda::current_device() & 63;
+  if (!set[dev]) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_density_fwd_kernel<G, DENSE>, cudaFuncAttributeMaxDynamicSharedMemorySize, G::SMEM));
+    set[dev] = true;
+  }
+  a100::attn_density_fwd_kernel<G, DENSE><<<dim3(p.L / G::BM, p.L / G::R, Z * p.H), G::NTHR, G::SMEM,
+                                          at::cuda::getCurrentCUDAStream()>>>(args);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+template <bool GATE, bool FAST = false>
+void compact_attention_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor mask,
+                            torch::Tensor out, torch::Tensor indices, torch::Tensor counts, torch::Tensor compact_bias, double scl, torch::Tensor gate) {
   const c10::cuda::CUDAGuard guard(q.device());
   const int64_t Z = q.size(0), L = q.size(1), H = q.size(3) / 32;
-  TORCH_CHECK(L >= 768 && L % 384 == 0 && q.size(2) == L && q.size(3) == H * 32 && H > 0, "compact_attention: square L % 384 == 0, head dim 32");
+  TORCH_CHECK(L >= (GATE ? 384 : 768) && L % 384 == 0 && q.size(2) == L && q.size(3) == H * 32 && H > 0, "compact_attention: square L % 384 == 0, head dim 32");
   TORCH_CHECK(Z * H <= 65535 && L <= 65535, "compact_attention: grid");
   for (const auto& t : {q, k, v, bias, out, compact_bias})
     TORCH_CHECK(t.is_cuda() && t.device() == q.device() && t.scalar_type() == at::kBFloat16, "compact_attention: bf16 tensors on one CUDA device");
@@ -97,30 +113,71 @@ void compact_attention(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch:
                 && (Z == 1 || t.stride(0) == L * t.stride(1)) && reinterpret_cast<uintptr_t>(t.data_ptr()) % 16 == 0,
                 "compact_attention: aligned token-major Q/K/V");
   TORCH_CHECK(bias.is_contiguous() && compact_bias.is_contiguous() && bias.numel() == Z * H * L * L && compact_bias.sizes() == bias.sizes(), "compact_attention: bias planes");
-  TORCH_CHECK(mask.device() == q.device() && mask.scalar_type() == at::kBool && mask.is_contiguous() && mask.numel() == Z * L, "compact_attention: bool mask [Z, L]");
+  TORCH_CHECK(mask.device() == q.device() && (mask.scalar_type() == at::kBool || mask.scalar_type() == at::kByte) && mask.is_contiguous() && mask.numel() == Z * L, "compact_attention: bool/uint8 mask [Z, L]");
   for (const auto& t : {indices, counts})
     TORCH_CHECK(t.device() == q.device() && t.scalar_type() == at::kInt && t.is_contiguous(), "compact_attention: int32 scratch");
   TORCH_CHECK(indices.numel() == Z * L && counts.numel() == Z, "compact_attention: scratch sizes");
   const auto stream = at::cuda::getCurrentCUDAStream();
-  compact_mask_kernel<<<Z, 32, 0, stream>>>(mask.data_ptr<bool>(), indices.data_ptr<int>(), counts.data_ptr<int>(), L);
+  compact_mask_kernel<<<Z, 32, 0, stream>>>(reinterpret_cast<const uint8_t*>(mask.data_ptr()), indices.data_ptr<int>(), counts.data_ptr<int>(), L);
   compact_bias_kernel<<<dim3((L + 255) / 256, L, Z * H), 256, 0, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr()), reinterpret_cast<__nv_bfloat16*>(compact_bias.data_ptr()), indices.data_ptr<int>(), L, H);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   a100::AttnParams p{};
   p.q = reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()); p.k = reinterpret_cast<const __nv_bfloat16*>(k.data_ptr());
   p.v = reinterpret_cast<const __nv_bfloat16*>(v.data_ptr()); p.bias = reinterpret_cast<const __nv_bfloat16*>(compact_bias.data_ptr());
-  p.out = reinterpret_cast<__nv_bfloat16*>(out.data_ptr());
+  p.out = GATE ? nullptr : reinterpret_cast<__nv_bfloat16*>(out.data_ptr());
   p.ldq = q.stride(2); p.ldk = k.stride(2); p.ldv = v.stride(2); p.ldo = H * 32; p.L = L; p.H = H; p.scl = scl;
   p.indices = indices.data_ptr<int>(); p.counts = counts.data_ptr<int>();
   // Two K/V stages reduce the compact loader's address/register pressure and
   // shared-memory footprint (60 KiB instead of 72 KiB). Keep two resident CTAs;
   // the dense forward and the backward retain their separate schedules.
-  launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2, false, true>>(p, Z);
+  if constexpr (GATE) {
+    TORCH_CHECK(gate.device() == q.device() && gate.scalar_type() == at::kBFloat16 && gate.sizes() == q.sizes()
+                && gate.stride(3) == 1 && gate.stride(2) >= H * 32 && gate.stride(2) % 8 == 0
+                && gate.stride(1) == L * gate.stride(2) && (Z == 1 || gate.stride(0) == L * gate.stride(1))
+                && reinterpret_cast<uintptr_t>(gate.data_ptr()) % 16 == 0, "compact_attention: aligned gate layout");
+    p.gate = reinterpret_cast<const __nv_bfloat16*>(gate.data_ptr()); p.ldgate = gate.stride(2);
+    p.aout = reinterpret_cast<__nv_bfloat16*>(out.data_ptr()); p.ldao = H * 32;
+    p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
+    if (FAST && L >= 512 && H <= 8) {
+      launch_density<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>, true>(p, Z);
+      launch_density<a100::AttnCfg<2, 2, 64, 3, true, true, 64>, false>(p, Z);
+      return;
+    }
+    using Cfg = a100::AttnCfg<2, 2, 64, 3, true, true, 64>;
+    static bool set[64] = {};
+    const int dev = at::cuda::current_device() & 63;
+    if (!set[dev]) {
+      C10_CUDA_CHECK(cudaFuncSetAttribute(a100::attn_adaptive_fwd_kernel<Cfg>, cudaFuncAttributeMaxDynamicSharedMemorySize, Cfg::SMEM));
+      set[dev] = true;
+    }
+    a100::attn_adaptive_fwd_kernel<Cfg><<<dim3(L / Cfg::BM, L / Cfg::R, Z * H), Cfg::NTHR, Cfg::SMEM, stream>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  } else {
+    if (FAST && L >= 512) {
+      p.dense_bias = reinterpret_cast<const __nv_bfloat16*>(bias.data_ptr());
+      launch_density<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>, true>(p, Z);
+      launch_density<a100::AttnCfg<2, 2, 48, 2, false, true>, false>(p, Z);
+      return;
+    }
+    launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2, false, true>>(p, Z);
+  }
+}
+
+void compact_attention(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor mask,
+                       torch::Tensor out, torch::Tensor indices, torch::Tensor counts, torch::Tensor compact_bias, double scl) {
+  compact_attention_impl<false>(q, k, v, bias, mask, out, indices, counts, compact_bias, scl, torch::Tensor());
+}
+
+void compact_attention_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor mask,
+                            torch::Tensor out, torch::Tensor indices, torch::Tensor counts, torch::Tensor compact_bias, double scl, torch::Tensor gate) {
+  compact_attention_impl<true>(q, k, v, bias, mask, out, indices, counts, compact_bias, scl, gate);
 }
 
 // Attention core forward.  q / k / v / out: token-major bf16 [z * L * L, ld] (element strides ldq / ldk / ldv / ldo, unit column stride; head h = columns
 // [32 h, 32 h + 32)); bias [z, H, L, L] bf16 contiguous (masked keys = bf16 min); lse: [z, H, L, L] fp32 or empty.  Schedule: `rows` pair rows
 // per CTA, `bn` keys per tile, `minb` CTAs per SM the registers are bounded for.
+template <int TUNED>
 void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor out, torch::Tensor lse, int64_t L, int64_t H,
               int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, double scl, int64_t rows, int64_t bn, int64_t minb) {
   for (auto* t : {&q, &k, &v, &bias, &out}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd: bf16 CUDA tensors");
@@ -142,6 +199,18 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = ldo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
   TORCH_CHECK(L % bn == 0, "attn_fwd: L must be a multiple of bn");
   const int64_t cfg = rows * 10000 + bn * 10 + minb;
+  if (TUNED == 3 && !lse.numel() && L >= 512 && rows == 2 && bn == 32 && minb == 2) {
+    launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, false, false, 64, true>>(p, (int)Z);
+    return;
+  }
+  if (TUNED >= 2 && !lse.numel() && L >= 256 && rows == 2 && bn == 32 && minb == 2) {
+    launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, false, false, 64>>(p, (int)Z);
+    return;
+  }
+  if (TUNED && !lse.numel() && L % 384 == 0 && rows == 2 && bn == 32 && minb == 2) {
+    launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2>>(p, (int)Z);
+    return;
+  }
   if (cfg == 4 * 10000 + 64 * 10 + 1) launch_attn_fwd<a100::AttnCfg<4, 4, 64, 1>>(p, (int)Z);
   else if (cfg == 2 * 10000 + 64 * 10 + 1) launch_attn_fwd<a100::AttnCfg<2, 4, 64, 1>>(p, (int)Z);
   else if (cfg == 2 * 10000 + 32 * 10 + 2) launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2>>(p, (int)Z);
@@ -152,6 +221,7 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
 
 // Attention core forward with the sigmoid gate fused into its epilogue (the generic-width path): aout [z L L, ldao] = bf16(sigmoid(gate) bf16(out)) where gate is the front's g columns
 // (token-major view, row stride ldgate); `out` (the plain attention output, needed by the backward) may be an empty tensor.  The default schedule (2 rows, 32 keys, 2 CTAs per SM).
+template <int TUNED>
 void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor out, torch::Tensor lse, torch::Tensor gate, torch::Tensor aout, int64_t L,
                    int64_t H, int64_t Z, int64_t ldq, int64_t ldk, int64_t ldv, int64_t ldo, int64_t ldgate, int64_t ldao, double scl) {
   for (auto* t : {&q, &k, &v, &bias, &gate, &aout}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kBFloat16, "attn_fwd_gate: bf16 CUDA tensors");
@@ -172,7 +242,13 @@ void attn_fwd_gate(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Ten
   p.out = out.numel() ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr()) : nullptr; p.lse = lse.numel() ? lse.data_ptr<float>() : nullptr;
   p.ldq = ldq; p.ldk = ldk; p.ldv = ldv; p.ldo = ldo; p.L = (int)L; p.H = (int)H; p.scl = (float)scl;
   p.gate = reinterpret_cast<const __nv_bfloat16*>(gate.data_ptr()); p.aout = reinterpret_cast<__nv_bfloat16*>(aout.data_ptr()); p.ldgate = ldgate; p.ldao = ldao;
-  launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true>>(p, (int)Z);
+  if (TUNED == 3 && !lse.numel() && !out.numel() && L >= 512 && (L < 768 || H <= 8))
+    launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true, false, 128, true>>(p, (int)Z);
+  else if (TUNED >= 2 && !lse.numel() && !out.numel() && L >= 256)
+    launch_attn_fwd<a100::AttnCfg<2, 2, 64, 3, true, false, 64>>(p, (int)Z);
+  else if (TUNED && !lse.numel() && !out.numel() && L % 384 == 0)
+    launch_attn_fwd<a100::AttnCfg<2, 2, 48, 2, true>>(p, (int)Z);
+  else launch_attn_fwd<a100::AttnCfg<2, 4, 32, 2, true>>(p, (int)Z);
 }
 
 // The front: input LayerNorm + q | k | v | g + bias projections (f1_sm80.cuh).  x [T, 128] bf16 (T = Z L^2 tokens of Z square pair stacks, L a multiple of
@@ -509,8 +585,20 @@ void wgrad_finalize(torch::Tensor g, torch::Tensor wq, torch::Tensor wk, torch::
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("compact_attention", &compact_attention);
-  m.def("attn_fwd", &attn_fwd);
-  m.def("attn_fwd_gate", &attn_fwd_gate);
+  m.def("compact_attention_gate", &compact_attention_gate);
+  m.def("compact_attention_fast", [](torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, torch::Tensor mask,
+      torch::Tensor out, torch::Tensor indices, torch::Tensor counts, torch::Tensor cbias, double scl) {
+    compact_attention_impl<false, true>(q, k, v, bias, mask, out, indices, counts, cbias, scl, torch::Tensor());
+  });
+  m.def("compact_attention_gate_fast", &compact_attention_impl<true, true>);
+  m.def("attn_fwd", &attn_fwd<false>);
+  m.def("attn_fwd_tuned", &attn_fwd<true>);
+  m.def("attn_fwd_internal", &attn_fwd<2>);
+  m.def("attn_fwd_fast", &attn_fwd<3>);
+  m.def("attn_fwd_gate", &attn_fwd_gate<false>);
+  m.def("attn_fwd_gate_tuned", &attn_fwd_gate<true>);
+  m.def("attn_fwd_gate_internal", &attn_fwd_gate<2>);
+  m.def("attn_fwd_gate_fast", &attn_fwd_gate<3>);
   m.def("front", &front);
   m.def("front_pack", &front_pack);
   m.def("back", &back);

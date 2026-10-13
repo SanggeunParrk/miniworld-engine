@@ -1,5 +1,9 @@
 # AttentionPairBias on A100 (sm80)
 
+2026-10-05 update: **24 x 16 inference** (d_single 384, d_pair 128) now uses the CUDA+cuBLAS path too: native 16-channel
+gated attention and a 24-head pair-bias pass, with the existing fused mask and residual seed. Its training path is unchanged.
+See the [paired before/after measurements](../../../records/a100-b200-glue-inference-20261005.md); the older four-layout measurements below retain their original scope.
+
 Kernel-level status of AttentionPairBias (the Pairformer single track: LayerNorm(single) -> q (with bias) / k / v / gate projections, pair bias =
 to_bias(LayerNorm(pair)), key mask, softmax, sigmoid gate, to_out, residual; d_pair 128, no QK-norm) on A100; the module-level summary is in
 [../a100.md](../a100.md). Columns are (Length, d_single) from the shape registry (`attention_pair_bias`, token stream: d_single 384, d_pair 128, 8 heads
@@ -211,3 +215,9 @@ The 16 x 24 layout (32 wide per head, H = 16) is the same step with a 1.1x wider
   already 2x cuEquivariance's.
 - The attention core at one sample is the largest piece after the pair passes at L384 (17.5 us of 68; 24 CTAs): a 64-query tile variant, or a split over the key range, would fill the GPU; the backward's attention kernels (60 us of 247) have the same shape problem.
 - Anthropic's A100 numbers for this module (the bench's `anthropic` arm, inference only) are not measured yet.
+
+### 2026-10-06: parameter-dtype CUDA finalization
+
+The refined finalizer writes gradients directly in each parameter's dtype and is enabled by default for the four eligible A100 training layouts. All 48 frozen rows improve versus the established path beyond paired measurement error. `MINIWORLD_APB_SM80_TYPED_GRAD=0` retains the previous finalizer. Correctness, per-row timings, source hashes and Slurm jobs are in the [immutable record](../../../records/a100-apb-typed-finalize-20261006.md).
+
+This remains partial: cuBLAS GEMMs and the h24d384 training fallback still need replacement. Graph-OFF rows are still slower than cuEquivariance.

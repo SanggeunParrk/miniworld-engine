@@ -84,6 +84,97 @@ def _spy(monkeypatch, module, name, calls):
     monkeypatch.setattr(module, name, wrapper)
 
 
+@pytest.mark.parametrize("gated", [False, True])
+@pytest.mark.parametrize("pattern", ["ordinary", "late_peak", "masked_first", "all_masked"])
+def test_fixed_shift_core_and_safe_recompute(gated, pattern):
+    """Check the inference softmax independently, including forced overflow repair."""
+    from miniworld_engine.kernels.triangle_attention.cuda import sm80
+
+    torch.manual_seed(819)
+    length, heads, width = 512, 1, 32
+    q, k, v, gate = [torch.randn(length * length, width, device="cuda", dtype=torch.bfloat16) * 0.3
+                     for _ in range(4)]
+    bias = torch.randn(1, heads, length, length, device="cuda", dtype=torch.bfloat16) * 0.2
+    if pattern == "late_peak":
+        bias[..., :64] = -1000
+    elif pattern == "masked_first":
+        bias[..., :128] = torch.finfo(torch.bfloat16).min
+    elif pattern == "all_masked":
+        bias.fill_(torch.finfo(torch.bfloat16).min)
+    out = torch.empty_like(q)
+    baseline = torch.empty_like(q)
+    empty = q.new_empty(0)
+    lse = q.new_empty(0, dtype=torch.float32)
+    ext = sm80._ext()
+    scale = 1.4426950408889634 / width ** 0.5
+
+    def run(dst, fast):
+        if gated:
+            fn = ext.attn_fwd_gate_fast if fast else ext.attn_fwd_gate_internal
+            fn(q, k, v, bias, empty, lse, gate, dst, length, heads, 1,
+               width, width, width, width, width, width, scale)
+        else:
+            fn = ext.attn_fwd_fast if fast else ext.attn_fwd_internal
+            fn(q, k, v, bias, dst, lse, length, heads, 1,
+               width, width, width, width, scale, 2, 32, 2)
+
+    with torch.no_grad():
+        run(out, True)
+        run(baseline, False)
+        assert torch.isfinite(out).all()
+        assert _rel(out, baseline) < 0.006
+        if pattern == "all_masked":
+            assert torch.count_nonzero(out) == 0
+        else:
+            for row in (0, length - 1):
+                sl = slice(row * length, (row + 1) * length)
+                logits = q[sl].float() @ k[sl].float().T / width ** 0.5 + bias[0, 0].float()
+                expected = (logits.softmax(-1) @ v[sl].float()).bfloat16()
+                if gated:
+                    expected = (expected.float() * gate[sl].float().sigmoid()).bfloat16()
+                assert _rel(out[sl], expected) < 0.006
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            run(out, True)
+        # Change from any initial case to extreme later logits after capture.
+        bias.normal_(0, 0.2)
+        bias[..., :64] = -1000
+        v.mul_(0.7)
+        graph.replay()
+        run(baseline, False)
+        assert torch.isfinite(out).all()
+        assert _rel(out, baseline) < 0.006
+
+
+@pytest.mark.parametrize("starting", [True, False])
+def test_aligned_front_preserves_reference_and_live_graph(starting, monkeypatch):
+    geom = (256, 256, 8)
+    m = _module(geom, starting).eval()
+    ref = _reference(m, geom, starting).eval()
+    pair, mask = _inputs(geom, 512)
+    with torch.no_grad():
+        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_GEMM_PAD", "0")
+        before = m(pair, mask)
+        monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_GEMM_PAD", "1")
+        after = m(pair, mask)
+        want = ref(pair.float(), mask)
+        assert _rel(after, before) < 0.003
+        assert _rel(after, want) <= max(1.25 * _rel(before, want), 0.003)
+        assert _rel(after.float() - pair.float(), want - pair.float()) < 0.03
+        compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+        for _ in range(3):
+            compiled(pair, mask)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            captured = compiled(pair, mask)
+        pair.add_(0.2 * torch.randn_like(pair))
+        mask.logical_not_()
+        m.ln_pair.bias.add_(0.1)
+        m.to_query.weight.mul_(0.8)
+        graph.replay()
+        assert torch.equal(captured, m(pair, mask))
+
+
 # ------------------------------------------------------------------------------------------------------------------------------------------------- the gate
 def test_gate_declines_what_it_is_not_built_for(monkeypatch):
     from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide as w
@@ -462,3 +553,88 @@ def test_d512_width_inference_and_training_match_the_fp32_module():
     names = ["pair", *(n for n, _ in m.named_parameters())]
     for name, g, gt, gr in zip(names, grads, grads_t, grads_r, strict=True):
         assert _rel(g, gr) <= max(1.5 * _rel(gt, gr), 6e-3), f"d{name}: cuda {_rel(g, gr):.3e} vs triton path {_rel(gt, gr):.3e}"
+
+
+@pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
+@pytest.mark.parametrize("starting", [True, False])
+def test_inference_core_schedule_preserves_mask_and_reference(d, starting, monkeypatch):
+    """The 48-key schedule covers both layouts, dense and masked wide inference."""
+    geom = (d, d, d // 32)
+    m = _module(geom, starting).eval()
+    ref = _reference(m, geom, starting).eval()
+    with torch.no_grad():
+        for length in (384, 768):
+            pair, _ = _inputs(geom, length)
+            for probability in (None, 0.5, 1.0):
+                mask = None if probability is None else torch.rand(1, length, device="cuda") > probability
+                monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_TUNED", "0")
+                before = m(pair, mask)
+                monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_TUNED", "1")
+                after = m(pair, mask)
+                assert torch.isfinite(after).all()
+                assert _rel(after, before) < 3e-3
+                if length == 384 and probability == 0.5:
+                    want = ref(pair.float(), mask)
+                    assert _rel(after, want) <= max(1.25 * _rel(before, want), 3e-3)
+
+
+@pytest.mark.parametrize("d", [64, 128, 512])
+@pytest.mark.parametrize("starting", [True, False])
+def test_tuned_core_fullgraph_replay_reads_updated_inputs(d, starting):
+    geom = (d, d, d // 32)
+    m = _module(geom, starting).eval()
+    pair, mask = _inputs(geom, 384)
+    torch._dynamo.reset()
+    compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+    with torch.no_grad():
+        eager = m(pair, mask)
+        assert torch.equal(compiled(pair, mask), eager)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = compiled(pair, mask)
+        pair.copy_(torch.randn_like(pair))
+        mask.logical_not_()
+        m.to_query.weight.mul_(1.25)
+        graph.replay()
+        assert torch.equal(out, m(pair, mask))
+        assert not torch.equal(out, eager)
+
+
+@pytest.mark.parametrize("d", [256, 384, 512])
+@pytest.mark.parametrize("starting", [True, False])
+def test_adaptive_gated_core_handles_tail_keys_and_mixed_batch_counts(d, starting, monkeypatch):
+    """Each batch item independently chooses dense or compact, including both sides of the threshold."""
+    geom = (d, d, d // 32)
+    m = _module(geom, starting).eval()
+    pair, mask = _inputs(geom, 384, batch=2)
+    with torch.no_grad():
+        for valid in (0, 1, 63, 64, 65, 288, 289, 384):
+            mask.zero_()
+            mask[0, :valid] = True
+            mask[1, :384 - valid] = True
+            monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_INTERNAL", "0")
+            before = m(pair, mask)
+            monkeypatch.setenv("MINIWORLD_TRIATTN_SM80_INTERNAL", "1")
+            after = m(pair, mask)
+            assert torch.isfinite(after).all()
+            assert _rel(after, before) < 3e-3
+
+
+@pytest.mark.parametrize(("d", "length"), [(256, 384), (512, 768)])
+def test_adaptive_gated_graph_switches_between_dense_sparse_and_empty(d, length):
+    geom = (d, d, d // 32)
+    m = _module(geom, False).eval()
+    pair, mask = _inputs(geom, length)
+    mask.fill_(True)
+    torch._dynamo.reset()
+    compiled = torch.compile(m, fullgraph=True, options={"triton.cudagraphs": False})
+    with torch.no_grad():
+        compiled(pair, mask)
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = compiled(pair, mask)
+        for valid in (length // 2, 0, length, length * 3 // 4 + 1):
+            mask.zero_()
+            mask[:, :valid] = True
+            graph.replay()
+            assert torch.equal(out, m(pair, mask))

@@ -195,8 +195,16 @@ def module_triangle_attention(module, pair, mask):
         triattn = provider("triattn")
         form = "mask_bias" if mask is not None else "bias_only"
         selection = pf.resolve_tier_core(row, *pf._call_class(q, k), form=form, direction=triattn.FWD)
-        result = triattn.triangle_attention(q, k, v, bias, mask, scale,
-                                           word=row, selection=selection, form=form)
+        import torch
+
+        if (torch.compiler.is_compiling() and selection.row == "triattn_native"
+                and q.dtype == torch.bfloat16 and torch.cuda.get_device_capability(q.device) == (8, 0)):
+            from miniworld_engine.integrations.anthropic_compile import native_triangle_attention
+
+            result = native_triangle_attention(q, k, v, bias, mask, float(scale), row)
+        else:
+            result = triattn.triangle_attention(q, k, v, bias, mask, scale,
+                                               word=row, selection=selection, form=form)
         selected.update(selection._asdict())
         return result
 

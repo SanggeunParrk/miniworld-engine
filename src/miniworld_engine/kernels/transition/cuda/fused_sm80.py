@@ -149,7 +149,7 @@ N_GB = 256     # the LayerNorm affine as float4 slots (gamma, beta: 2 x 128)
 
 
 @functools.lru_cache(maxsize=8)
-def _pack_tables(dev):
+def _pack_tables(dev, save=True):
     """Gather tables of the one-launch pack kernel: out16 = [w | wdw | wx], out32 = gb (LN affine float4 slots).
     idx16: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29; idx32: element | beta << 26."""
     n = H * D
@@ -159,10 +159,11 @@ def _pack_tables(dev):
     ws = code(2).view(D, H)
     w1, w2 = _layout_fwd(wa | half, wb, ws | (1 << 29), dev)          # W1 carries 0.5 Wa; W2 runs in f16
     w = torch.cat([w1, w2], 1).reshape(-1)
-    wdw, wx = _layout_bwd(wa | half, wb, ws, dev)                     # W1s carries 0.5 Wa
-    _, wx = _layout_bwd(wa | half, wb, ws, dev)                       # X: 0.5 Wa (PW's dA tile holds 2 dA, build flag PW_2DA)
-    idx16 = torch.cat([w, wdw, wx]).to(torch.int32).contiguous()
-    assert idx16.numel() == N_W + N_WDW + N_WX
+    if save:
+        wdw, wx = _layout_bwd(wa | half, wb, ws, dev)                 # PW and X both carry 0.5 Wa
+        w = torch.cat([w, wdw, wx])
+    idx16 = w.to(torch.int32).contiguous()
+    assert idx16.numel() == N_W + (N_WDW + N_WX if save else 0)
     s_, q_ = torch.arange(8, device=dev).view(-1, 1), torch.arange(4, device=dev).view(1, -1)
     c0 = (32 * (s_ // 2) + 8 * q_ + 4 * (s_ % 2)).reshape(-1, 1) + torch.arange(4, device=dev).view(1, -1)
     idx32 = torch.cat([c0.reshape(-1), c0.reshape(-1) | (1 << 26)]).to(torch.int32).contiguous()
@@ -170,13 +171,13 @@ def _pack_tables(dev):
     return idx16, idx32
 
 
-def _pack(gamma, beta, wa, wb, ws):
+def _pack(gamma, beta, wa, wb, ws, save=True):
     """All kernel weight layouts in one launch -> (w, gb, wdw, wx, gamma f32, beta f32).  The gather tables are built (and cached) inside the
     launch op, never in the traced region: ``torch.compile`` ignores ``lru_cache`` and would compile their 524288-element integer
     computation into every graph (Inductor's value-range analysis asserts on it)."""
     dev = wa.device     # wa, wb, ws: bf16, or fp32 masters (cast here)
     gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-    out16 = torch.empty(N_W + N_WDW + N_WX, dtype=torch.bfloat16, device=dev)
+    out16 = torch.empty(N_W + (N_WDW + N_WX if save else 0), dtype=torch.bfloat16, device=dev)
     gb = torch.empty(N_GB, dtype=torch.float32, device=dev)
     _pack_launch(*(w.to(torch.bfloat16).contiguous() for w in (wa, wb, ws)), gf, bf, out16, gb)
     return out16[:N_W], gb, out16[N_W:N_W + N_WDW], out16[N_W + N_WDW:], gf, bf
@@ -195,7 +196,7 @@ def _pack_launch(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, gamma: to
     """Packs the three weights (bf16 / fp16 tiles in out16) and the LayerNorm affine (gb) for the sm80 kernels, in place."""
     if _is_fake(wa, out16):
         return None
-    idx16, idx32 = _pack_tables(wa.device)
+    idx16, idx32 = _pack_tables(wa.device, out16.numel() != N_W)
     _ext().pack(wa, wb, ws, gamma, beta, idx16, idx32, out16, gb)
 
 
@@ -265,7 +266,7 @@ def transition_fused_sm80(x, gamma, beta, wa, wb, ws, eps):
     Inference (no grad needed) runs the forward without writing xn / stats."""
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))):
         shape = x.shape
-        w, gb, _, _, _, _ = _pack(gamma, beta, wa, wb, ws)
+        w, gb, _, _, _, _ = _pack(gamma, beta, wa, wb, ws, save=os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
         out, _, _ = _fwd_launch(x.reshape(-1, shape[-1]).contiguous(), w, gb, float(eps), False)
         return out.reshape(shape)
     return _FusedTransitionSM80.apply(x, gamma, beta, wa, wb, ws, eps)

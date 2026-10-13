@@ -67,6 +67,9 @@ class LocalDiTBlock(DiTBlock):
         self.cross_attention = cross_attention
         if cross_attention:
             self.attention.ada_ln_kv = AdaptiveLayerNorm(d_single, d_cond, implementation=implementation)
+        if implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
+            from miniworld_engine.integrations.local_dit_sm80 import prepare_projection_modules
+            prepare_projection_modules(self.attention)
 
     def attention_delta(self, single, cond, pair, mask=None) -> torch.Tensor:
         """The attention's update (no residual), PyTorch: AdaLN, q / k / v / gate, softmax over each 32 x 128 window, gates."""
@@ -76,6 +79,10 @@ class LocalDiTBlock(DiTBlock):
             )
 
             return local_atom_attention(self, single, cond, pair, mask)
+        from miniworld_engine.integrations import local_dit_sm80
+
+        if local_dit_sm80.serves(self, single, cond, pair, mask):
+            return local_dit_sm80.attention_delta(self, single, cond, pair, mask)
         att = self.attention
         x = att.ada_ln_in(single, cond)
         a, b, n, _ = x.shape
@@ -108,5 +115,8 @@ class LocalDiTBlock(DiTBlock):
         -> the stream after the attention and the transition (both residuals included)."""
         if _local.serves(self, single, cond, pair, mask):
             return _local.block(self, single, cond, pair, mask)
+        from miniworld_engine.integrations import local_dit_sm80
+        if not torch.is_grad_enabled() and local_dit_sm80.serves(self, single, cond, pair, mask):
+            return local_dit_sm80.inference_block(self, single, cond, pair, mask)
         single = single + self.attention_delta(single, cond, pair, mask)
         return self.transition(single, cond)

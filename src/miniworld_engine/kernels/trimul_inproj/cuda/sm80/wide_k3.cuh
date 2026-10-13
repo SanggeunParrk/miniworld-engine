@@ -13,7 +13,7 @@
 // kernel's time (measured: the whole TriMul forward 3 % faster at D384 L768, the training forward 8 %).
 // Training variant: p' and g' are also stored (bf16, the 0.5-scaled units) for the backward.
 //
-// CTA tile = 128 tokens x BN output channels, 8 warps (4 x 2), warp tile 32 x BN / 2 for both accumulators; one CTA per SM, a 4-stage ring.  (Tried and not kept: one
+// CTA tile = 128 tokens x BN output channels, 8 warps (4 x 2), warp tile 32 x BN / 2 for both accumulators; one CTA per SM, a 4-stage ring (5 for D512 inference).  (Tried and not kept: one
 // accumulator set with a shared-memory stash of p' and two CTAs per SM, which ran exactly as fast once the epilogue was fixed.)
 #pragma once
 #include "wide_gemm.cuh"
@@ -72,19 +72,19 @@ struct K3wParams {
   int T, L, D, Hc;
 };
 
-template <int BN>
+template <int BN, int ST = 4>
 struct K3wCfg {
-  using TP = WTile<128, BN, 4, 2, 4, true, false>;
-  using TG = WTile<128, BN, 4, 2, 4, false, false>;
+  using TP = WTile<128, BN, 4, 2, ST, true, false>;
+  using TG = WTile<128, BN, 4, 2, ST, false, false>;
   static constexpr int NTHR = TP::NTHR, SMEM = TP::SMEM, SMEM_X = TP::SMEM + 3072;     // + the statistics exchange: sums, squares, (mean, rstd) of the 128 tokens
   static_assert(TP::SMEM == TG::SMEM, "one ring for both phases");
 };
 
 // XSTATS (Hc <= 128: every k-tile of the X operand is still in its ring slot when the first GEMM ends): the LayerNorm_out statistics come from the tile instead of
 // ln_stats_cm -- thread (token, half) sums its half of the channels from shared memory, two passes, the halves merged through shared memory (exact in fp32)
-template <int BN, bool XSTATS>
+template <int BN, bool XSTATS, int ST = 4>
 __global__ void __launch_bounds__(256, BN == 64 ? 2 : 1) k3w_kernel(const K3wParams p) {
-  using Cfg = K3wCfg<BN>;
+  using Cfg = K3wCfg<BN, ST>;
   using TP = typename Cfg::TP;
   using TG = typename Cfg::TG;
   extern __shared__ __align__(128) uint8_t smem[];

@@ -18,6 +18,7 @@
 #include "pwa_ln_v_sm80.cuh"
 #include "pwa_pair_bwd_sm80.cuh"
 #include "pwa_pair_fwd_sm80.cuh"
+#include "pwa_finalize_sm80.cuh"
 
 namespace {
 
@@ -286,7 +287,30 @@ void reduce_rows(torch::Tensor in, torch::Tensor out) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void finalize_typed(std::vector<torch::Tensor> inputs,torch::Tensor wb,std::vector<torch::Tensor> outputs) {
+  TORCH_CHECK(inputs.size()==8 && outputs.size()==8,"PWA finalize: eight inputs and parameter outputs");
+  for(auto& input:inputs)check_f32(input,"finalize input");
+  check_bf16(wb,"finalize wb");
+  const int dm=inputs[0].numel(),hc=inputs[2].size(0),dz=wb.size(1),gch=std::min(hc,64);
+  TORCH_CHECK((dm==64 || dm==128) && (hc==64 || hc==128 || hc==256) && (dz==128 || dz==256 || dz==384) && wb.size(0)==8,"PWA finalize geometry");
+  TORCH_CHECK(inputs[1].numel()==dm && inputs[2].numel()==hc*dm && inputs[3].numel()==2*hc*dm && inputs[4].numel()==8*dz && inputs[5].numel()==8 && inputs[6].numel()==dz && inputs[7].numel()==dz,"PWA finalize input sizes");
+  const int64_t sizes[8]={dm,dm,(int64_t)hc*dm,(int64_t)hc*dm,dz,dz,(int64_t)8*dz,(int64_t)hc*dm};
+  pwa80::FinalizeOutputs out{};
+  for(int i=0;i<8;++i) {
+    auto& output=outputs[i];const auto dtype=output.scalar_type();
+    TORCH_CHECK(output.is_cuda() && output.device()==wb.device() && output.is_contiguous() && output.numel()==sizes[i] && (dtype==at::kFloat || dtype==at::kBFloat16),"PWA finalize output shape/device/dtype");
+    out.data[i]=output.data_ptr();if(dtype==at::kBFloat16)out.bf16|=1u<<i;
+  }
+  for(auto& input:inputs)TORCH_CHECK(input.device()==wb.device(),"PWA finalize input devices");
+  const at::cuda::CUDAGuard guard(wb.device());
+  const int64_t total=2*dm+3*(int64_t)hc*dm+10*dz;
+  pwa80::pwa_finalize_typed_kernel<<<(unsigned)((total+255)/256),256,0,at::cuda::getCurrentCUDAStream()>>>(
+    inputs[0].data_ptr<float>(),inputs[1].data_ptr<float>(),inputs[2].data_ptr<float>(),inputs[3].data_ptr<float>(),inputs[4].data_ptr<float>(),inputs[5].data_ptr<float>(),inputs[6].data_ptr<float>(),inputs[7].data_ptr<float>(),ptr<__nv_bfloat16>(wb),out,dm,hc,dz);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
+  mod.def("finalize_typed", &finalize_typed);
   mod.def("pair_fwd", &pair_fwd);
   mod.def("ln_v", &ln_v);
   mod.def("gate_out", &gate_out);

@@ -8,11 +8,14 @@ The step (``kernels/outer_product_mean/cuda/sm80``; ``kernels/outer_product_mean
 
   forward   prologue (LayerNorm + both projections + mask -> A, B [S, 32 L], s-major) -> O = A^T B (cuBLAS, the grouped outer product) -> mask counts n = mask^T mask
             (a bf16 GEMM with fp32 accumulation: exact) -> epilogue (O / n, the 1024 -> d_pair projection, bias, residual).
-  backward  dgrad (dz / n -> dO in the grouped layout, dbo) -> dA = B dO^T, dB = A dO (cuBLAS) -> dwo (split over rows of i, fixed-order sum off the kept O)
+  backward  dgrad (dz / n -> dO in the grouped layout, dbo) -> dA = B dO^T, dB = A dO (own CUDA at S1024/L128/CM64/CZ128; cuBLAS elsewhere) -> dwo (split over rows of i, fixed-order sum off the kept O)
             -> prologue_bwd (mask, both projection gradients, the LayerNorm backward -> dmsa, dWl, dWr, dgamma, dbeta).
 
 Inference is one opaque op; training is one autograd Function whose forward and backward are each one opaque op. ``MINIWORLD_OPM_SM80=0`` turns the path off
 (``MINIWORLD_OPM_SM80_SAVE_O=0`` recomputes O in the backward instead of keeping it: 1.2 GB at L768). Numerics and timings: ``docs/gpus/a100/outer_product/``.
+
+The qualified short training pipeline uses C++ stage dispatch and two own-CUDA gradient GEMMs; its forward outer product still uses cuBLAS.
+``MINIWORLD_OPM_SM80_NATIVE128_PIPELINE=0`` selects the previous short training implementation.
 """
 
 from __future__ import annotations
@@ -100,16 +103,46 @@ def _kernel_leaves(leaves: list[torch.Tensor]) -> list[torch.Tensor]:
     return [lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(), wo.to(bf).contiguous(), bo.to(bf).float().contiguous()]
 
 
-def _norm(mask: torch.Tensor | None, depth: int) -> tuple[torch.Tensor | None, float]:
+def _norm(mask: torch.Tensor | None, depth: int, clamp: bool = True, training: bool = False) -> tuple[torch.Tensor | None, float]:
     """The mask counts n_ij = sum_s mask[s, i] mask[s, j] clamped to >= 1 (fp32 [L, L], exact: a bf16 0 / 1 product with fp32 accumulation), or (None, S) without a mask."""
     if mask is None:
         return None, float(depth)
+    override = os.environ.get("MINIWORLD_OPM_SM80_MASK_COUNT_NATIVE")
+    native = (override == "1" if override is not None else
+              not training and (depth, mask.shape[1]) in ((1024, 128), (1024, 256), (2048, 128), (2048, 768), (4096, 128), (4096, 640)))
+    if native:
+        from miniworld_engine.kernels.outer_product_mean.cuda import mask_count_ballot_sm80
+        cfg = 2 if depth <= 1024 or mask.shape[1] == 768 else 1
+        return mask_count_ballot_sm80.result(mask.contiguous(), clamp, cfg), 1.0
     mf = mask.to(torch.bfloat16)
-    return torch.mm(mf.t(), mf, out_dtype=torch.float32).clamp_(min=1.0), 1.0
+    norm = torch.mm(mf.t(), mf, out_dtype=torch.float32)
+    return (norm.clamp_(min=1.0) if clamp else norm), 1.0
 
 
 def _mask_u8(mask: torch.Tensor | None) -> torch.Tensor | None:
     return None if mask is None else mask[0].contiguous().view(torch.uint8)
+
+
+def _mask_epilogue_enabled(m: torch.Tensor, wo: torch.Tensor, training: bool = False) -> bool:
+    override = os.environ.get("MINIWORLD_OPM_SM80_MASK_EPILOGUE")
+    if override is not None:
+        return override == "1"
+    return (not training and m.shape[-1] == 64 and wo.shape[0] == 128
+            and (m.shape[0], m.shape[1]) in ((1024, 128), (1024, 256), (1024, 512),
+                                           (2048, 256), (2048, 768), (4096, 640)))
+
+
+def _pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
+    # E053 measures host dispatch overhead. The grouped GEMMs still use cuBLAS.
+    return (os.environ.get("MINIWORLD_OPM_SM80_PIPELINE", "0") == "1"
+            and msa.shape[1] == 1024 and msa.shape[-1] == 64
+            and leaves[4].shape[0] == 128)
+
+
+def _native128_pipeline_enabled(msa: torch.Tensor, leaves: list[torch.Tensor]) -> bool:
+    return (os.environ.get("MINIWORLD_OPM_SM80_NATIVE128_PIPELINE", "1") == "1"
+            and msa.shape[1:3] == (1024, 128) and msa.shape[-1] == 64
+            and leaves[4].shape[0] == 128)
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
@@ -130,8 +163,12 @@ def inference(msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tens
         a, b, _ = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, False)
         o = torch.mm(a.t(), b)
         del a, b
-        norm, nconst = _norm(None if mk is None else mk, m.shape[0])
-        out = sm.epilogue(o, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
+        if mk is not None and _mask_epilogue_enabled(m, wo):
+            from miniworld_engine.kernels.outer_product_mean.cuda import mask_epilogue_sm80
+            out, _ = mask_epilogue_sm80.result(o, mk, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
+        else:
+            norm, nconst = _norm(None if mk is None else mk, m.shape[0], clamp=os.environ.get("MINIWORLD_A100_CLEANUP", "1") == "0")
+            out = sm.epilogue(o, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
     return out.unsqueeze(0)
 
 
@@ -152,6 +189,16 @@ def _forward_fake(msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.
 @opaque(fake=_forward_fake, name="opm_sm80_train_fwd")
 def forward(msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tensor | None, leaves: list[torch.Tensor], eps: float, norm_first: bool,
             save_o: bool) -> list[torch.Tensor]:
+    if _native128_pipeline_enabled(msa, leaves):
+        from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_native128_sm80
+        values = pipeline_native128_sm80.forward(msa[0], _mask_u8(mask), None if residual is None else residual[0].contiguous(),
+                                                 leaves, eps, norm_first, True, save_o)
+        return [values[0].unsqueeze(0), *values[1:]]
+    if _pipeline_enabled(msa, leaves):
+        from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_sm80
+        values = pipeline_sm80.forward(msa[0], _mask_u8(mask), None if residual is None else residual[0].contiguous(),
+                                       leaves, eps, norm_first, True, save_o)
+        return [values[0].unsqueeze(0), *values[1:]]
     sm = _sm80()
     lnw, lnb, wl, wr, wo, bo = _kernel_leaves(leaves)
     with torch.cuda.device(msa.device):
@@ -159,8 +206,12 @@ def forward(msa: torch.Tensor, mask: torch.Tensor | None, residual: torch.Tensor
         mk = _mask_u8(mask)
         a, b, stats = sm.prologue(m, mk, lnw, lnb, wl, wr, eps, True)
         o = torch.mm(a.t(), b)
-        norm, nconst = _norm(mk, m.shape[0])
-        out = sm.epilogue(o, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
+        if mk is not None and _mask_epilogue_enabled(m, wo, training=True):
+            from miniworld_engine.kernels.outer_product_mean.cuda import mask_epilogue_sm80
+            out, norm = mask_epilogue_sm80.result(o, mk, wo, bo, None if residual is None else residual[0].contiguous(), norm_first, True)
+        else:
+            norm, nconst = _norm(mk, m.shape[0], training=True)
+            out = sm.epilogue(o, norm, nconst, wo, bo, None if residual is None else residual[0].contiguous(), norm_first)
         if not save_o:
             o = msa.new_empty((0,))
         if norm is None:
@@ -177,6 +228,14 @@ def _backward_fake(msa: torch.Tensor, mask: torch.Tensor | None, leaves: list[to
 @opaque(fake=_backward_fake, name="opm_sm80_train_bwd")
 def backward(msa: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps: float, norm_first: bool, saved: list[torch.Tensor],
              dz: torch.Tensor) -> list[torch.Tensor]:
+    if _native128_pipeline_enabled(msa, leaves):
+        from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_native128_sm80
+        values = pipeline_native128_sm80.backward(msa[0], _mask_u8(mask), leaves, saved, dz[0].contiguous(), norm_first)
+        return [values[0].unsqueeze(0), *values[1:]]
+    if _pipeline_enabled(msa, leaves):
+        from miniworld_engine.kernels.outer_product_mean.cuda import pipeline_sm80
+        values = pipeline_sm80.backward(msa[0], _mask_u8(mask), leaves, saved, dz[0].contiguous(), norm_first)
+        return [values[0].unsqueeze(0), *values[1:]]
     sm = _sm80()
     lnw, lnb, wl, wr, wo, _ = _kernel_leaves(leaves)
     pdt = [t.dtype for t in leaves]
@@ -198,6 +257,10 @@ def backward(msa: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Te
         dwo = sm.dwo(dzn, o, pdt[4])
         del o, dzn
         dm, dwl, dwr, dg, dbt = sm.prologue_bwd(da, db, msa[0], stats, mk, lnw, lnb, wl, wr)
+    if os.environ.get("MINIWORLD_OPM_SM80_TYPED_GRAD", "0") == "1":
+        from miniworld_engine.kernels.outer_product_mean.cuda import finalize_typed_sm80
+        typed = finalize_typed_sm80.result([dg, dbt, dwl, dwr, dbo], [leaves[i] for i in (0, 1, 2, 3, 5)])
+        return [dm.unsqueeze(0), *typed[:4], dwo, typed[4]]
     # custom-op outputs may not alias each other: the small gradients are views of one reduction buffer, so each leaves as its own copy
     return [dm.unsqueeze(0), dg.to(pdt[0], copy=True), dbt.to(pdt[1], copy=True), dwl.to(pdt[2], copy=True), dwr.to(pdt[3], copy=True), dwo,
             dbo.to(pdt[5], copy=True)]

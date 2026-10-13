@@ -82,6 +82,15 @@ class DiTBlock(nn.Module):
             return _train.block(self, single, cond, pair, mask, compute_dtype)
         if _atom.serves(self, single, cond, pair, mask, compute_dtype):
             return _atom.block(self, single, cond, pair, mask)
+        from miniworld_engine.integrations import atom_dit_sm80_a100 as _atom_sm80
+        if _atom_sm80.serves(self, single, cond, pair, mask, compute_dtype):
+            return _atom_sm80.block(self, single, cond, pair, mask)
+        if (not torch.is_grad_enabled() and single.ndim == 4
+                and single.shape[0] == 5 and single.shape[1] == 1
+                and single.shape[2] in (128, 256, 384, 512, 640, 768, 200, 450, 700) and single.shape[3] == 768):
+            from miniworld_engine.integrations import token_padded_sm80 as _token_padded
+            if _token_padded.serves(self, single, cond, pair, mask, compute_dtype):
+                return _token_padded.block(self, single, cond, pair, mask)
         # A100: the dedicated hand-CUDA attention / transition paths of the two modules first (they are asked inside `self.attention` /
         # `self.transition`); the general CUDA composition only for what they decline (QK-norm, other head widths).
         from miniworld_engine.integrations import a100_families, augattn_sm80

@@ -3,7 +3,8 @@
 Same entry points and semantics as the Triton module ``kernels/conditioned_transition/triton/token_dit_kernels.py``
 (``adaln_rows``, ``resgate_adaln_rows``, ``gate_rows``, ``swiglu_rows``, ``pair_bias_all``; ``qknorm_rows`` has no
 Triton twin: QK-norm on the fused step is B200-only), so the runner can take
-either. ``pair_bias_all`` is a CUDA LayerNorm of the pair rows and one cuBLAS GEMM that writes every block's bias
+either. A100 BF16 / 16-head ``pair_bias_all`` uses the fused APB tensor-core producer, including the key mask.
+Other configurations use a CUDA LayerNorm of the pair rows and one cuBLAS GEMM that writes every block's bias
 head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower on B200 and was dropped). Built on first use (``load_extension``), never at import.
 """
 
@@ -36,6 +37,30 @@ def available() -> bool:
     """The extension builds (a failure is reported once by the caller, which keeps the Triton rows)."""
     _ext()
     return True
+
+
+@functools.lru_cache(maxsize=1)
+def _pack_ext():
+    from ..._nvcc import ensure_cuda_home, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="token_dit_pack_sm80", sources=[str(_dir / "token_dit_pack.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--fmad=false",
+                           "-gencode=arch=compute_80,code=sm_80"],
+        extra_cflags=["-O3", "-std=c++17"], verbose=False)
+
+
+def pack_token(block, qscale, bscale):
+    from miniworld_engine.integrations.token_dit import WEIGHTS
+
+    weights = []
+    for path in WEIGHTS:
+        node = block
+        for name in path.split("."):
+            node = getattr(node, name)
+        weights.append(node.contiguous())
+    return _pack_ext().pack_token(weights, float(qscale), float(bscale))
 
 
 def adaln_rows(x, ms, mb, out, L, eps=1e-5):
@@ -87,10 +112,18 @@ PAIR_BIAS_MASK = True
 def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None):
     """Every block's pair bias, head-major: out [NB, L, L] = (LN(z) @ wt)^T with wt [C, NB] (the LayerNorm weights and
     any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, 128].
-    A CUDA LayerNorm and one cuBLAS GEMM (a fused one-pass LayerNorm + projection kernel, one thread per pair row, measured
-    slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped)."""
+    A100 BF16 / 16 heads uses the tiled APB CUDA producer. Other cases retain CUDA LayerNorm + cuBLAS;
+    the older one-thread-per-row fused experiment was slower and is not used."""
     nb = wt.shape[1]
     m = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
+    import os
+    if (z2d.dtype is torch.bfloat16 and wt.dtype is torch.bfloat16 and nb == 16
+            and L % 128 == 0 and torch.cuda.get_device_capability(z2d.device) == (8, 0)
+            and os.environ.get("MINIWORLD_TOKEN_DIT_PREP", "1") != "0"):
+        from miniworld_engine.kernels.augmented_attention.cuda import apb
+
+        apb.ext().pair_bias_fwd(z2d, wt.t().contiguous(), m, out, L, float(eps), float("-inf"))
+        return
     zh = torch.empty(z2d.shape[0], 128, device=z2d.device, dtype=wt.dtype)
     _ext().layernorm128_rows(z2d, zh, float(eps))
     torch.mm(wt.t(), zh.t(), out=out.view(nb, -1))

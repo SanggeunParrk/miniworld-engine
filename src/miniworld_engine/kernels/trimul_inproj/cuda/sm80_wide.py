@@ -1,4 +1,5 @@
-"""A100 (sm_80) hand-CUDA TriMul at every width: D = d_pair = 64 / 128 / 256 / 384, one direction (hidden D) or bidirectional (hidden 2 D), bf16 and fp32 (TF32 tensor cores).
+"""A100 (sm_80) hand-CUDA TriMul: D = d_pair = 64 / 128 / 256 / 384, one direction (hidden D) or bidirectional (hidden 2 D), bf16 and fp32 (TF32 tensor cores).
+D512 additionally serves bf16 inference, with the same folded projections and channel-major contraction; training retains its general path.
 
 The width-generic sibling of ``sm80.py`` (whose fused kernels are literals for D128): the data flow of the B200 wide path (``b200_infer.py``) on ``mma.sync``.
 
@@ -30,7 +31,7 @@ from . import sm80 as _d128
 
 _dir = Path(__file__).parent / "sm80"
 
-WIDTHS = (64, 128, 256, 384)
+WIDTHS = (64, 128, 256, 384, 512)
 BIDIR, OUTGOING, INCOMING = _d128.BIDIR, _d128.OUTGOING, _d128.INCOMING
 
 
@@ -59,6 +60,8 @@ def shape_ok(shape, dtype, d_hidden: int, hs: int | None = None, mask_shape=None
     hs = d_hidden if hs is None else hs
     if d not in WIDTHS or hs not in (d, 2 * d) or n <= 0 or n % 16 != 0:
         return False
+    if d == 512 and dtype is not torch.bfloat16:
+        return False
     return mask_shape is None or (tuple(mask_shape) == (shape[0], n) and mask_dtype is torch.bool)
 
 
@@ -67,6 +70,9 @@ def supports(pair: torch.Tensor, d_hidden: int, mask: torch.Tensor | None = None
     if os.environ.get("MINIWORLD_TRIMUL_SM80", "1") == "0" or os.environ.get("MINIWORLD_TRIMUL_SM80_WIDE", "1") == "0":
         return False
     if not pair.is_cuda or not pair.is_contiguous():
+        return False
+    # D512 extends the BF16 inference path only; its backward keeps the general path.
+    if pair.ndim == 4 and pair.shape[-1] == 512 and torch.is_grad_enabled():
         return False
     if not shape_ok(tuple(pair.shape), pair.dtype, d_hidden, hs, None if mask is None else tuple(mask.shape), None if mask is None else mask.dtype):
         return False
@@ -202,7 +208,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
     if not fuse_z:
         E.stats_rows(zf, st_in, eps_in)
     planes = zf.new_empty((2 * hs, T))
-    E.k1w(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
+    k1 = E.k1w_row_mask if not save and os.environ.get("MINIWORLD_TRIMUL_SM80_ROW_MASK", "1") != "0" else E.k1w
+    k1(zf, pk["w1"], pk["vs"], pk["vb"], st_in, mask, planes, n, eps_in, fuse_z)
     x = zf.new_empty((hs, n, n))
     with _tf32(z):
         _contract(planes, x, hs, n, direction)
@@ -214,7 +221,8 @@ def _run_forward(leaves, mask, ds, direction, eps_in, eps_out, *, save):
         ps, gs = torch.empty_like(zf), torch.empty_like(zf)
     else:
         ps = gs = zf.new_empty((0,))
-    E.k3w(x.view(hs, T), zf, pk["wo"], pk["wg"], pk["so"], pk["eo"], pk["sg"], pk["eg"], st_out, st_in, ds, out, ps, gs, n, eps_out, fuse_x)
+    k3 = E.k3w_tuned if not save and os.environ.get("MINIWORLD_TRIMUL_SM80_TUNED", "1") != "0" else E.k3w
+    k3(x.view(hs, T), zf, pk["wo"], pk["wg"], pk["so"], pk["eo"], pk["sg"], pk["eg"], st_out, st_in, ds, out, ps, gs, n, eps_out, fuse_x)
     return out.view_as(z), ((planes, x, st_in, st_out, ps, gs) if save else None)
 
 

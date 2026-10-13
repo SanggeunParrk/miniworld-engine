@@ -125,6 +125,24 @@ def test_pwa_a100_registry_lengths(shape, L):
     _check(shape, S=64, L=L, masked=True, grad=False)
 
 
+@pytest.mark.parametrize("L", [384, 768])
+@pytest.mark.parametrize("masked", [False, True])
+def test_pwa_a100_frozen_training_lengths(L, masked):
+    """The production MSA depth exercises the native contractions and glue."""
+    _check((64, 128, 32), S=1024, L=L, masked=masked, grad=True)
+
+
+@pytest.mark.parametrize("S", [1024, 2048, 4096])
+@pytest.mark.parametrize("masked", [False, True])
+def test_pwa_a100_frozen_short_inference(S, masked):
+    _check((64, 128, 32), S=S, L=128, masked=masked, grad=False)
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_pwa_a100_frozen_short_training(masked):
+    _check((64, 128, 32), S=1024, L=128, masked=masked, grad=True)
+
+
 @pytest.mark.parametrize("S", [1, 7, 64, 129, 1000])
 def test_pwa_a100_msa_depth(S):
     """Any MSA depth (tiles of 128 rows with a predicated tail), forward and backward."""
@@ -189,11 +207,12 @@ def test_pwa_a100_short_lengths(L):
     _check((64, 128, 8), S=100, L=L, masked=True, grad=True)
 
 
-def test_pwa_a100_everything_masked_is_finite():
+@pytest.mark.parametrize("S,L", [(96, 64), (1024, 128)])
+def test_pwa_a100_everything_masked_is_finite(S, L):
     """A key mask without a valid key: the softmax is uniform (the module's finfo.min fill makes every logit equal), finite in both directions."""
     _, ours, _ = _modules(64, 128, 32)
-    msa, pair, _, dy = _inputs(96, 64, 64, 128)
-    mask = torch.zeros(1, 64, dtype=torch.bool, device="cuda")
+    msa, pair, _, dy = _inputs(S, L, 64, 128)
+    mask = torch.zeros(1, L, dtype=torch.bool, device="cuda")
     x, z = msa.bfloat16().requires_grad_(), pair.bfloat16().requires_grad_()
     y = ours(x, z, mask)
     y.backward(dy.bfloat16())

@@ -5,12 +5,15 @@ Two kernel sets, one gate (``serves``):
 * ``kernels.trimul_inproj.cuda.sm80`` -- the fused D128 path (bf16, one direction or bidirectional): literal tile shapes, the on-chip backward;
 * ``kernels.trimul_inproj.cuda.sm80_wide`` -- every other width D = 64 / 256 / 384 (and the dtypes the fused path does not take): the LayerNorm-folded
   GEMM kernels ``k1w`` / ``k3w`` with the cuBLAS contraction, and the backward as cuBLAS GEMMs between row kernels.
+  D512 uses this set for bf16 inference; ``sm80_wide512`` adds native backward rows at hidden 512 or 1024.
 
 ``MINIWORLD_TRIMUL_SM80=0`` turns both off (the Triton path serves); ``MINIWORLD_TRIMUL_SM80_WIDE=0`` turns the wide set off alone.
+``MINIWORLD_TRIMUL_SM80_WIDE512=0`` preserves the previous D512 training fallback.
 """
 
 from __future__ import annotations
 
+import os
 import torch
 
 from miniworld_engine import settings
@@ -20,6 +23,16 @@ from miniworld_engine.modules.exceptions import ImplementationType
 def _wide_hs(module) -> int:
     """Hidden channels of the plane pair: the leading size of the front matrices (D one direction, 2 D bidirectional)."""
     return module.to_left.weight.shape[0]
+
+
+def _wide_kernels(pair):
+    from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide
+
+    if pair.shape[-1] == 512 and torch.is_grad_enabled() and os.environ.get("MINIWORLD_TRIMUL_SM80_WIDE512", "1") != "0":
+        from miniworld_engine.kernels.trimul_inproj.cuda import sm80_wide512
+
+        return sm80_wide512
+    return sm80_wide
 
 
 def serves(module, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
@@ -41,7 +54,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
 
     if sm80.available(pair, module.d_hidden, mask):
         return True
-    return sm80_wide.available(pair, module.d_hidden, mask, hs=_wide_hs(module))
+    return _wide_kernels(pair).available(pair, module.d_hidden, mask, hs=_wide_hs(module))
 
 
 def update(module, pair: torch.Tensor, mask: torch.Tensor | None, dropscale: torch.Tensor | None, *, bidirectional: bool,
@@ -58,7 +71,7 @@ def update(module, pair: torch.Tensor, mask: torch.Tensor | None, dropscale: tor
     direction = sm80.BIDIR if bidirectional else sm80.OUTGOING if module.outgoing else sm80.INCOMING
     ds = (pair.new_empty((0,)) if dropscale is None
           else dropscale.reshape(n, pair.shape[-1]).to(pair.dtype).contiguous())
-    kernels = sm80 if sm80.supports(pair, module.d_hidden, mask) else sm80_wide
+    kernels = sm80 if sm80.supports(pair, module.d_hidden, mask) else _wide_kernels(pair)
     return kernels.trimul(pair, module.to_left.weight, module.to_left_gate.weight, module.to_right.weight,
                           module.to_right_gate.weight, module.to_gate.weight, module.to_out.weight,
                           module.ln_pair.weight, module.ln_pair.bias, module.ln_out.weight, module.ln_out.bias,

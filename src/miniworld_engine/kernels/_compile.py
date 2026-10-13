@@ -141,7 +141,7 @@ def _op_name(fn, name: str | None) -> str:
     return qual.replace(".", "__").replace("<", "").replace(">", "")
 
 
-def opaque(fake=None, *, name: str | None = None, mutates_args=()):
+def opaque(fake=None, *, name: str | None = None, mutates_args=(), tags=()):
     """Mark a kernel launch as untraceable by Dynamo, per ``settings.compile_wrap``.
 
     ``fake(*args, **kwargs)`` returns output tensors of the right shape/dtype/device without doing
@@ -152,6 +152,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
     ``name`` overrides the op name (default: the decorated function's qualified name).
     ``mutates_args`` names arguments the launch writes into, for launchers that fill a caller-owned
     output buffer instead of allocating one.
+    ``tags`` supplies dispatcher semantics, such as a random launch's nondeterministic_seeded tag.
     """
 
     def decorate(fn):
@@ -166,7 +167,7 @@ def opaque(fake=None, *, name: str | None = None, mutates_args=()):
         cached = _REGISTERED.get(qualname)
         if cached is not None:
             return cached
-        op = torch.library.custom_op(qualname, fn, mutates_args=mutates_args)
+        op = torch.library.custom_op(qualname, fn, mutates_args=mutates_args, tags=tags)
         op.register_fake(fake)
         # Keep the wrapped function reachable. `custom_op` returns a `CustomOpDef` whose
         # `__call__` is `(*args, **kwargs)`, so the launcher's real parameters disappear: nothing

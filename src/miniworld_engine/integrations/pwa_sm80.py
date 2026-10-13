@@ -104,6 +104,12 @@ def _key_mask(mask: torch.Tensor | None) -> torch.Tensor | None:
     return None if mask is None else mask[0].contiguous().view(torch.uint8)
 
 
+def _fused_contract_enabled(m: torch.Tensor, wg: torch.Tensor, training: bool) -> bool:
+    return (os.environ.get("MINIWORLD_PWA_SM80_CONTRACT_GATE_FUSED", "0" if training else "1") == "1"
+            and m.shape[1] == 128 and m.shape[2] == 64 and wg.shape[0] == 256
+            and m.shape[0] in ((1024,) if training else (1024, 2048, 4096)))
+
+
 # ------------------------------------------------------------------------------------------------------------ inference
 def _inference_fake(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_m: float, eps_z: float) -> torch.Tensor:
     """msa [1, S, L, d_msa], pair [1, L, L, d_pair] -> msa + PWA(msa, pair), bf16 like msa."""
@@ -120,9 +126,14 @@ def inference(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, 
         w = sm.pair_fwd(pair[0], _key_mask(mask), lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z)
         ns = sm.pick_split(m.shape[0])
         v, _ = sm.ln_v(m, lnm_w.contiguous(), lnm_b.contiguous(), wv.contiguous(), eps_m, False, ns)
-        o = torch.bmm(_expand(w, ns), v)
-        del v, w
-        out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), None, eps_m, 1.0)
+        if _fused_contract_enabled(m, wg, False):
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import contract_gate_fused_sm80
+            out, _ = contract_gate_fused_sm80.result(m, w, v, lnm_w, lnm_b, wg, wo, eps=eps_m, mode=1)
+        else:
+            o = (sm.broadcast_bmm(w, v) if ns > 1 and os.environ.get("MINIWORLD_A100_CLEANUP", "1") != "0"
+                 else torch.bmm(_expand(w, ns), v))
+            del v, w
+            out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), None, eps_m, 1.0)
     return out.unsqueeze(0)
 
 
@@ -139,6 +150,46 @@ def update_inference(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.
 def _expand(w: torch.Tensor, ns: int) -> torch.Tensor:
     """w [8, L, L] -> [8 ns, L, L] with every head repeated for its ns chunks of MSA rows (a small contiguous copy: the batch operand of the chunked bmm)."""
     return w if ns == 1 else w.unsqueeze(1).expand(8, ns, *w.shape[1:]).reshape(8 * ns, *w.shape[1:])
+
+
+def _broadcast_contract(w: torch.Tensor, v: torch.Tensor, transpose: bool = False) -> torch.Tensor:
+    """Native contractions for qualified L128 training rows; preserve the faster path elsewhere."""
+    if (os.environ.get("MINIWORLD_PWA_SM80_BROADCAST_NATIVE", "1") == "1"
+            and w.shape[1] == 128 and v.shape[2] % 128 == 0
+            and w.is_contiguous() and v.is_contiguous()
+            and w.dtype == torch.bfloat16 and v.dtype == torch.bfloat16):
+        short_mode = os.environ.get("MINIWORLD_PWA_SM80_BROADCAST_PIPELINE", "0")
+        if (short_mode in ("1", "2", "3")
+                and w.shape[0] == 8 and v.shape[0] == 32 and v.shape[2] == 8192):
+            if short_mode in ("2", "3"):
+                from miniworld_engine.kernels.pair_weighted_averaging.cuda import broadcast_capture_sm80
+                return broadcast_capture_sm80.result(w, v, transpose, 1 if short_mode == "2" else 2)
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import broadcast_pipeline_sm80
+            return broadcast_pipeline_sm80.result(w, v, transpose, 1)
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import broadcast_native_sm80
+        return broadcast_native_sm80.result(w, v, transpose, 0)
+    expanded = _expand(w, v.shape[0] // 8)
+    return torch.bmm(expanded.transpose(1, 2) if transpose else expanded, v)
+
+
+def _weight_contract(do: torch.Tensor, v: torch.Tensor) -> torch.Tensor:
+    """Native dw for qualified L384/640 rows; explicit1 tests other candidates."""
+    if (os.environ.get("MINIWORLD_PWA_SM80_DW_SHORT", "0") == "1"
+            and do.shape == v.shape and do.shape == (32, 128, 8192)
+            and do.is_contiguous() and v.is_contiguous()
+            and do.dtype == torch.bfloat16 and v.dtype == torch.bfloat16):
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_early_sm80
+        return dw_early_sm80.result(do, v, 2, 9)
+    override = os.environ.get("MINIWORLD_PWA_SM80_DW_NATIVE")
+    native = override == "1" if override is not None else do.shape[1] in (384, 640)
+    if (native
+            and do.shape[0] == 32 and do.shape[1] in (256, 384, 512, 640, 768)
+            and do.shape[2] == 8192 and do.shape == v.shape
+            and do.is_contiguous() and v.is_contiguous()
+            and do.dtype == torch.bfloat16 and v.dtype == torch.bfloat16):
+        from miniworld_engine.kernels.pair_weighted_averaging.cuda import dw_native_sm80
+        return dw_native_sm80.result(do, v, 4 if do.shape[1] == 256 else 1, 0)
+    return torch.bmm(do, v.transpose(1, 2), out_dtype=torch.float32)
 
 
 def _forward_fake(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
@@ -159,12 +210,16 @@ def forward(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, le
         w = sm.pair_fwd(pair[0], _key_mask(mask), lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z)
         ns = sm.pick_split(m.shape[0])
         v, _ = sm.ln_v(m, lnm_w.contiguous(), lnm_b.contiguous(), wv.contiguous(), eps_m, False, ns)
-        o = torch.bmm(_expand(w, ns), v)
         keep, dscale = None, 1.0
         if p_drop > 0:                                       # Dropout(broadcast_dim=1): one keep decision per (token, channel), shared over the MSA rows
             keep = (torch.rand(m.shape[1], m.shape[2], device=m.device) > p_drop).to(torch.bfloat16)      # fp32 draw: a bf16 `rand` has 8 mantissa bits and would bias the keep probability
             dscale = 1.0 / (1.0 - p_drop)
-        out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep, eps_m, dscale)
+        if _fused_contract_enabled(m, wg, True):
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import contract_gate_fused_sm80
+            out, o = contract_gate_fused_sm80.result(m, w, v, lnm_w, lnm_b, wg, wo, keep, eps_m, dscale, save_o=True, mode=1)
+        else:
+            o = _broadcast_contract(w, v)
+            out = sm.gate_out(m, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep, eps_m, dscale)
     return [out.unsqueeze(0), w, v, o, msa.new_empty((0,)) if keep is None else keep]
 
 
@@ -186,14 +241,71 @@ def backward(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, l
     with torch.cuda.device(msa.device):
         m, z = msa[0], pair[0]
         dres = dy[0].contiguous()
-        do, dgp, dwo, dwg = sm.glue(m, dres, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep_t, eps_m, dscale)
-        wx = _expand(w, v.shape[0] // 8)
-        dv = torch.bmm(wx.transpose(1, 2), do)                                          # [8 ns, L(j), S C / ns]
-        dw = torch.bmm(do, v.transpose(1, 2), out_dtype=torch.float32)                  # [8 ns, L(i), L(j)]: ns partial products per head (pair_bwd sums them)
-        del do, wx
+        typed_override = os.environ.get("MINIWORLD_PWA_SM80_TYPED_GRAD")
+        typed = typed_override == "1" if typed_override is not None else m.shape[1] in (128, 256, 384)
+        glue = sm.glue
+        glue_override = os.environ.get("MINIWORLD_PWA_SM80_GLUE_TUNED")
+        tuned_glue = glue_override == "1" if glue_override is not None else m.shape[1] in (256, 384, 512, 640, 768)
+        if (tuned_glue
+                and m.shape[0] == 1024 and m.shape[2] == 64 and wg.shape[0] == 256
+                and m.shape[1] in (128, 256, 384, 512, 640, 768)):
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import glue_tuned_sm80
+            glue = lambda *args, **kwargs: glue_tuned_sm80.glue(*args, **kwargs, mode=1)
+        grad_reduce = (os.environ.get("MINIWORLD_PWA_SM80_GRAD_REDUCE", "1" if m.shape == (1024, 128, 64) and wg.shape == (256, 64) and z.shape == (128, 128, 128) else "0") == "1"
+                       and m.shape[0] == 1024 and m.shape[2] == 64
+                       and wg.shape == (256, 64) and z.shape[-1] == 128
+                       and m.shape[1] in (128, 256, 384, 512, 640, 768))
+        if grad_reduce:
+            typed = True
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import grad_partials_sm80
+            glued = grad_partials_sm80.glue(m, dres, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep_t, eps_m, dscale, tuned_glue)
+        else:
+            glued = glue(m, dres, o, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wo.contiguous(), keep_t, eps_m, dscale, raw=typed)
+        do, dgp = glued[:2]
+        dv = _broadcast_contract(w, do, transpose=True)                                # [8 ns, L(j), S C / ns]
+        partial_pair = (os.environ.get("MINIWORLD_PWA_SM80_PAIR_PARTIAL", "1") == "1"
+                        and do.shape == v.shape == (32, 128, 8192)
+                        and do.dtype == v.dtype == torch.bfloat16
+                        and do.is_contiguous() and v.is_contiguous()
+                        and z.shape == (128, 128, 128))
+        if partial_pair:
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import pair_partial_sm80
+            dw = pair_partial_sm80.contract(do, v)
+        else:
+            dw = _weight_contract(do, v)                                              # ns partial products per head (pair_bwd sums them)
+        del do
+        if grad_reduce:
+            from miniworld_engine.kernels.pair_weighted_averaging.cuda import grad_reduce_vector_sm80
+            dm, dgv_partial = grad_partials_sm80.dgv(m, dres, dgp, dv, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wv.contiguous(), eps_m)
+            del dgp, dv
+            dz, pm, ps = grad_partials_sm80.pair(z, w, dw, _key_mask(mask), lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z)
+            dtype_bits = sum(1 << i for i, dt in enumerate(pdt) if dt == torch.bfloat16)
+            outputs = grad_reduce_vector_sm80.result(glued[2], dgv_partial, pm, ps, lnz_w, lnz_b, wb, dtype_bits)
+            return [dm.unsqueeze(0), dz.unsqueeze(0), *outputs]
         dm, dwv, dgm, dbm = sm.dgv_bwd(m, dres, dgp, dv, lnm_w.contiguous(), lnm_b.contiguous(), wg.contiguous(), wv.contiguous(), eps_m)
         del dgp, dv
-        dz, dwb, dgz, dbz = sm.pair_bwd(z, w, dw, _key_mask(mask), lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z)
+        if partial_pair:
+            key_mask = _key_mask(mask)
+            dz, pm, ps = pair_partial_sm80.pair(z, w, dw,
+                z.new_empty((0,), dtype=torch.uint8) if key_mask is None else key_mask,
+                lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z)
+            big_m = sm.reduce_rows(pm, torch.float32).view(8, z.shape[-1])
+            sums = sm.reduce_rows(ps, torch.float32)
+            if typed:
+                paired = (dz, big_m, sums)
+            else:
+                wbf = wb.float()
+                paired = (dz, lnz_w[None, :] * big_m + lnz_b[None, :] * sums[:, None],
+                          (wbf * big_m).sum(0), (wbf * sums[:, None]).sum(0))
+        else:
+            paired = sm.pair_bwd(z, w, dw, _key_mask(mask), lnz_w.contiguous(), lnz_b.contiguous(), wb.contiguous(), eps_z, raw=typed)
+        dz = paired[0]
+        if typed:
+            outputs = [torch.empty(t.shape, dtype=t.dtype, device=t.device) for t in leaves]
+            sm.ext().finalize_typed([dgm, dbm, dwv, glued[2], paired[1], paired[2], lnz_w, lnz_b], wb, outputs)
+            return [dm.unsqueeze(0), dz.unsqueeze(0), *outputs]
+        dwo, dwg = glued[2:]
+        dwb, dgz, dbz = paired[1:]
     # custom-op outputs may not alias each other: the small gradients are views of reduction buffers, so each leaves as its own copy in its leaf's dtype
     return [dm.unsqueeze(0), dz.unsqueeze(0), dgm.to(pdt[0], copy=True), dbm.to(pdt[1], copy=True), dwv.to(pdt[2], copy=True), dwg.to(pdt[3], copy=True),
             dgz.to(pdt[4], copy=True), dbz.to(pdt[5], copy=True), dwb.to(pdt[6], copy=True), dwo.to(pdt[7], copy=True)]

@@ -666,9 +666,16 @@ __device__ __forceinline__ int real_of(const Geo& G, int p) { const int c = p % 
 
 // W q | k | v | g [4 W, D] (padded rows; q rows x qs), its bias [4 W] (bq x qs, then 0), Wo [D, W] (padded columns) or none,
 // Wf = Wb * ln_pair.weight * ws [NH, 128]; bf16. 8 weights per thread.
+#ifdef APB_SM80
+template <bool SAVE_NATURAL = false>
+#endif
 __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const bf* __restrict__ BQ, const bf* __restrict__ WK,
     const bf* __restrict__ WV, const bf* __restrict__ WG, const bf* __restrict__ WO, const bf* __restrict__ WB, const float* __restrict__ LPW,
-    bf* __restrict__ WP, bf* __restrict__ BV, bf* __restrict__ WOP, bf* __restrict__ WF, Geo G, float qs, float ws) {
+    bf* __restrict__ WP, bf* __restrict__ BV, bf* __restrict__ WOP, bf* __restrict__ WF, Geo G, float qs, float ws
+#ifdef APB_SM80
+    , bf* __restrict__ WFN = nullptr
+#endif
+    ) {
   const int W = G.nh * G.dhp, D = G.d;
   const long n1 = 4L * W * D / 8, n2 = WOP ? (long)D * W / 8 : 0, i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   const uint4 zero = make_uint4(0u, 0u, 0u, 0u);
@@ -701,6 +708,10 @@ __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const b
   } else if (j < 4 * W + G.nh * DP) {
     const int k = (int)(j - 4 * W);
     WF[k] = __float2bfloat16_rn(__bfloat162float(WB[k]) * LPW[k % DP] * ws);
+#ifdef APB_SM80
+    if constexpr (SAVE_NATURAL)
+      WFN[k] = __float2bfloat16_rn(__bfloat162float(WB[k]) * LPW[k % DP]);
+#endif
   }
 }
 
@@ -740,6 +751,53 @@ __global__ void __launch_bounds__(256) finalize_k(const float* __restrict__ DWP,
 }
 
 // ------------------------------------------------------------------------------------------------ host
+#ifdef APB_SM80
+// Write every gradient directly in its parameter's dtype, preserving the FP32 accumulation above.
+struct GradientOutputs {
+  void* data[11];
+  unsigned bf16;
+  template<int which>
+  __device__ __forceinline__ void scalar(long index, float value) const {
+    if (bf16 & (1u << which)) reinterpret_cast<bf*>(data[which])[index] = __float2bfloat16_rn(value);
+    else reinterpret_cast<float*>(data[which])[index] = value;
+  }
+  template<int which>
+  __device__ __forceinline__ void vector(long index, float4 value) const {
+    if (bf16 & (1u << which)) V4<bf>::store(reinterpret_cast<bf*>(data[which]) + index, value);
+    else V4<float>::store(reinterpret_cast<float*>(data[which]) + index, value);
+  }
+};
+__global__ void __launch_bounds__(256) finalize_typed_k(const float* __restrict__ DWP, const float* __restrict__ DWO,
+    const float* __restrict__ ACC, const bf* __restrict__ WB, const float* __restrict__ LPW, GradientOutputs out, Geo G) {
+  const int W = G.nh * G.dhp, NHD = G.nh * DP, D = G.d;
+  const float *ALNW = ACC, *ALNB = ACC + D, *ABQ = ACC + 2 * D, *AWF = ACC + 2 * D + W;
+  const long nv = 5L * D * D / 4, i = (long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (i < nv) {
+    const long e = i * 4, blk = e / (D * D), off = e % (D * D), r = off / D, c = off % D;
+    if (blk < 4) {
+      const long prow = (long)blk * W + (r / G.dh) * G.dhp + r % G.dh;
+      const float4 value = V4<float>::load(DWP + prow * D + c);
+      if (blk == 0) out.vector<2>(off, value);
+      else if (blk == 1) out.vector<4>(off, value);
+      else if (blk == 2) out.vector<5>(off, value);
+      else out.vector<6>(off, value);
+    } else out.vector<7>(off, V4<float>::load(DWO + r * W + (c / G.dh) * G.dhp + c % G.dh));
+    return;
+  }
+  const long j = i - nv;
+  if (j < D) out.scalar<0>(j, ALNW[j]);
+  else if (j < 2 * D) out.scalar<1>(j - D, ALNB[j - D]);
+  else if (j < 3 * D) { const int c = (int)(j - 2 * D); out.scalar<3>(c, ABQ[(c / G.dh) * G.dhp + c % G.dh]); }
+  else if (j < 3 * D + NHD) { const int k = (int)(j - 3 * D); out.scalar<10>(k, AWF[k] * LPW[k % DP]); }
+  else if (j < 3 * D + NHD + DP) {
+    const int c = (int)(j - 3 * D - NHD);
+    float t = 0.f;
+    for (int h = 0; h < G.nh; ++h) t += AWF[h * DP + c] * __bfloat162float(WB[h * DP + c]);
+    out.scalar<8>(c, t);
+  } else if (j < 3 * D + NHD + 2 * DP) out.scalar<9>(j - 3 * D - NHD - DP, 0.f);
+}
+#endif
+
 #define APB_DISPATCH(T, NAME, ...)                                                                   \
   [&] {                                                                                              \
     if ((T) == at::kFloat) { using NAME = float; return __VA_ARGS__(); }                             \
@@ -958,6 +1016,47 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifdef APB_SM80
+void prep_train(at::Tensor wq, at::Tensor bq, at::Tensor wk, at::Tensor wv, at::Tensor wg, c10::optional<at::Tensor> wo, at::Tensor wb,
+          at::Tensor lpw, at::Tensor wp, at::Tensor bv, c10::optional<at::Tensor> wop, at::Tensor wf, double qs, double ws, at::Tensor wf_nat) {
+  for (auto* t : {&wq, &bq, &wk, &wv, &wg, &wb, &wp, &bv, &wf, &wf_nat}) chk(*t, at::kBFloat16, "prep_train: bf16");
+  chk(lpw, at::kFloat, "ln_pair.weight");
+  const Geo G = geo(wb.size(0), wq.size(1));
+  const int64_t W = width(G), D = G.d;
+  TORCH_CHECK(wq.numel() == D * D && wp.numel() == 4 * W * D && bv.numel() == 4 * W && wf.numel() == G.nh * DP && wf_nat.sizes() == wf.sizes(), "prep_train shapes");
+  TORCH_CHECK(wo.has_value() == wop.has_value(), "prep_train: wo and wop together");
+  if (wop) { chk(*wo, at::kBFloat16, "wo"); chk(*wop, at::kBFloat16, "wop"); TORCH_CHECK(wop->numel() == D * W, "wop [D, W]"); }
+  const at::cuda::CUDAGuard gd(wq.device());
+  const long n = 4L * W * D / 8 + (wop ? (long)D * W / 8 : 0) + 4 * W + G.nh * DP;
+  prep_k<true><<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<bf>(wq), CP<bf>(bq), CP<bf>(wk), CP<bf>(wv), CP<bf>(wg), wo ? CP<bf>(*wo) : nullptr,
+      CP<bf>(wb), CP<float>(lpw), P<bf>(wp), P<bf>(bv), wop ? P<bf>(*wop) : nullptr, P<bf>(wf), G, (float)qs, (float)ws, P<bf>(wf_nat));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void finalize_typed(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out) {
+  chk(dwp, at::kFloat, "dwp"); chk(dwo, at::kFloat, "dwo"); chk(wb, at::kBFloat16, "wb"); chk(lpw, at::kFloat, "lpw");
+  const Geo G = geo(wb.size(0), dwp.size(1));
+  const int64_t W = width(G), D = G.d;
+  chk_acc(acc, G);
+  TORCH_CHECK(dwp.numel() == 4 * W * D && dwo.numel() == D * W, "finalize: gradient shapes");
+  TORCH_CHECK(out.size() == 11, "finalize: 11 outputs");
+  GradientOutputs outputs{};
+  const int64_t sizes[11] = {D, D, D*D, D, D*D, D*D, D*D, D*D, DP, DP, G.nh*DP};
+  for (int i = 0; i < 11; ++i) {
+    const auto dt = out[i].scalar_type();
+    TORCH_CHECK(dt == at::kFloat || dt == at::kBFloat16, "finalize: FP32/BF16 gradients");
+    chk(out[i], dt, "finalize output");
+    TORCH_CHECK(out[i].device() == dwp.device() && out[i].numel() == sizes[i], "finalize: output device/shape");
+    outputs.data[i] = out[i].data_ptr();
+    if (dt == at::kBFloat16) outputs.bf16 |= 1u << i;
+  }
+  const at::cuda::CUDAGuard gd(dwp.device());
+  const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + 2 * DP;
+  finalize_typed_k<<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<float>(dwp), CP<float>(dwo), CP<float>(acc), CP<bf>(wb), CP<float>(lpw), outputs, G);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+#endif
+
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -971,6 +1070,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("prep", &prep);
   m.def("finalize", &finalize);
 #ifdef APB_SM80
+  m.def("prep_train", &prep_train);
+  m.def("finalize_typed", &finalize_typed);
   m.def("gate_rows_bf", &gate_rows_bf);                          // the A100 attention core's bf16 outputs (apb_pair_bias_sm80.cuh)
   m.def("gate_bwd_bf", &gate_bwd_bf);
   m.def("qkv_bwd_bf", &qkv_bwd_bf);

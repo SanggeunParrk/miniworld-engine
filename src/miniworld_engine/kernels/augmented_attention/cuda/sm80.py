@@ -129,8 +129,9 @@ class GatedInferenceCore:
     ampere = True
 
     def __init__(self, index: int, dtype: torch.dtype, heads: int, head_dim: int):
-        """bf16: the mma.sync core (head dim 32 / 48); fp32: the TF32 core of ``ops_tf32.cu`` (fp32 operands on the tensor cores, head dim 32 / 48), same contract."""
-        assert dtype in (torch.bfloat16, torch.float32) and head_dim in GATE_HEAD_DIMS, (dtype, head_dim)
+        """bf16: the mma.sync core (head dim 16 / 32 / 48); fp32: the TF32 core of ``ops_tf32.cu`` (head dim 32 / 48), same contract."""
+        dims = GATE_HEAD_DIMS if dtype is torch.bfloat16 else TF32_HEAD_DIMS
+        assert dtype in (torch.bfloat16, torch.float32) and head_dim in dims, (dtype, head_dim)
         self.heads, self.head_dim, self.dtype = heads, head_dim, dtype
         self.ext = _ext() if dtype is torch.bfloat16 else _tf32_ext()
 
@@ -147,12 +148,12 @@ class GatedInferenceCore:
                           1.0, 1.0, _MODE_GATE, *_fwd_schedule(samples), 0, _NOPEN, 0)
 
 
-#: head dims of the gated inference core: 48 (the token DiT's 16 heads) and 32 (AttentionPairBias at 12 x 32 / 16 x 24 padded / 16 x 32)
-GATE_HEAD_DIMS = (32, 48)
+#: BF16 gated inference: 16 (APB 24 x 16), 32 (12 x 32 / 16 x 24 padded / 16 x 32), 48 (token DiT).
+GATE_HEAD_DIMS = (16, 32, 48)
 
 
 def supported_gate(dtype: torch.dtype, length: int, d: int, heads: int, index: int) -> bool:
-    """The gated core's requirements: sm_80, bf16, head dim 32 or 48 (``d`` = ``heads`` x head dim), L a multiple of 128."""
+    """The gated core's requirements: sm_80, bf16, head dim 16, 32 or 48 (``d`` = ``heads`` x head dim), L a multiple of 128."""
     if os.environ.get("MINIWORLD_AUGATTN_SM80", "1") == "0":
         return False
     return dtype is torch.bfloat16 and d % heads == 0 and d // heads in GATE_HEAD_DIMS and length % 128 == 0 and _is_ampere(index)
@@ -245,7 +246,7 @@ def plain_forward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch
     log-sum-exp) or an empty tensor.  ``sm_scale`` (default 1 / sqrt(head_dim)) is the softmax scale: a head padded with zero columns (24 -> 32) keeps its real one.
     ``kpen`` (``key_penalty`` of a bool ``[A, L]`` mask, sample stride ``kps`` floats, default L) is a key mask that differs per sample; ``out``: write ``o`` into this
     bf16 ``[A L, >= H hd]`` view instead of a new tensor, ``lse`` the fp32 ``[A, H, L]`` tensor the log-sum-exp goes into (with ``save_lse``)."""
-    assert head_dim in HEAD_DIMS, head_dim
+    assert head_dim in HEAD_DIMS or (head_dim == 16 and samples == 1 and kpen is None), head_dim
     dev = q.device
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale
     o = torch.empty(samples * length, heads * head_dim, device=dev, dtype=torch.bfloat16) if out is None else out
@@ -280,7 +281,7 @@ def plain_backward(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, dob: torch
     NATURAL-unit bias (``db_natural``), or with respect to the raw-unit ``bias`` passed in (``db_natural=False``: times sm_scale).  A replay is bit-identical.
     ``kpen`` / ``kps``: as for :func:`plain_forward`.  ``dq`` / ``dk`` / ``dv``: write the gradients into these bf16 ``[A L, >= H hd]`` views (e.g. the first three
     column blocks of the projection's gradient) instead of new tensors."""
-    assert head_dim in HEAD_DIMS, head_dim
+    assert head_dim in HEAD_DIMS or (head_dim == 16 and samples == 1 and kpen is None), head_dim
     ext = _ext()
     dev, m, d = q.device, samples * length, heads * head_dim
     sm_scale = 1.0 / math.sqrt(head_dim) if sm_scale is None else sm_scale

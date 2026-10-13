@@ -1,5 +1,9 @@
 """Fused bias-only token DiT inference over a stack of ``modules.bias_only_dit.BiasOnlyDiTBlock``: CUDA and cuBLAS only (B200: the tcgen05 core, A100: the mma.sync core of ``cuda/sm80``).
 
+A100's one-block token layouts use a single CUDA weight pack and fused pair LayerNorm/projection. The optional B200
+conditioning experiment's tables are prepared only on demand there. ``MINIWORLD_BIAS_ONLY_DIT_PREP=0`` restores the earlier
+preparation. The integration scopes caches to capture, so weight and pair preparation stay live on every graph replay.
+
     runner = FusedBiasOnlyDiT(blocks)          # packs every weight once
     P = runner.hoist(pair, mask)               # once per sample(): every block's attention weights, softmax(pair bias)
     single = runner.step(single, cond, P)      # once per solver step
@@ -51,6 +55,19 @@ class FusedBiasOnlyDiT:
         self.dp = a0.ln_pair.weight.shape[0]
         assert dtype is torch.bfloat16, "the core is bf16 only"
         dev = a0.to_value.weight.device
+        self._fast_prep = (os.environ.get("MINIWORLD_BIAS_ONLY_DIT_PREP", "1") != "0"
+                           and torch.cuda.get_device_capability(dev) == (8, 0))
+        if (self._fast_prep and self.nb == 1 and (self.d, self.dc, self.dp) == (768, 384, 128)
+                and (self.h, self.da // self.h) in C.LAYOUTS
+                and tuple(blocks[0].transition.expand_a.weight.shape) == (1536, 768)):
+            wvg, wab, self.w1, self.b1, self.w2, self.b2, self.pw = C.pack_weights(blocks[0], self.h, self.da)
+            self.per = [dict(wvg=wvg, wab=wab, wo=a0.to_out.weight.detach().to(dtype).contiguous(),
+                             ws=blocks[0].transition.squeeze.weight.detach().to(dtype).contiguous())]
+            self.n_g1 = self.w1.shape[0]
+            self.dtype = dtype
+            self._buf = {}
+            self._ops = {}
+            return
         f32 = lambda t: t.detach().float()
         w1, b1, w2, b2, pw = [], [], [], [], []
         self.per = []
@@ -79,12 +96,19 @@ class FusedBiasOnlyDiT:
         # the one-kernel conditioning tables (cond_tables_sm100.cu): [W1; W2], their biases, and the column sums of the bf16 W1
         # rows (LN(c) W1^T = rstd (c W1^T - mu colsum(W1)))
         self.n_g1 = self.w1.shape[0]
-        self.wc = torch.cat([self.w1, self.w2], 0).contiguous()
-        self.bc = torch.cat([self.b1, self.b2], 0).float().contiguous()
-        self.csc = torch.cat([self.w1.float().sum(1), torch.zeros(self.w2.shape[0], device=dev)], 0).contiguous()
+        if not self._fast_prep:
+            self._conditioning_weights()
         self.dtype = dtype
         self._buf: dict = {}
         self._ops: dict = {}
+
+    def _conditioning_weights(self):
+        """Build the optional B200 experiment's tables; A100 calls this on demand."""
+        if hasattr(self, "wc"):
+            return
+        self.wc = torch.cat([self.w1, self.w2], 0).contiguous()
+        self.bc = torch.cat([self.b1, self.b2], 0).float().contiguous()
+        self.csc = torch.cat([self.w1.float().sum(1), self.w2.new_zeros(self.w2.shape[0], dtype=torch.float32)], 0).contiguous()
 
     # ------------------------------------------------------------------ once per sample()
     def hoist(self, pair, mask=None):
@@ -92,10 +116,17 @@ class FusedBiasOnlyDiT:
         ``mask`` [L] bool marks the real tokens; the other keys get zero weight."""
         L = pair.shape[1]
         z2d = pair.reshape(L * L, self.dp)
-        zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
-        _rows()._ext().layernorm128_rows(z2d, zh, EPS)
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
-        torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
+        if (self._fast_prep and self.nb == 1 and pair.dtype is torch.bfloat16 and self.dp == 128
+                and self.nb * self.h in (8, 12, 16, 24) and L % 128 == 0):
+            from miniworld_engine.kernels.augmented_attention.cuda import apb
+
+            # Keep mask handling in softmax: a fully masked row must remain uniform.
+            apb.ext().pair_bias_fwd(z2d, self.pw, None, P, L, EPS, 0.)
+        else:
+            zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
+            _rows()._ext().layernorm128_rows(z2d, zh, EPS)
+            torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
         m = None if mask is None else mask.reshape(L).to(torch.bool).contiguous()
         C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
         return P
@@ -165,6 +196,7 @@ class FusedBiasOnlyDiT:
         T = c.shape[0]
         cond_op = self._cond(dev)
         if cond_op is not None:                                  # one kernel; the sigmoid tables arrive as sigmoids
+            self._conditioning_weights()
             G = torch.empty(T, self.wc.shape[0], device=dev, dtype=self.dtype)
             cond_op(c, self.wc, self.bc, self.csc, G, self.n_g1, EPS)
             g1, g2 = G[:, :self.n_g1].view(T, nb, 4, D), G[:, self.n_g1:].view(T, nb, 2, D)

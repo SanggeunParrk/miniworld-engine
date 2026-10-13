@@ -9,10 +9,14 @@ weight through ``swa_dit_hoist_modulation``) and the five block weights. cos / s
 """
 from __future__ import annotations
 
+import os
+
 import torch
 
+from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.swa_dit.dispatch import (
     swa_dit_block_bwd,
+    swa_dit_block_bwd_typed_sm80,
     swa_dit_block_fwd,
     swa_dit_mod_bwd_sm80,
     swa_dit_mod_bwd_sm100,
@@ -24,6 +28,11 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
 from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
 
 
+@device_constant
+def _grad_cast_is_a100(index: int) -> bool:
+    return torch.cuda.get_device_capability(index) == (8, 0)
+
+
 class SWADiTBlockFunction(torch.autograd.Function):
     """``swa_dit_block`` with a backward. Called by ``interface.swa_dit_block`` only when a gradient is recorded."""
 
@@ -32,6 +41,14 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # The weights may be an fp32 master with bf16 activations: the kernels get casts made here, outside autograd, and the
         # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
+        ctx.native_grad_cast = (
+            os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GRAD_CAST",
+                           "1" if q.shape[1] == 4096 or os.environ.get("MINIWORLD_SWA_DIT_SM80_NATIVE_GROUPED5_DW", "1" if q.shape[1] == 8192 else "0") == "1" else "0") == "1"
+            and q.is_cuda and q.dtype == torch.bfloat16
+            and q.shape[0] == 48 and q.shape[1] in (4096, 8192) and q.shape[2] == 128
+            and all(dt in (torch.bfloat16, torch.float32) for dt in ctx.param_dtypes)
+            and _grad_cast_is_a100(q.device.index if q.device.index is not None else torch.cuda.current_device())
+        )
         wqkv, wg, wo, wu, wd = (w.to(q.dtype) for w in (wqkv, wg, wo, wu, wd))
         outputs = swa_dit_block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, FP32_EPS, True)
         ctx.save_for_backward(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, *outputs[1:])
@@ -41,7 +58,11 @@ class SWADiTBlockFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         B, half_window = ctx.meta
-        grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS)
+        if ctx.native_grad_cast:
+            mask = sum(1 << i for i, dt in enumerate(ctx.param_dtypes) if dt == torch.bfloat16)
+            grads = swa_dit_block_bwd_typed_sm80(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS, mask)
+        else:
+            grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors, B, half_window, FP32_EPS)
         dq, dmod, *dw = grads
         dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
         return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None

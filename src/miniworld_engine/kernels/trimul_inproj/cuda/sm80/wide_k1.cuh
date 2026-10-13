@@ -36,13 +36,29 @@ constexpr int K1W_STATS_SMEM = K1wTile::SMEM + 128 * 8;     // + (mean, rstd) of
 
 // STATS: the input row statistics come from the tile itself instead of ln_stats_rows (D <= 128: every k-tile of the A operand is still in its ring slot when the mainloop
 // ends, and thread i owns token row i of the tile: two passes over its 4 granules per k-tile, exact in fp32 like ln_stats_rows), saving that kernel's read of z and its launch
-template <bool STATS>
+template <bool STATS, bool ROW_MASK = false>
 __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
   extern __shared__ __align__(128) uint8_t smem[];
   const uint32_t s0 = smem_u32(smem);
   const int ntn = p.ncol >> 7;
   const int mtile = (int)blockIdx.x / ntn, ntile = (int)blockIdx.x - mtile * ntn;
   const int t0 = mtile * 128, j0 = ntile * 128;
+  // With L divisible by 128, a CTA never crosses a pair row. Resolve its row
+  // mask once, and replace the per-output token divisions with local offsets.
+  // This specialization does not own LayerNorm statistics (STATS must be off).
+  static_assert(!ROW_MASK || !STATS, "row skipping must not skip statistics writes");
+  const int first_col = ROW_MASK ? t0 % p.L : 0;
+  if constexpr (ROW_MASK) {
+    if (p.mask != nullptr && __ldg(p.mask + t0 / p.L) == 0) {
+      __nv_bfloat16* out = p.planes + (size_t)(ntile * 64) * p.T + t0;
+#pragma unroll
+      for (int e = 0; e < 8; ++e) {
+        const int idx = threadIdx.x + 128 * e;
+        stg128(out + (size_t)(idx >> 4) * p.T + 8 * (idx & 15), make_uint4(0u, 0u, 0u, 0u));
+      }
+      return;
+    }
+  }
   K1wTile tl;
   tl.run_fast(s0, p.D >> 5, GemmOps{p.z, (size_t)p.D, t0, p.T, p.w1, (size_t)p.D, j0, p.ncol});
   const int tid0 = threadIdx.x;
@@ -86,7 +102,15 @@ __global__ void __launch_bounds__(128, 2) k1w_kernel(const K1wParams p) {
       else s = __ldg(p.st + tok);
       rs[mt][rh] = s.y; mr[mt][rh] = s.x * s.y;
       float m = 1.f;
-      if (p.mask != nullptr) { const int i = tok / p.L, j = tok - i * p.L; m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f; }
+      if (p.mask != nullptr) {
+        if constexpr (ROW_MASK) {
+          const int j = first_col + 64 * wm + 16 * mt + 2 * g8 + rh;
+          m = __ldg(p.mask + j) != 0 ? 1.f : 0.f;
+        } else {
+          const int i = tok / p.L, j = tok - i * p.L;
+          m = (__ldg(p.mask + i) != 0 && __ldg(p.mask + j) != 0) ? 1.f : 0.f;
+        }
+      }
       mk[mt][rh] = m;
     }
 #pragma unroll

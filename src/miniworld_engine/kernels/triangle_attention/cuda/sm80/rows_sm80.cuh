@@ -23,13 +23,13 @@ struct WPackParams {
   const float* gamma;           // [D] fp32 (folded)
   const float* beta;            // [D] fp32 (folded)
   __nv_bfloat16* out;           // folded: [NR][D + 8]; plain: [NR][D] (NR = 4 DHp: the four projections only)
-  int D, H, hd, DHp, NR, folded;
+  int D, H, hd, DHp, NR, folded, ld;
 };
 
 __global__ void __launch_bounds__(256) w_pack_kernel(const WPackParams p) {
   const int row = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
   if (row >= p.NR) return;
-  const size_t ld = p.folded ? (size_t)p.D + 8 : (size_t)p.D;
+  const size_t ld = p.ld;
   const __nv_bfloat16* src = nullptr;
   if (row < 4 * p.DHp) {
     const int pj = row / p.DHp, r = row - pj * p.DHp, h = r >> 5, c = r & 31;
@@ -56,7 +56,7 @@ __global__ void __launch_bounds__(256) w_pack_kernel(const WPackParams p) {
   }
   if (p.folded) {
     dotb = warp_sum(dotb);                                       // the butterfly order is fixed: replays are bit-identical
-    if (lane < 8) {                                              // columns D .. D + 7: b_hi, b_lo, 0 ...
+    if (lane < p.ld - p.D) {                                    // b_hi, b_lo, then zero padding
       const __nv_bfloat16 hi = __float2bfloat16_rn(dotb);
       const __nv_bfloat16 lo = __float2bfloat16_rn(dotb - __bfloat162float(hi));
       p.out[(size_t)row * ld + p.D + lane] = lane == 0 ? hi : (lane == 1 ? lo : __float2bfloat16_rn(0.f));
@@ -103,7 +103,7 @@ DEVI size_t module_row(size_t t, unsigned L, int transposed) {  // the token's r
   return z * LL + b * L + a;
 }
 
-template <int D>
+template <int D, int PAD = 8>
 __global__ void __launch_bounds__(256) ln_rows_kernel(const LnRowsParams p) {
   using S = RowShape<D>;
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, sub = lane / S::TPR, tl = lane - sub * S::TPR;
@@ -135,7 +135,7 @@ __global__ void __launch_bounds__(256) ln_rows_kernel(const LnRowsParams p) {
     }
     const float rstd = rsqrtf(group_sum(q, S::TPR) * (1.f / D) + p.eps);
     if (!valid) continue;
-    __nv_bfloat16* xo = p.xh + t * (D + 8);
+    __nv_bfloat16* xo = p.xh + t * (D + PAD);
 #pragma unroll
     for (int i = 0; i < S::CPT; ++i) {
       const int ch = tl + i * S::TPR;
@@ -147,6 +147,8 @@ __global__ void __launch_bounds__(256) ln_rows_kernel(const LnRowsParams p) {
     }
     if (tl == 0) {
       stg128(xo + D, make_uint4(0x3f803f80u, 0u, 0u, 0u));       // the constant columns: 1, 1, 0 ... (bf16)
+#pragma unroll
+      for (int pad = 8; pad < PAD; pad += 8) stg128(xo + D + pad, make_uint4(0u, 0u, 0u, 0u));
       if (p.stats != nullptr) *reinterpret_cast<float2*>(p.stats + 2 * t) = make_float2(mean, rstd);
     }
   }

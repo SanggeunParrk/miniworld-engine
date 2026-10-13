@@ -43,9 +43,12 @@ void w_pack(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor 
     p.w[i] = bp(*ws[i]);
   }
   p.NR = (int)(folded ? 4 * DHp + Hpad : 4 * DHp);
-  const int64_t ld = folded ? D + 8 : D;
+  const int64_t ld = out.size(-1);
+  TORCH_CHECK(folded ? (ld == D + 8 || ld == D + 32) : ld == D, "w_pack: padding must be 8 or 32 columns");
   check_bf16(out, "w_pack");
-  TORCH_CHECK(out.is_contiguous() && out.numel() == p.NR * ld, "w_pack: out [NR, D (+ 8)]");
+  TORCH_CHECK(out.is_contiguous() && out.dim() == 2 && out.size(0) >= p.NR && out.size(0) <= p.NR + 32,
+              "w_pack: out [NR (+ up to 32 zero rows), D (+ padding)]");
+  p.NR = out.size(0); // the same kernel initializes alignment rows, including every padding column
   if (folded) {
     TORCH_CHECK(gamma.scalar_type() == at::kFloat && beta.scalar_type() == at::kFloat && gamma.is_contiguous() && beta.is_contiguous() && gamma.numel() == D && beta.numel() == D &&
                 reinterpret_cast<uintptr_t>(gamma.data_ptr()) % 8 == 0 && reinterpret_cast<uintptr_t>(beta.data_ptr()) % 8 == 0, "w_pack: gamma / beta [D] fp32");
@@ -53,7 +56,7 @@ void w_pack(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor 
   } else {
     p.gamma = p.beta = nullptr;
   }
-  p.out = bm(out); p.D = (int)D; p.H = (int)H; p.hd = (int)hd; p.DHp = (int)DHp; p.folded = (int)folded;
+  p.out = bm(out); p.D = (int)D; p.H = (int)H; p.hd = (int)hd; p.DHp = (int)DHp; p.folded = (int)folded; p.ld = ld;
   a100::w_pack_kernel<<<(p.NR + 7) / 8, 256, 0, stream()>>>(p);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -72,11 +75,18 @@ void ln_rows(torch::Tensor x, torch::Tensor xh, torch::Tensor stats, int64_t D, 
   const int64_t T = x.numel() / D;
   TORCH_CHECK(D % 64 == 0 && D >= 64 && D <= 512 && T % (L * L) == 0 && T < (int64_t(1) << 31), "ln_rows: D a multiple of 64 up to 512, T a multiple of L^2 below 2^31");
   check_rows(x, T, D, "ln_rows x");
-  check_rows(xh, T, D + 8, "ln_rows xh");
+  const bool padded = D == 256 && xh.size(-1) == D + 32 && !stats.numel();
+  check_rows(xh, T, D + (padded ? 32 : 8), "ln_rows xh");
   TORCH_CHECK(!stats.numel() || (stats.scalar_type() == at::kFloat && stats.is_contiguous() && stats.numel() == 2 * T), "ln_rows: stats [T, 2] fp32");
   a100::LnRowsParams p;
   p.x = bp(x); p.xh = bm(xh); p.stats = stats.numel() ? stats.data_ptr<float>() : nullptr;
   p.T = (unsigned)T; p.L = (int)L; p.transposed = (int)transposed; p.eps = (float)eps;
+  if (padded) {
+    const unsigned grid = std::min<int64_t>((T + 7) / 8, (int64_t)nsm() * 16);
+    a100::ln_rows_kernel<256, 32><<<grid, 256, 0, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
 #define LN_CASE(DD) case DD: { using S = a100::RowShape<DD>; \
     const unsigned grid = (unsigned)std::min<int64_t>((T + 8 * S::RPW - 1) / (8 * S::RPW), (int64_t)nsm() * 16); \
     a100::ln_rows_kernel<DD><<<grid, 256, 0, stream()>>>(p); break; }

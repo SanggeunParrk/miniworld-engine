@@ -1,10 +1,19 @@
 # Bias-only token DiT on A100 (sm80)
 
+2026-10-05 preparation follow-up: [B200 source audit, paired measurements, profiles and validation](../../../records/a100-bias-only-dit-preparation-20261005.md).
+The A100 one-block path now packs weights with one vectorized CUDA kernel, skips unused B200 conditioning-experiment
+tables, and fuses pair LayerNorm + projection with the existing APB producer. Graph replay goes from **51 to 15 kernels**.
+For A5/shared conditioning, 16×48 heads and L128–768, latency improves **1.55–1.82×** over the preceding implementation:
+L128 **0.249→0.137 ms**, L768 **0.838→0.529 ms**. All backends in the new comparison use compile + CUDA Graph;
+the connected Anthropic composition is 1.55–2.62× slower and PyTorch compiled is 1.27–1.57× slower than the new path.
+`MINIWORLD_BIAS_ONLY_DIT_PREP=0` restores the preceding preparation. Graphs still recompute from live weights/pair/mask.
+The older sampling-step tables below excluded packing and pair preparation, so their times are not directly comparable.
+
 Kernel-level status of the bias-only token DiT block on A100; the module-level summary is in [a100.md](../a100.md) and the algorithm is described on the B200 page
 ([../../b200/bias_only_dit/bias_only_dit.md](../../b200/bias_only_dit/bias_only_dit.md)). The block (`modules/bias_only_dit`, `BiasOnlyDiTBlock`) is the token DiT block with the attention's query-key half
 removed: AdaLN + **bias-only attention** (the logits are the pair bias, `softmax(to_bias(LN(pair))) v`, gated by `sigmoid(g)` and by the conditioning scale) + conditioned SwiGLU transition. Widths as the
-`dit` target: d_single 768, d_cond 384, d_pair 128, transition n = 2. Columns are (Length, Dimension) with the token width 768 (bf16 only). No other implementation of this op exists (cuEquivariance and
-Anthropic have no such block), so every comparison is against the PyTorch module compiled.
+`dit` target: d_single 768, d_cond 384, d_pair 128, transition n = 2. Columns are (Length, Dimension) with the token width 768 (bf16 only).
+Anthropic has no dedicated bias-only block; the current adapter composes its zero-Q/K APB and DTK kernels. The older tables below compare against the PyTorch module compiled.
 
 With no query and no key the attention weights `P = softmax(bias)` depend on neither the augmented sample nor the single representation, only on the pair, which carries no noise level: one `P` per block serves
 every sample and every solver step. The fast path is therefore a different algorithm from the DiT's: `P` is hoisted (once per pair and mask, cached on the tensors' pointer and version), and the per-sample attention is

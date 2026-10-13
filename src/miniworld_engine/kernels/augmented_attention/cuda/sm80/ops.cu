@@ -133,6 +133,9 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
 #define FWD_CFG(HD, R, NKV, MINB, MODE, KM) \
   if (cfg == ((((int64_t(HD) * 10 + (R)) * 10 + (NKV)) * 10 + (MINB)) * 10 + (MODE)) * 10 + (KM)) { \
     launch_fwd<aa80::FwdCfg<HD, R, NKV, MINB, MODE, KM>>(p, (int)A); return; }
+  // APB 24 x 16: the shared-bias gated inference core, with no padded head columns.
+  FWD_CFG(16, 1, 4, 2, 0, 0) FWD_CFG(16, 2, 3, 2, 0, 0)
+  FWD_CFG(16, 1, 4, 2, 2, 0)
   FWD_CFG(48, 1, 3, 2, 0, 0) FWD_CFG(48, 2, 3, 2, 0, 0) FWD_CFG(48, 1, 3, 2, 1, 0) FWD_CFG(48, 2, 3, 2, 1, 0) FWD_CFG(48, 1, 3, 2, 2, 0) FWD_CFG(48, 2, 3, 2, 2, 0)
   FWD_CFG(48, 1, 4, 2, 0, 0) FWD_CFG(48, 1, 4, 1, 0, 0) FWD_CFG(48, 2, 4, 1, 0, 0) FWD_CFG(48, 1, 4, 2, 1, 0) FWD_CFG(48, 1, 4, 1, 1, 0) FWD_CFG(48, 2, 4, 1, 1, 0)
   FWD_CFG(48, 1, 4, 2, 2, 0)
@@ -186,6 +189,7 @@ void attn_bwd_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
   DQ_CFG(48, 2, 3, 1, 0, 0) DQ_CFG(48, 2, 3, 2, 0, 0) DQ_CFG(48, 1, 4, 2, 0, 0) DQ_CFG(48, 1, 3, 1, 0, 0)
   DQ_CFG(32, 4, 3, 1, 0, 0) DQ_CFG(32, 2, 4, 1, 0, 0) DQ_CFG(32, 1, 3, 2, 0, 0) DQ_CFG(32, 4, 3, 1, 1, 0) DQ_CFG(32, 2, 4, 1, 1, 0) DQ_CFG(32, 1, 3, 2, 1, 0)
   DQ_CFG(32, 6, 3, 1, 1, 0) DQ_CFG(32, 6, 3, 1, 0, 0)
+  DQ_CFG(16, 1, 3, 2, 1, 0)
   // a per-sample key mask: the module-level core's schedules (bf16 gradients)
   DQ_CFG(48, 4, 3, 1, 1, 1) DQ_CFG(48, 2, 4, 1, 1, 1) DQ_CFG(48, 1, 3, 2, 1, 1) DQ_CFG(32, 4, 3, 1, 1, 1) DQ_CFG(32, 2, 4, 1, 1, 1) DQ_CFG(32, 1, 3, 2, 1, 1)
 #undef DQ_CFG
@@ -240,6 +244,7 @@ void attn_bwd_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   DKV_CFG(48, 3, 2, 0, 0) DKV_CFG(48, 3, 2, 1, 0) DKV_CFG(48, 4, 2, 0, 0) DKV_CFG(48, 4, 1, 0, 0) DKV_CFG(48, 3, 1, 0, 0) DKV_CFG(48, 2, 2, 0, 0)
   DKV_CFG(32, 3, 2, 0, 0) DKV_CFG(32, 3, 2, 1, 0) DKV_CFG(32, 4, 2, 0, 0) DKV_CFG(32, 4, 2, 1, 0) DKV_CFG(32, 4, 1, 1, 0)
   DKV_CFG(48, 3, 2, 1, 1) DKV_CFG(32, 4, 2, 1, 1)
+  DKV_CFG(16, 3, 2, 1, 0)
 #undef DKV_CFG
   TORCH_CHECK(false, "attn_bwd_dkv: unsupported schedule (hd, nst, minb, kpen)");
 }
@@ -271,7 +276,8 @@ void attn_delta(torch::Tensor dO, torch::Tensor O, torch::Tensor delta, int64_t 
   auto st = at::cuda::getCurrentCUDAStream();
   const auto* d = reinterpret_cast<const __nv_bfloat16*>(dO.data_ptr());
   const bool bf = O.scalar_type() == at::kBFloat16;
-  if (hd == 32 && bf) aa80::attn_delta_kernel<32, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
+  if (hd == 16 && bf) aa80::attn_delta_kernel<16, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
+  else if (hd == 32 && bf) aa80::attn_delta_kernel<32, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else if (hd == 32) aa80::attn_delta_kernel<32, float><<<grid, 128, 0, st>>>(d, O.data_ptr<float>(), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else if (hd == 48 && bf) aa80::attn_delta_kernel<48, __nv_bfloat16><<<grid, 128, 0, st>>>(d, reinterpret_cast<const __nv_bfloat16*>(O.data_ptr()), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);
   else if (hd == 48) aa80::attn_delta_kernel<48, float><<<grid, 128, 0, st>>>(d, O.data_ptr<float>(), delta.data_ptr<float>(), lddo, ldo, (int)L, (int)H, tokens);

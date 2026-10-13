@@ -69,7 +69,7 @@ void stats_cm_t(torch::Tensor x, torch::Tensor st, double eps) {
 #define CM(HH) if (H == HH) { if (wide) a100::ln_stats_cm_kernel<HH, V, E><<<M / (32 * V), 256, 0, stream()>>>(cp<E>(x), o, M, (float)eps); \
                               else a100::ln_stats_cm_kernel<HH, TPL4, E><<<M / (32 * TPL4), 256, 0, stream()>>>(cp<E>(x), o, M, (float)eps); \
                               C10_CUDA_KERNEL_LAUNCH_CHECK(); return; }
-  CM(64) CM(128) CM(256) CM(384) CM(512) CM(768)
+  CM(64) CM(128) CM(256) CM(384) CM(512) CM(768) CM(1024)
 #undef CM
   TORCH_CHECK(false, "stats_cm: unsupported hidden width ", H);
 }
@@ -121,6 +121,7 @@ void wpack(torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor 
 // --------------------------------------------------------------------------------------------------------------------------------------------- k1w
 // z [T, D], w1 [4 Hs, D], vs / vb [4 Hs], st [T, 2], mask [L] uint8 or empty -> planes [2 Hs, T].  fuse (bf16, D <= 128): st is an OUTPUT, the kernel computes (mean, rstd) of the rows
 // itself (eps); otherwise st holds ln_stats_rows' result
+template <bool ROW_MASK>
 void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, torch::Tensor st, torch::Tensor mask, torch::Tensor planes, int64_t L, double eps, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), ncol = (int)w1.size(0);
   TORCH_CHECK(T % 128 == 0 && D % 32 == 0 && ncol % 128 == 0 && planes.size(0) == ncol / 2 && planes.size(1) == T && z.scalar_type() == w1.scalar_type() &&
@@ -142,6 +143,13 @@ void k1w(torch::Tensor z, torch::Tensor w1, torch::Tensor vs, torch::Tensor vb, 
   p.mask = mask.numel() ? mask.data_ptr<uint8_t>() : nullptr;
   p.planes = mbf(planes);
   p.T = T; p.D = D; p.L = (int)L; p.ncol = ncol;
+  if (ROW_MASK && D == 512 && !fuse && L % 128 == 0) {
+    static bool set_row = false;
+    if (!set_row) { set_smem(a100::k1w_kernel<false, true>, a100::K1wTile::SMEM); set_row = true; }
+    a100::k1w_kernel<false, true><<<(T / 128) * (ncol / 128), 128, a100::K1wTile::SMEM, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   static bool set = false;
   static bool set1 = false;
   if (!set1) { set_smem(a100::k1w_kernel<false>, a100::K1wTile::SMEM); set_smem(a100::k1w_kernel<true>, a100::K1W_STATS_SMEM); set1 = true; }
@@ -171,6 +179,7 @@ void launch_k3w32(const a100::K3w32Params& p) {
 
 // x [Hc, T], z [T, D], wo3 [D, Hc], wg3 [D, D], fold vectors [D], sto / sti [T, 2], ds [L, D] or empty -> out [T, D]; ps / gs [T, D] (training saves) or empty.  fuse (bf16, Hc <= 128 and
 // D <= 128: one CTA per token tile): sto is an OUTPUT, the kernel computes LayerNorm_out's (mean, rstd) of X itself (eps)
+template <bool TUNED>
 void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3, torch::Tensor so, torch::Tensor eo, torch::Tensor sg, torch::Tensor eg,
          torch::Tensor sto, torch::Tensor sti, torch::Tensor ds, torch::Tensor out, torch::Tensor ps, torch::Tensor gs, int64_t L, double eps, bool fuse) {
   const int T = (int)z.size(0), D = (int)z.size(1), Hc = (int)x.size(0);
@@ -194,6 +203,16 @@ void k3w(torch::Tensor x, torch::Tensor z, torch::Tensor wo3, torch::Tensor wg3,
   p.out = mbf(out);
   p.ps = ps.numel() ? mbf(ps) : nullptr; p.gs = gs.numel() ? mbf(gs) : nullptr;
   p.T = T; p.D = D; p.Hc = Hc; p.L = (int)L;
+  if (TUNED && D == 512 && !fuse && !ps.numel()) {
+    // The wider inference projections benefit from one extra prefetch stage.
+    // Statistics-fused and training calls retain the four-stage schedule.
+    using Cfg = a100::K3wCfg<128, 5>;
+    static bool set = false;
+    if (!set) { set_smem(a100::k3w_kernel<128, false, 5>, Cfg::SMEM); set = true; }
+    a100::k3w_kernel<128, false, 5><<<(p.T / 128) * (p.D / 128), Cfg::NTHR, Cfg::SMEM, stream()>>>(p);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    return;
+  }
   if (D % 128 == 0) launch_k3w<128>(p, fuse); else launch_k3w<64>(p, fuse);
 }
 
@@ -356,8 +375,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("stats_rows", &stats_rows);
   m.def("stats_cm", &stats_cm);
   m.def("wpack", &wpack);
-  m.def("k1w", &k1w);
-  m.def("k3w", &k3w);
+  m.def("k1w", &k1w<false>);
+  m.def("k1w_row_mask", &k1w<true>);
+  m.def("k3w", &k3w<false>);
+  m.def("k3w_tuned", &k3w<true>);
   m.def("gate_bwd_blocks", &gate_bwd_blocks);
   m.def("lnin_bwd_blocks", &lnin_bwd_blocks);
   m.def("gate_bwd", &gate_bwd);

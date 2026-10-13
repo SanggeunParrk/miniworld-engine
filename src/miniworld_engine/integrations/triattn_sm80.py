@@ -12,6 +12,7 @@ Two whole-module paths, picked by the module's geometry:
 from __future__ import annotations
 
 import os
+import types
 
 import torch
 
@@ -127,15 +128,60 @@ def forward_train(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torc
     """``pair + drop(TriangleAttention(pair))`` with autograd.  The dropout scale is the module's own draw on the original layout (``[B, 1, L, C]`` starting /
     ``[B, L, 1, C]`` ending); in the kernels' starting frame both index the token's second index, so either is ``[B, L, C]`` as it is."""
     kind = _kind(module, pair, mask)
+    ln = module.ln_pair
+    weights = _weights(module)
+    wo = module.to_out.weight
     ds = None
     if module.training and module.p_drop > 0.0:
         b, length = pair.shape[:2]
-        ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
-    ln = module.ln_pair
-    if kind is not None and kind[0] == "wide":
+        if _native_dropout_after_serves(module, pair, kind, weights, wo, ln):
+            from miniworld_engine.kernels.dropout.cuda import row_scale_sm80
+            ds = row_scale_sm80.scale(pair, module.p_drop, module._drop_dim).reshape(b, length, pair.shape[-1])
+        else:
+            ds = module._make_drop_scale(pair, module.p_drop).reshape(b, length, pair.shape[-1])
+    if kind is not None and kind[0] == 'wide':
         from miniworld_engine.kernels.triangle_attention.cuda import sm80_wide
-
-        return sm80_wide.trainable(pair, kind[1], _weights(module), module.to_out.weight, ln.weight, ln.bias, ln.eps, mask, transposed=not module.starting, ds=ds)
+        return sm80_wide.trainable(pair, kind[1], weights, wo, ln.weight, ln.bias, ln.eps, mask, transposed=not module.starting, ds=ds)
     from miniworld_engine.kernels.triangle_attention.cuda import sm80
+    return sm80.trainable(pair, weights, ln.weight, ln.bias, wo, ln.eps, mask, transposed=not module.starting, ds=ds)
 
-    return sm80.trainable(pair, _weights(module), ln.weight, ln.bias, module.to_out.weight, ln.eps, mask, transposed=not module.starting, ds=ds)
+
+def _native_dropout_after_serves(module,pair,kind,weights,wo,ln):
+    """Called only inside forward_train after the original serves_train gate.
+
+    That gate already proves own SM80, contiguous BF16 square pair, every
+    projection dtype/device/shape, LN shape/device/matching dtype and mask.
+    Retain the narrower original frozen scope and every explicit override.
+    """
+    # An explicitly installed physical scale/method takes precedence.
+    callback = module._make_drop_scale
+    if not isinstance(callback, types.MethodType):
+        return False
+    if '_make_drop_scale' in module.__dict__:
+        return False
+    from miniworld_engine.modules.triangle_attention.module import TriangleAttention
+    if callback.__func__ is not TriangleAttention._sm80_default_drop_scale:
+        return False
+    if os.environ.get('MINIWORLD_DROPOUT_SCALE_SM80') is not None:
+        return False
+    if os.environ.get('MINIWORLD_TRIATTN_SM80_NATIVE_RNG','1') == '0':
+        return False
+    from miniworld_engine.modules.exceptions import ImplementationType
+    if module.implementation not in (ImplementationType.MINIWORLD,ImplementationType.TRITON):
+        return False
+    if not module.training or module.p_drop != .25 or kind is None:
+        return False
+    b,length,_,d = pair.shape
+    if b != 1 or length not in (128,256,384,512,640,768) or d not in (64,128,256,384,512):
+        return False
+    if ln.weight.dtype != torch.float32 or ln.bias.dtype != torch.float32:
+        return False
+    # supports() permits strided parameters and makes them contiguous in its
+    # launch bodies. These checks were NOT proven by serves_train, so retain
+    # them instead of widening the old private policy's eligible domain.
+    if not all(t.is_contiguous() for t in (*weights,wo,ln.weight,ln.bias)):
+        return False
+    if kind[0] == 'fused':
+        return True
+    cfg = kind[1]
+    return cfg.d == d and cfg.dhp == d and cfg.hd == 32
