@@ -61,7 +61,7 @@ _SCRIPT = textwrap.dedent("""
 
 # (samples, S, conditioning): one conditioning row per sample (B = N, A = 1: the ATM = 32 / single-stage builds), shared by
 # the samples (A = 1, 3 use the same builds; A = 5, 48 the default ones).
-@pytest.mark.parametrize("n,s,cond", [(48, 4096, "per_row"), (1, 4096, "shared"), (3, 2048, "shared"), (5, 4096, "shared"),
+@pytest.mark.parametrize(("n", "s", "cond"), [(48, 4096, "per_row"), (1, 4096, "shared"), (3, 2048, "shared"), (5, 4096, "shared"),
                                       (48, 4096, "shared")])
 def test_forward_chain_survives_graph_replays(n, s, cond):
     try:

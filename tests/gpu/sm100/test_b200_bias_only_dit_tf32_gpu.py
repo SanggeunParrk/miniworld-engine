@@ -157,7 +157,8 @@ def test_inference_graph_compile_and_caches(monkeypatch, inf3_env):
         assert not any("triton" in n.lower() for n in names), [n for n in names if "triton" in n.lower()]
         rows = [n for n in names if any(r in n for r in DEFAULT_ROWS)]
         if inf3_env == "1":                                                  # front -> core -> tail, none of the 12-launch rows
-            assert all(any(k in n for n in names) for k in INF3_NAMES) and not rows, names
+            assert all(any(k in n for n in names) for k in INF3_NAMES), names
+            assert not rows, names
         else:                                                                # no front / tail kernel
             assert not any(k in n for n in names for k in INF3_NAMES[::2]), names
         compiled = torch.compile(fast, fullgraph=True, options={"triton.cudagraphs": False})
@@ -274,7 +275,9 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
         return [t.grad.clone() for t in (xs, cs, ps)] + [q.grad.clone() for q in m.parameters()]
 
     eager = run(fast)
-    from tests.cuda_graph_nodes import launched_kernels      # the graph's own kernel nodes (the profiler drops driver-API launches)
+    from tests.cuda_graph_nodes import (
+        launched_kernels,  # the graph's own kernel nodes (the profiler drops driver-API launches)
+    )
     names = launched_kernels(lambda: run(fast))
     for k in ("bo_pv_gate_tf32_sm100", "bo_dpb32_sm100", "bo_glu_bwd_tf32_sm100", "pair_bias_tc_k", "pair_bias_bwd_tc_k",
               "pack_k"):
@@ -384,7 +387,8 @@ def test_every_sample_group_of_the_core(monkeypatch, n_head, d_head, batch):
         core(v, P, out, S)                                   # ungated (the training dV)
         assert relative(out, o) < 3e-3, sg
         for k in (core.kernel(sg, True), core.kernel(sg, False)):
-            assert k.regs <= 128 and k.lmem == 0, (sg, k.regs, k.lmem)
+            assert k.regs <= 128, (sg, k.regs, k.lmem)
+            assert k.lmem == 0, (sg, k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -397,7 +401,8 @@ def test_dpb32_repeatable(L, n_head, d_head):
     DA, M = H * DH, A * L
     dpb = T.Dpb32(dev, nh=H, dh=DH)
     k = dpb.kernel()
-    assert k.regs <= 128 and k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 128, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
     for seed in range(4):
         torch.manual_seed(1000 * L + seed)
         P = torch.softmax(2 * torch.randn(H * L, L, device="cuda"), -1)
@@ -446,7 +451,8 @@ def test_swiglu_gemms_match_fp64(M):
     x, w = torch.randn(M, D, device="cuda"), torch.randn(2 * H, D, device="cuda") / D ** 0.5
     fwd, bwd = T.GemmGluTF32(dev), T.GemmGluTF32(dev, bwd=True)
     for k in (fwd.k, bwd.k):
-        assert k.regs <= 128 and k.lmem == 0, (k.regs, k.lmem)
+        assert k.regs <= 128, (k.regs, k.lmem)
+        assert k.lmem == 0, (k.regs, k.lmem)
     ab, h = torch.empty(M, 2 * H, device="cuda"), torch.empty(M, H, device="cuda")
     fwd(x, w, ab, h)
     ab64 = x.double() @ w.double().t()
@@ -539,7 +545,7 @@ def test_training_kernels_match_fp64(L, n_head, d_head):
         err = (dbias.view(H, L, L).double() - want).abs().view(H, L // 128, 128, L // 32, 32).amax((2, 4))
         top = torch.topk(err.flatten(), 6)
         where = [(int(i) // (err.shape[1] * err.shape[2]), int(i) // err.shape[2] % err.shape[1] * 128, int(i) % err.shape[2] * 32,
-                  float(e)) for e, i in zip(top.values, top.indices)]
+                  float(e)) for e, i in zip(top.values, top.indices, strict=True)]
         raise AssertionError(f"dpb32 dbias rel {rel:.3e} (NJ {T.DPB32_NJ}); rerun bit-identical: "
                              f"{torch.equal(dbias, again)}, rerun rel {relative(again.view(H, L, L), want):.3e}; worst (head, i0, j0, "
                              f"max abs err): {where}; median tile err {float(err.median()):.3e}, |want| max {float(want.abs().max()):.3e}")
@@ -669,7 +675,8 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     xa = torch.full((M, 768), float("nan"), device="cuda")
     front = T32.FrontTF32(torch.cuda.current_device(), da)
     k = front.kernel(cl)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     front(x, tab[:, 1], w, vg, T, xa=xa)
     tok = torch.arange(M, device="cuda") % T
     t64 = tab[:, 1].double()[tok]
@@ -678,7 +685,8 @@ def test_front_kernel_matches_fp64(monkeypatch, da, cl, M, T):
     assert torch.isfinite(vg).all()
     assert relative(vg, want) < 3e-3, relative(vg, want)
     assert torch.equal(vg[:, :da], T32.round_tf32(vg[:, :da]))
-    assert torch.isfinite(xa).all() and torch.equal(xa, T32.round_tf32(xa))     # the exchange scratch: every block written, TF32
+    assert torch.isfinite(xa).all()
+    assert torch.equal(xa, T32.round_tf32(xa))
     assert relative(xa, xa64) < 2e-3
     again = torch.empty_like(vg)
     front(x, tab[:, 1], w, again, T, xa=xa)
@@ -706,7 +714,8 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
     k0 = torch.arange(32, device="cuda")
     assert torch.equal(wop.view(cl, -1, 2, nc, 32)[3, 5, 1, 7], wo[nc * 3 + 7, 64 * 5 + 32 + k0])   # P[((c p) 2 + h) NC + n, k]
     k = tail.kernel(cl)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     out = torch.full((M, 768), float("nan"), device="cuda")
     xt = torch.full((M, 768), float("nan"), device="cuda")              # row-major
     hs = torch.full((M * 48, 32), float("nan"), device="cuda")          # blocked k-block-major
@@ -720,9 +729,11 @@ def test_tail_kernel_matches_fp64(cl, da, M, T):
     want = x1 + t64[:, 1] * (h @ wsq.double().t())
     assert torch.isfinite(out).all()
     assert relative(out - x, want - x.double()) < 3e-3, relative(out - x, want - x.double())
-    assert torch.isfinite(xt).all() and torch.isfinite(hs).all()          # the exchange scratch: every block written
-    rows = lambda t, nk: t.view(M // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(M, 32 * nk)   # noqa: E731  blocked -> rows
-    assert relative(xt, xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
+    assert torch.isfinite(xt).all()
+    assert torch.isfinite(hs).all()
+    rows = lambda t, nk: t.view(M // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(M, 32 * nk)
+    assert relative(xt, xt64) < 2e-3
+    assert relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=cl)
     assert torch.equal(again, out)
@@ -745,7 +756,8 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     wsq = T32.round_tf32(torch.randn(768, 1536, device="cuda") / 1536 ** 0.5)
     tail = T32.TailTF32(dev, da)
     k = tail.kernel(T32.TAIL_PAIR)
-    assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 168, (k.regs, k.lmem)
     Mp = T32.tail_rows(M, T32.TAIL_PAIR)
     out = torch.full((M, 768), float("nan"), device="cuda")
     xt = torch.full((Mp, 800), float("nan"), device="cuda")[:, :768]    # padded rows, as the runner's
@@ -761,9 +773,11 @@ def test_tail2_kernel_matches_fp64(da, M, T):
     want = x1 + t64[:, 1] * (h @ wsq.double().t())
     assert torch.isfinite(out).all()
     assert relative(out - x, want - x.double()) < 3e-3, relative(out - x, want - x.double())
-    assert torch.isfinite(xt).all() and torch.isfinite(hs).all()          # every block of every tile, padding included
-    rows = lambda t, nk: t.view(Mp // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(Mp, 32 * nk)[:M]   # noqa: E731
-    assert relative(xt[:M], xt64) < 2e-3 and relative(rows(hs, 48), h) < 3e-3
+    assert torch.isfinite(xt).all()
+    assert torch.isfinite(hs).all()
+    rows = lambda t, nk: t.view(Mp // 128, nk, 128, 32).permute(0, 2, 1, 3).reshape(Mp, 32 * nk)[:M]
+    assert relative(xt[:M], xt64) < 2e-3
+    assert relative(rows(hs, 48), h) < 3e-3
     again = torch.empty_like(out)
     tail(a, x, tab[:, 0], wop, wab, wsqp, again, T, xt=xt, h=hs, cl=T32.TAIL_PAIR)
     assert torch.equal(again, out)
@@ -807,8 +821,9 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
     """The captured step: with the weights and the conditioning declared static (the bench harness's inference mode) exactly the three
     kernels, replaying bit-identically to the eager call and following a new single copied in; without, the hoists (weight pack, P,
     conditioning tables) are recorded too and the three kernels close the graph. The default step's row kernels never appear."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
     _, fast, _ = blocks(seed=5, n_head=n_head, d_head=d_head)
     fast.eval()
     L, S = 384, 5
@@ -834,7 +849,8 @@ def test_inf3_graph_is_three_kernels_and_replays(inf3, static, n_head, d_head):
         graph.replay()
         torch.cuda.synchronize()
         if static:
-            assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+            assert len(names) == 3, names
+            assert all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
             assert torch.equal(out, eager)
         else:
             assert all(k in n for k, n in zip(INF3_NAMES, names[-3:], strict=True)), names
@@ -871,7 +887,8 @@ def test_inf3_tables_follow_the_conditioning(inf3):
     with torch.no_grad(), _capture.static_weights(), _capture.static_inputs():
         fast(x, c, p)
         names = launched_kernels(lambda: fast(x, c, p))
-    assert len(names) == 3 and all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
+    assert len(names) == 3, names
+    assert all(k in n for k, n in zip(INF3_NAMES, names, strict=True)), names
 
 
 def test_inf3_two_blocks_match_two_single_block_steps(inf3, monkeypatch):
@@ -907,11 +924,13 @@ def test_inf3_kernels_do_not_spill(n_head, d_head):
     dev, da = torch.cuda.current_device(), n_head * d_head
     front, tail = T32.FrontTF32(dev, da), T32.TailTF32(dev, da)
     for k in [front.kernel(cl) for cl in front.clusters()] + [tail.kernel(cl) for cl in (*T32.TAIL_CLUSTERS, T32.TAIL_PAIR)]:
-        assert k.lmem == 0 and k.regs <= 168, (k.regs, k.lmem)
+        assert k.lmem == 0, (k.regs, k.lmem)
+        assert k.regs <= 168, (k.regs, k.lmem)
     core = T32.PvGateCoreTF32(dev, nh=n_head, dh=d_head, pdl=True)
     for sg in T32.pv_groups(d_head):
         k = core.kernel(sg, True)
-        assert k.lmem == 0 and k.regs <= 128, (sg, k.regs, k.lmem)
+        assert k.lmem == 0, (sg, k.regs, k.lmem)
+        assert k.regs <= 128, (sg, k.regs, k.lmem)
 
 
 # ------------------------------------------------------------------------------------------------------------ the pair tail (A/B)
@@ -997,7 +1016,8 @@ def test_pair_tail_switch_selects_bo_tail2(inf3, monkeypatch, on, L, pair_L):
     with torch.no_grad():
         out = fast(x, c, p)
     torch.cuda.synchronize()
-    assert inf3 and picked, (len(inf3), picked)
+    assert inf3, (len(inf3), picked)
+    assert picked, (len(inf3), picked)
     assert torch.isfinite(out).all()
     assert all((cl == T32.TAIL_PAIR) is want for cl in picked), picked
 
@@ -1019,7 +1039,8 @@ def _dpb32_case(L, A, H, DH, seed):
 def test_dpb_pair_tf32_kernel_does_not_spill(n_head, d_head):
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32 as T32
     k = T32.Dpb32(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
-    assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 255, (k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -1054,6 +1075,7 @@ def test_dpb_pair_tf32_bit_identical_with_a_poisoned_allocator(monkeypatch, n_he
             op = T32.Dpb32(torch.cuda.current_device(), nh=H, dh=DH)
         _poison()
         db = torch.empty(H * L, L, device="cuda")
+        assert op is not None
         op(do, v, P, dd, db, A)
         torch.cuda.synchronize()
         assert op.last == "pair"

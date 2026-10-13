@@ -81,6 +81,7 @@ def test_training_core_tf32(heads, L, masked):
     DQ, DK, DV, DB = sm100.backward_tf32(q2, k2, v2, dO.reshape(A * L, W).contiguous(), bias.contiguous(), LSE, Dd, A, L, H, dh)
     torch.cuda.synchronize()
     want.backward(dO.double())
+    assert bd.grad is not None
     bgrad = bd.grad.masked_fill(torch.isinf(bias.double()), 0.0)
     errs = {"O": _rel(O.view(A, L, H, dh), want), "dq": _rel(DQ.view(A, L, H, dh), qd.grad),
             "dk": _rel(DK.view(A, L, H, dh), kd.grad), "dv": _rel(DV.view(A, L, H, dh), vd.grad),
@@ -160,7 +161,7 @@ class _TF32:
 def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
     from miniworld_engine.integrations import token_dit
 
-    H, d = layout
+    _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=11)
     ref.eval(); eng.eval()
     g = torch.Generator(device="cuda").manual_seed(12)
@@ -178,7 +179,8 @@ def test_fused_inference_fp32(layout, S, L, qk, monkeypatch):
         with _TF32(True):
             module = eng(x, c, p, mask)
     token_dit._RUNNERS.clear()
-    assert got.dtype is torch.float32 and torch.isfinite(got).all()
+    assert got.dtype is torch.float32
+    assert torch.isfinite(got).all()
     ef, em = _rel(got, truth), _rel(module, truth)
     assert ef < 1.5 * em + 2e-3, f"fused {ef:.2e} vs module path {em:.2e}"
 
@@ -200,7 +202,7 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     block: output and every gradient within 1.5x the module path's error in the same TF32 regime."""
     from miniworld_engine.integrations import token_dit_train
 
-    H, d = layout
+    _, d = layout
     ref, eng = _pair_of_blocks(layout, qk, seed=21)
     g = torch.Generator(device="cuda").manual_seed(22)
     single = torch.randn(A, 1, L, d, device="cuda", generator=g)
@@ -215,7 +217,8 @@ def test_fused_training_fp32(layout, A, L, qk, monkeypatch):
     monkeypatch.setattr(token_dit_train._Block, "apply", lambda *a: calls.append(a[7]) or orig(*a))
     with _TF32(True):
         fused = _run(eng, single, cond, pair, mask, w)
-        assert calls and all(calls), "the fp32 training call did not take the fused fp32 path"
+        assert calls, "the fp32 training call did not take the fused fp32 path"
+        assert all(calls), "the fp32 training call did not take the fused fp32 path"
         monkeypatch.setenv("MINIWORLD_TOKEN_DIT_TRAIN", "0")
         module = _run(eng, single, cond, pair, mask, w)
     assert set(fused) == set(truth), sorted(set(truth) ^ set(fused))
@@ -234,7 +237,7 @@ def test_fused_training_fp32_under_bf16_autocast(layout, monkeypatch):
     precision follows the tensors -- with the same result as without autocast."""
     from miniworld_engine.integrations import token_dit_train
 
-    H, d = layout
+    _, d = layout
     _, eng = _pair_of_blocks(layout, True, seed=31)
     A, L = 4, 256
     g = torch.Generator(device="cuda").manual_seed(32)

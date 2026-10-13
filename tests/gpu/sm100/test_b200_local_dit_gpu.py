@@ -168,7 +168,9 @@ def _kernel_names(fn, monkeypatch):
     """The kernel launches of one eager call of ``fn``, counted at the launch functions the integration calls (one name per launch).
     Not the profiler: in a long pytest process it drops the records of these driver-API launches (all of them, at times)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
 
     names: list[str] = []
     with monkeypatch.context() as m:
@@ -214,7 +216,8 @@ def test_hoisted_tables_are_made_once_per_conditioning_and_pair(cross, monkeypat
     assert torch.equal(first, second)
     assert _count(first_names, *TABLE_LAUNCHES) == (3 if cross else 2), first_names
     assert _count(names, *TABLE_LAUNCHES) == 0, names
-    assert _count(names, "attn_fwd") == 1 and _count(names, "pre_fwd", "pre_fwd_kv", "post_fwd") == 2, "the block's own kernels must still run"
+    assert _count(names, "attn_fwd") == 1, "the block's own kernels must still run"
+    assert _count(names, "pre_fwd", "pre_fwd_kv", "post_fwd") == 2, "the block's own kernels must still run"
 
 
 def test_hoist_off_recomputes_every_call(monkeypatch):
@@ -224,7 +227,8 @@ def test_hoist_off_recomputes_every_call(monkeypatch):
     with torch.no_grad():
         eng(single, cond, pair)
         names = _kernel_names(lambda: eng(single, cond, pair), monkeypatch)
-    assert _count(names, "cond_fwd") == 1 and _count(names, "pair_bias_fwd") == 1, names
+    assert _count(names, "cond_fwd") == 1, names
+    assert _count(names, "pair_bias_fwd") == 1, names
 
 
 @pytest.mark.parametrize("cross", [False, True])
@@ -320,4 +324,5 @@ def test_entries_of_freed_tensors_are_dropped():
             eng(single, cond, pair)
             del single, cond, pair
             gc.collect()
-    assert len(local_dit._HOIST_COND) <= 1 and len(local_dit._HOIST_BIAS) <= 1, (len(local_dit._HOIST_COND), len(local_dit._HOIST_BIAS))
+    assert len(local_dit._HOIST_COND) <= 1, (len(local_dit._HOIST_COND), len(local_dit._HOIST_BIAS))
+    assert len(local_dit._HOIST_BIAS) <= 1, (len(local_dit._HOIST_COND), len(local_dit._HOIST_BIAS))

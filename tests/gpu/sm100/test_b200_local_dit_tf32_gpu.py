@@ -388,7 +388,8 @@ def test_hoisted_fp32_tables_are_made_once_per_conditioning_and_pair(cross):
     assert torch.equal(first, second)
     assert _count(names, "f32_ln_aff", "local_bias_fwd_f32") == 0, names
     assert _count(names, "atom_gemm_tf32", "f32_adaln", "f32_gate") == 0, names   # the fused pre / post kernels only
-    assert _count(names, "atom_pre_tf32") == 1 and _count(names, "atom_post_tf32") == 1, names
+    assert _count(names, "atom_pre_tf32") == 1, names
+    assert _count(names, "atom_post_tf32") == 1, names
     assert _count(names, "local_attn_fwd_tf32") == 1
 
 
@@ -397,8 +398,9 @@ def test_static_inputs_replay_launches_the_block_kernels_only(cross):
     """Under ``static_inputs()`` a captured fp32 inference call replays the block's own kernels only: no conditioning tables, no pair bias
     and no weight packing (the contract covers the weights). Without it a replay repacks the weights (one cat, an in-place rounding) and
     remakes the tables in a handful of launches, and sees an in-place update of the conditioning."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
 
     _, eng = _block(cross=cross)
     single, cond, pair = _inputs(3, 384)

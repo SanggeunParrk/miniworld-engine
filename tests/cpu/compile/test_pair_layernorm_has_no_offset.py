@@ -10,7 +10,9 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from miniworld_engine.modules.attention_pair_bias.module import AttentionPairBias
-from miniworld_engine.modules.msa_pair_weighted_averaging.module import MSAPairWeightedAveraging
+from miniworld_engine.modules.msa_pair_weighted_averaging.module import (
+    MSAPairWeightedAveraging,
+)
 
 D_PAIR, D_MSA, D_SINGLE, HEADS, L = 24, 16, 16, 2, 10
 

@@ -25,7 +25,11 @@ from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as INF
 from miniworld_engine.integrations import bias_only_dit_hoist as HO
 from miniworld_engine.integrations import bias_only_dit_train as TR
-from miniworld_engine.modules.bias_only_dit import BiasOnlyAttention, BiasOnlyDiTBlock, pair_bias_all
+from miniworld_engine.modules.bias_only_dit import (
+    BiasOnlyAttention,
+    BiasOnlyDiTBlock,
+    pair_bias_all,
+)
 from miniworld_engine.modules.bias_only_dit import hoist as hoist_mod
 from miniworld_engine.modules.bias_only_dit import module as bo_module
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -88,7 +92,7 @@ def fused_only():
         raise AssertionError("a PyTorch path ran")
     old_fwd, old_ref = bo_module.BiasOnlyAttention.forward, hoist_mod._reference
     bo_module.BiasOnlyAttention.forward = boom
-    hoist_mod._reference = boom
+    hoist_mod._reference = boom  # ty: ignore[invalid-assignment] -- deliberate stub
     try:
         yield
     finally:
@@ -152,12 +156,16 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
     tol = TOL[dtype]
     base = outs[0].untyped_storage().data_ptr()
     for i, (o, w) in enumerate(zip(outs, w_outs, strict=True)):
-        assert o.dtype is dtype and o.shape == (1, n_head, L, L) and o.is_contiguous(), i
+        assert o.dtype is dtype, i
+        assert o.shape == (1, n_head, L, L), i
+        assert o.is_contiguous(), i
         assert o.data_ptr() == base + i * n_head * L * L * o.element_size(), i          # slice i of the one [nb H, L L] buffer
         assert relative(o, w) < tol["bias"], (i, relative(o, w))
-    assert dp.dtype is dtype and relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
+    assert dp.dtype is dtype, relative(dp, w_dp)
+    assert relative(dp, w_dp) < tol["dpair"], relative(dp, w_dp)
     for i in range(nb):
-        assert dgs[i].dtype is attns[i].ln_pair.weight.dtype and dws[i].dtype is attns[i].to_bias.weight.dtype, i
+        assert dgs[i].dtype is attns[i].ln_pair.weight.dtype, i
+        assert dws[i].dtype is attns[i].to_bias.weight.dtype, i
         assert relative(dgs[i], w_dgs[i]) < tol["dg"], (i, relative(dgs[i], w_dgs[i]))
         assert relative(dws[i], w_dws[i]) < tol["dW"], (i, relative(dws[i], w_dws[i]))
 
@@ -175,10 +183,12 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
     outs, dp, dgs, dws = hoist_run(attns, pair, dbs, implementation=PT)
     bound = 2e-2 if dtype is BF else 3e-3
     for o, w in zip(outs, w_outs, strict=True):
-        assert o.shape == (1, H, L, L) and relative(o, w) < bound
+        assert o.shape == (1, H, L, L)
+        assert relative(o, w) < bound
     assert relative(dp, w_dp) < bound
     for a, b, c, d in zip(dgs, w_dgs, dws, w_dws, strict=True):
-        assert relative(a, b) < bound and relative(c, d) < bound
+        assert relative(a, b) < bound
+        assert relative(c, d) < bound
     # unused bias 1, fused
     zero = [dbs[0], torch.zeros_like(dbs[1]), dbs[2]]
     w_outs, w_dp, w_dgs, w_dws = hoist_ref64(attns, pair, zero)
@@ -186,15 +196,18 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
         outs, dp, dgs, dws = hoist_run(attns, pair, dbs, use=[0, 2])
     tol = TOL[dtype]
     assert relative(dp, w_dp) < tol["dpair"]
-    assert torch.count_nonzero(dgs[1]) == 0 and torch.count_nonzero(dws[1]) == 0
+    assert torch.count_nonzero(dgs[1]) == 0
+    assert torch.count_nonzero(dws[1]) == 0
     for i in (0, 2):
-        assert relative(dgs[i], w_dgs[i]) < tol["dg"] and relative(dws[i], w_dws[i]) < tol["dW"], i
+        assert relative(dgs[i], w_dgs[i]) < tol["dg"], i
+        assert relative(dws[i], w_dws[i]) < tol["dW"], i
 
 
 def test_serves_and_declines(monkeypatch):
     attns = attentions(2, 16, 48, BF)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=BF)
-    assert HO.serves(MW, attns, p) and HO.serves(ImplementationType.TRITON, attns, p)
+    assert HO.serves(MW, attns, p)
+    assert HO.serves(ImplementationType.TRITON, attns, p)
     assert not HO.serves(PT, attns, p)                                                  # the PyTorch implementation: the fold
     assert not HO.serves(MW, attns, p.expand(2, -1, -1, -1))                             # B == 1 only
     assert not HO.serves(MW, attns, p.half())                                            # bf16 / fp32 only
@@ -205,7 +218,7 @@ def test_serves_and_declines(monkeypatch):
         assert not HO.serves(MW, a32, p.float())                                         # fp32 under autocast: the fold
     monkeypatch.setenv("MINIWORLD_BIAS_ONLY_DIT_HOIST", "0")
     assert not HO.serves(MW, attns, p)
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="must share eps and head count"):
         pair_bias_all([*attns, *attentions(1, 24, 32, BF)], p, implementation=MW)       # head counts differ
 
 
@@ -217,7 +230,8 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
     reruns; no local memory. y takes the path's dtype (that of x)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
     for name, regs, lmem in HK.kernel_attrs():
-        assert lmem == 0 and regs <= 128, (name, regs, lmem)
+        assert lmem == 0, (name, regs, lmem)
+        assert regs <= 128, (name, regs, lmem)
     g = torch.Generator(device="cuda").manual_seed(R)
     x = (3 * torch.randn(R, 128, device="cuda", generator=g) + 0.5).to(xdt)
     dy = torch.randn(R, 128, device="cuda", generator=g)
@@ -233,7 +247,8 @@ def test_ln0_backward_rows_against_fp64(R, xdt, odt):
         torch.cuda.synchronize()
         outs.append((dx, y))
     dx, y = outs[0]
-    assert torch.isfinite(dx.float()).all() and torch.isfinite(y.float()).all()
+    assert torch.isfinite(dx.float()).all()
+    assert torch.isfinite(y.float()).all()
     assert relative(dx, xd.grad) < (6e-3 if odt is BF else 1e-5), relative(dx, xd.grad)
     ln = y.double() if K == 128 else y[:, :128].double() + y[:, 128:].double()
     assert relative(ln, ln64) < 3e-5, relative(ln, ln64)
@@ -276,7 +291,7 @@ def stack_step(blocks, x, c, p, mask, dy, dtype, hoist, wrap=None):
     leaves = [t.detach().to(dtype).requires_grad_(True) for t in (x, c, p)]
     for b in blocks:
         b.zero_grad(set_to_none=True)
-    y = forward(blocks, *leaves, mask, hoist, wrap)
+    y = forward(blocks, leaves[0], leaves[1], leaves[2], mask, hoist, wrap)
     y.backward(dy.to(dtype))
     return [y.detach()] + [t.grad for t in leaves] + [q.grad for b in blocks for q in b.parameters()]
 
@@ -320,7 +335,8 @@ def test_hoisted_stack_every_gradient_against_fp64(nb, L, A, masked, n_head, d_h
         base_m, k, floor = ref, 1.5, 1e-3
     xb, cb, pb = (t.to(dtype).requires_grad_(True) for t in (x, c, p))
     bias0 = pair_bias_all(fast, pb)[0]
-    assert HO.serves(MW, [b.attention for b in fast], pb) and TR.serves(fast[0], xb, cb, None, mask, bias=bias0)
+    assert HO.serves(MW, [b.attention for b in fast], pb)
+    assert TR.serves(fast[0], xb, cb, None, mask, bias=bias0)
     del bias0
     cap, orig = {}, HO._hoist_bwd
 
@@ -423,8 +439,9 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
     pair: the forward launches one kernel fewer (no pair_bias), the backward has no pair_bias_bwd (nor its pair_bias_bwd_fin merge)
     and exactly one finalize: as many launches as the pair's backward minus its pair kernels, plus finalize where the pair's was
     merged into pair_bias_bwd_fin."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
     _, fast = stacks(1, n_head, d_head, seed=8)
     blk = fast[0].to(dtype)
     L, A, H = 384, 4, n_head
@@ -455,7 +472,8 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
         nb_ = captured(lambda: bwd(x, c, p, mask, params, saved, dy))
         nbh = captured(lambda: bwdh(x, c, mask, params, saved_h, dy, db))
     assert not any("pair_bias" in n for n in nfh), nfh
-    assert sum("softmax_t" in n for n in nfh) == 1 and len(nfh) == len(nf) - 1, (nf, nfh)
+    assert sum("softmax_t" in n for n in nfh) == 1, (nf, nfh)
+    assert len(nfh) == len(nf) - 1, (nf, nfh)
     assert not any("pair_bias" in n for n in nbh), nbh
     assert sum("finalize" in n for n in nbh) == 1, nbh
     merged = any("pair_bias_bwd_fin" in n for n in nb_)

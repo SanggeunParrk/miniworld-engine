@@ -593,7 +593,8 @@ def test_pv_core_p_early_within_fp64_and_bitwise_the_plain_builds(S, L, n_head, 
         core(v, P, out, S, g=g)
         torch.cuda.synchronize()
         outs.append(out.clone())
-    assert torch.equal(outs[2], outs[1]) and torch.equal(outs[2], outs[0])
+    assert torch.equal(outs[2], outs[1])
+    assert torch.equal(outs[2], outs[0])
     _pv_within_fp64(outs[2], P, v, g, S, L, n_head, d_head)
 
 
@@ -649,23 +650,30 @@ def test_pv_core_p_early_selection(inf3b, monkeypatch, env):
         for _ in range(2):                                            # a P-cache miss (hoist right before), then a hit
             out = fast(x, c, p)
     torch.cuda.synchronize()
-    assert inf3b and torch.isfinite(out.float()).all()
+    assert inf3b
+    assert torch.isfinite(out.float()).all()
     on = env is None
-    assert early and all(e == on for e in early), early
-    assert serial == [on] * len(serial) and len(serial) == 2, serial      # one block: its front is the step's first, each step
+    assert early, early
+    assert all(e == on for e in early), early
+    assert serial == [on] * len(serial), serial
+    assert len(serial) == 2, serial      # one block: its front is the step's first, each step
     dev = torch.cuda.current_device()
     for kind in ("pv", "pvpdl"):
         assert not TR._op(kind, torch.device("cuda", dev)).p_early, kind
-    assert "P_EARLY" not in open(C._dir / "bo_pvdpb.cu").read()
+    assert "P_EARLY" not in (C._dir / "bo_pvdpb.cu").read_text()
 
 
 def test_pv_core_served_keys_per_v_tile(monkeypatch):
     """VB (keys per v tile): 128 below 16 samples (inference); 256 at L768 for 16 x 48 with A >= 16 (the training forward and dV at
     A = 48: in-process A/B); 192 / 256 where one divides L otherwise; and the bound launch follows it (a spy on the cache key)."""
     monkeypatch.delenv("MINIWORLD_BIAS_ONLY_DIT_PV_VB", raising=False)
-    assert C._pv_vb(768, 48, 48) == 256 and C._pv_vb(768, 16, 48) == 256
-    assert C._pv_vb(768, 48, 32) == 192 and C._pv_vb(768, 48, 64) == 192          # other layouts: unmeasured, unchanged
-    assert C._pv_vb(384, 48, 48) == 192 and C._pv_vb(512, 48, 48) == 256 and C._pv_vb(640, 48, 48) == 128
+    assert C._pv_vb(768, 48, 48) == 256
+    assert C._pv_vb(768, 16, 48) == 256
+    assert C._pv_vb(768, 48, 32) == 192
+    assert C._pv_vb(768, 48, 64) == 192
+    assert C._pv_vb(384, 48, 48) == 192
+    assert C._pv_vb(512, 48, 48) == 256
+    assert C._pv_vb(640, 48, 48) == 128
     assert all(C._pv_vb(L, 5, 48) == 128 for L in (128, 384, 512, 640, 768))
     P, v, g, out = _pv_inputs(48, 768, 16, 48, seed=2)
     core = C.PvGateCore(torch.cuda.current_device())

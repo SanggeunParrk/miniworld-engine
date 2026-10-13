@@ -331,9 +331,13 @@ def test_defaults_and_their_switches(monkeypatch, off):
     assert all(torch.isfinite(g).all() for g in got)
     assert len(alias) == 2, alias
     if off:
-        assert not rows and not any(alias) and dpb.last == "single", (rows, alias, dpb.last)
+        assert not rows, (rows, alias, dpb.last)
+        assert not any(alias), (rows, alias, dpb.last)
+        assert dpb.last == "single", (rows, alias, dpb.last)
     else:
-        assert rows == ["pack16_cuda"] and all(alias) and dpb.last == "pair", (rows, alias, dpb.last)
+        assert rows == ["pack16_cuda"], (rows, alias, dpb.last)
+        assert all(alias), (rows, alias, dpb.last)
+        assert dpb.last == "pair", (rows, alias, dpb.last)
 
 
 @pytest.mark.parametrize("mid", ["0", "1"])
@@ -359,9 +363,12 @@ def test_one_launch_weight_pack_matches_the_torch_pack(monkeypatch, fp32_norms, 
     TR._PACKS.clear()
     ref, one = packs
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
-    assert set(one) == set(ref) and ("WnT3" in ref) == BWF.mid_on(), sorted(set(one) ^ set(ref))   # + bo_bwd_mid's transposes
+    assert set(one) == set(ref), sorted(set(one) ^ set(ref))
+    assert ("WnT3" in ref) == BWF.mid_on(), sorted(set(one) ^ set(ref))   # + bo_bwd_mid's transposes
     for k, v in ref.items():
-        assert one[k].dtype is v.dtype and one[k].shape == v.shape and torch.equal(one[k], v), k
+        assert one[k].dtype is v.dtype, k
+        assert one[k].shape == v.shape, k
+        assert torch.equal(one[k], v), k
 
 
 # ------------------------------------------------------------------------------------------------- bias gradient on CTA pairs (dpbx2)
@@ -381,7 +388,8 @@ def _dpb_case(L, A, H, DH, seed):
 def test_dpb_pair_kernel_does_not_spill(n_head, d_head):
     _sm100_only()
     k = C.DpbKernel(torch.cuda.current_device(), nh=n_head, dh=d_head).pair_kernel()
-    assert k.lmem == 0 and k.regs <= 255, (k.regs, k.lmem)
+    assert k.lmem == 0, (k.regs, k.lmem)
+    assert k.regs <= 255, (k.regs, k.lmem)
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
@@ -418,6 +426,7 @@ def test_dpb_pair_bit_identical_with_a_poisoned_allocator(monkeypatch, L, A, n_h
             op = C.DpbKernel(torch.cuda.current_device(), nh=H, dh=DH)
         _poison()
         db = torch.empty(H * L, L, device="cuda", dtype=torch.bfloat16)
+        assert op is not None
         op(do, v, P.view(H * L, L), dd, db, A)
         torch.cuda.synchronize()
         assert op.last == "pair"
@@ -514,7 +523,8 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
     H, DA, D = n_head, n_head * d_head, 768
     ins, want, BWF = _tail_case(L, A, H, d_head, L + A + H)
     op = BWF.TailBwd(torch.cuda.current_device(), H, d_head)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
     out = _run_tail(op, ins, A, L, H, DA)
     T = A * L // 128
     got = {"dz": out["dz"], "dg2": out["dGg"][:, D:], "dab": out["dab"], "dxt": out["dG"][:, 3 * D:], "ds2": out["dG"][:, 2 * D:3 * D],
@@ -528,7 +538,8 @@ def test_fused_backward_tail_kernel_against_fp64(L, A, n_head, d_head):
     again = _run_tail(op, ins, A, L, H, DA)
     for k in ("dz", "dGg", "dab", "dx1", "dy", "do", "dd"):
         assert torch.equal(again[k], out[k]), k
-    assert torch.equal(again["dG"][:, 2 * D:], out["dG"][:, 2 * D:]) and torch.equal(again["dvg"][:, DA:], out["dvg"][:, DA:])
+    assert torch.equal(again["dG"][:, 2 * D:], out["dG"][:, 2 * D:])
+    assert torch.equal(again["dvg"][:, DA:], out["dvg"][:, DA:])
     assert torch.equal(again["part"][:3, :4 * T], out["part"][:3, :4 * T])
 
 
@@ -550,7 +561,8 @@ def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
     wraw = torch.randn(4 * D, DC, device="cuda", generator=g)
     w1, w2 = 1 + 0.1 * torch.randn(DC, device="cuda", generator=g), 1 + 0.1 * torch.randn(DC, device="cuda", generator=g)
     op = BWF.Wgrad(torch.cuda.current_device(), da)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
 
     def run():
         outs = tuple(torch.full(s, float("nan"), device="cuda", dtype=odt) for s in shapes)
@@ -568,7 +580,9 @@ def test_fused_backward_wgrad_kernel_against_fp64(da, M, f32):
     assert relative64(dwu, dwn * w) < 6e-3
     assert relative64(pw, (dwn * wraw.double()).view(192, 16, DC).sum(1)) < 1e-3
     o2, dwu2, pw2 = run()
-    assert all(torch.equal(a, b) for a, b in zip(outs, o2, strict=True)) and torch.equal(dwu, dwu2) and torch.equal(pw, pw2)
+    assert all(torch.equal(a, b) for a, b in zip(outs, o2, strict=True))
+    assert torch.equal(dwu, dwu2)
+    assert torch.equal(pw, pw2)
 
 
 @pytest.mark.parametrize("nh", [12, 16, 24])
@@ -646,8 +660,10 @@ def test_fused_backward_pvdpb_kernel_bit_identical_to_two_launches(monkeypatch, 
         assert both(do, Ptb, dv[:, :DA], vg[:, :DA], Pb, dd, db, A)
         torch.cuda.synchronize()
         assert dpb.last == "single"
-        assert torch.isfinite(dv[:, :DA].float()).all() and torch.isfinite(db.float()).all()
-        assert torch.equal(dv[:, :DA], dv0[:, :DA]) and torch.equal(db, db0)
+        assert torch.isfinite(dv[:, :DA].float()).all()
+        assert torch.isfinite(db.float()).all()
+        assert torch.equal(dv[:, :DA], dv0[:, :DA])
+        assert torch.equal(db, db0)
         assert dv[:, DA:].isnan().all()                                                 # the gate half untouched
     if pair:                                                                            # at the step's default the op declines
         monkeypatch.delenv("MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR")
@@ -668,19 +684,20 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
     H, DA, D, DC, M, bf, nan = n_head, n_head * d_head, 768, 384, A * L, torch.bfloat16, float("nan")
     T = M // 128
     g = torch.Generator(device="cuda").manual_seed(L + A + H + 1)
-    rn = lambda *s, sc=1.0: (sc * torch.randn(*s, device="cuda", generator=g)).to(bf)        # noqa: E731
+    rn = lambda *s, sc=1.0: (sc * torch.randn(*s, device="cuda", generator=g)).to(bf)
     dvg, dGg, G, x, c = rn(M, 2 * DA), rn(M, 2 * D), rn(M, 4 * D), rn(M, D), rn(M, DC)
     dGt = rn(M, 2 * D)
     dx1 = torch.randn(M, D, device="cuda", generator=g)
     bs1 = 0.1 * torch.randn(D, device="cuda", generator=g)
-    stat = lambda t: torch.stack([t.double().mean(1), (t.double().var(1, unbiased=False) + 1e-5).rsqrt()], 1).float().contiguous()  # noqa: E731
+    stat = lambda t: torch.stack([t.double().mean(1), (t.double().var(1, unbiased=False) + 1e-5).rsqrt()], 1).float().contiguous()
     xst, cst = stat(x), stat(c)
     Wv, Wgt = rn(DA, D, sc=D ** -0.5), rn(DA, D, sc=D ** -0.5)
     Ws0, Ws1, Wn = rn(D, DC, sc=DC ** -0.5), rn(D, DC, sc=DC ** -0.5), rn(4 * D, DC, sc=DC ** -0.5)
     W = {"WvT": Wv.t().contiguous(), "WgtT": Wgt.t().contiguous(), "WsT0": Ws0.t().contiguous(), "WsT1": Ws1.t().contiguous(),
          **{f"WnT{i}": Wn[i * D:(i + 1) * D].t().contiguous() for i in range(4)}}
     op = BWF.MidBwd(torch.cuda.current_device(), H, d_head)
-    assert op.k.lmem == 0 and op.k.regs <= 168, (op.k.regs, op.k.lmem)
+    assert op.k.lmem == 0, (op.k.regs, op.k.lmem)
+    assert op.k.regs <= 168, (op.k.regs, op.k.lmem)
 
     def run():
         dG = torch.full((M, 4 * D), nan, device="cuda", dtype=bf)
@@ -692,7 +709,7 @@ def test_fused_backward_mid_kernel_against_fp64(L, A, n_head, d_head):
         assert n == 4 * T
         return out
     out = run()
-    d = lambda t: t.double()                                                                  # noqa: E731
+    d = lambda t: t.double()
     dxa = d(dvg) @ torch.cat([d(Wv), d(Wgt)])
     xh = (d(x) - d(xst[:, :1])) * d(xst[:, 1:])
     s1 = torch.sigmoid(d(G[:, :D]) + d(bs1))
@@ -726,8 +743,9 @@ def test_fused_backward_launch_count(monkeypatch, n_head, d_head, fused, tail, p
     """The captured backward of one block (``_bwd`` under static weights: no repack) at L384: 11 kernel launches at the defaults
     (bo_bwd_tail x 3, bo_pvdpb, the five of dxa / adaln_a_bwd / dchat / dcg / cond_bwd, bo_wgrad, pair_bias_bwd_fin); 9 with
     bo_bwd_mid on (_BWD_MID=1); the per-step path launches 23 (BWD_FUSED=0)."""
-    from miniworld_engine.kernels import _capture
     from tests.cuda_graph_nodes import graph_kernels
+
+    from miniworld_engine.kernels import _capture
     from miniworld_engine.kernels.bias_only_dit.cuda import bwd_fused as BWF
     for k, v in (("FUSED", fused), ("TAIL", tail), ("PBFIN", pbfin), ("PVDPB", pvdpb), ("MID", mid)):
         if v is None:                                                               # the defaults
@@ -740,7 +758,7 @@ def test_fused_backward_launch_count(monkeypatch, n_head, d_head, fused, tail, p
     x, c, p, dy = (t.bfloat16() for t in (x, c, p, dy))
     params = [fast.get_parameter(n) for n in TR.NAMES]
     with _capture.static_weights(), torch.no_grad():
-        out, *saved = TR._fwd(x, c, p, mask, params)
+        _, *saved = TR._fwd(x, c, p, mask, params)
         TR._bwd(x, c, p, mask, params, saved, dy)                                     # eager: packs, tables, counters
         torch.cuda.synchronize()
         graph = torch.cuda.CUDAGraph(keep_graph=True)

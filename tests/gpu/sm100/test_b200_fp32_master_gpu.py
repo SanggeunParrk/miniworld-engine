@@ -131,8 +131,9 @@ def test_swa_dit_block_and_modulation():
                                               ((6 * C, C), (3 * C, C), (C, C), (C, C), (512, C), (C, 256))])
 
         def forward(self, q, c):
-            assert refusal(q, cos, sin, seq, *self.ws[1:], n_head=4, half_window=64, cond=c, wmod=self.ws[0]) is None
-            return swa_dit_block(q, swa_dit_hoist_modulation(c, self.ws[0]), cos, sin, seq, *self.ws[1:], B, 64)
+            wqkv, wg, wo, wu, wd = (self.ws[i] for i in range(1, 6))
+            assert refusal(q, cos, sin, seq, wqkv, wg, wo, wu, wd, n_head=4, half_window=64, cond=c, wmod=self.ws[0]) is None
+            return swa_dit_block(q, swa_dit_hoist_modulation(c, self.ws[0]), cos, sin, seq, wqkv, wg, wo, wu, wd, B, 64)
 
     _check(Block, [_r(A * B, S, C), _r(B, S, C)], lambda m, v: m(v[0], v[1]))
 
@@ -153,8 +154,9 @@ def test_token_pair_init_bf16_streams_fp32_weights():
 
     def run(left, right):
         leaves = [t.detach().clone().requires_grad_() for t in (left, right, w_rel, w_bond)]
-        assert refusal(*leaves, bond) is None
-        z = token_pair_init(*leaves, *ids, bond)
+        left_, right_, w_rel_, w_bond_ = leaves
+        assert refusal(left_, right_, w_rel_, w_bond_, bond) is None
+        z = token_pair_init(left_, right_, w_rel_, w_bond_, ids[0], ids[1], ids[2], ids[3], ids[4], bond)
         return z, torch.autograd.grad(z, leaves, dz)
 
     z16, g16 = run(left16, right16)
