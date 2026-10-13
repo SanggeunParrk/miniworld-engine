@@ -11,6 +11,7 @@ import functools
 from pathlib import Path
 
 import torch
+from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
@@ -24,7 +25,11 @@ def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False
     assert rpb in (1, 2, 4, 8), rpb
     ensure_cuda_home()
     hopper = torch.cuda.get_device_capability() == (9, 0)
-    name = "token_dit_train_rows_cuda" if (d, hd) == (768, 48) else f"token_dit_train_rows_cuda_{d}_{hd}"
+    name = (
+        "token_dit_train_rows_cuda"
+        if (d, hd) == (768, 48)
+        else f"token_dit_train_rows_cuda_{d}_{hd}"
+    )
     if rpb != 8:
         name += f"_rpb{rpb}"
     if empty_uniform:
@@ -32,14 +37,25 @@ def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False
     return load_extension(
         name=name,
         sources=[str(_dir / "token_dit_train_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__", f"-DTD_D={d}", f"-DTD_HD={hd}", f"-DTD_RPB={rpb}",
-                           *(["-DTOKEN_EMPTY_UNIFORM=1"] if empty_uniform else []),
-                           *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",)))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            f"-DTD_D={d}",
+            f"-DTD_HD={hd}",
+            f"-DTD_RPB={rpb}",
+            *(["-DTOKEN_EMPTY_UNIFORM=1"] if empty_uniform else []),
+            *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
-RPB = 8          # rows per block of the D-wide kernels (token_dit_train_rows.cu)
+RPB = 8  # rows per block of the D-wide kernels (token_dit_train_rows.cu)
 
 
 def partials(M: int, width: int, device, rpb: int = RPB) -> torch.Tensor:
@@ -131,17 +147,29 @@ def owned_gemm_ext():
     from torch.utils.cpp_extension import load_inline
     from ..._nvcc import ensure_cuda_home
     import hashlib
-    import os
 
     cuda_home = ensure_cuda_home()
-    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+    if cuda_home is None or tuple(
+        map(int, (torch.version.cuda or "0.0").split(".")[:2])
+    ) > (12, 9):
         raise RuntimeError("Token Hopper owned GEMMs require CUDA <= 12.9")
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    build = root / "token_owned_gemm" / hashlib.sha256(_OWNED_GEMM_CPP.encode()).hexdigest()[:16]
+    root = settings.engine_jit_root()
+    build = (
+        root
+        / "token_owned_gemm"
+        / hashlib.sha256(_OWNED_GEMM_CPP.encode()).hexdigest()[:16]
+    )
     build.mkdir(parents=True, exist_ok=True)
     return load_inline(
-        name="token_hopper_owned_gemm", cpp_sources=_OWNED_GEMM_CPP,
-        functions=["owned_mm", "owned_addmm"], with_cuda=True, build_directory=str(build),
-        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
-        extra_cflags=["-O3"], extra_ldflags=["-lcublas", "-lcublasLt"], verbose=False,
+        name="token_hopper_owned_gemm",
+        cpp_sources=_OWNED_GEMM_CPP,
+        functions=["owned_mm", "owned_addmm"],
+        with_cuda=True,
+        build_directory=str(build),
+        extra_include_paths=[
+            str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
+        ],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublas", "-lcublasLt"],
+        verbose=False,
     )

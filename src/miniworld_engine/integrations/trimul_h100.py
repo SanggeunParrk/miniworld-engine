@@ -16,8 +16,7 @@ SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 
 def _b200style_serves(module, pair):
     """Explicit Hopper port; keep measured default selections until qualified."""
-    import os
-    if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE", "0") != "1":
+    if not settings.current().trimul_h100_b200style:
         return False
     if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
             or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2]
@@ -50,8 +49,7 @@ def _b200style_update(module, pair, mask, dropscale, bidirectional):
 
 
 def _native_buckets_enabled():
-    import os
-    return os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
+    return settings.current().trimul_h100_native_buckets is True
 
 
 def _selected_uni_d256(module, pair):
@@ -219,8 +217,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         module.to_out.weight,
     )
     if bidirectional and d == 64:
-        import os
-        if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE", "0") == "1":
+        if settings.current().trimul_h100_b200style:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_b200gate import (
                 bidirectional_trimul as apply,
             )
@@ -232,8 +229,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         apply = bidirectional_trimul
     elif d in (64, 256, 384, 512):
         if d == 64:
-            import os
-            if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE", "0") == "1":
+            if settings.current().trimul_h100_b200style:
                 from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_b200gate import (
                     single_trimul,
                 )
@@ -315,7 +311,6 @@ def _native_wide_inference_bucket(module, pair):
 def serves_inference(
     module, pair: torch.Tensor, *, bidirectional: bool, dropscale=None
 ) -> bool:
-    import os
     if (
         module.implementation != ImplementationType.MINIWORLD
         or settings.current().engine_backend == "triton"
@@ -341,7 +336,7 @@ def serves_inference(
     if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))
             or _native_wide_inference_bucket(module, pair))
             and (pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
-                 if os.environ.get("MINIWORLD_TRIMUL_H100_B200STYLE") == "1"
+                 if settings.current().trimul_h100_b200style
                  else (128, 256, 384, 512, 640, 768))
                  or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
                  or any(p.dtype != torch.float32 for p in (

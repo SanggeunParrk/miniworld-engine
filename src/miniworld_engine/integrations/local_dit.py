@@ -56,7 +56,6 @@ turns it off).
 from __future__ import annotations
 
 import contextlib
-import os
 import warnings
 import weakref
 from types import SimpleNamespace
@@ -212,6 +211,12 @@ def _hoisting() -> bool:
     return settings.current().local_dit_hoist
 
 
+# Candidate routes kept compiled and reachable but not selectable at run time (formerly default-off environment switches).
+# The sm_100 kernels on Hopper (formerly MINIWORLD_LOCAL_DIT_H100); dead at the default.
+_SM100_KERNELS_ON_HOPPER = False
+# Graph-owned cuBLAS workspace for the Hopper scopes (formerly MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS); dead at the default.
+_OWNED_BLAS_CANDIDATE = False
+
 _FAILED = False
 F32 = torch.float32
 _LOADED32: set[int] = set()
@@ -349,11 +354,11 @@ def serves(module, single, cond, pair, mask) -> bool:
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
     cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
-    hopper = cap == (9, 0) and os.environ.get("MINIWORLD_LOCAL_DIT_H100", "0") == "1"
+    hopper = cap == (9, 0) and _SM100_KERNELS_ON_HOPPER
     if (
         hopper
         and torch.is_grad_enabled()
-        and os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN", "0") != "1"
+        and settings.current().local_dit_h100_train is not True
     ):
         return False
     if not (cap == (10, 0) or hopper):
@@ -425,12 +430,12 @@ class _Unserved(NotImplementedError):
 
 def _serves_hopper_training(module, single, cond, pair, mask):
     """Hopper training: True (native CUDA), None (not Hopper / not training: the other routes decide) or, for a call outside
-    the native geometry, None as well -- the module's composed path serves it. ``MINIWORLD_LOCAL_DIT_H100_TRAIN=1`` set
+    the native geometry, None as well -- the module's composed path serves it. ``local_dit_h100_train=True`` set
     explicitly keeps the contract error."""
     try:
         return _require_hopper_training(module, single, cond, pair, mask)
     except _Unserved:
-        if os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN") == "1":
+        if settings.current().local_dit_h100_train is True:
             raise
         return None
 
@@ -456,7 +461,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
     ):
         return None
     # Preserve the explicit diagnostic comparison switch, outside production.
-    if os.environ.get("MINIWORLD_LOCAL_DIT_H100_TRAIN", "1") == "0":
+    if settings.current().local_dit_h100_train is False:
         return False
 
     def require(ok, detail):
@@ -939,7 +944,7 @@ def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
     return (
         scope
         and torch.cuda.get_device_capability(single.device) == (9, 0)
-        and os.environ.get("MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS", "0") == "1"
+        and _OWNED_BLAS_CANDIDATE
     )
 
 

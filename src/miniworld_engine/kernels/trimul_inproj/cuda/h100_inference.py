@@ -1,7 +1,6 @@
 """Native K1/K3 inference, packaged with its measured tile table and CUDA sources."""
 
 import json
-import os
 import torch
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -98,8 +97,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
         T._launch_module()._make_context_current(x.device.index)
         # Measured D384/L512 outgoing candidate. Keep a separate loaded unit
         # so toggling the opt-in never reuses a cubin with different arithmetic.
-        native_residual = (cz == ch == 384 and n == 512 and direction == 1
-                           and os.environ.get("MINIWORLD_TRIMUL_H100_K3W_NATIVE_RESIDUAL", "1") == "1")
+        native_residual = cz == ch == 384 and n == 512 and direction == 1
         kk = _kernels(True) if native_residual else _kernels()
         from miniworld_engine.autotune.fused_config import unpack_trimul
         cfg = unpack_trimul(config)

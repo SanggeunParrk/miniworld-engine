@@ -10,7 +10,7 @@ D=128), bf16, M%128==0.
   (fair comparison), calls `transition_b2b_fwd`, reshapes back. Weight layouts match `nn.Linear.weight`
   directly (wa/wb `[ND,K]`, ws `[D,ND]`).
 - `modules/transition/module.py::_inference_forward` routes to it when
-  `_cuda_b2b_inference_enabled()` (env `MINIWORLD_TRANSITION_CUDA_B2B`, default ON) AND d_hidden==128,
+  `_cuda_b2b_inference_enabled()` (setting `transition_cuda_b2b`, default ON) AND d_hidden==128,
   n==4, x is CUDA bf16, M%128==0. Otherwise falls back to the Triton b2b path.
 
 ## Correctness (real weights, L=1024)
@@ -35,7 +35,7 @@ common LN-stats pass (`stats_triton`) + reshape overhead added around the kernel
 above with randomized weights.
 
 ## Next lever
-Fuse the LN stats into the CUDA b2b kernel (cf. MINIWORLD_TRANSITION_FUSE_STATS for the Triton path) to
+Fuse the LN stats into the CUDA b2b kernel (cf. the `transition_fuse_stats` setting for the Triton path) to
 close the 1.29x->1.20x gap — the kernel already loads the full-K row.
 
 ## Module TRAINING A/B (H100, cudagraph=manual, bf16-mixed, d_pair=128, ms)

@@ -23,8 +23,7 @@ Backward (7 launches, ``h100_sources/d64_train/d64_bwd_wg.cu``, wgmma + TMA, per
 Nothing is cached across calls except compiled kernels, tensor-map descriptors keyed by address
 and launch templates: every call owns its activations and weight pack.
 B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
-The default covers L384/768; MINIWORLD_TRIMUL_H100_TRAIN_CUDA=1 selects
-native preparation and the six L128..768 buckets for the CUDA sweep candidate.
+The default covers L384/768; native preparation runs inside the qualified D64 launch scope.
 """
 
 from __future__ import annotations
@@ -128,10 +127,6 @@ def _front(x, w1, maskf, gi, bi, ab):
 
 
 def _bmm(a, b, *, out):
-    import os
-    if os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM", "0") == "1":
-        from ._h100_pack import owned_bmm
-        return owned_bmm(a, b, out=out)
     return torch.bmm(a, b, out=out)
 
 

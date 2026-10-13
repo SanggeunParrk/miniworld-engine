@@ -49,7 +49,6 @@ other small gradients. ln_pair / to_bias get their gradients from the hoist.
 from __future__ import annotations
 
 import math
-import os
 import warnings
 
 import torch
@@ -206,18 +205,21 @@ def _dg_direct() -> bool:
     return settings.current().bias_only_dit_bwd_dg
 
 
+#: Hopper pair-bias logits stay fp32 into the softmax (the shipped path); False keeps the bf16 rounding (private candidate).
+_H100_FP32_LOGITS = True
+#: Exact-cuBLAS gamma shadow for H = 16, DA = 1024 on Hopper (private candidate, off: the shipped path).
+_H100_SHADOW_GAMMA = False
+
+
 def _fp32_logits(dev) -> bool:
     """Hopper: the pair bias leaves the projection as fp32 logits (the mma accumulators, unrounded) into the softmax, instead of
     being rounded to bf16 first. The rounding was the largest single error of the ln_pair / to_bias / pair gradients (ln_pair.weight
     against fp64: 0.0107 -> 0.0090 at L384 A3 24 x 32, 0.0106 -> 0.0095 at L768 A16 16 x 64; the bf16 PyTorch block's 0.0088 / 0.0094);
-    it costs one fp32 [H, L, L] buffer (written and read once). MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS=0 (read per call) keeps the
-    bf16 logits. The sm_100a path is unchanged."""
+    it costs one fp32 [H, L, L] buffer (written and read once). ``_H100_FP32_LOGITS = False`` keeps the bf16 logits.
+    The sm_100a path is unchanged."""
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
-    return (
-        h100_enabled(dev)
-        and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS", "1") != "0"
-    )
+    return h100_enabled(dev) and _H100_FP32_LOGITS
 
 
 def _bwd_fused(dev, H, DA):
@@ -241,17 +243,15 @@ def _pack_h100(P):
 
     bt = ext()
     g = lambda n: P[n]
-    pipeline = os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
     cast = lambda t: (
         t.detach()
-        if pipeline and t.dtype is torch.float32
+        if t.dtype is torch.float32
         else bt.pack90([t.detach()], [], True).view(t.shape)
     )
 
     def cat(ts, scales=(), fp32=False):
         if (
-            pipeline
-            and len(ts) == 1
+            len(ts) == 1
             and not scales
             and ts[0].dtype is (torch.float32 if fp32 else BF)
         ):
@@ -964,7 +964,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         and H == 16
         and DA == 1024
         and L in (384, 768)
-        and os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_SHADOW_GAMMA", "0") == "1"
+        and _H100_SHADOW_GAMMA
     ):
         # Reuse the exact cuBLAS helper; the small gamma gradient is sensitive
         # to folding and BF16 rounding along the pair-bias chain.

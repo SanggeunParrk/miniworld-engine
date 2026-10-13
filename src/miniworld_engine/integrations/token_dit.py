@@ -20,7 +20,6 @@ False -- and returns the first L rows.
 
 from __future__ import annotations
 
-import os
 from types import SimpleNamespace
 
 import torch
@@ -162,11 +161,6 @@ def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) 
         ),
         "contiguous matching-dtype parameters (FP32 masters are supported for BF16)",
     )
-    if torch.is_grad_enabled():
-        require(
-            os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "1") != "0",
-            "native training enabled",
-        )
     return True
 
 

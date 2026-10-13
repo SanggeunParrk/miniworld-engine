@@ -7,9 +7,7 @@ buckets, so H100 training reconstructs that FP32 rounding with native CUDA and
 cuBLAS (ln_pair has no beta, so only dWb is repaired). This accuracy-first shadow
 materializes extra FP32 workspaces: the B200 tensor lifetimes and former fast-path
 latency do not describe this training default.
-MINIWORLD_APB_H100_TRAIN=0 retains the explicit legacy comparison path; disabling
-MINIWORLD_APB_H100_BETA_SHADOW (the name predates the beta removal) selects the
-known-inaccurate experimental gradient.
+``settings.apb_h100_train = False`` retains the explicit legacy comparison path.
 
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
@@ -37,7 +35,6 @@ masked_fill's zero derivative at every masked key."""
 from __future__ import annotations
 
 import math
-import os
 
 import torch
 from torch.autograd.function import once_differentiable
@@ -48,29 +45,57 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
-SHAPES = ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))   # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 24 x 16, 16 x 32
+SHAPES = (
+    (8, 384),
+    (12, 384),
+    (16, 384),
+    (24, 384),
+    (16, 512),
+)  # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 24 x 16, 16 x 32
 LOG2E = math.log2(math.e)
-NEG = -1e30                     # masked keys: finite, so a fully masked sample stays NaN-free
+NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
 
 
 def native_training_enabled() -> bool:
     """Validated H100 CUDA training; explicit zero retains the legacy baseline."""
-    return os.environ.get("MINIWORLD_APB_H100_TRAIN", "1") == "1"
+    return settings.current().apb_h100_train
 
 
-def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> bool:
-    if module.implementation != ImplementationType.MINIWORLD or settings.current().engine_backend == "triton":
+def _eligible(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> bool:
+    if (
+        module.implementation != ImplementationType.MINIWORLD
+        or settings.current().engine_backend == "triton"
+    ):
         return False
     H, D = module.n_head, single.shape[-1]
-    if module.use_qk_norm or (H, D) not in SHAPES or tuple(module.to_query.weight.shape) != (D, D):
+    if (
+        module.use_qk_norm
+        or (H, D) not in SHAPES
+        or tuple(module.to_query.weight.shape) != (D, D)
+    ):
         return False
-    if tuple(module.to_bias.weight.shape) != (H, DP) or module.ln_single.weight is None or module.ln_pair.weight is None:
+    if (
+        tuple(module.to_bias.weight.shape) != (H, DP)
+        or module.ln_single.weight is None
+        or module.ln_pair.weight is None
+    ):
         return False
-    if not single.is_cuda or single.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
+    if (
+        not single.is_cuda
+        or single.dtype != torch.bfloat16
+        or pair.dtype != torch.bfloat16
+    ):
         return False
-    if single.ndim != 3 or single.shape[0] != 1 or single.shape[2] != D or not single.is_contiguous():
+    if (
+        single.ndim != 3
+        or single.shape[0] != 1
+        or single.shape[2] != D
+        or not single.is_contiguous()
+    ):
         return False
     L = single.shape[1]
     if tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
@@ -78,50 +103,90 @@ def _eligible(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tens
     if mask is not None and tuple(mask.shape) != (1, L):
         return False
     capability = torch.cuda.get_device_capability(single.device)
-    return capability == (10, 0) or (capability == (9, 0) and L % 128 == 0
-                                    and (not torch.is_grad_enabled() or native_training_enabled()))
+    return capability == (10, 0) or (
+        capability == (9, 0)
+        and L % 128 == 0
+        and (not torch.is_grad_enabled() or native_training_enabled())
+    )
 
 
-def serves_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    return not torch.is_grad_enabled() and single.shape[1] % 16 == 0 and _eligible(module, single, pair, mask)
+def serves_inference(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
+) -> bool:
+    return (
+        not torch.is_grad_enabled()
+        and single.shape[1] % 16 == 0
+        and _eligible(module, single, pair, mask)
+    )
 
 
-def serves_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    return torch.is_grad_enabled() and single.shape[1] % 128 == 0 and _eligible(module, single, pair, mask)
+def serves_train(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
+) -> bool:
+    return (
+        torch.is_grad_enabled()
+        and single.shape[1] % 128 == 0
+        and _eligible(module, single, pair, mask)
+    )
 
 
 def _leaves(module) -> list[torch.Tensor]:
     """The module's parameters as they are (any float dtype, e.g. an fp32 master): ln_single w / b, Wq, bq, Wk, Wv, Wg, Wo,
     ln_pair w, Wb. The ops cast them (``_kernel_leaves``) outside autograd, so fp32 parameters get unrounded fp32 gradients."""
-    return [module.ln_single.weight, module.ln_single.bias, module.to_query.weight, module.to_query.bias, module.to_key.weight,
-            module.to_value.weight, module.to_gate.weight, module.to_out.weight, module.ln_pair.weight,
-            module.to_bias.weight]
+    return [
+        module.ln_single.weight,
+        module.ln_single.bias,
+        module.to_query.weight,
+        module.to_query.bias,
+        module.to_key.weight,
+        module.to_value.weight,
+        module.to_gate.weight,
+        module.to_out.weight,
+        module.ln_pair.weight,
+        module.to_bias.weight,
+    ]
 
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
     """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
     # Compiled, the casts are aten ops (traced, fused by the compiler; the same round-to-nearest as the launch below).
-    if torch.cuda.get_device_capability(leaves[0].device) == (9, 0) and not torch.compiler.is_compiling():
+    if (
+        torch.cuda.get_device_capability(leaves[0].device) == (9, 0)
+        and not torch.compiler.is_compiling()
+    ):
         return _rows().ext().cast_leaves(leaves)
     bf = torch.bfloat16
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
-    return [lnw.float(), lnb.float(), wq.to(bf), bq.to(bf), wk.to(bf), wv.to(bf), wg.to(bf), wo.to(bf), lnpw.float(),
-            wb.to(bf)]
+    return [
+        lnw.float(),
+        lnb.float(),
+        wq.to(bf),
+        bq.to(bf),
+        wk.to(bf),
+        wv.to(bf),
+        wg.to(bf),
+        wo.to(bf),
+        lnpw.float(),
+        wb.to(bf),
+    ]
 
 
 def _rows():
     from miniworld_engine.kernels.augmented_attention.cuda import apb as rows
+
     return rows
 
 
 def _sm100():
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
     return sm100
 
 
 def _training_core(device):
     if torch.cuda.get_device_capability(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
         return sm90
     return _sm100()
 
@@ -129,6 +194,7 @@ def _training_core(device):
 def _inference_core(device, heads: int, d: int):
     if torch.cuda.get_device_capability(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
         return sm90.ApbInferenceCore(device.index, heads, d)
     return _sm100().ApbInferenceCore(device.index, heads, d)
 
@@ -149,8 +215,13 @@ def _inference_packs(params, leaves):
     call; repacking costs a launch). Keyed on the parameters themselves (``params``), not on ``leaves``, their kernel-dtype casts,
     which are fresh tensors per call for fp32 parameters. Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs
     once, recorded, so each replay packs the weights as they are then."""
-    build = lambda: (*_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E), params)
-    return _capture.lookup(_packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8)[:4]
+    build = lambda: (
+        *_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E),
+        params,
+    )
+    return _capture.lookup(
+        _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8
+    )[:4]
 
 
 def _prep(leaves, qs: float, ws: float):
@@ -162,7 +233,22 @@ def _prep(leaves, qs: float, ws: float):
     bvec = wq.new_empty((4 * W,))
     wf = wq.new_empty((H, DP))
     wop = wq.new_empty((D, W)) if W != D else None
-    _rows().ext().prep(wq, bq, wk, wv, wg, wo if wop is not None else None, wb, lnpw, wpack, bvec, wop, wf, qs, ws)
+    _rows().ext().prep(
+        wq,
+        bq,
+        wk,
+        wv,
+        wg,
+        wo if wop is not None else None,
+        wb,
+        lnpw,
+        wpack,
+        bvec,
+        wop,
+        wf,
+        qs,
+        ws,
+    )
     return wpack, bvec, wf, wop
 
 
@@ -171,13 +257,21 @@ def _inference_fake(single, pair, mask, leaves, eps_s, eps_p):
 
 
 @opaque(fake=_inference_fake, name="apb_b200_inference")
-def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-              eps_p: float) -> torch.Tensor:
+def inference(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+) -> torch.Tensor:
     """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     L = single.shape[1]
     rows, dev = _rows(), single.device
     params = leaves
-    leaves = _capture.param_forms("apb_leaves", params, lambda: tuple(_kernel_leaves(params)))
+    leaves = _capture.param_forms(
+        "apb_leaves", params, lambda: tuple(_kernel_leaves(params))
+    )
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
@@ -185,7 +279,9 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
         wpack, bvec, wf, wop = _inference_packs(params, leaves)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
-        y = torch.empty_like(x)                   # residual seed, written by ln_rows; to_out accumulates onto it
+        y = torch.empty_like(
+            x
+        )  # residual seed, written by ln_rows; to_out accumulates onto it
         rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
         neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
@@ -197,8 +293,17 @@ def inference(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | Non
         return y.addmm_(qkvg[:, :W], wo.t()).view(1, L, D)
 
 
-def update_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    return inference(single, pair, _mask(mask, single.shape[1]), _leaves(module), module.ln_single.eps, module.ln_pair.eps)
+def update_inference(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
+    return inference(
+        single,
+        pair,
+        _mask(mask, single.shape[1]),
+        _leaves(module),
+        module.ln_single.eps,
+        module.ln_pair.eps,
+    )
 
 
 # ------------------------------------------------------------------------------------------------------------- training
@@ -207,14 +312,30 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
     L = single.shape[1]
     H, _, W, D = _geometry(leaves)
     e, f32 = single.new_empty, torch.float32
-    out = [torch.empty_like(single), e((L, D)), e((L, 2), dtype=f32), e((L, 4 * W)), e((H, L, L)), e((L, W), dtype=f32),
-           e((H, L), dtype=f32), e((L, W)), e((H, DP)), e((4 * W, D))]
+    out = [
+        torch.empty_like(single),
+        e((L, D)),
+        e((L, 2), dtype=f32),
+        e((L, 4 * W)),
+        e((H, L, L)),
+        e((L, W), dtype=f32),
+        e((H, L), dtype=f32),
+        e((L, W)),
+        e((H, DP)),
+        e((4 * W, D)),
+    ]
     return out + ([e((D, W))] if W != D else [])
 
 
 @opaque(fake=_forward_fake, name="apb_b200_train_fwd")
-def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-            eps_p: float) -> list[torch.Tensor]:
+def forward(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+) -> list[torch.Tensor]:
     L = single.shape[1]
     rows = _rows()
     lnw, lnb = leaves[0], leaves[1]
@@ -228,48 +349,86 @@ def forward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
         y = torch.empty_like(x)
         rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
-        neg = -math.inf if torch.cuda.get_device_capability(single.device) == (9, 0) else NEG
+        neg = (
+            -math.inf
+            if torch.cuda.get_device_capability(single.device) == (9, 0)
+            else NEG
+        )
         bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
-        O, LSE = _training_core(single.device).apb_forward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], bias, L, H, D)
+        O, LSE = _training_core(single.device).apb_forward(
+            qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D
+        )
         og = x.new_empty((L, W))
         rows.ext().gate_rows(O, qkvg, og)
-        y = y.addmm_(og, wo.t()).view(1, L, D)   # in place onto the residual seed: no copy of x into the output
-    return [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack] + ([wop] if wop is not None else [])
+        y = y.addmm_(og, wo.t()).view(
+            1, L, D
+        )  # in place onto the residual seed: no copy of x into the output
+    return [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack] + (
+        [wop] if wop is not None else []
+    )
 
 
 def _backward_fake(single, pair, mask, leaves, eps_s, eps_p, saved, dy):
     """One gradient per input (its dtype) and per leaf (fp32), contiguous."""
-    return [torch.empty_like(single), torch.empty_like(pair), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves)]
+    return [
+        torch.empty_like(single),
+        torch.empty_like(pair),
+        *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves),
+    ]
 
 
 @opaque(fake=_backward_fake, name="apb_b200_train_bwd")
-def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None, leaves: list[torch.Tensor], eps_s: float,
-             eps_p: float, saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+def backward(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+    saved: list[torch.Tensor],
+    dy: torch.Tensor,
+) -> list[torch.Tensor]:
     L = single.shape[1]
     rows = _rows()
     E = rows.ext()
     lnw, lnpw, wb = leaves[0], leaves[8], leaves[9]
     H, _, W, D = _geometry(leaves)
     xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
-    wo = saved[9] if W != D else leaves[7]                 # [D, W]
+    wo = saved[9] if W != D else leaves[7]  # [D, W]
     f32 = torch.float32
     with torch.cuda.device(single.device):
         x = single.view(L, D)
         dy2 = dy.contiguous().view(L, D)
         if torch.cuda.get_device_capability(x.device) == (9, 0):
             # Every producer owns a block partial; finalize reduces in block order.
-            nblocks = max(2 * torch.cuda.get_device_properties(x.device).multi_processor_count, (L + rows.RW - 1) // rows.RW)
+            nblocks = max(
+                2 * torch.cuda.get_device_properties(x.device).multi_processor_count,
+                (L + rows.RW - 1) // rows.RW,
+            )
             acc = torch.empty(nblocks, rows.acc_n(H, D), device=x.device)
             E.zero_acc(acc)
         else:
             acc = torch.zeros(rows.acc_n(H, D), device=x.device)
-        dog = dy2 @ wo                                       # [L, W]: zero in the pads (Wo's pad columns are zero)
-        dwo = torch.mm(dy2.t(), og, out_dtype=f32)           # [D, W]; finalize keeps the real columns
+        dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
+        dwo = torch.mm(
+            dy2.t(), og, out_dtype=f32
+        )  # [D, W]; finalize keeps the real columns
         dob = x.new_empty((L, W))
         dd = x.new_empty((H, L), dtype=f32)
         dqkvg = torch.empty_like(qkvg)
         E.gate_bwd(dog, O, qkvg, dob, dd, dqkvg)
-        DQ, DK, DV, DB = _training_core(single.device).apb_backward(qkvg[:, :W], qkvg[:, W:2 * W], qkvg[:, 2 * W:3 * W], dob, bias, LSE, dd, L, H, D)
+        DQ, DK, DV, DB = _training_core(single.device).apb_backward(
+            qkvg[:, :W],
+            qkvg[:, W : 2 * W],
+            qkvg[:, 2 * W : 3 * W],
+            dob,
+            bias,
+            LSE,
+            dd,
+            L,
+            H,
+            D,
+        )
         E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D)
         del DQ, DK, DV
         dxa = dqkvg @ wpack
@@ -283,14 +442,20 @@ def backward(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
 
 
-
 def _pair_weight_shadow_fake(single, pair, mask, leaves, eps_s, eps_p, dy):
     return torch.empty(leaves[-1].shape, device=single.device, dtype=torch.float32)
 
 
 @opaque(fake=_pair_weight_shadow_fake, name="apb_h100_pair_weight_fp32_shadow")
-def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None,
-                        leaves: list[torch.Tensor], eps_s: float, eps_p: float, dy: torch.Tensor) -> torch.Tensor:
+def _pair_weight_shadow(
+    single: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    leaves: list[torch.Tensor],
+    eps_s: float,
+    eps_p: float,
+    dy: torch.Tensor,
+) -> torch.Tensor:
     """Accuracy-first exact pair-weight (to_bias.weight) gradient with native CUDA and cuBLAS.
 
     This intentionally recreates the FP32 numerical path of the oracle: the
@@ -302,24 +467,19 @@ def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Te
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
-            (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
-        # The exact pair-weight gradient needs graph-owned scratch. Explicitly
-        # disabling that repair retains the earlier ownership choices for
-        # diagnostic comparisons; those old gradients are not qualified.
-        owned_sgemm_default = qualified
-        mm = E.exact_mm_owned if os.environ.get(
-            "MINIWORLD_APB_H100_OWNED_SGEMM", "1" if owned_sgemm_default else "0"
-        ) == "1" else E.exact_mm
-        shadow_io = os.environ.get("MINIWORLD_APB_H100_SHADOW_IO", "1" if qualified else "0") == "1"
+            (8, 384),
+            (12, 384),
+            (16, 384),
+            (24, 384),
+            (16, 512),
+        )
+        # The exact pair-weight gradient needs graph-owned scratch on the
+        # qualified cells; the other cells keep the plain exact GEMM.
+        mm = E.exact_mm_owned if qualified else E.exact_mm
+        shadow_io = qualified
         convert = E.exact_fp32_inputs_grouped if shadow_io else E.exact_fp32_inputs
-        pair_ln = int(os.environ.get("MINIWORLD_APB_H100_SHADOW_PAIR_LN", "2" if qualified else "0"))
-        if pair_ln not in (0, 1, 2):
-            raise ValueError("H100 shadow pair LN mode must be 0, 1, or 2")
-        pair_project_default = qualified and shape[0] in (8, 12, 16) and pair_ln == 2
-        fused_pair_project = os.environ.get(
-            "MINIWORLD_APB_H100_SHADOW_PAIR_PROJECT", "1" if pair_project_default else "0") == "1"
-        if fused_pair_project and not (qualified and shape[0] in (8, 12, 16) and pair_ln == 2):
-            raise ValueError("H100 exact LN pair projection requires a qualified H8/H12/H16 training shape and pair LN mode 2")
+        pair_ln = 2 if qualified else 0
+        fused_pair_project = qualified and shape[0] in (8, 12, 16)
         if pair_ln:
             values = convert([single, dy, *leaves])
             x, dy32 = values[:2]
@@ -335,21 +495,32 @@ def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Te
         # Preserve the accurate D2 producer when explicitly selected or for
         # H24. The fused producer keeps its normalized pair tile on chip and
         # writes masked head-major bias directly for the other required shapes.
-        za = None if fused_pair_project else (
-            E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2) if pair_ln
-            else E.exact_ln(z, lnpw, torch.zeros_like(lnpw), eps_p)).view(L * L, DP)
+        za = (
+            None
+            if fused_pair_project
+            else (
+                E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2)
+                if pair_ln
+                else E.exact_ln(z, lnpw, torch.zeros_like(lnpw), eps_p)
+            ).view(L * L, DP)
+        )
+
         def finish(db):
             norm = za
             if norm is None:
-                norm = E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2).view(L*L, DP)
-            db_head = E.exact_transpose_tiled(db, None, L, False).view(H, L*L)
+                norm = E.exact_ln_bf16(pair, lnpw, eps_p, pair_ln == 2).view(L * L, DP)
+            db_head = E.exact_transpose_tiled(db, None, L, False).view(H, L * L)
             return E.exact_mm_owned(db_head, norm)
+
         q = mm(xa, wq.t(), bq)
         k = mm(xa, wk.t())
         v = mm(xa, wv.t())
         gate = mm(xa, wg.t())
-        bias = (E.exact_ln_pair_project(pair, lnpw, wb, mask, eps_p) if fused_pair_project
-                else mm(za, wb.t()))
+        bias = (
+            E.exact_ln_pair_project(pair, lnpw, wb, mask, eps_p)
+            if fused_pair_project
+            else mm(za, wb.t())
+        )
         dog = mm(dy32.view(L, D), wo)
         do_rows = E.exact_point(dog, gate, 1.0, 1).view(L, H, dh)
         if mask is not None:
@@ -358,16 +529,29 @@ def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Te
             # project CUDA launches of the installed C++ templates, including
             # the FP32 rounded product/reduction used for its delta tensor.
             qh, kh, vh = (t.view(L, H, dh) for t in (q, k, v))
-            bm = bias if fused_pair_project else (
-                E.exact_transpose_tiled(bias, mask, L, False) if shadow_io
-                else E.exact_mask_bias(bias, mask, L))
+            bm = (
+                bias
+                if fused_pair_project
+                else (
+                    E.exact_transpose_tiled(bias, mask, L, False)
+                    if shadow_io
+                    else E.exact_mask_bias(bias, mask, L)
+                )
+            )
             out32, lse32 = E.exact_attention_fwd(qh, kh, vh, bm)
             delta32 = E.exact_delta(do_rows, out32)
-            ds = (E.exact_attention_db_only(qh, kh, vh, bm, lse32, do_rows, delta32)
-                  if os.environ.get("MINIWORLD_APB_H100_SHADOW_DB_ONLY", "1" if qualified else "0") == "1"
-                  else E.exact_attention_db(qh, kh, vh, bm, out32, lse32, do_rows, delta32))
-            db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
-                  else E.exact_db_transpose(ds, mask))
+            ds = (
+                E.exact_attention_db_only(qh, kh, vh, bm, lse32, do_rows, delta32)
+                if qualified
+                else E.exact_attention_db(
+                    qh, kh, vh, bm, out32, lse32, do_rows, delta32
+                )
+            )
+            db = (
+                E.exact_transpose_tiled(ds, mask, L, True)
+                if shadow_io and H >= 16
+                else E.exact_db_transpose(ds, mask)
+            )
             return finish(db)
         scale = math.sqrt(1.0 / math.sqrt(dh))
         qs = E.exact_point(q, q, scale, 0).view(1, L, H, dh).transpose(1, 2)
@@ -379,8 +563,11 @@ def _pair_weight_shadow(single: torch.Tensor, pair: torch.Tensor, mask: torch.Te
         vh = v.view(1, L, H, dh).transpose(1, 2)
         dp = mm(do, vh.transpose(-2, -1))
         ds = E.exact_soft(dp, probs, True)
-        db = (E.exact_transpose_tiled(ds, mask, L, True) if shadow_io and H >= 16
-                  else E.exact_db_transpose(ds, mask))
+        db = (
+            E.exact_transpose_tiled(ds, mask, L, True)
+            if shadow_io and H >= 16
+            else E.exact_db_transpose(ds, mask)
+        )
         return finish(db)
 
 
@@ -389,49 +576,80 @@ class _Training(torch.autograd.Function):
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
         params = leaves
-        ctx.beta_shadow = (torch.cuda.get_device_capability(single.device) == (9, 0)
-                           and os.environ.get("MINIWORLD_APB_H100_BETA_SHADOW", "1") == "1")
-        # Resolve the repair during forward; environment changes before
-        # backward cannot change the captured gradient policy.
+        ctx.beta_shadow = torch.cuda.get_device_capability(single.device) == (9, 0)
+        # Resolve the repair during forward so that the captured gradient policy
+        # is fixed before backward.
         qualified_exact_dwb = single.shape[1] in (384, 768) and (
-            leaves[-1].shape[0], single.shape[-1]) in (
-                (8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
+            leaves[-1].shape[0],
+            single.shape[-1],
+        ) in ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
         # ln_pair has no beta: the shadow only repairs the pair-weight gradient.
-        ctx.exact_dwb = ctx.beta_shadow and os.environ.get(
-            "MINIWORLD_APB_H100_EXACT_DWB", "1" if qualified_exact_dwb else "0") == "1"
+        ctx.exact_dwb = ctx.beta_shadow and qualified_exact_dwb
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)
         ctx.saved_count = len(saved)
-        ctx.save_for_backward(mask, single, pair, *leaves, *saved, *(params if ctx.exact_dwb else ()))
+        ctx.save_for_backward(
+            mask, single, pair, *leaves, *saved, *(params if ctx.exact_dwb else ())
+        )
         return y
 
     @staticmethod
     @once_differentiable
     def backward(ctx, dy):
         v = ctx.saved_tensors
-        mask, single, pair, leaves, saved = v[0], v[1], v[2], list(v[3:13]), list(v[13:13 + ctx.saved_count])
+        mask, single, pair, leaves, saved = (
+            v[0],
+            v[1],
+            v[2],
+            list(v[3:13]),
+            list(v[13 : 13 + ctx.saved_count]),
+        )
         dx, dz, *grads = backward(single, pair, mask, leaves, *ctx.eps, saved, dy)
         if ctx.exact_dwb:
-            params = list(v[13 + ctx.saved_count:])
+            params = list(v[13 + ctx.saved_count :])
             grads[9] = _pair_weight_shadow(single, pair, mask, params, *ctx.eps, dy)
         if torch.cuda.get_device_capability(single.device) == (9, 0):
             if torch.compiler.is_compiling():
-                grads = [g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)]
+                grads = [
+                    g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)
+                ]
             else:
-                grads = _rows().ext().cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+                grads = (
+                    _rows()
+                    .ext()
+                    .cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+                )
             from miniworld_engine.integrations.token_dit_train import (
                 _activate_native_caller,
             )
+
             _activate_native_caller(force=True)
             return (None, None, None, dx, dz, *grads)
-        return (None, None, None, dx, dz, *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)))
+        return (
+            None,
+            None,
+            None,
+            dx,
+            dz,
+            *(g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)),
+        )
 
 
-def update_train(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
-    out = _Training.apply(module.ln_single.eps, module.ln_pair.eps, _mask(mask, single.shape[1]), single, pair, *_leaves(module))
+def update_train(
+    module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
+) -> torch.Tensor:
+    out = _Training.apply(
+        module.ln_single.eps,
+        module.ln_pair.eps,
+        _mask(mask, single.shape[1]),
+        single,
+        pair,
+        *_leaves(module),
+    )
     if torch.cuda.get_device_capability(single.device) == (9, 0):
         from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
+
         # The result graph now owns its AccumulateGrad nodes. Installing on
         # fresh leaves before apply can hook a temporary weak-held node.
         _native_caller_hooks(single, pair, *module.parameters(), force=True)

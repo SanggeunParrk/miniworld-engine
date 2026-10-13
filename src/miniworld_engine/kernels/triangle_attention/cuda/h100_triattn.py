@@ -14,6 +14,7 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import (
@@ -34,16 +35,18 @@ def _owned_blas_enabled():
     selected = getattr(_OWNED_BLAS_STATE, "enabled", None)
     if selected is not None:
         return selected
-    return os.environ.get("MINIWORLD_TRIATTN_H100_OWNED_BLAS", "0") == "1"
+    return False
 
 
 def _owned_blas_for_module(module, pair):
-    override = os.environ.get("MINIWORLD_TRIATTN_H100_OWNED_BLAS")
-    if override is not None:
-        return override == "1"
     B, L, _, C = pair.shape
-    return (module.training and torch.is_grad_enabled() and module.starting
-            and B == 1 and (C, L) in ((128, 768), (512, 384)))
+    return (
+        module.training
+        and torch.is_grad_enabled()
+        and module.starting
+        and B == 1
+        and (C, L) in ((128, 768), (512, 384))
+    )
 
 
 @contextmanager
@@ -56,18 +59,25 @@ def _owned_blas_scope(enabled):
         _OWNED_BLAS_STATE.enabled = previous
 
 
-
 def _variant_flags(part):
     # Experiment hook: MW_F2_DEFS="-DMW_F2_STAGES_FORCE=3 -DMW_F2_MINB_FORCE=1" and MW_F2_PTXAS=1.
     if part not in ("front_fused2", "front_fused3", "training_forward"):
         return []
-    return [*os.environ.get("MW_F2_DEFS", "").split(), *(["-Xptxas=-v"] if os.environ.get("MW_F2_PTXAS") else [])]
+    return [
+        *os.environ.get("MW_F2_DEFS", "").split(),
+        *(["-Xptxas=-v"] if os.environ.get("MW_F2_PTXAS") else []),
+    ]
 
 
 def _variant_suffix(part):
     if part not in ("front_fused2", "front_fused3", "training_forward"):
         return ""
-    return "".join(c for c in os.environ.get("MW_F2_DEFS", "") + ("p" if os.environ.get("MW_F2_PTXAS") else "") if c.isalnum())
+    return "".join(
+        c
+        for c in os.environ.get("MW_F2_DEFS", "")
+        + ("p" if os.environ.get("MW_F2_PTXAS") else "")
+        if c.isalnum()
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -90,10 +100,13 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
     if not (cutlass / "include/cute/tensor.hpp").is_file():
         raise RuntimeError("CUTLASS_PATH must contain CUTLASS 4.2 headers")
     return load_extension(
-        name=(f"triattn_h100_b200style_{part}_v1" + (f"_kv{kv_tile}" if kv_tile != 64 else "")
-              + (f"_r{row_group}" if row_group != 1 else "")
-              + (f"_ws{pipeline}" if pipeline else "")
-              + _variant_suffix(part)),
+        name=(
+            f"triattn_h100_b200style_{part}_v1"
+            + (f"_kv{kv_tile}" if kv_tile != 64 else "")
+            + (f"_r{row_group}" if row_group != 1 else "")
+            + (f"_ws{pipeline}" if pipeline else "")
+            + _variant_suffix(part)
+        ),
         sources=[str(_SRC / f"{part}.cu")],
         extra_include_paths=[str(_PARENT), str(cutlass / "include")],
         extra_cflags=["-O3"],
@@ -111,7 +124,8 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
             *(["--use_fast_math"] if part == "module" else []),
             *_variant_flags(part),
         ],
-        verbose=bool(os.environ.get("MW_F2_PTXAS")) and part in ("front_fused2", "front_fused3", "training_forward"),
+        verbose=bool(os.environ.get("MW_F2_PTXAS"))
+        and part in ("front_fused2", "front_fused3", "training_forward"),
     )
 
 
@@ -168,9 +182,7 @@ def _join(parts):
 
 
 def _core_forward(q, k, v, bias):
-    core = extension("training_forward", int(os.environ.get("MINIWORLD_TRIATTN_H100_KV_TILE", "64")),
-                     int(os.environ.get("MINIWORLD_TRIATTN_H100_ROW_GROUP", "2")),
-                     int(os.environ.get("MINIWORLD_TRIATTN_H100_PIPELINE", "0")))
+    core = extension("training_forward", 64, 2, 0)
     results = [
         core.forward(q[b : b + 1], k[b : b + 1], v[b : b + 1], bias[b : b + 1])
         for b in range(q.shape[0])
@@ -180,8 +192,6 @@ def _core_forward(q, k, v, bias):
 
 def _weight_gradient(dy, x):
     """Split the long reduction so skinny FP32-output GEMMs fill the H100."""
-    if os.environ.get("MINIWORLD_TRIATTN_H100_SPLIT_WGRAD", "1") == "0":
-        return _mm(dy.T, x, out_dtype=torch.float32)
     tiles = ((dy.shape[1] + 127) // 128) * ((x.shape[1] + 127) // 128)
     splits = 32 if tiles < 32 else 16 if tiles < 64 else 8
     while dy.shape[0] % splits:
@@ -198,19 +208,36 @@ def _weight_gradient(dy, x):
 def _frontend(C):
     """Qualified default front end: the one-kernel LN + projection front wins at C128 (64-row tiles) and C256 (128-row
     tiles) (docs/records/triattn_fuse_20261008.md); wider pairs keep the cuBLAS front."""
-    return os.environ.get("MINIWORLD_TRIATTN_H100_FRONTEND") or (
-        "fused2" if C == 128 else "fused3" if C == 256 else "grouped"
-    )
+    return "fused2" if C == 128 else "fused3" if C == 256 else "grouped"
 
 
 def _resolve_pack(weights, wall, outweight):
     """The (wall, outweight) pack: the caller's, or the weights' own -- cached while they are unmodified, scoped to a capture."""
     if wall is not None and outweight is not None:
         return wall, outweight
-    return _capture.param_forms("triattn_h100_pack", weights, lambda: pack_weights(*weights))
+    return _capture.param_forms(
+        "triattn_h100_pack", weights, lambda: pack_weights(*weights)
+    )
 
 
-def _forward_op_fake(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, eps, fused_tail, owned_blas):
+def _forward_op_fake(
+    pair,
+    lnw,
+    lnb,
+    wq,
+    wk,
+    wv,
+    wg,
+    wb,
+    wo,
+    mask,
+    drop,
+    wall,
+    outweight,
+    eps,
+    fused_tail,
+    owned_blas,
+):
     """result [B, L, L, C]; proj [rows, 4C] (cuBLAS front end) or [4, rows, C] (fused front ends); bias [B, H, L, L];
     stats [rows, 2] fp32; o_rows [rows, C]; lse [B, H, L, L] fp32. All in pair's dtype unless noted; rows = B L L, H = C / 32."""
     B, L, _, C = pair.shape
@@ -228,14 +255,29 @@ def _forward_op_fake(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, o
 
 @opaque(fake=_forward_op_fake, name="triangle_attention_h100_forward_cuda")
 def _forward_op(
-    pair: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor,
-    wg: torch.Tensor, wb: torch.Tensor, wo: torch.Tensor, mask: torch.Tensor, drop: torch.Tensor,
-    wall: torch.Tensor | None, outweight: torch.Tensor | None, eps: float, fused_tail: bool, owned_blas: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    pair: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wb: torch.Tensor,
+    wo: torch.Tensor,
+    mask: torch.Tensor,
+    drop: torch.Tensor,
+    wall: torch.Tensor | None,
+    outweight: torch.Tensor | None,
+    eps: float,
+    fused_tail: bool,
+    owned_blas: bool,
+) -> tuple[
+    torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
+]:
     """Native H100 TriangleAttention forward (front end, core, tail); also returns what the backward needs."""
     with _owned_blas_scope(owned_blas):
         B, L, _, C = pair.shape
-        vector_rows = os.environ.get("MINIWORLD_TRIATTN_H100_ROW_VECTOR", "1") == "1"
+        vector_rows = True
         m = extension("module")
         x = pair.contiguous().view(-1, C)
         wall, outweight = _resolve_pack((wq, wk, wv, wg, wb, wo), wall, outweight)
@@ -248,30 +290,54 @@ def _forward_op(
             qr, kr, vr, gr = (proj[:, j * C : (j + 1) * C] for j in range(4))
             bias = f.bias(proj, mask, C, L)
         elif frontend == "fused3":
-            proj, bias, stats = extension("front_fused3").front(x, lw, lb, wall, mask, L, C // 32, eps)
-            qr, kr, vr, gr = proj.unbind(0)
-        elif frontend == "fused2":
-            proj, bias, stats = extension("front_fused2").front(x, lw, lb, wall, mask, L, C // 32, eps)
+            proj, bias, stats = extension("front_fused3").front(
+                x, lw, lb, wall, mask, L, C // 32, eps
+            )
             qr, kr, vr, gr = proj.unbind(0)
         else:
-            proj, bias, stats = m.front(x, lw, lb, wall, mask, L, C // 32, eps, frontend == "fused_reuse")
+            proj, bias, stats = extension("front_fused2").front(
+                x, lw, lb, wall, mask, L, C // 32, eps
+            )
             qr, kr, vr, gr = proj.unbind(0)
         q, k, v = (_view(t, B, L, C) for t in (qr, kr, vr))
         o, lse = _core_forward(q, k, v, bias)
         o_rows = _rows(o, C)
-        tail = os.environ.get("MINIWORLD_TRIATTN_H100_TAIL", "fused" if fused_tail else "grouped")
-        if tail == "grouped":
+        if not fused_tail:
             f = extension("front_grouped")
-            result = f.residual(x, _mm(f.gate(gr, o_rows, vector_rows), outweight.T), drop, L, vector_rows).view_as(pair)
-        elif tail == "fused3":
-            result = extension("tail_fused3").tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
+            result = f.residual(
+                x,
+                _mm(f.gate(gr, o_rows, vector_rows), outweight.T),
+                drop,
+                L,
+                vector_rows,
+            ).view_as(pair)
         else:
             result = m.tail(x, gr, o_rows, outweight, drop, L).view_as(pair)
         return result, proj, bias, stats, o_rows, lse
 
 
-def _backward_op_fake(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats, o_rows, lse,
-                   owned_blas):
+def _backward_op_fake(
+    dy,
+    pair,
+    lnw,
+    lnb,
+    wq,
+    wk,
+    wv,
+    wg,
+    wb,
+    wo,
+    mask,
+    drop,
+    wall,
+    outweight,
+    proj,
+    bias,
+    stats,
+    o_rows,
+    lse,
+    owned_blas,
+):
     """dx [B, L, L, C] in pair's dtype, then the gradients of the ln weight, ln bias, wq, wk, wv, wg, wb and wo, each shaped
     and typed like its parameter."""
     return (
@@ -289,12 +355,37 @@ def _backward_op_fake(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wa
 
 @opaque(fake=_backward_op_fake, name="triangle_attention_h100_backward_cuda")
 def _backward_op(
-    dy: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wq: torch.Tensor, wk: torch.Tensor,
-    wv: torch.Tensor, wg: torch.Tensor, wb: torch.Tensor, wo: torch.Tensor, mask: torch.Tensor, drop: torch.Tensor,
-    wall: torch.Tensor | None, outweight: torch.Tensor | None, proj: torch.Tensor, bias: torch.Tensor, stats: torch.Tensor,
-    o_rows: torch.Tensor, lse: torch.Tensor, owned_blas: bool,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor]:
+    dy: torch.Tensor,
+    pair: torch.Tensor,
+    lnw: torch.Tensor,
+    lnb: torch.Tensor,
+    wq: torch.Tensor,
+    wk: torch.Tensor,
+    wv: torch.Tensor,
+    wg: torch.Tensor,
+    wb: torch.Tensor,
+    wo: torch.Tensor,
+    mask: torch.Tensor,
+    drop: torch.Tensor,
+    wall: torch.Tensor | None,
+    outweight: torch.Tensor | None,
+    proj: torch.Tensor,
+    bias: torch.Tensor,
+    stats: torch.Tensor,
+    o_rows: torch.Tensor,
+    lse: torch.Tensor,
+    owned_blas: bool,
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Native H100 TriangleAttention backward: the input gradient and the eight parameter gradients (parameters' dtypes)."""
     with _owned_blas_scope(owned_blas):
         B, L, _, C = pair.shape
@@ -330,17 +421,18 @@ def _backward_op(
             dv.append(vb)
             db.append(bb)
         dq, dk, dv = (_rows(_join(ts), C) for ts in (dq, dk, dv))
-        dall = extension("front_grouped").pack_backward(dq, dk, dv, dg, _join(db), mask, L)
+        dall = extension("front_grouped").pack_backward(
+            dq, dk, dv, dg, _join(db), mask, L
+        )
         # One grouped projection product instead of five independent dgrad GEMMs.
-        if os.environ.get("MINIWORLD_TRIATTN_H100_PROJECT_LN", "0") == "1":
-            dx, z, parts = extension("projection_ln").backward(x, dall, wall, dy, stats, lw, lb)
-        else:
-            dz = _mm(dall, wall, out_dtype=torch.float32)
-            dx, z, parts = m.ln_backward(x, dz, dy, stats, lw, lb)
+        dz = _mm(dall, wall, out_dtype=torch.float32)
+        dx, z, parts = m.ln_backward(x, dz, dy, stats, lw, lb)
         dnorm = extension("pack").reduce_partials(parts)
         grad = _weight_gradient(dall, z)
         dwo = _weight_gradient(dys, u)
-        p = extension("pack").finish(grad, dwo, dnorm, [dt == torch.float32 for dt in dtypes])
+        p = extension("pack").finish(
+            grad, dwo, dnorm, [dt == torch.float32 for dt in dtypes]
+        )
         return dx.view(B, L, L, C), p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7]
 
 
@@ -348,22 +440,111 @@ class H100Triangle(torch.autograd.Function):
     """Autograd owner of the native launches: ``ctx`` lives here, the launches are the opaque ops above."""
 
     @staticmethod
-    def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, wall, outweight, fused_tail, owned_blas):
+    def forward(
+        ctx,
+        pair,
+        lnw,
+        lnb,
+        wq,
+        wk,
+        wv,
+        wg,
+        wb,
+        wo,
+        mask,
+        eps,
+        drop,
+        wall,
+        outweight,
+        fused_tail,
+        owned_blas,
+    ):
         result, proj, bias, stats, o_rows, lse = _forward_op(
-            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, eps, fused_tail, owned_blas
+            pair,
+            lnw,
+            lnb,
+            wq,
+            wk,
+            wv,
+            wg,
+            wb,
+            wo,
+            mask,
+            drop,
+            wall,
+            outweight,
+            eps,
+            fused_tail,
+            owned_blas,
         )
         if any(ctx.needs_input_grad[:9]):
-            ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats,
-                                  o_rows, lse)
+            ctx.save_for_backward(
+                pair,
+                lnw,
+                lnb,
+                wq,
+                wk,
+                wv,
+                wg,
+                wb,
+                wo,
+                mask,
+                drop,
+                wall,
+                outweight,
+                proj,
+                bias,
+                stats,
+                o_rows,
+                lse,
+            )
             ctx.owned_blas = owned_blas
         return result
 
     @staticmethod
     def backward(ctx, dy):
-        (pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats, o_rows,
-         lse) = ctx.saved_tensors
-        grads = _backward_op(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop, wall, outweight, proj, bias, stats,
-                             o_rows, lse, ctx.owned_blas)
+        (
+            pair,
+            lnw,
+            lnb,
+            wq,
+            wk,
+            wv,
+            wg,
+            wb,
+            wo,
+            mask,
+            drop,
+            wall,
+            outweight,
+            proj,
+            bias,
+            stats,
+            o_rows,
+            lse,
+        ) = ctx.saved_tensors
+        grads = _backward_op(
+            dy,
+            pair,
+            lnw,
+            lnb,
+            wq,
+            wk,
+            wv,
+            wg,
+            wb,
+            wo,
+            mask,
+            drop,
+            wall,
+            outweight,
+            proj,
+            bias,
+            stats,
+            o_rows,
+            lse,
+            ctx.owned_blas,
+        )
         return (*grads, None, None, None, None, None, None, None)
 
 
@@ -379,8 +560,21 @@ def _drop_scale(pair: torch.Tensor, probability: float) -> torch.Tensor:
 
 
 def triangle_attention(
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None, packed=None,
-    fused_tail=False, owned_blas=None,
+    pair,
+    lnw,
+    lnb,
+    wq,
+    wk,
+    wv,
+    wg,
+    wb,
+    wo,
+    mask=None,
+    eps=1e-5,
+    drop=None,
+    packed=None,
+    fused_tail=False,
+    owned_blas=None,
 ):
     """``packed`` (the weights' ``pack_weights``) and ``owned_blas`` (None: the ambient scope / env) are optional; without a
     pack the op packs the weights itself, cached while they are unmodified."""
@@ -400,7 +594,17 @@ def triangle_attention(
     if owned_blas is None:
         owned_blas = _owned_blas_enabled()
     return H100Triangle.apply(
-        pair, lnw, lnb, *weights, mask, eps, drop.contiguous(), wall, outweight, fused_tail, owned_blas
+        pair,
+        lnw,
+        lnb,
+        *weights,
+        mask,
+        eps,
+        drop.contiguous(),
+        wall,
+        outweight,
+        fused_tail,
+        owned_blas,
     )
 
 
@@ -417,10 +621,19 @@ def forward(module, pair, mask=None):
     B, L, _, C = pair.shape
     # Fused tail: inference, B1, starting node, C128/256 (module sweep 2026-10-08). Evaluate grad
     # mode here: autograd.Function.forward itself always runs with grads disabled.
-    fused_tail = (not torch.is_grad_enabled() and not module.training and module.starting
-                  and B == 1 and C in (128, 256))
+    fused_tail = (
+        not torch.is_grad_enabled()
+        and not module.training
+        and module.starting
+        and B == 1
+        and C in (128, 256)
+    )
     # detached: the scale is a constant of the step, not a function of the pair (the op has no autograd formula)
-    drop = _drop_scale(pair.detach(), module.p_drop) if module.training and module.p_drop else None
+    drop = (
+        _drop_scale(pair.detach(), module.p_drop)
+        if module.training and module.p_drop
+        else None
+    )
     x = pair if module.starting else pair.transpose(1, 2)
     weights = (
         module.to_query.weight,
@@ -541,35 +754,61 @@ def _owned_blas_extension():
     import hashlib
 
     cuda_home = ensure_cuda_home()
-    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
+    cuda_version = torch.version.cuda
+    if (
+        cuda_home is None
+        or cuda_version is None
+        or tuple(map(int, cuda_version.split(".")[:2])) > (12, 9)
+    ):
         raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT", Path.home() / ".cache" / "miniworld_engine_jit"))
-    build = root / "triattn_owned_blas" / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
+    root = settings.engine_jit_root()
+    build = (
+        root
+        / "triattn_owned_blas"
+        / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
+    )
     build.mkdir(parents=True, exist_ok=True)
     return load_inline(
-        name="triattn_h100_owned_blas", cpp_sources=_OWNED_BLAS_CPP,
-        functions=["owned_mm", "owned_bmm"], with_cuda=True, build_directory=str(build),
-        extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
-        extra_cflags=["-O3"], extra_ldflags=["-lcublas"], verbose=False,
+        name="triattn_h100_owned_blas",
+        cpp_sources=_OWNED_BLAS_CPP,
+        functions=["owned_mm", "owned_bmm"],
+        with_cuda=True,
+        build_directory=str(build),
+        extra_include_paths=[
+            str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
+        ],
+        extra_cflags=["-O3"],
+        extra_ldflags=["-lcublas"],
+        verbose=False,
     )
 
 
 def _mm(a, b, *, out_dtype=None):
     if not _owned_blas_enabled():
-        return torch.mm(a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {}))
+        return torch.mm(
+            a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {})
+        )
     return _owned_blas_extension().owned_mm(
-        a, b, torch.backends.cuda.matmul.allow_tf32, out_dtype == torch.float32,
+        a,
+        b,
+        torch.backends.cuda.matmul.allow_tf32,
+        out_dtype == torch.float32,
     )
 
 
 def _bmm(a, b, *, out_dtype=None):
     # Held-graph replay requires owned scratch for this reduction geometry only.
     # Other required training cells retain their original cuBLAS BMM calls.
-    needs_owned = (a.shape[0] * a.shape[2] == 384 * 384 and b.shape[2] == 256)
+    needs_owned = a.shape[0] * a.shape[2] == 384 * 384 and b.shape[2] == 256
     if not _owned_blas_enabled() or not needs_owned:
-        return torch.bmm(a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {}))
+        return torch.bmm(
+            a, b, **({"out_dtype": out_dtype} if out_dtype is not None else {})
+        )
     out = torch.empty(
-        (a.shape[0], a.shape[1], b.shape[2]), device=a.device,
+        (a.shape[0], a.shape[1], b.shape[2]),
+        device=a.device,
         dtype=a.dtype if out_dtype is None else out_dtype,
     )
-    return _owned_blas_extension().owned_bmm(a, b, out, torch.backends.cuda.matmul.allow_tf32)
+    return _owned_blas_extension().owned_bmm(
+        a, b, out, torch.backends.cuda.matmul.allow_tf32
+    )

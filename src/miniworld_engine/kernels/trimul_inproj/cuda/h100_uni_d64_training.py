@@ -9,8 +9,7 @@ The bidirectional D64 path (``h100_d64_training``) at half the hidden width:
 Backward (``h100_sources/d64_train/uni_bwd_wg.cu``): uni64_b1w (output side) -> dt, dxg; 2x cuBLAS
 contraction gradients -> dl, dr; uni64_b2w (input side) -> dx; uni64_finw reduces the per-CTA
 partials. B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
-The default covers L384/768; MINIWORLD_TRIMUL_H100_TRAIN_CUDA=1 selects
-native preparation and the six L128..768 buckets for the CUDA sweep candidate.
+The default covers L384/768; native preparation runs inside the qualified D64 launch scope.
 """
 
 from __future__ import annotations

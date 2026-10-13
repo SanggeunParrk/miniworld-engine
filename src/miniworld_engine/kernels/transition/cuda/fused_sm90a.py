@@ -23,7 +23,6 @@ are the same LayerNorm statistics, the intermediate roundings happen at the same
 """
 
 import functools
-import os
 import warnings
 from pathlib import Path
 
@@ -42,15 +41,6 @@ ROWS = 128
 DW_REPL = 8
 #: Hidden multiples (the n of ``Transition(128, n)``) with a build.
 NS = (4, 2)
-
-
-def native_aux_enabled(d: int = 128) -> bool:
-    """Live CUDA preparation for every required Hopper width.
-
-    An explicit zero retains the frozen pre-sweep path for paired measurements.
-    Native coverage is independent of latency wins; slower cells stay labeled.
-    """
-    return os.environ.get("MINIWORLD_TRANSITION_H100_CUDA_AUX", "1") == "1"
 
 
 @functools.lru_cache(maxsize=1)
@@ -125,17 +115,8 @@ def _sm_count(device: torch.device | int | None = None) -> int:
 
 
 def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
-    warp_store = (
-        os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE", "0") == "1"
-    )
-    early_release = (
-        os.environ.get("MINIWORLD_TRANSITION_H100_DW_EARLY_RELEASE", "0") == "1"
-    )
-    dw_overlap = (
-        early_release
-        or os.environ.get("MINIWORLD_TRANSITION_H100_DW_OVERLAP", "0") == "1"
-    )
-    return _build_ext(ctas, dw_repl, save, warp_store, dw_overlap, early_release, n)
+    # The warp-store / dW-overlap / early-release variants stay loadable through ``_build_ext``; none is selected here.
+    return _build_ext(ctas, dw_repl, save, False, False, False, n)
 
 
 @functools.lru_cache(maxsize=32)
@@ -356,15 +337,10 @@ def _bwd_launch(
     config = _select_schedule(args, backward=True, save=True)
     if _is_fake(dy, x):
         return _bwd_launch_fake(*args)
-    symbol = (
-        "transition_fused_bwd_native"
-        if native_aux_enabled()
-        else "transition_fused_bwd_master"
-    )
     return tuple(
-        getattr(
-            _ext(config["ctas"], config["dw_repl"], True, wa.shape[0] // 128), symbol
-        )(*args)
+        _ext(
+            config["ctas"], config["dw_repl"], True, wa.shape[0] // 128
+        ).transition_fused_bwd_native(*args)
     )
 
 
@@ -376,15 +352,7 @@ def _select_schedule(args, *, backward, save):
     n = (args[6] if backward else args[3]).shape[0] // 128
     sms = _sm_count(x.device)
     grid = transition_candidates(sms, backward=backward, n=n)
-    symbol = (
-        (
-            "transition_fused_bwd_native"
-            if native_aux_enabled()
-            else "transition_fused_bwd_master"
-        )
-        if backward
-        else "transition_fused_fwd"
-    )
+    symbol = "transition_fused_bwd_native" if backward else "transition_fused_fwd"
 
     def run(c):
         return tuple(getattr(_ext(c["ctas"], c["dw_repl"], save, n), symbol)(*args))
@@ -421,35 +389,7 @@ def _master_pack(
     wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """bf16 copies of an fp32 master (Wa, Wb, Ws) plus Ws^T, all freshly allocated."""
-    if native_aux_enabled(wa.shape[1]):
-        return _cuda_prepare(wa, wb, ws)
-    from miniworld_engine.integrations.h100_master import transition_pack_kernel
-
-    a, b, s, st = _master_pack_fake(wa, wb, ws)
-    d = wa.shape[1]
-    rows = 8 if d == 64 else 32
-    transition_pack_kernel[(wa.shape[0] // 32, d // rows)](
-        wa,
-        wb,
-        ws,
-        a,
-        b,
-        s,
-        st,
-        D=d,  # ty: ignore[invalid-argument-type]
-        ROWS=rows,  # ty: ignore[invalid-argument-type]
-    )
-    return a, b, s, st
-
-
-def _cast_weights(weights, dtype):
-    if native_aux_enabled(weights[0].shape[1]):
-        return _cuda_prepare(weights[0], weights[1], weights[2], False)[:3]
-    if all(w.dtype == dtype for w in weights):
-        return tuple(w.contiguous() for w in weights)
-    outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
-    torch._foreach_copy_(outs, list(weights))
-    return tuple(outs)
+    return _cuda_prepare(wa, wb, ws)
 
 
 class _FusedTransitionSM90A(torch.autograd.Function):
@@ -465,13 +405,7 @@ class _FusedTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         raw = (wa, wb, ws)
         param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        if native_aux_enabled():
-            wa, wb, ws, wst = _cuda_prepare(*raw)
-        elif all(w.dtype == torch.float32 and w.is_contiguous() for w in raw):
-            wa, wb, ws, wst = _master_pack(*raw)
-        else:
-            wa, wb, ws = _cast_weights(raw, x.dtype)
-            wst = ws.t().contiguous()
+        wa, wb, ws, wst = _cuda_prepare(*raw)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         save = any(ctx.needs_input_grad)
@@ -526,11 +460,7 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
-        if native_aux_enabled():
-            wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
-        else:
-            wa, wb, ws = _cast_weights((wa, wb, ws), x.dtype)
-            wst = ws.t().contiguous()
+        wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
         out, _, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),
@@ -543,8 +473,6 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
         )
         return out.reshape(shape)
     out = _FusedTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
-    if native_aux_enabled():
-        from miniworld_engine.integrations.token_dit_train import _native_caller_output
+    from miniworld_engine.integrations.token_dit_train import _native_caller_output
 
-        out = _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)
-    return out
+    return _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)

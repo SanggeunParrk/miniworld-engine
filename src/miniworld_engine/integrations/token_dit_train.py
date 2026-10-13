@@ -17,7 +17,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
     ``kernels/augmented_attention/cuda`` (bf16 wgmma; fp32 TF32 wgmma), which write og = sigmoid(g) o themselves (no O kept);
   * every elementwise / row step: ``kernels/conditioned_transition/cuda/token_dit_train_rows.cu``; in bf16 the expand GEMM
     carries the SwiGLU on B200 (``gemm_swiglu2_sm100.cu -DSAVE_AB``, which also writes [a | b] for the backward);
-  * H100 only: the native path (``MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE``, default on): fused weight pack / final gradient
+  * H100 only: the native path (always on): fused weight pack / final gradient
     kernels, graph-owned cuBLAS workspaces for the qualified buckets, and the caller-gradient hooks (``_native_caller_*``);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
@@ -45,7 +45,6 @@ LayerNorm are computed per block rather than once per stack.
 from __future__ import annotations
 
 import contextlib
-import os
 
 import torch
 
@@ -136,12 +135,6 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         return False
     if cap == (9, 0) and (a.n_head, d) != (H, D):
         return False  # H100: 16 x 48 only (the sm_90a cores; the other layouts are B200-only)
-    if (
-        cap == (9, 0)
-        and operand_dtype(single, compute_dtype) is not BF
-        and os.environ.get("MINIWORLD_TOKEN_DIT_TRAIN_FP32", "1") == "0"
-    ):
-        return False
     if mask is not None and not (
         mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])
     ):
@@ -229,30 +222,29 @@ _PACKS: dict = {}
 _PACK_STREAMS: dict = {}
 
 
+# Private candidate (default off): the asynchronous weight-pack pipeline of the native H100 path. The branch is kept
+# reachable here, not deleted (formerly MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC=1).
+_CANDIDATE_PACK_ASYNC = False
+
+
 def _native_rpb():
-    return int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB", "2"))
+    return 2
 
 
 def _native90(dev):
-    return os.environ.get(
-        "MINIWORLD_TOKEN_DIT_H100_TRAIN_NATIVE", "1"
-    ) == "1" and _sm90(dev)
+    return _sm90(dev)
 
 
 def _empty_uniform90(dev, A=None, L=None):
-    default = "1" if A == 5 and L in (384, 768) else "0"
-    return (
-        _native90(dev)
-        and os.environ.get("MINIWORLD_TOKEN_DIT_H100_EMPTY_UNIFORM", default) == "1"
-    )
+    return _native90(dev) and A == 5 and L in (384, 768)
 
 
 def _owned_gemms90(single):
     """GEMMs whose captured scratch belongs to this graph, never a framework handle."""
-    default = "1" if single.shape[0] == 5 and single.shape[2] in (384, 768) else "0"
     if not (
         _native90(single.device)
-        and os.environ.get("MINIWORLD_TOKEN_DIT_H100_OWNED_GEMMS", default) == "1"
+        and single.shape[0] == 5
+        and single.shape[2] in (384, 768)
     ):
         return torch.mm, _mm32, torch.addmm
     from miniworld_engine.kernels.conditioned_transition.cuda.train import (
@@ -279,10 +271,7 @@ _NATIVE_CALLER_TASKS: set[int] = set()
 
 def _activate_native_caller(*, force: bool = False):
     """Limit installed hooks to backward tasks that actually execute our block."""
-    if (
-        not (force or os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") == "1")
-        or torch.compiler.is_compiling()
-    ):
+    if not force or torch.compiler.is_compiling():
         return
     task = torch._C._current_graph_task_id()
     if task >= 0 and task not in _NATIVE_CALLER_TASKS:
@@ -321,10 +310,7 @@ def _native_caller_hooks(*tensors, force: bool = False):
     the caller, and gradients remain ordinary Tensors. This experimental option
     is for the manual CUDA-graph path, not a torch.compile transformation.
     """
-    if (
-        not (force or os.environ.get("MINIWORLD_DIT_H100_CALLER_NATIVE", "0") == "1")
-        or torch.compiler.is_compiling()
-    ):
+    if not force or torch.compiler.is_compiling():
         return
     import threading
 
@@ -454,10 +440,7 @@ def _pack(P, qk, dev, at):
     it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
     reused inside a capture, whose replays would otherwise run on the weights of capture time after every optimizer step."""
     native = _native90(dev)
-    pipeline = (
-        native
-        and os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC", "0") == "1"
-    )
+    pipeline = native and _CANDIDATE_PACK_ASYNC
     key = (native, pipeline, *((t.data_ptr(), t._version) for t in P.values()))
     slot = _capture.scoped((next(iter(P.values())).data_ptr(), at))
     hit = None if slot is None else _PACKS.get(slot)
@@ -733,10 +716,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     chat = torch.empty(M, DC, device=dev, dtype=at)
     cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
-    pipeline = (
-        native
-        and os.environ.get("MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC", "0") == "1"
-    )
+    pipeline = native and _CANDIDATE_PACK_ASYNC
     packed = _pack(P, qk, dev, at) if pipeline else None
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
@@ -996,7 +976,7 @@ def _native_final90(
         dWf,
         W["Wb"],
         W["wp"],
-        os.environ.get("MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE", "1") == "1",
+        True,
     )
     result = dict(zip(canonical, out, strict=True))
     return [result[n] for n in names]
@@ -1298,10 +1278,7 @@ class _Block(torch.autograd.Function):
             fp32,
             heads,
         )
-        if (
-            _native90(single.device)
-            and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0"
-        ):
+        if _native90(single.device):
             _activate_native_caller(force=True)
         return (
             dx,
@@ -1359,11 +1336,7 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     out = _Block.apply(
         single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head), *params
     )
-    # Flag 0 reconstructs the legacy caller for comparisons; the CUDA core is unchanged.
-    if (
-        _native90(caller[0].device)
-        and os.environ.get("MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE", "1") != "0"
-    ):
+    if _native90(caller[0].device):
         # The result's edges now strongly own leaf AccumulateGrad nodes.
         # Installing before apply can attach hooks to a temporary weak owner.
         _native_caller_hooks(*caller, *module.parameters(), force=True)

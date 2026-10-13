@@ -209,11 +209,11 @@ class SWADiTBlock(nn.Module):
 
 
 def _native_h100_strict(x: torch.Tensor, native_h100_enabled) -> bool:
-    """True when the caller forced the native H100 path (``MINIWORLD_SWA_H100_CUDA_ONLY=1``): an unsupported call then raises.
+    """True when the caller forced the native H100 path (``settings.swa_dit_h100_native=True``): an unsupported call then raises.
 
     Otherwise the native path is a default that serves what it is validated for and the module falls back to the
     PyTorch / Triton path for every other contract, as on every other card.
     """
-    import os
+    from miniworld_engine import settings
 
-    return os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY") == "1" and native_h100_enabled(x)
+    return settings.current().swa_dit_h100_native is True and native_h100_enabled(x)

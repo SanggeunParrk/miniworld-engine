@@ -12,6 +12,8 @@ import threading
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine import settings
+
 SOURCES = Path(__file__).with_name("h100_sources")
 _d256_scope = threading.local()
 _d128_scope = threading.local()
@@ -19,40 +21,50 @@ _bidi_d256_scope = threading.local()
 _d64_scope = threading.local()
 _uni_owned_blas_scope = threading.local()
 
+# Candidate cells that were selectable through environment switches (default off). The switches are gone; the cells stay
+# reachable through these private constants (tests force them with monkeypatch.setattr).
+_D64_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D64 L768 / uni outgoing D64 L768 graph workspace
+_D128_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D128 384^2 preserved route
+_WIDE_DEFAULT_CANDIDATE = False  # bidir D384 default cell
+_CUDA_AUX_UNSCOPED = False  # native auxiliary kernels outside the qualified launch scopes
+_TRAIN_CUDA_UNSCOPED = False  # D64 native preparation and the L128..1024 D64 buckets outside the qualified scope
+_TRAIN_FUSED_PREP_UNSCOPED = False  # D64 fused preparation outside the qualified scope (needs the line above)
+_D64_UNI_AFFINE_FORCED = False  # uni D64 affine split outside the selected L768 cell
+
+
+def _native_buckets():
+    """None: only the qualified cells; True: explicit native buckets; False: every native training cell off."""
+    return settings.current().trimul_h100_native_buckets
+
+
+def _preserved_width(width):
+    """Explicit preserved glue: native buckets forced on and the width selected."""
+    s = settings.current()
+    return s.trimul_h100_native_buckets is True and width in s.trimul_h100_preserve_widths
+
 
 def d64_training(x, outgoing=False, bidirectional=False):
     """Qualified compact-mask D64 preparation; keep wide-preservation policy separate."""
     if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
             or x.shape[-1] != 64 or x.shape[1] not in (384, 768)):
         return False
-    if any(os.environ.get(name) == "0" for name in (
-        "MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS",
-        "MINIWORLD_TRIMUL_H100_TRAIN_CUDA",
-        "MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP",
-    )):
+    if _native_buckets() is False:
         return False
     if bidirectional:
-        return (x.shape[1] == 384 or os.environ.get(
-            "MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") == "1")
-    return (outgoing and x.shape[1] == 768
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_GRAPH_WORKSPACE_CANDIDATE") == "1"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT") != "0"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM") != "0")
+        return x.shape[1] == 384 or _D64_GRAPH_WORKSPACE_CANDIDATE
+    return outgoing and x.shape[1] == 768 and _D64_GRAPH_WORKSPACE_CANDIDATE
 
 
 def d64_uni_owned_bmm_enabled(length):
     """Only the qualified training scope selects owned L768 scratch by default."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
-    return os.environ.get("MINIWORLD_TRIMUL_H100_D64_OWNED_BMM",
-                          "1" if scoped and length == 768 else "0") == "1"
+    return scoped and length == 768
 
 
 def d64_uni_affine_enabled(x, outgoing):
-    """Use the qualified L768 split; explicit one permits a source-only experiment."""
+    """Use the qualified L768 split."""
     selected = d64_training(x, outgoing=outgoing, bidirectional=False)
-    return (x.shape[-1] == 64 and outgoing
-            and os.environ.get("MINIWORLD_TRIMUL_H100_D64_UNI_AFFINE_SPLIT",
-                               "1" if selected else "0") == "1")
+    return x.shape[-1] == 64 and outgoing and (selected or _D64_UNI_AFFINE_FORCED)
 
 
 @contextmanager
@@ -69,15 +81,11 @@ def d128_training(x, outgoing=True, bidirectional=False):
     """Preserved D128 candidates; default waits for safe graph-owned scratch."""
     if x.shape[-1] != 128:
         return False
-    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
-            or os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "0"):
+    if _native_buckets() is False:
         return False
-    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1")
-    return explicit or (bidirectional and x.ndim == 4
-                        and tuple(x.shape[:3]) == (1, 384, 384)
-                        and os.environ.get(
-                            "MINIWORLD_TRIMUL_H100_D128_GRAPH_WORKSPACE_CANDIDATE") == "1")
+    return _preserved_width(128) or (bidirectional and x.ndim == 4
+                                     and tuple(x.shape[:3]) == (1, 384, 384)
+                                     and _D128_GRAPH_WORKSPACE_CANDIDATE)
 
 
 @contextmanager
@@ -91,17 +99,13 @@ def preserved_d128_context(enabled):
 
 
 def uni_d256_training(x, outgoing):
-    """Qualified outgoing L384 default; explicit zero keeps the old diagnostic path."""
+    """Qualified outgoing L384 default; trimul_h100_native_buckets=False keeps the old diagnostic path."""
     if x.shape[-1] != 256:
         return False
-    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
-            or os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "0"):
+    if _native_buckets() is False:
         return False
-    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1")
-    return explicit or (outgoing and x.ndim == 4
-            and tuple(x.shape[:3]) == (1, 384, 384)
-            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS") != "0")
+    return _preserved_width(256) or (outgoing and x.ndim == 4
+                                     and tuple(x.shape[:3]) == (1, 384, 384))
 
 
 @contextmanager
@@ -116,21 +120,15 @@ def preserved_d256_context(enabled):
 
 
 def bidi_training(x):
-    """Qualified bidirectional native cells; explicit flags retain diagnostic routes."""
+    """Qualified bidirectional native cells; trimul_h100_native_buckets / preserve_widths retain diagnostic routes."""
     width = x.shape[-1]
     if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
             or x.shape[1] not in (384, 768) or width not in (256, 384, 512)):
         return False
-    preserve = "MINIWORLD_TRIMUL_H100_PRESERVE_D256" if width == 256 else "MINIWORLD_TRIMUL_H100_PRESERVE_WIDE"
-    if (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "0"
-            or os.environ.get(preserve) == "0"):
+    if _native_buckets() is False:
         return False
-    explicit = (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                and os.environ.get(preserve) == "1")
-    return (explicit or (width == 256 and x.shape[1] == 768
-                         and os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE") != "0")
-            or (width == 384 and os.environ.get(
-                "MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE") == "1"))
+    return (_preserved_width(width) or (width == 256 and x.shape[1] == 768)
+            or (width == 384 and _WIDE_DEFAULT_CANDIDATE))
 
 
 @contextmanager
@@ -148,14 +146,12 @@ def preserved_bidi_context(x):
 
 def d256_register_source_enabled(selected=False):
     scoped = False if torch.compiler.is_compiling() else getattr(_bidi_d256_scope, "enabled", False)
-    return os.environ.get("MINIWORLD_TRIMUL_H100_D256_REG_SOURCE",
-                          "1" if selected or scoped else "0") == "1"
+    return bool(selected or scoped)
 
 
-def d256_glue_enabled(name, selected=False):
+def d256_glue_enabled(selected=False):
     scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
-    default = "1" if selected or scoped else "0"
-    return os.environ.get(name, default) == "1"
+    return bool(selected or scoped)
 
 
 def _upstream():
@@ -171,24 +167,20 @@ def _launch_module():
 def preserve_d128_training():
     """Opt-in native glue around the existing, selected D128 B1/B7 kernels."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d128_scope, "enabled", False)
-    return (scoped or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                      and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D128") == "1"))
+    return scoped or _preserved_width(128)
 
 
 def preserve_d256_training():
     """Keep selected wide CUDA plans; use deterministic native auxiliary work."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
-    return (scoped
-            or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_D256") == "1"))
+    return scoped or _preserved_width(256)
 
 
 def preserve_wide_training(width):
     """Opt-in D384/D512 native glue around the selected Hopper compute kernels."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d256_scope, "enabled", False)
     return (width in (384, 512)
-            and (scoped or (os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") == "1"
-                           and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") == "1")))
+            and (scoped or _preserved_width(width)))
 
 
 def uni_training(x, outgoing):
@@ -202,9 +194,7 @@ def uni_training(x, outgoing):
     return (outgoing and bucket
             and (x.shape[-1] == 512
                  or (x.shape[-1] == 384 and x.shape[1] == 384))
-            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS") != "0"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS") != "0"
-            and os.environ.get("MINIWORLD_TRIMUL_H100_PRESERVE_WIDE") != "0")
+            and _native_buckets() is not False)
 
 
 def preserve_training(width):
@@ -215,8 +205,7 @@ def preserve_training(width):
 
 def wide_owned_blas_enabled():
     scoped = False if torch.compiler.is_compiling() else getattr(_uni_owned_blas_scope, "enabled", False)
-    return os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS",
-                          "1" if scoped else "0") == "1"
+    return scoped
 
 
 @contextmanager
@@ -264,13 +253,7 @@ def read_config(relative_path):
 
 def cache_dir():
     root = (
-        Path(
-            os.environ.get(
-                "engine_jit_root",
-                str(Path.home() / ".cache/miniworld_engine_jit"),
-            )
-        )
-        / "trimul_h100"
+        settings.engine_jit_root() / "trimul_h100"
     )
     root.mkdir(parents=True, exist_ok=True)
     return root
@@ -397,21 +380,18 @@ def cuda_aux_enabled():
     scoped = False if torch.compiler.is_compiling() else (
         getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False)
         or getattr(_d64_scope, "enabled", False))
-    return (scoped
-            or os.environ.get("MINIWORLD_TRIMUL_H100_CUDA_AUX") == "1")
+    return scoped or _CUDA_AUX_UNSCOPED
 
 
 def cuda_training_aux_enabled():
-    """D64 launch-local preparation; explicit flags retain diagnostic paths."""
+    """D64 launch-local preparation (qualified launch scope only)."""
     scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
-    return os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_CUDA", "1" if scoped else "0") == "1"
+    return scoped or _TRAIN_CUDA_UNSCOPED
 
 
 def cuda_training_fused_prepare_enabled():
     scoped = False if torch.compiler.is_compiling() else getattr(_d64_scope, "enabled", False)
-    return (cuda_training_aux_enabled()
-            and os.environ.get("MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP",
-                               "1" if scoped else "0") == "1")
+    return cuda_training_aux_enabled() and (scoped or _TRAIN_FUSED_PREP_UNSCOPED)
 
 
 @torch.compile(fullgraph=True, dynamic=False, options={"triton.cudagraphs": False})

@@ -13,7 +13,6 @@ B1, BF16 pair, FP32 LN affine, L384/768, H100 (sm_90a). Selected schedules are i
 from __future__ import annotations
 
 import json
-import os
 from functools import lru_cache
 
 import torch
@@ -27,26 +26,21 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 R = T.SOURCES / "wide_forward"
 WIDTHS = (256, 384, 512)
 LENGTHS = (384, 768)
+#: Bidirectional D512 / L384 inference candidate (formerly an environment switch, default off); kept reachable.
+_BIDI512_INFER_CANDIDATE = False
 
 
 def native_inference_bucket(width, length):
     """Validated BIDI candidate; existing-test gate remains open, default off."""
-    return (os.environ.get("MINIWORLD_TRIMUL_H100_BIDI512_INFER_CANDIDATE", "0") == "1"
-            and width == 512 and length == 384
-            and all(os.environ.get(name) != "0" for name in (
-                "MINIWORLD_TRIMUL_H100_CUDA_AUX",
-                "MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS",
-                "MINIWORLD_TRIMUL_H100_INFER_FAST_AUX")))
+    return _BIDI512_INFER_CANDIDATE and width == 512 and length == 384
 
 
 def _owned_blas_enabled(width, length):
-    return os.environ.get("MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS",
-                          "1" if native_inference_bucket(width, length) else "0") == "1"
+    return native_inference_bucket(width, length)
 
 
 def _fast_aux_enabled(width, length):
-    return os.environ.get("MINIWORLD_TRIMUL_H100_INFER_FAST_AUX",
-                          "1" if native_inference_bucket(width, length) else "0") == "1"
+    return native_inference_bucket(width, length)
 
 
 

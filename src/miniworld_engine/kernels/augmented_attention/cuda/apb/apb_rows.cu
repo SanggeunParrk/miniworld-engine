@@ -951,6 +951,7 @@ __global__ void acc_reduce_k(const float* parts, float* out, int width, int coun
   for (int row = 0; row < count; ++row) value += parts[(long)row * width + c];
   out[c] = value;
 }
+// Not launched (the sequential acc_reduce_k is the only reduction; the former environment switch for this tree is gone).
 // Fixed reduction tree with enough CTAs to occupy Hopper at the small APB
 // parameter widths. Each warp sums disjoint partial rows in increasing order;
 // warp zero combines the eight partials in a fixed order.
@@ -992,11 +993,7 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   if (acc.dim() == 2) {
     // Hopper: every producer wrote a block partial row; reduce them in a fixed order.
     auto total = at::empty({acc.size(1)}, acc.options());
-    const char* tree = std::getenv("MINIWORLD_APB_ACC_TREE");
-    if (tree && tree[0] == '1')
-      acc_reduce_tree_k<<<(unsigned)((acc.size(1) + 31) / 32), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
-    else
-      acc_reduce_k<<<(unsigned)((acc.size(1) + 255) / 256), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
+    acc_reduce_k<<<(unsigned)((acc.size(1) + 255) / 256), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
     acc = total;
   }
   const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + DP;

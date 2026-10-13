@@ -22,7 +22,6 @@ The wide widths use a tanh.approx sigmoid (forward and backward alike); D = 64 k
 """
 
 import functools
-import os
 import warnings
 from pathlib import Path
 
@@ -32,7 +31,7 @@ from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 from miniworld_engine import settings
 
-from .fused_sm90a import _cuda_prepare, _native_ext, native_aux_enabled
+from .fused_sm90a import _cuda_prepare, _native_ext
 
 _dir = Path(__file__).parent / "wide"
 
@@ -57,19 +56,19 @@ _SOURCES = {
 }
 
 
+#: D384 keeps the forward's h by default; tests flip this to exercise the recompute cell.
+_SAVE_H_D384 = True
+
+
 def save_h_enabled(d: int) -> bool:
     """Keep the forward's SwiGLU intermediate h [M, 4D] for the D >= 384
     backward instead of recomputing-and-storing it in the gate kernel. The D >= 384 forward writes h to HBM anyway (between
     its two kernels), so this costs no forward time -- only activation memory, M x 4D bf16 per layer (453 MB at D = 384,
-    604 MB at D = 512 for a 384 x 384 pair). Native D384 enables this by default
-    (``MINIWORLD_TRANSITION_H100_SAVE_H=0`` turns that default off); ``settings.transition_wide_save_h``
+    604 MB at D = 512 for a 384 x 384 pair). D384 keeps it by default; ``settings.transition_wide_save_h``
     switches it on for every D >= 384."""
     if d < 384:
         return False
-    if settings.current().transition_wide_save_h:
-        return True
-    default = "1" if d == 384 and native_aux_enabled(d) else "0"
-    return os.environ.get("MINIWORLD_TRANSITION_H100_SAVE_H", default) == "1"
+    return (d == 384 and _SAVE_H_D384) or settings.current().transition_wide_save_h
 
 
 def save_ab_enabled(d: int, rows: int = 0) -> bool:
@@ -77,40 +76,26 @@ def save_ab_enabled(d: int, rows: int = 0) -> bool:
     its forward is LayerNorm kernel + split expand (the resident LayerNorm tile of ``lnsg`` does not fit at 768)."""
     if d == 768:
         return True
-    return (
-        d >= 384
-        and native_aux_enabled(d)
-        and os.environ.get(
-            "MINIWORLD_TRANSITION_H100_SAVE_AB",
-            "1" if d == 512 and rows == 768 * 768 else "0",
-        )
-        == "1"
-    )
+    return d == 512 and rows == 768 * 768
 
 
 def split_fwd_enabled(d: int, rows: int = 0) -> bool:
     if d == 768:
         return True
-    return (
-        d == 512
-        and save_ab_enabled(d, rows)
-        and os.environ.get(
-            "MINIWORLD_TRANSITION_H100_SPLIT_FWD", "1" if rows == 768 * 768 else "0"
-        )
-        == "1"
-    )
+    return d == 512 and save_ab_enabled(d, rows) and rows == 768 * 768
 
 
 def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
+#: The fused D384 forward (``fwd_fused_d384``, build flag ``fused_d384``) is a measured non-winner kept reachable here;
+#: it was formerly selected by an environment switch.
+_CANDIDATE_FUSED_D384 = False
+
+
 def fused_d384_enabled(d: int) -> bool:
-    return (
-        d == 384
-        and native_aux_enabled(d)
-        and os.environ.get("MINIWORLD_TRANSITION_H100_FUSED_D384", "0") == "1"
-    )
+    return d == 384 and _CANDIDATE_FUSED_D384
 
 
 @functools.lru_cache(maxsize=8)
@@ -204,71 +189,25 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
         x.shape[-1] == 768
     ):  # n = 2 only: saved a / b and the split forward are the whole path
         return _ext(768, _sm_count(x.device), save_ab=True, split_fwd=True, n=n)
+    d64_repl = settings.current().transition_d64_repl
     if (
         n != 4
     ):  # the n = 4 experiments below are tuned for hidden = 4 D; other n runs the plain build
         # D64 backward: weight CTAs = hidden slices (n) x replicas; measured best 26 replicas at n = 2 (16 at n = 4)
-        repl = (
-            int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "26"))
-            if x.shape[-1] == 64
-            else 16
-        )
+        repl = (d64_repl or 26) if x.shape[-1] == 64 else 16
         return _ext(x.shape[-1], _sm_count(x.device), repl, n=n)
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
-    saved_default = "1" if x.shape[-1] == 512 and x.shape[0] == 768 * 768 else "0"
-    repl = (
-        int(os.environ.get("MINIWORLD_TRANSITION_D64_REPL", "16"))
-        if native_aux_enabled(x.shape[-1])
-        else 16
-    )
-    gate_k64 = (
-        int(os.environ.get("MINIWORLD_TRANSITION_H100_GATE_K64", "0"))
-        if x.shape[-1] in (256, 512) and not save_ab
-        else 0
-    )
-    if gate_k64 not in (0, 1, 2):
-        raise ValueError("MINIWORLD_TRANSITION_H100_GATE_K64 must be 0, 1 or 2")
-    gate_full_stage = (
-        x.shape[-1] in (256, 512)
-        and not save_ab
-        and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_FULL_STAGE", "0") == "1"
-    )
-    if gate_full_stage:
-        gate_k64 = 0
+    saved_tma = x.shape[-1] == 512 and x.shape[0] == 768 * 768 and save_ab
     return _ext(
         x.shape[-1],
         _sm_count(x.device),
-        repl,
+        d64_repl or 16,
         save_ab,
         save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
         fused_d384_enabled(x.shape[-1]),
-        fused_d384_enabled(x.shape[-1])
-        and os.environ.get("MINIWORLD_TRANSITION_H100_FUSED_D384_MC", "0") == "1",
-        x.shape[-1] == 64
-        and native_aux_enabled(64)
-        and os.environ.get("MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL", "1") == "1",
-        x.shape[-1] in (256, 512)
-        and not save_ab
-        and not gate_k64
-        and not gate_full_stage
-        and os.environ.get("MINIWORLD_TRANSITION_H100_GATE_MULTICAST", "0") == "1",
-        gate_k64,
-        gate_full_stage,
-        x.shape[-1] == 256
-        and native_aux_enabled(256)
-        and os.environ.get("MINIWORLD_TRANSITION_H100_DXLN_FULL_ROW", "0") == "1",
-        x.shape[-1] == 512
-        and save_ab
-        and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", saved_default)
-        == "1",
-        x.shape[-1] == 512
-        and save_ab
-        and os.environ.get("MINIWORLD_TRANSITION_H100_SAVED_AB_TMA", saved_default)
-        == "1"
-        and os.environ.get(
-            "MINIWORLD_TRANSITION_H100_SAVED_AB_NO_H_STAGE", saved_default
-        )
-        == "1",
+        affine_parallel=x.shape[-1] == 64,
+        gate_saved_tma=saved_tma,
+        gate_saved_no_h_stage=saved_tma,
     )
 
 
@@ -334,42 +273,15 @@ def _is_fake(*tensors) -> bool:
 def _pack(wa: torch.Tensor, wb: torch.Tensor, block: int) -> torch.Tensor:
     """[Wa; Wb] interleaved in ``block``-row blocks [Wa_0 | Wb_0 | Wa_1 | ...] -- one GEMM tile then holds a AND b of the
     same hidden units."""
-    if native_aux_enabled(wa.shape[1]):
-        return _native_ext().pair_layout(wa, wb, block, False)
-    h, d = wa.shape
-    return (
-        torch.stack(
-            [wa.reshape(h // block, block, d), wb.reshape(h // block, block, d)], 1
-        )
-        .reshape(2 * h, d)
-        .contiguous()
-    )
-
-
-def _owned_mm_enabled() -> bool:
-    """Opt-in graph-owned scratch; keep explicit legacy comparisons unchanged."""
-    return (
-        native_aux_enabled()
-        and os.environ.get("MINIWORLD_TRANSITION_H100_OWNED_MM", "0") == "1"
-    )
-
-
-def _owned_mm(a: torch.Tensor, b: torch.Tensor, fp32_output: bool) -> torch.Tensor:
-    from ...conditioned_transition.cuda.train import owned_gemm_ext
-
-    return owned_gemm_ext().owned_mm(
-        a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output
-    )
+    return _native_ext().pair_layout(wa, wb, block, False)
 
 
 def _mm_dx(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return _owned_mm(a, b, False) if _owned_mm_enabled() else a @ b
+    return a @ b
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """bf16 x bf16 -> fp32 GEMM (cuBLAS with an fp32 output); torch builds without ``out_dtype`` round through bf16."""
-    if _owned_mm_enabled():
-        return _owned_mm(a, b, True)
     try:
         return torch.mm(a, b, out_dtype=torch.float32)
     except TypeError:
@@ -423,11 +335,7 @@ def _fwd_launch(
         )
     if x.shape[-1] in (64, 256):
         if wst is None:
-            wst = (
-                _cuda_prepare(wa, wb, ws)[3]
-                if native_aux_enabled(x.shape[-1])
-                else ws.t().contiguous()
-            )
+            wst = _cuda_prepare(wa, wb, ws)[3]
         return (
             *ext.fwd(x, gamma, beta, wa, wb, wst, float(eps), bool(save)),
             x.new_empty((1, 1)),
@@ -499,11 +407,7 @@ def _bwd_launch_fake(
     bsaved=None,
 ):
     """Output structure only: (dx, dgamma, dbeta, dWa, dWb, dWs); the weight gradients are fp32 at D >= 256."""
-    wdt = (
-        (torch.float32 if fp32_dw else wa.dtype)
-        if native_aux_enabled(x.shape[-1])
-        else (torch.float32 if x.shape[-1] >= 256 or fp32_dw else wa.dtype)
-    )
+    wdt = torch.float32 if fp32_dw else wa.dtype
     return (
         torch.empty_like(x),
         torch.empty_like(gamma),
@@ -542,7 +446,7 @@ def _bwd_launch(
         return tuple(ext.bwd_master(dy, x, xn, rstd, c1, gamma, wa, wb, ws, fp32_dw))
     h = wa.shape[0]
     have_h = hsaved.shape[0] == x.shape[0]
-    wst = _cuda_prepare(wa, wb, ws)[3] if native_aux_enabled(d) else ws.t().contiguous()
+    wst = _cuda_prepare(wa, wb, ws)[3]
     if asaved is not None:
         assert have_h and bsaved is not None
         hid, dab = hsaved, ext.gate_saved(dy, wst, asaved, bsaved)
@@ -553,41 +457,16 @@ def _bwd_launch(
     dws = _mm_f32(dy.t(), hid)  # [D, H]
     dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb (dab holds dA | dB, unpacked)
     del hid
-    split_dx = (
-        d == 256
-        and native_aux_enabled(d)
-        and os.environ.get("MINIWORLD_TRANSITION_H100_SPLIT_DX", "0") == "1"
-    )
-    if native_aux_enabled(d):
-        w_ab = _native_ext().pair_layout(wa, wb, 0, d == 256 and not split_dx)
+    w_ab = _native_ext().pair_layout(wa, wb, 0, d == 256)
+    if d == 256:
+        dx, pg, pb = ext.dxln_partials(dab, w_ab, x, dy, gamma, rstd, c1)
+        dgam, dbeta = _native_ext().reduce_affine(pg, pb)
     else:
-        w_ab = torch.cat((wa, wb), 0)
-    if d == 256 and not split_dx:
-        if native_aux_enabled(d):
-            dx, pg, pb = ext.dxln_partials(dab, w_ab, x, dy, gamma, rstd, c1)
-            dgam, dbeta = _native_ext().reduce_affine(pg, pb)
-        else:
-            dx, dgam, dbeta = ext.dxln(
-                dab, w_ab.t().contiguous(), x, dy, gamma, rstd, c1
-            )
-    elif native_aux_enabled(d):
         aux = _native_ext()
-        compact = (
-            d == 512
-            and os.environ.get(
-                "MINIWORLD_TRANSITION_H100_COMPACT_LN",
-                "1" if asaved is not None and x.shape[0] == 768 * 768 else "0",
-            )
-            == "1"
-        )
-        compact384 = (
-            d == 384
-            and x.shape[0] == 768 * 768
-            and os.environ.get("MINIWORLD_TRANSITION_H100_COMPACT_LN_D384", "0") == "1"
-        )
-        ln = aux.ln_bwd_compact if compact or compact384 else aux.ln_bwd
         # The compact kernel uses 89 registers without spills, allowing five
         # resident 128-thread CTAs instead of four for the 112-register plan.
+        compact = d == 512 and asaved is not None and x.shape[0] == 768 * 768
+        ln = aux.ln_bwd_compact if compact else aux.ln_bwd
         dx, dgam, dbeta = ln(
             _mm_dx(dab, w_ab),
             x,
@@ -595,31 +474,16 @@ def _bwd_launch(
             rstd,
             c1,
             dy,
-            6 if compact384 else 5 if compact else 3 if d == 768 else 4,
+            5 if compact else 3 if d == 768 else 4,
         )  # D768: 3 resident CTAs per SM (170 registers)
-    else:
-        from ..triton.fused import _transition_ln_bwd
-
-        dx, dgam, dbeta = _transition_ln_bwd(_mm_dx(dab, w_ab), x, rstd, c1, gamma)
-        dx = dx.add_(dy)
-    if native_aux_enabled(d):
-        # The opaque op forbids even disjoint output views of one storage. Copy/cast
-        # all three leaves together, producing the final parameter-gradient dtype.
-        dwa, dwb, dws = _native_ext().cast(
-            [dwab[:h], dwab[h:], dws], [fp32_dw] * 3, True
-        )
-        return dx, dgam, dbeta, dwa, dwb, dws
-    return dx, dgam, dbeta, dwab[:h], dwab[h:].clone(), dws
+    # The opaque op forbids even disjoint output views of one storage. Copy/cast
+    # all three leaves together, producing the final parameter-gradient dtype.
+    dwa, dwb, dws = _native_ext().cast([dwab[:h], dwab[h:], dws], [fp32_dw] * 3, True)
+    return dx, dgam, dbeta, dwa, dwb, dws
 
 
 def _cast_weights(weights, dtype):
-    if native_aux_enabled(weights[0].shape[1]):
-        return _cuda_prepare(weights[0], weights[1], weights[2], False)[:3]
-    if all(w.dtype == dtype for w in weights):
-        return tuple(w.contiguous() for w in weights)
-    outs = [torch.empty(w.shape, device=w.device, dtype=dtype) for w in weights]
-    torch._foreach_copy_(outs, list(weights))
-    return tuple(outs)
+    return _cuda_prepare(weights[0], weights[1], weights[2], False)[:3]
 
 
 class _WideTransitionSM90A(torch.autograd.Function):
@@ -630,17 +494,7 @@ class _WideTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         raw = (wa, wb, ws)
         param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
-        if native_aux_enabled(shape[-1]):
-            wa, wb, ws, wst = _cuda_prepare(*raw, shape[-1] in (64, 256))
-        elif shape[-1] == 64 and all(
-            w.dtype == torch.float32 and w.is_contiguous() for w in raw
-        ):
-            from .fused_sm90a import _master_pack
-
-            wa, wb, ws, wst = _master_pack(*raw)
-        else:
-            wa, wb, ws = _cast_weights(raw, x.dtype)
-            wst = None
+        wa, wb, ws, wst = _cuda_prepare(*raw, shape[-1] in (64, 256))
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
         wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
@@ -684,9 +538,7 @@ class _WideTransitionSM90A(torch.autograd.Function):
             a,
             b,
         )
-        if native_aux_enabled(flat.shape[-1]) and any(
-            dw.dtype != dt for dw, dt in zip((dwa, dwb, dws), (adt, bwdt, sdt))
-        ):
+        if any(dw.dtype != dt for dw, dt in zip((dwa, dwb, dws), (adt, bwdt, sdt))):
             dwa, dwb, dws = _native_ext().cast(
                 [dwa, dwb, dws], [dt == torch.float32 for dt in (adt, bwdt, sdt)], False
             )
@@ -710,11 +562,7 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
-        if (
-            shape[-1] == 64
-            and native_aux_enabled(64)
-            and os.environ.get("MINIWORLD_TRANSITION_H100_PREPARE_FUSED", "1") == "1"
-        ):
+        if shape[-1] == 64:
             # The forward consumes Ws transposed. Prepare its live master cast
             # and transpose together, as the training entry already does.
             wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
@@ -734,8 +582,6 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
         )
         return out.reshape(shape)
     out = _WideTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
-    if native_aux_enabled(x.shape[-1]):
-        from miniworld_engine.integrations.token_dit_train import _native_caller_output
+    from miniworld_engine.integrations.token_dit_train import _native_caller_output
 
-        out = _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)
-    return out
+    return _native_caller_output(out, x, gamma, beta, wa, wb, ws, force=True)

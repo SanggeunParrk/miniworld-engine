@@ -8,8 +8,6 @@ intermediates; a fully fused Hopper frontend is still experimental.
 
 from __future__ import annotations
 
-import os
-
 import torch
 
 from miniworld_engine import settings
@@ -22,24 +20,27 @@ def native_requested(module, pair):
 
     # The common runner maps the MiniWorld label to the TRITON family enum.
     # Both family spellings dispatch into this CUDA implementation on Hopper.
-    return (module.implementation in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
-            and pair.is_cuda
-            and torch.cuda.get_device_capability(pair.device) == (9, 0))
+    return (
+        module.implementation
+        in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
+        and pair.is_cuda
+        and torch.cuda.get_device_capability(pair.device) == (9, 0)
+    )
 
 
 def validated_inference(module, pair):
     """Compatibility predicate for the numerically validated inference scope."""
-    return (native_requested(module, pair) and not torch.is_grad_enabled()
-            and not module.training and module.starting)
+    return (
+        native_requested(module, pair)
+        and not torch.is_grad_enabled()
+        and not module.training
+        and module.starting
+    )
 
 
 def serves(module, pair, mask=None):
-    from miniworld_engine.modules.exceptions import ImplementationType
-
     validated = native_requested(module, pair)
-    if not (validated or getattr(module, "_h100_b200style_cuda", False)
-            or (module.implementation in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
-                and os.environ.get("MINIWORLD_TRIATTN_H100_CANDIDATE") == "1")):
+    if not (validated or getattr(module, "_h100_b200style_cuda", False)):
         return False
     if (
         module._backend != KernelBackend.TRITON
@@ -61,15 +62,19 @@ def serves(module, pair, mask=None):
         module.to_out.weight,
     )
     if validated and (
-        not module.starting or pair.ndim != 4 or pair.shape[0] != 1
+        not module.starting
+        or pair.ndim != 4
+        or pair.shape[0] != 1
         or pair.shape[1] not in (128, 256, 384, 512, 640, 768)
         or not pair.is_contiguous()
         or any(not w.is_contiguous() for w in weights)
         or len({w.dtype for w in weights}) != 1
         or module.ln_pair.eps != 1e-5
         or not 0.0 <= module.p_drop < 1.0
-        or any(t.dtype != torch.float32 or not t.is_contiguous()
-               for t in (module.ln_pair.weight, module.ln_pair.bias))
+        or any(
+            t.dtype != torch.float32 or not t.is_contiguous()
+            for t in (module.ln_pair.weight, module.ln_pair.bias)
+        )
         or (mask is not None and not mask.is_contiguous())
     ):
         return False
@@ -82,4 +87,6 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None = None):
         forward as native,
     )
 
-    return _native_caller_output(native(module, pair, mask), pair, *module.parameters(), force=True)
+    return _native_caller_output(
+        native(module, pair, mask), pair, *module.parameters(), force=True
+    )

@@ -1,5 +1,3 @@
-import os
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -93,23 +91,52 @@ class AttentionPairBias(nn.Module):
             return _b200.update_inference(self, single, pair, mask)
         if _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
-        if (self.implementation == ImplementationType.MINIWORLD and single.is_cuda
-                and torch.cuda.get_device_capability(single.device) == (9, 0)
-                and (not torch.is_grad_enabled() or _b200.native_training_enabled())):
-            raise ValueError("H100 AttentionPairBias requires the native CUDA shape/dtype contract")
-        master = (self._backend == KernelBackend.TRITON and single.dtype == torch.bfloat16 and self.to_query.weight.dtype == torch.float32
-                  and _h100_master.is_h100(single.device))
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and single.is_cuda
+            and torch.cuda.get_device_capability(single.device) == (9, 0)
+            and (not torch.is_grad_enabled() or _b200.native_training_enabled())
+        ):
+            raise ValueError(
+                "H100 AttentionPairBias requires the native CUDA shape/dtype contract"
+            )
+        master = (
+            self._backend == KernelBackend.TRITON
+            and single.dtype == torch.bfloat16
+            and self.to_query.weight.dtype == torch.float32
+            and _h100_master.is_h100(single.device)
+        )
         if master:
-            wq, wk, wv, wb, wg, wo, bq = _h100_master.pack([
-                self.to_query.weight, self.to_key.weight, self.to_value.weight,
-                self.to_bias.weight, self.to_gate.weight, self.to_out.weight,
-                self.to_query.bias,
-            ])
-        single_res = single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
+            wq, wk, wv, wb, wg, wo, bq = _h100_master.pack(
+                [
+                    self.to_query.weight,
+                    self.to_key.weight,
+                    self.to_value.weight,
+                    self.to_bias.weight,
+                    self.to_gate.weight,
+                    self.to_out.weight,
+                    self.to_query.bias,
+                ]
+            )
+        single_res = (
+            single  # residual == the ORIGINAL input (before ln_single rebinds `single`)
+        )
         single = self.ln_single(single)
-        query = _h100_master.linear(single, self.to_query, wq, bq) if master else self.to_query(single)
-        key = _h100_master.linear(single, self.to_key, wk) if master else self.to_key(single)
-        value = _h100_master.linear(single, self.to_value, wv) if master else self.to_value(single)
+        query = (
+            _h100_master.linear(single, self.to_query, wq, bq)
+            if master
+            else self.to_query(single)
+        )
+        key = (
+            _h100_master.linear(single, self.to_key, wk)
+            if master
+            else self.to_key(single)
+        )
+        value = (
+            _h100_master.linear(single, self.to_value, wv)
+            if master
+            else self.to_value(single)
+        )
 
         query = rearrange(query, "B L (H D) -> B H L D", H=self.n_head)
         key = rearrange(key, "B L (H D) -> B H L D", H=self.n_head)
@@ -119,28 +146,12 @@ class AttentionPairBias(nn.Module):
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        # Explicit repaired PyTorch comparison, separate from the original reference and cuEquivariance baseline: the
-        # pair LayerNorm (which has no beta any more) runs in FP32 and is rounded to BF16 once, as the CUDA path does.
-        # The BF16 guard also leaves the runner's FP32 reference unchanged.
-        repaired_pair_norm = (
-            self.implementation == ImplementationType.PYTORCH
-            and os.environ.get("MINIWORLD_APB_PYTORCH_NULL_BETA", "0") == "1"
-            and pair.dtype == torch.bfloat16
-            and pair.shape[-1] == 128
-            and pair.shape[1] in (384, 768)
-            and (single.shape[-1], self.n_head)
-            in ((384, 8), (384, 12), (384, 16), (384, 24), (512, 16))
-            and self.to_query.weight.shape[0] == single.shape[-1]
+        pair = self.ln_pair(pair)
+        bias = (
+            _h100_master.linear(pair, self.to_bias, wb)
+            if master
+            else self.to_bias(pair)
         )
-        if repaired_pair_norm:
-            pair = F.layer_norm(
-                pair.float(), self.ln_pair.normalized_shape,
-                self.ln_pair.weight.float(), None,
-                self.ln_pair.eps,
-            ).to(pair.dtype)
-        else:
-            pair = self.ln_pair(pair)
-        bias = _h100_master.linear(pair, self.to_bias, wb) if master else self.to_bias(pair)
         bias = rearrange(bias, "B L L2 H -> B H L L2")
         if mask is not None:
             bias = bias.masked_fill(
@@ -152,14 +163,25 @@ class AttentionPairBias(nn.Module):
             # Reuse the existing QK + pair-bias kernel with one augmentation.
             # Bias-only attention is a different operation and cannot replace QK.
             q, k, v = (t.transpose(1, 2).unsqueeze(0) for t in (query, key, value))
-            out = kernels.triton_augmented_attention_pair_bias(
-                q, k, v, bias.permute(0, 2, 3, 1),
-                None if mask is None else mask.unsqueeze(0),
-            ).squeeze(0).transpose(1, 2)
+            out = (
+                kernels.triton_augmented_attention_pair_bias(
+                    q,
+                    k,
+                    v,
+                    bias.permute(0, 2, 3, 1),
+                    None if mask is None else mask.unsqueeze(0),
+                )
+                .squeeze(0)
+                .transpose(1, 2)
+            )
         else:
             raise InvalidImplementationError(self.implementation)
 
-        gate = _h100_master.linear(single, self.to_gate, wg) if master else self.to_gate(single)
+        gate = (
+            _h100_master.linear(single, self.to_gate, wg)
+            if master
+            else self.to_gate(single)
+        )
         out = rearrange(out, "B H L D -> B L (H D)")
         out = sigmoid_gate(gate, out)
         out = _h100_master.linear(out, self.to_out, wo) if master else self.to_out(out)

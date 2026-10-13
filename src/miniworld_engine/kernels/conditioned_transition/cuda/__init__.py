@@ -10,13 +10,14 @@ head-major (a fused WMMA LayerNorm + projection kernel measured 3.4-3.6x slower 
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
 
 _dir = Path(__file__).parent
-STAT_W = 128          # kept for the runner's buffer layout (the Triton module's statistics width)
+STAT_W = (
+    128  # kept for the runner's buffer layout (the Triton module's statistics width)
+)
 
 
 def _ext():
@@ -32,10 +33,18 @@ def _arch_ext(arch):
     return load_extension(
         name=f"token_dit_rows_cuda_sm{arch}",
         sources=[str(_dir / "token_dit_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
-                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-                           *gencodes(arch, ptx=() if arch == "90a" else ("100",))],
-        extra_cflags=["-std=c++17"], verbose=False)
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes(arch, ptx=() if arch == "90a" else ("100",)),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 
 
 def available() -> bool:
@@ -45,12 +54,18 @@ def available() -> bool:
 
 
 def token_pack(weights, heads, qk, qs, dtype=torch.bfloat16):
-    vector_default = "1" if torch.cuda.get_device_capability(weights[0].device) == (9, 0) else "0"
-    if dtype is torch.float32 or os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", vector_default) == "1":
-        return _ext().token_pack_vector(weights, int(heads), bool(qk), float(qs), dtype is torch.float32)
+    if dtype is torch.float32 or torch.cuda.get_device_capability(
+        weights[0].device
+    ) == (9, 0):
+        return _ext().token_pack_vector(
+            weights, int(heads), bool(qk), float(qs), dtype is torch.float32
+        )
     return _ext().token_pack(weights, int(heads), bool(qk), float(qs))
 
 
+# Private candidate (default 0 = synchronous pack; 1 / 2 = asynchronous pack schedules): kept reachable here instead of being
+# deleted (formerly MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC).
+_CANDIDATE_INFER_ASYNC = 0
 _TOKEN_PACKS: dict = {}
 _TOKEN_STREAMS: dict = {}
 
@@ -58,6 +73,7 @@ _TOKEN_STREAMS: dict = {}
 @functools.lru_cache(maxsize=8)
 def _token_swiglu(device_index):
     from .gemm_swiglu import GemmSwigluSm90
+
     return GemmSwigluSm90(device_index)
 
 
@@ -74,21 +90,47 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     from ...augmented_attention.cuda import apb
 
     A, B, L, D = single.shape
-    if (torch.is_grad_enabled() or single.dtype not in (torch.bfloat16, torch.float32) or pair.dtype != single.dtype
-        or B != 1 or D != 768 or heads != 16 or L % 128 or cond.shape[-1] != 384
-        or tuple(pair.shape) != (1, L, L, 128) or not pair.is_contiguous()
-        or torch.cuda.get_device_capability(single.device) != (9, 0)):
-        raise ValueError("Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads")
+    if (
+        torch.is_grad_enabled()
+        or single.dtype not in (torch.bfloat16, torch.float32)
+        or pair.dtype != single.dtype
+        or B != 1
+        or D != 768
+        or heads != 16
+        or L % 128
+        or cond.shape[-1] != 384
+        or tuple(pair.shape) != (1, L, L, 128)
+        or not pair.is_contiguous()
+        or torch.cuda.get_device_capability(single.device) != (9, 0)
+    ):
+        raise ValueError(
+            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads"
+        )
     qs = math.log2(math.e) / math.sqrt(48)
     fp32 = single.dtype is torch.float32
-    asynchronous = int(os.environ.get("MINIWORLD_TOKEN_DIT_H100_INFER_ASYNC", "0"))
-    if asynchronous not in (0, 1, 2):
-        raise ValueError("Hopper token inference pack schedule must be 0, 1 or 2")
-    key = (asynchronous, qk, heads, single.dtype, os.environ.get("MINIWORLD_TOKEN_DIT_H100_PACK_VECTOR", "1"), *((w.data_ptr(), w._version) for w in weights))
+    asynchronous = _CANDIDATE_INFER_ASYNC
+    key = (
+        asynchronous,
+        qk,
+        heads,
+        single.dtype,
+        *((w.data_ptr(), w._version) for w in weights),
+    )
+
     def prepare():
         if not asynchronous:
-            return token_pack(weights, heads, qk, qs, single.dtype), weights, None, None, None
-        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+            return (
+                token_pack(weights, heads, qk, qs, single.dtype),
+                weights,
+                None,
+                None,
+                None,
+            )
+        idx = (
+            single.device.index
+            if single.device.index is not None
+            else torch.cuda.current_device()
+        )
         if idx not in _TOKEN_STREAMS:
             _TOKEN_STREAMS[idx] = torch.cuda.Stream(device=single.device)
         stream = _TOKEN_STREAMS[idx]
@@ -97,7 +139,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
             # Keep the bandwidth-heavy pair projection separate from large
             # weight casts; release the latter beside conditioning GEMMs.
             _ext().token_stage90(weights, out, heads, qk, qs, fp32, 0, 5)
-            return out, weights, None, torch.cuda.Event(), {"stream": stream, "pending": True}
+            return (
+                out,
+                weights,
+                None,
+                torch.cuda.Event(),
+                {"stream": stream, "pending": True},
+            )
         stream.wait_stream(torch.cuda.current_stream(single.device))
         cond_ready, matrix_ready = torch.cuda.Event(), torch.cuda.Event()
         with torch.cuda.stream(stream):
@@ -107,7 +155,10 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
             matrix_ready.record(stream)
         _ext().token_stage90(weights, out, heads, qk, qs, fp32, 4, 5)
         return out, weights, cond_ready, matrix_ready, None
-    packed, _, cond_ready, matrix_ready, late_pack = _capture.lookup(_TOKEN_PACKS, key, prepare, limit=8)
+
+    packed, _, cond_ready, matrix_ready, late_pack = _capture.lookup(
+        _TOKEN_PACKS, key, prepare, limit=8
+    )
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     mask = None if mask is None else mask.reshape(L)
     # The augmented-attention module fills fully masked rows with a finite
@@ -124,7 +175,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(-1, 384)
     P = c.shape[0]
-    cn = single.new_empty((P, 384)); cc = torch.empty_like(cn)
+    cn = single.new_empty((P, 384))
+    cc = torch.empty_like(cn)
     cond_rows(c, cn, cc, 1e-5)
     if late_pack is not None and late_pack["pending"]:
         stream = late_pack["stream"]
@@ -143,12 +195,15 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, 1e-5)
     if matrix_ready is not None:
         torch.cuda.current_stream(single.device).wait_event(matrix_ready)
-    qkvg = (torch.addmm(bqkvg[:3 * D], xa, wqkvg[:3 * D].t()) if fp32
-            else torch.addmm(bqkvg, xa, wqkvg.t()))
+    qkvg = (
+        torch.addmm(bqkvg[: 3 * D], xa, wqkvg[: 3 * D].t())
+        if fp32
+        else torch.addmm(bqkvg, xa, wqkvg.t())
+    )
     if qk:
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
     if fp32:
-        vt = torch.mm(wqkvg[3 * D:], xa.t())
+        vt = torch.mm(wqkvg[3 * D :], xa.t())
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D)
     else:
         attention.gated_inference(qkvg, bias, 0, A)
@@ -244,4 +299,18 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
         out.view(nb, L, L)[:, :, ~m] = float("-inf")
 
 
-__all__ = ["STAT_W", "adaln_in_rows", "adaln_rows", "available", "cond_rows", "gate_rows", "key_perm", "layernorm_rows", "pair_bias_all", "qknorm_rows", "resgate_adaln_rows", "resgate_out_rows", "swiglu_rows"]
+__all__ = [
+    "STAT_W",
+    "adaln_in_rows",
+    "adaln_rows",
+    "available",
+    "cond_rows",
+    "gate_rows",
+    "key_perm",
+    "layernorm_rows",
+    "pair_bias_all",
+    "qknorm_rows",
+    "resgate_adaln_rows",
+    "resgate_out_rows",
+    "swiglu_rows",
+]

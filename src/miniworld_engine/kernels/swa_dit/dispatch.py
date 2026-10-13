@@ -1,8 +1,8 @@
 """The fused SWA atom DiT block's host side: which implementation serves each stage, and its launches.
 
 Required H100 shapes retain the accurate legacy composition until native candidates pass all acceptance gates.
-MINIWORLD_SWA_H100_CUDA_ONLY=1 selects handwritten CUDA and cuBLAS; additionally setting
-MINIWORLD_SWA_H100_B200_FUSION=1 selects the experimental Hopper implementation of the B200 fusion boundaries.
+settings.swa_dit_h100_native=True forces handwritten CUDA and cuBLAS (False disables it); the Hopper implementation of the B200
+fusion boundaries follows the shape default.
 Unsupported native contracts and failed builds raise. Candidate timings do not describe the default path.
 
 Moved from team-gm ``swa_fused_triton.block_fwd`` / ``block_bwd`` (commit 14f2c73). The launch sequence, the buffers and
@@ -46,7 +46,6 @@ their backwards, around the SAME window-attention kernels on bf16 operands (what
 from __future__ import annotations
 
 import functools
-import os
 import warnings
 from typing import Any
 
@@ -105,9 +104,9 @@ def _native_b200_default(q, training=None):
 
 def native_h100_enabled(q, training=None):
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
-    override = os.environ.get("MINIWORLD_SWA_H100_CUDA_ONLY")
+    override = settings.current().swa_dit_h100_native
     if override is not None:
-        return override == "1" and is_sm90(q.device)
+        return override and is_sm90(q.device)
     if (q.ndim == 3 and q.shape[0] in (1, 5)
             and q.shape[1] in (1024, 2048, 4096, 8192) and q.shape[2] == 128):
         return _native_b200_default(q, training) and is_sm90(q.device)
@@ -115,9 +114,6 @@ def native_h100_enabled(q, training=None):
 
 
 def _native_b200_fusion(q=None, training=None):
-    override = os.environ.get("MINIWORLD_SWA_H100_B200_FUSION")
-    if override is not None:
-        return override == "1"
     return q is not None and _native_b200_default(q, training)
 
 
@@ -134,9 +130,7 @@ def _native_h100_extension(which="qkvg"):
 def _native_mm(a, b):
     # Private cuBLAS state preserves the incumbent GEMM choice. The captured
     # graph owns its scratch tensor independently of other graphs' lifetimes.
-    if os.environ.get("MINIWORLD_SWA_H100_B200_FUSION") != "0":
-        return _native_h100_extension().native_owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32)
-    return _mm32(a, b)
+    return _native_h100_extension().native_owned_mm(a, b, torch.backends.cuda.matmul.allow_tf32)
 
 
 def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training):
@@ -186,8 +180,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         g, pq, pk = [empty(M, 128) for _ in range(3)]
         rows(1, [p, cs, sn], [qh, kh, vh, g, pq, pk])
     o, lse = empty(M, 128, dtype=torch.bfloat16), empty(N, 4, S, dtype=torch.float32)
-    attention = (ext.tiled_attention if fusion or os.environ.get("MINIWORLD_SWA_H100_TILED_ATTENTION", "0") == "1"
-                 else ext.native_attention)
+    attention = ext.tiled_attention if fusion else ext.native_attention
     attention([qh, kh, vh, sequ], [o, lse], 0)
     if bf:
         ffn_ext = _native_h100_extension("fwd_small" if small else "fwd")
@@ -226,7 +219,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
     def rows(stage, ins, outs):
         ext.native_rows(ins, outs, stage, A, B, S, bf, eps)
     dmod = torch.empty_like(mod)
-    if bf and (fusion or os.environ.get("MINIWORLD_SWA_H100_REUSE_FFN_BWD", "0") == "1"):
+    if bf and fusion:
         overwrite = fusion and A == 1
         ffn_ext = _native_h100_extension("bwd_overwrite" if overwrite else "bwd")
         wab, wdt, wabt = ext.native_ffn_pack(wu, wd, dmod, not overwrite)
@@ -244,7 +237,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
         rows(8, [dy, dY, q1, mod], [dq1, dmod])
     datt, gated = empty(M, 128), empty(M, 128)
     dO, dG, delta = empty(M, 128, dtype=torch.bfloat16), empty(M, 128), empty(N, 4, S, dtype=torch.float32)
-    if bf and A == 1 and (fusion or os.environ.get("MINIWORLD_SWA_H100_FUSED_OPROJ_BWD", "0") == "1"):
+    if bf and A == 1 and fusion:
         ext.fused_oproj_bwd([dq1, mod, att, o, g, wo], [datt, gated, dO, dG, delta, dmod], S)
     else:
         rows(9, [dq1, mod, att, o, g], [datt, gated, dmod])
@@ -252,8 +245,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
         rows(10, [dgated, o, g], [dO, dG, delta])
     dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
     ai, ao = [qh, kh, vh, sequ, dO, lse, delta], [dqh, dkh, dvh]
-    attention = (ext.tiled_attention if fusion or os.environ.get("MINIWORLD_SWA_H100_TILED_ATTENTION", "0") == "1"
-                 else ext.native_attention)
+    attention = ext.tiled_attention if fusion else ext.native_attention
     attention(ai, ao, 1)
     attention(ai, ao, 2)
     dp = empty(M, 512)
@@ -268,11 +260,6 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
         dX = _native_mm(dp, wstack)
         rows(12, [dq1, dX, q, mod], [dq, dmod])
     def wgrad(gradient, activation):
-        if fusion and bf and os.environ.get("MINIWORLD_SWA_H100_OWNED_LT_WGRAD", "0") == "1":
-            from miniworld_engine.kernels.augmented_attention.cuda.sm100_atom import (
-                owned_wgrad_hopper,
-            )
-            return owned_wgrad_hopper(gradient, activation)
         return _native_mm(gradient.t(), activation)
     return [dq.view_as(q), dmod, wgrad(dp[:, :384], x), wgrad(dp[:, 384:], x),
             wgrad(datt, gated), wgrad(dab, y), wgrad(dffn, hh)]

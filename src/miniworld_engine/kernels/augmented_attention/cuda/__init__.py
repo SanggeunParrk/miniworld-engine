@@ -37,7 +37,6 @@ from __future__ import annotations
 
 import functools
 import math
-import os
 import warnings
 from pathlib import Path
 
@@ -486,9 +485,9 @@ def tf32_inference_core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
     """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, 16 heads x 48, L a multiple of 128, H100.
-    MINIWORLD_AUGATTN_TF32_SM90=0 keeps the Triton core."""
+    ``settings.augattn_tf32_sm90 = False`` keeps the Triton core."""
     return (
-        os.environ.get("MINIWORLD_AUGATTN_TF32_SM90", "1") != "0"
+        settings.current().augattn_tf32_sm90
         and dtype is torch.float32
         and (d, h) == (H * D, H)
         and L % 128 == 0

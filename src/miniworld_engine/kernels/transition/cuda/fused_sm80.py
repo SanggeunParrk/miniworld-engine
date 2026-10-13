@@ -25,7 +25,6 @@ summed in a fixed order (no atomics), so a replay is bit-identical.
 
 import functools
 import hashlib
-import os
 import warnings
 from pathlib import Path
 
@@ -173,7 +172,7 @@ def _pack_tables(dev):
     """Gather tables of the one-launch pack kernel: out16 = [w | wdw | wx], out32 = gb (LN affine float4 slots).
     idx16: element | source << 26 (Wa, Wb, Ws) | x0.5 << 28 | f16 << 29; idx32: element | beta << 26."""
     n = H * D
-    code = lambda src: (torch.arange(n, device=dev, dtype=torch.int64) | (src << 26))  # noqa: E731
+    code = lambda src: torch.arange(n, device=dev, dtype=torch.int64) | (src << 26)  # noqa: E731
     half = 1 << 28
     wa, wb = code(0).view(H, D), code(1).view(H, D)
     ws = code(2).view(D, H)

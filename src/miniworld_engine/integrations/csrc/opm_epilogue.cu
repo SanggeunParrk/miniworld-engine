@@ -736,9 +736,6 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
  if(tid<64){sl[tid]=gamma[tid];sl[64+tid]=beta[tid];}
  __syncthreads();
  if(warp<4){
-#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
-  asm volatile("setmaxnreg.dec.sync.aligned.u32 24;":::"memory");
-#endif
   if(tid==0){
    expect(wf,8192);ld2(&wam,sw,wf,0,0);ld2(&wbm,sw+2048,wf,0,0);
    int g=0;
@@ -753,9 +750,6 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
  }else if(warp<12){
   // The first prototype's inc-to-80 trapped when the compiler's initial
   // allotment was already larger. Keep the compiler's static allocation.
-#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
-  asm volatile("setmaxnreg.inc.sync.aligned.u32 80;":::"memory");
-#endif
   const int r=(warp-4)*16+(lane&15),hf=lane>>4;int g=0;
   for(int t=blockIdx.x;t<tiles;t+=gridDim.x,++g){
    int slot=g%NST,i=t/nsb,s0=(t%nsb)*BS;
@@ -801,9 +795,6 @@ __global__ __launch_bounds__(512,1) void opm_prologue_tma_hopper(
    wg::proxy_fence();__syncwarp();if(lane==0)arrive(yf+slot);
   }
  }else{
-#if defined(MINIWORLD_OPM_TMA_DYNAMIC_REGS)
-  asm volatile("setmaxnreg.inc.sync.aligned.u32 112;":::"memory");
-#endif
   wait(wf,0);const int cw=warp-12;int g=0;
   for(int t=blockIdx.x;t<tiles;t+=gridDim.x,++g){
    int slot=g%NST,b=g%2,i=t/nsb,s0=(t%nsb)*BS;

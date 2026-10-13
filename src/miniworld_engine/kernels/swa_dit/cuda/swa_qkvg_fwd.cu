@@ -628,7 +628,6 @@ template<int MODE, int SLOTS=2> void launch(swa_native::Att p,CUtensorMap mq,CUt
  cudaKernel_t k;C10_CUDA_CHECK(cudaGetKernel(&k,attention<MODE,SLOTS>));
  C10_CUDA_CHECK(cudaFuncSetAttribute((const void*)k,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
  int waves=MODE==0?2:(SLOTS==1?2:1);
- if(const char* v=std::getenv("MINIWORLD_SWA_H100_ATTN_WAVES"))waves=std::max(1,std::atoi(v));
  int grid=std::min(p.N*4*(p.S/64),num_sms(dev)*waves);
  void* args[]={&p,&mq,&mk,&mv,&md};
  C10_CUDA_CHECK(cudaLaunchKernel((const void*)k,dim3(grid),dim3(160),args,smem,at::cuda::getCurrentCUDAStream()));C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -649,13 +648,8 @@ void tiled_attention(std::vector<torch::Tensor>x,std::vector<torch::Tensor>y,int
   TORCH_CHECK(x[4].is_contiguous()&&x[4].scalar_type()==torch::kBFloat16&&x[4].numel()==(long)p.N*p.S*128,"tiled SWA dO contract");
   p.d=(const __nv_bfloat16*)x[4].data_ptr();p.lse=x[5].data_ptr<float>();p.delta=x[6].data_ptr<float>();
   p.dq=(__nv_bfloat16*)y[0].data_ptr();p.dk=(__nv_bfloat16*)y[1].data_ptr();p.dv=(__nv_bfloat16*)y[2].data_ptr();md=swa_tiled::do_map(x[4],qr);
-  const char* slots=std::getenv("MINIWORLD_SWA_H100_ATTN_STAGES");
-  const char* fusion=std::getenv("MINIWORLD_SWA_H100_B200_FUSION");
-  if(slots?std::atoi(slots)==1:(!fusion||std::atoi(fusion)==1)){
-   if(stage==1)swa_tiled::launch<1,1>(p,mq,mk,mv,md,x[0].get_device());else swa_tiled::launch<2,1>(p,mq,mk,mv,md,x[0].get_device());
-  }else{
-   if(stage==1)swa_tiled::launch<1>(p,mq,mk,mv,md,x[0].get_device());else swa_tiled::launch<2>(p,mq,mk,mv,md,x[0].get_device());
-  }
+  // One attention smem slot (the two-slot launch<1> / launch<2> instantiations stay in the template, unselected).
+  if(stage==1)swa_tiled::launch<1,1>(p,mq,mk,mv,md,x[0].get_device());else swa_tiled::launch<2,1>(p,mq,mk,mv,md,x[0].get_device());
  }
 }
 

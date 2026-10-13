@@ -26,7 +26,6 @@ module's row-broadcast dropout on the update are applied inside the kernel: the 
 
 from __future__ import annotations
 
-import os
 from contextvars import ContextVar
 from pathlib import Path
 from typing import Any, cast
@@ -69,20 +68,15 @@ def _h100_training_default(msa: torch.Tensor) -> bool:
 
 
 def native_aux_enabled(msa: torch.Tensor | None = None) -> bool:
-    """Qualified training defaults; explicit AUX=0 preserves the legacy path."""
-    default = (
+    """Qualified training defaults (the six required H100 shapes, or the active native training scope)."""
+    return (
         _h100_training_default(msa) if msa is not None else _NATIVE_TRAINING_SCOPE.get()
     )
-    return os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1" if default else "0") == "1"
 
 
 def native_inference_enabled(device: torch.device) -> bool:
-    """Validated H100 inference default; AUX=0 retains the original path."""
-    return (
-        os.environ.get("MINIWORLD_PWA_H100_CUDA_AUX", "1") == "1"
-        and device.type == "cuda"
-        and torch.cuda.get_device_capability(device) == (9, 0)
-    )
+    """Validated H100 inference default."""
+    return device.type == "cuda" and torch.cuda.get_device_capability(device) == (9, 0)
 
 
 def payload_dir():  # kept for symmetry with anthropic_msa: this path needs no payload

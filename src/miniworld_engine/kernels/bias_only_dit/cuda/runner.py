@@ -49,7 +49,6 @@ output-gate table GEMM on a side stream (no change).
 
 from __future__ import annotations
 
-import os
 import weakref
 
 import torch
@@ -715,6 +714,9 @@ _H100_INFER_PACKS: dict = {}
 _H100_INFER_PROBS: dict = {}
 _H100_INFER_OPS: dict = {}
 _H100_INFER_STREAMS: dict = {}
+#: Inference pack schedule: 0 packs inline (the shipped path); 1 / 2 stage the pack on an auxiliary stream (the condition
+#: tables first for 2). Kept reachable as a private candidate; the selection environment variable is gone.
+_H100_INFER_ASYNC = 0
 
 
 def _h100_infer_core(idx: int):
@@ -754,7 +756,7 @@ def h100_inference(single, cond, pair, mask, weights):
         raise ValueError(
             "Hopper bias-only CUDA inference requires BF16 buckets128..768, B1, 768/384/128"
         )
-    asynchronous = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_INFER_ASYNC", "0"))
+    asynchronous = _H100_INFER_ASYNC
     key = (asynchronous, *((w.data_ptr(), w._version) for w in weights))
 
     def prepare():

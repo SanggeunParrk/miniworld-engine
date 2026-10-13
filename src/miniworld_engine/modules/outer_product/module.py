@@ -1,4 +1,5 @@
 """OuterProduct / OuterProductMean — MSA/single -> pair building blocks (ported from team-gm)."""
+
 import torch
 import torch.nn as nn
 from einops import rearrange
@@ -92,11 +93,14 @@ class OuterProductMean(nn.Module):
         self.implementation = ImplementationType(implementation)
         # "anthropic" names an MSA payload, not a LayerNorm one: the primitives below are plumbing for
         # the fallback path and take the engine's own auto choice in that case (integrations.anthropic_msa).
-        implementation = (ImplementationType.MINIWORLD if self.implementation == ImplementationType.ANTHROPIC
-                          else self.implementation)
+        implementation = (
+            ImplementationType.MINIWORLD
+            if self.implementation == ImplementationType.ANTHROPIC
+            else self.implementation
+        )
         self.normalize_before_proj = normalize_before_proj
         # LN over the MSA feature dim — route to the fused miniworld_engine LN (bf16) under
-        # MINIWORLD_ENGINE; a raw nn.LayerNorm runs fp32-native under autocast and,
+        # the engine implementation; a raw nn.LayerNorm runs fp32-native under autocast and,
         # at MSA depth 2048, is the single biggest kernel in the MSA module.
         self.ln_msa = LayerNorm(d_msa, implementation=implementation)
         self.to_left = Linear(d_msa, d_hidden, bias=False)
@@ -120,39 +124,82 @@ class OuterProductMean(nn.Module):
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.
         if _opm_train.wanted(self.implementation):
-            _dims = (self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0])
-            if _opm_train.serves(msa, *_dims, interchain=bool(self.mask_interchain and token_asym_id is not None),
-                                 normalize_before_proj=self.normalize_before_proj):
-                _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+            _dims = (
+                self.to_left.weight.shape[1],
+                self.to_left.weight.shape[0],
+                self.to_out.weight.shape[0],
+            )
+            if _opm_train.serves(
+                msa,
+                *_dims,
+                interchain=bool(self.mask_interchain and token_asym_id is not None),
+                normalize_before_proj=self.normalize_before_proj,
+            ):
+                _m = (
+                    mask
+                    if mask is not None
+                    else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                )
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):
-            _fused = {"grad": torch.is_grad_enabled(),
-                          "interchain": bool(self.mask_interchain and token_asym_id is not None)}
+            _fused = {
+                "grad": torch.is_grad_enabled(),
+                "interchain": bool(self.mask_interchain and token_asym_id is not None),
+            }
             _dims = (self.to_left.weight.shape[0], self.to_out.weight.shape[0])
             if self.implementation == ImplementationType.ANTHROPIC:
-                _anthropic.require_opm(msa, *_dims, **_fused)      # explicit: the reason, never a reroute
+                _anthropic.require_opm(
+                    msa, *_dims, **_fused
+                )  # explicit: the reason, never a reroute
             if _anthropic.serves_opm(msa, *_dims, **_fused):
-                _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                _m = (
+                    mask
+                    if mask is not None
+                    else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                )
                 _pair = _anthropic.outer_product_mean(self, msa, _m)
                 return residual + _pair if residual is not None else _pair
         # The portable Triton path (kernels.outer_product_mean) for every call the native paths above did not take:
         # other GPUs, other widths, engine_backend="triton". An explicit implementation="triton" refuses with the reason.
-        if self.implementation in (ImplementationType.MINIWORLD, ImplementationType.TRITON) and (
-                resolve("outer_product_mean", self.implementation, msa.device) == KernelBackend.TRITON):
+        if self.implementation in (
+            ImplementationType.MINIWORLD,
+            ImplementationType.TRITON,
+        ) and (
+            resolve("outer_product_mean", self.implementation, msa.device)
+            == KernelBackend.TRITON
+        ):
             from miniworld_engine.kernels.outer_product_mean.interface import (
                 refusal,
                 triton_outer_product_mean,
             )
-            why = refusal(msa, self.to_left.weight.shape[0], self.to_out.weight.shape[0],
-                          interchain=bool(self.mask_interchain and token_asym_id is not None), residual=residual)
+
+            why = refusal(
+                msa,
+                self.to_left.weight.shape[0],
+                self.to_out.weight.shape[0],
+                interchain=bool(self.mask_interchain and token_asym_id is not None),
+                residual=residual,
+            )
             if why is None:
-                return triton_outer_product_mean(msa, mask, self.ln_msa.weight, self.ln_msa.bias, self.to_left.weight,
-                                                 self.to_right.weight, self.to_out.weight, self.to_out.bias, residual,
-                                                 eps=float(self.ln_msa.eps), normalize_before_proj=self.normalize_before_proj)
+                return triton_outer_product_mean(
+                    msa,
+                    mask,
+                    self.ln_msa.weight,
+                    self.ln_msa.bias,
+                    self.to_left.weight,
+                    self.to_right.weight,
+                    self.to_out.weight,
+                    self.to_out.bias,
+                    residual,
+                    eps=float(self.ln_msa.eps),
+                    normalize_before_proj=self.normalize_before_proj,
+                )
             if self.implementation == ImplementationType.TRITON:
-                raise NotImplementedError(f"OuterProductMean(implementation='triton'): {why}")
+                raise NotImplementedError(
+                    f"OuterProductMean(implementation='triton'): {why}"
+                )
         msa = self.ln_msa(msa)
         left = self.to_left(msa)
         right = self.to_right(msa)

@@ -2,7 +2,7 @@
 
 The supported H100 window64 path defaults to handwritten CUDA plus cuBLAS, including live FP32 master parameters and
 native caller-gradient accumulation. Unsupported selected-native contracts raise. Explicit
-MINIWORLD_SWA_H100_CUDA_ONLY=0 retains the historical backend descriptions below.
+``settings.swa_dit_h100_native=False`` retains the historical backend descriptions below.
 
 Provenance: moved from team-gm (``src/team_gm/modules/blocks/swa_fused_triton.py`` and ``swa_cuda/``, introduced by team-gm
 commit 14f2c73 "research(swa): preserve opt-in fused atom transformer work", copied from team-gm 4fafa83). Kernel math is

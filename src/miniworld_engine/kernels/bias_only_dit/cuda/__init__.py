@@ -20,7 +20,6 @@ The fp32 path (TF32 tensor cores: ``pv_gate_tf32.cu``, ``dpb32_sm100.cu``, ``gem
 from __future__ import annotations
 
 import functools
-import os
 import warnings
 from pathlib import Path
 
@@ -35,9 +34,9 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 def h100_enabled(device) -> bool:
     """Native Hopper kernels; per-shape speed qualification is recorded separately."""
-    return os.environ.get(
-        "MINIWORLD_BIAS_ONLY_DIT_H100", "1"
-    ) == "1" and torch.cuda.get_device_capability(device) == (9, 0)
+    return settings.current().bias_only_dit_h100 and torch.cuda.get_device_capability(
+        device
+    ) == (9, 0)
 
 
 def _h100_group(samples, length, heads, width, sms):
@@ -424,18 +423,8 @@ class PvGateCore:
     def __call__(self, v, P, out, S, g=None):
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         if h100_enabled(self.device_index):
-            sg = int(os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PV_GROUP", "0"))
-            if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1":
-                sg = (
-                    min(S, sg)
-                    if sg
-                    else _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
-                )
-                h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
-            elif sg > 0:
-                h100_ext().grouped_pv(v, P, out, S, g, self.nh, self.dh, min(S, sg))
-            else:
-                h100_ext().pv(v, P, out, S, g, self.nh, self.dh)
+            sg = _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
+            h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
             return out
         L = v.shape[0] // S
         vb, early = (
@@ -589,12 +578,7 @@ class DpbKernel:
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
-            op = (
-                h100_ext().dpb_pipeline
-                if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
-                else h100_ext().dpb
-            )
-            op(do, v, P, dd, out, A, self.nh, self.dh)
+            h100_ext().dpb_pipeline(do, v, P, dd, out, A, self.nh, self.dh)
             return out
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
@@ -784,12 +768,7 @@ class GemmSwigluAB:
 
     def __call__(self, x, w, ab, h):
         if h100_enabled(self.device_index):
-            op = (
-                h100_ext().swiglu_pipeline
-                if os.environ.get("MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE", "1") == "1"
-                else h100_ext().swiglu
-            )
-            op(x, w, ab, h)
+            h100_ext().swiglu_pipeline(x, w, ab, h)
             return h
         M, K, H = x.shape[0], self.K, self.H
         assert (

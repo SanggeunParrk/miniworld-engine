@@ -214,9 +214,7 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   TORCH_CHECK(pair.is_cuda() && pair.scalar_type()==torch::kBFloat16 && pair.dim()==4
     && pair.size(1)==pair.size(2) && probability>0. && probability<1.,"BF16 square pair and 0<p<1 required");
   c10::cuda::CUDAGuard guard(pair.device());
-  const char* native_rng_env = std::getenv("MINIWORLD_TRIATTN_H100_NATIVE_RNG");
-  const bool native_graph_rng = !native_rng_env || std::string(native_rng_env) != "0";
-  if (native_graph_rng) enable_graph_rng_writer();
+  enable_graph_rng_writer();
   auto out=torch::empty({pair.size(0),pair.size(1),pair.size(3)},pair.options());
   int64_t n=out.numel();auto* prop=at::cuda::getCurrentDeviceProperties();
   int blocks=std::min<int64_t>((n+255)/256,prop->multiProcessorCount*(prop->maxThreadsPerMultiProcessor/256));
@@ -224,7 +222,7 @@ torch::Tensor drop_scale(torch::Tensor pair,double probability) {
   auto* gen=at::check_generator<at::CUDAGeneratorImpl>(at::cuda::detail::getDefaultCUDAGenerator());
   at::PhiloxCudaState state;
   {std::lock_guard<std::mutex> lock(gen->mutex_);state=gen->philox_cuda_state(increment);}
-  if (native_graph_rng) register_graph_rng(state);
+  register_graph_rng(state);
   auto* dst=(__nv_bfloat16*)out.data_ptr();float p=probability,inverse=1.f/(1.f-p);
   cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,drop_scale_kernel));
   void* args[]={&dst,&n,&state,&p,&inverse};

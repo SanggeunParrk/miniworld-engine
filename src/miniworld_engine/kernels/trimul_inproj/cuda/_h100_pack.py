@@ -1,10 +1,10 @@
 """Live weight packing without a nested torch.compile runtime invocation."""
-import os
 from functools import lru_cache
 from pathlib import Path
 import triton
 import triton.language as tl
 import torch
+from miniworld_engine import settings
 from . import _h100_runtime as T
 from miniworld_engine.kernels._compile import opaque
 
@@ -107,8 +107,7 @@ def _owned_blas_ext():
     cuda_home = ensure_cuda_home()
     if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
         raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
-    root = Path(os.environ.get("MINIWORLD_ENGINE_JIT_ROOT",
-                               Path.home() / ".cache" / "miniworld_engine_jit"))
+    root = settings.engine_jit_root()
     build = root / "trimul_owned_blas" / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
     build.mkdir(parents=True, exist_ok=True)
     return load_inline(
@@ -204,7 +203,7 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
         dst, *quad, r, d, *(w.stride(0) for w in quad), *(w.stride(1) for w in quad),
         *(int(w.dtype == torch.float32) for w in quad)])
     vector = (T.preserve_training(d)
-              and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
+              and T.d256_glue_enabled()
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
     _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
             (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
@@ -267,7 +266,7 @@ def dense_copy_into(dst, src):
 
 def finish_affine_partials(pg, pb, dg, db):
     blocks, width = pg.shape
-    parallel = T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
+    parallel = T.d256_glue_enabled()
     columns = 4 if parallel else 32
     _aux_unit().kernel("mw_aux_affine_cta_finish_parallel" if parallel
                        else "mw_aux_affine_cta_finish").launch(
@@ -280,13 +279,12 @@ def fused_wide_glue(width, length, bidirectional=False, selected=False):
                ((384, 384, False), (384, 768, True)))
     return (length in (384, 768) and (width == 384 or (width == 512 and bidirectional))
             and (selected or T.preserve_wide_training(width))
-            and os.environ.get("MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE",
-                               "1" if default else "0") == "1")
+            and default)
 
 def fused_d256_glue(width, length, selected=False, *, bidirectional=False):
     return ((width == 256 and length == 384
              and (selected or T.preserve_d256_training())
-             and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FUSED_GLUE", selected))
+             and T.d256_glue_enabled(selected))
             or (width == 256 and length == 768
                 and (selected or T.preserve_d256_training())
                 and T.d256_register_source_enabled(selected and bidirectional))
@@ -368,7 +366,7 @@ def normalize_into(dst, x, g, b, stats=None, *, warp=False):
     width, rows = x.shape[-1], x.numel()//x.shape[-1]
     if width not in (64, 128, 256, 384, 512):
         raise ValueError("Hopper CUDA normalization requires a supported pair width")
-    if warp or os.environ.get("MINIWORLD_TRIMUL_H100_WARP_LN") == "1":
+    if warp:
         _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
     else:
         _launch("mw_aux_norm", (rows, 1, 1), [x, g, b, dst, stats, width])
@@ -459,7 +457,7 @@ def stack_backward_weights(weights):
         *weights, out, *(w.shape[0] for w in weights),
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights), width])
     vector = (T.preserve_training(width)
-              and T.d256_glue_enabled("MINIWORLD_TRIMUL_H100_FAST_GLUE")
+              and T.d256_glue_enabled()
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights))
     count = max(w.numel() for w in weights) // (8 if vector else 1)
     _launch("mw_aux_stack_vec" if vector else "mw_aux_stack", ((count+255)//256, 5, 1), [p])
