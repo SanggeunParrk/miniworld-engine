@@ -30,7 +30,7 @@ def refusal(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: 
         return f"x_pred must be fp32 or bf16, got {x_pred.dtype}"
     if x_pred.dim() != 4 or x_pred.shape[-1] != 3:
         return f"x_pred must be [A, B, N, 3], got {tuple(x_pred.shape)}"
-    a, b, n, _ = x_pred.shape
+    _a, b, n, _ = x_pred.shape
     if tuple(gt.shape) != (b, n, 3):
         return f"gt must be [B, N, 3] = {(b, n, 3)}, got {tuple(gt.shape)}"
     if tuple(is_nuc.shape) != (b, n) or tuple(mask.shape) != (b, n):
@@ -101,7 +101,7 @@ class SmoothLddtFunction(torch.autograd.Function):
 def smooth_lddt(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
     """``mean_{a, b} (1 - smooth lDDT)``: differentiable in ``x_pred`` [A, B, N, 3]; ``gt`` [B, N, 3] is the (un-noised, un-augmented) structure,
     ``is_nuc`` / ``mask`` [B, N] bool (nucleotide atoms, resolved atoms). Check :func:`refusal` first."""
-    a, b, n, _ = x_pred.shape
+    _a, _b, n, _ = x_pred.shape
     pad = (-n) % BLK
     if pad:
         x_pred = torch.nn.functional.pad(x_pred, (0, 0, 0, pad))

@@ -49,7 +49,7 @@ def weighted_align(
     cov_matrix = torch.einsum("bni,bnj->bij", x_centered * weight, y_centered)
 
     # Singular Value Decomposition
-    u, s, v = torch.linalg.svd(cov_matrix)
+    u, _, v = torch.linalg.svd(cov_matrix)
     v = v.mH
 
     rotation_matrix = torch.einsum("bij,bkj -> bik", u, v)
@@ -84,7 +84,7 @@ def kabsch_rmsd(coords: np.ndarray, mask: np.ndarray) -> np.ndarray:
     mask:  (N, L) or (N, L, 1) boolean
     """
     # shape
-    N, L, _ = coords.shape
+    _n, _l, _ = coords.shape
 
     # ensure mask shape
     if mask.ndim == 3:
@@ -160,7 +160,7 @@ def kabsch_rmsd_ref(
     tC = torch.from_numpy(coords).to(torch.float64)
     tM = torch.from_numpy(mask.astype(bool))
 
-    N, L, _ = tC.shape
+    N, _l, _ = tC.shape
     device = tC.device
 
     # --- reference-centered coords (zero-out invalid) ---

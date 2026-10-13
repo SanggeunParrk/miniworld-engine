@@ -7,7 +7,6 @@ from jaxtyping import Float
 from pydantic import BaseModel
 
 
-# ruff: noqa: E501
 class DiffusionScheduler(ABC):
     """Maps a time index t -> noise level(s), scaling factors, loss weights, etc."""
 

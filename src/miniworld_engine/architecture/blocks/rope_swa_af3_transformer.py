@@ -186,7 +186,7 @@ class RoPESWAAttentionAF3(nn.Module):
 
     def _sdpa_band(self, q, k, v, valid):
         """Dense fallback (CPU / no flash). O(S^2) — tests only. half_window<0=global."""
-        n, s = q.shape[:2]
+        _, s = q.shape[:2]
         allowed = valid.unsqueeze(1) & valid.unsqueeze(2)
         if self.half_window >= 0:  # sliding window; <0 -> global (valid pairs only)
             rank = torch.cumsum(valid.to(torch.long), dim=1) - 1

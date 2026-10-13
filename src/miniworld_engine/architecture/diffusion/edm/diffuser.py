@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     )
 
 
-# ruff: noqa: PLR2004
 class EuclideanDiffuser(Diffuser, ABC):
     """Diffuser class for Euclidean diffusion process."""
 

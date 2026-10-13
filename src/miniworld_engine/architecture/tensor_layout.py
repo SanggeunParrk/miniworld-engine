@@ -55,7 +55,7 @@ def flatten_final_dims(t: torch.Tensor, num_dims: int) -> torch.Tensor:
     Returns:
         torch.Tensor: the flattened tensor
     """
-    return t.reshape(shape=t.shape[:-num_dims] + (-1,))
+    return t.reshape(shape=(*t.shape[:-num_dims], -1))
 
 
 def one_hot(
@@ -315,7 +315,7 @@ def gather_pair_embedding_in_dense_trunk(
     assert len(idx_q.shape) == len(idx_k.shape) == 2
 
     # Get the shape parameters
-    N_b, N_q = idx_q.shape
+    _, N_q = idx_q.shape
     N_k = idx_k.shape[1]
 
     # Expand idx_q and idx_k to match the shape required for advanced indexing

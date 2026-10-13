@@ -5,7 +5,11 @@ from __future__ import annotations
 import pytest
 import torch
 
-from miniworld_engine.kernels.smooth_lddt import refusal, smooth_lddt, smooth_lddt_reference
+from miniworld_engine.kernels.smooth_lddt import (
+    refusal,
+    smooth_lddt,
+    smooth_lddt_reference,
+)
 
 pytestmark = [
     pytest.mark.gpu,
@@ -27,7 +31,7 @@ def _rel(a, e):
     return float((a.double() - e.double()).norm() / e.double().norm().clamp_min(1e-30))
 
 
-@pytest.mark.parametrize("a,b,n,tile", [(3, 2, 200, False), (4, 1, 500, False), (2, 2, 1024, False), (48, 1, 1000, False),
+@pytest.mark.parametrize(("a", "b", "n", "tile"), [(3, 2, 200, False), (4, 1, 500, False), (2, 2, 1024, False), (48, 1, 1000, False),
                                         (2, 1, 3000, False), (2, 1, 3600, False),   # whole-structure kernels up to N = 3520, tile kernels above
                                         (3, 2, 200, True), (4, 1, 1000, True)])     # the tile kernels forced
 def test_value_and_gradient_match_the_dense_reference(a, b, n, tile, monkeypatch):
@@ -49,7 +53,8 @@ def test_nothing_resolved_and_nothing_in_radius_give_zero_gradient():
     xk = x.clone().requires_grad_()
     loss = smooth_lddt(xk, gt, nuc, mask)
     loss.backward()
-    assert float(loss) == pytest.approx(1.0) and float(xk.grad.abs().max()) == 0.0
+    assert float(loss) == pytest.approx(1.0)
+    assert float(xk.grad.abs().max()) == 0.0
 
 
 def test_bf16_input_gets_a_bf16_gradient_of_the_fp32_value():
@@ -58,7 +63,8 @@ def test_bf16_input_gets_a_bf16_gradient_of_the_fp32_value():
     loss = smooth_lddt(xb, gt, nuc, mask)
     loss.backward()
     ref = smooth_lddt_reference(xb.detach().float(), gt, nuc, mask)
-    assert xb.grad.dtype == torch.bfloat16 and abs(float(loss) - float(ref)) < 1e-6
+    assert xb.grad.dtype == torch.bfloat16
+    assert abs(float(loss) - float(ref)) < 1e-6
 
 
 def test_the_backward_is_deterministic():
@@ -87,4 +93,5 @@ def test_a_cuda_graph_replays_value_and_gradient():
     xr = x.clone().requires_grad_()
     lr = smooth_lddt_reference(xr, gt, nuc, mask)
     lr.backward()
-    assert abs(float(loss) - float(lr)) < 1e-6 and _rel(xk.grad, xr.grad) < 5e-5
+    assert abs(float(loss) - float(lr)) < 1e-6
+    assert _rel(xk.grad, xr.grad) < 5e-5

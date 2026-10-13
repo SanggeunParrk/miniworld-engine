@@ -376,7 +376,7 @@ class SWAAtomTransformer(nn.Module):
         )
 
         cos, sin, seqused, _cu, _max, _valid = attention_params
-        n, s, _ = q.shape
+        _, s, _ = q.shape
         if (
             c_base is None
         ):  # no augment structure known: one modulation row per (n, atom)
