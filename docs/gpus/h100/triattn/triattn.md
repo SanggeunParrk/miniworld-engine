@@ -525,3 +525,30 @@ Training, forward + backward (PyTorch compiled / cuEquivariance / ours, ×):
 
 Every one of the 60 cells is faster than every other measured implementation; the smallest margin is d_pair 256 inference L128 (1.16×
 over Anthropic).  Not covered by this grid: ending node, mask, B > 1, fp32 inputs.
+
+### Ending node, key mask, B = 2 (2026-10-14)
+
+`bench.py` only builds B = 1, starting node, so these cells come from a scratch module-level script
+(`~/miniworld-engine-scratch/triattn_cs/cases.py`: the same `TriangleAttention` module, `compile_module_for_benchmark`, one CUDA graph of a
+module call, median of 5 x 10 replays; fp32 master parameters under bf16 autocast).  Cases: ending node; starting node with a key mask
+(20 % masked); starting node with B = 2.  Widths 64-512, L 128 / 256 / 512 / 768, inference and training (forward + autograd.grad of the
+input and every parameter, dropout 0.25), PyTorch compiled and cuEquivariance.  Anthropic is not measured here.
+
+Control, same script, starting node, B = 1, no mask: ours matches `bench.py` (d_pair 128 L768 inference 1.346 vs 1.356 ms, training 4.97
+vs 5.04 ms), but the two baselines are slower than in `bench.py` (cuEquivariance 5.74 vs 3.96 ms, PyTorch 25.0 vs 13.0 ms: their fp32 master
+parameters are cast every call).  The "conservative" column therefore rescales the `bench.py` baseline of the same cell by
+(case time / control time) of the same implementation.
+
+| case, mode | cells | smallest x (conservative) | at | smallest x (same script) |
+|---|---|---|---|---|
+| ending, inference | 20 | 1.67 | d_pair 512 L128 | 1.65 |
+| ending, training | 20 | 1.55 | d_pair 64 L128 | 1.53 |
+| mask, inference | 20 | 1.56 | d_pair 512 L128 | 1.64 |
+| mask, training | 20 | 1.53 | d_pair 64 L128 | 1.43 |
+| B = 2, inference | 20 | 1.65 | d_pair 512 L128 | 1.73 |
+| B = 2, training | 20 | 1.74 | d_pair 64 L128 | 1.71 |
+
+Ours is the fastest in all 120 cells; largest margins (same script) are d_pair 128 at L >= 256 (4.1-4.8x inference, 4.5-4.8x training).
+PyTorch compiled runs out of memory at L768 for d_pair 512 (B = 1, 2) and d_pair 256-384 at B = 2 and for d_pair 384 training;
+those cells are against cuEquivariance only.  Ending node and mask cost nothing over the starting node without a mask (ours within
++-3 % of the control).  Not covered: fp32 activations, B > 2, L not a multiple of 128, Anthropic with these conditions.
