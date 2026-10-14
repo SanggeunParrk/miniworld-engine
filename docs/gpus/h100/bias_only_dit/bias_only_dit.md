@@ -201,8 +201,7 @@ min_seq_len=128 max_seq_len=768 seq_len_step=128 cudagraph=manual`, ms per block
 No Anthropic or cuEquivariance block exists for this module: the only comparison is the PyTorch module.
 Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 
-### Inference
-**bf16, A = 5**, one conditioning shared by the samples
+### Inference, bf16, A = 5, one conditioning shared by the samples
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
 |---|---|---|---|
@@ -213,7 +212,7 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 0.339 | **0.130** | 2.60 |
 | (768, 768, bf16) | 0.424 | **0.146** | 2.91 |
 
-**bf16, A = 1**
+### Inference, bf16, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
 |---|---|---|---|
@@ -224,7 +223,7 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 0.253 | **0.071** | 3.59 |
 | (768, 768, bf16) | 0.325 | **0.078** | 4.15 |
 
-**fp32, A = 5**, one conditioning shared by the samples
+### Inference, fp32, A = 5, one conditioning shared by the samples
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
 |---|---|---|---|
@@ -235,7 +234,7 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, fp32) | 0.641 | **0.257** | 2.49 |
 | (768, 768, fp32) | 0.772 | **0.296** | 2.61 |
 
-**fp32, A = 1**
+### Inference, fp32, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
 |---|---|---|---|
@@ -246,7 +245,7 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, fp32) | 0.397 | **0.110** | 3.61 |
 | (768, 768, fp32) | 0.516 | **0.138** | 3.73 |
 
-### Training (A = 48)
+### Training, bf16, A = 48
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
 |---|---|---|---|
@@ -256,6 +255,11 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, bf16) | 3.31 | **2.81** | 1.18 |
 | (640, 768, bf16) | 4.16 | **3.58** | 1.16 |
 | (768, 768, bf16) | 4.99 | **4.22** | 1.18 |
+
+### Training, fp32, A = 48
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
 | (128, 768, fp32) | 2.18 | **1.98** | 1.10 |
 | (256, 768, fp32) | 3.84 | **3.55** | 1.08 |
 | (384, 768, fp32) | 5.63 | **5.05** | 1.11 |
