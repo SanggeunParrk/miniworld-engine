@@ -80,7 +80,7 @@ def _run(m, single, cond, pair, mask, w, tf32=None):
 @pytest.mark.parametrize("qk", [False, True])
 @pytest.mark.parametrize("masked", [False, True])
 # (3, 200): the block pads L to a multiple of 128 (and A to an even count on B200; the H100 core takes an odd A as is)
-@pytest.mark.parametrize(("A", "L"), [(4, 256), (6, 256), (3, 200)])
+@pytest.mark.parametrize(("A", "L"), [(4, 256), (6, 256), (3, 200), (4, 128), (4, 512), (3, 640)])
 def test_train_block_matches_the_module_path(dtype, qk, masked, A, L, monkeypatch):
     torch.manual_seed(7)
     ref = _randomize(

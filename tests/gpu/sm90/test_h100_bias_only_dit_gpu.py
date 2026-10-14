@@ -122,7 +122,7 @@ def reference(block, single, cond, pair, mask):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-@pytest.mark.parametrize(("L", "A", "shared"), [(256, 3, True), (384, 5, True), (768, 5, False)])
+@pytest.mark.parametrize(("L", "A", "shared"), [(128, 2, True), (256, 3, True), (384, 5, True), (512, 4, False), (640, 3, True), (768, 5, False)])
 def test_block_inference_against_the_fp32_oracle(dtype, L, A, shared):
     block = make_block(dtype)
     torch.manual_seed(L)
@@ -140,8 +140,9 @@ def test_block_inference_against_the_fp32_oracle(dtype, L, A, shared):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
-def test_block_training_gradients_against_the_fp32_oracle(dtype):
-    L, A = 256, 4
+@pytest.mark.parametrize("L", [128, 256, 512, 640])
+def test_block_training_gradients_against_the_fp32_oracle(dtype, L):
+    A = 4
     block = make_block(dtype)
     ref = BiasOnlyDiTBlock(implementation=ImplementationType.PYTORCH).cuda().float()
     ref.load_state_dict(block.state_dict())
