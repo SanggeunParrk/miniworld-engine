@@ -268,3 +268,7 @@ H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (i
 - 2026-10-14, fp32 attention forward: `TRUNC_P=1` (p reaches the TF32 wgmma by clearing its low 13 bits, `l` summed from the
   same values, so no `cvt.rna` on the XU pipe) -- no change: L768 S5 87.8 -> 91.9 us, S48 713 -> 799 us, error 6.6e-4 either
   way. The forward is not XU bound; kept behind the flag, default off.
+- 2026-10-14, fp32 attention forward: `QK_RS=1` (q as register A operands of the QK wgmma, loaded once from the swizzled tile;
+  half the shared-memory reads of S) -- 1.3x SLOWER: L768 S5 87.6 -> 115.4 us, S48 717 -> 979 us (same error). 24 more live
+  registers under the 2-CTAs-per-SM cap and an RS wgmma that cannot start until the fragments are in registers cost more than the
+  smem bytes saved. Kept behind the flag, default off.

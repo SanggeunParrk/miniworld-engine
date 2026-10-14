@@ -46,6 +46,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef TRUNC_P
 #define TRUNC_P 0    // 1: p goes to the TF32 MMA by clearing its low 13 bits (a LOP) instead of cvt.rna (XU pipe); l sums the same values
 #endif
+#ifndef QK_RS
+#define QK_RS 0      // 1: q as register A operands of the QK wgmma (half the shared-memory reads of S = q k^T)
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -85,6 +88,12 @@ TMN_DEVI void tma_load_4d(void* dst, const CUtensorMap* map, uint64_t* bar, int 
 TMN_DEVI void mma_qk(float (&d)[32], uint64_t a, uint64_t b) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+// S (+)= q k^T, m64 n64 k8: A (q, TF32 bits) from registers, B (k) from shared memory
+TMN_DEVI void mma_qk_rs(float (&d)[32], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint64_t b) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, {%32,%33,%34,%35}, %36, p, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+    : "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(b));
 }
 // O += p v, m64 n48 k8: A (p, TF32) from registers, B (v^T) from shared memory
 TMN_DEVI void mma_pv(float (&d)[24], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint64_t b) {
@@ -176,6 +185,25 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   const uint64_t dQ0 = dsw(qa), dQ1 = dsw(qa + QCH);
   const uint32_t sbase = smem_u32(sst);
   mbar_wait(qbar, 0);
+#if QK_RS
+  uint32_t qf[6][4];                                                // q fragments of this lane, loaded once
+  {
+    const uint32_t r0 = wg * 64 + warp * 16 + g;
+#pragma unroll
+    for (int ks = 0; ks < 6; ++ks) {
+      const int c0 = ks * 8 + t, c1 = c0 + 4;
+      uint32_t v[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const uint32_t r = r0 + (e & 1) * 8;
+        const int c = (e >> 1) ? c1 : c0;
+        const uint32_t addr = smem_u32(sq) + (c >> 5) * QCH + r * 128 + ((((c & 31) >> 2) ^ (r & 7)) << 4) + ((c & 3) << 2);
+        asm volatile("ld.shared.b32 %0, [%1];" : "=r"(v[e]) : "r"(addr));
+      }
+      qf[ks][0] = v[0]; qf[ks][1] = v[1]; qf[ks][2] = v[2]; qf[ks][3] = v[3];
+    }
+  }
+#endif
 
   float sc[32];
   for (int n = 0; n < nblocks; ++n) {
@@ -193,10 +221,17 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     const uint32_t slot = sbase + sn * ST_BYTES;
     const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + KCH);
     wgmma_fence();
+#if QK_RS
+#pragma unroll
+    for (int ks = 0; ks < 4; ++ks) mma_qk_rs(sc, qf[ks][0], qf[ks][1], qf[ks][2], qf[ks][3], dK0 + ks * 2);
+#pragma unroll
+    for (int ks = 0; ks < 2; ++ks) mma_qk_rs(sc, qf[4 + ks][0], qf[4 + ks][1], qf[4 + ks][2], qf[4 + ks][3], dK1 + ks * 2);
+#else
 #pragma unroll
     for (int ks = 0; ks < 4; ++ks) mma_qk(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
 #pragma unroll
     for (int ks = 0; ks < 2; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);            // 32..47
+#endif
     wgmma_commit();
     wgmma_wait<0>();
 #pragma unroll
