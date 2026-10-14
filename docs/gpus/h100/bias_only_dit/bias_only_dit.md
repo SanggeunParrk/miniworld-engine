@@ -212,6 +212,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 0.339 | **0.130** | 2.60 |
 | (768, 768, bf16) | 0.424 | **0.146** | 2.91 |
 
+![Inference, bf16, A = 5, one conditioning shared by the samples, length sweep at D768](figures/bias_only_dit_inference_bf16_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
 ### Inference, bf16, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
@@ -222,6 +224,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, bf16) | 0.207 | **0.064** | 3.25 |
 | (640, 768, bf16) | 0.253 | **0.071** | 3.59 |
 | (768, 768, bf16) | 0.325 | **0.078** | 4.15 |
+
+![Inference, bf16, A = 1, length sweep at D768](figures/bias_only_dit_inference_bf16_a_1_length.png) <!-- measure_bars -->
 
 ### Inference, fp32, A = 5, one conditioning shared by the samples
 
@@ -234,6 +238,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, fp32) | 0.641 | **0.257** | 2.49 |
 | (768, 768, fp32) | 0.772 | **0.296** | 2.61 |
 
+![Inference, fp32, A = 5, one conditioning shared by the samples, length sweep at D768](figures/bias_only_dit_inference_fp32_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
 ### Inference, fp32, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
@@ -244,6 +250,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, fp32) | 0.309 | **0.102** | 3.03 |
 | (640, 768, fp32) | 0.397 | **0.110** | 3.61 |
 | (768, 768, fp32) | 0.516 | **0.138** | 3.73 |
+
+![Inference, fp32, A = 1, length sweep at D768](figures/bias_only_dit_inference_fp32_a_1_length.png) <!-- measure_bars -->
 
 ### Training, bf16, A = 48
 
@@ -256,6 +264,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 4.16 | **3.58** | 1.16 |
 | (768, 768, bf16) | 4.99 | **4.22** | 1.18 |
 
+![Training, bf16, A = 48, length sweep at D768](figures/bias_only_dit_training_bf16_a_48_length.png) <!-- measure_bars -->
+
 ### Training, fp32, A = 48
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
@@ -266,3 +276,5 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, fp32) | 7.15 | **6.62** | 1.08 |
 | (640, 768, fp32) | 9.26 | **8.48** | 1.09 |
 | (768, 768, fp32) | 11.04 | **10.28** | 1.07 |
+
+![Training, fp32, A = 48, length sweep at D768](figures/bias_only_dit_training_fp32_a_48_length.png) <!-- measure_bars -->

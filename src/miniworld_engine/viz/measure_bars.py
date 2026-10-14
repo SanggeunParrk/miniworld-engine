@@ -65,7 +65,7 @@ def tables(text: str):
 
 def value(cell: str) -> float | None:
     try:
-        return float(cell)
+        return float(cell.strip("*"))   # ours is written **0.178** in the sweep tables
     except ValueError:
         return None
 
@@ -73,8 +73,9 @@ def value(cell: str) -> float | None:
 def chart(title, header, rows, axis, fixed, out: Path, second: str = "Dimension", lpre: str = "L") -> bool:
     import matplotlib.pyplot as plt
 
-    impls = [h for h in header if h != TIMES]
-    xcol = header.index(TIMES) if TIMES in header else None
+    impls = [h for h in header if not h.startswith(TIMES)]   # "×", or "× Anthropic" / "× PyTorch" ratio columns
+    ratios = [i for i, h in enumerate(header) if h.startswith(TIMES)]
+    xcol = ratios[-1] if ratios else None                    # the last ratio column labels ours (the fastest other when several)
     sel = [(r[0] if axis == "length" else r[1], r[2]) for r in rows if (r[1] if axis == "length" else r[0]) == fixed]
     if len(sel) < 2 or len({x for x, _ in sel}) != len(sel):   # one point, or mixed dtypes / variants under one axis value
         return False

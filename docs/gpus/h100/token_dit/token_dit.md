@@ -303,6 +303,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 0.520 | 0.217 | **0.159** | 3.28 | 1.36 |
 | (768, 768, bf16) | 0.666 | 0.252 | **0.179** | 3.73 | 1.41 |
 
+![Inference, bf16, A = 5, one conditioning shared by the samples, length sweep at D768](figures/token_dit_inference_bf16_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
 ### Inference, bf16, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
@@ -313,6 +315,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, bf16) | 0.233 | 0.104 | **0.068** | 3.45 | 1.54 |
 | (640, 768, bf16) | 0.285 | 0.112 | **0.073** | 3.90 | 1.53 |
 | (768, 768, bf16) | 0.357 | 0.125 | **0.081** | 4.44 | 1.56 |
+
+![Inference, bf16, A = 1, length sweep at D768](figures/token_dit_inference_bf16_a_1_length.png) <!-- measure_bars -->
 
 ### Inference, fp32, A = 5, one conditioning shared by the samples
 
@@ -325,6 +329,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, fp32) | 0.989 | 0.349 | **0.322** | 3.08 | 1.09 |
 | (768, 768, fp32) | 1.24 | 0.419 | **0.370** | 3.36 | 1.13 |
 
+![Inference, fp32, A = 5, one conditioning shared by the samples, length sweep at D768](figures/token_dit_inference_fp32_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
 ### Inference, fp32, A = 1
 
 | (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
@@ -335,6 +341,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, fp32) | 0.336 | 0.134 | **0.118** | 2.84 | 1.13 |
 | (640, 768, fp32) | 0.433 | 0.139 | **0.130** | 3.34 | 1.07 |
 | (768, 768, fp32) | 0.573 | 0.173 | **0.157** | 3.65 | 1.10 |
+
+![Inference, fp32, A = 1, length sweep at D768](figures/token_dit_inference_fp32_a_1_length.png) <!-- measure_bars -->
 
 ### Training, bf16, A = 48
 
@@ -347,6 +355,8 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (640, 768, bf16) | 12.76 | **6.09** | 2.10 |
 | (768, 768, bf16) | 16.97 | **7.66** | 2.21 |
 
+![Training, bf16, A = 48, length sweep at D768](figures/token_dit_training_bf16_a_48_length.png) <!-- measure_bars -->
+
 ### Training, fp32, A = 48
 
 | (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
@@ -357,3 +367,5 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (512, 768, fp32) | 12.74 | **9.95** | 1.28 |
 | (640, 768, fp32) | 17.87 | **12.99** | 1.38 |
 | (768, 768, fp32) | 24.10 | **16.41** | 1.47 |
+
+![Training, fp32, A = 48, length sweep at D768](figures/token_dit_training_fp32_a_48_length.png) <!-- measure_bars -->
