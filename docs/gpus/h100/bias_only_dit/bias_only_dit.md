@@ -153,3 +153,18 @@ removing those needs fusions with the GEMM epilogues, which were measured and lo
   item's MMAs) and the GEMM epilogue fusions above.
 - fp32 training is bound by cuBLAS's TF32 `nt` weight-gradient kernels (3.3 ms of 10.3).
 - Only 16 x 48 heads are served on H100 (the 24 x 32, 12 x 64 and 16 x 64 layouts of B200 fall back to PyTorch).
+
+## Verification (2026-10-14)
+
+`tests/gpu/sm90/test_h100_bias_only_dit_gpu.py`, 37 tests, all pass on H100 (cssb node01):
+
+| test | cells | check |
+|---|---|---|
+| `pvx` gate / no gate | L128-768, S 1-48 | fp64 oracle, rel. error < 4e-3, bitwise repeat |
+| `pvx32` | L256-768, S 3-48 | fp64 oracle, rel. error < 2e-3 (TF32 operands) |
+| `dpb2` (dbias) | L256-768, A 5-48 | fp64 oracle < 4e-3, bitwise repeat |
+| block inference | L 128 / 256 / 384 / 512 / 640 / 768, bf16 and fp32, shared and per-sample cond | fp32-IEEE block, < 6e-3 (bf16) / 1.5e-3 (fp32) |
+| block training | L 128 / 256 / 512 / 640, A4, bf16 and fp32 | output, input and every parameter gradient vs the fp32 block, bitwise repeatable step |
+
+L384 / L768 training and the benchmarks run in the regression job (`bench.py target=bias_only_dit`, accuracy line per cell).
+Token DiT training (`tests/gpu/any/test_token_dit_train_gpu.py`, 60 tests) covers L 128 / 200 / 256 / 512 / 640.

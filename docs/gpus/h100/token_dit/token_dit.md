@@ -277,3 +277,9 @@ H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (i
   forward (~0.1 ms of a 16.4 ms step), so TMA-multicast of the bias tile across the samples' CTAs is not built. ncu of the
   forward: 96 registers, 2 CTAs / SM (the intended occupancy), issue slots 37 % busy, 0.63 eligible warps / scheduler; the
   stalls are the QK accumulate chain (6 dependent HGMMAs) and the mbarrier waits.
+
+### Verification added 2026-10-14
+
+`tests/gpu/any/test_token_dit_train_gpu.py` (60 pass): the module-path comparison now also runs (A, L) = (4, 128), (4, 512),
+(3, 640) beside (4, 256), (6, 256), (3, 200), for bf16 and fp32, QK-norm on / off, masked / unmasked. The inference cells
+other than L384 / L768 were not re-run in this pass.
