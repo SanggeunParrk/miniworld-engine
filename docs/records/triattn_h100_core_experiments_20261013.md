@@ -125,3 +125,16 @@ C128, device time per kernel (us), training; splits = CTA pairs of `tri_wgrad` (
 
 Negative: the reduce stays at about 7-8 us even with 8 splits (the floor is the gate_bwd dWo partials, `ggrid` x 64 KB), while
 wgrad loses far more than the reduce gains. The default stays.
+
+## Round 6 (2026-10-14): dWo partials summed inside a 4-CTA cluster (DSMEM)
+
+`tri_gate_bwd` staged each CTA's fp32 dWo in smem and summed the cluster's shares in rank order through `ld.shared::cluster`, so
+`tri_grad_reduce` read a quarter of the slots (grid sized by `cudaOccupancyMaxActiveClusters`). 82 tests pass, deterministic.
+
+| C128 train | L128 | L256 | L384 |
+|---|---|---|---|
+| reduce 9.8/9.3/10.6 -> | 7.2 | 7.2 | 8.7 us |
+| step 166/473/1050 -> | 170 | 478 | 1052 us |
+
+Negative: the reduce shrinks by 2-3 us but the gate_bwd tail (stage, two cluster barriers, DSMEM reads, fewer resident CTAs) costs
+more. Reverted; patch kept in the scratch dir (`gate_bwd_cluster_reduce.patch`).
