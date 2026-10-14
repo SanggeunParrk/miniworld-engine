@@ -49,6 +49,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef QK_RS
 #define QK_RS 0      // 1: q as register A operands of the QK wgmma (half the shared-memory reads of S = q k^T)
 #endif
+#ifndef BIAS_NOMEM
+#define BIAS_NOMEM 0 // 1 (timing probe only, wrong results): the forward's bias seed is computed, not loaded
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -211,8 +214,12 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     // seed with bias (+ key mask), loaded before the wait so the L2 latency hides under it
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
+#if BIAS_NOMEM
+      const float2 b0 = make_float2(1e-3f * (n + j), 2e-3f * (j + t + wg)), b1 = make_float2(3e-3f * (n + t), 1e-3f * (j + g));
+#else
       const float2 b0 = *reinterpret_cast<const float2*>(brow0 + n * BN + 8 * j);
       const float2 b1 = *reinterpret_cast<const float2*>(brow1 + n * BN + 8 * j);
+#endif
       float2 km = make_float2(0.f, 0.f);
       if (HASM) km = *reinterpret_cast<const float2*>(kmr + n * BN + 8 * j);
       sc[4 * j] = b0.x + km.x; sc[4 * j + 1] = b0.y + km.y; sc[4 * j + 2] = b1.x + km.x; sc[4 * j + 3] = b1.y + km.y;

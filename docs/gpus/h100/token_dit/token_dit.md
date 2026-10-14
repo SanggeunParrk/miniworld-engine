@@ -272,3 +272,8 @@ H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (i
   half the shared-memory reads of S) -- 1.3x SLOWER: L768 S5 87.6 -> 115.4 us, S48 717 -> 979 us (same error). 24 more live
   registers under the 2-CTAs-per-SM cap and an RS wgmma that cannot start until the fragments are in registers cost more than the
   smem bytes saved. Kept behind the flag, default off.
+- 2026-10-14, fp32 attention forward, bias-traffic upper bound: `BIAS_NOMEM=1` (timing probe, wrong results: the bias seed is
+  computed instead of loaded) L768 S5 87.0 -> 66.3 us, S48 716 -> 605 us. Removing ALL bias traffic is worth at most 1.18x of the
+  forward (~0.1 ms of a 16.4 ms step), so TMA-multicast of the bias tile across the samples' CTAs is not built. ncu of the
+  forward: 96 registers, 2 CTAs / SM (the intended occupancy), issue slots 37 % busy, 0.63 eligible warps / scheduler; the
+  stalls are the QK accumulate chain (6 dependent HGMMAs) and the mbarrier waits.
