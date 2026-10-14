@@ -43,6 +43,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef PSTAGES
 #define PSTAGES 4
 #endif
+#ifndef TRUNC_P
+#define TRUNC_P 0    // 1: p goes to the TF32 MMA by clearing its low 13 bits (a LOP) instead of cvt.rna (XU pipe); l sums the same values
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -59,6 +62,7 @@ static_assert(ST_BYTES % 1024 == 0 && QCH % 1024 == 0, "1-KB aligned regions (12
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI float ex2(float a) { float r; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(a)); return r; }
+TMN_DEVI float trunc_tf32(float x) { return __uint_as_float(__float_as_uint(x) & 0xffffe000u); }
 TMN_DEVI uint32_t tf32(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
 TMN_DEVI float sigmoid_t(float a) {
   float t; asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * a));
@@ -223,9 +227,15 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     for (int j = 0; j < 8; ++j) {
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
+#if TRUNC_P
+        const float p0 = trunc_tf32(ex2(sc[4 * j + 2 * h] - m_i[h])), p1 = trunc_tf32(ex2(sc[4 * j + 2 * h + 1] - m_i[h]));
+        l_i[h] += p0 + p1;
+        pa[4 * j + 2 * h] = __float_as_uint(p0); pa[4 * j + 2 * h + 1] = __float_as_uint(p1);
+#else
         const float p0 = ex2(sc[4 * j + 2 * h] - m_i[h]), p1 = ex2(sc[4 * j + 2 * h + 1] - m_i[h]);
         l_i[h] += p0 + p1;
         pa[4 * j + 2 * h] = tf32(p0); pa[4 * j + 2 * h + 1] = tf32(p1);
+#endif
       }
     }
     const uint64_t dV0 = dsw(slot + 2 * KCH), dV1 = dsw(slot + 2 * KCH + VCH);

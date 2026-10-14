@@ -265,3 +265,6 @@ H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (i
 - **Weight-gradient split** is off on sm90 (B200's split 4 costs +750 us a step on H100).
 - Not kept (measured): software-pipelined TF32 attention forward (0.66x, 167 registers -> one CTA per SM, `FWD_PIPE = 0`),
   fp32 chunked dqb, `BIAS_FAKE` L2 test, side-stream overlap.
+- 2026-10-14, fp32 attention forward: `TRUNC_P=1` (p reaches the TF32 wgmma by clearing its low 13 bits, `l` summed from the
+  same values, so no `cvt.rna` on the XU pipe) -- no change: L768 S5 87.8 -> 91.9 us, S48 713 -> 799 us, error 6.6e-4 either
+  way. The forward is not XU bound; kept behind the flag, default off.
