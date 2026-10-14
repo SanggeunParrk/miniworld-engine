@@ -138,3 +138,17 @@ wgrad loses far more than the reduce gains. The default stays.
 
 Negative: the reduce shrinks by 2-3 us but the gate_bwd tail (stage, two cluster barriers, DSMEM reads, fewer resident CTAs) costs
 more. Reverted; patch kept in the scratch dir (`gate_bwd_cluster_reduce.patch`).
+
+## Round 7 (2026-10-14): `tri_front` weights in four chunks with their own barriers
+
+ncu (C128 L384 inference): front DRAM 65% of elapsed, tail 81%; front stalls = barrier / long scoreboard. Hypothesis: the 132 KiB
+weight load (from L2, per CTA) delays the first GEMM by ~3 us. Change: W4 as four 32 KiB chunks, one mbarrier each (q + Wb first),
+the GEMM of chunk c waits only for its own barrier. 24 tests pass.
+
+| front, inference | L128 | L256 | L768 |
+|---|---|---|---|
+| before | 10.2 | 33.5 | 287 us |
+| after | 10.2 | 33.5 | 287 us |
+
+No change (front moves 4 x its input and runs at 2.1-2.6 TB/s = 63-79% of peak, with a launch ramp at L128): the weight prologue is
+not on the critical path. Reverted; patch in the scratch dir (`front_chunked_weights.patch`).
