@@ -48,7 +48,7 @@ template<int C,int HD> struct Shared {
 template<int C,int HD> __global__ __launch_bounds__(256,minb_for(C))
 void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
               Element const* x,float const* lnw,float const* lnb,bool const* mask,
-              Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale) {
+              Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale,int tr) {
   constexpr int NK=C/64,COLS=4*HD+64,NB=(COLS+BN-1)/BN,STAGES=stages_for(C),total=NB*NK;
   extern __shared__ char memory[]; auto& s=*reinterpret_cast<Shared<C,HD>*>(memory);
   int tid=threadIdx.x,wgi=tid/128,wt=tid%128,base=blockIdx.x*128;
@@ -83,7 +83,9 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       int64_t row=base+r;float vals[PER*8],mean=0.f,var=0.f;
       #pragma unroll
       for(int i=0;i<PER;++i) {
-        uint4 vv=*reinterpret_cast<uint4 const*>(x+row*C+(sub+T*i)*8);
+        int64_t prow=row;
+        if(tr){int64_t ll=int64_t(L)*L,bb=row/ll,rem=row-bb*ll,ii=rem/L,jj=rem-ii*L;prow=bb*ll+jj*L+ii;}   // ending node: physical row (b, j, i)
+        uint4 vv=*reinterpret_cast<uint4 const*>(x+prow*C+(sub+T*i)*8);
         auto const* v=reinterpret_cast<Element const*>(&vv);
         #pragma unroll
         for(int e=0;e<8;++e){vals[i*8+e]=float(v[e]);mean+=vals[i*8+e];}
@@ -198,7 +200,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
 }
 
 template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,
-                            torch::Tensor p,torch::Tensor bias,torch::Tensor stats,int L,int H,float eps,float inv_scale) {
+                            torch::Tensor p,torch::Tensor bias,torch::Tensor stats,int L,int H,float eps,float inv_scale,int tr) {
   int rows=x.size(0);
   auto gw=make_tensor(make_gmem_ptr((Element const*)weights.data_ptr()),make_shape(4*HD+64,C),ST{C,_1{}});
   auto tw=make_tma_copy(SM90_TMA_LOAD{},gw,WL{},Shape<Int<BN>,_64>{},_1{});
@@ -207,11 +209,11 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   size_t smem=sizeof(Shared<C,HD>);
   C10_CUDA_CHECK(cudaFuncSetAttribute(front_v3<C,HD>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
   front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
-    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.data_ptr<float>(),rows,L,H,eps,inv_scale);
+    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.data_ptr<float>(),rows,L,H,eps,inv_scale,tr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale) {
+std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
   TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && HD==32*H && H<=16 && HD%64==0,"invalid pair/head dimensions");
@@ -222,13 +224,13 @@ std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch
   auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
   const int key=C*1000+HD;
   switch(key){
-    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
-    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale));break;
+    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
     default: TORCH_CHECK(false,"unsupported (d_pair, heads x 32) pair");
   }
   return {p,bias,stats};

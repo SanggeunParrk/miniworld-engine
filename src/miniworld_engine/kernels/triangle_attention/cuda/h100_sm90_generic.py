@@ -65,16 +65,20 @@ _LT_CPP = r"""
 #include <vector>
 #define LT_CHECK(x) do { auto st_ = (x); TORCH_CHECK(st_ == CUBLAS_STATUS_SUCCESS, "cublasLt status ", int(st_), " at " #x); } while (0)
 struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; cublasLtMatmulAlgo_t algo; size_t ws; bool tuned; };
-torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x) {
+torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x, int64_t L, bool trans) {
   TORCH_CHECK(u.is_cuda() && u.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16, "bf16 cuda");
   TORCH_CHECK(u.dim() == 2 && w.dim() == 2 && u.stride(1) == 1 && w.stride(1) == 1 && u.size(1) == w.size(1), "shapes");
   c10::cuda::CUDAGuard guard(u.device());
   const int64_t M = u.size(0), K = u.size(1), C = w.size(0);
   const bool has_c = x.has_value();
   if (has_c) TORCH_CHECK(x->scalar_type() == at::kBFloat16 && x->is_contiguous() && x->size(0) == M && x->size(1) == C, "x");
+  // trans (ending node): the output / residual rows are the pair's physical rows (b, j, i) of the logical rows (b, i, j): per (b, i) a
+  // [C x L] matrix at column stride L C, batched over i with batch stride C
+  const int64_t LL = trans ? L * L : M, NB = trans ? M / LL : 1;
+  TORCH_CHECK(!trans || (L > 0 && M % LL == 0), "trans needs L with M = B L L");
   auto out = torch::empty({M, C}, u.options());
-  static std::map<std::tuple<int, int64_t, int64_t, int64_t, int64_t, int64_t, int>, LtPlan> plans;
-  const auto key = std::make_tuple((int)u.get_device(), M, K, C, u.stride(0), w.stride(0), (int)has_c);
+  static std::map<std::tuple<int, int64_t, int64_t, int64_t, int64_t, int64_t, int, int64_t>, LtPlan> plans;
+  const auto key = std::make_tuple((int)u.get_device(), M, K, C, u.stride(0), w.stride(0), (int)has_c + 2 * (int)trans, trans ? L : 0);
   auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());
   auto stream = at::cuda::getCurrentCUDAStream();
   cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
@@ -89,8 +93,21 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
       LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)));
       LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)));
       LT_CHECK(cublasLtMatrixLayoutCreate(&p.la, CUDA_R_16BF, K, C, w.stride(0)));
-      LT_CHECK(cublasLtMatrixLayoutCreate(&p.lb, CUDA_R_16BF, K, M, u.stride(0)));
-      LT_CHECK(cublasLtMatrixLayoutCreate(&p.lc, CUDA_R_16BF, C, M, C));
+      if (trans) {
+        LT_CHECK(cublasLtMatrixLayoutCreate(&p.lb, CUDA_R_16BF, K, L, u.stride(0)));
+        LT_CHECK(cublasLtMatrixLayoutCreate(&p.lc, CUDA_R_16BF, C, L, L * C));
+        int32_t nb = (int32_t)L;
+        int64_t sa = 0, sb = L * u.stride(0), sc = C;
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.la, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &nb, sizeof(nb)));
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.la, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sa, sizeof(sa)));
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.lb, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &nb, sizeof(nb)));
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.lb, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sb, sizeof(sb)));
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.lc, CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT, &nb, sizeof(nb)));
+        LT_CHECK(cublasLtMatrixLayoutSetAttribute(p.lc, CUBLASLT_MATRIX_LAYOUT_STRIDED_BATCH_OFFSET, &sc, sizeof(sc)));
+      } else {
+        LT_CHECK(cublasLtMatrixLayoutCreate(&p.lb, CUDA_R_16BF, K, M, u.stride(0)));
+        LT_CHECK(cublasLtMatrixLayoutCreate(&p.lc, CUDA_R_16BF, C, M, C));
+      }
     } else p = it->second;
     cublasLtMatmulPreference_t pref;
     LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
@@ -111,8 +128,16 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
       float best = 1e30f; int bi = 0;
       for (int c = 0; c < n; ++c) {
         auto run = [&]() {
-          return cublasLtMatmul(lt, p.op, &alpha, w.data_ptr(), p.la, u.data_ptr(), p.lb, &beta, has_c ? x->data_ptr() : tmp.data_ptr(), p.lc,
-                                tmp.data_ptr(), p.lc, &cands[c].algo, ws.data_ptr(), cands[c].workspaceSize, stream);
+          cublasStatus_t st = CUBLAS_STATUS_SUCCESS;
+          for (int64_t bb = 0; bb < NB; ++bb) {
+            const char* ub = (const char*)u.data_ptr() + bb * LL * u.stride(0) * 2;
+            char* tb = (char*)tmp.data_ptr() + bb * LL * C * 2;
+            const char* xb = has_c ? (const char*)x->data_ptr() + bb * LL * C * 2 : tb;
+            st = cublasLtMatmul(lt, p.op, &alpha, w.data_ptr(), p.la, ub, p.lb, &beta, xb, p.lc, tb, p.lc, &cands[c].algo, ws.data_ptr(),
+                                cands[c].workspaceSize, stream);
+            if (st != CUBLAS_STATUS_SUCCESS) break;
+          }
+          return st;
         };
         if (run() != CUBLAS_STATUS_SUCCESS) continue;
         cudaEventRecord(e0, stream);
@@ -130,8 +155,12 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
   const LtPlan& p = it->second;
   auto ws = torch::empty({(int64_t)p.ws + 16}, u.options().dtype(at::kByte));
   const float alpha = 1.f, beta = has_c ? 1.f : 0.f;
-  LT_CHECK(cublasLtMatmul(lt, p.op, &alpha, w.data_ptr(), p.la, u.data_ptr(), p.lb, &beta, has_c ? x->data_ptr() : out.data_ptr(), p.lc,
-                          out.data_ptr(), p.lc, &p.algo, ws.data_ptr(), p.ws, stream));
+  for (int64_t bb = 0; bb < NB; ++bb) {
+    const char* ub = (const char*)u.data_ptr() + bb * LL * u.stride(0) * 2;
+    char* ob = (char*)out.data_ptr() + bb * LL * C * 2;
+    const char* xb = has_c ? (const char*)x->data_ptr() + bb * LL * C * 2 : ob;
+    LT_CHECK(cublasLtMatmul(lt, p.op, &alpha, w.data_ptr(), p.la, ub, p.lb, &beta, xb, p.lc, ob, p.lc, &p.algo, ws.data_ptr(), p.ws, stream));
+  }
   return out;
 }
 """
@@ -152,7 +181,7 @@ def _lt():
     )
     build.mkdir(parents=True, exist_ok=True)
     return load_inline(
-        name="triattn_h100_lt2",
+        name="triattn_h100_lt3",
         cpp_sources=_LT_CPP,
         functions=["lt_mm"],
         with_cuda=True,
@@ -289,7 +318,6 @@ def _forward(
     empty = torch.empty(0, device=pair.device)
     fused = (
         (not need)
-        and not trans
         and (C, HD) in _FRONT_L
         and L <= _FRONT_L[(C, HD)]
         and _front() is not None
@@ -308,6 +336,7 @@ def _forward(
             HD,
             eps,
             1.0 / scale,
+            trans,
         )
         qkvg = None
         q, k, v, gt = (proj[i].view(B, L, L, H, D) for i in range(4))
@@ -325,7 +354,7 @@ def _forward(
         )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
-        qkvg = _lt().lt_mm(y, wcat, None)  # [M, 4 HD + Hp]
+        qkvg = _lt().lt_mm(y, wcat, None, 0, False)  # [M, 4 HD + Hp]
         sbias = g.front_bias(
             qkvg, mask if mask is not None else empty.bool(), B, L, H, 4 * HD, scale
         )
@@ -333,16 +362,10 @@ def _forward(
         q, k, v, gt = _views(qkvg, B, L, HD, H)
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
-    if drop is None and not trans:
+    if drop is None:
         out = _lt().lt_mm(
-            u.view(M, HD), wo_p, x
+            u.view(M, HD), wo_p, x, L, trans
         )  # x + u Wo^T: the residual in the GEMM epilogue (D != C, no staging copy)
-    elif (
-        drop is None
-    ):  # ending node: the residual kernel reads and writes the pair through the transposed row map
-        out = g.residual(
-            x, _lt().lt_mm(u.view(M, HD), wo_p, None), empty.bfloat16(), L, True
-        )
     else:
         t = torch.matmul(u.view(M, HD), wo_p.t())
         out = g.residual(x, t, drop, L, trans)
