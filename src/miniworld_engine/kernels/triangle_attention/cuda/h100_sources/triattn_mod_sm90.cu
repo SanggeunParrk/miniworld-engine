@@ -888,45 +888,55 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm90(
 // order -> MT [4][128 c][128 o] | VEC (cs [4][128] | B [4][128] | cdb [4]) | dWo [128][128], fp32: deterministic parameter gradients
 __global__ void __launch_bounds__(256) tri_grad_reduce(const float* __restrict__ WS, int splits, const float* __restrict__ GS, int ggrid,
                                                      float* __restrict__ MT, float* __restrict__ VEC, float* __restrict__ DWO) {
+  // 32 consecutive elements (coalesced) x 8 groups of splits (k, k + 8, ...), summed in a fixed order through shared memory
   using wg::SLOT;
-  const long i = (long)blockIdx.x * 256 + threadIdx.x;
+  __shared__ float red[8][32];
+  const int x = threadIdx.x & 31, y = threadIdx.x >> 5;
+  const long i = (long)blockIdx.x * 32 + x;
   const long NM = 4L * C * C, NV = 8L * C + NH;
   float s = 0.f;
   if (i < NM) {
     const int t = (int)(i / (C * C)); const long e = i - (long)t * C * C;
-    for (int k = 0; k < splits; ++k) s += WS[(2L * k + t / 2) * SLOT + (t & 1) * C * C + e];
-    MT[i] = s;
+    for (int k = y; k < splits; k += 8) s += WS[(2L * k + t / 2) * SLOT + (t & 1) * C * C + e];
   } else if (i < NM + 4 * C) {
     const int j = (int)(i - NM), t = j / C, o = j % C;
-    for (int k = 0; k < splits; ++k) s += WS[(2L * k + t / 2) * SLOT + 2 * C * C + (t & 1) * C + o];
-    VEC[j] = s;
+    for (int k = y; k < splits; k += 8) s += WS[(2L * k + t / 2) * SLOT + 2 * C * C + (t & 1) * C + o];
   } else if (i < NM + 8 * C) {
     const int j = (int)(i - NM - 4 * C);
-    for (int k = 0; k < splits; ++k) s += WS[(2L * k) * SLOT + 2 * C * C + 2 * C + j];
-    VEC[4 * C + j] = s;
+    for (int k = y; k < splits; k += 8) s += WS[(2L * k) * SLOT + 2 * C * C + 2 * C + j];
   } else if (i < NM + NV) {
     const int h = (int)(i - NM - 8 * C);
-    for (int k = 0; k < splits; ++k) s += WS[(2L * k) * SLOT + 2 * C * C + 6 * C + 2 * h] + WS[(2L * k) * SLOT + 2 * C * C + 6 * C + 2 * h + 1];
-    VEC[8 * C + h] = s;
+    for (int k = y; k < splits; k += 8) s += WS[(2L * k) * SLOT + 2 * C * C + 6 * C + 2 * h] + WS[(2L * k) * SLOT + 2 * C * C + 6 * C + 2 * h + 1];
   } else if (i < NM + NV + C * C) {
     const long e = i - NM - NV;
-    for (int g = 0; g < ggrid; ++g) s += GS[(long)g * C * C + e];
-    DWO[e] = s;
+    for (int g = y; g < ggrid; g += 8) s += GS[(long)g * C * C + e];
   }
+  red[y][x] = s;
+  __syncthreads();
+  if (y != 0) return;
+  float tot = 0.f;
+#pragma unroll
+  for (int q = 0; q < 8; ++q) tot += red[q][x];
+  if (i < NM) MT[i] = tot;
+  else if (i < NM + 4 * C) VEC[i - NM] = tot;
+  else if (i < NM + 8 * C) VEC[4 * C + (i - NM - 4 * C)] = tot;
+  else if (i < NM + NV) VEC[8 * C + (i - NM - 8 * C)] = tot;
+  else if (i < NM + NV + C * C) DWO[i - NM - NV] = tot;
 }
 
 __device__ __forceinline__ void st_out(__nv_bfloat16* p, float v) { *p = __float2bfloat16_rn(v); }
 __device__ __forceinline__ void st_out(float* p, float v) { *p = v; }
 
 // the B200 path's parameter algebra (arch-neutral): OutT = the parameters' dtype (bf16, or fp32 master weights)
+template <typename OutT> struct Outs { OutT* dw[4]; OutT* gamma; OutT* beta; OutT* wb; OutT* wo; };
 template <typename OutT>
 __global__ void __launch_bounds__(256) tri_param_finish(const float* __restrict__ MT, const float* __restrict__ VEC,
     const __nv_bfloat16* __restrict__ W4, const float* __restrict__ LNW, const float* __restrict__ LNB, const float* __restrict__ WBF,
-    OutT* __restrict__ DW, OutT* __restrict__ DGB, const float* __restrict__ DWO, OutT* __restrict__ DWO16) {
+    Outs<OutT> O, const float* __restrict__ DWO) {
   const int tid = threadIdx.x;
   if (blockIdx.x >= 64 + C) {                      // blocks 192..207: gate_bwd's dWo fp32 -> the parameters' dtype
     const int i0 = (blockIdx.x - 64 - C) * 1024;
-    for (int i = tid; i < 1024; i += 256) st_out(DWO16 + i0 + i, DWO[i0 + i]);
+    for (int i = tid; i < 1024; i += 256) st_out(O.wo + i0 + i, DWO[i0 + i]);
     return;
   }
   const float* cs = VEC; const float* bh = VEC + 4 * C; const float* cdb = VEC + 8 * C;
@@ -937,7 +947,7 @@ __global__ void __launch_bounds__(256) tri_param_finish(const float* __restrict_
     __syncthreads();
     for (int i = tid; i < 32 * 32; i += 256) {
       const int oo = i >> 5, cc = i & 31, c = c0 + cc, o = o0 + oo;
-      st_out(DW + ((long)tt * C + o) * C + c, LNW[c] * tile[cc][oo] + LNB[c] * cs[tt * C + o]);
+      st_out(O.dw[tt] + (long)o * C + c, LNW[c] * tile[cc][oo] + LNB[c] * cs[tt * C + o]);
     }
     return;
   }
@@ -960,15 +970,16 @@ __global__ void __launch_bounds__(256) tri_param_finish(const float* __restrict_
     for (int h = 0; h < NH; ++h) {
       g = fmaf(WBF[h * C + c], bh[h * C + c], g);
       b = fmaf(WBF[h * C + c], cdb[h], b);
-      st_out(DGB + 2 * C + h * C + c, LNW[c] * bh[h * C + c] + LNB[c] * cdb[h]);
+      st_out(O.wb + h * C + c, LNW[c] * bh[h * C + c] + LNB[c] * cdb[h]);
     }
-    st_out(DGB + c, g);
-    st_out(DGB + C + c, b);
+    st_out(O.gamma + c, g);
+    st_out(O.beta + c, b);
   }
 }
 
 namespace {
 auto bf16ptr(const torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t.data_ptr<at::BFloat16>()); }
+auto bf16c(const torch::Tensor& t) { return reinterpret_cast<const __nv_bfloat16*>(t.data_ptr<at::BFloat16>()); }
 }  // namespace
 
 // x [R, 128] bf16 (R = B * L * L rows (b, i, j)); lnw / lnb fp32 [128]; w4 = [Wq; Wk; Wv; Wg] [512, 128] bf16; wb16 [16, 128] bf16 (Wb
@@ -1118,25 +1129,77 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
                                                                   slots.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const long nred = 4L * C * C + 8L * C + NH + C * C;
-  tri_grad_reduce<<<(int)((nred + 255) / 256), 256, 0, stream>>>(slots.data_ptr<float>(), splits, dwo_part.data_ptr<float>(),
+  tri_grad_reduce<<<(int)((nred + 31) / 32), 256, 0, stream>>>(slots.data_ptr<float>(), splits, dwo_part.data_ptr<float>(),
       (int)(dwo_part.numel() / (C * C)), mt.data_ptr<float>(), vec.data_ptr<float>(), dwo32.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous(), wbf = wb.to(torch::kFloat32).contiguous();
   auto oopt = fp32_out ? x.options().dtype(torch::kFloat32) : x.options();
-  auto dw = torch::empty({4, C, C}, oopt), dgb = torch::empty({2 + NH, C}, oopt), dwo = torch::empty({C, C}, oopt);
+  torch::Tensor o8[8] = {torch::empty({C, C}, oopt), torch::empty({C, C}, oopt), torch::empty({C, C}, oopt), torch::empty({C, C}, oopt),
+                         torch::empty({C}, oopt), torch::empty({C}, oopt), torch::empty({NH, C}, oopt), torch::empty({C, C}, oopt)};
   const auto* w4p = reinterpret_cast<const __nv_bfloat16*>(w4.data_ptr<at::BFloat16>());
-  if (fp32_out)
+  if (fp32_out) {
+    Outs<float> O{{o8[0].data_ptr<float>(), o8[1].data_ptr<float>(), o8[2].data_ptr<float>(), o8[3].data_ptr<float>()}, o8[4].data_ptr<float>(),
+                  o8[5].data_ptr<float>(), o8[6].data_ptr<float>(), o8[7].data_ptr<float>()};
     tri_param_finish<float><<<64 + C + 16, 256, 0, stream>>>(mt.data_ptr<float>(), vec.data_ptr<float>(), w4p, lw.data_ptr<float>(),
-        lb.data_ptr<float>(), wbf.data_ptr<float>(), dw.data_ptr<float>(), dgb.data_ptr<float>(), dwo32.data_ptr<float>(), dwo.data_ptr<float>());
-  else
+        lb.data_ptr<float>(), wbf.data_ptr<float>(), O, dwo32.data_ptr<float>());
+  } else {
+    Outs<__nv_bfloat16> O{{bf16ptr(o8[0]), bf16ptr(o8[1]), bf16ptr(o8[2]), bf16ptr(o8[3])}, bf16ptr(o8[4]), bf16ptr(o8[5]), bf16ptr(o8[6]),
+                          bf16ptr(o8[7])};
     tri_param_finish<__nv_bfloat16><<<64 + C + 16, 256, 0, stream>>>(mt.data_ptr<float>(), vec.data_ptr<float>(), w4p, lw.data_ptr<float>(),
-        lb.data_ptr<float>(), wbf.data_ptr<float>(), bf16ptr(dw), bf16ptr(dgb), dwo32.data_ptr<float>(), bf16ptr(dwo));
+        lb.data_ptr<float>(), wbf.data_ptr<float>(), O, dwo32.data_ptr<float>());
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dw, dgb, dwo};
+  return {o8[0], o8[1], o8[2], o8[3], o8[4], o8[5], o8[6], o8[7]};
+}
+
+// one launch: [Wq; Wk; Wv; Wg] -> w4 [512, 128] bf16, Wb -> wb16 [16, 128] (rows >= 4 zero), Wo -> wo16 [128, 128] bf16 (inputs fp32 or bf16)
+__device__ __forceinline__ float to_f32(float v) { return v; }
+__device__ __forceinline__ float to_f32(__nv_bfloat16 v) { return __bfloat162float(v); }
+template <typename T>
+__global__ void __launch_bounds__(256) tri_pack_k(const T* __restrict__ wq, const T* __restrict__ wk, const T* __restrict__ wv, const T* __restrict__ wg,
+                                                  const T* __restrict__ wb, const T* __restrict__ wo, __nv_bfloat16* __restrict__ w4,
+                                                  __nv_bfloat16* __restrict__ wb16, __nv_bfloat16* __restrict__ wo16) {
+  const long n4 = 4L * C * C, nb = 16L * C, no = (long)C * C;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n4 + nb + no; i += (long)gridDim.x * 256) {
+    float v;
+    if (i < n4) {
+      const int t = (int)(i / (C * C)); const long e = i - (long)t * C * C;
+      const T* src = t == 0 ? wq : t == 1 ? wk : t == 2 ? wv : wg;
+      v = to_f32(src[e]);
+      w4[i] = __float2bfloat16_rn(v);
+    } else if (i < n4 + nb) {
+      const long j = i - n4;
+      v = j < (long)NH * C ? to_f32(wb[j]) : 0.f;
+      wb16[j] = __float2bfloat16_rn(v);
+    } else {
+      const long j = i - n4 - nb;
+      wo16[j] = __float2bfloat16_rn(to_f32(wo[j]));
+    }
+  }
+}
+std::vector<torch::Tensor> tri_pack(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo) {
+  const auto dt = wq.scalar_type();
+  for (const auto* t : {&wq, &wk, &wv, &wg, &wo}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == dt && t->is_contiguous() && t->numel() == (long)C * C, "w [128, 128]");
+  TORCH_CHECK(wb.scalar_type() == dt && wb.is_contiguous() && wb.numel() == (long)NH * C, "wb [4, 128]");
+  TORCH_CHECK(dt == torch::kFloat32 || dt == torch::kBFloat16, "fp32 or bf16 parameters");
+  auto bopt = wq.options().dtype(torch::kBFloat16);
+  auto w4 = torch::empty({4 * C, C}, bopt), wb16 = torch::empty({16, C}, bopt), wo16 = torch::empty({C, C}, bopt);
+  const long total = 4L * C * C + 16L * C + (long)C * C;
+  const int grid = (int)std::min<long>((total + 255) / 256, 1024);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  if (dt == torch::kFloat32)
+    tri_pack_k<float><<<grid, 256, 0, stream>>>(wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), wg.data_ptr<float>(), wb.data_ptr<float>(),
+        wo.data_ptr<float>(), bf16ptr(w4), bf16ptr(wb16), bf16ptr(wo16));
+  else
+    tri_pack_k<__nv_bfloat16><<<grid, 256, 0, stream>>>(bf16c(wq), bf16c(wk), bf16c(wv), bf16c(wg), bf16c(wb), bf16c(wo), bf16ptr(w4),
+        bf16ptr(wb16), bf16ptr(wo16));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {w4, wb16, wo16};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("tri_wgrad", &tri_wgrad, "sm90 TriangleAttention parameter gradients: (dW_q|k|v|g [4,128,128], dgamma|dbeta|dWb [6,128], dWo [128,128])");
+  m.def("tri_wgrad", &tri_wgrad, "sm90 TriangleAttention parameter gradients: (dWq, dWk, dWv, dWg [128,128], dgamma, dbeta [128], dWb [4,128], dWo [128,128])");
+  m.def("tri_pack", &tri_pack, "sm90 TriangleAttention weight pack: (w4 [512,128] bf16, wb16 [16,128] bf16, wo16 [128,128] bf16) in one launch");
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm90 TriangleAttention gate backward: (do, dg, delta, seed); dWo added into a fp32 accumulator");
   m.def("tri_tail", &tri_tail, "sm90 TriangleAttention tail: x + drop o (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"),

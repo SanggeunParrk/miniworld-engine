@@ -131,6 +131,18 @@ def _bwd(defs: tuple[str, ...] = ()):
     )
 
 
+def _pack_params(wq, wk, wv, wg, wb, wo):
+    """(w4, wb16, wo16) in one launch when the six parameters share a dtype (fp32 master or bf16); the torch pack otherwise."""
+    if (
+        len({t.dtype for t in (wq, wk, wv, wg, wb, wo)}) == 1
+        and wq.dtype in (torch.float32, torch.bfloat16)
+        and all(t.is_contiguous() for t in (wq, wk, wv, wg, wb, wo))
+    ):
+        return _mod().tri_pack(wq, wk, wv, wg, wb, wo)
+    w4, wb16 = pack_front(wq, wk, wv, wg, wb)
+    return w4, wb16, wo.to(torch.bfloat16).contiguous()
+
+
 def train_forward(
     pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=True, trans=False
 ):
@@ -139,8 +151,7 @@ def train_forward(
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
-    w4, wb16 = pack_front(wq, wk, wv, wg, wb)
-    wo16 = wo.to(torch.bfloat16).contiguous()
+    w4, wb16, wo16 = _pack_params(wq, wk, wv, wg, wb, wo)
     lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
     empty = torch.empty(0, device=pair.device)
     q, k, v, g, sbias = m.tri_front(
@@ -173,8 +184,7 @@ def train_backward(
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m, bw = _mod(), _bwd()
-    w4, _ = pack_front(wq, wk, wv, wg, wb)
-    wo16 = wo.to(torch.bfloat16).contiguous()
+    w4, _, wo16 = _pack_params(wq, wk, wv, wg, wb, wo)
     lw, lb = lnw.float().contiguous(), lnb.float().contiguous()
     empty = torch.empty(0, device=pair.device)
     drop = drop if drop is not None else empty.bfloat16()
@@ -192,17 +202,20 @@ def train_backward(
     dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
     m.tri_head_bwd(dq, dk, dv, dg, dbias, x, w4, wb, lw, eps, dpair, B, L, trans)
     fp32 = wq.dtype == torch.float32
-    dw, dgb, dwo = m.tri_wgrad(
+    dwq, dwk, dwv, dwg, dgamma, dbeta, dwb, dwo = m.tri_wgrad(
         dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32, trans
     )
-    # (clones: the outputs of a custom op may not alias each other, and these are slices of a few buffers)
+    # separate buffers from the kernel (no slices: the outputs of a custom op may not alias each other); .to is a no-op in the common case
     return (
         dpair.view(B, L, L, C),
-        dgb[0].to(lnw.dtype).clone(),
-        dgb[1].to(lnb.dtype).clone(),
-        *(dw[t].to(w.dtype).clone() for t, w in enumerate((wq, wk, wv, wg))),
-        dgb[2:].to(wb.dtype).clone(),
-        dwo.to(wo.dtype).clone(),
+        dgamma.to(lnw.dtype),
+        dbeta.to(lnb.dtype),
+        dwq.to(wq.dtype),
+        dwk.to(wk.dtype),
+        dwv.to(wv.dtype),
+        dwg.to(wg.dtype),
+        dwb.to(wb.dtype),
+        dwo.to(wo.dtype),
     )
 
 

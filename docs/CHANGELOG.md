@@ -88,6 +88,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   The ending node no longer transposes its pair tensor in and out (two copies, 29-39 % of the call at d_pair 128): the fused front, tail, gate
   backward, head backward and weight-gradient kernels read and write it through 4-D TMA tensor maps (c, j, i, b), the width-generic row
   kernels through a row index map; ending-node inference at d_pair 128 L768: 1722 -> 1345 us (starting node 1336 us).
+  The fused d_pair 128 training step lost ten device copies and six cast kernels per call to the weight pack and the parameter-gradient
+  slices: one `tri_pack` launch packs the six parameters (fp32 master or bf16), `tri_wgrad` writes the eight gradients into their own
+  buffers, and the split-K gradient reduce is 8 x 32 threads instead of one -- L128 training step 193 -> 165 us device time (-15 %),
+  L256 -6 %.
   Core experiments and what bounds the attention core: `docs/records/triattn_h100_core_experiments_20261013.md`.
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
