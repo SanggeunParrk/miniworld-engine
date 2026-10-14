@@ -32,6 +32,13 @@ H, DH = 16, 48  # the default heads x width
 LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 
+#: Hopper PV core: True = ``pvx`` (all samples of a group in one pass over the keys, 3-stage TMA ring, two consumer
+#: warpgroups), False = the earlier ``pv_grouped`` (P tile resident, one consumer warpgroup). Kept for A/B.
+_H100_PVX = True
+_H100_DPB2 = True  # the 128 x TN bias-gradient kernel (False: the 64 x 64 ``dpb_pipe``)
+_H100_PVX_FORCE = (0, 0, 0)  # (consumer warpgroups, samples per CTA, cluster); 0 = the host cost model
+
+
 def h100_enabled(device) -> bool:
     """Native Hopper kernels; per-shape speed qualification is recorded separately."""
     return settings.current().bias_only_dit_h100 and torch.cuda.get_device_capability(
@@ -201,6 +208,8 @@ def core_supported(
     if not settings.current().bias_only_dit_core:
         return False
     if dtype is torch.float32:
+        if h100_enabled(device_index):  # Hopper: the TF32 wgmma core (``pvx32``), 16 heads x 48 only
+            return d % h == 0 and (h, d // h) == (16, 48) and L % 128 == 0 and 0 < L <= 768
         if not (
             d % h == 0
             and (h, d // h) in LAYOUTS
@@ -322,6 +331,20 @@ class _Runs(dict):
         return run
 
 
+class PvGateCoreH100TF32:
+    """Hopper fp32 attention core: out = sigmoid(g) * (P v) per head and sample on TF32 wgmma (``pvx32``). v arrives
+    transposed (TF32 wgmma takes K-major operands only): ``vt`` [nh dh, S L] fp32, P [nh L, L] fp32, g / out [S L, nh dh]."""
+
+    def __init__(self, device_index: int, nh: int = 16, dh: int = 48):
+        assert (nh, dh) == (16, 48), (nh, dh)
+        self.device_index, self.nh, self.dh = device_index, nh, dh
+        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+
+    def __call__(self, vt, P, out, S, g):
+        h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm)
+        return out
+
+
 class PvGateCore:
     """``pv_gate_inf.cu``: out [S L, 768] = sigmoid(g) * (P v) -- or, without g, P v -- per head and sample; P one block's
     [16 L, L] attention weights (bf16, contiguous), v / g / out [S L, 768] bf16 views with any row stride (v | g are the
@@ -423,6 +446,11 @@ class PvGateCore:
     def __call__(self, v, P, out, S, g=None):
         """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
         if h100_enabled(self.device_index):
+            if _H100_PVX:
+                h100_ext().pv_cta(
+                    v, P, out, S, g, self.nh, self.dh, self.nsm, *_H100_PVX_FORCE
+                )
+                return out
             sg = _h100_group(S, v.shape[0] // S, self.nh, self.dh, self.nsm)
             h100_ext().grouped_pv_pipeline(v, P, out, S, g, self.nh, self.dh, sg)
             return out
@@ -578,7 +606,10 @@ class DpbKernel:
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
-            h100_ext().dpb_pipeline(do, v, P, dd, out, A, self.nh, self.dh)
+            if _H100_DPB2 and self.dh == 48 and do.shape[0] // A >= 384:  # L256: 64 CTAs, the 64 x 64 kernel wins
+                h100_ext().dpb2(do, v, P, dd.sum(0).contiguous(), out, A, self.nh, self.dh, self.nsm)
+            else:
+                h100_ext().dpb_pipeline(do, v, P, dd, out, A, self.nh, self.dh)
             return out
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1

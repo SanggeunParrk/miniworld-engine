@@ -77,6 +77,35 @@ def _token_swiglu(device_index):
     return GemmSwigluSm90(device_index)
 
 
+#: Hopper fp32 token inference: the expand GEMM with the SwiGLU in its epilogue on TF32 wgmma (False: cuBLAS + ``swiglu_rows``)
+_FP32_SWIGLU_GEMM = False  # measured: -16 us but output error 2.9e-4 -> 4.6e-4 (TMA-fed operands are truncated)
+_TF32_WAB: dict = {}
+_PAIR_BIAS: dict = {}  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
+
+
+def _swiglu_gemm_ok(xa, wab) -> bool:
+    return (
+        torch.cuda.get_device_capability(xa.device) == (9, 0)
+        and xa.shape[0] % 128 == 0
+        and xa.shape[1] % 32 == 0
+        and (wab.shape[0] // 2) % 128 == 0
+        and wab.shape[1] == xa.shape[1]
+    )
+
+
+def _tf32_wab(wab):
+    """[Wa; Wb] -> the SwiGLU GEMM's per-256-row-tile packing ([Wa 128 rows | Wb 128 rows] per tile), rounded to TF32 (to
+    nearest, ties away), once per weight pack."""
+    from ... import _capture
+
+    def build():
+        H, K = wab.shape[0] // 2, wab.shape[1]
+        w = torch.stack([wab[:H].view(H // 128, 128, K), wab[H:].view(H // 128, 128, K)], 1).reshape(2 * H, K)
+        return ((w.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
+
+    return _capture.lookup(_TF32_WAB, (wab.data_ptr(), wab._version, tuple(wab.shape)), build, limit=8)
+
+
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
 
@@ -164,14 +193,43 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     # The augmented-attention module fills fully masked rows with a finite
     # negative value, so its reference softmax is uniform on that edge.
     # AttentionPairBias has a separate zero-probability reference contract.
-    if fp32:
-        zh = single.new_empty((L * L, 128))
-        _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
-        bias = torch.mm(wf, zh.t()).view(heads, L, L)
-        if mask is not None:
-            _ext().token_mask90(bias, mask)
-    else:
-        bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+    def make_bias():
+        if fp32:
+            if _FUSED_PAIR_BIAS_F32 and heads in (12, 16, 24) and pair.is_contiguous() and wf.is_contiguous():
+                # LayerNorm + the projections + the key permutation + the mask in ONE pass over the pair (the LN, a cuBLAS GEMM and
+                # the mask fill read / wrote it three times: 302 MB each at fp32); masked keys take the same -1e30 as token_mask90
+                from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+                bias = single.new_empty((heads, L, L))
+                rows32().pair_bias_tok_cuda(pair.view(L * L, 128), wf, bias, mask, int(L), 1e-5, True, -1e30)
+            else:
+                zh = single.new_empty((L * L, 128))
+                _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
+                bias = torch.mm(wf, zh.t()).view(heads, L, L)
+                if mask is not None:
+                    _ext().token_mask90(bias, mask)
+        else:
+            bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+        return bias, pair, mask
+
+    # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
+    # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);
+    # a capture without it records the build once and every replay rebuilds it from the pair as it is then.
+    bias = _capture.lookup_inputs(
+        _PAIR_BIAS,
+        (
+            pair.data_ptr(),
+            pair._version,
+            tuple(pair.shape),
+            None if mask is None else (mask.data_ptr(), mask._version),
+            wf.data_ptr(),
+            wf._version,
+            heads,
+            fp32,
+        ),
+        make_bias,
+        limit=2,
+    )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(-1, 384)
     P = c.shape[0]
@@ -210,7 +268,12 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     y = torch.mm(qkvg[:, :D], wo.t())
     resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
     h = single.new_empty((M, ws.shape[1]))
-    if fp32:
+    if fp32 and _FP32_SWIGLU_GEMM and _swiglu_gemm_ok(xa, wab_fp32):
+        # expand + SwiGLU as one TF32 wgmma GEMM: xa is TF32-rounded by its row kernel and the weights once per pack, so the
+        # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
+        op = _token_swiglu(single.device.index)
+        op.ext.gemm_swiglu(xa, _tf32_wab(wab_fp32), h, op.nsm)
+    elif fp32:
         ab = torch.mm(xa, wab_fp32.t())
         swiglu_rows(ab, h)
     else:
@@ -281,6 +344,10 @@ def key_perm(L, device):
     return p - r + 4 * (r % 2) + r // 2
 
 
+#: Hopper fp32 pair bias in one pass (False: LayerNorm rows + a cuBLAS GEMM)
+_FUSED_PAIR_BIAS_F32 = True
+
+
 def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     """Every block's pair bias, head-major: out [NB, L, L] = (LN(z) @ wt)^T with wt [C, NB] (the LayerNorm weights and
     any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, 128].
@@ -288,6 +355,24 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped). ``perm``: the key columns in
     ``key_perm`` order (the TF32 core's; the LayerNorm writes the pair rows there, so it costs nothing)."""
     nb = wt.shape[1]
+    if (
+        _FUSED_PAIR_BIAS_F32
+        and wt.dtype is torch.float32
+        and z2d.dtype is torch.float32
+        and nb % 16 == 0
+        and z2d.is_contiguous()
+        and torch.cuda.get_device_capability(z2d.device) == (9, 0)
+    ):
+        # Hopper fp32: LN + the 16 projections of a block in one pass over the pair (LN, then a GEMM, read it three times)
+        from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32 as _rows32
+
+        rows32 = _rows32()
+        wf = wt.t().contiguous()
+        m0 = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
+        o2 = out.view(nb, -1)
+        for b in range(nb // 16):
+            rows32.pair_bias_tok_cuda(z2d, wf[16 * b : 16 * b + 16], o2[16 * b : 16 * b + 16], m0, int(L), float(eps), bool(perm), float("-inf"))
+        return
     m = None if mask is None else mask.reshape(-1).to(torch.bool)
     if m is not None and perm:
         m = m[key_perm(L, m.device)]

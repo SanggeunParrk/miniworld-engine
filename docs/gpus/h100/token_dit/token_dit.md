@@ -237,3 +237,31 @@ unresolved; do not describe the full block as passing default memcheck. Evidence
   do not describe its current performance; a paired benchmark remains to be run.
 - B200 shares the row kernels, the integrations and the qk-norm / I/O conventions changed here; its token DiT tests were
   not re-run on B200.
+
+## 2026-10-14 update (branch `h100/token-bodit-opt`)
+
+H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (inference) / 12.5 % (training).
+
+| (Length, Dimension, dtype) | | PyTorch compiled | Anthropic | ours |
+|---|---|---|---|---|
+| (384, 768, bf16) | inference | -- | 0.141 | **0.102** |
+| (768, 768, bf16) | inference | 0.665 | 0.250 | **0.178** |
+| (384, 768, fp32) | inference | -- | 0.225 | **0.196** |
+| (768, 768, fp32) | inference | 1.248 | 0.419 | **0.372** |
+| (384, 768, bf16) | training A48 | 5.65 | -- | **3.35** |
+| (768, 768, bf16) | training A48 | 17.01 | -- | **7.67** |
+| (384, 768, fp32) | training A48 | 9.09 | -- | **7.23** |
+| (768, 768, fp32) | training A48 | 24.14 | -- | **16.42** |
+
+- **Pair-bias cache.** The bench sets `static_weights(True)` and `static_inputs(True)` for inference; the pair bias is cached
+  through `_capture.lookup_inputs` keyed on pair / mask / weight / heads / dtype (both dtypes). Without the cache every replay
+  recomputed it (0.178 -> 0.241 ms).
+- **fp32 pair bias** is one TF32 `mma.sync` pass (`pair_bias_tok_cuda`, key permutation + mask fill in the epilogue): 439 -> 129 us.
+- **bf16 dbias (training)** goes through `attn_dqb` with C = 4 chunk buffers, not one buffer shared by reduce-adds: TMA
+  reduce-adds from different CTAs into one buffer are not bitwise repeatable when the SM schedule changes (visible only to a
+  perturbed 24-repeat test). Each CTA adds its sample groups in order (`wait_group 0` between groups), the chunks are summed in
+  fixed order: 8.47 -> 7.67 ms at L768 A48 and bitwise repeatable. The same scheme for fp32 (`attn_tf32_dqb`) is repeatable but no
+  faster (kept behind `_NATIVE_DQB_F32 = False`). The per-sample-buffer path it replaced cost 2.6 ms of dkv + reduce.
+- **Weight-gradient split** is off on sm90 (B200's split 4 costs +750 us a step on H100).
+- Not kept (measured): software-pipelined TF32 attention forward (0.66x, 167 registers -> one CTA per SM, `FWD_PIPE = 0`),
+  fp32 chunked dqb, `BIAS_FAKE` L2 test, side-stream overlap.

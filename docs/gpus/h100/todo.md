@@ -99,6 +99,10 @@ some of this (it still calls single-direction training D128-only).
    FP32 backward layout candidate (2026-10-05): 1.050–1.070x whole-block F+B on L384/768, A4/6; numerical, compile and
    replay checks passed. New-kernel sanitizers and whole-block racecheck/synccheck passed; a baseline-common memcheck
    API error remains. Explicit experiment only, default dispatch unchanged; see the token DiT experiment section.
+   2026-10-14 (`h100/token-bodit-opt`): token DiT inference bf16 0.102 / 0.178 ms (L384 / L768), training bf16 3.35 / 7.67 ms,
+   fp32 7.23 / 16.42 ms; **bias-only DiT** now CUDA on H100 (bf16 + fp32, inference + training,
+   [bias_only_dit/bias_only_dit.md](bias_only_dit/bias_only_dit.md)). Left: fp32 attention (latency bound), `pvx` epilogue overlap,
+   fp32 bias-only wgrad (cuBLAS TF32 `nt`).
    - Inference retains upstream's shared and per-sample conditioning. Shared cond `[1, 1, L, 384]` or stride 0 runs
      the AdaLN / gate projections on L rows; per-sample cond `[S, 1, L, 384]` runs them on S L rows.
      Both use the H100 CUDA rows and attention core. Weight packs / pair bias retain upstream's capture scopes.

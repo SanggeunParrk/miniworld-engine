@@ -754,7 +754,8 @@ __device__ __forceinline__ int fcol32(int kk, int s) { return 16 * (kk / 2) + 4 
 // weights), the bias stored head-major straight from the accumulators (32 contiguous bytes per head and row group).
 template <int NH, int TERMS>
 __global__ void __launch_bounds__(256, 2) pair_bias_tc_k(const float* __restrict__ Z, const float* __restrict__ WF,
-    float* __restrict__ BIAS, float2* __restrict__ PST, long R, float eps) {
+    float* __restrict__ BIAS, float2* __restrict__ PST, long R, float eps,
+    const bool* __restrict__ MASK, int L, bool perm, float NEG) {
   constexpr int NT = (NH + 7) / 8;
   __shared__ uint4 bw[16][NT][32];                     // Wf^T fragments per k-step, n-tile, lane: (b0, b1) hi, (b0, b1) lo
   const int lane = threadIdx.x % 32, g = lane / 4, q = lane % 4;
@@ -812,9 +813,21 @@ __global__ void __launch_bounds__(256, 2) pair_bias_tc_k(const float* __restrict
 #pragma unroll
       for (int e = 0; e < 2; ++e) {
         const int h = 8 * t + 2 * q + e;
-        if (h < NH) { BIAS[(long)h * R + rb + g] = acc[t][e]; BIAS[(long)h * R + rb + g + 8] = acc[t][2 + e]; }
+        if (h < NH) {
+          if (L == 0) { BIAS[(long)h * R + rb + g] = acc[t][e]; BIAS[(long)h * R + rb + g + 8] = acc[t][2 + e]; }
+          else {  // the token DiT's layout: key columns in the TF32 core's order (perm), -inf on masked keys
+#pragma unroll
+            for (int hr = 0; hr < 2; ++hr) {
+              const long rr = rb + g + 8 * hr;
+              const int j = (int)(rr % L);
+              const int pj = perm ? (j - (j & 7) + 2 * (j & 3) + ((j & 7) >> 2)) : j;
+              const bool live = MASK == nullptr || MASK[j];
+              BIAS[(long)h * R + (rr / L) * L + pj] = live ? acc[t][2 * hr + e] : NEG;
+            }
+          }
+        }
       }
-    if (q == 0) { PST[rb + g] = make_float2(mean[0], rs[0]); PST[rb + g + 8] = make_float2(mean[1], rs[1]); }
+    if (PST != nullptr && q == 0) { PST[rb + g] = make_float2(mean[0], rs[0]); PST[rb + g + 8] = make_float2(mean[1], rs[1]); }
   }
 }
 
@@ -1265,7 +1278,7 @@ int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf
 }
 
 // the training pair bias / its backward on TF32 tensor cores (terms 1: TF32; 3: split fp32, ~exact)
-using PbFwd = void (*)(const float*, const float*, float*, float2*, long, float);
+using PbFwd = void (*)(const float*, const float*, float*, float2*, long, float, const bool*, int, bool, float);
 using PbBwd = void (*)(const float*, const float*, const float2*, const float*, float*, float*, long);
 PbFwd pb_fwd(int64_t nh, int64_t terms) {
   TORCH_CHECK(terms == 1 || terms == 3, "pair bias: terms 1 or 3");
@@ -1289,7 +1302,27 @@ void pair_bias_tc(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, 
   int per = 1;
   cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, k, 256, 0);
   const unsigned g = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R / 16 + WPB - 1) / WPB, (int64_t)std::max(per, 1) * nsm()));
-  k<<<g, 256, 0, S()>>>(CP<float>(z), CP<float>(wf), P<float>(bias), P<float2>(pst), R, (float)eps);
+  k<<<g, 256, 0, S()>>>(CP<float>(z), CP<float>(wf), P<float>(bias), P<float2>(pst), R, (float)eps, nullptr, 0, false, 0.f);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// the token DiT's pair bias: out [nh, L L] with the key columns permuted (``perm``) and -inf on masked keys, one pass of the pair
+void pair_bias_tok(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional<at::Tensor> mask, int64_t L, double eps, bool perm, double neg) {
+  f32c(z, "pair"); f32c(wf, "Wf"); f32c(out, "bias");
+  const int64_t R = z.size(0), nh = wf.size(0);
+  TORCH_CHECK(z.dim() == 2 && z.size(1) == 128 && R == L * L && R % 16 == 0 && wf.size(1) == 128 && (nh == 12 || nh == 16 || nh == 24)
+              && out.numel() == nh * R, "pair_bias_tok: pair [L L, 128], Wf [12, 16 or 24, 128], out [nh, L L] fp32");
+  const bool* mp = nullptr;
+  if (mask.has_value()) {
+    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "pair_bias_tok: mask [L] bool");
+    mp = mask->data_ptr<bool>();
+  }
+  const at::cuda::CUDAGuard gd(z.device());
+  const PbFwd k = pb_fwd(nh, 1);
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, k, 256, 0);
+  const unsigned g = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R / 16 + WPB - 1) / WPB, (int64_t)std::max(per, 1) * nsm()));
+  k<<<g, 256, 0, S()>>>(CP<float>(z), CP<float>(wf), P<float>(out), nullptr, R, (float)eps, mp, (int)L, perm, (float)neg);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1393,5 +1426,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("softmax_rows_cuda", &softmax_rows);
   m.def("softmax_t_cuda", &softmax_t);
   m.def("pair_bias_cuda", &pair_bias);
+  m.def("pair_bias_tok_cuda", &pair_bias_tok);
   m.def("pair_bias_bwd_cuda", &pair_bias_bwd);
 }

@@ -609,6 +609,91 @@ void token_mask90(at::Tensor bias,at::Tensor mask) {
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ---- fp32 pair bias in ONE pass over the pair ------------------------------------------------------------------------------
+// out[h, i L + pos(j)] = (Wf[h] . LN(z[i L + j])) for h < NH, -inf where MASK[j] is false; z [R, 128] fp32, Wf [NH, 128] fp32 (the
+// LayerNorm weight and any log2 e scale folded in). One thread per pair row, a 128-row tile through shared memory (read once,
+// coalesced), the 16 projections on the FMA pipe in exact fp32. ``perm``: pos(j) is the H100 TF32 attention core's key order
+// (position 2 (j & 3) + (j & 7) / 4 of each group of 8). LN + a cuBLAS GEMM read the pair three times (302 MB each at fp32).
+template <int NH>
+__global__ void __launch_bounds__(128, 3) pair_bias_f32_k(const float* __restrict__ Z, const float* __restrict__ WF,
+    float* __restrict__ OUT, const bool* __restrict__ MASK, long R, int L, float eps, bool perm) {
+  constexpr int TR = 128, PITCH = 129;
+  extern __shared__ float pbs[];
+  float* zs = pbs;                        // [TR][PITCH]
+  float* wt = pbs + TR * PITCH;           // [128][NH]
+  const int tid = threadIdx.x;
+  for (int i = tid; i < NH * 128; i += 128) { const int h = i / 128, c = i % 128; wt[c * NH + h] = WF[i]; }
+  for (long r0 = (long)blockIdx.x * TR; r0 < R; r0 += (long)gridDim.x * TR) {
+    __syncthreads();
+    const int nr = (int)min((long)TR, R - r0);
+#pragma unroll 4
+    for (int k = 0; k < 32; ++k) {
+      const int idx = k * 128 + tid, row = idx >> 5, c4 = idx & 31;
+      if (row < nr) {
+        const float4 v = *reinterpret_cast<const float4*>(Z + (r0 + row) * 128 + c4 * 4);
+        float* d = zs + row * PITCH + c4 * 4;
+        d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = v.w;
+      }
+    }
+    __syncthreads();
+    if (tid < nr) {
+      const float* zr = zs + tid * PITCH;
+      float s4[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll 8
+      for (int c = 0; c < 128; ++c) s4[c & 3] += zr[c];
+      const float mean = ((s4[0] + s4[1]) + (s4[2] + s4[3])) * (1.f / 128);
+      float q4[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll 8
+      for (int c = 0; c < 128; ++c) { const float d = zr[c] - mean; q4[c & 3] += d * d; }
+      const float rstd = rsqrtf(((q4[0] + q4[1]) + (q4[2] + q4[3])) * (1.f / 128) + eps);
+      float acc[NH];
+#pragma unroll
+      for (int h = 0; h < NH; ++h) acc[h] = 0.f;
+#pragma unroll 2
+      for (int c = 0; c < 128; ++c) {
+        const float xh = (zr[c] - mean) * rstd;
+        const float4* w4 = reinterpret_cast<const float4*>(wt + c * NH);
+#pragma unroll
+        for (int q = 0; q < NH / 4; ++q) {
+          const float4 w = w4[q];
+          acc[4 * q + 0] = fmaf(xh, w.x, acc[4 * q + 0]); acc[4 * q + 1] = fmaf(xh, w.y, acc[4 * q + 1]);
+          acc[4 * q + 2] = fmaf(xh, w.z, acc[4 * q + 2]); acc[4 * q + 3] = fmaf(xh, w.w, acc[4 * q + 3]);
+        }
+      }
+      const long rr = r0 + tid;
+      const int j = (int)(rr % L);
+      const long i = rr / L;
+      const int p = perm ? (j - (j & 7) + 2 * (j & 3) + ((j & 7) >> 2)) : j;
+      const bool live = MASK == nullptr || MASK[j];
+      const long col = i * L + p;
+#pragma unroll
+      for (int h = 0; h < NH; ++h) OUT[(long)h * R + col] = live ? acc[h] : -INFINITY;
+    }
+  }
+}
+
+void pair_bias_f32_fused(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional<at::Tensor> mask, int64_t L, double eps, bool perm) {
+  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kFloat && z.dim() == 2 && z.size(1) == 128 && z.is_contiguous(), "pair_bias_f32_fused: z [R, 128] fp32");
+  TORCH_CHECK(wf.scalar_type() == at::kFloat && wf.is_contiguous() && wf.dim() == 2 && wf.size(0) == 16 && wf.size(1) == 128, "pair_bias_f32_fused: Wf [16, 128] fp32");
+  const int64_t R = z.size(0);
+  TORCH_CHECK(R == L * L && out.scalar_type() == at::kFloat && out.is_contiguous() && out.numel() == 16 * R, "pair_bias_f32_fused: out [16, L L] fp32");
+  const bool* mp = nullptr;
+  if (mask.has_value()) {
+    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "pair_bias_f32_fused: mask [L] bool");
+    mp = mask->data_ptr<bool>();
+  }
+  const at::cuda::CUDAGuard g(z.device());
+  const size_t smem = (size_t)(128 * 129 + 128 * 16) * 4;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_f32_k<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, pair_bias_f32_k<16>, 128, smem);
+  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const unsigned grid = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R + 127) / 128, (int64_t)std::max(per, 1) * nsm));
+  pair_bias_f32_k<16><<<grid, 128, smem, at::cuda::getCurrentCUDAStream()>>>(
+      z.data_ptr<float>(), wf.data_ptr<float>(), out.data_ptr<float>(), mp, R, (int)L, (float)eps, perm);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -622,6 +707,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_rows_cuda", &gate_rows);
   m.def("swiglu_rows_cuda", &swiglu_rows);
   m.def("layernorm128_rows", &layernorm128_rows);
+  m.def("pair_bias_f32_fused", &pair_bias_f32_fused);
   m.def("cond_rows_cuda", &cond_rows);
   m.def("qknorm_rows_cuda", &qknorm_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);

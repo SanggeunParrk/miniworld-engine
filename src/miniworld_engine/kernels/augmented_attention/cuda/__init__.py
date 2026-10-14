@@ -525,10 +525,24 @@ def tf32_backward(
     [16, L, L] fp32 with its key columns still permuted (``key_perm`` order)."""
     ext = _ext("attn_tf32")
     dq, dk, dv = (torch.empty_like(qs) for _ in range(3))
-    db_p = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-    ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, db_p)
+    dbc = torch.zeros(tf32_dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+    ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, dbc)
+    db_p = dbc.sum(0)  # the chunk buffers in order: bitwise repeatable
     ext.attn_tf32_dkv(qs, dob, qt, dot, k, v, bias_tp, lse_p, dd_p, km, dk, dv)
     return dq, dk, dv, db_p
+
+
+def tf32_dqb_chunks(A: int) -> int:
+    """Partial dbias buffers of the TF32 ``attn_tf32_dqb`` (see ``dqb_chunks``): the largest divisor of A up to 4."""
+    return max(c for c in (1, 2, 3, 4) if A % c == 0)
+
+
+def dqb_chunks(A: int) -> int:
+    """Partial dbias buffers of ``attn_dqb``: each CTA adds its A / 3 / C sample groups to ONE buffer in order (the TMA reduce-adds
+    of two CTAs into one buffer land in schedule order: not bitwise repeatable); the C buffers are summed in order afterwards.
+    The largest divisor of A / 3 up to 4: C x 16 x (L / 64) CTAs, 4 buffers = 4 x 38 MB fp32 at L768."""
+    groups = A // 3
+    return max(c for c in (1, 2, 3, 4) if groups % c == 0)
 
 
 def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L):
@@ -539,8 +553,10 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L):
     if (
         A % 3 == 0
     ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
-        db = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-        _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, db)
+        chunks = dqb_chunks(A)
+        dbc = torch.zeros(chunks, H, L, L, device=qs.device, dtype=torch.float32)
+        _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
+        db = dbc.sum(0)  # the chunks in order: bitwise repeatable
         _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
             qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
         )

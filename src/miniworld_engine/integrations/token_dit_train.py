@@ -186,7 +186,9 @@ def _mm32(a, b):
     tiles = -(-n // 128) * -(-k // 128)
     nsm = torch.cuda.get_device_properties(a.device).multi_processor_count
     s = 1
-    if tiles < 128 and b.is_contiguous() and a.t().is_contiguous():
+    if tiles < 128 and not _sm90(a.device) and b.is_contiguous() and a.t().is_contiguous():
+        # (Hopper: the split costs ~440 us a step at A = 48, L768 -- measured dWo / dWg / dWn / dWsq 207 / 284 / 436 / 444 us as
+        #  one GEMM against 319 / 321 / 548 / 627 us split in four)
         while s < 8 and tiles * s * 2 <= 2 * nsm and m % (2 * s * 128) == 0:
             s *= 2
     if s == 1:
@@ -902,11 +904,33 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
     return dq, dk, dv, db_p[..., inv]
 
 
+#: Hopper bf16 token DiT backward: dbias from the dQ pass (A a multiple of 3); False: the per-sample buffer + reduce
+#: fp32: the TF32 dQ pass with C chunk buffers (each CTA adds its A / C samples in order): bitwise repeatable, but no faster than the
+#: per-sample buffer + reduce it replaces (dQ 2365 us against 1766 + 613 us), so off. (One shared buffer, 4608 CTAs: -0.9 ms, not repeatable.)
+_NATIVE_DQB_F32 = False
+_NATIVE_DQB = True  # bf16 (A a multiple of 3): dbias from the dQ pass into C chunk buffers summed in order (bitwise repeatable)
+
+
+_INV_PERM: dict = {}
+
+
+def _inv_key_perm(L, device, rows):
+    """The inverse of the TF32 core's key permutation (positions -> natural key order), once per (L, device)."""
+    key = (L, device)
+    if key not in _INV_PERM:
+        _INV_PERM[key] = torch.argsort(rows.key_perm(L, device))
+    return _INV_PERM[key]
+
+
 def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
-    db = torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
+    db = (
+        None
+        if ((fp32 and _NATIVE_DQB_F32) or (not fp32 and _NATIVE_DQB and A % 3 == 0))
+        else torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
+    )
     km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
     empty_defs = ("TOKEN_EMPTY_UNIFORM=1",) if _empty_uniform90(qs.device, A, L) else ()
     if fp32:
@@ -917,9 +941,32 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
             return out
 
         bt, lp, dp = T.train_tf32_bwd_layout90(bias, lse, dd)
+        if _NATIVE_DQB_F32:
+            # the samples' dS tiles added into ONE key-permuted [H, L, L] buffer by TMA reduce-adds (bitwise repeatable under
+            # SM-schedule perturbation, measured); the per-sample variant below writes [A, H, L, L] fp32 (1.8 GB at A48 L768),
+            # costs 1.77 ms in dQ and 0.61 ms in its reduce
+            from miniworld_engine.kernels.conditioned_transition import cuda as rows
+
+            inv = _inv_key_perm(L, qs.device, rows)
+            dbc = torch.zeros(sm90.tf32_dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+            core = sm90._ext("attn_tf32", tuple(empty_defs))
+            core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, dbc)
+            core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
+            return dq, dk, dv, dbc.sum(0)[..., inv]  # chunk buffers summed in order: bitwise repeatable
         core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1", *empty_defs))
         core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, db)
         core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
+    elif _NATIVE_DQB and A % 3 == 0:
+        # dbias in the dQ pass: the three samples of a work item are summed in shared memory and added with ONE TMA bulk reduce,
+        # in a fixed order (bitwise repeatable). The per-sample variant below writes an [A, H, L, L] fp32 buffer (1.8 GB at A48
+        # L768), takes 1.4 ms in dK / dV for the atomics and 0.6 ms in the reduce: 2.6 ms against 1.6 ms for this pass.
+        dbc = torch.zeros(sm90.dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+        sm90._ext("attn_dqb", empty_defs).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
+        dbn = dbc.sum(0)  # the chunk buffers summed in order: bitwise repeatable
+        sm90._ext("attn_dkv", ("DBIAS=0", *empty_defs)).attn_dkv(
+            qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn
+        )
+        return dq, dk, dv, dbn.to(torch.bfloat16)
     else:
         sm90._ext(
             "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *empty_defs)

@@ -129,8 +129,15 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         or torch.is_autocast_enabled("cuda")
     ):
         return False  # fp32 = an fp32 block; under autocast the module path keeps its casts
-    if dt is F32 and torch.cuda.get_device_capability(single.device) != (10, 0):
-        return False  # the TF32 path is kind::tf32 tcgen05 (sm_100); the Hopper path is bf16 only
+    if (
+        dt is F32
+        and torch.cuda.get_device_capability(single.device) != (10, 0)
+        and not (
+            h100_enabled(single.device)
+            and (module.attention.n_head, module.attention.to_value.weight.shape[0] // module.attention.n_head) == (16, 48)
+        )
+    ):
+        return False  # the TF32 tcgen05 path is sm_100; Hopper serves fp32 at 16 x 48 (TF32 wgmma core + cuBLAS)
     if not any(t.requires_grad for t in (single, cond, src)) and not any(
         p.requires_grad for p in module.parameters()
     ):
@@ -181,6 +188,11 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
             if single.device.index is not None
             else torch.cuda.current_device()
         )
+        if torch.cuda.get_device_capability(single.device) != (10, 0):
+            from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+            rows32()  # Hopper: the fp32 row kernels (generic CUDA) + the wgmma core in the sm90a extension
+            return True
         return tf32_ready(idx, at.n_head, da // at.n_head, True)
     return True
 
@@ -207,6 +219,13 @@ def _dg_direct() -> bool:
 
 #: Hopper pair-bias logits stay fp32 into the softmax (the shipped path); False keeps the bf16 rounding (private candidate).
 _H100_FP32_LOGITS = True
+#: Hopper bf16 backward: dV and dbias as two batched cuBLAS GEMMs over the heads (False: the pvx / dpb_pipe kernels)
+#: Hopper bf16 backward: the SwiGLU backward in the dh GEMM's epilogue (``dswi``)
+_H100_DSWI = False  # measured: 509 vs 318 us at M = 36864 (128 x 128 tiles re-read ~1.4 GB from L2), module +235 us
+#: Hopper: the pair part of the step on a side stream beside the GEMM chain (measured: +30 us -- the GEMM CTAs hold the
+#: shared memory of every SM, so the memory-bound passes do not co-reside)
+_H100_OVERLAP = False
+_H100_BWD_BMM = False  # measured: +25 us a step (the permute copies cost what the GEMMs save)
 #: Exact-cuBLAS gamma shadow for H = 16, DA = 1024 on Hopper (private candidate, off: the shipped path).
 _H100_SHADOW_GAMMA = False
 
@@ -613,6 +632,49 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
     x = single.reshape(M, D).contiguous()  # the input as it is: the first residual rows
+
+    def pair_part():
+        """The attention weights P (and P^T): pair bias -> softmax. Reads the pair and the mask only."""
+        P = torch.empty(H, L, L, device=dev, dtype=BF)
+        if bias is None:
+            p2 = pair.reshape(R, DP)
+            pst = torch.empty(R, 2, device=dev)
+            if _fp32_logits(dev):  # Hopper: fp32 logits beside P (not overwritten)
+                logits = torch.empty(H * L, L, device=dev, dtype=torch.float32)
+                BT.pair_bias_cuda(p2, W["Wf_bf"], logits, pst, EPS)
+            else:
+                BT.pair_bias_cuda(
+                    p2, W["Wf_bf"], P, pst, EPS
+                )  # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
+                logits = P.view(H * L, L)  # the softmax overwrites it with P
+        else:
+            pst, logits = (
+                None,
+                bias.reshape(H * L, L),
+            )  # hoisted (pair_bias_all): read, not written
+        Pt = torch.empty(
+            H, L, L, device=dev, dtype=BF
+        )  # P^T for the backward's dV, from the softmax kernel
+        C.softmax_t(
+            logits,
+            P.view(H * L, L),
+            Pt.view(H * L, L),
+            None if mask is None else mask.reshape(L).contiguous(),
+        )
+        return P, Pt, pst
+
+    side = _side_stream(dev) if C.h100_enabled(dev) and _H100_OVERLAP else None
+    if side is not None:
+        # Hopper: the pair part is memory bound and independent of the per-sample chain (conditioning GEMMs, AdaLN, v | g): run
+        # it on a side stream beside the GEMMs, which leave the DRAM mostly idle
+        cur = torch.cuda.current_stream(dev)
+        started = torch.cuda.Event()
+        started.record(cur)
+        with torch.cuda.stream(side):
+            side.wait_event(started)
+            P, Pt, pst = pair_part()
+            pair_done = torch.cuda.Event()
+            pair_done.record(side)
     c2 = cond.reshape(M, DC).contiguous()
     chat = torch.empty(M, DC, device=dev, dtype=BF)
     cst = torch.empty(M, 2, device=dev)
@@ -623,32 +685,13 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     xst = torch.empty(M, 2, device=dev)
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
-    P = torch.empty(H, L, L, device=dev, dtype=BF)
-    if bias is None:
-        p2 = pair.reshape(R, DP)
-        pst = torch.empty(R, 2, device=dev)
-        if _fp32_logits(dev):  # Hopper: fp32 logits beside P (not overwritten)
-            logits = torch.empty(H * L, L, device=dev, dtype=torch.float32)
-            BT.pair_bias_cuda(p2, W["Wf_bf"], logits, pst, EPS)
-        else:
-            BT.pair_bias_cuda(
-                p2, W["Wf_bf"], P, pst, EPS
-            )  # the bias, head-major; Wf = Wb diag(wp); LN(pair) stays on chip
-            logits = P.view(H * L, L)  # the softmax overwrites it with P
+    if side is None:
+        P, Pt, pst = pair_part()
     else:
-        pst, logits = (
-            None,
-            bias.reshape(H * L, L),
-        )  # hoisted (pair_bias_all): read, not written
-    Pt = torch.empty(
-        H, L, L, device=dev, dtype=BF
-    )  # P^T for the backward's dV, from the softmax kernel
-    C.softmax_t(
-        logits,
-        P.view(H * L, L),
-        Pt.view(H * L, L),
-        None if mask is None else mask.reshape(L).contiguous(),
-    )
+        cur.wait_event(pair_done)
+        for t in (P, Pt, pst):
+            if t is not None:
+                t.record_stream(cur)
     og = torch.empty(M, DA, device=dev, dtype=BF)
     _op("pv", dev, H, DA // H)(
         vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:]
@@ -661,7 +704,13 @@ def _fwd_impl(single, cond, pair, bias, mask, params):
     )  # x1 = x + sigmoid(g1) y is never stored
     ab = torch.empty(M, 4 * D, device=dev, dtype=BF)  # [M, 2 * 2D] a | b
     h = torch.empty(M, 2 * D, device=dev, dtype=BF)
-    _op("swiglu", dev)(xt, W["Wab"], ab, h)  # the SwiGLU in the expand GEMM's epilogue
+    if C.h100_enabled(dev):
+        # Hopper: cuBLAS + the SwiGLU row pass (380 us at M = 36864) beats the epilogue kernel that also stores a | b (813 us:
+        # its epilogue serialises behind the stores); same layout of ab, same h
+        torch.mm(xt, W["Wab"].t(), out=ab)
+        C.swiglu_rows(ab, h)
+    else:
+        _op("swiglu", dev)(xt, W["Wab"], ab, h)  # the SwiGLU in the expand GEMM's epilogue
     z = torch.mm(h, W["Wsq"].t())
     out = torch.empty(M, D, device=dev, dtype=single.dtype)
     BT.res_c_cuda(x, y, z, Gg, W["bg1"], W["bg2"], out)
@@ -892,9 +941,18 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     dGg = torch.empty(M, 2 * D, device=dev, dtype=BF)
     dz = torch.empty(M, D, device=dev, dtype=BF)
     n0 = BT.res_c_bwd_cuda(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = torch.mm(dz, Wsq)  # [M, 2D]
     dab = torch.empty_like(ab)
-    BT.swiglu_bwd_cuda(dh, ab, dab)
+    if C.h100_enabled(dev) and _H100_DSWI:
+        # Hopper: dh = dz Wsq with the SwiGLU backward in the GEMM's epilogue (dh never reaches HBM)
+        WsqT = W.get("WsqT")
+        if WsqT is None:  # K-major B: Wsq^T [2D, D], once per weight pack
+            WsqT = W["WsqT"] = Wsq.t().contiguous()
+        C.h100_ext().swiglu_bwd_gemm(
+            dz, WsqT, ab, dab, torch.cuda.get_device_properties(dev).multi_processor_count
+        )
+    else:
+        dh = torch.mm(dz, Wsq)  # [M, 2D]
+        BT.swiglu_bwd_cuda(dh, ab, dab)
     dWsq = wgrad("transition.squeeze.weight", dz, h)
     dg_direct = _dg_direct()
     dxt = (
@@ -913,15 +971,50 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
     dbias = (
         torch.empty(H * L, L, device=dev, dtype=BF)
         if dbias_out is None
         else dbias_out.view(H * L, L)
     )
-    _op("dpb", dev, H, DA // H)(
-        do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
-    )  # P o (dP - D); masked keys get P = 0
+    if C.h100_enabled(dev) and _H100_BWD_BMM and DA // H == 48:
+        # Hopper: samples folded into the columns, [H, L, A 48] per head is one regular matrix, so dV = P^T dO and
+        # dP = sum_a dO_a v_a^T are each one batched cuBLAS GEMM over the heads (fp32 accumulation; dP stays fp32 until
+        # D is subtracted)
+        dh_ = DA // H
+        doP = do.view(A, L, H, dh_).permute(2, 1, 0, 3).contiguous().view(H, L, A * dh_)
+        vP = (
+            vg.view(A, L, 2 * DA)[..., :DA]
+            .unflatten(-1, (H, dh_))
+            .permute(2, 1, 0, 3)
+            .contiguous()
+            .view(H, L, A * dh_)
+        )
+        dvP = torch.bmm(Pt.view(H, L, L), doP)  # dv = P^T do
+        dvg[:, :DA].view(A, L, H, dh_).copy_(dvP.view(H, L, A, dh_).permute(2, 1, 0, 3))
+        dP = torch.bmm(doP, vP.transpose(1, 2), out_dtype=torch.float32)  # [H, L, L]
+        dP.sub_(dd.sum(0).unsqueeze(-1))
+        torch.mul(dP, P.view(H, L, L), out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
+    else:
+        _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
+        _op("dpb", dev, H, DA // H)(
+            do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
+        )  # P o (dP - D); masked keys get P = 0
+    pb_side = None
+    if C.h100_enabled(dev) and _H100_OVERLAP and dbias_out is None and not _H100_BWD_BMM:
+        # Hopper: the pair LayerNorm backward (memory bound, 125 us) needs only dbias: it runs on a side stream beside the
+        # tensor-bound chain that follows (dxa, the weight gradients, the AdaLN / conditioning backward)
+        pb_side = _side_stream(dev)
+        cur = torch.cuda.current_stream(dev)
+        ready = torch.cuda.Event()
+        ready.record(cur)
+        dbias.record_stream(pb_side)
+        with torch.cuda.stream(pb_side):
+            pb_side.wait_event(ready)
+            dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
+            pwf = torch.empty(BT.partial_rows(M), H, DP, device=dev)  # dWf partials, one per block
+            nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
+            pb_done = torch.cuda.Event()
+            pb_done.record(pb_side)
     dxa = (
         torch.mm(dvg, Wvg, out=dG[:, D : 2 * D]) if dg_direct else torch.mm(dvg, Wvg)
     )  # d shift1 = dxa: straight into dG
@@ -952,11 +1045,16 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
             norms,
         ]
     # the pair LayerNorm backward with d LN(pair) = dbias^T Wf, and dWf = dbias LN(pair), in one kernel (LN(pair) rebuilt on chip)
-    dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
-    pwf = torch.empty(
-        BT.partial_rows(M), H, DP, device=dev
-    )  # dWf partials, one per block
-    nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
+    if pb_side is None:
+        dpair = torch.empty(R, DP, device=dev, dtype=pair.dtype)
+        pwf = torch.empty(
+            BT.partial_rows(M), H, DP, device=dev
+        )  # dWf partials, one per block
+        nwf = BT.pair_bias_bwd_cuda(dbias, p2, pst, W["Wf_bf"], dpair, pwf)
+    else:
+        torch.cuda.current_stream(dev).wait_event(pb_done)
+        dpair.record_stream(torch.cuda.current_stream(dev))
+        pwf.record_stream(torch.cuda.current_stream(dev))
     # the step's last kernel: bias sums, cond-LN weights, ln_pair / to_bias from their partials, in the parameters' dtype
     BT.finalize_cuda(part, [n0, n12, n12, n3], pw, pwf, nwf, Wb, wp, flat[_U:], norms)
     if (
@@ -1423,6 +1521,8 @@ def _wgrad32(a, b):
     M, N, K = a.shape[0], a.shape[1], b.shape[1]
     forced = settings.current().bias_only_dit_wgrad_split
     S = int(forced) if forced else (4 if N * K < 2_000_000 or M >= 32768 else 1)
+    if not forced and torch.cuda.get_device_capability(a.device) == (9, 0):
+        S = 1  # Hopper TF32: one GEMM per weight is faster (split-4 costs +746 us a step at A = 48, L768: B200 tuning)
     if S <= 1 or M % S:
         return torch.mm(a.t(), b)
     return torch.bmm(
@@ -1435,9 +1535,27 @@ def _glu(dev, bwd):
     cuBLAS + the fp32 rows (switched off, or the build failed)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import tf32
 
+    if _hopper(dev):  # the SwiGLU GEMMs are tcgen05 (sm_100a): cuBLAS + the fp32 rows
+        return None
     return tf32.glu_op(
         dev.index if dev.index is not None else torch.cuda.current_device(), bwd
     )
+
+
+_SIDE: dict = {}
+
+
+def _side_stream(dev):
+    """The per-device side stream the Hopper steps run their independent memory-bound passes on."""
+    idx = dev.index if dev.index is not None else torch.cuda.current_device()
+    if idx not in _SIDE:
+        _SIDE[idx] = torch.cuda.Stream(device=idx)
+    return _SIDE[idx]
+
+
+def _hopper(dev) -> bool:
+    """The fp32 step on Hopper: wgmma core + cuBLAS for the attention (no tcgen05 cubins)."""
+    return torch.cuda.get_device_capability(dev) == (9, 0)
 
 
 def _op32(kind, dev, nh, dh):
@@ -1529,9 +1647,18 @@ def _fwd32_impl(single, cond, pair, bias, mask, params):
             None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
         )
         og = e(M, DA)
-        _op32("pv", dev, H, DA // H)(
-            vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:]
-        )  # a = sigmoid(g) (P v)
+        if _hopper(dev):
+            # TF32 wgmma reads K-major operands only: v^T = Wv xa^T beside the v | g GEMM (the backward needs v | g)
+            from miniworld_engine.kernels.bias_only_dit.cuda import PvGateCoreH100TF32
+
+            vt = torch.mm(W["Wvg"][:DA], xa.t())
+            PvGateCoreH100TF32(dev.index if dev.index is not None else torch.cuda.current_device(), H, DA // H)(
+                vt, P.view(H * L, L), og, A, vg[:, DA:]
+            )  # a = sigmoid(g) (P v)
+        else:
+            _op32("pv", dev, H, DA // H)(
+                vg[:, :DA], P.view(H * L, L), og, A, g=vg[:, DA:]
+            )  # a = sigmoid(g) (P v)
         y = torch.mm(og, W["Wo"].t())
         xt, x1st = e(M, D), e(M, 2)
         F.res_adaln_b_cuda(x, y, Gg, W["bg1"], G, W["bs2"], xt, x1st, EPS)
@@ -1667,13 +1794,25 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out):
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
         F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-        _op32("pv", dev, H, DA // H)(
-            do, Pt.view(H * L, L), dvg[:, :DA], A
-        )  # dv = P^T do
         dbias = e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
-        _op32("dpb", dev, H, DA // H)(
-            do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
-        )  # P o (dP - D); masked keys get P = 0
+        if _hopper(dev):
+            # samples folded into the columns: [H, L, A 48] per head is one regular matrix, so dV = P^T dO and
+            # dP = sum_a dO_a v_a^T are each ONE batched cuBLAS TF32 GEMM over the heads
+            dh_ = DA // H
+            doP = do.view(A, L, H, dh_).permute(2, 1, 0, 3).contiguous().view(H, L, A * dh_)
+            vP = vg.view(A, L, 2 * DA)[..., :DA].unflatten(-1, (H, dh_)).permute(2, 1, 0, 3).contiguous().view(H, L, A * dh_)
+            dvP = torch.bmm(Pt.view(H, L, L), doP)  # dv = P^T do
+            dvg[:, :DA].view(A, L, H, dh_).copy_(dvP.view(H, L, A, dh_).permute(2, 1, 0, 3))
+            dP = torch.bmm(doP, vP.transpose(1, 2))  # [H, L, L]
+            dP.sub_(dd.sum(0).unsqueeze(-1))  # dd [A, H, L] -> sum over the samples
+            torch.mul(dP, P.view(H, L, L), out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
+        else:
+            _op32("pv", dev, H, DA // H)(
+                do, Pt.view(H * L, L), dvg[:, :DA], A
+            )  # dv = P^T do
+            _op32("dpb", dev, H, DA // H)(
+                do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
+            )  # P o (dP - D); masked keys get P = 0
         dxa = torch.mm(
             dvg, Wvg, out=dG[:, D : 2 * D]
         )  # d shift1 = dxa: straight into its dG columns

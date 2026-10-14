@@ -8,6 +8,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- H100 bias-only token DiT: `pvx` / `pvx32` PV + gate cores, `dpb2` bias gradient, fp32 (TF32) inference and training served on
+  sm90 ([page](gpus/h100/bias_only_dit/bias_only_dit.md)); `tests/gpu/sm90/test_h100_bias_only_dit_gpu.py`.
+
+### Changed
+
+- H100 token DiT: pair-bias cache under static inputs, one TF32 pass for the fp32 pair bias, bf16 dbias through a deterministic
+  chunk-buffer `attn_dqb` (training L768 A48 8.47 -> 7.67 ms), no weight-gradient split on sm90.
+
 ### Removed
 
 - The dense atom DiT (attention over all N atoms with the shared pair bias; the AF3 atom transformer is the block-local

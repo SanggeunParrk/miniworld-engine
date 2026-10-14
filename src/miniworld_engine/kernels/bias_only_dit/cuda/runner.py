@@ -175,7 +175,7 @@ class FusedBiasOnlyDiT:
             R32.softmax_rows_cuda(P.view(-1, L), P.view(-1, L), m)
             return P
         zh = torch.empty(L * L, self.dp, device=pair.device, dtype=self.dtype)
-        _rows()._ext().layernorm128_rows(z2d, zh, EPS)
+        _rows()._ext().layernorm128_rows(z2d, zh, EPS, False)
         P = torch.empty(self.nb * self.h, L, L, device=pair.device, dtype=self.dtype)
         torch.mm(self.pw, zh.t(), out=P.view(self.nb * self.h, L * L))
         C.softmax_rows(P.view(-1, L), P.view(-1, L), m)
@@ -190,6 +190,8 @@ class FusedBiasOnlyDiT:
                 x=e(D, torch.float32),
                 xa=e(D),
                 vg=e(2 * self.da),
+                vt=torch.empty(self.da, M, device=dev, dtype=self.dtype),  # Hopper fp32: v^T (K-major TF32 operand)
+                gg=e(self.da),  # Hopper fp32: the gate g = xa Wg^T
                 a=e(self.da),
                 y=e(D),
                 ab=e(self.per[0]["wab"].shape[0]),
@@ -201,7 +203,11 @@ class FusedBiasOnlyDiT:
         idx = device.index if device.index is not None else torch.cuda.current_device()
         if ("core", idx) not in self._ops:
             self._ops[("core", idx)] = (
-                _tf32().PvGateCoreTF32(idx, nh=self.h, dh=self.da // self.h)
+                (
+                    C.PvGateCoreH100TF32(idx, nh=self.h, dh=self.da // self.h)
+                    if C.h100_enabled(idx)
+                    else _tf32().PvGateCoreTF32(idx, nh=self.h, dh=self.da // self.h)
+                )
                 if self.fp32
                 else C.PvGateCore(idx, nh=self.h, dh=self.da // self.h)
             )
@@ -234,6 +240,19 @@ class FusedBiasOnlyDiT:
         key = ("gsw", idx, xa.shape[0])
         if self.fp32:
             return None
+        if C.h100_enabled(idx):
+            # Hopper: expand + SwiGLU as one sm_90a GEMM (the token DiT's ``gemm_swiglu_sm90``): [a | b] never reaches HBM and
+            # the SwiGLU row pass (10 us at L768) disappears
+            if key not in self._ops:
+                from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
+
+                wab = self.per[0]["wab"]
+                self._ops[key] = (
+                    gemm_swiglu.GemmSwigluSm90(idx)
+                    if gemm_swiglu.supported_sm90(xa, wab)
+                    else None
+                )
+            return self._ops[key]
         if key not in self._ops:
             from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
@@ -262,6 +281,8 @@ class FusedBiasOnlyDiT:
     def _inf3_ok(self, device) -> bool:
         T = _tf32()
         if not (self.fp32 and T.inf3_on() and self.d == 768 and self.da in (768, 1024)):
+            return False
+        if C.h100_enabled(device):  # the three-kernel step is tcgen05 (sm_100a)
             return False
         idx = device.index if device.index is not None else torch.cuda.current_device()
         return T.inf3_ready(idx, self.h, self.da // self.h)
@@ -656,11 +677,22 @@ class FusedBiasOnlyDiT:
         )
         ps = presig
         C.adaln_in_rows(single, x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
+        h100_tf32 = self.fp32 and C.h100_enabled(dev)
         for b, p in enumerate(self.per):
-            torch.mm(xa, p["wvg"].t(), out=vg)
-            core(
-                vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=vg[:, DA:]
-            )  # sigmoid(g) * (P v)
+            if h100_tf32:
+                # TF32 wgmma reads K-major operands only: v^T = Wv xa^T from cuBLAS, g = xa Wg^T beside it
+                torch.mm(p["wvg"][:DA], xa.t(), out=buf["vt"])
+                torch.mm(xa, p["wvg"][DA:].t(), out=buf["gg"])
+                core(buf["vt"], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=buf["gg"])
+            else:
+                torch.mm(xa, p["wvg"].t(), out=vg)
+                core(
+                    vg[:, :DA],
+                    P[b * H : (b + 1) * H].view(H * L, L),
+                    a,
+                    S,
+                    g=vg[:, DA:],
+                )  # sigmoid(g) * (P v)
             if resln is not None:  # out GEMM + residual + gate + AdaLN, one kernel
                 resln(a, p["wo"], x, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS)
             else:
