@@ -283,3 +283,73 @@ H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (i
 `tests/gpu/any/test_token_dit_train_gpu.py` (60 pass): the module-path comparison now also runs (A, L) = (4, 128), (4, 512),
 (3, 640) beside (4, 256), (6, 256), (3, 200), for bf16 and fp32, QK-norm on / off, masked / unmasked. The inference cells
 other than L384 / L768 were not re-run in this pass.
+
+## Measurements, length sweep (2026-10-15)
+
+H100 80GB HBM3 (cssb), the v2.2.0 pixi env (torch 2.13.0+cu129), `benchmarks/runners/bench.py target=dit level=module
+min_seq_len=128 max_seq_len=768 seq_len_step=128 cudagraph=manual`, ms per block, median, key mask 20 % (inference) / 12.5 %
+(training). Inference at A = 5 (one conditioning shared by the samples, `+shared_cond=true`) and A = 1; training at A = 48.
+Anthropic is its inference release (separate invocation, `compile=false`; no backward). No cuEquivariance block exists for this module.
+Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
+
+### Inference
+**bf16, A = 5**, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, bf16) | 0.140 | 0.090 | **0.060** | 2.32 | 1.49 |
+| (256, 768, bf16) | 0.200 | 0.113 | **0.076** | 2.63 | 1.49 |
+| (384, 768, bf16) | 0.282 | 0.142 | **0.102** | 2.76 | 1.39 |
+| (512, 768, bf16) | 0.389 | 0.182 | **0.127** | 3.07 | 1.44 |
+| (640, 768, bf16) | 0.520 | 0.217 | **0.159** | 3.28 | 1.36 |
+| (768, 768, bf16) | 0.666 | 0.252 | **0.179** | 3.73 | 1.41 |
+
+**bf16, A = 1**
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, bf16) | 0.122 | 0.079 | **0.053** | 2.29 | 1.49 |
+| (256, 768, bf16) | 0.145 | 0.087 | **0.059** | 2.47 | 1.48 |
+| (384, 768, bf16) | 0.182 | 0.094 | **0.064** | 2.86 | 1.48 |
+| (512, 768, bf16) | 0.233 | 0.104 | **0.068** | 3.45 | 1.54 |
+| (640, 768, bf16) | 0.285 | 0.112 | **0.073** | 3.90 | 1.53 |
+| (768, 768, bf16) | 0.357 | 0.125 | **0.081** | 4.44 | 1.56 |
+
+**fp32, A = 5**, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, fp32) | 0.172 | 0.126 | **0.102** | 1.69 | 1.23 |
+| (256, 768, fp32) | 0.277 | 0.172 | **0.143** | 1.94 | 1.20 |
+| (384, 768, fp32) | 0.469 | 0.226 | **0.195** | 2.40 | 1.16 |
+| (512, 768, fp32) | 0.627 | 0.284 | **0.252** | 2.48 | 1.12 |
+| (640, 768, fp32) | 0.989 | 0.349 | **0.322** | 3.08 | 1.09 |
+| (768, 768, fp32) | 1.24 | 0.419 | **0.370** | 3.36 | 1.13 |
+
+**fp32, A = 1**
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, fp32) | 0.139 | 0.104 | **0.083** | 1.67 | 1.26 |
+| (256, 768, fp32) | 0.182 | 0.114 | **0.091** | 2.01 | 1.25 |
+| (384, 768, fp32) | 0.254 | 0.129 | **0.107** | 2.36 | 1.20 |
+| (512, 768, fp32) | 0.336 | 0.134 | **0.118** | 2.84 | 1.13 |
+| (640, 768, fp32) | 0.433 | 0.139 | **0.130** | 3.34 | 1.07 |
+| (768, 768, fp32) | 0.573 | 0.173 | **0.157** | 3.65 | 1.10 |
+
+### Training (A = 48)
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, bf16) | 1.35 | **1.09** | 1.24 |
+| (256, 768, bf16) | 3.25 | **2.15** | 1.51 |
+| (384, 768, bf16) | 5.63 | **3.32** | 1.69 |
+| (512, 768, bf16) | 8.55 | **4.65** | 1.84 |
+| (640, 768, bf16) | 12.76 | **6.09** | 2.10 |
+| (768, 768, bf16) | 16.97 | **7.66** | 2.21 |
+| (128, 768, fp32) | 2.83 | **2.44** | 1.16 |
+| (256, 768, fp32) | 5.66 | **4.64** | 1.22 |
+| (384, 768, fp32) | 9.12 | **7.25** | 1.26 |
+| (512, 768, fp32) | 12.74 | **9.95** | 1.28 |
+| (640, 768, fp32) | 17.87 | **12.99** | 1.38 |
+| (768, 768, fp32) | 24.10 | **16.41** | 1.47 |

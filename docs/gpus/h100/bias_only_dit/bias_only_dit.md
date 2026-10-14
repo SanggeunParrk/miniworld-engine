@@ -192,3 +192,73 @@ Training step, nb blocks, A = 48 (eager CUDA events, one GPU; per-block pair bia
 
 The saving is per block and independent of A, so it grows with the stack depth (24 blocks: ~4 ms bf16 / ~8.5 ms fp32 at L768 by
 extrapolation, not measured). The token DiT has no fused hoist; its `architecture/blocks/pair_bias_hoist.py` stays the PyTorch fold.
+
+## Measurements, length sweep (2026-10-15)
+
+H100 80GB HBM3 (cssb), the v2.2.0 pixi env (torch 2.13.0+cu129), `benchmarks/runners/bench.py target=bias_only_dit level=module
+min_seq_len=128 max_seq_len=768 seq_len_step=128 cudagraph=manual`, ms per block, median, key mask 20 % (inference) / 12.5 %
+(training). Inference at A = 5 (one conditioning shared by the samples, `+shared_cond=true`) and A = 1; training at A = 48.
+No Anthropic or cuEquivariance block exists for this module: the only comparison is the PyTorch module.
+Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
+
+### Inference
+**bf16, A = 5**, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, bf16) | 0.116 | **0.057** | 2.06 |
+| (256, 768, bf16) | 0.153 | **0.068** | 2.24 |
+| (384, 768, bf16) | 0.207 | **0.089** | 2.33 |
+| (512, 768, bf16) | 0.276 | **0.103** | 2.67 |
+| (640, 768, bf16) | 0.339 | **0.130** | 2.60 |
+| (768, 768, bf16) | 0.424 | **0.146** | 2.91 |
+
+**bf16, A = 1**
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, bf16) | 0.106 | **0.051** | 2.07 |
+| (256, 768, bf16) | 0.125 | **0.055** | 2.26 |
+| (384, 768, bf16) | 0.157 | **0.060** | 2.61 |
+| (512, 768, bf16) | 0.207 | **0.064** | 3.25 |
+| (640, 768, bf16) | 0.253 | **0.071** | 3.59 |
+| (768, 768, bf16) | 0.325 | **0.078** | 4.15 |
+
+**fp32, A = 5**, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, fp32) | 0.138 | **0.092** | 1.50 |
+| (256, 768, fp32) | 0.218 | **0.119** | 1.84 |
+| (384, 768, fp32) | 0.365 | **0.163** | 2.25 |
+| (512, 768, fp32) | 0.444 | **0.191** | 2.33 |
+| (640, 768, fp32) | 0.641 | **0.257** | 2.49 |
+| (768, 768, fp32) | 0.772 | **0.296** | 2.61 |
+
+**fp32, A = 1**
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, fp32) | 0.119 | **0.077** | 1.53 |
+| (256, 768, fp32) | 0.156 | **0.081** | 1.93 |
+| (384, 768, fp32) | 0.226 | **0.094** | 2.40 |
+| (512, 768, fp32) | 0.309 | **0.102** | 3.03 |
+| (640, 768, fp32) | 0.397 | **0.110** | 3.61 |
+| (768, 768, fp32) | 0.516 | **0.138** | 3.73 |
+
+### Training (A = 48)
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, bf16) | 0.921 | **0.786** | 1.17 |
+| (256, 768, bf16) | 1.68 | **1.45** | 1.16 |
+| (384, 768, bf16) | 2.52 | **2.14** | 1.18 |
+| (512, 768, bf16) | 3.31 | **2.81** | 1.18 |
+| (640, 768, bf16) | 4.16 | **3.58** | 1.16 |
+| (768, 768, bf16) | 4.99 | **4.22** | 1.18 |
+| (128, 768, fp32) | 2.18 | **1.98** | 1.10 |
+| (256, 768, fp32) | 3.84 | **3.55** | 1.08 |
+| (384, 768, fp32) | 5.63 | **5.05** | 1.11 |
+| (512, 768, fp32) | 7.15 | **6.62** | 1.08 |
+| (640, 768, fp32) | 9.26 | **8.48** | 1.09 |
+| (768, 768, fp32) | 11.04 | **10.28** | 1.07 |
