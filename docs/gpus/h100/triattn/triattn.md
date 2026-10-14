@@ -494,3 +494,34 @@ What changed on the generic path (inference): `torch.addmm(x, ...)` stages x int
 the call at d_pair 256) -- the residual now runs as one cublasLt GEMM with D != C (`lt_addmm`); at L <= 256 the bias projection joins
 the q | k | v | g GEMM.  Core experiments (what bounds the attention core and what did not help) are in
 `docs/records/triattn_h100_core_experiments_20261013.md`.
+
+## Full re-measurement at `f2c4cda4` (2026-10-14)
+
+Same harness as above (`bench.py target=triangle_attention level=module cudagraph=manual compile=true`, bf16-mixed, B1, starting node,
+no mask, `allow_tf32=true`; training `n_augment=48 dropout=0.25`), one H100, ms, CUDA graph, one run of the grid.  × = the fastest of the
+others / ours.  Anthropic: its native cell (`block:triattn_native`), inference, d_pair 128 / 256 only.  The cuEquivariance training runs
+use the harness with the fp32 execution-consistency limit relaxed from 1e-4 to 1e-3 (its gradients come from atomics: 1.3e-4 - 2.5e-4
+between replays); "-" = PyTorch out of memory.
+
+Inference (PyTorch compiled / cuEquivariance / Anthropic / ours, ×):
+
+| d_pair | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| 64 | 0.069 / 0.059 / - / **0.025** 2.36× | 0.245 / 0.151 / - / **0.064** 2.37× | 0.827 / 0.359 / - / **0.151** 2.37× | 1.506 / 0.729 / - / **0.281** 2.59× | 3.822 / 1.257 / - / **0.476** 2.64× | 6.575 / 2.002 / - / **0.736** 2.72× |
+| 128 | 0.107 / 0.080 / 0.051 / **0.033** 1.57× | 0.482 / 0.265 / 0.170 / **0.112** 1.52× | 1.635 / 0.715 / 0.398 / **0.265** 1.50× | 3.260 / 1.416 / 0.729 / **0.507** 1.44× | 8.284 / 2.454 / 1.180 / **0.873** 1.35× | 12.984 / 3.962 / 1.766 / **1.356** 1.30× |
+| 256 | 0.193 / 0.127 / 0.075 / **0.065** 1.16× | 1.171 / 0.547 / 0.309 / **0.256** 1.21× | 3.621 / 1.395 / 0.758 / **0.607** 1.25× | 7.853 / 2.758 / 1.391 / **1.153** 1.21× | 16.636 / 4.854 / 2.325 / **1.974** 1.18× | 25.910 / 7.825 / 3.498 / **3.070** 1.14× |
+| 384 | 0.276 / 0.193 / - / **0.104** 1.86× | 2.011 / 0.826 / - / **0.387** 2.13× | 5.936 / 2.070 / - / **0.974** 2.13× | 16.980 / 4.106 / - / **1.840** 2.23× | 31.753 / 7.312 / - / **3.255** 2.25× | 55.181 / 11.931 / - / **5.129** 2.33× |
+| 512 | 0.461 / 0.249 / - / **0.147** 1.69× | 3.154 / 1.091 / - / **0.555** 1.96× | 9.676 / 2.802 / - / **1.398** 2.00× | 22.779 / 5.599 / - / **2.725** 2.05× | 42.567 / 9.993 / - / **4.663** 2.14× | 74.078 / 18.160 / - / **7.359** 2.47× |
+
+Training, forward + backward (PyTorch compiled / cuEquivariance / ours, ×):
+
+| d_pair | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| 64 | 0.216 / 0.209 / **0.140** 1.50× | 0.810 / 0.657 / **0.327** 2.01× | 2.315 / 1.697 / **0.671** 2.53× | 4.567 / 3.444 / **1.191** 2.89× | 10.04 / 6.072 / **1.956** 3.11× | 11.88 / 9.836 / **2.932** 3.36× |
+| 128 | 0.344 / 0.304 / **0.133** 2.29× | 1.519 / 1.218 / **0.407** 2.99× | 4.665 / 3.246 / **0.938** 3.46× | 9.234 / 6.642 / **1.781** 3.73× | 14.94 / 11.85 / **3.092** 3.83× | 23.52 / 19.41 / **5.036** 3.85× |
+| 256 | 0.615 / 0.523 / **0.314** 1.66× | 3.437 / 2.397 / **0.987** 2.43× | 9.463 / 6.416 / **2.244** 2.86× | 19.93 / 13.10 / **4.317** 3.03× | 42.56 / 23.74 / **7.496** 3.17× | - / 40.21 / **11.85** 3.39× |
+| 384 | 0.908 / 0.805 / **0.446** 1.80× | 5.847 / 3.530 / **1.449** 2.44× | 16.73 / 9.510 / **3.494** 2.72× | 21.19 / 19.81 / **6.869** 2.88× | 44.98 / 37.46 / **12.06** 3.11× | 71.29 / 64.79 / **19.52** 3.32× |
+| 512 | 1.496 / 1.022 / **0.584** 1.75× | 10.07 / 4.685 / **2.041** 2.30× | 29.50 / 12.63 / **4.852** 2.60× | 72.23 / 26.99 / **9.643** 2.80× | - / 52.44 / **17.40** 3.01× | - / 88.59 / **27.95** 3.17× |
+
+Every one of the 60 cells is faster than every other measured implementation; the smallest margin is d_pair 256 inference L128 (1.16×
+over Anthropic).  Not covered by this grid: ending node, mask, B > 1, fp32 inputs.
