@@ -234,6 +234,8 @@ class BenchConfig(BaseModel):
     tri_d_hidden: int | None = None
     #: TriangleAttention on B200: False sets `module._b200_cuda = False` (the Triton path, the baseline the CUDA path replaced).
     tri_b200_cuda: bool = True
+    #: TriangleAttention on H100: False sets `module._h100_cuda = False` (the b200style path of `integrations/triattn_h100.py`).
+    tri_h100_cuda: bool = True
 
     @model_validator(mode="before")
     @classmethod
@@ -1340,6 +1342,7 @@ def bench_module_triangle_attention(
     for layer in model.layers:
         assert isinstance(layer, TriangleAttention)
         layer._b200_cuda = conf.tri_b200_cuda
+        layer._h100_cuda = conf.tri_h100_cuda
     if (
         conf.compile
     ):  # compile the kernels, then capture (real regime); custom_op has no breaks

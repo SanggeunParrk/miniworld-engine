@@ -73,6 +73,19 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 (sm_90a) TriangleAttention is hand-written CUDA around the attention core for every registered width
+  (`integrations/triattn_h100_sm90.py`, `kernels/triangle_attention/cuda/h100_sm90.py`, `h100_sm90_generic.py`, `h100_sources/`):
+  d_pair 128 / 4 heads x 32 on fused front, tail and backward kernels (wgmma / TMA), d_pair 64-512 with heads of 16 or 32 channels
+  (4 x 16, 2 / 4 / 8 / 12 / 16 x 32) on the width-generic path (LayerNorm, gate, residual, LayerNorm-backward kernels and the core's
+  gate epilogue between cuBLAS projections). Inference and training, both nodes, any B, L a multiple of 16 (zero-padded to 128 with the
+  pad keys masked), the module's broadcast dropout, bf16 or fp32 parameters. `module._h100_cuda = False` keeps the previous path;
+  `bench.py +tri_h100_cuda=false` selects it. The kernel launches are `opaque` custom ops (the module stays one
+  compiled graph; the benchmark harness' CUDA-graph capture of the compiled module failed on the traced weight packs before). Page: `docs/gpus/h100/triattn/triattn.md`.
+- H100 TriangleAttention (continued, 2026-10-13): the generic path's inference residual is one cublasLt GEMM with D != C (torch.addmm copied the
+  whole pair tensor into its output: 6 % of the call at d_pair 256), the GEMM algorithm is chosen by timing the heuristic's candidates
+  once per shape, and a one-kernel front (LayerNorm + q | k | v | g + head-major scaled / masked bias, `front_fused3_sm90.cu`, needs
+  `CUTLASS_PATH`) serves d_pair 64 at every L and d_pair 128 (8 x 16) / 256 / 384 / 512 at L128: 5-23 % faster inference.
+  Core experiments and what bounds the attention core: `docs/records/triattn_h100_core_experiments_20261013.md`.
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
   harness default; one run per cell, 131 + 82 harness runs on 6 cards). Training rows did not move; the first take of the inference

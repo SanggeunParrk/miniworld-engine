@@ -153,6 +153,9 @@ class TriangleAttention(nn.Module):
         self._fuse_gate_backward = True
         # B200 (sm_100a) whole-module CUDA path (integrations.triattn_b200); False keeps the Triton path there.
         self._b200_cuda = True
+        # H100 (sm_90a) whole-module CUDA path (integrations.triattn_h100_sm90: raw-PTX wgmma / TMA, every registered width,
+        # inference and training); False falls through to the b200style path below (the benchmark baseline).
+        self._h100_cuda = True
 
     def _kernel_triangle_attention(
         self,
@@ -361,8 +364,11 @@ class TriangleAttention(nn.Module):
         if _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
-        from miniworld_engine.integrations import triattn_h100
+        from miniworld_engine.integrations import triattn_h100, triattn_h100_sm90
 
+        if triattn_h100_sm90.serves(self, pair, mask):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return triattn_h100_sm90.forward(self, pair, mask)
         requested_h100 = triattn_h100.native_requested(self, pair) or getattr(
             self, "_h100_b200style_cuda", False
         )
