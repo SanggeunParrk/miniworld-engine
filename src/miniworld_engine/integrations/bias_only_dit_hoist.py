@@ -24,13 +24,13 @@ is the two-term split [bf16(LN0) | bf16(LN0 - bf16(LN0))] (K = 256; hi + lo = LN
 to fp32 accumulation; on the fp32 path Y = LN0 (fp32, the TF32 GEMM's operand). LN0 is not kept from the forward.
 
 Per training step that replaces, per block, the pair LayerNorm + projection (``pair_bias``), its backward (``pair_bias_bwd``) and
-the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks.
+the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper runs the same two GEMMs on cuBLAS (bf16, or TF32 for fp32) and the same LN0 rows.
 
 bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
-``serves()`` is the gate (B200, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
+``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
 ``modules.bias_only_dit.hoist``. settings.bias_only_dit_hoist=0 (read per call) turns it off;
 settings.bias_only_dit_hoist_wsplit=S (read per call) sets the row chunks of the dW' GEMM (1: one GEMM).
 """
@@ -61,7 +61,7 @@ def serves(implementation, attns, pair) -> bool:
         return False
     if settings.current().engine_backend == "triton":
         return False
-    if not (pair.is_cuda and torch.cuda.get_device_capability(pair.device) == (10, 0)):
+    if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
         return False
     if (
         pair.ndim != 4

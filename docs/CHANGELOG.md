@@ -15,6 +15,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 bias-only DiT: the fused hoisted pair bias (`pair_bias_all`: one LayerNorm + one GEMM for every block, forward and
+  backward) is served on sm_90 as well as sm_100; training step 1.02-1.04x (bf16) / 1.02-1.04x (fp32) at L384-768, A48.
 - H100 token DiT: pair-bias cache under static inputs, one TF32 pass for the fp32 pair bias, bf16 dbias through a deterministic
   chunk-buffer `attn_dqb` (training L768 A48 8.47 -> 7.67 ms), no weight-gradient split on sm90.
 

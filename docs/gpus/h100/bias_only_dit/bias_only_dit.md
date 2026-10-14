@@ -168,3 +168,27 @@ removing those needs fusions with the GEMM epilogues, which were measured and lo
 
 L384 / L768 training and the benchmarks run in the regression job (`bench.py target=bias_only_dit`, accuracy line per cell).
 Token DiT training (`tests/gpu/any/test_token_dit_train_gpu.py`, 60 tests) covers L 128 / 200 / 256 / 512 / 640.
+
+## Hoisted pair bias (`pair_bias_all`, 2026-10-15)
+
+`integrations/bias_only_dit_hoist.py` makes every block's pair bias from ONE LayerNorm (`LN0(pair)`, shared by the blocks) and ONE
+GEMM (`W'_all = [W_b diag(g_b)]`, cuBLAS bf16 / TF32), and its backward from one dLN0 GEMM, one `ln0_bwd_rows` and one dW' GEMM
+(the blocks write their dbias into slices of one buffer). It was B200-only (`serves()` required sm_100); the gate now also admits
+sm_90. The LN0 rows are the same CUDA kernels (built for sm_90 already); the block functions already took `bias=`.
+
+Tests: the B200 hoist file runs unchanged on H100 (`tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`, 77 passed, 20 skipped:
+fp32 blocks at layouts other than 16 x 48 take the module path on Hopper, so the fused-only assertions are skipped there).
+fp64 oracle for every gradient, hoisted-vs-per-pair inference, checkpointing bit-identity, poisoned-allocator bit-identity, no pair
+kernels in a hoisted block, CUDA-graph capture and steady memory all pass.
+
+Training step, nb blocks, A = 48 (eager CUDA events, one GPU; per-block pair bias vs hoisted):
+
+| dtype | L | nb | per-block (ms) | hoisted (ms) | x | saved per block |
+|---|---|---|---|---|---|---|
+| bf16 | 384 | 8 | 17.55 | 17.23 | 1.018 | 0.04 ms |
+| bf16 | 768 | 4 | 17.64 | 16.96 | 1.040 | 0.17 ms |
+| fp32 | 384 | 8 | 41.95 | 41.01 | 1.023 | 0.12 ms |
+| fp32 | 768 | 4 | 42.19 | 40.77 | 1.035 | 0.36 ms |
+
+The saving is per block and independent of A, so it grows with the stack depth (24 blocks: ~4 ms bf16 / ~8.5 ms fp32 at L768 by
+extrapolation, not measured). The token DiT has no fused hoist; its `architecture/blocks/pair_bias_hoist.py` stays the PyTorch fold.
