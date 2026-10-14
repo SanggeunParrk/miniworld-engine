@@ -111,3 +111,17 @@ row), the dbias partials another 3.6 GB.  Summing the two warpgroups in shared m
 (DSMEM sum over two key tiles and two row groups) halves both again: about 0.8 ms of reduce time on top of 1.18 ms, plus the dQ buffer's
 memset and its conversion to bf16, against 2.35 ms today -- at best -4 % of the training step for a cluster kernel with a
 transposed dbias path.  Not built.  Source: `~/miniworld-engine-scratch/triattn_cs/triattn_bwd_sm90.dq_singlepass.cu`.
+
+## Round 5 (2026-10-14): fewer wgrad splits to shrink `tri_grad_reduce`
+
+C128, device time per kernel (us), training; splits = CTA pairs of `tri_wgrad` (default SMs/2 = 66):
+
+| splits | L128 wgrad / reduce / step | L256 | L384 |
+|---|---|---|---|
+| 66 (default) | 16.0 / 9.8 / 166 | 46.1 / 9.3 / 473 | 91.6 / 10.6 / 1050 |
+| 32 | 18.5 / 8.8 / 166 | 62.3 / 7.9 / 485 | 127.6 / 8.2 / 1082 |
+| 16 | 30.6 / 8.5 / 177 | 111.9 / 7.5 / 534 | 244.0 / 7.8 / 1197 |
+| 8 | 55.6 / 8.0 / 201 | 217.8 / 7.1 / 637 | 482.6 / 7.5 / 1435 |
+
+Negative: the reduce stays at about 7-8 us even with 8 splits (the floor is the gate_bwd dWo partials, `ggrid` x 64 KB), while
+wgrad loses far more than the reduce gains. The default stays.
