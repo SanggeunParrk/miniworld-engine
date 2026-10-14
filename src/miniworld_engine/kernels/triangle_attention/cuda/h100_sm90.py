@@ -89,7 +89,7 @@ def pack_front(wq, wk, wv, wg, wb):
     return w4, wb16
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5):
+def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
     out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16."""
     B, L, _, _ = pair.shape
@@ -107,12 +107,15 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5):
         B,
         L,
         D**-0.5,
+        trans,
     )
     shp = (B, L, L, H, D)
     o, _, _, _ = _core().triattn_fwd(
         q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False
     )
-    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L).view(B, L, L, C)
+    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans).view(
+        B, L, L, C
+    )
 
 
 @functools.lru_cache(maxsize=None)
@@ -128,7 +131,9 @@ def _bwd(defs: tuple[str, ...] = ()):
     )
 
 
-def train_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=True):
+def train_forward(
+    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=True, trans=False
+):
     """The module forward with the tensors its backward reads: -> (out [B, L, L, 128], (q, k, v, g, sbias, o, lse)); o / lse are empty
     unless `need`.  Every returned tensor is a fresh allocation (none aliases an argument), so it can be an output of a custom op."""
     B, L, _, _ = pair.shape
@@ -149,17 +154,20 @@ def train_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need=
         B,
         L,
         D**-0.5,
+        trans,
     )
     shp = (B, L, L, H, D)
     o, lse, _, _ = _core().triattn_fwd(
         q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, need
     )
     drop = drop if drop is not None else empty.bfloat16()
-    out = m.tri_tail(g, o.view(-1, C), x, wo16, drop, L)
+    out = m.tri_tail(g, o.view(-1, C), x, wo16, drop, L, trans)
     return out.view(B, L, L, C), (q, k, v, g, sbias, o, lse)
 
 
-def train_backward(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, saved):
+def train_backward(
+    dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, saved, trans=False
+):
     """Gradients (pair, lnw, lnb, wq, wk, wv, wg, wb, wo) of `train_forward`, each in its input's dtype."""
     q, k, v, g, sbias, o, lse = saved
     B, L, _, _ = pair.shape
@@ -175,17 +183,17 @@ def train_backward(dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, saved)
     )  # the query-side kernel adds its partials in
     dy = dy.contiguous().view(-1, C)
     do, dg, delta, dpair, dwo_part = m.tri_gate_bwd(
-        dy, g, o.view(-1, C), wo16, drop, B, L
+        dy, g, o.view(-1, C), wo16, drop, B, L, trans
     )
     shp = (B, L, L, H, D)
     q5, k5, v5, do5 = q.view(shp), k.view(shp), v.view(shp), do.view(shp)
     dk, dv = bw.triattn_bwd_kv(q5, k5, v5, sbias, do5, lse, delta, D**-0.5)
     dq = bw.triattn_bwd_q(q5, k5, v5, sbias, do5, lse, delta, D**-0.5, dbias)
     dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
-    m.tri_head_bwd(dq, dk, dv, dg, dbias, x, w4, wb, lw, eps, dpair, B, L)
+    m.tri_head_bwd(dq, dk, dv, dg, dbias, x, w4, wb, lw, eps, dpair, B, L, trans)
     fp32 = wq.dtype == torch.float32
     dw, dgb, dwo = m.tri_wgrad(
-        dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32
+        dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32, trans
     )
     # (clones: the outputs of a custom op may not alias each other, and these are slices of a few buffers)
     return (

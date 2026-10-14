@@ -11,7 +11,6 @@ import weakref
 
 import torch
 import torch.nn.functional as F
-from einops import rearrange
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
@@ -113,13 +112,18 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
 
 # ---------------------------------------------------------------- custom ops
 # args = [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop]; mask [B, L] bool and drop [B, L, C] bf16 are empty when absent.
-def _infer_fake(kind, args, eps, n_head, head_dim):
+def _infer_fake(kind, args, eps, n_head, head_dim, trans):
     return torch.empty_like(args[0])
 
 
 @opaque(fake=_infer_fake, name="triattn_h100_infer")
 def _infer_op(
-    kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int
+    kind: int,
+    args: list[torch.Tensor],
+    eps: float,
+    n_head: int,
+    head_dim: int,
+    trans: bool,
 ) -> torch.Tensor:
     pair, lnw, lnb, *weights, mask, _ = args
     mask = mask if mask.numel() else None
@@ -127,16 +131,18 @@ def _infer_op(
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import inference
 
         w4, wb16, wo16 = _packed(kind, tuple(weights))
-        return inference(pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps)
+        return inference(
+            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans
+        )
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )
 
     wcat, wo_p = _packed(kind, tuple(weights))
-    return gen.inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps)
+    return gen.inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans)
 
 
-def _fwd_fake(kind, args, eps, n_head, head_dim):
+def _fwd_fake(kind, args, eps, n_head, head_dim, trans):
     pair = args[0]
     B, L, _, C = pair.shape
     M = B * L * L
@@ -166,7 +172,12 @@ def _fwd_fake(kind, args, eps, n_head, head_dim):
 
 @opaque(fake=_fwd_fake, name="triattn_h100_fwd")
 def _fwd_op(
-    kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int
+    kind: int,
+    args: list[torch.Tensor],
+    eps: float,
+    n_head: int,
+    head_dim: int,
+    trans: bool,
 ) -> list[torch.Tensor]:
     pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop = args
     mask = mask if mask.numel() else None
@@ -175,7 +186,7 @@ def _fwd_op(
         from miniworld_engine.kernels.triangle_attention.cuda import h100_sm90 as fused
 
         out, saved = fused.train_forward(
-            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop
+            pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True, trans
         )
         return [out, *saved]
     from miniworld_engine.kernels.triangle_attention.cuda import (
@@ -183,12 +194,12 @@ def _fwd_op(
     )
 
     out, saved = gen.train_forward(
-        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim
+        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim, trans
     )
     return [out, *saved]
 
 
-def _bwd_fake(kind, args, saved, eps, n_head, head_dim):
+def _bwd_fake(kind, args, saved, eps, n_head, head_dim, trans):
     return [
         torch.empty_like(t) for t in args[1:10]
     ]  # pair, lnw, lnb, wq, wk, wv, wg, wb, wo
@@ -202,6 +213,7 @@ def _bwd_op(
     eps: float,
     n_head: int,
     head_dim: int,
+    trans: bool,
 ) -> list[torch.Tensor]:
     dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop = args
     drop = drop if drop.numel() else None
@@ -210,7 +222,20 @@ def _bwd_op(
 
         return list(
             fused.train_backward(
-                dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, tuple(saved)
+                dy,
+                pair,
+                lnw,
+                lnb,
+                wq,
+                wk,
+                wv,
+                wg,
+                wb,
+                wo,
+                eps,
+                drop,
+                tuple(saved),
+                trans,
             )
         )
     from miniworld_engine.kernels.triangle_attention.cuda import (
@@ -234,6 +259,7 @@ def _bwd_op(
             n_head,
             head_dim,
             tuple(saved),
+            trans,
         )
     )
 
@@ -249,6 +275,7 @@ class _TriAttnFn(torch.autograd.Function):
         eps,
         n_head,
         head_dim,
+        trans,
         pair,
         lnw,
         lnb,
@@ -267,15 +294,16 @@ class _TriAttnFn(torch.autograd.Function):
             eps,
             n_head,
             head_dim,
+            trans,
         )
         ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop, *saved)
-        ctx.cfg = (kind, eps, n_head, head_dim)
+        ctx.cfg = (kind, eps, n_head, head_dim, trans)
         return out
 
     @staticmethod
     def backward(ctx, dy):
         pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop, *saved = ctx.saved_tensors
-        kind, eps, n_head, head_dim = ctx.cfg
+        kind, eps, n_head, head_dim, trans = ctx.cfg
         grads = _bwd_op(
             kind,
             [dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop],
@@ -283,8 +311,9 @@ class _TriAttnFn(torch.autograd.Function):
             eps,
             n_head,
             head_dim,
+            trans,
         )
-        return (None, None, None, None, *grads, None, None)
+        return (None, None, None, None, None, *grads, None, None)
 
 
 def _padded(length: int) -> int:
@@ -308,8 +337,8 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
             .reshape(B, L, pair.shape[-1])
             .to(torch.bfloat16)
         )
-    if not module.starting:
-        pair = rearrange(pair, "B I J D -> B J I D")
+    # the ending node reads and writes its pair through the transposed row map (4-D tensor maps / a row index), without copies
+    trans = not module.starting
     if Lp != L:
         pair = F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L))
         keep = torch.zeros(B, Lp, dtype=torch.bool, device=pair.device)
@@ -340,6 +369,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
             ln.eps,
             module.n_head,
             head_dim,
+            trans,
         )
     else:
         out = _TriAttnFn.apply(
@@ -347,6 +377,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
             ln.eps,
             module.n_head,
             head_dim,
+            trans,
             pair,
             ln.weight,
             ln.bias,
@@ -356,6 +387,4 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
         )
     if Lp != L:
         out = out[:, :L, :L]
-    if not module.starting:
-        out = rearrange(out, "B J I D -> B I J D")
     return out.contiguous()

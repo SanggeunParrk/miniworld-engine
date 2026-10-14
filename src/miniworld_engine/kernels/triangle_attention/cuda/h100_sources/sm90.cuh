@@ -229,6 +229,42 @@ __device__ __forceinline__ float4 lds128(uint32_t saddr) {
   return v;
 }
 
+// 4-D tile transfers: the pair tensor of an ending node is read / written through a map (c, j, i, b) with strides (1, L C, C, L L C), so the
+// kernels see the transposed pair [b, i, j] without a copy.  pair_* take the 2-D row of the starting layout and L; tr = 0 keeps 2-D.
+__device__ __forceinline__ void load_4d(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+}
+__device__ __forceinline__ void store_4d(const void* map, uint32_t src, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+}
+__device__ __forceinline__ void reduce_add_4d(const void* map, uint32_t src, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
+               :: "l"(map), "r"(src), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+}
+__device__ __forceinline__ void pair_coord(int row, int L, int& i, int& j, int& b) {
+  b = row / (L * L);
+  const int rem = row - b * L * L;
+  i = rem / L;
+  j = rem - i * L;
+}
+__device__ __forceinline__ void load_pair(const void* map, uint32_t dst, uint32_t bar, int c0, int row, int L, int tr) {
+  if (!tr) { load_2d(map, dst, bar, c0, row); return; }
+  int i, j, b; pair_coord(row, L, i, j, b);
+  load_4d(map, dst, bar, c0, j, i, b);
+}
+__device__ __forceinline__ void store_pair(const void* map, uint32_t src, int c0, int row, int L, int tr) {
+  if (!tr) { store_2d(map, src, c0, row); return; }
+  int i, j, b; pair_coord(row, L, i, j, b);
+  store_4d(map, src, c0, j, i, b);
+}
+__device__ __forceinline__ void reduce_add_pair(const void* map, uint32_t src, int c0, int row, int L, int tr) {
+  if (!tr) { reduce_add_2d(map, src, c0, row); return; }
+  int i, j, b; pair_coord(row, L, i, j, b);
+  reduce_add_4d(map, src, c0, j, i, b);
+}
+
 // ---------------------------------------------------------------- math
 __device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
 // 2^x on the FMA pipe (the MUFU is the softmax's bound): n = round(x) by the 1.5 * 2^23 add, 2^f (|f| <= 1/2) by a degree-3 minimax

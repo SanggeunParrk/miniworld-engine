@@ -32,8 +32,8 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace fr
 
 __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
-    int L, int ntiles, float eps, float inv_scale,
-    const __grid_constant__ CUtensorMap xmap,             // x [R][128] bf16, box (64, 128), 128B swizzle
+    int L, int ntiles, float eps, float inv_scale, int tr,
+    const __grid_constant__ CUtensorMap xmap,             // x [R][128] bf16, box (64, 128), 128B swizzle (tr: the 4-D transposed pair map)
     const __grid_constant__ CUtensorMap wmap,             // W4 [512][128] bf16, box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap wbmap,            // Wb16 [16][128] bf16, box (64, 16), 128B swizzle
     const float* __restrict__ LNW, const float* __restrict__ LNB,
@@ -74,7 +74,7 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
         wait(xe(st), ph ^ 1);
         expect_tx(xf(st), XT * 2);
-        for (int kh = 0; kh < 2; ++kh) load_2d(&xmap, sX + (st * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM);
+        for (int kh = 0; kh < 2; ++kh) load_pair(&xmap, sX + (st * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, tr);
         if (++st == NX) { st = 0; ph ^= 1; }
       }
     }
@@ -209,7 +209,7 @@ __device__ __forceinline__ float sigmoid_t(float x) {   // 0.5 + 0.5 tanh(x / 2)
 }
 
 __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
-    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP,
+    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP, int tr,
     const __grid_constant__ CUtensorMap gmap,             // g / o / x [R][128] bf16, box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap omap,
     const __grid_constant__ CUtensorMap xmap,
@@ -244,7 +244,8 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
         expect_tx(xf(st), 3 * XT * 2);
         const CUtensorMap* maps[3] = {&gmap, &omap, &xmap};
         for (int a = 0; a < 3; ++a)
-          for (int kh = 0; kh < 2; ++kh) load_2d(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM);
+          for (int kh = 0; kh < 2; ++kh)
+            load_pair(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, a == 2 ? tr : 0);
         if (++st == NX) { st = 0; ph ^= 1; }
       }
     }
@@ -317,7 +318,7 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
     fence_proxy_async();
     named_sync(3 + w, 128);
     if (T == 0) {
-      for (int kh = 0; kh < 2; ++kh) store_2d(&ymap, gs + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w);
+      for (int kh = 0; kh < 2; ++kh) store_pair(&ymap, gs + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w, L, tr);
       bulk_commit();
       bulk_wait_read<0>();
     }
@@ -344,7 +345,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace gb
 
 __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm90(
-    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP,
+    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP, int tr,
     const __grid_constant__ CUtensorMap dymap,            // dy / g / o [R][128] bf16, box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap gmap,
     const __grid_constant__ CUtensorMap omap,
@@ -383,7 +384,8 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm90(
         expect_tx(xf(st), 3 * XT * 2);
         const CUtensorMap* maps[3] = {&dymap, &gmap, &omap};
         for (int a = 0; a < 3; ++a)
-          for (int kh = 0; kh < 2; ++kh) load_2d(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM);
+          for (int kh = 0; kh < 2; ++kh)
+            load_pair(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, a == 0 ? tr : 0);
         if (++st == NX) { st = 0; ph ^= 1; }
       }
     }
@@ -414,11 +416,11 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm90(
     wait(xf(st), ph);
     const uint32_t ys = sX + st * 3 * XT * 2, gs = ys + XT * 2, os = gs + XT * 2;
     auto chunk = [&](uint32_t base, int c16) { return base + (c16 >> 3) * BM * 128 + lrow * 128 + (((c16 & 7) ^ (lrow & 7)) << 4); };
-    auto store_rows = [&](const CUtensorMap* map, uint32_t base) {   // this warpgroup's 64 rows of a staged tile
-      for (int kh = 0; kh < 2; ++kh) store_2d(map, base + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w);
+    auto store_rows = [&](const CUtensorMap* map, uint32_t base, int pr) {   // this warpgroup's 64 rows of a staged tile
+      for (int kh = 0; kh < 2; ++kh) store_pair(map, base + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w, L, pr);
       bulk_commit();
     };
-    if (T == 0) store_rows(&seedmap, ys);                 // the residual's share of dpair, straight from the stage
+    if (T == 0) store_rows(&seedmap, ys, tr);                 // the residual's share of dpair, straight from the stage
     const long row = (long)t * BM + 64 * w + 16 * wi + g8;
     if (DROP != nullptr && bi / L != dfb) load_drop(bi / L, row - (long)bi * L);
     // dyd = dy o drop in the A-fragment layout (word e of block kb: row g + 8 (e & 1), channels 16 kb + 8 (e >> 1) + 2 t4, +1)
@@ -484,7 +486,7 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm90(
     }
     fence_proxy_async();
     named_sync(5, 256);                                   // both warpgroups' dyd / u are staged: the dWo GEMM reads every row
-    if (T == 0) store_rows(&domap, gs);
+    if (T == 0) store_rows(&domap, gs, 0);
     // dWo[out 64 w .., in] += dyd^T u  (A = dyd MN-major over the tile's rows, B = u MN-major)
     wg_fence();
 #pragma unroll
@@ -498,7 +500,7 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm90(
     for (int kb = 0; kb < 8; ++kb) stsm_x4(chunk(ys, 2 * kb + lcol8), dga[kb][0], dga[kb][1], dga[kb][2], dga[kb][3]);
     fence_proxy_async();
     named_sync(3 + w, 128);
-    if (T == 0) { store_rows(&dgmap, ys); bulk_wait_read<0>(); }
+    if (T == 0) { store_rows(&dgmap, ys, 0); bulk_wait_read<0>(); }
     named_sync(3 + w, 128);
     if (lane == 0) arrive(xe(st));
     if (++st == NX) { st = 0; ph ^= 1; }
@@ -530,7 +532,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace hb
 
 __global__ void __launch_bounds__(hb::THREADS, 1) tri_head_bwd_sm90(
-    int L, int ntiles, float eps,
+    int L, int ntiles, float eps, int tr,
     const __grid_constant__ CUtensorMap d0map,            // dq / dk / dv / dg [R][128] bf16, box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap d1map,
     const __grid_constant__ CUtensorMap d2map,
@@ -574,7 +576,7 @@ __global__ void __launch_bounds__(hb::THREADS, 1) tri_head_bwd_sm90(
       for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
         wait(xe(xs), xph ^ 1);
         expect_tx(xf(xs), XT * 2);
-        for (int kh = 0; kh < 2; ++kh) load_2d(&xmap, sX + (xs * XT + kh * BM * 64) * 2, xf(xs), kh * 64, t * BM);
+        for (int kh = 0; kh < 2; ++kh) load_pair(&xmap, sX + (xs * XT + kh * BM * 64) * 2, xf(xs), kh * 64, t * BM, L, tr);
         if (++xs == NX) { xs = 0; xph ^= 1; }
         for (int a = 0; a < 4; ++a)
           for (int kh = 0; kh < 2; ++kh) {
@@ -688,7 +690,7 @@ __global__ void __launch_bounds__(hb::THREADS, 1) tri_head_bwd_sm90(
     fence_proxy_async();
     named_sync(3 + w, 128);
     if (T == 0) {
-      for (int kh = 0; kh < 2; ++kh) reduce_add_2d(&pmap, xst + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w);
+      for (int kh = 0; kh < 2; ++kh) reduce_add_pair(&pmap, xst + kh * BM * 128 + 64 * w * 128, kh * 64, t * BM + 64 * w, L, tr);
       bulk_commit();
       bulk_wait_read<0>();
     }
@@ -720,7 +722,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace wg
 
 __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm90(
-    int L, int ntiles, float eps,
+    int L, int ntiles, float eps, int tr,
     const __grid_constant__ CUtensorMap d0map, const __grid_constant__ CUtensorMap d1map,
     const __grid_constant__ CUtensorMap d2map, const __grid_constant__ CUtensorMap d3map,
     const __grid_constant__ CUtensorMap xmap,             // [R][128] bf16, box (64, 128), 128B swizzle
@@ -758,7 +760,8 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm90(
         wait(xe(st), ph ^ 1);
         expect_tx(xf(st), 3 * XT * 2);
         for (int a = 0; a < 3; ++a)
-          for (int kh = 0; kh < 2; ++kh) load_2d(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM);
+          for (int kh = 0; kh < 2; ++kh)
+            load_pair(maps[a], sX + ((st * 3 + a) * XT + kh * BM * 64) * 2, xf(st), kh * 64, t * BM, L, a == 0 ? tr : 0);
         if (++st == NX) { st = 0; ph ^= 1; }
       }
     }
@@ -972,7 +975,7 @@ auto bf16ptr(const torch::Tensor& t) { return reinterpret_cast<__nv_bfloat16*>(t
 // in rows 0..3, zeros below); mask [B, L] bool or empty -> (q, k, v, g [R, 128] bf16, sbias [B, 4, L, L] bf16 = bias / scale, masked
 // keys -inf)
 std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
-                                     torch::Tensor mask, int64_t B, int64_t L, double scale) {
+                                     torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
   const long R = x.numel() / C;
   TORCH_CHECK(R == B * L * L && L % fr::BM == 0, "rows = B * L * L, L % 128 == 0");
@@ -987,20 +990,24 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap xm = m2(x, R, 128, "x"), wm = m2(w4, 4 * C, 256, "w4"), wbm = m2(wb16, 16, 16, "wb16");
+  auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
+    if (!trans) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
+    return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
+                       {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
+  CUtensorMap xm = pm(x, R, 128, "x"), wm = m2(w4, 4 * C, 256, "w4"), wbm = m2(wb16, 16, 16, "wb16");
   CUtensorMap qm = m2(q, R, 64, "q"), km = m2(k, R, 64, "k"), vm = m2(v, R, 64, "v"), gm = m2(g, R, 64, "g");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM)); attr = true; }
   const int ntiles = (int)(R / fr::BM);
   tri_front_sm90<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, (float)(1.0 / scale), xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
       qm, km, vm, gm, bf16ptr(bias));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
 
 // out = x + drop o (sigmoid(g) o o) . Wo^T; g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty
-torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L) {
+torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, bool trans) {
   for (const auto* t : {&g, &o, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == g.numel(), "g / o / x: [R, 128] bf16");
   const long R = g.numel() / C;
   TORCH_CHECK(R % tl::BM == 0 && L % tl::BM == 0, "rows % 128, L % 128");
@@ -1010,13 +1017,17 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
   auto out = torch::empty({R, C}, g.options());
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap gm = m2(g, R, 128, "g"), om = m2(o, R, 128, "o"), xm = m2(x, R, 128, "x"), wm = m2(wo, C, 128, "wo"), ym = m2(out, R, 64, "out");
+  auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
+    if (!trans) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
+    return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
+                       {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
+  CUtensorMap gm = m2(g, R, 128, "g"), om = m2(o, R, 128, "o"), xm = pm(x, R, 128, "x"), wm = m2(wo, C, 128, "wo"), ym = pm(out, R, 64, "out");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_tail_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, tl::SMEM)); attr = true; }
   const int ntiles = (int)(R / tl::BM);
   const int jb = (int)(L / tl::BM), grid = std::max(jb, std::min(ntiles, num_sms(g.device().index())) / jb * jb);   // a multiple of the j blocks
   tri_tail_sm90<<<grid, tl::THREADS, tl::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, gm, om, xm, wm, ym);
+      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, (int)trans, gm, om, xm, wm, ym);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1024,7 +1035,7 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
 // dy, g, o [R, 128] bf16 (rows (b, i, j)), wo [128, 128] bf16, drop [B, L, 128] bf16 or empty
 // -> (do, dg [R, 128] bf16, delta fp32 [B, L, 4, L], seed [R, 128] bf16 = dy, dWo partials fp32 [grid, 128 * 128] for tri_wgrad)
 std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch::Tensor o, torch::Tensor wo, torch::Tensor drop,
-                                        int64_t B, int64_t L) {
+                                        int64_t B, int64_t L, bool trans) {
   for (const auto* t : {&dy, &g, &o}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == B * L * L * C, "dy / g / o: [R, 128] bf16");
   const long R = B * L * L;
   TORCH_CHECK(L % gb::BM == 0, "L % 128");
@@ -1036,15 +1047,19 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
   auto delta = torch::empty({B, L, 4, L}, opt.dtype(torch::kFloat32));
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap ym = m2(dy, R, 128, "dy"), gm = m2(g, R, 128, "g"), om = m2(o, R, 128, "o"), wm = m2(wo, C, 128, "wo");
-  CUtensorMap dom = m2(dO, R, 64, "do"), dgm = m2(dG, R, 64, "dg"), sm_ = m2(seed, R, 64, "seed");
+  auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
+    if (!trans) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
+    return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
+                       {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
+  CUtensorMap ym = pm(dy, R, 128, "dy"), gm = m2(g, R, 128, "g"), om = m2(o, R, 128, "o"), wm = m2(wo, C, 128, "wo");
+  CUtensorMap dom = m2(dO, R, 64, "do"), dgm = m2(dG, R, 64, "dg"), sm_ = pm(seed, R, 64, "seed");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_gate_bwd_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, gb::SMEM)); attr = true; }
   const int ntiles = (int)(R / gb::BM);
   const int jb = (int)(L / gb::BM), grid = std::max(jb, std::min(ntiles, num_sms(dy.device().index())) / jb * jb);
   auto dwo = torch::empty({grid, C * C}, opt.dtype(torch::kFloat32));
   tri_gate_bwd_sm90<<<grid, gb::THREADS, gb::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, ym, gm, om, wm, dom, dgm, sm_,
+      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, (int)trans, ym, gm, om, wm, dom, dgm, sm_,
       delta.data_ptr<float>(), dwo.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dG, delta, seed, dwo};
@@ -1053,7 +1068,7 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
 // dq, dk, dv, dg [R, 128] bf16; db fp32 [B, 4, L, L]; x [R, 128] (the LN input); w4 [512, 128] bf16; wb [4, 128], lnw [128] fp32;
 // dpair [R, 128] bf16 (gate_bwd's seed; dx is added in place)
 void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::Tensor dg, torch::Tensor db, torch::Tensor x,
-                  torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, double eps, torch::Tensor dpair, int64_t B, int64_t L) {
+                  torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, double eps, torch::Tensor dpair, int64_t B, int64_t L, bool trans) {
   const long R = B * L * L;
   for (const auto* t : {&dq, &dk, &dv, &dg, &x, &dpair}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
   TORCH_CHECK(db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.numel() == B * NH * L * L, "db fp32 [B, 4, L, L]");
@@ -1061,13 +1076,18 @@ void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::T
   auto wbf = wb.to(torch::kFloat32).contiguous(), lw = lnw.to(torch::kFloat32).contiguous();
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap m0 = m2(dq, R, 128, "dq"), m1 = m2(dk, R, 128, "dk"), m2_ = m2(dv, R, 128, "dv"), m3 = m2(dg, R, 128, "dg"), xm = m2(x, R, 128, "x");
-  CUtensorMap wm = m2(w4, 4 * C, 256, "w4"), pm = m2(dpair, R, 64, "dpair");
+  CUtensorMap m0 = m2(dq, R, 128, "dq"), m1 = m2(dk, R, 128, "dk"), m2_ = m2(dv, R, 128, "dv"), m3 = m2(dg, R, 128, "dg");
+  auto pmk = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
+    if (!trans) return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what);
+    return make_map<4>(t.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)(rows / ((uint64_t)L * L))},
+                       {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C}, {64, br, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
+  CUtensorMap xm = pmk(x, R, 128, "x");
+  CUtensorMap wm = m2(w4, 4 * C, 256, "w4"), pm = pmk(dpair, R, 64, "dpair");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_head_bwd_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, hb::SMEM)); attr = true; }
   const int ntiles = (int)(R / hb::BM);
   tri_head_bwd_sm90<<<std::min(ntiles, num_sms(x.device().index())), hb::THREADS, hb::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, wm, pm, db.data_ptr<float>(), wbf.data_ptr<float>(), lw.data_ptr<float>());
+      (int)L, ntiles, (float)eps, (int)trans, m0, m1, m2_, m3, xm, wm, pm, db.data_ptr<float>(), wbf.data_ptr<float>(), lw.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1075,7 +1095,7 @@ void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::T
 // fp32_out (master parameters) else bf16; dwo_part: gate_bwd's dWo partials [grid, 128 * 128]
 std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::Tensor dg, torch::Tensor db, torch::Tensor x,
                                      double eps, int64_t B, int64_t L, torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, torch::Tensor lnb,
-                                     torch::Tensor dwo_part, bool fp32_out) {
+                                     torch::Tensor dwo_part, bool fp32_out, bool trans) {
   const long R = B * L * L;
   for (const auto* t : {&dq, &dk, &dv, &dg, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
   TORCH_CHECK(db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.numel() == B * NH * L * L, "db fp32 [B, 4, L, L]");
@@ -1084,14 +1104,17 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
   auto mt = torch::empty({4L * C * C}, fopt), vec = torch::empty({8L * C + NH}, fopt), dwo32 = torch::empty({C * C}, fopt);
   auto m2 = [&](const torch::Tensor& t, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap m0 = m2(dq, "dq"), m1 = m2(dk, "dk"), m2_ = m2(dv, "dv"), m3 = m2(dg, "dg"), xm = m2(x, "x");
+  CUtensorMap m0 = m2(dq, "dq"), m1 = m2(dk, "dk"), m2_ = m2(dv, "dv"), m3 = m2(dg, "dg");
+  CUtensorMap xm = trans ? make_map<4>(x.data_ptr(), {(uint64_t)C, (uint64_t)L, (uint64_t)L, (uint64_t)B}, {(uint64_t)L * C, (uint64_t)C, (uint64_t)L * L * C},
+                                       {64, 128, 1, 1}, CU_TENSOR_MAP_SWIZZLE_128B, "x")
+                         : m2(x, "x");
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgrad_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, wg::SMEM)); attr = true; }
   const int ntiles = (int)(R / wg::BM);
   const int splits = std::max(1, std::min(ntiles, num_sms(x.device().index()) / 2));
   auto stream = at::cuda::getCurrentCUDAStream();
   auto slots = torch::empty({2L * splits * wg::SLOT}, fopt);
-  tri_wgrad_sm90<<<2 * splits, wg::THREADS, wg::SMEM, stream>>>((int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, db.data_ptr<float>(),
+  tri_wgrad_sm90<<<2 * splits, wg::THREADS, wg::SMEM, stream>>>((int)L, ntiles, (float)eps, (int)trans, m0, m1, m2_, m3, xm, db.data_ptr<float>(),
                                                                   slots.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const long nred = 4L * C * C + 8L * C + NH + C * C;
@@ -1117,8 +1140,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm90 TriangleAttention gate backward: (do, dg, delta, seed); dWo added into a fp32 accumulator");
   m.def("tri_tail", &tri_tail, "sm90 TriangleAttention tail: x + drop o (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"),
-        py::arg("wo"), py::arg("drop"), py::arg("L"));
+        py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false);
   m.def("tri_front", &tri_front, "sm90 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias / scale",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"),
-        py::arg("L"), py::arg("scale"));
+        py::arg("L"), py::arg("scale"), py::arg("trans") = false);
 }

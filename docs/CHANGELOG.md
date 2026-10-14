@@ -85,6 +85,9 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   whole pair tensor into its output: 6 % of the call at d_pair 256), the GEMM algorithm is chosen by timing the heuristic's candidates
   once per shape, and a one-kernel front (LayerNorm + q | k | v | g + head-major scaled / masked bias, `front_fused3_sm90.cu`, needs
   `CUTLASS_PATH`) serves d_pair 64 at every L and d_pair 128 (8 x 16) / 256 / 384 / 512 at L128: 5-23 % faster inference.
+  The ending node no longer transposes its pair tensor in and out (two copies, 29-39 % of the call at d_pair 128): the fused front, tail, gate
+  backward, head backward and weight-gradient kernels read and write it through 4-D TMA tensor maps (c, j, i, b), the width-generic row
+  kernels through a row index map; ending-node inference at d_pair 128 L768: 1722 -> 1345 us (starting node 1336 us).
   Core experiments and what bounds the attention core: `docs/records/triattn_h100_core_experiments_20261013.md`.
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new

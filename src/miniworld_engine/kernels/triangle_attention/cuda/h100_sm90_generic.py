@@ -276,7 +276,9 @@ def _views(qkvg, B, L, HD, H):
     return [base.as_strided(shp, s, i * HD) for i in range(4)]
 
 
-def _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need):
+def _forward(
+    pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need, trans=False
+):
     B, L, _, C = pair.shape
     H = n_head
     HD = H * D
@@ -287,6 +289,7 @@ def _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need
     empty = torch.empty(0, device=pair.device)
     fused = (
         (not need)
+        and not trans
         and (C, HD) in _FRONT_L
         and L <= _FRONT_L[(C, HD)]
         and _front() is not None
@@ -310,7 +313,7 @@ def _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need
         q, k, v, gt = (proj[i].view(B, L, L, H, D) for i in range(4))
     else:
         y, mean, rstd = g.ln_fwd(
-            x, lnw.float().contiguous(), lnb.float().contiguous(), eps
+            x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, trans
         )
     if fused:
         pass
@@ -330,20 +333,28 @@ def _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need
         q, k, v, gt = _views(qkvg, B, L, HD, H)
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
-    if drop is None:
+    if drop is None and not trans:
         out = _lt().lt_mm(
             u.view(M, HD), wo_p, x
         )  # x + u Wo^T: the residual in the GEMM epilogue (D != C, no staging copy)
+    elif (
+        drop is None
+    ):  # ending node: the residual kernel reads and writes the pair through the transposed row map
+        out = g.residual(
+            x, _lt().lt_mm(u.view(M, HD), wo_p, None), empty.bfloat16(), L, True
+        )
     else:
         t = torch.matmul(u.view(M, HD), wo_p.t())
-        out = g.residual(x, t, drop, L)
+        out = g.residual(x, t, drop, L, trans)
     return out.view(B, L, L, C), (y, mean, rstd, qkvg, sbias, o, lse, u)
 
 
-def inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask=None, eps=1e-5):
+def inference(
+    pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask=None, eps=1e-5, trans=False
+):
     """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128."""
     return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False
+        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans
     )[0]
 
 
@@ -353,16 +364,47 @@ def _mm_f32(a, b):
 
 
 def train_forward(
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim
+    pair,
+    lnw,
+    lnb,
+    wq,
+    wk,
+    wv,
+    wg,
+    wb,
+    wo,
+    mask,
+    eps,
+    drop,
+    n_head,
+    head_dim,
+    trans=False,
 ):
     """-> (out [B, L, L, C], (y, mean, rstd, qkvg, sbias, o, lse, u)): the tensors the backward reads (o, u as [B, N, S, H, 32]).  Every
     returned tensor is a fresh allocation (none aliases an argument), so it can be an output of a custom op."""
     wcat, wo_p = pack_weights(wq, wk, wv, wg, wb, wo)
-    return _forward(pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, True)
+    return _forward(
+        pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, True, trans
+    )
 
 
 def train_backward(
-    dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, eps, drop, n_head, head_dim, saved
+    dy,
+    pair,
+    lnw,
+    lnb,
+    wq,
+    wk,
+    wv,
+    wg,
+    wb,
+    wo,
+    eps,
+    drop,
+    n_head,
+    head_dim,
+    saved,
+    trans=False,
 ):
     """Gradients (pair, lnw, lnb, wq, wk, wv, wg, wb, wo) of `train_forward`, each in its input's dtype."""
     y, mean, rstd, qkvg, sbias, o, lse, u = saved
@@ -377,7 +419,7 @@ def train_backward(
     g = _glue()
     e = _core_mod._bwd()
     dy = dy.contiguous().view(M, C)
-    ddrop = g.gate_bwd_in(dy, drop if drop is not None else dy.new_empty(0), L)
+    ddrop = g.gate_bwd_in(dy, drop if drop is not None else dy.new_empty(0), L, trans)
     du = torch.matmul(ddrop, wo_p)
     dwo = _mm_f32(ddrop.t(), u)
     dall = torch.empty(M, wcat.shape[0], device=x.device, dtype=torch.bfloat16)
@@ -398,7 +440,7 @@ def train_backward(
     e.triattn_bwd_q(q, k, v, sbias, do5, lse, delta, scale, dbias, slot(0))
     g.assemble(dbias, dall, H, L, HD)
     dyln = torch.matmul(dall, wcat)  # bf16 (the reference module's own precision here)
-    dx, part = g.ln_bwd(dyln, x, dy, lw, mean, rstd)
+    dx, part = g.ln_bwd(dyln, x, dy, lw, mean, rstd, L, trans)
     dg_db = part.sum(0)
     dw = _mm_f32(dall.t(), y)  # [4 HD + Hp, C]
 

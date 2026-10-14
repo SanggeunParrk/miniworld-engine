@@ -45,6 +45,12 @@ __device__ __forceinline__ float warp_sum(float v) {
   return v;
 }
 __device__ __forceinline__ float sigmoidf_(float x) { return 1.f / (1.f + __expf(-x)); }
+// ending node: the logical row (b, i, j) of the starting layout is the physical row (b, j, i) of the pair tensor
+__device__ __forceinline__ long phys_row(long row, int L, int tr) {
+  if (!tr) return row;
+  const long ll = (long)L * L, b = row / ll, rem = row - b * ll, i = rem / L, j = rem - i * L;
+  return b * ll + j * L + i;
+}
 auto bp(const torch::Tensor& t) { return reinterpret_cast<bf16*>(t.data_ptr<at::BFloat16>()); }
 auto cbp(const torch::Tensor& t) { return reinterpret_cast<const bf16*>(t.data_ptr<at::BFloat16>()); }
 }  // namespace
@@ -61,7 +67,7 @@ __device__ __forceinline__ float grp_sum(float v) {
 template <int LPR>
 __global__ void __launch_bounds__(256) ln_fwd_k(const bf16* __restrict__ x, const float* __restrict__ w, const float* __restrict__ bs,
                                                 bf16* __restrict__ y, float* __restrict__ mean_o, float* __restrict__ rstd_o, long M, int C,
-                                                float eps) {
+                                                float eps, int L, int tr) {
   constexpr int RPW = 32 / LPR, NA = LPR == 32 ? MAXV : 1;
   const int lane = threadIdx.x & 31, sub = lane % LPR, grp = lane / LPR;
   const int nv = C >> 3;
@@ -74,7 +80,7 @@ __global__ void __launch_bounds__(256) ln_fwd_k(const bf16* __restrict__ x, cons
     for (int a = 0; a < NA; ++a) {
       const int idx = sub + LPR * a;
       if (idx < nv && ok) {
-        unpack8(*reinterpret_cast<const uint4*>(x + row * C + idx * 8), v[a]);
+        unpack8(*reinterpret_cast<const uint4*>(x + phys_row(row, L, tr) * C + idx * 8), v[a]);
 #pragma unroll
         for (int e = 0; e < 8; ++e) s += v[a][e];
       }
@@ -140,14 +146,15 @@ __global__ void __launch_bounds__(256) gate_u_k(const bf16* __restrict__ qkvb, c
 
 // out = x + drop o t; drop [B, L, C] (index (b, j)) or nullptr
 __global__ void __launch_bounds__(256) residual_k(const bf16* __restrict__ x, const bf16* __restrict__ t, const bf16* __restrict__ drop,
-                                                  bf16* __restrict__ out, long M, int C, int L) {
+                                                  bf16* __restrict__ out, long M, int C, int L, int tr) {
   const int nv = C >> 3;
   const long total = M * nv;
   for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < total; i += (long)gridDim.x * 256) {
     const long row = i / nv;
+    const long prow = phys_row(row, L, tr);
     const int c = (int)(i - row * nv) * 8;
     float xv[8], tv[8], r[8];
-    unpack8(*reinterpret_cast<const uint4*>(x + row * C + c), xv);
+    unpack8(*reinterpret_cast<const uint4*>(x + prow * C + c), xv);
     unpack8(*reinterpret_cast<const uint4*>(t + row * C + c), tv);
     if (drop != nullptr) {
       const long bj = (row / ((long)L * L)) * L + row % L;
@@ -158,20 +165,20 @@ __global__ void __launch_bounds__(256) residual_k(const bf16* __restrict__ x, co
     }
 #pragma unroll
     for (int e = 0; e < 8; ++e) r[e] = xv[e] + tv[e];
-    *reinterpret_cast<uint4*>(out + row * C + c) = pack8(r);
+    *reinterpret_cast<uint4*>(out + prow * C + c) = pack8(r);
   }
 }
 
 // ddrop = dy o drop
 __global__ void __launch_bounds__(256) gate_bwd_in_k(const bf16* __restrict__ dy, const bf16* __restrict__ drop, bf16* __restrict__ dd,
-                                                     long M, int C, int L) {
+                                                     long M, int C, int L, int tr) {
   const int nv = C >> 3;
   const long total = M * nv;
   for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < total; i += (long)gridDim.x * 256) {
     const long row = i / nv;
     const int c = (int)(i - row * nv) * 8;
     float v[8];
-    unpack8(*reinterpret_cast<const uint4*>(dy + row * C + c), v);
+    unpack8(*reinterpret_cast<const uint4*>(dy + phys_row(row, L, tr) * C + c), v);
     if (drop != nullptr) {
       const long bj = (row / ((long)L * L)) * L + row % L;
       float dv[8];
@@ -247,7 +254,7 @@ __device__ __forceinline__ void load8(const bf16* p, float (&f)[8]) { unpack8(*r
 template <int LPR, typename TD>
 __global__ void __launch_bounds__(256) ln_bwd_k(const TD* __restrict__ dyln, const bf16* __restrict__ x, const bf16* __restrict__ dy,
                                                 const float* __restrict__ w, const float* __restrict__ mean_i, const float* __restrict__ rstd_i,
-                                                bf16* __restrict__ dx, float* __restrict__ part, long M, int C) {
+                                                bf16* __restrict__ dx, float* __restrict__ part, long M, int C, int L, int tr) {
   constexpr int RPW = 32 / LPR, NA = LPR == 32 ? MAXV : 1;
   __shared__ float red[8192];                              // [8 warps x RPW][2][C]
   const int lane = threadIdx.x & 31, wi = threadIdx.x >> 5, sub = lane % LPR, grp = lane / LPR;
@@ -268,7 +275,7 @@ __global__ void __launch_bounds__(256) ln_bwd_k(const TD* __restrict__ dyln, con
       const int idx = sub + LPR * a;
       if (idx < nv && ok) {
         float xv[8];
-        unpack8(*reinterpret_cast<const uint4*>(x + row * C + idx * 8), xv);
+        unpack8(*reinterpret_cast<const uint4*>(x + phys_row(row, L, tr) * C + idx * 8), xv);
         float dd[8];
         load8(dyln + row * C + idx * 8, dd);
         const float4 w0 = *reinterpret_cast<const float4*>(w + idx * 8), w1 = *reinterpret_cast<const float4*>(w + idx * 8 + 4);
@@ -290,10 +297,10 @@ __global__ void __launch_bounds__(256) ln_bwd_k(const TD* __restrict__ dyln, con
       const int idx = sub + LPR * a;
       if (idx < nv && ok) {
         float r[8];
-        unpack8(*reinterpret_cast<const uint4*>(dy + row * C + idx * 8), r);
+        unpack8(*reinterpret_cast<const uint4*>(dy + phys_row(row, L, tr) * C + idx * 8), r);
 #pragma unroll
         for (int e = 0; e < 8; ++e) r[e] += rstd * (g[a][e] - m1 - xh[a][e] * m2);
-        *reinterpret_cast<uint4*>(dx + row * C + idx * 8) = pack8(r);
+        *reinterpret_cast<uint4*>(dx + phys_row(row, L, tr) * C + idx * 8) = pack8(r);
       }
     }
   }
@@ -323,7 +330,7 @@ cudaStream_t stream() { return at::cuda::getCurrentCUDAStream(); }
 }  // namespace
 
 // x [M, C] bf16 -> (y bf16 [M, C], mean fp32 [M], rstd fp32 [M])
-std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps) {
+std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, int64_t L, bool trans) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x [M, C] bf16 contiguous");
   const long M = x.size(0);
   const int C = (int)x.size(1);
@@ -332,7 +339,7 @@ std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Ten
   auto mean = torch::empty({M}, x.options().dtype(torch::kFloat32)), rstd = torch::empty({M}, x.options().dtype(torch::kFloat32));
   const int lpr = C == 64 ? 8 : C == 128 ? 16 : 32;
   const int grid = grid_for(M, 8 * (32 / lpr));
-  auto args = std::make_tuple(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), bp(y), mean.data_ptr<float>(), rstd.data_ptr<float>(), M, C, (float)eps);
+  auto args = std::make_tuple(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), bp(y), mean.data_ptr<float>(), rstd.data_ptr<float>(), M, C, (float)eps, (int)L, (int)trans);
   if (lpr == 8) std::apply([&](auto... a) { ln_fwd_k<8><<<grid, 256, 0, stream()>>>(a...); }, args);
   else if (lpr == 16) std::apply([&](auto... a) { ln_fwd_k<16><<<grid, 256, 0, stream()>>>(a...); }, args);
   else std::apply([&](auto... a) { ln_fwd_k<32><<<grid, 256, 0, stream()>>>(a...); }, args);
@@ -362,20 +369,20 @@ torch::Tensor g_gate_u(torch::Tensor qkvb, torch::Tensor o, int64_t g_col) {
   return u;
 }
 
-torch::Tensor g_residual(torch::Tensor x, torch::Tensor t, torch::Tensor drop, int64_t L) {
+torch::Tensor g_residual(torch::Tensor x, torch::Tensor t, torch::Tensor drop, int64_t L, bool trans) {
   const long M = x.size(0);
   const int C = (int)x.size(1);
   auto out = torch::empty_like(x);
-  residual_k<<<grid_for(M * (C / 8), 256), 256, 0, stream()>>>(cbp(x), cbp(t), drop.numel() > 0 ? cbp(drop) : nullptr, bp(out), M, C, (int)L);
+  residual_k<<<grid_for(M * (C / 8), 256), 256, 0, stream()>>>(cbp(x), cbp(t), drop.numel() > 0 ? cbp(drop) : nullptr, bp(out), M, C, (int)L, (int)trans);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
 
-torch::Tensor g_gate_bwd_in(torch::Tensor dy, torch::Tensor drop, int64_t L) {
+torch::Tensor g_gate_bwd_in(torch::Tensor dy, torch::Tensor drop, int64_t L, bool trans) {
   const long M = dy.size(0);
   const int C = (int)dy.size(1);
   auto dd = torch::empty_like(dy);
-  gate_bwd_in_k<<<grid_for(M * (C / 8), 256), 256, 0, stream()>>>(cbp(dy), drop.numel() > 0 ? cbp(drop) : nullptr, bp(dd), M, C, (int)L);
+  gate_bwd_in_k<<<grid_for(M * (C / 8), 256), 256, 0, stream()>>>(cbp(dy), drop.numel() > 0 ? cbp(drop) : nullptr, bp(dd), M, C, (int)L, (int)trans);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return dd;
 }
@@ -403,7 +410,8 @@ void g_assemble(torch::Tensor dbias, torch::Tensor dall, int64_t H, int64_t L, i
 }
 
 // -> (dx bf16 [M, C], partial sums fp32 [grid, 2, C])
-std::vector<torch::Tensor> g_ln_bwd(torch::Tensor dyln, torch::Tensor x, torch::Tensor dy, torch::Tensor w, torch::Tensor mean, torch::Tensor rstd) {
+std::vector<torch::Tensor> g_ln_bwd(torch::Tensor dyln, torch::Tensor x, torch::Tensor dy, torch::Tensor w, torch::Tensor mean, torch::Tensor rstd,
+                                    int64_t L, bool trans) {
   const long M = x.size(0);
   const int C = (int)x.size(1);
   TORCH_CHECK((dyln.scalar_type() == torch::kFloat32 || dyln.scalar_type() == torch::kBFloat16) && dyln.is_contiguous() && C % 8 == 0 && C <= 256 * MAXV,
@@ -414,7 +422,7 @@ std::vector<torch::Tensor> g_ln_bwd(torch::Tensor dyln, torch::Tensor x, torch::
   auto part = torch::empty({grid, 2, C}, x.options().dtype(torch::kFloat32));
   auto launch = [&](auto* dptr) {
     using TD = std::remove_cv_t<std::remove_pointer_t<decltype(dptr)>>;
-    auto args = std::make_tuple(dptr, cbp(x), cbp(dy), w.data_ptr<float>(), mean.data_ptr<float>(), rstd.data_ptr<float>(), bp(dx), part.data_ptr<float>(), M, C);
+    auto args = std::make_tuple(dptr, cbp(x), cbp(dy), w.data_ptr<float>(), mean.data_ptr<float>(), rstd.data_ptr<float>(), bp(dx), part.data_ptr<float>(), M, C, (int)L, (int)trans);
     if (lpr == 8) std::apply([&](auto... a) { ln_bwd_k<8, TD><<<grid, 256, 0, stream()>>>(a...); }, args);
     else if (lpr == 16) std::apply([&](auto... a) { ln_bwd_k<16, TD><<<grid, 256, 0, stream()>>>(a...); }, args);
     else std::apply([&](auto... a) { ln_bwd_k<32, TD><<<grid, 256, 0, stream()>>>(a...); }, args);
