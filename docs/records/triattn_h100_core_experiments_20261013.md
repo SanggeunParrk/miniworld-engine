@@ -152,3 +152,20 @@ the GEMM of chunk c waits only for its own barrier. 24 tests pass.
 
 No change (front moves 4 x its input and runs at 2.1-2.6 TB/s = 63-79% of peak, with a launch ramp at L128): the weight prologue is
 not on the critical path. Reverted; patch in the scratch dir (`front_chunked_weights.patch`).
+
+## Round 8 (2026-10-14): backward core, ncu + an FFMA ablation
+
+ncu (C128 L768), both kernels are issue-bound with no dominant stall:
+
+| kernel | SM % | XU % | FMA % | issue % | top stalls |
+|---|---|---|---|---|---|
+| bwd_kv (dK, dV) | 59.9 | 41.2 | 22.2 | 60.4 | wait, selected, not_selected, short_scoreboard |
+| bwd_q (dQ, dbias) | 55.1 | 42.8 | 26.1 | 55.9 | selected, long_scoreboard (mbarrier spins, 17 % of samples over 20+ sites), wait |
+
+bwd_q is not limited by the dbias reduce-add (QR = 4 already: S / 4 partials, ~1.8 GB in 1.18 ms).  Ablation (timing only, wrong
+results): the `P = ex2(scale * S - lse)` FFMA removed from both kernels: bwd_kv 1185 -> 1227 us, bwd_q 1180 -> 1180 us.  One
+instruction per score is therefore not what the kernels wait for; the latency chain of a sub-step is.  A fold of `-lse` into the QK^T
+(padded K dimension) would save exactly that instruction, so it is not built.  Patch kept: `triattn_cs/bwd_abl_fma.patch`.
+
+Single-pass backward (dQ in shared memory) re-examined: it needs the dbias partials summed over several rows before the reduce-add
+(7.2 GB with one row per CTA instead of 1.8 GB), and two rows' fp32 dQ (2 x 96 KiB at L768) do not fit next to the stages.
