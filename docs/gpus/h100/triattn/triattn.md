@@ -620,3 +620,25 @@ All 60 cells faster than both baselines (smallest: 1.69x).  Ending node, key mas
 mask / B = 2, inference and training, d_pair 64-512, L 128 / 256 / 512 / 768): every cell faster than both baselines, smallest 1.69x
 (training, d_pair 64, L128).  Against Anthropic's native cell (d_pair 128 / 256, inference, all four cases): see the table after
 `7f7851aa`, every cell faster, smallest 1.10x.
+
+### Against Anthropic's native cell, complete grid (2026-10-15)
+
+After `7f7851aa`.  Inference, d_pair 128 and 256 (the only widths its cell serves), L128-768 (640 included), four cases (scratch script
+`cases_anth.py`, one CUDA graph per cell; ms, Anthropic / ours, Anthropic ÷ ours).  `bench.py` (`implementations=[anthropic,miniworld]`,
+B = 1, starting, no mask) gives the same picture: d_pair 128 L128-768 1.57 / 1.52 / 1.49 / 1.43 / 1.35 / 1.30x, d_pair 256
+1.17 / 1.21 / 1.25 / 1.21 / 1.19 / 1.11x.
+
+| case, d_pair | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| base, 128 | 0.047 / 0.030 (1.57x) | 0.163 / 0.109 (1.50x) | 0.378 / 0.265 (1.43x) | 0.696 / 0.504 (1.38x) | 1.146 / 0.873 (1.31x) | 1.736 / 1.360 (1.28x) |
+| base, 256 | 0.070 / 0.061 (1.15x) | 0.302 / 0.258 (1.17x) | 0.745 / 0.606 (1.23x) | 1.387 / 1.176 (1.18x) | 2.286 / 2.016 (1.13x) | 3.467 / 3.233 (1.07x) |
+| ending, 128 | 0.051 / 0.030 (1.70x) | 0.177 / 0.110 (1.61x) | 0.406 / 0.264 (1.54x) | 0.728 / 0.507 (1.44x) | 1.205 / 0.878 (1.37x) | 1.786 / 1.384 (1.29x) |
+| ending, 256 | 0.076 / 0.061 (1.25x) | 0.320 / 0.260 (1.23x) | 0.783 / 0.615 (1.27x) | 1.463 / 1.178 (1.24x) | 2.418 / 2.066 (1.17x) | 3.608 / 3.185 (1.13x) |
+| mask, 128 | 0.048 / 0.030 (1.60x) | 0.166 / 0.109 (1.52x) | 0.386 / 0.262 (1.47x) | 0.711 / 0.500 (1.42x) | 1.170 / 0.875 (1.34x) | 1.766 / 1.375 (1.28x) |
+| mask, 256 | 0.072 / 0.060 (1.20x) | 0.303 / 0.255 (1.19x) | 0.764 / 0.604 (1.26x) | 1.403 / 1.179 (1.19x) | 2.321 / 1.985 (1.17x) | 3.488 / 3.183 (1.10x) |
+| B = 2, 128 | 0.105 / 0.050 (2.10x) | 0.409 / 0.207 (1.98x) | 0.952 / 0.505 (1.89x) | 1.746 / 1.001 (1.74x) | 2.821 / 1.718 (1.64x) | 4.262 / 2.710 (1.57x) |
+| B = 2, 256 | 0.194 / 0.122 (1.59x) | 0.767 / 0.481 (1.59x) | 1.864 / 1.178 (1.58x) | 3.471 / 2.364 (1.47x) | 5.759 / 4.092 (1.41x) | 8.533 / 6.485 (1.32x) |
+
+48 of 48 cells faster; the thinnest margin is d_pair 256 L768 (1.07x in this script, 1.11x in `bench.py`: the cuBLAS projections dominate).
+Anthropic's cell does not run d_pair 64 (`no-cell:fpf:prologue:64x2x32`), d_pair 384 (`pow2:c384h12d32`) or d_pair 512
+(`Refused: pair_fused:epilogue`, Triton 3.7 PTXAS error), and ships no training path: no comparison is possible there.
