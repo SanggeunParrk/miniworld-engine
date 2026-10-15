@@ -58,6 +58,15 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef DHP
 #define DHP 48       // head width: 32, 48 or 64
 #endif
+#ifndef INPLACE_P
+#define INPLACE_P 0  // 1: p is written back into the score registers (no separate pa array): fewer live registers, room for BLKSM 3
+#endif
+#ifndef MC_BIAS
+#define MC_BIAS 0    // 1: the cluster-multicast bias tile in shared memory (width 32 only fits two CTAs / SM); measured 0.99x at 24 x 32, off
+#endif
+#ifndef PREFETCH_BIAS
+#define PREFETCH_BIAS 0  // 1: block n + 1's bias is loaded into registers while block n's QK wgmma / softmax run
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -95,6 +104,23 @@ TMN_DEVI void tma_load_4d(void* dst, const CUtensorMap* map, uint64_t* bar, int 
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];"
                :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
+
+// the bias tile of a stage (the multicast form): two 128-B-swizzled boxes of 32 keys, QM rows each
+constexpr int ST_MC = NCH * KCH + 2 * VCH + 2 * QM * 128;
+TMN_DEVI void tma_load_mc2d(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
+               :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
+}
+TMN_DEVI uint32_t mapa_u32(uint32_t a, uint32_t rank) {
+  uint32_t r; asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(rank)); return r;
+}
+TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(mapa_u32(smem_u32(bar), rank)) : "memory");
+}
+TMN_DEVI void cluster_sync_all() {
+  asm volatile("barrier.cluster.arrive.release.aligned;\nbarrier.cluster.wait.acquire.aligned;\n" ::: "memory");
+}
+TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;\n" : "=r"(r)); return r; }
 
 // S (+)= q k^T, m64 n64 k8, both from shared memory
 TMN_DEVI void mma_qk(float (&d)[32], uint64_t a, uint64_t b) {
@@ -233,12 +259,22 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #endif
 
   float sc[32];
+#if PREFETCH_BIAS
+  float2 bpf[16];                                                    // block n + 1's bias, loaded under block n's MMAs / softmax
+#pragma unroll
+  for (int j = 0; j < 8; ++j) {
+    bpf[2 * j] = *reinterpret_cast<const float2*>(brow0 + 8 * j);
+    bpf[2 * j + 1] = *reinterpret_cast<const float2*>(brow1 + 8 * j);
+  }
+#endif
   for (int n = 0; n < nblocks; ++n) {
     const int sn = n % STAGES;
     // seed with bias (+ key mask), loaded before the wait so the L2 latency hides under it
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
-#if BIAS_NOMEM
+#if PREFETCH_BIAS
+      const float2 b0 = bpf[2 * j], b1 = bpf[2 * j + 1];
+#elif BIAS_NOMEM
       const float2 b0 = make_float2(1e-3f * (n + j), 2e-3f * (j + t + wg)), b1 = make_float2(3e-3f * (n + t), 1e-3f * (j + g));
 #else
       const float2 b0 = *reinterpret_cast<const float2*>(brow0 + n * BN + 8 * j);
@@ -250,6 +286,255 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     }
     mbar_wait(&full[sn], (n / STAGES) & 1);
     const uint32_t slot = sbase + sn * ST_BYTES;
+    const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + KCH);
+    wgmma_fence();
+#if QK_RS
+#pragma unroll
+    for (int ks = 0; ks < 4; ++ks) mma_qk_rs(sc, qf[ks][0], qf[ks][1], qf[ks][2], qf[ks][3], dK0 + ks * 2);
+#pragma unroll
+    for (int ks = 0; ks < JJ - 4; ++ks) mma_qk_rs(sc, qf[4 + ks][0], qf[4 + ks][1], qf[4 + ks][2], qf[4 + ks][3], dK1 + ks * 2);
+#else
+#pragma unroll
+    for (int ks = 0; ks < 4; ++ks) mma_qk(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
+#pragma unroll
+    for (int ks = 0; ks < JJ - 4; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);       // 32..DH - 1
+#endif
+    wgmma_commit();
+#if PREFETCH_BIAS
+    if (n + 1 < nblocks) {
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        bpf[2 * j] = *reinterpret_cast<const float2*>(brow0 + (n + 1) * BN + 8 * j);
+        bpf[2 * j + 1] = *reinterpret_cast<const float2*>(brow1 + (n + 1) * BN + 8 * j);
+      }
+    }
+#endif
+    wgmma_wait<0>();
+#pragma unroll
+    for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
+    float m_new[2];
+    bool moved = false;
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      float mx = -INFINITY;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
+      mx = fmaxf(qmax(mx), -1e30f);
+      m_new[h] = mx > m_i[h] + LAZY ? mx : m_i[h];
+      moved |= m_new[h] != m_i[h];
+    }
+    if (__any_sync(0xffffffffu, moved)) {
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const float alpha = ex2(m_i[h] - m_new[h]);
+        l_i[h] *= alpha;
+#pragma unroll
+        for (int j = 0; j < JJ; ++j) { acc[4 * j + 2 * h] *= alpha; acc[4 * j + 2 * h + 1] *= alpha; }
+        m_i[h] = m_new[h];
+      }
+    }
+#if INPLACE_P
+#define PA(i) (__float_as_uint(sc[i]))
+#else
+    uint32_t pa[32];
+#define PA(i) (pa[i])
+#endif
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+#if TRUNC_P
+        const float p0 = trunc_tf32(ex2(sc[4 * j + 2 * h] - m_i[h])), p1 = trunc_tf32(ex2(sc[4 * j + 2 * h + 1] - m_i[h]));
+        l_i[h] += p0 + p1;
+#if INPLACE_P
+        sc[4 * j + 2 * h] = p0; sc[4 * j + 2 * h + 1] = p1;
+#else
+        pa[4 * j + 2 * h] = __float_as_uint(p0); pa[4 * j + 2 * h + 1] = __float_as_uint(p1);
+#endif
+#else
+        const float p0 = ex2(sc[4 * j + 2 * h] - m_i[h]), p1 = ex2(sc[4 * j + 2 * h + 1] - m_i[h]);
+        l_i[h] += p0 + p1;
+#if INPLACE_P
+        sc[4 * j + 2 * h] = __uint_as_float(tf32(p0)); sc[4 * j + 2 * h + 1] = __uint_as_float(tf32(p1));
+#else
+        pa[4 * j + 2 * h] = tf32(p0); pa[4 * j + 2 * h + 1] = tf32(p1);
+#endif
+#endif
+      }
+    }
+    const uint64_t dV0 = dsw(slot + NCH * KCH), dV1 = dsw(slot + NCH * KCH + VCH);
+    wgmma_fence();
+#pragma unroll
+    for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
+#pragma unroll
+    for (int j = 0; j < 8; ++j)                                     // A (row g, k t) = S (g, 2t), (g, k t + 4) = S (g, 2t + 1)
+      mma_pvd<DH>(acc, PA(4 * j), PA(4 * j + 2), PA(4 * j + 1), PA(4 * j + 3), (j < 4 ? dV0 : dV1) + (j % 4) * 2);
+    wgmma_commit();
+    wgmma_wait<0>();
+    if ((tid & 31) == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
+  }
+#pragma unroll
+  for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
+
+  // ---- epilogue: rows row (h = 0), row + 8 (h = 1); columns 8j + 2t, + 1
+#pragma unroll
+  for (int h = 0; h < 2; ++h) {
+    const float l = qsum(l_i[h]);
+    const float inv = 1.f / l;
+    const size_t r = (size_t)srow + row + 8 * h;
+    if constexpr (GATED) {
+      float* orow = OUT + r * so + qcol;
+#pragma unroll
+      for (int j = 0; j < JJ; ++j) {
+        const float2 gg = *reinterpret_cast<const float2*>(orow + goff + 8 * j + 2 * t);
+        *reinterpret_cast<float2*>(orow + 8 * j + 2 * t) =
+            make_float2(acc[4 * j + 2 * h] * inv * sigmoid_t(gg.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_t(gg.y));
+      }
+    } else {                                                        // O, or with OUT (the q|k|v|g rows) og = sigmoid(g) O
+      float* orow = O + r * DM + qcol;
+      const float* grow = OUT != nullptr ? OUT + r * so + goff + qcol : nullptr;
+#pragma unroll
+      for (int j = 0; j < JJ; ++j) {
+        float2 o = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
+        if (grow != nullptr) {
+          const float2 gg = *reinterpret_cast<const float2*>(grow + 8 * j + 2 * t);
+          o.x *= 1.f / (1.f + __expf(-gg.x)); o.y *= 1.f / (1.f + __expf(-gg.y));
+        }
+        *reinterpret_cast<float2*>(orow + 8 * j + 2 * t) = o;
+      }
+      if (t == 0) LSE[((size_t)samp * NH + head) * L + row + 8 * h] = m_i[h] + __log2f(l);
+    }
+  }
+}
+
+template <bool GATED, bool HASM>
+__global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
+attn_tf32_fwd_mc_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
+                     const __grid_constant__ CUtensorMap mvt, const __grid_constant__ CUtensorMap mb, int cs, const float* __restrict__ KM,
+                     float* __restrict__ O, float* __restrict__ LSE, float* __restrict__ OUT, long so, long goff, int L, int A) {
+  extern __shared__ __align__(1024) uint8_t smem_raw[];
+  uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
+  uint8_t* sq = sm;
+  uint8_t* sst = sm + Q_BYTES;
+  uint64_t* full = reinterpret_cast<uint64_t*>(sst + STAGES * ST_MC);
+  uint64_t* empty = full + STAGES;
+  uint64_t* qbar = empty + STAGES;
+
+  const int tid = threadIdx.x;
+  const int mt = L / QM;
+  const int samp = blockIdx.x % A, cid = blockIdx.x / A;
+  const int m_tile = cid % mt, head = cid / mt;
+  const int m0 = m_tile * QM, qcol = head * DH, srow = samp * L;
+  const int nblocks = L / BN;
+
+  if (tid == 0) {
+    for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 3); mbar_init(&empty[s], cs * 4 * NWG); }
+    mbar_init(qbar, 1);
+    fence_barrier_init();
+  }
+  __syncthreads();
+  if (cs > 1) cluster_sync_all();                                   // every barrier of the cluster initialised
+  const uint32_t rank = cs > 1 ? cluster_rank() : 0;
+
+  if (tid >= 128 * NWG) {                                           // producer warp: lane 0 k, lane 1 v^T, lane 2 the bias tile
+    const int iss = tid - 128 * NWG;
+    if (iss == 0) {
+      tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mvt);
+      mbar_arrive_expect_tx(qbar, Q_BYTES);
+      tma_load_2d(sq, &mq, qbar, qcol, srow + m0);
+      if (NCH == 2) tma_load_2d(sq + QCH, &mq, qbar, qcol + 32, srow + m0);
+    }
+    if (iss < 3) {
+      for (int n = 0; n < nblocks; ++n) {
+        const int s = n % STAGES;
+        mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
+        uint8_t* slot = sst + s * ST_MC;
+        const int k0 = srow + n * BN;
+        if (iss == 0) {
+          mbar_arrive_expect_tx(&full[s], NCH * KCH);
+          tma_load_4d(slot, &mk, &full[s], qcol, 0, 0, k0 / 8);
+          if (NCH == 2) tma_load_4d(slot + KCH, &mk, &full[s], qcol + 32, 0, 0, k0 / 8);
+        } else if (iss == 1) {
+          mbar_arrive_expect_tx(&full[s], 2 * VCH);
+          tma_load_2d(slot + NCH * KCH, &mvt, &full[s], k0, qcol);
+          tma_load_2d(slot + NCH * KCH + VCH, &mvt, &full[s], k0 + 32, qcol);
+        } else {                                                    // the bias tile [QM rows][64 keys]: one rank issues, rotating
+          mbar_arrive_expect_tx(&full[s], 2 * QM * 128);
+          if (cs == 1 || rank == (uint32_t)(n % cs)) {
+            uint8_t* bt = slot + NCH * KCH + 2 * VCH;
+            const uint16_t msk = (uint16_t)((1u << cs) - 1);
+            tma_load_mc2d(bt, &mb, &full[s], n * BN, head * L + m0, msk);
+            tma_load_mc2d(bt + QM * 128, &mb, &full[s], n * BN + 32, head * L + m0, msk);
+          }
+        }
+      }
+    }
+    __syncwarp();
+    if (cs > 1) cluster_sync_all();                                 // no remote arrive may land on an exited CTA
+    return;
+  }
+
+  // ---- consumer warpgroups: 64 query rows each
+  const int wg = tid >> 7, lane = tid & 31, warp = (tid >> 5) & 3;
+  const int g = lane >> 2, t = lane & 3;
+  const int row = m0 + wg * 64 + warp * 16 + g;                     // this lane's rows: row, row + 8 (within the sample)
+  const int rl = wg * 64 + warp * 16 + g;                           // this lane's row inside the CTA's bias tile (+ 8)
+  const float* kmr = HASM ? KM + (size_t)samp * L + 2 * t : nullptr;
+  float acc[ACC];
+#pragma unroll
+  for (int i = 0; i < ACC; ++i) acc[i] = 0.f;
+  float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
+  if (OUT != nullptr && t == 0) {                                   // the epilogue's g rows (192 B each): into L2 now
+#pragma unroll
+    for (int h = 0; h < 2; ++h) {
+      const float* gp = OUT + ((size_t)srow + row + 8 * h) * so + goff + qcol;
+      asm volatile("prefetch.global.L2 [%0];" :: "l"(gp));
+      asm volatile("prefetch.global.L2 [%0];" :: "l"(gp + 24));
+      asm volatile("prefetch.global.L2 [%0];" :: "l"(gp + DH - 1));
+    }
+  }
+  const uint32_t qa = smem_u32(sq) + wg * 64 * 128;
+  const uint64_t dQ0 = dsw(qa), dQ1 = dsw(qa + QCH);
+  const uint32_t sbase = smem_u32(sst);
+  mbar_wait(qbar, 0);
+#if QK_RS
+  uint32_t qf[JJ][4];                                                // q fragments of this lane, loaded once
+  {
+    const uint32_t r0 = wg * 64 + warp * 16 + g;
+#pragma unroll
+    for (int ks = 0; ks < JJ; ++ks) {
+      const int c0 = ks * 8 + t, c1 = c0 + 4;
+      uint32_t v[4];
+#pragma unroll
+      for (int e = 0; e < 4; ++e) {
+        const uint32_t r = r0 + (e & 1) * 8;
+        const int c = (e >> 1) ? c1 : c0;
+        const uint32_t addr = smem_u32(sq) + (c >> 5) * QCH + r * 128 + ((((c & 31) >> 2) ^ (r & 7)) << 4) + ((c & 3) << 2);
+        asm volatile("ld.shared.b32 %0, [%1];" : "=r"(v[e]) : "r"(addr));
+      }
+      qf[ks][0] = v[0]; qf[ks][1] = v[1]; qf[ks][2] = v[2]; qf[ks][3] = v[3];
+    }
+  }
+#endif
+
+  float sc[32];
+  for (int n = 0; n < nblocks; ++n) {
+    const int sn = n % STAGES;
+    mbar_wait(&full[sn], (n / STAGES) & 1);
+    const uint32_t slot = sbase + sn * ST_MC;
+    {                                                               // seed with the bias tile from shared memory (swizzled 128 B rows)
+      const uint32_t bt = slot + NCH * KCH + 2 * VCH;
+#pragma unroll
+      for (int j = 0; j < 8; ++j) {
+        const uint32_t cb = bt + (j >> 2) * (QM * 128) + (((2 * (j & 3) + (t >> 1)) ^ (rl & 7)) << 4) + (t & 1) * 8;
+        float2 b0, b1;
+        asm volatile("ld.shared.v2.f32 {%0, %1}, [%2];" : "=f"(b0.x), "=f"(b0.y) : "r"(cb + rl * 128));
+        asm volatile("ld.shared.v2.f32 {%0, %1}, [%2];" : "=f"(b1.x), "=f"(b1.y) : "r"(cb + (rl + 8) * 128));
+        float2 km = make_float2(0.f, 0.f);
+        if (HASM) km = *reinterpret_cast<const float2*>(kmr + n * BN + 8 * j);
+        sc[4 * j] = b0.x + km.x; sc[4 * j + 1] = b0.y + km.y; sc[4 * j + 2] = b1.x + km.x; sc[4 * j + 3] = b1.y + km.y;
+      }
+    }
     const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + KCH);
     wgmma_fence();
 #if QK_RS
@@ -288,7 +573,12 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
         m_i[h] = m_new[h];
       }
     }
+#if INPLACE_P
+#define PA(i) (__float_as_uint(sc[i]))
+#else
     uint32_t pa[32];
+#define PA(i) (pa[i])
+#endif
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
 #pragma unroll
@@ -296,11 +586,19 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #if TRUNC_P
         const float p0 = trunc_tf32(ex2(sc[4 * j + 2 * h] - m_i[h])), p1 = trunc_tf32(ex2(sc[4 * j + 2 * h + 1] - m_i[h]));
         l_i[h] += p0 + p1;
+#if INPLACE_P
+        sc[4 * j + 2 * h] = p0; sc[4 * j + 2 * h + 1] = p1;
+#else
         pa[4 * j + 2 * h] = __float_as_uint(p0); pa[4 * j + 2 * h + 1] = __float_as_uint(p1);
+#endif
 #else
         const float p0 = ex2(sc[4 * j + 2 * h] - m_i[h]), p1 = ex2(sc[4 * j + 2 * h + 1] - m_i[h]);
         l_i[h] += p0 + p1;
+#if INPLACE_P
+        sc[4 * j + 2 * h] = __uint_as_float(tf32(p0)); sc[4 * j + 2 * h + 1] = __uint_as_float(tf32(p1));
+#else
         pa[4 * j + 2 * h] = tf32(p0); pa[4 * j + 2 * h + 1] = tf32(p1);
+#endif
 #endif
       }
     }
@@ -310,10 +608,13 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
 #pragma unroll
     for (int j = 0; j < 8; ++j)                                     // A (row g, k t) = S (g, 2t), (g, k t + 4) = S (g, 2t + 1)
-      mma_pvd<DH>(acc, pa[4 * j], pa[4 * j + 2], pa[4 * j + 1], pa[4 * j + 3], (j < 4 ? dV0 : dV1) + (j % 4) * 2);
+      mma_pvd<DH>(acc, PA(4 * j), PA(4 * j + 2), PA(4 * j + 1), PA(4 * j + 3), (j < 4 ? dV0 : dV1) + (j % 4) * 2);
     wgmma_commit();
     wgmma_wait<0>();
-    if ((tid & 31) == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
+    if ((tid & 31) == 0 && n + STAGES < nblocks) {
+      if (cs == 1) mbar_arrive(&empty[sn]);
+      else for (int r = 0; r < cs; ++r) mbar_arrive_remote(&empty[sn], r);   // free in every rank's view
+    }
   }
 #pragma unroll
   for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
@@ -382,7 +683,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mvt);
       mbar_arrive_expect_tx(qbar, Q_BYTES);
       tma_load_2d(sq, &mq, qbar, qcol, srow + m0);
-      tma_load_2d(sq + QCH, &mq, qbar, qcol + 32, srow + m0);
+      if (NCH == 2) tma_load_2d(sq + QCH, &mq, qbar, qcol + 32, srow + m0);
     }
     if (iss < 2) {
       for (int n = 0; n < nblocks; ++n) {
@@ -391,13 +692,13 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
         uint8_t* slot = sst + s * ST_BYTES;
         const int k0 = srow + n * BN;
         if (iss == 0) {
-          mbar_arrive_expect_tx(&full[s], 2 * KCH);
+          mbar_arrive_expect_tx(&full[s], NCH * KCH);
           tma_load_4d(slot, &mk, &full[s], qcol, 0, 0, k0 / 8);
-          tma_load_4d(slot + KCH, &mk, &full[s], qcol + 32, 0, 0, k0 / 8);
+          if (NCH == 2) tma_load_4d(slot + KCH, &mk, &full[s], qcol + 32, 0, 0, k0 / 8);
         } else {
           mbar_arrive_expect_tx(&full[s], 2 * VCH);
-          tma_load_2d(slot + 2 * KCH, &mvt, &full[s], k0, qcol);
-          tma_load_2d(slot + 2 * KCH + VCH, &mvt, &full[s], k0 + 32, qcol);
+          tma_load_2d(slot + NCH * KCH, &mvt, &full[s], k0, qcol);
+          tma_load_2d(slot + NCH * KCH + VCH, &mvt, &full[s], k0 + 32, qcol);
         }
       }
     }
@@ -411,9 +712,9 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
   const float* brow0 = Bias + ((size_t)head * L + row) * L + 2 * t;
   const float* brow1 = brow0 + 8 * (size_t)L;
   const float* kmr = HASM ? KM + (size_t)samp * L + 2 * t : nullptr;
-  float acc[24];
+  float acc[ACC];
 #pragma unroll
-  for (int i = 0; i < 24; ++i) acc[i] = 0.f;
+  for (int i = 0; i < ACC; ++i) acc[i] = 0.f;
   float m_i[2] = {-INFINITY, -INFINITY}, l_i[2] = {0.f, 0.f};
   if (OUT != nullptr && t == 0) {                                   // the epilogue's g rows (192 B each): into L2 now
 #pragma unroll
@@ -452,7 +753,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
 #pragma unroll
     for (int ks = 0; ks < 4; ++ks) mma_qk(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
 #pragma unroll
-    for (int ks = 0; ks < 2; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);            // 32..47
+    for (int ks = 0; ks < JJ - 4; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);       // 32..DH - 1
     wgmma_commit();
   };
   // S(n) in sc is complete. has_next: QK(n + 1) is the one group allowed to stay pending past PV(n - 1)'s wait.
@@ -472,14 +773,14 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
     }
     if (has_next) wgmma_wait<1>(); else wgmma_wait<0>();               // PV(n - 1) done: acc and pa are free again
 #pragma unroll
-    for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+    for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
     if (__any_sync(0xffffffffu, moved)) {
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
         const float alpha = ex2(m_i[h] - m_new[h]);
         l_i[h] *= alpha;
 #pragma unroll
-        for (int j = 0; j < 6; ++j) { acc[4 * j + 2 * h] *= alpha; acc[4 * j + 2 * h + 1] *= alpha; }
+        for (int j = 0; j < JJ; ++j) { acc[4 * j + 2 * h] *= alpha; acc[4 * j + 2 * h + 1] *= alpha; }
         m_i[h] = m_new[h];
       }
     }
@@ -495,13 +796,13 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
     if ((tid & 31) == 0 && n > 0 && (n - 1) + PSTAGES < nblocks) mbar_arrive(&empty[(n - 1) % PSTAGES]);  // block n - 1 fully read
     const int sn = n % PSTAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
-    const uint64_t dV0 = dsw(slot + 2 * KCH), dV1 = dsw(slot + 2 * KCH + VCH);
+    const uint64_t dV0 = dsw(slot + NCH * KCH), dV1 = dsw(slot + NCH * KCH + VCH);
     wgmma_fence();
 #pragma unroll
-    for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+    for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
 #pragma unroll
     for (int j = 0; j < 8; ++j)                                     // A (row g, k t) = S (g, 2t), (g, k t + 4) = S (g, 2t + 1)
-      mma_pv(acc, pa[4 * j], pa[4 * j + 2], pa[4 * j + 1], pa[4 * j + 3], (j < 4 ? dV0 : dV1) + (j % 4) * 2);
+      mma_pvd<DH>(acc, pa[4 * j], pa[4 * j + 2], pa[4 * j + 1], pa[4 * j + 3], (j < 4 ? dV0 : dV1) + (j % 4) * 2);
     wgmma_commit();
   };
   seed(scA, 0);
@@ -518,7 +819,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
   }
   wgmma_wait<0>();
 #pragma unroll
-  for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+  for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
 
   // ---- epilogue: rows row (h = 0), row + 8 (h = 1); columns 8j + 2t, + 1
 #pragma unroll
@@ -529,7 +830,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
     if constexpr (GATED) {
       float* orow = OUT + r * so + qcol;
 #pragma unroll
-      for (int j = 0; j < 6; ++j) {
+      for (int j = 0; j < JJ; ++j) {
         const float2 gg = *reinterpret_cast<const float2*>(orow + goff + 8 * j + 2 * t);
         *reinterpret_cast<float2*>(orow + 8 * j + 2 * t) =
             make_float2(acc[4 * j + 2 * h] * inv * sigmoid_t(gg.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_t(gg.y));
@@ -538,7 +839,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
       float* orow = O + r * DM + qcol;
       const float* grow = OUT != nullptr ? OUT + r * so + goff + qcol : nullptr;
 #pragma unroll
-      for (int j = 0; j < 6; ++j) {
+      for (int j = 0; j < JJ; ++j) {
         float2 o = make_float2(acc[4 * j + 2 * h] * inv, acc[4 * j + 2 * h + 1] * inv);
         if (grow != nullptr) {
           const float2 gg = *reinterpret_cast<const float2*>(grow + 8 * j + 2 * t);
@@ -546,7 +847,7 @@ attn_tf32_fwd_pipe_kernel(const __grid_constant__ CUtensorMap mq, const __grid_c
         }
         *reinterpret_cast<float2*>(orow + 8 * j + 2 * t) = o;
       }
-      if (t == 0) LSE[((size_t)samp * 16 + head) * L + row + 8 * h] = m_i[h] + __log2f(l);
+      if (t == 0) LSE[((size_t)samp * NH + head) * L + row + 8 * h] = m_i[h] + __log2f(l);
     }
   }
 }
@@ -950,7 +1251,6 @@ template <bool GATED, bool HASM>
 void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mvt, const float* bias,
             const float* km, float* o, float* lse, float* out, long so, long goff) {
 #if FWD_PIPE
-  static_assert(DH == 48 && NH == 16, "the software-pipelined forward is the 16 x 48 experiment");
   const size_t smem = 1024 + Q_BYTES + PSTAGES * ST_BYTES + 256;
   auto kern = attn_tf32_fwd_pipe_kernel<GATED, HASM>;
 #else
@@ -960,6 +1260,25 @@ void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CU
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   kern<<<A * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(mq, mk, mvt, bias, km, o, lse, out, so,
                                                                                     goff, L, A);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+template <bool HASM>
+void launch_mc(int A, int L, int cs, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mvt, const CUtensorMap& mb,
+               const float* km, float* out, long so, long goff) {
+  const size_t smem = Q_BYTES + STAGES * ST_MC + 256;                 // the 1024-B slack is dropped: 2 CTAs / SM at width 32
+  auto kern = attn_tf32_fwd_mc_kernel<true, HASM>;
+  cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(A * NH * (L / QM));
+  cfg.blockDim = dim3(128 * NWG + 32);
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute attr[1];
+  attr[0].id = cudaLaunchAttributeClusterDimension;
+  attr[0].val.clusterDim.x = cs; attr[0].val.clusterDim.y = 1; attr[0].val.clusterDim.z = 1;
+  cfg.attrs = attr; cfg.numAttrs = 1;
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mvt, mb, cs, km, (float*)nullptr, (float*)nullptr, out, so, goff, L, A) == cudaSuccess,
+              "mc launch");
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void check_f32(const torch::Tensor& t, const char* name) {
@@ -1020,8 +1339,15 @@ void attn_tf32_inf(torch::Tensor qkg, torch::Tensor vt, torch::Tensor bias_all, 
   float* base = qkg.data_ptr<float>();
   const auto mq = map2d(base, rows, DM, rs, QM), mk = map_kperm(base + DM, rows, DM, rs),
              mvt = map2d(vt.data_ptr<float>(), DM, rows, rows, DH);
-  launch<true, false>((int)S, L, mq, mk, mvt, bias_all.data_ptr<float>() + (size_t)block * NH * L * L, nullptr, nullptr,
-                      nullptr, base, (long)rs, (long)goff);
+  float* bias = bias_all.data_ptr<float>() + (size_t)block * NH * L * L;
+  int cs = 1;
+  for (int c = 8; c >= 2; --c) if (S % c == 0) { cs = c; break; }   // samples of one (head, row tile) share the bias tile
+  if (MC_BIAS && cs > 1) {
+    const auto mb = map2d(bias, (uint64_t)NH * L, L, L, QM);          // [head * L + row, key]: boxes of 32 keys x QM rows
+    launch_mc<false>((int)S, L, cs, mq, mk, mvt, mb, nullptr, base, (long)rs, (long)goff);
+    return;
+  }
+  launch<true, false>((int)S, L, mq, mk, mvt, bias, nullptr, nullptr, nullptr, base, (long)rs, (long)goff);
 }
 
 // Backward, dK and dV: q (exp2 units), dob = dO, k, v [A L, 768] fp32; qt, dot = q^T, dO^T [768, A L]; bt [16, L(key), L]

@@ -467,3 +467,21 @@ L512 / L640 (1.05x). Measured and rejected as levers:
   configuration sweeps (BLKSM 3 / 4, STAGES 3 / 4, NWG 1, LAZY, PSTAGES) are neutral or slower, `TRUNC_P=1` +3.7 % and `QK_RS=1`
   +3.3 % at 24 x 32 (not combinable: 1.00x), both worse at 16 x 48 / 12 x 64. Reaching +5 % at 24 x 32 L768 needs ~ -23 us of the
   110 us attention: a restructured forward (a 128-key block or a ping-pong schedule between the two warpgroups), not a flag.
+
+Further attention-forward experiments for the 24 x 32 cell (kept behind build flags, all default off; L768, A = 5 attention core,
+us, base 110.3 / 87.0 / 87.3 at 24 x 32 / 12 x 64 / 16 x 48):
+
+| flag | 24 x 32 | 12 x 64 | 16 x 48 | what it is |
+|---|---|---|---|---|
+| `FWD_PIPE=1` (software pipeline, now per layout) | 168 (0.66x) | 113 (0.77x) | 133 (0.66x) | QK(n + 1) under softmax(n); 1 CTA / SM |
+| `INPLACE_P=1` | 110.3 (1.00x) | 86.2 (1.01x) | 87.1 (1.00x) | p written back into the score registers |
+| `INPLACE_P=1 BLKSM=3` | 156 (0.71x) | build fails | build fails | 3 CTAs / SM: register cap 75 spills |
+| `MC_BIAS=1` | 112 (0.99x) | 116 (0.76x) | 131 (0.67x) | the bias tile multicast across the A = 5 samples' cluster, read from smem |
+| `PREFETCH_BIAS=1` | 111 (1.00x) | 184 (0.47x) | 123 (0.71x) | next block's bias in registers under the QK / softmax |
+| `TRUNC_P=1` | 106 (1.04x) | 85.4 (1.02x) | 91.6 (0.95x) | p truncated to TF32 by a LOP |
+| `QK_RS=1` | 107 (1.03x) | 150 (0.58x) | 115 (0.76x) | q as register operands of the QK wgmma |
+
+The `BIAS_NOMEM` probe (bias computed instead of loaded: 74 us at 24 x 32) is not a bound on the bias cost: removing the loads by
+multicast through shared memory (`MC_BIAS`) or hiding them under the MMAs (`PREFETCH_BIAS`) gains nothing, so the 1.5x of the probe
+comes from the changed values / code, not from the L2 traffic. The forward is limited by its own dependency chain (QK wgmma ->
+softmax -> PV wgmma per 64-key block, 4 consumer warpgroups per SM), which none of these changes.
