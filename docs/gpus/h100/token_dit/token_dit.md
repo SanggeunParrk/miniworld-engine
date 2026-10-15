@@ -485,3 +485,10 @@ The `BIAS_NOMEM` probe (bias computed instead of loaded: 74 us at 24 x 32) is no
 multicast through shared memory (`MC_BIAS`) or hiding them under the MMAs (`PREFETCH_BIAS`) gains nothing, so the 1.5x of the probe
 comes from the changed values / code, not from the L2 traffic. The forward is limited by its own dependency chain (QK wgmma ->
 softmax -> PV wgmma per 64-key block, 4 consumer warpgroups per SM), which none of these changes.
+
+ncu of the 24 x 32 forward (L768, A = 5; `--set full`, SASS sampling): 96 registers, 2 CTAs / SM, issue slots 41 % busy, L2 hit rate 71 %
+(the 56 MB bias exceeds the 50 MB L2), DRAM 30 %; warp stalls per issued instruction 9.8 cycles, of which Long Scoreboard 4.5 (the first
+use of the loaded bias: `FADD R24, RZ, R24` carries 18 % of all samples), Wait 1.1, Math Pipe Throttle 0.4, GMMA 0.4. Two measured
+answers to that stall did not help: the bias hidden under the MMAs (`PREFETCH_BIAS`, 1.00x) and the bias delivered through shared
+memory by cluster multicast (`MC_BIAS`, 0.99x); and `BIAS_PF=n`, a one-thread bulk tensor prefetch of the bias tile n blocks ahead into
+L2, is 0.76x at 24 x 32 for every n (0.78-0.87x at the other layouts), so it stays off.

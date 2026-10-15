@@ -67,6 +67,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef PREFETCH_BIAS
 #define PREFETCH_BIAS 0  // 1: block n + 1's bias is loaded into registers while block n's QK wgmma / softmax run
 #endif
+#ifndef BIAS_PF
+#define BIAS_PF 0    // > 0: the producer prefetches the bias tile BIAS_PF blocks ahead into L2 (one bulk tensor prefetch per 32 keys):
+                     // the bias is read from DRAM on a 29 % miss rate at 24 heads (56 MB > L2), and its first use stalls the warps
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -99,6 +103,9 @@ TMN_DEVI float qmax(float v) {
 TMN_DEVI float qsum(float v) {
   v += __shfl_xor_sync(0xffffffffu, v, 1);
   return v + __shfl_xor_sync(0xffffffffu, v, 2);
+}
+TMN_DEVI void tma_prefetch_l2_2d(const CUtensorMap* map, int c0, int c1) {
+  asm volatile("cp.async.bulk.prefetch.tensor.2d.L2.global [%0, {%1, %2}];" :: "l"(map), "r"(c0), "r"(c1) : "memory");
 }
 TMN_DEVI void tma_load_4d(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, int c2, int c3) {
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];"
@@ -162,7 +169,7 @@ template <int N> TMN_DEVI void mma_pvd(float (&d)[N / 2], uint32_t a0, uint32_t 
 template <bool GATED, bool HASM>
 __global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
 attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
-                     const __grid_constant__ CUtensorMap mvt, const float* __restrict__ Bias, const float* __restrict__ KM,
+                     const __grid_constant__ CUtensorMap mvt, const __grid_constant__ CUtensorMap mb, const float* __restrict__ Bias, const float* __restrict__ KM,
                      float* __restrict__ O, float* __restrict__ LSE, float* __restrict__ OUT, long so, long goff, int L, int A) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
@@ -195,8 +202,22 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
       if (NCH == 2) tma_load_2d(sq + QCH, &mq, qbar, qcol + 32, srow + m0);
     }
     if (iss < 2) {
+#if BIAS_PF
+      if (iss == 0) {                                               // the first blocks' bias tiles, before the ring starts
+        for (int p = 0; p < BIAS_PF && p < nblocks; ++p) {
+          tma_prefetch_l2_2d(&mb, p * BN, head * L + m0);
+          tma_prefetch_l2_2d(&mb, p * BN + 32, head * L + m0);
+        }
+      }
+#endif
       for (int n = 0; n < nblocks; ++n) {
         const int s = n % STAGES;
+#if BIAS_PF
+        if (iss == 0 && n + BIAS_PF < nblocks) {
+          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * BN, head * L + m0);
+          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * BN + 32, head * L + m0);
+        }
+#endif
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
         uint8_t* slot = sst + s * ST_BYTES;
         const int k0 = srow + n * BN;
@@ -1250,6 +1271,7 @@ CUtensorMap map_kperm(const float* p, uint64_t rows, uint64_t cols, uint64_t rs)
 template <bool GATED, bool HASM>
 void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mvt, const float* bias,
             const float* km, float* o, float* lse, float* out, long so, long goff) {
+  const CUtensorMap mb = map2d(bias, (uint64_t)NH * L, L, L, QM);   // the bias as [head * L + row, key]: the L2 prefetch's descriptor
 #if FWD_PIPE
   const size_t smem = 1024 + Q_BYTES + PSTAGES * ST_BYTES + 256;
   auto kern = attn_tf32_fwd_pipe_kernel<GATED, HASM>;
@@ -1258,8 +1280,13 @@ void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CU
   auto kern = attn_tf32_fwd_kernel<GATED, HASM>;
 #endif
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+#if FWD_PIPE
   kern<<<A * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(mq, mk, mvt, bias, km, o, lse, out, so,
                                                                                     goff, L, A);
+#else
+  kern<<<A * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(mq, mk, mvt, mb, bias, km, o, lse, out, so,
+                                                                                    goff, L, A);
+#endif
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 template <bool HASM>
