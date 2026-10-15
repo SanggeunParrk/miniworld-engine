@@ -255,7 +255,8 @@ class _weight_grads_aside:
         return False
 
 
-def _fwd_fake(x, gamma, beta, wa, wb, ws, eps, save):
+def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
+    """Shapes of the generic forward's outputs (y, the saved tensors); no kernel runs."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
     ab = (
@@ -278,7 +279,7 @@ def _fwd_fake(x, gamma, beta, wa, wb, ws, eps, save):
     )
 
 
-@opaque(fake=_fwd_fake, name="transition_generic_fwd_sm90a")
+@opaque(fake=_fwd_launch_fake, name="transition_generic_fwd_sm90a")
 def _fwd_launch(
     x: torch.Tensor,
     gamma: torch.Tensor,
@@ -295,7 +296,7 @@ def _fwd_launch(
     [M, 2 HID] = [a | b] and ``h`` [M, HID] (from the fp32 accumulators) when the bf16 training forward keeps them for the backward,
     else 1-element placeholders."""
     if _is_fake(x, wa):
-        return _fwd_fake(x, gamma, beta, wa, wb, ws, eps, save)
+        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
     ext = _ext()
     if (
         x.dtype is torch.float32
@@ -326,7 +327,8 @@ def _fwd_launch(
     return out, xn, rstd, c1, ab, (h if ab.numel() > 1 else x.new_empty((1, 1)))
 
 
-def _bwd_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws):
+def _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws):
+    """Shapes of the generic backward's outputs (dx, dgamma, dbeta, dW_ab, dW_s); no kernel runs."""
     return (
         torch.empty_like(x),
         torch.empty_like(gamma),
@@ -336,7 +338,7 @@ def _bwd_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws):
     )
 
 
-@opaque(fake=_bwd_fake, name="transition_generic_bwd_sm90a")
+@opaque(fake=_bwd_launch_fake, name="transition_generic_bwd_sm90a")
 def _bwd_launch(
     dy: torch.Tensor,
     x: torch.Tensor,
@@ -354,7 +356,7 @@ def _bwd_launch(
     """Returns (dx, dgamma, dbeta, dWab, dWs): ``dx`` already carries the residual branch, dWab = [dWa; dWb] [2 HID, D], the weight
     gradients come out of cuBLAS (fp32 accumulation, one rounding to the weight dtype) in the weight dtype."""
     if _is_fake(dy, x):
-        return _bwd_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws)
+        return _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws)
     ext = _ext()
     tf32 = x.dtype is torch.float32
     if (

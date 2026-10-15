@@ -73,9 +73,9 @@ def test_native_inference_cli_is_explicit():
 @pytest.mark.parametrize("sms", [114, 132])
 @pytest.mark.parametrize("backward", [False, True])
 def test_transition_n2_grid_has_four_slices_and_roundtrips(sms, backward):
-    """Hidden 2 D (256 rows at D128): four 64-unit slices, ~64 weight-role CTAs = 4 x 16 (measured 255 vs 404 us at 4 x 8)."""
-    grid = transition_candidates(sms, backward=backward, slices=4)
-    assert grid[0] == {"ctas": sms, "dw_repl": 16}
+    """Hidden 2 D (256 rows at D128): four 64-unit slices, ~60 weight-role CTAs = 4 x 15 (measured: 14-15 best, 16 is 4 % slower)."""
+    grid = transition_candidates(sms, backward=backward, n=2)
+    assert grid[0] == {"ctas": sms, "dw_repl": 15}
     assert all(c["ctas"] > 4 * c["dw_repl"] for c in grid)
     assert len(grid) == len({tuple(sorted(c.items())) for c in grid})
     op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"

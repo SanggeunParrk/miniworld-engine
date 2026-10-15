@@ -30,6 +30,7 @@ SRC = Path("src")
 REG = SRC / "miniworld_engine/kernels/registry/registry.csv"
 
 GEMM = ((r"\btorch\.(?:mm|bmm|matmul)\s*\(", "torch GEMM"),
+        (r"\b_H100_BMM\.bmm\s*\(", "torch GEMM"),   # trimul_inproj/cuda/_h100_bmm: the same cuBLAS strided-batched GEMM with a zero workspace
         (r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
         (r"\btcgen05\b|\bwgmma\b|\bmma\.sync\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
 REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
