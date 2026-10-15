@@ -445,6 +445,19 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   LayerNorm-gradient rows of every D64 / D128 backward are summed by one fixed-order kernel (`lnpart_sum`) instead of two
   torch reductions. Harness training step (CUDA graph, dropout 0.25) 0.99-1.06x the retired path's 2026-09-29 numbers;
   a same-card A/B of the two paths varied from 0.93x to 1.08x between cards.
+- SWA atom DiT (`kernels/swa_dit`), bf16 on H100: every stage is hand-CUDA now (was 3 CUDA + 6 Triton). New sources
+  `cuda/swa_attn.cu` (window attention forward, and the backward's dq / dk / dv as ONE kernel; mma.sync, single-pass
+  softmax over the <= 144 keys a warp's 16 queries reach) and `cuda/swa_slab.cu` (qkvg fwd / bwd, out-projection fwd /
+  bwd, FFN fwd / bwd: 16-row slabs per 4-warp group, weights resident in smem, built for the small row counts the block
+  mostly runs at). On the CUDA backward the attention side shares one [M, 4C] buffer, so the Triton path's dP copies of
+  dv and dG are gone. New settings `swa_dit_attn_cuda`, `swa_dit_oproj_bwd_cuda`, `swa_dit_qkvg_bwd_cuda` (default on)
+  and `swa_dit_rows_impl` ("auto" / "slab" / "wgmma": which CUDA kernels serve the qkvg fwd, out-projection + FFN fwd
+  and FFN bwd; auto keeps team-gm's wgmma kernels for A % 8 == 0 at >= 5120 / 20480 rows). Measured on H100, 3 blocks
+  fwd + bwd under a CUDA graph: team-gm's `SWAAtomTransformer` at N = 1, S = 4096 0.516 ms (Triton tuned 0.571,
+  untuned 0.860, team-gm's CUDA stages 0.771); A = 48, S = 1024 1.860 ms (Triton tuned 2.325). Errors against the fp32
+  reference equal the Triton path's. Registry rows `swa_dit_{softmax_fwd,softmax_bwd,output_bwd,inproj_bwd}_sm90_cuda`,
+  `swa_dit_{inproj_fwd,output_fwd,swiglu_fwd,swiglu_bwd}_rows_sm90_cuda`.
+
 - H100 TriMul inference K1 reads row-major `W_l, W_lg, W_r, W_rg` in place (`K1ParamsQ`, four
   TMA maps) instead of a per-call packed `w1`: no weight-pack kernels on bidirectional D64 and
   single-direction D64–384; output bitwise-identical. The column-major D128 bidirectional storage
@@ -512,6 +525,34 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- SWA atom DiT on H100: the weight-gradient GEMMs and the hoisted modulation get hand-CUDA kernels (`kernels/swa_dit/cuda/swa_wgrad.cu`,
+  `swa_mod.cu`; stages "wgrad" and "mod" of `cuda/loader.py`). `wgrad` / `wgrad_f32`: a block's dWqkv, dWg, dWo, dWu, dWd in one launch
+  (clusters of 8 CTAs split K and sum in rank order through distributed shared memory; bf16 on mma.sync, fp32 on bf16 hi / lo planes:
+  4.8e-6 against an fp64 reference where cuBLAS's TF32 GEMMs have 3.0e-4), served up to 16384 rows (bf16) / 8192 rows (fp32), cuBLAS
+  above. `mod_fwd` / `mod_bwd` (bf16 c / Wmod): silu(c) Wmod^T and its backward with exact products (dmod split into three bf16
+  planes); fp32 stays on torch's GEMMs. `dmod` is no longer zero-filled when the slab kernels store it plainly (A in 1, 2, 4, 8, 16).
+  New settings `swa_dit_mod_cuda`, `swa_dit_wgrad_cuda` (default on). H100, 3 blocks fwd + bwd under a CUDA graph: bf16 A = 1,
+  S = 4096 0.656 -> 0.444 ms (Triton fused 0.708), fp32 0.700 -> 0.652 ms (Triton fused 0.825, per-op 1.654); full matrix in
+  `docs/gpus/h100/swa_atom_dit/swa_atom_dit.md`. Registry rows `swa_dit_gemm_{fwd,bwd}_sm90_cuda`, `swa_dit_dw_sm90_cuda`,
+  `swa_dit_dw_fp32_sm90_cuda`, `swa_dit_transpose_sm90_cuda`. The same weight gradients also exist on Hopper's asynchronous units (`swa_wgrad_wg.cu` bf16,
+  `swa_wgrad_wg_f32.cu` fp32: TMA producer warp, mbarrier ring, wgmma m64n128k16 MN-major, cluster-8 DSMEM reduction; stages "wgwg" /
+  "wgwg32"): bf16 at every row count (74 us against cuBLAS 111 at 49152 rows), fp32 up to 65536 rows; the modulation forward on
+  TMA + wgmma (`swa_mod_wg.cu`, stage "modwg"). Every kernel of the block chain after its heads launches with programmatic dependent
+  launch (`cuda/pdl.cuh`). bf16 H100, 3 blocks fwd + bwd under a CUDA graph: A = 1, S = 4096 0.656 -> 0.426 ms, A = 48, S = 1024
+  1.869 -> 1.653 ms; fp32 A = 1, S = 4096 0.700 -> 0.623 ms. The wgmma FFN kernels' four weight layouts
+  (formerly four torch copies per block per step) come from one launch (`swa_pack.cu`, stage "pack"), kept for the backward of the same
+  step (weakref + `_version`; not while a graph is captured).
+- fp32 SWA atom DiT block in hand-written CUDA on H100 (`kernels/swa_dit/cuda/swa_fp32.cu`, stage "fp32" of
+  `cuda/loader.py`): every stage of the fp32 fused block -- qkvg forward, window attention forward and backward,
+  out-projection + gated residual + SwiGLU FFN forward, FFN backward, out-projection backward, qkvg backward, plus a
+  per-call weight prep kernel -- as sm_90a tf32 wgmma kernels with cvt.rna-rounded operands (FFN weights split into
+  two tf32 halves) and a bf16-operand mma.sync window attention. A 64-row tile runs on a pair of CTAs that split its
+  weight stream; row tensors move by TMA; partial sums cross by `st.async` into the partner's shared memory. New
+  setting `swa_dit_fp32_cuda` (default on); it serves while torch's fp32 matmul precision allows TF32 ("high" /
+  "medium"), otherwise, off sm_90, with `engine_backend="triton"` or on a failed build the fp32 Triton kernels do.
+  Same saved tensors and weight-gradient GEMMs as the Triton path. H100, 3 blocks fwd+bwd under a CUDA graph at
+  "medium": N=1 S=4096 0.655 ms (fp32 Triton autotuned 0.780, per-op 1.78); A=48 S=1024 3.72 ms (5.70, 11.0).
+  Registry rows `swa_dit_*_fp32_sm90_cuda` (8). `build/classify.py` recognises `mma.sync` and `__cluster_dims__`.
 - SWA atom DiT fused block moved from team-gm 14f2c73 ("research(swa): preserve opt-in fused atom
   transformer work"; copied from team-gm 4fafa83, `swa_fused_triton.py` + `swa_cuda/`) into the new
   kernel family `kernels/swa_dit`: the ESMFold2 `SWAAtomBlock` (RMSNorm + adaLN-Zero, QKVG

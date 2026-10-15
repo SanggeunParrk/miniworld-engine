@@ -281,12 +281,40 @@ class Settings:
     swa_dit_ffn_fwd_cuda: bool = True
     #: Same for the FFN backward (used with `swa_dit_ffn_dw="mat"` only). Formerly SWA_FFN_BWD.
     swa_dit_ffn_bwd_cuda: bool = True
+    #: Serve the bf16 window attention -- forward, and the backward's dq / dk / dv as ONE kernel -- with the hand-CUDA sm_90a
+    #: kernels (`cuda/swa_attn.cu`); off (or any other card, or a failed build) takes `_swa_attn_fwd_kernel` and
+    #: `_swa_attn_bwd_{dq,dkv}_kernel`.
+    swa_dit_attn_cuda: bool = True
+    #: Same for the bf16 out-projection backward (`cuda/swa_slab.cu`; else `_swa_oproj_bwd_kernel`).
+    swa_dit_oproj_bwd_cuda: bool = True
+    #: Same for the bf16 qkvg backward (`cuda/swa_slab.cu`; else `_swa_qkvg_bwd_kernel`).
+    swa_dit_qkvg_bwd_cuda: bool = True
+    #: Which hand-CUDA kernels serve the stages that have two (the qkvg forward, the out-projection + FFN forward, the FFN
+    #: backward): "slab" (`cuda/swa_slab.cu`, 16-row slabs per 4-warp group, mma.sync -- built for the small row counts the
+    #: block mostly runs at), "wgmma" (team-gm's 64-row wgmma kernels), or "auto" (by row count, see
+    #: `kernels/swa_dit/dispatch.py:_SLAB_MAX_ROWS`).
+    swa_dit_rows_impl: Literal["auto", "slab", "wgmma"] = "auto"
     #: FFN weight gradients: "mat" materialises [da | db] and h and takes dW from cuBLAS; "fused" recomputes them in
     #: the `_swa_ffn_dw_kernel` Triton kernel (correct, slower in Triton: 255 registers). Formerly SWA_FFN_DW.
     swa_dit_ffn_dw: Literal["mat", "fused"] = "mat"
     #: dtype of dq1, the gradient handed from the FFN half of the backward to the attention half, on the Triton FFN
     #: backward (the hand-CUDA one writes bf16). Formerly SWA_DQ1.
     swa_dit_dq1: Literal["bf16", "fp32"] = "bf16"
+    #: Serve the fp32 block (q fp32) with the hand-CUDA sm_90a kernels of `kernels/swa_dit/cuda/swa_fp32.cu` on sm_90:
+    #: every stage -- qkvg, window attention, out-projection + FFN and their backwards -- on tf32 wgmma with
+    #: rna-rounded operands (cuBLAS's TF32; the FFN weights split in two tf32 halves) and a bf16-operand window
+    #: attention (FlashAttention-4's). Only while torch's fp32 matmul precision allows TF32 ("high" / "medium"); under
+    #: "highest", off, on any other card, or on a failed build the fp32 Triton kernels serve. The weight gradients are
+    #: torch GEMMs either way.
+    swa_dit_fp32_cuda: bool = True
+    #: Serve the hoisted adaLN modulation (`swa_dit_hoist_modulation`: silu(c) Wmod^T and its backward) with the hand-CUDA
+    #: sm_90a kernels of `kernels/swa_dit/cuda/swa_mod.cu` on sm_90, bf16 (any matmul precision) or fp32 (TF32 allowed). Off
+    #: or on any other card, the fp32 GEMMs of torch serve.
+    swa_dit_mod_cuda: bool = True
+    #: The four weight-gradient GEMMs of the bf16 block backward (dWqkv | dWg, dWo, dWu, dWd) as ONE hand-CUDA launch
+    #: (`kernels/swa_dit/cuda/swa_wgrad.cu`, clusters of 8 CTAs splitting K, summed in rank order) instead of four cuBLAS GEMMs.
+    #: sm_90, bf16, on the all-CUDA backward only.
+    swa_dit_wgrad_cuda: bool = True
 
     # ---- diagnostics ----------------------------------------------------------------------- #
     #: jaxtyped+beartype decoration on annotated functions. Off by default: it is a per-call cost.

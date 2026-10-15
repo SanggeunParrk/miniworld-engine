@@ -21,7 +21,9 @@ from miniworld_engine.kernels.swa_dit.dispatch import (
     native_h100_mod_fwd,
     swa_dit_block_bwd,
     swa_dit_block_fwd,
+    swa_dit_mod_bwd_sm90,
     swa_dit_mod_bwd_sm100,
+    swa_dit_mod_fwd_sm90,
     swa_dit_mod_fwd_sm100,
 )
 from miniworld_engine.kernels.swa_dit.interface import FP32_EPS
@@ -130,3 +132,20 @@ class H100ModulationLinear(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         return _modulation_linear_bwd(dy, *ctx.saved_tensors)
+
+
+class SWADiTModulationSm90(torch.autograd.Function):
+    """``swa_dit_hoist_modulation`` on the sm_90a kernels (``cuda/swa_mod.cu``): c [R, C] and Wmod [6C, C], both bf16 or both
+    fp32, contiguous; the modulation comes back fp32 and its gradient flows to c (c's dtype) and Wmod (Wmod's dtype)."""
+
+    @staticmethod
+    def forward(ctx, c, wmod):
+        mod, a = swa_dit_mod_fwd_sm90(c, wmod, True)
+        ctx.save_for_backward(c, a, wmod)
+        return mod
+
+    @staticmethod
+    def backward(ctx, g):
+        c, a, wmod = ctx.saved_tensors
+        dc, dw = swa_dit_mod_bwd_sm90(g.contiguous(), c, a, wmod)
+        return dc, dw

@@ -8,7 +8,7 @@ opposite of true. So the classifier walks the transitive closure of same-file ca
 classifies the union.
 
 Categories, in priority order:
-  gemm    -- a matrix multiply: tl.dot, a cuBLAS gemm call, or an MMA/WGMMA/tcgen05 atom
+  gemm    -- a matrix multiply: tl.dot, a cuBLAS gemm call, or an MMA (mma.sync) / WGMMA / tcgen05 atom
   reduce  -- no matmul, but a cross-lane or cross-block reduction: tl.sum/max/min, a warp shuffle,
              or an atomic accumulate
   elem    -- neither: per-element work, transposes, casts, gathers
@@ -31,7 +31,7 @@ REG = SRC / "miniworld_engine/kernels/registry/registry.csv"
 
 GEMM = ((r"\btorch\.(?:mm|bmm|matmul)\s*\(", "torch GEMM"),
         (r"\b(?:gemm|compile_gemm_kernel)\s*\(", "external GEMM"), (r"\btl\.dot\b", "tl.dot"), (r"cublas\w*Gemm", "cublasGemm"),
-        (r"\btcgen05\b|\bwgmma\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
+        (r"\btcgen05\b|\bwgmma\b|\bmma\.sync\b|\bmma_atom\b|\bMmaOp\b|\bmake_mma\b|\bSM90_\d+x\d+x\d+_", "mma"))
 REDUCE = ((r"\btl\.(sum|max|min)\b", "tl.reduce"), (r"__shfl\w*", "shfl"),
           (r"\batomic_add\b|\batomicAdd\b|\btl\.atomic_\w+", "atomic"))
 
@@ -80,8 +80,8 @@ def _py_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
 
 def _cu_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
     """Same for a .cu/.cuh: split on function definitions found by a brace scan."""
-    # This attribute has parentheses but is not the function's name/signature.
-    text = re.sub(r"__launch_bounds__\s*\([^)]*\)", "", text)
+    # These attributes have parentheses but are not the function's name/signature.
+    text = re.sub(r"__(?:launch_bounds|cluster_dims)__\s*\([^)]*\)", "", text)
     out: dict[str, tuple[str, set[str]]] = {}
     for m in re.finditer(r"(?:__global__|__device__|__inline__|\bvoid\b|\bstd::vector<[^>]+>|"
                          r"\btorch::Tensor\b)[^;{]*?\b(\w+)\s*\(", text):

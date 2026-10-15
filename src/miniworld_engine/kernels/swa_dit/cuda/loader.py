@@ -1,4 +1,8 @@
-"""JIT build of the three sm_90a bf16-wgmma kernels of the fused SWA atom DiT block.
+"""JIT build of the sm_90a bf16 CUDA kernels of the fused SWA atom DiT block.
+
+Five extensions (``SOURCES``): team-gm's three wgmma kernels (``qkvg``, ``fwd``, ``bwd``, below), the window attention
+forward + backward (``attn``: ``swa_attn.cu``) and the slab kernels (``slab``: ``swa_slab.cu`` -- qkvg fwd / bwd, out-projection
+fwd / bwd, FFN fwd / bwd for small row counts). The two engine sources use mma.sync + cp.async and share this module's flags.
 
 Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources, same nvcc flags (``-O3``,
 ``-gencode=arch=compute_90a,code=sm_90a``, ``--use_fast_math``); what changed is where and how they build:
@@ -13,10 +17,11 @@ Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources
 ``extension(which)`` never raises: a card that is not sm_90, a missing toolkit or a failed build all return None and the
 caller takes the Triton kernel. The reason is kept in ``ERRORS[which]``.
 
-The kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve d_atom 128, 4 heads x 32, SwiGLU hidden
-256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation. ``swa_ffn_bwd.cu`` still reads the team-gm
-diagnostics ``SWA_FFN_ABL`` (ablation bits) and ``SWA_FFN_PROF`` (clock64 section profile) from the environment; both
-default off and change nothing when unset.
+The bf16 kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve d_atom 128, 4 heads x 32,
+SwiGLU hidden 256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation. ``swa_ffn_bwd.cu`` still
+reads the team-gm diagnostics ``SWA_FFN_ABL`` (ablation bits) and ``SWA_FFN_PROF`` (clock64 section profile) from the
+environment; both default off and change nothing when unset. ``swa_fp32.cu`` (stage "fp32") is the whole fp32 block,
+forward and backward, on tf32 wgmma with a bf16 window attention; its header says what each kernel does.
 """
 
 from __future__ import annotations
@@ -32,7 +37,16 @@ from miniworld_engine import settings
 _DIR = Path(__file__).resolve().parent
 
 #: stage -> source file stem (and the python-visible entry point it defines).
-SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd"}
+SOURCES = {"qkvg": "swa_qkvg_fwd", "fwd": "swa_ffn_fwd", "bwd": "swa_ffn_bwd",
+           # bf16 window attention fwd + bwd, and the out-projection / qkvg backwards (mma.sync; see the files' headers)
+           "attn": "swa_attn", "slab": "swa_slab",
+           "fp32": "swa_fp32",                     # every fp32 stage (tf32 wgmma + bf16 attention), see swa_fp32.cu
+           "mod": "swa_mod",
+           "wgrad": "swa_wgrad",
+           "wgwg": "swa_wgrad_wg",
+           "wgwg32": "swa_wgrad_wg_f32",
+           "modwg": "swa_mod_wg",
+           "pack": "swa_pack"}   # the wgmma FFN kernels\' four weight layouts in one launch, see swa_pack.cu
 SOURCES.update(qkvg_small="swa_qkvg_fwd", fwd_small="swa_ffn_fwd", bwd_overwrite="swa_ffn_bwd")
 
 # Separate build identities preserve the legacy kernels and their schedules.
@@ -72,7 +86,7 @@ def is_sm90(device: torch.device | None = None) -> bool:
 
 
 def extension(which: str) -> Any:
-    """The built extension for stage ``which`` ("qkvg", "fwd" or "bwd"), or None. Never raises.
+    """The built extension for stage ``which`` ("qkvg", "fwd", "bwd" or "fp32"), or None. Never raises.
 
     Built once per process on first use; a failed build is not retried (``ERRORS`` says why).
     """

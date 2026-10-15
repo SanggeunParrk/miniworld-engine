@@ -77,7 +77,10 @@ def test_the_defaults_are_team_gms():
     assert (s.swa_dit_qkvg_fwd_cuda, s.swa_dit_ffn_fwd_cuda, s.swa_dit_ffn_bwd_cuda) == (True, True, True)
     assert s.swa_dit_ffn_dw == "mat"
     assert s.swa_dit_dq1 == "bf16"
-
+    # the engine's own hand-CUDA stages (the attention side), on by default like team-gm's three
+    assert (s.swa_dit_attn_cuda, s.swa_dit_oproj_bwd_cuda, s.swa_dit_qkvg_bwd_cuda) == (True, True, True)
+    assert s.swa_dit_rows_impl == "auto"
+    assert s.swa_dit_fp32_cuda is True       # the fp32 CUDA extension (no team-gm counterpart), on by default
 
 @pytest.mark.parametrize(("change", "reason"), [
     ({}, "CUDA"),
