@@ -71,6 +71,10 @@ using namespace tmn; using namespace tmn::sm90;
 #define BIAS_PF 0    // > 0: the producer prefetches the bias tile BIAS_PF blocks ahead into L2 (one bulk tensor prefetch per 32 keys):
                      // the bias is read from DRAM on a 29 % miss rate at 24 heads (56 MB > L2), and its first use stalls the warps
 #endif
+#ifndef FWD_BN
+#define FWD_BN 64    // keys per block of the serial forward (64 or 128): 128 halves the per-block fixed work (wgmma commit / wait,
+                     // max shuffles, barriers) at the cost of 32 more score registers
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -112,6 +116,15 @@ TMN_DEVI void tma_load_4d(void* dst, const CUtensorMap* map, uint64_t* bar, int 
                :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
 
+constexpr int FBN = FWD_BN;                                         // keys per block of the serial forward
+constexpr int FKCH = FBN * 128;                                     // bytes of one 128-B chunk of its k tile
+constexpr int FST_BYTES = NCH * FKCH + (FBN / 32) * VCH;            // its stage: k chunks + FBN / 32 v^T chunks of 32 keys
+static_assert(FBN == 64 || FBN == 128, "forward block of 64 or 128 keys");
+// FBN == 128 is a measured dead end and WRONG: with 2 CTAs / SM the 96-register cap spills 450 B / thread and ptxas serializes the wgmmas
+// ("insufficient register resources"); the spilled accumulators come back as garbage (rel error 5-10, non-finite at L768), while the
+// timings looked like 90 us. It needs <= 1 CTA / SM of two warpgroups (low occupancy: slower). Kept behind the build guard.
+static_assert(FBN == 64, "FWD_BN = 128 spills the wgmma accumulators at 2 CTAs / SM and returns wrong results: see the comment above");
+
 // the bias tile of a stage (the multicast form): two 128-B-swizzled boxes of 32 keys, QM rows each
 constexpr int ST_MC = NCH * KCH + 2 * VCH + 2 * QM * 128;
 TMN_DEVI void tma_load_mc2d(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
@@ -133,6 +146,14 @@ TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%clust
 TMN_DEVI void mma_qk(float (&d)[32], uint64_t a, uint64_t b) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_qk128(float (&d)[64], uint64_t a, uint64_t b) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, %64, %65, p, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
+    : "l"(a), "l"(b));
+}
+template <int N> TMN_DEVI void mma_qkn(float (&d)[N / 2], uint64_t a, uint64_t b) {
+  if constexpr (N == 64) mma_qk(d, a, b); else mma_qk128(d, a, b);
 }
 // S (+)= q k^T, m64 n64 k8: A (q, TF32 bits) from registers, B (k) from shared memory
 TMN_DEVI void mma_qk_rs(float (&d)[32], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint64_t b) {
@@ -175,7 +196,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint8_t* sq = sm;
   uint8_t* sst = sm + Q_BYTES;
-  uint64_t* full = reinterpret_cast<uint64_t*>(sst + STAGES * ST_BYTES);
+  uint64_t* full = reinterpret_cast<uint64_t*>(sst + STAGES * FST_BYTES);
   uint64_t* empty = full + STAGES;
   uint64_t* qbar = empty + STAGES;
 
@@ -184,7 +205,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   const int samp = blockIdx.x % A, cid = blockIdx.x / A;
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, srow = samp * L;
-  const int nblocks = L / BN;
+  const int nblocks = L / FBN;
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], 2); mbar_init(&empty[s], 4 * NWG); }
@@ -205,8 +226,8 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #if BIAS_PF
       if (iss == 0) {                                               // the first blocks' bias tiles, before the ring starts
         for (int p = 0; p < BIAS_PF && p < nblocks; ++p) {
-          tma_prefetch_l2_2d(&mb, p * BN, head * L + m0);
-          tma_prefetch_l2_2d(&mb, p * BN + 32, head * L + m0);
+          tma_prefetch_l2_2d(&mb, p * FBN, head * L + m0);
+          tma_prefetch_l2_2d(&mb, p * FBN + 32, head * L + m0);
         }
       }
 #endif
@@ -214,21 +235,21 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
         const int s = n % STAGES;
 #if BIAS_PF
         if (iss == 0 && n + BIAS_PF < nblocks) {
-          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * BN, head * L + m0);
-          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * BN + 32, head * L + m0);
+          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * FBN, head * L + m0);
+          tma_prefetch_l2_2d(&mb, (n + BIAS_PF) * FBN + 32, head * L + m0);
         }
 #endif
         mbar_wait(&empty[s], ((n / STAGES) & 1) ^ 1);
-        uint8_t* slot = sst + s * ST_BYTES;
-        const int k0 = srow + n * BN;
+        uint8_t* slot = sst + s * FST_BYTES;
+        const int k0 = srow + n * FBN;
         if (iss == 0) {
-          mbar_arrive_expect_tx(&full[s], NCH * KCH);
+          mbar_arrive_expect_tx(&full[s], NCH * FKCH);
           tma_load_4d(slot, &mk, &full[s], qcol, 0, 0, k0 / 8);
-          if (NCH == 2) tma_load_4d(slot + KCH, &mk, &full[s], qcol + 32, 0, 0, k0 / 8);
+          if (NCH == 2) tma_load_4d(slot + FKCH, &mk, &full[s], qcol + 32, 0, 0, k0 / 8);
         } else {
-          mbar_arrive_expect_tx(&full[s], 2 * VCH);
-          tma_load_2d(slot + NCH * KCH, &mvt, &full[s], k0, qcol);
-          tma_load_2d(slot + NCH * KCH + VCH, &mvt, &full[s], k0 + 32, qcol);
+          mbar_arrive_expect_tx(&full[s], (FBN / 32) * VCH);
+#pragma unroll
+          for (int c = 0; c < FBN / 32; ++c) tma_load_2d(slot + NCH * FKCH + c * VCH, &mvt, &full[s], k0 + 32 * c, qcol);
         }
       }
     }
@@ -279,7 +300,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   }
 #endif
 
-  float sc[32];
+  float sc[FBN / 2];
 #if PREFETCH_BIAS
   float2 bpf[16];                                                    // block n + 1's bias, loaded under block n's MMAs / softmax
 #pragma unroll
@@ -298,16 +319,19 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #elif BIAS_NOMEM
       const float2 b0 = make_float2(1e-3f * (n + j), 2e-3f * (j + t + wg)), b1 = make_float2(3e-3f * (n + t), 1e-3f * (j + g));
 #else
-      const float2 b0 = *reinterpret_cast<const float2*>(brow0 + n * BN + 8 * j);
-      const float2 b1 = *reinterpret_cast<const float2*>(brow1 + n * BN + 8 * j);
+      const float2 b0 = *reinterpret_cast<const float2*>(brow0 + n * FBN + 8 * j);
+      const float2 b1 = *reinterpret_cast<const float2*>(brow1 + n * FBN + 8 * j);
 #endif
-      float2 km = make_float2(0.f, 0.f);
-      if (HASM) km = *reinterpret_cast<const float2*>(kmr + n * BN + 8 * j);
-      sc[4 * j] = b0.x + km.x; sc[4 * j + 1] = b0.y + km.y; sc[4 * j + 2] = b1.x + km.x; sc[4 * j + 3] = b1.y + km.y;
+      if constexpr (HASM) {
+        const float2 km = *reinterpret_cast<const float2*>(kmr + n * FBN + 8 * j);
+        sc[4 * j] = b0.x + km.x; sc[4 * j + 1] = b0.y + km.y; sc[4 * j + 2] = b1.x + km.x; sc[4 * j + 3] = b1.y + km.y;
+      } else {                                                      // no mask: the loaded bias IS the seed (x + 0.f is a real FADD)
+        sc[4 * j] = b0.x; sc[4 * j + 1] = b0.y; sc[4 * j + 2] = b1.x; sc[4 * j + 3] = b1.y;
+      }
     }
     mbar_wait(&full[sn], (n / STAGES) & 1);
-    const uint32_t slot = sbase + sn * ST_BYTES;
-    const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + KCH);
+    const uint32_t slot = sbase + sn * FST_BYTES;
+    const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + FKCH);
     wgmma_fence();
 #if QK_RS
 #pragma unroll
@@ -316,30 +340,30 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     for (int ks = 0; ks < JJ - 4; ++ks) mma_qk_rs(sc, qf[4 + ks][0], qf[4 + ks][1], qf[4 + ks][2], qf[4 + ks][3], dK1 + ks * 2);
 #else
 #pragma unroll
-    for (int ks = 0; ks < 4; ++ks) mma_qk(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
+    for (int ks = 0; ks < 4; ++ks) mma_qkn<FBN>(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
 #pragma unroll
-    for (int ks = 0; ks < JJ - 4; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);       // 32..DH - 1
+    for (int ks = 0; ks < JJ - 4; ++ks) mma_qkn<FBN>(sc, dQ1 + ks * 2, dK1 + ks * 2);       // 32..DH - 1
 #endif
     wgmma_commit();
 #if PREFETCH_BIAS
     if (n + 1 < nblocks) {
 #pragma unroll
       for (int j = 0; j < 8; ++j) {
-        bpf[2 * j] = *reinterpret_cast<const float2*>(brow0 + (n + 1) * BN + 8 * j);
-        bpf[2 * j + 1] = *reinterpret_cast<const float2*>(brow1 + (n + 1) * BN + 8 * j);
+        bpf[2 * j] = *reinterpret_cast<const float2*>(brow0 + (n + 1) * FBN + 8 * j);
+        bpf[2 * j + 1] = *reinterpret_cast<const float2*>(brow1 + (n + 1) * FBN + 8 * j);
       }
     }
 #endif
     wgmma_wait<0>();
 #pragma unroll
-    for (int i = 0; i < 32; ++i) fence_reg(sc[i]);
+    for (int i = 0; i < FBN / 2; ++i) fence_reg(sc[i]);
     float m_new[2];
     bool moved = false;
 #pragma unroll
     for (int h = 0; h < 2; ++h) {
       float mx = -INFINITY;
 #pragma unroll
-      for (int j = 0; j < 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
+      for (int j = 0; j < FBN / 8; ++j) mx = fmaxf(mx, fmaxf(sc[4 * j + 2 * h], sc[4 * j + 2 * h + 1]));
       mx = fmaxf(qmax(mx), -1e30f);
       m_new[h] = mx > m_i[h] + LAZY ? mx : m_i[h];
       moved |= m_new[h] != m_i[h];
@@ -357,11 +381,11 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #if INPLACE_P
 #define PA(i) (__float_as_uint(sc[i]))
 #else
-    uint32_t pa[32];
+    uint32_t pa[FBN / 2];
 #define PA(i) (pa[i])
 #endif
 #pragma unroll
-    for (int j = 0; j < 8; ++j) {
+    for (int j = 0; j < FBN / 8; ++j) {
 #pragma unroll
       for (int h = 0; h < 2; ++h) {
 #if TRUNC_P
@@ -383,13 +407,13 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #endif
       }
     }
-    const uint64_t dV0 = dsw(slot + NCH * KCH), dV1 = dsw(slot + NCH * KCH + VCH);
+    const uint32_t vbase = slot + NCH * FKCH;
     wgmma_fence();
 #pragma unroll
     for (int i = 0; i < ACC; ++i) fence_reg(acc[i]);
 #pragma unroll
-    for (int j = 0; j < 8; ++j)                                     // A (row g, k t) = S (g, 2t), (g, k t + 4) = S (g, 2t + 1)
-      mma_pvd<DH>(acc, PA(4 * j), PA(4 * j + 2), PA(4 * j + 1), PA(4 * j + 3), (j < 4 ? dV0 : dV1) + (j % 4) * 2);
+    for (int j = 0; j < FBN / 8; ++j)                               // A (row g, k t) = S (g, 2t), (g, k t + 4) = S (g, 2t + 1)
+      mma_pvd<DH>(acc, PA(4 * j), PA(4 * j + 2), PA(4 * j + 1), PA(4 * j + 3), dsw(vbase + (j / 4) * VCH) + (j % 4) * 2);
     wgmma_commit();
     wgmma_wait<0>();
     if ((tid & 31) == 0 && n + STAGES < nblocks) mbar_arrive(&empty[sn]);
@@ -1262,9 +1286,9 @@ CUtensorMap map2d(const float* p, uint64_t rows, uint64_t cols, uint64_t rs, uin
   return encode(p, 2, dims, strides, box);
 }
 // the k rows, permuted within each group of 8 (smem row 2j + i = key 4i + j): dims (columns, i, j, row group)
-CUtensorMap map_kperm(const float* p, uint64_t rows, uint64_t cols, uint64_t rs) {
+CUtensorMap map_kperm(const float* p, uint64_t rows, uint64_t cols, uint64_t rs, uint32_t groups = 8) {
   const cuuint64_t dims[4] = {cols, 2, 4, rows / 8}, strides[3] = {4 * rs * 4, rs * 4, 8 * rs * 4};
-  const cuuint32_t box[4] = {32, 2, 4, 8};
+  const cuuint32_t box[4] = {32, 2, 4, groups};
   return encode(p, 4, dims, strides, box);
 }
 
@@ -1276,7 +1300,7 @@ void launch(int A, int L, const CUtensorMap& mq, const CUtensorMap& mk, const CU
   const size_t smem = 1024 + Q_BYTES + PSTAGES * ST_BYTES + 256;
   auto kern = attn_tf32_fwd_pipe_kernel<GATED, HASM>;
 #else
-  const size_t smem = 1024 + Q_BYTES + STAGES * ST_BYTES + 256;
+  const size_t smem = 1024 + Q_BYTES + STAGES * FST_BYTES + 256;
   auto kern = attn_tf32_fwd_kernel<GATED, HASM>;
 #endif
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -1326,7 +1350,7 @@ void attn_tf32_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor vt, torch::Te
   if (hasm) { check_f32(*kmask, "kmask"); TORCH_CHECK(kmask->numel() == (int64_t)A * L, "kmask [A, L]"); }
   const at::cuda::CUDAGuard guard(q.device());
   const uint64_t rows = (uint64_t)A * L;
-  const auto mq = map2d(q.data_ptr<float>(), rows, DM, DM, QM), mk = map_kperm(k.data_ptr<float>(), rows, DM, DM),
+  const auto mq = map2d(q.data_ptr<float>(), rows, DM, DM, QM), mk = map_kperm(k.data_ptr<float>(), rows, DM, DM, FBN / 8),
              mvt = map2d(vt.data_ptr<float>(), DM, rows, rows, DH);
   auto f = [](torch::Tensor& t) { return t.data_ptr<float>(); };
   if (hasm) launch<false, true>(A, L, mq, mk, mvt, f(bias), kmask->data_ptr<float>(), f(O), f(LSE), nullptr, 0, 0);
@@ -1345,7 +1369,7 @@ void attn_tf32_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor vt, torch:
   if (hasm) { check_f32(*kmask, "kmask"); TORCH_CHECK(kmask->numel() == (int64_t)A * L, "kmask [A, L]"); }
   const at::cuda::CUDAGuard guard(q.device());
   const uint64_t rows = (uint64_t)A * L;
-  const auto mq = map2d(q.data_ptr<float>(), rows, DM, DM, QM), mk = map_kperm(k.data_ptr<float>(), rows, DM, DM),
+  const auto mq = map2d(q.data_ptr<float>(), rows, DM, DM, QM), mk = map_kperm(k.data_ptr<float>(), rows, DM, DM, FBN / 8),
              mvt = map2d(vt.data_ptr<float>(), DM, rows, rows, DH);
   auto f = [](torch::Tensor& t) { return t.data_ptr<float>(); };
   if (hasm) launch<false, true>(A, L, mq, mk, mvt, f(bias), kmask->data_ptr<float>(), f(OG), f(LSE), f(qkvg), 4 * DM, 3 * DM);
@@ -1364,12 +1388,12 @@ void attn_tf32_inf(torch::Tensor qkg, torch::Tensor vt, torch::Tensor bias_all, 
               "shapes");
   const at::cuda::CUDAGuard guard(qkg.device());
   float* base = qkg.data_ptr<float>();
-  const auto mq = map2d(base, rows, DM, rs, QM), mk = map_kperm(base + DM, rows, DM, rs),
+  const auto mq = map2d(base, rows, DM, rs, QM), mk = map_kperm(base + DM, rows, DM, rs, FBN / 8),
              mvt = map2d(vt.data_ptr<float>(), DM, rows, rows, DH);
   float* bias = bias_all.data_ptr<float>() + (size_t)block * NH * L * L;
   int cs = 1;
   for (int c = 8; c >= 2; --c) if (S % c == 0) { cs = c; break; }   // samples of one (head, row tile) share the bias tile
-  if (MC_BIAS && cs > 1) {
+  if (MC_BIAS && FBN == 64 && cs > 1) {
     const auto mb = map2d(bias, (uint64_t)NH * L, L, L, QM);          // [head * L + row, key]: boxes of 32 keys x QM rows
     launch_mc<false>((int)S, L, cs, mq, mk, mvt, mb, nullptr, base, (long)rs, (long)goff);
     return;

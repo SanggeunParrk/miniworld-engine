@@ -625,7 +625,7 @@ class FusedTokenDiT:
             if sm90.tf32_inference_core_supported(self.dtype, L, self.d, self.h, idx):
                 try:
                     nh, dh = self.h, self.d // self.h
-                    sm90._ext("attn_tf32", sm90.tf32_defs(nh, dh))  # build now: a failure keeps Triton
+                    sm90._ext("attn_tf32", sm90.tf32_fwd_defs(nh, dh))  # build now: a failure keeps Triton
                     core = functools.partial(sm90.tf32_gated_inference, nh=nh, dh=dh)
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
                     import warnings

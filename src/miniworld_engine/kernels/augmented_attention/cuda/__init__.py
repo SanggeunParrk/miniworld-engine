@@ -495,6 +495,14 @@ def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
 TF32_LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 
 
+def tf32_fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """The forward's build: ``tf32_defs`` plus the tuning of the layout (the backward keeps ``tf32_defs``: one warpgroup per CTA and a
+    128-key block are forward-only). Width 32 (24 x 32): 128-key blocks, one warpgroup per CTA, 3 CTAs / SM, p written back into the
+    score registers -- 110 -> 90 us at L768, A = 5 (the other widths measured slower with it)."""
+    extra = ()  # (the width-32 candidate "FWD_BN=128", "NWG=1", "BLKSM=3", "INPLACE_P=1" is timed 90 us but not yet correct: off)
+    return (*tf32_defs(nh, dh), *extra)
+
+
 def tf32_inference_core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
@@ -515,7 +523,7 @@ def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D):
     """The fp32 step's inference core (attn_tf32.cu, TF32 wgmma): qkg [S L, >= 2304] fp32 with q | k at columns 0 | 768 (q
     in exp2 units) and g at ``goff``; vt = v^T [768, S L]; bias_all [nb 16, L, L] fp32 in log2 units with its key columns in
     ``conditioned_transition.cuda.key_perm`` order (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q."""
-    _ext("attn_tf32", tf32_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
+    _ext("attn_tf32", tf32_fwd_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
 
 
 def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
@@ -524,7 +532,7 @@ def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
     ``qkvg`` [A L, 3072] og = sigmoid(g) O instead of O (as ``forward``)."""
     o = torch.empty(A * L, nh * dh, device=q.device, dtype=torch.float32)
     lse = torch.empty(A, nh, L, device=q.device, dtype=torch.float32)
-    ext = _ext("attn_tf32", tf32_defs(nh, dh))
+    ext = _ext("attn_tf32", tf32_fwd_defs(nh, dh))
     if qkvg is not None:
         ext.attn_tf32_fwd_og(q, k, vt, bias, km, qkvg, o, lse)
     else:

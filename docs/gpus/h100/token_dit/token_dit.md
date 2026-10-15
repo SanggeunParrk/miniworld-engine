@@ -492,3 +492,18 @@ use of the loaded bias: `FADD R24, RZ, R24` carries 18 % of all samples), Wait 1
 answers to that stall did not help: the bias hidden under the MMAs (`PREFETCH_BIAS`, 1.00x) and the bias delivered through shared
 memory by cluster multicast (`MC_BIAS`, 0.99x); and `BIAS_PF=n`, a one-thread bulk tensor prefetch of the bias tile n blocks ahead into
 L2, is 0.76x at 24 x 32 for every n (0.78-0.87x at the other layouts), so it stays off.
+
+### Anthropic's attention core against ours (2026-10-15, fp32, A = 5, L768, the core alone, CUDA events)
+
+| layout | Anthropic `fpf_apb.apb_views` (Triton, 64 x 64 tiles, 4 warps / CTA, TMA bias) | ours `attn_tf32_fwd` |
+|---|---|---|
+| 16 x 48 | 124 us (head dim padded to 64) | **87 us** |
+| 24 x 32 | **94 us** | 110 us |
+| 12 x 64 | 93 us | **87 us** |
+
+ncu at 24 x 32: Anthropic 113 us / 32.0 M instructions / 108 registers / 4 CTAs of 128 threads / 599 K global load requests; ours 129 us /
+34.6 M / 96 registers / 2 CTAs of 288 threads / 1.15 M requests (both under ncu's locked clocks). Same occupancy (4 warpgroups an SM) and
+the same issue-slot utilisation (41 %); the 12 % gap is 8 % fewer instructions and a shorter bias-load stall. That is why the 24 x 32
+block is 0.99x of Anthropic's at L768 while every other cell of the table is ahead. Two attempts to close it: FWD_BN = 128 (halve the
+per-block fixed work) *timed* 90 us but is wrong -- the 96-register cap spills the wgmma accumulators (ptxas C7512, 450 B spill) and the
+output is garbage; it is now blocked by a static_assert. Removing the bias seed FADD: no change.
