@@ -23,7 +23,7 @@ from miniworld_engine.viz import style
 #: the second axis of a table's first column -> (tick prefix, chart / file name)
 AXES = {"Dimension": ("D", "dimension"), "MSA depth": ("S", "msa_depth")}
 #: table column -> style identity (colour / legend order)
-IDENTITY = {"PyTorch compiled": "torch.compile", "cuEquivariance": "cuequivariance", "Anthropic": "anthropic",
+IDENTITY = {"PyTorch compiled": "torch.compile", "PyTorch eager": "pytorch", "cuEquivariance": "cuequivariance", "Anthropic": "anthropic",
             "Triton path": "triton", "engine v2.2": "triton", "ours": "miniworld"}
 MARK = "<!-- measure_bars -->"
 TIMES = "\u00d7"     # the speed-up column's header (multiplication sign)

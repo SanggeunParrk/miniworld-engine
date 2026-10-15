@@ -5657,15 +5657,20 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         dtype=dtype,
         requires_grad=is_train,
     )
-    cond = torch.randn(
-        conf.n_augment,
-        1,
-        atom_len,
-        d_single,
-        device=DEVICE,
-        dtype=dtype,
-        requires_grad=is_train,
-    )
+    if conf.shared_cond:  # one conditioning for every sample (stride 0 over the samples: a sampling step / the model's repeated atom c)
+        cond = torch.randn(
+            1, 1, atom_len, d_single, device=DEVICE, dtype=dtype, requires_grad=is_train
+        ).expand(conf.n_augment, 1, atom_len, d_single)
+    else:
+        cond = torch.randn(
+            conf.n_augment,
+            1,
+            atom_len,
+            d_single,
+            device=DEVICE,
+            dtype=dtype,
+            requires_grad=is_train,
+        )
     pair = torch.randn(
         1,
         windows(atom_len),

@@ -272,11 +272,27 @@ local_adaln1_extra_sm90(const __nv_bfloat16* __restrict__ a, const __nv_bfloat16
 }
 
 // Fixed-order partial reductions preserve the cross-KV parameter gradients.
-extern "C" __global__ void local_kv_bias_part_sm90(const __nv_bfloat16* src,float* part,int M) {
- int c=threadIdx.x;
- float value=0.f;
- for(int r=blockIdx.x;r<M;r+=gridDim.x)value+=__bfloat162float(src[size_t(r)*256+c]);
- part[size_t(blockIdx.x)*128+c]=value;
+// column sums of src[:, 0:128] (row stride 256): block b sums rows b, b + G, ... (16 rows in flight, a thread holds 8 columns); the 16 row
+// groups of a block combine in a fixed order through shared memory -> part[b, 128]
+extern "C" __global__ void __launch_bounds__(256) local_kv_bias_part_sm90(const __nv_bfloat16* src, float* part, int M) {
+ __shared__ float red[16][129];
+ const int c8 = (threadIdx.x & 15) * 8, rg = threadIdx.x >> 4;
+ float v[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+ for (int r = blockIdx.x * 16 + rg; r < M; r += gridDim.x * 16) {
+  const uint4 u = *reinterpret_cast<const uint4*>(src + size_t(r) * 256 + c8);
+  const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+  #pragma unroll
+  for (int i = 0; i < 4; ++i) { v[2 * i] += __uint_as_float(w[i] << 16); v[2 * i + 1] += __uint_as_float(w[i] & 0xffff0000u); }
+ }
+ #pragma unroll
+ for (int i = 0; i < 8; ++i) red[rg][c8 + i] = v[i];
+ __syncthreads();
+ if (threadIdx.x < 128) {
+  float s = 0.f;
+  #pragma unroll
+  for (int g = 0; g < 16; ++g) s += red[g][threadIdx.x];
+  part[size_t(blockIdx.x) * 128 + threadIdx.x] = s;
+ }
 }
 extern "C" __global__ void local_reduce_columns_sm90(const float* part,float* out,int count) {
  int c=threadIdx.x;

@@ -444,6 +444,13 @@ class Settings:
     #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
     #: False disables the native Hopper training path.
     local_dit_h100_train: bool | None = None
+    #: The H100 local atom DiT on warp-level tensor-core kernels (``integrations/local_dit_h100``): fp32 inference (TF32). Off keeps the
+    #: previous routes.
+    local_dit_h100_mma: bool = True
+    local_dit_h100_mma_fp32: bool = True
+    local_dit_h100_mma_bf16: bool = True
+    #: programmatic dependent launch between the kernels of the H100 local atom DiT (the next kernel's launch overlaps the previous one's tail)
+    local_dit_h100_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None

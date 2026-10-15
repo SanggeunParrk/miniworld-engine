@@ -8,6 +8,23 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Changed
+
+- H100 AF3 local atom DiT (`LocalDiTBlock`, cross-attention): native fp32 (TF32) and bf16 paths for inference and training at any A and any N
+  (`integrations/local_dit_h100.py`, `kernels/augmented_attention/cuda/sm90_atom/`, `sm100_atom_local/lattn90*.cu`). Warp-level tensor-core row
+  kernels (wgmma with register A operands, 16-byte lane layout) and `mma.sync` window attention with the bias resident in shared memory.
+  Harness (CUDA graph, 4096 atoms): bf16 inference A5 0.098 ms (Anthropic 0.322), fp32 A5 0.151 ms (0.468; the previous fp32 path was the
+  module composition at 1.57 ms), bf16 training A48 3.6 ms (was 11.7; PyTorch eager composition 25.3, torch.compile 7.4), fp32 training A48 6.0 ms (was 21.8; PyTorch eager 26.2, torch.compile 12.0).
+  fp32 gradients are within the TF32 module's error (2-5x better on the output). Switches `settings.local_dit_h100_mma{,_fp32,_bf16}`.
+  A conditioning passed as an expanded view (stride 0 over the samples) is tabulated once per atom (A48 / 4096 atoms: bf16 training
+  3.59 -> 3.09 ms, fp32 6.02 -> 4.79 ms; the backward reduces four samples per CTA group in shared memory and a single `cond_bwd_sh90`
+  kernel replaces the sum + 13 small GEMM / elementwise launches). `bench.py target=local_dit` gained `+shared_cond=true`.
+  Small row counts: one-launch weight pack (`pack90.cu`, was ~150 kernels / 230 us per step) and split launches of the row kernels (A1 N128
+  fp32 training 0.538 -> 0.242 ms, now faster than `torch.compile` 0.277 and every other measured column in all 44 cells; a 336-cell matrix of A 1-48 x N 64-4096 x
+  fp32 / bf16 x per-sample / shared conditioning x inference / training has ours fastest everywhere, smallest margin 1.09x).
+  Tests `tests/gpu/sm90/test_h100_local_dit_mma_gpu.py`, `test_h100_local_dit_pack_gpu.py`; page `docs/gpus/h100/local_dit/local_dit.md`.
+  `viz.measure_bars` draws a `PyTorch eager` column in the PyTorch colour.
+
 ### Removed
 
 - The dense atom DiT (attention over all N atoms with the shared pair bias; the AF3 atom transformer is the block-local

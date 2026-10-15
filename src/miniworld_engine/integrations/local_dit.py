@@ -335,6 +335,10 @@ def _fp32_call(module, single, cond, pair) -> bool:
 
 
 def serves(module, single, cond, pair, mask) -> bool:
+    from miniworld_engine.integrations import local_dit_h100
+
+    if local_dit_h100.matches(module, single, cond, pair, mask):
+        return True
     qualified = _serves_hopper_training(module, single, cond, pair, mask)
     if qualified is not None:
         return qualified
@@ -1302,6 +1306,10 @@ def _infer(single, cond, pair, mask, weights):
 
 def block(module, single, cond, pair, mask=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
+    from miniworld_engine.integrations import local_dit_h100
+
+    if local_dit_h100.matches(module, single, cond, pair, mask):
+        return local_dit_h100.run_block(module, single, cond, pair, mask)
     weights = [
         module.get_parameter(name)
         for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))
