@@ -453,3 +453,17 @@ CUDA graph (ours) / `compile=false` (Anthropic's release, its own invocation; no
 
 70 of 72 cells are faster than Anthropic. The two exceptions are 24 x 32 fp32, A = 5, L640 / L768 (0.98x / 0.99x: 0.395 vs 0.391 ms at
 L768): the fp32 attention forward is latency bound there (see "Limits and next"), so it converges to Anthropic's TF32 core.
+
+### fp32 inference cells under 5 % of Anthropic (2026-10-15)
+
+Cells below 1.05x of the table above: 24 x 32 A = 5 L640 / L768 (0.98x / 0.99x), 12 x 64 A = 5 L640 / L768 (1.04x), and 16 x 64 A = 5
+L512 / L640 (1.05x). Measured and rejected as levers:
+
+- The cuBLAS TF32 GEMMs are at 60-68 % of the TF32 tensor peak (qkvg 46 us = 295 TFLOP/s, expand 54 us = 336 TFLOP/s); CUTLASS 3.x
+  TF32 (`KernelTmaWarpSpecialized{Cooperative,Pingpong}`, tiles 128x128 / 128x256 / 256x128, clusters 1x2 / 2x1) measured 0.51-0.95x of
+  cuBLAS on the five GEMM shapes, with 2.6x the error (its wgmma operands are truncated, cuBLAS rounds): not a lever.
+- The fused expand + SwiGLU GEMM saves ~16 us but raises the block error 2.9e-4 -> 4.6e-4 (and is wrong at 24 heads: cache key): off.
+- The 24 x 32 attention forward costs 110 us against 87 us at 16 x 48 for the same MACs (1.5x the softmax work: 24 heads x L^2 exps);
+  configuration sweeps (BLKSM 3 / 4, STAGES 3 / 4, NWG 1, LAZY, PSTAGES) are neutral or slower, `TRUNC_P=1` +3.7 % and `QK_RS=1`
+  +3.3 % at 24 x 32 (not combinable: 1.00x), both worse at 16 x 48 / 12 x 64. Reaching +5 % at 24 x 32 L768 needs ~ -23 us of the
+  110 us attention: a restructured forward (a 128-key block or a ping-pong schedule between the two warpgroups), not a flag.
