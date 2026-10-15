@@ -388,6 +388,19 @@ fp32 inference, A = 5 shared cond, PyTorch compiled / ours (ms), CUDA graph, key
 Accuracy against the fp32 IEEE block: 2.9e-4 at every layout and length (same as 16 x 48). The TF32 attention forward alone:
 5.9e-4 to 7.3e-4 against fp64 at every layout.
 
-Not done: the native H100 fp32 / bf16 **training** path and the bf16 inference attention core still serve 16 x 48 only (24 x 32,
-12 x 64, 16 x 64 take the general path: 1.1-1.7x PyTorch). The TF32 backward kernels (`attn_tf32_dqb` / `attn_tf32_dkv`) are
-templated the same way but are not wired into `token_dit_train.py`, whose native H100 pack / final kernels are 16 x 48.
+bf16 inference at the same layouts (`attn_fwd.cu` built per layout: `DHP` 32 / 48 / 64 -- a new `m64n64k16` PV form for width 64 --
+and `ROW_WIDTH`; the H100 serving gate admits `LAYOUTS`), PyTorch compiled / ours (ms), A = 5 shared cond:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 0.283 | 0.103 | 2.75 | 0.666 | 0.178 | 3.74 |
+| 24 x 32 | 0.308 | 0.106 | 2.90 | 0.813 | 0.191 | 4.26 |
+| 12 x 64 | 0.271 | 0.109 | 2.48 | 0.613 | 0.191 | 3.20 |
+| 16 x 64 (d 1024) | 0.334 | 0.139 | 2.41 | 0.769 | 0.272 | 2.83 |
+
+Accuracy against the fp32 IEEE block: 3.6e-3 at every layout (the bf16 recipe's own error, same as 16 x 48).
+
+Not done: the native H100 **training** path (bf16 and fp32) still serves 16 x 48 only (24 x 32, 12 x 64, 16 x 64 take the general
+path: 1.1-1.8x PyTorch). The TF32 backward kernels (`attn_tf32_dqb` / `attn_tf32_dkv`) are templated the same way but not wired into
+`token_dit_train.py`, whose native H100 pack / final kernels are 16 x 48; `attn_dq.cu` / `attn_dkv.cu` / `attn_dqb.cu` (bf16) are
+not built for width 64.

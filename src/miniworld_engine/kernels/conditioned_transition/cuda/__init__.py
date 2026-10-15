@@ -125,7 +125,6 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         or pair.dtype != single.dtype
         or B != 1
         or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
-        or (single.dtype is torch.bfloat16 and (heads, D) != (16, 768))  # the bf16 attention core is built for 16 x 48
         or L % 128
         or cond.shape[-1] != 384
         or tuple(pair.shape) != (1, L, L, 128)
@@ -264,7 +263,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         vt = torch.mm(wqkvg[3 * D :], xa.t())
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
-        attention.gated_inference(qkvg, bias, 0, A)
+        attention.gated_inference(qkvg, bias, 0, A, heads, D // heads)
     y = torch.mm(qkvg[:, :D], wo.t())
     resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
     h = single.new_empty((M, ws.shape[1]))

@@ -264,8 +264,8 @@ def serves(module, single, cond, pair, compute_dtype=None):
     cap = torch.cuda.get_device_capability(single.device)
     if a.use_qk_norm and not (cap in ((9, 0), (10, 0)) and _cuda_rows()):
         return False  # QK-norm needs the CUDA rows on either architecture
-    if (a.n_head, d) != (16, 768) and not (cap == (10, 0) and _cuda_rows()):
-        return False  # the other head layouts: B200's CUDA rows and sm_100a core only
+    if (a.n_head, d) != (16, 768) and not (cap in ((9, 0), (10, 0)) and _cuda_rows()):
+        return False  # the other head layouts: the CUDA rows (H100: attn_fwd.cu / attn_tf32.cu per layout; B200: sm_100a core)
     if cap == (10, 0):
         # any length, through the sm_100a core (a length the Triton gated core cannot tile needs it)
         if single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768):
@@ -280,7 +280,7 @@ def serves(module, single, cond, pair, compute_dtype=None):
         return sm100.inference_core_supported(
             single.dtype, _pad8(single.shape[2]), d, a.n_head, idx
         )
-    return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) == (16, 768)
+    return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) in LAYOUTS
 
 
 def _pad8(L: int) -> int:

@@ -474,11 +474,16 @@ def inference_core_supported(
     )
 
 
-def gated_inference(qkvg, bias_all, block, S):
+def fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """Build defines of ``attn_fwd.cu`` for a token head layout (default 16 x 48 builds without them)."""
+    return () if (nh, dh) == (H, D) else (f"DHP={dh}", f"ROW_WIDTH={nh * dh}")
+
+
+def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D):
     """The token DiT step's inference core (attn_fwd.cu, GATED): qkvg [S L, 3072] bf16 with q in exp2 units, bias_all
     [nb 16, L, L] bf16 in log2 units (masked keys -inf); writes sigmoid(g) softmax(q k^T + bias) v over q for ``block``'s
     slice of the bias."""
-    _ext("attn_fwd").attn_inf(qkvg, bias_all, int(block), int(S))
+    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all, int(block), int(S))
 
 
 def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
