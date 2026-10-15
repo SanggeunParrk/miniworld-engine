@@ -79,7 +79,7 @@ def test_transition_n2_grid_has_four_slices_and_roundtrips(sms, backward):
     assert all(c["ctas"] > 4 * c["dw_repl"] for c in grid)
     assert len(grid) == len({tuple(sorted(c.items())) for c in grid})
     op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
-    small, wa, ws = torch.empty(4), torch.empty(256, 128), torch.empty(128, 256)
+    small, wa, ws = torch.empty(4, 128), torch.empty(256, 128), torch.empty(128, 256)   # x [rows, D]: n = hidden / D
     tensors = [small] * 6 + [wa, wa, ws] if backward else [small] * 3 + [wa, wa, ws]
     assert native.candidates_for(op, native.tensor_key(*tensors, extra=(True, None, sms))) == grid
 
