@@ -4,14 +4,14 @@ Snapshot 2026-09-30, engine `main` 2719096e, torch 2.13 / triton 3.7. The requir
 module rows of `kernels/registry/registry_module.csv` (MiniWorld, AF3, Protenix, OpenDDE, ESMFold2
 configurations); lengths are L128–768 for token/pair/MSA streams and 1024–8192 atoms. A module is
 **complete** when every required shape runs a native (CUDA) path on H100 (training at L384/768,
-inference at every L). ✓ = CUDA on H100, ✗ = Triton or PyTorch. [dispatch.md](dispatch.md) predates
-some of this (it still calls single-direction training D128-only).
+inference at every L). ✓ = CUDA on H100, ✗ = Triton or PyTorch.
 
 ## Complete
 
 | Module | Required shapes | H100 |
 |---|---|---|
 | Bidirectional TriMul | d_pair = hidden = 128 (MiniWorld), bf16 | ✓ inference L128–768, training L384/768 (also D64 / 256 / 384 / 512 training); checked by a kernel profile of MiniWorld v1.3 blocks |
+| Single-direction TriMul | D64 / 128 / 256 / 384 / 512, bf16, outgoing and incoming | ✓ training and inference, L128–1024 (D512 incoming moved from the Triton fallback to CUDA 2026-10-15); rows in h100.md, comparison in [the record](../../records/trimul_h100_comparison_20261015.md) |
 
 ## Partial
 
@@ -21,17 +21,16 @@ some of this (it still calls single-direction training D128-only).
 | | **n=2**: pair D64 / 128 / 256 (template, conditioning), single D384 / 768 (conditioning) | ✗ | the CUDA kernels hard-code hidden = 4·D |
 | | fp32 (any D) | ✗ | `guard_dtype` sends it to the PyTorch reference |
 | | rows not a multiple of 128 | ✗ | no ragged-tail path |
-| **Single-direction TriMul** | D64 / 128 / 256 / 384, bf16 | ✓ training L384/768, ✓ inference (native tile table, uni D512 wide) | single-direction rows are not in h100.md yet |
 | | same widths, fp32 | ✗ | Triton |
-| | D512 training | ✗ | |
-| **Bidirectional TriMul inference, wide** | D256 / 384 / 512 at L128 / 256 / 512 / 640 | ✗ | CUDA only at L384 / 768 |
 | **OuterProductMean** | MSA 64 / pair 128 / hidden 32 (MiniWorld); MSA 128 / pair 256 (Protenix-v2, ESMFold2), pair 384 (OpenDDE); both normalisation orders | ✓ training and inference, CUDA + cuBLAS at every cell | any L and S (padded); 58-98 % of the speed-of-light floor, page [opm/opm.md](opm/opm.md) |
 | **MSAPairWeightedAveraging** | MSA 64 / pair 128, 8 heads × 32 (MiniWorld) | ✓ | contract: L % 128 == 0, even MSA depth |
 | | MSA 128 / pair 256, 8 × 16 (ESMFold2), 8 × 8 (Protenix-v2); MSA 128 / pair 384, 8 × 8 (OpenDDE) | ✓ training and inference (`pwa_wide`) | any L <= 1024 and S; 45-60 % of the fusion floor in training, page [pwa/pwa.md](pwa/pwa.md) |
 | **Local atom DiT** (AF3 block-local, cross-attention; `kernels/augmented_attention/cuda/sm90_atom`) | d_atom 128, d_pair 16, 4 heads, 32 x 128 windows; bf16 and fp32 (TF32), any A, any N, per-sample or shared (expanded) conditioning | ✓ inference and training, CUDA + cuBLAS | fastest column in all 336 measured cells (A 1-48, N 64-4096, fp32 / bf16) against PyTorch eager, `torch.compile`, Anthropic (inference) and the previous Triton path: 1.09x at the closest (fp32 training, A5 N64), 2-27x typically; [page](local_dit/local_dit.md); kernel sums at 65-75 % of the byte floor; `post90` forward and `pre_bwd90` not split over CTAs |
 | **SWA atom DiT** (`kernels/swa_dit`) | d_atom 128, 4 heads, window 128, SwiGLU 256; bf16 and fp32 | bf16 ✓ partly (3 CUDA stages + Triton), fp32 ✗ (Triton) | GPU suite 33 passed / 1 skipped, 17/17 registry checkers (2026-09-30); no H100 cache; opt-in in team-gm, so MiniWorld v1.3 does not use it yet |
 | **TriangleAttention** | MiniWorld n_head 4 / hidden 128 | ✗ core (Triton) + ✓ pieces (bias / LN backward CUDA) | template / Protenix / OpenDDE head counts: Triton; B200 has a whole-module CUDA path, H100 does not |
+| **AttentionPairBias** | single 384 / pair 128, 8 / 12 / 16 / 24 heads (+ 16 x 32 at 512), bf16, B = 1 | ✓ inference (L % 16) and training (L % 128), CUDA + cuBLAS; 1.7-2.5x the fastest other row, [page](attention_pair_bias/attention_pair_bias.md) | pair kernels 87-93 % of copy bandwidth; fp32 pair-weight gradient opt-in (`apb_h100_exact_dwb`) |
 | **Token DiT** | single 768 / cond 384 / pair 128, 16 heads; bf16 and fp32; QK-norm on / off | ✓ inference (shared or per-sample cond) and training, CUDA + cuBLAS, branch `h100/token-dit` ([token_dit/token_dit.md](token_dit/token_dit.md)) | upstream capture-scoped pack / bias caches retained |
+| **Smooth lDDT** (`kernels/smooth_lddt`) | any N / A, fp32 compute, x_pred fp32 / bf16 | ✓ CUDA-core (B200 source, sm_90a); 37-180x compiled PyTorch; ~45 % of the issue floor (lane imbalance), [page](smooth_lddt/smooth_lddt.md) | |
 | **AugmentedAttention** | atom 128 / pair 16 / 4 heads; token 768 / 384 / 128 / 16 heads; token 768 / 768 / 256 | bf16 sm_90 core (opt-in) | fp32 default path is Triton |
 
 ## Not implemented on H100
@@ -40,7 +39,6 @@ some of this (it still calls single-direction training D128-only).
 |---|---|---|
 | ConditionedTransition | atom 128 / cond 128; token 768 / cond 384; token 768 / cond 768 (bf16, fp32) | Triton |
 | AdaptiveLayerNorm | atom 128 / 128; token 768 / 384 (bf16, fp32) | Triton (+ CUDA LayerNorm backward) |
-| AttentionPairBias | single 384 / pair 128 / 8 heads | Triton |
 | SWA atom attention (per-op) | d 128 / 4 heads | FlashAttention-4 (external) + Triton `qk_norm_rope` |
 | Primitives: LayerNorm, LayerNormLinear, gated linear, SwiGLU FFN, projected attention, RMSNorm modulation | many widths (see the csv) | Triton; LayerNorm backward is CUDA for bf16 128 ≤ N ≤ 512 |
 | MPNN families | — | native paths target A6000 bf16; nothing H100-specific |
@@ -84,14 +82,19 @@ some of this (it still calls single-direction training D128-only).
    `opm_dgrad` at c_z 384 (about 2x its floor, needs a warp-specialised TMA pipeline); OPM L128 launch-count overhead; the MiniWorld-width
    PWA training of L512 / L640 after another shape in the same process ([record](../../records/h100_pwa_20261008.md)).
 6. **TriMul.**
-   - Bidirectional wide inference at L128 / 256 / 512 / 640.
-   - Single-direction training D512 and fp32; add the single-direction rows to h100.md and the
-     figures to `trimul/trimul.md`.
+   - Bidirectional wide inference at L128 / 256 / 512 / 640: served by the B200-style port (default on since 2026-10-13, per-cell fallback to the preserved path at L384 / 768; [record](../../records/trimul_h100_dispatch_selection_20261013.md)).
+   - Single-direction fp32 (bf16 only today); kernel flow figures for the single direction in `trimul/trimul.md`.
+   - D512 single direction training at L768 is 17.1 ms: front 2.7 ms (latency bound; multicast, N-split and BI=2 variants measured and
+     not faster), `contract_gp` 2.5 ms (at its DRAM traffic), output-LN backward 1.2 ms (reads 0.7 GB more than needed). Each
+     remaining item is 1 - 3 % of the step.
+   - Bidirectional D512 L128 training is the thinnest cell against the other implementations (1.10x).
    - Remove the remaining D128 weight-pack kernel (P1).
    - Wide single-direction training towards 90% of speed of light: at D384 L768 the step is at 86.5%
      of the design SoL; worst kernels are the front (69.6%), the output-LN backward (65.3%) and
      contract_gp (88%).
-   - Measurements tables in `trimul/trimul.md` (PyTorch compiled / cuEquivariance / Anthropic / ours / ×).
+   - Measurement tables in `trimul/trimul.md`: bidirectional filled 2026-10-13 (Triton / DTv1 / cuEquivariance / ours); the 2026-10-15
+     matrix (all three module kinds, L128 - 1024, PyTorch / cuEquivariance / DTv1, Anthropic same-process A/B) is in the record
+     `trimul_h100_comparison_20261015.md`; the full Triton matrix (L128 - 1024) was cancelled and remains.
 7. **TriangleAttention** whole-module CUDA on H100, all required head counts.
 8. **Token DiT**, fully CUDA (cuBLAS allowed for the GEMMs, as on B200), inference and training, bf16 and fp32,
    QK-norm on and off: done on branch `h100/token-dit` (2026-09-30, [token_dit/token_dit.md](token_dit/token_dit.md)).
@@ -109,4 +112,4 @@ some of this (it still calls single-direction training D128-only).
    H100 paths (diffusion-side modules; not in the v1.3 trunk).
 10. `test_op_contracts_gpu`: `rmsnorm_adamod_bwd` fails opcheck (`test_aot_dispatch_static`, eager vs
     AOT outputs differ); pre-existing on main before swa_dit.
-11. Refresh [dispatch.md](dispatch.md) to the current single-direction and D64 training paths.
+11. Refresh [dispatch.md](dispatch.md) to the current D64 training paths (single-direction and wide paths were refreshed 2026-10-15).

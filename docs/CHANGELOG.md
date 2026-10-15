@@ -24,6 +24,29 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   fp32 / bf16 x per-sample / shared conditioning x inference / training has ours fastest everywhere, smallest margin 1.09x).
   Tests `tests/gpu/sm90/test_h100_local_dit_mma_gpu.py`, `test_h100_local_dit_pack_gpu.py`; page `docs/gpus/h100/local_dit/local_dit.md`.
   `viz.measure_bars` draws a `PyTorch eager` column in the PyTorch colour.
+### Added
+
+- H100 (sm_90a) smooth lDDT: the B200 CUDA-core kernels (`kernels/smooth_lddt/cuda/sm100/smooth_lddt.cu`) now build for sm_90a and
+  `smooth_lddt.refusal` serves compute capability (9, 0) as well as (10, 0). Forward + backward at A = 48: 0.37-0.98 ms
+  (N = 4096-8192), 37-180x the fastest PyTorch form (`torch.compile`d dense). Page:
+  [gpus/h100/smooth_lddt](gpus/h100/smooth_lddt/smooth_lddt.md).
+
+### Changed
+
+- H100 TriMul, single direction: D512 incoming training runs the CUDA path (it was on the Triton fallback: L768 24.0 -> 18.1 ms), the D512
+  front reads a separately normalised operand and issues wgmma from shared memory (3.57 -> 3.18 ms; module L768 17.8 -> 17.1 ms), D256
+  inference takes the tmn K1 / K3 tiles at every length but 384 (0.7-2.5 %), and the residual Triton pieces of the wide paths (weight
+  pack, LN-affine fold, input LN) use the CUDA aux kernels in eager launches. Against PyTorch, cuEquivariance and DTv1 ours is the fastest in
+  all 240 measured cells (D64-512, L128-1024, single direction and bidirectional, training and inference; smallest 1.10x) and against the
+  Anthropic payload in all 48 cells it covers (thinnest 1.006x). Record:
+  [records/trimul_h100_comparison_20261015.md](records/trimul_h100_comparison_20261015.md); page:
+  [gpus/h100/trimul](gpus/h100/trimul/trimul.md).
+- H100 AttentionPairBias training: 1.7-2.4x the fastest other implementation (L128-768, was 0.5x at L384 / L768). The natural-unit
+  attention kernels divided by a float constant per score (attn_fwd / dq / dkv 59 / 62 / 84 -> 15 / 15 / 14 us at L768); the fp32
+  pair-weight "shadow" gradient is now opt-in (`settings.apb_h100_exact_dwb`, default off: the fused gradient has the bf16
+  PyTorch module's error, like every other gradient of the block); block-partial reduction 12 -> 3 us; fp32 master cast folded into
+  `prep`, gate into the attention epilogue. The default build no longer needs `CUTLASS_PATH`. Page:
+  [gpus/h100/attention_pair_bias](gpus/h100/attention_pair_bias/attention_pair_bias.md).
 
 ### Removed
 

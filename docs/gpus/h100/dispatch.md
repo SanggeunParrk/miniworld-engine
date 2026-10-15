@@ -7,8 +7,8 @@ policy before constructing/compiling models.
 
 | Module | Inference | Training | Native contract |
 |---|---|---|---|
-| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual | D128: selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12. D256/384/512: flattened port of the qualified large-width research plans (below) | BF16, batch 1; training L384/768, direction hidden=D, D64/128/256/384/512; D128 requires a full 132-SM H100 |
-| Single-direction TriMul | Packaged K1 → contraction → K3/residual | Native K1/K3, fused CUDA B1, two cuBLAS gradient contractions, streamed producer-consumer B7 | Training: BF16 compute, batch 1, D=hidden=64/128/256/384, L384/768; D128 requires a full 132-SM H100; both outgoing and incoming. Inference: width/hidden pair in the native tile table |
+| Bidirectional TriMul | Anthropic-derived native K1 → two cuBLAS contractions → K3/residual; D256/384/512 at every L: B200-style port (`h100_b200style`), L384 / L768 D512 L384 keep the preserved K1/K3 | D128: selected CUDA forward + B1–B4 + four cuBLAS contractions + B7–B12. D256/384/512: flattened port of the qualified large-width research plans (below), B200-style port at the other lengths | BF16, batch 1, L a multiple of 128 up to 1024; direction hidden=D, D64/128/256/384/512; D128 requires a full 132-SM H100 |
+| Single-direction TriMul | D64/128: packaged K1 → contraction → K3/residual; D256: the same K1/K3 tiles at every L except 384 (B200-style port at L384); D384/512: B200-style port; D512 L384/768 may use `h100_uni_wide_inference` | D64/128: native K1/K3, fused CUDA B1, two cuBLAS gradient contractions, streamed producer-consumer B7. D256/384/512: the wide path `h100_uni_wide_training` (front LN → K1 → cuBLAS contraction → LN → projection / gate GEMMs → output epilogue; backward gate, dn GEMM, output-LN backward, `contract_gp`, weight GEMMs, input-LN backward) | BF16, batch 1, D=hidden=64/128/256/384/512, L a multiple of 128 up to 1024 (training: wide path L384/768 and the B200-style port elsewhere); both outgoing and incoming; D128 requires a full 132-SM H100 |
 | Transition | Existing residual-fused hand-CUDA path | Same forward with native backward | BF16, n=4, D64/128/256/384/512 and each kernel's resource guards |
 | OuterProductMean | Packaged OPM with residual in the CUDA epilogue, no LN statistics saved | Residual-fused forward and native backward; residual gradient is passed through | BF16, batch 1, hidden32; (MSA, pair) 64/128 (MiniWorld), 128/256 (Protenix-v2, ESMFold2) or 128/384 (OpenDDE); any L and MSA depth (padded to 64 / 256 with masked rows); either normalization order; no interchain masking |
 | MSAPairWeightedAveraging | Packaged forward without training saves; N ≥ 512: cuBLAS contraction + `pwa_gateout` | Packaged forward/backward, residual and row dropout; N ≥ 512: same split forward; dv on cuBLAS, read tile by tile by `dgv_bwd`; no pair-LayerNorm beta (the module has none) | BF16, batch 1. MiniWorld: MSA64/pair128, 8 heads × 32, L multiple of 128, even MSA depth. Wide (`pwa_wide`): MSA 64 or 128, pair 128 / 256 / 384, 8 heads × 8 or 16 (ESMFold2, Protenix-v2, OpenDDE), L ≤ 1024 (padded to 16), any depth |
@@ -21,7 +21,7 @@ bidirectional CUDA training path at D64/128/256/384/512 (D64: its own fused path
 CUDA-graph replay. Inference: the packaged K1/K3 table (D64/128, uni D256/384), the
 wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512, 1.89-2.04x) and the
 single-direction D512 path `h100_uni_wide_inference` (1.80x). Single-direction training
-serves D64/128/256/384; D512 retains the general training path. Per-shape status: `docs/gpus/h100/h100.md`.
+serves D64/128/256/384/512 in both directions (D512 incoming was on the Triton fallback until 2026-10-15). Per-shape status: `docs/gpus/h100/h100.md`; comparison matrix: `docs/records/trimul_h100_comparison_20261015.md`.
 
 ## Retained values and execution
 
@@ -137,8 +137,21 @@ Selected schedules live in `h100_sources/single_output/selection.json`.
 The measured local search covers 6 K1 tiles, 6 K3 schedules, 4 B1 CTA counts and
 10 B7 producer/consumer/ring combinations per length. This is a bounded search,
 not a claim of exhaustive configuration tuning or 90% speed-of-light.
-D64/256/384/512 **single-direction training** retains the general path.
+D256/384/512 **single-direction training** runs the wide path (`h100_uni_wide_training`) described in the next section.
 See the measurements and validation at `archive/docs-20260928:docs/records/verdicts/trimul-single-20260923/`.
+
+## Single-direction wide path (D256/384/512), 2026-10-15
+
+`h100_uni_wide_training` serves outgoing and incoming (`GP_DIR` 1 / 2 in `contract_gp`; the contraction picks the transposed operand).
+D512 front: `ln_in_d512.cu` writes `x_n` (one warp per row, fp32 two-pass statistics), then `front_pre_ss.cu` (derived from the frozen
+`front_pre_d384.cu`) reads the normalised operand and issues wgmma with A and B from shared memory (no 128-register A fragment set);
+tile (1, 64, 4, 4, 1). A 2-CTA multicast variant (`front_pre_mc.cu`) and an N-split two-warpgroup variant (`front_pre_ns.cu`) exist behind
+`_MC` / `_NS` (default off: 3.14 / 3.19 ms against 3.18 ms for the default). Weight pack, LN-affine fold and input LN of the wide paths
+use the CUDA aux kernels (`pack_into`, `fold_into`, `normalize_into`) whenever they run eagerly; the Triton versions only serve compiled
+regions. A kernel-name scan of D256/384/512 at L384/768 (36 cells) finds no Triton kernel.
+
+Inference selection (`_legacy_native_faster`): single direction D256 takes the tmn K1/K3 tiles at every L except 384; bidirectional
+keeps the preserved K1/K3 at (D384, L768) and (D512, L384).
 
 ## Wide bidirectional training (D256/384/512)
 
@@ -231,3 +244,20 @@ in saved-tensor version checks. Native narrow reducers store FP32 directly; wide
 cuBLAS gradients avoid a BF16 round trip. See [master_weights.md](master_weights.md)
 for the per-shape full F+B latency table, dispatch and validation evidence, and
 scope of the less-than-2-percent mixed overhead requirement.
+
+## AttentionPairBias (2026-10-13)
+
+`modules/attention_pair_bias` -> `integrations/attention_pair_bias_b200.py` (the B200 file; sm_90 branches inside). Served when:
+`implementation=miniworld`, engine backend not `triton`, bf16 `single` / `pair`, B = 1, contiguous, (heads, d_single) in
+{(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)}, d_pair 128, no QK-norm, key mask `[1, L]` or none, capability 9.0 or 10.0;
+inference `L % 16 == 0`, training `L % 128 == 0` (H100). Anything else takes the module path (Triton / PyTorch); on H100 with
+`implementation=miniworld` a call outside the contract raises instead of falling back silently.
+
+| switch (`settings`) | default | meaning |
+|---|---|---|
+| `apb_h100_train` | on | native CUDA training; off keeps the module (Triton) path as an explicit baseline |
+| `apb_h100_exact_dwb` | **off** | recompute the `to_bias.weight` gradient in fp32 from bf16-rounded inputs (needs CUTLASS 4.2 headers via `CUTLASS_PATH`); 1.7e-2 -> 0.8e-2 on that one gradient, 2.4x the step |
+
+Saved tensors (training): xa, (mean, rstd), q|k|v|g, bias, O fp32, LSE, og, Wf, packed W q|k|v|g, bf16 Wo, bf16 Wb; the original
+parameters are kept for autograd version checks. Parameter gradients are fp32 and are cast to the parameter dtype only when the
+parameter is not fp32. Weight packs are cached per parameter version and scoped to the CUDA-graph capture (`kernels/_capture.py`).

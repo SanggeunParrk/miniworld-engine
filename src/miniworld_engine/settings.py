@@ -434,6 +434,11 @@ class Settings:
     #: Formerly ``MINIWORLD_APB_H100_TRAIN`` (default on): the native H100 CUDA AttentionPairBias training path
     #: (`integrations/attention_pair_bias_b200.py`). Off keeps the legacy comparison path (explicit baseline only).
     apb_h100_train: bool = True
+    #: H100 AttentionPairBias training: True recomputes the pair-weight (``to_bias.weight``) gradient in fp32 from bf16-rounded
+    #: inputs (the "shadow": 1.45e-2 against an fp64 truth, about 2.4x the step); False (default) keeps the fused kernel's dWf
+    #: (bf16 operands, fp32 accumulation: 1.9e-2, the same error as the bf16 PyTorch module, the Triton path and every other
+    #: gradient of the block).
+    apb_h100_exact_dwb: bool = False
     #: Formerly ``MINIWORLD_AUGATTN_TF32_SM90`` (default on): serve the fp32 token-DiT inference core with the hand-CUDA TF32 kernel
     #: (`attn_tf32.cu`) on sm_90; off keeps the Triton core.
     augattn_tf32_sm90: bool = True
@@ -463,11 +468,15 @@ class Settings:
     transition_dw_repl: int = 0
     #: Formerly ``MINIWORLD_TRIMUL_H100_B200STYLE`` (default off): serve TriMul on Hopper with the B200-style port
     #: (`h100_b200style*`, widths 256/384/512 plus the D64 b200gate kernels). Experimental; becomes a B item (bake in or delete)
-    #: when the family is qualified.
-    trimul_h100_b200style: bool = False
+    #: when the family is qualified. On since 2026-10-13: it is 1.2-2.1x faster than the general path at every length the preserved
+    #: native path does not serve, and the cells where that path is faster keep it (`integrations/trimul_h100.py`).
+    trimul_h100_b200style: bool = True
     #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
     #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
     #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
+    #: Run the H100 TriMul contractions through cuBLAS with a zero workspace (no semaphore memset before each GEMM, same kernels,
+    #: bitwise equal results; ``kernels/trimul_inproj/cuda/_h100_bmm.py``). Off falls back to ``torch.bmm``.
+    trimul_h100_zero_workspace_bmm: bool = True
     trimul_h100_native_buckets: bool | None = None
     #: Formerly ``MINIWORLD_TRIMUL_H100_PRESERVE_D128`` / ``_PRESERVE_D256`` / ``_PRESERVE_WIDE`` (widths 384 and 512 together):
     #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
