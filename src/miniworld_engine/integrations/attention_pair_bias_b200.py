@@ -148,15 +148,15 @@ def _leaves(module) -> list[torch.Tensor]:
 
 
 def _kernel_leaves(leaves) -> list[torch.Tensor]:
-    """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are)."""
-    # Compiled, the casts are aten ops (traced, fused by the compiler; the same round-to-nearest as the launch below).
-    if (
-        torch.cuda.get_device_capability(leaves[0].device) == (9, 0)
-        and not torch.compiler.is_compiling()
-    ):
-        return _rows().ext().cast_leaves(leaves)
-    bf = torch.bfloat16
+    """The kernels' dtypes: the LayerNorm vectors fp32, the projections bf16 (no copies when the parameters already are).
+    Hopper: the projections stay in their own dtype (one dtype for the seven; ``prep`` rounds them to bf16 inside its pass, so an
+    fp32 master costs no cast launch); only the LayerNorm vectors become fp32 (a no-op for fp32 parameters)."""
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
+    if torch.cuda.get_device_capability(lnw.device) == (9, 0):
+        dt = wq.dtype if wq.dtype in (torch.bfloat16, torch.float32) else torch.bfloat16
+        w = [t if t.dtype == dt else t.to(dt) for t in (wq, bq, wk, wv, wg, wo, wb)]
+        return [lnw.float(), lnb.float(), *w[:6], lnpw.float(), w[6]]
+    bf = torch.bfloat16
     return [
         lnw.float(),
         lnb.float(),
@@ -221,18 +221,22 @@ def _inference_packs(params, leaves):
     )
     return _capture.lookup(
         _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8
-    )[:4]
+    )[:5]
 
 
 def _prep(leaves, qs: float, ws: float):
     """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W], Wf = to_bias.weight * ln_pair.weight * ws [H, 128], Wo
-    [D, W] with padded columns -- or None when there is no padding (8 x 48: to_out.weight as is)), bf16, one launch."""
+    [D, W] bf16 with padded columns -- or None when there is no padding (8 x 48: to_out.weight as is) --, Wb bf16 [H, 128] or
+    None), bf16, one launch. Hopper always packs Wo and Wb (its weights may be an fp32 master that this pass rounds)."""
     _, _, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
     H, _, W, D = _geometry(leaves)
-    wpack = wq.new_empty((4 * W, D))
-    bvec = wq.new_empty((4 * W,))
-    wf = wq.new_empty((H, DP))
-    wop = wq.new_empty((D, W)) if W != D else None
+    hopper = torch.cuda.get_device_capability(wq.device) == (9, 0)
+    bf = torch.bfloat16
+    wpack = wq.new_empty((4 * W, D), dtype=bf)
+    bvec = wq.new_empty((4 * W,), dtype=bf)
+    wf = wq.new_empty((H, DP), dtype=bf)
+    wop = wq.new_empty((D, W), dtype=bf) if (W != D or hopper) else None
+    wbo = wq.new_empty((H, DP), dtype=bf) if hopper else None
     _rows().ext().prep(
         wq,
         bq,
@@ -248,8 +252,9 @@ def _prep(leaves, qs: float, ws: float):
         wf,
         qs,
         ws,
+        wbo,
     )
-    return wpack, bvec, wf, wop
+    return wpack, bvec, wf, wop, wbo
 
 
 def _inference_fake(single, pair, mask, leaves, eps_s, eps_p):
@@ -276,7 +281,7 @@ def inference(
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
         x = single.view(L, D)
-        wpack, bvec, wf, wop = _inference_packs(params, leaves)
+        wpack, bvec, wf, wop, _ = _inference_packs(params, leaves)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
         y = torch.empty_like(
@@ -324,7 +329,12 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
         e((H, DP)),
         e((4 * W, D)),
     ]
-    return out + ([e((D, W))] if W != D else [])
+    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
+    return (
+        out
+        + ([e((D, W))] if W != D or hopper else [])
+        + ([e((H, DP))] if hopper else [])
+    )
 
 
 @opaque(fake=_forward_fake, name="apb_b200_train_fwd")
@@ -342,7 +352,7 @@ def forward(
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(single.device):
         x = single.view(L, D)
-        wpack, bvec, wf, wop = _prep(leaves, 1.0, 1.0)
+        wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
         st = x.new_empty((L, 2), dtype=torch.float32)
@@ -355,16 +365,23 @@ def forward(
             else NEG
         )
         bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
-        O, LSE = _training_core(single.device).apb_forward(
-            qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D
-        )
-        og = x.new_empty((L, W))
-        rows.ext().gate_rows(O, qkvg, og)
+        core = _training_core(single.device)
+        if torch.cuda.get_device_capability(single.device) == (9, 0):
+            # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
+            O, og, LSE = core.apb_forward_gated(qkvg, bias, L, H, D)
+        else:
+            O, LSE = core.apb_forward(
+                qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D
+            )
+            og = x.new_empty((L, W))
+            rows.ext().gate_rows(O, qkvg, og)
         y = y.addmm_(og, wo.t()).view(
             1, L, D
         )  # in place onto the residual seed: no copy of x into the output
-    return [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack] + (
-        [wop] if wop is not None else []
+    return (
+        [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack]
+        + ([wop] if wop is not None else [])
+        + ([wbo] if wbo is not None else [])
     )
 
 
@@ -391,23 +408,23 @@ def backward(
     L = single.shape[1]
     rows = _rows()
     E = rows.ext()
-    lnw, lnpw, wb = leaves[0], leaves[8], leaves[9]
+    lnw, lnpw = leaves[0], leaves[8]
     H, _, W, D = _geometry(leaves)
     xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
-    wo = saved[9] if W != D else leaves[7]  # [D, W]
+    # [D, W] bf16 and Wb bf16: packed by ``prep`` on Hopper (its leaves may be an fp32 master), the leaf itself otherwise
+    wo = saved[9] if len(saved) > 9 else leaves[7]
+    wb = saved[10] if len(saved) > 10 else leaves[9]
     f32 = torch.float32
     with torch.cuda.device(single.device):
         x = single.view(L, D)
         dy2 = dy.contiguous().view(L, D)
         if torch.cuda.get_device_capability(x.device) == (9, 0):
-            # Every producer owns a block partial; finalize reduces in block order.
-            nblocks = max(
-                2 * torch.cuda.get_device_properties(x.device).multi_processor_count,
-                (L + rows.RW - 1) // rows.RW,
-            )
-            acc = torch.empty(nblocks, rows.acc_n(H, D), device=x.device)
-            E.zero_acc(acc)
+            # Every producer owns a block partial row; finalize reduces the rows each grid wrote, in block order (no zero fill).
+            rows_a = (L + rows.RW - 1) // rows.RW
+            rows_b = E.pair_bwd_blocks(x, H, L)
+            acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D), device=x.device)
         else:
+            rows_a = rows_b = 1
             acc = torch.zeros(rows.acc_n(H, D), device=x.device)
         dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
         dwo = torch.mm(
@@ -438,7 +455,7 @@ def backward(
         dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, DP), DB, wf, L, eps_p, acc, D)
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
         outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
-        E.finalize(dwp, dwo, acc, wb, lnpw, outs)
+        E.finalize(dwp, dwo, acc, wb, lnpw, outs, rows_a, rows_b)
     return [dx.view(single.shape), dz.view(pair.shape), *outs]
 
 
@@ -463,7 +480,7 @@ def _pair_weight_shadow(
     not. Its head-major operand matches the reference Linear backward layout.
     This materializes pair normalization for dWb and exceeds B200 lifetimes.
     """
-    E = _rows().ext()
+    E = _rows().ext(shadow=True)
     with torch.cuda.device(single.device), torch.autocast("cuda", enabled=False):
         shape = (leaves[-1].shape[0], single.shape[-1])
         qualified = single.shape[1] in (384, 768) and shape in (
@@ -584,7 +601,11 @@ class _Training(torch.autograd.Function):
             single.shape[-1],
         ) in ((8, 384), (12, 384), (16, 384), (24, 384), (16, 512))
         # ln_pair has no beta: the shadow only repairs the pair-weight gradient.
-        ctx.exact_dwb = ctx.beta_shadow and qualified_exact_dwb
+        ctx.exact_dwb = (
+            ctx.beta_shadow
+            and qualified_exact_dwb
+            and settings.current().apb_h100_exact_dwb
+        )
         leaves = _kernel_leaves(leaves)
         y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
         ctx.eps = (eps_s, eps_p)

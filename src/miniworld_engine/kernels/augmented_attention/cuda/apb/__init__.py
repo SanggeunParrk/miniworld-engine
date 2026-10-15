@@ -28,25 +28,27 @@ def acc_n(heads: int, d: int = 384) -> int:
     return 2 * d + width(heads, d) + heads * DP + heads
 
 
-def ext():
+def ext(shadow: bool = False):
+    """The row / pair extension. ``shadow`` (H100 only) also builds the fp32 pair-weight oracle (``apb_h100_exact_dwb``), which
+    needs CUTLASS 4.2 headers (``CUTLASS_PATH``); the default build has no such dependency."""
     arch = "90a" if torch.cuda.get_device_capability() == (9, 0) else "100"
-    return _ext(arch)
+    return _ext(arch, shadow and arch == "90a")
 
 
 @functools.lru_cache(maxsize=None)
-def _ext(arch: str):
+def _ext(arch: str, shadow: bool = False):
     from ...._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     includes, shadow_flags = [], []
-    if arch == "90a":
+    if shadow:
         root = os.environ.get("CUTLASS_PATH")
         if not root or not (Path(root) / "include/cutlass/cutlass.h").is_file():
             raise RuntimeError("H100 APB requires CUTLASS_PATH pointing to CUTLASS 4.2 headers")
         includes = [str(Path(root) / "include")]
         shadow_flags = ["-DAPB_H100_FP32_SHADOW=1"]
     return load_extension(
-        name=f"apb_rows_cuda_sm{arch}",
+        name=f"apb_rows_cuda_sm{arch}" + ("_shadow" if shadow else ""),
         sources=[str(_dir / "apb_rows.cu")],
         extra_include_paths=includes,
         extra_ldflags=["-lcublas", "-lcublasLt"],

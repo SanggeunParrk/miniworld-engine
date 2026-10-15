@@ -672,10 +672,31 @@ struct Geo { int nh, dh, dhp, d; };                                         // d
 __device__ __forceinline__ int real_of(const Geo& G, int p) { const int c = p % G.dhp; return c < G.dh ? (p / G.dhp) * G.dh + c : -1; }
 
 // W q | k | v | g [4 W, D] (padded rows; q rows x qs), its bias [4 W] (bq x qs, then 0), Wo [D, W] (padded columns) or none,
-// Wf = Wb * ln_pair.weight * ws [NH, 128]; bf16. 8 weights per thread.
-__global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const bf* __restrict__ BQ, const bf* __restrict__ WK,
-    const bf* __restrict__ WV, const bf* __restrict__ WG, const bf* __restrict__ WO, const bf* __restrict__ WB, const float* __restrict__ LPW,
-    bf* __restrict__ WP, bf* __restrict__ BV, bf* __restrict__ WOP, bf* __restrict__ WF, Geo G, float qs, float ws) {
+// Wf = Wb * ln_pair.weight * ws [NH, 128], and Wb as bf16 [NH, 128] (the backward's dlnpw); bf16 out. 8 weights per thread.
+// The weights are read in their own dtype T (bf16, or an fp32 master: rounded to bf16 first, exactly the cast the parameters would
+// have been given, then scaled): the live master-weight cast is part of this pass, not a launch of its own.
+template <typename T> __device__ __forceinline__ void load8(const T* p, float (&f)[8]);
+template <> __device__ __forceinline__ void load8<bf>(const bf* p, float (&f)[8]) {
+  const uint4 u = *reinterpret_cast<const uint4*>(p);
+  const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+  for (int k = 0; k < 4; ++k) { const float2 t = unpack2(w[k]); f[2 * k] = t.x; f[2 * k + 1] = t.y; }
+}
+template <> __device__ __forceinline__ void load8<float>(const float* p, float (&f)[8]) {
+  const float4 a = reinterpret_cast<const float4*>(p)[0], b = reinterpret_cast<const float4*>(p)[1];
+  f[0] = a.x; f[1] = a.y; f[2] = a.z; f[3] = a.w; f[4] = b.x; f[5] = b.y; f[6] = b.z; f[7] = b.w;
+}
+__device__ __forceinline__ float rbf(float v) { return __bfloat162float(__float2bfloat16_rn(v)); }
+__device__ __forceinline__ uint4 pack8(const float (&f)[8], float scale) {
+  uint4 u;
+  u.x = pack2(f[0] * scale, f[1] * scale); u.y = pack2(f[2] * scale, f[3] * scale);
+  u.z = pack2(f[4] * scale, f[5] * scale); u.w = pack2(f[6] * scale, f[7] * scale);
+  return u;
+}
+template <typename T>
+__global__ void __launch_bounds__(256) prep_k(const T* __restrict__ WQ, const T* __restrict__ BQ, const T* __restrict__ WK,
+    const T* __restrict__ WV, const T* __restrict__ WG, const T* __restrict__ WO, const T* __restrict__ WB, const float* __restrict__ LPW,
+    bf* __restrict__ WP, bf* __restrict__ BV, bf* __restrict__ WOP, bf* __restrict__ WF, bf* __restrict__ WBO, Geo G, float qs, float ws) {
   const int W = G.nh * G.dhp, D = G.d;
   const long n1 = 4L * W * D / 8, n2 = WOP ? (long)D * W / 8 : 0, i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   const uint4 zero = make_uint4(0u, 0u, 0u, 0u);
@@ -684,13 +705,11 @@ __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const b
     const int blk = (int)(prow / W), rr = real_of(G, (int)(prow % W));
     uint4 u = zero;
     if (rr >= 0) {
-      const bf* src = (blk == 0 ? WQ : blk == 1 ? WK : blk == 2 ? WV : WG) + (long)rr * D + col;
-      u = *reinterpret_cast<const uint4*>(src);
-      if (blk == 0) {
-        uint32_t* w = reinterpret_cast<uint32_t*>(&u);
+      float f[8];
+      load8<T>((blk == 0 ? WQ : blk == 1 ? WK : blk == 2 ? WV : WG) + (long)rr * D + col, f);
 #pragma unroll
-        for (int k = 0; k < 4; ++k) { const float2 f = unpack2(w[k]); w[k] = pack2(f.x * qs, f.y * qs); }
-      }
+      for (int k = 0; k < 8; ++k) f[k] = rbf(f[k]);                         // the bf16 parameter, then its scale
+      u = pack8(f, blk == 0 ? qs : 1.f);
     }
     *reinterpret_cast<uint4*>(WP + e) = u;
     return;
@@ -698,16 +717,22 @@ __global__ void __launch_bounds__(256) prep_k(const bf* __restrict__ WQ, const b
   if (i < n1 + n2) {                                                        // Wo row r, 8 padded columns (dh % 8 == 0: one head)
     const long e = (i - n1) * 8, r = e / W, pc = e % W;
     const int rc = real_of(G, (int)pc);
-    *reinterpret_cast<uint4*>(WOP + e) = rc >= 0 ? *reinterpret_cast<const uint4*>(WO + r * D + rc) : zero;
+    uint4 u = zero;
+    if (rc >= 0) { float f[8]; load8<T>(WO + r * D + rc, f); u = pack8(f, 1.f); }
+    *reinterpret_cast<uint4*>(WOP + e) = u;
     return;
   }
   const long j = i - n1 - n2;
   if (j < 4 * W) {
     const int rr = j < W ? real_of(G, (int)j) : -1;
-    BV[j] = __float2bfloat16_rn(rr >= 0 ? __bfloat162float(BQ[rr]) * qs : 0.f);
+    float v = 0.f;
+    if (rr >= 0) { const T b = BQ[rr]; v = rbf(static_cast<float>(b)) * qs; }
+    BV[j] = __float2bfloat16_rn(v);
   } else if (j < 4 * W + G.nh * DP) {
     const int k = (int)(j - 4 * W);
-    WF[k] = __float2bfloat16_rn(__bfloat162float(WB[k]) * LPW[k % DP] * ws);
+    const float wb = rbf(static_cast<float>(WB[k]));
+    WF[k] = __float2bfloat16_rn(wb * LPW[k % DP] * ws);
+    if (WBO) WBO[k] = __float2bfloat16_rn(wb);
   }
 }
 
@@ -855,6 +880,12 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Blocks of pair_bias_bwd's grid at L (the partial rows it writes): the Hopper accumulator's row count for its columns.
+int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L) {
+  const int bps = nh == 8 ? 2 : 1;
+  return std::min<int64_t>((int64_t)bps * nsm_of(like), L * ((L + 127) / 128));
+}
+
 void ln_rows(at::Tensor x, at::Tensor lw, at::Tensor lb, at::Tensor xa, c10::optional<at::Tensor> st, double eps,
              c10::optional<at::Tensor> y) {
   const int64_t D = lw.numel(), M = x.numel() / D;
@@ -928,46 +959,55 @@ void ln_bwd(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Tens
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Weights bf16 or fp32 (one dtype for the seven), outputs bf16. ``wbo`` (optional): Wb as bf16 for the backward.
 void prep(at::Tensor wq, at::Tensor bq, at::Tensor wk, at::Tensor wv, at::Tensor wg, c10::optional<at::Tensor> wo, at::Tensor wb,
-          at::Tensor lpw, at::Tensor wp, at::Tensor bv, c10::optional<at::Tensor> wop, at::Tensor wf, double qs, double ws) {
-  for (auto* t : {&wq, &bq, &wk, &wv, &wg, &wb, &wp, &bv, &wf}) chk(*t, at::kBFloat16, "prep: bf16");
+          at::Tensor lpw, at::Tensor wp, at::Tensor bv, c10::optional<at::Tensor> wop, at::Tensor wf, double qs, double ws,
+          c10::optional<at::Tensor> wbo) {
+  const auto dt = wq.scalar_type();
+  TORCH_CHECK(dt == at::kBFloat16 || dt == at::kFloat, "prep: bf16 or fp32 weights");
+  for (auto* t : {&bq, &wk, &wv, &wg, &wb}) chk(*t, dt, "prep: one weight dtype");
+  for (auto* t : {&wp, &bv, &wf}) chk(*t, at::kBFloat16, "prep: bf16 outputs");
   chk(lpw, at::kFloat, "ln_pair.weight");
   const Geo G = geo(wb.size(0), wq.size(1));
   const int64_t W = width(G), D = G.d;
   TORCH_CHECK(wq.numel() == D * D && wp.numel() == 4 * W * D && bv.numel() == 4 * W && wf.numel() == G.nh * DP, "prep shapes");
   TORCH_CHECK(wo.has_value() == wop.has_value(), "prep: wo and wop together");
-  if (wop) { chk(*wo, at::kBFloat16, "wo"); chk(*wop, at::kBFloat16, "wop"); TORCH_CHECK(wop->numel() == D * W, "wop [D, W]"); }
+  if (wop) { chk(*wo, dt, "wo"); chk(*wop, at::kBFloat16, "wop"); TORCH_CHECK(wop->numel() == D * W, "wop [D, W]"); }
+  if (wbo) { chk(*wbo, at::kBFloat16, "wbo"); TORCH_CHECK(wbo->numel() == G.nh * DP, "wbo [NH, 128]"); }
   const at::cuda::CUDAGuard gd(wq.device());
   const long n = 4L * W * D / 8 + (wop ? (long)D * W / 8 : 0) + 4 * W + G.nh * DP;
-  prep_k<<<(unsigned)((n + 255) / 256), 256, 0, S()>>>(CP<bf>(wq), CP<bf>(bq), CP<bf>(wk), CP<bf>(wv), CP<bf>(wg), wo ? CP<bf>(*wo) : nullptr,
-      CP<bf>(wb), CP<float>(lpw), P<bf>(wp), P<bf>(bv), wop ? P<bf>(*wop) : nullptr, P<bf>(wf), G, (float)qs, (float)ws);
+  const unsigned grid = (unsigned)((n + 255) / 256);
+  if (dt == at::kBFloat16)
+    prep_k<bf><<<grid, 256, 0, S()>>>(CP<bf>(wq), CP<bf>(bq), CP<bf>(wk), CP<bf>(wv), CP<bf>(wg), wo ? CP<bf>(*wo) : nullptr, CP<bf>(wb),
+        CP<float>(lpw), P<bf>(wp), P<bf>(bv), wop ? P<bf>(*wop) : nullptr, P<bf>(wf), wbo ? P<bf>(*wbo) : nullptr, G, (float)qs, (float)ws);
+  else
+    prep_k<float><<<grid, 256, 0, S()>>>(CP<float>(wq), CP<float>(bq), CP<float>(wk), CP<float>(wv), CP<float>(wg),
+        wo ? CP<float>(*wo) : nullptr, CP<float>(wb), CP<float>(lpw), P<bf>(wp), P<bf>(bv), wop ? P<bf>(*wop) : nullptr, P<bf>(wf),
+        wbo ? P<bf>(*wbo) : nullptr, G, (float)qs, (float)ws);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-__global__ void acc_reduce_k(const float* parts, float* out, int width, int count) {
-  const int c = blockIdx.x * blockDim.x + threadIdx.x;
-  if (c >= width) return;
-  float value = 0.f;
-  for (int row = 0; row < count; ++row) value += parts[(long)row * width + c];
-  out[c] = value;
-}
-// Not launched (the sequential acc_reduce_k is the only reduction; the former environment switch for this tree is gone).
-// Fixed reduction tree with enough CTAs to occupy Hopper at the small APB
-// parameter widths. Each warp sums disjoint partial rows in increasing order;
-// warp zero combines the eight partials in a fixed order.
-__global__ void acc_reduce_tree_k(const float* parts, float* out, int width, int count) {
-  __shared__ float sums[8][32];
+// Fixed-order reduction of the block partials: column c sums rows 0 .. count(c) - 1, count = rows_a for the columns below split
+// (dlnw | dlnb | dbq, written by the row kernels) and rows_b past it (dWf | head sums, written by pair_bias_bwd), so partial rows
+// a producer grid never wrote are never read (no zero fill). A block is 32 columns x 16 warps; warp w adds rows w, w + 16, ...
+// in increasing order and warp 0 adds the sixteen sums in warp order: deterministic, and 17 loads deep instead of 264.
+constexpr int RED_WARPS = 16;
+__global__ void __launch_bounds__(32 * RED_WARPS) acc_reduce_k(const float* parts, float* out, int width, int split, int rows_a, int rows_b) {
+  __shared__ float sums[RED_WARPS][32];
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5;
   const int c = blockIdx.x * 32 + lane;
+  const int count = c < split ? rows_a : rows_b;
   float value = 0.f;
-  if (c < width)
-    for (int row = warp; row < count; row += 8) value += parts[(long)row * width + c];
+  if (c < width) {
+#pragma unroll 4
+    for (int row = warp; row < count; row += RED_WARPS) value += parts[(long)row * width + c];
+  }
   sums[warp][lane] = value;
   __syncthreads();
   if (warp == 0 && c < width) {
     value = sums[0][lane];
 #pragma unroll
-    for (int row = 1; row < 8; ++row) value += sums[row][lane];
+    for (int w = 1; w < RED_WARPS; ++w) value += sums[w][lane];
     out[c] = value;
   }
 }
@@ -981,7 +1021,9 @@ void zero_acc(at::Tensor acc) {
   zero_acc_k<<<(unsigned)((acc.numel() + 255) / 256), 256, 0, S()>>>(P<float>(acc), acc.numel());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out) {
+// ``rows_a`` / ``rows_b`` (Hopper block partials only): the partial rows the row kernels (ln_bwd, qkv_bwd) and pair_bias_bwd wrote.
+void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at::Tensor lpw, std::vector<at::Tensor> out, int64_t rows_a,
+              int64_t rows_b) {
   chk(dwp, at::kFloat, "dwp"); chk(dwo, at::kFloat, "dwo"); chk(wb, at::kBFloat16, "wb"); chk(lpw, at::kFloat, "lpw");
   const Geo G = geo(wb.size(0), dwp.size(1));
   const int64_t W = width(G), D = G.d;
@@ -992,8 +1034,10 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   const at::cuda::CUDAGuard gd(dwp.device());
   if (acc.dim() == 2) {
     // Hopper: every producer wrote a block partial row; reduce them in a fixed order.
+    TORCH_CHECK(rows_a >= 1 && rows_b >= 1 && rows_a <= acc.size(0) && rows_b <= acc.size(0), "finalize: partial row counts");
     auto total = at::empty({acc.size(1)}, acc.options());
-    acc_reduce_k<<<(unsigned)((acc.size(1) + 255) / 256), 256, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1), (int)acc.size(0));
+    acc_reduce_k<<<(unsigned)((acc.size(1) + 31) / 32), 32 * RED_WARPS, 0, S()>>>(CP<float>(acc), P<float>(total), (int)acc.size(1),
+        (int)(2 * D + W), (int)rows_a, (int)rows_b);
     acc = total;
   }
   const long n = 5L * D * D / 4 + 3 * D + G.nh * DP + DP;
@@ -1868,6 +1912,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("cast_leaves", &cast_leaves);
   m.def("cast_grads", &cast_grads);
   m.def("zero_acc", &zero_acc);
+  m.def("pair_bwd_blocks", &pair_bwd_blocks);
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_bwd", &pair_bias_bwd);
   m.def("ln_rows", &ln_rows);

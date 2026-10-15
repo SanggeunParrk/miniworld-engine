@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import functools
 import math
+import os
 import warnings
 from pathlib import Path
 
@@ -56,6 +57,9 @@ _tmn = (
 
 H, D = 16, 48
 LOG2E = 1.0 / math.log(2.0)
+# AttentionPairBias (B = 1): key splits per 64 query rows -- APB_KS warpgroups, each walking every APB_KS-th key block, merged in
+# shared memory. Measured on H100 (L768, 8 x 48): 2 splits take 1-2 us off each core (about 0.5 % of the step); the default stays 1.
+_APB_KS = {"fwd": 1, "inf": 1, "dq": 1, "dkv": 1}
 
 
 @functools.lru_cache(maxsize=None)
@@ -98,7 +102,13 @@ class ApbInferenceCore:
         self.heads = heads
         with torch.cuda.device(device_index):
             self.extension = _ext(
-                "attn_fwd", (f"DHP={dh}", f"ROW_WIDTH={width(heads, d)}", "NWG=1")
+                "attn_fwd",
+                (
+                    f"DHP={dh}",
+                    f"ROW_WIDTH={width(heads, d)}",
+                    "NWG=1",
+                    f"APB_KS={_APB_KS['inf']}",
+                ),
             )
 
     def __call__(self, qkvg: torch.Tensor, bias: torch.Tensor):
@@ -131,14 +141,31 @@ def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
     return O, LSE
 
 
+def apb_forward_gated(qkvg, bias, L, heads: int = 8, d: int = 384):
+    """The Pairformer track's training forward with its gate in the epilogue: (O fp32, og = sigmoid(g) O bf16, LSE) from the
+    packed q | k | v | g GEMM output [L, 4 W] (natural units) and the head-major bias."""
+    from .apb import width
+
+    W = width(heads, d)
+    O = torch.empty(L, W, device=qkvg.device, dtype=torch.float32)
+    og = torch.empty(L, W, device=qkvg.device, dtype=torch.bfloat16)
+    LSE = torch.empty(heads, L, device=qkvg.device, dtype=torch.float32)
+    _ext("attn_fwd", _apb_training_defs(heads, d) + (f"APB_KS={_APB_KS['fwd']}",)).attn_fwd_o_og(
+        qkvg, bias, O, og, LSE
+    )
+    return O, og, LSE
+
+
 def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
     """dQB and dKV own their complete rows: no cross-CTA attention atomics."""
     opts = dict(memory_format=torch.contiguous_format, dtype=torch.float32)
     DQ, DK, DV = (torch.empty_like(q, **opts) for _ in range(3))
     DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
     defs = _apb_training_defs(heads, d)
-    _ext("attn_dq", defs).apb_dqb(q, k, v, dob, bias, LSE, Dd, DQ, DB)
-    _ext("attn_dkv", defs + ("DBIAS=0",)).attn_dkv(
+    _ext("attn_dq", defs + (f"APB_KS={_APB_KS['dq']}",)).apb_dqb(
+        q, k, v, dob, bias, LSE, Dd, DQ, DB
+    )
+    _ext("attn_dkv", defs + ("DBIAS=0", f"APB_KS={_APB_KS['dkv']}")).attn_dkv(
         q, k, v, dob, bias, None, LSE, Dd, DK, DV, DB
     )
     return DQ, DK, DV, DB

@@ -27,6 +27,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NWG
 #define NWG 3                    // consumer warpgroups: query rows per CTA = 64 NWG
 #endif
+#ifndef APB_KS
+#define APB_KS 1                     // key splits: APB_KS warpgroups per 64 query rows, each walking every APB_KS-th key block with its own dQ
+#endif                           // accumulator (summed in shared memory at the end)
 #ifndef BLKSM
 #define BLKSM 1
 #endif
@@ -68,7 +71,11 @@ using namespace tmn; using namespace tmn::sm90;
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
 constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
+constexpr int NCW = NWG * APB_KS;                // consumer warpgroups
+static_assert(APB_KS == 1 || FCLS == 1, "key splits do not combine with clusters");
 constexpr float LOG2E = 1.4426950408889634f;
+constexpr float LN2F = 0.6931471805599453f;
+constexpr float IRSQDV = 1.0f / RSQDV;      // natural-unit builds multiply by this: a float division by a constant is a ~10-instruction routine
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
@@ -126,7 +133,7 @@ constexpr float RSQD = RSQDV;
 static_assert(STAGES >= 2, "dO is parked in slot 1");
 
 template <bool HASM>
-__global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
+__global__ void __launch_bounds__(128 * NCW + 32, BLKSM)
 attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
                const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mdo,
                const __grid_constant__ CUtensorMap mbias, const float* __restrict__ KM, const float* __restrict__ LSE,
@@ -142,21 +149,22 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
   const int samp = blockIdx.x % A, cid = blockIdx.x / A;
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, row0 = samp * L + m0;
-  const int wg = tid >> 7;
+  const int wgi = tid >> 7;                                         // consumer warpgroup index
+  const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64 query rows, and its key split
   const int nblocks = L / BN;
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
     mbar_init(qbar, 1);
-    mbar_init(qdone, FCLS * 4 * NWG);                           // cluster-wide: a multicast lands in every rank's slot 0
+    mbar_init(qdone, FCLS * 4 * NCW);                           // cluster-wide: a multicast lands in every rank's slot 0
     fence_barrier_init();
   }
   __syncthreads();
   if (FCLS > 1) cluster_sync_all();
   const uint32_t rank = FCLS > 1 ? cluster_rank() : 0;
 
-  if (tid >= 128 * NWG) {
-    const int iss = tid - 128 * NWG;
+  if (tid >= 128 * NCW) {
+    const int iss = tid - 128 * NCW;
     if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mdo);
       tma_prefetch_desc(&mbias);
@@ -228,7 +236,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
   uint32_t pa[BN / 16][4];
   const uint32_t sbase = smem_u32(sm);
   const uint64_t dK0 = dsw(sbase), dM0 = dmn(sbase, 0);          // descriptors: base + (offset >> 4)
-  for (int n = 0; n < nblocks; ++n) {
+  for (int n = kspl; n < nblocks; n += APB_KS) {
     const int sn = n % STAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
     mbar_wait(&full[sn], (n / STAGES) & 1);
@@ -252,8 +260,8 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
           sc[4 * j + 2 * h] = b.x + (mk[2 * j] - lse[h]);
           sc[4 * j + 2 * h + 1] = b.y + (mk[2 * j + 1] - lse[h]);
           if constexpr (APB_NATURAL) {
-            sc[4 * j + 2 * h] = (b.x - lse[h] / LOG2E) / RSQDV;
-            sc[4 * j + 2 * h + 1] = (b.y - lse[h] / LOG2E) / RSQDV;
+            sc[4 * j + 2 * h] = (b.x - lse[h] * LN2F) * IRSQDV;
+            sc[4 * j + 2 * h + 1] = (b.y - lse[h] * LN2F) * IRSQDV;
           }
         }
       }
@@ -304,6 +312,23 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
   }
 #pragma unroll
   for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
+  if constexpr (APB_KS > 1) {
+    // sum the key splits' dQ: split k > 0 parks it in shared memory, split 0 adds them in split order
+    float* sx = reinterpret_cast<float*>(sm + STAGES * ST_BYTES + 256);
+    if (kspl > 0) {
+      float* mine = sx + ((size_t)((kspl - 1) * NWG + wg) * 128 + (tid & 127)) * (DH / 2);
+#pragma unroll
+      for (int i = 0; i < DH / 2; ++i) mine[i] = acc[i];
+    }
+    asm volatile("bar.sync 1, %0;" :: "n"(128 * NCW) : "memory");
+    if (kspl > 0) return;
+#pragma unroll
+    for (int k = 1; k < APB_KS; ++k) {
+      const float* o = sx + ((size_t)((k - 1) * NWG + wg) * 128 + (tid & 127)) * (DH / 2);
+#pragma unroll
+      for (int i = 0; i < DH / 2; ++i) acc[i] += o[i];
+    }
+  }
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     const int row = m0 + wg * 64 + r0 + 8 * h;
@@ -367,7 +392,7 @@ void attn_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   TORCH_CHECK(DQ.dim() == 2 && DQ.size(0) == A * L && DQ.size(1) == DM && DQ.stride(0) == BWD_ROW_STRIDE && DQ.stride(1) == 1 &&
               DQ.scalar_type() == (BWD_BF16 ? torch::kBFloat16 : torch::kFloat32) && LSE.is_contiguous() && Dd.is_contiguous(), "layout");
   TORCH_CHECK(L % QM == 0 && A % FCLS == 0, "shape");
-  const size_t smem = 1024 + STAGES * ST_BYTES + 256;
+  const size_t smem = 1024 + STAGES * ST_BYTES + 256 + (size_t)(APB_KS - 1) * NWG * 128 * (DH / 2) * 4;   // + the splits' dQ
   const bool hasm = kmask.has_value() && kmask->defined();
   auto kern = hasm ? attn_dq_kernel<true> : attn_dq_kernel<false>;
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -379,7 +404,7 @@ void attn_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(A * H * mt);
-  cfg.blockDim = dim3(128 * NWG + 32);
+  cfg.blockDim = dim3(128 * NCW + 32);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[1];

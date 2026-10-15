@@ -24,6 +24,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NWG
 #define NWG 2                    // consumer warpgroups: query rows per CTA = 64 NWG
 #endif
+#ifndef APB_KS
+#define APB_KS 1                     // key splits: APB_KS warpgroups per 64 query rows, each walking every APB_KS-th key block with its own
+#endif                           // (m, l, acc); the partials merge in shared memory at the end (B = 1: more warps per SM)
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -65,9 +68,13 @@ using namespace tmn; using namespace tmn::sm90;
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
 constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
+constexpr int NCW = NWG * APB_KS;                // consumer warpgroups
+static_assert(APB_KS == 1 || FCLS == 1, "key splits do not combine with clusters");
 static_assert(DH == 16 || DH == 32 || DH == 48, "unsupported head width");
 static_assert(DM % DH == 0, "row width must contain complete heads");
 constexpr float LOG2E = 1.4426950408889634f;
+constexpr float LN2F = 0.6931471805599453f;
+constexpr float IRSQDV = 1.0f / RSQDV;      // natural-unit builds multiply by this: a float division by a constant is a ~10-instruction routine
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
@@ -128,11 +135,12 @@ constexpr int ST_BYTES = 2 * SKV + SB;
 constexpr int QSTAGE = 2 * SKV;                                     // q is parked in slot 0's bias area
 
 // grid: A * H * (L / QM) CTAs, the sample fastest so the A CTAs sharing a bias tile run together and read it from L2
+// MODE 3 (APB training): both O fp32 (the backward's D = rowsum(dO o)) and og = sigmoid(g) O bf16, + LSE.
 // MODE 0: O fp32 + LSE (the bf16 attention op). MODE 1 (inference): QKVG is the [A L, 3072] q|k|v|g buffer the maps view,
 // sigmoid(g) o goes over q, no O / LSE. MODE 2 (the token DiT training block): og = sigmoid(g) o into OG [A L, 768] bf16, g
 // read from QKVG, + LSE -- the block's backward needs no O (D = rowsum(dO O) = rowsum(d og * og)).
 template <bool HASM, int MODE>
-__global__ void __launch_bounds__(128 * NWG + 32, BLKSM)
+__global__ void __launch_bounds__(128 * NCW + 32, BLKSM)
 attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk,
                 const __grid_constant__ CUtensorMap mv, const __grid_constant__ CUtensorMap mbias,
                 const __grid_constant__ CUtensorMap mg,
@@ -146,25 +154,27 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   uint64_t* qbar = empty + STAGES;
   uint64_t* qdone = qbar + 1;
   uint64_t* gbar = qdone + 1;
-  uint8_t* sg = sm + STAGES * ST_BYTES + 256;                       // MODE 1, 2: the g tile [QM][48] bf16, TMA-loaded up front
+  uint8_t* sg = sm + STAGES * ST_BYTES + 256;                       // MODE 1, 2, 3: the g tile [QM][48] bf16, TMA-loaded up front
+  float* sx = reinterpret_cast<float*>(sg + QM * DH * 2);           // APB_KS > 1: the other key splits' (m, l, acc), per thread
 
   const int tid = threadIdx.x;
-  constexpr int PTHR = 32, NTHR = 128 * NWG + PTHR;
+  constexpr int PTHR = 32, NTHR = 128 * NCW + PTHR;
   constexpr int LAUNCH_REGS = (65536 / (NTHR * BLKSM)) / 8 * 8;
-  constexpr int CONS_RAW = (NTHR * LAUNCH_REGS - PTHR * 40) / (128 * NWG) / 8 * 8;
+  constexpr int CONS_RAW = (NTHR * LAUNCH_REGS - PTHR * 40) / (128 * NCW) / 8 * 8;
   constexpr int CONS_REGS = CONS_RAW > 232 ? 232 : CONS_RAW;
-  if (RSPLIT) { if (tid >= 128 * NWG) setmaxnreg_dec<40>(); else setmaxnreg_inc<CONS_REGS>(); }
+  if (RSPLIT) { if (tid >= 128 * NCW) setmaxnreg_dec<40>(); else setmaxnreg_inc<CONS_REGS>(); }
 
   const int samp = blockIdx.x % A, cid = blockIdx.x / A;
   const int m_tile = cid % mt, head = cid / mt;
   const int m0 = m_tile * QM, qcol = head * DH, row0 = samp * L + m0;
-  const int wg = tid >> 7;
+  const int wgi = tid >> 7;                                         // consumer warpgroup index
+  const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64-row group, and its key split
   const int nblocks = L / BN;
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
     mbar_init(qbar, 1);
-    mbar_init(qdone, FCLS * 4 * NWG);                           // cluster-wide: a multicast lands in every rank's slot 0
+    mbar_init(qdone, FCLS * 4 * NCW);                           // cluster-wide: a multicast lands in every rank's slot 0
     mbar_init(gbar, 1);
     fence_barrier_init();
   }
@@ -172,8 +182,8 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   if (FCLS > 1) cluster_sync_all();                                  // every barrier in the cluster initialised
   const uint32_t rank = FCLS > 1 ? cluster_rank() : 0;
 
-  if (tid >= 128 * NWG) {                                           // producer warp: one issuing thread per tensor
-    const int iss = tid - 128 * NWG;                                // 0 = k, 1 = v, 2 = bias
+  if (tid >= 128 * NCW) {                                           // producer warp: one issuing thread per tensor
+    const int iss = tid - 128 * NCW;                                // 0 = k, 1 = v, 2 = bias
     if (iss == 0) {
       tma_prefetch_desc(&mq); tma_prefetch_desc(&mk); tma_prefetch_desc(&mv); tma_prefetch_desc(&mbias);
       mbar_arrive_expect_tx(qbar, QM * QW * 2);
@@ -241,7 +251,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   // Descriptors are built once and moved by adding (byte offset >> 4) to the 14-bit address field (shared addresses
   // stay under 256 KB, so it never carries): smem_desc per k-step cost ~1.8 uniform-datapath instructions a pair.
   const uint64_t dK0 = dsw(sbase), dV0 = dmn(sbase + SKV, 0);
-  for (int n = 0; n < nblocks; ++n) {
+  for (int n = kspl; n < nblocks; n += APB_KS) {
     const int sn = n % STAGES;
     const uint32_t slot = sbase + sn * ST_BYTES;
     mbar_wait(&full[sn], (n / STAGES) & 1);
@@ -266,8 +276,8 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
           sc[4 * j + 2 * h] = HASM ? b.x + mk[2 * j] : b.x;          // x + 0.f is not foldable (signed zero)
           sc[4 * j + 2 * h + 1] = HASM ? b.y + mk[2 * j + 1] : b.y;
           if constexpr (APB_NATURAL) {
-            sc[4 * j + 2 * h] /= RSQDV;
-            sc[4 * j + 2 * h + 1] /= RSQDV;
+            sc[4 * j + 2 * h] *= IRSQDV;
+            sc[4 * j + 2 * h + 1] *= IRSQDV;
           }
         }
       }
@@ -339,6 +349,35 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   }
 #pragma unroll
   for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
+  if constexpr (APB_KS > 1) {
+    // merge the key splits' (m, l, acc): split k > 0 parks its partials in shared memory, split 0 folds them in split order
+    constexpr int PW = DH / 2 + 4;                                  // floats a thread parks
+    float* mine = sx + ((size_t)((kspl > 0 ? kspl - 1 : 0) * NWG + wg) * 128 + (tid & 127)) * PW;
+    if (kspl > 0) {
+      mine[0] = m_i[0]; mine[1] = m_i[1]; mine[2] = l_i[0]; mine[3] = l_i[1];
+#pragma unroll
+      for (int i = 0; i < DH / 2; ++i) mine[4 + i] = acc[i];
+    }
+    asm volatile("bar.sync 1, %0;" :: "n"(128 * NCW) : "memory");
+    if (kspl > 0) return;
+#pragma unroll
+    for (int k = 1; k < APB_KS; ++k) {
+      const float* o = sx + ((size_t)((k - 1) * NWG + wg) * 128 + (tid & 127)) * PW;
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {
+        const float mo = o[h], lo = o[2 + h];
+        const float mn = fmaxf(m_i[h], mo);
+        const float a0 = m_i[h] == -INFINITY ? 0.f : ex2(m_i[h] - mn), a1 = mo == -INFINITY ? 0.f : ex2(mo - mn);
+        l_i[h] = l_i[h] * a0 + lo * a1;
+#pragma unroll
+        for (int j = 0; j < DH / 8; ++j) {
+          acc[4 * j + 2 * h] = acc[4 * j + 2 * h] * a0 + o[4 + 4 * j + 2 * h] * a1;
+          acc[4 * j + 2 * h + 1] = acc[4 * j + 2 * h + 1] * a0 + o[4 + 4 * j + 2 * h + 1] * a1;
+        }
+        m_i[h] = mn;
+      }
+    }
+  }
 
   // ---- epilogue: O = acc / l (fp32), LSE = m + log2 l; MODE 1: sigmoid(g) acc / l (bf16) over q; MODE 2: into OG, + LSE
   if constexpr (MODE != 0) mbar_wait(gbar, 0);
@@ -357,7 +396,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       }
       continue;
     }
-    if constexpr (MODE == 2) {
+    if constexpr (MODE == 2 || MODE == 3) {
       __nv_bfloat16* ogrow = OG + (size_t)(samp * L + row) * DM + qcol;
 #pragma unroll
       for (int j = 0; j < DH / 8; ++j) {
@@ -365,7 +404,8 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         *reinterpret_cast<__nv_bfloat162*>(ogrow + j * 8 + cb) =
             __floats2bfloat162_rn(acc[4 * j + 2 * h] * inv * sigmoid_e(g.x), acc[4 * j + 2 * h + 1] * inv * sigmoid_e(g.y));
       }
-    } else {
+    }
+    if constexpr (MODE == 0 || MODE == 3) {
       float* orow = O + (size_t)(samp * L + row) * DM + qcol;
 #pragma unroll
       for (int j = 0; j < DH / 8; ++j) {
@@ -420,11 +460,11 @@ void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, cons
             const CUtensorMap& mg,
             const float* km, float* O, float* LSE, __nv_bfloat16* qkvg, int L, int H, int A, int mt,
             __nv_bfloat16* og = nullptr) {
-  const size_t smem = 1024 + STAGES * ST_BYTES + 256 + QM * DH * 2;   // + the g tile
+  const size_t smem = 1024 + STAGES * ST_BYTES + 256 + QM * DH * 2 + (size_t)(APB_KS - 1) * NWG * 128 * (DH / 2 + 4) * 4;   // + g tile, key-split scratch
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(grid);
-  cfg.blockDim = dim3(128 * NWG + 32);
+  cfg.blockDim = dim3(128 * NCW + 32);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
   cudaLaunchAttribute at[1];
@@ -482,6 +522,28 @@ void attn_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
          reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, A, mt, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
 }
 
+// AttentionPairBias training forward (MODE 3): qkvg [L, 4 W] bf16 (q | k | v | g, natural units), bias [H, L, L] bf16 (natural
+// units, masked keys -inf). Writes O [L, W] fp32, og = sigmoid(g) O [L, W] bf16 and the LSE [H, L] (log2 units): the gate pass
+// of the Pairformer track is the epilogue of this kernel.
+void attn_fwd_o_og(torch::Tensor qkvg, torch::Tensor bias, torch::Tensor O, torch::Tensor OG, torch::Tensor LSE) {
+  const int H = bias.size(0), L = bias.size(1);
+  TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM && qkvg.size(0) == L,
+              "qkvg layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kFloat32 && O.size(0) == L && O.size(1) == DM, "O layout");
+  TORCH_CHECK(OG.is_contiguous() && OG.scalar_type() == torch::kBFloat16 && OG.size(0) == L && OG.size(1) == DM, "og layout");
+  TORCH_CHECK(LSE.is_contiguous() && L % QM == 0 && FCLS == 1, "LSE / shape");
+  const int mt = L / QM;
+  auto* base = reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr());
+  auto mq = tile_map(base, L, DM, 4 * DM, QW, QM);
+  auto mk = tile_map(base + DM, L, DM, 4 * DM, QW, BN);
+  auto mv = tile_map(base + 2 * DM, L, DM, 4 * DM, QW, BN);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
+  auto mg = tile_map(base + 3 * DM, L, DM, 4 * DM, DH, QM, CU_TENSOR_MAP_SWIZZLE_NONE);
+  launch(attn_fwd_kernel<false, 3>, H * mt, mq, mk, mv, mb, mg, nullptr, O.data_ptr<float>(), LSE.data_ptr<float>(), base, L, H, 1,
+         mt, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
+}
+
 // The inference core: qkvg [S*L, 3072] bf16 (q | k | v | g, q in exp2 units: sm_scale log2 e folded into Wq, bq or the
 // qk-norm weight), bias_all [nb*H, L, L] bf16 (log2 units, masked keys -inf), block = which H-row slice of it. Writes
 // sigmoid(g) softmax(q k^T + bias) v over q.
@@ -507,4 +569,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("attn_fwd", &attn_fwd);
   m.def("attn_inf", &attn_inf);
   m.def("attn_fwd_og", &attn_fwd_og);
+  m.def("attn_fwd_o_og", &attn_fwd_o_og);
 }
