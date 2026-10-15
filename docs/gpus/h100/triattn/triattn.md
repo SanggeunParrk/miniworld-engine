@@ -575,3 +575,24 @@ Anthropic's cell does not serve d_pair 64 (`no-cell:fpf:prologue:64x2x32`), 384 
 d_pair 256 at L128 is a tie and, in this script, a small loss (0.070 vs 0.074 ms; `bench.py` measured 0.075 vs 0.065 ms for the same
 cell on the same day): that cell is three kernels (fused front `front_v3` 28 us, core 22 us, cuBLAS 10 us of device time) and its
 latency differs by a few us between the two harnesses.  Everywhere else ours is faster (1.03x - 1.94x).
+
+#### Correction after `7f7851aa`: the weight pack
+
+The d_pair 256 L128 cell above (a tie / small loss) was the weight packing: the sm90 paths repack the weights inside a captured CUDA graph
+so a replay sees the current parameters, and with fp32 master parameters the generic path did it with twelve small torch kernels
+(cast, pad, cat: 17 us of a 74 us replay at d_pair 256 L128).  `pack_generic_k` (generic) and `tri_pack_k` (fused inference) do it in
+one launch each (3 / 2 us).  Re-measured, same script, ms, Anthropic / ours (Anthropic ÷ ours):
+
+| case, d_pair | L128 | L256 | L512 | L768 |
+|---|---|---|---|---|
+| base, 128 | 0.047 / 0.030 (1.57x) | 0.161 / 0.110 (1.46x) | 0.700 / 0.503 (1.39x) | 1.718 / 1.369 (1.25x) |
+| base, 256 | 0.070 / 0.061 (1.15x) | 0.301 / 0.255 (1.18x) | 1.388 / 1.168 (1.19x) | 3.474 / 3.158 (1.10x) |
+| ending, 128 | 0.050 / 0.030 (1.67x) | 0.176 / 0.110 (1.60x) | 0.739 / 0.506 (1.46x) | 1.801 / 1.363 (1.32x) |
+| ending, 256 | 0.076 / 0.062 (1.23x) | 0.322 / 0.258 (1.25x) | 1.439 / 1.185 (1.21x) | 3.638 / 3.208 (1.13x) |
+| mask, 128 | 0.048 / 0.030 (1.60x) | 0.166 / 0.110 (1.51x) | 0.720 / 0.504 (1.43x) | 1.746 / 1.368 (1.28x) |
+| mask, 256 | 0.070 / 0.061 (1.15x) | 0.305 / 0.256 (1.19x) | 1.388 / 1.173 (1.18x) | 3.495 / 3.167 (1.10x) |
+| B = 2, 128 | 0.104 / 0.051 (2.04x) | 0.410 / 0.206 (1.99x) | 1.744 / 1.001 (1.74x) | 4.238 / 2.724 (1.56x) |
+| B = 2, 256 | 0.195 / 0.120 (1.63x) | 0.771 / 0.479 (1.61x) | 3.458 / 2.284 (1.51x) | out of memory (reference check) |
+
+Ours is faster than Anthropic's native cell in every cell; the thinnest margin is d_pair 256 L768 (1.10x), where the cuBLAS projections
+dominate.  The same repack saving applies to every width and to training calls (their weight packs were the same torch kernels).
