@@ -538,3 +538,27 @@ at L640 the grid (600 CTAs on 264 slots) also fills its third wave to 27 %.
 Tried and not kept (all measured): `FWD_BN=128` (wrong: spilled accumulators, now blocked), `BIAS_AFTER` (the bias added after the QK
 wgmma: same time, the stall moves to the add), `BIAS_L1PF` (prefetch.global.L1: 0.85x), `PREFETCH_BIAS` + `INPLACE_P` (0.93x), `HT = 64`
 fused tiles (more tiles, 91 % last wave, but 24 x 32 L384 1.07 -> 1.04 and L640 1.00 -> 0.96).
+
+### bf16 after the 2026-10-15 changes (re-measured)
+
+Inference, x = Anthropic / ours (CUDA graph; Anthropic `compile=false`), 20 % key mask; every one of the 48 cells >= 1.19x:
+
+| layout | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|
+| 16 x 48 | 5 shared | 1.48 | 1.48 | 1.39 | 1.44 | 1.36 | 1.39 |
+| 16 x 48 | 1 | 1.47 | 1.48 | 1.49 | 1.55 | 1.53 | 1.57 |
+| 24 x 32 | 5 shared | 1.48 | 1.49 | 1.39 | 1.42 | 1.36 | 1.41 |
+| 24 x 32 | 1 | 1.46 | 1.47 | 1.50 | 1.54 | 1.52 | 1.52 |
+| 12 x 64 | 5 shared | 1.46 | 1.47 | 1.27 | 1.37 | 1.23 | 1.26 |
+| 12 x 64 | 1 | 1.46 | 1.46 | 1.43 | 1.47 | 1.47 | 1.48 |
+| 16 x 64 (d 1024) | 5 shared | 1.44 | 1.23 | 1.32 | 1.20 | 1.19 | 1.22 |
+| 16 x 64 (d 1024) | 1 | 1.41 | 1.41 | 1.41 | 1.43 | 1.44 | 1.43 |
+
+Training (A = 48), x = PyTorch compiled / ours (no Anthropic backward exists):
+
+| layout | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| 16 x 48 | 1.24 | 1.51 | 1.70 | 1.85 | 2.09 | 2.13 |
+| 24 x 32 | 1.33 | 1.75 | 2.00 | 2.24 | 2.59 | 2.87 |
+| 12 x 64 | 1.11 | 1.26 | 1.33 | 1.44 | 1.40 | 1.45 |
+| 16 x 64 (d 1024) | 1.10 | 1.30 | 1.42 | 1.51 | 1.69 | 1.74 |
