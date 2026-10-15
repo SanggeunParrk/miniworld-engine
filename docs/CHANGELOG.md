@@ -93,6 +93,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   buffers, and the split-K gradient reduce is 8 x 32 threads instead of one -- L128 training step 193 -> 165 us device time (-15 %),
   L256 -6 %.
   Core experiments and what bounds the attention core: `docs/records/triattn_h100_core_experiments_20261013.md`.
+- H100 TriangleAttention (2026-10-14 / 15): the weight packs replayed inside every captured CUDA graph are one launch each
+  (`pack_generic_k` for the width-generic path, `tri_pack_k` for the fused inference path; twelve torch cast / pad / cat kernels before):
+  (128, 256) inference replay 74 -> 60 us, (128, 128) 36 -> 29 us.  The re-measurement (all widths, L128-768, inference and training,
+  ending node, key mask, B = 2, and against Anthropic's native cell) is in `docs/gpus/h100/triattn/triattn.md` and
+  `docs/records/triattn_h100_remeasure_20261013_15.md`; backward / front experiments that did not pay (rounds 5-8) in
+  `docs/records/triattn_h100_core_experiments_20261013.md`.
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
   harness default; one run per cell, 131 + 82 harness runs on 6 cards). Training rows did not move; the first take of the inference
