@@ -148,9 +148,7 @@ def test_tuned_gates_take_n2():
         assert fused_wide_sm90a.supported(*operands(d, 4 * d))
         assert fused_wide_sm90a.supported(*operands(d, 2 * d))  # n = 2 is built for D64 ... D512
         assert not fused_wide_sm90a.supported(*operands(d, 3 * d))
-    assert not fused_wide_sm90a.supported(
-        *operands(768, 1536)
-    )  # no tuned D768 build: the generic kernels take it
+    assert fused_wide_sm90a.supported(*operands(768, 1536))  # D768 n = 2 has a tuned build in the committed wide family
 
 
 # -------------------------------------------------------------------------------------------------------------- generic kernels
@@ -311,7 +309,7 @@ def _spy(monkeypatch, module_obj, name):
         (256, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (384, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (512, 4, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
-        (768, 2, (1, 16, 16), "fused_generic_sm90a.transition_generic_sm90a"),
+        (768, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (
             128,
             4,
