@@ -552,3 +552,26 @@ Ours is the fastest in all 120 cells; largest margins (same script) are d_pair 1
 PyTorch compiled runs out of memory at L768 for d_pair 512 (B = 1, 2) and d_pair 256-384 at B = 2 and for d_pair 384 training;
 those cells are against cuEquivariance only.  Ending node and mask cost nothing over the starting node without a mask (ours within
 +-3 % of the control).  Not covered: fp32 activations, B > 2, L not a multiple of 128, Anthropic with these conditions.
+
+### Against Anthropic's native cell, all four conditions (2026-10-14)
+
+Same scratch script as the previous section (`cases_anth.py`: `integrations.anthropic.module_triangle_attention`, row
+`block:triattn_native`, on the module's own parameters, inference; ours = the module with the sm90 path; one CUDA graph per cell, median
+of 5 x 10 replays; fp32 master parameters under bf16 autocast).  Both outputs checked against the fp32 PyTorch module (relative error
+1.7e-3 - 1.9e-3 for both, every cell).  ms, Anthropic / ours (Anthropic ÷ ours):
+
+| case, d_pair | L128 | L256 | L512 | L768 |
+|---|---|---|---|---|
+| base, 128 | 0.047 / 0.036 (1.31x) | 0.162 / 0.115 (1.41x) | 0.702 / 0.512 (1.37x) | 1.712 / 1.367 (1.25x) |
+| base, 256 | 0.070 / 0.074 (**0.95x**) | 0.300 / 0.265 (1.13x) | 1.388 / 1.187 (1.17x) | 3.462 / 3.155 (1.10x) |
+| ending, 128 | 0.050 / 0.035 (1.43x) | 0.176 / 0.115 (1.53x) | 0.735 / 0.513 (1.43x) | 1.792 / 1.374 (1.30x) |
+| ending, 256 | 0.076 / 0.074 (1.03x) | 0.324 / 0.266 (1.22x) | 1.442 / 1.189 (1.21x) | 3.609 / 3.182 (1.13x) |
+| mask, 128 | 0.048 / 0.036 (1.33x) | 0.165 / 0.116 (1.42x) | 0.722 / 0.511 (1.41x) | 1.754 / 1.376 (1.27x) |
+| mask, 256 | 0.070 / 0.074 (**0.95x**) | 0.305 / 0.265 (1.15x) | 1.412 / 1.176 (1.20x) | 3.480 / 3.122 (1.11x) |
+| B = 2, 128 | 0.105 / 0.057 (1.84x) | 0.411 / 0.212 (1.94x) | 1.735 / 1.001 (1.73x) | 4.233 / 2.713 (1.56x) |
+| B = 2, 256 | 0.195 / 0.137 (1.42x) | 0.764 / 0.489 (1.56x) | 3.458 / 2.373 (1.46x) | out of memory (reference check) |
+
+Anthropic's cell does not serve d_pair 64 (`no-cell:fpf:prologue:64x2x32`), 384 (`pow2:c384h12d32`) or 512 (`Refused:pair_fused`).
+d_pair 256 at L128 is a tie and, in this script, a small loss (0.070 vs 0.074 ms; `bench.py` measured 0.075 vs 0.065 ms for the same
+cell on the same day): that cell is three kernels (fused front `front_v3` 28 us, core 22 us, cuBLAS 10 us of device time) and its
+latency differs by a few us between the two harnesses.  Everywhere else ours is faster (1.03x - 1.94x).
