@@ -430,3 +430,26 @@ The test file also carries the bf16 training gradients (output / inputs / every 
 8e-3 / 1.6e-2 / 3.2e-2, bitwise-repeatable step) at all four layouts, L 256 and 384, A = 6: 8 more tests.
 
 All four head layouts are now served natively on H100 for the token DiT in both dtypes, inference and training.
+
+## Head layouts vs Anthropic (2026-10-15, inference)
+
+`bench.py target=dit level=module mode=inference min_seq_len=128 max_seq_len=768 seq_len_step=128`, key mask 20 %, ms per block,
+CUDA graph (ours) / `compile=false` (Anthropic's release, its own invocation; no backward exists). x = Anthropic / ours.
+
+| layout | dtype | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|---|
+| 24 x 32 | bf16 | 5 shared | 1.48 | 1.49 | 1.40 | 1.42 | 1.35 | 1.41 |
+| 24 x 32 | bf16 | 1 | 1.47 | 1.48 | 1.50 | 1.54 | 1.53 | 1.53 |
+| 24 x 32 | fp32 | 5 shared | 1.22 | 1.16 | 1.06 | 1.06 | 0.98 | 0.99 |
+| 24 x 32 | fp32 | 1 | 1.24 | 1.25 | 1.20 | 1.12 | 1.06 | 1.09 |
+| 12 x 64 | bf16 | 5 shared | 1.46 | 1.47 | 1.26 | 1.37 | 1.22 | 1.27 |
+| 12 x 64 | bf16 | 1 | 1.46 | 1.46 | 1.44 | 1.46 | 1.47 | 1.48 |
+| 12 x 64 | fp32 | 5 shared | 1.21 | 1.15 | 1.12 | 1.11 | 1.04 | 1.04 |
+| 12 x 64 | fp32 | 1 | 1.23 | 1.24 | 1.19 | 1.13 | 1.05 | 1.09 |
+| 16 x 64 (d 1024) | bf16 | 5 shared | 1.46 | 1.23 | 1.31 | 1.20 | 1.19 | 1.22 |
+| 16 x 64 (d 1024) | bf16 | 1 | 1.40 | 1.40 | 1.42 | 1.43 | 1.45 | 1.43 |
+| 16 x 64 (d 1024) | fp32 | 5 shared | 1.21 | 1.15 | 1.11 | 1.05 | 1.05 | 1.07 |
+| 16 x 64 (d 1024) | fp32 | 1 | 1.23 | 1.21 | 1.11 | 1.08 | 1.07 | 1.07 |
+
+70 of 72 cells are faster than Anthropic. The two exceptions are 24 x 32 fp32, A = 5, L640 / L768 (0.98x / 0.99x: 0.395 vs 0.391 ms at
+L768): the fp32 attention forward is latency bound there (see "Limits and next"), so it converges to Anthropic's TF32 core.
