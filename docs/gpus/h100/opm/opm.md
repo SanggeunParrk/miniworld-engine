@@ -1,16 +1,17 @@
 # OuterProductMean on H100 (sm90)
 
 Kernel-level status of `OuterProductMean` on H100; the module-level summary is in [h100.md](../h100.md) and the dispatch contract
-in [dispatch.md](../dispatch.md). bf16; the module's width is fixed (d_msa 64, d_hidden 32, d_pair 128), so the columns are
+in [dispatch.md](../dispatch.md). bf16; d_hidden 32, the widths are listed below; the columns are
 (Length, MSA depth). The B200 page of the same module is [../../b200/opm/opm.md](../../b200/opm/opm.md); the fusion algorithm is
 the same, the instructions are not (see [Against B200](#against-b200)).
 
-Dispatch: `integrations/opm_train.py` (`_h100_path`); kernels: `integrations/csrc/opm_epilogue.cu` (one extension, built by JIT for sm_90a).
-Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, `normalize_before_proj` (the AF3 order), no interchain
-masking, N (length) a multiple of 64 and S (MSA depth) a multiple of 256, inference and training alike; the pair residual is added in
-the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call runs the portable Triton path.
-Not served on H100: other widths (MSA 128 with pair 256 / 384 in Protenix-v2, ESMFold2 and OpenDDE) and `normalize_before_proj=False`
-([todo.md](../todo.md) item 5).
+Dispatch: `integrations/opm_train.py` (`_h100_path`, `_forward_wide`); kernels: `integrations/csrc/opm_epilogue.cu` (one extension per
+(d_msa, d_pair), built by JIT for sm_90a).
+Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, no interchain masking, inference and training alike; the pair
+residual is added in the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call
+runs the portable Triton path. Widths: (d_msa, d_pair) = (64, 128) MiniWorld, (128, 256) Protenix-v2 / ESMFold2, (128, 384) OpenDDE,
+d_hidden 32. Either normalisation order (`normalize_before_proj=False` is ESMFold2's: divide after the projection and its bias). A length
+that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with masked rows and the output cut back.
 
 ## Fusion
 
@@ -24,9 +25,10 @@ Per call (training adds the right-hand column), the same three kernel boundaries
 | count | `n[i,j] = max(1, sum_s mask[s,i] mask[s,j])` from the bit mask (`opm_count_tiled`, exact) | reused |
 
 Kernels (`opm_epilogue.cu`): `opm_prologue_tma_hopper` (persistent, TMA + WGMMA), `opm_prologue_wgmma_native` (non-TMA),
-`opm_epilogue_kernel`, `opm_dgrad_kernel`, `opm_dwo_kernel` + `opm_reduce_partials_chunked`, `opm_prologue_bwd_kernel`,
-`opm_count_tiled`, `opm_pack_native`, `opm_finish_native`. The Triton prologue of MiniWorld's `runs/msa_bench_20260921` still serves the inference cells above; the legacy-composition switch
-(`MINIWORLD_OPM_H100_CUDA_ONLY`) was removed, so the native CUDA path is the only training route on H100.
+`opm_count_tiled`, `opm_pack_native`, `opm_finish_native`, and `opm_prologue_tma_wide<CM>` (persistent TMA prologue at d_msa 64 / 128, the wide path and the
+former Triton-prologue inference cells). The Triton prologue of MiniWorld's `runs/msa_bench_20260921` stays in `opm_train.py` as the reference
+(`_CUDA_PROLOGUE_FOR_LEGACY`); the legacy-composition switch (`MINIWORLD_OPM_H100_CUDA_ONLY`) was removed, so a native CUDA path is the only
+route on H100.
 
 ## Dispatch (`_h100_path`)
 
@@ -35,34 +37,36 @@ Kernels (`opm_epilogue.cu`): `opm_prologue_tma_hopper` (persistent, TMA + WGMMA)
 | training | S in {1024, 2048, 4096} | persistent TMA |
 | training | other S | non-TMA WGMMA (native) |
 | inference | (1024, 128 / 256 / 384), (2048, 128 / 256 / 384), (4096, 128) | persistent TMA; the gathered-TMA epilogue also at (1024, 384) and (2048, 384) |
-| inference | other S in {1024, 2048, 4096}, N in 128..768 | legacy composition (Triton prologue) |
+| inference | other S in {1024, 2048, 4096}, N in 128..768 | CUDA prologue `opm_prologue_wide` (the former legacy cells; Triton prologue kept compiled behind `_CUDA_PROLOGUE_FOR_LEGACY`) |
 | inference | any other shape | native |
+| both | d_msa 128 (pair 256 / 384) or `normalize_before_proj=False` | `_forward_wide`: `opm_prologue_wide` (persistent TMA, d_msa 64 / 128) + cuBLAS + the c_z-sliced epilogue |
 
 The choice per cell follows paired measurements (the dispatch is a measured table, not a rule). Training: the non-TMA prologue was
 5-6x slower than the legacy Triton prologue, the TMA one matches or beats it at every measured cell
-([record](../../../records/h100_opm_sol_20261007.md)). Training and inference are not bitwise equal at the cells whose inference
-path is the legacy composition.
+([record](../../../records/h100_opm_sol_20261007.md)). The former legacy inference cells (Triton prologue) now run the CUDA prologue,
+1.6-5.5 % faster at all 11 cells ([record](../../../records/h100_opm_pwa_wide_20261013.md)); training and inference there were not
+re-checked for bitwise equality.
 
 ## Completion
 
-Rows: **implementation** (what the default dispatch runs; "CUDA + Triton" = the inference prologue is Triton), **성능 확인**
+Rows: **implementation** (what the default dispatch runs), **성능 확인**
 (maintainer only). The cuBLAS contractions appear in the flow of the kernels above, not in the rows.
 
 ### Inference
 
 | (Length, MSA depth) | (128, 1024) | (256, 1024) | (384, 1024) | (512, 1024) | (640, 1024) | (768, 1024) |
 |---|---|---|---|---|---|---|
-| implementation | CUDA | CUDA | CUDA | CUDA + Triton | CUDA + Triton | CUDA + Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 | (Length, MSA depth) | (128, 2048) | (256, 2048) | (384, 2048) | (512, 2048) | (640, 2048) | (768, 2048) |
 |---|---|---|---|---|---|---|
-| implementation | CUDA | CUDA | CUDA | CUDA + Triton | CUDA + Triton | CUDA + Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 | (Length, MSA depth) | (128, 4096) | (256, 4096) | (384, 4096) | (512, 4096) | (640, 4096) | (768, 4096) |
 |---|---|---|---|---|---|---|
-| implementation | CUDA | CUDA + Triton | CUDA + Triton | CUDA + Triton | CUDA + Triton | CUDA + Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
 ### Training
@@ -82,8 +86,8 @@ Rows: **implementation** (what the default dispatch runs; "CUDA + Triton" = the 
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 
-The tables have no cache-build row: the CUDA path is built by JIT (cache root: `settings.engine_jit_root()`, field `engine_jit_root`), and the Triton prologue of the
-inference cells was not checked with `dev cache-status`. Figures are not generated yet (B200's come from `viz.kernel_flow`).
+The tables have no cache-build row: the CUDA path is built by JIT (cache root: `settings.engine_jit_root()`, field `engine_jit_root`); one
+extension per (d_msa, d_pair) is built on first use. Figures are not generated yet (B200's come from `viz.kernel_flow`).
 
 ## Speed of light
 
@@ -156,7 +160,7 @@ re-run of the training table has not been done, so no current ratio is stated.
 | tensor core | WGMMA (register accumulators) | tcgen05, TMEM accumulators, one issuing thread |
 | operands | TMA in the persistent prologue and the TMA epilogue variants; other kernels load through threads | every operand by TMA, warp-specialized roles |
 | epilogue permute | gathered-TMA / half-row variants, selected per cell | one 4-D TMA box absorbs the permute |
-| prologue | TMA prologue; the legacy Triton prologue still serves inference cells above | CUDA prologue in every cell (projection run transposed so a TMEM lane is an output channel) |
+| prologue | persistent TMA prologue at d_msa 64 and 128 in every cell (the Triton prologue is kept only as the reference) | CUDA prologue in every cell (projection run transposed so a TMEM lane is an output channel) |
 | mask count | bit mask from the prologue, `opm_count_tiled` (separate launch; the fp32 cuBLAS count was removed) | `opm_norm_sm100` from the prologue's bit mask |
 | dgrad rounding | `dz / n` rounded to bf16 first | `1 / n` in fp32, one bf16 rounding |
 | dWo | split-K partials + `opm_reduce_partials_chunked` | one CTA owns the K range in TMEM, partials folded by a column-sum GEMV in split order |
@@ -164,10 +168,29 @@ re-run of the training table has not been done, so no current ratio is stated.
 
 The fusion boundaries and tensors are the same.
 
+## Wide widths (d_msa 128: Protenix-v2 / ESMFold2 d_pair 256, OpenDDE d_pair 384)
+
+Same fusion boundaries; the epilogue and dWo cut c_z into 128-wide CTA slices (one CTA per slice), dgrad contracts over the whole
+c_z, the prologue backward widens its LayerNorm phase to 128 channels, and the CUDA prologue `opm_prologue_wide` runs the 128-row
+MSA tile with the projection K = d_msa. Every stage is CUDA or cuBLAS. Measured 2026-10-13 ([record](../../../records/h100_opm_pwa_wide_20261013.md)),
+CUDA graph, S 1024, ms, against the portable Triton path (Anthropic's `msa_opm` cell has no d_pair 256 / 384 entry; cuEquivariance
+ships no OPM):
+
+| (d_msa, d_pair), L | inference ours / Triton | training ours / Triton | SoL inference / training |
+|---|---|---|---|
+| 128 / 256, 128 | 0.104 / 0.125 | 0.394 / 0.593 | 79 % / 61 % |
+| 128 / 256, 384 | 0.794 / 0.865 | 2.429 / 3.284 | 80 % / 77 % |
+| 128 / 256, 768 | 2.912 / 3.278 | 8.623 / 11.585 | 84 % / 84 % |
+| 128 / 384, 128 | 0.121 / 0.149 | 0.430 / 0.666 | 70 % / 58 % |
+| 128 / 384, 384 | 0.902 / 1.007 | 2.736 / 3.829 | 74 % / 72 % |
+| 128 / 384, 768 | 3.324 / 3.727 | 9.973 / 13.722 | 77 % / 76 % |
+
+Tests: `tests/gpu/sm90/test_opm_wide_sm90a_gpu.py`. Per-cell implementation rows are CUDA at every length and depth (padded).
+
 ## Open
 
-- Inference cells above marked "CUDA + Triton": the TMA prologue was slower than the legacy one there when qualified; a CUDA
-  prologue that wins at those cells would complete the table.
-- L128-384 at S1024: 80-90 % SoL; hand-written epilogue / dgrad / dwo kernels are 10-40 % over their floors.
-- Widths other than 64 / 32 / 128 and `normalize_before_proj=False` ([todo.md](../todo.md) item 5).
-- Training and inference bitwise parity at the legacy-inference cells.
+- L128-384 at S1024: 80-90 % SoL at the MiniWorld width, 58-77 % at the wide widths; `opm_dgrad` at c_z 384 is about 2x its floor
+  (serial stage / chunk loop, one CTA per SM) and needs a warp-specialised TMA-pipelined rewrite.
+- The CUDA-graph step is about 10 % longer than the kernel sum at the large cells (cause not determined).
+- Training and inference bitwise parity at the former legacy-inference cells (they now use the CUDA prologue; not re-checked bitwise).
+- The gathered-TMA epilogue variants and the TMA prologue at d_msa 64 are written for the MiniWorld width only (`static_assert`).

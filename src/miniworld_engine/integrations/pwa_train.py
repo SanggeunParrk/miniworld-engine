@@ -35,6 +35,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
+from miniworld_engine.integrations import pwa_wide as _wide
 
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
@@ -118,8 +119,12 @@ def refusal(
     try:
         if not _enabled():
             return "settings.pwa_train / pwa_infer disables the native path"
-        if (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C):
-            return f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}), got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+        wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C)
+        if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden):
+            return (
+                f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}) and, wide, d_msa in {_wide.DMSA}, "
+                f"d_pair in {_wide.DPAIR}, {H} heads x d_hidden in {_wide.DHID}; got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+            )
         if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
             return f"the kernels are bf16, got {msa.dtype} / {pair.dtype}"
         if not msa.is_cuda:
@@ -137,6 +142,12 @@ def refusal(
         )
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > 1024):
             return f"the CUDA-only H100 path needs positive S and N <= 1024, got N={n}, S={s}"
+        if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
+            if cap != (9, 0):
+                return "the wide kernels are built for sm_90a"
+            if not 0 < n <= _wide.NMAX or s == 0:
+                return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
+            return None
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
         if cap == (10, 0) and (
@@ -915,10 +926,22 @@ def _inference_math(
     return out[None]
 
 
+def _is_wide(module) -> bool:
+    """True for a module whose widths are not MiniWorld's (served by `pwa_wide`)."""
+    return (
+        module.to_value.weight.shape[1],
+        module.to_bias.weight.shape[1],
+        module.n_head,
+        module.to_value.weight.shape[0] // module.n_head,
+    ) != (D, DZ, H, C)
+
+
 def pair_weighted_averaging(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
+    if _is_wide(module):
+        return _wide.pair_weighted_averaging(module, msa, pair, mask)
     n = msa.shape[2]
     if torch.cuda.get_device_capability(msa.device) == (
         10,
@@ -1107,6 +1130,8 @@ def _inference_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch
 
 
 def pair_weighted_averaging_inference(module, msa, pair, mask):
+    if _is_wide(module):
+        return _wide.pair_weighted_averaging_inference(module, msa, pair, mask)
     mask = (
         mask
         if mask is not None

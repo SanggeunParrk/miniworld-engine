@@ -20,6 +20,10 @@
 #              common/opt_core. The harness pins settings.pwa_train=0 / settings.pwa_infer=0 for
 #              both anthropic labels and masks OPT_CORE_DIR for every non-anthropic row.
 #   cuequivariance ships no pair-weighted-averaging kernel: not offered (`unsupported`).
+#
+# Other registered widths (the engine's H100 path also serves them; `+msa_d_msa` / `+msa_d_hidden` are not yaml keys):
+#   ESMFold2:  +msa_d_msa=128 +msa_d_hidden=16 d_pair=256   Protenix-v2:  +msa_d_msa=128 +msa_d_hidden=8 d_pair=256
+#   OpenDDE:   +msa_d_msa=128 +msa_d_hidden=8 d_pair=384
 d_single: 384
 d_pair: 128
 d_single_token: 768

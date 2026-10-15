@@ -25,10 +25,9 @@ some of this (it still calls single-direction training D128-only).
 | | same widths, fp32 | ✗ | Triton |
 | | D512 training | ✗ | |
 | **Bidirectional TriMul inference, wide** | D256 / 384 / 512 at L128 / 256 / 512 / 640 | ✗ | CUDA only at L384 / 768 |
-| **OuterProductMean** | MSA 64 / pair 128 / hidden 32 (MiniWorld) | ✓ training (TMA prologue at S 1024 / 2048 / 4096), ✓ inference (7 cells with the TMA prologue, the others keep the Triton prologue) | contract: L % 64 == 0, MSA depth % 256 == 0, no interchain mask; 80-100 % of the speed-of-light floor on this card, page [opm/opm.md](opm/opm.md) |
-| | MSA 128 / pair 256 / hidden 32 (Protenix-v2, ESMFold2), MSA 128 / pair 384 (OpenDDE) | ✗ | |
+| **OuterProductMean** | MSA 64 / pair 128 / hidden 32 (MiniWorld); MSA 128 / pair 256 (Protenix-v2, ESMFold2), pair 384 (OpenDDE); both normalisation orders | ✓ training and inference, CUDA + cuBLAS at every cell | any L and S (padded); 58-98 % of the speed-of-light floor, page [opm/opm.md](opm/opm.md) |
 | **MSAPairWeightedAveraging** | MSA 64 / pair 128, 8 heads × 32 (MiniWorld) | ✓ | contract: L % 128 == 0, even MSA depth |
-| | MSA 128 / pair 256, 8 heads (ESMFold2, Protenix-v2 8 × 8), MSA 128 / pair 384, 8 × 8 (OpenDDE) | ✗ | |
+| | MSA 128 / pair 256, 8 × 16 (ESMFold2), 8 × 8 (Protenix-v2); MSA 128 / pair 384, 8 × 8 (OpenDDE) | ✓ training and inference (`pwa_wide`) | any L <= 1024 and S; 45-60 % of the fusion floor in training, page [pwa/pwa.md](pwa/pwa.md) |
 | **SWA atom DiT** (`kernels/swa_dit`) | d_atom 128, 4 heads, window 128, SwiGLU 256; bf16 and fp32 | bf16 ✓ partly (3 CUDA stages + Triton), fp32 ✗ (Triton) | GPU suite 33 passed / 1 skipped, 17/17 registry checkers (2026-09-30); no H100 cache; opt-in in team-gm, so MiniWorld v1.3 does not use it yet |
 | **TriangleAttention** | MiniWorld n_head 4 / hidden 128 | ✗ core (Triton) + ✓ pieces (bias / LN backward CUDA) | template / Protenix / OpenDDE head counts: Triton; B200 has a whole-module CUDA path, H100 does not |
 | **Token DiT** | single 768 / cond 384 / pair 128, 16 heads; bf16 and fp32; QK-norm on / off | ✓ inference (shared or per-sample cond) and training, CUDA + cuBLAS, branch `h100/token-dit` ([token_dit/token_dit.md](token_dit/token_dit.md)) | upstream capture-scoped pack / bias caches retained |
@@ -77,10 +76,12 @@ some of this (it still calls single-direction training D128-only).
    - fp32 CUDA variant.
 4. **Transition.** n=2 CUDA path (pair D64 / 128 / 256, single D384 / 768); a ragged-tail path for
    rows that are not a multiple of 128; decide whether fp32 needs a native path.
-5. **OPM / PWA** at the wider MSA / pair widths (MSA 128 with pair 256 / 384). OPM at the MiniWorld width: the inference cells
-   that still use the Triton prologue (S 1024 / 2048 / 4096, N 512-768 and S 4096 N 256-384) need a CUDA prologue that beats it; L128-384
-   at S1024 training is at 80-90 % of the floor ([opm/opm.md](opm/opm.md#open)). PWA at the MiniWorld width: training L384 / L768 at
-   94 / 85 % of the floor, inference 71-74 %; what is left is 2-5 % items ([record](../../records/h100_pwa_20261008.md)).
+5. **OPM / PWA.** Wide widths (MSA 128 with pair 256 / 384, PWA d_hidden 8 / 16) and the ESMFold2 normalisation order are served
+   on CUDA + cuBLAS, training and inference, and so are the former Triton-prologue OPM inference cells
+   ([record](../../records/h100_opm_pwa_wide_20261013.md), [opm/opm.md](opm/opm.md#open), [pwa/pwa.md](pwa/pwa.md#open)). Left, each a
+   2-5 % item: PWA wide training at 45-60 % of the fusion floor (`dm_bwd`, `gate_bwd`, the `dv` copy);
+   `opm_dgrad` at c_z 384 (about 2x its floor, needs a warp-specialised TMA pipeline); OPM L128 launch-count overhead; the MiniWorld-width
+   PWA training of L512 / L640 after another shape in the same process ([record](../../records/h100_pwa_20261008.md)).
 6. **TriMul.**
    - Bidirectional wide inference at L128 / 256 / 512 / 640.
    - Single-direction training D512 and fp32; add the single-direction rows to h100.md and the

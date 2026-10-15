@@ -22,6 +22,9 @@
 #              (opm_train would otherwise serve implementation="anthropic" first) and masks
 #              OPT_CORE_DIR for every non-anthropic row.
 #   cuequivariance ships no OuterProductMean kernel: not offered (explicitly `unsupported`).
+#
+# Other registered widths (the engine's H100 path also serves them; `+msa_d_msa` / `d_pair` are not yaml keys):
+#   Protenix-v2 / ESMFold2:  +msa_d_msa=128 d_pair=256     OpenDDE:  +msa_d_msa=128 d_pair=384
 d_single: 384
 d_pair: 128
 d_single_token: 768

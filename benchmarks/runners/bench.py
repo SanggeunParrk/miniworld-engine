@@ -227,6 +227,11 @@ class BenchConfig(BaseModel):
     #: MiniWorld runs/msa_bench_20260921; v1.1's bucket_msa_multiple used 2048. Not a yaml key
     #: (every target's yaml carries one key set), so override it with `+n_msa=2048`.
     n_msa: int = 1024
+    #: MSA width and the PWA per-head hidden width of the outer_product / msa_pair_weighted_averaging targets (MiniWorld: 64 and 32).
+    #: Registered models: Protenix-v2 / ESMFold2 d_msa 128 with d_pair 256, OpenDDE d_msa 128 with d_pair 384, PWA d_hidden 8 or 16.
+    #: Not yaml keys: `+msa_d_msa=128 +msa_d_hidden=16 d_pair_values=[256]`.
+    msa_d_msa: int = 64
+    msa_d_hidden: int = 32
     #: TriangleAttention heads and hidden width (d_hidden None = d_pair). The registered model shapes keep 32-channel heads
     #: (Protenix-v2 256 = 8 x 32, OpenDDE 384 = 12 x 32, templates 64 = 2 x 32 / 4 x 32, AF3 template 64 = 4 x 16); the module's
     #: default of 4 heads is AF3's c_z / 4 rule. Not yaml keys: override with `+tri_n_head=8 +tri_d_hidden=256`.
@@ -2248,7 +2253,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         if hybrid
         else ImplementationType(key)
     )
-    d_msa, d_hidden = 64, 32
+    d_msa, d_hidden = conf.msa_d_msa, 32
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     layer_cls = OuterProductMean
     if pristine:
@@ -2473,7 +2478,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
         if hybrid
         else ImplementationType(key)
     )
-    d_msa, n_head, d_hidden = 64, 8, 32
+    d_msa, n_head, d_hidden = conf.msa_d_msa, 8, conf.msa_d_hidden
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     layer_cls = MSAPairWeightedAveraging
     if pristine:

@@ -99,6 +99,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   ending node, key mask, B = 2, and against Anthropic's native cell) is in `docs/gpus/h100/triattn/triattn.md` and
   `docs/records/triattn_h100_remeasure_20261013_15.md`; backward / front experiments that did not pay (rounds 5-8) in
   `docs/records/triattn_h100_core_experiments_20261013.md`.
+- H100 (sm_90a) OuterProductMean and MSAPairWeightedAveraging beyond MiniWorld's width, inference and training, bf16, CUDA + cuBLAS.
+  OPM: d_msa 128 with d_pair 256 / 384 (Protenix-v2, ESMFold2, OpenDDE) and the ESMFold2 normalisation order
+  (`normalize_before_proj=False`), any length / MSA depth (padded with masked rows); `csrc/opm_epilogue.cu` is built per
+  (`OPM_CM`, `OPM_CZ`), with a new persistent TMA prologue `opm_prologue_tma_wide` (d_msa 64 / 128) that also replaces the Triton
+  prologue at the former "CUDA + Triton" MiniWorld inference cells (1.6-5.5 % faster). PWA: `integrations/pwa_wide.py`
+  (`csrc/pair_wide.cu`, `csrc/pwa_wide.cu`; d_msa 64 / 128, d_pair 128 / 256 / 384, 8 heads x 8 / 16, any depth, N <= 1024), bitwise
+  deterministic, with faster `dm_bwd` and `pair_bwd`. `bench.py` gains `+msa_d_msa` / `+msa_d_hidden`. Tests:
+  `tests/gpu/sm90/test_opm_wide_sm90a_gpu.py`, `test_pwa_wide_sm90a_gpu.py`; pages `docs/gpus/h100/opm/opm.md`, `pwa/pwa.md`; record
+  `docs/records/h100_opm_pwa_wide_20261013.md`.
 - B200 documentation: the CUDA-graph measurement tables of TriMul, TriAttn, Transition, OPM, PWA, AttentionPairBias, token DiT, the
   SWA atom DiT and the cross-attention rows of the local DiT page were re-measured on 2026-10-11 with fp32 master parameters (the new
   harness default; one run per cell, 131 + 82 harness runs on 6 cards). Training rows did not move; the first take of the inference

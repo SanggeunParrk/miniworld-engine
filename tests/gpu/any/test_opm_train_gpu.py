@@ -141,6 +141,8 @@ def test_refusals(inputs):
             )
             is not None
         )
+        # the ESMFold2 order (divide after the projection) and a ragged depth are served: the epilogue takes the order as a flag,
+        # and the wrapper pads length / depth with masked rows
         assert (
             ot.refusal(
                 inputs["msa"],
@@ -150,11 +152,9 @@ def test_refusals(inputs):
                 interchain=False,
                 normalize_before_proj=False,
             )
-            is not None
+            is None
         )
-        assert (
-            ot.refusal(inputs["msa"][:, :200], D_MSA, D_HID, D_PAIR, **kw) is not None
-        )  # S % 256
+        assert ot.refusal(inputs["msa"][:, :200], D_MSA, D_HID, D_PAIR, **kw) is None
 
 
 def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeypatch):
