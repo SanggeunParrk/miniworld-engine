@@ -124,8 +124,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         or single.dtype not in (torch.bfloat16, torch.float32)
         or pair.dtype != single.dtype
         or B != 1
-        or D != 768
-        or heads != 16
+        or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
+        or (single.dtype is torch.bfloat16 and (heads, D) != (16, 768))  # the bf16 attention core is built for 16 x 48
         or L % 128
         or cond.shape[-1] != 384
         or tuple(pair.shape) != (1, L, L, 128)
@@ -133,9 +133,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
         raise ValueError(
-            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads"
+            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / 128"
         )
-    qs = math.log2(math.e) / math.sqrt(48)
+    qs = math.log2(math.e) / math.sqrt(D // heads)
     fp32 = single.dtype is torch.float32
     asynchronous = _CANDIDATE_INFER_ASYNC
     key = (
@@ -262,7 +262,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
     if fp32:
         vt = torch.mm(wqkvg[3 * D :], xa.t())
-        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D)
+        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
         attention.gated_inference(qkvg, bias, 0, A)
     y = torch.mm(qkvg[:, :D], wo.t())

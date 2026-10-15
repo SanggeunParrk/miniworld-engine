@@ -481,51 +481,62 @@ def gated_inference(qkvg, bias_all, block, S):
     _ext("attn_fwd").attn_inf(qkvg, bias_all, int(block), int(S))
 
 
+def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """Build defines of ``attn_tf32.cu`` for a head layout (the default 16 x 48 builds without them)."""
+    return () if (nh, dh) == (H, D) else (f"NHP={nh}", f"DHP={dh}")
+
+
+TF32_LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
+
+
 def tf32_inference_core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
-    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, 16 heads x 48, L a multiple of 128, H100.
+    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, h heads of width d / h (``TF32_LAYOUTS``; ``d`` is the attention width), L a multiple of 128, H100.
     ``settings.augattn_tf32_sm90 = False`` keeps the Triton core."""
     return (
         settings.current().augattn_tf32_sm90
         and dtype is torch.float32
-        and (d, h) == (H * D, H)
+        and h > 0
+        and d % h == 0
+        and (h, d // h) in TF32_LAYOUTS
         and L % 128 == 0
         and _is_hopper(device_index)
     )
 
 
-def tf32_gated_inference(qkg, vt, bias_all, block, S, goff):
+def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D):
     """The fp32 step's inference core (attn_tf32.cu, TF32 wgmma): qkg [S L, >= 2304] fp32 with q | k at columns 0 | 768 (q
     in exp2 units) and g at ``goff``; vt = v^T [768, S L]; bias_all [nb 16, L, L] fp32 in log2 units with its key columns in
     ``conditioned_transition.cuda.key_perm`` order (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q."""
-    _ext("attn_tf32").attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
+    _ext("attn_tf32", tf32_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
 
 
-def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None):
+def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
     """The TF32 training forward: q (exp2 units), k [A L, 768] fp32, vt = v^T [768, A L]; bias [16, L, L] fp32 (log2 units)
     and km [A, L] additive or None, both key-permuted (``key_perm``). Returns O [A L, 768] fp32 and the LSE [A, 16, L]; with
     ``qkvg`` [A L, 3072] og = sigmoid(g) O instead of O (as ``forward``)."""
-    o = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
-    lse = torch.empty(A, H, L, device=q.device, dtype=torch.float32)
+    o = torch.empty(A * L, nh * dh, device=q.device, dtype=torch.float32)
+    lse = torch.empty(A, nh, L, device=q.device, dtype=torch.float32)
+    ext = _ext("attn_tf32", tf32_defs(nh, dh))
     if qkvg is not None:
-        _ext("attn_tf32").attn_tf32_fwd_og(q, k, vt, bias, km, qkvg, o, lse)
+        ext.attn_tf32_fwd_og(q, k, vt, bias, km, qkvg, o, lse)
     else:
-        _ext("attn_tf32").attn_tf32_fwd(q, k, vt, bias, km, o, lse)
+        ext.attn_tf32_fwd(q, k, vt, bias, km, o, lse)
     return o, lse
 
 
 def tf32_backward(
-    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L
+    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D
 ):
     """The TF32 attention backward (attn_tf32.cu dqb + dkv). qs (q in exp2 units), k, v, dob = dO [A L, 768] fp32 and their
     transposes qt, kt, dot [768, A L]; bias_p the forward's key-permuted bias [16, L, L]; bias_tp [16, L(key), L] the bias
     transposed with its query columns permuted; lse, dd [A, 16, L] and lse_p, dd_p their query-permuted copies; km / km_p the
     natural / permuted additive key masks (or None). Returns dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias
     [16, L, L] fp32 with its key columns still permuted (``key_perm`` order)."""
-    ext = _ext("attn_tf32")
+    ext = _ext("attn_tf32", tf32_defs(nh, dh))
     dq, dk, dv = (torch.empty_like(qs) for _ in range(3))
-    dbc = torch.zeros(tf32_dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+    dbc = torch.zeros(tf32_dqb_chunks(A), nh, L, L, device=qs.device, dtype=torch.float32)
     ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, dbc)
     db_p = dbc.sum(0)  # the chunk buffers in order: bitwise repeatable
     ext.attn_tf32_dkv(qs, dob, qt, dot, k, v, bias_tp, lse_p, dd_p, km, dk, dv)

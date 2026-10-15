@@ -73,8 +73,7 @@ def _native_fp32_inference(module, single) -> bool:
         and getattr(getattr(module.attention, "to_bias", None), "weight", None)
         is not None
         and module.attention.to_bias.weight.shape[1] == 128
-        and module.attention.n_head == 16
-        and single.shape[-1] == 768  # the qualified layout only (16 x 48); the other layouts take the general path below
+        and (module.attention.n_head, single.shape[-1]) in LAYOUTS  # 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024)
         and single.is_cuda
         and single.dtype is torch.float32
         and torch.cuda.get_device_capability(single.device) == (9, 0)
@@ -177,10 +176,10 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         or single.shape[0] < 1
         or single.shape[1] != 1
         or single.shape[2] not in (128, 256, 384, 512, 640, 768)
-        or single.shape[3] != 768
+        or single.shape[3] not in (768, 1024)
     ):
         raise ValueError(
-            "Hopper FP32 token inference requires [A,1,L,768] at the six 128..768 buckets"
+            "Hopper FP32 token inference requires [A,1,L,768 or 1024] at the six 128..768 buckets"
         )
     A, _, L, _ = single.shape
     if (
@@ -197,9 +196,10 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
             "Hopper FP32 token inference requires matching FP32 conditioning/pair operands"
         )
     a = module.attention
-    if a.n_head != 16 or tuple(module.transition.expand_a.weight.shape) != (1536, 768):
+    d = single.shape[3]
+    if (a.n_head, d) not in LAYOUTS or tuple(module.transition.expand_a.weight.shape) != (2 * d, d):
         raise ValueError(
-            "Hopper FP32 token inference requires 16x48 heads and a 1536-wide transition"
+            "Hopper FP32 token inference requires a 16x48 / 24x32 / 12x64 (d 768) or 16x64 (d 1024) layout and a 2d-wide transition"
         )
     norms = (
         a.ada_ln_in.ln_in,

@@ -424,6 +424,7 @@ __device__ float pack_read(const TokenPack& p,int j,int i) {
   return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
                   : __bfloat162float(static_cast<const __nv_bfloat16*>(p.src[j])[i]);
 }
+template <int D>
 __global__ void token_pack_kernel(TokenPack p) {
   int block=blockIdx.x, out=0;
   for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
@@ -434,7 +435,7 @@ __global__ void token_pack_kernel(TokenPack p) {
     const int i=first+lane;if(i>=p.size[out])continue;
     // The host admits only these widths. Constant integer divisions keep
     // live master-weight staging bandwidth-bound instead of divide-bound.
-    float v=0.f;constexpr int D=768,DC=384;
+    float v=0.f;constexpr int DC=384;
     if(out==0) {
       int segment=i/(D*DC),c=i%DC,j=i%(D*DC);
       int wi=segment==0?7:segment==1?9:segment==2?15:17;
@@ -464,7 +465,8 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
-  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
+              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
   TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
@@ -483,7 +485,7 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
     TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
     p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
   }
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_kernel));
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,D==768?token_pack_kernel<768>:token_pack_kernel<1024>));
   void* args[]={&p};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
@@ -499,13 +501,14 @@ __device__ __forceinline__ float4 pack_mul4(float4 a, float4 b) {
 __device__ __forceinline__ float4 pack_scale4(float4 a,float b) {
   return make_float4(a.x*b,a.y*b,a.z*b,a.w*b);
 }
+template <int D>
 __global__ void token_pack_vector_kernel(TokenPack p) {
   int block=blockIdx.x, out=0;
   for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
   if(out==13)return;
   const int i=(block*256+threadIdx.x)*4;
   if(i>=p.size[out])return;
-  constexpr int D=768,DC=384;
+  constexpr int DC=384;
   float4 v=make_float4(0.f,0.f,0.f,0.f);
   if(out==0) {
     const int s=i/(D*DC),j=i%(D*DC),c=i%DC;
@@ -538,7 +541,8 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
-  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
+              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
   TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
@@ -557,7 +561,7 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
     TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
     p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
   }
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_vector_kernel));
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,D==768?token_pack_vector_kernel<768>:token_pack_vector_kernel<1024>));
   void* args[]={&p};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
@@ -566,9 +570,10 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
 
 
 std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t heads,bool qk,bool fp32) {
- TORCH_CHECK(weights.size()==(qk?25:23)&&heads==16,"native inference pack layout");
+ TORCH_CHECK(weights.size()==(qk?25:23)&&(heads==12||heads==16||heads==24),"native inference pack layout");
  const at::cuda::CUDAGuard guard(weights[0].device());
- const int D=768,DC=384,HH=weights[20].size(0);
+ const int D=weights[0].size(1),DC=384,HH=weights[20].size(0);
+ TORCH_CHECK(D==768||(D==1024&&heads==16),"native inference pack width");
  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},
   {fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{fp32?0:2*HH,D}};
  std::vector<at::Tensor> out;
@@ -582,7 +587,8 @@ std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t he
 void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int64_t heads,bool qk,double qs,bool fp32,int begin,int end) {
  TORCH_CHECK(out.size()==13&&weights.size()==(qk?25:23)&&0<=begin&&begin<end&&end<=13,"native inference pack stage");
  const at::cuda::CUDAGuard guard(weights[0].device());
- TokenPack p{};p.D=768;p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ TokenPack p{};p.D=weights[0].size(1);p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ TORCH_CHECK(p.D==768||(p.D==1024&&heads==16),"native inference pack width");
  for(int j=0;j<(int)weights.size();++j){
   TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()
     &&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native inference pack leaf");
@@ -593,7 +599,8 @@ void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,i
   const int a=o==7?5:o==9?22:-1;if(a>=0&&p.fp32[a]==fp32)continue;
   p.dst[o]=out[o].data_ptr();p.size[o]=out[o].numel();p.blocks[o]=(p.size[o]+1023)/1024;blocks+=p.blocks[o];
  }
- token_pack_vector_kernel<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ if(p.D==768)token_pack_vector_kernel<768><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ else token_pack_vector_kernel<1024><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

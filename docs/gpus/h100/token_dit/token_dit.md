@@ -369,3 +369,25 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (768, 768, fp32) | 24.10 | **16.41** | 1.47 |
 
 ![Training, fp32, A = 48, length sweep at D768](figures/token_dit_training_fp32_a_48_length.png) <!-- measure_bars -->
+
+## Head layouts other than 16 x 48 (2026-10-15)
+
+`attn_tf32.cu` is built per layout (`NHP`, `DHP`: heads 12 / 16 / 24, width 32 / 48 / 64; `DM = NHP x DHP`; the head width sets the
+number of 128-B chunks of a q / k row, the PV accumulator size and the wgmma N), the weight-pack kernels take d_single 768 or 1024
+and 12 / 16 / 24 heads, and the fp32 inference gate admits the four `LAYOUTS` entries (24 x 32, 12 x 64 at d 768; 16 x 64 at d 1024).
+Before this the fp32 inference of those layouts either raised (`ValueError: requires 16x48 heads`) or ran at PyTorch speed.
+
+fp32 inference, A = 5 shared cond, PyTorch compiled / ours (ms), CUDA graph, key mask 20 %:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 24 x 32 | 0.511 | 0.208 | 2.45 | 1.547 | 0.395 | 3.92 |
+| 12 x 64 | 0.445 | 0.197 | 2.26 | 1.111 | 0.375 | 2.96 |
+| 16 x 64 (d 1024) | 0.503 | 0.268 | 1.88 | 1.353 | 0.501 | 2.70 |
+
+Accuracy against the fp32 IEEE block: 2.9e-4 at every layout and length (same as 16 x 48). The TF32 attention forward alone:
+5.9e-4 to 7.3e-4 against fp64 at every layout.
+
+Not done: the native H100 fp32 / bf16 **training** path and the bf16 inference attention core still serve 16 x 48 only (24 x 32,
+12 x 64, 16 x 64 take the general path: 1.1-1.7x PyTorch). The TF32 backward kernels (`attn_tf32_dqb` / `attn_tf32_dkv`) are
+templated the same way but are not wired into `token_dit_train.py`, whose native H100 pack / final kernels are 16 x 48.
