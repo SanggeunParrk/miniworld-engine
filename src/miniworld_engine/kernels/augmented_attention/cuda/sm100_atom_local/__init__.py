@@ -65,7 +65,7 @@ def cubin(stem: str, hopper: bool = False) -> str:
         "-O3",
         "-arch=sm_90a" if hopper else "-arch=sm_100a",
         *(("-DATOM_HOPPER=1",) if hopper else ()),
-        *os.environ.get("ATTN_DEFS", "").split(),   # ablation / experiment switches
+        *os.environ.get("ATTN_DEFS", "").split(),  # ablation / experiment switches
         "-cubin",
         "-lineinfo",
         f"-I{_dir}",
@@ -138,19 +138,28 @@ _MMA_KERNELS = {
     "h_prep": ("h_bias_prep", 0),
     "h_fwd": ("h_attn_fwd", 64 * 136 * 4 + 2 * (64 + 160 + 160) * 40 * 2),
     "h_dq": ("h_attn_dq", 64 * 136 * 4 + (64 * 2 + 160 * 2) * 40 * 2 + 2 * 64 * 4),
-    "h_dkv": ("h_attn_dkv", 4 * 16 * 132 * 4 + (192 * 2 + 64 * 2) * 40 * 2 + 2 * 192 * 4),
+    "h_dkv": (
+        "h_attn_dkv",
+        4 * 16 * 132 * 4 + (192 * 2 + 64 * 2) * 40 * 2 + 2 * 192 * 4,
+    ),
     "h_pb": ("h_pair_bias", 0),
     "h_pbb": ("h_pair_bias_bwd", 0),
 }
 #: TF32 twins of the mma.sync kernels (``lattn90_tf32.cu``)
 _MMA_KERNELS32 = {
     "h_fwd32": ("h_attn_fwd_tf32", 90112),
-    "h_dq32": ("h_attn_dq_tf32", 64 * 136 * 4 + (64 * 2 + 160 * 2) * 36 * 4 + 2 * 64 * 4),
-    "h_dkv32": ("h_attn_dkv_tf32", 4 * 16 * 132 * 4 + (192 * 2 + 64 * 2) * 36 * 4 + 2 * 192 * 4),
+    "h_dq32": (
+        "h_attn_dq_tf32",
+        64 * 136 * 4 + (64 * 2 + 160 * 2) * 36 * 4 + 2 * 64 * 4,
+    ),
+    "h_dkv32": (
+        "h_attn_dkv_tf32",
+        4 * 16 * 132 * 4 + (192 * 2 + 64 * 2) * 36 * 4 + 2 * 192 * 4,
+    ),
 }
 #: Hopper attention through the mma.sync kernels (False: the wgmma ``*_sm90`` kernels of lattn_{fwd,dq,dkv}.cu).
 HOPPER_MMA_ATTN = True
-_SAMPLE_CHUNK = 16   # samples per CTA (the bias tile and its prologue amortised; measured A48 bwd 551 -> 476 us against 8)
+_SAMPLE_CHUNK = 16  # samples per CTA (the bias tile and its prologue amortised; measured A48 bwd 551 -> 476 us against 8)
 
 
 def _chunk(A: int, tiles: int = 0) -> int:
@@ -162,12 +171,19 @@ def _chunk(A: int, tiles: int = 0) -> int:
             want = (want + 1) // 2
             if want == 1:
                 break
-    return -(-A // -(-A // want))   # evenly split into ceil(A / want) chunks
+    return -(-A // -(-A // want))  # evenly split into ceil(A / want) chunks
 
 
 def _mma_bias(bias, km, n, d):
     out = torch.empty_like(bias)
-    _load("h_prep", d)((min(8 * nsm(d), (bias.numel() + 255) // 256), 1, 1), (256, 1, 1), bias, km, out, int(n))
+    _load("h_prep", d)(
+        (min(8 * nsm(d), (bias.numel() + 255) // 256), 1, 1),
+        (256, 1, 1),
+        bias,
+        km,
+        out,
+        int(n),
+    )
     return out
 
 
@@ -205,7 +221,11 @@ def _load(name: str, device_index: int):
         raise NotImplementedError(f"local atom kernel {name!r} exists on sm_90a only")
     else:
         stem, func, smem = KERNELS[name]
-    pdl = hopper and (name in _MMA_KERNELS or name in _MMA_KERNELS32) and settings.current().local_dit_h100_pdl
+    pdl = (
+        hopper
+        and (name in _MMA_KERNELS or name in _MMA_KERNELS32)
+        and settings.current().local_dit_h100_pdl
+    )
     with torch.cuda.device(device_index):
         return driver.Kernel(cubin(stem, hopper), func, smem, pdl=pdl)
 
@@ -283,7 +303,17 @@ def attn_fwd(q, k, v, bias, kmask=None):
             b2 = _mma_bias(bias, km, N, d)
             spc = _chunk(A, (N // 64) * NH)
             _load("h_fwd", d)(
-                (N // 64, NH, (A + spc - 1) // spc), (128, 1, 1), q, k, v, b2, o, lse, int(N), int(A), int(spc)
+                (N // 64, NH, (A + spc - 1) // spc),
+                (128, 1, 1),
+                q,
+                k,
+                v,
+                b2,
+                o,
+                lse,
+                int(N),
+                int(A),
+                int(spc),
             )
             return o, lse
         maps = tuple(
@@ -342,12 +372,50 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
             b2 = _mma_bias(bias, km, N, d)
             spc = _chunk(A, (N // 64) * NH)
             sp = (A + spc - 1) // spc
-            partial = torch.empty(sp, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
+            partial = torch.empty(
+                sp, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32
+            )
             grid = (N // 64, NH, sp)
-            _load("h_dq", d)(grid, (128, 1, 1), q, k, v, do, b2, lse, dd, dkv, int(ldd), int(N), int(A), int(spc))
-            _load("h_dkv", d)(grid, (128, 1, 1), q, k, v, do, b2, lse, dd, dkv, partial, int(ldd), int(N), int(A), int(spc))
+            _load("h_dq", d)(
+                grid,
+                (128, 1, 1),
+                q,
+                k,
+                v,
+                do,
+                b2,
+                lse,
+                dd,
+                dkv,
+                int(ldd),
+                int(N),
+                int(A),
+                int(spc),
+            )
+            _load("h_dkv", d)(
+                grid,
+                (128, 1, 1),
+                q,
+                k,
+                v,
+                do,
+                b2,
+                lse,
+                dd,
+                dkv,
+                partial,
+                int(ldd),
+                int(N),
+                int(A),
+                int(spc),
+            )
             _load("db_samples", d)(
-                (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1), (256, 1, 1), partial, dbias, int(N), int(sp)
+                (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+                (256, 1, 1),
+                partial,
+                dbias,
+                int(N),
+                int(sp),
             )
             return dbias
         partial = torch.empty(A, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
@@ -916,7 +984,19 @@ def attn_fwd_mma32(q, k, v, bias2):
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     spc = _chunk(A, (N // 64) * NH)
-    _load("h_fwd32", d)((N // 64, NH, (A + spc - 1) // spc), (128, 1, 1), q, k, v, bias2, o, lse, int(N), int(A), int(spc))
+    _load("h_fwd32", d)(
+        (N // 64, NH, (A + spc - 1) // spc),
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        bias2,
+        o,
+        lse,
+        int(N),
+        int(A),
+        int(spc),
+    )
     return o, lse
 
 
@@ -927,7 +1007,19 @@ def attn_fwd_mma(q, k, v, bias2):
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     spc = _chunk(A, (N // 64) * NH)
-    _load("h_fwd", d)((N // 64, NH, (A + spc - 1) // spc), (128, 1, 1), q, k, v, bias2, o, lse, int(N), int(A), int(spc))
+    _load("h_fwd", d)(
+        (N // 64, NH, (A + spc - 1) // spc),
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        bias2,
+        o,
+        lse,
+        int(N),
+        int(A),
+        int(spc),
+    )
     return o, lse
 
 
@@ -944,9 +1036,47 @@ def attn_bwd_mma(q, k, v, do, bias2, lse, dd, dkv, tf32: bool):
     partial = torch.empty(sp, NH, nwin, WQ, WK, device=q.device, dtype=torch.float32)
     grid = (N // 64, NH, sp)
     sfx = "32" if tf32 else ""
-    _load("h_dq" + sfx, d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, int(ldd), int(N), int(A), int(spc))
-    _load("h_dkv" + sfx, d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, partial, int(ldd), int(N), int(A), int(spc))
-    _load("db_samples", d)((min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1), (256, 1, 1), partial, dbias, int(N), int(sp))
+    _load("h_dq" + sfx, d)(
+        grid,
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        do,
+        bias2,
+        lse,
+        dd,
+        dkv,
+        int(ldd),
+        int(N),
+        int(A),
+        int(spc),
+    )
+    _load("h_dkv" + sfx, d)(
+        grid,
+        (128, 1, 1),
+        q,
+        k,
+        v,
+        do,
+        bias2,
+        lse,
+        dd,
+        dkv,
+        partial,
+        int(ldd),
+        int(N),
+        int(A),
+        int(spc),
+    )
+    _load("db_samples", d)(
+        (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+        (256, 1, 1),
+        partial,
+        dbias,
+        int(N),
+        int(sp),
+    )
     return dbias
 
 
@@ -961,6 +1091,18 @@ def pair_bias_bwd_mma(z, gamma, wb, dbias, eps=1e-5):
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
     wbf, gf = wb.float().contiguous(), gamma.float().contiguous()
-    _load("h_pbb", d)((nb, 1, 1), (256, 1, 1), z, wbf, gf, dbias.contiguous(), dz, part, int(rows), float(eps), int(z.dtype == torch.bfloat16))
+    _load("h_pbb", d)(
+        (nb, 1, 1),
+        (256, 1, 1),
+        z,
+        wbf,
+        gf,
+        dbias.contiguous(),
+        dz,
+        part,
+        int(rows),
+        float(eps),
+        int(z.dtype == torch.bfloat16),
+    )
     _load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wbf, gf, dgamma, dwb, 0)
     return dz, dgamma, dwb

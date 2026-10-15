@@ -320,4 +320,4 @@ def swa_dit_transpose_sm90_cuda():
     wd = torch.randn(128, 256, generator=g).to("cuda", torch.bfloat16)
     got = extension("pack").pack_ffn(wu, wd)
     ref = (D._pack_ffn64(wu), *D._pack_ffn(wu, wd))
-    return {n: (a.float(), b.float()) for n, a, b in zip(("wab64", "wab32", "wdt", "wabt"), got, ref)}
+    return {n: (a.float(), b.float()) for n, a, b in zip(("wab64", "wab32", "wdt", "wabt"), got, ref, strict=True)}

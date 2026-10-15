@@ -51,19 +51,37 @@ C, H, HIDDEN, HW = 128, 4, 256, 64
 
 #: The bf16 hand-CUDA stages: the three team-gm ones, then the attention side (window attention fwd + bwd, out-projection
 #: backward, qkvg backward).
-LEGACY_STAGES = ("swa_dit_qkvg_fwd_cuda", "swa_dit_ffn_fwd_cuda", "swa_dit_ffn_bwd_cuda")
+LEGACY_STAGES = (
+    "swa_dit_qkvg_fwd_cuda",
+    "swa_dit_ffn_fwd_cuda",
+    "swa_dit_ffn_bwd_cuda",
+)
 NEW_STAGES = ("swa_dit_attn_cuda", "swa_dit_oproj_bwd_cuda", "swa_dit_qkvg_bwd_cuda")
 TRITON = dict.fromkeys(LEGACY_STAGES + NEW_STAGES, False)
-CUDA = {"engine_backend": "auto", **dict.fromkeys(LEGACY_STAGES + NEW_STAGES, True), "swa_dit_ffn_dw": "mat",
-        "swa_dit_rows_impl": "auto"}
+CUDA = {
+    "engine_backend": "auto",
+    **dict.fromkeys(LEGACY_STAGES + NEW_STAGES, True),
+    "swa_dit_ffn_dw": "mat",
+    "swa_dit_rows_impl": "auto",
+}
 PATHS = {
     "triton": TRITON,
     "triton_fused_dw": {**TRITON, "swa_dit_ffn_dw": "fused"},
     "triton_dq1_fp32": {**TRITON, "swa_dit_dq1": "fp32"},
-    "cuda": CUDA,                                                           # every bf16 stage hand-CUDA (auto: slab / wgmma by shape)
-    "cuda_slab": {**CUDA, "swa_dit_rows_impl": "slab"},                     # ... with the slab kernels for qkvg fwd, FFN fwd / bwd
-    "cuda_wgmma": {**CUDA, "swa_dit_rows_impl": "wgmma"},                   # ... with team-gm's wgmma kernels for those
-    "cuda_legacy": {**CUDA, **dict.fromkeys(NEW_STAGES, False), "swa_dit_rows_impl": "wgmma"},   # team-gm's three stages only
+    "cuda": CUDA,  # every bf16 stage hand-CUDA (auto: slab / wgmma by shape)
+    "cuda_slab": {
+        **CUDA,
+        "swa_dit_rows_impl": "slab",
+    },  # ... with the slab kernels for qkvg fwd, FFN fwd / bwd
+    "cuda_wgmma": {
+        **CUDA,
+        "swa_dit_rows_impl": "wgmma",
+    },  # ... with team-gm's wgmma kernels for those
+    "cuda_legacy": {
+        **CUDA,
+        **dict.fromkeys(NEW_STAGES, False),
+        "swa_dit_rows_impl": "wgmma",
+    },  # team-gm's three stages only
 }
 #: One hand-CUDA kernel at a time (everything else Triton): the attention-side stages, and the slab kernels of the stages that also
 #: have a team-gm wgmma kernel.
@@ -96,7 +114,11 @@ def _needs_cuda_stages():
 
     if not is_sm90():
         pytest.skip("the hand-CUDA stages are sm_90a kernels")
-    missing = {w: ERRORS.get(w) for w in ("qkvg", "fwd", "bwd", "attn", "slab") if extension(w) is None}
+    missing = {
+        w: ERRORS.get(w)
+        for w in ("qkvg", "fwd", "bwd", "attn", "slab")
+        if extension(w) is None
+    }
     if missing:
         pytest.skip(f"the swa_dit CUDA extensions did not build here: {missing}")
 
@@ -225,7 +247,10 @@ def test_each_cuda_stage_agrees_with_the_triton_kernels_it_replaces(stage, a, b,
     settings.configure(**{**TRITON, "engine_backend": "auto", **ONE_STAGE[stage]})
     out_c, grads_c = _run(_fused, leaves, dy, cos, sin, seqused, b)
     failures = []
-    for name, got, want in [("out", out_c, out_t), *zip(NAMES, grads_c, grads_t, strict=True)]:
+    for name, got, want in [
+        ("out", out_c, out_t),
+        *zip(NAMES, grads_c, grads_t, strict=True),
+    ]:
         frob, _peak = _rel(got, want)
         if frob > 1e-2:
             failures.append(f"{name}: rel_frob={frob:.2e}")
@@ -259,14 +284,19 @@ def test_the_attention_side_cuda_kernels_match_triton_kernel_by_kernel():
         return (torch.randn(*shape, generator=g) * scale).to(DEV, dtype)
 
     qh, kh, vh = (r(n, H, s, d) for _ in range(3))
-    seqused = torch.tensor(([s, s - 17, 5, 70, 64, 129, s - 1] * n)[:n], dtype=torch.int32, device=DEV)
+    seqused = torch.tensor(
+        ([s, s - 17, 5, 70, 64, 129, s - 1] * n)[:n], dtype=torch.int32, device=DEV
+    )
     key = atom_key(s, A=a, C=C)
     o_t = torch.empty(m, C, device=DEV, dtype=BF)
     lse_t = torch.empty(n, H, s, device=DEV, dtype=torch.float32)
     _swa_attn_fwd_kernel[lambda meta: (triton.cdiv(s, meta["BM"]), n * H)](
-        qh, kh, vh, seqused, o_t, lse_t, s, d ** -0.5, shape_key=key, C=C, H=H, D=d, HW=HW)
-    o_c, lse_c = ea.attn_fwd(qh, kh, vh, seqused, d ** -0.5)
-    valid = (torch.arange(s, device=DEV)[None, None] < seqused[:, None, None]).expand(n, H, s)
+        qh, kh, vh, seqused, o_t, lse_t, s, d**-0.5, shape_key=key, C=C, H=H, D=d, HW=HW
+    )
+    o_c, lse_c = ea.attn_fwd(qh, kh, vh, seqused, d**-0.5)
+    valid = (torch.arange(s, device=DEV)[None, None] < seqused[:, None, None]).expand(
+        n, H, s
+    )
     assert _rel(o_c, o_t)[0] < 5e-3
     assert _rel(lse_c[valid], lse_t[valid])[0] < 1e-5
     rows_valid = (torch.arange(s, device=DEV)[None] < seqused[:, None]).reshape(m)
@@ -274,45 +304,137 @@ def test_the_attention_side_cuda_kernels_match_triton_kernel_by_kernel():
 
     mod = r(b * s, 6 * C, scale=0.3, dtype=torch.float32)
     dq1, gate, att = r(m, C), r(m, C), r(m, C)
-    wo = r(C, C, scale=C ** -0.5)
+    wo = r(C, C, scale=C**-0.5)
     grid_t = lambda meta: (triton.cdiv(s, meta["AT"]), triton.cdiv(a, meta["SP"]), b)
     dmod_t = torch.zeros(b * s, 6 * C, device=DEV)
-    do_t, dg_t, datt_t, gated_t = (torch.empty(m, C, device=DEV, dtype=BF) for _ in range(4))
+    do_t, dg_t, datt_t, gated_t = (
+        torch.empty(m, C, device=DEV, dtype=BF) for _ in range(4)
+    )
     dv_t = torch.empty(n, H, s, device=DEV)
-    _swa_oproj_bwd_kernel[grid_t](dq1, o_t, gate, mod, wo, att, do_t, dg_t, dv_t, datt_t, gated_t, dmod_t, s, a, b,
-                                  shape_key=key, C=C, H=H, D=d, MODW=6 * C)
+    _swa_oproj_bwd_kernel[grid_t](
+        dq1,
+        o_t,
+        gate,
+        mod,
+        wo,
+        att,
+        do_t,
+        dg_t,
+        dv_t,
+        datt_t,
+        gated_t,
+        dmod_t,
+        s,
+        a,
+        b,
+        shape_key=key,
+        C=C,
+        H=H,
+        D=d,
+        MODW=6 * C,
+    )
     dmod_c = torch.zeros_like(dmod_t)
     dp = torch.empty(m, 4 * C, device=DEV, dtype=BF)
-    do_c, datt_c, gated_c, dv_c = ep.oproj_bwd(dq1, gate, o_t, att, mod, dmod_c, wo, dp, a, b, s)
-    for got, want in ((do_c, do_t), (dp[:, 3 * C:], dg_t), (datt_c, datt_t), (gated_c, gated_t)):
+    do_c, datt_c, gated_c, dv_c = ep.oproj_bwd(
+        dq1, gate, o_t, att, mod, dmod_c, wo, dp, a, b, s
+    )
+    for got, want in (
+        (do_c, do_t),
+        (dp[:, 3 * C :], dg_t),
+        (datt_c, datt_t),
+        (gated_c, gated_t),
+    ):
         assert torch.equal(got, want)
     assert _rel(dv_c, dv_t)[0] < 1e-6
     assert _rel(dmod_c, dmod_t)[0] < 1e-6
 
-    dq_t, dk_t, dvh_t = (torch.empty(n, H, s, d, device=DEV, dtype=BF) for _ in range(3))
+    dq_t, dk_t, dvh_t = (
+        torch.empty(n, H, s, d, device=DEV, dtype=BF) for _ in range(3)
+    )
     _swa_attn_bwd_dq_kernel[lambda meta: (triton.cdiv(s, meta["BM"]), n * H)](
-        qh, kh, vh, do_t, lse_t, dv_t, seqused, dq_t, s, d ** -0.5, shape_key=key, C=C, H=H, D=d, HW=HW)
+        qh,
+        kh,
+        vh,
+        do_t,
+        lse_t,
+        dv_t,
+        seqused,
+        dq_t,
+        s,
+        d**-0.5,
+        shape_key=key,
+        C=C,
+        H=H,
+        D=d,
+        HW=HW,
+    )
     _swa_attn_bwd_dkv_kernel[lambda meta: (triton.cdiv(s, meta["BN"]), n * H)](
-        qh, kh, vh, do_t, lse_t, dv_t, seqused, dk_t, dvh_t, s, d ** -0.5, shape_key=key, C=C, H=H, D=d, HW=HW)
-    heads = ea.attn_bwd(qh, kh, vh, do_t, lse_t, dv_t, seqused, None, d ** -0.5)
-    ea.attn_bwd(qh, kh, vh, do_t, lse_t, dv_t, seqused, dp, d ** -0.5)
+        qh,
+        kh,
+        vh,
+        do_t,
+        lse_t,
+        dv_t,
+        seqused,
+        dk_t,
+        dvh_t,
+        s,
+        d**-0.5,
+        shape_key=key,
+        C=C,
+        H=H,
+        D=d,
+        HW=HW,
+    )
+    heads = ea.attn_bwd(qh, kh, vh, do_t, lse_t, dv_t, seqused, None, d**-0.5)
+    ea.attn_bwd(qh, kh, vh, do_t, lse_t, dv_t, seqused, dp, d**-0.5)
     for i, (got, want) in enumerate(zip(heads, (dq_t, dk_t, dvh_t), strict=True)):
         assert _rel(got, want)[0] < 1e-3, i
-        assert torch.equal(dp[:, i * C:(i + 1) * C].view(n, s, H, d).transpose(1, 2), got), i
+        assert torch.equal(
+            dp[:, i * C : (i + 1) * C].view(n, s, H, d).transpose(1, 2), got
+        ), i
 
     q, pq, pk = r(m, C), r(m, C), r(m, C)
     angles = torch.randn(b * s, d // 2, generator=g) * 3.0
     cos, sin = angles.cos().to(DEV), angles.sin().to(DEV)
-    wqkv, wg = r(3 * C, C, scale=C ** -0.5), r(C, C, scale=C ** -0.5)
+    wqkv, wg = r(3 * C, C, scale=C**-0.5), r(C, C, scale=C**-0.5)
     dmod_t.zero_()
     dq_out_t = torch.empty(m, C, device=DEV, dtype=BF)
     dp_t = torch.empty(m, 4 * C, device=DEV, dtype=BF)
-    _swa_qkvg_bwd_kernel[grid_t](q, mod, cos, sin, wqkv, wg, pq, pk, dq_t, dk_t, dvh_t, dg_t, dq1, dq_out_t, dp_t, dmod_t, s, a, b,
-                                 1e-5, FP32_EPS, shape_key=key, C=C, H=H, D=d, MODW=6 * C)
+    _swa_qkvg_bwd_kernel[grid_t](
+        q,
+        mod,
+        cos,
+        sin,
+        wqkv,
+        wg,
+        pq,
+        pk,
+        dq_t,
+        dk_t,
+        dvh_t,
+        dg_t,
+        dq1,
+        dq_out_t,
+        dp_t,
+        dmod_t,
+        s,
+        a,
+        b,
+        1e-5,
+        FP32_EPS,
+        shape_key=key,
+        C=C,
+        H=H,
+        D=d,
+        MODW=6 * C,
+    )
     for i, t in enumerate((dq_t, dk_t, dvh_t)):
-        dp[:, i * C:(i + 1) * C].view(n, s, H, d).copy_(t.transpose(1, 2))
+        dp[:, i * C : (i + 1) * C].view(n, s, H, d).copy_(t.transpose(1, 2))
     dmod_c.zero_()
-    dq_out_c = ep.qkvg_bwd(q, pq, pk, dq1, mod, dmod_c, cos, sin, wqkv, wg, dp, a, b, s, 1e-5, FP32_EPS)
+    dq_out_c = ep.qkvg_bwd(
+        q, pq, pk, dq1, mod, dmod_c, cos, sin, wqkv, wg, dp, a, b, s, 1e-5, FP32_EPS
+    )
     assert _rel(dq_out_c, dq_out_t)[0] < 1e-4
     assert _rel(dp, dp_t)[0] < 1e-4
     assert _rel(dmod_c, dmod_t)[0] < 1e-4
@@ -356,10 +478,19 @@ def test_a_cuda_graph_replays_the_training_step(path):
     # differs run to run, so two EAGER steps differ there too: the replay may differ from eager by what eager differs from
     # itself (x4), and by no more than rounding elsewhere.
     again_out, again_grads = _run(_fused, fresh, dy, cos, sin, seqused, b)
-    for name, got, want, again in zip(("out", *NAMES), replayed, [eager_out, *eager_grads], [again_out, *again_grads],
-                                      strict=True):
+    for name, got, want, again in zip(
+        ("out", *NAMES),
+        replayed,
+        [eager_out, *eager_grads],
+        [again_out, *again_grads],
+        strict=True,
+    ):
         frob, _peak = _rel(got, want)
-        assert frob <= max(1e-5, 4 * _rel(again, want)[0]), (name, frob, _rel(again, want)[0])
+        assert frob <= max(1e-5, 4 * _rel(again, want)[0]), (
+            name,
+            frob,
+            _rel(again, want)[0],
+        )
 
 
 @pytest.mark.parametrize("path", ["triton", "cuda"])
@@ -465,7 +596,10 @@ def test_zero_initialised_gates_keep_the_block_the_identity():
         torch.testing.assert_close(block(x, c, ap), x, rtol=0, atol=0)
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 @pytest.mark.parametrize("path", ["triton", "cuda"])
 def test_the_fused_module_compiles_fullgraph(path):
     """Two opaque ops and an autograd.Function: torch.compile(fullgraph=True) traces the module with no break."""
@@ -516,7 +650,9 @@ def _needs_fp32_cuda():
     if not is_sm90():
         pytest.skip("the fp32 CUDA stages are sm_90a kernels")
     if extension("fp32") is None:
-        pytest.skip(f"the swa_dit fp32 CUDA extension did not build here: {ERRORS.get('fp32')}")
+        pytest.skip(
+            f"the swa_dit fp32 CUDA extension did not build here: {ERRORS.get('fp32')}"
+        )
 
 
 @contextlib.contextmanager
@@ -540,7 +676,9 @@ def _fp32_path(path: str):
 
 
 @pytest.mark.parametrize("path", FP32_PATHS)
-@pytest.mark.parametrize(("a", "b", "s"), [(48, 1, 257), (3, 2, 333), (1, 3, 300), (2, 1, 300)])
+@pytest.mark.parametrize(
+    ("a", "b", "s"), [(48, 1, 257), (3, 2, 333), (1, 3, 300), (2, 1, 300)]
+)
 def test_the_fp32_block_matches_its_fp32_reference(a, b, s, path):
     """fp32 in, fp32 out, every gradient in its input's dtype, within the band the bf16 attention operands leave.
 
@@ -568,12 +706,16 @@ def test_the_fp32_block_matches_its_fp32_reference(a, b, s, path):
         frob, peak = _rel(got, want)
         bound = 2e-2 if name in attention_side else 5e-3
         if frob > bound or peak > 2 * bound:
-            failures.append(f"{name}: rel_frob={frob:.2e} rel_max={peak:.2e} (bound {bound:.0e})")
+            failures.append(
+                f"{name}: rel_frob={frob:.2e} rel_max={peak:.2e} (bound {bound:.0e})"
+            )
     assert not failures, f"fp32 {path} A={a} B={b} S={s}:\n  " + "\n  ".join(failures)
 
 
 @pytest.mark.parametrize(("a", "b", "s"), [(48, 1, 257), (1, 3, 300)])
-def test_the_fp32_cuda_stages_agree_with_the_fp32_triton_kernels(a, b, s, matmul_precision):
+def test_the_fp32_cuda_stages_agree_with_the_fp32_triton_kernels(
+    a, b, s, matmul_precision
+):
     """The CUDA extension against the fp32 Triton kernels on the same values, both under "high" (so the weight-gradient
     GEMMs are the same): the same bf16 attention and TF32 projections, the FFN weights split on the CUDA side and tf32x3
     on the Triton side. Measured on an H100: out ~1.7e-4, the q / conditioning / FFN gradients <= 8e-4, the attention-side
@@ -587,7 +729,10 @@ def test_the_fp32_cuda_stages_agree_with_the_fp32_triton_kernels(a, b, s, matmul
     with _fp32_path("triton"):
         out_t, grads_t = _run(_fused, leaves, dy, cos, sin, seqused, b)
     attention_side = {"w_qkv", "w_gate", "w_out"}
-    for name, got, want in [("out", out_c, out_t), *zip(NAMES, grads_c, grads_t, strict=True)]:
+    for name, got, want in [
+        ("out", out_c, out_t),
+        *zip(NAMES, grads_c, grads_t, strict=True),
+    ]:
         frob, _peak = _rel(got, want)
         assert frob < (2e-2 if name in attention_side else 5e-3), (name, frob)
 
@@ -599,7 +744,9 @@ def test_the_fp32_cuda_forward_saves_nothing_and_computes_the_same():
     with _fp32_path("cuda"):
         with torch.no_grad():
             inference = _fused(leaves, cos, sin, seqused, 2)
-        training, _ = _run(_fused, leaves, torch.randn(6, 333, C, device=DEV), cos, sin, seqused, 2)
+        training, _ = _run(
+            _fused, leaves, torch.randn(6, 333, C, device=DEV), cos, sin, seqused, 2
+        )
     torch.testing.assert_close(inference, training, rtol=0, atol=0)
 
 
@@ -661,9 +808,13 @@ def _reference_module(block, x, c, ap):
     )
 
 
-@pytest.mark.parametrize(("precision", "path"), [("highest", "triton"), ("medium", "triton"), ("medium", "cuda"),
-                                                  ("high", "cuda")])
-def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(precision, path, matmul_precision):
+@pytest.mark.parametrize(
+    ("precision", "path"),
+    [("highest", "triton"), ("medium", "triton"), ("medium", "cuda"), ("high", "cuda")],
+)
+def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(
+    precision, path, matmul_precision
+):
     """The fp32 module on the fused block against the same module on its per-op path (``swa_dit_fused=False``: engine
     rmsnorm_adamod, cuBLAS projections, FlashAttention-4 in bf16, triton_swiglu_ffn), each against the fp32 reference.
     ``medium`` is MiniWorld's trainer setting (cuBLAS TF32). The fused error may not exceed the per-op error by more than
@@ -678,10 +829,19 @@ def test_the_fp32_fused_block_is_as_accurate_as_the_per_op_path(precision, path,
     dy = torch.randn(a * b, s, C, device=DEV)
     with _fp32_path(path):
         matmul_precision(precision)
-        fused, fused_grads = _module_grads(block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy)
+        fused, fused_grads = _module_grads(
+            block,
+            lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_),
+            x,
+            c_base,
+            ap,
+            dy,
+        )
     settings.configure(swa_dit_fused=False)
     matmul_precision(precision)
-    perop, perop_grads = _module_grads(block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy)
+    perop, perop_grads = _module_grads(
+        block, lambda m, x_, c_, ap_: m.forward_hoisted(x_, c_, ap_), x, c_base, ap, dy
+    )
     matmul_precision("highest")
     ref, ref_grads = _module_grads(block, _reference_module, x, c_base, ap, dy)
     names = ["out", "x", "cond", *(n for n, _ in block.named_parameters())]
@@ -707,7 +867,10 @@ def test_the_fp32_module_takes_the_fused_block_and_mixed_dtypes_do_not():
     assert "mixed dtypes" in str(block.fused_refusal(x.to(BF), c_base, ap))
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="fullgraph needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="fullgraph needs the custom_op launches",
+)
 @pytest.mark.parametrize("path", FP32_PATHS)
 def test_the_fp32_fused_module_compiles_fullgraph(path):
     block = _block(dtype=F32)
@@ -715,9 +878,17 @@ def test_the_fp32_fused_module_compiles_fullgraph(path):
     c = c_base.repeat(3, 1, 1)
     dy = torch.randn(6, 200, C, device=DEV)
     with _fp32_path(path):
-        eager, eager_grads = _module_grads(block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy)
+        eager, eager_grads = _module_grads(
+            block, lambda m, x_, c_, ap_: m(x_, c_, ap_), x, c, ap, dy
+        )
         compiled, compiled_grads = _module_grads(
-            block, lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_), x, c, ap, dy)
+            block,
+            lambda m, x_, c_, ap_: torch.compile(m, fullgraph=True)(x_, c_, ap_),
+            x,
+            c,
+            ap,
+            dy,
+        )
     frob, _peak = _rel(compiled, eager)
     assert frob < 1e-4, frob
     for got, want in zip(compiled_grads, eager_grads, strict=True):
@@ -726,7 +897,10 @@ def test_the_fp32_fused_module_compiles_fullgraph(path):
         assert frob < 1e-3, frob
 
 
-@pytest.mark.skipif(settings.current().compile_wrap != "custom_op", reason="opcheck needs the custom_op launches")
+@pytest.mark.skipif(
+    settings.current().compile_wrap != "custom_op",
+    reason="opcheck needs the custom_op launches",
+)
 @pytest.mark.parametrize("path", FP32_PATHS)
 def test_the_fp32_ops_satisfy_their_contract(path):
     """Schema and fake against the fp32 forward (both save modes) and backward: the fakes carry the per-output dtypes
@@ -741,12 +915,20 @@ def test_the_fp32_ops_satisfy_their_contract(path):
     bwd_op = torch.ops.miniworld_engine.swa_dit_block_bwd.default
     with _fp32_path(path):
         for save in (False, True):
-            torch.library.opcheck(fwd_op, (q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, save),
-                                  test_utils=("test_schema", "test_faketensor"))
-        saved = swa_dit_block_fwd(q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, True)
+            torch.library.opcheck(
+                fwd_op,
+                (q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, save),
+                test_utils=("test_schema", "test_faketensor"),
+            )
+        saved = swa_dit_block_fwd(
+            q, mod, cos, sin, seqused, *weights, 2, HW, 1e-7, True
+        )
         dy = torch.randn_like(q)
-        torch.library.opcheck(bwd_op, (dy, q, mod, cos, sin, seqused, *weights, *saved[1:], 2, HW, 1e-7),
-                              test_utils=("test_schema", "test_faketensor"))
+        torch.library.opcheck(
+            bwd_op,
+            (dy, q, mod, cos, sin, seqused, *weights, *saved[1:], 2, HW, 1e-7),
+            test_utils=("test_schema", "test_faketensor"),
+        )
 
 
 def test_the_fp32_block_matches_team_gms_unfused_atom_transformer():
@@ -799,7 +981,6 @@ def test_the_fp32_block_matches_team_gms_unfused_atom_transformer():
         if frob > (3e-2 if "attn." in name else 1e-2):
             failures.append(f"{name}: rel_frob={frob:.2e}")
     assert not failures, "\n  ".join(failures)
-
 
 
 @pytest.mark.parametrize("dtype", [BF, F32], ids=["bf16", "fp32"])

@@ -35,7 +35,9 @@ def matches(module, single, cond, pair, mask) -> bool:
         return False
     if not settings.current().local_dit_h100_mma:
         return False
-    if not module.cross_attention or (torch.is_autocast_enabled("cuda") and single.dtype != BF):
+    if not module.cross_attention or (
+        torch.is_autocast_enabled("cuda") and single.dtype != BF
+    ):
         return False
     a, tr = module.attention, module.transition
     if a.use_qk_norm or settings.current().engine_backend == "triton":
@@ -49,26 +51,64 @@ def matches(module, single, cond, pair, mask) -> bool:
         return False
     dt = (single.dtype, cond.dtype, pair.dtype)
     if dt == (F32, F32, F32):
-        if any(p.dtype != F32 for p in params) or not settings.current().local_dit_h100_mma_fp32:
+        if (
+            any(p.dtype != F32 for p in params)
+            or not settings.current().local_dit_h100_mma_fp32
+        ):
             return False
     elif dt == (BF, BF, BF):
-        if any(p.dtype not in (F32, BF) for p in params) or not settings.current().local_dit_h100_mma_bf16:
+        if (
+            any(p.dtype not in (F32, BF) for p in params)
+            or not settings.current().local_dit_h100_mma_bf16
+        ):
             return False
     else:
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[3] != DS or single.shape[2] == 0:
+    if (
+        single.ndim != 4
+        or single.shape[1] != 1
+        or single.shape[3] != DS
+        or single.shape[2] == 0
+    ):
         return False
     n = single.shape[2]
     nwin = (n + 31) // 32
-    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, nwin, 32, 128, DP):
+    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (
+        1,
+        nwin,
+        32,
+        128,
+        DP,
+    ):
         return False
-    if not (single.is_contiguous() and pair.is_contiguous() and (cond.is_contiguous() or _shared(cond))):
+    if not (
+        single.is_contiguous()
+        and pair.is_contiguous()
+        and (cond.is_contiguous() or _shared(cond))
+    ):
         return False
-    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n) or mask.device != single.device):
+    if mask is not None and (
+        mask.dtype != torch.bool
+        or tuple(mask.shape) != (1, n)
+        or mask.device != single.device
+    ):
         return False
-    if (a.n_head, a.to_query.weight.shape[0], a.to_bias.weight.shape[1], tr.expand_a.weight.shape[0]) != (NH, DS, DP, 2 * DS):
+    if (
+        a.n_head,
+        a.to_query.weight.shape[0],
+        a.to_bias.weight.shape[1],
+        tr.expand_a.weight.shape[0],
+    ) != (NH, DS, DP, 2 * DS):
         return False
-    norms = (a.ada_ln_in.ln_in, a.ada_ln_in.ln_cond, a.ln_pair, tr.ada_ln_in.ln_in, tr.ada_ln_in.ln_cond, a.ada_ln_kv.ln_in, a.ada_ln_kv.ln_cond)
+    norms = (
+        a.ada_ln_in.ln_in,
+        a.ada_ln_in.ln_cond,
+        a.ln_pair,
+        tr.ada_ln_in.ln_in,
+        tr.ada_ln_in.ln_cond,
+        a.ada_ln_kv.ln_in,
+        a.ada_ln_kv.ln_cond,
+    )
     return all(norm.eps == _ld.EPS for norm in norms)
 
 
@@ -76,7 +116,12 @@ def matches(module, single, cond, pair, mask) -> bool:
 def _shared(cond) -> bool:
     """One conditioning for every sample: an expanded view (stride 0 over the samples) of [1, 1, N, 128]. The modulation tables are made
     once per atom instead of once per atom and sample, and read modulo N."""
-    return cond.shape[0] > 1 and cond.stride(0) == 0 and cond.stride(2) == DC and cond.stride(3) == 1
+    return (
+        cond.shape[0] > 1
+        and cond.stride(0) == 0
+        and cond.stride(2) == DC
+        and cond.stride(3) == 1
+    )
 
 
 def _dims(single):
@@ -89,30 +134,57 @@ def _fwd_fake(single, cond, pair, kmask, weights, save):
     out = torch.empty_like(single)
     if not save:
         return [out]
-    a, n0, n, m = _dims(single)
+    a, _n0, n, m = _dims(single)
     dt, dev = single.dtype, single.device
-    t = lambda *shape, d=dt: torch.empty(*shape, device=dev, dtype=d)  # noqa: E731
+    t = lambda *shape, d=dt: torch.empty(*shape, device=dev, dtype=d)
     return [
-        out, t(NH, n // 32, 32, 128, d=F32), t(n if _shared(cond) else m, 768), t(n if _shared(cond) else m, 256),
-        t(m, DS), t(m, DS), t(m, DS), t(m, DS), t(m, DS), t(m, DS), t(m, DS), t(a, NH, n, d=F32), t(m, DS), t(m, DS), t(m, DS), t(m, DS),
+        out,
+        t(NH, n // 32, 32, 128, d=F32),
+        t(n if _shared(cond) else m, 768),
+        t(n if _shared(cond) else m, 256),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(a, NH, n, d=F32),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
+        t(m, DS),
     ]
 
 
 @opaque(fake=_fwd_fake, name="local_dit_h100_fwd")
-def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, kmask: torch.Tensor | None, weights: list[torch.Tensor], save: bool) -> list[torch.Tensor]:
+def _fwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    kmask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    save: bool,
+) -> list[torch.Tensor]:
     """The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
     x2, t): fresh tensors."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
 
     tf32 = single.dtype == F32
-    a, n0, n, m = _dims(single)
+    a, _n0, n, m = _dims(single)
     attn = local.attn_fwd_mma32 if tf32 else local.attn_fwd_mma
     with torch.cuda.device(single.device):
         p = k90.pack(weights, tf32)
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
+        c2 = (
+            _ld._padded(cond[:1], n).reshape(n, DC)
+            if shared
+            else _ld._padded(cond, n).reshape(m, DC)
+        ).contiguous()
         nmod = n if shared else m
         hoist = (not save) and settings.current().local_dit_hoist
         wkey = tuple((w.data_ptr(), w._version) for w in weights) if hoist else None
@@ -120,7 +192,9 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, kmask: to
         def tables():
             return k90.cond_fwd(c2, p, tf32)
 
-        mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
+        mod, mkv = (
+            _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
+        )
         z = _ld._trunk(pair, n).contiguous()
 
         def pair_bias():
@@ -132,80 +206,166 @@ def _fwd(single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, kmask: to
         else:
             bias2 = pair_bias()
         if save:
-            q, sg, k, v, x1, xkv = k90.pre_fwd(s2, mod, mkv, p, tf32, save=True, nmod=nmod)
+            q, sg, k, v, x1, xkv = k90.pre_fwd(
+                s2, mod, mkv, p, tf32, save=True, nmod=nmod
+            )
         else:
             q, sg, k, v = k90.pre_fwd(s2, mod, mkv, p, tf32, nmod=nmod)
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
         o = o.view(m, DS)
         if not save:
-            return [_ld._unpadded(k90.post_fwd(s2, o, sg, mod, p, tf32, nmod=nmod).view(a, 1, n, DS), single.shape)]
+            return [
+                _ld._unpadded(
+                    k90.post_fwd(s2, o, sg, mod, p, tf32, nmod=nmod).view(a, 1, n, DS),
+                    single.shape,
+                )
+            ]
         out, u, a2, x2, t = k90.post_fwd(s2, o, sg, mod, p, tf32, save=True, nmod=nmod)
-    return [_ld._unpadded(out.view(a, 1, n, DS), single.shape), bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2, x2, t]
+    return [
+        _ld._unpadded(out.view(a, 1, n, DS), single.shape),
+        bias2,
+        mod,
+        mkv,
+        q,
+        k,
+        v,
+        sg,
+        x1,
+        xkv,
+        o,
+        lse,
+        u,
+        a2,
+        x2,
+        t,
+    ]
 
 
 def _bwd_fake(dy, single, cond, pair, kmask, weights, saved):
-    return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(w) for w in weights)]
+    return [
+        torch.empty_like(single),
+        torch.empty_like(cond),
+        torch.empty_like(pair),
+        *(torch.empty_like(w) for w in weights),
+    ]
 
 
 @opaque(fake=_bwd_fake, name="local_dit_h100_bwd")
-def _bwd(dy: torch.Tensor, single: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, kmask: torch.Tensor | None,
-         weights: list[torch.Tensor], saved: list[torch.Tensor]) -> list[torch.Tensor]:
+def _bwd(
+    dy: torch.Tensor,
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    kmask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    saved: list[torch.Tensor],
+) -> list[torch.Tensor]:
     """d single, d cond, d pair, then one gradient per parameter (its dtype)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
 
     bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2, x2, t = saved
     tf32 = single.dtype == F32
-    a, n0, n, m = _dims(single)
+    a, _n0, n, m = _dims(single)
     dev = single.device
     with torch.cuda.device(dev):
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
         shared = _shared(cond)
-        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
+        c2 = (
+            _ld._padded(cond[:1], n).reshape(n, DC)
+            if shared
+            else _ld._padded(cond, n).reshape(m, DC)
+        ).contiguous()
         nmod = n if shared else m
         z = _ld._trunk(pair, n).contiguous()
         p, pb = k90.pack(weights, tf32), k90.pack_bwd(weights, tf32)
         dyp = _ld._padded(dy.to(s2.dtype).contiguous(), n).reshape(m, DS).contiguous()
-        sh = (4, n, 1) if (shared and a % 4 == 0 and n % 32 == 0) else None   # grouped-sample reduction (4 samples per CTA group)
-        dt, hh, dab, dmod, cs_st = k90.tr_bwd(dyp, t, mod, x2, p, pb, tf32, nmod=nmod, shared=sh)
+        sh = (
+            (4, n, 1) if (shared and a % 4 == 0 and n % 32 == 0) else None
+        )  # grouped-sample reduction (4 samples per CTA group)
+        dt, hh, dab, dmod, cs_st = k90.tr_bwd(
+            dyp, t, mod, x2, p, pb, tf32, nmod=nmod, shared=sh
+        )
         dp = torch.empty(m, 512, device=dev, dtype=s2.dtype)  # [dg | dq | dk | dv]
-        da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(dab, dyp, a2, mod, u, sg, o, pb, dmod, dp, n, tf32, nmod=nmod, shared=sh)
-        dbias = local.attn_bwd_mma(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), do.view(a, n, DS), bias2, lse, dd, dp[:, DS:], tf32)
+        da2, du, gated, do, dd, cs_so, cs_sc2 = k90.post_bwd(
+            dab, dyp, a2, mod, u, sg, o, pb, dmod, dp, n, tf32, nmod=nmod, shared=sh
+        )
+        dbias = local.attn_bwd_mma(
+            q.view(a, n, DS),
+            k.view(a, n, DS),
+            v.view(a, n, DS),
+            do.view(a, n, DS),
+            bias2,
+            lse,
+            dd,
+            dp[:, DS:],
+            tf32,
+        )
         dz, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
-        dx, dmkv, cs_sc1, cs_bs, cs_bq = k90.pre_bwd(dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, nmod=nmod, shared=sh)
+        dx, dmkv, cs_sc1, cs_bs, cs_bq = k90.pre_bwd(
+            dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, nmod=nmod, shared=sh
+        )
         if shared:
-            if n % k90.ROWS == 0:   # one kernel: partial sums, the six products, LN backward
-                dc, nc, dmod, dmkv = k90.cond_bwd_shared(dmod.view(-1, n, 768), dmkv.view(-1, n, 256), c2, pb, tf32, a)
+            if (
+                n % k90.ROWS == 0
+            ):  # one kernel: partial sums, the six products, LN backward
+                dc, nc, dmod, dmkv = k90.cond_bwd_shared(
+                    dmod.view(-1, n, 768), dmkv.view(-1, n, 256), c2, pb, tf32, a
+                )
                 c2g = c2.float()
             else:
-                dc, nc, dmod, dmkv, c2g = _cond_bwd_shared(dmod, dmkv, c2, weights, a, n)
+                dc, nc, dmod, dmkv, c2g = _cond_bwd_shared(
+                    dmod, dmkv, c2, weights, a, n
+                )
         else:
             dc, nc = k90.cond_bwd(dmod, dmkv, c2, pb, tf32)
             c2g = c2
-        mm = lambda x, y: _mmT(x, y, tf32)  # noqa: E731
-        dwgq = mm(dp[:, 0:256], x1)          # [dg | dq]^T x1 -> Wg, Wq
-        dwkv = mm(dp[:, 256:512], xkv)       # [dk | dv]^T xkv -> Wk, Wv
+        mm = lambda x, y: _mmT(x, y, tf32)
+        dwgq = mm(dp[:, 0:256], x1)  # [dg | dq]^T x1 -> Wg, Wq
+        dwkv = mm(dp[:, 256:512], xkv)  # [dk | dv]^T xkv -> Wk, Wv
         dwo = mm(du, gated)
-        dwab = mm(dab, x2)                   # [Wa; Wb]
+        dwab = mm(dab, x2)  # [Wa; Wb]
         dwd = mm(dt, hh)
-        dc1 = mm(dmod[:, 0:256], nc)         # d W' of (Ws1', Wb1')
-        dc2 = mm(dmod[:, 384:640], nc)       # (Ws2', Wb2')
-        dckv = mm(dmkv, nc)                  # (Wkp', Wks')
+        dc1 = mm(dmod[:, 0:256], nc)  # d W' of (Ws1', Wb1')
+        dc2 = mm(dmod[:, 384:640], nc)  # (Ws2', Wb2')
+        dckv = mm(dmkv, nc)  # (Wkp', Wks')
         dwso = mm(dmod[:, 256:384], c2g)
         dwst = mm(dmod[:, 640:768], c2g)
         outs = [torch.empty(w.shape, device=dev, dtype=w.dtype) for w in weights]
         k90.finalize(
             {
-                "dwgq": dwgq, "dwkv": dwkv, "dwo": dwo, "dwab": dwab, "dwd": dwd, "dc1": dc1, "dc2": dc2, "dckv": dckv, "dwso": dwso,
-                "dwst": dwst, "cs_sc1": cs_sc1, "cs_bq": cs_bq, "cs_so": cs_so, "cs_sc2": cs_sc2, "cs_st": cs_st, "cs_bs": cs_bs,
-                "dgamma_pair": dgamma_pair, "dwb": dwb,
+                "dwgq": dwgq,
+                "dwkv": dwkv,
+                "dwo": dwo,
+                "dwab": dwab,
+                "dwd": dwd,
+                "dc1": dc1,
+                "dc2": dc2,
+                "dckv": dckv,
+                "dwso": dwso,
+                "dwst": dwst,
+                "cs_sc1": cs_sc1,
+                "cs_bq": cs_bq,
+                "cs_so": cs_so,
+                "cs_sc2": cs_sc2,
+                "cs_st": cs_st,
+                "cs_bs": cs_bs,
+                "dgamma_pair": dgamma_pair,
+                "dwb": dwb,
             },
-            weights, outs, dev.index if dev.index is not None else torch.cuda.current_device(),
+            weights,
+            outs,
+            dev.index if dev.index is not None else torch.cuda.current_device(),
         )
     out = outs
     dsingle = _ld._unpadded(dx.view(a, 1, n, DS), single.shape)
-    if shared:   # the gradient of the one shared row set, split evenly over the expanded view's A copies (autograd sums them back)
-        dcond = _ld._unpadded(dc.view(1, 1, n, DC).to(cond.dtype).expand(a, 1, n, DC).contiguous(), cond.shape)
+    if shared:  # the gradient of the one shared row set, split evenly over the expanded view's A copies (autograd sums them back)
+        dcond = _ld._unpadded(
+            dc.view(1, 1, n, DC).to(cond.dtype).expand(a, 1, n, DC).contiguous(),
+            cond.shape,
+        )
     else:
         dcond = _ld._unpadded(dc.view(a, 1, n, DC), cond.shape)
     dpair = dz[: pair.shape[1]].reshape(pair.shape).to(pair.dtype)
@@ -231,7 +391,11 @@ def _cond_bwd_shared(dmod, dmkv, c2, weights, a, n):
         dkv = dk[:, 0:128] @ w["kv_sc_w"] + dk[:, 128:256] @ w["kv_bi_w"]
         raw = ds[:, 256:384] @ w["so_w"] + ds[:, 640:768] @ w["st_w"]
     dn = d1 * w["g1"] + d2 * w["g2"] + dkv * w["gkv"]
-    dc = rstd * (dn - dn.mean(-1, keepdim=True) - nrm * (dn * nrm).mean(-1, keepdim=True)) + raw
+    dc = (
+        rstd
+        * (dn - dn.mean(-1, keepdim=True) - nrm * (dn * nrm).mean(-1, keepdim=True))
+        + raw
+    )
     return dc / a, nrm, ds, dk, c
 
 
@@ -247,7 +411,9 @@ def _fp32_exact():
 
 def _mmT(a, b, tf32):
     """a^T b -> fp32 (a, b [M, *] views; TF32 tensor cores for the fp32 path, bf16 products with fp32 accumulation otherwise)."""
-    if a.dtype == F32 and not tf32:   # the shared-conditioning path's fp32 operands under a bf16 block: exact fp32
+    if (
+        a.dtype == F32 and not tf32
+    ):  # the shared-conditioning path's fp32 operands under a bf16 block: exact fp32
         with _fp32_exact():
             return torch.mm(a.t(), b)
     if tf32:
@@ -256,10 +422,36 @@ def _mmT(a, b, tf32):
     return torch.mm(a.t(), b, out_dtype=torch.float32)
 
 
-_NAMES = ("g1", "sc1_w", "sc1_b", "bi1_w", "wq", "bq", "wk", "wv", "ln_pair", "wb", "wg", "wo", "so_w", "so_b",
-          "g2", "sc2_w", "sc2_b", "bi2_w", "wa", "wb2", "wd", "st_w", "st_b", "gkv", "kv_sc_w", "kv_sc_b", "kv_bi_w")
+_NAMES = (
+    "g1",
+    "sc1_w",
+    "sc1_b",
+    "bi1_w",
+    "wq",
+    "bq",
+    "wk",
+    "wv",
+    "ln_pair",
+    "wb",
+    "wg",
+    "wo",
+    "so_w",
+    "so_b",
+    "g2",
+    "sc2_w",
+    "sc2_b",
+    "bi2_w",
+    "wa",
+    "wb2",
+    "wd",
+    "st_w",
+    "st_b",
+    "gkv",
+    "kv_sc_w",
+    "kv_sc_b",
+    "kv_bi_w",
+)
 _IDX = {n: i for i, n in enumerate(_NAMES)}
-
 
 
 class _H100Block(torch.autograd.Function):
@@ -276,7 +468,7 @@ class _H100Block(torch.autograd.Function):
     @once_differentiable
     def backward(ctx, dy):
         kmask, single, cond, pair, *rest = ctx.saved_tensors
-        saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved:]
+        saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
         grads = _bwd(dy, single, cond, pair, kmask, list(weights), list(saved))
         return (None, *grads)
 
@@ -290,6 +482,8 @@ def run_block(module, single, cond, pair, mask=None):
     weights = _weights_of(module)
     n0 = single.shape[2]
     kmask = _ld._keys(mask, n0, _ld._padded_length(n0))
-    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights)):
+    if torch.is_grad_enabled() and any(
+        t.requires_grad for t in (single, cond, pair, *weights)
+    ):
         return _H100Block.apply(kmask, single, cond, pair, *weights)
     return _fwd(single, cond, pair, kmask, weights, False)[0]

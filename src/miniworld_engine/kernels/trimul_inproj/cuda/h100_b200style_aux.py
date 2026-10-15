@@ -83,6 +83,7 @@ extern "C" __global__ void mw_b200style_apply_{d}(const Apply p) {{
 GATE_BLOCKS = 132 * 8
 GATE_BLOCKS_SMALL = 132 * 2
 
+
 def _launch(name, grid, fields):
     _unit().kernel(name).launch(grid, (256, 1, 1), [T._launch_module().Struct(fields)])
 

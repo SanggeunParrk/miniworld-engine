@@ -6,11 +6,9 @@ than 1.5x the PyTorch module's error against an fp64 block (+ an absolute floor)
 padded lengths and key masks, the opaque ops under a CUDA graph, and that the kernels actually served the call.
 """
 
-import copy
 
 import pytest
 import torch
-
 from settings_helpers import override_setting
 
 from miniworld_engine.integrations import local_dit_h100 as h100
@@ -27,7 +25,12 @@ pytestmark = [
     ),
 ]
 
-CASES = [(3, 512, True), (1, 1000, True), (2, 200, False), (5, 256, False)]  # (A, N, masked)
+CASES = [
+    (3, 512, True),
+    (1, 1000, True),
+    (2, 200, False),
+    (5, 256, False),
+]  # (A, N, masked)
 
 
 def _rel(a, b):
@@ -36,7 +39,15 @@ def _rel(a, b):
 
 def _block(seed=0):
     torch.manual_seed(seed)
-    blk = LocalDiTBlock(128, 128, 16, 4, n=2, cross_attention=True, implementation=ImplementationType.TRITON)
+    blk = LocalDiTBlock(
+        128,
+        128,
+        16,
+        4,
+        n=2,
+        cross_attention=True,
+        implementation=ImplementationType.TRITON,
+    )
     with torch.no_grad():  # non-default parameters (zero-initialised gates would make the backward vacuous)
         for p in blk.parameters():
             if p.ndim > 1:
@@ -47,7 +58,15 @@ def _block(seed=0):
 
 
 def _reference(blk):
-    ref = LocalDiTBlock(128, 128, 16, 4, n=2, cross_attention=True, implementation=ImplementationType.PYTORCH)
+    ref = LocalDiTBlock(
+        128,
+        128,
+        16,
+        4,
+        n=2,
+        cross_attention=True,
+        implementation=ImplementationType.PYTORCH,
+    )
     ref.load_state_dict(blk.state_dict())
     return ref.cuda().double()
 
@@ -76,7 +95,7 @@ def _train(mod, s, c, z, dy, mask, dtype, autocast=False):
     return y.detach(), grads
 
 
-@pytest.mark.parametrize("a,n,masked", CASES, ids=lambda v: str(v))
+@pytest.mark.parametrize(("a", "n", "masked"), CASES, ids=lambda v: str(v))
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_training_matches_fp64(a, n, masked, dtype):
     blk = _block()
@@ -91,25 +110,34 @@ def test_training_matches_fp64(a, n, masked, dtype):
     served = h100.matches(blk, *(x.to(dtype) for x in ins), mask)
     assert served
     y, g = _train(blk, s, c, z, dy, mask, dtype, autocast=dtype == torch.bfloat16)
-    tol = 1e-3 if dtype == torch.float32 else 8e-3  # TF32 kernels: ~3e-4 (the TF32 PyTorch module: 1.6e-3); bf16: ~4.4e-3
+    tol = (
+        1e-3 if dtype == torch.float32 else 8e-3
+    )  # TF32 kernels: ~3e-4 (the TF32 PyTorch module: 1.6e-3); bf16: ~4.4e-3
     assert _rel(y, y_ref) < tol, _rel(y, y_ref)
     names = ["single", "cond", "pair"] + [nm for nm, _ in ref.named_parameters()]
     for nm, ge, gr in zip(names, g, g_ref, strict=True):
-        assert ge is not None and torch.isfinite(ge).all(), nm
-        assert _rel(ge, gr) < (3e-3 if dtype == torch.float32 else 2.5e-2), (nm, _rel(ge, gr))
+        assert ge is not None, nm
+        assert torch.isfinite(ge).all(), nm
+        assert _rel(ge, gr) < (3e-3 if dtype == torch.float32 else 2.5e-2), (
+            nm,
+            _rel(ge, gr),
+        )
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_training_step_is_bitwise_repeatable(dtype):
     blk = _block()
     s, c, z, dy, mask = _inputs(3, 512, True)
-    out = [_train(blk, s, c, z, dy, mask, dtype, autocast=dtype == torch.bfloat16) for _ in range(2)]
+    out = [
+        _train(blk, s, c, z, dy, mask, dtype, autocast=dtype == torch.bfloat16)
+        for _ in range(2)
+    ]
     assert torch.equal(out[0][0], out[1][0])
     for ga, gb in zip(out[0][1], out[1][1], strict=True):
         assert torch.equal(ga, gb)
 
 
-@pytest.mark.parametrize("a,n,masked", CASES, ids=lambda v: str(v))
+@pytest.mark.parametrize(("a", "n", "masked"), CASES, ids=lambda v: str(v))
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_inference_matches_fp64(a, n, masked, dtype):
     blk = _block().eval()
@@ -189,10 +217,13 @@ def test_torch_compile_fullgraph_matches_eager(dtype):
     with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf):
         y = cb(sx, c.to(dtype), z.to(dtype), mask)
     y.backward(dy.to(y.dtype))
-    assert torch.isfinite(sx.grad).all() and all(p.grad is not None for p in blk.parameters())
+    assert torch.isfinite(sx.grad).all()
+    assert all(p.grad is not None for p in blk.parameters())
 
 
-@pytest.mark.parametrize("a", [4, 5, 8], ids=lambda v: f"A{v}")   # 4, 8: samples reduced in groups of four inside the CTA; 5: per-sample rows
+@pytest.mark.parametrize(
+    "a", [4, 5, 8], ids=lambda v: f"A{v}"
+)  # 4, 8: samples reduced in groups of four inside the CTA; 5: per-sample rows
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_shared_conditioning_matches_materialised(dtype, a):
     """A conditioning given as an expanded view (stride 0 over the samples) is tabulated once per atom; output and every gradient equal the
@@ -216,7 +247,8 @@ def test_shared_conditioning_matches_materialised(dtype, a):
     ym, gm, gcm, gpm = run(lambda b: b.expand(a, 1, 512, 128).contiguous())
     tol = 3e-3 if dtype == torch.float32 else 3e-2
     assert _rel(ys, ym) < 1e-3 if dtype == torch.float32 else _rel(ys, ym) < 1e-2
-    assert _rel(gs, gm) < tol and _rel(gc, gcm) < tol
+    assert _rel(gs, gm) < tol
+    assert _rel(gc, gcm) < tol
     for a_, b_ in zip(gp, gpm, strict=True):
         assert _rel(a_, b_) < tol
 
@@ -243,4 +275,6 @@ def test_split_and_unsplit_launches_agree(dtype):
     tol = 1e-5 if dtype == torch.float32 else 3e-3
     assert _rel(y3, y36[:3]) < tol, _rel(y3, y36[:3])
     assert _rel(ds3, ds36[:3]) < tol, _rel(ds3, ds36[:3])
-    assert _rel(dc3, dc36[:3]) < 10 * tol, _rel(dc3, dc36[:3])   # the conditioning gradient sums its K blocks in a different order
+    assert _rel(dc3, dc36[:3]) < 10 * tol, _rel(
+        dc3, dc36[:3]
+    )  # the conditioning gradient sums its K blocks in a different order

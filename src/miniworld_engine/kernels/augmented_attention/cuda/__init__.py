@@ -150,9 +150,9 @@ def apb_forward_gated(qkvg, bias, L, heads: int = 8, d: int = 384):
     O = torch.empty(L, W, device=qkvg.device, dtype=torch.float32)
     og = torch.empty(L, W, device=qkvg.device, dtype=torch.bfloat16)
     LSE = torch.empty(heads, L, device=qkvg.device, dtype=torch.float32)
-    _ext("attn_fwd", _apb_training_defs(heads, d) + (f"APB_KS={_APB_KS['fwd']}",)).attn_fwd_o_og(
-        qkvg, bias, O, og, LSE
-    )
+    _ext(
+        "attn_fwd", _apb_training_defs(heads, d) + (f"APB_KS={_APB_KS['fwd']}",)
+    ).attn_fwd_o_og(qkvg, bias, O, og, LSE)
     return O, og, LSE
 
 

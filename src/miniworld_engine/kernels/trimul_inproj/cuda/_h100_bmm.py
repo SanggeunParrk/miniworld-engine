@@ -20,13 +20,36 @@ def _cublas():
     global _lib
     if _lib is None:
         lib = ctypes.CDLL("libcublas.so.12", mode=ctypes.RTLD_GLOBAL)
-        lib.cublasSetWorkspace_v2.argtypes = [ctypes.c_void_p, ctypes.c_void_p, ctypes.c_size_t]
+        lib.cublasSetWorkspace_v2.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_size_t,
+        ]
         lib.cublasGemmStridedBatchedEx.argtypes = [
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_longlong,
-            ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_longlong,
-            ctypes.c_void_p, ctypes.c_void_p, ctypes.c_int, ctypes.c_int, ctypes.c_longlong,
-            ctypes.c_int, ctypes.c_int, ctypes.c_int]
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_void_p,
+            ctypes.c_void_p,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_longlong,
+            ctypes.c_int,
+            ctypes.c_int,
+            ctypes.c_int,
+        ]
         _lib = lib
     return _lib
 
@@ -45,8 +68,14 @@ def supports(a, b, out):
         _layout(a), _layout(b)
     except ValueError:
         return False
-    return (a.dtype == b.dtype == out.dtype == torch.bfloat16 and a.ndim == b.ndim == out.ndim == 3 and out.is_contiguous()
-            and a.shape[0] == b.shape[0] == out.shape[0] and a.stride(0) > 0 and b.stride(0) > 0)
+    return (
+        a.dtype == b.dtype == out.dtype == torch.bfloat16
+        and a.ndim == b.ndim == out.ndim == 3
+        and out.is_contiguous()
+        and a.shape[0] == b.shape[0] == out.shape[0]
+        and a.stride(0) > 0
+        and b.stride(0) > 0
+    )
 
 
 def bmm_out(a, b, out):
@@ -63,14 +92,29 @@ def bmm_out(a, b, out):
     # row-major C = A B  <=>  column-major C^T (n x m) = B^T (n x k) A^T (k x m)
     status = lib.cublasGemmStridedBatchedEx(
         handle,
-        1 if b_t else 0, 1 if a_t else 0,
-        n, m, k,
+        1 if b_t else 0,
+        1 if a_t else 0,
+        n,
+        m,
+        k,
         ctypes.byref(one),
-        b.data_ptr(), _CUDA_R_16BF, ldb, b.stride(0),
-        a.data_ptr(), _CUDA_R_16BF, lda, a.stride(0),
+        b.data_ptr(),
+        _CUDA_R_16BF,
+        ldb,
+        b.stride(0),
+        a.data_ptr(),
+        _CUDA_R_16BF,
+        lda,
+        a.stride(0),
         ctypes.byref(zero),
-        out.data_ptr(), _CUDA_R_16BF, n, out.stride(0),
-        batch, _COMPUTE_32F, _GEMM_DEFAULT_TENSOR_OP)
+        out.data_ptr(),
+        _CUDA_R_16BF,
+        n,
+        out.stride(0),
+        batch,
+        _COMPUTE_32F,
+        _GEMM_DEFAULT_TENSOR_OP,
+    )
     if status:
         raise RuntimeError("cublasGemmStridedBatchedEx failed: %d" % status)
     return out

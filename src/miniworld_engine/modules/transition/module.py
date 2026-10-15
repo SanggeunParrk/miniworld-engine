@@ -156,7 +156,9 @@ class Transition(nn.Module):
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
 
         w = self.expand_a.weight
-        return fused_generic_sm90a.available(x, w.to(x.dtype), self.squeeze.weight.to(x.dtype))
+        return fused_generic_sm90a.available(
+            x, w.to(x.dtype), self.squeeze.weight.to(x.dtype)
+        )
 
     def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Residual-fused Transition: LN, expand-SwiGLU, squeeze with the residual folded into
@@ -207,9 +209,17 @@ class Transition(nn.Module):
             training = torch.is_grad_enabled() and any(
                 t.requires_grad for t in (x, self.ln_in.weight, pa, pb, ps)
             )
-            if fused_generic_sm90a.prefers_generic(x, training, self.n) and fused_generic_sm90a.available(x, ga, gs):
+            if fused_generic_sm90a.prefers_generic(
+                x, training, self.n
+            ) and fused_generic_sm90a.available(x, ga, gs):
                 return fused_generic_sm90a.transition_generic_sm90a(
-                    x, self.ln_in.weight, self.ln_in.bias, ga, pb.to(x.dtype), gs, self.ln_in.eps
+                    x,
+                    self.ln_in.weight,
+                    self.ln_in.bias,
+                    ga,
+                    pb.to(x.dtype),
+                    gs,
+                    self.ln_in.eps,
                 )
             for kern, entry in (
                 (fused_sm90a, fused_sm90a.transition_fused_sm90a),
@@ -219,7 +229,13 @@ class Transition(nn.Module):
                 if kern is fused_generic_sm90a:
                     if kern.available(x, ga, gs):
                         return entry(
-                            x, self.ln_in.weight, self.ln_in.bias, ga, pb.to(x.dtype), gs, self.ln_in.eps
+                            x,
+                            self.ln_in.weight,
+                            self.ln_in.bias,
+                            ga,
+                            pb.to(x.dtype),
+                            gs,
+                            self.ln_in.eps,
                         )
                     continue
                 if kern.available(x, pa, ps):
@@ -243,13 +259,27 @@ class Transition(nn.Module):
         wb = self.expand_b.weight.to(x.dtype)
         ws = self.squeeze.weight.to(x.dtype)
         if _fused_sm90a_enabled():
-            from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a
+            from miniworld_engine.kernels.transition.cuda import (
+                fused_generic_sm90a,
+                fused_sm90a,
+            )
 
             training = torch.is_grad_enabled() and any(
-                t.requires_grad for t in (x, self.ln_in.weight, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight))
-            if fused_generic_sm90a.prefers_generic(x, training, self.n) and fused_generic_sm90a.available(x, wa, ws):
+                t.requires_grad
+                for t in (
+                    x,
+                    self.ln_in.weight,
+                    self.expand_a.weight,
+                    self.expand_b.weight,
+                    self.squeeze.weight,
+                )
+            )
+            if fused_generic_sm90a.prefers_generic(
+                x, training, self.n
+            ) and fused_generic_sm90a.available(x, wa, ws):
                 return fused_generic_sm90a.transition_generic_sm90a(
-                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
+                )
             if fused_sm90a.available(x, wa, ws):
                 return fused_sm90a.transition_fused_sm90a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
