@@ -65,3 +65,26 @@ def test_sm100a_fake_and_compiled_availability_never_build(monkeypatch, wide):
     x = torch.zeros(128, 256 if wide else 128)
     compiled = torch.compile(forward, backend="eager", fullgraph=True)
     torch.testing.assert_close(compiled(x), x + 1)
+
+
+def test_generic_sm90a_fake_and_compiled_availability_never_build(monkeypatch):
+    """The same two guarantees for the generic sm_90a kernels (``fused_generic_sm90a``, built on first real launch)."""
+    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as backend
+
+    monkeypatch.setattr(backend, "supported", lambda *args: True)
+    monkeypatch.setattr(backend, "_BUILD_FAILED", False)
+
+    def forbidden(*args):
+        raise AssertionError("the generic extension builder was reached from a shape-only context")
+
+    monkeypatch.setattr(backend, "_ext", forbidden)
+    with FakeTensorMode():
+        x = torch.empty(100, 192)
+        assert backend.available(x, x, x)
+
+    def forward(x):
+        return x + (1 if backend.available(x, x, x) else 0)
+
+    x = torch.zeros(100, 192)
+    compiled = torch.compile(forward, backend="eager", fullgraph=True)
+    torch.testing.assert_close(compiled(x), x + 1)

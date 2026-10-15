@@ -68,3 +68,28 @@ def test_native_inference_cli_is_explicit():
     assert args.backend == "native"
     assert args.mode == "eval"
     assert args.config_type == "default"
+
+
+@pytest.mark.parametrize("sms", [114, 132])
+@pytest.mark.parametrize("backward", [False, True])
+def test_transition_n2_grid_has_four_slices_and_roundtrips(sms, backward):
+    """Hidden 2 D (256 rows at D128): four 64-unit slices, ~64 weight-role CTAs = 4 x 16 (measured 255 vs 404 us at 4 x 8)."""
+    grid = transition_candidates(sms, backward=backward, slices=4)
+    assert grid[0] == {"ctas": sms, "dw_repl": 16}
+    assert all(c["ctas"] > 4 * c["dw_repl"] for c in grid)
+    assert len(grid) == len({tuple(sorted(c.items())) for c in grid})
+    op = "transition_bwd_residual_sm90_cuda" if backward else "transition_fwd_residual_sm90_cuda"
+    small, wa, ws = torch.empty(4), torch.empty(256, 128), torch.empty(128, 256)
+    tensors = [small] * 6 + [wa, wa, ws] if backward else [small] * 3 + [wa, wa, ws]
+    assert native.candidates_for(op, native.tensor_key(*tensors, extra=(True, None, sms))) == grid
+
+
+def test_transition_n2_precompile_builds_the_hidden_2d_variant(monkeypatch):
+    from miniworld_engine.kernels.transition.cuda import fused_sm90a
+    calls = []
+    monkeypatch.setattr(fused_sm90a, "_ext", lambda *args: calls.append(args))
+    small, wa, ws = torch.empty(4), torch.empty(256, 128), torch.empty(128, 256)
+    key = native.tensor_key(*([small] * 3 + [wa, wa, ws]), extra=(True, 1e-5, 114))
+    task = native_compile.task_for("transition_fwd_residual_sm90_cuda", {"ctas": 114, "dw_repl": 4}, key)
+    native_compile.compile_task(task)
+    assert calls == [(114, 4, True, 2)]

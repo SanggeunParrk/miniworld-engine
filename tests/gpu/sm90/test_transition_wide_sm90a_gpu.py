@@ -401,3 +401,23 @@ def test_native_required_buckets_pytorch_and_live_graph(
     eager = [fresh, x.grad, *(p.grad for p in module.parameters())]
     assert all(torch.equal(a, b) for a, b in zip(changed, eager, strict=True))
     assert not torch.equal(first[0], changed[0])
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="sm_90a only")
+@pytest.mark.parametrize("rows, d, n", [(16384, 64, 4), (12288, 64, 2), (16384, 128, 4)])
+def test_backward_as_the_first_call_of_a_process(rows, d, n):
+    """The autograd engine runs backward on a thread of its own. A tensor-map encode (a driver call) there needs a current context, and with
+    every allocation served from the caching allocator's pool nothing had made it current: CUDA_ERROR_INVALID_CONTEXT, but only for a first
+    call at 12 288 .. 20 480 rows (a smaller call earlier in the process hid it).  Fresh interpreter, one training step."""
+    import subprocess
+    import sys
+
+    code = (
+        "import torch\n"
+        "from miniworld_engine.modules import Transition\n"
+        f"m = Transition({d}, n={n}, implementation='miniworld').cuda()\n"
+        f"x = torch.randn({rows}, {d}, device='cuda', dtype=torch.bfloat16).requires_grad_()\n"
+        "y = m(x); torch.autograd.grad(y, (x, *m.parameters()), torch.randn_like(y)); torch.cuda.synchronize(); print('OK')\n"
+    )
+    out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=900)
+    assert out.returncode == 0 and "OK" in out.stdout, out.stderr[-600:]

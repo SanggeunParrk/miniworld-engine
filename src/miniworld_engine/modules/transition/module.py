@@ -80,7 +80,8 @@ class Transition(nn.Module):
         # Every backend returns x + transition(x); the residual is folded into the squeeze
         # epilogue and the input-LN backward. No dropout in this module.
         # 'miniworld' (ours, auto) resolves to the TRITON family: the hand-CUDA sm_90 kernels
-        # (fused_sm90a at d=128, fused_wide_sm90a at d=64/256/384/512, n=4, bf16) where they
+        # (fused_sm90a at d=128, fused_wide_sm90a at d=64/256/384/512, n=4 and n=2, bf16, whole 128-row tiles; fused_generic_sm90a
+        # for any other d (multiple of 64), hidden (multiple of 128), ragged rows, and fp32 on TF32) where they
         # apply, else the shape-general Triton residual path. Transition has NO cuequivariance
         # kernel, so an explicit CUEQUIVARIANCE request falls back to the PYTORCH reference
         # (resolve() maps cueq->pytorch for non-trimul ops).
@@ -115,6 +116,9 @@ class Transition(nn.Module):
                 raise ValueError(
                     "H100 MiniWorld Transition requires the native CUDA backend"
                 )
+            if x.dtype is torch.float32 and self._generic_sm90a_serves(x):
+                # fp32 on TF32 tensor cores: the generic sm_90a kernels (the other fast paths are bf16 only)
+                return self._residual_forward(x)
             matrices = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight)
             if (
                 x.dtype != torch.bfloat16
@@ -145,16 +149,27 @@ class Transition(nn.Module):
             and torch.cuda.get_device_capability(x.device) == (9, 0)
         )
 
+    def _generic_sm90a_serves(self, x: torch.Tensor) -> bool:
+        """Whether the generic sm_90a kernels take this activation (fp32 / TF32 included)."""
+        if not _fused_sm90a_enabled():
+            return False
+        from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
+
+        w = self.expand_a.weight
+        return fused_generic_sm90a.available(x, w.to(x.dtype), self.squeeze.weight.to(x.dtype))
+
     def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Residual-fused Transition: LN, expand-SwiGLU, squeeze with the residual folded into
         its epilogue, and the matching backward.
 
         On sm_90 at the AF3 pair width (d=128, n=4, bf16, whole 128-row tiles) this runs the
         fused hand-CUDA kernels -- one launch each way instead of three and two. d = 64, 256, 384
-        and 512 (n = 4) have their own hand-CUDA builds (``fused_wide_sm90a``). sm_100 (B200) and
+        and 512 have their own hand-CUDA builds (``fused_wide_sm90a``), and n = 2 (hidden 2 d) is built for d = 64 / 128 / 256 / 384 / 512.
+        Every other width (multiple of 64), hidden width (multiple of 128), any row count and fp32 (TF32 tensor cores) run the generic
+        sm_90a kernels (``fused_generic_sm90a``). sm_100 (B200) and
         sm_80 (A100) have their own d=128/n=4 builds (``fused_sm100a``, ``fused_sm80``). Every other
         shape, dtype and architecture keeps the Triton path, which is shape-general. The gates are
-        ``fused_sm90a.available`` / ``fused_wide_sm90a.available``; they are the kernels' own
+        ``fused_sm90a.available`` / ``fused_wide_sm90a.available`` / ``fused_generic_sm90a.available``; they are the kernels' own
         requirements, not a policy. The sm_100 entries take the parameters themselves and cast them outside autograd, so an fp32
         master gets unrounded fp32 gradients; the other paths take the casts in autograd.
         """
@@ -182,15 +197,31 @@ class Transition(nn.Module):
 
         if _fused_sm90a_enabled():
             from miniworld_engine.kernels.transition.cuda import (
+                fused_generic_sm90a,
                 fused_sm90a,
                 fused_wide_sm90a,
             )
 
             pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
+            ga, gs = pa.to(x.dtype), ps.to(x.dtype)
+            training = torch.is_grad_enabled() and any(
+                t.requires_grad for t in (x, self.ln_in.weight, pa, pb, ps)
+            )
+            if fused_generic_sm90a.prefers_generic(x, training, self.n) and fused_generic_sm90a.available(x, ga, gs):
+                return fused_generic_sm90a.transition_generic_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, ga, pb.to(x.dtype), gs, self.ln_in.eps
+                )
             for kern, entry in (
                 (fused_sm90a, fused_sm90a.transition_fused_sm90a),
                 (fused_wide_sm90a, fused_wide_sm90a.transition_wide_sm90a),
+                (fused_generic_sm90a, fused_generic_sm90a.transition_generic_sm90a),
             ):
+                if kern is fused_generic_sm90a:
+                    if kern.available(x, ga, gs):
+                        return entry(
+                            x, self.ln_in.weight, self.ln_in.bias, ga, pb.to(x.dtype), gs, self.ln_in.eps
+                        )
+                    continue
                 if kern.available(x, pa, ps):
                     return entry(
                         x,
@@ -212,8 +243,13 @@ class Transition(nn.Module):
         wb = self.expand_b.weight.to(x.dtype)
         ws = self.squeeze.weight.to(x.dtype)
         if _fused_sm90a_enabled():
-            from miniworld_engine.kernels.transition.cuda import fused_sm90a
+            from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_sm90a
 
+            training = torch.is_grad_enabled() and any(
+                t.requires_grad for t in (x, self.ln_in.weight, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight))
+            if fused_generic_sm90a.prefers_generic(x, training, self.n) and fused_generic_sm90a.available(x, wa, ws):
+                return fused_generic_sm90a.transition_generic_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps)
             if fused_sm90a.available(x, wa, ws):
                 return fused_sm90a.transition_fused_sm90a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
@@ -223,6 +259,13 @@ class Transition(nn.Module):
 
             if fused_wide_sm90a.available(x, wa, ws):
                 return fused_wide_sm90a.transition_wide_sm90a(
+                    x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
+                )
+            # everything else sm_90a: any n / width (multiple of 64), ragged rows, fp32 on TF32 (fused_generic_sm90a)
+            from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
+
+            if fused_generic_sm90a.available(x, wa, ws):
+                return fused_generic_sm90a.transition_generic_sm90a(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
                 )
 

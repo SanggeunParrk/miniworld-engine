@@ -1,0 +1,546 @@
+// Torch bindings of the generic sm_90a Transition kernels (tr90.cuh). One extension for every (D, hidden, dtype): the kernels are
+// instantiated per tile width / dtype and picked at run time.
+//
+// Tensor maps are cached on (pointer, dims, box, dtype): 128 opaque bytes valid for one base pointer, so weights encode once and
+// activations re-encode per call (host work only; the maps travel by value in the kernel parameters, which is what CUDA graphs capture).
+#include <torch/extension.h>
+#include <ATen/cuda/CUDAContext.h>
+#include <cuda.h>
+#include <cuda_bf16.h>
+#include <cuda_runtime.h>
+#include <array>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <stdexcept>
+
+#include "tr90.cuh"
+
+using namespace tr90;
+
+namespace {
+
+using EncodeTiled = CUresult (*)(CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*, const cuuint64_t*, const cuuint64_t*,
+                                 const cuuint32_t*, const cuuint32_t*, CUtensorMapInterleave, CUtensorMapSwizzle,
+                                 CUtensorMapL2promotion, CUtensorMapFloatOOBfill);
+
+EncodeTiled encoder() {
+  static EncodeTiled fn = [] {
+    void* p = nullptr;
+    cudaDriverEntryPointQueryResult q{};
+    cudaError_t e = cudaGetDriverEntryPoint("cuTensorMapEncodeTiled", &p, cudaEnableDefault, &q);
+    if (e != cudaSuccess || p == nullptr) throw std::runtime_error("cuTensorMapEncodeTiled unavailable: the driver predates TMA");
+    return reinterpret_cast<EncodeTiled>(p);
+  }();
+  return fn;
+}
+
+void expect(bool ok, const char* what) {
+  if (!ok) throw std::invalid_argument(std::string("transition generic sm90a: ") + what);
+}
+
+bool is_bf16(const torch::Tensor& t) { return t.scalar_type() == torch::kBFloat16; }
+
+// 2-D row-major [rows][cols] tensor, box = [128 B of columns][box_rows], 128 B swizzle (K-major MMA operand slabs).
+const CUtensorMap& slab_map(const torch::Tensor& t, int box_rows) {
+  using Key = std::array<uint64_t, 6>;
+  static std::map<Key, CUtensorMap> cache;
+  static std::mutex lock;
+  const uint64_t rows = t.size(0), cols = t.size(1);
+  const int es = is_bf16(t) ? 2 : 4;
+  const Key key{reinterpret_cast<uint64_t>(t.data_ptr()), rows, cols, (uint64_t)box_rows, (uint64_t)es, (uint64_t)t.stride(0)};
+  std::lock_guard<std::mutex> guard(lock);
+  auto it = cache.find(key);
+  if (it != cache.end()) return it->second;
+  CUtensorMap map{};
+  const cuuint64_t dims[2] = {cols, rows};
+  const cuuint64_t strides[1] = {(cuuint64_t)t.stride(0) * es};
+  const cuuint32_t box[2] = {(cuuint32_t)(128 / es), (cuuint32_t)box_rows};
+  const cuuint32_t elem[2] = {1, 1};
+  // cuTensorMapEncodeTiled is a driver call and needs a current context. The autograd engine runs backward on its own thread, and when the
+  // caching allocator serves every tensor from its pool no runtime call has made the primary context current there: CUDA_ERROR_INVALID_CONTEXT.
+  // (cudaSetDevice binds it; cudaFree(0) would do too but is an unsafe call inside a CUDA-graph capture.)
+  if (cudaSetDevice(t.get_device()) != cudaSuccess) throw std::runtime_error("cudaSetDevice failed before cuTensorMapEncodeTiled");
+  CUresult r = encoder()(&map, is_bf16(t) ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 : CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 2, t.data_ptr(), dims,
+                         strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
+                         CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+  if (r != CUDA_SUCCESS) throw std::runtime_error("cuTensorMapEncodeTiled failed");
+  return cache.emplace(key, map).first->second;
+}
+
+int sm_count() {
+  static std::map<int, int> cache;
+  static std::mutex lock;
+  int dev = 0;
+  cudaGetDevice(&dev);
+  std::lock_guard<std::mutex> guard(lock);
+  auto it = cache.find(dev);
+  if (it != cache.end()) return it->second;
+  int n = 0;
+  cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, dev);
+  return cache.emplace(dev, n).first->second;
+}
+
+bool cluster_on() {
+  static const bool v = [] { const char* e = std::getenv("MINIWORLD_TRANSITION_GENERIC_CLUSTER"); return e && e[0] == '1'; }();
+  return v;
+}
+
+// grid / smem launch of a 384-thread GEMM kernel, as a 2-CTA cluster when `cluster` (the grid is then even).
+template <typename K, typename... Args>
+void launch_gemm_kernel(K kernel, int grid, int smem, bool cluster, Args... args) {
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(grid, 1, 1);
+  cfg.blockDim = dim3(384, 1, 1);
+  cfg.dynamicSmemBytes = smem;
+  cfg.stream = at::cuda::getCurrentCUDAStream();
+  cudaLaunchAttribute attr[2];
+  int n = 0;
+  attr[n].id = cudaLaunchAttributeProgrammaticStreamSerialization;       // the kernel waits (griddepcontrol.wait) before reading
+  attr[n++].val.programmaticStreamSerializationAllowed = 1;
+  if (cluster) {
+    attr[n].id = cudaLaunchAttributeClusterDimension;
+    attr[n].val.clusterDim.x = 2; attr[n].val.clusterDim.y = 1; attr[n].val.clusterDim.z = 1;
+    ++n;
+  }
+  cfg.attrs = attr;
+  cfg.numAttrs = n;
+  cudaError_t e = cudaLaunchKernelEx(&cfg, kernel, args...);
+  if (e != cudaSuccess) throw std::runtime_error(std::string("GEMM kernel launch: ") + cudaGetErrorString(e));
+}
+
+// persistent grid for `units` work units (tile pairs when clustered)
+int gemm_grid(int64_t mtiles, int64_t nt, bool cluster, int minb = 1) {
+  const int64_t sms = (int64_t)sm_count() * minb;
+  if (!cluster) return (int)std::min<int64_t>(mtiles * nt, sms);
+  const int64_t pairs = ((mtiles + 1) / 2) * nt;
+  return (int)(2 * std::min<int64_t>(pairs, sms / 2));
+}
+
+template <typename K>
+void optin(K kernel, int bytes) {
+  cudaError_t e = cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel), cudaFuncAttributeMaxDynamicSharedMemorySize, bytes);
+  if (e != cudaSuccess) throw std::runtime_error(std::string("smem opt-in: ") + cudaGetErrorString(e));
+}
+
+template <typename T> const T* cp(const torch::Tensor& t) { return reinterpret_cast<const T*>(t.data_ptr()); }
+template <typename T> T* mp(torch::Tensor& t) { return reinterpret_cast<T*>(t.data_ptr()); }
+
+void check_act(const torch::Tensor& t, int64_t cols, const char* what) {
+  expect(t.is_cuda() && t.dim() == 2 && t.size(1) == cols && t.stride(1) == 1 && t.stride(0) == cols &&
+             (is_bf16(t) || t.scalar_type() == torch::kFloat32), what);
+}
+
+template <typename T, int BN, int MODE>
+void launch_gemm(const torch::Tensor& A, const torch::Tensor& B, const torch::Tensor& B2, const torch::Tensor* Xt, torch::Tensor* Ot,
+                 int64_t M, int64_t N, int64_t K, const T* X, void* O) {
+  using C = GemmCfg<BN, Tt<T>::ES, MODE>;
+  static const bool ready = (optin(gemm_kernel<T, BN, MODE>, C::SMEM), optin(gemm_kernel<T, BN, MODE, false, 1, true>, C::SMEM), true);
+  (void)ready;
+  const int NW = C::NW;
+  const bool cl = cluster_on() && M > 128;                // a single tile has no pair to share with
+  const int64_t mtiles = (M + BM - 1) / BM, nt = N / NW;
+  const int grid = gemm_grid(mtiles, nt, cl);
+  const torch::Tensor& bt2 = MODE == MODE_SWIGLU ? B2 : B;
+  const CUtensorMap& mx = (C::STAGED && Xt) ? slab_map(*Xt, 64) : slab_map(A, BM);
+  const CUtensorMap& mo = (C::STAGED && Ot) ? slab_map(*Ot, 64) : slab_map(A, BM);
+  const int brows = MODE == MODE_SWIGLU ? BN / 2 : (cl ? BN / 2 : BN);      // clustered K-major B: each CTA loads half the rows
+  const CUtensorMap mb = slab_map(B, brows), mb2 = slab_map(bt2, brows), mA = slab_map(A, BM);
+  if (cl) launch_gemm_kernel(gemm_kernel<T, BN, MODE, false, 1, true>, grid, C::SMEM, true, mA, mb, mb2, mx, mo, mo, (int)M, (int)N, (int)K, X, O, LnArgs{});
+  else launch_gemm_kernel(gemm_kernel<T, BN, MODE>, grid, C::SMEM, false, mA, mb, mb2, mx, mo, mo, (int)M, (int)N, (int)K, X, O, LnArgs{});
+}
+
+template <typename T, int MODE>
+void gemm_bn(int bn, const torch::Tensor& A, const torch::Tensor& B, const torch::Tensor& B2, const torch::Tensor* Xt,
+             torch::Tensor* Ot, int64_t M, int64_t N, int64_t K, const T* X, void* O) {
+  switch (bn) {
+    case 64: launch_gemm<T, 64, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
+    case 128: launch_gemm<T, 128, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
+    case 192: launch_gemm<T, 192, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
+    case 256: launch_gemm<T, 256, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
+    default: throw std::invalid_argument("transition generic sm90a: unsupported tile width");
+  }
+}
+
+// Persistent grid: a tile width w costs ceil(tiles / SMs) waves of (w columns of MMA work + a fixed per-tile overhead of 32 columns);
+// pick the width with the least total.  (The widest tile that fills the SMs left 144 tiles on 132 SMs = two waves at M = 3072, D = 768.)
+// `cols` = MMA columns per output column of the tile (2 for SwiGLU: a and b).  Ties go to the wider tile.
+int pick_width(int64_t M, int64_t N, std::initializer_list<int> widths, int cols = 1) {
+  const int64_t mtiles = (M + BM - 1) / BM;
+  int best = 0;
+  int64_t best_cost = 0;
+  for (int w : widths) {
+    if (N % w) continue;
+    const int64_t tiles = mtiles * (N / w), waves = (tiles + sm_count() - 1) / sm_count();
+    const int64_t cost = waves * (w * cols + 32);
+    if (!best || cost < best_cost) { best = w; best_cost = cost; }
+  }
+  if (!best) throw std::invalid_argument("transition generic sm90a: width must be a multiple of 64");
+  return best;
+}
+int pick_bn(int64_t M, int64_t N) { return pick_width(M, N, {256, 192, 128, 64}); }
+bool two_cta() { static const bool v = [] { const char* e = std::getenv("MINIWORLD_TRANSITION_GENERIC_2CTA"); return e && e[0] == '1'; }(); return v; }
+
+template <typename T, int PER>
+void run_ln_fwd(const torch::Tensor& x, const torch::Tensor& g, const torch::Tensor& b, torch::Tensor& xn, torch::Tensor& rstd,
+                torch::Tensor& c1, double eps, bool save) {
+  const int64_t M = x.size(0), D = x.size(1);
+  ln_fwd_kernel<T, PER><<<(M + 7) / 8, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      cp<T>(x), g.data_ptr<float>(), b.data_ptr<float>(), mp<T>(xn), rstd.data_ptr<float>(), c1.data_ptr<float>(), (int)M, (int)D,
+      (float)eps, save ? 1 : 0);
+}
+
+template <typename T, int PER>
+void run_ln_bwd(const torch::Tensor& dxn, const torch::Tensor& x, const torch::Tensor& dy, const torch::Tensor& rstd,
+                const torch::Tensor& c1, const torch::Tensor& g, torch::Tensor& dx, torch::Tensor& pdg, torch::Tensor& pdb, int grid) {
+  ln_bwd_kernel<T, PER><<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      cp<T>(dxn), cp<T>(x), cp<T>(dy), rstd.data_ptr<float>(), c1.data_ptr<float>(), g.data_ptr<float>(), mp<T>(dx),
+      pdg.data_ptr<float>(), pdb.data_ptr<float>(), (int)x.size(0), (int)x.size(1));
+}
+
+#define PER_SWITCH(PER_EXPR, FN, ...)                                    \
+  switch (PER_EXPR) {                                                    \
+    case 2: FN<T, 2>(__VA_ARGS__); break;                              \
+    case 4: FN<T, 4>(__VA_ARGS__); break;                              \
+    case 6: FN<T, 6>(__VA_ARGS__); break;                              \
+    case 8: FN<T, 8>(__VA_ARGS__); break;                              \
+    case 10: FN<T, 10>(__VA_ARGS__); break;                              \
+    case 12: FN<T, 12>(__VA_ARGS__); break;                              \
+    case 14: FN<T, 14>(__VA_ARGS__); break;                              \
+    case 16: FN<T, 16>(__VA_ARGS__); break;                              \
+    case 18: FN<T, 18>(__VA_ARGS__); break;                              \
+    case 20: FN<T, 20>(__VA_ARGS__); break;                              \
+    case 22: FN<T, 22>(__VA_ARGS__); break;                              \
+    case 24: FN<T, 24>(__VA_ARGS__); break;                              \
+    case 26: FN<T, 26>(__VA_ARGS__); break;                              \
+    case 28: FN<T, 28>(__VA_ARGS__); break;                              \
+    case 30: FN<T, 30>(__VA_ARGS__); break;                              \
+    case 32: FN<T, 32>(__VA_ARGS__); break;                              \
+    default: throw std::invalid_argument("transition generic sm90a: unsupported width for the row kernels"); \
+  }
+
+template <typename T>
+void ln_fwd_t(const torch::Tensor& x, const torch::Tensor& g, const torch::Tensor& b, torch::Tensor& xn, torch::Tensor& rstd,
+              torch::Tensor& c1, double eps, bool save) {
+  PER_SWITCH((int)(x.size(1) / 32), run_ln_fwd, x, g, b, xn, rstd, c1, eps, save);
+}
+template <typename T>
+void ln_bwd_t(const torch::Tensor& dxn, const torch::Tensor& x, const torch::Tensor& dy, const torch::Tensor& rstd,
+              const torch::Tensor& c1, const torch::Tensor& g, torch::Tensor& dx, torch::Tensor& pdg, torch::Tensor& pdb, int grid) {
+  PER_SWITCH((int)(x.size(1) / 32), run_ln_bwd, dxn, x, dy, rstd, c1, g, dx, pdg, pdb, grid);
+}
+
+template <typename T>
+void gate_t(const torch::Tensor& xn, const torch::Tensor& dy, const torch::Tensor& wa, const torch::Tensor& wb, const torch::Tensor& wst,
+            torch::Tensor& h, torch::Tensor& dab) {
+  using C = GateCfg<T>;
+  static const bool ready = (optin(gate_kernel<T>, C::SMEM), true);
+  (void)ready;
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  const int64_t tiles = ((M + BM - 1) / BM) * (HID / 64);
+  const int grid = (int)std::min<int64_t>(tiles, sm_count());
+  gate_kernel<T><<<grid, 384, C::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      slab_map(xn, BM), slab_map(dy, BM), slab_map(wa, 64), slab_map(wb, 64), slab_map(wst, 64), slab_map(h, 64), slab_map(dab, 64), (int)M, (int)D, (int)HID, mp<T>(h), mp<T>(dab));
+}
+
+// bf16 saved-a/b path.  swiglu_save: h [M, HID] and ab [M, 2 HID] (a | b); gate_ab: dh = dy Ws with the SwiGLU backward in the
+// epilogue from the saved ab -> h, dab.
+template <int BN, int MINB = 1>
+void swiglu_save_bn(const torch::Tensor& xn, const torch::Tensor& wa, const torch::Tensor& wb, torch::Tensor& h, torch::Tensor& ab) {
+  using C = GemmCfg<BN, 2, MODE_SWIGLU_SAVE, smem_limit(MINB)>;
+  static const bool ready = (optin(gemm_kernel<__nv_bfloat16, BN, MODE_SWIGLU_SAVE, false, MINB>, C::SMEM),
+                             optin(gemm_kernel<__nv_bfloat16, BN, MODE_SWIGLU_SAVE, false, MINB, true>, C::SMEM), true);
+  (void)ready;
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  const bool cl = cluster_on() && MINB == 1 && M > 128;
+  const int grid = gemm_grid((M + BM - 1) / BM, HID / C::NW, cl, MINB);
+  if (cl) launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_SWIGLU_SAVE, false, MINB, true>, grid, C::SMEM, true,
+      slab_map(xn, BM), slab_map(wa, BN / 2), slab_map(wb, BN / 2), slab_map(h, 64), slab_map(h, 64), slab_map(ab, 64), (int)M, (int)HID,
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+  else launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_SWIGLU_SAVE, false, MINB>, grid, C::SMEM, false,
+      slab_map(xn, BM), slab_map(wa, BN / 2), slab_map(wb, BN / 2), slab_map(h, 64), slab_map(h, 64), slab_map(ab, 64), (int)M, (int)HID,
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+}
+
+template <int BN, int MINB = 1>
+void gate_ab_bn(const torch::Tensor& dy, const torch::Tensor& ws, const torch::Tensor& ab, torch::Tensor& dab) {
+  using C = GemmCfg<BN, 2, MODE_GATE, smem_limit(MINB)>;
+  static const bool ready = (optin(gemm_kernel<__nv_bfloat16, BN, MODE_GATE, true, MINB>, C::SMEM),
+                             optin(gemm_kernel<__nv_bfloat16, BN, MODE_GATE, true, MINB, true>, C::SMEM), true);
+  (void)ready;
+  const int64_t M = dy.size(0), D = dy.size(1), HID = ws.size(1);
+  const bool cl = cluster_on() && MINB == 1 && M > 128;
+  const int grid = gemm_grid((M + BM - 1) / BM, HID / C::NW, cl, MINB);
+  if (cl) launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_GATE, true, MINB, true>, grid, C::SMEM, true,
+      slab_map(dy, BM), slab_map(ws, 64), slab_map(ws, 64), slab_map(ab, 64), slab_map(dab, 64), slab_map(dab, 64), (int)M, (int)HID,
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+  else launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_GATE, true, MINB>, grid, C::SMEM, false,
+      slab_map(dy, BM), slab_map(ws, 64), slab_map(ws, 64), slab_map(ab, 64), slab_map(dab, 64), slab_map(dab, 64), (int)M, (int)HID,
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+}
+
+template <int BN>
+void dxn_bt_bn(const torch::Tensor& dab, const torch::Tensor& wa, const torch::Tensor& wb, torch::Tensor& out) {
+  using C = GemmCfg<BN, 2, MODE_OUT>;
+  static const bool ready = (optin(gemm_kernel<__nv_bfloat16, BN, MODE_OUT, true>, C::SMEM),
+                             optin(gemm_kernel<__nv_bfloat16, BN, MODE_OUT, true, 1, true>, C::SMEM), true);
+  (void)ready;
+  const int64_t M = dab.size(0), K = dab.size(1), D = wa.size(1);
+  const bool cl = cluster_on() && M > 128;
+  const int grid = gemm_grid((M + BM - 1) / BM, D / C::NW, cl);
+  if (cl) launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_OUT, true, 1, true>, grid, C::SMEM, true,
+      slab_map(dab, BM), slab_map(wa, 64), slab_map(wb, 64), slab_map(out, 64), slab_map(out, 64), slab_map(out, 64), (int)M, (int)D,
+      (int)K, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+  else launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_OUT, true>, grid, C::SMEM, false,
+      slab_map(dab, BM), slab_map(wa, 64), slab_map(wb, 64), slab_map(out, 64), slab_map(out, 64), slab_map(out, 64), (int)M, (int)D,
+      (int)K, (const __nv_bfloat16*)nullptr, (void*)nullptr, LnArgs{});
+}
+
+// LayerNorm-fused expand: h = silu(a) b with xn = LN(x) formed in shared memory (bf16, D = 64 DD <= 512); MODE_SWIGLU_SAVE also stores
+// [a | b].  One build per (DD, mode); the tile is BN = 128 (64 hidden units).
+template <int DD, int MODE>
+void swiglu_ln_t(const torch::Tensor& x, const torch::Tensor& gamma, const torch::Tensor& beta, double eps, const torch::Tensor& wa,
+                 const torch::Tensor& wb, torch::Tensor& h, torch::Tensor& ab, torch::Tensor& xn, torch::Tensor& rstd, torch::Tensor& c1,
+                 bool save) {
+  constexpr int BN = 128;
+  using C = GemmCfg<BN, 2, MODE, SMEM_LIMIT, DD * BM * 128>;
+  static const bool ready = (optin(gemm_kernel<__nv_bfloat16, BN, MODE, false, 1, false, DD>, C::SMEM), true);
+  (void)ready;
+  const int64_t M = x.size(0), HID = wa.size(0);
+  const int64_t units = ((M + BM - 1) / BM) * (HID / C::NW);
+  const int grid = (int)std::min<int64_t>(units, sm_count());
+  LnArgs ln{gamma.data_ptr<float>(), beta.data_ptr<float>(), save ? reinterpret_cast<__nv_bfloat16*>(xn.data_ptr()) : nullptr,
+            save ? rstd.data_ptr<float>() : nullptr, save ? c1.data_ptr<float>() : nullptr, (float)eps, save ? 1 : 0};
+  launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE, false, 1, false, DD>, grid, C::SMEM, false,
+      slab_map(x, BM), slab_map(wa, BN / 2), slab_map(wb, BN / 2), slab_map(h, 64), slab_map(h, 64), slab_map(MODE == MODE_SWIGLU_SAVE ? ab : h, 64),
+      (int)M, (int)HID, (int)(DD * 64), (const __nv_bfloat16*)nullptr, (void*)nullptr, ln);
+}
+
+}  // namespace
+
+// x [M, D]; gamma / beta fp32 [D]. Returns (xn, rstd, c1); rstd / c1 are 1-element placeholders unless save.
+std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, double eps, bool save) {
+  const int64_t M = x.size(0), D = x.size(1);
+  check_act(x, D, "x must be contiguous bf16 / fp32 [M, D]");
+  expect(D % 64 == 0 && D <= 1024, "D must be a multiple of 64, at most 1024");
+  expect(gamma.scalar_type() == torch::kFloat32 && beta.scalar_type() == torch::kFloat32 && gamma.numel() == D && beta.numel() == D,
+         "gamma / beta must be fp32 [D]");
+  auto xn = torch::empty_like(x);
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto rstd = torch::empty({save ? M : 1}, f32), c1 = torch::empty({save ? M : 1}, f32);
+  if (M > 0) {
+    if (is_bf16(x)) ln_fwd_t<__nv_bfloat16>(x, gamma, beta, xn, rstd, c1, eps, save);
+    else ln_fwd_t<float>(x, gamma, beta, xn, rstd, c1, eps, save);
+  }
+  return {xn, rstd, c1};
+}
+
+// h = silu(xn Wa^T) * (xn Wb^T); xn [M, D], wa / wb [HID, D]. HID must be a multiple of 128.
+torch::Tensor swiglu(torch::Tensor xn, torch::Tensor wa, torch::Tensor wb) {
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  check_act(xn, D, "xn"); check_act(wa, D, "wa"); check_act(wb, D, "wb");
+  expect(wa.size(0) == wb.size(0) && HID % 128 == 0 && D % 64 == 0, "hidden width must be a multiple of 128");
+  expect(xn.scalar_type() == wa.scalar_type() && xn.scalar_type() == wb.scalar_type(), "dtype mismatch");
+  auto h = torch::empty({M, HID}, xn.options());
+  if (M == 0) return h;
+  const int bn = 2 * pick_width(M, HID, {128, 64}, 2);                 // hidden units per tile = bn / 2
+  if (is_bf16(xn)) gemm_bn<__nv_bfloat16, MODE_SWIGLU>(bn, xn, wa, wb, nullptr, &h, M, HID, D, nullptr, h.data_ptr());
+  else gemm_bn<float, MODE_SWIGLU>(bn, xn, wa, wb, nullptr, &h, M, HID, D, nullptr, h.data_ptr());
+  return h;
+}
+
+// bf16: h = silu(a) b as `swiglu`, plus ab [M, 2 HID] = [a | b] saved for `gate_ab`.
+std::vector<torch::Tensor> swiglu_save(torch::Tensor xn, torch::Tensor wa, torch::Tensor wb) {
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  check_act(xn, D, "xn"); check_act(wa, D, "wa"); check_act(wb, D, "wb");
+  expect(is_bf16(xn) && is_bf16(wa) && is_bf16(wb), "saved a / b path is bf16 only");
+  expect(wa.size(0) == wb.size(0) && HID % 128 == 0 && D % 64 == 0, "hidden width must be a multiple of 128");
+  auto h = torch::empty({M, HID}, xn.options());
+  auto ab = torch::empty({M, 2 * HID}, xn.options());
+  if (M == 0) return {h, ab};
+  const int bn = 2 * pick_width(M, HID, {128, 64}, 2);
+  if (bn == 256) swiglu_save_bn<256>(xn, wa, wb, h, ab);          // (the n128 accumulator tile needs > 80 registers: no 2-CTA variant)
+  else swiglu_save_bn<128>(xn, wa, wb, h, ab);
+  return {h, ab};
+}
+
+// bf16 backward gate from the saved a | b: returns dab [M, 2 HID] (dA | dB).  ws [D, HID] is read as stored (MN-major operand).
+torch::Tensor gate_ab(torch::Tensor dy, torch::Tensor ws, torch::Tensor ab) {
+  const int64_t M = dy.size(0), D = dy.size(1), HID = ws.size(1);
+  check_act(dy, D, "dy"); check_act(ws, HID, "ws"); check_act(ab, 2 * HID, "ab");
+  expect(is_bf16(dy) && is_bf16(ws) && is_bf16(ab) && ab.size(0) == M && ws.size(0) == D && HID % 128 == 0 && D % 64 == 0, "shapes / dtype");
+  auto dab = torch::empty({M, 2 * HID}, dy.options());
+  if (M == 0) return dab;
+  const int bn = pick_width(M, HID, {128, 64});
+  if (two_cta() && M > 4096) gate_ab_bn<64, 2>(dy, ws, ab, dab);
+  else if (bn == 128) gate_ab_bn<128>(dy, ws, ab, dab);
+  else gate_ab_bn<64>(dy, ws, ab, dab);
+  return dab;
+}
+
+// bf16 LayerNorm-fused expand, D in {128, 256, 384, 512}: returns (h [M, HID], ab [M, 2 HID] or a placeholder, xn [M, D] or a
+// placeholder, rstd, c1) -- the last three only when `save` (training), where ab is also saved.
+std::vector<torch::Tensor> swiglu_ln(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, double eps, torch::Tensor wa,
+                                     torch::Tensor wb, bool save) {
+  const int64_t M = x.size(0), D = x.size(1), HID = wa.size(0);
+  check_act(x, D, "x"); check_act(wa, D, "wa"); check_act(wb, D, "wb");
+  expect(is_bf16(x) && is_bf16(wa) && is_bf16(wb), "bf16 only");
+  expect(gamma.scalar_type() == torch::kFloat32 && beta.scalar_type() == torch::kFloat32 && gamma.numel() == D && beta.numel() == D,
+         "gamma / beta must be fp32 [D]");
+  expect(D % 64 == 0 && D >= 128 && D <= 512 && HID % 128 == 0 && wb.size(0) == HID, "shapes");
+  auto h = torch::empty({M, HID}, x.options());
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto ab = save ? torch::empty({M, 2 * HID}, x.options()) : torch::empty({1, 1}, x.options());
+  auto xn = save ? torch::empty_like(x) : torch::empty({1, 1}, x.options());
+  auto rstd = torch::empty({save ? M : 1}, f32), c1 = torch::empty({save ? M : 1}, f32);
+  if (M == 0) return {h, ab, xn, rstd, c1};
+#define LN_CASE(DDV)                                                                                                           \
+  case DDV * 64:                                                                                                                \
+    if (save) swiglu_ln_t<DDV, MODE_SWIGLU_SAVE>(x, gamma, beta, eps, wa, wb, h, ab, xn, rstd, c1, true);                       \
+    else swiglu_ln_t<DDV, MODE_SWIGLU>(x, gamma, beta, eps, wa, wb, h, ab, xn, rstd, c1, false);                                \
+    break;
+  switch (D) {
+    LN_CASE(2) LN_CASE(4) LN_CASE(6) LN_CASE(8)
+    default: throw std::invalid_argument("transition generic sm90a: LayerNorm-fused expand supports D = 128 / 256 / 384 / 512");
+  }
+#undef LN_CASE
+  return {h, ab, xn, rstd, c1};
+}
+
+// out = h Ws^T + x; h [M, HID], ws [D, HID], x [M, D].
+torch::Tensor squeeze_res(torch::Tensor h, torch::Tensor ws, torch::Tensor x) {
+  const int64_t M = h.size(0), HID = h.size(1), D = ws.size(0);
+  check_act(h, HID, "h"); check_act(ws, HID, "ws"); check_act(x, D, "x");
+  expect(x.size(0) == M && HID % 64 == 0, "shapes");
+  expect(h.scalar_type() == ws.scalar_type() && h.scalar_type() == x.scalar_type(), "dtype mismatch");
+  auto out = torch::empty_like(x);
+  if (M == 0) return out;
+  const int bn = pick_bn(M, D);
+  if (is_bf16(h)) gemm_bn<__nv_bfloat16, MODE_RES>(bn, h, ws, ws, &x, &out, M, D, HID, cp<__nv_bfloat16>(x), out.data_ptr());
+  else gemm_bn<float, MODE_RES>(bn, h, ws, ws, &x, &out, M, D, HID, cp<float>(x), out.data_ptr());
+  return out;
+}
+
+// dxn = dab @ Wab (activation dtype), with wabt = [Wa;Wb]^T [D, 2 HID]; dab [M, 2 HID].
+torch::Tensor dxn_gemm(torch::Tensor dab, torch::Tensor wabt) {
+  const int64_t M = dab.size(0), K = dab.size(1), D = wabt.size(0);
+  check_act(dab, K, "dab"); check_act(wabt, K, "wabt");
+  expect(dab.scalar_type() == wabt.scalar_type() && K % 64 == 0, "shapes / dtype");
+  auto out = torch::empty({M, D}, dab.options());
+  if (M == 0) return out;
+  const int bn = pick_bn(M, D);
+  if (is_bf16(dab)) gemm_bn<__nv_bfloat16, MODE_OUT>(bn, dab, wabt, wabt, nullptr, &out, M, D, K, nullptr, out.data_ptr());
+  else gemm_bn<float, MODE_OUT>(bn, dab, wabt, wabt, nullptr, nullptr, M, D, K, nullptr, out.data_ptr());
+  return out;
+}
+
+// bf16 SwiGLU backward from a cuBLAS dh [M, HID] and the saved ab [M, 2 HID]: returns dab [M, 2 HID] (dA | dB).
+torch::Tensor swiglu_bwd(torch::Tensor dh, torch::Tensor ab) {
+  const int64_t M = dh.size(0), HID = dh.size(1);
+  check_act(dh, HID, "dh"); check_act(ab, 2 * HID, "ab");
+  expect(is_bf16(dh) && is_bf16(ab) && ab.size(0) == M && HID % 8 == 0, "shapes / dtype");
+  auto dab = torch::empty({M, 2 * HID}, dh.options());
+  if (M == 0) return dab;
+  const long long nvec = (long long)M * (HID / 8);
+  const int grid = (int)std::min<long long>((nvec + 255) / 256, 8LL * sm_count());
+  swiglu_bwd_kernel<<<grid, 256, 0, at::cuda::getCurrentCUDAStream()>>>(cp<__nv_bfloat16>(dh), cp<__nv_bfloat16>(ab), mp<__nv_bfloat16>(dab), nvec,
+                                                                     (int)HID);
+  return dab;
+}
+
+// bf16 dxn = dab [Wa; Wb] with the weights read as stored (MN-major operand); dab [M, 2 HID], wa / wb [HID, D].
+torch::Tensor dxn_gemm_t(torch::Tensor dab, torch::Tensor wa, torch::Tensor wb) {
+  const int64_t M = dab.size(0), D = wa.size(1), HID = wa.size(0);
+  check_act(dab, 2 * HID, "dab"); check_act(wa, D, "wa"); check_act(wb, D, "wb");
+  expect(is_bf16(dab) && is_bf16(wa) && is_bf16(wb) && wb.size(0) == HID && D % 64 == 0 && HID % 64 == 0, "shapes / dtype");
+  auto out = torch::empty({M, D}, dab.options());
+  if (M == 0) return out;
+  switch (pick_bn(M, D)) {
+    case 64: dxn_bt_bn<64>(dab, wa, wb, out); break;
+    case 128: dxn_bt_bn<128>(dab, wa, wb, out); break;
+    case 192: dxn_bt_bn<192>(dab, wa, wb, out); break;
+    default: dxn_bt_bn<256>(dab, wa, wb, out); break;
+  }
+  return out;
+}
+
+// Backward gate: returns (h [M, HID], dab [M, 2 HID]).  wst = Ws^T [HID, D].
+std::vector<torch::Tensor> gate(torch::Tensor xn, torch::Tensor dy, torch::Tensor wa, torch::Tensor wb, torch::Tensor wst) {
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  check_act(xn, D, "xn"); check_act(dy, D, "dy"); check_act(wa, D, "wa"); check_act(wb, D, "wb"); check_act(wst, D, "wst");
+  expect(dy.size(0) == M && wst.size(0) == HID && HID % 64 == 0 && D % 64 == 0, "shapes");
+  auto h = torch::empty({M, HID}, xn.options());
+  auto dab = torch::empty({M, 2 * HID}, xn.options());
+  if (M == 0) return {h, dab};
+  if (is_bf16(xn)) gate_t<__nv_bfloat16>(xn, dy, wa, wb, wst, h, dab);
+  else gate_t<float>(xn, dy, wa, wb, wst, h, dab);
+  return {h, dab};
+}
+
+// LayerNorm backward + residual: returns (dx, dgamma, dbeta).
+std::vector<torch::Tensor> ln_bwd(torch::Tensor dxn, torch::Tensor x, torch::Tensor dy, torch::Tensor rstd, torch::Tensor c1,
+                                  torch::Tensor gamma) {
+  const int64_t M = x.size(0), D = x.size(1);
+  check_act(x, D, "x"); check_act(dy, D, "dy");
+  expect(dxn.scalar_type() == x.scalar_type() && dxn.is_contiguous() && dxn.size(0) == M && dxn.size(1) == D, "dxn must be [M, D] in the activation dtype");
+  expect(rstd.numel() == M && c1.numel() == M && gamma.numel() == D && D % 64 == 0 && D <= 1024, "shapes");
+  auto dx = torch::empty_like(x);
+  static const int mult = [] { const char* e = std::getenv("MINIWORLD_LNBWD_MULT"); return e ? std::atoi(e) : 2; }();
+  const int grid = (int)std::max<int64_t>(1, std::min<int64_t>((int64_t)mult * sm_count(), (M + 7) / 8));
+  auto f32 = x.options().dtype(torch::kFloat32);
+  auto pdg = torch::empty({grid, D}, f32), pdb = torch::empty({grid, D}, f32);
+  if (is_bf16(x)) ln_bwd_t<__nv_bfloat16>(dxn, x, dy, rstd, c1, gamma, dx, pdg, pdb, grid);
+  else ln_bwd_t<float>(dxn, x, dy, rstd, c1, gamma, dx, pdg, pdb, grid);
+  auto dg = torch::empty({D}, f32), db = torch::empty({D}, f32);
+  {
+    cudaLaunchConfig_t cfg{};
+    cfg.gridDim = dim3((D + 31) / 32, 1, 1);
+    cfg.blockDim = dim3(1024, 1, 1);
+    cfg.stream = at::cuda::getCurrentCUDAStream();
+    cudaLaunchAttribute attr[1];
+    attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = attr;
+    cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, reduce_cols_kernel, (const float*)pdg.data_ptr<float>(), (const float*)pdb.data_ptr<float>(),
+                       dg.data_ptr<float>(), db.data_ptr<float>(), grid, (int)D);
+  }
+  return {dx, dg, db};
+}
+
+// Weight prep in one launch: returns (wst [HID, D], wabt [D, 2 HID], wa_r, wb_r, ws_r) -- bit 0..5 of `mask` selects Ws^T, the Wa^T / Wb^T halves of
+// [Wa;Wb]^T, and copies of Wa / Wb / Ws; with `round` (fp32 activations) every output is rounded to nearest TF32. Outputs not selected are
+// 1-element placeholders.
+std::vector<torch::Tensor> prep(torch::Tensor wa, torch::Tensor wb, torch::Tensor ws, int64_t mask, bool round) {
+  const int64_t HID = wa.size(0), D = wa.size(1);
+  check_act(wa, D, "wa"); check_act(wb, D, "wb"); check_act(ws, HID, "ws");
+  expect(wb.size(0) == HID && ws.size(0) == D && D % 32 == 0 && HID % 32 == 0, "weight shapes");
+  expect(wa.scalar_type() == wb.scalar_type() && wa.scalar_type() == ws.scalar_type(), "dtype mismatch");
+  auto slot = [&](int bit, std::initializer_list<int64_t> shape) {
+    return (mask >> bit) & 1 ? torch::empty(shape, wa.options()) : torch::empty({1, 1}, wa.options());
+  };
+  auto wst = slot(0, {HID, D}), wabt = ((mask & 6) ? torch::empty({D, 2 * HID}, wa.options()) : torch::empty({1, 1}, wa.options()));
+  auto war = slot(3, {HID, D}), wbr = slot(4, {HID, D}), wsr = slot(5, {D, HID});
+  const unsigned tiles = (unsigned)(std::max(HID, D) / 32);
+  const dim3 grid(tiles, tiles, 6), block(32, 8);
+  auto stream = at::cuda::getCurrentCUDAStream();
+  const int r = round ? 1 : 0, mk = (int)mask;
+  if (is_bf16(wa)) prep_bwd_kernel<__nv_bfloat16><<<grid, block, 0, stream>>>(cp<__nv_bfloat16>(wa), cp<__nv_bfloat16>(wb), cp<__nv_bfloat16>(ws), mp<__nv_bfloat16>(wst), mp<__nv_bfloat16>(wabt), mp<__nv_bfloat16>(war), mp<__nv_bfloat16>(wbr), mp<__nv_bfloat16>(wsr), (int)D, (int)HID, mk, r);
+  else prep_bwd_kernel<float><<<grid, block, 0, stream>>>(cp<float>(wa), cp<float>(wb), cp<float>(ws), mp<float>(wst), mp<float>(wabt), mp<float>(war), mp<float>(wbr), mp<float>(wsr), (int)D, (int)HID, mk, r);
+  return {wst, wabt, war, wbr, wsr};
+}
+
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("ln_fwd", &ln_fwd);
+  m.def("swiglu", &swiglu);
+  m.def("squeeze_res", &squeeze_res);
+  m.def("dxn_gemm", &dxn_gemm);
+  m.def("gate", &gate);
+  m.def("swiglu_save", &swiglu_save);
+  m.def("swiglu_ln", &swiglu_ln);
+  m.def("gate_ab", &gate_ab);
+  m.def("dxn_gemm_t", &dxn_gemm_t);
+  m.def("swiglu_bwd", &swiglu_bwd);
+  m.def("ln_bwd", &ln_bwd);
+  m.def("prep", &prep);
+}

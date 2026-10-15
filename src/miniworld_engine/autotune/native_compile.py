@@ -43,7 +43,10 @@ def compile_task(task):
     op, c, ts = task["op"], task["config"], task["tensors"]
     if op in ("transition_fwd_residual_sm90_cuda", "transition_bwd_residual_sm90_cuda"):
         from miniworld_engine.kernels.transition.cuda.fused_sm90a import _ext
-        _ext(c["ctas"], c["dw_repl"], bool(task["extra"][0]))
+        index = 6 if "bwd" in op else 3                  # hidden width = rows of the expand weight
+        hmult = ts[index][0][0] // 128 if len(ts) > index else 4
+        args = (c["ctas"], c["dw_repl"], bool(task["extra"][0]))
+        _ext(*args) if hmult == 4 else _ext(*args, hmult)
         return
     if op.endswith("sm90_cuda"):
         from miniworld_engine.kernels.transition.cuda import _ext

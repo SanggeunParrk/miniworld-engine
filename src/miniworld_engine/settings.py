@@ -378,6 +378,21 @@ class Settings:
     transition_wide_sm90a: bool = True
     #: Formerly ``MINIWORLD_TRANSITION_WIDE_SAVE_H`` (default off).
     transition_wide_save_h: bool = False
+    #: The generic sm_90a Transition kernels (any width multiple of 64, any hidden multiple of 128, ragged rows, fp32 on TF32);
+    #: off leaves only the tuned fused / wide builds. Formerly ``MINIWORLD_TRANSITION_GENERIC_SM90A`` (default on).
+    transition_generic_sm90a: bool = True
+    #: Prefer the generic kernels where they beat a tuned build at small row counts. Formerly ``MINIWORLD_TRANSITION_GENERIC_SMALL``.
+    transition_generic_small: bool = True
+    #: Training bf16 forwards of the generic path keep a | b for the backward. Formerly ``MINIWORLD_TRANSITION_GENERIC_SAVE_AB``.
+    transition_generic_save_ab: bool = True
+    #: Force the cuBLAS parts of the generic bf16 path: comma separated ``f3`` / ``gate`` / ``dxn``, ``all`` or ``none``; None keeps
+    #: the measured row-count plan. Formerly ``MINIWORLD_TRANSITION_GENERIC_CUBLAS``.
+    transition_generic_cublas: str | None = None
+    #: Fuse the input LN into the expand GEMM (measured 5-25 % slower: default off). Formerly ``MINIWORLD_TRANSITION_GENERIC_LNF``.
+    transition_generic_lnf: bool = False
+    #: Overlap the weight gradients with the dxn -> ln_bwd chain at the row counts where it pays. Formerly
+    #: ``MINIWORLD_TRANSITION_GENERIC_DW_ASIDE`` (default on).
+    transition_generic_dw_aside: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU`` (default off).
     bias_only_dit_tf32_glu: bool = False
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD`` (default on).

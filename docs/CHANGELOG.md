@@ -304,6 +304,22 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   autograd functions and return the kernels fp32 weight-gradient accumulators unrounded, in each parameters dtype; the SWA DiT and
   token pair init no longer refuse fp32 weights over bf16 activations (token pair init also takes bf16 `left` / `right`). Tests:
   `tests/gpu/sm100/test_b200_fp32_master_gpu.py`; page: `docs/gpus/b200/b200.md`.
+- H100 (sm_90a) Transition D128 inference forward, hidden 2 D / 4 D: the LayerNorm is formed in the wgmma A-fragment layout and stays in registers as the
+  first GEMM's operand (the hidden-chunk loop is unrolled: in the rolled loop ptxas reused the operand registers and the result was wrong by 5x the
+  bf16 rounding error), the x tile's TMA is issued before the weights, and the two consumer warpgroups ping-pong (swiglu of one overlaps the GEMM of
+  the other; the weight-slot refill no longer blocks either). fp64 error 1.66e-3 at every row count, bit-identical replays; 7 - 37 % ahead of the best
+  anthropic row that loads (n = 2 3 072 rows 9.0 vs 9.7 us). `fused_generic_sm90a.prefers_generic` takes D128 inference rows <= 512 (n = 2) / 4 096 (n = 4).
+  Test: `test_inference_matches_fp64_on_whole_persistent_tiles`; page `docs/gpus/h100/transition/transition.md`, record
+  `docs/records/2026-10-15-h100-transition-vs-anthropic.md`.
+- H100 (sm_90a) Transition beyond hidden 4 D / whole tiles / bf16: hidden 2 D at D64 / 128 / 256 through the tuned fused forward and backward
+  kernels rebuilt for `HMULT=2` / `WIDE_HM=2` (`fused_sm90a`, `fused_wide_sm90a`; 1.35x - 2.2x the Triton residual path at L384 / L768, weight-role
+  replicas measured: D128 16 x 4 slices, D64 28 x 2), and a generic hand-CUDA family `kernels/transition/cuda/fused_generic_sm90a.py`
+  (`generic_sm90a/`: wgmma + TMA + mbarrier GEMM skeleton, forward and backward) for any D multiple of 64 up to 1024, any hidden width multiple of 128,
+  any row count (ragged tail by TMA zero-fill / clipping, no PyTorch fallback) and fp32 activations on TF32 tensor cores (operands rounded to nearest
+  TF32 so the error matches cuBLAS TF32). `Transition.forward` routes fp32 to it when TF32 is allowed. 1.1x - 6x `torch.compile` PyTorch on large inputs (ties it at 768 rows, D768);
+  CUDA-graph timings vs PyTorch / Triton / Transformer Engine on `docs/gpus/h100/transition/transition.md`. `autotune.fused_config.transition_candidates`
+  takes `slices` (default weight-role replicas now `~64 / slices`: unchanged 8 at n = 4, 16 at n = 2) and the native build driver tunes both hidden widths.
+  Tests: `tests/numerics/test_transition_generic_sm90a_gpu.py`, `tests/autotune/test_v210_native.py`, `tests/compile/test_transition_fake_availability.py`.
 - B200 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
   d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128): served by the D64 / D128 kernels unchanged -- per token it has the
   bidirectional block's shapes (4 D planes, LN_out over 2 D), only the cuBLAS contraction between the kernels pairs the planes in one

@@ -180,6 +180,7 @@ def test_agrees_with_the_triton_path_to_bf16(shape, monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    monkeypatch.setenv("MINIWORLD_TRANSITION_GENERIC_SMALL", "0")  # this test targets the fused / wide build itself, not the small-row preference
     module, x, dy = _build(shape)
     fused = _run(module, x, dy, fused=True)
     triton = _run(module, x, dy, fused=False)
@@ -196,6 +197,7 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
     from miniworld_engine.kernels.transition.cuda import fused_sm90a
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    monkeypatch.setenv("MINIWORLD_TRANSITION_GENERIC_SMALL", "0")  # this test targets the fused / wide build itself, not the small-row preference
     calls = []
     original = fused_sm90a.transition_fused_sm90a
     monkeypatch.setattr(
@@ -274,3 +276,33 @@ def test_persistent_input_refill_graph(monkeypatch):
         graph.replay()
         for got, want in zip(outputs, expected, strict=True):
             torch.testing.assert_close(got, want, rtol=0, atol=0)
+
+
+@pytest.mark.skipif(not HOPPER, reason="the fused Transition is sm_90a only")
+@pytest.mark.parametrize("n", [2, 4])
+@pytest.mark.parametrize("rows", [128, 2048, 16896])
+def test_inference_matches_fp64_on_whole_persistent_tiles(n, rows):
+    """The fragment-LayerNorm inference build (registers feed the first GEMM as the wgmma A operand) against an fp64 reference.
+
+    A ptxas liveness defect of the rolled chunk loop (the A fragment aliased the swiglu temporaries from chunk 1 on) gave an error
+    of 8e-3 .. 1.2e-2 here while every row-count / agreement test still passed: those compare two kernels that share the
+    LayerNorm path, or use a single tile.  16896 rows is 132 tiles: one per CTA and more than one on small parts.
+    """
+    import torch.nn.functional as F
+
+    from miniworld_engine.kernels.transition.cuda import fused_sm90a
+
+    d, h = 128, 128 * n
+    g = torch.Generator(device="cuda").manual_seed(5)
+    x = torch.randn(rows, d, device="cuda", dtype=torch.bfloat16, generator=g)
+    gamma = torch.randn(d, device="cuda", dtype=torch.float32, generator=g) * 0.3 + 1.0
+    beta = torch.randn(d, device="cuda", dtype=torch.float32, generator=g) * 0.3
+    wa, wb = (torch.randn(h, d, device="cuda", dtype=torch.bfloat16, generator=g) * d ** -0.5 for _ in range(2))
+    ws = torch.randn(d, h, device="cuda", dtype=torch.bfloat16, generator=g) * h ** -0.5
+    with torch.no_grad():
+        y = fused_sm90a.transition_fused_sm90a(x, gamma, beta, wa, wb, ws, 1e-5).double()
+        xd = x.double()
+        xn = F.layer_norm(xd, (d,), gamma.double(), beta.double(), 1e-5)
+        ref = xd + (F.silu(xn @ wa.double().t()) * (xn @ wb.double().t())) @ ws.double().t()
+    rel = float((y - ref).norm() / ref.norm())
+    assert rel < 3e-3, f"relative error {rel:.2e} vs fp64 (bf16 output rounding alone is ~1.7e-3)"

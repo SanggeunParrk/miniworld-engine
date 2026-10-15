@@ -50,15 +50,24 @@ def transition(
         raise ValueError(msg)
     if settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton":
         from miniworld_engine.kernels.transition.cuda import (
+            fused_generic_sm90a,
             fused_sm90a,
             fused_wide_sm90a,
         )
 
+        training = torch.is_grad_enabled() and any(
+            t.requires_grad for t in (x, ln_in_weight, expand_a_weight, expand_b_weight, squeeze_weight))
+        if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, expand_a_weight, squeeze_weight):
+            return fused_generic_sm90a.transition_generic_sm90a(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
         if fused_sm90a.available(x, expand_a_weight, squeeze_weight):
             return fused_sm90a.transition_fused_sm90a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
         if fused_wide_sm90a.available(x, expand_a_weight, squeeze_weight):
             return fused_wide_sm90a.transition_wide_sm90a(
+                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+        if fused_generic_sm90a.available(x, expand_a_weight, squeeze_weight):
+            return fused_generic_sm90a.transition_generic_sm90a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
 
     if settings.current().engine_backend != "triton":

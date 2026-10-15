@@ -395,14 +395,16 @@ def _fused_transition(backward):
     rows = length * length if both_level_is_pair(length) else length
     x = torch.randn(rows, 128, device="cuda", dtype=BF16)
     gamma, beta = torch.ones(128, device="cuda"), torch.zeros(128, device="cuda")
-    wa, wb = [torch.randn(512, 128, device="cuda", dtype=BF16) / 128 ** 0.5 for _ in range(2)]
-    ws = torch.randn(128, 512, device="cuda", dtype=BF16) / 512 ** 0.5
-    if backward:
-        _, xn, rstd, c1 = _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, True)
-        return _bwd_launch(torch.randn_like(x), x, xn, rstd, c1, gamma, wa, wb, ws)
-    for save in ((False,) if policy.mode() == "eval" else (True,) if policy.mode() == "train" else (False, True)):
-        _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, save)
-    return None
+    for n in (4, 2):                                  # hidden 512 (the AF3 Transition) and 256: two builds, two tuned schedules
+        hid = n * 128
+        wa, wb = [torch.randn(hid, 128, device="cuda", dtype=BF16) / 128 ** 0.5 for _ in range(2)]
+        ws = torch.randn(128, hid, device="cuda", dtype=BF16) / hid ** 0.5
+        if backward:
+            _, xn, rstd, c1 = _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, True)
+            _bwd_launch(torch.randn_like(x), x, xn, rstd, c1, gamma, wa, wb, ws)
+            continue
+        for save in ((False,) if policy.mode() == "eval" else (True,) if policy.mode() == "train" else (False, True)):
+            _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, save)
 
 
 def transition_fwd_residual_sm90_cuda():
