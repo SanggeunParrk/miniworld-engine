@@ -99,6 +99,9 @@ some of this (it still calls single-direction training D128-only).
    FP32 backward layout candidate (2026-10-05): 1.050–1.070x whole-block F+B on L384/768, A4/6; numerical, compile and
    replay checks passed. New-kernel sanitizers and whole-block racecheck/synccheck passed; a baseline-common memcheck
    API error remains. Explicit experiment only, default dispatch unchanged; see the token DiT experiment section.
+   2026-10-15: all four head layouts (16 x 48, 24 x 32, 12 x 64, 16 x 64) native in bf16 and fp32, inference and training; fp32 inference
+   fused expand + SwiGLU (rounded `xa`); open: 24 x 32 fp32 A = 5 L640 / L768 (1.00x / 1.04x of Anthropic: the attention core 110 us
+   against their 94 us; split-K over the keys or a persistent tile queue are the untried structures, see token_dit.md).
    2026-10-14 (`h100/token-bodit-opt`): token DiT inference bf16 0.102 / 0.178 ms (L384 / L768), training bf16 3.35 / 7.67 ms,
    fp32 7.23 / 16.42 ms; **bias-only DiT** now CUDA on H100 (bf16 + fp32, inference + training,
    [bias_only_dit/bias_only_dit.md](bias_only_dit/bias_only_dit.md)). Left: fp32 attention (latency bound), `pvx` epilogue overlap,

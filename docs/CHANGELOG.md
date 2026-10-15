@@ -10,9 +10,17 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 token DiT and bias-only DiT at every head layout (16 x 48, 24 x 32, 12 x 64 at d 768; 16 x 64 at d 1024), bf16 and fp32,
+  inference and training: `attn_tf32.cu` / `attn_fwd.cu` / `attn_dq.cu` / `attn_dkv.cu` / `attn_dqb.cu` built per layout, `pvx32` templated
+  on the head width, pack / row kernels at d 768 or 1024; `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py`.
 - H100 bias-only token DiT: `pvx` / `pvx32` PV + gate cores, `dpb2` bias gradient, fp32 (TF32) inference and training served on
   sm90 ([page](gpus/h100/bias_only_dit/bias_only_dit.md)); `tests/gpu/sm90/test_h100_bias_only_dit_gpu.py`.
 
+### Changed
+
+- H100 fp32 token DiT inference: expand + SwiGLU as one TF32 GEMM at M >= 768 rows; `resgate_adaln_rows` can round its output to TF32
+  (`tf32_round`); accuracy unchanged (2.92e-4), -16 us a block at A = 5, L768. Hopper fp32 inference no longer raises at head layouts
+  other than 16 x 48 (it is served natively).
 ### Changed
 
 - H100 bias-only DiT: the fused hoisted pair bias (`pair_bias_all`: one LayerNorm + one GEMM for every block, forward and

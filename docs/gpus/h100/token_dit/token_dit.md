@@ -4,6 +4,23 @@ Kernel-level status of the token DiT block (AF3 Alg. 23: AdaLN + AugmentedAttent
 transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48, transition n = 2) on H100; the module-level summary is in
 [h100.md](../h100.md). Columns are (Length, Dimension, dtype) from the shape registry (`token_single`, d_hidden 768).
 
+## Status, 2026-10-15 (branch `h100/token-bodit-opt`, local commits; read this first)
+
+| | bf16 | fp32 (TF32 wgmma) |
+|---|---|---|
+| layouts served natively | 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024) | the same four |
+| inference vs PyTorch compiled | 2.4-4.4x | 1.7-3.9x |
+| inference vs Anthropic (48 cells each: L128-768 x A 5 / 1 x 4 layouts) | **all >= 1.19x** | 46 of 48 >= 1.05x; 24 x 32 A = 5: L640 1.00x, L768 1.04x |
+| training (A = 48) vs PyTorch compiled | 1.10-2.87x | 1.16-1.70x |
+| accuracy vs the fp32 IEEE block | 3.6e-3 (the bf16 recipe's own) | 2.9e-4 |
+
+Anthropic has no backward, so training has no faster-than comparison. Where each number lives: the length sweeps (tables + charts)
+under "Measurements, length sweep (2026-10-15)"; head layouts under "Head layouts other than 16 x 48" and "Head layouts vs
+Anthropic"; the fp32 cells under 5 % and everything tried against them under "fp32 inference cells under 5 %" and the sections after
+it; tests: `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py` (40: inference bf16 / fp32, fp32 and bf16 training gradients,
+bitwise-repeatable steps, at the four layouts) and `tests/gpu/any/test_token_dit_train_gpu.py` (60). Not at SoL90 (fp32 attention
+~20-25 % of the TF32 tensor peak; cuBLAS GEMMs 60-68 %).
+
 On H100 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton -- in bf16 and fp32, QK-norm on or off, on
 two paths that `modules/dit` dispatches to (the same two integrations as on B200):
 
@@ -22,7 +39,8 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
     one GEMM, v^T from a second (TF32 wgmma takes v K-major), the hoisted pair bias written key-permuted (below);
   - expand + SwiGLU, **bf16**: `kernels/conditioned_transition/cuda/gemm_swiglu_sm90.cu`, one sm_90a GEMM (128 x 256 tiles
     whose B rows are 128 of Wa then the same 128 of Wb, wgmma m64n256, SwiGLU in the epilogue): [a | b] never reaches HBM.
-    Its TF32 build is opt-in (`settings.token_dit_gemm_swiglu_fp32`, default off; see below);
+    Its TF32 build serves the fp32 inference expand at M >= 768 rows since 2026-10-15 (the row kernel hands it a TF32-rounded
+    `xa`; accuracy equals the cuBLAS path's; see "fp32 inference after the fused expand" below);
   - the other GEMMs cuBLAS (fp32: TF32 under the caller's `allow_tf32`).
 - **Training** (`integrations/token_dit_train.py`): `DiTBlock` calls under autograd, B == 1, L % 128 == 0, key mask [B, L]
   or none. One autograd Function per block whose forward and backward are each one opaque op (torch.compile keeps them
