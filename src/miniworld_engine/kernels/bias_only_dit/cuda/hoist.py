@@ -35,7 +35,7 @@ def ext():
 def ln0_rows(x: torch.Tensor, out: torch.Tensor, eps: float = 1e-5) -> None:
     """out = LN(x) without affine; x [R, 128] (bf16 / fp32 rows), out contiguous [R, 128] (bf16 / fp32)."""
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
-    rows._ext().layernorm128_rows(x, out, float(eps))
+    rows._ext().layernorm128_rows(x, out, float(eps), False)
 
 
 def ln0_bwd_rows(x: torch.Tensor, dy: torch.Tensor, dx: torch.Tensor, y: torch.Tensor, eps: float = 1e-5) -> None:

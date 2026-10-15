@@ -2,8 +2,8 @@
 
     python -m miniworld_engine.viz.measure_bars docs/gpus/b200/trimul/trimul.md [--length-d 128] [--dim-l 384] [--length-prefix L]
 
-Every table under ``## Measurements`` whose first column is ``(Length, <axis>)`` -- ``Dimension``, or e.g. ``MSA depth``
-for the MSA modules -- gets two charts, drawn from the table itself so they cannot disagree with it: a length sweep at one
+Every table under a ``## Measurements...`` section whose first column is ``(Length, <axis>)`` or ``(Length, <axis>, dtype)`` --
+``Dimension``, or e.g. ``MSA depth`` for the MSA modules (a table with two rows at one length is skipped: split it by dtype) -- gets two charts, drawn from the table itself so they cannot disagree with it: a length sweep at one
 value of the second axis (``--length-d``, default 128) and a sweep of the second axis at one length (``--dim-l``, default
 384); length ticks read L<n>, or N<n> with ``--length-prefix N`` (the atom pages: the length is the atom count). One bar
 per implementation column (columns that are all "—" are skipped), latency in ms on a log axis, ours labelled with the
@@ -36,23 +36,25 @@ def slug(title: str) -> str:
 def tables(text: str):
     """(title, second axis, header, rows, end line index) for every (Length, <axis>) table under ## Measurements."""
     lines = text.split("\n")
-    start = next(i for i, ln in enumerate(lines) if ln.startswith("## Measurements"))
     title = None
-    i = start
+    in_section = False
+    i = 0
     while i < len(lines):
         ln = lines[i]
-        if ln.startswith("## ") and i > start:
-            break
-        if ln.startswith("### "):
+        if ln.startswith("## "):
+            in_section = ln.startswith("## Measurements")   # every "## Measurements ..." section, any date
+            title = None
+        if in_section and ln.startswith("### "):
             title = ln[4:].strip()
-        m = re.match(r"\| \(Length, ([^)]+)\) \|", ln)
-        if m and m.group(1) in AXES and title:
+        # (Length, <axis>) or (Length, <axis>, dtype): the dtype is part of the row label, the sweep axis is the second field
+        m = re.match(r"\| \(Length, ([^,)]+)(?:, [^)]+)?\) \|", ln)
+        if in_section and m and m.group(1) in AXES and title:
             header = [c.strip() for c in ln.strip("|").split("|")]
             rows = []
             j = i + 2
             while j < len(lines) and lines[j].startswith("| ("):
                 cells = [c.strip() for c in lines[j].strip("|").split("|")]
-                length, dim = map(int, re.findall(r"\d+", cells[0]))
+                length, dim = map(int, re.findall(r"\d+", cells[0])[:2])
                 rows.append((length, dim, cells[1:]))
                 j += 1
             yield title, m.group(1), header[1:], rows, j - 1
@@ -63,7 +65,7 @@ def tables(text: str):
 
 def value(cell: str) -> float | None:
     try:
-        return float(cell)
+        return float(cell.strip("*"))   # ours is written **0.178** in the sweep tables
     except ValueError:
         return None
 
@@ -71,10 +73,11 @@ def value(cell: str) -> float | None:
 def chart(title, header, rows, axis, fixed, out: Path, second: str = "Dimension", lpre: str = "L") -> bool:
     import matplotlib.pyplot as plt
 
-    impls = [h for h in header if h != TIMES]
-    xcol = header.index(TIMES) if TIMES in header else None
+    impls = [h for h in header if not h.startswith(TIMES)]   # "×", or "× Anthropic" / "× PyTorch" ratio columns
+    ratios = [i for i, h in enumerate(header) if h.startswith(TIMES)]
+    xcol = ratios[-1] if ratios else None                    # the last ratio column labels ours (the fastest other when several)
     sel = [(r[0] if axis == "length" else r[1], r[2]) for r in rows if (r[1] if axis == "length" else r[0]) == fixed]
-    if len(sel) < 2:
+    if len(sel) < 2 or len({x for x, _ in sel}) != len(sel):   # one point, or mixed dtypes / variants under one axis value
         return False
     sel.sort()
     impls = [h for h in impls if any(value(c[header.index(h)]) is not None for _, c in sel)]

@@ -77,6 +77,46 @@ def _token_swiglu(device_index):
     return GemmSwigluSm90(device_index)
 
 
+#: Hopper fp32 token inference: the expand GEMM with the SwiGLU in its epilogue on TF32 wgmma (False: cuBLAS + ``swiglu_rows``)
+_FP32_SWIGLU_GEMM = True  # expand + SwiGLU as one TF32 wgmma GEMM; xa is RNA-rounded by its row kernel (the TMA-fed operands truncate)
+_TF32_WAB: dict = {}
+_PAIR_BIAS: dict = {}  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
+
+
+def _swiglu_gemm_ok(xa, wab) -> bool:
+    return (
+        torch.cuda.get_device_capability(xa.device) == (9, 0)
+        and xa.shape[0] % 128 == 0
+        and xa.shape[1] % 32 == 0
+        and (wab.shape[0] // 2) % 128 == 0
+        and wab.shape[1] == xa.shape[1]
+    )
+
+
+def _swiglu_ht(M: int, H: int, nsm: int) -> int:
+    """Hidden units per tile of the fp32 fused expand: 128 (128 x 256 tiles) or 64 (twice the tiles): the one whose last wave of the
+    persistent grid is fuller (ties: 128, the larger tile)."""
+    def eff(ht):
+        tiles = (M // 128) * (H // ht)
+        return tiles / (-(-tiles // nsm) * nsm)
+    # Measured: HT = 64 raises the last wave's fill (M = 1920: 68 -> 91 %; M = 3200: 76 -> 91 %) but loses at both (24 x 32 L384
+    # 1.07 -> 1.04, L640 1.00 -> 0.96 of Anthropic's block): the narrower tile's MMA / TMA ratio costs more than the wave. Kept, not chosen.
+    return 128
+
+
+def _tf32_wab(wab, ht=128):
+    """[Wa; Wb] -> the SwiGLU GEMM's per-tile packing ([Wa ht rows | Wb ht rows] per tile, ht = 128 or 64), rounded to TF32 (to
+    nearest, ties away), once per weight pack (per ht)."""
+    from ... import _capture
+
+    def build():
+        H, K = wab.shape[0] // 2, wab.shape[1]
+        w = torch.stack([wab[:H].view(H // ht, ht, K), wab[H:].view(H // ht, ht, K)], 1).reshape(2 * H, K)
+        return ((w.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
+
+    return _capture.lookup(_TF32_WAB, (wab.data_ptr(), wab._version, tuple(wab.shape), ht), build, limit=8)
+
+
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
 
@@ -95,8 +135,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         or single.dtype not in (torch.bfloat16, torch.float32)
         or pair.dtype != single.dtype
         or B != 1
-        or D != 768
-        or heads != 16
+        or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
         or L % 128
         or cond.shape[-1] != 384
         or tuple(pair.shape) != (1, L, L, 128)
@@ -104,9 +143,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
         raise ValueError(
-            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768/384/128, 16 heads"
+            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / 128"
         )
-    qs = math.log2(math.e) / math.sqrt(48)
+    qs = math.log2(math.e) / math.sqrt(D // heads)
     fp32 = single.dtype is torch.float32
     asynchronous = _CANDIDATE_INFER_ASYNC
     key = (
@@ -164,14 +203,43 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     # The augmented-attention module fills fully masked rows with a finite
     # negative value, so its reference softmax is uniform on that edge.
     # AttentionPairBias has a separate zero-probability reference contract.
-    if fp32:
-        zh = single.new_empty((L * L, 128))
-        _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
-        bias = torch.mm(wf, zh.t()).view(heads, L, L)
-        if mask is not None:
-            _ext().token_mask90(bias, mask)
-    else:
-        bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+    def make_bias():
+        if fp32:
+            if _FUSED_PAIR_BIAS_F32 and heads in (12, 16, 24) and pair.is_contiguous() and wf.is_contiguous():
+                # LayerNorm + the projections + the key permutation + the mask in ONE pass over the pair (the LN, a cuBLAS GEMM and
+                # the mask fill read / wrote it three times: 302 MB each at fp32); masked keys take the same -1e30 as token_mask90
+                from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+                bias = single.new_empty((heads, L, L))
+                rows32().pair_bias_tok_cuda(pair.view(L * L, 128), wf, bias, mask, int(L), 1e-5, True, -1e30)
+            else:
+                zh = single.new_empty((L * L, 128))
+                _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
+                bias = torch.mm(wf, zh.t()).view(heads, L, L)
+                if mask is not None:
+                    _ext().token_mask90(bias, mask)
+        else:
+            bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+        return bias, pair, mask
+
+    # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
+    # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);
+    # a capture without it records the build once and every replay rebuilds it from the pair as it is then.
+    bias = _capture.lookup_inputs(
+        _PAIR_BIAS,
+        (
+            pair.data_ptr(),
+            pair._version,
+            tuple(pair.shape),
+            None if mask is None else (mask.data_ptr(), mask._version),
+            wf.data_ptr(),
+            wf._version,
+            heads,
+            fp32,
+        ),
+        make_bias,
+        limit=2,
+    )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(-1, 384)
     P = c.shape[0]
@@ -204,13 +272,21 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         qknorm_rows(qkvg, nq, nk, eq, ek, D)
     if fp32:
         vt = torch.mm(wqkvg[3 * D :], xa.t())
-        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D)
+        attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
-        attention.gated_inference(qkvg, bias, 0, A)
+        attention.gated_inference(qkvg, bias, 0, A, heads, D // heads)
     y = torch.mm(qkvg[:, :D], wo.t())
-    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
+    # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
+    fused_expand = fp32 and _FP32_SWIGLU_GEMM and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
+    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5, tf32_round=fused_expand)
     h = single.new_empty((M, ws.shape[1]))
-    if fp32:
+    if fused_expand:
+        # expand + SwiGLU as one TF32 wgmma GEMM: xa is TF32-rounded by its row kernel and the weights once per pack, so the
+        # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
+        op = _token_swiglu(single.device.index)
+        ht = _swiglu_ht(M, ws.shape[1], op.nsm)
+        op.ext.gemm_swiglu(xa, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
+    elif fp32:
         ab = torch.mm(xa, wab_fp32.t())
         swiglu_rows(ab, h)
     else:
@@ -227,9 +303,12 @@ def adaln_rows(x, ms, mb, out, L, eps=1e-5):
     _ext().adaln_rows_cuda(x, ms, mb, out, int(L), float(eps))
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
+def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, tf32_round=False):
     """x += sigmoid(gl[row % L]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
-    _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+    if tf32_round:
+        _ext().resgate_adaln_rows_r_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+    else:
+        _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
 
 
 def gate_rows(o, g, out):
@@ -281,6 +360,10 @@ def key_perm(L, device):
     return p - r + 4 * (r % 2) + r // 2
 
 
+#: Hopper fp32 pair bias in one pass (False: LayerNorm rows + a cuBLAS GEMM)
+_FUSED_PAIR_BIAS_F32 = True
+
+
 def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     """Every block's pair bias, head-major: out [NB, L, L] = (LN(z) @ wt)^T with wt [C, NB] (the LayerNorm weights and
     any log2 e scale already folded in), -inf on the columns of masked keys (``mask`` [L] bool). z2d [L L, 128].
@@ -288,6 +371,24 @@ def pair_bias_all(z2d, wt, out, L, eps=1e-5, mask=None, perm=False):
     slower -- 450 against 266 us for a whole L = 768 block call -- and was dropped). ``perm``: the key columns in
     ``key_perm`` order (the TF32 core's; the LayerNorm writes the pair rows there, so it costs nothing)."""
     nb = wt.shape[1]
+    if (
+        _FUSED_PAIR_BIAS_F32
+        and wt.dtype is torch.float32
+        and z2d.dtype is torch.float32
+        and nb % 16 == 0
+        and z2d.is_contiguous()
+        and torch.cuda.get_device_capability(z2d.device) == (9, 0)
+    ):
+        # Hopper fp32: LN + the 16 projections of a block in one pass over the pair (LN, then a GEMM, read it three times)
+        from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32 as _rows32
+
+        rows32 = _rows32()
+        wf = wt.t().contiguous()
+        m0 = None if mask is None else mask.reshape(-1).to(torch.bool).contiguous()
+        o2 = out.view(nb, -1)
+        for b in range(nb // 16):
+            rows32.pair_bias_tok_cuda(z2d, wf[16 * b : 16 * b + 16], o2[16 * b : 16 * b + 16], m0, int(L), float(eps), bool(perm), float("-inf"))
+        return
     m = None if mask is None else mask.reshape(-1).to(torch.bool)
     if m is not None and perm:
         m = m[key_perm(L, m.device)]

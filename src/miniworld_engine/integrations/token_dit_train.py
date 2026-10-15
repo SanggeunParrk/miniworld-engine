@@ -133,8 +133,6 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         0
     ] != 2 * d:
         return False
-    if cap == (9, 0) and (a.n_head, d) != (H, D):
-        return False  # H100: 16 x 48 only (the sm_90a cores; the other layouts are B200-only)
     if mask is not None and not (
         mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])
     ):
@@ -186,7 +184,9 @@ def _mm32(a, b):
     tiles = -(-n // 128) * -(-k // 128)
     nsm = torch.cuda.get_device_properties(a.device).multi_processor_count
     s = 1
-    if tiles < 128 and b.is_contiguous() and a.t().is_contiguous():
+    if tiles < 128 and not _sm90(a.device) and b.is_contiguous() and a.t().is_contiguous():
+        # (Hopper: the split costs ~440 us a step at A = 48, L768 -- measured dWo / dWg / dWn / dWsq 207 / 284 / 436 / 444 us as
+        #  one GEMM against 319 / 321 / 548 / 627 us split in four)
         while s < 8 and tiles * s * 2 <= 2 * nsm and m % (2 * s * 128) == 0:
             s *= 2
     if s == 1:
@@ -474,7 +474,8 @@ def _pack(P, qk, dev, at):
             "Wab",
             "Wsq",
         )
-        T = ext(rpb=_native_rpb())
+        d_ = P["attention.to_out.weight"].shape[0]
+        T = ext(d_, d_ // P["attention.to_bias.weight"].shape[0], rpb=_native_rpb())
         weights = [P[n] for n in names]
         if pipeline:
             idx = dev.index if dev.index is not None else torch.cuda.current_device()
@@ -745,7 +746,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
         kn = torch.empty_like(qn)
         vc = None if (fp32 and not h100) else torch.empty_like(qn)
         T.qknorm(
-            qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, QS90 if h100 else 1.0
+            qkvg, nq, nk, qn, kn, vc, rqk, eq, ek, qk, (LOG2E / DH**0.5) if h100 else 1.0
         )  # H100: q scaled for the exp2 core
         vsave = vc if vc is not None else qkvg.new_empty(0, D)
         if vc is None:
@@ -791,11 +792,13 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
                 A,
                 L,
                 qkvg,
+                H,
+                DH,
             )  # sigmoid(g) o, no O
             del vt
         else:
             og, LSE = sm90.forward(
-                qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg
+                qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH
             )  # sigmoid(g) o, no O
     else:
         if not fp32 and mask is not None:
@@ -871,6 +874,8 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
 
     perm = rows.key_perm(L, qs.device)
     inv = torch.argsort(perm)
+    nh_ = bias_p.shape[0]
+    dh_ = qs.shape[1] // nh_
 
     def tr(t):
         out = t.new_empty(t.shape[1], t.shape[0])
@@ -898,15 +903,44 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
         _key_mask(mask, A, L, perm),
         A,
         L,
+        nh_,
+        dh_,
     )
     return dq, dk, dv, db_p[..., inv]
+
+
+#: Hopper bf16 token DiT backward: dbias from the dQ pass (A a multiple of 3); False: the per-sample buffer + reduce
+#: fp32: the TF32 dQ pass with C chunk buffers (each CTA adds its A / C samples in order): bitwise repeatable, but no faster than the
+#: per-sample buffer + reduce it replaces (dQ 2365 us against 1766 + 613 us), so off. (One shared buffer, 4608 CTAs: -0.9 ms, not repeatable.)
+_NATIVE_DQB_F32 = False
+_NATIVE_DQB = True  # bf16 (A a multiple of 3): dbias from the dQ pass into C chunk buffers summed in order (bitwise repeatable)
+
+
+_INV_PERM: dict = {}
+
+
+def _inv_key_perm(L, device, rows):
+    """The inverse of the TF32 core's key permutation (positions -> natural key order), once per (L, device)."""
+    key = (L, device)
+    if key not in _INV_PERM:
+        _INV_PERM[key] = torch.argsort(rows.key_perm(L, device))
+    return _INV_PERM[key]
 
 
 def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
+    H = bias.shape[0]  # this layout's heads (the module-level H is the default 16)
+    DH = qs.shape[1] // H
+    tf32_defs = sm90.tf32_defs(H, DH)
+    bf_defs = sm90.fwd_defs(H, DH)  # attn_fwd / dq / dkv / dqb build defines of this layout (none at 16 x 48)
+
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
-    db = torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
+    db = (
+        None
+        if ((fp32 and _NATIVE_DQB_F32) or (not fp32 and _NATIVE_DQB and A % 3 == 0))
+        else torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
+    )
     km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
     empty_defs = ("TOKEN_EMPTY_UNIFORM=1",) if _empty_uniform90(qs.device, A, L) else ()
     if fp32:
@@ -917,14 +951,37 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
             return out
 
         bt, lp, dp = T.train_tf32_bwd_layout90(bias, lse, dd)
-        core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1", *empty_defs))
+        if _NATIVE_DQB_F32:
+            # the samples' dS tiles added into ONE key-permuted [H, L, L] buffer by TMA reduce-adds (bitwise repeatable under
+            # SM-schedule perturbation, measured); the per-sample variant below writes [A, H, L, L] fp32 (1.8 GB at A48 L768),
+            # costs 1.77 ms in dQ and 0.61 ms in its reduce
+            from miniworld_engine.kernels.conditioned_transition import cuda as rows
+
+            inv = _inv_key_perm(L, qs.device, rows)
+            dbc = torch.zeros(sm90.tf32_dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+            core = sm90._ext("attn_tf32", (*tf32_defs, *empty_defs))
+            core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, dbc)
+            core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
+            return dq, dk, dv, dbc.sum(0)[..., inv]  # chunk buffers summed in order: bitwise repeatable
+        core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1", *tf32_defs, *empty_defs))
         core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, db)
         core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
+    elif _NATIVE_DQB and A % 3 == 0:
+        # dbias in the dQ pass: the three samples of a work item are summed in shared memory and added with ONE TMA bulk reduce,
+        # in a fixed order (bitwise repeatable). The per-sample variant below writes an [A, H, L, L] fp32 buffer (1.8 GB at A48
+        # L768), takes 1.4 ms in dK / dV for the atomics and 0.6 ms in the reduce: 2.6 ms against 1.6 ms for this pass.
+        dbc = torch.zeros(sm90.dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
+        sm90._ext("attn_dqb", (*bf_defs, *empty_defs)).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
+        dbn = dbc.sum(0)  # the chunk buffers summed in order: bitwise repeatable
+        sm90._ext("attn_dkv", ("DBIAS=0", *bf_defs, *empty_defs)).attn_dkv(
+            qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn
+        )
+        return dq, dk, dv, dbn.to(torch.bfloat16)
     else:
         sm90._ext(
-            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *empty_defs)
+            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *bf_defs, *empty_defs)
         ).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
-        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *empty_defs)).attn_dkv(
+        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(
             qs, k, v, dob, bias, km, lse, dd, dk, dv, db
         )
     return dq, dk, dv, T.train_db_reduce90(db, fp32)
@@ -937,6 +994,7 @@ def _native_final90(
 
     canonical = WEIGHTS + (QK_WEIGHTS if qk else ())
     P = dict(zip(names, params, strict=True))
+    D = dWqkvg.shape[1]  # this layout's token width (768, or 1024 for 16 x 64); the module-level D is the default
     # The placeholders are not read by entries whose deterministic reduction is fused into the writer.
     src = [
         dWqkvg[:D],
@@ -1134,7 +1192,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
     elif h100:  # dq for the unscaled q, dbias natural units
         DQ, DK, DV, DB = sm90.backward(
-            qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L
+            qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L, H, DH
         )
     else:
         # B200 fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums

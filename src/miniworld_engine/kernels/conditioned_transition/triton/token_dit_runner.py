@@ -14,6 +14,7 @@ What each call hoists, and why it may:
           (LayerNorm(cond) statistics are shared too; each block's cond-LayerNorm weight is folded).
 """
 
+import functools
 import contextlib
 
 import torch
@@ -623,8 +624,9 @@ class FusedTokenDiT:
             core = None
             if sm90.tf32_inference_core_supported(self.dtype, L, self.d, self.h, idx):
                 try:
-                    sm90._ext("attn_tf32")  # build now: a failure keeps Triton
-                    core = sm90.tf32_gated_inference
+                    nh, dh = self.h, self.d // self.h
+                    sm90._ext("attn_tf32", sm90.tf32_fwd_defs(nh, dh))  # build now: a failure keeps Triton
+                    core = functools.partial(sm90.tf32_gated_inference, nh=nh, dh=dh)
                 except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
                     import warnings
 

@@ -4,6 +4,23 @@ Kernel-level status of the token DiT block (AF3 Alg. 23: AdaLN + AugmentedAttent
 transition; d_single 768, d_cond 384, d_pair 128, 16 heads x 48, transition n = 2) on H100; the module-level summary is in
 [h100.md](../h100.md). Columns are (Length, Dimension, dtype) from the shape registry (`token_single`, d_hidden 768).
 
+## Status, 2026-10-15 (branch `h100/token-bodit-opt`, local commits; read this first)
+
+| | bf16 | fp32 (TF32 wgmma) |
+|---|---|---|
+| layouts served natively | 16 x 48, 24 x 32, 12 x 64 (d 768), 16 x 64 (d 1024) | the same four |
+| inference vs PyTorch compiled | 2.4-4.4x | 1.7-3.9x |
+| inference vs Anthropic (48 cells each: L128-768 x A 5 / 1 x 4 layouts) | **all >= 1.19x** | 46 of 48 >= 1.05x; 24 x 32 A = 5: L640 1.00x, L768 1.04x |
+| training (A = 48) vs PyTorch compiled | 1.10-2.87x | 1.16-1.70x |
+| accuracy vs the fp32 IEEE block | 3.6e-3 (the bf16 recipe's own) | 2.9e-4 |
+
+Anthropic has no backward, so training has no faster-than comparison. Where each number lives: the length sweeps (tables + charts)
+under "Measurements, length sweep (2026-10-15)"; head layouts under "Head layouts other than 16 x 48" and "Head layouts vs
+Anthropic"; the fp32 cells under 5 % and everything tried against them under "fp32 inference cells under 5 %" and the sections after
+it; tests: `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py` (40: inference bf16 / fp32, fp32 and bf16 training gradients,
+bitwise-repeatable steps, at the four layouts) and `tests/gpu/any/test_token_dit_train_gpu.py` (60). Not at SoL90 (fp32 attention
+~20-25 % of the TF32 tensor peak; cuBLAS GEMMs 60-68 %).
+
 On H100 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton -- in bf16 and fp32, QK-norm on or off, on
 two paths that `modules/dit` dispatches to (the same two integrations as on B200):
 
@@ -22,7 +39,8 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
     one GEMM, v^T from a second (TF32 wgmma takes v K-major), the hoisted pair bias written key-permuted (below);
   - expand + SwiGLU, **bf16**: `kernels/conditioned_transition/cuda/gemm_swiglu_sm90.cu`, one sm_90a GEMM (128 x 256 tiles
     whose B rows are 128 of Wa then the same 128 of Wb, wgmma m64n256, SwiGLU in the epilogue): [a | b] never reaches HBM.
-    Its TF32 build is opt-in (`settings.token_dit_gemm_swiglu_fp32`, default off; see below);
+    Its TF32 build serves the fp32 inference expand at M >= 768 rows since 2026-10-15 (the row kernel hands it a TF32-rounded
+    `xa`; accuracy equals the cuBLAS path's; see "fp32 inference after the fused expand" below);
   - the other GEMMs cuBLAS (fp32: TF32 under the caller's `allow_tf32`).
 - **Training** (`integrations/token_dit_train.py`): `DiTBlock` calls under autograd, B == 1, L % 128 == 0, key mask [B, L]
   or none. One autograd Function per block whose forward and backward are each one opaque op (torch.compile keeps them
@@ -237,3 +255,328 @@ unresolved; do not describe the full block as passing default memcheck. Evidence
   do not describe its current performance; a paired benchmark remains to be run.
 - B200 shares the row kernels, the integrations and the qk-norm / I/O conventions changed here; its token DiT tests were
   not re-run on B200.
+
+## 2026-10-14 update (branch `h100/token-bodit-opt`)
+
+H100 80GB HBM3 (cssb node01), CUDA graph, ms per block, median, key mask 20 % (inference) / 12.5 % (training).
+
+| (Length, Dimension, dtype) | | PyTorch compiled | Anthropic | ours |
+|---|---|---|---|---|
+| (384, 768, bf16) | inference | -- | 0.141 | **0.102** |
+| (768, 768, bf16) | inference | 0.665 | 0.250 | **0.178** |
+| (384, 768, fp32) | inference | -- | 0.225 | **0.196** |
+| (768, 768, fp32) | inference | 1.248 | 0.419 | **0.372** |
+| (384, 768, bf16) | training A48 | 5.65 | -- | **3.35** |
+| (768, 768, bf16) | training A48 | 17.01 | -- | **7.67** |
+| (384, 768, fp32) | training A48 | 9.09 | -- | **7.23** |
+| (768, 768, fp32) | training A48 | 24.14 | -- | **16.42** |
+
+- **Pair-bias cache.** The bench sets `static_weights(True)` and `static_inputs(True)` for inference; the pair bias is cached
+  through `_capture.lookup_inputs` keyed on pair / mask / weight / heads / dtype (both dtypes). Without the cache every replay
+  recomputed it (0.178 -> 0.241 ms).
+- **fp32 pair bias** is one TF32 `mma.sync` pass (`pair_bias_tok_cuda`, key permutation + mask fill in the epilogue): 439 -> 129 us.
+- **bf16 dbias (training)** goes through `attn_dqb` with C = 4 chunk buffers, not one buffer shared by reduce-adds: TMA
+  reduce-adds from different CTAs into one buffer are not bitwise repeatable when the SM schedule changes (visible only to a
+  perturbed 24-repeat test). Each CTA adds its sample groups in order (`wait_group 0` between groups), the chunks are summed in
+  fixed order: 8.47 -> 7.67 ms at L768 A48 and bitwise repeatable. The same scheme for fp32 (`attn_tf32_dqb`) is repeatable but no
+  faster (kept behind `_NATIVE_DQB_F32 = False`). The per-sample-buffer path it replaced cost 2.6 ms of dkv + reduce.
+- **Weight-gradient split** is off on sm90 (B200's split 4 costs +750 us a step on H100).
+- Not kept (measured): software-pipelined TF32 attention forward (0.66x, 167 registers -> one CTA per SM, `FWD_PIPE = 0`),
+  fp32 chunked dqb, `BIAS_FAKE` L2 test, side-stream overlap.
+- 2026-10-14, fp32 attention forward: `TRUNC_P=1` (p reaches the TF32 wgmma by clearing its low 13 bits, `l` summed from the
+  same values, so no `cvt.rna` on the XU pipe) -- no change: L768 S5 87.8 -> 91.9 us, S48 713 -> 799 us, error 6.6e-4 either
+  way. The forward is not XU bound; kept behind the flag, default off.
+- 2026-10-14, fp32 attention forward: `QK_RS=1` (q as register A operands of the QK wgmma, loaded once from the swizzled tile;
+  half the shared-memory reads of S) -- 1.3x SLOWER: L768 S5 87.6 -> 115.4 us, S48 717 -> 979 us (same error). 24 more live
+  registers under the 2-CTAs-per-SM cap and an RS wgmma that cannot start until the fragments are in registers cost more than the
+  smem bytes saved. Kept behind the flag, default off.
+- 2026-10-14, fp32 attention forward, bias-traffic upper bound: `BIAS_NOMEM=1` (timing probe, wrong results: the bias seed is
+  computed instead of loaded) L768 S5 87.0 -> 66.3 us, S48 716 -> 605 us. Removing ALL bias traffic is worth at most 1.18x of the
+  forward (~0.1 ms of a 16.4 ms step), so TMA-multicast of the bias tile across the samples' CTAs is not built. ncu of the
+  forward: 96 registers, 2 CTAs / SM (the intended occupancy), issue slots 37 % busy, 0.63 eligible warps / scheduler; the
+  stalls are the QK accumulate chain (6 dependent HGMMAs) and the mbarrier waits.
+
+### Verification added 2026-10-14
+
+`tests/gpu/any/test_token_dit_train_gpu.py` (60 pass): the module-path comparison now also runs (A, L) = (4, 128), (4, 512),
+(3, 640) beside (4, 256), (6, 256), (3, 200), for bf16 and fp32, QK-norm on / off, masked / unmasked. The inference cells
+other than L384 / L768 were not re-run in this pass.
+
+## Measurements, length sweep (2026-10-15)
+
+H100 80GB HBM3 (cssb), the v2.2.0 pixi env (torch 2.13.0+cu129), `benchmarks/runners/bench.py target=dit level=module
+min_seq_len=128 max_seq_len=768 seq_len_step=128 cudagraph=manual`, ms per block, median, key mask 20 % (inference) / 12.5 %
+(training). Inference at A = 5 (one conditioning shared by the samples, `+shared_cond=true`) and A = 1; training at A = 48.
+Anthropic is its inference release (separate invocation, `compile=false`; no backward). No cuEquivariance block exists for this module.
+Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
+
+### Inference, bf16, A = 5, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, bf16) | 0.140 | 0.090 | **0.060** | 2.32 | 1.49 |
+| (256, 768, bf16) | 0.200 | 0.113 | **0.076** | 2.63 | 1.49 |
+| (384, 768, bf16) | 0.282 | 0.142 | **0.102** | 2.76 | 1.39 |
+| (512, 768, bf16) | 0.389 | 0.182 | **0.127** | 3.07 | 1.44 |
+| (640, 768, bf16) | 0.520 | 0.217 | **0.159** | 3.28 | 1.36 |
+| (768, 768, bf16) | 0.666 | 0.252 | **0.179** | 3.73 | 1.41 |
+
+![Inference, bf16, A = 5, one conditioning shared by the samples, length sweep at D768](figures/token_dit_inference_bf16_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
+### Inference, bf16, A = 1
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, bf16) | 0.122 | 0.079 | **0.053** | 2.29 | 1.49 |
+| (256, 768, bf16) | 0.145 | 0.087 | **0.059** | 2.47 | 1.48 |
+| (384, 768, bf16) | 0.182 | 0.094 | **0.064** | 2.86 | 1.48 |
+| (512, 768, bf16) | 0.233 | 0.104 | **0.068** | 3.45 | 1.54 |
+| (640, 768, bf16) | 0.285 | 0.112 | **0.073** | 3.90 | 1.53 |
+| (768, 768, bf16) | 0.357 | 0.125 | **0.081** | 4.44 | 1.56 |
+
+![Inference, bf16, A = 1, length sweep at D768](figures/token_dit_inference_bf16_a_1_length.png) <!-- measure_bars -->
+
+### Inference, fp32, A = 5, one conditioning shared by the samples
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, fp32) | 0.172 | 0.126 | **0.102** | 1.69 | 1.23 |
+| (256, 768, fp32) | 0.277 | 0.172 | **0.143** | 1.94 | 1.20 |
+| (384, 768, fp32) | 0.469 | 0.226 | **0.195** | 2.40 | 1.16 |
+| (512, 768, fp32) | 0.627 | 0.284 | **0.252** | 2.48 | 1.12 |
+| (640, 768, fp32) | 0.989 | 0.349 | **0.322** | 3.08 | 1.09 |
+| (768, 768, fp32) | 1.24 | 0.419 | **0.370** | 3.36 | 1.13 |
+
+![Inference, fp32, A = 5, one conditioning shared by the samples, length sweep at D768](figures/token_dit_inference_fp32_a_5_one_conditioning_shared_by_the_samples_length.png) <!-- measure_bars -->
+
+### Inference, fp32, A = 1
+
+| (Length, Dimension, dtype) | PyTorch compiled | Anthropic | ours | × PyTorch | × Anthropic |
+|---|---|---|---|---|---|
+| (128, 768, fp32) | 0.139 | 0.104 | **0.083** | 1.67 | 1.26 |
+| (256, 768, fp32) | 0.182 | 0.114 | **0.091** | 2.01 | 1.25 |
+| (384, 768, fp32) | 0.254 | 0.129 | **0.107** | 2.36 | 1.20 |
+| (512, 768, fp32) | 0.336 | 0.134 | **0.118** | 2.84 | 1.13 |
+| (640, 768, fp32) | 0.433 | 0.139 | **0.130** | 3.34 | 1.07 |
+| (768, 768, fp32) | 0.573 | 0.173 | **0.157** | 3.65 | 1.10 |
+
+![Inference, fp32, A = 1, length sweep at D768](figures/token_dit_inference_fp32_a_1_length.png) <!-- measure_bars -->
+
+### Training, bf16, A = 48
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, bf16) | 1.35 | **1.09** | 1.24 |
+| (256, 768, bf16) | 3.25 | **2.15** | 1.51 |
+| (384, 768, bf16) | 5.63 | **3.32** | 1.69 |
+| (512, 768, bf16) | 8.55 | **4.65** | 1.84 |
+| (640, 768, bf16) | 12.76 | **6.09** | 2.10 |
+| (768, 768, bf16) | 16.97 | **7.66** | 2.21 |
+
+![Training, bf16, A = 48, length sweep at D768](figures/token_dit_training_bf16_a_48_length.png) <!-- measure_bars -->
+
+### Training, fp32, A = 48
+
+| (Length, Dimension, dtype) | PyTorch compiled | ours | × PyTorch |
+|---|---|---|---|
+| (128, 768, fp32) | 2.83 | **2.44** | 1.16 |
+| (256, 768, fp32) | 5.66 | **4.64** | 1.22 |
+| (384, 768, fp32) | 9.12 | **7.25** | 1.26 |
+| (512, 768, fp32) | 12.74 | **9.95** | 1.28 |
+| (640, 768, fp32) | 17.87 | **12.99** | 1.38 |
+| (768, 768, fp32) | 24.10 | **16.41** | 1.47 |
+
+![Training, fp32, A = 48, length sweep at D768](figures/token_dit_training_fp32_a_48_length.png) <!-- measure_bars -->
+
+## Head layouts other than 16 x 48 (2026-10-15)
+
+`attn_tf32.cu` is built per layout (`NHP`, `DHP`: heads 12 / 16 / 24, width 32 / 48 / 64; `DM = NHP x DHP`; the head width sets the
+number of 128-B chunks of a q / k row, the PV accumulator size and the wgmma N), the weight-pack kernels take d_single 768 or 1024
+and 12 / 16 / 24 heads, and the fp32 inference gate admits the four `LAYOUTS` entries (24 x 32, 12 x 64 at d 768; 16 x 64 at d 1024).
+Before this the fp32 inference of those layouts either raised (`ValueError: requires 16x48 heads`) or ran at PyTorch speed.
+
+fp32 inference, A = 5 shared cond, PyTorch compiled / ours (ms), CUDA graph, key mask 20 %:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 24 x 32 | 0.511 | 0.208 | 2.45 | 1.547 | 0.395 | 3.92 |
+| 12 x 64 | 0.445 | 0.197 | 2.26 | 1.111 | 0.375 | 2.96 |
+| 16 x 64 (d 1024) | 0.503 | 0.268 | 1.88 | 1.353 | 0.501 | 2.70 |
+
+Accuracy against the fp32 IEEE block: 2.9e-4 at every layout and length (same as 16 x 48). The TF32 attention forward alone:
+5.9e-4 to 7.3e-4 against fp64 at every layout.
+
+bf16 inference at the same layouts (`attn_fwd.cu` built per layout: `DHP` 32 / 48 / 64 -- a new `m64n64k16` PV form for width 64 --
+and `ROW_WIDTH`; the H100 serving gate admits `LAYOUTS`), PyTorch compiled / ours (ms), A = 5 shared cond:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 0.283 | 0.103 | 2.75 | 0.666 | 0.178 | 3.74 |
+| 24 x 32 | 0.308 | 0.106 | 2.90 | 0.813 | 0.191 | 4.26 |
+| 12 x 64 | 0.271 | 0.109 | 2.48 | 0.613 | 0.191 | 3.20 |
+| 16 x 64 (d 1024) | 0.334 | 0.139 | 2.41 | 0.769 | 0.272 | 2.83 |
+
+Accuracy against the fp32 IEEE block: 3.6e-3 at every layout (the bf16 recipe's own error, same as 16 x 48).
+
+fp32 **training** at the same layouts (the native H100 path with the row / pack / final kernels built per layout, `attn_tf32.cu`
+dqb + dkv per layout; the serving gate admits `LAYOUTS` for fp32), PyTorch compiled / ours (ms), A = 48:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 9.08 | 7.15 | 1.26 | 24.10 | 16.36 | 1.47 |
+| 24 x 32 | 10.34 | 7.49 | 1.38 | 30.36 | 17.84 | 1.70 |
+| 12 x 64 | 8.41 | 6.88 | 1.22 | 20.63 | 15.47 | 1.33 |
+| 16 x 64 (d 1024) | 11.40 | 9.61 | 1.19 | 29.44 | 21.71 | 1.36 |
+
+Tests: `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py` -- inference (bf16 and fp32, three length / sample-count / conditioning cells)
+and fp32 training gradients (output, inputs and every parameter against the fp32 IEEE module, bitwise-repeatable step) at all four
+layouts: 32 pass. Bugs found on the way (d 1024 only): `_native_final90` sliced the weight gradients with the module-level D = 768, and
+the cond-LN weight gradient's hierarchical reduction hard-coded 12 groups / 6 per branch (D / 64, D / 128 now).
+
+bf16 **training** at the same layouts (`attn_fwd.cu`, `attn_dq.cu`, `attn_dkv.cu` and `attn_dqb.cu` built per layout: `DHP` 32 / 48 / 64
+-- the width-64 `m64n64k16` PV form is new in the first three, `attn_dqb.cu`'s `DH` / `DM` / `RSQD` / `mma_o` are now macro-driven),
+PyTorch compiled / ours (ms), A = 48:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 5.63 | 3.32 | 1.69 | 16.97 | 7.66 | 2.21 |
+| 24 x 32 | 7.05 | 3.56 | 1.98 | 23.77 | 8.27 | 2.87 |
+| 12 x 64 | 4.62 | 3.44 | 1.34 | 11.23 | 7.71 | 1.46 |
+| 16 x 64 (d 1024) | 6.72 | 4.71 | 1.43 | 18.66 | 10.67 | 1.75 |
+
+The test file also carries the bf16 training gradients (output / inputs / every parameter against the fp32 IEEE module within
+8e-3 / 1.6e-2 / 3.2e-2, bitwise-repeatable step) at all four layouts, L 256 and 384, A = 6: 8 more tests.
+
+All four head layouts are now served natively on H100 for the token DiT in both dtypes, inference and training.
+
+## Head layouts vs Anthropic (2026-10-15, inference)
+
+`bench.py target=dit level=module mode=inference min_seq_len=128 max_seq_len=768 seq_len_step=128`, key mask 20 %, ms per block,
+CUDA graph (ours) / `compile=false` (Anthropic's release, its own invocation; no backward exists). x = Anthropic / ours.
+
+| layout | dtype | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|---|
+| 24 x 32 | bf16 | 5 shared | 1.48 | 1.49 | 1.40 | 1.42 | 1.35 | 1.41 |
+| 24 x 32 | bf16 | 1 | 1.47 | 1.48 | 1.50 | 1.54 | 1.53 | 1.53 |
+| 24 x 32 | fp32 | 5 shared | 1.22 | 1.16 | 1.06 | 1.06 | 0.98 | 0.99 |
+| 24 x 32 | fp32 | 1 | 1.24 | 1.25 | 1.20 | 1.12 | 1.06 | 1.09 |
+| 12 x 64 | bf16 | 5 shared | 1.46 | 1.47 | 1.26 | 1.37 | 1.22 | 1.27 |
+| 12 x 64 | bf16 | 1 | 1.46 | 1.46 | 1.44 | 1.46 | 1.47 | 1.48 |
+| 12 x 64 | fp32 | 5 shared | 1.21 | 1.15 | 1.12 | 1.11 | 1.04 | 1.04 |
+| 12 x 64 | fp32 | 1 | 1.23 | 1.24 | 1.19 | 1.13 | 1.05 | 1.09 |
+| 16 x 64 (d 1024) | bf16 | 5 shared | 1.46 | 1.23 | 1.31 | 1.20 | 1.19 | 1.22 |
+| 16 x 64 (d 1024) | bf16 | 1 | 1.40 | 1.40 | 1.42 | 1.43 | 1.45 | 1.43 |
+| 16 x 64 (d 1024) | fp32 | 5 shared | 1.21 | 1.15 | 1.11 | 1.05 | 1.05 | 1.07 |
+| 16 x 64 (d 1024) | fp32 | 1 | 1.23 | 1.21 | 1.11 | 1.08 | 1.07 | 1.07 |
+
+70 of 72 cells are faster than Anthropic. The two exceptions are 24 x 32 fp32, A = 5, L640 / L768 (0.98x / 0.99x: 0.395 vs 0.391 ms at
+L768): the fp32 attention forward is latency bound there (see "Limits and next"), so it converges to Anthropic's TF32 core.
+
+### fp32 inference cells under 5 % of Anthropic (2026-10-15)
+
+Cells below 1.05x of the table above: 24 x 32 A = 5 L640 / L768 (0.98x / 0.99x), 12 x 64 A = 5 L640 / L768 (1.04x), and 16 x 64 A = 5
+L512 / L640 (1.05x). Measured and rejected as levers:
+
+- The cuBLAS TF32 GEMMs are at 60-68 % of the TF32 tensor peak (qkvg 46 us = 295 TFLOP/s, expand 54 us = 336 TFLOP/s); CUTLASS 3.x
+  TF32 (`KernelTmaWarpSpecialized{Cooperative,Pingpong}`, tiles 128x128 / 128x256 / 256x128, clusters 1x2 / 2x1) measured 0.51-0.95x of
+  cuBLAS on the five GEMM shapes, with 2.6x the error (its wgmma operands are truncated, cuBLAS rounds): not a lever.
+- The fused expand + SwiGLU GEMM saves ~16 us but raises the block error 2.9e-4 -> 4.6e-4 (and is wrong at 24 heads: cache key): off.
+- The 24 x 32 attention forward costs 110 us against 87 us at 16 x 48 for the same MACs (1.5x the softmax work: 24 heads x L^2 exps);
+  configuration sweeps (BLKSM 3 / 4, STAGES 3 / 4, NWG 1, LAZY, PSTAGES) are neutral or slower, `TRUNC_P=1` +3.7 % and `QK_RS=1`
+  +3.3 % at 24 x 32 (not combinable: 1.00x), both worse at 16 x 48 / 12 x 64. Reaching +5 % at 24 x 32 L768 needs ~ -23 us of the
+  110 us attention: a restructured forward (a 128-key block or a ping-pong schedule between the two warpgroups), not a flag.
+
+Further attention-forward experiments for the 24 x 32 cell (kept behind build flags, all default off; L768, A = 5 attention core,
+us, base 110.3 / 87.0 / 87.3 at 24 x 32 / 12 x 64 / 16 x 48):
+
+| flag | 24 x 32 | 12 x 64 | 16 x 48 | what it is |
+|---|---|---|---|---|
+| `FWD_PIPE=1` (software pipeline, now per layout) | 168 (0.66x) | 113 (0.77x) | 133 (0.66x) | QK(n + 1) under softmax(n); 1 CTA / SM |
+| `INPLACE_P=1` | 110.3 (1.00x) | 86.2 (1.01x) | 87.1 (1.00x) | p written back into the score registers |
+| `INPLACE_P=1 BLKSM=3` | 156 (0.71x) | build fails | build fails | 3 CTAs / SM: register cap 75 spills |
+| `MC_BIAS=1` | 112 (0.99x) | 116 (0.76x) | 131 (0.67x) | the bias tile multicast across the A = 5 samples' cluster, read from smem |
+| `PREFETCH_BIAS=1` | 111 (1.00x) | 184 (0.47x) | 123 (0.71x) | next block's bias in registers under the QK / softmax |
+| `TRUNC_P=1` | 106 (1.04x) | 85.4 (1.02x) | 91.6 (0.95x) | p truncated to TF32 by a LOP |
+| `QK_RS=1` | 107 (1.03x) | 150 (0.58x) | 115 (0.76x) | q as register operands of the QK wgmma |
+
+The `BIAS_NOMEM` probe (bias computed instead of loaded: 74 us at 24 x 32) is not a bound on the bias cost: removing the loads by
+multicast through shared memory (`MC_BIAS`) or hiding them under the MMAs (`PREFETCH_BIAS`) gains nothing, so the 1.5x of the probe
+comes from the changed values / code, not from the L2 traffic. The forward is limited by its own dependency chain (QK wgmma ->
+softmax -> PV wgmma per 64-key block, 4 consumer warpgroups per SM), which none of these changes.
+
+ncu of the 24 x 32 forward (L768, A = 5; `--set full`, SASS sampling): 96 registers, 2 CTAs / SM, issue slots 41 % busy, L2 hit rate 71 %
+(the 56 MB bias exceeds the 50 MB L2), DRAM 30 %; warp stalls per issued instruction 9.8 cycles, of which Long Scoreboard 4.5 (the first
+use of the loaded bias: `FADD R24, RZ, R24` carries 18 % of all samples), Wait 1.1, Math Pipe Throttle 0.4, GMMA 0.4. Two measured
+answers to that stall did not help: the bias hidden under the MMAs (`PREFETCH_BIAS`, 1.00x) and the bias delivered through shared
+memory by cluster multicast (`MC_BIAS`, 0.99x); and `BIAS_PF=n`, a one-thread bulk tensor prefetch of the bias tile n blocks ahead into
+L2, is 0.76x at 24 x 32 for every n (0.78-0.87x at the other layouts), so it stays off.
+
+### Anthropic's attention core against ours (2026-10-15, fp32, A = 5, L768, the core alone, CUDA events)
+
+| layout | Anthropic `fpf_apb.apb_views` (Triton, 64 x 64 tiles, 4 warps / CTA, TMA bias) | ours `attn_tf32_fwd` |
+|---|---|---|
+| 16 x 48 | 124 us (head dim padded to 64) | **87 us** |
+| 24 x 32 | **94 us** | 110 us |
+| 12 x 64 | 93 us | **87 us** |
+
+ncu at 24 x 32: Anthropic 113 us / 32.0 M instructions / 108 registers / 4 CTAs of 128 threads / 599 K global load requests; ours 129 us /
+34.6 M / 96 registers / 2 CTAs of 288 threads / 1.15 M requests (both under ncu's locked clocks). Same occupancy (4 warpgroups an SM) and
+the same issue-slot utilisation (41 %); the 12 % gap is 8 % fewer instructions and a shorter bias-load stall. That is why the 24 x 32
+block is 0.99x of Anthropic's at L768 while every other cell of the table is ahead. Two attempts to close it: FWD_BN = 128 (halve the
+per-block fixed work) *timed* 90 us but is wrong -- the 96-register cap spills the wgmma accumulators (ptxas C7512, 450 B spill) and the
+output is garbage; it is now blocked by a static_assert. Removing the bias seed FADD: no change.
+
+### fp32 inference after the fused expand (2026-10-15)
+
+Two changes, both accuracy-neutral (block error 2.92e-4 at 16 / 24 / 12 heads, as before):
+
+- `resgate_adaln_rows` rounds `xa` to TF32 the way `cvt.rna.tf32.f32` does (`rna_tf32`: add half an ulp of the kept bits, clear the rest)
+  when the fused expand will read it, and the weights are rounded once per pack (`_tf32_wab`). The TMA-fed wgmma operands truncate, so the
+  earlier fused-expand attempt (error 2.9e-4 -> 4.6e-4) had read an unrounded `xa`; with rounded operands the products are the ones
+  cuBLAS forms. `_FP32_SWIGLU_GEMM` is on: expand + SwiGLU as one GEMM, `[a | b]` never reaches HBM, for M >= 768 rows
+  (below it cuBLAS + the SwiGLU rows wins: 128 x 256 tiles leave SMs idle). -16 us a block at A = 5, L768.
+- the forward's instruction mix (R2UR descriptors made warp-uniform, `tf32_pos` for the probabilities) is 32 % shorter (37.9 -> 25.6 M
+  warp instructions at 24 x 32) -- and not faster: the kernel is bound by latency, not by issue slots.
+
+Ours against Anthropic's block, fp32 inference, 20 % key mask, x = Anthropic / ours (higher is faster):
+
+| layout | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|
+| 16 x 48 | 5 shared | 1.24 | 1.26 | 1.14 | 1.18 | 1.10 | 1.17 |
+| 16 x 48 | 1 | 1.26 | 1.27 | 1.21 | 1.13 | 1.09 | 1.17 |
+| 24 x 32 | 5 shared | 1.23 | 1.20 | 1.06 | 1.12 | **1.00** | **1.04** |
+| 24 x 32 | 1 | 1.24 | 1.27 | 1.21 | 1.14 | 1.08 | 1.15 |
+| 12 x 64 | 5 shared | 1.21 | 1.19 | 1.11 | 1.18 | 1.05 | 1.11 |
+| 12 x 64 | 1 | 1.23 | 1.24 | 1.19 | 1.12 | 1.05 | 1.14 |
+| 16 x 64 (d 1024) | 5 shared | 1.21 | 1.15 | 1.22 | 1.09 | 1.09 | 1.13 |
+| 16 x 64 (d 1024) | 1 | 1.23 | 1.21 | 1.11 | 1.08 | 1.07 | 1.09 |
+
+Everything is >= 1.05 except 24 x 32, A = 5, L640 (1.00) and L768 (1.04). There the attention core is 110 us against Anthropic's 94 us;
+at L640 the grid (600 CTAs on 264 slots) also fills its third wave to 27 %.
+Tried and not kept (all measured): `FWD_BN=128` (wrong: spilled accumulators, now blocked), `BIAS_AFTER` (the bias added after the QK
+wgmma: same time, the stall moves to the add), `BIAS_L1PF` (prefetch.global.L1: 0.85x), `PREFETCH_BIAS` + `INPLACE_P` (0.93x), `HT = 64`
+fused tiles (more tiles, 91 % last wave, but 24 x 32 L384 1.07 -> 1.04 and L640 1.00 -> 0.96).
+
+### bf16 after the 2026-10-15 changes (re-measured)
+
+Inference, x = Anthropic / ours (CUDA graph; Anthropic `compile=false`), 20 % key mask; every one of the 48 cells >= 1.19x:
+
+| layout | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|
+| 16 x 48 | 5 shared | 1.48 | 1.48 | 1.39 | 1.44 | 1.36 | 1.39 |
+| 16 x 48 | 1 | 1.47 | 1.48 | 1.49 | 1.55 | 1.53 | 1.57 |
+| 24 x 32 | 5 shared | 1.48 | 1.49 | 1.39 | 1.42 | 1.36 | 1.41 |
+| 24 x 32 | 1 | 1.46 | 1.47 | 1.50 | 1.54 | 1.52 | 1.52 |
+| 12 x 64 | 5 shared | 1.46 | 1.47 | 1.27 | 1.37 | 1.23 | 1.26 |
+| 12 x 64 | 1 | 1.46 | 1.46 | 1.43 | 1.47 | 1.47 | 1.48 |
+| 16 x 64 (d 1024) | 5 shared | 1.44 | 1.23 | 1.32 | 1.20 | 1.19 | 1.22 |
+| 16 x 64 (d 1024) | 1 | 1.41 | 1.41 | 1.41 | 1.43 | 1.44 | 1.43 |
+
+Training (A = 48), x = PyTorch compiled / ours (no Anthropic backward exists):
+
+| layout | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| 16 x 48 | 1.24 | 1.51 | 1.70 | 1.85 | 2.09 | 2.13 |
+| 24 x 32 | 1.33 | 1.75 | 2.00 | 2.24 | 2.59 | 2.87 |
+| 12 x 64 | 1.11 | 1.26 | 1.33 | 1.44 | 1.40 | 1.45 |
+| 16 x 64 (d 1024) | 1.10 | 1.30 | 1.42 | 1.51 | 1.69 | 1.74 |

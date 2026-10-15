@@ -472,19 +472,20 @@ def _fwd_launch(
     return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L)
 
 
-def forward(qs, kb, vb, bb, km, A, L, qkvg=None):
+def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
     """The forward kernel on prepared operands, no op wrapper (for callers that are themselves one opaque op, as the fused
     token DiT training block): qs = q log2 e / sqrt 48, kb, vb [A L, 768] bf16 contiguous; bb [16, L, L] bf16 in log2
     units; km None or an additive key mask [A, L] fp32. Returns O fp32 [A L, 768] and the LSE [A, 16, L] (log2); with
     ``qkvg`` (the block's [A L, 3072] q|k|v|g GEMM output) og = sigmoid(g) O in bf16 instead of O -- all the token DiT
     block keeps (its backward takes D = rowsum(dO O) = rowsum(d og * og))."""
-    lse = torch.empty(A, H, L, device=qs.device, dtype=torch.float32)
+    lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
+    ext = _ext("attn_fwd", fwd_defs(nh, dh))
     if qkvg is not None:
-        og = torch.empty(A * L, H * D, device=qs.device, dtype=torch.bfloat16)
-        _ext("attn_fwd").attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
+        og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
+        ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
         return og, lse
-    o = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
-    _ext("attn_fwd").attn_fwd(qs, kb, vb, bb, km, o, lse)
+    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
     return o, lse
 
 
@@ -501,83 +502,124 @@ def inference_core_supported(
     )
 
 
-def gated_inference(qkvg, bias_all, block, S):
+def fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """Build defines of ``attn_fwd.cu`` for a token head layout (default 16 x 48 builds without them)."""
+    return () if (nh, dh) == (H, D) else (f"DHP={dh}", f"ROW_WIDTH={nh * dh}")
+
+
+def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D):
     """The token DiT step's inference core (attn_fwd.cu, GATED): qkvg [S L, 3072] bf16 with q in exp2 units, bias_all
     [nb 16, L, L] bf16 in log2 units (masked keys -inf); writes sigmoid(g) softmax(q k^T + bias) v over q for ``block``'s
     slice of the bias."""
-    _ext("attn_fwd").attn_inf(qkvg, bias_all, int(block), int(S))
+    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all, int(block), int(S))
+
+
+def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """Build defines of ``attn_tf32.cu`` for a head layout (the default 16 x 48 builds without them)."""
+    return () if (nh, dh) == (H, D) else (f"NHP={nh}", f"DHP={dh}")
+
+
+TF32_LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
+
+
+def tf32_fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """The forward's build: ``tf32_defs`` plus the tuning of the layout (the backward keeps ``tf32_defs``: one warpgroup per CTA and a
+    128-key block are forward-only). Width 32 (24 x 32): 128-key blocks, one warpgroup per CTA, 3 CTAs / SM, p written back into the
+    score registers -- 110 -> 90 us at L768, A = 5 (the other widths measured slower with it)."""
+    extra = ()  # (the width-32 candidate "FWD_BN=128", "NWG=1", "BLKSM=3", "INPLACE_P=1" is timed 90 us but not yet correct: off)
+    return (*tf32_defs(nh, dh), *extra)
 
 
 def tf32_inference_core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
-    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, 16 heads x 48, L a multiple of 128, H100.
+    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, h heads of width d / h (``TF32_LAYOUTS``; ``d`` is the attention width), L a multiple of 128, H100.
     ``settings.augattn_tf32_sm90 = False`` keeps the Triton core."""
     return (
         settings.current().augattn_tf32_sm90
         and dtype is torch.float32
-        and (d, h) == (H * D, H)
+        and h > 0
+        and d % h == 0
+        and (h, d // h) in TF32_LAYOUTS
         and L % 128 == 0
         and _is_hopper(device_index)
     )
 
 
-def tf32_gated_inference(qkg, vt, bias_all, block, S, goff):
+def tf32_gated_inference(qkg, vt, bias_all, block, S, goff, nh=H, dh=D):
     """The fp32 step's inference core (attn_tf32.cu, TF32 wgmma): qkg [S L, >= 2304] fp32 with q | k at columns 0 | 768 (q
     in exp2 units) and g at ``goff``; vt = v^T [768, S L]; bias_all [nb 16, L, L] fp32 in log2 units with its key columns in
     ``conditioned_transition.cuda.key_perm`` order (masked keys -inf). Writes sigmoid(g) softmax(q k^T + bias) v over q."""
-    _ext("attn_tf32").attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
+    _ext("attn_tf32", tf32_fwd_defs(nh, dh)).attn_tf32_inf(qkg, vt, bias_all, int(block), int(S), int(goff))
 
 
-def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None):
+def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
     """The TF32 training forward: q (exp2 units), k [A L, 768] fp32, vt = v^T [768, A L]; bias [16, L, L] fp32 (log2 units)
     and km [A, L] additive or None, both key-permuted (``key_perm``). Returns O [A L, 768] fp32 and the LSE [A, 16, L]; with
     ``qkvg`` [A L, 3072] og = sigmoid(g) O instead of O (as ``forward``)."""
-    o = torch.empty(A * L, H * D, device=q.device, dtype=torch.float32)
-    lse = torch.empty(A, H, L, device=q.device, dtype=torch.float32)
+    o = torch.empty(A * L, nh * dh, device=q.device, dtype=torch.float32)
+    lse = torch.empty(A, nh, L, device=q.device, dtype=torch.float32)
+    ext = _ext("attn_tf32", tf32_fwd_defs(nh, dh))
     if qkvg is not None:
-        _ext("attn_tf32").attn_tf32_fwd_og(q, k, vt, bias, km, qkvg, o, lse)
+        ext.attn_tf32_fwd_og(q, k, vt, bias, km, qkvg, o, lse)
     else:
-        _ext("attn_tf32").attn_tf32_fwd(q, k, vt, bias, km, o, lse)
+        ext.attn_tf32_fwd(q, k, vt, bias, km, o, lse)
     return o, lse
 
 
 def tf32_backward(
-    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L
+    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D
 ):
     """The TF32 attention backward (attn_tf32.cu dqb + dkv). qs (q in exp2 units), k, v, dob = dO [A L, 768] fp32 and their
     transposes qt, kt, dot [768, A L]; bias_p the forward's key-permuted bias [16, L, L]; bias_tp [16, L(key), L] the bias
     transposed with its query columns permuted; lse, dd [A, 16, L] and lse_p, dd_p their query-permuted copies; km / km_p the
     natural / permuted additive key masks (or None). Returns dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias
     [16, L, L] fp32 with its key columns still permuted (``key_perm`` order)."""
-    ext = _ext("attn_tf32")
+    ext = _ext("attn_tf32", tf32_defs(nh, dh))
     dq, dk, dv = (torch.empty_like(qs) for _ in range(3))
-    db_p = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-    ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, db_p)
+    dbc = torch.zeros(tf32_dqb_chunks(A), nh, L, L, device=qs.device, dtype=torch.float32)
+    ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, dbc)
+    db_p = dbc.sum(0)  # the chunk buffers in order: bitwise repeatable
     ext.attn_tf32_dkv(qs, dob, qt, dot, k, v, bias_tp, lse_p, dd_p, km, dk, dv)
     return dq, dk, dv, db_p
 
 
-def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L):
+def tf32_dqb_chunks(A: int) -> int:
+    """Partial dbias buffers of the TF32 ``attn_tf32_dqb`` (see ``dqb_chunks``): the largest divisor of A up to 4."""
+    return max(c for c in (1, 2, 3, 4) if A % c == 0)
+
+
+def dqb_chunks(A: int) -> int:
+    """Partial dbias buffers of ``attn_dqb``: each CTA adds its A / 3 / C sample groups to ONE buffer in order (the TMA reduce-adds
+    of two CTAs into one buffer land in schedule order: not bitwise repeatable); the C buffers are summed in order afterwards.
+    The largest divisor of A / 3 up to 4: C x 16 x (L / 64) CTAs, 4 buffers = 4 x 38 MB fp32 at L768."""
+    groups = A // 3
+    return max(c for c in (1, 2, 3, 4) if groups % c == 0)
+
+
+def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     """dQ, dK, dV [A L, 768] fp32 (with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
     a transposed view when A is not a multiple of 3). dob [A L, 768] bf16 and dd = rowsum(dO O) [A, 16, L] fp32; the other operands as ``forward`` took them."""
-    dq = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
+    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
+    ld = fwd_defs(nh, dh)
     if (
         A % 3 == 0
     ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
-        db = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-        _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, db)
-        _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
+        chunks = dqb_chunks(A)
+        dbc = torch.zeros(chunks, nh, L, L, device=qs.device, dtype=torch.float32)
+        _ext("attn_dqb", ld).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
+        db = dbc.sum(0)  # the chunks in order: bitwise repeatable
+        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(
             qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
         )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *ld)).attn_dq(
         qs, kb, vb, dob, bb, km, lse, dd, dq
     )
-    dbt = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-    _ext("attn_dkv").attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
+    dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
+    _ext("attn_dkv", ld).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
 
 

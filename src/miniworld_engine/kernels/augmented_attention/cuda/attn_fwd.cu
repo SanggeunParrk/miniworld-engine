@@ -70,7 +70,7 @@ using namespace tmn; using namespace tmn::sm90;
 constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
 constexpr int NCW = NWG * APB_KS;                // consumer warpgroups
 static_assert(APB_KS == 1 || FCLS == 1, "key splits do not combine with clusters");
-static_assert(DH == 16 || DH == 32 || DH == 48, "unsupported head width");
+static_assert(DH == 16 || DH == 32 || DH == 48 || DH == 64, "unsupported head width");
 static_assert(DM % DH == 0, "row width must contain complete heads");
 constexpr float LOG2E = 1.4426950408889634f;
 constexpr float LN2F = 0.6931471805599453f;
@@ -95,6 +95,10 @@ TMN_DEVI void mma_o(float (&d)[DH / 2], const uint32_t (&a)[4], uint64_t b) {
 #if DHP == 48
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n48k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, {%24,%25,%26,%27}, %28, p, 1, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#elif DHP == 64
+  asm volatile("wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, {%32,%33,%34,%35}, %36, 1, 1, 1, 1;"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
 #elif DHP == 32
   asm volatile("wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, 1, 1, 1, 1;"

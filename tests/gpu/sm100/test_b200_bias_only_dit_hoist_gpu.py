@@ -72,10 +72,17 @@ def tf32(on):
         torch.backends.cuda.matmul.allow_tf32 = old
 
 
+def hopper_serves_layout(n_head, d_head, dtype=None):
+    """Hopper's fp32 (TF32 wgmma) block kernels serve 16 x 48 only; the other fp32 layouts take the module path (the hoist itself
+    serves every layout, and bf16 serves them all)."""
+    if torch.cuda.get_device_capability() == (9, 0) and dtype is F32 and (n_head, d_head) != (16, 48):
+        pytest.skip("Hopper fp32 block kernels: 16 x 48 only")
+
+
 @pytest.fixture(autouse=True)
 def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
+    if torch.cuda.get_device_capability() not in ((10, 0), (9, 0)):
+        pytest.skip("Blackwell (sm_100) or Hopper (sm_90) required")
     old = settings.configure(engine_backend="auto")
     old_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -363,6 +370,7 @@ STACK = [
 def test_hoisted_stack_every_gradient_against_fp64(
     nb, L, A, masked, n_head, d_head, dtype
 ):
+    hopper_serves_layout(n_head, d_head, dtype)
     """nb blocks on the hoisted biases (fused hoist + fused blocks; no PyTorch path runs) against the stack in fp64 (per-block bias).
 
     3 blocks: the output and every gradient within the training files' bounds against the PyTorch stack in the same dtype (bf16 1.1x
@@ -459,6 +467,7 @@ def test_hoisted_stack_every_gradient_against_fp64(
 def test_inference_on_hoisted_biases_matches_the_per_pair_path(
     masked, n_head, d_head, dtype
 ):
+    hopper_serves_layout(n_head, d_head, dtype)
     """No autograd: blocks on hoisted biases (P = softmax(bias) per call) against the same blocks on the pair (P cached per pair):
     within the inference bounds of the per-pair path against fp64 (bf16 1.1x + 1e-4, fp32 1.5x + 1e-3)."""
     nb, L, S = 3, 384, 5
@@ -512,6 +521,7 @@ def test_hoisted_stack_under_checkpointing_is_bit_identical(dtype):
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_hoisted_steps_bit_identical_with_a_poisoned_allocator(n_head, d_head, dtype):
+    hopper_serves_layout(n_head, d_head, dtype)
     """Twenty training steps of a hoisted 3-block stack (forward + backward, the shared bias-gradient buffer included), the
     allocator's free memory filled with NaN before each: every gradient finite and bit-identical across the steps."""
     _, fast = stacks(3, n_head, d_head, seed=11)
@@ -534,6 +544,7 @@ def test_hoisted_steps_bit_identical_with_a_poisoned_allocator(n_head, d_head, d
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
 def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
+    hopper_serves_layout(n_head, d_head, dtype)
     """The captured forward / backward of one block on a hoisted bias (under static weights: no repack) against the same block on the
     pair: the forward launches one kernel fewer (no pair_bias), the backward has no pair_bias_bwd (nor its pair_bias_bwd_fin merge)
     and exactly one finalize: as many launches as the pair's backward minus its pair kernels, plus finalize where the pair's was
@@ -589,6 +600,7 @@ def test_hoisted_block_launches_no_pair_kernels(dtype, n_head, d_head):
 @pytest.mark.parametrize("dtype", [BF, F32])
 @pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (24, 32)])
 def test_hoisted_stack_graph_capture_and_steady_memory(dtype, n_head, d_head):
+    hopper_serves_layout(n_head, d_head, dtype)
     """A hoisted 3-block training step: after two warm-up steps every further step leaves memory_reserved unchanged (the shared
     bias-gradient buffer is made in the first block backward and released by the hoist's); a captured step replays to the eager
     gradients (bf16 2e-3, fp32 1e-4: cuBLAS may pick other algorithms under capture)."""

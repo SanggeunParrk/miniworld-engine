@@ -28,7 +28,12 @@ using namespace tdr;
 // One block per row, one float4 per thread (NT = cols / 4 threads): a row of 768 is 192 threads, so even the step's
 // smallest M (1920 rows at L = 384, S = 5) puts ~80 warps on every SM. One warp per row left ~13 and was latency-bound.
 // xhat = LN(x) of the row, then out = xhat * sigmoid(ms) + mb; x is this thread's float4.
-template <int NT, typename GT, typename OutT>
+// x rounded to TF32 as cvt.rna.tf32.f32 does (half away from zero on the magnitude: add half an ulp of the kept bits, clear the rest;
+// inf and nan keep their patterns): the operand the next TF32 GEMM would round to anyway -- so a GEMM that reads its operands
+// unrounded (the TMA-fed wgmma kernels truncate) sees the bits cuBLAS's rounding would give
+__device__ __forceinline__ float rna_tf32(float v) { return __uint_as_float((__float_as_uint(v) + 0x1000u) & 0xffffe000u); }
+
+template <int NT, typename GT, typename OutT, bool RND = false>
 __device__ __forceinline__ void adaln_store(float4 x, float eps, const GT* ms, const GT* mb, OutT* out, float* red) {
   constexpr int D = NT * 4;
   const float mean = block_sum<NT>(x.x + x.y + x.z + x.w, red) / D;
@@ -40,6 +45,7 @@ __device__ __forceinline__ void adaln_store(float4 x, float eps, const GT* ms, c
   o.y = b * rstd * sigm(m.y) + h.y;
   o.z = c * rstd * sigm(m.z) + h.z;
   o.w = d * rstd * sigm(m.w) + h.w;
+  if constexpr (RND && std::is_same<OutT, float>::value) { o.x = rna_tf32(o.x); o.y = rna_tf32(o.y); o.z = rna_tf32(o.z); o.w = rna_tf32(o.w); }
   V4<OutT>::store(out + col, o);
 }
 
@@ -101,7 +107,7 @@ __global__ void __launch_bounds__(256) layernorm384_rows_kernel(const ZT* __rest
   }
 }
 
-template <int NT, typename YT, typename GT, typename OutT>
+template <int NT, typename YT, typename GT, typename OutT, bool RND = false>
 __global__ void __launch_bounds__(NT) resgate_adaln_rows_kernel(float* __restrict__ X, const YT* __restrict__ Y,
     const GT* __restrict__ GL, const GT* __restrict__ MS, const GT* __restrict__ MB, OutT* __restrict__ OUT, int L,
     long sx, long sy, long sgl, long sms, long smb, float eps, bool has_adaln) {
@@ -111,7 +117,7 @@ __global__ void __launch_bounds__(NT) resgate_adaln_rows_kernel(float* __restric
   float4 x = V4<float>::load(X + row * sx + col), y = V4<YT>::load(Y + row * sy + col), g = V4<GT>::load(GL + tok * sgl + col);
   x.x += sigm(g.x) * y.x; x.y += sigm(g.y) * y.y; x.z += sigm(g.z) * y.z; x.w += sigm(g.w) * y.w;
   V4<float>::store(X + row * sx + col, x);
-  if (has_adaln) adaln_store<NT>(x, eps, MS + tok * sms, MB + tok * smb, OUT + row * (NT * 4), red);
+  if (has_adaln) adaln_store<NT, GT, OutT, RND>(x, eps, MS + tok * sms, MB + tok * smb, OUT + row * (NT * 4), red);
 }
 
 template <typename T>
@@ -250,8 +256,8 @@ void adaln_rows(at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int6
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional<at::Tensor> ms, c10::optional<at::Tensor> mb,
-                        at::Tensor out, int64_t L, double eps) {
+void resgate_adaln_rows_impl(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional<at::Tensor> ms, c10::optional<at::Tensor> mb,
+                             at::Tensor out, int64_t L, double eps, bool tf32_round) {
   const int64_t M = x.size(0), D = x.size(1);
   TORCH_CHECK(x.scalar_type() == at::kFloat, "resgate_adaln_rows: fp32 x");
   const bool has = ms.has_value();
@@ -266,14 +272,28 @@ void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional
     TDR_DISPATCH(gl.scalar_type(), GT, [&] {
       TDR_DISPATCH(out.scalar_type(), OT, [&] {
         TDR_WIDTH(D, NT, [&] {
-          resgate_adaln_rows_kernel<NT, YT, GT, OT><<<(unsigned)M, NT, 0, st>>>(ptr<float>(x), ptr<const YT>(y),
-              ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), (int)L, x.stride(0), y.stride(0),
-              gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has);
+          if (tf32_round)
+            resgate_adaln_rows_kernel<NT, YT, GT, OT, true><<<(unsigned)M, NT, 0, st>>>(ptr<float>(x), ptr<const YT>(y),
+                ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), (int)L, x.stride(0), y.stride(0),
+                gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has);
+          else
+            resgate_adaln_rows_kernel<NT, YT, GT, OT, false><<<(unsigned)M, NT, 0, st>>>(ptr<float>(x), ptr<const YT>(y),
+                ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), (int)L, x.stride(0), y.stride(0),
+                gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has);
         });
       });
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional<at::Tensor> ms, c10::optional<at::Tensor> mb,
+                        at::Tensor out, int64_t L, double eps) {
+  resgate_adaln_rows_impl(x, y, gl, ms, mb, out, L, eps, false);
+}
+void resgate_adaln_rows_r(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional<at::Tensor> ms, c10::optional<at::Tensor> mb,
+                          at::Tensor out, int64_t L, double eps) {
+  resgate_adaln_rows_impl(x, y, gl, ms, mb, out, L, eps, true);   // out rounded to TF32 (cvt.rna) where it is fp32
 }
 
 void adaln_in_rows(at::Tensor xin, at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t L, double eps) {
@@ -424,6 +444,7 @@ __device__ float pack_read(const TokenPack& p,int j,int i) {
   return p.fp32[j] ? static_cast<const float*>(p.src[j])[i]
                   : __bfloat162float(static_cast<const __nv_bfloat16*>(p.src[j])[i]);
 }
+template <int D>
 __global__ void token_pack_kernel(TokenPack p) {
   int block=blockIdx.x, out=0;
   for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
@@ -434,7 +455,7 @@ __global__ void token_pack_kernel(TokenPack p) {
     const int i=first+lane;if(i>=p.size[out])continue;
     // The host admits only these widths. Constant integer divisions keep
     // live master-weight staging bandwidth-bound instead of divide-bound.
-    float v=0.f;constexpr int D=768,DC=384;
+    float v=0.f;constexpr int DC=384;
     if(out==0) {
       int segment=i/(D*DC),c=i%DC,j=i%(D*DC);
       int wi=segment==0?7:segment==1?9:segment==2?15:17;
@@ -464,7 +485,8 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
-  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
+              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
   TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
@@ -483,7 +505,7 @@ std::vector<at::Tensor> token_pack(std::vector<at::Tensor> weights,int64_t heads
     TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
     p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
   }
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_kernel));
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,D==768?token_pack_kernel<768>:token_pack_kernel<1024>));
   void* args[]={&p};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
@@ -499,13 +521,14 @@ __device__ __forceinline__ float4 pack_mul4(float4 a, float4 b) {
 __device__ __forceinline__ float4 pack_scale4(float4 a,float b) {
   return make_float4(a.x*b,a.y*b,a.z*b,a.w*b);
 }
+template <int D>
 __global__ void token_pack_vector_kernel(TokenPack p) {
   int block=blockIdx.x, out=0;
   for(;out<13;++out) {if(block<p.blocks[out])break;block-=p.blocks[out];}
   if(out==13)return;
   const int i=(block*256+threadIdx.x)*4;
   if(i>=p.size[out])return;
-  constexpr int D=768,DC=384;
+  constexpr int DC=384;
   float4 v=make_float4(0.f,0.f,0.f,0.f);
   if(out==0) {
     const int s=i/(D*DC),j=i%(D*DC),c=i%DC;
@@ -538,7 +561,8 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
   TORCH_CHECK(weights.size()==(qk?25:23),"token DiT leaf count");
   const at::cuda::CUDAGuard guard(weights[0].device());
   const int D=weights[0].size(1),DC=weights[6].numel(),HH=weights[20].size(0);
-  TORCH_CHECK(D==768 && DC==384 && heads==16 && HH%128==0,"Hopper token pack requires 768/384, 16 heads, hidden multiple of 128");
+  TORCH_CHECK(((D==768 && (heads==12 || heads==16 || heads==24)) || (D==1024 && heads==16)) && DC==384 && HH%128==0,
+              "Hopper token pack requires 768 x (12, 16, 24 heads) or 1024 x 16 heads, cond 384, hidden multiple of 128");
   TokenPack p{};p.D=D;p.DC=DC;p.H=heads;p.HH=HH;p.qs=qs;p.qk=qk;p.out_fp32=out_fp32;
   for(int j=0;j<(int)weights.size();++j) {
     const auto& t=weights[j];
@@ -557,7 +581,7 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
     TORCH_CHECK(outputs.back().numel()<=2147483647,"token pack requires 32-bit buffer offsets");
     p.dst[j]=outputs.back().data_ptr();p.size[j]=outputs.back().numel();p.blocks[j]=(p.size[j]+1023)/1024;blocks+=p.blocks[j];
   }
-  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,token_pack_vector_kernel));
+  cudaKernel_t kernel;C10_CUDA_CHECK(cudaGetKernel(&kernel,D==768?token_pack_vector_kernel<768>:token_pack_vector_kernel<1024>));
   void* args[]={&p};
   C10_CUDA_CHECK(cudaLaunchKernel((void*)kernel,dim3(blocks),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return outputs;
@@ -566,9 +590,10 @@ std::vector<at::Tensor> token_pack_vector(std::vector<at::Tensor> weights,int64_
 
 
 std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t heads,bool qk,bool fp32) {
- TORCH_CHECK(weights.size()==(qk?25:23)&&heads==16,"native inference pack layout");
+ TORCH_CHECK(weights.size()==(qk?25:23)&&(heads==12||heads==16||heads==24),"native inference pack layout");
  const at::cuda::CUDAGuard guard(weights[0].device());
- const int D=768,DC=384,HH=weights[20].size(0);
+ const int D=weights[0].size(1),DC=384,HH=weights[20].size(0);
+ TORCH_CHECK(D==768||(D==1024&&heads==16),"native inference pack width");
  std::vector<std::vector<int64_t>> shapes={{4*D,DC},{4*D},{2*D,DC},{2*D},{heads,128},{4*D,D},{4*D},{D,D},
   {fp32?2*HH:0,D},{D,HH},{qk?D/heads:0},{qk?D/heads:0},{fp32?0:2*HH,D}};
  std::vector<at::Tensor> out;
@@ -582,7 +607,8 @@ std::vector<at::Tensor> token_alloc90(std::vector<at::Tensor> weights,int64_t he
 void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,int64_t heads,bool qk,double qs,bool fp32,int begin,int end) {
  TORCH_CHECK(out.size()==13&&weights.size()==(qk?25:23)&&0<=begin&&begin<end&&end<=13,"native inference pack stage");
  const at::cuda::CUDAGuard guard(weights[0].device());
- TokenPack p{};p.D=768;p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ TokenPack p{};p.D=weights[0].size(1);p.DC=384;p.H=heads;p.HH=weights[20].size(0);p.qs=qs;p.qk=qk;p.out_fp32=fp32;
+ TORCH_CHECK(p.D==768||(p.D==1024&&heads==16),"native inference pack width");
  for(int j=0;j<(int)weights.size();++j){
   TORCH_CHECK(weights[j].device()==weights[0].device()&&weights[j].is_contiguous()
     &&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native inference pack leaf");
@@ -593,7 +619,8 @@ void token_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,i
   const int a=o==7?5:o==9?22:-1;if(a>=0&&p.fp32[a]==fp32)continue;
   p.dst[o]=out[o].data_ptr();p.size[o]=out[o].numel();p.blocks[o]=(p.size[o]+1023)/1024;blocks+=p.blocks[o];
  }
- token_pack_vector_kernel<<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ if(p.D==768)token_pack_vector_kernel<768><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
+ else token_pack_vector_kernel<1024><<<blocks,256,0,at::cuda::getCurrentCUDAStream()>>>(p);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -609,6 +636,91 @@ void token_mask90(at::Tensor bias,at::Tensor mask) {
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ---- fp32 pair bias in ONE pass over the pair ------------------------------------------------------------------------------
+// out[h, i L + pos(j)] = (Wf[h] . LN(z[i L + j])) for h < NH, -inf where MASK[j] is false; z [R, 128] fp32, Wf [NH, 128] fp32 (the
+// LayerNorm weight and any log2 e scale folded in). One thread per pair row, a 128-row tile through shared memory (read once,
+// coalesced), the 16 projections on the FMA pipe in exact fp32. ``perm``: pos(j) is the H100 TF32 attention core's key order
+// (position 2 (j & 3) + (j & 7) / 4 of each group of 8). LN + a cuBLAS GEMM read the pair three times (302 MB each at fp32).
+template <int NH>
+__global__ void __launch_bounds__(128, 3) pair_bias_f32_k(const float* __restrict__ Z, const float* __restrict__ WF,
+    float* __restrict__ OUT, const bool* __restrict__ MASK, long R, int L, float eps, bool perm) {
+  constexpr int TR = 128, PITCH = 129;
+  extern __shared__ float pbs[];
+  float* zs = pbs;                        // [TR][PITCH]
+  float* wt = pbs + TR * PITCH;           // [128][NH]
+  const int tid = threadIdx.x;
+  for (int i = tid; i < NH * 128; i += 128) { const int h = i / 128, c = i % 128; wt[c * NH + h] = WF[i]; }
+  for (long r0 = (long)blockIdx.x * TR; r0 < R; r0 += (long)gridDim.x * TR) {
+    __syncthreads();
+    const int nr = (int)min((long)TR, R - r0);
+#pragma unroll 4
+    for (int k = 0; k < 32; ++k) {
+      const int idx = k * 128 + tid, row = idx >> 5, c4 = idx & 31;
+      if (row < nr) {
+        const float4 v = *reinterpret_cast<const float4*>(Z + (r0 + row) * 128 + c4 * 4);
+        float* d = zs + row * PITCH + c4 * 4;
+        d[0] = v.x; d[1] = v.y; d[2] = v.z; d[3] = v.w;
+      }
+    }
+    __syncthreads();
+    if (tid < nr) {
+      const float* zr = zs + tid * PITCH;
+      float s4[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll 8
+      for (int c = 0; c < 128; ++c) s4[c & 3] += zr[c];
+      const float mean = ((s4[0] + s4[1]) + (s4[2] + s4[3])) * (1.f / 128);
+      float q4[4] = {0.f, 0.f, 0.f, 0.f};
+#pragma unroll 8
+      for (int c = 0; c < 128; ++c) { const float d = zr[c] - mean; q4[c & 3] += d * d; }
+      const float rstd = rsqrtf(((q4[0] + q4[1]) + (q4[2] + q4[3])) * (1.f / 128) + eps);
+      float acc[NH];
+#pragma unroll
+      for (int h = 0; h < NH; ++h) acc[h] = 0.f;
+#pragma unroll 2
+      for (int c = 0; c < 128; ++c) {
+        const float xh = (zr[c] - mean) * rstd;
+        const float4* w4 = reinterpret_cast<const float4*>(wt + c * NH);
+#pragma unroll
+        for (int q = 0; q < NH / 4; ++q) {
+          const float4 w = w4[q];
+          acc[4 * q + 0] = fmaf(xh, w.x, acc[4 * q + 0]); acc[4 * q + 1] = fmaf(xh, w.y, acc[4 * q + 1]);
+          acc[4 * q + 2] = fmaf(xh, w.z, acc[4 * q + 2]); acc[4 * q + 3] = fmaf(xh, w.w, acc[4 * q + 3]);
+        }
+      }
+      const long rr = r0 + tid;
+      const int j = (int)(rr % L);
+      const long i = rr / L;
+      const int p = perm ? (j - (j & 7) + 2 * (j & 3) + ((j & 7) >> 2)) : j;
+      const bool live = MASK == nullptr || MASK[j];
+      const long col = i * L + p;
+#pragma unroll
+      for (int h = 0; h < NH; ++h) OUT[(long)h * R + col] = live ? acc[h] : -INFINITY;
+    }
+  }
+}
+
+void pair_bias_f32_fused(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional<at::Tensor> mask, int64_t L, double eps, bool perm) {
+  TORCH_CHECK(z.is_cuda() && z.scalar_type() == at::kFloat && z.dim() == 2 && z.size(1) == 128 && z.is_contiguous(), "pair_bias_f32_fused: z [R, 128] fp32");
+  TORCH_CHECK(wf.scalar_type() == at::kFloat && wf.is_contiguous() && wf.dim() == 2 && wf.size(0) == 16 && wf.size(1) == 128, "pair_bias_f32_fused: Wf [16, 128] fp32");
+  const int64_t R = z.size(0);
+  TORCH_CHECK(R == L * L && out.scalar_type() == at::kFloat && out.is_contiguous() && out.numel() == 16 * R, "pair_bias_f32_fused: out [16, L L] fp32");
+  const bool* mp = nullptr;
+  if (mask.has_value()) {
+    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "pair_bias_f32_fused: mask [L] bool");
+    mp = mask->data_ptr<bool>();
+  }
+  const at::cuda::CUDAGuard g(z.device());
+  const size_t smem = (size_t)(128 * 129 + 128 * 16) * 4;
+  C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_f32_k<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+  int per = 1;
+  cudaOccupancyMaxActiveBlocksPerMultiprocessor(&per, pair_bias_f32_k<16>, 128, smem);
+  const int nsm = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const unsigned grid = (unsigned)std::max<int64_t>(1, std::min<int64_t>((R + 127) / 128, (int64_t)std::max(per, 1) * nsm));
+  pair_bias_f32_k<16><<<grid, 128, smem, at::cuda::getCurrentCUDAStream()>>>(
+      z.data_ptr<float>(), wf.data_ptr<float>(), out.data_ptr<float>(), mp, R, (int)L, (float)eps, perm);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -619,9 +731,11 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("token_mask90", &token_mask90);
   m.def("adaln_rows_cuda", &adaln_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);
+  m.def("resgate_adaln_rows_r_cuda", &resgate_adaln_rows_r);
   m.def("gate_rows_cuda", &gate_rows);
   m.def("swiglu_rows_cuda", &swiglu_rows);
   m.def("layernorm128_rows", &layernorm128_rows);
+  m.def("pair_bias_f32_fused", &pair_bias_f32_fused);
   m.def("cond_rows_cuda", &cond_rows);
   m.def("qknorm_rows_cuda", &qknorm_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
