@@ -15,6 +15,8 @@ forward re-run in the backward): about 0.3 s per micro-step in MiniWorld's phase
 
 ## Scope and dispatch
 
+The same source also builds for H100 (sm_90a): [H100 page](../../h100/smooth_lddt/smooth_lddt.md).
+
 fp32 compute on B200 (sm_100a). `x_pred` [A, B, N, 3] fp32 or bf16 (the gradient goes back in its dtype), `gt` [B, N, 3], `is_nuc` / `mask`
 [B, N] bool, any N (padded to a multiple of 128 inside), any A and B. `smooth_lddt.refusal(...)` returns `None` when the op serves a call
 and otherwise the reason; it reads metadata only. The three ops are registered as `smooth_lddt_prep` / `smooth_lddt_fwd` /

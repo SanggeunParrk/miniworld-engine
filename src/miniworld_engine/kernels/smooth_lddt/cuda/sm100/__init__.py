@@ -1,4 +1,4 @@
-"""sm_100a build and launch of the smooth lDDT kernels (``smooth_lddt.cu``).
+"""sm_100a / sm_90a build and launch of the smooth lDDT kernels (``smooth_lddt.cu``).
 
 The cubin is built on first use by the newest nvcc here that knows sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``) and cached
 under ``settings.engine_jit_root()``; launches go through the CUDA driver on torch's current stream (CUDA-graph capturable), the way the
@@ -27,18 +27,24 @@ def _full(n: int) -> bool:
     return not FORCE_TILE and n * 32 <= FULL_SMEM
 
 
+def _arch(index: int) -> str:
+    """nvcc arch of the device: sm_100a (B200) or sm_90a (H100). The kernels are plain CUDA-core code, the same source serves both."""
+    major, _ = torch.cuda.get_device_capability(index)
+    return "sm_90a" if major == 9 else "sm_100a"
+
+
 @functools.lru_cache(maxsize=None)
-def cubin() -> str:
+def cubin(arch: str = "sm_100a") -> str:
     """Path of the cubin, built on first use; rebuilt only when the source, a flag or the toolchain changes."""
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
     nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", "-arch=sm_100a", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
+    flags = (*host, "-std=c++17", "-O3", f"-arch={arch}", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
     h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
     src = _dir / "smooth_lddt.cu"
     h.update(src.read_bytes())
     root = settings.engine_jit_root()
-    out = root / "smooth_lddt_sm100" / f"smooth_lddt_{h.hexdigest()[:16]}.cubin"
+    out = root / f"smooth_lddt_{arch[3:]}" / f"smooth_lddt_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
         out.parent.mkdir(parents=True, exist_ok=True)
         tmp = out.with_suffix(f".{os.getpid()}.tmp")
@@ -56,7 +62,7 @@ def _kernels(index: int):
 
     with torch.cuda.device(index):
         # the whole-structure kernels take N * 32 B of dynamic shared memory: the attribute is raised once, the launch size is set per call
-        return tuple(driver.Kernel(cubin(), name, FULL_SMEM if name.endswith("_full") else 0)
+        return tuple(driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if name.endswith("_full") else 0)
                      for name in ("slddt_prep", "slddt_fwd", "slddt_bwd", "slddt_fwd_full", "slddt_bwd_full"))
 
 

@@ -10,7 +10,7 @@ coordinates, the four sigmoids share one exponential, and only the pairs inside 
 so the ground-truth pair set, its normaliser and the tile flags are computed once per call. The backward is analytic, deterministic
 (every atom collects the gradient of both of its roles in a pair; no atomics) and CUDA-graph capturable.
 
-Served: B200 (sm_100a). The kernels compute in fp32; ``x_pred`` may be fp32 or bf16 (cast outside autograd, the gradient goes back in its
+Served: B200 (sm_100a) and H100 (sm_90a, same source). The kernels compute in fp32; ``x_pred`` may be fp32 or bf16 (cast outside autograd, the gradient goes back in its
 dtype). :func:`refusal` says why anything else is not served; it never raises.
 """
 from __future__ import annotations
@@ -35,8 +35,8 @@ def refusal(x_pred: torch.Tensor, gt: torch.Tensor, is_nuc: torch.Tensor, mask: 
         return f"gt must be [B, N, 3] = {(b, n, 3)}, got {tuple(gt.shape)}"
     if tuple(is_nuc.shape) != (b, n) or tuple(mask.shape) != (b, n):
         return f"is_nuc / mask must be [B, N] = {(b, n)}, got {tuple(is_nuc.shape)} / {tuple(mask.shape)}"
-    if torch.cuda.get_device_capability(x_pred.device) != (10, 0):
-        return "served on B200 (sm_100a) only"
+    if torch.cuda.get_device_capability(x_pred.device) not in ((10, 0), (9, 0)):
+        return "served on B200 (sm_100a) and H100 (sm_90a) only"
     return None
 
 
