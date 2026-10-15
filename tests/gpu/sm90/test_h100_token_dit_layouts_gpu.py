@@ -91,3 +91,33 @@ def test_fp32_training_gradients_against_the_fp32_oracle(nh, d, L):
     out_f2, in_f2, _ = run(fast, True)
     assert torch.equal(out_f, out_f2)
     assert all(torch.equal(a, b) for a, b in zip(in_f, in_f2, strict=True))
+
+
+@pytest.mark.parametrize(("nh", "d"), LAYOUTS)
+@pytest.mark.parametrize("L", [256, 384])
+def test_bf16_training_gradients_against_the_fp32_oracle(nh, d, L):
+    A = 6
+    fast, ref = blocks(nh, d)
+    single, cond, pair, mask = inputs(L, A, d, torch.bfloat16)
+    dy = torch.randn_like(single)
+
+    def run(module, dt, bf16):
+        torch.backends.cuda.matmul.allow_tf32 = not bf16 and False
+        ins = [t.detach().to(dt).clone().requires_grad_() for t in (single, cond, pair)]
+        module.zero_grad(set_to_none=True)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=bf16):
+            out = module(*ins, mask)
+        out.backward(dy.to(dt))
+        return out.detach(), [t.grad for t in ins], {n: p.grad.clone() for n, p in module.named_parameters()}
+
+    out_f, in_f, g_f = run(fast, torch.bfloat16, True)
+    out_r, in_r, g_r = run(ref, torch.float32, False)
+    tol = 8e-3
+    assert rel(out_f, out_r) < tol
+    for a, b in zip(in_f, in_r, strict=True):
+        assert rel(a, b) < 2 * tol
+    worst = max(rel(g_f[n], g_r[n]) for n in g_r)
+    assert worst < 4 * tol, f"worst parameter gradient error {worst:.2e}"
+    out_f2, in_f2, _ = run(fast, torch.bfloat16, True)
+    assert torch.equal(out_f, out_f2)
+    assert all(torch.equal(a, b) for a, b in zip(in_f, in_f2, strict=True))

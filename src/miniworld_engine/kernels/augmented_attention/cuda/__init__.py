@@ -445,19 +445,20 @@ def _fwd_launch(
     return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L)
 
 
-def forward(qs, kb, vb, bb, km, A, L, qkvg=None):
+def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
     """The forward kernel on prepared operands, no op wrapper (for callers that are themselves one opaque op, as the fused
     token DiT training block): qs = q log2 e / sqrt 48, kb, vb [A L, 768] bf16 contiguous; bb [16, L, L] bf16 in log2
     units; km None or an additive key mask [A, L] fp32. Returns O fp32 [A L, 768] and the LSE [A, 16, L] (log2); with
     ``qkvg`` (the block's [A L, 3072] q|k|v|g GEMM output) og = sigmoid(g) O in bf16 instead of O -- all the token DiT
     block keeps (its backward takes D = rowsum(dO O) = rowsum(d og * og))."""
-    lse = torch.empty(A, H, L, device=qs.device, dtype=torch.float32)
+    lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
+    ext = _ext("attn_fwd", fwd_defs(nh, dh))
     if qkvg is not None:
-        og = torch.empty(A * L, H * D, device=qs.device, dtype=torch.bfloat16)
-        _ext("attn_fwd").attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
+        og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
+        ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
         return og, lse
-    o = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
-    _ext("attn_fwd").attn_fwd(qs, kb, vb, bb, km, o, lse)
+    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
     return o, lse
 
 
@@ -561,28 +562,29 @@ def dqb_chunks(A: int) -> int:
     return max(c for c in (1, 2, 3, 4) if groups % c == 0)
 
 
-def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L):
+def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     """dQ, dK, dV [A L, 768] fp32 (with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
     a transposed view when A is not a multiple of 3). dob [A L, 768] bf16 and dd = rowsum(dO O) [A, 16, L] fp32; the other operands as ``forward`` took them."""
-    dq = torch.empty(A * L, H * D, device=qs.device, dtype=torch.float32)
+    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
+    ld = fwd_defs(nh, dh)
     if (
         A % 3 == 0
     ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
         chunks = dqb_chunks(A)
-        dbc = torch.zeros(chunks, H, L, L, device=qs.device, dtype=torch.float32)
-        _ext("attn_dqb").attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
+        dbc = torch.zeros(chunks, nh, L, L, device=qs.device, dtype=torch.float32)
+        _ext("attn_dqb", ld).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
         db = dbc.sum(0)  # the chunks in order: bitwise repeatable
-        _ext("attn_dkv", ("DBIAS=0",)).attn_dkv(
+        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(
             qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
         )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", () if L % 192 == 0 else ("NWG=2",)).attn_dq(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *ld)).attn_dq(
         qs, kb, vb, dob, bb, km, lse, dd, dq
     )
-    dbt = torch.zeros(H, L, L, device=qs.device, dtype=torch.float32)
-    _ext("attn_dkv").attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
+    dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
+    _ext("attn_dkv", ld).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
 
 

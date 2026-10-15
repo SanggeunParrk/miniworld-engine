@@ -14,8 +14,14 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef STAGES
 #define STAGES 3
 #endif
+#ifndef DHP
+#define DHP 48                   // head width: 32, 48 or 64
+#endif
+#ifndef ROW_WIDTH
+#define ROW_WIDTH 768            // attention channels: heads x head width
+#endif
 #ifndef QWID
-#define QWID 48
+#define QWID DHP
 #endif
 #ifndef DBR
 #define DBR 1                    // timing diagnostics: 0 skips the dbias L2 reds (keeps the exchange)
@@ -30,9 +36,10 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef SPLITRED
 #define SPLITRED 0               // 1: every warpgroup reduces a third of the dS tile; 0: one owner warpgroup a block
 #endif
-constexpr int G = 3, BN = 64, QB = 64, DH = 48, QW = QWID, DM = 768;
+constexpr int G = 3, BN = 64, QB = 64, DH = DHP, QW = QWID, DM = ROW_WIDTH;
+static_assert(DH == 32 || DH == 48 || DH == 64, "head width 32 / 48 / 64");
 constexpr float LOG2E = 1.4426950408889634f;
-constexpr float RSQD = 0.14433756729740643f;                         // 1 / sqrt(48)
+constexpr float RSQD = DH == 32 ? 0.17677669529663687f : DH == 48 ? 0.14433756729740643f : 0.125f;   // 1 / sqrt(DH)
 
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI uint64_t dmn(uint32_t base, int ks) { return smem_desc(base + ks * 2048, 16, 1024, 1); }   // MN-major, k-step = 16 rows
@@ -44,10 +51,20 @@ TMN_DEVI void mma_s_rs(float* d, const uint32_t (&a)[4], uint64_t b, int accumul
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b), "r"(accumulate));
 }
-TMN_DEVI void mma_o(float (&d)[24], const uint32_t (&a)[4], uint64_t b) {
+TMN_DEVI void mma_o(float (&d)[DH / 2], const uint32_t (&a)[4], uint64_t b) {
+#if DHP == 48
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n48k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, {%24,%25,%26,%27}, %28, p, 1, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23])
     : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#elif DHP == 32
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, {%16,%17,%18,%19}, %20, p, 1, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#else
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, {%32,%33,%34,%35}, %36, p, 1, 1, 1; }"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+    : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "l"(b));
+#endif
 }
 TMN_DEVI void tma_load_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
@@ -161,9 +178,9 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   for (int gi = 0; gi < ngi; ++gi) {
   const int a0 = (chunk * ngi + gi) * G;
   const int a = a0 + wg;
-  float acc[24];
+  float acc[DH / 2];
 #pragma unroll
-  for (int i = 0; i < 24; ++i) acc[i] = 0.f;
+  for (int i = 0; i < DH / 2; ++i) acc[i] = 0.f;
   float lse[2], dd[2];
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
@@ -238,7 +255,7 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
       }
     wgmma_fence();
 #pragma unroll
-    for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+    for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
 #pragma unroll
     for (int ks = 0; ks < BN / 16; ++ks) mma_o(acc, pa[ks], dM0 + ((s * SLOT + wg * TILE + ks * 2048) >> 4));
     wgmma_commit();
@@ -334,12 +351,12 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   __syncwarp();
   if (lane == 0) mbar_arrive(gdone);
 #pragma unroll
-  for (int i = 0; i < 24; ++i) fence_reg(acc[i]);
+  for (int i = 0; i < DH / 2; ++i) fence_reg(acc[i]);
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
     float* orow = DQ + ((size_t)a * L + m0 + r0 + 8 * h) * DM + qcol;
 #pragma unroll
-    for (int j = 0; j < 6; ++j)
+    for (int j = 0; j < DH / 8; ++j)
       *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * RSQD, acc[4 * j + 2 * h + 1] * RSQD);
   }
   }  // groups

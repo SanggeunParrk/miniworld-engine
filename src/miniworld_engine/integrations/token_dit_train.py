@@ -133,12 +133,6 @@ def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
         0
     ] != 2 * d:
         return False
-    if (
-        cap == (9, 0)
-        and (a.n_head, d) != (H, D)
-        and not (single.dtype is torch.float32 and compute_dtype in (None, torch.float32))
-    ):
-        return False  # H100: the other layouts in fp32 (TF32 cores built per layout) only; bf16 serves 16 x 48
     if mask is not None and not (
         mask.ndim == 2 and tuple(mask.shape) == (1, single.shape[2])
     ):
@@ -804,7 +798,7 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
             del vt
         else:
             og, LSE = sm90.forward(
-                qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg
+                qn, kn, vc, bias, km if native else _key_mask(mask, A, L), A, L, qkvg, H, DH
             )  # sigmoid(g) o, no O
     else:
         if not fp32 and mask is not None:
@@ -939,6 +933,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     H = bias.shape[0]  # this layout's heads (the module-level H is the default 16)
     DH = qs.shape[1] // H
     tf32_defs = sm90.tf32_defs(H, DH)
+    bf_defs = sm90.fwd_defs(H, DH)  # attn_fwd / dq / dkv / dqb build defines of this layout (none at 16 x 48)
 
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
     db = (
@@ -976,17 +971,17 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
         # in a fixed order (bitwise repeatable). The per-sample variant below writes an [A, H, L, L] fp32 buffer (1.8 GB at A48
         # L768), takes 1.4 ms in dK / dV for the atomics and 0.6 ms in the reduce: 2.6 ms against 1.6 ms for this pass.
         dbc = torch.zeros(sm90.dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
-        sm90._ext("attn_dqb", empty_defs).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
+        sm90._ext("attn_dqb", (*bf_defs, *empty_defs)).attn_dqb(qs, k, v, dob, bias, km, lse, dd, dq, dbc)
         dbn = dbc.sum(0)  # the chunk buffers summed in order: bitwise repeatable
-        sm90._ext("attn_dkv", ("DBIAS=0", *empty_defs)).attn_dkv(
+        sm90._ext("attn_dkv", ("DBIAS=0", *bf_defs, *empty_defs)).attn_dkv(
             qs, k, v, dob, bias, km, lse, dd, dk, dv, dbn
         )
         return dq, dk, dv, dbn.to(torch.bfloat16)
     else:
         sm90._ext(
-            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *empty_defs)
+            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *bf_defs, *empty_defs)
         ).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
-        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *empty_defs)).attn_dkv(
+        sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(
             qs, k, v, dob, bias, km, lse, dd, dk, dv, db
         )
     return dq, dk, dv, T.train_db_reduce90(db, fp32)
@@ -1197,7 +1192,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         DQ, DK, DV, DB = _tf32_attn_bwd(T, qn, kn, vc, dob, bias, mask, LSE, dd, A, L)
     elif h100:  # dq for the unscaled q, dbias natural units
         DQ, DK, DV, DB = sm90.backward(
-            qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L
+            qn, kn, vc, dob, bias, _key_mask(mask, A, L), LSE, dd, A, L, H, DH
         )
     else:
         # B200 fp32: dQ / dK / dV land in their column blocks of dqkvg; qknorm_bwd then rewrites dq / dk in place (QK-norm) or only sums

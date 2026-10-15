@@ -415,5 +415,18 @@ and fp32 training gradients (output, inputs and every parameter against the fp32
 layouts: 32 pass. Bugs found on the way (d 1024 only): `_native_final90` sliced the weight gradients with the module-level D = 768, and
 the cond-LN weight gradient's hierarchical reduction hard-coded 12 groups / 6 per branch (D / 64, D / 128 now).
 
-Not done: **bf16 training** at the other layouts (the bf16 attention backward `attn_dqb.cu` has DH = 48 / DM = 768 constants and
-`attn_dq.cu` / `attn_dkv.cu` are not built for width 64): it keeps the general path (1.1-1.8x PyTorch).
+bf16 **training** at the same layouts (`attn_fwd.cu`, `attn_dq.cu`, `attn_dkv.cu` and `attn_dqb.cu` built per layout: `DHP` 32 / 48 / 64
+-- the width-64 `m64n64k16` PV form is new in the first three, `attn_dqb.cu`'s `DH` / `DM` / `RSQD` / `mma_o` are now macro-driven),
+PyTorch compiled / ours (ms), A = 48:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 5.63 | 3.32 | 1.69 | 16.97 | 7.66 | 2.21 |
+| 24 x 32 | 7.05 | 3.56 | 1.98 | 23.77 | 8.27 | 2.87 |
+| 12 x 64 | 4.62 | 3.44 | 1.34 | 11.23 | 7.71 | 1.46 |
+| 16 x 64 (d 1024) | 6.72 | 4.71 | 1.43 | 18.66 | 10.67 | 1.75 |
+
+The test file also carries the bf16 training gradients (output / inputs / every parameter against the fp32 IEEE module within
+8e-3 / 1.6e-2 / 3.2e-2, bitwise-repeatable step) at all four layouts, L 256 and 384, A = 6: 8 more tests.
+
+All four head layouts are now served natively on H100 for the token DiT in both dtypes, inference and training.
