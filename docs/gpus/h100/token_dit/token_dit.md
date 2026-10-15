@@ -507,3 +507,34 @@ the same issue-slot utilisation (41 %); the 12 % gap is 8 % fewer instructions a
 block is 0.99x of Anthropic's at L768 while every other cell of the table is ahead. Two attempts to close it: FWD_BN = 128 (halve the
 per-block fixed work) *timed* 90 us but is wrong -- the 96-register cap spills the wgmma accumulators (ptxas C7512, 450 B spill) and the
 output is garbage; it is now blocked by a static_assert. Removing the bias seed FADD: no change.
+
+### fp32 inference after the fused expand (2026-10-15)
+
+Two changes, both accuracy-neutral (block error 2.92e-4 at 16 / 24 / 12 heads, as before):
+
+- `resgate_adaln_rows` rounds `xa` to TF32 the way `cvt.rna.tf32.f32` does (`rna_tf32`: add half an ulp of the kept bits, clear the rest)
+  when the fused expand will read it, and the weights are rounded once per pack (`_tf32_wab`). The TMA-fed wgmma operands truncate, so the
+  earlier fused-expand attempt (error 2.9e-4 -> 4.6e-4) had read an unrounded `xa`; with rounded operands the products are the ones
+  cuBLAS forms. `_FP32_SWIGLU_GEMM` is on: expand + SwiGLU as one GEMM, `[a | b]` never reaches HBM, for M >= 768 rows
+  (below it cuBLAS + the SwiGLU rows wins: 128 x 256 tiles leave SMs idle). -16 us a block at A = 5, L768.
+- the forward's instruction mix (R2UR descriptors made warp-uniform, `tf32_pos` for the probabilities) is 32 % shorter (37.9 -> 25.6 M
+  warp instructions at 24 x 32) -- and not faster: the kernel is bound by latency, not by issue slots.
+
+Ours against Anthropic's block, fp32 inference, 20 % key mask, x = Anthropic / ours (higher is faster):
+
+| layout | A | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|---|
+| 16 x 48 | 5 shared | 1.24 | 1.26 | 1.14 | 1.18 | 1.10 | 1.17 |
+| 16 x 48 | 1 | 1.26 | 1.27 | 1.21 | 1.13 | 1.09 | 1.17 |
+| 24 x 32 | 5 shared | 1.23 | 1.20 | 1.06 | 1.12 | **1.00** | **1.04** |
+| 24 x 32 | 1 | 1.24 | 1.27 | 1.21 | 1.14 | 1.08 | 1.15 |
+| 12 x 64 | 5 shared | 1.21 | 1.19 | 1.11 | 1.18 | 1.05 | 1.11 |
+| 12 x 64 | 1 | 1.23 | 1.24 | 1.19 | 1.12 | 1.05 | 1.14 |
+| 16 x 64 (d 1024) | 5 shared | 1.21 | 1.15 | 1.22 | 1.09 | 1.09 | 1.13 |
+| 16 x 64 (d 1024) | 1 | 1.23 | 1.21 | 1.11 | 1.08 | 1.07 | 1.09 |
+
+Everything is >= 1.05 except 24 x 32, A = 5, L640 (1.00) and L768 (1.04). There the attention core is 110 us against Anthropic's 94 us;
+at L640 the grid (600 CTAs on 264 slots) also fills its third wave to 27 %.
+Tried and not kept (all measured): `FWD_BN=128` (wrong: spilled accumulators, now blocked), `BIAS_AFTER` (the bias added after the QK
+wgmma: same time, the stall moves to the add), `BIAS_L1PF` (prefetch.global.L1: 0.85x), `PREFETCH_BIAS` + `INPLACE_P` (0.93x), `HT = 64`
+fused tiles (more tiles, 91 % last wave, but 24 x 32 L384 1.07 -> 1.04 and L640 1.00 -> 0.96).

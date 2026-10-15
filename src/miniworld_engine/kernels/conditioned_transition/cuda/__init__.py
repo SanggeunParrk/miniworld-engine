@@ -78,7 +78,7 @@ def _token_swiglu(device_index):
 
 
 #: Hopper fp32 token inference: the expand GEMM with the SwiGLU in its epilogue on TF32 wgmma (False: cuBLAS + ``swiglu_rows``)
-_FP32_SWIGLU_GEMM = False  # measured: -16 us but output error 2.9e-4 -> 4.6e-4 (TMA-fed operands are truncated)
+_FP32_SWIGLU_GEMM = True  # expand + SwiGLU as one TF32 wgmma GEMM; xa is RNA-rounded by its row kernel (the TMA-fed operands truncate)
 _TF32_WAB: dict = {}
 _PAIR_BIAS: dict = {}  # hoisted pair biases, keyed on the pair / mask / weight pack (kernels/_capture.lookup_inputs)
 
@@ -93,17 +93,28 @@ def _swiglu_gemm_ok(xa, wab) -> bool:
     )
 
 
-def _tf32_wab(wab):
-    """[Wa; Wb] -> the SwiGLU GEMM's per-256-row-tile packing ([Wa 128 rows | Wb 128 rows] per tile), rounded to TF32 (to
-    nearest, ties away), once per weight pack."""
+def _swiglu_ht(M: int, H: int, nsm: int) -> int:
+    """Hidden units per tile of the fp32 fused expand: 128 (128 x 256 tiles) or 64 (twice the tiles): the one whose last wave of the
+    persistent grid is fuller (ties: 128, the larger tile)."""
+    def eff(ht):
+        tiles = (M // 128) * (H // ht)
+        return tiles / (-(-tiles // nsm) * nsm)
+    # Measured: HT = 64 raises the last wave's fill (M = 1920: 68 -> 91 %; M = 3200: 76 -> 91 %) but loses at both (24 x 32 L384
+    # 1.07 -> 1.04, L640 1.00 -> 0.96 of Anthropic's block): the narrower tile's MMA / TMA ratio costs more than the wave. Kept, not chosen.
+    return 128
+
+
+def _tf32_wab(wab, ht=128):
+    """[Wa; Wb] -> the SwiGLU GEMM's per-tile packing ([Wa ht rows | Wb ht rows] per tile, ht = 128 or 64), rounded to TF32 (to
+    nearest, ties away), once per weight pack (per ht)."""
     from ... import _capture
 
     def build():
         H, K = wab.shape[0] // 2, wab.shape[1]
-        w = torch.stack([wab[:H].view(H // 128, 128, K), wab[H:].view(H // 128, 128, K)], 1).reshape(2 * H, K)
+        w = torch.stack([wab[:H].view(H // ht, ht, K), wab[H:].view(H // ht, ht, K)], 1).reshape(2 * H, K)
         return ((w.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
 
-    return _capture.lookup(_TF32_WAB, (wab.data_ptr(), wab._version, tuple(wab.shape)), build, limit=8)
+    return _capture.lookup(_TF32_WAB, (wab.data_ptr(), wab._version, tuple(wab.shape), ht), build, limit=8)
 
 
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
@@ -265,13 +276,16 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
     else:
         attention.gated_inference(qkvg, bias, 0, A, heads, D // heads)
     y = torch.mm(qkvg[:, :D], wo.t())
-    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5)
+    # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
+    fused_expand = fp32 and _FP32_SWIGLU_GEMM and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)
+    resgate_adaln_rows(x, y, g2[:, 0], g1[:, 2], g1[:, 3], xa, P, 1e-5, tf32_round=fused_expand)
     h = single.new_empty((M, ws.shape[1]))
-    if fp32 and _FP32_SWIGLU_GEMM and _swiglu_gemm_ok(xa, wab_fp32):
+    if fused_expand:
         # expand + SwiGLU as one TF32 wgmma GEMM: xa is TF32-rounded by its row kernel and the weights once per pack, so the
         # TMA-fed (truncating) operands carry cuBLAS's rounding; [a | b] never reaches HBM
         op = _token_swiglu(single.device.index)
-        op.ext.gemm_swiglu(xa, _tf32_wab(wab_fp32), h, op.nsm)
+        ht = _swiglu_ht(M, ws.shape[1], op.nsm)
+        op.ext.gemm_swiglu(xa, _tf32_wab(wab_fp32, ht), h, op.nsm, ht)
     elif fp32:
         ab = torch.mm(xa, wab_fp32.t())
         swiglu_rows(ab, h)
@@ -289,9 +303,12 @@ def adaln_rows(x, ms, mb, out, L, eps=1e-5):
     _ext().adaln_rows_cuda(x, ms, mb, out, int(L), float(eps))
 
 
-def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5):
+def resgate_adaln_rows(x, y, gl, ms, mb, out, L, eps=1e-5, tf32_round=False):
     """x += sigmoid(gl[row % L]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
-    _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+    if tf32_round:
+        _ext().resgate_adaln_rows_r_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
+    else:
+        _ext().resgate_adaln_rows_cuda(x, y, gl, ms, mb, out, int(L), float(eps))
 
 
 def gate_rows(o, g, out):

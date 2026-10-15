@@ -75,6 +75,14 @@ using namespace tmn; using namespace tmn::sm90;
 #define FWD_BN 64    // keys per block of the serial forward (64 or 128): 128 halves the per-block fixed work (wgmma commit / wait,
                      // max shuffles, barriers) at the cost of 32 more score registers
 #endif
+#ifndef BIAS_L1PF
+#define BIAS_L1PF 0  // > 0: each warp prefetches its 16 rows' bias lines (2 x 128 B a row) BIAS_L1PF blocks ahead into L1: one instruction a
+                     // block; the bias seed then hits L1 (the wgmma fence waited on the L2 / DRAM latency of the bias loads)
+#endif
+#ifndef BIAS_AFTER
+#define BIAS_AFTER 0 // 1: the QK wgmma overwrites the scores (scale-d = 0) and the bias is loaded under it and ADDED afterwards: the wgmma
+                     // no longer waits (WARPGROUP.ARRIVE) for the bias loads' L2 / DRAM latency. 64-key blocks only.
+#endif
 #ifndef BLKSM
 #define BLKSM 2
 #endif
@@ -95,6 +103,9 @@ static_assert(ST_BYTES % 1024 == 0 && QCH % 1024 == 0, "1-KB aligned regions (12
 TMN_DEVI uint64_t dsw(uint32_t addr) { return smem_desc(addr, 16, 1024, 1); }          // K-major, 128-B swizzle
 TMN_DEVI float ex2(float a) { float r; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(a)); return r; }
 TMN_DEVI float trunc_tf32(float x) { return __uint_as_float(__float_as_uint(x) & 0xffffe000u); }
+// cvt.rna.tf32.f32 for a non-negative finite x (p = 2^(s - m) <= 2^LAZY): round half away from zero = add half an ulp of the kept 10
+// mantissa bits and clear the rest -- the same bits as the instruction, which ptxas expands to FSETP + IADD + LOP + SEL (nan / inf checks)
+TMN_DEVI uint32_t tf32_pos(float x) { return (__float_as_uint(x) + 0x1000u) & 0xffffe000u; }
 TMN_DEVI uint32_t tf32(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return r; }
 TMN_DEVI float sigmoid_t(float a) {
   float t; asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(0.5f * a));
@@ -146,6 +157,10 @@ TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%clust
 TMN_DEVI void mma_qk(float (&d)[32], uint64_t a, uint64_t b) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1; }"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_qk_set(float (&d)[32], uint64_t a, uint64_t b) {
+  asm volatile("{ .reg .pred p; setp.ne.b32 p, 0, 0; wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1; }"
+    : "=f"(d[0]), "=f"(d[1]), "=f"(d[2]), "=f"(d[3]), "=f"(d[4]), "=f"(d[5]), "=f"(d[6]), "=f"(d[7]), "=f"(d[8]), "=f"(d[9]), "=f"(d[10]), "=f"(d[11]), "=f"(d[12]), "=f"(d[13]), "=f"(d[14]), "=f"(d[15]), "=f"(d[16]), "=f"(d[17]), "=f"(d[18]), "=f"(d[19]), "=f"(d[20]), "=f"(d[21]), "=f"(d[22]), "=f"(d[23]), "=f"(d[24]), "=f"(d[25]), "=f"(d[26]), "=f"(d[27]), "=f"(d[28]), "=f"(d[29]), "=f"(d[30]), "=f"(d[31]) : "l"(a), "l"(b));
 }
 TMN_DEVI void mma_qk128(float (&d)[64], uint64_t a, uint64_t b) {
   asm volatile("{ .reg .pred p; setp.ne.b32 p, 1, 0; wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, %64, %65, p, 1, 1; }"
@@ -257,7 +272,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   }
 
   // ---- consumer warpgroups: 64 query rows each
-  const int wg = tid >> 7, lane = tid & 31, warp = (tid >> 5) & 3;
+  const int wg = __shfl_sync(0xffffffffu, tid >> 7, 0), lane = tid & 31, warp = (tid >> 5) & 3;   // wg: warp-uniform to the compiler (descriptors in uniform registers)
   const int g = lane >> 2, t = lane & 3;
   const int row = m0 + wg * 64 + warp * 16 + g;                     // this lane's rows: row, row + 8 (within the sample)
   const float* brow0 = Bias + ((size_t)head * L + row) * L + 2 * t;
@@ -301,6 +316,12 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #endif
 
   float sc[FBN / 2];
+#if BIAS_L1PF
+  // lane l prefetches line (l & 1) of row l / 2 of the warp's 16 rows: [row0 + l / 2][n * FBN + 32 (l & 1) ..)
+  const float* pfp = Bias + ((size_t)head * L + m0 + wg * 64 + warp * 16 + (lane >> 1)) * L + 32 * (lane & 1);
+#pragma unroll
+  for (int p = 0; p < BIAS_L1PF && p < nblocks; ++p) asm volatile("prefetch.global.L1 [%0];" :: "l"(pfp + p * FBN));
+#endif
 #if PREFETCH_BIAS
   float2 bpf[16];                                                    // block n + 1's bias, loaded under block n's MMAs / softmax
 #pragma unroll
@@ -311,6 +332,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #endif
   for (int n = 0; n < nblocks; ++n) {
     const int sn = n % STAGES;
+#if !BIAS_AFTER
     // seed with bias (+ key mask), loaded before the wait so the L2 latency hides under it
 #pragma unroll
     for (int j = 0; j < 8; ++j) {
@@ -329,6 +351,7 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
         sc[4 * j] = b0.x; sc[4 * j + 1] = b0.y; sc[4 * j + 2] = b1.x; sc[4 * j + 3] = b1.y;
       }
     }
+#endif
     mbar_wait(&full[sn], (n / STAGES) & 1);
     const uint32_t slot = sbase + sn * FST_BYTES;
     const uint64_t dK0 = dsw(slot), dK1 = dsw(slot + FKCH);
@@ -339,12 +362,32 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
 #pragma unroll
     for (int ks = 0; ks < JJ - 4; ++ks) mma_qk_rs(sc, qf[4 + ks][0], qf[4 + ks][1], qf[4 + ks][2], qf[4 + ks][3], dK1 + ks * 2);
 #else
+#if BIAS_AFTER
+    static_assert(FBN == 64, "BIAS_AFTER is the 64-key form");
+    mma_qk_set(sc, dQ0, dK0);                                                          // overwrite: no read of sc, no wait on the bias
+#pragma unroll
+    for (int ks = 1; ks < 4; ++ks) mma_qk(sc, dQ0 + ks * 2, dK0 + ks * 2);
+#pragma unroll
+    for (int ks = 0; ks < JJ - 4; ++ks) mma_qk(sc, dQ1 + ks * 2, dK1 + ks * 2);
+#else
 #pragma unroll
     for (int ks = 0; ks < 4; ++ks) mma_qkn<FBN>(sc, dQ0 + ks * 2, dK0 + ks * 2);            // head columns 0..31
 #pragma unroll
     for (int ks = 0; ks < JJ - 4; ++ks) mma_qkn<FBN>(sc, dQ1 + ks * 2, dK1 + ks * 2);       // 32..DH - 1
 #endif
+#endif
     wgmma_commit();
+#if BIAS_AFTER
+    float2 btmp[16];                                                // the bias under the MMA's latency
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      btmp[2 * j] = *reinterpret_cast<const float2*>(brow0 + n * FBN + 8 * j);
+      btmp[2 * j + 1] = *reinterpret_cast<const float2*>(brow1 + n * FBN + 8 * j);
+    }
+#endif
+#if BIAS_L1PF
+    if (n + BIAS_L1PF < nblocks) asm volatile("prefetch.global.L1 [%0];" :: "l"(pfp + (n + BIAS_L1PF) * FBN));
+#endif
 #if PREFETCH_BIAS
     if (n + 1 < nblocks) {
 #pragma unroll
@@ -357,6 +400,13 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
     wgmma_wait<0>();
 #pragma unroll
     for (int i = 0; i < FBN / 2; ++i) fence_reg(sc[i]);
+#if BIAS_AFTER
+#pragma unroll
+    for (int j = 0; j < 8; ++j) {
+      sc[4 * j] += btmp[2 * j].x; sc[4 * j + 1] += btmp[2 * j].y;
+      sc[4 * j + 2] += btmp[2 * j + 1].x; sc[4 * j + 3] += btmp[2 * j + 1].y;
+    }
+#endif
     float m_new[2];
     bool moved = false;
 #pragma unroll
@@ -400,9 +450,9 @@ attn_tf32_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
         const float p0 = ex2(sc[4 * j + 2 * h] - m_i[h]), p1 = ex2(sc[4 * j + 2 * h + 1] - m_i[h]);
         l_i[h] += p0 + p1;
 #if INPLACE_P
-        sc[4 * j + 2 * h] = __uint_as_float(tf32(p0)); sc[4 * j + 2 * h + 1] = __uint_as_float(tf32(p1));
+        sc[4 * j + 2 * h] = __uint_as_float(tf32_pos(p0)); sc[4 * j + 2 * h + 1] = __uint_as_float(tf32_pos(p1));
 #else
-        pa[4 * j + 2 * h] = tf32(p0); pa[4 * j + 2 * h + 1] = tf32(p1);
+        pa[4 * j + 2 * h] = tf32_pos(p0); pa[4 * j + 2 * h + 1] = tf32_pos(p1);
 #endif
 #endif
       }
