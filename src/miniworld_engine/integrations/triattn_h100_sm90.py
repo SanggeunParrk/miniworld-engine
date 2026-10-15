@@ -7,6 +7,8 @@ run eagerly inside the ops (also under a CUDA-graph capture), and the autograd f
 
 from __future__ import annotations
 
+from typing import Any
+
 import weakref
 
 import torch
@@ -145,8 +147,8 @@ def _fwd_fake(kind, args, eps, n_head, head_dim, trans):
     pair = args[0]
     B, L, _, C = pair.shape
     M = B * L * L
-    kw = {"device": pair.device, "dtype": torch.bfloat16}
-    f32 = {"device": pair.device, "dtype": torch.float32}
+    kw: dict[str, Any] = {"device": pair.device, "dtype": torch.bfloat16}
+    f32: dict[str, Any] = {"device": pair.device, "dtype": torch.float32}
     if kind == FUSED:
         return [
             torch.empty_like(pair),
