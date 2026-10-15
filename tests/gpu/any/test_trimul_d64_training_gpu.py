@@ -179,6 +179,16 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
         return real(*args)
 
     monkeypatch.setattr(H, "bidirectional_trimul", spy)
+    # The B200-style D64 kernels (default since 2026-10-13) are the native path when the switch is on.
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_d64_b200gate as G
+
+    real_gate = G.bidirectional_trimul
+
+    def spy_gate(*args):
+        calls.append(1)
+        return real_gate(*args)
+
+    monkeypatch.setattr(G, "bidirectional_trimul", spy_gate)
     previous = settings.configure(engine_backend="auto", trimul_h100_training_widths=widths)
     try:
         n = 384

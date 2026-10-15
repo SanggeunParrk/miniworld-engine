@@ -7,6 +7,7 @@ saved tensors; there is no global activation or weight cache.
 """
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -54,6 +55,30 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
     )
 
 
+USE_INFERENCE_K1 = True  # D128 front: the tuned inference K1 (same planes, accuracy unchanged, 94.6 -> 81 us at L384)
+
+
+def _front(d):
+    """Input LayerNorm + gated projections -> planes [512, n, n]; the inference K1 build when it is selected, else the training front."""
+    if USE_INFERENCE_K1 and d["x"].shape[-1] == 128:
+        from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
+        from miniworld_engine.kernels.trimul_inproj.cuda import h100_inference as INF
+
+        n = d["n"]
+        x = d["x"]
+        ab = x.new_empty((512, n, n))
+        cfg = (2, 64, 4, 2) if n == 128 else K.TILE_TABLE[("sm_90a", 128, 256, "b")]["k1"]
+        w = {"w1": d["w1"], "ln_in_w": d["gi"], "ln_in_b": d["bi"], "ln_out_w": d["go"], "ln_out_b": d["bo"], "wo": d["wp"],
+             "wg": d["leaves"][5]}
+        mask = d["mask"]
+        INF._kernels().k1(x[0], mask if mask.ndim == 1 else mask.reshape(n, n).float(), w, ab, N=n, Np=n, cz=128, ch=256, cfg=cfg,
+                          lnm=2, eps=1e-5, cache={}, token_mask=mask.ndim == 1)
+        return ab
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
+
+    return O.front(d)[0]
+
+
 def _forward_fake(leaves, mask, ds):
     """Return output, activations, FP32 LN statistics and per-forward weight pack."""
     x = leaves[0]
@@ -89,10 +114,10 @@ def forward(
 
         d = _data(leaves, mask, ds)
         # Same K1 body/schedule as the selected training reference.
-        ab, _ = O.front(d)
+        ab = _front(d)
         tri = x.new_empty((256, n, n))
-        torch.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
-        torch.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
+        _H100_BMM.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
+        _H100_BMM.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
         y, s = O.output(d, tri, ln=3, stats=2, method=-1)
         return [y, ab, tri, s["xn"].reshape_as(x), s["ro"], d["w1"],
                 x.new_empty((0,), dtype=torch.float32)]
@@ -113,10 +138,10 @@ def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
             return WIDE.forward(leaves, mask, ds)[0]
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
         d = _data(leaves, mask, ds)
-        ab, _ = O.front(d)
+        ab = _front(d)
         tri = x.new_empty((256, n, n))
-        torch.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
-        torch.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
+        _H100_BMM.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
+        _H100_BMM.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
         return O.output(d, tri, ln=0, stats=0, method=-1)[0]
 
 
@@ -165,10 +190,10 @@ def backward(
         dg, dwg, dt, dgo, dbo, dwp = b1()
         dl = torch.empty_like(tri)
         dr = torch.empty_like(tri)
-        torch.bmm(dt[:128], ab[256:384], out=dl[:128])
-        torch.bmm(dt[:128].transpose(-1, -2), ab[:128], out=dr[:128])
-        torch.bmm(ab[384:], dt[128:].transpose(-1, -2), out=dl[128:])
-        torch.bmm(ab[128:256], dt[128:], out=dr[128:])
+        _H100_BMM.bmm(dt[:128], ab[256:384], out=dl[:128])
+        _H100_BMM.bmm(dt[:128].transpose(-1, -2), ab[:128], out=dr[:128])
+        _H100_BMM.bmm(ab[384:], dt[128:].transpose(-1, -2), out=dl[128:])
+        _H100_BMM.bmm(ab[128:256], dt[128:], out=dr[128:])
         b7 = B7.Plan(d, dy, dl, dr, dg, xn=xn)
         dx, dwl, dwlg, dwr, dwrg, dgi, dbi = b7()
         from ._h100_pack import dense_native

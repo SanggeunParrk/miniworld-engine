@@ -20,6 +20,7 @@ from __future__ import annotations
 from functools import lru_cache
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -149,9 +150,9 @@ def _run(x, weights, mask, outgoing, sel=None):
     tri = x.new_empty((H, N, N))
     left, right = ab[:H], ab[H:]
     if outgoing:
-        torch.bmm(left, right.transpose(-1, -2), out=tri)
+        _H100_BMM.bmm(left, right.transpose(-1, -2), out=tri)
     else:
-        torch.bmm(left.transpose(-1, -2), right, out=tri)
+        _H100_BMM.bmm(left.transpose(-1, -2), right, out=tri)
 
     # Gate GEMM (bf16 out) and the LN_out fold of the output projection.
     g = torch.mm(xn.view(N * N, D), wg.t())

@@ -3,7 +3,7 @@ import torch
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 R = T.SOURCES / "output"
-K1 = (2, 64, 8, 2, -1, 232, 2)
+K1 = (3, 64, 8, 2, -1, 232, 2)  # 192-token tile, as the inference table: K1 106 -> 93 us (L384), 450 -> 407 us (L768)
 K3 = (2, 64, 4, 1, 1, 1)
 
 
@@ -11,7 +11,7 @@ K3 = (2, 64, 4, 1, 1, 1)
 def kernel(kind, ln=0, stats=0, pg=False, method=0):
     inc = T._upstream() / "csrc"
     src = R / ("original_k1.cu" if kind == "k1" else "save_k3.cu")
-    defs = dict(MW_SAVE_PG=int(pg), MW_PG_METHOD=method, XHAT_FP32=method)
+    defs = dict(MW_SAVE_PG=int(pg), MW_PG_METHOD=method, XHAT_FP32=method, MW_K1_BI=K1[0])
     if kind == "k1":
         smem = T.k1_smem(K1) + (32768 if pg and method == 0 else 0)
         threads = 384
@@ -126,7 +126,7 @@ def front(d, pg=False, method=0, bufs=None):
             1,
             1,
         ),
-        (384, 1, 1),
+        (128 * (K1[0] * K1[1] // 64 + 1), 1, 1),
         [p],
         smem,
     )

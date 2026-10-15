@@ -1,6 +1,14 @@
 // SPDX-License-Identifier: Apache-2.0
 // Anthropic TMA/WGMMA/LN primitives; streamed on-chip training derivatives.
 #include "common_recompute.cuh"
+#ifndef B1_READ_WAIT
+#define B1_READ_WAIT 1
+#endif
+#if B1_READ_WAIT
+#define B1_STORE_WAIT() tma_store_wait_read<0>()
+#else
+#define B1_STORE_WAIT() tma_store_wait_all()
+#endif
 #include <cuda_fp16.h>
 // NVIDIA PTX cp.async.bulk.tensor cache-policy hints affect replacement
 // priority only; no correctness assumption depends on cache residency.
@@ -352,8 +360,9 @@ TMN_DEVI void shared_role(const Params& p,uint8_t* sm,uint64_t* bars,float (&wp0
   weight_gemm(wp1,norm+40960,norm+wi*16384,round>0);
 #endif
 #if !B1_DEFER_DG_STORE
-  if(threadIdx.x==0)tma_store_wait_all();allsync();
+  if(threadIdx.x==0)B1_STORE_WAIT();allsync();
 #endif
+  
 #if !B1_DIRECT_DP
   for(int j=threadIdx.x;j<4096;j+=256)reinterpret_cast<uint32_t*>(sm)[j]=reinterpret_cast<uint32_t*>(norm+32768)[j];
   fence_proxy_async();allsync();

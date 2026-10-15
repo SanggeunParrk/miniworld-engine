@@ -24,6 +24,7 @@ import warnings
 from pathlib import Path
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
@@ -52,7 +53,7 @@ def _bmm(a, b, *, out):
     if T.wide_owned_blas_enabled():
         from ._h100_pack import owned_bmm
         return owned_bmm(a, b, out=out)
-    return torch.bmm(a, b, out=out)
+    return _H100_BMM.bmm(a, b, out=out)
 
 
 def supports(width, length):

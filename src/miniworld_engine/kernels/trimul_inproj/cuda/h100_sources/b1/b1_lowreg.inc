@@ -53,5 +53,5 @@ TMN_DEVI void lowreg_dgrad(const Params& p,uint8_t* sm,int m0,int slot){
 #else
  sx+ch*128,
 #endif
- m0,ch,0);tma_store_commit();tma_store_wait_all();}sync_group();
+ m0,ch,0);tma_store_commit();B1_STORE_WAIT();}sync_group();
 }

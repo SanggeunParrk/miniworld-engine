@@ -63,8 +63,12 @@ def test_uni_wide_inference_matches_triton(outgoing, masked, monkeypatch):
             calls = []
             real = UW.uni_wide_inference
             monkeypatch.setattr(UW, "uni_wide_inference", lambda *a: calls.append(1) or real(*a))
+            from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
+
+            real_bs = BS.trimul
+            monkeypatch.setattr(BS, "trimul", lambda *a: calls.append(1) or real_bs(*a))
             y_mod = m(x, mask=mask)
-            assert calls, "default dispatch did not take the uni wide inference path"
+            assert calls, "default dispatch did not take a native uni wide inference path"
         y = _uni_wide(m, x, mask)
         try:
             settings.configure(engine_backend="triton")
@@ -74,7 +78,8 @@ def test_uni_wide_inference_matches_triton(outgoing, masked, monkeypatch):
     delta, want = (y - x).float(), (ref - x).float()
     assert float((delta - want).norm() / want.norm()) < 2e-2
     if hasattr(H, "_uni_wide_inference_ok"):
-        torch.testing.assert_close(y_mod, y, rtol=0, atol=0)
+        # Different native kernels may serve the module (B200-style port) and this helper (preserved path): one bf16 ulp.
+        torch.testing.assert_close(y_mod, y, rtol=1.6e-2, atol=4e-2)
 
 
 def test_uni_wide_inference_graph_replay_and_compile():

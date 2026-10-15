@@ -14,9 +14,29 @@ TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 
 
-def _b200style_serves(module, pair):
+#: Cells where the preserved native path (served with the switch off) measured faster than the B200-style port on H100
+#: (2026-10-13, bf16, FP32 masters, B1): training L384 / L768 at D256 / D384 / D512, and bidirectional inference at
+#: (D384, L768) and (D512, L384). Every other length keeps the B200-style port, which is 1.2-2.1x faster than the
+#: general path wherever the preserved path does not exist.
+_LEGACY_TRAINING_WIDTHS = (256, 384, 512)
+_LEGACY_BIDIR_INFERENCE_CELLS = ((384, 768), (512, 384))
+
+
+def _legacy_native_faster(module, pair, inference):
+    n, d = pair.shape[1], pair.shape[-1]
+    if inference:
+        if hasattr(module, "outgoing"):
+            # single direction D256: the tmn K1 / K3 tiles beat the B200-style port by 0.7-2.5 % at every length but 384
+            return d == 256 and n != 384
+        return (d, n) in _LEGACY_BIDIR_INFERENCE_CELLS
+    return n in (384, 768) and d in _LEGACY_TRAINING_WIDTHS
+
+
+def _b200style_serves(module, pair, inference=False):
     """Explicit Hopper port; keep measured default selections until qualified."""
     if not settings.current().trimul_h100_b200style:
+        return False
+    if pair.ndim == 4 and _legacy_native_faster(module, pair, inference):
         return False
     if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
             or pair.shape[0] != 1 or pair.shape[1] != pair.shape[2]
@@ -48,20 +68,32 @@ def _b200style_update(module, pair, mask, dropscale, bidirectional):
     return trimul(leaves, token, scale, direction)
 
 
-def _native_buckets_enabled():
-    return settings.current().trimul_h100_native_buckets is True
+def _native_buckets_enabled(pair=None):
+    """True = explicit native buckets. Unset (None): D64 / D128 take them at every length 128..1024 (2026-10-13: 1.2-2.4x
+    over the Triton fallback they otherwise get outside L384 / L768); D256+ keep the qualified cells only (the explicit
+    buckets measured 2.6x slower there at L384 / L768)."""
+    policy = settings.current().trimul_h100_native_buckets
+    if policy is None and pair is not None:
+        return pair.shape[-1] in (64, 128)
+    return policy is True
 
 
 def _selected_uni_d256(module, pair):
     """Qualified outgoing D256/D384 L384 and D512 L384,768 native defaults."""
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import uni_training
-    return (getattr(module, "outgoing", False) and uni_training(pair, True))
+    return (hasattr(module, "outgoing") and uni_training(pair, bool(module.outgoing)))
 
 
 def _selected_d64_training(module, pair):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import d64_training
     return d64_training(pair, getattr(module, "outgoing", False),
                         not hasattr(module, "outgoing"))
+
+
+def _selected_wide_training(module, pair):
+    """The qualified D256+ native cells (the D128 default stays on the framework RNG so the module compiles fullgraph)."""
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import bidi_training
+    return _selected_uni_d256(module, pair) or (not hasattr(module, "outgoing") and bidi_training(pair))
 
 
 def _selected_native_training(module, pair):
@@ -96,7 +128,7 @@ def serves(module, pair: torch.Tensor) -> bool:
         or pair.shape[0] != 1
         or pair.shape[1] != pair.shape[2]
         or pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
-                                if _native_buckets_enabled() or (pair.shape[-1] == 64 and _native_training_enabled())
+                                if _native_buckets_enabled(pair) or (pair.shape[-1] == 64 and _native_training_enabled())
                                 else (384, 768))
     ):
         return False
@@ -137,7 +169,7 @@ def update(
     )
     with preserved_d64_context(_selected_d64_training(module, pair)):
         out = _update(module, pair, mask, dropscale, bidirectional=bidirectional)
-    if _b200style_serves(module, pair) or _native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
+    if _b200style_serves(module, pair) or _native_buckets_enabled(pair) or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled()):
         from miniworld_engine.integrations.token_dit_train import _native_caller_output
         out = _native_caller_output(out, pair, *module.parameters(), force=True)
     return out
@@ -156,7 +188,7 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         preserve_training,
     )
     preserve = preserve_training(d) or _selected_native_training(module, pair)
-    if _native_buckets_enabled() and d != 64 and not preserve:
+    if _native_buckets_enabled(pair) and d != 64 and not preserve:
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             training_unit_scale,
         )
@@ -176,8 +208,8 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         return native_buckets(True, True, *args)
     # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
     # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
-    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2) and not preserve
-    if preserve:
+    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
+    if preserve and not token_path:
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             owned_training_mask,
         )
@@ -271,7 +303,7 @@ def _native_training_enabled():
 
 def native_training_dropout(module, pair, probability):
     """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression."""
-    if not (_b200style_serves(module, pair) or _native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled())) or not serves(module, pair):
+    if not (_b200style_serves(module, pair) or settings.current().trimul_h100_native_buckets is True or _selected_wide_training(module, pair) or _selected_d64_training(module, pair) or (pair.shape[-1] == 64 and _native_training_enabled())) or not serves(module, pair):
         return None
     from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
     return extension("pack").drop_scale(pair, probability).reshape(
@@ -283,7 +315,9 @@ def requires_cuda_training(module, pair):
     explicit `engine_backend="triton"` comparison are not refused here (the inference contract is `requires_cuda_inference`)."""
     if not torch.is_grad_enabled() or settings.current().engine_backend == "triton":
         return False
-    return ((_native_buckets_enabled() or _selected_native_training(module, pair) or _selected_d64_training(module, pair) or (_native_training_enabled() and pair.shape[-1] == 64))
+    # The default D64 / D128 length buckets fall back to the general path where they do not apply; only an explicit
+    # `trimul_h100_native_buckets=True` or a qualified cell turns an unsupported call into an error.
+    return ((settings.current().trimul_h100_native_buckets is True or _selected_wide_training(module, pair) or _selected_d64_training(module, pair) or (_native_training_enabled() and pair.shape[-1] == 64))
             and module.implementation == ImplementationType.MINIWORLD
             and pair.is_cuda
             and torch.cuda.get_device_capability(pair.device) == (9, 0))
@@ -318,7 +352,7 @@ def serves_inference(
         return False
     if torch.is_grad_enabled() or dropscale is not None:
         return False
-    if _b200style_serves(module, pair):
+    if _b200style_serves(module, pair, inference=True):
         return True
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():
         return False
@@ -360,6 +394,9 @@ def requires_cuda_inference(module, pair):
         cuda_aux_enabled,
     )
     native = cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
+    # A non-default LayerNorm eps is outside every promoted bucket: that call uses the general path, it is not refused.
+    if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
+        return False
     return (module.implementation == ImplementationType.MINIWORLD
             and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
             and pair.is_cuda and (native or pair.shape[-1] in (64, 128) or _native_residual_bucket(module, pair))
@@ -368,7 +405,7 @@ def requires_cuda_inference(module, pair):
 
 
 def update_inference(module, pair, mask, *, bidirectional):
-    if _b200style_serves(module, pair):
+    if _b200style_serves(module, pair, inference=True):
         return _b200style_update(module, pair, mask, None, bidirectional)
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
 
@@ -444,7 +481,7 @@ def _wide_inference_ok(module, pair: torch.Tensor) -> bool:
 def serves_single(module, pair: torch.Tensor) -> bool:
     """Qualified single-direction native training contract; inference is separate."""
     return (pair.shape[-1] in SINGLE_TRAINING_WIDTHS
-            and (pair.shape[-1] != 512 or _native_buckets_enabled()
+            and (pair.shape[-1] != 512 or _native_buckets_enabled(pair)
                  or _selected_native_training(module, pair) or _b200style_serves(module, pair)) and serves(module, pair))
 
 

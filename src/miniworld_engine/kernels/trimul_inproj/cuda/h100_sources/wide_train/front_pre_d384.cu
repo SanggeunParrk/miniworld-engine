@@ -1251,7 +1251,10 @@ TMN_DEVI void k3_body(const K3Params& p) {
 #ifndef FRONT_BI
 #define FRONT_BI 2
 #endif
-using Base=tmn::K1Cfg<FRONT_CZ,FRONT_CH,false,FRONT_BI,64,FRONT_SLOTS,FRONT_SK,-1>;
+#ifndef FRONT_SCHED
+#define FRONT_SCHED -1
+#endif
+using Base=tmn::K1Cfg<FRONT_CZ,FRONT_CH,false,FRONT_BI,64,FRONT_SLOTS,FRONT_SK,FRONT_SCHED>;
 struct C:Base{static constexpr int SMEM_STAGE=NCWG*12288;static constexpr int SMEM=Base::SMEM+NCWG*4096;};
 extern "C" __global__ __launch_bounds__(C::NTHR,C::MINB)
 void mw_wide_front_pre_overlap(__grid_constant__ const tmn::K1Params p){tmn::sm90::k1_body<C,true,1,false,true,1>(p);}

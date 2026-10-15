@@ -205,12 +205,17 @@ def pack_into_cuda(dst, wl, wlg, wr, wrg):
     vector = (T.preserve_training(d)
               and T.d256_glue_enabled()
               and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in quad))
+    if (not vector and r % 32 == 0 and d % 32 == 0
+            and all(w.dtype == torch.bfloat16 and w.stride(0) == 1 and w.stride(1) >= r for w in quad)):
+        _aux_unit().kernel("mw_aux_pack_t").launch((4 * r // 32, d // 32, 1), (32, 8, 1), [p])
+        return
     _launch("mw_aux_pack_vec" if vector else "mw_aux_pack",
             (((4*r*d//8 if vector else 4*r*d)+255)//256, 1, 1), [p])
 
 
 def pack_into(dst, wl, wlg, wr, wrg):
-    if T.cuda_aux_enabled():
+    # Eager launches (every caller sits inside an opaque custom op) use the CUDA pack; the Triton op only serves compiled regions.
+    if T.cuda_aux_enabled() or (T._GLUE_CUDA and not torch.compiler.is_compiling()):
         return pack_into_cuda(dst, wl, wlg, wr, wrg)
     return pack_into_triton(dst, wl, wlg, wr, wrg)
 
@@ -240,6 +245,32 @@ def dense_native(value, dtype=None):
     out = torch.empty(value.shape, device=value.device, dtype=dtype)
     _launch("mw_aux_dense_copy", ((value.numel()+255)//256,1,1),
             [value,out,*value.shape,*value.stride(),int(value.dtype==torch.float32),int(dtype==torch.float32)])
+    return out
+
+
+def dense_native_many(values, dtypes):
+    """``dense_native`` for several matrices in one launch (the ones that already are dense keep their storage)."""
+    out = list(values)
+    todo = [i for i, (v, t) in enumerate(zip(values, dtypes, strict=True)) if not (v.is_contiguous() and v.dtype == t)]
+    if not todo:
+        return out
+    if len(todo) == 1 or len(todo) > 6:
+        for i in todo:
+            out[i] = dense_native(values[i], dtypes[i])
+        return out
+    for i in todo:
+        v, t = values[i], dtypes[i]
+        if v.ndim != 2 or v.dtype not in (torch.bfloat16, torch.float32) or t not in (torch.bfloat16, torch.float32):
+            raise ValueError("native dense copy requires a BF16/FP32 matrix")
+        out[i] = torch.empty(v.shape, device=v.device, dtype=t)
+    pad = lambda xs, fill=0: [xs[i] if i < len(todo) else fill for i in range(6)]
+    srcs = [values[i] for i in todo]
+    dsts = [out[i] for i in todo]
+    p = T._launch_module().Struct([
+        *pad(srcs, None), *pad(dsts, None), *pad([s.numel() for s in srcs]), *pad([s.shape[1] for s in srcs], 1),
+        *pad([s.stride(0) for s in srcs]), *pad([s.stride(1) for s in srcs]),
+        *pad([int(s.dtype == torch.float32) for s in srcs]), *pad([int(d.dtype == torch.float32) for d in dsts])])
+    _launch("mw_aux_copy_n", ((max(s.numel() for s in srcs) + 255) // 256, len(todo), 1), [p])
     return out
 
 
@@ -366,7 +397,7 @@ def normalize_into(dst, x, g, b, stats=None, *, warp=False):
     width, rows = x.shape[-1], x.numel()//x.shape[-1]
     if width not in (64, 128, 256, 384, 512):
         raise ValueError("Hopper CUDA normalization requires a supported pair width")
-    if warp:
+    if warp or rows >= 4096:    # one warp per row (8 rows per block); the one-block-per-row kernel only serves tiny inputs
         _launch("mw_aux_norm_warp", ((rows+7)//8, 1, 1), [x, g, b, dst, stats, width, rows])
     else:
         _launch("mw_aux_norm", (rows, 1, 1), [x, g, b, dst, stats, width])
@@ -445,7 +476,7 @@ def _training_gradient_copies_fake(grads: list[torch.Tensor], weights: list[torc
 def _training_gradient_copies(grads: list[torch.Tensor],weights: list[torch.Tensor]) -> list[torch.Tensor]:
     """Gradients densified to the weights' dtype, then laid out like the weights."""
     with T.native_context(grads[0].device):
-        dense=[dense_native(g,w.dtype) for g,w in zip(grads,weights,strict=True)]
+        dense=dense_native_many(grads,[w.dtype for w in weights])
         return preserve_parameter_layout(dense,weights)
 
 

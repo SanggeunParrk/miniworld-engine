@@ -9,6 +9,7 @@ Selected by integration only with ``Settings.trimul_h100_b200style``.
 from __future__ import annotations
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
@@ -109,7 +110,7 @@ def _front(x, w1, maskf, gi, bi, ab):
 
 
 def _bmm(a, b, *, out):
-    return torch.bmm(a, b, out=out)
+    return _H100_BMM.bmm(a, b, out=out)
 
 
 def _triangle(ab, tri):

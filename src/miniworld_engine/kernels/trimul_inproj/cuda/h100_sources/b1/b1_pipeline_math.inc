@@ -63,7 +63,7 @@ TMN_DEVI void pipeline_dgrad(const Params& p,uint8_t* sm,int m0,int slot){
  red[c]+=(tmp[c]+tmp[512+c])+(tmp[1024+c]+tmp[1536+c]);
  red[256+c]+=(tmp[256+c]+tmp[768+c])+(tmp[1280+c]+tmp[1792+c]);
  fence_proxy_async();sync_group(); // Generic dtri stores visible before each WG's TMA read.
- if(tid==0){for(int ch=wi*128;ch<(wi+1)*128;ch+=16)tma_store_3d(&p.dtri,sx+ch*128,m0,ch,0);tma_store_commit();tma_store_wait_all();}
+ if(tid==0){for(int ch=wi*128;ch<(wi+1)*128;ch+=16)tma_store_3d(&p.dtri,sx+ch*128,m0,ch,0);tma_store_commit();B1_STORE_WAIT();}
  sync_group(); // TMA finished consuming this slot before cluster reuse.
 }
 

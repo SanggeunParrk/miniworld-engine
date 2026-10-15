@@ -15,6 +15,7 @@ The default covers L384/768; native preparation runs inside the qualified D64 la
 from __future__ import annotations
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
@@ -91,7 +92,7 @@ def _bmm(a, b, *, out):
     if T.d64_uni_owned_bmm_enabled(a.shape[-1]):
         from ._h100_pack import owned_bmm
         return owned_bmm(a, b, out=out)
-    return torch.bmm(a, b, out=out)
+    return _H100_BMM.bmm(a, b, out=out)
 
 
 def _triangle(ab, tri, outgoing):

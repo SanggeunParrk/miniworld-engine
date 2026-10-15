@@ -27,8 +27,8 @@ _D64_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D64 L768 / uni outgoing D64 L768
 _D128_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D128 384^2 preserved route
 _WIDE_DEFAULT_CANDIDATE = False  # bidir D384 default cell
 _CUDA_AUX_UNSCOPED = False  # native auxiliary kernels outside the qualified launch scopes
-_TRAIN_CUDA_UNSCOPED = False  # D64 native preparation and the L128..1024 D64 buckets outside the qualified scope
-_TRAIN_FUSED_PREP_UNSCOPED = False  # D64 fused preparation outside the qualified scope (needs the line above)
+_TRAIN_CUDA_UNSCOPED = True  # D64 native preparation and the L128..1024 D64 buckets outside the qualified scope
+_TRAIN_FUSED_PREP_UNSCOPED = True  # D64 fused preparation outside the qualified scope (needs the line above)
 _D64_UNI_AFFINE_FORCED = False  # uni D64 affine split outside the selected L768 cell
 
 
@@ -40,6 +40,8 @@ def _native_buckets():
 def _preserved_width(width):
     """Explicit preserved glue: native buckets forced on and the width selected."""
     s = settings.current()
+    if width == 128 and s.trimul_h100_native_buckets is None:
+        return True  # D128 serves every length 128..1024 natively by default (2026-10-13)
     return s.trimul_h100_native_buckets is True and width in s.trimul_h100_preserve_widths
 
 
@@ -191,9 +193,10 @@ def uni_training(x, outgoing):
     if preserve_wide_training(x.shape[-1]) and bucket:
         return True
     # Qualified outgoing cells preserve the selected native algorithm per shape.
-    return (outgoing and bucket
-            and (x.shape[-1] == 512
-                 or (x.shape[-1] == 384 and x.shape[1] == 384))
+    # D512 serves both directions (GP_DIR 1/2 in contract_gp); D384 L384 stays outgoing-only.
+    return (bucket
+            and ((x.shape[-1] == 512)
+                 or (outgoing and x.shape[-1] == 384 and x.shape[1] == 384))
             and _native_buckets() is not False)
 
 
@@ -211,8 +214,8 @@ def wide_owned_blas_enabled():
 @contextmanager
 def preserved_uni_blas_context(x, outgoing):
     """Graph-owned scratch defaults only for four qualified uni training cells."""
-    bucket = (outgoing and x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
-              and ((x.shape[-1] in (256, 384) and x.shape[1] == 384)
+    bucket = (x.ndim == 4 and x.shape[0] == 1 and x.shape[1] == x.shape[2]
+              and ((outgoing and x.shape[-1] in (256, 384) and x.shape[1] == 384)
                    or (x.shape[-1] == 512 and x.shape[1] in (384, 768))))
     previous = getattr(_uni_owned_blas_scope, "enabled", False)
     _uni_owned_blas_scope.enabled = previous or (bucket and uni_training(x, outgoing))
@@ -376,6 +379,9 @@ def pack_into(dst, wl, wlg, wr, wrg, backward_stack=None, gate=None):
     pack(dst, wl, wlg, wr, wrg)
 
 
+_GLUE_CUDA = True   # eager glue (weight pack, input LN, LN-affine fold) on the CUDA aux kernels instead of Triton / Inductor
+
+
 def cuda_aux_enabled():
     scoped = False if torch.compiler.is_compiling() else (
         getattr(_d256_scope, "enabled", False) or getattr(_d128_scope, "enabled", False)
@@ -400,7 +406,7 @@ def _normalize_into_compiled(dst, x, g, b):
 
 
 def normalize_into(dst, x, g, b, warp=False):
-    if cuda_aux_enabled():
+    if cuda_aux_enabled() or (_GLUE_CUDA and not torch.compiler.is_compiling()):
         from ._h100_pack import normalize_into as native
         return native(dst, x, g, b, warp=warp)
     return _normalize_into_compiled(dst, x, g, b)

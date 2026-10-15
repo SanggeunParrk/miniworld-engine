@@ -27,6 +27,21 @@ struct AuxCast {
   const void* src[6]; bf* dst[6];
   int count[6], cols[6], s0[6], s1[6], fp32[6];
 };
+struct AuxCopyN {
+  const void* src[6]; void* dst[6];
+  int count[6], cols[6], s0[6], s1[6], src32[6], dst32[6];
+};
+// Up to six dense copies (strided source, dtype conversion) in one launch; grid.y selects the matrix.
+extern "C" __global__ void mw_aux_copy_n(AuxCopyN p) {
+  const int k=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
+  if(i>=p.count[k])return;
+  const int j=(i/p.cols[k])*p.s0[k]+(i%p.cols[k])*p.s1[k];
+  if(p.src32[k]==p.dst32[k]) {
+    if(p.src32[k])static_cast<unsigned int*>(p.dst[k])[i]=static_cast<const unsigned int*>(p.src[k])[j];
+    else static_cast<unsigned short*>(p.dst[k])[i]=static_cast<const unsigned short*>(p.src[k])[j];
+  } else if(p.dst32[k])static_cast<float*>(p.dst[k])[i]=__bfloat162float(static_cast<const bf*>(p.src[k])[j]);
+  else static_cast<bf*>(p.dst[k])[i]=__float2bfloat16_rn(static_cast<const float*>(p.src[k])[j]);
+}
 extern "C" __global__ void mw_aux_dense_copy(const void* src,void* dst,
     int rows,int cols,int s0,int s1,int src32,int dst32) {
   int i=blockIdx.x*256+threadIdx.x;if(i>=rows*cols)return;
@@ -70,6 +85,21 @@ extern "C" __global__ void mw_aux_pack(AuxPack p) {
   int row=i/p.cols,col=i%p.cols,source=(row/64)*32+row%32;
   int leaf=2*(source>=p.rows)+(row%64<32),r=source%p.rows;
   p.dst[i]=__float2bfloat16_rn(aux_read(p.w[leaf],r*p.s0[leaf]+col*p.s1[leaf],p.fp32[leaf]));
+}
+// Column-major bf16 leaves (unit row stride): a 32 x 32 tile is read along the leaf rows and written along the packed columns, so both
+// sides are coalesced. Same element mapping as mw_aux_pack; rows and cols are multiples of 32.
+extern "C" __global__ void mw_aux_pack_t(AuxPack p) {
+  __shared__ unsigned short tile[32][34];
+  const int row0=blockIdx.x*32,ct=blockIdx.y,tx=threadIdx.x,ty=threadIdx.y;
+  const int base=(row0/64)*32,leaf=2*(base>=p.rows)+(row0%64<32),r0=base%p.rows;
+  const unsigned short* src=static_cast<const unsigned short*>(p.w[leaf]);
+  const int ld=p.s1[leaf];
+#pragma unroll
+  for(int k=0;k<4;++k)tile[tx][ty+8*k]=src[(size_t)(ct*32+ty+8*k)*ld+(r0+tx)];
+  __syncthreads();
+  unsigned short* dst=reinterpret_cast<unsigned short*>(p.dst);
+#pragma unroll
+  for(int k=0;k<4;++k)dst[(size_t)(row0+ty+8*k)*p.cols+ct*32+tx]=tile[ty+8*k][tx];
 }
 extern "C" __global__ void mw_aux_pack_vec(AuxPack p) {
   int i=blockIdx.x*256+threadIdx.x,cols=p.cols/8;

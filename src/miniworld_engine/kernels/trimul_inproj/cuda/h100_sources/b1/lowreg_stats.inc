@@ -49,7 +49,7 @@ TMN_DEVI void lowreg_dgrad(const Params& p,uint8_t* sm,uint64_t* bars,int m0,int
 #if B1_DEFER_DG_STORE
  // sm0 is reused by parameter reduction. Finish the outgoing dGate TMA
  // before the existing CTA barrier publishes that scratch as reusable.
- if(threadIdx.x==0)tma_store_wait_all();
+ if(threadIdx.x==0)B1_STORE_WAIT();
 #endif
  #if B1_REG_EARLY_RAW
  // wait_group releases operands only for this warp-group. Both groups
@@ -141,11 +141,11 @@ TMN_DEVI void lowreg_dgrad(const Params& p,uint8_t* sm,uint64_t* bars,int m0,int
  red[c]+=(tmp[c]+tmp[512+c])+(tmp[1024+c]+tmp[1536+c]);red[256+c]+=(tmp[256+c]+tmp[768+c])+(tmp[1280+c]+tmp[1792+c]);
 #endif
 #if B1_DTRI_ASYNC_EPI
- if(tid==0)tma_store_wait_all();
+ if(tid==0)B1_STORE_WAIT();
 #if !B1_SKIP_FINAL_GROUP_SYNC
  sync_group();
 #endif
 #else
- fence_proxy_async();sync_group();if(tid==0){for(int ch=wi*128;ch<(wi+1)*128;ch+=B1_DTRI_STORE_C)cached_dtri_store(&p.dtri,sx+ch*128,m0,ch,0);tma_store_commit();tma_store_wait_all();}sync_group();
+ fence_proxy_async();sync_group();if(tid==0){for(int ch=wi*128;ch<(wi+1)*128;ch+=B1_DTRI_STORE_C)cached_dtri_store(&p.dtri,sx+ch*128,m0,ch,0);tma_store_commit();B1_STORE_WAIT();}sync_group();
 #endif
 }

@@ -24,8 +24,13 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
 
 WIDTHS = (256, 384, 512)
+_PROF = 0          # timing experiment switch (front_pre_ss.cu MW_PROF_MODE)
+_NS = False        # C_Z = 512: one 64-token tile, two consumer warpgroups split the N blocks (front_pre_ns.cu)
+_MC = False         # C_Z = 512: 2-CTA cluster, weight slots multicast (front_pre_mc.cu); needs the PRELN front
+_PRELN = True      # C_Z = 512: LN_in in its own kernel (ln_in_d512.cu), the front reads the normalised operand
+_SSA_D512 = True   # front for C_Z = 512: LN in place in shared memory, wgmma A from shared memory (front_pre_ss.cu)
 # front K1 tiles: (BI, BJ, ring slots, K chunks per slot, min blocks per SM)
-_K1 = {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1)}
+_K1 = {256: (2, 64, 4, 4, 1), 384: (2, 64, 2, 6, 1), 512: (1, 64, 4, 4, 1)}
 
 
 def supports(width, length) -> bool:
@@ -37,23 +42,63 @@ def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
     n, D = x.shape[1], x.shape[-1]
     hidden = D if hidden is None else hidden
     cfg = _K1[D] if D in _K1 else {128: (2, 64, 2, 2, 1), 512: (1, 64, 2, 8, 1)}[D]
-    a, b, slots, sk, minb = cfg
-    defines = W._defines(MW_MINB=minb, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, TMN_WSKIP=1,
+    preln = D == 512 and _SSA_D512 and _PRELN
+    a, b, slots, sk, minb = cfg[:5]
+    sched = cfg[5] if len(cfg) > 5 else -1
+    defines = W._defines(MW_MINB=minb, FRONT_SCHED=sched, MW_PROF_MODE=_PROF | (1 if preln else 0), MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, TMN_WSKIP=1,
                          TMN_MASK_TEMPLATE=1, FRONT_CZ=D, FRONT_CH=hidden, FRONT_BI=a, FRONT_SLOTS=slots, FRONT_SK=sk)
+    mc = preln and _MC and a == 1 and not _NS
+    ns = preln and _NS and a == 1
     smem = W._k1_smem(D, cfg, a * b // 64 * 4096)
-    k = W._kernel("front_pre_d384.cu", "mw_wide_front_pre_overlap", "forward", defines, smem)
+    if ns:   # two weight rings (one per N-split warpgroup) + two staging areas
+        smem = a * b * D * 2 + 2 * slots * sk * 8192 + 2 * 12288 + ((2 + 4 * slots) * 8 + 8 + 127) // 128 * 128 + 1024
+    threads = 128 * 3 if ns else 128 * (a * b // 64 + 1)
+    source = ("front_pre_ns.cu" if ns else "front_pre_mc.cu" if mc else "front_pre_ss.cu") if (D == 512 and _SSA_D512) else "front_pre_d384.cu"
+    k = W._kernel(source, "mw_wide_front_pre_overlap", "forward", defines, smem)
     tj = (n + b - 1) // b
     tiles = ((n + a - 1) // a) * tj
     fields = [
-        W._map(x, [64, b, a], [D, n, n], [D * 2, n * D * 2]),
+        W._map(xn if preln else x, [64, b, a], [D, n, n], [D * 2, n * D * 2]),
         W._map(w1, [64, 64], [D, 4 * hidden], [D * 2]),
         W._map(ab, [64, 1, 32], [n, n, 2 * hidden], [n * 2, n * n * 2]),
         mask, gi, bi, ab, None, xn,
         W._map(pre, [64, 64], [pre.shape[1], pre.shape[0]], [pre.shape[1] * 2]),
         n, n, tj, tiles, 1, n, 1, 1e-5, n * D, D, 0, 0,
     ]
-    W._launch(k, min(tiles, W._sms() * minb), 128 * (a * b // 64 + 1), smem,
+    if preln:
+        _ln_in_512(x, gi, bi, xn)
+    grid = min(tiles, 2 * _active_clusters(k, smem, threads) if mc else W._sms() * minb)
+    W._launch(k, grid, threads, smem,
               W._params(f"uni_front{D}", fields))
+
+
+@T.device_cache
+def _active_clusters(kernel, smem, threads):
+    drv = kernel.unit.drv
+    driver = drv.d
+    config = driver.CUlaunchConfig()
+    config.gridDimX = 2 * W._sms()
+    config.gridDimY = config.gridDimZ = 1
+    config.blockDimX = threads
+    config.blockDimY = config.blockDimZ = 1
+    config.sharedMemBytes = smem
+    config.hStream = driver.CUstream(int(torch.cuda.current_stream().cuda_stream))
+    attr = driver.CUlaunchAttribute()
+    attr.id = driver.CUlaunchAttributeID.CU_LAUNCH_ATTRIBUTE_CLUSTER_DIMENSION
+    attr.value.clusterDim.x = 2
+    attr.value.clusterDim.y = attr.value.clusterDim.z = 1
+    config.attrs = [attr]
+    config.numAttrs = 1
+    count = drv._unwrap("cuOccupancyMaxActiveClusters",
+                        driver.cuOccupancyMaxActiveClusters(driver.CUfunction(int(kernel.handle)), config))
+    assert count > 0
+    return count
+
+
+def _ln_in_512(x, gi, bi, xn):
+    M = x.shape[1] * x.shape[2]
+    k = W._kernel("ln_in_d512.cu", "mw_ln_in_d512", "upstream", ())
+    W._launch(k, W._sms() * 4, 256, 0, W._params("uni_ln_in512", [x, xn, gi, bi, M, 1e-5]))
 
 
 def _triangle(ab, tri, outgoing):

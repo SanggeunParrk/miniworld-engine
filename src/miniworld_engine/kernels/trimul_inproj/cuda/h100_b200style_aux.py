@@ -78,6 +78,11 @@ extern "C" __global__ void mw_b200style_apply_{d}(const Apply p) {{
     return T.load_unit(str(T.compile_text(body, flags)), "b200style_aux_driver")
 
 
+# gate_bwd grid: one pass of 8 resident CTAs per SM is best from L384 up; below that the fixed 512-atomics-per-CTA epilogue
+# dominates, so two CTAs per SM (measured on H100, D256-512, L128-768: L128 93 -> 34 us at D256).
+GATE_BLOCKS = 132 * 8
+GATE_BLOCKS_SMALL = 132 * 2
+
 def _launch(name, grid, fields):
     _unit().kernel(name).launch(grid, (256, 1, 1), [T._launch_module().Struct(fields)])
 
@@ -98,7 +103,7 @@ class DriverAux:
         part.zero_()
         _launch(
             f"mw_b200style_gate_{d}",
-            (148 * 15, 1, 1),
+            (GATE_BLOCKS_SMALL if m < 384 * 384 else GATE_BLOCKS, 1, 1),
             [
                 dy,
                 pv,

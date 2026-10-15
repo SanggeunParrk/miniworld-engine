@@ -5,6 +5,9 @@
 #ifndef B7_PREFETCH
 #define B7_PREFETCH 0
 #endif
+#ifndef B7_EARLY_FREE
+#define B7_EARLY_FREE 1
+#endif
 constexpr int RING_CHUNK=B7_RING_CHUNK,RING_SLOTS=32768/RING_CHUNK,RING_PHASES=131072/RING_CHUNK,RING_H=RING_CHUNK/8192;
 constexpr int THREADS=256,SMEM=114688;
 #ifndef B7_CONSUMERS
@@ -83,10 +86,15 @@ TMN_DEVI void source_producer(const Params& p,uint8_t* sm,uint64_t* bar){
   for(int round=0;round<rounds;round+=2){bool second=round+1<rounds;mbar_wait(bar+19,(round/2)&1);
    publish_tile(p,sm+98304,cid,round%RINGS,rank);
    if(second)publish_tile(p,sm+106496,cid,(round+1)%RINGS,rank);
+#if B7_EARLY_FREE
+   // The staging tiles are free once the bulk stores have read them; the flag still waits for the writes to complete.
+   tma_store_commit();tma_store_wait_read<0>();mbar_arrive(bar+20);tma_store_wait_all();
+   publish(p.flags+(cid*RINGS+round%RINGS)*(SOURCES+2)+1+rank,round+1);
+#else
    tma_store_commit();tma_store_wait_all();
    publish(p.flags+(cid*RINGS+round%RINGS)*(SOURCES+2)+1+rank,round+1);
-   
    mbar_arrive(bar+20);
+#endif
   }return;
  }if(threadIdx.x)return;
  for(int round=0,tile=cid;tile<p.tiles;tile+=groups,++round){int slot=round%4,rs=round%RINGS;
@@ -130,7 +138,7 @@ TMN_DEVI void source_compute(const Params& p,uint8_t* sm,uint64_t* bar){
   if(second){mbar_wait(bar+slot+1,(round/4)&1);load_frag_bf16<8,8192>(xn,smem_u32(s1),w*16,lane);pair_gp(a1,xn,desc);}
   if(round>0)mbar_wait(bar+20,((round/2)-1)&1);
   pair_glu(a0,s0,sg0,ma,mb);
-  if(second){wgmma_wait<0>();fence_regs(a1);ma=b7_mask_bits(p,(tile+groups)*64+ra);mb=b7_mask_bits(p,(tile+groups)*64+ra+8);pair_glu(a1,s1,sg1,ma,mb);}
+    if(second){wgmma_wait<0>();fence_regs(a1);ma=b7_mask_bits(p,(tile+groups)*64+ra);mb=b7_mask_bits(p,(tile+groups)*64+ra+8);pair_glu(a1,s1,sg1,ma,mb);}
   fence_proxy_async();allsync();
   // Both consumers use the same derivatives. Publish while local dW executes.
   if(tid==0)mbar_arrive(bar+19);

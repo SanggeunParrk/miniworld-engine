@@ -16,6 +16,7 @@ import json
 from functools import lru_cache
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 import torch.nn.functional as F
 import triton
 import triton.language as tl
@@ -178,7 +179,7 @@ def _run(x, weights, mask):
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     _, N, _, D = x.shape
     H, M = 2 * D, N * N
-    native_aux = T.cuda_aux_enabled() or native_inference_bucket(D, N)
+    native_aux = T.cuda_aux_enabled() or native_inference_bucket(D, N) or (T._GLUE_CUDA and not torch.compiler.is_compiling())
     fast_aux = _fast_aux_enabled(D, N)
     sel = _selection(D, N)
     cfg, normalize, gfold = tuple(sel["k1"]), sel["normalize"], sel.get("gfold", False)
@@ -238,8 +239,8 @@ def _run(x, weights, mask):
         owned_bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
         owned_bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
     else:
-        torch.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
-        torch.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
+        _H100_BMM.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
+        _H100_BMM.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
 
     # K3: folded output LN + projection, gate, residual.
     y = torch.empty_like(x)

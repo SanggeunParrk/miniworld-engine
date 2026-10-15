@@ -2,6 +2,7 @@
 
 import json
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
@@ -151,12 +152,12 @@ def _run_inference(x, weights, mask, direction, eps, config):
         left, right = ab[:ch], ab[ch:]
         if direction == 0:
             h = ch // 2
-            torch.bmm(left[:h], right[:h].transpose(-1, -2), out=tri[:h])
-            torch.bmm(left[h:].transpose(-1, -2), right[h:], out=tri[h:])
+            _H100_BMM.bmm(left[:h], right[:h].transpose(-1, -2), out=tri[:h])
+            _H100_BMM.bmm(left[h:].transpose(-1, -2), right[h:], out=tri[h:])
         elif direction == 1:
-            torch.bmm(left, right.transpose(-1, -2), out=tri)
+            _H100_BMM.bmm(left, right.transpose(-1, -2), out=tri)
         else:
-            torch.bmm(left.transpose(-1, -2), right, out=tri)
+            _H100_BMM.bmm(left.transpose(-1, -2), right, out=tri)
         kk.k3(
             tri,
             z,

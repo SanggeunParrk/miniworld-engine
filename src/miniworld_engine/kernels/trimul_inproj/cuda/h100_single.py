@@ -8,6 +8,7 @@ import json
 from functools import lru_cache
 
 import torch
+from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -108,9 +109,9 @@ class Plan:
         self.front()
         left, right = self.ab[:128], self.ab[128:]
         if self.outgoing:
-            torch.bmm(left, right.transpose(-1, -2), out=self.tri)
+            _H100_BMM.bmm(left, right.transpose(-1, -2), out=self.tri)
         else:
-            torch.bmm(left.transpose(-1, -2), right, out=self.tri)
+            _H100_BMM.bmm(left.transpose(-1, -2), right, out=self.tri)
         return self.output()
 
     def backward(self, dy=None):
@@ -134,11 +135,11 @@ class Plan:
         dr = torch.empty_like(dt)
         left, right = self.ab[:128], self.ab[128:]
         if self.outgoing:
-            torch.bmm(dt, right, out=dl)
-            torch.bmm(dt.transpose(-1, -2), left, out=dr)
+            _H100_BMM.bmm(dt, right, out=dl)
+            _H100_BMM.bmm(dt.transpose(-1, -2), left, out=dr)
         else:
-            torch.bmm(right, dt.transpose(-1, -2), out=dl)
-            torch.bmm(left, dt, out=dr)
+            _H100_BMM.bmm(right, dt.transpose(-1, -2), out=dl)
+            _H100_BMM.bmm(left, dt, out=dr)
         from ._h100_pack import dense_native
         d = dict(
             n=self.n,

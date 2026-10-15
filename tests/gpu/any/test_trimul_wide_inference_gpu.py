@@ -39,9 +39,14 @@ def test_wide_inference_matches_triton(d, masked, monkeypatch):
     calls = []
     real = W.wide_inference
     monkeypatch.setattr(W, "wide_inference", lambda *a: calls.append(1) or real(*a))
+    # The B200-style port (default since 2026-10-13) is the native path outside the preserved cells.
+    from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as BS
+
+    real_bs = BS.trimul
+    monkeypatch.setattr(BS, "trimul", lambda *a: calls.append(1) or real_bs(*a))
     with torch.no_grad():
         y = m(x, mask=mask)
-        assert calls, "default dispatch did not take the wide K1/K3 inference path"
+        assert calls, "default dispatch did not take a native wide inference path"
         try:
             settings.configure(engine_backend="triton")
             ref = m(x, mask=mask)

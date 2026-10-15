@@ -100,7 +100,10 @@ class Plan:
         self.dbeta = torch.empty_like(self.dgam)
         from ._h100_pack import zeros_native
         zeros = zeros_native if T.preserve_d128_training() else torch.zeros
-        self.partw = zeros((self.clusters * 2, 16, 64, 128), device=x.device)
+        # b7_384 sums `groups` partial blocks and every one is written by its source CTA; the b7_768 source also sums a second,
+        # never-written half that must read as zero.
+        self.partw = (torch.empty((self.clusters, 16, 64, 128), device=x.device) if d["n"] == 384
+                      else zeros((self.clusters * 2, 16, 64, 128), device=x.device))
         self.partln = torch.empty(
             (self.clusters * self.consumers, 256), device=x.device
         )
