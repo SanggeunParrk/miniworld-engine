@@ -596,3 +596,27 @@ one launch each (3 / 2 us).  Re-measured, same script, ms, Anthropic / ours (Ant
 
 Ours is faster than Anthropic's native cell in every cell; the thinnest margin is d_pair 256 L768 (1.10x), where the cuBLAS projections
 dominate.  The same repack saving applies to every width and to training calls (their weight packs were the same torch kernels).
+
+## Full re-measurement at `ea15e364` (2026-10-15)
+
+After the one-launch weight pack (`7f7851aa`).  Same `bench.py` harness and settings as the 2026-10-14 grid above (PyTorch compiled /
+cuEquivariance / ours; cuEquivariance training with the fp32 consistency limit relaxed to 1e-3).  ours in ms (x = the faster of PyTorch
+compiled / cuEquivariance ÷ ours):
+
+| mode, d_pair | L128 | L256 | L384 | L512 | L640 | L768 |
+|---|---|---|---|---|---|---|
+| inference 64 | 0.025 (2.34x) | 0.064 (2.37x) | 0.152 (2.38x) | 0.282 (2.57x) | 0.480 (2.62x) | 0.735 (2.73x) |
+| inference 128 | 0.033 (2.41x) | 0.111 (2.38x) | 0.265 (2.70x) | 0.507 (2.81x) | 0.872 (2.82x) | 1.345 (2.94x) |
+| inference 256 | 0.065 (2.00x) | 0.257 (2.14x) | 0.610 (2.30x) | 1.170 (2.35x) | 1.970 (2.47x) | 3.096 (2.53x) |
+| inference 384 | 0.104 (1.85x) | 0.391 (2.11x) | 0.972 (2.13x) | 1.853 (2.21x) | 3.270 (2.22x) | 5.103 (2.33x) |
+| inference 512 | 0.147 (1.69x) | 0.553 (1.97x) | 1.423 (1.97x) | 2.697 (2.08x) | 4.646 (2.15x) | 7.442 (2.44x) |
+| training 64 | 0.122 (1.70x) | 0.310 (2.14x) | 0.656 (2.58x) | 1.166 (2.93x) | 1.924 (3.15x) | 2.909 (3.40x) |
+| training 128 | 0.133 (2.29x) | 0.410 (2.98x) | 0.942 (3.43x) | 1.793 (3.70x) | 3.064 (3.89x) | 4.955 (3.94x) |
+| training 256 | 0.296 (1.75x) | 0.972 (2.47x) | 2.231 (2.88x) | 4.194 (3.10x) | 7.537 (3.14x) | 11.78 (3.44x) |
+| training 384 | 0.428 (1.88x) | 1.431 (2.51x) | 3.438 (2.78x) | 6.759 (2.93x) | 11.94 (3.15x) | 19.40 (3.33x) |
+| training 512 | 0.569 (1.81x) | 1.974 (2.40x) | 4.882 (2.60x) | 9.629 (2.81x) | 17.20 (3.04x) | 27.54 (3.23x) |
+
+All 60 cells faster than both baselines (smallest: 1.69x).  Ending node, key mask, B = 2 (scratch script, 160 cells over base / ending /
+mask / B = 2, inference and training, d_pair 64-512, L 128 / 256 / 512 / 768): every cell faster than both baselines, smallest 1.69x
+(training, d_pair 64, L128).  Against Anthropic's native cell (d_pair 128 / 256, inference, all four cases): see the table after
+`7f7851aa`, every cell faster, smallest 1.10x.
