@@ -75,14 +75,15 @@ def _settings():
 
 
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """sm_90, bf16 (or fp32 with TF32 allowed), D a multiple of 64 up to 1024, hidden a multiple of 128, weights in the activation dtype.
-    Any row count."""
+    """sm_90, bf16 (or fp32 with TF32 allowed), D a multiple of 64 up to 1024, hidden a multiple of 128, weights bf16 or fp32 (cast to the activation dtype inside; the
+    weight gradients come back in the weights' own dtype).  Any row count."""
     if not _settings().transition_generic_sm90a:
         return False
     if not x.is_cuda or x.dtype not in (torch.bfloat16, torch.float32):
         return False
-    if wa.dtype != x.dtype or ws.dtype != x.dtype:
-        return False
+    for w in (wa, ws):
+        if w.dtype not in (torch.bfloat16, torch.float32):
+            return False   # the module's bf16 pinned weights under fp32 activations and fp32 masters under bf16 ones: cast inside
     if x.dtype is torch.float32 and not _tf32_allowed():
         return False
     if not _is_hopper(
@@ -255,6 +256,16 @@ class _weight_grads_aside:
         return False
 
 
+def _kernel_weights(x: torch.Tensor, *ws: torch.Tensor) -> list[torch.Tensor]:
+    """The weights as the kernels read them: the activation dtype (fp32 masters under bf16 activations are cast here)."""
+    return [(w.to(x.dtype) if w.dtype != x.dtype else w).contiguous() for w in ws]
+
+
+def _mm(a: torch.Tensor, b: torch.Tensor, fp32_out: bool) -> torch.Tensor:
+    """cuBLAS product; ``fp32_out`` keeps the fp32 accumulation unrounded (the weight gradients of an fp32 master)."""
+    return torch.mm(a, b, out_dtype=torch.float32) if fp32_out else torch.mm(a, b)
+
+
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
     """Shapes of the generic forward's outputs (y, the saved tensors); no kernel runs."""
     rows = x.shape[0] if save else 1
@@ -327,14 +338,14 @@ def _fwd_launch(
     return out, xn, rstd, c1, ab, (h if ab.numel() > 1 else x.new_empty((1, 1)))
 
 
-def _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws):
+def _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32=False):
     """Shapes of the generic backward's outputs (dx, dgamma, dbeta, dW_ab, dW_s); no kernel runs."""
     return (
         torch.empty_like(x),
         torch.empty_like(gamma),
         torch.empty_like(gamma),
-        torch.empty((2 * wa.shape[0], wa.shape[1]), dtype=wa.dtype, device=wa.device),
-        torch.empty(ws.shape, dtype=ws.dtype, device=ws.device),
+        torch.empty((2 * wa.shape[0], wa.shape[1]), dtype=torch.float32 if dw_fp32 else wa.dtype, device=wa.device),
+        torch.empty(ws.shape, dtype=torch.float32 if dw_fp32 else ws.dtype, device=ws.device),
     )
 
 
@@ -352,11 +363,12 @@ def _bwd_launch(
     wa: torch.Tensor,
     wb: torch.Tensor,
     ws: torch.Tensor,
+    dw_fp32: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns (dx, dgamma, dbeta, dWab, dWs): ``dx`` already carries the residual branch, dWab = [dWa; dWb] [2 HID, D], the weight
     gradients come out of cuBLAS (fp32 accumulation, one rounding to the weight dtype) in the weight dtype."""
     if _is_fake(dy, x):
-        return _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws)
+        return _bwd_launch_fake(dy, x, xn, rstd, c1, ab, h, wcat, gamma, wa, wb, ws, dw_fp32)
     ext = _ext()
     tf32 = x.dtype is torch.float32
     if (
@@ -372,8 +384,8 @@ def _bwd_launch(
         with _weight_grads_aside(
             dy, h, dab, xn, rows=x.shape[0], d=x.shape[1]
         ) as grads:  # dW GEMMs on a second stream: off the dxn -> ln_bwd critical path
-            dws = torch.mm(dy.t(), h)  # [D, HID]
-            dwab = torch.mm(dab.t(), xn)  # [2 HID, D]: dWa then dWb (dab holds dA | dB)
+            dws = _mm(dy.t(), h, dw_fp32)  # [D, HID]
+            dwab = _mm(dab.t(), xn, dw_fp32)  # [2 HID, D]: dWa then dWb (dab holds dA | dB)
             grads.append((dwab, dws))
         del h
         dxn = torch.mm(dab, wcat) if wcat.numel() > 1 else ext.dxn_gemm_t(dab, wa, wb)
@@ -384,6 +396,8 @@ def _bwd_launch(
         h, dab = ext.gate(xn, dy, wa_r if tf32 else wa, wb_r if tf32 else wb, wst)
         dws = torch.mm(dy.t(), h)
         dwab = torch.mm(dab.t(), xn)
+        if dw_fp32:
+            dws, dwab = dws.float(), dwab.float()   # fp32 activations never carry bf16 masters; kept for the contract
         del h
         dxn = ext.dxn_gemm(dab, wabt)
     del dab
@@ -401,7 +415,9 @@ class _GenericTransitionSM90A(torch.autograd.Function):
         shape = x.shape
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = wa.contiguous(), wb.contiguous(), ws.contiguous()
+        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
+        masters = (wa, wb, ws)   # saved too: an in-place update of a parameter before backward must raise, as for any autograd op
+        wa, wb, ws = _kernel_weights(x, wa, wb, ws)
         out, xn, rstd, c1, ab, h = _fwd_launch(
             flat, gf, bf, wa, wb, ws, float(eps), True
         )
@@ -411,14 +427,13 @@ class _GenericTransitionSM90A(torch.autograd.Function):
             and _cublas_plan(flat.shape[0], flat.shape[1], wa.shape[0])[2]
             else flat.new_empty((1, 1))
         )
-        ctx.save_for_backward(flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws)
+        ctx.save_for_backward(flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *masters)
         ctx.shape = shape
-        ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         return out.reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws = ctx.saved_tensors
+        flat, xn, rstd, c1, ab, h, wcat, gf, wa, wb, ws, *_ = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
         dx, dgam, dbeta, dwab, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),
@@ -433,6 +448,7 @@ class _GenericTransitionSM90A(torch.autograd.Function):
             wa,
             wb,
             ws,
+            adt is torch.float32 and flat.dtype is torch.bfloat16,
         )
         hid = wa.shape[0]
         return (
@@ -458,9 +474,7 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),
             beta.float().contiguous(),
-            wa.contiguous(),
-            wb.contiguous(),
-            ws.contiguous(),
+            *_kernel_weights(x, wa, wb, ws),
             float(eps),
             False,
         )

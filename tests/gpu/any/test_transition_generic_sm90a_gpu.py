@@ -114,7 +114,8 @@ def test_generic_gate_accepts_and_rejects():
         *operands(1, 128, 256, torch.float16)[1:],
     )  # fp16
     x, wa, ws = operands(128, 128, 256)
-    assert not gen.supported(x, wa.float(), ws)  # weights not in the activation dtype
+    assert gen.supported(x, wa.float(), ws)  # fp32 masters under bf16 activations are cast inside
+    assert not gen.supported(x, wa.half(), ws)  # a weight dtype the kernels do not read
     assert not gen.supported(x.cpu(), wa.cpu(), ws.cpu())
     assert not gen.supported(
         torch.empty(0, 128, device="cuda", dtype=torch.bfloat16), wa, ws
@@ -145,9 +146,7 @@ def test_tuned_gates_take_n2():
     assert not fused_sm90a.supported(*operands(128, 384))
     for d in (64, 256, 384, 512):
         assert fused_wide_sm90a.supported(*operands(d, 4 * d))
-        assert fused_wide_sm90a.supported(*operands(d, 2 * d)) is (
-            d in (64, 256)
-        )  # D384 / D512 n = 2: the generic kernels
+        assert fused_wide_sm90a.supported(*operands(d, 2 * d))  # n = 2 is built for D64 ... D512
         assert not fused_wide_sm90a.supported(*operands(d, 3 * d))
     assert not fused_wide_sm90a.supported(
         *operands(768, 1536)
@@ -310,7 +309,7 @@ def _spy(monkeypatch, module_obj, name):
         (128, 2, (1, 16, 16), "fused_sm90a.transition_fused_sm90a"),
         (64, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (256, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
-        (384, 2, (1, 16, 16), "fused_generic_sm90a.transition_generic_sm90a"),
+        (384, 2, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (512, 4, (1, 16, 16), "fused_wide_sm90a.transition_wide_sm90a"),
         (768, 2, (1, 16, 16), "fused_generic_sm90a.transition_generic_sm90a"),
         (

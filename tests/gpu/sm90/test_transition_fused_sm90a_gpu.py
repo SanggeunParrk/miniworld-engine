@@ -180,8 +180,8 @@ def test_agrees_with_the_triton_path_to_bf16(shape, monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    monkeypatch.setenv(
-        "MINIWORLD_TRANSITION_GENERIC_SMALL", "0"
+    override_setting(
+        monkeypatch, "transition_generic_small", "0"
     )  # this test targets the fused / wide build itself, not the small-row preference
     module, x, dy = _build(shape)
     fused = _run(module, x, dy, fused=True)
@@ -199,8 +199,8 @@ def test_the_module_actually_dispatches_to_it(monkeypatch):
     from miniworld_engine.kernels.transition.cuda import fused_sm90a
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    monkeypatch.setenv(
-        "MINIWORLD_TRANSITION_GENERIC_SMALL", "0"
+    override_setting(
+        monkeypatch, "transition_generic_small", "0"
     )  # this test targets the fused / wide build itself, not the small-row preference
     calls = []
     original = fused_sm90a.transition_fused_sm90a

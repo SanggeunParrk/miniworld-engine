@@ -4,6 +4,7 @@ PyTorch fp32 reference bounds both, and the module really dispatches to the nati
 import copy
 
 import pytest
+from settings_helpers import override_setting
 import torch
 
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -14,6 +15,12 @@ CUDA = torch.cuda.is_available()
 HOPPER = CUDA and torch.cuda.get_device_capability() == (9, 0)
 needs_hopper = pytest.mark.skipif(not HOPPER, reason="the Transition kernels are sm_90a only")
 N2_WIDTHS = (64, 128, 256, 384, 512, 768)
+
+
+@pytest.fixture(autouse=True)
+def _tuned_builds_not_the_generic_small_row_preference(monkeypatch):
+    """These tests target the fused / wide builds themselves; the generic kernels are preferred at small row counts by default."""
+    override_setting(monkeypatch, "transition_generic_small", "0")
 
 
 def _build(shape, n=2, seed=72):

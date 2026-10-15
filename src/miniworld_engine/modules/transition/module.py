@@ -135,6 +135,13 @@ class Transition(nn.Module):
                     "H100 CUDA Transition requires contiguous BF16 activations, FP32 norm affine, "
                     "and matching BF16 or FP32 projection weights"
                 )
+        if (
+            x.dtype is torch.float32
+            and self._backend != KernelBackend.PYTORCH
+            and self._generic_sm90a_serves(x)
+        ):
+            # fp32 on TF32 tensor cores: the generic sm_90a kernels (the other fast paths are bf16 only)
+            return self._residual_forward(x)
         backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
@@ -155,9 +162,8 @@ class Transition(nn.Module):
             return False
         from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
 
-        w = self.expand_a.weight
         return fused_generic_sm90a.available(
-            x, w.to(x.dtype), self.squeeze.weight.to(x.dtype)
+            x, self.expand_a.weight, self.squeeze.weight
         )
 
     def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -205,20 +211,19 @@ class Transition(nn.Module):
             )
 
             pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
-            ga, gs = pa.to(x.dtype), ps.to(x.dtype)
             training = torch.is_grad_enabled() and any(
                 t.requires_grad for t in (x, self.ln_in.weight, pa, pb, ps)
             )
             if fused_generic_sm90a.prefers_generic(
                 x, training, self.n
-            ) and fused_generic_sm90a.available(x, ga, gs):
+            ) and fused_generic_sm90a.available(x, pa, ps):
                 return fused_generic_sm90a.transition_generic_sm90a(
                     x,
                     self.ln_in.weight,
                     self.ln_in.bias,
-                    ga,
-                    pb.to(x.dtype),
-                    gs,
+                    pa,
+                    pb,
+                    ps,
                     self.ln_in.eps,
                 )
             for kern, entry in (
@@ -226,18 +231,6 @@ class Transition(nn.Module):
                 (fused_wide_sm90a, fused_wide_sm90a.transition_wide_sm90a),
                 (fused_generic_sm90a, fused_generic_sm90a.transition_generic_sm90a),
             ):
-                if kern is fused_generic_sm90a:
-                    if kern.available(x, ga, gs):
-                        return entry(
-                            x,
-                            self.ln_in.weight,
-                            self.ln_in.bias,
-                            ga,
-                            pb.to(x.dtype),
-                            gs,
-                            self.ln_in.eps,
-                        )
-                    continue
                 if kern.available(x, pa, ps):
                     return entry(
                         x,

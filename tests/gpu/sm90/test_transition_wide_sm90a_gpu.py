@@ -20,6 +20,12 @@ needs_hopper = pytest.mark.skipif(
 WIDTHS = (64, 256, 384, 512)
 
 
+@pytest.fixture(autouse=True)
+def _tuned_builds_not_the_generic_small_row_preference(monkeypatch):
+    """These tests target the fused / wide builds themselves; the generic kernels are preferred at small row counts by default."""
+    override_setting(monkeypatch, "transition_generic_small", "0")
+
+
 def _weights(d, h=None, dev="cuda"):
     h = h or 4 * d
     return (
@@ -275,17 +281,18 @@ def test_saved_h_changes_nothing_but_the_kernel(d, monkeypatch):
 
 @needs_hopper
 @pytest.mark.parametrize("d", [128, 384])
-@pytest.mark.parametrize("bad", ["dtype", "rows", "expansion", "build"])
-def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
+@pytest.mark.parametrize("bad", ["dtype", "rows", "expansion"])
+def test_shapes_beyond_the_tuned_builds_run_the_generic_kernels(d, bad, monkeypatch):
+    """fp32 (TF32), a ragged row count and n = 3 have no tuned build; the generic sm_90a kernels serve them natively (no Triton fallback)."""
     from miniworld_engine import settings
-    from miniworld_engine.kernels.transition.cuda import fused_sm90a, fused_wide_sm90a
+    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     settings.configure(engine_backend="auto", transition_fused_sm90a=True)
     module = Transition(
         d,
-        n=3 if bad == "expansion" else 4,  # n = 2 has native builds now; 3 has none
+        n=3 if bad == "expansion" else 4,
         implementation=ImplementationType.MINIWORLD,
     ).cuda()
     x = torch.randn(
@@ -294,9 +301,41 @@ def test_promoted_cuda_path_refuses_fallback(d, bad, monkeypatch):
         device="cuda",
         dtype=torch.float32 if bad == "dtype" else torch.bfloat16,
     )
+    torch.backends.cuda.matmul.allow_tf32 = True
+    calls = []
+    original = fused_generic_sm90a.transition_generic_sm90a
+    monkeypatch.setattr(
+        fused_generic_sm90a,
+        "transition_generic_sm90a",
+        lambda *a, **k: (calls.append(1), original(*a, **k))[1],
+    )
+    with torch.no_grad():
+        y = module(x)
+    assert calls, "the generic kernels were never entered"
+    assert torch.isfinite(y).all()
+
+
+@needs_hopper
+@pytest.mark.parametrize("bad", ["width", "build"])
+def test_promoted_cuda_path_refuses_fallback(bad, monkeypatch):
+    """What no native build serves raises on H100 instead of silently running Triton: a width that is not a multiple of 64,
+    and every build unavailable."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import (
+        fused_generic_sm90a,
+        fused_sm90a,
+        fused_wide_sm90a,
+    )
+    from miniworld_engine.modules import Transition
+
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(engine_backend="auto", transition_fused_sm90a=True)
+    d = 100 if bad == "width" else 128
+    module = Transition(d, n=4, implementation=ImplementationType.MINIWORLD).cuda()
+    x = torch.randn(128, d, device="cuda", dtype=torch.bfloat16)
     if bad == "build":
-        monkeypatch.setattr(fused_sm90a, "available", lambda *_: False)
-        monkeypatch.setattr(fused_wide_sm90a, "available", lambda *_: False)
+        for kern in (fused_sm90a, fused_wide_sm90a, fused_generic_sm90a):
+            monkeypatch.setattr(kern, "available", lambda *_: False)
     with pytest.raises(ValueError, match="H100 CUDA Transition"):
         module(x)
 
