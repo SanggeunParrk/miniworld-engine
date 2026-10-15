@@ -433,6 +433,58 @@ std::vector<torch::Tensor> g_ln_bwd(torch::Tensor dyln, torch::Tensor x, torch::
   return {dx, part};
 }
 
+// ---- weight pack: [Wq; Wk; Wv; Wg; Wb] (heads padded to 32 channels, Wb rows zero-padded to 64) and Wo [C, HD] in one launch
+template <typename T> __device__ __forceinline__ bf16 to_bf(T v);
+template <> __device__ __forceinline__ bf16 to_bf<float>(float v) { return __float2bfloat16_rn(v); }
+template <> __device__ __forceinline__ bf16 to_bf<bf16>(bf16 v) { return v; }
+template <typename T>
+__global__ void __launch_bounds__(256) pack_generic_k(const T* __restrict__ wq, const T* __restrict__ wk, const T* __restrict__ wv, const T* __restrict__ wg,
+                                                      const T* __restrict__ wb, const T* __restrict__ wo, bf16* __restrict__ wall, bf16* __restrict__ wop,
+                                                      int C, int H, int hd) {
+  const long HD = 32L * H, n1 = (4 * HD + 64) * C, n = n1 + (long)C * HD;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n; i += (long)gridDim.x * 256) {
+    bf16 v = __float2bfloat16_rn(0.f);
+    if (i < n1) {
+      const long row = i / C; const int col = (int)(i - row * C);
+      if (row < 4 * HD) {
+        const int part = (int)(row / HD), r = (int)(row - part * HD), h = r >> 5, d = r & 31;
+        if (d < hd) {
+          const T* w = part == 0 ? wq : part == 1 ? wk : part == 2 ? wv : wg;
+          v = to_bf<T>(w[(long)(h * hd + d) * C + col]);
+        }
+      } else if (row - 4 * HD < H) {
+        v = to_bf<T>(wb[(row - 4 * HD) * C + col]);
+      }
+      wall[i] = v;
+    } else {
+      const long j = i - n1, c = j / HD; const int r = (int)(j - c * HD), h = r >> 5, d = r & 31;
+      if (d < hd) v = to_bf<T>(wo[c * (long)H * hd + h * hd + d]);
+      wop[j] = v;
+    }
+  }
+}
+
+// -> (wall [4 HD + 64, C] bf16, wo_p [C, HD] bf16); weights fp32 or bf16, contiguous: wq .. wg [H hd, C], wb [H, C], wo [C, H hd]
+std::vector<torch::Tensor> g_pack(torch::Tensor wq, torch::Tensor wk, torch::Tensor wv, torch::Tensor wg, torch::Tensor wb, torch::Tensor wo) {
+  const int H = (int)wb.size(0), C = (int)wq.size(1), hd = (int)(wq.size(0) / H);
+  TORCH_CHECK(hd >= 1 && hd <= 32 && wq.size(0) == (long)H * hd, "heads of at most 32 channels");
+  for (const auto* t : {&wq, &wk, &wv, &wg, &wb, &wo}) TORCH_CHECK(t->is_cuda() && t->is_contiguous() && t->scalar_type() == wq.scalar_type(), "contiguous, one dtype");
+  const long HD = 32L * H;
+  auto wall = torch::empty({4 * HD + 64, C}, wq.options().dtype(torch::kBFloat16));
+  auto wop = torch::empty({C, HD}, wq.options().dtype(torch::kBFloat16));
+  const long n = (4 * HD + 64) * C + (long)C * HD;
+  const int grid = (int)std::min<long>((n + 255) / 256, 1024);
+  if (wq.scalar_type() == torch::kFloat32)
+    pack_generic_k<float><<<grid, 256, 0, stream()>>>(wq.data_ptr<float>(), wk.data_ptr<float>(), wv.data_ptr<float>(), wg.data_ptr<float>(),
+                                                      wb.data_ptr<float>(), wo.data_ptr<float>(), bp(wall), bp(wop), C, H, hd);
+  else {
+    TORCH_CHECK(wq.scalar_type() == torch::kBFloat16, "fp32 or bf16 weights");
+    pack_generic_k<bf16><<<grid, 256, 0, stream()>>>(cbp(wq), cbp(wk), cbp(wv), cbp(wg), cbp(wb), cbp(wo), bp(wall), bp(wop), C, H, hd);
+  }
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {wall, wop};
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &g_ln_fwd);
   m.def("front_bias", &g_front_bias);
@@ -442,4 +494,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_bwd_out", &g_gate_bwd_out);
   m.def("assemble", &g_assemble);
   m.def("ln_bwd", &g_ln_bwd);
+  m.def("pack", &g_pack);
 }

@@ -39,7 +39,7 @@ TOK = _core_mod.TOK
 def _glue():
     ensure_cuda_home()
     return load_extension(
-        name="triattn_h100_generic_v4",
+        name="triattn_h100_generic_v5",
         sources=[str(_SRC / "triattn_generic_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -274,6 +274,16 @@ def pack_weights(wq, wk, wv, wg, wb, wo):
     hd = wq.shape[0] // n_head
     C = wq.shape[1]
     bf = torch.bfloat16
+    ws = (wq, wk, wv, wg, wb, wo)
+    if (
+        hd <= D
+        and wq.dtype in (torch.float32, bf)
+        and all(w.dtype == wq.dtype and w.is_cuda and w.is_contiguous() for w in ws)
+    ):  # one launch (the packing kernels are replayed with every CUDA-graph call, so their count is latency)
+        wall, wo_p = _glue().pack(*ws)
+        wcat = wall[: 4 * n_head * D + _hp(n_head)]
+        wcat._triattn_wall = wall
+        return wcat, wo_p
 
     def pad_rows(w):
         w = w.to(bf)

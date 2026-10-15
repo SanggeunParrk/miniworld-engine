@@ -75,11 +75,10 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
         with torch.no_grad():
             if kind == FUSED:
                 from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import (
-                    pack_front,
+                    _pack_params,
                 )
 
-                w4, wb16 = pack_front(*weights[:5])
-                return w4, wb16, weights[5].to(torch.bfloat16).contiguous()
+                return _pack_params(*weights)  # one launch
             from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90_generic import (
                 pack_weights,
             )
