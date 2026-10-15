@@ -134,10 +134,10 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         and torch.cuda.get_device_capability(single.device) != (10, 0)
         and not (
             h100_enabled(single.device)
-            and (module.attention.n_head, module.attention.to_value.weight.shape[0] // module.attention.n_head) == (16, 48)
+            and (module.attention.n_head, module.attention.to_value.weight.shape[0] // module.attention.n_head) in LAYOUTS
         )
     ):
-        return False  # the TF32 tcgen05 path is sm_100; Hopper serves fp32 at 16 x 48 (TF32 wgmma core + cuBLAS)
+        return False  # the TF32 tcgen05 path is sm_100; Hopper serves fp32 at every LAYOUTS entry (TF32 wgmma core + cuBLAS)
     if not any(t.requires_grad for t in (single, cond, src)) and not any(
         p.requires_grad for p in module.parameters()
     ):

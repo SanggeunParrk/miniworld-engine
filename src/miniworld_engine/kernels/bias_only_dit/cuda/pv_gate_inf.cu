@@ -390,6 +390,27 @@ void pv_cta(at::Tensor v,at::Tensor p,at::Tensor out,int64_t A,c10::optional<at:
  else    { if(wgs==2)pvx_dispatch<false,2>(cs,v,p,out,A,gate,H,DH,nsm,sg); else pvx_dispatch<false,1>(cs,v,p,out,A,gate,H,DH,nsm,sg); }
 }
 // ---- fp32 (TF32) PV core: K-major A = P fp32 tile, K-major B = v^T rows of 48 per sample (N = 48 x samples) -----------
+// the n = 32 / 64 / 128 / 160 / 256 forms: 32- and 64-wide heads (N = head width x samples)
+TMN_DEVI void mma_tf32_n32(float*d,uint64_t a,uint64_t b){
+  asm volatile("wgmma.mma_async.sync.aligned.m64n32k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15}, %16, %17, 1, 1, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_tf32_n64(float*d,uint64_t a,uint64_t b){
+  asm volatile("wgmma.mma_async.sync.aligned.m64n64k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, 1, 1, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_tf32_n128(float*d,uint64_t a,uint64_t b){
+  asm volatile("wgmma.mma_async.sync.aligned.m64n128k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63}, %64, %65, 1, 1, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_tf32_n160(float*d,uint64_t a,uint64_t b){
+  asm volatile("wgmma.mma_async.sync.aligned.m64n160k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63,%64,%65,%66,%67,%68,%69,%70,%71,%72,%73,%74,%75,%76,%77,%78,%79}, %80, %81, 1, 1, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63]), "+f"(d[64]), "+f"(d[65]), "+f"(d[66]), "+f"(d[67]), "+f"(d[68]), "+f"(d[69]), "+f"(d[70]), "+f"(d[71]), "+f"(d[72]), "+f"(d[73]), "+f"(d[74]), "+f"(d[75]), "+f"(d[76]), "+f"(d[77]), "+f"(d[78]), "+f"(d[79]) : "l"(a), "l"(b));
+}
+TMN_DEVI void mma_tf32_n256(float*d,uint64_t a,uint64_t b){
+  asm volatile("wgmma.mma_async.sync.aligned.m64n256k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31,%32,%33,%34,%35,%36,%37,%38,%39,%40,%41,%42,%43,%44,%45,%46,%47,%48,%49,%50,%51,%52,%53,%54,%55,%56,%57,%58,%59,%60,%61,%62,%63,%64,%65,%66,%67,%68,%69,%70,%71,%72,%73,%74,%75,%76,%77,%78,%79,%80,%81,%82,%83,%84,%85,%86,%87,%88,%89,%90,%91,%92,%93,%94,%95,%96,%97,%98,%99,%100,%101,%102,%103,%104,%105,%106,%107,%108,%109,%110,%111,%112,%113,%114,%115,%116,%117,%118,%119,%120,%121,%122,%123,%124,%125,%126,%127}, %128, %129, 1, 1, 1;\n"
+    : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]), "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]), "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]), "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]), "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63]), "+f"(d[64]), "+f"(d[65]), "+f"(d[66]), "+f"(d[67]), "+f"(d[68]), "+f"(d[69]), "+f"(d[70]), "+f"(d[71]), "+f"(d[72]), "+f"(d[73]), "+f"(d[74]), "+f"(d[75]), "+f"(d[76]), "+f"(d[77]), "+f"(d[78]), "+f"(d[79]), "+f"(d[80]), "+f"(d[81]), "+f"(d[82]), "+f"(d[83]), "+f"(d[84]), "+f"(d[85]), "+f"(d[86]), "+f"(d[87]), "+f"(d[88]), "+f"(d[89]), "+f"(d[90]), "+f"(d[91]), "+f"(d[92]), "+f"(d[93]), "+f"(d[94]), "+f"(d[95]), "+f"(d[96]), "+f"(d[97]), "+f"(d[98]), "+f"(d[99]), "+f"(d[100]), "+f"(d[101]), "+f"(d[102]), "+f"(d[103]), "+f"(d[104]), "+f"(d[105]), "+f"(d[106]), "+f"(d[107]), "+f"(d[108]), "+f"(d[109]), "+f"(d[110]), "+f"(d[111]), "+f"(d[112]), "+f"(d[113]), "+f"(d[114]), "+f"(d[115]), "+f"(d[116]), "+f"(d[117]), "+f"(d[118]), "+f"(d[119]), "+f"(d[120]), "+f"(d[121]), "+f"(d[122]), "+f"(d[123]), "+f"(d[124]), "+f"(d[125]), "+f"(d[126]), "+f"(d[127]) : "l"(a), "l"(b));
+}
 TMN_DEVI void mma_tf32_n48(float*d,uint64_t a,uint64_t b){
   asm volatile("wgmma.mma_async.sync.aligned.m64n48k8.f32.tf32.tf32 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23}, %24, %25, 1, 1, 1;\n"
     : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]) : "l"(a), "l"(b));
@@ -419,11 +440,18 @@ CUtensorMap map32(at::Tensor t,int bc,int br){
 // pvx32: out[s] = sigmoid(g[s]) * (P_h v[s]_h) in fp32 on TF32 tensor cores. v^T [da, A L] fp32 (rows = attention channels,
 // columns = tokens), P [H L, L] fp32, g / out [A L, da] fp32. CTA = (head, 64 * WGS rows, group of <= SGX samples); one
 // m64n(48 x samples)k8 wgmma per k8 step covers the whole group; k-blocks of 32 keys through a TMA ring.
-template<int WGS> struct Pvx32Cfg { static constexpr int ST=WGS==2?4:5, SB=WGS*8192+SGX*6144; };
-template<int WGS>
+// DHT: the head width (32, 48 or 64); SGM: samples per group (N = DHT x SGM <= 256: 5 at 32 / 48, 4 at 64)
+template<int DHT> struct Pvx32Dims { static constexpr int SGM=DHT==64?4:SGX, JJ=DHT/8, ACC=DHT*SGM/2, SBYTES=DHT*128; };
+template<int WGS,int DHT> struct Pvx32Cfg { static constexpr int ST=WGS==2?4:5, SB=WGS*8192+Pvx32Dims<DHT>::SGM*Pvx32Dims<DHT>::SBYTES; };
+template<int DHT> TMN_DEVI void mma_tf32_ns(int ns,float*acc,uint64_t da,uint64_t db){
+  if constexpr(DHT==32){ switch(ns){case 1:mma_tf32_n32(acc,da,db);break;case 2:mma_tf32_n64(acc,da,db);break;case 3:mma_tf32_n96(acc,da,db);break;case 4:mma_tf32_n128(acc,da,db);break;default:mma_tf32_n160(acc,da,db);break;} }
+  else if constexpr(DHT==48){ switch(ns){case 1:mma_tf32_n48(acc,da,db);break;case 2:mma_tf32_n96(acc,da,db);break;case 3:mma_tf32_n144(acc,da,db);break;case 4:mma_tf32_n192(acc,da,db);break;default:mma_tf32_n240(acc,da,db);break;} }
+  else { switch(ns){case 1:mma_tf32_n64(acc,da,db);break;case 2:mma_tf32_n128(acc,da,db);break;case 3:mma_tf32_n192(acc,da,db);break;default:mma_tf32_n256(acc,da,db);break;} }
+}
+template<int WGS,int DHT>
 __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ CUtensorMap mp,const __grid_constant__ CUtensorMap mv,
  const float*__restrict__ g,float*__restrict__ out,int L,int A,int H,int DH,int gs,int os,int SG) {
- constexpr int ST=Pvx32Cfg<WGS>::ST,SB=Pvx32Cfg<WGS>::SB;
+ constexpr int ST=Pvx32Cfg<WGS,DHT>::ST,SB=Pvx32Cfg<WGS,DHT>::SB,JJ=Pvx32Dims<DHT>::JJ,ACC=Pvx32Dims<DHT>::ACC,SGM=Pvx32Dims<DHT>::SGM,SBY=Pvx32Dims<DHT>::SBYTES;
  extern __shared__ __align__(1024) unsigned char sm[];
  uint64_t*full=reinterpret_cast<uint64_t*>(sm+ST*SB),*empty=full+ST;
  int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,mt=L/(64*WGS),ng=(A+SG-1)/SG,KB=L/32;
@@ -438,10 +466,10 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
      for(int kb=0;kb<KB;++kb,++it){
        int s=it%ST;if(it>=ST)mbar_wait(empty+s,((it/ST)-1)&1);
        unsigned char*st=sm+s*SB;
-       mbar_arrive_expect_tx(full+s,WGS*8192+ns*6144);
+       mbar_arrive_expect_tx(full+s,WGS*8192+ns*SBY);
        #pragma unroll
        for(int w=0;w<WGS;++w)tma_load_2d(st+w*8192,&mp,full+s,kb*32,head*L+m0+w*64);
-       for(int j=0;j<ns;++j)tma_load_2d(st+WGS*8192+j*6144,&mv,full+s,(a0+j)*L+kb*32,head*DH);
+       for(int j=0;j<ns;++j)tma_load_2d(st+WGS*8192+j*SBY,&mv,full+s,(a0+j)*L+kb*32,head*DHT);
      }
    }
    return;
@@ -450,9 +478,9 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
  const int cw=wg-1;
  for(int item=blockIdx.x;item<items;item+=gridDim.x){
    int m=item%mt,head=(item/mt)%H,group=item/(mt*H),a0=group*SG,ns=min(SG,A-a0),m0=m*64*WGS+cw*64;
-   float acc[120];
+   float acc[ACC];
    #pragma unroll
-   for(int e=0;e<120;++e)acc[e]=0.f;
+   for(int e=0;e<ACC;++e)acc[e]=0.f;
    int prev=-1;
    for(int kb=0;kb<KB;++kb,++it){
      int s=it%ST;mbar_wait(full+s,(it/ST)&1);
@@ -462,13 +490,7 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
      #pragma unroll
      for(int k=0;k<4;++k){
        uint64_t da=ds(a_base+k*32),db=ds(b_base+k*32);
-       switch(ns){
-         case 1: mma_tf32_n48(acc,da,db);break;
-         case 2: mma_tf32_n96(acc,da,db);break;
-         case 3: mma_tf32_n144(acc,da,db);break;
-         case 4: mma_tf32_n192(acc,da,db);break;
-         default: mma_tf32_n240(acc,da,db);break;
-       }
+       mma_tf32_ns<DHT>(ns,acc,da,db);
      }
      wgmma_commit();
      if(prev>=0){wgmma_wait<1>();if(!wtid)mbar_arrive(empty+prev);}
@@ -478,62 +500,65 @@ __global__ __launch_bounds__(128*(WGS+1),1) void pvx32(const __grid_constant__ C
    fence_regs(acc);
    if(!wtid)mbar_arrive(empty+prev);
    int r0=m0+16*warp+(lane>>2),c0=2*(lane&3);
-   float2 gcur[12],gnxt[12];
-   auto loadg=[&](int j,float2 (&dst)[12]){
+   float2 gcur[JJ*2],gnxt[JJ*2];
+   auto loadg=[&](int j,float2 (&dst)[JJ*2]){
      #pragma unroll
-     for(int jj=0;jj<6;++jj)
+     for(int jj=0;jj<JJ;++jj)
        #pragma unroll
        for(int rb=0;rb<2;++rb){
          float2 v=make_float2(0.f,0.f);
-         if(j<ns)v=__ldg(reinterpret_cast<const float2*>(g+(size_t)((a0+j)*L+r0+rb*8)*gs+head*DH+jj*8+c0));
+         if(j<ns)v=__ldg(reinterpret_cast<const float2*>(g+(size_t)((a0+j)*L+r0+rb*8)*gs+head*DHT+jj*8+c0));
          dst[jj*2+rb]=v;
        }
    };
    loadg(0,gcur);
    #pragma unroll
-   for(int j=0;j<SGX;++j){
+   for(int j=0;j<SGM;++j){
      if(j<ns){
        loadg(j+1,gnxt);
        #pragma unroll
-       for(int jj=0;jj<6;++jj)
+       for(int jj=0;jj<JJ;++jj)
          #pragma unroll
          for(int rb=0;rb<2;++rb){
-           int row=(a0+j)*L+r0+rb*8,col=head*DH+jj*8+c0;
-           int ix=(j*6+jj)*4+rb*2;
+           int row=(a0+j)*L+r0+rb*8,col=head*DHT+jj*8+c0;
+           int ix=(j*JJ+jj)*4+rb*2;
            float2 gg=gcur[jj*2+rb];
            float v0=acc[ix]*rcpf(1.f+ex2f(-1.4426950408889634f*gg.x));
            float v1=acc[ix+1]*rcpf(1.f+ex2f(-1.4426950408889634f*gg.y));
            *reinterpret_cast<float2*>(out+(size_t)row*os+col)=make_float2(v0,v1);
          }
        #pragma unroll
-       for(int e=0;e<12;++e)gcur[e]=gnxt[e];
+       for(int e=0;e<JJ*2;++e)gcur[e]=gnxt[e];
      }
    }
  }
 }
-static void pvx32_pick(int L,int A,int H,int nsm,int&wgs,int&sg){
+static void pvx32_pick(int L,int A,int H,int DH,int nsm,int&wgs,int&sg){
+ int SGM=DH==64?4:SGX;
  double best=1e30;int KB=L/32;
  for(int w=1;w<=2;++w){ if(L%(64*w))continue;
-   for(int g=1;g<=SGX;++g){
+   for(int g=1;g<=SGM;++g){
      int ng=(A+g-1)/g, items=H*(L/(64*w))*ng, grid=std::min(items,nsm), rounds=(items+grid-1)/grid;
-     double kcost=std::max(96.0*g*w,(double)(w*8192+g*6144)/30.0);
+     double kcost=std::max(2.0*DH*g*w,(double)(w*8192+g*DH*128)/30.0);
      double t=rounds*(KB*kcost+3000.0);
      if(t<best){best=t;wgs=w;sg=g;}
    }}
 }
-template<int WGS> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int DH,int nsm,int SG){
- int L=vt.size(1)/A;constexpr int smem=Pvx32Cfg<WGS>::ST*Pvx32Cfg<WGS>::SB+64+1024;
- auto ma=map32(p,32,64),mb=map32(vt,32,DH);int ng=(A+SG-1)/SG;int grid=std::min<int>(nsm,H*(L/(64*WGS))*ng);
- cudaFuncSetAttribute(pvx32<WGS>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
- pvx32<WGS><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DH,(int)gate.stride(0),(int)out.stride(0),SG);
+template<int WGS,int DHT> static void pvx32_launch(at::Tensor vt,at::Tensor p,at::Tensor out,at::Tensor gate,int A,int H,int nsm,int SG){
+ int L=vt.size(1)/A;constexpr int smem=Pvx32Cfg<WGS,DHT>::ST*Pvx32Cfg<WGS,DHT>::SB+64+1024;
+ auto ma=map32(p,32,64),mb=map32(vt,32,DHT);int ng=(A+SG-1)/SG;int grid=std::min<int>(nsm,H*(L/(64*WGS))*ng);
+ cudaFuncSetAttribute(pvx32<WGS,DHT>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
+ pvx32<WGS,DHT><<<grid,128*(WGS+1),smem,at::cuda::getCurrentCUDAStream()>>>(ma,mb,(const float*)gate.data_ptr(),(float*)out.data_ptr(),L,A,H,DHT,(int)gate.stride(0),(int)out.stride(0),SG);
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 void pv_cta_tf32(at::Tensor vt,at::Tensor p,at::Tensor out,int64_t A,at::Tensor gate,int64_t H,int64_t DH,int64_t nsm){
  at::cuda::CUDAGuard guard(vt.device());cudaSetDevice(vt.get_device());int L=vt.size(1)/A;
- TORCH_CHECK(L%128==0&&L<=768&&DH==48&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
+ TORCH_CHECK(L%128==0&&L<=768&&(DH==32||DH==48||DH==64)&&vt.scalar_type()==at::kFloat&&p.scalar_type()==at::kFloat&&gate.scalar_type()==at::kFloat&&out.scalar_type()==at::kFloat,"pvx32 shape/dtype");
  TORCH_CHECK(vt.size(0)==H*DH&&vt.is_contiguous()&&p.is_contiguous()&&gate.stride(1)==1&&out.stride(1)==1,"pvx32 layout");
- int wgs=2,sg=1;pvx32_pick(L,A,H,nsm,wgs,sg);
- if(wgs==2)pvx32_launch<2>(vt,p,out,gate,A,H,DH,nsm,sg);else pvx32_launch<1>(vt,p,out,gate,A,H,DH,nsm,sg);
+ int wgs=2,sg=1;pvx32_pick(L,A,H,(int)DH,nsm,wgs,sg);
+ if(DH==32){ if(wgs==2)pvx32_launch<2,32>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,32>(vt,p,out,gate,A,H,nsm,sg); }
+ else if(DH==48){ if(wgs==2)pvx32_launch<2,48>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,48>(vt,p,out,gate,A,H,nsm,sg); }
+ else { if(wgs==2)pvx32_launch<2,64>(vt,p,out,gate,A,H,nsm,sg);else pvx32_launch<1,64>(vt,p,out,gate,A,H,nsm,sg); }
 }
 __global__ __launch_bounds__(256,2) void dpb_pipe(const __grid_constant__ CUtensorMap md,const __grid_constant__ CUtensorMap mv,
  const bf*p,const float*dd,bf*out,int L,int A,int H,int DH){

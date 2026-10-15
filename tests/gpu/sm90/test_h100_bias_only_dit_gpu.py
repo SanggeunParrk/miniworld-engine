@@ -22,6 +22,7 @@ pytestmark = [
 ]
 
 H, DH = 16, 48
+LAYOUTS = [(16, 48), (24, 32), (12, 64), (16, 64)]   # (heads, head width): 768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64
 LENGTHS = [(128, 1), (256, 3), (384, 5), (640, 2), (768, 5), (768, 48)]
 
 
@@ -30,8 +31,8 @@ def rel(a, b):
     return float((a - b).norm() / b.norm().clamp_min(1e-30))
 
 
-def probs(L, device="cuda"):
-    return torch.softmax(torch.randn(H, L, L, device=device) * 2, -1)
+def probs(L, device="cuda", heads=H):
+    return torch.softmax(torch.randn(heads, L, L, device=device) * 2, -1)
 
 
 # ------------------------------------------------------------------------------------------------------ PV + gate core
@@ -63,18 +64,20 @@ def test_pvx_without_gate_is_the_plain_product(L, S):
     assert rel(out.view(S, L, H, DH), ref) < 4e-3
 
 
+@pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
 @pytest.mark.parametrize(("L", "S"), [(256, 3), (384, 5), (768, 5), (768, 48)])
-def test_pvx32_fp32_matches_fp64(L, S):
-    torch.manual_seed(L)
-    v = torch.randn(S * L, H * DH, device="cuda")
-    g = torch.randn(S * L, H * DH, device="cuda")
-    P = probs(L).view(H * L, L).contiguous()
+def test_pvx32_fp32_matches_fp64(L, S, nh, dh):
+    torch.manual_seed(L + nh)
+    w = nh * dh
+    v = torch.randn(S * L, w, device="cuda")
+    g = torch.randn(S * L, w, device="cuda")
+    P = probs(L, heads=nh).view(nh * L, L).contiguous()
     out = torch.empty_like(v)
-    C.PvGateCoreH100TF32(0, nh=H, dh=DH)(v.t().contiguous(), P, out, S, g)
-    ref = torch.einsum("hlk,skhd->slhd", P.view(H, L, L).double(), v.double().view(S, L, H, DH)) * torch.sigmoid(
-        g.double().view(S, L, H, DH)
+    C.PvGateCoreH100TF32(0, nh=nh, dh=dh)(v.t().contiguous(), P, out, S, g)
+    ref = torch.einsum("hlk,skhd->slhd", P.view(nh, L, L).double(), v.double().view(S, L, nh, dh)) * torch.sigmoid(
+        g.double().view(S, L, nh, dh)
     )
-    assert rel(out.view(S, L, H, DH), ref) < 2e-3  # TF32 operands
+    assert rel(out.view(S, L, nh, dh), ref) < 2e-3  # TF32 operands
 
 
 # ------------------------------------------------------------------------------------------------------ bias gradient
@@ -97,9 +100,9 @@ def test_dbias_matches_fp64_and_is_deterministic(L, A):
 
 
 # ------------------------------------------------------------------------------------------------------ the block
-def make_block(dtype):
+def make_block(dtype, nh=16, dh=48):
     torch.manual_seed(0)
-    block = BiasOnlyDiTBlock(implementation=ImplementationType.TRITON)
+    block = BiasOnlyDiTBlock(n_head=nh, d_head=dh, implementation=ImplementationType.TRITON)
     with torch.no_grad():
         for p in block.parameters():
             if p.ndim == 2:
@@ -110,7 +113,8 @@ def make_block(dtype):
 
 
 def reference(block, single, cond, pair, mask):
-    ref = BiasOnlyDiTBlock(implementation=ImplementationType.PYTORCH).cuda().float()
+    ref = BiasOnlyDiTBlock(n_head=block.attention.n_head, d_head=block.attention.to_value.weight.shape[0] // block.attention.n_head,
+                           implementation=ImplementationType.PYTORCH).cuda().float()
     ref.load_state_dict(block.state_dict())
     old = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
@@ -122,9 +126,12 @@ def reference(block, single, cond, pair, mask):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A", "shared"), [(128, 2, True), (256, 3, True), (384, 5, True), (512, 4, False), (640, 3, True), (768, 5, False)])
-def test_block_inference_against_the_fp32_oracle(dtype, L, A, shared):
-    block = make_block(dtype)
+def test_block_inference_against_the_fp32_oracle(dtype, L, A, shared, nh, dh):
+    if (nh, dh) != (16, 48) and L not in (256, 768):
+        pytest.skip("other layouts: two lengths")
+    block = make_block(dtype, nh, dh)
     torch.manual_seed(L)
     single = torch.randn(A, 1, L, 768, device="cuda", dtype=dtype)
     cond = torch.randn(1 if shared else A, 1, L, 384, device="cuda", dtype=dtype)
@@ -140,11 +147,14 @@ def test_block_inference_against_the_fp32_oracle(dtype, L, A, shared):
 
 
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
 @pytest.mark.parametrize("L", [128, 256, 512, 640])
-def test_block_training_gradients_against_the_fp32_oracle(dtype, L):
+def test_block_training_gradients_against_the_fp32_oracle(dtype, L, nh, dh):
+    if (nh, dh) != (16, 48) and L not in (256, 640):
+        pytest.skip("other layouts: two lengths")
     A = 4
-    block = make_block(dtype)
-    ref = BiasOnlyDiTBlock(implementation=ImplementationType.PYTORCH).cuda().float()
+    block = make_block(dtype, nh, dh)
+    ref = BiasOnlyDiTBlock(n_head=nh, d_head=dh, implementation=ImplementationType.PYTORCH).cuda().float()
     ref.load_state_dict(block.state_dict())
     torch.manual_seed(1)
     inputs = [

@@ -152,7 +152,8 @@ removing those needs fusions with the GEMM epilogues, which were measured and lo
   fused tail measured neutral against separate launches. The remaining headroom is `pvx` (an epilogue that overlaps the next
   item's MMAs) and the GEMM epilogue fusions above.
 - fp32 training is bound by cuBLAS's TF32 `nt` weight-gradient kernels (3.3 ms of 10.3).
-- Only 16 x 48 heads are served on H100 (the 24 x 32, 12 x 64 and 16 x 64 layouts of B200 fall back to PyTorch).
+- All four layouts (16 x 48, 24 x 32, 12 x 64, 16 x 64) are served on H100: bf16 through the generic `pv_grouped` / `pvx` cores, fp32 through
+  `pvx32` templated on the head width (32 / 48 / 64; N = width x samples <= 256, so at most 4 samples per group at width 64).
 
 ## Verification (2026-10-14)
 
@@ -278,3 +279,23 @@ Branch `h100/token-bodit-opt`. × = other / ours, so larger is faster.
 | (768, 768, fp32) | 11.04 | **10.28** | 1.07 |
 
 ![Training, fp32, A = 48, length sweep at D768](figures/bias_only_dit_training_fp32_a_48_length.png) <!-- measure_bars -->
+
+## Head layouts other than 16 x 48 (2026-10-15)
+
+`pvx32` is templated on the head width (`DHT` 32 / 48 / 64: the wgmma N = DHT x samples, new n32 / n64 / n128 / n160 / n256 forms,
+accumulator `DHT x SGM / 2` registers), and the fp32 training gate admits every `LAYOUTS` entry. Before this change fp32 at the
+other layouts ran the PyTorch module (1.00x). Tests: `tests/gpu/sm90/test_h100_bias_only_dit_gpu.py` (fp32 / bf16 x 4 layouts,
+inference and training gradients, bitwise-repeatable steps).
+
+PyTorch compiled / ours (ms), CUDA graph, A = 5 shared cond (inference), A = 48 (training), fp32:
+
+| layout | mode | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|---|
+| 24 x 32 | inference | 0.354 | 0.164 | 2.16 | 0.794 | 0.313 | 2.54 |
+| 24 x 32 | training | 5.67 | 5.15 | 1.10 | 11.23 | 10.46 | 1.07 |
+| 12 x 64 | inference | 0.359 | 0.162 | 2.22 | 0.756 | 0.306 | 2.47 |
+| 12 x 64 | training | 5.66 | 5.09 | 1.11 | 11.01 | 10.07 | 1.09 |
+| 16 x 64 | inference | 0.373 | 0.171 | 2.18 | 0.784 | 0.315 | 2.49 |
+| 16 x 64 | training | 5.96 | 5.44 | 1.10 | 11.86 | 11.15 | 1.06 |
+
+bf16 at the same layouts (same run family): inference 2.26-2.38x at L384 / 2.74-2.82x at L768 over PyTorch, training 1.09-1.16x.

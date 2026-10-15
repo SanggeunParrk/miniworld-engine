@@ -73,6 +73,8 @@ def _native_fp32_inference(module, single) -> bool:
         and getattr(getattr(module.attention, "to_bias", None), "weight", None)
         is not None
         and module.attention.to_bias.weight.shape[1] == 128
+        and module.attention.n_head == 16
+        and single.shape[-1] == 768  # the qualified layout only (16 x 48); the other layouts take the general path below
         and single.is_cuda
         and single.dtype is torch.float32
         and torch.cuda.get_device_capability(single.device) == (9, 0)

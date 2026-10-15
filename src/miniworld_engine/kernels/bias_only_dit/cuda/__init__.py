@@ -208,8 +208,8 @@ def core_supported(
     if not settings.current().bias_only_dit_core:
         return False
     if dtype is torch.float32:
-        if h100_enabled(device_index):  # Hopper: the TF32 wgmma core (``pvx32``), 16 heads x 48 only
-            return d % h == 0 and (h, d // h) == (16, 48) and L % 128 == 0 and 0 < L <= 768
+        if h100_enabled(device_index):  # Hopper: the TF32 wgmma core (``pvx32``), head widths 32 / 48 / 64
+            return d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
         if not (
             d % h == 0
             and (h, d // h) in LAYOUTS
@@ -336,7 +336,7 @@ class PvGateCoreH100TF32:
     transposed (TF32 wgmma takes K-major operands only): ``vt`` [nh dh, S L] fp32, P [nh L, L] fp32, g / out [S L, nh dh]."""
 
     def __init__(self, device_index: int, nh: int = 16, dh: int = 48):
-        assert (nh, dh) == (16, 48), (nh, dh)
+        assert dh in (32, 48, 64) and nh * dh in (768, 1024), (nh, dh)
         self.device_index, self.nh, self.dh = device_index, nh, dh
         self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
 
