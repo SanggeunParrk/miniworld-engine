@@ -949,7 +949,7 @@ __global__ void train_pack90_k(TrainPack90 p) {
  else V4<bf>::store((bf*)p.dst[o]+i,v);
 }
 std::vector<at::Tensor> train_pack90(std::vector<at::Tensor> weights,bool qk,bool fp32) {
- TORCH_CHECK(D==768&&HD==48&&weights.size()==(qk?25:23),"native H100 token pack: 768/48 weights");
+ TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23),"native H100 token pack: 768 or 1024 wide weights");
  const at::cuda::CUDAGuard guard(weights[0].device());
  TrainPack90 p{};p.qk=qk;
  for(int j=0;j<(int)weights.size();++j){
@@ -974,7 +974,7 @@ std::vector<at::Tensor> train_pack90(std::vector<at::Tensor> weights,bool qk,boo
 
 
 std::vector<at::Tensor> train_alloc90(std::vector<at::Tensor> weights,bool qk,bool fp32) {
- TORCH_CHECK(D==768&&HD==48&&weights.size()==(qk?25:23),"native H100 staged pack layout");
+ TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23),"native H100 staged pack layout");
  const at::cuda::CUDAGuard guard(weights[0].device());
  const std::vector<std::vector<int64_t>> shapes={{DC},{DC},{4*D,DC},{4*D,DC},{2*D,DC},{D},{D},{D},{D},
  {4*D,D},{4*D},{HD},{HD},{128},{NHH,128},{NHH,128},{NHH,128},{NHH,128},{D,D},{4*D,D},{D,2*D}};
@@ -990,7 +990,7 @@ std::vector<at::Tensor> train_alloc90(std::vector<at::Tensor> weights,bool qk,bo
  return out;
 }
 void train_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,bool qk,bool fp32,int begin,int end) {
- TORCH_CHECK(D==768&&HD==48&&weights.size()==(qk?25:23)&&out.size()==21&&0<=begin&&begin<end&&end<=21,"native H100 staged pack");
+ TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23)&&out.size()==21&&0<=begin&&begin<end&&end<=21,"native H100 staged pack");
  const at::cuda::CUDAGuard guard(weights[0].device());TrainPack90 p{};p.qk=qk;
  for(int j=0;j<(int)weights.size();++j){
   TORCH_CHECK(weights[j].is_cuda()&&weights[j].is_contiguous()&&weights[j].device()==weights[0].device()
@@ -1031,8 +1031,8 @@ __global__ void train_reduce_parts90_k(const float* allp,const float* lnp,float*
     for(int r=0;r<16;++r)if(r0+r<rows)v=add4(v,V4<float>::load(allp+(r0+r)*7*D+c));
     V4<float>::store(out+g*7*D+c,v);
   }
-  // LayerNorm-affine partials: 96 rows per conditioning branch.
-  if(blockIdx.x==0&&c<DC&&g<12){
+  // LayerNorm-affine partials: D / 8 rows per conditioning branch (96 at 768), D / 64 groups of 16 rows in all.
+  if(blockIdx.x==0&&c<DC&&g<D/64){
     float4 z=make_float4(0,0,0,0);
     #pragma unroll
     for(int r=0;r<16;++r)z=add4(z,V4<float>::load(lnp+(g*16+r)*DC+c));
@@ -1067,18 +1067,18 @@ __global__ void train_final90_k(TrainGrad90 p) {
 }
 std::vector<at::Tensor> train_final90(std::vector<at::Tensor> params,std::vector<at::Tensor> grads,
  at::Tensor dwn,at::Tensor raw,at::Tensor w1,at::Tensor w2,at::Tensor allp,at::Tensor dwf,at::Tensor wb,at::Tensor wp,bool hierarchical=false) {
- TORCH_CHECK(D==768&&HD==48&&(params.size()==23||params.size()==25)&&grads.size()==params.size(),"native token grad layout");
+ TORCH_CHECK((D==768||D==1024)&&(params.size()==23||params.size()==25)&&grads.size()==params.size(),"native token grad layout");
  const at::cuda::CUDAGuard guard(dwn.device());
  auto parts=at::empty({4*D/16,DC},dwn.options());
  train_lnw_parts90_k<<<4*D/16,NTC,0,S()>>>(CP<float>(dwn),CP<float>(raw),P<float>(parts));
  auto rp=allp,lp=parts;
  if(hierarchical){
    const int groups=(allp.size(0)+15)/16;
-   rp=at::empty({groups,7*D},allp.options());lp=at::empty({12,DC},parts.options());
-   train_reduce_parts90_k<<<dim3(((params.size()==25?7:5)*D+1023)/1024,std::max(groups,12)),256,0,S()>>>(
+   rp=at::empty({groups,7*D},allp.options());lp=at::empty({D/64,DC},parts.options());
+   train_reduce_parts90_k<<<dim3(((params.size()==25?7:5)*D+1023)/1024,std::max(groups,D/64)),256,0,S()>>>(
        CP<float>(allp),CP<float>(parts),P<float>(rp),P<float>(lp),allp.size(0),(params.size()==25?7:5)*D);
  }
- TrainGrad90 p{};p.n=params.size();p.parts=rp.size(0);p.lnparts=hierarchical?6:2*D/16;
+ TrainGrad90 p{};p.n=params.size();p.parts=rp.size(0);p.lnparts=hierarchical?D/128:2*D/16;
  p.dwn=CP<float>(dwn);p.w1=CP<float>(w1);p.w2=CP<float>(w2);p.allp=CP<float>(rp);
  p.lnp=CP<float>(lp);p.dwf=CP<float>(dwf);p.wb=CP<float>(wb);p.wp=CP<float>(wp);
  std::vector<at::Tensor> out;int total=0;

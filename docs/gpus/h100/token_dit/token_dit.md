@@ -400,7 +400,20 @@ and `ROW_WIDTH`; the H100 serving gate admits `LAYOUTS`), PyTorch compiled / our
 
 Accuracy against the fp32 IEEE block: 3.6e-3 at every layout (the bf16 recipe's own error, same as 16 x 48).
 
-Not done: the native H100 **training** path (bf16 and fp32) still serves 16 x 48 only (24 x 32, 12 x 64, 16 x 64 take the general
-path: 1.1-1.8x PyTorch). The TF32 backward kernels (`attn_tf32_dqb` / `attn_tf32_dkv`) are templated the same way but not wired into
-`token_dit_train.py`, whose native H100 pack / final kernels are 16 x 48; `attn_dq.cu` / `attn_dkv.cu` / `attn_dqb.cu` (bf16) are
-not built for width 64.
+fp32 **training** at the same layouts (the native H100 path with the row / pack / final kernels built per layout, `attn_tf32.cu`
+dqb + dkv per layout; the serving gate admits `LAYOUTS` for fp32), PyTorch compiled / ours (ms), A = 48:
+
+| layout | L384 PyTorch | L384 ours | x | L768 PyTorch | L768 ours | x |
+|---|---|---|---|---|---|---|
+| 16 x 48 (reference) | 9.08 | 7.15 | 1.26 | 24.10 | 16.36 | 1.47 |
+| 24 x 32 | 10.34 | 7.49 | 1.38 | 30.36 | 17.84 | 1.70 |
+| 12 x 64 | 8.41 | 6.88 | 1.22 | 20.63 | 15.47 | 1.33 |
+| 16 x 64 (d 1024) | 11.40 | 9.61 | 1.19 | 29.44 | 21.71 | 1.36 |
+
+Tests: `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py` -- inference (bf16 and fp32, three length / sample-count / conditioning cells)
+and fp32 training gradients (output, inputs and every parameter against the fp32 IEEE module, bitwise-repeatable step) at all four
+layouts: 32 pass. Bugs found on the way (d 1024 only): `_native_final90` sliced the weight gradients with the module-level D = 768, and
+the cond-LN weight gradient's hierarchical reduction hard-coded 12 groups / 6 per branch (D / 64, D / 128 now).
+
+Not done: **bf16 training** at the other layouts (the bf16 attention backward `attn_dqb.cu` has DH = 48 / DM = 768 constants and
+`attn_dq.cu` / `attn_dkv.cu` are not built for width 64): it keeps the general path (1.1-1.8x PyTorch).
