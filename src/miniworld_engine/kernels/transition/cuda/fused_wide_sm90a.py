@@ -1,4 +1,4 @@
-"""Hand-CUDA sm_90a Transition for the channel widths other than 128: D = 64, 256, 384, 512 (n = 4, bf16).
+"""Hand-CUDA sm_90a Transition for the channel widths other than 128: D = 64, 256, 384, 512 (n = 4 and n = 2, bf16).
 
 The companion of ``fused_sm90a`` (D = 128), developed in ``archive/experiments-20260928:experiments/transition_fused`` (record:
 ``records/widths.md``). What runs depends on the width, because what fits the register file does:
@@ -28,6 +28,7 @@ from pathlib import Path
 import torch
 
 from ..._compile import opaque
+from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 from miniworld_engine import settings
 
@@ -43,7 +44,7 @@ NS = {64: (4, 2), 256: (4, 2), 384: (4, 2), 512: (4, 2), 768: (2,)}
 ROWS = 128
 
 _SOURCES = {
-    64: ("d64_fwd.cu", "d64_bwd.cu"),
+    64: ("d64_fwd.cu", "d64_fwd_small.cu", "d64_fwd_small3.cu", "d64_fwd_h32x4.cu", "d64_fwd_h32x5.cu", "d64_fwd_small_f2.cu", "d64_fwd_small_f3.cu", "d64_bwd.cu"),
     256: ("d256_fwd.cu", "gate.cu", "dxln.cu"),
     384: ("lnsg.cu", "squeeze.cu", "gate.cu", "gate_noh.cu"),
     512: ("lnsg.cu", "squeeze.cu", "gate.cu", "gate_noh.cu"),
@@ -121,7 +122,7 @@ def _ext(
     ensure_cuda_home()
     # This change lives in an included header. Give the corrected D64 kernel
     # its own cache identity instead of accepting a prebuilt pre-barrier binary.
-    revision = "_input_barrier_v1" if width == 64 else ""
+    revision = "_input_barrier_v1_small3_frag2_pf" if width == 64 else ""
     if n != 4:
         revision += f"_n{n}"
     if width == 64 and d64_repl != 16:
@@ -288,6 +289,28 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         return torch.mm(a, b).float()
 
 
+def _d64_variant(rows: int, sms: int = 132) -> int:
+    """D = 64 inference build for ``rows`` (a multiple of 64): 13 / 12 = the 64-row tile with LayerNorm in the wgmma A-fragment layout (xn
+    stays in registers) at 3 / 2 CTAs per SM -- the fastest builds at every measured row count (n = 2 and 4); 0 = the 128-row tile; 2 / 3 =
+    the earlier 64-row builds (LayerNorm through shared memory), 14 / 15 = hidden chunks of 32 (both kept for the record, forced only).  3 / SM
+    unless the 2 / SM build's waves are fuller by more than 2 % (a wave: 3 x 64 or 2 x 64 rows per SM).
+    ``settings.transition_d64_variant`` (0 = auto) forces one."""
+    force = settings.current().transition_d64_variant
+    if force:
+        return force
+    if rows % 64 != 0 or rows < 64:
+        return 0
+    if rows <= 6144:
+        return 13
+    cap3, cap2 = 3 * sms * 64, 2 * sms * 64
+
+    def fill(cap: int) -> float:
+        waves = -(-rows // cap)
+        return rows / (cap * waves)
+
+    return 12 if fill(cap2) > fill(cap3) + 0.02 else 13
+
+
 def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, wst=None):
     """Output structure only: (out, xn, rstd, c1, h); the saves are 1-element placeholders when ``save`` is false, and h is
     [M, 4D] at D >= 384 (the two-kernel forward materializes it) and a placeholder otherwise."""
@@ -328,6 +351,12 @@ def _fwd_launch(
             return out, xn, rstd, c1, h
         return out, x.new_empty((1, 768)), rstd.new_empty((1,)), c1.new_empty((1,)), h
     ext = _ext_for(x, n=n)
+    variant = _d64_variant(x.shape[0], _sm_count(x.device)) if x.shape[-1] == 64 and not save else 0
+    if variant:
+        # 64-row tiles: one consumer warpgroup per CTA (2 or 3 CTAs per SM), more tiles in flight than the 128-row build
+        out = ext.fwd_small(x, gamma, beta, wa, wb, _cuda_prepare(wa, wb, ws)[3], float(eps), variant)
+        f32 = dict(dtype=torch.float32, device=x.device)
+        return (out, x.new_empty((1, 64)), torch.empty((1,), **f32), torch.empty((1,), **f32), x.new_empty((1, 1)))
     if n == 4 and fused_d384_enabled(x.shape[-1]) and not save:
         wst = _cuda_prepare(wa, wb, ws)[3]
         return tuple(

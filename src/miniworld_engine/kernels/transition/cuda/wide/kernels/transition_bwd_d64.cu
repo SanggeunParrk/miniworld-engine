@@ -41,7 +41,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define NCTA 132
 #endif
 #ifndef WIDE_N
-#define WIDE_N 4
+#define WIDE_N 4          // hidden width / D (4: the AF3 Transition, 2: the narrow one)
 #endif
 constexpr int D_ = 64, H_ = WIDE_N * 64, HS = 64, NCH = H_ / HS, ROWS = 128, WGR = 64, NSL = H_ / HS;
 constexpr int NDW = NSL * DW_REPL, NDX = NCTA - NDW;

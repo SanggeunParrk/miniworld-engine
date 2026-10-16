@@ -28,7 +28,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define NSTAGE 3
 #endif
 #ifndef WIDE_N
-#define WIDE_N 4                                        // hidden = WIDE_N * D; K2 = 2 H is the [dA | dB] width
+#define WIDE_N 4
 #endif
 constexpr int D = DW, K2 = 2 * WIDE_N * DW, NW = DW / COLS, ROWB = 128 / COLS, NG = NW / 8;
 constexpr int RB = TBK * 2, SW_LAYOUT = TBK == 64 ? 1 : 2, SBO = 8 * RB;

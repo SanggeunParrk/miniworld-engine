@@ -1,5 +1,13 @@
-// D = 64 backward: one fused two-role kernel (64 weight CTAs = 4 hidden slices x DW_REPL 16, the rest input CTAs) and the
-// partial-sum reduction. See kernels/transition_bwd_d64.cu.
+// D = 64 backward: one fused two-role kernel (DW_REPL replicas of each hidden slice in the weight role, the rest input CTAs) and
+// the partial-sum reduction. See kernels/transition_bwd_d64.cu.
+// Weight-role CTAs: 4 slices x 16 for the AF3 Transition (n = 4), 2 slices x 28 for n = 2 (measured L384 / L768 backward, repl 24: 126 / 398 us, 32: 123 / 437 us, 40: 166 / 568 us); with n = 2 the input role has half the hidden chunks to stream
+// per tile, so it takes fewer CTAs and the weight role more (WIDE_REPL, MINIWORLD_TRANSITION_WIDE_REPL override).
+#ifndef WIDE_N
+#define WIDE_N 4
+#endif
+#ifndef WIDE_REPL
+#define WIDE_REPL (WIDE_N == 4 ? 16 : 28)
+#endif
 #define NCTA WIDE_SMS
 #ifndef MW_D64_DW_REPL
 #define MW_D64_DW_REPL 16

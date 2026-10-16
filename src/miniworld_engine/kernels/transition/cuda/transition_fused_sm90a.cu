@@ -418,12 +418,16 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
 
 // ---- the launchers, from the two kernel translation units ----------------------------------
 int transition_fused_fwd_ctas();
+#ifndef SUBCH
+#define SUBCH 0
+#endif
 int transition_fused_fwd_rows();
+void transition_fused_trace(unsigned long long* host);
 bool transition_fused_fwd_saves_xn();
 void transition_fused_fwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                                  const CUtensorMap&, const CUtensorMap&, const float*, const float*,
                                  __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float,
-                                 cudaStream_t);
+                                 const __nv_bfloat16*, cudaStream_t);
 int transition_fused_bwd_ctas();
 int transition_fused_bwd_ndw();
 int transition_fused_bwd_ndx();
@@ -434,6 +438,10 @@ void transition_fused_bwd_launch(const CUtensorMap&, const CUtensorMap&, const C
                                  float*, float*, float*, int, int, cudaStream_t);
 void transition_fused_reduce_launch(const float*, void*, void*, void*,
                                     const float*, float*, float*, bool, cudaStream_t);
+
+#ifndef MW_N
+#define MW_N 4
+#endif
 
 namespace {
 
@@ -472,6 +480,10 @@ const CUtensorMap& tile_map(const torch::Tensor& t, uint32_t d_inner, uint32_t d
   const cuuint64_t strides[1] = {static_cast<cuuint64_t>(d_inner) * 2};
   const cuuint32_t box[2] = {box_inner, box_outer};
   const cuuint32_t elem[2] = {1, 1};
+  // cuTensorMapEncodeTiled is a driver call and needs a current context. The autograd engine runs backward on its own thread, and when the
+  // caching allocator serves every tensor from its pool no runtime call has made the primary context current there: CUDA_ERROR_INVALID_CONTEXT.
+  // (cudaSetDevice binds it; cudaFree(0) would do too but is an unsafe call inside a CUDA-graph capture.)
+  if (cudaSetDevice(t.get_device()) != cudaSuccess) throw std::runtime_error("cudaSetDevice failed before cuTensorMapEncodeTiled");
   CUresult r = encoder()(&map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, t.data_ptr(), dims, strides,
                          box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
                          CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
@@ -519,12 +531,12 @@ std::vector<torch::Tensor> transition_fused_fwd(torch::Tensor x, torch::Tensor g
   auto c1 = torch::empty({saved}, f32);
 
   transition_fused_fwd_launch(
-      tile_map(x, D, M, 64, 64), tile_map(wa, D, H, 64, 64), tile_map(wb, D, H, 64, 64),
+      tile_map(x, D, M, 64, 64), tile_map(wa, D, H, 64, SUBCH ? 32 : 64), tile_map(wb, D, H, 64, SUBCH ? 32 : 64),
       tile_map(wst, D, H, 64, 64), tile_map(out, D, M, 64, 64),
       gamma.data_ptr<float>(), beta.data_ptr<float>(), bf16_ptr(xn), bf16_ptr(out),
       rstd.data_ptr<float>(), c1.data_ptr<float>(), static_cast<int>(M),
       static_cast<int>(M / transition_fused_fwd_rows()), static_cast<float>(eps),
-      at::cuda::getCurrentCUDAStream());
+      reinterpret_cast<const __nv_bfloat16*>(x.data_ptr()), at::cuda::getCurrentCUDAStream());
   return {out, xn, rstd, c1};
 }
 
@@ -615,6 +627,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("transition_fused_bwd", [](torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rs, torch::Tensor c1, torch::Tensor g, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) { return transition_fused_bwd_master(dy,x,xn,rs,c1,g,wa,wb,ws,false); },
         "fused sm_90a Transition backward (one kernel + a partial reduction)");
   m.def("rows_per_tile", &transition_fused_fwd_rows);
+  m.def("trace", [] { std::vector<int64_t> v(64); std::vector<unsigned long long> h(64); transition_fused_trace(h.data()); for (int i = 0; i < 64; ++i) v[i] = (int64_t)h[i]; return v; });
   m.def("fwd_ctas", &transition_fused_fwd_ctas);
   m.def("bwd_ctas", &transition_fused_bwd_ctas);
   m.def("saves_xn", &transition_fused_fwd_saves_xn);

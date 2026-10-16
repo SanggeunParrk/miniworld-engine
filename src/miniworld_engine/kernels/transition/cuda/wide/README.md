@@ -1,5 +1,8 @@
 # Wide-width sm_90a Transition kernels (D = 64, 256, 384, 512)
 
+Hidden width n D with n = 4 (the AF3 Transition) or n = 2: one extension per (width, SM count, n); `-DWIDE_N=<n>` sets the hidden multiple the
+kernels are compiled for (`kernels/*.cu` default to 4), `-DWIDE_REPL` the D = 64 backward's weight-role replicas (`d64_bwd.cu`).
+
 Wired through `../fused_wide_sm90a.py`, dispatched from `modules/transition/module.py::_residual_forward` right after the
 D = 128 path, under the same `transition_fused_sm90a` setting; opt out with `settings.transition_wide_sm90a=0`.
 

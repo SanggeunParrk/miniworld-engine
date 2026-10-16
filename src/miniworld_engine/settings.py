@@ -507,6 +507,9 @@ class Settings:
     token_dit_gemm_swiglu_fp32: bool = False
     #: Formerly ``MINIWORLD_TRANSITION_D64_REPL``; 0 keeps the built-in value (26 at n = 2, 16 at n = 4): D64 backward weight replicas.
     transition_d64_repl: int = 0
+    #: Formerly ``MINIWORLD_TRANSITION_D64_VARIANT``; 0 picks the D64 inference build by row count (13 / 12 = 64-row tile, LayerNorm in
+    #: the wgmma A fragment, 3 / 2 CTAs per SM; 2 / 3 / 14 / 15 earlier builds, forced only).
+    transition_d64_variant: int = 0
     #: Formerly ``MINIWORLD_TRANSITION_DW_REPL``; 0 keeps the built-in value (8 at n = 4, 15 at n = 2): D128 backward weight replicas.
     transition_dw_repl: int = 0
     #: Formerly ``MINIWORLD_TRIMUL_H100_B200STYLE`` (default off): serve TriMul on Hopper with the B200-style port
@@ -740,6 +743,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_TRAIN_FP32": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_D64_REPL": "transition_d64_repl",
+    "MINIWORLD_TRANSITION_D64_VARIANT": "transition_d64_variant",
     "MINIWORLD_TRANSITION_DW_REPL": "transition_dw_repl",
     "MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE": "",  # removed: the default behaviour is the only one

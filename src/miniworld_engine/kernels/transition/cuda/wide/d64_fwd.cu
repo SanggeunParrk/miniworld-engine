@@ -12,5 +12,5 @@ void wide_d64_fwd_launch(const CUtensorMap& mx, const CUtensorMap& mwa, const CU
                          float* rstd, float* c1, int M, int tiles, float eps, int save, cudaStream_t stream) {
   static const bool ready = (wide_smem_optin(reinterpret_cast<const void*>(wide_d64_fwd_kernel), SMEM_BYTES, "d64 fwd"), true);
   (void)ready;
-  wide_d64_fwd_kernel<<<NCTA, 256, SMEM_BYTES, stream>>>(mx, mwa, mwb, mwst, mout, gamma, beta, xn, out, rstd, c1, M, tiles, eps, save);
+  wide_d64_fwd_kernel<<<(tiles < NCTA ? tiles : NCTA), 256, SMEM_BYTES, stream>>>(mx, mwa, mwb, mwst, mout, gamma, beta, xn, out, rstd, c1, M, tiles, eps, save);
 }

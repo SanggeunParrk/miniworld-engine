@@ -27,7 +27,7 @@ using namespace tmn; using namespace tmn::sm90;
 #define SIG_TANH 1
 #endif
 #ifndef WIDE_N
-#define WIDE_N 4                                        // hidden = WIDE_N * D (Transition(d, n))
+#define WIDE_N 4          // hidden width / D (4: the AF3 Transition, 2: the narrow one)
 #endif
 constexpr int D_ = 256, H_ = WIDE_N * 256, HS = 32, NCH = H_ / HS, ROWS = 128, WGR = 64;
 constexpr int F_ABW = 32768, F_SLOT = 49152;                    // slot: [Wa_j; Wb_j] 4 quarters x [64 n][128 B], Ws^T_j at +32 KB

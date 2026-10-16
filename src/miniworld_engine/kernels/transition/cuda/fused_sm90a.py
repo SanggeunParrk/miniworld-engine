@@ -14,7 +14,8 @@ path, at the AF3 pair width:
 
 **It is Hopper-only and shape-specific by construction.** The tile sizes, the shared-memory
 budget and the two-role CTA split are all written for ``d_hidden == 128`` with ``n == 4``
-(hidden 512) in bf16, and the persistent grid is one CTA per SM with the SM count compiled in.
+(hidden 512) or ``n == 2`` (hidden 256, ``HIDDEN_WIDTHS``; the same kernels compiled with ``-DMW_N=2``: four 64-unit hidden
+slices instead of eight, a weight role of ``4 x 16`` CTAs) in bf16, and the persistent grid is one CTA per SM with the SM count compiled in.
 ``supported()`` is the whole gate; everything it rejects keeps the existing path, unchanged.
 
 Numerics differ from the Triton path in the last bf16 ulp, not in the contract: the statistics
@@ -29,11 +30,32 @@ from pathlib import Path
 import torch
 
 from ..._compile import opaque
+from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
+#: Tuned D128 forward build knobs (fixed; the measured-best values, see docs/gpus/h100/transition). The kernel's macros take them as -D flags.
+_RSMASK = 256
+_RESIDENT = 0
+_SPLIT2 = 0
+_PDL = 0
+_ABL = 0
+_SKEW = 1
+_TRACE = 0
+_NEWTON = 0
+_WSLOTS = 2
+_GBSMEM = 0
+_SUBCH = 0
+_XFIRST = 1
+_DECOUPLE = 1
+_STAGGER = 0
+_CPX = 0
+_FRAG = 1
+
+#: Hidden widths with a build: n = 4 (the AF3 Transition, 512) and n = 2 (256).
+HIDDEN_WIDTHS = (512, 256)
 #: Row tile of the persistent grid. ``M`` must be a whole number of these.
 ROWS = 128
 #: Hidden slice replicas in the backward's weight role: NDW = 8 * DW_REPL weight CTAs.
@@ -119,6 +141,21 @@ def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
     return _build_ext(ctas, dw_repl, save, False, False, False, n)
 
 
+
+# D128 forward build constants (the measured configuration; every one is a compile-time macro of transition_fused_fwd_sm90a_kernel.cu).
+# LNFRAG: LayerNorm in the wgmma A-fragment layout, x_n kept in registers as the RS operand (forward without saves; the saving build keeps
+# the shared-memory LayerNorm).  XFIRST: the x tile's TMA before the weight chunks'.  DECOUPLE: the weight-slot refill is issued by whichever
+# warpgroup retires the slot last.  SKEW: the two consumer warpgroups start half a chunk apart.  RSMASK: rows-per-slice mask.
+_FWD_TUNING = dict(LNFRAG=1, RSMASK=256, PDL=0, ABL=0, SKEW=1, TRACE=0, XFIRST=1, DECOUPLE=1, STAGGER=0, CPX=0, SUBCH=0, NEWTON=0, WSLOTS=2, GBSMEM=0)
+
+
+def _fwd_tuning_flags(save: bool) -> list[str]:
+    """-D flags of the forward tuning; the saving build (training) keeps the shared-memory LayerNorm and the plain schedule."""
+    t = dict(_FWD_TUNING)
+    if save:
+        t.update(LNFRAG=0, SKEW=0, DECOUPLE=0, NEWTON=0, GBSMEM=0, CPX=0, SUBCH=0, WSLOTS=2)
+    return [f"-D{k}={v}" for k, v in t.items()] + ["-DRESIDENT=0", "-DSPLIT2=0"]
+
 @functools.lru_cache(maxsize=32)
 def _build_ext(
     ctas: int,
@@ -149,6 +186,7 @@ def _build_ext(
             + ("_dw_overlap_v1" if dw_overlap else "")
             + ("_early_release_v1" if early_release else "")
             + (f"_n{n}" if n != 4 else "")
+            + "_fwdtune1"
         ),
         sources=[
             str(_dir / "transition_fused_sm90a.cu"),
@@ -165,6 +203,7 @@ def _build_ext(
             f"-DDW_REPL={dw_repl}",
             f"-DFWD_SAVE={int(save)}",
             f"-DMW_N={n}",
+            *_fwd_tuning_flags(save),
             *(["-DMW_AFFINE_WARP_STORE=1"] if warp_store else []),
             *(["-DMW_DW_OVERLAP=1"] if dw_overlap else []),
             *(["-DMW_DW_EARLY_RELEASE=1"] if early_release else []),
