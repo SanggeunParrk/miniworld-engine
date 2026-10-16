@@ -4,13 +4,14 @@ over PyTorch per implementation.
 The pair-stack modules are bf16-mixed; the diffusion transformer blocks (token DiT, bias-only token DiT, AF3 atom DiT, SWA atom
 DiT) are drawn twice, bf16-mixed and fp32, each against the PyTorch of the same precision.
 
-usage: python benchmarks/runners/main_figure_plot.py OUT_DIR bf16mixed.csv [more.csv ...] -- fp32.csv [more.csv ...]
+usage: MAIN_FIGURE_GPU=H100 python benchmarks/runners/main_figure_plot.py OUT_DIR bf16mixed.csv [more.csv ...] -- fp32.csv [more.csv ...]
 Later files override earlier ones; the CSVs are the output of ``main_figure_campaign.py``.
 """
 
 from __future__ import annotations
 
 import csv
+import os
 import sys
 from pathlib import Path
 
@@ -19,6 +20,7 @@ import matplotlib as mpl
 mpl.use("Agg")
 import matplotlib.pyplot as plt
 
+GPU = os.environ.get("MAIN_FIGURE_GPU", "B200")   # the card the CSVs were measured on (the figure title)
 TIMES = chr(0xD7)          # the multiplication sign
 COLOURS = {"pytorch": "#8A8F98", "cuequivariance": "#E8833A", "anthropic": "#2A9D8F", "miniworld": "#1F4E9E"}
 LABELS = {"pytorch": "PyTorch", "cuequivariance": "cuEquivariance", "anthropic": "Anthropic", "miniworld": "Ours"}
@@ -83,7 +85,7 @@ def draw(mode: str, data: dict[str, dict], out: Path, summary: list) -> None:
                         for index, (_key, title, precision) in enumerate(groups)], fontsize=10.5)
     ax.set_xlim(-0.6, len(groups) - 0.4)
     ax.set_ylabel("Speedup over PyTorch (higher is better)")
-    ax.set_title(f"B200 · {mode} · L = 384 tokens (atom blocks: 4096 atoms)"
+    ax.set_title(f"{GPU} · {mode} · L = 384 tokens (atom blocks: 4096 atoms)"
                  + ("" if mode == "inference" else " · CUDA graph"), loc="left")
     top = ax.get_ylim()[1] * 1.22
     ax.set_ylim(0, top)

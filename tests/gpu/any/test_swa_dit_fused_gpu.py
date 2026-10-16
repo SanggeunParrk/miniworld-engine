@@ -188,7 +188,8 @@ NAMES = ("q", "c_base", "w_adaln", "w_qkv", "w_gate", "w_out", "w_up", "w_down")
 
 @pytest.mark.parametrize("path", sorted(PATHS))
 @pytest.mark.parametrize(
-    ("a", "b", "s"), [(48, 1, 257), (3, 2, 333), (8, 2, 130), (1, 3, 300)]
+    ("a", "b", "s"),
+    [(48, 1, 257), (3, 2, 333), (8, 2, 130), (1, 3, 300), (5, 1, 4096)],  # (5, 1, 4096): shared conditioning on a B200-style cell
 )
 def test_the_block_matches_its_fp32_reference(path, a, b, s):
     """Output and every gradient within bf16's band of the fp32 reference, on the same bf16 values."""
@@ -1001,3 +1002,18 @@ def test_the_cuda_block_is_bitwise_repeatable(dtype, a, b, s):
             for name, x, y in zip(NAMES, first[1], again[1], strict=True):
                 if name not in ("c_base", "w_adaln"):
                     assert torch.equal(x, y), name
+
+
+@pytest.mark.parametrize("path", ["cuda"])
+def test_a_bf16_modulation_is_widened_for_the_kernels(path):
+    """A conditioning shared by the samples is projected under autocast and arrives as a bf16 modulation: the block widens it
+    (the kernels take fp32) and hands its gradient back in bf16."""
+    _use(path)
+    torch.manual_seed(0)
+    leaves, cos, sin, seqused = _case(5, 1, 4096)
+    q, c_base, wmod, wqkv, wg, wo, wu, wd = [t.detach().clone().requires_grad_() for t in leaves]
+    mod = swa_dit_hoist_modulation(c_base, wmod).to(BF).detach().requires_grad_()
+    out = swa_dit_block(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, 1, half_window=HW)
+    out.backward(torch.randn_like(out))
+    assert torch.isfinite(out).all()
+    assert mod.grad is not None and mod.grad.dtype is BF and torch.isfinite(mod.grad).all()

@@ -38,6 +38,10 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # weights get the backward's fp32 gradients in their own dtype (fp32 ones unrounded).
         ctx.param_dtypes = [w.dtype for w in (wqkv, wg, wo, wu, wd)]
         raw_weights = (wqkv, wg, wo, wu, wd)
+        # The kernels take an fp32 modulation; a bf16 one (a conditioning shared by the samples, projected under autocast) is
+        # widened here and its gradient handed back in its own dtype.
+        ctx.mod_dtype = mod.dtype
+        mod = mod.contiguous() if mod.dtype is torch.float32 else mod.float().contiguous()
         ctx.native_h100 = native_h100_enabled(q, True)
         if ctx.native_h100:
             wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
@@ -61,7 +65,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
             dwqkv, dwg, dwo, dwu, dwd = native_h100_cast(dw, list(ctx.saved_tensors[-5:]))
         else:
             dwqkv, dwg, dwo, dwu, dwd = (g.to(dt) for g, dt in zip(dw, ctx.param_dtypes, strict=True))
-        return dq, dmod, None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
+        return dq, dmod.to(ctx.mod_dtype), None, None, None, dwqkv, dwg, dwo, dwu, dwd, None, None
 
 
 class SWADiTModulationH100(torch.autograd.Function):

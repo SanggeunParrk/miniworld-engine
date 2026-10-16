@@ -1,0 +1,78 @@
+module,precision,mode,implementation,latency_ms,speedup_vs_pytorch
+TriMul (outgoing),bf16-mixed,inference,PyTorch,0.7769,1.00
+TriMul (outgoing),bf16-mixed,inference,cuEquivariance,0.2820,2.75
+TriMul (outgoing),bf16-mixed,inference,Anthropic,0.1670,4.65
+TriMul (outgoing),bf16-mixed,inference,Ours,0.1469,5.29
+TriMul (bidirectional),bf16-mixed,inference,PyTorch,1.3146,1.00
+TriMul (bidirectional),bf16-mixed,inference,cuEquivariance,0.7880,1.67
+TriMul (bidirectional),bf16-mixed,inference,Anthropic,0.2848,4.62
+TriMul (bidirectional),bf16-mixed,inference,Ours,0.2421,5.43
+Triangle attention,bf16-mixed,inference,PyTorch,1.6441,1.00
+Triangle attention,bf16-mixed,inference,cuEquivariance,0.7149,2.30
+Triangle attention,bf16-mixed,inference,Anthropic,0.4466,3.68
+Triangle attention,bf16-mixed,inference,Ours,0.2648,6.21
+Transition (pair),bf16-mixed,inference,PyTorch,0.4521,1.00
+Transition (pair),bf16-mixed,inference,Ours,0.1129,4.00
+Attention pair bias,bf16-mixed,inference,PyTorch,0.1063,1.00
+Attention pair bias,bf16-mixed,inference,cuEquivariance,0.1088,0.98
+Attention pair bias,bf16-mixed,inference,Ours,0.0415,2.56
+Outer product mean,bf16-mixed,inference,PyTorch,0.9251,1.00
+Outer product mean,bf16-mixed,inference,Anthropic,1.2361,0.75
+Outer product mean,bf16-mixed,inference,Ours,0.6362,1.45
+MSA pair- weighted avg.,bf16-mixed,inference,PyTorch,0.9847,1.00
+MSA pair- weighted avg.,bf16-mixed,inference,Anthropic,1.0190,0.97
+MSA pair- weighted avg.,bf16-mixed,inference,Ours,0.4037,2.44
+Token DiT,bf16-mixed,inference,PyTorch,0.2843,1.00
+Token DiT,bf16-mixed,inference,Anthropic,0.1411,2.01
+Token DiT,bf16-mixed,inference,Ours,0.1030,2.76
+Token DiT,fp32,inference,PyTorch,0.4731,1.00
+Token DiT,fp32,inference,Anthropic,0.2256,2.10
+Token DiT,fp32,inference,Ours,0.1988,2.38
+Bias-only token DiT,bf16-mixed,inference,PyTorch,0.2114,1.00
+Bias-only token DiT,bf16-mixed,inference,Ours,0.1036,2.04
+Bias-only token DiT,fp32,inference,PyTorch,0.3638,1.00
+Bias-only token DiT,fp32,inference,Ours,0.1940,1.87
+AF3 atom DiT (32×128),bf16-mixed,inference,PyTorch,0.3750,1.00
+AF3 atom DiT (32×128),bf16-mixed,inference,Anthropic,0.3210,1.17
+AF3 atom DiT (32×128),bf16-mixed,inference,Ours,0.0974,3.85
+AF3 atom DiT (32×128),fp32,inference,PyTorch,0.5336,1.00
+AF3 atom DiT (32×128),fp32,inference,Anthropic,0.4685,1.14
+AF3 atom DiT (32×128),fp32,inference,Ours,0.1525,3.50
+SWA atom DiT (window 129),bf16-mixed,inference,PyTorch,1.2068,1.00
+SWA atom DiT (window 129),bf16-mixed,inference,Ours,0.8543,1.41
+SWA atom DiT (window 129),fp32,inference,PyTorch,3.3477,1.00
+SWA atom DiT (window 129),fp32,inference,Ours,0.2217,15.10
+TriMul (outgoing),bf16-mixed,training,PyTorch,2.4213,1.00
+TriMul (outgoing),bf16-mixed,training,cuEquivariance,1.4443,1.68
+TriMul (outgoing),bf16-mixed,training,Ours,0.7594,3.19
+TriMul (bidirectional),bf16-mixed,training,PyTorch,4.0073,1.00
+TriMul (bidirectional),bf16-mixed,training,cuEquivariance,2.4935,1.61
+TriMul (bidirectional),bf16-mixed,training,Ours,0.9492,4.22
+Triangle attention,bf16-mixed,training,PyTorch,4.6660,1.00
+Triangle attention,bf16-mixed,training,cuEquivariance,3.3357,1.40
+Triangle attention,bf16-mixed,training,Ours,0.9372,4.98
+Transition (pair),bf16-mixed,training,PyTorch,1.2128,1.00
+Transition (pair),bf16-mixed,training,Ours,0.5317,2.28
+Attention pair bias,bf16-mixed,training,PyTorch,0.3080,1.00
+Attention pair bias,bf16-mixed,training,cuEquivariance,0.2636,1.17
+Attention pair bias,bf16-mixed,training,Ours,0.1228,2.51
+Outer product mean,bf16-mixed,training,PyTorch,2.4637,1.00
+Outer product mean,bf16-mixed,training,Ours,1.8689,1.32
+MSA pair- weighted avg.,bf16-mixed,training,PyTorch,2.6162,1.00
+MSA pair- weighted avg.,bf16-mixed,training,Ours,1.4041,1.86
+Token DiT,bf16-mixed,training,PyTorch,5.6950,1.00
+Token DiT,bf16-mixed,training,Ours,3.3750,1.69
+Token DiT,fp32,training,PyTorch,9.1537,1.00
+Token DiT,fp32,training,Ours,7.0983,1.29
+Bias-only token DiT,bf16-mixed,training,PyTorch,2.4997,1.00
+Bias-only token DiT,bf16-mixed,training,Ours,2.1181,1.18
+Bias-only token DiT,fp32,training,PyTorch,5.6386,1.00
+Bias-only token DiT,fp32,training,Ours,5.0757,1.11
+AF3 atom DiT (32×128),bf16-mixed,training,PyTorch,8.7844,1.00
+AF3 atom DiT (32×128),bf16-mixed,training,Ours,3.4755,2.53
+AF3 atom DiT (32×128),fp32,training,PyTorch,12.6008,1.00
+AF3 atom DiT (32×128),fp32,training,Ours,5.7458,2.19
+SWA atom DiT (window 129),bf16-mixed,training,PyTorch,31.3833,1.00
+SWA atom DiT (window 129),bf16-mixed,training,Ours,22.6655,1.38
+SWA atom DiT (window 129),fp32,training,PyTorch,86.8349,1.00
+SWA atom DiT (window 129),fp32,training,Ours,25.1198,3.46

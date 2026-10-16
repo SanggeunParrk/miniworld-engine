@@ -133,8 +133,12 @@ def native_h100_enabled(q, training=None):
     return is_sm90(q.device)
 
 
-def _native_b200_fusion(q=None, training=None):
-    return q is not None and _native_b200_default(q, training)
+def _native_b200_fusion(q=None, training=None, B=None):
+    """The B200-style fused row stages read one conditioning row per sequence row; a call whose samples share their conditioning
+    (``q.shape[0] != B``: a sampling step) runs the plain native stages instead."""
+    if q is None or (B is not None and q.ndim == 3 and q.shape[0] != B):
+        return False
+    return _native_b200_default(q, training)
 
 
 def _native_h100_extension(which="qkvg"):
@@ -154,8 +158,6 @@ def _native_mm(a, b):
 
 
 def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training):
-    if _native_b200_fusion(q, training) and (q.ndim != 3 or q.shape[0] != B):
-        raise ValueError("B200-style H100 SWA requires one conditioning row per sequence row")
     if (q.dtype not in (torch.bfloat16, torch.float32) or q.ndim != 3 or q.shape[-1] != 128
             or not q.is_cuda or not q.is_contiguous() or q.numel() == 0
             or half_window != 64 or B <= 0 or q.shape[0] % B
@@ -163,7 +165,9 @@ def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training)
             or seqused.dtype != torch.int32 or not seqused.is_contiguous()
             or tuple(mod.shape) != (B * q.shape[1], 768)
             or tuple(seqused.shape) != (q.shape[0],)):
-        raise ValueError("native H100 SWA requires contiguous BF16/FP32 [A*B,S,128], FP32 modulation and window64")
+        raise ValueError("native H100 SWA requires contiguous BF16/FP32 [A*B,S,128], FP32 modulation and window64; got "
+                         f"q {tuple(q.shape)} {q.dtype} contiguous={q.is_contiguous()}, mod {tuple(mod.shape)} {mod.dtype}, "
+                         f"seqused {tuple(seqused.shape)} {seqused.dtype}, B={B}, half_window={half_window}")
     if any(t.device != q.device for t in (mod, cs, sn, seqused, *weights)):
         raise ValueError("native H100 SWA tensors must be on the same CUDA device")
     if any(t.dtype != torch.float32 or not t.is_contiguous()
@@ -181,7 +185,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
     N, S, _ = q.shape
     A, M = N // B, N * S
     bf = q.dtype == torch.bfloat16
-    fusion = _native_b200_fusion(q, save)
+    fusion = _native_b200_fusion(q, save, B)
     small = fusion and bf and A == 1 and M >= 4096
     def empty(*shape, dtype=None):
         return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
@@ -233,7 +237,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
     ext = _native_h100_extension()
     N, S, _ = q.shape
     A, M, bf = N // B, N * S, q.dtype == torch.bfloat16
-    fusion = _native_b200_fusion(q, True)
+    fusion = _native_b200_fusion(q, True, B)
     def empty(*shape, dtype=None):
         return torch.empty(shape, device=q.device, dtype=q.dtype if dtype is None else dtype)
     def rows(stage, ins, outs):
