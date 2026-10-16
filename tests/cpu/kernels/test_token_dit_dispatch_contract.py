@@ -15,7 +15,7 @@ from miniworld_engine.modules.dispatch import KernelBackend
     ((9, 0), 16, 768, 384, torch.bfloat16, True),
     ((9, 0), 16, 768, 384, torch.float32, True),
     ((9, 0), 16, 768, 333, torch.bfloat16, False),
-    ((9, 0), 24, 768, 384, torch.bfloat16, False),
+    ((9, 0), 24, 768, 384, torch.bfloat16, True),    # H100 serves every LAYOUTS head layout (tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py)
     ((10, 0), 16, 768, 333, torch.bfloat16, True),
     ((10, 0), 16, 768, 333, torch.float32, True),
     ((10, 0), 24, 768, 384, torch.bfloat16, True),
