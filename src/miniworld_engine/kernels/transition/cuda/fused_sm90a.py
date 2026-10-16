@@ -499,7 +499,11 @@ def transition_fused_sm90a(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
-        wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
+        if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
+            # an inference loop calls with the same weights: reuse the cached Ws^T instead of a prepare launch per call
+            wst = transposed_contiguous(ws)
+        else:
+            wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
         out, _, _, _ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),

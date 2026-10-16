@@ -8,7 +8,7 @@ instead of a one-hot re-materialisation and a long-K weight-gradient GEMM. Exact
 Linears round the weights; this does not). The class-bin and dright sums use global atomics: run-to-run the last bits of
 dright / dW can differ.
 
-Served: B200 (sm_100a), d_pair 128. The kernels compute in fp32; ``left`` / ``right`` may be fp32 or bf16 (a bf16-autocast
+Served: B200 (sm_100a) and H100 (sm_90a; the backward there is bitwise deterministic), d_pair 128. The kernels compute in fp32; ``left`` / ``right`` may be fp32 or bf16 (a bf16-autocast
 caller) and the weights fp32 or bf16 (an fp32 master or bf16 parameters): the autograd function casts them to fp32 outside
 autograd and hands every gradient back in its input's dtype. :func:`refusal` says why anything else is not served; it never
 raises.
@@ -41,9 +41,20 @@ def refusal(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond
         return f"weights must be [{D_PAIR}, {n_rel(r_max, s_max)}] and [{D_PAIR}, 2], got {tuple(w_rel.shape)} / {tuple(w_bond.shape)}"
     if tuple(bond.shape) != (left.shape[0], left.shape[1], left.shape[1]):
         return f"bond must be [B, L, L], got {tuple(bond.shape)}"
-    if torch.cuda.get_device_capability(left.device) != (10, 0):
-        return "served on B200 (sm_100a) only"
+    if torch.cuda.get_device_capability(left.device) not in ((10, 0), (9, 0)):
+        return "served on B200 (sm_100a) and H100 (sm_90a) only"
     return None
+
+
+def _backend(device):
+    """The kernel module of the device: H100 (sm_90a, ``cuda.sm90``) or B200 (sm_100a, ``cuda.sm100``)."""
+    if torch.cuda.get_device_capability(device) == (9, 0):
+        from miniworld_engine.kernels.token_pair_init.cuda import sm90
+
+        return sm90
+    from miniworld_engine.kernels.token_pair_init.cuda import sm100
+
+    return sm100
 
 
 def _token_pair_init_fwd_fake(left, right, tbl, ids, bond, r_max, s_max):
@@ -57,9 +68,7 @@ def token_pair_init_fwd(left: torch.Tensor, right: torch.Tensor, tbl: torch.Tens
                         r_max: int, s_max: int) -> torch.Tensor:
     """z [B, L, L, 128] from left / right [B, L, 128], tbl [n_rel + 2, 128] = [w_rel^T ; w_bond^T], ids [5, B*L] int32,
     bond [B*L*L] uint8."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm100
-
-    return sm100.forward(left, right, tbl, ids, bond, r_max, s_max)
+    return _backend(left.device).forward(left, right, tbl, ids, bond, r_max, s_max)
 
 
 def _token_pair_init_bwd_fake(g, ids, bond, r_max, s_max):
@@ -75,9 +84,8 @@ def _token_pair_init_bwd_fake(g, ids, bond, r_max, s_max):
 @opaque(fake=_token_pair_init_bwd_fake, name="token_pair_init_bwd")
 def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, r_max: int, s_max: int) -> list[torch.Tensor]:
     """[dleft, dright, dtbl] from dz = g [B, L, L, 128] fp32."""
-    from miniworld_engine.kernels.token_pair_init.cuda import sm100
 
-    return list(sm100.backward(g, ids, bond, r_max, s_max))
+    return list(_backend(g.device).backward(g, ids, bond, r_max, s_max))
 
 
 class TokenPairInitFunction(torch.autograd.Function):

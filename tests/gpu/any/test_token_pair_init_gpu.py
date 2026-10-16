@@ -1,4 +1,4 @@
-"""Fused token-pair initialisation on B200 (``kernels/token_pair_init``): output and every gradient against the dense fp32
+"""Fused token-pair initialisation on B200 and H100 (``kernels/token_pair_init``): output and every gradient against the dense fp32
 reference (the 139-wide one-hot Linear the model ran), ragged lengths, B > 1, CUDA-graph capture."""
 
 from __future__ import annotations
@@ -14,7 +14,8 @@ from miniworld_engine.kernels.token_pair_init import (
 
 pytestmark = [
     pytest.mark.gpu,
-    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="B200 (sm_100)"),
+    pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() not in ((10, 0), (9, 0)),
+                       reason="B200 (sm_100) or H100 (sm_90)"),
 ]
 DEV, P = "cuda", 128
 
@@ -119,3 +120,17 @@ def test_bins_that_do_not_fit_eight_bits_are_refused():
     with pytest.raises(ValueError, match="8 bits"):
         sm100.check_packable(64, 2)
     sm100.check_packable(32, 2)
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability() != (9, 0), reason="H100: the sm_90a backward is atomic-free")
+@pytest.mark.parametrize(("b", "l"), [(1, 384), (2, 130), (1, 768)])
+def test_h100_backward_is_bitwise_deterministic(b, l):
+    (left, right, w_rel, w_bond), ids, bond = _case(b, l, seed=5)
+    dz = torch.randn(b, l, l, P, device=DEV)
+    runs = []
+    for _ in range(3):
+        z = _run(token_pair_init, (left, right, w_rel, w_bond), ids, bond)
+        runs.append((z, *torch.autograd.grad(z, (left, right, w_rel, w_bond), dz)))
+    for r in runs[1:]:
+        for a, e in zip(r, runs[0], strict=True):
+            assert torch.equal(a, e)

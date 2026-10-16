@@ -354,7 +354,7 @@ def _fwd_launch(
     variant = _d64_variant(x.shape[0], _sm_count(x.device)) if x.shape[-1] == 64 and not save else 0
     if variant:
         # 64-row tiles: one consumer warpgroup per CTA (2 or 3 CTAs per SM), more tiles in flight than the 128-row build
-        out = ext.fwd_small(x, gamma, beta, wa, wb, _cuda_prepare(wa, wb, ws)[3], float(eps), variant)
+        out = ext.fwd_small(x, gamma, beta, wa, wb, wst if wst is not None else transposed_contiguous(ws), float(eps), variant)
         f32 = dict(dtype=torch.float32, device=x.device)
         return (out, x.new_empty((1, 64)), torch.empty((1,), **f32), torch.empty((1,), **f32), x.new_empty((1, 1)))
     if n == 4 and fused_d384_enabled(x.shape[-1]) and not save:
@@ -592,9 +592,12 @@ def transition_wide_sm90a(x, gamma, beta, wa, wb, ws, eps):
     ):
         shape = x.shape
         if shape[-1] == 64:
-            # The forward consumes Ws transposed. Prepare its live master cast
-            # and transpose together, as the training entry already does.
-            wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
+            # The forward consumes Ws transposed. bf16 weights reuse a cached transpose (an inference loop calls with the same
+            # weights); fp32 masters are cast and transposed together, as the training entry does.
+            if all(w.dtype == torch.bfloat16 for w in (wa, wb, ws)):
+                wst = transposed_contiguous(ws)
+            else:
+                wa, wb, ws, wst = _cuda_prepare(wa, wb, ws)
         else:
             wa, wb, ws = _cast_weights((wa, wb, ws), x.dtype)
             wst = None
