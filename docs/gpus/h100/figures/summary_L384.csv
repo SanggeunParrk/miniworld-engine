@@ -20,7 +20,7 @@ Outer product mean,bf16-mixed,inference,PyTorch,0.9251,1.00
 Outer product mean,bf16-mixed,inference,Anthropic,1.2361,0.75
 Outer product mean,bf16-mixed,inference,Ours,0.6362,1.45
 MSA pair- weighted avg.,bf16-mixed,inference,PyTorch,0.9847,1.00
-MSA pair- weighted avg.,bf16-mixed,inference,Anthropic,1.0190,0.97
+MSA pair- weighted avg.,bf16-mixed,inference,Anthropic,0.7028,1.40
 MSA pair- weighted avg.,bf16-mixed,inference,Ours,0.4037,2.44
 Token DiT,bf16-mixed,inference,PyTorch,0.2843,1.00
 Token DiT,bf16-mixed,inference,Anthropic,0.1411,2.01
