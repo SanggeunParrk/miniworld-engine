@@ -301,7 +301,7 @@ def test_shapes_beyond_the_tuned_builds_run_the_generic_kernels(d, bad, monkeypa
         device="cuda",
         dtype=torch.float32 if bad == "dtype" else torch.bfloat16,
     )
-    torch.backends.cuda.matmul.allow_tf32 = True
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", True)   # restored after the test: no global state left behind
     calls = []
     original = fused_generic_sm90a.transition_generic_sm90a
     monkeypatch.setattr(
