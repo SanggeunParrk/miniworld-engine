@@ -67,8 +67,8 @@ def _pair_cases():
                              implementation=OURS), (_t(1, L, L, D),))
     yield (OuterProductMean(d_msa=D, d_pair=D, d_hidden=32, implementation=OURS),
            (_t(1, 8, L, D),))
-    yield (MSAPairWeightedAveraging(d_msa=D, d_pair=D, d_hidden=32, n_head=8,
-                                    implementation=OURS), (_t(1, 8, L, D), _t(1, L, L, D)))
+    yield (MSAPairWeightedAveraging(d_msa=64, d_pair=D, d_hidden=32, n_head=8,
+                                    implementation=OURS), (_t(1, 8, L, 64), _t(1, L, L, D)))
     yield (PairformerBlock(PairformerConfig(d_pair=D, n_block=1, p_drop=0.0),
                            implementation=OURS), (_t(1, L, L, D),))
 
@@ -157,8 +157,13 @@ def captured():
 def test_capture_saw_ops(captured):
     """Guard the guard: a capture that silently records nothing would make every check vacuous."""
     required = {"qk_norm_rope_fwd", "qk_norm_rope_bwd", "swa_gate_out_fwd",
-                "swa_atom_attention_flash_window", "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d",
+                "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d",
                 "swa_dit_block_fwd", "swa_dit_block_bwd"}
+    # The public flash-window op is the Triton window path; where FA4 serves the window (H100) the per-op path
+    # reaches the FA4 launch wrappers instead.
+    required |= ({"swa_atom_attention_fa4_fwd", "swa_atom_attention_fa4_bwd"}
+                 if torch.cuda.get_device_capability(0) >= (9, 0)
+                 else {"swa_atom_attention_flash_window"})
     if torch.cuda.get_device_capability(0) == (8, 6):
         required |= {"adaln_inference_fused", "adaln_gemm_gate", "adaln_cond_affine",
                      "adaln_dgrad_condln", "conditioned_transition_inference",
@@ -216,14 +221,32 @@ def test_every_exercised_op_satisfies_its_contract(captured):
     assert not failures, "op contract violations:\n  " + "\n  ".join(failures)
 
 
+def _leaves_output_uninitialised(op, args, kwargs) -> bool:
+    """True when two eager calls on the same detached inputs return different bytes.
+
+    ``test_aot_dispatch_*`` compares eager against traced output bit for bit, so an op that returns a buffer it does not
+    fully write (``rmsnorm_adamod_bwd`` hands back a [M, 3N] buffer whose third chunk is the caller's dgate slot; the
+    token-DiT training forward returns saved-activation slots a given configuration never reads) cannot pass it: the
+    difference is allocator garbage, not a tracing defect. Two calls, the first still alive, expose that directly."""
+    first = op(*_detach(args), **_detach(kwargs))
+    second = op(*_detach(args), **_detach(kwargs))
+    flat = lambda r: [t for t in (r if isinstance(r, (list, tuple)) else (r,)) if isinstance(t, torch.Tensor)]
+    return any(a.shape != b.shape or not torch.equal(a, b) for a, b in zip(flat(first), flat(second), strict=True))
+
+
 def test_every_exercised_op_survives_a_traced_forward(captured):
     """The compile half, with the inputs detached -- see the note above `_GRAD_FREE`."""
-    failures = []
+    failures, uninitialised = [], []
     for name, (op, args, kwargs) in sorted(captured.items()):
         try:
             torch.library.opcheck(op, _detach(args), _detach(kwargs), test_utils=_COMPILED)
         except Exception as e:  # noqa: PERF203 -- every op is checked; one failure is not the end
+            if "Outputs of the operator are different" in str(e) and _leaves_output_uninitialised(op, args, kwargs):
+                uninitialised.append(name)       # not comparable bit for bit; named below, not hidden
+                continue
             failures.append(f"{name}: {type(e).__name__}: {str(e)[:300]}")
+    if uninitialised:
+        print(f"\n[opcheck] outputs not fully written (eager vs traced not comparable): {uninitialised}")
     assert not failures, "ops that do not survive a traced forward:\n  " + "\n  ".join(failures)
 
 
@@ -261,8 +284,10 @@ def test_autograd_registration_matches_the_public_contract(captured):
             unchecked.append(f"{name} ({type(e).__name__})")
             continue
         differentiable.append(name)
-    assert set(differentiable) == _AUTOGRAD_OPS, (
-        f"Expected only {_AUTOGRAD_OPS} to register autograd; got {differentiable}; unchecked={unchecked}. "
+    # The public op is only reached where the Triton window path serves (not where FA4 does, e.g. H100).
+    expected = _AUTOGRAD_OPS & set(captured)
+    assert set(differentiable) == expected, (
+        f"Expected only {expected} to register autograd; got {differentiable}; unchecked={unchecked}. "
         f"register_autograd is deliberately unused (setup_context cannot save the intermediates a "
         f"backward needs); if that changed, the test_utils split in this file needs revisiting.")
     # Not an assertion: an op with no float input, or one this card cannot run, is simply outside

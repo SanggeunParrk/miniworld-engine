@@ -332,7 +332,7 @@ static_assert(SMEM <= 232448, "smem");
 }  // namespace qk
 
 __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
-    int N, int H, int S, int ntasks, float scl, float scale,
+    int N, int H, int S, int ntasks, int P, long slabrows, float scl, float scale,
     const __grid_constant__ CUtensorMap qmap,             // q / dO [B*N*S][H*32] bf16, box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap dmap,
     const __grid_constant__ CUtensorMap kmap,             // k / v, box (32, 64), 64B swizzle
@@ -366,8 +366,13 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
     bar_init_fence();
   }
   __syncthreads();
-  auto decode = [&](int t, int& b, int& h, int& qt, int& g) {
-    qt = t % QTILES; int r = t / QTILES; h = r % H; r /= H; g = r % NG; b = r / NG;
+  // Deterministic dbias: a chunk c = (tile (b, h, qt), slab p) owns the pair-row groups [g0, g1) of that tile and is run by ONE CTA, in
+  // order; its TMA reduce-adds go to slab p of dbias [P][B*H*S][S].  Every element then receives its adds from one thread in a fixed
+  // order (the storer drains each task's reduces before the next), and the slabs are summed in a fixed order afterwards.
+  auto decode = [&](int c, int& b, int& h, int& qt, int& g0, int& g1, int& p) {
+    const int tile = c / P; p = c % P;
+    qt = tile % QTILES; int r = tile / QTILES; h = r % H; b = r / H;
+    g0 = (int)((long)p * NG / P); g1 = (int)((long)(p + 1) * NG / P);
   };
   auto row0 = [&](int b, int n) -> int { n = min(n, N - 1); return (b * N + n) * S; };
 
@@ -376,8 +381,9 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
     if (tid == 0) {
       prefetch_map(&qmap); prefetch_map(&dmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap); prefetch_map(&dbmap);
       int lt = 0, st = 0, ph = 0;
-      for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
-        int b, h, qt, g; decode(t, b, h, qt, g);
+      for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
+       int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+       for (int g = g0; g < g1; ++g, ++lt) {
         wait(qe, (lt & 1) ^ 1);
         expect_tx(qf, QR * 2 * QT * 2);
         for (int r = 0; r < QR; ++r) {
@@ -394,23 +400,27 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
           }
           if (++st == NS) { st = 0; ph ^= 1; }
         }
+       }
       }
     } else if (tid == 32) {                               // the storer: each step's dbias partials -> TMA reduce-adds
       int u = 0;
       for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
-        int b, h, qt, g; decode(t, b, h, qt, g);
+       int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+       for (int g = g0; g < g1; ++g) {
         for (int j = 0; j < KS; ++j, ++u) {
           const int k = u & 1;
           for (int w_ = 0; w_ < 2; ++w_) {
             wait(dbf(w_, k), (u >> 1) & 1);
             const uint32_t buf = sDB + (w_ * 2 + k) * DBT;
             for (int half = 0; half < 2; ++half)
-              reduce_add_2d(&dbmap, buf + half * 64 * 128, j * BK + half * 32, (b * H + h) * S + qt * BQ + 64 * w_);
+              reduce_add_2d(&dbmap, buf + half * 64 * 128, j * BK + half * 32, (long)p * slabrows + (b * H + h) * S + qt * BQ + 64 * w_);
           }
           bulk_commit();
           bulk_wait_read<0>();
           for (int w_ = 0; w_ < 2; ++w_) arrive(dbe(w_, k));
         }
+        bulk_wait<0>();                                   // this task's reduces have landed before the next task's reach the same elements
+       }
       }
       bulk_wait<0>();
     }
@@ -507,8 +517,9 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
 #define PQA() do {} while (0)
 #endif
   int lt = 0;
-  for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
-    int b, h, qt, g; decode(t, b, h, qt, g);
+  for (int t = blockIdx.x; t < ntasks; t += gridDim.x) {
+   int b, h, qt, g0, g1, p; decode(t, b, h, qt, g0, g1, p);
+   for (int g = g0; g < g1; ++g, ++lt) {
 #pragma unroll
     for (int r = 0; r < QR; ++r) {
       const long li = ((long)(b * N + min(g * QR + r, N - 1)) * H + h) * S + qt * BQ + 64 * w + 16 * wi + g8;
@@ -573,6 +584,7 @@ __global__ void __launch_bounds__(qk::THREADS, 1) triattn_bwd_q_sm90(
         *reinterpret_cast<uint4*>(DQ + (rbase + 8 * hf) * ldo + h * D + 8 * t4) = v;
       }
     }
+   }
   }
 }
 
@@ -643,16 +655,20 @@ torch::Tensor triattn_bwd_q(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
   check_proj(dq, q, "dq");
   CUtensorMap qm = proj_map(q, qk::BQ, "q"), dm = proj_map(dout, qk::BQ, "dout"), km = proj_map(k, qk::BK, "k"), vm = proj_map(v, qk::BK, "v");
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias");
-  CUtensorMap dbm = make_map<2>(dbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {32, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
+  const long tiles = B * H * (S / qk::BQ), NG = (N + qk::QR - 1) / qk::QR;
+  const long P = std::max<long>(1, std::min<long>(NG, num_sms(q.device().index()) / tiles));   // slabs: enough chunks to fill the SMs
+  torch::Tensor slabs = P > 1 ? torch::zeros({P, B, H, S, S}, dbias.options()) : dbias;
+  CUtensorMap dbm = make_map<2>(slabs.data_ptr(), {(uint64_t)S, (uint64_t)(P * B * H * S)}, {(uint64_t)S}, {32, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_q_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, qk::SMEM)); attr = true; }
-  const long ntasks = B * H * ((N + qk::QR - 1) / qk::QR) * (S / qk::BQ);
+  const long ntasks = tiles * P;
   const int grid = (int)std::min<long>(ntasks, num_sms(q.device().index()));
   triattn_bwd_q_sm90<<<grid, qk::THREADS, qk::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), (float)scale, qm, dm, km, vm, bm, dbm,
+      (int)N, (int)H, (int)S, (int)ntasks, (int)P, (long)(B * H * S), (float)(scale * 1.4426950408889634), (float)scale, qm, dm, km, vm, bm, dbm,
       lse.data_ptr<float>(), delta.data_ptr<float>(), bf16p(dq), (long)dq.stride(2));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (P > 1) dbias.add_(slabs.sum(0));                    // fixed-order sum of the slabs (dbias arrives zeroed)
   return dq;
 }
 

@@ -21,20 +21,30 @@ def _inputs():
     return x, gamma, beta, wa, wb
 
 
-def _cuda(kind):
-    from miniworld_engine.kernels.transition import cuda
+def _operands(kind):
+    """The argument tuple of one native Hopper launch; ``checks/transition.py`` builds the SAME one."""
     x, gamma, beta, wa, wb = _inputs()
     mean = x.float().mean(-1)
     rstd = torch.rsqrt(x.float().var(-1, unbiased=False) + 1e-5)
     args = (x, rstd, mean * rstd, gamma, beta, wa, wb)
     if kind == "b2b":
         ws = torch.randn(x.shape[-1], wa.shape[0], device=x.device, dtype=x.dtype) / wa.shape[0]**0.5
-        cuda.transition_b2b_fwd(*args, ws)
+        return (*args, ws)
+    if kind == "expand_gate":
+        return args
+    grad = torch.randn(x.shape[0], wa.shape[0], device=x.device, dtype=x.dtype)
+    return (*args, grad)
+
+
+def _cuda(kind):
+    from miniworld_engine.kernels.transition import cuda
+    args = _operands(kind)
+    if kind == "b2b":
+        cuda.transition_b2b_fwd(*args)
     elif kind == "expand_gate":
         cuda.transition_expand_gate_fwd(*args)
     else:
-        grad = torch.randn(x.shape[0], wa.shape[0], device=x.device, dtype=x.dtype)
-        cuda.transition_expand_gatebwd_wgmma(*args, grad)
+        cuda.transition_expand_gatebwd_wgmma(*args)
 
 
 def transition_fwd_b2b_sm90_cuda():

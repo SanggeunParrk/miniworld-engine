@@ -308,3 +308,111 @@ def transition_squeeze_residual_triton():
     r = rows2d(ROWS, K_SMALL)
     expected = ((h.float() @ w.float().T).to(h.dtype).float() + r.float()).to(r.dtype)
     return squeeze_residual(h, w, r, SHAPE_KEY), expected
+
+
+# ── native Hopper (sm90) CUDA kernels ────────────────────────────────────────────────────────
+#
+# Operands come from the drivers' own builders (``hopper._operands``, ``transition._fused_operands``),
+# so a checker cannot drift from the launch the runner records. References run in fp32 over the
+# same bf16 bits; the kernels round xn (and, before the squeeze, h) to bf16 because both feed a
+# bf16 wgmma, so the references round at exactly those two points.
+
+
+def _hopper_ref(x, rstd, c1, g, beta, wa, wb):
+    """(xn_bf16, a, b) from the SAME rstd/c1 the kernel is handed."""
+    xn = _xn(x, rstd, c1, g, beta).to(x.dtype)
+    a, b = _proj(xn, wa, wb)
+    return xn, a, b
+
+
+def transition_fwd_b2b_sm90_cuda():
+    """LN(from stats) + SwiGLU expand + squeeze + residual: y = x + bf16(silu(a)*b) @ Ws^T."""
+    from miniworld_engine.kernels.drivers.hopper import _operands
+    from miniworld_engine.kernels.transition import cuda
+
+    args = _operands("b2b")
+    x, rstd, c1, g, beta, wa, wb, ws = args
+    y = cuda.transition_b2b_fwd(*args)
+    _, a, b = _hopper_ref(x, rstd, c1, g, beta, wa, wb)
+    h = (a * torch.sigmoid(a) * b).to(x.dtype)
+    return y, x.float() + h.float() @ ws.float().T
+
+
+def transition_expand_gate_sm90_cuda():
+    """LN(from stats) + SwiGLU expand: h = silu(a)*b, (M, ND)."""
+    from miniworld_engine.kernels.drivers.hopper import _operands
+    from miniworld_engine.kernels.transition import cuda
+
+    args = _operands("expand_gate")
+    h = cuda.transition_expand_gate_fwd(*args)
+    _, a, b = _hopper_ref(*args)
+    return h, a * torch.sigmoid(a) * b
+
+
+def transition_bwd_gate_sm90_cuda():
+    """Expand + SwiGLU gate backward, returning (h, [dA|dB], xn)."""
+    from miniworld_engine.kernels.drivers.hopper import _operands
+    from miniworld_engine.kernels.transition import cuda
+
+    args = _operands("gatebwd")
+    h, dab, xn = cuda.transition_expand_gatebwd_wgmma(*args)
+    xn_ref, a, b = _hopper_ref(*args[:-1])
+    h_ref, da, db = _swiglu_bwd(a, b, args[-1])
+    return {"h": (h, h_ref), "dAB": (dab, torch.cat((da, db), dim=1)), "xn": (xn, xn_ref)}
+
+
+def _fused_ref(x, gamma, beta, wa, wb, ws, dy=None):
+    """fp32 autograd reference of y = x + Ws(silu(Wa xn)*(Wb xn)), xn = LN(x). Returns (y, xn, rstd, c1,
+    grads | None); xn is rounded to bf16 where the kernel feeds it to the wgmma (value, not graph)."""
+    # .detach().clone(): gamma/beta are already fp32, so a bare .float() returns the driver's own
+    # tensor and the reference's grads would accumulate into it across the n=4 / n=2 runs.
+    def leaf(t):
+        return t.detach().clone().float().requires_grad_(dy is not None)
+
+    xf, gf, bf = leaf(x), leaf(gamma), leaf(beta)
+    waf, wbf, wsf = leaf(wa), leaf(wb), leaf(ws)
+    mean = xf.mean(-1, keepdim=True)
+    rstd = torch.rsqrt(((xf - mean) ** 2).mean(-1, keepdim=True) + 1e-5)
+    xn = (xf - mean) * rstd * gf + bf
+    a, b = xn @ waf.T, xn @ wbf.T
+    y = xf + (torch.nn.functional.silu(a) * b) @ wsf.T
+    if dy is None:
+        return y, xn, rstd[:, 0], (mean * rstd)[:, 0], None
+    y.backward(dy.float())
+    return y, xn, rstd[:, 0], (mean * rstd)[:, 0], (xf.grad, gf.grad, bf.grad, waf.grad, wbf.grad, wsf.grad)
+
+
+def transition_fwd_residual_sm90_cuda():
+    """Fused LN + expand + squeeze + residual (sm90a), save=True so xn/rstd/c1 are observable,
+    at both hidden widths the driver builds (n=4 and n=2)."""
+    from miniworld_engine.kernels.drivers.transition import _fused_operands
+    from miniworld_engine.kernels.transition.cuda.fused_sm90a import _fwd_launch
+
+    x, gamma, beta, weights = _fused_operands()
+    out = {}
+    for (wa, wb, ws), tag in zip(weights, ("n4", "n2"), strict=True):
+        y, xn, rstd, c1 = _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, True)
+        y_ref, xn_ref, rstd_ref, c1_ref, _ = _fused_ref(x, gamma, beta, wa, wb, ws)
+        out[f"{tag}_y"] = (y, y_ref)
+        out[f"{tag}_xn"] = (xn, xn_ref)
+        out[f"{tag}_rstd"] = (rstd, rstd_ref)
+        out[f"{tag}_c1"] = (c1, c1_ref)
+    return out
+
+
+def transition_bwd_residual_sm90_cuda():
+    """Fused backward (sm90a): dx (with the residual branch), dgamma, dbeta, dWa, dWb, dWs vs fp32
+    autograd, at both hidden widths. The forward feeds it its own saved xn/rstd/c1, as in training."""
+    from miniworld_engine.kernels.drivers.transition import _fused_operands
+    from miniworld_engine.kernels.transition.cuda.fused_sm90a import _bwd_launch, _fwd_launch
+
+    x, gamma, beta, weights = _fused_operands()
+    out = {}
+    for (wa, wb, ws), tag in zip(weights, ("n4", "n2"), strict=True):
+        _, xn, rstd, c1 = _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, True)
+        dy = torch.randn_like(x)
+        got = _bwd_launch(dy, x, xn, rstd, c1, gamma, wa, wb, ws)
+        *_, grads = _fused_ref(x, gamma, beta, wa, wb, ws, dy)
+        for name, a, e in zip(("dx", "dgamma", "dbeta", "dWa", "dWb", "dWs"), got, grads, strict=True):
+            out[f"{tag}_{name}"] = (a, e)
+    return out

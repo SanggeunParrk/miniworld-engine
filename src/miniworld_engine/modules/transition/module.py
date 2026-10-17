@@ -150,8 +150,12 @@ class Transition(nn.Module):
         return self._residual_forward(x)
 
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
+        from miniworld_engine import settings
+
+        # An explicit engine_backend="triton" is a comparison run, never refused (as for TriMul).
         return (
             self.implementation == ImplementationType.MINIWORLD
+            and settings.current().engine_backend != "triton"
             and x.is_cuda
             and torch.cuda.get_device_capability(x.device) == (9, 0)
         )

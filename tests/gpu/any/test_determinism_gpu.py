@@ -69,6 +69,8 @@ NOT_BITWISE = {
         # as proof that "uses atomics" does not predict non-reproducibility. It was measured in the
         # only precision the suite ever ran. The first fp32 run of this suite -- possible only once
         # the drivers started honouring the declared dtype -- shows the same kernel differing.
+        # (H100, 2026-10-17: bf16 differed by one ulp in 2 of ~4 full runs and reproduced in the others -- a
+        # distribution like augmented_attention's bf16, so neither list entry nor SAMPLE is stable there.)
         "fp32": "unordered atomic accumulation into dgamma/dbeta; in fp32 the reordered additions "
                 "survive rounding, where in bf16 they do not",
     },

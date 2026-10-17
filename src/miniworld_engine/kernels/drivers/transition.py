@@ -385,20 +385,29 @@ def transition_squeeze_residual_triton():
     squeeze_residual(h, w, r, SHAPE_KEY)
 
 
+def _fused_operands():
+    """(x, gamma, beta, [(wa, wb, ws) for n in (4, 2)]) of the fused sm90a launches; the checkers reuse it."""
+    length = driver_length(384)
+    rows = length * length if both_level_is_pair(length) else length
+    x = torch.randn(rows, 128, device="cuda", dtype=BF16)
+    gamma, beta = torch.ones(128, device="cuda"), torch.zeros(128, device="cuda")
+    weights = []
+    for n in (4, 2):                                  # hidden 512 (the AF3 Transition) and 256: two builds, two tuned schedules
+        hid = n * 128
+        wa, wb = [torch.randn(hid, 128, device="cuda", dtype=BF16) / 128 ** 0.5 for _ in range(2)]
+        ws = torch.randn(128, hid, device="cuda", dtype=BF16) / hid ** 0.5
+        weights.append((wa, wb, ws))
+    return x, gamma, beta, weights
+
+
 def _fused_transition(backward):
     from miniworld_engine.autotune import policy
     from miniworld_engine.kernels.transition.cuda.fused_sm90a import (
         _bwd_launch,
         _fwd_launch,
     )
-    length = driver_length(384)
-    rows = length * length if both_level_is_pair(length) else length
-    x = torch.randn(rows, 128, device="cuda", dtype=BF16)
-    gamma, beta = torch.ones(128, device="cuda"), torch.zeros(128, device="cuda")
-    for n in (4, 2):                                  # hidden 512 (the AF3 Transition) and 256: two builds, two tuned schedules
-        hid = n * 128
-        wa, wb = [torch.randn(hid, 128, device="cuda", dtype=BF16) / 128 ** 0.5 for _ in range(2)]
-        ws = torch.randn(128, hid, device="cuda", dtype=BF16) / hid ** 0.5
+    x, gamma, beta, weights = _fused_operands()
+    for wa, wb, ws in weights:
         if backward:
             _, xn, rstd, c1 = _fwd_launch(x, gamma, beta, wa, wb, ws.T.contiguous(), 1e-5, True)
             _bwd_launch(torch.randn_like(x), x, xn, rstd, c1, gamma, wa, wb, ws)

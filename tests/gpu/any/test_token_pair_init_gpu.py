@@ -20,6 +20,18 @@ pytestmark = [
 DEV, P = "cuda", 128
 
 
+@pytest.fixture(autouse=True)
+def _exact_fp32_reference():
+    """The dense reference is an fp32 Linear: an earlier test that leaves TF32 on makes it round the weights
+    (rel 8e-5 against this kernel's exact fp32). Pin full precision for these tests and restore it."""
+    previous = (torch.get_float32_matmul_precision(), torch.backends.cuda.matmul.allow_tf32)
+    torch.set_float32_matmul_precision("highest")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    yield
+    torch.set_float32_matmul_precision(previous[0])
+    torch.backends.cuda.matmul.allow_tf32 = previous[1]
+
+
 def _case(b, l, seed=0, r_max=32, s_max=2, grad=True):
     g = torch.Generator().manual_seed(seed)
     n_rel = 2 * (2 * r_max + 2) + (2 * s_max + 2) + 1

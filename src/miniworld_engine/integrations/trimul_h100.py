@@ -388,6 +388,10 @@ def serves_inference(
     return bool(entry and entry.get("k1") and entry.get("k3"))
 
 
+#: Pair lengths of the promoted D64 / D128 inference buckets; any other length takes the general path, not a refusal.
+_PROMOTED_LENGTHS = (128, 256, 384, 512, 640, 768, 896, 1024)
+
+
 def requires_cuda_inference(module, pair):
     """Promoted inference buckets refuse instead of silently using Triton."""
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
@@ -399,7 +403,9 @@ def requires_cuda_inference(module, pair):
         return False
     return (module.implementation == ImplementationType.MINIWORLD
             and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
-            and pair.is_cuda and (native or pair.shape[-1] in (64, 128) or _native_residual_bucket(module, pair))
+            and pair.is_cuda and (native or (pair.shape[-1] in (64, 128) and pair.ndim == 4
+                                             and pair.shape[1] in _PROMOTED_LENGTHS)
+                                  or _native_residual_bucket(module, pair))
             and torch.cuda.get_device_capability(pair.device) == (9, 0)
             and not torch.is_grad_enabled())
 

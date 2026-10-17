@@ -311,3 +311,57 @@ def trimul_output_f567_train():
     rows = torch.arange(norm.shape[0], device=norm.device) % length
     expected = residual.float() + p * g * ds.float()[rows]
     return {"y": (y, expected), "proj": (proj, p), "gate": (gate, g)}
+
+
+def trimul_fwd_sm90_cuda():
+    """Native sm90 TriMul inference (K1 + contraction + K3): y = x + LN_out(tri) @ Wp^T * sigmoid(LN_in(x) @ Wg^T).
+
+    Same operands as the driver (``drivers.trimul_inproj.trimul_fwd_sm90_cuda``: L, width, the hidden
+    widths ``width`` and ``2*width`` that ``trimul_candidates`` admits, directions 0/1/2), except the
+    token mask: the driver passes all-True, which would leave the mask path unproved, so some
+    tokens here are masked. direction 1 = outgoing (tri = a @ b^T), 2 = incoming (a^T @ b), 0 =
+    bidirectional (first half of the hidden channels outgoing, second half incoming). The reference
+    is fp32 over the same bf16 operands, per (hidden, direction) block of the dict.
+    """
+    import torch.nn.functional as F
+
+    from miniworld_engine.autotune.fused_config import trimul_candidates
+    from miniworld_engine.kernels.drivers import driver_length, driver_width
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
+
+    length, width = driver_length(384), driver_width(128)
+    x = torch.randn(1, length, length, width, device="cuda", dtype=BF16)
+    mask = torch.rand(length, device="cuda") > 0.2
+    out = {}
+    for hidden in (width, 2 * width):
+        if not trimul_candidates(width, hidden, length, 0):
+            continue
+
+        def weight(n, k):
+            return torch.randn(n, k, device="cuda", dtype=BF16) / k ** 0.5
+
+        def affine(n, bias=False):
+            return torch.zeros(n, device="cuda") if bias else torch.ones(n, device="cuda")
+
+        weights = [weight(hidden, width) for _ in range(4)]
+        weights += [weight(width, width), weight(width, hidden), affine(width), affine(width, True),
+                    affine(hidden), affine(hidden, True)]
+        wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = (_f(w) for w in weights)
+        xf = _f(x)
+        xn = F.layer_norm(xf, (width,), gi, bi, 1e-5)
+        pm = (mask[:, None] & mask[None, :])[None, :, :, None]
+        a = ((xn @ wl.t()) * torch.sigmoid(xn @ wlg.t()) * pm)[0].permute(2, 0, 1)
+        b = ((xn @ wr.t()) * torch.sigmoid(xn @ wrg.t()) * pm)[0].permute(2, 0, 1)
+        gate = torch.sigmoid(xn @ wg.t())
+        for direction in (0, 1, 2):
+            got = inference(x, weights, mask, direction, 1e-5)
+            if direction == 0:
+                h = hidden // 2
+                tri = torch.cat((a[:h] @ b[:h].transpose(-1, -2), a[h:].transpose(-1, -2) @ b[h:]))
+            elif direction == 1:
+                tri = a @ b.transpose(-1, -2)
+            else:
+                tri = a.transpose(-1, -2) @ b
+            norm = F.layer_norm(tri.permute(1, 2, 0), (hidden,), go, bo, 1e-5)
+            out[f"h{hidden}_dir{direction}"] = (got, xf + (norm @ wp.t())[None] * gate)
+    return out

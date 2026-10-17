@@ -124,7 +124,7 @@ def _bwd(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_bwd{tag}_v10",
+        name=f"triattn_h100_bwd{tag}_v11",
         sources=[str(_SRC / "triattn_bwd_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -201,7 +201,9 @@ def train_backward(
     dq = bw.triattn_bwd_q(q5, k5, v5, sbias, do5, lse, delta, D**-0.5, dbias)
     dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
     m.tri_head_bwd(dq, dk, dv, dg, dbias, x, w4, wb, lw, eps, dpair, B, L, trans)
-    fp32 = wq.dtype == torch.float32
+    # fp32 outputs whenever any parameter is fp32 (master weights, or the bf16 model's fp32 LayerNorm affine): the wrapper's `.to` then
+    # rounds the bf16 ones exactly as the kernel's own bf16 store would, and gamma / beta keep their fp32 value
+    fp32 = wq.dtype == torch.float32 or lnw.dtype == torch.float32
     dwq, dwk, dwv, dwg, dgamma, dbeta, dwb, dwo = m.tri_wgrad(
         dq, dk, dv, dg, dbias, x, eps, B, L, w4, wb, lw, lb, dwo_part, fp32, trans
     )
