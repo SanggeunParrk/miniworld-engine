@@ -65,14 +65,14 @@ NOT_BITWISE = {
         "fp32": "unordered atomic accumulation into dK/dV; the order varies run to run",
     },
     "layernorm_bwd_atomic_triton": {
-        # bf16 is NOT listed: it reproduces there, and this file's header used to cite exactly that
-        # as proof that "uses atomics" does not predict non-reproducibility. It was measured in the
-        # only precision the suite ever ran. The first fp32 run of this suite -- possible only once
-        # the drivers started honouring the declared dtype -- shows the same kernel differing.
-        # (H100, 2026-10-17: bf16 differed by one ulp in 2 of ~4 full runs and reproduced in the others -- a
-        # distribution like augmented_attention's bf16, so neither list entry nor SAMPLE is stable there.)
+        # bf16 reproduced when this file's header cited it as proof that "uses atomics" does not predict
+        # non-reproducibility, and it does on many runs. H100, 2026-10-17: it differed by one bf16 ulp
+        # (6.25e-2) at call 4 / 6 of 12 in two runs of this suite and reproduced in others -- a distribution,
+        # like augmented_attention's bf16, so it is listed and the exception test samples until it sees one.
+        "bf16": "unordered atomic accumulation into dgamma/dbeta; the reordered additions survive the bf16 "
+                "store only some of the time",
         "fp32": "unordered atomic accumulation into dgamma/dbeta; in fp32 the reordered additions "
-                "survive rounding, where in bf16 they do not",
+                "survive rounding, where in bf16 they only sometimes do",
     },
 }
 
@@ -96,6 +96,9 @@ NOT_BITWISE = {
 #: autotuner re-benches and can pick a different config, which adds its own variation. The number
 #: above is the harder case, one fixed config.)
 SAMPLES = 12
+
+#: Upper bound for `test_a_declared_exception_is_still_one`, which stops at the first observed difference.
+MAX_EXCEPTION_SAMPLES = 100
 
 #: One kernel per family that has a checker, chosen for launch-path variety rather than coverage:
 #: an atomic accumulation, a split reduction, a persistent grid, a fused epilogue. Declared rather
@@ -201,13 +204,21 @@ def test_a_declared_exception_is_still_one(kernel: str) -> None:
     if why is None:
         pytest.skip(f"{kernel} is only excused at other precisions; this process is another")
 
-    runs = [_actuals(row["check"]) for _ in range(SAMPLES)]
+    # Run until the first difference. A difference is a DISTRIBUTION event (module header: bf16 atomics land on the
+    # same bytes a large share of the time, layernorm_bwd_atomic differed at call 4 and 6 of 12 on H100 and not at all in
+    # other 12-call runs), so a fixed 12 samples made this assertion a coin flip; ~100 makes the miss negligible
+    # and the loop stops at the first difference, so the usual cost is a handful of runs.
+    runs = [_actuals(row["check"])]
+    for _ in range(MAX_EXCEPTION_SAMPLES - 1):
+        runs.append(_actuals(row["check"]))
+        if any(not torch.equal(a, b) for a, b in zip(runs[0], runs[-1], strict=True)):
+            break
     first = runs[0]
     differs = sorted({i for later in runs[1:]
                       for i, (a, b) in enumerate(zip(first, later, strict=True))
                       if not torch.equal(a, b)})
     assert differs, (
-        f"{kernel} is listed in NOT_BITWISE ({why}) but reproduced exactly across {SAMPLES} runs. "
+        f"{kernel} is listed in NOT_BITWISE ({why}) but reproduced exactly across {len(runs)} runs. "
         f"Move it into SAMPLE -- the exception list must not outlive its reason.")
     from miniworld_engine.autotune.run_all import DEFAULT_RTOL
     from miniworld_engine.kernels.drivers import DTYPE_MODE
