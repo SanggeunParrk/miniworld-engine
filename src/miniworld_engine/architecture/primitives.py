@@ -341,7 +341,15 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
             return output.to(orig_type)
         if self.implementation == ImplementationType.MINIWORLD_ENGINE:
             from miniworld_engine import ops
+            from miniworld_engine.modules.dispatch import restricted_card
 
+            if input.is_cuda and restricted_card(input.device):
+                # H100 / B200 have no Triton fallback: the general CUDA LayerNorm, or the PyTorch statements for what it does not take
+                from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
+
+                if len(self.normalized_shape) == 1 and supported(input):
+                    return layernorm_cuda(input, self.weight, self.bias, self.eps)
+                return super().forward(input.float()).to(input.dtype)
             return ops.layer_norm(
                 input,
                 self.weight,

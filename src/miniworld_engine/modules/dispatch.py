@@ -301,9 +301,10 @@ _KnownBest = KernelBackend | Callable[[torch.device | None], KernelBackend]
 
 _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "triangle_multiplication": _trimul_known_best,
-    # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
-    # per-shape auto-dispatched backward), grouped under the CUDA-family entry.
-    "layernorm": _torch_on_hopper_blackwell(KernelBackend.CUDA),
+    # layernorm's MINIWORLD is the CUDA family on every card: the auto-routing layernorm_kernel
+    # (fused triton fwd + per-shape auto-dispatched backward), and on H100 / B200 (no Triton
+    # there, see restricted_card) the general CUDA LayerNorm (kernels/layernorm/cuda/general).
+    "layernorm": KernelBackend.CUDA,
     "rmsnorm": _torch_on_hopper_blackwell(KernelBackend.TRITON),
     # These have no faster module-layer backend than the TRITON family (whose kernels do
     # their own shape/arch sub-dispatch, incl. hand-CUDA on H100 internally). Listed

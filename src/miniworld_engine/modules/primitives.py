@@ -16,6 +16,7 @@ from miniworld_engine.modules.dispatch import (
     KernelBackend,
     resolve_layernorm,
     resolve_rmsnorm,
+    restricted_card,
 )
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -176,6 +177,14 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
                 self.bias,
                 self.eps,
             )
+        if backend == KernelBackend.CUDA and input.is_cuda and restricted_card(input.device):
+            # H100 / B200 (no Triton there): the general CUDA LayerNorm, any width / row count, bf16 / fp16 / fp32; an input it
+            # does not take runs the PyTorch statements.
+            from miniworld_engine.kernels.layernorm.cuda.general import layernorm_cuda, supported
+
+            if len(self.normalized_shape) == 1 and supported(input):
+                return layernorm_cuda(input, self.weight, self.bias, self.eps)
+            return super().forward(input.float()).to(input.dtype)
         if backend == KernelBackend.CUDA:
             # miniworld = our auto-routing LayerNorm: forward fused triton (HBM-bound,
             # at the bandwidth wall) + backward auto-dispatched per shape

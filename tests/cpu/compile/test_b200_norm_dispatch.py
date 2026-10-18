@@ -1,5 +1,6 @@
-"""LayerNorm / RMSNorm (and AdaptiveLayerNorm / ConditionedTransition, which have no CUDA path yet) on an H100 or B200 run as PyTorch
-ops that ``torch.compile`` fuses -- the engine has no Triton fallback on those cards; every other card keeps the engine kernel.
+"""RMSNorm (and AdaptiveLayerNorm / ConditionedTransition, which have no CUDA path yet) on an H100 or B200 run as PyTorch ops that
+``torch.compile`` fuses -- the engine has no Triton fallback on those cards; every other card keeps the engine kernel. LayerNorm resolves
+to the CUDA family on every card (on H100 / B200 its forward takes the general CUDA LayerNorm, ``kernels/layernorm/cuda/general``).
 
 ``settings.triton_on_hopper_blackwell`` (and, on B200 only, the older ``b200_engine_triton``) bring the engine's Triton kernels back
 (the A/B switch), and a strict ``engine_backend="triton"`` process still wins. No GPU is needed: the card is faked.
@@ -36,11 +37,18 @@ def _card(monkeypatch, capability):
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
-@pytest.mark.parametrize(("op", "engine"), _NORMS + [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
+@pytest.mark.parametrize(("op", "engine"), _NORMS[1:] + [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
 def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, capability):
     _card(monkeypatch, capability)
     assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
     assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.PYTORCH
+
+
+@pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
+def test_h100_and_b200_run_layernorm_on_cuda(monkeypatch, capability):
+    _card(monkeypatch, capability)
+    assert dispatch.resolve("layernorm", "miniworld") is KernelBackend.CUDA
+    assert dispatch.resolve("layernorm", "miniworld", torch.device("cuda", 0)) is KernelBackend.CUDA
 
 
 @pytest.mark.parametrize("capability", [(8, 0), (8, 6)])
