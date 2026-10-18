@@ -54,18 +54,20 @@ class AdaptiveLayerNorm(nn.Module):
     ) -> Float[torch.Tensor, "* d_hidden"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
         if self._backend == KernelBackend.PYTORCH:
-            # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation run
-            # under bf16 autocast, as the Triton path's own casts did.
+            # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
+            # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.
+            from miniworld_engine.integrations.h100_master import master_linear
+
             from miniworld_engine.modules import dispatch as _dispatch
 
-            with _dispatch.fallback_autocast(
-                x, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
-            ):
-                x_norm = self.ln_in(x)
-                cond_norm = self.ln_cond(cond)
-                scale = self.to_scale(cond_norm)
-                bias = self.to_bias(cond_norm)
-                return torch.sigmoid(scale) * x_norm + bias
+            engine_leg = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
+            x_norm = self.ln_in(x)
+            cond_norm = self.ln_cond(cond)
+            scale = master_linear(self.to_scale, cond_norm)
+            bias = master_linear(self.to_bias, cond_norm)
+            out = torch.sigmoid(scale) * x_norm + bias
+            # the engine's own path returned the compute dtype (bf16 under autocast); torch's LayerNorm would hand back fp32 there
+            return out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
 
         if self._backend == KernelBackend.TRITON:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.

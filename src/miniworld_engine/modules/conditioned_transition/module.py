@@ -107,11 +107,13 @@ class ConditionedTransition(nn.Module):
         x: Float[torch.Tensor, "*"],
         cond: Float[torch.Tensor, "*"],
     ) -> Float[torch.Tensor, "*"]:
-        a = self.expand_a(x)
-        b = self.expand_b(x)
+        from miniworld_engine.integrations.h100_master import master_linear
+
+        a = master_linear(self.expand_a, x)
+        b = master_linear(self.expand_b, x)
         h = F.silu(a) * b
-        out = self.squeeze(h)
-        scale = self.to_scale(cond)
+        out = master_linear(self.squeeze, h)
+        scale = master_linear(self.to_scale, cond)
         return torch.sigmoid(scale) * out
 
     @typecheck
@@ -141,12 +143,7 @@ class ConditionedTransition(nn.Module):
         """
         x = self.ada_ln_in(x, cond)
         if self._backend == KernelBackend.PYTORCH:
-            from miniworld_engine.modules import dispatch as _dispatch
-
-            with _dispatch.fallback_autocast(
-                x, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
-            ):
-                return self._reference(x, cond)
+            return self._reference(x, cond)
 
         if self._backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]

@@ -78,3 +78,13 @@ class _Linear(torch.autograd.Function):
 
 def linear(x, module, compute_weight, compute_bias=None):
     return _Linear.apply(x, module.weight, module.bias, compute_weight, compute_bias)
+
+
+def master_linear(module, x):
+    """``module(x)`` where a bf16 activation meets fp32 master parameters: bf16 GEMM, fp32 (unrounded) weight / bias gradients.
+    Any other combination is the module itself. Used by the PyTorch legs that H100 / B200 run in place of a Triton fallback."""
+    w = module.weight
+    if x.is_cuda and x.dtype == torch.bfloat16 and w.dtype == torch.float32:
+        b = module.bias
+        return linear(x, module, w.to(torch.bfloat16), None if b is None else b.to(torch.bfloat16))
+    return module(x)
