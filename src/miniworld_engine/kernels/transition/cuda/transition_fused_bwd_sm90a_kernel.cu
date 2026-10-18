@@ -37,12 +37,6 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef NCTA
 #define NCTA 132
 #endif
-#ifndef MW_DW_OVERLAP
-#define MW_DW_OVERLAP 0
-#endif
-#ifndef MW_DW_EARLY_RELEASE
-#define MW_DW_EARLY_RELEASE 0
-#endif
 #ifndef MW_N
 #define MW_N 4              // hidden = MW_N * D (the n of Transition(d, n))
 #endif
@@ -161,31 +155,7 @@ TMN_DEVI void weight_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg
 #pragma unroll
     for (int ks = 0; ks < 8; ++ks) mma128<0, 0>(AB, dk128(inu + W_XN + wg * 8192, ks), dk128(su + W_WAB, ks), ks > 0);
     wgmma_commit();
-#if !MW_DW_EARLY_RELEASE
     wgmma_wait<1>(); fence_regs(acc);
-#endif
-#if MW_DW_OVERLAP
-    // The previous tile's two DW groups precede this tile's DH and AB.
-    // wait<1> retires DW and DH while AB remains in flight. Release only
-    // those retired readers, then prefetch into the previous input slot.
-    if (i >= 1) {
-#if MW_DW_EARLY_RELEASE
-      // Only prior DW reads must retire for this slot to be reusable.
-      // Let both current DH and AB continue while the next TMA loads issue.
-      wgmma_wait<2>();
-#endif
-      fence_regs(accW1); fence_regs(accW2);
-      const int previous = (i - 1) & 1;
-      if (wtid == 0) { mbar_arrive(hdb_free); mbar_arrive(in_free + previous); }
-      if (tid == 0 && i + 1 < n_local) {
-        mbar_wait(in_free + previous, ((i - 1) >> 1) & 1);
-        issue_in(i + 1);
-      }
-    }
-#endif
-#if MW_DW_EARLY_RELEASE
-    wgmma_wait<1>(); fence_regs(acc);
-#endif
     uint32_t dhp[16];
 #pragma unroll
     for (int e = 0; e < 16; ++e) dhp[e] = pack_bf16(acc[2 * e], acc[2 * e + 1]);
@@ -223,16 +193,10 @@ TMN_DEVI void weight_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg
 #pragma unroll
     for (int ks = 0; ks < 8; ++ks) mma64<1, 1>(accW2, dmn(hdbu, ks, 16), dmn(inu + wg * 16384, ks, 16), 1);
     wgmma_commit();
-#if !MW_DW_OVERLAP
     wgmma_wait<0>(); fence_regs(accW1); fence_regs(accW2);
     if (wtid == 0) { mbar_arrive(hdb_free); mbar_arrive(in_free + buf); }
     if (tid == 0 && i + 2 < n_local) { mbar_wait(in_free + buf, (i >> 1) & 1); issue_in(i + 2); }
-#endif
   }
-#if MW_DW_OVERLAP
-  // No next tile will retire the final pair of DW groups.
-  wgmma_wait<0>(); fence_regs(accW1); fence_regs(accW2);
-#endif
   // ---- fp32 partials of this CTA
   float* base = p.partw + (size_t)cta * 3 * HS * D_;
   const int r0 = 16 * warp + (lane >> 2);
@@ -399,24 +363,6 @@ TMN_DEVI void input_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg,
 #pragma unroll
       for (int e = 0; e < 32; ++e) { dgp[e] += __shfl_xor_sync(0xffffffffu, dgp[e], sh); dbp[e] += __shfl_xor_sync(0xffffffffu, dbp[e], sh); }
     }
-#if MW_AFFINE_WARP_STORE
-    {                                                       // all lanes own disjoint channels after the warp reduction
-      float* row = dgw + (wg * 4 + warp) * 256;
-      float g0=0.f,g1=0.f,g2=0.f,g3=0.f,b0=0.f,b1=0.f,b2=0.f,b3=0.f;
-      // Static register indices avoid spilling the entire partial vector for
-      // a dynamically indexed register-array load.
-#pragma unroll
-      for (int g = 0; g < 8; ++g) {
-        if ((lane >> 2) == g) {
-          g0=dgp[2*g];g1=dgp[2*g+1];g2=dgp[2*g+16];g3=dgp[2*g+17];
-          b0=dbp[2*g];b1=dbp[2*g+1];b2=dbp[2*g+16];b3=dbp[2*g+17];
-        }
-      }
-      const int col=2*lane;
-      row[col]+=g0;row[col+1]+=g1;row[col+64]+=g2;row[col+65]+=g3;
-      row[128+col]+=b0;row[129+col]+=b1;row[192+col]+=b2;row[193+col]+=b3;
-    }
-#else
     if (lane < 4) {                                          // a private global row per (CTA, warp): a plain read-modify-write
       float* row = dgw + (wg * 4 + warp) * 256;
 #pragma unroll
@@ -426,7 +372,6 @@ TMN_DEVI void input_role(const BwdPar& p, uint8_t* sm, int cta, int tid, int wg,
         row[128 + col] += dbp[2 * g]; row[128 + col + 1] += dbp[2 * g + 1];
       }
     }
-#endif
     // All four warps must finish the scalar x/dy reads before the leader
     // releases this slot for TMA refill. WGMMA retirement above does not
     // synchronize these later scalar epilogue reads across the warpgroup.

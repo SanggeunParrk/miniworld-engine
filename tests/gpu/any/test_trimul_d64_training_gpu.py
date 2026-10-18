@@ -1,10 +1,10 @@
-"""Bidirectional TriMul D64 native training (h100_d64_training): numerics, graphs, compile."""
+"""Bidirectional TriMul D64 native training (h100_d64_b200gate): numerics, graphs, compile."""
 
 import pytest
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine.kernels.trimul_inproj.cuda import h100_d64_training as H
+from miniworld_engine.kernels.trimul_inproj.cuda import h100_d64_b200gate as H
 
 pytestmark = [
     pytest.mark.gpu,

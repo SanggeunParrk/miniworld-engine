@@ -17,7 +17,6 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
-#include <cstdlib>
 #include <type_traits>
 
 namespace {
@@ -114,8 +113,6 @@ struct Args {
   float* dmod;
   int S, A, B, nab, nag, ntile;
   float eps;
-  int ablate;
-  unsigned long long* prof;                                             // experiments: 1 = no dab/h stores, 2 = no row final pass, 4 = no pass A, 8 = no GEMMs
 };
 
 template <int SP>
@@ -138,8 +135,6 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
   __syncthreads();
   const int ntT = (int)blockIdx.x < args.ntile ? (args.ntile - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const long S = args.S, A = args.A, B = args.B;
-  long long pt_ = clock64();
-#define PR(k, who) do { if (args.prof != nullptr && (who)) { const long long c_ = clock64(); atomicAdd(args.prof + (k), (unsigned long long)(c_ - pt_)); pt_ = c_; } } while (0)
   auto coords = [&](int t, int& b, int& a0, int& s0) {
     const int ab = t % args.nab, r = t / args.nab, ag = r % args.nag;
     b = r / args.nag; a0 = ag * SP; s0 = ab * AT;
@@ -152,9 +147,7 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
         int b, a0, s0; coords(blockIdx.x + T * gridDim.x, b, a0, s0);
         const int st = T & 1;
         unsigned char* sD = smem + SSET + st * SET + 2 * TB;
-        PR(9, warp == 2 && lane == 0);
         tma::wait(xfull + st, (T >> 1) & 1);
-        PR(10, warp == 2 && lane == 0);
 #pragma unroll 1
         for (int i0 = 0; i0 < 32; i0 += 2) {
           float4 gv[2]; long Rr[2]; bool okr[2];
@@ -178,7 +171,6 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
         }
         wg::proxy_fence();
         asm volatile("bar.sync 5, 64;\n" ::: "memory");
-        PR(11, warp == 2 && lane == 0);
         if (warp == 2 && lane == 0) tma::arrive(afull + st);
       }
       return;
@@ -232,9 +224,7 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
       unsigned char* sX = smem + SSET + st * SET;
       unsigned char* sD = sX + 2 * TB;
       unsigned char* sStg = sX + 4 * TB;                   // the set's partials region is free while its tile is in the GEMMs: [da|db|h] staging x 2
-      PR(0, tq == 0);
       tma::wait(afull + st, (T >> 1) & 1);
-      PR(1, tq == 0);
       auto grow = [&](int rl, bool& ok) {
         const long a = a0 + rl / AT, s = s0 + rl % AT;
         ok = a < A && s < S;
@@ -245,7 +235,6 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
       auto chunk = [&](auto first_tag, int j) {
         constexpr bool FIRST = decltype(first_tag)::value;
         const int gs0 = g + SPC * j;
-        if (args.ablate & 8) { if (lane == 0) { tma::arrive(wempty + gs0 % NST); tma::arrive(wempty + (gs0 + 1) % NST); if (j > 0) tma::arrive(wempty + (gs0 - 1) % NST); } return; }
         wg::fence();
         {
           const int s_ = gs0 % NST;
@@ -306,12 +295,10 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
           }
         }
         wg::commit();
-        if (!(args.ablate & 1)) {                          // [da_j | db_j | h_j] -> staging slot j & 1 -> TMA stores (clipped at the tensor edges)
+        {                                                  // [da_j | db_j | h_j] -> staging slot j & 1 -> TMA stores (clipped at the tensor edges)
           unsigned char* stg = sStg + (j & 1) * 12288;
           if (tq == 0 && j >= 2) tma::store_wait_read<1>();
-          PR(2, tq == 0);
           if (j == 0 && T >= 2) tma::wait(pfree + st, ((T >> 1) - 1) & 1);   // the row warpgroup is done with the previous tile's partials
-          PR(3, tq == 0);
           asm volatile("bar.sync 3, 128;\n" ::: "memory");
 #pragma unroll
           for (int i = 0; i < 4; ++i) {
@@ -336,7 +323,6 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
       wg::wait<0>();
       if (lane == 0) tma::arrive(wempty + (g + SPC * NCH - 1) % NST);
       g += SPC * NCH;
-      PR(4, tq == 0);
       if (tq == 0) tma::store_wait_read<0>();
       asm volatile("bar.sync 3, 128;\n" ::: "memory");
       if (tq == 0) tma::arrive(xempty + st);               // y / dffn are dead: the next tile of this set can land while the row pass runs
@@ -349,7 +335,6 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
         *reinterpret_cast<float2*>(sF + kb * XTF + wg::off32(r0 + 8, c4) + oo) = make_float2(acc_dx[i * 4 + 2], acc_dx[i * 4 + 3]);
       }
       asm volatile("bar.sync 3, 128;\n" ::: "memory");
-      PR(5, tq == 0);
       if (tq == 0) tma::arrive(cfull + st);
     }
     return;
@@ -390,13 +375,9 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
         }
       }
     };
-    PR(6, tq == 0);
     tma::wait(cfull + rs, (T >> 1) & 1);                   // dy (fp32) in P
-    PR(7, tq == 0);
-    if (args.ablate & 2) { asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory"); if (tq == 0) tma::arrive(pfree + rs); continue; }
     reduce(sP, 3 * C);                                     // d shift_f = sum dy (padding rows are exact zeros)
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory");
-    PR(12, tq == 0);
     // ---- final pass: dq1; P <- d scale_f partials ----
 #pragma unroll
     for (int i0 = 0; i0 < 16; i0 += FIN_ILP) {
@@ -404,8 +385,8 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
 #pragma unroll
       for (int j = 0; j < FIN_ILP; ++j) {
         bool ok; long mrow; const long R = row(warp * 16 + i0 + j, ok, mrow);
-        scv[j] = (args.ablate & 32) ? make_float4(0.1f, 0.1f, 0.1f, 0.1f) : __ldg(reinterpret_cast<const float4*>(args.mod + mrow * MODW + 4 * C + c0));
-        q1r[j] = (ok && !(args.ablate & 64)) ? __ldg(reinterpret_cast<const uint2*>(args.q1 + R * C + c0)) : make_uint2(0x3f803f80u, 0x3f803f80u);
+        scv[j] = __ldg(reinterpret_cast<const float4*>(args.mod + mrow * MODW + 4 * C + c0));
+        q1r[j] = ok ? __ldg(reinterpret_cast<const uint2*>(args.q1 + R * C + c0)) : make_uint2(0x3f803f80u, 0x3f803f80u);
         dqr[j] = ok ? __ldg(reinterpret_cast<const uint2*>(args.dq2 + R * C + c0)) : make_uint2(0u, 0u);
       }
 #pragma unroll
@@ -417,15 +398,13 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
         const float4 q = ld4(reinterpret_cast<const __nv_bfloat16*>(&q1r[j]));
         float ss = q.x * q.x + q.y * q.y + q.z * q.z + q.w * q.w;
 #pragma unroll
-        if (!(args.ablate & 16))
-          for (int o2 = 16; o2 > 0; o2 >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o2);
+        for (int o2 = 16; o2 > 0; o2 >>= 1) ss += __shfl_xor_sync(0xffffffffu, ss, o2);
         const float r_ = rsqrtf(ss * (1.f / C) + args.eps);
         const float4 xh = make_float4(q.x * r_, q.y * r_, q.z * r_, q.w * r_);
         const float4 dxh = make_float4(dn.x * (1.f + scv[j].x), dn.y * (1.f + scv[j].y), dn.z * (1.f + scv[j].z), dn.w * (1.f + scv[j].w));
         float s2 = dxh.x * xh.x + dxh.y * xh.y + dxh.z * xh.z + dxh.w * xh.w;
 #pragma unroll
-        if (!(args.ablate & 16))
-          for (int o2 = 16; o2 > 0; o2 >>= 1) s2 += __shfl_xor_sync(0xffffffffu, s2, o2);
+        for (int o2 = 16; o2 > 0; o2 >>= 1) s2 += __shfl_xor_sync(0xffffffffu, s2, o2);
         s2 *= (1.f / C);
         if (ok) {
           const float4 d = ld4(reinterpret_cast<const __nv_bfloat16*>(&dqr[j]));
@@ -436,10 +415,8 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
       }
     }
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory");
-    PR(13, tq == 0);
     reduce(sP, 4 * C);
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory");
-    PR(14, tq == 0);
 #pragma unroll
     for (int i0 = 0; i0 < 16; i0 += 4) {                  // d gate_f partial = dq2 * ffn (L2-hot re-reads) -> P
       uint2 dv[4], fv[4];
@@ -456,10 +433,8 @@ __global__ void __launch_bounds__(THREADS, 1) ffn_bwd_kernel(Args args, const __
       }
     }
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory");
-    PR(15, tq == 0);
     reduce(sP, 5 * C);
     asm volatile("bar.sync %0, 128;\n" :: "r"(bar_id) : "memory");
-    PR(8, tq == 0);
     if (tq == 0) tma::arrive(pfree + rs);                  // P -> the GEMM warpgroup (staging of this set's next tile)
   }
 }
@@ -494,7 +469,6 @@ CUtensorMap map4d(const torch::Tensor& t, long A, long B, long S, uint32_t at, u
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(4d) failed: ", (int)r);
   return m;
 }
-torch::Tensor g_prof;
 int num_sms(int dev) { static int s = 0; if (s == 0) cudaDeviceGetAttribute(&s, cudaDevAttrMultiProcessorCount, dev); return s; }
 
 template <int SP>
@@ -538,9 +512,6 @@ std::vector<torch::Tensor> ffn_bwd(torch::Tensor dq2, torch::Tensor q1, torch::T
   args.h = reinterpret_cast<__nv_bfloat16*>(h.data_ptr()); args.dab = reinterpret_cast<__nv_bfloat16*>(dab.data_ptr());
   args.dmod = dmod.data_ptr<float>();
   args.S = (int)S; args.A = (int)A; args.B = (int)B; args.eps = (float)eps;
-  { const char* ab = std::getenv("SWA_FFN_ABL"); args.ablate = ab != nullptr ? std::atoi(ab) : 0; }
-  args.prof = nullptr;
-  { const char* pe = std::getenv("SWA_FFN_PROF"); if (pe != nullptr && pe[0] == '1') { g_prof = torch::zeros({16}, dq2.options().dtype(torch::kLong)); args.prof = reinterpret_cast<unsigned long long*>(g_prof.data_ptr<int64_t>()); } }
   if (sp == 0) sp = A % 4 == 0 ? 4 : A % 2 == 0 ? 2 : 1;
   if (sp == 8) launch<8>(args, y, dq2, mwab, mwdt, mwabt, dab, h);
   else if (sp == 4) launch<4>(args, y, dq2, mwab, mwdt, mwabt, dab, h);
@@ -551,5 +522,4 @@ std::vector<torch::Tensor> ffn_bwd(torch::Tensor dq2, torch::Tensor q1, torch::T
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ffn_bwd", &ffn_bwd, "ESMFold2 SWA atom block FFN backward (bf16 wgmma)");
-  m.def("prof", []() { return g_prof; });
 }

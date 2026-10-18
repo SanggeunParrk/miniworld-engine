@@ -1,9 +1,9 @@
-"""Explicit B200-style D64 training gate-gradient placement on H100.
+"""B200-style D64 training gate-gradient placement on H100.
 
 B1 stores BF16 dGout. B7 accumulates dGout @ Wg with the input projection
 gradient in FP32. Constant accumulator indices avoid local array traffic.
 The original normalization-statistics saves and forward path are retained.
-Selected by integration only with ``Settings.trimul_h100_b200style``.
+The D64 training path the integration selects (``integrations.trimul_h100``).
 """
 
 from __future__ import annotations

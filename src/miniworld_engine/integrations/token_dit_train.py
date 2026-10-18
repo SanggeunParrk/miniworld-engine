@@ -219,12 +219,6 @@ def _key_mask(mask, A, L, perm=None):
 
 
 _PACKS: dict = {}
-_PACK_STREAMS: dict = {}
-
-
-# Private candidate (default off): the asynchronous weight-pack pipeline of the native H100 path. The branch is kept
-# reachable here, not deleted (formerly MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC=1).
-_CANDIDATE_PACK_ASYNC = False
 
 
 def _native_rpb():
@@ -440,8 +434,7 @@ def _pack(P, qk, dev, at):
     it once per block, not once per forward. Scoped to the CUDA-graph capture (``kernels._capture``): an eager pack is never
     reused inside a capture, whose replays would otherwise run on the weights of capture time after every optimizer step."""
     native = _native90(dev)
-    pipeline = native and _CANDIDATE_PACK_ASYNC
-    key = (native, pipeline, *((t.data_ptr(), t._version) for t in P.values()))
+    key = (native, *((t.data_ptr(), t._version) for t in P.values()))
     slot = _capture.scoped((next(iter(P.values())).data_ptr(), at))
     hit = None if slot is None else _PACKS.get(slot)
     if hit is not None and hit[0] == key:
@@ -477,25 +470,9 @@ def _pack(P, qk, dev, at):
         d_ = P["attention.to_out.weight"].shape[0]
         T = ext(d_, d_ // P["attention.to_bias.weight"].shape[0], rpb=_native_rpb())
         weights = [P[n] for n in names]
-        if pipeline:
-            idx = dev.index if dev.index is not None else torch.cuda.current_device()
-            if idx not in _PACK_STREAMS:
-                _PACK_STREAMS[idx] = torch.cuda.Stream(device=dev)
-            stream = _PACK_STREAMS[idx]
-            out = T.train_alloc90(weights, qk, at is torch.float32)
-            stream.wait_stream(torch.cuda.current_stream(dev))
-            cond_ready, ready = torch.cuda.Event(), torch.cuda.Event()
-            with torch.cuda.stream(stream):
-                T.train_stage90(weights, out, qk, at is torch.float32, 0, 9)
-                cond_ready.record(stream)
-                T.train_stage90(weights, out, qk, at is torch.float32, 9, 21)
-                ready.record(stream)
-            W = dict(zip(keys, out, strict=True))
-            W["_cond_ready"], W["_pack_ready"] = cond_ready, ready
-        else:
-            W = dict(
-                zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True)
-            )
+        W = dict(
+            zip(keys, T.train_pack90(weights, qk, at is torch.float32), strict=True)
+        )
         if slot is not None:
             _capture.prune(_PACKS)
             _PACKS[slot] = (key, W)
@@ -717,15 +694,11 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
     chat = torch.empty(M, DC, device=dev, dtype=at)
     cbf = None if own_c else torch.empty_like(chat)
     cst = torch.empty(M, 2, device=dev)
-    pipeline = native and _CANDIDATE_PACK_ASYNC
-    packed = _pack(P, qk, dev, at) if pipeline else None
     if native:
         T.cond_prep90(cond, chat, cbf, cst, EPS)
     else:
         T.cond_prep(c2, chat, cbf, cst, EPS)
-    W = packed if packed is not None else _pack(P, qk, dev, at)
-    if pipeline:
-        torch.cuda.current_stream(dev).wait_event(W["_cond_ready"])
+    W = _pack(P, qk, dev, at)
     Wn, Wg = W["Wn"], W["Wg"]
     G = mm(chat, Wn.t())  # [M, 4D] s1 | sh1 | s2 | sh2
     Gg = mm(c2 if own_c else cbf, Wg.t())  # [M, 2D] gate1 | gate2
@@ -736,8 +709,6 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H):
         single.reshape(M, D).contiguous(), G, bs1, xa, xst, EPS, x
     )  # reads the input, writes x on the way
     Wqkvg, bqkvg = W["Wqkvg"], W["bqkvg"]
-    if pipeline:
-        torch.cuda.current_stream(dev).wait_event(W["_pack_ready"])
     qkvg = addmm(bqkvg, xa, Wqkvg.t())
     rqk = torch.empty(M, 2 * H, device=dev)
     nq, nk = W["nq"], W["nk"]
@@ -909,24 +880,6 @@ def _tf32_attn_bwd(T, qs, k, v, dob, bias_p, mask, lse, dd, A, L):
     return dq, dk, dv, db_p[..., inv]
 
 
-#: Hopper bf16 token DiT backward: dbias from the dQ pass (A a multiple of 3); False: the per-sample buffer + reduce
-#: fp32: the TF32 dQ pass with C chunk buffers (each CTA adds its A / C samples in order): bitwise repeatable, but no faster than the
-#: per-sample buffer + reduce it replaces (dQ 2365 us against 1766 + 613 us), so off. (One shared buffer, 4608 CTAs: -0.9 ms, not repeatable.)
-_NATIVE_DQB_F32 = False
-_NATIVE_DQB = True  # bf16 (A a multiple of 3): dbias from the dQ pass into C chunk buffers summed in order (bitwise repeatable)
-
-
-_INV_PERM: dict = {}
-
-
-def _inv_key_perm(L, device, rows):
-    """The inverse of the TF32 core's key permutation (positions -> natural key order), once per (L, device)."""
-    key = (L, device)
-    if key not in _INV_PERM:
-        _INV_PERM[key] = torch.argsort(rows.key_perm(L, device))
-    return _INV_PERM[key]
-
-
 def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
@@ -938,7 +891,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
     dq, dk, dv = (torch.empty_like(qs, dtype=torch.float32) for _ in range(3))
     db = (
         None
-        if ((fp32 and _NATIVE_DQB_F32) or (not fp32 and _NATIVE_DQB and A % 3 == 0))
+        if (not fp32 and A % 3 == 0)
         else torch.empty((A, H, L, L), device=qs.device, dtype=torch.float32)
     )
     km, kmp = T.train_keymask90(mask, qs, A, L, fp32)
@@ -951,22 +904,12 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
             return out
 
         bt, lp, dp = T.train_tf32_bwd_layout90(bias, lse, dd)
-        if _NATIVE_DQB_F32:
-            # the samples' dS tiles added into ONE key-permuted [H, L, L] buffer by TMA reduce-adds (bitwise repeatable under
-            # SM-schedule perturbation, measured); the per-sample variant below writes [A, H, L, L] fp32 (1.8 GB at A48 L768),
-            # costs 1.77 ms in dQ and 0.61 ms in its reduce
-            from miniworld_engine.kernels.conditioned_transition import cuda as rows
-
-            inv = _inv_key_perm(L, qs.device, rows)
-            dbc = torch.zeros(sm90.tf32_dqb_chunks(A), H, L, L, device=qs.device, dtype=torch.float32)
-            core = sm90._ext("attn_tf32", (*tf32_defs, *empty_defs))
-            core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, dbc)
-            core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
-            return dq, dk, dv, dbc.sum(0)[..., inv]  # chunk buffers summed in order: bitwise repeatable
+        # per-sample dbias buffer + reduce: the TF32 dQ pass with C chunk buffers is bitwise repeatable too, but measured no
+        # faster (dQ 2365 us against 1766 + 613 us), so not used here
         core = sm90._ext("attn_tf32", ("DB_PER_SAMPLE=1", *tf32_defs, *empty_defs))
         core.attn_tf32_dqb(qs, dob, k, v, tr(k), bias, lse, dd, kmp, dq, db)
         core.attn_tf32_dkv(qs, dob, tr(qs), tr(dob), k, v, bt, lp, dp, km, dk, dv)
-    elif _NATIVE_DQB and A % 3 == 0:
+    elif A % 3 == 0:
         # dbias in the dQ pass: the three samples of a work item are summed in shared memory and added with ONE TMA bulk reduce,
         # in a fixed order (bitwise repeatable). The per-sample variant below writes an [A, H, L, L] fp32 buffer (1.8 GB at A48
         # L768), takes 1.4 ms in dK / dV for the atomics and 0.6 ms in the reduce: 2.6 ms against 1.6 ms for this pass.
@@ -1129,8 +1072,6 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     names = _names_for(qk)
     at = torch.float32 if fp32 else BF
     W = _pack(dict(zip(names, params, strict=False)), qk, single.device, at)
-    if W.get("_pack_ready") is not None:
-        torch.cuda.current_stream(single.device).wait_event(W["_pack_ready"])
     Wn, Wraw, Wg, Wqkvg, Wo, Wab, Wsq, Wf = (
         W["Wn"],
         W["Wraw"],

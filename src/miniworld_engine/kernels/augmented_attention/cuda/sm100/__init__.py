@@ -125,7 +125,7 @@ def supported(
 ) -> bool:
     """q [A, 1, L, 16, 48] (any float dtype) with A even, a bias of [1, L, L, 16] (``bias_head_major``: [16, 1, L, L]),
     no key mask, on sm_100 with L a multiple of 128 (the kernels' tile shapes and sample pairing, not a policy)."""
-    if (not settings.current().augattn_bf16_sm100) or mask is not None:
+    if (not settings.current().augmented_attention_bf16_sm100) or mask is not None:
         return False
     if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
         return False
@@ -849,7 +849,7 @@ def inference_core_supported(
 ) -> bool:
     """bf16, or fp32 (TF32 MMA), at a head layout of TDIT_HEADS (d = heads x head dim); L a multiple of 8 (the fused step pads
     other lengths to one), sm_100."""
-    if (not settings.current().augattn_bf16_sm100) or d % h:
+    if (not settings.current().augmented_attention_bf16_sm100) or d % h:
         return False
     ok = dtype in (torch.float32, torch.bfloat16) and (h, d // h) in TDIT_HEADS
     return ok and L % 8 == 0 and L >= 8 and _is_blackwell(device_index)

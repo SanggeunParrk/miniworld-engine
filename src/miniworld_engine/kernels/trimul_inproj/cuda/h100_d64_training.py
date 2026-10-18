@@ -24,6 +24,7 @@ Nothing is cached across calls except compiled kernels, tensor-map descriptors k
 and launch templates: every call owns its activations and weight pack.
 B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
 The default covers L384/768; native preparation runs inside the qualified D64 launch scope.
+No longer selected by ``integrations.trimul_h100`` (``h100_d64_b200gate`` serves D64); kept for its direct kernel tests.
 """
 
 from __future__ import annotations

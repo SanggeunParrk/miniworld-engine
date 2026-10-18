@@ -14,7 +14,7 @@ TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 
 
-#: Cells where the preserved native path (served with the switch off) measured faster than the B200-style port on H100
+#: Cells where the preserved native path (the one served before the port) measured faster than the B200-style port on H100
 #: (2026-10-13, bf16, FP32 masters, B1): training L384 / L768 at D256 / D384 / D512, and bidirectional inference at
 #: (D384, L768) and (D512, L384). Every other length keeps the B200-style port, which is 1.2-2.1x faster than the
 #: general path wherever the preserved path does not exist.
@@ -33,9 +33,7 @@ def _legacy_native_faster(module, pair, inference):
 
 
 def _b200style_serves(module, pair, inference=False):
-    """Explicit Hopper port; keep measured default selections until qualified."""
-    if not settings.current().trimul_h100_b200style:
-        return False
+    """The Hopper port of the B200 algorithm, except the cells where the preserved native path measured faster."""
     if pair.ndim == 4 and _legacy_native_faster(module, pair, inference):
         return False
     if (not pair.is_cuda or pair.dtype != torch.bfloat16 or pair.ndim != 4
@@ -249,26 +247,16 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         module.to_out.weight,
     )
     if bidirectional and d == 64:
-        if settings.current().trimul_h100_b200style:
-            from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_b200gate import (
-                bidirectional_trimul as apply,
-            )
-        else:
-            from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_training import (
-                bidirectional_trimul as apply,
-            )
+        from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_b200gate import (
+            bidirectional_trimul as apply,
+        )
     elif bidirectional:
         apply = bidirectional_trimul
     elif d in (64, 256, 384, 512):
         if d == 64:
-            if settings.current().trimul_h100_b200style:
-                from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_b200gate import (
-                    single_trimul,
-                )
-            else:
-                from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_training import (
-                    single_trimul,
-                )
+            from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_b200gate import (
+                single_trimul,
+            )
         else:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_wide_training import (
                 single_trimul,
@@ -310,36 +298,10 @@ def native_training_dropout(module, pair, probability):
         pair.shape[0], 1, pair.shape[1], pair.shape[-1])
 
 
-def requires_cuda_training(module, pair):
-    """Selected native training never silently substitutes a Triton shape. Training only: an inference call (no grad) and an
-    explicit `engine_backend="triton"` comparison are not refused here (the inference contract is `requires_cuda_inference`)."""
-    if not torch.is_grad_enabled() or settings.current().engine_backend == "triton":
-        return False
-    # The default D64 / D128 length buckets fall back to the general path where they do not apply; only an explicit
-    # `trimul_h100_native_buckets=True` or a qualified cell turns an unsupported call into an error.
-    return ((settings.current().trimul_h100_native_buckets is True or _selected_wide_training(module, pair) or _selected_d64_training(module, pair) or (_native_training_enabled() and pair.shape[-1] == 64))
-            and module.implementation == ImplementationType.MINIWORLD
-            and pair.is_cuda
-            and torch.cuda.get_device_capability(pair.device) == (9, 0))
-
-
 def _native_residual_bucket(module, pair):
     """Measured outgoing D384/L512 inference bucket (contract checked by serves)."""
     return (pair.ndim == 4 and pair.shape[1] == 512 and pair.shape[-1] == 384
             and module.d_hidden == 384 and getattr(module, "outgoing", False))
-
-
-
-def _native_wide_inference_bucket(module, pair):
-    """One BIDI bucket; engine_backend=triton remains an explicit comparison."""
-    if (settings.current().engine_backend == "triton" or pair.ndim != 4
-            or module.d_hidden != pair.shape[-1]
-            or module.to_left.weight.shape[0] != 2 * pair.shape[-1]):
-        return False
-    from miniworld_engine.kernels.trimul_inproj.cuda.h100_wide_inference import (
-        native_inference_bucket,
-    )
-    return native_inference_bucket(pair.shape[-1], pair.shape[1])
 
 
 def serves_inference(
@@ -367,11 +329,8 @@ def serves_inference(
         return False
     if torch.cuda.get_device_capability(pair.device) != (9, 0):
         return False
-    if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair))
-            or _native_wide_inference_bucket(module, pair))
-            and (pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
-                 if settings.current().trimul_h100_b200style
-                 else (128, 256, 384, 512, 640, 768))
+    if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair)))
+            and (pair.shape[1] not in (128, 256, 384, 512, 640, 768, 896, 1024)
                  or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
                  or any(p.dtype != torch.float32 for p in (
                      module.ln_pair.weight, module.ln_pair.bias,
@@ -388,28 +347,6 @@ def serves_inference(
     return bool(entry and entry.get("k1") and entry.get("k3"))
 
 
-#: Pair lengths of the promoted D64 / D128 inference buckets; any other length takes the general path, not a refusal.
-_PROMOTED_LENGTHS = (128, 256, 384, 512, 640, 768, 896, 1024)
-
-
-def requires_cuda_inference(module, pair):
-    """Promoted inference buckets refuse instead of silently using Triton."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
-        cuda_aux_enabled,
-    )
-    native = cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
-    # A non-default LayerNorm eps is outside every promoted bucket: that call uses the general path, it is not refused.
-    if module.ln_pair.eps != 1e-5 or module.ln_out.eps != 1e-5:
-        return False
-    return (module.implementation == ImplementationType.MINIWORLD
-            and (native or settings.current().engine_backend != "triton" or _native_residual_bucket(module, pair))
-            and pair.is_cuda and (native or (pair.shape[-1] in (64, 128) and pair.ndim == 4
-                                             and pair.shape[1] in _PROMOTED_LENGTHS)
-                                  or _native_residual_bucket(module, pair))
-            and torch.cuda.get_device_capability(pair.device) == (9, 0)
-            and not torch.is_grad_enabled())
-
-
 def update_inference(module, pair, mask, *, bidirectional):
     if _b200style_serves(module, pair, inference=True):
         return _b200style_update(module, pair, mask, None, bidirectional)
@@ -418,7 +355,7 @@ def update_inference(module, pair, mask, *, bidirectional):
     n = pair.shape[1]
     native_residual = not bidirectional and _native_residual_bucket(module, pair)
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
-    native_aux = runtime.cuda_aux_enabled() or _native_wide_inference_bucket(module, pair)
+    native_aux = runtime.cuda_aux_enabled()
     if (native_residual or native_aux) and mask is not None and (
         mask.device != pair.device or mask.dtype != torch.bool
         or tuple(mask.shape) != (1, n) or not mask.is_contiguous()

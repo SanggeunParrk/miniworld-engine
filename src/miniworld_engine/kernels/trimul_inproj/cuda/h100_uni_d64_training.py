@@ -10,6 +10,7 @@ Backward (``h100_sources/d64_train/uni_bwd_wg.cu``): uni64_b1w (output side) -> 
 contraction gradients -> dl, dr; uni64_b2w (input side) -> dx; uni64_finw reduces the per-CTA
 partials. B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
 The default covers L384/768; native preparation runs inside the qualified D64 launch scope.
+No longer selected by ``integrations.trimul_h100`` (``h100_uni_d64_b200gate`` serves D64); kept for its direct kernel tests.
 """
 
 from __future__ import annotations

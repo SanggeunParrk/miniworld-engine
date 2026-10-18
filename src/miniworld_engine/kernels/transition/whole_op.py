@@ -36,11 +36,12 @@ def transition(
     Autograd-transparent: back-prop produces gradients for ``x`` and every weight.
 
     Dispatch is the one ``modules.Transition`` uses: the hand-CUDA sm_90 kernels
-    (``fused_sm90a`` at d=128, ``fused_wide_sm90a`` at d=64/256/384/512; n=4, bf16) and the sm_100
-    kernels (``fused_sm100a`` at d=128, ``fused_wide_sm100a`` at d=64/256/384/512; n=4, bf16) where they
-    apply, else the shape-general Triton
-    residual path. LayerNorm is folded into the kernel on
-    every path, never a separate native ``F.layer_norm``.
+    (``kernels.transition.cuda.transition_sm90a``: ``fused_sm90a`` at d=128, ``fused_wide_sm90a`` at d=64/256/384/512/768,
+    ``fused_generic_sm90a`` for every other width, ragged rows and fp32 on TF32) and the sm_100 kernels (``fused_sm100a`` at
+    d=128, ``fused_wide_sm100a`` at d=64/256/384/512; n=4, bf16) where they apply. A call none of them serves runs the PyTorch
+    reference on H100 / B200 (no Triton fallback there, ``modules.dispatch.restricted_card``) and the shape-general Triton
+    residual path on every other card. LayerNorm is folded into the kernel on every kernel path, never a separate native
+    ``F.layer_norm``.
     """
     from miniworld_engine import settings
 
@@ -49,26 +50,12 @@ def transition(
                f"n * d_hidden = {n} * {x.shape[-1]}")
         raise ValueError(msg)
     if settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton":
-        from miniworld_engine.kernels.transition.cuda import (
-            fused_generic_sm90a,
-            fused_sm90a,
-            fused_wide_sm90a,
-        )
+        from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
-        training = torch.is_grad_enabled() and any(
-            t.requires_grad for t in (x, ln_in_weight, expand_a_weight, expand_b_weight, squeeze_weight))
-        if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, expand_a_weight, squeeze_weight):
-            return fused_generic_sm90a.transition_generic_sm90a(
-                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
-        if fused_sm90a.available(x, expand_a_weight, squeeze_weight):
-            return fused_sm90a.transition_fused_sm90a(
-                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
-        if fused_wide_sm90a.available(x, expand_a_weight, squeeze_weight):
-            return fused_wide_sm90a.transition_wide_sm90a(
-                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
-        if fused_generic_sm90a.available(x, expand_a_weight, squeeze_weight):
-            return fused_generic_sm90a.transition_generic_sm90a(
-                x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+        out = transition_sm90a(
+            x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps, n)
+        if out is not None:
+            return out
 
     if settings.current().engine_backend != "triton":
         from miniworld_engine.kernels.transition.cuda import fused_sm100a
@@ -82,6 +69,19 @@ def transition(
         if fused_wide_sm100a.available(x, expand_a_weight, squeeze_weight):
             return fused_wide_sm100a.transition_wide_sm100a(
                 x, ln_in_weight, ln_in_bias, expand_a_weight, expand_b_weight, squeeze_weight, eps)
+
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    if x.is_cuda and restricted_card(x.device):
+        # H100 / B200 have no Triton fallback: a call no CUDA kernel serves runs the PyTorch reference (an explicit
+        # engine_backend="triton" or settings.triton_on_hopper_blackwell lifts this and keeps Triton). The weights are cast to the
+        # activation dtype, as the Triton path's caller does in modules.Transition.
+        from miniworld_engine.kernels.transition.reference import transition_pytorch
+
+        return transition_pytorch(
+            x, ln_in_weight, ln_in_bias, expand_a_weight.to(x.dtype), expand_b_weight.to(x.dtype),
+            squeeze_weight.to(x.dtype), n, eps,
+        )
 
     from miniworld_engine.kernels.transition.triton.residual import transition_residual
 

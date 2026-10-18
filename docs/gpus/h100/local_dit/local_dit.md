@@ -10,8 +10,9 @@ residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. Module summary: [h
 **Contract** (`integrations/local_dit_h100.matches`): H100, cross-attention, no QK-norm, B = 1, any A, any N (padded to a multiple of 128
 inside, the padded atoms masked as keys), a `[1, N]` bool key mask or none, contiguous `single` / `cond` `[A, 1, N, 128]` and pair
 `[1, nwin, 32, 128, 16]`; **fp32** activations with fp32 parameters (no autocast) run the TF32 kernels, **bf16** activations (fp32 master or
-bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else keeps the previous routes
-(`settings.local_dit_h100_mma{,_fp32,_bf16}` switch it off). Two opaque ops (`local_dit_h100_fwd` / `_bwd`): eager, CUDA graphs and
+bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else runs the module composition (on H100 its PyTorch
+statements: no Triton fallback, see [dispatch.md](../dispatch.md));
+`settings.local_dit_h100_mma{,_fp32,_bf16}` switch the path off. Two opaque ops (`local_dit_h100_fwd` / `_bwd`): eager, CUDA graphs and
 `torch.compile`.
 
 ## Path
@@ -231,7 +232,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 336 cells: A in {1, 2, 3, 5, 12, 24, 48} x N in {64, 100, 300, 1000, 2048, 4096} (N not a multiple of 32 included) x {fp32, bf16} x
 {per-sample conditioning, shared (expanded) conditioning} x {inference, training}, one CUDA graph per (implementation, cell)
-(`cmp_wide.py` in the scratch directory; the compiled module has `torch.autocast` inside the compiled function). Ours is the fastest
+(a scratch harness, not in the repository; the compiled module has `torch.autocast` inside the compiled function). Ours is the fastest
 column in every cell. Speed-up over the faster of eager / compiled:
 
 | mode / precision / conditioning | cells | smallest (cell) | mean |
@@ -302,7 +303,7 @@ Inference (A5, 4096 atoms): bf16 post90 49 us, pre90 24 us, attention 19 us; fp3
   windows). Estimated 100-130 us of traffic plus ~30 % more dKV work against the 158 us dQ kernel it replaces: not built.
 - 128-row CTAs (two warpgroups) per kernel: only the fp32 `tr_bwd90` wins (565 -> 491 us, `_NWARP`); all other kernels lose 5-15 %.
 - Thread-block clusters / TMA multicast of the weights: not tried; the backward row kernels are at 70-80 % of L2 and DRAM throughput already.
-- Ablations (A48, 4096 atoms, bf16; `ATTN_DEFS` / `ROW_DEFS` compile switches `ABL_*`): removing the dbias accumulation saves 22 us of the
+- Ablations (A48, 4096 atoms, bf16; `ABL_*` ablation builds through the former `ATTN_DEFS` / `ROW_DEFS` compile hooks, since removed): removing the dbias accumulation saves 22 us of the
   476 us attention backward, the pair-bias reads 0, the exponentials and PV products ~0 (they hide behind loads), the activation loads
   66 us, the bias-band prologue 40 us, the stores ~120 us (dK / dV through 16-byte vector stores staged in the warp's own shared rows: dkv
   295 -> 274 us). Removing every weight load from the row kernels saves 0.2 ms of the 3.6 ms step (cond90 267 -> 164 us, the others

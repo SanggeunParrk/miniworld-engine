@@ -3,7 +3,7 @@
 Kernel-level status of the Transition (`modules.Transition`, `y = x + W_s(silu(W_a·LN(x)) · (W_b·LN(x)))`, hidden n·D) on H100; the
 module-level summary is in [h100.md](../h100.md), the dispatch contract in [dispatch.md](../dispatch.md). H100 = hand-written CUDA
 (wgmma + TMA + mbarrier, accumulators in registers; sm_90a has no TMEM, so nothing here is a port of the sm_100 kernels); a shape without
-a CUDA path is 미구현. Triton stays as the fallback and the PyTorch reference.
+a CUDA path is 미구현 and runs the PyTorch reference (no Triton fallback on H100, see [dispatch.md](../dispatch.md)).
 
 Coverage (`Transition(d, n)` through the module, `ops.transition`, the whole-op wrapper; training = forward saving what the backward needs +
 backward; inference = forward saving nothing):
@@ -21,12 +21,13 @@ zero-fills the tail tile on the way in, clips it on the way out; the row kernels
 
 Dispatch order (`modules/transition/module.py::_residual_forward`, `kernels/transition/whole_op.py`), the first `available()` wins:
 `fused_sm90a` (D = 128, hidden 512 or 256, bf16, rows % 128 = 0) → `fused_wide_sm90a` (D = 64 / 256 with hidden 4 D or 2 D, D = 384 / 512 with
-hidden 4 D; bf16, rows % 128 = 0) → `fused_generic_sm90a` (everything else the table lists) → sm_100 / sm_80 paths (they reject sm_90) → the
-Triton residual path. fp32 enters `Transition.forward` through the same gate (`_generic_sm90a_serves`) instead of the bf16-only
+hidden 4 D; bf16, rows % 128 = 0) → `fused_generic_sm90a` (everything else the table lists) → sm_100 / sm_80 paths (they reject sm_90) → on H100
+the PyTorch reference (the Triton residual path on other cards or on request). fp32 enters `Transition.forward` through the same gate (`_generic_sm90a_serves`) instead of the bf16-only
 `guard_dtype` PyTorch fallback, and only when TF32 is allowed (`torch.set_float32_matmul_precision("high")` or
 `torch.backends.cuda.matmul.allow_tf32`, the switch cuBLAS follows); with exact fp32 the PyTorch reference keeps running. Opt-outs:
-`MINIWORLD_TRANSITION_GENERIC_SM90A=0` (generic only), `MINIWORLD_TRANSITION_FUSED_SM90A=0` / `MINIWORLD_TRANSITION_WIDE_SM90A=0` (the tuned paths),
-`settings.transition_fused_sm90a=False` (all three). `MINIWORLD_TRANSITION_WIDE_REPL` overrides the D = 64, n = 2 backward's weight-role replicas.
+`Settings` fields `transition_generic_sm90a=False` (generic only), `transition_wide_sm90a=False` (the wide tuned builds),
+`transition_fused_sm90a=False` (all three; also `MINIWORLD_TRANSITION_FUSED_SM90A=0`). `transition_wide_repl` overrides the D = 64, n = 2
+backward's weight-role replicas.
 Every launch is an opaque op with a fake, so all of it traces under `torch.compile(fullgraph=True)` and captures in a CUDA graph.
 
 ## Tuned kernels at n = 2 (D = 64 / 128 / 256)
@@ -71,7 +72,7 @@ truncate them, a one-sided error that made y 4.5x less accurate than cuBLAS TF32
 | F3 `gemm_kernel<RES>` | y = h Ws^T + x: the residual tile is TMA-loaded into the staging buffer during the mainloop, added in place | 57 |
 
 In the bf16 training forward F2 is `gemm_kernel<SWIGLU_SAVE>`: it also stores `[a | b]` (bf16, `[M, 2 HID]`) and keeps `h` (from the fp32
-accumulators) for the backward, as TE does. fp32 / TF32 keeps the recompute backward below (`MINIWORLD_TRANSITION_GENERIC_SAVE_AB=0` selects it for bf16
+accumulators) for the backward, as TE does. fp32 / TF32 keeps the recompute backward below (`settings.transition_generic_save_ab=False` selects it for bf16
 too; it is ~10 % slower at large M and its dx / dW errors are 10-25 % lower).
 
 ##### Backward (bf16, a | b and h saved)
@@ -106,8 +107,8 @@ so a hand-written dW would need transposed copies of dy / h / dA / dB / xn.
 | cuBLAS `mm` for d_xn below 12 288 rows | kept (`_cublas_plan`) |
 | PDL (`ln_fwd` -> F2 -> F3, `ln_bwd` -> `reduce_cols`; `griddepcontrol.wait` at kernel entry) | kept, 2-4 % at small rows |
 | `ln_bwd` grid 2 x SMs (was 8 x) | kept, 2-3 % at 768 / 3072 rows |
-| 2 CTAs / SM (epilogue of one overlaps the mainloop of the other) | **dropped** (`MINIWORLD_TRANSITION_GENERIC_2CTA=1` keeps it): no gain; the n128 SwiGLU accumulator does not fit 80 registers |
-| 2-CTA cluster, B tile TMA multicast (`MINIWORLD_TRANSITION_GENERIC_CLUSTER=1`) | **dropped**: no gain. A first version was 2x slower: `mbarrier.arrive.release.cluster` on the remote empty barrier costs a `membar` per stage (ncu: membar stalls); with the plain arrive it is level with the non-clustered kernel |
+| 2 CTAs / SM (epilogue of one overlaps the mainloop of the other) | **dropped** (removed after measurement): no gain; the n128 SwiGLU accumulator does not fit 80 registers |
+| 2-CTA cluster, B tile TMA multicast | **dropped** (removed after measurement): no gain. A first version was 2x slower: `mbarrier.arrive.release.cluster` on the remote empty barrier costs a `membar` per stage (ncu: membar stalls); with the plain arrive it is level with the non-clustered kernel |
 | `torch.addmm` for F3 (residual as beta C) | **dropped**: faster below 12 k rows but y error 2.3e-3 -> 2.6e-3 (two roundings) |
 | cuBLAS dh + elementwise SwiGLU backward | **dropped**: dx / dW errors +7-10 % (dh rounded to bf16) |
 
@@ -116,7 +117,7 @@ floor ~0.6 ms.
 
 ## Verification (GPU, node01, H100 SXM)
 
-`tests/numerics/test_transition_generic_sm90a_gpu.py` (`-k transition` over `tests/numerics integrations compile autotune layout`: 429 passed; the 6 failures are `test_conditioned_transition_precision_gpu` and fail identically on origin/main):
+`tests/gpu/any/test_transition_generic_sm90a_gpu.py` (2026-10-14: `-k transition` over the GPU test directories of that time, 429 passed; the 6 failures are `test_conditioned_transition_precision_gpu` and fail identically on origin/main):
 
 * output and all six gradients against a float64 PyTorch reference: bf16 relative error 2.3e-3 (out), 2.6e-3 (dx), 2.5 - 3.5e-3 (dgamma, dbeta, dW) on
   every shape - the same as the Triton path's own error; TF32 2.9e-4 / 4.4e-4 / 5 - 7e-4 (torch's own TF32 reference: 2.9e-4 / 3.7e-4 / 5 - 5.5e-4);
@@ -127,89 +128,14 @@ floor ~0.6 ms.
 * module: `Transition(d, n)` enters the expected path (spies on the three entry points), is no less accurate than the Triton path (≤ 1.6x its error against float64),
   fp32 enters the generic kernels only with TF32 on, `torch.compile(fullgraph=True)` forward + backward matches eager.
 
-## Measurements
+## Measurements (2026-10-15)
 
-H100 SXM 80GB HBM3 (132 SMs), torch 2.13 / cu129 / triton 3.7, CUDA-graph replay (min of 5 x 30 / 10 replays), bf16 unless noted. Inference = forward without
-saves; training = forward + backward with gradients for x, LN weight / bias and the three weights (`torch.autograd.grad`). Columns: **ours** = what
-`Transition` dispatches to; **generic** = `fused_generic_sm90a` where a tuned kernel took the call; **PyTorch** = `torch.compile` of the reference;
-**Triton** = the engine's residual path (`triton/residual.py`); **TE** = Transformer Engine `LayerNormMLP(swiglu, bias=False)` + residual add. Milliseconds,
-inference / training. Scratch scripts (not in the repo): `~/miniworld-engine-scratch/jit-transition2/{bench,check,kern}.py`. 성능 확인 is the maintainer's call; the
-tables below are the evidence, not the verdict.
+Module path `Transition(...)`, CUDA-graph replay, H100 SXM, torch 2.13 / cu129. Raw anthropic rows and the stack limits:
+[docs/records/2026-10-15-h100-transition-vs-anthropic.md](../../../records/2026-10-15-h100-transition-vs-anthropic.md). The 2026-10-14
+tables (pair / single / ragged rows and fp32 against PyTorch, Triton and Transformer Engine):
+[docs/records/h100_transition_20261014.md](../../../records/h100_transition_20261014.md).
 
-### Pair stream n = 2, L = 384 (M = 147 456 rows)
-
-| D | ours | generic | PyTorch (compile) | Triton | TE |
-|---|---|---|---|---|---|
-| 64 | **0.040 / 0.165** (tuned) | 0.078 / 0.297 | 0.149 / 0.427 | 0.071 / 0.316 | 0.150 / 0.485 |
-| 128 | **0.077 / 0.334** (tuned) | 0.144 / 0.531 | 0.342 / 0.928 | 0.171 / 0.631 | 0.271 / 0.799 |
-| 256 | **0.238 / 1.028** (tuned) | 0.310 / 1.128 | 0.626 / 1.658 | 0.444 / 1.389 | 0.524 / 1.420 |
-| 384 | **0.547 / 2.096** (generic) | | 0.964 / 2.620 | 0.808 / 2.506 | 0.872 / 2.341 |
-| 512 | **0.913 / 3.167** (generic) | | 1.435 / 3.756 | 1.354 / 3.924 | 1.283 / 3.389 |
-| 768 | 1.792 / 6.854 (generic) | | 2.469 / 7.329 | 2.855 / 8.197 | 2.266 / **6.342** |
-
-L = 768 (M = 589 824): D64 0.117 / 0.520 (PyTorch 0.534 / 1.444, Triton 0.269 / 1.117), D128 0.264 / 1.273 (1.300 / 3.424, 0.640 / 2.323),
-D256 0.868 / 3.928 (2.405 / 6.494, 1.784 / 5.452). n = 4, L = 384, D128 (existing kernel, unchanged): 0.117 / 0.528; generic 0.220 / 0.877.
-
-### Single / token stream (few rows), n = 2
-
-| (rows, D) | ours (generic) | PyTorch (compile) | Triton | TE |
-|---|---|---|---|---|
-| (768, 384) | **0.014 / 0.045** | 0.019 / 0.056 | 0.016 / 0.053 | 0.018 / 0.059 |
-| (3072, 384) | **0.025 / 0.089** | 0.028 / 0.095 | 0.028 / 0.100 | 0.029 / 0.119 |
-| (768, 768) | **0.024** / 0.092 | 0.031 / 0.094 | 0.033 / 0.108 | 0.026 / **0.071** |
-| (3072, 768) | **0.055** / 0.205 | 0.068 / 0.226 | 0.065 / 0.221 | 0.057 / **0.159** |
-
-At D768 the training step is ~30 % behind TE (the backward is the gate kernel plus a transposed-weight prep that does not scale down to 768 rows).
-
-### Ragged rows, bf16
-
-| (rows, D, n) | ours (generic) | PyTorch (compile) | Triton | TE |
-|---|---|---|---|---|
-| (10 000, 64, 2) | 0.013 / 0.051 | 0.018 / 0.064 | **0.011 / 0.046** | 0.019 / 0.127 |
-| (10 000, 128, 2) | 0.019 / **0.069** | 0.029 / 0.110 | **0.017** / 0.075 | 0.025 / 0.152 |
-| (10 000, 128, 4) | **0.023 / 0.092** | 0.038 / 0.140 | 0.025 / 0.105 | 0.035 / 0.177 |
-| (10 000, 256, 2) | **0.030 / 0.119** | 0.047 / 0.180 | 0.035 / 0.138 | 0.043 / 0.160 |
-| (5 000, 384, 2) | **0.026 / 0.115** | 0.051 / 0.171 | 0.038 / 0.136 | 0.040 / 0.150 |
-| (153 664 = 392², 128, 4) | **0.226 / 0.849** | 0.872 / 1.797 | 0.287 / 1.091 | 0.443 / 1.288 |
-| (153 664 = 392², 64, 2) | 0.083 / **0.311** | 0.569 / 0.923 | **0.075** / 0.329 | 0.157 / 0.500 |
-| (147 457, 128, 2) | **0.142 / 0.528** | 0.675 / 1.280 | 0.181 / 0.642 | 0.271 / 0.800 |
-
-A ragged D64 call is where the generic kernels merely tie Triton (the tuned D64 kernel needs whole tiles).
-
-### fp32 on TF32 tensor cores (`set_float32_matmul_precision("high")`), n = 2 unless noted
-
-| (rows, D) | ours (generic) | PyTorch (compile, TF32) |
-|---|---|---|
-| (147 456, 64) | **0.136 / 0.527** | 0.280 / 0.837 |
-| (147 456, 128) | **0.269 / 1.018** | 0.579 / 1.615 |
-| (147 456, 256) | **0.592 / 2.243** | 1.097 / 3.434 |
-| (147 456, 128), n = 4 | **0.404 / 1.635** | 0.885 / 2.509 |
-| (147 456, 384) | **1.075 / 4.302** | 1.754 / 5.840 |
-| (10 000, 128) | **0.028 / 0.113** | 0.087 / 0.240 |
-| (768, 768) | 0.057 / 0.204 | 0.050 / 0.195 |
-| (3 072, 768) | **0.118 / 0.464** | 0.142 / 0.538 |
-
-(The engine's Triton residual path is bf16-only; the fp32 module call used to go through the PyTorch reference.)
-
-### Recheck 2026-10-14 (D768 / D512 / D384, n = 2 and 4; CUDA-graph replay, ms, inference / training)
-
-| (D, rows, n) | ours | Triton | TE |
-|---|---|---|---|
-| 768, 768, 2 | 0.022 / 0.069 | 0.033 / 0.104 | 0.026 / 0.073 |
-| 768, 3072, 2 | 0.047 / 0.160 | 0.065 / 0.221 | 0.057 / **0.158** |
-| 768, 12 288, 2 | 0.150 / 0.511 | 0.226 / 0.725 | 0.202 / 0.573 |
-| 768, 147 456, 2 | 1.80 / 5.79 | 2.82 / 8.44 | 2.34 / 6.43 |
-| 512, 768 / 3072 / 147 456, 2 | 0.018 / 0.052 ... 0.857 / 2.83 | 0.062 ... 3.97 | 0.065 ... 3.43 |
-| 384, 768, 2 | 0.012 / 0.038 | 0.053 train | 0.019 / 0.060 |
-| 384, 3072, 2 | 0.024 / 0.076 | 0.028 / 0.099 | 0.028 / 0.119 |
-| 384, 147 456, 2 | 0.545 / 1.85 | 0.813 / 2.47 | 0.878 / 2.38 |
-| 384, 3072 / 147 456, 4 | 0.035 / 0.124 ... 0.944 / 3.39 | 0.142 ... 4.59 | 0.154 ... 4.09 |
-
-Error against float64 (D768, 3072 rows): y 2.3e-3, dx 2.9e-3, dgamma / dbeta 3.5e-3, dWa / dWb 3.9e-3, dWs 3.35e-3; Triton 2.6 / 3.2 / 3.4 / 3.85 / 3.35e-3,
-TE 3.3 / 3.9 / 4.7 / 5.0 / 5.0e-3, PyTorch bf16 3.4 / 4.2 / 5.3 / 5.3 / 5.3e-3. The only training cell behind another implementation is D768 at 3072 rows
-(0.160 vs TE 0.158, within run-to-run noise).
-
-### Against anthropic and cuequivariance (2026-10-15; module path `Transition(...)`, CUDA-graph replay, H100 SXM)
+### Against anthropic and cuequivariance (inference) and PyTorch (training)
 
 cuequivariance has no Transition kernel: `implementation="cuequivariance"` runs the PyTorch reference, so that column is `torch.compile` of the
 reference. anthropic (`integrations/anthropic.py`; rows `v2` at D128 n = 4, `pf` at D64 / 128 / 256 / 384; inference only) refuses D512, n = 4 at D64
@@ -234,10 +160,8 @@ anthropic column is the fastest row that loads on this stack: D64 `v2` / `lnl` /
 | 4, 384 | 17.1 / 77.4 / 21.9 | 29.5 / 159 / 40.7 | 95.8 / 460 / 150 | 306 / 1839 / 521 | 906 / 5407 / 1487 |
 | 4, 512 | 20.4 / - / 25.4 | 40.0 / - / 56.9 | 142 / - / 211 | 486 / - / 788 | 1505 / - / 2257 |
 
-Not measurable on this machine (driver 575, CUDA 12.9, torch 2.13 + cu129): the D256 specialised row `esm_t16` (its shipped cubin is NVRTC 13.0:
-the process segfaults at load) and `flash_sm90a` (the shipped binary is torch 2.13 + cu130; the kit's recipe for another stack needs CUTLASS
-4.2.0 headers, this machine has 4.8.0 and the compute nodes are offline). `esm_fused_exact` loads (60.4 µs at 768 rows, n = 4, D256). The D256
-anthropic column is therefore the best row that loads, not the best row that exists.
+Not measurable on this machine: the D256 specialised row `esm_t16` and `flash_sm90a` (see the record). The D256 anthropic column is
+therefore the best row that loads, not the best row that exists.
 
 Thinnest margins against anthropic: n = 2 D128 at 3 072 rows 7.2 %, at 768 rows 7.4 %; n = 2 D64 at 12 288 rows 10 %; n = 4 D64 at 12 288 rows 13 %,
 n = 4 D128 at 3 072 rows 15 %.
@@ -273,21 +197,17 @@ What produced the small-row numbers (all measured):
 | generic kernels below 3 072 .. 16 384 rows (`prefers_generic`, per D, mode and n) | D256 3072 rows 44 -> 18 µs, D384 77 -> 30, D512 117 -> 40 |
 | weight-gradient GEMMs on a second stream in the training backward (`_weight_grads_aside`, rows <= 12 288 (D64) / 3 072 (D128 .. 384) / 768 (D512)) | 1.25 - 1.28x at D64 / 128 768 - 3072 rows, 1.03 - 1.13x D256 / 384; 1 - 3 % loss at 49 152+ rows so it is off there |
 
-Tried and not kept: LayerNorm formed inside the expand GEMM (`MINIWORLD_TRANSITION_GENERIC_LNF=1`, correct, 5 - 25 % slower: the per-CTA
-normalization is on the critical path); 2 CTAs / SM and 2-CTA clusters with B-tile multicast (no gain; the first cluster version was 2x slower from
-`mbarrier.arrive.release.cluster` fences); staggering the D64 weight-chunk order across CTAs (no change); `addmm` for the residual (y error 2.3e-3 ->
-2.6e-3); cuBLAS dh + elementwise SwiGLU backward (dx / dW error +7 - 10 %).
+Tried and not kept: LayerNorm formed inside the expand GEMM (correct, 5 - 25 % slower: the per-CTA normalization is on the critical path;
+removed after measurement); 2 CTAs / SM and 2-CTA clusters with B-tile multicast (no gain; the first cluster version was 2x slower from
+`mbarrier.arrive.release.cluster` fences; removed); staggering the D64 weight-chunk order across CTAs (no change); `addmm` for the residual
+(y error 2.3e-3 -> 2.6e-3); cuBLAS dh + elementwise SwiGLU backward (dx / dW error +7 - 10 %).
 
 ### D128 fused forward, 2026-10-15 (inference build: fragment LayerNorm, x tile first)
 
-Correction first: the 2026-10-14 D128 numbers above that came from the fragment-LayerNorm fused build (8 - 10 % faster) were measured on a
-kernel that was **wrong**: fused vs float64 7.9e-3 (n = 2) / 1.2e-2 (n = 4) against 1.7e-3 for the generic path, while every row-count and
-kernel-agreement test passed (both sides shared the LayerNorm path or used one tile). Cause, from the SASS: in the rolled hidden-chunk loop ptxas
-allocated the loop-carried RS `wgmma` A operand (`af[4..7]`, R168 ..) to the swiglu temporaries from chunk 1 on. The Python-level fixes that did
-not help: `fence_regs` on the operand before / after the wait (variant 2), re-reading the operand from a stored tile with ldmatrix (variant 4: same
-error, so the values and the fragment mapping were right and the same data through the SS path was exact, variant 3). What fixes it: unrolling the
-chunk loop (`RSMASK` bit 8 -> `#pragma unroll`), after which the operand lives straight-line. New regression test
-`test_inference_matches_fp64_on_whole_persistent_tiles` (n = 2 / 4, 128 / 2048 / 16 896 rows, fp64 reference, < 3e-3).
+The 2026-10-14 D128 numbers of the fragment-LayerNorm fused build were measured on a kernel that was **wrong** (fused vs float64 7.9e-3 /
+1.2e-2 at n = 2 / 4): ptxas allocated the loop-carried RS `wgmma` A operand to the swiglu temporaries of the rolled hidden-chunk loop.
+Unrolling the chunk loop (`RSMASK` bit 8 -> `#pragma unroll`) fixes it; regression test `test_inference_matches_fp64_on_whole_persistent_tiles`
+(n = 2 / 4, 128 / 2048 / 16 896 rows, fp64 reference, < 3e-3). Details: the record above.
 
 Final numbers (µs, module path, CUDA-graph replay, default dispatch; anthropic best row: `lnl` n = 2, `v2` n = 4):
 
@@ -329,12 +249,12 @@ Timeline of one 128-row tile (n = 2, cycles, `TRACE` build): x 1 201 | LN 1 190 
 GEMM (hidden) | 4 chunks ~ 9 000 | epilogue + store ~1 400. The swiglu is issue / MUFU bound (8 192 sigmoids = 16 384 MUFU ops per chunk per CTA)
 and runs with the tensor core idle; the two warpgroups run in lockstep.
 
-Build switches of the inference forward (`fused_sm90a.py`, environment variables in the worktree, to become `Settings` fields when this is merged;
-defaults in brackets): `MINIWORLD_TRANSITION_D128_FRAG` [1] fragment LayerNorm, `_RSMASK` [256] (bit 8 = unrolled chunk loop, required for
-correctness), `_XFIRST` [1], `_DECOUPLE` [1], `_SKEW` [1]; experiments, all [0]: `_RESIDENT`, `_SPLIT2`, `_PDL`, `_NEWTON`, `_WSLOTS` [2], `_GBSMEM`, `_SUBCH`,
-`_STAGGER`, `_CPX`, `_ABL` (timing ablation, wrong results), `_TRACE` (clock64 timeline of CTA 0, `ext.trace()`).
+Build switches of the inference forward are the constants of `_FWD_TUNING` in `kernels/transition/cuda/fused_sm90a.py` (the saving
+training build turns the inference-only ones off, `_fwd_tuning_flags`): `LNFRAG` 1 fragment LayerNorm, `RSMASK` 256 (bit 8 = unrolled chunk
+loop, required for correctness), `XFIRST` 1, `DECOUPLE` 1, `SKEW` 1; experiments, all 0: `RESIDENT`, `SPLIT2`, `PDL`, `NEWTON`, `WSLOTS` 2,
+`GBSMEM`, `SUBCH`, `STAGGER`, `CPX`, `ABL` (timing ablation, wrong results), `TRACE` (clock64 timeline of CTA 0).
 
-Tried for this chain and not kept (each measured, correct, same or slower; the switches stay in the source, default off): all four weight chunks
+Tried for this chain and not kept (each measured, correct, same or slower; the switches stay in `_FWD_TUNING`, default off): all four weight chunks
 resident (+1.0 µs: the four fetches share the bandwidth and chunk 0 lands late); 64-row tile with the hidden split over the two warpgroups and a
 shared-memory reduction (`SPLIT2`: +0.8 µs at 3072, +2.2 at 6144 - 96 CTAs x 192 KB of weights is L2-bandwidth bound); PDL on the fused kernel
 (no change); warpgroup skew so one swiglu overlaps the other's GEMM (no change at n = 2, +1 µs at large rows); the sigmoid reciprocal by three
@@ -348,7 +268,7 @@ ahead per call in the single-call graph) and up to 4 096 rows at n = 4 (generic 
 * The weight-gradient GEMMs are cuBLAS. A hand-written bf16 dW (MN-major wgmma operands) would let the gate kernel feed it without the dA / dB round
   trip; TF32 needs a different formulation.
 * The generic path does not fuse the LayerNorm backward into the d_xn GEMM (the tuned D <= 256 kernels do). The forward fusion (LN in the expand GEMM)
-  was built and is slower below 12 288 rows (see above); at large row counts it was not better either (D384 49 152 rows training 1.095 vs 1.131 ms).
+  was built, measured slower below 12 288 rows (see above) and removed; at large row counts it was not better either (D384 49 152 rows training 1.095 vs 1.131 ms).
 * Small rows are latency bound: D128 .. 512 at 3072 rows run 12 - 40 µs against a GEMM-time floor of about 6 - 25 µs (three launches with PDL; the D128
   fused kernel is now covered in the section above, its remaining cost is the swiglu not overlapping the tensor core). The
   D64 forward fixed the same shape with 64-row tiles; for D >= 128 each tile streams 393 KB+ of weights, so splitting the hidden dimension across a

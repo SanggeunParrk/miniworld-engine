@@ -186,18 +186,6 @@ def _cublas_plan(rows: int, d: int, hid: int) -> tuple[bool, bool, bool]:
     )  # dxn only: same rounding as the hand tiles, 3-12 % faster below 12k rows
 
 
-def _ln_fused(x: torch.Tensor, wa: torch.Tensor) -> bool:
-    """bf16, D in {128, 256, 384, 512}: the expand GEMM normalizes its own x tile.  OFF by default (``settings.transition_generic_lnf``
-    turns it on): measured 5-25 % SLOWER than ln_fwd + expand at 768 .. 12 288 rows -- the per-CTA normalization sits on the critical
-    path, while the separate kernel runs on every SM at once and overlaps its successor through PDL."""
-    return (
-        x.dtype is torch.bfloat16
-        and x.shape[-1] in (128, 256, 384, 512)
-        and wa.shape[0] % 128 == 0
-        and _settings().transition_generic_lnf
-    )
-
-
 _SIDE_STREAMS: dict = {}
 
 
@@ -313,21 +301,13 @@ def _fwd_launch(
         x.dtype is torch.float32
     ):  # the MMA would truncate raw fp32 weights: hand it TF32-rounded copies
         _, _, wa, wb, ws = ext.prep(wa, wb, ws, _PREP_ROUNDED_COPIES, True)
-    if _ln_fused(x, wa):
-        # LayerNorm formed in shared memory by the expand GEMM itself: one launch fewer, no xn round trip
-        h, ab, xn, rstd, c1 = ext.swiglu_ln(
-            x, gamma, beta, float(eps), wa, wb, bool(save) and _saves_ab(x, save)
-        )
-        if save and not _saves_ab(
-            x, save
-        ):  # (saved-a/b switched off: stats still needed)
-            xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), True)
+    # LayerNorm as its own kernel, not inside the expand GEMM: the in-GEMM normalization measured 5-25 % slower at 768 .. 12 288 rows
+    # (it sits on each CTA's critical path; the separate kernel runs on every SM and overlaps its successor through PDL)
+    xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), bool(save))
+    if _saves_ab(x, save):
+        h, ab = ext.swiglu_save(xn, wa, wb)
     else:
-        xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), bool(save))
-        if _saves_ab(x, save):
-            h, ab = ext.swiglu_save(xn, wa, wb)
-        else:
-            h, ab = ext.swiglu(xn, wa, wb), x.new_empty((1, 1))
+        h, ab = ext.swiglu(xn, wa, wb), x.new_empty((1, 1))
     if (
         x.dtype is torch.bfloat16
         and _cublas_plan(x.shape[0], x.shape[1], wa.shape[0])[0]

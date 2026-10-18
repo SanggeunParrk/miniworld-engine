@@ -11,23 +11,9 @@
 #include "fa3_utils.h"
 using namespace cute;
 using Element=cutlass::bfloat16_t;
-#ifndef MW_F2_STAGES
-#define MW_F2_STAGES 3
-#endif
-#ifndef MW_F2_MINB
-#define MW_F2_MINB 1
-#endif
 constexpr int BN=128;
-#ifdef MW_F2_STAGES_FORCE
-constexpr int stages_for(int){return MW_F2_STAGES_FORCE;}
-#else
-constexpr int stages_for(int C){return C<=256?2:MW_F2_STAGES;}
-#endif
-#ifdef MW_F2_MINB_FORCE
-constexpr int minb_for(int){return MW_F2_MINB_FORCE;}
-#else
+constexpr int stages_for(int C){return C<=256?2:3;}
 constexpr int minb_for(int C){return C<=256?2:1;}
-#endif
 using TileLayout=decltype(tile_to_shape(GMMA::Layout_K_SW128_Atom<Element>{},Shape<_64,_64>{}));
 using WL=decltype(tile_to_shape(GMMA::Layout_K_SW128_Atom<Element>{},Shape<Int<BN>,_64>{}));
 using GS=Shape<int32_t,int32_t>;

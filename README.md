@@ -16,6 +16,7 @@ cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 | I want to… | go to |
 |---|---|
 | run on a GPU, or see what is finished there for which shapes | [docs/gpus/](docs/gpus/README.md) |
+| find a dated measurement or audit (never edited after the fact) | [docs/records/](docs/records/) |
 | read everything else | [docs/README.md](docs/README.md) |
 | work on this repo as an agent | [.claude/CLAUDE.md](.claude/CLAUDE.md) |
 

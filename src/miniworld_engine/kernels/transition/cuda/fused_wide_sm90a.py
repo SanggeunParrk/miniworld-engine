@@ -90,15 +90,6 @@ def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-#: The fused D384 forward (``fwd_fused_d384``, build flag ``fused_d384``) is a measured non-winner kept reachable here;
-#: it was formerly selected by an environment switch.
-_CANDIDATE_FUSED_D384 = False
-
-
-def fused_d384_enabled(d: int) -> bool:
-    return d == 384 and _CANDIDATE_FUSED_D384
-
-
 @functools.lru_cache(maxsize=8)
 def _ext(
     width: int,
@@ -106,8 +97,6 @@ def _ext(
     d64_repl: int = 16,
     save_ab: bool = False,
     split_fwd: bool = False,
-    fused_d384: bool = False,
-    multicast: bool = False,
     affine_parallel: bool = False,
     gate_multicast: bool = False,
     gate_k64: int = 0,
@@ -131,10 +120,6 @@ def _ext(
         revision += "_saved_ab_v1"
     if split_fwd:
         revision += "_split_fwd_v1"
-    if fused_d384:
-        revision += "_fused_d384_v3_converged"
-    if multicast:
-        revision += "_multicast_v1"
     if affine_parallel:
         revision += "_affine_parallel_v1"
     if gate_multicast:
@@ -173,8 +158,6 @@ def _ext(
             *(["-DMW_GATE_SAVED_NO_H_STAGE=1"] if gate_saved_no_h_stage else []),
             *(["-DMW_SAVE_AB=1"] if save_ab else []),
             *(["-DMW_SPLIT_FWD=1"] if split_fwd else []),
-            *(["-DMW_FUSED_D384=1"] if fused_d384 else []),
-            *(["-DMW_FUSED_D384_MC=1"] if multicast else []),
             "--expt-relaxed-constexpr",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -205,7 +188,6 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
         d64_repl or 16,
         save_ab,
         save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
-        fused_d384_enabled(x.shape[-1]),
         affine_parallel=x.shape[-1] == 64,
         gate_saved_tma=saved_tma,
         gate_saved_no_h_stage=saved_tma,
@@ -316,8 +298,7 @@ def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, wst=None):
     [M, 4D] at D >= 384 (the two-kernel forward materializes it) and a placeholder otherwise."""
     rows = x.shape[0] if save else 1
     d = x.shape[1]
-    keep_h = d >= 384 and (save or not (wa.shape[0] == 4 * d and fused_d384_enabled(d)))
-    h = x.new_empty((x.shape[0], wa.shape[0])) if keep_h else x.new_empty((1, 1))
+    h = x.new_empty((x.shape[0], wa.shape[0])) if d >= 384 else x.new_empty((1, 1))
     return (
         torch.empty_like(x),
         torch.empty_like(x) if save else x.new_empty((1, d)),
@@ -357,11 +338,6 @@ def _fwd_launch(
         out = ext.fwd_small(x, gamma, beta, wa, wb, wst if wst is not None else transposed_contiguous(ws), float(eps), variant)
         f32 = dict(dtype=torch.float32, device=x.device)
         return (out, x.new_empty((1, 64)), torch.empty((1,), **f32), torch.empty((1,), **f32), x.new_empty((1, 1)))
-    if n == 4 and fused_d384_enabled(x.shape[-1]) and not save:
-        wst = _cuda_prepare(wa, wb, ws)[3]
-        return tuple(
-            ext.fwd_fused_d384(x, gamma, beta, wa, wb, wst, float(eps), False)[:5]
-        )
     if x.shape[-1] in (64, 256):
         if wst is None:
             wst = _cuda_prepare(wa, wb, ws)[3]
@@ -402,13 +378,6 @@ def _saved_fwd_launch(
     """The forward that also saves what the backward needs: (out, xn, rstd, c1, h, a, b)."""
     if _is_fake(x, wa):
         return _saved_fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps)
-    if fused_d384_enabled(x.shape[-1]):
-        wst = _cuda_prepare(wa, wb, ws)[3]
-        return tuple(
-            _ext_for(x, True).fwd_fused_d384(
-                x, gamma, beta, wa, wb, wst, float(eps), True
-            )
-        )
     if split_fwd_enabled(x.shape[-1], x.shape[0]):
         xn, rstd, c1 = _native_ext().ln_fwd(x, gamma, beta, float(eps))
         out, h, a, b = _ext_for(x, True, wa.shape[0] // x.shape[-1]).fwd_split(

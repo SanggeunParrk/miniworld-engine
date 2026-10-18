@@ -91,6 +91,9 @@ def test_projection_contract_is_preserved(gpu_settings, variant, monkeypatch):
             assert torch.isfinite(x.grad).all()
             assert model.out_proj.weight.grad is not None
     assert torch.isfinite(result).all()
-    assert ("fused" in calls) == (variant == "plain")
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    # H100 / B200 have no Triton fallback: the gate-out runs its PyTorch statements there, never the Triton kernel
+    assert ("fused" in calls) == (variant == "plain" and not restricted_card(x.device))
     if variant == "hook":
         assert "projection" in calls

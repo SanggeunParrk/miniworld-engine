@@ -3,7 +3,6 @@
 import pytest
 import torch
 import torch.nn.functional as F
-from settings_helpers import override_setting
 
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as K
 
@@ -162,7 +161,6 @@ def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch
     cls = (
         BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
     )
-    override_setting(monkeypatch, "trimul_h100_b200style", True)
     old = settings.configure(engine_backend="auto")
     try:
         leaves, mask, ds, dy = fixture(d, 128, 0 if bidirectional else 1, master)

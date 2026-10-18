@@ -34,6 +34,30 @@ def _ext(kind, width, config):
     return _EXTENSIONS[key]
 
 
+def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
+    """The sm_90a (H100) Transition dispatch that ``modules.Transition`` and ``ops.transition`` share. Returns ``x + transition(x)``
+    from the first hand-CUDA build that takes the call, or ``None`` when none does (the caller then picks its fallback).
+
+    Order: the generic kernels where they are the faster pick even though a tuned build would take the call
+    (``fused_generic_sm90a.prefers_generic``), then ``fused_sm90a`` (d=128), ``fused_wide_sm90a`` (d=64/256/384/512/768) and
+    ``fused_generic_sm90a`` (any other width, ragged rows, fp32 on TF32). Each ``available`` is the kernel's own requirement plus a
+    successful build. The caller decides whether the sm_90a kernels are switched on (``settings.transition_fused_sm90a`` and an
+    engine backend other than ``"triton"``)."""
+    from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
+
+    training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))
+    if fused_generic_sm90a.prefers_generic(x, training, n) and fused_generic_sm90a.available(x, wa, ws):
+        return fused_generic_sm90a.transition_generic_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps)
+    for kern, entry in (
+        (fused_sm90a, fused_sm90a.transition_fused_sm90a),
+        (fused_wide_sm90a, fused_wide_sm90a.transition_wide_sm90a),
+        (fused_generic_sm90a, fused_generic_sm90a.transition_generic_sm90a),
+    ):
+        if kern.available(x, wa, ws):
+            return entry(x, ln_weight, ln_bias, wa, wb, ws, eps)
+    return None
+
+
 def _b2b_launch_fake(x, rstd, c1, g, beta, wa, wb, ws, bn, stages, warpgroups, kt, min_blocks):
     """Allocate outputs with the same shape, dtype and strides as _b2b_launch."""
     return torch.empty_like(x)

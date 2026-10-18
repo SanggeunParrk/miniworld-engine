@@ -8,7 +8,8 @@ Dispatch: `integrations/pwa_train.py` (MiniWorld width: `csrc/pair3.cu`, `ln_vg.
 `dgv_bwd.cu`) and `integrations/pwa_wide.py` (every other width: `csrc/pair_wide.cu`, `csrc/pwa_wide.cu`). Served when
 `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), inference and training alike; the MSA residual
 and the module's row dropout (`drop_msa`) are applied in the gate / out pass. `settings.pwa_train` / `pwa_infer` turn the paths off.
-Every other call runs the portable Triton path (which refuses d_hidden < 16: those calls run the PyTorch statements).
+Every other call runs the module's PyTorch statements on H100 (no Triton fallback, see [dispatch.md](../dispatch.md)); other cards run the
+portable Triton path (which refuses d_hidden < 16: those calls run the PyTorch statements there too).
 
 | width (d_msa, d_pair, heads x d_hidden) | model | path | length / depth |
 |---|---|---|---|

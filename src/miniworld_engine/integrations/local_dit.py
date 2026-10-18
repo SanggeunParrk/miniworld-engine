@@ -211,12 +211,6 @@ def _hoisting() -> bool:
     return settings.current().local_dit_hoist
 
 
-# Candidate routes kept compiled and reachable but not selectable at run time (formerly default-off environment switches).
-# The sm_100 kernels on Hopper (formerly MINIWORLD_LOCAL_DIT_H100); dead at the default.
-_SM100_KERNELS_ON_HOPPER = False
-# Graph-owned cuBLAS workspace for the Hopper scopes (formerly MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS); dead at the default.
-_OWNED_BLAS_CANDIDATE = False
-
 _FAILED = False
 F32 = torch.float32
 _LOADED32: set[int] = set()
@@ -358,18 +352,9 @@ def serves(module, single, cond, pair, mask) -> bool:
     if a._backend != KernelBackend.TRITON or a.use_qk_norm:
         return False
     cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
-    hopper = cap == (9, 0) and _SM100_KERNELS_ON_HOPPER
-    if (
-        hopper
-        and torch.is_grad_enabled()
-        and settings.current().local_dit_h100_train is not True
-    ):
-        return False
-    if not (cap == (10, 0) or hopper):
+    if cap != (10, 0):
         return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF) and not fp32:
-        return False
-    if hopper and fp32:  # the fp32 kernels are tcgen05 (sm_100a) only
         return False
     if (
         single.ndim != 4
@@ -379,15 +364,6 @@ def serves(module, single, cond, pair, mask) -> bool:
     ):
         return False
     n = single.shape[2]
-    if (
-        hopper
-        and torch.is_grad_enabled()
-        and (
-            n not in (4096, 8192)
-            or not all(t.is_contiguous() for t in (single, cond, pair))
-        )
-    ):
-        return False
     if mask is not None and (
         mask.dtype != torch.bool
         or tuple(mask.shape) != (1, n)
@@ -724,14 +700,14 @@ def _kv_pack(weights, packed_pre=None):
 
 
 def _cond_tables(
-    cond, c2_fn, n, weights, wc, cross, save, wp=None, owned=False, packed_infer=False
+    cond, c2_fn, n, weights, wc, cross, save, wp=None, packed_infer=False
 ):
     """The conditioning tables of a call: mod [rows, 768] (cond_fwd) and, in the cross-attention mode, cn (the LN of the conditioning) and the
     key / value modulation mkv [rows, 256]. They depend on the conditioning tensor and the weights only -- the same at every block call that
     reads one conditioning (a sampler's steps), so an inference call (``save`` False) takes them from the hoist: made once per conditioning
     tensor (pointer, version) and weights, scoped to the CUDA-graph capture (``kernels._capture.lookup_inputs``).
-    Hopper: ``wp`` (the pack's input-projection operands) feeds the KV pack, ``owned`` routes the product through the owned cuBLAS
-    workspace, ``packed_infer`` picks the persistent conditioning schedule."""
+    Hopper: ``wp`` (the pack's input-projection operands) feeds the KV pack, ``packed_infer`` picks the persistent conditioning
+    schedule."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -750,7 +726,7 @@ def _cond_tables(
             return mod, None, None
         wm, _, gkv, *_ = _kv_pack(weights, wp)
         cn = local.cond_ln(c2, gkv)
-        return mod, cn, _mm(cn, wm.t(), owned)
+        return mod, cn, cn @ wm.t()
 
     if save or not _hoisting():
         return build()
@@ -846,11 +822,6 @@ def _block_fwd(
     a, _, n0, _ = single.shape
     n = _padded_length(n0)
     m = a * n
-    owned = _owned_blas_enabled(single, save) and (a, n0) in (
-        (5, 8192),
-        (48, 4096),
-        (48, 8192),
-    )
     with torch.cuda.device(single.device):
         cross = len(weights) > len(WEIGHTS)
         hopper = rows._hopper(
@@ -870,7 +841,6 @@ def _block_fwd(
             cross,
             save,
             wp=wp if hopper else None,
-            owned=owned,
             packed_infer=packed_infer,
         )
         if (
@@ -879,7 +849,7 @@ def _block_fwd(
             _, bs, _, wk, wv, _ = _kv_pack(weights, wp)
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=True, cross=True)
             xkv = local.kv_fwd(x1, mkv, bs)
-            k, v = _mm(xkv, wk.t(), owned), _mm(xkv, wv.t(), owned)
+            k, v = xkv @ wk.t(), xkv @ wv.t()
         elif cross:  # keys and values from a second AdaLN of x1, inside pre_fwd
             bs = _kv_pack(weights)[1]
             w_pre, b_pre = wp
@@ -940,41 +910,9 @@ def _fused_wgrads(spec, weights, names, f32, dev, rows_r):
     return out
 
 
-def _owned_blas_enabled(single: torch.Tensor, training: bool) -> bool:
-    """Opt-in graph workspace ownership; defaults require paired qualification."""
-    scope = (training and single.shape[2] in (4096, 8192)) or (
-        not training and (single.shape[0], single.shape[2]) == (48, 4096)
-    )
-    return (
-        scope
-        and torch.cuda.get_device_capability(single.device) == (9, 0)
-        and _OWNED_BLAS_CANDIDATE
-    )
-
-
-def _owned_mm(
-    a: torch.Tensor, b: torch.Tensor, fp32_output: bool = False
-) -> torch.Tensor:
-    from miniworld_engine.kernels.conditioned_transition.cuda.train import (
-        owned_gemm_ext,
-    )
-
-    return owned_gemm_ext().owned_mm(
-        a, b, torch.backends.cuda.matmul.allow_tf32, fp32_output
-    )
-
-
-def _mm(a: torch.Tensor, b: torch.Tensor, owned: bool) -> torch.Tensor:
-    return _owned_mm(a, b) if owned else a @ b
-
-
-def _wgrad(dout, x, owned: bool = False):
+def _wgrad(dout, x):
     """dout^T x, fp32: the weight gradients stay unrounded for fp32 parameters (an fp32 master); bf16 ones round once, as before."""
-    return (
-        _owned_mm(dout.t(), x, True)
-        if owned
-        else torch.mm(dout.t(), x, out_dtype=torch.float32)
-    )
+    return torch.mm(dout.t(), x, out_dtype=torch.float32)
 
 
 def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
@@ -1008,7 +946,6 @@ def _block_bwd(
     n = _padded_length(n0)
     m = a * n
     dev = single.device
-    owned = _owned_blas_enabled(single, True)
     with torch.cuda.device(dev):
         hopper = rows._hopper(
             dev.index if dev.index is not None else torch.cuda.current_device()
@@ -1079,9 +1016,9 @@ def _block_bwd(
                 wm, bs, gkv, wk, wv, _ = _kv_pack(weights, wp)
                 dk, dv = dp[:, DS_ : 2 * DS_], dp[:, 2 * DS_ : 3 * DS_]
                 dxkv = torch.addmm(dk @ wk, dv, wv)
-                dwk, dwv = _wgrad(dk, xkv, owned), _wgrad(dv, xkv, owned)
+                dwk, dwv = _wgrad(dk, xkv), _wgrad(dv, xkv)
                 dx1_kv, dmkv = local.kv_bwd(x1, mkv, bs, dxkv)
-                dwm = _wgrad(dmkv, cn, owned)
+                dwm = _wgrad(dmkv, cn)
                 dbs = local.kv_bias_hopper(dmkv)
                 dg_kv = allocate(DS_, device=dev)
                 dc_kv = local.cond_ln_bwd(c2, dmkv @ wm, gkv, dg_kv)
@@ -1096,15 +1033,15 @@ def _block_bwd(
                 local.add_cond_hopper(dc, dc_kv)
             rows.finish_columns_hopper(dmod, dp, dgparts, dbias_cols, dbq, dgamma_cond)
             dws, dwu, dwo, dwp = (
-                _wgrad(dt, hh, owned),
-                _wgrad(dab, x2, owned),
-                _wgrad(du, gated, owned),
-                _wgrad(dp, x1, owned),
+                _wgrad(dt, hh),
+                _wgrad(dab, x2),
+                _wgrad(du, gated),
+                _wgrad(dp, x1),
             )
             dw1, dw2, dw3 = (
-                _wgrad(dmod[:, 0:256], cn1, owned),
-                _wgrad(dmod[:, 256:512], cn2, owned),
-                _wgrad(dmod[:, 512:768], c2, owned),
+                _wgrad(dmod[:, 0:256], cn1),
+                _wgrad(dmod[:, 256:512], cn2),
+                _wgrad(dmod[:, 512:768], c2),
             )
         else:
             if cross:

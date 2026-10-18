@@ -24,7 +24,7 @@ def _artifact_ready():
 
 @device_constant
 def _available(device):
-    return torch.cuda.is_available() and _artifact_ready() and torch.cuda.get_device_capability(device)==(9,0) and 'H100' in torch.cuda.get_device_name(device)
+    return torch.cuda.is_available() and _artifact_ready() and torch.cuda.get_device_capability(device)==(9,0)
 
 def can_use(q,k,v,b):
     if not (q.is_cuda and q.dtype==torch.bfloat16 and q.ndim==5 and q.shape[0]==1

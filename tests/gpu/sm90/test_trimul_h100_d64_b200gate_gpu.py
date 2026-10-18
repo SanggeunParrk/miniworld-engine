@@ -1,4 +1,4 @@
-"""The explicit D64 B200-style flag changes gate-gradient placement only."""
+"""The H100 D64 TriMul training dispatch: B200-style gate-gradient placement kernels and all gradients against the reference."""
 import runpy
 from pathlib import Path
 
@@ -12,8 +12,7 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 @pytest.mark.parametrize("length", [128, 256, 1024])
 @pytest.mark.parametrize("direction", [0, 1, 2])
 @pytest.mark.parametrize("master", [False, True])
-@pytest.mark.parametrize("enabled", [False, True])
-def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, monkeypatch):
+def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("Hopper required")
     from miniworld_engine import settings
@@ -27,7 +26,6 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
     override_setting(monkeypatch, "trimul_h100_native_buckets", True)
-    override_setting(monkeypatch, "trimul_h100_b200style", enabled)
     for constant in ("_TRAIN_CUDA_UNSCOPED", "_TRAIN_FUSED_PREP_UNSCOPED", "_CUDA_AUX_UNSCOPED"):
         monkeypatch.setattr(T, constant, True)
     previous = settings.configure(engine_backend="auto")
@@ -65,12 +63,12 @@ def test_flag_dispatch_and_all_gradients(length, direction, master, enabled, mon
         if not names:
             pytest.skip("the profiler returned no CUDA events (CUPTI is not available in this session)")
         assert any("_b2w" in n for n in names), names
-        pipelined = enabled and not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
+        pipelined = not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
         affine_registers = pipelined and direction != 0 and not (
             direction == 1 and T._D64_UNI_AFFINE_FORCED)
         assert any("_b2w_affinereg" in n for n in names) == affine_registers, names
         assert any("_b2w_gatepipe" in n for n in names) == (pipelined and not affine_registers), names
-        assert any("_b2w_b7gate" in n for n in names) == (enabled and not pipelined), names
+        assert any("_b2w_b7gate" in n for n in names) == (not pipelined), names
         assert not any("triton" in n.lower() for n in names), names
         helpers["assert_reference"]([leaves[0], *actual], mask, ds, dy, direction, y, grads)
         with torch.no_grad():
@@ -93,4 +91,4 @@ def test_forced_affine_split_keeps_qualified_pipeline(length, master, monkeypatc
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
     monkeypatch.setattr(T, "_D64_UNI_AFFINE_FORCED", True)
-    test_flag_dispatch_and_all_gradients(length, 1, master, True, monkeypatch)
+    test_dispatch_and_all_gradients(length, 1, master, monkeypatch)

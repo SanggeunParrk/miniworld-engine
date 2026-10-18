@@ -59,27 +59,6 @@ def _owned_blas_scope(enabled):
         _OWNED_BLAS_STATE.enabled = previous
 
 
-def _variant_flags(part):
-    # Experiment hook: MW_F2_DEFS="-DMW_F2_STAGES_FORCE=3 -DMW_F2_MINB_FORCE=1" and MW_F2_PTXAS=1.
-    if part not in ("front_fused2", "front_fused3", "training_forward"):
-        return []
-    return [
-        *os.environ.get("MW_F2_DEFS", "").split(),
-        *(["-Xptxas=-v"] if os.environ.get("MW_F2_PTXAS") else []),
-    ]
-
-
-def _variant_suffix(part):
-    if part not in ("front_fused2", "front_fused3", "training_forward"):
-        return ""
-    return "".join(
-        c
-        for c in os.environ.get("MW_F2_DEFS", "")
-        + ("p" if os.environ.get("MW_F2_PTXAS") else "")
-        if c.isalnum()
-    )
-
-
 @functools.lru_cache(maxsize=None)
 def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 0):
     if part not in (
@@ -88,11 +67,9 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
         "dq",
         "bias_fusion",
         "pack",
-        "projection_ln",
         "front_grouped",
         "front_fused2",
         "front_fused3",
-        "tail_fused3",
     ):
         raise ValueError(part)
     ensure_cuda_home()
@@ -105,7 +82,6 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
             + (f"_kv{kv_tile}" if kv_tile != 64 else "")
             + (f"_r{row_group}" if row_group != 1 else "")
             + (f"_ws{pipeline}" if pipeline else "")
-            + _variant_suffix(part)
         ),
         sources=[str(_SRC / f"{part}.cu")],
         extra_include_paths=[str(_PARENT), str(cutlass / "include")],
@@ -122,10 +98,7 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
             "--expt-extended-lambda",
             "-lineinfo",
             *(["--use_fast_math"] if part == "module" else []),
-            *_variant_flags(part),
         ],
-        verbose=bool(os.environ.get("MW_F2_PTXAS"))
-        and part in ("front_fused2", "front_fused3", "training_forward"),
     )
 
 

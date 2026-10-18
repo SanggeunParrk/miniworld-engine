@@ -208,7 +208,7 @@ class Settings:
     #: Other cards are unaffected (Triton is their implementation).
     triton_on_hopper_blackwell: bool = False
     #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
-    #: own fused path (h100_d64_training), about 2.0x Triton under CUDA-graph replay at L384/768.
+    #: own fused path (h100_d64_b200gate).
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
 
     # ---- transition backend selection ------------------------------------------------------ #
@@ -224,11 +224,11 @@ class Settings:
     #: Route the pair-bias attention core, when it is asked to compute in bf16 (``compute_dtype=torch.bfloat16``), on
     #: sm_90 with 16 heads x 48, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
     #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
-    #: Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM90=0 also turns it off.
+    #: Falls back on anything else. Read by the module and by the kernel entry itself (formerly also ``augattn_bf16_sm90``).
     augmented_attention_bf16_sm90: bool = True
     #: The same routing on sm_100 (B200) through the tcgen05 forward and backward
     #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
-    #: A is even and there is no key mask. Falls back on anything else. MINIWORLD_AUGATTN_BF16_SM100=0 also turns it off.
+    #: A is even and there is no key mask. Falls back on anything else (formerly also ``augattn_bf16_sm100``).
     augmented_attention_bf16_sm100: bool = True
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
@@ -389,10 +389,6 @@ class Settings:
     token_dit_rows_cuda: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
     token_dit_train: bool = True
-    #: Formerly ``MINIWORLD_AUGATTN_BF16_SM90`` (default on).
-    augattn_bf16_sm90: bool = True
-    #: Formerly ``MINIWORLD_AUGATTN_BF16_SM100`` (default on).
-    augattn_bf16_sm100: bool = True
     #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
     tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
@@ -421,8 +417,6 @@ class Settings:
     #: Force the cuBLAS parts of the generic bf16 path: comma separated ``f3`` / ``gate`` / ``dxn``, ``all`` or ``none``; None keeps
     #: the measured row-count plan. Formerly ``MINIWORLD_TRANSITION_GENERIC_CUBLAS``.
     transition_generic_cublas: str | None = None
-    #: Fuse the input LN into the expand GEMM (measured 5-25 % slower: default off). Formerly ``MINIWORLD_TRANSITION_GENERIC_LNF``.
-    transition_generic_lnf: bool = False
     #: Overlap the weight gradients with the dxn -> ln_bwd chain at the row counts where it pays. Formerly
     #: ``MINIWORLD_TRANSITION_GENERIC_DW_ASIDE`` (default on).
     transition_generic_dw_aside: bool = True
@@ -517,17 +511,12 @@ class Settings:
     transition_d64_variant: int = 0
     #: Formerly ``MINIWORLD_TRANSITION_DW_REPL``; 0 keeps the built-in value (8 at n = 4, 15 at n = 2): D128 backward weight replicas.
     transition_dw_repl: int = 0
-    #: Formerly ``MINIWORLD_TRIMUL_H100_B200STYLE`` (default off): serve TriMul on Hopper with the B200-style port
-    #: (`h100_b200style*`, widths 256/384/512 plus the D64 b200gate kernels). Experimental; becomes a B item (bake in or delete)
-    #: when the family is qualified. On since 2026-10-13: it is 1.2-2.1x faster than the general path at every length the preserved
-    #: native path does not serve, and the cells where that path is faster keep it (`integrations/trimul_h100.py`).
-    trimul_h100_b200style: bool = True
-    #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
-    #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
-    #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
     #: Run the H100 TriMul contractions through cuBLAS with a zero workspace (no semaphore memset before each GEMM, same kernels,
     #: bitwise equal results; ``kernels/trimul_inproj/cuda/_h100_bmm.py``). Off falls back to ``torch.bmm``.
     trimul_h100_zero_workspace_bmm: bool = True
+    #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
+    #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
+    #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
     trimul_h100_native_buckets: bool | None = None
     #: Formerly ``MINIWORLD_TRIMUL_H100_PRESERVE_D128`` / ``_PRESERVE_D256`` / ``_PRESERVE_WIDE`` (widths 384 and 512 together):
     #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
@@ -615,8 +604,8 @@ def engine_jit_root() -> Path:
 #: Environment variables that used to switch these settings and are not read any more. The value is the setting that replaced
 #: the variable ("" when the switch was removed). Setting one now changes nothing, so it is reported instead of ignored silently.
 _REMOVED_ENVIRONMENT = {
-    "MINIWORLD_AUGATTN_BF16_SM100": "augattn_bf16_sm100",
-    "MINIWORLD_AUGATTN_BF16_SM90": "augattn_bf16_sm90",
+    "MINIWORLD_AUGATTN_BF16_SM100": "augmented_attention_bf16_sm100",
+    "MINIWORLD_AUGATTN_BF16_SM90": "augmented_attention_bf16_sm90",
     "MINIWORLD_BIAS_ONLY_DIT": "bias_only_dit",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_DG": "bias_only_dit_bwd_dg",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED": "bias_only_dit_bwd_fused",
@@ -781,7 +770,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TRIATTN_H100_ROW_VECTOR": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIATTN_H100_SPLIT_WGRAD": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIATTN_H100_TAIL": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_TRIMUL_H100_B200STYLE": "trimul_h100_b200style",
+    "MINIWORLD_TRIMUL_H100_B200STYLE": "",  # removed: the B200-style H100 TriMul port is always on (since 2026-10-13)
     "MINIWORLD_TRIMUL_H100_BIDI512_INFER_CANDIDATE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_CUDA_AUX": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_D128_GRAPH_WORKSPACE_CANDIDATE": "",  # removed: the default behaviour is the only one
@@ -804,6 +793,10 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TRIMUL_H100_WIDE_DEFAULT_CANDIDATE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_WIDE_FUSED_GLUE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_WIDE_OWNED_BLAS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_GENERIC_LNF": "",  # removed: the LN-in-GEMM variant measured 5-25 % slower
+    "MINIWORLD_TRANSITION_GENERIC_CLUSTER": "",  # removed: the cluster-multicast variant measured no gain
+    "MINIWORLD_TRANSITION_GENERIC_2CTA": "",  # removed: the 2-CTA variant measured no gain
+    "MINIWORLD_LNBWD_MULT": "",  # removed: the default behaviour is the only one
 }
 
 

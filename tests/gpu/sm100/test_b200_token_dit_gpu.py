@@ -126,7 +126,7 @@ def test_token_dit_step_runs_the_sm100_core(dtype, monkeypatch):
         got = m(x, c, p)
         assert calls, "the step did not take the sm_100a core"
         n = len(calls)
-        override_setting(monkeypatch, "augattn_bf16_sm100", "0")
+        override_setting(monkeypatch, "augmented_attention_bf16_sm100", "0")
         token_dit._RUNNERS.clear()
         tri = m(x, c, p)
         assert len(calls) == n, "the switch did not take the core out"

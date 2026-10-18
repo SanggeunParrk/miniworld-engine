@@ -36,24 +36,6 @@ from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 
-#: Tuned D128 forward build knobs (fixed; the measured-best values, see docs/gpus/h100/transition). The kernel's macros take them as -D flags.
-_RSMASK = 256
-_RESIDENT = 0
-_SPLIT2 = 0
-_PDL = 0
-_ABL = 0
-_SKEW = 1
-_TRACE = 0
-_NEWTON = 0
-_WSLOTS = 2
-_GBSMEM = 0
-_SUBCH = 0
-_XFIRST = 1
-_DECOUPLE = 1
-_STAGGER = 0
-_CPX = 0
-_FRAG = 1
-
 #: Hidden widths with a build: n = 4 (the AF3 Transition, 512) and n = 2 (256).
 HIDDEN_WIDTHS = (512, 256)
 #: Row tile of the persistent grid. ``M`` must be a whole number of these.
@@ -136,12 +118,6 @@ def _sm_count(device: torch.device | int | None = None) -> int:
     return torch.cuda.get_device_properties(device).multi_processor_count
 
 
-def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
-    # The warp-store / dW-overlap / early-release variants stay loadable through ``_build_ext``; none is selected here.
-    return _build_ext(ctas, dw_repl, save, False, False, False, n)
-
-
-
 # D128 forward build constants (the measured configuration; every one is a compile-time macro of transition_fused_fwd_sm90a_kernel.cu).
 # LNFRAG: LayerNorm in the wgmma A-fragment layout, x_n kept in registers as the RS operand (forward without saves; the saving build keeps
 # the shared-memory LayerNorm).  XFIRST: the x tile's TMA before the weight chunks'.  DECOUPLE: the weight-slot refill is issued by whichever
@@ -156,16 +132,13 @@ def _fwd_tuning_flags(save: bool) -> list[str]:
         t.update(LNFRAG=0, SKEW=0, DECOUPLE=0, NEWTON=0, GBSMEM=0, CPX=0, SUBCH=0, WSLOTS=2)
     return [f"-D{k}={v}" for k, v in t.items()] + ["-DRESIDENT=0", "-DSPLIT2=0"]
 
+
+def _ext(ctas: int, dw_repl: int, save: bool, n: int = 4):
+    return _build_ext(ctas, dw_repl, save, n)   # one cache key per build, however the caller spells n
+
+
 @functools.lru_cache(maxsize=32)
-def _build_ext(
-    ctas: int,
-    dw_repl: int,
-    save: bool,
-    warp_store: bool,
-    dw_overlap: bool = False,
-    early_release: bool = False,
-    n: int = 4,
-):
+def _build_ext(ctas: int, dw_repl: int, save: bool, n: int):
     """Build for a given SM count. ``ctas`` is in the module name, so a second device with a
     different multiprocessor count gets its own build rather than a silently wrong grid.
 
@@ -182,9 +155,6 @@ def _build_ext(
     return load_extension(
         name=(
             f"transition_fused_sm90a_c{ctas}_r{dw_repl}_s{int(save)}_input_barrier_v1"
-            + ("_affine_warp_store_v1" if warp_store else "")
-            + ("_dw_overlap_v1" if dw_overlap else "")
-            + ("_early_release_v1" if early_release else "")
             + (f"_n{n}" if n != 4 else "")
             + "_fwdtune1"
         ),
@@ -204,9 +174,6 @@ def _build_ext(
             f"-DFWD_SAVE={int(save)}",
             f"-DMW_N={n}",
             *_fwd_tuning_flags(save),
-            *(["-DMW_AFFINE_WARP_STORE=1"] if warp_store else []),
-            *(["-DMW_DW_OVERLAP=1"] if dw_overlap else []),
-            *(["-DMW_DW_EARLY_RELEASE=1"] if early_release else []),
             "--expt-relaxed-constexpr",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
@@ -413,22 +380,6 @@ def _select_schedule(args, *, backward, save):
         run=run,
         validate=validator(run, grid[0], output_only=not save),
     )
-
-
-def _master_pack_fake(wa, wb, ws):
-    """Output structure only: (Wa, Wb, Ws) as bf16 in their own shapes, then Ws^T as bf16."""
-    return tuple(
-        torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
-        for w in (wa, wb, ws)
-    ) + (torch.empty(ws.shape[1], ws.shape[0], device=ws.device, dtype=torch.bfloat16),)
-
-
-@opaque(fake=_master_pack_fake, name="transition_master_weight_pack_sm90a")
-def _master_pack(
-    wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """bf16 copies of an fp32 master (Wa, Wb, Ws) plus Ws^T, all freshly allocated."""
-    return _cuda_prepare(wa, wb, ws)
 
 
 class _FusedTransitionSM90A(torch.autograd.Function):

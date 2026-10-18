@@ -18,9 +18,8 @@ Moved from team-gm ``swa_fused_triton._cuda_ext`` (commit 14f2c73). Same sources
 caller takes the Triton kernel. The reason is kept in ``ERRORS[which]``.
 
 The bf16 kernels (``swa_qkvg_fwd.cu``, ``swa_ffn_fwd.cu``, ``swa_ffn_bwd.cu``) serve d_atom 128, 4 heads x 32,
-SwiGLU hidden 256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation. ``swa_ffn_bwd.cu`` still
-reads the team-gm diagnostics ``SWA_FFN_ABL`` (ablation bits) and ``SWA_FFN_PROF`` (clock64 section profile) from the
-environment; both default off and change nothing when unset. ``swa_fp32.cu`` (stage "fp32") is the whole fp32 block,
+SwiGLU hidden 256, bf16 operands with fp32 accumulate and an fp32 [B*S, 768] modulation.
+``swa_fp32.cu`` (stage "fp32") is the whole fp32 block,
 forward and backward, on tf32 wgmma with a bf16 window attention; its header says what each kernel does.
 """
 

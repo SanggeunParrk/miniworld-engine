@@ -65,7 +65,6 @@ def cubin(stem: str, hopper: bool = False) -> str:
         "-O3",
         "-arch=sm_90a" if hopper else "-arch=sm_100a",
         *(("-DATOM_HOPPER=1",) if hopper else ()),
-        *os.environ.get("ATTN_DEFS", "").split(),  # ablation / experiment switches
         "-cubin",
         "-lineinfo",
         f"-I{_dir}",

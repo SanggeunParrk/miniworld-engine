@@ -315,7 +315,7 @@ def supported(
 ) -> bool:
     """q [A, 1, L, 16, 48] (any float dtype) and a bias of [1, L, L, 16] (``bias_head_major``: [16, 1, L, L]) on sm_90
     with L a multiple of 128. The requirements are the kernels' own tile shapes, not a policy."""
-    if not settings.current().augattn_bf16_sm90:
+    if not settings.current().augmented_attention_bf16_sm90:
         return False
     if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
         return False
@@ -494,7 +494,7 @@ def inference_core_supported(
 ) -> bool:
     """The fused token DiT step's gated core fits: bf16, 16 heads x 48, L a multiple of 128, H100."""
     return (
-        settings.current().augattn_bf16_sm90
+        settings.current().augmented_attention_bf16_sm90
         and dtype is torch.bfloat16
         and (d, h) == (H * D, H)
         and L % 128 == 0

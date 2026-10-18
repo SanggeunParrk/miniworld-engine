@@ -28,16 +28,6 @@ def native_requested(module, pair):
     )
 
 
-def validated_inference(module, pair):
-    """Compatibility predicate for the numerically validated inference scope."""
-    return (
-        native_requested(module, pair)
-        and not torch.is_grad_enabled()
-        and not module.training
-        and module.starting
-    )
-
-
 def serves(module, pair, mask=None):
     validated = native_requested(module, pair)
     if not (validated or getattr(module, "_h100_b200style_cuda", False)):

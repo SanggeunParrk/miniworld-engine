@@ -66,6 +66,12 @@ did not change them. Step time-roofline SoL (pair bytes / 3.35 TB/s) ~55 % at L7
 - Key splits (2 warpgroups per tile, merged in smem; build flag `APB_KS`): 1-2 us per core, 0.5 % of the step, default 1.
 - Not done: overlapping `pair_bias_bwd` with the dK / dV chain on a second stream (~10 %), bf16 dbias (3 % of bytes).
 
+## Open
+
+- fp32 activations and QK-norm have no CUDA path: on H100 they run the PyTorch reference (no Triton fallback,
+  [dispatch.md](../dispatch.md)). Carried over from the 2026-09-30 status snapshot
+  ([docs/records/h100_status_20260930.md](../../../records/h100_status_20260930.md), item 9).
+
 ## Reproduce
 
 ```sh

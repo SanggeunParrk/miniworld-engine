@@ -392,7 +392,7 @@ def install_native_recorders() -> None:
             ("kernels.trimul_inproj.cuda.h100_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_single", (("forward", "_forward_fake"), ("backward", "_backward_fake"))),
             ("kernels.trimul_inproj.cuda.h100_inference", (("inference", "_inference_fake"),)),
-            ("kernels.trimul_inproj.cuda.h100_d64_training", (("forward", "_forward_fake"), ("backward", "_backward_fake"),
+            ("kernels.trimul_inproj.cuda.h100_d64_b200gate", (("forward", "_forward_fake"), ("backward", "_backward_fake"),
                                                               ("forward_nograd", "_forward_nograd_fake"))),
             ("kernels.trimul_inproj.cuda.h100_wide_inference", (("wide_inference", "_wide_inference_fake"),)),
             ("kernels.trimul_inproj.cuda.h100_uni_wide_inference", (("uni_wide_inference", "_uni_wide_inference_fake"),)),

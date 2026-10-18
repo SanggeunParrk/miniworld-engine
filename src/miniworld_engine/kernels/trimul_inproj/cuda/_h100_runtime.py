@@ -21,15 +21,12 @@ _bidi_d256_scope = threading.local()
 _d64_scope = threading.local()
 _uni_owned_blas_scope = threading.local()
 
-# Candidate cells that were selectable through environment switches (default off). The switches are gone; the cells stay
-# reachable through these private constants (tests force them with monkeypatch.setattr).
-_D64_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D64 L768 / uni outgoing D64 L768 graph workspace
-_D128_GRAPH_WORKSPACE_CANDIDATE = False  # bidir D128 384^2 preserved route
-_WIDE_DEFAULT_CANDIDATE = False  # bidir D384 default cell
+# Launch-scope policies that were environment switches. The switches are gone; these private constants keep the
+# alternatives reachable (tests force them with monkeypatch.setattr).
 _CUDA_AUX_UNSCOPED = False  # native auxiliary kernels outside the qualified launch scopes
 _TRAIN_CUDA_UNSCOPED = True  # D64 native preparation and the L128..1024 D64 buckets outside the qualified scope
 _TRAIN_FUSED_PREP_UNSCOPED = True  # D64 fused preparation outside the qualified scope (needs the line above)
-_D64_UNI_AFFINE_FORCED = False  # uni D64 affine split outside the selected L768 cell
+_D64_UNI_AFFINE_FORCED = False  # uni outgoing D64: the affine-split backward instead of the affine-register one
 
 
 def _native_buckets():
@@ -46,15 +43,12 @@ def _preserved_width(width):
 
 
 def d64_training(x, outgoing=False, bidirectional=False):
-    """Qualified compact-mask D64 preparation; keep wide-preservation policy separate."""
-    if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
-            or x.shape[-1] != 64 or x.shape[1] not in (384, 768)):
+    """Qualified compact-mask D64 preparation (the bidirectional L384 cell; no single-direction cell is qualified, so
+    ``outgoing`` does not change the answer); keep wide-preservation policy separate."""
+    if (not bidirectional or x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
+            or x.shape[-1] != 64 or x.shape[1] != 384):
         return False
-    if _native_buckets() is False:
-        return False
-    if bidirectional:
-        return x.shape[1] == 384 or _D64_GRAPH_WORKSPACE_CANDIDATE
-    return outgoing and x.shape[1] == 768 and _D64_GRAPH_WORKSPACE_CANDIDATE
+    return _native_buckets() is not False
 
 
 def d64_uni_owned_bmm_enabled(length):
@@ -64,9 +58,8 @@ def d64_uni_owned_bmm_enabled(length):
 
 
 def d64_uni_affine_enabled(x, outgoing):
-    """Use the qualified L768 split."""
-    selected = d64_training(x, outgoing=outgoing, bidirectional=False)
-    return x.shape[-1] == 64 and outgoing and (selected or _D64_UNI_AFFINE_FORCED)
+    """The affine-split backward for single-direction outgoing D64, only when forced."""
+    return x.shape[-1] == 64 and outgoing and _D64_UNI_AFFINE_FORCED
 
 
 @contextmanager
@@ -80,14 +73,12 @@ def preserved_d64_context(enabled):
 
 
 def d128_training(x, outgoing=True, bidirectional=False):
-    """Preserved D128 candidates; default waits for safe graph-owned scratch."""
+    """Preserved D128 path (``_preserved_width``; the direction does not change the answer)."""
     if x.shape[-1] != 128:
         return False
     if _native_buckets() is False:
         return False
-    return _preserved_width(128) or (bidirectional and x.ndim == 4
-                                     and tuple(x.shape[:3]) == (1, 384, 384)
-                                     and _D128_GRAPH_WORKSPACE_CANDIDATE)
+    return _preserved_width(128)
 
 
 @contextmanager
@@ -129,8 +120,7 @@ def bidi_training(x):
         return False
     if _native_buckets() is False:
         return False
-    return (_preserved_width(width) or (width == 256 and x.shape[1] == 768)
-            or (width == 384 and _WIDE_DEFAULT_CANDIDATE))
+    return _preserved_width(width) or (width == 256 and x.shape[1] == 768)
 
 
 @contextmanager

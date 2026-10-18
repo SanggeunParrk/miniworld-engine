@@ -668,10 +668,6 @@ def load_unit(unit, arch=None, device=None, build_dir=None, verify=True):
         return u
 
 
-def loaded_units():
-    return dict(_UNITS)
-
-
 # ---------------------------------------------------------------------------------------------------------------- tensor maps
 _TMAP_DTYPE_OF_TORCH = {
     "torch.bfloat16": "bfloat16",

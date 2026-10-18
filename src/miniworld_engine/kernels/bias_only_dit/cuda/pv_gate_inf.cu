@@ -699,92 +699,6 @@ void dpb2_launch(at::Tensor d,at::Tensor v,at::Tensor p,at::Tensor dsum,at::Tens
  }
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-
-// ---- dswi: dab = SwiGLU backward of (dz Wsq) in the GEMM's epilogue; dh never reaches HBM -----------------------------------------
-// dh [M, H] = dz [M, K] Wsq [K, H] (B given K-major: WsqT [H, K]); with ab = [a | b] [M, 2H]: da = dh b silu'(a), db = dh silu(a).
-// CTA tile 128 x 128 (two consumer warpgroups, m64n128), a TMA ring of [dz rows | WsqT rows] k-blocks; the tile's a / b
-// fragments are loaded into registers before the K loop (their latency hides under the GEMM).
-constexpr int DS_ST=4, DS_SB=32768;
-__global__ __launch_bounds__(384,1) void dswi(const __grid_constant__ CUtensorMap mz,const __grid_constant__ CUtensorMap mw,
- const bf*__restrict__ ab,bf*__restrict__ dab,int M,int K,int H){
- extern __shared__ __align__(1024) unsigned char sm[];
- uint64_t*full=reinterpret_cast<uint64_t*>(sm+DS_ST*DS_SB),*empty=full+DS_ST;
- int tid=threadIdx.x,wg=tid/128,wtid=tid&127,warp=wtid/32,lane=tid&31,KB=K/64,MT=M/128,NT=H/128,items=MT*NT;
- if(!tid){for(int s=0;s<DS_ST;++s){mbar_init(full+s,1);mbar_init(empty+s,2);}fence_barrier_init();}
- __syncthreads();
- unsigned it=0;
- if(wg==0){
-   setmaxnreg_dec<40>();
-   if(tid==0)for(int item=blockIdx.x;item<items;item+=gridDim.x){
-     int m0=(item%MT)*128,n0=(item/MT)*128;
-     for(int kb=0;kb<KB;++kb,++it){
-       int s=it%DS_ST;if(it>=DS_ST)mbar_wait(empty+s,((it/DS_ST)-1)&1);
-       unsigned char*st=sm+s*DS_SB;
-       mbar_arrive_expect_tx(full+s,DS_SB);
-       tma_load_2d(st,&mz,full+s,kb*64,m0);
-       tma_load_2d(st+8192,&mz,full+s,kb*64,m0+64);
-       tma_load_2d(st+16384,&mw,full+s,kb*64,n0);
-       tma_load_2d(st+24576,&mw,full+s,kb*64,n0+64);
-     }
-   }
-   return;
- }
- setmaxnreg_inc<232>();
- const int cw=wg-1;
- for(int item=blockIdx.x;item<items;item+=gridDim.x){
-   int m0=(item%MT)*128+cw*64,n0=(item/MT)*128;
-   const int r0=m0+16*warp+(lane>>2),c0=n0+2*(lane&3);
-   uint32_t av[32],bv[32];   // a, b bf16 pairs: [group j][row half rb]
-   #pragma unroll
-   for(int j=0;j<16;++j)
-     #pragma unroll
-     for(int rb=0;rb<2;++rb){
-       size_t ix=(size_t)(r0+rb*8)*(2*H)+c0+8*j;
-       av[j*2+rb]=*reinterpret_cast<const uint32_t*>(ab+ix);
-       bv[j*2+rb]=*reinterpret_cast<const uint32_t*>(ab+ix+H);
-     }
-   float acc[64];
-   #pragma unroll
-   for(int e=0;e<64;++e)acc[e]=0.f;
-   int prev=-1;
-   for(int kb=0;kb<KB;++kb,++it){
-     int s=it%DS_ST;mbar_wait(full+s,(it/DS_ST)&1);
-     uint32_t a_base=smem_u32(sm)+s*DS_SB+cw*8192,b_base=smem_u32(sm)+s*DS_SB+16384;
-     fence_regs(acc);wgmma_fence();
-     #pragma unroll
-     for(int k=0;k<4;++k)mma_n128(acc,ds(a_base+k*32),ds(b_base+k*32));
-     wgmma_commit();
-     if(prev>=0){wgmma_wait<1>();if(!wtid)mbar_arrive(empty+prev);}
-     prev=s;
-   }
-   wgmma_wait<0>();fence_regs(acc);if(!wtid)mbar_arrive(empty+prev);
-   #pragma unroll
-   for(int j=0;j<16;++j)
-     #pragma unroll
-     for(int rb=0;rb<2;++rb){
-       uint32_t aw=av[j*2+rb],bw=bv[j*2+rb];
-       float a0=__uint_as_float(aw<<16),a1=__uint_as_float(aw&0xffff0000u),b0=__uint_as_float(bw<<16),b1=__uint_as_float(bw&0xffff0000u);
-       float d0=acc[j*4+rb*2],d1=acc[j*4+rb*2+1];
-       float s0=rcpf(1.f+ex2f(-1.4426950408889634f*a0)),s1=rcpf(1.f+ex2f(-1.4426950408889634f*a1));
-       float da0=d0*b0*s0*(1.f+a0*(1.f-s0)),da1=d1*b1*s1*(1.f+a1*(1.f-s1));
-       float db0=d0*a0*s0,db1=d1*a1*s1;
-       size_t ix=(size_t)(r0+rb*8)*(2*H)+c0+8*j;
-       *reinterpret_cast<__nv_bfloat162*>(dab+ix)=__floats2bfloat162_rn(da0,da1);
-       *reinterpret_cast<__nv_bfloat162*>(dab+ix+H)=__floats2bfloat162_rn(db0,db1);
-     }
- }
-}
-void swiglu_bwd_gemm(at::Tensor dz,at::Tensor wsqT,at::Tensor ab,at::Tensor dab,int64_t nsm){
- at::cuda::CUDAGuard guard(dz.device());cudaSetDevice(dz.get_device());
- int M=dz.size(0),K=dz.size(1),H=wsqT.size(0);
- TORCH_CHECK(M%128==0&&K%64==0&&H%128==0&&wsqT.size(1)==K&&ab.size(0)==M&&ab.size(1)==2*H&&dab.sizes()==ab.sizes(),"dswi shape");
- TORCH_CHECK(dz.is_contiguous()&&wsqT.is_contiguous()&&ab.is_contiguous()&&dab.is_contiguous(),"dswi layout");
- constexpr int smem=DS_ST*DS_SB+64+1024;
- cudaFuncSetAttribute(dswi,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
- int grid=std::min<int>(nsm,(M/128)*(H/128));
- dswi<<<grid,384,smem,at::cuda::getCurrentCUDAStream()>>>(map(dz,64,64),map(wsqT,64,64),(bf*)ab.data_ptr(),(bf*)dab.data_ptr(),M,K,H);
- C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
 void dpb_pipeline(at::Tensor d,at::Tensor v,at::Tensor p,at::Tensor dd,at::Tensor out,int64_t A,int64_t H,int64_t DH){
  at::cuda::CUDAGuard guard(d.device());cudaSetDevice(d.get_device());int L=d.size(0)/A;
  constexpr int smem=3*16384+1024;cudaFuncSetAttribute(dpb_pipe,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
@@ -871,7 +785,7 @@ void swiglu(at::Tensor x,at::Tensor w,at::Tensor ab,at::Tensor h){
  expand<<<std::min(132,(M/64)*(H/64)),128,0,at::cuda::getCurrentCUDAStream()>>>(map(x,64,64),map(w,64,64),(bf*)ab.data_ptr(),(bf*)h.data_ptr(),M,K,H);C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta);m.def("swiglu_bwd_gemm",&bo90::swiglu_bwd_gemm);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32);m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){m.def("pv",&bo90::pv);m.def("grouped_pv",&bo90::grouped_pv);m.def("dpb",&bo90::dpb);m.def("swiglu",&bo90::swiglu);m.def("grouped_pv_pipeline",&bo90::grouped_pv_pipeline);m.def("pv_cta",&bo90::pv_cta);m.def("dpb2",&bo90::dpb2_launch);m.def("pv_cta_tf32",&bo90::pv_cta_tf32);m.def("pv_cta_prof",&bo90::pv_cta_prof);m.def("dpb_pipeline",&bo90::dpb_pipeline);m.def("swiglu_pipeline",&bo90::swiglu_pipeline);}
 #else
 // pv_gate_inf.cu -- the bias-only token DiT's INFERENCE attention core, sm_100a:
 //

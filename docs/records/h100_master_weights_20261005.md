@@ -1,12 +1,15 @@
 # H100 FP32 master weights: qualified implementation (2026-10-05)
 
+Moved from `docs/gpus/h100/master_weights.md` on 2026-10-18; it describes the code of 2026-10-05, before the H100
+no-Triton-fallback policy of [dispatch.md](../gpus/h100/dispatch.md).
+
 Installed and verified on one NVIDIA H100 80GB HBM3, SM90, 132 SM, using Slurm `h100` / `normal_h100`. All 56 measured configurations have BF16-mixed overhead below 2%. These measurements include 52 configurations of modified module families and four unchanged OPM/TokenDiT controls.
 
 BF16-mixed means FP32 master parameters, BF16 activation/projection operands, and FP32 matrix gradients computed without a BF16 rounding intermediate. FP32 weights are freshly packed on each call and CUDA Graph replay. Original parameters remain saved for autograd version checks.
 
 ## Measurement method
 
-The complete forward pass and gradients for every input and parameter are timed; optimizer updates are excluded. Both modes use the same state, including pinned normalization parameters. Timing uses CUDA Graph replay, 90 alternating paired samples, five replays per CUDA-event measurement, and medians. Each listed configuration independently satisfies `mixed_ms / bf16_ms < 1.02`; negative overhead means mixed is faster. Native CUDA defaults are retained. Portable Triton cold dispatch uses `autotune_miss_cap=1`, not exhaustive autotuning. Four empty profiler captures from job 21477 are repaired in profile-only job 21490; the original 90-sample latency results remain unchanged. Actual CUDA/Triton dispatch profiles, dtype inventories, unrounded matrix-gradient checks, and all raw timing samples are retained in [the measurement artifact](../../records/data/master_weights/master_weights_20261005.json).
+The complete forward pass and gradients for every input and parameter are timed; optimizer updates are excluded. Both modes use the same state, including pinned normalization parameters. Timing uses CUDA Graph replay, 90 alternating paired samples, five replays per CUDA-event measurement, and medians. Each listed configuration independently satisfies `mixed_ms / bf16_ms < 1.02`; negative overhead means mixed is faster. Native CUDA defaults are retained. Portable Triton cold dispatch uses `autotune_miss_cap=1`, not exhaustive autotuning. Four empty profiler captures from job 21477 are repaired in profile-only job 21490; the original 90-sample latency results remain unchanged. Actual CUDA/Triton dispatch profiles, dtype inventories, unrounded matrix-gradient checks, and all raw timing samples are retained in [the measurement artifact](data/master_weights/master_weights_20261005.json).
 
 ## Implementation
 

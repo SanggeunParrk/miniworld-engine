@@ -48,7 +48,6 @@ def cubin(
         f"-DNWARP={nwarp}",
         f"-DMINB={minb}",
         *defs,
-        *os.environ.get("ROW_DEFS", "").split(),
         "-cubin",
         "-lineinfo",
         f"-I{_dir}",
@@ -360,12 +359,9 @@ def _pack_all(weights, tf32: bool):
 
 
 def _kernel_pack_ok(weights) -> bool:
-    return (
-        all(
-            w.dtype in (torch.float32, torch.bfloat16) and w.is_contiguous()
-            for w in weights
-        )
-        and os.environ.get("LDIT_PACK", "kernel") == "kernel"
+    return all(
+        w.dtype in (torch.float32, torch.bfloat16) and w.is_contiguous()
+        for w in weights
     )
 
 
@@ -390,10 +386,8 @@ def pack_bwd(weights, tf32: bool) -> dict:
 _SM_FILL = 132 * 2  # CTAs the split aims for (about two per SM)
 
 
-def _split_for(tiles: int, choices, kind: str = "") -> int:
+def _split_for(tiles: int, choices) -> int:
     """The smallest split of the work of one 64-row tile over CTAs (``choices`` ascending) that gives about _SM_FILL CTAs; 1 for many tiles."""
-    if kind and kind in os.environ.get("LDIT_NOSPLIT", "").split(","):
-        return 1
     for s in choices:
         if tiles * s >= _SM_FILL:
             return s
@@ -407,7 +401,7 @@ def cond_fwd(c, p, tf32: bool, eps: float = 1e-5):
     mod = torch.empty(M, 768, device=c.device, dtype=dt)
     mkv = torch.empty(M, 256, device=c.device, dtype=dt)
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4, 8, 16), "cond")
+    ns = _split_for(tiles, (1, 2, 4, 8, 16))
     kernel("cond_split" if ns > 1 else "cond", tf32, _dev(c))(
         (tiles, ns, 1),
         (NWARP * 32, 1, 1),
@@ -430,7 +424,7 @@ def pre_fwd(
     new = lambda: torch.empty(M, DS, device=x.device, dtype=x.dtype)  # noqa: E731
     q, sg, k, v = new(), new(), new(), new()
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4, 8), "pre")
+    ns = _split_for(tiles, (1, 2, 4, 8))
     # the unsplit TF32 kernel round-trips the exact x1 through memory (registers hold it rounded); the split one keeps it in registers
     x1 = new() if (save or (tf32 and ns == 1)) else None
     xkv = new() if save else None
@@ -455,31 +449,6 @@ def pre_fwd(
         int(save),
     )
     return (q, sg, k, v, x1, xkv) if save else (q, sg, k, v)
-
-
-def _tmap2(t, rows: int, cols: int, box_cols: int, box_rows: int, tf32: bool):
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
-
-    es = 4 if tf32 else 2
-    return driver.TensorMap(
-        t,
-        (cols, rows),
-        cols * es,
-        (box_cols, box_rows),
-        swizzle=128,
-        dtype="f32" if tf32 else "bf16",
-    )
-
-
-def _maps(p, key, tf32, build):
-    m = p.get(key)
-    if m is None:
-        m = p[key] = build()
-    return m
-
-
-def _nsm(dev):
-    return torch.cuda.get_device_properties(dev).multi_processor_count
 
 
 def post_fwd(
@@ -580,7 +549,7 @@ def tr_bwd(dy, t, mod, x2, p, pb, tf32: bool, nmod: int = 0, shared=None):
     )
     grid = (M // rows, 1, 1)
     nch = 256 // (128 // (4 if tf32 else 2))
-    ns = _split_for(grid[0], tuple(s for s in (1, 2, 4, 8) if nch % s == 0), "tr_bwd")
+    ns = _split_for(grid[0], tuple(s for s in (1, 2, 4, 8) if nch % s == 0))
     grid = (grid[0], ns, 1)
     colpart = torch.empty(grid[0] * grid[1], 128, device=dev, dtype=torch.float32)
     kernel("tr_bwd_g" if shared else "tr_bwd", tf32, _dev(dy))(
@@ -632,7 +601,7 @@ def post_bwd(
     dd = torch.empty(M // n, 4, n, device=dev, dtype=torch.float32)
     spc, natoms, sp = shared or (0, 0, 1)
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 2, 4), "post_bwd")
+    ns = _split_for(tiles, (1, 2, 4))
     grid = (tiles, ns, 1)
     part = (
         torch.empty(tiles * ns * 16 * 512, device=dev, dtype=torch.float32)
@@ -738,7 +707,7 @@ def cond_bwd(dmod, dmkv, c, pb, tf32: bool, eps: float = 1e-5):
     dc = torch.empty(M, DS, device=c.device, dtype=c.dtype)
     n = torch.empty(M, DS, device=c.device, dtype=c.dtype)
     tiles = M // ROWS
-    ns = _split_for(tiles, (1, 4), "cond_bwd")
+    ns = _split_for(tiles, (1, 4))
     part = (
         torch.empty(tiles * ns * 16 * 512, device=c.device, dtype=torch.float32)
         if ns > 1

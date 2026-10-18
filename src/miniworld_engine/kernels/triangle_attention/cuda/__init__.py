@@ -37,7 +37,6 @@ def _available(device: torch.device) -> bool:
     return (
         torch.cuda.is_available() and _artifact_ready()
         and torch.cuda.get_device_capability(device) == (9, 0)
-        and "H100" in torch.cuda.get_device_name(device)
     )
 
 

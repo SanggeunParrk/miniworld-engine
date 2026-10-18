@@ -7,8 +7,7 @@ S1024/L768 training owns cuBLAS workspaces for safe independent CUDA-graph lifet
 S1024/L384 and S2048/L384 inference also use the gathered-TMA, overlapping-WGMMA epilogue.
 Other required inference cells retain the faster accurate historical composition;
 training retains zero-gamma-safe CUDA backward. The all-shape CUDA-only goal remains open.
-The H100 shape routing lives in `_h100_path` / `_epilogue_*_enabled` / `_owned_blas_for`; the former environment switches for
-the TMA prologue, the cuBLAS mask count and the WIDE epilogue are the private `_CANDIDATE_*` constants below (all False).
+The H100 shape routing lives in `_h100_path` / `_epilogue_*_enabled` / `_owned_blas_for`.
 
 The historical TRAINING path: one autograd.Function over the fused OPM kernels developed in MiniWorld's
 `runs/msa_bench_20260921` (2026-09-22): the upstream-style fused Triton PROLOGUE (LayerNorm + both projections + mask
@@ -54,21 +53,13 @@ def _enabled() -> bool:
     return True if value is None else value
 
 
-# Candidate build variants that stay compiled/loadable but are not selected by any shape (the former diagnostic environment switches).
-_CANDIDATE_TMA_PROLOGUE = False  # TMA prologue on every shape (``_h100_path`` already picks it for the qualified cells)
-_CANDIDATE_CUBLAS_COUNT = False  # FP32 cuBLAS mask count instead of the exact bit-mask popcount kernel (needs the TMA prologue)
 _CUDA_PROLOGUE_FOR_LEGACY = True  # inference cells that used the Triton prologue run the CUDA one (`opm_prologue_wide`): 1.5-5.5 % faster at all 11 such cells (2026-10-13)
-_CANDIDATE_EPILOGUE_WIDE = (
-    False  # wide gathered-TMA epilogue (mutually exclusive with HALF)
-)
 
 
 def _h100_path(s: int, n: int, *, training: bool, wide: bool = False) -> str:
     """Only stable paired wins below the eligible historical timing are promoted."""
     if wide:  # d_msa / d_pair other than MiniWorld's: the wide composition (persistent TMA prologue at that d_msa)
         return "wide"
-    if _CANDIDATE_TMA_PROLOGUE:
-        return "tma"
     if training:
         return "tma" if s in (1024, 2048, 4096) else "native"
     if (s, n) in (
@@ -201,10 +192,9 @@ def _ext(
     device=None,
     *,
     native=None,
-    tma=None,
+    tma=False,
     epi_tma=None,
     epi_half=None,
-    owned=None,
     cm: int = CM,
     cz: int = CZ,
 ):
@@ -214,22 +204,14 @@ def _ext(
     sm100 = torch.cuda.get_device_capability(device) == (10, 0)
     wide = (cm, cz) != (CM, CZ)
     native = True if native is None else native
-    tma = _CANDIDATE_TMA_PROLOGUE if tma is None else tma
-    count = native and tma and _CANDIDATE_CUBLAS_COUNT
-    owned = not sm100 and native and bool(owned)
     # Gathered O/W TMA stages with overlapping WGMMA groups (chosen per shape by the callers).
     epi_tma = not sm100 and native and tma and bool(epi_tma)
     epi_half = epi_tma and bool(epi_half)
-    epi_wide = epi_tma and _CANDIDATE_EPILOGUE_WIDE
-    if epi_half and epi_wide:
-        raise ValueError("OPM epilogue HALF and WIDE candidates are mutually exclusive")
     key = (
         "sm100"
         if sm100
         else (
-            "mod_native_tma_cublas_count"
-            if count
-            else "mod_native_tma_static"
+            "mod_native_tma_static"
             if native and tma
             else "mod_native"
             if native
@@ -240,10 +222,6 @@ def _ext(
         key += "_epi_tma_overlap"
     if epi_half:
         key += "_half"
-    if epi_wide:
-        key += "_wide"
-    if owned:
-        key += "_owned_blas"
     if wide and not sm100:
         key += f"_{cm}_{cz}"
     if key in _EXT:
@@ -265,9 +243,7 @@ def _ext(
         )
     else:
         suffix = (
-            "_native_tma_cublas_count"
-            if count
-            else "_native_tma_static"
+            "_native_tma_static"
             if native and tma
             else "_native"
             if native
@@ -277,10 +253,6 @@ def _ext(
             suffix += "_epi_tma_overlap"
         if epi_half:
             suffix += "_half"
-        if epi_wide:
-            suffix += "_wide"
-        if owned:
-            suffix += "_owned_blas"
         if wide:
             suffix += f"_{cm}_{cz}"
         build = root / ("opm_epilogue" + suffix)
@@ -291,13 +263,9 @@ def _ext(
             build_directory=str(build),
             extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
-            + (["-DMINIWORLD_OPM_CUBLAS_COUNT=1"] if count else [])
-            + (["-DMINIWORLD_OPM_OWNED_BLAS=1"] if owned else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
-            + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
-            + (["-DMINIWORLD_OPM_EPILOGUE_TMA_WIDE=1"] if epi_wide else []),
+            + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else []),
             extra_cflags=["-O3"],
-            extra_ldflags=["-lcublas"] if owned else [],
         )
     return _EXT[key]
 
@@ -666,7 +634,6 @@ class _OpmMath(torch.autograd.Function):
             epi_half=_epilogue_half_enabled(
                 msa.shape[1], msa.shape[2], training=save_stats
             ),
-            owned=owned,
         )
         if torch.cuda.get_device_capability(msa.device) == (10, 0):
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
@@ -789,7 +756,6 @@ class _OpmMath(torch.autograd.Function):
             tma=path == "tma",
             epi_tma=_epilogue_tma_enabled(s, n, training=True),
             epi_half=_epilogue_half_enabled(s, n, training=True),
-            owned=owned,
         )
         if torch.cuda.get_device_capability(dz.device) == (10, 0):
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100

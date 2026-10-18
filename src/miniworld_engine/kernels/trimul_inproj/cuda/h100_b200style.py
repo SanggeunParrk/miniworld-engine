@@ -1,4 +1,4 @@
-"""Hopper port of the B200 wide TriMul fusion algorithm (explicit candidate).
+"""Hopper port of the B200 wide TriMul fusion algorithm (selected by ``integrations.trimul_h100`` wherever it is faster).
 
 K1 writes gated planes and LN_in statistics; folded K3 writes y, projection,
 gate and LN_out statistics. Neither normalized output rows nor front
@@ -8,18 +8,11 @@ instructions are imported: the shared B200 auxiliary sources are plain CUDA.
 """
 
 from functools import lru_cache
-from pathlib import Path
 
 import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._nvcc import (
-    ensure_cuda_home,
-    gencodes,
-    host_flags,
-    load_extension,
-)
 from . import _h100_runtime as T
 from . import h100_uni_wide_inference as I
 from . import h100_wide_inference as BI
@@ -28,30 +21,6 @@ from ._h100_pack import owned_bf16_mask, pack_into_cuda, cast_training_weights
 R = T.SOURCES / "b200style"
 WIDTHS = (256, 384, 512)
 LENGTHS = (128, 256, 384, 512, 640, 768, 896, 1024)
-
-
-@lru_cache(None)
-def _runtime_aux():
-    """Retain the initial runtime binding for reproducing diagnostic logs."""
-    ensure_cuda_home()
-    shared = Path(__file__).with_name("b200_sources")
-    return load_extension(
-        name="trimul_h100_schedule256_aux_v1",
-        sources=[
-            str(R / "bind.cpp"),
-            str(shared / "wide_aux.cu"),
-            str(shared / "wide_bwd.cu"),
-        ],
-        extra_cuda_cflags=[
-            *host_flags(),
-            "-O3",
-            "-std=c++17",
-            *gencodes("90a"),
-            "-lineinfo",
-        ],
-        extra_cflags=["-O3", "-std=c++17"],
-        verbose=False,
-    )
 
 
 @lru_cache(None)

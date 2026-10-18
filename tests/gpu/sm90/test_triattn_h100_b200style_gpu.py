@@ -280,6 +280,7 @@ def test_opt_in_module_dispatch():
     x = torch.randn(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     assert not triattn_h100.serves(m, x)
     m._h100_b200style_cuda = True
+    m._h100_cuda = False  # the sm_90 TriAttn kernels take the call first; this test is about the b200style opt-in
     assert triattn_h100.serves(m, x)
     with torch.no_grad():
         torch.testing.assert_close(m(x), native.forward(m, x), atol=0, rtol=0)

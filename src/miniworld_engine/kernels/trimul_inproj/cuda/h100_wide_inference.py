@@ -27,22 +27,6 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 R = T.SOURCES / "wide_forward"
 WIDTHS = (256, 384, 512)
 LENGTHS = (384, 768)
-#: Bidirectional D512 / L384 inference candidate (formerly an environment switch, default off); kept reachable.
-_BIDI512_INFER_CANDIDATE = False
-
-
-def native_inference_bucket(width, length):
-    """Validated BIDI candidate; existing-test gate remains open, default off."""
-    return _BIDI512_INFER_CANDIDATE and width == 512 and length == 384
-
-
-def _owned_blas_enabled(width, length):
-    return native_inference_bucket(width, length)
-
-
-def _fast_aux_enabled(width, length):
-    return native_inference_bucket(width, length)
-
 
 
 def supports(width: int, length: int) -> bool:
@@ -179,8 +163,7 @@ def _run(x, weights, mask):
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     _, N, _, D = x.shape
     H, M = 2 * D, N * N
-    native_aux = T.cuda_aux_enabled() or native_inference_bucket(D, N) or (T._GLUE_CUDA and not torch.compiler.is_compiling())
-    fast_aux = _fast_aux_enabled(D, N)
+    native_aux = T.cuda_aux_enabled() or (T._GLUE_CUDA and not torch.compiler.is_compiling())
     sel = _selection(D, N)
     cfg, normalize, gfold = tuple(sel["k1"]), sel["normalize"], sel.get("gfold", False)
     bn, stages = sel["k3s"]
@@ -210,13 +193,13 @@ def _run(x, weights, mask):
         if gfold:
             if native_aux:
                 from ._h100_pack import normalize_into
-                normalize_into(xn, x, gi, bi, xs, warp=fast_aux)
+                normalize_into(xn, x, gi, bi, xs)
             else:
                 _normalize_stats_into(xn, xs, x, gi, bi)
         else:
             if native_aux:
                 from ._h100_pack import normalize_into
-                normalize_into(xn, x, gi, bi, warp=fast_aux)
+                normalize_into(xn, x, gi, bi)
             else:
                 T.normalize_into(xn, x, gi, bi)
     k1, smem1 = _compile("k1", D, cfg, normalize, gfold and normalize, mask is not None)
@@ -234,13 +217,8 @@ def _run(x, weights, mask):
 
     # Outgoing and incoming contractions into tri = [out | in].
     tri = x.new_empty((H, N, N))
-    if _owned_blas_enabled(D, N):
-        from ._h100_pack import owned_bmm
-        owned_bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
-        owned_bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
-    else:
-        _H100_BMM.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
-        _H100_BMM.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
+    _H100_BMM.bmm(ab[:D], ab[H:H + D].transpose(-1, -2), out=tri[:D])
+    _H100_BMM.bmm(ab[D:H].transpose(-1, -2), ab[H + D:], out=tri[D:])
 
     # K3: folded output LN + projection, gate, residual.
     y = torch.empty_like(x)

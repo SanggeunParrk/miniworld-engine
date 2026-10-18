@@ -11,8 +11,9 @@ GEMMs of the backward and the hoisted adaLN modulation (`swa_dit_hoist_modulatio
 kernels too (see "Weight gradients and modulation" below): the bf16 weight gradients on TMA + wgmma at every row count, the fp32
 ones up to 65536 rows (cuBLAS's TF32 GEMMs are faster above), the bf16 modulation on mma.sync / wgmma; the fp32 modulation stays on
 torch's GEMMs. Nothing autotunes: tiles and launch shapes are fixed, so there is no
-dependence on an H100 autotune cache. The Triton kernels (`triton/forward*.py`, `backward*.py`) remain the non-H100 path, the
-fallback when an extension does not build, and the accuracy reference the tests compare against.
+dependence on an H100 autotune cache. The Triton kernels (`triton/forward*.py`, `backward*.py`) are the non-H100 path and the accuracy
+reference the tests compare against; on H100 they run only on request (`engine_backend="triton"`, a `swa_dit_*_cuda` switch off) and for
+the fp32 block under matmul precision "highest" (below). H100 has no Triton fallback otherwise ([dispatch.md](../dispatch.md)).
 
 ## Where the code is
 
@@ -105,9 +106,10 @@ of 0.66 ms, SIMT fp32 GEMMs plus splitK reductions plus eager casts). They are k
 
 ## Measured (H100, CUDA-graph replay, 3 blocks, fwd + bwd, N = 1 sample, B = 1; 2026-10-14)
 
-"Triton fused" is the fused block with `engine_backend="triton"` (every CUDA stage off, no H100 autotune cache: the heuristic
-fallback config, which is how a fresh install runs); "CUDA" is the default. bf16 under `torch.set_float32_matmul_precision("highest")`,
-fp32 under "medium" (TF32 allowed: the only precision the fp32 CUDA stages serve). Harness: `bench.py` of the 2026-10-14 record.
+"Triton fused" is the fused block with `engine_backend="triton"` (every CUDA stage off, no H100 autotune cache: the
+heuristic config of a cold cache); "CUDA" is the default. bf16 under `torch.set_float32_matmul_precision("highest")`,
+fp32 under "medium" (TF32 allowed: the only precision the fp32 CUDA stages serve). Harness: the scratch harness described in
+[docs/records/swa_dit_h100_20261014.md](../../../records/swa_dit_h100_20261014.md) (Setup).
 
 | dtype | A | S (atoms) | Triton fused (ms) | CUDA (ms) | CUDA vs Triton |
 |---|---|---|---|---|---|
@@ -228,32 +230,13 @@ because the fused ops are opaque to Dynamo):
 No measured cell has any of these baselines ahead of the CUDA block. Cells where the block itself calls cuBLAS TF32 (fp32 weight
 gradients above 65536 rows, the fp32 modulation) run at cuBLAS's speed by construction.
 
-## Where the time goes (A = 1, S = 4096, one block, forward + backward, device us; taken before the wgmma weight gradients and PDL)
+## Where the time goes
 
-Kernel durations from one graph replay (`timeline.py` of the record; launch gaps are 0.4-0.8 us each, 5 % of the step):
-
-| stage | bf16 | fp32 |
-|---|---|---|
-| modulation forward | 12 | 14 (cuBLAS + silu) |
-| qkvg forward | 11 | 11 + weight prep 4 |
-| window attention forward | 5 | 5 |
-| out-projection + FFN forward | 15 | 26 |
-| FFN backward (+ dmod fill in fp32) | 17 | 39 (+4) |
-| out-projection backward | 8 | 12 |
-| window attention backward | 10 | 9 |
-| qkvg backward | 12 | 20 |
-| weight gradients | 20 | 34 |
-| modulation backward | 26 | 33 (cuBLAS + silu') |
-| total per block | 140 | 215 |
-
-Against the compulsory-traffic floor (HBM at 3 TB/s over the bytes each kernel must read and write, or the MMA work at the
-mma.sync rate, whichever is larger) the A = 1 step is at ~30 % per kernel and ~60 % of a latency-adjusted floor that charges every
-kernel ~4 us for launch, weight prologue and one slab's dependency chain (11 kernels per block). ncu on these kernels: one CTA per SM
-with 4-8 warps (occupancy 6-12 %), issue slots 10-25 % busy, top stall `long_scoreboard` (the loads at the top of every slab
-iteration are consumed before the next one is issued); no kernel is bandwidth- or tensor-bound at A = 1. At A = 48, S = 1024 the same
-kernels sit at 36-47 % of HBM peak (ffn_bwd 104 us, qkvg_bwd 94, weight gradients 111 per block against ~60 us of traffic). 90 % of
-speed of light is not reached anywhere in this decomposition; what stands in the way is structural (single CTA per SM, loads not
-software-pipelined across slabs, 11 kernel boundaries), not a tuning knob.
+The per-stage breakdown of the A = 1, S = 4096 step taken before the wgmma weight gradients and PDL (140 us bf16 / 215 us fp32 per
+block, ~30 % of the compulsory-traffic floor per kernel, one CTA per SM, top stall `long_scoreboard`; 90 % of speed of light not
+reached anywhere, for structural reasons) is in [docs/records/h100_swa_atom_dit_20261014.md](../../../records/h100_swa_atom_dit_20261014.md);
+the per-kernel timeline and Nsight Compute data of the session in
+[docs/records/swa_dit_h100_20261014.md](../../../records/swa_dit_h100_20261014.md).
 
 ## Tried and not kept (2026-10-14)
 
@@ -275,12 +258,12 @@ RMSNorm / RoPE / modulation-gradient arithmetic and atomics per row, and that, n
 
 ## Correctness
 
-- `tests/numerics/test_swa_dit_fused_gpu.py` (112 passed, 1 skipped -- the team-gm comparison, team-gm is not installed -- on
+- `tests/gpu/any/test_swa_dit_fused_gpu.py` (112 passed, 1 skipped -- the team-gm comparison, team-gm is not installed -- on
   merged main ce7fd93b, H100): output and every gradient (q, the five block weights, and conditioning / adaLN weight through the
   hoisted modulation) against the fp32 reference, no worse than the Triton path; each CUDA kernel alone next to Triton; the attention
   side kernels launched directly against the Triton kernels; CUDA-graph replay; `torch.compile(fullgraph)`; the fp32 extension against
-  the fp32 Triton kernels and the module's per-op fp32 path. After the 2026-10-14 kernels: 89 passed, 1 skipped on this branch (H100);
-  `tests/numerics/test_numerical.py -k swa_dit` (the registry checkers, bf16 and fp32 processes) passes, including the four new
+  the fp32 Triton kernels and the module's per-op fp32 path. After the 2026-10-14 kernels: 89 passed, 1 skipped (H100);
+  `tests/gpu/any/test_numerical.py -k swa_dit` (the registry checkers, bf16 and fp32 processes) passes, including the four new
   rows `swa_dit_gemm_{fwd,bwd}_sm90_cuda`, `swa_dit_dw_sm90_cuda`, `swa_dit_dw_fp32_sm90_cuda`, `swa_dit_transpose_sm90_cuda`.
 - `test_a_cuda_graph_replays_the_training_step` is statistical: it holds the replay to 4x the eager-vs-eager difference of the
   atomically accumulated modulation gradient (floor 1e-5), and that difference is a few bf16 rounding flips of dWmod / dc caused by

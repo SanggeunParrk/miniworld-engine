@@ -35,7 +35,7 @@ def _artifact_ready():
 
 @functools.lru_cache(maxsize=None)
 def _device_ready(device):
-    return torch.cuda.get_device_capability(device)==(9,0) and 'H100' in torch.cuda.get_device_name(device)
+    return torch.cuda.get_device_capability(device)==(9,0)
 
 
 def can_use(q,k,v,b):

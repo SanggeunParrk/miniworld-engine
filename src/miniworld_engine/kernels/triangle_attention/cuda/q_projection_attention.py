@@ -26,8 +26,7 @@ def _artifact_ready():
 
 @device_constant
 def _available(device):
-    return (_artifact_ready() and torch.cuda.get_device_capability(device)==(9,0)
-            and 'H100' in torch.cuda.get_device_name(device))
+    return (_artifact_ready() and torch.cuda.get_device_capability(device)==(9,0))
 
 def extension():
     global _EXT

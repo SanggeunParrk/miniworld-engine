@@ -27,31 +27,6 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 
-#ifdef MINIWORLD_OPM_OWNED_BLAS
-
-#include <ATen/Context.h>
-#include <cublas_v2.h>
-#include <map>
-#include <memory>
-static void opm_owned_count(torch::Tensor norm,torch::Tensor mf) {
- struct Handle {cublasHandle_t value;Handle(){TORCH_CHECK(cublasCreate(&value)==CUBLAS_STATUS_SUCCESS,"OPM cublasCreate");}~Handle(){cublasDestroy(value);}};
- static thread_local std::map<int,std::unique_ptr<Handle>> handles;
- auto& h=handles[mf.get_device()];if(!h)h=std::make_unique<Handle>();
- auto handle=h->value;
- auto ck=[](cublasStatus_t s){TORCH_CHECK(s==CUBLAS_STATUS_SUCCESS,"OPM owned count cuBLAS ",int(s));};
- ck(cublasSetStream(handle,at::cuda::getCurrentCUDAStream()));
- ck(cublasSetPointerMode(handle,CUBLAS_POINTER_MODE_HOST));
- ck(cublasSetAtomicsMode(handle,CUBLAS_ATOMICS_NOT_ALLOWED));
- ck(cublasSetMathMode(handle,at::globalContext().allowTF32CuBLAS()?CUBLAS_TF32_TENSOR_OP_MATH:CUBLAS_DEFAULT_MATH));
- size_t bytes=at::cuda::getChosenWorkspaceSize();
- auto workspace=torch::empty({int64_t(bytes)},mf.options().dtype(at::kByte));
- ck(cublasSetWorkspace(handle,workspace.data_ptr(),bytes));
- int n=mf.size(1),s=mf.size(0);float alpha=1,beta=0;
- ck(cublasSgemm(handle,CUBLAS_OP_N,CUBLAS_OP_T,n,n,s,&alpha,mf.data_ptr<float>(),n,mf.data_ptr<float>(),n,&beta,norm.data_ptr<float>(),n));
-}
-
-#endif
-
 namespace {
 
 constexpr int CH = 32;             // c_hidden
@@ -70,13 +45,11 @@ constexpr int CZ = OPM_CZ;         // d_pair
 constexpr int ZW = 128;            // c_z slice per CTA (the wgmma n of the epilogue, the m of dWo)
 constexpr int NZS = CZ / ZW;       // slices
 static_assert(CZ % ZW == 0, "d_pair must be a multiple of 128");
-#if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF) || defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE) || defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
+#if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF) || defined(MINIWORLD_OPM_EPILOGUE_TMA_OVERLAP)
 static_assert(CZ == 128 && CM_MSA == 64, "the gathered-TMA epilogue variants are written for the MiniWorld width");
 #endif
 #if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
 constexpr int BI = 2;              // one warpgroup shares each gathered TMA stage
-#elif defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
-constexpr int BI = 8;              // four warpgroups share each projection-weight stage
 #else
 constexpr int BI = 4;              // i tokens per CTA
 #endif
@@ -169,14 +142,6 @@ __global__ void opm_mask_bits_native(const bool* mask, unsigned* bits, int S, in
   int n=word/(S/32), s=(word%(S/32))*32+lane;
   unsigned v=__ballot_sync(0xffffffff,mask[(long)s*N+n]);
   if(lane==0)bits[word]=v;
-}
-__global__ void opm_mask_fp32_selective(const bool* mask, float* output, int count) {
-  int i=blockIdx.x*blockDim.x+threadIdx.x;
-  if(i<count)output[i]=mask[i]?1.f:0.f;
-}
-__global__ void opm_norm_clamp_selective(float* norm, int count) {
-  int i=blockIdx.x*blockDim.x+threadIdx.x;
-  if(i<count)norm[i]=fmaxf(norm[i],1.f);
 }
 __global__ void opm_count_native(const unsigned* bits, float* norm, int S, int N) {
   int p=blockIdx.x*blockDim.x+threadIdx.x;
@@ -1118,8 +1083,6 @@ __device__ __forceinline__ void stmatrix_x4(uint32_t dst, uint32_t r0, uint32_t 
 
 #if defined(MINIWORLD_OPM_EPILOGUE_TMA_HALF)
 constexpr int WARPS = 4;
-#elif defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
-constexpr int WARPS = 16;
 #else
 constexpr int WARPS = 8;            // two warpgroups of 64 rows each
 #endif
@@ -2279,11 +2242,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   auto stream = at::cuda::getCurrentCUDAStream();
   static bool ep_attr = false;                 // the staged weight pushes the tiles past 48 KiB
   if (!ep_attr) {
-#if defined(MINIWORLD_OPM_EPILOGUE_TMA_WIDE)
-    cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 192 * 1024);
-#else
     cudaFuncSetAttribute(opm_epilogue_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, 128 * 1024);
-#endif
     ep_attr = true;
   }
   // z[i, j, z] as TMA sees it, innermost first: 64 z, then j, then the z half, then i
@@ -2390,20 +2349,7 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  int grid=std::min(tiles,at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(512),args,opm_pro_tma::SMEM,at::cuda::getCurrentCUDAStream()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();
-#ifdef MINIWORLD_OPM_CUBLAS_COUNT
- // Keep the established FP32 cuBLAS mask product; only its cast/clamp are native replacements.
- // Binary inputs make each count exact throughout the supported MSA depths, including TF32 mode.
- auto mf=torch::empty({S,N},fo);
- opm_native_launch(opm_mask_fp32_selective,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),mf.data_ptr<float>(),S*N);
-#ifdef MINIWORLD_OPM_OWNED_BLAS
- opm_owned_count(norm,mf);
-#else
- at::mm_out(norm,mf.t(),mf);
-#endif
- opm_native_launch(opm_norm_clamp_selective,dim3((N*N+255)/256),dim3(256),norm.data_ptr<float>(),N*N);
-#else
  opm_count_launch(bitp,norm.data_ptr<float>(),S,N);
-#endif
  return {a,b,stats,mk,norm};
 }
 

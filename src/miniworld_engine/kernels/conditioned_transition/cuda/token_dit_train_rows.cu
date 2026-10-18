@@ -971,44 +971,6 @@ std::vector<at::Tensor> train_pack90(std::vector<at::Tensor> weights,bool qk,boo
  train_pack90_k<<<total,256,0,S()>>>(p);C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 
-
-
-std::vector<at::Tensor> train_alloc90(std::vector<at::Tensor> weights,bool qk,bool fp32) {
- TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23),"native H100 staged pack layout");
- const at::cuda::CUDAGuard guard(weights[0].device());
- const std::vector<std::vector<int64_t>> shapes={{DC},{DC},{4*D,DC},{4*D,DC},{2*D,DC},{D},{D},{D},{D},
- {4*D,D},{4*D},{HD},{HD},{128},{NHH,128},{NHH,128},{NHH,128},{NHH,128},{D,D},{4*D,D},{D,2*D}};
- const int aliases[21]={6,14,-1,-1,-1,8,16,11,19,-1,-1,qk?23:-1,qk?24:-1,12,13,-1,-1,-1,5,-1,22};
- std::vector<at::Tensor> out;
- for(int o=0;o<21;++o){
-  const bool isact=o==3||o==4||o==9||o==10||o==16||o==17||o>=18;
-  const auto dt=isact&&!fp32?at::kBFloat16:at::kFloat;
-  const int a=aliases[o];
-  if(a>=0&&weights[a].scalar_type()==dt)out.push_back(weights[a]);
-  else out.push_back(at::empty(shapes[o],weights[0].options().dtype(dt)));
- }
- return out;
-}
-void train_stage90(std::vector<at::Tensor> weights,std::vector<at::Tensor> out,bool qk,bool fp32,int begin,int end) {
- TORCH_CHECK((D==768||D==1024)&&weights.size()==(qk?25:23)&&out.size()==21&&0<=begin&&begin<end&&end<=21,"native H100 staged pack");
- const at::cuda::CUDAGuard guard(weights[0].device());TrainPack90 p{};p.qk=qk;
- for(int j=0;j<(int)weights.size();++j){
-  TORCH_CHECK(weights[j].is_cuda()&&weights[j].is_contiguous()&&weights[j].device()==weights[0].device()
-   &&(weights[j].scalar_type()==at::kFloat||weights[j].scalar_type()==at::kBFloat16),"native staged weight layout");
-  p.src[j]=weights[j].data_ptr();p.sf[j]=weights[j].scalar_type()==at::kFloat;
- }
- const int aliases[21]={6,14,-1,-1,-1,8,16,11,19,-1,-1,qk?23:-1,qk?24:-1,12,13,-1,-1,-1,5,-1,22};
- int total=0;
- for(int o=begin;o<end;++o){
-  const bool isact=o==3||o==4||o==9||o==10||o==16||o==17||o>=18;
-  const auto dt=isact&&!fp32?at::kBFloat16:at::kFloat;p.df[o]=dt==at::kFloat;
-  const int a=aliases[o];if(a>=0&&weights[a].scalar_type()==dt)continue;
-  p.dst[o]=out[o].data_ptr();p.size[o]=out[o].numel();p.blocks[o]=(p.size[o]+1023)/1024;total+=p.blocks[o];
- }
- if(total)train_pack90_k<<<total,256,0,S()>>>(p);
- C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 struct TrainGrad90 {
  const float* src[25]; void* dst[25]; bool fp32[25]; int size[25],blocks[25];
  const float* dwn; const float* w1; const float* w2; const float* allp; const float* lnp;
@@ -1268,8 +1230,6 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("caller_sum90", &caller_sum90);
   m.def("caller_add90", &caller_add90);
   m.def("train_pack90", &train_pack90);
-  m.def("train_alloc90", &train_alloc90);
-  m.def("train_stage90", &train_stage90);
   m.def("train_final90", &train_final90);
   m.def("train_bias90", &train_bias90);
   m.def("train_keymask90", &train_keymask90);

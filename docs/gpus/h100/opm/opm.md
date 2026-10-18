@@ -8,8 +8,9 @@ the same, the instructions are not (see [Against B200](#against-b200)).
 Dispatch: `integrations/opm_train.py` (`_h100_path`, `_forward_wide`); kernels: `integrations/csrc/opm_epilogue.cu` (one extension per
 (d_msa, d_pair), built by JIT for sm_90a).
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, no interchain masking, inference and training alike; the pair
-residual is added in the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call
-runs the portable Triton path. Widths: (d_msa, d_pair) = (64, 128) MiniWorld, (128, 256) Protenix-v2 / ESMFold2, (128, 384) OpenDDE,
+residual is added in the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call runs the
+module's PyTorch statements on H100 (no Triton fallback, see [dispatch.md](../dispatch.md); other cards run the portable Triton path).
+Widths: (d_msa, d_pair) = (64, 128) MiniWorld, (128, 256) Protenix-v2 / ESMFold2, (128, 384) OpenDDE,
 d_hidden 32. Either normalisation order (`normalize_before_proj=False` is ESMFold2's: divide after the projection and its bias). A length
 that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with masked rows and the output cut back.
 
@@ -91,7 +92,7 @@ extension per (d_msa, d_pair) is built on first use. Figures are not generated y
 
 ## Speed of light
 
-Measured 2026-10-07 on one H100 (CUDA graph, ours = default dispatch, code of this branch with the tiled count kernel); method,
+Measured 2026-10-07 on one H100 (CUDA graph, ours = default dispatch, the code of that date with the tiled count kernel); method,
 ceilings and raw numbers: [record](../../../records/h100_opm_sol_20261007.md). Ceilings measured on this card: HBM 3.04 TB/s, cuBLAS bf16
 703 TFLOP/s (also measured on the module's own grouped GEMM per shape). Floor = sum over the kernels of `max(bytes / HBM, FLOPs / TC)`.
 The floor takes cuBLAS's measured rate as the tensor ceiling, so a step that beats it exceeds 100 %. Spread between jobs 2-3 %.
@@ -147,7 +148,7 @@ MiniWorld column predates the tiled count kernel, so a re-run is a few percent f
 
 ### Training
 
-Earlier runs against PyTorch compiled (`benchmarks/modules/outer_product/artifacts/`, `native_final_*` files, before the training
+Earlier runs against PyTorch compiled (their `native_final_*` artifact files are no longer in the tree; before the training
 prologue change): ours / PyTorch compiled, ms: (384, 1024) 2.090 / 2.467, (768, 1024) 7.867 / 9.003, (384, 2048) 3.722 / 3.945,
 (768, 2048) 13.987 / 14.809, (384, 4096) 7.030 / 7.333, (768, 4096) 24.997 / 25.591 (1.02-1.18x). The current code is 4-9 % faster than
 those "ours" values at the six cells above ([record](../../../records/h100_opm_sol_20261007.md)); a protocol-style

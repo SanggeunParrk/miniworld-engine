@@ -2,7 +2,7 @@
 
 Kernel-level status of the TriMul modules on H100; the module-level summary is in
 [h100.md](../h100.md). bf16 only; columns are (Length, Dimension). H100 = CUDA; a shape
-without a CUDA path is 미구현. Figures: one box per kernel, left to right, HBM reads (blue,
+without a CUDA path is 미구현 (it runs the PyTorch reference: no Triton fallback on H100, see [dispatch.md](../dispatch.md)). Figures: one box per kernel, left to right, HBM reads (blue,
 left) and writes (red, right); generated from `figures/trimul_bidir.json` by
 `python -m miniworld_engine.viz.kernel_flow`, then `rsvg-convert -z 2 -b white` to PNG.
 Dispatch: `integrations/trimul_h100.py`.
@@ -41,7 +41,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 | (Length, Dimension) | (384, 256) | (768, 256) | (384, 384) | (768, 384) | (384, 512) | (768, 512) |
 |---|---|---|---|---|---|---|
-| implementation | Triton | Triton | Triton | Triton | Triton | Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -57,7 +57,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 | (Length, Dimension) | (384, 256) | (768, 256) | (384, 384) | (768, 384) | (384, 512) | (768, 512) |
 |---|---|---|---|---|---|---|
-| implementation | Triton | Triton | Triton | Triton | Triton | Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -79,7 +79,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 | (Length, Dimension) | (384, 64) | (768, 64) |
 |---|---|---|
-| implementation | Triton | Triton |
+| implementation | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ |
 | cache build | ✓ | ✓ |
 
@@ -131,7 +131,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 | (Length, Dimension) | (384, 128) | (768, 128) |
 |---|---|---|
-| implementation | Triton | Triton |
+| implementation | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ |
 | cache build | ✓ | ✓ |
 
@@ -175,7 +175,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 | (Length, Dimension) | (384, 256) | (768, 256) | (384, 384) | (768, 384) | (384, 512) | (768, 512) |
 |---|---|---|---|---|---|---|
-| implementation | Triton | Triton | Triton | Triton | Triton | Triton |
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -253,97 +253,34 @@ D512 training at L768 (outgoing, ms per kernel): front 2.74 + LN 0.43, `contract
 1.74 + 1.76 (cuBLAS, about 70 % of the tensor peak), output-LN backward 1.24, gate 1.09, input-LN backward 0.84, output epilogue 0.82,
 forward LN-out 0.47: 17.1 ms in total. Kernel flow figures for the single direction are not generated yet.
 
-Weight pack, LN-affine fold and input LN use the CUDA aux kernels whenever the call runs eagerly (every caller sits inside an opaque
-custom op); the Triton versions only serve compiled regions. No Triton kernel remains in any D256 / D384 / D512 cell at L384 / L768.
+Weight pack, LN-affine fold and input LN use the CUDA aux kernels whenever the call runs eagerly, and every caller sits inside an
+opaque custom op, so the P1 / F3-fold rows above are CUDA; their Triton versions only serve a `torch.compile` region that traces the
+caller. No Triton kernel remains in any D256 / D384 / D512 cell at L384 / L768.
 
-## Measurements (2026-10-13)
+## Open
 
-H100 80GB HBM3 (132 SMs), torch 2.13.0+cu129, B=1, bf16 activations, FP32 master parameters, `benchmarks/runners/bench.py` (compiled,
-manual CUDA graph), default dispatch (`trimul_h100_b200style` on, per-cell fallback to the preserved path at L384 / 768; see
-[the record](../../../records/trimul_h100_dispatch_selection_20261013.md)). Latency in ms, median; training = forward + backward
-with dropout 0.25, inference dropout 0, mask probability 0.1. × = fastest other / ours. PyTorch compiled is far behind and omitted;
-the Anthropic payload (inference, D64–D384 single direction, D64 / D128 bidirectional) is compared in the
-[inference records](../../../records/trimul_h100_inference_master_matched_20261012.md) (1.01–1.27x) and, for L128 – L1024, in
-[the 2026-10-15 matrix](../../../records/trimul_h100_comparison_20261015.md) (1.006–1.41x).
+- Single direction in fp32 (bf16 only today); kernel flow figures for the single direction.
+- D512 single-direction training at L768 (17.1 ms): front 2.7 ms (latency bound; multicast, N-split and BI=2 variants measured and
+  not faster), `contract_gp` 2.5 ms (at its DRAM traffic), output-LN backward 1.2 ms (reads 0.7 GB more than needed). Each remaining
+  item is 1 - 3 % of the step.
+- Wide single-direction training towards 90 % of speed of light: at D384 L768 the step is at 86.5 % of the design SoL; the worst
+  kernels are the front (69.6 %), the output-LN backward (65.3 %) and `contract_gp` (88 %).
+- Bidirectional D512 L128 training is the thinnest cell against the other implementations (1.10x).
 
-### Bidirectional · Inference
+(Carried over from the 2026-09-30 status snapshot, [docs/records/h100_status_20260930.md](../../../records/h100_status_20260930.md).)
 
-| (Length, Dimension) | Triton | DTv1 | cuEquivariance | ours | × (fastest other / ours) |
-|---|---|---|---|---|---|
-| (128, 64) | 0.039 | 0.053 | 0.049 | **0.029** | 1.31 |
-| (256, 64) | 0.090 | 0.135 | 0.118 | **0.061** | 1.48 |
-| (384, 64) | 0.182 | 0.296 | 0.268 | **0.120** | 1.52 |
-| (512, 64) | 0.310 | 0.511 | 0.485 | **0.210** | 1.47 |
-| (640, 64) | 0.469 | 0.793 | 0.745 | **0.326** | 1.44 |
-| (768, 64) | 0.663 | 1.115 | 1.064 | **0.466** | 1.42 |
-| (128, 128) | 0.064 | 0.082 | 0.080 | **0.042** | 1.54 |
-| (256, 128) | 0.204 | 0.289 | 0.326 | **0.126** | 1.61 |
-| (384, 128) | 0.432 | 0.627 | 0.523 | **0.244** | 1.77 |
-| (512, 128) | 0.733 | 1.080 | 0.891 | **0.417** | 1.76 |
-| (640, 128) | 1.150 | 1.694 | 1.380 | **0.662** | 1.74 |
-| (768, 128) | 1.649 | 2.421 | 1.985 | **0.956** | 1.72 |
-| (128, 256) | 0.142 | 0.164 | 0.169 | **0.083** | 1.72 |
-| (256, 256) | 0.498 | 0.605 | 0.680 | **0.281** | 1.77 |
-| (384, 256) | 1.104 | 1.289 | 1.678 | **0.595** | 1.86 |
-| (512, 256) | 1.898 | 2.261 | 2.954 | **1.051** | 1.81 |
-| (640, 256) | 3.030 | 3.776 | 4.636 | **1.681** | 1.80 |
-| (768, 256) | 4.394 | 5.320 | 6.686 | **2.466** | 1.78 |
-| (128, 384) | 0.266 | 0.277 | 0.307 | **0.150** | 1.77 |
-| (256, 384) | 0.909 | 1.001 | 1.557 | **0.516** | 1.76 |
-| (384, 384) | 2.092 | 2.201 | 3.492 | **1.100** | 1.90 |
-| (512, 384) | 3.650 | 3.847 | 6.169 | **2.019** | 1.81 |
-| (640, 384) | 5.811 | 6.247 | 9.721 | **3.319** | 1.75 |
-| (768, 384) | 8.403 | 8.989 | 14.014 | **4.791** | 1.75 |
-| (128, 512) | 0.434 | 0.398 | 0.472 | **0.298** | 1.34 |
-| (256, 512) | 1.591 | 1.456 | 2.632 | **0.896** | 1.62 |
-| (384, 512) | 3.665 | 3.211 | 5.895 | **1.873** | 1.71 |
-| (512, 512) | 6.553 | 5.839 | 10.467 | **3.462** | 1.69 |
-| (640, 512) | 10.584 | 9.161 | 16.422 | **5.514** | 1.66 |
-| (768, 512) | 15.350 | 13.405 | 23.744 | **8.065** | 1.66 |
+## Measurements (2026-10-15)
 
-### Bidirectional · Training
-
-| (Length, Dimension) | Triton | DTv1 | cuEquivariance | ours | × (fastest other / ours) |
-|---|---|---|---|---|---|
-| (128, 64) | 0.152 | 0.177 | 0.195 | **0.103** | 1.47 |
-| (256, 64) | 0.393 | 0.499 | 0.525 | **0.204** | 1.93 |
-| (384, 64) | 0.817 | 1.066 | 1.139 | **0.392** | 2.09 |
-| (512, 64) | 1.368 | 1.823 | 1.954 | **0.661** | 2.07 |
-| (640, 64) | 2.132 | 2.804 | 2.990 | **1.009** | 2.11 |
-| (768, 64) | 3.018 | 3.977 | 4.249 | **1.482** | 2.04 |
-| (128, 128) | 0.245 | 0.286 | 0.318 | **0.207** | 1.18 |
-| (256, 128) | 0.789 | 0.992 | 1.107 | **0.524** | 1.51 |
-| (384, 128) | 1.629 | 2.119 | 2.311 | **1.006** | 1.62 |
-| (512, 128) | 2.797 | 3.632 | 3.933 | **1.737** | 1.61 |
-| (640, 128) | 4.562 | 5.646 | 6.173 | **2.828** | 1.61 |
-| (768, 128) | 6.549 | 8.117 | 8.740 | **3.972** | 1.65 |
-| (128, 256) | 0.485 | 0.536 | 0.626 | **0.432** | 1.12 |
-| (256, 256) | 1.698 | 1.954 | 2.444 | **1.367** | 1.24 |
-| (384, 256) | 3.722 | 4.194 | 5.579 | **2.675** | 1.39 |
-| (512, 256) | 6.552 | 7.379 | 9.657 | **4.948** | 1.32 |
-| (640, 256) | 11.287 | 11.649 | 15.102 | **7.729** | 1.46 |
-| (768, 256) | 16.329 | 16.646 | 21.746 | **11.070** | 1.48 |
-| (128, 384) | 0.843 | 0.869 | 1.066 | **0.706** | 1.19 |
-| (256, 384) | 2.953 | 3.066 | 4.577 | **2.284** | 1.29 |
-| (384, 384) | 6.488 | 6.768 | 10.171 | **4.590** | 1.41 |
-| (512, 384) | 11.536 | 11.886 | 17.881 | **8.723** | 1.32 |
-| (640, 384) | 19.496 | 18.798 | 28.127 | **13.753** | 1.37 |
-| (768, 384) | 28.187 | 27.077 | 40.850 | **19.007** | 1.42 |
-| (128, 512) | 1.232 | 1.207 | 1.528 | **1.100** | 1.10 |
-| (256, 512) | 4.421 | 4.425 | 7.328 | **3.632** | 1.22 |
-| (384, 512) | 9.928 | 9.778 | 16.277 | **7.248** | 1.35 |
-| (512, 512) | 17.619 | 17.303 | 28.750 | **14.121** | 1.23 |
-| (640, 512) | 30.197 | 27.012 | 45.269 | **22.117** | 1.22 |
-| (768, 512) | 43.707 | 40.160 | 66.108 | **29.384** | 1.37 |
-
-## Measurements (2026-10-15): single direction, incoming and bidirectional refreshed
-
-Same setup as above (B=1, bf16, FP32 masters, compiled, manual CUDA graph, L = 128 ... 1024 in steps of 128, D = 64 ... 512). Cells show
+H100 80GB HBM3 (132 SMs), torch 2.13.0+cu129, `benchmarks/runners/bench.py` (compiled, manual CUDA graph), default dispatch; B=1, bf16
+activations, FP32 master parameters, training = forward + backward with dropout 0.25, inference dropout 0, mask probability 0.1;
+L = 128 ... 1024 in steps of 128, D = 64 ... 512. Cells show
 × = fastest other implementation / ours, with that implementation in parentheses; the others are PyTorch, cuEquivariance and DTv1. Absolute
 latencies, the Anthropic payload (same-process alternating A/B, D64 ... D384 single direction and D64 / D128 bidirectional, ours faster in
 all 48 cells, thinnest 1.006x at D256 L768) and the Triton rows are in
 [the record](../../../records/trimul_h100_comparison_20261015.md). **Ours is the fastest in all 240 cells** (smallest 1.10x).
 The D256 single-direction inference cells were measured before the 2026-10-15 selection change (0.7 - 2.5 % faster now).
+The 2026-10-13 tables (absolute latencies of the bidirectional module against Triton, DTv1 and cuEquivariance):
+[docs/records/h100_trimul_20261013.md](../../../records/h100_trimul_20261013.md).
 
 ### Single direction, outgoing · Training
 
