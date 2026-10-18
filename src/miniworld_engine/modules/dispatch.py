@@ -294,6 +294,17 @@ def _torch_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device
     return pick
 
 
+def _cuda_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
+    """Like :func:`_torch_on_hopper_blackwell`, but H100 and B200 run the op on its general CUDA kernel rather than as PyTorch ops."""
+    torch_pick = _torch_on_hopper_blackwell(default)
+
+    def pick(device: torch.device | None) -> KernelBackend:
+        backend = torch_pick(device)
+        return KernelBackend.CUDA if backend is KernelBackend.PYTORCH else backend
+
+    return pick
+
+
 #: A fixed backend, or a device-dependent chooser. Spelled out rather than `object` so that
 #: `resolve`'s `best(device) if callable(best) else best` narrows to `KernelBackend` on both
 #: arms instead of returning `object`.
@@ -305,7 +316,8 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     # (fused triton fwd + per-shape auto-dispatched backward), and on H100 / B200 (no Triton
     # there, see restricted_card) the general CUDA LayerNorm (kernels/layernorm/cuda/general).
     "layernorm": KernelBackend.CUDA,
-    "rmsnorm": _torch_on_hopper_blackwell(KernelBackend.TRITON),
+    # rmsnorm: Triton on other cards; H100 / B200 the general CUDA RMSNorm (kernels/rmsnorm/cuda).
+    "rmsnorm": _cuda_on_hopper_blackwell(KernelBackend.TRITON),
     # These have no faster module-layer backend than the TRITON family (whose kernels do
     # their own shape/arch sub-dispatch, incl. hand-CUDA on H100 internally). Listed
     # explicitly so the policy is auditable rather than implicit-by-omission.

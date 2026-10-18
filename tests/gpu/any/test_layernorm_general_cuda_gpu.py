@@ -47,13 +47,15 @@ def test_forward_and_backward_match_fp64(n, dtype):
         bi = b.clone().requires_grad_() if b is not None else None
         y = layernorm_cuda(xi, wi, bi, 1e-5)
         y.backward(dy)
-        assert y.dtype == dtype and y.shape == x.shape
+        assert y.dtype == dtype
+        assert y.shape == x.shape
         tol = TOL[dtype]
         if n > 1:
             assert rel(y, y_ref) < tol, (n, m, affine, "y")
             assert rel(xi.grad, dx_ref) < 4 * tol, (n, m, affine, "dx")
         if wi is not None:
-            assert wi.grad.dtype == wi.dtype and rel(wi.grad, dw_ref) < 4 * tol, (n, m, affine, "dw")
+            assert wi.grad.dtype == wi.dtype
+            assert rel(wi.grad, dw_ref) < 4 * tol, (n, m, affine, "dw")
         if bi is not None:
             assert rel(bi.grad, db_ref) < 4 * tol, (n, m, affine, "db")
 
@@ -65,7 +67,8 @@ def test_leading_dims_bf16_activation_fp32_affine_and_no_grad():
     with torch.no_grad():
         y = layernorm_cuda(x, w, b)
     ref = F.layer_norm(x.float(), (64,), w, b).to(torch.bfloat16)
-    assert y.shape == x.shape and rel(y, ref) < 1e-2
+    assert y.shape == x.shape
+    assert rel(y, ref) < 1e-2
 
 
 @pytest.mark.parametrize("n", [64, 128, 1000])
@@ -139,5 +142,6 @@ def test_engine_layernorms_take_the_general_kernel_on_h100_and_b200(monkeypatch)
             y.backward(dy)
             outs.append((y, xi.grad, m.weight.grad, m.bias.grad))
         for a, e in zip(*outs, strict=True):
-            assert a.dtype == e.dtype and rel(a, e) < 1e-2
+            assert a.dtype == e.dtype
+            assert rel(a, e) < 1e-2
     assert len(calls) == 2

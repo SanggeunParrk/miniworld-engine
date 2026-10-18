@@ -1,6 +1,7 @@
-"""RMSNorm (and AdaptiveLayerNorm / ConditionedTransition, which have no CUDA path yet) on an H100 or B200 run as PyTorch ops that
-``torch.compile`` fuses -- the engine has no Triton fallback on those cards; every other card keeps the engine kernel. LayerNorm resolves
-to the CUDA family on every card (on H100 / B200 its forward takes the general CUDA LayerNorm, ``kernels/layernorm/cuda/general``).
+"""AdaptiveLayerNorm / ConditionedTransition (no CUDA path yet) on an H100 or B200 run as PyTorch ops that ``torch.compile`` fuses -- the
+engine has no Triton fallback on those cards; every other card keeps the engine kernel. LayerNorm and RMSNorm resolve to CUDA on H100 /
+B200 (the general kernels, ``kernels/layernorm/cuda/general`` and ``kernels/rmsnorm/cuda``); elsewhere LayerNorm stays CUDA and RMSNorm
+Triton.
 
 ``settings.triton_on_hopper_blackwell`` (and, on B200 only, the older ``b200_engine_triton``) bring the engine's Triton kernels back
 (the A/B switch), and a strict ``engine_backend="triton"`` process still wins. No GPU is needed: the card is faked.
@@ -37,7 +38,7 @@ def _card(monkeypatch, capability):
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
-@pytest.mark.parametrize(("op", "engine"), _NORMS[1:] + [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
+@pytest.mark.parametrize(("op", "engine"), [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
 def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, capability):
     _card(monkeypatch, capability)
     assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
@@ -45,10 +46,11 @@ def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, cap
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
-def test_h100_and_b200_run_layernorm_on_cuda(monkeypatch, capability):
+@pytest.mark.parametrize("op", ["layernorm", "rmsnorm"])
+def test_h100_and_b200_run_the_norms_on_cuda(monkeypatch, op, capability):
     _card(monkeypatch, capability)
-    assert dispatch.resolve("layernorm", "miniworld") is KernelBackend.CUDA
-    assert dispatch.resolve("layernorm", "miniworld", torch.device("cuda", 0)) is KernelBackend.CUDA
+    assert dispatch.resolve(op, "miniworld") is KernelBackend.CUDA
+    assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.CUDA
 
 
 @pytest.mark.parametrize("capability", [(8, 0), (8, 6)])
@@ -107,6 +109,6 @@ def test_the_pytorch_stand_in_for_rmsnorm_returns_the_input_dtype(monkeypatch):
     monkeypatch.setattr(torch.nn.RMSNorm, "forward", autocast_like)
     x = torch.randn(2, 16, dtype=torch.bfloat16)
     stand_in = RMSNorm(16, implementation="miniworld")
-    assert stand_in._backend is KernelBackend.PYTORCH
+    assert stand_in._backend is KernelBackend.CUDA  # a CPU tensor runs the PyTorch statements
     assert stand_in(x).dtype is torch.bfloat16
     assert RMSNorm(16, implementation="pytorch")(x).dtype is torch.float32  # an explicit request keeps torch's behaviour

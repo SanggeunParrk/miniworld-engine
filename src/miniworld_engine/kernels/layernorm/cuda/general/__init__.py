@@ -1,7 +1,7 @@
 """General LayerNorm on CUDA: any width (1 .. 65 536 bf16 / fp16, 32 768 fp32), any row count, bf16 / fp16 / fp32 activations, fp32
 statistics, optional weight and bias (cast to fp32), forward and backward (dx and the affine gradients without atomics: a replay is
 bit-identical). Plain CUDA (sm_80+), built on first use; every launch is an opaque op with a fake, so it traces under torch.compile
-and captures in a CUDA graph.
+and captures in a CUDA graph. The same extension serves RMSNorm (`kernels/rmsnorm/cuda`): a template flag drops the mean and the bias.
 
 Layout (``ln_common.cuh``): TPR threads per row, each holding CHUNKS vectors of VEC elements in registers; :func:`config` picks them
 from the width: the fewest idle lanes, at most 32 values per thread, and TPR as close to 128 as that allows (measured on H100: 128
@@ -60,7 +60,7 @@ def _ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="layernorm_general_cuda_v2",
+        name="layernorm_general_cuda_v3",
         sources=[str(_dir / "bind.cpp"), str(_dir / "ln_fwd.cu"), str(_dir / "ln_bwd.cu")],
         extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "--expt-relaxed-constexpr", *gencodes("80", "90", "100")],
         extra_cflags=["-O3", "-std=c++17"],
@@ -86,6 +86,7 @@ def _affine(t: torch.Tensor | None, x: torch.Tensor) -> torch.Tensor:
 
 
 def _fwd_fake(x, w, b, eps, save):
+    """y like x; mean / rstd fp32 [M] when save, else empty."""
     m = x.shape[0] if save else 0
     f32 = dict(dtype=torch.float32, device=x.device)
     return torch.empty_like(x), torch.empty((m,), **f32), torch.empty((m,), **f32)
@@ -93,12 +94,14 @@ def _fwd_fake(x, w, b, eps, save):
 
 @opaque(fake=_fwd_fake, name="layernorm_general_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, save: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """LayerNorm forward of contiguous x [M, N]; w / b fp32 [N] or empty. (y, mean, rstd)."""
     tpr, ch, vec = config(x.shape[1], x.element_size())
-    y, mean, rstd = _ext().fwd(x, w, b, float(eps), bool(save), tpr, ch, vec)
+    y, mean, rstd = _ext().fwd(x, w, b, float(eps), bool(save), False, tpr, ch, vec)
     return y, mean, rstd
 
 
 def _bwd_fake(dy, x, w, mean, rstd, wgrad):
+    """dx like x; dw / db fp32 [N] when wgrad, else empty."""
     f32 = dict(dtype=torch.float32, device=x.device)
     n = x.shape[1] if wgrad else 0
     return torch.empty_like(x), torch.empty((n,), **f32), torch.empty((n,), **f32)
@@ -107,8 +110,9 @@ def _bwd_fake(dy, x, w, mean, rstd, wgrad):
 @opaque(fake=_bwd_fake, name="layernorm_general_bwd")
 def _bwd(dy: torch.Tensor, x: torch.Tensor, w: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor,
          wgrad: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """LayerNorm backward from the saved mean / rstd. (dx, dw, db); the affine gradients only when wgrad."""
     tpr, ch, vec = config(x.shape[1], x.element_size())
-    dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), tpr, ch, vec, 0)
+    dx, dw, db = _ext().bwd(dy, x, w, mean, rstd, bool(wgrad), False, tpr, ch, vec, 0)
     return dx, dw, db
 
 

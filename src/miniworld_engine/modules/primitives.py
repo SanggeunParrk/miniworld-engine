@@ -215,13 +215,19 @@ class RMSNorm(nn.RMSNorm):
         # (torch 2.13): a qk-norm then hands the attention kernels an fp32 q next to a bf16 k. An explicit PYTORCH request
         # keeps torch's behaviour.
         self._returns_input_dtype = (
-            self.implementation == ImplementationType.MINIWORLD and self._backend == KernelBackend.PYTORCH
+            self.implementation == ImplementationType.MINIWORLD and self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA)
         )
-        if len(self.normalized_shape) != 1 and self._backend != KernelBackend.PYTORCH:
+        if len(self.normalized_shape) != 1 and self._backend == KernelBackend.TRITON:
             raise ValueError("Engine RMSNorm supports one normalized dimension")
 
     def forward(self, x):
-        if self._backend == KernelBackend.PYTORCH or not x.is_cuda:
+        if self._backend == KernelBackend.CUDA and x.is_cuda and len(self.normalized_shape) == 1:
+            # H100 / B200 (no Triton there): the general CUDA RMSNorm; an input it does not take runs the PyTorch statements below
+            from miniworld_engine.kernels.rmsnorm.cuda import rmsnorm_cuda, supported
+
+            if supported(x):
+                return rmsnorm_cuda(x, self.weight, self.effective_eps(x.dtype))
+        if self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA) or not x.is_cuda:
             out = super().forward(x)
             return out.to(x.dtype) if self._returns_input_dtype else out
         if self._backend != KernelBackend.TRITON:

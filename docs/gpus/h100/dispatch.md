@@ -40,7 +40,10 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
 * LayerNorm (`modules.LayerNorm` MINIWORLD, `architecture.primitives.LayerNorm` MINIWORLD_ENGINE) runs the general CUDA LayerNorm
   (`kernels/layernorm/cuda/general`: any width up to 64K bf16 / 32K fp32, any row count, bf16 / fp16 / fp32, forward and backward,
   bit-identical replays); a multi-dimension `normalized_shape` or a CPU tensor runs the PyTorch statements.
-* RMSNorm, AdaptiveLayerNorm and ConditionedTransition (no CUDA path yet) resolve to PyTorch on these cards
+* RMSNorm (`modules.RMSNorm` MINIWORLD) runs the general CUDA RMSNorm (`kernels/rmsnorm/cuda`, the LayerNorm kernel without mean
+  and bias; same widths, dtypes and determinism; returns the input dtype); a multi-dimension `normalized_shape` or a CPU tensor runs
+  the PyTorch statements.
+* AdaptiveLayerNorm and ConditionedTransition (no CUDA path yet) resolve to PyTorch on these cards
   (`dispatch._torch_on_hopper_blackwell`); a CUDA path for them is open work, not a fallback to keep.
 * TriMul (single / bidirectional), TriangleAttention (single / bidirectional / bias-only), AttentionPairBias, AugmentedAttention,
   OuterProductMean, MSAPairWeightedAveraging, Transition and the SWA RMS norm take the CUDA path where it exists and the PyTorch statements

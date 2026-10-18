@@ -1,11 +1,12 @@
-// General LayerNorm forward: y = (x - mean) * rstd * w + b per row, fp32 statistics, y in x's dtype; mean / rstd saved on request.
+// General LayerNorm / RMSNorm forward: y = (x - mean) * rstd * w + b per row (RMS: mean = 0, no bias), fp32 statistics, y in x's
+// dtype; mean / rstd saved on request.
 #include "ln_common.cuh"
 #include <ATen/cuda/CUDAContext.h>
 #include <torch/extension.h>
 
 namespace mwln {
 
-template <typename T, int TPR, int CHUNKS, int VEC>
+template <typename T, int TPR, int CHUNKS, int VEC, bool RMS>
 __global__ void __launch_bounds__(cta_threads<TPR>()) ln_fwd_kernel(
     const T* __restrict__ x, const float* __restrict__ w, const float* __restrict__ b, T* __restrict__ y,
     float* __restrict__ mean_out, float* __restrict__ rstd_out, int64_t M, int N, float eps) {
@@ -36,7 +37,8 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_fwd_kernel(
 #pragma unroll
       for (int i = 0; i < VEC; ++i) s += v[c * VEC + i];
     }
-    const float mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
+    float mean = 0.f;
+    if constexpr (!RMS) mean = row_sum<TPR>(s, red, r_in, lane) * inv_n;
     float q = 0.f;
 #pragma unroll
     for (int c = 0; c < CHUNKS; ++c) {
@@ -64,15 +66,15 @@ __global__ void __launch_bounds__(cta_threads<TPR>()) ln_fwd_kernel(
           store_vec<T, VEC>(yr + col, o);
         }
       }
-      if (lane == 0 && mean_out) {
-        mean_out[row] = mean;
-        rstd_out[row] = rstd;
+      if (lane == 0) {
+        if (mean_out) mean_out[row] = mean;
+        if (rstd_out) rstd_out[row] = rstd;
       }
     }
   }
 }
 
-template <typename T, int TPR, int CHUNKS, int VEC>
+template <typename T, int TPR, int CHUNKS, int VEC, bool RMS>
 void launch_fwd(const T* x, const float* w, const float* b, T* y, float* mean, float* rstd, int64_t M, int N, float eps,
                 cudaStream_t stream) {
   constexpr int CTA = cta_threads<TPR>();
@@ -81,15 +83,15 @@ void launch_fwd(const T* x, const float* w, const float* b, T* y, float* mean, f
   const int64_t groups = (M + RPC - 1) / RPC;
   const int64_t cap = int64_t(sms) * (2048 / CTA) * 4;  // full residency, a few waves of grid-stride
   const int grid = int(groups < cap ? groups : cap);
-  ln_fwd_kernel<T, TPR, CHUNKS, VEC><<<grid > 0 ? grid : 1, CTA, 0, stream>>>(x, w, b, y, mean, rstd, M, N, eps);
+  ln_fwd_kernel<T, TPR, CHUNKS, VEC, RMS><<<grid > 0 ? grid : 1, CTA, 0, stream>>>(x, w, b, y, mean, rstd, M, N, eps);
 }
 
-template <typename T, int VEC>
+template <typename T, int VEC, bool RMS>
 bool dispatch_fwd(int tpr, int chunks, const T* x, const float* w, const float* b, T* y, float* mean, float* rstd, int64_t M,
                   int N, float eps, cudaStream_t s) {
 #define MWLN_CASE(CH, TPR_)                                                              \
   if (tpr == TPR_ && chunks == CH) {                                                     \
-    launch_fwd<T, TPR_, CH, VEC>(x, w, b, y, mean, rstd, M, N, eps, s);                  \
+    launch_fwd<T, TPR_, CH, VEC, RMS>(x, w, b, y, mean, rstd, M, N, eps, s);                  \
     return true;                                                                         \
   }
 #define MWLN_TPR(TPR_) MWLN_FOR_CHUNKS(MWLN_CASE, TPR_)
@@ -104,37 +106,41 @@ bool dispatch_fwd(int tpr, int chunks, const T* x, const float* w, const float* 
 
 }  // namespace mwln
 
-// x [M, N] contiguous (bf16 / fp16 / fp32); w, b fp32 [N] or empty. Returns (y, mean, rstd); mean / rstd are [M] fp32 when
-// `save`, else empty.
-std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, bool save, int64_t tpr,
+// x [M, N] contiguous (bf16 / fp16 / fp32); w, b fp32 [N] or empty. Returns (y, mean, rstd); rstd is [M] fp32 when `save`, mean too
+// unless `rms` (RMSNorm: no mean, and b must be empty), else they are empty.
+std::vector<torch::Tensor> ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, bool save, bool rms, int64_t tpr,
                                   int64_t chunks, int64_t vec) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous(), "x must be contiguous CUDA [M, N]");
+  TORCH_CHECK(!rms || b.numel() == 0, "RMSNorm has no bias");
   const int64_t M = x.size(0);
   const int N = int(x.size(1));
   auto y = torch::empty_like(x);
   auto f32 = x.options().dtype(torch::kFloat32);
-  auto mean = save ? torch::empty({M}, f32) : torch::empty({0}, f32);
+  auto mean = save && !rms ? torch::empty({M}, f32) : torch::empty({0}, f32);
   auto rstd = save ? torch::empty({M}, f32) : torch::empty({0}, f32);
   if (M == 0) return {y, mean, rstd};
   if (w.numel() && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16) w = w.clone();
   if (b.numel() && reinterpret_cast<uintptr_t>(b.data_ptr()) % 16) b = b.clone();
   const float* wp = w.numel() ? w.data_ptr<float>() : nullptr;
   const float* bp = b.numel() ? b.data_ptr<float>() : nullptr;
-  float* mp = save ? mean.data_ptr<float>() : nullptr;
+  float* mp = mean.numel() ? mean.data_ptr<float>() : nullptr;
   float* rp = save ? rstd.data_ptr<float>() : nullptr;
   auto s = at::cuda::getCurrentCUDAStream();
   bool ok = false;
-#define MWLN_DT(TORCH_T, CT, VMAX)                                                                                      \
-  if (x.scalar_type() == TORCH_T) {                                                                                      \
-    auto xp = reinterpret_cast<const CT*>(x.data_ptr());                                                                 \
-    auto yp = reinterpret_cast<CT*>(y.data_ptr());                                                                       \
-    ok = vec > 1 ? mwln::dispatch_fwd<CT, VMAX>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s)     \
-                 : mwln::dispatch_fwd<CT, 1>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s);       \
+#define MWLN_GO(CT, V) \
+  (rms ? mwln::dispatch_fwd<CT, V, true>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s)  \
+       : mwln::dispatch_fwd<CT, V, false>(int(tpr), int(chunks), xp, wp, bp, yp, mp, rp, M, N, float(eps), s))
+#define MWLN_DT(TORCH_T, CT, VMAX)                                     \
+  if (x.scalar_type() == TORCH_T) {                                     \
+    auto xp = reinterpret_cast<const CT*>(x.data_ptr());                \
+    auto yp = reinterpret_cast<CT*>(y.data_ptr());                      \
+    ok = vec > 1 ? MWLN_GO(CT, VMAX) : MWLN_GO(CT, 1);                  \
   }
   MWLN_DT(torch::kBFloat16, __nv_bfloat16, 8)
   MWLN_DT(torch::kHalf, __half, 8)
   MWLN_DT(torch::kFloat32, float, 4)
 #undef MWLN_DT
+#undef MWLN_GO
   TORCH_CHECK(ok, "general LayerNorm forward: no build for tpr=", tpr, " chunks=", chunks, " vec=", vec);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, mean, rstd};
