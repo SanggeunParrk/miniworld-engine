@@ -42,6 +42,12 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
 * TriMul (single / bidirectional), TriangleAttention (single / bidirectional / bias-only), AttentionPairBias, AugmentedAttention,
   OuterProductMean, MSAPairWeightedAveraging, Transition and the SWA RMS norm take the CUDA path where it exists and the PyTorch statements
   otherwise. The former `ValueError` refusals of those modules ("H100 ... requires the native CUDA contract") are gone.
+* The architecture blocks that call kernels directly rather than through the module dispatch obey it too: `SWAAtomBlock` / `SwiGLUFFN`
+  (`architecture/blocks/swa_atom_transformer.py`: the RMSNorm-adaLN modulation and the SwiGLU FFN) and `SWA3DRoPEAttention` (QK norm +
+  RoPE, gate, output projection) run their PyTorch statements; the token DiT's fp32 Hopper path declines (instead of raising) a call
+  outside its buckets. `tests/gpu/sm90/test_architecture_no_triton_gpu.py` records every Triton launch through the atom transformer
+  (windowed, AF3 and global attention), the Pairformer and the diffusion transformer: none, bf16 and fp32, inference and training. A
+  MiniWorld phase-1a training run with `train.forbid_triton` on ran 67 steps on H100 without a Triton launch (2026-10-18).
 * Other cards (A100, RTX A5000 / A6000): Triton is the implementation, unchanged.
 * An explicit request keeps Triton on H100 / B200: `implementation="triton"`, `engine_backend="triton"`, or
   `settings.triton_on_hopper_blackwell=True` (A/B work, building Triton caches). `b200_engine_triton` does the same on B200.

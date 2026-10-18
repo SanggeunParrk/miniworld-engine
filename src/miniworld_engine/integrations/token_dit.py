@@ -221,7 +221,11 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
 
 def serves(module, single, cond, pair, compute_dtype=None):
     if _native_fp32_inference(module, single):
-        _check_native_fp32(module, single, cond, pair, compute_dtype)
+        try:
+            _check_native_fp32(module, single, cond, pair, compute_dtype)
+        except ValueError:
+            # no CUDA path for this call: the block runs its own statements (H100 has no Triton fallback; they are PyTorch there)
+            return False
         return True
     if torch.is_grad_enabled() or settings.current().engine_backend == "triton":
         return False

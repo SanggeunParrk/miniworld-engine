@@ -31,6 +31,7 @@ from miniworld_engine.architecture.layers.ops import mp_sum, mp_swish_gate
 from miniworld_engine.architecture.primitives import Linear, MPLinear
 from miniworld_engine.architecture.typing import typecheck
 from miniworld_engine.modules import RMSNorm
+from miniworld_engine.modules.dispatch import fallback_autocast, restricted_card
 from miniworld_engine.modules.swa_atom_attention.module import (
     SWA3DRoPEAttention,
     build_3d_rope,
@@ -63,6 +64,7 @@ class SwiGLUFFN(nn.Module):
             and x.is_cuda
             and not self.magnitude_preserving
             and not self._pointwise
+            and not restricted_card(x.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
         ):
             # Cast through autograd, retaining the original FP32 master weights.
             dtype = (
@@ -75,9 +77,11 @@ class SwiGLUFFN(nn.Module):
                 return kernels.triton_swiglu_ffn(
                     x.to(dtype), wa, wb, self.w_down.weight.to(dtype)
                 )
-        x1, x2 = self.w_up(x).chunk(2, dim=-1)
-        x = mp_swish_gate(x1, x2) if self.magnitude_preserving else F.silu(x1) * x2
-        return self.w_down(x)
+        # H100 / B200 land here (no Triton fallback): fp32 master weights under a bf16 activation run under bf16 autocast
+        with fallback_autocast(x, self, x.is_cuda and restricted_card(x.device)):
+            x1, x2 = self.w_up(x).chunk(2, dim=-1)
+            x = mp_swish_gate(x1, x2) if self.magnitude_preserving else F.silu(x1) * x2
+            return self.w_down(x)
 
 
 class SWAAtomBlock(nn.Module):
@@ -152,6 +156,7 @@ class SWAAtomBlock(nn.Module):
             and q.is_cuda
             and not self.mp_full
             and not self._pointwise
+            and not restricted_card(q.device)  # H100 / B200 have no Triton fallback: the PyTorch statements below run
         ):
             # Keep the six-chunk checkpoint layout and the adaLN-Zero algorithm.
             # The engine SWADiTBlock implements different conditioning, so it
@@ -181,16 +186,17 @@ class SWAAtomBlock(nn.Module):
                 )
             ffn = gate_f * self.ffn(ffn_in)
             return mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
-        shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.adaln_modulation(
-            c
-        ).chunk(6, dim=-1)
-        attn_in = self.attn_norm(q) * (1 + scale_a) + shift_a
-        attn = gate_a * self.attn(attn_in, attention_params)
-        q = mp_sum(q, attn, self.residual_t) if self.mp_residual else q + attn
-        ffn_in = self.ffn_norm(q) * (1 + scale_f) + shift_f
-        ffn = gate_f * self.ffn(ffn_in)
-        q = mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
-        return q
+        with fallback_autocast(q, self, q.is_cuda and restricted_card(q.device)):
+            shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = self.adaln_modulation(
+                c
+            ).chunk(6, dim=-1)
+            attn_in = self.attn_norm(q) * (1 + scale_a) + shift_a
+            attn = gate_a * self.attn(attn_in, attention_params)
+            q = mp_sum(q, attn, self.residual_t) if self.mp_residual else q + attn
+            ffn_in = self.ffn_norm(q) * (1 + scale_f) + shift_f
+            ffn = gate_f * self.ffn(ffn_in)
+            q = mp_sum(q, ffn, self.residual_t) if self.mp_residual else q + ffn
+            return q
 
 
 def _pads_atoms(q: torch.Tensor, s: int) -> bool:

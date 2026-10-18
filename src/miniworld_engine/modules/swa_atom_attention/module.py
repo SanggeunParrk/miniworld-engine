@@ -746,6 +746,11 @@ class SWA3DRoPEAttention(nn.Module):
         qkv = self.Wqkv(x).view(n, s, 3, self.n_heads, self.head_dim)
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
         engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
+        if engine_pointwise and q.is_cuda:
+            from miniworld_engine.modules.dispatch import restricted_card
+
+            # H100 / B200 have no Triton fallback: the QK norm + RoPE, the gate and the output projection run as PyTorch ops
+            engine_pointwise = not restricted_card(q.device)
         if q.is_cuda and engine_pointwise:
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
             q, k = qk_norm_rope_3d(q, k, cos, sin)
