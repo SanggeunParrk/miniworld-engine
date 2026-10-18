@@ -160,7 +160,7 @@ def _native_mm(a, b):
 def _native_contract(q, mod, cs, sn, seqused, weights, B, half_window, training):
     if (q.dtype not in (torch.bfloat16, torch.float32) or q.ndim != 3 or q.shape[-1] != 128
             or not q.is_cuda or not q.is_contiguous() or q.numel() == 0
-            or half_window != 64 or B <= 0 or q.shape[0] % B
+            or (half_window != 64 and not is_global(half_window)) or B <= 0 or q.shape[0] % B
             or mod.dtype != torch.float32 or not mod.is_contiguous()
             or seqused.dtype != torch.int32 or not seqused.is_contiguous()
             or tuple(mod.shape) != (B * q.shape[1], 768)
@@ -204,8 +204,16 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         g, pq, pk = [empty(M, 128) for _ in range(3)]
         rows(1, [p, cs, sn], [qh, kh, vh, g, pq, pk])
     o, lse = empty(M, 128, dtype=torch.bfloat16), empty(N, 4, S, dtype=torch.float32)
-    attention = ext.tiled_attention if fusion else ext.native_attention
-    attention([qh, kh, vh, sequ], [o, lse], 0)
+    if is_global(hw):
+        # Global attention (the input feature embedder's atom encoder): the native stages around FlashAttention-4, which skips
+        # rows past seqused -- they must read zero.
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_fwd
+
+        o.zero_()
+        attn_global_fwd(qh, kh, vh, sequ, o, lse)
+    else:
+        attention = ext.tiled_attention if fusion else ext.native_attention
+        attention([qh, kh, vh, sequ], [o, lse], 0)
     if bf:
         ffn_ext = _native_h100_extension("fwd_small" if small else "fwd")
         packed_wu = torch.empty_like(wu)
@@ -267,11 +275,17 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
         rows(9, [dq1, mod, att, o, g], [datt, gated, dmod])
         dgated = _native_mm(datt, wo)
         rows(10, [dgated, o, g], [dO, dG, delta])
-    dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
-    ai, ao = [qh, kh, vh, sequ, dO, lse, delta], [dqh, dkh, dvh]
-    attention = ext.tiled_attention if fusion else ext.native_attention
-    attention(ai, ao, 1)
-    attention(ai, ao, 2)
+    if is_global(hw):
+        from miniworld_engine.kernels.swa_dit.cuda.sm100 import attn_global_bwd
+
+        dqh, dkh, dvh = [torch.zeros_like(qh) for _ in range(3)]   # FA4 leaves the rows past seqused alone
+        attn_global_bwd(qh, kh, vh, o, dO, lse, sequ, dqh, dkh, dvh)
+    else:
+        dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
+        ai, ao = [qh, kh, vh, sequ, dO, lse, delta], [dqh, dkh, dvh]
+        attention = ext.tiled_attention if fusion else ext.native_attention
+        attention(ai, ao, 1)
+        attention(ai, ao, 2)
     dp = empty(M, 512)
     wstack = empty(512, 128)
     ext.native_copy([wqkv, wg], [wstack[:384], wstack[384:]], 0)

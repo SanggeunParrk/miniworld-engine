@@ -34,6 +34,7 @@ from miniworld_engine.modules.exceptions import (
     ImplementationType,
     InvalidImplementationError,
 )
+from miniworld_engine.modules.input_feature_embedder import InputFeatureEmbedder
 from miniworld_engine.modules.msa_pair_weighted_averaging import (
     MSAPairWeightedAveraging,
 )
@@ -62,4 +63,4 @@ from miniworld_engine.modules.triangle_multiplication import (
     TriangleMultiplication,
 )
 
-__all__ = ["AdaptiveLayerNorm", "AttentionPairBias", "AugmentedAttentionPairBias", "BidirectionalTriangleAttention", "BidirectionalTriangleMultiplication", "ConditionedTransition", "Dropout", "ImplementationType", "InvalidImplementationError", "KernelBackend", "LayerNorm", "Linear", "MPLinear", "MSAPairWeightedAveraging", "OuterProduct", "OuterProductMean", "Pairformer", "PairformerBlock", "PairformerConfig", "RMSNorm", "SWA3DRoPEAttention", "Transition", "TriangleAttention", "TriangleMultiplication", "TrianglePairAttention"]
+__all__ = ["AdaptiveLayerNorm", "AttentionPairBias", "AugmentedAttentionPairBias", "BidirectionalTriangleAttention", "BidirectionalTriangleMultiplication", "ConditionedTransition", "Dropout", "ImplementationType", "InputFeatureEmbedder", "InvalidImplementationError", "KernelBackend", "LayerNorm", "Linear", "MPLinear", "MSAPairWeightedAveraging", "OuterProduct", "OuterProductMean", "Pairformer", "PairformerBlock", "PairformerConfig", "RMSNorm", "SWA3DRoPEAttention", "Transition", "TriangleAttention", "TriangleMultiplication", "TrianglePairAttention"]

@@ -337,9 +337,10 @@ class SWAAtomTransformer(nn.Module):
         blk = self.blocks[0]
         is_global = self._is_global()
         cast = self._global_cast(q)
-        if is_global and not (q.dtype == torch.bfloat16 or cast):
-            return False  # global attention: bf16 stages only (see _global_cast)
-        if is_global and torch.cuda.get_device_capability(q.device) != (10, 0):
+        hopper = torch.cuda.get_device_capability(q.device) == (9, 0)
+        if is_global and not (q.dtype == torch.bfloat16 or cast or hopper):
+            return False  # global attention on B200: bf16 stages only (see _global_cast); H100's native stages take fp32 too
+        if is_global and torch.cuda.get_device_capability(q.device) not in ((10, 0), (9, 0)):
             return False
         # The engine block runs bf16 or fp32 activations and conditioning, with the
         # weights in that dtype or fp32 (an fp32 master over bf16 activations: the

@@ -128,13 +128,21 @@ def refusal(
     if (c, n_head) != (D_ATOM, N_HEAD):
         return f"the kernels serve d_atom={D_ATOM} with {N_HEAD} heads, got d_atom={c}, n_head={n_head}"
     if is_global(half_window):
-        if q.dtype != torch.bfloat16:
-            return f"global attention is served in bf16 (sm_100a stages + FlashAttention-4), got {q.dtype}"
-        if q.is_cuda and torch.cuda.get_device_capability(q.device) != (10, 0):
-            return "global attention is served on B200 (sm_100a) only"
-        why = _global_gate()
-        if why is not None:
-            return why
+        hopper = q.is_cuda and torch.cuda.get_device_capability(q.device) == (9, 0)
+        if hopper:
+            # H100: the native sm_90a stages (bf16 or fp32 activations) around a FlashAttention-4 global attention
+            from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+            if not sm100.FA4_AVAILABLE:
+                return "global attention needs FlashAttention-4 (flash_attn.cute), which is not installed"
+        else:
+            if q.dtype != torch.bfloat16:
+                return f"global attention is served in bf16 (sm_100a stages + FlashAttention-4), got {q.dtype}"
+            if q.is_cuda and torch.cuda.get_device_capability(q.device) != (10, 0):
+                return "global attention is served on B200 (sm_100a) and H100 (sm_90a) only"
+            why = _global_gate()
+            if why is not None:
+                return why
     elif half_window != HALF_WINDOW:
         return (
             f"the fused block is validated at half_window={HALF_WINDOW} (window {2 * HALF_WINDOW}) or global attention, "
