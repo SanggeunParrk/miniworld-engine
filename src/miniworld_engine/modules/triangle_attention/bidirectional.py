@@ -247,6 +247,14 @@ class BidirectionalTriangleAttention(nn.Module):
         backend = _dispatch.guard_dtype(
             self._backend, pair.dtype, op="BidirectionalTriangleAttention"
         )
+        no_triton = False
+        if (
+            backend == KernelBackend.TRITON
+            and self.implementation == ImplementationType.MINIWORLD
+            and _dispatch.restricted_card(pair.device)
+        ):
+            backend = KernelBackend.PYTORCH  # H100 / B200: no Triton fallback, the reference runs
+            no_triton = True
         # cuequivariance ships a SINGLE-direction triangle-attention kernel only; there is no
         # bidirectional one, so a CUEQUIVARIANCE request here runs the pytorch reference -- the
         # honest baseline -- exactly as it did before `triangle_attention` joined `_CUEQ_OPS`.
@@ -254,12 +262,13 @@ class BidirectionalTriangleAttention(nn.Module):
         # resolves under the same op name as the single-direction one, so adding that name to the
         # cueq set re-routed it to a backend its forward never handled.
         if backend in (KernelBackend.PYTORCH, KernelBackend.CUEQUIVARIANCE):
-            pln = self.ln_pair(pair)
-            if self.use_self_attention:
-                out = self._attend_sa(pln, mask, backend)
-            else:
-                out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
-            return pair + self.to_out(sigmoid_gate(self.to_gate(pln), out))
+            with _dispatch.fallback_autocast(pair, self, no_triton):
+                pln = self.ln_pair(pair)
+                if self.use_self_attention:
+                    out = self._attend_sa(pln, mask, backend)
+                else:
+                    out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
+                return pair + self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
         if backend == KernelBackend.TRITON:
             # Inference max-fusion (LN folded into the projections), gated like the

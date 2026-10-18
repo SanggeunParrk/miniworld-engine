@@ -9,6 +9,7 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
@@ -151,7 +152,14 @@ class AugmentedAttentionPairBias(nn.Module):
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
 
-        if self._backend == KernelBackend.PYTORCH:
+        backend = self._backend
+        if (
+            backend == KernelBackend.TRITON
+            and self.implementation == ImplementationType.MINIWORLD
+            and _dispatch.restricted_card(query.device)
+        ):
+            backend = KernelBackend.PYTORCH  # H100 / B200: no Triton fallback; the CUDA cores were tried above
+        if backend == KernelBackend.PYTORCH:
             query = query * query.shape[-1] ** -0.5
             attention = torch.einsum("abihd,abjhd->abhij", query, key)
             bias = bias.permute(0, 3, 1, 2).contiguous()  # (B, H, L, L)
@@ -167,7 +175,7 @@ class AugmentedAttentionPairBias(nn.Module):
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("abhij,abjhd->abihd", attention, value)
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             return kernels.triton_augmented_attention_pair_bias(
                 query,
                 key,

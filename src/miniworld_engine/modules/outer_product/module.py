@@ -8,6 +8,7 @@ from jaxtyping import Bool, Float, Int
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.integrations import opm_train as _opm_train
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.primitives import LayerNorm, Linear
@@ -169,6 +170,9 @@ class OuterProductMean(nn.Module):
         ) and (
             resolve("outer_product_mean", self.implementation, msa.device)
             == KernelBackend.TRITON
+        ) and (
+            self.implementation == ImplementationType.TRITON
+            or _dispatch.triton_leg_allowed(msa.device)   # H100 / B200: no Triton fallback, the PyTorch statements below run
         ):
             from miniworld_engine.kernels.outer_product_mean.interface import (
                 refusal,
@@ -200,29 +204,30 @@ class OuterProductMean(nn.Module):
                 raise NotImplementedError(
                     f"OuterProductMean(implementation='triton'): {why}"
                 )
-        msa = self.ln_msa(msa)
-        left = self.to_left(msa)
-        right = self.to_right(msa)
+        with _dispatch.fallback_autocast(msa, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(msa.device)):
+            msa = self.ln_msa(msa)
+            left = self.to_left(msa)
+            right = self.to_right(msa)
 
-        if mask is None:
-            mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+            if mask is None:
+                mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
 
-        left = left * mask[..., None]
-        right = right * mask[..., None]
-        out = torch.einsum("bmid,bmje->bijde", left, right)
-        out = rearrange(out, "B L1 L2 D1 D2 -> B L1 L2 (D1 D2)")
+            left = left * mask[..., None]
+            right = right * mask[..., None]
+            out = torch.einsum("bmid,bmje->bijde", left, right)
+            out = rearrange(out, "B L1 L2 D1 D2 -> B L1 L2 (D1 D2)")
 
-        norm = torch.einsum("bmi,bmj->bij", mask.float(), mask.float())
-        # norm stays fp32 for count precision (>256 counts aren't bf16-exact), but cast the
-        # normalized result back to the projection dtype so to_out runs in native bf16
-        # (no autocast in the distogram trunk; a bf16/fp32 mismatch would otherwise crash).
-        norm = norm.clamp(min=1)[..., None]
-        if self.normalize_before_proj:
-            pair = self.to_out((out / norm).to(left.dtype))
-        else:
-            # ESMFold2 normalizes AFTER projection, including its learned bias.
-            pair = (self.to_out(out) / norm).to(left.dtype)
-        if self.mask_interchain and token_asym_id is not None:
-            same_chain = token_asym_id[:, :, None] == token_asym_id[:, None, :]
-            pair = pair * same_chain[..., None].to(pair.dtype)
-        return residual + pair if residual is not None else pair
+            norm = torch.einsum("bmi,bmj->bij", mask.float(), mask.float())
+            # norm stays fp32 for count precision (>256 counts aren't bf16-exact), but cast the
+            # normalized result back to the projection dtype so to_out runs in native bf16
+            # (no autocast in the distogram trunk; a bf16/fp32 mismatch would otherwise crash).
+            norm = norm.clamp(min=1)[..., None]
+            if self.normalize_before_proj:
+                pair = self.to_out((out / norm).to(left.dtype))
+            else:
+                # ESMFold2 normalizes AFTER projection, including its learned bias.
+                pair = (self.to_out(out) / norm).to(left.dtype)
+            if self.mask_interchain and token_asym_id is not None:
+                same_chain = token_asym_id[:, :, None] == token_asym_id[:, None, :]
+                pair = pair * same_chain[..., None].to(pair.dtype)
+            return residual + pair if residual is not None else pair

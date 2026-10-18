@@ -29,6 +29,28 @@ wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512, 1.89-2.04x) and th
 single-direction D512 path `h100_uni_wide_inference` (1.80x). Single-direction training
 serves D64/128/256/384/512 in both directions (D512 incoming was on the Triton fallback until 2026-10-15). Per-shape status: `docs/gpus/h100/h100.md`; comparison matrix: `docs/records/trimul_h100_comparison_20261015.md`.
 
+## No Triton fallback; PyTorch where no CUDA path serves the call (intentional)
+
+H100 (sm_90) and B200 (sm_100) run hand-written CUDA and cuBLAS. **There is no Triton fallback on either card, and that is deliberate.**
+A `MINIWORLD` call that no CUDA path serves (a ragged length, an unbuilt width, fp32 without TF32, a dtype or layout outside a kernel's
+contract) is not routed to the Triton family -- untuned on these cards, unmeasured against the CUDA path, easy to mistake for it in a
+benchmark -- and it is not refused either: it runs the **PyTorch reference** (`torch.compile` fuses it where the caller compiles), always
+with a correct result. `modules.dispatch.restricted_card(device)` is the single test; each module takes its PyTorch leg when it is true.
+
+* LayerNorm, RMSNorm, AdaptiveLayerNorm and ConditionedTransition (no CUDA path yet) resolve to PyTorch on these cards
+  (`dispatch._torch_on_hopper_blackwell`); a CUDA path for them is open work, not a fallback to keep.
+* TriMul (single / bidirectional), TriangleAttention (single / bidirectional / bias-only), AttentionPairBias, AugmentedAttention,
+  OuterProductMean, MSAPairWeightedAveraging, Transition and the SWA RMS norm take the CUDA path where it exists and the PyTorch statements
+  otherwise. The former `ValueError` refusals of those modules ("H100 ... requires the native CUDA contract") are gone.
+* Other cards (A100, RTX A5000 / A6000): Triton is the implementation, unchanged.
+* An explicit request keeps Triton on H100 / B200: `implementation="triton"`, `engine_backend="triton"`, or
+  `settings.triton_on_hopper_blackwell=True` (A/B work, building Triton caches). `b200_engine_triton` does the same on B200.
+* Committed H100 / B200 Triton autotune caches are not needed and are not maintained.
+
+Verified with a Triton-launch recorder over every module, bf16 and fp32, inference and training, ragged lengths (L = 100, 128, 200, 384),
+widths 64 / 100 / 128 / 192 / 256 / 768: zero Triton launches, zero errors, and the output agrees with the module's
+`implementation="pytorch"` on the same weights (bf16: relative error <= 4e-3, fp32: exact).
+
 ## Retained values and execution
 
 D128 TriMul training retains input `x_n`, left/right, `tri`, and packed front weights.

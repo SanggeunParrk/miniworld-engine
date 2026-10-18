@@ -317,9 +317,9 @@ def test_shapes_beyond_the_tuned_builds_run_the_generic_kernels(d, bad, monkeypa
 
 @needs_hopper
 @pytest.mark.parametrize("bad", ["width", "build"])
-def test_promoted_cuda_path_refuses_fallback(bad, monkeypatch):
-    """What no native build serves raises on H100 instead of silently running Triton: a width that is not a multiple of 64,
-    and every build unavailable."""
+def test_unserved_cell_runs_the_pytorch_reference(bad, monkeypatch):
+    """What no native build serves runs the PyTorch reference on H100, never Triton and never an error: a width that is not a
+    multiple of 64, and every build unavailable."""
     from miniworld_engine import settings
     from miniworld_engine.kernels.transition.cuda import (
         fused_generic_sm90a,
@@ -336,8 +336,10 @@ def test_promoted_cuda_path_refuses_fallback(bad, monkeypatch):
     if bad == "build":
         for kern in (fused_sm90a, fused_wide_sm90a, fused_generic_sm90a):
             monkeypatch.setattr(kern, "available", lambda *_: False)
-    with pytest.raises(ValueError, match="H100 CUDA Transition"):
-        module(x)
+    with torch.no_grad():
+        actual = module(x)
+        expected = module._torch_forward(x) + x
+    torch.testing.assert_close(actual, expected, rtol=0, atol=0)
 
 
 @needs_hopper

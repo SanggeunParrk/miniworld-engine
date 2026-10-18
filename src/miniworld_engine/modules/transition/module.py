@@ -113,9 +113,7 @@ class Transition(nn.Module):
         """
         if self._requires_h100_cuda(x):
             if not _fused_sm90a_enabled():
-                raise ValueError(
-                    "H100 MiniWorld Transition requires the native CUDA backend"
-                )
+                return self._torch_forward(x) + x   # the native CUDA kernels are switched off: PyTorch, never Triton
             if x.dtype is torch.float32 and self._generic_sm90a_serves(x):
                 # fp32 on TF32 tensor cores: the generic sm_90a kernels (the other fast paths are bf16 only)
                 return self._residual_forward(x)
@@ -131,10 +129,8 @@ class Transition(nn.Module):
                 or matrices[0].dtype not in (torch.bfloat16, torch.float32)
                 or any(p.dtype != matrices[0].dtype for p in matrices)
             ):
-                raise ValueError(
-                    "H100 CUDA Transition requires contiguous BF16 activations, FP32 norm affine, "
-                    "and matching BF16 or FP32 projection weights"
-                )
+                # no CUDA path takes this activation / parameter layout: the PyTorch reference (no Triton fallback on H100 / B200)
+                return self._torch_forward(x) + x
         if (
             x.dtype is torch.float32
             and self._backend != KernelBackend.PYTORCH
@@ -152,12 +148,12 @@ class Transition(nn.Module):
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
         from miniworld_engine import settings
 
-        # An explicit engine_backend="triton" is a comparison run, never refused (as for TriMul).
+        # H100 / B200 have no Triton fallback: a MINIWORLD call no CUDA path serves runs the PyTorch reference. An explicit
+        # engine_backend="triton" (or settings.triton_on_hopper_blackwell) is a comparison run and keeps Triton (as for TriMul).
         return (
             self.implementation == ImplementationType.MINIWORLD
-            and settings.current().engine_backend != "triton"
             and x.is_cuda
-            and torch.cuda.get_device_capability(x.device) == (9, 0)
+            and _dispatch.restricted_card(x.device)
         )
 
     def _generic_sm90a_serves(self, x: torch.Tensor) -> bool:
@@ -247,10 +243,7 @@ class Transition(nn.Module):
                     )
 
             if self._requires_h100_cuda(x):
-                raise ValueError(
-                    "H100 CUDA Transition requires a supported n=4 width, whole 128-row tiles, "
-                    "and a successful native build"
-                )
+                return self._torch_forward(x) + x   # no sm_90a build serves this width / dtype: PyTorch, never Triton
 
         wa = self.expand_a.weight.to(x.dtype)
         wb = self.expand_b.weight.to(x.dtype)
@@ -303,6 +296,9 @@ class Transition(nn.Module):
                 return fused_sm80.transition_fused_sm80(
                     x, self.ln_in.weight, self.ln_in.bias, wa, wb, ws, self.ln_in.eps
                 )
+
+        if self._requires_h100_cuda(x):
+            return self._torch_forward(x) + x   # B200 / H100 without a CUDA build for this call: no Triton fallback
 
         from miniworld_engine.kernels.transition.triton.residual import (
             transition_residual,

@@ -23,9 +23,11 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.integrations import trimul_b200 as _b200
 from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
 )
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     resolve_triangle_multiplication as _resolve_trimul_backend,
 )
@@ -142,13 +144,11 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
             return _h100.update(self, pair, mask, _ds)
-        if (torch.is_grad_enabled() or _ds is not None) and _h100.requires_cuda_training(self, pair):
-            raise ValueError("native H100 TriMul training requires a supported B1 BF16 bucket and FP32 norm affine")
 
         if _h100.serves_inference(self, pair, bidirectional=True, dropscale=_ds):
             return _h100.update_inference(self, pair, mask, bidirectional=True)
-        if _ds is None and _h100.requires_cuda_inference(self, pair):
-            raise ValueError("H100 bidirectional TriMul inference requires the native CUDA bucket/dtype contract")
+        # H100 / B200 have no Triton fallback: a call no CUDA path serves runs the PyTorch statements below.
+        no_triton = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device)
 
         # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
         # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
@@ -163,7 +163,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
 
         if self._backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
-        if self._backend == KernelBackend.TRITON:
+        if self._backend == KernelBackend.TRITON and not no_triton:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
@@ -171,29 +171,30 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # residual + row-broadcast dropout are FUSED into the triton gate store
             # (gate_elem epilogue) — no external _r() add.
             return self._forward_triton(pair, mask, _ds)
-        if self._backend != KernelBackend.PYTORCH:
+        if self._backend not in (KernelBackend.PYTORCH, KernelBackend.TRITON, KernelBackend.CUDA):
             raise InvalidImplementationError(self.implementation)
 
-        pair = self.ln_pair(pair)
-        left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
-        right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
+        with _dispatch.fallback_autocast(pair, self, no_triton):
+            pair = self.ln_pair(pair)
+            left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
+            right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
 
-        if mask is not None:
-            mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-            left = left * mask_2d[..., None]
-            right = right * mask_2d[..., None]
+            if mask is not None:
+                mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+                left = left * mask_2d[..., None]
+                right = right * mask_2d[..., None]
 
-        # Split hidden channels: first half -> outgoing, second half -> incoming.
-        h = self.d_hidden
-        left_out, left_in = left[..., :h], left[..., h:]
-        right_out, right_in = right[..., :h], right[..., h:]
+            # Split hidden channels: first half -> outgoing, second half -> incoming.
+            h = self.d_hidden
+            left_out, left_in = left[..., :h], left[..., h:]
+            right_out, right_in = right[..., :h], right[..., h:]
 
-        out_outgoing = torch.einsum("bikd,bjkd->bijd", left_out, right_out)
-        out_incoming = torch.einsum("bkid,bkjd->bijd", left_in, right_in)
-        out = torch.cat([out_outgoing, out_incoming], dim=-1)
+            out_outgoing = torch.einsum("bikd,bjkd->bijd", left_out, right_out)
+            out_incoming = torch.einsum("bkid,bkjd->bijd", left_in, right_in)
+            out = torch.cat([out_outgoing, out_incoming], dim=-1)
 
-        out = self.ln_out(out)
-        return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
+            out = self.ln_out(out)
+            return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
 
     def _forward_cuequivariance(
         self,

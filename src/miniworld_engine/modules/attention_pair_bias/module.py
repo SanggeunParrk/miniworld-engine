@@ -8,6 +8,7 @@ from miniworld_engine import kernels
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import attention_pair_bias_b200 as _b200
 from miniworld_engine.integrations import h100_master as _h100_master
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve_augmented_attention
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -91,15 +92,13 @@ class AttentionPairBias(nn.Module):
             return _b200.update_inference(self, single, pair, mask)
         if _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
-        if (
+        # H100 / B200 have no Triton fallback: a MINIWORLD call the native CUDA path does not serve runs the PyTorch attention.
+        no_triton = (
             self.implementation == ImplementationType.MINIWORLD
             and single.is_cuda
-            and torch.cuda.get_device_capability(single.device) == (9, 0)
-            and (not torch.is_grad_enabled() or _b200.native_training_enabled())
-        ):
-            raise ValueError(
-                "H100 AttentionPairBias requires the native CUDA shape/dtype contract"
-            )
+            and _dispatch.restricted_card(single.device)
+        )
+        backend = KernelBackend.PYTORCH if no_triton else self._backend
         master = (
             self._backend == KernelBackend.TRITON
             and single.dtype == torch.bfloat16
@@ -157,9 +156,9 @@ class AttentionPairBias(nn.Module):
             bias = bias.masked_fill(
                 ~mask[:, None, None, :], torch.finfo(bias.dtype).min
             )
-        if self._backend == KernelBackend.PYTORCH:
+        if backend == KernelBackend.PYTORCH:
             out = F.scaled_dot_product_attention(query, key, value, bias)
-        elif self._backend == KernelBackend.TRITON:
+        elif backend == KernelBackend.TRITON:
             # Reuse the existing QK + pair-bias kernel with one augmentation.
             # Bias-only attention is a different operation and cannot replace QK.
             q, k, v = (t.transpose(1, 2).unsqueeze(0) for t in (query, key, value))

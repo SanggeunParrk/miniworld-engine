@@ -7,6 +7,7 @@ from jaxtyping import Bool, Float
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_msa as _anthropic
 from miniworld_engine.integrations import pwa_train as _pwa_train
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import KernelBackend, resolve
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.functional import sigmoid_gate
@@ -112,10 +113,8 @@ class MSAPairWeightedAveraging(nn.Module):
                 and not (self.training and self.drop_msa.p_drop > 0)
                 and _pwa_train.native_inference_enabled(msa.device)
             )
-            if cuda_required and self.implementation == ImplementationType.MINIWORLD:
-                raise ValueError(
-                    f"H100 CUDA PWA does not support this call: {_pwa_train.refusal(msa, pair, *_dims)}"
-                )
+            # A call the native CUDA path does not take (cuda_required: it would have): no Triton fallback on H100 / B200, so it
+            # falls through to the PyTorch reference below instead of raising.
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused cell where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):
@@ -144,6 +143,9 @@ class MSAPairWeightedAveraging(nn.Module):
         ) and (
             resolve("msa_pair_weighted_averaging", self.implementation, msa.device)
             == KernelBackend.TRITON
+        ) and (
+            self.implementation == ImplementationType.TRITON
+            or _dispatch.triton_leg_allowed(msa.device)
         ):
             from miniworld_engine.kernels.pair_weighted_averaging.interface import (
                 refusal,
@@ -185,25 +187,26 @@ class MSAPairWeightedAveraging(nn.Module):
                 raise NotImplementedError(
                     f"MSAPairWeightedAveraging(implementation='triton'): {why}"
                 )
-        msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
-        msa = self.ln_msa(msa)
-        value = self.to_value(msa)
-        value = rearrange(value, "B M L (H D) -> B M L H D", H=self.n_head)
+        with _dispatch.fallback_autocast(msa, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(msa.device)):
+            msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)
+            msa = self.ln_msa(msa)
+            value = self.to_value(msa)
+            value = rearrange(value, "B M L (H D) -> B M L H D", H=self.n_head)
 
-        pair = self.ln_pair(pair)
-        bias = self.to_bias(pair)
-        bias = rearrange(bias, "B L1 L2 H -> B H L1 L2")
+            pair = self.ln_pair(pair)
+            bias = self.to_bias(pair)
+            bias = rearrange(bias, "B L1 L2 H -> B H L1 L2")
 
-        if mask is not None:
-            bias = bias.masked_fill(
-                ~mask[:, None, None, :], torch.finfo(bias.dtype).min
-            )
+            if mask is not None:
+                bias = bias.masked_fill(
+                    ~mask[:, None, None, :], torch.finfo(bias.dtype).min
+                )
 
-        attention = F.softmax(bias, dim=-1)
-        out = torch.einsum("bhij,bmjhd->bmihd", attention, value)
+            attention = F.softmax(bias, dim=-1)
+            out = torch.einsum("bhij,bmjhd->bmihd", attention, value)
 
-        gate = self.to_gate(msa)
-        out = rearrange(out, "B M L H D -> B M L (H D)")
-        out = sigmoid_gate(gate, out)
-        out = self.drop_msa(self.to_out(out))
-        return msa_res + out
+            gate = self.to_gate(msa)
+            out = rearrange(out, "B M L H D -> B M L (H D)")
+            out = sigmoid_gate(gate, out)
+            out = self.drop_msa(self.to_out(out))
+            return msa_res + out

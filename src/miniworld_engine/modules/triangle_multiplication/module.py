@@ -168,12 +168,10 @@ class TriangleMultiplication(nn.Module):
             # Hand-CUDA H100 kernels first (integrations.trimul_h100 states their contract).
             if _h100.serves_inference(self, pair, bidirectional=False, dropscale=_ds):
                 return _h100.update_inference(self, pair, mask, bidirectional=False)
-            if _ds is None and _h100.requires_cuda_inference(self, pair):
-                raise ValueError("H100 TriMul inference requires the native CUDA bucket/dtype contract")
+            # H100 / B200 have no Triton fallback: a call no CUDA path serves runs the PyTorch statements below.
+            no_triton = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device)
             if _h100.serves_single(self, pair):
                 return _h100.update(self, pair, mask, _ds, bidirectional=False)
-            if _h100.requires_cuda_training(self, pair):
-                raise ValueError("native H100 TriMul training requires a supported B1 BF16 bucket and FP32 norm affine")
             # The Anthropic TriMul payload, when TRIMUL_NATIVE_BUILD_DIR names one that can run this forward
             # (sm_90, bf16, one square plane, no grad, no live dropout scale, a unit for this width).  An explicit
             # `implementation="anthropic"` refuses with the reason; `miniworld` uses it where it fits and falls
@@ -188,6 +186,8 @@ class TriangleMultiplication(nn.Module):
             if backend == KernelBackend.CUEQUIVARIANCE:
                 return _r(self._forward_cuequivariance(pair, mask))
 
+            if no_triton and backend in (KernelBackend.TRITON, KernelBackend.CUDA):
+                backend = KernelBackend.PYTORCH
             if backend == KernelBackend.TRITON:
                 # Fused BDLL pipeline: LN_in -> gated BDLL front (transposed store, no permute) -> ONE
                 # bmm contraction -> fused output stages. BF16 training uses
@@ -201,22 +201,23 @@ class TriangleMultiplication(nn.Module):
             if backend != KernelBackend.PYTORCH:
                 raise InvalidImplementationError(self.implementation)
 
-            pair = self.ln_pair(pair)
-            left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
-            right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
+            with _dispatch.fallback_autocast(pair, self, no_triton):
+                pair = self.ln_pair(pair)
+                left = sigmoid_gate(self.to_left_gate(pair), self.to_left(pair))
+                right = sigmoid_gate(self.to_right_gate(pair), self.to_right(pair))
 
-            if mask is not None:
-                mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
-                left = left * mask_2d[..., None]
-                right = right * mask_2d[..., None]
+                if mask is not None:
+                    mask_2d = mask.unsqueeze(-1) & mask.unsqueeze(-2)
+                    left = left * mask_2d[..., None]
+                    right = right * mask_2d[..., None]
 
-            if self.outgoing:
-                out = torch.einsum("bikd,bjkd->bijd", left, right)
-            else:
-                out = torch.einsum("bkid,bkjd->bijd", left, right)
+                if self.outgoing:
+                    out = torch.einsum("bikd,bjkd->bijd", left, right)
+                else:
+                    out = torch.einsum("bkid,bkjd->bijd", left, right)
 
-            out = self.ln_out(out)
-            return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
+                out = self.ln_out(out)
+                return _r(sigmoid_gate(self.to_gate(pair), self.to_out(out)))
 
     # No wrapper: every launch reachable from here is an ``opaque`` op at its own definition,
     # so Dynamo traces straight through this. It could never have BEEN an op itself -- see

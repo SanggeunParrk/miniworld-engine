@@ -434,6 +434,13 @@ class TriangleAttention(nn.Module):
             backend = _dispatch.guard_dtype(
                 self._backend, pair.dtype, op="TriangleAttention"
             )
+            master_family = backend  # the fp32-master projections below (cuBLAS casts, no Triton) stay on for the engine family
+            if (
+                backend == KernelBackend.TRITON
+                and self.implementation == ImplementationType.MINIWORLD
+                and _dispatch.restricted_card(pair.device)
+            ):
+                backend = KernelBackend.PYTORCH  # H100 / B200: no Triton fallback; the native CUDA routes were tried in forward()
             if not self.starting:
                 pair = rearrange(pair, "B I J D -> B J I D").contiguous()
             assert pair.is_contiguous()
@@ -456,7 +463,7 @@ class TriangleAttention(nn.Module):
 
             pair = self._layernorm(pair, backend)
             master = (
-                backend == KernelBackend.TRITON
+                master_family == KernelBackend.TRITON
                 and pair.dtype == torch.bfloat16
                 and self.to_value.weight.dtype == torch.float32
                 and _master.is_h100(pair.device)

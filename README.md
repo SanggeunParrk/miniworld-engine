@@ -1,8 +1,8 @@
 # miniworld-engine
 
 GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
-optimized in isolation: **hand-written CUDA where it exists, a Triton fallback everywhere
-else**, and a PyTorch reference that defines what "correct" means.
+optimized in isolation: **hand-written CUDA where it exists, a Triton fallback on every other GPU**
+(H100 and B200 have none, on purpose: they fall back to PyTorch), and a PyTorch reference that defines what "correct" means.
 
 > **Where this fits.** miniworld-engine is the bottom layer of a three-layer stack: it owns
 > the fused kernels and building-block ops; **team-gm** composes them into representative AF3

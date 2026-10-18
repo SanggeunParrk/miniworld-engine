@@ -45,14 +45,9 @@ def _pack_fake(weights):
 
 @opaque(fake=_pack_fake, name="h100_master_projection_pack")
 def _pack(weights: list[torch.Tensor]) -> list[torch.Tensor]:
+    # One multi-tensor PyTorch copy (a cast): H100 has no Triton fallback, and this is not worth a kernel of its own.
     outputs = _pack_fake(weights)
-    if all(w.is_contiguous() for w in weights):
-        sizes = tuple(w.numel() for w in weights)
-        _cast_kernel[(sum(triton.cdiv(n, 1024) for n in sizes),)](
-            tuple(weights), tuple(outputs), sizes, BLOCK=1024,  # ty: ignore[invalid-argument-type]  # Triton launch metadata
-        )
-    else:
-        torch._foreach_copy_(outputs, weights)
+    torch._foreach_copy_(outputs, weights)
     return outputs
 
 

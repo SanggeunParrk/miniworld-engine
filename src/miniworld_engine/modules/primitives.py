@@ -201,7 +201,7 @@ class RMSNorm(nn.RMSNorm):
         super().__init__(normalized_shape, eps, elementwise_affine, device=device, dtype=dtype)
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_rmsnorm(self.implementation)
-        # A MINIWORLD request that the B200 policy (``dispatch._torch_on_b200``) resolved to PYTORCH stands in for the kernel and
+        # A MINIWORLD request that the B200 policy (``dispatch._torch_on_hopper_blackwell``) resolved to PYTORCH stands in for the kernel and
         # returns what the kernel returns, the input dtype. Torch's ``rms_norm`` runs in fp32 under autocast and returns fp32
         # (torch 2.13): a qk-norm then hands the attention kernels an fp32 q next to a bf16 k. An explicit PYTORCH request
         # keeps torch's behaviour.

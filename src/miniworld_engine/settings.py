@@ -202,6 +202,11 @@ class Settings:
 
     #: Process-wide application policy; configure before constructing models.
     engine_backend: Literal["auto", "triton"] = "auto"
+    #: H100 (sm_90) and B200 (sm_100) have no Triton fallback, on purpose: those cards run hand-written CUDA (plus cuBLAS), and a call
+    #: no CUDA path serves runs the PyTorch reference instead of an untuned Triton kernel (`modules.dispatch.restricted_card`). True
+    #: brings the engine's Triton kernels back on those cards for A/B work and cache builds; `engine_backend="triton"` does the same.
+    #: Other cards are unaffected (Triton is their implementation).
+    triton_on_hopper_blackwell: bool = False
     #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
     #: own fused path (h100_d64_training), about 2.0x Triton under CUDA-graph replay at L384/768.
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)

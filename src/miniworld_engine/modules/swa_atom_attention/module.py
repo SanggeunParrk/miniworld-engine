@@ -681,8 +681,10 @@ def _qk_norm(x: torch.Tensor) -> torch.Tensor:
 
     Eager on CPU: the kernel is CUDA-only and the module's unit tests are not.
     """
-    if not x.is_cuda:
-        return F.rms_norm(x, (x.size(-1),)).to(x.dtype)
+    from miniworld_engine.modules import dispatch as _dispatch
+
+    if not x.is_cuda or _dispatch.restricted_card(x.device):   # H100 / B200: no Triton fallback
+        return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps).to(x.dtype)
     from miniworld_engine import kernels
 
     return kernels.triton_rmsnorm(x, None, torch.finfo(torch.float32).eps).to(x.dtype)

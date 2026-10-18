@@ -3,7 +3,7 @@
 <!-- Loaded automatically by Claude Code from .claude/CLAUDE.md. Other agents: read this file first. -->
 
 GPU kernel library for MiniWorld / AF3-style ops: hand-written CUDA where it exists, a Triton
-fallback everywhere else, a PyTorch reference for each op. Layout and quickstart: `README.md`.
+fallback on the other GPUs (none on H100 / B200, on purpose: they fall back to the PyTorch reference, see `docs/gpus/h100/dispatch.md`), a PyTorch reference for each op. Layout and quickstart: `README.md`.
 Docs index: `docs/README.md`.
 
 ## Hard rules

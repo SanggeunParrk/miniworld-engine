@@ -240,17 +240,55 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     return KernelBackend.TRITON
 
 
-def _torch_on_b200(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
-    """B200 runs this op as PyTorch ops that ``torch.compile`` fuses; every other card keeps ``default``.
-    ``settings.b200_engine_triton`` brings the engine's Triton kernels back on B200 (A/B). Resolved once, when the module is built."""
+def restricted_card(device: torch.device | None = None) -> bool:
+    """True on H100 (sm_90) and B200 (sm_100): the cards with **no Triton fallback**, on purpose. They run hand-written CUDA and
+    cuBLAS; a call no CUDA path serves runs the PyTorch reference (compiled by ``torch.compile`` where the caller compiles), never an
+    untuned Triton kernel. ``settings.triton_on_hopper_blackwell`` (or ``engine_backend="triton"``) lifts it for A/B work."""
+    if not torch.cuda.is_available():
+        return False
+    from miniworld_engine import settings
+
+    current = settings.current()
+    if current.triton_on_hopper_blackwell or current.engine_backend == "triton":
+        return False
+    index = device.index if device is not None and device.type == "cuda" else None
+    return torch.cuda.get_device_capability(index)[0] in (9, 10)
+
+
+def fallback_autocast(x: torch.Tensor, module: torch.nn.Module, active: bool = True):
+    """Context for a PyTorch fallback leg. A bf16 activation next to fp32 master parameters (the engine's mixed-precision layout) runs the
+    reference under bf16 autocast, as the caller's own autocast would; anything else runs as is."""
+    import contextlib
+
+    if (
+        active
+        and x.is_cuda
+        and x.dtype == torch.bfloat16
+        and not torch.is_autocast_enabled("cuda")
+        and any(p.dtype == torch.float32 for p in module.parameters() if p.ndim >= 2)
+    ):
+        return torch.autocast("cuda", dtype=torch.bfloat16)
+    return contextlib.nullcontext()
+
+
+def triton_leg_allowed(device: torch.device | None = None) -> bool:
+    """May a module run its Triton leg on ``device``? False on H100 / B200 (see :func:`restricted_card`): the module takes its PyTorch leg."""
+    return not restricted_card(device)
+
+
+def _torch_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
+    """H100 and B200 run this op as PyTorch ops (``torch.compile`` fuses them); every other card keeps ``default``. The settings
+    ``triton_on_hopper_blackwell`` / ``b200_engine_triton`` (B200 only) bring the engine's Triton kernels back for A/B work. Resolved once,
+    when the module is built."""
 
     def pick(device: torch.device | None) -> KernelBackend:
         from miniworld_engine import settings
 
-        if torch.cuda.is_available() and not settings.current().b200_engine_triton:
+        if restricted_card(device):
             index = device.index if device is not None and device.type == "cuda" else None
-            if torch.cuda.get_device_capability(index) == (10, 0):
-                return KernelBackend.PYTORCH
+            if torch.cuda.get_device_capability(index) == (10, 0) and settings.current().b200_engine_triton:
+                return default
+            return KernelBackend.PYTORCH
         return default
 
     return pick
@@ -265,15 +303,16 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     "triangle_multiplication": _trimul_known_best,
     # layernorm's MINIWORLD is the auto-routing layernorm_kernel (fused triton fwd +
     # per-shape auto-dispatched backward), grouped under the CUDA-family entry.
-    "layernorm": _torch_on_b200(KernelBackend.CUDA),
-    "rmsnorm": _torch_on_b200(KernelBackend.TRITON),
+    "layernorm": _torch_on_hopper_blackwell(KernelBackend.CUDA),
+    "rmsnorm": _torch_on_hopper_blackwell(KernelBackend.TRITON),
     # These have no faster module-layer backend than the TRITON family (whose kernels do
     # their own shape/arch sub-dispatch, incl. hand-CUDA on H100 internally). Listed
     # explicitly so the policy is auditable rather than implicit-by-omission.
     "transition": KernelBackend.TRITON,
     "triangle_attention": KernelBackend.TRITON,
-    "adaptive_layernorm": KernelBackend.TRITON,
-    "conditioned_transition": KernelBackend.TRITON,
+    # No CUDA path yet: Triton was their implementation; on H100 / B200 they run the PyTorch reference (no Triton fallback there).
+    "adaptive_layernorm": _torch_on_hopper_blackwell(KernelBackend.TRITON),
+    "conditioned_transition": _torch_on_hopper_blackwell(KernelBackend.TRITON),
     "augmented_attention": KernelBackend.TRITON,
     # The MSA pair. Their native H100 paths (integrations.opm_train / pwa_train) and the Anthropic payload are chosen inside
     # the modules before this is asked; what is resolved here is the portable path every other GPU gets.

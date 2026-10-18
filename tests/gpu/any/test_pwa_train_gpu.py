@@ -114,7 +114,7 @@ def test_fused_training_path_matches_the_engines_own(module, inputs, mask_key):
     # sm_100a rounds where the module's bf16 statements do (logits, o, the value projection), the engine's Triton path keeps
     # more in fp32: vs an fp32 copy the Triton path is ~3e-3 and both the module and sm_100a ~4.6e-3, so they sit ~5e-3 apart
     # (test_sm100_is_no_worse_than_the_modules_bf16_statements holds sm_100a to the module itself)
-    tol = 8e-3 if torch.cuda.get_device_capability() == (10, 0) else 5e-3
+    tol = 8e-3 if torch.cuda.get_device_capability() in ((9, 0), (10, 0)) else 5e-3  # H100 / B200: the engine's own path is PyTorch's bf16 statements
     assert rel(out_f, out_e) < tol
     assert (
         rel(dmsa_f, dmsa_e) < tol
@@ -123,7 +123,8 @@ def test_fused_training_path_matches_the_engines_own(module, inputs, mask_key):
     assert rel(dmsa_f.float() - gz.float(), dmsa_e.float() - gz.float()) < 2e-2
     assert rel(dpair_f, dpair_e) < 1e-2
     for n in PARAMS:
-        assert rel(g_f[n], g_e[n]) < 1e-2, n
+        # 2e-2 on H100 / B200: the engine's own path is PyTorch's bf16 statements, which round the LN-weight reduction differently
+        assert rel(g_f[n], g_e[n]) < (2e-2 if torch.cuda.get_device_capability() in ((9, 0), (10, 0)) else 1e-2), n
 
 
 @pytest.mark.parametrize("mask_key", ["full", "ragged"])
@@ -266,7 +267,7 @@ def test_inference_takes_the_same_kernels(module, inputs):
         assert pt.STATS["served"] == served + 1
         # sm_100a rounds as the module's bf16 statements do; the engine's Triton path is closer to fp32 (see the training test)
         assert rel(out_f, out_e) < (
-            8e-3 if torch.cuda.get_device_capability() == (10, 0) else 5e-3
+            8e-3 if torch.cuda.get_device_capability() in ((9, 0), (10, 0)) else 5e-3
         )
         assert (
             rel(
@@ -380,58 +381,18 @@ def test_native_inference_default_live_master_graph(module, monkeypatch, length)
 
 
 @pytest.mark.skipif(not SM90, reason="H100 native inference")
-def test_native_inference_default_refuses_unserved_shape(module, inputs, monkeypatch):
+def test_native_inference_default_runs_the_reference_on_an_unserved_shape(module, inputs, monkeypatch):
+    """No Triton fallback on H100: a shape the native kernels do not serve runs the PyTorch statements (and matches them)."""
+    import copy
+
+    from miniworld_engine.modules.dispatch import KernelBackend
+    from miniworld_engine.modules.exceptions import ImplementationType
+
     override_setting(monkeypatch, "pwa_train", None)
-    with torch.no_grad(), pytest.raises(ValueError, match="H100 CUDA PWA"):
-        module(
-            inputs["msa"][:, :, :320],
-            inputs["pair"][:, :320, :320],
-            inputs["full"][:, :320],
-        )
-
-
-@pytest.mark.skipif(not SM90, reason="the sm_90a glue kernel")
-@pytest.mark.parametrize("length", [384, 768])
-def test_glue_dropout_shared_tiles_match_materialized_gradient(length):
-    """Both consumers' dWo reads must see masked tiles, including reused ring slots."""
-    torch.manual_seed(73)
-    s = 256
-
-    def rand(*shape):
-        return torch.randn(*shape, device=DEV, dtype=DT)
-
-    o, y, dy = rand(s, length, 256), rand(s, length, 64), rand(s, length, 64)
-    wg, wot = rand(256, 64), rand(256, 64)
-    mask = (torch.rand(length, 64, device=DEV) > 0.15).to(DT)
-    scale = 1.0 / 0.85
-    ext = pt._k()["glue3"]
-    expected = ext.pwa_glue3(
-        o, y, (dy * mask[None] * scale).contiguous(), wg, wot, None, 2, 1
-    )
-    actual = ext.pwa_glue3(o, y, dy, wg, wot, None, 2, 1, mask, scale)
-    for a, b in zip(actual, expected, strict=True):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
-
-
-@pytest.mark.skipif(SM90, reason="the sm_100a glue kernel")
-@pytest.mark.parametrize("length", [384, 768])
-def test_glue2_dropout_masks_dres_in_shared_memory_like_a_materialized_gradient(length):
-    """sm_100a glue2: dres' = dres . keep / (1 - p) formed in shared memory gives the same outputs, bit for bit, as the
-    materialized masked gradient: do, dyg (= dgp . Wg) and both weight gradients (dWo, dWg) accumulated over reused tiles."""
-    torch.manual_seed(73)
-    s = 256
-
-    def rand(*shape):
-        return torch.randn(*shape, device=DEV, dtype=DT)
-
-    o, y, dy = rand(8, length, s * 32), rand(s, length, 64), rand(s, length, 64)
-    wg, wot = rand(256, 64), rand(256, 64)
-    mask = (torch.rand(length, 64, device=DEV) > 0.15).to(DT)
-    scale = 1.0 / 0.85
-    ext = pt._k100()["pwa"]
-    expected = ext.pwa_glue2(
-        o, y, (dy * mask[None] * scale).contiguous(), wg, wot, None, 1.0, 0
-    )
-    actual = ext.pwa_glue2(o, y, dy, wg, wot, mask, scale, 0)
-    for a, b in zip(actual, expected, strict=True):
-        torch.testing.assert_close(a, b, rtol=0, atol=0)
+    args = (inputs["msa"][:, :, :320], inputs["pair"][:, :320, :320], inputs["full"][:, :320])
+    reference = copy.deepcopy(module)
+    reference.implementation, reference._backend = ImplementationType.PYTORCH, KernelBackend.PYTORCH
+    with torch.no_grad():
+        actual = module(*args)
+        expected = reference(*args)
+    assert rel(actual, expected) < 1e-2

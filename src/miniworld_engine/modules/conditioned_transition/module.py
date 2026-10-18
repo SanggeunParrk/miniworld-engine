@@ -141,7 +141,12 @@ class ConditionedTransition(nn.Module):
         """
         x = self.ada_ln_in(x, cond)
         if self._backend == KernelBackend.PYTORCH:
-            return self._reference(x, cond)
+            from miniworld_engine.modules import dispatch as _dispatch
+
+            with _dispatch.fallback_autocast(
+                x, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
+            ):
+                return self._reference(x, cond)
 
         if self._backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]

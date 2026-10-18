@@ -295,7 +295,11 @@ def test_native_bucket_module_graph(monkeypatch, n, master):
     gc.collect();torch.cuda.empty_cache()
 
 
-def test_native_training_refuses_unbucketed_length(monkeypatch):
+def test_native_training_runs_the_reference_on_an_unbucketed_length(monkeypatch):
+    """No Triton fallback on H100: a length outside the native training buckets runs the PyTorch statements (fp32 master
+    parameters under bf16 autocast) and matches them."""
+    import copy
+
     _hopper()
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
     from miniworld_engine.modules.exceptions import ImplementationType
@@ -305,6 +309,12 @@ def test_native_training_refuses_unbucketed_length(monkeypatch):
 
     monkeypatch.setattr(T, "_TRAIN_CUDA_UNSCOPED", True)
     module = TriangleMultiplication(64, implementation=ImplementationType.MINIWORLD, p_drop=0.0).cuda().train()
-    pair = torch.empty((1, 64, 64, 64), device="cuda", dtype=torch.bfloat16)
-    with pytest.raises(ValueError, match="native H100 TriMul training requires a supported B1 BF16 bucket"):
-        module(pair)
+    reference = copy.deepcopy(module)
+    reference.implementation = ImplementationType.PYTORCH
+    reference._backend = type(module._backend).PYTORCH
+    pair = torch.randn((1, 64, 64, 64), device="cuda", dtype=torch.bfloat16)
+    actual = module(pair)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        expected = reference(pair)
+    assert torch.isfinite(actual).all()
+    assert float((actual.float() - expected.float()).norm() / expected.float().norm().clamp_min(1e-12)) < 3e-2

@@ -1,7 +1,8 @@
-"""LayerNorm / RMSNorm on a B200 run as PyTorch ops that ``torch.compile`` fuses; every other card keeps the engine kernel.
+"""LayerNorm / RMSNorm (and AdaptiveLayerNorm / ConditionedTransition, which have no CUDA path yet) on an H100 or B200 run as PyTorch
+ops that ``torch.compile`` fuses -- the engine has no Triton fallback on those cards; every other card keeps the engine kernel.
 
-``settings.b200_engine_triton`` brings the engine's Triton kernels back on B200 (the A/B switch), and a strict
-``engine_backend="triton"`` process still wins. No GPU is needed: the card is faked.
+``settings.triton_on_hopper_blackwell`` (and, on B200 only, the older ``b200_engine_triton``) bring the engine's Triton kernels back
+(the A/B switch), and a strict ``engine_backend="triton"`` process still wins. No GPU is needed: the card is faked.
 
 Run: ``pixi run python -m pytest tests/cpu/compile/test_b200_norm_dispatch.py -q``
 """
@@ -34,14 +35,15 @@ def _card(monkeypatch, capability):
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda index=None: capability)
 
 
-@pytest.mark.parametrize(("op", "engine"), _NORMS)
-def test_b200_runs_the_norms_as_pytorch_ops(monkeypatch, op, engine):
-    _card(monkeypatch, (10, 0))
+@pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
+@pytest.mark.parametrize(("op", "engine"), _NORMS + [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
+def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, capability):
+    _card(monkeypatch, capability)
     assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
     assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.PYTORCH
 
 
-@pytest.mark.parametrize("capability", [(9, 0), (8, 0), (8, 6)])
+@pytest.mark.parametrize("capability", [(8, 0), (8, 6)])
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
 def test_other_cards_keep_the_engine_kernel(monkeypatch, op, engine, capability):
     _card(monkeypatch, capability)
@@ -62,8 +64,18 @@ def test_b200_engine_triton_brings_the_engine_kernel_back(monkeypatch, op, engin
 
 
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
-def test_a_strict_triton_process_still_wins_on_b200(monkeypatch, op, engine):
-    _card(monkeypatch, (10, 0))
+def test_triton_on_hopper_blackwell_brings_the_engine_kernel_back(monkeypatch, op, engine):
+    for capability in ((9, 0), (10, 0)):
+        _card(monkeypatch, capability)
+        settings.configure(triton_on_hopper_blackwell=True)
+        assert dispatch.resolve(op, "miniworld") is engine
+        settings.configure(triton_on_hopper_blackwell=False)
+
+
+@pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
+@pytest.mark.parametrize(("op", "engine"), _NORMS)
+def test_a_strict_triton_process_still_wins_on_h100_and_b200(monkeypatch, op, engine, capability):
+    _card(monkeypatch, capability)
     settings.configure(engine_backend="triton")
     assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON
 
