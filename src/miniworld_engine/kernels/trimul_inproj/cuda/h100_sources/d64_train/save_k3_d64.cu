@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Anthropic f4f62fa K3; Miniworld training epilogue, optional LN statistics and output projection/gate saves.
 // Derived by derive.py. Apache-2.0 upstream attribution retained.
-// D64 copy (h100_d64_training): the pair width is the MW_CZ define instead of a literal 128.
+// D64 copy (h100_d64_b200gate): the pair width is the MW_CZ define instead of a literal 128.
 #include "tmn_kernels.cuh"
 #include <cuda_fp16.h>
 namespace tmn { namespace sm90 {

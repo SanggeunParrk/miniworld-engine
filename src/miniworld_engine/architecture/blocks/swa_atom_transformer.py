@@ -334,6 +334,12 @@ class SWAAtomTransformer(nn.Module):
         )
         if not want or not q.is_cuda:
             return False
+        from miniworld_engine.kernels.swa_dit.interface import (
+            highest_fp32_on_hopper_blackwell,
+        )
+
+        if highest_fp32_on_hopper_blackwell(q, self.config.swa_window_size // 2):
+            return False  # fp32 under "highest" off the native H100 stages: the per-block PyTorch statements (no Triton on H100 / B200)
         blk = self.blocks[0]
         is_global = self._is_global()
         cast = self._global_cast(q)

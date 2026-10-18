@@ -57,8 +57,6 @@ class SWADiTBlockFunction(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         B, half_window = ctx.meta
-        if ctx.native_h100 and not dy.is_contiguous():
-            raise ValueError("native H100 SWA requires contiguous upstream gradient")
         grads = swa_dit_block_bwd(dy.contiguous(), *ctx.saved_tensors[:-5], B, half_window, FP32_EPS)
         dq, dmod, *dw = grads
         if ctx.native_h100:
@@ -78,9 +76,7 @@ class SWADiTModulationH100(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        if not dy.is_contiguous():
-            raise ValueError("native SWA modulation requires contiguous upstream gradient")
-        return native_h100_mod_bwd(dy, *ctx.saved_tensors)
+        return native_h100_mod_bwd(dy.contiguous(), *ctx.saved_tensors)  # e.g. the expanded gradient of a sum
 
 
 class SWADiTModulationSm100(torch.autograd.Function):

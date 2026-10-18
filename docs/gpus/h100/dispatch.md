@@ -16,7 +16,7 @@ policy before constructing/compiling models.
 | Local atom DiT (AF3 windowed, cross-attention) | `integrations/local_dit_h100.py`: hoisted conditioning tables and windowed pair bias, `pre90` (AdaLN 1 + q / gate + K / V AdaLN + k / v), `mma.sync` window attention, `post90` (gate, out-projection, AdaLN 2, SwiGLU, residuals); wgmma row kernels, TF32 or bf16 | One opaque fwd / bwd per block: row kernels `cond90` `pre90` `post90` / `tr_bwd90` `post_bwd90` `pre_bwd90` `cond_bwd90` (wgmma, register A), `mma.sync` attention fwd / dq / dkv, cuBLAS weight gradients, `finalize90` (gradient packing) | fp32 activations + fp32 parameters (no autocast, TF32) or bf16 activations (fp32 master or bf16 parameters, autocast allowed); B = 1, d128 / cond 128 / pair 16, 4 x 32 heads, n = 2, any A, any N (padded to 128 inside), key mask [1, N]; `settings.local_dit_h100_mma{,_fp32,_bf16}`, `local_dit_h100_pdl`, `local_dit_hoist` ([local_dit/local_dit.md](local_dit/local_dit.md)); few 64-row tiles: weight packs in one launch (`pack90`), `cond90` / `pre90` / `tr_bwd90` / `post_bwd90` / `cond_bwd90` split over CTAs (`grid.y`), shared conditioning: four samples per CTA group and `cond_bwd_sh90` |
 
 A call outside these contracts runs the PyTorch reference (next section). `auto` selects the bidirectional CUDA training path at
-D64/128/256/384/512 (D64: its own fused path `h100_d64_training`). Inference: the packaged K1/K3 table (D64/128, uni D256/384), the
+D64/128/256/384/512 (D64: its own fused path `h100_d64_b200gate`). Inference: the packaged K1/K3 table (D64/128, uni D256/384), the
 wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512) and the single-direction D512 path `h100_uni_wide_inference`.
 Single-direction training serves D64/128/256/384/512 in both directions. Per-shape status: `docs/gpus/h100/h100.md`; comparison
 matrix: `docs/records/trimul_h100_comparison_20261015.md`. Measurements and audits of the v2.2.0 integration that this page used to
@@ -48,6 +48,11 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
   outside its buckets. `tests/gpu/sm90/test_architecture_no_triton_gpu.py` records every Triton launch through the atom transformer
   (windowed, AF3 and global attention), the Pairformer and the diffusion transformer: none, bf16 and fp32, inference and training. A
   MiniWorld phase-1a training run with `train.forbid_triton` on ran 67 steps on H100 without a Triton launch (2026-10-18).
+* The engine `SWADiTBlock` (`modules/swa_dit`) does the same: its leg for a contract the fused block refuses, and its `SwiGLUFFN`, run
+  the PyTorch statements on these cards rather than the Triton RMS-adaLN / gated-residual / SwiGLU ops.
+* SWA atom DiT in fp32 under matmul precision "highest" (torch's default): the native H100 stages serve it (exact-fp32 cuBLAS
+  projections); a call they do not take (B200, `swa_dit_h100_native=False`) runs the PyTorch statements, never the sm_100a TF32 or the
+  Triton fp32 kernels (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`, `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
 * Other cards (A100, RTX A5000 / A6000): Triton is the implementation, unchanged.
 * An explicit request keeps Triton on H100 / B200: `implementation="triton"`, `engine_backend="triton"`, or
   `settings.triton_on_hopper_blackwell=True` (A/B work, building Triton caches). `b200_engine_triton` does the same on B200.

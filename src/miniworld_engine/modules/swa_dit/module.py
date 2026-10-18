@@ -32,7 +32,10 @@ class SwiGLUFFN(nn.Module):
         self.w_down = Linear(hidden, d_model, bias=False, init="normal")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if self.implementation != ImplementationType.PYTORCH:
+        from miniworld_engine.modules.dispatch import restricted_card
+
+        # H100 / B200 have no Triton fallback: the PyTorch statements below run there
+        if self.implementation != ImplementationType.PYTORCH and not (x.is_cuda and restricted_card(x.device)):
             from miniworld_engine import ops
 
             wa, wb = self.w_up.weight.chunk(2, dim=0)
@@ -180,8 +183,17 @@ class SWADiTBlock(nn.Module):
                 # One modulation row per sequence row (B = N): no augment structure is known here.
                 return self._fused(x, cond, attention_params)
             from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
+            from miniworld_engine.modules.dispatch import (
+                fallback_autocast,
+                restricted_card,
+            )
+
             if _native_h100_strict(x, native_h100_enabled):
                 raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
+            if x.is_cuda and restricted_card(x.device):
+                # H100 / B200 have no Triton fallback: the PyTorch statements below (fp32 masters under bf16 autocast)
+                with fallback_autocast(x, self):
+                    return self._pytorch_forward(x, cond, attention_params).to(x.dtype)
             from miniworld_engine import ops
 
             activated = self.adaln_modulation[0](cond)
@@ -198,7 +210,9 @@ class SWADiTBlock(nn.Module):
                 x, activated, sc_f, sh_f, g_f, eps=eps,
             )
             return ops.gated_residual(x, gate_f, self.ffn(ffn_in))
+        return self._pytorch_forward(x, cond, attention_params)
 
+    def _pytorch_forward(self, x: torch.Tensor, cond: torch.Tensor, attention_params: tuple) -> torch.Tensor:
         shift_a, scale_a, gate_a, shift_f, scale_f, gate_f = (
             self.adaln_modulation(cond).chunk(6, dim=-1)
         )

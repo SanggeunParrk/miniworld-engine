@@ -75,6 +75,30 @@ def _global_gate() -> str | None:
     return None
 
 
+def _matmul_precision() -> str:
+    """torch's float32 matmul precision, read as a constant under torch.compile (Dynamo cannot trace the getter)."""
+    return torch.get_float32_matmul_precision()
+
+
+_matmul_precision = torch.compiler.assume_constant_result(_matmul_precision)
+
+
+def highest_fp32_on_hopper_blackwell(q: torch.Tensor, half_window: int) -> bool:
+    """fp32 activations under ``torch.set_float32_matmul_precision("highest")`` on H100 / B200 that the native sm_90a stages do not
+    take. Off those stages the fused fp32 block is the sm_100a TF32 kernels (B200) or the Triton fp32 kernels, neither of which
+    "highest" asks for, and those cards have no Triton fallback: the callers run the PyTorch statements instead. The native H100
+    stages stay (fp32 rows, cuBLAS projections in exact fp32 under "highest", bf16 attention operands as the per-op path has them)."""
+    if q.dtype != torch.float32 or not q.is_cuda or _matmul_precision() != "highest":
+        return False
+    from miniworld_engine.kernels.swa_dit.dispatch import (
+        _h100_global,
+        native_h100_enabled,
+    )
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    return restricted_card(q.device) and not (native_h100_enabled(q) or _h100_global(q, half_window))
+
+
 def refusal(
     q: torch.Tensor,
     cos: torch.Tensor,
@@ -113,6 +137,8 @@ def refusal(
         tensors["adaln weight"] = wmod
     if q.dtype not in (torch.bfloat16, torch.float32):
         return f"the fused block runs bf16 or fp32, got q {q.dtype}"
+    if highest_fp32_on_hopper_blackwell(q, half_window):
+        return "fp32 under matmul precision 'highest' off the native H100 stages runs the PyTorch statements on H100 / B200"
     for name, t in tensors.items():
         # the weights may also be an fp32 master over bf16 activations (cast for the kernels outside autograd)
         if t.dtype != q.dtype and not (
@@ -368,6 +394,7 @@ __all__ = [
     "HALF_WINDOW",
     "N_HEAD",
     "N_HIDDEN",
+    "highest_fp32_on_hopper_blackwell",
     "is_global",
     "refusal",
     "swa_dit_block",

@@ -50,7 +50,7 @@ def _k3(tile):
     return k, smem
 
 
-B1W_SMEM, B2W_SMEM = 171008, 170560  # == b1::SMEM, b2::SMEM in uni_bwd_wg.cu
+B1W_SMEM, B2W_SMEM = 171008, 170560  # == b1::SMEM, b2::SMEM in uni_bwd_wg_affinereg.cu / _gatepipe.cu / _b7gate.cu
 B1W_SLOT, B2W_SLOT = 4096 + 128 + 4096, 16384 + 128
 FINW_OUT = B2W_SLOT + B1W_SLOT
 

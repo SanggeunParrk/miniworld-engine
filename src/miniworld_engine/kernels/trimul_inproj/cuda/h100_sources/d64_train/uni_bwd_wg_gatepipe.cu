@@ -2,7 +2,7 @@
 // EXPERIMENT: B200 gate input-gradient placement; original baseline preserved.
 // SPDX-License-Identifier: Apache-2.0
 // Single-direction TriMul training backward at pair width D = 64 (hidden 64, one contraction), sm_90a, wgmma + TMA.
-// Derived from d64_bwd_wg.cu (bidirectional, H = 128): the output side keeps one [64][64] Wp tile and a 64-channel
+// Derived from the former d64_bwd_wg.cu (bidirectional, H = 128; removed, see git history): the output side keeps one [64][64] Wp tile and a 64-channel
 // output LN; the input side has two packed 64-row weight blocks per side instead of four.
 //
 // Notation (per token t, M = n * n tokens):  xhat = (x - mu_in) r_in, xn = xhat gi + bi (the forward's gate / projection operand),

@@ -252,8 +252,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
 def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
                      qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, hw, eps):
     _native_contract(q, mod, cs, sn, sequ, (wqkv, wg, wo, wu, wd), B, hw, True)
-    if not dy.is_contiguous():
-        raise ValueError("native H100 SWA requires contiguous upstream gradient")
+    dy = dy.contiguous()  # e.g. the expanded gradient of a sum
     ext = _native_h100_extension()
     N, S, _ = q.shape
     A, M, bf = N // B, N * S, q.dtype == torch.bfloat16
@@ -730,7 +729,8 @@ def _fp32_cuda(C: int, NHID: int, half_window: int, device: torch.device) -> Any
     It serves only while the process allows TF32 (``torch.get_float32_matmul_precision()`` "high" or "medium" -- what
     MiniWorld's trainer sets, and what the per-op path's cuBLAS projections then run at): its FFN splits the weights but
     not the activations, which matches the per-op path under TF32, not under "highest", where the per-op FFN is exact
-    fp32. There the Triton kernels' tf32x3 FFN serves instead. Read on every call, like the other settings.
+    fp32. There the Triton kernels' tf32x3 FFN serves instead, off H100 / B200 (there "highest" never reaches this: the callers run the
+    PyTorch statements, interface.highest_fp32_on_hopper_blackwell). Read on every call, like the other settings.
     """
     wanted = (settings.current().swa_dit_fp32_cuda and torch.get_float32_matmul_precision() != "highest"
               and C == D_ATOM and NHID == N_HIDDEN and half_window == HALF_WINDOW)

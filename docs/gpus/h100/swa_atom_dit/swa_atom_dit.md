@@ -12,8 +12,11 @@ kernels too (see "Weight gradients and modulation" below): the bf16 weight gradi
 ones up to 65536 rows (cuBLAS's TF32 GEMMs are faster above), the bf16 modulation on mma.sync / wgmma; the fp32 modulation stays on
 torch's GEMMs. Nothing autotunes: tiles and launch shapes are fixed, so there is no
 dependence on an H100 autotune cache. The Triton kernels (`triton/forward*.py`, `backward*.py`) are the non-H100 path and the accuracy
-reference the tests compare against; on H100 they run only on request (`engine_backend="triton"`, a `swa_dit_*_cuda` switch off) and for
-the fp32 block under matmul precision "highest" (below). H100 has no Triton fallback otherwise ([dispatch.md](../dispatch.md)).
+reference the tests compare against; on H100 they run only on request (`engine_backend="triton"`, `settings.triton_on_hopper_blackwell`).
+H100 has no Triton fallback ([dispatch.md](../dispatch.md)). fp32 under matmul precision "highest" (torch's default) stays on the native
+H100 stages (fp32 rows, exact-fp32 cuBLAS projections, bf16 attention operands as in the per-op path); a call those stages do not take
+(B200, or `swa_dit_h100_native=False`) runs the PyTorch statements instead of the TF32 or Triton fp32 kernels
+(`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`).
 
 ## Where the code is
 
@@ -37,7 +40,8 @@ the fp32 block under matmul precision "highest" (below). H100 has no Triton fall
 - fp32: `swa_fp32.cu` is one `fwd` and one `bwd` call; tf32 wgmma with round-to-nearest operands, the FFN weights split in two
   tf32 passes (hi + lo), residual stream / norms / modulation / gates / RoPE / SwiGLU / every saved tensor in fp32, the window
   attention on bf16 operands. It is served while TF32 is allowed (`torch.set_float32_matmul_precision("high"/"medium")`) and
-  `swa_dit_fp32_cuda` is on; under "highest" the Triton fp32 kernels serve.
+  `swa_dit_fp32_cuda` is on; under "highest" off the native H100 stages the block runs the PyTorch statements (the
+  `SWAAtomTransformer` fused path and `modules.swa_dit.SWADiTBlock` alike; `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
 - Dispatch is gated on compute capability 9.0 (`cuda/loader.py:is_sm90`); other GPUs take the Triton path. Switches:
   `swa_dit_qkvg_fwd_cuda`, `swa_dit_ffn_fwd_cuda`, `swa_dit_ffn_bwd_cuda`, `swa_dit_attn_cuda`, `swa_dit_oproj_bwd_cuda`,
   `swa_dit_qkvg_bwd_cuda`, `swa_dit_rows_impl`, `swa_dit_fp32_cuda`, `swa_dit_mod_cuda`, `swa_dit_wgrad_cuda` (all default on);
