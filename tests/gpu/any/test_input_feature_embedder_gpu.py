@@ -98,13 +98,23 @@ def test_no_triton_on_h100_or_b200(monkeypatch, grad, window):
     assert not launches, dict(launches)
 
 
+@pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
-def test_global_attention_at_a_default_window_cell(grad):
+def test_a_default_window_cell_stays_on_cuda(grad, window, monkeypatch):
     """4096 atoms, one sample: a shape the window block's per-shape defaults route away from the native H100 stages; global
     attention must still run them (it has no other path on H100)."""
-    model = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS["global"])
+    import collections
+
+    import triton.runtime.jit as jit
+
+    launches = collections.Counter()
+    original = jit.JITFunction.run
+    monkeypatch.setattr(jit.JITFunction, "run", lambda self, *a, **k: launches.update([self.fn.__name__]) or original(self, *a, **k))
+    model = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS[window])
     with torch.set_grad_enabled(grad), torch.autocast("cuda", dtype=torch.bfloat16):
         y = model(*_inputs(n=4096, n_token=512))
         if grad:
             y.float().sum().backward()
     assert torch.isfinite(y).all()
+    if torch.cuda.get_device_capability()[0] in (9, 10):
+        assert not launches, dict(launches)

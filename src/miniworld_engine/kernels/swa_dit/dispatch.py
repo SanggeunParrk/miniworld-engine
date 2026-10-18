@@ -129,7 +129,11 @@ def native_h100_enabled(q, training=None):
         return override and is_sm90(q.device)
     if (q.ndim == 3 and q.shape[0] in (1, 5)
             and q.shape[1] in (1024, 2048, 4096, 8192) and q.shape[2] == 128):
-        return _native_b200_default(q, training) and is_sm90(q.device)
+        # The per-cell speed gates kept some cells on the composed path, which mixes in Triton kernels. H100 has no Triton
+        # fallback (modules.dispatch.restricted_card): those cells take the native stages too unless Triton was asked for.
+        from miniworld_engine.modules.dispatch import restricted_card
+
+        return is_sm90(q.device) and (_native_b200_default(q, training) or restricted_card(q.device))
     return is_sm90(q.device)
 
 
