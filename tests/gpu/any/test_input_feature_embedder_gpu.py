@@ -14,7 +14,7 @@ from miniworld_engine.modules import InputFeatureEmbedder
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")]
 
 
-def _inputs(b=1, n=300, n_token=40, seed=0):
+def _inputs(b=1, n=300, n_token=40, seed=0):  # n=4096 is a cell whose window default is not the native H100 block
     g = torch.Generator(device="cuda").manual_seed(seed)
     pos = torch.randn(b, n, 3, device="cuda", generator=g) * 5
     atoms = torch.arange(n, device="cuda")[None].expand(b, -1)
@@ -96,3 +96,15 @@ def test_no_triton_on_h100_or_b200(monkeypatch, grad, window):
             y.float().sum().backward()
     torch.cuda.synchronize()
     assert not launches, dict(launches)
+
+
+@pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
+def test_global_attention_at_a_default_window_cell(grad):
+    """4096 atoms, one sample: a shape the window block's per-shape defaults route away from the native H100 stages; global
+    attention must still run them (it has no other path on H100)."""
+    model = _model(ImplementationType.MINIWORLD_ENGINE, WINDOWS["global"])
+    with torch.set_grad_enabled(grad), torch.autocast("cuda", dtype=torch.bfloat16):
+        y = model(*_inputs(n=4096, n_token=512))
+        if grad:
+            y.float().sum().backward()
+    assert torch.isfinite(y).all()

@@ -133,6 +133,14 @@ def native_h100_enabled(q, training=None):
     return is_sm90(q.device)
 
 
+def _h100_global(q, half_window):
+    """Global attention on H100 always takes the native sm_90a stages (FlashAttention-4 between them): the composed path's
+    global attention is the sm_100a stages, which an H100 cannot run, whatever the per-shape defaults pick for the window."""
+    from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
+
+    return is_global(half_window) and q.is_cuda and is_sm90(q.device)
+
+
 def _native_b200_fusion(q=None, training=None, B=None):
     """The B200-style fused row stages read one conditioning row per sequence row; a call whose samples share their conditioning
     (``q.shape[0] != B``: a sampling step) runs the plain native stages instead."""
@@ -598,7 +606,7 @@ def swa_dit_block_fwd(
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
-    if native_h100_enabled(q, save):
+    if native_h100_enabled(q, save) or _h100_global(q, half_window):
         return _native_h100_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
@@ -923,7 +931,7 @@ def swa_dit_block_bwd(
     """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C] in q's
     dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
     (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
-    if native_h100_enabled(q, True):
+    if native_h100_enabled(q, True) or _h100_global(q, half_window):
         return _native_h100_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd,
                                 qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
     if is_global(half_window):
