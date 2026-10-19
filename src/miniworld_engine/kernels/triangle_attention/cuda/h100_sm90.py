@@ -89,9 +89,20 @@ def pack_front(wq, wk, wv, wg, wb):
     return w4, wb16
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False):
+def flip_bias(sbias, mask):
+    """The ending node on AlphaFold 3's bias orientation, from the front's output: the transpose of the bias the front projected
+    from the transposed pair, with the key mask applied afterwards (to the transposed axis).  ``sbias`` is [B, H, L, L] bf16 made
+    with no mask; masked keys are -inf, as the front writes them."""
+    out = sbias.transpose(-1, -2)
+    if mask is not None:
+        out = out.masked_fill(~mask[:, None, None, :], float("-inf"))
+    return out.contiguous()
+
+
+def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, flip=False):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
-    out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16."""
+    out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16.  ``flip``: the ending node (``trans``) takes its
+    bias from the pair as it is (:func:`flip_bias`)."""
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
@@ -103,12 +114,14 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False):
         eps,
         w4,
         wb16,
-        mask if mask is not None else empty.bool(),
+        mask if mask is not None and not flip else empty.bool(),
         B,
         L,
         D**-0.5,
         trans,
     )
+    if flip:
+        sbias = flip_bias(sbias, mask)
     shp = (B, L, L, H, D)
     o, _, _, _ = _core().triattn_fwd(
         q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False
