@@ -186,7 +186,8 @@ class GemmSwigluSm90:
 
     def __call__(self, x, w_ab, out):
         key = (w_ab.data_ptr(), w_ab._version)
-        wp = self.packed.get(key)
+        hit = self.packed.get(key)
+        wp = hit[0] if hit is not None else None
         if wp is None:
             H, K = w_ab.shape[0] // 2, w_ab.shape[1]
             wp = (
@@ -198,7 +199,7 @@ class GemmSwigluSm90:
                 .contiguous()
             )
             if not torch.cuda.is_current_stream_capturing():
-                self.packed[key] = wp
+                self.packed[key] = (wp, w_ab)  # keeps ``w_ab`` alive: its address cannot alias another tensor
         self.ext.gemm_swiglu(x, wp, out, self.nsm)
         return out
 

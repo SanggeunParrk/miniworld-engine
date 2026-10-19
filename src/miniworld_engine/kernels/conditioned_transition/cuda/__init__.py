@@ -114,7 +114,13 @@ def _tf32_wab(wab, ht=128):
         w = torch.stack([wab[:H].view(H // ht, ht, K), wab[H:].view(H // ht, ht, K)], 1).reshape(2 * H, K)
         return ((w.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
 
-    return _capture.lookup(_TF32_WAB, (wab.data_ptr(), wab._version, tuple(wab.shape), ht), build, limit=8)
+    # the entry holds ``wab``: a freed pack's address cannot alias another tensor while the entry lives
+    return _capture.lookup(
+        _TF32_WAB,
+        (wab.data_ptr(), wab._version, tuple(wab.shape), ht),
+        lambda: (build(), wab),
+        limit=8,
+    )[0]
 
 
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
@@ -220,7 +226,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
                     _ext().token_mask90(bias, mask)
         else:
             bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
-        return bias, pair, mask
+        return bias, pair, mask, wf  # the entry keeps its key tensors alive: a freed address cannot alias another tensor
 
     # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
     # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);

@@ -694,9 +694,13 @@ def _kv_pack(weights, packed_pre=None):
         weights[WEIGHTS.index("attention.to_key.weight")],
         weights[WEIGHTS.index("attention.to_value.weight")],
     ]
+    # the entry keeps the weights alive: a freed address cannot alias another tensor
     return _capture.lookup(
-        _KV, (hopper, *((t.data_ptr(), t._version) for t in tail)), build, limit=16
-    )
+        _KV,
+        (hopper, *((t.data_ptr(), t._version) for t in tail)),
+        lambda: (build(), tuple(tail)),
+        limit=16,
+    )[0]
 
 
 def _cond_tables(

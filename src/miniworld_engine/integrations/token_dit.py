@@ -386,6 +386,7 @@ def _infer(
         assert (
             mask is not None
         )  # off sm_90 ``update`` fills a missing mask with all-True
+        pinned = (pair, mask)  # the cache entry below keeps the caller's tensors alive
         bkey = _capture.scoped(
             (
                 pair.data_ptr(),
@@ -410,7 +411,7 @@ def _infer(
                 )
             bias = runner.hoist(pair.contiguous(), mask)
             if bkey is not None:
-                runner._bias_cache = (bkey, bias)
+                runner._bias_cache = (bkey, bias, pinned)
         if L8 == L:
             return runner.step(single, cond, bias)
         # padded query rows: zero single / cond rows, computed and dropped (a shared cond stays one table)
