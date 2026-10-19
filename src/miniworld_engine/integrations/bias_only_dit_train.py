@@ -323,7 +323,7 @@ def _pack(P, dev):
     if W is not None:
         if slot is not None:
             _capture.prune(_PACKS)
-            _PACKS[slot] = (key, W)
+            _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
         return W
     g = lambda n: P[n]
     w1, w2 = (
@@ -392,7 +392,7 @@ def _pack(P, dev):
         W.update(mt)
     if slot is not None:
         _capture.prune(_PACKS)
-        _PACKS[slot] = (key, W)
+        _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
     return W
 
 
@@ -1400,7 +1400,7 @@ def _pack32(P, dev):
     }
     if slot is not None:
         _capture.prune(_PACKS32)
-        _PACKS32[slot] = (key, W)
+        _PACKS32[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
     return W
 
 

@@ -204,7 +204,8 @@ def _infer(
         else:
             P = runner.hoist(pair.contiguous(), mask)
             if pkey is not None:
-                runner._p_cache = (pkey, P)
+                # the entry keeps its key tensors alive: a freed address cannot alias another tensor
+                runner._p_cache = (pkey, P, (pair, mask))
         return runner.step(single, cond, P)
 
 
