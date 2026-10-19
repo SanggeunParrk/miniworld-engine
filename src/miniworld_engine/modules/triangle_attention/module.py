@@ -61,6 +61,13 @@ class TriangleAttention(nn.Module):
         Whether to use self-attention.
     use_qk_norm : bool
         Whether to apply RMSNorm to query and key projections.
+    transposed_bias : bool
+        Which orientation the ending node (``starting=False``) takes its pair bias from. ``True`` (default): the bias is
+        projected from the transposed pair, the orientation the queries and keys are in (the supplementary-information
+        and OpenFold convention). ``False``: the bias is projected from the pair as it is and read in the transposed
+        frame, i.e. the transpose of the ``True`` bias (AlphaFold 3's released code). Starting-node attention has one
+        orientation and ignores it. Training is served by the composed legs; the H100 hand-CUDA kernels serve the
+        ``False`` orientation for inference only, the B200 kernels not at all.
     implementation : ImplementationType
         Implementation to use.
 
@@ -75,6 +82,7 @@ class TriangleAttention(nn.Module):
         starting: bool = True,
         use_self_attention: bool = True,
         use_qk_norm: bool = False,
+        transposed_bias: bool = True,
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
         anthropic_row: str = "k2b",
@@ -82,6 +90,10 @@ class TriangleAttention(nn.Module):
         super().__init__()
         self.n_head = n_head
         self.starting = starting
+        self.transposed_bias = transposed_bias
+        #: Ending node on AlphaFold 3's bias orientation: the composed legs transpose the bias, the fused whole-module
+        #: legs below are told to keep out of the way (the H100 sm90 kernels do it themselves, inference only).
+        self._bias_untransposed = not starting and not transposed_bias
         self.use_self_attention = use_self_attention
         self.use_qk_norm = use_qk_norm
         # ======================================================================================
@@ -118,6 +130,10 @@ class TriangleAttention(nn.Module):
         if self._backend == KernelBackend.ANTHROPIC and not use_self_attention:
             raise ValueError(
                 "Anthropic TriangleAttention adapter requires use_self_attention=True"
+            )
+        if self._backend == KernelBackend.ANTHROPIC and self._bias_untransposed:
+            raise ValueError(
+                "Anthropic TriangleAttention adapter implements the transposed bias only"
             )
         position = "starting" if starting else "ending"
         self.nvtx_enabled = False
@@ -314,6 +330,8 @@ class TriangleAttention(nn.Module):
         value, bias, gate = proj.split([dv, db, dv], dim=-1)
         value = rearrange(value.view(B, L, L, dv), "B L L2 (H D) -> B H L L2 D", H=H)
         bias = rearrange(bias.view(B, L, L, db), "B L L2 H -> B H L L2")
+        if self._bias_untransposed:
+            bias = bias.transpose(-1, -2).contiguous()
         if mask is not None:
             bias = bias.masked_fill(
                 ~mask[:, None, None, :], torch.finfo(bias.dtype).min
@@ -358,10 +376,10 @@ class TriangleAttention(nn.Module):
                 raise RuntimeError(
                     "Anthropic TriangleAttention requires eval() when dropout is enabled"
                 )
-        if _b200.serves(self, pair, mask):
+        if not self._bias_untransposed and _b200.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward(self, pair, mask)
-        if _b200.serves_wide(self, pair, mask):
+        if not self._bias_untransposed and _b200.serves_wide(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward_wide(self, pair, mask)
         from miniworld_engine.integrations import triattn_h100, triattn_h100_sm90
@@ -369,8 +387,9 @@ class TriangleAttention(nn.Module):
         if triattn_h100_sm90.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return triattn_h100_sm90.forward(self, pair, mask)
-        requested_h100 = triattn_h100.native_requested(self, pair) or getattr(
-            self, "_h100_b200style_cuda", False
+        requested_h100 = not self._bias_untransposed and (
+            triattn_h100.native_requested(self, pair)
+            or getattr(self, "_h100_b200style_cuda", False)
         )
         if requested_h100:
             if triattn_h100.serves(self, pair, mask):
@@ -383,7 +402,8 @@ class TriangleAttention(nn.Module):
                     "requested H100 CUDA TriangleAttention does not support this shape or dtype"
                 )
         if (
-            pair.dtype == torch.bfloat16
+            not self._bias_untransposed
+            and pair.dtype == torch.bfloat16
             and self.to_value.weight.dtype == torch.float32
             and self._backend == KernelBackend.TRITON
         ):
@@ -394,7 +414,8 @@ class TriangleAttention(nn.Module):
             if qg_projection_attention.can_use(self, pair, mask):
                 return qg_projection_attention.forward(self, pair, mask)
         if (
-            getattr(self, "_fuse_front_backward", True)
+            not self._bias_untransposed
+            and getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)
             and torch.is_grad_enabled()
             and self._backend == KernelBackend.TRITON
@@ -520,6 +541,9 @@ class TriangleAttention(nn.Module):
             # internally), so the explicit permute copy is pure overhead.
             value = rearrange(value, "B L L2 (H D) -> B H L L2 D", H=self.n_head)
             bias = rearrange(bias, "B L L2 H -> B H L L2")
+            if self._bias_untransposed:
+                # AF3: the bias of the pair as it is, read in the transposed frame (see ``transposed_bias``).
+                bias = bias.transpose(-1, -2).contiguous()
             if mask is not None:
                 bias = bias.masked_fill(
                     ~mask[:, None, None, :], torch.finfo(bias.dtype).min

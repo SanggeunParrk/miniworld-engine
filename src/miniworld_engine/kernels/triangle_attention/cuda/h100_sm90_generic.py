@@ -326,6 +326,7 @@ def _forward(
     need,
     trans=False,
     out=None,
+    flip=False,
 ):
     B, L, _, C = pair.shape
     H = n_head
@@ -335,6 +336,8 @@ def _forward(
     x = pair.contiguous().view(M, C)
     scale = head_dim**-0.5
     empty = torch.empty(0, device=pair.device)
+    # ``flip`` (the ending node on AF3's bias orientation, inference): the bias is made unmasked and masked after the transpose
+    front_mask = mask if mask is not None and not flip else empty.bool()
     fused = (
         (not need)
         and (C, HD) in _FRONT_L
@@ -349,7 +352,7 @@ def _forward(
             lnw.float().contiguous(),
             lnb.float().contiguous(),
             _wall(wcat, HD),
-            mask if mask is not None else empty.bool(),
+            front_mask,
             L,
             H,
             HD,
@@ -369,16 +372,18 @@ def _forward(
         qkvg = torch.matmul(y, wcat[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g
         bias = torch.matmul(y, wcat[4 * HD :].t())  # [M, Hp]
         sbias = g.front_bias(
-            bias, mask if mask is not None else empty.bool(), B, L, H, 0, scale
+            bias, front_mask, B, L, H, 0, scale
         )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
         qkvg = _lt().lt_mm(y, wcat, None, 0, False, None)  # [M, 4 HD + Hp]
         sbias = g.front_bias(
-            qkvg, mask if mask is not None else empty.bool(), B, L, H, 4 * HD, scale
+            qkvg, front_mask, B, L, H, 4 * HD, scale
         )
     if not fused:
         q, k, v, gt = _views(qkvg, B, L, HD, H)
+    if flip:
+        sbias = _core_mod.flip_bias(sbias, mask)
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
@@ -405,11 +410,12 @@ def inference(
     eps=1e-5,
     trans=False,
     out=None,
+    flip=False,
 ):
     """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous
     tensor like pair to write into."""
     return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out
+        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip
     )[0]
 
 
