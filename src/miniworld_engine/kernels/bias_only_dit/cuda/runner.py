@@ -454,6 +454,7 @@ class FusedBiasOnlyDiT:
 
         if (
             self.fp32
+            or torch.cuda.get_device_capability(device) != (10, 0)  # sm_100a cubins: an H100 keeps the 12-launch step, no load attempt
             or not B16.inf3_bf16_on()
             or self.d != 768
             or self.da not in (768, 1024)
