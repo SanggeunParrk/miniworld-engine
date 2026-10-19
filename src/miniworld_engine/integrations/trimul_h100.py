@@ -13,6 +13,23 @@ TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 #: D256/384: the wide sources at hidden D).$
 SINGLE_TRAINING_WIDTHS = (64, 128, 256, 384, 512)
 
+#: Largest batch the D64 path takes natively (tokens b-major, one launch per stage; MiniWorld's template embedder runs its templates
+#: as the B samples of one pair stack). Same meaning as ``trimul_b200.MAX_BATCH``; see ``_batch_ok`` for why this bound.
+MAX_BATCH = 48
+
+
+def _batch_ok(pair, inference=False) -> bool:
+    """One sample at every width; B samples (B <= MAX_BATCH) at D64, whose K1 / K3 / B1 / B2 take b-major tokens (rows = B L of the
+    slow token axis, a per-sample token mask and row-dropout scale) and whose contraction batches over channels x B. Training also
+    needs the native D64 preparation (the per-sample pair mask is built there)."""
+    if pair.ndim != 4:
+        return False
+    bsz = pair.shape[0]
+    if bsz == 1:
+        return True
+    return (pair.shape[-1] == 64 and 1 <= bsz <= MAX_BATCH and pair.shape[1] % 16 == 0
+            and (inference or _native_training_enabled()))
+
 
 #: Cells where the preserved native path (the one served before the port) measured faster than the B200-style port on H100
 #: (2026-10-13, bf16, FP32 masters, B1): training L384 / L768 at D256 / D384 / D512, and bidirectional inference at
@@ -123,7 +140,7 @@ def serves(module, pair: torch.Tensor) -> bool:
         return False
     if (
         pair.ndim != 4
-        or pair.shape[0] != 1
+        or not _batch_ok(pair)
         or pair.shape[1] != pair.shape[2]
         or pair.shape[1] not in ((128, 256, 384, 512, 640, 768, 896, 1024)
                                 if _native_buckets_enabled(pair) or (pair.shape[-1] == 64 and _native_training_enabled())
@@ -236,8 +253,8 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         )
         scale = training_unit_scale(pair)
     else:
-        scale = (pair.new_ones((n, d)) if dropscale is None
-                 else dropscale.reshape(n, d).contiguous())
+        scale = (pair.new_ones((pair.shape[0] * n, d)) if dropscale is None
+                 else dropscale.reshape(pair.shape[0] * n, d).contiguous())
     weights = (
         module.to_left.weight,
         module.to_left_gate.weight,
@@ -320,7 +337,7 @@ def serves_inference(
         return False
     if (
         pair.ndim != 4
-        or pair.shape[0] != 1
+        or not _batch_ok(pair, inference=True)
         or pair.shape[1] != pair.shape[2]
         or pair.shape[1] <= 0
     ):
@@ -352,17 +369,17 @@ def update_inference(module, pair, mask, *, bidirectional):
         return _b200style_update(module, pair, mask, None, bidirectional)
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import inference
 
-    n = pair.shape[1]
+    bsz, n = pair.shape[0], pair.shape[1]
     native_residual = not bidirectional and _native_residual_bucket(module, pair)
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as runtime
     native_aux = runtime.cuda_aux_enabled()
     if (native_residual or native_aux) and mask is not None and (
         mask.device != pair.device or mask.dtype != torch.bool
-        or tuple(mask.shape) != (1, n) or not mask.is_contiguous()
+        or tuple(mask.shape) != (bsz, n) or not mask.is_contiguous()
     ):
-        raise ValueError("H100 native TriMul inference requires a contiguous boolean [1,L] mask")
-    # K1 forms the pair mask m[i] & m[j] from the token mask itself: no [n, n] tensor per call.
-    token = None if mask is None else mask.reshape(n)
+        raise ValueError("H100 native TriMul inference requires a contiguous boolean [B,L] mask")
+    # K1 forms the pair mask m[i] & m[j] from the token mask itself: no [n, n] tensor per call (B samples: [B n], b-major).
+    token = None if mask is None else mask.reshape(bsz * n)
     if token is not None and token.dtype != torch.bool:
         token = token != 0
     weights = (

@@ -691,12 +691,18 @@ class Kernels:
         stream=None,
         grid_limit=0,
         token_mask=False,
+        rows=None,
     ):
         """z [N, N, cz] contiguous (bf16 or fp32); mask None or fp32 [N, N] contiguous; w = packed weights (ops.pack_weights); ab = planes
         [2 ch, Np, Np] bf16 (fully written incl. zero pads).  transpose=True reads z (and mask) with the token axes swapped: the planes then hold
         the transposed a/b (incoming direction contracts with the same NT GEMM as outgoing).  xz (fp32 z only): a bf16 [N, N, cz] buffer that receives
         bf16(LN_in(z)) in z's own layout (the _x1 kernels) for a mode-p K3.  token_mask=True: mask is a bool / uint8 TOKEN mask [N] and K1
-        applies m[i] & m[j] itself (K1Params.pad1 = 1), so no [N, N] pair mask is built."""
+        applies m[i] & m[j] itself (K1Params.pad1 = 1), so no [N, N] pair mask is built.
+        rows (MiniWorld batched samples): B N for B samples stacked b-major -- z [B N, N, cz], planes [2 ch, B N, N] (Np == N), a token mask
+        [B N] or a pair mask [B N, N]; None = N (one sample)."""
+        rows = N if rows is None else int(rows)
+        if rows != N and (Np != N or transpose or rows % N):
+            raise ValueError("batched K1 needs unpadded planes (Np == N), no transpose and rows = B N")
         zf32 = z.dtype == torch.float32
         esz = 4 if zf32 else 2
         bi, bj, nslot, skch = (
@@ -739,15 +745,15 @@ class Kernels:
         # w["wq"] = (W_l, W_lg, W_r, W_rg), row-major bf16 [ch, cz]: K1 reads them in place (K1ParamsQ.tm_wq, pad0 = 1) and no
         # packed w1 exists; otherwise w["w1"] is the host-packed [4 ch, cz] block-interleaved matrix.
         wmode = self._k1_weight_mode(w, cz, ch)   # 0 packed w1 | 1 in place (row-major)
-        plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode, bool(token_mask))
+        plan_key = ("tmn.k1", name, N, Np, transpose, float(eps), wmode, bool(token_mask), rows)
         ent = cache.get(
             plan_key
-        )  # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps, weight mode);
+        )  # every scalar baked into the plan is part of its key (N, Np, transpose -> mask strides / vec, eps, weight mode, rows);
         # pointers / maps / the weight set are re-patched per call below
         if ent is None:
             smem = k1_smem(cz, ch, zf32, bi, bj, nslot, skch)
             k = self.kernel(cz, ch, name, smem)
-            tiles_i, tiles_j = -(-Np // bi), -(-Np // bj)
+            tiles_i, tiles_j = -(-(Np if rows == N else rows) // bi), -(-Np // bj)
             num_tiles = tiles_i * tiles_j
             ms_i, ms_j = (1, N) if transpose else (N, 1)
             zero_tm = L.TensorMap(b"\0" * 128)
@@ -775,6 +781,7 @@ class Kernels:
                     int(ms_j * cz),
                     int(wmode),
                     int(bool(token_mask)),
+                    int(0 if rows == N else rows),   # K1Params.rows (batched samples; 0 = one sample)
                     *tm_wq,
                 ]
             )
@@ -813,7 +820,7 @@ class Kernels:
             tm_w, tm_wq = self._k1_weight_maps(cache, w, cz, ch, L.TensorMap(b"\0" * 128))
             pack.set_tensor_map(0, tm_w, field=1)
             for q, tm in enumerate(tm_wq):
-                pack.set_tensor_map(0, tm, field=21 + q)
+                pack.set_tensor_map(0, tm, field=22 + q)
             pack.set_ptr(0, w["ln_in_w"].data_ptr(), field=4)
             pack.set_ptr(0, w["ln_in_b"].data_ptr(), field=5)
             ent[9] = wsig
@@ -822,10 +829,10 @@ class Kernels:
             s_fast, s_slow = s_slow, s_fast
         tm_z = self.tmap(
             cache,
-            ("z1", N, cz, esz, bi, bj, transpose),
+            ("z1", N, cz, esz, bi, bj, transpose, rows),
             z,
             [128 // esz, bj, bi],
-            [cz, N, N],
+            [cz, N, rows],
             [s_fast, s_slow],
             "128B",
             "128B",
@@ -848,11 +855,11 @@ class Kernels:
             ab_box = [32, 2, 32] if bj == 32 else [64, 1, 32]
             tm_ab = self.tmap(
                 cache,
-                ("ab1", Np, ch, bj),
+                ("ab1", Np, ch, bj, rows),
                 ab,
                 ab_box,
-                [Np, Np, 2 * ch],
-                [Np * 2, Np * Np * 2],
+                [Np, Np if rows == N else rows, 2 * ch],
+                [Np * 2, (Np if rows == N else rows) * Np * 2],
                 "64B" if bj == 32 else "128B",
                 "128B",
             )
@@ -899,10 +906,13 @@ class Kernels:
         zres=None,
         prenorm=True,
         stats=None,
+        rows=None,
     ):
         """x = contraction planes [ch, Np, Np] bf16 contiguous (Np % 8 == 0); z = the gate operand rows [N, N, cz] contiguous: the bf16 or fp32 pair
         tensor itself (modes b / f: LN_in applied here; out has z's dtype), or bf16(LN_in(z)) rows from K1's _x1 kernel with zres = the fp32 pair
-        tensor (mode p: fp32 residual + fp32 out; prenorm=False = mode c: z holds a bf16 cast of zres and LN_in is applied here)."""
+        tensor (mode p: fp32 residual + fp32 out; prenorm=False = mode c: z holds a bf16 cast of zres and LN_in is applied here).
+        rows (MiniWorld batched samples): B N for B samples stacked b-major -- x [ch, B N, N] (Np == N), z / out [B N, N, cz]; None = N."""
+        rows = N if rows is None else int(rows)
         mode = (
             ("g" if out.dtype == torch.bfloat16 else "f")
             if z.dtype == torch.float32
@@ -931,7 +941,9 @@ class Kernels:
                 self._hasname[(cz, ch, nu)] = hk
             if hk:
                 name, upd = nu, True
-        ent = cache.get(("tmn.k3", name, N, Np, float(eps)))
+        if rows != N and (Np != N or k3_is_wide(cfg) or rows % N):
+            raise ValueError("batched K3 needs unpadded planes (Np == N), the register-resident K3 and rows = B N")
+        ent = cache.get(("tmn.k3", name, N, Np, float(eps), rows))
         if ent is None:
             smem = (
                 k3w_smem(cz, ch, mode, bi, bj, nslot, nacc)
@@ -941,7 +953,7 @@ class Kernels:
                 )
             )
             k = self.kernel(cz, ch, name, smem)
-            tiles_i, tiles_j = -(-N // bi), -(-N // bj)
+            tiles_i, tiles_j = -(-rows // bi), -(-N // bj)
             num_tiles = tiles_i * tiles_j
             tm_wg = self.tmap(
                 cache, ("wg", cz), w["wg"], [64, 32], [cz, cz], [cz * 2], "128B", "256B"
@@ -980,6 +992,7 @@ class Kernels:
                     0,
                     float(eps),
                     0,
+                    int(0 if rows == N else rows),   # K3Params.rows (batched samples; 0 = one sample)
                 ]
             )  # field 12: K1-saved LN_in statistics (experiment)
             pack = L.ArgPack([st])
@@ -1007,7 +1020,7 @@ class Kernels:
                 wsig,
                 None,
             ]  # + last-patched (z map, x map, residual flag, prof ptr, weight signature, out map)
-            cache[("tmn.k3", name, N, Np, float(eps))] = ent
+            cache[("tmn.k3", name, N, Np, float(eps), rows)] = ent
         pack, k, grid, smem = ent[0], ent[1], ent[2], ent[3]
         wsig = tuple(
             w[n].data_ptr()
@@ -1036,21 +1049,21 @@ class Kernels:
             ent[8] = wsig
         tm_z = self.tmap(
             cache,
-            ("z3", N, cz, esz, bi, bj),
+            ("z3", N, cz, esz, bi, bj, rows),
             z,
             [128 // esz, bj, bi],
-            [cz, N, N],
+            [cz, N, rows],
             [cz * esz, N * cz * esz],
             "128B",
             "128B",
         )
         tm_x = self.tmap(
             cache,
-            ("x3", Np, ch),
+            ("x3", Np, ch, rows),
             x,
             [64, 1, 64],
-            [Np, Np, ch],
-            [Np * 2, Np * Np * 2],
+            [Np, Np if rows == N else rows, ch],
+            [Np * 2, (Np if rows == N else rows) * Np * 2],
             "128B",
             "128B",
         )
@@ -1070,10 +1083,10 @@ class Kernels:
         ):  # bf16 output store descriptor: dims [cz (c)][N (j)][N (i)], box [64][16][1] = one warp's 16-token x 64-channel slice
             tm_o = self.tmap(
                 cache,
-                ("o3", N, cz),
+                ("o3", N, cz, rows),
                 out,
                 [64, 16, 1],
-                [cz, N, N],
+                [cz, N, rows],
                 [cz * 2, N * cz * 2],
                 "128B",
                 "128B",

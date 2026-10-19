@@ -191,10 +191,17 @@ __device__ float aux_mask_read(const void* p,int i,int kind) {
   return kind==1?float(static_cast<const bool*>(p)[i]):
          kind==2?__bfloat162float(static_cast<const bf*>(p)[i]):static_cast<const float*>(p)[i];
 }
-extern "C" __global__ void mw_aux_train_mask(const void* mask,float* pair,int length,int kind,int token) {
+// Batched samples (MiniWorld templates): `samples` pair masks [B][L][L], b-major; a token mask is [B L] (element i = (s L + a) L + b reads
+// tokens s L + a and s L + b), a pair-mask input is [B L L] and read in place. samples = 1 is the single-sample contract.
+__device__ __forceinline__ float aux_pair_mask(const void* mask,int i,int length,int kind,int token,int samples) {
+  return kind==0?1.f:token?
+    float(aux_mask_read(mask,i/length,kind)!=0.f&&aux_mask_read(mask,(samples>1?i/(length*length)*length:0)+i%length,kind)!=0.f):
+    aux_mask_read(mask,i,kind);
+}
+extern "C" __global__ void mw_aux_train_mask(const void* mask,float* pair,int length,int kind,int token,int samples) {
   int i=blockIdx.x*256+threadIdx.x;
-  if(i>=length*length)return;
-  pair[i]=kind==0?1.f:token?float(aux_mask_read(mask,i/length,kind)!=0.f&&aux_mask_read(mask,i%length,kind)!=0.f):aux_mask_read(mask,i,kind);
+  if(i>=samples*length*length)return;
+  pair[i]=aux_pair_mask(mask,i,length,kind,token,samples);
 }
 extern "C" __global__ void mw_aux_unit_scale(bf* scale,int count) {
   int i=blockIdx.x*256+threadIdx.x;
@@ -202,7 +209,7 @@ extern "C" __global__ void mw_aux_unit_scale(bf* scale,int count) {
 }
 struct AuxD64TrainPrepare {
   const void* w[6]; bf *packed,*gate,*output; const void* mask; float* pair;
-  int s0[6],s1[6],fp32[6],hidden,length,mask_kind,token;
+  int s0[6],s1[6],fp32[6],hidden,length,mask_kind,token,samples;   // samples: B pair masks [B][L][L] (see aux_pair_mask)
 };
 extern "C" __global__ void mw_aux_d64_training_prepare(AuxD64TrainPrepare p) {
   const int i=blockIdx.x*256+threadIdx.x;
@@ -215,10 +222,8 @@ extern "C" __global__ void mw_aux_d64_training_prepare(AuxD64TrainPrepare p) {
     p.gate[i]=__float2bfloat16_rn(aux_read(p.w[4],(i/64)*p.s0[4]+(i%64)*p.s1[4],p.fp32[4]));
   if(i<64*p.hidden)
     p.output[i]=__float2bfloat16_rn(aux_read(p.w[5],(i/p.hidden)*p.s0[5]+(i%p.hidden)*p.s1[5],p.fp32[5]));
-  if(i<p.length*p.length)
-    p.pair[i]=p.mask_kind==0?1.f:p.token?
-      float(aux_mask_read(p.mask,i/p.length,p.mask_kind)!=0.f&&aux_mask_read(p.mask,i%p.length,p.mask_kind)!=0.f):
-      aux_mask_read(p.mask,i,p.mask_kind);
+  if(i<p.samples*p.length*p.length)
+    p.pair[i]=aux_pair_mask(p.mask,i,p.length,p.mask_kind,p.token,p.samples);
 }
 // Deterministic normalization backward shared by the general Hopper training
 // buckets. Two bounded reductions replace atomic affine updates. The output

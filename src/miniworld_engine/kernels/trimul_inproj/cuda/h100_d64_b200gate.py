@@ -96,6 +96,9 @@ def _k1_cache():
 
 
 # --------------------------------------------------------------------------- forward
+# Batched samples (x [B, n, n, 64], B > 1: MiniWorld's templates): tokens b-major, M = B n n. K1 / K3 take the samples stacked along the slow
+# token axis (rows = B n) in one launch each, the planes are [c, B n, n] so the contraction batches over c x B, the pair mask is [B n, n] and
+# the row-dropout scale [B n, 64] (K3 / B1 read row s n + j for a token of sample s). B = 1 is the single-sample path unchanged.
 def _map(t, box, dims, strides):
     return T._launch_module().tensor_map(t, box, dims=dims, strides_bytes=strides,
                                          swizzle="128B", l2="128B")
@@ -103,52 +106,58 @@ def _map(t, box, dims, strides):
 
 def _front(x, w1, maskf, gi, bi, ab):
     kk, K = _k1()
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
     cfg = K.lookup("sm_90a", WIDTH, HIDDEN, "b", N=n)["k1"]
-    kk.k1(x[0], maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n, cz=WIDTH,
-          ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache())
+    kk.k1(x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH), maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n,
+          cz=WIDTH, ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache(), rows=bsz * n)
 
 
 def _bmm(a, b, *, out):
     return _H100_BMM.bmm(a, b, out=out)
 
 
+def fold(t):
+    """[c, B n, n] -> [c B, n, n] (a view): the samples join the channel planes in cuBLAS's batch dim."""
+    return t.view(-1, t.shape[-1], t.shape[-1])
+
+
 def _triangle(ab, tri):
     h = WIDTH
-    _bmm(ab[:h], ab[2 * h:3 * h].transpose(-1, -2), out=tri[:h])
-    _bmm(ab[h:2 * h].transpose(-1, -2), ab[3 * h:], out=tri[h:])
+    _bmm(fold(ab[:h]), fold(ab[2 * h:3 * h]).transpose(-1, -2), out=fold(tri[:h]))
+    _bmm(fold(ab[h:2 * h]).transpose(-1, -2), fold(ab[3 * h:]), out=fold(tri[h:]))
 
 
 def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     L = T._launch_module()
-    n = x.shape[1]
-    m = n * n
+    bsz, n = x.shape[0], x.shape[1]
+    rows = bsz * n
+    m = rows * n
     tile = K3_TILE
     bi_, bj, _, _ = tile
     k, smem = _k3(tile)
     tj = (n + bj - 1) // bj
-    tiles = ((n + bi_ - 1) // bi_) * tj
-    ymap = _map(y, [64, 16, 1], [WIDTH, n, n], [WIDTH * 2, n * WIDTH * 2])
+    tiles = ((rows + bi_ - 1) // bi_) * tj
+    ymap = _map(y, [64, 16, 1], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2])
     base = L.Struct.fixed("h100_d64_gatepipe_selected_v2:k3base", [
-        _map(x, [64, bj, bi_], [WIDTH, n, n], [WIDTH * 2, n * WIDTH * 2]),
-        _map(tri, [64, 1, 64], [n, n, HIDDEN], [n * 2, m * 2]),
+        _map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
+        _map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
         _map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
         _map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
         ymap, gi, bi, go, bo, x, y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
-    params = L.Struct.fixed("h100_d64_gatepipe_selected_v2:k3", [
+    params = L.Struct.fixed("h100_d64_gatepipe_selected_v3:k3", [
         base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
-        None, None])
+        None, None, 0 if bsz == 1 else rows])
     k.launch((min(tiles, _sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
 def _prepare(leaves, mask):
     x, wl, wlg, wr, wrg = leaves[:5]
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
     w1 = x.new_empty((4 * HIDDEN, WIDTH))
     if T.cuda_training_aux_enabled():
         from ._h100_pack import pack_into_cuda, training_pair_mask
         pack_into_cuda(w1, wl, wlg, wr, wrg)
-        return w1, training_pair_mask(mask, n, x.device)
+        return w1, training_pair_mask(mask, n, x.device, bsz)
     T.pack_into(w1, wl, wlg, wr, wrg)
     # An owned FP32 copy (also for FP32 callers: a saved output must not alias an input);
     # K1 reads it now and the backward reuses it.
@@ -158,16 +167,16 @@ def _prepare(leaves, mask):
 def _run_forward(leaves, mask, ds, save):
     prepared = len(leaves) == 12
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves[:11]
-    n = x.shape[1]
-    m = n * n
+    bsz, n = x.shape[0], x.shape[1]
+    m = bsz * n * n
     w1, maskf = (leaves[11], mask) if prepared else _prepare(leaves, mask)
-    ab = x.new_empty((2 * HIDDEN, n, n))
-    tri = x.new_empty((HIDDEN, n, n))
+    ab = x.new_empty((2 * HIDDEN, bsz * n, n))
+    tri = x.new_empty((HIDDEN, bsz * n, n))
     stats = torch.empty((4, m), device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
     _front(x, w1, maskf, gi, bi, ab)
     _triangle(ab, tri)
-    _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(n, WIDTH), y, stats)
+    _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(bsz * n, WIDTH), y, stats)
     if not save:
         return y
     return [y, ab, tri, stats] if prepared else [y, ab, tri, stats, w1, maskf]
@@ -176,13 +185,14 @@ def _run_forward(leaves, mask, ds, save):
 def _forward_fake(leaves, mask, ds):
     """Output plus saved ab, tri, LN statistics [mean_in, rstd_in, mean_out, rstd_out], weight pack, FP32 mask."""
     x = leaves[0]
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
+    r = bsz * n
     if len(leaves) == 12:
-        return [torch.empty_like(x), x.new_empty((2*HIDDEN,n,n)), x.new_empty((HIDDEN,n,n)),
-                x.new_empty((4,n*n),dtype=torch.float32)]
-    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, n, n)), x.new_empty((HIDDEN, n, n)),
-            x.new_empty((4, n * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
-            x.new_empty((n, n), dtype=torch.float32)]
+        return [torch.empty_like(x), x.new_empty((2*HIDDEN,r,n)), x.new_empty((HIDDEN,r,n)),
+                x.new_empty((4,r*n),dtype=torch.float32)]
+    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, r, n)), x.new_empty((HIDDEN, r, n)),
+            x.new_empty((4, r * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
+            x.new_empty((r, n), dtype=torch.float32)]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_gatepipe_selected_v2_d64_train_fwd")
@@ -217,8 +227,8 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
-    n = x.shape[1]
-    m = n * n
+    bsz, n = x.shape[0], x.shape[1]
+    m = bsz * n * n                     # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(PROF is not None, master, gatepipe=n >= 256)
@@ -233,16 +243,16 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     # one folded partial slot per B1 CTA (dWp | dgo | dbo | dWg)
     p1 = torch.empty((g1, B1W_SLOT), device=x.device, dtype=torch.float32)
     params = L.Struct.fixed("h100_d64_gatepipe_selected_v2:b1w", [
-        planes(tri), rows(x), rows(dy), _map2(ds.reshape(n, h).contiguous(), [64, 64], [h, n], [h * 2]),
+        planes(tri), rows(x), rows(dy), _map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
         _map2(stats, [64, 4], [m, 4], [m * 4], "none"), planes(dt), rows(dgate),
         wp, wg, go, bo, gi, bi, p1, ntiles, n, None if PROF is None else PROF[0]])
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
-    _bmm(dt[:h], ab[2 * h:3 * h], out=dl[:h])
-    _bmm(dt[:h].transpose(-1, -2), ab[:h], out=dr[:h])
-    _bmm(ab[3 * h:], dt[h:].transpose(-1, -2), out=dl[h:])
-    _bmm(ab[h:2 * h], dt[h:], out=dr[h:])
+    _bmm(fold(dt[:h]), fold(ab[2 * h:3 * h]), out=fold(dl[:h]))
+    _bmm(fold(dt[:h]).transpose(-1, -2), fold(ab[:h]), out=fold(dr[:h]))
+    _bmm(fold(ab[3 * h:]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
+    _bmm(fold(ab[h:2 * h]), fold(dt[h:]), out=fold(dr[h:]))
     dx = torch.empty_like(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     maskf = maskf.reshape(m)
@@ -316,7 +326,8 @@ class _Training(torch.autograd.Function):
 
 
 def bidirectional_trimul(*args):
-    """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
+    """(x [B, n, n, 64], wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, dropscale [B n, D]) -> y; mask: a token mask [B, n] / pair
+    mask [B, n, n] or empty (the native preparation builds the FP32 pair mask [B n, n]). B > 1: samples b-major (see ``_front``)."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if T.cuda_training_fused_prepare_enabled():

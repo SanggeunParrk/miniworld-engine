@@ -5,7 +5,10 @@
 #include "tmn_kernels.cuh"
 #include <cuda_fp16.h>
 namespace tmn { namespace sm90 {
-struct RecomputeParams { K3Params base; const __nv_bfloat16* dropscale; CUtensorMap tm_lnin,tm_lnout; __nv_bfloat16 *lnin,*lnout; float *mean_in,*rs_in,*mean_out,*rs_out; CUtensorMap tm_proj,tm_gate; __nv_bfloat16 *proj,*gate; };
+struct RecomputeParams { K3Params base; const __nv_bfloat16* dropscale; CUtensorMap tm_lnin,tm_lnout; __nv_bfloat16 *lnin,*lnout; float *mean_in,*rs_in,*mean_out,*rs_out; CUtensorMap tm_proj,tm_gate; __nv_bfloat16 *proj,*gate;
+  // MiniWorld batched samples: rows of the slow token axis (B N; x / y [B N][N][C], planes [H][B N][N]); 0 = N. The dropout scale is
+  // [B N][C]: row i of sample s = i / N reads ds rows s N + j.
+  int rows; };
 template <int KS, bool SERIAL = false, int CLS = math::REF>
 TMN_DEVI LnStats ln_save_xhat(uint32_t (&fa)[KS][4], const float* sGamma, const float* sBeta, int lane, float eps, void* output, int row, int M, const CUtensorMap* outmap, uint8_t* stage) {
   constexpr float invC = 1.f / (16 * KS);
@@ -135,6 +138,7 @@ TMN_DEVI void emit_ln(const uint32_t (&f)[KS][4],const CUtensorMap* map,
 template <class G, int LNM, bool UPD = false>
 TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
   const K3Params& p=tp.base;
+  const int NI = tp.rows > 0 ? tp.rows : p.N;           // batched samples: B N rows of i
   constexpr int CZ = G::CZ, CH = G::CH, KSG = G::KSG, KSP = G::KSP, NKG = G::NKG, NKP = G::NKP, NB = G::NB, NBW = G::NBW, BN = G::BN, NSLOT = G::NSLOT;
   constexpr int NKCZ = G::NKCZ, BI = G::BI, BJ = G::BJ, OB = G::OB, SLOT_BYTES = G::SLOT_BYTES, CHB = G::CHUNK_BYTES, ESZ = G::ESZ;
   constexpr bool SPLITN = G::SPLITN, ZF32 = G::ZF32, OUT32 = G::OUT32, STG32 = G::STG32, PRENORM = G::PRENORM, RESG = G::RESG, NORES = G::NORES;
@@ -251,6 +255,8 @@ TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
     const int tile = (int)blockIdx.x + t_local * (int)gridDim.x;
     const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
     const int iw = i0 + tok0 / BJ, jw = j0 + tok0 % BJ;               // this WG's 64 tokens: row iw, columns jw .. jw+63
+    // batched samples: this row's sample owns dropout-scale rows s N .. s N + N - 1 (one base per tile; 0 for one sample)
+    const __nv_bfloat16* const ds_rows = tp.dropscale + (tp.rows > 0 ? (size_t)(iw - iw % p.N) * CZ : (size_t)0);
 
     // ---- projection operand: X sub-tile [C_H ch rows][64 tok] -> ldmatrix.trans -> release the X stage -> LN_out (before z is touched:
     //      one raw fragment set live at a time keeps the normalisation inside the register budget)
@@ -275,7 +281,7 @@ TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
     PF(2);                                               // 2: X ldmatrix + release
     LnStats stats_out=ln_save_xhat<KSP,MW_SERIAL>(fx,sGout,sBout,lane,p.eps,tp.lnout,iw*p.N+jw+16*wiw+(lane>>2),p.N*p.N,&tp.tm_lnout,sOut+(4*cw+wiw)*OB);
 #if MW_SAVE_STATS_OUT
-    if((!SPLITN||cw==0)&&(lane&3)==0 && iw<p.N){int r=jw+16*wiw+(lane>>2);if(r<p.N){tp.rs_out[(size_t)iw*p.N+r]=stats_out.rA;
+    if((!SPLITN||cw==0)&&(lane&3)==0 && iw<NI){int r=jw+16*wiw+(lane>>2);if(r<p.N){tp.rs_out[(size_t)iw*p.N+r]=stats_out.rA;
 #if XHAT_FP32 == -1 || XHAT_FP32 == 3
  tp.mean_out[(size_t)iw*p.N+r]=stats_out.mA;
 #endif
@@ -314,7 +320,7 @@ TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
     PF(5);                                               // 5: z load + release
     LnStats stats_in=ln_fragment<KSG,MW_SERIAL>(fz,sGin,sBin,lane,p.eps);
 #if MW_SAVE_STATS_IN
-    if((!SPLITN||cw==0)&&(lane&3)==0 && iw<p.N){int r=jw+16*wiw+(lane>>2);if(r<p.N){tp.mean_in[(size_t)iw*p.N+r]=stats_in.mA;tp.rs_in[(size_t)iw*p.N+r]=stats_in.rA;}if(r+8<p.N){tp.mean_in[(size_t)iw*p.N+r+8]=stats_in.mB;tp.rs_in[(size_t)iw*p.N+r+8]=stats_in.rB;}}
+    if((!SPLITN||cw==0)&&(lane&3)==0 && iw<NI){int r=jw+16*wiw+(lane>>2);if(r<p.N){tp.mean_in[(size_t)iw*p.N+r]=stats_in.mA;tp.rs_in[(size_t)iw*p.N+r]=stats_in.rA;}if(r+8<p.N){tp.mean_in[(size_t)iw*p.N+r+8]=stats_in.mB;tp.rs_in[(size_t)iw*p.N+r+8]=stats_in.rB;}}
 #endif
 #if MW_SAVE_IN
     if(!SPLITN || cw==0)emit_ln(fz,&tp.tm_lnin,tp.lnin,sOut+(4*cw+wiw)*OB,iw,jw,p.N);
@@ -362,7 +368,7 @@ TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
     const size_t orow_off = (((size_t)iw * p.N + jl) * CZ) * OSZ + (size_t)OGB * cgl;
     uint8_t* orow = reinterpret_cast<uint8_t*>(p.out) + orow_off;
     const uint8_t* zrow = reinterpret_cast<const uint8_t*>(p.zres) + orow_off;          // mode 2: the fp32 z rows (same geometry as the fp32 output)
-    const int nvalid = iw < p.N ? (p.N - jl + RSTEP - 1) / RSTEP : 0;                     // granules it < nvalid are inside the ragged edge
+    const int nvalid = iw < NI ? (p.N - jl + RSTEP - 1) / RSTEP : 0;                     // granules it < nvalid are inside the ragged edge
     constexpr size_t GSTRIDE = (size_t)RSTEP * CZ * OSZ;                                 // output bytes between a lane's consecutive granule rows
     auto release = [&](int qb) {                         // this warp's MMAs of block qb have retired (wgmma wait + syncwarp): free its two weight slots
       __syncwarp();
@@ -401,11 +407,11 @@ TMN_DEVI void infer_k3_body(const RecomputeParams& tp) {
 #if MW_PG_METHOD==0
           pp[j>>1][2*(j&1)+r]=pack_bf16(p0,p1);gg[j>>1][2*(j&1)+r]=pack_bf16(g0,g1);
 #else
-          if(iw<p.N && jr<p.N){stg32(tp.proj+((size_t)iw*p.N+jr)*CZ+c,pack_bf16(p0,p1));stg32(tp.gate+((size_t)iw*p.N+jr)*CZ+c,pack_bf16(g0,g1));}
+          if(iw<NI && jr<p.N){stg32(tp.proj+((size_t)iw*p.N+jr)*CZ+c,pack_bf16(p0,p1));stg32(tp.gate+((size_t)iw*p.N+jr)*CZ+c,pack_bf16(g0,g1));}
 #endif
 #endif
-          if (iw<p.N && jr<p.N) {
-            const uint32_t ds=ldg32(tp.dropscale+(size_t)jr*CZ+c);
+          if (iw<NI && jr<p.N) {
+            const uint32_t ds=ldg32(ds_rows+(size_t)jr*CZ+c);   // sample (iw / N) row jr
             const uint32_t res=rz[j>>1][2*(j&1)+r];
             v[2*r]=fmaf(p0*g0,bf16lo(ds),bf16lo(res));
             v[2*r+1]=fmaf(p1*g1,bf16hi(ds),bf16hi(res));

@@ -125,7 +125,8 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b1w_b7gate(const __gr
   const int v = 2 * blockIdx.x + r, vstride = 2 * gridDim.x;
   auto load = [&](int tile, int st) {
     const uint32_t s = ring + st * STAGE, bar = bar0 + 8 * st;
-    const int t0 = tile * 64, j0 = t0 % P.n;
+    // batched samples (tokens b-major, M = B n n): the ds row of token t0 is sample (t0 / n n) row j (ds is [B n, 64]); 0 for B = 1
+    const int t0 = tile * 64, j0 = t0 % P.n + t0 / (P.n * P.n) * P.n;
     mbar_expect(bar, TX);
     tma_load(s + TRI, &P.tm_tri, bar, t0, 0);
     tma_load(s + XS, &P.tm_x, bar, 0, t0);

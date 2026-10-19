@@ -45,7 +45,7 @@ def _preserved_width(width):
 def d64_training(x, outgoing=False, bidirectional=False):
     """Qualified compact-mask D64 preparation (the bidirectional L384 cell; no single-direction cell is qualified, so
     ``outgoing`` does not change the answer); keep wide-preservation policy separate."""
-    if (not bidirectional or x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
+    if (not bidirectional or x.ndim != 4 or x.shape[1] != x.shape[2]   # any batch: B samples share the B = 1 scope
             or x.shape[-1] != 64 or x.shape[1] != 384):
         return False
     return _native_buckets() is not False

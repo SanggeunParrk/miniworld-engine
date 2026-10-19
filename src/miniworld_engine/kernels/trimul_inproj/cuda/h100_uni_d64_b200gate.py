@@ -73,12 +73,14 @@ def _bwd_wg(master=False, affine_split=False, gatepipe=True):
 
 
 # --------------------------------------------------------------------------- forward
+# Batched samples (x [B, n, n, 64]): as ``h100_d64_b200gate`` -- rows = B n of the slow token axis in K1 / K3, planes [c, B n, n] folded into
+# cuBLAS's batch dim, pair mask [B n, n], dropout scale [B n, 64].
 def _front(x, w1, maskf, gi, bi, ab):
     kk, K = D64._k1()
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
     cfg = K.lookup("sm_90a", WIDTH, HIDDEN, "b", N=n)["k1"]
-    kk.k1(x[0], maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n, cz=WIDTH,
-          ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache())
+    kk.k1(x[0] if bsz == 1 else x.view(bsz * n, n, WIDTH), maskf, {"w1": w1, "ln_in_w": gi, "ln_in_b": bi}, ab, N=n, Np=n,
+          cz=WIDTH, ch=HIDDEN, cfg=cfg, lnm=2, eps=1e-5, cache=_k1_cache(), rows=bsz * n)
 
 
 @T.device_cache
@@ -93,43 +95,47 @@ def _bmm(a, b, *, out):
     return _H100_BMM.bmm(a, b, out=out)
 
 
+fold = D64.fold
+
+
 def _triangle(ab, tri, outgoing):
-    left, right = ab[:HIDDEN], ab[HIDDEN:]
+    left, right = fold(ab[:HIDDEN]), fold(ab[HIDDEN:])
     if outgoing:
-        _bmm(left, right.transpose(-1, -2), out=tri)
+        _bmm(left, right.transpose(-1, -2), out=fold(tri))
     else:
-        _bmm(left.transpose(-1, -2), right, out=tri)
+        _bmm(left.transpose(-1, -2), right, out=fold(tri))
 
 
 def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     L = T._launch_module()
-    n = x.shape[1]
-    m = n * n
+    bsz, n = x.shape[0], x.shape[1]
+    rows = bsz * n
+    m = rows * n
     bi_, bj, _, _ = K3_TILE
     k, smem = _k3(K3_TILE)
     tj = (n + bj - 1) // bj
-    tiles = ((n + bi_ - 1) // bi_) * tj
-    ymap = D64._map(y, [64, 16, 1], [WIDTH, n, n], [WIDTH * 2, n * WIDTH * 2])
+    tiles = ((rows + bi_ - 1) // bi_) * tj
+    ymap = D64._map(y, [64, 16, 1], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2])
     base = L.Struct.fixed("h100_uni64_affinereg:k3base", [
-        D64._map(x, [64, bj, bi_], [WIDTH, n, n], [WIDTH * 2, n * WIDTH * 2]),
-        D64._map(tri, [64, 1, 64], [n, n, HIDDEN], [n * 2, m * 2]),
+        D64._map(x, [64, bj, bi_], [WIDTH, n, rows], [WIDTH * 2, n * WIDTH * 2]),
+        D64._map(tri, [64, 1, 64], [n, rows, HIDDEN], [n * 2, m * 2]),
         D64._map(wg, [64, 32], [WIDTH, WIDTH], [WIDTH * 2]),
         D64._map(wp, [64, 32], [HIDDEN, WIDTH], [HIDDEN * 2]),
         ymap, gi, bi, go, bo, x, y, None, n, n, tj, tiles, 1, 0, 1e-5, 0])
-    params = L.Struct.fixed("h100_uni64_affinereg:k3", [
+    params = L.Struct.fixed("h100_uni64_affinereg_v2:k3", [
         base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
-        None, None])
+        None, None, 0 if bsz == 1 else rows])
     k.launch((min(tiles, D64._sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
 def _prepare(leaves, mask):
     x, wl, wlg, wr, wrg = leaves[:5]
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
     w1 = x.new_empty((4 * HIDDEN, WIDTH))
     if T.cuda_training_aux_enabled():
         from ._h100_pack import pack_into_cuda, training_pair_mask
         pack_into_cuda(w1, wl, wlg, wr, wrg)
-        return w1, training_pair_mask(mask, n, x.device)
+        return w1, training_pair_mask(mask, n, x.device, bsz)
     T.pack_into(w1, wl, wlg, wr, wrg)
     return w1, mask.reshape(n, n).to(torch.float32, copy=True)
 
@@ -137,15 +143,15 @@ def _prepare(leaves, mask):
 def _run_forward(leaves, mask, ds, outgoing, save):
     prepared = len(leaves) == 12
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves[:11]
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
     w1, maskf = (leaves[11], mask) if prepared else _prepare(leaves, mask)
-    ab = x.new_empty((2 * HIDDEN, n, n))
-    tri = x.new_empty((HIDDEN, n, n))
-    stats = torch.empty((4, n * n), device=x.device, dtype=torch.float32)
+    ab = x.new_empty((2 * HIDDEN, bsz * n, n))
+    tri = x.new_empty((HIDDEN, bsz * n, n))
+    stats = torch.empty((4, bsz * n * n), device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
     _front(x, w1, maskf, gi, bi, ab)
     _triangle(ab, tri, outgoing)
-    _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(n, WIDTH), y, stats)
+    _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(bsz * n, WIDTH), y, stats)
     if not save:
         return y
     return [y, ab, tri, stats] if prepared else [y, ab, tri, stats, w1, maskf]
@@ -154,13 +160,14 @@ def _run_forward(leaves, mask, ds, outgoing, save):
 def _forward_fake(leaves, mask, ds, outgoing):
     """Output plus saved ab, tri, LN statistics [mean_in, rstd_in, mean_out, rstd_out], weight pack, FP32 mask."""
     x = leaves[0]
-    n = x.shape[1]
+    bsz, n = x.shape[0], x.shape[1]
+    r = bsz * n
     if len(leaves) == 12:
-        return [torch.empty_like(x), x.new_empty((2*HIDDEN,n,n)), x.new_empty((HIDDEN,n,n)),
-                x.new_empty((4,n*n),dtype=torch.float32)]
-    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, n, n)), x.new_empty((HIDDEN, n, n)),
-            x.new_empty((4, n * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
-            x.new_empty((n, n), dtype=torch.float32)]
+        return [torch.empty_like(x), x.new_empty((2*HIDDEN,r,n)), x.new_empty((HIDDEN,r,n)),
+                x.new_empty((4,r*n),dtype=torch.float32)]
+    return [torch.empty_like(x), x.new_empty((2 * HIDDEN, r, n)), x.new_empty((HIDDEN, r, n)),
+            x.new_empty((4, r * n), dtype=torch.float32), x.new_empty((4 * HIDDEN, WIDTH)),
+            x.new_empty((r, n), dtype=torch.float32)]
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_affinereg_uni64_train_fwd")
@@ -187,8 +194,8 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
-    n = x.shape[1]
-    m = n * n
+    bsz, n = x.shape[0], x.shape[1]
+    m = bsz * n * n                     # tokens b-major: B1 / B2 run over every sample's rows, the weight partials sum them
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(master, T.d64_uni_affine_enabled(x, outgoing), gatepipe=not (outgoing and n == 256))
@@ -202,19 +209,19 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     dgate = torch.empty_like(x)
     p1 = torch.empty((g1, B1W_SLOT), device=x.device, dtype=torch.float32)
     params = L.Struct.fixed("h100_uni64_affinereg:b1w", [
-        planes(tri), rows(x), rows(dy), D64._map2(ds.reshape(n, h).contiguous(), [64, 64], [h, n], [h * 2]),
+        planes(tri), rows(x), rows(dy), D64._map2(ds.reshape(bsz * n, h).contiguous(), [64, 64], [h, bsz * n], [h * 2]),
         D64._map2(stats, [64, 4], [m, 4], [m * 4], "none"), planes(dt), rows(dgate),
         wp, wg, go, bo, gi, bi, p1, ntiles, n, None])
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
-    left, right = ab[:HIDDEN], ab[HIDDEN:]
+    left, right, dtf = fold(ab[:HIDDEN]), fold(ab[HIDDEN:]), fold(dt)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
     if outgoing:        # tri = l r^T
-        _bmm(dt, right, out=dl)
-        _bmm(dt.transpose(-1, -2), left, out=dr)
+        _bmm(dtf, right, out=fold(dl))
+        _bmm(dtf.transpose(-1, -2), left, out=fold(dr))
     else:               # tri = l^T r
-        _bmm(right, dt.transpose(-1, -2), out=dl)
-        _bmm(left, dt, out=dr)
+        _bmm(right, dtf.transpose(-1, -2), out=fold(dl))
+        _bmm(left, dtf, out=fold(dr))
     dx = torch.empty_like(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     params = L.Struct.fixed("h100_uni64_affinereg:b2w", [
@@ -289,7 +296,8 @@ class _Training(torch.autograd.Function):
 
 
 def single_trimul(outgoing, *args):
-    """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
+    """(x [B, n, n, 64], wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, dropscale [B n, D]) -> y; mask: a token mask [B, n] / pair
+    mask [B, n, n] or empty (the native preparation builds the FP32 pair mask [B n, n]). B > 1: samples b-major (see ``_front``)."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if T.cuda_training_fused_prepare_enabled():

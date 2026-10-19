@@ -7,6 +7,41 @@ left) and writes (red, right); generated from `figures/trimul_bidir.json` by
 `python -m miniworld_engine.viz.kernel_flow`, then `rsvg-convert -z 2 -b white` to PNG.
 Dispatch: `integrations/trimul_h100.py`.
 
+## Batched samples (D64, B <= 48)
+
+The D64 path takes B samples in one call, inference and training, bidirectional and either single direction: tokens b-major, one
+launch per stage instead of B calls (MiniWorld's template embedder runs its templates as the B samples of one pair stack). K1 / K3
+(packaged inference K1 / K3, the training front K1 and `save_k3_d64`) take the samples stacked along the slow token axis
+(`K1Params.rows` / `K3Params.rows` / `RecomputeParams.rows` = B L, 0 = one sample), so a tile may straddle two samples: every row
+reads its own sample's token mask (K1: `m[i] & m[s L + j]`), and K3 / B1 read the row-dropout scale `[B L, 64]` at row `s L + j`.
+The training preparation builds the FP32 pair mask `[B L, L]` per sample (`mw_aux_d64_training_prepare` / `mw_aux_train_mask`,
+`samples`), B2 reads it per row, the planes are `[c, B L, L]` and the contraction batches over c x B (one cuBLAS call per product),
+and the B1 / B2 weight partials sum over every sample in a fixed order (deterministic). Wider D keeps one sample per call
+(`serves*` refuse B > 1 there) and B > `MAX_BATCH` runs the module's PyTorch statements.
+
+`integrations.trimul_h100.MAX_BATCH = 48` is the largest batch validated, not a kernel limit: B in {1, 2, 4, 8, 16, 32, 48} x
+L in {128, 256, 384, 768} x the three directions, inference and training, all pass with y and dx **bitwise equal** to B calls of
+one sample (the weight gradients differ only by the FP32 order of the per-sample sum, <= 2.1e-4 relative at L768 B48) and bitwise
+run to run. The only index bound in the kernels is the int32 token index (B L^2 < 2^31); memory is the practical one (training
+L768 B48 peaks at 68 GB). Tests: `tests/gpu/sm90/test_h100_trimul_batch_gpu.py` (one call vs B calls with a mask and a dropout
+scale per sample, so an index mix-up between samples is a large error; the FP32 PyTorch reference, every gradient; bitwise
+determinism; CUDA-graph capture with live inputs, masks, dropout scales and weights).
+
+Measured 2026-10-19 on one H100 80GB HBM3, torch 2.13.0+cu129, bf16 pair, FP32 parameters, a token mask per sample, CUDA-graph
+timing (median of 5 x 20 replays), B = 4: the MiniPairformer block (`BidirectionalTriangleMultiplication(64)` + `Transition(64)`,
+the template stack's block; training = forward + backward of every gradient, row dropout on). "PyTorch" = one call of 4 samples
+as H100 ran it before (TriMul's PyTorch statements for B > 1, Transition already CUDA on the flattened rows). Record:
+[records/trimul_h100_batched_samples_20261019.md](../../../records/trimul_h100_batched_samples_20261019.md).
+
+| L | mode | one call (ms) | 4 calls (ms) | PyTorch (ms) | × vs 4 calls | × vs PyTorch |
+|---|---|---|---|---|---|---|
+| 128 | inference | 0.079 | 0.135 | 0.436 | 1.72 | 5.54 |
+| 128 | training | 0.309 | 0.681 | 1.255 | 2.21 | 4.07 |
+| 384 | inference | 0.601 | 0.695 | 3.832 | 1.16 | 6.37 |
+| 384 | training | 2.130 | 2.922 | 10.228 | 1.37 | 4.80 |
+| 768 | inference | 2.467 | 2.776 | 28.452 | 1.13 | 11.53 |
+| 768 | training | 9.045 | 10.712 | 60.315 | 1.18 | 6.67 |
+
 ## Bidirectional (`BidirectionalTriangleMultiplication`)
 
 Outgoing + incoming in one module (h = D per direction), one output LayerNorm over 2h.

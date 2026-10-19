@@ -86,7 +86,12 @@ struct K1Params {
   int N, Np, tiles_j, num_tiles, vec, ms_i, ms_j;
   float eps;
   int xs_i, xs_j, pad0, pad1;   // xz element strides of the tile's slow (i) and fast (j) token axes
+  // MiniWorld batched samples: rows of the slow token axis, B N for B samples stacked b-major ([B N][N] tokens, planes [2 C_H][B N][N],
+  // Np == N); 0 = N (one sample).  Sits in the struct's alignment padding (sizeof stays 512), so callers that never set it read 0.
+  int rows;
 };
+// Rows of the slow token axis and the first token of row i's sample (the token mask's j index is sample-relative).
+TMN_DEVI int k_rows(int rows, int n) { return rows > 0 ? rows : n; }
 
 // K1 that can read the four projection weights in place: with pad0 != 0 the producer fills each 64-row weight block from
 // tm_wq = {W_l, W_lg, W_r, W_rg} (each 2D [C_Z (k)][C_H (n)] bf16, box [64][32], SW128) instead of the host-packed tm_w.
@@ -110,6 +115,7 @@ struct K3Params {
   const float* stats;    // nullable (experiment TMN_K3_STATS): K1's saved LN_in (mean, rstd) per pair row, stats[2 (i N + j) + {0, 1}]; K3 skips the statistics passes
   int N, Np, tiles_j, num_tiles, residual, pad0;
   float eps; int pad1;
+  int rows;              // MiniWorld batched samples: rows of the slow token axis (B N, Np == N); 0 = N.  In the alignment padding (sizeof stays 768).
 };
 
 // ============================================================================================================ configs (tuning data)
@@ -570,9 +576,11 @@ TMN_DEVI void k1_prefetch_weights(const P& p) {
 template <int MT>
 TMN_DEVI void k1_mask_rows(const K1Params& p, bool vA, int iA, int jA, bool vB, int iB, int jB, float& mA, float& mB) {
   if (p.pad1 == 1) {
+    // batched samples: the token mask is [B N] b-major and i is the global row (sample s = i / N), so m[i] is the row's own token and j
+    // reads token s N + j of the same sample (s = 0 for one sample)
     const unsigned char* tk = reinterpret_cast<const unsigned char*>(p.mask);
-    if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + jA));
-    if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + jB));
+    if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + (p.rows > 0 ? iA - iA % p.N : 0) + jA));
+    if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + (p.rows > 0 ? iB - iB % p.N : 0) + jB));
     return;
   }
   const size_t oA = (size_t)iA * p.ms_i + (size_t)jA * p.ms_j, oB = (size_t)iB * p.ms_i + (size_t)jB * p.ms_j;
@@ -661,7 +669,8 @@ TMN_DEVI void k1_body(const P& p) {
   const int wiw = warp & 3;              // warp within warpgroup: rows 16*wiw.. of the m64 tile
   const uint32_t sA_u = smem_u32(sA), sW_u = smem_u32(sW);
   const uint32_t stage_u = smem_u32(sStage) + (uint32_t)(cw * 8192);   // this warpgroup's 2 x 4 KB staging buffers [32 ch][64 tok]
-  const size_t plane = (size_t)p.Np * (size_t)p.Np;
+  const int NI = k_rows(p.rows, p.N), NPI = p.rows > 0 ? p.rows : p.Np;   // batched samples: B N rows of i (planes [2 C_H][B N][N], Np == N)
+  const size_t plane = (size_t)NPI * (size_t)p.Np;
   const int rho0 = 64 * cw + 16 * wiw;                  // first of this warp's 16 token rows (tile-relative)
   const int rowA = rho0 + (lane >> 2), rowB = rowA + 8;  // this thread's accumulator rows
   // stmatrix role: lane -> (matrix idx, row rr): channel ch = 16 hq + 8 (idx>>1) + rr; token granule tg = 2 wiw + (idx&1) (8 tokens each), stored at tg ^ (ch & 7)
@@ -692,12 +701,12 @@ TMN_DEVI void k1_body(const P& p) {
     if (t_local == n_iter - 1 && tid == 128) pdl_trigger();       // TMN_PDL: the dependent grid may take SMs as CTAs retire
     // ---- this thread's two rows: validity + mask; this lane's two store runs: pointers + predicates
     const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
-    const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
+    const bool vA = (iA < NI) && (jA < p.N), vB = (iB < NI) && (jB < p.N);
     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
     if (HAS_MASK) k1_mask_rows<MT>(p, vA, iA, jA, vB, iB, jB, mA, mB);
     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
-    const bool st_ok = (is_ < p.Np) && (js_ < p.Np);
+    const bool st_ok = (is_ < NPI) && (js_ < p.Np);
     const int st_n = min(8, p.Np - js_);                                   // valid tokens of this lane's 8-token granule (ragged planes)
     __nv_bfloat16* gp0 = p.ab + (size_t)st_ch0 * plane + (size_t)is_ * p.Np + js_;   // + 32 b * plane per block; + 4 * plane for e = 1
     const size_t blk_stride = 32 * plane, e_stride = 4 * plane;
@@ -705,7 +714,7 @@ TMN_DEVI void k1_body(const P& p) {
     // TMN_K1_WARPSTORE geometry: lane = channel of the block; granule e = tokens 64 cw + 16 wiw + 8 e .. +7 (this warp's own stmatrix granules 2 wiw + e)
     const int rho_w0 = 64 * cw + 16 * wiw, rho_w1 = rho_w0 + 8;
     const int is_w0 = i0 + rho_w0 / BJ, js_w0 = j0 + rho_w0 % BJ, is_w1 = i0 + rho_w1 / BJ, js_w1 = j0 + rho_w1 % BJ;
-    const bool ok_w0 = (is_w0 < p.Np) && (js_w0 < p.Np), ok_w1 = (is_w1 < p.Np) && (js_w1 < p.Np);
+    const bool ok_w0 = (is_w0 < NPI) && (js_w0 < p.Np), ok_w1 = (is_w1 < NPI) && (js_w1 < p.Np);
     const int n_w0 = min(8, p.Np - js_w0), n_w1 = min(8, p.Np - js_w1);
     __nv_bfloat16* gw0 = p.ab + (size_t)lane * plane + (size_t)is_w0 * p.Np + js_w0;   // + 32 b * plane per block
     __nv_bfloat16* gw1 = p.ab + (size_t)lane * plane + (size_t)is_w1 * p.Np + js_w1;
@@ -995,8 +1004,8 @@ TMN_DEVI void k3_body(const K3Params& p) {
     float stA = 0.f, srA = 1.f, stB = 0.f, srB = 1.f;                     // experiment TMN_K3_STATS: K1-saved LN_in statistics, loaded before the X wait
     if (TMN_K3_STATS != 0 && LNM == 1 && p.stats != nullptr) {
       const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
-      if (iA < p.N && jA < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iA * p.N + jA)); stA = s.x; srA = s.y; }
-      if (iB < p.N && jB < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iB * p.N + jB)); stB = s.x; srB = s.y; }
+      if (iA < k_rows(p.rows, p.N) && jA < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iA * p.N + jA)); stA = s.x; srA = s.y; }
+      if (iB < k_rows(p.rows, p.N) && jB < p.N) { const float2 s = __ldg(reinterpret_cast<const float2*>(p.stats) + ((size_t)iB * p.N + jB)); stB = s.x; srB = s.y; }
     }
 
     // ---- projection operand: X sub-tile [C_H ch rows][64 tok] -> ldmatrix.trans -> release the X stage -> LN_out (before z is touched:
@@ -1099,7 +1108,7 @@ TMN_DEVI void k3_body(const K3Params& p) {
     const size_t orow_off = (((size_t)iw * p.N + jl) * CZ) * OSZ + (size_t)OGB * cgl;
     uint8_t* orow = reinterpret_cast<uint8_t*>(p.out) + orow_off;
     const uint8_t* zrow = reinterpret_cast<const uint8_t*>(p.zres) + orow_off;          // mode 2: the fp32 z rows (same geometry as the fp32 output)
-    const int nvalid = iw < p.N ? (p.N - jl + RSTEP - 1) / RSTEP : 0;                     // granules it < nvalid are inside the ragged edge
+    const int nvalid = iw < k_rows(p.rows, p.N) ? (p.N - jl + RSTEP - 1) / RSTEP : 0;                     // granules it < nvalid are inside the ragged edge
     constexpr size_t GSTRIDE = (size_t)RSTEP * CZ * OSZ;                                 // output bytes between a lane's consecutive granule rows
     auto release = [&](int qb) {                         // this warp's MMAs of block qb have retired (wgmma wait + syncwarp): free its two weight slots
       __syncwarp();

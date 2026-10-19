@@ -513,30 +513,30 @@ def deterministic_ln_backward(x, dy, gamma, *, planes=False, stats=None, residua
     return dx, dg, db
 
 
-def training_pair_mask(mask, length, device):
-    """Owned FP32 pair mask, built directly from token/pair/absent masks."""
-    out = torch.empty((length, length), device=device, dtype=torch.float32)
+def training_pair_mask(mask, length, device, samples=1):
+    """Owned FP32 pair mask [B L, L], built directly from token [B L] / pair [B L L] / absent masks (B = ``samples``, b-major)."""
+    out = torch.empty((samples * length, length), device=device, dtype=torch.float32)
     absent = mask is None or mask.numel() == 0
     if not absent and (not mask.is_contiguous() or mask.dtype not in
                        (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (length, length * length)):
+                       or mask.numel() not in (samples * length, samples * length * length)):
         raise ValueError("native TriMul mask requires contiguous token or square pair data")
     kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
-    token = int(not absent and mask.numel() == length)
-    _launch("mw_aux_train_mask", ((length*length+255)//256, 1, 1),
-            [None if absent else mask, out, length, kind, token])
+    token = int(not absent and mask.numel() == samples * length)
+    _launch("mw_aux_train_mask", ((samples*length*length+255)//256, 1, 1),
+            [None if absent else mask, out, length, kind, token, samples])
     return out
 
 
 def _training_unit_scale_fake(pair):
-    """[L, D] bf16 constant scale; ``pair`` supplies only the shape and device."""
-    return torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
+    """[B L, D] bf16 constant scale; ``pair`` supplies only the shape and device."""
+    return torch.empty((pair.shape[0] * pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
 
 
 @opaque(fake=_training_unit_scale_fake, name="trimul_h100_training_unit_scale")
 def _training_unit_scale(pair: torch.Tensor) -> torch.Tensor:
-    """The constant [L, D] BF16 unit-scale tensor of the training path (no derivative)."""
-    out = torch.empty((pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
+    """The constant [B L, D] BF16 unit-scale tensor of the training path (no derivative; one row block per sample)."""
+    out = torch.empty((pair.shape[0] * pair.shape[1], pair.shape[-1]), device=pair.device, dtype=torch.bfloat16)
     _launch("mw_aux_unit_scale", ((out.numel()+255)//256, 1, 1), [out, out.numel()])
     return out
 
@@ -548,20 +548,21 @@ def training_unit_scale(pair):
 
 
 def _fused_training_prepare_fake(leaves, mask):
-    """(packed [4H, D], pair mask [L, L] fp32, gate [D, D], output [D, H]), shapes read from x and the first weight."""
+    """(packed [4H, D], pair mask [B L, L] fp32, gate [D, D], output [D, H]), shapes read from x and the first weight."""
     x, weight = leaves[:2]
-    length, width, hidden = x.shape[1], x.shape[-1], weight.shape[0]
+    samples, length, width, hidden = x.shape[0], x.shape[1], x.shape[-1], weight.shape[0]
     return (x.new_empty((4*hidden, width)),
-            x.new_empty((length, length), dtype=torch.float32),
+            x.new_empty((samples * length, length), dtype=torch.float32),
             x.new_empty((width, width)), x.new_empty((width, hidden)))
 
 
 @opaque(fake=_fused_training_prepare_fake, name="trimul_h100_d64_training_prepare")
 def fused_training_prepare(leaves: list[torch.Tensor], mask: torch.Tensor | None
                            ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """One live CUDA launch for D64 K1 packing, output weights and pair mask."""
+    """One live CUDA launch for D64 K1 packing, output weights and pair mask. x [B, L, L, D] (B samples, b-major): the pair mask is
+    [B L, L] fp32 from a token mask [B, L] or a pair mask [B, L, L]."""
     x, *weights = leaves[:7]
-    length, width = x.shape[1], x.shape[-1]
+    samples, length, width = x.shape[0], x.shape[1], x.shape[-1]
     hidden = weights[0].shape[0]
     if width != 64 or hidden not in (64, 128):
         raise ValueError("fused training preparation requires D64/H64 or H128")
@@ -570,17 +571,17 @@ def fused_training_prepare(leaves: list[torch.Tensor], mask: torch.Tensor | None
     absent = mask is None or mask.numel() == 0
     if not absent and (not mask.is_contiguous() or mask.dtype not in
                        (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (length, length * length)):
+                       or mask.numel() not in (samples * length, samples * length * length)):
         raise ValueError("native TriMul mask requires contiguous token or square pair data")
     kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
-    token = int(not absent and mask.numel() == length)
+    token = int(not absent and mask.numel() == samples * length)
     packed = torch.empty((4*hidden, width), device=x.device, dtype=torch.bfloat16)
     gate = torch.empty((width, width), device=x.device, dtype=torch.bfloat16)
     output = torch.empty((width, hidden), device=x.device, dtype=torch.bfloat16)
-    pair_mask = torch.empty((length, length), device=x.device, dtype=torch.float32)
+    pair_mask = torch.empty((samples * length, length), device=x.device, dtype=torch.float32)
     p = T._launch_module().Struct([
         *weights, packed, gate, output, None if absent else mask, pair_mask,
         *(w.stride(0) for w in weights), *(w.stride(1) for w in weights),
-        *(int(w.dtype == torch.float32) for w in weights), hidden, length, kind, token])
-    _launch("mw_aux_d64_training_prepare", ((max(length*length,4*hidden*width)+255)//256,1,1), [p])
+        *(int(w.dtype == torch.float32) for w in weights), hidden, length, kind, token, samples])
+    _launch("mw_aux_d64_training_prepare", ((max(samples*length*length,4*hidden*width)+255)//256,1,1), [p])
     return packed, pair_mask, gate, output

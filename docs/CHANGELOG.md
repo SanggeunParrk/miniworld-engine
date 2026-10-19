@@ -10,6 +10,11 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 TriMul D64 takes B samples in one call (`integrations.trimul_h100.MAX_BATCH = 48`, same meaning as the B200 one): bidirectional
+  and single direction, inference and training. K1 / K3 / `save_k3_d64` stack the samples on the slow token axis (`rows = B L`), the
+  token mask, pair mask and row-dropout scale are per sample, the contraction batches over channels x B, B1 / B2 run over every
+  sample's rows. y and dx are bitwise equal to B calls of one sample; B = 1 is unchanged. MiniPairformer block (TriMul + Transition),
+  B = 4: 1.13-2.21x over 4 calls, 4.1-11.5x over the PyTorch statements H100 ran before for B > 1.
 - H100 AF3 local atom DiT (`LocalDiTBlock`, cross-attention): native fp32 (TF32) and bf16 paths for inference and training at any A and any N
   (`integrations/local_dit_h100.py`, `kernels/augmented_attention/cuda/sm90_atom/`, `sm100_atom_local/lattn90*.cu`). Warp-level tensor-core row
   kernels (wgmma with register A operands, 16-byte lane layout) and `mma.sync` window attention with the bias resident in shared memory.

@@ -32,9 +32,9 @@ def headers(base):
                 "  extern __shared__ __align__(1024) uint8_t smem[];\n  uint8_t* sA = smem;",
             )
             replace(
-                "  const size_t plane = (size_t)p.Np * (size_t)p.Np;",
+                "  const size_t plane = (size_t)NPI * (size_t)p.Np;",
                 "  const uint32_t dpl_u = smem_u32(sStage) + G::NCWG * 8192 + cw * 4096;\n"
-                "  const size_t plane = (size_t)p.Np * (size_t)p.Np;",
+                "  const size_t plane = (size_t)NPI * (size_t)p.Np;",
             )
             replace(
                 "    auto prefetch_dpl = [&](int b) {\n"

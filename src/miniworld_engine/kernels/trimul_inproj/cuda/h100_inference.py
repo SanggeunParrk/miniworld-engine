@@ -64,7 +64,8 @@ def inference(
     eps: float,
 ) -> torch.Tensor:
     """Run packaged K1, contractions, and K3 with a GPU/shape-specific schedule. mask: None, a bool token mask [N] (K1
-    forms m[i] & m[j] itself) or a pair mask [N, N]."""
+    forms m[i] & m[j] itself) or a pair mask [N, N]. x [B, N, N, cz] with B > 1 (N % 16 == 0): the samples run in the same launches,
+    mask a token mask [B N] (``_run_inference``)."""
     config = _select_config(x, weights, mask, direction, eps)
     return _run_inference(x, weights, mask, direction, eps, config)
 
@@ -89,11 +90,17 @@ def _select_config(x, weights, mask, direction, eps):
 def _run_inference(x, weights, mask, direction, eps, config):
     # weights: left, left gate, right, right gate, output gate, output, four LN affine tensors.
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
-    z = x[0]
+    # Batched samples (x [B, N, N, cz], B > 1): tokens b-major, the B samples stacked along the slow token axis (rows = B N) of one K1 / K3
+    # launch each, planes [c, B N, N] so the contraction batches over c x B; the mask is a token mask [B N]. Needs N % 16 == 0 (no pad).
+    bsz = x.shape[0]
     n = x.shape[1]
     cz = x.shape[-1]
     ch = wl.shape[0]
+    z = x[0] if bsz == 1 else x.view(bsz * n, n, cz)
     npad = (n + 15) // 16 * 16
+    if bsz > 1 and (npad != n or (mask is not None and mask.ndim != 1)):
+        raise ValueError("batched H100 TriMul inference needs N % 16 == 0 and a token mask [B N]")
+    rows = bsz * npad
     with torch.cuda.device(x.device):
         T._launch_module()._make_context_current(x.device.index)
         # Measured D384/L512 outgoing candidate. Keep a separate loaded unit
@@ -130,8 +137,8 @@ def _run_inference(x, weights, mask, direction, eps, config):
             "wo": wp,
             "wg": wg,
         }
-        ab = x.new_empty((2 * ch, npad, npad))
-        tri = x.new_empty((ch, npad, npad))
+        ab = x.new_empty((2 * ch, rows, npad))
+        tri = x.new_empty((ch, rows, npad))
         out = torch.empty_like(z)
         cache = {}
         kk.k1(
@@ -148,16 +155,19 @@ def _run_inference(x, weights, mask, direction, eps, config):
             eps=eps,
             cache=cache,
             token_mask=mask is not None and mask.ndim == 1,
+            rows=rows,
         )
+        # [c, B N, N] -> [c B, N, N]: the samples join the channel planes in cuBLAS's batch dim (a view; B = 1 is the same shape as before)
+        fold = lambda t: t.view(-1, npad, npad)
         left, right = ab[:ch], ab[ch:]
         if direction == 0:
             h = ch // 2
-            _H100_BMM.bmm(left[:h], right[:h].transpose(-1, -2), out=tri[:h])
-            _H100_BMM.bmm(left[h:].transpose(-1, -2), right[h:], out=tri[h:])
+            _H100_BMM.bmm(fold(left[:h]), fold(right[:h]).transpose(-1, -2), out=fold(tri[:h]))
+            _H100_BMM.bmm(fold(left[h:]).transpose(-1, -2), fold(right[h:]), out=fold(tri[h:]))
         elif direction == 1:
-            _H100_BMM.bmm(left, right.transpose(-1, -2), out=tri)
+            _H100_BMM.bmm(fold(left), fold(right).transpose(-1, -2), out=fold(tri))
         else:
-            _H100_BMM.bmm(left.transpose(-1, -2), right, out=tri)
+            _H100_BMM.bmm(fold(left).transpose(-1, -2), fold(right), out=fold(tri))
         kk.k3(
             tri,
             z,
@@ -172,5 +182,6 @@ def _run_inference(x, weights, mask, direction, eps, config):
             lnm=1,
             eps=eps,
             cache=cache,
+            rows=rows,
         )
-        return out.unsqueeze(0)
+        return out.unsqueeze(0) if bsz == 1 else out.view(x.shape)
