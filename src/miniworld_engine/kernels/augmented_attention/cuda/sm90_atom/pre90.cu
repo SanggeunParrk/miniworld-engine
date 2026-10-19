@@ -5,6 +5,8 @@
 //   xkv = LN(x1) * sigmoid(mkv[:, 0:128] + bs) + mkv[:, 128:256]
 //   k   = xkv Wk^T           v  = xkv Wv^T
 // q, k, v only feed MMAs (TF32: rounded to nearest on the way out). SAVE also writes x1 and xkv for the backward.
+// PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (inference only: with PAR the
+// backward of the chained form does not apply).
 // SPDX-License-Identifier: Apache-2.0
 #include "row90.cuh"
 using namespace r90;
@@ -35,7 +37,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
                                                                const T* __restrict__ w /*[Wq;Wg;Wk;Wv] 512 x 128*/, const float* __restrict__ bq,
                                                                const float* __restrict__ bs, T* __restrict__ q, T* __restrict__ sg,
                                                                T* __restrict__ k, T* __restrict__ v, T* __restrict__ x1s, T* __restrict__ xkvs,
-                                                               int M, int nmod, float eps, int save) {
+                                                               int M, int nmod, float eps, int save, int par) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128 * ES;
@@ -64,6 +66,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
 #else
       if (save) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
 #endif
+      if (par) ld_tile(c, x + row0 * 128, 128, 0, g, t);  // AlphaFold 3: the K / V AdaLN reads the raw x, not x1
       ln_stats(c, eps, m0, r0, m1, r1);
       adaln_half<0>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
       adaln_half<1>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
@@ -103,7 +106,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
 extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __restrict__ x, const T* __restrict__ mod, const T* __restrict__ mkv,
                                                                 const T* __restrict__ w, const float* __restrict__ bq, const float* __restrict__ bs,
                                                                 T* __restrict__ q, T* __restrict__ sg, T* __restrict__ k, T* __restrict__ v,
-                                                                T* __restrict__ x1s, T* __restrict__ xkvs, int M, int nmod, float eps, int save) {
+                                                                T* __restrict__ x1s, T* __restrict__ xkvs, int M, int nmod, float eps, int save, int par) {
   pdl_wait();
   extern __shared__ uint8_t sm_raw[];
   constexpr int UNIT = 64 * 128 * ES;
@@ -122,7 +125,8 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __res
   adaln_half<0>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   adaln_half<1>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   if (save && u0 == 0) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
-  if (u0 >= 4) {  // k, v: xkv = LN(x1) * sigmoid(mkv pre + bs) + mkv shift
+  if (u0 >= 4) {  // k, v: xkv = LN(x1) * sigmoid(mkv pre + bs) + mkv shift (PAR: LN(x))
+    if (par) ld_tile(c, x + row0 * 128, 128, 0, g, t);
     ln_stats(c, eps, m0, r0, m1, r1);
     adaln_half<0>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
     adaln_half<1>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
