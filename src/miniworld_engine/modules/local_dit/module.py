@@ -39,6 +39,25 @@ def _key_windows(t: torch.Tensor, n: int, value: float = 0.0) -> torch.Tensor:
     return padded.unfold(-2, KEYS, QUERIES).transpose(-1, -2)
 
 
+
+def slide_starts(n_real: torch.Tensor, nwin: int) -> torch.Tensor:
+    """[B] real atom counts -> [B, nwin] first key of every query window, AlphaFold 3's rule: the window ``[32 w - 48, 32 w + 80)``
+    shifted back inside the real atoms ``[0, N)`` (``featurisation: AtomCrossAtt.compute_features``). A window short of the start
+    begins at 0, one past the end at ``N - 128``. Below 128 real atoms the rule has no valid window; the window then begins at 0 and
+    the keys past ``N`` are masked (AlphaFold 3's own indices wrap there)."""
+    first = (QUERIES * torch.arange(nwin, device=n_real.device) - KEY_OFFSET).clamp(min=0)
+    return torch.minimum(first[None], (n_real - KEYS)[:, None]).clamp(min=0)
+
+
+def slide_windows(t: torch.Tensor, starts: torch.Tensor) -> torch.Tensor:
+    """[A, B, N, C] and starts [B, nwin] -> [A, B, nwin, KEYS, C]: the slid key window of every query window."""
+    if t.shape[2] < KEYS:
+        t = F.pad(t, (0, 0, 0, KEYS - t.shape[2]))
+    index = starts[:, :, None] + torch.arange(KEYS, device=t.device)               # [B, nwin, KEYS]
+    batch = torch.arange(t.shape[1], device=t.device)[:, None, None]
+    return t[:, batch, index]
+
+
 def to_windows(pair: torch.Tensor) -> torch.Tensor:
     """Dense pair [B, N, N, d] -> trunked pair [B, nwin, 32, 128, d] (positions outside [0, N) are zero)."""
     n = pair.shape[1]
@@ -51,7 +70,16 @@ def to_windows(pair: torch.Tensor) -> torch.Tensor:
 
 
 class LocalDiTBlock(DiTBlock):
-    """AF3 atom transformer block: block-local pair-bias attention, then the conditioned transition."""
+    """AF3 atom transformer block: block-local pair-bias attention, then the conditioned transition.
+
+    ``cross_attention`` adds the K / V AdaLN (``attention.ada_ln_kv``). ``kv_norm`` says what it normalises: ``"chained"`` the atoms the
+    first AdaLN has already normalised (Protenix, the default), ``"parallel"`` the raw atoms next to it (AlphaFold 3).
+    ``key_window`` says where a query window's 128 keys start: ``"pad"`` at ``32 w - 48``, clipped to the atoms that exist, so an edge
+    window sees fewer keys (the default), or ``"slide"`` shifted back inside the real atoms (AlphaFold 3: the first two windows start at 0,
+    the last ones end at atom ``N - 1``); the trunked pair is read as laid out from the window's first key either way. ``"slide"`` takes
+    the real atom count ``N`` from the key mask, whose real atoms must come first; under 128 real atoms there is no valid window and the
+    keys past ``N`` are masked. The H100 mma kernels serve both for inference; a call with grad runs the composed path.
+    """
 
     def __init__(
         self,
@@ -62,10 +90,20 @@ class LocalDiTBlock(DiTBlock):
         n: int = 2,
         *,
         cross_attention: bool = False,
+        kv_norm: str = "chained",
+        key_window: str = "pad",
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__(d_single, d_cond, d_pair, n_head, n, implementation=implementation)
         self.cross_attention = cross_attention
+        if kv_norm not in ("chained", "parallel"):
+            raise ValueError(f"kv_norm must be 'chained' or 'parallel', got {kv_norm!r}")
+        if key_window not in ("pad", "slide"):
+            raise ValueError(f"key_window must be 'pad' or 'slide', got {key_window!r}")
+        if kv_norm == "parallel" and not cross_attention:
+            raise ValueError("kv_norm='parallel' needs cross_attention=True (there is no K/V AdaLN otherwise)")
+        self.kv_norm = kv_norm
+        self.key_window = key_window
         if cross_attention:
             self.attention.ada_ln_kv = AdaptiveLayerNorm(d_single, d_cond, implementation=implementation)
 
@@ -90,18 +128,31 @@ class LocalDiTBlock(DiTBlock):
             z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
         bias = (_master.linear(z, att.to_bias, wb) if master else F.linear(z, att.to_bias.weight.to(z.dtype))).permute(0, 4, 1, 2, 3)
         q = _master.linear(x, att.to_query, wq, bq) if master else att.to_query(x)
-        xkv = att.ada_ln_kv(x, cond) if self.cross_attention else x  # ty: ignore[call-non-callable]  # AF3 cross-attention mode: a second AdaLN for K / V (ty types the nn.Module attribute as Tensor)
+        # AF3 cross-attention mode: a second AdaLN for K / V (ty types the nn.Module attribute as Tensor). Chained: of the already
+        # normalised atoms (Protenix); parallel: of the raw atoms, next to the first one (AlphaFold 3).
+        kv_input = single if self.kv_norm == "parallel" else x
+        xkv = att.ada_ln_kv(kv_input, cond) if self.cross_attention else x  # ty: ignore[call-non-callable]
         k = _master.linear(xkv, att.to_key, wk) if master else att.to_key(xkv)
         v = _master.linear(xkv, att.to_value, wv) if master else att.to_value(xkv)
         gate = _master.linear(x, att.to_gate, wg) if master else att.to_gate(x)
         qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
-        kw = _key_windows(k, n).reshape(a, b, nwin, KEYS, h, d)
-        vw = _key_windows(v, n).reshape(a, b, nwin, KEYS, h, d)
+        keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
+        if self.key_window == "slide":
+            n_real = keep.sum(-1).long()
+            starts = slide_starts(n_real, nwin)
+            kw = slide_windows(k, starts).reshape(a, b, nwin, KEYS, h, d)
+            vw = slide_windows(v, starts).reshape(a, b, nwin, KEYS, h, d)
+        else:
+            kw = _key_windows(k, n).reshape(a, b, nwin, KEYS, h, d)
+            vw = _key_windows(v, n).reshape(a, b, nwin, KEYS, h, d)
         wide = torch.float64 if x.dtype == torch.float64 else torch.float32
         with torch.autocast(device_type=x.device.type, enabled=False):
             scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
-        keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
-        valid = _key_windows(keep[..., None], n)[..., 0] > 0                    # [B, nwin, 128]
+        if self.key_window == "slide":
+            # the slid window lies inside the real atoms; only a system under 128 atoms has keys past them
+            valid = slide_windows(keep[None, ..., None], starts)[0, ..., 0] > 0
+        else:
+            valid = _key_windows(keep[..., None], n)[..., 0] > 0                # [B, nwin, 128]
         scores = scores.masked_fill(~valid[None, :, None, :, None, :], float("-inf"))
         probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
         with torch.autocast(device_type=x.device.type, enabled=False):

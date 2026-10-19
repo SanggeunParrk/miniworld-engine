@@ -328,11 +328,18 @@ def _fp32_call(module, single, cond, pair) -> bool:
     return all(p.dtype == F32 for p in module.parameters())
 
 
+def _af3_variant(module) -> bool:
+    """AlphaFold 3's block: the K/V AdaLN beside the first one (``kv_norm="parallel"``) or the slid key window (``key_window="slide"``)."""
+    return getattr(module, "kv_norm", "chained") != "chained" or getattr(module, "key_window", "pad") != "pad"
+
+
 def serves(module, single, cond, pair, mask) -> bool:
     from miniworld_engine.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask):
         return True
+    if _af3_variant(module):
+        return False  # only the H100 mma kernels know AlphaFold 3's K/V norm and key window; the others keep the composed path
     qualified = _serves_hopper_training(module, single, cond, pair, mask)
     if qualified is not None:
         return qualified

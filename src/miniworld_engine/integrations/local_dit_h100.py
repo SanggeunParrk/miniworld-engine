@@ -39,6 +39,8 @@ def matches(module, single, cond, pair, mask) -> bool:
         torch.is_autocast_enabled("cuda") and single.dtype != BF
     ):
         return False
+    if _ld._af3_variant(module) and not _af3_servable(module, single, cond, pair, mask):
+        return False
     a, tr = module.attention, module.transition
     if a.use_qk_norm or settings.current().engine_backend == "triton":
         return False
@@ -112,6 +114,52 @@ def matches(module, single, cond, pair, mask) -> bool:
     return all(norm.eps == _ld.EPS for norm in norms)
 
 
+def _af3_servable(module, single, cond, pair, mask) -> bool:
+    """AlphaFold 3's K/V norm and slid key window are inference-only here (the backward kernels know neither); the slide needs the real atom
+    count on the host (one sync, so not inside a CUDA graph capture) and 128 real atoms, or no window fits."""
+    params = [module.get_parameter(n) for n in (*_ld.WEIGHTS, *_ld.CROSS_WEIGHTS)]
+    if torch.is_grad_enabled() and any(
+        t.requires_grad for t in (single, cond, pair, *params)
+    ):
+        return False
+    if module.key_window == "slide":
+        return _real_atoms(module, mask, single.shape[2]) >= DS
+    return True
+
+
+def _real_atoms(module, mask, n0: int) -> int:
+    """The real atom count the slid window needs (0 = pad mode); the mask's real atoms come first."""
+    if module.key_window != "slide":
+        return 0
+    if mask is None:
+        return n0
+    if torch.cuda.is_current_stream_capturing():
+        return -1
+    return int(mask.sum())
+
+
+def _edge_windows(n_real: int) -> list[int]:
+    """The query windows whose slid key window is not the clipped one: those starting before atom 0 and those ending past atom N."""
+    last = (n_real - 1) // 32
+    return [w for w in range(last + 1) if 32 * w - 48 < 0 or 32 * w + 80 > n_real]
+
+
+def _slid_edges(o, q, k, v, z, gamma, wb, a, n, n_real):
+    """Overwrite the attention output ``o`` [A, N, 128] of the edge windows with the attention over their slid key windows (torch, fp32)."""
+    import torch.nn.functional as F
+
+    h, d = NH, DS // NH
+    zz = F.layer_norm(z.float(), (DP,), gamma.float(), None, _ld.EPS)
+    bias = F.linear(zz, wb.float())  # [nwin, 32, 128, h]
+    for w in _edge_windows(n_real):
+        s = max(0, min(32 * w - 48, n_real - DS))
+        qw = q.view(a, n, h, d)[:, 32 * w : 32 * w + 32].float()
+        kw, vw = (t.view(a, n, h, d)[:, s : s + DS].float() for t in (k, v))
+        logits = torch.einsum("aqhd,akhd->ahqk", qw, kw) * d**-0.5 + bias[w].permute(2, 0, 1)
+        out = torch.einsum("ahqk,akhd->aqhd", logits.softmax(-1), vw)
+        o.view(a, n, DS)[:, 32 * w : 32 * w + 32] = out.reshape(a, 32, DS).to(o.dtype)
+
+
 # --------------------------------------------------------------------------------------------------------------------- the ops
 def _shared(cond) -> bool:
     """One conditioning for every sample: an expanded view (stride 0 over the samples) of [1, 1, N, 128]. The modulation tables are made
@@ -130,7 +178,7 @@ def _dims(single):
     return a, n0, n, a * n
 
 
-def _fwd_fake(single, cond, pair, kmask, weights, save):
+def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide_n=0):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -165,8 +213,11 @@ def _fwd(
     kmask: torch.Tensor | None,
     weights: list[torch.Tensor],
     save: bool,
+    parallel_kv: bool = False,
+    slide_n: int = 0,
 ) -> list[torch.Tensor]:
-    """The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
+    """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide_n`` > 0: its slid key window for ``slide_n`` real atoms (inference only).
+    The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
     x2, t): fresh tensors."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
     from miniworld_engine.kernels.augmented_attention.cuda import (
@@ -187,7 +238,11 @@ def _fwd(
         ).contiguous()
         nmod = n if shared else m
         hoist = (not save) and settings.current().local_dit_hoist
-        wkey = tuple((w.data_ptr(), w._version) for w in weights) if hoist else None
+        wkey = (
+            (tuple((w.data_ptr(), w._version) for w in weights), parallel_kv)
+            if hoist
+            else None
+        )
 
         def tables():
             return k90.cond_fwd(c2, p, tf32)
@@ -208,10 +263,14 @@ def _fwd(
         if save:
             q, sg, k, v, x1, xkv = k90.pre_fwd(
                 s2, mod, mkv, p, tf32, save=True, nmod=nmod
-            )
+            )  # the training path is the chained K/V norm only (``matches``)
         else:
-            q, sg, k, v = k90.pre_fwd(s2, mod, mkv, p, tf32, nmod=nmod)
+            q, sg, k, v = k90.pre_fwd(
+                s2, mod, mkv, p, tf32, nmod=nmod, parallel_kv=parallel_kv
+            )
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
+        if slide_n:
+            _slid_edges(o, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n, slide_n)
         o = o.view(m, DS)
         if not save:
             return [
@@ -486,4 +545,7 @@ def run_block(module, single, cond, pair, mask=None):
         t.requires_grad for t in (single, cond, pair, *weights)
     ):
         return _H100Block.apply(kmask, single, cond, pair, *weights)
-    return _fwd(single, cond, pair, kmask, weights, False)[0]
+    parallel = module.kv_norm == "parallel"
+    return _fwd(
+        single, cond, pair, kmask, weights, False, parallel, _real_atoms(module, mask, n0)
+    )[0]

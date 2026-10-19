@@ -319,3 +319,7 @@ Inference (A5, 4096 atoms): bf16 post90 49 us, pre90 24 us, attention 19 us; fp3
   `pre_bwd90` are not split over CTAs (small row counts); a shared conditioning with A not a multiple of four takes per-sample rows (about
   0.05 ms slower than the grouped path at A5 / 4096 atoms, still faster than every other column); kernel sums sit at 65-75 % of the byte
   floor, not at 90 %.
+
+## AlphaFold 3 variant (`kv_norm="parallel"`, `key_window="slide"`)
+
+AF3 normalises the keys and values with a second AdaLN of the *raw* atoms and gives every query window the 128 keys `[32 w - 48, 32 w + 80)` slid back inside the real atoms. The H100 mma kernels serve both options for inference (fp32/TF32 and bf16): `pre90` takes a `par` flag for the K/V AdaLN input, the slid window is the clipped one except for the first two and the last windows, which are recomputed in torch from the kernels' q/k/v and written over the attention output. Not served (composed path): a call with grad, a slide under 128 real atoms, a slide under CUDA graph capture (the real atom count is read from the mask on the host). Checked against the fp64 PyTorch module for real atom counts 140 to 512 (`tests/gpu/sm90/test_h100_local_dit_af3_variant_gpu.py`); speed not measured.

@@ -388,9 +388,18 @@ def cond_fwd(c, p, tf32: bool, eps: float = 1e-5):
 
 
 def pre_fwd(
-    x, mod, mkv, p, tf32: bool, save: bool = False, eps: float = 1e-5, nmod: int = 0
+    x,
+    mod,
+    mkv,
+    p,
+    tf32: bool,
+    save: bool = False,
+    eps: float = 1e-5,
+    nmod: int = 0,
+    parallel_kv: bool = False,
 ):
-    """-> q, sg, k, v [M, 128] (and x1, xkv when ``save``)."""
+    """-> q, sg, k, v [M, 128] (and x1, xkv when ``save``). ``parallel_kv``: the K / V AdaLN reads the raw x beside the first AdaLN
+    (AlphaFold 3), not its output (Protenix)."""
     M = x.shape[0]
     new = lambda: torch.empty(M, DS, device=x.device, dtype=x.dtype)  # noqa: E731
     q, sg, k, v = new(), new(), new(), new()
@@ -418,6 +427,7 @@ def pre_fwd(
         int(nmod or M),
         float(eps),
         int(save),
+        int(parallel_kv),
     )
     return (q, sg, k, v, x1, xkv) if save else (q, sg, k, v)
 
