@@ -26,6 +26,23 @@ The benchmark uses `compile=true`, bf16 mixed precision, `mask_prob=0.0`,
 `n_layers=1`, `L in {384, 512, 640, 768, 896, 1024}`, and
 `d_pair in {128, 256, 512}` at fixed `L=384` for d sweeps.
 
+## Ending-node bias orientation
+
+The ending node attends in the transposed frame `y = x^T`. `transposed_bias=True` (default) projects its pair bias from `y`, the
+supplementary-information and OpenFold convention. `transposed_bias=False` projects it from `x` as it is, the transpose of the former, which
+is how AlphaFold 3's released code computes it (a checkpoint trained with one orientation needs it). A symmetric pair gives the same
+result either way; starting-node attention has one orientation and ignores the option.
+
+Where each leg stands for `transposed_bias=False`:
+
+| leg | status |
+|---|---|
+| PyTorch, Triton, cuEquivariance (composed) | the bias is transposed after its projection, before the key mask |
+| H100 hand-CUDA, inference (fused 128 / 4 x 32 and width-generic) | the front kernel makes the bias unmasked, the wrapper transposes it and applies the key mask, then the core runs; no kernel change |
+| H100 hand-CUDA, grad or training dropout | not served; the composed legs run (the backward reads the front's orientation) |
+| B200 hand-CUDA | not served; the composed legs run |
+| Anthropic adapter | refused at construction |
+
 ## CUDA graph regime
 
 The primary comparison is `compile=true + cudagraph=manual`. Full triangle

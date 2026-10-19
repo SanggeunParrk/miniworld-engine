@@ -35,6 +35,7 @@ def triangle_attention(
     norm_query_weight: torch.Tensor | None = None,  # (d_head,) — enables qk-norm
     norm_key_weight: torch.Tensor | None = None,    # (d_head,)
     starting: bool = True,
+    transposed_bias: bool = True,
     eps: float = 1e-5,
 ) -> torch.Tensor:
     """Fused triangle (gated) attention — whole-op call. Returns ``(B, L, L, d_pair)``.
@@ -42,6 +43,9 @@ def triangle_attention(
     Autograd-transparent: back-prop produces gradients for ``pair`` and every weight.
     Matches the AF3 reference (query is scaled by ``d_head**-0.5`` inside the attention
     kernel; masked keys get ``finfo.min`` bias).
+
+    ``transposed_bias`` (ending node only): ``True`` projects the pair bias from the transposed pair; ``False`` keeps AlphaFold 3's
+    released orientation, the bias of the pair as it is read in the transposed frame.
     """
     from miniworld_engine.kernels.triangle_attention.triton.main import (
         triton_triangle_attention_pair_bias,
@@ -63,6 +67,8 @@ def triangle_attention(
 
     value = rearrange(F.linear(x, to_value_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
     bias = rearrange(F.linear(x, to_bias_weight), "B L L2 H -> B H L L2")
+    if not starting and not transposed_bias:
+        bias = bias.transpose(-1, -2).contiguous()
     if mask is not None:
         bias = bias.masked_fill(~mask[:, None, None, :], torch.finfo(bias.dtype).min)
 

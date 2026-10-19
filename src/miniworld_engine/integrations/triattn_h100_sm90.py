@@ -42,6 +42,10 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
         return None
     if not module.use_self_attention or module.use_qk_norm:
         return None
+    if module._bias_untransposed and (
+        torch.is_grad_enabled() or (module.training and module.p_drop > 0.0)
+    ):
+        return None  # AF3's ending-node bias: inference only (the backward reads the front's orientation)
     if not pair.is_cuda or pair.dtype != torch.bfloat16:
         return None
     if pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
@@ -113,7 +117,7 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
 
 # ---------------------------------------------------------------- custom ops
 # args = [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop]; mask [B, L] bool and drop [B, L, C] bf16 are empty when absent.
-def _infer_fake(kind, args, eps, n_head, head_dim, trans):
+def _infer_fake(kind, args, eps, n_head, head_dim, trans, flip):
     return torch.empty_like(args[0])
 
 
@@ -125,6 +129,7 @@ def _infer_op(
     n_head: int,
     head_dim: int,
     trans: bool,
+    flip: bool,
 ) -> torch.Tensor:
     pair, lnw, lnb, *weights, mask, _ = args
     mask = mask if mask.numel() else None
@@ -133,14 +138,16 @@ def _infer_op(
 
         w4, wb16, wo16 = _packed(kind, tuple(weights))
         return inference(
-            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans
+            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, flip
         )
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
     )
 
     wcat, wo_p = _packed(kind, tuple(weights))
-    return gen.inference(pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans)
+    return gen.inference(
+        pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, flip
+    )
 
 
 def _fwd_fake(kind, args, eps, n_head, head_dim, trans):
@@ -340,6 +347,8 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
         )
     # the ending node reads and writes its pair through the transposed row map (4-D tensor maps / a row index), without copies
     trans = not module.starting
+    # AF3's ending-node bias: transposed between the front and the core (inference; see ``_kind``)
+    flip = trans and not module.transposed_bias
     if Lp != L:
         pair = F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L))
         keep = torch.zeros(B, Lp, dtype=torch.bool, device=pair.device)
@@ -371,6 +380,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
             module.n_head,
             head_dim,
             trans,
+            flip,
         )
     else:
         out = _TriAttnFn.apply(
