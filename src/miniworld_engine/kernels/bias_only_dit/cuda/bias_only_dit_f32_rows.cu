@@ -1208,13 +1208,14 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   f32c(bias, "bias"); f32c(p, "p");
   TORCH_CHECK(bias.dim() == 2 && p.sizes() == bias.sizes(), "softmax_rows: p like bias [R, L]");
   const int64_t R = bias.size(0), L = bias.size(1);
-  TORCH_CHECK(L % 4 == 0 && L <= 2048, "softmax_rows: L a multiple of 4, at most 2048");
+  TORCH_CHECK(L % 4 == 0 && L <= 3072, "softmax_rows: L a multiple of 4, at most 3072");
   const bool* mk = mask_ptr(mask, L, "softmax_rows");
   const at::cuda::CUDAGuard gd(bias.device());
   const unsigned g = (unsigned)((R + 7) / 8);
   if (L <= 512) softmax_rows_k<4><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
   else if (L <= 1024) softmax_rows_k<8><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
-  else softmax_rows_k<16><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
+  else if (L <= 2048) softmax_rows_k<16><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
+  else softmax_rows_k<24><<<g, 256, 0, S()>>>(CP<float>(bias), P<float>(p), mk, R, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

@@ -37,6 +37,8 @@ LAYOUTS = ((16, 48), (24, 32), (12, 64), (16, 64))
 _H100_PVX = True
 _H100_DPB2 = True  # the 128 x TN bias-gradient kernel (False: the 64 x 64 ``dpb_pipe``)
 _H100_PVX_FORCE = (0, 0, 0)  # (consumer warpgroups, samples per CTA, cluster); 0 = the host cost model
+#: Longest L the Hopper inference path serves (``pvx`` / ``pvx32`` stream P; the softmax rows take up to 3072 keys).
+H100_MAX_L = 3072
 
 
 def h100_enabled(device) -> bool:
@@ -84,6 +86,37 @@ def h100_ext():
     )
 
 
+@functools.lru_cache(maxsize=None)
+def h100_gemm_ext():
+    """``bo_gemm_sm90.cu``: Hopper wgmma GEMMs with a row pass in the epilogue -- the one-launch conditioning tables (dispatched), and
+    the squeeze + last residual and out-projection gradient + gate backward fusions (measured slower; probes). Built on first use."""
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        gencodes,
+        host_flags,
+        load_extension,
+    )
+
+    ensure_cuda_home()
+    k = _dir.parent.parent
+    return load_extension(
+        name="bias_only_dit_gemm_sm90a",
+        sources=[str(_dir / "bo_gemm_sm90.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            *gencodes("90a"),
+            "--expt-relaxed-constexpr",
+            f"-I{k / 'transition' / 'cuda' / 'anthropic_v5'}",
+            f"-I{k / 'transition' / 'cuda' / 'wide' / 'kernels'}",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
 def _head_defs(nh: int, dh: int) -> tuple[str, ...]:
     """Compile definitions of the sm_100a cubins for a head layout (none for the default, so its cubins keep their keys)."""
     assert (nh, dh) in LAYOUTS, (nh, dh)
@@ -119,7 +152,8 @@ def ln_rows(x, out, eps=1e-5):
 
 
 def adaln_in_rows(single, x, ms, mb, out, T, eps=1e-5, presig=False):
-    """x = single (fp32), out = LN(x) * sigmoid(ms[row % T]) + mb[row % T]; width 768. ``presig``: ms holds the sigmoid."""
+    """x = single (fp32; x empty: no copy), out = LN(single) * sigmoid(ms[row % T]) + mb[row % T]; width 768. ``presig``: ms holds
+    the sigmoid."""
     _ext().adaln_in_rows_cuda(single, x, ms, mb, out, int(T), float(eps), bool(presig))
 
 
@@ -127,6 +161,14 @@ def resgate_adaln_rows(x, y, gl, ms, mb, out, T, eps=1e-5, presig=False):
     """x += sigmoid(gl[row % T]) * y in place (fp32); then, when ms is given, out = AdaLN(x) for the next half-block."""
     _ext().resgate_adaln_rows_cuda(
         x, y, gl, ms, mb, out, int(T), float(eps), bool(presig)
+    )
+
+
+def resgate_adaln_rows_in(xin, x, y, gl, ms, mb, out, T, eps=1e-5, presig=False):
+    """x = xin + sigmoid(gl[row % T]) * y (fp32; xin bf16 or fp32: the step input when ``adaln_in_rows`` made no fp32 copy), out =
+    AdaLN(x)."""
+    _ext().resgate_adaln_rows_in_cuda(
+        xin, x, y, gl, ms, mb, out, int(T), float(eps), bool(presig)
     )
 
 
@@ -203,13 +245,21 @@ def core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 (the P tile and two accumulators in 512 TMEM columns), sm_100. settings.bias_only_dit_core=0 turns it off.
+    up to 768 on sm_100 (the P tile and two accumulators in 512 TMEM columns), up to ``H100_MAX_L`` on Hopper (``pvx`` / ``pvx32``
+    stream P through a TMA ring: no length bound of their own; the sampler's token rungs reach 2560).
+    settings.bias_only_dit_core=0 turns it off.
     fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
     if not settings.current().bias_only_dit_core:
         return False
+    if h100_enabled(device_index):  # Hopper: ``pvx`` (bf16) / the TF32 wgmma core ``pvx32`` (fp32), head widths 32 / 48 / 64
+        return (
+            dtype in (torch.bfloat16, torch.float32)
+            and d % h == 0
+            and (h, d // h) in LAYOUTS
+            and L % 128 == 0
+            and 0 < L <= H100_MAX_L
+        )
     if dtype is torch.float32:
-        if h100_enabled(device_index):  # Hopper: the TF32 wgmma core (``pvx32``), head widths 32 / 48 / 64
-            return d % h == 0 and (h, d // h) in LAYOUTS and L % 128 == 0 and 0 < L <= 768
         if not (
             d % h == 0
             and (h, d // h) in LAYOUTS
@@ -227,10 +277,7 @@ def core_supported(
         and (h, d // h) in LAYOUTS
         and L % 128 == 0
         and 0 < L <= 768
-        and (
-            torch.cuda.get_device_capability(device_index) == (10, 0)
-            or h100_enabled(device_index)
-        )
+        and torch.cuda.get_device_capability(device_index) == (10, 0)
     )
 
 

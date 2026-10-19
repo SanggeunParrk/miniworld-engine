@@ -17,15 +17,19 @@ the per-sample attention is a GEMM per head (`P_h [L, L] x v_h [L, 48]`) with th
 ## Scope and dispatch
 
 Hand-written CUDA and cuBLAS only (no Triton), bf16 and fp32 (TF32 tensor cores, fp32 softmax / norm statistics / residual),
-16 x 48 heads, B == 1, L a multiple of 128 up to 768, a key mask [1, L] or none. Everything else keeps the module's PyTorch
-composition. `settings.bias_only_dit_h100` (default on) switches the Hopper paths.
+16 x 48 heads, B == 1, L a multiple of 128 up to 3072 (inference: the sampler's token rungs reach 2560) or 768 (training), a key mask
+[1, L] or none. Everything else keeps the module's PyTorch composition. `settings.bias_only_dit_h100` (default on) switches the Hopper paths.
 
 - **Inference** (`integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`): one conditioning
-  per sample or one shared by the samples. Per call: the conditioning tables (LN rows + two cuBLAS GEMMs), then per block
-  `adaln_in_rows` -> cuBLAS v | g -> **`pvx`** (bf16) / **`pvx32`** (fp32) -> cuBLAS out -> `resgate_adaln_rows` -> expand
-  (bf16: `gemm_swiglu_sm90`, SwiGLU in the epilogue; fp32: cuBLAS + `swiglu_cuda`) -> cuBLAS squeeze -> `resgate_out_rows`.
+  per sample or one shared by the samples. Per call: the conditioning tables (LN rows + two cuBLAS GEMMs; bf16 up to 384 table rows:
+  LN rows + ONE sm_90a GEMM for both, `bo_gemm_sm90.cu cond_tables`), then per block `adaln_in_rows` (no fp32 copy of the input:
+  the first residual pass, `resgate_adaln_rows_in`, reads the input itself) -> cuBLAS v | g -> **`pvx`** (bf16) / **`pvx32`** (fp32)
+  -> cuBLAS out -> `resgate_adaln_rows` -> expand (bf16: `gemm_swiglu_sm90`, SwiGLU in the epilogue, or cuBLAS + `swiglu_rows` where
+  its 128 x 256 tiles fill at most half a wave or just over one; fp32: cuBLAS + `swiglu_cuda`) -> cuBLAS squeeze -> `resgate_out_rows`.
   `P` is made once per pair and mask (`runner.hoist`: pair LayerNorm + projection + softmax rows) and served from the
-  capture-scoped cache.
+  capture-scoped cache. The private switches `runner._H100_NOCOPY` / `_H100_EXPAND_ROWS` / `_H100_COND1` (all on) keep the
+  previous forms for A/B. The B200 three-kernel step was ported (`inf3_h100.py`, `bo_inf3_sm90.cu`) and is slower here: off
+  (`inf3_h100._ON`), [below](#the-b200-three-kernel-step-and-fused-backward-on-h100-2026-10-19).
 - **Training** (`integrations/bias_only_dit_train.py`): one autograd Function per block, forward and backward each one opaque op.
   bf16: pair bias + `softmax_t` (P and P^T), v | g GEMM, `pvx` (a = sigmoid(g) P v), out GEMM, the AdaLN / residual rows, expand
   GEMM + `swiglu_rows` (a | b saved), squeeze GEMM; backward `res_c_bwd`, dh GEMM + `swiglu_bwd`, dxt, `res_adaln_b_bwd`, dog,
@@ -90,6 +94,48 @@ The 2026-10-14 measurements (L384 / L768 with output errors, per-sample conditio
 GEMMs 52 %, row passes 39 %, the attention-side kernels 9 %, ~75 % of the time-weighted roofline):
 [docs/records/h100_bias_only_dit_20261014.md](../../../records/h100_bias_only_dit_20261014.md). Current numbers: the length sweep below.
 
+## The B200 three-kernel step and fused backward on H100 (2026-10-19)
+
+Full numbers, traces and probes: [docs/records/h100_bias_only_dit_inf3_20261019.md](../../../records/h100_bias_only_dit_inf3_20261019.md).
+
+**Three-kernel inference step** (`kernels/bias_only_dit/cuda/inf3_h100.py`, `bo_inf3_sm90.cu`; off: `inf3_h100._ON = False`). B200's
+I0 design on wgmma: `bo90_front` (LN + AdaLN + v|g GEMM) -> `pvx` launched with PDL (`pv_cta_pdl`) -> `bo90_tail` (out GEMM, residual
++ gate, LN + AdaLN, a|b GEMM, SwiGLU, squeeze GEMM, residual + gate), a cluster of 8 (or 16, non-portable) CTAs per 128-row tile,
+LayerNorm statistics through DSMEM, xa / xt / h through L2 with one release per exchange, activation k-blocks multicast by TMA, the
+weights streamed before the PDL wait. Correct (2.96e-3 against the fp32 module chain; the 12-launch step 3.06e-3) and bitwise
+repeatable, but slower at every measured shape:
+
+| (L, A) | 12-launch front / core / tail (us) | three-kernel, best cluster: front / core / tail / chain (us) |
+|---|---|---|
+| 128, 1 | 5.8 / 3.5 / 22.5 | 13.2 / 3.4 / 32.3 / 49.3 (CL 16) |
+| 384, 5 shared | 13.5 / 8.9 / 42.8 | 25.1 / 9.1 / 51.8 / 91.6 (CL 8) |
+| 768, 5 shared | 23.1 / 20.0 / 65.8 | 50.2 / 20.6 / 103.9 / 177.4 (CL 8) |
+| 2560, 5 shared | 81.7 / 160.5 / 234.2 | 175.4 / 161.7 / 370.1 / 721.6 (CL 8) |
+
+Why (`%globaltimer` trace of the tail at L128): a CTA takes in 64-73 GB/s per k-block -- the TMA intake per SM -- so the column-split
+cluster's per-CTA tiles (128 x 96 for the out / squeeze GEMMs, 128 x 192 per a|b pass: 55 / 77 FLOP per byte) run at 47-76 % of the
+tensor rate (0.38 / 0.55 / 0.44 us per k-block), multicast saves L2 reads but not that intake, and the exchanges and epilogues (~13
+of 42 us) idle the tensor core. B200 recovers both with M 256 CTA-pair MMAs and TMEM accumulators; on H100 the accumulators are
+registers (n <= 256 per warpgroup with the residual live), so the per-CTA tile cannot grow, and cuBLAS's 128 x 192-256 tiles (77-85
+FLOP / byte) win. A slot release as `mbarrier.arrive.release.cluster` cost ~0.5 us each (the first build: 330 us a round); the kept
+form is the default `.release.cta` remote arrive.
+
+**Fewer launches instead** (shipped): the 12-launch step without the fp32 input copy, with cuBLAS + SwiGLU rows for the expand GEMM at
+few rows, and with one GEMM launch for both conditioning tables up to 384 rows ([dispatch above](#scope-and-dispatch)); per block,
+runner level, one process: L128 A1 41.8 -> 35.4 us (1.18x), L384 A1 51.1 -> 47.9, L768 A5 141.9 -> 136.9, L2560 A5 531.9 -> 512.0;
+module level in the table below. A wgmma GEMM with the row pass in its epilogue (`bo_gemm_sm90.cu`: squeeze + last residual) runs its
+mainloop at cuBLAS's rate (M3840 squeeze 13.9 vs 15.3 us) but adds the epilogue serially: 26.2 vs 22.4 us with cuBLAS + `resgate_out`
+at M3840 -- not dispatched.
+
+**Fused bf16 backward** (B200 T6): not shipped, the H100 backward keeps its 23 launches. The bf16 step at L768 A48 is cuBLAS GEMMs 54 %
+(weight gradients at ~72 % of the tensor peak), row passes 30 %, attention side 15 %. B200's fused tail moves the row passes into GEMM
+epilogues; its G4 piece (dog = dy Wo with the gate backward in the epilogue) built on H100 (`bo_gemm_sm90.cu dog_gatebwd`,
+`dog_gatebwd_tma`: g / ao in and do / dg out by TMA, own loader thread) is correct (do / dg bit-identical, dd 4.5e-8) and bitwise
+repeatable, but 104-110 vs 90 us (L384) and 185-198 vs 170 us (L768) against cuBLAS + `gate_bwd_rows`: the mainloop alone is faster
+than cuBLAS (71 vs 83 us at L768), the epilogue runs with both warpgroups off the tensor core and its 96 KB buffer leaves a 3-stage
+ring. The CTA-pair bias gradient (`dpbx2_sm100`) has no H100 form (no 2-CTA MMA; a cluster can only multicast the key tile, which
+does not lower the per-SM intake that bounds `dpb2`).
+
 ## What was tried and not kept
 
 | attempt | result |
@@ -104,6 +150,10 @@ GEMMs 52 %, row passes 39 %, the attention-side kernels 9 %, ~75 % of the time-w
 | K-major (explicitly transposed) operands for the TF32 weight gradients | GEMMs 784 us faster, transposes cost 800+ us |
 | fp32 expand + SwiGLU on `gemm_swiglu_sm90`'s TF32 build | -16 us but output error 2.9e-4 -> 4.6e-4 (its TMA-fed operands are truncated, not rounded) |
 | a custom TF32 weight-gradient kernel | net 1-3 % after the transposes and partial-sum reduce (computed, not built) |
+| the B200 three-kernel step (cluster-split front / tail, DSMEM statistics, TMA multicast, PDL; 2026-10-19) | 1.4-1.6x slower than the 12-launch step's same launches at L128-2560 (section above); opt-in `inf3_h100._ON` |
+| squeeze GEMM + the last residual in one wgmma kernel (`sq_resout`, 2026-10-19) | 1.1-1.5x slower than cuBLAS + `resgate_out_rows` (M 128-36864) |
+| dog GEMM + gate backward in one kernel, register or TMA epilogue (`dog_gatebwd`, `_tma`; 2026-10-19) | 1.1-2.4x slower than cuBLAS + `gate_bwd_rows` |
+| both conditioning tables in one GEMM launch above 384 rows | L768 A1 72.0 -> 78.4 us, 1920 rows 98.0 -> 115.5 (kept below 384 rows) |
 
 ## Limits and next
 
@@ -125,6 +175,12 @@ GEMMs 52 %, row passes 39 %, the attention-side kernels 9 %, ~75 % of the time-w
 | `dpb2` (dbias) | L256-768, A 5-48 | fp64 oracle < 4e-3, bitwise repeat |
 | block inference | L 128 / 256 / 384 / 512 / 640 / 768, bf16 and fp32, shared and per-sample cond | fp32-IEEE block, < 6e-3 (bf16) / 1.5e-3 (fp32) |
 | block training | L 128 / 256 / 512 / 640, A4, bf16 and fp32 | output, input and every parameter gradient vs the fp32 block, bitwise repeatable step |
+
+2026-10-19 additions (same file): `test_block_inference_long_rungs` (L1024 / 1536 / 2560, bf16 and fp32, shared and per-sample
+conditioning: the fused path serves them, against the fp32-IEEE block < 6e-3 / 1.5e-3) and
+`test_inf3_h100_matches_the_oracle_and_is_bitwise_repeatable` (the opt-in three-kernel step, clusters of 8 and 16, one and two
+blocks: fp32 module chain < 6e-3, the 12-launch step < 4e-3, three bitwise-identical reruns). The file: 84 passed, 36 skipped (2026-10-19). The B200 hoist file
+(`tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`) passes on H100 unchanged (77 passed, 20 skipped).
 
 L384 / L768 training and the benchmarks run in the regression job (`bench.py target=bias_only_dit`, accuracy line per cell).
 Token DiT training (`tests/gpu/any/test_token_dit_train_gpu.py`, 60 tests) covers L 128 / 200 / 256 / 512 / 640.
@@ -238,6 +294,40 @@ No Anthropic or cuEquivariance block exists for this module: the only comparison
 | (768, 768, fp32) | 11.04 | **10.28** | 1.07 |
 
 ![Training, fp32, A = 48, length sweep at D768](figures/bias_only_dit_training_fp32_a_48_length.png) <!-- measure_bars -->
+
+## Measurements, inference with the long rungs (2026-10-19)
+
+H100 80GB HBM3 (cssb node02), the repo pixi env (torch 2.13.0+cu129), `benchmarks/runners/bench.py target=bias_only_dit level=module
+mode=inference precision=bf16-mixed cudagraph=manual mask_prob=0.2` (`+shared_cond=true` at A = 5, `n_augment=1` at A = 1), ms per
+block, median. This branch's step: the length bound lifted to 3072 and the 12-launch step without the input copy, with cuBLAS + SwiGLU
+rows for the expand GEMM at few rows and one launch for both conditioning tables up to 384 rows. Before it, L1536 / L2560 ran the
+PyTorch module (6.30 / 17.3 ms at A = 1, 6.82 / 18.2 ms at A = 5 shared, CUDA graph, uncompiled). × = PyTorch / ours.
+
+| (Length, Dimension, dtype), A = 5 shared | PyTorch compiled | ours | × PyTorch | ours on 2026-10-15 |
+|---|---|---|---|---|
+| (128, 768, bf16) | 0.116 | **0.055** | 2.13 | 0.057 |
+| (256, 768, bf16) | 0.154 | **0.068** | 2.26 | 0.068 |
+| (384, 768, bf16) | 0.208 | **0.088** | 2.35 | 0.089 |
+| (512, 768, bf16) | 0.276 | **0.100** | 2.75 | 0.103 |
+| (640, 768, bf16) | 0.338 | **0.126** | 2.69 | 0.130 |
+| (768, 768, bf16) | 0.426 | **0.140** | 3.04 | 0.146 |
+| (1536, 768, bf16) | 1.153 | **0.283** | 4.07 | PyTorch module |
+| (2560, 768, bf16) | 2.701 | **0.510** | 5.30 | PyTorch module |
+
+| (Length, Dimension, dtype), A = 1 | PyTorch compiled | ours | × PyTorch | ours on 2026-10-15 |
+|---|---|---|---|---|
+| (128, 768, bf16) | 0.104 | **0.046** | 2.29 | 0.051 |
+| (256, 768, bf16) | 0.123 | **0.053** | 2.32 | 0.055 |
+| (384, 768, bf16) | 0.157 | **0.058** | 2.71 | 0.060 |
+| (512, 768, bf16) | 0.205 | **0.061** | 3.38 | 0.064 |
+| (640, 768, bf16) | 0.252 | **0.069** | 3.65 | 0.071 |
+| (768, 768, bf16) | 0.323 | **0.077** | 4.19 | 0.078 |
+| (1536, 768, bf16) | 0.922 | **0.130** | 7.12 | PyTorch module |
+| (2560, 768, bf16) | 2.282 | **0.212** | 10.78 | PyTorch module |
+
+Same process, main's switches against this branch's (eight chained blocks, per block, us): L128 A1 45.1 -> 39.4, L768 A5 139.4 ->
+134.5, L2560 A5 535.8 -> 520.9 ([record](../../../records/h100_bias_only_dit_inf3_20261019.md)). No figure was regenerated for these
+rows. fp32 serves the same lengths (tests below); its long rungs were not benchmarked.
 
 ## Head layouts other than 16 x 48 (2026-10-15)
 

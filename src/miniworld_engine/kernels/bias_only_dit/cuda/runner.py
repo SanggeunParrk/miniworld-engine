@@ -247,9 +247,14 @@ class FusedBiasOnlyDiT:
                 from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
                 wab = self.per[0]["wab"]
+                # its 128 x 256 tiles under-fill the SMs at few rows (<= half a wave) and lose a whole second wave just past one:
+                # there cuBLAS + the SwiGLU rows is faster (2026-10-19, us: M128 10.6 -> 6.0, M640 10.6 -> 9.7, M1536 19.2 -> 17.6)
+                tiles = (xa.shape[0] // 128) * (wab.shape[0] // 256)
+                nsm = torch.cuda.get_device_properties(idx).multi_processor_count
+                small = _H100_EXPAND_ROWS and (tiles <= nsm // 2 or nsm < tiles <= nsm * 11 // 10)
                 self._ops[key] = (
                     gemm_swiglu.GemmSwigluSm90(idx)
-                    if gemm_swiglu.supported_sm90(xa, wab)
+                    if gemm_swiglu.supported_sm90(xa, wab) and not small
                     else None
                 )
             return self._ops[key]
@@ -271,6 +276,8 @@ class FusedBiasOnlyDiT:
         if not self.fp32:
             if self._inf3b_ok(single.device):
                 return self._step3b(single, cond, P, out_dtype)
+            if self._inf3h_ok(single.device, out_dtype or single.dtype):
+                return self._step3h(single, cond, P, out_dtype)
             return self._step(single, cond, P, out_dtype)
         with _tf32().tf32_gemms():
             if self._inf3_ok(single.device):
@@ -634,6 +641,79 @@ class FusedBiasOnlyDiT:
             xin = y
         return out.view(S, 1, L, D)
 
+    # ------------------------------------------------------------------ bf16 on H100, three kernels per block (opt-in: inf3_h100._ON;
+    # measured slower than the 12-launch step, docs/gpus/h100/bias_only_dit/bias_only_dit.md)
+    def _inf3h_ok(self, device, out_dtype) -> bool:
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_h100 as H3
+
+        return (
+            not self.fp32
+            and C.h100_enabled(device)
+            and H3.on()
+            and self.d == 768
+            and self.da in (768, 1024)
+            and out_dtype in (torch.bfloat16, torch.float32)
+            and H3.ready()
+        )
+
+    def _ops3h(self, device):
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_h100 as H3
+
+        idx = device.index if device.index is not None else torch.cuda.current_device()
+        key = ("inf3h", idx)
+        if key not in self._ops:
+            self._ops[key] = H3.Inf3H100(idx, self.h, self.da // self.h)
+        return self._ops[key]
+
+    def _buffers3h(self, S, L, dev):
+        """xa / xt (the clusters' L2 exchange of the GEMM operands), v|g, a, h, and the fp32 hand-over between blocks."""
+        key = ("inf3h", S, L, dev)
+        if key not in self._buf:
+            M, bf = S * L, torch.bfloat16
+            e = lambda n, dt=bf: torch.empty(M, n, device=dev, dtype=dt)  # noqa: E731
+            self._buf[key] = dict(
+                xa=e(self.d),
+                xt=e(self.d),
+                vg=e(2 * self.da),
+                a=e(self.da),
+                h=e(2 * self.d),
+                xn=[e(self.d, torch.float32) for _ in range(2 if self.nb > 1 else 0)],
+            )
+        return self._buf[key]
+
+    def _step3h(self, single, cond, P, out_dtype=None):
+        """The H100 bf16 step as three kernels per block (``inf3_h100``): front (LN + AdaLN + v|g GEMM) -> ``pvx`` (PDL) -> tail
+        (everything after the core), behind the 12-launch step's conditioning tables (LN rows + two cuBLAS GEMMs, raw: the kernels
+        apply the sigmoids). The block input is the step's bf16 single, then the previous tail's fp32 output; the last tail writes the
+        step's dtype."""
+        from miniworld_engine.kernels.bias_only_dit.cuda import inf3_h100 as H3
+
+        S, B, L, D = single.shape
+        assert B == 1 and L % 128 == 0 and D == self.d
+        M, H, DA, nb, dev = S * L, self.h, self.da, self.nb, single.device
+        shared = cond.shape[0] == 1 or cond.stride(0) == 0
+        c = (cond[0, 0] if shared else cond.reshape(M, self.dc)).to(self.dtype)
+        T = c.shape[0]
+        cn = torch.empty(T, self.dc, device=dev, dtype=self.dtype)
+        C.ln_rows(c, cn, EPS)
+        g1 = torch.addmm(self.b1, cn, self.w1.t())  # [T, nb 4 D]: per block s1, sh1, s2, sh2
+        g2 = torch.addmm(self.b2, c, self.w2.t())  # [T, nb 2 D]: per block gate1, gate2
+        ops = self._ops3h(dev)
+        idx = dev.index if dev.index is not None else torch.cuda.current_device()
+        cl = H3.cluster(M, idx)
+        buf = self._buffers3h(S, L, dev)
+        xin = single.reshape(M, D).contiguous()
+        out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
+        vg, a = buf["vg"], buf["a"]
+        for b, p in enumerate(self.per):
+            y = out if b + 1 == nb else buf["xn"][b % 2]
+            g1b, g2b = g1[:, 4 * D * b : 4 * D * (b + 1)], g2[:, 2 * D * b : 2 * D * (b + 1)]
+            ops.front(xin, g1b, p["wvg"], vg, buf["xa"], cl, EPS)
+            ops.core(vg[:, :DA], P[b * H : (b + 1) * H].view(H * L, L), a, S, vg[:, DA:])
+            ops.tail(a, xin, g1b, g2b, p["wo"], p["wab"], p["ws"], buf["xt"], buf["h"], y, cl, EPS)
+            xin = y
+        return out.view(S, 1, L, D)
+
     def _step(self, single, cond, P, out_dtype=None):
         S, B, L, D = single.shape
         assert B == 1 and L % 128 == 0 and D == self.d
@@ -654,8 +734,14 @@ class FusedBiasOnlyDiT:
         else:
             cn = torch.empty(T, self.dc, device=dev, dtype=self.dtype)
             C.ln_rows(c, cn, EPS)
-            g1 = torch.addmm(self.b1, cn, self.w1.t()).view(T, nb, 4, D)
-            g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)
+            if _H100_COND1 and C.h100_enabled(dev) and not self.fp32 and T % 128 == 0 and T <= _H100_COND1_ROWS:
+                # both table GEMMs as one sm_90a launch (bo_gemm_sm90.cu cond_tables; the weights prefetched before its PDL wait)
+                G = torch.empty(T, self.wc.shape[0], device=dev, dtype=self.dtype)
+                C.h100_gemm_ext().cond_tables(cn, c.contiguous(), self.wc, self.bc, G, self.n_g1, True, 0)
+                g1, g2 = G[:, : self.n_g1].view(T, nb, 4, D), G[:, self.n_g1 :].view(T, nb, 2, D)
+            else:
+                g1 = torch.addmm(self.b1, cn, self.w1.t()).view(T, nb, 4, D)
+                g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         self._run(
             single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None
@@ -677,8 +763,12 @@ class FusedBiasOnlyDiT:
             self._resln(dev, True, presig),
         )
         ps = presig
-        C.adaln_in_rows(single, x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
-        h100_tf32 = self.fp32 and C.h100_enabled(dev)
+        hopper = C.h100_enabled(dev)
+        # Hopper: no fp32 copy of the input; the first residual pass reads it as it is (resgate_adaln_rows_in)
+        nocopy = hopper and _H100_NOCOPY and resln is None
+        C.adaln_in_rows(single, x[:0] if nocopy else x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
+        sqro = hopper and _H100_SQ_RESOUT and resln is None and not ps and not self.fp32
+        h100_tf32 = self.fp32 and hopper
         for b, p in enumerate(self.per):
             if h100_tf32:
                 # TF32 wgmma reads K-major operands only: v^T = Wv xa^T from cuBLAS, g = xa Wg^T beside it
@@ -698,9 +788,14 @@ class FusedBiasOnlyDiT:
                 resln(a, p["wo"], x, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS)
             else:
                 torch.mm(a, p["wo"].t(), out=y)
-                C.resgate_adaln_rows(
-                    x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps
-                )
+                if nocopy and b == 0:
+                    C.resgate_adaln_rows_in(
+                        single, x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps
+                    )
+                else:
+                    C.resgate_adaln_rows(
+                        x, y, g2[:, b, 0], g1[:, b, 2], g1[:, b, 3], xa, T, EPS, ps
+                    )
             if gsw is not None:
                 gsw(xa, p["wab"], h)  # expand + SwiGLU, one sm_100a kernel
             else:
@@ -725,6 +820,8 @@ class FusedBiasOnlyDiT:
                         T,
                         EPS,
                     )
+            elif last and sqro:  # squeeze GEMM + the last residual + gate, one sm_90a kernel (bo_gemm_sm90.cu)
+                C.h100_gemm_ext().sq_resout(h, p["ws"], x, g2[:, b, 1], out, False, True, 0)
             else:
                 torch.mm(h, p["ws"].t(), out=y)
                 if last:
@@ -742,6 +839,18 @@ class FusedBiasOnlyDiT:
                         ps,
                     )
 
+
+#: Hopper 12-launch step: no fp32 copy of the step input (the first residual pass reads the input itself).
+_H100_NOCOPY = True
+#: Hopper 12-launch step: the expand GEMM as cuBLAS + the SwiGLU rows where gemm_swiglu_sm90 under-fills the SMs (see _gemm_swiglu).
+_H100_EXPAND_ROWS = True
+#: Hopper 12-launch step: the two conditioning-table GEMMs as one sm_90a launch (bo_gemm_sm90.cu cond_tables) instead of two cuBLAS, up to
+#: _H100_COND1_ROWS table rows (2026-10-19, us per block: L128 A1 37.0 -> 35.4, L384 A1 48.6 -> 47.9; slower from 768 rows: L768 A1 72.0 -> 78.4)
+_H100_COND1 = True
+_H100_COND1_ROWS = 384
+#: Hopper 12-launch step: the squeeze GEMM + the last residual as one kernel (bo_gemm_sm90.cu sq_resout) instead of cuBLAS + the rows;
+#: off: 1.1-1.5x slower (its epilogue runs after the mainloop with the tensor core idle; 2026-10-19 record).
+_H100_SQ_RESOUT = False
 
 _H100_INFER_PACKS: dict = {}
 _H100_INFER_PROBS: dict = {}

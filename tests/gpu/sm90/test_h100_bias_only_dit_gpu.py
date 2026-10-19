@@ -184,6 +184,67 @@ def test_block_training_gradients_against_the_fp32_oracle(dtype, L, nh, dh):
     worst = max(rel(g_o[n], g_r[n]) for n in g_r)
     assert worst < 4 * tol, f"worst parameter gradient error {worst:.2e}"
     # the step is bitwise repeatable
-    out_o2, in_o2, g_o2 = run(block, True, dtype)
+    out_o2, in_o2, _ = run(block, True, dtype)
     assert torch.equal(out_o, out_o2)
     assert all(torch.equal(a, b) for a, b in zip(in_o, in_o2, strict=True))
+
+
+# ------------------------------------------------------------------------------------------------------ long rungs
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize(("L", "A", "shared"), [(1024, 2, True), (1536, 2, False), (2560, 1, True)])
+def test_block_inference_long_rungs(dtype, L, A, shared):
+    """The sampler's long token rungs (up to 2560) run the Hopper path (``pvx`` / ``pvx32`` stream P; no 768 bound)."""
+    from miniworld_engine.integrations import bias_only_dit as fused
+
+    block = make_block(dtype)
+    torch.manual_seed(L)
+    single = torch.randn(A, 1, L, 768, device="cuda", dtype=dtype)
+    cond = torch.randn(1 if shared else A, 1, L, 384, device="cuda", dtype=dtype)
+    cond = cond.expand(A, 1, L, 384) if shared else cond
+    pair = torch.randn(1, L, L, 128, device="cuda", dtype=dtype)
+    mask = torch.rand(1, L, device="cuda") > 0.2
+    expected = reference(block, single, cond, pair, mask)
+    torch.backends.cuda.matmul.allow_tf32 = True
+    with torch.no_grad(), torch.autocast("cuda", dtype=torch.bfloat16, enabled=dtype is torch.bfloat16):
+        assert fused.serves(block, single, cond, pair, mask)
+        got = block(single, cond, pair, mask)
+    assert rel(got, expected) < (6e-3 if dtype is torch.bfloat16 else 1.5e-3)
+
+
+# ------------------------------------------------------------------------------------------------------ three-kernel step (opt-in)
+@pytest.mark.parametrize(("L", "A", "shared", "cl", "nb"), [(128, 1, False, 8, 1), (128, 1, False, 16, 1), (384, 5, True, 8, 1),
+                                                           (768, 5, False, 8, 1), (256, 3, True, 8, 2)])
+def test_inf3_h100_matches_the_oracle_and_is_bitwise_repeatable(L, A, shared, cl, nb):
+    """``inf3_h100`` (front / pvx with PDL / tail, clusters of 8 or 16 with TMA multicast and DSMEM statistics): off by default on
+    Hopper (measured slower than the 12-launch step), kept correct: against the fp32 module chain, the 12-launch step, and itself."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import inf3_h100 as H3
+    from miniworld_engine.kernels.bias_only_dit.cuda.runner import FusedBiasOnlyDiT
+
+    blocks = [make_block(torch.bfloat16) for _ in range(nb)]
+    for i, blk in enumerate(blocks[1:], 1):
+        with torch.no_grad():
+            for p in blk.parameters():
+                p.mul_(1 + 0.05 * i)
+    torch.manual_seed(L)
+    single = torch.randn(A, 1, L, 768, device="cuda", dtype=torch.bfloat16)
+    cond = torch.randn(1 if shared else A, 1, L, 384, device="cuda", dtype=torch.bfloat16)
+    cond = cond.expand(A, 1, L, 384) if shared else cond
+    pair = torch.randn(1, L, L, 128, device="cuda", dtype=torch.bfloat16)
+    mask = torch.rand(1, L, device="cuda") > 0.2
+    expected = single.float()
+    for blk in blocks:
+        expected = reference(blk, expected, cond, pair, mask)
+    runner = FusedBiasOnlyDiT(blocks, dtype=torch.bfloat16)
+    forced = H3._FORCE_CL
+    H3._FORCE_CL = cl
+    try:
+        with torch.no_grad():
+            P = runner.hoist(pair, mask.view(L))
+            got = runner._step3h(single, cond, P)
+            again = [runner._step3h(single, cond, P) for _ in range(3)]
+            twelve = runner._step(single, cond, P)
+    finally:
+        H3._FORCE_CL = forced
+    assert all(torch.equal(got, x) for x in again), "the three-kernel step is not bitwise repeatable"
+    assert rel(got, expected) < 6e-3
+    assert rel(got, twelve) < 4e-3

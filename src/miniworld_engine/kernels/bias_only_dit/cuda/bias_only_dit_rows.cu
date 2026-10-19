@@ -94,12 +94,15 @@ __global__ void __launch_bounds__(WPB * 32) adaln_in_rows_kernel(const IT* __res
 #pragma unroll
   for (int j = 0; j < NCH; ++j) x[j] = V4<IT>::load(IN + row * sin + (j * 32 + lane) * 4);
 #pragma unroll
-  for (int j = 0; j < NCH; ++j) V4<float>::store(X + row * (NCH * 128) + (j * 32 + lane) * 4, x[j]);
+  if (X) {
+#pragma unroll
+    for (int j = 0; j < NCH; ++j) V4<float>::store(X + row * (NCH * 128) + (j * 32 + lane) * 4, x[j]);
+  }
   adaln_store<NCH>(x, eps, MS + tok * sms, MB + tok * smb, OUT + row * (NCH * 128), lane, ps);
 }
 
-template <int NCH, typename YT, typename GT, typename OT>
-__global__ void __launch_bounds__(WPB * 32) resgate_adaln_rows_kernel(float* __restrict__ X, const YT* __restrict__ Y,
+template <int NCH, typename XI, typename YT, typename GT, typename OT>
+__global__ void __launch_bounds__(WPB * 32) resgate_adaln_rows_kernel(const XI* XIN, float* X, const YT* __restrict__ Y,
     const GT* __restrict__ GL, const GT* __restrict__ MS, const GT* __restrict__ MB, OT* __restrict__ OUT, long R, int T, long sy,
     long sgl, long sms, long smb, float eps, bool has_adaln, bool ps) {
   const long row = (long)blockIdx.x * WPB + threadIdx.x / 32;
@@ -110,7 +113,7 @@ __global__ void __launch_bounds__(WPB * 32) resgate_adaln_rows_kernel(float* __r
 #pragma unroll
   for (int j = 0; j < NCH; ++j) {
     const int c = (j * 32 + lane) * 4;
-    x[j] = V4<float>::load(X + row * (NCH * 128) + c); y[j] = V4<YT>::load(Y + row * sy + c); g[j] = V4<GT>::load(GL + tok * sgl + c);
+    x[j] = V4<XI>::load(XIN + row * (NCH * 128) + c); y[j] = V4<YT>::load(Y + row * sy + c); g[j] = V4<GT>::load(GL + tok * sgl + c);
   }
 #pragma unroll
   for (int j = 0; j < NCH; ++j) {
@@ -289,7 +292,8 @@ void ln_rows(at::Tensor x, at::Tensor out, double eps) {
 
 void adaln_in_rows(at::Tensor in, at::Tensor x, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t T, double eps, bool ps) {
   const int64_t M = in.size(0), D = in.size(1);
-  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat && x.is_contiguous() && out.is_contiguous(), "adaln_in_rows: width 768");
+  // x: the fp32 copy of the input (the residual stream), or an empty tensor: no copy (the first resgate_adaln_rows_in reads the input)
+  TORCH_CHECK(D == 768 && (x.numel() == 0 || (x.scalar_type() == at::kFloat && x.is_contiguous())) && out.is_contiguous(), "adaln_in_rows: width 768");
   check_rows(in, "in", D); check_rows(ms, "ms", D); check_rows(mb, "mb", D);
   TORCH_CHECK(ms.scalar_type() == mb.scalar_type(), "adaln_in_rows: ms / mb dtypes");
   const at::cuda::CUDAGuard g(in.device());
@@ -297,7 +301,7 @@ void adaln_in_rows(at::Tensor in, at::Tensor x, at::Tensor ms, at::Tensor mb, at
     BOR_DISPATCH(ms.scalar_type(), GT, [&] {
       BOR_DISPATCH(out.scalar_type(), OT, [&] {
         adaln_in_rows_kernel<6, IT, GT, OT><<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<const IT>(in),
-            ptr<float>(x), ptr<const GT>(ms), ptr<const GT>(mb), ptr<OT>(out), M, (int)T, in.stride(0), ms.stride(0), mb.stride(0),
+            x.numel() ? ptr<float>(x) : nullptr, ptr<const GT>(ms), ptr<const GT>(mb), ptr<OT>(out), M, (int)T, in.stride(0), ms.stride(0), mb.stride(0),
             (float)eps, ps);
       });
     });
@@ -320,9 +324,33 @@ void resgate_adaln_rows(at::Tensor x, at::Tensor y, at::Tensor gl, c10::optional
   BOR_DISPATCH(y.scalar_type(), YT, [&] {
     BOR_DISPATCH(gl.scalar_type(), GT, [&] {
       BOR_DISPATCH(out.scalar_type(), OT, [&] {
-        resgate_adaln_rows_kernel<6, YT, GT, OT><<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<float>(x),
-            ptr<const YT>(y), ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), M, (int)T, y.stride(0),
+        resgate_adaln_rows_kernel<6, float, YT, GT, OT><<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<const float>(x),
+            ptr<float>(x), ptr<const YT>(y), ptr<const GT>(gl), ptr<const GT>(msv), ptr<const GT>(mbv), ptr<OT>(out), M, (int)T, y.stride(0),
             gl.stride(0), msv.stride(0), mbv.stride(0), (float)eps, has, ps);
+      });
+    });
+  });
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// resgate_adaln_rows reading the residual from xin (bf16 or fp32: the step's input, when adaln_in_rows made no fp32 copy) and writing the
+// new residual x += sigmoid(gl) y into x (fp32): the copy's 4 B write and the 2 B extra read per element disappear
+void resgate_adaln_rows_in(at::Tensor xin, at::Tensor x, at::Tensor y, at::Tensor gl, at::Tensor ms, at::Tensor mb, at::Tensor out, int64_t T,
+                           double eps, bool ps) {
+  const int64_t M = x.size(0), D = x.size(1);
+  TORCH_CHECK(D == 768 && x.scalar_type() == at::kFloat && x.is_contiguous() && xin.is_contiguous() && xin.sizes() == x.sizes(),
+              "resgate_adaln_rows_in: contiguous [M, 768] xin and fp32 x");
+  check_rows(y, "y", D); check_rows(gl, "gl", D); check_rows(ms, "ms", D); check_rows(mb, "mb", D);
+  TORCH_CHECK(out.is_contiguous() && ms.scalar_type() == gl.scalar_type() && mb.scalar_type() == gl.scalar_type(), "out contiguous, ms / mb like gl");
+  const at::cuda::CUDAGuard g(x.device());
+  BOR_DISPATCH(xin.scalar_type(), XI, [&] {
+    BOR_DISPATCH(y.scalar_type(), YT, [&] {
+      BOR_DISPATCH(gl.scalar_type(), GT, [&] {
+        BOR_DISPATCH(out.scalar_type(), OT, [&] {
+          resgate_adaln_rows_kernel<6, XI, YT, GT, OT><<<blocks(M), WPB * 32, 0, at::cuda::getCurrentCUDAStream()>>>(ptr<const XI>(xin),
+              ptr<float>(x), ptr<const YT>(y), ptr<const GT>(gl), ptr<const GT>(ms), ptr<const GT>(mb), ptr<OT>(out), M, (int)T, y.stride(0),
+              gl.stride(0), ms.stride(0), mb.stride(0), (float)eps, true, ps);
+        });
       });
     });
   });
@@ -492,7 +520,7 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   TORCH_CHECK(bias.is_cuda() && bias.scalar_type() == at::kBFloat16 && bias.is_contiguous() && bias.dim() == 2, "softmax_rows: bf16 [R, L]");
   TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes(), "softmax_rows: p like bias");
   const int64_t R = bias.size(0), L = bias.size(1);
-  TORCH_CHECK(L % 8 == 0 && L <= 2048, "softmax_rows: L a multiple of 8, at most 2048");
+  TORCH_CHECK(L % 8 == 0 && L <= 3072, "softmax_rows: L a multiple of 8, at most 3072");
   const bool* mk = nullptr;
   if (mask.has_value()) {
     TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "softmax_rows: bool mask [L]");
@@ -505,7 +533,8 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   auto* o = ptr<__nv_bfloat16>(p);
   if (L <= 512) softmax_rows_kernel<2><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
   else if (L <= 1024) softmax_rows_kernel<4><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
-  else softmax_rows_kernel<8><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+  else if (L <= 2048) softmax_rows_kernel<8><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);
+  else softmax_rows_kernel<12><<<grid, 256, 0, st>>>(b, o, mk, R, (int)L);   // the sampler's long rungs (L 2560)
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -651,6 +680,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_rows_cuda", &ln_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);
+  m.def("resgate_adaln_rows_in_cuda", &resgate_adaln_rows_in);
   m.def("resgate_out_rows_cuda", &resgate_out_rows);
   m.def("swiglu_rows_cuda", &swiglu_rows);
   m.def("softmax_rows_cuda", &softmax_rows);

@@ -15,8 +15,8 @@ settings.bias_only_dit_inf3=0 (read per call) keeps the 12-launch cuBLAS + rows 
 ``bo_tail2_bf16``) behind bf16 tables (``runner._tables3b``); settings.bias_only_dit_inf3_bf16=0 (read per call) keeps the 12-launch
 bf16 step, which is also what a failed build falls back to.
 
-``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128, a key mask [1, L] or
+``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD or TRITON), B200 or H100, bf16 or fp32, the
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 (up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
 none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 settings.bias_only_dit=0 turns it off. Anything else keeps the module's PyTorch composition.
 
