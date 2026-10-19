@@ -42,6 +42,68 @@ as H100 ran it before (TriMul's PyTorch statements for B > 1, Transition already
 | 768 | inference | 2.467 | 2.776 | 28.452 | 1.13 | 11.53 |
 | 768 | training | 9.045 | 10.712 | 60.315 | 1.18 | 6.67 |
 
+## Long and ragged lengths (MiniWorld's L1536 / 2048 / 2560 rungs)
+
+Contract (`integrations.trimul_h100`), both modules, every direction:
+
+| width | inference | training |
+|---|---|---|
+| D64 (B <= 48) / D128 | any L >= 16 (`MIN_INFERENCE_LENGTH`) | L a multiple of 128 up to 10240 (`TRAINING_GRANULE`, `MAX_TRAINING_LENGTH`, B200's bound) |
+| D256 / D384 / D512 | as before up to L1024; above: L a multiple of 128 (B200-style port; single-direction D256 / D384 keep the packaged K1 / K3 at any L) | as before up to L1024; above: L a multiple of 128 (B200-style port) |
+
+Bound common to both: the int32 token index, B L^2 < 2^31 (L rounded up to 16). Memory binds first on an 80 GB card: training at
+L2560 peaks at 28 GB (D128 bidirectional), 13.5 GB (D64, one sample), 54 GB (D64, B = 4); at L4096 D64 bidirectional fits, D128
+bidirectional training ends near L4300. Before this change every H100 TriMul call outside L128 ... 1024 (multiples of 128) ran the
+module's PyTorch statements.
+
+What it took, per kernel:
+
+| stage | change |
+|---|---|
+| inference K1 / K3 (packaged, D64 / D128) | none: the tile table already has length buckets to N 4096 (`by_n`), plane offsets are 64-bit and one sample pads the planes to `Np` = L rounded up to 16 (zero pad rows written by K1). One sample with L % 16 != 0 failed since the batched-samples change (it passed `rows = Np` to K1, which the batched check rejects); B = 1 now leaves `rows` unset |
+| B samples at L % 16 != 0 (inference) | the K1 / K3 sample stacking (`rows = B L`) has no pad, so `update_inference` pads each sample to the next multiple of 16 on the host: zero pair entries on masked pad tokens (K1's `m[i] & m[j]` zeroes their left / right rows and columns, so a real pair contracts the same terms), output sliced back |
+| training front / `save_k3` / B1 / B7 (D128), `save_k3_d64` / B1 / B2 (D64), `single_b1` / `single_b7` | none: B1 is built per L (`TRAIN_L`), B7 runs the `b7_768` source (two-part weight partial) at every L but 384, the B1 / B7 / single-direction configurations take their 768 entries above L768; the length guards (`n in (128, ..., 1024)`) became `n % 128 == 0` |
+| B200-style port (D256 / D384 / D512) | the length guard only (`n % 128 == 0`); its backward sums LN / gate partials with global atomics (`b200_sources/wide_bwd.cu`), so its gradients agree run to run only up to the FP32 summation order (y is bitwise), as at L <= 1024 |
+
+Per-kernel time per pair token (torch profiler, `prof_longl.py`) against L768: the contraction (cuBLAS) runs at 730 TFLOP/s at
+L2048 / 2560; inference K1 / K3 and B7 cost 12-14 % more per token, the D64 `b2w` 21 %, the D128 B1 38 % and `save_k3` 50 % (both
+read and write the channel-strided `[c, L, L]` planes, `L^2` apart). The B1 builds with the extended dropout-fragment cache
+(`B1_EXT_MASK`), another dTri store tile or gate demotion move the step by +-1 % (L1536-2560): not adopted.
+
+Measured 2026-10-19, one H100 80GB HBM3, torch 2.13.0+cu129, bf16 pair, FP32 parameters, a token mask, CUDA-graph timing (median of
+5 x 20 replays); training = forward + backward of x and every parameter, row dropout on. "PyTorch" = the module's PyTorch statements,
+which H100 ran at these lengths before (under bf16 autocast, CUDA graph); cuEquivariance = `implementation="cuequivariance"` under bf16
+autocast. Record: [records/trimul_h100_long_l_20261019.md](../../../records/trimul_h100_long_l_20261019.md).
+
+| module | L | mode | ours (ms) | PyTorch (ms) | cuEquivariance (ms) | × vs PyTorch | × vs cuEquivariance |
+|---|---|---|---|---|---|---|---|
+| bidirectional D64, B = 4 | 1536 | inference | 9.50 | 119.04 | 20.13 | 12.5 | 2.12 |
+| bidirectional D64, B = 4 | 1536 | training | 30.47 | 248.36 | 97.56 | 8.15 | 3.20 |
+| bidirectional D64, B = 4 | 2048 | inference | 20.09 | 214.76 | 39.03 | 10.7 | 1.94 |
+| bidirectional D64, B = 4 | 2048 | training | 62.27 | 468.93 | 181.60 | 7.53 | 2.92 |
+| bidirectional D64, B = 4 | 2560 | inference | 36.71 | 351.62 | 65.95 | 9.58 | 1.80 |
+| bidirectional D64, B = 4 | 2560 | training | 112.54 | OOM | OOM | - | - |
+| bidirectional D128 | 1536 | inference | 5.19 | 60.96 | 14.51 | 11.7 | 2.79 |
+| bidirectional D128 | 1536 | training | 19.72 | 191.54 | 55.33 | 9.71 | 2.81 |
+| bidirectional D128 | 2048 | inference | 10.59 | 111.18 | 26.95 | 10.5 | 2.54 |
+| bidirectional D128 | 2048 | training | 40.06 | 355.27 | 102.82 | 8.87 | 2.57 |
+| bidirectional D128 | 2560 | inference | 19.26 | 175.94 | 44.57 | 9.14 | 2.31 |
+| bidirectional D128 | 2560 | training | 69.47 | 563.60 | 159.07 | 8.11 | 2.29 |
+| bidirectional D64, B = 1 | 1536 / 2048 / 2560 | inference | 2.39 / 4.98 / 9.14 | 29.89 / 53.69 / 87.81 | | 12.5 / 10.8 / 9.61 | |
+| bidirectional D64, B = 1 | 1536 / 2048 / 2560 | training | 7.63 / 15.74 / 28.19 | 91.50 / 169.05 / 273.29 | | 12.0 / 10.7 / 9.69 | |
+| outgoing D128 | 1536 / 2048 / 2560 | inference | 2.96 / 6.06 / 10.61 | 44.59 / 80.38 / 119.37 | | 15.0 / 13.3 / 11.3 | |
+| outgoing D128 | 1536 / 2048 / 2560 | training | 12.89 / 25.30 / 43.77 | 183.86 / 337.61 / 524.41 | | 14.3 / 13.3 / 12.0 | |
+
+OOM: the PyTorch statements and the cuEquivariance composition need more than 80 GB for D64 B = 4 training at L2560; ours peaks at 54 GB.
+The served lengths are unchanged: L384 / L768, D64 (B = 1 and 4, every direction) and D128 (every direction), inference and training,
+worktree / main 0.994-1.009 (two interleaved rounds on two GPUs, the record has every cell).
+
+Tests: `tests/gpu/sm90/test_trimul_h100_long_l_gpu.py` (inference L 48 / 200 / 520 / 1040 / 1536 / 2048 / 2560, D64 B = 1 and 4,
+D128, every direction, with and without a mask, against the FP32 PyTorch statement computed in row chunks; training L 1152 / 1536 /
+2048 / 2560 (D64 and D128, every direction), 2816 / 3584 (D128) and 4096 (D64), every gradient, and D64 B = 4 at L1152 against the
+reference and at L2560 against four one-sample calls; the B200-style port at D256 / D384 / D512 L1152 / 1536; bitwise run-to-run
+determinism; CUDA-graph capture with live inputs, masks, dropout scales and weights).
+
 ## Bidirectional (`BidirectionalTriangleMultiplication`)
 
 Outgoing + incoming in one module (h = D per direction), one output LayerNorm over 2h.

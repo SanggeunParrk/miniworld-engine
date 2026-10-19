@@ -10,6 +10,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 TriMul beyond L1024 and at ragged L (`integrations.trimul_h100`): D64 / D128 (both modules, every direction, D64 with B <= 48)
+  infer at any L >= 16 (`MIN_INFERENCE_LENGTH`; one sample pads to 16 inside K1 / K3, B samples at L % 16 != 0 are padded on the host)
+  and train at any multiple of 128 up to 10240 (`TRAINING_GRANULE`, `MAX_TRAINING_LENGTH`, B200's bound; memory binds first); D256 /
+  D384 / D512 take the B200-style port at multiples of 128 above L1024. The kernels were already length-generic; the length tuples
+  L128 ... 1024 in the integration, `h100_b1.Plan`, `h100_single.Plan` and `h100_b200style.trimul` became `L % 128 == 0`. Fixed: one
+  sample at L % 16 != 0 failed in `h100_inference` since the batched-samples change (`rows = Np` reached K1). MiniWorld's rungs
+  L1536 / 2048 / 2560, D64 B = 4 and D128 bidirectional: 7.5-12.5x over the PyTorch statements H100 ran there before, 1.8-3.2x over
+  cuEquivariance; the cells served before are unchanged (0.994-1.009). Tests `tests/gpu/sm90/test_trimul_h100_long_l_gpu.py`; record
+  `docs/records/trimul_h100_long_l_20261019.md`.
 - H100 TriMul D64 takes B samples in one call (`integrations.trimul_h100.MAX_BATCH = 48`, same meaning as the B200 one): bidirectional
   and single direction, inference and training. K1 / K3 / `save_k3_d64` stack the samples on the slow token axis (`rows = B L`), the
   token mask, pair mask and row-dropout scale are per sample, the contraction batches over channels x B, B1 / B2 run over every

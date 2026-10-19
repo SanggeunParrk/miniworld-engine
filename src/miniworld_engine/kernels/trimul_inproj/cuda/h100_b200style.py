@@ -20,7 +20,6 @@ from ._h100_pack import owned_bf16_mask, pack_into_cuda, cast_training_weights
 
 R = T.SOURCES / "b200style"
 WIDTHS = (256, 384, 512)
-LENGTHS = (128, 256, 384, 512, 640, 768, 896, 1024)
 
 
 @lru_cache(None)
@@ -546,13 +545,13 @@ def trimul(leaves, mask, ds, direction=0):
         or x.shape[0] != 1
         or x.shape[1] != x.shape[2]
         or x.shape[-1] not in WIDTHS
-        or x.shape[1] not in LENGTHS
+        or x.shape[1] % 128 or x.shape[1] < 128
         or not x.is_contiguous()
         or direction not in (0, 1, 2)
         or torch.cuda.get_device_capability(x.device) != (9, 0)
     ):
         raise ValueError(
-            "B200-style Hopper TriMul requires B1, BF16, D256/384/512, L128..1024"
+            "B200-style Hopper TriMul requires B1, BF16, D256/384/512, L a multiple of 128"
         )
     h = x.shape[-1] * (2 if direction == 0 else 1)
     if leaves[1].shape != (h, x.shape[-1]) or leaves[6].shape != (x.shape[-1], h):

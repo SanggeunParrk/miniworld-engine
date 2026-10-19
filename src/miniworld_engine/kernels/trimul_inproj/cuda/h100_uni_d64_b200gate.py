@@ -23,8 +23,8 @@ K3_TILE = (2, 64, 4, 1)
 
 
 def supports(width, length) -> bool:
-    return width == WIDTH and length in ((128, 256, 384, 512, 640, 768, 896, 1024)
-                                         if T.cuda_training_aux_enabled() else (384, 768))
+    return width == WIDTH and ((length % 128 == 0 and length >= 128)
+                                         if T.cuda_training_aux_enabled() else length in (384, 768))
 
 
 def _k3_smem(tile):

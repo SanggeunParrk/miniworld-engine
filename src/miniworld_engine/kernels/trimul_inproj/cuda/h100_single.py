@@ -55,7 +55,7 @@ class Plan:
         n = self.n
         if (
             x.shape != (1, n, n, 128)
-            or n not in (128, 256, 384, 512, 640, 768, 896, 1024)
+            or n % 128 or n < 128
             or x.dtype != torch.bfloat16
         ):
             raise ValueError("single H100 training requires BF16 B1/D128 and a supported multiple of 128")

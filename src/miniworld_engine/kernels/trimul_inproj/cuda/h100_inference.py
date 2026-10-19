@@ -155,7 +155,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
             eps=eps,
             cache=cache,
             token_mask=mask is not None and mask.ndim == 1,
-            rows=rows,
+            rows=None if bsz == 1 else rows,   # one sample: N rows, planes padded to Np
         )
         # [c, B N, N] -> [c B, N, N]: the samples join the channel planes in cuBLAS's batch dim (a view; B = 1 is the same shape as before)
         fold = lambda t: t.view(-1, npad, npad)
@@ -182,6 +182,6 @@ def _run_inference(x, weights, mask, direction, eps, config):
             lnm=1,
             eps=eps,
             cache=cache,
-            rows=rows,
+            rows=None if bsz == 1 else rows,
         )
         return out.unsqueeze(0) if bsz == 1 else out.view(x.shape)
