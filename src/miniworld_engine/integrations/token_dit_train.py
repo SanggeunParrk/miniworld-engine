@@ -475,7 +475,7 @@ def _pack(P, qk, dev, at):
         )
         if slot is not None:
             _capture.prune(_PACKS)
-            _PACKS[slot] = (key, W)
+            _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
         return W
     g = lambda n: P[n]
     D = g("attention.to_out.weight").shape[0]
@@ -547,7 +547,7 @@ def _pack(P, qk, dev, at):
     }
     if slot is not None:
         _capture.prune(_PACKS)
-        _PACKS[slot] = (key, W)
+        _PACKS[slot] = (key, W, tuple(P.values()))  # keeps the key tensors alive
     return W
 
 

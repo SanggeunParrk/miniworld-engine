@@ -109,6 +109,9 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   token mask, pair mask and row-dropout scale are per sample, the contraction batches over channels x B, B1 / B2 run over every
   sample's rows. y and dx are bitwise equal to B calls of one sample; B = 1 is unchanged. MiniPairformer block (TriMul + Transition),
   B = 4: 1.13-2.21x over 4 calls, 4.1-11.5x over the PyTorch statements H100 ran before for B > 1.
+- Pointer-keyed weight and conditioning caches (Transition weight re-layout, token / bias-only / local DiT pair-bias and conditioning tables, conditioned-transition
+  packs) no longer serve a stale entry when a new tensor reuses a freed address at the same version: an entry keeps a weak reference to its key tensor and a hit
+  needs that reference to be the tensor asked for. Tests `tests/cpu/kernels/test_transition_weight_cache_identity.py`, `tests/gpu/sm90/test_pointer_keyed_caches_gpu.py`.
 - H100 AF3 local atom DiT (`LocalDiTBlock`, cross-attention): native fp32 (TF32) and bf16 paths for inference and training at any A and any N
   (`integrations/local_dit_h100.py`, `kernels/augmented_attention/cuda/sm90_atom/`, `sm100_atom_local/lattn90*.cu`). Warp-level tensor-core row
   kernels (wgmma with register A operands, 16-byte lane layout) and `mma.sync` window attention with the bias resident in shared memory.

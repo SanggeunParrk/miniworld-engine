@@ -951,7 +951,10 @@ def h100_inference(single, cond, pair, mask, weights):
         L,
         None if mask is None else (mask.data_ptr(), mask._version),
     )
-    prob = _capture.lookup(_H100_INFER_PROBS, pkey, probability, limit=8)
+    # the entry keeps its key tensors alive: a freed address cannot alias another tensor
+    prob = _capture.lookup(
+        _H100_INFER_PROBS, pkey, lambda: (probability(), pair, mask), limit=8
+    )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(A * L, 384)
     T, M = c.shape[0], A * L
