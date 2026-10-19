@@ -10,6 +10,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- `LocalDiTBlock(kv_norm="parallel" | "chained", key_window="slide" | "pad")`: AlphaFold 3's atom attention. `kv_norm="parallel"` runs the K/V AdaLN on the
+  raw atoms next to the first one (Protenix chains it, the default); `key_window="slide"` slides each 128-key window inside the real atoms
+  (`[32 w - 48, 32 w + 80)` shifted back, as `AtomCrossAtt.compute_features`) instead of clipping and masking it. Defaults are unchanged. The H100
+  mma kernels serve both for inference (`pre90_fwd(..., par)`; the first two and the last windows are recomputed in torch for the slide); a
+  call with grad, a slide under 128 real atoms, or a slide inside a CUDA graph capture takes the composed path. Tests
+  `tests/cpu/compile/test_local_dit_af3_variant.py`, `tests/gpu/sm90/test_h100_local_dit_af3_variant_gpu.py`.
 - H100 AF3 local atom DiT (`LocalDiTBlock`, cross-attention): native fp32 (TF32) and bf16 paths for inference and training at any A and any N
   (`integrations/local_dit_h100.py`, `kernels/augmented_attention/cuda/sm90_atom/`, `sm100_atom_local/lattn90*.cu`). Warp-level tensor-core row
   kernels (wgmma with register A operands, 16-byte lane layout) and `mma.sync` window attention with the bias resident in shared memory.
