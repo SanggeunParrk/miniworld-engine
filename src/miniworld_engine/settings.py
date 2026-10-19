@@ -464,6 +464,9 @@ class Settings:
     transition_sm100_nvcc: str = ""
     #: Formerly ``MINIWORLD_ENGINE_JIT_ROOT``: where JIT-built kernels are cached; empty means ``$XDG_CACHE_HOME/miniworld_engine_jit`` (``~/.cache`` when unset). Use :func:`engine_jit_root`.
     engine_jit_root: str = ""
+    #: Print one ``[miniworld-engine build]`` line to stderr when a JIT build starts and one when it ends (nothing on a cache hit);
+    #: False silences them. See docs/kernels/jit-cache.md.
+    jit_build_log: bool = True
     #: Formerly ``MINIWORLD_OPM_TRAIN``: False disables the fused OPM training path; None = automatic.
     opm_train: bool | None = None
     #: Formerly ``MINIWORLD_PWA_TRAIN``: False disables the fused PWA training path; None = automatic.

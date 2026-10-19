@@ -61,19 +61,21 @@ def cubin(
         / f"{stem}_{'tf32' if tf32 else 'bf16'}_w{nwarp}m{minb}_{h.hexdigest()[:16]}.cubin"
     )
     if not out.exists():
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run(
-            [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-        if res.returncode != 0:
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc failed on {stem}.cu:\n{res.stderr[-4000:]}")
-        os.replace(tmp, out)
+        from miniworld_engine.kernels._nvcc import building
+        with building(f"{out.parent.name}/{out.stem}", "cubin"):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(f".{os.getpid()}.tmp")
+            res = subprocess.run(
+                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
+            )
+            if res.returncode != 0:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"nvcc failed on {stem}.cu:\n{res.stderr[-4000:]}")
+            os.replace(tmp, out)
     return str(out)
 
 

@@ -11,9 +11,10 @@ All three were indistinguishable from "slow" -- the suite prints nothing while w
 took three investigations to find. Deleting the file moved the stalled job forward in 20 seconds.
 
 `kernels/_nvcc.load_extension` makes both halves impossible: a lock too old to belong to a live
-build is reclaimed, and a wait on a fresh one is bounded and raises naming the file. Correctness
-still comes from torch's own baton; this only decides how long to tolerate it. The remedy the
-message gives is one `rm`.
+build is reclaimed (also while waiting on it), a wait on a fresh one says once a minute what it is
+waiting for, and only a wait far beyond any real build raises naming the file. Correctness still
+comes from torch's own baton; this only decides how long to tolerate it. The remedy the message
+gives is one `rm`.
 """
 from __future__ import annotations
 
@@ -120,9 +121,68 @@ def test_the_message_says_what_to_do(tmp_path: Path) -> None:
 
 
 def test_the_defaults_are_ordered_sensibly() -> None:
-    """A stale threshold above the wait limit would mean waiting the full limit on a lock that was
-    already reclaimable."""
-    assert STALE_LOCK_SECONDS >= LOCK_WAIT_SECONDS
+    """A waiter reclaims a lock once it goes stale, so the hard bound must lie beyond the stale
+    threshold: below it, a waiter would raise on a lock it was about to reclaim -- and a 10-minute
+    bound did fail jobs that were waiting on a genuine build by another process."""
+    assert LOCK_WAIT_SECONDS > STALE_LOCK_SECONDS
+
+
+def test_a_fresh_lock_is_waited_on_until_it_goes(tmp_path: Path) -> None:
+    """Another process really is building: wait (no error), and return as soon as it is done."""
+    import threading
+
+    lock = tmp_path / "lock"
+    lock.touch()
+    threading.Timer(1.0, lock.unlink).start()
+    started = time.monotonic()
+    wait_for_lock(lock, poll=0.05)
+    waited = time.monotonic() - started
+    assert 0.8 < waited < 10.0, f"returned after {waited:.1f}s; the lock went at 1s"
+
+
+def test_a_lock_that_goes_stale_while_waited_on_is_reclaimed(tmp_path: Path) -> None:
+    """A builder killed mid-build leaves its lock: the waiter reclaims it once stale and builds,
+    rather than raising or waiting out the hard bound."""
+    lock = tmp_path / "lock"
+    lock.touch()
+    started = time.monotonic()
+    wait_for_lock(lock, limit=60.0, stale_after=1.0, poll=0.05)
+    assert not lock.exists()
+    assert time.monotonic() - started < 30.0
+
+
+def test_a_waiter_says_what_it_waits_for(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                         capsys: pytest.CaptureFixture[str]) -> None:
+    """Silence while waiting looked exactly like a hang: say so, once a minute, naming the build."""
+    import threading
+
+    from miniworld_engine.kernels import _nvcc
+
+    monkeypatch.setattr(_nvcc, "WAIT_QUIET_SECONDS", 0.0)
+    lock = tmp_path / "lock"
+    lock.touch()
+    threading.Timer(0.5, lock.unlink).start()
+    wait_for_lock(lock, name="some_ext", poll=0.05)
+    err = capsys.readouterr().err
+    assert "[miniworld-engine build] waiting for some_ext, built by another process (" in err
+    assert err.count("waiting for") == 1, err
+
+
+def test_a_held_flock_is_waited_on_with_a_message(tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+                                                  capsys: pytest.CaptureFixture[str]) -> None:
+    """The TriMul cubin cache serialises builds with flock: a waiter used to block silently."""
+    import fcntl
+    import threading
+
+    from miniworld_engine.kernels import _nvcc
+
+    monkeypatch.setattr(_nvcc, "WAIT_QUIET_SECONDS", 0.0)
+    path = tmp_path / "x.lock"
+    with path.open("w") as holder, path.open("w") as waiter:
+        fcntl.flock(holder, fcntl.LOCK_EX)
+        threading.Timer(0.5, fcntl.flock, (holder, fcntl.LOCK_UN)).start()
+        _nvcc.flock_wait(waiter, "trimul_h100/k3.cu")
+    assert "waiting for trimul_h100/k3.cu, built by another process" in capsys.readouterr().err
 
 
 def test_every_jit_load_goes_through_the_guard() -> None:
@@ -138,7 +198,7 @@ def test_every_jit_load_goes_through_the_guard() -> None:
             f"{path.relative_to(root)}:{node.lineno}"
             for node in ast.walk(ast.parse(path.read_text()))
             if isinstance(node, ast.ImportFrom) and node.module == "torch.utils.cpp_extension"
-            and any(a.name == "load" for a in node.names))
+            and any(a.name in ("load", "load_inline") for a in node.names))
     assert not offenders, (
-        f"these import torch's `load` directly and so can still hang on a leftover lock: "
-        f"{offenders}. Use kernels._nvcc.load_extension.")
+        f"these import torch's `load` / `load_inline` directly and so can still hang on a leftover "
+        f"lock: {offenders}. Use kernels._nvcc.load_extension / load_inline_extension.")

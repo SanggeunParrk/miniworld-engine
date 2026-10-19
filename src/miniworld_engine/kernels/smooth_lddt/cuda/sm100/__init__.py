@@ -46,13 +46,15 @@ def cubin(arch: str = "sm_100a") -> str:
     root = settings.engine_jit_root()
     out = root / f"smooth_lddt_{arch[3:]}" / f"smooth_lddt_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run([nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True, timeout=900, check=False)
-        if res.returncode != 0:
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}")
-        os.replace(tmp, out)
+        from miniworld_engine.kernels._nvcc import building
+        with building(f"{out.parent.name}/{out.stem}", "cubin"):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(f".{os.getpid()}.tmp")
+            res = subprocess.run([nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True, timeout=900, check=False)
+            if res.returncode != 0:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}")
+            os.replace(tmp, out)
     return str(out)
 
 

@@ -77,14 +77,16 @@ def cubin(stem: str, defs: tuple[str, ...] = (), src_dir: str | None = None) -> 
     h.update(" ".join((nvcc, *flags)).encode())
     out = _jit_root() / f"{stem}_{h.hexdigest()[:16]}.cubin"
     if not out.exists():
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run(
-            [nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True
-        )
-        if res.returncode != 0:
-            raise RuntimeError(f"nvcc {stem}.cu failed:\n{res.stderr[-4000:]}")
-        os.replace(tmp, out)
+        from miniworld_engine.kernels._nvcc import building
+        with building(f"{out.parent.name}/{out.stem}", "cubin"):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(f".{os.getpid()}.tmp")
+            res = subprocess.run(
+                [nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True
+            )
+            if res.returncode != 0:
+                raise RuntimeError(f"nvcc {stem}.cu failed:\n{res.stderr[-4000:]}")
+            os.replace(tmp, out)
     return str(out)
 
 

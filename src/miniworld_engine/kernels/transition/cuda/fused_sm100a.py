@@ -37,6 +37,7 @@ import torch
 from ..._compile import opaque
 from ..._nvcc import (
     _HOST_CANDIDATES,
+    building,
     ensure_cuda_home,
     gencodes,
     host_flags,
@@ -182,29 +183,30 @@ def build_cubins(
     for name, src, extra in specs:
         dst = out / f"{name}.cubin"
         if not dst.exists():
-            tmp = out / f"{name}.{os.getpid()}.tmp"
-            cmd = [
-                nvcc,
-                *flags,
-                "-std=c++17",
-                "-O3",
-                "-arch=sm_100a",
-                "-cubin",
-                f"-I{_dir}",
-                *extra,
-                str(_dir / src),
-                "-o",
-                str(tmp),
-            ]
-            r = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=900, check=False
-            )
-            if r.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {src} {' '.join(extra)}:\n{r.stderr[-4000:]}"
+            with building(f"transition_sm100a/{out.name}/{name}", "cubin"):
+                tmp = out / f"{name}.{os.getpid()}.tmp"
+                cmd = [
+                    nvcc,
+                    *flags,
+                    "-std=c++17",
+                    "-O3",
+                    "-arch=sm_100a",
+                    "-cubin",
+                    f"-I{_dir}",
+                    *extra,
+                    str(_dir / src),
+                    "-o",
+                    str(tmp),
+                ]
+                r = subprocess.run(
+                    cmd, capture_output=True, text=True, timeout=900, check=False
                 )
-            os.replace(tmp, dst)
+                if r.returncode != 0:
+                    tmp.unlink(missing_ok=True)
+                    raise RuntimeError(
+                        f"nvcc {rel[0]}.{rel[1]} failed on {src} {' '.join(extra)}:\n{r.stderr[-4000:]}"
+                    )
+                os.replace(tmp, dst)
         paths[name] = str(dst)
     return paths
 

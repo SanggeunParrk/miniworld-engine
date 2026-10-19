@@ -13,13 +13,17 @@ Two failures this fixes, both observed rather than guessed:
 
 from __future__ import annotations
 
+import contextlib
 import functools
 import importlib
 import os
 import subprocess
 import sys
+import threading
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 
 @functools.lru_cache(maxsize=1)
@@ -194,22 +198,6 @@ def host_flags() -> list[str]:
 
 
 # ---------------------------------------------------------------------------------------------
-# JIT extension loading, with the two failure modes that cost five GPU-hours.
-#
-# `torch.utils.cpp_extension.load` serialises concurrent builds with a `FileBaton` on
-# `<build dir>/lock`, and `FileBaton.wait()` polls for that file to disappear FOREVER, with no
-# timeout and no message. A build that is killed -- a cancelled Slurm job, a Ctrl-C -- leaves the
-# lock behind, and every later run on that machine blocks on it indefinitely.
-#
-# That happened. A run left a 13-hour-old lock in `layer_norm_cuda/`; three subsequent GPU jobs
-# (45 min killed, 4 h timed out, one stalled at test 42 of 100) all sat on it, and all three looked
-# exactly like "slow". Deleting the file moved the stalled job forward within 20 seconds.
-#
-# So: reclaim a lock that is too old to be real, and turn an unbounded wait into an error that
-# names the file. A message beats a hang, and the remedy is one `rm`.
-# ---------------------------------------------------------------------------------------------
-
-# ---------------------------------------------------------------------------------------------
 # mathdx (cuBLASDx) headers. Three transition extensions include them; their include paths were
 # written in as `-I/<a developer home>/mathdx_dl/...`, unbuildable for anyone else and, by the
 # time it was found, for the author too -- the directory was gone and nothing noticed, because
@@ -267,15 +255,126 @@ def mathdx_includes() -> list[str]:
     return [f"-I{p}" for p in includes if p.is_dir()]
 
 
+# ---------------------------------------------------------------------------------------------
+# Build progress. Every JIT build is silent (verbose=False everywhere), so a first call that spends
+# minutes in nvcc looked exactly like a hang. One line when a compile starts, one when it ends,
+# nothing on a cache hit -- so a run that prints nothing reused every artifact.
+# ---------------------------------------------------------------------------------------------
+
+#: Prefix of every line this module prints.
+LOG_PREFIX = "[miniworld-engine build]"
+
+#: A torch extension load whose ``.so`` cannot be located counts as a build when it took longer
+#: than this; a no-op ninja check plus the import is far below it.
+LOAD_BUILD_SECONDS = 2.0
+
+#: How often a waiter on another process's build says it is still waiting.
+WAIT_LOG_SECONDS = 60.0
+
+#: A waiter says nothing for this long: a cached load also holds the lock, for about a second.
+WAIT_QUIET_SECONDS = 5.0
+
+
+class Built(NamedTuple):
+    """One compile this process ran."""
+
+    name: str
+    kind: str
+    seconds: float
+
+
+_BUILT: list[Built] = []
+_BUILT_GUARD = threading.Lock()
+
+
+def _log_enabled() -> bool:
+    try:
+        from miniworld_engine import settings
+    except ImportError:
+        return True
+    return bool(getattr(settings.current(), "jit_build_log", True))
+
+
+def build_log(message: str) -> None:
+    """Print one ``[miniworld-engine build]`` line to stderr (unless ``settings.jit_build_log`` is off)."""
+    if _log_enabled():
+        print(f"{LOG_PREFIX} {message}", file=sys.stderr, flush=True)
+
+
+def built_this_process() -> tuple[Built, ...]:
+    """What this process compiled, in order (cache hits are not listed)."""
+    with _BUILT_GUARD:
+        return tuple(_BUILT)
+
+
+def _record(name: str, kind: str, seconds: float) -> None:
+    with _BUILT_GUARD:
+        _BUILT.append(Built(name, kind, seconds))
+        count = len(_BUILT)
+    build_log(f"built {name} in {seconds:.1f} s; {count} built in this process")
+
+
+@contextlib.contextmanager
+def building(name: str, kind: str) -> Iterator[None]:
+    """Wrap a compile that is known to run (a cache miss): logs its start and its end, and counts it."""
+    build_log(f"compiling {name} ({kind}) ...")
+    started = time.perf_counter()
+    try:
+        yield
+    except BaseException:
+        build_log(f"failed to build {name} after {time.perf_counter() - started:.1f} s")
+        raise
+    _record(name, kind, time.perf_counter() - started)
+
+
+def cache_roots() -> list[Path]:
+    """The JIT cache directories that exist here: ``settings.engine_jit_root()`` (every cubin and
+    every extension built with a ``build_directory``) and torch's extensions root (``$TORCH_EXTENSIONS_DIR``,
+    else torch's default, for ``load_extension`` calls without one). See docs/kernels/jit-cache.md."""
+    from miniworld_engine import settings
+
+    roots = [settings.engine_jit_root()]
+    torch_root = os.environ.get("TORCH_EXTENSIONS_DIR")
+    if not torch_root:
+        try:
+            from torch.utils.cpp_extension import get_default_build_root
+            torch_root = get_default_build_root()
+        except Exception:  # no torch, no torch cache
+            torch_root = None
+    if torch_root:
+        roots.append(Path(torch_root))
+    out: list[Path] = []
+    for r in roots:
+        if r.is_dir() and r.resolve() not in {o.resolve() for o in out}:
+            out.append(r)
+    return out
+
+
+# ---------------------------------------------------------------------------------------------
+# JIT extension loading, with the two failure modes that cost five GPU-hours.
+#
+# `torch.utils.cpp_extension.load` serialises concurrent builds with a `FileBaton` on
+# `<build dir>/lock`, and `FileBaton.wait()` polls for that file to disappear FOREVER, with no
+# timeout and no message. A build that is killed -- a cancelled Slurm job, a Ctrl-C -- leaves the
+# lock behind, and every later run on that machine blocks on it indefinitely.
+#
+# That happened. A run left a 13-hour-old lock in `layer_norm_cuda/`; three subsequent GPU jobs
+# (45 min killed, 4 h timed out, one stalled at test 42 of 100) all sat on it, and all three looked
+# exactly like "slow". Deleting the file moved the stalled job forward within 20 seconds.
+#
+# So: reclaim a lock that is too old to be real, say once a minute that we are waiting on a live
+# one, and raise naming the file only when the wait is beyond any real build. The remedy is one `rm`.
+# ---------------------------------------------------------------------------------------------
 
 #: A lock older than this cannot belong to a live build -- the longest real build here is a few
-#: minutes -- so it is a leftover and gets reclaimed. `build --reclaim` makes the same judgement
-#: about the builder's own O_EXCL claims.
+#: minutes -- so it is a leftover and gets reclaimed, also while waiting on it. `build --reclaim`
+#: makes the same judgement about the builder's own O_EXCL claims.
 STALE_LOCK_SECONDS = 1800.0
 
-#: How long to wait for a FRESH lock (another process really is building) before giving up. Long
-#: enough for a genuine four-arch nvcc build, short enough that a job notices inside its time limit.
-LOCK_WAIT_SECONDS = 600.0
+#: Upper bound on a wait for another process's build. A waiter does not give up on a live build
+#: (it waits until the lock is gone, or reclaims it once stale); this only fires when something is
+#: clearly wrong, such as a lock that cannot be removed or whose timestamps never age.
+LOCK_WAIT_SECONDS = 7200.0
 
 
 def _build_lock(name: str, build_directory: str | None = None) -> Path | None:
@@ -300,8 +399,6 @@ def _build_lock(name: str, build_directory: str | None = None) -> Path | None:
 
 def clear_stale_lock(lock: Path, stale_after: float = STALE_LOCK_SECONDS) -> bool:
     """Delete `lock` if it is too old to belong to a running build. True if it was reclaimed."""
-    import time
-
     try:
         st = lock.stat()
     except OSError:
@@ -321,44 +418,113 @@ def clear_stale_lock(lock: Path, stale_after: float = STALE_LOCK_SECONDS) -> boo
         lock.unlink()
     except OSError:
         return False
-    print(f"[miniworld.nvcc] reclaimed a stale build lock ({age / 60:.0f} min old): {lock}",
-          file=sys.stderr)
+    print(f"{LOG_PREFIX} reclaimed a stale build lock ({age / 60:.0f} min old): {lock}",
+          file=sys.stderr, flush=True)
     return True
 
 
-def wait_for_lock(lock: Path, limit: float = LOCK_WAIT_SECONDS) -> None:
-    """Wait for a fresh `lock` to clear, or raise naming it. Never block indefinitely."""
-    import time
+def wait_for_lock(lock: Path, limit: float = LOCK_WAIT_SECONDS, name: str | None = None,
+                  stale_after: float = STALE_LOCK_SECONDS, poll: float = 2.0) -> None:
+    """Wait while another process builds behind `lock`; return once it is gone or reclaimed as stale.
 
+    Says so once a minute (after a few quiet seconds: a cached load holds the lock briefly too).
+    Raises, naming the file, only past `limit` -- far beyond any real build.
+    """
     if not lock.exists():
         return
-    print(f"[miniworld.nvcc] another process is building this extension; waiting up to "
-          f"{limit / 60:.0f} min for {lock}", file=sys.stderr)
-    deadline = time.time() + limit
+    what = name or lock.parent.name
+    started = time.monotonic()
+    next_report = started + min(WAIT_QUIET_SECONDS, limit)
     while lock.exists():
-        if time.time() > deadline:
-            msg = (f"waited {limit / 60:.0f} min for another process's build lock and it is still "
-                   f"there:\n    {lock}\n"
+        if clear_stale_lock(lock, stale_after):
+            return
+        now = time.monotonic()
+        if now - started > limit:
+            msg = (f"waited {(now - started) / 60:.0f} min for another process's build lock and it "
+                   f"is still there:\n    {lock}\n"
                    f"If no build is running, it is a leftover from a killed one -- torch waits on "
                    f"it forever, which is why this raises instead. Remove it:\n"
                    f"    rm {lock}")
             raise TimeoutError(msg)
-        time.sleep(2.0)
+        if now >= next_report:
+            build_log(f"waiting for {what}, built by another process ({now - started:.0f} s)")
+            next_report = now + WAIT_LOG_SECONDS
+        time.sleep(poll)
 
 
-def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
-    """`torch.utils.cpp_extension.load`, but it cannot hang on a leftover lock.
+def flock_wait(handle: Any, name: str) -> None:
+    """``fcntl.flock(handle, LOCK_EX)``, saying once a minute that another process holds it.
 
-    Reclaims a lock too old to be real, then bounds the wait on a fresh one. Correctness still
-    comes from torch's own baton: this only decides how long to tolerate it.
+    No upper bound and no stale check: the kernel drops a flock when its holder dies.
     """
-    from torch.utils.cpp_extension import load
+    import fcntl
 
-    lock = _build_lock(name, kwargs.get("build_directory"))
-    if lock is not None and not clear_stale_lock(lock):
-        wait_for_lock(lock)
+    started = time.monotonic()
+    next_report = started + WAIT_QUIET_SECONDS
+    while True:
+        try:
+            fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return
+        except BlockingIOError:
+            pass
+        now = time.monotonic()
+        if now >= next_report:
+            build_log(f"waiting for {name}, built by another process ({now - started:.0f} s)")
+            next_report = now + WAIT_LOG_SECONDS
+        time.sleep(0.2)
+
+
+def _mtime(path: Path | None) -> float | None:
+    if path is None:
+        return None
     try:
-        return load(name=name, sources=sources, **kwargs)
+        return path.stat().st_mtime
+    except OSError:
+        return None
+
+
+def _will_build(library: Path, before: float | None, sources: list[str] | None) -> bool:
+    """Cheaply predict that torch's ninja is about to compile: no library yet, or (when the sources are
+    known) a ``build.ninja`` that does not name them -- another checkout built this cache -- or a source
+    newer than the library. Included headers are not checked; a rebuild they cause gets only the
+    "built" line."""
+    if before is None:
+        return True
+    if not sources:
+        return False
+    try:
+        ninja = (library.parent / "build.ninja").read_text()
+    except OSError:
+        return True
+    for s in sources:
+        path = os.path.abspath(s)
+        if path not in ninja:
+            return True
+        mtime = _mtime(Path(path))
+        if mtime is not None and mtime > before:
+            return True
+    return False
+
+
+def _guarded_load(name: str, kind: str, build_directory: str | None, call: Callable[[], Any],
+                  sources: list[str] | None = None) -> Any:
+    """Run a torch JIT load behind the lock guard, and log it if it compiled.
+
+    torch decides internally whether to rebuild (ninja), so the build is confirmed afterwards: the
+    library ``<build dir>/<name>.so`` is new or changed. When that is predictable up front
+    (:func:`_will_build`) the "compiling" line comes first.
+    """
+    lock = _build_lock(name, build_directory)
+    if lock is not None and not clear_stale_lock(lock):
+        wait_for_lock(lock, name=name)
+    library = lock.parent / f"{name}.so" if lock is not None else None
+    before = _mtime(library)
+    announced = library is not None and _will_build(library, before, sources)
+    if announced:
+        build_log(f"compiling {name} ({kind}) ...")
+    started = time.perf_counter()
+    try:
+        ext = call()
     except BaseException:
         # torch does not always release its baton when the build raises, and the leftover is
         # indistinguishable from a live build -- so the NEXT call in this same process waits on a
@@ -367,4 +533,37 @@ def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
         # the lock that exists on entry (above) covers another process; this covers our own.
         if lock is not None:
             lock.unlink(missing_ok=True)
+        if announced:
+            build_log(f"failed to build {name} after {time.perf_counter() - started:.1f} s")
         raise
+    seconds = time.perf_counter() - started
+    if library is not None:
+        after = _mtime(library)
+        compiled = after is not None and after != before
+    else:
+        compiled = seconds > LOAD_BUILD_SECONDS
+    if compiled:
+        _record(name, kind, seconds)
+    elif announced:
+        build_log(f"{name} needed no rebuild")
+    return ext
+
+
+def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
+    """`torch.utils.cpp_extension.load`, but it cannot hang on a leftover lock, and says when it compiles.
+
+    Reclaims a lock too old to be real, then waits on a fresh one (saying so). Correctness still
+    comes from torch's own baton: this only decides how long to tolerate it.
+    """
+    from torch.utils.cpp_extension import load
+
+    return _guarded_load(name, "torch extension", kwargs.get("build_directory"),
+                         lambda: load(name=name, sources=sources, **kwargs), sources=sources)
+
+
+def load_inline_extension(name: str, **kwargs: Any) -> Any:
+    """`torch.utils.cpp_extension.load_inline` behind the same guard and log as :func:`load_extension`."""
+    from torch.utils.cpp_extension import load_inline
+
+    return _guarded_load(name, "inline torch extension", kwargs.get("build_directory"),
+                         lambda: load_inline(name=name, **kwargs))

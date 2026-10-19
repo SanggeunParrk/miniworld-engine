@@ -7,7 +7,7 @@ content-addressed user cache. Module handles are specific to a CUDA device.
 from pathlib import Path
 from functools import lru_cache, wraps
 from contextlib import contextmanager
-import ctypes, fcntl, hashlib, os, shutil, subprocess, json
+import ctypes, hashlib, os, shutil, subprocess, json
 import threading
 import torch
 import torch.nn.functional as F
@@ -277,25 +277,45 @@ def _source_digest():
     return h.digest()
 
 
+def _display_name(source):
+    """How a build names ``source`` in the log: its path under h100_sources, a generated (``compile_text``) file, or its name."""
+    p = Path(source)
+    try:
+        return str(p.relative_to(SOURCES))
+    except ValueError:
+        pass
+    if p.parent == cache_dir() and len(p.stem) == 64:
+        return f"generated {p.stem[:12]}.cu"
+    return p.name
+
+
 def compile(source, flags):
+    """The cubin of ``source`` built with ``flags``. Keyed by the source, the flags, the nvcc version and every file under
+    h100_sources (``_source_digest``): any edit there rebuilds every TriMul cubin."""
+    from miniworld_engine.kernels._nvcc import building, flock_wait
+
     nvcc, version = _compiler()
     key = hashlib.sha256(
         source.read_bytes() + repr(flags).encode() + version.encode() + _source_digest()
     ).hexdigest()
     out = cache_dir() / (key + ".cubin")
+    if out.exists():  # the finished cubin only ever appears by rename: no lock needed to reuse it
+        return out
+    label = f"trimul_h100/{_display_name(source)} [{key[:8]}]"
     with out.with_suffix(".lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        flock_wait(lock, label)
         if not out.exists():
-            tmp = out.with_suffix(".tmp.cubin")
-            result = subprocess.run(
-                [nvcc, *flags, str(source), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-            )
-            out.with_suffix(".ptxas.log").write_text(result.stdout + result.stderr)
-            if result.returncode:
-                raise RuntimeError(result.stderr)
-            tmp.replace(out)
+            with building(label, "cubin"):
+                tmp = out.with_suffix(".tmp.cubin")
+                result = subprocess.run(
+                    [nvcc, *flags, str(source), "-o", str(tmp)],
+                    capture_output=True,
+                    text=True,
+                )
+                out.with_suffix(".ptxas.log").write_text(result.stdout + result.stderr)
+                if result.returncode:
+                    raise RuntimeError(result.stderr)
+                tmp.replace(out)
     return out
 
 

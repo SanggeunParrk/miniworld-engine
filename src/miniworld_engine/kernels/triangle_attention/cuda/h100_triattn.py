@@ -723,7 +723,7 @@ torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool t
 
 @functools.lru_cache(maxsize=1)
 def _owned_blas_extension():
-    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     import hashlib
 
     cuda_home = ensure_cuda_home()

@@ -169,7 +169,7 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
 @functools.lru_cache(maxsize=1)
 def _lt():
     import hashlib
-    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
 
     from miniworld_engine import settings
 

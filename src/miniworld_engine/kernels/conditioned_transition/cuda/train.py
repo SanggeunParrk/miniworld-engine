@@ -144,7 +144,7 @@ torch::Tensor owned_addmm(torch::Tensor bias, torch::Tensor a, torch::Tensor b, 
 
 @functools.lru_cache(maxsize=1)
 def owned_gemm_ext():
-    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     from ..._nvcc import ensure_cuda_home
     import hashlib
 

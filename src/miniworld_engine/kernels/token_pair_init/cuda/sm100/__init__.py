@@ -69,21 +69,23 @@ def cubin(ri: int = 2) -> str:
         / f"token_pair_init_ri{ri}_{h.hexdigest()[:16]}.cubin"
     )
     if not out.exists():
-        out.parent.mkdir(parents=True, exist_ok=True)
-        tmp = out.with_suffix(f".{os.getpid()}.tmp")
-        res = subprocess.run(
-            [nvcc, *flags, str(src), "-o", str(tmp)],
-            capture_output=True,
-            text=True,
-            timeout=900,
-            check=False,
-        )
-        if res.returncode != 0:
-            tmp.unlink(missing_ok=True)
-            raise RuntimeError(
-                f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}"
+        from miniworld_engine.kernels._nvcc import building
+        with building(f"{out.parent.name}/{out.stem}", "cubin"):
+            out.parent.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(f".{os.getpid()}.tmp")
+            res = subprocess.run(
+                [nvcc, *flags, str(src), "-o", str(tmp)],
+                capture_output=True,
+                text=True,
+                timeout=900,
+                check=False,
             )
-        os.replace(tmp, out)
+            if res.returncode != 0:
+                tmp.unlink(missing_ok=True)
+                raise RuntimeError(
+                    f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}"
+                )
+            os.replace(tmp, out)
     return str(out)
 
 

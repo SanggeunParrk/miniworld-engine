@@ -101,7 +101,7 @@ torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool t
 @lru_cache(maxsize=1)
 def _owned_blas_ext():
     import hashlib
-    from torch.utils.cpp_extension import load_inline
+    from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     from miniworld_engine.kernels._nvcc import ensure_cuda_home
 
     cuda_home = ensure_cuda_home()
