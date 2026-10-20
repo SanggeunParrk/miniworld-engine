@@ -148,9 +148,10 @@ __device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][DPW / 1
   }
 }
 
-// Batched: S samples, pair [S, L, L, DPW], mask [S, L], bias [S, NH, L, L]; a tile's query row i runs over the S L rows.
+// Batched: S samples, pair [S, L, L, DPW], mask [S, L], bias [S, NH, L, L]; a tile's query row i runs over the S L rows. BAT = false
+// (one sample) compiles the single-sample indexing (the batched one cost 6 % at L1536).
 // ST (optional): the (mean, rstd) of every pair row, for a backward that does not recompute them
-template <int NH, int DPW = DP>
+template <int NH, int DPW, bool BAT>
 __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
     bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg, int S) {
   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
@@ -221,7 +222,7 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
     }
     __syncthreads();                                                        // the stage is read; out_s[n & 1] written
     if (threadIdx.x == 0) issue(n + NSF);
-    const int sb = i / L, il = i - sb * L;                                  // sample, row within it
+    const int sb = BAT ? i / L : 0, il = BAT ? i - sb * L : i;              // sample, row within it
     for (int task = threadIdx.x; task < NH * 16; task += FNT) {             // (head, 8 keys) per task: 16-B stores
       const int h = task >> 4, ch = task & 15, j = j0 + ch * 8;
       if (ch * 8 >= rows) continue;
@@ -229,10 +230,14 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         float a = os[h][ch * 8 + 2 * e], bb = os[h][ch * 8 + 2 * e + 1];
-        if (MASK) { if (!MASK[(long)sb * L + j + 2 * e]) a = neg; if (!MASK[(long)sb * L + j + 2 * e + 1]) bb = neg; }
+        if (MASK) {
+          if constexpr (BAT) { const long mj = (long)sb * L + j + 2 * e; if (!MASK[mj]) a = neg; if (!MASK[mj + 1]) bb = neg; }
+          else { if (!MASK[j + 2 * e]) a = neg; if (!MASK[j + 2 * e + 1]) bb = neg; }
+        }
         o[e] = pack2(a, bb);
       }
-      *reinterpret_cast<uint4*>(OUT + (((long)sb * NH + h) * L + il) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
+      bf* dst = BAT ? OUT + (((long)sb * NH + h) * L + il) * L + j : OUT + ((long)h * L + i) * L + j;
+      *reinterpret_cast<uint4*>(dst) = make_uint4(o[0], o[1], o[2], o[3]);
     }
   }
 }
@@ -285,7 +290,7 @@ __device__ __forceinline__ void ldsm_x4_trans(uint32_t (&r)[4], uint32_t addr) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];"
                : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(addr));
 }
-template <int NH>
+template <int NH, bool BAT>
 __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __grid_constant__ CUtensorMap tmz, const __grid_constant__ CUtensorMap tmd,
     const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride, int S) {
   constexpr int NT8 = nhp<NH>() / 8, BW = NT8, BT = bwd_tile<NH>(), NSB = bwd_stages<NH>();   // BW: dx^ B words per tile (one per group)
@@ -308,7 +313,8 @@ __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __gr
     const int row = i * L + j0;
     tma2d(st, &tmz, 0, row, fb);
     tma2d(st + BT_PAIR / 2, &tmz, 64, row, fb);
-    tma3d(st + BT_PAIR, &tmd, j0, i % L, (i / L) * NH, fb);
+    if (BAT) tma3d(st + BT_PAIR, &tmd, j0, i % L, (i / L) * NH, fb);
+    else tma3d(st + BT_PAIR, &tmd, j0, i, 0, fb);
   };
   if (threadIdx.x == 0) {
     for (int k = 0; k < NSB; ++k) mbar_init(&full[k], 1);
@@ -886,14 +892,15 @@ void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::option
                      double neg) {
   static bool attr = false;
   if (!attr) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
     attr = true;
   }
   const int64_t ns = z.numel() / (L * L * DPW);                             // samples
   const long ntiles = ns * L * ((L + 127) / 128);
   const long per_sm = DPW > 128 ? 1 : 2;  // the 256-wide ring fills the SM's shared memory
-  pair_bias_fwd_k<NH, DPW><<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT, fwd_smem<NH, DPW>(), S()>>>(
-      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg, (int)ns);
+  (ns > 1 ? pair_bias_fwd_k<NH, DPW, true> : pair_bias_fwd_k<NH, DPW, false>)<<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT,
+      fwd_smem<NH, DPW>(), S()>>>(CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg, (int)ns);
 }
 // d_pair 128 (8 / 12 / 16 / 24 heads) or 256 (8 heads); ``stats`` (optional [L L, 2] fp32) receives every row's (mean, rstd)
 void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, c10::optional<at::Tensor> stats, int64_t L, double eps,
@@ -979,12 +986,13 @@ void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Ten
   const CUtensorMap md = cached_map(dbias.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 3, dd, ds, db, CU_TENSOR_MAP_SWIZZLE_NONE);
   static bool attr = false;
   if (!attr) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_bwd_k<NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, bwd_smem<NH>()));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_bwd_k<NH, false>, cudaFuncAttributeMaxDynamicSharedMemorySize, bwd_smem<NH>()));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_bwd_k<NH, true>, cudaFuncAttributeMaxDynamicSharedMemorySize, bwd_smem<NH>()));
     attr = true;
   }
   const long ntiles = ns * L * ((L + 127) / 128);
   float* awf = P<float>(acc) + 2 * G.d + width(G);
-  pair_bias_bwd_k<NH><<<(unsigned)std::min<long>((long)bwd_bps<NH>() * nsm_of(z), ntiles), 256, bwd_smem<NH>(), S()>>>(
+  (ns > 1 ? pair_bias_bwd_k<NH, true> : pair_bias_bwd_k<NH, false>)<<<(unsigned)std::min<long>((long)bwd_bps<NH>() * nsm_of(z), ntiles), 256, bwd_smem<NH>(), S()>>>(
       mz, md, CP<bf>(w), P<bf>(dz), awf, awf + NH * DP, (int)L, (float)eps, acc.dim() == 2 ? (int)acc.size(1) : 0, (int)ns);
 }
 void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {

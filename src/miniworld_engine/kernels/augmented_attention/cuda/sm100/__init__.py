@@ -652,8 +652,9 @@ def apb_ksplit(L: int, heads: int, d: int = 384, nsm: int = 148) -> int:
     the batch, so a batch of B samples is bitwise B single-sample calls). ``settings.apb_b200_ksplit`` overrides it (1: the
     unsplit cores). The work items of one sample are (heads x query-tile pairs); a split into ns chunks makes ns times as many,
     each 1 / ns as long, so the core takes ~ waves(ns) / ns of the unsplit time, waves = ceil(items ns / ``nsm``). The choice is
-    the smallest ns (a divisor of the key blocks ceil(L / 64), each item keeping at least two) that minimises it: e.g. 8 heads at
-    L768 (24 items) ns 6, 16 heads at L768 (48) ns 3, 16 heads at L1536 (96) ns 3 (two waves of a third each)."""
+    the smallest ns (a divisor of the key blocks ceil(L / 64), each item keeping at least two) that minimises it, kept only when it
+    at least halves the unsplit estimate (the partials and the combine pass cost ~4-5 us: two waves of a third each, 16 heads at
+    L1536, measured even). E.g. 8 heads L768 (24 items) ns 6, 16 heads L768 (48) ns 3, 16 heads L1536 (96) unsplit."""
     nbt = -(-L // 64)
     forced = settings.current().apb_b200_ksplit
     if forced is not None:
@@ -668,7 +669,7 @@ def apb_ksplit(L: int, heads: int, d: int = 384, nsm: int = 148) -> int:
         cost = -(-base * ns // nsm) / ns
         if cost < best_cost - 1e-9:
             best, best_cost = ns, cost
-    return best
+    return best if best_cost <= 0.5 * -(-base // nsm) + 1e-9 else 1
 
 
 def apb_qsplit(L: int, heads: int, nsm: int = 148) -> int:
