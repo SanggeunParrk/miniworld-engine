@@ -311,6 +311,9 @@ class Settings:
     bias_only_dit_pair_exact: bool = False
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_CORE`` (default on).
     bias_only_dit_core: bool = True
+    #: B200 bf16 bias-only DiT past L 768 (to 3072): the attention core streams P through shared memory (``pv_stream_sm100.cu``);
+    #: False keeps the old bound (longer L runs the PyTorch module). Read per call.
+    bias_only_dit_stream: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3`` (default on).
     bias_only_dit_inf3: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA`` (default on).
