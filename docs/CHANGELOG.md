@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-10-20
+
 ### Added
 
 - Prebuilt CUDA kernels in the engine's own binary wheel (`miniworld_engine/_prebuilt/<arch>/`, docs/kernels/prebuilt-kernels.md):
@@ -20,6 +22,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   Python ABIs / torch / CUDA builds, incremental refresh), `dev build-wheel` (cpXY manylinux_2_28 wheels pinned to the
   torch minor, auditwheel-style binary check), `dev code-graph` (an artifact's graph and key, `--affected <file>`).
   CUTLASS / CUDA toolkit headers are needed only to build. License files for CUTLASS and FlashAttention-3 (BSD-3-Clause).
+  The wheels (cp310, cp312, manylinux_2_28) carry the sm90 kernels for both CUDA builds of torch 2.13 (`sm90-cu129`,
+  `sm90-cu130`; the running torch picks its own) and require `torch==2.13.*`.
+
+### Fixed
+
+- CUDA 13 builds: 15 sources that named the unversioned `PFN_cuTensorMapEncodeTiled` (removed in CUDA 13) resolve
+  `cuTensorMapEncodeTiled` through `cudaGetDriverEntryPointByVersion(..., 12000, ...)` (OPM epilogue, PWA, `ln_vg`,
+  `dgv_bwd`, SWA DiT sm90); same SASS under CUDA 12.9. The Hopper atom cubins (`atom_local_sm90`, `local_dit_sm90`) and
+  the owned cuBLAS / cuBLASLt extensions no longer refuse CUDA newer than 12.9 (no reason was recorded; the four
+  `atom_local_sm90` cubins in the bundle come out of 12.9 and 13.0 with identical SASS).
 
 ### Changed
 

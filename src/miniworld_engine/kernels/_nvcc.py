@@ -706,14 +706,6 @@ def _toolchain_torch() -> tuple[str, list[str]]:
     return nvcc, real_host_flags()
 
 
-def _toolchain_torch_le_129() -> tuple[str, list[str]]:
-    import torch
-
-    if tuple(map(int, (torch.version.cuda or "99.0").split(".")[:2])) > (12, 9):
-        raise RuntimeError("these Hopper kernels require the matching CUDA <= 12.9 toolchain")
-    return _toolchain_torch()
-
-
 def _toolchain_sm100() -> tuple[str, list[str]]:
     from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
 
@@ -748,7 +740,9 @@ def _toolchain_torch_nohost() -> tuple[str, list[str]]:
 TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
     "torch": _toolchain_torch,
     "torch-nohost": _toolchain_torch_nohost,
-    "torch-cuda<=12.9": _toolchain_torch_le_129,
+    # the old name of "torch" for the Hopper atom families, kept so recorded recipes still replay: their "CUDA <= 12.9"
+    # requirement had no reason behind it (the sources build under CUDA 13.0, with the same SASS; docs/kernels/prebuilt-kernels.md)
+    "torch-cuda<=12.9": _toolchain_torch,
     "sm100": _toolchain_sm100,
     "path": _toolchain_path,
 }

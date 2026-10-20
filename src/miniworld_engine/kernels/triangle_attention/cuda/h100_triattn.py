@@ -727,13 +727,8 @@ def _owned_blas_extension():
     from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
 
     cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
-    cuda_version = torch.version.cuda
-    if (
-        cuda_home is None
-        or cuda_version is None
-        or tuple(map(int, cuda_version.split(".")[:2])) > (12, 9)
-    ):
-        raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
+    if tuple(map(int, (torch.version.cuda or "0.0").split(".")[:2])) < (12, 0):
+        raise RuntimeError("Hopper owned BLAS requires CUDA 12 or newer")
     return load_inline(
         name="triattn_h100_owned_blas",
         cpp_sources=_OWNED_BLAS_CPP,

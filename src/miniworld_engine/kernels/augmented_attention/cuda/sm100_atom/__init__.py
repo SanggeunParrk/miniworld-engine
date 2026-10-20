@@ -73,7 +73,7 @@ def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
     )
     family = "local_dit_sm90" if hopper else "local_dit_sm100"
     return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
-                           toolchain="torch-cuda<=12.9" if hopper else "sm100"))
+                           toolchain="torch" if hopper else "sm100"))
 
 
 @functools.lru_cache(maxsize=None)
@@ -1404,11 +1404,8 @@ def _owned_wgrad_extension():
     from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
 
     cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
-    if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (
-        12,
-        9,
-    ):
-        raise RuntimeError("Atom Hopper cuBLASLt gradients require CUDA <= 12.9")
+    if tuple(map(int, (torch.version.cuda or "0.0").split(".")[:2])) < (12, 0):
+        raise RuntimeError("Atom Hopper cuBLASLt gradients require CUDA 12 or newer")
     return load_inline(  # built (once per content key) under engine_jit_root/torch_extensions
         name="atom_hopper_owned_wgrad",
         cpp_sources=_OWNED_WGRAD_CPP,

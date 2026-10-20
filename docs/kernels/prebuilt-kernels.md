@@ -5,7 +5,8 @@ wheel**, the way PyTorch ships its kernels: `pip install miniworld-engine` next 
 call loads binaries instead of running nvcc. An sdist or a git install carries none and JIT-compiles every artifact on
 first use into a per-machine cache ([jit-cache.md](jit-cache.md)), tens of minutes for a new environment.
 
-The binaries live in the package at `miniworld_engine/_prebuilt/<arch>/` (`sm90` for H100, `sm100` for B200): a
+The binaries live in the package at `miniworld_engine/_prebuilt/<arch>-cu<XY>/`, one directory per GPU arch (`sm90` for
+H100, `sm100` for B200) and CUDA build of torch (`sm90-cu129`, `sm90-cu130`), each a
 `manifest.json` mapping each artifact's **content key** to its file under `artifacts/`. The directory is produced at
 release time by `miniworld-engine dev bundle-kernels` and is not in git (`.gitignore`).
 
@@ -25,7 +26,7 @@ extensions, `_nvcc.cubin` for cubins (the raw sm_90a / sm_100a families and TriM
    `settings.jit_fallback = False` (or `MINIWORLD_ENGINE_JIT_FALLBACK=0` in the environment) it raises
    `kernels.prebuilt.PrebuiltMissing` instead: that is how a release check proves the shipped kernels cover a run.
 
-A `_prebuilt/<arch>/` is used only when its manifest's torch version and CUDA (`torch.version.cuda`) are the running
+A `_prebuilt/<arch>-cu<XY>/` is used only when its manifest's torch version and CUDA (`torch.version.cuda`) are the running
 ones and the GPU is that arch; anything else is ignored with one line and the JIT path takes over.
 `settings.prebuilt_kernels = False` ignores the shipped kernels; `MINIWORLD_ENGINE_KERNEL_BUNDLES=<dir>[:<dir>]`
 (directories holding a `manifest.json`) adds bundles from elsewhere.
@@ -109,9 +110,10 @@ made `layernorm_general` 32 MB):
   `--coverage "cmd:cd ~/MiniWorld && python scripts/prebuild_engine.py --mode all --jobs 8"` (run it in an
   environment whose engine is this checkout).
 
-The recorded artifacts then update `<prebuilt root>/<arch>/` (default: the package's own `_prebuilt/`):
+The recorded artifacts then update `<prebuilt root>/<arch>-cu<XY>/` (default: the package's own `_prebuilt/`; the CUDA
+build is the running torch's):
 
-* **incremental**: while the drivers run, the existing `_prebuilt/<arch>` is installed (it is inside the package), so
+* **incremental**: while the drivers run, the existing `_prebuilt/<arch>-cu<XY>` is installed (it is inside the package), so
   every artifact whose key did not change is a prebuilt hit and is not compiled again -- a refresh after an engine
   commit compiles only the kernels whose code graph changed;
 * artifacts of this Python ABI (and every cubin) that the run no longer reaches are dropped (`--keep` keeps them);
@@ -141,7 +143,7 @@ python -m twine check dist/*
 ```
 
 `dev build-wheel` builds the pure wheel with setuptools (`pip wheel --no-build-isolation`; `_prebuilt/` is excluded
-from package data, so an sdist never carries it), adds `_prebuilt/<arch>/` with every cubin and the extensions of the
+from package data, so an sdist never carries it), adds every `_prebuilt/<arch>-cu<XY>/` with its cubins and the extensions of the
 running Python ABI (a filtered manifest), pins `Requires-Dist: torch==<major>.<minor>.*` to the torch the artifacts
 were built against, and tags it `cpXY-cpXY-manylinux_2_28_x86_64`. Its binary check (auditwheel-style, `readelf`)
 reports any shared library an artifact needs beyond the manylinux system set and what torch's wheel provides (libtorch,
@@ -157,21 +159,40 @@ most `GLIBCXX_3.4.21` / `CXXABI_1.3.9`, no RPATH. torch 2.13 compiles host code 
 it. The release build is therefore a replay (no GPU) in clean venvs with that compiler, one per Python ABI and torch /
 CUDA build, from the records of one H100 coverage run.
 
-A wheel holds one torch / CUDA build of the kernels. On PyPI that has to be the CUDA build `pip install torch` gives
-(torch 2.13.0: CUDA 13.0, `2.13.0+cu130`); with any other torch build the wheel still works, through the JIT path.
+**Two CUDA builds per wheel.** A wheel carries the kernels for every torch / CUDA build in the prebuilt root -- for
+2.3.0, `sm90-cu129` (torch `2.13.0+cu129`, what MiniWorld uses on the H100 cluster, whose driver 575 stops at CUDA 12.9)
+and `sm90-cu130` (`2.13.0+cu130`, what `pip install torch==2.13.0` gives) -- and the running torch picks its own
+(`torch.version.cuda`), the other is skipped silently. With any other torch build the wheel still works, through the
+JIT path. Size, 2.3.0: 68.5 MB (cp312) / 68.2 MB (cp310) for 2 x 140 sm90 artifacts (about 34 MB compressed per CUDA
+build; 150-175 MB unpacked). An sm100 bundle per CUDA build adds roughly as much again (B200 kernels of comparable
+count), which puts a wheel with sm90 and sm100 for two CUDA builds near 135 MB, over PyPI's 100 MB file limit: then
+ask PyPI for a larger per-file limit (a pypi/support request), ship one CUDA build, or drop `-lineinfo` from the
+cubins.
+
+**CUDA 13.** Builds that worked only under CUDA 12.x: 15 sources named the unversioned `PFN_cuTensorMapEncodeTiled`
+(gone in CUDA 13) and resolved it with the deprecated `cudaGetDriverEntryPoint`; they now take
+`PFN_cuTensorMapEncodeTiled_v12000` through `cudaGetDriverEntryPointByVersion(..., 12000, ...)` (CUDA >= 12.5), as
+the TriangleAttention sm90 / sm100 headers already did. The Hopper atom cubins (`atom_local_sm90`, `local_dit_sm90`)
+and the owned cuBLAS / cuBLASLt extensions refused any CUDA newer than 12.9 with no recorded reason; they build under
+13.0 and the limit is gone (owned BLAS: CUDA 12 or newer): the four `atom_local_sm90` cubins come out of CUDA 12.9
+and 13.0 with identical SASS. Of the 90 sm90 cubins, 72 are identical under both; the 18 that differ are TriMul's (a
+few instructions shorter under ptxas 13, the generated unit 111k vs 67k instructions). The CUDA 13 build was compiled
+and its extensions imported against PyPI torch `2.13.0+cu130`, but not run: the H100 cluster's driver 575 cannot run
+CUDA 13 (that needs a driver >= 580).
 
 ## Release checklist
 
 Per release, at the engine commit being released (set `version` in `pyproject.toml` first; PyPI takes no local
-versions, so one wheel per Python ABI carries one torch / CUDA build -- the one `pip install torch` gives).
+versions: one wheel per Python ABI, carrying every CUDA build in the prebuilt root).
 
 1. **Coverage, sm90** (an H100, any environment whose torch has the target's torch minor):
    `miniworld-engine dev bundle-kernels --arch sm90 --out <work> --coverage engine --coverage pytest:<smoke set>`,
    plus the model's driver (`--coverage "cmd:..."`). Its `<work>/records/*.jsonl` list every artifact with its recipe.
-2. **Release build** (CPU): per target torch / CUDA a clean venv per Python ABI (`pip install torch==<x.y.z>` from the
-   index the wheel targets, `ninja`, the engine's runtime dependencies, `setuptools build twine`; for a CUDA build
+2. **Release build** (CPU): for each CUDA build the wheel carries (2.3.0: cu129 from
+   `https://download.pytorch.org/whl/cu129`, cu130 = plain PyPI) a clean venv per Python ABI (`pip install torch==<x.y.z>`, `ninja`, the engine's runtime dependencies, `setuptools build twine`; for a CUDA build
    other than the cluster's, `cuda-toolkit[nvcc,cudart,crt,cccl,nvvm]==<cuda>` provides nvcc), with the pinned
-   compiler, replaying into one prebuilt root:
+   compiler, replaying into one prebuilt root (each CUDA build becomes its own `sm90-cu<XY>/`; repeat the two replays
+   per CUDA build with that venv pair and its `CUDA_HOME`, then build the wheels once):
 
    ```bash
    export MINIWORLD_ENGINE_HOST_CXX=/opt/ohpc/pub/compiler/gcc/12.4.0/bin/g++ CXX=/opt/ohpc/pub/compiler/gcc/12.4.0/bin/g++

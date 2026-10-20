@@ -358,3 +358,25 @@ def test_toolkit_and_cutlass_stand_ins_key_like_the_real_directories(tmp_path: P
     assert cg.classify_dir("/opt/env/targets/x86_64-linux/include", real) == \
         cg.classify_dir(f"{cg.CUDA_HOME_STANDIN}/targets/x86_64-linux/include", bare)
     assert cg.classify_dir(str(_nvcc.CUTLASS_STANDIN), bare)[0] == f"cutlass@{cg.CUTLASS_PINNED}"
+
+
+def test_each_cuda_build_gets_its_own_directory_and_only_the_matching_one_is_used(tmp_path: Path, jit: Path,
+                                                                                   capsys: pytest.CaptureFixture[str]) -> None:
+    from miniworld_engine.build import kernel_bundle
+
+    assert kernel_bundle.variant_name("sm90", "12.9") == "sm90-cu129"
+    v = cg._versions()
+    base = {"format": prebuilt.MANIFEST_FORMAT, "key_scheme": cg.KEY_SCHEME, "arch": "sm90", "artifacts": {}}
+    for name, cuda in (("sm90-cuXX", "0.0"), ("sm90-mine", v["cuda"])):
+        (tmp_path / "pb" / name).mkdir(parents=True)
+        (tmp_path / "pb" / name / prebuilt.MANIFEST).write_text(json.dumps({**base, "torch": v["torch"], "cuda": cuda}))
+    import os
+
+    os.environ[prebuilt.BUNDLE_ENV] = os.pathsep.join(str(p) for p in sorted((tmp_path / "pb").iterdir()))
+    try:
+        prebuilt.bundles.cache_clear()
+        assert [b.root.name for b in prebuilt.bundles()] == ["sm90-mine"]
+        assert "no prebuilt kernels" not in capsys.readouterr().err  # the other CUDA build is skipped silently
+    finally:
+        del os.environ[prebuilt.BUNDLE_ENV]
+        prebuilt.bundles.cache_clear()

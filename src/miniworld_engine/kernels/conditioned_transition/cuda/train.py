@@ -150,10 +150,8 @@ def owned_gemm_ext():
     from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
 
     cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
-    if cuda_home is None or tuple(
-        map(int, (torch.version.cuda or "0.0").split(".")[:2])
-    ) > (12, 9):
-        raise RuntimeError("Token Hopper owned GEMMs require CUDA <= 12.9")
+    if tuple(map(int, (torch.version.cuda or "0.0").split(".")[:2])) < (12, 0):
+        raise RuntimeError("Token Hopper owned GEMMs require CUDA 12 or newer")
     return load_inline(
         name="token_hopper_owned_gemm",
         cpp_sources=_OWNED_GEMM_CPP,

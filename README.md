@@ -77,8 +77,8 @@ current source and existing valid measurements; use `dev coverage` to inspect a 
 
 The hand-written CUDA kernels compile on first use (tens of minutes for a new environment) unless the installed engine
 is a binary wheel: release wheels (`miniworld_engine-<version>-cp3XX-cp3XX-manylinux_2_28_x86_64.whl`) carry the
-compiled kernels for H100 (sm_90a) in `miniworld_engine/_prebuilt/`, built against one torch / CUDA build and pinned to
-that torch minor version, so the first call loads binaries and never runs nvcc:
+compiled kernels for H100 (sm_90a) in `miniworld_engine/_prebuilt/` for both CUDA builds of torch 2.13 (the default
+PyPI one, CUDA 13.0, and the cu129 one) and pin `torch==2.13.*`, so the first call loads binaries and never runs nvcc:
 
 ```bash
 pip install miniworld-engine     # with the torch it pins; an sdist / git install keeps the JIT path

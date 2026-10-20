@@ -286,14 +286,19 @@ __global__ void __launch_bounds__(128 * NTOK) ln_vg_kernel(const float* __restri
   if (wtid == 0) tma::wait_all();
 }
 
-PFN_cuTensorMapEncodeTiled tma_encode() {
-  static PFN_cuTensorMapEncodeTiled fn = nullptr;
+PFN_cuTensorMapEncodeTiled_v12000 tma_encode() {
+  static PFN_cuTensorMapEncodeTiled_v12000 fn = nullptr;
   if (fn == nullptr) {
     void* p = nullptr;
     cudaDriverEntryPointQueryResult qr;
+    // CUDA 13 has no unversioned PFN name and deprecates cudaGetDriverEntryPoint: ask for the 12.0 ABI by version
+#if CUDART_VERSION >= 12050
+    C10_CUDA_CHECK(cudaGetDriverEntryPointByVersion("cuTensorMapEncodeTiled", &p, 12000, cudaEnableDefault, &qr));
+#else
     C10_CUDA_CHECK(cudaGetDriverEntryPoint("cuTensorMapEncodeTiled", &p, cudaEnableDefault, &qr));
+#endif
     TORCH_CHECK(p != nullptr && qr == cudaDriverEntryPointSuccess, "cuTensorMapEncodeTiled unavailable");
-    fn = reinterpret_cast<PFN_cuTensorMapEncodeTiled>(p);
+    fn = reinterpret_cast<PFN_cuTensorMapEncodeTiled_v12000>(p);
   }
   return fn;
 }

@@ -54,7 +54,7 @@ def cubin(stem: str, hopper: bool = False) -> str:
     )
     family = "atom_local_sm90" if hopper else "atom_local_sm100"
     return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
-                           toolchain="torch-cuda<=12.9" if hopper else "sm100"))
+                           toolchain="torch" if hopper else "sm100"))
 
 
 #: (stem, function, dynamic smem bytes) of every kernel

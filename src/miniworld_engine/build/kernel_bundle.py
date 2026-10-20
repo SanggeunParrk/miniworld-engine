@@ -18,7 +18,8 @@
 2. **Replay** (``--replay <records.jsonl>``): rebuild the recorded artifacts from their recipes in this environment --
    another Python ABI, another torch / CUDA -- without running a GPU driver: CPU only, ``--jobs`` processes.
 
-3. **Update** ``<prebuilt root>/<arch>/`` (default ``src/miniworld_engine/_prebuilt/<arch>``, not in git):
+3. **Update** ``<prebuilt root>/<arch>-cu<XY>/`` (default under ``src/miniworld_engine/_prebuilt/``, not in git; one
+   directory per arch and CUDA build):
    ``manifest.json`` (key -> path, kind, name, size, sha256, key material) and ``artifacts/``. Artifacts of this
    Python ABI (and every cubin) that the run did not reach are dropped (``--keep`` keeps them); other ABIs' extensions
    are kept.
@@ -305,6 +306,11 @@ def _abi_tag(cache_tag: str) -> str:
     return f"cp{m.group(1)}" if m else _safe(cache_tag or "py")
 
 
+def variant_name(arch: str, cuda: str) -> str:
+    """``sm90`` + CUDA ``12.9`` -> ``sm90-cu129``: the directory of one arch / CUDA build under ``_prebuilt/``."""
+    return f"{arch}-cu{str(cuda).replace('.', '')}"
+
+
 def _entry_python(entry: dict) -> str:
     return ((entry.get("material") or {}).get("python")) or "-"
 
@@ -315,8 +321,9 @@ def update_prebuilt(entries: dict[str, dict], root: Path, arch: str, *, keep: bo
     this Python ABI (and cubins) the run did not reach unless ``keep``; write the manifest."""
     from miniworld_engine.kernels import _codegraph as cg
 
-    target = root / arch
     versions = cg._versions()
+    # one directory per arch and CUDA build (a wheel carries several: torch picks the one built for its own CUDA)
+    target = root / variant_name(arch, versions["cuda"])
     old: dict = {}
     mf = target / prebuilt.MANIFEST
     if mf.is_file():
@@ -614,11 +621,12 @@ def build_wheel(args) -> int:
                         p.write_bytes(data)
                         binaries.append(p)
             log(f"{arch_dir.name}: {len(keep)} artifacts for {tag} ({dropped} of other Python ABIs left out)")
-        if len(torch_versions) != 1:
-            log(f"the arch bundles were built against different torch / CUDA: {sorted(torch_versions)}")
+        minors = {".".join(t.split("+")[0].split(".")[:2]) for t, _ in torch_versions}
+        if len(minors) != 1:
+            log(f"the bundles were built against different torch minor versions: {sorted(torch_versions)}")
             return 1
-        torch_version, cuda = next(iter(torch_versions))
-        major_minor = ".".join(torch_version.split("+")[0].split(".")[:2])
+        major_minor = next(iter(minors))
+        builds = ", ".join(f"{t} / CUDA {c}" for t, c in sorted(torch_versions))
         problems = check_binaries(binaries)
         for p in problems:
             log(f"  binary check: {p}")
@@ -654,7 +662,7 @@ def build_wheel(args) -> int:
                 record.append(f"{dist_info}/RECORD,,")
                 zout.writestr(f"{dist_info}/RECORD", "\n".join(record) + "\n")
     size = wheel.stat().st_size
-    log(f"wheel: {wheel} ({size / 1e6:.1f} MB; torch {torch_version} / CUDA {cuda} -> requires torch=={major_minor}.*)")
+    log(f"wheel: {wheel} ({size / 1e6:.1f} MB; {builds} -> requires torch=={major_minor}.*)")
     if size > 100e6:
         log("  over PyPI's 100 MB file limit")
     if problems:

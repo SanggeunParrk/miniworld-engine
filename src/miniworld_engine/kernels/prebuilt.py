@@ -1,7 +1,7 @@
 """Prebuilt kernels shipped inside the engine package, looked up by content key before any build.
 
-A release wheel of miniworld-engine carries ``miniworld_engine/_prebuilt/<arch>/`` (``sm90``, ``sm100``): a
-``manifest.json`` mapping content keys to artifacts (torch extension ``.so`` files and cubins) under ``artifacts/``. The
+A release wheel of miniworld-engine carries ``miniworld_engine/_prebuilt/<arch>-cu<XY>/`` per GPU arch and CUDA build
+(``sm90-cu129``, ``sm90-cu130``; ``sm100-*`` later), each a ``manifest.json`` mapping content keys to artifacts (torch extension ``.so`` files and cubins) under ``artifacts/``. The
 directory is produced at release time by ``miniworld-engine dev bundle-kernels`` (it is not in git), and an sdist or
 git install simply has none, so every artifact is JIT-built as before. ``MINIWORLD_ENGINE_KERNEL_BUNDLES``
 (``os.pathsep``-separated directories holding a ``manifest.json``) adds bundles from elsewhere, e.g. a freshly built
@@ -85,12 +85,12 @@ def mismatch(manifest: dict, *, arch: str | None = None) -> str | None:
 
 @functools.lru_cache(maxsize=1)
 def bundles() -> tuple[Bundle, ...]:
-    """The usable bundles (manifest matches this process), discovered once per process. A bundle for another arch is
-    skipped silently (a wheel carries every arch); one for another torch / CUDA is reported once on stderr."""
+    """The usable bundles (manifest matches this process), discovered once per process. Bundles for another arch, or for another
+    CUDA build when one fits, are skipped silently (a wheel carries several); if none fits, that is said once on stderr."""
     from miniworld_engine.kernels import _codegraph as cg
     from miniworld_engine.kernels._nvcc import build_log
 
-    found = []
+    found, skipped = [], []
     arch = cg.target_arch()
     for root in _candidate_dirs():
         try:
@@ -102,9 +102,11 @@ def bundles() -> tuple[Bundle, ...]:
             continue
         why = mismatch(manifest, arch=arch)
         if why:
-            build_log(f"ignoring kernel bundle {root}: {why}")
+            skipped.append(f"{root.name} ({why})")
             continue
         found.append(Bundle(root, manifest))
+    if skipped and not found:  # one build per CUDA ships side by side: only say so when none of them fits
+        build_log(f"no prebuilt kernels for this torch / CUDA; ignoring {', '.join(skipped)}")
     return tuple(found)
 
 
