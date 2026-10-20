@@ -35,7 +35,11 @@ def native_dependencies(arch: str) -> None:
 
     major = int(normalise_arch(arch)[2:]) // 10
     errors = []
-    if major >= 9:
+    # The cuBLASDx headers are included by one extension only, the sm_90a Transition binding
+    # (kernels/transition/cuda, gencode 90a). Nothing a B200 (sm_100) dispatches includes them, and
+    # requiring them there failed every `build all` on a B200 environment without mathdx before any
+    # work started.
+    if major == 9:
         from miniworld_engine.kernels._nvcc import mathdx_includes
         try:
             mathdx_includes()
