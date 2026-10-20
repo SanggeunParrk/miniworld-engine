@@ -23,7 +23,7 @@ import torch
 
 from miniworld_engine.kernels._device import num_sms
 
-from miniworld_engine.kernels.bias_only_dit.cuda import _descriptors, _dir
+from miniworld_engine.kernels.bias_only_dit.cuda import _descriptors, _dir, sm100_kernel
 from miniworld_engine import settings
 
 D, DC = 768, 384
@@ -233,7 +233,7 @@ class TailBwd:
             *(() if stages == 4 else (f"TAIL_NST={stages}",)),
             *(("TRACE",) if trace else ()),
         )
-        self.k = _sm100()._sm100_kernel(
+        self.k = sm100_kernel(
             "bo_bwd_tail",
             "bo_bwd_tail_sm100",
             device_index,
@@ -443,7 +443,7 @@ class MidBwd:
             *(("CF32",) if cf32 else ()),
             *(("TRACE",) if trace else ()),
         )
-        self.k = _sm100()._sm100_kernel(
+        self.k = sm100_kernel(
             "bo_bwd_mid",
             "bo_bwd_mid_sm100",
             device_index,
@@ -603,7 +603,7 @@ class Wgrad:
         self.idx, self.da = device_index, da
         self.nsm = num_sms(device_index)
         self.plan, wmax = wgrad_plan(da, self.nsm)
-        self.k = _sm100()._sm100_kernel(
+        self.k = sm100_kernel(
             "bo_wgrad",
             "bo_wgrad_sm100",
             device_index,
