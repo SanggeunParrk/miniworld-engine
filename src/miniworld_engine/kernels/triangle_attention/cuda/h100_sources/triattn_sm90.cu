@@ -13,10 +13,12 @@
 // row r) has two phases:
 //   G: the warpgroup's 64 x 128 bias fragment (ldmatrix) initialises a score accumulator (the H100 technique of Anthropic's opt_core
 //      `triattn_m1`: no per-logit bias add), and S += Q_r K_rj^T is issued (RS wgmma: Q_r lives in registers for the whole task);
-//   X: p = 2^(S * scale * log2e - m_r), max-free (the offset m_r is the maximum of the row's first 32 keys, fixed for the task -- the
-//      B200 kernel's and opt_core's max-free softmax; a later logit would have to exceed it by ~126 log2 units to overflow, which the
-//      epilogue counts in FLAGS); P rounded to bf16 in registers = the A fragment of [O_r | l_r] += P [V_rj | 1] (one m64n40 RS
-//      wgmma per 16 keys: the row sums come from the tensor core, from the same bf16 P), left in flight.
+//   X: p = 2^(S * scale * log2e - m_r) with the row's running maximum as the offset m_r, raised lazily (only when a tile's maximum
+//      exceeds it by more than TA_TAU = 8 log2 units; o_r and l_r are then rescaled, which is safe because they are idle during the X phase
+//      of their own row), so p <= 2^8 for any spread of the logits; P rounded to bf16 in registers = the A fragment of
+//      [O_r | l_r] += P [V_rj | 1] (one m64n40 RS wgmma per 16 keys: the row sums come from the tensor core, from the same bf16 P),
+//      left in flight.  (An earlier version fixed m_r at the maximum of the first 32 keys and overflowed to inf / NaN when a later
+//      logit exceeded it by ~126 log2 units, which trained weights do.)
 // The sub-steps are software-pipelined in each warpgroup (two score accumulators): the G phase of sub-step y + 1 is issued before
 // the X phase of y, so the QK^T GEMM and its latency hide under the exponentials; the MUFU (16 ex2 / clk / SM) is the bound.
 // With TA_PP the two consumer warpgroups also take turns on the G phase (FlashAttention-3's scheduler barrier).
@@ -50,6 +52,9 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 #ifndef TB_WGSYNC
 #define TB_WGSYNC 0       // experiments: a warpgroup barrier at the start of every sub-step
+#endif
+#ifndef TA_TAU
+#define TA_TAU 8.f        // forward: a tile raises a row's offset only when its maximum exceeds it by more than this many log2 units
 #endif
 #ifndef TA_POLY
 #define TA_POLY 0         // forward: exponentials (of every 16) computed on the FMA pipe instead of the MUFU
@@ -209,20 +214,27 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     if (lane == 0) arrive(kve(xst));
     if (++xst == NKV) xst = 0;
   };
-  // X phase of (tile j, row r) on s (its QK^T retired): the row offset (first tile) and the exponentials, in place
+  // X phase of (tile j, row r) on s (its QK^T retired): the row offset and the exponentials, in place.  The offset is the running
+  // maximum of the row, raised only when a tile's maximum exceeds it by more than TA_TAU log2 units (the lazy rescale of
+  // FlashAttention-4): every p is then <= 2^TA_TAU, whatever the spread of the logits, and the first tile fixes the offset exactly.  The
+  // accumulators o[r] are idle here (the PV in flight belongs to the other pair row), so a rescale is a plain multiply of o[r] and l_r.
   auto X = [&](int j, int r) {
     TRACE(5);
-    if (j == 0) {                                // the row's offset: the maximum of its first 32 keys, fixed for the task
-      float m0 = fmaxf(s[0], s[1]), m1 = fmaxf(s[2], s[3]);
+    float m0 = fmaxf(s[0], s[1]), m1 = fmaxf(s[2], s[3]);
 #pragma unroll
-      for (int i = 1; i < 4; ++i) { m0 = fmaxf(m0, fmaxf(s[4 * i], s[4 * i + 1])); m1 = fmaxf(m1, fmaxf(s[4 * i + 2], s[4 * i + 3])); }
-      m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 1)); m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 2));
-      m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 1)); m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 2));
-      m0 *= scl; m1 *= scl;
-      m[r][0] = m0 > -1e30f ? m0 : 0.f;          // 32 masked keys (bias = -inf): -inf - -inf would be NaN
-      m[r][1] = m1 > -1e30f ? m1 : 0.f;
+    for (int i = 1; i < 16; ++i) { m0 = fmaxf(m0, fmaxf(s[4 * i], s[4 * i + 1])); m1 = fmaxf(m1, fmaxf(s[4 * i + 2], s[4 * i + 3])); }
+    m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 1)); m0 = fmaxf(m0, __shfl_xor_sync(0xffffffffu, m0, 2));
+    m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 1)); m1 = fmaxf(m1, __shfl_xor_sync(0xffffffffu, m1, 2));
+    m0 *= scl; m1 *= scl;                         // -inf when the tile's 128 keys are all masked
+    const bool u0 = m0 > m[r][0] + TA_TAU, u1 = m1 > m[r][1] + TA_TAU;     // m = -inf until a finite logit was seen
+    if (__any_sync(0xffffffffu, u0 | u1)) {
+      const float n0 = u0 ? m0 : m[r][0], n1 = u1 ? m1 : m[r][1];
+      const float f0 = u0 ? ex2f(m[r][0] - n0) : 1.f, f1 = u1 ? ex2f(m[r][1] - n1) : 1.f;     // 2^(-inf) = 0 scales an empty sum
+#pragma unroll
+      for (int i = 0; i < 5; ++i) { o[r][4 * i] *= f0; o[r][4 * i + 1] *= f0; o[r][4 * i + 2] *= f1; o[r][4 * i + 3] *= f1; }
+      m[r][0] = n0; m[r][1] = n1;
     }
-    const float nm0 = -m[r][0], nm1 = -m[r][1];
+    const float nm0 = m[r][0] > -INFINITY ? -m[r][0] : 0.f, nm1 = m[r][1] > -INFINITY ? -m[r][1] : 0.f;   // all keys masked so far: -inf - -inf would be NaN
 #pragma unroll
     for (int i = 0; i < 16; ++i) {
 #pragma unroll
@@ -287,7 +299,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     for (int r = 0; r < R; ++r) {
 #pragma unroll
       for (int i = 0; i < 20; ++i) o[r][i] = 0.f;
-      m[r][0] = m[r][1] = 0.f;
+      m[r][0] = m[r][1] = -INFINITY;             // no finite logit seen yet
     }
     {                                              // sub-step (0, 0): no previous PV
 #if TA_PP
@@ -332,8 +344,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
       const int q0 = qt * BM + qrow + g8;
       if (LSE != nullptr && t4 == 0) {
         float* lp = LSE + ((size_t)(b * N + n) * H + h) * S + q0;
-        lp[0] = m[r][0] + __log2f(l0);
-        lp[8] = m[r][1] + __log2f(l1);
+        lp[0] = (m[r][0] > -INFINITY ? m[r][0] : 0.f) + __log2f(l0);
+        lp[8] = (m[r][1] > -INFINITY ? m[r][1] : 0.f) + __log2f(l1);
       }
 #pragma unroll
       for (int half = 0; half < 2; ++half) {
@@ -382,8 +394,8 @@ torch::Tensor& flags_for(const torch::Device& dev) {
 
 // q, k, v [B, N, S, H, 32] bf16 (the projection layout: row (b, n, s) holds all heads; rows may sit at a common wider stride);
 // sbias bf16 [B, H, S, S] contiguous = bias / scale (masked keys -inf); S % 128 == 0.
-// -> (out [B, N, S, H, 32] bf16 contiguous, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [1]: rows whose offset
-//     overflowed, a per-device counter accumulated over every call)
+// -> (out [B, N, S, H, 32] bf16 contiguous, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [1]: rows whose sum left
+//     (0, 3e38) -- a row with every key masked --, a per-device counter accumulated over every call)
 std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
                                        c10::optional<torch::Tensor> gate, bool want_out) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 5 && q.size(4) == D, "q [B, N, S, H, 32]");

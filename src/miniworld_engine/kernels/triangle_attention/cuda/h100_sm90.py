@@ -44,7 +44,7 @@ def _core(rows: int = 2, defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_core_r{rows}{tag}_v11",
+        name=f"triattn_h100_core_r{rows}{tag}_v12",
         sources=[str(_SRC / "triattn_sm90.cu")],
         extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}", *(f"-D{d}" for d in defs)],
         verbose=True,

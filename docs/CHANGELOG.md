@@ -21,6 +21,9 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- H100 TriangleAttention forward core: the softmax offset is the row's running maximum raised lazily (threshold 8 log2 units, o and l rescaled) instead of the
+  maximum of the first 32 keys fixed for the task, which overflowed to inf / NaN when a later logit exceeded it by ~126 log2 units (trained weights do). The reduction order
+  is unchanged (deterministic). Test `tests/gpu/sm90/test_triattn_large_logits_gpu.py`.
 - Pointer-keyed weight and conditioning caches (Transition weight re-layout, token / bias-only / local DiT pair-bias and conditioning tables, conditioned-transition
   packs) no longer serve a stale entry when a new tensor reuses a freed address at the same version: an entry keeps a weak reference to its key tensor and a hit
   needs that reference to be the tensor asked for. Tests `tests/cpu/kernels/test_transition_weight_cache_identity.py`, `tests/gpu/sm90/test_pointer_keyed_caches_gpu.py`.

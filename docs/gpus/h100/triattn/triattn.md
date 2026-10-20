@@ -55,8 +55,9 @@ F1 · front → F2 · attention → F3 · tail.
 - **F2 `triattn_fwd_sm90`** — task = (b, h, 128-query tile) × 2 pair rows, persistent grid ordered query tile, head, row group
   (the CTAs running together share whole K / V rows in L2); a TMA producer warpgroup and two consumer warpgroups (64 queries each).
   The score accumulator starts from the bias (ldmatrix of the bf16 bias / scale tile: no per-logit bias add — the technique of
-  Anthropic's opt_core `triattn_m1`), S += Q K^T is an RS wgmma with Q in registers for the whole task, the softmax is max-free
-  (the offset is the maximum of the row's first 32 keys, fixed for the task; the B200 kernel's and opt_core's), and one m64n40 RS
+  Anthropic's opt_core `triattn_m1`), S += Q K^T is an RS wgmma with Q in registers for the whole task, the softmax offset is
+  the row's running maximum, raised lazily (only when a tile exceeds it by more than 8 log2 units, then o and l are rescaled; every p <= 2^8,
+  so trained weights with logits of 100-200 no longer overflow to NaN as the earlier fixed first-32-keys offset did), and one m64n40 RS
   wgmma per 16 keys computes [O | l] += P [V | 1] (the row sums on the tensor core, from the same bf16 P). The sub-steps run in
   FlashAttention-3 order (QK^T of this sub-step, PV of the previous one, the exponentials under the PV) with nothing in flight at a
   loop back edge.
