@@ -107,9 +107,34 @@ L768 0.9032 / 3.4757 vs 0.9042 / 3.4733; ending node the same ±0.5 %. Tests: `t
 dW_q|k|v|g|o bitwise on both paths; default: y bitwise, the fused weight gradients within 1e-2, the wide ones bitwise), and
 `test_deterministic_wgrad_matches_default` (y bitwise, gradients within 1e-3).
 
+## Follow-up: the ending node without transposed copies
+
+The ending node had run the starting-node kernels on `pair.transpose(1, 2).contiguous()` and transposed y back (dy / dx likewise in
+training): 1.09-1.67x the starting node's time. The kernels walk rows (b, n, s) of the starting-node layout; the ending node's row
+(b, n, s) is element [b, s, n] of the caller's tensor. Each kernel that loads or stores a pair-shaped tensor (x, y, dy, dx; the wide
+path's dy o drop and u) now takes `trans` and uses a 4-D tensor map (c, j, i, b) with box (c-width, 1, rows, 1) at (c0, n, s, b)
+(`make_rows_map`, `load_rows`, `store_rows`, `reduce_rows`): the box lands in shared memory as the starting node's 2-D box does, so
+the kernels' shared-memory code is unchanged; raw-pointer reads (the wide front's row statistics, the wide tail's dropout-path
+residual) use `row_at`. The wide path's dW_o = (dy o drop)^T u needs both factors in one row order: `tri_scale_rows` keeps the
+caller's layout (its dropout index follows i), and `tri_wgbwd` stores u through the same transposed map. Intermediates (q, k, v, g,
+bias, o, lse, statistics, D) stay in the starting-node layout.
+
+`tri_wfront` and `tri_wgbwd` take the layout as a template argument (as a runtime flag it made them spill); ptxas: the starting-node
+instantiations do not spill, `tri_wgbwd<C, true>` spills 12 B (the ending node's training), `tri_wfront<384 / 448 / 512, 8, true>`
+28-40 B but are never launched (8 drain warps are used only up to C 256); the fused kernels' spills are unchanged (`tri_wgrad` 120 B,
+as main).
+
+Checks: y the same bits as main (which transposed) in all 96 cases of `p_b1_dump.py` (both nodes); the batched suite 539 passed / 3
+memory skips (`test_deterministic` now also on the ending node), test_triattn_b200_gpu.py and the plan / public-API CPU tests 88
+passed / 2 skipped. Memory: the ending node's peak per pair token now equals the starting node's (e.g. d_pair 128 training 3146 B,
+was 3660), the model's ending terms removed. Starting node kernel time unchanged (d_pair 128 L128 training 113.4-114.4 vs 113.9-114.1
+us, L384 inference 172.6 vs 172.6 us). CUDA graph, bf16-mixed, ms, starting / ending now / ending before: d_pair 128 inference L384 B1
+0.171 / 0.177 / 0.256, L768 B1 0.905 / 0.925 / 1.265, L384 B48 6.79 / 7.00 / 11.33, L768 B48 41.9 / 42.5 / 59.1; training L384 B1
+0.676 / 0.684 / 0.805, L768 B48 156.8 / 157.9 / 184.0; d_pair 64 (4 x 16) inference L768 B48 39.4 / 39.6 / 48.5; d_pair 256 inference
+L384 B1 0.349 / 0.354 / 0.530, training L768 B16 109.0 / 110.9 / 125.0 (full table in triattn.md). Against main at B = 1, ending node
+(d_pair 64 / 256, L128-768): inference 0.68-0.91x main's time, training 0.87-0.96x.
+
 ## Not done
 
-- The ending node still transposes in and out (40-49 % over the starting node at d_pair 128 inference, 15-20 % in training at B = 1);
-  H100 reads it through transposed tensor maps.
 - Chunked training copies each chunk's y and dx into the batch's tensors (the main cost of the 0.93-0.96x cells).
 - dbias stays an fp32 reduce-add in L2 order: dx / dgamma / dbeta / dW_b are not bitwise run to run (as on H100).

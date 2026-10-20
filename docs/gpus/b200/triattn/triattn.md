@@ -26,8 +26,9 @@ B200, `modules.dispatch.restricted_card`):
   chunks: [Batched samples](#batched-samples-b--1-any-length-and-chunking-2026-10-20)), `mask` is None or bool `[B, L]`;
 - compute capability (10, 0).
 
-Starting and ending node both run it (the ending node transposes in and out, two `[L, L, 128]` copies; at B = 1 that costs the
-ending node 40-49 % over the starting node at d_pair 128 inference, 15-20 % in training). Dropout is the
+Starting and ending node both run it; the ending node's pair, output, dy and dx are read and written in the caller's layout through
+4-D tensor maps (no transposed copies; 0-6 % over the starting node, see
+[Ending node without transposed copies](#ending-node-without-transposed-copies-2026-10-20)). Dropout is the
 module's own broadcast draw (`_make_drop_scale`, row-broadcast for the starting node, column for the ending node), applied
 inside the output kernel and its backward. Parameters may be bf16 or fp32 (master weights): one pack kernel stages them
 and the gradients come back in the parameters' dtype. Keys whose bias is masked get `finfo(bf16).min`, as in the
@@ -290,7 +291,8 @@ paths; the launches are opaque custom ops, so the module compiles to one graph).
   heads, training, total_memory, ending)` samples one after another: never an out-of-memory error and never the PyTorch statements
   because of B or L. The chunk is a function of the shapes, node, mode and the device's TOTAL memory only (the same split under
   torch.compile and in CUDA graphs). Working set per pair token (`_bytes_per_token`, the tensors each path allocates; against the
-  measured peaks of one launch -1.0 / +2.3 % over seven widths x both nodes x padded / whole-tile L x B 1-4, the -1 % at d_pair 512
+  measured peaks of one launch -1.0 / +2.3 % over seven widths x both nodes x padded / whole-tile L x B 1-4 (the ending node now
+  allocates what the starting node does), the -1 % at d_pair 512
   B = 1 L256: fixed allocations, under the 1 GiB slack), budget 0.85 of the
   device (179 GiB on B200) minus 1 GiB after the caller's x / y (training also dy / dx). Inference chunks write their rows of the
   output in place (new `out` of `tri_tail` / `tri_wtail`; a padded length, dropout or a traced call copies instead); training chunks
@@ -313,6 +315,45 @@ paths; the launches are opaque custom ops, so the module compiles to one graph).
   669.8 µs, L768 +0.2 %. The default (False) reduces with fp32 atomics as before (the last bits depend on the order; within 1e-3 of
   the fixed-order sum), and the B = 1 training step stays at main's time. dx, dγ, dβ and dW_b carry the query-side kernel's fp32
   reduce-add of dbias in either mode (L2 order; dx within 1e-5 relative run to run).
+
+#### Ending node without transposed copies (2026-10-20)
+
+The ending node used to run the starting-node kernels on a transposed copy of the pair and transpose the result back (and dy / dx in
+training): 9-67 % over the starting node. Now the kernels that touch the pair-shaped tensors -- `tri_front` / `tri_wfront` (x),
+`tri_tail` / `tri_wtail` (x, y), `tri_gate_bwd` (dy, the dx seed), `tri_head_bwd` (x, the dx reduce-add), `tri_wgrad` (x),
+`tri_wgbwd` (dy o drop, u), `tri_whbwd` (x, dy, dx), `tri_scale_rows` -- read and write the caller's `[B, I, J, C]` tensor through 4-D
+TMA maps (c, j, i, b) with a box of consecutive i at one j (`make_rows_map` / `load_rows` / `store_rows` / `reduce_rows` in
+`sm100.cuh`; the shared-memory image is the 2-D box of the starting node), raw-pointer reads go through `row_at`; the intermediates
+(q, k, v, g, bias, o, lse, statistics, the gradient rows) keep the starting-node layout. The wide path's dW_o = (dy o drop)ᵀ u pairs
+dy o drop and u in the caller's layout. The output is the same bits as the copying version (96 cases against main: seven widths x
+L128 / 384 x B 1 / 2 x both nodes x inference / training x bf16 / fp32 parameters). The starting node runs the same kernels on the same
+bits at the same kernel time (d_pair 128: L128 training 113.4-114.4 vs 113.9-114.1 µs, L384 inference 172.6 vs 172.6 µs).
+
+CUDA graph, bf16-mixed, best of 2 interleaved runs, ms: starting node / ending node now / ending node before.
+
+| d_pair, mode | L | B | starting | ending | ending before | ending: before / now |
+|---|---|---|---|---|---|---|
+| 128 inference | 128 | 1 | 0.0308 | 0.0308 | 0.0410 | 1.33 |
+| 128 training | 128 | 1 | 0.1212 | 0.1233 | 0.1430 | 1.16 |
+| 128 inference | 384 | 1 | 0.1710 | 0.1769 | 0.2559 | 1.45 |
+| 128 training | 384 | 1 | 0.6756 | 0.6836 | 0.8050 | 1.18 |
+| 128 inference | 768 | 1 | 0.9050 | 0.9253 | 1.2647 | 1.37 |
+| 128 training | 768 | 1 | 3.479 | 3.506 | 4.008 | 1.14 |
+| 128 inference | 384 | 48 | 6.790 | 7.004 | 11.33 | 1.62 |
+| 128 training | 384 | 48 | 26.00 | 26.30 | 32.83 | 1.25 |
+| 128 inference | 768 | 48 | 41.91 | 42.47 | 59.10 | 1.39 |
+| 128 training | 768 | 48 | 156.8 | 157.9 | 184.0 | 1.16 |
+| 64 (4 × 16) inference | 384 | 1 | 0.2042 | 0.2059 | 0.2358 | 1.15 |
+| 64 (4 × 16) training | 384 | 1 | 0.6798 | 0.6902 | 0.7486 | 1.08 |
+| 64 (4 × 16) inference | 768 | 48 | 39.35 | 39.56 | 48.49 | 1.23 |
+| 64 (4 × 16) training | 768 | 48 | 152.2 | 153.9 | 165.6 | 1.08 |
+| 256 inference | 384 | 1 | 0.3485 | 0.3542 | 0.5295 | 1.49 |
+| 256 training | 384 | 1 | 1.332 | 1.376 | 1.596 | 1.16 |
+| 256 inference | 768 | 16 | 28.63 | 29.10 | 39.66 | 1.36 |
+| 256 training | 768 | 16 | 109.0 | 110.9 | 125.0 | 1.13 |
+
+The ending node is now 0-6 % over the starting node (the remaining cost: each 4-D box gathers 128 rows that lie L x C elements
+apart instead of one contiguous block).
 
 ### Batched samples · measurements (2026-10-20)
 
@@ -366,8 +407,8 @@ B calls / one call and best other / one call. Probe harness: `p_bench.py` (outsi
 Further cases (same protocol): chunked calls -- d_pair 128 training L768 B96 (27 a launch, saved tensors kept) 349.3 ms vs 335.1
 (B calls; cuEquivariance refuses the shape: invalid launch configuration), d_pair 256 training L768 B32 (22 a launch) 248.8 vs 231.6,
 d_pair 512 inference L768 B40 (37 a launch) 182.5 vs 173.7; ragged L300 (computed at 384), d_pair 128 B16: inference 3.312 vs 3.746
-(cuEquivariance 8.578), training 11.46 vs 13.23 (27.04); ending node L384 B48: inference 11.33 vs 12.40 (36.36), training 33.05 vs
-39.13 (126.5); long crops, d_pair 128 training L2048 B2 101.6 vs 101.7 (394.4), d_pair 64 (4 × 16) 97.7 vs 97.9 (358.8), d_pair 128
+(cuEquivariance 8.578), training 11.46 vs 13.23 (27.04); ending node L384 B48 (with the transposed copies, before the change above:
+now 7.00 / 26.30 ms): inference 11.33 vs 12.40 (36.36), training 33.05 vs 39.13 (126.5); long crops, d_pair 128 training L2048 B2 101.6 vs 101.7 (394.4), d_pair 64 (4 × 16) 97.7 vs 97.9 (358.8), d_pair 128
 inference L2560 B2 49.3 vs 49.4 (93.0); PyTorch compiled runs out of memory from L2048.
 
 One call is 1.00-5.82x faster than B calls wherever the batch's saved tensors fit and the launches are not long, and 2-4.6x faster
@@ -380,8 +421,8 @@ graph (no gaps) take 89.0 ms against the one call's 88.4 ms (d_pair 256 L768; d_
 B = 1 against main (59d910cf), same harness, CUDA graph, bf16-mixed, ms (inference / training): d_pair 128, the default (atomic)
 weight-gradient reduction, best of 3 interleaved runs (2026-10-20, after the deterministic sum became opt-in), starting node L128
 0.0287 / 0.1219 -> 0.0287 / 0.1219, L256 0.0758 / 0.3063 -> 0.0758 / 0.3063, L384 0.1739 / 0.6743 -> 0.1731 / 0.6748, L512 0.3284 /
-1.2744 -> 0.3275 / 1.2748, L768 0.9042 / 3.4733 -> 0.9032 / 3.4757, ending node within the same ±0.5 %; d_pair 64 (4 × 16) and
-256: every cell L128-768 within ±1 % (both nodes, best of 2). With the deterministic sum d_pair 128 training is +1.3 % at L128 (kernel
+1.2744 -> 0.3275 / 1.2748, L768 0.9042 / 3.4733 -> 0.9032 / 3.4757 (the ending node, which main runs with transposed copies, is
+now 1.14-1.45x faster than main, table above); d_pair 64 (4 × 16) and 256, starting node: every cell L128-768 within ±1 % (best of 2). With the deterministic sum d_pair 128 training is +1.3 % at L128 (kernel
 time) and +0.7 % at L384. The output is the same bits as main at B = 1 and 2 (96 cases: seven configurations x L128 / 384 x
 both nodes x inference / training x bf16 / fp32 parameters).
 
@@ -582,13 +623,14 @@ reference, the output and every gradient stay within 1.25× the bf16 PyTorch mod
 gradients). Outside the harness, at (384, 128): worst parameter / input gradient rel. Frobenius 6.4e-3 (PyTorch bf16
 1.0e-2, cuEquivariance 6.7e-3); at (768, 128) 6.5e-3 (1.1e-2, 6.8e-3).
 
-Batched samples (`tests/gpu/sm100/test_triattn_b200_batched_gpu.py`, 529 passed, 3 not run: the test's own tensors above 64 GB): B in
+Batched samples (`tests/gpu/sm100/test_triattn_b200_batched_gpu.py`, 539 passed, 3 not run: the test's own tensors above 64 GB): B in
 {1, 2, 4, 8, 16, 32, 48} x L in {128, 300 (ragged), 384, 768} x the seven registered width layouts x inference / training, every sample
 its own key mask and dropout scale: y bitwise equal to B one-sample calls in every case, dx within 5e-3 and the parameter gradients
 within 5e-3 of the fp32 sum of the per-sample ones (relative), against the fp32 PyTorch statements (all samples where the
 [B, H, L, L, L] logits fit, then also every parameter gradient; else the first and last sample) within 1.25x the bf16 statements'
 own error. Also: ending node (B 4 / 48 x L128 / 300 / 384), ragged L 16-520, L < 16 not served, run-to-run bitwise determinism
-under a NaN-poisoned allocator (y, dW_q|k|v|g|o), forced chunks (kept / rerun / inference, both nodes, L256 and padded L208: y
+under a NaN-poisoned allocator on both nodes (y always; dW_q|k|v|g|o on the wide path, and on the fused path with
+`triattn_b200_deterministic_wgrad`), forced chunks (kept / rerun / inference, both nodes, L256 and padded L208: y
 bitwise to one launch), six calls that do not fit in one launch (peak under 0.95 of the device), L 1000 / 1536 / 2048 / 2560 (pair
 rows against the fp32 statements of those rows, within 1.25x the bf16 statements' error), CUDA-graph capture and torch.compile
 (fullgraph) with one launch and with chunks. `tests/cpu/kernels/test_triattn_b200_batch_plan.py` (23) checks `plan` / `max_batch`

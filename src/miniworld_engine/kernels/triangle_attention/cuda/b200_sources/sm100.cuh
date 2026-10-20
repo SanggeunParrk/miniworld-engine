@@ -97,6 +97,49 @@ __device__ __forceinline__ void store_4d(const void* map, const void* src, int c
   asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
                :: "l"(map), "r"(sa(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
+// ---------------------------------------------------------------- pair rows in either node's layout
+// The TriangleAttention kernels walk rows (b, n, s) of the starting-node layout ([B, L (n), L (s), C], row = (b L + n) L + s). The
+// ending node's pair is the same tensor transposed: (b, n, s) sits at [b, s, n] of the caller's [B, L, L, C]. With `trans` the
+// row-tile loads / stores of the caller's tensors (x, y, dy, dx) go through 4-D maps (c, j, i, b) (`make_rows_map`) at (c0, n, s, b):
+// a box of consecutive s at one n -- the same shared-memory image as the 2-D box of the starting node (no transposed copies).
+__device__ __forceinline__ void rows_nsb(int row0, int L, int& n, int& s, int& b) { b = row0 / (L * L); n = (row0 / L) % L; s = row0 % L; }
+__device__ __forceinline__ void load_rows(const void* map, void* dst, uint64_t* bar, int c0, int row0, int L, bool trans) {
+  if (!trans) { load_2d(map, dst, bar, c0, row0); return; }
+  int n, s, b; rows_nsb(row0, L, n, s, b);
+  load_4d(map, dst, bar, c0, n, s, b);
+}
+__device__ __forceinline__ void load_rows(const void* map, uint32_t dst, uint32_t bar, int c0, int row0, int L, bool trans) {
+  if (!trans) { load_2d(map, dst, bar, c0, row0); return; }
+  int n, s, b; rows_nsb(row0, L, n, s, b);
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+}
+__device__ __forceinline__ void store_rows(const void* map, uint32_t src, int c0, int row0, int L, bool trans) {
+  if (!trans) { store_2d(map, src, c0, row0); return; }
+  int n, s, b; rows_nsb(row0, L, n, s, b);
+  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
+               :: "l"(map), "r"(src), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+}
+__device__ __forceinline__ void store_rows(const void* map, const void* src, int c0, int row0, int L, bool trans) {
+  store_rows(map, sa(src), c0, row0, L, trans);
+}
+// bf16 / fp32 reduce-add of a row tile into the caller's tensor
+__device__ __forceinline__ void reduce_rows(const void* map, const void* src, int c0, int row0, int L, bool trans) {
+  if (!trans) {
+    asm volatile("cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3}], [%1];\n"
+                 :: "l"(map), "r"(sa(src)), "r"(c0), "r"(row0) : "memory");
+    return;
+  }
+  int n, s, b; rows_nsb(row0, L, n, s, b);
+  asm volatile("cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
+               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+}
+// element offset of row `row` of the starting-node layout in the caller's tensor ([B, L, L, ld], rows of ld elements)
+__device__ __forceinline__ long row_at(long row, int L, bool trans) {
+  if (!trans) return row;
+  const long ll = (long)L * L, b = row / ll, n = (row / L) % L, s = row % L;
+  return (b * L + s) * L + n;
+}
 __device__ __forceinline__ void bulk_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
 template <int N> __device__ __forceinline__ void bulk_wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" :: "n"(N) : "memory"); }
 template <int N> __device__ __forceinline__ void bulk_wait() { asm volatile("cp.async.bulk.wait_group %0;\n" :: "n"(N) : "memory"); }
@@ -342,6 +385,16 @@ inline CUtensorMap make_map(const void* base, const uint64_t (&dims)[R], const u
                             CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   TORCH_CHECK(r == CUDA_SUCCESS, "cuTensorMapEncodeTiled(", what, ") failed: ", (int)r);
   return m;
+}
+
+// A row-tile map over the caller's pair-shaped tensor [B, L, L, cols] (rows at stride ld): 2-D (cols, rows) for the starting node
+// (trans_L = 0), else 4-D (cols, L (j), L (i), B) with a box of br rows along i at one j (see load_rows).
+inline CUtensorMap make_rows_map(const void* base, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t bc, uint32_t br, CUtensorMapSwizzle sw,
+                                 const char* what, long trans_L, CUtensorMapDataType dt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, int esize = 2) {
+  if (trans_L == 0) return make_map<2>(base, {cols, rows}, {ld}, {bc, br}, sw, what, dt, esize);
+  const uint64_t L = (uint64_t)trans_L, B = rows / (L * L);
+  TORCH_CHECK(B * L * L == rows && L % br == 0, what, ": rows = B L^2 and L a multiple of the box");
+  return make_map<4>(base, {cols, L, L, B}, {ld, ld * L, ld * L * L}, {bc, 1u, br, 1u}, sw, what, dt, esize);
 }
 
 // sum a [splits, ...] fp32 buffer over dim 0 -> dtype (fp32 or bf16), deterministic
