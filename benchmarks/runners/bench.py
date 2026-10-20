@@ -150,6 +150,9 @@ class BenchConfig(BaseModel):
     d_head: int = (
         0  # bias_only_dit: the head width (0: 768 / n_head; 64 with n_head 16: 16 x 64)
     )
+    #: bias_only_dit: a pair of its own per sample (the samples folded into the batch axis: single [1, A, L, d], pair [A, L, L, d_pair],
+    #: key mask [A, L]) instead of one pair for all of them. Training only on H100 (`bias_only_dit_train.block_psb`).
+    per_sample_pair: bool = False
     min_seq_len: int = 64
     max_seq_len: int = 384
     seq_len_step: int = 64
@@ -5820,6 +5823,13 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
             )
 
         def forward(self, single, cond, pair, mask=None):
+            if conf.per_sample_pair:  # a pair per sample: every block's bias from ONE LayerNorm + GEMM (the stack's hoist), then the blocks
+                from miniworld_engine.modules.bias_only_dit import pair_bias_all
+
+                biases = pair_bias_all(list(self.layers), pair)
+                for layer, bias in zip(self.layers, biases, strict=True):
+                    single = layer(single, cond, None, mask, bias=bias)
+                return single
             for layer in self.layers:
                 single = layer(single, cond, pair, mask)
             return single
@@ -5839,9 +5849,10 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     model.train(is_train)
 
     torch.manual_seed(1)
+    per_sample = conf.per_sample_pair  # [1, A, L, d] with a pair row per sample: the samples ride the batch axis
+    lead = (1, conf.n_augment) if per_sample else (conf.n_augment, 1)
     single = torch.randn(
-        conf.n_augment,
-        1,
+        *lead,
         length,
         d_single,
         device=DEVICE,
@@ -5850,14 +5861,14 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     )
     if (
         conf.shared_cond
+        and not per_sample
     ):  # one conditioning for every sample (stride 0 over the samples)
         cond = torch.randn(
             1, 1, length, d_cond, device=DEVICE, dtype=dtype, requires_grad=is_train
         ).expand(conf.n_augment, 1, length, d_cond)
     else:
         cond = torch.randn(
-            conf.n_augment,
-            1,
+            *lead,
             length,
             d_cond,
             device=DEVICE,
@@ -5865,13 +5876,28 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
             requires_grad=is_train,
         )
     pair = torch.randn(
-        1, length, length, d_pair, device=DEVICE, dtype=dtype, requires_grad=is_train
+        conf.n_augment if per_sample else 1,
+        length,
+        length,
+        d_pair,
+        device=DEVICE,
+        dtype=dtype,
+        requires_grad=is_train,
     )
-    mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
+    mask = torch.rand(conf.n_augment if per_sample else 1, length, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
 
     if spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
+    elif per_sample:
+        with torch.set_grad_enabled(is_train):
+            served = model.layers[0]._psb_candidate(single, cond, pair, None)
+        execution_path = (
+            "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit_train.block_psb[per-sample pair bias: "
+            "pair_bias_all (one LayerNorm + GEMM for all blocks) + per-sample attention core + token DiT train rows]"
+            if served
+            else "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: the per-sample bias path declined]"
+        )
     else:
         from miniworld_engine.integrations import bias_only_dit as fused
         from miniworld_engine.integrations import bias_only_dit_train as fused_train

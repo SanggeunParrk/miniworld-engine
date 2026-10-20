@@ -419,13 +419,15 @@ void transpose_hll(at::Tensor in, at::Tensor out) {
 // 64-byte row pieces. The tile's row pitch is L + 2 elements: the column gathers of the transpose hit distinct banks.
 template <int CPL, typename IT = __nv_bfloat16>
 __global__ void __launch_bounds__(256) softmax_t_kernel(const IT* __restrict__ BIAS, __nv_bfloat16* P,
-    __nv_bfloat16* __restrict__ PT, const bool* __restrict__ MASK, int L) {
+    __nv_bfloat16* __restrict__ PT, const bool* __restrict__ MASK_ALL, int L, int A, long mask_stride, float scale) {
   extern __shared__ __align__(16) uint8_t sm_raw[];
   __nv_bfloat16* tile = reinterpret_cast<__nv_bfloat16*>(sm_raw);
   const int pitch = L + 2, lane = threadIdx.x % 32, warp = threadIdx.x / 32, nch = L / 8;
   const long r0 = (long)blockIdx.x * 32;                       // the block's first row of the [16 L, L] matrix
   const long h = r0 / L;
   const int i0 = (int)(r0 - h * L);
+  // per-sample bias ([H, A, L, L]: h is the (head, sample) index): the key mask of sample h % A when mask_stride is L
+  const bool* __restrict__ MASK = MASK_ALL ? MASK_ALL + (h % A) * mask_stride : nullptr;
   constexpr float NEG = -3.0e38f;
   for (int rr = warp; rr < 32; rr += 8) {
     const long row = r0 + rr;
@@ -440,7 +442,7 @@ __global__ void __launch_bounds__(256) softmax_t_kernel(const IT* __restrict__ B
         unsigned char mk[8];
         if (MASK) *reinterpret_cast<uint2*>(mk) = *reinterpret_cast<const uint2*>(MASK + ch * 8);
 #pragma unroll
-        for (int k = 0; k < 8; ++k) { v[c][k] = (MASK && !mk[k]) ? NEG : e[k]; mx = fmaxf(mx, v[c][k]); }
+        for (int k = 0; k < 8; ++k) { v[c][k] = (MASK && !mk[k]) ? NEG : e[k] * scale; mx = fmaxf(mx, v[c][k]); }
       }
     }
 #pragma unroll
@@ -462,12 +464,15 @@ __global__ void __launch_bounds__(256) softmax_t_kernel(const IT* __restrict__ B
 #pragma unroll
         for (int k = 0; k < 4; ++k) b[k] = __floats2bfloat162_rn(v[c][2 * k] * inv, v[c][2 * k + 1] * inv);
         *reinterpret_cast<uint4*>(P + row * L + ch * 8) = *reinterpret_cast<const uint4*>(b);
-        uint32_t* t = reinterpret_cast<uint32_t*>(tile + rr * pitch + ch * 8);     // 4-byte aligned (pitch even)
+        if (PT) {
+          uint32_t* t = reinterpret_cast<uint32_t*>(tile + rr * pitch + ch * 8);     // 4-byte aligned (pitch even)
 #pragma unroll
-        for (int k = 0; k < 4; ++k) t[k] = *reinterpret_cast<const uint32_t*>(&b[k]);
+          for (int k = 0; k < 4; ++k) t[k] = *reinterpret_cast<const uint32_t*>(&b[k]);
+        }
       }
     }
   }
+  if (!PT) return;                                              // P only (the per-sample backward reads P transposed through cuBLAS)
   __syncthreads();
   for (int idx = threadIdx.x; idx < 4 * L; idx += blockDim.x) {
     const int j = idx / 4, c = idx % 4;
@@ -478,23 +483,35 @@ __global__ void __launch_bounds__(256) softmax_t_kernel(const IT* __restrict__ B
   }
 }
 
-void softmax_t(at::Tensor bias, at::Tensor p, at::Tensor pt, c10::optional<at::Tensor> mask) {
+// pt may be absent (P only). samples > 1: bias is the per-sample [H, A, L, L] (rows (h, a, i)), and a mask of A L entries is one
+// key mask per sample; scale multiplies the logits (ln 2 for logits in log2 units).
+void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, c10::optional<at::Tensor> mask, int64_t samples,
+               double scale) {
   const bool f32 = bias.scalar_type() == at::kFloat;       // fp32 logits (Hopper training: the projection's accumulators, unrounded)
   TORCH_CHECK(bias.is_cuda() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.is_contiguous() && bias.dim() == 2,
               "softmax_t: bf16 or fp32 [16 L, L]");
-  TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes() && pt.sizes() == bias.sizes()
-              && pt.scalar_type() == at::kBFloat16 && pt.is_contiguous() && pt.data_ptr() != bias.data_ptr(),
-              "softmax_t: p, pt bf16 like bias");
+  TORCH_CHECK(p.scalar_type() == at::kBFloat16 && p.is_contiguous() && p.sizes() == bias.sizes(), "softmax_t: p bf16 like bias");
+  __nv_bfloat16* ot = nullptr;
+  if (pt_opt.has_value()) {
+    const at::Tensor& pt = *pt_opt;
+    TORCH_CHECK(pt.sizes() == bias.sizes() && pt.scalar_type() == at::kBFloat16 && pt.is_contiguous() && pt.data_ptr() != bias.data_ptr(),
+                "softmax_t: pt bf16 like bias");
+    ot = ptr<__nv_bfloat16>(pt);
+  }
   const int64_t R = bias.size(0), L = bias.size(1);
   TORCH_CHECK(L % 32 == 0 && L <= 1024 && R % L == 0, "softmax_t: L a multiple of 32, at most 1024; [H L, L]");
+  TORCH_CHECK(samples >= 1 && (R / L) % samples == 0, "softmax_t: samples divide the (head, sample) count");
   const bool* mk = nullptr;
+  int64_t mstride = 0;
   if (mask.has_value()) {
-    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "softmax_t: bool mask [L]");
+    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && (mask->numel() == L || mask->numel() == samples * L),
+                "softmax_t: bool mask [L] or [samples, L]");
     mk = mask->data_ptr<bool>();
+    mstride = mask->numel() == L ? 0 : L;
   }
   const at::cuda::CUDAGuard g(bias.device());
   auto st = at::cuda::getCurrentCUDAStream();
-  const size_t smem = 32 * (L + 2) * 2;
+  const size_t smem = ot ? 32 * (L + 2) * 2 : 0;
   static bool attr = [] {
     return cudaFuncSetAttribute(softmax_t_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
         && cudaFuncSetAttribute(softmax_t_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
@@ -502,16 +519,18 @@ void softmax_t(at::Tensor bias, at::Tensor p, at::Tensor pt, c10::optional<at::T
         && cudaFuncSetAttribute(softmax_t_kernel<4, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "softmax_t: shared memory attribute");
-  auto *o = ptr<__nv_bfloat16>(p), *ot = ptr<__nv_bfloat16>(pt);
+  auto *o = ptr<__nv_bfloat16>(p);
   const bool few = L <= 512;
+  const int A = (int)samples;
+  const float sc = (float)scale;
   if (f32) {
     const auto* b = ptr<const float>(bias);
-    if (few) softmax_t_kernel<2, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
-    else softmax_t_kernel<4, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+    if (few) softmax_t_kernel<2, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
+    else softmax_t_kernel<4, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
   } else {
     const auto* b = ptr<const __nv_bfloat16>(bias);
-    if (few) softmax_t_kernel<2><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
-    else softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L);
+    if (few) softmax_t_kernel<2><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
+    else softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -676,7 +695,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("infer_alloc90", &infer_alloc90);
   m.def("infer_stage90", &infer_stage90);
   m.def("infer_pack90", &infer_pack90);
-  m.def("softmax_t_cuda", &softmax_t);
+  m.def("softmax_t_cuda", &softmax_t, pybind11::arg("bias"), pybind11::arg("p"), pybind11::arg("pt") = pybind11::none(), pybind11::arg("mask") = pybind11::none(), pybind11::arg("samples") = 1, pybind11::arg("scale") = 1.0);
   m.def("ln_rows_cuda", &ln_rows);
   m.def("adaln_in_rows_cuda", &adaln_in_rows);
   m.def("resgate_adaln_rows_cuda", &resgate_adaln_rows);

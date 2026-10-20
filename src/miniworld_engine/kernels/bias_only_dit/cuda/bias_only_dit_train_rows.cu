@@ -28,7 +28,7 @@ namespace {
 using namespace tdr;
 using bf = __nv_bfloat16;
 
-constexpr int D = 768, NC = 6, DC = 384, NCC = 3, WPB = 8;
+constexpr int D = 768, NC = 6, WPB = 8;   // the conditioning width is a template parameter (NCC chunks of 128 per row: 384 or 768)
 #ifndef MINB
 #define MINB 3                     // resident blocks per SM the D-wide forward kernels are compiled for (<= 85 registers)
 #endif
@@ -91,8 +91,10 @@ __device__ __forceinline__ void stats(const float4 (&x)[N], float eps, float& me
 }
 
 // ------------------------------------------------------------------------------------------------------------- forward
+template <int NCC>
 __global__ void __launch_bounds__(WPB * 32) cond_ln_k(const bf* __restrict__ C, bf* __restrict__ CHAT, float2* __restrict__ CST,
     long M, float eps) {
+  constexpr int DC = NCC * 128;
   ROWS_BEGIN
   for (long r = wid; r < M; r += nw) {
     float4 c[NCC];
@@ -398,9 +400,10 @@ __global__ void __launch_bounds__(256, MINB_BWD) adaln_a_bwd_k(const bf* __restr
   block_partial2(acc, red, PS1);
 }
 
-template <typename OT>
+template <typename OT, int NCC>
 __global__ void __launch_bounds__(WPB * 32) cond_bwd_k(const bf* __restrict__ DCHAT, const bf* __restrict__ DCG, const bf* __restrict__ C,
     const float2* __restrict__ CST, OT* __restrict__ DCO, long M) {
+  constexpr int DC = NCC * 128;
   ROWS_BEGIN
   for (long r = wid; r < M; r += nw) {
     float4 dch[NCC], ch[NCC], dcg[NCC];
@@ -754,11 +757,11 @@ template <> __device__ __forceinline__ bf from_f<bf>(float v) { return __float2b
 // left as one partial row per block of 16 rows (192 blocks: 0-95 the attention's, 96-191 the transition's). 96 column quads x
 // 4 row lanes, every load of a thread issued first.
 constexpr int UNF_ROWS = 16, UNF_BLOCKS = 4 * 768 / UNF_ROWS;
-template <typename OT>
-__global__ void __launch_bounds__(384) unfold_k(const float* __restrict__ DWN, const float* __restrict__ WRAW, const float* __restrict__ W1,
+template <typename OT, int DC>
+__global__ void __launch_bounds__(DC) unfold_k(const float* __restrict__ DWN, const float* __restrict__ WRAW, const float* __restrict__ W1,
     const float* __restrict__ W2, OT* __restrict__ DWU, float* __restrict__ PW) {
-  __shared__ float4 red[4][96];
-  const int cq = threadIdx.x % 96, rl = threadIdx.x / 96, col = cq * 4;
+  __shared__ float4 red[4][DC / 4];
+  const int cq = threadIdx.x % (DC / 4), rl = threadIdx.x / (DC / 4), col = cq * 4;
   const long i0 = (long)blockIdx.x * UNF_ROWS;
   const float4 lw = V4<float>::load((i0 < 2 * D ? W1 : W2) + col);
   float4 d[UNF_ROWS / 4], w[UNF_ROWS / 4];
@@ -788,7 +791,7 @@ __global__ void __launch_bounds__(384) unfold_k(const float* __restrict__ DWN, c
 struct Counts { int n[4]; };
 // OUT: bias sums [4, 768] | to_bias [NH, 128] in the projections' dtype; NOUT: cond-LN weights [2, 384] | ln_pair [128] in the
 // LayerNorm weights' dtype (the engine's LayerNorms may keep fp32 weights in a bf16 block)
-constexpr int FIN_PB = 0, FIN_TOB = 4 * D, FIN_DW = 0, FIN_LNP = 2 * DC, FIN_NOUT = FIN_LNP + 128;
+constexpr int FIN_PB = 0, FIN_TOB = 4 * D, FIN_DW = 0;   // FIN_LNP = 2 d_cond, FIN_NOUT = FIN_LNP + 128 (d_cond is a runtime argument)
 // rows g, g + RG, ... of a column, U (8 or 16) loads in flight
 template <int RG, int U = 8>
 __device__ __forceinline__ float colsum_rg(const float* base, long stride, int n, int g) {
@@ -808,14 +811,16 @@ __device__ __forceinline__ float colsum_rg(const float* base, long stride, int n
 }
 // one finalize job (0 .. FIN_JOBS - 1) by a block of RG warps: 4 x 24 bias-sum column groups, 2 x 12 cond-LN column groups, 128 dWf
 // columns; RG row groups (16 in finalize_k's 512 threads, 8 in pair_bias_bwd_fin_k's 256)
-constexpr int FIN_JOBS = 96 + 24 + 128;
+// jobs: 96 bias-sum groups, 2 d_cond / 32 cond-LN column groups, 128 dWf columns
+__host__ __device__ constexpr int fin_jobs(int dc) { return 96 + dc / 16 + 128; }
 template <int NH, typename OT, typename NT, int RG, int U = 8>
 __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PART, long prow, const Counts& N,
     const float* __restrict__ PW, const float* __restrict__ PWF, int nwf, const float* __restrict__ WB, const float* __restrict__ WP,
-    OT* __restrict__ OUT, NT* __restrict__ NOUT) {
+    OT* __restrict__ OUT, NT* __restrict__ NOUT, int DC) {
   __shared__ float red[RG][33];
-  const int y = x < 96 ? x / 24 : x < 120 ? 4 + (x - 96) / 12 : 6;
-  const int bx = x < 96 ? x % 24 : x < 120 ? (x - 96) % 12 : x - 120;
+  const int G = DC / 32, J = 96 + 2 * G;               // column groups per cond-LN weight; jobs before the dWf ones
+  const int y = x < 96 ? x / 24 : x < J ? 4 + (x - 96) / G : 6;
+  const int bx = x < 96 ? x % 24 : x < J ? (x - 96) % G : x - J;
   const int lane = threadIdx.x % 32, g = threadIdx.x / 32;
   if (y < 4) {
     const int c = bx * 32 + lane;
@@ -841,7 +846,7 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
       const int c = bx, h = lane;                                       // t = dWf[h, c]
       if (h < NH) OUT[FIN_TOB + h * 128 + c] = from_f<OT>(t * WP[c]);
       const float u = warp_sum(h < NH ? t * WB[h * 128 + c] : 0.f);    // ln_pair[c] = sum_h dWf[h, c] Wb[h, c]
-      if (h == 0) NOUT[FIN_LNP + c] = from_f<NT>(u);
+      if (h == 0) NOUT[2 * DC + c] = from_f<NT>(u);
     }
   }
   __syncthreads();                                                      // red free for the block's next job
@@ -849,8 +854,8 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
 template <int NH, typename OT, typename NT>
 __global__ void __launch_bounds__(512) finalize_k(const float* __restrict__ PART, long prow, const Counts N, const float* __restrict__ PW,
     const float* __restrict__ PWF, int nwf, const float* __restrict__ WB, const float* __restrict__ WP, OT* __restrict__ OUT,
-    NT* __restrict__ NOUT) {
-  finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT);
+    NT* __restrict__ NOUT, int DC) {
+  finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT, DC);
 }
 
 // pair_bias_bwd + finalize in ONE launch (settings.bias_only_dit_bwd_pbfin): the persistent pair_bias_bwd blocks (grid <= the
@@ -864,7 +869,7 @@ template <int NH, typename OT, typename NT>
 __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_fin_k(const bf* __restrict__ DB, const bf* __restrict__ Z,
     const float2* __restrict__ PST, const bf* __restrict__ WF, bf* __restrict__ DZ, float* __restrict__ DWF, long R,
     const float* __restrict__ PART, long prow, const Counts N, const float* __restrict__ PW, const float* __restrict__ WB,
-    const float* __restrict__ WP, OT* __restrict__ OUT, NT* __restrict__ NOUT, unsigned* __restrict__ BAR) {
+    const float* __restrict__ WP, OT* __restrict__ OUT, NT* __restrict__ NOUT, unsigned* __restrict__ BAR, int DC) {
   pair_bias_bwd_body<NH>(DB, Z, PST, WF, DZ, DWF, R);
   __syncthreads();
   __shared__ int last;
@@ -875,8 +880,8 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_fin_k(const bf* __r
     __threadfence();
   }
   __syncthreads();
-  for (int x = blockIdx.x; x < FIN_JOBS; x += gridDim.x)
-    finalize_job<NH, OT, NT, WPB, 16>(x, PART, prow, N, PW, DWF, (int)gridDim.x, WB, WP, OUT, NOUT);   // 16 loads in flight: 8 warps
+  for (int x = blockIdx.x; x < fin_jobs(DC); x += gridDim.x)
+    finalize_job<NH, OT, NT, WPB, 16>(x, PART, prow, N, PW, DWF, (int)gridDim.x, WB, WP, OUT, NOUT, DC);   // 16 loads in flight: 8 warps
   if (threadIdx.x == 0) {
     __threadfence();
     last = atomicAdd(BAR + 1, 1u) == gridDim.x - 1;
@@ -1015,8 +1020,9 @@ int64_t partial_rows(int64_t) { return 8 * (int64_t)nsm(); }
 
 void cond_ln(at::Tensor c, at::Tensor chat, at::Tensor cst, double eps) {
   const int64_t M = c.size(0);
-  bf16c(c, "c"); TORCH_CHECK(c.is_contiguous() && c.size(1) == DC, "cond_ln: [M, 384]");
-  cond_ln_k<<<grid(cond_ln_k, M), WPB * 32, 0, S()>>>(CP<bf>(c), P<bf>(chat), P<float2>(cst), M, (float)eps);
+  bf16c(c, "c"); TORCH_CHECK(c.is_contiguous() && (c.size(1) == 384 || c.size(1) == 768), "cond_ln: [M, 384 or 768]");
+  if (c.size(1) == 384) cond_ln_k<3><<<grid(cond_ln_k<3>, M), WPB * 32, 0, S()>>>(CP<bf>(c), P<bf>(chat), P<float2>(cst), M, (float)eps);
+  else cond_ln_k<6><<<grid(cond_ln_k<6>, M), WPB * 32, 0, S()>>>(CP<bf>(c), P<bf>(chat), P<float2>(cst), M, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1108,7 +1114,9 @@ void cond_bwd(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at
   const int64_t M = dchat.size(0);
   bf16c(c, "c");
   TDT_DISPATCH(dc.scalar_type(), OT, [&] {
-    cond_bwd_k<OT><<<grid(cond_bwd_k<OT>, M), WPB * 32, 0, S()>>>(CP<bf>(dchat), CP<bf>(dcg), CP<bf>(c), CP<float2>(cst), P<OT>(dc), M);
+    TORCH_CHECK(c.size(1) == 384 || c.size(1) == 768, "cond_bwd: [M, 384 or 768]");
+    if (c.size(1) == 384) cond_bwd_k<OT, 3><<<grid(cond_bwd_k<OT, 3>, M), WPB * 32, 0, S()>>>(CP<bf>(dchat), CP<bf>(dcg), CP<bf>(c), CP<float2>(cst), P<OT>(dc), M);
+    else cond_bwd_k<OT, 6><<<grid(cond_bwd_k<OT, 6>, M), WPB * 32, 0, S()>>>(CP<bf>(dchat), CP<bf>(dcg), CP<bf>(c), CP<float2>(cst), P<OT>(dc), M);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1120,17 +1128,19 @@ void finalize(at::Tensor part, std::vector<int64_t> n, at::Tensor pw, at::Tensor
   f32c(part, "part"); f32c(pw, "pw"); f32c(pwf, "pwf"); f32c(wb, "Wb"); f32c(wp, "wp");
   TORCH_CHECK(part.dim() == 3 && part.size(0) == 4 && part.size(2) == D && n.size() == 4, "finalize: part [4, rows, 768], 4 counts");
   const int64_t nh = wb.size(0);
-  TORCH_CHECK((nh == 12 || nh == 16 || nh == 24) && wb.numel() == nh * 128 && pw.numel() == UNF_BLOCKS * DC && pwf.numel() >= nwf * nh * 128
-              && wp.numel() == 128, "finalize: unfold partials [192, 384], dWf partials [>= nwf, nh, 128], Wb [nh, 128], wp [128]");
-  TORCH_CHECK(out.is_contiguous() && out.numel() == FIN_TOB + nh * 128 && nout.is_contiguous() && nout.numel() == FIN_NOUT,
+  const int DC = (int)(pw.numel() / UNF_BLOCKS);
+  TORCH_CHECK((DC == 384 || DC == 768) && pw.numel() == UNF_BLOCKS * DC, "finalize: unfold partials [192, d_cond]");
+  TORCH_CHECK((nh == 12 || nh == 16 || nh == 24) && wb.numel() == nh * 128 && pwf.numel() >= nwf * nh * 128
+              && wp.numel() == 128, "finalize: dWf partials [>= nwf, nh, 128], Wb [nh, 128], wp [128]");
+  TORCH_CHECK(out.is_contiguous() && out.numel() == FIN_TOB + nh * 128 && nout.is_contiguous() && nout.numel() == 2 * DC + 128,
               "finalize: out = bias sums | to_bias, nout = cond-LN weights | ln_pair");
   Counts c{};
   for (int i = 0; i < 4; ++i) { TORCH_CHECK(n[i] <= part.size(1), "finalize: row count"); c.n[i] = (int)n[i]; }
   TDT_DISPATCH(out.scalar_type(), OT, [&] {
     TDT_DISPATCH(nout.scalar_type(), NT, [&] {
       auto k = nh == 12 ? finalize_k<12, OT, NT> : nh == 16 ? finalize_k<16, OT, NT> : finalize_k<24, OT, NT>;
-      k<<<96 + 24 + 128, 512, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
-                                       CP<float>(wp), P<OT>(out), P<NT>(nout));
+      k<<<fin_jobs(DC), 512, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
+                                       CP<float>(wp), P<OT>(out), P<NT>(nout), DC);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1148,8 +1158,9 @@ void pair_bias_bwd_fin(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor w
   TORCH_CHECK(dz.is_contiguous() && dz.scalar_type() == at::kBFloat16 && pst.is_contiguous(), "pair_bias_bwd_fin: d pair bf16");
   f32c(part, "part"); f32c(pw, "pw"); f32c(wb, "Wb"); f32c(wp, "wp");
   TORCH_CHECK(part.dim() == 3 && part.size(0) == 4 && part.size(2) == D && n.size() == 4, "pair_bias_bwd_fin: part [4, rows, 768], 4 counts");
-  TORCH_CHECK(wb.numel() == nh * 128 && pw.numel() == UNF_BLOCKS * DC && wp.numel() == 128 && out.is_contiguous()
-              && out.numel() == FIN_TOB + nh * 128 && nout.is_contiguous() && nout.numel() == FIN_NOUT, "pair_bias_bwd_fin: finalize operands");
+  const int DC = (int)(pw.numel() / UNF_BLOCKS);
+  TORCH_CHECK((DC == 384 || DC == 768) && wb.numel() == nh * 128 && pw.numel() == UNF_BLOCKS * DC && wp.numel() == 128 && out.is_contiguous()
+              && out.numel() == FIN_TOB + nh * 128 && nout.is_contiguous() && nout.numel() == 2 * DC + 128, "pair_bias_bwd_fin: finalize operands");
   TORCH_CHECK(bar.scalar_type() == at::kInt && bar.is_contiguous() && bar.numel() >= 2, "pair_bias_bwd_fin: bar int32 [2]");
   Counts c{};
   for (int i = 0; i < 4; ++i) { TORCH_CHECK(n[i] <= part.size(1), "pair_bias_bwd_fin: row count"); c.n[i] = (int)n[i]; }
@@ -1162,7 +1173,7 @@ void pair_bias_bwd_fin(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor w
       TORCH_CHECK(dwf.numel() >= (int64_t)g * nh * 128, "pair_bias_bwd_fin: dWf partials [partial_rows, nh, 128]");
       k<<<g, WPB * 32, smem, S()>>>(CP<bf>(db), CP<bf>(z), CP<float2>(pst), CP<bf>(wf), P<bf>(dz), P<float>(dwf), R, CP<float>(part),
                                     part.size(1), c, CP<float>(pw), CP<float>(wb), CP<float>(wp), P<OT>(out), P<NT>(nout),
-                                    reinterpret_cast<unsigned*>(bar.data_ptr()));
+                                    reinterpret_cast<unsigned*>(bar.data_ptr()), DC);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1170,11 +1181,13 @@ void pair_bias_bwd_fin(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor w
 
 void unfold(at::Tensor dwn, at::Tensor wraw, at::Tensor w1, at::Tensor w2, at::Tensor dwu, at::Tensor pw) {
   for (auto* t : {&dwn, &wraw, &w1, &w2, &pw}) f32c(*t, "unfold: fp32");
-  TORCH_CHECK(dwn.numel() == 4 * D * DC && wraw.numel() == 4 * D * DC && dwu.numel() == 4 * D * DC && dwu.is_contiguous()
-              && w1.numel() == DC && w2.numel() == DC && pw.numel() == UNF_BLOCKS * DC,
-              "unfold: dWn / Wraw / dWraw [3072, 384], w [384], partials [192, 384]");
+  const int DC = (int)(w1.numel());
+  TORCH_CHECK((DC == 384 || DC == 768) && dwn.numel() == 4 * D * DC && wraw.numel() == 4 * D * DC && dwu.numel() == 4 * D * DC && dwu.is_contiguous()
+              && w2.numel() == DC && pw.numel() == UNF_BLOCKS * DC,
+              "unfold: dWn / Wraw / dWraw [3072, d_cond], w [d_cond], partials [192, d_cond]");
   TDT_DISPATCH(dwu.scalar_type(), OT, [&] {
-    unfold_k<OT><<<UNF_BLOCKS, 384, 0, S()>>>(CP<float>(dwn), CP<float>(wraw), CP<float>(w1), CP<float>(w2), P<OT>(dwu), P<float>(pw));
+    if (DC == 384) unfold_k<OT, 384><<<UNF_BLOCKS, 384, 0, S()>>>(CP<float>(dwn), CP<float>(wraw), CP<float>(w1), CP<float>(w2), P<OT>(dwu), P<float>(pw));
+    else unfold_k<OT, 768><<<UNF_BLOCKS, 768, 0, S()>>>(CP<float>(dwn), CP<float>(wraw), CP<float>(w1), CP<float>(w2), P<OT>(dwu), P<float>(pw));
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

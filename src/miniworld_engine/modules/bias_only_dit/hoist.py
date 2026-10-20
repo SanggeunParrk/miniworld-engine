@@ -58,6 +58,8 @@ def pair_bias_all(blocks, pair: torch.Tensor, *, implementation: ImplementationT
                              "to_bias no bias")
     if _fused.serves(ImplementationType(impl), attns, pair):
         return _fused.pair_bias_all(attns, pair)
+    if _fused.serves(ImplementationType(impl), attns, pair, per_sample=True):  # a pair per sample: head-major buffers viewed [B, H, L, L]
+        return _fused.pair_bias_all_psb(attns, pair)
     return _reference(attns, pair, eps)
 
 

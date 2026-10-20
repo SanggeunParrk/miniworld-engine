@@ -497,6 +497,15 @@ class Settings:
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_H100`` (default on): the native Hopper bias-only DiT kernels
     #: (`kernels/bias_only_dit/cuda`); off takes the sm_100 / composed route.
     bias_only_dit_h100: bool = True
+    #: The bias-only DiT training block on a pair bias of its own per sample (`bias_only_dit_train.block_psb`), bf16: the attention
+    #: core. "recompute" (default): the forward keeps two floats per softmax row and no P, the backward rebuilds P from the bias
+    #: (`kernels/bias_only_dit/cuda/bo_psb.cu`); "stored": the same kernels with P written by the forward and read by the backward;
+    #: "cublas": the v0 core (batched cuBLAS GEMMs over (head, sample) + torch elementwise ops, P stored). Read per call; same
+    #: numbers within rounding, the others kept for A/B. fp32 always takes the cuBLAS core.
+    bias_only_dit_psb_core: str = "recompute"
+    #: The hoisted pair bias's backward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 in bf16 (`bo_hoist_bwd.cu`: d LN0, the
+    #: LayerNorm backward and dW' in one pass over the pair); False keeps the two cuBLAS GEMMs around `ln0_bwd_rows`. Read per call.
+    bias_only_dit_hoist_bwd_fused: bool = True
     #: Formerly ``MINIWORLD_LOCAL_DIT_H100_TRAIN``: None serves the Hopper local atom DiT training block natively when the
     #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
     #: False disables the native Hopper training path.
