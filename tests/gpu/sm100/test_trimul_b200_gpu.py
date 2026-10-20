@@ -84,8 +84,9 @@ def test_serves_train_d128_both_directions():
 
 
 def test_serves_rejects_other_shapes():
+    """(Batched samples are served at every width: tests/gpu/sm100/test_b200_trimul_batch_gpu.py.)"""
     m = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).cuda()
-    for shape in ((1, 200, 200, 128), (2, 128, 128, 128)):
+    for shape in ((1, 200, 200, 128), (2, 200, 200, 128)):
         assert not trimul_b200.serves_train(m, torch.zeros(shape, device="cuda", dtype=torch.bfloat16), bidirectional=True)
     assert not trimul_b200.serves_train(m, torch.zeros(1, 128, 128, 128, device="cuda"), bidirectional=True)
     with torch.no_grad():

@@ -196,7 +196,10 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     int s = 0; uint32_t ph = 0;
     for (int i = 0; i < n_local; ++i) {
       const int row = (cta + i * G) * TOK + r, b = (NXN == 1) ? 0 : (i & 1);
-      const uint32_t kmask = (tokmask == nullptr || (tokmask[row / L] && tokmask[row % L])) ? 0xffffffffu : 0u;
+      // tokens b-major: row = (s L + i) L + j; the token mask is [B L]: tokens s L + i and s L + j. A tile lies in one sample (L^2 is a
+      // multiple of 128), whose first mask row sL is formed once per tile (0 for one sample)
+      const int sL = (cta + i * G) * TOK / (L * L) * L;
+      const uint32_t kmask = (tokmask == nullptr || (tokmask[row / L] && tokmask[sL + row % L])) ? 0xffffffffu : 0u;
       float mu, rs;
       if constexpr (D <= 128) {
         // whole row resident (KB <= 2 ring slots): two-pass statistics here, as k1.cu (packed f32x2 sums)
@@ -273,7 +276,16 @@ __global__ void __launch_bounds__(NTHREADS, 1)
     const uint32_t sda = su + G_::O_OUT + ew * OSTW, sdp = sda + DAB;     // da box, then dpre gate / proj boxes
     uint32_t dph = 0;
     for (int i = 0; i < n_local; ++i) {
-      const int row0 = (cta + i * G) * TOK;
+      const int row0 = (cta + i * G) * TOK, sL = row0 / (L * L) * L;
+      // token mask of this thread's two fragment rows (t / 4 and t / 4 + 8 of each 16-token group), the same for every chunk
+      uint32_t km[2][2];
+#pragma unroll
+      for (int hh = 0; hh < 2; ++hh)
+#pragma unroll
+        for (int e = 0; e < 2; ++e) {
+          const int tok = row0 + q * 32 + hh * 16 + e * 8 + (lane >> 2);
+          km[hh][e] = (tokmask == nullptr || (tokmask[tok / L] && tokmask[sL + tok % L])) ? 1u : 0u;
+        }
       for (int c = grp; c < NCH; c += 2) {
         const int ci = i * NCH + c, acc = ci % NACC;
         if (lane == 0) {
@@ -286,15 +298,6 @@ __global__ void __launch_bounds__(NTHREADS, 1)
         tc_fence_after();
         mbar_wait(&B.da_full[ew], dph);
         dph ^= 1;
-        // token mask of this thread's two fragment rows (t / 4 and t / 4 + 8 of each 16-token group)
-        uint32_t km[2][2];
-#pragma unroll
-        for (int hh = 0; hh < 2; ++hh)
-#pragma unroll
-          for (int e = 0; e < 2; ++e) {
-            const int tok = row0 + q * 32 + hh * 16 + e * 8 + (lane >> 2);
-            km[hh][e] = (tokmask == nullptr || (tokmask[tok / L] && tokmask[tok % L])) ? 1u : 0u;
-          }
         const uint32_t tq = tmem + G_::T_ACC + acc * 128 + ((uint32_t)(q * 32) << 16);
         uint32_t ga[16], pa[16], gb[16], pb[16];
         auto ldg = [&](int grp4, uint32_t (&g)[16], uint32_t (&p)[16]) {
@@ -376,17 +379,20 @@ int num_sms() {
 
 }  // namespace k1wb
 
-// x [M, D]; wl, wlg, wr, wrg [P/2, D] (unit column stride); tokmask [L] or none; mean / rstd [M] (k1w_stats); gamma / beta [D];
-// da [P, L, L] bf16 (plane gradient); dpre [M, ldc] bf16 view, columns 0 .. 2P - 1 written.
+// x [M, D] (M = B L L, tokens b-major); wl, wlg, wr, wrg [P/2, D] (unit column stride); tokmask [B L] or none; mean / rstd [M]
+// (k1w_stats); gamma / beta [D]; da [P, (B,) L, L] bf16 (plane gradient); dpre [M, ldc] bf16 view, columns 0 .. 2P - 1 written.
 void k1wb_forward(torch::Tensor x, torch::Tensor wl, torch::Tensor wlg, torch::Tensor wr, torch::Tensor wrg,
                   c10::optional<torch::Tensor> tokmask, torch::Tensor mean, torch::Tensor rstd, torch::Tensor gamma, torch::Tensor beta,
                   torch::Tensor da, torch::Tensor dpre, int64_t grid) {
   using namespace k1wb;
   const int64_t M = x.size(0), D = x.size(1), P = da.size(0);
-  TORCH_CHECK(M % TOK == 0 && da.numel() == P * M && x.is_contiguous() && da.is_contiguous() && da.dim() == 3);
+  // da [P, L, L] (one sample) or [P, B, L, L]; the tokens of x are b-major, M = B L L
+  TORCH_CHECK(M % TOK == 0 && da.numel() == P * M && x.is_contiguous() && da.is_contiguous() && (da.dim() == 3 || da.dim() == 4));
   TORCH_CHECK(dpre.size(0) == M && dpre.size(1) >= 2 * P && dpre.stride(1) == 1 && (dpre.stride(0) * 2) % 16 == 0);
-  const int L = (int)da.size(1);
-  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
+  const int L = (int)da.size(da.dim() - 1);
+  const int64_t nb = M / ((int64_t)L * L);
+  TORCH_CHECK(nb * L * L == M && da.size(da.dim() - 2) == L && ((int64_t)L * L) % TOK == 0);   // a 128-token tile lies in one sample
+  TORCH_CHECK(!tokmask.has_value() || (tokmask->numel() == nb * L && tokmask->element_size() == 1 && tokmask->is_contiguous()));
   const auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mx = tmap::make(x.data_ptr(), bf, {(uint64_t)D, (uint64_t)M}, {(uint64_t)D * 2}, {64, TOK}, CU_TENSOR_MAP_SWIZZLE_128B);
   WMaps mw;

@@ -155,7 +155,8 @@ __global__ void __launch_bounds__(256, 1)
       for (int k = et; k < 4 * NTILE; k += 128) vs[k] = vec[(k / NTILE) * D + n0 + (k % NTILE)];
       named_bar_sync(1, 128);
       const float mo = mu_o[tok], ro = rs_o[tok], mi = mu_i[tok], ri = rs_i[tok];
-      const __nv_bfloat16* dsr = ds ? ds + (size_t)(tok % L) * D + n0 : nullptr;
+      // ds [B L, D]: pair row tok = (s L + i) L + j reads row s L + j (tokens b-major; s = 0 for one sample)
+      const __nv_bfloat16* dsr = ds ? ds + ((size_t)(tok / (L * L)) * L + tok % L) * D + n0 : nullptr;
       mbar_wait(&B.acc_full[b], (i >> 1) & 1);
       tc_fence_after();
       mbar_wait(&B.xr_full, i & 1);
@@ -232,7 +233,7 @@ int num_sms() {
 }  // namespace k3w
 
 // x [M, D], t [H, M], wpq = bf16(Wp g_o) [D, H], wgq = bf16(Wg g_i) [D, D] bf16; vec [4, D] fp32 = (sp, ep, sg, eg);
-// mu_o / rs_o / mu_i / rs_i [M] fp32; ds [L, D] bf16 or none; y [M, D] bf16; p_out / g_out [M, D] bf16 (training, optional):
+// mu_o / rs_o / mu_i / rs_i [M] fp32; ds [B L, D] bf16 or none (M = B L L, tokens b-major); y [M, D] bf16; p_out / g_out [M, D] bf16 (training, optional):
 // the output projection p and the gate logit g, before the gate.
 void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Tensor wgq, torch::Tensor vec, torch::Tensor mu_o,
                  torch::Tensor rs_o, torch::Tensor mu_i, torch::Tensor rs_i, c10::optional<torch::Tensor> ds, torch::Tensor y,
@@ -242,6 +243,7 @@ void k3w_forward(torch::Tensor x, torch::Tensor t, torch::Tensor wpq, torch::Ten
   TORCH_CHECK(M % TOK == 0 && t.numel() == H * M && wpq.size(0) == D && wpq.size(1) == H && wgq.size(0) == D && wgq.size(1) == D);
   TORCH_CHECK(x.is_contiguous() && t.is_contiguous() && wpq.is_contiguous() && wgq.is_contiguous() && vec.is_contiguous() &&
               y.is_contiguous());
+  TORCH_CHECK(M % (L * L) == 0 && (!ds.has_value() || ds->numel() == M / L * D), "k3w_forward: ds must be [B L, D]");
   const auto bf = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16;
   auto mt = tmap::make(t.data_ptr(), bf, {(uint64_t)M, (uint64_t)H}, {(uint64_t)M * 2}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B);
   auto mwp = tmap::make(wpq.data_ptr(), bf, {(uint64_t)H, (uint64_t)D}, {(uint64_t)H * 2}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B);

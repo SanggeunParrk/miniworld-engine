@@ -1,4 +1,6 @@
-"""B200 (sm_100a) TriMul inference for every width D = 64 / 128 / 256 / 384 / 512, bidirectional or one direction, bf16, B=1.
+"""B200 (sm_100a) TriMul inference for every width D = 64 / 128 / 256 / 384 / 512, bidirectional or one direction, bf16, B samples
+per launch (tokens b-major: M = B L L; every per-token kernel is token-flat, the token mask and the row-dropout scale are read per
+sample, the contraction batches over channels x B).
 
 Front (every D): ``k1w`` -- input LN + gated projections + mask -> channel-major planes (tcgen05; D <= 128 computes the LN
 statistics in-kernel, D >= 256 takes them from ``k1w_stats``). Contractions: cuBLAS. Output:
@@ -109,8 +111,26 @@ def _inference_fake(leaves, mask, ds, direction):
 def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int) -> torch.Tensor:
     """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]; the front four may be strided), gi, bi, go, bo (fp32);
     mask [B * L] bool token mask or None (k1w forms the pair mask); ds [B * L, D] bf16 row-dropout scale or None;
-    direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D]: B > 1 only for D <= 128 (the kernels take b-major
-    tokens, M = B L L), D >= 256 is B = 1. The hidden width is wl's row count (``hidden_ok``)."""
+    direction 0 = bidirectional, 1 = outgoing, 2 = incoming. x is [B, L, L, D], the samples b-major (one launch per stage for the
+    B samples). The hidden width is wl's row count (``hidden_ok``)."""
+    return _inference_body(leaves, mask, ds, direction, None)
+
+
+def _inference_into_fake(leaves, mask, ds, direction, out):
+    """Nothing: y is written into ``out``."""
+    return None
+
+
+@opaque(fake=_inference_into_fake, name="trimul_b200_inference_into", mutates_args=("out",))
+def inference_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int,
+                   out: torch.Tensor) -> None:
+    """``inference`` writing y into ``out`` (contiguous, x's shape): a chunked batch's launch writes its rows of the batch's output in
+    place (``integrations.trimul_b200``)."""
+    _inference_body(leaves, mask, ds, direction, out)
+
+
+def _inference_body(leaves, mask, ds, direction, y):
+    """-> y; y None: allocated here (after the planes, as the one-launch path always did)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m = bsz * n * n
@@ -119,8 +139,9 @@ def inference(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.T
         x2 = x.reshape(m, d)
         hid = wl.shape[0]
         p = planes_of(d, hid, direction)
-        planes = x.new_empty((p, bsz, n, n) if d <= 128 else (p, n, n))
-        y = torch.empty_like(x)
+        planes = x.new_empty((p, bsz, n, n))
+        if y is None:
+            y = torch.empty_like(x)
         if d <= 128:
             wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
             front = _front(E, wl, wlg, wr, wrg, wp, wpp)

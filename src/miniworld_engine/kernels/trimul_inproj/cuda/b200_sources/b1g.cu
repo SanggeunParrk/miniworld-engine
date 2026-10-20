@@ -221,14 +221,21 @@ __global__ void __launch_bounds__(512, 1)
       const uint32_t trow = tmem + ((uint32_t)(q * 32) << 16) + T0;
       const int c_lo = kq * 3, c_hi = kq == 2 ? 8 : kq * 3 + 3;
       uint4 dsv[6];
-      {
-        const uint4* dsr = reinterpret_cast<const uint4*>(a.ds + (size_t)(jc * TOK + q * 32 + lane) * C);
+      // ds is [B, L, 128]: a front CTA's tiles (tile_of(i) = cta + NF i, its j class fixed since NF % LC == 0) run over the samples
+      // in order, L LC tiles each, so the CTA's ds rows are reloaded when a tile's sample changes (once for B = 1), as in b1s.cu
+      int cur_sb = -1;
+      auto load_ds = [&](int sb) {
+        const uint4* dsr = reinterpret_cast<const uint4*>(a.ds + ((size_t)sb * a.L + jc * TOK + q * 32 + lane) * C);
 #pragma unroll
         for (int k = 0; k < 6; ++k)
           if (c_lo * 2 + k < c_hi * 2) dsv[k] = __ldg(dsr + c_lo * 2 + k);
-      }
+      };
       for (int i = 0; i < n_local; ++i) {
         const int row0 = tile_of(i) * TOK;
+        {
+          const int sb = tile_of(i) / (a.L * LC);
+          if (sb != cur_sb) { load_ds(sb); cur_sb = sb; }
+        }
         PW(0, mbar_wait(&B.g_full, i & 1));
         tc_fence_after();
         for (int c = c_lo; c < c_hi; ++c) {
@@ -549,7 +556,8 @@ void b1g_backward(torch::Tensor dy, torch::Tensor xn, torch::Tensor tri, torch::
   using namespace b1g;
   const int64_t M = dy.size(0);
   const int H = (int)tri.size(0);
-  TORCH_CHECK(dy.size(1) == C && M == L * L && M % TOK == 0 && L % TOK == 0 && tri.numel() == H * M && (H == 128 || H == 256));
+  TORCH_CHECK(dy.size(1) == C && M % (L * L) == 0 && M % TOK == 0 && L % TOK == 0 && tri.numel() == H * M && (H == 128 || H == 256));
+  TORCH_CHECK(ds.numel() == (M / (L * L)) * L * C, "b1g_backward: ds must be [B, L, 128]");   // M = B L L, tokens b-major
   int nsm = 0, dev = 0;
   cudaGetDevice(&dev);
   cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev);
