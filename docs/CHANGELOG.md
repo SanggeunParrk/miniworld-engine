@@ -23,6 +23,13 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   paths); a call with grad or training dropout, the B200 kernels and the Anthropic adapter do not serve it (the first two fall to the composed
   legs, the adapter refuses). Starting-node attention ignores it. Tests `tests/cpu/compile/test_triangle_attention_bias_direction.py`,
   `tests/gpu/sm90/test_triattn_bias_direction_gpu.py`.
+- H100 token DiT training with a pair bias of its own per sample (`[1, A, L, d]` with pair `[A, L, L, d_pair]`, as the bias-only DiT got in
+  2.3.2): the augmented-attention kernels are built with a per-sample bias (`PSB=1` variants of `attn_fwd` / `attn_dq` / `attn_dkv`) and
+  `integrations/token_dit_pair_bias.py` (`pair_biases`, `serves_psb`) routes the call; d_cond 384 / 768. Tests
+  `tests/gpu/sm90/test_augmented_attention_psb_gpu.py`, `tests/gpu/sm90/test_token_dit_psb_gpu.py`.
+- H100 local atom DiT with QK-norm (`LocalDiTBlock(use_qk_norm=True)`) on the mma path: q / k are RMS-normalised per head by
+  `kernels/augmented_attention/cuda/qknorm_local.cu` before the attention (the backward keeps the raw ones). Tests
+  `tests/gpu/sm90/test_h100_local_dit_mma_gpu.py`.
 
 ### Fixed
 
