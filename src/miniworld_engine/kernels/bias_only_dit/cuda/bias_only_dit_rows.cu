@@ -482,7 +482,7 @@ void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, 
     ot = ptr<__nv_bfloat16>(pt);
   }
   const int64_t R = bias.size(0), L = bias.size(1);
-  TORCH_CHECK(L % 32 == 0 && L <= 1024 && R % L == 0, "softmax_t: L a multiple of 32, at most 1024; [H L, L]");
+  TORCH_CHECK(L % 32 == 0 && L <= 3072 && R % L == 0, "softmax_t: L a multiple of 32, at most 3072; [H L, L]");
   TORCH_CHECK(samples >= 1 && (R / L) % samples == 0, "softmax_t: samples divide the (head, sample) count");
   const bool* mk = nullptr;
   int64_t mstride = 0;
@@ -494,12 +494,17 @@ void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, 
   }
   const at::cuda::CUDAGuard g(bias.device());
   auto st = at::cuda::getCurrentCUDAStream();
-  const size_t smem = ot ? 32 * (L + 2) * 2 : 0;
+  const size_t smem = ot ? 32 * (L + 2) * 2 : 0;          // the P^T tile; L 3072: 196736 B, one block per SM
+  // the attribute is the size of the largest call (the bf16 long rungs, L 3072: one block per SM) for the four per-lane widths
+  // up to 1024 keys; the 2048 / 3072-key forms (8 / 12 chunks per lane: the long rungs) are bf16 logits only
+  constexpr int SMAX = 32 * 3074 * 2;
   static bool attr = [] {
-    return cudaFuncSetAttribute(softmax_t_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
-        && cudaFuncSetAttribute(softmax_t_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
-        && cudaFuncSetAttribute(softmax_t_kernel<2, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess
-        && cudaFuncSetAttribute(softmax_t_kernel<4, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, 32 * 1026 * 2) == cudaSuccess;
+    return cudaFuncSetAttribute(softmax_t_kernel<2>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<8>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<12>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<2, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess
+        && cudaFuncSetAttribute(softmax_t_kernel<4, float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMAX) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "softmax_t: shared memory attribute");
   auto *o = ptr<__nv_bfloat16>(p);
@@ -507,13 +512,16 @@ void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, 
   const int A = (int)samples;
   const float sc = (float)scale;
   if (f32) {
+    TORCH_CHECK(L <= 1024, "softmax_t: fp32 logits up to 1024 keys");
     const auto* b = ptr<const float>(bias);
     if (few) softmax_t_kernel<2, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
     else softmax_t_kernel<4, float><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
   } else {
     const auto* b = ptr<const __nv_bfloat16>(bias);
     if (few) softmax_t_kernel<2><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
-    else softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
+    else if (L <= 1024) softmax_t_kernel<4><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
+    else if (L <= 2048) softmax_t_kernel<8><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
+    else softmax_t_kernel<12><<<(unsigned)(R / 32), 256, smem, st>>>(b, o, ot, mk, (int)L, A, mstride, sc);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

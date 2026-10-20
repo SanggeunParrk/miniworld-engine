@@ -35,7 +35,8 @@ weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + final
 read per call, or a failed build: the per-step launches.
 
 ``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD), B200, bf16 or fp32 inputs, the
-token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
+token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 up to 768 (bf16 on
+B200: up to 3072, the forward core and dV on ``pv_stream_sm100.cu`` past 768, ``softmax_t`` to 3072 keys, the rest length-free), a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
 Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
@@ -148,12 +149,14 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
         p.requires_grad for p in module.parameters()
     ):
         return False
+    from miniworld_engine.kernels.bias_only_dit.cuda import B200_TMEM_MAX_L, b200_max_l
+
     if (
         single.ndim != 4
         or single.shape[1] != 1
         or single.shape[-1] != D
         or single.shape[2] % 128
-        or single.shape[2] > 768
+        or single.shape[2] > (B200_TMEM_MAX_L if h100_enabled(single.device) else b200_max_l(dt))
     ):
         return False
     L = single.shape[2]
@@ -212,6 +215,11 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
             rows32()  # Hopper: the fp32 row kernels (generic CUDA) + the wgmma core in the sm90a extension
             return True
         return tf32_ready(idx, at.n_head, da // at.n_head, True)
+    if L > B200_TMEM_MAX_L:  # bf16 past 768 keys: the streaming core (pv_stream_sm100.cu) for the forward and dV
+        from miniworld_engine.kernels.bias_only_dit.cuda import stream_ready
+
+        idx = single.device.index if single.device.index is not None else torch.cuda.current_device()
+        return stream_ready(idx, at.n_head, da // at.n_head)
     return True
 
 

@@ -1,7 +1,9 @@
 """CUDA kernels of the bias-only token DiT (B200, sm_100a), inference.
 
   pv_gate_inf.cu          the attention core, sigmoid(g) * (P v) per head and sample, P = softmax(pair bias) made once per
-                          sample() -- a tcgen05 GEMM with the gate in its epilogue (``PvGateCore``)
+                          sample() -- a tcgen05 GEMM with the gate in its epilogue (``PvGateCore``); L <= 768 (P in tensor memory)
+  pv_stream_sm100.cu      the same core past L 768 (to 3072, bf16): P streamed through shared memory, key-outer / sample-inner
+                          (``PvStreamCore``; ``PvGateCore`` hands such calls over)
   bias_only_dit_rows.cu   every row pass between the GEMMs (one warp per row): the conditioning LayerNorm, the input AdaLN
                           with the fp32 residual copy, residual + gate + AdaLN, the last residual written in the output dtype,
                           SwiGLU, and the softmax of the hoisted bias
@@ -27,6 +29,7 @@ import torch
 
 from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import device_constant
 
 _dir = Path(__file__).parent
 H, DH = 16, 48  # the default heads x width
@@ -41,6 +44,18 @@ _H100_DPB2 = True  # the 128 x TN bias-gradient kernel (False: the 64 x 64 ``dpb
 _H100_PVX_FORCE = (0, 0, 0)  # (consumer warpgroups, samples per CTA, cluster); 0 = the host cost model
 #: Longest L the Hopper inference path serves (``pvx`` / ``pvx32`` stream P; the softmax rows take up to 3072 keys).
 H100_MAX_L = 3072
+#: B200: the longest L whose P tile fits tensor memory beside two accumulators (``pv_gate_inf.cu``, and every fp32 kernel's bound);
+#: past it the bf16 core streams P through shared memory (``pv_stream_sm100.cu``) up to ``B200_MAX_L`` (MiniWorld's token rungs).
+B200_TMEM_MAX_L = 768
+B200_MAX_L = 3072
+
+
+def b200_max_l(dtype: torch.dtype) -> int:
+    """Longest L the sm_100a path serves for ``dtype``: bf16 up to ``B200_MAX_L`` (the streaming core past ``B200_TMEM_MAX_L``,
+    settings.bias_only_dit_stream=0 keeps the old bound), fp32 up to ``B200_TMEM_MAX_L``."""
+    if dtype is torch.bfloat16 and settings.current().bias_only_dit_stream:
+        return B200_MAX_L
+    return B200_TMEM_MAX_L
 
 
 def h100_enabled(device) -> bool:
@@ -326,10 +341,10 @@ def core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
     """bf16, d attention channels as h heads in LAYOUTS (768 = 16 x 48, 24 x 32, 12 x 64; 1024 = 16 x 64), L a multiple of 128
-    up to 768 on sm_100 (the P tile and two accumulators in 512 TMEM columns), up to ``H100_MAX_L`` on Hopper (``pvx`` / ``pvx32``
-    stream P through a TMA ring: no length bound of their own; the sampler's token rungs reach 2560).
-    settings.bias_only_dit_core=0 turns it off.
-    fp32: the TF32 core (``tf32.py``; same layouts and lengths), once the fp32 path's kernels load (``tf32_ready``)."""
+    up to ``b200_max_l`` on sm_100 (``pv_gate_inf.cu`` with the P tile in tensor memory up to 768, ``pv_stream_sm100.cu`` streaming
+    P beyond, to 3072), up to ``H100_MAX_L`` on Hopper (``pvx`` / ``pvx32`` stream P through a TMA ring: no length bound of their
+    own; the sampler's token rungs reach 2560). settings.bias_only_dit_core=0 turns it off.
+    fp32: the TF32 core (``tf32.py``; same layouts, L up to 768), once the fp32 path's kernels load (``tf32_ready``)."""
     if not settings.current().bias_only_dit_core:
         return False
     if h100_enabled(device_index):  # Hopper: ``pvx`` (bf16) / the TF32 wgmma core ``pvx32`` (fp32), head widths 32 / 48 / 64
@@ -345,21 +360,23 @@ def core_supported(
             d % h == 0
             and (h, d // h) in LAYOUTS
             and L % 128 == 0
-            and 0 < L <= 768
+            and 0 < L <= B200_TMEM_MAX_L
             and torch.cuda.get_device_capability(device_index) == (10, 0)
         ):
             return False
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import tf32_ready
 
         return tf32_ready(device_index, h, d // h, False)
-    return (
+    if not (
         dtype is torch.bfloat16
         and d % h == 0
         and (h, d // h) in LAYOUTS
         and L % 128 == 0
-        and 0 < L <= 768
+        and 0 < L <= b200_max_l(dtype)
         and torch.cuda.get_device_capability(device_index) == (10, 0)
-    )
+    ):
+        return False
+    return L <= B200_TMEM_MAX_L or stream_ready(device_index, h, d // h)
 
 
 def _descriptors(*maps):
@@ -509,10 +526,16 @@ class PvGateCore:
         )
         self.nsm = num_sms(device_index)
         self.runs = _Runs()
+        self._stream = None
 
-    def early(self) -> bool:
-        """This call takes the P_EARLY build: ``p_early`` and not settings.bias_only_dit_inf3_p_early=0."""
-        return self.p_early and settings.current().bias_only_dit_inf3_p_early
+    def early(self, L: int = 0) -> bool:
+        """This call takes the P_EARLY build: ``p_early`` and not settings.bias_only_dit_inf3_p_early=0, and L within tensor memory
+        (the streaming core past it has no P_EARLY form)."""
+        return (
+            self.p_early
+            and settings.current().bias_only_dit_inf3_p_early
+            and L <= B200_TMEM_MAX_L
+        )
 
     def kernel(
         self, sg: int, gate: bool = True, vb: int = 128, early: bool | None = None
@@ -571,8 +594,22 @@ class PvGateCore:
             return _LaunchPDL(k, grid, (256, 1, 1), *maps, L, S)
         return _Launch(k, grid, (256, 1, 1), *maps, L, S)
 
+    def stream(self) -> "PvStreamCore":
+        """The streaming core for L > ``B200_TMEM_MAX_L`` (same layout and PDL build), made on first use."""
+        if self._stream is None:
+            self._stream = PvStreamCore(
+                self.device_index, nh=self.nh, dh=self.dh, pdl=self.pdl
+            )
+        return self._stream
+
     def __call__(self, v, P, out, S, g=None):
-        """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16."""
+        """v [S L, 768] view, P [nh L, L] contiguous, out [S L, 768] view, g [S L, 768] view or None; all bf16. L > 768 (the P tile
+        no longer fits tensor memory) runs ``pv_stream_sm100.cu`` (``PvStreamCore``)."""
+        if (
+            not h100_enabled(self.device_index)
+            and v.shape[0] // S > B200_TMEM_MAX_L
+        ):
+            return self.stream()(v, P, out, S, g)
         if h100_enabled(self.device_index):
             if _H100_PVX:
                 h100_ext().pv_cta(
@@ -601,6 +638,148 @@ class PvGateCore:
         )
         self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g, vb, early))()
         return out
+
+
+# --------------------------------------------------------------------------------------------------- the core past 768 keys
+#: samples per work item ``pv_stream_sm100.cu`` is built for (N = SG x 64 per product, two accumulator sets within 512 columns)
+_STREAM_GROUPS = (1, 2, 3, 4)
+
+
+
+def _stream_smem(sg: int) -> int:
+    """pv_stream_sm100.cu's shared memory: NST stages of (16 KB P chunk + SG 8 KB v tiles), three 16 KB staging tiles, barriers."""
+    stb = 16384 + sg * 8192
+    return (_SMEM_MAX - 1024 - 3 * 16384) // stb * stb + 3 * 16384 + 512
+
+
+def pick_group_stream(S: int, L: int, nsm: int, nh: int = H, dh: int = DH) -> int:
+    """Samples per work item of the streaming core: the least modelled time over the SMs, rounds of items x max(the SM's TMA intake
+    for the item -- the P tile once, SG v tiles -- at ~66 B/clk, the products at N = SG x 64 and ~4096 MAC/clk). Per 16-key step:
+    (128 + SG DH) 32 B / 66 against SG 32 clocks. settings.bias_only_dit_sg forces one (clamped to the built groups)."""
+    groups = [g for g in _STREAM_GROUPS if g <= max(S, 1)]
+    forced = settings.current().bias_only_dit_sg
+    if forced:
+        f = int(forced)
+        return max([g for g in groups if g <= f] or [1])
+    best = None
+    for sg in groups:
+        items = nh * (L // 128) * -(-S // sg)
+        per = max((128 + sg * dh) * 32 / 66, sg * 32)
+        cost = -(-items // nsm) * per
+        if best is None or cost < best[0] - 1e-9:
+            best = (cost, sg)
+    return best[1]
+
+
+class PvStreamCore:
+    """``pv_stream_sm100.cu``: ``PvGateCore``'s contract (out = sigmoid(g) * (P v), or P v without g; v / g / out [S L, nh dh] bf16
+    views with any row stride, P [nh L, L] bf16 contiguous) for L > 768, where the P tile no longer fits tensor memory: P streams
+    through shared memory in 64-key chunks as the K-major A operand of ONE product per 16-key step for the whole sample group
+    (B = the group's v tiles side by side, N = SG x 64). Bound launches cached per (buffers, strides, S, L). ``pdl``: the -DPDL_INF
+    build, launched with the PDL attribute (the bf16 three-kernel inference step, the training backward's programmatic dV)."""
+
+    def __init__(
+        self, device_index: int, nh: int = H, dh: int | None = None, pdl: bool = False
+    ):
+        from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
+        self._sm100, self._tm = sm100, sm100._tm
+        self.nh, self.dh = nh, dh or 768 // nh
+        assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
+        self.device_index, self.pdl = device_index, pdl
+        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.runs = _Runs()
+
+    def kernel(self, sg: int, gate: bool = True):
+        """The cubin for SG samples per item, with or without the gate (built on first use)."""
+        return self._sm100._sm100_kernel(
+            "pv_stream_sm100",
+            "bo_pv_stream_sm100",
+            self.device_index,
+            pdl=self.pdl,
+            src_dir=str(_dir),
+            defs=(
+                f"SG={sg}",
+                f"GATE={int(gate)}",
+                f"NHEAD={self.nh}",
+                f"DHEAD={self.dh}",
+                *(("PDL_INF",) if self.pdl else ()),
+            ),
+            smem=_stream_smem(sg),
+        )
+
+    def _bind(self, v, P, out, S, L, g):
+        M, nh, dh, tm, es = v.shape[0], self.nh, self.dh, self._tm, v.element_size()
+        gg = v if g is None else g
+        sg = pick_group_stream(S, L, self.nsm, nh, dh)
+        rs = v.stride(0) * es
+        maps = _descriptors(
+            tm(P, [L, nh * L], L * 2, [64, 128]),
+            tm(v, [nh * dh, L, S], [rs, L * rs], [dh, 64, sg]),  # the group's v tiles: one 3-D box per stage
+            tm(gg, [nh * dh, M], gg.stride(0) * es, [dh, 128]),
+            tm(out, [nh * dh, M], out.stride(0) * es, [dh, 128]),
+        )
+        k = self.kernel(sg, g is not None)
+        grid = (min(self.nsm, nh * (L // 128) * -(-S // sg)), 1, 1)
+        if self.pdl:
+            from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import _LaunchPDL
+
+            return _LaunchPDL(k, grid, (256, 1, 1), *maps, L, S)
+        return _Launch(k, grid, (256, 1, 1), *maps, L, S)
+
+    def __call__(self, v, P, out, S, g=None):
+        L = v.shape[0] // S
+        assert (
+            v.dtype is torch.bfloat16
+            and P.dtype is torch.bfloat16
+            and out.dtype is torch.bfloat16
+            and P.is_contiguous()
+            and tuple(P.shape) == (self.nh * L, L)
+            and L % 128 == 0
+        ), (v.dtype, P.dtype, tuple(P.shape), L)
+        key = (
+            v.data_ptr(),
+            v.stride(0),
+            None if g is None else (g.data_ptr(), g.stride(0)),
+            P.data_ptr(),
+            out.data_ptr(),
+            out.stride(0),
+            S,
+            L,
+            settings.current().bias_only_dit_sg,
+        )
+        self.runs.bind(key, lambda: self._bind(v, P, out, S, L, g))()
+        return out
+
+
+_STREAM_FAILED = False
+_STREAM_READY: set = set()
+
+
+@device_constant
+def stream_ready(index: int, nh: int, dh: int) -> bool:
+    """Build and load representative streaming-core cubins for (nh, dh) once; False (after one warning) when a toolchain or driver
+    problem keeps the module path for L > 768. A constant to ``torch.compile``."""
+    global _STREAM_FAILED
+    if _STREAM_FAILED:
+        return False
+    key = (index, nh, dh)
+    if key in _STREAM_READY:
+        return True
+    try:
+        core = PvStreamCore(index, nh, dh)
+        core.kernel(1, True)
+        core.kernel(1, False)
+    except Exception as exc:  # noqa: BLE001 -- a toolchain or driver problem keeps the module path past 768 keys
+        _STREAM_FAILED = True
+        warnings.warn(
+            f"bias-only DiT long-L core (pv_stream_sm100) unavailable, L > {B200_TMEM_MAX_L} keeps the module path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+    _STREAM_READY.add(key)
+    return True
 
 
 # --------------------------------------------------------------------------------------------------- training backward
@@ -858,10 +1037,11 @@ class PvDpb:
 
     def __call__(self, do, pt, dv, v, P, dd, dbias, A) -> bool:
         """do [A L, DA] view, pt / P [nh L, L] (P^T, P) contiguous, dv [A L, DA] view (dV out), v [A L, DA] view, dd [A, nh, L] fp32,
-        dbias [nh L, L] out; bf16 but dd. False (nothing launched) where the bias gradient belongs on CTA pairs."""
+        dbias [nh L, L] out; bf16 but dd. False (nothing launched) where the bias gradient belongs on CTA pairs, and past L 768 (pv
+        dV then runs the streaming core, ``pv_stream_sm100.cu``, which is not a body of this launch)."""
         L = do.shape[0] // A
         hp = 2 if self.dh == 32 else 1
-        if dpb_pair_on(L, self.nh, hp, self.nsm) and not self.single:
+        if L > B200_TMEM_MAX_L or (dpb_pair_on(L, self.nh, hp, self.nsm) and not self.single):
             return False
         key = (
             do.data_ptr(),
