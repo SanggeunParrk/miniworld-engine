@@ -6,20 +6,35 @@ QK-norm) on B200; the module-level summary is in [b200.md](../b200.md). Columns 
 Five head layouts are served: 8 x 48 (the registry row), 12 x 32, 16 x 24 (AF3's Pairformer single attention) and 24 x 16 at
 d_single 384, and 16 x 32 at d_single 512.
 
-Summary (2026-10-01). Inference and training in bf16, B = 1, every layout; inference at L % 16 == 0, training at L % 128 ==
-0 (both tested and measured at L128-768). Against the fastest other implementation (`bench.py`, PyTorch compiled / portable kernels /
-cuEquivariance / Anthropic): inference 1.16-1.66x in every layout (Anthropic's shipped module row is the runner-up),
-training with CUDA graphs 1.24-1.90x (cuEquivariance or Triton; Anthropic has no backward). Training without CUDA graphs
-is host-bound: 0.58-1.30x the fastest other row, behind at short lengths (see "Limits and next"). Accuracy matches the
-bf16 PyTorch module (output and every gradient within 1.3x its error against the fp32 module, every layout).
-Time-roofline SoL (8 x 48, measured 2026-09-30): inference 6-51 % (L128 -> L768), training 26 % (L384) / 49 % (L768);
-the pair kernels run at 69-95 %, the attention cores are latency-bound at B = 1.
+Summary (2026-10-20). Inference and training in bf16, any number of samples B (2026-10-20; up to 48 per launch, bitwise the
+one-sample results per sample), every layout; inference at L % 16 == 0, training at L % 128 == 0 (tested L128-1536, measured
+L384 / 768 / 1536). Against main (59d910cf, B = 1, same GPU, same harness, back to back): inference 1.00-1.11x, training with
+CUDA graphs 1.02-1.16x (the key-split forward cores, the query-split dK / dV core), training without CUDA graphs 1.04-2.74x
+(the C++ launch sequences; host-bound cells, noisy). Against the fastest other implementation (PyTorch compiled /
+cuEquivariance, 8 x 48 and 16 x 24): inference 2.06-2.78x, training with CUDA graphs 1.86-2.32x. B = 5 (the confidence head's
+samples, 16 x 24): inference 2.18-2.67x, training 1.98-2.10x the fastest other row, 2.2-3.2x main (main ran B > 1 on the PyTorch
+module path). Accuracy: the bf16 PyTorch module's (output and every gradient within 1.3x its error against the fp32 module,
+every layout, every split count); with `apb_b200_ksplit = apb_b200_qsplit = 1` the output, dsingle, dpair and the weight-GEMM
+gradients are main's bits. Every output and gradient is bitwise run to run (the parameter-gradient sums no longer use atomics).
+Time-roofline SoL of the attention cores (8 x 48, L768): inference core 11 % -> 23 % (15 % with the combine pass), training
+forward 12 % -> 24 %; the pair kernels (69-95 %, unchanged) dominate the step at L >= 768.
 
 On B200 the module runs **hand-written CUDA and cuBLAS only** (no Triton, no quack), from `AttentionPairBias.forward`
 through `integrations/attention_pair_bias_b200.py` when the call matches its contract: implementation MINIWORLD with the
-engine backend not forced to Triton, bf16 single and pair, B = 1, (heads, d_single) one of `SHAPES` = (8, 384), (12, 384),
-(16, 384), (24, 384), (16, 512), d_pair 128, no QK-norm, key mask [1, L] or none, capability 10.0. Everything else keeps
-the module path.
+engine backend not forced to Triton, bf16 single and pair, any number of samples B (since 2026-10-20; each sample its own pair
+and key mask, up to `max_batch()` = 48 per launch, more in consecutive chunks of 48), (heads, d_single) one of `SHAPES` =
+(8, 384), (12, 384), (16, 384), (24, 384), (16, 512), d_pair 128, no QK-norm, key mask [B, L] or none, capability 10.0.
+Everything else keeps the module path. MiniWorld calls the module in the confidence head's MiniPairformer (16 x 24, d_single
+384, its N diffusion samples as B); no MiniWorld config builds it with QK-norm (the trunk Pairformer sets `use_qk_norm: false`,
+the confidence head leaves the False default), so QK-norm is not served.
+
+Each op runs as **one C++ call** (since 2026-10-20): the sm_100 build of `apb_rows.cu` (`-DAPB_SM100_HOST`) registers the torch
+ops `apb_b200::train_fwd`, `apb_b200::train_bwd` and `apb_b200::infer`, which issue the op's whole launch sequence -- the row and
+pair kernels, the cuBLAS GEMMs through the same ATen calls as the Python sequence (so the same bits), the sm_100a attention
+cubins through the driver with their TMA descriptors encoded (and cached by address) in C++. The cubins are built by the Python
+side (nvcc 13.1) and fetched once per key through a resolver callback; `apb.host_ops()` loads the build, the ops' fake
+implementations and the resolver (a constant to torch.compile). `settings.apb_b200_host = False` runs the Python sequence (same
+kernels, same bits; the A/B switch). fp32 master weights go straight into `prep`, which rounds them to bf16 in its pass.
 
 - **Inference** (no autograd; one opaque op): `ln_rows` (LayerNorm of the single rows, bf16, and a copy of the input as the
   output's residual seed) -> one cuBLAS GEMM for q | k | v | g (the weights packed once per parameter version -- inside a CUDA-graph capture per capture, unless `static_weights()` is declared --, q and its
@@ -42,8 +57,25 @@ the module path.
 - **Deterministic dQ.** `attn_dqb` stores each 128-key chunk's dQ partial into its own slice (`-DDQPART=1`, [L / 128, L,
   W] fp32) instead of reduce-adding into one buffer, and `qkv_bwd` adds the slices in chunk order on its way to the bf16
   dq columns. The atomic order had made runs differ by ~1e-4 relative after the bf16 rounding, which the bench's repeat
-  check rejects (16 x 24, L640). The parameter-gradient column sums (dWf, ln weights, dbq) still add one block-reduced
-  partial per block atomically into fp32; their order varies run to run within that check.
+  check rejects (16 x 24, L640). Since 2026-10-20 the parameter-gradient column sums (dWf, ln weights, dbq) are deterministic
+  too: `ln_bwd` / `qkv_bwd` (grid capped at two blocks per SM, a block walking several rows) and `pair_bias_bwd` write one
+  block partial row each and `finalize` reduces them in a fixed order (`acc_reduce_k`, as on H100): every output and gradient
+  is bitwise run to run (five steps under a NaN-poisoned allocator, `test_b200_apb_host_gpu.py`).
+- **Key split (forward / inference cores).** At B = 1 the cores had 16-48 work items for 148 SMs. Built `-DKSPLIT=1` they split
+  the key blocks into NS equal chunks; a work item is (sample, head, query-tile pair, chunk) and leaves its chunk's
+  normalised partial O (fp32) and partial LSE; `ksplit_combine` merges the chunks in order (weights 2^(LSE_c - max)), gates
+  and writes og over q (inference) or O, LSE and og (training, the `gate_rows` pass folded in). NS depends on (L, heads)
+  only (`sm100.apb_ksplit`: the smallest NS minimising waves / NS, each item keeping two key blocks; e.g. 8 heads L768 NS 6,
+  16 heads L768 NS 3, L1536 NS 3), never on B, so a batch stays bitwise B single calls. The split builds form the exponent as
+  (t - m) log2 e, so a chunk whose keys are all masked (a padded tail) stays finite and gets weight 0.
+  `settings.apb_b200_ksplit` forces NS (1: the unsplit cores, the previous bits).
+- **Query split (backward dK / dV core).** `attn_dkv -DQSPLIT=1`: a work item walks 1 / NQ of the query blocks and leaves its
+  dK / dV as a slice of [NQ, S L, W]; `qkv_bwd` adds the slices in order. NQ by the same rule over the divisors of L / 128
+  (`sm100.apb_qsplit`; 8 heads L768 NQ 3), `settings.apb_b200_qsplit` forces it.
+- **Batches.** The forward cores' items carry the sample (bias planes [S H, L, L]), the backward cores take per-sample bias
+  planes (`-DBPS=1`; the token DiT's builds share one bias across samples), the pair kernels run over the S L query rows
+  (dbias map [L, L, S H]), D is [S, H, L]. A sample's output, dsingle and dpair are bitwise those of a one-sample call; the
+  parameter gradients are the samples' sum (fp32 order).
 - `ln_pair` has no bias since 2026-10-08 (the module's LayerNorm is `bias=False`; an old checkpoint's `ln_pair.bias` is dropped
   on load, exactly): its bias added Wb . b to every logit of a head, which the softmax cancels, and its gradient
   (sum_j dbias[h, i, j] = 0 for every query) is exactly zero. The kernels dropped it from the forward before as well; the
@@ -107,6 +139,9 @@ Built per layout with `-DQPAIR=1 -DNHEAD=<heads> -DDHP=<width> -DRSQDV=<1 / sqrt
   per 128-key chunk (see "Deterministic dQ"); dK / dV are [L, W].
 - The width sets the MMA K steps (DH / 16), the q / k / v / dO boxes and the fp32 output staging (48: a 32-column box in the
   128-B swizzle + a 16-column box in the 64-B swizzle; 32: the 32-column box; 16: the 16-column box in the 64-B swizzle).
+- `-DKSPLIT=1` (`attn_inf`, `attn_fwd2`): the key split above; `attn_inf` then stages fp32 partials (two 24 KB buffers, 225 KB
+  of shared memory) instead of loading g. `-DQSPLIT=1` (`attn_dkv`): the query split; `-DBPS=1` (`attn_dkv`, `attn_dqb`):
+  per-sample bias planes, `attn_dqb` items then (sample, head, query tile, key chunk).
 - The token DiT builds keep QPAIR = 0 and NHEAD = 16 (its tests pass unchanged).
 
 ### K4 · row passes and glue (`apb_rows.cu`)
@@ -116,12 +151,121 @@ A warp per row, lane l on CPL = W / 32 contiguous columns (12 at W = 384, 16 at 
 `gate_bwd` (dO for the core, D per head, dg), `qkv_bwd` (dq = the dQ chunk slices added in order | dk | dv, fp32 -> bf16
 into the dqkvg buffer, dbq), `ln_bwd` (dx = dy + LayerNorm backward, dw, db). Head sums are lane shuffles where a head
 spans whole lanes (8 x 48: 4 lanes; 16 x 24 and 16 x 32: 2); where it does not (24 x 16 and 12 x 32 at CPL 12),
-`gate_bwd_hl` gives each head one lane (lanes past the head count idle). Column sums (dw, db, dbq) are block-reduced and
+`gate_bwd_hl` gives each head one lane (lanes past the head count idle). `ksplit_combine` (the key split's merge) is a thread
+per four columns, templated on NS so the NS partial loads issue together (a runtime count left them one latency each: 6.4 ->
+4.0 us at 8 x 48 L768 NS 6). Column sums (dw, db, dbq) are block-reduced and
 added into one zeroed fp32 accumulator. `prep` packs W q | k | v | g (padded rows for 16 x 24), its bias, Wo (padded
 columns) and Wf in one launch; `finalize` writes every parameter gradient into its own tensor (custom-op outputs may not
 alias) in one launch.
 
-## Measurements (2026-10-01; CUDA-graph rows re-measured 2026-10-10)
+## Measurements (2026-10-20)
+
+`bench.py target=attention_pair_bias level=module sweep_axis=seq_len min_seq_len=L max_seq_len=L precision=bf16-mixed
++apb_n_head=<heads> d_single=<d> [+apb_batch=5]` (fp32 master parameters under autocast bf16, compiled, CUDA graph for
+inference, training with CUDA graphs off / on; no key masking, `mask_prob` 0), ms; GPU 7 of the B200 box (driver 580.95.05,
+torch 2.13.0+cu129, sm_100a cores built by nvcc 13.1) with only the ~2.3 GB utilisation dummy beside it, checked before every
+run. main = the engine at 59d910cf (its own worktree and harness), measured in the same session (cells reproduced to 4 digits
+on repeats); PyTorch compiled / cuEquivariance measured at 8 x 48 and 16 x 24 only. × = main / ours and (fastest of PyTorch
+compiled, cuEquivariance) / ours; training cells are graph off / on, the ratios graph on. The graph-off cells are host-bound and
+vary run to run (main 0.58-0.86 ms, ours 0.31-0.47 ms at L384 / 768 across runs). The B = 5 main cells ran the PyTorch module
+path (main serves B = 1 only).
+
+#### B = 1, inference
+
+| layout | L | PyTorch compiled | cuEquivariance | main | ours | × main | × fastest other |
+|---|---|---|---|---|---|---|---|
+| 8 x 48 | 384 | 0.072 | 0.074 | 0.035 | **0.033** | 1.06 | 2.19 |
+| 8 x 48 | 768 | 0.145 | 0.151 | 0.063 | **0.057** | 1.11 | 2.54 |
+| 8 x 48 | 1536 | 0.392 | 0.399 | 0.150 | **0.141** | 1.07 | 2.78 |
+| 12 x 32 | 384 |  |  | 0.035 | **0.035** | 1.00 |  |
+| 12 x 32 | 768 |  |  | 0.063 | **0.059** | 1.07 |  |
+| 12 x 32 | 1536 |  |  | 0.154 | **0.147** | 1.04 |  |
+| 16 x 24 | 384 | 0.072 | 0.076 | 0.037 | **0.035** | 1.06 | 2.06 |
+| 16 x 24 | 768 | 0.149 | 0.154 | 0.063 | **0.061** | 1.04 | 2.44 |
+| 16 x 24 | 1536 | 0.408 | 0.418 | 0.158 | **0.158** | 1.00 | 2.59 |
+| 24 x 16 | 384 |  |  | 0.037 | **0.035** | 1.06 |  |
+| 24 x 16 | 768 |  |  | 0.065 | **0.063** | 1.03 |  |
+| 24 x 16 | 1536 |  |  | 0.166 | **0.166** | 1.00 |  |
+| 16 x 32 (d 512) | 384 |  |  | 0.037 | **0.035** | 1.06 |  |
+| 16 x 32 (d 512) | 768 |  |  | 0.065 | **0.061** | 1.07 |  |
+| 16 x 32 (d 512) | 1536 |  |  | 0.160 | **0.160** | 1.00 |  |
+
+#### B = 1, training
+
+| layout | L | PyTorch compiled | cuEquivariance | main | ours | × main (graph on) | × fastest other (graph on) |
+|---|---|---|---|---|---|---|---|
+| 8 x 48 | 384 | 0.480 / 0.254 | 0.477 / 0.204 | 0.787 / 0.113 | 0.448 / **0.100** | 1.12 | 2.04 |
+| 8 x 48 | 768 | 0.625 / 0.514 | 0.658 / 0.407 | 0.577 / 0.201 | 0.325 / **0.178** | 1.13 | 2.29 |
+| 8 x 48 | 1536 | 1.465 / 1.351 | 1.270 / 1.135 | 0.604 / 0.510 | 0.531 / **0.489** | 1.04 | 2.32 |
+| 12 x 32 | 384 |  |  | 0.587 / 0.121 | 0.316 / **0.104** | 1.16 |  |
+| 12 x 32 | 768 |  |  | 0.580 / 0.227 | 0.324 / **0.201** | 1.13 |  |
+| 12 x 32 | 1536 |  |  | 0.823 / 0.622 | 0.625 / **0.580** | 1.07 |  |
+| 16 x 24 | 384 | 0.485 / 0.254 | 0.634 / 0.209 | 0.584 / 0.125 | 0.452 / **0.110** | 1.13 | 1.89 |
+| 16 x 24 | 768 | 0.657 / 0.541 | 0.658 / 0.430 | 0.594 / 0.237 | 0.470 / **0.223** | 1.06 | 1.93 |
+| 16 x 24 | 1536 | 1.567 / 1.445 | 1.375 / 1.236 | 0.747 / 0.681 | 0.713 / **0.666** | 1.02 | 1.86 |
+| 24 x 16 | 384 |  |  | 0.794 / 0.135 | 0.319 / **0.125** | 1.08 |  |
+| 24 x 16 | 768 |  |  | 0.624 / 0.272 | 0.476 / **0.258** | 1.06 |  |
+| 24 x 16 | 1536 |  |  | 0.884 / 0.821 | 0.850 / **0.806** | 1.02 |  |
+| 16 x 32 (d 512) | 384 |  |  | 0.810 / 0.127 | 0.317 / **0.115** | 1.11 |  |
+| 16 x 32 (d 512) | 768 |  |  | 0.863 / 0.243 | 0.315 / **0.227** | 1.07 |  |
+| 16 x 32 (d 512) | 1536 |  |  | 0.750 / 0.688 | 0.717 / **0.673** | 1.02 |  |
+
+#### B = 5, inference
+
+| layout | L | PyTorch compiled | cuEquivariance | main | ours | × main | × fastest other |
+|---|---|---|---|---|---|---|---|
+| 16 x 24 | 384 | 0.174 | 0.182 | 0.194 | **0.080** | 2.44 | 2.18 |
+| 16 x 24 | 768 | 0.492 | 0.506 | 0.578 | **0.203** | 2.85 | 2.43 |
+| 16 x 24 | 1536 | 1.792 | 1.816 | 2.135 | **0.672** | 3.18 | 2.67 |
+
+#### B = 5, training
+
+| layout | L | PyTorch compiled | cuEquivariance | main | ours | × main (graph on) | × fastest other (graph on) |
+|---|---|---|---|---|---|---|---|
+| 16 x 24 | 384 | 0.709 / 0.600 | 0.696 / 0.558 | 0.744 / 0.622 | 0.475 / **0.283** | 2.20 | 1.98 |
+| 16 x 24 | 768 | 1.971 / 1.836 | 1.889 / 1.737 | 2.109 / 1.965 | 0.889 / **0.848** | 2.32 | 2.05 |
+| 16 x 24 | 1536 | 6.755 / 6.577 | 6.385 / 6.180 | 7.288 / 7.095 | 2.989 / **2.944** | 2.41 | 2.10 |
+
+Host time per training step without CUDA graphs (`host_parts.py` / `host_probe.py` style probe, fp32 master parameters under
+autocast bf16, the module compiled with `triton.cudagraphs` off, B = 1; us of host time per step, which is the step time here;
+same-session values, +-30 % between runs on this shared host):
+
+| layout, L | main | Python sequence (`apb_b200_host = False`) | C++ host path |
+|---|---|---|---|
+| 16 x 24, 384 | 847-1070 | 632-847 | 487-498 |
+| 16 x 24, 768 | 613-876 | 618-629 | 326-336 |
+| 8 x 48, 768 | 617-619 | 609-726 | 338-493 |
+
+Inside the C++ ops (instrumented build, 16 x 24, L128): train_fwd 37 us, train_bwd 68 us of host work, of which the six cuBLAS
+GEMMs through ATen take 6-8 us each; the rest of the step's host time is torch's (autograd engine, autocast, the module call).
+
+Attention cores, kernel durations (CUPTI, eager steps, B = 1, bf16 parameters; us; split counts as chosen by `apb_ksplit` /
+`apb_qsplit`):
+
+| kernel | layout | L384 | L768 | L1536 |
+|---|---|---|---|---|
+| `attn_inf` unsplit -> split + `ksplit_combine` | 8 x 48 | 11.7 -> 6.5 + 3.2 (NS 3) | 18.4 -> 8.4 + 4.0 (NS 6) | 30.8 -> 15.5 + 4.2 (NS 3) |
+| | 16 x 24 | 11.3 -> 7.1 + 3.2 (NS 3) | 18.1 -> 10.5 + 3.8 (NS 3) | 31.3 (unsplit) |
+| `attn_fwd2` unsplit -> split (combine as above) | 8 x 48 | 10.4 -> 7.3 | 16.5 -> 8.2 | 28.4 -> 15.2 |
+| | 16 x 24 | 10.1 -> 6.9 | 16.2 -> 10.0 | 28.8 (unsplit) |
+| `attn_dkv` unsplit -> query split | 8 x 48 | 10.1 -> 7.3 (NQ 3) | 14.9 -> 9.1 (NQ 3) | 26.2 -> 21.0 (NQ 3) |
+| | 16 x 24 | 9.1 -> 6.7 (NQ 3) | 13.7 -> 12.2 (NQ 3) | 47.0 -> 36.3 (NQ 3) |
+
+The split cores move the forward / inference core from 2-29 % to 15-24 % of its time floor at L768 (floors from the
+2026-09-30 table below: 1.9 us for both cores at 8 x 48 L768); what is left is per-item latency (prologue, pipeline fill,
+partial store) and the combine launch. The split also makes the pair kernel that follows ~1 us slower (L2 state), which is why
+the split is kept only where its estimate halves the unsplit core.
+
+Accuracy and determinism (`tests/gpu/sm100/test_b200_apb_ksplit_gpu.py`, `test_b200_apb_host_gpu.py`, the existing
+`test_b200_apb_gpu.py` / `test_apb_b200_gpu.py` / `test_b200_fp32_master_gpu.py`): every key-split and query-split count
+against the fp32 module within 1.1x the unsplit error (padded key tails, whole masked chunks finite); the C++ path bitwise the
+Python sequence (every layout, bf16 and fp32-master parameters, inference and training); five steps under a NaN-poisoned
+allocator bitwise equal; CUDA-graph capture bitwise eager; B = 2 / 5 at L256 / 768 (samples of different lengths) and a chunked
+B = 5 (max_batch 2) bitwise the one-sample calls for the output, dsingle and dpair, parameter gradients within 1e-5 of the
+samples' sum; torch.compile against eager. 225 tests, plus the token DiT core tests (`test_augmented_attention_bf16_sm100_gpu.py`,
+`test_b200_token_dit*_gpu.py`, `test_tdit_heads_sm100_gpu.py`; 309 in the combined run).
+
+## Measurements (2026-10-01; CUDA-graph rows re-measured 2026-10-10; before the 2026-10-20 changes)
 
 `bench.py target=attention_pair_bias level=module sweep_axis=seq_len min_seq_len=128 max_seq_len=768 seq_len_step=128
 precision=bf16-mixed +apb_n_head=<heads> d_single=<d>`, compiled, one GPU with no other process on it, no key
@@ -304,17 +448,23 @@ What bounds the step:
 | 3 stages in the backward ring | no gain (69.3 vs 67.8 us) |
 | ln_pair.bias gradient from the kernel's per-head dbias sums | rounding noise around the exact zero (up to 2x the bf16 module's noise); returned as 0 (the parameter no longer exists) |
 | 16 / 24 heads in the pair backward: dWf accumulated in a second phase over the tile instead of per-warp accumulators | slower; reverted to per-warp accumulators at one block per SM |
+| key-split combine as a warp per row with a runtime chunk count (2026-10-20) | 4-10 us: the guarded partial loads issued one latency at a time; a thread per four columns, templated on NS: 3-5 us |
+| key split wherever waves / chunks improves (2026-10-20) | at two waves of a third (16 heads L1536, 24 heads L1024) the partial stores, the combine and a ~1 us slower pair kernel after it ate the gain (16 x 24 L1536 0.160 vs 0.158 ms unsplit); the split is kept only where its estimate halves the unsplit core |
+| batched indexing in the pair kernels for every B (2026-10-20) | the one-sample forward 1.6-6 % slower at L1536 (24 heads: 123.5 vs 115.7 us); B = 1 compiles the single-sample indexing |
 | 16 x 24 heads as 24 wide (no padding) | not built: 24 is not a multiple of the q k^T MMA's K step (16), and a 48-B row is no swizzle span (32 / 64 / 128 B); 32-wide heads with exact zero pads cost 33 % more q / k / v / g bytes and keep every kernel on the existing tiles |
 
 ## Limits and next
 
-- The attention cores (2-29 % SoL) are the largest lever left: splitting the key axis into chunks (a second, small combine
-  pass for the partial O / max / sum) would give ~3x more work items at B = 1 and cut the forward / inference core from
-  11-17 us toward its few-us floor.
-- Without CUDA graphs the step is host-bound (~0.5 ms of host time per training step against 0.1-0.2 ms of GPU work). The
-  opaque ops' Python bodies (~64 / ~125 us) and the cuda-python launches of the attention cubins are the part this path
-  controls; one C++ call per op (cubin launches and TMA descriptors included) is the lever.
-- Served: bf16, B = 1, no QK-norm, d_pair 128, (heads, d_single) in (8, 384), (12, 384), (16, 384), (24, 384), (16, 512);
-  inference L % 16 == 0 (the pair kernels' row groups), training L % 128 == 0 (the backward attention tiles). fp32, QK-norm
-  and other shapes run the module path.
-- Per-kernel SoL is measured for 8 x 48 only (2026-09-30, before the residual fold and the deterministic dQ).
+- Inference at L >= 768 is the pair kernel's (HBM-bound at 80-95 %: 27 of 50 us at 8 x 48 L768, 104 of 148 us at 16 x 24
+  L1536); the attention core with its combine is 12-16 us of it.
+- The key split's combine is its own launch (3-5 us). The last chunk of an item could merge the others' partials in the core's
+  epilogue (a counter per item; the merge order fixed, so still deterministic), removing the launch and the extra pass.
+- Backward: `attn_dqb` writes dbias in fp32 ([S H, L, L], 151 MB at 16 x 24 L1536) that `pair_bias_bwd` reads again
+  (dqb 98 us, pair backward 268 us there); `bias_transpose` (11 / 44 us at 16 x 24 L768 / 1536) exists only because `attn_dkv`
+  reads bias^T -- loading the bias tile through TMA and reading it transposed in shared memory would remove that pass.
+- Host: without CUDA graphs the step is still host-bound below L ~1024 (C++ ops ~105 us of host work, half of it the six
+  ATen GEMM calls; the rest torch's autograd / autocast / module call). Calling cuBLAS directly with cached algorithms would
+  save ~30 us but must reproduce ATen's algorithm choice to keep the bits.
+- Not served: QK-norm (no MiniWorld config uses it with this module), fp32 activations, other shapes (module path). H100 keeps
+  B = 1.
+- Per-kernel SoL beyond the attention cores is the 2026-09-30 table (8 x 48).
