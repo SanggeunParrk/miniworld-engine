@@ -484,6 +484,29 @@ pass `engine_backend="triton"`.
   `kernels/outer_product_mean/cuda/gather.cu`. Against `torch.compile` of the same statements (CUDA graph): token DiT 1.3-2.9x,
   atom DiT 1.2-1.9x, Chai-1 trunk triangle attention 3.2-6.5x, grouped OPM 1.1-1.2x, biased OPM 0.9-1.0x. Modules without these
   options are unchanged. Page: `docs/gpus/h100/model_variants/model_variants.md`.
+### Changed
+
+- B200 TriMul takes B samples in one call at every width (`integrations.trimul_b200.max_batch(width)`, `MAX_BATCH_BY_WIDTH`, 48 at
+  D64 / 128 / 256 / 384 / 512; `MAX_BATCH` keeps its D64 meaning and goes from 8 to 48; the wider widths took one sample): both
+  modules (and one direction at hidden 2D), inference and training, tokens b-major, a token mask and a row-dropout scale per sample.
+  Kernel changes: `b1g` reloads its dropout-scale rows when a front CTA's tile changes sample (as `b1s`), `k3w` reads the scale at row
+  s L + j, `k1wb` reads the token mask of the row's sample (formed once per tile; its epilogue mask is now built once per tile instead
+  of per 64-channel chunk) and takes `[P, B, L, L]` plane gradients; everything else was token-flat already (`k1w`, `k3g`, `b1s`,
+  `b7m` / `b7g`, the wide auxiliaries) and the contraction folds the samples into cuBLAS's batch dim. A call is split into launches by
+  `trimul_b200._plan` (a function of shapes, mode and the device's total memory only): at most 48 samples, at most 589824 (inference)
+  / 786432 (training, D128+) pair tokens -- the channel-major kernels (`k1w` stores, `k3w` loads) slow down as the launch's token
+  count grows (`k1w` D64 0.13 -> 0.24 ns per pair token from 0.59 M to 2.4 M tokens), so one launch of B samples at L768 was
+  0.83-0.98x of B one-sample calls -- and what fits in memory (measured working-set coefficients). Chunked inference writes into the
+  output in place (`b200_infer.inference_into`); chunked training is one autograd node (`b200_train._Chunked`: `forward_into` /
+  `backward_into` and the `*_small_into` D64 / D128 ops write their rows of y / dx in place; plain or checkpointed chunks; parameter
+  gradients summed in fp32 in chunk order). Under torch.compile the inference weight casts are traced instead of cached
+  (`_capture.param_forms` was a graph break under `fullgraph=True`); batched and chunked calls compile fullgraph. 612 cells (B 2-48 x
+  L128 / 384 / 768 / 1536 x five widths x three directions x inference / training): y and dx bitwise equal to B one-sample calls and
+  bitwise run to run, weight gradients within 5.8e-4 of the per-sample sum. B = 1: y / dx bitwise to main, time 1.001 (median ratio).
+  B200, CUDA graph, bf16-mixed: one call vs B calls 1.19-5.08x at L128, 1.01-1.50x at L384, 0.95-1.07x at L768 (checkpointed chunks
+  forced by memory 0.77-0.79x); 1.7-4.2x cuEquivariance, 3.8-17.1x the PyTorch statements. Tests
+  `tests/gpu/sm100/test_b200_trimul_batch_gpu.py` (rewritten: every width, bitwise, graphs, compile, chunks),
+  `tests/cpu/kernels/test_trimul_b200_batch_limit.py`; record `docs/records/trimul_b200_batched_20261020.md`.
 
 ## [2.3.7] - 2026-10-21
 
