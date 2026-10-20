@@ -1,5 +1,5 @@
 kernel,backend,family,file,status,detail,dtype
-#provenance,2.3.0,77ef5e3ec9d5,clean,2026-10-20,archive/norm-cuda-20260930-332-g77ef5e3e,
+#provenance,2.3.1,813f5c1080b0,clean,2026-10-20,archive/norm-cuda-20260930-335-g813f5c10,
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=2.79e-03 DLnW=2.04e-03 (band 1e-02 declared),bf16
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=1.51e-03 DX=3.13e-03 (band 1e-02 declared),bf16
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=2.33e-03 Mean=2.23e-08 Rstd=1.86e-07 Gate=1.95e-03 (band 1e-02 declared),bf16
@@ -32,7 +32,7 @@ gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kerne
 gated_projection_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
 gated_projection_gate_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,ok,rel out=3.79e-03 (band 1e-02 declared),bf16
 gated_projection_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
-layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=3.70e-07 dbeta=2.09e-07 (band 1e-02 declared),bf16
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=4.72e-07 dbeta=1.67e-07 (band 1e-02 declared),bf16
 layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=2.03e-03 dw=2.26e-03 db=2.41e-03 (band 1e-02 declared),bf16
 layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.61e-03 dgamma=2.40e-07 dbeta=8.45e-08 (band 9e-03 declared),bf16
 layernorm_bwd_reduce_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dw=2.26e-03 db=2.41e-03 (band 9e-03 declared),bf16
@@ -49,7 +49,7 @@ layernorm_fwd_strided_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/
 layernorm_linear_bwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel dx=2.30e-03 dln_weight=1.74e-03 dproj_weight=2.01e-03 (band 1e-02 declared),bf16
 layernorm_linear_fwd_fp32_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,ok,rel out=2.37e-03 mean=2.08e-08 rstd=1.74e-07 (band 9e-03 declared),bf16
 layernorm_linear_fwd_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/fused.py,ok,rel out=3.51e-03 (band 2e-02 declared),bf16
-layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=8.69e-08 c1=8.17e-08 (band 6e-07 declared),bf16
+layernorm_stats_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/stats.py,ok,rel rstd=8.69e-08 c1=1.63e-07 (band 6e-07 declared),bf16
 outer_product_mean_bwd_epilogue_dw_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dw_out=4.55e-03 (band 1e-02 declared),bf16
 outer_product_mean_bwd_epilogue_dx_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dmsa=5.84e-03 db_out=2.05e-03 dresidual=0.00e+00 (band 1e-02 declared),bf16
 outer_product_mean_bwd_layernorm_gemm_triton,triton,outer_product_mean,miniworld_engine/kernels/outer_product_mean/triton/main.py,ok,rel dmsa=5.84e-03 dln_weight=4.26e-03 dln_bias=3.54e-03 dw_left=4.97e-03 dw_right=6.01e-03 (band 1e-02 declared),bf16
@@ -67,7 +67,7 @@ rmsnorm_adamod_fwd_triton,triton,rmsnorm_adamod,miniworld_engine/kernels/rmsnorm
 rmsnorm_bwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel dx_aff=2.03e-03 dweight_aff=2.73e-03 dx_plain=2.54e-03 (band 4e-03 declared),bf16
 rmsnorm_fwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.py,ok,rel y_aff=2.37e-03 y_plain=3.80e-03 (band 4e-03 declared),bf16
 rope_fwd_triton,triton,rope,miniworld_engine/kernels/rope/triton/main.py,ok,rel y=5.14e-04 dx=7.23e-04 (band 3e-03 declared),bf16
-transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,RuntimeError: Error building extension 'transition_cuda_ext_v2': [1/3] c++ -MMD -MF transition_cuda.o.d -DTORCH_EXTENSION_NAME=transit | c++: error: unrecognized command line option ‘-std=c++20’; did you mean ‘-std=c++2a’?,bf16
+transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,RuntimeError: Error building extension 'transition_cuda_ext_v2': [1/2] c++ -MMD -MF transition_cuda.o.d -DTORCH_EXTENSION_NAME=transit | c++: error: unrecognized command line option ‘-std=c++20’; did you mean ‘-std=c++2a’?,bf16
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=2.18e-03 dAB=2.12e-03 xn=7.02e-04 (band 1e-02 declared),bf16
 transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: /home/psk6950/miniworld-engine-scratch/jit-runall2/miniworld_engine_jit/torch_extensions/transition_cuda_ext_v2-ee6c7a7d,bf16
 transition_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/main.py,ok,rel out=2.81e-03 (band 1e-02 declared),bf16
@@ -115,7 +115,7 @@ mpnn_edge_tail_bwd_dx_recompute_triton,triton,mpnn_edge_tail,miniworld_engine/ke
 mpnn_node_message_fwd_gemm_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,ok,rel out=1.49e-03 (band 5e-02),bf16
 mpnn_node_message_bwd_recompute_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,failed,WRONG NUMBERS: rel edge_states=1.10e-01 query_projection=1.02e-02 neighbor_projection=3.51e-02 edge_weight=2.20e-02 hidden_weight=6.86e-03 hidden_bias=3.82e-03 (band 5e-02),bf16
 mpnn_node_message_bwd_dx_triton,triton,mpnn_node_message,miniworld_engine/kernels/mpnn_node_message/triton/main.py,failed,WRONG NUMBERS: rel edge_states=1.10e-01 query_projection=1.02e-02 neighbor_projection=3.51e-02 edge_weight=2.20e-02 hidden_weight=6.86e-03 hidden_bias=3.82e-03 (band 5e-02),bf16
-mpnn_relative_position_bwd_reduce_triton,triton,mpnn_relative_position,miniworld_engine/kernels/mpnn_relative_position/triton/main.py,ok,rel grad_table=1.15e-07 grad_bias=7.24e-08 (band 5e-02),bf16
+mpnn_relative_position_bwd_reduce_triton,triton,mpnn_relative_position,miniworld_engine/kernels/mpnn_relative_position/triton/main.py,ok,rel grad_table=5.77e-08 grad_bias=7.24e-08 (band 5e-02),bf16
 mpnn_message_fwd_gemm_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel out=1.07e-03 (band 5e-02),bf16
 mpnn_message_fwd_gelu_reduce_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel out=1.07e-03 (band 5e-02),bf16
 mpnn_message_bwd_dx_triton,triton,mpnn_message,miniworld_engine/kernels/mpnn_message/triton/main.py,ok,rel preactivation=1.01e-02 weight=4.23e-03 bias=3.97e-03 (band 5e-02),bf16
