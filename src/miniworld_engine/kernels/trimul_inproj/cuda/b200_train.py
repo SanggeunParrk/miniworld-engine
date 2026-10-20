@@ -1,4 +1,5 @@
-"""B200 (sm_100a) TriMul training for every width D64-D512, either direction, bf16, B=1.
+"""B200 (sm_100a) TriMul training for every width D64-D512, either direction, bf16, B samples per launch (tokens b-major, M = B L L:
+the kernels are token-flat but for the per-sample token mask and row-dropout scale; the contractions batch over channels x B).
 
 D64 / D128 (``forward_small`` / ``backward_small``; L a multiple of 128): forward = the inference front (k1w,
 cuBLAS contractions) and k3g's saving epilogue (x_n, LN_out statistics); backward = two fused kernels around the contraction
@@ -28,7 +29,8 @@ Backward:
   cuBLAS      [dW1 ; dWg] = [dpre | dg]^T xn,  dxn = [dpre | dg] [W1 ; Wg]
   lnin_bwd    dx = dy + LN_in backward of dxn; dg_i, db_i
 Sources: ``b200_sources/{k1w,k3g,b1s,b7m,b1g,b7g}.cu`` (D64 / D128), ``b200_sources/{k1w,k3w,wide_aux,k1wb,wide_bwd}.cu``.
-Every call owns its buffers.
+Every call owns its buffers. The ``*_into`` ops are the same launches writing y (forward) / dx (backward) into a caller's buffer:
+``trimul_train_chunked`` runs a batch in chunks of samples as one autograd node, each chunk writing its rows of y and dx in place.
 """
 
 import torch
@@ -43,6 +45,12 @@ EPS = 1e-5
 TOK = 128
 B1_RSF = 4       # b1s / b1g ring slots per front CTA
 B7_RD = 12       # b7g ring slots per source group
+
+
+#: Fixed-arity return types of the ``*_into`` ops (the saved sets of the wide / D64-D128 forwards, the ten parameter gradients).
+_SAVED9 = tuple[(torch.Tensor,) * 9]
+_SAVED5 = tuple[(torch.Tensor,) * 5]
+_GRADS10 = tuple[(torch.Tensor,) * 10]
 
 
 def _ext():
@@ -125,29 +133,47 @@ def _contract_bwd(planes, dt, d, direction):
 
 def _forward_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, mean / rstd (LN_in), mean / rstd (LN_out), k3w vectors, p, g."""
+    return [torch.empty_like(leaves[0]), *_forward_into_fake(leaves, mask, ds, direction, leaves[0])]
+
+
+def _forward_into_fake(leaves, mask, ds, direction, y):
+    """The saved set of ``forward`` (y is written into ``y``)."""
     x = leaves[0]
-    n, d = x.shape[1], x.shape[-1]
-    m, p = n * n, (4 if direction == 0 else 2) * d
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m, p = bsz * n * n, (4 if direction == 0 else 2) * d
     f32 = torch.float32
-    return [torch.empty_like(x), x.new_empty((p, n, n)), x.new_empty((p // 2, n, n)), x.new_empty((m,), dtype=f32),
+    return (x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m,), dtype=f32),
             x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32),
-            x.new_empty((4, d), dtype=f32), x.new_empty((m, d)), x.new_empty((m, d))]
+            x.new_empty((4, d), dtype=f32), x.new_empty((m, d)), x.new_empty((m, d)))
 
 
 @opaque(fake=_forward_fake, name="trimul_b200_train_fwd")
 def forward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int) -> list[torch.Tensor]:
-    """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]), gi, bi, go, bo (fp32); mask [L] bool token mask or None;
-    ds [L, D] bf16 row-dropout scale or None; direction 0 = bidirectional, 1 = outgoing, 2 = incoming."""
+    """leaves = x, wl, wlg, wr, wrg, wg, wp (bf16, [out, in]), gi, bi, go, bo (fp32); x [B, L, L, D] (samples b-major); mask [B * L]
+    bool token mask or None; ds [B * L, D] bf16 row-dropout scale or None; direction 0 = bidirectional, 1 = outgoing, 2 = incoming."""
+    return list(_forward_body(leaves, mask, ds, direction, None))
+
+
+@opaque(fake=_forward_into_fake, name="trimul_b200_train_fwd_into", mutates_args=("y",))
+def forward_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int,
+                 y: torch.Tensor) -> _SAVED9:
+    """``forward`` writing y into the caller's ``y``; returns the saved set (a fixed-arity tuple: a mutating custom op returning
+    ``Tensor[]`` cannot be functionalized)."""
+    return tuple(_forward_body(leaves, mask, ds, direction, y)[1:])
+
+
+def _forward_body(leaves, mask, ds, direction, y):
+    """-> [y, *saved]; y None: allocated here (where the one-launch path always allocated it)."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    n, d = x.shape[1], x.shape[-1]
-    m = n * n
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    m = bsz * n * n
     E = _ext()
     with torch.cuda.device(x.device):
         x2 = x.reshape(m, d)
         mean = x.new_empty((m,), dtype=torch.float32)
         rstd = torch.empty_like(mean)
         E.k1w_stats(x2, mean, rstd, EPS)
-        planes = x.new_empty(((4 if direction == 0 else 2) * d, n, n))
+        planes = x.new_empty(((4 if direction == 0 else 2) * d, bsz, n, n))
         E.k1w_forward(x2, wl, wlg, wr, wrg, mask, mean, rstd, gi, bi, planes, 0, EPS)
         t = _contract(planes, d, direction)
         mo = torch.empty_like(mean)
@@ -157,26 +183,49 @@ def forward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Ten
         wgq = torch.empty_like(wg)
         vec = x.new_empty((4, d), dtype=torch.float32)
         E.wide_fold_prep(wp, go, bo, wg, gi, bi, wpq, wgq, vec)
-        y = torch.empty_like(x)
+        if y is None:
+            y = torch.empty_like(x)
         pv = torch.empty_like(x2)
         gv = torch.empty_like(x2)
         E.k3w_forward(x2, t.view(t.shape[0], m), wpq, wgq, vec, mo, ro, mean, rstd, ds, y.view(m, d), n, 0, pv, gv)
     return [y, planes, t, mean, rstd, mo, ro, vec, pv, gv]
 
 
+def _grads_fake(leaves):
+    """The parameter gradients: fp32 (the kernels' accumulators), contiguous."""
+    return tuple(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves[1:])
+
+
 def _backward_fake(leaves, mask, ds, direction, saved, dy):
     """One gradient per leaf, contiguous: dx in x's dtype, the parameter gradients fp32 (the kernels' accumulators)."""
-    return [torch.empty_like(leaves[0]), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves[1:])]
+    return [torch.empty_like(leaves[0]), *_grads_fake(leaves)]
+
+
+def _backward_into_fake(leaves, mask, ds, direction, saved, dy, dx):
+    """The parameter gradients (dx is written into ``dx``)."""
+    return _grads_fake(leaves)
 
 
 @opaque(fake=_backward_fake, name="trimul_b200_train_bwd")
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int,
              saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
     """gate_bwd -> do GEMM -> lnout_bwd -> dWp -> contraction gradients -> k1wb -> weight / input GEMMs -> lnin_bwd."""
+    return _backward_body(leaves, mask, ds, direction, saved, dy, None)
+
+
+@opaque(fake=_backward_into_fake, name="trimul_b200_train_bwd_into", mutates_args=("dx",))
+def backward_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor | None, direction: int,
+                  saved: list[torch.Tensor], dy: torch.Tensor, dx: torch.Tensor) -> _GRADS10:
+    """``backward`` writing dx into the caller's ``dx``; returns the parameter gradients."""
+    return tuple(_backward_body(leaves, mask, ds, direction, saved, dy, dx)[1:])
+
+
+def _backward_body(leaves, mask, ds, direction, saved, dy, dx):
+    """-> [dx, *parameter gradients]; dx None: allocated here."""
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     planes, t, mean, rstd, mo, ro, vec, pv, gv = saved
     n, d = x.shape[1], x.shape[-1]
-    m = n * n
+    m = x.shape[0] * n * n
     p = planes.shape[0]
     h = p // 2
     E = _ext()
@@ -205,7 +254,8 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
         dw = torch.mm(dcat.t(), xn, out_dtype=torch.float32)        # [2P + D, D]
         dwl, dwlg, dwr, dwrg = _unpack_w1(dw[:2 * p], p)
         dxn = dcat @ torch.cat((_pack_w1(wl, wlg, wr, wrg), wg))
-        dx = torch.empty_like(x)
+        if dx is None:
+            dx = torch.empty_like(x)
         E.wide_lnin_bwd(dxn, x2, dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d:4 * d])
     grads = [dwl, dwlg, dwr, dwrg, dw[2 * p:], dwp, dgi, dbi, dgo, dbo]
     # the small gradients are views of shared buffers; a custom op may not return aliasing outputs. fp32: the parameters may be
@@ -215,19 +265,35 @@ def backward(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Te
 
 def _forward_small_fake(leaves, mask, ds, direction):
     """y and the saved set: planes, t, x_n, LN_out mean / rstd."""
+    return [torch.empty_like(leaves[0]), *_forward_small_into_fake(leaves, mask, ds, direction, leaves[0])]
+
+
+def _forward_small_into_fake(leaves, mask, ds, direction, y):
+    """The saved set of ``forward_small`` (y is written into ``y``)."""
     x = leaves[0]
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
     m, p = bsz * n * n, planes_of(d, leaves[1].shape[0], direction)
     f32 = torch.float32
-    return [torch.empty_like(x), x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
-            x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32)]
+    return (x.new_empty((p, bsz, n, n)), x.new_empty((p // 2, bsz, n, n)), x.new_empty((m, d)),
+            x.new_empty((m,), dtype=f32), x.new_empty((m,), dtype=f32))
 
 
 @opaque(fake=_forward_small_fake, name="trimul_b200_train_small_fwd")
 def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int) -> list[torch.Tensor]:
-    """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([B * L, D] bf16, ones without dropout), and
-    x [B, L, L, D] with the samples b-major (B > 1 for D64 only: the D128 backward kernels take one sample); mask [B * L]. One
-    direction, the hidden width (wl's rows) may be 2 D (``b200_infer.hidden_ok``)."""
+    """D64 / D128 training forward; arguments as ``forward`` except ds, which is required ([B * L, D] bf16, ones without dropout).
+    One direction, the hidden width (wl's rows) may be 2 D (``b200_infer.hidden_ok``)."""
+    return list(_forward_small_body(leaves, mask, ds, direction, None))
+
+
+@opaque(fake=_forward_small_into_fake, name="trimul_b200_train_small_fwd_into", mutates_args=("y",))
+def forward_small_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
+                       y: torch.Tensor) -> _SAVED5:
+    """``forward_small`` writing y into the caller's ``y``; returns the saved set."""
+    return tuple(_forward_small_body(leaves, mask, ds, direction, y)[1:])
+
+
+def _forward_small_body(leaves, mask, ds, direction, y):
+    """-> [y, *saved]; y None: allocated here."""
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import _front
 
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
@@ -242,7 +308,8 @@ def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: tor
         wpp = x.new_empty((d, p // 2))     # k3g's output projection, columns in its TMEM K order
         E.k1w_forward(x2, *_front(E, wl, wlg, wr, wrg, wp, wpp), mask, None, None, gi, bi, planes, 0, EPS)
         t = _contract(planes, contracted(d, hid, direction), direction)
-        y = torch.empty_like(x)
+        if y is None:
+            y = torch.empty_like(x)
         xn = torch.empty_like(x2)
         mo = x.new_empty((m,), dtype=torch.float32)
         ro = torch.empty_like(mo)
@@ -252,15 +319,32 @@ def forward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: tor
 
 def _backward_small_fake(leaves, mask, ds, direction, saved, dy):
     """One gradient per leaf, contiguous: dx in x's dtype, the parameter gradients fp32 (the kernels' accumulators)."""
-    return [torch.empty_like(leaves[0]), *(torch.empty(t.shape, dtype=torch.float32, device=t.device) for t in leaves[1:])]
+    return [torch.empty_like(leaves[0]), *_grads_fake(leaves)]
+
+
+def _backward_small_into_fake(leaves, mask, ds, direction, saved, dy, dx):
+    """The parameter gradients (dx is written into ``dx``)."""
+    return _grads_fake(leaves)
 
 
 @opaque(fake=_backward_small_fake, name="trimul_b200_train_small_bwd")
 def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
-               saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
+                   saved: list[torch.Tensor], dy: torch.Tensor) -> list[torch.Tensor]:
     """b1s / b1g -> contraction gradients -> b7m / b7g. Weight gradients accumulate atomically in one fp32 buffer (one memset),
     which also holds the ring flags and the kernels' per-CTA LayerNorm-gradient rows: the fp32 LayerNorm gradients are those
     rows summed in a fixed order by ``lnpart_sum`` (atomics would add ~1e-4 relative run-to-run noise to them)."""
+    return _backward_small_body(leaves, mask, ds, direction, saved, dy, None)
+
+
+@opaque(fake=_backward_small_into_fake, name="trimul_b200_train_small_bwd_into", mutates_args=("dx",))
+def backward_small_into(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: torch.Tensor, direction: int,
+                        saved: list[torch.Tensor], dy: torch.Tensor, dx: torch.Tensor) -> _GRADS10:
+    """``backward_small`` writing dx into the caller's ``dx``; returns the parameter gradients."""
+    return tuple(_backward_small_body(leaves, mask, ds, direction, saved, dy, dx)[1:])
+
+
+def _backward_small_body(leaves, mask, ds, direction, saved, dy, dx):
+    """-> [dx, *parameter gradients]; dx None: allocated here."""
     x, wl, wlg, wr, wrg, wg, wp, gi, _bi, go, bo = leaves
     planes, t, xn, mo, ro = saved
     bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
@@ -299,7 +383,8 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
         else:
             tm = mask.view(bsz, n)
             pair_mask = (tm[:, :, None] & tm[:, None, :]).float().view(m)
-        dx = torch.empty_like(x)
+        if dx is None:
+            dx = torch.empty_like(x)
         w1 = _pack_w1(wl, wlg, wr, wrg)
         if d == 128:
             ring7 = x.new_empty((sg * B7_RD * nch * TOK, 128))
@@ -371,3 +456,77 @@ def trimul_train(leaves, mask, ds, direction):
             ds = x.new_ones((x.shape[0] * x.shape[1], d))
         return _TrainingSmall.apply(direction, mask, ds, *leaves)
     return _Training.apply(direction, mask, ds, *leaves)
+
+
+def _chunk_ops(width):
+    return ((forward_small_into, backward_small_into) if width <= 128 else (forward_into, backward_into))
+
+
+class _Chunked(torch.autograd.Function):
+    """A batch in chunks of samples (``sizes``, b-major, in order) as ONE autograd node. y and dx are allocated once and each chunk's
+    launch writes its rows of them in place (``*_into``), so nothing is copied or concatenated. Plain chunks keep their saved tensors
+    from the forward to the backward; checkpointed chunks (``checkpoint``) save nothing and run their forward again in the backward,
+    so only the chunk being differentiated holds saved tensors. The parameter gradients are the chunks' fp32 gradients summed in chunk
+    order (deterministic). Each chunk runs exactly the launches of a one-launch call of its samples."""
+
+    @staticmethod
+    def forward(ctx, direction, sizes, checkpoint, mask, ds, *leaves):
+        ctx.param_dtypes = [t.dtype for t in leaves[1:]]
+        leaves = _kernel_leaves(leaves)
+        x = leaves[0]
+        n = x.shape[1]
+        fwd, _ = _chunk_ops(x.shape[-1])
+        y = torch.empty_like(x)
+        saved, counts, start = [], [], 0
+        for size in sizes:
+            stop = start + size
+            part = fwd([x[start:stop], *leaves[1:]], None if mask is None else mask[start * n:stop * n],
+                       None if ds is None else ds[start * n:stop * n], direction, y[start:stop])
+            if checkpoint:
+                del part
+                counts.append(0)
+            else:
+                saved.extend(part)
+                counts.append(len(part))
+            start = stop
+        ctx.direction, ctx.sizes, ctx.checkpoint, ctx.counts = direction, sizes, checkpoint, counts
+        ctx.save_for_backward(mask, ds, *leaves, *saved)
+        return y
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dy):
+        vals = ctx.saved_tensors
+        mask, ds, leaves, saved = vals[0], vals[1], list(vals[2:13]), list(vals[13:])
+        x = leaves[0]
+        n = x.shape[1]
+        fwd, bwd = _chunk_ops(x.shape[-1])
+        dy = dy.contiguous()
+        dx = torch.empty_like(x)
+        total = None
+        start, at = 0, 0
+        for size, count in zip(ctx.sizes, ctx.counts, strict=True):
+            stop = start + size
+            sub = [x[start:stop], *leaves[1:]]
+            m = None if mask is None else mask[start * n:stop * n]
+            d = None if ds is None else ds[start * n:stop * n]
+            if ctx.checkpoint:
+                part = fwd(sub, m, d, ctx.direction, torch.empty_like(sub[0]))
+            else:
+                part = saved[at:at + count]
+                at += count
+            grads = bwd(sub, m, d, ctx.direction, part, dy[start:stop], dx[start:stop])
+            del part
+            total = grads if total is None else [a.add_(b) for a, b in zip(total, grads, strict=True)]
+            start = stop
+        return (None, None, None, None, None, dx, *(g.to(dt) for g, dt in zip(total, ctx.param_dtypes, strict=True)))
+
+
+def trimul_train_chunked(leaves, mask, ds, direction, sizes, checkpoint):
+    """``trimul_train`` for a batch run as chunks of ``sizes`` samples (``integrations.trimul_b200._plan``), one autograd node. mask
+    [B * L] or None, ds [B * L, D] or None."""
+    x = leaves[0]
+    d = x.shape[-1]
+    if d <= 128 and ds is None:
+        ds = x.new_ones((x.shape[0] * x.shape[1], d))
+    return _Chunked.apply(direction, tuple(sizes), bool(checkpoint), mask, ds, *leaves)

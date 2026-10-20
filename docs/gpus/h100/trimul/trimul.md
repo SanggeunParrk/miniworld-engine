@@ -12,8 +12,7 @@ Dispatch: `integrations/trimul_h100.py`.
 Every width takes B samples in one call, inference and training, bidirectional and either single direction: tokens b-major, one
 launch per stage instead of B calls. MiniWorld folds samples into the batch of one pair stack (the template embedder's templates at
 D64; structures / augments at D128 and wider). The MiniWorld-facing limit is `integrations.trimul_h100.max_batch(width)`
-(`MAX_BATCH_BY_WIDTH`, 48 at D64 / 128 / 256 / 384 / 512); `MAX_BATCH` keeps its D64 meaning (= `max_batch(64)`, as on B200, which
-batches D64 only). `max_batch` is what ONE LAUNCH takes; a call with more samples, or with more than fit in memory, runs in
+(`MAX_BATCH_BY_WIDTH`, 48 at D64 / 128 / 256 / 384 / 512); `MAX_BATCH` keeps its D64 meaning (= `max_batch(64)`, as on B200). `max_batch` is what ONE LAUNCH takes; a call with more samples, or with more than fit in memory, runs in
 several launches (`trimul_h100._plan`, below), so any B is served and nothing falls back to the PyTorch statements because of size.
 A length / width no batched path takes runs the module's PyTorch statements, as before.
 
