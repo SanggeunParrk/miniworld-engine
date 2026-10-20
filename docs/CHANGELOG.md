@@ -516,9 +516,10 @@ pass `engine_backend="triton"`.
   zero-padded with the pad keys masked (L 1536 / 2048 / 2560 served for training and inference). The launches are opaque custom ops
   (the module compiles to one graph; `serves` / `serves_wide` remain, `forward_wide` is folded into `forward`). The attention core's
   forward runs long launches (four pair rows a task) in sample groups of ~36 864 tasks (`b200_triattn.fwd_group`; inference L768
-  B48 1.05x; a dynamic task counter was measured 4-5 % slower and not kept); `triattn_fwd` gained `out` / `lse` outputs. The fused
-  path's parameter gradients are deterministic: `tri_gate_bwd` / `tri_wgrad` store per-CTA fp32 partials that the new `tri_slot_sum`
-  adds in CTA order (was fp32 atomics; dW_q|k|v|g|o now the same bits every run; +0.2-1.3 % on the B = 1 training step). y is
+  B48 1.05x; a dynamic task counter was measured 4-5 % slower and not kept); `triattn_fwd` gained `out` / `lse` outputs. New setting
+  `triattn_b200_deterministic_wgrad` (default False): the fused path's `tri_gate_bwd` / `tri_wgrad` then store per-CTA fp32 partials
+  that the new `tri_slot_sum` adds in CTA order (dW_q|k|v|g|o the same bits every run; +0.2-1.3 % on the B = 1 training step); by
+  default they keep the fp32 atomics (B = 1 at main's time). y is
   bitwise equal to B one-sample calls in every case of the B 1-48 x L 128 / 300 / 384 / 768 x seven-width grid; B = 1 forward
   unchanged in bits and time. Tests `tests/gpu/sm100/test_triattn_b200_batched_gpu.py`, `tests/cpu/kernels/test_triattn_b200_batch_plan.py`;
   record `docs/records/triattn_b200_batched_20261020.md`.
