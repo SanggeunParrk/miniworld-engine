@@ -46,7 +46,10 @@ using bf = __nv_bfloat16;
 #ifndef TOKEN_EMPTY_UNIFORM
 #define TOKEN_EMPTY_UNIFORM 0
 #endif
-constexpr int D = TD_D, NT = D / 4, DC = 384, NTC = DC / 4, RPB = TD_RPB, HD = TD_HD;
+#ifndef TD_DC
+#define TD_DC 384                // conditioning width: 384 (AF3) or 768 (a token DiT conditioned at its own width)
+#endif
+constexpr int D = TD_D, NT = D / 4, DC = TD_DC, NTC = DC / 4, RPB = TD_RPB, HD = TD_HD;
 static_assert(RPB == 1 || RPB == 2 || RPB == 4 || RPB == 8, "rows per block");
 constexpr int HT = HD / 4, NHH = D / HD;                                   // threads per head, heads
 static_assert(D % HD == 0 && NT % 32 == 0, "token DiT train rows: layout");
@@ -609,7 +612,7 @@ int64_t part_rows(int64_t M, bool fp32) {
 
 void cond_prep(at::Tensor c, at::Tensor chat, c10::optional<at::Tensor> cbf, at::Tensor cst, double eps) {
   const int64_t M = chat.size(0);
-  TORCH_CHECK(c.is_contiguous() && c.numel() == M * DC, "cond_prep: contiguous [M, 384]");
+  TORCH_CHECK(c.is_contiguous() && c.numel() == M * DC, "cond_prep: contiguous [M, DC]");
   if (cbf) actc(*cbf, chat, "cbf");
   const at::cuda::CUDAGuard g(c.device());
   TDT_DISPATCH(chat.scalar_type(), AT, [&] {
@@ -870,7 +873,7 @@ void cond_bwd(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at
 
 void unfold_lnw(at::Tensor dwn, at::Tensor ws1, at::Tensor wb1, at::Tensor ws2, at::Tensor wb2, at::Tensor w1, at::Tensor w2,
                 at::Tensor dw, at::Tensor dw12) {
-  TORCH_CHECK(dwn.size(0) == 4 * D && dwn.size(1) == DC, "unfold_lnw: dWn [3072, 384]");
+  TORCH_CHECK(dwn.size(0) == 4 * D && dwn.size(1) == DC, "unfold_lnw: dWn [4 D, DC]");
   const at::cuda::CUDAGuard g(dwn.device());
   unfold_lnw_k<<<4 * D / 16, NTC, 0, S()>>>(CP<float>(dwn), CP<float>(ws1), CP<float>(wb1), CP<float>(ws2), CP<float>(wb2), CP<float>(w1),
                                             CP<float>(w2), P<float>(dw), P<float>(dw12));
@@ -975,6 +978,7 @@ struct TrainGrad90 {
  const float* src[25]; void* dst[25]; bool fp32[25]; int size[25],blocks[25];
  const float* dwn; const float* w1; const float* w2; const float* allp; const float* lnp;
  const float* dwf; const float* wb; const float* wp;
+ const float* qkw;   // the QK-norm weight gradients reduced over the blocks by train_qkw90_k: [2, NHH, HD]
  int n,parts,lnparts;
 };
 __global__ void train_lnw_parts90_k(const float* __restrict__ dwn,const float* __restrict__ raw,float* __restrict__ part) {
@@ -1002,6 +1006,19 @@ __global__ void train_reduce_parts90_k(const float* allp,const float* lnp,float*
   }
 }
 
+// part[w, h, i] = sum over the partial rows r of allp[r, (5 + w) D + h HD + i], w = 0 (dwq) / 1 (dwk), i < HD: a block per (w, h),
+// 4 slots walking the rows in a fixed interleave and meeting in a fixed order, so the sum is bitwise repeatable. (The terms were
+// once summed serially, over heads too, by the HD / 4 threads that own the elements: a 1 ms tail at A = 48.) train_final90_k adds
+// the heads.
+__global__ void __launch_bounds__(256) train_qkw90_k(const float* __restrict__ allp,int parts,float* __restrict__ out) {
+ __shared__ float red[256];
+ const int w=blockIdx.x,h=blockIdx.y,i=threadIdx.x%64,slot=threadIdx.x/64;
+ float acc=0.f;
+ if(i<HD)
+  for(int r=slot;r<parts;r+=4)acc+=allp[(long)r*7*D+(5+w)*D+h*HD+i];
+ red[threadIdx.x]=acc;__syncthreads();
+ if(slot==0&&i<HD)out[(w*NHH+h)*HD+i]=((red[i]+red[i+64])+red[i+128])+red[i+192];
+}
 __global__ void train_final90_k(TrainGrad90 p) {
  int block=blockIdx.x,o=0;
  for(;o<p.n;++o){if(block<p.blocks[o])break;block-=p.blocks[o];}
@@ -1021,8 +1038,7 @@ __global__ void train_final90_k(TrainGrad90 p) {
   for(int h=0;h<NHH;++h)v=add4(v,mul4(V4<float>::load(p.dwf+h*128+i),V4<float>::load(p.wb+h*128+i)));
  }else if(o==13)v=mul4(V4<float>::load(p.dwf+i),V4<float>::load(p.wp+i%128));
  else if(o==23||o==24){
-  for(int h=0;h<NHH;++h)for(int r=0;r<p.parts;++r)
-    v=add4(v,V4<float>::load(p.allp+r*7*D+(o==23?5:6)*D+h*HD+i));
+  for(int h=0;h<NHH;++h)v=add4(v,V4<float>::load(p.qkw+((o-23)*NHH+h)*HD+i));
  }else v=V4<float>::load(p.src[o]+i);
  if(p.fp32[o])V4<float>::store((float*)p.dst[o]+i,v);
  else V4<bf>::store((bf*)p.dst[o]+i,v);
@@ -1041,6 +1057,8 @@ std::vector<at::Tensor> train_final90(std::vector<at::Tensor> params,std::vector
        CP<float>(allp),CP<float>(parts),P<float>(rp),P<float>(lp),allp.size(0),(params.size()==25?7:5)*D);
  }
  TrainGrad90 p{};p.n=params.size();p.parts=rp.size(0);p.lnparts=hierarchical?D/128:2*D/16;
+ at::Tensor qkw;
+ if(p.n==25){qkw=at::empty({2,NHH,HD},dwn.options());train_qkw90_k<<<dim3(2,NHH),256,0,S()>>>(CP<float>(rp),p.parts,P<float>(qkw));p.qkw=CP<float>(qkw);}
  p.dwn=CP<float>(dwn);p.w1=CP<float>(w1);p.w2=CP<float>(w2);p.allp=CP<float>(rp);
  p.lnp=CP<float>(lp);p.dwf=CP<float>(dwf);p.wb=CP<float>(wb);p.wp=CP<float>(wp);
  std::vector<at::Tensor> out;int total=0;

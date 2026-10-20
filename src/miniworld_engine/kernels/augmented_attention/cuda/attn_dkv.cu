@@ -49,6 +49,9 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef DBC
 #define DBC 1                    // samples per cluster that pre-sum dbias on chip: query block n is owned by rank n % DBC,
 #endif                           // the others st.async their bf16 dS tile to it, and only the owner issues the L2 reds
+#ifndef PSB
+#define PSB 0                    // 1: one bias per sample, bias [H, A, L, L]; 0: one bias per head shared by the A samples, [H, L, L]
+#endif
 #ifndef DBIAS
 #define DBIAS 1                  // 0: skip the dbias atomics (to price them)
 #endif
@@ -221,7 +224,7 @@ attn_dkv_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         tma_load_2d(slot + OFF_QT, &mq, &full[s], qcol, samp * L + nb * QB);
         tma_load_2d(slot + OFF_DOT, &mdo, &full[s], qcol, samp * L + nb * QB);
         for (int w = 0; w < NWG; ++w)
-          tma_load_2d(slot + OFF_BT + w * SBT, &mbias, &full[s], k0 + 64 * w, head * L + nb * QB);
+          tma_load_2d(slot + OFF_BT + w * SBT, &mbias, &full[s], k0 + 64 * w, (PSB ? head * A + samp : head) * L + nb * QB);
         const size_t li = ((size_t)samp * H + head) * L + nb * QB;
         asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];"
                      :: "r"(smem_u32(slot + OFF_LD)), "l"(LSE + li), "r"(QB * 4), "r"(smem_u32(&full[s])) : "memory");
@@ -474,11 +477,12 @@ CUtensorMap tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, u
 void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dO, torch::Tensor bias,
               c10::optional<torch::Tensor> kmask, torch::Tensor LSE, torch::Tensor Dd, torch::Tensor DK, torch::Tensor DV,
               torch::Tensor DBT) {
-  const int H = bias.size(0), L = bias.size(1);
+  const int H = bias.size(0), L = bias.size(PSB ? 2 : 1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v, &dO})
     TORCH_CHECK(t->stride(1) == 1 && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
-  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(PSB ? 3 : 2) == L && H * DH == DM
+              && (!PSB || (bias.dim() == 4 && bias.size(1) == A)), "bias layout");
   for (auto* t : {&DK, &DV}) TORCH_CHECK(t->dim() == 2 && t->size(0) == A * L && t->size(1) == DM &&
       t->stride(0) == BWD_ROW_STRIDE && t->stride(1) == 1 &&
       t->scalar_type() == (BWD_BF16 ? torch::kBFloat16 : torch::kFloat32), "out layout");
@@ -497,7 +501,7 @@ void attn_dkv(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, k.stride(0), QW, 64 * NWG);
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, v.stride(0), QW, 64 * NWG);
   auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, dO.stride(0), QW, QB);
-  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, 64, QB);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * (PSB ? A : 1) * L, L, L, 64, QB);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(A * H * nt);
   cfg.blockDim = dim3(128 * NCW + 32);

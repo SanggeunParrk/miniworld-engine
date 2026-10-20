@@ -42,15 +42,17 @@ def matches(module, single, cond, pair, mask) -> bool:
     if _ld._af3_variant(module) and not _af3_servable(module, single, cond, pair, mask):
         return False
     a, tr = module.attention, module.transition
-    if a.use_qk_norm or settings.current().engine_backend == "triton":
+    if settings.current().engine_backend == "triton":
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
 
     if a._backend != KernelBackend.TRITON:
         return False
-    params = [module.get_parameter(n) for n in (*_ld.WEIGHTS, *_ld.CROSS_WEIGHTS)]
+    params = _weights_of(module)
     if any(p.device != single.device or not p.is_contiguous() for p in params):
         return False
+    if a.use_qk_norm and (a.norm_query.eps is not None or a.norm_key.eps is not None):
+        return False   # the kernels take torch's default eps (the float32 one for bf16 and fp32 alike)
     dt = (single.dtype, cond.dtype, pair.dtype)
     if dt == (F32, F32, F32):
         if (
@@ -173,6 +175,14 @@ def _dims(single):
     return a, n0, n, a * n
 
 
+_NBASE = len(_ld.WEIGHTS) + len(_ld.CROSS_WEIGHTS)
+_QK_EPS = 1.1920928955078125e-07   # torch.finfo(torch.float32).eps: what the engine's RMSNorm uses for bf16 and fp32 inputs alike
+
+
+def _qk(weights) -> bool:
+    return len(weights) > _NBASE
+
+
 def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide=False):
     out = torch.empty_like(single)
     if not save:
@@ -197,6 +207,7 @@ def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide
         t(m, DS),
         t(m, DS),
         t(m, DS),
+        *((t(m, DS), t(m, DS)) if _qk(weights) else ()),
     ]
 
 
@@ -222,6 +233,8 @@ def _fwd(
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
     attn = local.attn_fwd_mma32 if tf32 else local.attn_fwd_mma
+    qkw = [w.float().contiguous() for w in weights[_NBASE:]]
+    weights = weights[:_NBASE]
     with torch.cuda.device(single.device):
         p = k90.pack(weights, tf32)
         s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
@@ -263,6 +276,13 @@ def _fwd(
             q, sg, k, v = k90.pre_fwd(
                 s2, mod, mkv, p, tf32, nmod=nmod, parallel_kv=parallel_kv
             )
+        qraw = kraw = None
+        if qkw:   # the attention reads the normalised q / k; the backward keeps the raw ones
+            qraw, kraw = q, k
+            q, k = torch.empty_like(qraw), torch.empty_like(kraw)
+            _qk_kernels().qknorm_fwd(qraw, kraw, qkw[0], qkw[1], _QK_EPS, _QK_EPS, q, k)
+            if not save:
+                del qraw, kraw
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
         if slide:
             _slid_edges(o, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n, kmask, _n0)
@@ -292,7 +312,14 @@ def _fwd(
         a2,
         x2,
         t,
+        *((qraw, kraw) if qkw else ()),
     ]
+
+
+def _qk_kernels():
+    from miniworld_engine.kernels.augmented_attention import cuda as sm90
+
+    return sm90._ext("qknorm_local")
 
 
 def _bwd_fake(dy, single, cond, pair, kmask, weights, saved):
@@ -320,7 +347,10 @@ def _bwd(
         sm100_atom_local as local,
     )
 
-    bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2, x2, t = saved
+    bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2, x2, t, *raw = saved
+    wq_dtype = weights[_NBASE].dtype if len(weights) > _NBASE else None
+    qkw = [w.float().contiguous() for w in weights[_NBASE:]]
+    weights = weights[:_NBASE]
     tf32 = single.dtype == F32
     a, _n0, n, m = _dims(single)
     dev = single.device
@@ -357,6 +387,9 @@ def _bwd(
             dp[:, DS:],
             tf32,
         )
+        if qkw:   # dq / dk leave the attention as gradients of the normalised tensors: back to the raw projections, in place
+            part = _qk_kernels().qknorm_bwd(dp[:, DS : 2 * DS], dp[:, 2 * DS : 3 * DS], raw[0], raw[1], qkw[0], qkw[1], _QK_EPS, _QK_EPS)
+            dqkw = part.sum(0)   # [2, 32]: the per-block partials in order
         dz, dgamma_pair, dwb = local.pair_bias_bwd_mma(z, p["gamma"], p["wbias"], dbias)
         dx, dmkv, cs_sc1, cs_bs, cs_bq = k90.pre_bwd(
             dp, x1, s2, mod, mkv, da2, pb, p, dmod, tf32, nmod=nmod, shared=sh
@@ -414,6 +447,8 @@ def _bwd(
             dev.index if dev.index is not None else torch.cuda.current_device(),
         )
     out = outs
+    if qkw:
+        out = [*outs, dqkw[0].to(wq_dtype).clone(), dqkw[1].to(wq_dtype).clone()]   # outputs of an opaque op may not alias
     dsingle = _ld._unpadded(dx.view(a, 1, n, DS), single.shape)
     if shared:  # the gradient of the one shared row set, split evenly over the expanded view's A copies (autograd sums them back)
         dcond = _ld._unpadded(
@@ -528,7 +563,10 @@ class _H100Block(torch.autograd.Function):
 
 
 def _weights_of(module):
-    return [module.get_parameter(n) for n in (*_ld.WEIGHTS, *_ld.CROSS_WEIGHTS)]
+    names = (*_ld.WEIGHTS, *_ld.CROSS_WEIGHTS)
+    if module.attention.use_qk_norm:
+        names = (*names, "attention.norm_query.weight", "attention.norm_key.weight")
+    return [module.get_parameter(n) for n in names]
 
 
 def run_block(module, single, cond, pair, mask=None):

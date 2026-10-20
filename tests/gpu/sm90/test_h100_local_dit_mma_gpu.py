@@ -37,7 +37,7 @@ def _rel(a, b):
     return float((a.double() - b.double()).norm() / b.double().norm().clamp_min(1e-30))
 
 
-def _block(seed=0):
+def _block(seed=0, qk=False):
     torch.manual_seed(seed)
     blk = LocalDiTBlock(
         128,
@@ -46,6 +46,7 @@ def _block(seed=0):
         4,
         n=2,
         cross_attention=True,
+        use_qk_norm=qk,
         implementation=ImplementationType.TRITON,
     )
     with torch.no_grad():  # non-default parameters (zero-initialised gates would make the backward vacuous)
@@ -57,7 +58,7 @@ def _block(seed=0):
     return blk.cuda().float()
 
 
-def _reference(blk):
+def _reference(blk, qk=False):
     ref = LocalDiTBlock(
         128,
         128,
@@ -65,6 +66,7 @@ def _reference(blk):
         4,
         n=2,
         cross_attention=True,
+        use_qk_norm=qk,
         implementation=ImplementationType.PYTORCH,
     )
     ref.load_state_dict(blk.state_dict())
@@ -95,11 +97,12 @@ def _train(mod, s, c, z, dy, mask, dtype, autocast=False):
     return y.detach(), grads
 
 
+@pytest.mark.parametrize("qk", [False, True], ids=["plain", "qknorm"])
 @pytest.mark.parametrize(("a", "n", "masked"), CASES, ids=lambda v: str(v))
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_training_matches_fp64(a, n, masked, dtype):
-    blk = _block()
-    ref = _reference(blk)
+def test_training_matches_fp64(a, n, masked, dtype, qk):
+    blk = _block(qk=qk)
+    ref = _reference(blk, qk=qk)
     s, c, z, dy, mask = _inputs(a, n, masked)
     torch.backends.cuda.matmul.allow_tf32 = False
     y_ref, g_ref = _train(ref, s, c, z, dy, mask, torch.float64)
@@ -124,9 +127,10 @@ def test_training_matches_fp64(a, n, masked, dtype):
         )
 
 
+@pytest.mark.parametrize("qk", [False, True], ids=["plain", "qknorm"])
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_training_step_is_bitwise_repeatable(dtype):
-    blk = _block()
+def test_training_step_is_bitwise_repeatable(dtype, qk):
+    blk = _block(qk=qk)
     s, c, z, dy, mask = _inputs(3, 512, True)
     out = [
         _train(blk, s, c, z, dy, mask, dtype, autocast=dtype == torch.bfloat16)
@@ -137,11 +141,12 @@ def test_training_step_is_bitwise_repeatable(dtype):
         assert torch.equal(ga, gb)
 
 
+@pytest.mark.parametrize("qk", [False, True], ids=["plain", "qknorm"])
 @pytest.mark.parametrize(("a", "n", "masked"), CASES, ids=lambda v: str(v))
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
-def test_inference_matches_fp64(a, n, masked, dtype):
-    blk = _block().eval()
-    ref = _reference(blk).eval()
+def test_inference_matches_fp64(a, n, masked, dtype, qk):
+    blk = _block(qk=qk).eval()
+    ref = _reference(blk, qk=qk).eval()
     s, c, z, _, mask = _inputs(a, n, masked)
     with torch.no_grad():
         torch.backends.cuda.matmul.allow_tf32 = False

@@ -7,12 +7,19 @@ bias `LN(z) Wb^T` of the *trunked* atom pair `[nwin, 32, 128, 16]` -> gated out-
 residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. Module summary: [h100.md](../h100.md); the B200 page is
 [local_dit](../../b200/local_dit/local_dit.md) (tcgen05; the kernels here are a different design for the same stage boundaries).
 
-**Contract** (`integrations/local_dit_h100.matches`): H100, cross-attention, no QK-norm, B = 1, any A, any N (padded to a multiple of 128
+**Contract** (`integrations/local_dit_h100.matches`): H100, cross-attention, with or without QK-norm, B = 1, any A, any N (padded to a multiple of 128
 inside, the padded atoms masked as keys), a `[1, N]` bool key mask or none, contiguous `single` / `cond` `[A, 1, N, 128]` and pair
 `[1, nwin, 32, 128, 16]`; **fp32** activations with fp32 parameters (no autocast) run the TF32 kernels, **bf16** activations (fp32 master or
 bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else runs the module composition (on H100 its PyTorch
 statements: no Triton fallback, see [dispatch.md](../dispatch.md));
-`settings.local_dit_h100_mma{,_fp32,_bf16}` switch the path off. Two opaque ops (`local_dit_h100_fwd` / `_bwd`): eager, CUDA graphs and
+`settings.local_dit_h100_mma{,_fp32,_bf16}` switch the path off.
+
+**QK-norm** (`use_qk_norm=True`: a per-head RMSNorm of q and k over the head width, one weight each, as the token DiT): two row kernels around the
+fused stages, `kernels/augmented_attention/cuda/qknorm_local.cu` -- the forward normalises `pre90`'s q and k into the tensors the attention reads (the raw ones
+are kept for the backward; fp32 outputs are rounded to tf32 as `pre90` rounds them), the backward rewrites the attention's dq / dk in place into the
+gradients of the raw projections before `pre_bwd90` and leaves the weight gradients as per-block partial rows summed in order (bitwise repeatable). The
+eps is torch's float32 one for bf16 and fp32 alike, as the engine's RMSNorm. Tests: the `qknorm` cases of `tests/gpu/sm90/test_h100_local_dit_mma_gpu.py`.
+Fusing the two passes into `pre90` / `pre_bwd90` is open work (the extra traffic is q and k once each way). Two opaque ops (`local_dit_h100_fwd` / `_bwd`): eager, CUDA graphs and
 `torch.compile`.
 
 ## Path

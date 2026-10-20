@@ -58,6 +58,14 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef DQ_BIAS
 #define DQ_BIAS APB_NATURAL
 #endif
+#ifndef PSB
+#define PSB 0                    // 1: one bias per sample, bias [H, A, L, L]; 0: one bias per head shared by the A samples, [H, L, L]
+#endif
+static_assert(!PSB || FCLS == 1, "a per-sample bias tile is not shared, so there is nothing to multicast");
+#ifndef PSB_DB
+#define PSB_DB 0                 // 1 (with PSB): also write each sample's dbias, [H, A, L(query), L(key)] bf16, times ln 2 (the gradient
+#endif                           // of the bias in log2 units), straight from the dS registers -- no fp32 buffer, no conversion pass
+static_assert(!PSB_DB || PSB, "a per-sample dbias needs a per-sample bias");
 #ifndef BWD_BF16
 #define BWD_BF16 0
 #endif
@@ -156,6 +164,7 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
   const int wgi = tid >> 7;                                         // consumer warpgroup index
   const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64 query rows, and its key split
   const int nblocks = L / BN;
+  const int brow = (PSB ? head * A + samp : head) * L + m0;         // this tile's first row in the [H (A) L, L] bias map
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
@@ -190,9 +199,9 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
           tma_load_2d(slot + SKV, &mv, &full[s], qcol, samp * L + n * BN);
         } else {
           mbar_arrive_expect_tx(&full[s], SB);
-          if (FCLS == 1) tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, head * L + m0);
+          if (FCLS == 1) tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, brow);
           else if (rank == (uint32_t)(n % FCLS))
-            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, head * L + m0, (1u << FCLS) - 1);
+            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow, (1u << FCLS) - 1);
         }
       }
     }
@@ -294,6 +303,11 @@ attn_dq_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ C
             const int row = m0 + wg * 64 + r0 + 8 * h;
             *reinterpret_cast<float2*>(DB + ((size_t)head * L + row) * L + n * BN + j * 8 + cb) = make_float2(s0, s1);
           }
+          if constexpr (PSB_DB) {
+            const int row = m0 + wg * 64 + r0 + 8 * h;
+            *reinterpret_cast<__nv_bfloat162*>(reinterpret_cast<__nv_bfloat16*>(DB) + (((size_t)head * A + samp) * L + row) * L + n * BN + j * 8 + cb) =
+                __floats2bfloat162_rn(s0 * LN2F, s1 * LN2F);
+          }
           const __nv_bfloat162 pk = __floats2bfloat162_rn(s0, s1);
           pa[j >> 1][2 * (j & 1) + h] = *reinterpret_cast<const uint32_t*>(&pk);
         }
@@ -388,11 +402,12 @@ CUtensorMap tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, u
 void attn_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dO, torch::Tensor bias,
              c10::optional<torch::Tensor> kmask, torch::Tensor LSE, torch::Tensor Dd, torch::Tensor DQ,
              c10::optional<torch::Tensor> DB) {
-  const int H = bias.size(0), L = bias.size(1);
+  const int H = bias.size(0), L = bias.size(PSB ? 2 : 1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v, &dO})
     TORCH_CHECK(t->stride(1) == 1 && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
-  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(PSB ? 3 : 2) == L && H * DH == DM
+              && (!PSB || (bias.dim() == 4 && bias.size(1) == A)), "bias layout");
   TORCH_CHECK(DQ.dim() == 2 && DQ.size(0) == A * L && DQ.size(1) == DM && DQ.stride(0) == BWD_ROW_STRIDE && DQ.stride(1) == 1 &&
               DQ.scalar_type() == (BWD_BF16 ? torch::kBFloat16 : torch::kFloat32) && LSE.is_contiguous() && Dd.is_contiguous(), "layout");
   TORCH_CHECK(L % QM == 0 && A % FCLS == 0, "shape");
@@ -405,7 +420,7 @@ void attn_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, k.stride(0), QW, BN);
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, v.stride(0), QW, BN);
   auto mdo = tile_map(dO.data_ptr(), (uint64_t)A * L, DM, dO.stride(0), QW, QM);
-  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * (PSB ? A : 1) * L, L, L, BN, QM);
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(A * H * mt);
   cfg.blockDim = dim3(128 * NCW + 32);
@@ -416,7 +431,7 @@ void attn_dq_impl(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tens
   at[0].val.clusterDim.x = FCLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
   TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr,
-                                 LSE.data_ptr<float>(), Dd.data_ptr<float>(), reinterpret_cast<float*>(DQ.data_ptr()), DB ? DB->data_ptr<float>() : nullptr, L, H, A, mt)
+                                 LSE.data_ptr<float>(), Dd.data_ptr<float>(), reinterpret_cast<float*>(DQ.data_ptr()), DB ? reinterpret_cast<float*>(DB->data_ptr()) : nullptr, L, H, A, mt)
               == cudaSuccess, "launch failed");
 }
 
@@ -424,9 +439,16 @@ void attn_dq(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dO
              c10::optional<torch::Tensor> kmask, torch::Tensor LSE, torch::Tensor Dd, torch::Tensor DQ) {
   attn_dq_impl(q, k, v, dO, bias, kmask, LSE, Dd, DQ, c10::nullopt);
 }
+// The per-sample-bias backward's dQ pass WITH dbias (PSB_DB build): dbias [H, A, L, L] bf16 (every element written once).
+void attn_dq_psb(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dO, torch::Tensor bias,
+                 c10::optional<torch::Tensor> kmask, torch::Tensor LSE, torch::Tensor Dd, torch::Tensor DQ, torch::Tensor DB) {
+  TORCH_CHECK(PSB_DB && DB.is_contiguous() && DB.scalar_type() == torch::kBFloat16 && DB.dim() == 4 && DB.size(0) == bias.size(0) &&
+              DB.size(1) == bias.size(1) && DB.size(2) == bias.size(2) && DB.size(3) == bias.size(3), "per-sample dbias must be bf16 [H,A,L,L]");
+  attn_dq_impl(q, k, v, dO, bias, kmask, LSE, Dd, DQ, DB);
+}
 void apb_dqb(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor dO, torch::Tensor bias,
              torch::Tensor LSE, torch::Tensor Dd, torch::Tensor DQ, torch::Tensor DB) {
-  TORCH_CHECK(APB_NATURAL && DQ_BIAS && q.size(0) == bias.size(1), "APB dQB requires the one-sample natural-unit build");
+  TORCH_CHECK(!PSB && APB_NATURAL && DQ_BIAS && q.size(0) == bias.size(1), "APB dQB requires the one-sample natural-unit build");
   attn_dq_impl(q, k, v, dO, bias, c10::nullopt, LSE, Dd, DQ, DB);
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("attn_dq", &attn_dq); m.def("apb_dqb", &apb_dqb); }
+PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) { m.def("attn_dq", &attn_dq); m.def("attn_dq_psb", &attn_dq_psb); m.def("apb_dqb", &apb_dqb); }

@@ -92,9 +92,10 @@ class LocalDiTBlock(DiTBlock):
         cross_attention: bool = False,
         kv_norm: str = "chained",
         key_window: str = "pad",
+        use_qk_norm: bool = False,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
-        super().__init__(d_single, d_cond, d_pair, n_head, n, implementation=implementation)
+        super().__init__(d_single, d_cond, d_pair, n_head, n, use_qk_norm=use_qk_norm, implementation=implementation)
         self.cross_attention = cross_attention
         if kv_norm not in ("chained", "parallel"):
             raise ValueError(f"kv_norm must be 'chained' or 'parallel', got {kv_norm!r}")
@@ -135,6 +136,9 @@ class LocalDiTBlock(DiTBlock):
         k = _master.linear(xkv, att.to_key, wk) if master else att.to_key(xkv)
         v = _master.linear(xkv, att.to_value, wv) if master else att.to_value(xkv)
         gate = _master.linear(x, att.to_gate, wg) if master else att.to_gate(x)
+        if att.use_qk_norm:   # per head, over the head width, one weight per tensor
+            q = att.norm_query(q.reshape(a, b, n, h, d)).reshape(a, b, n, h * d)
+            k = att.norm_key(k.reshape(a, b, n, h, d)).reshape(a, b, n, h * d)
         qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
         keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
         if self.key_window == "slide":

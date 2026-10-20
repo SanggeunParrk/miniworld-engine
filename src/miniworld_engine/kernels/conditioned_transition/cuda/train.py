@@ -17,12 +17,14 @@ _dir = Path(__file__).parent
 
 
 @functools.lru_cache(maxsize=None)
-def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False):
-    """The row kernels for model width ``d`` and head dim ``hd`` (one build per layout: 768 x 48 / 32 / 64, 1024 x 64)."""
+def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False, dc: int = 384):
+    """The row kernels for model width ``d``, head dim ``hd`` and conditioning width ``dc`` (384, or 768; one build per layout:
+    768 x 48 / 32 / 64, 1024 x 64)."""
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     assert (d, hd) in ((768, 48), (768, 32), (768, 64), (1024, 64)), (d, hd)
     assert rpb in (1, 2, 4, 8), rpb
+    assert dc in (384, 768), dc
     ensure_cuda_home()
     hopper = torch.cuda.get_device_capability() == (9, 0)
     name = (
@@ -32,6 +34,8 @@ def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False
     )
     if rpb != 8:
         name += f"_rpb{rpb}"
+    if dc != 384:
+        name += f"_dc{dc}"
     if empty_uniform:
         name += "_empty_uniform"
     return load_extension(
@@ -47,6 +51,7 @@ def ext(d: int = 768, hd: int = 48, rpb: int = 8, *, empty_uniform: bool = False
             f"-DTD_D={d}",
             f"-DTD_HD={hd}",
             f"-DTD_RPB={rpb}",
+            f"-DTD_DC={dc}",
             *(["-DTOKEN_EMPTY_UNIFORM=1"] if empty_uniform else []),
             *(gencodes("90a") if hopper else gencodes("80", "90", "100", ptx=("100",))),
         ],

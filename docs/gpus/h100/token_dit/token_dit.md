@@ -63,6 +63,30 @@ Every attention kernel here is bitwise deterministic run to run (6 runs, `torch.
 the bf16 kernels now issue `fence.proxy.async` before releasing a TMA stage (or the parked q tile) they read with
 ldmatrix: a generic-proxy read of a stage the async proxy refills is not ordered by the mbarrier release alone.
 
+### Per-sample pair bias (training, bf16)
+
+For a diffusion module whose pair is re-folded per augmentation (a pair of its own for each of the A samples, so each sample has its own
+attention bias), the attention cores above -- which share one bias across the A samples -- are built a second time with
+`PSB=1` (`attn_fwd.cu`, `attn_dq.cu`, `attn_dkv.cu`): bias [H, A, L, L], TMA row `(head A + sample) L + query tile`. Entry points:
+
+- `token_dit_train.block_psb` / `serves_psb`: the same block as above with the bias an input. Any L (padded to the 128-row tile inside,
+  the padded keys masked), any A, one batch row, cond width 384 or 768 (`TD_DC` build define), bf16 operands; no autograd needed to run.
+  The block returns d bias in the bias's layout and units and none for its own `ln_pair` / `to_bias` weights (the producer's).
+- `integrations/token_dit_pair_bias.pair_biases`: the biases of every block of a stack from one pair [A, L, L, 128] in one pass -- one
+  CUDA pair LayerNorm, one GEMM against the blocks' stacked `to_bias.weight diag(ln_pair.weight) log2 e` -- as views of one
+  [blocks H, A L L] buffer; the backward is two GEMMs and the LayerNorm backward. Reading the pair once instead of once per block
+  is what the per-block LayerNorm + projection cost twelve times.
+- Backward: the dQ pass (`attn_dq`, `PSB_DB=1`) writes each sample's dbias from its dS registers, bf16, natural layout, times ln 2;
+  the dK / dV pass keeps no dbias. Every element has one writer: bitwise repeatable, no atomics, no reduction.
+
+A = 48, L = 384, 12 blocks + bias, forward + backward (CUDA events): 63.6 ms (forward 20.2, backward 43.4), 29.2 GB, against 242.6 ms
+(39.4 GB) for the engine's Triton attention core with the same bias read off the pair by the fused LayerNorm + projection.
+ncu (SpeedOfLight, cuBLAS excluded): `pair_ln` / `pair_ln_bwd` 92 % DRAM (at their traffic), the row kernels 69-87 %, `attn_fwd` / `attn_dq`
+/ `attn_dkv` 66 / 58 / 62 % -- the open work (bias tile read and dbias write are the necessary traffic, ~1.4x more moves today).
+Tests: `tests/gpu/sm90/test_augmented_attention_psb_gpu.py` (cores against an fp64 truth at the bf16 input floor, per-sample ownership,
+bitwise repeatability), `tests/gpu/sm90/test_token_dit_psb_gpu.py` (block against the module path, cond 384 / 768, L not a multiple of 128;
+`pair_biases` against the per-block LayerNorm + projection).
+
 ### The TF32 core's layouts
 
 TF32 wgmma reads both operands K-major only (no transpose bit), which fixes three things:

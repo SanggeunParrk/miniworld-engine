@@ -64,12 +64,16 @@ using namespace tmn; using namespace tmn::sm90;
 #ifndef QWID
 #define QWID DHP                 // Load exactly one head; shared rows retain their 128-byte pitch.
 #endif                           // image keeps its 128-B row pitch), 64 also pulls 16 columns of the next head
+#ifndef PSB
+#define PSB 0                    // 1: one bias per sample, bias [H, A, L, L]; 0: one bias per head shared by the A samples, [H, L, L]
+#endif
 #ifndef FLOOR
 #define FLOOR 0                  // 1: the same TMA traffic and barriers, no math -- the measured pattern floor
 #endif
 constexpr int BN = 64, DH = DHP, QW = QWID, QM = 64 * NWG, DM = ROW_WIDTH;
 constexpr int NCW = NWG * APB_KS;                // consumer warpgroups
 static_assert(APB_KS == 1 || FCLS == 1, "key splits do not combine with clusters");
+static_assert(!PSB || FCLS == 1, "a per-sample bias tile is not shared, so there is nothing to multicast");
 static_assert(DH == 16 || DH == 32 || DH == 48 || DH == 64, "unsupported head width");
 static_assert(DM % DH == 0, "row width must contain complete heads");
 constexpr float LOG2E = 1.4426950408889634f;
@@ -174,6 +178,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   const int wgi = tid >> 7;                                         // consumer warpgroup index
   const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64-row group, and its key split
   const int nblocks = L / BN;
+  const int brow = (PSB ? head * A + samp : head) * L + m0;         // this tile's first row in the [H (A) L, L] bias map
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
@@ -212,9 +217,9 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
         } else {
           if (NOBIAS) { mbar_arrive(&full[s]); continue; }
           mbar_arrive_expect_tx(&full[s], SB);
-          if (FCLS == 1) tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, head * L + m0);
+          if (FCLS == 1) tma_load_2d(slot + 2 * SKV, &mbias, &full[s], n * BN, brow);
           else if (rank == (uint32_t)(n % FCLS))                     // one rank per block issues, rotating
-            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, head * L + m0, (1u << FCLS) - 1);
+            tma_load_mc(slot + 2 * SKV, &mbias, &full[s], n * BN, brow, (1u << FCLS) - 1);
         }
       }
     }
@@ -483,11 +488,12 @@ void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, cons
 // units) or empty. Writes O [A*L, 768] fp32 and LSE [A, H, L] fp32 (log2 units).
 void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, c10::optional<torch::Tensor> kmask,
               torch::Tensor O, torch::Tensor LSE) {
-  const int H = bias.size(0), L = bias.size(1);
+  const int H = bias.size(0), L = bias.size(PSB ? 2 : 1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v})
     TORCH_CHECK(t->stride(1) == 1 && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
-  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(PSB ? 3 : 2) == L && H * DH == DM
+              && (!PSB || (bias.dim() == 4 && bias.size(1) == A)), "bias layout");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == (FWD_BF16 ? torch::kBFloat16 : torch::kFloat32) && LSE.is_contiguous(), "out layout");
   TORCH_CHECK(L % QM == 0, "L must be a multiple of the query tile");
   const bool hasm = kmask.has_value() && kmask->defined();
@@ -495,7 +501,7 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, q.stride(0), QW, QM);
   auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, k.stride(0), QW, BN);
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, v.stride(0), QW, BN);
-  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * (PSB ? A : 1) * L, L, L, BN, QM);
   TORCH_CHECK(A % FCLS == 0, "A must be a multiple of the cluster size");
   launch(hasm ? attn_fwd_kernel<true, 0> : attn_fwd_kernel<false, 0>, A * H * mt, mq, mk, mv, mb, mq,   // (no g tile)
          hasm ? kmask->data_ptr<float>() : nullptr, reinterpret_cast<float*>(O.data_ptr()), LSE.data_ptr<float>(), nullptr, L, H, A, mt);
@@ -505,20 +511,21 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
 // of O.
 void attn_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, c10::optional<torch::Tensor> kmask,
                  torch::Tensor qkvg, torch::Tensor OG, torch::Tensor LSE) {
-  const int H = bias.size(0), L = bias.size(1);
+  const int H = bias.size(0), L = bias.size(PSB ? 2 : 1);
   const int A = q.size(0) / L;
   for (auto* t : {&q, &k, &v, &OG})
     TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv / og layout");
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM && qkvg.size(0) == A * L,
               "qkvg layout");
-  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
+  TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(PSB ? 3 : 2) == L && H * DH == DM
+              && (!PSB || (bias.dim() == 4 && bias.size(1) == A)), "bias layout");
   TORCH_CHECK(LSE.is_contiguous() && L % QM == 0 && A % FCLS == 0, "LSE / shape");
   const bool hasm = kmask.has_value() && kmask->defined();
   const int mt = L / QM;
   auto mq = tile_map(q.data_ptr(), (uint64_t)A * L, DM, DM, QW, QM);
   auto mk = tile_map(k.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
   auto mv = tile_map(v.data_ptr(), (uint64_t)A * L, DM, DM, QW, BN);
-  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
+  auto mb = tile_map(bias.data_ptr(), (uint64_t)H * (PSB ? A : 1) * L, L, L, BN, QM);
   auto mg = tile_map(reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()) + 3 * DM, (uint64_t)A * L, DM, 4 * DM, DH, QM,
                      CU_TENSOR_MAP_SWIZZLE_NONE);
   launch(hasm ? attn_fwd_kernel<true, 2> : attn_fwd_kernel<false, 2>, A * H * mt, mq, mk, mv, mb, mg,
@@ -536,6 +543,7 @@ void attn_fwd_o_og(torch::Tensor qkvg, torch::Tensor bias, torch::Tensor O, torc
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kFloat32 && O.size(0) == L && O.size(1) == DM, "O layout");
   TORCH_CHECK(OG.is_contiguous() && OG.scalar_type() == torch::kBFloat16 && OG.size(0) == L && OG.size(1) == DM, "og layout");
+  TORCH_CHECK(!PSB, "the Pairformer-track core has one sample");
   TORCH_CHECK(LSE.is_contiguous() && L % QM == 0 && FCLS == 1, "LSE / shape");
   const int mt = L / QM;
   auto* base = reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr());
@@ -557,6 +565,7 @@ void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t
               && qkvg.size(0) == S * L, "qkvg layout");
   TORCH_CHECK(bias_all.is_contiguous() && bias_all.scalar_type() == torch::kBFloat16 && bias_all.size(2) == L
               && bias_all.size(0) >= (block + 1) * H, "bias layout");
+  TORCH_CHECK(!PSB, "the inference core shares one hoisted bias");
   TORCH_CHECK(L % QM == 0 && FCLS == 1, "L must be a multiple of the query tile");
   const int mt = L / QM;
   auto* base = reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr());

@@ -623,6 +623,40 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     return dq, dk, dv, dbt.transpose(1, 2)
 
 
+# --------------------------------------------------------------------------------------------------- per-sample bias
+# The same cores with one bias PER SAMPLE (build define ``PSB=1``): bias [H, A, L, L], the layout a stacked bias GEMM leaves
+# (rows of the [H A L, L] TMA map are (head A + sample) L + query). Nothing is shared between the samples any more, so the
+# backward writes each sample's dbias itself (``attn_dkv`` ``DB_PER_SAMPLE``: plain stores, no atomics, no reduction).
+def forward_psb(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
+    """``forward`` with a per-sample bias: bb [H, A, L, L] bf16 in log2 units. Returns (O, LSE), or (og, LSE) with ``qkvg``."""
+    lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
+    ext = _ext("attn_fwd", (*fwd_defs(nh, dh), "PSB=1"))
+    if qkvg is not None:
+        og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
+        ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
+        return og, lse
+    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
+    return o, lse
+
+
+def backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
+    """``backward`` with a per-sample bias bb [H, A, L, L]: dQ, dK, dV [A L, 768] fp32 and the bias's gradient [H, A, L(query),
+    L(key)] bf16 in the bias's own (log2) units -- the dQ pass writes it from the dS registers (``PSB_DB``); the dK / dV pass
+    keeps no dbias. Deterministic: every output element has one writer."""
+    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    dk, dv = torch.empty_like(dq), torch.empty_like(dq)
+    dbias = torch.empty(nh, A, L, L, device=qs.device, dtype=torch.bfloat16)
+    ld = fwd_defs(nh, dh)
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *ld, "PSB=1", "PSB_DB=1")).attn_dq_psb(
+        qs, kb, vb, dob, bb, km, lse, dd, dq, dbias
+    )
+    _ext("attn_dkv", ("DBIAS=0", "PSB=1", *ld)).attn_dkv(
+        qs, kb, vb, dob, bb, km, lse, dd, dk, dv, torch.empty(1, device=qs.device)
+    )
+    return dq, dk, dv, dbias
+
+
 # What the checkpoint policy matches: the registered OpOverload under compile_wrap="custom_op" (the default). Under
 # "disable" there is no op to name, so FWD_OP is the plain launcher and the policy recomputes it like everything else --
 # same results, without the saving.
@@ -704,9 +738,52 @@ def augmented_attention_bf16_sm90(
     return _AttentionBf16Sm90.apply(q, k, v, bias, mask, bias_head_major)
 
 
+class _AttentionBf16Sm90Psb(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, q, k, v, bias, mask):  # noqa: D102
+        A, _, L, _, _ = q.shape
+        qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(D))
+        bb = _bias_prep(bias.reshape(H, A, L, L))
+        km = None
+        if mask is not None:
+            km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
+        o, lse = forward_psb(qs, kb, vb, bb, km, A, L)
+        if torch.is_grad_enabled() or any(ctx.needs_input_grad):
+            ctx.save_for_backward(
+                qs, kb, vb, bb, km if km is not None else torch.empty(0, device=q.device), o, lse
+            )
+        ctx.has_mask, ctx.dims = km is not None, (A, L)
+        return o.view(A, 1, L, H, D)
+
+    @staticmethod
+    def backward(ctx, do):  # noqa: D102
+        qs, kb, vb, bb, km, o, lse = ctx.saved_tensors
+        km = km if ctx.has_mask else None
+        A, L = ctx.dims
+        dob, dd = _prep_do(do, o, A, L)
+        dq, dk, dv, dbias = backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L)
+        shp = (A, 1, L, H, D)
+        # the kernel's gradient is wrt the log2-unit bias the cores read; this op's input is the natural-unit bias times log2 e
+        return dq.view(shp), dk.view(shp), dv.view(shp), dbias * LOG2E, None
+
+
+def augmented_attention_bf16_sm90_psb(q, k, v, bias, mask=None):
+    """``softmax(q k^T / sqrt(48) + bias[sample]) v`` with a bias of its own per sample, in bf16 with fp32 accumulation.
+
+    q, k, v: [A, 1, L, 16, 48]; bias: [16, A, L, L] head-major (``A`` samples, as the token DiT's stacked bias GEMM leaves it);
+    mask: key mask [A, 1, L] or [1, L] (True = attend). Returns fp32 [A, 1, L, 16, 48]; the gradient of the bias comes back in
+    the bias's layout. Same gate as ``augmented_attention_bf16_sm90``."""
+    if mask is not None and mask.dim() == 2:
+        mask = mask[None].expand(q.shape[0], *mask.shape)
+    return _AttentionBf16Sm90Psb.apply(q, k, v, bias, mask)
+
+
 __all__ = [
     "FWD_OP",
     "augmented_attention_bf16_sm90",
+    "augmented_attention_bf16_sm90_psb",
+    "backward_psb",
+    "forward_psb",
     "available",
     "backward",
     "checkpoint_context_keeping_attention",
