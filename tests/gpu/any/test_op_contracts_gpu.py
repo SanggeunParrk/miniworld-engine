@@ -156,9 +156,13 @@ def captured():
 
 def test_capture_saw_ops(captured):
     """Guard the guard: a capture that silently records nothing would make every check vacuous."""
-    required = {"qk_norm_rope_fwd", "qk_norm_rope_bwd", "swa_gate_out_fwd",
-                "rmsnorm_fwd", "rmsnorm_bwd", "rope_3d",
-                "swa_dit_block_fwd", "swa_dit_block_bwd"}
+    from miniworld_engine.modules.dispatch import restricted_card
+
+    required = {"rmsnorm_fwd", "rmsnorm_bwd", "rope_3d", "swa_dit_block_fwd", "swa_dit_block_bwd"}
+    # The per-op SWA path's qk_norm_rope / swa_gate_out are Triton: H100 / B200 run no Triton (the PyTorch statements serve that
+    # path there), so only the other cards reach them.
+    if not restricted_card():
+        required |= {"qk_norm_rope_fwd", "qk_norm_rope_bwd", "swa_gate_out_fwd"}
     # The public flash-window op is the Triton window path; where FA4 serves the window (H100) the per-op path
     # reaches the FA4 launch wrappers instead.
     required |= ({"swa_atom_attention_fa4_fwd", "swa_atom_attention_fa4_bwd"}
@@ -170,7 +174,8 @@ def test_capture_saw_ops(captured):
                      "conditioned_transition_composed_expand_swiglu",
                      "conditioned_transition_composed_squeeze_gate",
                      "conditioned_transition_b2b_fwd_train"}
-    assert {f"miniworld_engine::{name}" for name in required} <= captured.keys()
+    missing = {f"miniworld_engine::{name}" for name in required} - captured.keys()
+    assert not missing, f"not reached: {sorted(missing)}; captured: {sorted(captured)}"
     assert len(captured) >= 15, (
         f"only {len(captured)} ops captured -- the hook is not seeing calls, so the opcheck "
         f"below would pass by doing nothing")
