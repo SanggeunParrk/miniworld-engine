@@ -115,49 +115,44 @@ def matches(module, single, cond, pair, mask) -> bool:
 
 
 def _af3_servable(module, single, cond, pair, mask) -> bool:
-    """AlphaFold 3's K/V norm and slid key window are inference-only here (the backward kernels know neither); the slide needs the real atom
-    count on the host (one sync, so not inside a CUDA graph capture) and 128 real atoms, or no window fits."""
+    """AlphaFold 3's K/V norm and slid key window are inference-only here (the backward kernels know neither). The slid window needs no
+    host read of the real atom count: it is a device tensor, so the block also runs inside a CUDA graph capture."""
     params = [module.get_parameter(n) for n in (*_ld.WEIGHTS, *_ld.CROSS_WEIGHTS)]
-    if torch.is_grad_enabled() and any(
-        t.requires_grad for t in (single, cond, pair, *params)
-    ):
-        return False
-    if module.key_window == "slide":
-        return _real_atoms(module, mask, single.shape[2]) >= DS
-    return True
+    return not (
+        torch.is_grad_enabled()
+        and any(t.requires_grad for t in (single, cond, pair, *params))
+    )
 
 
-def _real_atoms(module, mask, n0: int) -> int:
-    """The real atom count the slid window needs (0 = pad mode); the mask's real atoms come first."""
-    if module.key_window != "slide":
-        return 0
-    if mask is None:
-        return n0
-    if torch.cuda.is_current_stream_capturing():
-        return -1
-    return int(mask.sum())
-
-
-def _edge_windows(n_real: int) -> list[int]:
-    """The query windows whose slid key window is not the clipped one: those starting before atom 0 and those ending past atom N."""
-    last = (n_real - 1) // 32
-    return [w for w in range(last + 1) if 32 * w - 48 < 0 or 32 * w + 80 > n_real]
-
-
-def _slid_edges(o, q, k, v, z, gamma, wb, a, n, n_real):
-    """Overwrite the attention output ``o`` [A, N, 128] of the edge windows with the attention over their slid key windows (torch, fp32)."""
+def _slid_edges(o, q, k, v, z, gamma, wb, a, n, kmask, n0):
+    """Overwrite the attention output ``o`` [A, N, 128] of the windows whose slid key window is not the clipped one with the attention
+    over their slid key windows (torch, fp32). Those are windows 0 and 1 and the last three real windows (a window ends at
+    ``32 w + 80``, so at most three end past the last real atom): five windows chosen on the device from the real atom count, so there
+    is no host read and the call can be captured. A window chosen twice is computed twice with the same result."""
     import torch.nn.functional as F
 
     h, d = NH, DS // NH
-    zz = F.layer_norm(z.float(), (DP,), gamma.float(), None, _ld.EPS)
-    bias = F.linear(zz, wb.float())  # [nwin, 32, 128, h]
-    for w in _edge_windows(n_real):
-        s = max(0, min(32 * w - 48, n_real - DS))
-        qw = q.view(a, n, h, d)[:, 32 * w : 32 * w + 32].float()
-        kw, vw = (t.view(a, n, h, d)[:, s : s + DS].float() for t in (k, v))
-        logits = torch.einsum("aqhd,akhd->ahqk", qw, kw) * d**-0.5 + bias[w].permute(2, 0, 1)
-        out = torch.einsum("ahqk,akhd->aqhd", logits.softmax(-1), vw)
-        o.view(a, n, DS)[:, 32 * w : 32 * w + 32] = out.reshape(a, 32, DS).to(o.dtype)
+    nwin = n // 32
+    n_real = (
+        kmask.sum()
+        if kmask is not None
+        else torch.full((), n0, device=o.device, dtype=torch.int64)
+    )
+    last = (n_real - 1) // 32
+    idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)  # [5]
+    starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_real - DS).clamp(min=0))
+    keys = starts[:, None] + torch.arange(DS, device=o.device)  # [5, 128]
+    valid = keys < n_real  # a system under 128 real atoms has keys past them
+    qs = q.view(a, nwin, 32, h, d)[:, idx].float()
+    ks = k.view(a, n, h, d)[:, keys].float()
+    vs = v.view(a, n, h, d)[:, keys].float()
+    zz = F.layer_norm(z[idx].float(), (DP,), gamma.float(), None, _ld.EPS)
+    bias = F.linear(zz, wb.float()).permute(0, 3, 1, 2)  # [5, h, 32, 128]
+    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * d**-0.5 + bias[None]
+    logits = logits.masked_fill(~valid[None, :, None, None, :], float("-inf"))
+    probs = torch.nan_to_num(torch.softmax(logits, dim=-1))
+    out = torch.einsum("awhqk,awkhd->awqhd", probs, vs).reshape(a, 5, 32, DS)
+    o.view(a, nwin, 32, DS).index_copy_(1, idx, out.to(o.dtype))
 
 
 # --------------------------------------------------------------------------------------------------------------------- the ops
@@ -178,7 +173,7 @@ def _dims(single):
     return a, n0, n, a * n
 
 
-def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide_n=0):
+def _fwd_fake(single, cond, pair, kmask, weights, save, parallel_kv=False, slide=False):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -214,9 +209,9 @@ def _fwd(
     weights: list[torch.Tensor],
     save: bool,
     parallel_kv: bool = False,
-    slide_n: int = 0,
+    slide: bool = False,
 ) -> list[torch.Tensor]:
-    """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide_n`` > 0: its slid key window for ``slide_n`` real atoms (inference only).
+    """``parallel_kv``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide``: its slid key window (inference only).
     The block output [A, 1, N, 128] and, when ``save``, the tensors the backward reads (bias2, mod, mkv, q, k, v, sg, x1, xkv, o, lse, u, a2,
     x2, t): fresh tensors."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
@@ -269,8 +264,8 @@ def _fwd(
                 s2, mod, mkv, p, tf32, nmod=nmod, parallel_kv=parallel_kv
             )
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
-        if slide_n:
-            _slid_edges(o, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n, slide_n)
+        if slide:
+            _slid_edges(o, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n, kmask, _n0)
         o = o.view(m, DS)
         if not save:
             return [
@@ -547,5 +542,5 @@ def run_block(module, single, cond, pair, mask=None):
         return _H100Block.apply(kmask, single, cond, pair, *weights)
     parallel = module.kv_norm == "parallel"
     return _fwd(
-        single, cond, pair, kmask, weights, False, parallel, _real_atoms(module, mask, n0)
+        single, cond, pair, kmask, weights, False, parallel, module.key_window == "slide"
     )[0]

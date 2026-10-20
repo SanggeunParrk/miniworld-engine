@@ -13,7 +13,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   raw atoms next to the first one (Protenix chains it, the default); `key_window="slide"` slides each 128-key window inside the real atoms
   (`[32 w - 48, 32 w + 80)` shifted back, as `AtomCrossAtt.compute_features`) instead of clipping and masking it. Defaults are unchanged. The H100
   mma kernels serve both for inference (`pre90_fwd(..., par)`; the first two and the last windows are recomputed in torch for the slide); a
-  call with grad, a slide under 128 real atoms, or a slide inside a CUDA graph capture takes the composed path. Tests
+  call with grad takes the composed path. The real atom count stays on the device (the edge windows are the first two and the last three real ones, recomputed in torch), so the block runs inside a CUDA graph capture and below 128 real atoms. Tests
   `tests/cpu/compile/test_local_dit_af3_variant.py`, `tests/gpu/sm90/test_h100_local_dit_af3_variant_gpu.py`.
 - `TriangleAttention(transposed_bias=...)` and `kernels.triangle_attention.whole_op(transposed_bias=...)`: which pair the ending node projects its
   bias from. `True` (default, the behaviour so far) projects it from the transposed pair, the supplementary-information and OpenFold convention;
