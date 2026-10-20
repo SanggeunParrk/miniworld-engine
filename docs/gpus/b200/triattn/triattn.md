@@ -306,11 +306,13 @@ paths; the launches are opaque custom ops, so the module compiles to one graph).
   (`fwd_group`: 8 samples at L768 with 4 heads, 2 at L1536): module inference L768 B48 43.9 -> 41.6 ms, L640 B48 26.7 -> 25.8 ms,
   d_pair 256 L768 B16 29.5 -> 29.0 ms; training +0.5-1.7 %. Measured and not kept: a dynamic task counter (H100's fix) was 4-5 %
   slower per sample at every launch size on B200, and grouping the two backward kernels changed the training step by -0.5 to +0.1 %.
-- **Deterministic parameter gradients (fused path):** `tri_gate_bwd` (dW_o) and `tri_wgrad` (M_t, the column / dbias vector sums)
-  now store one fp32 partial per CTA instead of fp32 atomics / TMA reduce-adds, and `tri_slot_sum` (new kernel, 6-7.5 µs) adds the
-  partials in CTA order: dW_q, dW_k, dW_v, dW_g and dW_o are the same bits every run, as on the wide path. dx, dγ, dβ and dW_b
-  still carry the query-side kernel's fp32 reduce-add of dbias (L2 order; dx within 1e-5 relative run to run). Cost at B = 1 (kernel time, d_pair 128 training): L128 114.2 -> 115.7 µs, L384
-  665.4 -> 669.8 µs, L768 +0.2 %.
+- **Deterministic parameter gradients (fused path, opt-in):** with `settings.triattn_b200_deterministic_wgrad=True`, `tri_gate_bwd`
+  (dW_o) and `tri_wgrad` (M_t, the column / dbias vector sums) store one fp32 partial per CTA instead of fp32 atomics / TMA
+  reduce-adds, and `tri_slot_sum` (6-7.5 µs) adds the partials in CTA order: dW_q, dW_k, dW_v, dW_g and dW_o are then the same bits
+  every run, as on the wide path (always). Cost at B = 1 (kernel time, d_pair 128 training): L128 114.2 -> 115.7 µs, L384 665.4 ->
+  669.8 µs, L768 +0.2 %. The default (False) reduces with fp32 atomics as before (the last bits depend on the order; within 1e-3 of
+  the fixed-order sum), and the B = 1 training step stays at main's time. dx, dγ, dβ and dW_b carry the query-side kernel's fp32
+  reduce-add of dbias in either mode (L2 order; dx within 1e-5 relative run to run).
 
 ### Batched samples · measurements (2026-10-20)
 
@@ -375,10 +377,12 @@ kernels are as fast per sample as one sample's (kernel time at L768 B48: 1806 vs
 idle gaps between graph launches, which at the 1000 W power cap keep the clock higher: the same 48 one-sample calls captured in ONE
 graph (no gaps) take 89.0 ms against the one call's 88.4 ms (d_pair 256 L768; d_pair 128 43.3 vs 41.8, d_pair 64 41.4 vs 39.3).
 
-B = 1 against main (59d910cf), same harness, CUDA graph, bf16-mixed, best of 2 interleaved runs, ms (inference / training, starting
-node): d_pair 128 L128 0.0287 / 0.1148 -> 0.0287 / 0.1254 (kernel time 114.2 -> 115.7 µs; the graph timings at L128 move 6 % run to
-run), L384 0.1721 / 0.6745 -> 0.1725 / 0.6789, L768 0.9049 / 3.4758 -> 0.9061 / 3.4824; d_pair 64 (4 × 16) and 256: every cell
-L128-768 within ±1 % (both nodes). The output is the same bits as main at B = 1 and 2 (96 cases: seven configurations x L128 / 384 x
+B = 1 against main (59d910cf), same harness, CUDA graph, bf16-mixed, ms (inference / training): d_pair 128, the default (atomic)
+weight-gradient reduction, best of 3 interleaved runs (2026-10-20, after the deterministic sum became opt-in), starting node L128
+0.0287 / 0.1219 -> 0.0287 / 0.1219, L256 0.0758 / 0.3063 -> 0.0758 / 0.3063, L384 0.1739 / 0.6743 -> 0.1731 / 0.6748, L512 0.3284 /
+1.2744 -> 0.3275 / 1.2748, L768 0.9042 / 3.4733 -> 0.9032 / 3.4757, ending node within the same ±0.5 %; d_pair 64 (4 × 16) and
+256: every cell L128-768 within ±1 % (both nodes, best of 2). With the deterministic sum d_pair 128 training is +1.3 % at L128 (kernel
+time) and +0.7 % at L384. The output is the same bits as main at B = 1 and 2 (96 cases: seven configurations x L128 / 384 x
 both nodes x inference / training x bf16 / fp32 parameters).
 
 

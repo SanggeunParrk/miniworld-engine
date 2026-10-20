@@ -63,7 +63,7 @@ vs 26.7, L512 B48 14.46 vs 14.61, d_pair 256 L768 B16 29.0 vs 29.5, d_pair 64 L7
 46.8; training +0.0-1.7 %. Grouping the two backward kernels the same way looked 6-10 % faster isolated (profiler with idle gaps)
 and changed the module's training step by -0.5 to +0.1 %: not kept.
 
-## Deterministic parameter gradients (fused path)
+## Deterministic parameter gradients (fused path; opt-in since the follow-up below)
 
 `tri_gate_bwd` (dW_o) and `tri_wgrad` (M_t = xhat^T d_t, column sums, dbias sums) store one fp32 partial per CTA (plain stores / TMA
 stores instead of `red.global.add` / TMA reduce-add / atomicAdd); `tri_slot_sum` adds them in CTA order (32 float4 columns x 8 slot
@@ -96,6 +96,16 @@ between replays, so no clock recovery under the 1000 W cap) take 89.0 ms against
 `tests/gpu/sm100/test_triattn_b200_batched_gpu.py`: 529 passed, 3 not run (test tensors above 64 GB). Existing
 `tests/gpu/sm100/test_triattn_b200_gpu.py` 57 passed (the shape-rejection case now expects L200 served), CPU
 `tests/cpu/kernels/test_triattn_b200_batch_plan.py` 23 passed.
+
+## Follow-up: the deterministic sum made opt-in
+
+`settings.triattn_b200_deterministic_wgrad` (default False). False: `tri_gate_bwd` / `tri_wgrad` reduce with fp32 atomics / TMA
+reduce-adds into one zeroed workspace exactly as main (no slot sum); True: the per-CTA partials and `tri_slot_sum` above. B = 1, d_pair
+128, CUDA graph, best of 3 interleaved runs against main, ms (inference / training, starting node): L128 0.0287 / 0.1219 vs 0.0287 /
+0.1219, L256 0.0758 / 0.3063 vs 0.0758 / 0.3063, L384 0.1731 / 0.6748 vs 0.1739 / 0.6743, L512 0.3275 / 1.2748 vs 0.3284 / 1.2744,
+L768 0.9032 / 3.4757 vs 0.9042 / 3.4733; ending node the same ±0.5 %. Tests: `test_deterministic` runs both modes (deterministic:
+dW_q|k|v|g|o bitwise on both paths; default: y bitwise, the fused weight gradients within 1e-2, the wide ones bitwise), and
+`test_deterministic_wgrad_matches_default` (y bitwise, gradients within 1e-3).
 
 ## Not done
 

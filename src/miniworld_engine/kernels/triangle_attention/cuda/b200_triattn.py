@@ -13,6 +13,7 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine import settings
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _SRC = Path(__file__).with_name("b200_sources")
@@ -44,7 +45,7 @@ def _core(rows: int = 4):
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v5", sources=[str(_SRC / "triattn_mod_sm100.cu")],
+    return load_extension(name="triattn_b200_mod_v6", sources=[str(_SRC / "triattn_mod_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -112,6 +113,9 @@ def _core_forward(q, k, v, bias, scale, need):
     return o, lse
 
 
+_WS_DWO, _WS_MT, _WS_VEC, _WS_DB = 0, C * C, 5 * C * C, 5 * C * C + 1056
+
+
 def _empty_mask(device):
     return torch.empty(0, device=device, dtype=torch.bool)
 
@@ -156,13 +160,21 @@ def fused_backward(dy, pair, eps, drop, saved, dtypes):
     x = pair.contiguous().view(-1, C)
     lw, lb, wbf = prm[0], prm[1], prm[2:]
     m, e = _mod(), _core(_rows_per_task(L))
-    # dbias: the query-side kernel reduce-adds its partials into zeros; the parameter gradients' partials go to per-CTA slots
-    # (no zeroing), summed in CTA order
-    dbws = torch.zeros(B * H * L * L, device=x.device, dtype=torch.float32)
-    E32 = x.new_empty(0, dtype=torch.float32)
+    det = bool(settings.current().triattn_b200_deterministic_wgrad)
+    if det:
+        # dbias: the query-side kernel reduce-adds into zeros; the parameter gradients' partials go to per-CTA slots (no zeroing),
+        # summed in CTA order (tri_slot_sum)
+        dbws = torch.zeros(B * H * L * L, device=x.device, dtype=torch.float32)
+        E32 = x.new_empty(0, dtype=torch.float32)
+        wdwo = wmt = E32
+    else:
+        # one zeroed fp32 workspace for every gradient accumulator (one memset): [dWo C*C | wgrad M 4*C*C | wgrad vectors 8*C + 4,
+        # padded | dbias B*4*L*L]; each piece starts on a 128-byte boundary
+        ws = torch.zeros(_WS_DB + B * H * L * L, device=x.device, dtype=torch.float32)
+        dbws, wdwo, wmt = ws[_WS_DB:], ws[_WS_DWO:_WS_MT], ws[_WS_MT:_WS_DB]
     dy = dy.contiguous().view(-1, C)
     drop = drop if drop is not None else x.new_empty(0)
-    do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, E32, drop)
+    do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, wdwo, drop, det)
     shp = (B, L, L, H, D)
     E = q.new_empty(0)
     dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D ** -0.5, dbws, E, E, E)
@@ -170,7 +182,7 @@ def fused_backward(dy, pair, eps, drop, saved, dtypes):
     m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, L)
     dt = dtypes
     fp32 = dt[2] == torch.float32
-    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, E32, fp32)
+    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, wmt, fp32, det)
     return dpair.view(B, L, L, C), dgb, dw, dwo
 
 

@@ -279,16 +279,21 @@ def poisoned(fn):
     return fn()
 
 
+@pytest.mark.parametrize("det", [True, False], ids=["deterministic-wgrad", "default"])
 @pytest.mark.parametrize("name", ["C128", "C256", "C64-H4x16"])
-def test_deterministic(name):
-    """Three runs of one batched training call (NaN-poisoned allocator): the output and the q / k / v / gate / out weight
-    gradients bit for bit; the LayerNorm and the bias projection gradients carry the core's fp32 reduce-add of dbias (L2 add order)."""
+def test_deterministic(name, det):
+    """Three runs of one batched training call (NaN-poisoned allocator): the output bit for bit, and the q / k / v / gate / out weight
+    gradients bit for bit on the wide path always and on the fused path with ``settings.triattn_b200_deterministic_wgrad`` (by default
+    its weight-gradient partials are added with fp32 atomics); the LayerNorm and the bias projection gradients carry the core's fp32
+    reduce-add of dbias (L2 add order)."""
+    settings.configure(triattn_b200_deterministic_wgrad=det)
     cfg = CONFIGS[name]
     m = make(cfg, p_drop=0.25)
     x, mask, dy = inputs(8, 384, cfg[0])
     FixedDrop(m, drop_scale(m, 8, 384, cfg[0]))
     runs = [poisoned(lambda: run(m, x, mask, dy, True)) for _ in range(3)]
     names = ["y", "x", *(n for n, _ in m.named_parameters())]
+    must = BITWISE if det or name != "C128" else ("y",)
     bitwise = []
     for r in runs[1:]:
         for i, n in enumerate(names):
@@ -296,11 +301,27 @@ def test_deterministic(name):
             b = r[0] if i == 0 else r[1] if i == 1 else r[2][i - 2]
             if torch.equal(a, b):
                 bitwise.append(n)
-            elif n in BITWISE:
+            elif n in must:
                 raise AssertionError(f"{n} not bitwise")
             else:
                 assert relative(a, b) < 1e-2, n
-    print(f"\n{name}: bitwise {sorted(set(bitwise))}")
+    print(f"\n{name} det={det}: bitwise {sorted(set(bitwise))}")
+
+
+def test_deterministic_wgrad_matches_default():
+    """The fused path's fixed-order weight-gradient sum against the default atomics: the same output, gradients within fp32 rounding."""
+    cfg = CONFIGS["C128"]
+    m = make(cfg, p_drop=0.25)
+    x, mask, dy = inputs(4, 256, cfg[0])
+    FixedDrop(m, drop_scale(m, 4, 256, cfg[0]))
+    got = {}
+    for det in (False, True):
+        settings.configure(triattn_b200_deterministic_wgrad=det)
+        got[det] = run(m, x, mask, dy, True)
+    assert torch.equal(got[False][0], got[True][0])
+    assert relative(got[False][1], got[True][1]) < 1e-4
+    for a, b in zip(got[False][2], got[True][2], strict=True):
+        assert relative(a, b) < 1e-3
 
 
 #: what test_deterministic requires bit for bit run to run (the rest within 1e-2: dbias's L2 reduce order)

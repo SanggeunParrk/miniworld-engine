@@ -422,8 +422,8 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
 }
 // ---------------------------------------------------------------------------------------------------------------------------------
 // gate backward:  du = dy . Wo;  s = sigmoid(g);  do = du o s;  dg = du o o o s (1 - s);  delta[b, i, h, j] = sum_{c in h} do . o;
-//                 dWo += dy^T . (s o o)   (accumulated in TMEM over the CTA's tiles, stored as the CTA's fp32 partial at the end;
-//                 tri_slot_sum adds the partials in CTA order: the same bits every run)
+//                 dWo += dy^T . (s o o)   (accumulated in TMEM over the CTA's tiles; at the end added into the fp32 dWo with
+//                 atomics, or (deterministic) stored as the CTA's partial for tri_slot_sum to add in CTA order)
 // Tile = 128 rows.  warp 0: TMA; warp 1: tcgen05 (du: A = dy K-major, B = Wo MN-major; dWo: A = dy^T, B = u^T, both MN-major
 // straight from the row tiles); warps 2-5 / 6-9: two groups, one 64-channel half each (a 32-channel chunk = one head: delta
 // falls out per chunk); they write do into its own tile, dg over g and u = s o o over o, and TMA-store do / dg.
@@ -454,10 +454,12 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
     const __grid_constant__ CUtensorMap dgmap,
     const __grid_constant__ CUtensorMap seedmap,          // dpair [R][128] <- dy (the residual's share; head_bwd adds dx), box (64, 128), 128B
     float* __restrict__ DELTA,                            // [B, L (i), 4, L (j)]
-    float* __restrict__ DWO,                              // [grid][128 out][128 in] fp32: this CTA's partial at DWO + blockIdx.x * C * C
+    float* __restrict__ DWO,                              // [128 out][128 in] fp32, accumulated (zeroed); deterministic: [grid][128][128]
+                                                          // partials, this CTA's at DWO + blockIdx.x * C * C
     unsigned* __restrict__ TICKET,                        // zeroed; the last CTA converts dWo and resets it
     __nv_bfloat16* __restrict__ DWO16,
-    const __nv_bfloat16* __restrict__ DROP) {             // [B][L][128] dropout scale or nullptr: du / dWo see dy o drop, the seed dy
+    const __nv_bfloat16* __restrict__ DROP,               // [B][L][128] dropout scale or nullptr: du / dWo see dy o drop, the seed dy
+    const int DET) {                                      // 1: per-CTA partials (deterministic), 0: fp32 atomics into DWO
   using namespace gb;
   const bool drop = DROP != nullptr;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -629,7 +631,7 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
         arrive(sd);                                // (both groups: count 2) g / do buffers free
       }
     }
-    // ---- dWo: TMEM lane = out, 128 in columns; group 0 stores the CTA's partial into its slot ----
+    // ---- dWo: TMEM lane = out, 128 in columns; group 0 adds them into the fp32 dWo (or stores the CTA's partial into its slot) ----
     if (gi == 0 && mytiles > 0) {
       wait(fin, 0);
       tc_fence_after();
@@ -638,9 +640,16 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
         float v[32];
         tmem_ld32(tmem_at(tmem + 128 + ch * 32, qq * 32, 0), v);
         tmem_wait_ld();
-        float4* dst = reinterpret_cast<float4*>(DWO + (long)blockIdx.x * C * C + (long)r * C + ch * 32);
+        if (DET) {
+          float4* dst = reinterpret_cast<float4*>(DWO + (long)blockIdx.x * C * C + (long)r * C + ch * 32);
 #pragma unroll
-        for (int i = 0; i < 8; ++i) dst[i] = make_float4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
+          for (int i = 0; i < 8; ++i) dst[i] = make_float4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
+        } else {
+          float* dst = DWO + (long)r * C + ch * 32;
+#pragma unroll
+          for (int i = 0; i < 32; i += 4)
+            asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};\n" :: "l"(dst + i), "f"(v[i]), "f"(v[i + 1]), "f"(v[i + 2]), "f"(v[i + 3]) : "memory");
+        }
       }
     }
     if (lead) bulk_wait<0>();
@@ -879,12 +888,14 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm100(
     const __grid_constant__ CUtensorMap xmap,
     const float* __restrict__ DB,                         // dbias [B, 4, L, L]
     float* __restrict__ MT,                               // (unused: the partials leave through mtmap)
-    float* __restrict__ VEC,                              // [grid][NVECP]: this CTA's cs [4][128] | B [4][128] | cdb [4] partial
+    float* __restrict__ VEC,                              // cs [4][128] | B [4][128] | cdb [4], accumulated (zeroed); deterministic:
+                                                          // [grid][NVECP], this CTA's partial
     unsigned* __restrict__ TICKET,                        // zeroed; the last CTA finishes and resets it
     const __nv_bfloat16* __restrict__ W4, const float* __restrict__ LNW, const float* __restrict__ LNB, const float* __restrict__ WBF,
     __nv_bfloat16* __restrict__ DW,                       // dW_q|k|v|g [4][128 o][128 c]
     __nv_bfloat16* __restrict__ DGB,                      // dgamma [128] | dbeta [128] | dWb [4][128]
-    const int want_finish, const __grid_constant__ CUtensorMap mtmap) {   // mtmap: the M_t slots fp32 [grid*4*128 c][128 o], box (32, 128), 128B swizzle
+    const int want_finish,                                // bit 1: deterministic (per-CTA partials: VEC slots, mtmap over the M_t slots)
+    const __grid_constant__ CUtensorMap mtmap) {          // MT fp32 [4*128 c][128 o] (reduce-add target) or the slots [grid*4*128 c][128 o]; box (32, 128), 128B swizzle
   using namespace wg;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -1088,7 +1099,11 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm100(
       }
     }
     named_sync(3, 128);
-    for (int i = t; i < NVEC; i += 128) VEC[(long)blockIdx.x * NVECP + i] = sRed[i] + sRed[1056 + i] + sRed[2 * 1056 + i] + sRed[3 * 1056 + i];
+    for (int i = t; i < NVEC; i += 128) {
+      const float a = sRed[i] + sRed[1056 + i] + sRed[2 * 1056 + i] + sRed[3 * 1056 + i];
+      if (want_finish & 2) VEC[(long)blockIdx.x * NVECP + i] = a;
+      else atomicAdd(VEC + i, a);
+    }
 #else
     // ---- a channel a thread: column sums of the d half-tiles; B_h = sum db_h xhat_c, cdb_h ----
     const int c = (warp - 6) * 32 + lane;          // 0..127
@@ -1160,7 +1175,8 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm100(
         named_sync(3, 128);
         if (lead) {
 #pragma unroll
-          for (int q = 0; q < 4; ++q) store_2d(&mtmap, stg + q * 4096, q * 32, ((int)blockIdx.x * 4 + ten) * 128);
+          if (want_finish & 2) { for (int q = 0; q < 4; ++q) store_2d(&mtmap, stg + q * 4096, q * 32, ((int)blockIdx.x * 4 + ten) * 128); }
+          else { for (int q = 0; q < 4; ++q) reduce_add_2d_bf(&mtmap, stg + q * 4096, q * 32, ten * 128); }
           bulk_commit();
         }
       }
@@ -1365,16 +1381,24 @@ void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::T
 // vector sums) is added in CTA order by tri_slot_sum: the parameter gradients are the same bits every run.
 std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::Tensor dg, torch::Tensor db, torch::Tensor x,
                                      double eps, int64_t B, int64_t L, torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, torch::Tensor lnb, bool finish,
-                                     torch::Tensor dwo32, torch::Tensor ws, bool fp32_out) {
+                                     torch::Tensor dwo32, torch::Tensor ws, bool fp32_out, bool det) {
   const long R = B * L * L;
   for (const auto* t : {&dq, &dk, &dv, &dg, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
   TORCH_CHECK(db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.numel() == B * NH * L * L, "db fp32 [B, 4, L, L]");
   auto opt = x.options().dtype(torch::kFloat32);
   const int ntiles = (int)(R / wg::BM), grid = std::min(ntiles, num_sms(x.device().index()));
-  // the per-CTA partials (every slot is written whole by its CTA: no zeroing) and their sums; ws is not used
-  auto mts = torch::empty({(long)grid * 4 * C * C}, opt), vecs = torch::empty({(long)grid * wg::NVECP}, opt);
-  auto mt = torch::empty({4, C, C}, opt), vec = torch::empty({wg::NVEC}, opt);
-  (void)ws;
+  // det: the per-CTA partials (every slot written whole by its CTA: no zeroing), summed into mt / vec by tri_slot_sum.
+  // Otherwise ws: an already-zeroed fp32 buffer of >= 4*C*C + 8*C + NH floats (mt | vec) the CTAs reduce into, else fresh zeros.
+  const long nws = 4L * C * C + 8 * C + NH;
+  const bool use_ws = !det && ws.defined() && ws.numel() >= nws && ws.scalar_type() == torch::kFloat32 && ws.is_contiguous();
+  torch::Tensor mts, vecs, mt, vec;
+  if (det) {
+    mts = torch::empty({(long)grid * 4 * C * C}, opt); vecs = torch::empty({(long)grid * wg::NVECP}, opt);
+    mt = torch::empty({4, C, C}, opt); vec = torch::empty({wg::NVEC}, opt);
+  } else {
+    mt = use_ws ? ws.slice(0, 0, 4L * C * C).view({4, C, C}) : torch::zeros({4, C, C}, opt);
+    vec = use_ws ? ws.slice(0, 4L * C * C, nws) : torch::zeros({8 * C + NH}, opt);
+  }
   static torch::Tensor ticket;
   if (!ticket.defined() || ticket.device() != x.device()) ticket = torch::zeros({1}, x.options().dtype(torch::kInt32));
   auto oopt = finish && fp32_out ? opt : x.options();
@@ -1387,21 +1411,22 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
   auto m2 = [&](const torch::Tensor& t, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap m0 = m2(dq, "dq"), m1 = m2(dk, "dk"), m2_ = m2(dv, "dv"), m3 = m2(dg, "dg"), xm = m2(x, "x");
-  CUtensorMap mtm = make_map<2>(mts.data_ptr(), {(uint64_t)C, (uint64_t)grid * 4 * C}, {(uint64_t)C}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "mt",
-                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
+  CUtensorMap mtm = make_map<2>((det ? mts : mt).data_ptr(), {(uint64_t)C, (uint64_t)(det ? grid : 1) * 4 * C}, {(uint64_t)C}, {32, 128},
+                                CU_TENSOR_MAP_SWIZZLE_128B, "mt", CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgrad_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, wg::SMEM)); attr = true; }
   tri_wgrad_sm100<<<grid, wg::THREADS, wg::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, db.data_ptr<float>(), mt.data_ptr<float>(), vecs.data_ptr<float>(),
+      (int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, db.data_ptr<float>(), mt.data_ptr<float>(), (det ? vecs : vec).data_ptr<float>(),
       reinterpret_cast<unsigned*>(ticket.data_ptr<int>()), finish ? reinterpret_cast<const __nv_bfloat16*>(w4.data_ptr<at::BFloat16>()) : nullptr,
       finish ? lw.data_ptr<float>() : nullptr, finish ? lb.data_ptr<float>() : nullptr, finish ? wbf.data_ptr<float>() : nullptr,
       finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dw.data_ptr<at::BFloat16>()),
-      finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), 0, mtm);
+      finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), det ? 2 : 0, mtm);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const bool wo_ = dwo32.defined() && dwo32.numel() > 0;
-  if (wo_) TORCH_CHECK(dwo32.scalar_type() == torch::kFloat32 && dwo32.is_contiguous() && dwo32.numel() % (C * C) == 0, "dwo32: fp32 [n, 128, 128] partials");
-  auto dwo_sum = torch::empty({wo_ ? C : 0, C}, opt);
-  {
+  if (wo_) TORCH_CHECK(dwo32.scalar_type() == torch::kFloat32 && dwo32.is_contiguous() && dwo32.numel() % (C * C) == 0 && (det || dwo32.numel() == C * C),
+                       "dwo32: fp32 [128, 128] (det: [n, 128, 128] partials)");
+  torch::Tensor dwo_sum = det ? torch::empty({wo_ ? C : 0, C}, opt) : (wo_ ? dwo32.view({C, C}) : torch::empty({0, C}, opt));
+  if (det) {
     const SlotSeg s0{mts.data_ptr<float>(), mt.data_ptr<float>(), 4L * C * C, 4L * C * C, grid};
     const SlotSeg s1{vecs.data_ptr<float>(), vec.data_ptr<float>(), (long)wg::NVEC, (long)wg::NVECP, grid};
     const SlotSeg s2{wo_ ? dwo32.data_ptr<float>() : nullptr, dwo_sum.data_ptr<float>(), wo_ ? (long)C * C : 0L, (long)C * C,
@@ -1413,7 +1438,7 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
   if (finish) {
     auto stream = at::cuda::getCurrentCUDAStream();
     const auto* w4p = reinterpret_cast<const __nv_bfloat16*>(w4.data_ptr<at::BFloat16>());
-    if (fp32_out) {                                  // fp32 parameters: dWo is gate_bwd's fp32 accumulator itself
+    if (fp32_out) {                                  // fp32 parameters: dWo is the fp32 sum itself
       tri_param_finish<float><<<64 + C, 256, 0, stream>>>(mt.data_ptr<float>(), vec.data_ptr<float>(), w4p, lw.data_ptr<float>(),
           lb.data_ptr<float>(), wbf.data_ptr<float>(), dw.data_ptr<float>(), dgb.data_ptr<float>(), nullptr, nullptr);
       C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1434,7 +1459,7 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
 // (one per CTA; tri_wgrad adds them in CTA order and finishes),
 // dpair [R, 128] bf16 = dy: the seed head_bwd adds dx into)
 std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch::Tensor o, torch::Tensor wo, int64_t B, int64_t L,
-                                        torch::Tensor dwo_ws, torch::Tensor drop) {
+                                        torch::Tensor dwo_ws, torch::Tensor drop, bool det) {
   for (const auto* t : {&dy, &g, &o}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == B * L * L * C, "dy / g / o: [R, 128] bf16");
   const long R = B * L * L;
   TORCH_CHECK(L % gb::BM == 0, "L % 128");
@@ -1443,10 +1468,12 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
   auto opt = dy.options();
   auto dO = torch::empty({R, C}, opt), dG = torch::empty({R, C}, opt);
   auto delta = torch::empty({B, L, 4, L}, opt.dtype(torch::kFloat32));
-  // the per-CTA dWo partials (each slot written whole by its CTA: no zeroing); dwo_ws is not used
+  // det: the per-CTA dWo partials (each slot written whole by its CTA: no zeroing); otherwise dwo_ws: an already-zeroed fp32 [C * C]
+  // accumulator (one memset with the other gradient accumulators), else fresh zeros
   const int ntiles_ = (int)(R / gb::BM), grid_ = std::min(ntiles_, num_sms(dy.device().index()));
-  auto dwo = torch::empty({grid_, C, C}, opt.dtype(torch::kFloat32));
-  (void)dwo_ws;
+  auto dwo = det ? torch::empty({grid_, C, C}, opt.dtype(torch::kFloat32))
+           : (dwo_ws.defined() && dwo_ws.numel() == C * C && dwo_ws.scalar_type() == torch::kFloat32) ? dwo_ws.view({C, C})
+                                                                                                    : torch::zeros({C, C}, opt.dtype(torch::kFloat32));
   auto dwo16 = torch::empty({C, C}, opt), seed = torch::empty({R, C}, opt);
   static torch::Tensor ticket;
   if (!ticket.defined() || ticket.device() != dy.device()) ticket = torch::zeros({1}, opt.dtype(torch::kInt32));
@@ -1458,7 +1485,7 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
   tri_gate_bwd_sm100<<<grid_, gb::THREADS, gb::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)L, ntiles_, dym, gm, om, wm, dom, dgm, sm_, delta.data_ptr<float>(), dwo.data_ptr<float>(), reinterpret_cast<unsigned*>(ticket.data_ptr<int>()),
       reinterpret_cast<__nv_bfloat16*>(dwo16.data_ptr<at::BFloat16>()),
-      drop.defined() && drop.numel() > 0 ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr);
+      drop.defined() && drop.numel() > 0 ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, det ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dG, delta, dwo, seed};
 }
@@ -1528,9 +1555,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_wgrad", &tri_wgrad, "sm100 TriangleAttention parameter gradients: finish -> (dW_q|k|v|g [4,128,128], dgamma|dbeta|dWb [6,128]) bf16; raw -> (M, cs, B, cdb)",
         py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("dg"), py::arg("db"), py::arg("x"), py::arg("eps"), py::arg("B"), py::arg("L"),
         py::arg("w4"), py::arg("wb"), py::arg("lnw"), py::arg("lnb"), py::arg("finish") = true, py::arg("dwo32") = torch::Tensor(),
-        py::arg("ws") = torch::Tensor(), py::arg("fp32_out") = false);
+        py::arg("ws") = torch::Tensor(), py::arg("fp32_out") = false, py::arg("det") = false);
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm100 TriangleAttention gate backward: (do, dg, delta, dWo)", py::arg("dy"), py::arg("g"), py::arg("o"), py::arg("wo"), py::arg("B"), py::arg("L"),
-        py::arg("dwo_ws"), py::arg("drop"));
+        py::arg("dwo_ws"), py::arg("drop"), py::arg("det") = false);
   m.def("tri_tail", &tri_tail, "sm100 TriangleAttention tail: x + (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"), py::arg("drop"), py::arg("L"),
         py::arg("out") = torch::Tensor());
   m.def("tri_pack_params", &tri_pack_params, "one-launch parameter pack: (w4 bf16 [512,128], wo bf16 [128,128], lnw|lnb|Wb fp32 [6,128])");

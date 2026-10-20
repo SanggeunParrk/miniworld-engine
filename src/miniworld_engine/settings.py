@@ -213,6 +213,10 @@ class Settings:
     #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
     #: own fused path (h100_d64_b200gate).
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
+    #: B200 TriangleAttention, d_pair 128 path: True stores the weight-gradient kernels' per-CTA fp32 partials and adds them in CTA
+    #: order (``tri_slot_sum``), so dW_q / dW_k / dW_v / dW_g / dW_o are the same bits every run, at +1.5 us (L128) to +4 us (L384) a
+    #: training step; False (default) reduces them with fp32 atomics as before (order-dependent in the last bits).
+    triattn_b200_deterministic_wgrad: bool = False
 
     # ---- transition backend selection ------------------------------------------------------ #
     #: Route the sm_90 d in {128,256}/n=4 case of ``triton_transition_fused`` (the raw-op Triton
