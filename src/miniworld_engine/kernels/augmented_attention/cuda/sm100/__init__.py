@@ -634,8 +634,10 @@ def apb_width(heads: int, d: int = 384) -> int:
 
 
 def _apb_defs(heads: int, qpair: bool, d: int = 384, ksplit: bool = False):
+    """-D flags of an AttentionPairBias build: every core takes per-sample bias planes (BPS; the backward cores' flag, the
+    forward cores' QPAIR mode)."""
     dhp, dreal = APB_GEOMETRY[(heads, d)]
-    defs = (("QPAIR=1",) if qpair else ()) + (f"NHEAD={heads}",)
+    defs = (("QPAIR=1",) if qpair else ("BPS=1",)) + (f"NHEAD={heads}",)
     if dhp != 48 or dreal != 48:
         defs += (f"DHP={dhp}", f"RSQDV={dreal**-0.5!r}f")
     return defs + (("KSPLIT=1",) if ksplit else ())
@@ -764,26 +766,28 @@ class ApbInferenceCore:
 
 
 def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
-    """AttentionPairBias training forward (``attn_fwd2 -DQPAIR``): q, k, v [L, W] bf16 rows (W = ``apb_width(heads)``, column
-    views welcome), bias [heads, L, L] bf16 natural units -> O [L, W] fp32, LSE [heads, L] (log2)."""
+    """AttentionPairBias training forward (``attn_fwd2 -DQPAIR``): q, k, v [S L, W] bf16 rows (W = ``apb_width(heads)``, column
+    views welcome), bias [S heads, L, L] bf16 natural units -> O [S L, W] fp32, LSE [S heads, L] (log2)."""
     dev = _index(q)
     dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
-    O = torch.empty(L, W, device=q.device, dtype=torch.float32)
-    LSE = torch.empty(heads, L, device=q.device, dtype=torch.float32)
+    M = q.shape[0]
+    S = M // L
+    O = torch.empty(M, W, device=q.device, dtype=torch.float32)
+    LSE = torch.empty(S * heads, L, device=q.device, dtype=torch.float32)
 
     def build():
         maps = (
-            _tmn(q, [W, L], _rs(q), [dh, 128]),
-            _tmn(k, [W, L], _rs(k), [dh, 64]),
-            _tmn(v, [W, L], _rs(v), [dh, 64]),
-            _tmn(bias, [L, heads * L], L * 2, [64, 128]),
-            _tmn(O, [W, L], W * 4, [32, 128], swizzle=128, dtype="f32"),
-            _tmn(O, [W, L], W * 4, [16, 128], swizzle=64, dtype="f32"),
+            _tmn(q, [W, M], _rs(q), [dh, 128]),
+            _tmn(k, [W, M], _rs(k), [dh, 64]),
+            _tmn(v, [W, M], _rs(v), [dh, 64]),
+            _tmn(bias, [L, S * heads * L], L * 2, [64, 128]),
+            _tmn(O, [W, M], W * 4, [32, 128], swizzle=128, dtype="f32"),
+            _tmn(O, [W, M], W * 4, [16, 128], swizzle=64, dtype="f32"),
         )
-        grid = _grid(((L // 128 + 1) // 2) * heads, dev)
+        grid = _grid(((L // 128 + 1) // 2) * heads * S, dev)
         return _sm100_kernel(
             "attn_fwd2", "augattn_fwd2_sm100", dev, defs=_apb_defs(heads, True, d)
-        ).bind(grid, (384, 1, 1), *maps, O, LSE, int(L), 1)
+        ).bind(grid, (384, 1, 1), *maps, O, LSE, int(L), int(S))
 
     key = (
         "fwd",
@@ -791,6 +795,7 @@ def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
         d,
         dev,
         L,
+        S,
         *(t.data_ptr() for t in (q, k, v, bias, O, LSE)),
         _rs(q),
         _rs(k),
@@ -841,45 +846,48 @@ def apb_forward_og(qkvg, bias, L, heads: int = 8, d: int = 384):
 
 
 def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
-    """AttentionPairBias training backward (``attn_dkv``, ``attn_dqb`` with -DNHEAD, A = 1): q, k, v, dob [L, W] bf16 rows, bias
-    [heads, L, L] bf16 as given to ``apb_forward``, LSE from it, Dd = rowsum(dO O) [heads, L] fp32 -> dQ, dK, dV [L, W] fp32 and
-    dbias [heads, L, L] fp32. dQ comes as L / 128 key-chunk partials [L / 128, L, W] (``attn_dqb -DDQPART=1`` stores each
-    chunk's slice instead of reduce-adding into one buffer, so the sum -- the caller's, in chunk order -- is deterministic)."""
+    """AttentionPairBias training backward (``attn_dkv``, ``attn_dqb`` with -DBPS -DNHEAD, A = S samples): q, k, v, dob [S L, W]
+    bf16 rows, bias [S heads, L, L] bf16 as given to ``apb_forward``, LSE from it, Dd = rowsum(dO O) [S heads, L] fp32 -> dQ, dK,
+    dV [S L, W] fp32 and dbias [S heads, L, L] fp32. dQ comes as L / 128 key-chunk partials [L / 128, S L, W] (``attn_dqb
+    -DDQPART=1`` stores each chunk's slice instead of reduce-adding into one buffer, so the sum -- the caller's, in chunk order --
+    is deterministic)."""
     dev = _index(q)
     dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
     nch = L // 128
+    M = q.shape[0]
+    S = M // L
     bias_t = torch.empty_like(bias)
-    DQ = torch.empty(nch, L, W, device=q.device, dtype=torch.float32)
-    DB = torch.empty(heads, L, L, device=q.device, dtype=torch.float32)
-    DK, DV = (torch.empty(L, W, device=q.device, dtype=torch.float32) for _ in range(2))
+    DQ = torch.empty(nch, M, W, device=q.device, dtype=torch.float32)
+    DB = torch.empty(S * heads, L, L, device=q.device, dtype=torch.float32)
+    DK, DV = (torch.empty(M, W, device=q.device, dtype=torch.float32) for _ in range(2))
 
     def build():
         f32 = dict(dtype="f32")
-        dims = [W, L]
+        dims = [W, M]
         dkv_maps = (
             _tmn(q, dims, _rs(q), [dh, 64]),
             _tmn(k, dims, _rs(k), [dh, 128]),
             _tmn(v, dims, _rs(v), [dh, 128]),
             _tmn(dob, dims, _rs(dob), [dh, 64]),
-            _tmn(bias_t, [L, heads * L], L * 2, [64, 128]),
+            _tmn(bias_t, [L, S * heads * L], L * 2, [64, 128]),
             _tmn(DK, dims, W * 4, [32, 128], swizzle=128, **f32),
             _tmn(DK, dims, W * 4, [16, 128], swizzle=64, **f32),
             _tmn(DV, dims, W * 4, [32, 128], swizzle=128, **f32),
             _tmn(DV, dims, W * 4, [16, 128], swizzle=64, **f32),
         )
-        dq_dims = [W, nch * L]
+        dq_dims = [W, nch * M]
         dqb_maps = (
             *(_tmn(t, dims, _rs(t), [dh, 128]) for t in (q, k, v, dob)),
-            _tmn(bias, [L, heads * L], L * 2, [64, 128]),
+            _tmn(bias, [L, S * heads * L], L * 2, [64, 128]),
             _tmn(DQ, dq_dims, W * 4, [32, 128], swizzle=128, **f32),
             _tmn(DQ, dq_dims, W * 4, [16, 128], swizzle=64, **f32),
         )
         defs = _apb_defs(heads, False, d)
         tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind(
-            (L // 32, L // 32, heads), (32, 8, 1), bias, bias_t, int(L)
+            (L // 32, L // 32, S * heads), (32, 8, 1), bias, bias_t, int(L)
         )
         dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs).bind(
-            _grid(heads * (L // 128), dev),
+            _grid(S * heads * (L // 128), dev),
             (384, 1, 1),
             *dkv_maps,
             LSE,
@@ -888,12 +896,12 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             DV,
             None,
             int(L),
-            1,
+            int(S),
         )  # no dQ zero fill
         dqb = _sm100_kernel(
             "attn_dqb", "augattn_dqb_sm100", dev, defs=defs + ("DQPART=1",)
         ).bind(
-            _grid(heads * (L // 128) * (L // 128), dev),
+            _grid(S * heads * (L // 128) * (L // 128), dev),
             (384, 1, 1),
             *dqb_maps,
             LSE,
@@ -901,7 +909,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             DQ,
             DB,
             int(L),
-            1,
+            int(S),
         )
 
         def run():
@@ -918,6 +926,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
         d,
         dev,
         L,
+        S,
         *(t.data_ptr() for t in (q, k, v, dob, bias, LSE, Dd, bias_t, DQ, DB, DK, DV)),
         _rs(q),
         _rs(k),
