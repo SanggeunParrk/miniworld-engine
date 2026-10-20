@@ -12,7 +12,13 @@
 // TMEM: S[w][b] at w * 128 + b * 64 (64 cols), P[w] at 256 + w * 32 (bf16, 32 cols), O[w] at 320 + w * 64 (48 cols).
 // -DQPAIR=1 (AttentionPairBias, one sample, -DNHEAD heads, O rows NHEAD * 48 wide): a work item is (head, pair of 128-query
 // tiles m0, m0 + 128), warpgroup w takes tile m0 + 128 w; both read the same k / v blocks, each its own bias tile; the partner
-// past the last tile recomputes the last one and does not store. A is 1.
+// past the last tile recomputes the last one and does not store. A is the batch (samples), each with its own bias
+// [A, NHEAD, L, L] (A = 1: the single-sample layout); a work item is (sample, head, tile pair).
+// -DKSPLIT=1 (with QPAIR; AttentionPairBias at small batch): the key axis is split into NS equal chunks (NS divides L / 64) and a
+// work item is (sample, head, tile pair, chunk): NS times the work items, each walking L / NS keys. The item leaves its chunk's
+// normalised partial O in O[chunk][A L] and its partial LSE in LSE[chunk][A][NHEAD][L]; apb_rows' ksplit_combine merges the
+// chunks (weights 2^(LSE_c - max)). The exponent is formed as (t - m) log2 e (an exact difference) instead of one FMA, so a chunk
+// whose keys are all masked (t = m = -1e30) gives p = 1 instead of 2^(the FMA's rounding error): finite, and weighted 0 later.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -47,6 +53,10 @@ constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 #ifndef NHEAD
 #define NHEAD 16
 #endif
+#ifndef KSPLIT
+#define KSPLIT 0
+#endif
+static_assert(!KSPLIT || QPAIR, "the key split is built for the query-tile pairs");
 // stage: k0 | k1 | v0 | v1 | bias (sample pairs) or k | v | bias0 | bias1 (query-tile pairs), 48 KB either way
 constexpr int STB = QPAIR ? 2 * TK + 2 * TB : 4 * TK + TB;
 __host__ __device__ constexpr int K_OFF(int w) { return QPAIR ? 0 : w * TK; }
@@ -93,23 +103,33 @@ DEVI float max3f(float a, float b, float c) { float d; asm("max.f32 %0, %1, %2, 
 extern "C" __global__ void __launch_bounds__(384, 1)
 augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                    const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap moa, const __grid_constant__ CUtensorMap mob,
-                   float* __restrict__ O, float* __restrict__ LSE, int L, int A) {
+                   float* __restrict__ O, float* __restrict__ LSE, int L, int A
+#if KSPLIT
+                   , int NS
+#endif
+                   ) {
+#if !KSPLIT
+  constexpr int NS = 1;
+#endif
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int npair = A >> 1, mt = L / QM, nb = L / BN;
-  const int items = QPAIR ? ((mt + 1) >> 1) * NHEAD : npair * mt * NHEAD;
+  const int npair = A >> 1, mt = L / QM, nb = L / BN / NS, npt = (mt + 1) >> 1;   // nb: key blocks per item
+  const int items = QPAIR ? npt * NHEAD * NS * A : npair * mt * NHEAD;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;                                          // this CTA's key blocks, all items
-  auto item_of = [&](int li, int& a0, int& m0, int& head) {
+  // QPAIR: (head, chunk, tile pair, sample), head fastest; m0 is the pair's first tile, sp the key chunk
+  auto item_of = [&](int li, int& a0, int& m0, int& head, int& sp) {
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
-    if (QPAIR) { a0 = 0; head = wi % NHEAD; m0 = (wi / NHEAD) * 2 * QM; return; }   // m0: the pair's first tile
+    if (QPAIR) { head = wi % NHEAD; int r = wi / NHEAD; sp = r % NS; r /= NS; m0 = (r % npt) * 2 * QM; a0 = r / npt; return; }
     const int pair = wi % npair, cid = wi / npair;
-    a0 = 2 * pair; m0 = (cid % mt) * QM; head = cid / mt;
+    a0 = 2 * pair; m0 = (cid % mt) * QM; head = cid / mt; sp = 0;
   };
-  // warpgroup w's first row in the [A L] rows (its tile, clamped for the missing partner / its sample), and whether it stores
-  auto row_of = [&](int a0, int m0, int w) { return QPAIR ? min(m0 + w * QM, (mt - 1) * QM) : (a0 + w) * L + m0; };
+  // warpgroup w's tile row within its sample (QPAIR: clamped for the missing partner), its first row in the [A L] rows, and
+  // whether it stores
+  auto trow_of = [&](int m0, int w) { return QPAIR ? min(m0 + w * QM, (mt - 1) * QM) : m0; };
+  auto row_of = [&](int a0, int m0, int w) { return QPAIR ? a0 * L + trow_of(m0, w) : (a0 + w) * L + m0; };
   auto live = [&](int m0, int w) { return !QPAIR || m0 + w * QM < L; };
 
   if (tid == 0) {
@@ -132,8 +152,8 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
     if (lane == 0) {
       int g = 0;
       for (int li = 0; li < my_items; ++li) {
-        int a0, m0, head; item_of(li, a0, m0, head);
-        const int qs = li % QR, qcol = head * DH;
+        int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+        const int qs = li % QR, qcol = head * DH, kb0 = sp * nb;
         if (li >= QR) mbar_wait(&B.q_empty[qs], ((li / QR) - 1) & 1);
         mbar_expect_tx(&B.q_full[qs], 2 * QM * DH * 2);
         for (int w = 0; w < 2; ++w) tma_load_2d(su + O_Q + qs * 2 * TQ + w * TQ, &mq, &B.q_full[qs], qcol, row_of(a0, m0, w));
@@ -144,11 +164,11 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
           mbar_expect_tx(&B.kv_full[s], QPAIR ? 2 * BN * DH * 2 + 2 * TB : 4 * BN * DH * 2 + TB);
           for (int w = 0; w < 2; ++w) {
             if (QPAIR && w == 1) break;                                   // one k / v for both query tiles
-            tma_load_2d(st + K_OFF(w), &mk, &B.kv_full[s], qcol, (QPAIR ? 0 : (a0 + w) * L) + n * BN);
-            tma_load_2d(st + V_OFF(w), &mv, &B.kv_full[s], qcol, (QPAIR ? 0 : (a0 + w) * L) + n * BN);
+            tma_load_2d(st + K_OFF(w), &mk, &B.kv_full[s], qcol, (QPAIR ? a0 : a0 + w) * L + (kb0 + n) * BN);
+            tma_load_2d(st + V_OFF(w), &mv, &B.kv_full[s], qcol, (QPAIR ? a0 : a0 + w) * L + (kb0 + n) * BN);
           }
           for (int w = 0; w < (QPAIR ? 2 : 1); ++w)
-            tma_load_2d(st + B_OFF(w), &mb, &B.kv_full[s], n * BN, head * L + (QPAIR ? row_of(a0, m0, w) : m0));
+            tma_load_2d(st + B_OFF(w), &mb, &B.kv_full[s], (kb0 + n) * BN, (QPAIR ? (a0 * NHEAD + head) * L + trow_of(m0, w) : head * L + m0));
           TR(0, g);
         }
       }
@@ -249,7 +269,11 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         }
         m_i = m_new;
       }
+#if KSPLIT
+      const f2 NM = mk2(-m_i, -m_i);                                       // e = (t - m) log2 e: exact for t = m = -1e30
+#else
       const f2 NM = mk2(-m_i * LOG2E, -m_i * LOG2E);
+#endif
       f2 ssp[4] = {mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f), mk2(0.f, 0.f)};
       if (PP) named_bar_sync(3 + w, 256);                                  // my exp turn: the other warpgroup's exps are done
 #pragma unroll
@@ -257,7 +281,11 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         uint32_t pk[16];
 #pragma unroll
         for (int k = 0; k < 16; ++k) {
+#if KSPLIT
+          const f2 e = mul2(add2(t[cc * 16 + k], NM), L2E);
+#else
           const f2 e = fma2(t[cc * 16 + k], L2E, NM);
+#endif
           float p0, p1;
           if ((k % PMOD) < PCNT) { const f2 pp = ex2_poly2(e); p0 = lo2(pp); p1 = hi2(pp); }
           else { p0 = ex2f(lo2(e)); p1 = ex2f(hi2(e)); }
@@ -277,12 +305,13 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       if (w == 1 && r == 0) TR(7, G);
       if (n == nb - 1) {
         // ---- epilogue of the item: O = acc / l (fp32), LSE = m log2 e + log2 l
-        int a0, m0, head; item_of(li, a0, m0, head);
+        int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
         mbar_wait(&B.p_free[w], G & 1);
         tc_fence_after();
         const float inv = 1.f / l_i;
-        const int a = QPAIR ? 0 : a0 + w, rbase = row_of(a0, m0, w) - a * L, row = rbase + (int)r;   // row within sample a
-        float* orow = O + ((size_t)a * L + row) * (NHEAD * DH) + head * DH;
+        const int a = QPAIR ? a0 : a0 + w, rbase = row_of(a0, m0, w) - a * L, row = rbase + (int)r;   // row within sample a
+        const int orb = (sp * A + a) * L + rbase;                          // the tile's first row in O ([chunk][A L] with the key split)
+        float* orow = O + ((size_t)orb + r) * (NHEAD * DH) + head * DH;
         uint32_t ov[DH];
 #pragma unroll
         for (int cc = 0; cc < DH / 16; ++cc) tmem_ld16(trow + T_O + w * 64 + cc * 16, *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
@@ -305,7 +334,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
             fence_proxy_async();
             named_bar_sync(1 + w, 128);
             if (r == 0 && live(m0, w)) {
-              tma_store_2d(&moa, xa, head * DH + 32 * hf, a * L + rbase);
+              tma_store_2d(&moa, xa, head * DH + 32 * hf, orb);
               tma_store_commit();
             }
           }
@@ -323,9 +352,9 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
           fence_proxy_async();
           named_bar_sync(1 + w, 128);
           if (r == 0 && live(m0, w)) {
-            if (DH == 16) tma_store_2d(&mob, xb, head * DH, a * L + rbase);
-            else tma_store_2d(&moa, xa, head * DH, a * L + rbase);
-            if (DH > 32) tma_store_2d(&mob, xb, head * DH + 32, a * L + rbase);
+            if (DH == 16) tma_store_2d(&mob, xb, head * DH, orb);
+            else tma_store_2d(&moa, xa, head * DH, orb);
+            if (DH > 32) tma_store_2d(&mob, xb, head * DH + 32, orb);
             tma_store_commit();
           }
         } else if (live(m0, w)) {
@@ -334,7 +363,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
             *reinterpret_cast<float4*>(orow + 4 * k) = make_float4(__uint_as_float(ov[4 * k]) * inv, __uint_as_float(ov[4 * k + 1]) * inv,
                                                                    __uint_as_float(ov[4 * k + 2]) * inv, __uint_as_float(ov[4 * k + 3]) * inv);
         }
-        if (live(m0, w)) LSE[((size_t)a * NHEAD + head) * L + row] = m_i * LOG2E + __log2f(l_i);
+        if (live(m0, w)) LSE[(((size_t)sp * A + a) * NHEAD + head) * L + row] = m_i * LOG2E + __log2f(l_i);
       }
     }
     if (TST && r == 0) tma_store_wait0();
