@@ -145,7 +145,10 @@ def test_softmax_t_long_rows(L):
 
 # ------------------------------------------------------------------------------------------------------------- inference block
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
-@pytest.mark.parametrize(("L", "S", "shared", "masked"), [(1024, 5, False, True), (1536, 1, True, False), (2560, 5, True, True), (3072, 1, False, False)])
+@pytest.mark.parametrize(
+    ("L", "S", "shared", "masked"),
+    [(1024, 5, False, True), (1152, 3, False, True), (1536, 1, True, False), (2560, 5, True, True), (3072, 1, False, False)],
+)
 @pytest.mark.parametrize("inf3", ["1", "0"])
 def test_long_inference_block_matches_the_pytorch_block(monkeypatch, n_head, d_head, L, S, shared, masked, inf3):
     """The long rungs against the fp32 PyTorch block within the PyTorch bf16 block's own error, with the three-kernel switch on or off
@@ -269,10 +272,10 @@ def _step(m, x, c, p, mask, dy, dtype):
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
-@pytest.mark.parametrize(("L", "A", "masked"), [(1024, 3, True), (1536, 2, False), (3072, 1, True)])
+@pytest.mark.parametrize(("L", "A", "masked"), [(1024, 3, True), (1152, 2, True), (1536, 2, False), (3072, 1, True)])
 def test_long_training_every_gradient_within_the_pytorch_bf16_error(n_head, d_head, L, A, masked):
     """The output and every gradient against the fp32 PyTorch block within 1.1x the PyTorch bf16 block's error + 1e-4 (the short
-    lengths' bound)."""
+    lengths' bound). L1152: 256-key tiles do not divide L, so dbias runs on single CTAs (dpb_sm100.cu), elsewhere on CTA pairs."""
     ref, fast, ref_bf = blocks(seed=3, n_head=n_head, d_head=d_head)
     x, c, p, dy, mask = _inputs(L, A, masked)
     xb, cb, pb = (t.to(BF).requires_grad_(True) for t in (x, c, p))

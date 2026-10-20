@@ -529,6 +529,31 @@ pass `engine_backend="triton"`.
   bitwise equal to B one-sample calls in every case of the B 1-48 x L 128 / 300 / 384 / 768 x seven-width grid; B = 1 forward
   unchanged in bits and time. Tests `tests/gpu/sm100/test_triattn_b200_batched_gpu.py`, `tests/cpu/kernels/test_triattn_b200_batch_plan.py`;
   record `docs/records/triattn_b200_batched_20261020.md`.
+- B200 AttentionPairBias (`integrations.attention_pair_bias_b200`): any number of samples B (48 per launch,
+  `max_batch()`, more in consecutive chunks; each sample its own pair and key mask; a sample's output, dsingle and dpair bitwise
+  equal to a one-sample call) -- the kernels take per-sample bias planes (`attn_dkv` / `attn_dqb -DBPS`, the forward cores'
+  QPAIR items carry the sample) and the pair kernels run over the S L query rows. The forward / inference attention cores split
+  the key axis (`-DKSPLIT`, `apb_rows.ksplit_combine`; `sm100.apb_ksplit(L, heads)`, `settings.apb_b200_ksplit`) and the
+  backward dK / dV core the query axis (`attn_dkv -DQSPLIT`, slices added by `qkv_bwd`; `sm100.apb_qsplit`,
+  `settings.apb_b200_qsplit`), never depending on B. Each op is one C++ call: the torch ops `apb_b200::train_fwd` / `train_bwd`
+  / `infer` (sm_100 build of `apb_rows.cu`, `apb.host_ops()`; `settings.apb_b200_host = False` keeps the Python sequence, same
+  bits). The parameter-gradient sums use block partial rows reduced in a fixed order instead of atomics (bitwise run to run).
+  2026-10-20, B200, fp32 master parameters, vs main at B = 1: inference 1.00-1.11x, training with CUDA graphs 1.02-1.16x,
+  without 1.04-2.74x; B = 5 (16 x 24) 1.98-2.67x the fastest of PyTorch compiled / cuEquivariance. With
+  `apb_b200_ksplit = apb_b200_qsplit = 1` the output and the input gradients are main's bits. `bench.py` takes `+apb_batch=N`.
+  Tests `tests/gpu/sm100/test_b200_apb_ksplit_gpu.py`, `test_b200_apb_host_gpu.py`; page
+  `docs/gpus/b200/attention_pair_bias/attention_pair_bias.md`.
+- B200 bias-only token DiT serves MiniWorld's long token rungs in bf16: L a multiple of 128 up to 3072 (was 768; longer L ran the
+  PyTorch module), inference and training, every head layout. Past L 768 the attention core streams P through shared memory
+  (`kernels/bias_only_dit/cuda/pv_stream_sm100.cu`, `PvStreamCore`: the bf16 twin of the fp32 core, key-outer / sample-inner, one MMA
+  per 16 keys for a sample group; `PvGateCore` hands such calls over), `softmax_t` takes 3072 keys, and inference runs the 12-launch
+  step there (the three-kernel step's per-tile clusters lose past 768). New: `settings.bias_only_dit_stream` (default on),
+  `b200_max_l`, `B200_TMEM_MAX_L`, `B200_MAX_L`, `pick_group_stream`, `stream_ready`. L <= 768 is bit-identical to before (160
+  inference / training cells) and as fast. Eight chained blocks, CUDA graph, bf16-mixed, 16 x 48: L1536 A1 / A5 79.6 / 146.7 us per
+  block, L3072 A1 / A5 139.5 / 307.5 (PyTorch compiled 474 / 579 and 1510 / 1726; the module 4279 / 4585 and 16923 / 17554). The fp32
+  (TF32) path is now tested and measured on B200 (700 tests; the whole training step bit-identical over ten poisoned steps; inference
+  1.12-2.68x and training 1.19-1.21x PyTorch compiled). Tests `tests/gpu/sm100/test_b200_bias_only_dit_long_gpu.py`,
+  `test_b200_bias_only_dit_tf32_gpu.py`; page `docs/gpus/b200/bias_only_dit/bias_only_dit.md` (I4, T8, Measurements 2026-10-20).
 
 ## [2.3.7] - 2026-10-21
 
