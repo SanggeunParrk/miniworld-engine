@@ -155,7 +155,8 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
     const __grid_constant__ CUtensorMap xmap,                                               // x [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,                                               // out [R][C], box (32, 32), 64B swizzle
     const __nv_bfloat16* __restrict__ X,                                                    // residual [R][C] (dropout path)
-    const __nv_bfloat16* __restrict__ DROP, int L) {        // dropout scale [B][L (the row's last index)][C] or nullptr
+    const __nv_bfloat16* __restrict__ DROP, int L,          // dropout scale [B][L (the row's last index)][C] or nullptr
+    const int TRANS) {                                      // 1: x / out in the ending node's layout (see load_rows)
   using T = WT<C>;
   constexpr int CO = T::CO, KX = CO / 64;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -202,7 +203,7 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
           if (kc < KXS) {                                             // residual stage: up to CPS x chunks of the block
             const int j0 = kc * T::CPS, j1 = min(KX, j0 + T::CPS);
             expect_tx(sf + s, (j1 - j0) * T::XC);
-            for (int j = j0; j < j1; ++j) load_2d(&xmap, Xc(s, j - j0), sf + s, c0 + j * 64, t * WBM);
+            for (int j = j0; j < j1; ++j) load_rows(&xmap, Xc(s, j - j0), sf + s, c0 + j * 64, t * WBM, L, TRANS);
             continue;
           }
           const int ku = kc - KXS;
@@ -283,7 +284,7 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
       const int t = it / T::NH, c0 = (it % T::NH) * CO;
       const int acc = lt % T::NACC;
       const long row = (long)t * WBM + qq * 32 + lane;
-      const uint4* xr = reinterpret_cast<const uint4*>(X + row * C + c0);
+      const uint4* xr = reinterpret_cast<const uint4*>(X + row_at(row, L, TRANS) * C + c0);
       uint4 xv[2][4] = {};
       if (!fold) {
 #pragma unroll
@@ -327,7 +328,7 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
           *reinterpret_cast<uint4*>(rowp + ((c ^ ((lane >> 1) & 3)) << 4)) = make_uint4(w[c * 4], w[c * 4 + 1], w[c * 4 + 2], w[c * 4 + 3]);
         fence_proxy_async();
         __syncwarp();
-        if (lane == 0) { store_2d(&ymap, buf, c0 + k * 32, t * WBM + qq * 32); bulk_commit(); }
+        if (lane == 0) { store_rows(&ymap, buf, c0 + k * 32, t * WBM + qq * 32, L, TRANS); bulk_commit(); }
         ++nst;
       }
     }
@@ -417,7 +418,7 @@ template <int C, int ND> struct WF {
   static_assert(NW >= 2, "front W stages");
 };
 
-template <int C, int ND>
+template <int C, int ND, bool TRANS>   // TRANS: x in the ending node's layout (see load_rows); compile-time (a runtime flag spilled)
 __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles, int L, int HDp, int NH, int NBR, float eps,
     const __grid_constant__ CUtensorMap xmap,                                   // x [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,                                   // W [4 HDp + 16][C], box (64, NBR / 2), 128B swizzle
@@ -469,7 +470,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
   auto blk_row0 = [&](int b) { return b < 4 * NBT ? (b / NBT) * HDp + (b % NBT) * NBR : 4 * HDp; };
   auto load_x = [&](int t, int xb) {
     expect_tx(xf + xb, T::XB);
-    for (int kc = 0; kc < T::KC; ++kc) load_2d(&xmap, sX + (xb * T::KC + kc) * WBM * 64, xf + xb, kc * 64, t * WBM);
+    for (int kc = 0; kc < T::KC; ++kc) load_rows(&xmap, sX + (xb * T::KC + kc) * WBM * 64, xf + xb, kc * 64, t * WBM, L, TRANS);
   };
 
   if (warp == 0) {
@@ -531,7 +532,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
       auto load_chunks = [&](int tt) {
         for (int kc = 0; kc < T::KC; ++kc) {
           expect_tx(xf + kc, WBM * 64 * 2);
-          load_2d(&xmap, sX + kc * WBM * 64, xf + kc, kc * 64, tt * WBM);
+          load_rows(&xmap, sX + kc * WBM * 64, xf + kc, kc * 64, tt * WBM, L, TRANS);
         }
       };
       auto stats = [&](int tt) {
@@ -543,7 +544,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
 #pragma unroll
             for (int p = 0; p < PER; ++p) {
               const int j = lane + 32 * p;
-              u[i][p] = j < NV ? __ldg(X4 + ((long)tt * WBM + r0 + rr + i) * NV + j) : make_uint4(0u, 0u, 0u, 0u);
+              u[i][p] = j < NV ? __ldg(X4 + row_at((long)tt * WBM + r0 + rr + i, L, TRANS) * NV + j) : make_uint4(0u, 0u, 0u, 0u);
             }
           float s1[4], s2[4];
 #pragma unroll
@@ -737,13 +738,15 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
 
 // ---- dy_s = dy o drop[b, j, :] (the module's broadcast dropout scale), 8 channels a thread
 __global__ void __launch_bounds__(256) tri_scale_rows(const __nv_bfloat16* __restrict__ DY, const __nv_bfloat16* __restrict__ DROP,
-                                                      __nv_bfloat16* __restrict__ OUT, int C, int L, long R) {
+                                                      __nv_bfloat16* __restrict__ OUT, int C, int L, long R, int trans) {
   const long i = (long)blockIdx.x * blockDim.x + threadIdx.x;
   const int per = C / 8;
   if (i >= R * per) return;
   const long row = i / per;
   const int c = (int)(i % per) * 8;
-  const long srow = (row / ((long)L * L)) * L + row % L;
+  // the scale is per (sample, the row's last position): kernel row (b, n, s) -> s; in the ending node's layout row (b, i, j) is
+  // kernel row (b, j, i), so the index is i
+  const long srow = (row / ((long)L * L)) * L + (trans ? (row / L) % L : row % L);
   const uint4 d = *reinterpret_cast<const uint4*>(DY + row * C + c), m = __ldg(reinterpret_cast<const uint4*>(DROP + srow * C + c));
   const uint32_t dw[4] = {d.x, d.y, d.z, d.w}, mw[4] = {m.x, m.y, m.z, m.w};
   uint32_t o[4];
@@ -792,7 +795,7 @@ template <int C> struct WG {
   static_assert(NW >= 2, "gate backward stages");
 };
 
-template <int C>
+template <int C, bool TRANS>   // TRANS: dy_s and u in the ending node's layout; compile-time (a runtime flag spilled)
 __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int HDp, int NBR,
     const __grid_constant__ CUtensorMap amap,                                   // dy_s [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,                                   // WoT [HDp][C], box (64, NBR), 128B swizzle
@@ -835,7 +838,7 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
             const int s = y % T::NW;
             if (y >= T::NW) wait(se + s, ((y / T::NW) - 1) & 1);
             expect_tx(sf + s, (WBM + NBR) * 128);
-            load_2d(&amap, stg + s * T::SB, sf + s, kc * 64, t * WBM);
+            load_rows(&amap, stg + s * T::SB, sf + s, kc * 64, t * WBM, L, TRANS);
             load_2d(&wmap, stg + s * T::SB + WBM * 128, sf + s, kc * 64, b * NBR);
           }
     }
@@ -940,7 +943,7 @@ __global__ void __launch_bounds__(320, 1) tri_wgbwd_sm100(int ntiles, int L, int
           if (lane == 0) {
             store_2d(&domap, slot, col0, t * WBM + qq * 32);
             store_2d(&dgmap, slot + 2048, col0, t * WBM + qq * 32);
-            store_2d(&umap, slot + 4096, col0, t * WBM + qq * 32);
+            store_rows(&umap, slot + 4096, col0, t * WBM + qq * 32, L, TRANS);   // (u pairs with dy_s in dWo = dy_s^T u)
             bulk_commit();
           }
         }
@@ -978,7 +981,7 @@ template <int C> struct WH {
 };
 
 template <int C>
-__global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int ntiles, int HDp,
+__global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int ntiles, int HDp, int L, int TRANS,   // TRANS: x / dy / dx in the ending node's layout
     const __grid_constant__ CUtensorMap amap,                                            // D = [dq | dk | dv | dg | db] [R][4 HDp + 64], box (64, 128), 128B
     const __grid_constant__ CUtensorMap wmap,                                            // W^T [C][4 HDp + 64], box (64, NNR), 128B
     const __grid_constant__ CUtensorMap dxmap,                                           // dx [R][C], box (32, 32), 64B
@@ -1074,11 +1077,11 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
       unsigned char* p = ring + sl * HB_SLOT;
       if (lj < NKW) {
         expect_tx(glw + sl, 2048);
-        load_2d(&xmap, p, glw + sl, (hv + NH2 * lj) * 32, row);
+        load_rows(&xmap, p, glw + sl, (hv + NH2 * lj) * 32, row, L, TRANS);
       } else {
         expect_tx(glw + sl, 4096);
-        load_2d(&xmap, p, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row);
-        load_2d(&dymap, p + 2048, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row);
+        load_rows(&xmap, p, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row, L, TRANS);
+        load_rows(&dymap, p + 2048, glw + sl, (hv + NH2 * (lj - NKW)) * 32, row, L, TRANS);
       }
       ++nl;
       if (++lj == NJ) { lj = 0; lt_ += gridDim.x; }
@@ -1171,7 +1174,7 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
         fence_proxy_async();
         __syncwarp();
         if (lane == 0) {
-          store_2d(&dxmap, slot, k * 32, t * WBM + qq * 32);
+          store_rows(&dxmap, slot, k * 32, t * WBM + qq * 32, L, TRANS);
           store_2d(&xhmap, slot + 2048, k * 32, t * WBM + qq * 32);
           if (k == NK - 1) {                            // xhat's extra columns: 1 at C, zeros after
             store_2d(&xhmap, sPad, C, t * WBM + qq * 32);
@@ -1317,7 +1320,7 @@ torch::Tensor tri_gate_mul_h(torch::Tensor g, torch::Tensor o) {
 // ---- fused wide tail: g [R, HDp] (dense rows at a 16-byte-multiple stride), o [R, HDp], x [R, C], wo [C, HDp] -> x + (sigmoid(g) o o) . wo^T
 template <int C>
 static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& x, const torch::Tensor& wo, torch::Tensor& out,
-                         const __nv_bfloat16* drop, long L) {
+                         const __nv_bfloat16* drop, long L, bool trans) {
   using T = WT<C>;
   const long R = x.size(0), HDp = o.size(1);
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
@@ -1325,19 +1328,20 @@ static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const t
   CUtensorMap gm = m2(g, HDp, R, g.stride(0), 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "g");
   CUtensorMap om = m2(o, HDp, R, HDp, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "o");
   CUtensorMap wm = m2(wo, HDp, C, HDp, 64, T::NNR, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
-  CUtensorMap ym = m2(out, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "out");
-  CUtensorMap xm = m2(x, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap ym = make_rows_map(out.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "out", trans ? L : 0);
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wtail_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
   tri_wtail_sm100<C><<<std::min(ntiles * T::NH, num_sms(x.device().index())), 448, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       ntiles, (int)(HDp / 64), drop == nullptr ? 1 : 0, gm, om, wm, xm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-      drop, (int)L);
+      drop, (int)L, trans ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // out_: a contiguous [R, C] bf16 tensor (or a view of one: a chunk's rows of a batch's output) to write into, or empty (fresh)
-torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_) {
+torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_,
+                          bool trans) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 2 && o.size(0) == R && o.size(1) % 64 == 0, "o: [R, HDp]");
@@ -1355,28 +1359,29 @@ torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, tor
                          "out: contiguous bf16 with R x C elements");
   auto out = given ? out_.view({R, C}) : torch::empty_like(x);
   switch (C) {
-    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L); break;
-    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L); break;
-    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L); break;
-    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L); break;
-    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L); break;
-    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L); break;
-    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L); break;
-    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L); break;
+    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L, trans); break;
+    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L, trans); break;
+    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L, trans); break;
+    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L, trans); break;
+    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L, trans); break;
+    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L, trans); break;
+    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L, trans); break;
+    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L, trans); break;
     default: TORCH_CHECK(false, "tri_wtail: C must be a multiple of 64 in 64 .. 512");
   }
   return out;
 }
 
 // ---- fused wide front: x [R, C], LN w / b [C], W [4 HDp + 16, C] bf16 -> (q, k, v, g [R, HDp] bf16, bias [B, NH, L, L] bf16)
-template <int C, int ND>
+template <int C, int ND, bool TR>
 static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
                              long HDp, long NH, const bool* mp, long L, long NBR, std::vector<torch::Tensor>& outs, float2* stp) {
+  constexpr bool trans = TR;
   using T = WF<C, ND>;
   const long R = x.size(0);
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
-  CUtensorMap xm = m2(x, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x");
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0);
   CUtensorMap wm = m2(W, C, W.size(0), C, 64, (uint32_t)(NBR / 2), CU_TENSOR_MAP_SWIZZLE_128B, "W");
   CUtensorMap wb = m2(W, C, W.size(0), C, 64, 8, CU_TENSOR_MAP_SWIZZLE_128B, "Wb");
   CUtensorMap om[4];
@@ -1391,13 +1396,13 @@ static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, co
   static int ncl[16] = {0};                               // co-resident 2-CTA clusters (the persistent grid must be one wave)
   const int dev = x.device().index();
   if (ncl[dev] == 0) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND, TR>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
     cfg.gridDim = dim3(num_sms(dev) & ~1);
-    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND>), &cfg));
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND, TR>), &cfg));
     TORCH_CHECK(ncl[dev] >= 1, "tri_wfront: no 2-CTA cluster fits");
   }
   cfg.gridDim = dim3(std::min(2 * ncl[dev], ntiles));
-  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND>, ntiles, (int)L, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND, TR>, ntiles, (int)L, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
                                     Maps4{{om[0], om[1], om[2], om[3]}}, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
                                     (const float*)lw.data_ptr<float>(), (const float*)lb.data_ptr<float>(), mp,
                                     reinterpret_cast<__nv_bfloat16*>(outs[4].data_ptr<at::BFloat16>()), stp));
@@ -1405,15 +1410,20 @@ static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, co
 
 template <int C>
 static void launch_wfront(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
-                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp) {
+                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp, bool trans) {
   long NBR = 0;                                           // rows per output block: the largest divisor of HDp <= 256, a multiple of 32
   for (long d = 256; d >= 32 && !NBR; d -= 32) if (HDp % d == 0) NBR = d;
-  if (C <= 256 && NBR >= 128) launch_wfront_nd<C, 8>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
-  else launch_wfront_nd<C, 4>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+  if (C <= 256 && NBR >= 128) {
+    if (trans) launch_wfront_nd<C, 8, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+    else launch_wfront_nd<C, 8, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+  } else {
+    if (trans) launch_wfront_nd<C, 4, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+    else launch_wfront_nd<C, 4, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+  }
 }
 
 std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, torch::Tensor W, int64_t NH,
-                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats) {
+                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats, bool trans) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(R == B * L * L && L % WBM == 0, "rows = B*L*L, L % 128");
@@ -1433,14 +1443,14 @@ std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch:
   std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt),
                                      torch::empty({R, HDp}, opt), torch::empty({B, NH, L, L}, opt)};
   switch (C) {
-    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
-    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp); break;
+    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
     default: TORCH_CHECK(false, "tri_wfront: C must be a multiple of 64 in 64 .. 512");
   }
   return outs;
@@ -1448,7 +1458,7 @@ std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch:
 
 
 // ---- backward host wrappers
-torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L) {
+torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L, bool trans) {
   TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kBFloat16 && dy.is_contiguous() && dy.dim() == 2, "dy: [R, C] bf16");
   const long R = dy.size(0), C = dy.size(1);
   TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C && C % 8 == 0, "drop: [B, L, C]");
@@ -1456,7 +1466,7 @@ torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L) 
   const long n = R * (C / 8);
   tri_scale_rows<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(dy.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), (int)C, (int)L, R);
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), (int)C, (int)L, R, trans ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1479,31 +1489,39 @@ static long pick_rows(long HDp, long maxn) {             // the largest divisor 
   return 32;
 }
 
-template <int C>
-static void launch_wgbwd(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
-                         std::vector<torch::Tensor>& outs) {                      // outs[1] (dg) may be a strided view
+template <int C, bool TR>
+static void launch_wgbwd_t(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
+                           std::vector<torch::Tensor>& outs) {                      // outs[1] (dg) may be a strided view
+  constexpr bool trans = TR;
   using T = WG<C>;
   const long R = dys.size(0), HDp = g.size(1), NBR = pick_rows(HDp, T::MAXN);
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
-  CUtensorMap am = m2(dys, C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "dy");
+  CUtensorMap am = make_rows_map(dys.data_ptr(), C, R, C, 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "dy", trans ? L : 0);
   CUtensorMap wm = m2(wot, C, HDp, C, 64, (uint32_t)NBR, CU_TENSOR_MAP_SWIZZLE_128B, "wo^T");
   CUtensorMap dom = m2(outs[0], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "do");
   CUtensorMap dgm = m2(outs[1], HDp, R, outs[1].stride(0), 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dg");
-  CUtensorMap um = m2(outs[2], HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "u");
+  CUtensorMap um = make_rows_map(outs[2].data_ptr(), HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "u", trans ? L : 0);
   CUtensorMap gm = m2(g, HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "g");
   CUtensorMap omm = m2(o, HDp, R, HDp, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "o");
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgbwd_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wgbwd_sm100<C, TR>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
-  tri_wgbwd_sm100<C><<<std::min(ntiles, num_sms(dys.device().index())), 320, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
+  tri_wgbwd_sm100<C, TR><<<std::min(ntiles, num_sms(dys.device().index())), 320, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       ntiles, (int)L, (int)HDp, (int)NBR, am, wm, dom, dgm, um, gm, omm, outs[3].data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <int C>
+static void launch_wgbwd(const torch::Tensor& dys, const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& wot, long L,
+                         std::vector<torch::Tensor>& outs, bool trans) {
+  if (trans) launch_wgbwd_t<C, true>(dys, g, o, wot, L, outs);
+  else launch_wgbwd_t<C, false>(dys, g, o, wot, L, outs);
+}
+
 // dy_s [R, C], g / o [R, HDp], wo^T [HDp, C] -> (do, dg, u [R, HDp] bf16, delta fp32 [B, L, HDp/32, L])
 std::vector<torch::Tensor> tri_wgbwd_h(torch::Tensor dys, torch::Tensor g, torch::Tensor o, torch::Tensor wot, torch::Tensor dg_out,
-                                       int64_t B, int64_t L) {
+                                       int64_t B, int64_t L, bool trans) {
   TORCH_CHECK(dys.is_cuda() && dys.scalar_type() == torch::kBFloat16 && dys.is_contiguous() && dys.dim() == 2, "dy_s: [R, C] bf16");
   const long R = dys.size(0), C = dys.size(1);
   TORCH_CHECK(R == B * L * L && R % WBM == 0, "rows = B*L*L, a multiple of 128");
@@ -1517,14 +1535,14 @@ std::vector<torch::Tensor> tri_wgbwd_h(torch::Tensor dys, torch::Tensor g, torch
   std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), dg_out, torch::empty({R, HDp}, opt),
                                      torch::empty({B, L, HDp / 32, L}, opt.dtype(torch::kFloat32))};
   switch (C) {
-    case 64: launch_wgbwd<64>(dys, g, o, wot, L, outs); break;
-    case 128: launch_wgbwd<128>(dys, g, o, wot, L, outs); break;
-    case 192: launch_wgbwd<192>(dys, g, o, wot, L, outs); break;
-    case 256: launch_wgbwd<256>(dys, g, o, wot, L, outs); break;
-    case 320: launch_wgbwd<320>(dys, g, o, wot, L, outs); break;
-    case 384: launch_wgbwd<384>(dys, g, o, wot, L, outs); break;
-    case 448: launch_wgbwd<448>(dys, g, o, wot, L, outs); break;
-    case 512: launch_wgbwd<512>(dys, g, o, wot, L, outs); break;
+    case 64: launch_wgbwd<64>(dys, g, o, wot, L, outs, trans); break;
+    case 128: launch_wgbwd<128>(dys, g, o, wot, L, outs, trans); break;
+    case 192: launch_wgbwd<192>(dys, g, o, wot, L, outs, trans); break;
+    case 256: launch_wgbwd<256>(dys, g, o, wot, L, outs, trans); break;
+    case 320: launch_wgbwd<320>(dys, g, o, wot, L, outs, trans); break;
+    case 384: launch_wgbwd<384>(dys, g, o, wot, L, outs, trans); break;
+    case 448: launch_wgbwd<448>(dys, g, o, wot, L, outs, trans); break;
+    case 512: launch_wgbwd<512>(dys, g, o, wot, L, outs, trans); break;
     default: TORCH_CHECK(false, "tri_wgbwd: C must be a multiple of 64 in 64 .. 512");
   }
   return outs;
@@ -1532,29 +1550,29 @@ std::vector<torch::Tensor> tri_wgbwd_h(torch::Tensor dys, torch::Tensor g, torch
 
 template <int C>
 static void launch_whbwd(const torch::Tensor& Dall, const torch::Tensor& x, const torch::Tensor& dy, const torch::Tensor& lw,
-                         const torch::Tensor& stats, const torch::Tensor& wt, torch::Tensor& dx, torch::Tensor& xh) {
+                         const torch::Tensor& stats, const torch::Tensor& wt, torch::Tensor& dx, torch::Tensor& xh, long L, bool trans) {
   using T = WH<C>;
   const long R = x.size(0), HDp = (Dall.size(1) - 64) / 4;
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
     return make_map<2>(t.data_ptr(), {cols, rows}, {ld}, {b0, b1}, sw, w); };
   CUtensorMap am = m2(Dall, Dall.size(1), R, Dall.size(1), 64, WBM, CU_TENSOR_MAP_SWIZZLE_128B, "D");
   CUtensorMap wm = m2(wt, wt.size(1), C, wt.size(1), 64, T::NNR, CU_TENSOR_MAP_SWIZZLE_128B, "W^T");
-  CUtensorMap dxm = m2(dx, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dx");
+  CUtensorMap dxm = make_rows_map(dx.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dx", trans ? L : 0);
   CUtensorMap xhm = m2(xh, C + 64, R, C + 64, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "xhat");
-  CUtensorMap xm = m2(x, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "x");
-  CUtensorMap dym = m2(dy, C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dy");
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "x", trans ? L : 0);
+  CUtensorMap dym = make_rows_map(dy.data_ptr(), C, R, C, 32, 32, CU_TENSOR_MAP_SWIZZLE_64B, "dy", trans ? L : 0);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_whbwd_sm100<C>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM)); attr = true; }
   const int ntiles = (int)(R / WBM);
   tri_whbwd_sm100<C><<<std::min(ntiles, num_sms(x.device().index())), (2 + T::ND) * 32, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      ntiles, (int)HDp, am, wm, dxm, xhm, xm, dym, reinterpret_cast<const float2*>(stats.data_ptr<float>()), lw.data_ptr<float>());
+      ntiles, (int)HDp, (int)L, trans ? 1 : 0, am, wm, dxm, xhm, xm, dym, reinterpret_cast<const float2*>(stats.data_ptr<float>()), lw.data_ptr<float>());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // D = [dq | dk | dv | dg | db rows] [R, 4 HDp + 64] bf16; x, dy [R, C]; LN gamma [C]; W^T = [Wq; Wk; Wv; Wg; Wb64]^T [C, 4 HDp + 64]
 // -> (dx = dy + LN-backward(D . W) [R, C] bf16, xhat | 1 | 0.. [R, C + 64] bf16)
 std::vector<torch::Tensor> tri_whbwd_h(torch::Tensor Dall, torch::Tensor x, torch::Tensor dy, torch::Tensor lnw, torch::Tensor stats,
-                                       torch::Tensor wt) {
+                                       torch::Tensor wt, int64_t L, bool trans) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(R % WBM == 0, "rows % 128");
@@ -1569,14 +1587,14 @@ std::vector<torch::Tensor> tri_whbwd_h(torch::Tensor Dall, torch::Tensor x, torc
   TORCH_CHECK(stats.scalar_type() == torch::kFloat32 && stats.is_contiguous() && stats.numel() == 2 * R, "stats: fp32 [R, 2] (the forward's)");
   auto dx = torch::empty_like(x), xh = torch::empty({R, C + 64}, x.options());
   switch (C) {
-    case 64: launch_whbwd<64>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 128: launch_whbwd<128>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 192: launch_whbwd<192>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 256: launch_whbwd<256>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 320: launch_whbwd<320>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 384: launch_whbwd<384>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 448: launch_whbwd<448>(Dall, x, dy, lw, stats, wt, dx, xh); break;
-    case 512: launch_whbwd<512>(Dall, x, dy, lw, stats, wt, dx, xh); break;
+    case 64: launch_whbwd<64>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 128: launch_whbwd<128>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 192: launch_whbwd<192>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 256: launch_whbwd<256>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 320: launch_whbwd<320>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 384: launch_whbwd<384>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 448: launch_whbwd<448>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
+    case 512: launch_whbwd<512>(Dall, x, dy, lw, stats, wt, dx, xh, L, trans); break;
     default: TORCH_CHECK(false, "tri_whbwd: C must be a multiple of 64 in 64 .. 512");
   }
   return {dx, xh};
@@ -1616,20 +1634,20 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("tri_scale_rows", &tri_scale_rows_h, "dy o drop[b, j, :]", py::arg("dy"), py::arg("drop"), py::arg("L"));
+  m.def("tri_scale_rows", &tri_scale_rows_h, "dy o drop[b, j, :]", py::arg("dy"), py::arg("drop"), py::arg("L"), py::arg("trans"));
   m.def("tri_db_rows", &tri_db_rows_h, "dbias [B, H, L, L] fp32 -> rows [R, 64] bf16 (into a view)", py::arg("db"), py::arg("out"),
         py::arg("B"), py::arg("L"));
   m.def("tri_wgbwd", &tri_wgbwd_h, "wide gate backward: (do, dg, u, delta); dg into a view", py::arg("dys"), py::arg("g"), py::arg("o"),
-        py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"));
+        py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"), py::arg("trans"));
   m.def("tri_whbwd", &tri_whbwd_h, "wide head backward: (dx, xhat | 1)", py::arg("D"), py::arg("x"), py::arg("dy"), py::arg("lnw"),
-        py::arg("stats"), py::arg("wt"));
+        py::arg("stats"), py::arg("wt"), py::arg("L"), py::arg("trans"));
   m.def("tri_wfinish", &tri_wfinish_h, "wide parameter gradients from G = D^T [xhat | 1]", py::arg("G"), py::arg("wcat"), py::arg("lnw"),
         py::arg("lnb"), py::arg("dwo"), py::arg("NH"), py::arg("hd"), py::arg("fp32_out"));
   m.def("tri_wfront", &tri_wfront_h, "fused LN + [q | k | v | g | bias] projections for any width",
         py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("W"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"),
-        py::arg("stats"));
+        py::arg("stats"), py::arg("trans"));
   m.def("tri_wtail", &tri_wtail_h, "fused x + (sigmoid(g) o o) . Wo^T for any width", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"),
-        py::arg("drop"), py::arg("L"), py::arg("out") = torch::Tensor());
+        py::arg("drop"), py::arg("L"), py::arg("out"), py::arg("trans"));
   m.def("tri_ln_rows", &tri_ln_rows_h, "LayerNorm over C (64 .. 512) rows: bf16 -> bf16", py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("xcopy"));
   m.def("tri_bias_heads", &tri_bias_heads_h, "bias columns of the projection -> head-major masked bias [B, NH, L, L]",
         py::arg("P"), py::arg("cb"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"));
