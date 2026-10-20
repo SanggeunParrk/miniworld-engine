@@ -380,3 +380,20 @@ def test_each_cuda_build_gets_its_own_directory_and_only_the_matching_one_is_use
     finally:
         del os.environ[prebuilt.BUNDLE_ENV]
         prebuilt.bundles.cache_clear()
+
+
+def test_a_replay_compiles_its_own_checkout_and_jit_root(tmp_path: Path) -> None:
+    """Records made in one checkout replay in another (a clean release tree): the recipe's source / include paths and
+    generated-file paths must move to the replaying tree, or it compiles the recording tree's code under other keys."""
+    from miniworld_engine.build import kernel_bundle
+
+    old = "/old/checkout/src/miniworld_engine"
+    recipe = {"fn": "cubin", "source": f"{old}/kernels/x/k.cu", "flags": [f"-I{old}/kernels/x", "-I/old/jit/trimul_h100/h"],
+              "overlay": {"/old/jit/trimul_h100/h/a.cuh": "int a;"}, "jit": "/old/jit"}
+    new = kernel_bundle.rebase_recipe(recipe, None, "/new/jit", package=tmp_path / "miniworld_engine")
+    assert new["source"] == f"{tmp_path}/miniworld_engine/kernels/x/k.cu"
+    assert new["flags"] == [f"-I{tmp_path}/miniworld_engine/kernels/x", "-I/new/jit/trimul_h100/h"]
+    assert list(new["overlay"]) == ["/new/jit/trimul_h100/h/a.cuh"]
+    text_only = {"fn": "cubin", "source": None, "text": '#include "k.cuh"', "flags": [f"-I{old}/kernels/x"], "jit": "/old/jit"}
+    assert kernel_bundle.rebase_recipe(text_only, None, "/new/jit", package=tmp_path / "miniworld_engine")["flags"] == \
+        [f"-I{tmp_path}/miniworld_engine/kernels/x"]

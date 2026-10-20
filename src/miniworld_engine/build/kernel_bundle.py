@@ -397,15 +397,25 @@ def update_prebuilt(entries: dict[str, dict], root: Path, arch: str, *, keep: bo
 
 
 # --------------------------------------------------------------------------------------------------- replay
+def rebase_recipe(recipe: dict, recorded_jit: str | None, jit: str | None, package: Path = PKG_ROOT) -> dict:
+    """``recipe`` with the recording's checkout and JIT root replaced by this one's: a replay compiles THIS tree's
+    sources (and writes generated files under this JIT root), so it keys them as this tree's own builds would. (A
+    recipe still carries the generated TriMul header and ``compile_text`` texts of the recording: refresh the records
+    with a coverage run after editing the sources they are generated from.)"""
+    text = json.dumps(recipe)
+    m = re.search(r'(?:"|-I)(/[^"]*?/miniworld_engine)/(?:kernels|integrations|modules)/', text)
+    for old, new in ((recipe.get("jit") or recorded_jit, jit), (m.group(1) if m else None, str(package))):
+        if old and new and old != new:
+            text = text.replace(old, new)
+    return json.loads(text)
+
+
 def _replay_one(task: dict) -> dict:
     """Rebuild one recorded artifact here (a worker process). Returns {old, key, path} or {old, error}."""
     from miniworld_engine.kernels import _codegraph as cg
     from miniworld_engine.kernels import _nvcc
 
-    r = task["recipe"]
-    old_jit, new_jit = r.get("jit") or task.get("jit"), cg.context().jit
-    if old_jit and new_jit and old_jit != new_jit:  # generated headers / sources lived under the recording's JIT root
-        r = json.loads(json.dumps(r).replace(old_jit, new_jit))
+    r = rebase_recipe(task["recipe"], task.get("jit"), cg.context().jit)
     try:
         if r["fn"] == "derived":
             base = _replay_one({"recipe": task["base"], "old": r["base_key"], "jit": task.get("jit")})
@@ -440,6 +450,8 @@ def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, onl
     if only:
         recipes = {k: e for k, e in recipes.items() if only in e["kind"] or only in e["name"]}
     record = out / "records" / f"replay-{_abi_tag(sys.implementation.cache_tag)}.jsonl"
+    if record.exists():  # one replay, one record: never pack an earlier run's artifacts
+        record.rename(record.with_suffix(f".{int(time.time())}.prev"))
     env = driver_env(out, arch, record)
     os.environ.update({k: env[k] for k in (prebuilt.RECORD_ENV, "MINIWORLD_ENGINE_BUNDLE_ARCH", "XDG_CACHE_HOME",
                                            "MINIWORLD_ENGINE_JIT_FALLBACK")})
@@ -502,7 +514,7 @@ def bundle_kernels(args) -> int:
         rec = replay([Path(p) for p in args.replay], out, root, arch, args.jobs, args.only)
         timings["replay"] = time.monotonic() - t0
         records = [rec]
-        keep = True
+        keep = args.keep  # artifacts of this ABI (and cubins) the replay did not produce are pruned
     else:
         device_arch = cg.target_arch()
         if device_arch not in ("cpu", arch):
