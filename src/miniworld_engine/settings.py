@@ -418,6 +418,10 @@ class Settings:
     #: (bf16 operands, fp32 accumulation: 1.9e-2, the same error as the bf16 PyTorch module, the Triton path and every other
     #: gradient of the block).
     apb_h100_exact_dwb: bool = False
+    #: B200 AttentionPairBias forward / inference attention cores: the number of key chunks a work item walks (the key split,
+    #: merged by ``ksplit_combine``). None picks it per (L, heads) (``kernels.augmented_attention.cuda.sm100.apb_ksplit``); 1 runs
+    #: the unsplit cores (bitwise the pre-split results); n > 1 forces n chunks where n divides the key blocks (ceil(L / 64)).
+    apb_b200_ksplit: int | None = None
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None

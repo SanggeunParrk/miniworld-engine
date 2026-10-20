@@ -32,6 +32,7 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <type_traits>
 #ifdef APB_H100_FP32_SHADOW
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h>
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_backward.h>
@@ -608,6 +609,50 @@ __global__ void __launch_bounds__(NT) gate_bwd_hl_k(const bf* __restrict__ DOG, 
   DD[(long)lane * M + r] = dotv<V>(d_o, o);
 }
 
+// Key-split combine (the sm_100a forward cores built -DKSPLIT): row r of the [A L] rows (sample r / L, row r % L), head h. The NS
+// chunks' normalised partial o_c [NS, M, W] and partial LSE_c [NS, A, NH, L] (log2 units) merge in chunk order as
+// o = sum_c w_c o_c, w_c = 2^(LSE_c - max) / sum 2^(LSE_c' - max); LSE = max + log2(sum). A thread per four columns of a row
+// (its head's weights from the NS LSE values, which every thread of the head reads: L1 hits). Templated on NS so the NS partial
+// loads are unconditional and issue together (a runtime chunk count left them one latency each). Inference: sigmoid(g) o as bf16 over the q columns of qkvg; training: O (fp32), LSE and og = sigmoid(g) o (bf16),
+// the gate_rows pass folded in.
+constexpr int NSMAX = 16, CNT = 256;
+template <int NS, bool TRAIN>
+__global__ void __launch_bounds__(CNT) ksplit_combine_k(const float* __restrict__ OP, const float* __restrict__ LP, bf* __restrict__ QKVG,
+    float* __restrict__ O, float* __restrict__ LSE, bf* __restrict__ OG, int M, int L, int W, int NH, int DHP) {
+  const long t = (long)blockIdx.x * CNT + threadIdx.x, q4 = W / 4;
+  if (t >= (long)M * q4) return;
+  const long r = t / q4;
+  const int c = (int)(t - r * q4) * 4, h = c / DHP, A = M / L;
+  const long a = r / L, i = r % L;
+  float lse[NS], mx = -INFINITY;
+  float4 p[NS];
+#pragma unroll
+  for (int k = 0; k < NS; ++k) {
+    lse[k] = LP[(((long)k * A + a) * NH + h) * L + i];
+    p[k] = *reinterpret_cast<const float4*>(OP + ((long)k * M + r) * W + c);
+  }
+#pragma unroll
+  for (int k = 0; k < NS; ++k) mx = fmaxf(mx, lse[k]);
+  float sum = 0.f;
+#pragma unroll
+  for (int k = 0; k < NS; ++k) { lse[k] = exp2f(lse[k] - mx); sum += lse[k]; }
+  const float inv = 1.f / sum;
+  float4 acc = make_float4(0.f, 0.f, 0.f, 0.f);
+#pragma unroll
+  for (int k = 0; k < NS; ++k) {
+    const float w = lse[k] * inv;
+    acc.x = fmaf(w, p[k].x, acc.x); acc.y = fmaf(w, p[k].y, acc.y); acc.z = fmaf(w, p[k].z, acc.z); acc.w = fmaf(w, p[k].w, acc.w);
+  }
+  const float4 g = mul4(sig4(V4<bf>::load(QKVG + r * 4 * W + 3 * W + c)), acc);
+  if (TRAIN) {
+    *reinterpret_cast<float4*>(O + r * W + c) = acc;
+    V4<bf>::store(OG + r * W + c, g);
+    if (c % DHP == 0) LSE[(a * NH + h) * L + i] = mx + log2f(sum);
+  } else {
+    V4<bf>::store(QKVG + r * 4 * W + c, g);
+  }
+}
+
 // dq (NCH key-chunk partials [NCH, M, W], added in chunk order: deterministic) | dk | dv fp32 [M, W] -> dqkvg[:, 0:3W] bf16;
 // ABQ[c] += sum_r dq (bf16-rounded, what the GEMMs see)
 template <int V>
@@ -923,6 +968,50 @@ void gate_rows(at::Tensor o, at::Tensor qkvg, at::Tensor og) {
   const at::cuda::CUDAGuard gd(o.device());
   if (W == 384) gate_rows_k<3><<<blocks(M), NT, 0, S()>>>(CP<float>(o), CP<bf>(qkvg), P<bf>(og), (int)M);
   else gate_rows_k<4><<<blocks(M), NT, 0, S()>>>(CP<float>(o), CP<bf>(qkvg), P<bf>(og), (int)M);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// op [NS, M, W] fp32, lp [NS, A, NH, L] fp32 -> inference (o, lse, og absent): sigmoid(g) o bf16 over qkvg[:, :W]; training: o
+// [M, W] fp32, lse [A, NH, L] fp32, og [M, W] bf16.
+void ksplit_combine(at::Tensor op, at::Tensor lp, at::Tensor qkvg, c10::optional<at::Tensor> o, c10::optional<at::Tensor> lse,
+                    c10::optional<at::Tensor> og, int64_t L, int64_t nh, int64_t dhp) {
+  chk(op, at::kFloat, "op"); chk(lp, at::kFloat, "lp"); chk(qkvg, at::kBFloat16, "qkvg");
+  TORCH_CHECK(op.dim() == 3, "op [NS, M, W]");
+  const int64_t NS = op.size(0), M = op.size(1), W = op.size(2);
+  TORCH_CHECK(NS >= 1 && NS <= NSMAX && M % L == 0 && lp.numel() == NS * M * nh && qkvg.size(0) == M && qkvg.size(1) == 4 * W,
+              "ksplit_combine shapes");
+  TORCH_CHECK(W == nh * dhp && dhp % 4 == 0, "ksplit_combine widths");
+  const bool train = o.has_value();
+  TORCH_CHECK(train == lse.has_value() && train == og.has_value(), "ksplit_combine: o, lse and og together");
+  if (train) { chk(*o, at::kFloat, "o"); chk(*lse, at::kFloat, "lse"); chk(*og, at::kBFloat16, "og"); }
+  const at::cuda::CUDAGuard gd(op.device());
+  const unsigned grid = (unsigned)((M * (W / 4) + CNT - 1) / CNT);
+  float* po = train ? P<float>(*o) : nullptr;
+  float* pl = train ? P<float>(*lse) : nullptr;
+  bf* pg = train ? P<bf>(*og) : nullptr;
+  auto run = [&](auto ns) {
+    constexpr int N = decltype(ns)::value;
+    auto k = train ? ksplit_combine_k<N, true> : ksplit_combine_k<N, false>;
+    k<<<grid, CNT, 0, S()>>>(CP<float>(op), CP<float>(lp), P<bf>(qkvg), po, pl, pg, (int)M, (int)L, (int)W, (int)nh, (int)dhp);
+  };
+  switch (NS) {
+    case 1: run(std::integral_constant<int, 1>{}); break;
+    case 2: run(std::integral_constant<int, 2>{}); break;
+    case 3: run(std::integral_constant<int, 3>{}); break;
+    case 4: run(std::integral_constant<int, 4>{}); break;
+    case 5: run(std::integral_constant<int, 5>{}); break;
+    case 6: run(std::integral_constant<int, 6>{}); break;
+    case 7: run(std::integral_constant<int, 7>{}); break;
+    case 8: run(std::integral_constant<int, 8>{}); break;
+    case 9: run(std::integral_constant<int, 9>{}); break;
+    case 10: run(std::integral_constant<int, 10>{}); break;
+    case 11: run(std::integral_constant<int, 11>{}); break;
+    case 12: run(std::integral_constant<int, 12>{}); break;
+    case 13: run(std::integral_constant<int, 13>{}); break;
+    case 14: run(std::integral_constant<int, 14>{}); break;
+    case 15: run(std::integral_constant<int, 15>{}); break;
+    default: run(std::integral_constant<int, 16>{}); break;
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1861,6 +1950,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_rows", &ln_rows);
   m.def("gate_rows", &gate_rows);
   m.def("gate_bwd", &gate_bwd);
+  m.def("ksplit_combine", &ksplit_combine);
   m.def("qkv_bwd", &qkv_bwd);
   m.def("ln_bwd", &ln_bwd);
   m.def("prep", &prep);

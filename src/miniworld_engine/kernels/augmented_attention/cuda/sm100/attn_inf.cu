@@ -14,7 +14,13 @@
 //
 // -DQPAIR=1 (AttentionPairBias, one sample, -DNHEAD heads): a work item is (head, pair of 128-query tiles m0, m0 + 128) and
 // warpgroup w takes tile m0 + 128 w; both read the same k / v blocks (loaded once per stage) and each its own bias tile. The
-// partner past the last tile recomputes the last one (loads clamped) and does not store. A is 1.
+// partner past the last tile recomputes the last one (loads clamped) and does not store. A is the batch (samples), each with its
+// own bias planes (the bias map's third coordinate is sample x NHEAD + head; A = 1: the single-sample layout); a work item is
+// (sample, head, tile pair).
+// -DKSPLIT=1 (with QPAIR): the key axis is split into NS equal chunks of key blocks (NS divides ceil(L / 64)), a work item is
+// (sample, head, tile pair, chunk), and the item leaves its chunk's normalised partial o (fp32, through the 3-D maps mpa / mpb:
+// [W, L, NS A]) and partial LSE (log2 units, LSEP [NS][A][NHEAD][L]) instead of the gated o; apb_rows' ksplit_combine merges
+// the chunks, gates and writes the bf16 o over q. No g tile is loaded then.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -51,6 +57,10 @@ constexpr int BN = 64, DH = DHP, QM = 128, DM = 768;
 #ifndef NHEAD
 #define NHEAD 16
 #endif
+#ifndef KSPLIT
+#define KSPLIT 0
+#endif
+static_assert(!KSPLIT || (QPAIR && DHP != 64), "the key split is built for the query-tile pairs, heads up to 48 wide");
 constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 // stage: k0 | k1 | v0 | v1 | bias (sample pairs) or k | v | bias0 | bias1 (query-tile pairs), 48 KB either way
 constexpr int STB = QPAIR ? 2 * TK + 2 * TB : 4 * TK + TB;
@@ -59,7 +69,8 @@ __host__ __device__ constexpr int V_OFF(int w) { return QPAIR ? TK : 2 * TK + w 
 __host__ __device__ constexpr int B_OFF(int w) { return QPAIR ? 2 * TK + w * TB : 4 * TK; }
 constexpr int O_Q = 0, O_ST = QR * 2 * TQ, O_BAR = O_ST + ST * STB;        // q ring: QR slots x (q0 | q1)
 constexpr int XG = 128 * 128;                                              // per warpgroup: g tile in, gated o out (bf16, SW128, 96 B rows)
-constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + 2 * XG;
+constexpr int XA = 128 * 32 * 4, XB = 128 * 16 * 4;                        // KSPLIT: fp32 partial o staging, cols 0-31 (SW128), 32-47 (SW64)
+constexpr int O_X = O_BAR + 1024, SMEM_BYTES = O_X + (KSPLIT ? 2 * (XA + XB) : 2 * XG);
 static_assert(SMEM_BYTES <= 232448, "shared memory");
 constexpr uint32_t T_S = 0, T_P = 256, T_O = PDB ? 384 : 320;          // P[w][b] at 256 + w * 64 + b * 32 (PDB), else 256 + w * 32
 constexpr uint32_t I_QK = idesc_bf16(128, BN), I_PV = idesc_bf16(128, DH, 0, 1);
@@ -102,24 +113,33 @@ DEVI float max3f(float a, float b, float c) { float d; asm("max.f32 %0, %1, %2, 
 extern "C" __global__ void __launch_bounds__(384, 1)
 augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant__ CUtensorMap mk, const __grid_constant__ CUtensorMap mv,
                   const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mg, const __grid_constant__ CUtensorMap mo,
-                  int L, int A) {
+                  int L, int A
+#if KSPLIT
+                  , const __grid_constant__ CUtensorMap mpa, const __grid_constant__ CUtensorMap mpb, float* __restrict__ LSEP, int NS
+#endif
+                  ) {
+#if !KSPLIT
+  constexpr int NS = 1;
+#endif
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int npair = (A + 1) >> 1, mt = (L + QM - 1) / QM, nb = (L + BN - 1) / BN;
-  const int items = QPAIR ? ((mt + 1) >> 1) * NHEAD : npair * mt * NHEAD;
+  const int npair = (A + 1) >> 1, mt = (L + QM - 1) / QM, nb = (L + BN - 1) / BN / NS, npt = (mt + 1) >> 1;   // nb: per item
+  const int items = QPAIR ? npt * NHEAD * NS * A : npair * mt * NHEAD;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;                                          // this CTA's key blocks, all items
-  auto item_of = [&](int li, int& a0, int& m0, int& head) {
+  // QPAIR: (head, chunk, tile pair, sample), head fastest; m0 is the pair's first tile, sp the key chunk
+  auto item_of = [&](int li, int& a0, int& m0, int& head, int& sp) {
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
-    if (QPAIR) { a0 = 0; head = wi % NHEAD; m0 = (wi / NHEAD) * 2 * QM; return; }   // m0: the pair's first tile
+    if (QPAIR) { head = wi % NHEAD; int q = wi / NHEAD; sp = q % NS; q /= NS; m0 = (q % npt) * 2 * QM; a0 = q / npt; return; }
     const int pair = wi % npair, cid = wi / npair;
-    a0 = 2 * pair; m0 = (cid % mt) * QM; head = cid / mt;
+    a0 = 2 * pair; m0 = (cid % mt) * QM; head = cid / mt; sp = 0;
   };
   // warpgroup w's rows and sample: its query tile (clamped for the missing partner) / its sample of the pair
   auto row_of = [&](int m0, int w) { return QPAIR ? min(m0 + w * QM, (mt - 1) * QM) : m0; };
-  auto smp_of = [&](int a0, int w) { return QPAIR ? 0 : min(a0 + w, A - 1); };
+  auto smp_of = [&](int a0, int w) { return QPAIR ? a0 : min(a0 + w, A - 1); };
+  auto bpl_of = [&](int a0, int head) { return QPAIR ? a0 * NHEAD + head : head; };   // the bias map's plane
   auto live = [&](int a0, int m0, int w) { return QPAIR ? m0 + w * QM < L : a0 + w < A; };
 
   if (tid == 0) {
@@ -142,8 +162,8 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     if (lane == 0) {
       int g = 0;
       for (int li = 0; li < my_items; ++li) {
-        int a0, m0, head; item_of(li, a0, m0, head);
-        const int qs = li % QR, qcol = head * DH;
+        int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+        const int qs = li % QR, qcol = head * DH, kb0 = sp * nb;
         if (li >= QR) mbar_wait(&B.q_empty[qs], ((li / QR) - 1) & 1);
         mbar_expect_tx(&B.q_full[qs], 2 * QM * DH * 2);
         for (int w = 0; w < 2; ++w) tma_load_3d(su + O_Q + qs * 2 * TQ + w * TQ, &mq, &B.q_full[qs], qcol, row_of(m0, w), smp_of(a0, w));
@@ -153,10 +173,10 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.kv_full[s], QPAIR ? 2 * BN * DH * 2 + 2 * TB : 4 * BN * DH * 2 + TB);   // k / v boxes are DH wide
           for (int w = 0; w < (QPAIR ? 1 : 2); ++w) {
-            tma_load_3d(st + K_OFF(w), &mk, &B.kv_full[s], qcol, n * BN, smp_of(a0, w));
-            tma_load_3d(st + V_OFF(w), &mv, &B.kv_full[s], qcol, n * BN, smp_of(a0, w));
+            tma_load_3d(st + K_OFF(w), &mk, &B.kv_full[s], qcol, (kb0 + n) * BN, smp_of(a0, w));
+            tma_load_3d(st + V_OFF(w), &mv, &B.kv_full[s], qcol, (kb0 + n) * BN, smp_of(a0, w));
           }
-          for (int w = 0; w < (QPAIR ? 2 : 1); ++w) tma_load_3d(st + B_OFF(w), &mb, &B.kv_full[s], n * BN, row_of(m0, w), head);
+          for (int w = 0; w < (QPAIR ? 2 : 1); ++w) tma_load_3d(st + B_OFF(w), &mb, &B.kv_full[s], (kb0 + n) * BN, row_of(m0, w), bpl_of(a0, head));
           TR(0, g);
         }
       }
@@ -207,13 +227,15 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
     const uint32_t xg = su + O_X + w * XG;
     float m_i = -INFINITY, l_i = 0.f;
+    int kb0 = 0;                                                           // the item's first key block (its chunk)
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
       const int s = G % ST;
       if (n == 0) {
         m_i = -INFINITY; l_i = 0.f;
-        if (r == 0) {                                                      // this item's g tile into the (drained) staging buffer
-          int a0, m0, head; item_of(li, a0, m0, head);
+        int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+        kb0 = sp * nb;
+        if (!KSPLIT && r == 0) {                                           // this item's g tile into the (drained) staging buffer
           tma_store_wait_read0();
           mbar_expect_tx(&B.g_full[w], QM * DH * 2);
           tma_load_3d(xg, &mg, &B.g_full[w], head * DH, row_of(m0, w), smp_of(a0, w));
@@ -240,7 +262,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         }
       }
       if (G >= 1) { tc_fence_before(); }
-      if (const int kv = L - n * BN; kv < BN) {                            // the last block's keys past L (kv is a multiple of 8)
+      if (const int kv = L - (kb0 + n) * BN; kv < BN) {                            // the last block's keys past L (kv is a multiple of 8)
 #pragma unroll
         for (int j = 0; j < BN / 2; ++j) if (2 * j >= kv) t[j] = mk2(-INFINITY, -INFINITY);
       }
@@ -304,7 +326,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (w == 1 && r == 0) TR(7, G);
       if (n == nb - 1) {
         // ---- epilogue of the item: o = sigmoid(g) acc / l, bf16, over q
-        int a0, m0, head; item_of(li, a0, m0, head);
+        int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
         mbar_wait(&B.p_free[w][PDB ? (G & 1) : 0], PDB ? ((G >> 1) & 1) : (G & 1));
         tc_fence_after();
         const float inv = 1.f / l_i;
@@ -315,6 +337,30 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.o_free[w]);
+#if KSPLIT
+        {                                                                  // the chunk's partial: o / l (fp32) and its LSE (log2 units)
+          const int trow = row_of(m0, w), z = sp * A + smp_of(a0, w);
+          const uint32_t xa = su + O_X + w * (XA + XB), xb = xa + XA;
+          if (r == 0) tma_store_wait_read0();                              // the previous item's store has left the staging buffer
+          named_bar_sync(1 + w, 128);
+#pragma unroll
+          for (int q = 0; q < DH / 4; ++q) {
+            const uint4 u = make_uint4(__float_as_uint(__uint_as_float(ov[4 * q]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 1]) * inv),
+                                       __float_as_uint(__uint_as_float(ov[4 * q + 2]) * inv), __float_as_uint(__uint_as_float(ov[4 * q + 3]) * inv));
+            if (DH == 16) sts128(xb + sw64(r, q), u);                       // 16 columns: the 64-B box alone
+            else if (q < 8) sts128(xa + sw128(r, q), u); else sts128(xb + sw64(r, q - 8), u);
+          }
+          fence_proxy_async();
+          named_bar_sync(1 + w, 128);
+          if (r == 0 && live(a0, m0, w)) {
+            if (DH == 16) tma_store_3d(&mpb, xb, head * DH, trow, z);
+            else tma_store_3d(&mpa, xa, head * DH, trow, z);
+            if (DH > 32) tma_store_3d(&mpb, xb, head * DH + 32, trow, z);
+            tma_store_commit();
+          }
+          if (live(a0, m0, w) && trow + (int)r < L) LSEP[((size_t)z * NHEAD + head) * L + trow + r] = m_i + __log2f(l_i);
+        }
+#else
         mbar_wait(&B.g_full[w], li & 1);
 #pragma unroll
         for (int q = 0; q < DH / 8; ++q) {                                 // 8 channels per 16-byte chunk of this thread's row
@@ -336,6 +382,7 @@ augattn_inf_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           tma_store_3d(&mo, xg, head * DH, row_of(m0, w), smp_of(a0, w));
           tma_store_commit();
         }
+#endif
       }
     }
     if (r == 0) tma_store_wait0();

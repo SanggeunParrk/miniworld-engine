@@ -386,11 +386,8 @@ def forward(
             # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
             O, og, LSE = core.apb_forward_gated(qkvg, bias, L, H, D)
         else:
-            O, LSE = core.apb_forward(
-                qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W], bias, L, H, D
-            )
-            og = x.new_empty((L, W))
-            rows.ext().gate_rows(O, qkvg, og)
+            # attn_fwd2 (+ the key split's combine) and the gate: O, LSE, og = sigmoid(g) O
+            O, LSE, og = core.apb_forward_og(qkvg, bias, L, H, D)
         y = y.addmm_(og, wo.t()).view(
             1, L, D
         )  # in place onto the residual seed: no copy of x into the output

@@ -628,12 +628,46 @@ def apb_width(heads: int, d: int = 384) -> int:
     return heads * APB_GEOMETRY[(heads, d)][0]
 
 
-def _apb_defs(heads: int, qpair: bool, d: int = 384):
+def _apb_defs(heads: int, qpair: bool, d: int = 384, ksplit: bool = False):
     dhp, dreal = APB_GEOMETRY[(heads, d)]
     defs = (("QPAIR=1",) if qpair else ()) + (f"NHEAD={heads}",)
     if dhp != 48 or dreal != 48:
         defs += (f"DHP={dhp}", f"RSQDV={dreal**-0.5!r}f")
-    return defs
+    return defs + (("KSPLIT=1",) if ksplit else ())
+
+
+#: most chunks a work item's keys are split into (``apb_rows`` ksplit_combine's NSMAX)
+KSPLIT_MAX = 16
+
+
+def apb_ksplit(L: int, heads: int, d: int = 384, nsm: int = 148) -> int:
+    """Key chunks per work item of the forward / inference cores at (L, heads): a function of the layout and L only (never of
+    the batch, so a batch of B samples is bitwise B single-sample calls). ``settings.apb_b200_ksplit`` overrides it (1: the
+    unsplit cores). The work items of one sample are (heads x query-tile pairs); a split into ns chunks makes ns times as many,
+    each 1 / ns as long, so the core takes ~ waves(ns) / ns of the unsplit time, waves = ceil(items ns / ``nsm``). The choice is
+    the smallest ns (a divisor of the key blocks ceil(L / 64), each item keeping at least two) that minimises it: e.g. 8 heads at
+    L768 (24 items) ns 6, 16 heads at L768 (48) ns 3, 16 heads at L1536 (96) ns 3 (two waves of a third each)."""
+    nbt = -(-L // 64)
+    forced = settings.current().apb_b200_ksplit
+    if forced is not None:
+        if forced < 1 or forced > KSPLIT_MAX or nbt % forced:
+            raise ValueError(f"apb_b200_ksplit={forced} must divide the {nbt} key blocks of L={L} (at most {KSPLIT_MAX})")
+        return int(forced)
+    base = ((-(-L // 128) + 1) // 2) * heads
+    best, best_cost = 1, -(-base // nsm)
+    for ns in range(2, KSPLIT_MAX + 1):
+        if nbt % ns or nbt // ns < 2:
+            continue
+        cost = -(-base * ns // nsm) / ns
+        if cost < best_cost - 1e-9:
+            best, best_cost = ns, cost
+    return best
+
+
+def _rows_ext():
+    from ..apb import ext
+
+    return ext()
 
 
 _apb_runs: dict = {}
@@ -658,35 +692,51 @@ def _tmn(t, dims, stride_bytes, box, **kw):
 
 
 class ApbInferenceCore:
-    """AttentionPairBias's inference core: ``qkvg`` [L, 4 W] bf16 (q | k | v | g, W = ``apb_width(heads)``, logits pre-scaled into
-    exp2 units), the head-major bias [heads, L, L] bf16 (exp2 units, masked keys very negative); sigmoid(g) * o written over q."""
+    """AttentionPairBias's inference core: ``qkvg`` [S L, 4 W] bf16 (q | k | v | g, W = ``apb_width(heads)``, logits pre-scaled
+    into exp2 units), the head-major bias [S heads, L, L] bf16 (exp2 units, masked keys very negative); sigmoid(g) * o written
+    over q. With a key split (``apb_ksplit``) the core leaves per-chunk partials and ``ksplit_combine`` gates them over q."""
 
     def __init__(self, device_index: int, heads: int = 8, d: int = 384):
         self.heads, self.d, self.dhp = heads, d, APB_GEOMETRY[(heads, d)][0]
-        self.k = _sm100_kernel(
-            "attn_inf",
-            "augattn_inf_sm100",
-            device_index,
-            defs=_apb_defs(heads, True, d),
-        )
+        self.dev = device_index
         self.nsm = num_sms(device_index)
 
-    def _bind(self, qkvg, bias, L):
+    def _kernel(self, ksplit: bool):
+        return _sm100_kernel(
+            "attn_inf",
+            "augattn_inf_sm100",
+            self.dev,
+            defs=_apb_defs(self.heads, True, self.d, ksplit),
+        )
+
+    def _bind(self, qkvg, bias, L, S, ns, op, lp):
         W, es, H_, dh = qkvg.shape[1], qkvg.element_size(), self.heads, self.dhp
         Dm = W // 4
         q, k, v, g = (qkvg[:, i * Dm : (i + 1) * Dm] for i in range(4))
-        t3 = lambda t, rows: _tmn(t, [Dm, L, 1], [W * es, L * W * es], [dh, rows, 1])  # noqa: E731
+        t3 = lambda t, rows: _tmn(t, [Dm, L, S], [W * es, L * W * es], [dh, rows, 1])  # noqa: E731
         mq, mk, mv, mg = t3(q, 128), t3(k, 64), t3(v, 64), t3(g, 128)
-        mb = _tmn(bias, [L, L, H_], [L * es, L * L * es], [64, 128, 1])
-        grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * H_), 1, 1)
-        return self.k.bind(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), 1)
-
-    def __call__(self, qkvg, bias):
-        L = qkvg.shape[0]
-        assert (
-            qkvg.shape[1] == 4 * apb_width(self.heads, self.d)
-            and bias.shape[0] == self.heads
+        mb = _tmn(bias, [L, L, S * H_], [L * es, L * L * es], [64, 128, 1])
+        grid = (min(self.nsm, ((-(-L // 128) + 1) // 2) * H_ * ns * S), 1, 1)
+        if ns == 1:
+            return self._kernel(False).bind(grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), int(S))
+        f32 = dict(dtype="f32")
+        dims, st = [Dm, L, ns * S], [Dm * 4, L * Dm * 4]
+        mpa = _tmn(op, dims, st, [32, 128, 1], swizzle=128, **f32)
+        mpb = _tmn(op, dims, st, [16, 128, 1], swizzle=64, **f32)
+        return self._kernel(True).bind(
+            grid, (384, 1, 1), mq, mk, mv, mb, mg, mq, int(L), int(S), mpa, mpb, lp, int(ns)
         )
+
+    def __call__(self, qkvg, bias, L: int | None = None):
+        L = qkvg.shape[0] if L is None else L
+        S = qkvg.shape[0] // L
+        W = apb_width(self.heads, self.d)
+        assert qkvg.shape[1] == 4 * W and bias.shape[0] == S * self.heads and S * L == qkvg.shape[0]
+        ns = apb_ksplit(L, self.heads, self.d, self.nsm)
+        op = lp = None
+        if ns > 1:
+            op = torch.empty(ns, S * L, W, device=qkvg.device, dtype=torch.float32)
+            lp = torch.empty(ns, S, self.heads, L, device=qkvg.device, dtype=torch.float32)
         _apb_bound(
             (
                 "inf",
@@ -696,9 +746,15 @@ class ApbInferenceCore:
                 qkvg.data_ptr(),
                 bias.data_ptr(),
                 L,
+                S,
+                ns,
+                None if op is None else op.data_ptr(),
+                None if lp is None else lp.data_ptr(),
             ),
-            lambda: self._bind(qkvg, bias, L),
+            lambda: self._bind(qkvg, bias, L, S, ns, op, lp),
         )()
+        if ns > 1:
+            _rows_ext().ksplit_combine(op, lp, qkvg, None, None, None, L, self.heads, self.dhp)
         return qkvg
 
 
@@ -737,6 +793,46 @@ def apb_forward(q, k, v, bias, L, heads: int = 8, d: int = 384):
     )
     _apb_bound(key, build)()
     return O, LSE
+
+
+def apb_forward_og(qkvg, bias, L, heads: int = 8, d: int = 384):
+    """The training forward with the gate: ``qkvg`` [S L, 4 W] bf16 (q | k | v | g, natural units), bias [S heads, L, L] bf16
+    -> O [S L, W] fp32, LSE [S heads, L] (log2), og = sigmoid(g) O [S L, W] bf16. Unsplit (``apb_ksplit`` 1): ``attn_fwd2``
+    then ``gate_rows``; split: ``attn_fwd2 -DKSPLIT`` (per-chunk partials) then ``ksplit_combine`` (O, LSE and og in one pass)."""
+    dev = _index(qkvg)
+    dh, W = APB_GEOMETRY[(heads, d)][0], apb_width(heads, d)
+    M = qkvg.shape[0]
+    S = M // L
+    q, k, v = qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 2 * W : 3 * W]
+    ns = apb_ksplit(L, heads, d, num_sms(dev))
+    og = torch.empty(M, W, device=qkvg.device, dtype=torch.bfloat16)
+    if ns == 1:
+        O, LSE = apb_forward(q, k, v, bias, L, heads, d)
+        _rows_ext().gate_rows(O, qkvg, og)
+        return O, LSE, og
+    OP = torch.empty(ns, M, W, device=qkvg.device, dtype=torch.float32)
+    LP = torch.empty(ns, S, heads, L, device=qkvg.device, dtype=torch.float32)
+
+    def build():
+        maps = (
+            _tmn(q, [W, M], _rs(q), [dh, 128]),
+            _tmn(k, [W, M], _rs(k), [dh, 64]),
+            _tmn(v, [W, M], _rs(v), [dh, 64]),
+            _tmn(bias, [L, S * heads * L], L * 2, [64, 128]),
+            _tmn(OP, [W, ns * M], W * 4, [32, 128], swizzle=128, dtype="f32"),
+            _tmn(OP, [W, ns * M], W * 4, [16, 128], swizzle=64, dtype="f32"),
+        )
+        grid = _grid(((L // 128 + 1) // 2) * heads * ns * S, dev)
+        return _sm100_kernel(
+            "attn_fwd2", "augattn_fwd2_sm100", dev, defs=_apb_defs(heads, True, d, True)
+        ).bind(grid, (384, 1, 1), *maps, OP, LP, int(L), int(S), int(ns))
+
+    key = ("fwd_ks", heads, d, dev, L, S, ns, *(t.data_ptr() for t in (qkvg, bias, OP, LP)))
+    _apb_bound(key, build)()
+    O = torch.empty(M, W, device=qkvg.device, dtype=torch.float32)
+    LSE = torch.empty(S * heads, L, device=qkvg.device, dtype=torch.float32)
+    _rows_ext().ksplit_combine(OP, LP, qkvg, O, LSE, og, L, heads, dh)
+    return O, LSE, og
 
 
 def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
@@ -845,6 +941,8 @@ __all__ = [
     "GatedInferenceCore",
     "apb_backward",
     "apb_forward",
+    "apb_forward_og",
+    "apb_ksplit",
     "apb_width",
     "augmented_attention_bf16_sm100",
     "available",
