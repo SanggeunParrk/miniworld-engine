@@ -136,6 +136,30 @@ than cuBLAS (71 vs 83 us at L768), the epilogue runs with both warpgroups off th
 ring. The CTA-pair bias gradient (`dpbx2_sm100`) has no H100 form (no 2-CTA MMA; a cluster can only multicast the key tile, which
 does not lower the per-SM intake that bounds `dpb2`).
 
+## Per-augmentation pair bias (training, 2026-10-20)
+
+`block(single [1, A, L, d], cond, pair [A, L, L, 128])` (A > 1) or `bias=` [A, H, L, L]: every sample attends with its own
+`softmax(bias_a)`, so nothing is shared across the samples (`pvx` / `dpb2` assume one P per block and are not used). Served by
+`bias_only_dit_train.block_psb` (bf16 and fp32/TF32, H100, L a multiple of 128 up to 768, key mask [1, L] or [A, L], every head layout);
+other calls keep the module's PyTorch composition. The inference runner is unchanged.
+
+**Layout.** Bias, P and dbias are head-major `[H, A, L, L]`, natural logits (the token DiT's `pair_biases` uses the same layout but
+log2 units). `pair_bias_all(blocks, pair)` with `pair` [A, L, L, 128] returns `[A, H, L, L]` permuted views of one head-major buffer per
+block (one LayerNorm + one GEMM for all blocks, bf16 and fp32); the block reads that buffer without a copy and writes its bias gradient into
+the same slot of the hoist's gradient buffer.
+
+| piece | file | note |
+|---|---|---|
+| softmax with per-sample mask / scale | `bias_only_dit_rows.cu`, `bias_only_dit_f32_rows.cu` `softmax_t` | `samples`, `scale`, optional P^T; the shared path is bit-identical |
+| attention core bf16 | `bo_psb.cu` `psb_fwd` / `psb_bwd` | mma.sync, bias tiles by cp.async; recompute (default): the forward keeps (mc, 1/sum) per row, the backward rebuilds P with the forward's arithmetic; `bias_only_dit_psb_core="stored"` writes P, `"cublas"` is the v0 core |
+| attention core fp32 | `bo_psb32.cu` | TF32 mma.sync, recompute form, forward up to L 512 |
+| hoist backward | `bo_hoist_bwd.cu` | d LN0, LN backward and dW' in one pass (bf16, <= 192 bias rows); `bias_only_dit_hoist_bwd_fused` |
+
+Numbers, memory, ncu and the rejected list: [h100_bias_only_dit_per_aug_bias_20261020.md](../../../records/h100_bias_only_dit_per_aug_bias_20261020.md)
+(bf16 A = 48, L 384, 12 blocks: PyTorch compiled 102.1 ms, v1 36.9 ms; fp32 106.0 vs 82.7 ms). The attention kernels reach 34 % (forward) and
+58 % (backward) of DRAM peak, the fused hoist backward 32 %: not SoL90. Tests: `tests/gpu/sm90/test_bias_only_dit_psb_gpu.py`.
+The conditioning width is read off the block's weights; the training row kernels (cond LayerNorm and its backward, unfold, finalize) are templated on it and serve 384 and 768 on H100 (`KERNEL_D_CONDS`), another width keeps the PyTorch composition.
+
 ## What was tried and not kept
 
 | attempt | result |

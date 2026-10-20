@@ -30,7 +30,7 @@
 namespace {
 using namespace tdr;
 
-constexpr int D = 768, DC = 384, NCC = 3, WPB = 8, RPB2 = 4;
+constexpr int D = 768, WPB = 8, RPB2 = 4;   // the conditioning width is a template parameter (NCC chunks of 128 per row: 384 or 768)
 
 __device__ __forceinline__ float sg(float v) { return 1.f / (1.f + __expf(-v)); }
 __device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
@@ -128,8 +128,10 @@ __device__ __forceinline__ void block_partial_smem(float4 (&acc)[RPB2][D / 4], f
 }
 
 // ------------------------------------------------------------------------------------------------------------- forward
+template <int NCC>
 __global__ void __launch_bounds__(WPB * 32, 2) cond_ln_k(const float* __restrict__ C, float* __restrict__ CHAT,
     float2* __restrict__ CST, long M, float eps) {
+  constexpr int DC = NCC * 128;
   ROWS_BEGIN
   for (long r = wid; r < M; r += nw) {
     float4 c[NCC];
@@ -367,8 +369,10 @@ __global__ void __launch_bounds__(256, 2) adaln_a_bwd_k(const float* __restrict_
   block_partial2(acc, red, PS1);
 }
 
+template <int NCC>
 __global__ void __launch_bounds__(WPB * 32, 2) cond_bwd_k(const float* __restrict__ DCHAT, const float* __restrict__ DCG,
     const float* __restrict__ C, const float2* __restrict__ CST, float* __restrict__ DCO, long M) {
+  constexpr int DC = NCC * 128;
   ROWS_BEGIN
   for (long r = wid; r < M; r += nw) {
     float4 dch[NCC], ch[NCC], dcg[NCC];
@@ -501,13 +505,16 @@ __global__ void __launch_bounds__(256, 2) softmax_rows_k(const float* __restrict
 // order: the same bits)
 template <int CPL>
 __device__ __forceinline__ void softmax_row2(const float* __restrict__ b0, const float* __restrict__ b1, const bool* __restrict__ mask,
-                                             int L, int lane, float4 (&v)[2][CPL]) {
+                                             int L, int lane, float4 (&v)[2][CPL], float scale = 1.f) {
   constexpr float NEG = -3.0e38f;
   const int nch = L / 4;
 #pragma unroll
   for (int r = 0; r < 2; ++r)
 #pragma unroll
-    for (int c = 0; c < CPL; ++c) v[r][c] = lane + 32 * c < nch ? ld4((r ? b1 : b0) + (lane + 32 * c) * 4) : zero4();
+    for (int c = 0; c < CPL; ++c) {
+      v[r][c] = lane + 32 * c < nch ? ld4((r ? b1 : b0) + (lane + 32 * c) * 4) : zero4();
+      if (scale != 1.f) v[r][c] = make_float4(v[r][c].x * scale, v[r][c].y * scale, v[r][c].z * scale, v[r][c].w * scale);   // logits in log2 units
+    }
   float mx[2] = {NEG, NEG};
 #pragma unroll
   for (int c = 0; c < CPL; ++c) {
@@ -558,17 +565,19 @@ __device__ __forceinline__ void softmax_row2(const float* __restrict__ b0, const
 constexpr int SR = 16;
 template <int CPL>
 __global__ void __launch_bounds__(256, 2) softmax_t_k(const float* __restrict__ BIAS, float* P, float* __restrict__ PT,
-    const bool* __restrict__ MASK, int L) {
+    const bool* __restrict__ MASK_ALL, int L, int A, long mask_stride, float scale) {
   extern __shared__ float tile[];
   const int pitch = L + 4, lane = threadIdx.x % 32, warp = threadIdx.x / 32;
   const long r0 = (long)blockIdx.x * SR;
   const long h = r0 / L;
   const int i0 = (int)(r0 - h * L);
+  // per-sample bias ([H, A, L, L]: h is the (head, sample) index): the key mask of sample h % A when mask_stride is L
+  const bool* __restrict__ MASK = MASK_ALL ? MASK_ALL + (h % A) * mask_stride : nullptr;
   {
     const int rr = 2 * warp;
     const long row = r0 + rr;
     float4 v[2][CPL];
-    softmax_row2<CPL>(BIAS + row * L, BIAS + (row + 1) * L, MASK, L, lane, v);
+    softmax_row2<CPL>(BIAS + row * L, BIAS + (row + 1) * L, MASK, L, lane, v, scale);
 #pragma unroll
     for (int r = 0; r < 2; ++r)
 #pragma unroll
@@ -576,10 +585,11 @@ __global__ void __launch_bounds__(256, 2) softmax_t_k(const float* __restrict__ 
         const int ch = lane + 32 * c;
         if (ch < L / 4) {
           st4(P + (row + r) * L + ch * 4, v[r][c]);
-          st4(tile + (rr + r) * pitch + ch * 4, v[r][c]);
+          if (PT) st4(tile + (rr + r) * pitch + ch * 4, v[r][c]);
         }
       }
   }
+  if (!PT) return;                                              // P only
   __syncthreads();
   for (int idx = threadIdx.x; idx < (SR / 4) * L; idx += blockDim.x) {
     const int j = idx / (SR / 4), c = idx % (SR / 4);
@@ -1069,9 +1079,10 @@ const bool* mask_ptr(const c10::optional<at::Tensor>& mask, int64_t L, const cha
 void cond_ln(at::Tensor c, at::Tensor chat, at::Tensor cst, double eps) {
   const int64_t M = c.size(0);
   f32c(c, "c"); f32c(chat, "chat"); f32c(cst, "cst");
-  TORCH_CHECK(c.size(1) == DC && chat.sizes() == c.sizes() && cst.numel() == 2 * M, "cond_ln: [M, 384], stats [M, 2]");
+  TORCH_CHECK((c.size(1) == 384 || c.size(1) == 768) && chat.sizes() == c.sizes() && cst.numel() == 2 * M, "cond_ln: [M, 384 or 768], stats [M, 2]");
   const at::cuda::CUDAGuard gd(c.device());
-  cond_ln_k<<<grid(cond_ln_k, M, WPB, 256), 256, 0, S()>>>(CP<float>(c), P<float>(chat), P<float2>(cst), M, (float)eps);
+  if (c.size(1) == 384) cond_ln_k<3><<<grid(cond_ln_k<3>, M, WPB, 256), 256, 0, S()>>>(CP<float>(c), P<float>(chat), P<float2>(cst), M, (float)eps);
+  else cond_ln_k<6><<<grid(cond_ln_k<6>, M, WPB, 256), 256, 0, S()>>>(CP<float>(c), P<float>(chat), P<float2>(cst), M, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1162,10 +1173,10 @@ int64_t adaln_a_bwd(at::Tensor dxa, at::Tensor x, at::Tensor xst, at::Tensor G, 
 void cond_bwd(at::Tensor dchat, at::Tensor dcg, at::Tensor c, at::Tensor cst, at::Tensor dc) {
   const int64_t M = dchat.size(0);
   f32c(dchat, "dchat"); f32c(dcg, "dcg"); f32c(c, "c"); f32c(cst, "cst"); f32c(dc, "dc");
-  TORCH_CHECK(c.size(1) == DC && dchat.sizes() == c.sizes() && dcg.sizes() == c.sizes() && dc.sizes() == c.sizes(), "cond_bwd: [M, 384]");
+  TORCH_CHECK((c.size(1) == 384 || c.size(1) == 768) && dchat.sizes() == c.sizes() && dcg.sizes() == c.sizes() && dc.sizes() == c.sizes(), "cond_bwd: [M, 384 or 768]");
   const at::cuda::CUDAGuard gd(dchat.device());
-  cond_bwd_k<<<grid(cond_bwd_k, M, WPB, 256), 256, 0, S()>>>(CP<float>(dchat), CP<float>(dcg), CP<float>(c), CP<float2>(cst),
-                                                             P<float>(dc), M);
+  if (c.size(1) == 384) cond_bwd_k<3><<<grid(cond_bwd_k<3>, M, WPB, 256), 256, 0, S()>>>(CP<float>(dchat), CP<float>(dcg), CP<float>(c), CP<float2>(cst), P<float>(dc), M);
+  else cond_bwd_k<6><<<grid(cond_bwd_k<6>, M, WPB, 256), 256, 0, S()>>>(CP<float>(dchat), CP<float>(dcg), CP<float>(c), CP<float2>(cst), P<float>(dc), M);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1219,22 +1230,38 @@ void softmax_rows(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> mask)
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void softmax_t(at::Tensor bias, at::Tensor p, at::Tensor pt, c10::optional<at::Tensor> mask) {
-  f32c(bias, "bias"); f32c(p, "p"); f32c(pt, "pt");
-  TORCH_CHECK(bias.dim() == 2 && p.sizes() == bias.sizes() && pt.sizes() == bias.sizes() && pt.data_ptr() != bias.data_ptr(),
-              "softmax_t: p, pt like bias [H L, L] (p may be bias, pt may not)");
+void softmax_t(at::Tensor bias, at::Tensor p, c10::optional<at::Tensor> pt_opt, c10::optional<at::Tensor> mask, int64_t samples,
+               double scale) {
+  f32c(bias, "bias"); f32c(p, "p");
+  TORCH_CHECK(bias.dim() == 2 && p.sizes() == bias.sizes(), "softmax_t: p like bias [H L, L] (p may be bias)");
+  float* pt = nullptr;
+  if (pt_opt.has_value()) {
+    f32c(*pt_opt, "pt");
+    TORCH_CHECK(pt_opt->sizes() == bias.sizes() && pt_opt->data_ptr() != bias.data_ptr(), "softmax_t: pt like bias (not bias)");
+    pt = P<float>(*pt_opt);
+  }
   const int64_t R = bias.size(0), L = bias.size(1);
   TORCH_CHECK(L % 32 == 0 && L <= 1024 && R % L == 0, "softmax_t: L a multiple of 32, at most 1024; [H L, L]");
-  const bool* mk = mask_ptr(mask, L, "softmax_t");
+  TORCH_CHECK(samples >= 1 && (R / L) % samples == 0, "softmax_t: samples divide the (head, sample) count");
+  const bool* mk = nullptr;
+  int64_t mstride = 0;
+  if (mask.has_value()) {
+    TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && (mask->numel() == L || mask->numel() == samples * L),
+                "softmax_t: bool mask [L] or [samples, L]");
+    mk = mask->data_ptr<bool>();
+    mstride = mask->numel() == L ? 0 : L;
+  }
   const at::cuda::CUDAGuard gd(bias.device());
-  const size_t smem = SR * (L + 4) * 4;
+  const size_t smem = pt ? SR * (L + 4) * 4 : 0;
   static bool attr = [] {
     return cudaFuncSetAttribute(softmax_t_k<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, SR * 1028 * 4) == cudaSuccess
         && cudaFuncSetAttribute(softmax_t_k<8>, cudaFuncAttributeMaxDynamicSharedMemorySize, SR * 1028 * 4) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "softmax_t: shared memory attribute");
-  if (L <= 512) softmax_t_k<4><<<(unsigned)(R / SR), 256, smem, S()>>>(CP<float>(bias), P<float>(p), P<float>(pt), mk, (int)L);
-  else softmax_t_k<8><<<(unsigned)(R / SR), 256, smem, S()>>>(CP<float>(bias), P<float>(p), P<float>(pt), mk, (int)L);
+  const int A = (int)samples;
+  const float sc = (float)scale;
+  if (L <= 512) softmax_t_k<4><<<(unsigned)(R / SR), 256, smem, S()>>>(CP<float>(bias), P<float>(p), pt, mk, (int)L, A, mstride, sc);
+  else softmax_t_k<8><<<(unsigned)(R / SR), 256, smem, S()>>>(CP<float>(bias), P<float>(p), pt, mk, (int)L, A, mstride, sc);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1394,8 +1421,8 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
     out.emplace_back(n, (int64_t)a.numRegs, (int64_t)a.localSizeBytes);
   };
 #define FA(...) add(#__VA_ARGS__, (const void*)__VA_ARGS__)
-  FA(cond_ln_k); FA(adaln_a_k); FA(res_adaln_b_k<2>); FA(res_adaln_b_k<3>); FA(res_c_k); FA(res_c_bwd_k); FA(res_adaln_b_bwd_k);
-  FA(adaln_a_bwd_k); FA(cond_bwd_k); FA(gate_bwd_k<6>); FA(gate_bwd_k<8>); FA(swiglu_k); FA(swiglu_bwd_k); FA(softmax_rows_k<4>);
+  FA(cond_ln_k<3>); FA(cond_ln_k<6>); FA(adaln_a_k); FA(res_adaln_b_k<2>); FA(res_adaln_b_k<3>); FA(res_c_k); FA(res_c_bwd_k); FA(res_adaln_b_bwd_k);
+  FA(adaln_a_bwd_k); FA(cond_bwd_k<3>); FA(cond_bwd_k<6>); FA(gate_bwd_k<6>); FA(gate_bwd_k<8>); FA(swiglu_k); FA(swiglu_bwd_k); FA(softmax_rows_k<4>);
   FA(softmax_rows_k<8>); FA(softmax_rows_k<16>); FA(softmax_t_k<4>); FA(softmax_t_k<8>); FA(pair_bias_k<12>); FA(pair_bias_k<16>);
   FA(pair_bias_k<24>); FA(pair_bias_bwd_k<12>); FA(pair_bias_bwd_k<16>); FA(pair_bias_bwd_k<24>);
   FA(pair_bias_tc_k<12, 1>); FA(pair_bias_tc_k<16, 1>); FA(pair_bias_tc_k<24, 1>); FA(pair_bias_tc_k<12, 3>); FA(pair_bias_tc_k<16, 3>);
@@ -1425,7 +1452,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swiglu_cuda", &swiglu);
   m.def("swiglu_bwd_cuda", &swiglu_bwd);
   m.def("softmax_rows_cuda", &softmax_rows);
-  m.def("softmax_t_cuda", &softmax_t);
+  m.def("softmax_t_cuda", &softmax_t, pybind11::arg("bias"), pybind11::arg("p"), pybind11::arg("pt") = pybind11::none(), pybind11::arg("mask") = pybind11::none(), pybind11::arg("samples") = 1, pybind11::arg("scale") = 1.0);
   m.def("pair_bias_cuda", &pair_bias);
   m.def("pair_bias_tok_cuda", &pair_bias_tok);
   m.def("pair_bias_bwd_cuda", &pair_bias_bwd);

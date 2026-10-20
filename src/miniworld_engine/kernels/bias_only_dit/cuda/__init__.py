@@ -87,6 +87,83 @@ def h100_ext():
 
 
 @functools.lru_cache(maxsize=None)
+def psb_ext():
+    """``bo_psb.cu``: the attention core on a pair bias of its own per sample (single-pass mma.sync forward / backward). Built on first use."""
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        gencodes,
+        host_flags,
+        load_extension,
+    )
+
+    ensure_cuda_home()
+    return load_extension(
+        name="bias_only_dit_psb_sm90a",
+        sources=[str(_dir / "bo_psb.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            *gencodes("90a"),
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+@functools.lru_cache(maxsize=None)
+def psb32_ext():
+    """``bo_psb32.cu``: the fp32 (TF32 tensor cores) attention core on a pair bias of its own per sample, recompute form. Built on first use."""
+    from miniworld_engine.kernels._nvcc import (
+        ensure_cuda_home,
+        gencodes,
+        host_flags,
+        load_extension,
+    )
+
+    ensure_cuda_home()
+    return load_extension(
+        name="bias_only_dit_psb32_sm90a",
+        sources=[str(_dir / "bo_psb32.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+#: Longest L of the fp32 per-sample forward (v of the (head, sample) stays resident in shared memory)
+PSB32_MAX_L = 512
+
+
+def psb32_fwd(bias, stats, mask, vg, og, samples, heads, dh):
+    """fp32: og = sigmoid(g) (P v) with P = softmax(bias + key mask) on TF32 tensor cores; ``stats`` [H A L, 2] fp32 get (mc, 1 / sum), the
+    backward rebuilds P from them. bias [H A L, L]; vg [A L, 2 H dh]; og [A L, H dh]; mask bool [L] or [A, L] or None."""
+    psb32_ext().psb32_fwd(bias, stats, mask, vg, og, int(samples), int(heads), int(dh))
+
+
+def psb32_bwd(bias, stats, mask, dout, vg, dd, dbias, dvg, samples, heads, dh):
+    """fp32: dV = P^T dO into the v columns of ``dvg`` and dbias = P o (dO v^T - D) into ``dbias`` [H A L, L], P rebuilt from the bias,
+    the forward's statistics and the key mask; dd [A, H, L]."""
+    psb32_ext().psb32_bwd(bias, stats, mask, dout, vg, dd, dbias, dvg, int(samples), int(heads), int(dh))
+
+
+def psb_fwd(bias, p, mask, vg, og, samples, heads, dh, stats=None):
+    """og = sigmoid(g) (P v), P = softmax(bias + key mask). bias [H A L, L] bf16 head-major; vg [A L, 2 H dh] = v | g; og [A L, H dh]; mask
+    bool [L] or [A, L] or None. One pass, bf16. Either P is written to ``p`` (``stats`` None), or ``p`` is None and the row statistics
+    (mc, 1 / sum) go to ``stats`` [H A L, 2] fp32 -- the backward then rebuilds P from the bias (``psb_bwd(..., stats=...)``)."""
+    psb_ext().psb_fwd(bias, p, stats, mask, vg, og, int(samples), int(heads), int(dh))
+
+
+def psb_bwd(p, dout, vg, dd, dbias, dvg, samples, heads, dh, stats=None, mask=None):
+    """dV = P^T dO into the v columns of ``dvg`` and dbias = P o (dO v^T - D) into ``dbias`` [H A L, L]; dd [A, H, L] fp32. One pass.
+    ``stats`` None: ``p`` is P. Else ``p`` is the bias and P is rebuilt from the forward's row statistics (and the key mask)."""
+    psb_ext().psb_bwd(p, stats, mask, dout, vg, dd, dbias, dvg, int(samples), int(heads), int(dh))
+
+
+@functools.lru_cache(maxsize=None)
 def h100_gemm_ext():
     """``bo_gemm_sm90.cu``: Hopper wgmma GEMMs with a row pass in the epilogue -- the one-launch conditioning tables (dispatched), and
     the squeeze + last residual and out-projection gradient + gate backward fusions (measured slower; probes). Built on first use."""
@@ -187,10 +264,14 @@ def softmax_rows(bias, p, mask=None):
     _ext().softmax_rows_cuda(bias, p, mask)
 
 
-def softmax_t(bias, p, pt, mask=None):
+def softmax_t(bias, p, pt=None, mask=None, samples=1, scale=1.0):
     """softmax_rows that also writes pt[h] = p[h]^T (bias, p, pt [16 L, L] bf16; p may be bias, pt may not). bias may also be fp32
-    (the Hopper training logits, not overwritten: p is a separate bf16 buffer)."""
-    _ext().softmax_t_cuda(bias, p, pt, mask)
+    (the Hopper training logits, not overwritten: p is a separate bf16 buffer). ``pt`` None: P only.
+
+    Per-sample bias (the per-augmentation pair bias, head-major [H, A, L, L] as a [H A L, L] matrix): ``samples`` = A, and a bool
+    ``mask`` [A, L] is one key mask per sample ([L]: one for all). ``scale`` multiplies the logits first (ln 2 for logits in log2
+    units: P = softmax(scale bias))."""
+    _ext().softmax_t_cuda(bias, p, pt, mask, int(samples), float(scale))
 
 
 # --------------------------------------------------------------------------------------------------- the core
@@ -1037,6 +1118,10 @@ __all__ = [
     "pick_group",
     "resgate_adaln_rows",
     "resgate_out_rows",
+    "psb32_bwd",
+    "psb32_fwd",
+    "psb_bwd",
+    "psb_fwd",
     "softmax_t",
     "softmax_rows",
     "swiglu_rows",

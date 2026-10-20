@@ -116,6 +116,37 @@ class BiasOnlyDiTBlock(nn.Module):
         self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, d_head=d_head)
         self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=_REF)
 
+    def _psb_candidate(self, single, cond, pair, bias) -> bool:
+        """A pair (or hoisted bias) of its own per sample: ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair] or ``bias``
+        [B, H, L, L], B > 1 (the samples folded into the batch axis, each attending with its own bias). Training on Hopper only
+        (``integrations.bias_only_dit_train.block_psb``)."""
+        if (pair is None and bias is None) or not torch.is_grad_enabled() or self.implementation is _REF:
+            return False
+        if not (single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1):
+            return False
+        src = pair if bias is None else bias
+        if src.ndim != 4 or src.shape[0] != single.shape[1]:
+            return False
+        from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+
+        return bool(single.is_cuda and h100_enabled(single.device) and src.dtype is single.dtype)
+
+    def _forward_psb(self, single, cond, bias, mask):
+        """The fused per-sample-bias block (``bias_only_dit_train.block_psb``) on ``bias`` [B, H, L, L], or None when it does not serve
+        the call. The bias is read as head-major [H, B, L, L]: a hoist's (``pair_bias_all``) is already that buffer, any other layout
+        is copied (differentiably)."""
+        B, L = single.shape[1], single.shape[2]
+        if tuple(bias.shape) != (B, self.attention.n_head, L, L):
+            return None
+        s, c = single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1)
+        from miniworld_engine.integrations.bias_only_dit_hoist import SINK_ATTR
+
+        hb = bias.permute(1, 0, 2, 3)
+        hb = hb if hb.is_contiguous() else hb.contiguous()
+        if not _train.serves_psb(self, s, c, hb, mask):
+            return None
+        return _train.block_psb(self, s, c, hb, mask, getattr(bias, SINK_ATTR, None)).reshape(single.shape)
+
     def forward(
         self,
         single: Float[torch.Tensor, "A B L d_single"],
@@ -129,6 +160,14 @@ class BiasOnlyDiTBlock(nn.Module):
         block's hoisted pair bias (``pair_bias_all``) in place of ``to_bias(ln_pair(pair))``."""
         if bias is None and pair is None:
             raise ValueError("BiasOnlyDiTBlock: pass the pair or the block's precomputed bias")
+        if self._psb_candidate(single, cond, pair, bias):  # a bias of its own per sample (training, Hopper)
+            if bias is None:
+                from miniworld_engine.modules.bias_only_dit.hoist import pair_bias_all
+
+                bias = pair_bias_all([self], pair)[0]  # [B, H, L, L], made once: the reference below reads it too if not served
+            out = self._forward_psb(single, cond, bias, mask)
+            if out is not None:
+                return out
         if _fused.serves(self, single, cond, pair, mask, bias=bias):
             return _fused.update(self, single, cond, pair, mask, bias=bias)
         if _train.serves(self, single, cond, pair, mask, bias=bias):

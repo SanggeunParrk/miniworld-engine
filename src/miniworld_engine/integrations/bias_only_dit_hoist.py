@@ -51,8 +51,10 @@ F32 = torch.float32
 SINK_ATTR = "_bias_only_dit_hoist_sink"
 
 
-def serves(implementation, attns, pair) -> bool:
-    """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller)."""
+def serves(implementation, attns, pair, per_sample=False) -> bool:
+    """The fused hoist serves ``pair`` and the attention modules ``attns`` (eps / head count / no offset checked by the caller).
+    ``per_sample``: ``pair`` is [A, L, L, 128] with A > 1 (a pair of its own per sample, the samples in the batch axis) instead of
+    [1, L, L, 128]."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if not settings.current().bias_only_dit_hoist:
@@ -65,7 +67,7 @@ def serves(implementation, attns, pair) -> bool:
         return False
     if (
         pair.ndim != 4
-        or pair.shape[0] != 1
+        or (pair.shape[0] < 2 if per_sample else pair.shape[0] != 1)
         or pair.shape[1] != pair.shape[2]
         or pair.shape[-1] != DP
         or pair.shape[1] == 0
@@ -134,6 +136,9 @@ def _hoist_bwd(
 
     N, R = dball.shape
     f32 = pair2d.dtype is F32
+    if settings.current().bias_only_dit_hoist_bwd_fused and HK.fused_bwd_served(pair2d, wf):
+        dpair, dwf = HK.hoist_bwd_fused(pair2d, wf, dball, eps)  # one pass over the pair (bo_hoist_bwd.cu)
+        return [dpair, dwf]
     K = HK.operand_cols(pair2d.dtype)
     with _gemms(pair2d.dtype):
         dln = (
@@ -165,11 +170,11 @@ class _Sink:
     time); a gradient that does not sit in its slot (autograd summed it with another, a reentrant checkpoint copied the input) is
     copied in, a missing one is zero."""
 
-    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "r")
+    __slots__ = ("buf", "device", "dtype", "given", "h", "nb", "psb", "r")
 
-    def __init__(self, nb, h, r, dtype, device):
+    def __init__(self, nb, h, r, dtype, device, psb=False):
         self.nb, self.h, self.r, self.dtype, self.device = nb, h, r, dtype, device
-        self.buf, self.given = None, set()
+        self.buf, self.given, self.psb = None, set(), psb
 
     def slot(self, i, dtype, device):
         """Block i's [H, R] slice of the buffer, or None (another dtype / device, or the slot already handed out)."""
@@ -197,7 +202,8 @@ class _Sink:
             s = buf[i * self.h : (i + 1) * self.h]
             if g is None:
                 s.zero_()
-            elif not (
+                continue
+            if not (
                 g.data_ptr() == s.data_ptr()
                 and g.dtype == s.dtype
                 and g.is_contiguous()
@@ -221,13 +227,16 @@ class _Hoist(torch.autograd.Function):
     def forward(ctx, pair, eps, nb, sink, *params):  # params: ln_pair.weight, to_bias.weight of each block
         L, dp = pair.shape[1], pair.shape[-1]
         H = params[1].shape[0]
+        A = pair.shape[0] if sink.psb else 1
         gam, wts, wf = _fold(params, pair.dtype)
         ctx.set_materialize_grads(
             False
         )  # an unused block's bias: None, not a zero tensor
-        ball = _hoist_fwd(pair.reshape(L * L, dp), wf, eps)
+        ball = _hoist_fwd(pair.reshape(A * L * L, dp), wf, eps)
         ctx.save_for_backward(pair, wf, gam, wts)
         ctx.meta = (eps, nb, H, sink, [p.dtype for p in params])
+        if sink.psb:  # per-sample: block b's slice is the head-major [H, A, L, L]
+            return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L) for i in range(nb))
         return tuple(ball[i * H : (i + 1) * H].view(1, H, L, L) for i in range(nb))
 
     @staticmethod
@@ -235,8 +244,9 @@ class _Hoist(torch.autograd.Function):
         pair, wf, gam, wts = ctx.saved_tensors
         eps, nb, H, sink, pdts = ctx.meta
         L, dp = pair.shape[1], pair.shape[-1]
+        R = (pair.shape[0] if sink.psb else 1) * L * L
         dball = sink.take(grads)
-        dpair, dwf = _hoist_bwd(pair.reshape(L * L, dp), wf, dball, eps, _split(L * L))
+        dpair, dwf = _hoist_bwd(pair.reshape(R, dp), wf, dball, eps, _split(R))
         del dball
         dwf = dwf.view(nb, H, dp)
         dW = dwf * gam[:, None, :]  # dW_b = dW'_b diag(g_b)
@@ -272,4 +282,21 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     return tuple(outs)
 
 
-__all__ = ["SINK_ATTR", "pair_bias_all", "serves"]
+def pair_bias_all_psb(attns, pair) -> tuple[torch.Tensor, ...]:
+    """Each attention module's bias [A, H, L, L] for a pair of its own per sample ``pair`` [A, L, L, 128] (A > 1): the ``[A, H, L, L]``
+    view of block b's head-major [H, A, L, L] slice of ONE buffer (one LayerNorm pass and one GEMM for every block); differentiable in
+    the pair and in every ``ln_pair.weight`` / ``to_bias.weight``. The fused per-sample block reads the head-major buffer without a
+    copy and writes its bias gradient into the same slot of the shared gradient buffer. Call ``serves(..., per_sample=True)`` first."""
+    nb, H, A, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[0], pair.shape[1]
+    sink = _Sink(nb, H, A * L * L, pair.dtype, pair.device, psb=True)
+    params = [p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)]
+    outs = _Hoist.apply(pair.contiguous(), float(attns[0].ln_pair.eps), nb, sink, *params)
+    res = []
+    for i, o in enumerate(outs):
+        v = o.permute(1, 0, 2, 3)
+        setattr(v, SINK_ATTR, (sink, i))
+        res.append(v)
+    return tuple(res)
+
+
+__all__ = ["SINK_ATTR", "pair_bias_all", "pair_bias_all_psb", "serves"]
