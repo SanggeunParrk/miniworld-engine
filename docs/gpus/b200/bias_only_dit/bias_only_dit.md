@@ -16,8 +16,9 @@ running max, no rescale.
 ## Scope and dispatch
 
 Both paths run **hand-written CUDA and cuBLAS only** (no Triton, no quack), bf16 -- or fp32 on TF32 tensor cores (an fp32 block:
-fp32 inputs and weights, no CUDA autocast; see [fp32 path](#fp32-path-tf32)) -- B == 1, L a multiple of 128 up to 768, a key
-mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD. Everything else -- other cards, other widths, fp32
+fp32 inputs and weights, no CUDA autocast; see [fp32 path](#fp32-path-tf32)) -- B == 1, L a multiple of 128 up to 768 (bf16: up to
+3072, MiniWorld's long token rungs, [I4](#i4--long-token-rungs-l--768-the-streaming-core-pv_stream_sm100); fp32 stays at 768), a key
+mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD or TRITON. Everything else -- other cards, other widths, fp32
 under autocast or with bf16 weights -- runs the module's PyTorch composition. Each integration's `serves()` is the whole gate.
 
 - **Inference** (no autograd): `BiasOnlyDiTBlock.forward` -> `integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`
@@ -226,6 +227,67 @@ is the token DiT's CUDA `layernorm128_rows`.
 | implementation | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | cuBLAS + CUDA | CUDA |
 | 성능 확인 | △ | △ | △ | △ | △ | △ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+### I4 · long token rungs (L > 768): the streaming core `pv_stream_sm100`
+
+Status (2026-10-20): bf16 inference and training serve L a multiple of 128 up to 3072 at every head layout (before: L <= 768; the
+1024-3072 rungs ran the PyTorch module). `settings.bias_only_dit_stream=0` (read per call) restores the old bound; `b200_max_l` /
+`B200_TMEM_MAX_L` / `B200_MAX_L` in `kernels/bias_only_dit/cuda/__init__.py` hold it. L <= 768 runs exactly what it ran before
+(bit-identical to main 59d910cf in 160 inference / training cells, all four layouts, bf16 and fp32; module timings equal within
+0.2 us, Measurements below).
+
+![Inference past L 768](figures/bias_only_dit_inference_long.svg) <!-- figures/bias_only_dit.json by `python -m miniworld_engine.viz.kernel_flow`; no SVG-to-PNG converter on the B200 box -->
+
+**Why a second core.** I1 keeps the item's P tile [128 i][L j] in tensor memory (L / 2 columns) beside two d_head-column
+accumulators: L <= 768. `kernels/bias_only_dit/cuda/pv_stream_sm100.cu` (`PvStreamCore`; `PvGateCore` hands every L > 768 call to
+it, gated or not, plain or PDL) is the bf16 twin of the fp32 core F1 (`pv_gate_tf32.cu`, which streams P for the same reason): the
+same kernel split, warp roles (0 TMA, 1 MMA, 2 TMEM, 4-7 epilogue), barriers, item order and accumulators double-buffered by item
+parity; what differs is the operand format and the stage geometry. Work item = (head, 128-query tile, group of SG samples), the
+group fastest (consecutive CTAs read the same P tile: the second group's P comes from L2). Per stage: one P chunk [128 i][64 j]
+(K-major A, SW128, 16 KB) and the group's v tiles [64 j][d_head] (one 3-D TMA box [d_head][64][SG], 8 KB per sample at 128-B
+rows); per 16-key step ONE `kind::f16` MMA M 128 x N SG x 64 for the whole group (B = the samples' v tiles side by side, MN-major,
+LBO 8 KB) -- a 48- or 32-wide head computes 16 / 32 unused columns per sample. SG 1-4 (2 SG 64 <= 512 TMEM columns) from a cost
+model (`pick_group_stream`: rounds of items x max(TMA intake for P + SG v tiles, the products)); stages 7 / 5 / 4 / 3 at SG 1-4.
+Epilogue as I1 (packed f32x2 gate, staged tile out by TMA).
+
+**The step past 768.** The three-kernel step (I0) takes one 128-row tile per cluster, so at long L its front and tail run several
+rounds of clusters and lose to the 12-launch step's cuBLAS GEMMs + rows; the runner takes the 12-launch step (I2, I3 and this core)
+for L > 768 whatever `settings.bias_only_dit_inf3_bf16` says. Eight chained blocks (16 x 48, us per block, three-kernel /
+12-launch): L1024 A1 73.0 / 62.3, A5 137.1 / 111.9; L1536 A1 91.3 / 79.6, A5 185.4 / 146.4; L2048 A5 271.9 / 198.8; L2560 A5 358.1 /
+250.1; L3072 A1 166.2 / 139.5, A5 401.2 / 310.3. Kernel durations at L3072 A5 (per-sample conditioning, torch.profiler, us):
+three-kernel front 106.6 / core 132.9 / pair tail 189.8; 12-launch core 117.9, expand + SwiGLU 49.7, v|g / out / squeeze GEMMs 26.1 /
+13.9 / 24.5, table GEMMs 48.1, rows (adaln_in 25.7, resgate_adaln 29.7, resgate_out 17.8, ln_rows 6.0).
+
+**The core alone** (CUDA graph of 20 launches, gated, 16 x 48, us; floor = max(the HBM bytes of P, v, g, a / 7 TB/s, FLOPs / 2.23
+PF/s)):
+
+| L | 1024 | 1536 | 2048 | 2560 | 3072 |
+|---|---|---|---|---|---|
+| S = 1 | 7.8 | 16.2 | 27.3 | 43.5 | 54.1 (floor 45.2: P alone is 302 MB) |
+| S = 5 | 16.6 (SG 3) | 33.7 | 57.1 | 81.7 | 111.0 (floor 53.3) |
+| S = 16 | 41.1 | 75.6 | 121.7 | 188.2 | 265.3 |
+| S = 48 | 97.7 | 197.2 | | | |
+
+Other layouts at L3072 S5: 24 x 32 147.3 (1.5x the heads, so 1.5x the P bytes), 12 x 64 81.7, 16 x 64 115.3. At S = 1 the core
+runs at 83 % of the HBM floor of P; at S = 5 it is bound by each SM's TMA intake (~70-90 GB/s with 6-16 KB boxes: 1.7 MB per item
+at SG 3, two groups per (head, tile)). For reference, at L <= 768 (where it is not used) it measured within -10 / +20 % of I1.
+
+Tried and not kept (round notes; in-process A/B, CUDA graph, us):
+- a TMA box per sample's v tile instead of one 3-D box per stage: 2-6 % slower (L3072 S5 112.8 vs 110.6, A48 L1536 12 x 64 168.2 vs
+  158.1). Kept the 3-D box.
+- two P chunks per stage (128 keys, one 3-D box of 32 KB): fewer stages fit; L3072 S5 110.6 -> 126.8, L2048 S3 34.7 -> 40.3. Deleted.
+- SG 5-8 with one accumulator set (a second MMA per K step for samples 4..SG-1; the products of the next item wait for the
+  epilogue): L3072 S5 111.0 -> 102.4 and L1024 S5 16.6 -> 15.2, but L1536 S5 33.7 -> 39.7 (rounds) and A48 SG 4 -> 6 / 8 197 -> 282 /
+  241 (exposed epilogues, two stages). Deleted.
+
+| (Length, Dimension, dtype) | (1024, 768, bf16) | (1536, 768, bf16) | (2048, 768, bf16) | (2560, 768, bf16) | (3072, 768, bf16) |
+|---|---|---|---|---|---|
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA |
+| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+The long-rung step's other CUDA kernels are I2 (`softmax_rows` already took 3072 keys) and I3 at those row counts, both
+length-free.
 
 ## Training
 
@@ -457,12 +519,35 @@ the d bias it receives carries the stack's bf16 error, while the hoist's own ari
 gradient. The 24-block test therefore bounds each gradient by max(1.1x PyTorch, 1.05x fused per-block) + 1e-4 and the hoist's
 arithmetic on its captured inputs by the parameter dtype's rounding + 1e-4. Tests: `tests/gpu/sm100/test_b200_bias_only_dit_hoist_gpu.py`.
 
+### T8 · long token rungs in training (bf16, L > 768)
+
+The training block serves L up to 3072 in bf16: the forward core (gated) and dV = P^T dO run `pv_stream_sm100` (I4; dV as a PDL
+build behind the fused backward's tail), `softmax_t` writes P and P^T up to 3072 keys (8 / 12 chunks per lane, the 32-row tile up to
+192 KB of shared memory), `bo_pvdpb` declines L > 768 (pv dV is not one of its bodies there), and the rest is length-free: the pair
+bias kernels (T1), dbias (T3: CTA pairs where 256-key tiles divide L, `dpb_sm100` otherwise, e.g. L1152), the rows and the fused
+backward. Measured (eight / four / two chained blocks fwd + bwd in one CUDA graph, bf16-mixed, 16 x 48, us per block; the PyTorch
+module with the same fp32 master parameters under autocast): L1536 A16 2011.7 vs 9635.6 (4.8x), L2048 A8 2140.0 vs 13205.2 (6.2x),
+L3072 A4 3352.7 vs 25783.1 (7.7x). Tests: `tests/gpu/sm100/test_b200_bias_only_dit_long_gpu.py` (every gradient against the fp32
+block within 1.1x the PyTorch bf16 block's error at L1024 / 1152 / 1536 / 3072 x four layouts, five poisoned bitwise steps at L1536,
+a captured step and torch.compile at L2048).
+
+| (Length, Dimension, dtype) | (1024, 768, bf16) | (1536, 768, bf16) | (2048, 768, bf16) | (2560, 768, bf16) | (3072, 768, bf16) |
+|---|---|---|---|---|---|
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA |
+| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ |
+
 ## fp32 path (TF32)
 
-Status (2026-10-06): written, **not yet built or measured on B200** -- the kernels below compile on first use; the tests are
-`tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`. Every head layout of the bf16 path (16 x 48, 24 x 32, 12 x 64,
-16 x 64), the same lengths (L a multiple of 128 up to 768), masks, shared / per-sample conditioning, eager, `torch.compile`
-(the same opaque ops) and CUDA graphs.
+Status (2026-10-20): built (nvcc 13.1 cubins), tested and measured on B200. `tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`:
+700 passed, 13 skipped by design (front CL 6 at 1024 channels) -- every head layout of the bf16 path (16 x 48, 24 x 32, 12 x 64,
+16 x 64), L a multiple of 128 up to 768 (the long rungs are bf16 only), masks, shared / per-sample conditioning, eager,
+`torch.compile` (the same opaque ops) and CUDA graphs, the output and every gradient against fp64 within 1.5x the PyTorch TF32
+block's error + 1e-3, the kernels against fp64, and run-to-run bitwise: per kernel (core, dpb32, dpbx2 TF32), the inference step,
+and since 2026-10-20 the whole training step (ten forward + backward steps at L384 A5 and L768 A48, every layout, a NaN-poisoned
+allocator, every output and gradient bit-identical). The dbias of the fp32 step on B200 is F2 (`dpb32_sm100.cu`, the port of the
+bf16 `dpb_sm100.cu`, or the TF32 build of `dpbx2_sm100.cu` at L768); no TF32 bmm computes dbias on B200 (that form is the Hopper
+path's). Measured: [Measurements (2026-10-20)](#measurements-2026-10-20-long-rungs-fp32-and-main-against-this-change).
 
 **Gate.** `serves()` takes fp32 when single, cond and pair are fp32, the block's weights are fp32 (`to_value.weight`) and CUDA
 autocast is off (under autocast the module path keeps its casts, as before), and `tf32_ready` (a `device_constant`) has built the
@@ -888,6 +973,93 @@ truncation step, 2^-10 (a `kind::tf32` MMA drops the operands' low 13 bits where
 fp32 tests take 1.5x + 3e-3). Kernel tests: the TF32 products (core, dV, dbias) within 3e-3 of fp64 einsum; the exact-fp32 kernels (softmax, pair bias and
 its backward, gate backward) within 1e-5.
 
+## Measurements (2026-10-20): long rungs, fp32, and main against this change
+
+B200 (GPU 6 of node 2, a ~2.3 GB utilisation dummy on the card as on every GPU there, 1000 W cap), torch 2.13.0+cu129, the bias-only
+cubins by the torch-matched nvcc 12.9 as in main (they are built by nvcc 13.1 since this change: bit-identical in the 160 cells,
+and within -0.3 / +0.8 % in an alternating A/B of ten of the rows below -- see "Toolchain"). Method (`probe_chain.py`, outside the checkout): NB `BiasOnlyDiTBlock` calls chained in ONE CUDA graph
+(inference NB = 8, `static_weights`, P hoisted once per pair as a sampler does, the per-call conditioning tables included, key mask
+20 %; training NB = 4 at A = 48, 2-4 at the long rungs, forward + backward of the chain), replayed, us per block, median of rounds.
+bf16-mixed = fp32 master parameters, bf16 activations, CUDA autocast bf16; fp32 = fp32 everything (the PyTorch module with TF32
+GEMMs allowed). "main" = engine main 59d910cf run from an export of it in alternation with this change (3 alternations for bf16,
+medians); past L 768 main runs the PyTorch module. A = 5 shares one conditioning. No other implementation of this block exists.
+
+### bf16-mixed · Inference · main against this change (L <= 768)
+
+| (L, A) | 16 x 48 main | 16 x 48 this change |
+|---|---|---|
+| 128, 1 | 53.1 | 53.2 |
+| 128, 5 | 54.3 | 54.3 |
+| 384, 1 | 56.8 | 56.8 |
+| 384, 5 | 61.6 | 61.5 |
+| 768, 1 | 64.2 | 64.2 |
+| 768, 5 | 94.8 | 94.8 |
+
+L768 A5, other layouts (main / this change): 24 x 32 95.5 / 95.4, 12 x 64 92.2 / 92.2, 16 x 64 100.3 / 100.3.
+
+### bf16-mixed · Inference · the long rungs (16 x 48)
+
+| (Length, Dimension, dtype) | PyTorch module (main) | PyTorch compiled | ours | × module | × compiled |
+|---|---|---|---|---|---|
+| (1024, 768, bf16), A = 1 | 1954.8 | | **62.2** | 31.4 | |
+| (1024, 768, bf16), A = 5 | 2164.7 | | **112.0** | 19.3 | |
+| (1536, 768, bf16), A = 1 | 4279.4 | 474.3 | **79.6** | 53.8 | 5.96 |
+| (1536, 768, bf16), A = 5 | 4584.7 | 578.5 | **146.7** | 31.3 | 3.94 |
+| (2048, 768, bf16), A = 1 | 7635.6 | | **96.2** | 79.4 | |
+| (2048, 768, bf16), A = 5 | 8054.6 | | **198.9** | 40.5 | |
+| (2560, 768, bf16), A = 1 | 11823.6 | | **124.3** | 95.1 | |
+| (2560, 768, bf16), A = 5 | 12369.1 | | **250.2** | 49.4 | |
+| (3072, 768, bf16), A = 1 | 16922.9 | 1509.6 | **139.5** | 121 | 10.8 |
+| (3072, 768, bf16), A = 5 | 17553.8 | 1725.5 | **307.5** | 57.1 | 5.61 |
+
+(The module recomputes the pair bias -- LayerNorm of L^2 pair rows, projection, softmax -- on every call; the fused path makes P
+once per pair.) L3072 A5, other layouts (module / ours): 24 x 32 19216.1 / **345.2**, 12 x 64 17719.0 / **276.2**, 16 x 64 17618.0 /
+**320.3**.
+
+### fp32 · Inference (16 x 48; the fp32 step is main's)
+
+| (Length, Dimension, dtype) | PyTorch module | PyTorch compiled | main | ours | × compiled |
+|---|---|---|---|---|---|
+| (128, 768, fp32), A = 1 | 158.4 | 89.1 | 79.3 | **79.3** | 1.12 |
+| (128, 768, fp32), A = 5 | 184.8 | 111.5 | 79.3 | **79.4** | 1.40 |
+| (384, 768, fp32), A = 1 | 331.1 | 141.4 | 86.2 | **86.1** | 1.64 |
+| (384, 768, fp32), A = 5 | 427.1 | 193.3 | 91.5 | **91.6** | 2.11 |
+| (768, 768, fp32), A = 1 | 904.0 | 268.3 | 100.2 | **100.2** | 2.68 |
+| (768, 768, fp32), A = 5 | 1094.6 | 379.5 | 147.6 | **147.7** | 2.57 |
+
+L768 A5, other layouts (module / ours): 24 x 32 1151.5 / **149.7**, 12 x 64 1075.5 / **152.8**, 16 x 64 1107.4 / **157.6**.
+
+### Training, A = 48 (16 x 48, four chained blocks)
+
+| (Length, Dimension, dtype) | PyTorch module | PyTorch compiled | main | ours | × compiled |
+|---|---|---|---|---|---|
+| (384, 768, bf16-mixed) | 3251.6 | 1329.9 | 1045.5 | **1044.5** | 1.27 |
+| (768, 768, bf16-mixed) | 6905.1 | 2445.3 | 2051.4 | **2037.5** | 1.20 |
+| (384, 768, fp32) | 3738.8 | 2347.5 | 1952.0 | **1945.5** | 1.21 |
+| (768, 768, fp32) | 7582.3 | 4495.8 | 3839.7 | **3789.6** | 1.19 |
+
+fp32 L768, other layouts (module / ours): 24 x 32 7689.6 / **3825.2**, 12 x 64 7540.5 / **3839.7**, 16 x 64 7953.4 / **4202.1**.
+bf16 L384: both builds alternate between ~1044 and ~1076 us from run to run (main 1044.4 / 1076.3 / 1045.5, this change 1075.5 /
+1076.3 / 1077.1 in the campaign; this change 1044.0 / 1044.5 in two later runs) -- the card's power state, not the code (the L384
+cells are bit-identical and run the same kernels).
+
+**Toolchain.** The family's sm_100a cubins (bf16 and fp32: `bias_only_dit.cuda.sm100_kernel`) are built by the newest nvcc that
+knows sm_100a (`transition.cuda.fused_sm100a.kernel_toolchain`: 13.1 here) since this change; before, by the torch-matched 12.9
+through `augmented_attention.cuda.sm100.cubin` (which keeps that default for its other users; `newest=True` selects 13.1). The 160
+L <= 768 cells are bit-identical to main either way. Alternating A/B, two rounds, us per block (12.9 / 13.1): bf16 inference L384 A5
+61.4, 61.5 / 61.6, 61.6; L768 A5 94.7, 94.9 / 94.6, 94.6; L768 A1 64.2, 64.3 / 64.4, 64.4; L1536 A1 74.9, 79.6 / 75.0, 79.7; L3072 A5
+303.2, 308.0 / 307.1, 308.3; fp32 inference L384 A5 91.3, 91.5 / 91.6, 91.7; L768 A5 147.7, 147.5 / 147.4, 147.4; training A48 bf16
+L768 2036.1, 2052.6 / 2052.5, 2057.0; fp32 L384 1931.2, 1932.0 / 1946.2, 1944.3; L768 3807.4, 3933.8 / 3829.3, 3962.5 (the minima
+of the training rounds equal within 0.5 %).
+
+**The fused bf16 backward did not run in these training rows** (main and this change alike): in a fresh process whose first
+bias-only backward reaches the cubin load before any CUDA runtime call on autograd's backward thread, `cuModuleLoadData` fails with
+`CUDA_ERROR_INVALID_CONTEXT` (the driver API needs a current context, the thread has none yet), `bwd_fused_ready` warns once and the
+process keeps the per-step launches (T6's 23). A guard that makes the primary context current first (`cuDevicePrimaryCtxRetain` +
+`cuCtxSetCurrent`, once per thread) loads it; under this method it then measured L384 A8 361 -> 439-462 us, L384 A48 1044 ->
+1043-1068, L768 A48 2027 -> 2032-2043 (per-step -> fused). Not changed here (it changes which backward a process runs, and the fused
+one is not faster in this regime): left to the maintainer, with that measurement.
+
 ## Measurements (2026-09-30 / 2026-10-01)
 
 B200 (148 SMs, 1000 W power cap), the v2.2.0 pixi env (torch 2.13.0+cu129), one GPU through `gpuq` with nothing else on it.
@@ -1053,7 +1225,10 @@ Inference:
 
 ## Limits and next
 
-- fp32 (TF32) inference and training: written (see [fp32 path](#fp32-path-tf32)); not yet built, tested or measured on B200.
+- fp32 (TF32) inference and training: built, tested and measured (2026-10-20, [fp32 path](#fp32-path-tf32)); L <= 768 only.
+- Long rungs (I4, T8): the streaming core is TMA-intake bound at A = 5 (L3072: 111 us against a 53 us floor; a 2-CTA form with the
+  group's v tiles split by N would halve each SM's v intake) and computes 16 / 32 unused columns per sample for 48- / 32-wide heads.
+- The fused bf16 backward loads only when a CUDA runtime call precedes it on autograd's thread (Measurements 2026-10-20).
 - Training: half the step is cuBLAS at the power cap; the row kernels and the SwiGLU GEMM are at their floor (✓). Below it (△):
   the pair-bias kernels (T1, issue-bound), `softmax_t` (T2), `dpb` (T3, TMA intake), `finalize` (~8 us of reduction latency)
   and, with 32-wide heads, the core's N = 32 products (24 x 32 L768 at 80 % of its floor; two samples per N = 64 product would

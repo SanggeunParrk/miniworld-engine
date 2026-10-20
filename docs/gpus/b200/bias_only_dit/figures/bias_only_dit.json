@@ -1,0 +1,104 @@
+{
+ "figures": {
+  "inference_long": {
+   "title": "B200 · bias-only token DiT · inference past L 768 (to 3072) · d 768, 16 heads x 48, cond 384, pair 128, bf16",
+   "panels": [
+    {
+     "label": "once per pair and mask (every solver step and sample reuses P)",
+     "kernels": [
+      {
+       "id": "H1", "name": "pair LayerNorm", "impl": "CUDA · layernorm128_rows",
+       "code": ["zh = LN0(pair)   # no affine: the blocks' ln_pair weights folded into Wf"],
+       "reads": ["pair"],
+       "writes": ["zh"]
+      },
+      {
+       "id": "H2", "name": "pair bias of every head", "impl": "cuBLAS · mm",
+       "code": ["bias = Wf zh^T   # [H, L L], head-major"],
+       "reads": ["zh", "Wf"],
+       "writes": ["P (as bias)"]
+      },
+      {
+       "id": "H3", "name": "softmax over the keys, in place", "impl": "CUDA · softmax_rows",
+       "code": ["P = softmax(bias.masked_fill(~mask, min))"],
+       "reads": ["P (bias)", "mask"],
+       "writes": ["P"]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 3072)",
+     "hbm": [
+      {"name": "pair, zh", "shape": "[1,L,L,128] bf16", "size": "2.4 GB each"},
+      {"name": "P", "shape": "[16, L, L] bf16", "size": "302 MB"}
+     ]
+    },
+    {
+     "label": "per block and solver step: the 12-launch step around the streaming core",
+     "kernels": [
+      {
+       "id": "T", "name": "conditioning tables", "impl": "CUDA · ln_rows + cuBLAS · addmm x 2",
+       "code": ["g1 = LN(c) W1^T + b1   # s1 | sh1 | s2 | sh2", "g2 = c W2^T + b2       # gate1 | gate2"],
+       "reads": ["cond"],
+       "writes": ["g1, g2"]
+      },
+      {
+       "id": "R1", "name": "input AdaLN", "impl": "CUDA · adaln_in_rows",
+       "code": ["x = single (fp32)", "xa = LN(x) sigmoid(s1) + sh1"],
+       "reads": ["single", "g1"],
+       "writes": ["x", "xa"]
+      },
+      {
+       "id": "G1", "name": "v | g", "impl": "cuBLAS · mm",
+       "code": ["vg = xa [Wv; Wg]^T"],
+       "reads": ["xa", "Wv, Wg"],
+       "writes": ["vg"]
+      },
+      {
+       "id": "I4", "name": "streaming attention core", "impl": "CUDA · pv_stream_sm100",
+       "code": ["a = sigmoid(g) * (P_h v_h)   # per head and sample", "# P in 64-key chunks through shared memory,", "# one MMA per 16 keys for the sample group"],
+       "reads": ["P", "vg"],
+       "writes": ["a"]
+      },
+      {
+       "id": "G2", "name": "out projection", "impl": "cuBLAS · mm",
+       "code": ["y = a Wo^T"],
+       "reads": ["a", "Wo"],
+       "writes": ["y"]
+      },
+      {
+       "id": "R2", "name": "residual + gate + AdaLN", "impl": "CUDA · resgate_adaln_rows",
+       "code": ["x += sigmoid(gate1) y", "xa = LN(x) sigmoid(s2) + sh2"],
+       "reads": ["x", "y", "g1, g2"],
+       "writes": ["x", "xa"]
+      },
+      {
+       "id": "G3", "name": "expand + SwiGLU", "impl": "CUDA · gemm_swiglu2_sm100 (cuBLAS + swiglu_rows below 3840 rows)",
+       "code": ["h = silu(xa Wa^T) * (xa Wb^T)"],
+       "reads": ["xa", "Wa, Wb"],
+       "writes": ["h"]
+      },
+      {
+       "id": "G4", "name": "squeeze", "impl": "cuBLAS · mm",
+       "code": ["z = h Wsq^T"],
+       "reads": ["h", "Wsq"],
+       "writes": ["z"]
+      },
+      {
+       "id": "R3", "name": "residual + gate", "impl": "CUDA · resgate_out_rows",
+       "code": ["out = x + sigmoid(gate2) z"],
+       "reads": ["x", "z", "g2"],
+       "writes": ["out"]
+      }
+     ],
+     "hbm_title": "HBM (sizes at L = 3072, S = 5, per-sample conditioning)",
+     "hbm": [
+      {"name": "single, out, xa, y, z, a", "shape": "[S L, 768] bf16", "size": "24 MB each"},
+      {"name": "x", "shape": "[S L, 768] fp32", "size": "47 MB"},
+      {"name": "vg, h", "shape": "[S L, 1536] bf16", "size": "47 MB each"},
+      {"name": "g1 / g2", "shape": "[S L, 3072] / [S L, 1536] bf16", "size": "94 / 47 MB"},
+      {"name": "P", "shape": "[16, L, L] bf16", "size": "302 MB"}
+     ]
+    }
+   ]
+  }
+ }
+}
