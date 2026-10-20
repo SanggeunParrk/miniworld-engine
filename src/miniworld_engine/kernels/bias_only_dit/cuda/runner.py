@@ -276,7 +276,10 @@ class FusedBiasOnlyDiT:
         """One solver step: single [S, 1, L, D], cond [S or 1, 1, L, dc] (one conditioning shared by the samples when
         its sample axis is 1 or has stride 0), P from ``hoist``. Returns [S, 1, L, D] in ``out_dtype`` (single's)."""
         if not self.fp32:
-            if self._inf3b_ok(single.device):
+            # the three-kernel step takes one row tile per cluster: past L 768 its front / tail run several rounds of clusters and
+            # lose to the 12-launch step's cuBLAS GEMMs + rows (2026-10-20, eight chained blocks, 16 x 48, us per block, three-kernel
+            # / 12-launch: L1024 A1 73.0 / 62.3, L1536 A5 185.4 / 146.4, L3072 A5 401.2 / 310.3), so the long rungs take the latter
+            if single.shape[2] <= C.B200_TMEM_MAX_L and self._inf3b_ok(single.device):
                 return self._step3b(single, cond, P, out_dtype)
             if self._inf3h_ok(single.device, out_dtype or single.dtype):
                 return self._step3h(single, cond, P, out_dtype)
@@ -615,7 +618,7 @@ class FusedBiasOnlyDiT:
         xin = single.reshape(M, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         xa, vg, a = buf["xa"], buf["vg"], buf["a"]
-        early = core.early()  # the core reads P before its PDL wait: see _ops3b
+        early = core.early(L)  # the core reads P before its PDL wait: see _ops3b
         assert not early or P.shape == (self.nb * H, L, L), (
             P.shape
         )  # the whole hoisted P (hoist's layout), not a chain's own
