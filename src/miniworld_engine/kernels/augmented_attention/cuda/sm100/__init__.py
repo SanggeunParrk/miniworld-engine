@@ -671,6 +671,27 @@ def apb_ksplit(L: int, heads: int, d: int = 384, nsm: int = 148) -> int:
     return best
 
 
+def apb_qsplit(L: int, heads: int, nsm: int = 148) -> int:
+    """Query chunks per work item of the backward dK / dV core (``attn_dkv -DQSPLIT``): one sample has heads x L / 128 work
+    items (key tiles); the same waves / chunks rule as ``apb_ksplit`` over the divisors of L / 128. ``settings.apb_b200_qsplit``
+    overrides it (1: the unsplit core)."""
+    kt = L // 128
+    forced = settings.current().apb_b200_qsplit
+    if forced is not None:
+        if forced < 1 or kt % forced:
+            raise ValueError(f"apb_b200_qsplit={forced} must divide the {kt} key tiles of L={L}")
+        return int(forced)
+    base = heads * kt
+    best, best_cost = 1, -(-base // nsm)
+    for nq in range(2, kt + 1):
+        if kt % nq:
+            continue
+        cost = -(-base * nq // nsm) / nq
+        if cost < best_cost - 1e-9:
+            best, best_cost = nq, cost
+    return best
+
+
 def _rows_ext():
     from ..apb import ext
 
@@ -856,10 +877,11 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
     nch = L // 128
     M = q.shape[0]
     S = M // L
+    nq = apb_qsplit(L, heads, torch.cuda.get_device_properties(dev).multi_processor_count)
     bias_t = torch.empty_like(bias)
     DQ = torch.empty(nch, M, W, device=q.device, dtype=torch.float32)
     DB = torch.empty(S * heads, L, L, device=q.device, dtype=torch.float32)
-    DK, DV = (torch.empty(M, W, device=q.device, dtype=torch.float32) for _ in range(2))
+    DK, DV = (torch.empty(nq, M, W, device=q.device, dtype=torch.float32) for _ in range(2))
 
     def build():
         f32 = dict(dtype="f32")
@@ -870,10 +892,10 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             _tmn(v, dims, _rs(v), [dh, 128]),
             _tmn(dob, dims, _rs(dob), [dh, 64]),
             _tmn(bias_t, [L, S * heads * L], L * 2, [64, 128]),
-            _tmn(DK, dims, W * 4, [32, 128], swizzle=128, **f32),
-            _tmn(DK, dims, W * 4, [16, 128], swizzle=64, **f32),
-            _tmn(DV, dims, W * 4, [32, 128], swizzle=128, **f32),
-            _tmn(DV, dims, W * 4, [16, 128], swizzle=64, **f32),
+            _tmn(DK, [W, nq * M], W * 4, [32, 128], swizzle=128, **f32),
+            _tmn(DK, [W, nq * M], W * 4, [16, 128], swizzle=64, **f32),
+            _tmn(DV, [W, nq * M], W * 4, [32, 128], swizzle=128, **f32),
+            _tmn(DV, [W, nq * M], W * 4, [16, 128], swizzle=64, **f32),
         )
         dq_dims = [W, nch * M]
         dqb_maps = (
@@ -886,8 +908,10 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
         tr = _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0).bind(
             (L // 32, L // 32, S * heads), (32, 8, 1), bias, bias_t, int(L)
         )
-        dkv = _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=defs).bind(
-            _grid(S * heads * (L // 128), dev),
+        dkv = _sm100_kernel(
+            "attn_dkv", "augattn_dkv_sm100", dev, defs=defs + (("QSPLIT=1",) if nq > 1 else ())
+        ).bind(
+            _grid(S * heads * (L // 128) * nq, dev),
             (384, 1, 1),
             *dkv_maps,
             LSE,
@@ -897,6 +921,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
             None,
             int(L),
             int(S),
+            *((int(nq),) if nq > 1 else ()),
         )  # no dQ zero fill
         dqb = _sm100_kernel(
             "attn_dqb", "augattn_dqb_sm100", dev, defs=defs + ("DQPART=1",)
@@ -927,6 +952,7 @@ def apb_backward(q, k, v, dob, bias, LSE, Dd, L, heads: int = 8, d: int = 384):
         dev,
         L,
         S,
+        nq,
         *(t.data_ptr() for t in (q, k, v, dob, bias, LSE, Dd, bias_t, DQ, DB, DK, DV)),
         _rs(q),
         _rs(k),
@@ -957,6 +983,7 @@ __all__ = [
     "apb_forward",
     "apb_forward_og",
     "apb_ksplit",
+    "apb_qsplit",
     "apb_width",
     "augmented_attention_bf16_sm100",
     "available",

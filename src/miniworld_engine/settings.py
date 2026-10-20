@@ -426,6 +426,9 @@ class Settings:
     #: ``train_bwd`` / ``infer``: one call per op, no per-launch Python); False keeps the Python sequence (the same kernels and
     #: GEMMs, so the same bits; the A/B switch).
     apb_b200_host: bool = True
+    #: B200 AttentionPairBias backward dK / dV core: query chunks per work item (``attn_dkv -DQSPLIT``, the slices added by
+    #: ``qkv_bwd``). None picks it per (L, heads) (``sm100.apb_qsplit``); 1 the unsplit core; n > 1 forces n (dividing L / 128).
+    apb_b200_qsplit: int | None = None
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None

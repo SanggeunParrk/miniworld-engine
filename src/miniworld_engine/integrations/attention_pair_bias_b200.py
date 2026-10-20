@@ -733,8 +733,9 @@ class _TrainingHost(torch.autograd.Function):
     each parameter's dtype (a no-op for an fp32 master)."""
 
     @staticmethod
-    def forward(ctx, eps_s, eps_p, ns, mask, single, pair, *params):
+    def forward(ctx, eps_s, eps_p, ns, nq, mask, single, pair, *params):
         ctx.param_dtypes = [t.dtype for t in params]
+        ctx.nq = nq
         y, *saved = torch.ops.apb_b200.train_fwd(single, pair, mask, list(params), eps_s, eps_p, ns)
         ctx.eps_p = eps_p
         ctx.save_for_backward(mask, single, pair, *params, *saved)
@@ -745,8 +746,9 @@ class _TrainingHost(torch.autograd.Function):
     def backward(ctx, dy):
         v = ctx.saved_tensors
         mask, single, pair = v[0], v[1], v[2]
-        dx, dz, *grads = torch.ops.apb_b200.train_bwd(single, pair, mask, list(v[3:13]), list(v[13:]), dy, ctx.eps_p)
+        dx, dz, *grads = torch.ops.apb_b200.train_bwd(single, pair, mask, list(v[3:13]), list(v[13:]), dy, ctx.eps_p, ctx.nq)
         return (
+            None,
             None,
             None,
             None,
@@ -767,6 +769,7 @@ def update_train(
             module.ln_single.eps,
             module.ln_pair.eps,
             _sm100().apb_ksplit(single.shape[1], module.n_head, single.shape[2]),
+            _sm100().apb_qsplit(single.shape[1], module.n_head),
             mask,
             single,
             pair,
