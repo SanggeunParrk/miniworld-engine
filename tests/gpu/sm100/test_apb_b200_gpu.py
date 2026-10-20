@@ -129,6 +129,8 @@ def test_apb_training_core(L, shape):
     DQP, DK, DV, DB = sm100.apb_backward(qp, kp, vp, dobp, bb, LSE, Dd, L, heads, d)
     assert DQP.shape == (L // 128, L, sm100.apb_width(heads, d))      # key-chunk partials, summed by the caller
     DQ = DQP.sum(0)
+    # dK / dV: query-chunk slices [nq, L, W] (attn_dkv -DQSPLIT; one slice when unsplit), summed by the caller
+    DK, DV = (t.sum(0) for t in (DK, DV))
     want.backward(dob.double())
     for got, ref in ((DQ, qd.grad), (DK, kd.grad), (DV, vd.grad)):
         g_real, g_pad = _real(got, shape)
