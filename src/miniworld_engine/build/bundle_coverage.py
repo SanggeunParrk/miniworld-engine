@@ -9,7 +9,8 @@ the number of batched samples. This driver runs, on the current GPU:
   128 ... 2560, atom rungs 1024 ... 49152) for inference, the training crops (384, 768 tokens; the registry's atom
   ladder) for training, in each declared dtype and compute dtype, plus two batched samples on the pair stream;
 * the architecture blocks the model is built from (Pairformer with one- and two-directional TriMul, the token
-  DiffusionTransformer with its pair-bias / core-precision options and batched pairs, the SWA atom transformer in its
+  DiffusionTransformer with its pair-bias / core-precision options and batched pairs, the bias-only token DiT (one
+  pair shared by the samples or one per sample, masked, hoisted, d_cond 384 / 768), the SWA atom transformer in its
   three styles and the block-local atom DiT), inference and training,
 
 every one in bf16, fp32, bf16-mixed (fp32 parameters under bf16 autocast, MiniWorld's precision) and, for the blocks,
@@ -101,6 +102,17 @@ def cases() -> list[dict]:
                     for b in ((1, BATCHED) if length in (384, 768) else (1,)):
                         out.append({"kind": "diffusion", "L": length, "train": train, "dtype": prec, "options": opts,  # noqa: PERF401
                                     "samples": 48 if train else 5, "batch": b, "heavy": length >= HEAVY_TOKENS})
+                # The bias-only token DiT: one pair shared by the samples, or a pair of its own per sample (training
+                # block_psb); masked or not; trained stacks also from one hoisted pair_bias_all.
+                for d_cond in (384, 768):
+                    for pair in ("shared", "per_sample"):
+                        if pair == "per_sample" and length > TRAIN_TOKENS[-1]:
+                            continue
+                        for masked, hoist in ((False, False), (True, False), *(((True, True),) if train else ())):
+                            out.append({"kind": "bias_only_dit", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
+                                        "d_cond": d_cond, "pair": pair, "masked": masked, "hoist": hoist,
+                                        "samples": 48 if train else 5,
+                                        "heavy": length >= HEAVY_TOKENS or (pair == "per_sample" and length >= 640)})
             atoms = (1024, 2048, 3072, 4096, 6144) if train else ATOM_RUNGS
             for n in atoms:
                 for variant in ("esmfold2", "af3", "af3_global"):
@@ -218,6 +230,31 @@ def _run_block(c: dict) -> None:
             out = model(q, cond, params)
             if c["train"]:
                 out.float().sum().backward()
+        torch.cuda.synchronize()
+        return
+    elif c["kind"] == "bias_only_dit":
+        from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
+        from miniworld_engine.modules.exceptions import ImplementationType as MI
+
+        blocks = [BiasOnlyDiTBlock(d_cond=c["d_cond"], implementation=MI.MINIWORLD).cuda().to(pdt)
+                  for _ in range(2 if c["hoist"] else 1)]
+        for b in blocks:
+            _randomize(b)
+            b.train(c["train"])
+        a, n, per = c["samples"], c["L"], c["pair"] == "per_sample"
+        lead, nb = ((1, a), a) if per else ((a, 1), 1)  # per sample: [1, A, L, d] reading pair [A, L, L, 128]
+        x = torch.randn(*lead, n, 768, device="cuda", dtype=dt)
+        cond = torch.randn(*lead, n, c["d_cond"], device="cuda", dtype=dt)
+        pair = torch.randn(nb, n, n, 128, device="cuda", dtype=dt)
+        mask = torch.rand(nb, n, device="cuda") > 0.15 if c["masked"] else None
+        if c["train"]:
+            x, cond, pair = (t.requires_grad_(True) for t in (x, cond, pair))
+        with torch.set_grad_enabled(c["train"]), torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            biases = pair_bias_all(blocks, pair) if c["hoist"] else [None] * len(blocks)
+            for b, bias in zip(blocks, biases, strict=True):
+                x = b(x, cond, None if c["hoist"] else pair, mask, bias=bias)
+            if c["train"]:
+                x.float().sum().backward()
         torch.cuda.synchronize()
         return
     elif c["kind"] == "local_dit":
