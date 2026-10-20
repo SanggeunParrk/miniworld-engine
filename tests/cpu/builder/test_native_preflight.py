@@ -46,9 +46,18 @@ def test_foreign_native_failures_are_reported_together(monkeypatch):
     monkeypatch.setattr(preflight.importlib, "import_module", load)
     monkeypatch.setattr(_nvcc, "mathdx_includes", missing)
     with pytest.raises(ValueError, match="before tuning") as exc:
-        preflight.native_dependencies("sm100")
+        preflight.native_dependencies("sm90")
     assert "incompatible CUTLASS" in str(exc.value)
     assert "cuBLASDx headers missing" in str(exc.value)
+
+
+def test_blackwell_does_not_require_mathdx(monkeypatch):
+    """Only the sm_90a Transition extension includes cuBLASDx; a B200 build must not need the headers."""
+    monkeypatch.setattr(swa, "_flash_backend", lambda: "fa4")
+    monkeypatch.setattr(preflight.importlib, "import_module",
+                        lambda name: SimpleNamespace(flash_attn_varlen_func=lambda: None))
+    monkeypatch.setattr(_nvcc, "mathdx_includes", lambda: pytest.fail("Blackwell requested mathdx"))
+    preflight.native_dependencies("sm100")
 
 
 def test_backend_without_varlen_entry_is_rejected(monkeypatch):
