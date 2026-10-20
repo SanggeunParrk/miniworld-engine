@@ -487,6 +487,21 @@ pass `engine_backend="triton"`.
   forced by memory 0.77-0.79x); 1.7-4.2x cuEquivariance, 3.8-17.1x the PyTorch statements. Tests
   `tests/gpu/sm100/test_b200_trimul_batch_gpu.py` (rewritten: every width, bitwise, graphs, compile, chunks),
   `tests/cpu/kernels/test_trimul_b200_batch_limit.py`; record `docs/records/trimul_b200_batched_20261020.md`.
+- B200 TriangleAttention takes B samples in one call by design and any length L >= 16 (`integrations.triattn_b200`: one `forward`
+  for both paths, `kind_of`, `max_batch(kind, length)` = 48 per launch, `plan(kind, B, L, d_pair, heads, training, total_memory,
+  ending)`): every kernel already ran once over the B samples (per-sample key mask and dropout scale); a call with more samples, or
+  whose working set would not fit 0.85 of the device, now runs in balanced chunks of a deterministic size (inference chunks write
+  their output rows in place through new `out` arguments of `tri_tail` / `tri_wtail`; training chunks run in one autograd node,
+  `_Chunked`, keeping or rerunning their forward, the parameter gradients summed in fp32); a length that is not a multiple of 128 runs
+  zero-padded with the pad keys masked (L 1536 / 2048 / 2560 served for training and inference). The launches are opaque custom ops
+  (the module compiles to one graph; `serves` / `serves_wide` remain, `forward_wide` is folded into `forward`). The attention core's
+  forward runs long launches (four pair rows a task) in sample groups of ~36 864 tasks (`b200_triattn.fwd_group`; inference L768
+  B48 1.05x; a dynamic task counter was measured 4-5 % slower and not kept); `triattn_fwd` gained `out` / `lse` outputs. The fused
+  path's parameter gradients are deterministic: `tri_gate_bwd` / `tri_wgrad` store per-CTA fp32 partials that the new `tri_slot_sum`
+  adds in CTA order (was fp32 atomics; dW_q|k|v|g|o now the same bits every run; +0.2-1.3 % on the B = 1 training step). y is
+  bitwise equal to B one-sample calls in every case of the B 1-48 x L 128 / 300 / 384 / 768 x seven-width grid; B = 1 forward
+  unchanged in bits and time. Tests `tests/gpu/sm100/test_triattn_b200_batched_gpu.py`, `tests/cpu/kernels/test_triattn_b200_batch_plan.py`;
+  record `docs/records/triattn_b200_batched_20261020.md`.
 
 ## [2.3.7] - 2026-10-21
 

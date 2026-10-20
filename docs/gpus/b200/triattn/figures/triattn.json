@@ -224,7 +224,7 @@
         "du = (ds * dy) @ W_o",
         "s_g = torch.sigmoid(g)",
         "do, dg = du * s_g, du * o * s_g * (1 - s_g)",
-        "Δ = (do * o).sum per head; dW_o = (ds*dy).T @ (s_g*o)",
+        "Δ = (do * o).sum per head; dW_o[cta] = (ds*dy).T @ (s_g*o)   # this CTA's rows",
         "dx = dy   # residual seed"
        ],
        "reads": [
@@ -236,7 +236,7 @@
         "do, dg",
         "Δ",
         "dx",
-        "dW_o (fp32)"
+        "dW_o partials (fp32, one per CTA)"
        ]
       },
       {
@@ -313,9 +313,10 @@
       {
        "id": "B6",
        "name": "weight / LN-parameter grads",
-       "impl": "CUDA · tri_wgrad + tri_param_finish",
+       "impl": "CUDA · tri_wgrad + tri_slot_sum + tri_param_finish",
        "code": [
-        "M[t] = xhat.T @ d[t]   (t = q, k, v, g)",
+        "M[t][cta] = xhat.T @ d[t]   (t = q, k, v, g; this CTA's rows)",
+        "M[t], dW_o = sum over CTAs, in CTA order   # same bits every run",
         "dW[t] = γ * M[t] + outer(β, d[t].sum(0));  dγ, dβ, dW_b",
         "dW_o = dW_o.to(W_o.dtype)"
        ],
@@ -324,9 +325,10 @@
         "db",
         "x",
         "w_4, prm",
-        "dW_o (fp32)"
+        "dW_o partials (fp32)"
        ],
        "writes": [
+        "M / vector partials (fp32, one per CTA)",
         "dW_q, dW_k, dW_v, dW_g",
         "dγ, dβ, dW_b, dW_o"
        ]
