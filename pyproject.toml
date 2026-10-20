@@ -1,6 +1,6 @@
 [project]
 name = "miniworld-engine"
-version = "2.3.0"
+version = "2.3.1"
 requires-python = ">=3.10"
 readme = "README.md"
 description = "MiniWorld GPU kernel development repo — Triton / CUDA kernels + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
@@ -24,6 +24,7 @@ dependencies = [
   "jaxtyping",
   "numpy",
   "scipy",  # module parameter initialization uses scipy.stats.truncnorm
+  "pydantic",  # miniworld_engine.architecture (block / diffusion configs are pydantic models)
 ]
 
 [project.optional-dependencies]

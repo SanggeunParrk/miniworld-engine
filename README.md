@@ -9,7 +9,7 @@ optimized in isolation: **hand-written CUDA where it exists, a Triton fallback o
 > blocks; terminal product repos assemble those into full models. Boundary rules live in
 > team-gm's `docs/ARCHITECTURE.md`.
 
-**Version 2.2.0** — CUDA + Triton only (CuTe/quack removed), torch 2.13 / cu129,
+**Version 2.3.1** — CUDA + Triton only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
 cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 [attribution](licenses/THIRD_PARTY_NOTICES.md).
 
@@ -82,6 +82,8 @@ PyPI one, CUDA 13.0, and the cu129 one) and pin `torch==2.13.*`, so the first ca
 
 ```bash
 pip install miniworld-engine     # with the torch it pins; an sdist / git install keeps the JIT path
+# torch's CUDA 12.9 build instead (NVIDIA driver 575-579, which cannot run CUDA 13):
+pip install miniworld-engine --index-url https://download.pytorch.org/whl/cu129 --extra-index-url https://pypi.org/simple
 ```
 
 Shipped kernels that do not match the running torch / CUDA or GPU are ignored, and anything they do not cover still

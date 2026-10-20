@@ -8,6 +8,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.1] - 2026-10-20
+
+### Fixed
+
+- `pydantic` is a runtime dependency: `miniworld_engine.architecture` (the block and diffusion configs) imports it, and a
+  plain `pip install miniworld-engine` (2.3.0) could not import `DiffusionTransformer` or any other block. It was only in
+  the `bench` extra. The kernels and the prebuilt bundles are the same as 2.3.0.
+- `miniworld-engine dev bundle-kernels --replay` compiles the tree it runs from and starts each bundle clean (records
+  from another checkout are rebased, stale artifacts pruned).
+
 ## [2.3.0] - 2026-10-20
 
 ### Added
