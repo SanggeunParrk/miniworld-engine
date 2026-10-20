@@ -65,7 +65,7 @@ _LT_CPP = r"""
 #include <vector>
 #define LT_CHECK(x) do { auto st_ = (x); TORCH_CHECK(st_ == CUBLAS_STATUS_SUCCESS, "cublasLt status ", int(st_), " at " #x); } while (0)
 struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; cublasLtMatmulAlgo_t algo; size_t ws; bool tuned; };
-torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x, int64_t L, bool trans) {
+torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x, int64_t L, bool trans, c10::optional<torch::Tensor> out_into) {
   TORCH_CHECK(u.is_cuda() && u.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16, "bf16 cuda");
   TORCH_CHECK(u.dim() == 2 && w.dim() == 2 && u.stride(1) == 1 && w.stride(1) == 1 && u.size(1) == w.size(1), "shapes");
   c10::cuda::CUDAGuard guard(u.device());
@@ -76,7 +76,10 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
   // [C x L] matrix at column stride L C, batched over i with batch stride C
   const int64_t LL = trans ? L * L : M, NB = trans ? M / LL : 1;
   TORCH_CHECK(!trans || (L > 0 && M % LL == 0), "trans needs L with M = B L L");
-  auto out = torch::empty({M, C}, u.options());
+  // out_into: a contiguous bf16 [M, C] to write into (a chunk's rows of a batch's output), else a new tensor
+  if (out_into.has_value())
+    TORCH_CHECK(out_into->is_cuda() && out_into->scalar_type() == at::kBFloat16 && out_into->is_contiguous() && out_into->numel() == M * C, "out");
+  auto out = out_into.has_value() ? out_into->view({M, C}) : torch::empty({M, C}, u.options());
   static std::map<std::tuple<int, int64_t, int64_t, int64_t, int64_t, int64_t, int, int64_t>, LtPlan> plans;
   const auto key = std::make_tuple((int)u.get_device(), M, K, C, u.stride(0), w.stride(0), (int)has_c + 2 * (int)trans, trans ? L : 0);
   auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());
@@ -181,7 +184,7 @@ def _lt():
     )
     build.mkdir(parents=True, exist_ok=True)
     return load_inline(
-        name="triattn_h100_lt3",
+        name="triattn_h100_lt4",
         cpp_sources=_LT_CPP,
         functions=["lt_mm"],
         with_cuda=True,
@@ -316,7 +319,19 @@ def _views(qkvg, B, L, HD, H):
 
 
 def _forward(
-    pair, lnw, lnb, wcat, wo_p, mask, eps, drop, n_head, head_dim, need, trans=False
+    pair,
+    lnw,
+    lnb,
+    wcat,
+    wo_p,
+    mask,
+    eps,
+    drop,
+    n_head,
+    head_dim,
+    need,
+    trans=False,
+    out=None,
 ):
     B, L, _, C = pair.shape
     H = n_head
@@ -364,7 +379,7 @@ def _forward(
         )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
-        qkvg = _lt().lt_mm(y, wcat, None, 0, False)  # [M, 4 HD + Hp]
+        qkvg = _lt().lt_mm(y, wcat, None, 0, False, None)  # [M, 4 HD + Hp]
         sbias = g.front_bias(
             qkvg, mask if mask is not None else empty.bool(), B, L, H, 4 * HD, scale
         )
@@ -372,9 +387,11 @@ def _forward(
         q, k, v, gt = _views(qkvg, B, L, HD, H)
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
+    # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
+    # + the residual kernel's transposed store was slower except at d_pair 64 L128, measured 2026-10-20)
     if drop is None:
         out = _lt().lt_mm(
-            u.view(M, HD), wo_p, x, L, trans
+            u.view(M, HD), wo_p, x, L, trans, out
         )  # x + u Wo^T: the residual in the GEMM epilogue (D != C, no staging copy)
     else:
         t = torch.matmul(u.view(M, HD), wo_p.t())
@@ -383,11 +400,22 @@ def _forward(
 
 
 def inference(
-    pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask=None, eps=1e-5, trans=False
+    pair,
+    lnw,
+    lnb,
+    wcat,
+    wo_p,
+    n_head,
+    head_dim,
+    mask=None,
+    eps=1e-5,
+    trans=False,
+    out=None,
 ):
-    """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128."""
+    """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous
+    tensor like pair to write into."""
     return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans
+        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out
     )[0]
 
 
@@ -470,7 +498,7 @@ def train_backward(
 
     e.triattn_bwd_kv(q, k, v, sbias, do5, lse, delta, scale, slot(1), slot(2))
     dbias = torch.zeros(B, H, L, L, device=x.device, dtype=torch.float32)
-    e.triattn_bwd_q(q, k, v, sbias, do5, lse, delta, scale, dbias, slot(0))
+    _core_mod.bwd_q(e, q, k, v, sbias, do5, lse, delta, scale, dbias, slot(0))
     g.assemble(dbias, dall, H, L, HD)
     dyln = torch.matmul(dall, wcat)  # bf16 (the reference module's own precision here)
     dx, part = g.ln_bwd(dyln, x, dy, lw, mean, rstd, L, trans)

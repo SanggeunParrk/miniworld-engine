@@ -1016,16 +1016,20 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
-
-// out = x + drop o (sigmoid(g) o o) . Wo^T; g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty
-torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, bool trans) {
+// out = x + drop o (sigmoid(g) o o) . Wo^T; g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty; `out`: a
+// contiguous bf16 [R, 128] to write into (a chunk's rows of a batch's output), else a new tensor
+torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, bool trans,
+                       c10::optional<torch::Tensor> out_into) {
   for (const auto* t : {&g, &o, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == g.numel(), "g / o / x: [R, 128] bf16");
   const long R = g.numel() / C;
   TORCH_CHECK(R % tl::BM == 0 && L % tl::BM == 0, "rows % 128, L % 128");
   TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.numel() == C * C, "wo [128, 128] bf16");
   const bool dr = drop.defined() && drop.numel() > 0;
   if (dr) TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C, "drop: [B, L, 128] bf16");
-  auto out = torch::empty({R, C}, g.options());
+  if (out_into.has_value())
+    TORCH_CHECK(out_into->is_cuda() && out_into->scalar_type() == torch::kBFloat16 && out_into->is_contiguous() && out_into->numel() == R * C,
+                "out: contiguous bf16 [R, 128]");
+  auto out = out_into.has_value() ? out_into->view({R, C}) : torch::empty({R, C}, g.options());
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   auto pm = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
@@ -1203,7 +1207,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm90 TriangleAttention gate backward: (do, dg, delta, seed); dWo added into a fp32 accumulator");
   m.def("tri_tail", &tri_tail, "sm90 TriangleAttention tail: x + drop o (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"),
-        py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false);
+        py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false, py::arg("out") = py::none());
   m.def("tri_front", &tri_front, "sm90 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias / scale",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"),
         py::arg("L"), py::arg("scale"), py::arg("trans") = false);

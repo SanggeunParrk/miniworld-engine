@@ -34,6 +34,9 @@ using namespace sm90;
 #ifndef TA_PP
 #define TA_PP 0          // forward: consumer ping-pong on the G phase
 #endif
+#ifndef TA_DYN
+#define TA_DYN 1         // forward: dynamic task schedule (a global counter; the static round robin lets long launches drift apart)
+#endif
 namespace {
 constexpr int D = 32, BM = 128, BN = 128, R = 2, NKV = TA_NKV, NB = TA_NB;
 constexpr int QT = BM * D;                                 // Q tile [128 q][32], 64B swizzle (8 KiB)
@@ -70,7 +73,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     float* __restrict__ LSE,                             // [B, N, H, S] base-2 log-sum-exp for the backward, or nullptr
     int* __restrict__ FLAGS,
     const __nv_bfloat16* __restrict__ GATE,              // optional gate g (rows at stride ldg, columns h * 32 + c): U = sigmoid(g) o bf16(O), or nullptr
-    __nv_bfloat16* __restrict__ U, long ldg) {           // [B*N*S][H*32] contiguous
+    __nv_bfloat16* __restrict__ U, long ldg,             // [B*N*S][H*32] contiguous
+    int* __restrict__ SCHED) {                           // zeroed task counter (dynamic schedule, see TA_DYN), or nullptr: static
   const int QTILES = S / BM, NK = S / BN, NG = (N + R - 1) / R;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -100,15 +104,20 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     qt = t % QTILES; int r = t / QTILES; h = r % H; r /= H; g = r % NG; b = r / NG;
   };
   auto row0 = [&](int b, int n) -> int { n = min(n, N - 1); return (b * N + n) * S; };   // first (b, n) row
+  // dynamic schedule: the producer takes each next task from the global counter (in launch order, so the CTAs running together stay
+  // on neighbouring tasks however long the launch) and hands it to the consumers in this slot (written before the Q tiles' arrive,
+  // read after its completion; -1 ends the CTA)
+  volatile int* slot = reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 240);
 
   if (wg == 0) {
     reg_dealloc<40>();
     if (tid == 0) {
       prefetch_map(&qmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap);
       int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
-      for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
+      for (int t = blockIdx.x; t < ntasks; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
         int b, h, qt, g; decode(t, b, h, qt, g);
         wait(qe, (lt & 1) ^ 1);
+        if (SCHED) *slot = t;
         expect_tx(qf, R * QT * 2);
         for (int r = 0; r < R; ++r) load_2d(&qmap, sQ + r * QT * 2, qf, h * D, row0(b, g * R + r) + qt * BM);
         for (int j = 0; j < NK; ++j) {
@@ -125,6 +134,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
             if (++st == NKV) { st = 0; kph ^= 1; }
           }
         }
+      }
+      if (SCHED) {                                   // the end: once the consumers took the last task's Q, a task-free phase of qf
+        wait(qe, (lt & 1) ^ 1);
+        *slot = -1;
+        arrive(qf);
       }
     }
     return;
@@ -251,9 +265,14 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     pack();
   };
   int lt = 0;
-  for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
-    int b, h, qt, g; decode(t, b, h, qt, g);
+  for (int t = blockIdx.x;; t += SCHED ? 0 : (int)gridDim.x, ++lt) {
+    if (SCHED == nullptr && t >= ntasks) break;
     wait(qf, lt & 1);
+    if (SCHED) {
+      t = *slot;
+      if (t < 0) break;
+    }
+    int b, h, qt, g; decode(t, b, h, qt, g);
     // Q fragments of the warp's 16 rows (A of the QK^T wgmma), two k16 blocks per pair row
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -396,11 +415,15 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_fwd_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   const long ntasks = B * H * ((N + R - 1) / R) * (S / BM);
   const int grid = (int)std::min<long>(ntasks, num_sms(q.device().index()));
+  // the dynamic schedule's counter (a zeroed int per call); a launch of a few tasks per CTA keeps the static one
+  const bool dyn = TA_DYN && !TA_PP && ntasks >= 16L * grid;
+  auto sched = torch::zeros({dyn ? 1 : 0}, q.options().dtype(torch::kInt32));
   triattn_fwd_sm90<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), qm, km, vm, bm,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr<at::BFloat16>()) : nullptr,
-      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L);
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L,
+      dyn ? sched.data_ptr<int>() : nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, lse, flags, u};
 }

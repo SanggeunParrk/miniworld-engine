@@ -44,7 +44,7 @@ def _core(rows: int = 2, defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_core_r{rows}{tag}_v10",
+        name=f"triattn_h100_core_r{rows}{tag}_v11",
         sources=[str(_SRC / "triattn_sm90.cu")],
         extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}", *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -74,7 +74,7 @@ def _mod(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_mod{tag}_v8",
+        name=f"triattn_h100_mod{tag}_v9",
         sources=[str(_SRC / "triattn_mod_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -89,9 +89,11 @@ def pack_front(wq, wk, wv, wg, wb):
     return w4, wb16
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False):
+def inference(
+    pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None
+):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
-    out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16."""
+    out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16; `out`: a contiguous tensor like pair to write into."""
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
@@ -113,7 +115,7 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False):
     o, _, _, _ = _core().triattn_fwd(
         q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False
     )
-    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans).view(
+    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out).view(
         B, L, L, C
     )
 
@@ -124,7 +126,7 @@ def _bwd(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_bwd{tag}_v11",
+        name=f"triattn_h100_bwd{tag}_v12",
         sources=[str(_SRC / "triattn_bwd_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -198,7 +200,7 @@ def train_backward(
     shp = (B, L, L, H, D)
     q5, k5, v5, do5 = q.view(shp), k.view(shp), v.view(shp), do.view(shp)
     dk, dv = bw.triattn_bwd_kv(q5, k5, v5, sbias, do5, lse, delta, D**-0.5)
-    dq = bw.triattn_bwd_q(q5, k5, v5, sbias, do5, lse, delta, D**-0.5, dbias)
+    dq = bwd_q(bw, q5, k5, v5, sbias, do5, lse, delta, D**-0.5, dbias)
     dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
     m.tri_head_bwd(dq, dk, dv, dg, dbias, x, w4, wb, lw, eps, dpair, B, L, trans)
     # fp32 outputs whenever any parameter is fp32 (master weights, or the bf16 model's fp32 LayerNorm affine): the wrapper's `.to` then
@@ -276,3 +278,27 @@ def triangle_attention(
 ):
     """pair + drop o TriangleAttention(pair) for the starting node; the caller transposes for the ending node."""
     return TriAttnFused.apply(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop)
+
+
+#: Query-side backward launches: tasks = (b, h, 128-query tile) x slabs, each a whole tile's pair rows (its dbias partials
+#: reduce-added in order).  A launch of many samples was slower per sample than launches of a few (B48: 1.07-1.55x over H 4-16 and
+#: L128-768, 2026-10-20): the tasks after the first wave start out of step with the other query tiles of their (b, h), which then
+#: read the same K / V rows from DRAM at different times.  So B samples run in launches of ``g`` samples whose tasks make one wave of
+#: ~96 CTAs (one sample, any g >= 1: the single launch as before).
+BWD_Q_WAVE = 96
+
+
+def bwd_q(bw, q, k, v, sbias, do, lse, delta, scale, dbias, dq=None):
+    """dq of the core's query side (dbias partials added into ``dbias``), the B samples in launches of ``g`` samples (see BWD_Q_WAVE)."""
+    B, _, S, H, _ = q.shape
+    g = max(1, BWD_Q_WAVE // (H * (S // TOK)))
+    if g >= B:
+        return bw.triattn_bwd_q(q, k, v, sbias, do, lse, delta, scale, dbias, dq)
+    if dq is None:
+        dq = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    for i in range(0, B, g):
+        s = slice(i, min(B, i + g))
+        bw.triattn_bwd_q(
+            q[s], k[s], v[s], sbias[s], do[s], lse[s], delta[s], scale, dbias[s], dq[s]
+        )
+    return dq

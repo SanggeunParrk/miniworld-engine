@@ -643,7 +643,7 @@ std::vector<torch::Tensor> triattn_bwd_kv(torch::Tensor q, torch::Tensor k, torc
 // dQ and dbias of the core: q, k, v, dout [B, N, S, H, 32] bf16; sbias bf16 [B, H, S, S]; lse, delta fp32 [B, N, H, S];
 // dbias: a zeroed fp32 [B, H, S, S] the partials are added into -> dq [B, N, S, H, 32] bf16
 torch::Tensor triattn_bwd_q(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, torch::Tensor dout, torch::Tensor lse,
-                            torch::Tensor delta, double scale, torch::Tensor dbias, c10::optional<torch::Tensor> dq_dst) {
+                            torch::Tensor delta, double scale, torch::Tensor dbias, c10::optional<torch::Tensor> dq_dst, int64_t slabs) {
   check_proj(q, q, "q"); check_proj(k, q, "k"); check_proj(v, q, "v"); check_proj(dout, q, "dout");
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
   TORCH_CHECK(S % qk::BQ == 0, "S % 128 == 0");
@@ -656,9 +656,11 @@ torch::Tensor triattn_bwd_q(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
   CUtensorMap qm = proj_map(q, qk::BQ, "q"), dm = proj_map(dout, qk::BQ, "dout"), km = proj_map(k, qk::BK, "k"), vm = proj_map(v, qk::BK, "v");
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias");
   const long tiles = B * H * (S / qk::BQ), NG = (N + qk::QR - 1) / qk::QR;
-  const long P = std::max<long>(1, std::min<long>(NG, num_sms(q.device().index()) / tiles));   // slabs: enough chunks to fill the SMs
-  torch::Tensor slabs = P > 1 ? torch::zeros({P, B, H, S, S}, dbias.options()) : dbias;
-  CUtensorMap dbm = make_map<2>(slabs.data_ptr(), {(uint64_t)S, (uint64_t)(P * B * H * S)}, {(uint64_t)S}, {32, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
+  // slabs: chunks of a tile's pair-row groups, each run by one CTA into its own copy of dbias, enough to fill the SMs once (more
+  // were measured slower: 8 tasks per CTA 1.0-1.5x); `slabs` > 0 sets the count
+  const long P = slabs > 0 ? std::min<long>(slabs, NG) : std::max<long>(1, std::min<long>(NG, num_sms(q.device().index()) / tiles));
+  torch::Tensor slab_buf = P > 1 ? torch::zeros({P, B, H, S, S}, dbias.options()) : dbias;
+  CUtensorMap dbm = make_map<2>(slab_buf.data_ptr(), {(uint64_t)S, (uint64_t)(P * B * H * S)}, {(uint64_t)S}, {32, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "dbias",
                                 CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_bwd_q_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, qk::SMEM)); attr = true; }
@@ -668,7 +670,7 @@ torch::Tensor triattn_bwd_q(torch::Tensor q, torch::Tensor k, torch::Tensor v, t
       (int)N, (int)H, (int)S, (int)ntasks, (int)P, (long)(B * H * S), (float)(scale * 1.4426950408889634), (float)scale, qm, dm, km, vm, bm, dbm,
       lse.data_ptr<float>(), delta.data_ptr<float>(), bf16p(dq), (long)dq.stride(2));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  if (P > 1) dbias.add_(slabs.sum(0));                    // fixed-order sum of the slabs (dbias arrives zeroed)
+  if (P > 1) dbias.add_(slab_buf.sum(0));                    // fixed-order sum of the slabs (dbias arrives zeroed)
   return dq;
 }
 
@@ -686,7 +688,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #endif
   m.def("triattn_bwd_q", &triattn_bwd_q, "sm90 triangle-attention backward, query side: dq [B, N, S, H, 32] bf16; dbias partials added into a fp32 [B, H, S, S]",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("sbias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"), py::arg("dbias"),
-        py::arg("dq_dst") = py::none());
+        py::arg("dq_dst") = py::none(), py::arg("slabs") = 0);
   m.def("triattn_delta", &triattn_delta, "rowsum(dout o out) fp32 [B, N, H, S]");
   m.def("triattn_bwd_kv", &triattn_bwd_kv, "sm90 triangle-attention backward, key side: (dk, dv) [B, N, S, H, 32] bf16",
         py::arg("q"), py::arg("k"), py::arg("v"), py::arg("sbias"), py::arg("dout"), py::arg("lse"), py::arg("delta"), py::arg("scale"),

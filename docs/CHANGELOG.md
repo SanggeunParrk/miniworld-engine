@@ -10,6 +10,21 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 TriangleAttention takes B samples in one call by design (`integrations.triattn_h100_sm90.max_batch(kind, length)` = 48 per launch
+  for both paths, `kind_of`, `plan`): both CUDA paths already launched each kernel once over the B samples (per-sample key mask and
+  dropout scale); a call with more samples, or whose working set would not fit, now runs in balanced chunks of a deterministic size
+  (shapes, mode and the device's total memory; inference chunks write their output rows in place through new `out` arguments of
+  `tri_tail` and the cublasLt out-projection, training chunks run in one autograd node, `_Chunked`, keeping or rerunning their
+  forward, with the parameter gradients summed in fp32) instead of running out of memory (d_pair 128 and 64 training L768 B48, d_pair
+  256 inference L768 B48, d_pair 512 inference L768 B16, d_pair 256 training L768 B16 did). Kernel scheduling for long launches: the
+  attention core forward takes its tasks from a global counter (`TA_DYN`; the static round robin drifted apart: 940 vs 841 us per
+  sample at L768 B48, same bits) and the query-side backward runs in one-wave launches of 96 // (heads x L / 128) samples
+  (`h100_sm90.bwd_q`; one launch of 48 samples was 1.07-1.55x slower per sample); `triattn_bwd_q` gained a `slabs` override. y is
+  bitwise equal to B one-sample calls in all 245 cells of the B 2-48 x L128 / 384 / 768 x seven-width grid (dx within 3e-5, parameter
+  gradients within 2.8e-3 of the fp32 per-sample sum); B = 1 is unchanged in bits and the same or faster. CUDA graph: one call vs B
+  calls 1.01-2.22x where the saved tensors fit, 1.51-4.53x over cuEquivariance and the compiled PyTorch statements. Tests
+  `tests/gpu/sm90/test_triattn_h100_sm90_batched_gpu.py`, `tests/cpu/kernels/test_triattn_h100_batch_plan.py`; record
+  `docs/records/triattn_h100_batched_20261020.md`.
 - H100 TriMul takes B samples in one call at every width (`integrations.trimul_h100.max_batch(width)`, `MAX_BATCH_BY_WIDTH`, 48 at
   D64 / 128 / 256 / 384 / 512; `MAX_BATCH` keeps its D64 meaning): bidirectional and single direction, inference and training, tokens
   b-major, a token mask and row-dropout scale per sample. D128 on the native kernels (K1 / K3, `save_k3`, B1 with a separate
