@@ -145,6 +145,9 @@ class BenchConfig(BaseModel):
     apb_n_head: int = 8
     #: AttentionPairBias: constant on the gate logits (Chai-1: 1.0; not a yaml key: `+apb_gate_bias=1.0`). Engine rungs only.
     apb_gate_bias: float = 0.0
+    #: attention_pair_bias samples per call (B; MiniWorld's confidence head calls it with its N diffusion samples). Not a yaml
+    #: key: `+apb_batch=5`.
+    apb_batch: int = 1
     #: dit (token) heads: 16 (x 48 at d_single_token 768, the registry row); 24 (x 32) / 12 (x 64) at 768, 16 x 64 at
     #: `+d_single_token=1024`. Not a yaml key: `+tdit_n_head=24`.
     tdit_n_head: int = 16
@@ -2811,7 +2814,8 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     """AttentionPairBias (the Pairformer single track), `modules/attention_pair_bias`.
 
     MiniWorld's shape (registry_module.csv): d_single=`conf.d_single` (384), d_pair=`conf.d_pair`
-    (128), `conf.apb_n_head` heads (8 x 48, the registry row; 16 x 24 = AF3), B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
+    (128), `conf.apb_n_head` heads (8 x 48, the registry row; 16 x 24 = AF3), B=`conf.apb_batch` (1), L=`seq_len`, token key mask,
+    use_qk_norm=False; residual inside.
 
     * pytorch        -- the module's statements (SDPA with the additive pair bias).
     * portable       -- the `portable` spec (miniworld under settings.force_portable_kernels): portable LayerNorms + the augmented-attention
@@ -2931,9 +2935,10 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     model = _place(model, conf, dtype).train(is_train)
 
     torch.manual_seed(1)
-    single = torch.randn(1, seq_len, conf.d_single, device=DEVICE, dtype=dtype)
-    pair = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
-    mask = torch.rand(1, seq_len, device=DEVICE) > conf.mask_prob
+    nb = conf.apb_batch
+    single = torch.randn(nb, seq_len, conf.d_single, device=DEVICE, dtype=dtype)
+    pair = torch.randn(nb, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    mask = torch.rand(nb, seq_len, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
     anthropic_path = (
         _anthropic_apb_composition(
