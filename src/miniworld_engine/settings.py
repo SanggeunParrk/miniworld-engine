@@ -422,6 +422,10 @@ class Settings:
     #: merged by ``ksplit_combine``). None picks it per (L, heads) (``kernels.augmented_attention.cuda.sm100.apb_ksplit``); 1 runs
     #: the unsplit cores (bitwise the pre-split results); n > 1 forces n chunks where n divides the key blocks (ceil(L / 64)).
     apb_b200_ksplit: int | None = None
+    #: B200 AttentionPairBias: True (default) runs each op's launch sequence in C++ (the torch ops ``apb_b200::train_fwd`` /
+    #: ``train_bwd`` / ``infer``: one call per op, no per-launch Python); False keeps the Python sequence (the same kernels and
+    #: GEMMs, so the same bits; the A/B switch).
+    apb_b200_host: bool = True
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None

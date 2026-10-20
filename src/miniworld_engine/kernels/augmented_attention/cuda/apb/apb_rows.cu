@@ -30,9 +30,16 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cstdlib>
+#include <cstring>
 #include <map>
 #include <memory>
 #include <type_traits>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#ifdef APB_SM100_HOST
+#include <torch/library.h>
+#endif
 #ifdef APB_H100_FP32_SHADOW
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_forward.h>
 #include <ATen/native/transformers/cuda/mem_eff_attention/kernel_backward.h>
@@ -141,17 +148,18 @@ __device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][DPW / 1
   }
 }
 
+// Batched: S samples, pair [S, L, L, DPW], mask [S, L], bias [S, NH, L, L]; a tile's query row i runs over the S L rows.
 // ST (optional): the (mean, rstd) of every pair row, for a backward that does not recompute them
 template <int NH, int DPW = DP>
 __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
-    bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg) {
+    bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg, int S) {
   constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
   extern __shared__ __align__(128) uint8_t smem[];
   float (*out_s)[NHP][128 + 4] = reinterpret_cast<float (*)[NHP][128 + 4]>(smem + NSF * FT);
   uint64_t* full = reinterpret_cast<uint64_t*>(smem + NSF * FT + 2 * NHP * (128 + 4) * 4);
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
   const int ntj = (L + 127) / 128;
-  const long ntiles = (long)L * ntj;
+  const long ntiles = (long)S * L * ntj;
   auto issue = [&](long n) {                                                // thread 0: this block's n-th tile into its stage
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) return;
@@ -213,6 +221,7 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
     }
     __syncthreads();                                                        // the stage is read; out_s[n & 1] written
     if (threadIdx.x == 0) issue(n + NSF);
+    const int sb = i / L, il = i - sb * L;                                  // sample, row within it
     for (int task = threadIdx.x; task < NH * 16; task += FNT) {             // (head, 8 keys) per task: 16-B stores
       const int h = task >> 4, ch = task & 15, j = j0 + ch * 8;
       if (ch * 8 >= rows) continue;
@@ -220,10 +229,10 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         float a = os[h][ch * 8 + 2 * e], bb = os[h][ch * 8 + 2 * e + 1];
-        if (MASK) { if (!MASK[j + 2 * e]) a = neg; if (!MASK[j + 2 * e + 1]) bb = neg; }
+        if (MASK) { if (!MASK[(long)sb * L + j + 2 * e]) a = neg; if (!MASK[(long)sb * L + j + 2 * e + 1]) bb = neg; }
         o[e] = pack2(a, bb);
       }
-      *reinterpret_cast<uint4*>(OUT + ((long)h * L + i) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
+      *reinterpret_cast<uint4*>(OUT + (((long)sb * NH + h) * L + il) * L + j) = make_uint4(o[0], o[1], o[2], o[3]);
     }
   }
 }
@@ -278,7 +287,7 @@ __device__ __forceinline__ void ldsm_x4_trans(uint32_t (&r)[4], uint32_t addr) {
 }
 template <int NH>
 __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __grid_constant__ CUtensorMap tmz, const __grid_constant__ CUtensorMap tmd,
-    const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride) {
+    const bf* __restrict__ W, bf* __restrict__ DZ, float* __restrict__ AWF, float* __restrict__ AHS, int L, float eps, int acc_stride, int S) {
   constexpr int NT8 = nhp<NH>() / 8, BW = NT8, BT = bwd_tile<NH>(), NSB = bwd_stages<NH>();   // BW: dx^ B words per tile (one per group)
   constexpr bool YP = NH == 8;                                              // S2 from the projection y (8) or a first dx^ pass (16)
   constexpr int RING = NSB * BT > 8 * (NH * DP + NH) * 4 ? NSB * BT : 8 * (NH * DP + NH) * 4;
@@ -288,7 +297,7 @@ __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __gr
   uint32_t* bwt = reinterpret_cast<uint32_t*>(smem + RING + 64);          // [u][lane][4 tiles x BW words]: Wf[heads][f(t, g)]
   const int lane = threadIdx.x & 31, warp = threadIdx.x >> 5, g = lane >> 2, q = lane & 3;
   const int ntj = (L + 127) / 128;
-  const long ntiles = (long)L * ntj;
+  const long ntiles = (long)S * L * ntj;                                    // i runs over the S L query rows (dbias [S, NH, L, L])
   auto issue = [&](long n) {
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) return;
@@ -299,7 +308,7 @@ __global__ void __launch_bounds__(256, bwd_bps<NH>()) pair_bias_bwd_k(const __gr
     const int row = i * L + j0;
     tma2d(st, &tmz, 0, row, fb);
     tma2d(st + BT_PAIR / 2, &tmz, 64, row, fb);
-    tma3d(st + BT_PAIR, &tmd, j0, i, 0, fb);
+    tma3d(st + BT_PAIR, &tmd, j0, i % L, (i / L) * NH, fb);
   };
   if (threadIdx.x == 0) {
     for (int k = 0; k < NSB; ++k) mbar_init(&full[k], 1);
@@ -562,7 +571,7 @@ __global__ void __launch_bounds__(NT) gate_rows_k(const float* __restrict__ O, c
 // HL lanes (W / NH / (4 V)).
 template <int V, int HL>
 __global__ void __launch_bounds__(NT) gate_bwd_k(const bf* __restrict__ DOG, const float* __restrict__ O, const bf* __restrict__ QKVG,
-    bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M) {
+    bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M, int L) {
   constexpr int WD = 128 * V;
   const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
   if (r >= M) return;
@@ -582,13 +591,13 @@ __global__ void __launch_bounds__(NT) gate_bwd_k(const bf* __restrict__ DOG, con
   float dsum = dotv<V>(d_o, o);
 #pragma unroll
   for (int o_ = 1; o_ < HL; o_ <<= 1) dsum += __shfl_xor_sync(0xffffffffu, dsum, o_);
-  if (lane % HL == 0) DD[(long)(lane / HL) * M + r] = dsum;
+  if (lane % HL == 0) DD[((r / L) * (WD / (4 * V * HL)) + lane / HL) * L + r % L] = dsum;   // [S, NH, L]
 }
 
 // gate_bwd with a head per lane (24 x 16, 12 x 32; W = 384): lane h < NH owns head h's HC columns, the rest idle
 template <int NH, int HC>
 __global__ void __launch_bounds__(NT) gate_bwd_hl_k(const bf* __restrict__ DOG, const float* __restrict__ O, const bf* __restrict__ QKVG,
-    bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M) {
+    bf* __restrict__ DOB, float* __restrict__ DD, bf* __restrict__ DQKVG, int M, int L) {
   constexpr int WD = NH * HC, V = HC / 4;
   const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
   const int lane = threadIdx.x & 31;
@@ -606,7 +615,7 @@ __global__ void __launch_bounds__(NT) gate_bwd_hl_k(const bf* __restrict__ DOG, 
     V4<bf>::store(DOB + r * WD + c + 4 * k, d_o[k]);
     V4<bf>::store(DQKVG + r * 4 * WD + 3 * WD + c + 4 * k, dg[k]);
   }
-  DD[(long)lane * M + r] = dotv<V>(d_o, o);
+  DD[((r / L) * NH + lane) * L + r % L] = dotv<V>(d_o, o);                // [S, NH, L]
 }
 
 // Key-split combine (the sm_100a forward cores built -DKSPLIT): row r of the [A L] rows (sample r / L, row r % L), head h. The NS
@@ -655,14 +664,17 @@ __global__ void __launch_bounds__(CNT) ksplit_combine_k(const float* __restrict_
 
 // dq (NCH key-chunk partials [NCH, M, W], added in chunk order: deterministic) | dk | dv fp32 [M, W] -> dqkvg[:, 0:3W] bf16;
 // ABQ[c] += sum_r dq (bf16-rounded, what the GEMMs see)
+// Rows r = (block, warp) + k (grid RW) (one row per warp when the grid covers M; fewer blocks than M / RW walk several, so a
+// capped grid bounds the partial rows a deterministic caller reduces); the column sum of each warp's rows in row order.
 template <int V>
 __global__ void __launch_bounds__(NT) qkv_bwd_k(const float* __restrict__ DQ, const float* __restrict__ DK, const float* __restrict__ DV,
     bf* __restrict__ DQKVG, float* __restrict__ ABQ, int M, int NCH, int acc_stride) {
   constexpr int WD = 128 * V;
   __shared__ __align__(16) float red[RW * WD];
-  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
-  float4 v[V] = {};
-  if (r < M) {
+  float4 cs[V] = {};
+  bool first = true;
+  for (long r = (long)blockIdx.x * RW + (threadIdx.x >> 5); r < M; r += (long)gridDim.x * RW) {
+    float4 v[V];
     ldv<V>(DQ + r * WD, v);
     for (int c = 1; c < NCH; ++c) {
       float4 p[V];
@@ -676,8 +688,11 @@ __global__ void __launch_bounds__(NT) qkv_bwd_k(const float* __restrict__ DQ, co
     float4 t[V];
     ldv<V>(DK + r * WD, t); stv<V>(DQKVG + r * 4 * WD + WD, t);
     ldv<V>(DV + r * WD, t); stv<V>(DQKVG + r * 4 * WD + 2 * WD, t);
+#pragma unroll
+    for (int k = 0; k < V; ++k) cs[k] = first ? v[k] : add4(cs[k], v[k]);
+    first = false;
   }
-  colsum_add<V>(v, red, ABQ, acc_stride);
+  colsum_add<V>(cs, red, ABQ, acc_stride);
 }
 
 // x^ = LN(x); dx = dy + rstd (dxa w - mean(dxa w) - x^ mean(dxa w x^)); ALNW += dxa x^, ALNB += dxa
@@ -687,9 +702,9 @@ __global__ void __launch_bounds__(NT) ln_bwd_k(const bf* __restrict__ DXA, const
     int acc_stride) {
   constexpr int D = 128 * V;
   __shared__ __align__(16) float red[RW * D];
-  const long r = (long)blockIdx.x * RW + (threadIdx.x >> 5);
   float4 aw[V] = {}, ab[V] = {};
-  if (r < M) {
+  bool first = true;
+  for (long r = (long)blockIdx.x * RW + (threadIdx.x >> 5); r < M; r += (long)gridDim.x * RW) {   // (as qkv_bwd_k)
     float4 dxa[V], xh[V], w[V], g[V], dy[V];
     ldv<V>(DXA + r * D, dxa); ldv<V>(X + r * D, xh); ldv<V>(LW, w); ldv<V>(DY + r * D, dy);
     const float2 st = ST[r];
@@ -697,9 +712,10 @@ __global__ void __launch_bounds__(NT) ln_bwd_k(const bf* __restrict__ DXA, const
     for (int k = 0; k < V; ++k) {
       xh[k] = make_float4((xh[k].x - st.x) * st.y, (xh[k].y - st.x) * st.y, (xh[k].z - st.x) * st.y, (xh[k].w - st.x) * st.y);
       g[k] = mul4(dxa[k], w[k]);
-      aw[k] = mul4(dxa[k], xh[k]);
-      ab[k] = dxa[k];
+      aw[k] = first ? mul4(dxa[k], xh[k]) : add4(aw[k], mul4(dxa[k], xh[k]));
+      ab[k] = first ? dxa[k] : add4(ab[k], dxa[k]);
     }
+    first = false;
     const float m1 = warp_sum(sumv<V>(g)) * (1.f / D), m2 = warp_sum(dotv<V>(g, xh)) * (1.f / D);
 #pragma unroll
     for (int k = 0; k < V; ++k)
@@ -846,8 +862,12 @@ void chk_acc(const at::Tensor& acc, const Geo& G) {
   TORCH_CHECK((acc.dim() == 1 && acc.numel() == n) || (acc.dim() == 2 && acc.size(1) == n), "acc: ", n, " floats per partial");
 }
 int nsm_of(const at::Tensor& t) {
+  static int cache[64] = {};                                                // per device (cudaDeviceGetAttribute costs host time per call)
+  const int dev = t.get_device();
+  if (dev >= 0 && dev < 64 && cache[dev]) return cache[dev];
   int nsm = 0;
-  C10_CUDA_CHECK(cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, t.get_device()));
+  C10_CUDA_CHECK(cudaDeviceGetAttribute(&nsm, cudaDevAttrMultiProcessorCount, dev));
+  if (dev >= 0 && dev < 64) cache[dev] = nsm;
   return nsm;
 }
 
@@ -859,10 +879,11 @@ void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::option
     C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
     attr = true;
   }
-  const long ntiles = L * ((L + 127) / 128);
+  const int64_t ns = z.numel() / (L * L * DPW);                             // samples
+  const long ntiles = ns * L * ((L + 127) / 128);
   const long per_sm = DPW > 128 ? 1 : 2;  // the 256-wide ring fills the SM's shared memory
   pair_bias_fwd_k<NH, DPW><<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT, fwd_smem<NH, DPW>(), S()>>>(
-      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg);
+      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg, (int)ns);
 }
 // d_pair 128 (8 / 12 / 16 / 24 heads) or 256 (8 heads); ``stats`` (optional [L L, 2] fp32) receives every row's (mean, rstd)
 void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, c10::optional<at::Tensor> stats, int64_t L, double eps,
@@ -870,11 +891,13 @@ void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> ma
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
   const int64_t nh = w.size(0), dp = w.size(1);
   TORCH_CHECK(dp == DP || (dp == 2 * DP && (nh == 8 || nh == 16)), "pair_bias: d_pair 128, or 256 with 8 or 16 heads");
-  TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * dp && w.numel() == nh * dp && out.numel() == nh * L * L, "pair_bias_fwd shapes");
+  const int64_t ns = z.numel() / (L * L * dp);
+  TORCH_CHECK(L % 16 == 0 && ns >= 1 && z.numel() == ns * L * L * dp && w.numel() == nh * dp && out.numel() == ns * nh * L * L,
+              "pair_bias_fwd shapes: pair [S, L, L, d_pair], bias [S, H, L, L]");
   TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias: 8, 12, 16 or 24 heads");
-  if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == L, "mask [L]"); }
+  if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == ns * L, "mask [S, L]"); }
   float2* st = nullptr;
-  if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * L * L, "stats [L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
+  if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * ns * L * L, "stats [S L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
   const at::cuda::CUDAGuard gd(z.device());
   if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, L, eps, neg); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg); }
   else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, L, eps, neg);
@@ -906,31 +929,62 @@ CUtensorMap tensor_map(void* ptr, CUtensorMapDataType dt, int rank, const cuuint
   return m;
 }
 
+// Encoded maps cached by everything that defines them (address, type, dims, strides, box, swizzle): in steady state the caching
+// allocator hands the same addresses back every step, and an encode costs microseconds of host time. A map holds no tensor.
+struct MapKey {
+  uint64_t v[9];
+  bool operator==(const MapKey& o) const { return std::memcmp(v, o.v, sizeof(v)) == 0; }
+};
+struct MapKeyHash {
+  size_t operator()(const MapKey& k) const {
+    uint64_t h = 1469598103934665603ull;
+    for (uint64_t x : k.v) h = (h ^ x) * 1099511628211ull;
+    return (size_t)h;
+  }
+};
+std::unordered_map<MapKey, CUtensorMap, MapKeyHash>* g_maps = new std::unordered_map<MapKey, CUtensorMap, MapKeyHash>();
+std::mutex* g_maps_mu = new std::mutex();
+CUtensorMap cached_map(const void* p, CUtensorMapDataType dt, int rank, const cuuint64_t* d, const cuuint64_t* s, const cuuint32_t* b,
+              CUtensorMapSwizzle sw) {
+  MapKey k{{(uint64_t)(uintptr_t)p, (uint64_t)dt | ((uint64_t)rank << 8) | ((uint64_t)sw << 16), d[0], d[1], rank == 3 ? d[2] : 0, s[0],
+            rank == 3 ? s[1] : 0, (uint64_t)b[0] | ((uint64_t)b[1] << 32), rank == 3 ? (uint64_t)b[2] : 0}};
+  std::lock_guard<std::mutex> lk(*g_maps_mu);
+  const auto it = g_maps->find(k);
+  if (it != g_maps->end()) return it->second;
+  if (g_maps->size() >= 4096) g_maps->clear();
+  const CUtensorMap m = tensor_map(const_cast<void*>(p), dt, rank, d, s, b, sw);
+  g_maps->emplace(k, m);
+  return m;
+}
+
 template <int NH>
 void pair_bias_bwd_t(const at::Tensor& z, const at::Tensor& dbias, const at::Tensor& w, at::Tensor& dz, at::Tensor& acc, int64_t L, double eps,
                      const Geo& G) {
-  const cuuint64_t zd[2] = {(cuuint64_t)DP, (cuuint64_t)(L * L)}, zs[1] = {DP * 2};
+  const int64_t ns = z.numel() / (L * L * DP);                              // samples
+  const cuuint64_t zd[2] = {(cuuint64_t)DP, (cuuint64_t)(ns * L * L)}, zs[1] = {DP * 2};
   const cuuint32_t zb[2] = {64, 128};
-  const CUtensorMap mz = tensor_map(z.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, zd, zs, zb, CU_TENSOR_MAP_SWIZZLE_128B);
-  const cuuint64_t dd[3] = {(cuuint64_t)L, (cuuint64_t)L, NH}, ds[2] = {(cuuint64_t)L * 4, (cuuint64_t)(L * L * 4)};
+  const CUtensorMap mz = cached_map(z.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 2, zd, zs, zb, CU_TENSOR_MAP_SWIZZLE_128B);
+  const cuuint64_t dd[3] = {(cuuint64_t)L, (cuuint64_t)L, (cuuint64_t)(ns * NH)}, ds[2] = {(cuuint64_t)L * 4, (cuuint64_t)(L * L * 4)};
   const cuuint32_t db[3] = {128, 1, NH};
-  const CUtensorMap md = tensor_map(dbias.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 3, dd, ds, db, CU_TENSOR_MAP_SWIZZLE_NONE);
+  const CUtensorMap md = cached_map(dbias.data_ptr(), CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 3, dd, ds, db, CU_TENSOR_MAP_SWIZZLE_NONE);
   static bool attr = false;
   if (!attr) {
     C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_bwd_k<NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, bwd_smem<NH>()));
     attr = true;
   }
-  const long ntiles = L * ((L + 127) / 128);
+  const long ntiles = ns * L * ((L + 127) / 128);
   float* awf = P<float>(acc) + 2 * G.d + width(G);
   pair_bias_bwd_k<NH><<<(unsigned)std::min<long>((long)bwd_bps<NH>() * nsm_of(z), ntiles), 256, bwd_smem<NH>(), S()>>>(
-      mz, md, CP<bf>(w), P<bf>(dz), awf, awf + NH * DP, (int)L, (float)eps, acc.dim() == 2 ? (int)acc.size(1) : 0);
+      mz, md, CP<bf>(w), P<bf>(dz), awf, awf + NH * DP, (int)L, (float)eps, acc.dim() == 2 ? (int)acc.size(1) : 0, (int)ns);
 }
 void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, at::Tensor acc, int64_t L, double eps, int64_t d) {
   chk(z, at::kBFloat16, "pair"); chk(dbias, at::kFloat, "dbias"); chk(w, at::kBFloat16, "wf"); chk(dz, at::kBFloat16, "dpair");
   const int64_t nh = w.size(0);
   const Geo G = geo(nh, d);
   chk_acc(acc, G);
-  TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * DP && dbias.numel() == nh * L * L, "pair_bias_bwd shapes");
+  const int64_t ns = z.numel() / (L * L * DP);
+  TORCH_CHECK(L % 16 == 0 && ns >= 1 && z.numel() == ns * L * L * DP && dbias.numel() == ns * nh * L * L,
+              "pair_bias_bwd shapes: pair [S, L, L, 128], dbias [S, H, L, L]");
   const at::cuda::CUDAGuard gd(z.device());
   if (nh == 8) pair_bias_bwd_t<8>(z, dbias, w, dz, acc, L, eps, G);
   else if (nh == 12) pair_bias_bwd_t<12>(z, dbias, w, dz, acc, L, eps, G);
@@ -940,9 +994,9 @@ void pair_bias_bwd(at::Tensor z, at::Tensor dbias, at::Tensor w, at::Tensor dz, 
 }
 
 // Blocks of pair_bias_bwd's grid at L (the partial rows it writes): the Hopper accumulator's row count for its columns.
-int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L) {
+int64_t pair_bwd_blocks(at::Tensor like, int64_t nh, int64_t L, int64_t ns) {
   const int bps = nh == 8 ? 2 : 1;
-  return std::min<int64_t>((int64_t)bps * nsm_of(like), L * ((L + 127) / 128));
+  return std::min<int64_t>((int64_t)bps * nsm_of(like), ns * L * ((L + 127) / 128));
 }
 
 void ln_rows(at::Tensor x, at::Tensor lw, at::Tensor lb, at::Tensor xa, c10::optional<at::Tensor> st, double eps,
@@ -1019,20 +1073,24 @@ void gate_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at:
   const int64_t M = o.size(0), W = o.size(1);
   chk(dog, at::kBFloat16, "dog"); chk(o, at::kFloat, "o"); chk(dob, at::kBFloat16, "dob"); chk(dd, at::kFloat, "dd");
   chk(dqkvg, at::kBFloat16, "dqkvg");
-  const int64_t nh = dd.size(0);
+  // dd: [NH, M] (one sample) or [S, NH, L] (S samples of L rows)
+  const int64_t nh = dd.dim() == 3 ? dd.size(1) : dd.size(0), L = dd.dim() == 3 ? dd.size(2) : M;
   TORCH_CHECK((W == 384 && (nh == 8 || nh == 12 || nh == 24)) || (W == 512 && nh == 16), "gate_bwd widths");
+  TORCH_CHECK(M % L == 0 && dd.numel() == nh * M, "gate_bwd: dd [NH, M] or [S, NH, L]");
   const at::cuda::CUDAGuard gd(o.device());
+  const int m = (int)M, l = (int)L;
   if (nh == 24)
-    gate_bwd_hl_k<24, 16><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
+    gate_bwd_hl_k<24, 16><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), m, l);
   else if (nh == 12)
-    gate_bwd_hl_k<12, 32><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
-  else if (W == 384) gate_bwd_k<3, 4><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
-  else gate_bwd_k<4, 2><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), (int)M);
+    gate_bwd_hl_k<12, 32><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), m, l);
+  else if (W == 384) gate_bwd_k<3, 4><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), m, l);
+  else gate_bwd_k<4, 2><<<blocks(M), NT, 0, S()>>>(CP<bf>(dog), CP<float>(o), CP<bf>(qkvg), P<bf>(dob), P<float>(dd), P<bf>(dqkvg), m, l);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // dq: [M, W] or key-chunk partials [NCH, M, W]; acc: the step's accumulator (d = d_single locates its dbq slice)
-void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::Tensor acc, int64_t d) {
+// ``parts`` > 0: the grid (and so the partial rows written into a 2-D acc), at most M / RW blocks; 0: one row per warp
+void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::Tensor acc, int64_t d, int64_t parts) {
   const int64_t NCH = dq.dim() == 3 ? dq.size(0) : 1, M = dk.size(0), W = dk.size(1);
   TORCH_CHECK(dq.numel() == NCH * M * W, "qkv_bwd: dq [NCH, M, W]");
   chk(dq, at::kFloat, "dq"); chk(dk, at::kFloat, "dk"); chk(dv, at::kFloat, "dv"); chk(dqkvg, at::kBFloat16, "dqkvg");
@@ -1041,21 +1099,25 @@ void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::
   const at::cuda::CUDAGuard gd(dq.device());
   float* abq = P<float>(acc) + 2 * d;
   const int stride = acc.dim() == 2 ? (int)acc.size(1) : 0;
-  if (W == 384) qkv_bwd_k<3><<<blocks(M), NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
-  else qkv_bwd_k<4><<<blocks(M), NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
+  const unsigned g = parts > 0 ? (unsigned)std::min<int64_t>(parts, blocks(M)) : blocks(M);
+  TORCH_CHECK(acc.dim() == 1 || (int64_t)g <= acc.size(0), "qkv_bwd: more blocks than partial rows");
+  if (W == 384) qkv_bwd_k<3><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
+  else qkv_bwd_k<4><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void ln_bwd(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Tensor dy, at::Tensor dx, at::Tensor acc) {
+void ln_bwd(at::Tensor dxa, at::Tensor x, at::Tensor st, at::Tensor lw, at::Tensor dy, at::Tensor dx, at::Tensor acc, int64_t parts) {
   const int64_t D = lw.numel(), M = x.numel() / D;
   TORCH_CHECK(D == 384 || D == 512, "ln_bwd: d_single 384 or 512");
   chk(dxa, at::kBFloat16, "dxa"); chk(lw, at::kFloat, "lw"); chk(st, at::kFloat, "stats"); chk(acc, at::kFloat, "acc");
   TORCH_CHECK(x.is_contiguous() && dy.is_contiguous() && dx.is_contiguous() && dy.scalar_type() == dx.scalar_type(), "ln_bwd");
   const at::cuda::CUDAGuard gd(x.device());
+  const unsigned g = parts > 0 ? (unsigned)std::min<int64_t>(parts, blocks(M)) : blocks(M);
+  TORCH_CHECK(acc.dim() == 1 || (int64_t)g <= acc.size(0), "ln_bwd: more blocks than partial rows");
   APB_DISPATCH(x.scalar_type(), XT, [&] {
     APB_DISPATCH(dx.scalar_type(), OT, [&] {
       auto k = D == 384 ? ln_bwd_k<XT, OT, 3> : ln_bwd_k<XT, OT, 4>;
-      k<<<blocks(M), NT, 0, S()>>>(CP<bf>(dxa), CP<XT>(x), CP<float2>(st), CP<float>(lw), CP<OT>(dy), P<OT>(dx), P<float>(acc),
+      k<<<g, NT, 0, S()>>>(CP<bf>(dxa), CP<XT>(x), CP<float2>(st), CP<float>(lw), CP<OT>(dy), P<OT>(dx), P<float>(acc),
                                    P<float>(acc) + D, (int)M, acc.dim() == 2 ? (int)acc.size(1) : 0);
     });
   });
@@ -1151,7 +1213,353 @@ void finalize(at::Tensor dwp, at::Tensor dwo, at::Tensor acc, at::Tensor wb, at:
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// Live master-weight conversion for the Hopper full-module path. One CUDA launch,
+// including the small LN vectors; matching-dtype leaves remain views of originals.
+struct LeafCasts {
+  const void* src[10];
+  void* dst[10];
+  int64_t sizes[10];
+  int blocks[10];
+  bool source_float[10], target_float[10];
+};
+__global__ void cast_leaves_k(LeafCasts args) {
+  int block = blockIdx.x;
+  for (int j = 0; j < 10; ++j) {
+    if (block < args.blocks[j]) {
+      const int64_t i = (int64_t)block * blockDim.x + threadIdx.x;
+      if (i < args.sizes[j]) {
+        const float value = args.source_float[j] ? static_cast<const float*>(args.src[j])[i]
+          : __bfloat162float(static_cast<const bf*>(args.src[j])[i]);
+        if (args.target_float[j]) static_cast<float*>(args.dst[j])[i] = value;
+        else static_cast<bf*>(args.dst[j])[i] = __float2bfloat16_rn(value);
+      }
+      return;
+    }
+    block -= args.blocks[j];
+  }
+}
+std::vector<at::Tensor> cast_leaves(std::vector<at::Tensor> leaves) {
+  TORCH_CHECK(leaves.size() == 10, "APB expects ten parameter leaves");
+  const at::cuda::CUDAGuard gd(leaves[0].device());
+  LeafCasts args{};
+  int blocks = 0;
+  std::vector<at::Tensor> out;
+  for (int j = 0; j < 10; ++j) {
+    const auto& t = leaves[j];
+    TORCH_CHECK(t.is_cuda() && t.device() == leaves[0].device() && t.is_contiguous()
+      && (t.scalar_type() == at::kFloat || t.scalar_type() == at::kBFloat16), "unsupported APB parameter");
+    const auto dtype = j == 0 || j == 1 || j == 8 ? at::kFloat : at::kBFloat16;
+    out.push_back(t.scalar_type() == dtype ? t : at::empty(t.sizes(), t.options().dtype(dtype)));
+    if (t.scalar_type() == dtype) continue;
+    args.src[j] = t.data_ptr(); args.dst[j] = out.back().data_ptr();
+    args.sizes[j] = t.numel(); args.blocks[j] = (t.numel() + 255) / 256;
+    args.source_float[j] = t.scalar_type() == at::kFloat;
+    args.target_float[j] = dtype == at::kFloat;
+    blocks += args.blocks[j];
+  }
+  if (blocks) cast_leaves_k<<<blocks, 256, 0, S()>>>(args);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+std::vector<at::Tensor> cast_grads(std::vector<at::Tensor> grads, std::vector<bool> target_float) {
+  TORCH_CHECK(grads.size() == 10 && target_float.size() == 10, "APB expects ten gradients");
+  const at::cuda::CUDAGuard gd(grads[0].device());
+  LeafCasts args{};
+  int blocks = 0;
+  std::vector<at::Tensor> out;
+  for (int j = 0; j < 10; ++j) {
+    const auto& t = grads[j];
+    chk(t, at::kFloat, "APB gradient");
+    out.push_back(target_float[j] ? t : at::empty(t.sizes(), t.options().dtype(at::kBFloat16)));
+    if (target_float[j]) continue;
+    args.src[j] = t.data_ptr(); args.dst[j] = out.back().data_ptr();
+    args.sizes[j] = t.numel(); args.blocks[j] = (t.numel() + 255) / 256;
+    args.source_float[j] = true; args.target_float[j] = false;
+    blocks += args.blocks[j];
+  }
+  if (blocks) cast_leaves_k<<<blocks, 256, 0, S()>>>(args);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+#ifdef APB_SM100_HOST
+// ------------------------------------------------------------------------------------------------ B200 host path (sm_100 build)
+// One C++ call per op, registered as the torch ops apb_b200::train_fwd / train_bwd / infer: every launch of the training forward,
+// its backward and the inference step -- the row and pair kernels above, the cuBLAS GEMMs (the same ATen calls as the Python path,
+// so the same bits), the sm_100a attention cubins (driver launches with the TMA descriptors encoded here). The cubins are built
+// by the Python side (nvcc 13.1) and resolved once per key through ``set_resolver``'s callback.
+struct CoreFn { CUfunction f = nullptr; int smem = 0; };
+std::mutex* g_core_mu = new std::mutex();                                    // leaked on purpose: no destructor runs at exit
+std::unordered_map<std::string, CoreFn>* g_cores = new std::unordered_map<std::string, CoreFn>();
+py::object* g_resolver = new py::object();
+
+void set_resolver(py::object fn) { *g_resolver = std::move(fn); }
+
+// key "<kind>/<device>/<heads>/<d_single>/<variant>", kind fwd2 | inf | dkv | dqb, variant 1 = the key-split build
+CoreFn core_fn(const char* kind, int dev, const Geo& G, int variant) {
+  const std::string key = std::string(kind) + "/" + std::to_string(dev) + "/" + std::to_string(G.nh) + "/" + std::to_string(G.d) +
+                          "/" + std::to_string(variant);
+  {
+    std::lock_guard<std::mutex> lk(*g_core_mu);
+    const auto it = g_cores->find(key);
+    if (it != g_cores->end()) return it->second;
+  }
+  CoreFn f;
+  {
+    py::gil_scoped_acquire gil;
+    TORCH_CHECK(static_cast<bool>(*g_resolver), "apb_b200: no cubin resolver (load the ops through apb.host_ops())");
+    const py::tuple t = (*g_resolver)(key);
+    f.f = reinterpret_cast<CUfunction>(t[0].cast<uintptr_t>());
+    f.smem = t[1].cast<int>();
+  }
+  std::lock_guard<std::mutex> lk(*g_core_mu);
+  (*g_cores)[key] = f;
+  return f;
+}
+
+using LaunchFn = CUresult (*)(CUfunction, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, unsigned, CUstream, void**, void**);
+void launch_core(const CoreFn& k, unsigned grid, void** args) {
+  static LaunchFn fn = [] {
+    void* p = nullptr;
+    cudaDriverEntryPointQueryResult qr;
+    C10_CUDA_CHECK(cudaGetDriverEntryPoint("cuLaunchKernel", &p, cudaEnableDefault, &qr));
+    TORCH_CHECK(qr == cudaDriverEntryPointSuccess && p, "cuLaunchKernel unavailable");
+    return reinterpret_cast<LaunchFn>(p);
+  }();
+  const CUresult r = fn(k.f, grid, 1, 1, 384, 1, 1, (unsigned)k.smem, reinterpret_cast<CUstream>(S()), args, nullptr);
+  TORCH_CHECK(r == CUDA_SUCCESS, "apb_b200: cuLaunchKernel failed: ", (int)r);
+}
+
+struct alignas(64) TM { CUtensorMap m; };
+// bf16 / fp32 tiled maps, innermost dimension first (strides in bytes)
+TM tm2(const void* p, CUtensorMapDataType dt, uint64_t d0, uint64_t d1, uint64_t s1, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw) {
+  const cuuint64_t d[2] = {d0, d1}, s[1] = {s1};
+  const cuuint32_t b[2] = {b0, b1};
+  return TM{cached_map(p, dt, 2, d, s, b, sw)};
+}
+TM tm3(const void* p, CUtensorMapDataType dt, uint64_t d0, uint64_t d1, uint64_t d2, uint64_t s1, uint64_t s2, uint32_t b0, uint32_t b1,
+       CUtensorMapSwizzle sw) {
+  const cuuint64_t d[3] = {d0, d1, d2}, s[2] = {s1, s2};
+  const cuuint32_t b[3] = {b0, b1, 1};
+  return TM{cached_map(p, dt, 3, d, s, b, sw)};
+}
+constexpr CUtensorMapDataType BF16 = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, F32 = CU_TENSOR_MAP_DATA_TYPE_FLOAT32;
+constexpr CUtensorMapSwizzle SW128 = CU_TENSOR_MAP_SWIZZLE_128B, SW64 = CU_TENSOR_MAP_SWIZZLE_64B;
+constexpr float NEG_MASK = -1e30f;                                          // masked keys (finite: integrations' NEG)
+
+// [planes, L, L] bf16 -> [planes, L(key), L(query)] (attn_dkv reads its key rows contiguously; glue.cu's bias_transpose_bf16)
+__global__ void __launch_bounds__(256) bias_transpose_k(const bf* __restrict__ src, bf* __restrict__ dst, int L) {
+  __shared__ bf t[32][34];
+  const size_t base = (size_t)blockIdx.z * L * L;
+  const int i0 = blockIdx.y * 32, j0 = blockIdx.x * 32;
+#pragma unroll
+  for (int k = 0; k < 32; k += 8) t[threadIdx.y + k][threadIdx.x] = src[base + (size_t)(i0 + threadIdx.y + k) * L + j0 + threadIdx.x];
+  __syncthreads();
+#pragma unroll
+  for (int k = 0; k < 32; k += 8) dst[base + (size_t)(j0 + threadIdx.y + k) * L + i0 + threadIdx.x] = t[threadIdx.x][threadIdx.y + k];
+}
+
+at::TensorOptions opts(const at::Tensor& like, at::ScalarType dt) { return like.options().dtype(dt); }
+c10::optional<at::Tensor> flat_mask(const c10::optional<at::Tensor>& mask, int64_t n) {
+  if (!mask) return c10::nullopt;
+  return mask->reshape({n}).to(at::kBool).contiguous();
+}
+
+// training forward core + gate: O [M, W] fp32, LSE [S H, L] (log2), og [M, W] bf16. ns > 1: the key split and its combine.
+void fwd_core(const at::Tensor& qkvg, const at::Tensor& bias, int64_t L, const Geo& G, int64_t ns, at::Tensor& O, at::Tensor& LSE,
+              at::Tensor& og) {
+  const int64_t M = qkvg.size(0), NB = M / L, W = width(G), H = G.nh, dh = G.dhp;
+  const char* b = static_cast<const char*>(qkvg.data_ptr());
+  const uint64_t rs = 4 * W * 2;
+  TM mq = tm2(b, BF16, W, M, rs, dh, 128, SW128), mk = tm2(b + W * 2, BF16, W, M, rs, dh, 64, SW128),
+     mv = tm2(b + 2 * W * 2, BF16, W, M, rs, dh, 64, SW128), mb = tm2(bias.data_ptr(), BF16, L, NB * H * L, L * 2, 64, 128, SW128);
+  const unsigned grid = (unsigned)std::min<int64_t>(nsm_of(qkvg), ((L / 128 + 1) / 2) * H * ns * NB);
+  int iL = (int)L, iA = (int)NB, iN = (int)ns;
+  O = at::empty({M, W}, opts(qkvg, at::kFloat));
+  LSE = at::empty({NB * H, L}, opts(qkvg, at::kFloat));
+  og = at::empty({M, W}, qkvg.options());
+  if (ns == 1) {
+    TM moa = tm2(O.data_ptr(), F32, W, M, W * 4, 32, 128, SW128), mob = tm2(O.data_ptr(), F32, W, M, W * 4, 16, 128, SW64);
+    void* po = O.data_ptr(); void* pl = LSE.data_ptr();
+    void* args[] = {&mq, &mk, &mv, &mb, &moa, &mob, &po, &pl, &iL, &iA};
+    launch_core(core_fn("fwd2", qkvg.get_device(), G, 0), grid, args);
+    gate_rows(O, qkvg, og);
+    return;
+  }
+  const at::Tensor OP = at::empty({ns, M, W}, opts(qkvg, at::kFloat)), LP = at::empty({ns, NB, H, L}, opts(qkvg, at::kFloat));
+  TM moa = tm2(OP.data_ptr(), F32, W, ns * M, W * 4, 32, 128, SW128), mob = tm2(OP.data_ptr(), F32, W, ns * M, W * 4, 16, 128, SW64);
+  void* po = OP.data_ptr(); void* pl = LP.data_ptr();
+  void* args[] = {&mq, &mk, &mv, &mb, &moa, &mob, &po, &pl, &iL, &iA, &iN};
+  launch_core(core_fn("fwd2", qkvg.get_device(), G, 1), grid, args);
+  ksplit_combine(OP, LP, qkvg, O, LSE, og, L, H, dh);
+}
+
+// inference core: sigmoid(g) o over the q columns of qkvg (logits in exp2 units)
+void inf_core(at::Tensor& qkvg, const at::Tensor& bias, int64_t L, const Geo& G, int64_t ns) {
+  const int64_t M = qkvg.size(0), NB = M / L, W = width(G), H = G.nh, dh = G.dhp;
+  const char* b = static_cast<const char*>(qkvg.data_ptr());
+  const uint64_t rs = 4 * W * 2;
+  auto t3 = [&](const char* p, uint32_t rows) { return tm3(p, BF16, W, L, NB, rs, L * rs, dh, rows, SW128); };
+  TM mq = t3(b, 128), mk = t3(b + W * 2, 64), mv = t3(b + 2 * W * 2, 64), mg = t3(b + 3 * W * 2, 128);
+  TM mb = tm3(bias.data_ptr(), BF16, L, L, NB * H, L * 2, L * L * 2, 64, 128, SW128);
+  const unsigned grid = (unsigned)std::min<int64_t>(nsm_of(qkvg), (((L + 127) / 128 + 1) / 2) * H * ns * NB);
+  int iL = (int)L, iA = (int)NB, iN = (int)ns;
+  if (ns == 1) {
+    void* args[] = {&mq, &mk, &mv, &mb, &mg, &mq, &iL, &iA};
+    launch_core(core_fn("inf", qkvg.get_device(), G, 0), grid, args);
+    return;
+  }
+  const at::Tensor OP = at::empty({ns, M, W}, opts(qkvg, at::kFloat)), LP = at::empty({ns, NB, H, L}, opts(qkvg, at::kFloat));
+  TM mpa = tm3(OP.data_ptr(), F32, W, L, ns * NB, W * 4, L * W * 4, 32, 128, SW128);
+  TM mpb = tm3(OP.data_ptr(), F32, W, L, ns * NB, W * 4, L * W * 4, 16, 128, SW64);
+  void* pl = LP.data_ptr();
+  void* args[] = {&mq, &mk, &mv, &mb, &mg, &mq, &iL, &iA, &mpa, &mpb, &pl, &iN};
+  launch_core(core_fn("inf", qkvg.get_device(), G, 1), grid, args);
+  ksplit_combine(OP, LP, qkvg, c10::nullopt, c10::nullopt, c10::nullopt, L, H, dh);
+}
+
+// backward core: dQ as L / 128 key-chunk slices [L / 128, M, W], dK, dV [M, W] fp32, dbias [S H, L, L] fp32
+void bwd_core(const at::Tensor& qkvg, const at::Tensor& dob, const at::Tensor& bias, const at::Tensor& LSE, const at::Tensor& dd, int64_t L,
+              const Geo& G, at::Tensor& DQ, at::Tensor& DK, at::Tensor& DV, at::Tensor& DB) {
+  const int64_t M = qkvg.size(0), NB = M / L, W = width(G), H = G.nh, dh = G.dhp, nch = L / 128;
+  const at::Tensor bias_t = at::empty_like(bias);
+  bias_transpose_k<<<dim3((unsigned)(L / 32), (unsigned)(L / 32), (unsigned)(NB * H)), dim3(32, 8), 0, S()>>>(CP<bf>(bias), P<bf>(bias_t),
+                                                                                                         (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  DQ = at::empty({nch, M, W}, opts(qkvg, at::kFloat));
+  DB = at::empty({NB * H, L, L}, opts(qkvg, at::kFloat));
+  DK = at::empty({M, W}, opts(qkvg, at::kFloat));
+  DV = at::empty({M, W}, opts(qkvg, at::kFloat));
+  const char* b = static_cast<const char*>(qkvg.data_ptr());
+  const uint64_t rs = 4 * W * 2, rd = W * 2;
+  int iL = (int)L, iA = (int)NB;
+  {
+    TM mq = tm2(b, BF16, W, M, rs, dh, 64, SW128), mk = tm2(b + W * 2, BF16, W, M, rs, dh, 128, SW128),
+       mv = tm2(b + 2 * W * 2, BF16, W, M, rs, dh, 128, SW128), mdo = tm2(dob.data_ptr(), BF16, W, M, rd, dh, 64, SW128),
+       mbt = tm2(bias_t.data_ptr(), BF16, L, NB * H * L, L * 2, 64, 128, SW128);
+    TM mka = tm2(DK.data_ptr(), F32, W, M, W * 4, 32, 128, SW128), mkb = tm2(DK.data_ptr(), F32, W, M, W * 4, 16, 128, SW64),
+       mva = tm2(DV.data_ptr(), F32, W, M, W * 4, 32, 128, SW128), mvb = tm2(DV.data_ptr(), F32, W, M, W * 4, 16, 128, SW64);
+    void* pl = LSE.data_ptr(); void* pd = dd.data_ptr(); void* pk = DK.data_ptr(); void* pv = DV.data_ptr(); void* pz = nullptr;
+    void* args[] = {&mq, &mk, &mv, &mdo, &mbt, &mka, &mkb, &mva, &mvb, &pl, &pd, &pk, &pv, &pz, &iL, &iA};
+    launch_core(core_fn("dkv", qkvg.get_device(), G, 0), (unsigned)std::min<int64_t>(nsm_of(qkvg), NB * H * (L / 128)), args);
+  }
+  {
+    TM mq = tm2(b, BF16, W, M, rs, dh, 128, SW128), mk = tm2(b + W * 2, BF16, W, M, rs, dh, 128, SW128),
+       mv = tm2(b + 2 * W * 2, BF16, W, M, rs, dh, 128, SW128), mdo = tm2(dob.data_ptr(), BF16, W, M, rd, dh, 128, SW128),
+       mb = tm2(bias.data_ptr(), BF16, L, NB * H * L, L * 2, 64, 128, SW128);
+    TM mqa = tm2(DQ.data_ptr(), F32, W, nch * M, W * 4, 32, 128, SW128), mqb = tm2(DQ.data_ptr(), F32, W, nch * M, W * 4, 16, 128, SW64);
+    void* pl = LSE.data_ptr(); void* pd = dd.data_ptr(); void* pq = DQ.data_ptr(); void* pb = DB.data_ptr();
+    void* args[] = {&mq, &mk, &mv, &mdo, &mb, &mqa, &mqb, &pl, &pd, &pq, &pb, &iL, &iA};
+    launch_core(core_fn("dqb", qkvg.get_device(), G, 0), (unsigned)std::min<int64_t>(nsm_of(qkvg), NB * H * (L / 128) * (L / 128)), args);
+  }
+}
+
+// params (the module's own tensors, any of bf16 / fp32): ln_single w, b, Wq, bq, Wk, Wv, Wg, Wo, ln_pair w, Wb.
+// Weights packed by prep, which reads bf16 or fp32 (one dtype for the seven) and rounds to bf16 itself (the cast the Python path
+// makes, so the same bits): an fp32 master costs no cast launch.
+struct Packs { at::Tensor wpack, bvec, wf, wop, wbo; };
+Packs packs_of(at::TensorList params, const Geo& G, double qs, double ws) {
+  const int64_t W = width(G), D = G.d;
+  std::vector<at::Tensor> w = {params[2], params[3], params[4], params[5], params[6], params[7], params[9]};
+  const auto dt = w[0].scalar_type();
+  bool same = dt == at::kBFloat16 || dt == at::kFloat;
+  for (const auto& t : w) same = same && t.scalar_type() == dt && t.is_contiguous();
+  if (!same)
+    for (auto& t : w) t = t.to(at::kBFloat16).contiguous();
+  const auto o = opts(params[2], at::kBFloat16);
+  Packs p{at::empty({4 * W, D}, o), at::empty({4 * W}, o), at::empty({G.nh, DP}, o), at::empty({D, W}, o), at::empty({G.nh, DP}, o)};
+  prep(w[0], w[1], w[2], w[3], w[4], w[5], w[6], params[8].to(at::kFloat), p.wpack, p.bvec, p.wop, p.wf, qs, ws, p.wbo);
+  return p;
+}
+
+// -> y, then the backward's set: xa, (mean, rstd), qkvg, bias, O, LSE, og, Wf, W q|k|v|g, Wo (packed, bf16), Wb (bf16)
+std::vector<at::Tensor> train_fwd(const at::Tensor& single, const at::Tensor& pair, const c10::optional<at::Tensor>& mask,
+                                  at::TensorList params, double eps_s, double eps_p, int64_t ns) {
+  const int64_t NB = single.size(0), L = single.size(1), D = single.size(2), M = NB * L;
+  const Geo G = geo(params[9].size(0), D);
+  const at::cuda::CUDAGuard gd(single.device());
+  const Packs pk = packs_of(params, G, 1.0, 1.0);
+  const at::Tensor x = single.view({M, D});
+  at::Tensor xa = at::empty_like(x), st = at::empty({M, 2}, opts(x, at::kFloat)), y = at::empty_like(x);
+  ln_rows(x, params[0].to(at::kFloat), params[1].to(at::kFloat), xa, st, eps_s, y);
+  const at::Tensor qkvg = at::addmm(pk.bvec, xa, pk.wpack.t());
+  at::Tensor bias = at::empty({NB * G.nh, L, L}, opts(x, at::kBFloat16));
+  pair_bias_fwd(pair.view({M * L, DP}), pk.wf, flat_mask(mask, M), bias, L, eps_p, NEG_MASK);
+  at::Tensor O, LSE, og;
+  fwd_core(qkvg, bias, L, G, ns, O, LSE, og);
+  y.addmm_(og, pk.wop.t());                                                  // onto the residual seed ln_rows wrote
+  return {y.view({NB, L, D}), xa, st, qkvg, bias, O, LSE, og, pk.wf, pk.wpack, pk.wop, pk.wbo};
+}
+
+// -> dsingle, dpair and one fp32 gradient per parameter (params' order). Parameter-gradient column sums leave as block partial rows
+// reduced by finalize in a fixed order: bitwise run to run.
+std::vector<at::Tensor> train_bwd(const at::Tensor& single, const at::Tensor& pair, const c10::optional<at::Tensor>& mask,
+                                  at::TensorList params, at::TensorList saved, const at::Tensor& dy, double eps_p) {
+  (void)mask;                                                                // masked keys carry zero dbias
+  const int64_t NB = single.size(0), L = single.size(1), D = single.size(2), M = NB * L;
+  const Geo G = geo(params[9].size(0), D);
+  const int64_t W = width(G), H = G.nh;
+  const at::cuda::CUDAGuard gd(single.device());
+  const at::Tensor &xa = saved[0], &st = saved[1], &qkvg = saved[2], &bias = saved[3], &O = saved[4], &LSE = saved[5], &og = saved[6],
+                   &wf = saved[7], &wpack = saved[8], &wop = saved[9], &wbo = saved[10];
+  const at::Tensor x = single.view({M, D}), dy2 = dy.contiguous().view({M, D});
+  const int64_t ra = std::min<int64_t>(blocks(M), 2L * nsm_of(x)), rb = pair_bwd_blocks(x, H, L, NB);
+  at::Tensor acc = at::empty({std::max(ra, rb), (int64_t)acc_n(G.d, G.nh, (int)W)}, opts(x, at::kFloat));
+  const at::Tensor dog = at::mm(dy2, wop);                                   // [M, W]: zero in the pads
+  const at::Tensor dwo = at::mm(dy2.t(), og, at::kFloat);
+  at::Tensor dob = at::empty({M, W}, opts(x, at::kBFloat16)), dd = at::empty({NB, H, L}, opts(x, at::kFloat)), dqkvg = at::empty_like(qkvg);
+  gate_bwd(dog, O, qkvg, dob, dd, dqkvg);
+  at::Tensor DQ, DK, DV, DB;
+  bwd_core(qkvg, dob, bias, LSE, dd, L, G, DQ, DK, DV, DB);
+  qkv_bwd(DQ, DK, DV, dqkvg, acc, D, ra);
+  const at::Tensor dxa = at::mm(dqkvg, wpack), dwp = at::mm(dqkvg.t(), xa, at::kFloat);
+  at::Tensor dx = at::empty_like(x);
+  ln_bwd(dxa, x, st, params[0].to(at::kFloat), dy2, dx, acc, ra);
+  at::Tensor dz = at::empty({M * L, DP}, pair.options());
+  pair_bias_bwd(pair.view({M * L, DP}), DB, wf, dz, acc, L, eps_p, D);
+  std::vector<at::Tensor> outs;
+  outs.reserve(12);
+  outs.push_back(dx.view(single.sizes()));
+  outs.push_back(dz.view(pair.sizes()));
+  std::vector<at::Tensor> grads;
+  for (const auto& t : params) grads.push_back(at::empty(t.sizes(), opts(x, at::kFloat)));
+  finalize(dwp, dwo, acc, wbo, params[8].to(at::kFloat), grads, ra, rb);
+  for (auto& g : grads) outs.push_back(g);
+  return outs;
+}
+
+// packs: ln_single w, b (fp32), W q|k|v|g (q in exp2 units), its bias, Wf (exp2 units), Wo bf16 [D, W]
+at::Tensor infer(const at::Tensor& single, const at::Tensor& pair, const c10::optional<at::Tensor>& mask, at::TensorList packs,
+                 double eps_s, double eps_p, int64_t ns) {
+  const int64_t NB = single.size(0), L = single.size(1), D = single.size(2), M = NB * L;
+  const Geo G = geo(packs[4].size(0), D);
+  const at::cuda::CUDAGuard gd(single.device());
+  const at::Tensor x = single.view({M, D});
+  at::Tensor xa = at::empty_like(x), y = at::empty_like(x);
+  ln_rows(x, packs[0], packs[1], xa, c10::nullopt, eps_s, y);
+  at::Tensor qkvg = at::addmm(packs[3], xa, packs[2].t());
+  at::Tensor bias = at::empty({NB * G.nh, L, L}, opts(x, at::kBFloat16));
+  pair_bias_fwd(pair.view({M * L, DP}), packs[4], flat_mask(mask, M), bias, L, eps_p, NEG_MASK);
+  inf_core(qkvg, bias, L, G, ns);
+  return y.addmm_(qkvg.narrow(1, 0, width(G)), packs[5].t()).view({NB, L, D});
+}
+#endif  // APB_SM100_HOST
+
 }  // namespace
+
+#ifdef APB_SM100_HOST
+TORCH_LIBRARY(apb_b200, m) {
+  m.def("train_fwd(Tensor single, Tensor pair, Tensor? mask, Tensor[] params, float eps_s, float eps_p, int ns) -> Tensor[]");
+  m.def("train_bwd(Tensor single, Tensor pair, Tensor? mask, Tensor[] params, Tensor[] saved, Tensor dy, float eps_p) -> Tensor[]");
+  m.def("infer(Tensor single, Tensor pair, Tensor? mask, Tensor[] packs, float eps_s, float eps_p, int ns) -> Tensor");
+}
+TORCH_LIBRARY_IMPL(apb_b200, CUDA, m) {
+  m.impl("train_fwd", &train_fwd);
+  m.impl("train_bwd", &train_bwd);
+  m.impl("infer", &infer);
+}
+#endif
 
 // Accuracy-first FP32 shadow of Hopper APB's exact pair-weight (dWb) gradient (ln_pair has no beta).
 // Fixed arithmetic/reduction order; no ATen compute or reference calls. The
@@ -1943,7 +2351,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("exact_bias_add", &apb_exact::bias_add);
   m.def("exact_db_transpose", &apb_exact::db_transpose);
   m.def("zero_acc", &zero_acc);
-  m.def("pair_bwd_blocks", &pair_bwd_blocks);
+  m.def("pair_bwd_blocks", &pair_bwd_blocks, py::arg("like"), py::arg("nh"), py::arg("L"), py::arg("ns") = 1);
   m.def("pair_bias_fwd", &pair_bias_fwd);
   m.def("pair_bias_fwd_stats", &pair_bias_fwd_stats);
   m.def("pair_bias_bwd", &pair_bias_bwd);
@@ -1951,8 +2359,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_rows", &gate_rows);
   m.def("gate_bwd", &gate_bwd);
   m.def("ksplit_combine", &ksplit_combine);
-  m.def("qkv_bwd", &qkv_bwd);
-  m.def("ln_bwd", &ln_bwd);
+  m.def("qkv_bwd", &qkv_bwd, py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("dqkvg"), py::arg("acc"), py::arg("d"),
+        py::arg("parts") = 0);
+  m.def("ln_bwd", &ln_bwd, py::arg("dxa"), py::arg("x"), py::arg("st"), py::arg("lw"), py::arg("dy"), py::arg("dx"), py::arg("acc"),
+        py::arg("parts") = 0);
   m.def("prep", &prep);
+#ifdef APB_SM100_HOST
+  m.def("set_resolver", &set_resolver);
+#endif
   m.def("finalize", &finalize);
 }
