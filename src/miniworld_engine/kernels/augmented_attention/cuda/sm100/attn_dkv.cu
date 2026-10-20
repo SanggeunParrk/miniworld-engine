@@ -7,6 +7,8 @@
 // The two dS warpgroups take alternate 64-query blocks of the same key tile and feed one dK / dV accumulator pair. The bias arrives
 // TRANSPOSED ([H, L(key), L(query)], a one-off copy in the op's prep) so each thread reads its key row contiguously; LSE and D of the
 // block's queries are bulk-copied next to it and read as broadcasts.
+// -DBPS=1 (AttentionPairBias): every sample has its own bias planes, bias^T [A, NHEAD, L(key), L(query)] (the token DiT shares one
+// [NHEAD, L, L] across its A samples); nothing else changes (A = 1 is the single-sample layout).
 // TMEM: S^T[w] at w * 128, dP^T[w] at w * 128 + 64, P^T[w] at 256 + w * 64 (bf16), dS^T[w] at 288 + w * 64, dK at 384, dV at 432.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -23,6 +25,9 @@ using namespace s100;
 #endif
 #ifndef NHEAD
 #define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
+#endif
+#ifndef BPS
+#define BPS 0
 #endif
 #ifndef DHP
 #define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
@@ -141,7 +146,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           TR(0, G);
           tma_load_2d(st, &mq, &B.full[s], qcol, a * L + n * BQ);
           tma_load_2d(st + TQ, &mdo, &B.full[s], qcol, a * L + n * BQ);
-          tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], n * BQ, head * L + k0);
+          tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], n * BQ, (BPS ? a * NHEAD + head : head) * L + k0);
           bulk_g2s(st + 2 * TQ + TBT, LSE + li0 + n * BQ, BQ * 4, &B.full[s]);
           bulk_g2s(st + 2 * TQ + TBT + 512, DD + li0 + n * BQ, BQ * 4, &B.full[s]);
           TR(0, G);

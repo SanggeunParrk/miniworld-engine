@@ -33,6 +33,7 @@ masked_fill's zero derivative at every masked key."""
 
 from __future__ import annotations
 
+import functools
 import math
 
 import torch
@@ -40,7 +41,8 @@ from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture, _cast_cuda
-from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
@@ -56,6 +58,30 @@ LOG2E = math.log2(math.e)
 NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
+
+
+@functools.lru_cache(maxsize=16)
+def _capability_of(index: int) -> tuple[int, int]:
+    return torch.cuda.get_device_capability(index)
+
+
+def _cap(device) -> tuple[int, int]:
+    """The device's compute capability, cached per device in eager calls (``torch.cuda.get_device_capability`` costs ~8 us of
+    host time, and a training step used to ask a dozen times); traced as the plain query under torch.compile."""
+    device = torch.device(device)
+    if torch.compiler.is_compiling() or device.type != "cuda":
+        return torch.cuda.get_device_capability(device)
+    return _capability_of(device.index if device.index is not None else torch.cuda.current_device())
+
+
+def _nsm(device) -> int:
+    device = torch.device(device)
+    return num_sms(device.index if device.index is not None else torch.cuda.current_device())
+
+
+def _host(device) -> bool:
+    """B200: the ops' C++ launch sequences (``apb_b200::*``, ``settings.apb_b200_host``) instead of the Python one."""
+    return _cap(device) == (10, 0) and settings.current().apb_b200_host
 
 
 def _eligible(
@@ -106,11 +132,20 @@ def _eligible(
         return False
     if mask is not None and tuple(mask.shape) != (1, L):
         return False
-    capability = torch.cuda.get_device_capability(single.device)
-    return capability == (10, 0) or (
+    capability = _cap(single.device)
+    if capability == (10, 0):
+        return not settings.current().apb_b200_host or _host_ready()
+    return (
         capability == (9, 0)
         and L % 128 == 0
     )
+
+
+@device_constant
+def _host_ready() -> bool:
+    """Loads the B200 host-path ops (``apb_b200::*``) once; a constant to torch.compile (evaluated at trace time), so the ops
+    exist before the traced code names them."""
+    return _rows().host_ops()
 
 
 def serves_inference(
@@ -155,7 +190,7 @@ def _kernel_leaves(leaves) -> list[torch.Tensor]:
     Hopper: the projections stay in their own dtype (one dtype for the seven; ``prep`` rounds them to bf16 inside its pass, so an
     fp32 master costs no cast launch); only the LayerNorm vectors become fp32 (a no-op for fp32 parameters)."""
     lnw, lnb, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
-    if torch.cuda.get_device_capability(lnw.device) == (9, 0):
+    if _cap(lnw.device) == (9, 0):
         dt = wq.dtype if wq.dtype in (torch.bfloat16, torch.float32) else torch.bfloat16
         w = [t if t.dtype == dt else t.to(dt) for t in (wq, bq, wk, wv, wg, wo, wb)]
         return [lnw.float(), lnb.float(), *w[:6], lnpw.float(), w[6]]
@@ -187,7 +222,7 @@ def _sm100():
 
 
 def _training_core(device):
-    if torch.cuda.get_device_capability(device) == (9, 0):
+    if _cap(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
         return sm90
@@ -195,7 +230,7 @@ def _training_core(device):
 
 
 def _inference_core(device, heads: int, d: int):
-    if torch.cuda.get_device_capability(device) == (9, 0):
+    if _cap(device) == (9, 0):
         from miniworld_engine.kernels.augmented_attention import cuda as sm90
 
         return sm90.ApbInferenceCore(device.index, heads, d)
@@ -236,7 +271,7 @@ def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
     None), bf16, one launch. Hopper always packs Wo and Wb (its weights may be an fp32 master that this pass rounds)."""
     _, _, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
     H, _, W, D = _geometry(leaves)
-    hopper = torch.cuda.get_device_capability(wq.device) == (9, 0)
+    hopper = _cap(wq.device) == (9, 0)
     bf = torch.bfloat16
     wpack = wq.new_empty((4 * W, D), dtype=bf)
     bvec = wq.new_empty((4 * W,), dtype=bf)
@@ -285,8 +320,8 @@ def inference(
     eps_p: float,
     gate_bias: float = 0.0,
 ) -> torch.Tensor:
-    """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
-    L = single.shape[1]
+    """single [S, L, d], pair [S, L, L, 128] bf16, mask [S L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
+    NB, L = single.shape[0], single.shape[1]
     rows, dev = _rows(), single.device
     params = leaves
     leaves = _capture.param_forms(
@@ -295,22 +330,29 @@ def inference(
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
-        x = single.view(L, D)
+        x = single.view(NB * L, D)
         wpack, bvec, wf, wop, _ = _inference_packs(params, leaves, gate_bias)
         wo = leaves[7] if wop is None else wop
+        if _host(dev):  # one C++ call: the same launches without the Python sequence
+            return torch.ops.apb_b200.infer(
+                single, pair, mask, [lnw, lnb, wpack, bvec, wf, wo], eps_s, eps_p, _sm100().apb_ksplit(L, H, D)
+            )
         xa = torch.empty_like(x)
         y = torch.empty_like(
             x
         )  # residual seed, written by ln_rows; to_out accumulates onto it
         rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
-        neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
-        bias = rows.pair_bias(pair.view(L * L, wf.shape[1]), wf, mask, L, eps_p, neg)
+        neg = -math.inf if _cap(dev) == (9, 0) else NEG
+        bias = rows.pair_bias(pair.view(NB * L * L, wf.shape[1]), wf, mask, L, eps_p, neg)
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
-        core(qkvg, bias)
-        return y.addmm_(qkvg[:, :W], wo.t()).view(1, L, D)
+        if _cap(dev) == (9, 0):
+            core(qkvg, bias)
+        else:
+            core(qkvg, bias, L)
+        return y.addmm_(qkvg[:, :W], wo.t()).view(NB, L, D)
 
 
 def update_inference(
@@ -319,7 +361,7 @@ def update_inference(
     return inference(
         single,
         pair,
-        _mask(mask, single.shape[1]),
+        _mask(mask, single.shape[0] * single.shape[1]),
         _leaves(module),
         module.ln_single.eps,
         module.ln_pair.eps,
@@ -330,22 +372,23 @@ def update_inference(
 # ------------------------------------------------------------------------------------------------------------- training
 def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
     """y and the saved set: xa, (mean, rstd), qkvg, bias, O, LSE, og, Wf, W q | k | v | g (and the padded Wo for 16 x 24)."""
-    L = single.shape[1]
+    NB, L = single.shape[0], single.shape[1]
+    M = NB * L
     H, _, W, D = _geometry(leaves)
     e, f32 = single.new_empty, torch.float32
     out = [
         torch.empty_like(single),
-        e((L, D)),
-        e((L, 2), dtype=f32),
-        e((L, 4 * W)),
-        e((H, L, L)),
-        e((L, W), dtype=f32),
-        e((H, L), dtype=f32),
-        e((L, W)),
+        e((M, D)),
+        e((M, 2), dtype=f32),
+        e((M, 4 * W)),
+        e((NB * H, L, L)),
+        e((M, W), dtype=f32),
+        e((NB * H, L), dtype=f32),
+        e((M, W)),
         e((H, DP)),
         e((4 * W, D)),
     ]
-    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
+    hopper = _cap(single.device) == (9, 0)
     return (
         out
         + ([e((D, W))] if W != D or hopper else [])
@@ -362,12 +405,12 @@ def forward(
     eps_s: float,
     eps_p: float,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
+    NB, L = single.shape[0], single.shape[1]
     rows = _rows()
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(single.device):
-        x = single.view(L, D)
+        x = single.view(NB * L, D)
         wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
@@ -377,19 +420,19 @@ def forward(
         qkvg = torch.addmm(bvec, xa, wpack.t())
         neg = (
             -math.inf
-            if torch.cuda.get_device_capability(single.device) == (9, 0)
+            if _cap(single.device) == (9, 0)
             else NEG
         )
-        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
+        bias = rows.pair_bias(pair.view(NB * L * L, DP), wf, mask, L, eps_p, neg)
         core = _training_core(single.device)
-        if torch.cuda.get_device_capability(single.device) == (9, 0):
+        if _cap(single.device) == (9, 0):
             # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
             O, og, LSE = core.apb_forward_gated(qkvg, bias, L, H, D)
         else:
             # attn_fwd2 (+ the key split's combine) and the gate: O, LSE, og = sigmoid(g) O
             O, LSE, og = core.apb_forward_og(qkvg, bias, L, H, D)
         y = y.addmm_(og, wo.t()).view(
-            1, L, D
+            NB, L, D
         )  # in place onto the residual seed: no copy of x into the output
     return (
         [y, xa, st, qkvg, bias, O, LSE, og, wf, wpack]
@@ -418,7 +461,8 @@ def backward(
     saved: list[torch.Tensor],
     dy: torch.Tensor,
 ) -> list[torch.Tensor]:
-    L = single.shape[1]
+    NB, L = single.shape[0], single.shape[1]
+    M = NB * L
     rows = _rows()
     E = rows.ext()
     lnw, lnpw = leaves[0], leaves[8]
@@ -429,22 +473,21 @@ def backward(
     wb = saved[10] if len(saved) > 10 else leaves[9]
     f32 = torch.float32
     with torch.cuda.device(single.device):
-        x = single.view(L, D)
-        dy2 = dy.contiguous().view(L, D)
-        if torch.cuda.get_device_capability(x.device) == (9, 0):
-            # Every producer owns a block partial row; finalize reduces the rows each grid wrote, in block order (no zero fill).
-            rows_a = (L + rows.RW - 1) // rows.RW
-            rows_b = E.pair_bwd_blocks(x, H, L)
-            acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D), device=x.device)
-        else:
-            rows_a = rows_b = 1
-            acc = torch.zeros(rows.acc_n(H, D), device=x.device)
+        x = single.view(M, D)
+        dy2 = dy.contiguous().view(M, D)
+        # Every producer owns a block partial row; finalize reduces the rows each grid wrote, in block order (no zero fill, no
+        # atomics: bitwise run to run). B200 caps the row kernels' grid (their blocks then walk several rows) at two per SM.
+        rows_a = (M + rows.RW - 1) // rows.RW
+        if _cap(x.device) != (9, 0):
+            rows_a = min(rows_a, 2 * _nsm(x.device))
+        rows_b = E.pair_bwd_blocks(x, H, L, NB)
+        acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D), device=x.device)
         dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
         dwo = torch.mm(
             dy2.t(), og, out_dtype=f32
         )  # [D, W]; finalize keeps the real columns
-        dob = x.new_empty((L, W))
-        dd = x.new_empty((H, L), dtype=f32)
+        dob = x.new_empty((M, W))
+        dd = x.new_empty((H, L) if NB == 1 else (NB, H, L), dtype=f32)
         dqkvg = torch.empty_like(qkvg)
         E.gate_bwd(dog, O, qkvg, dob, dd, dqkvg)
         DQ, DK, DV, DB = _training_core(single.device).apb_backward(
@@ -459,13 +502,13 @@ def backward(
             H,
             D,
         )
-        E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D)
+        E.qkv_bwd(DQ, DK, DV, dqkvg, acc, D, rows_a)
         del DQ, DK, DV
         dxa = dqkvg @ wpack
         dwp = torch.mm(dqkvg.t(), xa, out_dtype=f32)
         dx = torch.empty_like(x)
-        E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc)
-        dz, _, _ = rows.pair_bias_bwd(pair.view(L * L, DP), DB, wf, L, eps_p, acc, D)
+        E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc, rows_a)
+        dz, _, _ = rows.pair_bias_bwd(pair.view(M * L, DP), DB, wf, L, eps_p, acc, D)
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
         outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
         E.finalize(dwp, dwo, acc, wb, lnpw, outs, rows_a, rows_b)
@@ -606,7 +649,7 @@ class _Training(torch.autograd.Function):
     def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
         params = leaves
-        ctx.beta_shadow = torch.cuda.get_device_capability(single.device) == (9, 0)
+        ctx.beta_shadow = _cap(single.device) == (9, 0)
         # Resolve the repair during forward so that the captured gradient policy
         # is fixed before backward.
         qualified_exact_dwb = single.shape[1] in (384, 768) and (
@@ -643,7 +686,7 @@ class _Training(torch.autograd.Function):
         if ctx.exact_dwb:
             params = list(v[13 + ctx.saved_count :])
             grads[9] = _pair_weight_shadow(single, pair, mask, params, *ctx.eps, dy)
-        if torch.cuda.get_device_capability(single.device) == (9, 0):
+        if _cap(single.device) == (9, 0):
             if torch.compiler.is_compiling():
                 grads = [
                     g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)
@@ -668,18 +711,58 @@ class _Training(torch.autograd.Function):
         )
 
 
+class _TrainingHost(torch.autograd.Function):
+    """B200 training with the C++ launch sequences: ``apb_b200::train_fwd`` / ``train_bwd`` take the module's parameters as they
+    are (bf16 or an fp32 master; ``prep`` rounds the weights to bf16 inside its pass) and return fp32 gradients, cast here to
+    each parameter's dtype (a no-op for an fp32 master)."""
+
+    @staticmethod
+    def forward(ctx, eps_s, eps_p, ns, mask, single, pair, *params):
+        ctx.param_dtypes = [t.dtype for t in params]
+        y, *saved = torch.ops.apb_b200.train_fwd(single, pair, mask, list(params), eps_s, eps_p, ns)
+        ctx.eps_p = eps_p
+        ctx.save_for_backward(mask, single, pair, *params, *saved)
+        return y
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dy):
+        v = ctx.saved_tensors
+        mask, single, pair = v[0], v[1], v[2]
+        dx, dz, *grads = torch.ops.apb_b200.train_bwd(single, pair, mask, list(v[3:13]), list(v[13:]), dy, ctx.eps_p)
+        return (
+            None,
+            None,
+            None,
+            None,
+            dx,
+            dz,
+            *(g if g.dtype == dt else g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)),
+        )
+
+
 def update_train(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if _host(single.device):
+        return _TrainingHost.apply(
+            module.ln_single.eps,
+            module.ln_pair.eps,
+            _sm100().apb_ksplit(single.shape[1], module.n_head, single.shape[2]),
+            mask,
+            single,
+            pair,
+            *_leaves(module),
+        )
     out = _Training.apply(
         module.ln_single.eps,
         module.ln_pair.eps,
-        _mask(mask, single.shape[1]),
+        _mask(mask, single.shape[0] * single.shape[1]),
         single,
         pair,
         *_leaves(module),
     )
-    if torch.cuda.get_device_capability(single.device) == (9, 0):
+    if _cap(single.device) == (9, 0):
         from miniworld_engine.integrations.token_dit_train import _native_caller_hooks
 
         # The result graph now owns its AccumulateGrad nodes. Installing on
