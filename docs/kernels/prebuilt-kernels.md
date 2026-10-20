@@ -187,7 +187,9 @@ versions: one wheel per Python ABI, carrying every CUDA build in the prebuilt ro
 
 1. **Coverage, sm90** (an H100, any environment whose torch has the target's torch minor):
    `miniworld-engine dev bundle-kernels --arch sm90 --out <work> --coverage engine --coverage pytest:<smoke set>`,
-   plus the model's driver (`--coverage "cmd:..."`). Its `<work>/records/*.jsonl` list every artifact with its recipe.
+   and **always** MiniWorld's production driver, `--coverage "cmd:cd <MiniWorld> && python scripts/prebuild_engine.py --mode all --jobs 8"`
+   (in MiniWorld's environment with this checkout first on `PYTHONPATH`): the engine drivers do not reach the fused SWA atom
+   DiT or the bias-only token DiT, and 2.3.0 / 2.3.1 shipped without them. Its `<work>/records/*.jsonl` list every artifact with its recipe.
 2. **Release build** (CPU): for each CUDA build the wheel carries (2.3.0: cu129 from
    `https://download.pytorch.org/whl/cu129`, cu130 = plain PyPI) a clean venv per Python ABI (`pip install torch==<x.y.z>`, `ninja`, the engine's runtime dependencies, `setuptools build twine`; for a CUDA build
    other than the cluster's, `cuda-toolkit[nvcc,cudart,crt,cccl,nvvm]==<cuda>` provides nvcc), with the pinned

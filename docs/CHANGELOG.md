@@ -8,6 +8,20 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.2] - 2026-10-20
+
+### Added
+
+- H100 bias-only DiT: a pair bias of its own per augmentation (training, bf16 + TF32), d_cond 384 / 768
+  (docs/records/h100_bias_only_dit_per_aug_bias_20261020.md).
+
+### Fixed
+
+- The wheel's sm90 bundles now carry MiniWorld's production kernels. 2.3.0 / 2.3.1 were covered by the engine's own
+  drivers only, which do not reach the fused SWA atom DiT (`swa_dit`) or the bias-only token DiT (`bias_only_dit`), so a
+  MiniWorld model on an H100 still compiled those on its first call. The release coverage now also records MiniWorld's
+  `scripts/prebuild_engine.py --mode all` (every inference rung and training crop of the production configs).
+
 ## [2.3.1] - 2026-10-20
 
 ### Fixed
