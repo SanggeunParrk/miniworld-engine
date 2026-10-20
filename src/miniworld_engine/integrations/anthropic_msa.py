@@ -41,8 +41,6 @@ from typing import Any
 
 import torch
 
-from miniworld_engine import settings
-
 ENV = "OPT_CORE_DIR"
 PWA_CFG = "g_fo4p"  # the config that wins at our shape; the shipped default too
 _LOADED: dict[str, Any] = {}
@@ -106,12 +104,9 @@ def _ext():
     from miniworld_engine.kernels._nvcc import load_extension as load
 
     src = Path(__file__).with_name("csrc") / "opm_epilogue.cu"
-    build = settings.engine_jit_root() / "opm_epilogue"
-    build.mkdir(parents=True, exist_ok=True)
     _EXT["mod"] = load(
         name="miniworld_opm_epilogue",
         sources=[str(src)],
-        build_directory=str(build),
         extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"],
         extra_cflags=["-O3"],
     )

@@ -4,7 +4,6 @@ from pathlib import Path
 import triton
 import triton.language as tl
 import torch
-from miniworld_engine import settings
 from . import _h100_runtime as T
 from miniworld_engine.kernels._compile import opaque
 
@@ -100,20 +99,17 @@ torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool t
 
 @lru_cache(maxsize=1)
 def _owned_blas_ext():
-    import hashlib
     from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     from miniworld_engine.kernels._nvcc import ensure_cuda_home
 
-    cuda_home = ensure_cuda_home()
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
         raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
-    root = settings.engine_jit_root()
-    build = root / "trimul_owned_blas" / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
-    build.mkdir(parents=True, exist_ok=True)
     return load_inline(
         name="trimul_hopper_owned_blas", cpp_sources=_OWNED_BLAS_CPP,
         functions=["owned_mm", "owned_mm_out", "owned_bmm"], with_cuda=True,
-        build_directory=str(build),
         extra_include_paths=[str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")],
         extra_cflags=["-O3"], extra_ldflags=["-lcublas"], verbose=False,
     )

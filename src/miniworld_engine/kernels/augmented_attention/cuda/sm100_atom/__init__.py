@@ -35,9 +35,6 @@ The cubins are built on first use by the newest nvcc here that knows sm_100a (``
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 from pathlib import Path
 
 import torch
@@ -62,25 +59,9 @@ SOURCES = (
 def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a (``hopper``: sm_90a with ``-DATOM_HOPPER=1``, the sources' Hopper half) with the sources'
     default options (+ ``-D`` ``defs``); rebuilt only when a source or a flag changes."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
-    if hopper:
-        from miniworld_engine.kernels._nvcc import (
-            ensure_cuda_home,
-            host_flags,
-            nvcc_path,
-        )
-
-        ensure_cuda_home()
-        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
-        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
-            raise RuntimeError(
-                "Atom Hopper kernels require the matching CUDA <= 12.9 toolchain"
-            )
-    else:
-        nvcc, rel, host = kernel_toolchain()
     flags = (
-        *host,
         "-std=c++17",
         "-O3",
         "-arch=sm_90a" if hopper else "-arch=sm_100a",
@@ -90,40 +71,9 @@ def cubin(stem: str, defs: tuple = (), hopper: bool = False) -> str:
         f"-I{_dir}",
         *("-D" + d for d in defs),
     )
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
-        h.update(f.read_bytes())
-    if hopper:
-        h.update(
-            (
-                _dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc"
-            ).read_bytes()
-        )
-    root = settings.engine_jit_root()
-    out = (
-        root
-        / ("local_dit_sm90" if hopper else "local_dit_sm100")
-        / f"{stem}_{h.hexdigest()[:16]}.cubin"
-    )
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
-                )
-            os.replace(tmp, out)
-    return str(out)
+    family = "local_dit_sm90" if hopper else "local_dit_sm100"
+    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
+                           toolchain="torch-cuda<=12.9" if hopper else "sm100"))
 
 
 @functools.lru_cache(maxsize=None)
@@ -750,11 +700,9 @@ F32 = torch.float32
 @functools.lru_cache(maxsize=None)
 def cubin_tf32(stem: str, defs: tuple = ()) -> str:
     """``cubin`` for the fp32-path sources, which include ``../sm100/sm100.cuh`` (the kind::tf32 helpers): that header is hashed."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
-    nvcc, rel, host = kernel_toolchain()
     flags = (
-        *host,
         "-std=c++17",
         "-O3",
         "-arch=sm_100a",
@@ -763,30 +711,7 @@ def cubin_tf32(stem: str, defs: tuple = ()) -> str:
         f"-I{_dir}",
         *("-D" + d for d in defs),
     )
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (_dir.parent / "sm100" / "sm100.cuh", _dir / f"{stem}.cu"):
-        h.update(f.read_bytes())
-    root = settings.engine_jit_root()
-    out = root / "local_dit_sm100_tf32" / f"{stem}_{h.hexdigest()[:16]}.cubin"
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
-                )
-            os.replace(tmp, out)
-    return str(out)
+    return str(_nvcc.cubin(f"local_dit_sm100_tf32/{stem}", flags, source=_dir / f"{stem}.cu", toolchain="sm100"))
 
 
 #: (stem, function, dynamic smem) of every fp32-path kernel (gemm_tf32's size is static_asserted in the source)
@@ -1476,25 +1401,19 @@ def _owned_wgrad_extension():
     from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     from miniworld_engine.kernels._nvcc import ensure_cuda_home
 
-    cuda_home = ensure_cuda_home()
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     if cuda_home is None or tuple(map(int, torch.version.cuda.split(".")[:2])) > (
         12,
         9,
     ):
         raise RuntimeError("Atom Hopper cuBLASLt gradients require CUDA <= 12.9")
-    root = settings.engine_jit_root()
-    build = (
-        root
-        / "atom_owned_wgrad"
-        / hashlib.sha256(_OWNED_WGRAD_CPP.encode()).hexdigest()[:16]
-    )
-    build.mkdir(parents=True, exist_ok=True)
-    return load_inline(
+    return load_inline(  # built (once per content key) under engine_jit_root/torch_extensions
         name="atom_hopper_owned_wgrad",
         cpp_sources=_OWNED_WGRAD_CPP,
         functions=["owned_wgrad"],
         with_cuda=True,
-        build_directory=str(build),
         extra_include_paths=[
             str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
         ],

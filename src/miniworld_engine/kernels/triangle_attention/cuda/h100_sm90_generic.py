@@ -171,24 +171,15 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
 
 @functools.lru_cache(maxsize=1)
 def _lt():
-    import hashlib
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
     from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
 
-    from miniworld_engine import settings
-
-    cuda_home = ensure_cuda_home()
-    build = (
-        settings.engine_jit_root()
-        / "triattn_h100_lt"
-        / hashlib.sha256(_LT_CPP.encode()).hexdigest()[:16]
-    )
-    build.mkdir(parents=True, exist_ok=True)
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     return load_inline(
         name="triattn_h100_lt4",
         cpp_sources=_LT_CPP,
         functions=["lt_mm"],
         with_cuda=True,
-        build_directory=str(build),
         extra_include_paths=[
             str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
         ],
@@ -201,16 +192,19 @@ def _lt():
 @functools.lru_cache(maxsize=1)
 def _front():
     """LN + [Wq; Wk; Wv; Wg; Wb] + head-major scaled / masked bias in one kernel (d_pair 256 inference at short L); None without CUTLASS."""
-    import os
+    from miniworld_engine.kernels._nvcc import CutlassMissing, cutlass_include
 
-    cutlass = Path(os.environ.get("CUTLASS_PATH", ""))
-    if not (cutlass / "include/cute/tensor.hpp").is_file():
+    try:  # prebuilt or cached: no CUTLASS headers needed; a build without them -> None, as before
+        return _front_ext(cutlass_include())
+    except CutlassMissing:
         return None
-    ensure_cuda_home()
+
+
+def _front_ext(cutlass_inc):
     return load_extension(
         name="triattn_h100_front3_sm90_v1",
         sources=[str(_SRC / "front_fused3_sm90.cu")],
-        extra_include_paths=[str(_SRC), str(cutlass / "include")],
+        extra_include_paths=[str(_SRC), str(cutlass_inc)],
         extra_cflags=["-O3"],
         extra_cuda_cflags=[
             *host_flags(),

@@ -24,3 +24,23 @@ The installed TriMul runtime also includes selected native v5/overlay sources in
 Python driver/launch helpers in its parent directory. `PROVENANCE.json` maps
 selected source bodies to the archived experiments (tag `archive/experiments-20260928`) and their hashes.
 The corresponding Apache-2.0 license applies to these inherited portions.
+
+## Compiled kernels in binary wheels
+
+A binary (platform) wheel of miniworld-engine carries prebuilt kernels under `miniworld_engine/_prebuilt/<arch>/`
+(docs/kernels/prebuilt-kernels.md): torch extensions and cubins compiled from this repository's CUDA sources. Besides
+the MIT and Anthropic Apache-2.0 code above, they contain object code compiled from:
+
+- **NVIDIA CUTLASS / CuTe 4.2** headers (BSD-3-Clause, Copyright (c) 2017 - 2025 NVIDIA CORPORATION & AFFILIATES):
+  the H100 TriangleAttention kernels that include `cute/` / `cutlass/` (built with `CUTLASS_PATH`). License:
+  [`CUTLASS-LICENSE.txt`](CUTLASS-LICENSE.txt). The headers themselves are not shipped.
+- **FlashAttention-3** helpers (`hopper/utils.h`, `hopper/softmax.h`; BSD-3-Clause, Copyright (c) 2024 Tri Dao),
+  adapted in `kernels/triangle_attention/cuda/fa3_utils.h` and `h100_sources/fa3_utils.h`. License:
+  [`FlashAttention-LICENSE.txt`](FlashAttention-LICENSE.txt).
+- **NVIDIA CUDA Toolkit** headers (`cuda_runtime.h`, `cuda_bf16.h`, cooperative groups, ...) and the device code nvcc
+  generates from them, which the CUDA Toolkit EULA allows to distribute as part of an application. The extensions link
+  the CUDA runtime, cuBLAS / cuBLASLt and libtorch dynamically; the wheel carries none of those libraries (they come
+  with torch).
+
+No shipped artifact compiles NVIDIA MathDx / cuBLASDx: the only kernels that include it (the mathdx-based
+`transition/cuda` extensions) are not reached by any production path and are never bundled; they JIT-build if used.

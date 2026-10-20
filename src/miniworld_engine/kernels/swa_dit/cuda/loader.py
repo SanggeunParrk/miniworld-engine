@@ -107,12 +107,9 @@ def extension(which: str) -> Any:
         name = f"miniworld_swa_dit_{src}"
         if which in _VARIANT_FLAGS:
             name += f"_{which}"
-        build = jit_root() / name
-        build.mkdir(parents=True, exist_ok=True)
         _EXT[which] = load_extension(
             name,
             [str(_DIR / f"{src}.cu")],
-            build_directory=str(build),
             extra_include_paths=[str(_DIR)],
             extra_cuda_cflags=[
                 *host_flags(),

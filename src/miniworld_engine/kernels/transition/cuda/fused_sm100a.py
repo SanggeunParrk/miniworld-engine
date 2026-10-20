@@ -23,7 +23,6 @@ the weight gradients are summed in a fixed order (no atomics), so a replay is bi
 """
 
 import functools
-import hashlib
 import os
 import re
 import subprocess
@@ -37,7 +36,6 @@ import torch
 from ..._compile import opaque
 from ..._nvcc import (
     _HOST_CANDIDATES,
-    building,
     ensure_cuda_home,
     gencodes,
     host_flags,
@@ -169,45 +167,15 @@ def kernel_toolchain() -> tuple[str, tuple[int, int], tuple[str, ...]]:
 def build_cubins(
     group: str, specs: tuple[tuple[str, str, tuple[str, ...]], ...]
 ) -> dict[str, str]:
-    """Build (or reuse) cubins: ``specs`` = (name, source relative to ``sm100/``, extra nvcc flags). The output directory is keyed
-    by the group, the toolchain, the flags and every source under ``sm100/`` (the kernels include ``sm100.cuh``). Concurrent
-    builders write private temporaries and rename them into place, so no lock is needed: the results are identical."""
-    nvcc, rel, flags = kernel_toolchain()
-    digest = hashlib.sha256(f"{group} {nvcc} {rel} {flags} {specs}".encode())
-    for src in sorted({s for _, s, _ in specs} | {"sm100.cuh"}):
-        digest.update((_dir / src).read_bytes())
-    root = settings.engine_jit_root()
-    out = root / "transition_sm100a" / f"{group}-{digest.hexdigest()[:16]}"
-    out.mkdir(parents=True, exist_ok=True)
+    """Build (or reuse, or load from the prebuilt bundle) cubins: ``specs`` = (name, source relative to ``sm100/``, extra
+    nvcc flags), compiled by :func:`kernel_toolchain`. Each is keyed by its own code graph and flags (``_nvcc.cubin``)."""
+    from miniworld_engine.kernels import _nvcc
+
     paths = {}
     for name, src, extra in specs:
-        dst = out / f"{name}.cubin"
-        if not dst.exists():
-            with building(f"transition_sm100a/{out.name}/{name}", "cubin"):
-                tmp = out / f"{name}.{os.getpid()}.tmp"
-                cmd = [
-                    nvcc,
-                    *flags,
-                    "-std=c++17",
-                    "-O3",
-                    "-arch=sm_100a",
-                    "-cubin",
-                    f"-I{_dir}",
-                    *extra,
-                    str(_dir / src),
-                    "-o",
-                    str(tmp),
-                ]
-                r = subprocess.run(
-                    cmd, capture_output=True, text=True, timeout=900, check=False
-                )
-                if r.returncode != 0:
-                    tmp.unlink(missing_ok=True)
-                    raise RuntimeError(
-                        f"nvcc {rel[0]}.{rel[1]} failed on {src} {' '.join(extra)}:\n{r.stderr[-4000:]}"
-                    )
-                os.replace(tmp, dst)
-        paths[name] = str(dst)
+        flags = ["-std=c++17", "-O3", "-arch=sm_100a", "-cubin", f"-I{_dir}", *extra]
+        paths[name] = str(_nvcc.cubin(f"transition_sm100a/{group}/{name}", flags, source=_dir / src,
+                                      toolchain="sm100"))
     return paths
 
 

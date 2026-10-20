@@ -25,7 +25,6 @@ from typing import Any
 import torch
 import torch.nn.functional as F
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 H = 8
@@ -46,12 +45,9 @@ def _load(name: str, src: str, flags: list[str]):
     from miniworld_engine.kernels._nvcc import load_extension as load
 
     csrc = Path(__file__).with_name("csrc")
-    build = settings.engine_jit_root() / name
-    build.mkdir(parents=True, exist_ok=True)
     _EXT[name] = load(
         name=name,
         sources=[str(csrc / src)],
-        build_directory=str(build),
         extra_include_paths=[str(csrc)],
         extra_cuda_cflags=[
             "-O3",

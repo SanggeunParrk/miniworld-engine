@@ -2,9 +2,11 @@
 name = "miniworld-engine"
 version = "2.2.0"
 requires-python = ">=3.10"
+readme = "README.md"
 description = "MiniWorld GPU kernel development repo — Triton / CUDA kernels + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."
-license = "MIT AND Apache-2.0"
-license-files = ["LICENSE", "licenses/THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt", "licenses/Anthropic-NOTICE"]
+license = "MIT AND Apache-2.0 AND BSD-3-Clause"
+license-files = ["LICENSE", "licenses/THIRD_PARTY_NOTICES.md", "licenses/Anthropic-Apache-2.0.txt", "licenses/Anthropic-NOTICE",
+                 "licenses/CUTLASS-LICENSE.txt", "licenses/FlashAttention-LICENSE.txt"]
 dependencies = [
   # Lean runtime core. This is the PUBLIC CONTRACT surface a parent (team-gm)
   # inherits when it consumes miniworld-engine as a submodule / dependency:
@@ -98,7 +100,11 @@ miniworld_engine = ["autotune/plans/*/*/*",  # generated revision history; rebui
                     # Both `default` and opt-in `grid` ship. A/B accuracy/blk*/
                     # warp*/mixed* exist to compare tilings during a sweep and a consumer
                     # never selects one, so 819 CSVs stay out of the wheel.
-                    "autotune/configs/ab/*/*"]
+                    "autotune/configs/ab/*/*",
+                    # release-time prebuilt kernels: `dev build-wheel` adds the ones of the wheel's Python ABI itself;
+                    # an sdist or a git install has none and JIT-builds (docs/kernels/prebuilt-kernels.md)
+                    "_prebuilt/*", "_prebuilt/*/*", "_prebuilt/*/*/*", "_prebuilt/*/*/*/*", "_prebuilt/*/*/*/*/*",
+                    "_prebuilt/*/*/*/*/*/*"]
 
 # ----------------------------------------------------------------------------
 # ruff — practical repo policy.

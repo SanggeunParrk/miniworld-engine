@@ -7,11 +7,9 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 def headers():
     src = T._upstream() / "csrc"
     dst = T.cache_dir() / ("native_headers_" + T._source_digest().hex()[:16])
-    dst.mkdir(exist_ok=True)
     # Preserve upstream; relax only the minimum CTA occupancy for wide K1.
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         p = dst / name
-        p.parent.mkdir(exist_ok=True)
         s = (src / name).read_text()
         if name == "tmn_kernels.cuh":
             needle = "static constexpr int MINB = NCWG == 1 ? 2 : 1;"

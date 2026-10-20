@@ -1299,6 +1299,27 @@ def cmd_coverage(args: argparse.Namespace) -> int:
     return 1 if rep["missing"] else 0
 
 
+def cmd_bundle_kernels(args: argparse.Namespace) -> int:
+    """Build and package the prebuilt kernel bundle (``build.kernel_bundle``)."""
+    from miniworld_engine.build.kernel_bundle import bundle_kernels
+
+    return bundle_kernels(args)
+
+
+def cmd_build_wheel(args: argparse.Namespace) -> int:
+    """Build the engine wheel carrying the prebuilt kernels (``build.kernel_bundle``)."""
+    from miniworld_engine.build.kernel_bundle import build_wheel
+
+    return build_wheel(args)
+
+
+def cmd_code_graph(args: argparse.Namespace) -> int:
+    """Print an artifact's code graph and key, or the artifacts a file reaches (``build.kernel_bundle``)."""
+    from miniworld_engine.build.kernel_bundle import code_graph
+
+    return code_graph(args)
+
+
 def cmd_derive(args: argparse.Namespace) -> int:
     """Derive `registry_kernel.csv` from `registry_module.csv` by running the modules on fake
     tensors -- no kernel compiled, no memory allocated, every branch decided by Python.
@@ -1978,6 +1999,47 @@ def build_parser() -> argparse.ArgumentParser:
     der.set_defaults(func=cmd_derive)
     der.add_argument("--workers", type=int, default=1,
                      help="isolated derivation processes sharing the allocated GPU")
+
+    bnd = dev.add_parser("bundle-kernels",
+                         help="compile every CUDA artifact a production run requests on this arch and package them "
+                              "as an installable kernel bundle (docs/kernels/prebuilt-kernels.md)")
+    bnd.add_argument("--arch", required=True, help="sm90 / sm100: the arch of this GPU")
+    bnd.add_argument("--out", required=True, help="work directory (cache/, records/, logs/, summary.json)")
+    bnd.add_argument("--prebuilt-root", default="",
+                     help="where the bundle lives (default: the package's own _prebuilt/, i.e. <arch>/manifest.json there)")
+    bnd.add_argument("--coverage", action="append", default=[],
+                     help="coverage driver, repeatable: engine (default), engine:<filter>, pytest:<path,...>, "
+                          "cmd:<shell command>")
+    bnd.add_argument("--workers", type=int, default=16, help="driver processes per GPU")
+    bnd.add_argument("--gpus", default="", help="GPU indices (default: the visible ones)")
+    bnd.add_argument("--collect-only", action="store_true",
+                     help="skip the drivers; package what <out>/records already lists")
+    bnd.add_argument("--keep", action="store_true", help="keep artifacts this run did not reach")
+    bnd.add_argument("--replay", nargs="+", default=[],
+                     help="rebuild the artifacts of these records .jsonl in this environment (another Python / torch / "
+                          "CUDA), CPU only, instead of running coverage drivers")
+    bnd.add_argument("--jobs", type=int, default=32, help="parallel rebuilds for --replay")
+    bnd.add_argument("--only", default="", help="--replay only recipes whose kind or name contains this")
+    bnd.set_defaults(func=cmd_bundle_kernels)
+
+    bwh = dev.add_parser("build-wheel",
+                         help="the engine's platform wheel with the prebuilt kernels of this Python ABI "
+                              "(docs/kernels/prebuilt-kernels.md)")
+    bwh.add_argument("--prebuilt-root", default="", help="default: the package's _prebuilt/")
+    bwh.add_argument("--out", default="dist", help="directory for the wheel")
+    bwh.add_argument("--strict", action="store_true", help="fail on a binary-check (auditwheel-style) finding")
+    bwh.set_defaults(func=cmd_build_wheel)
+
+    cgr = dev.add_parser("code-graph",
+                         help="print a kernel artifact's include graph and content key, or which artifacts a file "
+                              "change rebuilds (--affected)")
+    cgr.add_argument("target", nargs="?", default="",
+                     help="a source / header path (its include graph) or an artifact name / key prefix")
+    cgr.add_argument("--affected", default="", help="list the known artifacts this file reaches")
+    cgr.add_argument("-I", "--include", action="append", default=[], help="include directory for a file target")
+    cgr.add_argument("--manifest", action="append", default=[],
+                     help="also consult this bundle manifest.json or records .jsonl")
+    cgr.set_defaults(func=cmd_code_graph)
 
     aud = dev.add_parser("audit",
                          help="verify the build system and the shipped cache's coverage")

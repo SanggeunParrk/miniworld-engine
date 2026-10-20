@@ -93,12 +93,25 @@ def supported_arches() -> frozenset[str]:
     return frozenset(line.strip() for line in out.split("\n") if line.strip())
 
 
+#: Set by ``dev bundle-kernels`` (``sm90`` / ``sm100``): a build keeps only that arch out of a multi-arch ``gencodes``
+#: request, so a bundle carries one arch's code. The artifact's key is computed from the request, not from this.
+BUNDLE_ARCH_ENV = "MINIWORLD_ENGINE_BUNDLE_ARCH"
+
+
 def gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
-    """``-gencode`` flags for the requested arches, dropping any this nvcc does not know.
+    """Placeholders for the ``-gencode`` flags of the requested arches (expanded by :func:`expand_flags` when a build
+    runs, so computing a key or loading a prebuilt artifact never asks nvcc anything).
 
     ``arches`` are like ``"90"`` or ``"90a"``; ``ptx`` names arches to also emit PTX for, so a
     newer card can JIT from it.
     """
+    from miniworld_engine.kernels._codegraph import GENCODE_MARKER, PTX_MARKER
+
+    return [f"{GENCODE_MARKER}{a}" for a in arches] + [f"{PTX_MARKER}{a}" for a in ptx]
+
+
+def real_gencodes(*arches: str, ptx: tuple[str, ...] = ()) -> list[str]:
+    """``-gencode`` flags for the requested arches, dropping any this nvcc does not know."""
     ensure_cuda_home()
     have = supported_arches()
     def supported(a):
@@ -128,6 +141,10 @@ _PROBE = """
 __global__ void k(float* p) { p[0] = 1.0f; }
 """
 
+
+#: A release build sets this to the one host compiler every artifact is built with (and CXX to the same, which
+#: torch uses to compile and link the C++ side): the libstdc++ it links decides which systems can load the result.
+HOST_CXX_ENV = "MINIWORLD_ENGINE_HOST_CXX"
 
 #: g++ installs to try, best first. The environment's own compiler comes first so a working
 #: setup needs no override; the cluster's module tree is next, because this cluster ships GCC 12.4
@@ -162,6 +179,9 @@ def host_compiler() -> tuple[str | None, bool]:
     cands = [c.format(prefix=sys.prefix) for c in _HOST_CANDIDATES]
     cands += [p for p in (which(f"g++-{v}") for v in (13, 12, 11, 10, 9)) if p]
     default = cands[0]
+    forced = os.environ.get(HOST_CXX_ENV)
+    if forced:  # a release build pins its toolchain (and sets CXX to the same compiler for torch's link step)
+        cands, default = [forced], ""
     with tempfile.TemporaryDirectory() as tmp:
         src = Path(tmp) / "probe.cu"
         src.write_text(_PROBE)
@@ -181,6 +201,47 @@ def host_compiler() -> tuple[str | None, bool]:
 
 
 def host_flags() -> list[str]:
+    """A placeholder for :func:`real_host_flags`, expanded only when a build runs (:func:`expand_flags`): finding the
+    host compiler compiles a probe, which a process that loads prebuilt or cached artifacts must not do."""
+    from miniworld_engine.kernels._codegraph import HOST_MARKER
+
+    return [HOST_MARKER]
+
+
+def expand_flags(flags: list[str] | tuple[str, ...]) -> list[str]:
+    """``flags`` with the :func:`host_flags` / :func:`gencodes` placeholders replaced by real nvcc flags. Under
+    ``dev bundle-kernels`` (``MINIWORLD_ENGINE_BUNDLE_ARCH``) a multi-arch request keeps only the bundle's arch."""
+    from miniworld_engine.kernels._codegraph import (
+        GENCODE_MARKER,
+        HOST_MARKER,
+        PTX_MARKER,
+    )
+
+    out: list[str] = []
+    arches: list[str] = []
+    ptx: list[str] = []
+    slot = None
+    for f in flags:
+        f = str(f)
+        if f == HOST_MARKER:
+            out += real_host_flags()
+        elif f.startswith((GENCODE_MARKER, PTX_MARKER)):
+            if slot is None:
+                slot = len(out)
+            (arches if f.startswith(GENCODE_MARKER) else ptx).append(f.split("=", 1)[1])
+        else:
+            out.append(f)
+    if slot is not None:
+        bundle = os.environ.get(BUNDLE_ARCH_ENV, "").removeprefix("sm").removeprefix("_")
+        if bundle:
+            keep = [a for a in arches if a.rstrip("a") == bundle.rstrip("a")]
+            if keep:
+                arches, ptx = keep, [a for a in ptx if a.rstrip("a") == bundle.rstrip("a")]
+        out[slot:slot] = real_gencodes(*arches, ptx=tuple(ptx))
+    return out
+
+
+def real_host_flags() -> list[str]:
     """``-ccbin`` for a host compiler nvcc can drive.
 
     Raises if none of the candidates compiles a probe: a JIT build that is going to fail should
@@ -253,6 +314,31 @@ def mathdx_includes() -> list[str]:
             f"Looked in: {', '.join(str(c) for c in _mathdx_candidates())}")
     includes = [root / "include", root / "external" / "cutlass" / "include"]
     return [f"-I{p}" for p in includes if p.is_dir()]
+
+
+# ---------------------------------------------------------------------------------------------
+# CUTLASS / CuTe headers. Only a BUILD needs them: an artifact found prebuilt or cached loads without, so a call site
+# takes the include directory from here (a stand-in path when CUTLASS_PATH is unset or incomplete, keyed as the pinned
+# CUTLASS release) and the requirement is checked when a build is about to run (CutlassMissing).
+# ---------------------------------------------------------------------------------------------
+
+#: Stand-in for an absent CUTLASS checkout: never exists, classified as CUTLASS (``_codegraph.CUTLASS_PINNED``).
+CUTLASS_STANDIN = Path("/nonexistent/cutlass-headers/include")
+
+
+class CutlassMissing(RuntimeError):
+    """An artifact that compiles CUTLASS / CuTe headers is neither prebuilt nor cached, and the headers are absent."""
+
+
+def cutlass_include() -> Path:
+    """``$CUTLASS_PATH/include`` when it holds the CuTe headers, else :data:`CUTLASS_STANDIN`."""
+    root = os.environ.get("CUTLASS_PATH", "")
+    inc = Path(root) / "include"
+    return inc if root and (inc / "cute" / "tensor.hpp").is_file() else CUTLASS_STANDIN
+
+
+def cutlass_available() -> bool:
+    return cutlass_include() != CUTLASS_STANDIN
 
 
 # ---------------------------------------------------------------------------------------------
@@ -549,21 +635,366 @@ def _guarded_load(name: str, kind: str, build_directory: str | None, call: Calla
     return ext
 
 
-def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
-    """`torch.utils.cpp_extension.load`, but it cannot hang on a leftover lock, and says when it compiles.
+# ---------------------------------------------------------------------------------------------
+# Artifact resolution: installed bundle -> local cache -> build. Every compiled artifact (a torch extension or a cubin)
+# is named by a content key from its code graph (kernels/_codegraph.py), the same on every machine. A bundle hit loads
+# the shipped binary and never touches nvcc; a cache hit loads the local one; only a miss compiles, and with
+# settings.jit_fallback False a miss raises instead. See docs/kernels/prebuilt-kernels.md.
+# ---------------------------------------------------------------------------------------------
 
-    Reclaims a lock too old to be real, then waits on a fresh one (saying so). Correctness still
-    comes from torch's own baton: this only decides how long to tolerate it.
+#: key of every artifact this process resolved, by path (derived artifacts key off their base).
+_KEY_OF: dict[str, str] = {}
+_LOADED: dict[str, Any] = {}
+_MISS_EXPLAINED = False
+
+
+def key_of_artifact(path: str | Path) -> str | None:
+    """The content key of an artifact this process resolved, by its path."""
+    return _KEY_OF.get(str(path))
+
+
+def _jit_fallback() -> bool:
+    try:
+        from miniworld_engine import settings
+    except ImportError:
+        return True
+    return bool(getattr(settings.current(), "jit_fallback", True))
+
+
+def _before_build(kind: str, name: str, key: str) -> None:
+    """A miss: say so (once per artifact), or raise when builds are not allowed."""
+    global _MISS_EXPLAINED
+    from miniworld_engine.kernels import prebuilt
+
+    if not _jit_fallback():
+        raise prebuilt.PrebuiltMissing(
+            f"{name} ({kind}, key {key[:16]}) is not in the prebuilt kernel bundle ({prebuilt.describe()}) and "
+            "settings.jit_fallback is False, so it is not compiled. Rebuild the bundle with this artifact covered "
+            "(docs/kernels/prebuilt-kernels.md), or allow JIT builds.")
+    if prebuilt.enabled():
+        why = "" if _MISS_EXPLAINED else f" ({prebuilt.describe()})"
+        _MISS_EXPLAINED = True
+        build_log(f"not in the prebuilt bundle: {name}{why}")
+
+
+def _resolved(kind: str, name: str, key: str, path: Path, origin: str, material: dict, **extra: Any) -> None:
+    _KEY_OF[str(path)] = key
+    from miniworld_engine.kernels import prebuilt
+
+    if prebuilt.recording():
+        sidecars = [s for s in (".ptxas.log",) if path.with_suffix(s).is_file()] if kind == "cubin" else []
+        prebuilt.record({"kind": kind, "name": name, "key": key, "path": str(path), "origin": origin,
+                         "material": material, "sidecars": sidecars, **extra})
+
+
+def _write_json(path: Path, data: dict) -> None:
+    import json
+    import tempfile
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile("w", dir=path.parent, delete=False, suffix=".tmp") as fh:
+        json.dump(data, fh, indent=1, sort_keys=True)
+    Path(fh.name).replace(path)
+
+
+# -------------------------------------------------------------------------------- toolchains (only on a build)
+def _toolchain_torch() -> tuple[str, list[str]]:
+    ensure_cuda_home()
+    nvcc = nvcc_path()
+    if not nvcc:
+        raise RuntimeError("no nvcc matching torch.version.cuda")
+    return nvcc, real_host_flags()
+
+
+def _toolchain_torch_le_129() -> tuple[str, list[str]]:
+    import torch
+
+    if tuple(map(int, (torch.version.cuda or "99.0").split(".")[:2])) > (12, 9):
+        raise RuntimeError("these Hopper kernels require the matching CUDA <= 12.9 toolchain")
+    return _toolchain_torch()
+
+
+def _toolchain_sm100() -> tuple[str, list[str]]:
+    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+
+    nvcc, _, host = kernel_toolchain()
+    return nvcc, list(host)
+
+
+def _toolchain_path() -> tuple[str, list[str]]:
+    """The nvcc on PATH after :func:`ensure_cuda_home`, with its default host compiler (TriMul H100)."""
+    from shutil import which
+
+    ensure_cuda_home()
+    nvcc = which("nvcc")
+    if nvcc is None:
+        home = os.environ.get("CUDA_HOME")
+        nvcc = str(Path(home) / "bin" / "nvcc") if home else None
+    if not nvcc:
+        raise RuntimeError("these kernels require the CUDA nvcc compiler")
+    return nvcc, []
+
+
+#: How a cubin is compiled when it has to be: (nvcc, host flags). A name, not a callable, so a build recipe is data.
+def _toolchain_torch_nohost() -> tuple[str, list[str]]:
+    """The torch-matched nvcc with its default host compiler (the families that never passed ``-ccbin``)."""
+    ensure_cuda_home()
+    nvcc = nvcc_path()
+    if not nvcc:
+        raise RuntimeError("no nvcc matching torch.version.cuda")
+    return nvcc, []
+
+
+TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
+    "torch": _toolchain_torch,
+    "torch-nohost": _toolchain_torch_nohost,
+    "torch-cuda<=12.9": _toolchain_torch_le_129,
+    "sm100": _toolchain_sm100,
+    "path": _toolchain_path,
+}
+
+
+def _safe(stem: str) -> str:
+    import re
+
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", stem).strip("_") or "artifact"
+
+
+def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path | None = None, text: str | None = None,
+          family: str | None = None, toolchain: str = "torch", ptxas_log: bool = False,
+          timeout: float | None = 900) -> Path:
+    """The cubin of ``source`` (or of the generated ``text``) compiled with ``flags``: from an installed kernel bundle,
+    else from the local cache (``engine_jit_root/<family>/<name>-<key>.cubin``), else built with ``toolchain``.
+
+    ``name`` identifies the artifact (``<family>/<what>``, no hash); the key (``_codegraph``) covers the sources and
+    headers it reaches, the flags and the versions. ``ptxas_log`` keeps nvcc's output next to the cubin
+    (``<cubin stem>.ptxas.log``), for callers that read the register report.
     """
-    from torch.utils.cpp_extension import load
+    from miniworld_engine import settings
+    from miniworld_engine.kernels import _codegraph as cg
+    from miniworld_engine.kernels import prebuilt
 
-    return _guarded_load(name, "torch extension", kwargs.get("build_directory"),
-                         lambda: load(name=name, sources=sources, **kwargs), sources=sources)
+    if (source is None) == (text is None):
+        raise ValueError("cubin() takes a source path or a text, not both")
+    flags = [str(f) for f in flags]
+    family = family or name.split("/", 1)[0]
+    fam_dir = settings.engine_jit_root() / family
+    ctx = cg.context()
+    root: str | cg.TextRoot = cg.TextRoot(f"text:{name}", text, str(fam_dir)) if text is not None else str(source)
+    graph = cg.closure([root], cg.include_dirs_of(flags), ctx)
+    material = cg.key_material("cubin", name, graph, flags, ctx=ctx)
+    key = cg.key_of(material)
+    recipe = {"fn": "cubin", "name": name, "flags": flags, "source": None if source is None else str(source), "text": text,
+              "family": family, "toolchain": toolchain, "ptxas_log": ptxas_log, "timeout": timeout, "jit": ctx.jit,
+              "overlay": {p: t for p in graph.paths if (t := cg.overlay_text(p)) is not None}}
+    hit = prebuilt.find("cubin", name, key)
+    if hit is not None:
+        _resolved("cubin", name, key, hit.path, "prebuilt", material, recipe=recipe)
+        return hit.path
+    out = fam_dir / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
+    if not out.exists():
+        _before_build("cubin", name, key)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        with out.with_suffix(".lock").open("w") as lock:
+            flock_wait(lock, name)
+            if not out.exists():
+                with building(f"{name} [{key[:8]}]", "cubin"):
+                    nvcc, host = TOOLCHAINS[toolchain]()
+                    cg.materialize(graph.paths)
+                    src = Path(source) if source is not None else out.with_suffix(".cu")
+                    if text is not None and not src.exists():
+                        tmp_src = src.with_name(f"{src.name}.{os.getpid()}.tmp")
+                        tmp_src.write_text(text)
+                        tmp_src.replace(src)
+                    tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp")
+                    res = subprocess.run([nvcc, *host, *expand_flags(flags), str(src), "-o", str(tmp)],
+                                         capture_output=True, text=True, timeout=timeout, check=False)
+                    if ptxas_log:
+                        out.with_suffix(".ptxas.log").write_text(res.stdout + res.stderr)
+                    if res.returncode != 0:
+                        tmp.unlink(missing_ok=True)
+                        raise RuntimeError(f"nvcc failed on {name}:\n{res.stderr[-4000:]}")
+                    _write_json(out.with_suffix(".json"), {"name": name, "key": key, "material": material})
+                    os.replace(tmp, out)
+                _resolved("cubin", name, key, out, "built", material, recipe=recipe)
+                return out
+    _resolved("cubin", name, key, out, "cache", material, recipe=recipe)
+    return out
+
+
+def derived_cubin(name: str, base: str | Path, params: Any, produce: Callable[[Path], bool],
+                  family: str | None = None, replay: tuple[str, list] | None = None) -> Path | None:
+    """A cubin made from another one by ``produce(tmp_path) -> bool`` (a post-link patch, no compiler): keyed by the
+    base's key and ``params`` (which should carry a digest of the patch code). None when ``produce`` declines (the
+    caller keeps the base)."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels import _codegraph as cg
+    from miniworld_engine.kernels import prebuilt
+
+    base_key = key_of_artifact(base)
+    if base_key is None:
+        raise RuntimeError(f"derived_cubin: {base} was not resolved through _nvcc.cubin in this process")
+    material = {"scheme": cg.KEY_SCHEME, "kind": "cubin", "name": name, "derived_from": base_key,
+                "params": repr(params)}
+    key = cg.key_of(material)
+    # how to redo it elsewhere: "module:function" called as function(base_cubin, *args)
+    recipe = {"fn": "derived", "name": name, "base_key": base_key, "replay": list(replay) if replay else None}
+    hit = prebuilt.find("cubin", name, key)
+    if hit is not None:
+        _resolved("cubin", name, key, hit.path, "prebuilt", material, recipe=recipe)
+        return hit.path
+    family = family or name.split("/", 1)[0]
+    out = settings.engine_jit_root() / family / f"{_safe(name.split('/', 1)[-1])}-{key[:16]}.cubin"
+    if not out.exists():
+        _before_build("cubin", name, key)
+        out.parent.mkdir(parents=True, exist_ok=True)
+        tmp = out.with_name(f"{out.stem}.{os.getpid()}.tmp")
+        with building(f"{name} [{key[:8]}]", "derived cubin"):
+            ok = produce(tmp)
+        if not ok:
+            tmp.unlink(missing_ok=True)
+            return None
+        os.replace(tmp, out)
+        _resolved("cubin", name, key, out, "built", material, recipe=recipe)
+        return out
+    _resolved("cubin", name, key, out, "cache", material, recipe=recipe)
+    return out
+
+
+# -------------------------------------------------------------------------------- torch extensions
+def _ext_key(name: str, kwargs: dict, sources: list[str] | None, inline: bool) -> tuple[dict, str, Any]:
+    from miniworld_engine.kernels import _codegraph as cg
+
+    ctx = cg.context()
+    # load_inline writes main.cpp / cuda.cu into the build directory, where nothing else lives: quoted includes resolve
+    # through the -I directories, so the directory only has to be one without headers.
+    build_dir = Path(ctx.jit or ".") / "torch_extensions"
+    cflags = [str(f) for f in kwargs.get("extra_cflags") or []]
+    cuflags = [str(f) for f in kwargs.get("extra_cuda_cflags") or []]
+    incs = [str(p) for p in kwargs.get("extra_include_paths") or []]
+    include_dirs = [os.path.abspath(p) for p in incs] + cg.include_dirs_of(cuflags) + cg.include_dirs_of(cflags)
+    if inline:
+        where = str(build_dir or ".")
+        roots: list = []
+        for label, part in (("inline:cpp", "cpp_sources"), ("inline:cuda", "cuda_sources")):
+            value = kwargs.get(part)
+            if value:
+                roots.append(cg.TextRoot(label, value if isinstance(value, str) else "\n".join(value), where))
+    else:
+        roots = [str(s) for s in sources or []]
+    graph = cg.closure(roots, include_dirs, ctx)
+    flags = {
+        "cflags": cflags,
+        "cuda_cflags": cuflags,
+        "ldflags": [str(f) for f in kwargs.get("extra_ldflags") or []],
+        "include": [f"-I{p}" for p in incs],
+        "with_cuda": kwargs.get("with_cuda"),
+        "python_module": kwargs.get("is_python_module", True),
+        "standalone": kwargs.get("is_standalone", False),
+        "functions": list(kwargs["functions"]) if isinstance(kwargs.get("functions"), (list, tuple))
+        else kwargs.get("functions"),
+    }
+    material = cg.key_material("ext", name, graph, flags, python=True, ctx=ctx)
+    return material, cg.key_of(material), graph
+
+
+def _import_ext(so: Path, module: str, python_module: bool) -> Any:
+    from torch.utils.cpp_extension import _import_module_from_library
+
+    return _import_module_from_library(module, str(so.parent), python_module)
+
+
+def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = None, inline: bool = False) -> Any:
+    import json
+
+    from miniworld_engine import settings
+    from miniworld_engine.kernels import _codegraph as cg
+    from miniworld_engine.kernels import prebuilt
+
+    kwargs = dict(kwargs)
+    kwargs.pop("build_directory", None)  # content-addressed below: one directory per key, never rebuilt in place
+    material, key, graph = _ext_key(name, kwargs, sources, inline)
+    if key in _LOADED:
+        return _LOADED[key]
+    recipe = {"fn": "ext", "name": name, "inline": inline, "sources": sources, "jit": str(settings.engine_jit_root()),
+              "kwargs": {k: v for k, v in kwargs.items() if k != "verbose"}}
+    python_module = bool(kwargs.get("is_python_module", True))
+    hit = prebuilt.find("ext", name, key)
+    if hit is not None:
+        module = hit.entry.get("module", name)
+        ext = _import_ext(hit.path, module, python_module)
+        _resolved("ext", name, key, hit.path, "prebuilt", material, module=module, python_module=python_module, recipe=recipe)
+        _LOADED[key] = ext
+        return ext
+    build = settings.engine_jit_root() / "torch_extensions" / f"{name}-{key[:16]}"
+    marker = build / "artifact.json"
+
+    def cached() -> Any:
+        try:
+            info = json.loads(marker.read_text())
+        except (OSError, ValueError):
+            return None
+        so = build / info["file"]
+        if not so.is_file():
+            return None
+        ext = _import_ext(so, info["module"], python_module)
+        _resolved("ext", name, key, so, "cache", material, module=info["module"], python_module=python_module, recipe=recipe)
+        return ext
+
+    ext = cached()
+    if ext is None:
+        lock = build / "lock"
+        if lock.exists() and not clear_stale_lock(lock):
+            wait_for_lock(lock, name=name)
+            ext = cached()
+    if ext is None:
+        if str(CUTLASS_STANDIN) in [os.path.abspath(p) for p in kwargs.get("extra_include_paths") or []]:
+            raise CutlassMissing(f"{name} compiles CUTLASS 4.2 / CuTe headers and is not in the prebuilt kernels: set "
+                                 "CUTLASS_PATH to a CUTLASS 4.2 checkout to build it")
+        _before_build("ext", name, key)
+        ensure_cuda_home()
+        build.mkdir(parents=True, exist_ok=True)
+        cg.materialize(graph.paths)
+        call_kwargs = dict(kwargs, build_directory=str(build))
+        for f in ("extra_cflags", "extra_cuda_cflags"):
+            if call_kwargs.get(f):
+                call_kwargs[f] = expand_flags(call_kwargs[f])
+        forced = os.environ.get(HOST_CXX_ENV)
+        cu = call_kwargs.get("extra_cuda_cflags") or []
+        if forced and not any(str(f) == "-ccbin" or str(f).startswith(("-ccbin=", "--compiler-bindir")) for f in cu):
+            call_kwargs["extra_cuda_cflags"] = [*cu, "-ccbin", forced]  # a pinned release toolchain covers every .cu
+        if inline:
+            from torch.utils.cpp_extension import load_inline
+
+            ext = _guarded_load(name, kind_label, str(build), lambda: load_inline(name=name, **call_kwargs))
+        else:
+            from torch.utils.cpp_extension import load
+
+            ext = _guarded_load(name, kind_label, str(build),
+                                lambda: load(name=name, sources=sources, **call_kwargs), sources=sources)
+        if python_module:
+            so, module = Path(ext.__file__), ext.__name__
+        else:
+            so = Path(str(ext))
+            module = so.name[: -len(".so")] if so.name.endswith(".so") else so.stem
+        _write_json(marker, {"name": name, "key": key, "file": so.name, "module": module, "material": material})
+        _resolved("ext", name, key, so, "built", material, module=module, python_module=python_module, recipe=recipe)
+    _LOADED[key] = ext
+    return ext
+
+
+def load_extension(name: str, sources: list[str], **kwargs: Any) -> Any:
+    """`torch.utils.cpp_extension.load`, resolved through the prebuilt bundle and a content-keyed cache.
+
+    The extension's key (its code graph, flags and versions) picks a shipped binary when an installed kernel bundle has
+    it, else ``engine_jit_root/torch_extensions/<name>-<key>/`` when this machine built it before; only a miss runs
+    torch's build, into that directory. An edit that does not reach the extension's sources never rebuilds it, and an
+    edit that does always does (a new directory). The build still cannot hang on a leftover lock (reclaimed when too
+    old to be real, else waited on, saying so) and says when it compiles. ``build_directory`` is ignored.
+    """
+    return _load("torch extension", name, kwargs, sources=[str(s) for s in sources])
 
 
 def load_inline_extension(name: str, **kwargs: Any) -> Any:
-    """`torch.utils.cpp_extension.load_inline` behind the same guard and log as :func:`load_extension`."""
-    from torch.utils.cpp_extension import load_inline
-
-    return _guarded_load(name, "inline torch extension", kwargs.get("build_directory"),
-                         lambda: load_inline(name=name, **kwargs))
+    """`torch.utils.cpp_extension.load_inline`, resolved like :func:`load_extension` (the inline text is the graph's root)."""
+    return _load("inline torch extension", name, kwargs, inline=True)

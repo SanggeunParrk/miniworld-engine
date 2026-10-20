@@ -26,9 +26,6 @@ The fp32 path (fp32 activations; ``KERNELS_TF32``, loaded by ``_load32`` and onl
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 from pathlib import Path
 
 import torch
@@ -44,23 +41,9 @@ SOURCES = ("lattn_fwd", "lattn_dq", "lattn_dkv", "lbias", "lcross")
 @functools.lru_cache(maxsize=None)
 def cubin(stem: str, hopper: bool = False) -> str:
     """Path of ``<stem>.cu`` built for sm_100a; rebuilt only when a source or a flag changes."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
-    if hopper:
-        from miniworld_engine.kernels._nvcc import (
-            ensure_cuda_home,
-            host_flags,
-            nvcc_path,
-        )
-
-        ensure_cuda_home()
-        nvcc, rel, host = nvcc_path(), (12, 9), host_flags()
-        if not nvcc or tuple(map(int, torch.version.cuda.split(".")[:2])) > (12, 9):
-            raise RuntimeError("Local Hopper kernels require matching CUDA <= 12.9")
-    else:
-        nvcc, rel, host = kernel_toolchain()
     flags = (
-        *host,
         "-std=c++17",
         "-O3",
         "-arch=sm_90a" if hopper else "-arch=sm_100a",
@@ -69,45 +52,9 @@ def cubin(stem: str, hopper: bool = False) -> str:
         "-lineinfo",
         f"-I{_dir}",
     )
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (
-        _dir / "local.cuh",
-        _dir.parent / "sm100" / "sm100.cuh",
-        _dir / f"{stem}.cu",
-    ):
-        h.update(f.read_bytes())
-    if hopper:
-        h.update((_dir.parent / "sm100_atom" / "sm100.cuh").read_bytes())
-        h.update(
-            (
-                _dir.parents[2] / "swa_dit" / "cuda" / "gen" / "wgmma_bf16.inc"
-            ).read_bytes()
-        )
-    root = settings.engine_jit_root()
-    out = (
-        root
-        / ("atom_local_sm90" if hopper else "atom_local_sm100")
-        / f"{stem}_{h.hexdigest()[:16]}.cubin"
-    )
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu:\n{res.stderr[-4000:]}"
-                )
-            os.replace(tmp, out)
-    return str(out)
+    family = "atom_local_sm90" if hopper else "atom_local_sm100"
+    return str(_nvcc.cubin(f"{family}/{stem}", flags, source=_dir / f"{stem}.cu",
+                           toolchain="torch-cuda<=12.9" if hopper else "sm100"))
 
 
 #: (stem, function, dynamic smem bytes) of every kernel

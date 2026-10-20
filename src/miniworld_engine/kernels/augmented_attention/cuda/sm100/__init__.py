@@ -40,9 +40,6 @@ Everything else keeps the Triton path, and so do fake tensors and torch.compile 
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 import warnings
 from pathlib import Path
 
@@ -64,30 +61,12 @@ def _jit_root() -> Path:
 def cubin(stem: str, defs: tuple[str, ...] = (), src_dir: str | None = None) -> str:
     """Path of ``<src_dir>/<stem>.cu`` (default: this directory) built for sm_100a with ``-D`` ``defs`` and this
     directory's ``sm100.cuh`` on the include path; rebuilt only when a source or a flag changes."""
-    from miniworld_engine.kernels._nvcc import nvcc_path
+    from miniworld_engine.kernels import _nvcc
 
-    nvcc = nvcc_path()
-    if not nvcc:
-        raise RuntimeError("no nvcc matching torch.version.cuda")
     src = Path(src_dir or _dir) / f"{stem}.cu"
     flags = (*_NVCC_FLAGS, f"-I{_dir}", *("-D" + d for d in defs))
-    h = hashlib.sha256()
-    for f in (_dir / "sm100.cuh", src):
-        h.update(f.read_bytes())
-    h.update(" ".join((nvcc, *flags)).encode())
-    out = _jit_root() / f"{stem}_{h.hexdigest()[:16]}.cubin"
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True
-            )
-            if res.returncode != 0:
-                raise RuntimeError(f"nvcc {stem}.cu failed:\n{res.stderr[-4000:]}")
-            os.replace(tmp, out)
-    return str(out)
+    # no -ccbin: this family has always been built with nvcc's default host compiler
+    return str(_nvcc.cubin(f"augattn_sm100/{stem}", flags, source=src, toolchain="torch-nohost", timeout=None))
 
 
 @functools.lru_cache(maxsize=None)

@@ -1,0 +1,750 @@
+"""``miniworld-engine dev bundle-kernels`` / ``dev build-wheel``: the engine's prebuilt kernels, built and shipped.
+
+1. **Coverage.** Coverage drivers run with the recorder on (``MINIWORLD_ENGINE_BUNDLE_RECORD``), a JIT root of the
+   build's own (``<out>/cache``) and ``MINIWORLD_ENGINE_BUNDLE_ARCH`` (multi-arch ``gencodes`` requests compile only
+   the bundle's arch). Every artifact a driver's processes resolve -- built, cached or already prebuilt -- is recorded
+   with its key and the recipe that rebuilds it. Drivers:
+
+   * ``engine`` (default): :mod:`miniworld_engine.build.bundle_coverage`, dealt to ``--workers`` processes per GPU
+     (different artifacts compile in parallel; a worker that needs an artifact another one is building waits on its
+     lock). Heavy shapes run last, one per GPU.
+   * ``pytest:<paths>``: a test run (one process per test file), e.g. a release smoke set.
+   * ``cmd:<command>``: any command, e.g. MiniWorld's ``python scripts/prebuild_engine.py --mode all``.
+
+   The bundle being refreshed is itself installed while the drivers run (it is ``<prebuilt root>/<arch>``, inside the
+   package), so an artifact whose key did not change is a prebuilt hit and is not compiled again: a refresh compiles
+   only new keys.
+
+2. **Replay** (``--replay <records.jsonl>``): rebuild the recorded artifacts from their recipes in this environment --
+   another Python ABI, another torch / CUDA -- without running a GPU driver: CPU only, ``--jobs`` processes.
+
+3. **Update** ``<prebuilt root>/<arch>/`` (default ``src/miniworld_engine/_prebuilt/<arch>``, not in git):
+   ``manifest.json`` (key -> path, kind, name, size, sha256, key material) and ``artifacts/``. Artifacts of this
+   Python ABI (and every cubin) that the run did not reach are dropped (``--keep`` keeps them); other ABIs' extensions
+   are kept.
+
+4. **Wheel** (``dev build-wheel``): the engine's own wheel (setuptools, then the prebuilt artifacts of this Python ABI
+   added), tagged ``cpXY-cpXY-manylinux_2_28_x86_64`` and pinned to the torch minor version the artifacts were built
+   against; :func:`check_binaries` is the auditwheel-style check (only torch / CUDA / system libraries needed, glibc
+   and libstdc++ symbol versions within manylinux_2_28).
+
+See docs/kernels/prebuilt-kernels.md.
+"""
+
+from __future__ import annotations
+
+import base64
+import concurrent.futures
+import contextlib
+import datetime
+import hashlib
+import json
+import multiprocessing
+import os
+import platform
+import re
+import selectors
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+import zipfile
+from pathlib import Path
+
+from miniworld_engine.kernels import prebuilt
+
+PKG_ROOT = Path(__file__).resolve().parents[1]
+REPO_ROOT = PKG_ROOT.parents[1]
+#: manylinux_2_28 (AlmaLinux 8): the newest symbol versions a binary may need from the system.
+MANYLINUX = "manylinux_2_28_x86_64"
+MAX_SYMBOL_VERSIONS = {"GLIBC": (2, 28), "GLIBCXX": (3, 4, 25), "CXXABI": (1, 3, 11), "GCC": (8, 0, 0)}
+#: Libraries an artifact may link: the manylinux system set, and what torch's own wheel provides.
+ALLOWED_LIBS = re.compile(
+    r"^(libc|libm|libdl|librt|libpthread|libgcc_s|libstdc\+\+|ld-linux-x86-64|libutil)\.so[.\d]*$"
+    r"|^lib(c10|c10_cuda|torch|torch_cpu|torch_cuda|torch_python|shm)\.so$"
+    r"|^lib(cudart|cublas|cublasLt|cuda|nvrtc|cusparse|cufft|curand|cusolver|nvJitLink)\.so[.\d]*$")
+
+
+def log(message: str) -> None:
+    print(f"[bundle-kernels] {message}", flush=True)
+
+
+# --------------------------------------------------------------------------------------------------- environment
+def driver_env(out: Path, arch: str, record: Path, gpu: str | None = None) -> dict[str, str]:
+    env = dict(os.environ)
+    env[prebuilt.RECORD_ENV] = str(record)
+    env["MINIWORLD_ENGINE_BUNDLE_ARCH"] = arch
+    env["XDG_CACHE_HOME"] = str(out / "cache")
+    env.setdefault("MINIWORLD_ENGINE_JIT_FALLBACK", "1")
+    src = str(PKG_ROOT.parent)
+    env["PYTHONPATH"] = os.pathsep.join([src, *([env["PYTHONPATH"]] if env.get("PYTHONPATH") else [])])
+    if gpu is not None:
+        env["CUDA_VISIBLE_DEVICES"] = gpu
+    return env
+
+
+def visible_gpus(spec: str) -> list[str]:
+    if spec:
+        return [g.strip() for g in spec.split(",") if g.strip()]
+    vis = os.environ.get("CUDA_VISIBLE_DEVICES", "")
+    if vis:
+        return [g.strip() for g in vis.split(",") if g.strip()]
+    import torch
+
+    return [str(i) for i in range(torch.cuda.device_count())]
+
+
+# --------------------------------------------------------------------------------------------------- engine driver
+class _Worker:
+    def __init__(self, index: int, gpu: str, env: dict, logs: Path):
+        self.index, self.gpu = index, gpu
+        self.log = (logs / f"worker{index:03d}.log").open("a")
+        self.proc = subprocess.Popen([sys.executable, "-m", "miniworld_engine.build.bundle_coverage", "serve"],
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.log, text=True,
+                                     env=env, bufsize=1)
+        self.case: dict | None = None
+        self.started = 0.0
+
+    def give(self, case: dict) -> None:
+        self.case, self.started = case, time.monotonic()
+        assert self.proc.stdin is not None
+        self.proc.stdin.write(json.dumps(case) + "\n")
+        self.proc.stdin.flush()
+
+    def close(self) -> None:
+        with contextlib.suppress(Exception):
+            assert self.proc.stdin is not None
+            self.proc.stdin.close()
+        with contextlib.suppress(Exception):
+            self.proc.wait(timeout=60)
+        if self.proc.poll() is None:
+            self.proc.kill()
+        self.log.close()
+
+
+def _interleave(cases: list[dict]) -> list[dict]:
+    """Round-robin over (kind, module, width row, mode, dtype): the workers start on different modules, so they compile
+    different artifacts at once instead of all waiting on the first module's."""
+    groups: dict[tuple, list[dict]] = {}
+    for c in cases:
+        groups.setdefault((c["kind"], c.get("case"), c.get("dim"), c["train"], c["dtype"]), []).append(c)
+    out: list[dict] = []
+    queues = list(groups.values())
+    while queues:
+        out += [q.pop(0) for q in queues]
+        queues = [q for q in queues if q]
+    return out
+
+
+def run_engine_driver(out: Path, arch: str, gpus: list[str], workers: int, case_filter: str = "") -> dict:
+    """Deal ``bundle_coverage.cases()`` to ``workers`` processes over ``gpus``; heavy cases run last, one per GPU."""
+    from miniworld_engine.build import bundle_coverage
+
+    cases = bundle_coverage.cases()
+    if case_filter:
+        cases = [c for c in cases if case_filter in json.dumps(c)]
+    light = _interleave([c for c in cases if not c["heavy"]])
+    heavy = _interleave([c for c in cases if c["heavy"]])
+    results: dict[int, dict] = {}
+    logs = out / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    record = out / "records" / "engine.jsonl"
+
+    def phase(queue: list[dict], per_gpu: int) -> list[dict]:
+        sel = selectors.DefaultSelector()
+        pool: list[_Worker] = []
+        retry: list[dict] = []
+        queue = list(queue)
+        total, done, t0 = len(queue), 0, time.monotonic()
+
+        def spawn(i: int) -> _Worker:
+            w = _Worker(i, gpus[i % len(gpus)], driver_env(out, arch, record, gpus[i % len(gpus)]), logs)
+            sel.register(w.proc.stdout, selectors.EVENT_READ, w)
+            return w
+
+        pool = [spawn(i) for i in range(min(len(gpus) * per_gpu, max(1, len(queue))))]
+        for w in pool:
+            if queue:
+                w.give(queue.pop(0))
+        while any(w.case is not None for w in pool):
+            for key, _ in sel.select(timeout=30):
+                w: _Worker = key.data
+                line = w.proc.stdout.readline() if w.proc.stdout else ""
+                if not line:  # the worker died: its case failed, start a new worker
+                    sel.unregister(key.fileobj)
+                    if w.case is not None:
+                        results[w.case["id"]] = {"id": w.case["id"], "status": "crash",
+                                                 "detail": f"worker exited {w.proc.poll()}", "seconds": 0}
+                        done += 1
+                    w.close()
+                    nw = spawn(w.index)
+                    pool[pool.index(w)] = nw
+                    if queue:
+                        nw.give(queue.pop(0))
+                    continue
+                if not line.startswith("RESULT "):
+                    continue
+                r = json.loads(line[7:])
+                results[r["id"]] = r
+                done += 1
+                if r["status"] == "oom" and w.case is not None and not w.case.get("retried"):
+                    retry.append(dict(w.case, retried=True))
+                w.case = None
+                if queue:
+                    w.give(queue.pop(0))
+                if done % 50 == 0 or done == total:
+                    log(f"  {done}/{total} cases ({time.monotonic() - t0:.0f} s)")
+        for w in pool:
+            with contextlib.suppress(Exception):
+                sel.unregister(w.proc.stdout)
+            w.close()
+        return retry
+
+    log(f"engine driver: {len(light)} cases on {len(gpus)} GPU(s) x {workers} workers, then {len(heavy)} heavy")
+    retry = phase(light, workers)
+    phase(heavy + retry, 1)
+    summary: dict[str, int] = {}
+    for r in results.values():
+        summary[r["status"]] = summary.get(r["status"], 0) + 1
+    (out / "logs" / "engine_cases.jsonl").write_text(
+        "".join(json.dumps({**c, **results.get(c["id"], {})}) + "\n" for c in cases))
+    log(f"engine driver done: {summary}")
+    return summary
+
+
+def run_pytest_driver(out: Path, arch: str, gpus: list[str], workers: int, paths: list[str], name: str) -> int:
+    """One pytest process per test file, ``workers`` per GPU at a time."""
+    files: list[str] = []
+    for p in paths:
+        path = Path(p)
+        files += sorted(str(f) for f in path.rglob("test_*.py")) if path.is_dir() else [str(path)]
+    record = out / "records" / f"{name}.jsonl"
+    logs = out / "logs"
+    logs.mkdir(parents=True, exist_ok=True)
+    running: list[tuple[subprocess.Popen, Path]] = []
+    failed = 0
+    slots = max(1, len(gpus) * workers)
+    for i, f in enumerate(files):
+        while len(running) >= slots:
+            for proc, lf in list(running):
+                if proc.poll() is not None:
+                    running.remove((proc, lf))
+                    failed += proc.returncode not in (0, 5)
+            time.sleep(1)
+        lf = logs / f"{name}-{Path(f).stem}.log"
+        env = driver_env(out, arch, record, gpus[i % len(gpus)])
+        cmd = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", f]
+        log(f"  {' '.join(cmd[3:])} (GPU {gpus[i % len(gpus)]})")
+        running.append((subprocess.Popen(cmd, cwd=REPO_ROOT if (REPO_ROOT / "tests").is_dir() else None, env=env,
+                                         stdout=lf.open("w"), stderr=subprocess.STDOUT), lf))
+    for proc, _ in running:
+        proc.wait()
+        failed += proc.returncode not in (0, 5)
+    log(f"pytest driver {name}: {len(files)} files, {failed} with failures (see {logs})")
+    return failed
+
+
+def run_cmd_driver(out: Path, arch: str, command: str, name: str) -> int:
+    record = out / "records" / f"{name}.jsonl"
+    lf = out / "logs" / f"{name}.log"
+    lf.parent.mkdir(parents=True, exist_ok=True)
+    log(f"  {command}")
+    rc = subprocess.call(command, shell=True, env=driver_env(out, arch, record), stdout=lf.open("w"),
+                         stderr=subprocess.STDOUT)
+    log(f"command driver {name}: exit {rc} (log {lf})")
+    return rc
+
+
+# --------------------------------------------------------------------------------------------------- records
+def read_records(paths: list[Path], require_file: bool = True) -> dict[str, dict]:
+    """key -> record (an artifact recorded by several processes is one entry)."""
+    entries: dict[str, dict] = {}
+    for p in paths:
+        if not p.is_file():
+            continue
+        for line in p.read_text().splitlines():
+            if not line.strip():
+                continue
+            try:
+                e = json.loads(line)
+            except ValueError:
+                continue
+            if not require_file or Path(e["path"]).is_file():
+                entries.setdefault(e["key"], e)
+    return entries
+
+
+def _sha256(path: Path) -> str:
+    h = hashlib.sha256()
+    with path.open("rb") as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def engine_commit() -> str:
+    """``<sha>`` of the engine checkout (``-dirty`` when tracked files under the package are modified), or ""."""
+    try:
+        sha = subprocess.run(["git", "-C", str(PKG_ROOT), "rev-parse", "HEAD"], capture_output=True, text=True,
+                             check=True).stdout.strip()
+        dirty = subprocess.run(["git", "-C", str(PKG_ROOT), "status", "--porcelain", "--untracked-files=no", "--",
+                                str(PKG_ROOT)], capture_output=True, text=True, check=True).stdout.strip()
+    except (OSError, subprocess.CalledProcessError):
+        return ""
+    return sha + ("-dirty" if dirty else "")
+
+
+def _safe(name: str) -> str:
+    return re.sub(r"[^A-Za-z0-9_-]+", "_", name).strip("_")
+
+
+def _abi_tag(cache_tag: str) -> str:
+    """``cpython-312`` -> ``cp312``."""
+    m = re.match(r"cpython-(\d+)", cache_tag or "")
+    return f"cp{m.group(1)}" if m else _safe(cache_tag or "py")
+
+
+def _entry_python(entry: dict) -> str:
+    return ((entry.get("material") or {}).get("python")) or "-"
+
+
+# --------------------------------------------------------------------------------------------------- update
+def update_prebuilt(entries: dict[str, dict], root: Path, arch: str, *, keep: bool = False) -> Path:
+    """Merge recorded artifacts into ``root/<arch>``: copy the new ones, keep unchanged keys in place, drop artifacts of
+    this Python ABI (and cubins) the run did not reach unless ``keep``; write the manifest."""
+    from miniworld_engine.kernels import _codegraph as cg
+
+    target = root / arch
+    versions = cg._versions()
+    old: dict = {}
+    mf = target / prebuilt.MANIFEST
+    if mf.is_file():
+        old = json.loads(mf.read_text())
+        if (old.get("torch"), old.get("cuda")) != (versions["torch"], versions["cuda"]) \
+                or old.get("format") != prebuilt.MANIFEST_FORMAT or old.get("key_scheme") != cg.KEY_SCHEME:
+            raise SystemExit(f"{target} holds a bundle for torch {old.get('torch')} / CUDA {old.get('cuda')} "
+                             f"(format {old.get('format')}); this is torch {versions['torch']} / CUDA {versions['cuda']}. "
+                             "Use another --prebuilt-root, or remove it.")
+    artifacts: dict[str, dict] = dict(old.get("artifacts", {}))
+    here = cg.python_abi()
+    if not keep:
+        for key, a in list(artifacts.items()):
+            in_scope = a["kind"] == "cubin" or _entry_python(a) == here
+            if in_scope and key not in entries:
+                with contextlib.suppress(OSError):
+                    (target / a["path"]).unlink()
+                    for s in a.get("sidecars") or []:
+                        (target / a["path"]).with_suffix(s).unlink(missing_ok=True)
+                del artifacts[key]
+    copied = 0
+    for key, e in sorted(entries.items(), key=lambda kv: (kv[1]["kind"], kv[1]["name"])):
+        if "<mathdx>" in json.dumps((e.get("material") or {}).get("flags")):
+            # NVIDIA MathDx / cuBLASDx: not redistributed in compiled form; such kernels JIT-build where they are used
+            log(f"  not bundled (compiles MathDx): {e['name']}")
+            continue
+        src = Path(e["path"])
+        if e["kind"] == "ext":
+            rel = Path("artifacts") / "ext" / _abi_tag(_entry_python(e)) / f"{_safe(e['name'])}-{key[:16]}" / src.name
+        else:
+            rel = Path("artifacts") / "cubin" / _safe(e["name"].split("/", 1)[0]) / \
+                f"{_safe(e['name'].split('/', 1)[-1])}-{key[:16]}.cubin"
+        dst = target / rel
+        if src.resolve() != dst.resolve():
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+            copied += 1
+        sidecars = []
+        for suffix in e.get("sidecars") or []:
+            s, d = src.with_suffix(suffix), dst.with_suffix(suffix)
+            if s.is_file():
+                if s.resolve() != d.resolve():
+                    shutil.copy2(s, d)
+                sidecars.append(suffix)
+        artifacts[key] = {
+            "kind": e["kind"], "name": e["name"], "path": rel.as_posix(), "size": dst.stat().st_size,
+            "sha256": _sha256(dst), "sidecars": sidecars, "material": e.get("material"),
+            **({"module": e["module"], "python_module": e.get("python_module", True)} if e["kind"] == "ext" else {}),
+        }
+    # empty directories left by dropped artifacts
+    for d in sorted((target / "artifacts").glob("**/"), key=lambda p: -len(p.parts)) if (target / "artifacts").is_dir() else []:
+        with contextlib.suppress(OSError):
+            d.rmdir()
+    manifest = {
+        "format": prebuilt.MANIFEST_FORMAT,
+        "key_scheme": cg.KEY_SCHEME,
+        "arch": arch,
+        "torch": versions["torch"],
+        "cuda": versions["cuda"],
+        "pythons": sorted({_entry_python(a) for a in artifacts.values() if a["kind"] == "ext"}),
+        "engine": prebuilt.engine_version(),
+        "engine_commit": engine_commit(),
+        "built": datetime.datetime.now(datetime.timezone.utc).isoformat(timespec="seconds"),
+        "host": platform.node(),
+        "artifacts": artifacts,
+    }
+    target.mkdir(parents=True, exist_ok=True)
+    (target / prebuilt.MANIFEST).write_text(json.dumps(manifest, indent=1, sort_keys=True) + "\n")
+    log(f"{target}: {len(artifacts)} artifacts ({copied} copied in, {len(old.get('artifacts', {}))} before)")
+    return target
+
+
+# --------------------------------------------------------------------------------------------------- replay
+def _replay_one(task: dict) -> dict:
+    """Rebuild one recorded artifact here (a worker process). Returns {old, key, path} or {old, error}."""
+    from miniworld_engine.kernels import _codegraph as cg
+    from miniworld_engine.kernels import _nvcc
+
+    r = task["recipe"]
+    old_jit, new_jit = r.get("jit") or task.get("jit"), cg.context().jit
+    if old_jit and new_jit and old_jit != new_jit:  # generated headers / sources lived under the recording's JIT root
+        r = json.loads(json.dumps(r).replace(old_jit, new_jit))
+    try:
+        if r["fn"] == "derived":
+            base = _replay_one({"recipe": task["base"], "old": r["base_key"], "jit": task.get("jit")})
+            if "error" in base:
+                return {"old": task["old"], "error": "base: " + base["error"]}
+            module, fn = r["replay"][0].split(":")
+            import importlib
+
+            out = getattr(importlib.import_module(module), fn)(Path(base["path"]), *r["replay"][1])
+            return {"old": task["old"], "path": str(out)}
+        if r["fn"] == "cubin":
+            for p, t in (r.get("overlay") or {}).items():
+                cg.publish(p, t)
+            out = _nvcc.cubin(r["name"], r["flags"], source=r["source"], text=r["text"], family=r["family"],
+                              toolchain=r["toolchain"], ptxas_log=r["ptxas_log"], timeout=r["timeout"])
+            return {"old": task["old"], "path": str(out)}
+        if r["inline"]:
+            ext = _nvcc.load_inline_extension(r["name"], **r["kwargs"])
+        else:
+            ext = _nvcc.load_extension(r["name"], r["sources"], **r["kwargs"])
+        return {"old": task["old"], "path": getattr(ext, "__file__", str(ext))}
+    except Exception as exc:  # one failed rebuild is reported, the rest go on
+        import traceback
+
+        return {"old": task["old"], "error": f"{type(exc).__name__}: {str(exc)[-300:]}",
+                "detail": f"{exc}\n{traceback.format_exc()}"}
+
+
+def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, only: str = "") -> Path:
+    """Rebuild every recorded recipe in this environment, ``jobs`` at a time; returns the new records file."""
+    recipes = {k: e for k, e in read_records(records, require_file=False).items() if e.get("recipe")}
+    if only:
+        recipes = {k: e for k, e in recipes.items() if only in e["kind"] or only in e["name"]}
+    record = out / "records" / f"replay-{_abi_tag(sys.implementation.cache_tag)}.jsonl"
+    env = driver_env(out, arch, record)
+    os.environ.update({k: env[k] for k in (prebuilt.RECORD_ENV, "MINIWORLD_ENGINE_BUNDLE_ARCH", "XDG_CACHE_HOME",
+                                           "MINIWORLD_ENGINE_JIT_FALLBACK")})
+    os.environ.setdefault("MINIWORLD_ENGINE_TARGET_ARCH", arch)
+    # no GPU here: torch must not try to detect the arch of an extension that names none
+    os.environ.setdefault("TORCH_CUDA_ARCH_LIST", f"{int(arch[2:]) // 10}.{int(arch[2:]) % 10}")
+    # the bundle being built is the only one in view: its own artifacts are reused (another ABI's cubins, an
+    # interrupted run), nothing from the package's own _prebuilt/ or elsewhere
+    os.environ["MINIWORLD_ENGINE_PREBUILT_DIR"] = str(root)
+    os.environ.pop(prebuilt.BUNDLE_ENV, None)
+    def jit_of(e: dict) -> str | None:
+        """The JIT root the recording ran with (older records do not name it: take it from the artifact's path)."""
+        if e["recipe"].get("jit"):
+            return e["recipe"]["jit"]
+        m = re.match(r"(.*/miniworld_engine_jit)/", e["path"])
+        return m.group(1) if m else None
+
+    tasks = []
+    for key, e in recipes.items():
+        r = e["recipe"]
+        if r["fn"] == "derived":
+            base = recipes.get(r["base_key"])
+            if base is None:
+                log(f"  skip {e['name']}: its base cubin was not recorded")
+                continue
+            tasks.append({"old": key, "recipe": r, "base": base["recipe"], "jit": jit_of(base)})
+        else:
+            tasks.append({"old": key, "recipe": r, "jit": jit_of(e)})
+    tasks.sort(key=lambda t: t["recipe"]["fn"] == "derived")
+    log(f"replaying {len(tasks)} recipes with {jobs} processes")
+    started, errors = time.monotonic(), []
+    ctx = multiprocessing.get_context("spawn")
+    with concurrent.futures.ProcessPoolExecutor(max_workers=jobs, mp_context=ctx) as pool:
+        for i, res in enumerate(pool.map(_replay_one, tasks), 1):
+            if "error" in res:
+                errors.append(res)
+                name = recipes[res["old"]]["name"]
+                detail = out / "logs" / f"replay-failed-{_safe(name)}.log"
+                detail.write_text(res.get("detail", res["error"]))
+                log(f"  FAILED {name}: {res['error']} (full output: {detail})")
+            if i % 20 == 0 or i == len(tasks):
+                log(f"  {i}/{len(tasks)} ({time.monotonic() - started:.0f} s)")
+    log(f"replay: {len(tasks) - len(errors)} rebuilt / loaded, {len(errors)} failed, {time.monotonic() - started:.0f} s")
+    return record
+
+
+# --------------------------------------------------------------------------------------------------- command
+def bundle_kernels(args) -> int:
+    started = time.monotonic()
+    arch = args.arch if args.arch.startswith("sm") else f"sm{args.arch}"
+    out = Path(args.out).resolve()
+    root = Path(args.prebuilt_root).resolve() if args.prebuilt_root else prebuilt.PREBUILT_DIR
+    (out / "records").mkdir(parents=True, exist_ok=True)
+    (out / "logs").mkdir(parents=True, exist_ok=True)
+    from miniworld_engine.kernels import _codegraph as cg
+
+    timings: dict[str, float] = {}
+    if args.replay:
+        t0 = time.monotonic()
+        rec = replay([Path(p) for p in args.replay], out, root, arch, args.jobs, args.only)
+        timings["replay"] = time.monotonic() - t0
+        records = [rec]
+        keep = True
+    else:
+        device_arch = cg.target_arch()
+        if device_arch not in ("cpu", arch):
+            log(f"this GPU is {device_arch}, not {arch}: a bundle is built on its own arch")
+            return 2
+        os.environ["MINIWORLD_ENGINE_PREBUILT_DIR"] = str(root)  # the drivers see the bundle being refreshed
+        if not args.collect_only:
+            for old in (out / "records").glob("*.jsonl"):
+                old.rename(old.with_suffix(f".{int(time.time())}.prev"))
+            gpus = visible_gpus(args.gpus)
+            for i, spec in enumerate(args.coverage or ["engine"]):
+                t0 = time.monotonic()
+                if spec == "engine" or spec.startswith("engine:"):
+                    run_engine_driver(out, arch, gpus, args.workers, spec.partition(":")[2])
+                elif spec.startswith("pytest:"):
+                    run_pytest_driver(out, arch, gpus, args.workers, spec[7:].split(","), f"pytest{i}")
+                elif spec.startswith("cmd:"):
+                    run_cmd_driver(out, arch, spec[4:], f"cmd{i}")
+                else:
+                    log(f"unknown coverage driver {spec!r} (engine | pytest:<paths> | cmd:<command>)")
+                    return 2
+                timings[spec[:40]] = time.monotonic() - t0
+        records = sorted((out / "records").glob("*.jsonl"))
+        keep = args.keep
+    entries = read_records(records)
+    if not entries:
+        log("no artifacts were recorded")
+        return 1
+    target = update_prebuilt(entries, root, arch, keep=keep)
+    manifest = json.loads((target / prebuilt.MANIFEST).read_text())
+    total = sum(a["size"] for a in manifest["artifacts"].values())
+    kinds: dict[str, int] = {}
+    for a in manifest["artifacts"].values():
+        k = a["kind"] if a["kind"] == "cubin" else f"ext-{_abi_tag(_entry_python(a))}"
+        kinds[k] = kinds.get(k, 0) + 1
+    origins: dict[str, int] = {}
+    for e in entries.values():
+        origins[e["origin"]] = origins.get(e["origin"], 0) + 1
+    summary = {"seconds": round(time.monotonic() - started, 1), "phases": {k: round(v, 1) for k, v in timings.items()},
+               "recorded": len(entries), "origins": origins, "bundle": kinds, "bytes": total, "target": str(target)}
+    (out / "summary.json").write_text(json.dumps(summary, indent=1) + "\n")
+    log(f"done in {summary['seconds']:.0f} s: {summary}")
+    return 0
+
+
+# --------------------------------------------------------------------------------------------------- wheel
+def _version_tuple(text: str) -> tuple[int, ...]:
+    return tuple(int(x) for x in re.findall(r"\d+", text))
+
+
+def check_binaries(paths: list[Path]) -> list[str]:
+    """auditwheel-style findings for shared objects: a NEEDED library outside :data:`ALLOWED_LIBS`, an RPATH /
+    RUNPATH, or a symbol version newer than manylinux_2_28 allows. Empty list = pass."""
+    problems = []
+    for so in paths:
+        dyn = subprocess.run(["readelf", "-dW", str(so)], capture_output=True, text=True, check=False).stdout
+        problems += [f"{so.name}: needs {lib}" for lib in re.findall(r"\(NEEDED\)\s+Shared library: \[([^\]]+)\]", dyn)
+                     if not ALLOWED_LIBS.match(lib)]
+        for kind, value in re.findall(r"\((RPATH|RUNPATH)\)\s+Library \w+: \[([^\]]+)\]", dyn):
+            problems.append(f"{so.name}: {kind} {value}")
+        ver = subprocess.run(["readelf", "-VW", str(so)], capture_output=True, text=True, check=False).stdout
+        needs = set(re.findall(r"Name: ((?:GLIBC|GLIBCXX|CXXABI|GCC)_[\d.]+)", ver))
+        for need in sorted(needs):
+            family, _, number = need.partition("_")
+            if _version_tuple(number) > MAX_SYMBOL_VERSIONS[family]:
+                problems.append(f"{so.name}: needs {need} (manylinux_2_28 allows up to "
+                                f"{family}_{'.'.join(map(str, MAX_SYMBOL_VERSIONS[family]))})")
+    return problems
+
+
+def _record_hash(data: bytes) -> str:
+    return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
+
+
+def build_wheel(args) -> int:
+    """The engine's platform wheel: setuptools builds the pure wheel, then the prebuilt artifacts of this Python ABI
+    go in as package data, the torch requirement is pinned to the artifacts' torch minor, and the tag says
+    ``cpXY-cpXY-manylinux_2_28_x86_64``."""
+    from miniworld_engine.kernels import _codegraph as cg
+
+    root = Path(args.prebuilt_root).resolve() if args.prebuilt_root else prebuilt.PREBUILT_DIR
+    out = Path(args.out).resolve()
+    out.mkdir(parents=True, exist_ok=True)
+    here = cg.python_abi()
+    tag = _abi_tag(here)
+    with tempfile.TemporaryDirectory() as tmp:
+        log(f"building the pure wheel of {REPO_ROOT} with {sys.executable}")
+        subprocess.run([sys.executable, "-m", "pip", "wheel", str(REPO_ROOT), "--no-deps", "--no-build-isolation",
+                        "-q", "-w", tmp], check=True)
+        base = next(Path(tmp).glob("miniworld_engine-*.whl"))
+        manifests = sorted(root.glob(f"*/{prebuilt.MANIFEST}"))
+        if not manifests:
+            log(f"no prebuilt kernels under {root}: run `dev bundle-kernels` first")
+            return 1
+        torch_versions = set()
+        extra: list[tuple[str, bytes]] = []
+        binaries: list[Path] = []
+        unpacked = Path(tmp) / "unpacked"
+        for mf in manifests:
+            manifest = json.loads(mf.read_text())
+            torch_versions.add((manifest["torch"], manifest["cuda"]))
+            arch_dir = mf.parent
+            keep = {k: a for k, a in manifest["artifacts"].items()
+                    if a["kind"] == "cubin" or _entry_python(a) == here}
+            dropped = len(manifest["artifacts"]) - len(keep)
+            manifest = dict(manifest, artifacts=keep, pythons=[here])
+            prefix = f"miniworld_engine/_prebuilt/{arch_dir.name}"
+            extra.append((f"{prefix}/{prebuilt.MANIFEST}", (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()))
+            for a in keep.values():
+                for rel in [a["path"], *[str(Path(a["path"]).with_suffix(s)) for s in a.get("sidecars") or []]]:
+                    data = (arch_dir / rel).read_bytes()
+                    extra.append((f"{prefix}/{rel}", data))
+                    if rel.endswith(".so"):
+                        p = unpacked / arch_dir.name / rel
+                        p.parent.mkdir(parents=True, exist_ok=True)
+                        p.write_bytes(data)
+                        binaries.append(p)
+            log(f"{arch_dir.name}: {len(keep)} artifacts for {tag} ({dropped} of other Python ABIs left out)")
+        if len(torch_versions) != 1:
+            log(f"the arch bundles were built against different torch / CUDA: {sorted(torch_versions)}")
+            return 1
+        torch_version, cuda = next(iter(torch_versions))
+        major_minor = ".".join(torch_version.split("+")[0].split(".")[:2])
+        problems = check_binaries(binaries)
+        for p in problems:
+            log(f"  binary check: {p}")
+        with zipfile.ZipFile(base) as zin:
+            names = zin.namelist()
+            dist_info = next(n.split("/")[0] for n in names if n.endswith(".dist-info/METADATA"))
+            version = dist_info.removeprefix("miniworld_engine-").removesuffix(".dist-info")
+            wheel = out / f"miniworld_engine-{version}-{tag}-{tag}-{MANYLINUX}.whl"
+            record: list[str] = []
+            with zipfile.ZipFile(wheel, "w", compression=zipfile.ZIP_DEFLATED) as zout:
+                for n in names:
+                    if n.startswith(f"{dist_info}/") and n.rsplit("/", 1)[-1] in ("RECORD", "WHEEL", "METADATA"):
+                        continue
+                    if n.startswith("miniworld_engine/_prebuilt/"):
+                        continue
+                    data = zin.read(n)
+                    zout.writestr(zin.getinfo(n), data)
+                    record.append(f"{n},{_record_hash(data)},{len(data)}")
+                for n, data in extra:
+                    zout.writestr(n, data)
+                    record.append(f"{n},{_record_hash(data)},{len(data)}")
+                meta = zin.read(f"{dist_info}/METADATA").decode()
+                meta, count = re.subn(r"^Requires-Dist: torch[^;\n]*$", f"Requires-Dist: torch=={major_minor}.*",
+                                      meta, count=1, flags=re.MULTILINE)
+                if not count:
+                    meta = meta.replace("\n\n", f"\nRequires-Dist: torch=={major_minor}.*\n\n", 1)
+                wheel_meta = (f"Wheel-Version: 1.0\nGenerator: miniworld-engine build-wheel\nRoot-Is-Purelib: false\n"
+                              f"Tag: {tag}-{tag}-{MANYLINUX}\n")
+                for n, text in (("METADATA", meta), ("WHEEL", wheel_meta)):
+                    data = text.encode()
+                    zout.writestr(f"{dist_info}/{n}", data)
+                    record.append(f"{dist_info}/{n},{_record_hash(data)},{len(data)}")
+                record.append(f"{dist_info}/RECORD,,")
+                zout.writestr(f"{dist_info}/RECORD", "\n".join(record) + "\n")
+    size = wheel.stat().st_size
+    log(f"wheel: {wheel} ({size / 1e6:.1f} MB; torch {torch_version} / CUDA {cuda} -> requires torch=={major_minor}.*)")
+    if size > 100e6:
+        log("  over PyPI's 100 MB file limit")
+    if problems:
+        log(f"  {len(problems)} binary check finding(s): the {MANYLINUX} tag is not honest until they are fixed")
+        return 3 if args.strict else 0
+    log(f"  binary check: {len(binaries)} shared objects, no findings")
+    return 0
+
+
+# --------------------------------------------------------------------------------------------------- code graph
+def known_artifacts(extra: list[str] = ()) -> list[dict]:
+    """Every artifact whose key material is on this machine: the local cache's sidecars, the installed bundles, and
+    ``extra`` manifests / record files."""
+    from miniworld_engine import settings
+
+    found: list[dict] = []
+    root = settings.engine_jit_root()
+    for side in list(root.glob("*/*.json")) + list(root.glob("torch_extensions/*/artifact.json")):
+        with contextlib.suppress(OSError, ValueError, KeyError):
+            data = json.loads(side.read_text())
+            found.append({"name": data["name"], "key": data["key"], "material": data["material"],
+                          "where": str(side.parent if side.name == "artifact.json" else side.with_suffix(".cubin"))})
+    manifests = [b.root / prebuilt.MANIFEST for b in prebuilt.bundles()] + [Path(p) for p in extra]
+    for m in manifests:
+        with contextlib.suppress(OSError, ValueError):
+            if m.suffix == ".jsonl":
+                found.extend({"name": e["name"], "key": e["key"], "material": e.get("material"), "where": str(m)}
+                             for e in read_records([m]).values())
+                continue
+            data = json.loads(m.read_text())
+            for key, a in data.get("artifacts", {}).items():
+                found.append({"name": a["name"], "key": key, "material": a.get("material"), "where": str(m)})
+    return found
+
+
+def file_label(path: Path) -> str:
+    from miniworld_engine.kernels import _codegraph as cg
+
+    p = os.path.abspath(path)
+    rel = cg._under(p, cg.context().package)
+    return f"pkg:{rel}" if rel is not None else f"file:{path.name}"
+
+
+def code_graph(args) -> int:
+    from miniworld_engine.kernels import _codegraph as cg
+
+    known = known_artifacts(args.manifest)
+    if args.affected:
+        path = Path(args.affected)
+        label = file_label(path)
+        digest = cg.parse_file(os.path.abspath(path)).digest if path.is_file() else None
+        hits = []
+        for a in known:
+            nodes = {n[0]: n[1] for n in (a.get("material") or {}).get("nodes") or []}
+            if label in nodes:
+                hits.append((a, "rebuilds" if nodes[label] != digest else "unchanged (same normalized content)"))
+        print(f"{label}: reached by {len(hits)} of {len(known)} known artifacts")
+        for a, state in sorted(hits, key=lambda h: h[0]["name"]):
+            print(f"  {a['name']:60s} {a['key'][:16]}  {state}")
+        return 0
+    target = args.target
+    if target and Path(target).is_file():
+        path = Path(target)
+        graph = cg.closure([path], [os.path.abspath(p) for p in args.include] + [str(path.parent)])
+        print(f"graph of {file_label(path)} (-I {', '.join(args.include) or '(its directory)'}):")
+        for n in graph.nodes:
+            print(f"  {n.label:70s} {n.digest[:16]}")
+        for spelling in graph.external:
+            print(f"  ext:{spelling}")
+        for frm, spelling, to in graph.edges:
+            print(f'    {frm} --#include "{spelling}"--> {to}')
+        users = [a for a in known if file_label(path) in dict(map(tuple, (a.get("material") or {}).get("nodes") or []))]
+        print(f"reached by {len(users)} known artifact(s): " + ", ".join(sorted({a["name"] for a in users})))
+        return 0
+    matches = [a for a in known if target and (a["name"] == target or a["key"].startswith(target) or target in a["name"])]
+    if not matches:
+        print(f"no known artifact matches {target!r} ({len(known)} known: local cache, installed bundles, --manifest)")
+        return 1
+    for a in matches:
+        m = a.get("material") or {}
+        print(f"{a['name']}  key {a['key']}  ({a['where']})")
+        for label, digest in m.get("nodes", []):
+            now = ""
+            if label.startswith("pkg:"):
+                p = cg.PKG_ROOT / label[4:]
+                cur = cg.parse_file(str(p)).digest if p.is_file() else None
+                now = "" if cur == digest else ("  CHANGED" if cur else "  MISSING")
+            print(f"  {label:70s} {digest[:16]}{now}")
+        for spelling in m.get("external", []):
+            print(f"  ext:{spelling}")
+        print(f"  flags: {json.dumps(m.get('flags'))}")
+        print(f"  arch {m.get('arch')}  torch {m.get('torch')}  cuda {m.get('cuda')}  python {m.get('python')}")
+    return 0

@@ -228,15 +228,11 @@ def _ext(
         return _EXT[key]
     from miniworld_engine.kernels._nvcc import load_extension as load
 
-    root = settings.engine_jit_root()
     csrc = Path(__file__).with_name("csrc")
     if sm100:
-        build = root / "opm_sm100"
-        build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(
             name="miniworld_opm_sm100",
             sources=[str(csrc / "sm100" / "opm_sm100.cu")],
-            build_directory=str(build),
             extra_include_paths=[str(csrc / "sm100")],
             extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a"],
             extra_cflags=["-O3"],
@@ -255,12 +251,9 @@ def _ext(
             suffix += "_half"
         if wide:
             suffix += f"_{cm}_{cz}"
-        build = root / ("opm_epilogue" + suffix)
-        build.mkdir(parents=True, exist_ok=True)
         _EXT[key] = load(
             name="miniworld_opm_epilogue" + suffix,
             sources=[str(csrc / "opm_epilogue.cu")],
-            build_directory=str(build),
             extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])

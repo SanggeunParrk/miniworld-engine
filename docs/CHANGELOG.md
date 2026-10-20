@@ -8,6 +8,19 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- Prebuilt CUDA kernels in the engine's own binary wheel (`miniworld_engine/_prebuilt/<arch>/`, docs/kernels/prebuilt-kernels.md):
+  every torch extension and cubin is resolved by a content key from its include graph (`kernels/_codegraph.py`:
+  normalized sources and the headers they reach, flags without machine paths, arch, torch, CUDA, Python ABI) -- shipped
+  binary first, then the local cache, then a JIT build (`settings.jit_fallback`, `MINIWORLD_ENGINE_JIT_FALLBACK=0` makes a
+  miss an error). The local JIT cache uses the same keys: an edit that does not reach a kernel (a comment, an unrelated
+  header in the same directory) no longer rebuilds it, `TORCH_EXTENSIONS_DIR` is no longer used, and TriMul's
+  `_source_digest` no longer keys cubins. `miniworld-engine dev bundle-kernels` (coverage drivers, recipe replay for other
+  Python ABIs / torch / CUDA builds, incremental refresh), `dev build-wheel` (cpXY manylinux_2_28 wheels pinned to the
+  torch minor, auditwheel-style binary check), `dev code-graph` (an artifact's graph and key, `--affected <file>`).
+  CUTLASS / CUDA toolkit headers are needed only to build. License files for CUTLASS and FlashAttention-3 (BSD-3-Clause).
+
 ### Changed
 
 - H100 TriangleAttention takes B samples in one call by design (`integrations.triattn_h100_sm90.max_batch(kind, length)` = 48 per launch

@@ -7,14 +7,10 @@ under ``settings.engine_jit_root()``; launches go through the CUDA driver on tor
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
@@ -36,26 +32,10 @@ def _arch(index: int) -> str:
 @functools.lru_cache(maxsize=None)
 def cubin(arch: str = "sm_100a") -> str:
     """Path of the cubin, built on first use; rebuilt only when the source, a flag or the toolchain changes."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
-    nvcc, rel, host = kernel_toolchain()
-    flags = (*host, "-std=c++17", "-O3", f"-arch={arch}", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    src = _dir / "smooth_lddt.cu"
-    h.update(src.read_bytes())
-    root = settings.engine_jit_root()
-    out = root / f"smooth_lddt_{arch[3:]}" / f"smooth_lddt_{h.hexdigest()[:16]}.cubin"
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run([nvcc, *flags, str(src), "-o", str(tmp)], capture_output=True, text=True, timeout=900, check=False)
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}")
-            os.replace(tmp, out)
-    return str(out)
+    flags = ("-std=c++17", "-O3", f"-arch={arch}", "-cubin", "-lineinfo", "-ftz=true", "-prec-sqrt=false", "-prec-div=false")
+    return str(_nvcc.cubin(f"smooth_lddt_{arch[3:]}/smooth_lddt", flags, source=_dir / "smooth_lddt.cu", toolchain="sm100"))
 
 
 @functools.lru_cache(maxsize=16)

@@ -7,7 +7,7 @@ content-addressed user cache. Module handles are specific to a CUDA device.
 from pathlib import Path
 from functools import lru_cache, wraps
 from contextlib import contextmanager
-import ctypes, hashlib, os, shutil, subprocess, json
+import ctypes, hashlib, json, re
 import threading
 import torch
 import torch.nn.functional as F
@@ -245,30 +245,15 @@ def read_config(relative_path):
 
 
 def cache_dir():
-    root = (
-        settings.engine_jit_root() / "trimul_h100"
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    return root
-
-
-@lru_cache(None)
-def _compiler():
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home
-
-    ensure_cuda_home()
-    nvcc = shutil.which("nvcc")
-    if nvcc is None:
-        from torch.utils.cpp_extension import CUDA_HOME
-
-        nvcc = str(Path(CUDA_HOME) / "bin/nvcc") if CUDA_HOME else None
-    if not nvcc:
-        raise RuntimeError("H100 native kernels require the CUDA nvcc compiler")
-    return nvcc, subprocess.check_output([nvcc, "--version"], text=True)
+    """Where TriMul H100 cubins (and, when a build needs them, the generated headers) live. Not created here: a process
+    that loads prebuilt or cached cubins writes nothing."""
+    return settings.engine_jit_root() / "trimul_h100"
 
 
 @lru_cache(None)
 def _source_digest():
+    """A digest of every file under h100_sources. Names the generated-header directories only; no cubin key uses it
+    (keys come from each cubin's own include graph, ``kernels/_codegraph.py``)."""
     h = hashlib.sha256()
     for p in sorted(SOURCES.rglob("*")):
         if p.is_file():
@@ -278,56 +263,35 @@ def _source_digest():
 
 
 def _display_name(source):
-    """How a build names ``source`` in the log: its path under h100_sources, a generated (``compile_text``) file, or its name."""
+    """How a build names ``source``: its path under h100_sources, else its name."""
     p = Path(source)
     try:
         return str(p.relative_to(SOURCES))
     except ValueError:
-        pass
-    if p.parent == cache_dir() and len(p.stem) == 64:
-        return f"generated {p.stem[:12]}.cu"
-    return p.name
+        return p.name
 
 
 def compile(source, flags):
-    """The cubin of ``source`` built with ``flags``. Keyed by the source, the flags, the nvcc version and every file under
-    h100_sources (``_source_digest``): any edit there rebuilds every TriMul cubin."""
-    from miniworld_engine.kernels._nvcc import building, flock_wait
+    """The cubin of ``source`` built with ``flags`` (``_nvcc.cubin``): keyed by the source, the headers it actually
+    includes (resolved through ``flags``' -I directories, generated ones included), the flags and the versions. The
+    nvcc output is kept as ``<cubin stem>.ptxas.log``."""
+    from miniworld_engine.kernels import _nvcc
 
-    nvcc, version = _compiler()
-    key = hashlib.sha256(
-        source.read_bytes() + repr(flags).encode() + version.encode() + _source_digest()
-    ).hexdigest()
-    out = cache_dir() / (key + ".cubin")
-    if out.exists():  # the finished cubin only ever appears by rename: no lock needed to reuse it
-        return out
-    label = f"trimul_h100/{_display_name(source)} [{key[:8]}]"
-    with out.with_suffix(".lock").open("w") as lock:
-        flock_wait(lock, label)
-        if not out.exists():
-            with building(label, "cubin"):
-                tmp = out.with_suffix(".tmp.cubin")
-                result = subprocess.run(
-                    [nvcc, *flags, str(source), "-o", str(tmp)],
-                    capture_output=True,
-                    text=True,
-                )
-                out.with_suffix(".ptxas.log").write_text(result.stdout + result.stderr)
-                if result.returncode:
-                    raise RuntimeError(result.stderr)
-                tmp.replace(out)
-    return out
+    return _nvcc.cubin(f"trimul_h100/{_display_name(source)}", list(flags), source=source, family="trimul_h100",
+                       toolchain="path", ptxas_log=True, timeout=None)
+
+
+_KERNEL_NAME = re.compile(r"\bvoid\s+(\w+)\s*\(")
 
 
 def compile_text(source, flags):
-    key = hashlib.sha256(source.encode()).hexdigest()
-    p = cache_dir() / (key + ".cu")
-    # Same bytes for every writer; atomically publish before invoking nvcc.
-    if not p.exists():
-        tmp = p.with_suffix(".%d.tmp" % os.getpid())
-        tmp.write_text(source)
-        tmp.replace(p)
-    return compile(p, flags)
+    """``compile`` for generated source text (written to the cache only when it has to be compiled)."""
+    from miniworld_engine.kernels import _nvcc
+
+    m = _KERNEL_NAME.search(source)
+    name = f"trimul_h100/generated/{m.group(1) if m else 'unit'}"
+    return _nvcc.cubin(name, list(flags), text=source, family="trimul_h100", toolchain="path", ptxas_log=True,
+                       timeout=None)
 
 
 class CooperativePlan:
@@ -439,16 +403,18 @@ def load_unit(path, name):
 
 
 def publish_header(path, text):
-    """Atomically publish an immutable transformed header for concurrent builds."""
-    path.parent.mkdir(parents=True, exist_ok=True)
-    if path.exists() and path.read_text() == text:
-        return
-    import tempfile
+    """Register a transformed header at ``path`` (in memory: ``_codegraph.publish``). Cubin keys read it from there;
+    it is written to disk only when a cubin that includes it has to be compiled."""
+    from miniworld_engine.kernels import _codegraph
 
-    with tempfile.NamedTemporaryFile(mode="w", dir=path.parent, delete=False) as handle:
-        handle.write(text)
-        temporary = Path(handle.name)
-    temporary.replace(path)
+    _codegraph.publish(path, text)
+
+
+def read_header(path):
+    """The text of a header, published (generated) or on disk."""
+    from miniworld_engine.kernels import _codegraph
+
+    return _codegraph.read_text(path)
 
 
 # ------------------------------------------------------------------------------------------------ caller-owned outputs

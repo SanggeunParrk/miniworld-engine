@@ -12,10 +12,7 @@ from __future__ import annotations
 
 import ctypes
 import functools
-import hashlib
-import os
 import re
-import subprocess
 from pathlib import Path
 
 import torch
@@ -33,14 +30,9 @@ ROWS = NWARP * 16
 def cubin(
     stem: str, tf32: bool, nwarp: int = NWARP, minb: int = 1, defs: tuple = ()
 ) -> str:
-    from miniworld_engine.kernels._nvcc import ensure_cuda_home, host_flags, nvcc_path
+    from miniworld_engine.kernels import _nvcc
 
-    ensure_cuda_home()
-    nvcc = nvcc_path()
-    if not nvcc:
-        raise RuntimeError("sm90_atom kernels need nvcc")
     flags = (
-        *host_flags(),
         "-std=c++17",
         "-O3",
         "-arch=sm_90a",
@@ -52,31 +44,8 @@ def cubin(
         "-lineinfo",
         f"-I{_dir}",
     )
-    h = hashlib.sha256(" ".join((nvcc, *flags)).encode())
-    for f in (_dir / "row90.cuh", _dir / f"{stem}.cu"):
-        h.update(f.read_bytes())
-    out = (
-        settings.engine_jit_root()
-        / "atom_sm90"
-        / f"{stem}_{'tf32' if tf32 else 'bf16'}_w{nwarp}m{minb}_{h.hexdigest()[:16]}.cubin"
-    )
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(f"nvcc failed on {stem}.cu:\n{res.stderr[-4000:]}")
-            os.replace(tmp, out)
-    return str(out)
+    return str(_nvcc.cubin(f"atom_sm90/{stem}_{'tf32' if tf32 else 'bf16'}_w{nwarp}m{minb}", flags,
+                           source=_dir / f"{stem}.cu"))
 
 
 def _grp_bytes(nw: int, tf32: bool) -> int:

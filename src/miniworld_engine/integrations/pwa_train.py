@@ -204,12 +204,9 @@ def _build(
     from miniworld_engine.kernels._nvcc import load_extension as load
 
     src = Path(__file__).with_name("csrc") / src_name
-    build = settings.engine_jit_root() / name
-    build.mkdir(parents=True, exist_ok=True)
     _EXT[name] = load(
         name=name,
         sources=[str(src)],
-        build_directory=str(build),
         extra_cuda_cflags=[
             "-O3",
             "-gencode=arch=compute_90a,code=sm_90a",
@@ -235,14 +232,10 @@ def _k100():
     if "sm100" not in _EXT:
         from miniworld_engine.kernels._nvcc import load_extension as load
 
-        root = settings.engine_jit_root()
         csrc = Path(__file__).with_name("csrc")
-        build = root / "miniworld_pwa_sm100"
-        build.mkdir(parents=True, exist_ok=True)
         pwa = load(
             name="miniworld_pwa_sm100",
             sources=[str(csrc / "sm100" / "pwa_sm100.cu")],
-            build_directory=str(build),
             extra_include_paths=[str(csrc / "sm100")],
             extra_cuda_cflags=[
                 "-O3",

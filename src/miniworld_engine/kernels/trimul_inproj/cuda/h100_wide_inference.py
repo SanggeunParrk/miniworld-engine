@@ -68,7 +68,6 @@ def _headers():
                 "W_RESIDENT || NSLOT >= 2 * SPB",
                 "W_RESIDENT || (SCHED == 1 && (MW_K1_STREAM || NSLOT >= SPB)) || NSLOT >= 2 * SPB")
         path = dest / name
-        path.parent.mkdir(parents=True, exist_ok=True)
         T.publish_header(path, content)
     return dest
 

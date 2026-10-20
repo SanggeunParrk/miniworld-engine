@@ -33,16 +33,12 @@ capturable. Page: ``docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`` ("fp32 (TF32) 
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 from pathlib import Path
 
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels.swa_dit.cuda import sm100 as _sm
-from miniworld_engine import settings
 
 C, H, D, NHID, HW = _sm.C, _sm.H, _sm.D, _sm.NHID, _sm.HW
 EPS = _sm.EPS
@@ -79,12 +75,10 @@ FUNCS = {
 @functools.lru_cache(maxsize=None)
 def cubin(name: str) -> str:
     """Path of the cubin ``name`` (see CUBINS), built on first use; rebuilt only when a source, a flag or the toolchain changes."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
     stem, extra = CUBINS[name]
-    nvcc, rel, host = kernel_toolchain()
     flags = (
-        *host,
         "-std=c++17",
         "-O3",
         "-arch=sm_100a",
@@ -93,30 +87,7 @@ def cubin(name: str) -> str:
         f"-I{_dir}",
         *extra,
     )
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    for f in (_dir / "sm100.cuh", _dir / f"{stem}.cu"):
-        h.update(f.read_bytes())
-    root = settings.engine_jit_root()
-    out = root / "swa_dit_sm100_tf32" / f"{name}_{h.hexdigest()[:16]}.cubin"
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(_dir / f"{stem}.cu"), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {stem}.cu {' '.join(extra)}:\n{res.stderr[-4000:]}"
-                )
-            os.replace(tmp, out)
-    return str(out)
+    return str(_nvcc.cubin(f"swa_dit_sm100_tf32/{name}", flags, source=_dir / f"{stem}.cu", toolchain="sm100"))
 
 
 def _load(name: str, func: str | None = None):

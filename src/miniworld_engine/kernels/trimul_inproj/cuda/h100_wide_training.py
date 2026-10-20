@@ -13,7 +13,8 @@ B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5, H=2D.
 
 from functools import lru_cache
 import ctypes
-import fcntl
+import hashlib
+import inspect
 import json
 import os
 import re
@@ -157,28 +158,31 @@ def _register_pool(cubin, kernel, initial, consumer):
     each allocation state. Otherwise the original cubin is returned (correct, one
     resident CTA) with a warning.
     """
-    out = cubin.with_name(cubin.stem + f".pool{initial}.cubin")
-    if out.exists():
-        return out
-    try:
-        tool = _cuobjdump()
-        if tool is None:
-            raise RuntimeError("cuobjdump not found")
-        sass = subprocess.check_output([tool, "--dump-sass", str(cubin)], text=True)
-        _check_register_pool(sass, kernel, initial, consumer)
-        data = bytearray(cubin.read_bytes())
-        _patch_register_count(data, consumer, initial)
-    except Exception as error:  # noqa: BLE001 - any failure keeps the verified original
-        warnings.warn(f"{kernel}: initial register pool not lowered ({error}); "
-                      "running with one resident CTA per SM", RuntimeWarning)
-        return cubin
-    with out.with_suffix(".lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
-        if not out.exists():
-            tmp = out.with_suffix(".tmp")
-            tmp.write_bytes(bytes(data))
-            tmp.replace(out)
-    return out
+    from miniworld_engine.kernels import _nvcc
+
+    def produce(tmp):
+        try:
+            tool = _cuobjdump()
+            if tool is None:
+                raise RuntimeError("cuobjdump not found")
+            sass = subprocess.check_output([tool, "--dump-sass", str(cubin)], text=True)
+            _check_register_pool(sass, kernel, initial, consumer)
+            data = bytearray(Path(cubin).read_bytes())
+            _patch_register_count(data, consumer, initial)
+        except Exception as error:  # noqa: BLE001 - any failure keeps the verified original
+            warnings.warn(f"{kernel}: initial register pool not lowered ({error}); "
+                          "running with one resident CTA per SM", RuntimeWarning)
+            return False
+        tmp.write_bytes(bytes(data))
+        return True
+
+    # keyed by the base cubin's key, the pool parameters and the patch code itself
+    patch_code = hashlib.sha256("".join(inspect.getsource(f) for f in (
+        _check_register_pool, _patch_register_count)).encode()).hexdigest()
+    out = _nvcc.derived_cubin(f"trimul_h100/{kernel}.pool{initial}", cubin, (kernel, initial, consumer, patch_code),
+                              produce, family="trimul_h100",
+                              replay=(f"{__name__}:_register_pool", [kernel, initial, consumer]))
+    return cubin if out is None else out
 
 
 def _check_register_pool(sass, kernel, initial, consumer):

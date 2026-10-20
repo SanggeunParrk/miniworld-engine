@@ -10,14 +10,14 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 def headers(base):
     names = ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh")
     payload = Path(__file__).read_bytes() + b"".join(
-        (base / name).read_bytes() for name in names
+        T.read_header(base / name).encode() for name in names
     )
     payload += (T.SOURCES / "b200style/k1wb_epilogue.inc").read_bytes()
     dest = T.cache_dir() / (
         "k1_dpl_prefetch_" + hashlib.sha256(payload).hexdigest()[:16]
     )
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
-        source = (base / name).read_text()
+        source = T.read_header(base / name)
         if name == "tmn_kernels.cuh":
             lead = (
                 (T.SOURCES / "b200style/k1wb_epilogue.inc")

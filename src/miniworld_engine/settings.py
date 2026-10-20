@@ -467,6 +467,13 @@ class Settings:
     #: Print one ``[miniworld-engine build]`` line to stderr when a JIT build starts and one when it ends (nothing on a cache hit);
     #: False silences them. See docs/kernels/jit-cache.md.
     jit_build_log: bool = True
+    #: Use an installed prebuilt kernel bundle (``miniworld_engine_kernels_<arch>``) before the local JIT cache. See
+    #: docs/kernels/prebuilt-kernels.md.
+    prebuilt_kernels: bool = True
+    #: Compile an artifact the prebuilt bundle and the local cache do not have (development). False raises
+    #: ``kernels.prebuilt.PrebuiltMissing`` instead, which is how a release check proves a bundle covers a run. The default
+    #: comes from ``MINIWORLD_ENGINE_JIT_FALLBACK`` (``0`` = False) so a check can set it for a whole test run.
+    jit_fallback: bool = dataclasses.field(default_factory=lambda: _jit_fallback_from_env())
     #: Formerly ``MINIWORLD_OPM_TRAIN``: False disables the fused OPM training path; None = automatic.
     opm_train: bool | None = None
     #: Formerly ``MINIWORLD_PWA_TRAIN``: False disables the fused PWA training path; None = automatic.
@@ -528,6 +535,20 @@ class Settings:
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
         return kernel in self.autotune_kernels
+
+
+def _jit_fallback_from_env() -> bool:
+    """``MINIWORLD_ENGINE_JIT_FALLBACK``: the default of ``jit_fallback``. From the environment for the same reason as
+    ``MINIWORLD_COMPILE_WRAP``: a release check runs other people's processes (a test suite, a model's prebuild
+    script) that never call :func:`configure`. ``1`` / ``0`` (or true / false); anything else raises."""
+    raw = os.environ.get("MINIWORLD_ENGINE_JIT_FALLBACK", "").strip().lower()
+    if not raw:
+        return True
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    if raw in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"MINIWORLD_ENGINE_JIT_FALLBACK={raw!r}: use 1 or 0")
 
 
 def _compile_wrap_from_env() -> Literal["disable", "custom_op"]:

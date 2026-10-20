@@ -17,7 +17,7 @@ The maintainer makes that call; the pages record it.
 - Install the pixi env on a CPU allocation of the cluster you will run on
   (`pixi install`, `pixi run fix-te-cu12`, `miniworld-engine dev install-flash --arch <sm>`).
   Conda prefixes are absolute paths: an env built in one checkout cannot be moved to another.
-- Give each GPU/checkout its own JIT cache (`settings.engine_jit_root` and `TORCH_EXTENSIONS_DIR`, see
+- Install a release wheel of the engine (it carries the H100 kernels prebuilt, [kernels/prebuilt-kernels.md](../kernels/prebuilt-kernels.md)), or share one content-keyed JIT cache (`settings.engine_jit_root`, see
   [kernels/jit-cache.md](../kernels/jit-cache.md)); prebuilt
   TriangleAttention `.so` files are tied to the torch/python they were built with and a call
   that needs them silently takes the module's other path when they do not match (the PyTorch reference on H100 / B200, Triton elsewhere)

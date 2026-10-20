@@ -38,7 +38,7 @@ def _headers(backward=False):
         + ("_bwd" if backward else "_fwd")
     )
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
-        source = (base / name).read_text()
+        source = T.read_header(base / name)
         if name == "tmn_kernels.cuh" and backward:
             # Keep the existing K1 producer/ring policy; replace only its gated
             # plane epilogue with token-major gate/projection derivatives.

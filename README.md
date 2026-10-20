@@ -73,6 +73,22 @@ missing drivers and execution failures are reported separately. See
 that take the same arguments as their torch equivalents. Getting them *fast* on your card means
 building a tuned cache with `miniworld-engine build all`. Its work depends on the GPU,
 current source and existing valid measurements; use `dev coverage` to inspect a specific GPU cache.
+## Prebuilt CUDA kernels
+
+The hand-written CUDA kernels compile on first use (tens of minutes for a new environment) unless the installed engine
+is a binary wheel: release wheels (`miniworld_engine-<version>-cp3XX-cp3XX-manylinux_2_28_x86_64.whl`) carry the
+compiled kernels for H100 (sm_90a) in `miniworld_engine/_prebuilt/`, built against one torch / CUDA build and pinned to
+that torch minor version, so the first call loads binaries and never runs nvcc:
+
+```bash
+pip install miniworld-engine     # with the torch it pins; an sdist / git install keeps the JIT path
+```
+
+Shipped kernels that do not match the running torch / CUDA or GPU are ignored, and anything they do not cover still
+compiles (`MINIWORLD_ENGINE_JIT_FALLBACK=0` makes that an error). How kernels are keyed by their include graph, how
+the release builds and checks them (`miniworld-engine dev bundle-kernels`, `dev build-wheel`), and the release
+checklist: [docs/kernels/prebuilt-kernels.md](docs/kernels/prebuilt-kernels.md).
+
 ## Layout
 
 ```

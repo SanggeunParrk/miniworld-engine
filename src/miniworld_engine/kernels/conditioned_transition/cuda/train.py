@@ -146,26 +146,19 @@ torch::Tensor owned_addmm(torch::Tensor bias, torch::Tensor a, torch::Tensor b, 
 def owned_gemm_ext():
     from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
     from ..._nvcc import ensure_cuda_home
-    import hashlib
 
-    cuda_home = ensure_cuda_home()
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     if cuda_home is None or tuple(
         map(int, (torch.version.cuda or "0.0").split(".")[:2])
     ) > (12, 9):
         raise RuntimeError("Token Hopper owned GEMMs require CUDA <= 12.9")
-    root = settings.engine_jit_root()
-    build = (
-        root
-        / "token_owned_gemm"
-        / hashlib.sha256(_OWNED_GEMM_CPP.encode()).hexdigest()[:16]
-    )
-    build.mkdir(parents=True, exist_ok=True)
     return load_inline(
         name="token_hopper_owned_gemm",
         cpp_sources=_OWNED_GEMM_CPP,
         functions=["owned_mm", "owned_addmm"],
         with_cuda=True,
-        build_directory=str(build),
         extra_include_paths=[
             str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
         ],

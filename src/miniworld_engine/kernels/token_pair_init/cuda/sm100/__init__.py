@@ -8,13 +8,9 @@ capturable), the way the ``swa_dit`` sm_100a stages do. Plain CUDA-core kernels 
 from __future__ import annotations
 
 import functools
-import hashlib
-import os
-import subprocess
 from pathlib import Path
 
 import torch
-from miniworld_engine import settings
 
 _dir = Path(__file__).parent
 P = 128
@@ -47,11 +43,9 @@ def n_rel(r_max: int, s_max: int) -> int:
 @functools.lru_cache(maxsize=None)
 def cubin(ri: int = 2) -> str:
     """Path of the cubin, built on first use; rebuilt only when the source, a flag or the toolchain changes."""
-    from miniworld_engine.kernels.transition.cuda.fused_sm100a import kernel_toolchain
+    from miniworld_engine.kernels import _nvcc
 
-    nvcc, rel, host = kernel_toolchain()
     flags = (
-        *host,
         "-std=c++17",
         "-O3",
         "-arch=sm_100a",
@@ -59,34 +53,8 @@ def cubin(ri: int = 2) -> str:
         "-lineinfo",
         f"-DTPI_RI={ri}",
     )
-    h = hashlib.sha256(" ".join((nvcc, str(rel), *flags)).encode())
-    src = _dir / "token_pair_init.cu"
-    h.update(src.read_bytes())
-    root = settings.engine_jit_root()
-    out = (
-        root
-        / "token_pair_init_sm100"
-        / f"token_pair_init_ri{ri}_{h.hexdigest()[:16]}.cubin"
-    )
-    if not out.exists():
-        from miniworld_engine.kernels._nvcc import building
-        with building(f"{out.parent.name}/{out.stem}", "cubin"):
-            out.parent.mkdir(parents=True, exist_ok=True)
-            tmp = out.with_suffix(f".{os.getpid()}.tmp")
-            res = subprocess.run(
-                [nvcc, *flags, str(src), "-o", str(tmp)],
-                capture_output=True,
-                text=True,
-                timeout=900,
-                check=False,
-            )
-            if res.returncode != 0:
-                tmp.unlink(missing_ok=True)
-                raise RuntimeError(
-                    f"nvcc {rel[0]}.{rel[1]} failed on {src.name}:\n{res.stderr[-4000:]}"
-                )
-            os.replace(tmp, out)
-    return str(out)
+    return str(_nvcc.cubin(f"token_pair_init_sm100/token_pair_init_ri{ri}", flags, source=_dir / "token_pair_init.cu",
+                           toolchain="sm100"))
 
 
 @functools.lru_cache(maxsize=16)

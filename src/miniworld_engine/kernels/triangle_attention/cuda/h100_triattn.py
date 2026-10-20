@@ -7,14 +7,12 @@ cuBLAS implements the grouped projection products. No Triton is used here.
 from __future__ import annotations
 
 import functools
-import os
 import threading
 from contextlib import contextmanager
 from pathlib import Path
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._nvcc import (
@@ -73,9 +71,10 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
     ):
         raise ValueError(part)
     ensure_cuda_home()
-    cutlass = Path(os.environ.get("CUTLASS_PATH", ""))
-    if not (cutlass / "include/cute/tensor.hpp").is_file():
-        raise RuntimeError("CUTLASS_PATH must contain CUTLASS 4.2 headers")
+    from miniworld_engine.kernels._nvcc import cutlass_include
+
+    # CUTLASS 4.2 headers are needed only to build (prebuilt / cached artifacts load without; _nvcc raises CutlassMissing)
+    cutlass_inc = cutlass_include()
     return load_extension(
         name=(
             f"triattn_h100_b200style_{part}_v1"
@@ -84,7 +83,7 @@ def extension(part: str, kv_tile: int = 64, row_group: int = 1, pipeline: int = 
             + (f"_ws{pipeline}" if pipeline else "")
         ),
         sources=[str(_SRC / f"{part}.cu")],
-        extra_include_paths=[str(_PARENT), str(cutlass / "include")],
+        extra_include_paths=[str(_PARENT), str(cutlass_inc)],
         extra_cflags=["-O3"],
         extra_cuda_cflags=[
             *host_flags(),
@@ -724,9 +723,10 @@ torch::Tensor owned_bmm(torch::Tensor a,torch::Tensor b,torch::Tensor out,bool t
 @functools.lru_cache(maxsize=1)
 def _owned_blas_extension():
     from miniworld_engine.kernels._nvcc import load_inline_extension as load_inline
-    import hashlib
 
-    cuda_home = ensure_cuda_home()
+    from miniworld_engine.kernels._codegraph import CUDA_HOME_STANDIN
+
+    cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     cuda_version = torch.version.cuda
     if (
         cuda_home is None
@@ -734,19 +734,11 @@ def _owned_blas_extension():
         or tuple(map(int, cuda_version.split(".")[:2])) > (12, 9)
     ):
         raise RuntimeError("Hopper owned BLAS requires CUDA <= 12.9")
-    root = settings.engine_jit_root()
-    build = (
-        root
-        / "triattn_owned_blas"
-        / hashlib.sha256(_OWNED_BLAS_CPP.encode()).hexdigest()[:16]
-    )
-    build.mkdir(parents=True, exist_ok=True)
     return load_inline(
         name="triattn_h100_owned_blas",
         cpp_sources=_OWNED_BLAS_CPP,
         functions=["owned_mm", "owned_bmm"],
         with_cuda=True,
-        build_directory=str(build),
         extra_include_paths=[
             str(Path(cuda_home) / "targets" / "x86_64-linux" / "include")
         ],

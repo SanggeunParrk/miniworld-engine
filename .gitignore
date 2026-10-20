@@ -112,3 +112,6 @@ src/miniworld_engine/autotune/data/.merge.lock
 
 # local run artifacts (experiments, outputs, results, raw benchmark dumps): one directory, never tracked
 /runs/
+
+# release-time prebuilt kernels (miniworld-engine dev bundle-kernels); shipped in wheels, never in git
+src/miniworld_engine/_prebuilt/

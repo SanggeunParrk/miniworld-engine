@@ -10,11 +10,11 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 def headers(base):
     names = ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh")
     payload = Path(__file__).read_bytes() + b"".join(
-        (base / n).read_bytes() for n in names
+        T.read_header(base / n).encode() for n in names
     )
     dest = T.cache_dir() / ("emitxn_tma_" + hashlib.sha256(payload).hexdigest()[:16])
     for name in names:
-        s = (base / name).read_text()
+        s = T.read_header(base / name)
         if name == "tmn_kernels.cuh":
             anchor = "  CUtensorMap tm_dcat, tm_dpl;"
             assert s.count(anchor) == 1
