@@ -118,7 +118,7 @@ class Plan(T.CooperativePlan):
         if (
             d["n"] % 128 or d["n"] < 128
             or d["x"].dtype != torch.bfloat16
-            or d["x"].numel() != d["n"] ** 2 * 128
+            or d["x"].numel() % (d["n"] ** 2 * 128)   # B samples (tokens b-major): M = B n n
         ):
             raise ValueError(
                 "This candidate requires BF16 C128 and supported multiples of 128"
@@ -130,16 +130,19 @@ class Plan(T.CooperativePlan):
         self.count, self.part, self.d = count, part, d
         self.reduce_size = 49664
         self.threads = 384 if (defines or {}).get("PRODUCER") else 256
+        if d["x"].numel() > d["n"] ** 2 * 128:
+            # B samples: the build that reads each row's own dropout-scale sample (one sample keeps the original cubin)
+            defines = dict(defines or {}, B1_BATCHED=1)
         self.k, self.reduce, self.smem = build(
             count, d["n"], part, tuple(sorted((defines or {}).items()))
         )
-        m = d["n"] ** 2
         x = d["x"]
+        m = x.numel() // 128   # B n n tokens (b-major)
         bf = lambda shape: torch.empty(shape, device=x.device, dtype=x.dtype)
         self.outputs = (
             bf((m, 128)),
             torch.empty((128, 128), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype),
-            bf((256, d["n"], d["n"])),
+            bf((256, m // d["n"], d["n"])),
             torch.empty(256, device=x.device),
             torch.empty(256, device=x.device),
             torch.empty((128, 256), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype),
@@ -155,7 +158,7 @@ class Plan(T.CooperativePlan):
         self.xhat, self.rstd = xhat, rstd
         d = self.d
         n = d["n"]
-        m = n * n
+        m = d["x"].numel() // 128   # batched samples: B n n tokens, b-major (the kernel reads row s n + j of ds [B n, 128])
         L = T._launch_module()
         from ._h100_pack import dense_native
         self.wpt = dense_native(d["wp"].t()) if T.preserve_d128_training() else d["wp"].t().contiguous()

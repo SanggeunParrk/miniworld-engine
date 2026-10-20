@@ -131,7 +131,7 @@ def _run_forward(leaves, mask, ds, outgoing, save):
     _output_norm(tri, norm, go, bo, mu, rs)
     W._mm(norm, wp.t(), out=proj)
     W._mm(xn.reshape(M, D), wg.t(), out=gate)
-    y = torch.empty_like(x)
+    y = T.take_output(x)
     defines = W._defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=D, GROUPS=1, KCHUNK=1)
     k = W._kernel("output_dense.cu", "mw_wide_dense_output_epi", "forward", defines)
     W._launch(k, 1056, 256, 0, W._params(f"uni_epilogue{D}", [proj, gate, x, ds.reshape(n, D), y, M * D, n * D]))
@@ -293,7 +293,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     else:
         wcat = torch.cat((wg, wl, wlg, wr, wrg))
     dxn = W._mm(dxin.t(), wcat)
-    dx = torch.empty_like(x)
+    dx = T.take_input_grad(x)
     dgi, dbi = affine_alloc(D, **f32), affine_alloc(D, **f32)
     in_affine = _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=fused_glue)
     if fused_glue:
@@ -439,7 +439,7 @@ def native_forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
         _output_norm(tri,norm,go,bo,mu,rs)
         W._mm(norm,wp.t(),out=proj)
         W._mm(xn.reshape(n*n,d),wg.t(),out=gate)
-        y = torch.empty_like(x)
+        y = T.take_output(x)
         defines = W._defines(MW_MINB=1,MW_K1_STREAM=0,TMN_SIGMOID_TANH=1,WIDTH=d,GROUPS=1,KCHUNK=1)
         k = W._kernel("output_dense.cu","mw_wide_dense_output_epi","forward",defines)
         W._launch(k,1056,256,0,W._params(f"native_epilogue{d}",[proj,gate,x,ds,y,n*n*d,n*d]))

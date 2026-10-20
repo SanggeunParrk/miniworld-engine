@@ -32,7 +32,8 @@ struct Params{CUtensorMap xn,wp,dl,dr,dg,wgate,x,res,dx,wt[4],ringstore;const __
 TMN_DEVI uint32_t b7_mask_bits(const Params& p,int t){
 #if B7_TOKEN_MASK
  const unsigned char* tk=reinterpret_cast<const unsigned char*>(p.mask);
- return (tk[t/B7_N]&tk[t%B7_N])?0x3F803F80u:0u;
+ // batched samples (t = (s N + i) N + j, token mask [B N]): token j of the same sample s = t / N^2 (0 for one sample)
+ return (tk[t/B7_N]&tk[t/(B7_N*B7_N)*B7_N+t%B7_N])?0x3F803F80u:0u;
 #else
  return uint32_t(__bfloat16_as_ushort(p.mask[t]))*0x10001u;
 #endif

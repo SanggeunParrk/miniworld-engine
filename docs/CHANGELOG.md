@@ -10,6 +10,23 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 TriMul takes B samples in one call at every width (`integrations.trimul_h100.max_batch(width)`, `MAX_BATCH_BY_WIDTH`, 48 at
+  D64 / 128 / 256 / 384 / 512; `MAX_BATCH` keeps its D64 meaning): bidirectional and single direction, inference and training, tokens
+  b-major, a token mask and row-dropout scale per sample. D128 on the native kernels (K1 / K3, `save_k3`, B1 with a separate
+  `B1_BATCHED` build, B7, `h100_native.Front`, `single_b1` / `single_b7`), D256 / D384 / D512 on the B200-style port (K1 `rows`, K3 and
+  `gate_bwd` read the dropout scale of the row's sample; wide inference at L % 128 != 0 is padded on the host). The contraction folds
+  the samples into cuBLAS's batch dim. A call with more samples than one launch takes or than fit in memory runs in launches of a
+  deterministic size (`trimul_h100._plan`: shapes, mode and the device's total memory; inference writes each chunk into the output in
+  place via `h100_b200style.inference_into` / `h100_inference.inference_into`; training chunks run in one autograd node, `_Chunked`,
+  writing their rows of y and dx in place, plain or checkpointed), so no batch falls back to the PyTorch statements or runs out of
+  memory because of size while the caller's x / y / dy / dx fit (D256 L768 B48, D384 B26, D512 B20 training run). y and dx are bitwise
+  equal to B calls of one sample at every width (B 16 / 32 / 48 at L128 / 384 also against the FP32 statement, 144 / 144 cells);
+  B = 1 is unchanged (bitwise at D128, y / dx bitwise at D256+, time 0.984-1.012 of main). H100 80GB, CUDA graph: one call vs B calls
+  1.13-2.25x at L128, inference 0.99-1.10x and D128 training 1.02-1.17x at L384 / 768; at the preserved D256+ training cells the faster
+  of the port and per-sample preserved launches into y / dx is chosen per cell (`PER_SAMPLE_LEGACY_TRAINING`), 0.994-1.03x of B
+  calls (1.02-1.16x of B calls that accumulate their gradients); checkpointed chunks 0.73-0.80x of a per-sample fwd + bwd loop that a
+  model running B calls and one backward cannot use; 2.0-5.2x over cuEquivariance, 3.1-19.6x over the PyTorch statements H100 ran for B > 1 before. Tests `tests/gpu/sm90/test_h100_trimul_batch_wide_gpu.py`;
+  record `docs/records/trimul_h100_batched_wide_20261019.md`.
 - H100 TriMul beyond L1024 and at ragged L (`integrations.trimul_h100`): D64 / D128 (both modules, every direction, D64 with B <= 48)
   infer at any L >= 16 (`MIN_INFERENCE_LENGTH`; one sample pads to 16 inside K1 / K3, B samples at L % 16 != 0 are padded on the host)
   and train at any multiple of 128 up to 10240 (`TRAINING_GRANULE`, `MAX_TRAINING_LENGTH`, B200's bound; memory binds first); D256 /

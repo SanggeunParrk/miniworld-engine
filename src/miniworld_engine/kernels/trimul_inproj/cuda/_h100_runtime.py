@@ -449,3 +449,40 @@ def publish_header(path, text):
         handle.write(text)
         temporary = Path(handle.name)
     temporary.replace(path)
+
+
+# ------------------------------------------------------------------------------------------------ caller-owned outputs
+# A chunked batch (``integrations.trimul_h100``) hands each chunk's launch the rows of the batch's y (forward) and dx (backward):
+# the path's final y / dx allocation takes the buffer instead of allocating, so no chunk output is copied or concatenated. Only
+# the first allocation of a matching tensor takes it (the scope is consumed), and never while Dynamo traces (the buffer is not an
+# argument of the opaque op, so a traced graph would not see the write): there the path allocates and the caller copies.
+_out_scope = threading.local()
+
+
+@contextmanager
+def output_buffers(y=None, dx=None):
+    previous = getattr(_out_scope, "y", None), getattr(_out_scope, "dx", None)
+    _out_scope.y, _out_scope.dx = y, dx
+    try:
+        yield
+    finally:
+        _out_scope.y, _out_scope.dx = previous
+
+
+def _take(name, like):
+    buf = getattr(_out_scope, name, None)
+    if (buf is not None and not torch.compiler.is_compiling() and buf.shape == like.shape and buf.dtype == like.dtype
+            and buf.device == like.device and buf.is_contiguous()):
+        setattr(_out_scope, name, None)
+        return buf
+    return torch.empty_like(like, memory_format=torch.contiguous_format)
+
+
+def take_output(like):
+    """The training forward's y: the chunk's rows of the caller's y when a chunked batch provides them, else a new tensor."""
+    return _take("y", like)
+
+
+def take_input_grad(like):
+    """The training backward's dx: the chunk's rows of the batch's dx when provided, else a new tensor."""
+    return _take("dx", like)

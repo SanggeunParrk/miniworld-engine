@@ -341,10 +341,10 @@ extern "C" __global__ void mw_aux_affine_pair_finish(
     dg[c]=g;db[c]=b;
   }
 }
-extern "C" __global__ void mw_aux_owned_mask(const void* src,bf* dst,int n,int kind,int token){
-  int i=blockIdx.x*256+threadIdx.x;if(i>=n*n)return;
-  float v=kind==0?1.f:token?float(aux_mask_read(src,i/n,kind)!=0.f&&aux_mask_read(src,i%n,kind)!=0.f):aux_mask_read(src,i,kind);
-  dst[i]=__float2bfloat16_rn(v);
+// samples: B b-major pair masks [B n][n] from a token mask [B n] or a pair mask [B n n] (aux_pair_mask); 1 = one sample.
+extern "C" __global__ void mw_aux_owned_mask(const void* src,bf* dst,int n,int kind,int token,int samples){
+  int i=blockIdx.x*256+threadIdx.x;if(i>=samples*n*n)return;
+  dst[i]=__float2bfloat16_rn(aux_pair_mask(src,i,n,kind,token,samples));
 }
 #else
 // SPDX-License-Identifier: Apache-2.0

@@ -173,7 +173,7 @@ def _run_forward(leaves, mask, ds, save):
     ab = x.new_empty((2 * HIDDEN, bsz * n, n))
     tri = x.new_empty((HIDDEN, bsz * n, n))
     stats = torch.empty((4, m), device=x.device, dtype=torch.float32)
-    y = torch.empty_like(x)
+    y = T.take_output(x)
     _front(x, w1, maskf, gi, bi, ab)
     _triangle(ab, tri)
     _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(bsz * n, WIDTH), y, stats)
@@ -253,7 +253,7 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     _bmm(fold(dt[:h]).transpose(-1, -2), fold(ab[:h]), out=fold(dr[:h]))
     _bmm(fold(ab[3 * h:]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
     _bmm(fold(ab[h:2 * h]), fold(dt[h:]), out=fold(dr[h:]))
-    dx = torch.empty_like(x)
+    dx = T.take_input_grad(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     maskf = maskf.reshape(m)
     params = L.Struct.fixed("h100_d64_gatepipe_selected_v2:b2w", [

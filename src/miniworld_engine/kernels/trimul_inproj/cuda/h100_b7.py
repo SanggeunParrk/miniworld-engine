@@ -93,8 +93,8 @@ class Plan:
         self.clusters, self.consumers = static.clusters, static.consumers
         self.reuse_dp, self.count, self.k = static.reuse_dp, static.count, static.k
         x = d["x"]
-        m = d["n"] ** 2
-        self.dx = torch.empty((m, 128), device=x.device, dtype=x.dtype)
+        m = x.numel() // 128   # batched samples: B n n tokens, b-major (a token mask [B n] is indexed per sample in the kernel)
+        self.dx = T.take_input_grad(x).view(m, 128)
         self.dw = torch.empty((4, 128, 256), device=x.device, dtype=torch.float32 if d.get("master_weights") else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
@@ -125,8 +125,7 @@ class Plan:
         if xn is not None:
             self.xn = xn
         d = self.d
-        n = d["n"]
-        m = n * n
+        m = d["x"].numel() // 128
         L = T._launch_module()
         tm = lambda t, box, dims, strides: L.tensor_map(
             t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="256B"

@@ -114,13 +114,15 @@ def kernel(kind, D, cfg, emit_xn=True, normalize=True, hidden=None):
 
 class Front:
     def __init__(self, x, w, mask, g, b, cfg, emit_xn=True, normalize=True, saved=None, hidden=None):
-        n = x.shape[1]
+        """x [rows, n, D]: one sample (rows = n) or B samples stacked b-major (rows = B n; planes [2 hidden, B n, n], a token mask
+        [B n] or a pair mask [B n, n])."""
+        rows, n = x.shape[0], x.shape[1]
         D = x.shape[-1]
         hidden = 2 * D if hidden is None else hidden
         self.ab = (
             saved[0]
             if saved
-            else torch.empty((2 * hidden, n, n), device=x.device, dtype=x.dtype)
+            else torch.empty((2 * hidden, rows, n), device=x.device, dtype=x.dtype)
         )
         self.xn = (
             saved[2] if saved else torch.empty_like(x) if emit_xn else x.new_empty((0,))
@@ -132,12 +134,12 @@ class Front:
         tm = lambda t, box, dims, strides: U.tensor_map(
             t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
         )
-        mz = tm(x, [64, bj, bi], [D, n, n], [D * 2, n * D * 2])
+        mz = tm(x, [64, bj, bi], [D, n, rows], [D * 2, n * D * 2])
         mw = tm(w, [64, 64], [D, 4 * hidden], [D * 2])
-        ma = tm(self.ab, [64, 1, 32], [n, n, 2 * hidden], [n * 2, n * n * 2])
+        ma = tm(self.ab, [64, 1, 32], [n, rows, 2 * hidden], [n * 2, rows * n * 2])
         tj = (n + bj - 1) // bj
-        tiles = ((n + bi - 1) // bi) * tj
-        self.params = U.Struct.fixed("h100_native:1",
+        tiles = ((rows + bi - 1) // bi) * tj
+        self.params = U.Struct.fixed("h100_native:1b",
             [
                 mz,
                 mw,
@@ -160,6 +162,7 @@ class Front:
                 D,
                 0,
                 0,
+                0 if rows == n else rows,   # K1Params.rows (batched samples; 0 = one sample)
             ]
         )
         self.grid = min(

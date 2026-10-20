@@ -226,19 +226,17 @@ def test_inference_batch_graph_replay(direction):
 
 
 def test_batch_limits():
-    """D64 takes up to MAX_BATCH samples per call; wider widths and larger batches keep the one-sample contract."""
+    """D64 takes up to MAX_BATCH (= max_batch(64)) samples in one launch; a larger batch runs in several (trimul_h100._plan). The
+    wider widths: test_h100_trimul_batch_wide_gpu.py."""
+    assert trimul_h100.max_batch(D) == trimul_h100.MAX_BATCH
     bidir = make(0)
     x = torch.empty(trimul_h100.MAX_BATCH, 128, 128, D, device="cuda", dtype=torch.bfloat16)
+    over = torch.empty(trimul_h100.MAX_BATCH + 1, 128, 128, D, device="cuda", dtype=torch.bfloat16)
     assert trimul_h100.serves(bidir, x)
-    assert not trimul_h100.serves(bidir, torch.empty(trimul_h100.MAX_BATCH + 1, 128, 128, D, device="cuda", dtype=torch.bfloat16))
+    assert trimul_h100._plan(bidir, x, False)[0] == trimul_h100.MAX_BATCH
+    assert trimul_h100.serves(bidir, over)
+    assert trimul_h100._plan(bidir, over, False)[0] <= trimul_h100.MAX_BATCH
     with torch.no_grad():
         bidir.eval()
         assert trimul_h100.serves_inference(bidir, x, bidirectional=True)
-        assert not trimul_h100.serves_inference(
-            bidir, torch.empty(trimul_h100.MAX_BATCH + 1, 128, 128, D, device="cuda", dtype=torch.bfloat16), bidirectional=True)
-    wide = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).cuda()
-    x128 = torch.empty(2, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
-    assert not trimul_h100.serves(wide, x128)
-    with torch.no_grad():
-        wide.eval()
-        assert not trimul_h100.serves_inference(wide, x128, bidirectional=True)
+        assert trimul_h100.serves_inference(bidir, over, bidirectional=True)

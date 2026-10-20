@@ -116,6 +116,8 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3tmasave(__gr
 
   for (int tile = blockIdx.x; tile < p.tiles; tile += gridDim.x) {
     const int tok0 = tile * MT + 64 * w;
+    // batched samples (M = B L L, tokens b-major): these 64 tokens lie in sample s = tok0 / L^2, whose dropout scale is rows s L .. s L + L - 1
+    const bf* const dsb = p.ds + (size_t)(tok0 / (p.L * p.L)) * p.L * D;
     for (int cb = 0; cb < NCB; ++cb) {
     float s1a = 0.f, s2a = 0.f, s1b = 0.f, s2b = 0.f, ka = 0.f, kb = 0.f;
 
@@ -218,8 +220,8 @@ extern "C" __global__ void __launch_bounds__(384, 1) mw_b200style_k3tmasave(__gr
         acc[4*g+1] = __uint_as_float(gb);
         float2 da = make_float2(1.f, 1.f), db = da;
         if (p.ds) {
-          const uint32_t va = *reinterpret_cast<const uint32_t*>(p.ds + (size_t)((tok0 + rowA) % p.L) * D + c);
-          const uint32_t vb = *reinterpret_cast<const uint32_t*>(p.ds + (size_t)((tok0 + rowB) % p.L) * D + c);
+          const uint32_t va = *reinterpret_cast<const uint32_t*>(dsb + (size_t)((tok0 + rowA) % p.L) * D + c);
+          const uint32_t vb = *reinterpret_cast<const uint32_t*>(dsb + (size_t)((tok0 + rowB) % p.L) * D + c);
           da = make_float2(bf16lo(va), bf16hi(va)); db = make_float2(bf16lo(vb), bf16hi(vb));
         }
         const float ya0 = bf16lo(xa) + da.x * pa0 * math::sigmoid(bf16lo(ga)), ya1 = bf16hi(xa) + da.y * pa1 * math::sigmoid(bf16hi(ga));

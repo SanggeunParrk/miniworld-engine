@@ -34,7 +34,7 @@ class Plan:
         self.ks, self.path = build(debug, master)
         self.count = count
         n = x.shape[1]
-        m = n * n
+        m = x.numel() // 128   # batched samples: B n n tokens, b-major (the kernels read row s n + j of ds [B n, 128])
         self.y = torch.empty_like(x)
         self.dg = x.new_empty((m, 128))
         self.dt = torch.empty_like(tri)
@@ -136,22 +136,23 @@ class Output:
     def __init__(self, x, tri, wp, wg, gi, bi, go, bo, ds, cfg=(2, 64, 4, 1)):
         U = T._launch_module()
         n = x.shape[1]
-        m = n * n
+        rows = x.shape[0] * n   # batched samples: the B samples stacked along the slow token axis (B = 1: rows = n)
+        m = rows * n
         self.k, self.smem = k3_build(cfg)
-        self.y = torch.empty_like(x)
+        self.y = T.take_output(x)
         tm = lambda t, box, dims, strides: U.tensor_map(
             t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="128B"
         )
         bi0, bj, _, _ = cfg
         maps = [
-            tm(x, [64, bj, bi0], [128, n, n], [256, n * 256]),
-            tm(tri, [64, 1, 64], [n, n, 128], [n * 2, m * 2]),
+            tm(x, [64, bj, bi0], [128, n, rows], [256, n * 256]),
+            tm(tri, [64, 1, 64], [n, rows, 128], [n * 2, m * 2]),
             tm(wg, [64, 32], [128, 128], [256]),
             tm(wp, [64, 32], [128, 128], [256]),
-            tm(self.y, [64, 16, 1], [128, n, n], [256, n * 256]),
+            tm(self.y, [64, 16, 1], [128, n, rows], [256, n * 256]),
         ]
         tj = (n + bj - 1) // bj
-        tiles = ((n + bi0 - 1) // bi0) * tj
+        tiles = ((rows + bi0 - 1) // bi0) * tj
         base = U.Struct(
             [*maps, gi, bi, go, bo, x, self.y, None, n, n, tj, tiles, 1, 0, 1e-5, 0]
         )
@@ -171,6 +172,7 @@ class Output:
                 maps[-1],
                 None,
                 None,
+                0 if rows == n else rows,   # RecomputeParams.rows (batched samples; 0 = one sample)
             ]
         )
         self.grid = min(

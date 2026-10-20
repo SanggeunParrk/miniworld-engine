@@ -56,6 +56,9 @@ struct K1Params {
   int N, Np, tiles_j, num_tiles, vec, ms_i, ms_j;
   float eps;
   int xs_i, xs_j, pad0, pad1;   // xz element strides of the tile's slow (i) and fast (j) token axes
+  // MiniWorld batched samples: rows of the slow token axis, B N for B samples stacked b-major ([B N][N] tokens, planes [2 C_H][B N][N],
+  // Np == N); 0 = N (one sample).  Sits in the struct's alignment padding (sizeof stays 512), so callers that never set it read 0.
+  int rows;
 };
 
 struct K3Params {
@@ -515,7 +518,8 @@ TMN_DEVI void k1_body(const K1Params& p) {
   const int wiw = warp & 3;              // warp within warpgroup: rows 16*wiw.. of the m64 tile
   const uint32_t sA_u = smem_u32(sA), sW_u = smem_u32(sW);
   const uint32_t stage_u = smem_u32(sStage) + (uint32_t)(cw * 8192);   // this warpgroup's 2 x 4 KB staging buffers [32 ch][64 tok]
-  const size_t plane = (size_t)p.Np * (size_t)p.Np;
+  const int NI = p.rows > 0 ? p.rows : p.N, NPI = p.rows > 0 ? p.rows : p.Np;   // batched samples: B N rows of i (planes [2 C_H][B N][N], Np == N)
+  const size_t plane = (size_t)NPI * (size_t)p.Np;
   const int rho0 = 64 * cw + 16 * wiw;                  // first of this warp's 16 token rows (tile-relative)
   const int rowA = rho0 + (lane >> 2), rowB = rowA + 8;  // this thread's accumulator rows
   // stmatrix role: lane -> (matrix idx, row rr): channel ch = 16 hq + 8 (idx>>1) + rr; token granule tg = 2 wiw + (idx&1) (8 tokens each), stored at tg ^ (ch & 7)
@@ -541,13 +545,14 @@ TMN_DEVI void k1_body(const K1Params& p) {
     const int i0 = (tile / p.tiles_j) * BI, j0 = (tile % p.tiles_j) * BJ;
     // ---- this thread's two rows: validity + mask; this lane's two store runs: pointers + predicates
     const int iA = i0 + rowA / BJ, jA = j0 + rowA % BJ, iB = i0 + rowB / BJ, jB = j0 + rowB % BJ;
-    const bool vA = (iA < p.N) && (jA < p.N), vB = (iB < p.N) && (jB < p.N);
+    const bool vA = (iA < NI) && (jA < p.N), vB = (iB < NI) && (jB < p.N);
     float mA = vA ? 1.f : 0.f, mB = vB ? 1.f : 0.f;
     if (HAS_MASK) {
       if (p.pad1 == 1) {            // MiniWorld: token mask [N] (bool / uint8), factor m[i] & m[j]; no [N, N] pair mask per call
+        // batched samples: the token mask is [B N] b-major and i the global row (sample s = i / N); j reads token s N + j of the same sample
         const unsigned char* tk = reinterpret_cast<const unsigned char*>(p.mask);
-        if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + jA));
-        if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + jB));
+        if (vA) mA = (float)(__ldg(tk + iA) & __ldg(tk + (p.rows > 0 ? iA - iA % p.N : 0) + jA));
+        if (vB) mB = (float)(__ldg(tk + iB) & __ldg(tk + (p.rows > 0 ? iB - iB % p.N : 0) + jB));
       } else {
         if (vA) mA = __ldg(p.mask + (size_t)iA * p.ms_i + (size_t)jA * p.ms_j);
         if (vB) mB = __ldg(p.mask + (size_t)iB * p.ms_i + (size_t)jB * p.ms_j);
@@ -555,7 +560,7 @@ TMN_DEVI void k1_body(const K1Params& p) {
     }
     const int rho_g = 64 * cw + 8 * st_g;                                  // first token of this lane's store granule
     const int is_ = i0 + rho_g / BJ, js_ = j0 + rho_g % BJ;
-    const bool st_ok = (is_ < p.Np) && (js_ < p.Np);
+    const bool st_ok = (is_ < NPI) && (js_ < p.Np);
     const int st_n = min(8, p.Np - js_);                                   // valid tokens of this lane's 8-token granule (ragged planes)
     __nv_bfloat16* gp0 = p.ab + (size_t)st_ch0 * plane + (size_t)is_ * p.Np + js_;   // + 32 b * plane per block; + 4 * plane for e = 1
     const size_t blk_stride = 32 * plane, e_stride = 4 * plane;

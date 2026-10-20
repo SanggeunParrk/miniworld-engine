@@ -380,15 +380,15 @@ def cast_training_weights(weights):
 
 
 def _owned_training_mask_fake(pair,mask):
-    """[L, L] bf16 mask; ``pair`` supplies only the shape and device."""
-    return pair.new_empty((pair.shape[1],pair.shape[1]),dtype=torch.bfloat16)
+    """[B L, L] bf16 mask; ``pair`` supplies only the shape and device."""
+    return pair.new_empty((pair.shape[0]*pair.shape[1],pair.shape[1]),dtype=torch.bfloat16)
 
 
 @opaque(fake=_owned_training_mask_fake,name="trimul_h100_preserved_owned_mask")
 def owned_training_mask(pair: torch.Tensor,mask: torch.Tensor | None) -> torch.Tensor:
-    """The pair mask as an owned [L, L] BF16 tensor."""
+    """The pair mask as an owned [B L, L] BF16 tensor (B samples b-major; B = 1: [L, L])."""
     with T.native_context(pair.device):
-        return owned_bf16_mask(mask,pair.shape[1],pair.device)
+        return owned_bf16_mask(mask,pair.shape[1],pair.device,pair.shape[0])
 
 
 def normalize_into(dst, x, g, b, stats=None, *, warp=False):
@@ -414,18 +414,19 @@ def pair_mask(token, length, device):
     return out
 
 
-def owned_bf16_mask(mask, length, device):
-    """Read live token/pair masks into owned K1/contraction storage without ATen."""
-    out = torch.empty((length, length), device=device, dtype=torch.bfloat16)
+def owned_bf16_mask(mask, length, device, samples=1):
+    """Read live token/pair masks into owned K1/contraction storage without ATen: [B L, L] bf16 for B = ``samples`` (b-major) from a
+    token mask [B L] or a pair mask [B L L]; [L, L] for one sample."""
+    out = torch.empty((samples * length, length), device=device, dtype=torch.bfloat16)
     absent = mask is None or mask.numel() == 0
     if not absent and (mask.device != torch.device(device) or not mask.is_contiguous() or mask.dtype not in
                        (torch.bool, torch.bfloat16, torch.float32)
-                       or mask.numel() not in (length, length * length)):
+                       or mask.numel() not in (samples * length, samples * length * length)):
         raise ValueError("native TriMul mask requires contiguous token or pair data")
     kind = 0 if absent else 1 if mask.dtype == torch.bool else 2 if mask.dtype == torch.bfloat16 else 3
-    _launch("mw_aux_owned_mask", ((length*length+255)//256, 1, 1),
+    _launch("mw_aux_owned_mask", ((samples*length*length+255)//256, 1, 1),
             [None if absent else mask, out, length, kind,
-             int(not absent and mask.numel() == length)])
+             int(not absent and mask.numel() == samples * length), samples])
     return out
 
 

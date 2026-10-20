@@ -81,8 +81,8 @@ class Plan:
         occ = dd.cuOccupancyMaxActiveClusters(dd.CUfunction(int(self.k.handle)), cfg)
         assert int(occ[0]) == 0 and self.count <= int(occ[1]) * self.hwcluster
         x = d["x"]
-        m = d["n"] ** 2
-        self.dx = torch.empty((m, 128), device=x.device, dtype=x.dtype)
+        m = x.numel() // 128   # batched samples: B n n tokens, b-major (the pair mask is [B n, n])
+        self.dx = T.take_input_grad(x).view(m, 128)
         self.dw = torch.empty((4, 128, 128), device=x.device, dtype=torch.float32 if d.get("master_weights", False) else x.dtype)
         self.dgam = torch.empty(128, device=x.device)
         self.dbeta = torch.empty_like(self.dgam)
@@ -108,8 +108,7 @@ class Plan:
         if xn is not None:
             self.xn = xn
         d = self.d
-        n = d["n"]
-        m = n * n
+        m = d["x"].numel() // 128
         L = T._launch_module()
         tm = lambda t, box, dims, strides: L.tensor_map(
             t, box, dims=dims, strides_bytes=strides, swizzle="128B", l2="256B"

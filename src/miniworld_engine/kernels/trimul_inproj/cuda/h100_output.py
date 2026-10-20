@@ -134,9 +134,13 @@ def front(d, pg=False, method=0, bufs=None):
 
 
 def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
+    """K3 with the training saves. Batched samples (x [B, n, n, 128], B > 1): tokens b-major, the samples stacked along the slow token
+    axis (rows = B n; tri [256, B n, n], ds [B n, 128], saves [B n n, c]); B = 1 is the single-sample launch unchanged."""
     n = d["n"]
     x = d["x"]
-    m = n * n
+    bsz = x.shape[0]
+    rows = bsz * n
+    m = rows * n
     bi, bj = K3[:2]
     L = T._launch_module()
     k, smem = kernel("k3", ln, stats, pg, method)
@@ -171,7 +175,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
             proj=e(128) if pg else None,
             gate=e(128) if pg else None,
         )
-        y = torch.empty_like(x)
+        y = T.take_output(x)
     else:
         y, saves = bufs
     if method in (-1, 3) and saves["ro"] is not None:
@@ -179,14 +183,14 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
     if method == -1:
         saves["xnout"] = tri
     maps = [
-        tm(x, [64, bj, bi], [128, n, n], [256, n * 256]),
-        tm(tri, [64, 1, 64], [n, n, 256], [n * 2, m * 2]),
+        tm(x, [64, bj, bi], [128, n, rows], [256, n * 256]),
+        tm(tri, [64, 1, 64], [n, rows, 256], [n * 2, m * 2]),
         tm(d["leaves"][5], [64, 32], [128, 128], [256]),
         tm(d["wp"], [64, 32], [256, 128], [512]),
-        tm(y, [64, 16, 1], [128, n, n], [256, n * 256]),
+        tm(y, [64, 16, 1], [128, n, rows], [256, n * 256]),
     ]
     tj = (n + bj - 1) // bj
-    tiles = ((n + bi - 1) // bi) * tj
+    tiles = ((rows + bi - 1) // bi) * tj
     base = L.Struct.fixed("h100_output:2",
         [
             *maps,
@@ -208,7 +212,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         ]
     )
     om = lambda key, c: (
-        tm(saves[key], [64, 16, 1], [c, n, n], [c * 2, n * c * 2])
+        tm(saves[key], [64, 16, 1], [c, n, rows], [c * 2, n * c * 2])
         if saves[key] is not None
         else maps[-1]
     )
@@ -224,7 +228,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         if method == 1
         else maps[-1]
     )
-    p = L.Struct.fixed("h100_output:3",
+    p = L.Struct.fixed("h100_output:4",
         [
             base,
             d["ds"],
@@ -240,6 +244,7 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
             om("gate", 128),
             saves["proj"],
             saves["gate"],
+            0 if bsz == 1 else rows,   # RecomputeParams.rows (batched samples; 0 = one sample)
         ]
     )
     k.launch(

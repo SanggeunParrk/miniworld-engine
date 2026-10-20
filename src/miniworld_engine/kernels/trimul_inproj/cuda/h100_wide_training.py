@@ -622,7 +622,7 @@ def forward(leaves, mask, ds):
     _output_norm(cell, tri, norm, go, bo, mu, rs, saved[9:12] if D == 512 else None)
     _lt(cell, "proj", norm, wp.t(), proj, workspace)
     _lt(cell, "gate", xn.reshape(M, D), wg.t(), gate, workspace)
-    y = torch.empty_like(x)
+    y = T.take_output(x)
     defines = _defines(MW_MINB=1, MW_K1_STREAM=0, TMN_SIGMOID_TANH=1, WIDTH=D, GROUPS=1, KCHUNK=1)
     k = _kernel("output_dense.cu", "mw_wide_dense_output_epi", "forward", defines)
     _launch(k, 1056, 256, 0, _params("epilogue", [proj, gate, x, ds, y, M * D, n * D]))
@@ -903,7 +903,7 @@ def backward(leaves, mask, ds, saved, dy, master=False):
     ab, tri, xn, norm, proj, gate, mu, rs = saved[:8]
     fused_glue = len(saved) > {256:9,384:9,512:12}[D]
     f32 = dict(device=x.device, dtype=torch.float32)
-    dx = torch.empty_like(x)
+    dx = T.take_input_grad(x)
     dp = x.new_empty((M, D))
     dn = x.new_empty((M, H))
     dt = torch.empty_like(tri)

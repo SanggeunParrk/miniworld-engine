@@ -2,7 +2,7 @@
   "h100_sources/upstream/csrc/tmn_kernels.cuh": {
     "source": "experiments/trimul_training_v2/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_kernels.cuh",
     "sha256": "953ebc8f0c6668976b7282fd6ecdd360e98448ef67a32ebe0ba894060fe849e6",
-    "modified": "2026-09-29 MiniWorld: K1 token-mask mode (K1Params.pad1 = 1); sha256 is of the imported original"
+    "modified": "2026-09-29 MiniWorld: K1 token-mask mode (K1Params.pad1 = 1); 2026-10-19: batched samples (K1Params.rows = B N, per-sample token mask); sha256 is of the imported original"
   },
   "h100_sources/upstream/csrc/tmn_ptx.cuh": {
     "source": "experiments/trimul_training_v2/runs/trimul_sm90_parity_20260917/engine/third_party/anthropic/upstream/common/opt_core/opt_core/kernels/trimul/native/pkg/v5/csrc/tmn_ptx.cuh",
@@ -15,7 +15,7 @@
   "h100_sources/b1/b1_fused.cu": {
     "source": "experiments/trimul_training_v2/runs/trimul_b1_gate_demote_20260922/b1_fused.cu",
     "sha256": "cfb02167d4bb7b96064a009bcce13489982c6697be33118608435eeadb3d36e2",
-    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; sha256 is of the imported original"
+    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; 2026-10-19: batched samples (per-sample dropout-scale rows); sha256 is of the imported original"
   },
   "h100_sources/b1/common_recompute.cuh": {
     "source": "experiments/trimul_training_v2/runs/trimul_b1_gate_demote_20260922/common_recompute.cuh",
@@ -48,7 +48,7 @@
   "h100_sources/b7_384/joint.cu": {
     "source": "experiments/trimul_training_v2/runs/trimul_ln_gradient_20260922/fixed/joint.cu",
     "sha256": "70abb0c2da0cbb1efe8133d01895b2d4ce22cf1f5a44c63ee60c774e0b4e4712",
-    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; drain final consumer empty mbarrier phase before ring reuse; sha256 is of the imported original"
+    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; drain final consumer empty mbarrier phase before ring reuse; 2026-10-19: batched samples (per-sample token mask); sha256 is of the imported original"
   },
   "h100_sources/b7_384/single_wg.inc": {
     "source": "experiments/trimul_training_v2/runs/trimul_ln_gradient_20260922/fixed/single_wg.inc",
@@ -57,7 +57,7 @@
   "h100_sources/b7_768/joint.cu": {
     "source": "experiments/trimul_training_v2/runs/trimul_cuda_widths_opt_20260923/fixed128/joint.cu",
     "sha256": "38b5c5697c484473199b9c595397af2b8dd6fbec3fd225b08a019b0fea3a5e22",
-    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; drain final consumer empty mbarrier phase before ring reuse; sha256 is of the imported original"
+    "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; drain final consumer empty mbarrier phase before ring reuse; 2026-10-19: batched samples (per-sample token mask); sha256 is of the imported original"
   },
   "h100_sources/b7_768/single_wg.inc": {
     "source": "experiments/trimul_training_v2/runs/trimul_cuda_widths_opt_20260923/fixed128/single_wg.inc",
@@ -89,7 +89,8 @@
   },
   "h100_sources/output/save_k3.cu": {
     "source": "experiments/trimul_training_v2/runs/trimul_ln_policy_v4_20260921/save_k3.cu",
-    "sha256": "e1f729975ddf2959264947010fae8a9c3008f134ecdcad8437e4c8dc85917ec9"
+    "sha256": "e1f729975ddf2959264947010fae8a9c3008f134ecdcad8437e4c8dc85917ec9",
+    "modified": "2026-10-19 MiniWorld: batched samples (RecomputeParams.rows = B N, per-sample dropout-scale rows); sha256 is of the imported original"
   },
   "h100_sources/b1/configs.json": {
     "source": "generated selection from archived experiment configuration",

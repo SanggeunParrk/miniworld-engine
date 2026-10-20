@@ -40,16 +40,18 @@ def _kernel(d, h, cfg):
 
 
 def front(x, weights, token_mask, gi, bi, ab, xs):
-    n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
+    """x [B, n, n, d]; B > 1: the samples stacked along K1's slow token axis (K1Params.rows = B n, planes [2 h, B n, n]), the token
+    mask [B n] read per sample."""
+    rows, n, d, h = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1], ab.shape[0] // 2
     cfg = K._config(d)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _kernel(d, h, cfg)
     tj = n // b
-    tiles = (n // a) * tj
+    tiles = (rows // a) * tj
     fields = [
-        I._map(x, [64, b, a], [d, n, n], [d * 2, n * d * 2]),
+        I._map(x, [64, b, a], [d, n, rows], [d * 2, n * d * 2]),
         T._launch_module().TensorMap(b"\0" * 128),
-        I._map(ab, [64, 1, 32], [n, n, 2 * h], [n * 2, n * n * 2]),
+        I._map(ab, [64, 1, 32], [n, rows, 2 * h], [n * 2, rows * n * 2]),
         token_mask,
         gi,
         bi,
@@ -68,6 +70,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs):
         d,
         1,
         1,
+        0 if rows == n else rows,   # K1Params.rows (batched samples; 0 = one sample), before K1ParamsQ.tm_wq
         *(I._map(w, [64, 32], [d, h], [d * 2]) for w in weights),
     ]
     param = T._launch_module().Struct(fields)

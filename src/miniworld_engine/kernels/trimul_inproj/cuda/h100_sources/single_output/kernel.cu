@@ -52,6 +52,8 @@ template<bool FWD> TMN_DEVI void body(const Params& p,uint8_t* sm,uint64_t* bar)
    for(int k=0;k<2;++k){tma_load_2d(sm+XN+k*8192,&p.xn,bar+1,k*64,row);if constexpr(!FWD)tma_load_2d(sm+DY+k*8192,&p.dy,bar+1,k*64,row);}
    tma_load_2d(sm+TRI,&p.tri,bar+1,row,0);
   }mbar_wait(bar+1,iteration&1);__syncthreads();
+  // batched samples (M = B L L, tokens b-major): the 64-row tile lies in sample s = row / L^2, whose dropout scale is rows s L .. s L + L - 1
+  const bf* const ds_rows=p.ds+(size_t)(row/(p.L*p.L))*p.L*128;
   for(int r=warp;r<64;r+=8){float v[4],s=0;
    #pragma unroll
    for(int k=0;k<4;++k){v[k]=get(sm+TRI,lane+k*32,r);s+=v[k];}
@@ -64,7 +66,7 @@ template<bool FWD> TMN_DEVI void body(const Params& p,uint8_t* sm,uint64_t* bar)
   }__syncthreads();fence_proxy_async();__syncthreads();
   float gate[32]={},proj[32]={};project(gate,sm+XN,sm+WG);project(proj,sm+NORM,sm+WP);
   #pragma unroll
-  for(int j=0;j<32;++j){int r=rr(j),c=wi*64+cc(j);float g=math::sigmoid(math::round_bf16(gate[j])),v=math::round_bf16(proj[j]);float ds=__bfloat162float(p.ds[((row+r)%p.L)*128+c]);
+  for(int j=0;j<32;++j){int r=rr(j),c=wi*64+cc(j);float g=math::sigmoid(math::round_bf16(gate[j])),v=math::round_bf16(proj[j]);float ds=__bfloat162float(ds_rows[((row+r)%p.L)*128+c]);
    if constexpr(FWD){size_t ix=size_t(row+r)*128+c;p.y[ix]=__float2bfloat16_rn(__bfloat162float(p.x[ix])+v*g*ds);}
    else {float dy=math::round_bf16(val(sm+DY,r,c)*ds);set(sm+DP,r,c,dy*g);set(sm+DG,r,c,((dy*v)*g)*(1-g));}
   }__syncthreads();

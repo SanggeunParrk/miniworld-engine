@@ -57,7 +57,7 @@ def front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
 
         return backward_front(x, w1, mask, gi, bi, ab, xs, dpl, dcat, xn)
     n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
-    m = n * n
+    m = x.numel() // d   # token-flat: B n n tokens for batched samples (b-major; the pair mask is [B n, n])
     backward = dcat is not None
     cfg = _config(d, backward)
     tokens, stages, bn = cfg[:3]

@@ -28,6 +28,9 @@ def _backward_transposes(leaves):
 def _data(leaves, mask, ds, *, packed=None, for_backward=False):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     n = x.shape[1]
+    # Batched samples (x [B, n, n, 128], B > 1): tokens b-major, rows = B n of the slow token axis; a token mask [B n], a pair mask
+    # [B n, n] and the dropout scale [B n, 128] carry one block per sample (B = 1: the single-sample shapes).
+    rows = x.shape[0] * n
     # The same packed weights feed K1 and B7. Save this small, per-forward
     # tensor in autograd instead of rebuilding it during backward. It is never
     # cached across optimizer steps or shared between outstanding forwards.
@@ -37,14 +40,14 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
         T.pack_into(w1, wl, wlg, wr, wrg)
     if T.preserve_d128_training() and mask.ndim != 1 and not for_backward:
         from ._h100_pack import dense_native
-        mask = dense_native(mask.reshape(n,n),torch.float32)
+        mask = dense_native(mask.reshape(rows,n),torch.float32)
     return dict(
         n=n,
         x=x,
         leaves=leaves,
         # A token mask [n] goes to K1 and B7 as is (they form m[i] & m[j]); a pair mask keeps the old contract.
-        mask=mask if mask.ndim == 1 else mask.reshape(n, n) if for_backward else mask.reshape(n, n).float(),
-        ds=ds.reshape(n, 128),
+        mask=mask if mask.ndim == 1 else mask.reshape(rows, n) if for_backward else mask.reshape(rows, n).float(),
+        ds=ds.reshape(rows, 128),
         wt=_backward_transposes(leaves) if for_backward else [],
         wp=wp,
         gi=gi,
@@ -53,6 +56,21 @@ def _data(leaves, mask, ds, *, packed=None, for_backward=False):
         bo=bo,
         w1=w1,
     )
+
+
+def _fold(t, n):
+    """[c, B n, n] -> [c B, n, n] (a view): the samples join the channel planes in cuBLAS's batch dim (B = 1: the same shape)."""
+    return t.view(-1, n, n)
+
+
+def _contract(ab, n):
+    """Planes [512, B n, n] -> tri [256, B n, n]: outgoing (left right^T) on the first 128 channels, incoming (left^T right) on the
+    rest, every sample in the same two cuBLAS calls."""
+    tri = ab.new_empty((256, ab.shape[1], n))
+    f = lambda t: _fold(t, n)
+    _H100_BMM.bmm(f(ab[:128]), f(ab[256:384]).transpose(-1, -2), out=f(tri[:128]))
+    _H100_BMM.bmm(f(ab[128:256]).transpose(-1, -2), f(ab[384:]), out=f(tri[128:]))
+    return tri
 
 
 USE_INFERENCE_K1 = True  # D128 front: the tuned inference K1 (same planes, accuracy unchanged, 94.6 -> 81 us at L384)
@@ -66,13 +84,17 @@ def _front(d):
 
         n = d["n"]
         x = d["x"]
-        ab = x.new_empty((512, n, n))
+        bsz = x.shape[0]
+        rows = bsz * n
+        # batched samples: one K1 over the B samples stacked along the slow token axis (planes [512, B n, n]), as at D64
+        ab = x.new_empty((512, rows, n))
         cfg = (2, 64, 4, 2) if n == 128 else K.TILE_TABLE[("sm_90a", 128, 256, "b")]["k1"]
         w = {"w1": d["w1"], "ln_in_w": d["gi"], "ln_in_b": d["bi"], "ln_out_w": d["go"], "ln_out_b": d["bo"], "wo": d["wp"],
              "wg": d["leaves"][5]}
         mask = d["mask"]
-        INF._kernels().k1(x[0], mask if mask.ndim == 1 else mask.reshape(n, n).float(), w, ab, N=n, Np=n, cz=128, ch=256, cfg=cfg,
-                          lnm=2, eps=1e-5, cache={}, token_mask=mask.ndim == 1)
+        INF._kernels().k1(x[0] if bsz == 1 else x.view(rows, n, 128), mask if mask.ndim == 1 else mask.reshape(rows, n).float(),
+                          w, ab, N=n, Np=n, cz=128, ch=256, cfg=cfg, lnm=2, eps=1e-5, cache={}, token_mask=mask.ndim == 1,
+                          rows=None if bsz == 1 else rows)
         return ab
     from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
 
@@ -86,12 +108,13 @@ def _forward_fake(leaves, mask, ds):
     d = x.shape[-1]
     if WIDE.supports(d, n):
         return [torch.empty_like(x), *WIDE.saved_like(x, selected=T.bidi_training(x))]
+    rows = x.shape[0] * n   # batched samples: planes [c, B n, n], statistics [2 B n n]
     return [
         torch.empty_like(x),
-        x.new_empty((4 * d, n, n)),
-        x.new_empty((2 * d, n, n)),
+        x.new_empty((4 * d, rows, n)),
+        x.new_empty((2 * d, rows, n)),
         torch.empty_like(x),
-        x.new_empty((2 * n * n,), dtype=torch.float32),
+        x.new_empty((2 * rows * n,), dtype=torch.float32),
         x.new_empty((8 * d, d)),
         x.new_empty((0,), dtype=torch.float32),
     ]
@@ -115,9 +138,7 @@ def forward(
         d = _data(leaves, mask, ds)
         # Same K1 body/schedule as the selected training reference.
         ab = _front(d)
-        tri = x.new_empty((256, n, n))
-        _H100_BMM.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
-        _H100_BMM.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
+        tri = _contract(ab, n)
         y, s = O.output(d, tri, ln=3, stats=2, method=-1)
         return [y, ab, tri, s["xn"].reshape_as(x), s["ro"], d["w1"],
                 x.new_empty((0,), dtype=torch.float32)]
@@ -139,9 +160,7 @@ def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
         d = _data(leaves, mask, ds)
         ab = _front(d)
-        tri = x.new_empty((256, n, n))
-        _H100_BMM.bmm(ab[:128], ab[256:384].transpose(-1, -2), out=tri[:128])
-        _H100_BMM.bmm(ab[128:256].transpose(-1, -2), ab[384:], out=tri[128:])
+        tri = _contract(ab, n)
         return O.output(d, tri, ln=0, stats=0, method=-1)[0]
 
 
@@ -190,10 +209,11 @@ def backward(
         dg, dwg, dt, dgo, dbo, dwp = b1()
         dl = torch.empty_like(tri)
         dr = torch.empty_like(tri)
-        _H100_BMM.bmm(dt[:128], ab[256:384], out=dl[:128])
-        _H100_BMM.bmm(dt[:128].transpose(-1, -2), ab[:128], out=dr[:128])
-        _H100_BMM.bmm(ab[384:], dt[128:].transpose(-1, -2), out=dl[128:])
-        _H100_BMM.bmm(ab[128:256], dt[128:], out=dr[128:])
+        f = lambda t: _fold(t, n)   # batched samples: every sample in the same four cuBLAS calls
+        _H100_BMM.bmm(f(dt[:128]), f(ab[256:384]), out=f(dl[:128]))
+        _H100_BMM.bmm(f(dt[:128]).transpose(-1, -2), f(ab[:128]), out=f(dr[:128]))
+        _H100_BMM.bmm(f(ab[384:]), f(dt[128:]).transpose(-1, -2), out=f(dl[128:]))
+        _H100_BMM.bmm(f(ab[128:256]), f(dt[128:]), out=f(dr[128:]))
         b7 = B7.Plan(d, dy, dl, dr, dg, xn=xn)
         dx, dwl, dwlg, dwr, dwrg, dgi, dbi = b7()
         from ._h100_pack import dense_native

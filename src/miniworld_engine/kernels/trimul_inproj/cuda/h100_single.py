@@ -53,24 +53,27 @@ class Plan:
         self.master = master
         self.dy = dy
         n = self.n
+        # Batched samples (x [B, n, n, 128], B > 1): tokens b-major, rows = B n of the slow token axis; the pair mask [B n, n], the
+        # dropout scale [B n, 128] and the planes [c, B n, n] carry one block per sample, the contractions batch over c x B.
+        self.rows = rows = x.shape[0] * n
         if (
-            x.shape != (1, n, n, 128)
+            x.shape[1:] != (n, n, 128)
             or n % 128 or n < 128
             or x.dtype != torch.bfloat16
         ):
-            raise ValueError("single H100 training requires BF16 B1/D128 and a supported multiple of 128")
+            raise ValueError("single H100 training requires BF16 D128 and a supported multiple of 128")
         self.config = selection(n)
         self.weights = (wl, wlg, wr, wrg)
-        self.mask = mask.reshape(n, n).bfloat16().contiguous()
-        self.ds = ds.reshape(n, 128)
+        self.mask = mask.reshape(rows, n).bfloat16().contiguous()
+        self.ds = ds.reshape(rows, 128)
         self.w1 = saved[3] if saved else x.new_empty((512, 128))
-        self.tri = saved[1] if saved else x.new_empty((128, n, n))
+        self.tri = saved[1] if saved else x.new_empty((128, rows, n))
         self.gi, self.bi, self.go, self.bo = gi, bi, go, bo
         self.wg, self.wp = wg, wp
         self.front = None
         if saved is None:
             self.front = Front(
-                x[0],
+                x[0] if x.shape[0] == 1 else x.view(rows, n, 128),
                 self.w1,
                 self._front_mask(),
                 gi,
@@ -98,6 +101,10 @@ class Plan:
         self.back = None
         self.front_back = None
 
+    def _fold(self, t):
+        """[c, B n, n] -> [c B, n, n] (a view): the samples join the channel planes in cuBLAS's batch dim."""
+        return t.view(-1, self.n, self.n)
+
     def _front_mask(self):
         if T.preserve_d128_training():
             from ._h100_pack import dense_native
@@ -107,11 +114,12 @@ class Plan:
     def forward(self):
         T.pack_into(self.w1, *self.weights)
         self.front()
-        left, right = self.ab[:128], self.ab[128:]
+        f = self._fold
+        left, right = f(self.ab[:128]), f(self.ab[128:])
         if self.outgoing:
-            _H100_BMM.bmm(left, right.transpose(-1, -2), out=self.tri)
+            _H100_BMM.bmm(left, right.transpose(-1, -2), out=f(self.tri))
         else:
-            _H100_BMM.bmm(left.transpose(-1, -2), right, out=self.tri)
+            _H100_BMM.bmm(left.transpose(-1, -2), right, out=f(self.tri))
         return self.output()
 
     def backward(self, dy=None):
@@ -133,13 +141,14 @@ class Plan:
         dg, dwg, dt, dgo, dbo, dwp = self.back.backward()
         dl = torch.empty_like(dt)
         dr = torch.empty_like(dt)
-        left, right = self.ab[:128], self.ab[128:]
+        f = self._fold   # batched samples: every sample in the same two cuBLAS calls
+        left, right = f(self.ab[:128]), f(self.ab[128:])
         if self.outgoing:
-            _H100_BMM.bmm(dt, right, out=dl)
-            _H100_BMM.bmm(dt.transpose(-1, -2), left, out=dr)
+            _H100_BMM.bmm(f(dt), right, out=f(dl))
+            _H100_BMM.bmm(f(dt).transpose(-1, -2), left, out=f(dr))
         else:
-            _H100_BMM.bmm(right, dt.transpose(-1, -2), out=dl)
-            _H100_BMM.bmm(left, dt, out=dr)
+            _H100_BMM.bmm(right, f(dt).transpose(-1, -2), out=f(dl))
+            _H100_BMM.bmm(left, f(dt), out=f(dr))
         from ._h100_pack import dense_native
         d = dict(
             n=self.n,
@@ -174,10 +183,11 @@ def _forward_fake(leaves, mask, ds, outgoing):
     """y like x; saved planes [2D, L, L], contraction [D, L, L], x_n like x, packed W1 [4D, D]."""
     x = leaves[0]
     n, d = x.shape[1], x.shape[-1]
+    rows = x.shape[0] * n   # batched samples: planes [c, B n, n]
     return [
         torch.empty_like(x),
-        x.new_empty((2 * d, n, n)),
-        x.new_empty((d, n, n)),
+        x.new_empty((2 * d, rows, n)),
+        x.new_empty((d, rows, n)),
         torch.empty_like(x),
         x.new_empty((4 * d, d)),
     ]

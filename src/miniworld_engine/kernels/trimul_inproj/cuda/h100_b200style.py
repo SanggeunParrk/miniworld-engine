@@ -159,18 +159,21 @@ def _front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None, normalized
 
 
 def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
-    n, d, h = x.shape[1], x.shape[-1], ab.shape[0] // 2
+    # Batched samples (x [B, n, n, d], B > 1): K1 takes the samples stacked along the slow token axis (K1Params.rows = B n; planes
+    # [2 h, B n, n], the pair mask [B n, n]); the token-major saves (xs, xn, dpl, dcat) are [B n n, .] b-major.
+    rows, n, d, h = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1], ab.shape[0] // 2
+    m = rows * n
     if d in (256, 384) and dcat is not None and xn is None:
         raise ValueError("D256/D384 backward K1 requires its normalized-input output")
     cfg = _config(d, dcat is not None)
     a, b, _, _, mb = cfg[:5]
     kernel, smem = _front_kernel(d, h, dcat is not None, cfg)
     tj = n // b
-    tiles = (n // a) * tj
+    tiles = (rows // a) * tj
     fields = [
-        I._map(x, [64, b, a], [d, n, n], [d * 2, n * d * 2]),
+        I._map(x, [64, b, a], [d, n, rows], [d * 2, n * d * 2]),
         I._map(w1, [64, 64], [d, 4 * h], [d * 2]),
-        I._map(ab, [64, 1, 32], [n, n, 2 * h], [n * 2, n * n * 2]),
+        I._map(ab, [64, 1, 32], [n, rows, 2 * h], [n * 2, m * 2]),
         mask,
         gi,
         bi,
@@ -192,12 +195,13 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
     ]
     if dcat is not None:
         fields.insert(
-            3, I._map(dcat, [64, 64], [dcat.shape[1], n * n], [dcat.shape[1] * 2])
+            3, I._map(dcat, [64, 64], [dcat.shape[1], m], [dcat.shape[1] * 2])
         )
-        fields.insert(4, I._map(dpl, [64, 32], [n * n, 2 * h], [n * n * 2]))
+        fields.insert(4, I._map(dpl, [64, 32], [m, 2 * h], [m * 2]))
         if d in (256, 384):
-            fields.insert(5, I._map(xn, [64, 64], [d, n * n], [d * 2]))
+            fields.insert(5, I._map(xn, [64, 64], [d, m], [d * 2]))
         fields += [dpl, dcat, dcat.shape[1]]
+    fields.append(0 if rows == n else rows)   # K1Params.rows (batched samples; 0 = one sample)
     kernel.launch(
         (min(tiles, mb * I._sms(x.device.index)), 1, 1),
         (128 * (a * b // 64 + 1), 1, 1),
@@ -259,11 +263,11 @@ def _contract(ab, d, direction):
 
 
 def _saved(x, direction):
-    n, d = x.shape[1], x.shape[-1]
-    m, h = n * n, d * (2 if direction == 0 else 1)
+    rows, n, d = x.shape[0] * x.shape[1], x.shape[1], x.shape[-1]   # batched samples: planes [c, B n, n], token saves [B n n, .]
+    m, h = rows * n, d * (2 if direction == 0 else 1)
     return [
-        x.new_empty((2 * h, n, n)),
-        x.new_empty((h, n, n)),
+        x.new_empty((2 * h, rows, n)),
+        x.new_empty((h, rows, n)),
         x.new_empty((m, 2), dtype=torch.float32),
         x.new_empty((m,), dtype=torch.float32),
         x.new_empty((m,), dtype=torch.float32),
@@ -278,12 +282,16 @@ def _forward_fake(leaves, mask, ds, direction):
     return [torch.empty_like(leaves[0]), *_saved(leaves[0], direction)]
 
 
-def _run_forward(leaves, mask, ds, direction, save):
+def _run_forward(leaves, mask, ds, direction, save, out=None):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
-    n, d, m = x.shape[1], x.shape[-1], x.shape[1] ** 2
+    # Batched samples (x [B, n, n, d], B > 1): tokens b-major (M = B n n). K1 stacks the samples along its slow token axis, the
+    # contraction batches over channels x B, K3 is token-flat and reads the dropout-scale row s n + j of its sample.
+    bsz, n, d = x.shape[0], x.shape[1], x.shape[-1]
+    rows = bsz * n
+    m = rows * n
     h = wp.shape[1]
     with T.native_context(x.device):
-        ab = x.new_empty((2 * h, n, n))
+        ab = x.new_empty((2 * h, rows, n))
         xs = x.new_empty((m, 2), dtype=torch.float32)
         vec = x.new_empty((4, d), dtype=torch.float32)
         mu = x.new_empty((m,), dtype=torch.float32) if save else None
@@ -295,7 +303,7 @@ def _run_forward(leaves, mask, ds, direction, save):
         if (
             d in (256, 384)
             and mask.dtype == torch.bool
-            and mask.numel() == n
+            and mask.numel() == rows
             and mask.is_contiguous()
             and all(w.dtype == torch.bfloat16 and w.is_contiguous() for w in weights)
         ):
@@ -305,12 +313,12 @@ def _run_forward(leaves, mask, ds, direction, save):
         else:
             w1 = x.new_empty((4 * h, d))
             pack_into_cuda(w1, wl, wlg, wr, wrg)
-            pm = owned_bf16_mask(mask, n, x.device)
+            pm = owned_bf16_mask(mask, n, x.device, bsz)
             _front(x, w1, pm, gi, bi, ab, xs, xn=saved_xn)
         tri = _contract(ab, d, direction)
         wpf, wgf = torch.empty_like(wp), torch.empty_like(wg)
         _aux().fold(wp, go, bo, wg, gi, bi, wpf, wgf, vec)
-        y = torch.empty_like(x)
+        y = T.take_output(x) if out is None else out   # out: a caller-owned [B, n, n, d] buffer (chunked batches)
         cfg = _output_config(d)
         if not save and ds is None:
             from .h100_b200style_static import output_kernel
@@ -382,6 +390,23 @@ def inference(
     return _run_forward(leaves, mask, ds, direction, False)[0]
 
 
+def _inference_into_fake(leaves, mask, ds, direction, out):
+    """Writes ``out`` in place; returns nothing."""
+    return None
+
+
+@opaque(fake=_inference_into_fake, name="trimul_h100_schedule256_inference_into", mutates_args=("out",))
+def inference_into(
+    leaves: list[torch.Tensor],
+    mask: torch.Tensor,
+    ds: torch.Tensor | None,
+    direction: int,
+    out: torch.Tensor,
+) -> None:
+    """``inference`` writing y into ``out`` (contiguous, like x): a chunk of a batch writes its rows of the caller's output."""
+    _run_forward(leaves, mask, ds, direction, False, out)
+
+
 def _backward_fake(leaves, mask, ds, direction, saved, dy, master_mask):
     """[dx, one gradient per leaf after x]: fp32 where the master_mask bit is set, bf16 otherwise."""
     return [
@@ -412,7 +437,7 @@ def backward(
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, xs, mu, rs, vec, pv, gv = saved[:8]
     n, d, h = x.shape[1], x.shape[-1], wp.shape[1]
-    m, p = n * n, 2 * h
+    m, p = x.shape[0] * n * n, 2 * h   # batched samples: B n n tokens, b-major; the weight-gradient GEMMs sum every sample
     with T.native_context(x.device):
         E = _aux()
         workspace = (
@@ -454,7 +479,7 @@ def backward(
         dpl = _contract_bwd(ab, dt, d, direction)
         w1 = x.new_empty((2 * p, d))
         pack_into_cuda(w1, wl, wlg, wr, wrg)
-        pm = owned_bf16_mask(mask, n, x.device)
+        pm = owned_bf16_mask(mask, n, x.device, x.shape[0])
         if d == 512:
             xn = saved[8]
             _front(xn.view_as(x), w1, pm, gi, bi, ab, xs, dpl, dcat, normalized=True)
@@ -467,7 +492,7 @@ def backward(
             E.ln_apply(x.view(m, d), mean, rstd, gi, bi, xn)
         dw = G.mm(dcat.t(), xn, workspace, d, h, n, "dw", fp32=True)
         dxn = G.mm(dcat, torch.cat((w1, wg)), workspace, d, h, n, "dxn")
-        dx = torch.empty_like(x)
+        dx = T.take_input_grad(x)
         E.lnin_bwd(
             dxn, x.view(m, d), dy2, mean, rstd, gi, dx.view(m, d), acc[2 * d : 4 * d]
         )
@@ -536,13 +561,15 @@ class _Training(torch.autograd.Function):
         )
 
 
-def trimul(leaves, mask, ds, direction=0):
-    """Explicit B1/H=D Hopper candidate; direction 0=bidi, 1=outgoing, 2=incoming."""
+def trimul(leaves, mask, ds, direction=0, out=None):
+    """Explicit H=D Hopper candidate; direction 0=bidi, 1=outgoing, 2=incoming. x [B, n, n, d]: B > 1 runs the samples in the same
+    launches (tokens b-major; mask a token mask [B n] / pair mask [B n n] or empty, ds [B n, d])."""
     x = leaves[0]
+    bsz = x.shape[0] if x.ndim == 4 else 0
     if (
         x.dtype != torch.bfloat16
         or x.ndim != 4
-        or x.shape[0] != 1
+        or bsz < 1
         or x.shape[1] != x.shape[2]
         or x.shape[-1] not in WIDTHS
         or x.shape[1] % 128 or x.shape[1] < 128
@@ -551,7 +578,7 @@ def trimul(leaves, mask, ds, direction=0):
         or torch.cuda.get_device_capability(x.device) != (9, 0)
     ):
         raise ValueError(
-            "B200-style Hopper TriMul requires B1, BF16, D256/384/512, L a multiple of 128"
+            "B200-style Hopper TriMul requires BF16, D256/384/512, L a multiple of 128"
         )
     h = x.shape[-1] * (2 if direction == 0 else 1)
     if leaves[1].shape != (h, x.shape[-1]) or leaves[6].shape != (x.shape[-1], h):
@@ -580,13 +607,13 @@ def trimul(leaves, mask, ds, direction=0):
                 ds.device != x.device
                 or ds.dtype != torch.bfloat16
                 or not ds.is_contiguous()
-                or ds.shape != (x.shape[1], x.shape[-1])
+                or ds.shape != (bsz * x.shape[1], x.shape[-1])
             )
         )
         or mask.device != x.device
         or not mask.is_contiguous()
         or mask.dtype not in (torch.bool, torch.bfloat16, torch.float32)
-        or mask.numel() not in (0, x.shape[1], x.shape[1] ** 2)
+        or mask.numel() not in (0, bsz * x.shape[1], bsz * x.shape[1] ** 2)
     ):
         raise ValueError(
             "invalid B200-style Hopper weights, norm affines, mask or dropout scale"
@@ -597,6 +624,9 @@ def trimul(leaves, mask, ds, direction=0):
             *cast_training_weights(leaves[1:7]),
             *leaves[7:],
         ]
+        if out is not None:
+            inference_into(kernel_leaves, mask, ds, direction, out)
+            return out
         return inference(kernel_leaves, mask, ds, direction)
     if ds is None:
         from ._h100_pack import training_unit_scale

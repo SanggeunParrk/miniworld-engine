@@ -80,7 +80,12 @@ __global__ void __launch_bounds__(256) gate_bwd_kernel(const __nv_bfloat16* __re
       unpack8(reinterpret_cast<const uint4*>(dy)[e], fy);
       unpack8(reinterpret_cast<const uint4*>(p)[e], fp);
       unpack8(reinterpret_cast<const uint4*>(g)[e], fg);
-      if (ds) unpack8(*reinterpret_cast<const uint4*>(ds + (size_t)(row % L) * D + c8), fd);
+      // ds [B L, D]: pair row `row` = (s L + i) L + j reads row s L + j (batched samples, tokens b-major; M > L^2). One sample
+      // (M = L^2) keeps the single division of the original index.
+      if (ds) {
+        const int dr = M > L * L ? row % L + row / (L * L) * L : row % L;
+        unpack8(*reinterpret_cast<const uint4*>(ds + (size_t)dr * D + c8), fd);
+      }
       else {
 #pragma unroll
         for (int j = 0; j < 8; ++j) fd[j] = 1.f;

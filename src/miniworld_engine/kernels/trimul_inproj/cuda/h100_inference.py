@@ -70,6 +70,25 @@ def inference(
     return _run_inference(x, weights, mask, direction, eps, config)
 
 
+def _inference_into_fake(x, weights, mask, direction, eps, out):
+    """Writes ``out`` in place; returns nothing."""
+    return None
+
+
+@opaque(fake=_inference_into_fake, name="trimul_h100_infer_into", mutates_args=("out",))
+def inference_into(
+    x: torch.Tensor,
+    weights: list[torch.Tensor],
+    mask: torch.Tensor | None,
+    direction: int,
+    eps: float,
+    out: torch.Tensor,
+) -> None:
+    """``inference`` writing y into ``out`` (contiguous, like x): a chunk of a batch writes its rows of the caller's output."""
+    config = _select_config(x, weights, mask, direction, eps)
+    _run_inference(x, weights, mask, direction, eps, config, out)
+
+
 def _select_config(x, weights, mask, direction, eps):
     from miniworld_engine.autotune.fused_config import trimul_candidates, validator
     from miniworld_engine.autotune.native import choose_config, tensor_key
@@ -87,7 +106,7 @@ def _select_config(x, weights, mask, direction, eps):
                          device_index=x.device.index, run=run, validate=validator(run, grid[0]))
 
 
-def _run_inference(x, weights, mask, direction, eps, config):
+def _run_inference(x, weights, mask, direction, eps, config, dest=None):
     # weights: left, left gate, right, right gate, output gate, output, four LN affine tensors.
     wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = weights
     # Batched samples (x [B, N, N, cz], B > 1): tokens b-major, the B samples stacked along the slow token axis (rows = B N) of one K1 / K3
@@ -139,7 +158,7 @@ def _run_inference(x, weights, mask, direction, eps, config):
         }
         ab = x.new_empty((2 * ch, rows, npad))
         tri = x.new_empty((ch, rows, npad))
-        out = torch.empty_like(z)
+        out = torch.empty_like(z) if dest is None else dest.view(z.shape)   # dest: a caller-owned buffer like x (chunked batches)
         cache = {}
         kk.k1(
             z,

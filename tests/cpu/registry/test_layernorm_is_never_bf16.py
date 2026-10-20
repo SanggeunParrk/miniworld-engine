@@ -79,8 +79,8 @@ NOT_A_NORMALISATION = {
      "return mask.reshape(n, n).to(torch.bfloat16).contiguous()"):
         "The [L, L] pair mask for the wide training kernels, not a normalized activation.",
     ("trimul_inproj/cuda/h100_single.py",
-     "self.mask = mask.reshape(n, n).bfloat16().contiguous()"):
-        "Mask storage for the H100 projection path, not a normalized activation.",
+     "self.mask = mask.reshape(rows, n).bfloat16().contiguous()"):
+        "Mask storage ([B L, L], B samples) for the H100 projection path, not a normalized activation.",
     ("trimul_inproj/cuda/h100_single_b7.py",
      'self.mask = d["mask"].bfloat16().reshape(-1)'):
         "Mask storage for the H100 projection path, not a normalized activation.",

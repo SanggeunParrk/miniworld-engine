@@ -107,6 +107,9 @@ static_assert(!PRODUCER || 256*B1_CONS_REGS+128*B1_PROD_REGS <= 384*168, "regist
 #ifndef B1_LN_SERIAL
 #define B1_LN_SERIAL 1
 #endif
+#ifndef B1_BATCHED
+#define B1_BATCHED 0       // 1 = B samples per call (M = B L^2, tokens b-major): the dropout scale is read from the row's sample
+#endif
 
 #ifndef TRAIN_L
 #define TRAIN_L p.L
@@ -151,6 +154,11 @@ template<int STRIDE> TMN_DEVI FragmentMask fragment_mask(const Params& p,int fir
  12;
 #else
  3;
+#endif
+#if B1_BATCHED
+ // batched samples (M = B L L, tokens b-major; a separate build, B1_BATCHED): each sample has its own dropout-scale rows, so the
+ // per-period cache (rows mod L) does not apply; prepare_shared reads the scale of the row's sample directly
+ m.cached=false;
 #endif
  int wi=half<0?threadIdx.x/128:half,lane=threadIdx.x%32,w=(threadIdx.x/32)%4;
  if(m.cached && first<p.tiles)for(int z=0;z<m.period;++z){int row=((first+z*STRIDE)*64)%TRAIN_L;uint32_t bits=0;
@@ -283,6 +291,12 @@ TMN_DEVI void prepare_shared(const Params& p,uint8_t* sm,uint64_t* bars,int slot
  fence_proxy_async();allsync();
 #endif
  recompute_gemm<256,16384>(acc,norm,sm+147456+wi*8192);
+#if B1_BATCHED
+ // batched samples: the 64-token tile lies in one pair row of sample s = row / L^2, whose dropout scale is rows s L .. s L + L - 1
+ const __nv_bfloat16* const ds_rows=p.ds+(size_t)(row/(TRAIN_L*TRAIN_L))*TRAIN_L*128;
+#else
+ const __nv_bfloat16* const ds_rows=p.ds;
+#endif
  mbar_wait(bars+2,phase);
  #pragma unroll
  for(int q=0;q<4;++q){uint32_t dy[4],dg[4],dp[4];
@@ -291,7 +305,7 @@ TMN_DEVI void prepare_shared(const Params& p,uint8_t* sm,uint64_t* bars,int slot
   #pragma unroll
   for(int j=0;j<4;++j){int r=w*16+lane/4+8*(j&1),c=q*16+2*(lane%4)+8*(j>>1),jr=(row+r)%TRAIN_L;uint32_t ds;
    if(mask.cached){int bit=q*8+j*2;uint32_t bits=mask_bits(mask,mi);ds=((bits>>bit)&1?mask.scale:0)|((bits>>(bit+1))&1?mask.scale<<16:0);}
-   else ds=*reinterpret_cast<const uint32_t*>(p.ds+jr*128+wi*64+c);
+   else ds=*reinterpret_cast<const uint32_t*>(ds_rows+jr*128+wi*64+c);
    float a=bf16lo(dy[j])*bf16lo(ds),b=bf16hi(dy[j])*bf16hi(ds),ga=bf16lo(gate[q*4+j]),gb=bf16hi(gate[q*4+j]);
    dp[j]=pack_bf16(a*ga,b*gb);
    dg[j]=pack_bf16(((a*math::round_bf16(acc[q*8+j*2]))*ga)*(1.f-ga),((b*math::round_bf16(acc[q*8+j*2+1]))*gb)*(1.f-gb));

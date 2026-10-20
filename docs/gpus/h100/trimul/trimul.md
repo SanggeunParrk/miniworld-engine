@@ -7,7 +7,213 @@ left) and writes (red, right); generated from `figures/trimul_bidir.json` by
 `python -m miniworld_engine.viz.kernel_flow`, then `rsvg-convert -z 2 -b white` to PNG.
 Dispatch: `integrations/trimul_h100.py`.
 
-## Batched samples (D64, B <= 48)
+## Batched samples (B <= 48 per launch, any B per call, every width)
+
+Every width takes B samples in one call, inference and training, bidirectional and either single direction: tokens b-major, one
+launch per stage instead of B calls. MiniWorld folds samples into the batch of one pair stack (the template embedder's templates at
+D64; structures / augments at D128 and wider). The MiniWorld-facing limit is `integrations.trimul_h100.max_batch(width)`
+(`MAX_BATCH_BY_WIDTH`, 48 at D64 / 128 / 256 / 384 / 512); `MAX_BATCH` keeps its D64 meaning (= `max_batch(64)`, as on B200, which
+batches D64 only). `max_batch` is what ONE LAUNCH takes; a call with more samples, or with more than fit in memory, runs in
+several launches (`trimul_h100._plan`, below), so any B is served and nothing falls back to the PyTorch statements because of size.
+A length / width no batched path takes runs the module's PyTorch statements, as before.
+
+**Chunking** (`_plan`, `_Chunked`). The chunk is a deterministic function of the call's shapes, width, direction and mode and of the
+device's *total* memory (never of live free memory), so torch.compile and CUDA-graph capture see the same split every time. One
+launch's working set is a measured coefficient x D bytes per pair token (one batched call's peak plus 5 %: inference 18.1
+bidirectional / 12.1 single direction; training D64 / D128 40.3 / 32.0, D256+ 62.2 / 42.2) and must fit `CHUNK_MEMORY_FRACTION` = 0.85
+of the device. Chunked inference writes each chunk into the output in place (`inference_into`). Chunked training is one autograd
+node (`_Chunked`): y and dx are allocated once and each chunk's launch writes its rows of them in place (the path's own y / dx
+allocation takes the rows, `_h100_runtime.output_buffers`), so nothing is copied or concatenated and the batch holds only the
+caller's x / y / dy / dx (8 D bytes per pair token) next to the chunk being run; parameter gradients are the chunks' sums in chunk
+order. Plain chunks keep their graph from forward to backward when every chunk's saved state (measured 10-20 D bytes per pair token)
+fits next to one chunk's backward workspace; otherwise each chunk is checkpointed (forward without saves, again with grad in the
+backward). D256 L768 B48, D384 L768 B26 and D512 L768 B20 training now run (peak 67.5 / 63.3 / 70.0 GB of 85 GB, checkpointed
+chunks of 1; x / y / dy / dx alone are 58.0 / 47.1 / 48.3 GB), y and dx bitwise equal to B one-sample calls. Where x / y / dy / dx
+alone exceed the device, no split helps: that is 8 B L^2 D bytes, e.g. B > 70 at D256 L768 or B > 35 at D512 L768 on 80 GB.
+
+| width | inference (B > 1) | training (B > 1) | path |
+|---|---|---|---|
+| D64 | any L >= 16 (L % 16 != 0: host pad to 16) | L % 128 == 0 | native K1 / K3; `save_k3_d64`, B1 / B2 |
+| D128 | any L >= 16 (L % 16 != 0: host pad to 16) | L % 128 == 0 | native K1 / K3; training front K1, `save_k3`, B1, B7 (bidirectional) / `h100_native` K1, `save_k3`, `single_b1`, `single_b7` (single direction) |
+| D256 / D384 / D512 | L % 128 == 0; other L >= 16: each sample padded on the host to the next multiple of 128 (masked pad tokens, pad rows dropped) | L % 128 == 0 | the B200-style port, at every L (the preserved single-sample cells, `_legacy_native_faster`, keep B = 1 only) |
+
+The design is the D64 one at every width. K1 takes the samples stacked along its slow token axis (`K1Params.rows` = B L, 0 = one
+sample, in the struct's alignment padding: the packaged inference header, the B200-style port's forward / backward K1 and now the
+upstream header behind `h100_native.Front`), so a tile may straddle two samples: every row reads its own sample's token mask
+(`m[i] & m[s L + j]`). The planes are `[c, B L, L]`; the contraction folds the samples into cuBLAS's batch dim (c x B, one call per
+product, forward and backward). Everything after the contraction is token-flat (M = B L^2) and only needs the row-dropout scale
+`[B L, D]` read at row `s L + j`:
+
+| kernel | change |
+|---|---|
+| inference K1 / K3 (D128) | none beyond D64's (`rows`); the D128 tile table has no wide K3 |
+| `save_k3.cu` (D128 training K3, both modules) | `RecomputeParams.rows`; dropout-scale base hoisted once per tile (`ds_rows`), as in `save_k3_d64` |
+| `b1_fused.cu` (D128 bidirectional B1) | a separate build `B1_BATCHED=1` (selected when M > L^2): the per-period dropout fragment cache is off and the scale row is `s L + j` (base per 64-token tile). One sample keeps the original cubin: the first version computed the base in the shared build and cost B1 +5 % (180 -> 189 us at L384) |
+| `b7_384` / `b7_768` `joint.cu` (D128 bidirectional B7) | token-mask mode reads `m[t / L] & m[t / L^2 L + t % L]` (compile-time L); the pair-mask mode is flat |
+| upstream `tmn_kernels.cuh` K1 (`h100_native.Front`, D128 single direction) | `K1Params.rows`, row bound and per-sample token mask, as in the inference header |
+| `single_output/kernel.cu` (`single_b1`) | dropout-scale base per 64-row tile |
+| `single_b7` | none (flat pair mask `[B L, L]`) |
+| B200-style port: K1 (`_front_rs`, `h100_b200style_direct`) | `K1Params.rows`, maps over B L rows; the D512 shared-resident fronts (`k1ss*`) and every backward kernel are token-flat already |
+| B200-style K3 (`k3`, `k3reorder`, `k3tmasave`, `k3d384_tmasave`, `k3scalar_tmasave`) | dropout-scale base per 64-token warpgroup (`dsb`) |
+| `b200_sources/wide_bwd.cu` `gate_bwd_kernel` (shared with B200) | scale row `row % L + row / L^2 L`, only when M > L^2 (one sample keeps the single division; B200's arithmetic unchanged) |
+| `mw_aux_owned_mask` | `samples`: the bf16 pair mask `[B L, L]` from a token mask `[B L]` or a pair mask `[B L L]` |
+| integration | `max_batch(width)`; `[B L]` masks and `[B L, D]` scales; B > 1 at D128 always takes the preserved (B1 / B7) kernels; B > 1 at D256+ always the port; padded wide inference (`_padded_inference(..., 128)`) |
+
+Correctness, H100 80GB HBM3, torch 2.13.0+cu129, bf16 pair, FP32 parameters, a token mask and a row-dropout scale drawn per sample:
+
+- **B 16 / 32 / 48 x L128 / 384 x every width x three directions x inference / training (144 / 144 cells)**: one call against B
+  calls of one sample on the same path AND against the FP32 PyTorch statement (per sample; the weight gradients summed over the
+  samples, which is exact for the batch). y and dx bitwise equal to the B one-sample calls in every cell; against FP32 y <= 3.0e-3,
+  dx <= 4.7e-3, weight gradients <= 7.8e-3 relative, and the batch is as close to FP32 as the sum of B one-sample calls (weight
+  gradients batch-vs-samples <= 8.6e-4, the FP32 summation order). The L384 training cells at D256+ with B 32 / 48 ran chunked
+  (`_plan`), some checkpointed: the same results. So 48 is backed at every width (one launch at L128 for every mode; L384 inference
+  one launch, L384 training chunked where 48 do not fit).
+- the same at L768 for B 4 / 8 / 16 / 32 / 48 (bidirectional and outgoing, training; inference B 16 / 48): every cell that fits
+  passes, including the plain-chunk and checkpointed-chunk tiers.
+- B 2 ... 48 x L 128 / 384 / 768 / 1536 against B one-sample calls (bitwise y / dx, weight gradients <= 1.2e-3): every cell that fits
+  in one launch passes (the sweep that set the one-launch memory coefficients).
+- D128 is bitwise run to run; the port's backward sums its LN-out row statistics and gate-affine partials with `atomicAdd`
+  (`wide_bwd.cu`, unchanged), so at D256+ only y is bitwise run to run (gradients 7e-8 relative), as for one sample.
+
+Where chunking reaches its end: the caller's own x / y / dy / dx (training, 8 D bytes per pair token per sample) or x / y
+(inference, 4 D) have to fit; everything else is per chunk. The kernels' own index bound is the int32 token index per launch
+(B L^2 < 2^31).
+
+Largest B one launch took in the first sweep (80 GB; bidirectional / single direction) and peak memory per pair token:
+
+| width | inference L128 / 384 / 768 / 1536 | training L128 / 384 / 768 / 1536 |
+|---|---|---|
+| D128 | 48 / 48 / 48 / 8 (both) | 48 / 48 / 16 / 4 (bidirectional), 48 / 48 / 32 / 8 (single) |
+| D256 | 48 / 48 / 16 / 4 | 48 / 32 / 8 / 2 (bidirectional), 48 / 48 / 8 / 2 (single) |
+| D384 | 48 / 48 / 16 / 4 | 48 / 16 / 4 / - (bidirectional), 48 / 32 / 8 / 2 (single) |
+| D512 | 48 / 48 / 8 / 2 | 48 / 16 / 4 / - (both) |
+
+Training D128 bidirectional 4.6 kB, D256 bidirectional 15 kB, D512 bidirectional 30 kB (the port's backward workspace; it holds
+only 18-20 D bytes per pair token from the forward to the backward); inference D128 bidirectional 2.2 kB, D512 bidirectional 8.6 kB.
+
+B = 1 is unchanged: y, dx and every weight gradient bitwise equal to main at D128 (L384 / 768, every direction), y and dx bitwise at
+D256 / 384 / 512 (their weight gradients differ only where main itself is not bitwise run to run), and the time within main's
+run-to-run spread (0.984-1.012, two interleaved rounds, every width and direction at L384 / 768; the record has every cell).
+
+Measured 2026-10-19 on one H100 80GB HBM3, CUDA-graph timing (best of 5 runs of up to 30 replays), the module (`BidirectionalTriangle
+Multiplication(D)` / `TriangleMultiplication(D, outgoing=True)`, hidden = D), FP32 parameters, bf16 pair, a token mask (last L/8
+tokens masked); training = forward + backward of x and every parameter, row dropout on. "B calls" = B one-sample calls of the same
+module in one graph (at the preserved single-sample cells, `_legacy_native_faster`, the preserved kernels). cuEquivariance = `implementation="cuequivariance"`,
+PyTorch = the module's statements, both under bf16 autocast (what H100 ran for B > 1 before). OOM: did not fit in 80 GB (the
+graph's memory pool included). Record: [records/trimul_h100_batched_wide_20261019.md](../../../records/trimul_h100_batched_wide_20261019.md).
+
+| D | module | L | B | mode | one call (ms) | B calls (ms) | cuEquivariance (ms) | PyTorch (ms) | × vs B calls | × vs cuEquivariance | × vs PyTorch |
+|---|---|---|---|---|---|---|---|---|---|---|---|
+| 128 | bidirectional | 128 | 4 | inference | 0.121 | 0.160 | 0.326 | 1.125 | 1.33 | 2.70 | 9.31 |
+| 128 | bidirectional | 128 | 4 | training | 0.499 | 0.794 | 1.467 | 3.250 | 1.59 | 2.94 | 6.52 |
+| 128 | bidirectional | 128 | 48 | inference | 1.245 | 1.901 | 4.440 | 12.847 | 1.53 | 3.57 | 10.32 |
+| 128 | bidirectional | 128 | 48 | training | 4.819 | 9.462 | 17.024 | 31.454 | 1.96 | 3.53 | 6.53 |
+| 128 | bidirectional | 384 | 4 | inference | 0.877 | 0.948 | 3.042 | 9.920 | 1.08 | 3.47 | 11.31 |
+| 128 | bidirectional | 384 | 4 | training | 3.539 | 3.806 | 12.731 | 24.238 | 1.08 | 3.60 | 6.85 |
+| 128 | bidirectional | 384 | 48 | inference | 10.591 | 11.301 | 40.099 | 118.813 | 1.07 | 3.79 | 11.22 |
+| 128 | bidirectional | 384 | 48 | training | 42.308 | 45.271 | 156.420 | OOM | 1.07 | 3.70 | - |
+| 128 | bidirectional | 768 | 4 | inference | 3.688 | 3.738 | 13.523 | 67.234 | 1.01 | 3.67 | 18.23 |
+| 128 | bidirectional | 768 | 4 | training | 14.125 | 14.448 | 49.139 | 137.069 | 1.02 | 3.48 | 9.70 |
+| 128 | bidirectional | 768 | 48 | inference | 43.028 | 45.213 | OOM | OOM | 1.05 | - | - |
+| 128 | bidirectional | 768 | 48 | training | 214.840 | 171.330 | OOM | OOM | 0.80 | - | - |
+| 128 | outgoing | 128 | 4 | inference | 0.072 | 0.117 | 0.145 | 0.736 | 1.61 | 2.00 | 10.17 |
+| 128 | outgoing | 128 | 4 | training | 0.399 | 0.672 | 0.864 | 2.707 | 1.68 | 2.17 | 6.78 |
+| 128 | outgoing | 128 | 48 | inference | 0.673 | 1.384 | 1.417 | 8.513 | 2.06 | 2.11 | 12.66 |
+| 128 | outgoing | 128 | 48 | training | 3.533 | 7.946 | 7.796 | 25.623 | 2.25 | 2.21 | 7.25 |
+| 128 | outgoing | 384 | 4 | inference | 0.530 | 0.566 | 1.078 | 6.540 | 1.07 | 2.03 | 12.33 |
+| 128 | outgoing | 384 | 4 | training | 2.680 | 3.040 | 5.973 | 19.926 | 1.13 | 2.23 | 7.44 |
+| 128 | outgoing | 384 | 48 | inference | 6.261 | 6.838 | 12.572 | 77.976 | 1.09 | 2.01 | 12.45 |
+| 128 | outgoing | 384 | 48 | training | 31.297 | 36.435 | 68.606 | 235.521 | 1.16 | 2.19 | 7.53 |
+| 128 | outgoing | 768 | 4 | inference | 2.044 | 2.179 | 4.268 | 40.081 | 1.07 | 2.09 | 19.61 |
+| 128 | outgoing | 768 | 4 | training | 10.549 | 10.939 | 23.504 | 141.556 | 1.04 | 2.23 | 13.42 |
+| 128 | outgoing | 768 | 48 | inference | 25.602 | 26.198 | 51.108 | OOM | 1.02 | 2.00 | - |
+| 128 | outgoing | 768 | 48 | training | 126.730 | 131.450 | OOM | OOM | 1.04 | - | - |
+| 256 | bidirectional | 128 | 4 | inference | 0.272 | 0.315 | 0.791 | 2.051 | 1.16 | 2.91 | 7.54 |
+| 256 | bidirectional | 128 | 4 | training | 1.370 | 1.755 | 3.151 | 5.717 | 1.28 | 2.30 | 4.17 |
+| 256 | bidirectional | 128 | 48 | inference | 2.838 | 3.761 | 9.279 | 23.522 | 1.33 | 3.27 | 8.29 |
+| 256 | bidirectional | 128 | 48 | training | 13.955 | 20.920 | 35.675 | 60.424 | 1.50 | 2.56 | 4.33 |
+| 256 | bidirectional | 384 | 4 | inference | 2.144 | 2.289 | 6.976 | 18.415 | 1.07 | 3.25 | 8.59 |
+| 256 | bidirectional | 384 | 4 | training | 10.434 | 10.414 | 28.203 | 46.786 | 1.00 | 2.70 | 4.48 |
+| 256 | bidirectional | 384 | 48 | inference | 25.307 | 27.218 | 84.739 | OOM | 1.08 | 3.35 | - |
+| 256 | bidirectional | 384 | 48 | training | 125.454 | 125.003 | OOM | OOM | 1.00 | - | - |
+| 256 | bidirectional | 768 | 4 | inference | 9.158 | 9.352 | 28.276 | 132.712 | 1.02 | 3.09 | 14.49 |
+| 256 | bidirectional | 768 | 4 | training | 41.501 | 41.456 | 111.018 | 276.376 | 1.00 | 2.68 | 6.66 |
+| 256 | bidirectional | 768 | 48 | inference | 108.135 | 110.995 | OOM | OOM | 1.03 | - | - |
+| 256 | bidirectional | 768 | 48 | training | 659.791 | 499.952 | OOM | OOM | 0.76 | - | - |
+| 256 | outgoing | 128 | 4 | inference | 0.166 | 0.233 | 0.581 | 1.346 | 1.40 | 3.49 | 8.09 |
+| 256 | outgoing | 128 | 4 | training | 0.911 | 1.201 | 2.173 | 4.748 | 1.32 | 2.39 | 5.21 |
+| 256 | outgoing | 128 | 48 | inference | 1.705 | 2.767 | 7.348 | 15.183 | 1.62 | 4.31 | 8.91 |
+| 256 | outgoing | 128 | 48 | training | 8.899 | 14.300 | 23.482 | 48.752 | 1.61 | 2.64 | 5.48 |
+| 256 | outgoing | 384 | 4 | inference | 1.300 | 1.389 | 5.240 | 11.750 | 1.07 | 4.03 | 9.04 |
+| 256 | outgoing | 384 | 4 | training | 6.717 | 6.926 | 17.557 | 38.394 | 1.03 | 2.61 | 5.72 |
+| 256 | outgoing | 384 | 48 | inference | 15.238 | 16.497 | 62.233 | 141.080 | 1.08 | 4.08 | 9.26 |
+| 256 | outgoing | 384 | 48 | training | 79.112 | 83.059 | 209.411 | OOM | 1.05 | 2.65 | - |
+| 256 | outgoing | 768 | 4 | inference | 5.359 | 5.462 | 20.854 | 76.236 | 1.02 | 3.89 | 14.22 |
+| 256 | outgoing | 768 | 4 | training | 26.924 | 26.932 | 70.697 | 284.983 | 1.00 | 2.63 | 10.58 |
+| 256 | outgoing | 768 | 48 | inference | 63.228 | 64.164 | OOM | OOM | 1.01 | - | - |
+| 256 | outgoing | 768 | 48 | training | 404.797 | 322.384 | OOM | OOM | 0.80 | - | - |
+| 384 | bidirectional | 128 | 4 | inference | 0.497 | 0.582 | 1.629 | 3.072 | 1.17 | 3.28 | 6.18 |
+| 384 | bidirectional | 128 | 4 | training | 2.278 | 2.816 | 5.569 | 8.294 | 1.24 | 2.44 | 3.64 |
+| 384 | bidirectional | 128 | 48 | inference | 5.484 | 6.963 | 19.203 | 35.411 | 1.27 | 3.50 | 6.46 |
+| 384 | bidirectional | 128 | 48 | training | 25.490 | 33.793 | 64.091 | 91.374 | 1.33 | 2.51 | 3.58 |
+| 384 | bidirectional | 384 | 4 | inference | 4.118 | 4.306 | 14.418 | 27.799 | 1.05 | 3.50 | 6.75 |
+| 384 | bidirectional | 384 | 4 | training | 18.132 | 18.209 | 49.103 | 70.991 | 1.00 | 2.71 | 3.92 |
+| 384 | bidirectional | 384 | 48 | inference | 48.893 | 51.730 | OOM | OOM | 1.06 | - | - |
+| 384 | bidirectional | 384 | 48 | training | 286.925 | 217.878 | OOM | OOM | 0.76 | - | - |
+| 384 | bidirectional | 768 | 4 | inference | 17.439 | 17.311 | 58.946 | 206.705 | 0.99 | 3.38 | 11.85 |
+| 384 | bidirectional | 768 | 4 | training | 71.131 | 71.153 | 200.038 | OOM | 1.00 | 2.81 | - |
+| 384 | bidirectional | 768 | 48 | inference | 207.065 | 210.314 | OOM | OOM | 1.02 | - | - |
+| 384 | bidirectional | 768 | 48 | training | OOM | 863.148 | OOM | OOM | - | - | - |
+| 384 | outgoing | 128 | 4 | inference | 0.294 | 0.332 | 1.304 | 1.922 | 1.13 | 4.44 | 6.55 |
+| 384 | outgoing | 128 | 4 | training | 1.417 | 1.825 | 3.981 | 6.724 | 1.29 | 2.81 | 4.75 |
+| 384 | outgoing | 128 | 48 | inference | 3.140 | 3.925 | 15.434 | 21.933 | 1.25 | 4.92 | 6.99 |
+| 384 | outgoing | 128 | 48 | training | 14.809 | 21.903 | 45.074 | 73.017 | 1.48 | 3.04 | 4.93 |
+| 384 | outgoing | 384 | 4 | inference | 2.368 | 2.507 | 11.615 | 16.980 | 1.06 | 4.90 | 7.17 |
+| 384 | outgoing | 384 | 4 | training | 11.121 | 11.050 | 33.897 | 57.546 | 0.99 | 3.05 | 5.17 |
+| 384 | outgoing | 384 | 48 | inference | 27.983 | 29.978 | 139.530 | OOM | 1.07 | 4.99 | - |
+| 384 | outgoing | 384 | 48 | training | 132.708 | 132.875 | OOM | OOM | 1.00 | - | - |
+| 384 | outgoing | 768 | 4 | inference | 9.772 | 9.917 | 46.583 | 113.581 | 1.01 | 4.77 | 11.62 |
+| 384 | outgoing | 768 | 4 | training | 43.661 | 43.658 | 136.007 | 442.309 | 1.00 | 3.12 | 10.13 |
+| 384 | outgoing | 768 | 48 | inference | 117.218 | 117.494 | OOM | OOM | 1.00 | - | - |
+| 384 | outgoing | 768 | 48 | training | OOM | 525.124 | OOM | OOM | - | - | - |
+| 512 | bidirectional | 128 | 4 | inference | 0.885 | 1.167 | 2.723 | 4.220 | 1.32 | 3.08 | 4.77 |
+| 512 | bidirectional | 128 | 4 | training | 3.529 | 4.371 | 8.544 | 11.006 | 1.24 | 2.42 | 3.12 |
+| 512 | bidirectional | 128 | 48 | inference | 9.350 | 14.103 | 32.231 | 50.637 | 1.51 | 3.45 | 5.42 |
+| 512 | bidirectional | 128 | 48 | training | 38.770 | 52.381 | 98.744 | 125.761 | 1.35 | 2.55 | 3.24 |
+| 512 | bidirectional | 384 | 4 | inference | 7.075 | 7.390 | 24.191 | 39.047 | 1.04 | 3.42 | 5.52 |
+| 512 | bidirectional | 384 | 4 | training | 27.092 | 27.058 | 75.418 | 97.787 | 1.00 | 2.78 | 3.61 |
+| 512 | bidirectional | 384 | 48 | inference | 83.573 | 88.792 | OOM | OOM | 1.06 | - | - |
+| 512 | bidirectional | 384 | 48 | training | 443.453 | 323.598 | OOM | OOM | 0.73 | - | - |
+| 512 | bidirectional | 768 | 4 | inference | 29.400 | 29.536 | 98.713 | 273.413 | 1.00 | 3.36 | 9.30 |
+| 512 | bidirectional | 768 | 4 | training | 104.748 | 104.221 | OOM | OOM | 0.99 | - | - |
+| 512 | outgoing | 128 | 4 | inference | 0.515 | 0.649 | 2.317 | 2.487 | 1.26 | 4.50 | 4.83 |
+| 512 | outgoing | 128 | 4 | training | 2.149 | 2.704 | 6.379 | 8.586 | 1.26 | 2.97 | 4.00 |
+| 512 | outgoing | 128 | 48 | inference | 5.331 | 7.826 | 27.556 | 28.965 | 1.47 | 5.17 | 5.43 |
+| 512 | outgoing | 128 | 48 | training | 22.736 | 31.751 | 73.332 | 95.408 | 1.40 | 3.23 | 4.20 |
+| 512 | outgoing | 384 | 4 | inference | 4.038 | 4.336 | 20.681 | 22.422 | 1.07 | 5.12 | 5.55 |
+| 512 | outgoing | 384 | 4 | training | 16.209 | 16.142 | 55.183 | 76.512 | 1.00 | 3.40 | 4.72 |
+| 512 | outgoing | 384 | 48 | inference | 47.526 | 52.075 | OOM | OOM | 1.10 | - | - |
+| 512 | outgoing | 384 | 48 | training | 258.167 | 193.311 | OOM | OOM | 0.75 | - | - |
+| 512 | outgoing | 768 | 4 | inference | 16.423 | 16.708 | 82.860 | 150.889 | 1.02 | 5.05 | 9.19 |
+| 512 | outgoing | 768 | 4 | training | 64.828 | 64.706 | 220.907 | OOM | 1.00 | 3.41 | - |
+
+One call against B calls: 1.13-2.25x at L128 (B = 4 and 48); inference at L384 / 768 0.99-1.10x (chunked calls included); D128
+training at L384 / 768 1.02-1.17x in one launch. Against cuEquivariance 2.0-5.2x, against the PyTorch statements 3.1-19.6x, where
+they fit. The "B calls" column differentiates each call with `torch.autograd.grad` right after its forward and does not sum the
+parameter gradients; B calls whose gradients accumulate (`backward()`, as a model runs them) are 2-18 % slower than that column.
+
+- **D256+ training at L384 / 768 (the preserved single-sample cells, `_legacy_native_faster`)**: per cell and batch size the call
+  runs whichever measured faster, one launch / chunks of the port or one launch per sample of the preserved kernels writing into
+  the batch's y / dx (`PER_SAMPLE_LEGACY_TRAINING`: the largest B routed per (D, L, direction)). B = 4: 0.994-1.031x of the B calls
+  above and 1.02-1.16x of accumulating B calls (the port alone was 0.88-1.03x: the routed call does the B calls' work and sums the
+  gradients). Routing first lost 3-6 % to concatenating y and dx; writing in place removed that.
+- **Training that does not fit one launch (B L^2 large): checkpointed chunks 0.73-0.80x** of the B calls above (0.75-0.89x of
+  accumulating B calls). Those B calls hold
+  one sample's saved tensors at a time because each is differentiated right after its forward; a model that runs the B calls and
+  then one backward holds all of them, which at these sizes is beyond 80 GB. Plain (uncheckpointed) chunks and the routed
+  per-sample calls are at 1.00-1.05x. The OOM rows at D384 / D512 L768 B48 are the caller's own x / y / dy / dx (87 / 116 GB > 85 GB).
+
+### D64 (the first batched width)
 
 The D64 path takes B samples in one call, inference and training, bidirectional and either single direction: tokens b-major, one
 launch per stage instead of B calls (MiniWorld's template embedder runs its templates as the B samples of one pair stack). K1 / K3
@@ -16,8 +222,8 @@ launch per stage instead of B calls (MiniWorld's template embedder runs its temp
 reads its own sample's token mask (K1: `m[i] & m[s L + j]`), and K3 / B1 read the row-dropout scale `[B L, 64]` at row `s L + j`.
 The training preparation builds the FP32 pair mask `[B L, L]` per sample (`mw_aux_d64_training_prepare` / `mw_aux_train_mask`,
 `samples`), B2 reads it per row, the planes are `[c, B L, L]` and the contraction batches over c x B (one cuBLAS call per product),
-and the B1 / B2 weight partials sum over every sample in a fixed order (deterministic). Wider D keeps one sample per call
-(`serves*` refuse B > 1 there) and B > `MAX_BATCH` runs the module's PyTorch statements.
+and the B1 / B2 weight partials sum over every sample in a fixed order (deterministic).
+B > `MAX_BATCH` runs in several launches (chunking, above).
 
 `integrations.trimul_h100.MAX_BATCH = 48` is the largest batch validated, not a kernel limit: B in {1, 2, 4, 8, 16, 32, 48} x
 L in {128, 256, 384, 768} x the three directions, inference and training, all pass with y and dx **bitwise equal** to B calls of
@@ -48,8 +254,8 @@ Contract (`integrations.trimul_h100`), both modules, every direction:
 
 | width | inference | training |
 |---|---|---|
-| D64 (B <= 48) / D128 | any L >= 16 (`MIN_INFERENCE_LENGTH`) | L a multiple of 128 up to 10240 (`TRAINING_GRANULE`, `MAX_TRAINING_LENGTH`, B200's bound) |
-| D256 / D384 / D512 | as before up to L1024; above: L a multiple of 128 (B200-style port; single-direction D256 / D384 keep the packaged K1 / K3 at any L) | as before up to L1024; above: L a multiple of 128 (B200-style port) |
+| D64 / D128 (B <= 48) | any L >= 16 (`MIN_INFERENCE_LENGTH`) | L a multiple of 128 up to 10240 (`TRAINING_GRANULE`, `MAX_TRAINING_LENGTH`, B200's bound) |
+| D256 / D384 / D512 (B > 1: the B200-style port) | as before up to L1024; above: L a multiple of 128 (B200-style port; single-direction D256 / D384 keep the packaged K1 / K3 at any L) | as before up to L1024; above: L a multiple of 128 (B200-style port) |
 
 Bound common to both: the int32 token index, B L^2 < 2^31 (L rounded up to 16). Memory binds first on an 80 GB card: training at
 L2560 peaks at 28 GB (D128 bidirectional), 13.5 GB (D64, one sample), 54 GB (D64, B = 4); at L4096 D64 bidirectional fits, D128
