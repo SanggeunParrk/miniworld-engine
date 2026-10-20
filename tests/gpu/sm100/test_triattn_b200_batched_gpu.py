@@ -279,16 +279,17 @@ def poisoned(fn):
     return fn()
 
 
+@pytest.mark.parametrize("starting", [True, False], ids=["starting", "ending"])
 @pytest.mark.parametrize("det", [True, False], ids=["deterministic-wgrad", "default"])
 @pytest.mark.parametrize("name", ["C128", "C256", "C64-H4x16"])
-def test_deterministic(name, det):
+def test_deterministic(name, det, starting):
     """Three runs of one batched training call (NaN-poisoned allocator): the output bit for bit, and the q / k / v / gate / out weight
     gradients bit for bit on the wide path always and on the fused path with ``settings.triattn_b200_deterministic_wgrad`` (by default
     its weight-gradient partials are added with fp32 atomics); the LayerNorm and the bias projection gradients carry the core's fp32
     reduce-add of dbias (L2 add order)."""
     settings.configure(triattn_b200_deterministic_wgrad=det)
     cfg = CONFIGS[name]
-    m = make(cfg, p_drop=0.25)
+    m = make(cfg, starting=starting, p_drop=0.25)
     x, mask, dy = inputs(8, 384, cfg[0])
     FixedDrop(m, drop_scale(m, 8, 384, cfg[0]))
     runs = [poisoned(lambda: run(m, x, mask, dy, True)) for _ in range(3)]
@@ -305,7 +306,7 @@ def test_deterministic(name, det):
                 raise AssertionError(f"{n} not bitwise")
             else:
                 assert relative(a, b) < 1e-2, n
-    print(f"\n{name} det={det}: bitwise {sorted(set(bitwise))}")
+    print(f"\n{name} det={det} starting={starting}: bitwise {sorted(set(bitwise))}")
 
 
 def test_deterministic_wgrad_matches_default():

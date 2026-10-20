@@ -8,7 +8,9 @@ batch): up to ``max_batch`` per launch, more (or more than fit in memory) in lau
 
 The kernel launches are ``opaque`` custom ops (``kernels._compile``): the module compiles to one graph, the weight packs and the
 launches run eagerly inside the ops (also under a CUDA-graph capture), and the autograd function below calls one op forward and one
-backward. The ending node runs the starting-node kernels on the transposed pair (one copy in, one copy out)."""
+backward. The ending node runs the same kernels on the caller's [B, I, J, C] pair: the kernels that read or write the pair-shaped
+tensors (x, y, dy, dx) address them through 4-D tensor maps (``trans``), the intermediates stay in the starting-node layout, and no
+transposed copy is made."""
 
 from __future__ import annotations
 
@@ -122,16 +124,16 @@ def _packed(weights: tuple[torch.Tensor, ...]):
 # ---------------------------------------------------------------- custom ops
 # args = [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop]; mask [B, L] bool and drop [B, L, C] bf16 are empty when absent; pair is the
 # starting-node layout with L a multiple of 128.
-def _infer_fake(kind, args, eps, n_head, head_dim):
+def _infer_fake(kind, args, eps, n_head, head_dim, trans):
     return torch.empty_like(args[0])
 
 
 @opaque(fake=_infer_fake, name="triattn_b200_infer")
-def _infer_op(kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int) -> torch.Tensor:
-    return _infer(kind, args, eps, n_head, head_dim)
+def _infer_op(kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int, trans: bool) -> torch.Tensor:
+    return _infer(kind, args, eps, n_head, head_dim, trans)
 
 
-def _infer(kind, args, eps, n_head, head_dim, out=None):
+def _infer(kind, args, eps, n_head, head_dim, trans, out=None):
     """The inference kernels; `out`: a contiguous tensor like the pair to write the result into (a chunk's rows of a batch's output,
     eager only: an op output may not alias an input)."""
     from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
@@ -139,12 +141,12 @@ def _infer(kind, args, eps, n_head, head_dim, out=None):
     pair, lnw, lnb, *weights, mask, _ = args
     mask = mask if mask.numel() else None
     if kind == FUSED:
-        y, _ = k.fused_forward(pair, lnw, lnb, *weights, mask, eps, None, False, out)
+        y, _ = k.fused_forward(pair, lnw, lnb, *weights, mask, eps, None, False, out, trans)
         return y
-    return k.wide_inference(pair, lnw, lnb, _packed(tuple(weights)), n_head, head_dim, mask, eps, out)
+    return k.wide_inference(pair, lnw, lnb, _packed(tuple(weights)), n_head, head_dim, mask, eps, out, trans)
 
 
-def _fwd_fake(kind, args, eps, n_head, head_dim):
+def _fwd_fake(kind, args, eps, n_head, head_dim, trans):
     pair = args[0]
     B, L, _, C = pair.shape
     R = B * L * L
@@ -173,20 +175,21 @@ def _fwd_fake(kind, args, eps, n_head, head_dim):
 
 
 @opaque(fake=_fwd_fake, name="triattn_b200_fwd")
-def _fwd_op(kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int) -> list[torch.Tensor]:
+def _fwd_op(kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int, trans: bool) -> list[torch.Tensor]:
     from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
 
     pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop = args
     mask = mask if mask.numel() else None
     drop = drop if drop.numel() else None
     if kind == FUSED:
-        out, saved = k.fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True)
+        out, saved = k.fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True, None, trans)
     else:
-        out, saved = k.wide_forward(pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo)), n_head, head_dim, mask, eps, drop, True)
+        out, saved = k.wide_forward(pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo)), n_head, head_dim, mask, eps, drop, True, None,
+                                    trans)
     return [out, *saved]
 
 
-def _bwd_fake(kind, args, saved, eps, n_head, head_dim):
+def _bwd_fake(kind, args, saved, eps, n_head, head_dim, trans):
     """The backward's stacked gradients (``b200_triattn.split_grads`` takes them apart): fused (dpair, [dgamma; dbeta; dWb],
     [dWq; dWk; dWv; dWg], dWo), wide (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo); weight gradients fp32 when Wq is."""
     dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, _ = args
@@ -201,15 +204,17 @@ def _bwd_fake(kind, args, saved, eps, n_head, head_dim):
 
 
 @opaque(fake=_bwd_fake, name="triattn_b200_bwd")
-def _bwd_op(kind: int, args: list[torch.Tensor], saved: list[torch.Tensor], eps: float, n_head: int, head_dim: int) -> list[torch.Tensor]:
+def _bwd_op(kind: int, args: list[torch.Tensor], saved: list[torch.Tensor], eps: float, n_head: int, head_dim: int,
+            trans: bool) -> list[torch.Tensor]:
     from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
 
     dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop = args
     drop = drop if drop.numel() else None
     dtypes = tuple(t.dtype for t in (lnw, lnb, wq, wk, wv, wg, wb, wo))
     if kind == FUSED:
-        return list(k.fused_backward(dy, pair, eps, drop, list(saved), dtypes))
-    return list(k.wide_backward(dy, pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo)), n_head, head_dim, eps, drop, list(saved), dtypes))
+        return list(k.fused_backward(dy, pair, eps, drop, list(saved), dtypes, trans))
+    return list(k.wide_backward(dy, pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo)), n_head, head_dim, eps, drop, list(saved), dtypes,
+                                trans))
 
 
 def _grads(kind, raw, params):
@@ -225,18 +230,18 @@ class _TriAttnFn(torch.autograd.Function):
     one op backward.  Gradients come back in the parameters' dtype."""
 
     @staticmethod
-    def forward(ctx, kind, eps, n_head, head_dim, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop):
-        out, *saved = _fwd_op(kind, [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop], eps, n_head, head_dim)
+    def forward(ctx, kind, eps, n_head, head_dim, trans, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop):
+        out, *saved = _fwd_op(kind, [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, drop], eps, n_head, head_dim, trans)
         ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop, *saved)
-        ctx.cfg = (kind, eps, n_head, head_dim)
+        ctx.cfg = (kind, eps, n_head, head_dim, trans)
         return out
 
     @staticmethod
     def backward(ctx, dy):
         pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop, *saved = ctx.saved_tensors
-        kind, eps, n_head, head_dim = ctx.cfg
-        raw = _bwd_op(kind, [dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop], saved, eps, n_head, head_dim)
-        return (None, None, None, None, *_grads(kind, raw, (lnw, lnb, wq, wk, wv, wg, wb, wo)), None, None)
+        kind, eps, n_head, head_dim, trans = ctx.cfg
+        raw = _bwd_op(kind, [dy.contiguous(), pair, lnw, lnb, wq, wk, wv, wg, wb, wo, drop], saved, eps, n_head, head_dim, trans)
+        return (None, None, None, None, None, *_grads(kind, raw, (lnw, lnb, wq, wk, wv, wg, wb, wo)), None, None)
 
 
 # ---------------------------------------------------------------- batched samples and chunking
@@ -281,10 +286,11 @@ def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: 
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx)."""
     c, h = d_pair, n_head
-    # a padded length or the ending node: the kernels' copy of the pair (padded / transposed; saved in training), and of dy, and the
-    # output / dx in the kernels' layout before the cut / the copy back.  The copies of the pair and of the output are not alive at
-    # the same peak (measured: +2c per token in inference and in each training phase, also with both)
-    extra = 2 * c if padded or ending else 0
+    # a padded length: the padded copy of the pair (saved in training), and of dy, and the padded output / dx before the cut; the copies
+    # of the pair and of the output are not alive at the same peak (measured: +2c per token in inference and in each training phase).
+    # The ending node reads and writes the caller's layout directly (no copies; `ending` kept for the callers)
+    extra = 2 * c if padded else 0
+    del ending
     if kind == FUSED:
         # inference: q | k | v | g, o; bias (bf16 per head)
         # saved: q | k | v | g, o; bias; lse (fp32 per head)   backward: do, dg, dq, dk, dv; delta, dbias, bias^T (fp32 per head)
@@ -384,20 +390,18 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     params = _params(module)
     head_dim = module.to_query.weight.shape[0] // module.n_head
     eps = module.ln_pair.eps
-    # the kernels' (starting-node) layout; the ending node transposes in and out
-    x = pair.transpose(1, 2) if ending else pair
+    # the ending node: the kernels read and write the caller's layout (trans)
+    x, trans = pair, ending
     if chunk >= B:
-        out = _forward_one(kind, params, x, mask, drop, needs_grad, eps, module.n_head, head_dim)
+        out = _forward_one(kind, params, x, mask, drop, needs_grad, eps, module.n_head, head_dim, trans)
     elif not needs_grad:
-        out = _infer_chunks(kind, params, x, mask, drop, _split(B, chunk), eps, module.n_head, head_dim)
+        out = _infer_chunks(kind, params, x, mask, drop, _split(B, chunk), eps, module.n_head, head_dim, trans)
     else:
         out = _Chunked.apply(
-            kind, eps, module.n_head, head_dim, tuple(_split(B, chunk)), checkpoint, x, *params,
+            kind, eps, module.n_head, head_dim, trans, tuple(_split(B, chunk)), checkpoint, x, *params,
             mask if mask is not None else pair.new_empty(0, dtype=torch.bool),
             drop if drop is not None else pair.new_empty(0),
         )
-    if ending:
-        out = out.transpose(1, 2)
     return out.contiguous()
 
 
@@ -415,8 +419,8 @@ def _pad(x, mask, drop):
     return x, keep, drop
 
 
-def _forward_one(kind, params, x, mask, drop, needs_grad, eps, n_head, head_dim) -> torch.Tensor:
-    """One launch of every kernel for the samples of ``x`` (starting-node layout; any strides).  Without grad or dropout: the inference
+def _forward_one(kind, params, x, mask, drop, needs_grad, eps, n_head, head_dim, trans) -> torch.Tensor:
+    """One launch of every kernel for the samples of ``x`` (the caller's layout, ``trans`` for the ending node; any strides).  Without grad or dropout: the inference
     op (bf16 weight packs); otherwise the autograd function (the parameters go in as they are and get gradients in their dtype)."""
     L = x.shape[1]
     xp, m, d = _pad(x, mask, drop)
@@ -424,16 +428,16 @@ def _forward_one(kind, params, x, mask, drop, needs_grad, eps, n_head, head_dim)
     mask_t = m if m is not None else xp.new_empty(0, dtype=torch.bool)
     drop_t = d if d is not None else xp.new_empty(0)
     if d is None and not needs_grad:
-        out = _infer_op(kind, [xp, *params, mask_t, drop_t], eps, n_head, head_dim)
+        out = _infer_op(kind, [xp, *params, mask_t, drop_t], eps, n_head, head_dim, trans)
     else:
-        out = _TriAttnFn.apply(kind, eps, n_head, head_dim, xp, *params, mask_t, drop_t)
+        out = _TriAttnFn.apply(kind, eps, n_head, head_dim, trans, xp, *params, mask_t, drop_t)
     if xp.shape[1] != L:
         out = out[:, :L, :L]
     return out
 
 
-def _infer_chunks(kind, params, x, mask, drop, sizes, eps, n_head, head_dim) -> torch.Tensor:
-    """Inference in chunks of ``sizes`` samples into one output (starting-node layout): a whole-tile length writes each chunk's rows in
+def _infer_chunks(kind, params, x, mask, drop, sizes, eps, n_head, head_dim, trans) -> torch.Tensor:
+    """Inference in chunks of ``sizes`` samples into one output (the caller's layout): a whole-tile length writes each chunk's rows in
     place (eager; the tail kernels take them as their output), otherwise (padding, a traced call) each chunk's result is copied in."""
     B, L = x.shape[:2]
     out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
@@ -445,15 +449,15 @@ def _infer_chunks(kind, params, x, mask, drop, sizes, eps, n_head, head_dim) -> 
         if into:
             xc = x[sl].contiguous()
             args = [xc, *params, m if m is not None else xc.new_empty(0, dtype=torch.bool), xc.new_empty(0)]
-            _infer(kind, args, eps, n_head, head_dim, out[sl])
+            _infer(kind, args, eps, n_head, head_dim, trans, out[sl])
         else:
-            out[sl] = _forward_one(kind, params, x[sl], m, None if drop is None else drop[sl], False, eps, n_head, head_dim)
+            out[sl] = _forward_one(kind, params, x[sl], m, None if drop is None else drop[sl], False, eps, n_head, head_dim, trans)
         start += n
     return out
 
 
 def _chunk_inputs(x, mask, drop, start, n):
-    """The chunk's pair, mask and dropout scale (starting-node layout), padded to whole tiles as `_forward_one` pads."""
+    """The chunk's pair, mask and dropout scale (the caller's layout), padded to whole tiles as `_forward_one` pads."""
     xc, m, d = _pad(x[start:start + n], mask[start:start + n] if mask.numel() else None, drop[start:start + n] if drop.numel() else None)
     return (xc.contiguous(), m if m is not None else xc.new_empty(0, dtype=torch.bool), d if d is not None else xc.new_empty(0))
 
@@ -466,7 +470,7 @@ class _Chunked(torch.autograd.Function):
     fp32, add up in fp32 and are rounded to the parameters' dtype once, as inside one launch."""
 
     @staticmethod
-    def forward(ctx, kind, eps, n_head, head_dim, sizes, checkpoint, x, *rest):
+    def forward(ctx, kind, eps, n_head, head_dim, trans, sizes, checkpoint, x, *rest):
         *params, mask, drop = rest
         p32 = [p.float() for p in params]
         L = x.shape[1]
@@ -475,7 +479,7 @@ class _Chunked(torch.autograd.Function):
         start = 0
         for n in sizes:
             xc, m, d = _chunk_inputs(x, mask, drop, start, n)
-            o, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim)
+            o, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim, trans)
             out[start:start + n] = o[:, :L, :L]
             del o
             if not checkpoint:
@@ -483,14 +487,14 @@ class _Chunked(torch.autograd.Function):
             del s
             start += n
         ctx.save_for_backward(x, *params, mask, drop, *saved)
-        ctx.cfg = (kind, eps, n_head, head_dim, sizes, checkpoint)
+        ctx.cfg = (kind, eps, n_head, head_dim, trans, sizes, checkpoint)
         return out
 
     @staticmethod
     def backward(ctx, dy):
         x, *rest = ctx.saved_tensors
         params, (mask, drop), saved = rest[:8], rest[8:10], rest[10:]
-        kind, eps, n_head, head_dim, sizes, checkpoint = ctx.cfg
+        kind, eps, n_head, head_dim, trans, sizes, checkpoint = ctx.cfg
         p32 = [p.float() for p in params]
         L = x.shape[1]
         Lp = _padded(L)
@@ -501,17 +505,17 @@ class _Chunked(torch.autograd.Function):
         for c, n in enumerate(sizes):
             xc, m, d = _chunk_inputs(x, mask, drop, start, n)
             if checkpoint:
-                _, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim)
+                _, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim, trans)
             else:
                 s = list(saved[c * per:(c + 1) * per])
             g = dy[start:start + n]
             if Lp != L:
                 g = F.pad(g, (0, 0, 0, Lp - L, 0, Lp - L))
-            grads = _grads(kind, _bwd_op(kind, [g.contiguous(), xc, *p32, d], s, eps, n_head, head_dim), p32)
+            grads = _grads(kind, _bwd_op(kind, [g.contiguous(), xc, *p32, d], s, eps, n_head, head_dim, trans), p32)
             del s, g
             dx[start:start + n] = grads[0][:, :L, :L]
             for a, gp in zip(acc, grads[1:], strict=True):
                 a += gp
             del grads
             start += n
-        return (None, None, None, None, None, None, dx, *(a.to(p.dtype) for a, p in zip(acc, params, strict=True)), None, None)
+        return (None, None, None, None, None, None, None, dx, *(a.to(p.dtype) for a, p in zip(acc, params, strict=True)), None, None)
