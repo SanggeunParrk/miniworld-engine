@@ -7,6 +7,7 @@ d_pair_atom: 16
 n_layers: 1
 n_augment: auto  # inference: 5; training: 48
 mask_prob: 0.0
+per_sample_pair: false  # bias_only_dit training: a pair of its own per sample; unused by other targets
 min_seq_len: 384
 max_seq_len: 768
 seq_len_step: 128

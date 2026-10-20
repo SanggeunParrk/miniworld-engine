@@ -69,12 +69,12 @@ rmsnorm_fwd_triton,triton,rmsnorm,miniworld_engine/kernels/rmsnorm/triton/main.p
 rope_fwd_triton,triton,rope,miniworld_engine/kernels/rope/triton/main.py,ok,rel y=5.14e-04 dx=7.23e-04 (band 3e-03 declared),bf16
 transition_bwd_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,RuntimeError: Error building extension 'transition_cuda_ext_v2': [1/2] c++ -MMD -MF transition_cuda.o.d -DTORCH_EXTENSION_NAME=transit | c++: error: unrecognized command line option ‘-std=c++20’; did you mean ‘-std=c++2a’?,bf16
 transition_bwd_swiglu_recompute_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel h=2.18e-03 dAB=2.12e-03 xn=7.02e-04 (band 1e-02 declared),bf16
-transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: /home/psk6950/miniworld-engine-scratch/jit-runall2/miniworld_engine_jit/torch_extensions/transition_cuda_ext_v2-ee6c7a7d,bf16
+transition_cast_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: <path>,bf16
 transition_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/main.py,ok,rel out=2.81e-03 (band 1e-02 declared),bf16
 transition_fwd_b2b_ktiled_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=1.96e-03 (band 9e-03 declared),bf16
 transition_fwd_b2b_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=2.48e-03 (band 1e-02 declared),bf16
 transition_layernorm_expand_swiglu_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel out=2.18e-03 (band 1e-02 declared),bf16
-transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: /home/psk6950/miniworld-engine-scratch/jit-runall2/miniworld_engine_jit/torch_extensions/transition_cuda_ext_v2-ee6c7a7d,bf16
+transition_swiglu_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_cuda_kernel.cu,failed,ImportError: <path>,bf16
 triangle_attention_bwd_atomic_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/atomic.py,ok,rel dq=1.54e-02 dk=1.29e-02 dv=4.85e-03 dbias=4.05e-03 (band 5e-02),bf16
 triangle_attention_bwd_dkdv_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel dk=4.44e-03 dv=2.76e-03 dbias=3.27e-03 (band 2e-02 declared),bf16
 triangle_attention_bwd_dq_triton,triton,triangle_attention,miniworld_engine/kernels/triangle_attention/triton/main.py,ok,rel dq=6.77e-03 (band 2e-02 declared),bf16

@@ -22,7 +22,18 @@ stays visible instead of dropping out of both sides and reading as 100% covered.
 from __future__ import annotations
 
 import csv
+import re
 from pathlib import Path
+
+#: A path into one account or one site's storage (tests/cpu/layout/test_no_machine_paths.py). A failure detail is an
+#: exception message, and a JIT failure names its build directory under the home of whoever ran it: the manifest is
+#: committed and shipped, so the path is written as `<path>`.
+_MACHINE_PATH = re.compile(r"/(?:home|users|Users|public_data|public_data02|scratch|lustre|gpfs)/[^\s,:;'\")]*")
+
+
+def _portable(detail: str) -> str:
+    return _MACHINE_PATH.sub("<path>", detail)
+
 
 _PKG = Path(__file__).resolve().parent.parent
 _REGISTRY = _PKG / "kernels" / "registry" / "registry.csv"
@@ -176,7 +187,7 @@ def record(gpu_key: str, results: dict[str, tuple[bool, str]],
         rows.append({
             "kernel": entry["kernel"], "backend": entry["backend"],
             "family": entry["family"], "file": entry["file"],
-            "status": status, "detail": detail, "dtype": dtype,
+            "status": status, "detail": _portable(detail), "dtype": dtype,
         })
     # Every OTHER precision's rows, carried through -- but only for precisions the registry still
     # declares. A row for a precision a kernel no longer runs at is evidence about a configuration

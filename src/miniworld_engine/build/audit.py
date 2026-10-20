@@ -85,6 +85,11 @@ def import_all_kernels() -> list[tuple[str, str]]:
 
     failed = []
     for m in pkgutil.walk_packages(pkg.__path__, prefix=pkg.__name__ + "."):
+        # `build_*.py` are rebuild scripts run by hand (triangle_attention/cuda): importing one compiles its extension
+        # and overwrites the committed .so and *_manifest.json next to it (every CPU run with CUTLASS_PATH set did).
+        # Not edited to guard themselves: the runtime checks those files' hashes against the manifests.
+        if m.name.rpartition(".")[2].startswith("build_"):
+            continue
         try:
             importlib.import_module(m.name)
         except BaseException as exc:  # noqa: PERF203 -- a broken module is a finding, not a crash
