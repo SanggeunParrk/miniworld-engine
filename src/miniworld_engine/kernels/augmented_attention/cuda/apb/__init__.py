@@ -71,12 +71,14 @@ def available() -> bool:
 
 def _resolve_core(key: str) -> tuple[int, int]:
     """The C++ host path's cubin lookup: key "<kind>/<device>/<heads>/<d_single>/<variant>" -> (CUfunction handle, dynamic smem).
-    Kinds fwd2 / inf (variant 1: the key-split build), dkv, dqb (-DDQPART)."""
+    Kinds fwd2 / inf (variant 1: the key-split build), dkv (variant 1: the query-split build), dqb (-DDQPART)."""
     from ..sm100 import _apb_defs, _sm100_kernel
 
     kind, dev, heads, d, variant = key.split("/")
     stem, qpair = {"fwd2": ("attn_fwd2", True), "inf": ("attn_inf", True), "dkv": ("attn_dkv", False), "dqb": ("attn_dqb", False)}[kind]
-    defs = _apb_defs(int(heads), qpair, int(d), variant == "1") + (("DQPART=1",) if kind == "dqb" else ())
+    defs = _apb_defs(int(heads), qpair, int(d), variant == "1" and qpair) + (("DQPART=1",) if kind == "dqb" else ())
+    if kind == "dkv" and variant == "1":
+        defs += ("QSPLIT=1",)
     k = _sm100_kernel(stem, f"augattn_{stem.removeprefix('attn_')}_sm100", int(dev), defs=defs)
     try:
         handle = int(k.func)
@@ -95,7 +97,7 @@ def _fake_train_fwd(single, pair, mask, params, eps_s, eps_p, ns):
             e((D, W), dtype=bf), e((H, DP), dtype=bf)]
 
 
-def _fake_train_bwd(single, pair, mask, params, saved, dy, eps_p):
+def _fake_train_bwd(single, pair, mask, params, saved, dy, eps_p, nq):
     return [torch.empty_like(single), torch.empty_like(pair), *(single.new_empty(t.shape, dtype=torch.float32) for t in params)]
 
 

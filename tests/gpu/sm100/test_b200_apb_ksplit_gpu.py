@@ -1,4 +1,5 @@
-"""AttentionPairBias on B200: the key-split forward cores against the fp32 module (every chunk count, padded key tails)."""
+"""AttentionPairBias on B200: the key-split forward cores and the query-split backward dK / dV core against the fp32 module
+(every chunk count, padded key tails)."""
 
 import copy
 
@@ -24,7 +25,7 @@ SHAPES = [(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)]  # (heads, d_sin
 def restore_settings():
     prev = settings.current()
     yield
-    settings.configure(apb_b200_ksplit=prev.apb_b200_ksplit)
+    settings.configure(apb_b200_ksplit=prev.apb_b200_ksplit, apb_b200_qsplit=prev.apb_b200_qsplit)
 
 
 def _rel(a, b):
@@ -111,3 +112,25 @@ def test_ksplit_training(shape, L):
     for ns, e in worst.items():
         for i, (x, x1) in enumerate(zip(e, worst[1])):
             assert x < 1.1 * x1 + 2e-4, (ns, i, x, x1)
+
+
+@pytest.mark.parametrize("shape", SHAPES, ids=lambda s: f"h{s[0]}d{s[1]}")
+@pytest.mark.parametrize("L", [384, 768])
+def test_qsplit_training(shape, L):
+    """The query-split dK / dV core: every gradient against fp32 as the unsplit core (+ 10 %); the output is untouched."""
+    ref, ours = _module(shape)
+    s, p, m = _inputs(1, L, shape[1])
+    dy = torch.randn_like(s)
+    want = _step(ref, s, p, m, dy)
+    kt = L // 128
+    errs, outs = {}, {}
+    for nq in [1] + [n for n in range(2, kt + 1) if kt % n == 0]:
+        settings.configure(apb_b200_qsplit=nq)
+        got = _step(ours, s.bfloat16(), p.bfloat16(), m, dy.bfloat16())
+        assert all(torch.isfinite(t).all() for t in got), nq
+        outs[nq] = got[0]
+        errs[nq] = [_rel(a.float(), b) for a, b in zip(got[1:], want[1:])]
+    for nq, e in errs.items():
+        assert torch.equal(outs[nq], outs[1])
+        for i, (x, x1) in enumerate(zip(e, errs[1])):
+            assert x < 1.1 * x1 + 2e-4, (nq, i, x, x1)

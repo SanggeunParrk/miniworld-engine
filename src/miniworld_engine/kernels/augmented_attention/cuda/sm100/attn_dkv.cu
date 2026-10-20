@@ -7,6 +7,9 @@
 // The two dS warpgroups take alternate 64-query blocks of the same key tile and feed one dK / dV accumulator pair. The bias arrives
 // TRANSPOSED ([H, L(key), L(query)], a one-off copy in the op's prep) so each thread reads its key row contiguously; LSE and D of the
 // block's queries are bulk-copied next to it and read as broadcasts.
+// -DQSPLIT=1 (AttentionPairBias at small batch): a work item is (sample, key tile, head, query chunk) and walks 1 / NQ of the
+// query blocks (NQ divides L / 128); its dK / dV leave as the chunk's slice of [NQ, A L, W] (rows (chunk A + a) L + key) for the
+// caller to add in chunk order (apb_rows' qkv_bwd): NQ times the work items, no atomics.
 // -DBPS=1 (AttentionPairBias): every sample has its own bias planes, bias^T [A, NHEAD, L(key), L(query)] (the token DiT shares one
 // [NHEAD, L, L] across its A samples); nothing else changes (A = 1 is the single-sample layout).
 // TMEM: S^T[w] at w * 128, dP^T[w] at w * 128 + 64, P^T[w] at 256 + w * 64 (bf16), dS^T[w] at 288 + w * 64, dK at 384, dV at 432.
@@ -28,6 +31,9 @@ using namespace s100;
 #endif
 #ifndef BPS
 #define BPS 0
+#endif
+#ifndef QSPLIT
+#define QSPLIT 0
 #endif
 #ifndef DHP
 #define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
@@ -84,19 +90,27 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
                   const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mbt, const __grid_constant__ CUtensorMap mka,
                   const __grid_constant__ CUtensorMap mkb, const __grid_constant__ CUtensorMap mva, const __grid_constant__ CUtensorMap mvb,
                   const float* __restrict__ LSE,
-                  const float* __restrict__ DD, float* __restrict__ DK, float* __restrict__ DV, float* __restrict__ DQZ, int L, int A) {
+                  const float* __restrict__ DD, float* __restrict__ DK, float* __restrict__ DV, float* __restrict__ DQZ, int L, int A
+#if QSPLIT
+                  , int NQ
+#endif
+                  ) {
+#if !QSPLIT
+  constexpr int NQ = 1;
+#endif
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int kt = L / KM, nb = L / BQ;                                      // nb is even: every item starts on warpgroup 0
-  const int items = A * NHEAD * kt;
+  const int kt = L / KM, nb = L / BQ / NQ;                                 // query blocks per item; even: every item starts on warpgroup 0
+  const int items = A * NHEAD * kt * NQ;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
   const int nblk = my_items * nb;
-  auto item_of = [&](int li, int& a, int& k0, int& head) {
+  auto item_of = [&](int li, int& a, int& k0, int& head, int& qc) {
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
-    a = wi % A; const int r = wi / A;                                      // neighbouring CTAs: other samples of the same (head, key tile)
-    k0 = (r % kt) * KM; head = r / kt;
+    a = wi % A; int r = wi / A;                                            // neighbouring CTAs: other samples of the same (head, key tile)
+    k0 = (r % kt) * KM; r /= kt;
+    head = r % NHEAD; qc = r / NHEAD;                                      // qc: the query chunk (QSPLIT)
   };
 
   if (tid == 0) {
@@ -131,8 +145,8 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     if (lane == 0) {
       int G = 0;
       for (int li = 0; li < my_items; ++li) {
-        int a, k0, head; item_of(li, a, k0, head);
-        const int ks = li & 1, qcol = head * DH;
+        int a, k0, head, qc; item_of(li, a, k0, head, qc);
+        const int ks = li & 1, qcol = head * DH, qb0 = qc * nb * BQ;     // the chunk's first query
         if (li >= 2) mbar_wait(&B.kvempty[ks], ((li >> 1) - 1) & 1);
         mbar_expect_tx(&B.kvfull[ks], 2 * KM * DH * 2);
         tma_load_2d(su + O_KV + ks * 2 * TKV, &mk, &B.kvfull[ks], qcol, a * L + k0);
@@ -144,11 +158,11 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.full[s], 2 * BQ * DH * 2 + TBT + 2 * BQ * 4);
           TR(0, G);
-          tma_load_2d(st, &mq, &B.full[s], qcol, a * L + n * BQ);
-          tma_load_2d(st + TQ, &mdo, &B.full[s], qcol, a * L + n * BQ);
-          tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], n * BQ, (BPS ? a * NHEAD + head : head) * L + k0);
-          bulk_g2s(st + 2 * TQ + TBT, LSE + li0 + n * BQ, BQ * 4, &B.full[s]);
-          bulk_g2s(st + 2 * TQ + TBT + 512, DD + li0 + n * BQ, BQ * 4, &B.full[s]);
+          tma_load_2d(st, &mq, &B.full[s], qcol, a * L + qb0 + n * BQ);
+          tma_load_2d(st + TQ, &mdo, &B.full[s], qcol, a * L + qb0 + n * BQ);
+          tma_load_2d(st + 2 * TQ, &mbt, &B.full[s], qb0 + n * BQ, (BPS ? a * NHEAD + head : head) * L + k0);
+          bulk_g2s(st + 2 * TQ + TBT, LSE + li0 + qb0 + n * BQ, BQ * 4, &B.full[s]);
+          bulk_g2s(st + 2 * TQ + TBT + 512, DD + li0 + qb0 + n * BQ, BQ * 4, &B.full[s]);
           TR(0, G);
         }
       }
@@ -275,11 +289,12 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (w == 0 && r == 0) TR(4, G);
       if (n >= nb - 2) {                                                   // this warpgroup's last block of the item
         // ---- the item's epilogue: warpgroup 0 writes dK (scaled by 1 / sqrt 48), warpgroup 1 dV, one key row per thread
-        int a, k0, head; item_of(li, a, k0, head);
+        int a, k0, head, qc; item_of(li, a, k0, head, qc);
+        const int orw = (qc * A + a) * L + k0;                             // the tile's first row in DK / DV ([NQ][A L] with QSPLIT)
         mbar_wait(&B.acc_full, li & 1);
         tc_fence_after();
         const float sc = w == 0 ? RSQD : 1.f;
-        float* orow = (w == 0 ? DK : DV) + ((size_t)a * L + k0 + r) * DM + head * DH;
+        float* orow = (w == 0 ? DK : DV) + ((size_t)orw + r) * DM + head * DH;
         const uint32_t tc = w == 0 ? T_DK : T_DV;
         uint32_t v[32], u[DH == 64 ? 32 : 16];
         if (DH == 16) tmem_ld16(trow + tc, *reinterpret_cast<uint32_t(*)[16]>(v));
@@ -297,7 +312,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.acc_free);
         if (w == 0 && r == 0) TR(7, G);
-        if (DQZ) {                                                         // zero this tile of dQ for attn_dqb's reductions (it runs next):
+        if (DQZ && NQ == 1) {                                              // zero this tile of dQ for attn_dqb's reductions (it runs next):
           float4* zq = reinterpret_cast<float4*>(DQZ + ((size_t)a * L + k0) * DM + head * DH);   // 128 rows x DH / 4 float4, lanes along rows
 #pragma unroll
           for (int k = 0; k < DH / 8; ++k) {
@@ -321,7 +336,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
             fence_proxy_async();
             named_bar_sync(1 + w, 128);
             if (r == 0) {
-              tma_store_2d(w == 0 ? &mka : &mva, xa, head * DH + 32 * hf, a * L + k0);
+              tma_store_2d(w == 0 ? &mka : &mva, xa, head * DH + 32 * hf, orw);
               tma_store_commit();
             }
           }
@@ -338,9 +353,9 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
           fence_proxy_async();
           named_bar_sync(1 + w, 128);
           if (r == 0) {
-            if (DH == 16) tma_store_2d(w == 0 ? &mkb : &mvb, xb, head * DH, a * L + k0);
-            else tma_store_2d(w == 0 ? &mka : &mva, xa, head * DH, a * L + k0);
-            if (DH == 48) tma_store_2d(w == 0 ? &mkb : &mvb, xb, head * DH + 32, a * L + k0);
+            if (DH == 16) tma_store_2d(w == 0 ? &mkb : &mvb, xb, head * DH, orw);
+            else tma_store_2d(w == 0 ? &mka : &mva, xa, head * DH, orw);
+            if (DH == 48) tma_store_2d(w == 0 ? &mkb : &mvb, xb, head * DH + 32, orw);
             tma_store_commit();
           }
         } else {

@@ -664,11 +664,12 @@ __global__ void __launch_bounds__(CNT) ksplit_combine_k(const float* __restrict_
 
 // dq (NCH key-chunk partials [NCH, M, W], added in chunk order: deterministic) | dk | dv fp32 [M, W] -> dqkvg[:, 0:3W] bf16;
 // ABQ[c] += sum_r dq (bf16-rounded, what the GEMMs see)
+// dk / dv: [M, W] or query-chunk slices [NKV, M, W] (attn_dkv -DQSPLIT), added in chunk order like the dq slices.
 // Rows r = (block, warp) + k (grid RW) (one row per warp when the grid covers M; fewer blocks than M / RW walk several, so a
 // capped grid bounds the partial rows a deterministic caller reduces); the column sum of each warp's rows in row order.
 template <int V>
 __global__ void __launch_bounds__(NT) qkv_bwd_k(const float* __restrict__ DQ, const float* __restrict__ DK, const float* __restrict__ DV,
-    bf* __restrict__ DQKVG, float* __restrict__ ABQ, int M, int NCH, int acc_stride) {
+    bf* __restrict__ DQKVG, float* __restrict__ ABQ, int M, int NCH, int acc_stride, int NKV) {
   constexpr int WD = 128 * V;
   __shared__ __align__(16) float red[RW * WD];
   float4 cs[V] = {};
@@ -685,9 +686,18 @@ __global__ void __launch_bounds__(NT) qkv_bwd_k(const float* __restrict__ DQ, co
 #pragma unroll
     for (int k = 0; k < V; ++k) v[k] = rnd<bf>(v[k]);
     stv<V>(DQKVG + r * 4 * WD, v);
-    float4 t[V];
-    ldv<V>(DK + r * WD, t); stv<V>(DQKVG + r * 4 * WD + WD, t);
-    ldv<V>(DV + r * WD, t); stv<V>(DQKVG + r * 4 * WD + 2 * WD, t);
+    for (int which = 0; which < 2; ++which) {                               // dk, dv: the slices in chunk order
+      const float* src = which ? DV : DK;
+      float4 t[V];
+      ldv<V>(src + r * WD, t);
+      for (int c = 1; c < NKV; ++c) {
+        float4 p[V];
+        ldv<V>(src + ((long)c * M + r) * WD, p);
+#pragma unroll
+        for (int k = 0; k < V; ++k) t[k] = add4(t[k], p[k]);
+      }
+      stv<V>(DQKVG + r * 4 * WD + (1 + which) * WD, t);
+    }
 #pragma unroll
     for (int k = 0; k < V; ++k) cs[k] = first ? v[k] : add4(cs[k], v[k]);
     first = false;
@@ -1091,8 +1101,9 @@ void gate_bwd(at::Tensor dog, at::Tensor o, at::Tensor qkvg, at::Tensor dob, at:
 // dq: [M, W] or key-chunk partials [NCH, M, W]; acc: the step's accumulator (d = d_single locates its dbq slice)
 // ``parts`` > 0: the grid (and so the partial rows written into a 2-D acc), at most M / RW blocks; 0: one row per warp
 void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::Tensor acc, int64_t d, int64_t parts) {
-  const int64_t NCH = dq.dim() == 3 ? dq.size(0) : 1, M = dk.size(0), W = dk.size(1);
-  TORCH_CHECK(dq.numel() == NCH * M * W, "qkv_bwd: dq [NCH, M, W]");
+  const int64_t NCH = dq.dim() == 3 ? dq.size(0) : 1, NKV = dk.dim() == 3 ? dk.size(0) : 1;
+  const int64_t M = dk.size(dk.dim() - 2), W = dk.size(dk.dim() - 1);
+  TORCH_CHECK(dq.numel() == NCH * M * W && dk.numel() == NKV * M * W && dv.numel() == dk.numel(), "qkv_bwd: dq [NCH, M, W], dk / dv [NKV, M, W]");
   chk(dq, at::kFloat, "dq"); chk(dk, at::kFloat, "dk"); chk(dv, at::kFloat, "dv"); chk(dqkvg, at::kBFloat16, "dqkvg");
   chk(acc, at::kFloat, "acc");
   TORCH_CHECK(W == 384 || W == 512, "qkv_bwd width");
@@ -1101,8 +1112,10 @@ void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, at::Tensor dqkvg, at::
   const int stride = acc.dim() == 2 ? (int)acc.size(1) : 0;
   const unsigned g = parts > 0 ? (unsigned)std::min<int64_t>(parts, blocks(M)) : blocks(M);
   TORCH_CHECK(acc.dim() == 1 || (int64_t)g <= acc.size(0), "qkv_bwd: more blocks than partial rows");
-  if (W == 384) qkv_bwd_k<3><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
-  else qkv_bwd_k<4><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride);
+  if (W == 384)
+    qkv_bwd_k<3><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride, (int)NKV);
+  else
+    qkv_bwd_k<4><<<g, NT, 0, S()>>>(CP<float>(dq), CP<float>(dk), CP<float>(dv), P<bf>(dqkvg), abq, (int)M, (int)NCH, stride, (int)NKV);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1421,7 +1434,7 @@ void inf_core(at::Tensor& qkvg, const at::Tensor& bias, int64_t L, const Geo& G,
 
 // backward core: dQ as L / 128 key-chunk slices [L / 128, M, W], dK, dV [M, W] fp32, dbias [S H, L, L] fp32
 void bwd_core(const at::Tensor& qkvg, const at::Tensor& dob, const at::Tensor& bias, const at::Tensor& LSE, const at::Tensor& dd, int64_t L,
-              const Geo& G, at::Tensor& DQ, at::Tensor& DK, at::Tensor& DV, at::Tensor& DB) {
+              const Geo& G, int64_t nq, at::Tensor& DQ, at::Tensor& DK, at::Tensor& DV, at::Tensor& DB) {
   const int64_t M = qkvg.size(0), NB = M / L, W = width(G), H = G.nh, dh = G.dhp, nch = L / 128;
   const at::Tensor bias_t = at::empty_like(bias);
   bias_transpose_k<<<dim3((unsigned)(L / 32), (unsigned)(L / 32), (unsigned)(NB * H)), dim3(32, 8), 0, S()>>>(CP<bf>(bias), P<bf>(bias_t),
@@ -1429,8 +1442,8 @@ void bwd_core(const at::Tensor& qkvg, const at::Tensor& dob, const at::Tensor& b
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   DQ = at::empty({nch, M, W}, opts(qkvg, at::kFloat));
   DB = at::empty({NB * H, L, L}, opts(qkvg, at::kFloat));
-  DK = at::empty({M, W}, opts(qkvg, at::kFloat));
-  DV = at::empty({M, W}, opts(qkvg, at::kFloat));
+  DK = at::empty({nq, M, W}, opts(qkvg, at::kFloat));
+  DV = at::empty({nq, M, W}, opts(qkvg, at::kFloat));
   const char* b = static_cast<const char*>(qkvg.data_ptr());
   const uint64_t rs = 4 * W * 2, rd = W * 2;
   int iL = (int)L, iA = (int)NB;
@@ -1438,11 +1451,13 @@ void bwd_core(const at::Tensor& qkvg, const at::Tensor& dob, const at::Tensor& b
     TM mq = tm2(b, BF16, W, M, rs, dh, 64, SW128), mk = tm2(b + W * 2, BF16, W, M, rs, dh, 128, SW128),
        mv = tm2(b + 2 * W * 2, BF16, W, M, rs, dh, 128, SW128), mdo = tm2(dob.data_ptr(), BF16, W, M, rd, dh, 64, SW128),
        mbt = tm2(bias_t.data_ptr(), BF16, L, NB * H * L, L * 2, 64, 128, SW128);
-    TM mka = tm2(DK.data_ptr(), F32, W, M, W * 4, 32, 128, SW128), mkb = tm2(DK.data_ptr(), F32, W, M, W * 4, 16, 128, SW64),
-       mva = tm2(DV.data_ptr(), F32, W, M, W * 4, 32, 128, SW128), mvb = tm2(DV.data_ptr(), F32, W, M, W * 4, 16, 128, SW64);
+    TM mka = tm2(DK.data_ptr(), F32, W, nq * M, W * 4, 32, 128, SW128), mkb = tm2(DK.data_ptr(), F32, W, nq * M, W * 4, 16, 128, SW64),
+       mva = tm2(DV.data_ptr(), F32, W, nq * M, W * 4, 32, 128, SW128), mvb = tm2(DV.data_ptr(), F32, W, nq * M, W * 4, 16, 128, SW64);
     void* pl = LSE.data_ptr(); void* pd = dd.data_ptr(); void* pk = DK.data_ptr(); void* pv = DV.data_ptr(); void* pz = nullptr;
-    void* args[] = {&mq, &mk, &mv, &mdo, &mbt, &mka, &mkb, &mva, &mvb, &pl, &pd, &pk, &pv, &pz, &iL, &iA};
-    launch_core(core_fn("dkv", qkvg.get_device(), G, 0), (unsigned)std::min<int64_t>(nsm_of(qkvg), NB * H * (L / 128)), args);
+    int iQ = (int)nq;
+    void* args[] = {&mq, &mk, &mv, &mdo, &mbt, &mka, &mkb, &mva, &mvb, &pl, &pd, &pk, &pv, &pz, &iL, &iA, &iQ};
+    launch_core(core_fn("dkv", qkvg.get_device(), G, nq > 1 ? 1 : 0), (unsigned)std::min<int64_t>(nsm_of(qkvg), NB * H * (L / 128) * nq),
+                args);
   }
   {
     TM mq = tm2(b, BF16, W, M, rs, dh, 128, SW128), mk = tm2(b + W * 2, BF16, W, M, rs, dh, 128, SW128),
@@ -1495,7 +1510,7 @@ std::vector<at::Tensor> train_fwd(const at::Tensor& single, const at::Tensor& pa
 // -> dsingle, dpair and one fp32 gradient per parameter (params' order). Parameter-gradient column sums leave as block partial rows
 // reduced by finalize in a fixed order: bitwise run to run.
 std::vector<at::Tensor> train_bwd(const at::Tensor& single, const at::Tensor& pair, const c10::optional<at::Tensor>& mask,
-                                  at::TensorList params, at::TensorList saved, const at::Tensor& dy, double eps_p) {
+                                  at::TensorList params, at::TensorList saved, const at::Tensor& dy, double eps_p, int64_t nq) {
   (void)mask;                                                                // masked keys carry zero dbias
   const int64_t NB = single.size(0), L = single.size(1), D = single.size(2), M = NB * L;
   const Geo G = geo(params[9].size(0), D);
@@ -1511,7 +1526,7 @@ std::vector<at::Tensor> train_bwd(const at::Tensor& single, const at::Tensor& pa
   at::Tensor dob = at::empty({M, W}, opts(x, at::kBFloat16)), dd = at::empty({NB, H, L}, opts(x, at::kFloat)), dqkvg = at::empty_like(qkvg);
   gate_bwd(dog, O, qkvg, dob, dd, dqkvg);
   at::Tensor DQ, DK, DV, DB;
-  bwd_core(qkvg, dob, bias, LSE, dd, L, G, DQ, DK, DV, DB);
+  bwd_core(qkvg, dob, bias, LSE, dd, L, G, nq, DQ, DK, DV, DB);
   qkv_bwd(DQ, DK, DV, dqkvg, acc, D, ra);
   const at::Tensor dxa = at::mm(dqkvg, wpack), dwp = at::mm(dqkvg.t(), xa, at::kFloat);
   at::Tensor dx = at::empty_like(x);
@@ -1551,7 +1566,7 @@ at::Tensor infer(const at::Tensor& single, const at::Tensor& pair, const c10::op
 #ifdef APB_SM100_HOST
 TORCH_LIBRARY(apb_b200, m) {
   m.def("train_fwd(Tensor single, Tensor pair, Tensor? mask, Tensor[] params, float eps_s, float eps_p, int ns) -> Tensor[]");
-  m.def("train_bwd(Tensor single, Tensor pair, Tensor? mask, Tensor[] params, Tensor[] saved, Tensor dy, float eps_p) -> Tensor[]");
+  m.def("train_bwd(Tensor single, Tensor pair, Tensor? mask, Tensor[] params, Tensor[] saved, Tensor dy, float eps_p, int nq) -> Tensor[]");
   m.def("infer(Tensor single, Tensor pair, Tensor? mask, Tensor[] packs, float eps_s, float eps_p, int ns) -> Tensor");
 }
 TORCH_LIBRARY_IMPL(apb_b200, CUDA, m) {
