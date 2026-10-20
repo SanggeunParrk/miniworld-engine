@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.3] - 2026-10-21
+
 ### Added
 - `LocalDiTBlock(kv_norm="parallel" | "chained", key_window="slide" | "pad")`: AlphaFold 3's atom attention. `kv_norm="parallel"` runs the K/V AdaLN on the
   raw atoms next to the first one (Protenix chains it, the default); `key_window="slide"` slides each 128-key window inside the real atoms
@@ -33,6 +35,14 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- The wheel's sm90 bundles cover the bias-only token DiT's own paths, not only what MiniWorld's bf16-mixed runs reach: the
+  engine coverage (`build/bundle_coverage.py`) now drives the block with a shared pair and a pair per sample, masked,
+  hoisted, d_cond 384 / 768, in every precision. 2.3.2 compiled the fp32 rows and the per-sample / hoist-backward kernels on
+  first call.
+- Importing `triangle_attention/cuda/build_*.py` (a module walk: `dev audit`, the CPU suite) rebuilt those extensions and
+  overwrote the committed `.so` / `*_manifest.json`; the walk skips the rebuild scripts. A manifest's failure detail no longer
+  names an account or site path (`<path>`). `test_capture_saw_ops` no longer requires the per-op SWA path's Triton ops on
+  H100 / B200, which run no Triton.
 - H100 TriangleAttention forward core: the softmax offset is the row's running maximum raised lazily (threshold 8 log2 units, o and l rescaled) instead of the
   maximum of the first 32 keys fixed for the task, which overflowed to inf / NaN when a later logit exceeded it by ~126 log2 units (trained weights do). The reduction order
   is unchanged (deterministic). Test `tests/gpu/sm90/test_triattn_large_logits_gpu.py`.
