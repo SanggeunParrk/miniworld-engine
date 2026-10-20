@@ -507,6 +507,12 @@ pass `engine_backend="triton"`.
   forced by memory 0.77-0.79x); 1.7-4.2x cuEquivariance, 3.8-17.1x the PyTorch statements. Tests
   `tests/gpu/sm100/test_b200_trimul_batch_gpu.py` (rewritten: every width, bitwise, graphs, compile, chunks),
   `tests/cpu/kernels/test_trimul_b200_batch_limit.py`; record `docs/records/trimul_b200_batched_20261020.md`.
+- B200 TriangleAttention ending node without transposed copies: the kernels that read or write the pair-shaped tensors (`tri_front`,
+  `tri_tail`, `tri_gate_bwd`, `tri_head_bwd`, `tri_wgrad`, `tri_wfront`, `tri_wtail`, `tri_scale_rows`, `tri_wgbwd`, `tri_whbwd`; new
+  `trans` arguments) address the caller's `[B, I, J, C]` layout through 4-D TMA maps (`sm100.cuh`: `make_rows_map`, `load_rows`,
+  `store_rows`, `reduce_rows`, `row_at`), the intermediates keep the starting-node layout. Same output bits; the ending node is 0-6 %
+  over the starting node (was 9-67 %): d_pair 128 inference L384 B1 0.256 -> 0.177 ms, L768 B48 59.1 -> 42.5 ms, training L768 B48
+  184.0 -> 157.9 ms; d_pair 256 inference L384 B1 0.530 -> 0.354 ms. The working set no longer counts transposed copies.
 - B200 TriangleAttention takes B samples in one call by design and any length L >= 16 (`integrations.triattn_b200`: one `forward`
   for both paths, `kind_of`, `max_batch(kind, length)` = 48 per launch, `plan(kind, B, L, d_pair, heads, training, total_memory,
   ending)`): every kernel already ran once over the B samples (per-sample key mask and dropout scale); a call with more samples, or
