@@ -352,6 +352,33 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
         assert relative(g, e) < 1e-4
 
 
+def _poison(mb=512):
+    """Fill the caching allocator's next blocks with NaN: a buffer read before it is written would show it."""
+    junk = torch.full((mb << 18,), float("nan"), device="cuda")
+    torch.cuda.synchronize()
+    del junk
+
+
+@pytest.mark.parametrize(("n_head", "d_head"), LAYOUTS)
+@pytest.mark.parametrize(("L", "A"), [(384, 5), (768, 48)])
+def test_training_steps_bit_identical_with_a_poisoned_allocator(n_head, d_head, L, A):
+    """Ten fp32 training steps (forward + backward: the TF32 core forward and dV, dpb32 / its CTA-pair build at L768, the SwiGLU
+    backward GEMM, the TF32 pair bias, cuBLAS), the allocator's free memory NaN-filled before each: every gradient finite and
+    bit-identical across the steps."""
+    _, fast, _ = blocks(seed=11, n_head=n_head, d_head=d_head)
+    x, c, p, dy, mask = inputs(L, A, True, seed=2)
+    runs = []
+    for _ in range(10):
+        _poison(2048)
+        with no_module_path():
+            runs.append([t.clone() for t in step(fast, x, c, p, mask, dy, torch.float32)])
+        torch.cuda.synchronize()
+    for i, g in enumerate(runs[0]):
+        assert torch.isfinite(g).all(), i
+        for r in runs[1:]:
+            assert torch.equal(r[i], g), i
+
+
 def test_declines_what_it_does_not_serve():
     _, fast, _ = blocks()
     x = torch.randn(4, 1, 384, 768, device="cuda", requires_grad=True)
