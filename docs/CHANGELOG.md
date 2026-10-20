@@ -8,6 +8,23 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- `TriangleAttention(transposed_bias=...)` and `kernels.triangle_attention.whole_op(transposed_bias=...)`: which pair the ending node projects its
+  bias from. `True` (default, the behaviour so far) projects it from the transposed pair, the supplementary-information and OpenFold convention;
+  `False` projects it from the pair as it is and reads it in the transposed frame, which is what AlphaFold 3's released code does (the two
+  differ for an asymmetric pair). Composed legs (PyTorch, Triton, cuEquivariance) transpose the bias; the H100 hand-CUDA kernels serve the
+  `False` orientation for inference by transposing the front's bias before the core (no kernel change; fused 128/4x32 and width-generic
+  paths); a call with grad or training dropout, the B200 kernels and the Anthropic adapter do not serve it (the first two fall to the composed
+  legs, the adapter refuses). Starting-node attention ignores it. Tests `tests/cpu/compile/test_triangle_attention_bias_direction.py`,
+  `tests/gpu/sm90/test_triattn_bias_direction_gpu.py`.
+
+### Fixed
+
+- Pointer-keyed weight and conditioning caches (Transition weight re-layout, token / bias-only / local DiT pair-bias and conditioning tables, conditioned-transition
+  packs) no longer serve a stale entry when a new tensor reuses a freed address at the same version: an entry keeps a weak reference to its key tensor and a hit
+  needs that reference to be the tensor asked for. Tests `tests/cpu/kernels/test_transition_weight_cache_identity.py`, `tests/gpu/sm90/test_pointer_keyed_caches_gpu.py`.
+
 ## [2.3.2] - 2026-10-20
 
 ### Added
@@ -109,9 +126,6 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   token mask, pair mask and row-dropout scale are per sample, the contraction batches over channels x B, B1 / B2 run over every
   sample's rows. y and dx are bitwise equal to B calls of one sample; B = 1 is unchanged. MiniPairformer block (TriMul + Transition),
   B = 4: 1.13-2.21x over 4 calls, 4.1-11.5x over the PyTorch statements H100 ran before for B > 1.
-- Pointer-keyed weight and conditioning caches (Transition weight re-layout, token / bias-only / local DiT pair-bias and conditioning tables, conditioned-transition
-  packs) no longer serve a stale entry when a new tensor reuses a freed address at the same version: an entry keeps a weak reference to its key tensor and a hit
-  needs that reference to be the tensor asked for. Tests `tests/cpu/kernels/test_transition_weight_cache_identity.py`, `tests/gpu/sm90/test_pointer_keyed_caches_gpu.py`.
 - H100 AF3 local atom DiT (`LocalDiTBlock`, cross-attention): native fp32 (TF32) and bf16 paths for inference and training at any A and any N
   (`integrations/local_dit_h100.py`, `kernels/augmented_attention/cuda/sm90_atom/`, `sm100_atom_local/lattn90*.cu`). Warp-level tensor-core row
   kernels (wgmma with register A operands, 16-byte lane layout) and `mma.sync` window attention with the bias resident in shared memory.
@@ -128,14 +142,6 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   `viz.measure_bars` draws a `PyTorch eager` column in the PyTorch colour.
 ### Added
 
-- `TriangleAttention(transposed_bias=...)` and `kernels.triangle_attention.whole_op(transposed_bias=...)`: which pair the ending node projects its
-  bias from. `True` (default, the behaviour so far) projects it from the transposed pair, the supplementary-information and OpenFold convention;
-  `False` projects it from the pair as it is and reads it in the transposed frame, which is what AlphaFold 3's released code does (the two
-  differ for an asymmetric pair). Composed legs (PyTorch, Triton, cuEquivariance) transpose the bias; the H100 hand-CUDA kernels serve the
-  `False` orientation for inference by transposing the front's bias before the core (no kernel change; fused 128/4x32 and width-generic
-  paths); a call with grad or training dropout, the B200 kernels and the Anthropic adapter do not serve it (the first two fall to the composed
-  legs, the adapter refuses). Starting-node attention ignores it. Tests `tests/cpu/compile/test_triangle_attention_bias_direction.py`,
-  `tests/gpu/sm90/test_triattn_bias_direction_gpu.py`.
 - H100 (sm_90a) smooth lDDT: the B200 CUDA-core kernels (`kernels/smooth_lddt/cuda/sm100/smooth_lddt.cu`) now build for sm_90a and
   `smooth_lddt.refusal` serves compute capability (9, 0) as well as (10, 0). Forward + backward at A = 48: 0.37-0.98 ms
   (N = 4096-8192), 37-180x the fastest PyTorch form (`torch.compile`d dense). Page:
