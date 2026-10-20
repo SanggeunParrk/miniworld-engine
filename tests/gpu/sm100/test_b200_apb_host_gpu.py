@@ -9,6 +9,7 @@ import pytest
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.integrations import attention_pair_bias_b200 as b200
 from miniworld_engine.modules import AttentionPairBias
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -181,6 +182,9 @@ def test_batched_matches_single(shape, B, L):
     m[1, int(L * 0.6) :] = False  # samples of different lengths
     sb, pb = s.bfloat16(), p.bfloat16()
     dy = torch.randn_like(sb)
+    with torch.no_grad():
+        assert b200.serves_inference(ours, sb, pb, m)
+    assert b200.serves_train(ours, sb, pb, m)
     one_i = torch.cat([_infer(ours, sb[b : b + 1], pb[b : b + 1], m[b : b + 1]) for b in range(B)])
     assert torch.equal(_infer(ours, sb, pb, m), one_i)
     got = _step(ours, sb, pb, m, dy)
@@ -190,3 +194,23 @@ def test_batched_matches_single(shape, B, L):
     for i in range(3, len(got)):
         want = sum(t[i] for t in singles)
         assert _rel(got[i], want) < 1e-5, (i, _rel(got[i], want))
+
+
+@pytest.mark.parametrize("host", [False, True], ids=["python", "host"])
+def test_batch_chunking(host, monkeypatch):
+    """More samples than one launch takes run as consecutive chunks: still bitwise the single-sample results."""
+    settings.configure(apb_b200_host=host)
+    monkeypatch.setattr(b200, "MAX_BATCH", 2)
+    _, ours = _module((16, 384), master=True)
+    s, p, m = _inputs(5, 384, 384)
+    sb, pb = s.bfloat16(), p.bfloat16()
+    dy = torch.randn_like(sb)
+    assert torch.equal(
+        _infer(ours, sb, pb, m), torch.cat([_infer(ours, sb[b : b + 1], pb[b : b + 1], m[b : b + 1]) for b in range(5)])
+    )
+    got = _step(ours, sb, pb, m, dy)
+    singles = [_step(ours, sb[b : b + 1], pb[b : b + 1], m[b : b + 1], dy[b : b + 1]) for b in range(5)]
+    for i in range(3):
+        assert torch.equal(got[i], torch.cat([t[i] for t in singles])), i
+    for i in range(3, len(got)):
+        assert _rel(got[i], sum(t[i] for t in singles)) < 1e-5, i

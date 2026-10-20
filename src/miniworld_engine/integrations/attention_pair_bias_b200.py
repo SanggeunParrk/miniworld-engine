@@ -8,10 +8,11 @@ cuBLAS (ln_pair has no beta, so only dWb is repaired). This accuracy-first shado
 materializes extra FP32 workspaces: the B200 tensor lifetimes and former fast-path
 latency do not describe this training default.
 
-Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
+Contract: bf16 activations, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
 128, no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
-training: L a multiple of 128.
+training: L a multiple of 128. B200: any number of samples B (each its own pair and key mask; up to ``max_batch()`` per launch,
+more in fixed chunks of that size); H100: B = 1.
 
 16 x 24 runs 32 wide per head: the packed q | k | v | g weights carry 8 zero rows after each head's 24 (and Wo 8 zero columns),
 so q, k, v, g, O and every gradient on that side are W = 512 wide with exact zeros in the pads; the attention kernels see heads
@@ -55,6 +56,15 @@ SHAPES = (
     (16, 512),
 )  # (heads, d_single): 8 x 48, 12 x 32, 16 x 24 (padded to 32), 24 x 16, 16 x 32
 LOG2E = math.log2(math.e)
+#: B200: samples per launch. Each sample is computed exactly as alone (every kernel's work items are per sample, the key split
+#: depends on L only), so a call is split into chunks of this many samples, in order, without changing a sample's bits.
+MAX_BATCH = 48
+
+
+def max_batch() -> int:
+    """B200 samples per launch (``MAX_BATCH``); a call with more samples runs as consecutive chunks of this size."""
+    return MAX_BATCH
+
 NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
@@ -120,19 +130,16 @@ def _eligible(
         or pair.dtype != torch.bfloat16
     ):
         return False
-    if (
-        single.ndim != 3
-        or single.shape[0] != 1
-        or single.shape[2] != D
-        or not single.is_contiguous()
-    ):
+    if single.ndim != 3 or single.shape[2] != D or not single.is_contiguous():
         return False
-    L = single.shape[1]
-    if tuple(pair.shape) != (1, L, L, dp) or not pair.is_contiguous():
+    B, L = single.shape[0], single.shape[1]
+    if B < 1 or tuple(pair.shape) != (B, L, L, dp) or not pair.is_contiguous():
         return False
-    if mask is not None and tuple(mask.shape) != (1, L):
+    if mask is not None and tuple(mask.shape) != (B, L):
         return False
     capability = _cap(single.device)
+    if B != 1 and capability != (10, 0):
+        return False
     if capability == (10, 0):
         return not settings.current().apb_b200_host or _host_ready()
     return (
@@ -355,9 +362,18 @@ def inference(
         return y.addmm_(qkvg[:, :W], wo.t()).view(NB, L, D)
 
 
+def _chunks(single, pair, mask):
+    """B200 calls with more than ``max_batch()`` samples: consecutive chunks of that many (the last one shorter)."""
+    n = max_batch()
+    for b in range(0, single.shape[0], n):
+        yield single[b : b + n], pair[b : b + n], None if mask is None else mask[b : b + n]
+
+
 def update_inference(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if single.shape[0] > max_batch():
+        return torch.cat([update_inference(module, *c) for c in _chunks(single, pair, mask)])
     return inference(
         single,
         pair,
@@ -414,7 +430,7 @@ def forward(
         wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
-        st = x.new_empty((L, 2), dtype=torch.float32)
+        st = x.new_empty((NB * L, 2), dtype=torch.float32)
         y = torch.empty_like(x)
         rows.ext().ln_rows(x, lnw, lnb, xa, st, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
@@ -744,6 +760,8 @@ class _TrainingHost(torch.autograd.Function):
 def update_train(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if single.shape[0] > max_batch():
+        return torch.cat([update_train(module, *c) for c in _chunks(single, pair, mask)])
     if _host(single.device):
         return _TrainingHost.apply(
             module.ln_single.eps,
