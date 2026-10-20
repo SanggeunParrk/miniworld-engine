@@ -10,6 +10,8 @@
 // Per sample a (warpgroup w owns keys w * 64 .. w * 64 + 63 of the chunk, one query row per thread):
 //   S = q K_w^T, dP = dO V_w^T  (TMEM, fp32)      P = 2^(S log2 e / sqrt 48 + bias log2 e - LSE)      dS = P (dP - D)
 //   dbias_w += dS (registers)   dS -> TMEM (bf16)  dQ += dS K_w  (TS MMA, both warpgroups into one accumulator)
+// -DBPS=1 (AttentionPairBias): every sample has its own bias and dbias planes ([A, NHEAD, L, L]); a work item is then (sample,
+// head, 128-query tile, 128-key chunk) and walks that one sample (A = 1 is the single-sample layout, unchanged).
 // TMEM: S[w] at w * 128, dP[w] at w * 128 + 64, dS[w] at 256 + w * 32 (bf16), dQ[b] at 320 + b * 48 (NDQ buffers, round robin).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -41,6 +43,9 @@ using namespace s100;
 #endif
 #ifndef NHEAD
 #define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
+#endif
+#ifndef BPS
+#define BPS 0                            // 1: per-sample bias / dbias, one sample per work item
 #endif
 #ifndef DQPART
 #define DQPART 0                         // 1: each key chunk's dQ partial is STORED to its own slice DQ[chunk][a L + row] (deterministic;
@@ -113,16 +118,18 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int mt = L / QM, nch = L / KC;
-  const int items = NHEAD * mt * nch;
+  const int mt = L / QM, nch = L / KC, AI = BPS ? 1 : A;                  // AI: the samples one work item walks
+  const int items = (BPS ? A : 1) * NHEAD * mt * nch;
   const int my_items = (items > (int)blockIdx.x) ? (items - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  const int ng = my_items * A;                                             // (item, sample) steps of this CTA
-  auto item_of = [&](int li, int& c, int& m0, int& head) {
+  const int ng = my_items * AI;                                            // (item, sample) steps of this CTA
+  auto item_of = [&](int li, int& c, int& m0, int& head, int& ab) {        // ab: the item's sample (BPS)
     const int wi = (int)blockIdx.x + li * (int)gridDim.x;
-    c = wi % nch; const int r = wi / nch;
-    m0 = (r % mt) * QM; head = r / mt;
+    c = wi % nch; int r = wi / nch;
+    m0 = (r % mt) * QM; r /= mt;
+    head = r % NHEAD; ab = BPS ? r / NHEAD : 0;
   };
-  auto samp = [&](int c, int i) { return ROT ? (i + c * (ROTK ? ROTK : A / nch)) % A : i; };
+  auto samp = [&](int c, int ab, int i) { return BPS ? ab : ROT ? (i + c * (ROTK ? ROTK : A / nch)) % A : i; };
+  auto plane = [&](int ab, int head) { return BPS ? ab * NHEAD + head : head; };   // the bias / dbias plane of the item
 
   if (tid == 0) {
     for (int s = 0; s < STA; ++s) { mbar_init(&B.fullA[s], 1); mbar_init(&B.emptyA[s], 2); }
@@ -156,13 +163,13 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     if (lane == 0) {
       int g = 0;
       for (int li = 0; li < my_items; ++li) {
-        int c, m0, head; item_of(li, c, m0, head);
+        int c, m0, head, ab; item_of(li, c, m0, head, ab);
         const int bs = li % BSL, qcol = head * DH;
         if (li >= BSL) mbar_wait(&B.bempty[bs], ((li / BSL) - 1) & 1);
         mbar_expect_tx(&B.bfull[bs], 2 * T128);
-        for (int w = 0; w < 2; ++w) tma_load_2d(su + O_B + (bs * 2 + w) * T128, &mb, &B.bfull[bs], c * KC + w * BN, head * L + m0);
-        for (int i = 0; i < A; ++i, ++g) {
-          const int sa = g % STA, sk = g % STK, a = samp(c, i);
+        for (int w = 0; w < 2; ++w) tma_load_2d(su + O_B + (bs * 2 + w) * T128, &mb, &B.bfull[bs], c * KC + w * BN, plane(ab, head) * L + m0);
+        for (int i = 0; i < AI; ++i, ++g) {
+          const int sa = g % STA, sk = g % STK, a = samp(c, ab, i);
           if (g >= STA) mbar_wait(&B.emptyA[sa], ((g / STA) - 1) & 1);
           const uint32_t pa = su + O_A + sa * SA;
           mbar_expect_tx(&B.fullA[sa], 3 * 128 * DH * 2);
@@ -302,11 +309,11 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     f2 db[BN / 2];
     // positions advance incrementally: the runtime divisions of item_of run once per item, not per step
     auto advance = [&](int& pli, int& pi, int& pc, int& pm0, int& ph, int& pa) {
-      if (++pi == A) { pi = 0; if (++pli < my_items) { item_of(pli, pc, pm0, ph); pa = samp(pc, 0); } }
+      if (++pi == AI) { pi = 0; if (++pli < my_items) { int pab; item_of(pli, pc, pm0, ph, pab); pa = samp(pc, pab, 0); } }
       else pa = (pa + 1 == A) ? 0 : pa + 1;
     };
     int li = 0, i = 0, c = 0, m0 = 0, head = 0, a = 0;
-    if (ng > 0) { item_of(0, c, m0, head); a = samp(c, 0); }
+    if (ng > 0) { int ab0; item_of(0, c, m0, head, ab0); a = samp(c, ab0, 0); }
     int nli = li, ni = i, nc_ = c, nm0 = m0, nh = head, na = a;          // the next step's position (LSE / D prefetch)
     float lse_n = 0.f, dd_n = 0.f;
     if (ng > 0) { const size_t ri = ((size_t)a * NHEAD + head) * L + m0 + r; lse_n = LSE[ri]; dd_n = DD[ri]; }
@@ -379,11 +386,11 @@ augattn_dqb_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
       if (w == 0 && r == 0) TR(5, g);
       if (g >= 2) epi(g - 2, e2r, e2h);
       if (w == 0 && r == 0) TR(6, g);
-      if (i == A - 1) {
+      if (i == AI - 1) {
         // ---- the item's dbias: this thread's 64 keys of query row m0 + r, natural units, plain stores
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.bempty[bs]);
-        float* brow = DB + ((size_t)head * L + m0 + r) * L + c * KC + w * BN;
+        float* brow = DB + ((size_t)plane(BPS ? a : 0, head) * L + m0 + r) * L + c * KC + w * BN;
 #pragma unroll
         for (int k = 0; k < BN / 4; ++k)
           *reinterpret_cast<float4*>(brow + 4 * k) = make_float4(lo2(db[2 * k]), hi2(db[2 * k]), lo2(db[2 * k + 1]), hi2(db[2 * k + 1]));
