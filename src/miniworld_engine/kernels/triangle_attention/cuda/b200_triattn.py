@@ -37,14 +37,14 @@ def _rows_per_task(length: int) -> int:
 @functools.lru_cache(maxsize=None)
 def _core(rows: int = 4):
     ensure_cuda_home()
-    return load_extension(name=f"triattn_b200_core_r{rows}_v5", sources=[str(_SRC / "triattn_sm100.cu")],
+    return load_extension(name=f"triattn_b200_core_r{rows}_v7", sources=[str(_SRC / "triattn_sm100.cu")],
                           extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"], verbose=False)
 
 
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v3", sources=[str(_SRC / "triattn_mod_sm100.cu")],
+    return load_extension(name="triattn_b200_mod_v5", sources=[str(_SRC / "triattn_mod_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -58,7 +58,7 @@ class TriAttnCore(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, q, k, v, bias, scale):
-        out, lse, _ = _core(_rows_per_task(q.shape[2])).triattn_fwd(q, k, v, bias, scale, any(ctx.needs_input_grad))
+        out, lse = _core_forward(q, k, v, bias, scale, any(ctx.needs_input_grad))
         ctx.save_for_backward(q, k, v, bias, out, lse)
         ctx.scale = scale
         return out
@@ -74,56 +74,127 @@ class TriAttnCore(torch.autograd.Function):
         return dq, dk, dv, db.to(bias.dtype), None
 
 
-# One zeroed fp32 workspace for every gradient accumulator of the backward (one memset instead of four):
-# [dWo C*C | wgrad M 4*C*C | wgrad vectors 8*C + 4, padded | dbias B*4*L*L]; each piece starts on a 128-byte boundary.
-_WS_DWO, _WS_MT, _WS_VEC, _WS_DB = 0, C * C, 5 * C * C, 5 * C * C + 1056
+#: The attention core's forward in launches of a few samples (B200, 2026-10-20).  Its persistent kernel walks its tasks in a static
+#: round robin, and in a long launch the CTAs drift apart and stop sharing K / V rows in L2: with four pair rows a task (L > 384),
+#: module inference of 48 samples at L768 took 43.9 ms in one launch and 41.6 ms in launches of ~36 864 tasks (8 samples; L640 B48
+#: 26.7 -> 25.8 ms, d_pair 256 L768 B16 29.5 -> 29.0 ms; training +0.5-1.7 %).  The forward with two rows a task (L <= 384) does not
+#: drift.  Measured and not kept: a dynamic task counter in the forward (each CTA claiming its next task from a global counter, the
+#: H100 fix) was 4-5 % slower per sample at every launch size on B200, and the same grouping of the two backward kernels changed the
+#: module's training step by -0.5 to +0.1 % (isolated, with idle gaps between launches, they had looked 6-10 % faster in groups).
+#: Each launch is the same kernel on a contiguous range of samples (the same bits).
+GROUP_TASKS = 36864
+
+
+def fwd_group(batch: int, heads: int, length: int) -> int:
+    """Samples per launch of the core's forward: ~GROUP_TASKS tasks ((sample, head, 128-query tile) x 4 pair rows) at L > 384, all
+    samples at L <= 384 (two rows a task: no drift)."""
+    rows = _rows_per_task(length)
+    if rows != 4:
+        return batch
+    per = heads * (length // TOK) * ((length + rows - 1) // rows)
+    return max(1, min(batch, GROUP_TASKS // per))
+
+
+def _core_forward(q, k, v, bias, scale, need):
+    """The core's forward over [B, N, S, H, 32] tensors in launches of `fwd_group` samples -> (out [B, N, S, H, 32], lse or empty)."""
+    B, N, S, H, _ = q.shape
+    e = _core(_rows_per_task(S))
+    g = fwd_group(B, H, S)
+    if g >= B:
+        E = q.new_empty(0)                                     # (pybind: the optional outputs are passed explicitly)
+        o, lse, _ = e.triattn_fwd(q, k, v, bias, scale, need, E, E)
+        return o, lse
+    o = torch.empty(q.shape, device=q.device, dtype=q.dtype)
+    lse = torch.empty((B, N, H, S) if need else (0,), device=q.device, dtype=torch.float32)
+    for i in range(0, B, g):
+        j = min(B, i + g)
+        e.triattn_fwd(q[i:j], k[i:j], v[i:j], bias[i:j], scale, need, o[i:j], lse[i:j] if need else lse)
+    return o, lse
+
+
+def _empty_mask(device):
+    return torch.empty(0, device=device, dtype=torch.bool)
+
+
+def fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None, need=False, out=None):
+    """The d_pair 128 module forward (starting node, residual included) on B samples: -> (y [B, L, L, 128], saved).
+    saved = (prm, w4, wo16, q, k, v, g, bias, o, lse): what `fused_backward` reads (lse empty unless `need`); every one a fresh
+    allocation (none aliases an argument: they can be outputs of a custom op).  `out`: a contiguous bf16 tensor of the pair's size
+    to write y into (a chunk's rows of a batch's output), or None.  Kernels: tri_pack_params -> tri_front -> triattn_fwd -> tri_tail."""
+    B, L, _, _ = pair.shape
+    x = pair.contiguous().view(-1, C)
+    m = _mod()
+    w4, wo16, prm = m.tri_pack_params(wq.contiguous(), wk.contiguous(), wv.contiguous(), wg.contiguous(), wo.contiguous(),
+                                      lnw.contiguous(), lnb.contiguous(), wb.contiguous())
+    lw, lb, wbf = prm[0], prm[1], prm[2:]
+    q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf, mask if mask is not None else _empty_mask(pair.device), B, L)
+    shp = (B, L, L, H, D)
+    o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, D ** -0.5, need)
+    y = m.tri_tail(g, o.view(-1, C), x, wo16, drop if drop is not None else x.new_empty(0), L,
+                   out if out is not None else x.new_empty(0))
+    return (out if out is not None else y.view(B, L, L, C)), (prm, w4, wo16, q, k, v, g, bias, o, lse)
+
+
+def split_grads(fused, raw, dtypes):
+    """(pair, lnw, lnb, wq, wk, wv, wg, wb, wo) gradients from a backward's stacked outputs (views of them, cast to ``dtypes``, the
+    eight parameters' dtypes, where they differ)."""
+    if fused:
+        dpair, dgb, dw, dwo = raw          # dgb = [dgamma; dbeta; dWb (4 rows)], dw = [dWq; dWk; dWv; dWg]
+        wb = dgb[2:]
+    else:
+        dpair, dgb, dw, wb, dwo = raw      # dgb = [dgamma; dbeta] fp32
+    return (dpair, dgb[0].to(dtypes[0]), dgb[1].to(dtypes[1]), *(dw[i].to(dtypes[2 + i]) for i in range(4)), wb.to(dtypes[6]),
+            dwo.to(dtypes[7]))
+
+
+def fused_backward(dy, pair, eps, drop, saved, dtypes):
+    """Stacked gradients (dpair, [dgamma; dbeta; dWb], [dWq; dWk; dWv; dWg], dWo) of `fused_forward` (`split_grads` takes them apart);
+    dtypes = the eight parameters' dtypes (the weight gradients come back in fp32 when Wq is fp32, else bf16).
+    Kernels: tri_gate_bwd -> triattn_bwd (biasT, key side, query side) -> tri_head_bwd -> tri_wgrad (+ slot sum, finish)."""
+    prm, w4, wo16, q, k, v, g, bias, o, lse = saved
+    B, L, _, _ = pair.shape
+    x = pair.contiguous().view(-1, C)
+    lw, lb, wbf = prm[0], prm[1], prm[2:]
+    m, e = _mod(), _core(_rows_per_task(L))
+    # dbias: the query-side kernel reduce-adds its partials into zeros; the parameter gradients' partials go to per-CTA slots
+    # (no zeroing), summed in CTA order
+    dbws = torch.zeros(B * H * L * L, device=x.device, dtype=torch.float32)
+    E32 = x.new_empty(0, dtype=torch.float32)
+    dy = dy.contiguous().view(-1, C)
+    drop = drop if drop is not None else x.new_empty(0)
+    do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, E32, drop)
+    shp = (B, L, L, H, D)
+    E = q.new_empty(0)
+    dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D ** -0.5, dbws, E, E, E)
+    dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
+    m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, L)
+    dt = dtypes
+    fp32 = dt[2] == torch.float32
+    dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, E32, fp32)
+    return dpair.view(B, L, L, C), dgb, dw, dwo
 
 
 class TriAttnFused(torch.autograd.Function):
     """The whole module (residual included): pair [B, L, L, 128] -> pair + TriangleAttention(pair).
     Parameters may be bf16 or fp32 (master weights): one pack kernel stages them, and the gradients come back in their dtype.
-    drop: the module's broadcast dropout scale as [B, L, 128] bf16 (index = the row's last position), or None."""
+    drop: the module's broadcast dropout scale as [B, L, 128] bf16 (index = the row's last position), or None.
+    (The module path goes through the custom ops of ``integrations.triattn_b200``, which call `fused_forward` / `fused_backward`.)"""
 
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop):
-        B, L, _, _ = pair.shape
-        x = pair.contiguous().view(-1, C)
-        m = _mod()
-        w4, wo16, prm = m.tri_pack_params(wq.contiguous(), wk.contiguous(), wv.contiguous(), wg.contiguous(), wo.contiguous(),
-                                          lnw.contiguous(), lnb.contiguous(), wb.contiguous())
-        lw, lb, wbf = prm[0], prm[1], prm[2:]
-        q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf,
-                                       mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L)
-        shp = (B, L, L, H, D)
         need = any(ctx.needs_input_grad)
-        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, D ** -0.5, need)
-        drop = drop if drop is not None else x.new_empty(0)
-        out = m.tri_tail(g, o.view(-1, C), x, wo16, drop, L)
+        out, saved = fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, need)
         if need:
-            ctx.save_for_backward(x, prm, w4, wo16, q, k, v, g, bias, o, lse, drop)
-            ctx.dims = (B, L, eps)
+            ctx.save_for_backward(pair, drop if drop is not None else pair.new_empty(0), *saved)
+            ctx.eps = eps
             ctx.dtypes = tuple(t.dtype for t in (lnw, lnb, wq, wk, wv, wg, wb, wo))
-        return out.view(B, L, L, C)
+        return out
 
     @staticmethod
     def backward(ctx, dy):
-        x, prm, w4, wo16, q, k, v, g, bias, o, lse, drop = ctx.saved_tensors
-        B, L, eps = ctx.dims
-        dt = ctx.dtypes
-        lw, lb, wbf = prm[0], prm[1], prm[2:]
-        m, e = _mod(), _core(_rows_per_task(L))
-        ws = torch.zeros(_WS_DB + B * H * L * L, device=x.device, dtype=torch.float32)
-        dy = dy.contiguous().view(-1, C)
-        do, dg, delta, dwo, dpair = m.tri_gate_bwd(dy, g, o.view(-1, C), wo16, B, L, ws[_WS_DWO:_WS_MT], drop)
-        shp = (B, L, L, H, D)
-        E = q.new_empty(0)
-        dq, dk, dv, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, D ** -0.5, ws[_WS_DB:], E, E, E)
-        dq, dk, dv = dq.view(-1, C), dk.view(-1, C), dv.view(-1, C)
-        m.tri_head_bwd(dq, dk, dv, dg, db, x, w4, wbf, lw, lb, eps, dpair, B, L)
-        fp32 = dt[2] == torch.float32
-        dw, dgb, dwo = m.tri_wgrad(dq, dk, dv, dg, db, x, eps, B, L, w4, wbf, lw, lb, True, dwo, ws[_WS_MT:_WS_DB], fp32)
-        return (dpair.view(B, L, L, C), dgb[0].to(dt[0]), dgb[1].to(dt[1]), *(dw[t].to(dt[2 + t]) for t in range(4)),
-                dgb[2:].to(dt[6]), dwo.to(dt[7]), None, None, None)
+        pair, drop, *saved = ctx.saved_tensors
+        raw = fused_backward(dy, pair, ctx.eps, drop if drop.numel() else None, saved, ctx.dtypes)
+        return (*split_grads(True, raw, ctx.dtypes), None, None, None)
 
 
 def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, drop=None):
@@ -146,7 +217,7 @@ WIDE_MAX_HEADS = 16                   # the packed bias block is 16 rows
 @functools.lru_cache(maxsize=1)
 def _wide():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_wide_v31", sources=[str(_SRC / "triattn_wide_sm100.cu")],
+    return load_extension(name="triattn_b200_wide_v32", sources=[str(_SRC / "triattn_wide_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -193,21 +264,29 @@ def pack_wide_weights(wq, wk, wv, wg, wb, wo):
     return wcat, wo_p, wo_p.t().contiguous(), wall_t
 
 
-def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5):
+def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, out=None):
     """pair + TriangleAttention(pair) for the starting node, no grad; packed = pack_wide_weights(...).
     Three launches: tri_wfront (LN + the five projections, head-major masked bias) -> triattn_fwd -> tri_wtail
-    (sigmoid gate + out-projection + residual)."""
+    (sigmoid gate + out-projection + residual).  `out`: a contiguous bf16 tensor like the pair to write into, or None."""
+    y, _ = wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask, eps, None, False, out)
+    return y
+
+
+def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, drop=None, need=False, out=None):
+    """-> (y [B, L, L, C], saved = (q, k, v, g, bias, o, lse, stats)): lse / stats empty unless `need`; every saved tensor is a fresh
+    allocation (none aliases an argument)."""
     B, L, _, C = pair.shape
     wcat, wo_p = packed[:2]
     HDp = n_head * D
     w = _wide()
     x = pair.contiguous().view(-1, C)
-    q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head,
-                                    mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L,
-                                    x.new_empty(0, dtype=torch.float32))
+    stats = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32) if need else x.new_empty(0, dtype=torch.float32)
+    q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head, mask if mask is not None else _empty_mask(pair.device), B, L, stats)
     shp = (B, L, L, n_head, D)
-    o, _, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, False)
-    return w.tri_wtail(g, o.view(-1, HDp), x, wo_p, x.new_empty(0), L).view(B, L, L, C)
+    o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
+    y = w.tri_wtail(g, o.view(-1, HDp), x, wo_p, drop if drop is not None else x.new_empty(0), L,
+                    out if out is not None else x.new_empty(0))
+    return (out if out is not None else y.view(B, L, L, C)), (q, k, v, g, bias, o, lse, stats)
 
 
 def _mm32(a, b):
@@ -218,62 +297,60 @@ def _mm32(a, b):
         return torch.mm(a, b).float()
 
 
+def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved, dtypes):
+    """Stacked gradients (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo) of `wide_forward` (`split_grads` takes them
+    apart; the weight gradients in fp32 when Wq is fp32, else bf16)."""
+    q, k, v, g, bias, o, lse, stats = saved
+    B, L, _, C = pair.shape
+    x = pair.contiguous().view(-1, C)
+    wcat, _, wo_t, wall_t = packed
+    HDp = n_head * D
+    R = B * L * L
+    w, e = _wide(), _core(_rows_per_task(L))
+    dy = dy.contiguous().view(-1, C)
+    dys = w.tri_scale_rows(dy, drop, L) if drop is not None and drop.numel() else dy
+    Dall = x.new_empty(R, 4 * HDp + 64)                       # [dq | dk | dv | dg | db rows], written in place by their producers
+    cut = lambda i, n=HDp: Dall[:, i * HDp:i * HDp + n]
+    do, _, u, delta = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L)
+    shp = (B, L, L, n_head, D)
+    _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
+                                q.new_empty(0, dtype=torch.float32), cut(0), cut(1), cut(2))
+    w.tri_db_rows(db, cut(4, 64), B, L)
+    dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t)
+    # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
+    # (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish
+    G = _mm32(Dall.t(), xh)
+    dwo = _mm32(dys.t(), u)
+    dt = dtypes
+    fp32 = dt[2] == torch.float32
+    dw, dwb, dwo, dgb = w.tri_wfinish(G, wcat, lnw, lnb, dwo, n_head, head_dim, fp32)
+    return dpair.view(B, L, L, C), dgb, dw, dwb, dwo
+
+
 class WideTrain(torch.autograd.Function):
     """The wide path with a backward: pair [B, L, L, C] -> pair + drop o TriangleAttention(pair) (starting node).
-    packed = pack_wide_weights(...) of the same parameters (bf16 staging; the gradients come back in each parameter's dtype)."""
+    packed = pack_wide_weights(...) of the same parameters (bf16 staging; the gradients come back in each parameter's dtype).
+    (The module path goes through the custom ops of ``integrations.triattn_b200``, which call `wide_forward` / `wide_backward`.)"""
 
     @staticmethod
     def forward(ctx, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim, packed):
-        B, L, _, C = pair.shape
-        wcat, wo_p = packed[:2]
-        HDp = n_head * D
-        w = _wide()
-        x = pair.contiguous().view(-1, C)
         need = any(ctx.needs_input_grad)
-        stats = torch.empty(x.shape[0], 2, device=x.device, dtype=torch.float32) if need else x.new_empty(0, dtype=torch.float32)
-        q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head,
-                                        mask if mask is not None else torch.empty(0, device=pair.device, dtype=torch.bool), B, L, stats)
-        shp = (B, L, L, n_head, D)
-        o, lse, _ = _core(_rows_per_task(L)).triattn_fwd(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
-        drop = drop if drop is not None else x.new_empty(0)
-        out = w.tri_wtail(g, o.view(-1, HDp), x, wo_p, drop, L)
+        out, saved = wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask, eps, drop, need)
         if need:
-            ctx.save_for_backward(x, q, k, v, g, bias, o, lse, drop, lnw, lnb, stats)
+            ctx.save_for_backward(pair, lnw, lnb, drop if drop is not None else pair.new_empty(0), *saved)
             ctx.packed = packed
-            ctx.dims = (B, L, C, n_head, head_dim, eps)
+            ctx.dims = (n_head, head_dim, eps)
             ctx.dtypes = tuple(t.dtype for t in (lnw, lnb, wq, wk, wv, wg, wb, wo))
-        return out.view(B, L, L, C)
+        return out
 
     @staticmethod
     def backward(ctx, dy):
-        x, q, k, v, g, bias, o, lse, drop, lnw, lnb, stats = ctx.saved_tensors
-        B, L, C, n_head, head_dim, eps = ctx.dims
-        wcat, _, wo_t, wall_t = ctx.packed
-        HDp = n_head * D
-        R = B * L * L
-        w, e = _wide(), _core(_rows_per_task(L))
-        dy = dy.contiguous().view(-1, C)
-        dys = w.tri_scale_rows(dy, drop, L) if drop.numel() else dy
-        Dall = x.new_empty(R, 4 * HDp + 64)                       # [dq | dk | dv | dg | db rows], written in place by their producers
-        cut = lambda i, n=HDp: Dall[:, i * HDp:i * HDp + n]
-        do, _, u, delta = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L)
-        shp = (B, L, L, n_head, D)
-        _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
-                                    q.new_empty(0, dtype=torch.float32), cut(0), cut(1), cut(2))
-        w.tri_db_rows(db, cut(4, 64), B, L)
-        dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t)
-        # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
-        # (y = gamma o xhat + beta feeds every projection) and dWo without the padded channels, in tri_wfinish
-        G = _mm32(Dall.t(), xh)
-        dwo = _mm32(dys.t(), u)
-        dt = ctx.dtypes
-        fp32 = dt[2] == torch.float32
-        dw, dwb, dwo, dgb = w.tri_wfinish(G, wcat, lnw, lnb, dwo, n_head, head_dim, fp32)
-        return (dpair.view(B, L, L, C), dgb[0].to(dt[0]), dgb[1].to(dt[1]), *(dw[i].to(dt[2 + i]) for i in range(4)), dwb.to(dt[6]),
-                dwo.to(dt[7]), None, None, None, None, None, None)
+        pair, lnw, lnb, drop, *saved = ctx.saved_tensors
+        n_head, head_dim, eps = ctx.dims
+        raw = wide_backward(dy, pair, lnw, lnb, ctx.packed, n_head, head_dim, eps, drop if drop.numel() else None, saved, ctx.dtypes)
+        return (*split_grads(False, raw, ctx.dtypes), None, None, None, None, None, None)
 
 
 def wide_train(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, packed, n_head, head_dim, mask=None, eps=1e-5, drop=None):
     """pair + drop o TriangleAttention(pair) for the starting node with a backward (drop: [B, L, C] bf16 or None)."""
     return WideTrain.apply(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, n_head, head_dim, packed)
-

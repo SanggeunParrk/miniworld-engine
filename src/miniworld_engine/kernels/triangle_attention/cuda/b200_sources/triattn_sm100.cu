@@ -1037,7 +1037,10 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
 // (q / k / v rows may sit at a common stride: column slices of one projection output)
 // -> (out [B, N, S, H, 32] bf16 contiguous, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [1]: rows whose offset overflowed,
 //     a per-device counter accumulated over every call since the extension loaded -- never re-zeroed, so no memset per call)
-std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, double scale, bool want_lse) {
+// out_ / lse_: tensors to write into (a group of samples' part of a batch's out [B, N, S, H, 32] / lse [B, N, H, S], contiguous), or
+// empty (fresh tensors)
+std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor bias, double scale, bool want_lse,
+                                       torch::Tensor out_, torch::Tensor lse_) {
   TORCH_CHECK(q.is_cuda() && q.scalar_type() == torch::kBFloat16 && q.dim() == 5 && q.size(4) == D, "q: [B, N, S, H, 32] bf16");
   const long B = q.size(0), N = q.size(1), S = q.size(2), H = q.size(3);
   // q / k / v may be column slices of one projection output: rows (b, n, s) at a common stride ld >= H*32 (16-byte multiple)
@@ -1050,8 +1053,12 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
   TORCH_CHECK(S % BM == 0, "S must be a multiple of 128");
   TORCH_CHECK(bias.numel() == B * H * S * S, "bias: [B, H, S, S]");
   auto b16 = bias.scalar_type() == torch::kBFloat16 ? bias.contiguous() : bias.to(torch::kBFloat16).contiguous();
-  auto out = torch::empty(q.sizes(), q.options());
-  auto lse = want_lse ? torch::empty({B, N, H, S}, q.options().dtype(torch::kFloat32)) : torch::empty({0}, q.options().dtype(torch::kFloat32));
+  const bool og = out_.defined() && out_.numel() > 0, lg = want_lse && lse_.defined() && lse_.numel() > 0;
+  if (og) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == q.numel(), "out: contiguous bf16 like q");
+  if (lg) TORCH_CHECK(lse_.scalar_type() == torch::kFloat32 && lse_.is_contiguous() && lse_.numel() == B * N * H * S, "lse: contiguous fp32 [B, N, H, S]");
+  auto out = og ? out_.view(q.sizes()) : torch::empty(q.sizes(), q.options());
+  auto lse = lg ? lse_.view({B, N, H, S}) : want_lse ? torch::empty({B, N, H, S}, q.options().dtype(torch::kFloat32))
+                                                       : torch::empty({0}, q.options().dtype(torch::kFloat32));
   static torch::Tensor flags_dev[64];
   torch::Tensor& flags = flags_dev[q.device().index()];
   if (!flags.defined()) flags = torch::zeros({1}, q.options().dtype(torch::kInt32));
@@ -1146,7 +1153,8 @@ std::vector<torch::Tensor> triattn_bwd(torch::Tensor q, torch::Tensor k, torch::
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("triattn_fwd", &triattn_fwd, "sm100 triangle-attention forward (D = 32, bf16, no mask): q/k/v/out [B, N, S, H, 32], optional base-2 LSE",
-        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("scale"), py::arg("want_lse") = false);
+        py::arg("q"), py::arg("k"), py::arg("v"), py::arg("bias"), py::arg("scale"), py::arg("want_lse") = false,
+        py::arg("out"), py::arg("lse"));
 #if TA_TL
   m.def("triattn_tl", &triattn_tl);
 #endif
