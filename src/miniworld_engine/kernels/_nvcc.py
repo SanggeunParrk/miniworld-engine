@@ -905,7 +905,9 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
     from miniworld_engine.kernels import _codegraph as cg
     from miniworld_engine.kernels import prebuilt
 
-    kwargs = dict(kwargs)
+    # Lists copied: torch's load appends its own link flags to `extra_ldflags` in place, which changed the caller's list
+    # and the recorded recipe after the key was computed (a replay then keyed the artifact differently).
+    kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
     kwargs.pop("build_directory", None)  # content-addressed below: one directory per key, never rebuilt in place
     material, key, graph = _ext_key(name, kwargs, sources, inline)
     if key in _LOADED:
@@ -949,7 +951,8 @@ def _load(kind_label: str, name: str, kwargs: dict, sources: list[str] | None = 
         ensure_cuda_home()
         build.mkdir(parents=True, exist_ok=True)
         cg.materialize(graph.paths)
-        call_kwargs = dict(kwargs, build_directory=str(build))
+        call_kwargs = {k: list(v) if isinstance(v, list) else v for k, v in kwargs.items()}
+        call_kwargs["build_directory"] = str(build)
         for f in ("extra_cflags", "extra_cuda_cflags"):
             if call_kwargs.get(f):
                 call_kwargs[f] = expand_flags(call_kwargs[f])

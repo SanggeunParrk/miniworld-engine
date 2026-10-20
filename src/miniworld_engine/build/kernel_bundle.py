@@ -397,6 +397,20 @@ def update_prebuilt(entries: dict[str, dict], root: Path, arch: str, *, keep: bo
 
 
 # --------------------------------------------------------------------------------------------------- replay
+def keyed_recipe(entry: dict) -> dict:
+    """``entry``'s recipe with the ``extra_ldflags`` its key was computed from. torch's ``load`` appends its own link
+    flags (``-L<torch>/lib -lc10 ... -lcudart``) to the list it is given, in place, and records up to 2.3.1 stored
+    that list after the call: replayed as recorded, every extension with ``extra_ldflags`` (the SWA atom DiT, the
+    token DiT's owned GEMM) keyed differently from the one a model asks for. The key material holds the flags as
+    they were passed."""
+    recipe = entry["recipe"]
+    flags = (entry.get("material") or {}).get("flags") or {}
+    if (recipe.get("fn") != "ext" or "extra_ldflags" not in recipe.get("kwargs", {})
+            or any("<" in f for f in flags.get("ldflags", ["<"]))):  # absent, or machine-free placeholders
+        return recipe
+    return {**recipe, "kwargs": {**recipe["kwargs"], "extra_ldflags": list(flags["ldflags"])}}
+
+
 def rebase_recipe(recipe: dict, recorded_jit: str | None, jit: str | None, package: Path = PKG_ROOT) -> dict:
     """``recipe`` with the recording's checkout and JIT root replaced by this one's: a replay compiles THIS tree's
     sources (and writes generated files under this JIT root), so it keys them as this tree's own builds would. (A
@@ -477,9 +491,9 @@ def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, onl
             if base is None:
                 log(f"  skip {e['name']}: its base cubin was not recorded")
                 continue
-            tasks.append({"old": key, "recipe": r, "base": base["recipe"], "jit": jit_of(base)})
+            tasks.append({"old": key, "recipe": keyed_recipe(e), "base": keyed_recipe(base), "jit": jit_of(base)})
         else:
-            tasks.append({"old": key, "recipe": r, "jit": jit_of(e)})
+            tasks.append({"old": key, "recipe": keyed_recipe(e), "jit": jit_of(e)})
     tasks.sort(key=lambda t: t["recipe"]["fn"] == "derived")
     log(f"replaying {len(tasks)} recipes with {jobs} processes")
     started, errors = time.monotonic(), []

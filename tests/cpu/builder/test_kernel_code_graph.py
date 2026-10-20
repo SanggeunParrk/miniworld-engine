@@ -397,3 +397,17 @@ def test_a_replay_compiles_its_own_checkout_and_jit_root(tmp_path: Path) -> None
     text_only = {"fn": "cubin", "source": None, "text": '#include "k.cuh"', "flags": [f"-I{old}/kernels/x"], "jit": "/old/jit"}
     assert kernel_bundle.rebase_recipe(text_only, None, "/new/jit", package=tmp_path / "miniworld_engine")["flags"] == \
         [f"-I{tmp_path}/miniworld_engine/kernels/x"]
+
+
+def test_a_replay_links_with_the_flags_the_key_was_computed_from() -> None:
+    """torch's load appends its link flags to `extra_ldflags` in place; a record holding that list keyed its replay
+    differently from the artifact a model asks for (2.3.1: the SWA atom DiT and the token DiT's owned GEMM)."""
+    from miniworld_engine.build import kernel_bundle
+
+    polluted = ["-lcublas", "-L/env/torch/lib", "-lc10", "-ltorch", "-L/cuda/lib", "-lcudart"]
+    entry = {"recipe": {"fn": "ext", "name": "k", "kwargs": {"extra_cflags": ["-O3"], "extra_ldflags": polluted}},
+             "material": {"flags": {"ldflags": ["-lcublas"]}}}
+    assert kernel_bundle.keyed_recipe(entry)["kwargs"] == {"extra_cflags": ["-O3"], "extra_ldflags": ["-lcublas"]}
+    assert entry["recipe"]["kwargs"]["extra_ldflags"] is polluted  # the record itself is left alone
+    cubin = {"recipe": {"fn": "cubin", "name": "c"}, "material": {}}
+    assert kernel_bundle.keyed_recipe(cubin) is cubin["recipe"]

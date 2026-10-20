@@ -21,6 +21,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   drivers only, which do not reach the fused SWA atom DiT (`swa_dit`) or the bias-only token DiT (`bias_only_dit`), so a
   MiniWorld model on an H100 still compiled those on its first call. The release coverage now also records MiniWorld's
   `scripts/prebuild_engine.py --mode all` (every inference rung and training crop of the production configs).
+- Extensions built with `extra_ldflags` (the SWA atom DiT, the token DiT's owned GEMM) were bundled under a key no
+  process asks for: torch's `load` appends its link flags to that list in place, the recorded recipe kept the appended
+  list, and its replay keyed the rebuild from it. The engine now hands torch a copy, and a replay links with the flags
+  the key was computed from (`build.kernel_bundle.keyed_recipe`).
 
 ## [2.3.1] - 2026-10-20
 
