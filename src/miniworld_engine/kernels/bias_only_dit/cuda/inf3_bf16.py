@@ -22,7 +22,7 @@ import warnings
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
-from miniworld_engine.kernels.bias_only_dit.cuda import PTR, _descriptors, _Runs, _dir
+from miniworld_engine.kernels.bias_only_dit.cuda import PTR, _descriptors, _Runs, _dir, sm100_kernel
 from miniworld_engine import settings
 
 TAIL_CLUSTERS = (8, 6)
@@ -122,7 +122,7 @@ class FrontBF16:
     def kernel(self, cl: int, xbf: bool = False):
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import front_smem
 
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "bo_front_bf16",
             "bo_front_bf16_sm100",
             self.device_index,
@@ -260,7 +260,7 @@ class TailBF16:
 
     def kernel(self, cl: int = 8, xbf: bool = False, obf: bool = False):
         if cl == TAIL_PAIR:
-            return self._sm100._sm100_kernel(
+            return sm100_kernel(
                 "bo_tail2_bf16",
                 "bo_tail2_bf16_sm100",
                 self.device_index,
@@ -275,7 +275,7 @@ class TailBF16:
                 cluster=8,
                 smem=tail_smem(TAIL_PAIR),
             )
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "bo_tail_bf16",
             "bo_tail_bf16_sm100",
             self.device_index,

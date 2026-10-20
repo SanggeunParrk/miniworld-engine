@@ -60,13 +60,17 @@ def _jit_root() -> Path:
 
 
 @functools.lru_cache(maxsize=None)
-def cubin(stem: str, defs: tuple[str, ...] = (), src_dir: str | None = None) -> str:
+def cubin(stem: str, defs: tuple[str, ...] = (), src_dir: str | None = None, newest: bool = False) -> str:
     """Path of ``<src_dir>/<stem>.cu`` (default: this directory) built for sm_100a with ``-D`` ``defs`` and this
-    directory's ``sm100.cuh`` on the include path; rebuilt only when a source or a flag changes."""
+    directory's ``sm100.cuh`` on the include path; rebuilt only when a source or a flag changes. ``newest``: by the newest nvcc here
+    that knows sm_100a (toolchain ``sm100``, ``transition.cuda.fused_sm100a.kernel_toolchain``: 13.1 on the B200 box) instead of the
+    torch-matched one, under its own artifact name (the key does not see the compiler, so the two builds must not share a name)."""
     from miniworld_engine.kernels import _nvcc
 
     src = Path(src_dir or _dir) / f"{stem}.cu"
     flags = (*_NVCC_FLAGS, f"-I{_dir}", *("-D" + d for d in defs))
+    if newest:
+        return str(_nvcc.cubin(f"augattn_sm100_newest/{stem}", flags, source=src, toolchain="sm100", timeout=None))
     # no -ccbin: this family has always been built with nvcc's default host compiler
     return str(_nvcc.cubin(f"augattn_sm100/{stem}", flags, source=src, toolchain="torch-nohost", timeout=None))
 
@@ -81,12 +85,13 @@ def _sm100_kernel(
     defs: tuple[str, ...] = (),
     cluster: int | None = None,
     smem: int = _SMEM,
+    newest: bool = False,
 ):
     from . import driver
 
     with torch.cuda.device(device_index):
         return driver.Kernel(
-            cubin(stem, defs, src_dir=src_dir), func, smem, cluster=cluster, pdl=pdl
+            cubin(stem, defs, src_dir=src_dir, newest=newest), func, smem, cluster=cluster, pdl=pdl
         )
 
 

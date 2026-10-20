@@ -36,6 +36,7 @@ from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels._tf32 import tf32_grid, tf32_matmul
 from miniworld_engine.kernels.bias_only_dit.cuda import (
+    sm100_kernel,
     LAYOUTS,
     PTR,
     _descriptors,
@@ -155,7 +156,7 @@ class PvGateCoreTF32:
         settings.bias_only_dit_pv_batch=0."""
         batch = ("BATCHN",) if pv_batched() else ()
         if self.pdl:
-            return self._sm100._sm100_kernel(
+            return sm100_kernel(
                 "pv_gate_tf32",
                 "bo_pv_gate_tf32_sm100",
                 self.device_index,
@@ -171,7 +172,7 @@ class PvGateCoreTF32:
                 ),
                 smem=_pv_smem(self.dh, sg),
             )
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "pv_gate_tf32",
             "bo_pv_gate_tf32_sm100",
             self.device_index,
@@ -255,7 +256,7 @@ class GemmGluTF32:
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._tm, self.bwd = sm100._tm, bwd
-        self.k = sm100._sm100_kernel(
+        self.k = sm100_kernel(
             "gemm_glu_tf32",
             "bo_glu_bwd_tf32_sm100" if bwd else "bo_glu_fwd_tf32_sm100",
             device_index,
@@ -392,7 +393,7 @@ class Dpb32:
         self._pair_k, self.last = None, "single"
 
     def kernel(self):
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "dpb32_sm100",
             "bo_dpb32_sm100",
             self.device_index,
@@ -403,7 +404,7 @@ class Dpb32:
 
     def pair_kernel(self):
         """dpbx2_sm100.cu built -DTF32 (CTA pairs on 256 x 256 items)."""
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "dpbx2_sm100",
             "bo_dpbx2_sm100",
             self.device_index,
@@ -736,7 +737,7 @@ class FrontTF32:
         self.runs = _Runs()
 
     def kernel(self, cl: int):
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "bo_front_tf32",
             "bo_front_tf32_sm100",
             self.device_index,
@@ -855,7 +856,7 @@ class TailTF32:
 
     def kernel(self, cl: int = 8):
         if cl == TAIL_PAIR:
-            return self._sm100._sm100_kernel(
+            return sm100_kernel(
                 "bo_tail2_tf32",
                 "bo_tail2_tf32_sm100",
                 self.device_index,
@@ -865,7 +866,7 @@ class TailTF32:
                 cluster=8,
                 smem=tail_smem(TAIL_PAIR),
             )
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "bo_tail_tf32",
             "bo_tail_tf32_sm100",
             self.device_index,

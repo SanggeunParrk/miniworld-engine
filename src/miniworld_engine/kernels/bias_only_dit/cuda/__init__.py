@@ -58,6 +58,14 @@ def b200_max_l(dtype: torch.dtype) -> int:
     return B200_TMEM_MAX_L
 
 
+def sm100_kernel(*args, **kw):
+    """``augmented_attention.cuda.sm100._sm100_kernel`` for this family's sm_100a cubins, built by the newest nvcc here that knows
+    sm_100a (``transition.cuda.fused_sm100a.kernel_toolchain``: 13.1 on the B200 box) rather than the torch-matched 12.9."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100
+
+    return sm100._sm100_kernel(*args, newest=True, **kw)
+
+
 def h100_enabled(device) -> bool:
     """Native Hopper kernels; per-shape speed qualification is recorded separately."""
     return torch.cuda.get_device_capability(device) == (9, 0)
@@ -545,7 +553,7 @@ class PvGateCore:
         vdef = () if vb == 128 else (f"VB={vb}",)
         if self.pdl:
             edef = ("P_EARLY",) if (self.early() if early is None else early) else ()
-            return self._sm100._sm100_kernel(
+            return sm100_kernel(
                 "pv_gate_inf",
                 "bo_pv_gate_inf_sm100",
                 self.device_index,
@@ -561,7 +569,7 @@ class PvGateCore:
                 ),
                 smem=_pv_smem(vb),
             )
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "pv_gate_inf",
             "bo_pv_gate_inf_sm100",
             self.device_index,
@@ -692,7 +700,7 @@ class PvStreamCore:
 
     def kernel(self, sg: int, gate: bool = True):
         """The cubin for SG samples per item, with or without the gate (built on first use)."""
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "pv_stream_sm100",
             "bo_pv_stream_sm100",
             self.device_index,
@@ -856,7 +864,7 @@ class DpbKernel:
             2 if dh == 32 else 1
         )  # heads per work item (dpb_sm100.cu HP): two 32-wide heads per 128-byte row
         nj = _dpb_nj(L, self.nsm, nh // hp, hp)
-        k = self._sm100._sm100_kernel(
+        k = sm100_kernel(
             "dpb_sm100",
             "bo_dpb_sm100",
             self.device_index,
@@ -877,7 +885,7 @@ class DpbKernel:
 
     def pair_kernel(self):
         """The cubin of dpbx2_sm100.cu for this layout (built on first use)."""
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "dpbx2_sm100",
             "bo_dpbx2_sm100",
             self.device_index,
@@ -995,7 +1003,7 @@ class PvDpb:
             *_head_defs(self.nh, self.dh),
             self._src,
         )
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "bo_pvdpb",
             "bo_pvdpb_sm100",
             self.device_index,
@@ -1078,7 +1086,7 @@ class GemmSwigluAB:
         from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
         self._tm, self.K, self.H = sm100._tm, K, 2 * K
-        self.k = sm100._sm100_kernel(
+        self.k = sm100_kernel(
             "gemm_swiglu2_sm100",
             "gemm_swiglu2_sm100",
             device_index,
@@ -1154,7 +1162,7 @@ class ResLnGemm:
 
     def kernel(self, cl: int):
         defs = (f"CL={cl}", *(("FINAL",) if self.final else ()), *self.defs)
-        return self._sm100._sm100_kernel(
+        return sm100_kernel(
             "gemm_resln_sm100",
             "bo_gemm_resln_sm100",
             self.device_index,
@@ -1235,7 +1243,7 @@ class CondTables:
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._tm = sm100._tm
-        self.k = sm100._sm100_kernel(
+        self.k = sm100_kernel(
             "cond_tables_sm100",
             "bo_cond_tables_sm100",
             device_index,
