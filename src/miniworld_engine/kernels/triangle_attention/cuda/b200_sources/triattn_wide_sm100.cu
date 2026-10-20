@@ -1336,7 +1336,8 @@ static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const t
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L) {
+// out_: a contiguous [R, C] bf16 tensor (or a view of one: a chunk's rows of a batch's output) to write into, or empty (fresh)
+torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 2 && o.size(0) == R && o.size(1) % 64 == 0, "o: [R, HDp]");
@@ -1349,7 +1350,10 @@ torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, tor
                 "drop: [B, L, C] bf16 contiguous");
     dp = reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>());
   }
-  auto out = torch::empty_like(x);
+  const bool given = out_.defined() && out_.numel() > 0;
+  if (given) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == R * C && out_.device() == x.device(),
+                         "out: contiguous bf16 with R x C elements");
+  auto out = given ? out_.view({R, C}) : torch::empty_like(x);
   switch (C) {
     case 64: launch_wtail<64>(g, o, x, wo, out, dp, L); break;
     case 128: launch_wtail<128>(g, o, x, wo, out, dp, L); break;
@@ -1625,7 +1629,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("W"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"),
         py::arg("stats"));
   m.def("tri_wtail", &tri_wtail_h, "fused x + (sigmoid(g) o o) . Wo^T for any width", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"),
-        py::arg("drop"), py::arg("L"));
+        py::arg("drop"), py::arg("L"), py::arg("out") = torch::Tensor());
   m.def("tri_ln_rows", &tri_ln_rows_h, "LayerNorm over C (64 .. 512) rows: bf16 -> bf16", py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("xcopy"));
   m.def("tri_bias_heads", &tri_bias_heads_h, "bias columns of the projection -> head-major masked bias [B, NH, L, L]",
         py::arg("P"), py::arg("cb"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"));

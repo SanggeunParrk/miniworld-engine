@@ -168,8 +168,9 @@ def test_dropout_modes_served():
 
 def test_serves_rejects_other_shapes():
     m = make(ImplementationType.MINIWORLD)
-    for shape in ((1, 200, 200, 128), (1, 128, 256, 128)):
+    for shape in ((1, 8, 8, 128), (1, 128, 256, 128)):          # shorter than 16 tokens, not square
         assert not triattn_b200.serves(m, torch.zeros(shape, device="cuda", dtype=torch.bfloat16))
+    assert triattn_b200.serves(m, torch.zeros(1, 200, 200, 128, device="cuda", dtype=torch.bfloat16))   # padded to 256
     assert not triattn_b200.serves(m, torch.zeros(1, 128, 128, 128, device="cuda"))
     wide = TriangleAttention(256, 4, implementation=ImplementationType.MINIWORLD).cuda()
     assert not triattn_b200.serves(wide, torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16))

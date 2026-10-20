@@ -2,7 +2,7 @@
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
 (``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
-32-channel heads, inference and training) serve the whole module."""
+32-channel heads, inference and training; any L >= 16, B samples per call in deterministic chunks) serve the whole module."""
 
 import math
 from contextlib import contextmanager
@@ -407,12 +407,10 @@ class TriangleAttention(nn.Module):
                 raise RuntimeError(
                     "Anthropic TriangleAttention requires eval() when dropout is enabled"
                 )
-        if not self._bias_untransposed and _b200.serves(self, pair, mask):
+        # the B200 kernels project the ending node's bias from the transposed pair only (transposed_bias=True)
+        if not self._bias_untransposed and _b200.kind_of(self, pair, mask) is not None:
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward(self, pair, mask)
-        if not self._bias_untransposed and _b200.serves_wide(self, pair, mask):
-            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
-                return _b200.forward_wide(self, pair, mask)
         from miniworld_engine.integrations import triattn_h100, triattn_h100_sm90
 
         if triattn_h100_sm90.serves(self, pair, mask):
