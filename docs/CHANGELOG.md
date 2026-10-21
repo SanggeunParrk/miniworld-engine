@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.7] - 2026-10-21
+
 ### Fixed
 
 - H100 SWA atom DiT (`SWADiTBlock`, `swa_dit_block`, ESMFold2's atom block) ran 5-9x slower than it did on 2026-10-14. Since 2026-10-18 every

@@ -9,7 +9,7 @@ optimized in isolation: **hand-written CUDA where it exists, a Triton fallback o
 > blocks; terminal product repos assemble those into full models. Boundary rules live in
 > team-gm's `docs/ARCHITECTURE.md`.
 
-**Version 2.3.6** — CUDA + Triton only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
+**Version 2.3.7** — CUDA + Triton only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
 cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 [attribution](licenses/THIRD_PARTY_NOTICES.md).
 
