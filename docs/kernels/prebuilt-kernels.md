@@ -185,6 +185,21 @@ CUDA 13 (that needs a driver >= 580).
 Per release, at the engine commit being released (set `version` in `pyproject.toml` first; PyPI takes no local
 versions: one wheel per Python ABI, carrying every CUDA build in the prebuilt root).
 
+**A release after the first is incremental: start from the previous release's prebuilt root and redo only what changed.**
+The keys are the code graph, so the question per release is which artifacts are new or re-keyed, not "run everything again":
+
+* `git diff --stat v<previous>..HEAD -- '*.cu' '*.cuh' '*.h' '*.inc' '*.py'` and, for each changed kernel source,
+  `miniworld-engine dev code-graph --affected <file> --manifest <root>/sm90-cu129/manifest.json`: the artifacts that re-key.
+  No kernel source changed -> no existing artifact re-keys.
+* A dispatch change can make a call reach an artifact no driver reached before (2.3.7: the H100 SWA block moved to its
+  composed stages, nine extensions none of 2.3.0 - 2.3.6 had). Cover those with the engine cases that reach them only
+  (`--coverage 'engine:<filter>'`, a substring of the case's JSON, e.g. `engine:"variant": "esmfold2"`); add a case if none does.
+* Run coverage with `--keep` on a copy of the previous root, and replay **only this release's records** with `--keep`
+  (`--replay` without `--keep` prunes every artifact its records do not list, which is why replays once had to list every
+  earlier release's records). 2.3.7: coverage 14 min on one H100, replays 1-2 min per CUDA build x Python ABI.
+* The full drivers below (MiniWorld / FoldForge / pdall) are for a release whose changes reach code those drivers alone
+  exercise; the release check (step 4) runs them anyway, with `MINIWORLD_ENGINE_JIT_FALLBACK=0`, and fails on any miss.
+
 1. **Coverage, sm90** (an H100, any environment whose torch has the target's torch minor):
    `miniworld-engine dev bundle-kernels --arch sm90 --out <work> --coverage engine --coverage pytest:<smoke set>`,
    and **always** MiniWorld's production driver, `--coverage "cmd:cd <MiniWorld> && python scripts/prebuild_engine.py --mode all --jobs 8"`
