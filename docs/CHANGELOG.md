@@ -8,6 +8,17 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- H100 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
+  d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128), inference and training, which ran the PyTorch reference on H100 (the
+  dispatch required `d_hidden == d_pair`). Per token it has the bidirectional block's shapes (4 D planes, LN_out over 2 D), so the
+  bidirectional D64 / D128 kernels serve it; only the cuBLAS contraction between them pairs the planes in the module's one direction
+  over all 2 D channels (`direction` 1 / 2 of `h100_d64_b200gate` / `h100_training`, `trimul_h100._hidden_twice`). B samples (chunked
+  with the bidirectional working set), token mask, row dropout, CUDA graphs; the hidden = D paths are bitwise unchanged. CUDA graph,
+  against cuEquivariance 0.12: inference 2.0 - 3.5x, training fwd + bwd 2.0 - 3.7x (L128 - 768, B 1 / 4); against the PyTorch path it
+  replaces 8 - 28x. Tests: `tests/gpu/sm90/test_trimul_h100_hidden2x_gpu.py`; page: `docs/gpus/h100/trimul/trimul.md`.
+
 ## [2.3.5] - 2026-10-21
 
 ### Fixed

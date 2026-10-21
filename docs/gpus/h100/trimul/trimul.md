@@ -541,7 +541,7 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 
 ## Single direction (`TriangleMultiplication`, outgoing / incoming)
 
-One contraction, hidden = D, bf16 only. Both directions run the same kernels (`GP_DIR` / the transposed contraction operand selects the
+One contraction, hidden = D (hidden = 2D at D64 / D128: [below](#hidden-twice-the-width-one-direction-d64--d128)), bf16 only. Both directions run the same kernels (`GP_DIR` / the transposed contraction operand selects the
 direction). Kernel level, per width:
 
 | Width | Inference | Training |
@@ -559,6 +559,52 @@ forward LN-out 0.47: 17.1 ms in total. Kernel flow figures for the single direct
 Weight pack, LN-affine fold and input LN use the CUDA aux kernels whenever the call runs eagerly, and every caller sits inside an
 opaque custom op, so the P1 / F3-fold rows above are CUDA; their Triton versions only serve a `torch.compile` region that traces the
 caller. No Triton kernel remains in any D256 / D384 / D512 cell at L384 / L768.
+
+## Hidden twice the width (one direction, D64 / D128)
+
+`TriangleMultiplication(D, d_hidden=2D)` -- the AF3 / Protenix template block (pair 64, hidden 128), and D128 hidden 256 -- runs the
+bidirectional D64 / D128 kernels (it took the PyTorch reference before: the H100 dispatch required `d_hidden == D`). Per token it is
+the bidirectional block: K1 writes 4D planes (`a` then `b`, 2D each), K3 normalises a 2D-channel contraction output and projects it back
+to D, and the backward is the same chain (D64: B1 / B2 / fin of `h100_d64_b200gate`; D128: B1 / B7 of `h100_training`). The only
+difference is the cuBLAS contraction between the kernels: all 2D channels of `a` and `b` in the module's one direction (`t = a b^T`
+outgoing, `a^T b` incoming, one call each way instead of D channels per direction), and its two gradient contractions likewise
+(`direction` 1 / 2 of `h100_d64_b200gate._triangle` / `_contraction_grads`, `h100_training._contract` / `_contract_grads`). Inference
+is the packaged K1 / K3 unit at hidden 2D (the bidirectional one) with the one-direction contraction. Dispatch:
+`trimul_h100._hidden_twice`; the chunking of B samples uses the bidirectional working set. Batched samples, ragged L in inference,
+the token mask, row dropout and CUDA graphs work as for the bidirectional module; other hidden widths keep the PyTorch reference.
+The hidden = D paths are bitwise unchanged (y and every gradient of the bidirectional and the one-direction modules, D64 / D128,
+B 1 / 2 / 4, L 128 - 768 and ragged L200 inference, compared with `origin/main` 3d41dc3d: 54 of 54 equal). Tests:
+`tests/gpu/sm90/test_trimul_h100_hidden2x_gpu.py` (y and every gradient against the FP32 PyTorch reference, both directions, D64 and
+D128, B 1 / 4, L 128 / 256 / 384 and ragged L200 inference, mask, dropout, graph capture, the native entry spied on).
+
+Measured 2026-10-21 on one H100 80GB HBM3 (132 SMs, 700 W), torch 2.13.0+cu129, bf16 pair, FP32 parameters, outgoing, a token mask
+(15 % masked), row dropout 0.25 in training (fwd + bwd w.r.t. x and every parameter), CUDA-graph timing (30 replays after warm-up),
+ms. cuEquivariance 0.12 is the same module with `implementation=cuequivariance` (bf16 parameters); PyTorch is the path this replaces
+(the same module with the H100 contract off: the PyTorch statements under the bf16 fallback autocast). Incoming: ours within
+-3 / +4 % of outgoing in every cell, the same ratios to cuEquivariance (inference 2.0 - 3.5x, training 2.0 - 3.6x).
+
+| D | hidden | B | L | inference: ours / cuEq / PyTorch | × cuEq | × PyTorch | training fwd + bwd: ours / cuEq / PyTorch | × cuEq | × PyTorch |
+|---|---|---|---|---|---|---|---|---|---|
+| 64 | 128 | 1 | 128 | 0.022 / 0.047 / 0.205 | 2.13 | 9.3 | 0.092 / 0.245 / 0.741 | 2.65 | 8.0 |
+| 64 | 128 | 1 | 256 | 0.053 / 0.123 / 0.678 | 2.33 | 12.8 | 0.195 / 0.661 / 2.623 | 3.38 | 13.4 |
+| 64 | 128 | 1 | 384 | 0.113 / 0.265 / 1.557 | 2.35 | 13.8 | 0.376 / 1.363 / 4.889 | 3.63 | 13.0 |
+| 64 | 128 | 1 | 512 | 0.198 / 0.485 / 2.936 | 2.45 | 14.8 | 0.632 / 2.344 / 9.830 | 3.71 | 15.5 |
+| 64 | 128 | 1 | 768 | 0.443 / 1.058 / 9.452 | 2.39 | 21.4 | 1.420 / 5.055 / 39.178 | 3.56 | 27.6 |
+| 64 | 128 | 4 | 128 | 0.052 / 0.120 / 0.670 | 2.31 | 12.8 | 0.193 / 0.665 / 2.499 | 3.45 | 12.9 |
+| 64 | 128 | 4 | 256 | 0.200 / 0.480 / 2.696 | 2.41 | 13.5 | 0.637 / 2.331 / 8.012 | 3.66 | 12.6 |
+| 64 | 128 | 4 | 384 | 0.440 / 1.037 / 6.029 | 2.36 | 13.7 | 1.340 / 4.992 / 17.914 | 3.72 | 13.4 |
+| 64 | 128 | 4 | 512 | 0.785 / 1.828 / 11.504 | 2.33 | 14.7 | 2.395 / 8.761 / 35.598 | 3.66 | 14.9 |
+| 64 | 128 | 4 | 768 | 1.748 / 4.112 / 37.886 | 2.35 | 21.7 | 5.658 / 19.842 / 133.395 | 3.51 | 23.6 |
+| 128 | 256 | 1 | 128 | 0.037 / 0.079 / 0.311 | 2.11 | 8.3 | 0.199 / 0.393 / 1.170 | 1.98 | 5.9 |
+| 128 | 256 | 1 | 256 | 0.117 / 0.293 / 1.212 | 2.51 | 10.4 | 0.487 / 1.302 / 4.418 | 2.68 | 9.1 |
+| 128 | 256 | 1 | 384 | 0.236 / 0.673 / 2.721 | 2.85 | 11.5 | 0.947 / 2.996 / 9.196 | 3.16 | 9.7 |
+| 128 | 256 | 1 | 512 | 0.407 / 1.400 / 5.179 | 3.44 | 12.7 | 1.647 / 4.927 / 18.743 | 2.99 | 11.4 |
+| 128 | 256 | 1 | 768 | 0.899 / 2.868 / 17.821 | 3.19 | 19.8 | 3.782 / 11.724 / 78.233 | 3.10 | 20.7 |
+| 128 | 256 | 4 | 128 | 0.115 / 0.292 / 1.201 | 2.54 | 10.5 | 0.489 / 1.299 / 4.205 | 2.65 | 8.6 |
+| 128 | 256 | 4 | 256 | 0.416 / 1.390 / 4.650 | 3.34 | 11.2 | 1.659 / 4.891 / 14.887 | 2.95 | 9.0 |
+| 128 | 256 | 4 | 384 | 0.899 / 2.824 / 10.609 | 3.14 | 11.8 | 3.646 / 11.508 / 34.343 | 3.16 | 9.4 |
+| 128 | 256 | 4 | 512 | 1.632 / 5.547 / 20.458 | 3.40 | 12.5 | 6.620 / 20.437 / 68.647 | 3.09 | 10.4 |
+| 128 | 256 | 4 | 768 | 3.744 / 12.618 / 71.272 | 3.37 | 19.0 | 15.368 / 46.589 / 267.144 | 3.03 | 17.4 |
 
 ## Open
 
