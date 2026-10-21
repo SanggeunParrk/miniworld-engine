@@ -1349,3 +1349,27 @@ def test_dpb_pair_tf32_step_within_the_pytorch_tf32_error(
             relative(g, w),
             relative(b, w),
         )
+
+
+@pytest.mark.parametrize("masked", [False, True])
+def test_a_new_pair_at_a_freed_pairs_address_gets_its_own_attention(masked):
+    """The runner outlives an item (one per set of weights) and caches P = softmax(pair bias) per pair. A freed pair's block is handed
+    back by the allocator: the next item's pair of the same shape then has the old pointer and version, and must not be served the
+    old P (10-21: FoldBench structures of every item after a same-bucket item came out broken)."""
+    _, fast, _ = blocks(seed=7)
+    fast.eval()
+    L, S = 256, 2
+    x = torch.randn(S, 1, L, 768, device="cuda")
+    c = torch.randn(S, 1, L, 384, device="cuda")
+    mask = (torch.rand(1, L, device="cuda") > 0.2) if masked else None
+    with torch.no_grad():
+        p1 = torch.empty(1, L, L, 128, device="cuda").normal_()
+        fast(x, c, p1, mask)
+        key = (p1.data_ptr(), p1._version)
+        del p1
+        p2 = torch.empty(1, L, L, 128, device="cuda").normal_()
+        if (p2.data_ptr(), p2._version) != key:
+            pytest.skip("the allocator did not hand the freed block back")
+        got = fast(x, c, p2, mask)
+        want = copy.deepcopy(fast)(x, c, p2, mask)  # new weights, so a new runner with no cache
+    assert torch.equal(got, want)
