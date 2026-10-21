@@ -8,6 +8,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.4] - 2026-10-21
+
+### Fixed
+
+- The wheel's sm90 bundles also carry what FoldForge reaches: its families' single attention runs the H100 augmented
+  attention at a 512-wide row (`augattn_sm90_attn_fwd ... ROW_WIDTH512 ... APB`), which no engine or MiniWorld driver
+  reaches, so a FoldForge model compiled it on its first call with 2.3.3. The release coverage now also records FoldForge's
+  suite (docs/kernels/prebuilt-kernels.md). Kernels are otherwise the 2.3.3 ones.
+
 ## [2.3.3] - 2026-10-21
 
 ### Added
