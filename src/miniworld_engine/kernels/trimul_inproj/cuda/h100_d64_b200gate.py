@@ -4,6 +4,12 @@ B1 stores BF16 dGout. B7 accumulates dGout @ Wg with the input projection
 gradient in FP32. Constant accumulator indices avoid local array traffic.
 The original normalization-statistics saves and forward path are retained.
 The D64 training path the integration selects (``integrations.trimul_h100``).
+
+direction 1 / 2: a single-direction module whose hidden width is 128 (2 D, AF3 / Protenix's template TriMul: pair 64,
+hidden 128). Per token it has exactly this block's shapes -- K1 writes 4 D planes [a | b] (2 D each), K3 normalises a
+2 D-channel contraction output and projects it back to D, B1 / B2 / fin are the same -- only the cuBLAS contraction
+between the kernels differs: all 2 D channels in the module's one direction instead of D per direction (``_triangle``,
+``_contraction_grads``).
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 R = T.SOURCES / "d64_train"
 WIDTH = 64
-HIDDEN = 128  # both directions
+HIDDEN = 128  # both directions (bidirectional) or one (direction 1 / 2)
 K3_TILE = (2, 64, 4, 1)  # BI, BJ, ring slots, accumulator sets (K3Cfg: 128-token tiles, resident weights)
 
 
@@ -121,10 +127,33 @@ def fold(t):
     return t.view(-1, t.shape[-1], t.shape[-1])
 
 
-def _triangle(ab, tri):
+def _triangle(ab, tri, direction=0):
+    """direction 0: [a_out | a_in | b_out | b_in] (D each), outgoing on the first D channels, incoming on the rest;
+    1 / 2: [a | b] (2 D each), every channel outgoing (a b^T) / incoming (a^T b)."""
     h = WIDTH
-    _bmm(fold(ab[:h]), fold(ab[2 * h:3 * h]).transpose(-1, -2), out=fold(tri[:h]))
-    _bmm(fold(ab[h:2 * h]).transpose(-1, -2), fold(ab[3 * h:]), out=fold(tri[h:]))
+    if direction == 0:
+        _bmm(fold(ab[:h]), fold(ab[2 * h:3 * h]).transpose(-1, -2), out=fold(tri[:h]))
+        _bmm(fold(ab[h:2 * h]).transpose(-1, -2), fold(ab[3 * h:]), out=fold(tri[h:]))
+    elif direction == 1:
+        _bmm(fold(ab[:HIDDEN]), fold(ab[HIDDEN:]).transpose(-1, -2), out=fold(tri))
+    else:
+        _bmm(fold(ab[:HIDDEN]).transpose(-1, -2), fold(ab[HIDDEN:]), out=fold(tri))
+
+
+def _contraction_grads(ab, dt, dl, dr, direction=0):
+    """dl / dr (the gradients of the a / b planes) from dt, pairing the planes as ``_triangle``."""
+    h = WIDTH
+    if direction == 0:
+        _bmm(fold(dt[:h]), fold(ab[2 * h:3 * h]), out=fold(dl[:h]))
+        _bmm(fold(dt[:h]).transpose(-1, -2), fold(ab[:h]), out=fold(dr[:h]))
+        _bmm(fold(ab[3 * h:]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
+        _bmm(fold(ab[h:2 * h]), fold(dt[h:]), out=fold(dr[h:]))
+    elif direction == 1:
+        _bmm(fold(dt), fold(ab[HIDDEN:]), out=fold(dl))
+        _bmm(fold(dt).transpose(-1, -2), fold(ab[:HIDDEN]), out=fold(dr))
+    else:
+        _bmm(fold(ab[HIDDEN:]), fold(dt).transpose(-1, -2), out=fold(dl))
+        _bmm(fold(ab[:HIDDEN]), fold(dt), out=fold(dr))
 
 
 def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
@@ -164,7 +193,7 @@ def _prepare(leaves, mask):
     return w1, mask.reshape(n, n).to(torch.float32, copy=True)
 
 
-def _run_forward(leaves, mask, ds, save):
+def _run_forward(leaves, mask, ds, save, direction=0):
     prepared = len(leaves) == 12
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves[:11]
     bsz, n = x.shape[0], x.shape[1]
@@ -175,14 +204,14 @@ def _run_forward(leaves, mask, ds, save):
     stats = torch.empty((4, m), device=x.device, dtype=torch.float32)
     y = T.take_output(x)
     _front(x, w1, maskf, gi, bi, ab)
-    _triangle(ab, tri)
+    _triangle(ab, tri, direction)
     _output(x, tri, wg, wp, gi, bi, go, bo, ds.reshape(bsz * n, WIDTH), y, stats)
     if not save:
         return y
     return [y, ab, tri, stats] if prepared else [y, ab, tri, stats, w1, maskf]
 
 
-def _forward_fake(leaves, mask, ds):
+def _forward_fake(leaves, mask, ds, direction=0):
     """Output plus saved ab, tri, LN statistics [mean_in, rstd_in, mean_out, rstd_out], weight pack, FP32 mask."""
     x = leaves[0]
     bsz, n = x.shape[0], x.shape[1]
@@ -196,22 +225,22 @@ def _forward_fake(leaves, mask, ds):
 
 
 @opaque(fake=_forward_fake, name="trimul_h100_gatepipe_selected_v2_d64_train_fwd")
-def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> list[torch.Tensor]:
-    """Training forward; returns ``[y, ab, tri, stats, w1]`` (all freshly allocated)."""
+def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int = 0) -> list[torch.Tensor]:
+    """Training forward; returns ``[y, ab, tri, stats, w1]`` (all freshly allocated). direction: see the module docstring."""
     with T.native_context(leaves[0].device):
-        return _run_forward(leaves, mask, ds, True)
+        return _run_forward(leaves, mask, ds, True, direction)
 
 
-def _forward_nograd_fake(leaves, mask, ds):
+def _forward_nograd_fake(leaves, mask, ds, direction=0):
     """Output only."""
     return torch.empty_like(leaves[0])
 
 
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_gatepipe_selected_v2_d64_dropout_nograd")
-def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> torch.Tensor:
+def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int = 0) -> torch.Tensor:
     """Training-mode (dropout) forward without autograd: no saved activations are returned."""
     with T.native_context(leaves[0].device):
-        return _run_forward(leaves, mask, ds, False)
+        return _run_forward(leaves, mask, ds, False, direction)
 
 
 # --------------------------------------------------------------------------- backward
@@ -223,7 +252,7 @@ def _map2(t, box, dims, strides, swizzle="128B"):
                                          swizzle=swizzle, l2="128B")
 
 
-def _run_backward(leaves, mask, ds, saved, dy, master=False):
+def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
     x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo = leaves
     ab, tri, stats, w1, maskf = saved
     L = T._launch_module()
@@ -249,10 +278,7 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     b1.launch((g1, 1, 1), (256, 1, 1), [params], B1W_SMEM)
     dl = torch.empty_like(tri)
     dr = torch.empty_like(tri)
-    _bmm(fold(dt[:h]), fold(ab[2 * h:3 * h]), out=fold(dl[:h]))
-    _bmm(fold(dt[:h]).transpose(-1, -2), fold(ab[:h]), out=fold(dr[:h]))
-    _bmm(fold(ab[3 * h:]), fold(dt[h:]).transpose(-1, -2), out=fold(dl[h:]))
-    _bmm(fold(ab[h:2 * h]), fold(dt[h:]), out=fold(dr[h:]))
+    _contraction_grads(ab, dt, dl, dr, direction)
     dx = T.take_input_grad(x)
     p2 = torch.empty((g2, B2W_SLOT), device=x.device, dtype=torch.float32)
     maskf = maskf.reshape(m)
@@ -271,30 +297,31 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False):
     return [dx, *grads, dgi, dbi, dgo, dbo]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, master=False):
+def _backward_fake(leaves, mask, ds, saved, dy, master=False, direction=0):
     """One gradient per differentiable leaf, same shape and dtype."""
     return [torch.empty_like(t, dtype=torch.float32 if master and 1 <= i <= 6 else t.dtype) for i, t in enumerate(leaves)]
 
 
 @opaque(fake=_backward_fake, name="trimul_h100_gatepipe_selected_v2_d64_train_bwd")
 def backward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor,
-             saved: list[torch.Tensor], dy: torch.Tensor, master: bool = False) -> list[torch.Tensor]:
+             saved: list[torch.Tensor], dy: torch.Tensor, master: bool = False, direction: int = 0) -> list[torch.Tensor]:
     """Return the eleven leaf gradients (dx, dW*, dLN affine) in ``leaves`` order."""
     with T.native_context(leaves[0].device):
-        return _run_backward(leaves, mask, ds, saved, dy, master)
+        return _run_backward(leaves, mask, ds, saved, dy, master, direction)
 
 
 class _Training(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, *args):
+    def forward(ctx, direction, *args):
         leaves = list(args[:11])
+        ctx.direction = direction
         ctx.master = any(w.dtype == torch.float32 for w in leaves[1:7])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             weights = [*leaves[1:5], gate, output]
             prepared = [leaves[0], *weights, *leaves[7:], packed]
-            y, ab, tri, stats = forward(prepared, maskf, args[12])
+            y, ab, tri, stats = forward(prepared, maskf, args[12], direction)
             saved = [ab, tri, stats, packed, maskf]
             # Preserve per-forward lifetime and the backward saved-tensor contract.
             ctx.saved_count = len(saved)
@@ -309,7 +336,7 @@ class _Training(torch.autograd.Function):
             torch._foreach_copy_(weights, leaves[1:7])
         leaves = [leaves[0], *weights, *leaves[7:]]
         mask, ds = args[11:]
-        y, *saved = forward(leaves, mask, ds)
+        y, *saved = forward(leaves, mask, ds, direction)
         ctx.saved_count = len(saved)
         ctx.save_for_backward(*args, *saved, *weights)
         return y
@@ -320,21 +347,22 @@ class _Training(torch.autograd.Function):
         vals = ctx.saved_tensors
         leaves = [vals[0], *vals[-6:], *vals[7:11]]
         saved = list(vals[13:13+ctx.saved_count])
-        grads = backward(leaves, vals[11], vals[12], saved, dy, ctx.master)
+        grads = backward(leaves, vals[11], vals[12], saved, dy, ctx.master, ctx.direction)
         grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
-        return (*grads, None, None)
+        return (None, *grads, None, None)
 
 
-def bidirectional_trimul(*args):
+def bidirectional_trimul(*args, direction=0):
     """(x [B, n, n, 64], wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, dropscale [B n, D]) -> y; mask: a token mask [B, n] / pair
-    mask [B, n, n] or empty (the native preparation builds the FP32 pair mask [B n, n]). B > 1: samples b-major (see ``_front``)."""
+    mask [B, n, n] or empty (the native preparation builds the FP32 pair mask [B n, n]). B > 1: samples b-major (see ``_front``).
+    direction 1 / 2: a single-direction module with hidden 2 D (the module docstring)."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if T.cuda_training_fused_prepare_enabled():
             from ._h100_pack import fused_training_prepare
             packed, maskf, gate, output = fused_training_prepare(leaves, args[11])
             prepared = [leaves[0], *leaves[1:5], gate, output, *leaves[7:], packed]
-            return forward_nograd(prepared, maskf, args[12])
+            return forward_nograd(prepared, maskf, args[12], direction)
         if T.cuda_training_aux_enabled():
             from ._h100_pack import cast_weights
             leaves = [leaves[0], *cast_weights(leaves[1:7]), *leaves[7:]]
@@ -342,5 +370,5 @@ def bidirectional_trimul(*args):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
             torch._foreach_copy_(weights, leaves[1:7])
             leaves = [leaves[0], *weights, *leaves[7:]]
-        return forward_nograd(leaves, *args[11:])
-    return _Training.apply(*args)
+        return forward_nograd(leaves, *args[11:], direction)
+    return _Training.apply(direction, *args)

@@ -1,4 +1,5 @@
-"""Automatic dispatch to the packaged, selected bidirectional H100 training path."""
+"""Automatic dispatch to the packaged, selected bidirectional H100 training path. The hidden width equals the pair width, or is
+twice it in one direction at D64 / D128 (``_hidden_twice``: AF3 / Protenix template blocks, pair 64, hidden 128)."""
 
 from __future__ import annotations
 
@@ -74,6 +75,21 @@ def _total_memory(index: int) -> int:
     return torch.cuda.get_device_properties(index).total_memory
 
 
+def _hidden_twice(module, pair) -> bool:
+    """A single-direction module whose hidden width is twice the pair width, at D64 / D128 (AF3 / Protenix's template TriMul: pair
+    64, hidden 128). Per token it has exactly the bidirectional block's shapes -- K1 writes 4 D planes, K3 normalises a 2 D-channel
+    contraction output and projects it back to D, the same B1 / B2 / B7 backward -- only the cuBLAS contraction between the kernels
+    pairs the planes differently (all 2 D channels in the module's one direction instead of D per direction). So the bidirectional
+    D64 / D128 paths serve it with ``direction`` 1 / 2 (``h100_d64_b200gate``, ``h100_training``), and inference is the K1 / K3
+    unit at hidden 2 D (the bidirectional one) with the one-direction contraction."""
+    return hasattr(module, "outgoing") and pair.shape[-1] in (64, 128) and module.d_hidden == 2 * pair.shape[-1]
+
+
+def _hidden_ok(module, pair) -> bool:
+    """The hidden widths the D64 / D128 native paths take: the pair width, or twice it in one direction (``_hidden_twice``)."""
+    return module.d_hidden == pair.shape[-1] or _hidden_twice(module, pair)
+
+
 def _plan(module, pair, inference):
     """(chunk, checkpoint): the samples one launch takes and whether training chunks are checkpointed. chunk == B: one call."""
     bsz = pair.shape[0]
@@ -83,8 +99,9 @@ def _plan(module, pair, inference):
     granule = TRAINING_GRANULE if d >= 256 and inference else 16
     n = -(-n // granule) * granule                    # the padded length one launch runs (``_padded_inference``)
     bidirectional = not hasattr(module, "outgoing")
+    planes4 = bidirectional or _hidden_twice(module, pair)  # hidden 2 D in one direction: the bidirectional working set
     tokens = d * n * n                                 # bytes per sample = coefficient x tokens
-    peak = _WORKING_SET_PER_CHANNEL[(not inference, bidirectional, d <= 128)] * 1.05
+    peak = _WORKING_SET_PER_CHANNEL[(not inference, planes4, d <= 128)] * 1.05
     budget = CHUNK_MEMORY_FRACTION * _total_memory(pair.device.index if pair.device.index is not None else 0)
     limit = max(1, min(max_batch(d), (2 ** 31 - 1) // (n * n)))
     if (not inference and d >= 256 and bsz <= PER_SAMPLE_LEGACY_TRAINING.get((d, pair.shape[1], bidirectional), 0)
@@ -102,7 +119,7 @@ def _plan(module, pair, inference):
         free = budget - bsz * 4.0 * tokens
         return max(1, min(limit, int(free // (peak * tokens)))), False
     caller = bsz * _CALLER_PER_CHANNEL * tokens
-    saved = (_HELD_PER_CHANNEL[(bidirectional, d <= 128)] * 1.05 - 2.0) * tokens      # y is the caller's
+    saved = (_HELD_PER_CHANNEL[(planes4, d <= 128)] * 1.05 - 2.0) * tokens      # y is the caller's
     work = (peak - _CALLER_PER_CHANNEL) * tokens - saved                              # one chunk's backward workspace
     free = budget - caller - bsz * saved
     if free >= work:                                   # every chunk's saved state fits next to one chunk's backward workspace
@@ -296,7 +313,7 @@ def _serves_one(module, pair: torch.Tensor) -> bool:
     ):
         return False
     if (
-        module.d_hidden != pair.shape[-1]
+        not _hidden_ok(module, pair)
         or module.ln_pair.eps != 1e-5
         or module.ln_out.eps != 1e-5
     ):
@@ -441,9 +458,12 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
     from miniworld_engine.kernels.trimul_inproj.cuda._h100_runtime import (
         preserve_training,
     )
+    # hidden 2 D in one direction: the bidirectional D64 / D128 kernels (``_hidden_twice``), whatever the bucket policy
+    planes4 = bidirectional or _hidden_twice(module, pair)
     preserve = preserve_training(d) or _selected_native_training(module, pair)
     # (B samples take the preserved D128 kernels below: the general buckets run one sample)
-    if _native_buckets_enabled(pair) and d != 64 and not preserve and pair.shape[0] == 1:
+    if (_native_buckets_enabled(pair) and d != 64 and not preserve and pair.shape[0] == 1
+            and (bidirectional or not planes4)):
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             training_unit_scale,
         )
@@ -461,9 +481,9 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         if not bidirectional:
             return single_trimul(module.outgoing, *args)
         return native_buckets(True, True, *args)
-    # Bidirectional D128 takes the token mask [n]: its front K1 and B7 form m[i] & m[j] themselves.
-    # The other paths read a bf16 pair mask in forward and backward, so it is built once here.
-    token_path = bidirectional and d == 128 and (mask is None or mask.ndim == 2)
+    # Bidirectional D128 (and hidden 2 D in one direction, its kernels) takes the token mask [n]: its front K1 and B7 form m[i] & m[j]
+    # themselves. The other paths read a bf16 pair mask in forward and backward, so it is built once here.
+    token_path = planes4 and d == 128 and (mask is None or mask.ndim == 2)
     if preserve and not token_path:
         from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
             owned_training_mask,
@@ -504,12 +524,15 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
         module.to_gate.weight,
         module.to_out.weight,
     )
-    if bidirectional and d == 64:
-        from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_b200gate import (
-            bidirectional_trimul as apply,
-        )
-    elif bidirectional:
-        apply = bidirectional_trimul
+    if planes4:
+        if d == 64:
+            from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_b200gate import (
+                bidirectional_trimul as apply,
+            )
+        else:
+            apply = bidirectional_trimul
+        if not bidirectional:   # hidden 2 D in one direction: the contraction pairs all 2 D channels in it
+            apply = functools.partial(apply, direction=1 if module.outgoing else 2)
     elif d in (64, 256, 384, 512):
         if d == 64:
             from miniworld_engine.kernels.trimul_inproj.cuda.h100_uni_d64_b200gate import (
@@ -595,7 +618,7 @@ def _serves_inference_one(module, pair, *, bidirectional, dropscale=None):
         return False
     if ((pair.shape[-1] in (64, 128) or (not bidirectional and _native_residual_bucket(module, pair)))
             and (pair.shape[1] < MIN_INFERENCE_LENGTH
-                 or module.d_hidden != pair.shape[-1] or module.ln_pair.eps != 1e-5
+                 or not _hidden_ok(module, pair) or module.ln_pair.eps != 1e-5
                  or any(p.dtype != torch.float32 for p in (
                      module.ln_pair.weight, module.ln_pair.bias,
                      module.ln_out.weight, module.ln_out.bias)))):

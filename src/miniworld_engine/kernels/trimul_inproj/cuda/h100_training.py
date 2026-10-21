@@ -63,14 +63,40 @@ def _fold(t, n):
     return t.view(-1, n, n)
 
 
-def _contract(ab, n):
+def _contract(ab, n, direction=0):
     """Planes [512, B n, n] -> tri [256, B n, n]: outgoing (left right^T) on the first 128 channels, incoming (left^T right) on the
-    rest, every sample in the same two cuBLAS calls."""
+    rest, every sample in the same two cuBLAS calls. direction 1 / 2 (a single-direction module with hidden 256 = 2 D: per token
+    the bidirectional shapes, see ``bidirectional_trimul``): planes [left | right] (256 each), all 256 channels outgoing / incoming
+    in one call."""
     tri = ab.new_empty((256, ab.shape[1], n))
     f = lambda t: _fold(t, n)
-    _H100_BMM.bmm(f(ab[:128]), f(ab[256:384]).transpose(-1, -2), out=f(tri[:128]))
-    _H100_BMM.bmm(f(ab[128:256]).transpose(-1, -2), f(ab[384:]), out=f(tri[128:]))
+    if direction == 1:
+        _H100_BMM.bmm(f(ab[:256]), f(ab[256:]).transpose(-1, -2), out=f(tri))
+    elif direction == 2:
+        _H100_BMM.bmm(f(ab[:256]).transpose(-1, -2), f(ab[256:]), out=f(tri))
+    else:
+        _H100_BMM.bmm(f(ab[:128]), f(ab[256:384]).transpose(-1, -2), out=f(tri[:128]))
+        _H100_BMM.bmm(f(ab[128:256]).transpose(-1, -2), f(ab[384:]), out=f(tri[128:]))
     return tri
+
+
+def _contract_grads(ab, dt, n, direction=0):
+    """dl / dr (the gradients of the left / right planes) from dt, pairing the planes as ``_contract``."""
+    dl = torch.empty_like(dt)
+    dr = torch.empty_like(dt)
+    f = lambda t: _fold(t, n)   # batched samples: every sample in the same cuBLAS calls
+    if direction == 1:
+        _H100_BMM.bmm(f(dt), f(ab[256:]), out=f(dl))
+        _H100_BMM.bmm(f(dt).transpose(-1, -2), f(ab[:256]), out=f(dr))
+    elif direction == 2:
+        _H100_BMM.bmm(f(ab[256:]), f(dt).transpose(-1, -2), out=f(dl))
+        _H100_BMM.bmm(f(ab[:256]), f(dt), out=f(dr))
+    else:
+        _H100_BMM.bmm(f(dt[:128]), f(ab[256:384]), out=f(dl[:128]))
+        _H100_BMM.bmm(f(dt[:128]).transpose(-1, -2), f(ab[:128]), out=f(dr[:128]))
+        _H100_BMM.bmm(f(ab[384:]), f(dt[128:]).transpose(-1, -2), out=f(dl[128:]))
+        _H100_BMM.bmm(f(ab[128:256]), f(dt[128:]), out=f(dr[128:]))
+    return dl, dr
 
 
 USE_INFERENCE_K1 = True  # D128 front: the tuned inference K1 (same planes, accuracy unchanged, 94.6 -> 81 us at L384)
@@ -101,7 +127,7 @@ def _front(d):
     return O.front(d)[0]
 
 
-def _forward_fake(leaves, mask, ds):
+def _forward_fake(leaves, mask, ds, direction=0):
     """Return output, activations, FP32 LN statistics and per-forward weight pack."""
     x = leaves[0]
     n = x.shape[1]
@@ -124,9 +150,9 @@ def _forward_fake(leaves, mask, ds):
 # so previously compiled artifacts must not bind to these operators.
 @opaque(fake=_forward_fake, name="trimul_h100_train_fwd_wide_port")
 def forward(
-    leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor
+    leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int = 0
 ) -> list[torch.Tensor]:
-    """Run training forward with independently owned saved activations."""
+    """Run training forward with independently owned saved activations (direction: ``_contract``)."""
     x = leaves[0]
     n = x.shape[1]
     D = x.shape[-1]
@@ -138,19 +164,19 @@ def forward(
         d = _data(leaves, mask, ds)
         # Same K1 body/schedule as the selected training reference.
         ab = _front(d)
-        tri = _contract(ab, n)
+        tri = _contract(ab, n, direction)
         y, s = O.output(d, tri, ln=3, stats=2, method=-1)
         return [y, ab, tri, s["xn"].reshape_as(x), s["ro"], d["w1"],
                 x.new_empty((0,), dtype=torch.float32)]
 
 
-def _forward_nograd_fake(leaves, mask, ds):
+def _forward_nograd_fake(leaves, mask, ds, direction=0):
     """y like x."""
     return torch.empty_like(leaves[0])
 
 
 @opaque(fake=_forward_nograd_fake, name="trimul_h100_dropout_nograd_wide_port")
-def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) -> torch.Tensor:
+def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor, direction: int = 0) -> torch.Tensor:
     """Preserve training dropout/residual without backward-only D128 saves."""
     x = leaves[0]
     n, width = x.shape[1], x.shape[-1]
@@ -160,11 +186,11 @@ def forward_nograd(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Ten
         from miniworld_engine.kernels.trimul_inproj.cuda import h100_output as O
         d = _data(leaves, mask, ds)
         ab = _front(d)
-        tri = _contract(ab, n)
+        tri = _contract(ab, n, direction)
         return O.output(d, tri, ln=0, stats=0, method=-1)[0]
 
 
-def _backward_fake(leaves, mask, ds, saved, dy, fp32_dw=False, native=False):
+def _backward_fake(leaves, mask, ds, saved, dy, fp32_dw=False, native=False, direction=0):
     """Match each differentiable input gradient shape and dtype."""
     grads = [torch.empty_like(t, dtype=torch.float32 if fp32_dw and 1 <= i <= 6 else t.dtype) for i, t in enumerate(leaves)]
     if leaves[0].shape[-1] == 128:
@@ -182,7 +208,7 @@ def backward(
     mask: torch.Tensor,
     ds: torch.Tensor,
     saved: list[torch.Tensor],
-    dy: torch.Tensor, fp32_dw: bool = False, native: bool = False,
+    dy: torch.Tensor, fp32_dw: bool = False, native: bool = False, direction: int = 0,
 ) -> list[torch.Tensor]:
     """Run CUDA B1/B7 and contraction gradients using saved values."""
     x = leaves[0]
@@ -207,13 +233,7 @@ def backward(
         cfg["defines"] = dict(cfg.get("defines") or {}, MASTER_FP32=int(fp32_dw))
         b1 = B1.Plan(dict(d, x=xn), dy, tri, stats, **cfg)
         dg, dwg, dt, dgo, dbo, dwp = b1()
-        dl = torch.empty_like(tri)
-        dr = torch.empty_like(tri)
-        f = lambda t: _fold(t, n)   # batched samples: every sample in the same four cuBLAS calls
-        _H100_BMM.bmm(f(dt[:128]), f(ab[256:384]), out=f(dl[:128]))
-        _H100_BMM.bmm(f(dt[:128]).transpose(-1, -2), f(ab[:128]), out=f(dr[:128]))
-        _H100_BMM.bmm(f(ab[384:]), f(dt[128:]).transpose(-1, -2), out=f(dl[128:]))
-        _H100_BMM.bmm(f(ab[128:256]), f(dt[128:]), out=f(dr[128:]))
+        dl, dr = _contract_grads(ab, dt, n, direction)
         b7 = B7.Plan(d, dy, dl, dr, dg, xn=xn)
         dx, dwl, dwlg, dwr, dwrg, dgi, dbi = b7()
         from ._h100_pack import dense_native
@@ -233,9 +253,10 @@ def backward(
 
 class _Training(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, *args):
+    def forward(ctx, direction, *args):
         leaves = list(args[:11])
         mask, ds = args[11:]
+        ctx.direction = direction
         weights = leaves[1:7]
         ctx.master = any(w.dtype == torch.float32 for w in weights)
         ctx.native = T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True) or T.bidi_training(leaves[0])
@@ -246,7 +267,7 @@ class _Training(torch.autograd.Function):
             copies = [torch.empty_like(w, dtype=leaves[0].dtype) for w in weights]
             torch._foreach_copy_(copies, weights)
             leaves = [leaves[0], *copies, *leaves[7:]]
-        y, *saved = forward(leaves, mask, ds)
+        y, *saved = forward(leaves, mask, ds, direction)
         ctx.saved_count = len(saved)
         ctx.save_for_backward(*args, *saved, *leaves[1:7])
         return y
@@ -257,7 +278,7 @@ class _Training(torch.autograd.Function):
         vals = ctx.saved_tensors
         end = 13 + ctx.saved_count
         leaves = [vals[0], *vals[end:], *vals[7:11]]
-        grads = backward(leaves, vals[11], vals[12], list(vals[13:end]), dy, ctx.master, ctx.native)
+        grads = backward(leaves, vals[11], vals[12], list(vals[13:end]), dy, ctx.master, ctx.native, ctx.direction)
         if vals[0].shape[-1] == 128:
             grads = [grads[0], *(w.t() for w in grads[1].unbind()), *grads[2:]]
         if ctx.native:
@@ -265,10 +286,12 @@ class _Training(torch.autograd.Function):
             grads = native_training_grads(grads,list(vals[:11]))
         else:
             grads = [g.to(t.dtype) for g, t in zip(grads, vals[:11], strict=True)]
-        return (*grads, None, None)
+        return (None, *grads, None, None)
 
 
-def bidirectional_trimul(*args):
+def bidirectional_trimul(*args, direction=0):
+    """(x [B, n, n, D], wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, mask, dropscale [B n, D]) -> y. direction 1 / 2: a single-direction
+    D128 module with hidden 256 (2 D): the same kernels, the contraction pairs the planes per ``_contract``."""
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if T.preserve_training(leaves[0].shape[-1]) or T.d128_training(leaves[0], bidirectional=True) or T.bidi_training(leaves[0]):
@@ -278,5 +301,5 @@ def bidirectional_trimul(*args):
             weights = [torch.empty_like(w, dtype=leaves[0].dtype) for w in leaves[1:7]]
             torch._foreach_copy_(weights, leaves[1:7])
             leaves = [leaves[0], *weights, *leaves[7:]]
-        return forward_nograd(leaves, *args[11:])
-    return _Training.apply(*args)
+        return forward_nograd(leaves, *args[11:], direction)
+    return _Training.apply(direction, *args)
