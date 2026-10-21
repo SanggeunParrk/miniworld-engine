@@ -15,10 +15,11 @@ from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.integrations.h100_master import pack as pack_master
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.swa_dit.dispatch import (
+    _h100_global,
     native_h100_cast,
-    native_h100_enabled,
     native_h100_mod_bwd,
     native_h100_mod_fwd,
+    native_h100_stages,
     swa_dit_block_bwd,
     swa_dit_block_fwd,
     swa_dit_mod_bwd_sm90,
@@ -42,7 +43,7 @@ class SWADiTBlockFunction(torch.autograd.Function):
         # widened here and its gradient handed back in its own dtype.
         ctx.mod_dtype = mod.dtype
         mod = mod.contiguous() if mod.dtype is torch.float32 else mod.float().contiguous()
-        ctx.native_h100 = native_h100_enabled(q, True)
+        ctx.native_h100 = native_h100_stages(q) or _h100_global(q, half_window)
         if ctx.native_h100:
             wqkv, wg, wo, wu, wd = native_h100_cast(list(raw_weights), [torch.empty_like(w, dtype=q.dtype) for w in raw_weights])
         elif q.dtype == torch.bfloat16 and any(w.dtype == torch.float32 for w in raw_weights) and is_h100(q.device):

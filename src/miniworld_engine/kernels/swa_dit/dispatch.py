@@ -70,6 +70,7 @@ from miniworld_engine.kernels.swa_dit.interface import (
     HALF_WINDOW,
     N_HEAD,
     N_HIDDEN,
+    _matmul_precision,
     is_global,
 )
 from miniworld_engine.kernels.swa_dit.triton.backward import (
@@ -123,18 +124,52 @@ def _native_b200_default(q, training=None):
 
 
 def native_h100_enabled(q, training=None):
+    """Whether H100 serves this fused-block call (every sm_90 call unless ``settings.swa_dit_h100_native`` is False); which
+    stages run it is :func:`native_h100_stages`."""
     from miniworld_engine.kernels.swa_dit.cuda.loader import is_sm90
     override = settings.current().swa_dit_h100_native
     if override is not None:
         return override and is_sm90(q.device)
-    if (q.ndim == 3 and q.shape[0] in (1, 5)
-            and q.shape[1] in (1024, 2048, 4096, 8192) and q.shape[2] == 128):
-        # The per-cell speed gates kept some cells on the composed path, which mixes in Triton kernels. H100 has no Triton
-        # fallback (modules.dispatch.restricted_card): those cells take the native stages too unless Triton was asked for.
-        from miniworld_engine.modules.dispatch import restricted_card
-
-        return is_sm90(q.device) and (_native_b200_default(q, training) or restricted_card(q.device))
     return is_sm90(q.device)
+
+
+def native_h100_stages(q) -> bool:
+    """Whether an H100 call runs the native stages (``_native_h100_fwd`` / ``_bwd``) rather than the composed ones.
+
+    bf16 takes the composed stages: every one hand-CUDA on sm_90 (02073e40), no Triton launch anywhere on the grid A 1 - 48 x
+    256 - 16384 atoms (ragged included), inference and training, shared and per-sample conditioning, and 1.1 - 6.7x faster than
+    the native stages (A 48, 2048 atoms, training: 1.25 against 2.82 ms; A 5, 8192 atoms, inference: 0.22 against 0.31 ms).
+    A stage whose CUDA build is missing would fall to its Triton kernel, which H100 does not run: the native stages then.
+    fp32 under TF32 (matmul precision "high" / "medium") takes the composed stages too, ``swa_fp32.cu`` on tf32 wgmma: 1.3 - 1.5x
+    faster than the native stages and no less accurate (A 5, 1024 - 24 576 atoms, inference: 0.069 against 0.104 ms, 1.23 against
+    1.65 ms). Under "highest" fp32 keeps the native stages (exact fp32 cuBLAS projections). ``settings.swa_dit_h100_native=True``
+    forces the native stages.
+    """
+    if not native_h100_enabled(q):
+        return False
+    if settings.current().swa_dit_h100_native is True:
+        return True
+    if q.dtype == torch.float32:
+        # _fp32_cuda's test, with the precision read as a constant under torch.compile (this runs in the autograd.Function's forward)
+        composed = (settings.current().swa_dit_fp32_cuda and _matmul_precision() != "highest"
+                    and _composed_cuda(q.device, "fp32"))
+    else:
+        composed = q.dtype == torch.bfloat16 and _composed_cuda(q.device)
+    return not composed
+
+
+def _composed_cuda(device: torch.device, extra: str | None = None) -> bool:
+    """Whether every hand-CUDA extension the composed bf16 stages use (and ``extra``: "fp32" for the fp32 ones) builds / loads on
+    ``device`` (the prebuilt bundle or the JIT); ``engine_backend="triton"`` asks for their Triton kernels instead."""
+    return settings.current().engine_backend != "triton" and _composed_builds(device, extra)
+
+
+@functools.lru_cache(maxsize=8)
+def _composed_builds(device: torch.device, extra: str | None) -> bool:
+    from miniworld_engine.kernels.swa_dit.cuda.loader import extension
+
+    stages = ("qkvg", "fwd", "bwd", "attn", "slab", "pack", "mod", "wgrad") + ((extra,) if extra else ())
+    return all(extension(which) is not None for which in stages)
 
 
 def _h100_global(q, half_window):
@@ -151,6 +186,15 @@ def _native_b200_fusion(q=None, training=None, B=None):
     if q is None or (B is not None and q.ndim == 3 and q.shape[0] != B):
         return False
     return _native_b200_default(q, training)
+
+
+def _tiled_serves(qh, d_out=None):
+    """Whether the tiled window attention (``swa_tiled``: TMA tiles, wgmma, persistent waves) takes this call: bf16 heads
+    [N, 4, S, 32] with S a multiple of 64 (and a bf16 dO for the backward). It is the attention of every native call it serves,
+    whatever the row stages around it are: tying it to the B200-style row fusion (``_native_b200_fusion``) sent a call whose
+    samples share their conditioning -- every diffusion sampling step -- and every fp32 call to the untiled ``native_attention``,
+    37x slower (A 5, 8192 atoms: 1520 against 41 us)."""
+    return qh.shape[2] % 64 == 0 and (d_out is None or d_out.dtype == torch.bfloat16)
 
 
 def _native_h100_extension(which="qkvg"):
@@ -224,7 +268,7 @@ def _native_h100_fwd(q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd, B, hw, eps, sav
         o.zero_()
         attn_global_fwd(qh, kh, vh, sequ, o, lse)
     else:
-        attention = ext.tiled_attention if fusion else ext.native_attention
+        attention = ext.tiled_attention if _tiled_serves(qh) else ext.native_attention
         attention([qh, kh, vh, sequ], [o, lse], 0)
     if bf:
         ffn_ext = _native_h100_extension("fwd_small" if small else "fwd")
@@ -294,7 +338,7 @@ def _native_h100_bwd(dy, q, mod, cs, sn, sequ, wqkv, wg, wo, wu, wd,
     else:
         dqh, dkh, dvh = [torch.empty_like(qh) for _ in range(3)]
         ai, ao = [qh, kh, vh, sequ, dO, lse, delta], [dqh, dkh, dvh]
-        attention = ext.tiled_attention if fusion else ext.native_attention
+        attention = ext.tiled_attention if _tiled_serves(qh, dO) else ext.native_attention
         attention(ai, ao, 1)
         attention(ai, ao, 2)
     dp = empty(M, 512)
@@ -341,6 +385,10 @@ def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor,
     ext.native_copy([c], [a], 1)
     ext.native_copy([w], [w32], 0)
     with torch.autocast("cuda", enabled=False):
+        if c.dtype == torch.bfloat16 and w.dtype == torch.bfloat16:
+            # A bf16 block: bf16 operands -- the module's own GEMM precision -- on the tensor cores, fp32 accumulation and output.
+            # The fp32 copies ran an FFMA GEMM (A 5, 8192 atoms: 49 us shared, 228 us per-sample conditioning rows).
+            return torch.mm(a.to(torch.bfloat16), w.t(), out_dtype=torch.float32), a, w32
         return _native_mm(a, w32.t()), a, w32
 
 
@@ -609,8 +657,10 @@ def swa_dit_block_fwd(
     """The block forward. q [N, S, C] bf16 or fp32 (the weights in the same dtype); mod [B*S, 6C] fp32 (hoisted adaLN
     modulation of this block); cos / sin [B*S, D/2] fp32; seqused [N] int32. Returns [out] or, with ``save``,
     [out, Qh, Kh, Vh, G, O, lse, q1, X, PQ, PK, Att, Y, FF] (the tensors the backward reads)."""
-    if native_h100_enabled(q, save) or _h100_global(q, half_window):
-        return _native_h100_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
+    if native_h100_stages(q) or _h100_global(q, half_window):
+        # The native stages take an fp32 modulation; a bf16 one comes from the composed bf16 hoist (global attention, which only the
+        # native stages serve on H100, under a bf16 call that the composed stages otherwise take).
+        return _native_h100_fwd(q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save)
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
@@ -935,9 +985,11 @@ def swa_dit_block_bwd(
     """Backward of :func:`swa_dit_block_fwd` from its saved tensors. dy [N, S, C] in q's dtype. Returns [dq [N, S, C] in q's
     dtype, dmod [B*S, 6C] fp32, dWqkv, dWg, dWo, dWu, dWd fp32]: the weight gradients leave their fp32 accumulators unrounded
     (the parameters may be an fp32 master; ``autograd.SWADiTBlockFunction`` hands them back in the parameters' dtype)."""
-    if native_h100_enabled(q, True) or _h100_global(q, half_window):
-        return _native_h100_bwd(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd,
-                                qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
+    if native_h100_stages(q) or _h100_global(q, half_window):
+        grads = _native_h100_bwd(dy, q, mod.float(), cos, sin, seqused, wqkv, wg, wo, wu, wd,
+                                 qh, kh, vh, g, o, lse, q1, x, pq, pk, att, y, ffn, B, half_window, eps)
+        grads[1] = grads[1].to(mod.dtype)   # dmod like mod (the contract), whatever the native stages computed it in
+        return grads
     if is_global(half_window):
         sm100 = _sm100(q, wd.shape[1], half_window, eps)
         if sm100 is None:
@@ -1134,12 +1186,13 @@ def swa_dit_block_bwd(
         if ext_w is not None:
             dq, dP, datt, gated = side
             dwqkv, dwg, dwo, dwu, dwd = ext_w.wgrad(dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
-            return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+            # the weight gradients leave as fp32, as the contract (and the fake) says; the autograd node casts them
+            return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
         dq, dwqkv, dwg, dwo = side
         if dwu is None or dwd is None:
             dwu = dab.t() @ y
             dwd = dffn.t() @ hh
-        return [dq.view(N, S, C), dmod, dwqkv, dwg, dwo, dwu, dwd]
+        return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
     _swa_oproj_bwd_kernel[grid_t](
         dq1,
         o,

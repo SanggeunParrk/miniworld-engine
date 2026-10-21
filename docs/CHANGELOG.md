@@ -8,6 +8,21 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- H100 SWA atom DiT (`SWADiTBlock`, `swa_dit_block`, ESMFold2's atom block) ran 5-9x slower than it did on 2026-10-14. Since 2026-10-18 every
+  H100 call took the native stages (`_native_h100_fwd` / `_bwd`) instead of the composed hand-CUDA stages documented in
+  `docs/gpus/h100/swa_atom_dit`, and inside the native stages the window attention was the untiled `native_attention` for every call whose
+  samples share their conditioning (every diffusion sampling step) or that runs fp32: 1520 against 41 us at A 5, 8192 atoms. The tiled
+  attention now serves every bf16-head call with S % 64 == 0 (`_tiled_serves`), and the stages are chosen by `native_h100_stages`: bf16, and
+  fp32 under TF32, take the composed stages (all hand-CUDA, no Triton launch, A 1 - 48 x 256 - 16 384 atoms, ragged, train / infer);
+  fp32 under "highest" and global attention keep the native ones. `native_h100_enabled` again only says whether H100 serves the call.
+  The native stages' bf16 modulation runs on the tensor cores (it was an fp32 FFMA GEMM). A bf16 modulation reaching the native stages
+  (global attention) is widened there, and the composed bf16 backward returns fp32 weight gradients as its contract says. One block,
+  A 5, CUDA graph, bf16: 1024 / 8192 / 24 576 atoms 0.264 / 1.663 / 4.835 -> 0.051 / 0.196 / 0.545 ms (1.5 - 2.3x ahead of Anthropic's
+  ESMFold2 kit); fp32 (TF32) 1.3 - 1.5x faster inference, 1.5 - 1.7x faster training than on the native stages. Record:
+  `docs/records/swa_dit_h100_routing_20261021.md`.
+
 ## [2.3.6] - 2026-10-21
 
 ### Added

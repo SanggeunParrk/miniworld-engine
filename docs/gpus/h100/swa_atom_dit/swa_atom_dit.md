@@ -18,6 +18,26 @@ H100 stages (fp32 rows, exact-fp32 cuBLAS projections, bf16 attention operands a
 (B200, or `swa_dit_h100_native=False`) runs the PyTorch statements instead of the TF32 or Triton fp32 kernels
 (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`).
 
+## Which stages run a call (2026-10-21)
+
+`dispatch.native_h100_stages`: bf16, and fp32 under TF32, take the composed stages in the table below (every one hand-CUDA, no
+Triton launch); fp32 under "highest", global attention, `swa_dit_h100_native=True`, or a composed extension that does not load take
+the native stages (`_native_h100_fwd` / `_bwd`: `swa_native::rows` + the tiled window attention). From 2026-10-18 to 2.3.6 every H100
+call took the native stages, most of them with the untiled attention: 5-9x slower; the fix and the measurements are in
+[../../../records/swa_dit_h100_routing_20261021.md](../../../records/swa_dit_h100_routing_20261021.md). Against Anthropic's ESMFold2
+kit (`ef2_atom`, bf16 GEMMs, inference only), one block, A = 5, shared conditioning, CUDA graph:
+
+| atoms | ours bf16 (ms) | ours fp32 / TF32 (ms) | Anthropic `ef2_atom` (ms) | bf16 vs Anthropic |
+|---|---|---|---|---|
+| 1024 | 0.051 | 0.074 | 0.078 (fp32 call 0.068) | 1.54x |
+| 4096 | 0.108 | 0.222 | 0.250 (0.202) | 2.32x |
+| 8192 | 0.196 | 0.428 | 0.442 (0.356) | 2.26x |
+| 24 576 | 0.539 | 1.199 | 1.269 (1.025) | 2.35x |
+
+Anthropic's kernels round GEMM operands to bf16 for an fp32 call too, so our bf16 column is the like-for-like one; our fp32 column
+(tf32 wgmma, FFN weights split hi + lo) is 0.83 - 0.92x of their fp32 call. Training (A = 48, bf16 / fp32): 0.655 / 1.254 ms at
+1024 atoms, 2.19 / 4.61 ms at 4096 (PyTorch 5.82 / 9.51 and 54.8 / 109.1 ms); Anthropic's kit has no backward.
+
 ## Where the code is
 
 | stage | bf16 | fp32 (TF32 tensor cores) |
