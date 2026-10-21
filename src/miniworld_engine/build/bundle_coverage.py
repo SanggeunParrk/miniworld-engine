@@ -241,12 +241,20 @@ def _run_block(c: dict) -> None:
         model.train(c["train"])
         if c["train"]:
             q = q.requires_grad_(True)
-        with torch.set_grad_enabled(c["train"]), torch.autocast("cuda", dtype=torch.bfloat16,
-                                                                 enabled=autocast or dt is torch.bfloat16):
-            out = model(q, cond, params)
-            if c["train"]:
-                out.float().sum().backward()
-        torch.cuda.synchronize()
+        # fp32 activations take the native H100 stages under "highest" and the composed TF32 ones (swa_fp32.cu) under "high",
+        # what MiniWorld's trainer sets: both run.
+        before = torch.get_float32_matmul_precision()
+        try:
+            for precision in ("highest", "high") if dt is torch.float32 else (before,):
+                torch.set_float32_matmul_precision(precision)
+                with torch.set_grad_enabled(c["train"]), torch.autocast("cuda", dtype=torch.bfloat16,
+                                                                         enabled=autocast or dt is torch.bfloat16):
+                    out = model(q, cond, params)
+                    if c["train"]:
+                        out.float().sum().backward()
+                torch.cuda.synchronize()
+        finally:
+            torch.set_float32_matmul_precision(before)
         return
     elif c["kind"] == "trimul_hidden2x":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
