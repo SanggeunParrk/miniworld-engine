@@ -11,7 +11,8 @@ the number of batched samples. This driver runs, on the current GPU:
 * the architecture blocks the model is built from (Pairformer with one- and two-directional TriMul, the token
   DiffusionTransformer with its pair-bias / core-precision options and batched pairs, the bias-only token DiT (one
   pair shared by the samples or one per sample, masked, hoisted, d_cond 384 / 768), the SWA atom transformer in its
-  three styles, the block-local atom DiT and the template-stack TriMul (one direction, hidden twice the pair width)),
+  three styles, the block-local atom DiT (AF3, and ESMFold2's variant for inference) and the template-stack TriMul (one
+  direction, hidden twice the pair width)),
   inference and training,
 
 every one in bf16, fp32, bf16-mixed (fp32 parameters under bf16 autocast, MiniWorld's precision) and
@@ -123,6 +124,9 @@ def cases() -> list[dict]:
                                 "samples": 48 if train else 5, "heavy": n >= HEAVY_ATOMS})
                 out.append({"kind": "local_dit", "N": n, "train": train, "dtype": prec,
                             "samples": 48 if train else 5, "heavy": n >= HEAVY_ATOMS})
+                if not train:   # ESMFold2's atom block (RMS / SiLU AdaLN, raw gates, rotary q / k, 192-key +/- 64 window): inference
+                    out.append({"kind": "local_dit_esmfold2", "N": n, "train": False, "dtype": prec,  # noqa: PERF401
+                                "samples": 5, "heavy": n >= HEAVY_ATOMS})
     # Template-stack TriMul: one direction, hidden twice the pair width (pair 64 / hidden 128, 128 / 256), B 1 and 4 templates.
     for train in (False, True):
         for prec in PRECISIONS:
@@ -276,6 +280,20 @@ def _run_block(c: dict) -> None:
             if c["train"]:
                 x.float().sum().backward()
         torch.cuda.synchronize()
+        return
+    elif c["kind"] == "local_dit_esmfold2":
+        from miniworld_engine.modules.exceptions import ImplementationType as MI
+        from miniworld_engine.modules.local_dit import ESMFOLD2, LocalDiTBlock
+
+        model = LocalDiTBlock(128, 128, 16, 4, n=2, implementation=MI.TRITON, **ESMFOLD2)
+        a, n = c["samples"], c["N"]
+        angles = torch.randn(1, n, 16, device="cuda")
+        mask = torch.ones(1, n, device="cuda", dtype=torch.bool)
+        args = (torch.randn(a, 1, n, 128, device="cuda", dtype=dt), torch.randn(a, 1, n, 128, device="cuda", dtype=dt),
+                torch.randn(1, (n + 31) // 32, 32, 192, 16, device="cuda", dtype=dt), mask)
+        model = model.cuda().to(pdt)
+        _randomize(model)
+        _step(model, args, False, autocast, {"rope": (angles.cos(), angles.sin())})
         return
     elif c["kind"] == "local_dit":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
