@@ -57,7 +57,6 @@ class AdaptiveLayerNorm(nn.Module):
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.
             from miniworld_engine.integrations.h100_master import master_linear
-
             from miniworld_engine.modules import dispatch as _dispatch
 
             engine_leg = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
@@ -96,3 +95,34 @@ class AdaptiveLayerNorm(nn.Module):
                 )
 
         raise InvalidImplementationError(self.implementation)
+
+
+#: The epsilon of :class:`AdaptiveRMSNorm` (and of the q / k RMSNorms beside it): float32's machine epsilon whatever the input dtype.
+RMS_EPS = torch.finfo(torch.float32).eps
+
+
+class AdaptiveRMSNorm(nn.Module):
+    """ESMFold2's atom AdaLN: an affine-free RMSNorm of the activation, SiLU (not a LayerNorm) of the conditioning, and the
+    identity-centred scale with no bias on either projection:
+
+        out = (1 + W_s silu(c)) * x / sqrt(mean(x^2) + eps) + W_b silu(c)          eps = float32 epsilon
+
+    Parameters ``to_scale.weight`` and ``to_bias.weight`` (both zero-initialised: the identity). The norm runs in float32 and the result
+    comes back in ``x``'s dtype.
+    """
+
+    def __init__(self, d_hidden: int, d_cond: int, *, dtype: torch.dtype = torch.float32) -> None:
+        super().__init__()
+        self.to_scale = Linear(d_cond, d_hidden, bias=False, init="zero", dtype=dtype)
+        self.to_bias = Linear(d_cond, d_hidden, bias=False, init="zero", dtype=dtype)
+
+    def forward(self, x: torch.Tensor, cond: torch.Tensor) -> torch.Tensor:
+        from miniworld_engine.integrations.h100_master import master_linear
+
+        wide = torch.float64 if x.dtype == torch.float64 else torch.float32
+        xw = x.to(wide)
+        norm = xw * torch.rsqrt(xw.pow(2).mean(-1, keepdim=True) + RMS_EPS)
+        context = torch.nn.functional.silu(cond)
+        scale = master_linear(self.to_scale, context)
+        bias = master_linear(self.to_bias, context)
+        return ((scale.to(wide) + 1.0) * norm + bias.to(wide)).to(x.dtype)

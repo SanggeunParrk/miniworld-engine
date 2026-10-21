@@ -29,8 +29,10 @@ def _hopper(t) -> bool:
     return t.is_cuda and torch.cuda.get_device_capability(t.device) == (9, 0)
 
 
-def matches(module, single, cond, pair, mask) -> bool:
+def matches(module, single, cond, pair, mask, rope=None) -> bool:
     """H100, cross-attention AF3 atom block at the atom widths, fp32 inference (no gradient recorded)."""
+    if _ld._esm_variant(module):
+        return False
     if not (single.is_cuda and _hopper(single)):
         return False
     if not settings.current().local_dit_h100_mma:
@@ -569,7 +571,7 @@ def _weights_of(module):
     return [module.get_parameter(n) for n in names]
 
 
-def run_block(module, single, cond, pair, mask=None):
+def run_block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream on the H100 warp-level kernels; ``matches`` must have accepted the call."""
     weights = _weights_of(module)
     n0 = single.shape[2]

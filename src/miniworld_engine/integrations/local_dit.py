@@ -329,14 +329,22 @@ def _fp32_call(module, single, cond, pair) -> bool:
 
 
 def _af3_variant(module) -> bool:
-    """AlphaFold 3's block: the K/V AdaLN beside the first one (``kv_norm="parallel"``) or the slid key window (``key_window="slide"``)."""
-    return getattr(module, "kv_norm", "chained") != "chained" or getattr(module, "key_window", "pad") != "pad"
+    """AlphaFold 3's block: the K/V AdaLN beside the first one (``kv_norm="parallel"``) or the slid key window (``key_window="slide"``);
+    or ESMFold2's options on top of it (192 keys, the rank window, RMS / SiLU conditioning, rotary)."""
+    return (getattr(module, "kv_norm", "chained") != "chained" or getattr(module, "key_window", "pad") != "pad"
+            or _esm_variant(module))
 
 
-def serves(module, single, cond, pair, mask) -> bool:
+def _esm_variant(module) -> bool:
+    """Any of ESMFold2's options (``modules.local_dit.ESMFOLD2``): only the H100 kernels know them."""
+    return (getattr(module, "keys", KEYS) != KEYS or getattr(module, "window_half", None) is not None
+            or getattr(module, "conditioning", "layernorm") != "layernorm" or getattr(module, "rope", False))
+
+
+def serves(module, single, cond, pair, mask, rope=None) -> bool:
     from miniworld_engine.integrations import local_dit_h100
 
-    if local_dit_h100.matches(module, single, cond, pair, mask):
+    if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return True
     if _af3_variant(module):
         return False  # only the H100 mma kernels know AlphaFold 3's K/V norm and key window; the others keep the composed path
@@ -1252,12 +1260,12 @@ def _infer(single, cond, pair, mask, weights):
     return _block_fwd(single, cond, pair, mask, list(weights), False)[0]
 
 
-def block(module, single, cond, pair, mask=None):
+def block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream (both residuals included), on the sm_100a kernels; ``serves()`` must have accepted the call."""
     from miniworld_engine.integrations import local_dit_h100
 
-    if local_dit_h100.matches(module, single, cond, pair, mask):
-        return local_dit_h100.run_block(module, single, cond, pair, mask)
+    if local_dit_h100.matches(module, single, cond, pair, mask, rope):
+        return local_dit_h100.run_block(module, single, cond, pair, mask, rope)
     weights = [
         module.get_parameter(name)
         for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))
