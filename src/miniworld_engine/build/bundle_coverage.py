@@ -229,8 +229,11 @@ def _run_block(c: dict) -> None:
         )
         from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
+        # esmfold2 runs the fused block (kernels/swa_dit), as MiniWorld does (MINIWORLD_SWA_FUSED): settings.swa_fused is off by
+        # default, and without it no engine case reached the fused block's extensions (2.3.0 - 2.3.6 got them from MiniWorld only).
         config = SWAAtomTransformer.Config(n_block=1, block_style="af3" if c["variant"].startswith("af3") else "esmfold2",
-                                           global_attn=c["variant"] == "af3_global")
+                                           global_attn=c["variant"] == "af3_global",
+                                           fused_triton=True if c["variant"] == "esmfold2" else None)
         model = SWAAtomTransformer(config).cuda().to(pdt)
         _randomize(model)
         a, s = c["samples"], c["N"]
