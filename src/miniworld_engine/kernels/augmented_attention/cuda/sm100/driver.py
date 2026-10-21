@@ -2,10 +2,12 @@
 on torch's current stream (capture-safe).  Mirrors the argument conventions of the Anthropic esm_t16 loader (ef2_t16_nvjit)."""
 import ctypes
 import struct
+import threading
 import torch
 from cuda.bindings import driver as cu
 
 _INIT = False
+_TLS = threading.local()
 
 
 def _chk(res, what):
@@ -21,6 +23,31 @@ def init():
         torch.zeros(1, device="cuda")
         _chk(cu.cuInit(0), "cuInit")
         _INIT = True
+    ensure_context()
+
+
+def ensure_context(device_index: int | None = None) -> None:
+    """Make the device's primary context -- the one torch's runtime uses -- current on the calling thread (once per thread and
+    device). The driver API needs a current context, and a thread whose first CUDA work is a cubin load or a driver launch has none:
+    autograd's backward thread, when nothing before has made a runtime call on it (a CUDA-graph warm-up of a training step whose
+    backward starts with a bias-only DiT block: cuModuleLoadData failed with CUDA_ERROR_INVALID_CONTEXT, and the fused backward
+    fell back to its per-step launches for the rest of the process)."""
+    idx = torch.cuda.current_device() if device_index is None else int(device_index)
+    seen = getattr(_TLS, "devices", None)
+    if seen is None:
+        seen = _TLS.devices = set()
+    if idx in seen:
+        return
+    err, ctx = cu.cuCtxGetCurrent()
+    current = None
+    if err == cu.CUresult.CUDA_SUCCESS and int(ctx) != 0:
+        e2, dev = cu.cuCtxGetDevice()
+        current = int(dev) if e2 == cu.CUresult.CUDA_SUCCESS else None
+    if current != idx:
+        dev = _chk(cu.cuDeviceGet(idx), "cuDeviceGet")
+        primary = _chk(cu.cuDevicePrimaryCtxRetain(dev), "cuDevicePrimaryCtxRetain")
+        _chk(cu.cuCtxSetCurrent(primary), "cuCtxSetCurrent")
+    seen.add(idx)
 
 
 class TensorMap:
