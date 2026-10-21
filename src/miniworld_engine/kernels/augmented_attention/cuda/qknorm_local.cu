@@ -3,6 +3,8 @@
 //
 //   forward   qo = q * rsqrt(mean(q^2) + eps) * wq,    ko likewise              (q, k [M, 128] bf16 or fp32, weights fp32 [32])
 //   backward  with x_hat = x rstd, g = dn w:   dx = rstd (g - x_hat mean(g x_hat)),   dw += dn x_hat
+//   rotary    (qknorm_rope_fwd, ESMFold2, inference) then qo = rot(qo), ko = rot(ko) with per-atom tables cos / sin [N, 16] (row r is atom r % N):
+//             channel c < 16 of a head pairs with c + 16, (a, b) -> (a cos - b sin, b cos + a sin) -- the partner is lane ^ 4.
 //
 // A warp per row, 8 lanes per head, 4 elements a lane: the mean of squares and the backward's mean are quad-of-octet shuffles, nothing
 // touches shared memory in the forward. The backward runs in place on the gradient slices of the block's [dg | dq | dk | dv] buffer
@@ -51,7 +53,8 @@ __device__ __forceinline__ float octet_sum(float v) {          // the 8 lanes of
 template <typename T>
 __global__ void __launch_bounds__(WARPS * 32)
 qknorm_fwd_k(const T* __restrict__ q, const T* __restrict__ k, const float* __restrict__ wq, const float* __restrict__ wk,
-             T* __restrict__ qo, T* __restrict__ ko, long M, float eq, float ek, bool rnd) {
+             T* __restrict__ qo, T* __restrict__ ko, long M, float eq, float ek, bool rnd, const float* __restrict__ cs = nullptr,
+             const float* __restrict__ sn = nullptr, long natoms = 1) {
   const long row = (long)blockIdx.x * WARPS + threadIdx.x / 32;
   if (row >= M) return;
   const int lane = threadIdx.x % 32, col = lane * 4, d = (lane % 8) * 4;
@@ -64,7 +67,16 @@ qknorm_fwd_k(const T* __restrict__ q, const T* __restrict__ k, const float* __re
     const float4 x = load4<T>(src[t]);
     const float rstd = rsqrtf(octet_sum(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w) / HD + eps[t]);
     const float4 wv = *reinterpret_cast<const float4*>(w[t]);
-    store4<T>(dst[t], make_float4(x.x * rstd * wv.x, x.y * rstd * wv.y, x.z * rstd * wv.z, x.w * rstd * wv.w), rnd);
+    float4 y = make_float4(x.x * rstd * wv.x, x.y * rstd * wv.y, x.z * rstd * wv.z, x.w * rstd * wv.w);
+    if (cs != nullptr) {                                         // the rotary of the normalised values (fp32)
+      const int r = d % 16;
+      const float4 c = *reinterpret_cast<const float4*>(cs + (row % natoms) * 16 + r), s = *reinterpret_cast<const float4*>(sn + (row % natoms) * 16 + r);
+      const float4 p = make_float4(__shfl_xor_sync(0xffffffffu, y.x, 4), __shfl_xor_sync(0xffffffffu, y.y, 4),
+                                   __shfl_xor_sync(0xffffffffu, y.z, 4), __shfl_xor_sync(0xffffffffu, y.w, 4));
+      const float sg = d < 16 ? -1.f : 1.f;                     // first half: a cos - b sin; second: b cos + a sin
+      y = make_float4(y.x * c.x + sg * p.x * s.x, y.y * c.y + sg * p.y * s.y, y.z * c.z + sg * p.z * s.z, y.w * c.w + sg * p.w * s.w);
+    }
+    store4<T>(dst[t], y, rnd);
   }
 }
 
@@ -132,6 +144,31 @@ void qknorm_fwd(at::Tensor q, at::Tensor k, at::Tensor wq, at::Tensor wk, double
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ESMFold2 (inference): the norm, then the rotary with the per-atom tables cos, sin [natoms, 16] fp32 (rows r of q / k are atom r % natoms).
+void qknorm_rope_fwd(at::Tensor q, at::Tensor k, at::Tensor wq, at::Tensor wk, double eq, double ek, at::Tensor cs, at::Tensor sn, at::Tensor qo,
+                     at::Tensor ko) {
+  check(q, "q"); check(k, "k"); check(qo, "qo"); check(ko, "ko"); check_w(wq, "wq"); check_w(wk, "wk");
+  TORCH_CHECK(q.stride(0) == DS && k.stride(0) == DS && qo.stride(0) == DS && ko.stride(0) == DS, "contiguous rows");
+  TORCH_CHECK(q.scalar_type() == k.scalar_type() && q.scalar_type() == qo.scalar_type() && k.sizes() == q.sizes(), "operands match");
+  TORCH_CHECK(cs.is_cuda() && sn.is_cuda() && cs.scalar_type() == at::kFloat && sn.scalar_type() == at::kFloat && cs.is_contiguous() &&
+              sn.is_contiguous() && cs.dim() == 2 && cs.size(1) == HD / 2 && sn.sizes() == cs.sizes(), "rotary tables: fp32 [N, 16]");
+  const long M = q.size(0), natoms = cs.size(0);
+  TORCH_CHECK(natoms > 0 && M % natoms == 0, "rows are samples x atoms");
+  const at::cuda::CUDAGuard guard(q.device());
+  const dim3 grid((unsigned)((M + WARPS - 1) / WARPS));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  if (q.scalar_type() == at::kFloat)
+    qknorm_fwd_k<float><<<grid, WARPS * 32, 0, stream>>>(q.data_ptr<float>(), k.data_ptr<float>(), wq.data_ptr<float>(), wk.data_ptr<float>(),
+                                                          qo.data_ptr<float>(), ko.data_ptr<float>(), M, (float)eq, (float)ek, true,
+                                                          cs.data_ptr<float>(), sn.data_ptr<float>(), natoms);
+  else
+    qknorm_fwd_k<__nv_bfloat16><<<grid, WARPS * 32, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(q.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(k.data_ptr()), wq.data_ptr<float>(),
+        wk.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(qo.data_ptr()), reinterpret_cast<__nv_bfloat16*>(ko.data_ptr()), M, (float)eq, (float)ek, false,
+        cs.data_ptr<float>(), sn.data_ptr<float>(), natoms);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 // dq, dk: [M, 128] views into the block's gradient buffer (row stride ld), rewritten in place from the gradient of the normalised
 // tensor to that of the raw one; qr, kr: the raw q, k. Returns the weight-gradient partials [blocks, 2, 32] fp32.
 at::Tensor qknorm_bwd(at::Tensor dq, at::Tensor dk, at::Tensor qr, at::Tensor kr, at::Tensor wq, at::Tensor wk, double eq, double ek) {
@@ -157,5 +194,6 @@ at::Tensor qknorm_bwd(at::Tensor dq, at::Tensor dk, at::Tensor qr, at::Tensor kr
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("qknorm_fwd", &qknorm_fwd);
+  m.def("qknorm_rope_fwd", &qknorm_rope_fwd);
   m.def("qknorm_bwd", &qknorm_bwd);
 }

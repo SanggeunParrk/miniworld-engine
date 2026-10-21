@@ -6,8 +6,9 @@
 // mod columns: so = [256, 384), s2 = [384, 512), bi2 = [512, 640), st = [640, 768). The residual stream a2 and x2 stay in registers;
 // SAVE writes u, a2, x2 and t for the backward. Weights stream through shared memory as swizzled K-major tiles: Wo in two 64-row
 // units, then per chunk [Wa_j; Wb_j] (2 HB rows x 128) and Wd_j (128 rows x HB).
+// -DRMS=1 (ESMFold2): AdaLN 2 normalises with an RMSNorm; so, s2 and st come from cond90 as they are (raw gates, 1 + s scale).
 // SPDX-License-Identifier: Apache-2.0
-#include "row90.cuh"
+#include "rms90.cuh"
 using namespace r90;
 
 extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __restrict__ a, const T* __restrict__ o, const T* __restrict__ sg,
@@ -82,7 +83,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void post90_fwd(const T* __rest
     ld_tile(s2, mod + mrow * 768, 768, 384, g, t);
     ld_tile(b2, mod + mrow * 768, 768, 512, g, t);
     float m0, r0, m1, r1;
-    ln_stats(a2, eps, m0, r0, m1, r1);
+    norm_stats(a2, eps, m0, r0, m1, r1);
 #pragma unroll
     for (int nt = 0; nt < 16; ++nt) {
       c.f[nt][0] = round_store((a2.f[nt][0] - m0) * r0 * s2.f[nt][0] + b2.f[nt][0]);

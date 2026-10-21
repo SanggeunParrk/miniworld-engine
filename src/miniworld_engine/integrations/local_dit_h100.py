@@ -32,7 +32,7 @@ def _hopper(t) -> bool:
 def matches(module, single, cond, pair, mask, rope=None) -> bool:
     """H100, cross-attention AF3 atom block at the atom widths, fp32 inference (no gradient recorded)."""
     if _ld._esm_variant(module):
-        return False
+        return _esm_matches(module, single, cond, pair, mask, rope)
     if not (single.is_cuda and _hopper(single)):
         return False
     if not settings.current().local_dit_h100_mma:
@@ -573,6 +573,8 @@ def _weights_of(module):
 
 def run_block(module, single, cond, pair, mask=None, rope=None):
     """The block's output stream on the H100 warp-level kernels; ``matches`` must have accepted the call."""
+    if _ld._esm_variant(module):
+        return _run_esm(module, single, cond, pair, mask, rope)
     weights = _weights_of(module)
     n0 = single.shape[2]
     kmask = _ld._keys(mask, n0, _ld._padded_length(n0))
@@ -584,3 +586,179 @@ def run_block(module, single, cond, pair, mask=None, rope=None):
     return _fwd(
         single, cond, pair, kmask, weights, False, parallel, module.key_window == "slide"
     )[0]
+
+
+# --------------------------------------------------------------------------------------------------------------------- ESMFold2
+# ``LocalDiTBlock(**ESMFOLD2)`` for inference, on the same row kernels built with -DRMS=1 (RMSNorm AdaLNs, tables of silu(c), (1 + s) scales,
+# raw gates), the q / k RMSNorm + rotary of qknorm_local.cu, and the 192-key rank-window attention of lattn90_esm.cu:
+#
+#     cond90 (hoisted) -> pre90 -> qknorm_rope -> pair_bias_esm (hoisted) -> attn_esm -> post90
+#
+# The row kernels take the AF3 block's 27 parameters; ESMFold2 has no conditioning LayerNorm and no projection biases, so those slots hold
+# constants: the LN weights 1, the scale biases 1 (the identity-centred scale), the gate biases 0.
+ESM_KEYS = 192
+_ESM_NAMES = {
+    "sc1_w": "attention.ada_ln_in.to_scale.weight",
+    "bi1_w": "attention.ada_ln_in.to_bias.weight",
+    "wq": "attention.to_query.weight",
+    "bq": "attention.to_query.bias",
+    "wk": "attention.to_key.weight",
+    "wv": "attention.to_value.weight",
+    "ln_pair": "attention.ln_pair.weight",
+    "wb": "attention.to_bias.weight",
+    "wg": "attention.to_gate.weight",
+    "wo": "attention.to_out.weight",
+    "so_w": "attention.to_scale.weight",
+    "sc2_w": "transition.ada_ln_in.to_scale.weight",
+    "bi2_w": "transition.ada_ln_in.to_bias.weight",
+    "wa": "transition.expand_a.weight",
+    "wb2": "transition.expand_b.weight",
+    "wd": "transition.squeeze.weight",
+    "st_w": "transition.to_scale.weight",
+    "kv_sc_w": "attention.ada_ln_kv.to_scale.weight",
+    "kv_bi_w": "attention.ada_ln_kv.to_bias.weight",
+}
+_ESM_ONES = ("g1", "sc1_b", "g2", "sc2_b", "gkv", "kv_sc_b")
+_ESM_ZEROS = ("so_b", "st_b")
+_ESM_CONST: dict = {}
+
+
+def _esm_const(device, value: float):
+    """A persistent fp32 constant vector [128] per device (made eagerly and kept; inside a capture with none kept yet, a fresh one that is not kept)."""
+    key = (device, value)
+    c = _ESM_CONST.get(key)
+    if c is None:
+        c = torch.full((DS,), value, device=device, dtype=F32)
+        if not torch.cuda.is_current_stream_capturing():
+            _ESM_CONST[key] = c
+    return c
+
+
+def _esm_weights(module):
+    """The module's parameters in the row kernels' 27 slots (constants where ESMFold2 has none), then the q / k RMSNorm weights."""
+    dev = module.attention.to_query.weight.device
+    out = []
+    for name in _NAMES:
+        if name in _ESM_NAMES:
+            out.append(module.get_parameter(_ESM_NAMES[name]))
+        else:
+            out.append(_esm_const(dev, 1.0 if name in _ESM_ONES else 0.0))
+    return out, [module.attention.norm_query.weight, module.attention.norm_key.weight]
+
+
+def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
+    """H100, exactly ESMFold2's option set (``modules.local_dit.ESMFOLD2``) at the atom widths, inference (no gradient recorded), bf16 or fp32
+    single / cond / pair, the rotary tables [1, N, 16]."""
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+    from miniworld_engine.modules.dispatch import KernelBackend
+
+    if not (single.is_cuda and _hopper(single)) or not settings.current().local_dit_h100_mma:
+        return False
+    if settings.current().engine_backend == "triton" or module.attention._backend != KernelBackend.TRITON:
+        return False
+    a, tr = module.attention, module.transition
+    options = (module.cross_attention, module.kv_norm, module.key_window, module.keys, module.window_half, module.conditioning,
+               module.rope, a.use_qk_norm)
+    if options != (True, "parallel", "slide", ESM_KEYS, 64, "rms_silu", True, True):
+        return False
+    if a.norm_query.eps != RMS_EPS or a.norm_key.eps != RMS_EPS:
+        return False
+    weights, qkw = _esm_weights(module)
+    params = [*(module.get_parameter(n) for n in _ESM_NAMES.values()), *qkw]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
+        return False   # inference only: the backward kernels know neither the conditioning nor the window
+    if any(p.device != single.device or not p.is_contiguous() for p in params):
+        return False
+    if torch.is_autocast_enabled("cuda") and single.dtype != BF:
+        return False
+    dt = (single.dtype, cond.dtype, pair.dtype)
+    if dt == (F32, F32, F32):
+        if any(p.dtype != F32 for p in params) or not settings.current().local_dit_h100_mma_fp32:
+            return False
+    elif dt == (BF, BF, BF):
+        if any(p.dtype not in (F32, BF) for p in params) or not settings.current().local_dit_h100_mma_bf16:
+            return False
+    else:
+        return False
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[3] != DS or single.shape[2] == 0:
+        return False
+    n = single.shape[2]
+    if tuple(cond.shape) != (*single.shape[:3], DC) or tuple(pair.shape) != (1, (n + 31) // 32, 32, ESM_KEYS, DP):
+        return False
+    if not (single.is_contiguous() and pair.is_contiguous() and (cond.is_contiguous() or _shared(cond))):
+        return False
+    if mask is not None and (mask.dtype != torch.bool or tuple(mask.shape) != (1, n) or mask.device != single.device):
+        return False
+    if rope is None or len(rope) != 2 or any(
+        t.device != single.device or tuple(t.shape) != (1, n, DS // NH // 2) or not t.is_floating_point() for t in rope
+    ):
+        return False
+    if (a.n_head, a.to_query.weight.shape[0], a.to_bias.weight.shape[1], tr.expand_a.weight.shape[0]) != (NH, DS, DP, 2 * DS):
+        return False
+    return a.ln_pair.eps == _ld.EPS
+
+
+def _esm_fwd_fake(single, cond, pair, kmask, weights, qkw, cos, sin):
+    return torch.empty_like(single)
+
+
+@opaque(fake=_esm_fwd_fake, name="local_dit_h100_esm_fwd")
+def _esm_fwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    kmask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    qkw: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> torch.Tensor:
+    """ESMFold2's block output [A, 1, N, 128] (inference): the RMS row kernels, the q / k RMSNorm + rotary and the rank-window attention.
+    ``cos`` / ``sin``: the rotary tables, fp32 [n, 16] at the padded length."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+
+    tf32 = single.dtype == F32
+    a, n0, n, m = _dims(single)
+    with torch.cuda.device(single.device):
+        p = k90.pack(weights, tf32)
+        s2 = _ld._padded(single, n).reshape(m, DS).contiguous()
+        shared = _shared(cond)
+        c2 = (_ld._padded(cond[:1], n).reshape(n, DC) if shared else _ld._padded(cond, n).reshape(m, DC)).contiguous()
+        nmod = n if shared else m
+        hoist = settings.current().local_dit_hoist
+        wkey = (tuple((w.data_ptr(), w._version) for w in weights), "esm") if hoist else None
+
+        def tables():
+            return k90.cond_fwd(c2, p, tf32, rms=True)
+
+        mod, mkv = _ld._hoisted(_HOIST_COND, cond, (wkey, n), tables) if hoist else tables()
+        z = _ld._trunk(pair, n).contiguous()
+
+        def pair_bias():
+            nreal = (kmask.sum(dtype=torch.int32) if kmask is not None
+                     else torch.full((), n0, device=single.device, dtype=torch.int32))
+            return local.pair_bias_esm(z, p["gamma"], p["wbias"], kmask, nreal, n)
+
+        if hoist:
+            mk = None if kmask is None else _ld._tkey(kmask)
+            bias2 = _ld._hoisted(_HOIST_BIAS, pair, (wkey, n, mk), pair_bias)
+        else:
+            bias2 = pair_bias()
+        qraw, sg, kraw, v = k90.pre_fwd(s2, mod, mkv, p, tf32, eps=RMS_EPS, nmod=nmod, parallel_kv=True, rms=True)
+        q, k = torch.empty_like(qraw), torch.empty_like(kraw)
+        _qk_kernels().qknorm_rope_fwd(qraw, kraw, qkw[0].float().contiguous(), qkw[1].float().contiguous(), RMS_EPS, RMS_EPS, cos, sin, q, k)
+        del qraw, kraw
+        o = local.attn_esm(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2, tf32).view(m, DS)
+        out = k90.post_fwd(s2, o, sg, mod, p, tf32, eps=RMS_EPS, nmod=nmod, rms=True)
+    return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
+
+
+def _run_esm(module, single, cond, pair, mask, rope):
+    weights, qkw = _esm_weights(module)
+    n0 = single.shape[2]
+    n = _ld._padded_length(n0)
+    kmask = _ld._keys(mask, n0, n)
+    cos, sin = (torch.nn.functional.pad(t[0].float(), (0, 0, 0, n - n0)).contiguous() for t in rope)
+    return _esm_fwd(single, cond, pair, kmask, weights, qkw, cos, sin)

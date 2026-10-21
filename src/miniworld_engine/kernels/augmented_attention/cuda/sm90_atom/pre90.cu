@@ -7,8 +7,9 @@
 // q, k, v only feed MMAs (TF32: rounded to nearest on the way out). SAVE also writes x1 and xkv for the backward.
 // PAR (AlphaFold 3's K / V norm): xkv = LN(x) * sigmoid(...) + ..., the second AdaLN of the raw x next to the first, not of x1 (inference only: with PAR the
 // backward of the chained form does not apply).
+// -DRMS=1 (ESMFold2): both AdaLNs normalise with an RMSNorm and the K / V scale is mkv pre + bs (bs = 1), no sigmoid; RMS runs with PAR.
 // SPDX-License-Identifier: Apache-2.0
-#include "row90.cuh"
+#include "rms90.cuh"
 using namespace r90;
 
 // c <- (c - mean) rstd * S + B for n-tiles 8 H .. 8 H + 7, S = sigmoid(p[:, scol ..] + sbias) (sbias != null) or the stored scale as is,
@@ -27,7 +28,7 @@ DEVI void adaln_half(Tile& c, const T* p, int ld, int scol, int bcol, const floa
     const float bx[4] = {bb.x, bb.y, bb.x, bb.y};
 #pragma unroll
     for (int e = 0; e < 4; ++e) {
-      const float sv = sgm ? sigm(s[i][e] + bx[e]) : s[i][e];
+      const float sv = sgm ? cond_act(s[i][e] + bx[e]) : s[i][e];
       c.f[nt][e] = round_store((c.f[nt][e] - (e < 2 ? m0 : m1)) * (e < 2 ? r0 : r1) * sv + b[i][e]);
     }
   }
@@ -51,7 +52,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
   Tile c;
   ld_tile(c, x + row0 * 128, 128, 0, g, t);
   float m0, r0, m1, r1;
-  ln_stats(c, eps, m0, r0, m1, r1);
+  norm_stats(c, eps, m0, r0, m1, r1);
   // x1 = LN(x) * s1 + bi1, the modulation read in halves of the row (registers)
   adaln_half<0>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   adaln_half<1>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
@@ -67,7 +68,7 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_fwd(const T* __restr
       if (save) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
 #endif
       if (par) ld_tile(c, x + row0 * 128, 128, 0, g, t);  // AlphaFold 3: the K / V AdaLN reads the raw x, not x1
-      ln_stats(c, eps, m0, r0, m1, r1);
+      norm_stats(c, eps, m0, r0, m1, r1);
       adaln_half<0>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
       adaln_half<1>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
       if (save) st_tile(c, xkvs + row0 * 128, 128, 0, g, t);
@@ -121,13 +122,13 @@ extern "C" __global__ __launch_bounds__(NTHR, 1) void pre90_split(const T* __res
   Tile c;
   ld_tile(c, x + row0 * 128, 128, 0, g, t);
   float m0, r0, m1, r1;
-  ln_stats(c, eps, m0, r0, m1, r1);
+  norm_stats(c, eps, m0, r0, m1, r1);
   adaln_half<0>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   adaln_half<1>(c, mod + mrow * 768, 768, 0, 128, nullptr, m0, r0, m1, r1, g, t);
   if (save && u0 == 0) st_tile(c, x1s + row0 * 128, 128, 0, g, t);
   if (u0 >= 4) {  // k, v: xkv = LN(x1) * sigmoid(mkv pre + bs) + mkv shift (PAR: LN(x))
     if (par) ld_tile(c, x + row0 * 128, 128, 0, g, t);
-    ln_stats(c, eps, m0, r0, m1, r1);
+    norm_stats(c, eps, m0, r0, m1, r1);
     adaln_half<0>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
     adaln_half<1>(c, mkv + mrow * 256, 256, 0, 128, bs, m0, r0, m1, r1, g, t);
     if (save && u0 == 4) st_tile(c, xkvs + row0 * 128, 128, 0, g, t);
