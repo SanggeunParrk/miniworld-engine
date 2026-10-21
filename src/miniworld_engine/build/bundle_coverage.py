@@ -11,7 +11,8 @@ the number of batched samples. This driver runs, on the current GPU:
 * the architecture blocks the model is built from (Pairformer with one- and two-directional TriMul, the token
   DiffusionTransformer with its pair-bias / core-precision options and batched pairs, the bias-only token DiT (one
   pair shared by the samples or one per sample, masked, hoisted, d_cond 384 / 768), the SWA atom transformer in its
-  three styles and the block-local atom DiT), inference and training,
+  three styles, the block-local atom DiT and the template-stack TriMul (one direction, hidden twice the pair width)),
+  inference and training,
 
 every one in bf16, fp32, bf16-mixed (fp32 parameters under bf16 autocast, MiniWorld's precision) and
 fp32 parameters fed bf16 activations (``PRECISIONS``).
@@ -122,6 +123,15 @@ def cases() -> list[dict]:
                                 "samples": 48 if train else 5, "heavy": n >= HEAVY_ATOMS})
                 out.append({"kind": "local_dit", "N": n, "train": train, "dtype": prec,
                             "samples": 48 if train else 5, "heavy": n >= HEAVY_ATOMS})
+    # Template-stack TriMul: one direction, hidden twice the pair width (pair 64 / hidden 128, 128 / 256), B 1 and 4 templates.
+    for train in (False, True):
+        for prec in PRECISIONS:
+            for d in (64, 128):
+                for length in (TRAIN_TOKENS if train else TOKEN_RUNGS):
+                    for outgoing in (True, False):
+                        for b in (1, 4):
+                            out.append({"kind": "trimul_hidden2x", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
+                                        "d": d, "outgoing": outgoing, "batch": b, "heavy": length >= HEAVY_TOKENS})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -234,6 +244,14 @@ def _run_block(c: dict) -> None:
                 out.float().sum().backward()
         torch.cuda.synchronize()
         return
+    elif c["kind"] == "trimul_hidden2x":
+        from miniworld_engine.modules.exceptions import ImplementationType as MI
+        from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+
+        d, b, n = c["d"], c["batch"], c["L"]
+        model = TriangleMultiplication(d, d_hidden=2 * d, outgoing=c["outgoing"], implementation=MI.MINIWORLD,
+                                       p_drop=0.25 if c["train"] else 0.0)
+        args = (torch.randn(b, n, n, d, device="cuda", dtype=dt), torch.ones(b, n, device="cuda", dtype=torch.bool))
     elif c["kind"] == "bias_only_dit":
         from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
         from miniworld_engine.modules.exceptions import ImplementationType as MI
