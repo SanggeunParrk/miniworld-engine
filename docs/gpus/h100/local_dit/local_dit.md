@@ -330,3 +330,80 @@ Inference (A5, 4096 atoms): bf16 post90 49 us, pre90 24 us, attention 19 us; fp3
 ## AlphaFold 3 variant (`kv_norm="parallel"`, `key_window="slide"`)
 
 AF3 normalises the keys and values with a second AdaLN of the *raw* atoms and gives every query window the 128 keys `[32 w - 48, 32 w + 80)` slid back inside the real atoms. The H100 mma kernels serve both options for inference (fp32/TF32 and bf16): `pre90` takes a `par` flag for the K/V AdaLN input, the slid window is the clipped one except for windows 0 and 1 and the last three real windows, recomputed in torch from the kernels' q/k/v and written over the attention output. Not served (composed path): a call with grad. The real atom count is a device tensor, so a slide runs under CUDA graph capture and below 128 real atoms (keys past the last atom are masked). Checked against the fp64 PyTorch module for real atom counts 140 to 512 (`tests/gpu/sm90/test_h100_local_dit_af3_variant_gpu.py`); speed not measured.
+
+## ESMFold2 variant (`LocalDiTBlock(**ESMFOLD2)`, inference)
+
+ESMFold2's three atom stacks (FoldForge `spec.ESMFOLD2` / `ESMFOLD2_FAST`: the trunk-input encoder, the diffusion encoder and decoder,
+`DiffusionCrossAttTransformer`) are the AF3 block above -- parallel K/V AdaLN, slid window, per-window pair bias, gating query, output
+projection, transition n = 2 -- with four changes, all options of `LocalDiTBlock` (`modules.local_dit.ESMFOLD2` holds the set):
+
+- **Conditioning** (`conditioning="rms_silu"`): every AdaLN is `AdaptiveRMSNorm`, `(1 + W_s silu(c)) * x / sqrt(mean(x^2) + eps) + W_b silu(c)`
+  with eps = float32's epsilon whatever the dtype (no conditioning LayerNorm, no biases), and the attention's and the transition's output gates are
+  raw `W silu(c)` (no sigmoid, no bias). Parameters: `ada_ln_*.{to_scale,to_bias}.weight`, `{attention,transition}.to_scale.weight`.
+- **q / k** (`use_qk_norm=True`, `rope=True`): a per-head RMSNorm (float32 eps; ESMFold2's is affine-free, so its weights stay 1), then a rotary
+  split into halves (channel `c < 16` of a head pairs with `c + 16`, `(a, b) -> (a cos - b sin, b cos + a sin)`) with per-atom tables
+  `forward(..., rope=(cos, sin))`, each `[B, N, 16]`; FoldForge builds them from the reference conformer (`build_atom_rope`: 3 axes x 2 spatial
+  frequencies, base 20, then 10 space-uid frequencies, base 1e4). The keys take their own atoms' rows.
+- **Keys** (`keys=192`, `window_half=64`): every window's subset is 192 keys slid as AF3 slides its 128 (`[32 w - 80, 32 w + 112)`; a window short
+  of atom 0 starts at 0, otherwise it ends at the last real atom at the latest, so below 192 real atoms it starts before atom 0, on AF3's padding),
+  and query `i` sees key `j` only when `|i - j| <= 64` by rank among the real atoms (the position: the real atoms come first). The pair is the
+  trunked `[1, nwin, 32, 192, 16]`, read from each window's first key as laid out by the featuriser.
+
+**Kernels** (inference, fp32/TF32 and bf16):
+
+    cond90 (-DRMS=1, hoisted) -> pre90 (-DRMS=1) -> qknorm_rope -> pair_bias_esm (hoisted) -> attn_esm -> post90 (-DRMS=1)
+
+- Row kernels: the AF3 ones built with `-DRMS=1` (`sm90_atom/rms90.cuh`: `norm_stats` = RMSNorm statistics, `cond_act` = no sigmoid); the
+  27-parameter weight pack takes constants where ESMFold2 has none (LN weights 1, scale biases 1, gate biases 0), so the tables come out as
+  `1 + s`, `b` and the raw gates. The backward row kernels are untouched (their cubins keep their keys).
+- `qknorm_local.cu::qknorm_rope_fwd`: the QK-norm forward with the rotary after it (the partner channel is lane ^ 4), fp32 outputs rounded to tf32.
+- `sm100_atom_local/lattn90_esm.cu`: `h_pair_bias_esm` re-indexes the bias by *position* once per pair tensor -- `[4, nwin, 32, 160]` for the
+  positions `32 w - 64 + c`, read from the subset slot that holds them, -inf outside the band, the real keys or the subset (the AF3 slide from the
+  real atom count on the device, so no host read and the call captures) -- since for a real query the band cut to the real atoms always lies inside
+  its window's subset. `h_attn_esm` / `h_attn_esm_tf32`: a CTA = 64 queries x 1 head x a chunk of samples stages the 192 positions
+  `[q0 - 64, q0 + 128)`; a warp walks the 144 positions its 16 queries can see (18 key tiles against the AF3 kernel's 16).
+- Contract (`local_dit_h100._esm_matches`): exactly the `ESMFOLD2` set at the atom widths, no gradient recorded, the rotary tables `[1, N, 16]`,
+  otherwise as the AF3 block (bf16 or fp32, any A, any N, a `[1, N]` real-first key mask). A call with grad runs the composed PyTorch path.
+  Bitwise deterministic; runs inside a CUDA graph capture. Tests: `tests/cpu/compile/test_local_dit_esmfold2_variant.py` (the module against a
+  per-window definition, fp64), `tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py`.
+
+**Parity with FoldForge** (2026-10-21, fp32, the engine's PyTorch path against FoldForge's dense `DiffusionCrossAttTransformer(spec=ESMFOLD2)`
+with its weights copied, gathers from AF3's own featuriser at 192 keys, ragged token layouts, real atoms 150-24 500, A 1 and 5): relative error
+2.1e-7 - 7.4e-7 over the random-weight stack and the three trained stacks of the converted ESMFold2 checkpoint, below either side's own error
+against the fp64 engine module (0.67 of it at worst). Script: `~/miniworld-engine-scratch/esm-atom/parity.py` (outside the repo).
+
+**Accuracy** (relative error of the valid rows against the fp64 module; the same weights and inputs):
+
+| A | N | real | fp32 kernels (TF32) | bf16 kernels | bf16 PyTorch module | fp32 PyTorch module |
+|---|---|---|---|---|---|---|
+| 1 | 256 | 256 | 3.72e-04 | 5.43e-03 | 5.35e-03 | 2.67e-07 |
+| 2 | 512 | 400 | 3.68e-04 | 5.38e-03 | 5.29e-03 | 2.63e-07 |
+| 5 | 1024 | 1000 | 3.73e-04 | 5.39e-03 | 5.28e-03 | 2.95e-07 |
+| 1 | 384 | 150 | 3.78e-04 | 5.42e-03 | 5.35e-03 | 3.03e-07 |
+| 3 | 640 | 193 | 3.78e-04 | 5.38e-03 | 5.32e-03 | 2.99e-07 |
+| 5 | 4096 | 4000 | 3.72e-04 | 5.35e-03 | 5.24e-03 | 2.95e-07 |
+| 5 | 24576 | 24500 | 3.72e-04 | 5.35e-03 | 5.25e-03 | 2.96e-07 |
+
+**Timing** (2026-10-21, H100 SXM, CUDA graph of one block call replayed, A = 5 samples sharing one conditioning, all atoms real, ms; record
+[local_dit_h100_esmfold2_20261021](../../../records/local_dit_h100_esmfold2_20261021.md)). *kernels*: every stage recomputed each replay;
+*static*: under `kernels._capture.static_inputs()` (the conditioning tables and the pair bias made once, as a sampler's steps over one item
+see them). PyTorch = the same module on `ImplementationType.PYTORCH` (fp32 matmuls without TF32), compiled = `torch.compile` of it; both
+graph-captured. × = PyTorch (compiled) / kernels.
+
+| (Length, Dimension) | fp32 kernels | fp32 static | fp32 PyTorch | fp32 compiled | × | bf16 kernels | bf16 static | bf16 PyTorch | bf16 compiled | × |
+|---|---|---|---|---|---|---|---|---|---|---|
+| (1024, 128) | 0.078 | 0.060 | 0.935 | 0.319 | 12.0 (4.1) | 0.058 | 0.046 | 0.812 | 0.195 | 14.0 (3.4) |
+| (2048, 128) | 0.121 | 0.093 | 1.673 | 0.524 | 13.8 (4.3) | 0.082 | 0.061 | 1.424 | 0.308 | 17.5 (3.8) |
+| (4096, 128) | 0.209 | 0.166 | 3.204 | 0.971 | 15.3 (4.6) | 0.130 | 0.099 | 2.623 | 0.519 | 20.2 (4.0) |
+| (8192, 128) | 0.362 | 0.293 | 6.268 | 1.850 | 17.3 (5.1) | 0.218 | 0.172 | 5.124 | 0.989 | 23.5 (4.5) |
+| (16384, 128) | 0.647 | 0.528 | 12.303 | 3.415 | 19.0 (5.3) | 0.397 | 0.319 | 10.356 | 1.969 | 26.1 (5.0) |
+| (24576, 128) | 0.918 | 0.760 | 18.242 | 5.040 | 19.9 (5.5) | 0.563 | 0.457 | 15.485 | 2.917 | 27.5 (5.2) |
+
+Per kernel (torch profiler, eager, hoist off, A = 5, us; N = 8192 / 24576): bf16 `post90` 66 / 185, `pre90` 44 / 122, `h_attn_esm` 40 / 102,
+`h_pair_bias_esm` 25 / 66, `qknorm_rope` 18 / 49, `cond90` 15 / 28; fp32 `pre90` 98 / 265, `post90` 92 / 233, `h_attn_esm_tf32` 68 / 162,
+`h_pair_bias_esm` 39 / 100, `qknorm_rope` 31 / 92, `cond90` 25 / 48. Against the AF3 block at the same A (the tables above, per-sample
+conditioning there) the variant is about 1.3x slower: 25 % more keys per query, the wider pair (192 keys), and the separate q / k pass.
+
+**Not done**: training (the backward row kernels know neither the RMS conditioning nor the raw gates, and the attention backward neither the band
+nor the position-indexed bias; a call with grad runs the composed path); fusing `qknorm_rope` into `pre90`'s epilogue (8-10 % of the block);
+a B200 path (the sm100 kernels decline the variant).

@@ -18,6 +18,18 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   with the bidirectional working set), token mask, row dropout, CUDA graphs; the hidden = D paths are bitwise unchanged. CUDA graph,
   against cuEquivariance 0.12: inference 2.0 - 3.5x, training fwd + bwd 2.0 - 3.7x (L128 - 768, B 1 / 4); against the PyTorch path it
   replaces 8 - 28x. Tests: `tests/gpu/sm90/test_trimul_h100_hidden2x_gpu.py`; page: `docs/gpus/h100/trimul/trimul.md`.
+- `LocalDiTBlock(**modules.local_dit.ESMFOLD2)`: ESMFold2's atom block (FoldForge `spec.ESMFOLD2` / `ESMFOLD2_FAST`). New options
+  `conditioning="rms_silu"` (`AdaptiveRMSNorm`: `(1 + W_s silu(c)) * rms(x) + W_b silu(c)`, float32 eps, no biases; raw output gates `W silu(c)`),
+  `rope=True` (q / k rotated after the QK-norm with per-atom tables, `forward(..., rope=(cos, sin))`, `[B, N, 16]`), `keys=192` (AF3's slid
+  subset at 192 keys, pair `[B, nwin, 32, 192, d_pair]`) and `window_half=64` (query `i` sees key `j` only when `|i - j| <= 64` by rank among
+  the real atoms). Defaults are unchanged. Matches FoldForge's dense `DiffusionCrossAttTransformer(spec=ESMFOLD2)` to fp32 rounding (random and
+  trained weights). The H100 kernels serve it for inference, bf16 and fp32/TF32: the row kernels built with `-DRMS=1`, `qknorm_rope_fwd`
+  and `lattn90_esm.cu` (position-indexed pair bias, the +/- 64 band attention); 12-28x the composed PyTorch path and 3.4-5.5x its
+  `torch.compile` at A = 5, N 1024-24 576 (docs/gpus/h100/local_dit). A call with grad takes the composed path. Tests
+  `tests/cpu/compile/test_local_dit_esmfold2_variant.py`, `tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py`. New sm90 artifacts (not in
+  the 2.3.5 bundles): `atom_sm90/{cond,pre,post}90_*_rms` and `atom_local_sm90/lattn90_esm`; the AF3 block's forward row cubins
+  (`atom_sm90/{cond,pre,post}90_*`, now including `rms90.cuh`) and `augattn_sm90_qknorm_local` change key too, so a 2.3.5 bundle no longer
+  covers them: the next release's bundle must be rebuilt (the backward row cubins keep their keys).
 
 ## [2.3.5] - 2026-10-21
 

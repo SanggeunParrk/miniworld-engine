@@ -663,8 +663,7 @@ def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
         return False
     if a.norm_query.eps != RMS_EPS or a.norm_key.eps != RMS_EPS:
         return False
-    weights, qkw = _esm_weights(module)
-    params = [*(module.get_parameter(n) for n in _ESM_NAMES.values()), *qkw]
+    params = [*(module.get_parameter(n) for n in _ESM_NAMES.values()), a.norm_query.weight, a.norm_key.weight]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
         return False   # inference only: the backward kernels know neither the conditioning nor the window
     if any(p.device != single.device or not p.is_contiguous() for p in params):
@@ -716,7 +715,9 @@ def _esm_fwd(
     """ESMFold2's block output [A, 1, N, 128] (inference): the RMS row kernels, the q / k RMSNorm + rotary and the rank-window attention.
     ``cos`` / ``sin``: the rotary tables, fp32 [n, 16] at the padded length."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm90_atom as k90
-    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
     from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
 
     tf32 = single.dtype == F32
@@ -760,5 +761,8 @@ def _run_esm(module, single, cond, pair, mask, rope):
     n0 = single.shape[2]
     n = _ld._padded_length(n0)
     kmask = _ld._keys(mask, n0, n)
-    cos, sin = (torch.nn.functional.pad(t[0].float(), (0, 0, 0, n - n0)).contiguous() for t in rope)
+    # fp32 [n, 16] at the padded length (no copy when the caller's tables already are)
+    cos, sin = (
+        (t[0].float() if n == n0 else torch.nn.functional.pad(t[0].float(), (0, 0, 0, n - n0))).contiguous() for t in rope
+    )
     return _esm_fwd(single, cond, pair, kmask, weights, qkw, cos, sin)
