@@ -8,6 +8,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.5] - 2026-10-21
+
+### Fixed
+
+- The wheel's sm90 bundles carry the single-direction TriMul training backward for fp32 master parameters fed bf16
+  activations (`trimul_h100/single_output/kernel.cu`, `single_b7/joint.cu` with `-DMASTER_FP32=1`, `h100_single`): pdall's
+  training step compiled both on its first call with 2.3.4 (and failed without nvcc / CUTLASS). The engine coverage runs the
+  modules in that precision too ("master"), and the release coverage records pdall's training step
+  (docs/kernels/prebuilt-kernels.md). Kernels are otherwise the 2.3.4 ones.
+
 ## [2.3.4] - 2026-10-21
 
 ### Fixed

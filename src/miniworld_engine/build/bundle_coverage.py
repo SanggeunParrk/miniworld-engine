@@ -13,7 +13,7 @@ the number of batched samples. This driver runs, on the current GPU:
   pair shared by the samples or one per sample, masked, hoisted, d_cond 384 / 768), the SWA atom transformer in its
   three styles and the block-local atom DiT), inference and training,
 
-every one in bf16, fp32, bf16-mixed (fp32 parameters under bf16 autocast, MiniWorld's precision) and, for the blocks,
+every one in bf16, fp32, bf16-mixed (fp32 parameters under bf16 autocast, MiniWorld's precision) and
 fp32 parameters fed bf16 activations (``PRECISIONS``).
 
 The ``kernels/prebuilt`` recorder (``MINIWORLD_ENGINE_BUNDLE_RECORD``) captures what was built or loaded; this module
@@ -75,7 +75,9 @@ def cases() -> list[dict]:
     for name in CASE_NAMES:
         shapes = _shapes(name)
         dtypes = [str(d).removeprefix("torch.") for d in shapes["dtypes"]] or ["bfloat16"]
-        precs = [*dtypes, "mixed"]
+        # "master": fp32 parameters fed bf16 activations (pdall's training, no autocast) selects other kernel builds
+        # (single-direction TriMul backward with -DMASTER_FP32=1); 2.3.4 shipped without them.
+        precs = [*dtypes, "mixed", *(["master"] if "bfloat16" in dtypes else [])]
         computes = [str(d).removeprefix("torch.") for d in shapes["compute_dtypes"]] or [None]
         modes = [False, True] if shapes["train"] else [False]
         for i, (stream, registry) in enumerate(zip(shapes["streams"], shapes["lengths_by_dim"], strict=True)):
