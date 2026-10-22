@@ -8,6 +8,18 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- Boltz-2, RoseTTAFold3 and Chai-1 modules on H100, inference (bf16): `modules.dit_variant` (`DiTVariantStack` / `AtomDiTVariantStack` with
+  `BOLTZ2`, `ROSETTAFOLD3`, `CHAI1` and their `_ATOM` options: sigmoid or identity-centred AdaLN, kq LayerNorm, no gating query, no
+  atom output projection, up-gate transition, parallel schedule, same-conformer atom mask); `TriangleAttention(gate_bias=, out_bias=,
+  untransposed_output=, dual_output=)` and 64-channel heads (a mma.sync core, `kernels/triangle_attention/cuda/h100_dh.py`);
+  `OuterProductMean(projection_bias=, groups=)`; `AttentionPairBias(gate_bias=)`; `PairformerBlock.from_components(parallel=True)`.
+  New CUDA: `kernels/dit_variants/cuda/rows.cu`, `kernels/triangle_attention/cuda/h100_sources/triattn_dh_sm90.cu`,
+  `kernels/outer_product_mean/cuda/gather.cu`. Against `torch.compile` of the same statements (CUDA graph): token DiT 1.3-2.9x,
+  atom DiT 1.2-1.9x, Chai-1 trunk triangle attention 3.2-6.5x, grouped OPM 1.1-1.2x, biased OPM 0.9-1.0x. Modules without these
+  options are unchanged. Page: `docs/gpus/h100/model_variants/model_variants.md`.
+
 ## [2.3.7] - 2026-10-21
 
 ### Fixed

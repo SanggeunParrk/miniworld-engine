@@ -136,6 +136,9 @@ def cases() -> list[dict]:
                         for b in (1, 4):
                             out.append({"kind": "trimul_hidden2x", "L": length, "train": train, "dtype": prec,  # noqa: PERF401
                                         "d": d, "outgoing": outgoing, "batch": b, "heavy": length >= HEAVY_TOKENS})
+    # Boltz-2 / RoseTTAFold3 / Chai-1's variants (kernels/dit_variants, the 64-channel and output-variant TriangleAttention, the biased /
+    # grouped OuterProductMean, the parallel Pairformer sum): bf16 inference; their extensions take no shape keys, one small case covers them.
+    out.append({"kind": "model_variants", "train": False, "dtype": "bfloat16", "heavy": False})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -306,6 +309,9 @@ def _run_block(c: dict) -> None:
         _randomize(model)
         _step(model, args, False, autocast, {"rope": (angles.cos(), angles.sin())})
         return
+    elif c["kind"] == "model_variants":
+        _model_variants()
+        return
     elif c["kind"] == "local_dit":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
         from miniworld_engine.modules.local_dit import LocalDiTBlock
@@ -319,6 +325,58 @@ def _run_block(c: dict) -> None:
     model = model.cuda().to(pdt)
     _randomize(model)
     _step(model, args, c["train"], autocast)
+
+
+def _model_variants() -> None:
+    """Every Boltz-2 / RoseTTAFold3 / Chai-1 variant path once, bf16 inference, small shapes."""
+    import torch
+
+    from miniworld_engine.architecture.blocks.pairformer import PairformerBlock
+    from miniworld_engine.modules import Transition, TriangleMultiplication
+    from miniworld_engine.modules import dit_variant as dv
+    from miniworld_engine.modules.exceptions import ImplementationType as MI
+    from miniworld_engine.modules.outer_product import OuterProductMean
+    from miniworld_engine.modules.triangle_attention import TriangleAttention
+
+    bf, dev = torch.bfloat16, "cuda"
+
+    def prep(m):
+        m = m.to(dev).eval().to(bf)
+        _randomize(m)
+        return m
+
+    with torch.no_grad():
+        n = 256
+        for opts in (dv.BOLTZ2, dv.ROSETTAFOLD3, dv.CHAI1):
+            prep(dv.DiTVariantStack(2, **opts))(torch.randn(2, n, 768, device=dev, dtype=bf),
+                                               torch.randn(n, opts["d_cond"], device=dev, dtype=bf),
+                                               torch.randn(n, n, opts["d_pair"], device=dev, dtype=bf), torch.ones(n, dtype=torch.bool, device=dev))
+        n = 512
+        for opts in (dv.BOLTZ2_ATOM, dv.ROSETTAFOLD3_ATOM, dv.CHAI1_ATOM):
+            uid = torch.arange(n, device=dev) // 40 if opts is dv.CHAI1_ATOM else None
+            prep(dv.AtomDiTVariantStack(2, **opts))(torch.randn(2, n, 128, device=dev, dtype=bf), torch.randn(n, 128, device=dev, dtype=bf),
+                                                    torch.randn(n // 32, 32, 128, 16, device=dev, dtype=bf),
+                                                    torch.arange(n, device=dev) < n - 20, uid)
+        n = 128
+        mask = torch.ones(1, n, dtype=torch.bool, device=dev)
+        for d_pair, d_hidden, starting, options in ((256, 256, True, {}), (256, 256, False, {"untransposed_output": True}),
+                                                     (256, 256, True, {"dual_output": True}), (64, 128, False, {"untransposed_output": True}),
+                                                     (128, 128, True, {"gate_bias": True, "out_bias": True}),
+                                                     (64, 256, False, {"gate_bias": True, "out_bias": True})):
+            m = prep(TriangleAttention(d_pair, 4, d_hidden=d_hidden, starting=starting, transposed_bias=False, implementation=MI.MINIWORLD,
+                                       p_drop=0.0, **options))
+            m(torch.randn(1, n, n, d_pair, device=dev, dtype=bf), mask)
+        msa_mask = torch.ones(1, 256, n, dtype=torch.bool, device=dev)
+        for d_pair, d_hidden, options in ((128, 32, {"projection_bias": True, "normalize_before_proj": False}), (256, 64, {"groups": 8})):
+            prep(OuterProductMean(64, d_pair, d_hidden, implementation=MI.MINIWORLD, **options))(
+                torch.randn(1, 256, n, 64, device=dev, dtype=bf), msa_mask)
+        block = prep(PairformerBlock.from_components(
+            triangle_outgoing=TriangleMultiplication(128, outgoing=True, implementation=MI.MINIWORLD, p_drop=0.0),
+            triangle_incoming=TriangleMultiplication(128, outgoing=False, implementation=MI.MINIWORLD, p_drop=0.0),
+            attention_starting=None, attention_ending=None, transition_pair=Transition(128, 4, implementation=MI.MINIWORLD),
+            parallel=True))
+        block(torch.randn(1, n, n, 128, device=dev, dtype=bf), None, mask)
+    torch.cuda.synchronize()
 
 
 def run(c: dict) -> dict:
