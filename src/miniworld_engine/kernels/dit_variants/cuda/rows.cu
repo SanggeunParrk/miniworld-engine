@@ -30,9 +30,19 @@ __device__ __forceinline__ float scl(float v) {
   if constexpr (SIG) return sigm(v); else return v;
 }
 
+// Row geometry: a 768-wide row is a block of NT = 192 threads; a 128-wide row (NT = 32) is a warp, 8 rows to a 256-thread block (a
+// 32-thread block per row left the SMs half empty: 32 blocks per SM at most).
+template <int NT>
+struct Geo {
+  static constexpr int RPB = NT == 32 ? 8 : 1, THREADS = NT * RPB;
+  static __device__ __forceinline__ long row() { return NT == 32 ? (long)blockIdx.x * RPB + threadIdx.x / 32 : (long)blockIdx.x; }
+  static __device__ __forceinline__ int col() { return (NT == 32 ? threadIdx.x % 32 : threadIdx.x) * 4; }
+  static long blocks(long rows) { return (rows + RPB - 1) / RPB; }
+};
+
 template <int NT, bool SIG, typename GT, typename OutT>
 __device__ __forceinline__ void mod_store(const float4& xh, const GT* ms, const GT* mb, OutT* out) {
-  const int col = threadIdx.x * 4;
+  const int col = Geo<NT>::col();
   const float4 m = V4<GT>::load(ms + col), h = V4<GT>::load(mb + col);
   float4 o;
   o.x = xh.x * scl<SIG>(m.x) + h.x; o.y = xh.y * scl<SIG>(m.y) + h.y;
@@ -41,11 +51,16 @@ __device__ __forceinline__ void mod_store(const float4& xh, const GT* ms, const 
 }
 
 template <int NT>
+__device__ __forceinline__ float row_sum(float v, float* red) {
+  if constexpr (NT == 32) return warp_sum(v); else return block_sum<NT>(v, red);
+}
+
+template <int NT>
 __device__ __forceinline__ float4 layernorm(float4 x, float eps, float* red) {
   constexpr int D = NT * 4;
-  const float mean = block_sum<NT>(x.x + x.y + x.z + x.w, red) / D;
+  const float mean = row_sum<NT>(x.x + x.y + x.z + x.w, red) / D;
   x.x -= mean; x.y -= mean; x.z -= mean; x.w -= mean;
-  const float r = rsqrtf(block_sum<NT>(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w, red) / D + eps);
+  const float r = rsqrtf(row_sum<NT>(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w, red) / D + eps);
   x.x *= r; x.y *= r; x.z *= r; x.w *= r;
   return x;
 }
@@ -58,12 +73,13 @@ struct Mods {
 };
 
 template <int NT, bool SIG>
-__global__ void __launch_bounds__(NT) ln_mod_kernel(const __nv_bfloat16* __restrict__ XIN, float* __restrict__ X, Mods m, int L,
-                                                    long sms, float eps) {
+__global__ void __launch_bounds__(Geo<NT>::THREADS) ln_mod_kernel(const __nv_bfloat16* __restrict__ XIN, float* __restrict__ X, Mods m,
+                                                                  int L, long sms, float eps, long M) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
-  const long row = blockIdx.x;
-  const int tok = row % L, col = threadIdx.x * 4;
+  const long row = Geo<NT>::row();
+  if (row >= M) return;                            // only a warp-per-row launch has a ragged last block (no block barrier there)
+  const int tok = row % L, col = Geo<NT>::col();
   float4 x;
   if (XIN != nullptr) {
     x = V4<__nv_bfloat16>::load(XIN + row * D + col);
@@ -78,12 +94,13 @@ __global__ void __launch_bounds__(NT) ln_mod_kernel(const __nv_bfloat16* __restr
 }
 
 template <int NT, bool SIG, typename T>
-__global__ void __launch_bounds__(NT) res_kernel(float* __restrict__ X, const T* YA, long sya, const T* GA, const T* YT2, long syt,
-    const T* GT2, const T* MS, const T* MB, T* OUT_LN, T* FINAL, int L, long sg, long sms, float eps) {
+__global__ void __launch_bounds__(Geo<NT>::THREADS) res_kernel(float* __restrict__ X, const T* YA, long sya, const T* GA, const T* YT2,
+    long syt, const T* GT2, const T* MS, const T* MB, T* OUT_LN, T* FINAL, int L, long sg, long sms, float eps, long M) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
-  const long row = blockIdx.x;
-  const int tok = row % L, col = threadIdx.x * 4;
+  const long row = Geo<NT>::row();
+  if (row >= M) return;
+  const int tok = row % L, col = Geo<NT>::col();
   float4 x = V4<float>::load(X + row * D + col);
   float4 y = V4<T>::load(YA + row * sya + col), g = V4<T>::load(GA + tok * sg + col);
   x.x += sigm(g.x) * y.x; x.y += sigm(g.y) * y.y; x.z += sigm(g.z) * y.z; x.w += sigm(g.w) * y.w;
@@ -96,15 +113,18 @@ __global__ void __launch_bounds__(NT) res_kernel(float* __restrict__ X, const T*
   if (OUT_LN != nullptr) mod_store<NT, SIG>(layernorm<NT>(x, eps, red), MS + tok * sms, MB + tok * sms, OUT_LN + row * D);
 }
 
-// q and k of a row, each LayerNorm'd over its D columns; one block of NT = D / 4 threads per row walks q then k.
+// q and k of a row, each LayerNorm'd over its D columns, q then k.
 template <int NT, typename T>
-__global__ void __launch_bounds__(NT) qk_ln_kernel(T* __restrict__ Q, long sq, T* __restrict__ K, long sk, const float* __restrict__ WQ,
-    const float* __restrict__ BQ, const float* __restrict__ WK, const float* __restrict__ BK, float eps) {
+__global__ void __launch_bounds__(Geo<NT>::THREADS) qk_ln_kernel(T* __restrict__ Q, long sq, T* __restrict__ K, long sk,
+    const float* __restrict__ WQ, const float* __restrict__ BQ, const float* __restrict__ WK, const float* __restrict__ BK, float eps,
+    long M) {
   __shared__ float red[NT / 32];
-  const int col = threadIdx.x * 4;
+  const long row = Geo<NT>::row();
+  if (row >= M) return;
+  const int col = Geo<NT>::col();
 #pragma unroll
   for (int which = 0; which < 2; ++which) {
-    T* p = which ? K + (long)blockIdx.x * sk + col : Q + (long)blockIdx.x * sq + col;
+    T* p = which ? K + row * sk + col : Q + row * sq + col;
     const float4 xh = layernorm<NT>(V4<T>::load(p), eps, red);
     const float4 w = *reinterpret_cast<const float4*>((which ? WK : WQ) + col);
     const float4 b = *reinterpret_cast<const float4*>((which ? BK : BQ) + col);
@@ -112,10 +132,13 @@ __global__ void __launch_bounds__(NT) qk_ln_kernel(T* __restrict__ Q, long sq, T
   }
 }
 
+// gate / GLU: flat over the rows' 4-wide pieces (any width keeps the SMs full; a block per row starved them at 128 / 256 wide)
 template <typename T>
-__global__ void __launch_bounds__(256) gate_kernel(T* __restrict__ O, long so, const T* __restrict__ G, long sg, int D) {
-  const long row = blockIdx.x;
-  for (int c = threadIdx.x * 4; c < D; c += blockDim.x * 4) {
+__global__ void __launch_bounds__(256) gate_kernel(T* __restrict__ O, long so, const T* __restrict__ G, long sg, int D, long n4) {
+  const int per = D / 4;
+  for (long e = (long)blockIdx.x * 256 + threadIdx.x; e < n4; e += (long)gridDim.x * 256) {
+    const long row = e / per;
+    const int c = (int)(e - row * per) * 4;
     float4 o = V4<T>::load(O + row * so + c);
     const float4 g = V4<T>::load(G + row * sg + c);
     o.x *= sigm(g.x); o.y *= sigm(g.y); o.z *= sigm(g.z); o.w *= sigm(g.w);
@@ -124,9 +147,11 @@ __global__ void __launch_bounds__(256) gate_kernel(T* __restrict__ O, long so, c
 }
 
 template <typename T, bool UP>
-__global__ void __launch_bounds__(512) glu_kernel(const T* __restrict__ AB, T* __restrict__ OUT, int N, long sab) {
-  const long row = blockIdx.x;
-  for (int c = threadIdx.x * 4; c < N; c += blockDim.x * 4) {
+__global__ void __launch_bounds__(256) glu_kernel(const T* __restrict__ AB, T* __restrict__ OUT, int N, long sab, long n4) {
+  const int per = N / 4;
+  for (long e = (long)blockIdx.x * 256 + threadIdx.x; e < n4; e += (long)gridDim.x * 256) {
+    const long row = e / per;
+    const int c = (int)(e - row * per) * 4;
     const float4 g = V4<T>::load(AB + row * sab + c), v = V4<T>::load(AB + row * sab + N + c);
     float4 o = make_float4(g.x * sigm(g.x) * v.x, g.y * sigm(g.y) * v.y, g.z * sigm(g.z) * v.z, g.w * sigm(g.w) * v.w);
     if constexpr (UP) {
@@ -136,6 +161,9 @@ __global__ void __launch_bounds__(512) glu_kernel(const T* __restrict__ AB, T* _
     V4<T>::store(OUT + row * N + c, o);
   }
 }
+
+long flat_grid(long n4) { return std::min<long>((n4 + 255) / 256, 132L * 16); }
+
 
 // LayerNorm of C-wide rows (C = 128 or 256), no affine: one warp per row (C / 128 float4 per lane), 8 rows per block.
 template <int C, typename ZT, typename OutT>
@@ -231,8 +259,8 @@ void ln_mod_rows(c10::optional<at::Tensor> xin, at::Tensor x, std::vector<at::Te
   auto s = at::cuda::getCurrentCUDAStream();
   const BF* in = ptr<BF>(xin);
   const long sms = ms[0].stride(0);
-  if (d == 768) (sig ? ln_mod_kernel<192, true> : ln_mod_kernel<192, false>)<<<x.size(0), 192, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps);
-  else (sig ? ln_mod_kernel<32, true> : ln_mod_kernel<32, false>)<<<x.size(0), 32, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps);
+  if (d == 768) (sig ? ln_mod_kernel<192, true> : ln_mod_kernel<192, false>)<<<x.size(0), 192, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps, x.size(0));
+  else (sig ? ln_mod_kernel<32, true> : ln_mod_kernel<32, false>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(in, x.data_ptr<float>(), m, (int)L, sms, (float)eps, x.size(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -261,9 +289,9 @@ void res_rows(at::Tensor x, at::Tensor ya, at::Tensor ga, c10::optional<at::Tens
   BF* fin = final_out ? bfw(*final_out) : nullptr;
   const long syt = yt ? yt->stride(0) : 0, sms = ms ? ms->stride(0) : 0;
 #define RES_ARGS x.data_ptr<float>(), bf(ya), ya.stride(0), bf(ga), ptr<BF>(yt), syt, ptr<BF>(gt), ptr<BF>(ms), ptr<BF>(mb), oln, fin, \
-                 (int)L, ga.stride(0), sms, (float)eps
+                 (int)L, ga.stride(0), sms, (float)eps, x.size(0)
   if (d == 768) (sig ? res_kernel<192, true, BF> : res_kernel<192, false, BF>)<<<x.size(0), 192, 0, s>>>(RES_ARGS);
-  else (sig ? res_kernel<32, true, BF> : res_kernel<32, false, BF>)<<<x.size(0), 32, 0, s>>>(RES_ARGS);
+  else (sig ? res_kernel<32, true, BF> : res_kernel<32, false, BF>)<<<Geo<32>::blocks(x.size(0)), Geo<32>::THREADS, 0, s>>>(RES_ARGS);
 #undef RES_ARGS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -278,9 +306,9 @@ void qk_ln_rows(at::Tensor q, at::Tensor k, at::Tensor wq, at::Tensor bq, at::Te
   const at::cuda::OptionalCUDAGuard guard(q.device());
   auto s = at::cuda::getCurrentCUDAStream();
 #define QK_ARGS bfw(q), q.stride(0), bfw(k), k.stride(0), wq.data_ptr<float>(), bq.data_ptr<float>(), wk.data_ptr<float>(), \
-                bk.data_ptr<float>(), (float)eps
+                bk.data_ptr<float>(), (float)eps, q.size(0)
   if (d == 768) qk_ln_kernel<192, BF><<<q.size(0), 192, 0, s>>>(QK_ARGS);
-  else qk_ln_kernel<32, BF><<<q.size(0), 32, 0, s>>>(QK_ARGS);
+  else qk_ln_kernel<32, BF><<<Geo<32>::blocks(q.size(0)), Geo<32>::THREADS, 0, s>>>(QK_ARGS);
 #undef QK_ARGS
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -291,8 +319,9 @@ void gate_rows(at::Tensor o, at::Tensor g) {
   check(g, "g", at::kBFloat16, d);
   TORCH_CHECK(d % 4 == 0 && o.size(0) == g.size(0), "o / g: the same [rows, D], D % 4 == 0");
   const at::cuda::OptionalCUDAGuard guard(o.device());
-  gate_kernel<BF><<<o.size(0), d >= 1024 ? 256 : (int)(d / 4 + 31) / 32 * 32, 0, at::cuda::getCurrentCUDAStream()>>>(
-      bfw(o), o.stride(0), bf(g), g.stride(0), (int)d);
+  const long n4 = o.size(0) * d / 4;
+  gate_kernel<BF><<<flat_grid(n4), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      bfw(o), o.stride(0), bf(g), g.stride(0), (int)d, n4);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -303,9 +332,9 @@ void glu_rows(at::Tensor ab, at::Tensor out, bool up) {
   check(out, "out", at::kBFloat16, n);
   TORCH_CHECK(out.is_contiguous(), "out contiguous");
   const at::cuda::OptionalCUDAGuard guard(ab.device());
-  const int threads = std::min<int64_t>(512, (n / 4 + 31) / 32 * 32);
-  (up ? glu_kernel<BF, true> : glu_kernel<BF, false>)<<<ab.size(0), threads, 0, at::cuda::getCurrentCUDAStream()>>>(
-      bf(ab), bfw(out), (int)n, ab.stride(0));
+  const long n4 = ab.size(0) * n / 4;
+  (up ? glu_kernel<BF, true> : glu_kernel<BF, false>)<<<flat_grid(n4), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      bf(ab), bfw(out), (int)n, ab.stride(0), n4);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

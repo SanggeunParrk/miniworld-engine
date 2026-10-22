@@ -28,6 +28,21 @@ _PACKS: dict = {}
 _BIASES: dict = {}
 
 
+def _static_pack(store: dict, stack, build):
+    """The stack's folded bf16 weights, made once per (parameter pointer, version) and reused by every later call, a CUDA-graph capture
+    and its replays included: these modules are inference only, so their weights do not change under a graph, and repacking in every
+    replay (what ``_capture.lookup``'s capture scope does) cost more than the step's kernels (RoseTTAFold3, 24 blocks, L 384: 5.75 against
+    2.59 ms). A first call inside a capture records the pack (its replays repack); an in-place weight change after a capture needs a new
+    capture, as it would for any cached state."""
+    key = (id(stack), *((p.data_ptr(), p._version) for p in stack.parameters()))
+    hit = store.get(key)
+    if hit is None:
+        if len(store) >= 8:
+            store.pop(next(iter(store)))
+        hit = store[key] = build(stack)
+    return hit
+
+
 def serves(stack, single, cond, pair, mask) -> bool:
     """A bf16 call without a gradient on H100 at the AF3 token core's layout (768 wide, 16 x 48 heads, L a multiple of 128),
     the conditioning shared by the samples."""
@@ -121,8 +136,7 @@ def inference(stack, single, cond, pair, mask):
     nb, H = len(blocks), b0.n_head
     A, L, D = single.shape
     M = A * L
-    params = list(stack.parameters())
-    pack = _capture.lookup(_PACKS, (id(stack), *((p.data_ptr(), p._version) for p in params)), lambda: _pack(stack), limit=8)
+    pack = _static_pack(_PACKS, stack, _pack)
     bf = torch.bfloat16
     s = (cond if cond.ndim == 2 else cond[0]).to(bf).contiguous()
     sig = not b0.attn_adaln.identity_scale
@@ -239,51 +253,60 @@ def _atom_pack(stack):
     }
 
 
-def _atom_biases(pack, z, kmask, uid, n, eps):
+def _atom_biases(pack, z, kmask, uid, n, eps, slide):
+    """Per block: the clipped windows' bias (``pair_bias_mma``, log2 units, -inf off the keys, Chai-1's other-conformer keys -inf) and,
+    for the slid key window, its edge windows' (window index [5], key index [5, 128], bias [5, h, 32, 128] natural units with -inf off
+    the keys): everything that depends on the pair / mask / uid only, made once per pair."""
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
     )
 
-    out = []
+    nwin = n // 32
     same = None
     if uid is not None:
         # the clipped window's key of slot j: 32 w - 48 + j; keys outside [0, N) are -inf already. A padding query keeps its keys.
-        nwin = n // 32
         idx = (32 * torch.arange(nwin, device=z.device) - 48)[:, None] + torch.arange(128, device=z.device)
-        qu = uid.view(nwin, 32, 1)
-        real = kmask.view(nwin, 32, 1)
-        same = (qu == uid[idx.clamp(0, n - 1)][:, None, :]) | ~real
+        same = (uid.view(nwin, 32, 1) == uid[idx.clamp(0, n - 1)][:, None, :]) | ~kmask.view(nwin, 32, 1)
+    edge = None
+    if slide:
+        # windows 0, 1 and the last three real ones: the only ones whose slid window is not the clipped one (chosen on the device)
+        n_real = kmask.sum()
+        last = (n_real - 1) // 32
+        widx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)
+        starts = torch.minimum((32 * widx - 48).clamp(min=0), (n_real - 128).clamp(min=0))
+        keys = starts[:, None] + torch.arange(128, device=z.device)
+        valid = (keys < n_real)[:, None, :]                                             # [5, 1, 128]
+        keys = keys.clamp(max=n - 1)
+        if uid is not None:
+            rows = 32 * widx[:, None] + torch.arange(32, device=z.device)
+            valid = valid & ((uid[rows][:, :, None] == uid[keys][:, None, :]) | ~kmask[rows][:, :, None])
+        zz = z[widx].float()
+        edge = (widx, keys, valid, zz)
+    out = []
     for w in pack["blocks"]:
         b = local.pair_bias_mma(z, w["gamma"], w["wb"], kmask, n, eps)
         if same is not None:
             b.masked_fill_(~same[None], float("-inf"))
-        out.append(b)
-    return out, z, kmask, uid
+        e = None
+        if edge is not None:
+            widx, keys, valid, zz = edge
+            eb = F.linear(F.layer_norm(zz, zz.shape[-1:], w["gamma"], None, eps), w["wb"]).permute(0, 3, 1, 2)   # [5, h, 32, 128]
+            e = (widx, keys, eb.masked_fill(~valid[:, None], float("-inf")).contiguous())
+        out.append((b, e))
+    return out
 
 
-def _atom_edges(o, q, k, v, z, gamma, wb, a, n, kmask, uid, eps):
-    """``local_dit_h100._slid_edges`` with Chai-1's same-conformer mask: windows 0, 1 and the last three real ones redone over their slid
-    key window in torch (fp32); chosen on the device, so the call can be captured."""
+def _atom_edges(o, q, k, v, edge, a, n):
+    """The slid key window's edge windows (``_atom_biases``) redone in torch (fp32) over their keys, written over ``o``."""
+    widx, keys, bias = edge
     h, d = 4, 32
     nwin = n // 32
-    n_real = kmask.sum()
-    last = (n_real - 1) // 32
-    idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)
-    starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_real - 128).clamp(min=0))
-    keys = starts[:, None] + torch.arange(128, device=o.device)
-    valid = (keys < n_real)[:, None, :]                                                 # [5, 1, 128]
-    if uid is not None:
-        rows = 32 * idx[:, None] + torch.arange(32, device=o.device)                   # [5, 32]
-        valid = valid & ((uid[rows][:, :, None] == uid[keys.clamp(max=n - 1)][:, None, :]) | ~kmask[rows][:, :, None])
-    qs = q.view(a, nwin, 32, h, d)[:, idx].float()
-    ks = k.view(a, n, h, d)[:, keys.clamp(max=n - 1)].float()
-    vs = v.view(a, n, h, d)[:, keys.clamp(max=n - 1)].float()
-    zz = F.layer_norm(z[idx].float(), z.shape[-1:], gamma, None, eps)
-    bias = F.linear(zz, wb).permute(0, 3, 1, 2)                                        # [5, h, 32, 128]
+    qs = q.view(a, nwin, 32, h, d)[:, widx].float()
+    ks = k.view(a, n, h, d)[:, keys].float()
+    vs = v.view(a, n, h, d)[:, keys].float()
     logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * d**-0.5 + bias[None]
-    logits = logits.masked_fill(~valid[None, :, None], float("-inf"))
     out = torch.einsum("awhqk,awkhd->awqhd", torch.nan_to_num(logits.softmax(-1)), vs).reshape(a, 5, 32, 128)
-    o.view(a, nwin, 32, 128).index_copy_(1, idx, out.to(o.dtype))
+    o.view(a, nwin, 32, 128).index_copy_(1, widx, out.to(o.dtype))
 
 
 def atom_inference(stack, single, cond, pair, mask, uid):
@@ -297,6 +320,7 @@ def atom_inference(stack, single, cond, pair, mask, uid):
     nb = len(blocks)
     b0 = blocks[0]
     a, n0, _ = single.shape
+    uid_in = uid
     n = (n0 + 63) // 64 * 64        # the window kernel takes 64-query tiles: one padding window, masked, when N is an odd number of 32
     kmask = (torch.arange(n0, device=single.device) < n0) if mask is None else mask.bool()
     c = (cond if cond.ndim == 2 else cond[0]).to(bf)
@@ -308,17 +332,18 @@ def atom_inference(stack, single, cond, pair, mask, uid):
         kmask = F.pad(kmask, (0, n - n0), value=False)
         uid = None if uid is None else F.pad(uid, (0, n - n0), value=-1)
     c, z, kmask = c.contiguous(), z.contiguous(), kmask.contiguous()
-    params = list(stack.parameters())
-    pack = _capture.lookup(_ATOM_PACKS, (id(stack), *((p.data_ptr(), p._version) for p in params)), lambda: _atom_pack(stack),
-                           limit=8)
+    pack = _static_pack(_ATOM_PACKS, stack, _atom_pack)
     sig = not b0.q_adaln.identity_scale
     sm = F.layer_norm(c.float(), (128,), eps=1e-5).to(bf) if sig else c
     t_mod = torch.addmm(pack["mod_b"], sm, pack["mod_w"].t())      # [N, nb 6 128]: per block q sc | sh, k sc | sh, t sc | sh
     t_gate = torch.addmm(pack["gate_b"], c, pack["gate_w"].t())    # [N, nb 2 128]: per block gA | gT
     pair_eps = (b0.pair_norm if stack.per_block_pair_norm else stack.pair_norm).eps
-    key = (pair.data_ptr(), pair._version, tuple(pair.shape), kmask.data_ptr(), kmask._version,
-           None if uid is None else (uid.data_ptr(), uid._version), id(pack))
-    biases = _capture.lookup_inputs(_ATOM_BIASES, key, lambda: _atom_biases(pack, z, kmask, uid, n, pair_eps), limit=2)[0]
+    # keyed by the caller's pair / mask / uid tensors (kmask and a padded uid are made per call)
+    key = (pair.data_ptr(), pair._version, tuple(pair.shape), None if mask is None else (mask.data_ptr(), mask._version),
+           None if uid_in is None else (uid_in.data_ptr(), uid_in._version), id(pack), stack.key_window)
+    slide = stack.key_window == "slide"
+    biases = _capture.lookup_inputs(  # the entry keeps its key tensors alive
+        _ATOM_BIASES, key, lambda: (_atom_biases(pack, z, kmask, uid, n, pair_eps, slide), pair, mask, uid_in), limit=2)[0]
 
     m = a * n
     dev = single.device
@@ -343,9 +368,10 @@ def atom_inference(stack, single, cond, pair, mask, uid):
         k, v = kv[:, :128].contiguous(), kv[:, 128:].contiguous()
         if blk.kq_norm:
             cuda.qk_ln_rows(q, k, *w["qk"], w["qk_eps"])
-        o, _ = local.attn_fwd_mma(q.view(a, n, 128), k.view(a, n, 128), v.view(a, n, 128), biases[i])
+        bias, edge = biases[i]
+        o, _ = local.attn_fwd_mma(q.view(a, n, 128), k.view(a, n, 128), v.view(a, n, 128), bias)
         if stack.key_window == "slide":
-            _atom_edges(o, q, k, v, z, w["gamma"], w["wb"], a, n, kmask, uid, pair_eps)
+            _atom_edges(o, q, k, v, edge, a, n)
         o = o.view(m, 128)
         if blk.gating:
             cuda.gate_rows(o, torch.mm(xq, w["wg"].t()))
