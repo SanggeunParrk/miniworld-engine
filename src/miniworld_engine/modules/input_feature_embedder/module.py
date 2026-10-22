@@ -12,11 +12,20 @@ projections are cuBLAS and the token mean one scatter-add. On H100 / B200 nothin
 Parameter names match MiniWorld's ``ESMFold2InputAtomAttentionEncoder`` (``to_atom_single_cond``, ``atom_transformer``,
 ``atom_out_norm``, ``atom_single_rep_to_token_single``), so its checkpoints load unchanged. Unlike that encoder this one never builds the
 O(L_atom^2) atom-pair features the ESMFold2 path discards.
+
+``features="esmfold2"`` is ESMFold2's own encoder (biohub/esm ``EsmFold2AtomEncoder``) without the atom-name characters: per atom
+position, charge, atom mask and the element one-hot (atomic number, 128 classes) -> ``Linear`` -> an affine ``LayerNorm`` (``atom_norm``)
+that both starts the atom stream and conditions every block -> the transformer -> ``Linear + ReLU`` with no terminal norm -> the token
+mean. The default ``"legacy"`` layout above is the one MiniWorld trained through v2.3.0: its scalar element and un-normalised
+condition let the residual stream grow without bound and collapse onto one direction, after which the bias-free ReLU dies (2026-10-22).
 """
 
 from __future__ import annotations
 
+from typing import Literal
+
 import torch
+import torch.nn.functional as F
 from jaxtyping import Bool, Float, Int
 from torch import nn
 
@@ -24,6 +33,12 @@ from miniworld_engine.architecture.exceptions import ImplementationType
 
 #: Reference features per atom: position (3), mask, element, arcsinh(charge).
 N_ATOM_FEATURES = 6
+#: Element one-hot width of the ``"esmfold2"`` layout (atomic numbers 0..127, ESMFold2's ``MAX_ATOMIC_NUMBER``).
+MAX_ATOMIC_NUMBER = 128
+#: ``"esmfold2"`` features per atom: position (3), charge, atom mask, element one-hot.
+N_ATOM_FEATURES_ESMFOLD2 = 3 + 1 + 1 + MAX_ATOMIC_NUMBER
+
+AtomFeatures = Literal["legacy", "esmfold2"]
 
 
 def atom_single_features(
@@ -37,6 +52,20 @@ def atom_single_features(
     features = torch.cat(
         [pos, mask[..., None], element.to(pos.dtype)[..., None], torch.arcsinh(charge.to(pos.dtype))[..., None]], dim=-1
     )
+    return features * mask[..., None]
+
+
+def atom_single_features_esmfold2(
+    pos: Float[torch.Tensor, "B N 3"],
+    charge: Float[torch.Tensor, "B N"],
+    atom_mask: Bool[torch.Tensor, "B N"],
+    element: Float[torch.Tensor, "B N"],
+) -> Float[torch.Tensor, "B N 133"]:
+    """ESMFold2's per-atom features without the atom-name characters: position, charge, atom mask, element one-hot (atomic number),
+    zero on masked atoms (ESMFold2 zeroes the one-hots there; positions and charges of padding are zero already)."""
+    mask = atom_mask.to(pos.dtype)
+    element = F.one_hot(element.long().clamp(0, MAX_ATOMIC_NUMBER - 1), MAX_ATOMIC_NUMBER).to(pos.dtype)
+    features = torch.cat([pos, charge.to(pos.dtype)[..., None], mask[..., None], element], dim=-1)
     return features * mask[..., None]
 
 
@@ -60,6 +89,7 @@ class InputFeatureEmbedder(nn.Module):
         n_uid_rope_pairs: int = 10,
         spatial_rope_base_frequency: float = 20.0,
         uid_rope_base_frequency: float = 10000.0,
+        features: AtomFeatures = "legacy",
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
@@ -69,8 +99,17 @@ class InputFeatureEmbedder(nn.Module):
         from miniworld_engine.architecture.primitives import Linear
         from miniworld_engine.modules.primitives import RMSNorm
 
+        if features not in ("legacy", "esmfold2"):
+            message = f"features must be 'legacy' or 'esmfold2', got {features!r}"
+            raise ValueError(message)
+        self.features = features
         self.d_token = d_token
-        self.to_atom_single_cond = Linear(N_ATOM_FEATURES, d_atom, init="default", bias=False)
+        n_in = N_ATOM_FEATURES_ESMFOLD2 if features == "esmfold2" else N_ATOM_FEATURES
+        self.to_atom_single_cond = Linear(n_in, d_atom, init="default", bias=False)
+        if features == "esmfold2":
+            # ESMFold2's ``atom_norm``: the projected features are layer-normed once; the result starts the atom stream and is the
+            # condition of every block, so the adaLN modulation sees a bounded input
+            self.atom_norm = nn.LayerNorm(d_atom)
         self.atom_transformer = SWAAtomTransformer(
             SWAAtomTransformer.Config(
                 d_atom=d_atom,
@@ -90,8 +129,12 @@ class InputFeatureEmbedder(nn.Module):
                 fused_triton=True,
             )
         )
-        # Terminal norm of the pre-norm stack (GPT-2 / LLaMA ``ln_f``): affine-free, no parameters.
-        self.atom_out_norm = RMSNorm(d_atom, elementwise_affine=False, implementation=to_engine_impl(implementation))
+        # Terminal norm of the pre-norm stack (GPT-2 / LLaMA ``ln_f``): affine-free, no parameters. ESMFold2 has none.
+        self.atom_out_norm = (
+            nn.Identity()
+            if features == "esmfold2"
+            else RMSNorm(d_atom, elementwise_affine=False, implementation=to_engine_impl(implementation))
+        )
         self.atom_single_rep_to_token_single = nn.Sequential(
             Linear(d_atom, d_token, init="default", bias=False),
             nn.ReLU(),
@@ -106,10 +149,15 @@ class InputFeatureEmbedder(nn.Module):
         space_uid: Int[torch.Tensor, "B N"],
         atom_mask: Bool[torch.Tensor, "B N"],
     ) -> Float[torch.Tensor, "B N d_atom"]:
-        """The atom stream after the transformer and the terminal norm."""
+        """The atom stream after the transformer and the terminal norm (none for ``"esmfold2"``)."""
         from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
 
-        single = self.to_atom_single_cond(atom_single_features(pos, ref_mask, element, charge))
+        if self.features == "esmfold2":
+            projected = self.to_atom_single_cond(atom_single_features_esmfold2(pos, charge, atom_mask, element))
+            # the LayerNorm runs in fp32 under autocast; hand the transformer the projection's dtype, as the legacy layout does
+            single = self.atom_norm(projected).to(projected.dtype)
+        else:
+            single = self.to_atom_single_cond(atom_single_features(pos, ref_mask, element, charge))
         cos, sin = self.atom_transformer.build_rope(pos, space_uid)
         params = build_attention_params(cos, sin, atom_mask, num_aug=1)
         single = self.atom_transformer(single, single, params)   # the single conditions itself
