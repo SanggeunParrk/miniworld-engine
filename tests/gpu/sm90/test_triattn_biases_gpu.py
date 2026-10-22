@@ -95,3 +95,53 @@ def test_attention_pair_bias_gate_bias():
         z = torch.randn(1, 256, 256, 256, device="cuda")
         mask = (torch.arange(256, device="cuda") < 200)[None]
         torch.testing.assert_close(m(s, z, mask), ref(s, z, mask), rtol=1e-5, atol=1e-5)
+
+
+def _variant(d_pair, d_hidden, starting, transposed_bias=True, **options):
+    torch.manual_seed(0)
+    m = TriangleAttention(d_pair, 4, d_hidden=d_hidden, starting=starting, transposed_bias=transposed_bias,
+                          implementation=ImplementationType.MINIWORLD, p_drop=0.0, **options).cuda().eval()
+    with torch.no_grad():
+        for name, p in m.named_parameters():
+            p.copy_(1 + 0.1 * torch.randn_like(p) if name == "ln_pair.weight" else
+                    torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 0.3 * torch.randn_like(p))
+    return m
+
+
+# (d_pair, d_hidden, starting, transposed_bias, options): Chai-1's trunk (4 x 64) plain / untransposed ending / confidence dual;
+# its template (4 x 32) untransposed; RoseTTAFold3's template (4 x 64) with biases
+VARIANTS = [
+    (256, 256, True, True, {}),
+    (256, 256, False, False, {}),
+    (256, 256, False, False, {"untransposed_output": True}),
+    (256, 256, True, False, {"dual_output": True}),
+    (256, 256, False, False, {"dual_output": True}),
+    (64, 128, False, False, {"untransposed_output": True}),
+    (64, 256, True, False, {"gate_bias": True, "out_bias": True}),
+    (64, 256, False, False, {"gate_bias": True, "out_bias": True}),
+]
+
+
+@pytest.mark.parametrize("variant", range(len(VARIANTS)))
+@pytest.mark.parametrize(("b", "n", "real"), [(1, 256, 256), (1, 384, 333), (2, 192, 150)])
+def test_triattn_variants_h100(variant, b, n, real):
+    from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+    d_pair, d_hidden, starting, transposed_bias, options = VARIANTS[variant]
+    m = _variant(d_pair, d_hidden, starting, transposed_bias, **options)
+    g = torch.Generator(device="cuda").manual_seed(1)
+    z = torch.randn(b, n, n, d_pair, device="cuda", generator=g)
+    mask = (torch.arange(n, device="cuda") < real).expand(b, n).contiguous()
+    gold64 = copy.deepcopy(m).double()
+    ref16 = copy.deepcopy(m).to(torch.bfloat16)
+    eng = m.to(torch.bfloat16)
+    zb = z.to(torch.bfloat16)
+    with torch.no_grad():
+        assert h100_dh.serves(eng, zb, mask)
+        gold = z.double() + gold64._biased_reference(z.double(), mask)
+        base = zb + ref16._biased_reference(zb, mask)
+        got = eng(zb, mask)
+    rows = (slice(None), slice(0, real), slice(0, real))
+    err, err16 = _rel(got[rows], gold[rows]), _rel(base[rows], gold[rows])
+    assert torch.isfinite(got[rows]).all()
+    assert err <= max(1.5 * err16, 2e-3), f"{VARIANTS[variant]}: engine {err:.2e} vs bf16 reference {err16:.2e}"

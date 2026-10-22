@@ -88,6 +88,8 @@ class TriangleAttention(nn.Module):
         anthropic_row: str = "k2b",
         gate_bias: bool = False,
         out_bias: bool = False,
+        untransposed_output: bool = False,
+        dual_output: bool = False,
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -164,6 +166,12 @@ class TriangleAttention(nn.Module):
         # them for inference, anything else runs ``_biased_reference``.
         self.to_gate = Linear(d_pair, d_hidden, bias=gate_bias, init="gating")
         self.to_out = Linear(d_hidden, d_pair, bias=out_bias, init="zero")
+        # Chai-1: the ending node returns its update as the transposed pair has it (``untransposed_output``); the confidence head adds
+        # a second out-projection whose update lands transposed (``dual_output``: starting kept + other^T, ending kept^T + other).
+        self.untransposed_output = untransposed_output and not dual_output
+        self.dual_output = dual_output
+        if dual_output:
+            self.to_out_t = Linear(d_hidden, d_pair, bias=out_bias, init="zero")
         # Independent switches for qualified H100 projection and grouped-bias backward.
         # Each switch also selects its corresponding benchmark baseline.
         self._fuse_projection_backward = True
@@ -366,12 +374,17 @@ class TriangleAttention(nn.Module):
         comment); fusing them into the attention epilogue for the speed win is a later task.
         >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
         not a flag on this module."""
-        if self.to_gate.bias is not None or self.to_out.bias is not None:
+        variant_output = self.untransposed_output or self.dual_output
+        if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
+            # RoseTTAFold3's biases, Chai-1's output variants: the H100 kernels for inference, else the torch statements
             from miniworld_engine.integrations import triattn_h100_sm90
+            from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
 
-            if triattn_h100_sm90.serves(self, pair, mask):
-                with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                if not variant_output and triattn_h100_sm90.serves(self, pair, mask):
                     return triattn_h100_sm90.forward(self, pair, mask)
+                if h100_dh.serves(self, pair, mask):
+                    return h100_dh.forward(self, pair, mask)
             out = self._biased_reference(pair, mask)
             if self.p_drop > 0.0 and self.training:
                 out = out * self._make_drop_scale(pair, self.p_drop)
@@ -401,6 +414,11 @@ class TriangleAttention(nn.Module):
         if triattn_h100_sm90.serves(self, pair, mask):
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return triattn_h100_sm90.forward(self, pair, mask)
+        from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
+
+        if h100_dh.head_dim(self) == 64 and h100_dh.serves(self, pair, mask):  # 64-channel heads (Chai-1): the sm90 kernels take 16 / 32
+            with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                return h100_dh.forward(self, pair, mask)
         requested_h100 = not self._bias_untransposed and (
             triattn_h100.native_requested(self, pair)
             or getattr(self, "_h100_b200style_cuda", False)
@@ -477,8 +495,12 @@ class TriangleAttention(nn.Module):
         if mask is not None:
             logits = logits.masked_fill(~mask.bool()[:, None, None, None, :], float("-inf"))
         o = torch.einsum("bihjk,bikhd->bijhd", torch.nan_to_num(logits.softmax(-1)), v.to(acc)).reshape(B, L, L, -1).to(pair.dtype)
-        out = self.to_out(torch.sigmoid(self.to_gate(xt)) * o)
-        return out if self.starting else out.transpose(1, 2)
+        u = torch.sigmoid(self.to_gate(xt)) * o
+        out = self.to_out(u)
+        if self.dual_output:
+            other = self.to_out_t(u)
+            return out + other.transpose(1, 2) if self.starting else out.transpose(1, 2) + other
+        return out if self.starting or self.untransposed_output else out.transpose(1, 2)
 
     def _attention(
         self,
