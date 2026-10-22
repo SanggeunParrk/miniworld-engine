@@ -67,3 +67,9 @@ def ln_rows(z, out, eps=1e-5):
 
 def available() -> bool:
     return torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+
+
+def parallel_residual(x, outputs):
+    """x + sum_i (y_i - x) with fp32 sums and one rounding: a parallel block's output from the residual outputs y_i = x + f_i(x) of its
+    parts (each engine module owns its residual). x / y_i contiguous, one shape, bf16 or fp32; one to eight outputs."""
+    return ext().parallel_residual(x, list(outputs))

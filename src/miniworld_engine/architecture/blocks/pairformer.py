@@ -116,12 +116,17 @@ class PairformerBlock(nn.Module):
         transition_pair: nn.Module,
         attention_single: nn.Module | None = None,
         transition_single: nn.Module | None = None,
+        parallel: bool = False,
     ) -> "PairformerBlock":
         """Compose checkpoint-compatible ops with the standard residual contract.
 
         Model adapters may provide different parameter layouts or mask semantics.
         Every supplied self-residual op returns its complete residual output;
         this shared block owns only ordering. All tensors retain a batch axis.
+
+        ``parallel`` (Chai-1, RoseTTAFold3): every part reads the block input, ``pair + sum_i f_i(pair)`` (the single attention reads
+        the pair entering the block, the single transition the single entering it), summed from the parts' residual outputs by
+        ``kernels.dit_variants.cuda.parallel_residual``.
         """
         if (attention_single is None) != (transition_single is None):
             raise ValueError(
@@ -142,6 +147,7 @@ class PairformerBlock(nn.Module):
         block.tri_atten_starting = attention_starting
         block.tri_atten_ending = attention_ending
         block.transition_pair = transition_pair
+        block.parallel = parallel
         if block.use_single:
             block.attention_pair_bias = attention_single
             block.transition_single = transition_single
@@ -161,6 +167,8 @@ class PairformerBlock(nn.Module):
     ]:
         """Forward pass."""
         triangle_mask = pair_mask if pair_mask is not None else mask
+        if getattr(self, "parallel", False):
+            return self._parallel_forward(pair, single, mask, triangle_mask)
         if self.use_bidirectional_trimul:
             pair = self.tri_multi(pair, triangle_mask)
         else:
@@ -178,6 +186,41 @@ class PairformerBlock(nn.Module):
             single = self.attention_pair_bias(single, pair, mask)  # owns residual
             single = self.transition_single(single)
         return pair, single
+
+    def _parallel_forward(self, pair, single, mask, triangle_mask):
+        """Every part on the block input; the parts own their residuals, so the update is ``pair + sum_i (y_i - pair)``."""
+        if self.use_bidirectional_trimul:
+            outs = [self.tri_multi(pair, triangle_mask)]
+        else:
+            outs = [self.tri_multi_outgoing(pair, triangle_mask), self.tri_multi_incoming(pair, triangle_mask)]
+        if self.use_triangle_attention:
+            outs += [self.tri_atten_starting(pair, triangle_mask), self.tri_atten_ending(pair, triangle_mask)]
+        outs.append(self.transition_pair(pair))
+        new_pair = _parallel_residual(pair, outs)
+        if self.use_single:
+            if single is None:
+                msg = "single must be provided when use_single=True"
+                raise ValueError(msg)
+            single = _parallel_residual(single, [self.attention_pair_bias(single, pair, mask), self.transition_single(single)])
+        return new_pair, single
+
+
+def _parallel_residual(x: torch.Tensor, outs: list[torch.Tensor]) -> torch.Tensor:
+    """x + sum_i (y_i - x): the CUDA sum (fp32, one rounding) on H100, else the same in torch."""
+    if (
+        x.is_cuda
+        and x.dtype in (torch.bfloat16, torch.float32)
+        and torch.cuda.get_device_capability(x.device) == (9, 0)
+        and x.numel() % 4 == 0
+        and len(outs) <= 8
+    ):
+        from miniworld_engine.kernels.dit_variants import cuda
+
+        x = x.contiguous()
+        return cuda.parallel_residual(x, [y.contiguous() for y in outs])
+    acc = x.to(torch.promote_types(x.dtype, torch.float32))
+    total = acc + sum(y.to(acc.dtype) - acc for y in outs)
+    return total.to(x.dtype)
 
 
 class Pairformer(nn.Module):

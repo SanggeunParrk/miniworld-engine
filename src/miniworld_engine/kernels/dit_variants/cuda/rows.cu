@@ -11,6 +11,7 @@
 //   gate_rows      o <- o * sigmoid(g)
 //   glu_rows       out = silu(g) * v [* u],  row = [g | v | u]  (u: Boltz-2's up-gate)
 //   ln_rows        out = LN(z) (no affine), C = 128 or 256 (the pair rows of the hoisted pair bias)
+//   parallel_residual  out = x + sum_i (y_i - x): a parallel block (Chai-1, RoseTTAFold3) from its parts' residual outputs
 //
 // tok = row % L: the AdaLN / gate tables are per token (atom), shared by the samples. One block per row, a thread owns 4
 // consecutive columns; sums in fp32.
@@ -162,6 +163,25 @@ __global__ void __launch_bounds__(256) ln_rows_kernel(const ZT* __restrict__ Z, 
   }
 }
 
+// out = x + sum_i (y_i - x): a parallel block's update from residual outputs y_i = x + f_i(x) (fp32 sums, one rounding at the end)
+struct Outs {
+  const void* y[8];
+  int n;
+};
+
+template <typename T>
+__global__ void __launch_bounds__(256) parallel_residual_kernel(const T* __restrict__ X, Outs ys, T* __restrict__ OUT, long n4) {
+  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long)gridDim.x * blockDim.x) {
+    const float4 x = V4<T>::load(X + 4 * i);
+    float4 acc = x;
+    for (int k = 0; k < ys.n; ++k) {
+      const float4 y = V4<T>::load(reinterpret_cast<const T*>(ys.y[k]) + 4 * i);
+      acc.x += y.x - x.x; acc.y += y.y - x.y; acc.z += y.z - x.z; acc.w += y.w - x.w;
+    }
+    V4<T>::store(OUT + 4 * i, acc);
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ host
 using BF = __nv_bfloat16;
 
@@ -299,6 +319,29 @@ void ln_rows(at::Tensor z, at::Tensor out, double eps) {
       bf(z), bfw(out), r, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+at::Tensor parallel_residual(at::Tensor x, std::vector<at::Tensor> ys) {
+  TORCH_CHECK(x.is_cuda() && x.is_contiguous() && (x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kFloat) && x.numel() % 4 == 0,
+              "x: contiguous bf16 / fp32, numel % 4 == 0");
+  TORCH_CHECK(!ys.empty() && ys.size() <= 8, "one to eight outputs");
+  Outs o{};
+  o.n = (int)ys.size();
+  for (size_t k = 0; k < ys.size(); ++k) {
+    TORCH_CHECK(ys[k].is_contiguous() && ys[k].scalar_type() == x.scalar_type() && ys[k].sizes() == x.sizes(), "outputs: contiguous, like x");
+    o.y[k] = ys[k].data_ptr();
+  }
+  const at::cuda::OptionalCUDAGuard guard(x.device());
+  auto out = at::empty_like(x);
+  const long n4 = x.numel() / 4;
+  const int grid = (int)std::min<long>((n4 + 255) / 256, 132L * 16);
+  auto s = at::cuda::getCurrentCUDAStream();
+  if (x.scalar_type() == at::kBFloat16)
+    parallel_residual_kernel<BF><<<grid, 256, 0, s>>>(bf(x), o, bfw(out), n4);
+  else
+    parallel_residual_kernel<float><<<grid, 256, 0, s>>>(x.data_ptr<float>(), o, out.data_ptr<float>(), n4);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
 }  // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -308,4 +351,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_rows", &gate_rows);
   m.def("glu_rows", &glu_rows);
   m.def("ln_rows", &ln_rows);
+  m.def("parallel_residual", &parallel_residual);
 }
