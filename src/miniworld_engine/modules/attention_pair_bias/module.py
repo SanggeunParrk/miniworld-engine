@@ -44,10 +44,13 @@ class AttentionPairBias(nn.Module):
         d_hidden: int | None = None,
         *,
         use_qk_norm: bool = False,
+        gate_bias: float = 0.0,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
         self.n_head = n_head
+        #: A constant added to the gate logits (Chai-1's pairformer single attention: 1.0); the B200 kernels take none.
+        self.gate_bias = float(gate_bias)
         self.use_qk_norm = use_qk_norm
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_augmented_attention(self.implementation)
@@ -88,9 +91,9 @@ class AttentionPairBias(nn.Module):
         The residual is UNCONDITIONAL (domain standard) and applied EXPLICITLY here (team-gm layer,
         not kernel-fused). The residual is unconditional and has no flag."""
         # Hand-CUDA B200 (integrations.attention_pair_bias_b200 states its contract; the residual is folded there).
-        if _b200.serves_inference(self, single, pair, mask):
+        if self.gate_bias == 0.0 and _b200.serves_inference(self, single, pair, mask):
             return _b200.update_inference(self, single, pair, mask)
-        if _b200.serves_train(self, single, pair, mask):
+        if self.gate_bias == 0.0 and _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
         # H100 / B200 have no Triton fallback: a MINIWORLD call the native CUDA path does not serve runs the PyTorch attention.
         no_triton = (
@@ -181,6 +184,8 @@ class AttentionPairBias(nn.Module):
             if master
             else self.to_gate(single)
         )
+        if self.gate_bias:
+            gate = gate + self.gate_bias
         out = rearrange(out, "B H L D -> B L (H D)")
         out = sigmoid_gate(gate, out)
         out = _h100_master.linear(out, self.to_out, wo) if master else self.to_out(out)

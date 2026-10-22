@@ -74,3 +74,24 @@ def test_biased_reference_matches_the_engine_reference(starting):
         theirs = plain.double()(z, mask)
     rows = (slice(None), slice(0, 100), slice(0, 100))
     torch.testing.assert_close(ours[rows], theirs[rows], rtol=1e-6, atol=1e-7)
+
+
+def test_attention_pair_bias_gate_bias():
+    """Chai-1's single attention: ``gate_bias`` adds a constant to the gate logits (the same as a to_gate bias of that value)."""
+    from miniworld_engine.modules.attention_pair_bias import AttentionPairBias
+
+    torch.manual_seed(0)
+    m = AttentionPairBias(384, 256, 16, 24, gate_bias=1.0, implementation=ImplementationType.MINIWORLD).cuda().eval()
+    ref = AttentionPairBias(384, 256, 16, 24, implementation=ImplementationType.PYTORCH).cuda().eval()
+    ref.load_state_dict(m.state_dict())
+    with torch.no_grad():
+        for p in m.parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 1 + 0.1 * torch.randn_like(p))
+        ref.load_state_dict(m.state_dict())
+        ref.to_gate = torch.nn.Linear(384, 384).cuda()
+        ref.to_gate.weight.copy_(m.to_gate.weight)
+        ref.to_gate.bias.fill_(1.0)
+        s = torch.randn(1, 256, 384, device="cuda")
+        z = torch.randn(1, 256, 256, 256, device="cuda")
+        mask = (torch.arange(256, device="cuda") < 200)[None]
+        torch.testing.assert_close(m(s, z, mask), ref(s, z, mask), rtol=1e-5, atol=1e-5)
