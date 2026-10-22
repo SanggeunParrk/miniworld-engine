@@ -86,6 +86,9 @@ class OuterProductMean(nn.Module):
         *,
         mask_interchain: bool = False,
         normalize_before_proj: bool = True,
+        projection_bias: bool = False,
+        groups: int = 1,
+        product_norm_eps: float = 0.1,
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
@@ -104,9 +107,42 @@ class OuterProductMean(nn.Module):
         # the engine implementation; a raw nn.LayerNorm runs fp32-native under autocast and,
         # at MSA depth 2048, is the single biggest kernel in the MSA module.
         self.ln_msa = LayerNorm(d_msa, implementation=implementation)
-        self.to_left = Linear(d_msa, d_hidden, bias=False)
-        self.to_right = Linear(d_msa, d_hidden, bias=False)
-        self.to_out = Linear(d_hidden * d_hidden, d_pair, bias=True, init="zero")
+        # RoseTTAFold3: the left / right projections carry a bias (``projection_bias``; masked rows lose it too). Chai-1: ``groups`` = 8
+        # outer products of d_hidden / groups wide halves, their G (d_hidden / G)^2 products LayerNorm'd (``product_norm``, eps
+        # ``product_norm_eps``) before the out-projection, no division by the pair counts. Both run kernels.outer_product_mean.composed
+        # on H100 (inference) and ``_variant_reference`` elsewhere.
+        if d_hidden % groups:
+            raise ValueError(f"d_hidden ({d_hidden}) must be divisible by groups ({groups})")
+        self.groups, self.group_width = groups, d_hidden // groups
+        self.to_left = Linear(d_msa, d_hidden, bias=projection_bias)
+        self.to_right = Linear(d_msa, d_hidden, bias=projection_bias)
+        products = groups * self.group_width**2
+        self.to_out = Linear(products, d_pair, bias=True, init="zero")
+        if groups > 1:
+            self.product_norm = nn.LayerNorm(products, eps=product_norm_eps)
+
+    def _variant_reference(self, msa, mask, token_asym_id, residual):
+        """The projection-bias / grouped OPM in torch (products in the parameters' dtype)."""
+        B, S, N, _ = msa.shape
+        G, K = self.groups, self.group_width
+        m = self.ln_msa(msa)
+        left, right = self.to_left(m), self.to_right(m)
+        if mask is None:
+            mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+        left, right = left * mask[..., None], right * mask[..., None]
+        if G > 1:
+            prod = torch.einsum("bsigk,bsjgl->bijgkl", left.view(B, S, N, G, K), right.view(B, S, N, G, K)).reshape(B, N, N, -1)
+            pair = self.to_out(self.product_norm(prod))
+        else:
+            out = rearrange(torch.einsum("bmid,bmje->bijde", left, right), "B L1 L2 D1 D2 -> B L1 L2 (D1 D2)")
+            norm = torch.einsum("bmi,bmj->bij", mask.float(), mask.float()).clamp(min=1)[..., None]
+            if self.normalize_before_proj:
+                pair = self.to_out((out / norm).to(left.dtype))
+            else:
+                pair = (self.to_out(out) / norm).to(left.dtype)
+        if self.mask_interchain and token_asym_id is not None:
+            pair = pair * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(pair.dtype)
+        return residual + pair if residual is not None else pair
 
     @typecheck
     def forward(
@@ -122,6 +158,21 @@ class OuterProductMean(nn.Module):
         explicitly by the block (``pair = opm(msa, ..., residual=pair)``) rather than being the
         module's own input; the add is unconditional when ``residual`` is provided (no dropout on
         the OPM branch). ``residual=None`` returns the raw OPM output (standalone / benchmarking)."""
+        if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
+            from miniworld_engine.kernels.outer_product_mean import composed
+
+            if (
+                self.implementation != ImplementationType.PYTORCH
+                and self.groups == 1
+                and _opm_train.wanted(self.implementation)
+                and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
+                                      interchain=False, normalize_before_proj=self.normalize_before_proj)
+                and not torch.is_grad_enabled()
+            ):
+                return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
+            if self.implementation != ImplementationType.PYTORCH and composed.serves(self, msa, mask):
+                return composed.inference(self, msa, mask, token_asym_id, residual)
+            return self._variant_reference(msa, mask, token_asym_id, residual)
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.
         if _opm_train.wanted(self.implementation):
