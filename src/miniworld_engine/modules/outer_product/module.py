@@ -161,6 +161,9 @@ class OuterProductMean(nn.Module):
         if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
             from miniworld_engine.kernels.outer_product_mean import composed
 
+            if (self.implementation != ImplementationType.PYTORCH and self.to_left.bias is not None
+                    and composed.biased_wide_serves(self, msa, mask)):
+                return composed.biased_wide(self, msa, mask, token_asym_id, residual)
             if (
                 self.implementation != ImplementationType.PYTORCH
                 and self.groups == 1

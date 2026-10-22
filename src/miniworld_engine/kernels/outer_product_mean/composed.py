@@ -101,3 +101,43 @@ def biased_on_fused(module, msa, mask, token_asym_id=None, residual=None):
     if module.mask_interchain and token_asym_id is not None:
         out = out * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(out.dtype)
     return residual + out if residual is not None else out
+
+
+def biased_wide_serves(module, msa, mask) -> bool:
+    """The wide H100 composition takes the biases in its prologue: one sample, S % 256, N % 64, d_msa 64 / 128, 32 + 32 projections."""
+    if torch.is_grad_enabled() or not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
+        return False
+    if torch.cuda.get_device_capability(msa.device) != (9, 0) or module.groups != 1 or module.group_width != 32:
+        return False
+    _, s, n, cm = msa.shape
+    return s % 256 == 0 and n % 64 == 0 and cm in (64, 128) and module.to_out.weight.shape[0] in (128, 256, 384)
+
+
+def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
+    """RoseTTAFold3's biased projections in the wide H100 composition: its persistent TMA prologue adds the left | right biases in
+    the projection epilogue (masked like the projections), then cuBLAS for the outer product and the fused epilogue (out-projection,
+    bias, count normalisation before or after it, residual)."""
+    from miniworld_engine.integrations import opm_train
+
+    bf = torch.bfloat16
+    m = msa[0].contiguous()
+    _, n, cm = m.shape
+    cz = module.to_out.weight.shape[0]
+    ext = opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz)
+    mk = (mask[0] if mask is not None else torch.ones(m.shape[:2], dtype=torch.bool, device=msa.device)).contiguous()
+    if mk.dtype != torch.bool:
+        mk = mk != 0
+    pbias = torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous()
+    a2, bt, _, _, norm = ext.opm_prologue_wide(
+        m, mk, module.ln_msa.weight.float().contiguous(), module.ln_msa.bias.float().contiguous(),
+        module.to_left.weight.to(bf).contiguous(), module.to_right.weight.to(bf).contiguous(),
+        float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias)
+    interchain = module.mask_interchain and token_asym_id is not None
+    z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, module.to_out.weight.to(bf).contiguous(),
+                         module.to_out.bias.to(bf).float().contiguous(), n, n, None if interchain else residual,
+                         int(not module.normalize_before_proj))
+    z = z.view(1, n, n, cz)
+    if interchain:
+        z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
+        return residual + z if residual is not None else z
+    return z

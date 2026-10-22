@@ -915,7 +915,7 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
     const __grid_constant__ CUtensorMap xm, const __grid_constant__ CUtensorMap mm,
     const __grid_constant__ CUtensorMap wam, const __grid_constant__ CUtensorMap wbm,
     const __grid_constant__ CUtensorMap am, const __grid_constant__ CUtensorMap bm,
-    const float* gamma, const float* beta, __nv_bfloat16* mask16, float* stats, unsigned* bits,
+    const float* gamma, const float* beta, __nv_bfloat16* mask16, float* stats, unsigned* bits, const float* pbias,
     int S, int N, int tiles, float eps) {
   using namespace opm_pro_tma;
   using C = opm_pro_wide::Cfg<CMT>;
@@ -1025,6 +1025,11 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       for (int k = 0; k < 16; ++k) {
         int col = k * 8 + (lane % 4) * 2, ch = cw * 16 + lane / 4, h = col / 64, cc = col % 64;
         __nv_bfloat16* out = st + b * TT + h * 4096;
+        if (pbias != nullptr) {   // RoseTTAFold3's projection biases [a | b], masked like the projections (mask16 of this tile is written)
+          const float k0 = __bfloat162float(mask16[(long)(s0 + col) * N + i]), k1 = __bfloat162float(mask16[(long)(s0 + col + 1) * N + i]);
+          acc[k * 4] += pbias[ch] * k0; acc[k * 4 + 1] += pbias[ch] * k1;
+          acc[k * 4 + 2] += pbias[ch + 8] * k0; acc[k * 4 + 3] += pbias[ch + 8] * k1;
+        }
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4], acc[k * 4 + 1]);
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch + 8, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4 + 2], acc[k * 4 + 3]);
       }
@@ -2386,7 +2391,8 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
 // A2 [(i,c), s] / BT [(j,e), s] layouts, the LayerNorm statistics, the bf16 mask, and the exact mask count [N, N] (popcount of
 // the bit mask the prologue wrote).  Parameters arrive already as gamma / beta fp32 [CM] and Wa / Wb bf16 [32, CM].
 std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask, torch::Tensor gamma, torch::Tensor beta,
-                                             torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats) {
+                                             torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats,
+                                             c10::optional<torch::Tensor> pbias) {
   using Cf = opm_pro_wide::Cfg<CM_MSA>;
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == CM_MSA,
               "wide OPM prologue: m is contiguous bf16 [S, N, ", CM_MSA, "]");
@@ -2431,8 +2437,11 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   __nv_bfloat16* mp = reinterpret_cast<__nv_bfloat16*>(mk.data_ptr());
   float* sp = save_stats ? stats.data_ptr<float>() : nullptr;
   unsigned* bitp = reinterpret_cast<unsigned*>(bits.data_ptr());
+  TORCH_CHECK(!pbias || (pbias->is_cuda() && pbias->scalar_type() == torch::kFloat32 && pbias->is_contiguous() && pbias->numel() == 2 * CH),
+              "wide OPM prologue: pbias fp32 [2 x 32] (the left | right projection biases)");
+  const float* pbp = pbias ? pbias->data_ptr<float>() : nullptr;
   int tiles = N * (S / 128), s_arg = S, n_arg = N; float ep = float(eps);
-  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &s_arg, &n_arg, &tiles, &ep};
+  void* args[] = {&xm, &mm, &wam, &wbm, &am, &bm, &gp, &bp, &mp, &sp, &bitp, &pbp, &s_arg, &n_arg, &tiles, &ep};
   int grid = std::min(tiles, at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3(grid), dim3(512), args, Cf::SMEM,
                                   at::cuda::getCurrentCUDAStream()));
@@ -2478,7 +2487,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("eps"),py::arg("bwp"),py::arg("N"),py::arg("S"),py::arg("native_finish")=false,
         py::arg("raw_weights")=std::vector<torch::Tensor>{});
   m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128) + exact mask count",
-        py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"));
+        py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
+        py::arg("pbias") = py::none());
   m.def("opm_native_pack",&opm_native_pack);
   m.def("opm_native_prologue",&opm_native_prologue);
   m.def("opm_native_prologue_tma",&opm_native_prologue_tma);
