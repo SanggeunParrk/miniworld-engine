@@ -18,6 +18,7 @@ import functools
 from pathlib import Path
 
 import torch
+import torch.nn.functional as F
 
 from miniworld_engine.kernels._nvcc import (
     ensure_cuda_home,
@@ -327,6 +328,8 @@ def _forward(
     trans=False,
     out=None,
     flip=False,
+    gate_bias=None,
+    out_bias=None,
 ):
     B, L, _, C = pair.shape
     H = n_head
@@ -384,6 +387,9 @@ def _forward(
         q, k, v, gt = _views(qkvg, B, L, HD, H)
     if flip:
         sbias = _core_mod.flip_bias(sbias, mask)
+    if gate_bias is not None:  # RoseTTAFold3's gate bias, laid out like the gate's (heads padded to 32 channels)
+        hd = gate_bias.numel() // H
+        gt.add_(F.pad(gate_bias.view(H, hd), (0, D - hd)).to(gt.dtype))
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
     o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
@@ -395,7 +401,10 @@ def _forward(
     else:
         t = torch.matmul(u.view(M, HD), wo_p.t())
         out = g.residual(x, t, drop, L, trans)
-    return out.view(B, L, L, C), (y, mean, rstd, qkvg, sbias, o, lse, u)
+    out = out.view(B, L, L, C)
+    if out_bias is not None:
+        out.add_(out_bias.to(out.dtype))
+    return out, (y, mean, rstd, qkvg, sbias, o, lse, u)
 
 
 def inference(
@@ -411,11 +420,13 @@ def inference(
     trans=False,
     out=None,
     flip=False,
+    gate_bias=None,
+    out_bias=None,
 ):
     """pair + TriangleAttention(pair), starting node, no grad; wcat, wo_p = pack_weights(...); L a multiple of 128; `out`: a contiguous
     tensor like pair to write into."""
     return _forward(
-        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip
+        pair, lnw, lnb, wcat, wo_p, mask, eps, None, n_head, head_dim, False, trans, out, flip, gate_bias, out_bias
     )[0]
 
 

@@ -43,6 +43,10 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
         return None
     if not module.use_self_attention or module.use_qk_norm:
         return None
+    if any(b is not None for b in _biases(module)) and (
+        torch.is_grad_enabled() or (module.training and module.p_drop > 0.0)
+    ):
+        return None  # RoseTTAFold3's gate / out-projection biases: inference only (the backward knows neither)
     if module._bias_untransposed and (
         torch.is_grad_enabled() or (module.training and module.p_drop > 0.0)
     ):
@@ -138,14 +142,16 @@ def _infer_op(
 def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
     """The inference kernels; `out`: a contiguous tensor like the pair to write the result into (a chunk's rows of a batch's output,
     eager only: an op output may not alias an input)."""
-    pair, lnw, lnb, *weights, mask, _ = args
+    pair, lnw, lnb, *weights = args[:9]
+    mask = args[9]
+    gate_bias, out_bias = (t if t.numel() else None for t in args[11:13]) if len(args) > 11 else (None, None)
     mask = mask if mask.numel() else None
     if kind == FUSED:
         from miniworld_engine.kernels.triangle_attention.cuda.h100_sm90 import inference
 
         w4, wb16, wo16 = _packed(kind, tuple(weights))
         return inference(
-            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip
+            pair, lnw.float(), lnb.float(), w4, wb16, wo16, mask, eps, trans, out, flip, gate_bias, out_bias
         )
     from miniworld_engine.kernels.triangle_attention.cuda import (
         h100_sm90_generic as gen,
@@ -153,7 +159,7 @@ def _infer(kind, args, eps, n_head, head_dim, trans, out=None, flip=False):
 
     wcat, wo_p = _packed(kind, tuple(weights))
     return gen.inference(
-        pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip
+        pair, lnw, lnb, wcat, wo_p, n_head, head_dim, mask, eps, trans, out, flip, gate_bias, out_bias
     )
 
 
@@ -507,6 +513,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
                     *params,
                     m if m is not None else x.new_empty(0, dtype=torch.bool),
                     x.new_empty(0),
+                    *_bias_args(module, x),
                 ]
                 _infer(
                     kind,
@@ -686,7 +693,7 @@ def _forward_one(
     if drop is None and not needs_grad:
         out = _infer_op(
             kind,
-            [pair, *params, mask_t, drop_t],
+            [pair, *params, mask_t, drop_t, *_bias_args(module, pair)],
             eps,
             module.n_head,
             head_dim,
@@ -708,3 +715,13 @@ def _forward_one(
     if Lp != L:
         out = out[:, :L, :L]
     return out.contiguous()
+
+
+def _biases(module) -> tuple[torch.Tensor | None, torch.Tensor | None]:
+    """(gate bias, out-projection bias): RoseTTAFold3's TriangleAttention has both, every other model neither."""
+    return module.to_gate.bias, module.to_out.bias
+
+
+def _bias_args(module, like: torch.Tensor) -> list[torch.Tensor]:
+    """The inference op's trailing arguments: the two biases, an empty tensor for an absent one."""
+    return [b.detach() if b is not None else like.new_empty(0) for b in _biases(module)]

@@ -99,10 +99,11 @@ def flip_bias(sbias, mask):
     return out.contiguous()
 
 
-def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False):
+def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, out=None, flip=False, gate_bias=None, out_bias=None):
     """pair + TriangleAttention(pair) for the starting node, no grad: front (LN + projections + bias) -> core -> tail (gate +
     out-projection + residual).  w4, wb16 = pack_front(...); wo16 = Wo in bf16; `out`: a contiguous tensor like pair to write into.  ``flip``: the ending node (``trans``) takes its
-    bias from the pair as it is (:func:`flip_bias`)."""
+    bias from the pair as it is (:func:`flip_bias`). ``gate_bias`` [128] / ``out_bias`` [C]: biases of the gate / out-projection
+    (RoseTTAFold3), added to the front's gate and to the result."""
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
@@ -122,13 +123,16 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
     )
     if flip:
         sbias = flip_bias(sbias, mask)
+    if gate_bias is not None:
+        g.view(-1, gate_bias.numel()).add_(gate_bias.to(g.dtype))
     shp = (B, L, L, H, D)
     o, _, _, _ = _core().triattn_fwd(
         q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False
     )
-    return m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out).view(
-        B, L, L, C
-    )
+    result = m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out).view(B, L, L, C)
+    if out_bias is not None:
+        result.add_(out_bias.to(result.dtype))
+    return result
 
 
 @functools.lru_cache(maxsize=None)

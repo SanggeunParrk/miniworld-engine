@@ -86,6 +86,8 @@ class TriangleAttention(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
         p_drop: float = 0.25,
         anthropic_row: str = "k2b",
+        gate_bias: bool = False,
+        out_bias: bool = False,
     ) -> None:
         super().__init__()
         self.n_head = n_head
@@ -158,8 +160,10 @@ class TriangleAttention(nn.Module):
 
         self.to_value = Linear(d_pair, d_hidden, bias=False, init="glorot")
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
-        self.to_gate = Linear(d_pair, d_hidden, bias=False, init="gating")
-        self.to_out = Linear(d_hidden, d_pair, bias=False, init="zero")
+        # RoseTTAFold3 gives the gate and the out-projection a bias (``gate_bias`` / ``out_bias``): the H100 sm90 kernels serve
+        # them for inference, anything else runs ``_biased_reference``.
+        self.to_gate = Linear(d_pair, d_hidden, bias=gate_bias, init="gating")
+        self.to_out = Linear(d_hidden, d_pair, bias=out_bias, init="zero")
         # Independent switches for qualified H100 projection and grouped-bias backward.
         # Each switch also selects its corresponding benchmark baseline.
         self._fuse_projection_backward = True
@@ -362,6 +366,16 @@ class TriangleAttention(nn.Module):
         comment); fusing them into the attention epilogue for the speed win is a later task.
         >>> The raw op without the residual is ``_attention()`` / ``ops.triangle_attention``,
         not a flag on this module."""
+        if self.to_gate.bias is not None or self.to_out.bias is not None:
+            from miniworld_engine.integrations import triattn_h100_sm90
+
+            if triattn_h100_sm90.serves(self, pair, mask):
+                with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                    return triattn_h100_sm90.forward(self, pair, mask)
+            out = self._biased_reference(pair, mask)
+            if self.p_drop > 0.0 and self.training:
+                out = out * self._make_drop_scale(pair, self.p_drop)
+            return pair + out
         if self._backend == KernelBackend.ANTHROPIC:
             if self.anthropic_row.startswith("block:"):
                 from miniworld_engine.integrations.anthropic import (
@@ -442,6 +456,29 @@ class TriangleAttention(nn.Module):
         if self.p_drop > 0.0 and self.training:
             out = out * self._make_drop_scale(pair, self.p_drop)
         return pair + out
+
+    def _biased_reference(
+        self,
+        pair: Float[torch.Tensor, "B L L d_pair"],
+        mask: Bool[torch.Tensor, "B L"] | None = None,
+    ) -> Float[torch.Tensor, "B L L d_pair"]:
+        """The triangle-attention update (no residual) with the gate / out-projection biases, in torch (products in the parameters'
+        dtype, softmax in fp32). The ending node attends over the transposed pair; its bias comes from the transposed pair
+        (``transposed_bias``) or from the pair as it is."""
+        B, L, _, _ = pair.shape
+        H = self.n_head
+        x = self.ln_pair(pair)
+        xt = x if self.starting else x.transpose(1, 2)
+        bias = self.to_bias(x if (self.starting or not self.transposed_bias) else xt).permute(0, 3, 1, 2)  # [B, H, L, L]
+        q, k, v = (proj(xt).view(B, L, L, H, -1) for proj in (self.to_query, self.to_key, self.to_value))
+        d = q.shape[-1]
+        acc = torch.promote_types(pair.dtype, torch.float32)
+        logits = torch.einsum("bijhd,bikhd->bihjk", q.to(acc), k.to(acc)) * d**-0.5 + bias.to(acc)[:, None]
+        if mask is not None:
+            logits = logits.masked_fill(~mask.bool()[:, None, None, None, :], float("-inf"))
+        o = torch.einsum("bihjk,bikhd->bijhd", torch.nan_to_num(logits.softmax(-1)), v.to(acc)).reshape(B, L, L, -1).to(pair.dtype)
+        out = self.to_out(torch.sigmoid(self.to_gate(xt)) * o)
+        return out if self.starting else out.transpose(1, 2)
 
     def _attention(
         self,
