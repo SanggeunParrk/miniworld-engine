@@ -32,10 +32,11 @@ def ext():
     )
 
 
-def ln_mod_rows(x, ms1, mb1, out1, L, eps, sig, *, xin=None, ms2=None, mb2=None, out2=None):
-    """xhat = LN(x) (no affine; x = xin first when given); out1 = xhat * f(ms1) + mb1 [, out2 = xhat * f(ms2) + mb2],
-    f = sigmoid when ``sig`` else identity; tables [L, >= 768] bf16 views (unit column stride) indexed by row % L."""
-    ext().ln_mod_rows(xin, x, ms1, mb1, out1, ms2, mb2, out2, int(L), float(eps), bool(sig))
+def ln_mod_rows(x, mods, L, eps, sig, *, xin=None):
+    """xhat = LN(x) (no affine; x = xin first when given); for each (ms, mb, out) of ``mods`` (one to three): out = xhat * f(ms) + mb,
+    f = sigmoid when ``sig`` else identity; ms / mb [L, D] bf16 table views (one row stride) indexed by row % L. D = 768 or 128."""
+    ms, mb, out = (list(t) for t in zip(*mods, strict=True))
+    ext().ln_mod_rows(xin, x, ms, mb, out, int(L), float(eps), bool(sig))
 
 
 def res_rows(x, ya, ga, L, *, yt=None, gt=None, ms=None, mb=None, out_ln=None, final=None, eps=1e-5, sig=True):
@@ -44,9 +45,14 @@ def res_rows(x, ya, ga, L, *, yt=None, gt=None, ms=None, mb=None, out_ln=None, f
     ext().res_rows(x, ya, ga, yt, gt, ms, mb, out_ln, final, int(L), float(eps), bool(sig))
 
 
-def qk_ln_rows(qk, wq, bq, wk, bk, eps):
-    """In place: q = qk[:, :768], k = qk[:, 768:1536] <- LN over 768 * w + b (fp32 [768] each)."""
-    ext().qk_ln_rows(qk, wq, bq, wk, bk, float(eps))
+def qk_ln_rows(q, k, wq, bq, wk, bk, eps):
+    """In place: q <- LN(q) * wq + bq, k <- LN(k) * wk + bk over D (768 or 128) columns (bf16 row views; fp32 [D] affine)."""
+    ext().qk_ln_rows(q, k, wq, bq, wk, bk, float(eps))
+
+
+def gate_rows(o, g):
+    """In place: o <- o * sigmoid(g) (bf16 row views)."""
+    ext().gate_rows(o, g)
 
 
 def glu_rows(ab, out, up):
