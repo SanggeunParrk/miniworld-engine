@@ -8,6 +8,13 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Changed
+
+- H100 variants of 2.3.8, faster: the variant stacks' weight pack is no longer re-made in every CUDA-graph replay (token stacks 2.8-4.1x the
+  compiled torch statements, from 1.3-2.9x), 128-wide rows warp-per-row and the atom edge windows' bias per pair (atom stacks 1.6x, from
+  1.2-1.4x), RoseTTAFold3's OPM biases in the wide H100 prologue (`opm_prologue_wide(pbias=)`; 1.2-1.5x, from 0.9-1.0x). Record:
+  `docs/records/model_variants_h100_speed_20261022.md`.
+
 ## [2.3.8] - 2026-10-22
 
 ### Added
