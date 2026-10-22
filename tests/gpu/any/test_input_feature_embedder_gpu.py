@@ -201,3 +201,55 @@ def test_a_default_window_cell_stays_on_cuda(grad, window, monkeypatch):
     assert torch.isfinite(y).all()
     if torch.cuda.get_device_capability()[0] in (9, 10):
         assert not launches, dict(launches)
+
+
+_COMPILED_STEP = r"""
+import sys, torch, triton.runtime.jit as jit
+from miniworld_engine.architecture.exceptions import ImplementationType
+from miniworld_engine.modules import InputFeatureEmbedder
+engine_triton = []
+original = jit.JITFunction.run
+def run(self, *a, **k):
+    if getattr(self.fn, "__module__", "").startswith("miniworld_engine"):
+        engine_triton.append(self.fn.__name__)
+    return original(self, *a, **k)
+jit.JITFunction.run = run
+window, features = int(sys.argv[1]), sys.argv[2]
+model = InputFeatureEmbedder(128, 384, n_head=4, n_block=3, swa_window_size=window, features=features).cuda()
+g = torch.Generator(device="cuda").manual_seed(0)
+n, n_token = 1024, 128
+pos = torch.randn(1, n, 3, device="cuda", generator=g) * 5
+atom_mask = torch.ones(1, n, dtype=torch.bool, device="cuda")
+args = (pos, atom_mask.float(), torch.randint(1, 30, (1, n), device="cuda", generator=g).float(), torch.zeros(1, n, device="cuda"),
+        torch.arange(n, device="cuda")[None] // 8, atom_mask, (torch.arange(n, device="cuda")[None] * n_token // n), n_token)
+step = torch.compile(model)
+deep = lambda k: deep(k - 1) if k else step(*args)   # a trainer's call stack is deep; 700 frames overflowed the traced loader
+with torch.autocast("cuda", dtype=torch.bfloat16):
+    y = deep(700)
+y.float().sum().backward()
+torch.cuda.synchronize()
+assert torch.isfinite(y).all()
+print("ENGINE_TRITON", sorted(set(engine_triton)))
+"""
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0), reason="B200 only"
+)
+@pytest.mark.parametrize("features", ["legacy", "esmfold2"])
+@pytest.mark.parametrize("window", sorted(WINDOWS))
+def test_a_compiled_training_step_in_a_fresh_process_launches_no_engine_triton(window, features):
+    """The bf16 sm_100a SWA kernels must load outside the traced graph (``dispatch._sm100_ready``, a compile-time constant): traced,
+    their cached loader overflowed Dynamo's recursion limit, the engine took that for a broken toolchain and sent every call to its
+    Triton kernels -- the first compiled window-128 training step (v2.3.1, 2026-10-22). A fresh process (an earlier eager load in
+    this one would hide it) and a 700-frame call stack (the trainer's depth; engine 2.3.6 fails here, not at 300)."""
+    import os
+    import subprocess
+    import sys
+
+    out = subprocess.run(
+        [sys.executable, "-c", _COMPILED_STEP, str(WINDOWS[window]), features],
+        capture_output=True, text=True, timeout=1800, env=os.environ.copy(), check=False,
+    )
+    assert out.returncode == 0, out.stderr[-3000:]
+    assert "ENGINE_TRITON []" in out.stdout, out.stdout[-2000:] + out.stderr[-2000:]

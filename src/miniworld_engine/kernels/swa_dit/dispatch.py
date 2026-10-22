@@ -436,9 +436,33 @@ def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
 _SM100_FAILED = False
 
 
-def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
-    """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path."""
+@device_constant
+def _sm100_ready(device: torch.device) -> bool:
+    """Whether the bf16 sm_100a kernels (``cuda/sm100``) build and load on ``device``. Build and load happen here, once per device; a
+    failure warns once and keeps the Triton path. A constant to the compiled graph (``device_constant``), as ``_tf32_ready``: Dynamo
+    bakes the answer in and never traces the build -- tracing it (the cached cubin loader) overflowed Dynamo's recursion limit, which
+    the old in-line ``try`` took for a broken toolchain and sent every later call to Triton (a compiled window-128 training step)."""
     global _SM100_FAILED
+    if _SM100_FAILED:
+        return False
+    from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+    try:
+        sm100.kernels(device.index if device.index is not None else torch.cuda.current_device())
+    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
+        _SM100_FAILED = True
+        warnings.warn(
+            f"sm_100a SWA atom DiT kernels unavailable, keeping the Triton path: {exc!r}",
+            RuntimeWarning,
+            stacklevel=2,
+        )
+        return False
+    return True
+
+
+def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
+    """The sm_100a kernels (``cuda/sm100``) when they serve this bf16 call, else None -> the Triton path. Traceable: the switches,
+    tensor metadata (``sm100.supported``) and the per-device constant ``_sm100_ready`` (which owns the build / load)."""
     if (
         _SM100_FAILED
         or (not settings.current().swa_dit_sm100)
@@ -449,19 +473,7 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
 
     if not sm100.supported(q, nhid, half_window, eps):
         return None
-    try:
-        sm100.kernels(
-            q.device.index
-            if q.device.index is not None
-            else torch.cuda.current_device()
-        )
-    except Exception as exc:  # a toolchain or driver problem keeps the Triton path
-        _SM100_FAILED = True
-        warnings.warn(
-            f"sm_100a SWA atom DiT kernels unavailable, keeping the portable path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
+    if not _sm100_ready(q.device):
         return None
     return sm100
 
