@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.8] - 2026-10-22
+
 ### Added
 
 - Boltz-2, RoseTTAFold3 and Chai-1 modules on H100, inference (bf16): `modules.dit_variant` (`DiTVariantStack` / `AtomDiTVariantStack` with
