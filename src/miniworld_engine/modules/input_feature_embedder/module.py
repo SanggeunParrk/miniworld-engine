@@ -18,6 +18,10 @@ position, charge, atom mask and the element one-hot (atomic number, 128 classes)
 that both starts the atom stream and conditions every block -> the transformer -> ``Linear + ReLU`` with no terminal norm -> the token
 mean. The default ``"legacy"`` layout above is the one MiniWorld trained through v2.3.0: its scalar element and un-normalised
 condition let the residual stream grow without bound and collapse onto one direction, after which the bias-free ReLU dies (2026-10-22).
+
+``token_pool="linear"`` replaces the terminal ``Linear + ReLU`` with the LLM / ViT read-out: an affine ``LayerNorm`` (``atom_out_norm``)
+-> a bias-free ``Linear`` -> the token mean, no activation. The bias-free ReLU sat on a stream whose atoms share one direction, so
+most units went silent for every atom at once and never recovered (ESMFold2 layout, v2.3.1: 30 of 384 alive, 0.2% active).
 """
 
 from __future__ import annotations
@@ -39,6 +43,7 @@ MAX_ATOMIC_NUMBER = 128
 N_ATOM_FEATURES_ESMFOLD2 = 3 + 1 + 1 + MAX_ATOMIC_NUMBER
 
 AtomFeatures = Literal["legacy", "esmfold2"]
+TokenPool = Literal["relu", "linear"]
 
 
 def atom_single_features(
@@ -90,6 +95,7 @@ class InputFeatureEmbedder(nn.Module):
         spatial_rope_base_frequency: float = 20.0,
         uid_rope_base_frequency: float = 10000.0,
         features: AtomFeatures = "legacy",
+        token_pool: TokenPool = "relu",
         implementation: ImplementationType = ImplementationType.MINIWORLD_ENGINE,
     ) -> None:
         super().__init__()
@@ -102,7 +108,11 @@ class InputFeatureEmbedder(nn.Module):
         if features not in ("legacy", "esmfold2"):
             message = f"features must be 'legacy' or 'esmfold2', got {features!r}"
             raise ValueError(message)
+        if token_pool not in ("relu", "linear"):
+            message = f"token_pool must be 'relu' or 'linear', got {token_pool!r}"
+            raise ValueError(message)
         self.features = features
+        self.token_pool = token_pool
         self.d_token = d_token
         n_in = N_ATOM_FEATURES_ESMFOLD2 if features == "esmfold2" else N_ATOM_FEATURES
         self.to_atom_single_cond = Linear(n_in, d_atom, init="default", bias=False)
@@ -129,15 +139,17 @@ class InputFeatureEmbedder(nn.Module):
                 fused_triton=True,
             )
         )
-        # Terminal norm of the pre-norm stack (GPT-2 / LLaMA ``ln_f``): affine-free, no parameters. ESMFold2 has none.
-        self.atom_out_norm = (
-            nn.Identity()
-            if features == "esmfold2"
-            else RMSNorm(d_atom, elementwise_affine=False, implementation=to_engine_impl(implementation))
-        )
+        # Terminal norm of the pre-norm stack (GPT-2 / LLaMA ``ln_f``): affine-free, no parameters. ESMFold2 has none; the linear
+        # read-out takes an affine LayerNorm, as an LLM's final norm before its head.
+        if token_pool == "linear":
+            self.atom_out_norm = nn.LayerNorm(d_atom)
+        elif features == "esmfold2":
+            self.atom_out_norm = nn.Identity()
+        else:
+            self.atom_out_norm = RMSNorm(d_atom, elementwise_affine=False, implementation=to_engine_impl(implementation))
         self.atom_single_rep_to_token_single = nn.Sequential(
             Linear(d_atom, d_token, init="default", bias=False),
-            nn.ReLU(),
+            *([nn.ReLU()] if token_pool == "relu" else []),
         )
 
     def atom_single(
@@ -161,7 +173,7 @@ class InputFeatureEmbedder(nn.Module):
         cos, sin = self.atom_transformer.build_rope(pos, space_uid)
         params = build_attention_params(cos, sin, atom_mask, num_aug=1)
         single = self.atom_transformer(single, single, params)   # the single conditions itself
-        return self.atom_out_norm(single)
+        return self.atom_out_norm(single).to(single.dtype)   # the LayerNorm of token_pool="linear" runs in fp32 under autocast
 
     def to_tokens(
         self,
@@ -170,7 +182,8 @@ class InputFeatureEmbedder(nn.Module):
         atom_to_token: Int[torch.Tensor, "B N"],
         n_token: int,
     ) -> Float[torch.Tensor, "B T d_token"]:
-        """``Linear + ReLU`` per atom, then the mean over each token's atoms: one scatter-add (its backward a gather), summed in fp32."""
+        """``Linear + ReLU`` (``token_pool="linear"``: ``Linear``) per atom, then the mean over each token's atoms: one scatter-add (its
+        backward a gather), summed in fp32."""
         per_atom = self.atom_single_rep_to_token_single(atom_single * atom_mask[..., None])
         idx = atom_to_token.long()
         src = per_atom.float()

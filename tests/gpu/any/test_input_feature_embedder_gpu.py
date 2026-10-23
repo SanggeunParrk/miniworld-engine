@@ -32,9 +32,12 @@ WINDOWS = {"window128": 128, "global": 1 << 18}
 
 
 def _model(implementation, window=128, features="legacy"):
+    """``features`` is a layout, optionally with ``+linear`` for the linear token pool (e.g. ``"esmfold2+linear"``)."""
     torch.manual_seed(0)
+    features, _, pool = features.partition("+")
     model = InputFeatureEmbedder(
-        128, 384, n_head=4, n_block=3, swa_window_size=window, features=features, implementation=implementation
+        128, 384, n_head=4, n_block=3, swa_window_size=window, features=features, token_pool=pool or "relu",
+        implementation=implementation,
     ).cuda()
     with torch.no_grad():
         for p in model.parameters():
@@ -96,7 +99,34 @@ def test_esmfold2_layout_is_the_esmfold2_encoder(dtype):
     assert rel < (1e-2 if dtype is torch.bfloat16 else 1e-5), rel
 
 
-@pytest.mark.parametrize("features", ["legacy", "esmfold2"])
+def test_the_linear_token_pool_is_layernorm_linear_mean_without_relu():
+    """``token_pool="linear"`` (the LLM / ViT read-out): atom_out_norm = affine LayerNorm, then a bias-free Linear, then the token mean
+    -- no ReLU, so the pooled features take both signs; the default keeps the ReLU."""
+    from miniworld_engine.modules.swa_atom_attention.module import build_attention_params
+
+    model = _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2+linear")
+    assert isinstance(model.atom_out_norm, torch.nn.LayerNorm)
+    assert not any(isinstance(m, torch.nn.ReLU) for m in model.modules())
+    assert any(isinstance(m, torch.nn.ReLU) for m in _model(ImplementationType.MINIWORLD_ENGINE, features="esmfold2").modules())
+    with pytest.raises(ValueError, match="token_pool"):
+        InputFeatureEmbedder(128, 384, n_head=4, n_block=3, token_pool="gelu")
+    pos, ref_mask, element, charge, space_uid, atom_mask, atom_to_token, n_token = _inputs()
+    y = model(pos, ref_mask, element, charge, space_uid, atom_mask, atom_to_token, n_token)
+    with torch.no_grad():
+        from miniworld_engine.modules.input_feature_embedder.module import atom_single_features_esmfold2
+
+        c = model.atom_norm(model.to_atom_single_cond(atom_single_features_esmfold2(pos, charge, atom_mask, element)))
+        cos, sin = model.atom_transformer.build_rope(pos, space_uid)
+        q = model.atom_out_norm(model.atom_transformer(c, c, build_attention_params(cos, sin, atom_mask, num_aug=1)))
+        per_atom = model.atom_single_rep_to_token_single[0](q) * atom_mask[..., None]
+        total = torch.zeros(1, n_token, 384, device="cuda").index_add_(1, atom_to_token[0], per_atom)
+        count = torch.zeros(1, n_token, device="cuda").index_add_(1, atom_to_token[0], atom_mask.float())
+        reference = total / count[..., None].clamp(min=1.0)
+    assert (y < 0).any() and (y > 0).any()
+    assert float((y - reference).norm() / reference.norm()) < 1e-5
+
+
+@pytest.mark.parametrize("features", ["legacy", "esmfold2", "esmfold2+linear"])
 @pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "fp32"])
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
@@ -128,7 +158,7 @@ def test_matches_the_pytorch_implementation(dtype, grad, window, features, monke
 @pytest.mark.skipif(
     not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] not in (9, 10), reason="H100 / B200 only"
 )
-@pytest.mark.parametrize("features", ["legacy", "esmfold2"])
+@pytest.mark.parametrize("features", ["legacy", "esmfold2", "esmfold2+linear"])
 @pytest.mark.parametrize("window", sorted(WINDOWS))
 @pytest.mark.parametrize("grad", [False, True], ids=["inference", "training"])
 def test_no_triton_on_h100_or_b200(monkeypatch, grad, window, features):
