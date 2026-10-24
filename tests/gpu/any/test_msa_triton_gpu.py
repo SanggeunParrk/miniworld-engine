@@ -224,3 +224,25 @@ def test_one_compiled_graph_forward_and_backward():
     assert counter.frame_count == 1
     for a, b in zip((*out, *got_g), (*eager, *eager_g), strict=True):
         assert rel(a, b) < 1e-2
+
+
+@pytest.mark.parametrize("options", [dict(d_pair=128, d_hidden=32, projection_bias=True), dict(d_pair=128, d_hidden=64, groups=8)])
+def test_opm_variants_in_one_compiled_graph(options):
+    """The variants' launchers are opaque ops with fakes: forward + backward compile as one graph and agree with eager."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    torch.manual_seed(0)
+    m = _randomise(OuterProductMean(64, implementation=I.MINIWORLD, **options).to(DEV).to(BF))
+    msa = torch.randn(1, 64, 128, 64, device=DEV, dtype=BF, requires_grad=True)
+    mask = torch.rand(1, 64, 128, device=DEV) > 0.2
+    residual = torch.randn(1, 128, 128, options["d_pair"], device=DEV, dtype=BF, requires_grad=True)
+    eager = m(msa, mask, None, residual)
+    eager_g = torch.autograd.grad(eager.float().sum(), [msa, residual, *m.parameters()])
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(lambda a, r: m(a, mask, None, r), backend=counter, fullgraph=True)
+    for _ in range(2):
+        out = compiled(msa, residual)
+    got_g = torch.autograd.grad(out.float().sum(), [msa, residual, *m.parameters()])
+    assert counter.frame_count == 1
+    for a, b in zip((out, *got_g), (eager, *eager_g), strict=True):
+        assert rel(a, b) < 1e-2

@@ -115,7 +115,7 @@ def _pwa_layernorm_gemm_kernel(M, LNW, LNB, WV, V, S, L, eps, shape_key,
     tl.store(V + (h[None, :].to(tl.int64) * L + j) * (S * C) + s[:, None] * C + cc[None, :], v, mask=sm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_gate_gemm_triton"), key=["shape_key", "HAS_KEEP"])
+@triton.autotune(configs=configs_for("pair_weighted_averaging_gate_gemm_triton"), key=["shape_key", "HAS_KEEP", "CP"])
 @triton.jit
 def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, shape_key,
                           D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, HAS_KEEP: tl.constexpr,
@@ -147,7 +147,7 @@ def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, s
 
 
 # ---------------------------------------------------------------------------------------------------- backward kernels
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_gate_gemm_triton"), key=["shape_key", "HAS_KEEP"],
+@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_gate_gemm_triton"), key=["shape_key", "HAS_KEEP", "CP"],
                  reset_to_zero=["DWO", "DWG"])
 @triton.jit
 def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DWG, S, L, eps, scale, shape_key,
@@ -194,7 +194,7 @@ def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DW
     tl.atomic_add(DWG + (h * C + cc)[:, None] * D + k[None, :], dwg, mask=cm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dw_triton"), key=["shape_key"], reset_to_zero=["DWV"])
+@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dw_triton"), key=["shape_key", "CP"], reset_to_zero=["DWV"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key,
                                       D: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, BS: tl.constexpr, PPS: tl.constexpr):
@@ -223,7 +223,7 @@ def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key
     tl.atomic_add(DWV + (h * C + cc)[:, None] * D + k[None, :], acc, mask=cm[:, None])
 
 
-@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton"), key=["shape_key"],
+@triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton"), key=["shape_key", "CP"],
                  reset_to_zero=["DG", "DB"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(M, DR, DGP, DV, LNW, WG, WV, DM, DG, DB, S, L, eps, shape_key,
@@ -485,11 +485,11 @@ def triton_pair_weighted_averaging(msa: torch.Tensor, pair: torch.Tensor, mask: 
 
     ``keep`` [B, L, D] is the row-broadcast dropout keep-mask (the module's Dropout(broadcast_dim=1)), applied as keep / (1 - p_drop);
     None applies no dropout. Stacks run one at a time. Check :func:`refusal` first."""
-    empty = msa.new_empty((0,))
+    empty = lambda: msa.new_empty((0,))               # one tensor per absent input (Dynamo refuses the same tensor twice in apply)
     scale = 1.0 / (1.0 - p_drop) if keep is not None else 1.0
-    outs = [_PairWeightedAveragingTriton.apply(msa[bi], pair[bi], empty if mask is None else mask[bi], ln_msa_weight, ln_msa_bias,
+    outs = [_PairWeightedAveragingTriton.apply(msa[bi], pair[bi], empty() if mask is None else mask[bi], ln_msa_weight, ln_msa_bias,
                                                w_value, w_gate, ln_pair_weight, w_bias, w_out,
-                                               empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),
+                                               empty() if keep is None else keep[bi].to(torch.bfloat16).contiguous(),
                                                float(eps_msa), float(eps_pair), float(scale))
             for bi in range(msa.shape[0])]
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)

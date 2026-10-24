@@ -180,7 +180,7 @@ class OuterProductMean(nn.Module):
             if native and composed.serves(self, msa, mask):
                 return composed.inference(self, msa, mask, token_asym_id, residual)
             # The portable Triton path (projection biases folded into the projection kernel, groups as a leading batch axis of the
-            # outer product): every other GPU, engine_backend="triton". An explicit implementation="triton" refuses with the reason.
+            # outer product): every other GPU, engine_backend="triton".
             if self.implementation in (
                 ImplementationType.MINIWORLD,
                 ImplementationType.TRITON,
@@ -227,10 +227,8 @@ class OuterProductMean(nn.Module):
                         b_right=self.to_right.bias,
                         **options,
                     )
-                if self.implementation == ImplementationType.TRITON:
-                    raise NotImplementedError(
-                        f"OuterProductMean(implementation='triton'): {why}"
-                    )
+                # A variant call the kernels do not take (fp32, mask_interchain, a width outside the tile contract) runs the PyTorch
+                # statements below, as it did before this leg existed -- also for an explicit implementation="triton".
             return self._variant_reference(msa, mask, token_asym_id, residual)
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.

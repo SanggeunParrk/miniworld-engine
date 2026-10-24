@@ -83,14 +83,14 @@ def outer_product_mean_bwd_layernorm_gemm_triton():
     return _backward_pairs(("dmsa", "dln_weight", "dln_bias", "dw_left", "dw_right"), VARIANTS, {"pbias": ("db_left", "db_right")})
 
 
-def outer_product_mean_grouped_epilogue_triton():
+def outer_product_mean_epilogue_ln_triton():
     return _forward_pair(("grouped",))
 
 
-def outer_product_mean_grouped_bwd_epilogue_dx_triton():
+def outer_product_mean_bwd_epilogue_ln_dx_triton():
     """dO (scored through dmsa), the product LayerNorm's dgamma / dbeta and the residual's pass-through."""
     return _backward_pairs(("dmsa", "db_out", "dresidual", "dproduct_weight", "dproduct_bias"), ("grouped",))
 
 
-def outer_product_mean_grouped_bwd_epilogue_dw_triton():
+def outer_product_mean_bwd_epilogue_ln_dw_triton():
     return _backward_pairs(("dw_out",), ("grouped",))

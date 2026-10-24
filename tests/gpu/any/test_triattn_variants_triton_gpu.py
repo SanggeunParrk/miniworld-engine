@@ -90,3 +90,24 @@ def test_variants_on_the_triton_core(monkeypatch, case, b, n, real):
         (CASES[case], _rel(out[rows], out_gold[rows]), _rel(out_16[rows], out_gold[rows]))
     for i, (a, r, c) in enumerate(zip(g_eng, g_gold, g_16, strict=True)):
         assert _rel(a, r) <= max(1.5 * _rel(c, r), 2e-3), (CASES[case], i, _rel(a, r), _rel(c, r))
+
+
+@pytest.mark.parametrize("case", [5, 1])
+def test_variants_in_one_compiled_graph(case):
+    """Forward + backward of a variant compile as one graph (no graph break at the Triton core) and agree with eager."""
+    from torch._dynamo.testing import CompileCounterWithBackend
+
+    d_pair, d_hidden, n_head, starting, transposed_bias, options = CASES[case]
+    m = _module(d_pair, d_hidden, n_head, starting, transposed_bias, **options).to(BF)
+    z = torch.randn(1, 160, 160, d_pair, device=DEV, dtype=BF, requires_grad=True)
+    mask = torch.rand(1, 160, device=DEV) > 0.1
+    eager = m(z, mask)
+    eager_g = torch.autograd.grad(eager.float().sum(), [z, *m.parameters()])
+    counter = CompileCounterWithBackend("inductor")
+    compiled = torch.compile(lambda x: m(x, mask), backend=counter, fullgraph=True)
+    for _ in range(2):
+        out = compiled(z)
+    got_g = torch.autograd.grad(out.float().sum(), [z, *m.parameters()])
+    assert counter.frame_count == 1
+    for a, b in zip((out, *got_g), (eager, *eager_g), strict=True):
+        assert _rel(a, b) < 2e-2

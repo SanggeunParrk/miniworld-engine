@@ -96,13 +96,13 @@ def outer_product_mean_bwd_layernorm_gemm_triton() -> None:
     _backward(VARIANTS)
 
 
-def outer_product_mean_grouped_epilogue_triton() -> None:
+def outer_product_mean_epilogue_ln_triton() -> None:
     _forward(("grouped",))
 
 
-def outer_product_mean_grouped_bwd_epilogue_dx_triton() -> None:
+def outer_product_mean_bwd_epilogue_ln_dx_triton() -> None:
     _backward(("grouped",))
 
 
-def outer_product_mean_grouped_bwd_epilogue_dw_triton() -> None:
+def outer_product_mean_bwd_epilogue_ln_dw_triton() -> None:
     _backward(("grouped",))
