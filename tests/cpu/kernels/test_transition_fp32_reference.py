@@ -10,7 +10,7 @@ import torch.nn.functional as F
 from miniworld_engine.modules import ImplementationType, Transition
 
 
-@pytest.mark.parametrize("implementation", [ImplementationType.PYTORCH, ImplementationType.TRITON])
+@pytest.mark.parametrize("implementation", [ImplementationType.PYTORCH, ImplementationType.MINIWORLD])
 def test_fp32_input_runs_the_reference(implementation):
     torch.manual_seed(931)
     m = Transition(32, n=2, implementation=implementation)

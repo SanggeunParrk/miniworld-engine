@@ -66,7 +66,7 @@ def pad_mask(length, masked):
 def policy():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 (sm_90) required")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     try:
         yield
     finally:
@@ -229,7 +229,7 @@ def test_serves_rejects_other_shapes():
     )
     x = torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
     assert triattn_h100.serves(
-        make(ImplementationType.TRITON), x
+        make(ImplementationType.MINIWORLD), x
     )  # the module's TRITON backend hosts the CUDA path
     m._h100_cuda = False  # the switch keeps the existing path
     assert not triattn_h100.serves(m, x)

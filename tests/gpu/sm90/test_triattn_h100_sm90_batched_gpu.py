@@ -73,7 +73,7 @@ def make(
 def policy():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 (sm_90) required")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     try:
         yield
     finally:

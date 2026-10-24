@@ -9,7 +9,7 @@ import torch
 from miniworld_engine.modules import BidirectionalTriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = pytest.mark.gpu
+pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_triton")]
 
 
 def build(implementation):
@@ -26,7 +26,7 @@ def build(implementation):
 
 @pytest.mark.parametrize("masked", [False, True])
 def test_fp32_inference_matches_pytorch_and_training_path(masked):
-    triton_m = build(ImplementationType.TRITON)
+    triton_m = build(ImplementationType.MINIWORLD)
     torch_m = build(ImplementationType.PYTORCH)
     torch_m.load_state_dict(triton_m.state_dict())
     x = torch.randn(1, 48, 48, 128, device="cuda")

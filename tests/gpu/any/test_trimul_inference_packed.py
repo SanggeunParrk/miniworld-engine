@@ -8,7 +8,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forwar
 from miniworld_engine.modules import BidirectionalTriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = pytest.mark.gpu
+pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_triton")]
 
 
 def split_forward(left, right, h):
@@ -18,7 +18,7 @@ def split_forward(left, right, h):
 
 def setup(length):
     torch.manual_seed(917)
-    m = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.TRITON).cuda().bfloat16().eval()
+    m = BidirectionalTriangleMultiplication(128, implementation=ImplementationType.MINIWORLD).cuda().bfloat16().eval()
     with torch.no_grad():
         for name, p in m.named_parameters():
             if "ln_" not in name:

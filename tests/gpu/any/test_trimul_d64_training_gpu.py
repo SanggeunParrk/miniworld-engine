@@ -189,7 +189,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
         return real_gate(*args)
 
     monkeypatch.setattr(G, "bidirectional_trimul", spy_gate)
-    previous = settings.configure(engine_backend="auto", trimul_h100_training_widths=widths)
+    previous = settings.configure(force_triton_kernels=False, trimul_h100_training_widths=widths)
     try:
         n = 384
         torch.manual_seed(21)
@@ -221,7 +221,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch):
             assert a.shape == b.shape
             assert _rel(a, b) < 1.2e-2
     finally:
-        settings.configure(**{f: getattr(previous, f) for f in ("engine_backend", "trimul_h100_training_widths")})
+        settings.configure(**{f: getattr(previous, f) for f in ("force_triton_kernels", "trimul_h100_training_widths")})
 
 
 def _native_cos(a,b):

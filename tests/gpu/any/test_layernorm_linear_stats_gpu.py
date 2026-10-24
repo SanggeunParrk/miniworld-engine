@@ -21,7 +21,7 @@ pytestmark = [
 @pytest.fixture(autouse=True)
 def norm_settings():
     previous = settings.current()
-    settings.configure(engine_backend="triton", autotune_miss_cap=24)
+    settings.configure(force_triton_kernels=True, autotune_miss_cap=24)
     yield
     settings.configure(**vars(previous))
 

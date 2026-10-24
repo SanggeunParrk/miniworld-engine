@@ -5,7 +5,7 @@ import torch
 from miniworld_engine.modules import TriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = pytest.mark.gpu
+pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_triton")]
 
 
 @pytest.mark.parametrize("outgoing", [True, False])
@@ -14,7 +14,7 @@ pytestmark = pytest.mark.gpu
 def test_unidirectional_training(outgoing, dtype, all_invalid, monkeypatch):
     torch.manual_seed(941)
     torch.backends.cuda.matmul.allow_tf32 = False
-    actual = TriangleMultiplication(128, outgoing=outgoing, implementation=ImplementationType.TRITON,
+    actual = TriangleMultiplication(128, outgoing=outgoing, implementation=ImplementationType.MINIWORLD,
                                     p_drop=.25).cuda().to(dtype).train()
     reference = TriangleMultiplication(128, outgoing=outgoing, implementation=ImplementationType.PYTORCH,
                                        p_drop=.25).cuda().float().train()

@@ -1,8 +1,8 @@
 """The MSA pair's portable Triton path: who takes it, and what a call it cannot serve is told.
 
 Before these families existed an `OuterProductMean` / `MSAPairWeightedAveraging` built with `implementation="triton"` ran the
-PyTorch statements without a word -- the label named a backend that did not exist for either module. Now the explicit request
-either runs the Triton kernels or refuses with the reason, and `miniworld` (auto) falls through to the statements silently.
+PyTorch statements without a word -- the label named a backend that did not exist for either module. Triton is no longer a public
+backend: `miniworld` runs the Triton kernels where the card is recorded and otherwise falls through to the statements.
 CPU only: every refusal below is decided before a kernel could launch.
 """
 from __future__ import annotations
@@ -39,7 +39,7 @@ def _msa(d=64, dtype=torch.bfloat16):
 def test_auto_resolves_the_msa_pair_to_triton():
     assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.TRITON
     assert dispatch.resolve("msa_pair_weighted_averaging", I.MINIWORLD) == dispatch.KernelBackend.TRITON
-    settings.configure(engine_backend="triton")
+    settings.configure(force_triton_kernels=True)
     assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.TRITON
 
 
@@ -49,14 +49,19 @@ def test_refusals_name_the_reason():
     assert "CUDA" in str(pwa_refusal(_msa(), torch.randn(1, 16, 16, 128, dtype=torch.bfloat16), 8, 32))
 
 
-def test_explicit_triton_refuses_rather_than_running_the_statements():
+def test_the_deprecated_triton_string_is_miniworld_and_falls_through():
+    """`implementation="triton"` no longer names a backend: it is read as `miniworld` (with a DeprecationWarning), so a call the
+    Triton kernels cannot serve (here: a CPU tensor) runs the statements instead of refusing."""
     torch.manual_seed(0)
-    opm = OuterProductMean(64, 128, 32, implementation=I.TRITON).bfloat16()
-    with pytest.raises(NotImplementedError, match="not on a CUDA device"):
-        opm(_msa())
-    pwa = MSAPairWeightedAveraging(64, 128, 8, 32, implementation=I.TRITON).bfloat16()
-    with pytest.raises(NotImplementedError, match="not on a CUDA device"):
-        pwa(_msa(), torch.randn(1, 16, 16, 128, dtype=torch.bfloat16))
+    with pytest.warns(DeprecationWarning, match="miniworld"):
+        opm = OuterProductMean(64, 128, 32, implementation="triton").bfloat16()
+    assert opm.implementation is I.MINIWORLD
+    ref = OuterProductMean(64, 128, 32, implementation=I.PYTORCH).bfloat16()
+    ref.load_state_dict(opm.state_dict())
+    torch.testing.assert_close(opm(_msa()), ref(_msa()), rtol=0, atol=0)
+    with pytest.warns(DeprecationWarning, match="miniworld"):
+        pwa = MSAPairWeightedAveraging(64, 128, 8, 32, implementation="triton").bfloat16()
+    assert pwa.implementation is I.MINIWORLD
 
 
 def test_auto_falls_through_to_the_statements_where_triton_cannot_serve():

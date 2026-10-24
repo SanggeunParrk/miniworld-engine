@@ -31,3 +31,13 @@ def pytest_collection_modifyitems(config, items) -> None:
     for item in items:
         if "gpu" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture
+def force_triton():
+    """The internal A/B switch ``settings.force_triton_kernels`` for one test: the engine's Triton kernel family on every card, every CUDA stage off."""
+    from miniworld_engine import settings
+
+    previous = settings.configure(force_triton_kernels=True)
+    yield
+    settings.configure(**vars(previous))

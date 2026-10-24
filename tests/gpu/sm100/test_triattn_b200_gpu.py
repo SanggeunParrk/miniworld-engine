@@ -66,7 +66,7 @@ def pad_mask(length, masked):
 def policy():
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("B200 (sm_100) required")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     try:
         yield
     finally:
@@ -207,7 +207,7 @@ def test_serves_rejects_other_shapes():
     ref = make(ImplementationType.PYTORCH)
     assert not triattn_b200.serves(ref, torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16))
     x = torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
-    assert triattn_b200.serves(make(ImplementationType.TRITON), x)   # the module's TRITON backend hosts the CUDA path
+    assert triattn_b200.serves(make(ImplementationType.MINIWORLD), x)   # the module's TRITON backend hosts the CUDA path
     m._b200_cuda = False                                              # the switch keeps the Triton kernels
     assert not triattn_b200.serves(m, x)
 

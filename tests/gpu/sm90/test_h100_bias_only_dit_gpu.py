@@ -102,7 +102,7 @@ def test_dbias_matches_fp64_and_is_deterministic(L, A):
 # ------------------------------------------------------------------------------------------------------ the block
 def make_block(dtype, nh=16, dh=48):
     torch.manual_seed(0)
-    block = BiasOnlyDiTBlock(n_head=nh, d_head=dh, implementation=ImplementationType.TRITON)
+    block = BiasOnlyDiTBlock(n_head=nh, d_head=dh, implementation=ImplementationType.MINIWORLD)
     with torch.no_grad():
         for p in block.parameters():
             if p.ndim == 2:

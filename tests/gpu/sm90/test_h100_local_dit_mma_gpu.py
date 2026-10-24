@@ -47,7 +47,7 @@ def _block(seed=0, qk=False):
         n=2,
         cross_attention=True,
         use_qk_norm=qk,
-        implementation=ImplementationType.TRITON,
+        implementation=ImplementationType.MINIWORLD,
     )
     with torch.no_grad():  # non-default parameters (zero-initialised gates would make the backward vacuous)
         for p in blk.parameters():

@@ -51,7 +51,7 @@ def _rel(a, b):
 @pytest.mark.parametrize(("a", "n", "real"), CASES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_matches_the_pytorch_module(a, n, real, dtype):
-    blk = _block(ImplementationType.TRITON).cuda().eval()
+    blk = _block(ImplementationType.MINIWORLD).cuda().eval()
     ref = _block(ImplementationType.PYTORCH).cuda().double().eval()
     ref.load_state_dict(blk.state_dict())
     s, c, z, mask, rope = _inputs(a, n, real)
@@ -75,7 +75,7 @@ def test_matches_the_pytorch_module(a, n, real, dtype):
 
 
 def test_bitwise_deterministic():
-    blk = _block(ImplementationType.TRITON).cuda().eval()
+    blk = _block(ImplementationType.MINIWORLD).cuda().eval()
     s, c, z, mask, rope = _inputs(5, 1024, 1000)
     with torch.no_grad():
         for dtype in (torch.float32, torch.bfloat16):
@@ -87,7 +87,7 @@ def test_bitwise_deterministic():
 
 
 def test_a_gradient_or_a_missing_rope_is_not_served():
-    blk = _block(ImplementationType.TRITON).cuda().float()
+    blk = _block(ImplementationType.MINIWORLD).cuda().float()
     s, c, z, mask, rope = _inputs(1, 256, 200)
     assert not h100.matches(blk, s, c, z, mask, rope)            # the parameters record a gradient
     with torch.no_grad():
@@ -98,7 +98,7 @@ def test_a_gradient_or_a_missing_rope_is_not_served():
 @pytest.mark.parametrize("real", [512, 400, 150])
 def test_captured_in_a_cuda_graph(real):
     """The real atom count stays on the device: the block runs inside a graph capture and replays with another mask and inputs."""
-    blk = _block(ImplementationType.TRITON).cuda().float().requires_grad_(False)
+    blk = _block(ImplementationType.MINIWORLD).cuda().float().requires_grad_(False)
     s, c, z, mask, rope = _inputs(2, 512, 512, seed=3)
     s2, c2, z2, _, rope2 = _inputs(2, 512, 512, seed=4)
     static = [t.clone() for t in (s, c, z, mask, *rope)]

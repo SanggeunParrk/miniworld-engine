@@ -176,7 +176,7 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch, D, outgoing):
         return real(*args)
 
     monkeypatch.setattr(H, "single_trimul", spy)
-    previous = settings.configure(engine_backend="auto",
+    previous = settings.configure(force_triton_kernels=False,
                                   trimul_h100_training_widths=trimul_h100.TRAINING_WIDTHS)
     try:
         n = 384
@@ -209,4 +209,4 @@ def test_module_wiring_matches_pytorch_reference(monkeypatch, D, outgoing):
             assert a.shape == b.shape
             assert _rel(a, b) < 1.2e-2
     finally:
-        settings.configure(**{f: getattr(previous, f) for f in ("engine_backend", "trimul_h100_training_widths")})
+        settings.configure(**{f: getattr(previous, f) for f in ("force_triton_kernels", "trimul_h100_training_widths")})

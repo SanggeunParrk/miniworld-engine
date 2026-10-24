@@ -34,7 +34,7 @@ def hopper():
         pytest.skip("H100 (sm_90) required")
     if torch.cuda.get_device_properties(0).multi_processor_count != 132:
         pytest.skip("full H100 required (the D128 cooperative grids)")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     torch.compiler.reset()
     yield
     settings.configure(**vars(old))

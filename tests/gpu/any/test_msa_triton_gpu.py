@@ -1,6 +1,6 @@
 """The portable Triton OuterProductMean / MSAPairWeightedAveraging against fp32 autograd of the module's own statements.
 
-Run with `engine_backend="triton"` so the native H100 paths step aside and the Triton kernels are what is measured on any card.
+Run with `force_triton_kernels=True` so the native H100 paths step aside and the Triton kernels are what is measured on any card.
 Each error is bounded by the bf16 module's own error on the same inputs (x 1.5, floor 2e-3): the kernels may not be worse than
 running the module's statements in bf16. Covered: masks (none / ragged / every key masked), the pair residual, both
 normalization orders, non-power-of-two d_pair, batch > 1, row dropout, and one compiled graph for forward + backward.
@@ -26,7 +26,7 @@ DEV, BF = "cuda", torch.bfloat16
 @pytest.fixture(autouse=True)
 def triton_policy():
     previous = settings.current()
-    settings.configure(engine_backend="triton")
+    settings.configure(force_triton_kernels=True)
     yield
     settings.configure(**vars(previous))
 

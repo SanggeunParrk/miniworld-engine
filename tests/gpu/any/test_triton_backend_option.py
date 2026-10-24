@@ -9,7 +9,7 @@ from miniworld_engine.modules.exceptions import ImplementationType as EngineImpl
 
 
 def configure_engine_backend(backend):
-    settings.configure(engine_backend=backend)
+    settings.configure(force_triton_kernels=(backend == "triton"))
 
 
 @pytest.fixture(autouse=True)
@@ -31,7 +31,9 @@ def test_h100_auto_and_strict_resolution(monkeypatch):
         assert dispatch.resolve(op, "miniworld").value == "triton"
         assert dispatch.resolve(op, "pytorch").value == "pytorch"
     with pytest.raises(ValueError, match="conflicts"):
-        dispatch.resolve("transition", "cuda")
+        dispatch.resolve("transition", "anthropic")
+    with pytest.warns(DeprecationWarning, match="deprecated"):      # the retired "cuda" string is miniworld, which the switch pins to Triton
+        assert dispatch.resolve("transition", "cuda").value == "triton"
 
 
 def test_standalone_layernorm_cannot_select_cuda():

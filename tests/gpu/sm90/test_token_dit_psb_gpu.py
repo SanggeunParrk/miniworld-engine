@@ -23,7 +23,7 @@ LOG2E = 1.0 / math.log(2.0)
 
 @pytest.fixture(autouse=True)
 def policy():
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     try:
         yield
     finally:

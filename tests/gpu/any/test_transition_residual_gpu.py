@@ -37,9 +37,9 @@ def test_transition_residual_all_gradients(shape, n, monkeypatch):
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(engine_backend="triton")
+    settings.configure(force_triton_kernels=True)
     torch.manual_seed(72)
-    module = Transition(shape[-1], n=n, implementation=ImplementationType.TRITON).cuda().bfloat16()
+    module = Transition(shape[-1], n=n, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:

@@ -261,7 +261,7 @@ def _module(d, n, dtype, seed=72):
 
     torch.manual_seed(seed)
     module = (
-        Transition(d, n=n, implementation=ImplementationType.TRITON).cuda().bfloat16()
+        Transition(d, n=n, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     )
     with torch.no_grad():
         for param in module.parameters():
@@ -279,7 +279,7 @@ def _run(module, x, dy, *, fused):
 
     mod = copy.deepcopy(module)
     settings.configure(
-        engine_backend="auto" if fused else "triton", transition_fused_sm90a=fused
+        force_triton_kernels=not fused, transition_fused_sm90a=fused
     )
     xx = x.clone().requires_grad_()
     y = mod(xx)

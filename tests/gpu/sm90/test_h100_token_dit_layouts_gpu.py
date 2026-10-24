@@ -26,7 +26,7 @@ def rel(a, b):
 
 def blocks(nh, d, qk=False):
     torch.manual_seed(0)
-    fast = DiTBlock(d_single=d, d_cond=384, d_pair=128, n_head=nh, use_qk_norm=qk, implementation=ImplementationType.TRITON)
+    fast = DiTBlock(d_single=d, d_cond=384, d_pair=128, n_head=nh, use_qk_norm=qk, implementation=ImplementationType.MINIWORLD)
     with torch.no_grad():
         for p in fast.parameters():
             if p.ndim == 2:

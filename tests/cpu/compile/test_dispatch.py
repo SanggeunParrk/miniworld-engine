@@ -38,7 +38,8 @@ def test_kernelbackend_has_only_concrete_backends():
 
 
 def test_to_kernel_backend_rejects_miniworld():
-    assert dispatch.to_kernel_backend(ImplementationType.CUDA) is KernelBackend.CUDA
+    assert dispatch.to_kernel_backend(KernelBackend.CUDA) is KernelBackend.CUDA     # an internal backend passes through
+    assert dispatch.to_kernel_backend(ImplementationType.PYTORCH) is KernelBackend.PYTORCH
     with pytest.raises(InvalidImplementationError):
         dispatch.to_kernel_backend(ImplementationType.MINIWORLD)
 

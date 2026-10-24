@@ -28,7 +28,7 @@ def runner(monkeypatch):
                  "BF16": torch.bfloat16, "DEVICE": torch.device("cpu"), "_NO_GRAPH_TARGETS": set(),
                  "ImplementationType": type("Impl", (), {
                      "PYTORCH": type("Value", (), {"value": "pytorch"}),
-                     "TRITON": type("Value", (), {"value": "triton"})})}
+                     "MINIWORLD": type("Value", (), {"value": "miniworld"})})}
     exec(compile(ast.Module(body=body, type_ignores=[]), str(BENCH), "exec"), namespace)
     namespace["BenchConfig"].model_rebuild(_types_namespace=namespace)
     observed: dict[str, Any] = {"compiled": [], "measured": [], "affine": [], "outputs": [], "dw_error": 0.0, "pins": []}

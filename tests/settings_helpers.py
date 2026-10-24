@@ -36,4 +36,19 @@ def override_setting(monkeypatch, name: str, value) -> None:
     settings.configure(**{name: _coerce(name, value)})
 
 
-__all__ = ["override_setting", "typing"]
+
+
+
+import contextlib
+
+
+@contextlib.contextmanager
+def forced_triton():
+    """Run a block with the internal A/B switch ``settings.force_triton_kernels`` on (what ``implementation=TRITON`` used to say for one module)."""
+    previous = settings.configure(force_triton_kernels=True)
+    try:
+        yield
+    finally:
+        settings.configure(**vars(previous))
+
+__all__ = ["forced_triton", "override_setting", "typing"]

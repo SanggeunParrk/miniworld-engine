@@ -37,7 +37,7 @@ def test_inference_architecture_contract(monkeypatch, cap, heads, width, length,
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: cap)
     monkeypatch.setattr(token_dit, "_cuda_rows", lambda: True)
     monkeypatch.setattr(sm100, "_is_blackwell", lambda *_: cap == (10, 0))
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     try:
         with torch.no_grad():
             assert token_dit.serves(module, single, cond, pair) is expected

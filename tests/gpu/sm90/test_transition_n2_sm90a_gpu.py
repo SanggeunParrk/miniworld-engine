@@ -28,7 +28,7 @@ def _build(shape, n=2, seed=72):
 
     torch.manual_seed(seed)
     d = shape[-1]
-    module = Transition(d, n=n, implementation=ImplementationType.TRITON).cuda().bfloat16()
+    module = Transition(d, n=n, implementation=ImplementationType.MINIWORLD).cuda().bfloat16()
     with torch.no_grad():
         for param in module.parameters():
             if param.ndim == 2:
@@ -49,7 +49,7 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(engine_backend="auto" if fused else "triton", transition_fused_sm90a=fused)
+    settings.configure(force_triton_kernels=not fused, transition_fused_sm90a=fused)
     xx = x.clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
@@ -100,7 +100,7 @@ def test_n2_no_grad_forward_is_the_training_forward(d, monkeypatch):
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     module, x, _ = _build((1, 16, 32, d))
-    settings.configure(engine_backend="auto", transition_fused_sm90a=True)
+    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
     with torch.no_grad():
         inference = module(x)
     train = module(x.clone().requires_grad_())

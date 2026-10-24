@@ -31,9 +31,9 @@ def triton_launches(monkeypatch):
         return original(self, *args, **kwargs)
 
     monkeypatch.setattr(jit.JITFunction, "run", run)
-    previous = settings.configure(triton_on_hopper_blackwell=False, engine_backend="auto")
+    previous = settings.configure(triton_on_hopper_blackwell=False, force_triton_kernels=False)
     yield launches
-    settings.configure(**{f: getattr(previous, f) for f in ("triton_on_hopper_blackwell", "engine_backend")})
+    settings.configure(**{f: getattr(previous, f) for f in ("triton_on_hopper_blackwell", "force_triton_kernels")})
 
 
 def _run(config, dtype, grad, s=256, a=2, b=1):

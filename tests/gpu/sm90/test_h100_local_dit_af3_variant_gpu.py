@@ -37,7 +37,7 @@ def _rel(a, b):
 @pytest.mark.parametrize(("a", "n", "real"), CASES)
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
 def test_matches_the_pytorch_module(kv_norm, key_window, a, n, real, dtype):
-    blk = _pair(ImplementationType.TRITON, kv_norm=kv_norm, key_window=key_window).cuda().float()
+    blk = _pair(ImplementationType.MINIWORLD, kv_norm=kv_norm, key_window=key_window).cuda().float()
     ref = _pair(ImplementationType.PYTORCH, kv_norm=kv_norm, key_window=key_window).cuda().double()
     ref.load_state_dict(blk.state_dict())
     g = torch.Generator(device="cuda").manual_seed(1)
@@ -61,7 +61,7 @@ def test_matches_the_pytorch_module(kv_norm, key_window, a, n, real, dtype):
 
 
 def test_a_gradient_is_not_served():
-    blk = _pair(ImplementationType.TRITON, kv_norm="parallel", key_window="slide").cuda().float()
+    blk = _pair(ImplementationType.MINIWORLD, kv_norm="parallel", key_window="slide").cuda().float()
     s = torch.randn(1, 1, 256, 128, device="cuda")
     z = torch.randn(1, 8, 32, 128, 16, device="cuda")
     mask = torch.zeros(1, 256, dtype=torch.bool, device="cuda")
@@ -74,7 +74,7 @@ def test_a_gradient_is_not_served():
 @pytest.mark.parametrize("real", [256, 200, 100])
 def test_the_slid_window_is_captured_in_a_cuda_graph(real):
     """The real atom count stays on the device: the block runs inside a graph capture and replays with another mask."""
-    blk = _pair(ImplementationType.TRITON, kv_norm="parallel", key_window="slide").cuda().float().requires_grad_(False)
+    blk = _pair(ImplementationType.MINIWORLD, kv_norm="parallel", key_window="slide").cuda().float().requires_grad_(False)
     g = torch.Generator(device="cuda").manual_seed(3)
     s = torch.randn(2, 1, 256, 128, device="cuda", generator=g)
     c = torch.randn(2, 1, 256, 128, device="cuda", generator=g)

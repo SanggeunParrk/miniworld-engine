@@ -28,7 +28,7 @@ def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
     override_setting(monkeypatch, "trimul_h100_native_buckets", True)
     for constant in ("_TRAIN_CUDA_UNSCOPED", "_TRAIN_FUSED_PREP_UNSCOPED", "_CUDA_AUX_UNSCOPED"):
         monkeypatch.setattr(T, constant, True)
-    previous = settings.configure(engine_backend="auto")
+    previous = settings.configure(force_triton_kernels=False)
     try:
         leaves, mask, ds, dy = helpers["fixture"](64, length, direction, master)
         module = (BidirectionalTriangleMultiplication(64, p_drop=0.25, implementation=ImplementationType.MINIWORLD)

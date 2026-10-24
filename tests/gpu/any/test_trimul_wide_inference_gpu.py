@@ -48,10 +48,10 @@ def test_wide_inference_matches_triton(d, masked, monkeypatch):
         y = m(x, mask=mask)
         assert calls, "default dispatch did not take a native wide inference path"
         try:
-            settings.configure(engine_backend="triton")
+            settings.configure(force_triton_kernels=True)
             ref = m(x, mask=mask)
         finally:
-            settings.configure(engine_backend="auto")
+            settings.configure(force_triton_kernels=False)
     delta, want = (y - x).float(), (ref - x).float()
     assert float((delta - want).norm() / want.norm()) < 2e-2
 

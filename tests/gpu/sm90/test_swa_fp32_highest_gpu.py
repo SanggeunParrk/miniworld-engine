@@ -40,10 +40,10 @@ def watch(monkeypatch):
     monkeypatch.setattr(jit.JITFunction, "run", run)
     monkeypatch.setattr(SWAAtomTransformer, "_forward_fused", forward_fused)
     precision = torch.get_float32_matmul_precision()
-    previous = settings.configure(triton_on_hopper_blackwell=False, engine_backend="auto")
+    previous = settings.configure(triton_on_hopper_blackwell=False, force_triton_kernels=False)
     yield seen
     torch.set_float32_matmul_precision(precision)
-    settings.configure(**{f: getattr(previous, f) for f in ("triton_on_hopper_blackwell", "engine_backend", "swa_dit_h100_native")})
+    settings.configure(**{f: getattr(previous, f) for f in ("triton_on_hopper_blackwell", "force_triton_kernels", "swa_dit_h100_native")})
 
 
 def _atom_inputs(model, dtype, grad, s=256, a=2):

@@ -11,7 +11,7 @@ from miniworld_engine.modules.swa_atom_attention import build_attention_params
 from miniworld_engine.modules.swa_dit import SWADiTBlock
 
 
-@pytest.mark.parametrize("implementation", [ImplementationType.MINIWORLD, ImplementationType.TRITON])
+@pytest.mark.parametrize("implementation", [ImplementationType.MINIWORLD])
 def test_all_block_ops_are_reached(monkeypatch, implementation):
     calls = []
 

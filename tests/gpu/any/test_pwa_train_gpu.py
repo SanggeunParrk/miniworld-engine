@@ -284,7 +284,7 @@ def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeyp
     from miniworld_engine import settings
 
     override_setting(monkeypatch, "pwa_train", None)
-    assert settings.current().engine_backend == "auto"
+    assert (not settings.current().force_triton_kernels)
     assert pt.wanted(module.implementation)
     msa = (
         inputs["msa"]

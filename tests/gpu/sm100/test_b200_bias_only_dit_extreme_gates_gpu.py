@@ -51,7 +51,7 @@ GVALS = (
 def policy():
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("Blackwell (sm_100) required")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
         yield

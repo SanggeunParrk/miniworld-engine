@@ -10,6 +10,14 @@ from miniworld_engine.modules.exceptions import ImplementationType
 pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")
 
 
+@pytest.fixture(params=["miniworld", "forced_triton"])
+def implementation(request):
+    """`miniworld` as the card routes it, and `miniworld` under the A/B switch (the Triton family on every card; what `triton` was)."""
+    if request.param == "forced_triton":
+        request.getfixturevalue("force_triton")
+    return "miniworld"
+
+
 def models(kind, implementation="miniworld"):
     cls = BidirectionalTriangleMultiplication
     options = {}
@@ -94,7 +102,6 @@ def test_packed_contractions(length, hidden, strided, contract):
 
 
 @pytest.mark.parametrize("dynamic", [False, True])
-@pytest.mark.parametrize("implementation", ["miniworld", "triton"])
 def test_cold_compiled_training_reference(dynamic, implementation):
     torch.manual_seed(921)
     torch.compiler.reset()
@@ -119,7 +126,6 @@ def test_cold_compiled_training_reference(dynamic, implementation):
         check(name, p.grad, rp.grad)
 
 
-@pytest.mark.parametrize("implementation", ["miniworld", "triton"])
 def test_compiled_training_graph_rng_residual(implementation):
     torch.manual_seed(531)
     torch.compiler.reset()

@@ -30,7 +30,7 @@ PYTORCH_FALLBACK = {"local", "triangle256", "triangle384", "triangle512"}
 
 @pytest.mark.parametrize("kind", ["apb", "local", "local_cross", "triangle128", "triangle256", "triangle384", "triangle512", "pwa", "swa"])
 def test_attention_master_compile_and_live_graph(kind):
-    settings.configure(engine_backend="auto", autotune_miss_cap=1)
+    settings.configure(force_triton_kernels=False, autotune_miss_cap=1)
     torch.manual_seed(89)
     if kind == "apb":
         make = lambda: AttentionPairBias(384, 128, 8, implementation=IT.MINIWORLD)

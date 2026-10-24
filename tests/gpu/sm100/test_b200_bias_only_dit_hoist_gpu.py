@@ -83,7 +83,7 @@ def hopper_serves_layout(n_head, d_head, dtype=None):
 def policy():
     if torch.cuda.get_device_capability() not in ((10, 0), (9, 0)):
         pytest.skip("Blackwell (sm_100) or Hopper (sm_90) required")
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_triton_kernels=False)
     old_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:
@@ -242,7 +242,7 @@ def test_serves_and_declines(monkeypatch):
     attns = attentions(2, 16, 48, BF)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=BF)
     assert HO.serves(MW, attns, p)
-    assert HO.serves(ImplementationType.TRITON, attns, p)
+    assert HO.serves(ImplementationType.MINIWORLD, attns, p)
     assert not HO.serves(PT, attns, p)  # the PyTorch implementation: the fold
     assert not HO.serves(MW, attns, p.expand(2, -1, -1, -1))  # B == 1 only
     assert not HO.serves(MW, attns, p.half())  # bf16 / fp32 only

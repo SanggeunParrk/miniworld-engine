@@ -99,7 +99,7 @@ def _build(shape, n=4, seed=72):
 
     torch.manual_seed(seed)
     module = (
-        Transition(shape[-1], n=n, implementation=ImplementationType.TRITON)
+        Transition(shape[-1], n=n, implementation=ImplementationType.MINIWORLD)
         .cuda()
         .bfloat16()
     )
