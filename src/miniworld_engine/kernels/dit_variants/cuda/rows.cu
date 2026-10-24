@@ -8,7 +8,7 @@
 //                  straight into the output dtype; [out_ln = LN(x) * f(ms) + mb for the sequential block's transition]
 //   qk_ln_rows     q <- LayerNorm(q) * wq + bq, k <- LayerNorm(k) * wk + bk over all D columns, in place (RF3 kq-norm; a logit scale
 //                  folded into q's w / b)
-//   gate_rows      o <- o * sigmoid(g)
+//   gate_rows_inplace      o <- o * sigmoid(g)
 //   glu_rows       out = silu(g) * v [* u],  row = [g | v | u]  (u: Boltz-2's up-gate)
 //   ln_rows        out = LN(z) (no affine), C = 128 or 256 (the pair rows of the hoisted pair bias)
 //   parallel_residual  out = x + sum_i (y_i - x): a parallel block (Chai-1, RoseTTAFold3) from its parts' residual outputs
@@ -313,7 +313,7 @@ void qk_ln_rows(at::Tensor q, at::Tensor k, at::Tensor wq, at::Tensor bq, at::Te
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void gate_rows(at::Tensor o, at::Tensor g) {
+void gate_rows_inplace(at::Tensor o, at::Tensor g) {
   const int64_t d = o.size(1);
   check(o, "o", at::kBFloat16, d);
   check(g, "g", at::kBFloat16, d);
@@ -377,7 +377,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_mod_rows", &ln_mod_rows);
   m.def("res_rows", &res_rows);
   m.def("qk_ln_rows", &qk_ln_rows);
-  m.def("gate_rows", &gate_rows);
+  m.def("gate_rows_inplace", &gate_rows_inplace);
   m.def("glu_rows", &glu_rows);
   m.def("ln_rows", &ln_rows);
   m.def("parallel_residual", &parallel_residual);

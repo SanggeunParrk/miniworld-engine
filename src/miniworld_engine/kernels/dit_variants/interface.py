@@ -380,7 +380,7 @@ def atom_inference(stack, single, cond, pair, mask, uid):
             _atom_edges(o, q, k, v, edge, a, n)
         o = o.view(m, 128)
         if blk.gating:
-            cuda.gate_rows(o, torch.mm(xq, w["wg"].t()))
+            cuda.gate_rows_inplace(o, torch.mm(xq, w["wg"].t()))
         ya = torch.mm(o, w["wo"].t()) if blk.project_output else o
         if stack.parallel:
             torch.mm(xt, w["wexp"].t(), out=ab)

@@ -50,9 +50,9 @@ def qk_ln_rows(q, k, wq, bq, wk, bk, eps):
     ext().qk_ln_rows(q, k, wq, bq, wk, bk, float(eps))
 
 
-def gate_rows(o, g):
+def gate_rows_inplace(o, g):
     """In place: o <- o * sigmoid(g) (bf16 row views)."""
-    ext().gate_rows(o, g)
+    ext().gate_rows_inplace(o, g)
 
 
 def glu_rows(ab, out, up):
