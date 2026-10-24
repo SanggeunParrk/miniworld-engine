@@ -98,9 +98,15 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   no Anthropic path raise `InvalidImplementationError` at their forward, as for any unsupported value).
 - `tests/cpu/compile/test_compile_wrap_coverage.py` passes again: the CUDA rows kernel of `kernels/dit_variants` is `gate_rows_inplace`
   (its `gate_rows` name collided with the Triton token-DiT `gate_rows`, whose callers the test follows by name).
-- `dev bundle-kernels --drop-stale` leaves out the recorded artifacts whose key the checkout can no longer compute (a source they reached
-  has changed since they were built); with `--keep` or records of an older tree they were packed into the wheel and never loaded (11 in the
-  2.3.9 wheels). The 2.3.10 wheels are built with it.
+- Prebuilt wheel size and stale artifacts: the 2.3.9 wheels packed 11 re-keyed old kernels (artifacts whose key no import of the release
+  computes) because their bundle was grown with `--keep` over earlier releases' roots. 2.3.10's bundle is made from recipes only: the records of
+  this release's coverage (engine cases, MiniWorld's production shapes, FoldForge's suite with and without the Anthropic variables, pdall's
+  training step) plus the recipes of eight kernels earlier releases' drivers reached and this release's did not happen to
+  (`atom_sm90` TF32 split-K backward cubins, `augattn_sm90` `DB_PER_SAMPLE1` / `NWG2`, `triattn_h100_lt4`, TriMul d64 `b7gate` / `gatepipe`),
+  every one replayed against this tree's sources, so each key is the one the loader of this tree computes. New:
+  `dev bundle-kernels --drop-stale` (and `kernel_bundle.stale_keys`) leaves out recorded artifacts whose code graph changed since they were
+  built; a recipe recorded without CUTLASS (the stand-in include) now resolves from its sibling's artifact (the replay's parallel pool
+  raced on it: `CutlassMissing`).
 
 ### Notes
 

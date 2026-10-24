@@ -119,9 +119,10 @@ build is the running torch's):
 * artifacts of this Python ABI (and every cubin) that the run no longer reaches are dropped (`--keep` keeps them);
   other ABIs' extensions are kept;
 * `--drop-stale` leaves out the recorded artifacts whose key this checkout can no longer compute (a source in their code graph changed
-  since they were built). Pass the previous release's records next to this release's records and `--drop-stale` to carry over, by recipe,
-  the artifacts that are still valid and that this release's drivers did not happen to reach again (2.3.10: SPLITK / PER_SAMPLE variants a
-  driver's autotuned choice skipped), without packing the superseded ones;
+  since they were built). A replay compiles this tree's sources, so a recipe of an older record
+  always yields a key of this tree; `--drop-stale` is for the non-replay path and for records whose recipe bakes a text of the old tree.
+  To carry over an earlier release's artifact the new drivers did not reach (2.3.10: eight kernels, e.g. the TF32 split-K atom backward),
+  put that record's entry next to this release's records and check the replayed key against the old bundle's;
 * artifacts that compile NVIDIA MathDx / cuBLASDx are never bundled (not redistributed; they JIT where used).
 
 `<out>/summary.json` has the counts, sizes and timings; `<out>/logs/engine_cases.jsonl` the result of every coverage
