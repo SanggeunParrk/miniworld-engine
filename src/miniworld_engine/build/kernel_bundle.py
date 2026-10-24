@@ -544,6 +544,16 @@ def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, onl
                 log(f"  FAILED {name}: {res['error']} (full output: {detail})")
             if i % 20 == 0 or i == len(tasks):
                 log(f"  {i}/{len(tasks)} ({time.monotonic() - started:.0f} s)")
+    # A recipe recorded without a CUTLASS checkout (the stand-in include path) cannot build; it resolves from the artifact a sibling
+    # recipe (the same kernel recorded by another Python ABI, replayed here to the same key) has built, which a parallel pool may not
+    # have finished when the stand-in task ran. Once the pool is done, try those again, one at a time.
+    again = [res for res in errors if res["error"].startswith("CutlassMissing")]
+    for res in again:
+        task = next(t for t in tasks if t["old"] == res["old"])
+        retried = _replay_one(task)
+        if "error" not in retried:
+            errors.remove(res)
+            log(f"  {recipes[res['old']]['name']}: resolved from a sibling recipe's artifact")
     log(f"replay: {len(tasks) - len(errors)} rebuilt / loaded, {len(errors)} failed, {time.monotonic() - started:.0f} s")
     return record
 
