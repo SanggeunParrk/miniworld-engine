@@ -836,6 +836,14 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
     return 2
 
 
+def _kernels_choice(args: argparse.Namespace) -> str:
+    """``build --kernels {auto,native,portable}``; the hidden ``--backend {auto,native,triton}`` is its deprecated spelling (``triton`` is ``portable``)."""
+    old = getattr(args, "backend", None)
+    if old is not None:
+        return {"triton": "portable"}.get(old, old)
+    return getattr(args, "kernels", None) or "auto"
+
+
 def cmd_build(args: argparse.Namespace) -> int:
     """Build the cache. The builder owns decomposition and multi-GPU execution; this only parses."""
     from miniworld_engine.autotune import builder
@@ -848,7 +856,7 @@ def cmd_build(args: argparse.Namespace) -> int:
     # triton compilation, and `build <typo>` used to spend all of it before printing "unknown
     # case". Both name spaces are declared and readable without importing anything: CASE_NAMES is
     # a literal, and the per-op sweep's names are the first column of registry.csv.
-    if getattr(args, "backend", "auto") != "auto":
+    if _kernels_choice(args) != "auto":
         args.per_op = True
     rc = _reject_unknown_build_target(args, repo)
     if rc:
@@ -883,9 +891,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         stack = args.case if args.case in STACKS else None
         only = None if args.case == "all" or stack else set(_op_names(args.case))
         units = builder.op_units(only, config_dir=directory, stack=stack)
-        backend = getattr(args, "kernels", "auto")
-        if getattr(args, "backend", None) is not None:   # the deprecated --backend {auto,native,triton}
-            backend = {"triton": "portable"}.get(args.backend, args.backend)
+        backend = _kernels_choice(args)
         if backend != "auto":
             from miniworld_engine.autotune.native import BUILD_OPS, build_ops_for_arch
             native_ops = build_ops_for_arch((builder.device_sm() or "").replace("_", ""))
