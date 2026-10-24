@@ -31,12 +31,12 @@ def test_inference_ladders_survive_and_token_training_is_cropped():
 
 def test_global_search_and_alternative_dispatch_are_independent(monkeypatch):
     row = dataclasses.replace(module_rows()[0], options=(("ln_bwd_path", "atomic"),),
-                              impls=("miniworld", "triton"), modes=("eval", "train"))
+                              impls=("miniworld", "portable"), modes=("eval", "train"))
     production = derive.units([row])
     monkeypatch.setenv("MINIWORLD_BUILD_SCOPE", "all")
     alternatives = derive.units([row])
     assert len(alternatives) > len(production)
-    assert any(u.impl == "triton" for u in alternatives)
+    assert any(u.impl == "portable" for u in alternatives)
     assert any(u.option == ("ln_bwd_path", "atomic") for u in alternatives)
     monkeypatch.setenv("MINIWORLD_BUILD_MODE", "eval")
     assert all(u.mode == "eval" for u in derive.units([row]))

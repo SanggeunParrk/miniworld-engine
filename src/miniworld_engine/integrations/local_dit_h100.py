@@ -45,11 +45,11 @@ def matches(module, single, cond, pair, mask, rope=None) -> bool:
     if _ld._af3_variant(module) and not _af3_servable(module, single, cond, pair, mask):
         return False
     a, tr = module.attention, module.transition
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.TRITON:
+    if a._backend != KernelBackend.PORTABLE:
         return False
     params = _weights_of(module)
     if any(p.device != single.device or not p.is_contiguous() for p in params):
@@ -676,7 +676,7 @@ def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
 
     if not (single.is_cuda and _hopper(single)) or not settings.current().local_dit_h100_mma:
         return False
-    if settings.current().force_triton_kernels or module.attention._backend != KernelBackend.TRITON:
+    if settings.current().force_portable_kernels or module.attention._backend != KernelBackend.PORTABLE:
         return False
     a, tr = module.attention, module.transition
     options = (module.cross_attention, module.kv_norm, module.key_window, module.keys, module.window_half, module.conditioning,

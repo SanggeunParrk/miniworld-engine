@@ -124,7 +124,7 @@ def test_every_module_honors_mode_depth_compile_and_dtype(runner, target, mode, 
 
 
 @pytest.mark.parametrize("target", ["triangle_multiplication", "triangle_multiplication_bidirectional"])
-@pytest.mark.parametrize("implementation", ["pytorch", "triton", "miniworld", "cuequivariance"])
+@pytest.mark.parametrize("implementation", ["pytorch", "portable", "miniworld", "cuequivariance"])
 def test_trimul_variants_have_identical_dropout_and_requested_precision(runner, monkeypatch,
                                                                       target, implementation):
     namespace, seen, fabric = runner
@@ -372,7 +372,7 @@ def test_target_yaml_exposes_auto_dropout_to_hydra(runner, target):
 
 @pytest.mark.parametrize("target", ["dit", "augmented_attention_token",
                                     "augmented_attention_atom"])
-@pytest.mark.parametrize("implementation", ["pytorch", "triton", "miniworld"])
+@pytest.mark.parametrize("implementation", ["pytorch", "portable", "miniworld"])
 def test_pair_bias_attention_propagates_adaln_implementation(runner, target, implementation):
     namespace, seen, fabric = runner
     namespace[f"bench_module_{target}"](

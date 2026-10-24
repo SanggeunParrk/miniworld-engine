@@ -67,7 +67,7 @@ def tf32(on):
 def policy():
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("Blackwell (sm_100) required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     old_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:

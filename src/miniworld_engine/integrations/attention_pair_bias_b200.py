@@ -68,7 +68,7 @@ def _eligible(
 ) -> bool:
     if (
         module.implementation != ImplementationType.MINIWORLD
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return False
     H, D = module.n_head, single.shape[-1]

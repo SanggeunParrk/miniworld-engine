@@ -43,7 +43,7 @@ def test_triton_override_and_off(monkeypatch):
     monkeypatch.setattr(dispatch, "lookup", lambda *args, **kw: "atomic")
     try:
         settings.configure(
-            force_triton_kernels=True, layernorm_dispatch="auto", layernorm_bwd_path=None
+            force_portable_kernels=True, layernorm_dispatch="auto", layernorm_bwd_path=None
         )
         assert _resolve_bwd_path(147456, 384, x, x, w, s, s) == "atomic"
         settings.configure(layernorm_bwd_path="persistent")
@@ -55,7 +55,7 @@ def test_triton_override_and_off(monkeypatch):
 
 
 def test_rms_cache_graph():
-    settings.configure(force_triton_kernels=True, autotune_miss_cap=24)
+    settings.configure(force_portable_kernels=True, autotune_miss_cap=24)
     x = torch.randn(
         1, 8192, 1024, device="cuda", dtype=torch.bfloat16, requires_grad=True
     )

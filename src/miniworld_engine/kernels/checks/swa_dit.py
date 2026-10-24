@@ -30,7 +30,7 @@ from miniworld_engine.kernels.drivers.swa_dit import (
 
 _NAMES = ("dq", "dmod", "dw_qkv", "dw_gate", "dw_out", "dw_up", "dw_down")
 _SHAPE = {"a": 8, "b": 2, "s": 333, "seed": 1}
-_CUDA_ONLY = {"force_triton_kernels": False, "swa_dit_qkvg_fwd_cuda": False, "swa_dit_ffn_fwd_cuda": False,
+_CUDA_ONLY = {"force_portable_kernels": False, "swa_dit_qkvg_fwd_cuda": False, "swa_dit_ffn_fwd_cuda": False,
               "swa_dit_ffn_bwd_cuda": False, "swa_dit_attn_cuda": False, "swa_dit_oproj_bwd_cuda": False,
               "swa_dit_qkvg_bwd_cuda": False}
 
@@ -194,7 +194,7 @@ def _modulation_pairs(names):
     c = torch.randn(b, s, 128, generator=g).to("cuda", torch.bfloat16).requires_grad_()
     w = (torch.randn(768, 128, generator=g) * 0.05).to("cuda", torch.bfloat16).requires_grad_()
     gm = torch.randn(b * s, 768, generator=g).to("cuda")
-    with _pinned(force_triton_kernels=False, swa_dit_mod_cuda=True):
+    with _pinned(force_portable_kernels=False, swa_dit_mod_cuda=True):
         mod = swa_dit_hoist_modulation(c, w)
         mod.backward(gm)
     c64, w64 = c.detach().double().requires_grad_(), w.detach().double().requires_grad_()
@@ -216,7 +216,7 @@ def _wgrad_pairs():
     _require_cuda("wgrad")
     _require_cuda("slab")
     _require_cuda("attn")
-    pins = {"force_triton_kernels": False, "swa_dit_wgrad_cuda": True, "swa_dit_ffn_bwd_cuda": True, "swa_dit_oproj_bwd_cuda": True,
+    pins = {"force_portable_kernels": False, "swa_dit_wgrad_cuda": True, "swa_dit_ffn_bwd_cuda": True, "swa_dit_oproj_bwd_cuda": True,
             "swa_dit_qkvg_bwd_cuda": True, "swa_dit_attn_cuda": True, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"}
     return _backward_pairs(("dw_qkv", "dw_gate", "dw_out", "dw_up", "dw_down"), "bf16", **pins)
 

@@ -24,9 +24,9 @@ pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(),
 
 @pytest.fixture(autouse=True)
 def _triton_everywhere():
-    previous = settings.configure(force_triton_kernels=True)
+    previous = settings.configure(force_portable_kernels=True)
     yield
-    settings.configure(force_triton_kernels=previous.force_triton_kernels)
+    settings.configure(force_portable_kernels=previous.force_portable_kernels)
 
 
 def _rel(a, b):

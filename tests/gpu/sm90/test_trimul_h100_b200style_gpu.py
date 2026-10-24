@@ -161,7 +161,7 @@ def test_module_dispatch_and_all_gradients(d, bidirectional, master, monkeypatch
     cls = (
         BidirectionalTriangleMultiplication if bidirectional else TriangleMultiplication
     )
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         leaves, mask, ds, dy = fixture(d, 128, 0 if bidirectional else 1, master)
         module = (

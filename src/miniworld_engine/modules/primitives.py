@@ -170,7 +170,7 @@ class LayerNorm(_Fp32ParamsMixin, nn.LayerNorm):
             # activation (and for stability); restore the activation dtype.
             orig_type = input.dtype
             return super().forward(input.float()).to(orig_type)
-        if backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
+        if backend in {KernelBackend.PORTABLE, KernelBackend.CUEQUIVARIANCE}:
             return kernels.triton_layernorm(
                 input,
                 self.weight,
@@ -217,7 +217,7 @@ class RMSNorm(nn.RMSNorm):
         self._returns_input_dtype = (
             self.implementation == ImplementationType.MINIWORLD and self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA)
         )
-        if len(self.normalized_shape) != 1 and self._backend == KernelBackend.TRITON:
+        if len(self.normalized_shape) != 1 and self._backend == KernelBackend.PORTABLE:
             raise ValueError("Engine RMSNorm supports one normalized dimension")
 
     def forward(self, x):
@@ -230,7 +230,7 @@ class RMSNorm(nn.RMSNorm):
         if self._backend in (KernelBackend.PYTORCH, KernelBackend.CUDA) or not x.is_cuda:
             out = super().forward(x)
             return out.to(x.dtype) if self._returns_input_dtype else out
-        if self._backend != KernelBackend.TRITON:
+        if self._backend != KernelBackend.PORTABLE:
             raise InvalidImplementationError(self.implementation)
         eps = self.effective_eps(x.dtype)
         return kernels.triton_rmsnorm(x, self.weight, eps)

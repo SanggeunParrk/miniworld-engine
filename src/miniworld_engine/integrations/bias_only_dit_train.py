@@ -34,7 +34,7 @@ the dxa GEMM / adaln_a_bwd / dchat + dcg GEMMs / cond_bwd (``bo_bwd_mid`` x 3 wi
 weight gradients and the unfold, ``pair_bias_bwd_fin`` for pair_bias_bwd + finalize (_BWD_PBFIN). settings.bias_only_dit_bwd_fused=0,
 read per call, or a failed build: the per-step launches.
 
-``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD or TRITON), B200, bf16 or fp32 inputs, the
+``serves()`` is the whole gate: autograd on, the engine's kernels (implementation MINIWORLD), B200, bf16 or fp32 inputs, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128 / transition n = 2), B == 1, L a multiple of 128 up to 768, a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
@@ -105,7 +105,7 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
         return False
     if module.implementation != ImplementationType.MINIWORLD:
         return False
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         return False
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 

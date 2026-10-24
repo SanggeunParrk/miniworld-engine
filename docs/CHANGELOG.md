@@ -8,6 +8,37 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.12] - 2026-10-25
+
+### Removed (BREAKING for code that used the removed names)
+
+Triton is not something a user selects. `miniworld` routes per card automatically (`docs/dispatch.md`); the portable kernel family behind it is internal.
+2.3.10 removed the public enum members; 2.3.12 removes every other public surface that still named it. No aliases, no shims:
+
+| removed | use instead |
+|---|---|
+| `ImplementationType("triton")`, `("cuda")`, `implementation="triton"` / `"cuda"` (were read as `miniworld` with a `DeprecationWarning`) | `miniworld`. The strings now raise a `ValueError` that lists the four valid values (`pytorch`, `miniworld`, `cuequivariance`, `anthropic`). |
+| `settings.force_triton_kernels` | `settings.force_portable_kernels` |
+| `settings.triton_on_hopper_blackwell` | `settings.portable_on_hopper_blackwell` |
+| `settings.b200_engine_triton` | `settings.b200_portable_kernels` |
+| `settings.engine_backend` (`"auto"` / `"triton"`, read-only property and `configure(engine_backend=...)`) | `settings.force_portable_kernels` (`True` / `False`) |
+| `settings.trimul_impl` values `"triton"`, `"cuda"` (and `KernelBackend` names) | `"portable"`, `"native"`, `"pytorch"` (also `"cuequivariance"`, `"anthropic"`); other values raise |
+| `miniworld-engine build --backend {auto,native,triton}` (hidden alias) | `build --kernels {auto,native,portable}` |
+| bench spec strings `triton`, `triton_pytorch_ln`, `triton_ln`, `triton_kernel_ln`, `triton_dispatch_ln` (and the `-` spellings) in `benchmarks/runners/bench.py` and the `bench.yaml` files | `portable`, `portable_pytorch_ln`, `portable_ln`, `portable_kernel_ln`, `portable_dispatch_ln` |
+| `modules.dispatch.KernelBackend.TRITON` (value `"triton"`) | `KernelBackend.PORTABLE` (value `"portable"`) |
+| `modules.dispatch.triton_forced`, `triton_leg_allowed`, `triton_blocked` | `portable_forced`, `portable_leg_allowed`, `portable_blocked` |
+| dev build-unit label `triton` (`registry_module.csv` `impls`, `dev capture --impl triton`) and the `trimul_impl=triton` build option | `portable`, `trimul_impl=portable` |
+
+`settings.configure(...)` with a removed or unknown name raises a `TypeError` that names the replacement (a removed name) or lists the unknown one;
+an invalid `trimul_impl` raises a `ValueError`. Kernel module and directory names (`kernels/*/triton/`, `*_triton` kernel names) and the
+registry's `backend` column describe source code and are unchanged, as are the MPNN module's own `*_backend` strings (a separate surface; not changed here).
+
+### Changed
+
+- `UnrecordedCardWarning`, `KernelRefusedWarning`, the refusal reasons and the README / `docs/dispatch.md` / `docs/gpus/` text no longer present Triton as a choice: the card is not
+  recorded, run `python -m miniworld_engine.autotune.run_all` to record it, and pass `settings.force_portable_kernels=True` only to force the portable kernels (A/B work).
+- Nothing about routing or performance changes; the derivation hash moved with `settings.py` / `modules/dispatch.py` and the plans were re-derived.
+
 ## [2.3.11] - 2026-10-25
 
 ### Added

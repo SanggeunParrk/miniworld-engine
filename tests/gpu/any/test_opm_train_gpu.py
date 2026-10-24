@@ -162,7 +162,7 @@ def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeyp
 
     override_setting(monkeypatch, "opm_train", None)
     override_setting(monkeypatch, "opm_train_save_o", "1")
-    assert (not settings.current().force_triton_kernels)
+    assert (not settings.current().force_portable_kernels)
     assert ot.wanted(module.implementation)
     x = (
         inputs["msa"]

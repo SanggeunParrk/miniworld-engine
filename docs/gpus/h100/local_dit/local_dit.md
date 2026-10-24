@@ -11,7 +11,7 @@ residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. Module summary: [h
 inside, the padded atoms masked as keys), a `[1, N]` bool key mask or none, contiguous `single` / `cond` `[A, 1, N, 128]` and pair
 `[1, nwin, 32, 128, 16]`; **fp32** activations with fp32 parameters (no autocast) run the TF32 kernels, **bf16** activations (fp32 master or
 bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else runs the module composition (on H100 its PyTorch
-statements: no Triton fallback, see [dispatch.md](../dispatch.md));
+statements: no portable-kernel fallback, see [dispatch.md](../dispatch.md));
 `settings.local_dit_h100_mma{,_fp32,_bf16}` switch the path off.
 
 **QK-norm** (`use_qk_norm=True`: a per-head RMSNorm of q and k over the head width, one weight each, as the token DiT): two row kernels around the
@@ -78,7 +78,7 @@ packing (about 150 tiny kernels per step) and 8 row kernels of 20-30 us. What is
 - Not split (open): `post90` forward (hidden chunks, needs a partial-sum finish), `pre_bwd90` (two reduction points).
 
 The matrix: [records/h100_local_dit_small_rows_20261015.md](../../../records/h100_local_dit_small_rows_20261015.md): every cell of
-inference and training is the fastest column against Anthropic, PyTorch eager, `torch.compile` and the previous Triton path.
+inference and training is the fastest column against Anthropic, PyTorch eager, `torch.compile` and the previous portable path.
 
 ## Accuracy
 
@@ -102,14 +102,14 @@ mode=<inference|training> n_augment=<A> sweep_axis=seq_len min_seq_len=<atoms / 
 (training with `cudagraph=manual`; atoms = 8 x seq_len; cross-attention block, one random conditioning row per atom and sample), ms.
 bf16 rows are `bf16-mixed` (fp32 master parameters under autocast), fp32 rows `precision=32`. Anthropic = `opt_core`'s atom block
 (composed from their windowed attention and row kernels; inference only). PyTorch compiled = `torch.compile` of the module's reference
-composition; PyTorch eager = the same composition without it (training under a CUDA graph). Triton path = this tree with
+composition; PyTorch eager = the same composition without it (training under a CUDA graph). portable path = this tree with
 `local_dit_h100_mma=False`: the Triton + CUDA-piece path that served H100 before the kernels of this page. × = the fastest other column /
 ours. The Length is the atom count (Length, Dimension) = (atoms, d_single). — : not measured (the bf16 `torch.compile` training step
 fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the CUDA-graph measurement are in the wide matrix below).
 
 ### Inference A1 bf16
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (128, 128) | 0.0849 | 0.1028 | 0.1591 | 0.0347 | 2.45 |
 | (1024, 128) | 0.0930 | 0.1226 | 0.3079 | 0.0357 | 2.61 |
@@ -120,7 +120,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Inference A1 fp32
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (128, 128) | 0.0901 | 0.0951 | 0.1536 | 0.0349 | 2.58 |
 | (1024, 128) | 0.0975 | 0.1188 | 0.3489 | 0.0379 | 2.58 |
@@ -131,7 +131,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Inference A5 bf16
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (256, 128) | 0.0939 | 0.1117 | 0.1975 | 0.0432 | 2.17 |
 | (1024, 128) | 0.1356 | 0.1649 | 0.4024 | 0.0489 | 2.78 |
@@ -143,7 +143,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Inference A5 fp32
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (256, 128) | 0.0996 | 0.1098 | 0.2016 | 0.0494 | 2.01 |
 | (1024, 128) | 0.1632 | 0.1875 | 0.4378 | 0.0612 | 2.66 |
@@ -155,7 +155,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Inference A48 bf16
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (1024, 128) | 0.7582 | 0.7381 | 1.7787 | 0.1820 | 4.06 |
 | (2048, 128) | 1.5644 | 1.4836 | 3.4924 | 0.3456 | 4.29 |
@@ -165,7 +165,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Inference A48 fp32
 
-| (Length, Dimension) | Anthropic | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | Anthropic | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (1024, 128) | 1.0141 | 1.0550 | 1.8432 | 0.2888 | 3.51 |
 | (2048, 128) | 2.0018 | 1.9873 | 3.5940 | 0.5386 | 3.69 |
@@ -175,7 +175,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A1 bf16
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (128, 128) | 0.6379 | — | 0.4132 | 0.2251 | 1.84 |
 | (1024, 128) | 0.9679 | — | 0.6977 | 0.2516 | 2.77 |
@@ -185,7 +185,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A1 fp32
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (128, 128) | 0.5207 | 0.2774 | 0.4862 | 0.2444 | 1.14 |
 | (1024, 128) | 0.9129 | 0.3809 | 0.8368 | 0.2958 | 1.29 |
@@ -195,7 +195,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A5 bf16
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (512, 128) | 1.2085 | — | 0.8872 | 0.3219 | 2.76 |
 | (2048, 128) | 2.3044 | — | 1.6967 | 0.4410 | 3.85 |
@@ -205,7 +205,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A5 fp32
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (512, 128) | 1.0943 | 0.4505 | 0.9993 | 0.3754 | 1.20 |
 | (2048, 128) | 2.3384 | 0.9740 | 2.0331 | 0.6148 | 1.58 |
@@ -215,7 +215,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A48 bf16
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (1024, 128) | 7.1396 | — | 4.6719 | 1.1472 | 4.07 |
 | (2048, 128) | 13.0445 | — | 9.1404 | 1.9227 | 4.75 |
@@ -226,7 +226,7 @@ fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the C
 
 ### Training A48 fp32
 
-| (Length, Dimension) | PyTorch eager | PyTorch compiled | Triton path | ours | × |
+| (Length, Dimension) | PyTorch eager | PyTorch compiled | portable path | ours | × |
 |---|---|---|---|---|---|
 | (1024, 128) | 7.4115 | 3.3872 | 5.7199 | 1.7834 | 1.90 |
 | (2048, 128) | 13.3456 | 6.3472 | 11.0729 | 3.1963 | 1.99 |

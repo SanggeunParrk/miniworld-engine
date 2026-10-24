@@ -28,7 +28,7 @@ LN2 = math.log(2.0)
 
 @pytest.fixture(autouse=True)
 def policy():
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         yield
     finally:

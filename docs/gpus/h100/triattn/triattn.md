@@ -2,7 +2,7 @@
 
 Kernel-level status of `TriangleAttention` (`use_self_attention=True`) on H100; the module-level summary belongs in
 [h100.md](../h100.md). bf16 only; columns are (Length, Dimension). H100 = CUDA where the hand-written sm_90a path serves the
-shape; a shape without it is 미구현 (it runs the PyTorch reference: H100 has no Triton fallback, see [dispatch.md](../dispatch.md)).
+shape; a shape without it is 미구현 (it runs the PyTorch reference: H100 has no portable-kernel fallback, see [dispatch.md](../dispatch.md)).
 
 Dispatch: `integrations/triattn_h100_sm90.py`, called in `TriangleAttention.forward` after the B200 checks and ahead of the b200style path of `integrations/triattn_h100.py` (`module._h100_cuda = False` falls back to it). Two paths share the attention
 core:
@@ -19,9 +19,9 @@ not ports of the tcgen05 ones.
 
 The path is served when all of these hold, otherwise the module runs its other path (the b200style path where it serves, else the PyTorch reference):
 
-- the module's backend is TRITON (`implementation=miniworld`, or an explicit `triton`), `module._h100_cuda` is True (the
+- the module's backend is PORTABLE (`implementation=miniworld`), `module._h100_cuda` is True (the
   default; False falls through to the b200style path of `integrations/triattn_h100.py` where it serves, else the PyTorch reference,
-  e.g. as a benchmark baseline) and `(not settings.force_triton_kernels)`;
+  e.g. as a benchmark baseline) and `(not settings.force_portable_kernels)`;
 - `use_self_attention`, no QK-norm; heads of 32 channels (16 is zero-padded to 32), at most 16 heads, d_pair a multiple of 8 up
   to 512 (`d_hidden = heads × head_dim`); `d_pair = d_hidden = 128` with 4 heads takes the fused path;
 - `pair` is a bf16 CUDA tensor `[B, L, L, d_pair]` with L a multiple of 16 (any B), `mask` is None or bool `[B, L]`; a length that
@@ -313,7 +313,7 @@ path, per-kernel times of both paths): [docs/records/h100_triattn_20260930_20261
   wgrad splits and a chunked weight load of the front were neutral or slower.  All in
   [docs/records/triattn_h100_core_experiments_20261013.md](../../../records/triattn_h100_core_experiments_20261013.md) (rounds 4-8).
 - Heads of 64 / 96 / 128 channels (the module's default of 4 heads at d_pair >= 256), QK-norm, the bias-only variant and
-  `BidirectionalTriangleAttention` (not served on B200 either) run the PyTorch reference (no Triton fallback on H100). L must be a
+  `BidirectionalTriangleAttention` (not served on B200 either) run the PyTorch reference (no portable-kernel fallback on H100). L must be a
   multiple of 16; any other length runs
   the PyTorch reference, and a length that is not a multiple of 128 is computed at the next multiple of 128 (L = 144 costs an L = 256
   call).

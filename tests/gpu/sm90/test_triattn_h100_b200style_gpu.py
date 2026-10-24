@@ -276,7 +276,7 @@ def test_opt_in_module_dispatch():
     from miniworld_engine.modules.dispatch import KernelBackend
 
     m = make(256).eval()
-    m._backend = KernelBackend.TRITON
+    m._backend = KernelBackend.PORTABLE
     x = torch.randn(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     assert not triattn_h100.serves(m, x)
     m._h100_b200style_cuda = True

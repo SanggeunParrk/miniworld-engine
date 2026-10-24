@@ -21,7 +21,7 @@ pytestmark = [
 
 @pytest.fixture(autouse=True)
 def policy():
-    old = settings.configure(engine_backend="auto")
+    old = settings.configure(force_portable_kernels=False)
     try:
         yield
     finally:

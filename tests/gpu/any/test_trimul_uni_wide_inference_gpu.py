@@ -71,10 +71,10 @@ def test_uni_wide_inference_matches_triton(outgoing, masked, monkeypatch):
             assert calls, "default dispatch did not take a native uni wide inference path"
         y = _uni_wide(m, x, mask)
         try:
-            settings.configure(force_triton_kernels=True)
+            settings.configure(force_portable_kernels=True)
             ref = m(x, mask=mask)
         finally:
-            settings.configure(force_triton_kernels=False)
+            settings.configure(force_portable_kernels=False)
     delta, want = (y - x).float(), (ref - x).float()
     assert float((delta - want).norm() / want.norm()) < 2e-2
     if hasattr(H, "_uni_wide_inference_ok"):

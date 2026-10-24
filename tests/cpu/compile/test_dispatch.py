@@ -26,7 +26,7 @@ from miniworld_engine.modules.exceptions import (
 def test_kernelbackend_has_only_concrete_backends():
     assert {b.value for b in KernelBackend} == {
         "pytorch",
-        "triton",
+        "portable",
         "cuda",
         "cuequivariance",
         # A vendored payload, like a vendor library, is a concrete thing a module can execute:
@@ -130,11 +130,11 @@ def arch(monkeypatch):
 def test_trimul_arch_policy(arch):
     mw = ImplementationType.MINIWORLD
 
-    # TRITON family on every arch: the hand-CUDA H100 kernels are tried inside the modules,
+    # PORTABLE family on every arch: the hand-CUDA H100 kernels are tried inside the modules,
     # before backend dispatch, so they are not a module-layer backend.
     for major in (8, 9, 10):
         arch(major)
-        assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.TRITON
+        assert dispatch.resolve_triangle_multiplication(mw) is KernelBackend.PORTABLE
 
 
 def test_trimul_settings_override_wins(arch):
@@ -151,7 +151,7 @@ def test_trimul_settings_override_wins(arch):
 
 def test_arch_independent_resolvers(arch, monkeypatch):
     """Transition / triangle-attention / adaln / cond-transition / augmented all
-    resolve MINIWORLD to TRITON regardless of arch; LayerNorm to CUDA.
+    resolve MINIWORLD to PORTABLE regardless of arch; LayerNorm to CUDA.
 
     The faked arch does not reach ``torch.cuda``, and a real B200 runs LayerNorm as PyTorch ops that ``torch.compile`` fuses
     (``test_b200_norm_dispatch.py``), so the card is taken away: this test is about the table, not about the machine it runs on."""
@@ -159,11 +159,11 @@ def test_arch_independent_resolvers(arch, monkeypatch):
     mw = ImplementationType.MINIWORLD
     for major in (8, 9, 10):
         arch(major)
-        assert dispatch.resolve_transition(mw) is KernelBackend.TRITON
-        assert dispatch.resolve_triangle_attention(mw) is KernelBackend.TRITON
-        assert dispatch.resolve_adaptive_layernorm(mw) is KernelBackend.TRITON
-        assert dispatch.resolve_conditioned_transition(mw) is KernelBackend.TRITON
-        assert dispatch.resolve_augmented_attention(mw) is KernelBackend.TRITON
+        assert dispatch.resolve_transition(mw) is KernelBackend.PORTABLE
+        assert dispatch.resolve_triangle_attention(mw) is KernelBackend.PORTABLE
+        assert dispatch.resolve_adaptive_layernorm(mw) is KernelBackend.PORTABLE
+        assert dispatch.resolve_conditioned_transition(mw) is KernelBackend.PORTABLE
+        assert dispatch.resolve_augmented_attention(mw) is KernelBackend.PORTABLE
         assert dispatch.resolve_layernorm(mw) is KernelBackend.CUDA
 
 

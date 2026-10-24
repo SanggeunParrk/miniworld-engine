@@ -19,8 +19,8 @@ for path in (root/"results").glob("*.json"):
     groups.setdefault(key,[]).append(r)
 jobs=[]
 for _key,rows in sorted(groups.items()):
-    up=[r for r in rows if r["row"] not in {"engine_triton","pytorch","pytorch_compile","cueq"}]
-    base=[r for r in rows if r["row"]=="engine_triton"]
+    up=[r for r in rows if r["row"] not in {"engine_portable","pytorch","pytorch_compile","cueq"}]
+    base=[r for r in rows if r["row"]=="engine_portable"]
     if up:jobs.append(min(up,key=lambda r:r["ms"]))
     if base:jobs.append(base[0])
 (root/f"profile-plan-{a.lane}.json").write_text(json.dumps(jobs[a.lane::a.lanes],indent=2))

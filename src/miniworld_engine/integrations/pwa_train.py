@@ -101,7 +101,7 @@ def wanted(implementation) -> bool:
     ``settings.pwa_infer`` and, when that is unset, ``settings.pwa_train`` (no payload needed; faster than the upstream cell)."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    on = _enabled() and (not settings.current().force_triton_kernels)
+    on = _enabled() and (not settings.current().force_portable_kernels)
     # ``ANTHROPIC`` is not asked here: an explicit ``implementation="anthropic"`` is the Anthropic release's cell
     # (integrations.anthropic_msa), not this engine's own H100 path.
     return on and implementation == ImplementationType.MINIWORLD

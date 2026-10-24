@@ -47,8 +47,8 @@ def test_unknown_card_builds_everything():
 def test_common_rules_apply_to_every_card():
     """_common.csv is the reason the bf16-only misses are not pasted into four files."""
     for sm in FLEET:
-        assert not matrix.allows(sm, "triangle_multiplication", "triton", "float32")
-        assert matrix.allows(sm, "triangle_multiplication", "triton", "bfloat16")
+        assert not matrix.allows(sm, "triangle_multiplication", "portable", "float32")
+        assert matrix.allows(sm, "triangle_multiplication", "portable", "bfloat16")
 
 
 def test_arch_specific_denies_are_arch_specific():
@@ -65,8 +65,8 @@ def test_sm_tag_is_the_file_stem():
 
 
 @pytest.mark.parametrize(("sm", "expected_impls"), [
-    ("sm_86", {"miniworld", "triton"}),
-    ("sm_90", {"miniworld", "triton"}),
+    ("sm_86", {"miniworld", "portable"}),
+    ("sm_90", {"miniworld", "portable"}),
 ])
 def test_units_drop_only_the_unbuildable_impls(sm, expected_impls, monkeypatch):
     monkeypatch.setattr(builder, "device_sm", lambda: sm)

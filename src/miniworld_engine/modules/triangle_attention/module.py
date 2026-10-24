@@ -124,7 +124,7 @@ class TriangleAttention(nn.Module):
         self._drop_dim = (
             1 if starting else 2
         )  # drop_row (i) for starting, drop_col (j) for ending
-        # 'miniworld' (ours, auto) resolves to the TRITON family: the repo's only
+        # 'miniworld' (ours, auto) resolves to the PORTABLE family: the repo's only
         # tensor-core triangle-attention kernels are the triton ones (which
         # themselves per-GPU dispatch fused vs split via _bo_dispatch). Resolution
         # lives in modules.dispatch; forward routes on self._backend.
@@ -201,7 +201,7 @@ class TriangleAttention(nn.Module):
             attention = F.softmax(attention, dim=-1)
             return torch.einsum("bhijk,bhikd->bhijd", attention, value)
 
-        if backend == KernelBackend.TRITON:
+        if backend == KernelBackend.PORTABLE:
             if (
                 getattr(self, "_fuse_bias_backward", True)
                 and torch.is_grad_enabled()
@@ -260,14 +260,14 @@ class TriangleAttention(nn.Module):
         raise InvalidImplementationError(self.implementation)
 
     def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:
-        """LayerNorm via this repo's standalone kernel for the TRITON impl.
+        """LayerNorm via this repo's standalone kernel for the PORTABLE impl.
 
         Uses ``kernels.layernorm_kernel`` (the repo's own developed LayerNorm, not
         the legacy vendored ``triton_layernorm``); it is fully autograd-aware. It
         wins at large L but its dispatch overhead regresses at small L, so fall
         back to torch's native LayerNorm below the per-GPU threshold (see dispatch).
         """
-        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(pair.shape[1]):
+        if backend == KernelBackend.PORTABLE and _bo_dispatch.use_kernels(pair.shape[1]):
             return kernels.layernorm_kernel(
                 pair, self.ln_pair.weight, self.ln_pair.bias, self.ln_pair.eps
             )
@@ -440,7 +440,7 @@ class TriangleAttention(nn.Module):
             not self._bias_untransposed
             and pair.dtype == torch.bfloat16
             and self.to_value.weight.dtype == torch.float32
-            and self._backend == KernelBackend.TRITON
+            and self._backend == KernelBackend.PORTABLE
         ):
             from miniworld_engine.kernels.triangle_attention.cuda import (
                 qg_projection_attention,
@@ -453,7 +453,7 @@ class TriangleAttention(nn.Module):
             and getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)
             and torch.is_grad_enabled()
-            and self._backend == KernelBackend.TRITON
+            and self._backend == KernelBackend.PORTABLE
             and self.use_self_attention
             and not self.use_qk_norm
             and self.n_head == 4
@@ -481,9 +481,9 @@ class TriangleAttention(nn.Module):
     def _triton_variant(self, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor | None:
         """The variant update (no residual) on the portable Triton core (``kernels.triangle_attention.triton.variants``), or None when
         this call is not served there (the caller runs ``_biased_reference``). Served on every card the standard Triton leg is: a card with
-        a record for the op (``dispatch.call_backend``), and any card under ``force_triton_kernels``. bf16 only; forward and backward."""
+        a record for the op (``dispatch.call_backend``), and any card under ``force_portable_kernels``. bf16 only; forward and backward."""
         if (
-            _dispatch.call_backend(self, self._backend, pair) != KernelBackend.TRITON
+            _dispatch.call_backend(self, self._backend, pair) != KernelBackend.PORTABLE
             or self.implementation != ImplementationType.MINIWORLD
             or not self.use_self_attention
             or _dispatch.restricted_card(pair.device)
@@ -553,7 +553,7 @@ class TriangleAttention(nn.Module):
             )
             master_family = backend  # the fp32-master projections below (cuBLAS casts, no Triton) stay on for the engine family
             if (
-                backend == KernelBackend.TRITON
+                backend == KernelBackend.PORTABLE
                 and self.implementation == ImplementationType.MINIWORLD
                 and _dispatch.restricted_card(pair.device)
             ):
@@ -569,7 +569,7 @@ class TriangleAttention(nn.Module):
             if (
                 not self.use_self_attention
                 and not torch.is_grad_enabled()
-                and backend == KernelBackend.TRITON
+                and backend == KernelBackend.PORTABLE
                 and _bo_dispatch.use_kernels(pair.shape[1])
                 and _bo_dispatch.use_infer_concat(self.to_value.weight.shape[0])
             ):
@@ -580,7 +580,7 @@ class TriangleAttention(nn.Module):
 
             pair = self._layernorm(pair, backend)
             master = (
-                master_family == KernelBackend.TRITON
+                master_family == KernelBackend.PORTABLE
                 and pair.dtype == torch.bfloat16
                 and self.to_value.weight.dtype == torch.float32
                 and _master.is_h100(pair.device)
@@ -600,7 +600,7 @@ class TriangleAttention(nn.Module):
             if (
                 getattr(self, "_fuse_projection_backward", True)
                 and torch.is_grad_enabled()
-                and backend == KernelBackend.TRITON
+                and backend == KernelBackend.PORTABLE
                 and self.use_self_attention
                 and not self.use_qk_norm
                 and self.n_head == 4
@@ -675,7 +675,7 @@ class TriangleAttention(nn.Module):
             # sigmoid_gate is elementwise and materializes a contiguous result, so
             # an explicit .contiguous() on this transpose view is redundant.
             out = rearrange(out, "B H L L2 D -> B L L2 (H D)")
-            if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
+            if backend == KernelBackend.PORTABLE and _bo_dispatch.use_kernels(
                 pair.shape[1]
             ):
                 # Fuse sigmoid(to_gate(pair)) * out + the to_out projection (gated

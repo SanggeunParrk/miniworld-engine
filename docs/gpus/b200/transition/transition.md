@@ -10,7 +10,7 @@ rows (the single stream at D = 384 below 17 tiles excepted, see [Small M](#small
 
 Dispatch: `modules/transition/module.py::_residual_forward` and `kernels/transition/whole_op.py` try
 `kernels/transition/cuda/fused_sm100a.available()` (D = 128, n = 4) and then `fused_wide_sm100a.available()` (every other (D, n) in
-its `SHAPES`) before the Triton path: sm_100 with an even SM count, bf16 activations and weights, hidden = n D, rows a multiple of
+its `SHAPES`) before the portable path: sm_100 with an even SM count, bf16 activations and weights, hidden = n D, rows a multiple of
 128 (the two-role backwards also need enough SMs for both roles). Opt out of both with `settings.transition_fused_sm100a=0`. The
 two-role backwards' weight-role replica counts are `DW_REPL = 9` (D128 n = 4; `settings.transition_sm100_repl` overrides it) and
 `REPL` = 20 / 30 / 14 for (64, 4) / (64, 2) / (128, 2) (`settings.transition_wide_repl`). At D = 384 the small-M paths take calls of
@@ -483,7 +483,7 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
 - **Small M, D384** (`widths/tsmall_w.cu`): see [Small M](#small-m-d384-at-most-16-tiles); the backward is the D512-style chain with the
   gate's item schedule.
 - Numerics are the sm_90a contract (same rounding points; `x_n`, `h`, `dA`, `dB`, `d_xn` in bf16, fp32 accumulation; at D ≥ 384 `a, b`
-  saved in bf16); vs the fp32 module every (D, n) is at least as close as the Triton path
+  saved in bf16); vs the fp32 module every (D, n) is at least as close as the portable path
   (`tests/gpu/sm100/test_transition_fused_sm100a_gpu.py`, `tests/gpu/sm100/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
   tiles, 1200 at D ≥ 384, the MSA and single-stream shapes). Reductions run in a fixed order (no atomics): a replay is bit-identical.
 - The research record (rounds v1-v23 for D128, w1-w6, s1 and n2 for the other widths, n = 2 and D384, with profiles and rejected
@@ -538,7 +538,7 @@ backward ~70 µs faster (648 vs 720 µs); inference gains 1.25x.
 
 ![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), length sweep at D128](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_length.png) ![Pair, n = 4 (2026-09-29; D384 *ours* 2026-09-30; re-verified 2026-10-10), dimension sweep at L384](figures/transition_pair_n_4_2026_09_29_d384_ours_2026_09_30_re_verified_2026_10_10_dimension.png) <!-- measure_bars -->
 
-Accuracy: every width passes "no further from fp32 than the Triton path" on 1 / 3 / 15 / 1152 tiles (and 1200 tiles at D ≥ 384,
+Accuracy: every width passes "no further from fp32 than the portable path" on 1 / 3 / 15 / 1152 tiles (and 1200 tiles at D ≥ 384,
 the tile schedule), gradients included. Separate processes vary by up to ±10 % on this power-capped card (e.g. torch.compile D384
 L768 training 7939 µs without / 8666 µs with CUDA graphs in the same run).
 

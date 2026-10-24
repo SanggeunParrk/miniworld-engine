@@ -4,7 +4,7 @@ Three ops hold the attention cores of the portable paths: ``local_dit`` (the AF3
 attention), ``dit_variant_atom`` (the Boltz-2 / RoseTTAFold3 / Chai-1 atom stacks, same kernels) and ``dit_variant`` (their token stacks:
 the pair-bias attention of ``augmented_attention/triton/main.py``). The rule is ``docs/dispatch.md``'s: a card with ``ok`` manifest rows
 for every kernel the call launches runs the Triton kernels; a card without them warns once and runs the PyTorch reference; H100 / B200
-never reach Triton through ``miniworld`` unless ``settings.force_triton_kernels`` is on. The backward kernels only matter to a call that
+never reach Triton through ``miniworld`` unless ``settings.force_portable_kernels`` is on. The backward kernels only matter to a call that
 needs a gradient.
 """
 from __future__ import annotations
@@ -28,7 +28,7 @@ ATOM_OPS = ("local_dit", "dit_variant_atom")
 @pytest.fixture(autouse=True)
 def _clean():
     previous = settings.current()
-    settings.configure(force_triton_kernels=False, triton_on_hopper_blackwell=False, b200_engine_triton=False, capture=False)
+    settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False, b200_portable_kernels=False, capture=False)
     for cache in (dispatch._card_cache, dispatch._unrecorded_warned, dispatch._refused_warned):
         cache.clear()
     yield
@@ -61,17 +61,17 @@ def test_a_recorded_card_runs_the_window_kernels_and_an_unrecorded_one_warns_onc
     device = fake_card(monkeypatch, CARD, (8, 6))
     for op in ATOM_OPS:
         with pytest.warns(UnrecordedCardWarning, match="augmented_attention_fwd_window_triton"):
-            assert not dispatch.triton_leg_allowed(device, op)
+            assert not dispatch.portable_leg_allowed(device, op)
         with warnings.catch_warnings():
             warnings.simplefilter("error")                      # once per (op, card, mode)
-            assert not dispatch.triton_leg_allowed(device, op)
+            assert not dispatch.portable_leg_allowed(device, op)
     write_manifest(manifests, CARD, (8, 6), [*ATOM_OPS, "dit_variant"])
     records._load.cache_clear()
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in (*ATOM_OPS, "dit_variant"):
-            assert dispatch.triton_leg_allowed(device, op, training=False)
-            assert dispatch.triton_leg_allowed(device, op, training=True)
+            assert dispatch.portable_leg_allowed(device, op, training=False)
+            assert dispatch.portable_leg_allowed(device, op, training=True)
 
 
 def test_an_inference_record_serves_inference_and_blocks_only_a_call_that_needs_a_backward(monkeypatch, manifests):
@@ -80,18 +80,18 @@ def test_an_inference_record_serves_inference_and_blocks_only_a_call_that_needs_
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in (*ATOM_OPS, "dit_variant"):
-            assert dispatch.triton_leg_allowed(device, op, training=False)
+            assert dispatch.portable_leg_allowed(device, op, training=False)
     with pytest.warns(UnrecordedCardWarning, match="backward"):
-        assert not dispatch.triton_leg_allowed(device, "local_dit", training=True)
+        assert not dispatch.portable_leg_allowed(device, "local_dit", training=True)
 
 
 def test_the_token_variant_op_is_not_unrecorded_by_the_missing_window_kernels(monkeypatch, manifests):
     """A card recorded for the token attention only runs the token stacks, not the atom ones."""
     device = fake_card(monkeypatch, CARD, (8, 6))
     write_manifest(manifests, CARD, (8, 6), ["dit_variant"])
-    assert dispatch.triton_leg_allowed(device, "dit_variant", training=True)
+    assert dispatch.portable_leg_allowed(device, "dit_variant", training=True)
     with pytest.warns(UnrecordedCardWarning):
-        assert not dispatch.triton_leg_allowed(device, "dit_variant_atom")
+        assert not dispatch.portable_leg_allowed(device, "dit_variant_atom")
 
 
 @pytest.mark.parametrize(("name", "capability"), [("NVIDIA H100 80GB HBM3", (9, 0)), ("NVIDIA B200", (10, 0))])
@@ -101,19 +101,19 @@ def test_h100_and_b200_never_reach_the_portable_path_without_the_ab_switch(monke
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in (*ATOM_OPS, "dit_variant"):
-            assert not dispatch.triton_leg_allowed(device, op)
-    settings.configure(force_triton_kernels=True)
+            assert not dispatch.portable_leg_allowed(device, op)
+    settings.configure(force_portable_kernels=True)
     for op in (*ATOM_OPS, "dit_variant"):
-        assert dispatch.triton_leg_allowed(device, op)
+        assert dispatch.portable_leg_allowed(device, op)
 
 
 def test_the_ab_switch_forces_the_portable_path_on_an_unrecorded_card(monkeypatch, manifests):
     device = fake_card(monkeypatch, "Brand New GPU", (8, 9))
-    settings.configure(force_triton_kernels=True)
+    settings.configure(force_portable_kernels=True)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in (*ATOM_OPS, "dit_variant"):
-            assert dispatch.triton_leg_allowed(device, op, training=True)
+            assert dispatch.portable_leg_allowed(device, op, training=True)
 
 
 @pytest.mark.filterwarnings("ignore::miniworld_engine.modules.dispatch.UnrecordedCardWarning")

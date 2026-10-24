@@ -9,7 +9,7 @@ Dispatch: `integrations/opm_train.py` (`_h100_path`, `_forward_wide`); kernels: 
 (d_msa, d_pair), built by JIT for sm_90a).
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, no interchain masking, inference and training alike; the pair
 residual is added in the epilogue (its gradient is `dz`). The `opm_train` setting (default on) turns the path off. Every other call runs the
-module's PyTorch statements on H100 (no Triton fallback, see [dispatch.md](../dispatch.md); other cards run the portable Triton path).
+module's PyTorch statements on H100 (no portable-kernel fallback, see [dispatch.md](../dispatch.md); other cards run the portable portable path).
 Widths: (d_msa, d_pair) = (64, 128) MiniWorld, (128, 256) Protenix-v2 / ESMFold2, (128, 384) OpenDDE,
 d_hidden 32. Either normalisation order (`normalize_before_proj=False` is ESMFold2's: divide after the projection and its bias). A length
 that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with masked rows and the output cut back.
@@ -174,7 +174,7 @@ The fusion boundaries and tensors are the same.
 Same fusion boundaries; the epilogue and dWo cut c_z into 128-wide CTA slices (one CTA per slice), dgrad contracts over the whole
 c_z, the prologue backward widens its LayerNorm phase to 128 channels, and the CUDA prologue `opm_prologue_wide` runs the 128-row
 MSA tile with the projection K = d_msa. Every stage is CUDA or cuBLAS. Measured 2026-10-13 ([record](../../../records/h100_opm_pwa_wide_20261013.md)),
-CUDA graph, S 1024, ms, against the portable Triton path (Anthropic's `msa_opm` cell has no d_pair 256 / 384 entry; cuEquivariance
+CUDA graph, S 1024, ms, against the portable portable path (Anthropic's `msa_opm` cell has no d_pair 256 / 384 entry; cuEquivariance
 ships no OPM):
 
 | (d_msa, d_pair), L | inference ours / Triton | training ours / Triton | SoL inference / training |

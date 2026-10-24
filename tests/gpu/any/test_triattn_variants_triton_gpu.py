@@ -2,7 +2,7 @@
 AlphaFold 3's untransposed ending-node bias) on the portable Triton core, forward and gradients, against the module's fp64 torch
 statements (``_biased_reference``): the bf16 engine error is held to the bf16 statements' own (x 1.5, floor 2e-3).
 
-Run with ``force_triton_kernels=True`` so the H100 CUDA kernels step aside; the PyTorch statements are made to fail if they run.
+Run with ``force_portable_kernels=True`` so the H100 CUDA kernels step aside; the PyTorch statements are made to fail if they run.
 Padded keys (mask) and padded query rows are in every case; the cotangent is zero outside the real rows.
 """
 from __future__ import annotations
@@ -23,7 +23,7 @@ DEV, BF = "cuda", torch.bfloat16
 @pytest.fixture(autouse=True)
 def triton_policy():
     previous = settings.current()
-    settings.configure(force_triton_kernels=True)
+    settings.configure(force_portable_kernels=True)
     yield
     settings.configure(**vars(previous))
 

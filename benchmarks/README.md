@@ -294,8 +294,8 @@ the matrix below is the remaining repo-developed module kernels, one
 
 | target | implementations | sweeps | modes | notes |
 | --- | --- | --- | --- | --- |
-| `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical Triton pair-bias attention kernel plus the module LayerNorm/projection/gate path. See `docs/kernels/triangle-attention.md`. |
-| `transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | MiniWorld is the repo transition path (fused b2b / split dispatch by card and width); the Team-GM legacy Triton transition is no longer a benchmark implementation. |
+| `triangle_attention` | `pytorch`, `cuequivariance`, `miniworld` | `seq_len`, `d_pair` | inference, training | Full triangular self-attention (`use_self_attention=True`). MiniWorld maps to the canonical pair-bias attention kernel plus the module LayerNorm/projection/gate path. See `docs/kernels/triangle-attention.md`. |
+| `transition` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | MiniWorld is the repo transition path (fused b2b / split dispatch by card and width); the Team-GM legacy transition is no longer a benchmark implementation. |
 | `conditioned_transition` | `pytorch`, `miniworld` | `seq_len` | inference, training | the token-side block: hidden `d_single_token` (768) conditioned on `d_single` (384), the widths the model's token DiT builds; `d_pair` is not an input, so there is no d sweep. The config used to say `d_single_token: 384`, a width the model never builds and the cache never tuned. |
 | `adaptive_layernorm` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | benchmark treats `d_pair` as the AdaLN hidden/condition width so d sweeps change the real tensor shape. |
 | `augmented_attention_token` | `pytorch`, `miniworld` | `seq_len`, `d_pair` | inference, training | token path; `d_pair` sweeps pair-bias width. |

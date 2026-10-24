@@ -42,6 +42,7 @@ from pathlib import Path
 ORDER: list[str] = [
     "pytorch",
     "torch.compile",
+    "portable",
     "triton",
     "triton-atomic",
     "triton-atomic-compile",
@@ -62,6 +63,7 @@ ORDER: list[str] = [
 DISPLAY: dict[str, str] = {
     "pytorch": "PyTorch",
     "torch.compile": "torch.compile",
+    "portable": "Portable kernels",
     "triton": "Triton",
     "triton-atomic": "Triton atomic",
     "triton-atomic-compile": "Triton atomic compile",
@@ -86,6 +88,7 @@ PALETTE: dict[str, str] = {
     # baselines — cool, recede
     "pytorch": "#B9C0CC",        # light grey — naive reference
     "torch.compile": "#6E7B91",  # slate
+    "portable": "#2E6FDB",       # blue
     "triton": "#2E6FDB",         # blue
     "triton-atomic": "#5B8FF9",  # lighter blue variant for the atomic path
     "triton-atomic-compile": "#1F4AA8",  # dark blue compiled atomic path
@@ -111,6 +114,7 @@ PALETTE: dict[str, str] = {
 LINESTYLE: dict[str, str | tuple[int, tuple[int, int]]] = {
     "pytorch": (0, (1, 1)),       # dotted
     "torch.compile": (0, (4, 2)),  # dashed
+    "portable": "-",
     "triton": "-",
     "triton-atomic": "-",
     "triton-atomic-compile": (0, (4, 2)),
@@ -145,6 +149,17 @@ _ALIASES: dict[str, str] = {
     "compiled": "torch.compile", "inductor": "torch.compile",
     # triton
     "triton": "triton",
+    "portable": "portable",
+    "portableatomic": "triton-atomic",
+    "portableatomiccompile": "triton-atomic-compile",
+    "portablepartial": "triton-partial",
+    "portablepartialcompile": "triton-partial-compile",
+    "portablepytorchln": "portable",
+    "portableln": "layernorm-dispatch",
+    "portablekernelln": "layernorm-dispatch",
+    "portabledispatchln": "layernorm-dispatch",
+    "portablelnkernel": "layernorm-dispatch",
+    "portablelndispatch": "layernorm-dispatch",
     "tritonatomic": "triton-atomic",
     "tritonatomiccompile": "triton-atomic-compile",
     "tritonpartial": "triton-partial",

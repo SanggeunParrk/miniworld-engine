@@ -85,7 +85,7 @@ def wanted(implementation) -> bool:
     # (integrations.anthropic_msa), not this engine's own H100 path.
     return (
         _enabled()
-        and (not settings.current().force_triton_kernels)
+        and (not settings.current().force_portable_kernels)
         and implementation == ImplementationType.MINIWORLD
     )
 

@@ -69,7 +69,7 @@ def _native_fp32_inference(module, single) -> bool:
 
     return (
         not torch.is_grad_enabled()
-        and module.attention._backend == KernelBackend.TRITON
+        and module.attention._backend == KernelBackend.PORTABLE
         and getattr(getattr(module.attention, "to_bias", None), "weight", None)
         is not None
         and module.attention.to_bias.weight.shape[1] == 128
@@ -89,7 +89,7 @@ def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) 
     from miniworld_engine.modules.dispatch import KernelBackend
 
     if (
-        module.attention._backend != KernelBackend.TRITON
+        module.attention._backend != KernelBackend.PORTABLE
         or not single.is_cuda
         or module.attention.to_bias.weight.shape[1] != 128
         or torch.cuda.get_device_capability(single.device) != (9, 0)
@@ -101,10 +101,10 @@ def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) 
     def require(ok, detail):
         if not ok:
             raise NotImplementedError(
-                f"H100 token DiT requires {detail}; no Triton fallback"
+                f"H100 token DiT requires {detail}; no portable fallback on this card"
             )
 
-    require(not settings.current().force_triton_kernels, "the CUDA backend")
+    require(not settings.current().force_portable_kernels, "the CUDA backend")
     require(
         single.dtype in (torch.bfloat16, torch.float32)
         and compute_dtype in (None, single.dtype),
@@ -167,7 +167,7 @@ def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) 
 
 def _check_native_fp32(module, single, cond, pair, compute_dtype):
     """Reject unsupported Hopper FP32 calls instead of entering a portable fallback."""
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         raise ValueError("Hopper FP32 token inference requires the native CUDA backend")
     if compute_dtype not in (None, torch.float32):
         raise ValueError("Hopper FP32 token inference requires FP32 compute operands")
@@ -230,14 +230,14 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
             # no CUDA path for this call: the block runs its own statements (H100 has no Triton fallback; they are PyTorch there)
             return False
         return True
-    if torch.is_grad_enabled() or settings.current().force_triton_kernels:
+    if torch.is_grad_enabled() or settings.current().force_portable_kernels:
         return False
     a = module.attention
-    # the engine's kernels (implementation TRITON or MINIWORLD resolve to them), as the attention cores and the training
+    # the engine's kernels (implementation MINIWORLD resolve to them), as the attention cores and the training
     # path gate on; PYTORCH keeps the reference
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.TRITON:
+    if a._backend != KernelBackend.PORTABLE:
         return False
     if not single.is_cuda or single.dtype not in (torch.bfloat16, torch.float32):
         return False

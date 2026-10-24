@@ -36,9 +36,9 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
     """FUSED, GENERIC or None (not served): the mathematical and resource contract, before touching the CUDA builder."""
     # `_h100_cuda = False` keeps the existing path (the benchmark baseline), as `_b200_cuda` does on B200.
     if (
-        getattr(module, "_backend", None) != KernelBackend.TRITON
+        getattr(module, "_backend", None) != KernelBackend.PORTABLE
         or not getattr(module, "_h100_cuda", True)
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return None
     if not module.use_self_attention or module.use_qk_norm:

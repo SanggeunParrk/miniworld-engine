@@ -83,7 +83,7 @@ def hopper_serves_layout(n_head, d_head, dtype=None):
 def policy():
     if torch.cuda.get_device_capability() not in ((10, 0), (9, 0)):
         pytest.skip("Blackwell (sm_100) or Hopper (sm_90) required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     old_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = False
     try:

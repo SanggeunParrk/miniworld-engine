@@ -32,14 +32,14 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
 L,C=a.length,a.width
-if a.row=="engine_triton":
-    settings.configure(force_triton_kernels=True)
+if a.row=="engine_portable":
+    settings.configure(force_portable_kernels=True)
 dev="cuda"; dt=torch.bfloat16
 record=vars(a).copy()
 record.update(gpu=torch.cuda.get_device_name(), torch=torch.__version__, cuda=torch.version.cuda,
               upstream_revision=A.REVISION, precision="bf16 operands; fp32 LN affine; TF32 disabled",
               measurement="warm one-call CUDA graph, 5 rounds x 50 replays; candidates in separate processes",
-              force_triton_kernels=settings.current().force_triton_kernels,
+              force_portable_kernels=settings.current().force_portable_kernels,
               dropout=0, training=False)
 
 
@@ -94,10 +94,10 @@ def fixture():
         ref=mr(x.float()) if a.family=="transition" else mr(x.float(),mask)
         residual=x
         def call(mod): return mod(x) if a.family=="transition" else mod(x,mask)
-        if a.row in {"pytorch","pytorch_compile","engine_triton"}:
-            if a.row=="engine_triton":
+        if a.row in {"pytorch","pytorch_compile","engine_portable"}:
+            if a.row=="engine_portable":
                 from miniworld_engine.modules.dispatch import KernelBackend
-                m._backend=KernelBackend.TRITON
+                m._backend=KernelBackend.PORTABLE
             if a.row=="pytorch_compile": m=torch.compile(m, dynamic=False, fullgraph=True)
             return lambda:call(m),ref,residual
         # TriangleMultiplication and Transition no longer take anthropic_row (and dispatch.resolve
@@ -137,7 +137,7 @@ def fixture():
             s=(s+b).masked_fill(~mask[:,start:start+16],float("-inf"))
             pieces.append(s.softmax(-1) @ v[:,start:start+16].float())
         ref=torch.cat(pieces,1); del pieces
-        if a.row=="engine_triton":
+        if a.row=="engine_portable":
             from miniworld_engine.kernels.triangle_attention.triton.main import (
                 triton_triangle_attention_pair_bias,
             )
@@ -160,7 +160,7 @@ def fixture():
     if a.family=="ln":
         x=rand(1,L,L,C);w=rand(C,dtype=torch.float32,scale=.05)+1;b=rand(C,dtype=torch.float32,scale=.05)
         ref=torch.nn.functional.layer_norm(x.float(),(C,),w,b,1e-5)
-        if a.row=="engine_triton":
+        if a.row=="engine_portable":
             from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
             return lambda:triton_layernorm(x,w,b,1e-5),ref,None
         if a.row=="pytorch": return lambda:torch.nn.functional.layer_norm(x.float(),(C,),w,b,1e-5).to(dt),ref,None

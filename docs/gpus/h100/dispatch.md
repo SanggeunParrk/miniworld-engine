@@ -1,6 +1,6 @@
 # H100 module dispatch
 
-`implementation="miniworld"` with the default `force_triton_kernels=False` selects the
+`implementation="miniworld"` with the default `force_portable_kernels=False` selects the
 packaged H100 implementations below. No research-directory import, external
 TriMul payload, or MSA opt-in environment variable is required. Configure the
 policy before constructing/compiling models.
@@ -21,14 +21,14 @@ D64/128/256/384/512 (D64: its own fused path `h100_d64_b200gate`). Inference: th
 wide bidirectional K1/K3 `h100_wide_inference` (D256/384/512) and the single-direction D512 path `h100_uni_wide_inference`.
 Single-direction training serves D64/128/256/384/512 in both directions. Per-shape status: `docs/gpus/h100/h100.md`; comparison
 matrix: `docs/records/trimul_h100_comparison_20261015.md`. Measurements and audits of the v2.2.0 integration that this page used to
-carry (production-module audit, wide training against the Triton path, the master-parameter summary):
+carry (production-module audit, wide training against the portable path, the master-parameter summary):
 [docs/records/h100_dispatch_20260923_20261005.md](../../records/h100_dispatch_20260923_20261005.md).
 
-## No Triton fallback; PyTorch where no CUDA path serves the call (intentional)
+## No portable-kernel fallback; PyTorch where no CUDA path serves the call (intentional)
 
-H100 (sm_90) and B200 (sm_100) run hand-written CUDA and cuBLAS. **There is no Triton fallback on either card, and that is deliberate.**
+H100 (sm_90) and B200 (sm_100) run hand-written CUDA and cuBLAS. **There is no portable-kernel fallback on either card, and that is deliberate.**
 A `MINIWORLD` call that no CUDA path serves (a ragged length, an unbuilt width, fp32 without TF32, a dtype or layout outside a kernel's
-contract) is not routed to the Triton family -- untuned on these cards, unmeasured against the CUDA path, easy to mistake for it in a
+contract) is not routed to the portable kernel family -- untuned on these cards, unmeasured against the CUDA path, easy to mistake for it in a
 benchmark -- and it is not refused either: it runs the **PyTorch reference** (`torch.compile` fuses it where the caller compiles), always
 with a correct result. `modules.dispatch.restricted_card(device)` is the single test; each module takes its PyTorch leg when it is true.
 
@@ -54,10 +54,10 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
 * SWA atom DiT in fp32 under matmul precision "highest" (torch's default): the native H100 stages serve it (exact-fp32 cuBLAS
   projections); a call they do not take (B200, `swa_dit_h100_native=False`) runs the PyTorch statements, never the sm_100a TF32 or the
   Triton fp32 kernels (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`, `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
-* Other cards: not this page. `miniworld` runs a CUDA path where one serves the call, else the Triton kernel family only on a card the engine has a record for, else a warning and the PyTorch reference: [../../dispatch.md](../../dispatch.md).
-* Triton is not a public backend (`implementation` is pytorch / miniworld / cuequivariance / anthropic). The A/B switch keeps it on H100 / B200: `settings.force_triton_kernels=True`, or
-  `settings.triton_on_hopper_blackwell=True` (A/B work, building Triton caches). `b200_engine_triton` does the same on B200.
-* Committed H100 / B200 Triton autotune caches are not needed and are not maintained.
+* Other cards: not this page. `miniworld` runs a CUDA path where one serves the call, else the portable kernel family only on a card the engine has a record for, else a warning and the PyTorch reference: [../../dispatch.md](../../dispatch.md).
+* `implementation` is pytorch / miniworld / cuequivariance / anthropic; `miniworld` routes per card. The A/B switch brings the portable kernels back on H100 / B200:
+  `settings.force_portable_kernels=True`, or `settings.portable_on_hopper_blackwell=True` (A/B work, building portable-kernel caches). `b200_portable_kernels` does the same on B200.
+* Committed H100 / B200 portable-kernel autotune caches are not needed and are not maintained.
 
 Verified with a Triton-launch recorder over every module, bf16 and fp32, inference and training, ragged lengths (L = 100, 128, 200, 384),
 widths 64 / 100 / 128 / 192 / 256 / 768: zero Triton launches, zero errors, and the output agrees with the module's
@@ -89,15 +89,15 @@ the separate `[S,N,64]` masked-gradient allocation and HBM write/read.
 
 ## Policy and tuning
 
-`force_triton_kernels=True` (or `settings.triton_on_hopper_blackwell=True`) is the A/B opt-out of these automatic paths: it brings the
-Triton family back on H100, including the residual-fused Transition.
+`force_portable_kernels=True` (or `settings.portable_on_hopper_blackwell=True`) is the A/B opt-out of these automatic paths: it brings the
+portable kernel family back on H100, including the residual-fused Transition.
 `settings.opm_train=0`, `settings.pwa_train=0` and
 `settings.pwa_infer=0` disable their respective integrations.
 `trimul_h100_training_widths` can restrict the connected CUDA training widths;
 its default is `(64, 128, 256, 384, 512)`.
 
 Native TriMul ships measured tile selections; Token DiT retains its local first-use GEMM selection. The H100 CUDA paths need no
-autotune cache (Triton caches matter only for explicit Triton A/B runs). Derived build plans model these native
+autotune cache (Triton caches matter only for explicit portable-kernel A/B runs). Derived build plans model these native
 composites without invoking nvcc on fake tensors.
 
 The research histories remain available under `experiments/`; source hashes for
@@ -243,14 +243,14 @@ validation): [docs/records/h100_master_weights_20261005.md](../../records/h100_m
 ## AttentionPairBias (2026-10-13)
 
 `modules/attention_pair_bias` -> `integrations/attention_pair_bias_b200.py` (the B200 file; sm_90 branches inside). Served when:
-`implementation=miniworld`, engine backend not `triton`, bf16 `single` / `pair`, B = 1, contiguous, (heads, d_single) in
+`implementation=miniworld`, `force_portable_kernels` off, bf16 `single` / `pair`, B = 1, contiguous, (heads, d_single) in
 {(8, 384), (12, 384), (16, 384), (24, 384), (16, 512)}, d_pair 128, no QK-norm, key mask `[1, L]` or none, capability 9.0 or 10.0;
 inference `L % 16 == 0`, training `L % 128 == 0` (H100). Anything else takes the module path: the PyTorch reference on H100 (no Triton
-fallback, see above), the Triton path on other cards.
+fallback, see above), the portable path on other cards.
 
 | switch (`settings`) | default | meaning |
 |---|---|---|
-| `apb_h100_train` | on | native CUDA training; off keeps the module path (PyTorch on H100 unless `triton_on_hopper_blackwell`) as an explicit baseline |
+| `apb_h100_train` | on | native CUDA training; off keeps the module path (PyTorch on H100 unless `portable_on_hopper_blackwell`) as an explicit baseline |
 | `apb_h100_exact_dwb` | **off** | recompute the `to_bias.weight` gradient in fp32 from bf16-rounded inputs (needs CUTLASS 4.2 headers via `CUTLASS_PATH`); 1.7e-2 -> 0.8e-2 on that one gradient, 2.4x the step |
 
 Saved tensors (training): xa, (mean, rstd), q|k|v|g, bias, O fp32, LSE, og, Wf, packed W q|k|v|g, bf16 Wo, bf16 Wb; the original

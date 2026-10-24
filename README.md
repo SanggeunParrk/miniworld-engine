@@ -1,7 +1,7 @@
 # miniworld-engine
 
 GPU kernel library for MiniWorld / AF3-style ops. Each op is cut out of the model and
-optimized in isolation: **hand-written CUDA where it exists, a Triton fallback on every other GPU**
+optimized in isolation: **hand-written CUDA where it exists, a portable kernel fallback on every other GPU**
 (H100 and B200 have none, on purpose: they fall back to PyTorch), and a PyTorch reference that defines what "correct" means.
 
 > **Where this fits.** miniworld-engine is the bottom layer of a three-layer stack: it owns
@@ -9,7 +9,7 @@ optimized in isolation: **hand-written CUDA where it exists, a Triton fallback o
 > blocks; terminal product repos assemble those into full models. Boundary rules live in
 > team-gm's `docs/ARCHITECTURE.md`.
 
-**Version 2.3.11** — CUDA + Triton only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
+**Version 2.3.12** — CUDA + portable kernels only (CuTe/quack removed), torch 2.13 (CUDA 12.9 or 13.0), prebuilt H100 kernels,
 cuequivariance 0.12. [Changelog](docs/CHANGELOG.md) ·
 [attribution](licenses/THIRD_PARTY_NOTICES.md).
 
@@ -33,7 +33,7 @@ to read a number.
 python -m pip install -e .
 ```
 
-**2. Check what you have.** Prints the version and the config set every triton kernel will search
+**2. Check what you have.** Prints the version and the config set every kernel will search
 if you do nothing else.
 
 ```bash
@@ -161,12 +161,12 @@ from the code.
 
 **The minimum supported architecture is sm80.** The generated table above states each
 registered kernel's minimum architecture; it is not a numerical qualification for every
-listed GPU. The public backends are `pytorch`, `miniworld`, `cuequivariance` and `anthropic`; Triton is
-not one of them. `miniworld` runs the engine's CUDA path where one serves the call; on a card without one
-it routes to the internal Triton kernel family only if the engine holds a record for that exact card
+listed GPU. The values of `implementation` are `pytorch`, `miniworld`, `cuequivariance` and `anthropic`; `miniworld` routes per card
+automatically. It runs the engine's CUDA path where one serves the call; on a card without one
+it routes to the engine's portable kernels only if the engine holds a record for that exact card
 (`autotune/manifests/`), else it warns and runs the PyTorch reference
-([docs/dispatch.md](docs/dispatch.md)). `settings.force_triton_kernels` is the internal A/B switch that
-forces the Triton family. Native CUDA variants can require a newer architecture.
+([docs/dispatch.md](docs/dispatch.md)). `settings.force_portable_kernels` is the internal A/B switch that
+forces the portable kernels. Native CUDA variants can require a newer architecture.
 
 One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on

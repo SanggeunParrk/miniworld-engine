@@ -216,7 +216,7 @@ pytestmark = [
 
 @pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
 def test_transition_master_gradients_and_live_graph(d):
-    settings.configure(force_triton_kernels=False, autotune_miss_cap=1)
+    settings.configure(force_portable_kernels=False, autotune_miss_cap=1)
     _check(
         f"transition_D{d}",
         lambda: Transition(d, n=4, implementation=IT.MINIWORLD),
@@ -227,7 +227,7 @@ def test_transition_master_gradients_and_live_graph(d):
 @pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
 @pytest.mark.parametrize("length", [384, 768])
 def test_bidirectional_trimul_master_gradients_and_live_graph(d, length):
-    settings.configure(force_triton_kernels=False, autotune_miss_cap=1)
+    settings.configure(force_portable_kernels=False, autotune_miss_cap=1)
     _check(
         f"trimul_D{d}_L{length}",
         lambda: BidirectionalTriangleMultiplication(
@@ -240,7 +240,7 @@ def test_bidirectional_trimul_master_gradients_and_live_graph(d, length):
 @pytest.mark.parametrize("d", [64, 128, 256, 384])
 @pytest.mark.parametrize("outgoing", [False, True])
 def test_single_trimul_master_gradients_and_live_graph(d, outgoing):
-    settings.configure(force_triton_kernels=False, autotune_miss_cap=1)
+    settings.configure(force_portable_kernels=False, autotune_miss_cap=1)
     _check(
         f"trimul_single_D{d}",
         lambda: TriangleMultiplication(
@@ -252,7 +252,7 @@ def test_single_trimul_master_gradients_and_live_graph(d, outgoing):
 
 @pytest.mark.parametrize("d", [64, 128, 256, 384, 512])
 def test_bidirectional_master_mask_dropout_and_changed_graph(d):
-    settings.configure(force_triton_kernels=False, autotune_miss_cap=1)
+    settings.configure(force_portable_kernels=False, autotune_miss_cap=1)
     _check(
         f"trimul_dropout_D{d}",
         lambda: BidirectionalTriangleMultiplication(d, p_drop=0.25, implementation=IT.MINIWORLD),

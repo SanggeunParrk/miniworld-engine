@@ -14,7 +14,7 @@ autograd Function, served eagerly, under `torch.compile` and in CUDA graphs), an
 `kernels/augmented_attention/cuda/sm100_atom_local/`. The row kernels (conditioning, input projections, post-attention, transition and
 their backward) are in `kernels/augmented_attention/cuda/sm100_atom/`. The block
 has the parameters of `DiTBlock` at atom widths, so both blocks share a checkpoint layout. `serves()` accepts: B200, implementation
-MINIWORLD / TRITON, bf16 single / cond / pair, the atom widths, B = 1, any N, a `[B, N]` bool key mask or none, no QK-norm; anything else
+MINIWORLD, bf16 single / cond / pair, the atom widths, B = 1, any N, a `[B, N]` bool key mask or none, no QK-norm; anything else
 keeps the PyTorch path, and `settings.local_dit_sm100=0` turns it off. N is padded to a multiple of 128 for the row kernels (zero rows,
 the padded atoms masked as keys, the pair padded with zero windows); the first N rows come back.
 

@@ -290,7 +290,7 @@ def _serves_one(module, pair: torch.Tensor) -> bool:
     policy = settings.current()
     if (
         module.implementation != ImplementationType.MINIWORLD
-        or policy.force_triton_kernels
+        or policy.force_portable_kernels
     ):
         return False
     if _b200style_serves(module, pair):
@@ -596,7 +596,7 @@ def serves_inference(
 def _serves_inference_one(module, pair, *, bidirectional, dropscale=None):
     if (
         module.implementation != ImplementationType.MINIWORLD
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return False
     if torch.is_grad_enabled() or dropscale is not None:

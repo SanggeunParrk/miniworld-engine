@@ -10,7 +10,7 @@ kernels: `integrations/csrc/sm100/opm_sm100.cu` (tcgen05 / TMEM / TMA), one exte
 
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, `normalize_before_proj` (the AF3 order), no
 interchain masking, N (length) a multiple of 64 and S (MSA depth) a multiple of 256, inference and training alike. The pair residual is added in
-the epilogue (its gradient is `dz` itself). Every other call runs the portable Triton path.
+the epilogue (its gradient is `dz` itself). Every other call runs the portable portable path.
 
 ## OuterProductMean (`OuterProductMean`)
 

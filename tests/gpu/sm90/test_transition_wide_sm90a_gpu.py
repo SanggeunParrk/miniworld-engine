@@ -105,7 +105,7 @@ def _run(module, x, dy, *, fused, fp32=False):
         mod = mod.float()
         x, dy = x.float(), dy.float()
     settings.configure(
-        force_triton_kernels=not fused, transition_fused_sm90a=fused
+        force_portable_kernels=not fused, transition_fused_sm90a=fused
     )
     xx = x.clone().requires_grad_()
     y = mod(xx)
@@ -187,7 +187,7 @@ def test_no_grad_forward_is_the_training_forward(d, monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     module, x, _ = _build((1, 16, 16, d))
     with torch.no_grad():
         inference = module(x)
@@ -222,7 +222,7 @@ def test_d64_persistent_input_buffer_reuse(monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     module, x, dy = _build((1, 1024, 384, 64))
     x.requires_grad_()
     params = [x, *module.parameters()]
@@ -289,7 +289,7 @@ def test_shapes_beyond_the_tuned_builds_run_the_generic_kernels(d, bad, monkeypa
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     module = Transition(
         d,
         n=3 if bad == "expansion" else 4,
@@ -329,7 +329,7 @@ def test_unserved_cell_runs_the_pytorch_reference(bad, monkeypatch):
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     d = 100 if bad == "width" else 128
     module = Transition(d, n=4, implementation=ImplementationType.MINIWORLD).cuda()
     x = torch.randn(128, d, device="cuda", dtype=torch.bfloat16)
@@ -375,7 +375,7 @@ def test_native_required_buckets_pytorch_and_live_graph(
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
     # Force the retained-a/b cell (the shape default retains them only for D512 at 768 * 768 rows).
     monkeypatch.setattr(

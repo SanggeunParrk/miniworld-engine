@@ -8,7 +8,7 @@ from miniworld_engine.kernels.trimul_inproj.triton.contract import packed_forwar
 from miniworld_engine.modules import BidirectionalTriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_triton")]
+pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_portable")]
 
 
 def split_forward(left, right, h):

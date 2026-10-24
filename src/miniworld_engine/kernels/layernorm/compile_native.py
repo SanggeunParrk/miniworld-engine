@@ -60,7 +60,7 @@ def _resolve_bwd_path(
     # Offline, dtype-specific calibration may refine the coarse H100 heuristic.
     # Never reuse a BF16/FP32-affine measurement for another precision contract.
     regime = f"{x.dtype}|{weight.dtype}"
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         override = _ln_bwd_override()
         if override in {"atomic", "persistent"}:
             return override

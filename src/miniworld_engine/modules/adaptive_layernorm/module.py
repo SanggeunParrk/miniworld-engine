@@ -33,7 +33,7 @@ class AdaptiveLayerNorm(nn.Module):
     ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
-        # 'miniworld' (auto) -> the TRITON family (the only fused adaln kernel).
+        # 'miniworld' (auto) -> the PORTABLE family (the only fused adaln kernel).
         self._backend = resolve_adaptive_layernorm(self.implementation)
         self._train_gate = train_gate("adaptive_layernorm", self.implementation, self._backend)
         # Constructor-level, like ConditionedTransition: the norm and the scale/bias projections
@@ -72,7 +72,7 @@ class AdaptiveLayerNorm(nn.Module):
             # the engine's own path returned the compute dtype (bf16 under autocast); torch's LayerNorm would hand back fp32 there
             return out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
 
-        if backend == KernelBackend.TRITON:
+        if backend == KernelBackend.PORTABLE:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
             #
             # `dispatch.needs_backward` owns the condition -- see its docstring. It was written

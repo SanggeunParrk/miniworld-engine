@@ -537,7 +537,7 @@ def serve() -> int:
     """Worker loop: one JSON descriptor per stdin line, one ``RESULT <json>`` line per descriptor on stdout."""
     from miniworld_engine import settings
 
-    settings.configure(triton_on_hopper_blackwell=False, force_triton_kernels=False)
+    settings.configure(portable_on_hopper_blackwell=False, force_portable_kernels=False)
     for line in sys.stdin:
         line = line.strip()
         if not line:

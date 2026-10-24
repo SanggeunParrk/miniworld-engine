@@ -18,7 +18,7 @@ einsum so no ``.transpose()`` of the pair is needed.
 
 Gate convention follows ``TriangleAttention`` (gate on the hidden-width output,
 applied *before* ``to_out``), not the trimul convention. PYTORCH is the reference;
-the TRITON path reuses the bias-only fusion machinery (layernorm_kernel,
+the PORTABLE path reuses the bias-only fusion machinery (layernorm_kernel,
 fused_gate_out / split, the inference LN+proj concat, and the per-GPU dispatch).
 """
 
@@ -62,7 +62,7 @@ class BidirectionalTriangleAttention(nn.Module):
         implementation: ImplementationType = ImplementationType.PYTORCH,
     ) -> None:
         super().__init__()
-        # 'miniworld' (auto) -> the TRITON family (fused bidir attention kernels).
+        # 'miniworld' (auto) -> the PORTABLE family (fused bidir attention kernels).
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_attention(self.implementation)
         self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
@@ -90,7 +90,7 @@ class BidirectionalTriangleAttention(nn.Module):
 
     # ── shared machinery (bias-only fusion, reused from TriangleAttention) ──────────
     def _layernorm(self, pair: torch.Tensor, backend: KernelBackend) -> torch.Tensor:
-        if backend == KernelBackend.TRITON and _bo_dispatch.use_kernels(
+        if backend == KernelBackend.PORTABLE and _bo_dispatch.use_kernels(
             pair.shape[1]
         ):
             return kernels.layernorm_kernel(
@@ -150,9 +150,9 @@ class BidirectionalTriangleAttention(nn.Module):
         backend: KernelBackend,
     ) -> torch.Tensor:
         """One-direction (starting-frame) triangle self-attention: q,k,v [B,H,L,L,D],
-        bias [B,H,L,L] -> out [B,H,L,L,D]. PYTORCH = the reference einsum; TRITON reuses the
+        bias [B,H,L,L] -> out [B,H,L,L,D]. PYTORCH = the reference einsum; PORTABLE reuses the
         single-direction fused kernel (consumes strided q/k/v; bias made contiguous inside)."""
-        if backend == KernelBackend.TRITON:
+        if backend == KernelBackend.PORTABLE:
             return kernels.triton_triangle_attention_pair_bias(q, k, v, bias)
         scale = q.shape[-1] ** -0.5
         attn = torch.einsum("bhijd,bhikd->bhijk", q * scale, k)
@@ -171,11 +171,11 @@ class BidirectionalTriangleAttention(nn.Module):
         (identical to what the single-dir module does via `rearrange(pair, "B I J D -> B J I D")`,
         but expressed on the already-projected tensors so the input pair is never transposed).
 
-        TRITON routes through the fused ``bidir_triangle_attention_pair_bias`` Function: both
+        PORTABLE routes through the fused ``bidir_triangle_attention_pair_bias`` Function: both
         directions run the v7 kernels writing straight into a shared concat buffer (no
         transpose/cat/split materialization). PYTORCH below is the reference einsum."""
         H = self.n_head
-        if backend == KernelBackend.TRITON:
+        if backend == KernelBackend.PORTABLE:
             from miniworld_engine.kernels.triangle_attention.triton.bidirectional import (
                 bidir_triangle_attention_pair_bias,
             )
@@ -250,7 +250,7 @@ class BidirectionalTriangleAttention(nn.Module):
         )
         no_triton = False
         if (
-            backend == KernelBackend.TRITON
+            backend == KernelBackend.PORTABLE
             and self.implementation == ImplementationType.MINIWORLD
             and _dispatch.restricted_card(pair.device)
         ):
@@ -271,7 +271,7 @@ class BidirectionalTriangleAttention(nn.Module):
                     out = self._attend(self.to_value(pln), self.to_bias(pln), mask)
                 return pair + self.to_out(sigmoid_gate(self.to_gate(pln), out))
 
-        if backend == KernelBackend.TRITON:
+        if backend == KernelBackend.PORTABLE:
             # Inference max-fusion (LN folded into the projections), gated like the
             # single-dir path: needs L past the kernel crossover and the concat
             # projection narrow enough to stay tensor-core-friendly. Bias-only only

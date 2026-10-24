@@ -17,7 +17,7 @@ running max, no rescale.
 
 Both paths run **hand-written CUDA and cuBLAS only** (no Triton, no quack), bf16 -- or fp32 on TF32 tensor cores (an fp32 block:
 fp32 inputs and weights, no CUDA autocast; see [fp32 path](#fp32-path-tf32)) -- B == 1, L a multiple of 128 up to 768, a key
-mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD or TRITON. Everything else -- other cards, other widths, fp32
+mask [1, L] or none, LayerNorm eps 1e-5, implementation MINIWORLD. Everything else -- other cards, other widths, fp32
 under autocast or with bf16 weights -- runs the module's PyTorch composition. Each integration's `serves()` is the whole gate.
 
 - **Inference** (no autograd): `BiasOnlyDiTBlock.forward` -> `integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`

@@ -30,7 +30,7 @@ BF = torch.bfloat16
 def policy():
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("B200 (sm_100) required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         yield
     finally:

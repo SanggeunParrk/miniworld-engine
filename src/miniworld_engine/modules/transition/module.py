@@ -22,7 +22,7 @@ def _fused_sm90a_enabled() -> bool:
 
     return (
         settings.current().transition_fused_sm90a
-        and (not settings.current().force_triton_kernels)
+        and (not settings.current().force_portable_kernels)
     )
 
 
@@ -32,7 +32,7 @@ def _fused_sm100a_enabled() -> bool:
     Default on; settings.transition_fused_sm100a=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return (not settings.current().force_triton_kernels)
+    return (not settings.current().force_portable_kernels)
 
 
 def _fused_sm80_enabled() -> bool:
@@ -40,7 +40,7 @@ def _fused_sm80_enabled() -> bool:
     (training step ~1.44x the Triton residual path).  Default on; settings.transition_fused_sm80=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return (not settings.current().force_triton_kernels)
+    return (not settings.current().force_portable_kernels)
 
 
 @contextmanager
@@ -79,7 +79,7 @@ class Transition(nn.Module):
         self.n = n
         # Every backend returns x + transition(x); the residual is folded into the squeeze
         # epilogue and the input-LN backward. No dropout in this module.
-        # 'miniworld' (ours, auto) resolves to the TRITON family: the hand-CUDA sm_90 kernels
+        # 'miniworld' (ours, auto) resolves to the PORTABLE family: the hand-CUDA sm_90 kernels
         # (fused_sm90a at d=128, fused_wide_sm90a at d=64/256/384/512, n=4 and n=2, bf16, whole 128-row tiles; fused_generic_sm90a
         # for any other d (multiple of 64), hidden (multiple of 128), ragged rows, and fp32 on TF32) where they
         # apply, else the shape-general Triton residual path. Transition has NO cuequivariance
@@ -144,7 +144,7 @@ class Transition(nn.Module):
         backend = _dispatch.guard_dtype(_dispatch.call_backend(self, self._backend, x), x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
-        # TRITON / CUDA / CUEQUIVARIANCE(->PYTORCH above): one residual-fused path, which
+        # PORTABLE / CUDA / CUEQUIVARIANCE(->PYTORCH above): one residual-fused path, which
         # picks the hand-CUDA kernel where it applies and the Triton kernel everywhere else.
         return self._residual_forward(x)
 
@@ -161,12 +161,12 @@ class Transition(nn.Module):
             and self.d_hidden == 128
             and self.n == 4
             and settings.current().transition_fused_sm80
-            and not settings.current().force_triton_kernels
+            and not settings.current().force_portable_kernels
         )
 
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
         # H100 / B200 have no Triton fallback: a MINIWORLD call no CUDA path serves runs the PyTorch reference. An explicit
-        # force_triton_kernels=True (or settings.triton_on_hopper_blackwell) is a comparison run and keeps Triton (as for TriMul).
+        # force_portable_kernels=True (or settings.portable_on_hopper_blackwell) is a comparison run and keeps Triton (as for TriMul).
         return (
             self.implementation == ImplementationType.MINIWORLD
             and x.is_cuda

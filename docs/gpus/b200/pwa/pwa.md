@@ -10,7 +10,7 @@ kernels: `integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one exte
 
 Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), N (length) a multiple of 128 up
 to 1024 and S (MSA depth) a multiple of 128, inference and training alike. The MSA residual and the module's row-broadcast dropout
-(`drop_msa`, training) are applied in the gate / out-projection pass. Every other call runs the portable Triton path.
+(`drop_msa`, training) are applied in the gate / out-projection pass. Every other call runs the portable portable path.
 
 Design notes:
 - The contractions o = w · v and dv = wᵀ · do run on cuBLAS `bmm`: 5-15 % faster than a tcgen05 kernel of ours at L256-1024,

@@ -27,7 +27,7 @@ OTHER = "NVIDIA A40"                # same capability, never recorded
 @pytest.fixture(autouse=True)
 def _clean():
     previous = settings.current()
-    settings.configure(force_triton_kernels=False, triton_on_hopper_blackwell=False, b200_engine_triton=False, trimul_impl=None,
+    settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False, b200_portable_kernels=False, trimul_impl=None,
                        capture=False)
     for cache in (dispatch._card_cache, dispatch._unrecorded_warned, dispatch._refused_warned):
         cache.clear()

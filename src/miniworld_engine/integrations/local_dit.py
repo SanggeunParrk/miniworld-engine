@@ -18,7 +18,7 @@ depend on what the attention attends to. The attention and the pair bias are ``s
 the trunked pair ``[nwin, 32, 128, 16]`` (bias ``LN(z) Wb`` per window, shared by the samples), no N x N tensor anywhere.
 Both residuals are inside post_fwd (the block returns the stream).
 
-``serves()`` is the whole gate: B200, the engine's kernel backend (implementation MINIWORLD or TRITON), bf16 single / cond / pair,
+``serves()`` is the whole gate: B200, the engine's kernel backend (implementation MINIWORLD), bf16 single / cond / pair,
 the atom widths (d_single = d_cond = 128, 4 heads x 32, d_pair = 16, transition n = 2, no QK-norm), B == 1, any N, a [B, N] bool key
 mask or none, LayerNorm eps 1e-5. N is padded to a multiple of 128 for the row kernels (zero single / cond rows, the padded atoms
 masked as keys, the pair padded with zero windows) and the first N rows come back. ``settings.local_dit_sm100=0`` turns it off. A
@@ -358,13 +358,13 @@ def serves(module, single, cond, pair, mask, rope=None) -> bool:
     if (
         (_FAILED32 if fp32 else _FAILED)
         or (not settings.current().local_dit_sm100)
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
 
     a, tr = module.attention, module.transition
-    if a._backend != KernelBackend.TRITON or a.use_qk_norm:
+    if a._backend != KernelBackend.PORTABLE or a.use_qk_norm:
         return False
     cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
     if cap != (10, 0):
@@ -449,7 +449,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
 
     a, tr = module.attention, module.transition
     if (
-        a._backend != KernelBackend.TRITON
+        a._backend != KernelBackend.PORTABLE
         or not torch.is_grad_enabled()
         or not single.is_cuda
         or torch.cuda.get_device_capability(single.device) != (9, 0)
@@ -465,7 +465,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
                 f"H100 local atom DiT training requires {detail}; no composed fallback"
             )
 
-    require(not settings.current().force_triton_kernels, "the CUDA engine backend")
+    require(not settings.current().force_portable_kernels, "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )
@@ -550,7 +550,7 @@ def _require_hopper_inference(module, single, cond, pair, mask):
 
     a, tr = module.attention, module.transition
     if (
-        a._backend != KernelBackend.TRITON
+        a._backend != KernelBackend.PORTABLE
         or torch.is_grad_enabled()
         or not single.is_cuda
     ):
@@ -564,7 +564,7 @@ def _require_hopper_inference(module, single, cond, pair, mask):
                 f"H100 local atom DiT inference requires {detail}; no composed fallback"
             )
 
-    require(not settings.current().force_triton_kernels, "the CUDA engine backend")
+    require(not settings.current().force_portable_kernels, "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )

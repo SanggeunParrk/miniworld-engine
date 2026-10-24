@@ -3,7 +3,7 @@
 Kernel-level status of the Transition (`modules.Transition`, `y = x + W_s(silu(W_a·LN(x)) · (W_b·LN(x)))`, hidden n·D) on H100; the
 module-level summary is in [h100.md](../h100.md), the dispatch contract in [dispatch.md](../dispatch.md). H100 = hand-written CUDA
 (wgmma + TMA + mbarrier, accumulators in registers; sm_90a has no TMEM, so nothing here is a port of the sm_100 kernels); a shape without
-a CUDA path is 미구현 and runs the PyTorch reference (no Triton fallback on H100, see [dispatch.md](../dispatch.md)).
+a CUDA path is 미구현 and runs the PyTorch reference (no portable-kernel fallback on H100, see [dispatch.md](../dispatch.md)).
 
 Coverage (`Transition(d, n)` through the module, `ops.transition`, the whole-op wrapper; training = forward saving what the backward needs +
 backward; inference = forward saving nothing):
@@ -120,12 +120,12 @@ floor ~0.6 ms.
 `tests/gpu/any/test_transition_generic_sm90a_gpu.py` (2026-10-14: `-k transition` over the GPU test directories of that time, 429 passed; the 6 failures are `test_conditioned_transition_precision_gpu` and fail identically on origin/main):
 
 * output and all six gradients against a float64 PyTorch reference: bf16 relative error 2.3e-3 (out), 2.6e-3 (dx), 2.5 - 3.5e-3 (dgamma, dbeta, dW) on
-  every shape - the same as the Triton path's own error; TF32 2.9e-4 / 4.4e-4 / 5 - 7e-4 (torch's own TF32 reference: 2.9e-4 / 3.7e-4 / 5 - 5.5e-4);
+  every shape - the same as the portable path's own error; TF32 2.9e-4 / 4.4e-4 / 5 - 7e-4 (torch's own TF32 reference: 2.9e-4 / 3.7e-4 / 5 - 5.5e-4);
   tolerances in the tests: 8e-3 bf16, 4e-3 fp32;
 * shapes: M = 1 ... 1000 ragged, D = 64 ... 1024 (incl. 192 / 320 / 576), n = 2 / 3 / 4, 4-D activations, the module path with its parameters;
 * bitwise: replay of forward + backward identical (tuned D64 / 128 / 256 and generic at every width), the no-grad forward equals the training forward,
   CUDA-graph capture + replay identical to eager;
-* module: `Transition(d, n)` enters the expected path (spies on the three entry points), is no less accurate than the Triton path (≤ 1.6x its error against float64),
+* module: `Transition(d, n)` enters the expected path (spies on the three entry points), is no less accurate than the portable path (≤ 1.6x its error against float64),
   fp32 enters the generic kernels only with TF32 on, `torch.compile(fullgraph=True)` forward + backward matches eager.
 
 ## Measurements (2026-10-15)

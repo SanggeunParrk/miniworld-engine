@@ -21,7 +21,7 @@ pytestmark = [
 def policy():
     if torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
         pytest.skip("Hopper (sm_90) or Blackwell (sm_100) required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         yield
     finally:

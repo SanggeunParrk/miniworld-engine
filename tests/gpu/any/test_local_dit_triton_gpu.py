@@ -17,10 +17,10 @@ PROTENIX = {"cross_attention": True, "kv_norm": "chained", "key_window": "pad"}
 
 @pytest.fixture(autouse=True)
 def _triton_everywhere():
-    """``force_triton_kernels=True``: the portable legs run on every card, H100 / B200 included (their CUDA paths are switched off)."""
-    previous = settings.configure(force_triton_kernels=True)
+    """``force_portable_kernels=True``: the portable legs run on every card, H100 / B200 included (their CUDA paths are switched off)."""
+    previous = settings.configure(force_portable_kernels=True)
     yield
-    settings.configure(force_triton_kernels=previous.force_triton_kernels)
+    settings.configure(force_portable_kernels=previous.force_portable_kernels)
 
 
 def _block(impl, options):

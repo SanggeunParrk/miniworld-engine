@@ -183,17 +183,17 @@ class TriangleMultiplication(nn.Module):
             if backend == KernelBackend.CUEQUIVARIANCE:
                 return _r(self._forward_cuequivariance(pair, mask))
 
-            if no_triton and backend in (KernelBackend.TRITON, KernelBackend.CUDA):
+            if no_triton and backend in (KernelBackend.PORTABLE, KernelBackend.CUDA):
                 backend = KernelBackend.PYTORCH
-            if backend == KernelBackend.TRITON and self.d_hidden != pair.shape[-1] and pair.is_cuda:
+            if backend == KernelBackend.PORTABLE and self.d_hidden != pair.shape[-1] and pair.is_cuda:
                 # the Triton front produces per-side width d_pair: a wider or narrower hidden (Protenix's template TriMul, pair 64 /
                 # hidden 128) is a refusal, not an error
                 _dispatch.warn_refused(
                     "triangle_multiplication", pair.device,
-                    f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the Triton TriMul needs d_hidden == d_pair",
+                    f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the portable TriMul needs d_hidden == d_pair",
                 )
                 backend = KernelBackend.PYTORCH
-            if backend == KernelBackend.TRITON:
+            if backend == KernelBackend.PORTABLE:
                 # Fused BDLL pipeline: LN_in -> gated BDLL front (transposed store, no permute) -> ONE
                 # bmm contraction -> fused output stages. BF16 training uses
                 # LN_out + F567; inference also folds LN_out into the back kernel.
@@ -233,7 +233,7 @@ class TriangleMultiplication(nn.Module):
         mask: torch.Tensor | None,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """TRITON single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
+        """PORTABLE single-direction path (fwd + autograd bwd) — the fused BDLL pipeline
         (LN_in -> gated BDLL front -> ONE bmm contraction -> fused output stages).
         BF16 training shares F567 and the two backward fusions with bidirectional
         TriMul. The front emits left/right in channel-major BDLL directly (transposed

@@ -279,7 +279,7 @@ def _run(module, x, dy, *, fused):
 
     mod = copy.deepcopy(module)
     settings.configure(
-        force_triton_kernels=not fused, transition_fused_sm90a=fused
+        force_portable_kernels=not fused, transition_fused_sm90a=fused
     )
     xx = x.clone().requires_grad_()
     y = mod(xx)

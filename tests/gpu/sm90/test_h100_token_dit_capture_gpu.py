@@ -122,7 +122,7 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
 def test_h100_preserves_per_sample_conditioning(dtype):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         _check_per_sample_conditioning(dtype)
     finally:
@@ -134,7 +134,7 @@ def test_h100_preserves_per_sample_conditioning(dtype):
 def test_token_replay_uses_updated_weights_and_inputs(dtype, training):
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         torch.manual_seed(23)
         model = _randomize(

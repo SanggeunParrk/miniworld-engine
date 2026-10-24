@@ -200,17 +200,16 @@ class Settings:
     #: Inference LN+proj concat fusion (layernorm_linear).
     pin_infer_concat: bool | None = None
 
-    #: Internal A/B switch (formerly ``engine_backend="triton"``): run the engine's Triton kernel family everywhere, on every
-    #: card, and switch every ``*_cuda`` stage off. NOT a public backend -- ``implementation`` is pytorch / miniworld /
-    #: cuequivariance / anthropic -- and not a production setting: it is how a Triton cache is built and how the Triton
-    #: kernels are compared against the CUDA path. Without it ``miniworld`` routes per card (``modules.dispatch``,
-    #: ``docs/dispatch.md``). Configure before constructing models.
-    force_triton_kernels: bool = False
-    #: H100 (sm_90) and B200 (sm_100) have no Triton fallback, on purpose: those cards run hand-written CUDA (plus cuBLAS), and a call
-    #: no CUDA path serves runs the PyTorch reference instead of an untuned Triton kernel (`modules.dispatch.restricted_card`). True
-    #: brings the engine's Triton kernels back on those cards for A/B work and cache builds; `force_triton_kernels` does the same.
-    #: Other cards are unaffected (see `force_triton_kernels` and `autotune.records` for how they route).
-    triton_on_hopper_blackwell: bool = False
+    #: Internal A/B switch: run the engine's portable kernel family everywhere, on every card, and switch every ``*_cuda`` stage
+    #: off. NOT a backend -- ``implementation`` is pytorch / miniworld / cuequivariance / anthropic -- and not a production
+    #: setting: it is how a portable-kernel cache is built and how the portable kernels are compared against the native CUDA
+    #: path. Without it ``miniworld`` routes per card (``modules.dispatch``, ``docs/dispatch.md``). Configure before constructing models.
+    force_portable_kernels: bool = False
+    #: H100 (sm_90) and B200 (sm_100) have no portable-kernel fallback, on purpose: those cards run hand-written CUDA (plus cuBLAS), and a call
+    #: no CUDA path serves runs the PyTorch reference instead of an untuned portable kernel (`modules.dispatch.restricted_card`). True
+    #: brings the engine's portable kernels back on those cards for A/B work and cache builds; `force_portable_kernels` does the same.
+    #: Other cards are unaffected (see `force_portable_kernels` and `autotune.records` for how they route).
+    portable_on_hopper_blackwell: bool = False
     #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
     #: own fused path (h100_d64_b200gate).
     trimul_h100_training_widths: tuple[int, ...] = (64, 128, 256, 384, 512)
@@ -264,19 +263,19 @@ class Settings:
     layernorm_out_bwd_path: str | None = None
 
     # ---- triangle-multiplication backend selection ----------------------------------------- #
-    #: Override the trimul implementation choice. Formerly MINIWORLD_TRIMUL_IMPL.
+    #: Pin the TriMul route for A/B work: "portable", "native" or "pytorch" (None = ``miniworld`` decides per card). Formerly MINIWORLD_TRIMUL_IMPL.
     trimul_impl: str | None = None
 
     # ---- SWA atom DiT fused block (kernels/swa_dit) ----------------------------------------- #
     # Moved from team-gm (commit 14f2c73), whose environment switches these replace one for one, with the same
-    # defaults. `force_triton_kernels` turns every *_cuda stage off as well.
+    # defaults. `force_portable_kernels` turns every *_cuda stage off as well.
     #: Let `modules.swa_dit.SWADiTBlock` (implementation other than pytorch) run the fused block when
     #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
     #: off keeps the per-op path. Formerly team-gm's opt-in MINIWORLD_SWA_FUSED on SWAAtomTransformer.
     swa_dit_fused: bool = True
-    #: B200 only: keep the engine's hand-written Triton norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
-    #: PyTorch ops that `torch.compile` fuses (the default on B200: no hand-written Triton on that card). Other cards are unaffected.
-    b200_engine_triton: bool = False
+    #: B200 only: keep the engine's portable norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
+    #: PyTorch ops that `torch.compile` fuses (the default on B200: no portable kernels on that card). Other cards are unaffected.
+    b200_portable_kernels: bool = False
     #: Compute the 3D RoPE angles of `modules.swa_atom_attention.build_3d_rope` the way engines before 2026-10-06 did: with
     #: einsums, which under autocast run as bf16 matmuls. The angles are then wrong (UID rotations off by up to a whole turn at
     #: ids in the thousands), and a model TRAINED that way has adapted to them: the v2.0.0 phase 2a checkpoint (trained with engine
@@ -545,11 +544,6 @@ class Settings:
     #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
     trimul_h100_preserve_widths: frozenset[int] = frozenset()
 
-    @property
-    def engine_backend(self) -> Literal["auto", "triton"]:
-        """Deprecated read-only view of :attr:`force_triton_kernels` (``"triton"`` when set); removed in the next minor release."""
-        return "triton" if self.force_triton_kernels else "auto"
-
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
         return kernel in self.autotune_kernels
@@ -594,6 +588,17 @@ def _compile_wrap_from_env() -> Literal["disable", "custom_op"]:
     raise ValueError(msg)
 
 
+#: Settings removed in 2.3.12 -> the setting that replaced them ("" when the switch was removed). ``configure`` names the new one.
+_REMOVED_SETTINGS = {
+    "force_triton_kernels": "force_portable_kernels",
+    "triton_on_hopper_blackwell": "portable_on_hopper_blackwell",
+    "b200_engine_triton": "b200_portable_kernels",
+    "engine_backend": "force_portable_kernels",
+}
+
+#: Values of ``Settings.trimul_impl``.
+TRIMUL_ROUTES = ("portable", "native", "pytorch", "cuequivariance", "anthropic")
+
 _ACTIVE = Settings(compile_wrap=_compile_wrap_from_env())
 
 
@@ -606,22 +611,22 @@ def configure(**kwargs) -> Settings:
     """Replace the active settings; returns the previous value so a caller can restore it."""
     global _ACTIVE
     previous = _ACTIVE
-    if "engine_backend" in kwargs:
-        # Deprecated spelling of force_triton_kernels (one release): "triton" -> True, "auto" -> False.
-        backend = kwargs.pop("engine_backend")
-        if backend not in ("auto", "triton"):
-            raise ValueError(f"engine_backend={backend!r}: use 'auto' or 'triton' (deprecated; use force_triton_kernels)")
-        warnings.warn(
-            "settings.engine_backend is deprecated; use settings.force_triton_kernels=True (A/B switch) or False. "
-            "The alias is removed in the next minor release.",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        kwargs.setdefault("force_triton_kernels", backend == "triton")
     fields = {f.name for f in dataclasses.fields(Settings)}
     unknown = set(kwargs) - fields
     if unknown:
-        raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}")
+        hints = []
+        for name in sorted(unknown):
+            if name in _REMOVED_SETTINGS:
+                new = _REMOVED_SETTINGS[name]
+                hints.append(f"{name!r} was removed in 2.3.12; " + (f"use {new!r}" if new else "it has no replacement"))
+        suffix = ("; " + "; ".join(hints)) if hints else ""
+        raise TypeError(f"unknown setting(s): {', '.join(sorted(unknown))}{suffix}")
+    route = kwargs.get("trimul_impl")
+    if route is not None and route not in TRIMUL_ROUTES:
+        raise ValueError(
+            f"trimul_impl={route!r} is not a TriMul route; use one of {', '.join(repr(r) for r in TRIMUL_ROUTES)} "
+            "(or None: `miniworld` routes per card automatically, see docs/dispatch.md)"
+        )
     if "autotune_kernels" in kwargs and kwargs["autotune_kernels"] is not None:
         names = frozenset(kwargs["autotune_kernels"])
         known = frozenset(get_args(AutotuneKernel))

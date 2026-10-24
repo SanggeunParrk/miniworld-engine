@@ -56,7 +56,7 @@ def native_policy():
         pytest.skip("Hopper required")
     if torch.cuda.get_device_properties(0).multi_processor_count != 132:
         pytest.skip("full H100 required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     torch.compiler.reset()
     yield
     settings.configure(**vars(old))

@@ -4,7 +4,7 @@
 The RTX A5000 / A6000 (GA102 = `sm_86`) are **triton-only** targets, exactly like the
 A100 (`sm_80`): every hand-CUDA path is gated behind `sm_90`
 (`torch.cuda.get_device_capability()[0] < 9`), so `MINIWORLD` resolves to the portable
-Triton family — no dispatch change. They live on the `cssb-master` cluster
+portable kernel family — no dispatch change. They live on the `cssb-master` cluster
 (`partition=gpu`, `qos=normal`, A5000=`gpu02`/24 GB, A6000=`gpu01,03-05`/48 GB), which is
 separate from the A100/H100/B200 cluster. One parameterized launcher per bench type covers
 both cards (pick the card with `--gres`; the script auto-detects it and asserts `sm_86`):

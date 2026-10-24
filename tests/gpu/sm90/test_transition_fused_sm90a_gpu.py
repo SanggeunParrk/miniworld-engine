@@ -130,7 +130,7 @@ def _run(module, x, dy, *, fused, fp32=False):
         mod = mod.float()
         x, dy = x.float(), dy.float()
     settings.configure(
-        force_triton_kernels=not fused, transition_fused_sm90a=fused
+        force_portable_kernels=not fused, transition_fused_sm90a=fused
     )
     xx = x.clone().requires_grad_()
     y = mod(xx)
@@ -255,7 +255,7 @@ def test_persistent_input_refill_graph(monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_triton_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
     module, x, dy = _build((1, 384, 384, 128))
     with torch.no_grad():
         module.ln_in.weight.copy_(1 + 0.2 * torch.randn_like(module.ln_in.weight))

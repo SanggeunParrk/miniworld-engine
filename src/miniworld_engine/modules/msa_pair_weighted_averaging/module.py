@@ -135,14 +135,14 @@ class MSAPairWeightedAveraging(nn.Module):
             if _anthropic.serves_pwa(msa, *_dims, **_fused):
                 return msa + _anthropic.pair_weighted_averaging(self, msa, pair, mask)
         # The portable Triton path (kernels.pair_weighted_averaging) for every call the native paths above did not take:
-        # other GPUs with a record (dispatch.resolve), other widths, force_triton_kernels. The residual and the row dropout are
+        # other GPUs with a record (dispatch.resolve), other widths, force_portable_kernels. The residual and the row dropout are
         # fused into it; the keep-mask is drawn here exactly as Dropout(broadcast_dim=1) draws it. A card without a record
         # resolves to PYTORCH there (one warning); H100 / B200 take the PyTorch statements below.
         if (
             self.implementation == ImplementationType.MINIWORLD
             and resolve("msa_pair_weighted_averaging", self.implementation, msa.device,
-                        training=_dispatch.needs_backward(self, msa, pair)) == KernelBackend.TRITON
-            and _dispatch.triton_leg_allowed(msa.device)
+                        training=_dispatch.needs_backward(self, msa, pair)) == KernelBackend.PORTABLE
+            and _dispatch.portable_leg_allowed(msa.device)
         ):
             from miniworld_engine.kernels.pair_weighted_averaging.interface import (
                 refusal,

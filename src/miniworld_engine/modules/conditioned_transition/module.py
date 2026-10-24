@@ -16,7 +16,7 @@ the update ``y`` alone. Given the RAW activation ``x_in`` and conditioning ``con
 fp32 weights/activations with TF32 tensor-core matmuls. Two implementations:
 
   - PYTORCH: the readable reference (also the autograd path the kernel is checked against).
-  - TRITON:  inference -> d-aware fused/composed kernel; training -> autograd Function
+  - PORTABLE:  inference -> d-aware fused/composed kernel; training -> autograd Function
              (forward saves the minimum, custom backward).
 """
 
@@ -58,7 +58,7 @@ class ConditionedTransition(nn.Module):
     n : int
         SwiGLU expansion factor (ND = n * d_hidden).
     implementation : ImplementationType
-        PYTORCH (reference) or TRITON (fused/composed inference, custom-bwd training).
+        PYTORCH (reference) or PORTABLE (fused/composed inference, custom-bwd training).
     """
 
     def __init__(
@@ -78,7 +78,7 @@ class ConditionedTransition(nn.Module):
         self.d_cond = d_cond
         self.n = n
         self.implementation = ImplementationType(implementation)
-        # 'miniworld' (auto) -> the TRITON fused family (inference d_hidden
+        # 'miniworld' (auto) -> the PORTABLE fused family (inference d_hidden
         # sub-dispatch lives in the kernel); CUEQUIVARIANCE shares that path.
         self._backend = resolve_conditioned_transition(self.implementation)
         self._train_gate = train_gate("conditioned_transition", self.implementation, self._backend)
@@ -149,7 +149,7 @@ class ConditionedTransition(nn.Module):
         if backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)
 
-        if backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
+        if backend in {KernelBackend.PORTABLE, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]
             # L for the autotune shape key, read HERE because this is the last place that has it:
             # `x` is still (..., A, d), so `length_of` gives the ATOM count A. After the reshape

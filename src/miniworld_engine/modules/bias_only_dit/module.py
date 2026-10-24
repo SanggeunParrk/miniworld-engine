@@ -12,7 +12,7 @@ nor the single representation, only on the pair -- ONE softmax serves every augm
 solver step, since the pair carries no noise level. The fast path is therefore a different algorithm (hoisted weights and
 a GEMM per head), not the flash-attention core with an argument switched off.
 
-``implementation=PYTORCH`` is the reference. ``MINIWORLD`` / ``TRITON`` (the engine's kernels) take, on B200 in bf16 (or in
+``implementation=PYTORCH`` is the reference. ``MINIWORLD`` / ``PORTABLE`` (the engine's kernels) take, on B200 in bf16 (or in
 fp32 on TF32 tensor cores: an fp32 block with fp32 inputs, no autocast),
 ``integrations.bias_only_dit`` without autograd and ``integrations.bias_only_dit_train`` with it (CUDA and cuBLAS only), and
 the reference composition everywhere else (the parts are built on the PyTorch reference, so no other backend runs).

@@ -32,11 +32,11 @@ class SwiGLUFFN(nn.Module):
         self.w_down = Linear(hidden, d_model, bias=False, init="normal")
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        from miniworld_engine.modules.dispatch import needs_backward, triton_leg_allowed
+        from miniworld_engine.modules.dispatch import needs_backward, portable_leg_allowed
 
         # H100 / B200 have no Triton fallback, and a card without a record has none either: the PyTorch statements below run there
         if self.implementation != ImplementationType.PYTORCH and not (
-            x.is_cuda and not triton_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x))
+            x.is_cuda and not portable_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x))
         ):
             from miniworld_engine import ops
 
@@ -110,9 +110,9 @@ class SWADiTBlock(nn.Module):
         if (
             x.is_cuda
             and not _dispatch.restricted_card(x.device)
-            and not _dispatch.triton_leg_allowed(x.device, "swa_dit", training=_dispatch.needs_backward(self, x, cond))
+            and not _dispatch.portable_leg_allowed(x.device, "swa_dit", training=_dispatch.needs_backward(self, x, cond))
         ):
-            return "no record of the Triton kernels on this card (autotune.records)"
+            return "this card is not recorded (autotune.records)"
         if not settings.current().swa_dit_fused:
             from miniworld_engine.kernels.swa_dit.dispatch import native_h100_enabled
 
@@ -197,14 +197,14 @@ class SWADiTBlock(nn.Module):
                 fallback_autocast,
                 needs_backward,
                 restricted_card,
-                triton_leg_allowed,
+                portable_leg_allowed,
             )
 
             if _native_h100_strict(x, native_h100_enabled):
                 raise ValueError(f"native H100 SWA unsupported contract: {refusal}")
             if x.is_cuda and (
                 restricted_card(x.device)
-                or not triton_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x, cond))
+                or not portable_leg_allowed(x.device, "swa_dit", training=needs_backward(self, x, cond))
             ):
                 # H100 / B200 have no Triton fallback, nor has a card without a record: the PyTorch statements below (fp32 masters under bf16 autocast)
                 with fallback_autocast(x, self):

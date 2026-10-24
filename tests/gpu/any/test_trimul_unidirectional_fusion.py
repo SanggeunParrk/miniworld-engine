@@ -5,7 +5,7 @@ import torch
 from miniworld_engine.modules import TriangleMultiplication
 from miniworld_engine.modules.exceptions import ImplementationType
 
-pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_triton")]
+pytestmark = [pytest.mark.gpu, pytest.mark.usefixtures("force_portable")]
 
 
 @pytest.mark.parametrize("outgoing", [True, False])

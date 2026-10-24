@@ -14,7 +14,7 @@ pytestmark = pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA requ
 def implementation(request):
     """`miniworld` as the card routes it, and `miniworld` under the A/B switch (the Triton family on every card; what `triton` was)."""
     if request.param == "forced_triton":
-        request.getfixturevalue("force_triton")
+        request.getfixturevalue("force_portable")
     return "miniworld"
 
 

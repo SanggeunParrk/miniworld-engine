@@ -221,7 +221,7 @@ def trimul_triton(
     d = pair.shape[-1]
     if d_hidden != d:
         raise ValueError(
-            f"TRITON single-direction trimul requires d_hidden == d_pair "
+            f"the portable single-direction trimul requires d_hidden == d_pair "
             f"(got d_hidden={d_hidden}, d_pair={d})."
         )
     # The mask is applied to the contraction inputs (left/right), NOT folded into

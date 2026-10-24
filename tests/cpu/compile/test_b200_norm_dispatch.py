@@ -3,8 +3,8 @@ engine has no Triton fallback on those cards; every other card keeps the engine 
 B200 (the general kernels, ``kernels/layernorm/cuda/general`` and ``kernels/rmsnorm/cuda``); elsewhere LayerNorm stays CUDA and RMSNorm
 Triton.
 
-``settings.triton_on_hopper_blackwell`` (and, on B200 only, the older ``b200_engine_triton``) bring the engine's Triton kernels back
-(the A/B switch), and a strict ``force_triton_kernels=True`` process still wins. No GPU is needed: the card is faked.
+``settings.portable_on_hopper_blackwell`` (and, on B200 only, the older ``b200_portable_kernels``) bring the engine's Triton kernels back
+(the A/B switch), and a strict ``force_portable_kernels=True`` process still wins. No GPU is needed: the card is faked.
 
 Run: ``pixi run python -m pytest tests/cpu/compile/test_b200_norm_dispatch.py -q``
 """
@@ -22,13 +22,13 @@ from miniworld_engine.modules import dispatch
 from miniworld_engine.modules.dispatch import KernelBackend
 
 #: (op, the engine kernel every card but a B200 keeps)
-_NORMS = [("layernorm", KernelBackend.CUDA), ("rmsnorm", KernelBackend.TRITON)]
+_NORMS = [("layernorm", KernelBackend.CUDA), ("rmsnorm", KernelBackend.PORTABLE)]
 
 
 @pytest.fixture(autouse=True)
 def _restore_settings():
     previous = settings.current()
-    settings.configure(force_triton_kernels=False, b200_engine_triton=False)
+    settings.configure(force_portable_kernels=False, b200_portable_kernels=False)
     yield
     settings.configure(**dataclasses.asdict(previous))
 
@@ -41,7 +41,7 @@ def _card(monkeypatch, capability):
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
-@pytest.mark.parametrize(("op", "engine"), [("adaptive_layernorm", KernelBackend.TRITON), ("conditioned_transition", KernelBackend.TRITON)])
+@pytest.mark.parametrize(("op", "engine"), [("adaptive_layernorm", KernelBackend.PORTABLE), ("conditioned_transition", KernelBackend.PORTABLE)])
 def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, capability):
     _card(monkeypatch, capability)
     assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
@@ -75,35 +75,35 @@ def test_without_a_gpu_the_engine_kernel_stays(monkeypatch, op, engine):
 
 
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
-def test_b200_engine_triton_brings_the_engine_kernel_back(monkeypatch, op, engine):
+def test_b200_portable_kernels_brings_the_engine_kernel_back(monkeypatch, op, engine):
     _card(monkeypatch, (10, 0))
-    settings.configure(b200_engine_triton=True)
+    settings.configure(b200_portable_kernels=True)
     assert dispatch.resolve(op, "miniworld") is engine
 
 
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
-def test_triton_on_hopper_blackwell_brings_the_engine_kernel_back(monkeypatch, op, engine):
+def test_portable_on_hopper_blackwell_brings_the_engine_kernel_back(monkeypatch, op, engine):
     for capability in ((9, 0), (10, 0)):
         _card(monkeypatch, capability)
-        settings.configure(triton_on_hopper_blackwell=True)
+        settings.configure(portable_on_hopper_blackwell=True)
         assert dispatch.resolve(op, "miniworld") is engine
-        settings.configure(triton_on_hopper_blackwell=False)
+        settings.configure(portable_on_hopper_blackwell=False)
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
 def test_a_strict_triton_process_still_wins_on_h100_and_b200(monkeypatch, op, engine, capability):
     _card(monkeypatch, capability)
-    settings.configure(force_triton_kernels=True)
-    assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON
+    settings.configure(force_portable_kernels=True)
+    assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE
 
 
 @pytest.mark.parametrize(("op", "engine"), _NORMS)
 def test_an_explicit_backend_is_never_rewritten(monkeypatch, op, engine):
     _card(monkeypatch, (10, 0))
     assert dispatch.resolve(op, "pytorch") is KernelBackend.PYTORCH
-    with pytest.warns(DeprecationWarning, match="deprecated"):     # "triton" is no backend any more: it is read as miniworld, i.e. the CUDA family on B200
-        assert dispatch.resolve(op, "triton") is dispatch.resolve(op, "miniworld")
+    with pytest.raises(ValueError, match="miniworld"):     # "triton" is no value of implementation any more
+        dispatch.resolve(op, "triton")
 
 
 def test_the_pytorch_stand_in_for_rmsnorm_returns_the_input_dtype(monkeypatch):

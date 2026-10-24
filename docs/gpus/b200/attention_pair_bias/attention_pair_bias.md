@@ -7,7 +7,7 @@ Five head layouts are served: 8 x 48 (the registry row), 12 x 32, 16 x 24 (AF3's
 d_single 384, and 16 x 32 at d_single 512.
 
 Summary (2026-10-01). Inference and training in bf16, B = 1, every layout; inference at L % 16 == 0, training at L % 128 ==
-0 (both tested and measured at L128-768). Against the fastest other implementation (`bench.py`, PyTorch compiled / Triton /
+0 (both tested and measured at L128-768). Against the fastest other implementation (`bench.py`, PyTorch compiled / portable kernels /
 cuEquivariance / Anthropic): inference 1.16-1.66x in every layout (Anthropic's shipped module row is the runner-up),
 training with CUDA graphs 1.24-1.90x (cuEquivariance or Triton; Anthropic has no backward). Training without CUDA graphs
 is host-bound: 0.58-1.30x the fastest other row, behind at short lengths (see "Limits and next"). Accuracy matches the

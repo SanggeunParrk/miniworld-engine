@@ -4,7 +4,7 @@ The rule (modules/dispatch.py, autotune/records.py, docs/dispatch.md):
   * H100 / B200: native CUDA, an unserved call runs PyTorch, never Triton, never a warning;
   * every other card: a CUDA path that serves the call; else the Triton family IF the engine has a record for that exact card
     (every Triton kernel of the op has an `ok` manifest row); else one UnrecordedCardWarning per (op, card) and PyTorch;
-  * `settings.force_triton_kernels` (the A/B switch) forces Triton everywhere.
+  * `settings.force_portable_kernels` (the A/B switch) forces Triton everywhere.
 """
 from __future__ import annotations
 
@@ -31,7 +31,7 @@ OPS = ("transition", "triangle_multiplication", "triangle_attention", "adaptive_
 @pytest.fixture(autouse=True)
 def _clean(monkeypatch):
     previous = settings.current()
-    settings.configure(force_triton_kernels=False, triton_on_hopper_blackwell=False, b200_engine_triton=False, trimul_impl=None,
+    settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False, b200_portable_kernels=False, trimul_impl=None,
                        capture=False)
     dispatch._card_cache.clear()
     dispatch._unrecorded_warned.clear()
@@ -64,22 +64,21 @@ def test_the_public_enum_has_exactly_four_members():
     assert not hasattr(ImplementationType, "CUDA")
 
 
-# ---- (v) the deprecated strings --------------------------------------------------------------------------------------
-@pytest.mark.parametrize("old", ["triton", "cuda", "TRITON"])
-def test_the_deprecated_strings_are_miniworld_with_a_warning(old):
-    with pytest.warns(DeprecationWarning, match="deprecated") as caught:
-        assert ImplementationType(old) is ImplementationType.MINIWORLD
-    text = str(caught[0].message)
-    for needle in ("H100", "CUDA path", "settings.force_triton_kernels", "next minor"):
+# ---- (v) the removed strings ----------------------------------------------------------------------------------------
+@pytest.mark.parametrize("old", ["triton", "cuda", "TRITON", "Triton"])
+def test_the_removed_strings_raise_and_list_the_four_valid_values(old):
+    with pytest.raises(ValueError) as caught:
+        ImplementationType(old)
+    text = str(caught.value)
+    for needle in ("pytorch", "miniworld", "cuequivariance", "anthropic", "routes per card automatically", "docs/dispatch.md"):
         assert needle in text, needle
 
 
-def test_a_module_built_with_the_deprecated_string_is_a_miniworld_module():
+def test_a_module_built_with_a_removed_string_raises():
     from miniworld_engine.modules import Transition
 
-    with pytest.warns(DeprecationWarning, match="deprecated"):
-        module = Transition(64, implementation="triton")
-    assert module.implementation is ImplementationType.MINIWORLD
+    with pytest.raises(ValueError, match="miniworld"):
+        Transition(64, implementation="triton")
 
 
 def test_an_unknown_string_is_still_an_error():
@@ -87,15 +86,38 @@ def test_an_unknown_string_is_still_an_error():
         ImplementationType("cutlass")
 
 
-def test_the_old_engine_backend_setting_is_an_alias_of_the_ab_switch():
-    with pytest.warns(DeprecationWarning, match="force_triton_kernels"):
-        settings.configure(engine_backend="triton")
-    assert settings.current().force_triton_kernels
-    assert settings.current().engine_backend == "triton"
-    with pytest.warns(DeprecationWarning, match="engine_backend"):
-        settings.configure(engine_backend="auto")
-    assert not settings.current().force_triton_kernels
-    assert settings.current().engine_backend == "auto"
+@pytest.mark.parametrize(("old", "new"), [
+    ("force_triton_kernels", "force_portable_kernels"),
+    ("triton_on_hopper_blackwell", "portable_on_hopper_blackwell"),
+    ("b200_engine_triton", "b200_portable_kernels"),
+    ("engine_backend", "force_portable_kernels"),
+])
+def test_a_removed_setting_is_rejected_with_the_new_name(old, new):
+    with pytest.raises(TypeError) as caught:
+        settings.configure(**{old: True})
+    assert old in str(caught.value) and repr(new) in str(caught.value)
+    assert not hasattr(settings.current(), old)
+
+
+def test_an_unknown_setting_is_rejected():
+    with pytest.raises(TypeError, match="unknown setting"):
+        settings.configure(no_such_setting=1)
+
+
+@pytest.mark.parametrize("old", ["triton", "cuda"])
+def test_trimul_impl_rejects_the_old_values(old):
+    with pytest.raises(ValueError, match="portable"):
+        settings.configure(trimul_impl=old)
+
+
+@pytest.mark.parametrize(("route", "backend"), [("portable", KernelBackend.PORTABLE), ("native", KernelBackend.CUDA),
+                                                ("pytorch", KernelBackend.PYTORCH)])
+def test_trimul_impl_takes_the_neutral_vocabulary(route, backend):
+    previous = settings.configure(trimul_impl=route)
+    try:
+        assert dispatch._trimul_known_best(None) is backend
+    finally:
+        settings.configure(**vars(previous))
 
 
 # ---- (i) a record routes to Triton ------------------------------------------------------------------------------------
@@ -105,8 +127,8 @@ def test_a_recorded_card_routes_to_triton(monkeypatch, manifests):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in OPS:
-            assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON, op
-            assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.TRITON, op
+            assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE, op
+            assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.PORTABLE, op
 
 
 def test_one_missing_failed_or_wrong_dtype_kernel_unrecords_the_op(monkeypatch, manifests):
@@ -134,7 +156,7 @@ def test_an_unrecorded_card_warns_once_per_op_and_runs_pytorch(monkeypatch, mani
     assert results == [KernelBackend.PYTORCH, KernelBackend.PYTORCH]
     assert len(caught) == 1
     text = str(caught[0].message)
-    for needle in ("transition", "Brand New GPU", "sm_89", "run_all", "force_triton_kernels", "Verify", "PyTorch"):
+    for needle in ("transition", "Brand New GPU", "sm_89", "run_all", "force_portable_kernels", "Verify", "PyTorch"):
         assert needle in text, needle
     assert issubclass(UnrecordedCardWarning, UserWarning)
     with pytest.warns(UnrecordedCardWarning, match="triangle_attention"):   # another op on the same card warns on its own
@@ -147,7 +169,7 @@ def test_a_card_with_the_same_capability_and_another_name_is_not_recorded(monkey
     with pytest.warns(UnrecordedCardWarning, match="A40"):
         assert dispatch.resolve("transition", "miniworld") is KernelBackend.PYTORCH
     fake_card(monkeypatch, LONG, (8, 6))
-    assert dispatch.resolve("transition", "miniworld") is KernelBackend.TRITON
+    assert dispatch.resolve("transition", "miniworld") is KernelBackend.PORTABLE
 
 
 def test_the_same_name_at_another_capability_is_not_recorded(monkeypatch, manifests):
@@ -201,13 +223,13 @@ def test_an_inference_record_serves_inference_and_blocks_only_training(monkeypat
     assert not records.recorded("triangle_multiplication", LONG, (8, 6), mode="training")
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert dispatch.resolve("triangle_multiplication", "miniworld") is KernelBackend.TRITON          # the build: inference
+        assert dispatch.resolve("triangle_multiplication", "miniworld") is KernelBackend.PORTABLE          # the build: inference
         module = TriangleMultiplication(64, implementation=ImplementationType.MINIWORLD)
-        assert module._backend is KernelBackend.TRITON
+        assert module._backend is KernelBackend.PORTABLE
         assert module._train_gate is not None
         x = torch.randn(1, 4, 4, 64)
         with torch.no_grad():
-            assert dispatch.call_backend(module, module._backend, x) is KernelBackend.TRITON                # inference call
+            assert dispatch.call_backend(module, module._backend, x) is KernelBackend.PORTABLE                # inference call
     with pytest.warns(UnrecordedCardWarning, match="backward"):
         assert dispatch.call_backend(module.train(), module._backend, x) is KernelBackend.PYTORCH           # training call
     with warnings.catch_warnings():
@@ -215,7 +237,7 @@ def test_an_inference_record_serves_inference_and_blocks_only_training(monkeypat
         assert dispatch.call_backend(module.train(), module._backend, x) is KernelBackend.PYTORCH
     write_manifest(manifests, LONG, (8, 6), ["triangle_multiplication"], training=True)
     records._load.cache_clear()
-    assert dispatch.train_gate("triangle_multiplication", "miniworld", KernelBackend.TRITON) is None
+    assert dispatch.train_gate("triangle_multiplication", "miniworld", KernelBackend.PORTABLE) is None
 
 
 def test_a_card_missing_a_forward_kernel_blocks_inference_too(monkeypatch, manifests):
@@ -229,7 +251,7 @@ def test_a_card_missing_a_forward_kernel_blocks_inference_too(monkeypatch, manif
 def test_per_call_resolvers_ask_for_the_mode(monkeypatch, manifests):
     fake_card(monkeypatch, LONG, (8, 6))
     write_manifest(manifests, LONG, (8, 6), ["outer_product_mean"], training=False)
-    assert dispatch.resolve("outer_product_mean", "miniworld", training=False) is KernelBackend.TRITON
+    assert dispatch.resolve("outer_product_mean", "miniworld", training=False) is KernelBackend.PORTABLE
     with pytest.warns(UnrecordedCardWarning):
         assert dispatch.resolve("outer_product_mean", "miniworld", training=True) is KernelBackend.PYTORCH
 
@@ -239,20 +261,20 @@ def test_ops_entry_points_are_blocked_on_an_unrecorded_card_only(monkeypatch, ma
     x = torch.randn(2, 8)
     dev = fake_card(monkeypatch, "Brand New GPU", (8, 9))
     with pytest.warns(UnrecordedCardWarning, match="transition"):
-        assert dispatch.triton_blocked("transition", dev, x)
+        assert dispatch.portable_blocked("transition", dev, x)
     fake_card(monkeypatch, LONG, (8, 6))
     write_manifest(manifests, LONG, (8, 6), ["transition"])
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert not dispatch.triton_blocked("transition", dev, x)
+        assert not dispatch.portable_blocked("transition", dev, x)
     for name, capability in (("NVIDIA H100 80GB HBM3", (9, 0)), ("NVIDIA B200", (10, 0))):
         fake_card(monkeypatch, name, capability)
         with warnings.catch_warnings():
             warnings.simplefilter("error")
-            assert not dispatch.triton_blocked("transition", dev, x)               # H100 / B200 keep their own rule
+            assert not dispatch.portable_blocked("transition", dev, x)               # H100 / B200 keep their own rule
     fake_card(monkeypatch, "Brand New GPU", (8, 9))
-    settings.configure(force_triton_kernels=True)
-    assert not dispatch.triton_blocked("transition", dev, x)
+    settings.configure(force_portable_kernels=True)
+    assert not dispatch.portable_blocked("transition", dev, x)
 
 
 def test_ops_swiglu_and_layer_norm_run_the_statements_on_an_unrecorded_card(monkeypatch, manifests):
@@ -293,8 +315,8 @@ def test_a_native_cuda_path_needs_no_triton_record(monkeypatch, manifests):
     write_manifest(manifests, "NVIDIA A100 80GB PCIe", (8, 0), ["layernorm"])      # the LayerNorm inside is recorded; Transition's kernels are not
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert Transition(128, n=4, implementation=ImplementationType.MINIWORLD)._backend is KernelBackend.TRITON  # fused sm_80 CUDA
-        assert dispatch.resolve("transition", "miniworld", native_cuda=True) is KernelBackend.TRITON
+        assert Transition(128, n=4, implementation=ImplementationType.MINIWORLD)._backend is KernelBackend.PORTABLE  # fused sm_80 CUDA
+        assert dispatch.resolve("transition", "miniworld", native_cuda=True) is KernelBackend.PORTABLE
     with pytest.warns(UnrecordedCardWarning):      # d = 64: no CUDA kernel, no record
         assert Transition(64, n=4, implementation=ImplementationType.MINIWORLD)._backend is KernelBackend.PYTORCH
 
@@ -304,8 +326,8 @@ def test_a_triton_record_does_not_displace_cuda_on_h100_and_b200(monkeypatch, ma
         fake_card(monkeypatch, name, capability)
         write_manifest(manifests, name, capability, OPS)
         assert dispatch.restricted_card()
-        assert not dispatch.triton_leg_allowed(None, "transition")
-        assert not dispatch.triton_leg_allowed(torch.device("cuda", 0), "triangle_multiplication")
+        assert not dispatch.portable_leg_allowed(None, "transition")
+        assert not dispatch.portable_leg_allowed(torch.device("cuda", 0), "triangle_multiplication")
 
 
 # ---- (iv) H100 / B200 are unchanged -----------------------------------------------------------------------------------
@@ -316,29 +338,29 @@ def test_h100_and_b200_resolve_as_before_and_never_warn(monkeypatch, manifests, 
         warnings.simplefilter("error")
         for op in ("transition", "triangle_multiplication", "triangle_attention", "augmented_attention", "outer_product_mean",
                    "msa_pair_weighted_averaging"):
-            assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON     # the family; the modules take their CUDA / PyTorch leg
+            assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE     # the family; the modules take their CUDA / PyTorch leg
         for op in ("adaptive_layernorm", "conditioned_transition"):
             assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
         assert dispatch.resolve("layernorm", "miniworld") is KernelBackend.CUDA
         assert dispatch.resolve("rmsnorm", "miniworld") is KernelBackend.CUDA
         assert dispatch.restricted_card()
-        assert not dispatch.triton_leg_allowed(None)
-    settings.configure(triton_on_hopper_blackwell=True)
+        assert not dispatch.portable_leg_allowed(None)
+    settings.configure(portable_on_hopper_blackwell=True)
     assert not dispatch.restricted_card()
-    assert dispatch.triton_leg_allowed(None, "transition")
+    assert dispatch.portable_leg_allowed(None, "transition")
 
 
 # ---- (vi) the A/B switch ----------------------------------------------------------------------------------------------
 def test_the_ab_switch_forces_triton_on_any_card_without_a_warning(monkeypatch, manifests):
     fake_card(monkeypatch, "Brand New GPU", (8, 9))
-    settings.configure(force_triton_kernels=True)
+    settings.configure(force_portable_kernels=True)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in OPS:
-            assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON
-        assert dispatch.triton_leg_allowed(None, "swa_dit")
+            assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE
+        assert dispatch.portable_leg_allowed(None, "swa_dit")
     fake_card(monkeypatch, "NVIDIA H100 80GB HBM3", (9, 0))
-    assert dispatch.resolve("adaptive_layernorm", "miniworld") is KernelBackend.TRITON     # as engine_backend="triton" did
+    assert dispatch.resolve("adaptive_layernorm", "miniworld") is KernelBackend.PORTABLE 
     assert not dispatch.restricted_card()
 
 
@@ -347,7 +369,7 @@ def test_an_autotune_build_may_use_triton_on_a_new_card(monkeypatch, manifests):
     settings.configure(capture=True)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        assert dispatch.resolve("transition", "miniworld") is KernelBackend.TRITON
+        assert dispatch.resolve("transition", "miniworld") is KernelBackend.PORTABLE
 
 
 def test_without_a_gpu_the_triton_family_stays(monkeypatch):
@@ -355,8 +377,8 @@ def test_without_a_gpu_the_triton_family_stays(monkeypatch):
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         for op in OPS:
-            assert dispatch.resolve(op, "miniworld") is KernelBackend.TRITON
-        assert dispatch.resolve("transition", "miniworld", torch.device("cpu")) is KernelBackend.TRITON
+            assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE
+        assert dispatch.resolve("transition", "miniworld", torch.device("cpu")) is KernelBackend.PORTABLE
 
 
 # ---- the records themselves -------------------------------------------------------------------------------------------

@@ -72,7 +72,7 @@ def trio(cfg, starting=True, p_drop=0.0):
 def policy():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 (sm_90) required")
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         yield
     finally:

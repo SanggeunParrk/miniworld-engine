@@ -149,7 +149,7 @@ def available(
     except Exception as exc:  # noqa: BLE001
         _BUILD_FAILED = True
         warnings.warn(
-            f"sm100 bf16 augmented attention unavailable, keeping the Triton path: {exc!r}",
+            f"sm100 bf16 augmented attention unavailable, keeping the portable path: {exc!r}",
             RuntimeWarning,
             stacklevel=2,
         )

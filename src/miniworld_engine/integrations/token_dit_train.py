@@ -21,7 +21,7 @@ bf16 (bf16 inputs, or ``compute_dtype=bf16``) or fp32 (fp32 inputs, no ``compute
     kernels, graph-owned cuBLAS workspaces for the qualified buckets, and the caller-gradient hooks (``_native_caller_*``);
   * the residual stream fp32 inside the block, the output in the input's dtype.
 
-``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation TRITON or MINIWORLD), H100 or B200, a
+``serves()`` is the whole gate: autograd on, the engine's kernel backend (implementation MINIWORLD), H100 or B200, a
 bf16 or fp32 input (bf16 operands when the input or ``compute_dtype`` is bf16, else fp32), the token widths (cond 384 / pair
 128 / transition n = 2) at a head layout of LAYOUTS (B200: 16 x 48, 24 x 32, 12 x 64 at d 768, 16 x 64 at d 1024; H100: 16 x 48
 only; bf16 and fp32 alike), B == 1, a key mask of [B, L] or none (``DiTBlock`` hands an [A, B, L] mask shared by the samples
@@ -92,13 +92,13 @@ TRN = (
 def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     if (not settings.current().token_dit_train) or not torch.is_grad_enabled():
         return False
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         return False
     a = module.attention
-    # the engine's kernels (TRITON or MINIWORLD resolve to them), as the sm_90 / sm_100 attention cores gate on
+    # the engine's kernels (MINIWORLD resolve to them), as the sm_90 / sm_100 attention cores gate on
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.TRITON:
+    if a._backend != KernelBackend.PORTABLE:
         return False
     cap = torch.cuda.get_device_capability(single.device) if single.is_cuda else None
     if cap not in ((9, 0), (10, 0)):
@@ -1411,12 +1411,12 @@ def _serves_psb_core(module, single, cond, mask, compute_dtype=None) -> bool:
     and a key mask that is one [1, L] row or a row per sample [A, L]."""
     if not settings.current().token_dit_train:
         return False
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         return False
     a = module.attention
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if a._backend != KernelBackend.TRITON or not single.is_cuda or not _sm90(single.device):
+    if a._backend != KernelBackend.PORTABLE or not single.is_cuda or not _sm90(single.device):
         return False
     if single.dtype not in (BF, torch.float32) or operand_dtype(single, compute_dtype) is torch.float32:
         return False

@@ -2,7 +2,7 @@
 
 Kernel-level status of the TriMul modules on B200; the module-level summary is in
 [b200.md](../b200.md). bf16 only; columns are (Length, Dimension). B200 = CUDA where a
-hand-written sm_100a path exists; a shape without one is 미구현 (Triton path). Figures: one box
+hand-written sm_100a path exists; a shape without one is 미구현 (portable path). Figures: one box
 per kernel, left to right, HBM reads (blue, left) and writes (red, right); generated from
 `figures/trimul.json` by `python -m miniworld_engine.viz.kernel_flow`,
 then converted to PNG (`cairosvg -s 2 -b white`; `rsvg-convert` was not installed in the environment that generated the figures).
@@ -17,7 +17,7 @@ Served when `implementation=miniworld`, bf16 contiguous `[1, L, L, D]` input, `d
 `d_hidden = 2D`: see below), LayerNorm eps 1e-5, compute capability (10, 0), and:
 - inference: L a multiple of 16 (with a dropout scale at D <= 128: a multiple of 128);
 - training: D64 / D128 either direction: L a multiple of 128 (L <= 10240); D256 / D384 / D512: L a multiple of 16.
-Every other shape runs the Triton path.
+Every other shape runs the portable path.
 
 ## Batched samples (D64, B <= 8)
 

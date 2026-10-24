@@ -170,7 +170,7 @@ def missing(op: str, name: str, capability: tuple[int, int], dtype: str = "bf16"
     table does not know has no kernels to vouch for: its only entry is a note naming the op."""
     kernels = triton_kernels(op, dtype, mode)
     if not kernels:
-        return (f"<no Triton kernel of {op!r} declares {dtype}>",)
+        return (f"<no portable kernel of {op!r} declares {dtype}>",)
     rows = _load(card_key(name, capability))
     return tuple(k for k in kernels if rows.get((k, dtype)) != "ok")
 

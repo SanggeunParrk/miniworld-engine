@@ -247,7 +247,7 @@ jobs:
           assert "_StrEnum" in bases, bases          # the fallback class, not enum.StrEnum
           assert issubclass(KernelBackend, str), bases
           # and it has to behave: the whole point of StrEnum is that a member IS its value
-          assert KernelBackend.TRITON == "triton", list(KernelBackend)
+          assert KernelBackend.PORTABLE == "triton", list(KernelBackend)
           print("3.10 fallback exercised:", bases)
           PY
 

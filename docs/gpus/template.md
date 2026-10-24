@@ -73,7 +73,7 @@ Scope, dtype, figure legend, where dispatch lives.
 
 | (Length, Dimension) | (<L>, <D>) | … |
 |---|---|---|
-| implementation | CUDA / Triton | |
+| implementation | CUDA / portable kernels | |
 | 성능 확인 | ✗ | |
 | cache build | ✓ / ✗ | |
 

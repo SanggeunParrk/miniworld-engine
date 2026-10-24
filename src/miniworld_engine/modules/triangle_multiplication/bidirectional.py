@@ -165,21 +165,21 @@ class BidirectionalTriangleMultiplication(nn.Module):
         backend = _dispatch.call_backend(self, self._backend, pair)   # a card recorded for inference only: PyTorch for a training call
         if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
-        if backend == KernelBackend.TRITON and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
+        if backend == KernelBackend.PORTABLE and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
             _dispatch.warn_refused(
                 "triangle_multiplication", pair.device,
-                f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the Triton bidirectional TriMul needs d_hidden == d_pair",
+                f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the portable bidirectional TriMul needs d_hidden == d_pair",
             )
             backend = KernelBackend.PYTORCH
-        if backend == KernelBackend.TRITON and not no_triton:
-            # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
+        if backend == KernelBackend.PORTABLE and not no_triton:
+            # Composed-from-unidirectional PORTABLE path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
             # autograd pieces). See kernels/trimul_inproj/triton/bidirectional.py.
             # residual + row-broadcast dropout are FUSED into the triton gate store
             # (gate_elem epilogue) — no external _r() add.
             return self._forward_triton(pair, mask, _ds)
-        if backend not in (KernelBackend.PYTORCH, KernelBackend.TRITON, KernelBackend.CUDA):
+        if backend not in (KernelBackend.PYTORCH, KernelBackend.PORTABLE, KernelBackend.CUDA):
             raise InvalidImplementationError(self.implementation)
 
         with _dispatch.fallback_autocast(pair, self, no_triton):
@@ -252,7 +252,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         mask: torch.Tensor | None,
         dropscale: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """TRITON bidirectional path (fwd + autograd bwd) — composed from the
+        """PORTABLE bidirectional path (fwd + autograd bwd) — composed from the
         unidirectional triton pieces (per-direction ``triton_tm1`` front + triton
         ``GateElem`` back) plus torch einsum/cat/LayerNorm. Same code path for
         inference and training; every stage is autograd-capable so the backward is

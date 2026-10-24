@@ -100,7 +100,7 @@ Module names are also the benchmark target names; the kernel-level targets are t
 | PyTorch compiled | the module with `implementation=pytorch` under `torch.compile` (the strongest PyTorch); eager only where compile cannot trace the row (state it) | everywhere; training rows of blocks whose compiled backward fails the repeatability check are timed compiled **without** a graph (`cudagraph=disabled`) and marked |
 | cuEquivariance | `cuequivariance_torch` triangle ops | TriMul, TriAttn, APB (read `execution_path` in the CSV for what actually ran; its B200 TriMul kernel route is inference-only) |
 | Anthropic | the uplifting-biomolecular-modeling release's kernels composed into the same block over the same weights (`MINIWORLD_ANTHROPIC_ROOT`) | inference only; TriMul, TriAttn, OPM, PWA, token DiT, local DiT, SWA DiT |
-| engine (Triton / per-op) | what the engine ran before your CUDA path (`+swa_dit_fused=false`, `MINIWORLD_*=0` switches, `settings.force_triton_kernels`) | the "vs the previous path" column |
+| engine (Triton / per-op) | what the engine ran before your CUDA path (`+swa_dit_fused=false`, `MINIWORLD_*=0` switches, `settings.force_portable_kernels`) | the "vs the previous path" column |
 | ours | `implementation=miniworld`: your path through the module, dispatch included | |
 
 The speed-up column is **ours / the fastest of the other columns** at that row.
@@ -131,7 +131,7 @@ speed-up computed from it. Do not mix launch styles inside one table, and note w
 | `mode=inference\|training` | training times forward + backward of every input and parameter |
 | `precision=bf16-mixed\|32` | `bf16-mixed`: fp32 master parameters + bf16 activations under autocast (default policy, section 2); `32`: fp32 (TF32 matmul unless `allow_tf32=false`) |
 | `+param_master=false` | bf16 parameters (module cast to bf16); only for the "bf16 parameters" exception |
-| `implementations=[pytorch,triton,miniworld,cuequivariance,anthropic]` | rows to run; `anthropic` is inference-only (training is an explicit `unsupported` row); run it as its own invocation with `compile=false` |
+| `implementations=[pytorch,portable,miniworld,cuequivariance,anthropic]` | rows to run; `anthropic` is inference-only (training is an explicit `unsupported` row); run it as its own invocation with `compile=false` |
 | `compile=true\|false` | `torch.compile` the module; `false` for paths that cannot be traced (SWA DiT, local DiT) |
 | `cudagraph=auto\|manual\|disabled\|graphed` | `auto` = manual capture for inference; use `manual` for training tables; `graphed` refuses training |
 | `min_seq_len`, `max_seq_len`, `seq_len_step` | token length sweep (atom targets multiply by 8); `sweep_axis=d_pair` with `min_d_pair`... sweeps the width |

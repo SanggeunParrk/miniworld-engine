@@ -59,7 +59,7 @@ LEGACY_STAGES = (
 NEW_STAGES = ("swa_dit_attn_cuda", "swa_dit_oproj_bwd_cuda", "swa_dit_qkvg_bwd_cuda")
 TRITON = dict.fromkeys(LEGACY_STAGES + NEW_STAGES, False)
 CUDA = {
-    "force_triton_kernels": False,
+    "force_portable_kernels": False,
     **dict.fromkeys(LEGACY_STAGES + NEW_STAGES, True),
     "swa_dit_ffn_dw": "mat",
     "swa_dit_rows_impl": "auto",
@@ -245,7 +245,7 @@ def test_each_cuda_stage_agrees_with_the_triton_kernels_it_replaces(stage, a, b,
     dy = torch.randn(a * b, s, C, device=DEV, dtype=BF)
     settings.configure(**TRITON)
     out_t, grads_t = _run(_fused, leaves, dy, cos, sin, seqused, b)
-    settings.configure(**{**TRITON, "force_triton_kernels": False, **ONE_STAGE[stage]})
+    settings.configure(**{**TRITON, "force_portable_kernels": False, **ONE_STAGE[stage]})
     out_c, grads_c = _run(_fused, leaves, dy, cos, sin, seqused, b)
     failures = []
     for name, got, want in [
@@ -665,7 +665,7 @@ def _fp32_path(path: str):
     previous = torch.get_float32_matmul_precision()
     if path == "cuda":
         _needs_fp32_cuda()
-        settings.configure(force_triton_kernels=False, swa_dit_fp32_cuda=True)
+        settings.configure(force_portable_kernels=False, swa_dit_fp32_cuda=True)
         torch.set_float32_matmul_precision("high")
         assert _fp32_cuda(C, HIDDEN, HW, torch.device(DEV)) is not None
     else:

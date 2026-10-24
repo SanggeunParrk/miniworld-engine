@@ -10,8 +10,8 @@ Length is the atom count S. The module-level summary is in [b200.md](../b200.md)
 development build of these kernels (not shipped), unchanged, built on first use by the newest nvcc on the machine that knows
 sm_100a: 13.1 for the measurements below). The engine's fused block (`kernels/swa_dit/dispatch.py`, which `SWADiTBlock` takes) runs every stage on them on
 B200 in bf16 at the served widths, and the hoisted modulation (`swa_dit_hoist_modulation`) on `mod_fwd` / `mod_bwd`;
-`settings.swa_dit_sm100=0` keeps the Triton path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
-gradient against the fp32 reference (no worse than the Triton path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
+`settings.swa_dit_sm100=0` keeps the portable path. `tests/integrations/test_b200_swa_dit_gpu.py` checks the output and every
+gradient against the fp32 reference (no worse than the portable path: worst ratio 1.006; inference 2.4-2.6e-3, as Triton) at
 A = 1 / 3 / 5 / 8 / 48. The Measurements section below is the engine through the benchmark harness; the kernel tables (CUDA / ✓ / △ / ✗) and the speed-of-light section were
 taken in the standalone development build (not shipped) on the same sources, and "CUDA" in the kernel tables means the kernel ran at that shape there.
 
@@ -169,7 +169,7 @@ bulk shared::cluster copies, summed in rank order.
   (the sm_100a kernels). cuEquivariance has no such block. `compile=true` fails for ours in Dynamo on `sys.audit`, so ours is
   timed without `torch.compile` (as the other non-compiled rows).
 - Accuracy against the fp64 block (A8 S1024, standalone development build): ours output 2.58e-3, dq 2.78e-3, dc 4.60-4.62e-3, worst
-  weight gradient 7.4-7.6e-3; the Triton path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
+  weight gradient 7.4-7.6e-3; the portable path 2.58e-3 / 2.78e-3 / 4.91e-3 / 7.4-7.6e-3 (bf16 rounding points of the same algorithm).
   The harness inference rows carry the output error against an fp32 IEEE block in their CSV.
 - Charts: under each table, a length sweep at D128 (`python -m miniworld_engine.viz.measure_bars docs/gpus/b200/swa_atom_dit/swa_atom_dit.md`).
 
@@ -320,15 +320,15 @@ kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation 
 fp32. Host side: `kernels/swa_dit/cuda/sm100/tf32_fwd.py` (forward, `block_fwd_tf32`, `mod_fwd_tf32`);
 `dispatch._tf32` picks them for fp32 q on B200 at the served widths with S a multiple of 128 (else the Triton fp32 path, which takes
 any S). A call that records a gradient (a training forward, the hoisted modulation with a gradient) runs the Triton fp32 path;
-`settings.swa_dit_tf32=0` (or `settings.swa_dit_sm100=0`, `force_triton_kernels=True`) keeps the Triton fp32 path, and a build or
+`settings.swa_dit_tf32=0` (or `settings.swa_dit_sm100=0`, `force_portable_kernels=True`) keeps the Triton fp32 path, and a build or
 load failure warns once and keeps it too. The hoisted modulation (`swa_dit_hoist_modulation`, fp32 c and Wmod) runs on
 `mod_fwd_tf32` when no gradient is recorded.
 
-Precision against the Triton fp32 path: the window attention runs on TF32 Q / K / V / P instead of bf16 (the Triton path rounds the
+Precision against the Triton fp32 path: the window attention runs on TF32 Q / K / V / P instead of bf16 (the portable path rounds the
 attention operands to bf16, as FlashAttention-4 does), and every GEMM is single-pass TF32 with operands **rounded** to the nearest
 TF32 (`cvt.rna` in the kernels for activations; the weights once per weight version on the host, `tf32_fwd._round_tf32`, cached like
 the bf16 weight packs) -- the tensor core alone truncates the low 13 mantissa bits, a bias toward zero that does not average out over
-K and is why the Triton path pays for "tf32x3" in its FFN.
+K and is why the portable path pays for "tf32x3" in its FFN.
 
 Why not the bf16 kernels' layouts: in fp32 the weights do not stay on chip. The qkvg weights are 256 KB (bf16: 128 KB resident in
 shared memory, or the TMEM A operand), Wu + Wd are 384 KB (bf16 ffn_fwd2: resident in TMEM as the A operand -- in fp32 that would be
@@ -416,6 +416,6 @@ with the early trigger back in for the per-sample case).
   development build's, the Measurements tables the engine's through the harness. The atom-count rule holds there too: S % 128 != 0 raises
   `ValueError` on B200.
 - Measured only at B = 1 and at the lengths above; A = 2 - 4 inference ran the kernels' accuracy check only.
-- The modulation gradient accumulates with atomics (as the Triton path): not bitwise deterministic.
+- The modulation gradient accumulates with atomics (as the portable path): not bitwise deterministic.
 - Forward kernels and `attn_dkvq` sit near 45-50 % SoL (one tile at a time through serial thread phases); the block is at 16-18 %
   of the fully fused floor, so the large remaining gain is fewer kernel boundaries.

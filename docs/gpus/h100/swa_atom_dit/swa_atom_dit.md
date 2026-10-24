@@ -12,8 +12,8 @@ kernels too (see "Weight gradients and modulation" below): the bf16 weight gradi
 ones up to 65536 rows (cuBLAS's TF32 GEMMs are faster above), the bf16 modulation on mma.sync / wgmma; the fp32 modulation stays on
 torch's GEMMs. Nothing autotunes: tiles and launch shapes are fixed, so there is no
 dependence on an H100 autotune cache. The Triton kernels (`triton/forward*.py`, `backward*.py`) are the non-H100 path and the accuracy
-reference the tests compare against; on H100 they run only on request (`force_triton_kernels=True`, `settings.triton_on_hopper_blackwell`).
-H100 has no Triton fallback ([dispatch.md](../dispatch.md)). fp32 under matmul precision "highest" (torch's default) stays on the native
+reference the tests compare against; on H100 they run only on request (`force_portable_kernels=True`, `settings.portable_on_hopper_blackwell`).
+H100 has no portable-kernel fallback ([dispatch.md](../dispatch.md)). fp32 under matmul precision "highest" (torch's default) stays on the native
 H100 stages (fp32 rows, exact-fp32 cuBLAS projections, bf16 attention operands as in the per-op path); a call those stages do not take
 (B200, or `swa_dit_h100_native=False`) runs the PyTorch statements instead of the TF32 or Triton fp32 kernels
 (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`).
@@ -62,10 +62,10 @@ Anthropic's kernels round GEMM operands to bf16 for an fp32 call too, so our bf1
   attention on bf16 operands. It is served while TF32 is allowed (`torch.set_float32_matmul_precision("high"/"medium")`) and
   `swa_dit_fp32_cuda` is on; under "highest" off the native H100 stages the block runs the PyTorch statements (the
   `SWAAtomTransformer` fused path and `modules.swa_dit.SWADiTBlock` alike; `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
-- Dispatch is gated on compute capability 9.0 (`cuda/loader.py:is_sm90`); other GPUs take the Triton path. Switches:
+- Dispatch is gated on compute capability 9.0 (`cuda/loader.py:is_sm90`); other GPUs take the portable path. Switches:
   `swa_dit_qkvg_fwd_cuda`, `swa_dit_ffn_fwd_cuda`, `swa_dit_ffn_bwd_cuda`, `swa_dit_attn_cuda`, `swa_dit_oproj_bwd_cuda`,
   `swa_dit_qkvg_bwd_cuda`, `swa_dit_rows_impl`, `swa_dit_fp32_cuda`, `swa_dit_mod_cuda`, `swa_dit_wgrad_cuda` (all default on);
-  `force_triton_kernels=True` turns them all off.
+  `force_portable_kernels=True` turns them all off.
 
 ## Weight gradients and modulation (2026-10-14)
 
@@ -130,7 +130,7 @@ of 0.66 ms, SIMT fp32 GEMMs plus splitK reductions plus eager casts). They are k
 
 ## Measured (H100, CUDA-graph replay, 3 blocks, fwd + bwd, N = 1 sample, B = 1; 2026-10-14)
 
-"Triton fused" is the fused block with `force_triton_kernels=True` (every CUDA stage off, no H100 autotune cache: the
+"Triton fused" is the fused block with `force_portable_kernels=True` (every CUDA stage off, no H100 autotune cache: the
 heuristic config of a cold cache); "CUDA" is the default. bf16 under `torch.set_float32_matmul_precision("highest")`,
 fp32 under "medium" (TF32 allowed: the only precision the fp32 CUDA stages serve). Harness: the scratch harness described in
 [docs/records/swa_dit_h100_20261014.md](../../../records/swa_dit_h100_20261014.md) (Setup).
@@ -284,7 +284,7 @@ RMSNorm / RoPE / modulation-gradient arithmetic and atomics per row, and that, n
 
 - `tests/gpu/any/test_swa_dit_fused_gpu.py` (112 passed, 1 skipped -- the team-gm comparison, team-gm is not installed -- on
   merged main ce7fd93b, H100): output and every gradient (q, the five block weights, and conditioning / adaLN weight through the
-  hoisted modulation) against the fp32 reference, no worse than the Triton path; each CUDA kernel alone next to Triton; the attention
+  hoisted modulation) against the fp32 reference, no worse than the portable path; each CUDA kernel alone next to Triton; the attention
   side kernels launched directly against the Triton kernels; CUDA-graph replay; `torch.compile(fullgraph)`; the fp32 extension against
   the fp32 Triton kernels and the module's per-op fp32 path. After the 2026-10-14 kernels: 89 passed, 1 skipped (H100);
   `tests/gpu/any/test_numerical.py -k swa_dit` (the registry checkers, bf16 and fp32 processes) passes, including the four new
@@ -296,7 +296,7 @@ RMSNorm / RoPE / modulation-gradient arithmetic and atomics per row, and that, n
 - Determinism (`test_the_cuda_block_is_bitwise_repeatable`, bf16 and fp32, A = 1 / 5 / 8): the output, dq and all block-weight
   gradients are bit-identical across repeats. The modulation gradient (conditioning and `w_adaln` gradients) is bit-identical at A = 1
   and not at A > 1: where one atom is served by several slabs of augments, their fp32 partial sums meet in `red.global` in a run-dependent
-  order (as on the Triton path and the B200 kernels). A fixed-order reduction would need per-slab dmod buffers; not done. The new
+  order (as on the portable path and the B200 kernels). A fixed-order reduction would need per-slab dmod buffers; not done. The new
   modulation and weight-gradient kernels add no run-to-run difference of their own (fixed-order reductions).
 
 ## 성능 확인

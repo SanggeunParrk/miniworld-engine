@@ -677,7 +677,7 @@ autotune key list (`op_identity`), or simply no entry for this shape.
 
 `modules/dispatch.py` holds one declarative table `_MINIWORLD_KNOWN_BEST : {op -> backend | 
 callable(device)->backend}` behind `resolve(op, impl, device)`. `MINIWORLD` (auto) resolves
-via the table; an op/GPU it doesn't specially recognize falls back to **TRITON** (the portable
+via the table; an op/GPU it doesn't specially recognize falls back to **PORTABLE** (the portable
 default for brand-new GPUs), while op/arch pairs with a measured-faster backend (e.g. trimul
 cute on Hopper+) follow that. The per-op `resolve_*` are thin wrappers over `resolve`. This is
 the single source of truth for the module-layer backend choice; kernel-internal shape/arch

@@ -5,7 +5,7 @@
 #
 # implementations:
 #   pytorch         the module's statements (SDPA + additive pair bias)
-#   triton          Triton LayerNorms + the augmented-attention QK+pair-bias kernel (one augmentation)
+#   portable        portable-kernel LayerNorms + the augmented-attention QK+pair-bias kernel (one augmentation)
 #   miniworld       auto: the same attention kernel with the engine's auto LayerNorm
 #   cuequivariance  cuequivariance_torch.attention_pair_bias (0.12) called with the module's own
 #                   parameters + the module's residual: the same function for use_qk_norm=False
@@ -38,7 +38,7 @@ target: attention_pair_bias
 level: module
 implementations:
   - pytorch
-  - triton
+  - portable
   - miniworld
   - cuequivariance
 mode: inference

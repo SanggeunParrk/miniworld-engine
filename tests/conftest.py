@@ -34,10 +34,10 @@ def pytest_collection_modifyitems(config, items) -> None:
 
 
 @pytest.fixture
-def force_triton():
-    """The internal A/B switch ``settings.force_triton_kernels`` for one test: the engine's Triton kernel family on every card, every CUDA stage off."""
+def force_portable():
+    """The internal A/B switch ``settings.force_portable_kernels`` for one test: the engine's Triton kernel family on every card, every CUDA stage off."""
     from miniworld_engine import settings
 
-    previous = settings.configure(force_triton_kernels=True)
+    previous = settings.configure(force_portable_kernels=True)
     yield
     settings.configure(**vars(previous))

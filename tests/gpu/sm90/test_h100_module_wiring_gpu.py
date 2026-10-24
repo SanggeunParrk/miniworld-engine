@@ -45,7 +45,7 @@ def policy(monkeypatch):
     for name in ("TRIMUL_NATIVE_BUILD_DIR", "OPT_CORE_DIR"):
         monkeypatch.delenv(name, raising=False)
     old = settings.configure(
-        force_triton_kernels=False,
+        force_portable_kernels=False,
         trimul_h100_training_widths=(64, 128, 256, 384, 512),
         opm_train=None,
         pwa_train=None,

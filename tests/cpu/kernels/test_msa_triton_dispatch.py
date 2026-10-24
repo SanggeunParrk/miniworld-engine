@@ -37,10 +37,10 @@ def _msa(d=64, dtype=torch.bfloat16):
 
 
 def test_auto_resolves_the_msa_pair_to_triton():
-    assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.TRITON
-    assert dispatch.resolve("msa_pair_weighted_averaging", I.MINIWORLD) == dispatch.KernelBackend.TRITON
-    settings.configure(force_triton_kernels=True)
-    assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.TRITON
+    assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.PORTABLE
+    assert dispatch.resolve("msa_pair_weighted_averaging", I.MINIWORLD) == dispatch.KernelBackend.PORTABLE
+    settings.configure(force_portable_kernels=True)
+    assert dispatch.resolve("outer_product_mean", I.MINIWORLD) == dispatch.KernelBackend.PORTABLE
 
 
 def test_refusals_name_the_reason():
@@ -49,20 +49,12 @@ def test_refusals_name_the_reason():
     assert "CUDA" in str(pwa_refusal(_msa(), torch.randn(1, 16, 16, 128, dtype=torch.bfloat16), 8, 32))
 
 
-def test_the_deprecated_triton_string_is_miniworld_and_falls_through():
-    """`implementation="triton"` no longer names a backend: it is read as `miniworld` (with a DeprecationWarning), so a call the
-    Triton kernels cannot serve (here: a CPU tensor) runs the statements instead of refusing."""
-    torch.manual_seed(0)
-    with pytest.warns(DeprecationWarning, match="miniworld"):
-        opm = OuterProductMean(64, 128, 32, implementation="triton").bfloat16()
-    assert opm.implementation is I.MINIWORLD
-    ref = OuterProductMean(64, 128, 32, implementation=I.PYTORCH).bfloat16()
-    ref.load_state_dict(opm.state_dict())
-    torch.testing.assert_close(opm(_msa()), ref(_msa()), rtol=0, atol=0)
-    with pytest.warns(DeprecationWarning, match="miniworld"):
-        pwa = MSAPairWeightedAveraging(64, 128, 8, 32, implementation="triton").bfloat16()
-    assert pwa.implementation is I.MINIWORLD
-
+def test_the_removed_triton_string_raises():
+    """`implementation="triton"` is not a value any more (2.3.12): it raises and names the four valid ones."""
+    with pytest.raises(ValueError, match="miniworld"):
+        OuterProductMean(64, 128, 32, implementation="triton")
+    with pytest.raises(ValueError, match="miniworld"):
+        MSAPairWeightedAveraging(64, 128, 8, 32, implementation="triton")
 
 def test_auto_falls_through_to_the_statements_where_triton_cannot_serve():
     torch.manual_seed(0)

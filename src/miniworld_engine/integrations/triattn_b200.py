@@ -13,12 +13,12 @@ from miniworld_engine.modules.dispatch import KernelBackend
 
 def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     """Check the mathematical and resource contract before touching the CUDA builder."""
-    # The module resolves `miniworld` (and an explicit `triton`) to its TRITON backend, which also hosts the H100 CUDA paths;
+    # The module resolves `miniworld` to its PORTABLE backend, which also hosts the H100 CUDA paths;
     # `_b200_cuda = False` keeps the Triton kernels (the benchmark baseline), as the `_fuse_*` switches do on H100.
     if (
-        getattr(module, "_backend", None) != KernelBackend.TRITON
+        getattr(module, "_backend", None) != KernelBackend.PORTABLE
         or not getattr(module, "_b200_cuda", True)
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm or module.n_head != 4:
@@ -64,9 +64,9 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
 def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
     """The other widths (d_pair 64 .. 512, heads of 16 / 32 channels), inference and training (with the module's dropout)."""
     if (
-        getattr(module, "_backend", None) != KernelBackend.TRITON
+        getattr(module, "_backend", None) != KernelBackend.PORTABLE
         or not getattr(module, "_b200_cuda", True)
-        or settings.current().force_triton_kernels
+        or settings.current().force_portable_kernels
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm:

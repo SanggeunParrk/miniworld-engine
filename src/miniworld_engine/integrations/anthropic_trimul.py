@@ -105,7 +105,7 @@ def wanted(implementation) -> bool:
         return True
     if implementation != ImplementationType.MINIWORLD:
         return False
-    return bool(payload_dir()) and (not settings.current().force_triton_kernels)
+    return bool(payload_dir()) and (not settings.current().force_portable_kernels)
 
 
 def refusal(pair: torch.Tensor, c_z: int, c_hidden: int, *, grad: bool, dropout: bool) -> str | None:

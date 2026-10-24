@@ -189,14 +189,14 @@ class LocalDiTBlock(DiTBlock):
         """Does the attention core run on the Triton window kernel (``kernels/augmented_attention/triton/window.py``)? The portable
         core of the ``miniworld`` backend (op ``local_dit`` of ``modules.dispatch`` / ``autotune.records``): on a card the engine holds a
         record for (every window kernel the call launches has an ``ok`` manifest row; the backward ones only when the call needs a
-        gradient), never on H100 / B200 (PyTorch is the fallback there by design) unless ``settings.force_triton_kernels`` is on. A
+        gradient), never on H100 / B200 (PyTorch is the fallback there by design) unless ``settings.force_portable_kernels`` is on. A
         card without a record warns once and runs the PyTorch core; a call the kernel refuses (head width > 64, more than 256 keys,
         float64) warns once (``KernelRefusedWarning``) and does the same."""
         from miniworld_engine.modules import dispatch
 
         if self.attention.implementation != ImplementationType.MINIWORLD or not x.is_cuda:
             return False
-        if not dispatch.triton_leg_allowed(x.device, "local_dit", training=dispatch.needs_backward(self, x)):
+        if not dispatch.portable_leg_allowed(x.device, "local_dit", training=dispatch.needs_backward(self, x)):
             return False
         why = (
             f"head width {head_dim} > 64" if head_dim > 64
@@ -211,7 +211,7 @@ class LocalDiTBlock(DiTBlock):
 
     def serves_portable(self, single: torch.Tensor) -> bool:
         """Does ``forward(single, ...)`` run its attention core on the portable Triton window kernel on this card (the ``miniworld``
-        rule of ``docs/dispatch.md``: a recorded card, or ``settings.force_triton_kernels``; never H100 / B200 by default)? The question
+        rule of ``docs/dispatch.md``: a recorded card, or ``settings.force_portable_kernels``; never H100 / B200 by default)? The question
         a caller's ``serve_*`` seam asks on a card without the engine's CUDA paths; it may warn once (unrecorded card / refused call)."""
         return self._window_triton(single, single.shape[-1] // self.attention.n_head)
 

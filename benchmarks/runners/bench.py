@@ -407,7 +407,7 @@ def module_miniworld_spec(raw: str) -> ImplementationSpec:
     return parse_implementation_spec(raw)
 
 
-def triton_miniworld_spec(raw: str) -> ImplementationSpec:
+def portable_miniworld_spec(raw: str) -> ImplementationSpec:
     if raw.strip().lower() == "cuda":   # an internal technology backend, not a module backend: CUDA is what miniworld runs where it exists
         raise UnsupportedBenchmark("'cuda' is not a module backend; use implementation 'miniworld'")
     if raw.strip().lower() == MINIWORLD_IMPL:
@@ -417,11 +417,11 @@ def triton_miniworld_spec(raw: str) -> ImplementationSpec:
     return parse_implementation_spec(raw)
 
 
-#: The spec strings that name the engine's Triton kernel family (A/B work). Triton is not a public backend, so these map to
-#: ``miniworld`` and `implementation_environment` runs the row under `settings.force_triton_kernels`.
-TRITON_FAMILY_SPECS = frozenset({
-    "triton", "triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch",
-    "triton_ln", "triton_kernel_ln", "triton_dispatch_ln", "triton-ln-kernel", "triton-ln-dispatch",
+#: The spec strings that name the engine's portable kernel family (A/B work). They are not a backend, so they map to
+#: ``miniworld`` and `implementation_environment` runs the row under `settings.force_portable_kernels`.
+PORTABLE_FAMILY_SPECS = frozenset({
+    "portable", "portable_pytorch_ln", "portable-ln-pytorch", "portable_ln_pytorch",
+    "portable_ln", "portable_kernel_ln", "portable_dispatch_ln", "portable-ln-kernel", "portable-ln-dispatch",
 })
 
 
@@ -429,18 +429,18 @@ def parse_implementation_spec(raw: str) -> ImplementationSpec:
     key = raw.strip().lower()
     if key in {impl.value for impl in ImplementationType}:
         return ImplementationSpec(ImplementationType(key), None, key)
-    if key == "triton":
+    if key == "portable":
         return ImplementationSpec(ImplementationType.MINIWORLD, None, raw)
-    if key in {"triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch"}:
+    if key in {"portable_pytorch_ln", "portable-ln-pytorch", "portable_ln_pytorch"}:
         return ImplementationSpec(
             ImplementationType.MINIWORLD, ImplementationType.PYTORCH, raw
         )
     if key in {
-        "triton_ln",
-        "triton_kernel_ln",
-        "triton_dispatch_ln",
-        "triton-ln-kernel",
-        "triton-ln-dispatch",
+        "portable_ln",
+        "portable_kernel_ln",
+        "portable_dispatch_ln",
+        "portable-ln-kernel",
+        "portable-ln-dispatch",
     }:
         return ImplementationSpec(
             ImplementationType.MINIWORLD, ImplementationType.MINIWORLD, raw
@@ -763,7 +763,7 @@ def implementation_environment(implementation: str):
     from miniworld_engine import settings as _settings
 
     previous_settings = (
-        _settings.configure(force_triton_kernels=True) if key in TRITON_FAMILY_SPECS else None
+        _settings.configure(force_portable_kernels=True) if key in PORTABLE_FAMILY_SPECS else None
     )
     try:
         if key in {ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL}:
@@ -1322,14 +1322,14 @@ def bench_module_triangle_attention(
         layer_cls = AnthropicTriangleAttention
         spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)
     else:
-        spec = triton_miniworld_spec(implementation)
+        spec = portable_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
             ImplementationType.MINIWORLD,
             ImplementationType.CUEQUIVARIANCE,
         }:
             raise UnsupportedBenchmark(
-                f"triangle_attention implements pytorch, triton, miniworld, cuequivariance and "
+                f"triangle_attention implements pytorch, portable, miniworld, cuequivariance and "
                 f"anthropic, not {implementation!r}"
             )
 
@@ -1500,7 +1500,7 @@ def bench_module_transition(
             # cuequivariance has no Transition kernel (resolve() maps it to the reference), and
             # cuda is the same residual-fused path miniworld/triton already time.
             raise UnsupportedBenchmark(
-                f"transition implements pytorch, triton, miniworld and anthropic, not {implementation!r}"
+                f"transition implements pytorch, portable, miniworld and anthropic, not {implementation!r}"
             )
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
@@ -1768,7 +1768,7 @@ def bench_module_adaptive_layernorm(
     implementation: str,
     fabric: FabricLike,
 ):
-    spec = triton_miniworld_spec(implementation)
+    spec = portable_miniworld_spec(implementation)
     implementation_type = spec.impl
     if implementation_type not in {
         ImplementationType.PYTORCH,
@@ -1885,7 +1885,7 @@ def bench_module_augmented_attention_token(
     implementation: str,
     fabric: FabricLike,
 ):
-    spec = triton_miniworld_spec(implementation)
+    spec = portable_miniworld_spec(implementation)
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
         # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
@@ -2100,7 +2100,7 @@ def bench_module_augmented_attention_atom(
     implementation: str,
     fabric: FabricLike,
 ):
-    spec = triton_miniworld_spec(implementation)
+    spec = portable_miniworld_spec(implementation)
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
         # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
@@ -2193,7 +2193,7 @@ def bench_module_triangle_multiplication_bidirectional(
 class _StockLayerNorm:
     """`torch.nn.LayerNorm.forward` on a module's own LayerNorm parameters, for the pristine upstream
     MSA ops: they call the stock module's norm (or read its weight / bias / eps), and the engine's
-    LayerNorm primitive would route MINIWORLD/TRITON requests into this repo's own kernels. Under
+    LayerNorm primitive would route MINIWORLD requests into this repo's own kernels. Under
     the bf16 autocast the upstream ops run in, this is exactly the stock fp32 LayerNorm."""
 
     def __init__(self, ln: nn.LayerNorm) -> None:
@@ -2376,7 +2376,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         why = (
             None
             if opm_train.wanted(impl)
-            else "disabled (settings.opm_train=0 or force_triton_kernels=True)"
+            else "disabled (settings.opm_train=0 or force_portable_kernels=True)"
         )
         why = why or opm_train.refusal(
             msa,
@@ -2615,7 +2615,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
             why = (
                 None
                 if pwa_train.wanted(impl)
-                else "disabled (settings.pwa_train/_INFER=0 or force_triton_kernels=True)"
+                else "disabled (settings.pwa_train/_INFER=0 or force_portable_kernels=True)"
             )
             why = why or pwa_train.refusal(msa, pair, *dims)
         execution_path = (
@@ -2707,7 +2707,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     (128), `conf.apb_n_head` heads (8 x 48, the registry row; 16 x 24 = AF3), B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
 
     * pytorch        -- the module's statements (SDPA with the additive pair bias).
-    * triton         -- the `triton` spec (miniworld under settings.force_triton_kernels): Triton LayerNorms + the augmented-attention
+    * portable       -- the `portable` spec (miniworld under settings.force_portable_kernels): portable LayerNorms + the augmented-attention
       QK+pair-bias kernel at one augmentation.
     * miniworld      -- implementation="miniworld" (auto): resolves to the same attention kernel,
       with the engine's auto LayerNorm.
@@ -2732,7 +2732,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     key = implementation.strip().lower()
     supported = {
         "pytorch",
-        "triton",
+        "portable",
         MINIWORLD_IMPL,
         ImplementationType.CUEQUIVARIANCE.value,
         ImplementationType.ANTHROPIC.value,
@@ -2890,7 +2890,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
 
     execution_path = {
         "pytorch": "module.reference.torch",
-        "triton": "modules.attention_pair_bias[triton LN + triton_augmented_attention_pair_bias]",
+        "portable": "modules.attention_pair_bias[portable LN + triton_augmented_attention_pair_bias]",
         MINIWORLD_IMPL: "modules.attention_pair_bias[auto LN + triton_augmented_attention_pair_bias; on sm_100 "
         "integrations.attention_pair_bias_b200 (CUDA + cuBLAS)]",
     }.get(
@@ -4377,14 +4377,14 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
     * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (bf16 inference, no gradient), else the
       reference on H100 / B200, and on any other card the portable path (`kernels/dit_variants/triton/portable.py`: the engine's Triton
       attention cores) if the card is recorded, else the reference with a warning (`docs/dispatch.md`).
-    * triton -- the same module under `settings.force_triton_kernels` (the A/B switch, any card): the portable path.
+    * triton -- the same module under `settings.force_portable_kernels` (the A/B switch, any card): the portable path.
     `execution_path` says which one ran.
     The conditioning is shared by the samples (the variants' contract); a tenth of the keys are padding (`mask_prob`)."""
     from miniworld_engine.modules import dit_variant as dv
 
     if implementation.strip().lower() == ImplementationType.ANTHROPIC.value:
         raise UnsupportedBenchmark("the DiT variants have no Anthropic composition")
-    spec = triton_miniworld_spec(implementation)
+    spec = portable_miniworld_spec(implementation)
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         raise UnsupportedBenchmark(f"dit_variant does not implement {implementation!r}")
     name = conf.dit_variant
@@ -4555,7 +4555,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         # the module holds the parameters; its forward is replaced by the upstream composition
         spec = ImplementationSpec(ImplementationType.PYTORCH, None, implementation)
     else:
-        spec = triton_miniworld_spec(implementation)
+        spec = portable_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
             ImplementationType.MINIWORLD,
@@ -4653,8 +4653,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                 return None
         att = block.attention
         reasons = ["autograd (the runner is inference-only)"] if is_train else []
-        if settings.current().force_triton_kernels:
-            reasons.append("force_triton_kernels=True")
+        if settings.current().force_portable_kernels:
+            reasons.append("force_portable_kernels=True")
         if att.use_qk_norm and not (
             single.is_cuda
             and torch.cuda.get_device_capability(single.device) == (10, 0)
@@ -5006,7 +5006,7 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
     requested = set(conf.swa_kernels if conf.swa_kernels is not None else names)
     if requested - names:
         raise ValueError(f"unknown SWA kernels: {requested - names}")
-    spec = triton_miniworld_spec(implementation)
+    spec = portable_miniworld_spec(implementation)
     if spec.impl not in {
         ImplementationType.PYTORCH,
         ImplementationType.MINIWORLD,
@@ -5355,7 +5355,7 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
             ImplementationType.PYTORCH, None, implementation
         )  # the module holds the parameters
     else:
-        spec = triton_miniworld_spec(implementation)
+        spec = portable_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
             ImplementationType.MINIWORLD,
@@ -5750,9 +5750,9 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
             ImplementationType.PYTORCH, None, implementation
         )  # the module holds the parameters
     else:
-        spec = triton_miniworld_spec(
+        spec = portable_miniworld_spec(
             implementation
-        )  # miniworld -> TRITON: the engine's kernels
+        )  # miniworld -> PORTABLE: the engine's kernels
         if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
             raise UnsupportedBenchmark(
                 f"local_dit does not implement {implementation!r}"
@@ -5946,9 +5946,9 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     """
     from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 
-    spec = triton_miniworld_spec(
+    spec = portable_miniworld_spec(
         implementation
-    )  # miniworld -> TRITON: the engine's kernels
+    )  # miniworld -> PORTABLE: the engine's kernels
     if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         raise UnsupportedBenchmark(
             f"bias_only_dit does not implement {implementation!r}"
@@ -6214,7 +6214,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             # forward-only, so its training rows are explicit `unsupported` rows.
             "triangle_multiplication": (
                 "pytorch",
-                "triton",
+                "portable",
                 "miniworld",
                 "cuequivariance",
                 "dtv1",
@@ -6223,7 +6223,7 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             ),
             "triangle_multiplication_bidirectional": (
                 "pytorch",
-                "triton",
+                "portable",
                 "miniworld",
                 "cuequivariance",
                 "dtv1",
@@ -6232,12 +6232,12 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             ),
             "triangle_attention": (
                 "pytorch",
-                "triton",
+                "portable",
                 "miniworld",
                 "cuequivariance",
                 ANTHROPIC_IMPL,
             ),
-            "transition": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            "transition": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             "outer_product": (
                 "pytorch",
                 "miniworld",
@@ -6250,17 +6250,17 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
                 ANTHROPIC_IMPL,
                 ANTHROPIC_HYBRID_IMPL,
             ),
-            "attention_pair_bias": ("pytorch", "triton", "miniworld", "cuequivariance"),
-            "conditioned_transition": ("pytorch", "triton", "miniworld"),
-            "adaptive_layernorm": ("pytorch", "triton", "miniworld"),
-            "augmented_attention_token": ("pytorch", "triton", "miniworld"),
-            "augmented_attention_atom": ("pytorch", "triton", "miniworld"),
+            "attention_pair_bias": ("pytorch", "portable", "miniworld", "cuequivariance"),
+            "conditioned_transition": ("pytorch", "portable", "miniworld"),
+            "adaptive_layernorm": ("pytorch", "portable", "miniworld"),
+            "augmented_attention_token": ("pytorch", "portable", "miniworld"),
+            "augmented_attention_atom": ("pytorch", "portable", "miniworld"),
             "swa_atom_attention": ("pytorch", "miniworld"),
-            "dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            "dit": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the kit's fused ESMFold2 atom block (ef2_atom, gemm=bf16) on the module's weights; inference only
-            "swa_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            "swa_dit": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the AF3 atom block composed from their windowed atom attention (fpf_atom) and atom row kernels; inference only
-            "local_dit": ("pytorch", "triton", "miniworld", ANTHROPIC_IMPL),
+            "local_dit": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             "bias_only_dit": ("pytorch", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):

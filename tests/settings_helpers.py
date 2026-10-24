@@ -44,8 +44,8 @@ import contextlib
 
 @contextlib.contextmanager
 def forced_triton():
-    """Run a block with the internal A/B switch ``settings.force_triton_kernels`` on (what ``implementation=TRITON`` used to say for one module)."""
-    previous = settings.configure(force_triton_kernels=True)
+    """Run a block with the internal A/B switch ``settings.force_portable_kernels`` on (what ``implementation=TRITON`` used to say for one module)."""
+    previous = settings.configure(force_portable_kernels=True)
     try:
         yield
     finally:

@@ -146,7 +146,7 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     # covered by the unpinned unit, so pinning both would double the build for nothing.
     "ln_bwd_path": (("persistent", "atomic", "cuda"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
-    "trimul_impl": (("triton",), ("eval", "train")),
+    "trimul_impl": (("portable",), ("eval", "train")),
     # The rest of settings.py's backend selectors. They were left out when SWITCHES was written
     # and each one is a set of kernels no unit ever reached: measured against the shipped A6000
     # cache, 26 kernels with working drivers were in the cache and in NO derived unit, and the
@@ -318,8 +318,8 @@ def cases() -> list[Case]:
     )
 
     def IT(i):
-        # "triton" is the A/B label of a build unit (run_case forces the Triton family around it), not a public backend
-        return ImplementationType.MINIWORLD if i == "triton" else ImplementationType(i)
+        # "portable" is the A/B label of a build unit (run_case forces the portable family around it), not a backend
+        return ImplementationType.MINIWORLD if i == "portable" else ImplementationType(i)
 
     # The dims that used to be declared here -- PAIR_D, PAIR_HID, HID_D, BOTH -- are in
     # registry_module.csv now, with a `source` column saying where each number came from. They are
@@ -464,11 +464,11 @@ def cases() -> list[Case]:
 def run_case(case: Case, length: int, dim_index: int, *, train: bool, p_drop: float = 0.0,
              impl: str = "miniworld", dtype: torch.dtype = BF16,
              compute_dtype: torch.dtype | None = None) -> int:
-    """:func:`_run_case`, with the engine's Triton family forced for the ``triton`` impl: it is not a public backend any more, so the unit
-    builds a ``miniworld`` module under ``settings.force_triton_kernels`` (the A/B switch), as the explicit ``triton`` request did."""
+    """:func:`_run_case`, with the portable family forced for the ``portable`` impl: it is not a backend, so the unit
+    builds a ``miniworld`` module under ``settings.force_portable_kernels`` (the A/B switch), as the A/B request does."""
     from miniworld_engine import settings
 
-    previous = settings.configure(force_triton_kernels=True) if impl == "triton" else None
+    previous = settings.configure(force_portable_kernels=True) if impl == "portable" else None
     try:
         return _run_case(case, length, dim_index, train=train, p_drop=p_drop, impl=impl, dtype=dtype, compute_dtype=compute_dtype)
     finally:

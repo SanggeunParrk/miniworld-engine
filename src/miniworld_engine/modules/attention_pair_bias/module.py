@@ -104,7 +104,7 @@ class AttentionPairBias(nn.Module):
         )
         backend = KernelBackend.PYTORCH if no_triton else _dispatch.call_backend(self, self._backend, single, pair)
         master = (
-            self._backend == KernelBackend.TRITON
+            self._backend == KernelBackend.PORTABLE
             and single.dtype == torch.bfloat16
             and self.to_query.weight.dtype == torch.float32
             and _h100_master.is_h100(single.device)
@@ -162,7 +162,7 @@ class AttentionPairBias(nn.Module):
             )
         if backend == KernelBackend.PYTORCH:
             out = F.scaled_dot_product_attention(query, key, value, bias)
-        elif backend == KernelBackend.TRITON:
+        elif backend == KernelBackend.PORTABLE:
             # Reuse the existing QK + pair-bias kernel with one augmentation.
             # Bias-only attention is a different operation and cannot replace QK.
             q, k, v = (t.transpose(1, 2).unsqueeze(0) for t in (query, key, value))

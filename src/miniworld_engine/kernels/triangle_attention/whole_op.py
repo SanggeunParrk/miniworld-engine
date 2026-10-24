@@ -75,10 +75,10 @@ def triangle_attention(
     if use_self_attention:
         query = rearrange(F.linear(x, to_query_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
         key = rearrange(F.linear(x, to_key_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
-        from miniworld_engine.modules.dispatch import triton_blocked
+        from miniworld_engine.modules.dispatch import portable_blocked
 
         # a card the engine holds no record for: the PyTorch statements for the attention core and the QK norm (one UnrecordedCardWarning)
-        blocked = pair.is_cuda and triton_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
+        blocked = pair.is_cuda and portable_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
         if use_qk_norm:
             # No `d_head` here any more: the kernel normalizes over the LAST axis and reads its
             # width from the tensor, where F.rms_norm wanted it restated as `normalized_shape`.

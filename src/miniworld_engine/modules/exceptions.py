@@ -22,12 +22,11 @@ class ImplementationType(str, Enum):
         and it refuses rather than silently reroute; ``miniworld`` uses the same payloads
         where it can and falls back where it cannot.
 
-    Triton is NOT a public backend. Behind ``miniworld`` the engine uses its own CUDA path where one
-    serves the call; on a card without one it routes to the Triton kernel family only if the engine
-    holds a record for that exact card, else it warns and runs the PyTorch reference
-    (:mod:`miniworld_engine.autotune.records`, ``docs/dispatch.md``). The strings ``"triton"`` and ``"cuda"``
-    are still read, with a ``DeprecationWarning``, as ``miniworld`` (removed in the next minor release);
-    forcing the Triton family for A/B work is ``settings.force_triton_kernels``."""
+    Behind ``miniworld`` the engine uses its own CUDA path where one serves the call; on a card without one
+    it routes to its portable kernels only if the engine holds a record for that exact card, else it warns
+    and runs the PyTorch reference (:mod:`miniworld_engine.autotune.records`, ``docs/dispatch.md``).
+    ``miniworld`` routes per card automatically; no other value selects a kernel family. Forcing the portable
+    kernels for A/B work is ``settings.force_portable_kernels``."""
 
     PYTORCH = "pytorch"
     CUEQUIVARIANCE = "cuequivariance"
@@ -36,20 +35,13 @@ class ImplementationType(str, Enum):
 
     @classmethod
     def _missing_(cls, value):
-        if isinstance(value, str) and value.strip().lower() in ("triton", "cuda"):
-            import warnings
-
-            old = value.strip().lower()
-            warnings.warn(
-                f"implementation={old!r} is deprecated and is read as 'miniworld' (it is removed in the next minor release). "
-                "Triton is not a public backend: on H100 / B200 'miniworld' is the CUDA path (no Triton there), and elsewhere it "
-                "routes to Triton only on a card with a record. Forcing the Triton kernel family is only possible through the A/B "
-                "switch settings.force_triton_kernels=True.",
-                DeprecationWarning,
-                stacklevel=3,
+        valid = ", ".join(repr(m.value) for m in cls)
+        if isinstance(value, str):
+            raise ValueError(
+                f"{value!r} is not a valid ImplementationType. Valid values: {valid}. "
+                "'miniworld' routes per card automatically (docs/dispatch.md); there is no separate value for a kernel family."
             )
-            return cls.MINIWORLD
-        return None
+        raise ValueError(f"{value!r} is not a valid ImplementationType. Valid values: {valid}.")
 
 
 class InvalidImplementationError(ValueError):

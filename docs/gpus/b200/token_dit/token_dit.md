@@ -29,7 +29,7 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
 
 - **Inference** (`integrations/token_dit.py` -> `kernels/conditioned_transition/triton/token_dit_runner.py`, the fused
   step runner shared with H100): serves `DiTBlock` calls with no autograd, the engine's kernel backend (implementation
-  TRITON or MINIWORLD), bf16 or fp32, any L >= 8, the conditioning shared by the samples (L table rows) or one per sample
+  MINIWORLD), bf16 or fp32, any L >= 8, the conditioning shared by the samples (L table rows) or one per sample
   (S L rows). The core's TMA maps are 3-D per sample (tile tails load as zeros, stores clip, keys past L are masked), so it
   takes any multiple of 8; `integrations/token_dit.py` pads other lengths to the next multiple of 8 (zero single / cond /
   pair rows, the key mask extended with False) and returns the first L rows. QK-norm blocks (`use_qk_norm`) take the
@@ -49,7 +49,7 @@ On B200 the token DiT runs **hand-written CUDA and cuBLAS only** -- no Triton, n
   `static_weights()` (the benchmark harness does for inference), in which case a replay reads the pack and pair bias it was
   captured with and the live single / cond.
 - **Training** (`integrations/token_dit_train.py`): serves `DiTBlock` calls under autograd, engine kernel backend
-  (implementation TRITON or MINIWORLD), bf16 (inputs, or `compute_dtype=bf16`) or fp32 (fp32 inputs, no `compute_dtype`),
+  (implementation MINIWORLD), bf16 (inputs, or `compute_dtype=bf16`) or fp32 (fp32 inputs, no `compute_dtype`),
   B == 1, any A and L (padded to an even A and L % 128 == 0 inside, 2026-10-06), key mask [B, L] or none (`DiTBlock` passes
   the [B, L] row of an [A, B, L] mask expanded over the samples). One autograd Function per block whose forward and backward are
   each one opaque op (torch.compile keeps them as nodes): cuBLAS GEMMs (operands in the path's dtype -- fp32 ones forced to
@@ -170,7 +170,7 @@ block, median. Run-to-run spread on this card is +-3-5 % (power cap), so differe
 resolved.
 
 All rows from `benchmarks/runners/bench.py target=dit level=module` (one DiTBlock); each section states its settings. "ours"
-is the bench's `miniworld` row (implementation TRITON: the engine's kernels). cuEquivariance has no DiT block (no column).
+is the bench's `miniworld` row (implementation MINIWORLD: the engine's kernels). cuEquivariance has no DiT block (no column).
 × = ours vs the fastest other row.
 
 ### Training (2026-09-30; A = 48, compiled; CUDA graph off / on)
@@ -569,8 +569,8 @@ time. Not one of `token_dit_train.serves()`'s conditions was the cause -- it was
 - The engine's `DiTBlock.forward` took only a [B, L] mask (its fused paths take one key mask shared by the samples), which
   is why the consumer model code routed [A, B, L] around it.
 
-Every other condition holds for that call: grad on, `implementation: miniworld_engine` (-> TRITON backend),
-`force_triton_kernels: false`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
+Every other condition holds for that call: grad on, `implementation: miniworld_engine` (-> PORTABLE backend),
+`force_portable_kernels: false`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
 `bucket_token_multiple: 384`), 16 x 48, cond [A, 1, L, 384], pair [1, L, L, 128], LayerNorm eps 1e-5, QK-norm (served),
 non-reentrant `checkpoint_sequential` (grad stays on inside, so the fused Function runs and is recomputed in the backward),
 torch.compile (the block's forward / backward are opaque ops).

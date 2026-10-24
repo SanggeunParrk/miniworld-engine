@@ -68,7 +68,7 @@ did not change them. Step time-roofline SoL (pair bytes / 3.35 TB/s) ~55 % at L7
 
 ## Open
 
-- fp32 activations and QK-norm have no CUDA path: on H100 they run the PyTorch reference (no Triton fallback,
+- fp32 activations and QK-norm have no CUDA path: on H100 they run the PyTorch reference (no portable-kernel fallback,
   [dispatch.md](../dispatch.md)). Carried over from the 2026-09-30 status snapshot
   ([docs/records/h100_status_20260930.md](../../../records/h100_status_20260930.md), item 9).
 
@@ -78,7 +78,7 @@ did not change them. Step time-roofline SoL (pair bytes / 3.35 TB/s) ~55 % at L7
 # one GPU, engine environment's python (see ../h100.md for the srun line)
 export LD_LIBRARY_PATH=$CONDA_PREFIX/lib:$LD_LIBRARY_PATH
 python benchmarks/runners/bench.py target=attention_pair_bias level=module mode=<inference|training> \
-  min_seq_len=128 max_seq_len=768 seq_len_step=128 'implementations=[pytorch,triton,miniworld,cuequivariance]' \
+  min_seq_len=128 max_seq_len=768 seq_len_step=128 'implementations=[pytorch,portable,miniworld,cuequivariance]' \
   +apb_n_head=8 d_single=384 precision=bf16-mixed cudagraph=manual
 python -m pytest tests/gpu/sm90/test_h100_apb_training_gpu.py tests/gpu/sm100/test_b200_apb_gpu.py -k apb_h100
 ```

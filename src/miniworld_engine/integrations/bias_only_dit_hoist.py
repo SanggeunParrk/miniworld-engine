@@ -61,7 +61,7 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
         return False
     if implementation != ImplementationType.MINIWORLD:
         return False
-    if settings.current().force_triton_kernels:
+    if settings.current().force_portable_kernels:
         return False
     if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
         return False

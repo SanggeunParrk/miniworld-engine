@@ -49,7 +49,7 @@ may explicitly select statements for an unsupported fused surround. Q/K RMSNorm
 requires a core-only row. Primitive and full-module timings are distinct.
 
 `implementation="anthropic"` is explicit. The existing `miniworld` dispatch and
-training paths are unchanged. A forced `force_triton_kernels=True` rejects the
+training paths are unchanged. A forced `force_portable_kernels=True` rejects the
 Anthropic backend, which may execute CUDA. Unsupported module families refuse
 the backend instead of silently running another implementation.
 
@@ -61,7 +61,7 @@ backward, external row dropout/residual. Both single-direction and bidirectional
 modules support it. Training scope and validation: `archive/docs-20260928:docs/anthropic/trimul-training.md`.
 The newer `anthropic_row="training_saved"` keeps the previous training fusion
 boundaries and saved tensors, replaces the front/F567 kernels with Anthropic CUDA
-derivatives, and reuses the existing Triton/cuBLAS backward. Both TriMul module
+derivatives, and reuses the existing portable-kernel/cuBLAS backward. Both TriMul module
 classes support this explicit row. These rows are distinct; the native baseline
 does not have an optimized backward. Inference packed weight caches are rebuilt
 after parameter replacement, in-place updates, state-dict loading, or dtype/device

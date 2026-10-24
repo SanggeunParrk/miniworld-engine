@@ -27,7 +27,7 @@ def test_inference_architecture_contract(monkeypatch, cap, heads, width, length,
     norm = SimpleNamespace(eps=1e-5)
     adaln = SimpleNamespace(ln_in=norm, ln_cond=norm)
     module = SimpleNamespace(
-        attention=SimpleNamespace(_backend=KernelBackend.TRITON, n_head=heads, use_qk_norm=True,
+        attention=SimpleNamespace(_backend=KernelBackend.PORTABLE, n_head=heads, use_qk_norm=True,
                                   ada_ln_in=adaln, ln_pair=norm),
         transition=SimpleNamespace(ada_ln_in=adaln, expand_a=SimpleNamespace(weight=SimpleNamespace(shape=(2 * width, width)))),
     )
@@ -37,7 +37,7 @@ def test_inference_architecture_contract(monkeypatch, cap, heads, width, length,
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda *_: cap)
     monkeypatch.setattr(token_dit, "_cuda_rows", lambda: True)
     monkeypatch.setattr(sm100, "_is_blackwell", lambda *_: cap == (10, 0))
-    old = settings.configure(force_triton_kernels=False)
+    old = settings.configure(force_portable_kernels=False)
     try:
         with torch.no_grad():
             assert token_dit.serves(module, single, cond, pair) is expected

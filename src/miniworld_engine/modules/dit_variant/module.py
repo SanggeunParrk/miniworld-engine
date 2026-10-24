@@ -70,7 +70,7 @@ def serves_portable(stack: nn.Module, *inputs: torch.Tensor | None) -> bool:
     """Would ``stack(*inputs)`` run on the portable Triton path (``kernels/dit_variants/triton/portable.py``) on this card? The inputs
     are the ones of the stack's forward: ``(single, cond, pair, mask)`` for a :class:`DiTVariantStack`, ``(single, cond, pair, mask, uid)``
     for an :class:`AtomDiTVariantStack`. True on a card the engine holds a record for (``docs/dispatch.md``) or under
-    ``settings.force_triton_kernels``; False on H100 / B200 by default, where the CUDA path (``kernels.dit_variants.interface.serves``)
+    ``settings.force_portable_kernels``; False on H100 / B200 by default, where the CUDA path (``kernels.dit_variants.interface.serves``)
     or the PyTorch reference runs. A caller's ``variant_serves`` seam asks this after the H100 question."""
     from miniworld_engine.kernels.dit_variants.triton import portable
 

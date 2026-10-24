@@ -192,7 +192,7 @@ PINS: dict[str, tuple[tuple, tuple[str, ...], tuple[str, ...]]] = {
     #: would just rebuild the same shard under a second name.
     "dropout": ((0.25,), ("triangle_multiplication",), ("training",)),
     # transition's forward runs the hand-CUDA fused b2b when it applies, and that kernel is not
-    # autotuned -- so the TRITON expand-gate forward never fires during a build and
+    # autotuned -- so the PORTABLE expand-gate forward never fires during a build and
     # transition_expand_gate_fwd stays absent from the cache, while its backward (which has no CUDA
     # counterpart) is captured normally. The CUDA path only covers fixed shapes, so production
     # falls back to the triton one elsewhere and finds nothing cached. Sweeping it off captures
@@ -837,10 +837,7 @@ def _reject_unknown_build_target(args: argparse.Namespace, repo: Path) -> int:
 
 
 def _kernels_choice(args: argparse.Namespace) -> str:
-    """``build --kernels {auto,native,portable}``; the hidden ``--backend {auto,native,triton}`` is its deprecated spelling (``triton`` is ``portable``)."""
-    old = getattr(args, "backend", None)
-    if old is not None:
-        return {"triton": "portable"}.get(old, old)
+    """``build --kernels {auto,native,portable}``."""
     return getattr(args, "kernels", None) or "auto"
 
 
@@ -899,7 +896,7 @@ def cmd_build(args: argparse.Namespace) -> int:
         from miniworld_engine.autotune import policy
         units = policy.filter_op_units(units)
         if not units:
-            print(f"no triton op with a driver matched {args.case!r}", file=sys.stderr)
+            print(f"no kernel op with a driver matched {args.case!r}", file=sys.stderr)
             return None
         if only and len(only) > len({u.op for u in units}):
             # Named and not built is not the same as not named. A kernel with no driver, or none
@@ -923,7 +920,7 @@ def cmd_build(args: argparse.Namespace) -> int:
 
     # A NAMED target drives its MODULE: the two name spaces are different -- `build <case>` names a
     # module and `--per-op <kernel>` names a kernel -- so running the op sweep for a case name
-    # filters `op_units` by a name no kernel has and returns "no triton op with a driver matched".
+    # filters `op_units` by a name no kernel has and returns "no kernel op with a driver matched".
     # Which is what this did for one commit, turning `build gated_projection grid` into exit 2.
     # The MODULE pass is the default now, including for `all`. It used to be the op pass, because
     # the module pass reached only the 48 of 91 kernels some module happened to dispatch to while
@@ -1751,7 +1748,7 @@ def build_parser() -> argparse.ArgumentParser:
     cap.add_argument("--shards", default="~/.cache/miniworld-shards", help="where shards go")
     cap.add_argument("--impl", default="miniworld",
                      help="implementations=[...]. Use miniworld: for triangle_multiplication, "
-                          "'triton' builds the fp32 dtv1 baseline and captures nothing")
+                          "'portable' builds the fp32 baseline and captures nothing")
     cap.add_argument("--no-sweep-dispatch", action="store_true",
                      help="capture only the branch this card picks (leaves the other uncached)")
     cap.add_argument("--resume", action="store_true", help="skip shards that already exist")
@@ -1801,9 +1798,8 @@ def build_parser() -> argparse.ArgumentParser:
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
     bld.add_argument("--kernels", choices=("auto", "native", "portable"), default="auto",
-                     help="auto follows module dispatch; native tunes the hand-written CUDA per-op drivers, portable the Triton ones "
+                     help="auto follows module dispatch; native tunes the hand-written CUDA per-op drivers, portable the portable-kernel ones "
                           "(the portable family is internal: it is what miniworld routes to on a card with a record)")
-    bld.add_argument("--backend", choices=("auto", "native", "triton"), default=None, help=argparse.SUPPRESS)  # deprecated spelling of --kernels
     bld.add_argument("--include-alternatives", action="store_true",
                      help="also tune forced fallback backends; default follows production dispatch")
     bld.add_argument("--mode", choices=("both", "train", "eval"), default="both",

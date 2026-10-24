@@ -1,4 +1,4 @@
-"""An application Triton policy must not escape into native H100 engine kernels."""
+"""An application portable-kernel policy must not escape into native H100 engine kernels."""
 
 import pytest
 import torch
@@ -8,8 +8,8 @@ from miniworld_engine.modules import dispatch
 from miniworld_engine.modules.exceptions import ImplementationType as EngineImpl
 
 
-def configure_engine_backend(backend):
-    settings.configure(force_triton_kernels=(backend == "triton"))
+def force_portable(on):
+    settings.configure(force_portable_kernels=on)
 
 
 @pytest.fixture(autouse=True)
@@ -21,25 +21,25 @@ def restore_policy():
 
 def test_h100_auto_and_strict_resolution(monkeypatch):
     monkeypatch.setattr(dispatch, "is_sm90plus", lambda *_: True)
-    configure_engine_backend("auto")
+    force_portable(False)
     # The hand-CUDA H100 kernels are tried inside the modules, not by backend dispatch.
-    assert dispatch.resolve("triangle_multiplication", "miniworld").value == "triton"
-    configure_engine_backend("triton")
+    assert dispatch.resolve("triangle_multiplication", "miniworld").value == "portable"
+    force_portable(True)
     # Even the old per-op pin cannot override the process's strict policy.
-    settings.configure(trimul_impl="cuda")
+    settings.configure(trimul_impl="native")
     for op in dispatch._MINIWORLD_KNOWN_BEST:
-        assert dispatch.resolve(op, "miniworld").value == "triton"
+        assert dispatch.resolve(op, "miniworld").value == "portable"
         assert dispatch.resolve(op, "pytorch").value == "pytorch"
     with pytest.raises(ValueError, match="conflicts"):
         dispatch.resolve("transition", "anthropic")
-    with pytest.warns(DeprecationWarning, match="deprecated"):      # the retired "cuda" string is miniworld, which the switch pins to Triton
-        assert dispatch.resolve("transition", "cuda").value == "triton"
+    with pytest.raises(ValueError, match="miniworld"):      # the retired "cuda" string is no value of implementation
+        dispatch.resolve("transition", "cuda")
 
 
 def test_standalone_layernorm_cannot_select_cuda():
     from miniworld_engine.kernels.layernorm.compile_native import _resolve_bwd_path
 
-    configure_engine_backend("triton")
+    force_portable(True)
     settings.configure(layernorm_bwd_path="cuda")
     # No CUDA tensors needed: policy precedes hardware lookup, cache and native override.
     x = torch.zeros(2, 128, dtype=torch.bfloat16)
@@ -55,7 +55,7 @@ def test_transition_policy_precedes_internal_h100_dispatch(monkeypatch, training
     from miniworld_engine.kernels.transition.triton import residual
     from miniworld_engine.modules import Transition
 
-    configure_engine_backend("triton")
+    force_portable(True)
     module = Transition(128, implementation=EngineImpl.MINIWORLD).train(training)
     # The residual path returns x + transition(x) itself, so the stub stands for the whole
     # output: transition(x) = 3x.
@@ -88,7 +88,7 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
     from miniworld_engine.kernels.layernorm import cuda as ln_cuda
     from miniworld_engine.modules import BidirectionalTriangleMultiplication, Transition
 
-    configure_engine_backend("triton")
+    force_portable(True)
     settings.configure(
         layernorm_cuda_bwd=True
     )  # strict policy must beat this native opt-in
@@ -177,7 +177,7 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
 def test_cuda_standalone_layernorm_blocks_native_override(monkeypatch):
     from miniworld_engine.kernels.layernorm import cuda as ln_cuda
 
-    configure_engine_backend("triton")
+    force_portable(True)
     settings.configure(layernorm_bwd_path="cuda")
 
     def forbidden(*args, **kwargs):

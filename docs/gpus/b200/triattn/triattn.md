@@ -2,7 +2,7 @@
 
 Kernel-level status of `TriangleAttention` (`use_self_attention=True`) on B200; the module-level summary belongs in
 [b200.md](../b200.md). bf16 only; columns are (Length, Dimension). B200 = CUDA where a hand-written sm_100a path
-exists; a shape without one is 미구현 (it runs the Triton path). Figures: one box per kernel, left to right, HBM reads
+exists; a shape without one is 미구현 (it runs the portable path). Figures: one box per kernel, left to right, HBM reads
 (blue, left) and writes (red, right); generated from `figures/triattn.json` by `python -m miniworld_engine.viz.kernel_flow`,
 then converted to PNG with `cairosvg` (scale 2, white background).
 
@@ -15,10 +15,10 @@ below; the other registered widths (d_pair 64-512), inference and training, in
 The kernels were developed for sm_100a on the H100 path's kernel boundaries (LN + projections | attention | gate +
 out-projection, and the matching backward); they are not ports of the WGMMA kernels.
 
-The d_pair 128 path is served when all of these hold, otherwise the module runs its Triton path unchanged:
+The d_pair 128 path is served when all of these hold, otherwise the module runs its portable path unchanged:
 
-- the module's backend is TRITON (`implementation=miniworld`, or an explicit `triton`), `module._b200_cuda` is True
-  (the default; False keeps the Triton kernels, e.g. as a benchmark baseline) and `(not settings.force_triton_kernels)`;
+- the module's backend is PORTABLE (`implementation=miniworld`), `module._b200_cuda` is True
+  (the default; False keeps the Triton kernels, e.g. as a benchmark baseline) and `(not settings.force_portable_kernels)`;
 - `d_pair = d_hidden = 128`, `n_head = 4`, no QK-norm;
 - `pair` is a bf16 CUDA tensor `[B, L, L, 128]` with L a multiple of 128 (any B), `mask` is None or bool `[B, L]`;
 - compute capability (10, 0).
@@ -273,18 +273,18 @@ d_pair ≥ 256) and `BidirectionalTriangleAttention` are not served.
 B200 (148 SMs), torch 2.13.0+cu129, triton 3.7.1, cuEquivariance 0.12.0, sm_100a kernels built by nvcc 13.1, B=1, bf16, starting node, mask all-true,
 `benchmarks/runners/bench.py target=triangle_attention level=module min_seq_len=128 max_seq_len=768` (compiled), with
 `d_pair=<C> +tri_d_hidden=<HD> +tri_n_head=<heads>`. Latency in ms, median. × = ours vs the fastest of PyTorch compiled /
-cuEquivariance / Anthropic; "Triton path" is the same module with `+tri_b200_cuda=false` (the repository's Triton kernels, the
+cuEquivariance / Anthropic; "portable path" is the same module with `+tri_b200_cuda=false` (the repository's Triton kernels, the
 B200 default before this path), reported separately. Anthropic: `integrations.anthropic` row `block:triattn_native`,
 inference only; on B200 the payload refuses its native cell (measured on sm_90 / sm_80 only) and serves the `k2b` /
 cuEquivariance fallbacks for 4-head calls, so this column is not the H100 payload's speed; other head counts are —. No B200
 Triton autotune cache exists; none of the columns use one (ours is CUDA end to end). The 32-channel-head rows are one family:
 d_pair 64 is 2 × 32, d_pair 128 the fused 4 × 32 path above, 256 / 384 / 512 are 8 / 12 / 16 × 32.
 
-- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the CUDA-graph tables of the 32-channel-head family, d_pair 64 4 x 16 and 4 x 32 (Triton path included) (335 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.2 % (0.7 % for ours), 90th percentile 1.8 %; two cells were replaced ((384, 64) PyTorch compiled inference 0.584 -> 0.670 ms; (128, 64) cuEquivariance training, previously refused, 0.179 ms). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
+- Re-verification (2026-10-10, engine v2.2.0 plus unreleased changes, the setup above with the kernels built by nvcc 13.1, driver 580.95.05, one GPU with no other process on it): every cell of the CUDA-graph tables of the 32-channel-head family, d_pair 64 4 x 16 and 4 x 32 (portable path included) (335 cells) was re-measured through the harness command above, one run per width and mode; a cell that moved by more than 8 % against the table was repeated (once, twice if still beyond 8 %) and the median of the runs is reported. Median change 0.2 % (0.7 % for ours), 90th percentile 1.8 %; two cells were replaced ((384, 64) PyTorch compiled inference 0.584 -> 0.670 ms; (128, 64) cuEquivariance training, previously refused, 0.179 ms). The no-CUDA-graph training tables are host-bound (their cells move by 20-60 % between runs with the load on the host) and keep their 2026-09-30 values. **2026-10-11:** every CUDA-graph cell of these tables was re-measured with fp32 master parameters (`precision=bf16-mixed`, the harness default since that date: fp32 parameters over bf16 activations under `torch.autocast`; one run per cell, `parameter_dtype` = float32 in the CSV, the engine environment's python called directly); the cells above are those values. The no-CUDA-graph training tables are host-bound and keep their earlier values (bf16 parameters).
 
 ### Heads × 32 · Inference (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.061 | 0.055 | — | 0.045 | 0.024 | 2.29 | 1.88× |
 | (256, 64) | 0.182 | 0.102 | — | 0.098 | 0.053 | 1.92 | 1.85× |
@@ -321,7 +321,7 @@ d_pair 64 is 2 × 32, d_pair 128 the fused 4 × 32 path above, 256 / 384 / 512 a
 
 ### Heads × 32 · Training, dropout 0.25 (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.196 | 0.179 | — | 0.161 | 0.103 | 1.74 | 1.56× |
 | (256, 64) | 0.548 | 0.458 | — | 0.372 | 0.199 | 2.30 | 1.87× |
@@ -362,7 +362,7 @@ by about 1.2e-4 relative (the check is 1e-4). It refused the row (—) on 2026-0
 
 ### Heads × 32 · Training, dropout 0.25 (no CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.528 | 0.816 | — | 0.779 | 0.382 | 1.38 | 2.04× |
 | (256, 64) | 0.560 | 0.818 | — | 0.689 | 0.471 | 1.19 | 1.46× |
@@ -403,7 +403,7 @@ other load on the host.
 
 ### d_pair 64, 4 × 16 · Inference (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.080 | 0.080 | 0.037 | 0.047 | 0.029 | 1.28 | 1.62× |
 | (256, 64) | 0.301 | 0.119 | 0.096 | 0.121 | 0.072 | 1.33 | 1.68× |
@@ -416,7 +416,7 @@ other load on the host.
 
 ### d_pair 64, 4 × 16 · Training, dropout 0.25 (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.240 | 0.240 | — | 0.172 | 0.119 | 2.02 | 1.45× |
 | (256, 64) | 0.852 | 0.614 | — | 0.469 | 0.289 | 2.12 | 1.62× |
@@ -429,7 +429,7 @@ other load on the host.
 
 ### d_pair 64, 4 × 32 (d_hidden 128) · Inference (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.084 | 0.065 | 0.047 | 0.053 | 0.028 | 1.68 | 1.89× |
 | (256, 64) | 0.316 | 0.133 | 0.141 | 0.131 | 0.071 | 1.87 | 1.85× |
@@ -442,7 +442,7 @@ other load on the host.
 
 ### d_pair 64, 4 × 32 (d_hidden 128) · Training, dropout 0.25 (CUDA graph)
 
-| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | Triton path | ours | × | × vs Triton path |
+| (Length, Dimension) | PyTorch compiled | cuEquivariance | Anthropic | portable path | ours | × | × vs portable path |
 |---|---|---|---|---|---|---|---|
 | (128, 64) | 0.255 | 0.243 | — | 0.192 | 0.116 | 2.09 | 1.66× |
 | (256, 64) | 0.904 | 0.699 | — | 0.534 | 0.288 | 2.43 | 1.85× |
