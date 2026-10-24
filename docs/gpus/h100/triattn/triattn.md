@@ -21,7 +21,7 @@ The path is served when all of these hold, otherwise the module runs its other p
 
 - the module's backend is TRITON (`implementation=miniworld`, or an explicit `triton`), `module._h100_cuda` is True (the
   default; False falls through to the b200style path of `integrations/triattn_h100.py` where it serves, else the PyTorch reference,
-  e.g. as a benchmark baseline) and `settings.engine_backend != "triton"`;
+  e.g. as a benchmark baseline) and `(not settings.force_triton_kernels)`;
 - `use_self_attention`, no QK-norm; heads of 32 channels (16 is zero-padded to 32), at most 16 heads, d_pair a multiple of 8 up
   to 512 (`d_hidden = heads × head_dim`); `d_pair = d_hidden = 128` with 4 heads takes the fused path;
 - `pair` is a bf16 CUDA tensor `[B, L, L, d_pair]` with L a multiple of 16 (any B), `mask` is None or bool `[B, L]`; a length that

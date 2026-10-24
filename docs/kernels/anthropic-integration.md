@@ -49,7 +49,7 @@ may explicitly select statements for an unsupported fused surround. Q/K RMSNorm
 requires a core-only row. Primitive and full-module timings are distinct.
 
 `implementation="anthropic"` is explicit. The existing `miniworld` dispatch and
-training paths are unchanged. A forced `engine_backend="triton"` rejects the
+training paths are unchanged. A forced `force_triton_kernels=True` rejects the
 Anthropic backend, which may execute CUDA. Unsupported module families refuse
 the backend instead of silently running another implementation.
 

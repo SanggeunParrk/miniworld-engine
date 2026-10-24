@@ -100,7 +100,7 @@ Module names are also the benchmark target names; the kernel-level targets are t
 | PyTorch compiled | the module with `implementation=pytorch` under `torch.compile` (the strongest PyTorch); eager only where compile cannot trace the row (state it) | everywhere; training rows of blocks whose compiled backward fails the repeatability check are timed compiled **without** a graph (`cudagraph=disabled`) and marked |
 | cuEquivariance | `cuequivariance_torch` triangle ops | TriMul, TriAttn, APB (read `execution_path` in the CSV for what actually ran; its B200 TriMul kernel route is inference-only) |
 | Anthropic | the uplifting-biomolecular-modeling release's kernels composed into the same block over the same weights (`MINIWORLD_ANTHROPIC_ROOT`) | inference only; TriMul, TriAttn, OPM, PWA, token DiT, local DiT, SWA DiT |
-| engine (Triton / per-op) | what the engine ran before your CUDA path (`+swa_dit_fused=false`, `MINIWORLD_*=0` switches, `implementation=triton`) | the "vs the previous path" column |
+| engine (Triton / per-op) | what the engine ran before your CUDA path (`+swa_dit_fused=false`, `MINIWORLD_*=0` switches, `settings.force_triton_kernels`) | the "vs the previous path" column |
 | ours | `implementation=miniworld`: your path through the module, dispatch included | |
 
 The speed-up column is **ours / the fastest of the other columns** at that row.

@@ -161,9 +161,12 @@ from the code.
 
 **The minimum supported architecture is sm80.** The generated table above states each
 registered kernel's minimum architecture; it is not a numerical qualification for every
-listed GPU. Portable Triton paths and higher-architecture Triton/CUDA alternatives are
-selected by `modules/dispatch.py`. `implementation='triton'` explicitly selects the
-Triton backend; native CUDA variants can require a newer architecture.
+listed GPU. The public backends are `pytorch`, `miniworld`, `cuequivariance` and `anthropic`; Triton is
+not one of them. `miniworld` runs the engine's CUDA path where one serves the call; on a card without one
+it routes to the internal Triton kernel family only if the engine holds a record for that exact card
+(`autotune/manifests/`), else it warns and runs the PyTorch reference
+([docs/dispatch.md](docs/dispatch.md)). `settings.force_triton_kernels` is the internal A/B switch that
+forces the Triton family. Native CUDA variants can require a newer architecture.
 
 One extension is **not** in the table because it is not in the registry: `transition_b2b_cuda`,
 which the `Transition` module builds on demand, is compiled for `sm_90a` and fails to build on

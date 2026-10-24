@@ -1,6 +1,6 @@
 # H100 module dispatch
 
-`implementation="miniworld"` with the default `engine_backend="auto"` selects the
+`implementation="miniworld"` with the default `force_triton_kernels=False` selects the
 packaged H100 implementations below. No research-directory import, external
 TriMul payload, or MSA opt-in environment variable is required. Configure the
 policy before constructing/compiling models.
@@ -54,8 +54,8 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
 * SWA atom DiT in fp32 under matmul precision "highest" (torch's default): the native H100 stages serve it (exact-fp32 cuBLAS
   projections); a call they do not take (B200, `swa_dit_h100_native=False`) runs the PyTorch statements, never the sm_100a TF32 or the
   Triton fp32 kernels (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`, `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
-* Other cards (A100, RTX A5000 / A6000): Triton is the implementation, unchanged.
-* An explicit request keeps Triton on H100 / B200: `implementation="triton"`, `engine_backend="triton"`, or
+* Other cards: not this page. `miniworld` runs a CUDA path where one serves the call, else the Triton kernel family only on a card the engine has a record for, else a warning and the PyTorch reference: [../../dispatch.md](../../dispatch.md).
+* Triton is not a public backend (`implementation` is pytorch / miniworld / cuequivariance / anthropic). The A/B switch keeps it on H100 / B200: `settings.force_triton_kernels=True`, or
   `settings.triton_on_hopper_blackwell=True` (A/B work, building Triton caches). `b200_engine_triton` does the same on B200.
 * Committed H100 / B200 Triton autotune caches are not needed and are not maintained.
 
@@ -89,7 +89,7 @@ the separate `[S,N,64]` masked-gradient allocation and HBM write/read.
 
 ## Policy and tuning
 
-`engine_backend="triton"` (or `settings.triton_on_hopper_blackwell=True`) is the A/B opt-out of these automatic paths: it brings the
+`force_triton_kernels=True` (or `settings.triton_on_hopper_blackwell=True`) is the A/B opt-out of these automatic paths: it brings the
 Triton family back on H100, including the residual-fused Transition.
 `settings.opm_train=0`, `settings.pwa_train=0` and
 `settings.pwa_infer=0` disable their respective integrations.

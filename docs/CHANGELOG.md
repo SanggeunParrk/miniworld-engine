@@ -8,6 +8,32 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Changed
+
+- **Triton is no longer a public backend.** `ImplementationType` has exactly `pytorch`, `miniworld`, `cuequivariance`, `anthropic`
+  (`TRITON` and `CUDA` are gone). On a card other than H100 / B200, `miniworld` runs a CUDA path that serves the call; else the
+  Triton kernel family **only if the engine holds a record for that exact card** (every Triton kernel of the op has an `ok` row in
+  `autotune/manifests/<card>.csv`, written by `python -m miniworld_engine.autotune.run_all`); else it emits an
+  `UnrecordedCardWarning` (once per op and card) and runs the PyTorch reference. H100 and B200 are unchanged (CUDA, else PyTorch, never
+  Triton). Cards recorded today: A100 80GB PCIe, H100 80GB HBM3, RTX A5000, RTX A6000; their manifests predate several kernels, so most
+  ops on the three Ampere cards warn and run PyTorch until the card is re-recorded (table: `docs/dispatch.md`). New:
+  `autotune.records`, `modules.dispatch.route_for_card`, `UnrecordedCardWarning`.
+  The record is mode-aware (an inference call needs the forward kernels only; a missing backward kernel blocks training calls), the
+  `ops.*` entry points that sit on one Triton unit obey the same rule (`dispatch.triton_blocked`), and a Triton kernel that refuses a call
+  (TriMul `d_hidden != d_pair`, OPM / PWA shape guards) is one `KernelRefusedWarning` and the PyTorch reference instead of a `ValueError`
+  or a silent fallback.
+- `settings.engine_backend: Literal["auto", "triton"]` became the internal A/B switch `settings.force_triton_kernels: bool`
+  (the Triton family on every card, every `*_cuda` stage off). `engine_backend=` is accepted by `settings.configure` with a
+  `DeprecationWarning`. `build --backend {auto,native,triton}` became `build --kernels {auto,native,portable}` (`--backend` is a hidden alias).
+  `benchmarks/runners/bench.py` defaults to `implementations=[pytorch, miniworld]`; its `triton*` spec strings run `miniworld` under the switch.
+- `OuterProductMean` / `MSAPairWeightedAveraging` no longer refuse a call the Triton kernels cannot serve: the `triton` request that did is gone.
+
+### Deprecated
+
+- `implementation="triton"` and `implementation="cuda"` are read as `miniworld` with a `DeprecationWarning` (on H100 / B200 that is the
+  CUDA path; forcing Triton is only possible through `settings.force_triton_kernels`). **Removed in the next minor release**, together
+  with the `settings.engine_backend` alias and `build --backend`.
+
 ## [2.3.9] - 2026-10-24
 
 ### Added

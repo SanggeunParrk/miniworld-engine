@@ -320,7 +320,7 @@ kernels with TF32 tensor-core MMAs (`tcgen05.mma kind::tf32`, fp32 accumulation 
 fp32. Host side: `kernels/swa_dit/cuda/sm100/tf32_fwd.py` (forward, `block_fwd_tf32`, `mod_fwd_tf32`);
 `dispatch._tf32` picks them for fp32 q on B200 at the served widths with S a multiple of 128 (else the Triton fp32 path, which takes
 any S). A call that records a gradient (a training forward, the hoisted modulation with a gradient) runs the Triton fp32 path;
-`settings.swa_dit_tf32=0` (or `settings.swa_dit_sm100=0`, `engine_backend="triton"`) keeps the Triton fp32 path, and a build or
+`settings.swa_dit_tf32=0` (or `settings.swa_dit_sm100=0`, `force_triton_kernels=True`) keeps the Triton fp32 path, and a build or
 load failure warns once and keeps it too. The hoisted modulation (`swa_dit_hoist_modulation`, fp32 c and Wmod) runs on
 `mod_fwd_tf32` when no gradient is recorded.
 

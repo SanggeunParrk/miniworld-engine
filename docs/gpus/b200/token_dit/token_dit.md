@@ -570,7 +570,7 @@ time. Not one of `token_dit_train.serves()`'s conditions was the cause -- it was
   is why the consumer model code routed [A, B, L] around it.
 
 Every other condition holds for that call: grad on, `implementation: miniworld_engine` (-> TRITON backend),
-`engine_backend: auto`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
+`force_triton_kernels: false`, B200, fp32 activations (`diffusion.dtype: fp32`), B = 1, A = 48 (even), L = 384 (the crop is padded to
 `bucket_token_multiple: 384`), 16 x 48, cond [A, 1, L, 384], pair [1, L, L, 128], LayerNorm eps 1e-5, QK-norm (served),
 non-reentrant `checkpoint_sequential` (grad stays on inside, so the fused Function runs and is recomputed in the backward),
 torch.compile (the block's forward / backward are opaque ops).

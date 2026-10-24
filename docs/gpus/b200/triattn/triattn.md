@@ -18,7 +18,7 @@ out-projection, and the matching backward); they are not ports of the WGMMA kern
 The d_pair 128 path is served when all of these hold, otherwise the module runs its Triton path unchanged:
 
 - the module's backend is TRITON (`implementation=miniworld`, or an explicit `triton`), `module._b200_cuda` is True
-  (the default; False keeps the Triton kernels, e.g. as a benchmark baseline) and `settings.engine_backend != "triton"`;
+  (the default; False keeps the Triton kernels, e.g. as a benchmark baseline) and `(not settings.force_triton_kernels)`;
 - `d_pair = d_hidden = 128`, `n_head = 4`, no QK-norm;
 - `pair` is a bf16 CUDA tensor `[B, L, L, 128]` with L a multiple of 128 (any B), `mask` is None or bool `[B, L]`;
 - compute capability (10, 0).
