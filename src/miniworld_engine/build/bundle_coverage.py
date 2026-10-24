@@ -144,6 +144,9 @@ def cases() -> list[dict]:
     # Every hand-CUDA stage extension of the fused SWA atom block (kernels/swa_dit/cuda/loader.py): a stage the dispatch tries first (modwg)
     # and falls back from is reached by no model shape, and would JIT-compile on a first call.
     out.append({"kind": "swa_stages", "train": False, "dtype": "bfloat16", "heavy": False})
+    # The Anthropic OPM path (integrations/anthropic_msa) finishes with THIS repo's csrc/opm_epilogue.cu, built once under the name
+    # ``miniworld_opm_epilogue`` (no variant suffix: the ``_native*`` ones belong to integrations/opm_train). Needs no payload to build.
+    out.append({"kind": "anthropic_ext", "train": False, "dtype": "bfloat16", "heavy": False})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -322,6 +325,11 @@ def _run_block(c: dict) -> None:
         return
     elif c["kind"] == "swa_stages":
         _swa_stages()
+        return
+    elif c["kind"] == "anthropic_ext":
+        from miniworld_engine.integrations import anthropic_msa
+
+        anthropic_msa._ext()
         return
     elif c["kind"] == "local_dit":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
