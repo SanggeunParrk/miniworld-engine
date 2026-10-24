@@ -62,7 +62,7 @@ def test_other_cards_keep_the_engine_kernel_where_they_are_recorded(monkeypatch,
     """A100 holds a record for the RMSNorm kernels, the A6000 does not (autotune/manifests): there ``miniworld`` warns and runs PyTorch."""
     _card(monkeypatch, capability)
     if op == "rmsnorm" and capability == (8, 6):
-        with pytest.warns(UserWarning, match="no record"):
+        with pytest.warns(UserWarning, match="not recorded"):
             assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
     else:
         assert dispatch.resolve(op, "miniworld") is engine

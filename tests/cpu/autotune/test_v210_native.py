@@ -64,8 +64,8 @@ def test_candidate_validation_rejects_wrong_results_and_ignores_unwritten_infere
 
 def test_native_inference_cli_is_explicit():
     from miniworld_engine.cli import build_parser
-    args = build_parser().parse_args(["build", "all", "--backend", "native", "--mode", "eval"])
-    assert args.backend == "native"
+    args = build_parser().parse_args(["build", "all", "--kernels", "native", "--mode", "eval"])
+    assert args.kernels == "native"
     assert args.mode == "eval"
     assert args.config_type == "default"
 
