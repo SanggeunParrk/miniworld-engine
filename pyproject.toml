@@ -1,6 +1,6 @@
 [project]
 name = "miniworld-engine"
-version = "2.3.9"
+version = "2.3.10"
 requires-python = ">=3.10"
 readme = "README.md"
 description = "MiniWorld GPU kernel development repo — Triton / CUDA kernels + benches for AF3-style ops (triangle multiplication, transition, attention, ...)."

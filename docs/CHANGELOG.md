@@ -6,7 +6,7 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
-## [Unreleased]
+## [2.3.10] - 2026-10-24
 
 ### Added
 
@@ -78,6 +78,50 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - `implementation="triton"` and `implementation="cuda"` are read as `miniworld` with a `DeprecationWarning` (on H100 / B200 that is the
   CUDA path; forcing Triton is only possible through `settings.force_triton_kernels`). **Removed in the next minor release**, together
   with the `settings.engine_backend` alias and `build --backend`.
+
+### Fixed (release preparation)
+
+- The Anthropic OPM path's epilogue extension (`integrations/anthropic_msa._ext()`, built as `miniworld_opm_epilogue`, no variant suffix)
+  was not in the 2.3.9 wheel (only the `_native*` variants of `integrations/opm_train` were): the `anthropic` OPM path JIT-compiled it on its
+  first call. `build/bundle_coverage.py` has a case for it (`anthropic_ext`), and a FoldForge test run with the Anthropic variables set and an
+  empty cache compiles nothing.
+- `anthropic_msa.opm_refusal` knows the module's `normalize_before_proj`: the epilogue divides by the pair count before the output projection and
+  adds the bias undivided, so `OuterProductMean(normalize_before_proj=False)` (ESMFold2: the bias is divided too) is refused with a reason
+  (`implementation="anthropic"` raises `PayloadUnavailable`; `miniworld` with a payload named falls through to its other legs) instead of being
+  served with the wrong bias (relative error about 7).
+- `integrations.opm_train.wanted` and `integrations.pwa_train.wanted` no longer answer to `ANTHROPIC`: `implementation="anthropic"` runs the
+  release's path, not the engine's own H100 path first.
+- `modules.dispatch.resolve` accepts `ANTHROPIC` for every op whose module implements it (`triangle_multiplication`, `triangle_attention`;
+  `_ANTHROPIC_OPS`), not for TriMul only; the other ops still raise `ValueError`. (`Transition` has an adapter in `integrations.anthropic` but
+  no branch in the module: it still rejects the option.)
+- `architecture.exceptions.ImplementationType` has `ANTHROPIC` (`to_engine_impl` maps it to the engine's option; architecture layers that have
+  no Anthropic path raise `InvalidImplementationError` at their forward, as for any unsupported value).
+- `tests/cpu/compile/test_compile_wrap_coverage.py` passes again: the CUDA rows kernel of `kernels/dit_variants` is `gate_rows_inplace`
+  (its `gate_rows` name collided with the Triton token-DiT `gate_rows`, whose callers the test follows by name).
+- `dev bundle-kernels --drop-stale` leaves out the recorded artifacts whose key the checkout can no longer compute (a source they reached
+  has changed since they were built); with `--keep` or records of an older tree they were packed into the wheel and never loaded (11 in the
+  2.3.9 wheels). The 2.3.10 wheels are built with it.
+
+### Notes
+
+- **New Triton paths are validated on H100 only.** The portable Triton paths of this release (Triton gaps A and B: PWA `value_dim` 8, OPM
+  `projection_bias` / `groups`, TriangleAttention variants, `LocalDiTBlock` window attention, `DiTVariantStack` / `AtomDiTVariantStack`) were
+  run under the A/B switch on an H100. A100, RTX A5000 and RTX A6000 have no manifest row for them: until someone runs
+  `python -m miniworld_engine.autotune.run_all` on those cards and commits the manifest, `miniworld` warns (`UnrecordedCardWarning`) and runs
+  PyTorch there for these calls.
+- **`miniworld` still uses the Anthropic payloads automatically** when `OPT_CORE_DIR` (OPM / PWA) or `TRIMUL_NATIVE_BUILD_DIR` (TriMul) is set
+  and a call fits them. This is unchanged and documented in `docs/dispatch.md` ("The Anthropic payload"); whether it should require
+  `implementation="anthropic"` is open.
+
+### Migration: `implementation="triton"` / `engine_backend="triton"`
+
+`implementation="triton"` and `"cuda"` still parse (a `DeprecationWarning`), as `miniworld`; they are removed in the next minor release.
+`settings.engine_backend` and `build --backend` are aliases of `force_triton_kernels` / `build --kernels` and go with them. Code that used
+them to force the Triton family should call `settings.configure(force_triton_kernels=True)` (A/B work only) and pass `implementation="miniworld"`;
+code that used `"cuda"` or `"triton"` to mean "the engine's kernels" should pass `"miniworld"` (on H100 / B200 that is the CUDA path).
+MiniWorld scripts to migrate (not edited here): `check_trimul_f567_runtime`, `check_trimul_backward_runtime`, `benchmark_trimul_fusion_ab`
+and `benchmark_trimul_backward_fusion` pass `implementation="triton"`; `build_phase1_runtime_cache` and `benchmark_miniworld_training_graph`
+pass `engine_backend="triton"`.
 
 ## [2.3.9] - 2026-10-24
 
