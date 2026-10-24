@@ -8,6 +8,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.11] - 2026-10-25
+
 ### Added
 
 - `pair_embed_geom` (H100, sm_90a, forward only): the backbone pair embedding of La-Proteina's autoencoder encoder (sequence separation, CA-to-N/CA/C/CB distances,
@@ -46,6 +48,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- Registry bands of the two window-attention Triton backward rows (`augmented_attention_bwd_window_triton`, `augmented_attention_bwd_reduce_window_triton`) set at 4x the H100
+  `run_all` measurement (bf16); corrects the 2.3.10 bands.
 - Documented hazard (no code change): the H100 token DiT training path rebuilds its weight packs only when a parameter's `_version` changes (`token_dit_train._pack`), and a *fused*
   optimizer (`torch.optim.Adam(W)(fused=True)`) updates parameters in place without bumping it -- eager steps then run on the previous step's weights (a fused AdamW
   autoencoder run learned visibly slower, and an eager step disagreed with a CUDA-graph replay of the same state). Call `torch.autograd.graph.increment_version(p)` for every
