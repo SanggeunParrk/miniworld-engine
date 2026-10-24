@@ -451,7 +451,7 @@ torch::Tensor pwa_wgv(torch::Tensor g,torch::Tensor v) {
 torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w, double eps, torch::Tensor wb) {
   TORCH_CHECK(z.is_cuda() && z.scalar_type() == torch::kBFloat16 && z.is_contiguous() && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
   const int N = (int)z.size(0);
-  TORCH_CHECK(N % GJ == 0 && N <= 1024, "N must be a multiple of 16 (and <= 1024)");
+  TORCH_CHECK(N % GJ == 0 && N <= 2048, "N must be a multiple of 16 (and <= 2048; the forward holds H rows of N logits in shared memory)");
   TORCH_CHECK(mask.scalar_type() == torch::kBFloat16 && mask.is_contiguous() && mask.numel() == (long)N * N, "mask: [N, N] bf16");
   TORCH_CHECK(ln_w.scalar_type() == torch::kFloat && ln_w.is_contiguous() && ln_w.numel() == DZ, "LN scale fp32[128]");
   auto wb16 = wb.to(torch::kBFloat16).contiguous();
@@ -460,7 +460,7 @@ torch::Tensor pair_fwd3(torch::Tensor z, torch::Tensor mask, torch::Tensor ln_w,
   const int NP = N + 4;
   const int smem = NWARP * 2 * TILEB + (H * NP + DZ) * 4;
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (H * 1028 + DZ) * 4)); attr = true; }
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, NWARP * 2 * TILEB + (H * 2052 + DZ) * 4)); attr = true; }
   pair_fwd_kernel<<<N, THREADS, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(z.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(mask.data_ptr<at::BFloat16>()),
       ln_w.data_ptr<float>(), reinterpret_cast<const __nv_bfloat16*>(wb16.data_ptr<at::BFloat16>()),

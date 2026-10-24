@@ -48,6 +48,9 @@ _NATIVE_TRAINING_SCOPE: ContextVar[bool] = ContextVar(
 _SPLIT_MIN_N = 512
 
 
+NMAX_INFER = 2048  # longest sequence of the inference path (pair_fwd3's shared-memory row of logits)
+
+
 def _split_contraction(n: int) -> bool:
     """N >= 512: the contraction runs on cuBLAS (head-major o) and the gate / out pass in pwa_gateout; below, the fused kernel wins
     (the o round trip and the extra launch cost more than the faster contraction saves). o is rounded to bf16 BEFORE the gate here, as in
@@ -140,8 +143,10 @@ def refusal(
         native = native_aux_enabled(msa) or (
             not torch.is_grad_enabled() and native_inference_enabled(msa.device)
         )
-        if cap == (9, 0) and native and (n == 0 or s == 0 or n > 1024):
-            return f"the CUDA-only H100 path needs positive S and N <= 1024, got N={n}, S={s}"
+        # the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward one is built for N <= 1024
+        n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
+        if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
+            return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
@@ -885,7 +890,7 @@ def _inference_math(
     else:
         lnz_w = module.ln_pair.weight.detach().float().contiguous()
         wb16 = module.to_bias.weight.detach()
-    if k["pair3"] is not None and n % 16 == 0 and n <= 1024:
+    if k["pair3"] is not None and n % 16 == 0 and n <= NMAX_INFER:
         w16 = k["pair3"].pair_fwd3(z, pm, lnz_w, eps_z, wb16)
     else:
         w16 = pair_fwd(z, pm, lnz_w, eps_z, module.to_bias.weight.detach(), H, BJ=64)
