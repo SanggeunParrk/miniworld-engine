@@ -5,11 +5,17 @@
 //         attention core reads); sbias[b, h, i, j] = (y . Wb[h]) / scale, bf16, masked keys (mask[b, j] false) = -inf -- the core's
 //         bias operand, head-major.
 #include <torch/extension.h>
+#include <cuda_fp16.h>
 #include "sm90.cuh"
 using namespace sm90;
 
 namespace {
 constexpr int C = 128;                                    // d_pair
+__device__ __forceinline__ uint32_t pack2h(float a, float b) {       // fp16 pair, a -> low half
+  uint32_t r;
+  asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(b), "f"(a));
+  return r;
+}
 constexpr int NH = 4;                                     // heads (bias outputs)
 }  // namespace
 
@@ -33,6 +39,7 @@ static_assert(SMEM <= 232448, "smem");
 
 __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     int L, int ntiles, float eps, float inv_scale, int tr,
+    int h16,                                              // q / k / v and the bias in fp16 (the operands of the fp16 core, triattn_h16_sm90.cu); g stays bf16
     const __grid_constant__ CUtensorMap xmap,             // x [R][128] bf16, box (64, 128), 128B swizzle (tr: the 4-D transposed pair map)
     const __grid_constant__ CUtensorMap wmap,             // W4 [512][128] bf16, box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap wbmap,            // Wb16 [16][128] bf16, box (64, 16), 128B swizzle
@@ -42,7 +49,7 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
     const __grid_constant__ CUtensorMap kmap,
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap gmap,
-    __nv_bfloat16* __restrict__ BIAS) {                   // [B][4][L][L]
+    void* __restrict__ BIAS) {                            // [B][4][L][L] bf16, or fp16 (h16)
   using namespace fr;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -145,9 +152,17 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
         named_sync(3 + w, 128);
       }
 #pragma unroll
-      for (int i2 = 0; i2 < 8; ++i2)
-        stsm_x4(chunk(2 * i2 + lcol8), pack2(acc[8 * i2], acc[8 * i2 + 1]), pack2(acc[8 * i2 + 2], acc[8 * i2 + 3]),
-                pack2(acc[8 * i2 + 4], acc[8 * i2 + 5]), pack2(acc[8 * i2 + 6], acc[8 * i2 + 7]));
+      if (h16 && c < 3) {
+#pragma unroll
+        for (int i2 = 0; i2 < 8; ++i2)
+          stsm_x4(chunk(2 * i2 + lcol8), pack2h(acc[8 * i2], acc[8 * i2 + 1]), pack2h(acc[8 * i2 + 2], acc[8 * i2 + 3]),
+                  pack2h(acc[8 * i2 + 4], acc[8 * i2 + 5]), pack2h(acc[8 * i2 + 6], acc[8 * i2 + 7]));
+      } else {
+#pragma unroll
+        for (int i2 = 0; i2 < 8; ++i2)
+          stsm_x4(chunk(2 * i2 + lcol8), pack2(acc[8 * i2], acc[8 * i2 + 1]), pack2(acc[8 * i2 + 2], acc[8 * i2 + 3]),
+                  pack2(acc[8 * i2 + 4], acc[8 * i2 + 5]), pack2(acc[8 * i2 + 6], acc[8 * i2 + 7]));
+      }
       fence_proxy_async();
       named_sync(3 + w, 128);
       if (T == 0) {
@@ -174,7 +189,9 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
           for (int e = 0; e < 2; ++e) {
             const int h = 2 * t4 + e;
             const float val = keep ? acc[2 * hf + e] * inv_scale : -INFINITY;
-            BIAS[((b * NH + h) * L + i) * L + j] = __float2bfloat16_rn(val);
+            const long at = ((b * NH + h) * L + i) * L + j;
+            if (h16) reinterpret_cast<__half*>(BIAS)[at] = __float2half_rn(val > -INFINITY ? fmaxf(fminf(val, 6.0e4f), -6.0e4f) : val);   // finite values clamped to fp16's range
+            else reinterpret_cast<__nv_bfloat16*>(BIAS)[at] = __float2bfloat16_rn(val);
           }
         }
       }
@@ -188,8 +205,9 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm90(
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------
-// tail:  out = x + drop o ((sigmoid(g) o o) . Wo^T)   (the gate, the out-projection, the dropout scale and the residual in one pass;
-//        drop [B][L (the row's last index j)][128] bf16 = the module's broadcast dropout scale, or none).
+// tail:  out = x + drop o ((sigmoid(g) o o) . Wo^T [+ bo])   (the gate, the out-projection, its bias, the dropout scale and the residual
+//        in one pass, one rounding; drop [B][L (the row's last index j)][128] bf16 = the module's broadcast dropout scale, or none;
+//        bo [128] fp32 = RoseTTAFold3's out-projection bias, or none: added after the bf16 sum it was a second rounding at x's scale).
 // Tile = 128 rows.  Warpgroup 0 = TMA producer (Wo once; g | o | x per tile through a two-stage ring); warpgroups 1 / 2 = rows
 // 0-63 / 64-127.  A consumer warp ldmatrix-loads g, o and x in the wgmma A-fragment layout -- which is also the accumulator
 // layout of the same rows and columns -- forms u = sigmoid(g) o o in registers as the A operand of the m64n128 chain over Wo, adds
@@ -209,7 +227,7 @@ __device__ __forceinline__ float sigmoid_t(float x) {   // 0.5 + 0.5 tanh(x / 2)
 }
 
 __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
-    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP, int tr,
+    int L, int ntiles, const __nv_bfloat16* __restrict__ DROP, int tr, const float* __restrict__ BO, const float* __restrict__ GB,
     const __grid_constant__ CUtensorMap gmap,             // g / o / x [R][128] bf16, box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap omap,
     const __grid_constant__ CUtensorMap xmap,
@@ -282,7 +300,13 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
       ldsm_x4(chunk(os, 2 * kb + lcol8), oo);
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
-        const float2 a = bf2f(gg[e]), b = bf2f(oo[e]);
+        float2 a = bf2f(gg[e]);
+        const float2 b = bf2f(oo[e]);
+        if (GB != nullptr) {                              // word e: columns 16 kb + 8 (e >> 1) + 2 t4, + 1
+          const float2 gv = __ldg(reinterpret_cast<const float2*>(GB + 16 * kb + 8 * (e >> 1) + 2 * t4));
+          a.x += gv.x;
+          a.y += gv.y;
+        }
         ua[kb][e] = pack2(sigmoid_t(a.x) * b.x, sigmoid_t(a.y) * b.y);
       }
     }
@@ -307,6 +331,11 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm90(
         const float2 xv = bf2f(xa[i >> 1][2 * (i & 1) + hf]);
         float2 dv = make_float2(1.f, 1.f);
         if (DROP != nullptr) dv = bf2f(dfr[i][hf]);
+        if (BO != nullptr) {                              // columns 8 i + 2 t4, + 1 of the accumulator block
+          const float2 bv = __ldg(reinterpret_cast<const float2*>(BO + 8 * i + 2 * t4));
+          acc[4 * i + 2 * hf] += bv.x;
+          acc[4 * i + 2 * hf + 1] += bv.y;
+        }
         acc[4 * i + 2 * hf] = fmaf(acc[4 * i + 2 * hf], dv.x, xv.x);
         acc[4 * i + 2 * hf + 1] = fmaf(acc[4 * i + 2 * hf + 1], dv.y, xv.y);
       }
@@ -986,15 +1015,16 @@ auto bf16c(const torch::Tensor& t) { return reinterpret_cast<const __nv_bfloat16
 // in rows 0..3, zeros below); mask [B, L] bool or empty -> (q, k, v, g [R, 128] bf16, sbias [B, 4, L, L] bf16 = bias / scale, masked
 // keys -inf)
 std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb16,
-                                     torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans) {
+                                     torch::Tensor mask, int64_t B, int64_t L, double scale, bool trans, bool h16) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
   const long R = x.numel() / C;
   TORCH_CHECK(R == B * L * L && L % fr::BM == 0, "rows = B * L * L, L % 128 == 0");
   TORCH_CHECK(w4.scalar_type() == torch::kBFloat16 && w4.is_contiguous() && w4.size(0) == 4 * C && w4.size(1) == C, "w4 [512, 128] bf16");
   TORCH_CHECK(wb16.scalar_type() == torch::kBFloat16 && wb16.is_contiguous() && wb16.size(0) == 16 && wb16.size(1) == C, "wb16 [16, 128] bf16");
   auto opt = x.options();
-  auto q = torch::empty({R, C}, opt), k = torch::empty({R, C}, opt), v = torch::empty({R, C}, opt), g = torch::empty({R, C}, opt);
-  auto bias = torch::empty({B, NH, L, L}, opt);
+  const auto hopt = h16 ? opt.dtype(torch::kHalf) : opt;
+  auto q = torch::empty({R, C}, hopt), k = torch::empty({R, C}, hopt), v = torch::empty({R, C}, hopt), g = torch::empty({R, C}, opt);
+  auto bias = torch::empty({B, NH, L, L}, hopt);
   auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous();
   const bool* mp = nullptr;
   torch::Tensor mk;
@@ -1011,15 +1041,20 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_front_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, fr::SMEM)); attr = true; }
   const int ntiles = (int)(R / fr::BM);
   tri_front_sm90<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
-      qm, km, vm, gm, bf16ptr(bias));
+      (int)L, ntiles, (float)eps, (float)(1.0 / scale), (int)trans, (int)h16, xm, wm, wbm, lw.data_ptr<float>(), lb.data_ptr<float>(), mp,
+      qm, km, vm, gm, bias.data_ptr());
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
-// out = x + drop o (sigmoid(g) o o) . Wo^T; g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty; `out`: a
-// contiguous bf16 [R, 128] to write into (a chunk's rows of a batch's output), else a new tensor
+// out = x + drop o ((sigmoid(g [+ gb]) o o) . Wo^T [+ bo]); g, o, x [R, 128] bf16, wo [128, 128] bf16; drop [B, L, 128] bf16 or empty;
+// `out`: a contiguous bf16 [R, 128] to write into (a chunk's rows of a batch's output), else a new tensor; bo / gb: fp32 [128] or none
+// (RoseTTAFold3's out-projection / gate biases, in fp32 before the one rounding of each)
 torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, bool trans,
-                       c10::optional<torch::Tensor> out_into) {
+                       c10::optional<torch::Tensor> out_into, c10::optional<torch::Tensor> bo, c10::optional<torch::Tensor> gb) {
+  for (const auto* b : {&bo, &gb})
+    if (b->has_value())
+      TORCH_CHECK((*b)->is_cuda() && (*b)->scalar_type() == torch::kFloat32 && (*b)->is_contiguous() && (*b)->numel() == C,
+                  "bo / gb: fp32 [128]");
   for (const auto* t : {&g, &o, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == g.numel(), "g / o / x: [R, 128] bf16");
   const long R = g.numel() / C;
   TORCH_CHECK(R % tl::BM == 0 && L % tl::BM == 0, "rows % 128, L % 128");
@@ -1042,7 +1077,8 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
   const int ntiles = (int)(R / tl::BM);
   const int jb = (int)(L / tl::BM), grid = std::max(jb, std::min(ntiles, num_sms(g.device().index())) / jb * jb);   // a multiple of the j blocks
   tri_tail_sm90<<<grid, tl::THREADS, tl::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, (int)trans, gm, om, xm, wm, ym);
+      (int)L, ntiles, dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, (int)trans,
+      bo.has_value() ? bo->data_ptr<float>() : nullptr, gb.has_value() ? gb->data_ptr<float>() : nullptr, gm, om, xm, wm, ym);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1206,9 +1242,10 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_pack", &tri_pack, "sm90 TriangleAttention weight pack: (w4 [512,128] bf16, wb16 [16,128] bf16, wo16 [128,128] bf16) in one launch");
   m.def("tri_head_bwd", &tri_head_bwd, "sm90 TriangleAttention head backward: projection dgrad + LN backward, dx added into dpair");
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm90 TriangleAttention gate backward: (do, dg, delta, seed); dWo added into a fp32 accumulator");
-  m.def("tri_tail", &tri_tail, "sm90 TriangleAttention tail: x + drop o (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"),
-        py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false, py::arg("out") = py::none());
+  m.def("tri_tail", &tri_tail, "sm90 TriangleAttention tail: x + drop o ((sigmoid(g [+ gb]) o o) . Wo^T [+ bo])", py::arg("g"),
+        py::arg("o"), py::arg("x"), py::arg("wo"), py::arg("drop"), py::arg("L"), py::arg("trans") = false, py::arg("out") = py::none(),
+        py::arg("bo") = py::none(), py::arg("gb") = py::none());
   m.def("tri_front", &tri_front, "sm90 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias / scale",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb16"), py::arg("mask"), py::arg("B"),
-        py::arg("L"), py::arg("scale"), py::arg("trans") = false);
+        py::arg("L"), py::arg("scale"), py::arg("trans") = false, py::arg("h16") = false);
 }

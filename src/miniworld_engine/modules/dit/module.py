@@ -84,15 +84,22 @@ class DiTBlock(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | Bool[torch.Tensor, "A B L"] | None = None,
         *,
         compute_dtype: torch.dtype | None = None,
+        extra_pair_bias: Float[torch.Tensor, "L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """AF3 Alg. 23; each part returns its residual output (stream in, stream out).
+
+        ``extra_pair_bias`` [L, L] is added to every head's attention logits, on top of the pair's own bias (the
+        structural-token family's relation matrix). The Hopper BF16 CUDA path folds it into the hoisted bias; no other path
+        takes it, so a call it does not serve raises instead of dropping the term.
 
         ``mask`` is a key mask: [B, L], or [A, B, L] (the attention's own contract). The fused token DiT paths take one key
         mask shared by the samples, so an [A, B, L] mask that is one -- a [B, L] mask expanded over A (stride 0), or A == 1 --
         reaches them as its [B, L] row; a mask that differs per sample keeps the module path."""
         key_mask, shared = _shared_key_mask(mask)
-        if shared and _h100.serves(self, single, cond, pair, compute_dtype):
-            return _h100.update(self, single, cond, pair, key_mask)
+        if shared and _h100.serves(self, single, cond, pair, compute_dtype, extra_pair_bias):
+            return _h100.update(self, single, cond, pair, key_mask, extra_pair_bias)
+        if extra_pair_bias is not None:
+            raise ValueError("extra_pair_bias is served by the Hopper BF16 inference path only")
         if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype):
             return _train.block(self, single, cond, pair, key_mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}

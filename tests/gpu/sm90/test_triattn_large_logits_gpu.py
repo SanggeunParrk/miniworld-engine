@@ -51,7 +51,7 @@ def _rel(a, b):
 
 
 @pytest.mark.parametrize("weight_std", [0.35, 0.5, 0.8, 1.2])
-@pytest.mark.parametrize("length", [128, 256])
+@pytest.mark.parametrize("length", [128, 256, 512])
 @pytest.mark.parametrize(("starting", "transposed_bias"), [(True, True), (False, True), (False, False)])
 @pytest.mark.parametrize("masked", [False, True])
 def test_large_logits_stay_finite_and_accurate(weight_std, length, starting, transposed_bias, masked):
@@ -76,12 +76,13 @@ def test_large_logits_stay_finite_and_accurate(weight_std, length, starting, tra
     assert err <= 1.5 * base + 5e-3, (err, base)
 
 
-def test_first_tile_fully_masked_then_a_far_larger_logit():
+@pytest.mark.parametrize("length", [256, 512])
+def test_first_tile_fully_masked_then_a_far_larger_logit(length):
     """The offset starts at -inf: a row whose first 128 keys are masked takes it from a later tile."""
     engine, reference = _modules(0.8, True, True)
     g = torch.Generator(device="cuda").manual_seed(2)
-    x = torch.randn(1, 256, 256, 128, device="cuda", generator=g).bfloat16()
-    mask = torch.ones(1, 256, dtype=torch.bool, device="cuda")
+    x = torch.randn(1, length, length, 128, device="cuda", generator=g).bfloat16()
+    mask = torch.ones(1, length, dtype=torch.bool, device="cuda")
     mask[0, :128] = False
     with torch.no_grad():
         actual, expected = engine(x, mask), reference(x.float(), mask)

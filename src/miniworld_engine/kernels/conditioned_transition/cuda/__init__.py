@@ -119,16 +119,20 @@ def _tf32_wab(wab, ht=128):
         _TF32_WAB,
         (wab.data_ptr(), wab._version, tuple(wab.shape), ht),
         lambda: (build(), wab),
-        limit=8,
+        limit=_capture.BLOCK_CACHE_LIMIT,
     )[0]
 
 
-def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
+def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None):
     """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
 
     Live CUDA weight packing, fused pair normalization/bias, gated TMA/WGMMA
     attention, fused residual/AdaLN rows and WGMMA SwiGLU. All other products
     are cuBLAS. Unsupported calls raise and never enter a portable backend.
+
+    ``extra`` is an optional [L, L] logit bias added to every head of every block's pair bias (the structural-token
+    family's ``structural_pair_attn_bias``). It is folded into the hoisted bias, so it costs one add per pair, not per step.
+    BF16 only: the FP32 bias is key-permuted by its fused kernel.
     """
     import math
     from ... import _capture
@@ -151,6 +155,10 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         raise ValueError(
             "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / 128"
         )
+    if extra is not None and (
+        single.dtype is not torch.bfloat16 or tuple(extra.shape) != (L, L)
+    ):
+        raise ValueError("Hopper token extra pair bias requires BF16 and an [L, L] bias")
     qs = math.log2(math.e) / math.sqrt(D // heads)
     fp32 = single.dtype is torch.float32
     asynchronous = _CANDIDATE_INFER_ASYNC
@@ -202,7 +210,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
         return out, weights, cond_ready, matrix_ready, None
 
     packed, _, cond_ready, matrix_ready, late_pack = _capture.lookup(
-        _TOKEN_PACKS, key, prepare, limit=8
+        _TOKEN_PACKS, key, prepare, limit=_capture.BLOCK_CACHE_LIMIT
     )
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
     mask = None if mask is None else mask.reshape(L)
@@ -226,7 +234,11 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
                     _ext().token_mask90(bias, mask)
         else:
             bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
-        return bias, pair, mask, wf  # the entry keeps its key tensors alive: a freed address cannot alias another tensor
+            if extra is not None:
+                # the bias is in the attention's base-2 domain (``wf`` carries log2 e); a masked key stays at -1e30
+                bias += extra.float() * 1.4426950408889634
+        # the entry keeps its key tensors alive: a freed address cannot alias another tensor
+        return bias, pair, mask, wf, extra
 
     # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
     # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);
@@ -242,9 +254,10 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads):
             wf._version,
             heads,
             fp32,
+            None if extra is None else (extra.data_ptr(), extra._version),
         ),
         make_bias,
-        limit=2,
+        limit=_capture.BLOCK_CACHE_LIMIT,
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0, 0] if shared else cond.reshape(-1, 384)

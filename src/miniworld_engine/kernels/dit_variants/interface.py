@@ -164,7 +164,8 @@ def inference(stack, single, cond, pair, mask):
         ga, gt = t_gate[:, 2 * i * D:(2 * i + 1) * D], t_gate[:, (2 * i + 1) * D:(2 * i + 2) * D]
         last = out if i == nb - 1 else None
         mods = [(msa, mba, xa), *([(mst, mbt, xt)] if stack.parallel else [])]
-        cuda.ln_mod_rows(x, mods, L, eps, sig, xin=single.reshape(M, D) if i == 0 else None)
+        if i == 0 or stack.parallel:   # a sequential block's LN + AdaLN is the previous block's last residual pass (below)
+            cuda.ln_mod_rows(x, mods, L, eps, sig, xin=single.reshape(M, D) if i == 0 else None)
         torch.addmm(w["bqkv"], xa, w["wqkv"].t(), out=qkvg if blk.gating else qkvg[:, :3 * D])
         if blk.kq_norm:
             wq, bq, wk, bk, qeps = w["qk"]
@@ -179,7 +180,11 @@ def inference(stack, single, cond, pair, mask):
             cuda.res_rows(x, ya, ga, L, ms=mst, mb=mbt, out_ln=xt, eps=eps, sig=sig)
             torch.mm(xt, w["wexp"].t(), out=ab)
             cuda.glu_rows(ab, h, blk.up_gate)
-            cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, final=last)
+            if i + 1 < nb:
+                o = 4 * (i + 1) * D
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, ms=t_mod[:, o:o + D], mb=t_mod[:, o + D:o + 2 * D], out_ln=xa, eps=eps, sig=sig)
+            else:
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, final=last)
     return out.view(A, L, D)
 
 

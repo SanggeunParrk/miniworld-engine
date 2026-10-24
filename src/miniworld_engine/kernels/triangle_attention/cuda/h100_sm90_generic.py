@@ -66,13 +66,17 @@ _LT_CPP = r"""
 #include <vector>
 #define LT_CHECK(x) do { auto st_ = (x); TORCH_CHECK(st_ == CUBLAS_STATUS_SUCCESS, "cublasLt status ", int(st_), " at " #x); } while (0)
 struct LtPlan { cublasLtMatmulDesc_t op; cublasLtMatrixLayout_t la, lb, lc; cublasLtMatmulAlgo_t algo; size_t ws; bool tuned; };
-torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x, int64_t L, bool trans, c10::optional<torch::Tensor> out_into) {
+torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tensor> x, int64_t L, bool trans, c10::optional<torch::Tensor> out_into,
+                    c10::optional<torch::Tensor> bias) {
   TORCH_CHECK(u.is_cuda() && u.scalar_type() == at::kBFloat16 && w.scalar_type() == at::kBFloat16, "bf16 cuda");
   TORCH_CHECK(u.dim() == 2 && w.dim() == 2 && u.stride(1) == 1 && w.stride(1) == 1 && u.size(1) == w.size(1), "shapes");
   c10::cuda::CUDAGuard guard(u.device());
   const int64_t M = u.size(0), K = u.size(1), C = w.size(0);
   const bool has_c = x.has_value();
   if (has_c) TORCH_CHECK(x->scalar_type() == at::kBFloat16 && x->is_contiguous() && x->size(0) == M && x->size(1) == C, "x");
+  // bias: bf16 [C] added in the epilogue (fp32, before the one rounding of x + u W^T + bias)
+  const bool has_b = bias.has_value();
+  if (has_b) TORCH_CHECK(bias->scalar_type() == at::kBFloat16 && bias->is_contiguous() && bias->numel() == C, "bias");
   // trans (ending node): the output / residual rows are the pair's physical rows (b, j, i) of the logical rows (b, i, j): per (b, i) a
   // [C x L] matrix at column stride L C, batched over i with batch stride C
   const int64_t LL = trans ? L * L : M, NB = trans ? M / LL : 1;
@@ -82,7 +86,8 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
     TORCH_CHECK(out_into->is_cuda() && out_into->scalar_type() == at::kBFloat16 && out_into->is_contiguous() && out_into->numel() == M * C, "out");
   auto out = out_into.has_value() ? out_into->view({M, C}) : torch::empty({M, C}, u.options());
   static std::map<std::tuple<int, int64_t, int64_t, int64_t, int64_t, int64_t, int, int64_t>, LtPlan> plans;
-  const auto key = std::make_tuple((int)u.get_device(), M, K, C, u.stride(0), w.stride(0), (int)has_c + 2 * (int)trans, trans ? L : 0);
+  const auto key = std::make_tuple((int)u.get_device(), M, K, C, u.stride(0), w.stride(0), (int)has_c + 2 * (int)trans + 4 * (int)has_b,
+                                   trans ? L : 0);
   auto lt = reinterpret_cast<cublasLtHandle_t>(at::cuda::getCurrentCUDABlasLtHandle());
   auto stream = at::cuda::getCurrentCUDAStream();
   cudaStreamCaptureStatus cap = cudaStreamCaptureStatusNone;
@@ -96,6 +101,12 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
       cublasOperation_t ta = CUBLAS_OP_T, tb = CUBLAS_OP_N;
       LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSA, &ta, sizeof(ta)));
       LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_TRANSB, &tb, sizeof(tb)));
+      if (has_b) {
+        cublasLtEpilogue_t ep = CUBLASLT_EPILOGUE_BIAS;
+        cudaDataType_t bt = CUDA_R_16BF;
+        LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_EPILOGUE, &ep, sizeof(ep)));
+        LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_BIAS_DATA_TYPE, &bt, sizeof(bt)));
+      }
       LT_CHECK(cublasLtMatrixLayoutCreate(&p.la, CUDA_R_16BF, K, C, w.stride(0)));
       if (trans) {
         LT_CHECK(cublasLtMatrixLayoutCreate(&p.lb, CUDA_R_16BF, K, L, u.stride(0)));
@@ -113,6 +124,10 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
         LT_CHECK(cublasLtMatrixLayoutCreate(&p.lc, CUDA_R_16BF, C, M, C));
       }
     } else p = it->second;
+    if (has_b) {   // this call's bias, for the heuristic's alignment checks and the timing runs
+      const void* bp = bias->data_ptr();
+      LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bp, sizeof(bp)));
+    }
     cublasLtMatmulPreference_t pref;
     LT_CHECK(cublasLtMatmulPreferenceCreate(&pref));
     size_t wsmax = 32u << 20;
@@ -157,6 +172,10 @@ torch::Tensor lt_mm(torch::Tensor u, torch::Tensor w, c10::optional<torch::Tenso
     if (it == plans.end()) it = plans.emplace(key, p).first; else it->second = p;
   }
   const LtPlan& p = it->second;
+  if (has_b) {     // the descriptor is shared by every call of this shape: set this call's bias
+    const void* bp = bias->data_ptr();
+    LT_CHECK(cublasLtMatmulDescSetAttribute(p.op, CUBLASLT_MATMUL_DESC_BIAS_POINTER, &bp, sizeof(bp)));
+  }
   auto ws = torch::empty({(int64_t)p.ws + 16}, u.options().dtype(at::kByte));
   const float alpha = 1.f, beta = has_c ? 1.f : 0.f;
   for (int64_t bb = 0; bb < NB; ++bb) {
@@ -177,7 +196,7 @@ def _lt():
 
     cuda_home = ensure_cuda_home() or CUDA_HOME_STANDIN  # the toolkit's headers are needed only to build
     return load_inline(
-        name="triattn_h100_lt4",
+        name="triattn_h100_lt5",
         cpp_sources=_LT_CPP,
         functions=["lt_mm"],
         with_cuda=True,
@@ -348,6 +367,8 @@ def _forward(
         and _front() is not None
         and tuple(wcat.shape) == (4 * HD + _hp(H), C)
     )
+    # inference on the fp16 core (h100_sm90.INFERENCE_FP16): q / k / v and the bias in fp16, from the fused front or (L > 256) fp16 GEMMs
+    h16 = (not need) and _core_mod.INFERENCE_FP16 and (fused or L > 256)
     if fused:  # LN + projection + head-major scaled bias: one kernel
         y = mean = rstd = None
         proj, sbias, _ = _front().front(
@@ -362,24 +383,28 @@ def _forward(
             eps,
             1.0 / scale,
             trans,
+            h16,
         )
         qkvg = None
-        q, k, v, gt = (proj[i].view(B, L, L, H, D) for i in range(4))
+        q, k, v, gt = (
+            (proj[i].view(torch.float16) if h16 and i < 3 else proj[i]).view(B, L, L, H, D) for i in range(4)
+        )
     else:
         y, mean, rstd = g.ln_fwd(
-            x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, trans
+            x, lnw.float().contiguous(), lnb.float().contiguous(), eps, L, trans, h16  # h16: y in fp16 for fp16 GEMMs
         )
     if fused:
         pass
     elif need or L > 256:
-        qkvg = torch.matmul(y, wcat[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g
-        bias = torch.matmul(y, wcat[4 * HD :].t())  # [M, Hp]
+        ww = wcat.half() if h16 else wcat
+        qkvg = torch.matmul(y, ww[: 4 * HD].t())  # [M, 4 HD]: q | k | v | g (fp16 with h16, the gate too)
+        bias = torch.matmul(y, ww[4 * HD :].t())  # [M, Hp]
         sbias = g.front_bias(
             bias, front_mask, B, L, H, 0, scale
         )
     else:
         # short inference calls: one GEMM for q | k | v | g | bias (a launch less); beyond L 256 the extra tile column costs more
-        qkvg = _lt().lt_mm(y, wcat, None, 0, False, None)  # [M, 4 HD + Hp]
+        qkvg = _lt().lt_mm(y, wcat, None, 0, False, None, None)  # [M, 4 HD + Hp]
         sbias = g.front_bias(
             qkvg, front_mask, B, L, H, 4 * HD, scale
         )
@@ -391,22 +416,27 @@ def _forward(
         hd = gate_bias.numel() // H
         gt.add_(F.pad(gate_bias.view(H, hd), (0, D - hd)).to(gt.dtype))
     # the core's epilogue applies the gate: u = sigmoid(g) o (and writes o only when the backward needs it)
-    o, lse, _, u = _core_mod._core().triattn_fwd(q, k, v, sbias, scale, need, gt, need)
+    core = _core_mod._core_h16().triattn_fwd_h16 if h16 else _core_mod._core().triattn_fwd
+    o, lse, _, u = core(q, k, v, sbias, scale, need, gt, need)
     # (the ending node's out-projection writes its transposed rows as a strided batch over i: one cublasLt GEMM per sample; one GEMM
     # + the residual kernel's transposed store was slower except at d_pair 64 L128, measured 2026-10-20)
+    # RoseTTAFold3's out bias in the same epilogue, before its one rounding: added to the bf16 sum afterwards it was a second
+    # rounding at the residual's scale
+    bo = None if out_bias is None else out_bias.to(torch.bfloat16).contiguous()
     if drop is None:
         out = _lt().lt_mm(
-            u.view(M, HD), wo_p, x, L, trans, out
-        )  # x + u Wo^T: the residual in the GEMM epilogue (D != C, no staging copy)
+            u.view(M, HD), wo_p, x, L, trans, out, bo
+        )  # x + u Wo^T [+ bo]: the residual in the GEMM epilogue (D != C, no staging copy)
     else:
         t = torch.matmul(u.view(M, HD), wo_p.t())
+        if bo is not None:
+            t = t + bo
         out = g.residual(x, t, drop, L, trans)
     out = out.view(B, L, L, C)
-    if out_bias is not None:
-        out.add_(out_bias.to(out.dtype))
     return out, (y, mean, rstd, qkvg, sbias, o, lse, u)
 
 
+@torch.autocast("cuda", enabled=False)  # the fp16 core takes the fp16 projections as made: an enclosing bf16 autocast would turn the GEMMs bf16
 def inference(
     pair,
     lnw,

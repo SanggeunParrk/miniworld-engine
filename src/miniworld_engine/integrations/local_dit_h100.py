@@ -23,6 +23,7 @@ F32 = torch.float32
 BF = torch.bfloat16
 _HOIST_COND: dict = {}
 _HOIST_BIAS: dict = {}
+_HOIST_EDGES: dict = {}  # (pair tensor, LN / bias weights) -> the slid edge windows' indices, key mask and pair bias
 
 
 def _hopper(t) -> bool:
@@ -128,32 +129,42 @@ def _af3_servable(module, single, cond, pair, mask) -> bool:
     )
 
 
-def _slid_edges(o, q, k, v, z, gamma, wb, a, n, kmask, n0):
-    """Overwrite the attention output ``o`` [A, N, 128] of the windows whose slid key window is not the clipped one with the attention
-    over their slid key windows (torch, fp32). Those are windows 0 and 1 and the last three real windows (a window ends at
-    ``32 w + 80``, so at most three end past the last real atom): five windows chosen on the device from the real atom count, so there
-    is no host read and the call can be captured. A window chosen twice is computed twice with the same result."""
+def _edge_tables(z, gamma, wb, n, kmask, n0):
+    """What the slid edge windows read that does not change between the steps of a fold: the five window indices, their key positions and
+    validity, and their pair bias [5, h, 32, 128] (the pair LayerNorm and projection of those windows only). It depends on the real atom
+    count, the pair and the block's LN / bias weights, so it is built once per pair (``_HOIST_EDGES``) and read at every step."""
     import torch.nn.functional as F
 
-    h, d = NH, DS // NH
     nwin = n // 32
     n_real = (
         kmask.sum()
         if kmask is not None
-        else torch.full((), n0, device=o.device, dtype=torch.int64)
+        else torch.full((), n0, device=z.device, dtype=torch.int64)
     )
     last = (n_real - 1) // 32
     idx = torch.stack([last * 0, last * 0 + 1, last - 2, last - 1, last]).clamp(0, nwin - 1)  # [5]
     starts = torch.minimum((32 * idx - 48).clamp(min=0), (n_real - DS).clamp(min=0))
-    keys = starts[:, None] + torch.arange(DS, device=o.device)  # [5, 128]
+    keys = starts[:, None] + torch.arange(DS, device=z.device)  # [5, 128]
     valid = keys < n_real  # a system under 128 real atoms has keys past them
+    zz = F.layer_norm(z[idx].float(), (DP,), gamma.float(), None, _ld.EPS)
+    bias = F.linear(zz, wb.float()).permute(0, 3, 1, 2)  # [5, h, 32, 128]
+    mask = ~valid[None, :, None, None, :]
+    return idx, keys, mask, bias[None].contiguous()
+
+
+def _slid_edges(o, q, k, v, tables, a, n):
+    """Overwrite the attention output ``o`` [A, N, 128] of the windows whose slid key window is not the clipped one with the attention
+    over their slid key windows (torch, fp32). Those are windows 0 and 1 and the last three real windows (a window ends at
+    ``32 w + 80``, so at most three end past the last real atom): five windows chosen on the device from the real atom count, so there
+    is no host read and the call can be captured. A window chosen twice is computed twice with the same result. ``tables``: ``_edge_tables``."""
+    idx, keys, mask, bias = tables
+    h, d = NH, DS // NH
+    nwin = n // 32
     qs = q.view(a, nwin, 32, h, d)[:, idx].float()
     ks = k.view(a, n, h, d)[:, keys].float()
     vs = v.view(a, n, h, d)[:, keys].float()
-    zz = F.layer_norm(z[idx].float(), (DP,), gamma.float(), None, _ld.EPS)
-    bias = F.linear(zz, wb.float()).permute(0, 3, 1, 2)  # [5, h, 32, 128]
-    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * d**-0.5 + bias[None]
-    logits = logits.masked_fill(~valid[None, :, None, None, :], float("-inf"))
+    logits = torch.einsum("awqhd,awkhd->awhqk", qs, ks) * d**-0.5 + bias
+    logits = logits.masked_fill(mask, float("-inf"))
     probs = torch.nan_to_num(torch.softmax(logits, dim=-1))
     out = torch.einsum("awhqk,awkhd->awqhd", probs, vs).reshape(a, 5, 32, DS)
     o.view(a, nwin, 32, DS).index_copy_(1, idx, out.to(o.dtype))
@@ -287,7 +298,18 @@ def _fwd(
                 del qraw, kraw
         o, lse = attn(q.view(a, n, DS), k.view(a, n, DS), v.view(a, n, DS), bias2)
         if slide:
-            _slid_edges(o, q, k, v, z, weights[_ld._GAMMA], weights[_ld._WBIAS], a, n, kmask, _n0)
+            def edges():
+                return _edge_tables(z, weights[_ld._GAMMA], weights[_ld._WBIAS], n, kmask, _n0)
+
+            _slid_edges(
+                o,
+                q,
+                k,
+                v,
+                _ld._hoisted(_HOIST_EDGES, pair, (wkey, n, mk), edges) if hoist else edges(),
+                a,
+                n,
+            )
         o = o.view(m, DS)
         if not save:
             return [

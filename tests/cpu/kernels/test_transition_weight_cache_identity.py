@@ -44,9 +44,23 @@ def test_the_same_tensor_still_hits_and_a_change_misses():
     torch.testing.assert_close(b, w.t().contiguous())
 
 
-def test_the_cache_is_bounded_and_drops_dead_entries():
+def test_dead_entries_are_dropped_and_a_newer_version_replaces_the_older():
     _weights._CACHE.clear()
     with torch.no_grad():
-        for _ in range(_weights._MAX * 2):
+        for _ in range(200):
             _weights.transposed_contiguous(torch.randn(4, 4))
-    assert len(_weights._CACHE) <= _weights._MAX
+        assert len(_weights._CACHE) <= 1
+        w = torch.randn(4, 4)
+        _weights.transposed_contiguous(w)
+        w.add_(1)
+        _weights.transposed_contiguous(w)
+    assert sum(ref() is w for ref, _ in _weights._CACHE.values()) == 1
+
+
+def test_live_weights_keep_their_entries_past_a_model_s_worth_of_blocks():
+    # a captured CUDA graph reads the entry it hit: evicting a live weight's transpose freed memory a replay still read
+    _weights._CACHE.clear()
+    weights = [torch.randn(4, 4) for _ in range(200)]
+    with torch.no_grad():
+        first = [_weights.transposed_contiguous(w) for w in weights]
+        assert all(_weights.transposed_contiguous(w) is t for w, t in zip(weights, first))

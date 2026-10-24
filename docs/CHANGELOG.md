@@ -14,6 +14,22 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   compiled torch statements, from 1.3-2.9x), 128-wide rows warp-per-row and the atom edge windows' bias per pair (atom stacks 1.6x, from
   1.2-1.4x), RoseTTAFold3's OPM biases in the wide H100 prologue (`opm_prologue_wide(pbias=)`; 1.2-1.5x, from 0.9-1.0x). Record:
   `docs/records/model_variants_h100_speed_20261022.md`.
+- H100 TriangleAttention inference on fp16 operands (q / k / v / pair bias; `h100_sources/triattn_h16_sm90.cu`), the AF3 widths and the
+  width-generic path: core 1.04-1.09x Anthropic's sustained, module 1.13-1.51x (AF3 widths) and 1.03-1.08x (template widths); about a third
+  of the bf16 core's error against fp32. Record: `docs/records/triattn_h100_fp16_core_20261022.md`.
+
+### Fixed
+
+- A CUDA graph captured over more than 64 bf16 Transitions (Boltz-2's trunk: 64 pairformer blocks plus its template, MSA and confidence
+  stacks; Chai-1's; RoseTTAFold3's) faulted with an illegal memory access on a later replay. The fused sm90a Transition reads a cached
+  `Ws^T` per weight (`kernels/transition/cuda/_weights.py`), a capture reads that eager entry instead of recording the copy, and the cache
+  evicted its oldest entry past 64, freeing a transpose a captured graph still read. An entry now lives as long as its weight (dropped when
+  the weight dies or is cached again at a newer version).
+- H100 TriangleAttention with RoseTTAFold3's gate / out-projection biases added them after the bf16 rounding of the gate logits and of
+  `pair + update`: a second rounding at the residual's scale, sqrt(2) the bf16 reference's error on the update at a trunk's pair scale
+  (RoseTTAFold3's pLDDT moved by 1.5 at 256 tokens). The sm90 tail now takes both in fp32 before its one rounding (`tri_tail(bo=, gb=)`),
+  the width-generic path the out bias in its out-projection GEMM's cublasLt epilogue (`lt_mm(..., bias)`; its gate bias is still a bf16
+  add to the bf16 logits, an error at the logits' scale only).
 
 ## [2.3.8] - 2026-10-22
 

@@ -19,6 +19,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAException.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cstdint>
 #include <tuple>
 #include <type_traits>
@@ -39,6 +40,12 @@ __device__ __forceinline__ void unpack8(const uint4& v, float (&f)[8]) {
   f[4] = bf_lo(v.z); f[5] = bf_hi(v.z); f[6] = bf_lo(v.w); f[7] = bf_hi(v.w);
 }
 __device__ __forceinline__ uint4 pack8(const float (&f)[8]) { return make_uint4(pk(f[0], f[1]), pk(f[2], f[3]), pk(f[4], f[5]), pk(f[6], f[7])); }
+__device__ __forceinline__ uint32_t pkh(float a, float b) {     // fp16 pair, a -> low half
+  uint32_t r;
+  asm("cvt.rn.f16x2.f32 %0, %1, %2;" : "=r"(r) : "f"(b), "f"(a));
+  return r;
+}
+__device__ __forceinline__ uint4 pack8h(const float (&f)[8]) { return make_uint4(pkh(f[0], f[1]), pkh(f[2], f[3]), pkh(f[4], f[5]), pkh(f[6], f[7])); }
 __device__ __forceinline__ float warp_sum(float v) {
 #pragma unroll
   for (int o = 16; o > 0; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
@@ -67,7 +74,7 @@ __device__ __forceinline__ float grp_sum(float v) {
 template <int LPR>
 __global__ void __launch_bounds__(256) ln_fwd_k(const bf16* __restrict__ x, const float* __restrict__ w, const float* __restrict__ bs,
                                                 bf16* __restrict__ y, float* __restrict__ mean_o, float* __restrict__ rstd_o, long M, int C,
-                                                float eps, int L, int tr) {
+                                                float eps, int L, int tr, int h16) {     // h16: y as fp16 bits (the fp16 core's GEMM input)
   constexpr int RPW = 32 / LPR, NA = LPR == 32 ? MAXV : 1;
   const int lane = threadIdx.x & 31, sub = lane % LPR, grp = lane / LPR;
   const int nv = C >> 3;
@@ -106,15 +113,17 @@ __global__ void __launch_bounds__(256) ln_fwd_k(const bf16* __restrict__ x, cons
         float o[8];
 #pragma unroll
         for (int e = 0; e < 8; ++e) o[e] = fmaf((v[a][e] - mean) * rstd, ww[e], bb[e]);
-        *reinterpret_cast<uint4*>(y + row * C + idx * 8) = pack8(o);
+        *reinterpret_cast<uint4*>(y + row * C + idx * 8) = h16 ? pack8h(o) : pack8(o);
       }
     }
     if (sub == 0 && ok) { mean_o[row] = mean; rstd_o[row] = rstd; }
   }
 }
 
-// sbias[b, h, i, j] = bf16(qkvb[(b, i, j), bias_col + h] / scale), -inf where mask[b, j] is false.  A block = 128 consecutive j of one (b, i)
-__global__ void __launch_bounds__(256) front_bias_k(const bf16* __restrict__ qkvb, const bool* __restrict__ mask, bf16* __restrict__ sbias,
+// sbias[b, h, i, j] = T(qkvb[(b, i, j), bias_col + h] / scale), -inf where mask[b, j] is false (T = bf16, or fp16 for the fp16 inference core:
+// finite values clamped to its range).  A block = 128 consecutive j of one (b, i)
+template <typename T>
+__global__ void __launch_bounds__(256) front_bias_k(const T* __restrict__ qkvb, const bool* __restrict__ mask, T* __restrict__ sbias,
                                                     long ld, int bias_col, int H, int L, float inv_scale) {
   const long row0 = (long)blockIdx.x * 128;                  // (b * L + i) * L + j0
   const long bi = row0 / L;
@@ -122,8 +131,12 @@ __global__ void __launch_bounds__(256) front_bias_k(const bf16* __restrict__ qkv
   for (int idx = threadIdx.x; idx < 128 * H; idx += 256) {
     const int h = idx >> 7, r = idx & 127;
     const bool keep = mask == nullptr || mask[(long)b * L + j0 + r];
-    const float val = keep ? __bfloat162float(qkvb[(row0 + r) * ld + bias_col + h]) * inv_scale : -INFINITY;
-    sbias[(((long)b * H + h) * L + i) * L + j0 + r] = __float2bfloat16(val);
+    const T in = qkvb[(row0 + r) * ld + bias_col + h];
+    float f;
+    if constexpr (std::is_same_v<T, __half>) f = __half2float(in); else f = __bfloat162float(in);
+    const float val = keep ? f * inv_scale : -INFINITY;
+    if constexpr (std::is_same_v<T, __half>) sbias[(((long)b * H + h) * L + i) * L + j0 + r] = __float2half_rn(keep ? fmaxf(fminf(val, 6.0e4f), -6.0e4f) : val);
+    else sbias[(((long)b * H + h) * L + i) * L + j0 + r] = __float2bfloat16(val);
   }
 }
 
@@ -330,16 +343,17 @@ cudaStream_t stream() { return at::cuda::getCurrentCUDAStream(); }
 }  // namespace
 
 // x [M, C] bf16 -> (y bf16 [M, C], mean fp32 [M], rstd fp32 [M])
-std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, int64_t L, bool trans) {
+std::vector<torch::Tensor> g_ln_fwd(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, int64_t L, bool trans, bool h16) {
   TORCH_CHECK(x.is_cuda() && x.dim() == 2 && x.is_contiguous() && x.scalar_type() == torch::kBFloat16, "x [M, C] bf16 contiguous");
   const long M = x.size(0);
   const int C = (int)x.size(1);
   TORCH_CHECK(C % 8 == 0 && C <= 256 * MAXV, "C % 8 == 0 and C <= 512");
-  auto y = torch::empty_like(x);
+  auto y = h16 ? torch::empty_like(x, x.options().dtype(torch::kHalf)) : torch::empty_like(x);
   auto mean = torch::empty({M}, x.options().dtype(torch::kFloat32)), rstd = torch::empty({M}, x.options().dtype(torch::kFloat32));
   const int lpr = C == 64 ? 8 : C == 128 ? 16 : 32;
   const int grid = grid_for(M, 8 * (32 / lpr));
-  auto args = std::make_tuple(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), bp(y), mean.data_ptr<float>(), rstd.data_ptr<float>(), M, C, (float)eps, (int)L, (int)trans);
+  auto args = std::make_tuple(cbp(x), w.data_ptr<float>(), b.data_ptr<float>(), reinterpret_cast<bf16*>(y.data_ptr()), mean.data_ptr<float>(), rstd.data_ptr<float>(), M, C, (float)eps, (int)L, (int)trans,
+                              (int)h16);
   if (lpr == 8) std::apply([&](auto... a) { ln_fwd_k<8><<<grid, 256, 0, stream()>>>(a...); }, args);
   else if (lpr == 16) std::apply([&](auto... a) { ln_fwd_k<16><<<grid, 256, 0, stream()>>>(a...); }, args);
   else std::apply([&](auto... a) { ln_fwd_k<32><<<grid, 256, 0, stream()>>>(a...); }, args);
@@ -354,8 +368,12 @@ torch::Tensor g_front_bias(torch::Tensor qkvb, torch::Tensor mask, int64_t B, in
   torch::Tensor mk;
   const bool* mp = nullptr;
   if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
-  front_bias_k<<<(unsigned)(B * L * L / 128), 256, 0, stream()>>>(cbp(qkvb), mp, bp(sbias), qkvb.stride(0), (int)bias_col, (int)H, (int)L,
-                                                                  (float)(1.0 / scale));
+  if (qkvb.scalar_type() == torch::kHalf)          // fp16 GEMM output -> fp16 sbias (the fp16 inference core)
+    front_bias_k<__half><<<(unsigned)(B * L * L / 128), 256, 0, stream()>>>(reinterpret_cast<const __half*>(qkvb.data_ptr()), mp,
+        reinterpret_cast<__half*>(sbias.data_ptr()), qkvb.stride(0), (int)bias_col, (int)H, (int)L, (float)(1.0 / scale));
+  else
+    front_bias_k<bf16><<<(unsigned)(B * L * L / 128), 256, 0, stream()>>>(cbp(qkvb), mp, bp(sbias), qkvb.stride(0), (int)bias_col, (int)H, (int)L,
+                                                                        (float)(1.0 / scale));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return sbias;
 }
@@ -486,7 +504,7 @@ std::vector<torch::Tensor> g_pack(torch::Tensor wq, torch::Tensor wk, torch::Ten
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("ln_fwd", &g_ln_fwd);
+  m.def("ln_fwd", &g_ln_fwd, py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("L"), py::arg("trans"), py::arg("h16") = false);
   m.def("front_bias", &g_front_bias);
   m.def("gate_u", &g_gate_u);
   m.def("residual", &g_residual);

@@ -175,11 +175,12 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         single.ndim != 4
         or single.shape[0] < 1
         or single.shape[1] != 1
-        or single.shape[2] not in (128, 256, 384, 512, 640, 768)
+        or single.shape[2] < 128
+        or single.shape[2] % 128
         or single.shape[3] not in (768, 1024)
     ):
         raise ValueError(
-            "Hopper FP32 token inference requires [A,1,L,768 or 1024] at the six 128..768 buckets"
+            "Hopper FP32 token inference requires [A,1,L,768 or 1024] with L a multiple of 128"
         )
     A, _, L, _ = single.shape
     if (
@@ -219,7 +220,9 @@ def _check_native_fp32(module, single, cond, pair, compute_dtype):
         )
 
 
-def serves(module, single, cond, pair, compute_dtype=None):
+def serves(module, single, cond, pair, compute_dtype=None, extra=None):
+    if extra is not None and not serves_extra_bias(single, extra):
+        return False
     if _native_fp32_inference(module, single):
         try:
             _check_native_fp32(module, single, cond, pair, compute_dtype)
@@ -287,6 +290,16 @@ def serves(module, single, cond, pair, compute_dtype=None):
     return cap == (9, 0) and single.shape[2] % 128 == 0 and (a.n_head, d) in LAYOUTS
 
 
+def serves_extra_bias(single, extra) -> bool:
+    """The [L, L] extra pair bias is folded into the Hopper BF16 CUDA path's hoisted bias, and nowhere else."""
+    return (
+        single.is_cuda
+        and single.dtype is torch.bfloat16
+        and torch.cuda.get_device_capability(single.device) == (9, 0)
+        and tuple(extra.shape) == (single.shape[2], single.shape[2])
+    )
+
+
 def _pad8(L: int) -> int:
     return -(-L // 8) * 8
 
@@ -312,7 +325,7 @@ def _cuda_rows_available() -> bool:
         return False
 
 
-def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads):
+def _fake(single, cond, pair, mask, weights, qk, eq, ek, heads, extra):
     return torch.empty_like(single)
 
 
@@ -327,15 +340,18 @@ def _infer(
     eq: float,
     ek: float,
     heads: int,
+    extra: torch.Tensor | None,
 ) -> torch.Tensor:
-    """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise)."""
+    """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise).
+
+    ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
         from miniworld_engine.integrations.token_dit_train import _tf32
         from miniworld_engine.kernels.conditioned_transition import cuda
 
         with _tf32(single.dtype is torch.float32):
             return cuda.token_inference(
-                single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads
+                single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra
             )
     from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
         FusedTokenDiT,
@@ -424,7 +440,7 @@ def _infer(
 _ALL_TRUE: dict = {}
 
 
-def update(module, single, cond, pair, mask):
+def update(module, single, cond, pair, mask, extra=None):
     if (
         _native_fp32_inference(module, single)
         and mask is not None
@@ -461,4 +477,5 @@ def update(module, single, cond, pair, mask):
         eq,
         ek,
         int(a.n_head),
+        extra,
     )

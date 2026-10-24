@@ -12,6 +12,7 @@
 #include <cute/tensor.hpp>
 #include <cutlass/arch/barrier.h>
 #include "fa3_utils.h"
+#include <cuda_fp16.h>
 using namespace cute;
 using Element=cutlass::bfloat16_t;
 #ifndef MW_F3_STAGES
@@ -48,7 +49,8 @@ template<int C,int HD> struct Shared {
 template<int C,int HD> __global__ __launch_bounds__(256,minb_for(C))
 void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
               Element const* x,float const* lnw,float const* lnb,bool const* mask,
-              Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale,int tr) {
+              Element* bias,float* stats,int rows,int L,int H,float eps,float inv_scale,int tr,
+              int h16) {      // h16: q / k / v and the bias leave as fp16 bits (the fp16 inference core; the TMA store moves bytes), g as bf16
   constexpr int NK=C/64,COLS=4*HD+64,NB=(COLS+BN-1)/BN,STAGES=stages_for(C),total=NB*NK;
   extern __shared__ char memory[]; auto& s=*reinterpret_cast<Shared<C,HD>*>(memory);
   int tid=threadIdx.x,wgi=tid/128,wt=tid%128,base=blockIdx.x*128;
@@ -154,8 +156,10 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       #pragma unroll
       for(int j=0;j<size(acc);j+=2) {
         int rr=get<0>(coord(j)),cc=get<1>(coord(j));
-        Element lo=Element(acc(j)),hi=Element(acc(j+1));
-        *reinterpret_cast<uint32_t*>(stg+(cc/64)*4096+al(make_coord(rr,cc%64)))=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);
+        uint32_t word;
+        if(h16 && (col0+cc)/HD<3) word=uint32_t(__half_as_ushort(__float2half_rn(acc(j))))|(uint32_t(__half_as_ushort(__float2half_rn(acc(j+1))))<<16);
+        else {Element lo=Element(acc(j)),hi=Element(acc(j+1));word=uint32_t(lo.raw())|(uint32_t(hi.raw())<<16);}
+        *reinterpret_cast<uint32_t*>(stg+(cc/64)*4096+al(make_coord(rr,cc%64)))=word;
       }
       cutlass::arch::fence_view_async_shared();
       cutlass::arch::NamedBarrier::sync(128,1+wgi);
@@ -178,8 +182,12 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
       #pragma unroll
       for(int j=0;j<size(acc);j+=2) {
         int rr=get<0>(coord(j)),cc=get<1>(coord(j));
-        if(cc<H) stg[cc*64+rr]=Element(acc(j)*inv_scale);
-        if(cc+1<H) stg[(cc+1)*64+rr]=Element(acc(j+1)*inv_scale);
+        auto put=[&](int c,float v){
+          if(h16) reinterpret_cast<uint16_t*>(stg)[c*64+rr]=__half_as_ushort(__float2half_rn(fmaxf(fminf(v,6.0e4f),-6.0e4f)));
+          else stg[c*64+rr]=Element(v);
+        };
+        if(cc<H) put(cc,acc(j)*inv_scale);
+        if(cc+1<H) put(cc+1,acc(j+1)*inv_scale);
       }
       cutlass::arch::NamedBarrier::sync(128,1+wgi);
       if(wt<H*8) {
@@ -189,7 +197,10 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
         auto* v=reinterpret_cast<Element*>(&vec);
         if(mask) {
           #pragma unroll
-          for(int e=0;e<8;++e) if(!mask[b*L+key0+c*8+e]) v[e]=Element(-3.3895313892515355e38f);
+          for(int e=0;e<8;++e) if(!mask[b*L+key0+c*8+e]) {
+            if(h16) reinterpret_cast<uint16_t*>(v)[e]=0xFC00u;    // fp16 -inf
+            else v[e]=Element(-3.3895313892515355e38f);
+          }
         }
         *reinterpret_cast<uint4*>(bias+((int64_t(b)*H+h)*L+q)*L+key0+c*8)=vec;
       }
@@ -200,7 +211,7 @@ void front_v3(CUTE_GRID_CONSTANT TW const tw,CUTE_GRID_CONSTANT TO const to,
 }
 
 template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,
-                            torch::Tensor p,torch::Tensor bias,torch::Tensor stats,int L,int H,float eps,float inv_scale,int tr) {
+                            torch::Tensor p,torch::Tensor bias,torch::Tensor stats,int L,int H,float eps,float inv_scale,int tr,int h16) {
   int rows=x.size(0);
   auto gw=make_tensor(make_gmem_ptr((Element const*)weights.data_ptr()),make_shape(4*HD+64,C),ST{C,_1{}});
   auto tw=make_tma_copy(SM90_TMA_LOAD{},gw,WL{},Shape<Int<BN>,_64>{},_1{});
@@ -209,30 +220,34 @@ template<int C,int HD> void launch(torch::Tensor x,torch::Tensor lnw,torch::Tens
   size_t smem=sizeof(Shared<C,HD>);
   C10_CUDA_CHECK(cudaFuncSetAttribute(front_v3<C,HD>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem));
   front_v3<C,HD><<<rows/128,256,smem,at::cuda::getCurrentCUDAStream()>>>(tw,to,(Element*)x.data_ptr(),lnw.data_ptr<float>(),lnb.data_ptr<float>(),
-    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.data_ptr<float>(),rows,L,H,eps,inv_scale,tr);
+    mask.numel()?mask.data_ptr<bool>():nullptr,(Element*)bias.data_ptr(),stats.data_ptr<float>(),rows,L,H,eps,inv_scale,tr,h16);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans) {
+std::vector<torch::Tensor> front_forward(torch::Tensor x,torch::Tensor lnw,torch::Tensor lnb,torch::Tensor weights,torch::Tensor mask,int L,int H,int HD,double eps,double inv_scale,bool trans,bool h16) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type()==torch::kBFloat16 && x.is_contiguous() && x.dim()==2,"contiguous BF16 matrix required");
   c10::cuda::CUDAGuard guard(x.device());int C=x.size(1),rows=x.size(0),B=rows/(L*L);
   TORCH_CHECK(L>0 && L%128==0 && rows==B*L*L && HD==32*H && H<=16 && HD%64==0,"invalid pair/head dimensions");
   TORCH_CHECK(weights.device()==x.device() && weights.scalar_type()==torch::kBFloat16 && weights.is_contiguous() && weights.sizes()==torch::IntArrayRef({4*HD+64,C}),"packed weights mismatch");
   for(auto t:{lnw,lnb}) TORCH_CHECK(t.device()==x.device() && t.scalar_type()==torch::kFloat32 && t.is_contiguous() && t.numel()==C,"FP32 LN affines required");
   TORCH_CHECK(mask.device()==x.device() && mask.is_contiguous() && mask.scalar_type()==torch::kBool && (mask.numel()==0 || mask.sizes()==torch::IntArrayRef({B,L})),"mask mismatch");
-  auto p=torch::empty({4,rows,HD},x.options()),bias=torch::empty({B,H,L,L},x.options());
+  // h16: planes 0-2 of p and the bias hold fp16 bits (the caller views them as fp16), plane 3 (g) bf16
+  auto p=torch::empty({4,rows,HD},x.options()),bias=torch::empty({B,H,L,L},h16?x.options().dtype(torch::kHalf):x.options());
   auto stats=torch::empty({rows,2},x.options().dtype(torch::kFloat32));
   const int key=C*1000+HD;
   switch(key){
-    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
-    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans));break;
+    case 64064: launch<64,64>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 64128: launch<64,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 128128: launch<128,128>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 128256: launch<128,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 256256: launch<256,256>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 384384: launch<384,384>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
+    case 512512: launch<512,512>(x,lnw,lnb,weights,mask,p,bias,stats,L,H,float(eps),float(inv_scale),int(trans),int(h16));break;
     default: TORCH_CHECK(false,"unsupported (d_pair, heads x 32) pair");
   }
   return {p,bias,stats};
 }
-PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {m.def("front",&front_forward);}
+PYBIND11_MODULE(TORCH_EXTENSION_NAME,m) {
+  m.def("front",&front_forward,py::arg("x"),py::arg("lnw"),py::arg("lnb"),py::arg("weights"),py::arg("mask"),py::arg("L"),py::arg("H"),py::arg("HD"),
+        py::arg("eps"),py::arg("inv_scale"),py::arg("trans"),py::arg("h16")=false);
+}

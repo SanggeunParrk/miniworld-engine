@@ -139,6 +139,8 @@ def cases() -> list[dict]:
     # Boltz-2 / RoseTTAFold3 / Chai-1's variants (kernels/dit_variants, the 64-channel and output-variant TriangleAttention, the biased /
     # grouped OuterProductMean, the parallel Pairformer sum): bf16 inference; their extensions take no shape keys, one small case covers them.
     out.append({"kind": "model_variants", "train": False, "dtype": "bfloat16", "heavy": False})
+    # The sampler's glue (kernels/sampler_ops: random rigid motion, Kabsch + Euler update, encoder pooling): one extension, no shape keys.
+    out.append({"kind": "sampler_ops", "train": False, "dtype": "float32", "heavy": False})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -312,6 +314,9 @@ def _run_block(c: dict) -> None:
     elif c["kind"] == "model_variants":
         _model_variants()
         return
+    elif c["kind"] == "sampler_ops":
+        _sampler_ops()
+        return
     elif c["kind"] == "local_dit":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
         from miniworld_engine.modules.local_dit import LocalDiTBlock
@@ -325,6 +330,28 @@ def _run_block(c: dict) -> None:
     model = model.cuda().to(pdt)
     _randomize(model)
     _step(model, args, c["train"], autocast)
+
+
+def _sampler_ops() -> None:
+    """Every sampler-glue kernel once: the rigid motion + re-noising, the Kabsch + Euler update, the encoder pooling."""
+    import torch
+
+    from miniworld_engine.kernels.sampler_ops import interface
+
+    dev = "cuda"
+    b, n = 2, 1536
+    coords, noise = torch.randn(b, n, 3, device=dev), torch.randn(b, n, 3, device=dev)
+    mask = torch.ones(n, device=dev)
+    sigma, sigma_next = torch.tensor(2.0, device=dev), torch.tensor(1.5, device=dev)
+    noisy, sc = interface.augment_noise(
+        coords, mask, torch.randn(b, 2, 3, device=dev), torch.randn(b, 3, device=dev), noise, sigma, sigma_next,
+        window=False, gamma=0.8, gamma_min=1.0, sigma_min=0.0, sigma_max=float("inf"), noise_scale=1.003, variance_floor=0.0, clamp=False)
+    interface.align_euler(noisy, coords, mask, sc, sigma_next, 1.5)
+    tokens, atoms = 64, 24
+    interface.pool_atoms(torch.randn(b, tokens * atoms, 768, device=dev, dtype=torch.bfloat16),
+                         torch.randint(0, tokens * atoms, (tokens, atoms), device=dev), torch.ones(tokens, atoms, device=dev, dtype=torch.bool),
+                         torch.ones(tokens, atoms, device=dev))
+    torch.cuda.synchronize()
 
 
 def _model_variants() -> None:

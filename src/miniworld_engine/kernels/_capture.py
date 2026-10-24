@@ -33,6 +33,12 @@ import torch
 
 from miniworld_engine import settings
 
+#: Entries a per-block cache must hold: its key names the block's own weights, so one model run touches one entry per block
+#: (24 token-DiT blocks, 48 pairformer blocks). A limit below the block count evicts every entry before its block comes
+#: round again, and the cache then rebuilds at every call -- and, in a CUDA-graph capture, records the rebuild kernels so
+#: every replay runs them (a token DiT's pair bias alone was 15 % of a 1,024-token sampler).
+BLOCK_CACHE_LIMIT = 64
+
 _STATIC = [settings.current().static_weights]
 _STATIC_INPUTS = [settings.current().static_conditioning]
 

@@ -220,7 +220,7 @@ def _inference_packs(params, leaves):
         params,
     )
     return _capture.lookup(
-        _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=8
+        _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=_capture.BLOCK_CACHE_LIMIT
     )[:5]
 
 

@@ -27,14 +27,45 @@
 #include "sm90.cuh"
 using namespace sm90;
 
+#ifndef TA_FB
+#define TA_FB 0          // forward (measured slower, 2026-10-22: more traffic, lower clock under the 700 W cap): the bias staged once per call as fp32 in the score accumulator's register order (stage_bias): a G phase initialises
+                         // its accumulator with 16 LDS.128, no bf16 -> fp32 unpack per logit (~1 instruction per exponential of the issue-bound loop)
+#endif
 #ifndef TA_NKV
-#define TA_NKV 4         // forward: K | V ring stages (one per (key tile, row))
+#define TA_NKV (TA_FB ? 3 : 4)   // forward: K | V ring stages (one per (key tile, row)); 3 with the fp32 bias tiles (shared memory)
+#endif
+#ifndef TA_DOFF
+#define TA_DOFF 1        // forward: wgmma descriptors built once per CTA, moved per use by one add (desc_off), not re-assembled per wgmma
 #endif
 #ifndef TA_NB
 #define TA_NB 2          // forward: bias ring stages (one per key tile)
 #endif
 #ifndef TA_PP
 #define TA_PP 0          // forward: consumer ping-pong on the G phase
+#endif
+#ifndef TA_ORDER
+#define TA_ORDER 2       // forward: task order, fastest first: 0 = query tile, head, row group, b; 1 = query tile, row group, head, b (the CTAs running together work on ONE
+                         // head: its bias [S, S] stays L2-resident across the row groups; 0 keeps the four heads of the same K / V rows together); 2 = 1 from S >= TA_ORDER1_MINS
+#endif
+#ifndef TA_ORDER1_MINS
+#define TA_ORDER1_MINS 2048    // the bias of all heads (4 S^2 x 2 bytes) no longer fits the L2 beside the K / V rows
+#endif
+#ifndef TA_SPEC
+#define TA_SPEC 1        // forward: 1 = speculative offset: after a row's first finite tile no maximum is taken before the exponentials; the tile's row-sum increment
+                         // (from the tensor core) tells afterwards whether the offset must rise, and a tile no raise can repair (a logit more than ~110 log2 units above
+                         // the offset: non-finite sum) goes on a fix list that a second, exact launch (SAFE) recomputes.  0 = the row maximum of every tile (the SAFE form)
+#endif
+#ifndef TA_TS
+#define TA_TS 40.f       // TA_SPEC 1: a tile whose row-sum increment exceeds 2^TA_TS raises the row's offset (o, l scaled by the power of two)
+#endif
+#ifndef TA_SPEC_MINS
+#define TA_SPEC_MINS 512 // TA_SPEC 1 from this sequence length on (below it the second launch costs about what the maximum pass saves)
+#endif
+#ifndef TA_NOLIST
+#define TA_NOLIST 0      // experiments: no fix list and no second launch (wrong results for an overflowing tile)
+#endif
+#ifndef TA_TOVF
+#define TA_TOVF 110.f    // TA_SPEC 1: an increment above 2^TA_TOVF (or non-finite) is not trusted: o may have overflowed -> fix list
 #endif
 #ifndef TA_DYN
 #define TA_DYN 1         // forward: dynamic task schedule (a global counter; the static round robin lets long launches drift apart)
@@ -44,9 +75,10 @@ constexpr int D = 32, BM = 128, BN = 128, R = 2, NKV = TA_NKV, NB = TA_NB;
 constexpr int QT = BM * D;                                 // Q tile [128 q][32], 64B swizzle (8 KiB)
 constexpr int KVT = BN * D;                                // K or V tile [128 k][32], 64B swizzle (8 KiB)
 constexpr int STG = 3 * KVT;                               // a K | V stage: K, V, ones (24 KiB)
-constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle (32 KiB)
+constexpr int BT = BM * BN;                                // bias tile: bf16 [2 key halves][128 q][64], 128B swizzle (32 KiB), or fp32 in register order (TA_FB, 64 KiB)
+constexpr int BTB = BT * (TA_FB ? 4 : 2);                 // its bytes
 constexpr int THREADS = 384;
-constexpr int SMEM = 1024 + (NB * BT + R * QT + NKV * STG) * 2 + 256;
+constexpr int SMEM = 1024 + NB * BTB + (R * QT + NKV * STG) * 2 + 256;
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace
 
@@ -68,23 +100,29 @@ __device__ unsigned g_trace[2][256][8];
 #else
 #define TRACE(k) do {} while (0)
 #endif
+template <bool SPEC, bool ORD1>      // ORD1: the task order of TA_ORDER (query tile, row group, head); SPEC: the speculative offset (fix list written to FIX); else the exact form (row maximum of every tile), which with FIX set runs the tasks of that list (static schedule)
 __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     const __grid_constant__ CUtensorMap qmap,            // q [B*N*S][H*32] bf16 (rows may sit at a wider stride), box (32, 128), 64B swizzle
     const __grid_constant__ CUtensorMap kmap,
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap bmap,            // sbias [B*H*S][S] bf16, box (64, 128), 128B swizzle
+    const float* __restrict__ FB,                        // TA_FB: the staged bias [B H][S / 128][S / 128][2][16][128][4] fp32 (stage_bias), else unused
     __nv_bfloat16* __restrict__ OUT,                     // [B*N*S][H*32] contiguous, or nullptr (only U is wanted)
     float* __restrict__ LSE,                             // [B, N, H, S] base-2 log-sum-exp for the backward, or nullptr
     int* __restrict__ FLAGS,
     const __nv_bfloat16* __restrict__ GATE,              // optional gate g (rows at stride ldg, columns h * 32 + c): U = sigmoid(g) o bf16(O), or nullptr
     __nv_bfloat16* __restrict__ U, long ldg,             // [B*N*S][H*32] contiguous
-    int* __restrict__ SCHED) {                           // zeroed task counter (dynamic schedule, see TA_DYN), or nullptr: static
+    int* __restrict__ SCHED,                             // zeroed task counter (dynamic schedule, see TA_DYN), or nullptr: static
+    int* __restrict__ FIX) {                             // fix list: FIX[0] = count (zeroed), FIX[1..] = task ids (written by the speculative form, read by SAFE)
+  const bool LISTM = !SPEC && FIX != nullptr;
+  const int nt = LISTM ? *reinterpret_cast<volatile int*>(FIX) : ntasks;
+  if (LISTM && blockIdx.x == 0 && threadIdx.x == 0 && nt > 0) atomicAdd(FLAGS + 1, nt);     // telemetry: tasks the exact launch recomputed
   const int QTILES = S / BM, NK = S / BN, NG = (N + R - 1) / R;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   // shared layout: bias ring [NB][BT] | Q [R][QT] | K | V ring [NKV][K | V | ones] | barriers
-  const uint32_t sB = sa(smb), sQ = sB + NB * BT * 2, sKV = sQ + R * QT * 2, bar0 = sKV + NKV * STG * 2;
+  const uint32_t sB = sa(smb), sQ = sB + NB * BTB, sKV = sQ + R * QT * 2, bar0 = sKV + NKV * STG * 2;
   const uint32_t qf = bar0, qe = bar0 + 8;                  // the task's Q tiles landed / count 8: every consumer warp holds its Q fragments
   auto kvf = [&](int s) { return bar0 + 16 + 8 * s; };     // [NKV]
   auto kve = [&](int s) { return bar0 + 16 + 8 * (NKV + s); };                // count 8: the stage's MMAs retired in every consumer warp
@@ -101,12 +139,15 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     for (int k = 0; k < NKV; ++k) { bar_init(bars + 2 + k, 1); bar_init(bars + 2 + NKV + k, 8); }
     for (int k = 0; k < NB; ++k) { bar_init(bars + 2 + 2 * NKV + k, 1); bar_init(bars + 2 + 2 * NKV + NB + k, 8); }
     bar_init_fence();
+    reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[0] = 0; reinterpret_cast<int*>(smb + (bar0 - sB) + 244)[1] = 0;     // the fix-list counters
   }
   fence_proxy_async();                                      // the ones blocks are read by the tensor core (async proxy)
   __syncthreads();
   // task t: q tile fastest, then the head (the CTAs running together share whole K / V rows), then the row group, then b
   auto decode = [&](int t, int& b, int& h, int& qt, int& g) {
-    qt = t % QTILES; int r = t / QTILES; h = r % H; r /= H; g = r % NG; b = r / NG;
+    qt = t % QTILES; int r = t / QTILES;
+    if (ORD1) { g = r % NG; r /= NG; h = r % H; b = r / H; }
+    else        { h = r % H; r /= H; g = r % NG; b = r / NG; }
   };
   auto row0 = [&](int b, int n) -> int { n = min(n, N - 1); return (b * N + n) * S; };   // first (b, n) row
   // dynamic schedule: the producer takes each next task from the global counter (in launch order, so the CTAs running together stay
@@ -119,16 +160,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     if (tid == 0) {
       prefetch_map(&qmap); prefetch_map(&kmap); prefetch_map(&vmap); prefetch_map(&bmap);
       int lt = 0, st = 0, kph = 0, bs = 0, bph = 0;
-      for (int t = blockIdx.x; t < ntasks; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
-        int b, h, qt, g; decode(t, b, h, qt, g);
+      for (int t = blockIdx.x; t < nt; t = SCHED ? (int)gridDim.x + atomicAdd(SCHED, 1) : t + (int)gridDim.x, ++lt) {
+        int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
         wait(qe, (lt & 1) ^ 1);
         if (SCHED) *slot = t;
         expect_tx(qf, R * QT * 2);
         for (int r = 0; r < R; ++r) load_2d(&qmap, sQ + r * QT * 2, qf, h * D, row0(b, g * R + r) + qt * BM);
         for (int j = 0; j < NK; ++j) {
           wait(bem(bs), bph ^ 1);
-          expect_tx(bfu(bs), BT * 2);
+          expect_tx(bfu(bs), BTB);
+#if TA_FB
+          {                                                // one bulk copy: the staged tile is contiguous
+            const float* src = FB + ((size_t)((b * H + h) * QTILES + qt) * NK + j) * BT;
+            asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n"
+                         :: "r"(sB + bs * BTB), "l"(src), "r"((uint32_t)BTB), "r"(bfu(bs)) : "memory");
+          }
+#else
           for (int hh = 0; hh < 2; ++hh) load_2d(&bmap, sB + (bs * BT + hh * BM * 64) * 2, bfu(bs), j * BN + hh * 64, (b * H + h) * S + qt * BM);
+#endif
           if (++bs == NB) { bs = 0; bph ^= 1; }
           for (int r = 0; r < R; ++r) {
             wait(kve(st), kph ^ 1);
@@ -155,8 +204,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
   // ldmatrix lane geometry: matrices (rows +0 / +8) x (columns +0 / +8) of a 16 x 16 block
   const int lrow = qrow + (lane & 7) + 8 * ((lane >> 3) & 1), lcol8 = lane >> 4, x7 = lane & 7;
   const uint32_t qlane = sQ + lrow * D * 2, blane = sB + lrow * 128;
+#if TA_DOFF
+  const uint64_t kd0 = desc_k64(sKV), vd0 = desc_mn64(sKV + KVT * 2, KVT * 2);   // built once: a wgmma operand costs one 32-bit add (desc_off)
+#endif
 #if TA_PP
-  const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
+  const int mytasks = (int)blockIdx.x < nt ? (nt - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
   int left = mytasks * NK * R;                      // G phases of this CTA still to run
   if (w == 1 && left > 0) named_arrive(1, 256);    // warpgroup 0 takes the first G phase
 #endif
@@ -164,12 +216,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
   int gst = 0, gph = 0, bs = 0, bph = 0, xst = 0, bad = 0, xs = 0;
   uint32_t qa[R][2][4];
   float o[R][20], m[R][2];
+  float lprev[R][2];                                   // the row sums before the tile in flight (the increment test of the speculative offset)
+  int ovf = 0;                                      // this task: a tile the speculative offset could not absorb
   float s[64];                                      // the score accumulator, then the sub-step's probabilities (fp32)
   uint32_t p[32];                                   // the previous sub-step's P (bf16 pairs): the A fragment of its PV GEMM
   // G phase of (tile j, row r): bias fragment -> s, S += Q_r K^T issued and committed
   auto G = [&](int j, int r) {
     TRACE(0);
     if (r == 0) wait(bfu(bs), bph);
+#if TA_FB
+    {                                              // the staged tile holds this thread's 64 accumulator values as 16 float4, warpgroup-contiguous
+      const uint32_t base = sB + bs * BTB + ((w * 16) * 128 + T) * 16;
+#pragma unroll
+      for (int e4 = 0; e4 < 16; ++e4) {
+        const float4 v = lds128(base + e4 * 128 * 16);
+        s[4 * e4] = v.x; s[4 * e4 + 1] = v.y; s[4 * e4 + 2] = v.z; s[4 * e4 + 3] = v.w;
+      }
+    }
+#else
     const uint32_t btile = blane + bs * BT * 2;
 #pragma unroll
     for (int i2 = 0; i2 < 8; ++i2) {
@@ -180,6 +244,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
       s[8 * i2 + 0] = a0.x; s[8 * i2 + 1] = a0.y; s[8 * i2 + 2] = a1.x; s[8 * i2 + 3] = a1.y;
       s[8 * i2 + 4] = a2.x; s[8 * i2 + 5] = a2.y; s[8 * i2 + 6] = a3.x; s[8 * i2 + 7] = a3.y;
     }
+#endif
     if (r == R - 1) {
       fence_regs(s);                             // the ldmatrix data is in registers before the stage is released (an arrive
       fence_proxy_async();
@@ -190,10 +255,15 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     TRACE(1);
     wait(kvf(gst), gph);
     TRACE(2);
-    const uint32_t kaddr = sKV + gst * STG * 2;
     wg_fence();
+#if TA_DOFF
+    mma_rs_n128<0>(s, qa[r][0], desc_off(kd0, gst * STG * 2), 1u);
+    mma_rs_n128<0>(s, qa[r][1], desc_off(kd0, gst * STG * 2 + 32), 1u);
+#else
+    const uint32_t kaddr = sKV + gst * STG * 2;
     mma_rs_n128<0>(s, qa[r][0], desc_k64(kaddr), 1u);
     mma_rs_n128<0>(s, qa[r][1], desc_k64(kaddr + 32), 1u);
+#endif
     wg_commit();
     if (++gst == NKV) { gst = 0; gph ^= 1; }
     TRACE(3);
@@ -204,7 +274,11 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
 #pragma unroll
     for (int kk = 0; kk < BN / 16; ++kk) {
       const uint32_t a[4] = {p[4 * kk], p[4 * kk + 1], p[4 * kk + 2], p[4 * kk + 3]};
+#if TA_DOFF
+      mma_rs_n40<1>(o[r], a, desc_off(vd0, xst * STG * 2 + kk * 1024), 1u);
+#else
       mma_rs_n40<1>(o[r], a, desc_mn64(vaddr + kk * 1024, KVT * 2), 1u);
+#endif
     }
     wg_commit();
   };
@@ -220,6 +294,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
   // accumulators o[r] are idle here (the PV in flight belongs to the other pair row), so a rescale is a plain multiply of o[r] and l_r.
   auto X = [&](int j, int r) {
     TRACE(5);
+    if (!SPEC || __any_sync(0xffffffffu, !(m[r][0] > -INFINITY) | !(m[r][1] > -INFINITY)))      // speculative form: the tile's maximum only for a row without a finite logit yet
+    {
     float m0 = fmaxf(s[0], s[1]), m1 = fmaxf(s[2], s[3]);
 #pragma unroll
     for (int i = 1; i < 16; ++i) { m0 = fmaxf(m0, fmaxf(s[4 * i], s[4 * i + 1])); m1 = fmaxf(m1, fmaxf(s[4 * i + 2], s[4 * i + 3])); }
@@ -233,6 +309,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
 #pragma unroll
       for (int i = 0; i < 5; ++i) { o[r][4 * i] *= f0; o[r][4 * i + 1] *= f0; o[r][4 * i + 2] *= f1; o[r][4 * i + 3] *= f1; }
       m[r][0] = n0; m[r][1] = n1;
+    }
     }
     const float nm0 = m[r][0] > -INFINITY ? -m[r][0] : 0.f, nm1 = m[r][1] > -INFINITY ? -m[r][1] : 0.f;   // all keys masked so far: -inf - -inf would be NaN
 #pragma unroll
@@ -250,6 +327,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     for (int i = 0; i < 16; ++i) { p[2 * i] = PACKP(s[4 * i], s[4 * i + 1]); p[2 * i + 1] = PACKP(s[4 * i + 2], s[4 * i + 3]); }
     TRACE(7);
     ++xs;
+  };
+  // after the PV of a tile of row rr retired: its row-sum increment is at least its largest probability; a tile that exceeded the offset by more than
+  // TA_TS log2 units raises it by the power of two that brings the increment back to about 1 (o and l scaled exactly); a non-finite sum (a logit more
+  // than ~110 units above the offset) cannot be repaired here: the task goes on the fix list
+  auto check = [&](int rr) {
+    const float i0 = o[rr][16] - lprev[rr][0], i1 = o[rr][18] - lprev[rr][1];
+    const float lim = exp2f(TA_TS), lov = exp2f(TA_TOVF);
+    if (__any_sync(0xffffffffu, !(i0 <= lim) | !(i1 <= lim))) {
+      const bool b0 = !(i0 <= lim), b1 = !(i1 <= lim);
+      const bool f0 = b0 && i0 <= lov, f1 = b1 && i1 <= lov;           // increments that are absorbed by a raise
+      ovf |= (b0 && !f0) || (b1 && !f1);
+      const float d0 = f0 ? ceilf(__log2f(i0)) : 0.f, d1 = f1 ? ceilf(__log2f(i1)) : 0.f;
+      const float g0 = ex2f(-d0), g1 = ex2f(-d1);
+#pragma unroll
+      for (int i = 0; i < 5; ++i) { o[rr][4 * i] *= g0; o[rr][4 * i + 1] *= g0; o[rr][4 * i + 2] *= g1; o[rr][4 * i + 3] *= g1; }
+      m[rr][0] += d0; m[rr][1] += d1;
+    }
+    lprev[rr][0] = o[rr][16]; lprev[rr][1] = o[rr][18];
   };
   // one pipelined sub-step (tile j, row r): QK^T of this sub-step and PV of the previous one (row 1 - r) are both issued, the
   // exponentials run while the PV executes, and nothing is left in flight at the end (ptxas cannot follow a wgmma across a loop
@@ -273,18 +368,19 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     X(j, r);
     wg_wait<0>();
     fence_regs(o[0]); fence_regs(o[1]);
+    if (SPEC) check(1 - r);
     release();
     pack();
   };
   int lt = 0;
   for (int t = blockIdx.x;; t += SCHED ? 0 : (int)gridDim.x, ++lt) {
-    if (SCHED == nullptr && t >= ntasks) break;
+    if (SCHED == nullptr && t >= nt) break;
     wait(qf, lt & 1);
     if (SCHED) {
       t = *slot;
       if (t < 0) break;
     }
-    int b, h, qt, g; decode(t, b, h, qt, g);
+    int b, h, qt, g; decode(LISTM ? FIX[1 + t] : t, b, h, qt, g);
     // Q fragments of the warp's 16 rows (A of the QK^T wgmma), two k16 blocks per pair row
 #pragma unroll
     for (int r = 0; r < R; ++r)
@@ -300,6 +396,8 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
 #pragma unroll
       for (int i = 0; i < 20; ++i) o[r][i] = 0.f;
       m[r][0] = m[r][1] = -INFINITY;             // no finite logit seen yet
+      lprev[r][0] = lprev[r][1] = 0.f;
+      ovf = 0;
     }
     {                                              // sub-step (0, 0): no previous PV
 #if TA_PP
@@ -332,6 +430,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
     PV(1);                                         // the last sub-step's PV
     wg_wait<0>();
     fence_regs(o[0]); fence_regs(o[1]);
+    if (SPEC) check(1);
     release();
     // ---- epilogue: O_r / l_r -> bf16 -> out (a quad transposes its 4 x 4 words so each lane stores 16 contiguous bytes); LSE
 #pragma unroll
@@ -340,6 +439,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
       if (n >= N) continue;                      // a padding row: computed on row N - 1, not stored
       const float l0 = o[r][16], l1 = o[r][18];  // accumulator columns 32..39 = P 1: the row sums
       bad |= !(l0 > 0.f) || !(l0 < 3.0e38f) || !(l1 > 0.f) || !(l1 < 3.0e38f);
+      ovf |= !(l0 < 3.0e38f) || !(l1 < 3.0e38f);
       const float inv0 = 1.f / l0, inv1 = 1.f / l1;
       const int q0 = qt * BM + qrow + g8;
       if (LSE != nullptr && t4 == 0) {
@@ -379,23 +479,56 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm90(
         }
       }
     }
+    if (SPEC && !TA_NOLIST) {                      // a tile the speculative offset could not absorb: the task goes on the fix list (the exact launch recomputes it)
+      // every consumer warp adds 1 (+256 when one of its lanes overflowed) to a shared-memory counter per task parity; the warp that brings it to 8 pushes the
+      // task once and resets the counter (no warp waits: the others are at most a tile behind, so a counter is not reused before it was reset)
+      volatile int* cnt = reinterpret_cast<volatile int*>(smb + (bar0 - sB) + 244 + 4 * (lt & 1));
+      const int mine = __any_sync(0xffffffffu, ovf) ? 256 : 0;
+      if (lane == 0) {
+        const int old = atomicAdd(const_cast<int*>(cnt), 1 + mine);
+        if ((old & 255) == 7) {
+          if (((old + 1 + mine) >> 8) != 0) { const int i = atomicAdd(FIX, 1); FIX[1 + i] = t; }
+          *cnt = 0;
+        }
+      }
+    }
   }
   if (bad) atomicAdd(FLAGS, 1);
+}
+
+// TA_FB: the bias of a call in the score accumulator's register order. Per (b h, query tile, key tile) a contiguous [2][16][128][4] fp32 block:
+// consumer warpgroup w, float4 e4, thread T, element sub hold the m64n128 accumulator element s[4 e4 + sub] of thread T of warpgroup w --
+// row 64 w + 16 (T / 32) + (T % 32) / 4 + 8 (sub / 2), column 8 e4 + 2 (T % 4) + sub % 2 -- so a thread's 16 LDS.128 of one e4 are 512
+// contiguous bytes per warp (no bank conflict). One thread per float4: the writes are contiguous.
+__global__ void __launch_bounds__(256) stage_bias(const __nv_bfloat16* __restrict__ SB, float* __restrict__ FB, int S, long n4) {
+  const int QTILES = S / BM, NKT = S / BN;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n4; i += (long)gridDim.x * 256) {
+    const int T = (int)(i & 127), e4 = (int)((i >> 7) & 15), w = (int)((i >> 11) & 1);
+    const long tile = i >> 12;
+    const int kt = (int)(tile % NKT), qt = (int)((tile / NKT) % QTILES);
+    const long bh = tile / ((long)NKT * QTILES);
+    const int r0 = qt * BM + 64 * w + 16 * (T >> 5) + ((T & 31) >> 2), c0 = kt * BN + 8 * e4 + 2 * (T & 3);
+    const __nv_bfloat16* src = SB + bh * S * S;
+    const __nv_bfloat162 lo = *reinterpret_cast<const __nv_bfloat162*>(src + (long)r0 * S + c0);
+    const __nv_bfloat162 hi = *reinterpret_cast<const __nv_bfloat162*>(src + (long)(r0 + 8) * S + c0);
+    reinterpret_cast<float4*>(FB)[i] = make_float4(__low2float(lo), __high2float(lo), __low2float(hi), __high2float(hi));
+  }
 }
 
 namespace {
 torch::Tensor& flags_for(const torch::Device& dev) {
   static torch::Tensor flags[16];
   auto& f = flags[dev.index()];
-  if (!f.defined()) f = torch::zeros({1}, torch::TensorOptions().device(dev).dtype(torch::kInt32));
+  if (!f.defined()) f = torch::zeros({2}, torch::TensorOptions().device(dev).dtype(torch::kInt32));
   return f;
 }
 }  // namespace
 
 // q, k, v [B, N, S, H, 32] bf16 (the projection layout: row (b, n, s) holds all heads; rows may sit at a common wider stride);
 // sbias bf16 [B, H, S, S] contiguous = bias / scale (masked keys -inf); S % 128 == 0.
-// -> (out [B, N, S, H, 32] bf16 contiguous, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [1]: rows whose sum left
-//     (0, 3e38) -- a row with every key masked --, a per-device counter accumulated over every call)
+// -> (out [B, N, S, H, 32] bf16 contiguous, lse fp32 [B, N, H, S] base 2 (empty unless want_lse), flags int32 [2], per-device counters accumulated over
+//     every call: [0] rows whose sum left (0, 3e38) -- a row with every key masked --, [1] tasks (128 queries x 2 pair rows of a head) that the
+//     speculative softmax offset could not absorb and the exact launch recomputed (TA_SPEC))
 std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor sbias, double scale, bool want_lse,
                                        c10::optional<torch::Tensor> gate, bool want_out) {
   TORCH_CHECK(q.is_cuda() && q.dim() == 5 && q.size(4) == D, "q [B, N, S, H, 32]");
@@ -414,6 +547,7 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
     return make_map<2>(t.data_ptr(), {(uint64_t)(H * D), rows}, {(uint64_t)ld}, {32, 128}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
   CUtensorMap qm = m2(q, "q"), km = m2(k, "k"), vm = m2(v, "v");
   CUtensorMap bm = make_map<2>(sbias.data_ptr(), {(uint64_t)S, (uint64_t)(B * H * S)}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "sbias");
+  auto fb = torch::empty({TA_FB ? (long)B * H * S * S : 0}, q.options().dtype(torch::kFloat32));   // TA_FB: the staged bias (stage_bias)
   const bool has_gate = gate.has_value();
   const bool store_out = want_out || !has_gate;
   TORCH_CHECK(!has_gate || (gate->scalar_type() == torch::kBFloat16 && gate->is_cuda() && gate->sizes() == q.sizes() && gate->stride(4) == 1 &&
@@ -424,18 +558,44 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
   auto lse = torch::empty({want_lse ? B : 0, N, H, S}, q.options().dtype(torch::kFloat32));
   auto& flags = flags_for(q.device());
   static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_fwd_sm90, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  if (!attr) {
+    for (auto k : {triattn_fwd_sm90<false, false>, triattn_fwd_sm90<false, true>, triattn_fwd_sm90<true, false>, triattn_fwd_sm90<true, true>})
+      C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+    attr = true;
+  }
   const long ntasks = B * H * ((N + R - 1) / R) * (S / BM);
   const int grid = (int)std::min<long>(ntasks, num_sms(q.device().index()));
   // the dynamic schedule's counter (a zeroed int per call); a launch of a few tasks per CTA keeps the static one
   const bool dyn = TA_DYN && !TA_PP && ntasks >= 16L * grid;
   auto sched = torch::zeros({dyn ? 1 : 0}, q.options().dtype(torch::kInt32));
-  triattn_fwd_sm90<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), qm, km, vm, bm,
+  // speculative offset (TA_SPEC): the tasks whose tiles it could not absorb (a logit ~110 log2 units above the row's offset) are listed by the
+  // first launch, and a second, exact launch (row maximum of every tile) recomputes them; an empty list costs the second launch's start and exit
+  const bool spec = TA_SPEC == 1 && S >= TA_SPEC_MINS;
+  auto fix = torch::empty({spec ? 1 + ntasks : 0}, q.options().dtype(torch::kInt32));
+  cudaStream_t stream = at::cuda::getCurrentCUDAStream();
+  if (spec) C10_CUDA_CHECK(cudaMemsetAsync(fix.data_ptr<int>(), 0, sizeof(int), stream));
+  if (TA_FB) {
+    const long n4 = (long)B * H * S * S / 4;
+    stage_bias<<<(int)std::min<long>((n4 + 255) / 256, 132L * 32), 256, 0, stream>>>(
+        reinterpret_cast<const __nv_bfloat16*>(sbias.data_ptr<at::BFloat16>()), fb.data_ptr<float>(), (int)S, n4);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+  }
+  auto launch = [&](auto kernel, int* sch, int* fx) {
+    kernel<<<grid, THREADS, SMEM, stream>>>(
+      (int)N, (int)H, (int)S, (int)ntasks, (float)(scale * 1.4426950408889634), qm, km, vm, bm, TA_FB ? fb.data_ptr<float>() : nullptr,
       store_out ? reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()) : nullptr, want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
       has_gate ? reinterpret_cast<const __nv_bfloat16*>(gate->data_ptr<at::BFloat16>()) : nullptr,
-      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L,
-      dyn ? sched.data_ptr<int>() : nullptr);
+      has_gate ? reinterpret_cast<__nv_bfloat16*>(u.data_ptr<at::BFloat16>()) : nullptr, has_gate ? (long)gate->stride(2) : 0L, sch, fx);
+  };
+  int* fixp = spec ? fix.data_ptr<int>() : nullptr;
+  const bool ord1 = TA_ORDER == 1 || (TA_ORDER == 2 && S >= TA_ORDER1_MINS);
+  if (spec) {
+    launch(ord1 ? triattn_fwd_sm90<true, true> : triattn_fwd_sm90<true, false>, dyn ? sched.data_ptr<int>() : nullptr, fixp);
+    C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (!TA_NOLIST) launch(ord1 ? triattn_fwd_sm90<false, true> : triattn_fwd_sm90<false, false>, nullptr, fixp);
+  } else {
+    launch(ord1 ? triattn_fwd_sm90<false, true> : triattn_fwd_sm90<false, false>, dyn ? sched.data_ptr<int>() : nullptr, nullptr);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, lse, flags, u};
 }

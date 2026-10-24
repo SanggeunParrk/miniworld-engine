@@ -58,6 +58,31 @@ def test_biased_triattn_h100(starting, b, n, real, d_pair):
 
 
 @pytest.mark.parametrize("starting", [True, False])
+@pytest.mark.parametrize("d_pair", [128, 64])
+def test_biased_triattn_h100_rounds_once(starting, d_pair):
+    """The biases go in before the one rounding of pair + update. At a pair scale the trunk reaches (|pair| ~ 20) an out bias
+    added to the bf16 sum afterwards was a second rounding at the residual's scale: sqrt(2) times the bf16 reference's error on
+    the update, which moved RoseTTAFold3's pLDDT by 1.5 at 256 tokens. Both sides here round pair + update to bf16 once."""
+    m = _module(starting, d_pair=d_pair, d_hidden=128)
+    g = torch.Generator(device="cuda").manual_seed(2)
+    n, real = 256, 219
+    z = 20 * torch.randn(1, n, n, d_pair, device="cuda", generator=g)
+    mask = (torch.arange(n, device="cuda") < real)[None].contiguous()
+    gold64 = copy.deepcopy(m).double()
+    ref16 = copy.deepcopy(m).to(torch.bfloat16)
+    eng = m.to(torch.bfloat16)
+    zb = z.to(torch.bfloat16)
+    with torch.no_grad():
+        assert triattn_h100_sm90.serves(eng, zb, mask)
+        gold = gold64._biased_reference(zb.double(), mask)
+        base = (zb + ref16._biased_reference(zb, mask)).double() - zb.double()
+        got = eng(zb, mask).double() - zb.double()
+    rows = (slice(None), slice(0, real), slice(0, real))
+    err, err16 = _rel(got[rows], gold[rows]), _rel(base[rows], gold[rows])
+    assert err <= 1.05 * err16, f"engine {err:.3e} vs bf16 reference {err16:.3e}"
+
+
+@pytest.mark.parametrize("starting", [True, False])
 def test_biased_reference_matches_the_engine_reference(starting):
     """With zero biases the biased reference is the module's own math (the ending node on the pair-as-is bias included)."""
     m = _module(starting)

@@ -51,6 +51,23 @@ def _core(rows: int = 2, defs: tuple[str, ...] = ()):
     )
 
 
+@functools.lru_cache(maxsize=None)
+def _core_h16(defs: tuple[str, ...] = ()):
+    """The inference core on fp16 operands (h100_sources/triattn_h16_sm90.cu): q / k / v / sbias fp16, out bf16."""
+    ensure_cuda_home()
+    tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
+    return load_extension(
+        name=f"triattn_h100_core_h16{tag}_v1",
+        sources=[str(_SRC / "triattn_h16_sm90.cu")],
+        extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
+        verbose=True,
+    )
+
+
+# inference(): the front writes q / k / v and the bias in fp16 for the fp16 core (faster, and closer to fp32: see triattn_h16_sm90.cu)
+INFERENCE_FP16 = True
+
+
 def supports(length: int) -> bool:
     """Lengths the kernels take: whole 128-token tiles."""
     return length > 0 and length % TOK == 0
@@ -74,7 +91,7 @@ def _mod(defs: tuple[str, ...] = ()):
     ensure_cuda_home()
     tag = "".join(f"_{d.replace('=', '').lower()}" for d in defs)
     return load_extension(
-        name=f"triattn_h100_mod{tag}_v9",
+        name=f"triattn_h100_mod{tag}_v10",
         sources=[str(_SRC / "triattn_mod_sm90.cu")],
         extra_cuda_cflags=[*_flags(), *(f"-D{d}" for d in defs)],
         verbose=True,
@@ -120,19 +137,19 @@ def inference(pair, lnw, lnb, w4, wb16, wo16, mask=None, eps=1e-5, trans=False, 
         L,
         D**-0.5,
         trans,
+        INFERENCE_FP16,
     )
     if flip:
         sbias = flip_bias(sbias, mask)
-    if gate_bias is not None:
-        g.view(-1, gate_bias.numel()).add_(gate_bias.to(g.dtype))
     shp = (B, L, L, H, D)
-    o, _, _, _ = _core().triattn_fwd(
-        q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False
-    )
-    result = m.tri_tail(g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out).view(B, L, L, C)
-    if out_bias is not None:
-        result.add_(out_bias.to(result.dtype))
-    return result
+    core = _core_h16().triattn_fwd_h16 if INFERENCE_FP16 else _core().triattn_fwd
+    o, _, _, _ = core(q.view(shp), k.view(shp), v.view(shp), sbias, D**-0.5, False)
+    # the biases in fp32 inside the tail, before its one rounding: added to the bf16 gate / sum afterwards they were a second
+    # rounding each, the out bias at the residual's scale (RoseTTAFold3's trunk drifted from its reference by it)
+    fp32 = lambda t: None if t is None else t.float().contiguous()  # noqa: E731
+    return m.tri_tail(
+        g, o.view(-1, C), x, wo16, empty.bfloat16(), L, trans, out, bo=fp32(out_bias), gb=fp32(gate_bias)
+    ).view(B, L, L, C)
 
 
 @functools.lru_cache(maxsize=None)

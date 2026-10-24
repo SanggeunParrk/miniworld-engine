@@ -8,6 +8,11 @@ private pool), so warm the loop up once outside the capture; weights that requir
 The key is the weight's address and version, and an address is reused as soon as a tensor is freed: a new weight (another model, the next
 test) can land on a dead one's address with the same version. An entry therefore also holds a weak reference to its weight and only serves
 that very tensor object.
+
+A captured graph reads the entry it hit, so an entry is never evicted while its weight is alive: it goes when the weight dies or when the
+same weight is cached at a newer version. A size cap evicted live entries -- a model with more Transitions than the cap (Boltz-2's 64
+pairformer blocks plus its template, MSA and confidence stacks) freed transposes that captured trunk graphs still read, and the next
+replay faulted with an illegal memory access.
 """
 
 import weakref
@@ -15,7 +20,6 @@ import weakref
 import torch
 
 _CACHE: dict = {}
-_MAX = 64
 
 
 def transposed_contiguous(w: torch.Tensor) -> torch.Tensor:
@@ -29,10 +33,7 @@ def transposed_contiguous(w: torch.Tensor) -> torch.Tensor:
     out = w.t().contiguous()
     if w.is_cuda and torch.cuda.is_current_stream_capturing():
         return out                            # never cache a tensor that lives in a graph's private pool
-    if len(_CACHE) >= _MAX:
-        for dead in [k for k, (ref, _) in _CACHE.items() if ref() is None]:
-            del _CACHE[dead]
-        if len(_CACHE) >= _MAX:
-            _CACHE.pop(next(iter(_CACHE)))
+    for stale in [k for k, (ref, _) in _CACHE.items() if ref() is None or ref() is w]:
+        del _CACHE[stale]
     _CACHE[key] = (weakref.ref(w), out)
     return out

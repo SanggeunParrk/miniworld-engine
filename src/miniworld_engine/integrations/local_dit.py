@@ -657,16 +657,23 @@ def _device_of(mask):
 
 def _hoisted(store, tensor, key, build):
     """The table ``build()`` makes from ``tensor``, once per tensor (pointer, version, ``key``): the entry keeps a weak reference to the tensor, so
-    a new tensor that reuses a freed address is not served the old one's table, and entries of freed tensors are dropped."""
+    a new tensor that reuses a freed address is not served the old one's table, and entries of freed tensors are dropped.
+
+    A sample-expanded conditioning (stride 0 over the samples: a sampler step's view of the fold's one conditioning) is a NEW tensor object at
+    every call over the same small storage, so no weak reference to it outlives the call and the table would be remade at every call -- in a
+    captured step in every replay, for the whole life of the sampler. Such an entry holds the tensor itself (its storage is the fold's one
+    conditioning, which keeps its address from being reused while the entry stands); a view is otherwise named by the tensor it views."""
+    held = any(st == 0 and n > 1 for st, n in zip(tensor.stride(), tensor.shape, strict=True))
+    root = tensor._base if tensor._base is not None else tensor
     entry = _capture.lookup_inputs(
         store,
         (_tkey(tensor), key),
-        lambda: (weakref.ref(tensor), build()),
+        lambda: (tensor if held else weakref.ref(root), held, build()),
         limit=64,
-        valid=lambda e: e[0]() is tensor,
-        alive=lambda e: e[0]() is not None,
+        valid=lambda e: e[1] or e[0]() is root,
+        alive=lambda e: e[1] or e[0]() is not None,
     )
-    return entry[1]
+    return entry[2]
 
 
 def _tkey(t):
