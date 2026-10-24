@@ -112,6 +112,8 @@ FAMILY_MODULES = {
     "whole_op.py":      "the fused op-level entry point a module consumes",
     "autograd.py":      "the family's autograd.Function",
     "compile_native.py": "layernorm only -- see above",
+    "composed.py":      "outer_product_mean only -- the Pairformer-side composition of the family's stages",
+    "kabsch.py":        "sampler_ops only -- Horn's quaternion Kabsch rotation (the Euler update's alignment, graph-capturable)",
 }
 
 
