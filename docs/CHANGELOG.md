@@ -8,8 +8,27 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+## [2.3.9] - 2026-10-24
+
+### Added
+
+- `kernels/sampler_ops` (H100, fp32 coordinates): the diffusion sampler's glue as a few kernels instead of ~100 small torch ops -- the random
+  rigid motion + re-noising (`augment_noise`), the Kabsch alignment (Horn's quaternion method, graph-capturable) + Euler update
+  (`align_euler`) and the atom encoder's pooling (`pool_atoms`), with the churn arithmetic on device scalars. One extension, no shape keys
+  (covered by the `sampler_ops` case of `build/bundle_coverage.py`).
+- `DiTBlock(extra_pair_bias=)` / `integrations.token_dit.serves_extra_bias`: an `[L, L]` logit bias for every head on top of the pair's own
+  (the structural-token family's relation matrix), folded into the Hopper BF16 CUDA path's hoisted bias; a call no path serves raises
+  instead of dropping the term. The fp32 token path takes any L that is a multiple of 128.
+- H100 PairWeightedAveraging inference up to N = 2048 (the forward pair kernel holds H rows of N logits in shared memory; training stays
+  N <= 1024). Record: `docs/records/h100_pwa_long_inference_20261022.md`.
+
 ### Changed
 
+- H100 TriangleAttention forward: a speculative softmax offset (no row maximum before the exponentials from S >= 512; an increment test
+  after the tile, an exact second launch for the rare tile no raise repairs), a task order by head for S >= 2048, descriptors built once
+  per CTA (`triattn_sm90.cu`); the fp16 core and the width-generic path below.
+- Per-block caches (`kernels/_capture.BLOCK_CACHE_LIMIT = 64`) hold one entry per block of a 48-block model; a sample-expanded conditioning
+  keeps its hoisted tables across calls (a token DiT's pair bias was 15 % of a 1,024-token sampler's captured step).
 - H100 variants of 2.3.8, faster: the variant stacks' weight pack is no longer re-made in every CUDA-graph replay (token stacks 2.8-4.1x the
   compiled torch statements, from 1.3-2.9x), 128-wide rows warp-per-row and the atom edge windows' bias per pair (atom stacks 1.6x, from
   1.2-1.4x), RoseTTAFold3's OPM biases in the wide H100 prologue (`opm_prologue_wide(pbias=)`; 1.2-1.5x, from 0.9-1.0x). Record:
