@@ -141,6 +141,9 @@ def cases() -> list[dict]:
     out.append({"kind": "model_variants", "train": False, "dtype": "bfloat16", "heavy": False})
     # The sampler's glue (kernels/sampler_ops: random rigid motion, Kabsch + Euler update, encoder pooling): one extension, no shape keys.
     out.append({"kind": "sampler_ops", "train": False, "dtype": "float32", "heavy": False})
+    # Every hand-CUDA stage extension of the fused SWA atom block (kernels/swa_dit/cuda/loader.py): a stage the dispatch tries first (modwg)
+    # and falls back from is reached by no model shape, and would JIT-compile on a first call.
+    out.append({"kind": "swa_stages", "train": False, "dtype": "bfloat16", "heavy": False})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -317,6 +320,9 @@ def _run_block(c: dict) -> None:
     elif c["kind"] == "sampler_ops":
         _sampler_ops()
         return
+    elif c["kind"] == "swa_stages":
+        _swa_stages()
+        return
     elif c["kind"] == "local_dit":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
         from miniworld_engine.modules.local_dit import LocalDiTBlock
@@ -330,6 +336,18 @@ def _run_block(c: dict) -> None:
     model = model.cuda().to(pdt)
     _randomize(model)
     _step(model, args, c["train"], autocast)
+
+
+def _swa_stages() -> None:
+    """Load every stage extension of the fused SWA atom block once (a stage that fails to build is an error, not a silent fallback)."""
+    from miniworld_engine.kernels.swa_dit.cuda import loader
+
+    failed = {}
+    for stage in loader.SOURCES:
+        if loader.extension(stage) is None:
+            failed[stage] = loader.ERRORS.get(stage, "?")
+    if failed:
+        raise RuntimeError(f"swa_dit stage extensions that did not build: {failed}")
 
 
 def _sampler_ops() -> None:
