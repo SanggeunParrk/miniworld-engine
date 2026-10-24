@@ -40,8 +40,19 @@ def augmented_attention_pair_bias(
     from miniworld_engine.kernels.augmented_attention.interface import (
         triton_augmented_attention_pair_bias as _fn,
     )
+    from miniworld_engine.modules.dispatch import triton_blocked
 
     in_dtype = query.dtype
+    if query.is_cuda and triton_blocked("augmented_attention_pair_bias", query.device, query, key, value, bias):
+        # a card the engine holds no record for: the PyTorch reference (one UnrecordedCardWarning)
+        from miniworld_engine.kernels.augmented_attention.reference import (
+            augmented_attention_pair_bias_pytorch,
+        )
+
+        out = augmented_attention_pair_bias_pytorch(
+            query.transpose(2, 3), key.transpose(2, 3), value.transpose(2, 3), bias.permute(0, 2, 3, 1), mask,
+        )
+        return out.transpose(2, 3).to(in_dtype)
     # (A,B,H,L,D) -> (A,B,L,H,D); (B,H,L,L) -> (B,L,L,H)
     q = query.transpose(2, 3)
     k = key.transpose(2, 3)

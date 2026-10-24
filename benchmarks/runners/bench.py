@@ -198,7 +198,7 @@ class BenchConfig(BaseModel):
     level: Literal["kernel", "module"]
     implementations: list[str] = [
         ImplementationType.PYTORCH.value,
-        ImplementationType.TRITON.value,
+        ImplementationType.MINIWORLD.value,
     ]
     mode: Literal["inference", "training"]
     metric: Literal["time", "memory"]
@@ -390,6 +390,8 @@ class BenchResult(NamedTuple):
 
 
 def module_miniworld_spec(raw: str) -> ImplementationSpec:
+    if raw.strip().lower() == "cuda":   # an internal technology backend, not a module backend: CUDA is what miniworld runs where it exists
+        raise UnsupportedBenchmark("'cuda' is not a module backend; use implementation 'miniworld'")
     if raw.strip().lower() == MINIWORLD_IMPL:
         # MINIWORLD, not CUEQUIVARIANCE. `resolve()` sends a CUEQUIVARIANCE request for any
         # non-trimul op to KernelBackend.PYTORCH, so the old mapping made `implementations=
@@ -402,20 +404,32 @@ def module_miniworld_spec(raw: str) -> ImplementationSpec:
 
 
 def triton_miniworld_spec(raw: str) -> ImplementationSpec:
+    if raw.strip().lower() == "cuda":   # an internal technology backend, not a module backend: CUDA is what miniworld runs where it exists
+        raise UnsupportedBenchmark("'cuda' is not a module backend; use implementation 'miniworld'")
     if raw.strip().lower() == MINIWORLD_IMPL:
-        return ImplementationSpec(ImplementationType.TRITON, None, raw)
+        return ImplementationSpec(ImplementationType.MINIWORLD, None, raw)
     if raw.strip().lower() == BIAS_ONLY_V_IMPL:
         return ImplementationSpec(ImplementationType.PYTORCH, None, raw)
     return parse_implementation_spec(raw)
+
+
+#: The spec strings that name the engine's Triton kernel family (A/B work). Triton is not a public backend, so these map to
+#: ``miniworld`` and `implementation_environment` runs the row under `settings.force_triton_kernels`.
+TRITON_FAMILY_SPECS = frozenset({
+    "triton", "triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch",
+    "triton_ln", "triton_kernel_ln", "triton_dispatch_ln", "triton-ln-kernel", "triton-ln-dispatch",
+})
 
 
 def parse_implementation_spec(raw: str) -> ImplementationSpec:
     key = raw.strip().lower()
     if key in {impl.value for impl in ImplementationType}:
         return ImplementationSpec(ImplementationType(key), None, key)
+    if key == "triton":
+        return ImplementationSpec(ImplementationType.MINIWORLD, None, raw)
     if key in {"triton_pytorch_ln", "triton-ln-pytorch", "triton_ln_pytorch"}:
         return ImplementationSpec(
-            ImplementationType.TRITON, ImplementationType.PYTORCH, raw
+            ImplementationType.MINIWORLD, ImplementationType.PYTORCH, raw
         )
     if key in {
         "triton_ln",
@@ -425,7 +439,7 @@ def parse_implementation_spec(raw: str) -> ImplementationSpec:
         "triton-ln-dispatch",
     }:
         return ImplementationSpec(
-            ImplementationType.TRITON, ImplementationType.CUDA, raw
+            ImplementationType.MINIWORLD, ImplementationType.MINIWORLD, raw
         )
     msg = f"Unknown implementation spec: {raw!r}"
     raise ValueError(msg)
@@ -742,6 +756,11 @@ def implementation_environment(implementation: str):
     key = implementation.strip().lower()
     names = (*_ANTHROPIC_PAYLOAD_ENV, *_ENGINE_MSA_PATH_ENV, *_UPSTREAM_CFG_ENV)
     saved = {name: os.environ.get(name) for name in names}
+    from miniworld_engine import settings as _settings
+
+    previous_settings = (
+        _settings.configure(force_triton_kernels=True) if key in TRITON_FAMILY_SPECS else None
+    )
     try:
         if key in {ANTHROPIC_IMPL, ANTHROPIC_HYBRID_IMPL}:
             for name in _ENGINE_MSA_PATH_ENV:
@@ -778,6 +797,8 @@ def implementation_environment(implementation: str):
                 raise UnsupportedBenchmark(reason) from exc
             raise
     finally:
+        if previous_settings is not None:
+            _settings.configure(**vars(previous_settings))
         for name, value in saved.items():
             if value is None:
                 os.environ.pop(name, None)
@@ -1300,7 +1321,7 @@ def bench_module_triangle_attention(
         spec = triton_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
-            ImplementationType.TRITON,
+            ImplementationType.MINIWORLD,
             ImplementationType.CUEQUIVARIANCE,
         }:
             raise UnsupportedBenchmark(
@@ -1374,13 +1395,13 @@ def bench_module_triangle_attention(
     func = inference_step if is_inference_mode(conf.mode) else training_step
     execution_path = {
         ImplementationType.PYTORCH: "module.reference.torch",
-        ImplementationType.TRITON: (
+        ImplementationType.MINIWORLD: (
             "modules.triangle_attention.full."
             "layernorm+qkv_bias_projection+triton_triangle_attention_pair_bias+gate_out"
         ),
         ImplementationType.CUEQUIVARIANCE: "cuequivariance_torch.triangle_attention",
     }.get(spec.impl, spec.impl.value)
-    if spec.impl == ImplementationType.TRITON:
+    if spec.impl == ImplementationType.MINIWORLD:
         from miniworld_engine.integrations import triattn_b200
 
         layer0 = layers[0]
@@ -1470,7 +1491,6 @@ def bench_module_transition(
         spec = module_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
-            ImplementationType.TRITON,
             ImplementationType.MINIWORLD,
         }:
             # cuequivariance has no Transition kernel (resolve() maps it to the reference), and
@@ -1618,7 +1638,6 @@ def bench_module_conditioned_transition(
     spec = module_miniworld_spec(implementation)
     if spec.impl not in {
         ImplementationType.PYTORCH,
-        ImplementationType.TRITON,
         ImplementationType.MINIWORLD,
     }:
         # No CUEQUIVARIANCE: dispatch.resolve() maps it to the PyTorch reference for this op, so
@@ -1706,7 +1725,7 @@ def bench_module_conditioned_transition(
 
     func = inference_step if is_inference_mode(conf.mode) else training_step
     grad_to_none = [x, cond, *list(model.parameters())]
-    if spec.impl in {ImplementationType.TRITON, ImplementationType.MINIWORLD}:
+    if spec.impl == ImplementationType.MINIWORLD:
         if is_inference_mode(conf.mode):
             # The dispatch reads d_hidden, and d_hidden is `d_single_token`. This branched on
             # `conf.d_pair` -- the pair width, which this module never sees -- so at the token
@@ -1749,7 +1768,7 @@ def bench_module_adaptive_layernorm(
     implementation_type = spec.impl
     if implementation_type not in {
         ImplementationType.PYTORCH,
-        ImplementationType.TRITON,
+        ImplementationType.MINIWORLD,
     }:
         raise UnsupportedBenchmark(
             f"adaptive_layernorm does not implement {implementation!r}"
@@ -1863,7 +1882,7 @@ def bench_module_augmented_attention_token(
     fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
         # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
         # no module path here. Refuse rather than time the reference under another name.
@@ -2078,7 +2097,7 @@ def bench_module_augmented_attention_atom(
     fabric: FabricLike,
 ):
     spec = triton_miniworld_spec(implementation)
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         # cuequivariance: resolve() maps it to the PyTorch reference for augmented attention (its
         # AdaLN + conditioning-gate contract is not cuet.attention_pair_bias); cuda/anthropic have
         # no module path here. Refuse rather than time the reference under another name.
@@ -2353,7 +2372,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         why = (
             None
             if opm_train.wanted(impl)
-            else "disabled (settings.opm_train=0 or engine_backend=triton)"
+            else "disabled (settings.opm_train=0 or force_triton_kernels=True)"
         )
         why = why or opm_train.refusal(
             msa,
@@ -2592,7 +2611,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
             why = (
                 None
                 if pwa_train.wanted(impl)
-                else "disabled (settings.pwa_train/_INFER=0 or engine_backend=triton)"
+                else "disabled (settings.pwa_train/_INFER=0 or force_triton_kernels=True)"
             )
             why = why or pwa_train.refusal(msa, pair, *dims)
         execution_path = (
@@ -2684,7 +2703,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
     (128), `conf.apb_n_head` heads (8 x 48, the registry row; 16 x 24 = AF3), B=1, L=`seq_len`, token key mask, use_qk_norm=False; residual inside.
 
     * pytorch        -- the module's statements (SDPA with the additive pair bias).
-    * triton         -- implementation="triton": Triton LayerNorms + the augmented-attention
+    * triton         -- the `triton` spec (miniworld under settings.force_triton_kernels): Triton LayerNorms + the augmented-attention
       QK+pair-bias kernel at one augmentation.
     * miniworld      -- implementation="miniworld" (auto): resolves to the same attention kernel,
       with the engine's auto LayerNorm.
@@ -4402,7 +4421,6 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         spec = triton_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
-            ImplementationType.TRITON,
             ImplementationType.MINIWORLD,
         }:
             raise UnsupportedBenchmark(f"dit does not implement {implementation!r}")
@@ -4498,8 +4516,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                 return None
         att = block.attention
         reasons = ["autograd (the runner is inference-only)"] if is_train else []
-        if settings.current().engine_backend == "triton":
-            reasons.append("engine_backend=triton")
+        if settings.current().force_triton_kernels:
+            reasons.append("force_triton_kernels=True")
         if att.use_qk_norm and not (
             single.is_cuda
             and torch.cuda.get_device_capability(single.device) == (10, 0)
@@ -4543,7 +4561,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         execution_path = "module.reference.torch"
     elif (
         is_train
-        and spec.impl in (ImplementationType.MINIWORLD, ImplementationType.TRITON)
+        and spec.impl == ImplementationType.MINIWORLD
         and _token_dit_train_serves(model.layers[0], single, cond, pair, mask)
     ):
         execution_path = (
@@ -4552,7 +4570,6 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         )
     elif spec.impl in (
         ImplementationType.MINIWORLD,
-        ImplementationType.TRITON,
     ):  # both dispatch to the fused runner
         why = token_dit_refusal(model.layers[0])
         execution_path = (
@@ -4858,7 +4875,6 @@ def bench_swa_component_audit(conf, seq_len, implementation, fabric):
     if spec.impl not in {
         ImplementationType.PYTORCH,
         ImplementationType.MINIWORLD,
-        ImplementationType.TRITON,
     }:
         raise UnsupportedBenchmark("SWA audit supports pytorch and miniworld")
     enabled = requested if spec.impl != ImplementationType.PYTORCH else set()
@@ -5207,7 +5223,6 @@ def bench_module_swa_dit(conf, seq_len, implementation, fabric):
         spec = triton_miniworld_spec(implementation)
         if spec.impl not in {
             ImplementationType.PYTORCH,
-            ImplementationType.TRITON,
             ImplementationType.MINIWORLD,
         }:
             raise UnsupportedBenchmark(f"swa_dit does not implement {implementation!r}")
@@ -5601,7 +5616,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         spec = triton_miniworld_spec(
             implementation
         )  # miniworld -> TRITON: the engine's kernels
-        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+        if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
             raise UnsupportedBenchmark(
                 f"local_dit does not implement {implementation!r}"
             )
@@ -5791,7 +5806,7 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     spec = triton_miniworld_spec(
         implementation
     )  # miniworld -> TRITON: the engine's kernels
-    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.TRITON}:
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
         raise UnsupportedBenchmark(
             f"bias_only_dit does not implement {implementation!r}"
         )

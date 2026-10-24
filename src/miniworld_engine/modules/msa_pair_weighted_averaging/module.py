@@ -135,17 +135,14 @@ class MSAPairWeightedAveraging(nn.Module):
             if _anthropic.serves_pwa(msa, *_dims, **_fused):
                 return msa + _anthropic.pair_weighted_averaging(self, msa, pair, mask)
         # The portable Triton path (kernels.pair_weighted_averaging) for every call the native paths above did not take:
-        # other GPUs, other widths, engine_backend="triton". The residual and the row dropout are fused into it; the keep-mask
-        # is drawn here exactly as Dropout(broadcast_dim=1) draws it. An explicit implementation="triton" refuses with the reason.
-        if self.implementation in (
-            ImplementationType.MINIWORLD,
-            ImplementationType.TRITON,
-        ) and (
-            resolve("msa_pair_weighted_averaging", self.implementation, msa.device)
-            == KernelBackend.TRITON
-        ) and (
-            self.implementation == ImplementationType.TRITON
-            or _dispatch.triton_leg_allowed(msa.device)
+        # other GPUs with a record (dispatch.resolve), other widths, force_triton_kernels. The residual and the row dropout are
+        # fused into it; the keep-mask is drawn here exactly as Dropout(broadcast_dim=1) draws it. A card without a record
+        # resolves to PYTORCH there (one warning); H100 / B200 take the PyTorch statements below.
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and resolve("msa_pair_weighted_averaging", self.implementation, msa.device,
+                        training=_dispatch.needs_backward(self, msa, pair)) == KernelBackend.TRITON
+            and _dispatch.triton_leg_allowed(msa.device)
         ):
             from miniworld_engine.kernels.pair_weighted_averaging.interface import (
                 refusal,
@@ -155,6 +152,8 @@ class MSAPairWeightedAveraging(nn.Module):
             why = refusal(
                 msa, pair, self.n_head, self.to_value.weight.shape[0] // self.n_head
             )
+            if why is not None and msa.is_cuda:
+                _dispatch.warn_refused("msa_pair_weighted_averaging", msa.device, why)
             if why is None:
                 p_drop = float(self.drop_msa.p_drop) if self.training else 0.0
                 keep = None
@@ -182,10 +181,6 @@ class MSAPairWeightedAveraging(nn.Module):
                     eps_pair=float(self.ln_pair.eps),
                     keep=keep,
                     p_drop=p_drop,
-                )
-            if self.implementation == ImplementationType.TRITON:
-                raise NotImplementedError(
-                    f"MSAPairWeightedAveraging(implementation='triton'): {why}"
                 )
         with _dispatch.fallback_autocast(msa, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(msa.device)):
             msa_res = msa  # residual == the ORIGINAL input (before ln_msa rebinds `msa`)

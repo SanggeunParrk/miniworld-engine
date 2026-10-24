@@ -200,12 +200,16 @@ class Settings:
     #: Inference LN+proj concat fusion (layernorm_linear).
     pin_infer_concat: bool | None = None
 
-    #: Process-wide application policy; configure before constructing models.
-    engine_backend: Literal["auto", "triton"] = "auto"
+    #: Internal A/B switch (formerly ``engine_backend="triton"``): run the engine's Triton kernel family everywhere, on every
+    #: card, and switch every ``*_cuda`` stage off. NOT a public backend -- ``implementation`` is pytorch / miniworld /
+    #: cuequivariance / anthropic -- and not a production setting: it is how a Triton cache is built and how the Triton
+    #: kernels are compared against the CUDA path. Without it ``miniworld`` routes per card (``modules.dispatch``,
+    #: ``docs/dispatch.md``). Configure before constructing models.
+    force_triton_kernels: bool = False
     #: H100 (sm_90) and B200 (sm_100) have no Triton fallback, on purpose: those cards run hand-written CUDA (plus cuBLAS), and a call
     #: no CUDA path serves runs the PyTorch reference instead of an untuned Triton kernel (`modules.dispatch.restricted_card`). True
-    #: brings the engine's Triton kernels back on those cards for A/B work and cache builds; `engine_backend="triton"` does the same.
-    #: Other cards are unaffected (Triton is their implementation).
+    #: brings the engine's Triton kernels back on those cards for A/B work and cache builds; `force_triton_kernels` does the same.
+    #: Other cards are unaffected (see `force_triton_kernels` and `autotune.records` for how they route).
     triton_on_hopper_blackwell: bool = False
     #: Connected CUDA bidirectional training widths (subset of 64/128/256/384/512). D64 uses its
     #: own fused path (h100_d64_b200gate).
@@ -265,7 +269,7 @@ class Settings:
 
     # ---- SWA atom DiT fused block (kernels/swa_dit) ----------------------------------------- #
     # Moved from team-gm (commit 14f2c73), whose environment switches these replace one for one, with the same
-    # defaults. `engine_backend="triton"` turns every *_cuda stage off as well.
+    # defaults. `force_triton_kernels` turns every *_cuda stage off as well.
     #: Let `modules.swa_dit.SWADiTBlock` (implementation other than pytorch) run the fused block when
     #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
     #: off keeps the per-op path. Formerly team-gm's opt-in MINIWORLD_SWA_FUSED on SWAAtomTransformer.
@@ -541,6 +545,11 @@ class Settings:
     #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
     trimul_h100_preserve_widths: frozenset[int] = frozenset()
 
+    @property
+    def engine_backend(self) -> Literal["auto", "triton"]:
+        """Deprecated read-only view of :attr:`force_triton_kernels` (``"triton"`` when set); removed in the next minor release."""
+        return "triton" if self.force_triton_kernels else "auto"
+
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
         return kernel in self.autotune_kernels
@@ -597,6 +606,18 @@ def configure(**kwargs) -> Settings:
     """Replace the active settings; returns the previous value so a caller can restore it."""
     global _ACTIVE
     previous = _ACTIVE
+    if "engine_backend" in kwargs:
+        # Deprecated spelling of force_triton_kernels (one release): "triton" -> True, "auto" -> False.
+        backend = kwargs.pop("engine_backend")
+        if backend not in ("auto", "triton"):
+            raise ValueError(f"engine_backend={backend!r}: use 'auto' or 'triton' (deprecated; use force_triton_kernels)")
+        warnings.warn(
+            "settings.engine_backend is deprecated; use settings.force_triton_kernels=True (A/B switch) or False. "
+            "The alias is removed in the next minor release.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        kwargs.setdefault("force_triton_kernels", backend == "triton")
     fields = {f.name for f in dataclasses.fields(Settings)}
     unknown = set(kwargs) - fields
     if unknown:

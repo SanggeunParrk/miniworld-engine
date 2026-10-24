@@ -18,7 +18,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
     if (
         getattr(module, "_backend", None) != KernelBackend.TRITON
         or not getattr(module, "_b200_cuda", True)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm or module.n_head != 4:
@@ -66,7 +66,7 @@ def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) ->
     if (
         getattr(module, "_backend", None) != KernelBackend.TRITON
         or not getattr(module, "_b200_cuda", True)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm:

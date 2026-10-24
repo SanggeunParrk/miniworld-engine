@@ -21,7 +21,7 @@ def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropsca
         return False
     if (
         module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():
@@ -69,7 +69,7 @@ def serves_train(module, pair: torch.Tensor, *, bidirectional: bool) -> bool:
         return False
     if (
         module.implementation != ImplementationType.MINIWORLD
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     if not pair.is_cuda or pair.dtype != torch.bfloat16 or not pair.is_contiguous():

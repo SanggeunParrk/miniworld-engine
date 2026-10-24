@@ -59,9 +59,9 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
 
     if not settings.current().bias_only_dit_hoist:
         return False
-    if implementation not in (ImplementationType.MINIWORLD, ImplementationType.TRITON):
+    if implementation != ImplementationType.MINIWORLD:
         return False
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         return False
     if not pair.is_cuda or torch.cuda.get_device_capability(pair.device) not in ((10, 0), (9, 0)):
         return False

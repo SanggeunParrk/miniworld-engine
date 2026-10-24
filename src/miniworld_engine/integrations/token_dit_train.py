@@ -92,7 +92,7 @@ TRN = (
 def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
     if (not settings.current().token_dit_train) or not torch.is_grad_enabled():
         return False
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         return False
     a = module.attention
     # the engine's kernels (TRITON or MINIWORLD resolve to them), as the sm_90 / sm_100 attention cores gate on
@@ -1393,7 +1393,7 @@ def serves_psb(module, single, cond, bias, mask, compute_dtype=None) -> bool:
     autograd it runs the same forward (the saved activations are freed on return)."""
     if not settings.current().token_dit_train:
         return False
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         return False
     a = module.attention
     from miniworld_engine.modules.dispatch import KernelBackend

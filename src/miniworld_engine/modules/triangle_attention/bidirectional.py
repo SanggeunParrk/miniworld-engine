@@ -65,6 +65,7 @@ class BidirectionalTriangleAttention(nn.Module):
         # 'miniworld' (auto) -> the TRITON family (fused bidir attention kernels).
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
         self.n_head = n_head
         self.d_pair = d_pair
         self.d_hidden = d_hidden if d_hidden is not None else d_pair
@@ -245,7 +246,7 @@ class BidirectionalTriangleAttention(nn.Module):
         Routes on the resolved internal backend, degrading to the pytorch reference (with a
         warning) on a dtype the fused kernels can't run."""
         backend = _dispatch.guard_dtype(
-            self._backend, pair.dtype, op="BidirectionalTriangleAttention"
+            _dispatch.call_backend(self, self._backend, pair), pair.dtype, op="BidirectionalTriangleAttention"
         )
         no_triton = False
         if (

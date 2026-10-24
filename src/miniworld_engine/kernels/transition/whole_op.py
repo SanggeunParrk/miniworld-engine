@@ -49,7 +49,7 @@ def transition(
         msg = (f"transition: expand_a_weight has {expand_a_weight.shape[0]} rows, expected "
                f"n * d_hidden = {n} * {x.shape[-1]}")
         raise ValueError(msg)
-    if settings.current().transition_fused_sm90a and settings.current().engine_backend != "triton":
+    if settings.current().transition_fused_sm90a and (not settings.current().force_triton_kernels):
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
         out = transition_sm90a(
@@ -57,7 +57,7 @@ def transition(
         if out is not None:
             return out
 
-    if settings.current().engine_backend != "triton":
+    if (not settings.current().force_triton_kernels):
         from miniworld_engine.kernels.transition.cuda import fused_sm100a
 
         if fused_sm100a.available(x, expand_a_weight, squeeze_weight):
@@ -74,8 +74,19 @@ def transition(
 
     if x.is_cuda and restricted_card(x.device):
         # H100 / B200 have no Triton fallback: a call no CUDA kernel serves runs the PyTorch reference (an explicit
-        # engine_backend="triton" or settings.triton_on_hopper_blackwell lifts this and keeps Triton). The weights are cast to the
+        # force_triton_kernels=True or settings.triton_on_hopper_blackwell lifts this and keeps Triton). The weights are cast to the
         # activation dtype, as the Triton path's caller does in modules.Transition.
+        from miniworld_engine.kernels.transition.reference import transition_pytorch
+
+        return transition_pytorch(
+            x, ln_in_weight, ln_in_bias, expand_a_weight.to(x.dtype), expand_b_weight.to(x.dtype),
+            squeeze_weight.to(x.dtype), n, eps,
+        )
+
+    from miniworld_engine.modules.dispatch import triton_blocked
+
+    if x.is_cuda and triton_blocked("transition", x.device, x, ln_in_weight, expand_a_weight, expand_b_weight, squeeze_weight):
+        # a card the engine holds no record for: the PyTorch reference, as modules.Transition runs (one UnrecordedCardWarning)
         from miniworld_engine.kernels.transition.reference import transition_pytorch
 
         return transition_pytorch(

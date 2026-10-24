@@ -56,6 +56,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
         # GPU arch is resolved ONCE into self._backend; forward routes on that.
         self.implementation = ImplementationType(implementation)
         self._backend = _resolve_trimul_backend(implementation)  # concrete KernelBackend
+        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
         # ======================================================================================
         # THIS MODULE ALWAYS APPLIES THE RESIDUAL: y = pair + drop_row(bidir_trimul(pair)).
         # The residual connection is UNCONDITIONAL (AF3 default; residual is the domain standard) —
@@ -161,9 +162,16 @@ class BidirectionalTriangleMultiplication(nn.Module):
             if _anthropic.serves(pair, pair.shape[-1], 2 * self.d_hidden, **_native):
                 return _anthropic.update_bidirectional(self, pair, mask)
 
-        if self._backend == KernelBackend.CUEQUIVARIANCE:
+        backend = _dispatch.call_backend(self, self._backend, pair)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
-        if self._backend == KernelBackend.TRITON and not no_triton:
+        if backend == KernelBackend.TRITON and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
+            _dispatch.warn_refused(
+                "triangle_multiplication", pair.device,
+                f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the Triton bidirectional TriMul needs d_hidden == d_pair",
+            )
+            backend = KernelBackend.PYTORCH
+        if backend == KernelBackend.TRITON and not no_triton:
             # Composed-from-unidirectional TRITON path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
             # path serves inference and training (grad flows through the composed
@@ -171,7 +179,7 @@ class BidirectionalTriangleMultiplication(nn.Module):
             # residual + row-broadcast dropout are FUSED into the triton gate store
             # (gate_elem epilogue) — no external _r() add.
             return self._forward_triton(pair, mask, _ds)
-        if self._backend not in (KernelBackend.PYTORCH, KernelBackend.TRITON, KernelBackend.CUDA):
+        if backend not in (KernelBackend.PYTORCH, KernelBackend.TRITON, KernelBackend.CUDA):
             raise InvalidImplementationError(self.implementation)
 
         with _dispatch.fallback_autocast(pair, self, no_triton):

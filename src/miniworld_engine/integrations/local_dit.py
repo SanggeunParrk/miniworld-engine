@@ -358,7 +358,7 @@ def serves(module, single, cond, pair, mask, rope=None) -> bool:
     if (
         (_FAILED32 if fp32 else _FAILED)
         or (not settings.current().local_dit_sm100)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     from miniworld_engine.modules.dispatch import KernelBackend
@@ -465,7 +465,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
                 f"H100 local atom DiT training requires {detail}; no composed fallback"
             )
 
-    require(settings.current().engine_backend != "triton", "the CUDA engine backend")
+    (not require(settings.current().force_triton_kernels), "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )
@@ -564,7 +564,7 @@ def _require_hopper_inference(module, single, cond, pair, mask):
                 f"H100 local atom DiT inference requires {detail}; no composed fallback"
             )
 
-    require(settings.current().engine_backend != "triton", "the CUDA engine backend")
+    (not require(settings.current().force_triton_kernels), "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )

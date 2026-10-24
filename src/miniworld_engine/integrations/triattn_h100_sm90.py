@@ -38,7 +38,7 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
     if (
         getattr(module, "_backend", None) != KernelBackend.TRITON
         or not getattr(module, "_h100_cuda", True)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return None
     if not module.use_self_attention or module.use_qk_norm:

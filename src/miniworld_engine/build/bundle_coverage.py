@@ -304,7 +304,7 @@ def _run_block(c: dict) -> None:
         from miniworld_engine.modules.exceptions import ImplementationType as MI
         from miniworld_engine.modules.local_dit import ESMFOLD2, LocalDiTBlock
 
-        model = LocalDiTBlock(128, 128, 16, 4, n=2, implementation=MI.TRITON, **ESMFOLD2)
+        model = LocalDiTBlock(128, 128, 16, 4, n=2, implementation=MI.MINIWORLD, **ESMFOLD2)
         a, n = c["samples"], c["N"]
         angles = torch.randn(1, n, 16, device="cuda")
         mask = torch.ones(1, n, device="cuda", dtype=torch.bool)
@@ -327,7 +327,7 @@ def _run_block(c: dict) -> None:
         from miniworld_engine.modules.exceptions import ImplementationType as MI
         from miniworld_engine.modules.local_dit import LocalDiTBlock
 
-        model = LocalDiTBlock(128, 128, 16, 4, n=2, cross_attention=True, implementation=MI.TRITON)
+        model = LocalDiTBlock(128, 128, 16, 4, n=2, cross_attention=True, implementation=MI.MINIWORLD)
         a, n = c["samples"], c["N"]
         args = (torch.randn(a, 1, n, 128, device="cuda", dtype=dt), torch.randn(a, 1, n, 128, device="cuda", dtype=dt),
                 torch.randn(1, (n + 31) // 32, 32, 128, 16, device="cuda", dtype=dt))
@@ -451,7 +451,7 @@ def serve() -> int:
     """Worker loop: one JSON descriptor per stdin line, one ``RESULT <json>`` line per descriptor on stdout."""
     from miniworld_engine import settings
 
-    settings.configure(triton_on_hopper_blackwell=False, engine_backend="auto")
+    settings.configure(triton_on_hopper_blackwell=False, force_triton_kernels=False)
     for line in sys.stdin:
         line = line.strip()
         if not line:

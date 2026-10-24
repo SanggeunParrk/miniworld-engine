@@ -22,19 +22,34 @@ class ImplementationType(str, Enum):
         and it refuses rather than silently reroute; ``miniworld`` uses the same payloads
         where it can and falls back where it cannot.
 
-    ``triton`` / ``cuda`` are the concrete *technology* backends that
-    ``miniworld`` resolves to. They are INTERNAL — the module layer resolves to a
-    :class:`~miniworld_engine.modules.dispatch.KernelBackend` and never branches on
-    ``ImplementationType`` in ``forward``. They remain accepted here only so the
-    benchmark harness can pin one explicitly for per-impl A/B measurement; new
-    application code should pass ``miniworld`` (or ``pytorch``) instead."""
+    Triton is NOT a public backend. Behind ``miniworld`` the engine uses its own CUDA path where one
+    serves the call; on a card without one it routes to the Triton kernel family only if the engine
+    holds a record for that exact card, else it warns and runs the PyTorch reference
+    (:mod:`miniworld_engine.autotune.records`, ``docs/dispatch.md``). The strings ``"triton"`` and ``"cuda"``
+    are still read, with a ``DeprecationWarning``, as ``miniworld`` (removed in the next minor release);
+    forcing the Triton family for A/B work is ``settings.force_triton_kernels``."""
 
     PYTORCH = "pytorch"
-    TRITON = "triton"
-    CUDA = "cuda"
     CUEQUIVARIANCE = "cuequivariance"
     MINIWORLD = "miniworld"
     ANTHROPIC = "anthropic"
+
+    @classmethod
+    def _missing_(cls, value):
+        if isinstance(value, str) and value.strip().lower() in ("triton", "cuda"):
+            import warnings
+
+            old = value.strip().lower()
+            warnings.warn(
+                f"implementation={old!r} is deprecated and is read as 'miniworld' (it is removed in the next minor release). "
+                "Triton is not a public backend: on H100 / B200 'miniworld' is the CUDA path (no Triton there), and elsewhere it "
+                "routes to Triton only on a card with a record. Forcing the Triton kernel family is only possible through the A/B "
+                "switch settings.force_triton_kernels=True.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
+            return cls.MINIWORLD
+        return None
 
 
 class InvalidImplementationError(ValueError):

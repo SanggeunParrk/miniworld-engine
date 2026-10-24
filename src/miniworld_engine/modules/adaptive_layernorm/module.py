@@ -8,8 +8,10 @@ from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.kernels import adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
+    call_backend,
     needs_backward,
     resolve_adaptive_layernorm,
+    train_gate,
 )
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -33,6 +35,7 @@ class AdaptiveLayerNorm(nn.Module):
         self.implementation = ImplementationType(implementation)
         # 'miniworld' (auto) -> the TRITON family (the only fused adaln kernel).
         self._backend = resolve_adaptive_layernorm(self.implementation)
+        self._train_gate = train_gate("adaptive_layernorm", self.implementation, self._backend)
         # Constructor-level, like ConditionedTransition: the norm and the scale/bias projections
         # are one numerical unit. The module already followed a post-hoc ``.to(dtype)``; taking it
         # here as well means a caller can build a bf16 module directly instead of building fp32
@@ -53,7 +56,8 @@ class AdaptiveLayerNorm(nn.Module):
         cond: Float[torch.Tensor, "* d_cond"],
     ) -> Float[torch.Tensor, "* d_hidden"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
-        if self._backend == KernelBackend.PYTORCH:
+        backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.
             from miniworld_engine.integrations.h100_master import master_linear
@@ -68,7 +72,7 @@ class AdaptiveLayerNorm(nn.Module):
             # the engine's own path returned the compute dtype (bf16 under autocast); torch's LayerNorm would hand back fp32 there
             return out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
 
-        if self._backend == KernelBackend.TRITON:
+        if backend == KernelBackend.TRITON:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
             #
             # `dispatch.needs_backward` owns the condition -- see its docstring. It was written

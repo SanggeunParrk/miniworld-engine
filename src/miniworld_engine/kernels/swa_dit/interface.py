@@ -66,8 +66,8 @@ def _global_gate() -> str | None:
 
     if (
         not settings.current().swa_dit_sm100
-    ) or settings.current().engine_backend == "triton":
-        return "global attention runs on the sm_100a stages only, and settings.swa_dit_sm100=0 / engine_backend='triton' turn them off"
+    ) or settings.current().force_triton_kernels:
+        return "global attention runs on the sm_100a stages only, and settings.swa_dit_sm100=0 / force_triton_kernels=True turn them off"
     if dispatch._SM100_FAILED:
         return "the sm_100a SWA atom DiT kernels failed to build or load earlier in this process"
     if not sm100.FA4_AVAILABLE:
@@ -209,13 +209,13 @@ def refusal(
 
 def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     """Whether the hoisted modulation runs on the sm_100a kernels: B200, bf16 c, bf16 or fp32 Wmod, d_cond = C = 128, rows a multiple
-    of 128, and the kernels load (``settings.swa_dit_sm100=0`` or ``engine_backend="triton"`` keep the fp32 GEMM)."""
+    of 128, and the kernels load (``settings.swa_dit_sm100=0`` or ``force_triton_kernels=True`` keep the fp32 GEMM)."""
 
     from miniworld_engine import settings
 
     if (
         not settings.current().swa_dit_sm100
-    ) or settings.current().engine_backend == "triton":
+    ) or settings.current().force_triton_kernels:
         return False
     if not (
         c_base.is_cuda
@@ -241,7 +241,7 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
 
 def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     """Whether the hoisted modulation runs on the sm_100a TF32 kernel (mod_fwd_tf32): B200, fp32 c and Wmod, d_cond = C = 128, rows a
-    multiple of 128, the TF32 kernels load (``settings.swa_dit_tf32=0`` / ``settings.swa_dit_sm100=0`` / ``engine_backend="triton"``
+    multiple of 128, the TF32 kernels load (``settings.swa_dit_tf32=0`` / ``settings.swa_dit_sm100=0`` / ``force_triton_kernels=True``
     keep the torch fp32 GEMM) -- and no gradient is recorded (there is no TF32 backward at the moment: ``dispatch._tf32_bwd_ready``).
     Traceable: tensor metadata and the per-device constant ``dispatch._tf32_ready`` (which owns the build / load)."""
     if not (

@@ -130,6 +130,7 @@ class TriangleAttention(nn.Module):
         # lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_attention", self.implementation, self._backend)
         self.anthropic_row = anthropic_row
         if self._backend == KernelBackend.ANTHROPIC and not use_self_attention:
             raise ValueError(
@@ -512,7 +513,7 @@ class TriangleAttention(nn.Module):
             # Degrade to the pytorch reference (with a warning) on a dtype the fused
             # triton kernels can't run; bf16 (production) keeps the fast path.
             backend = _dispatch.guard_dtype(
-                self._backend, pair.dtype, op="TriangleAttention"
+                _dispatch.call_backend(self, self._backend, pair), pair.dtype, op="TriangleAttention"
             )
             master_family = backend  # the fp32-master projections below (cuBLAS casts, no Triton) stay on for the engine family
             if (

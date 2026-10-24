@@ -83,7 +83,7 @@ def wanted(implementation) -> bool:
 
     return (
         _enabled()
-        and settings.current().engine_backend != "triton"
+        and (not settings.current().force_triton_kernels)
         and implementation
         in (ImplementationType.MINIWORLD, ImplementationType.ANTHROPIC)
     )

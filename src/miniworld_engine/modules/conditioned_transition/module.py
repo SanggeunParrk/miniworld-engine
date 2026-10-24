@@ -34,8 +34,10 @@ from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
+    call_backend,
     needs_backward,
     resolve_conditioned_transition,
+    train_gate,
 )
 from miniworld_engine.modules.exceptions import (
     ImplementationType,
@@ -79,6 +81,7 @@ class ConditionedTransition(nn.Module):
         # 'miniworld' (auto) -> the TRITON fused family (inference d_hidden
         # sub-dispatch lives in the kernel); CUEQUIVARIANCE shares that path.
         self._backend = resolve_conditioned_transition(self.implementation)
+        self._train_gate = train_gate("conditioned_transition", self.implementation, self._backend)
 
         # AF3 Algorithm 25 step 1: the conditioned transition STARTS with an AdaLN of the
         # input (matches ESMFold2 + pre-migration team-gm). The AdaLN is applied by this
@@ -142,10 +145,11 @@ class ConditionedTransition(nn.Module):
         post-AdaLN tail; the AdaLN lives in this module).
         """
         x = self.ada_ln_in(x, cond)
-        if self._backend == KernelBackend.PYTORCH:
+        backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)
 
-        if self._backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
+        if backend in {KernelBackend.TRITON, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]
             # L for the autotune shape key, read HERE because this is the last place that has it:
             # `x` is still (..., A, d), so `length_of` gives the ATOM count A. After the reshape

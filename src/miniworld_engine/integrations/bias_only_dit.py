@@ -75,12 +75,9 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
 
     if (not settings.current().bias_only_dit) or torch.is_grad_enabled():
         return False
-    if module.implementation not in (
-        ImplementationType.MINIWORLD,
-        ImplementationType.TRITON,
-    ):
+    if module.implementation != ImplementationType.MINIWORLD:
         return False
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         return False
     dt = single.dtype
     src = (

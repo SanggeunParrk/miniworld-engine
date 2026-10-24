@@ -47,7 +47,7 @@ class TriangleMultiplication(nn.Module):
         Dimension of pair representation.
     d_hidden : int | None
         Hidden dimension for left/right projections. Defaults to ``d_pair`` when *None*.
-        Not supported with the TRITON implementation.
+        On the Triton kernels it is a refusal (a ``KernelRefusedWarning`` and the PyTorch reference); the H100 CUDA kernels serve hidden = 2 d_pair at D64 / D128.
     outgoing : bool
         Whether to use outgoing edges.
     implementation : ImplementationType
@@ -92,6 +92,7 @@ class TriangleMultiplication(nn.Module):
         # public option is kept on self.implementation; forward routes on _backend.
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_triangle_multiplication(self.implementation)
+        self._train_gate = _dispatch.train_gate("triangle_multiplication", self.implementation, self._backend)
         self.ln_implementation = ln_implementation
         direction = "outgoing" if outgoing else "incoming"
         self.nvtx_enabled = False
@@ -100,12 +101,8 @@ class TriangleMultiplication(nn.Module):
         if d_hidden is None:
             d_hidden = d_pair
 
-        if d_hidden != d_pair and implementation == ImplementationType.TRITON:
-            msg = (
-                f"d_hidden != d_pair ({d_hidden} != {d_pair}) is not "
-                f"supported with TRITON implementation"
-            )
-            raise ValueError(msg)
+        # d_hidden != d_pair is not an error here: the Triton front produces per-side width d_pair, so `miniworld` warns
+        # (dispatch.warn_refused) and runs the PyTorch reference for it; the hand-CUDA H100 kernels serve hidden = 2 d_pair at D64 / D128.
 
         # The front projects d_pair -> d_hidden, and `to_out` projects d_hidden -> d_pair
         # (AF3 Alg. 12). These four were `Linear(d_pair, d_pair)`, which ignored `d_hidden`
@@ -149,7 +146,7 @@ class TriangleMultiplication(nn.Module):
         dropout_p = self.p_drop if dropout_p is None else dropout_p
         with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
             backend = _dispatch.guard_dtype(
-                self._backend, pair.dtype, op="TriangleMultiplication"
+                _dispatch.call_backend(self, self._backend, pair), pair.dtype, op="TriangleMultiplication"
             )
             _pair_in = pair  # original (pre-LN) input == the residual; torch path rebinds `pair`
             # row-broadcast dropout scale (== drop_row mask/(1-p), [B,1,L,D]); training only.
@@ -187,6 +184,14 @@ class TriangleMultiplication(nn.Module):
                 return _r(self._forward_cuequivariance(pair, mask))
 
             if no_triton and backend in (KernelBackend.TRITON, KernelBackend.CUDA):
+                backend = KernelBackend.PYTORCH
+            if backend == KernelBackend.TRITON and self.d_hidden != pair.shape[-1] and pair.is_cuda:
+                # the Triton front produces per-side width d_pair: a wider or narrower hidden (Protenix's template TriMul, pair 64 /
+                # hidden 128) is a refusal, not an error
+                _dispatch.warn_refused(
+                    "triangle_multiplication", pair.device,
+                    f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the Triton TriMul needs d_hidden == d_pair",
+                )
                 backend = KernelBackend.PYTORCH
             if backend == KernelBackend.TRITON:
                 # Fused BDLL pipeline: LN_in -> gated BDLL front (transposed store, no permute) -> ONE

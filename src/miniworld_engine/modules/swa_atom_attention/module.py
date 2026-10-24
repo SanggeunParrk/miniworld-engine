@@ -683,7 +683,7 @@ def _qk_norm(x: torch.Tensor) -> torch.Tensor:
     """
     from miniworld_engine.modules import dispatch as _dispatch
 
-    if not x.is_cuda or _dispatch.restricted_card(x.device):   # H100 / B200: no Triton fallback
+    if not x.is_cuda or not _dispatch.triton_leg_allowed(x.device, "swa_atom_attention"):   # H100 / B200: no Triton fallback; other cards: only with a record
         return F.rms_norm(x, (x.size(-1),), eps=torch.finfo(torch.float32).eps).to(x.dtype)
     from miniworld_engine import kernels
 
@@ -720,7 +720,7 @@ class SWA3DRoPEAttention(nn.Module):
             msg = f"d_model ({d_model}) must be divisible by n_heads ({n_heads})."
             raise ValueError(msg)
         self.implementation = ImplementationType(implementation)
-        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD, ImplementationType.TRITON}:
+        if self.implementation not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
             raise InvalidImplementationError(self.implementation)
         self.n_heads = n_heads
         self.head_dim = d_model // n_heads
@@ -747,10 +747,16 @@ class SWA3DRoPEAttention(nn.Module):
         q, k, v = qkv.permute(2, 0, 1, 3, 4).unbind(0)  # each [N, S, H, D]
         engine_pointwise = self.implementation != ImplementationType.PYTORCH and not getattr(self, "torch_pointwise", False)
         if engine_pointwise and q.is_cuda:
-            from miniworld_engine.modules.dispatch import restricted_card
+            from miniworld_engine.modules.dispatch import (
+                needs_backward,
+                triton_leg_allowed,
+            )
 
-            # H100 / B200 have no Triton fallback: the QK norm + RoPE, the gate and the output projection run as PyTorch ops
-            engine_pointwise = not restricted_card(q.device)
+            # H100 / B200 have no Triton fallback, and a card without a record (autotune.records) gets none either: the QK norm +
+            # RoPE, the gate and the output projection run as PyTorch ops
+            engine_pointwise = triton_leg_allowed(
+                q.device, "swa_atom_attention", training=needs_backward(self, q, k, v)
+            )
         if q.is_cuda and engine_pointwise:
             from miniworld_engine.kernels.rope.interface import qk_norm_rope_3d
             q, k = qk_norm_rope_3d(q, k, cos, sin)

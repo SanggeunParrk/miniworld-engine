@@ -11,7 +11,7 @@ the arguments are team-gm's; what differs is the engine plumbing:
 * the CUDA-vs-Triton choice reads ``settings`` instead of team-gm's environment switches
   (``SWA_QKVG_FWD`` / ``SWA_FFN_FWD`` / ``SWA_FFN_BWD`` -> ``swa_dit_{qkvg_fwd,ffn_fwd,ffn_bwd}_cuda``,
   ``SWA_FFN_DW`` -> ``swa_dit_ffn_dw``, ``SWA_DQ1`` -> ``swa_dit_dq1``; same defaults), and
-  ``engine_backend="triton"`` turns every CUDA stage off, as it does for the other families;
+  ``force_triton_kernels=True`` turns every CUDA stage off, as it does for the other families;
 * the CUDA kernels build through ``cuda/loader.py`` (``settings.engine_jit_root``) and any failure falls back to Triton;
 * each Triton launch passes ``shape_key=atom_key(S, A=..., C=C[, NHID=NHID])`` where team-gm passed ``SB = log2(rows)``:
   the atom count S bucketed like every other atom-level kernel, and the AUGMENT COUNT A = N // B exactly, always -- the
@@ -21,7 +21,7 @@ the arguments are team-gm's; what differs is the engine plumbing:
   untraceable as the launches, so it sits inside the same op. ``autograd.SWADiTBlockFunction`` owns the saved tensors.
 
 bf16 stages -- every one hand-CUDA on sm_90 (each with its own switch; Triton on other cards, on a failed build, or with
-``engine_backend="triton"``). Forward: qkvg -> window attention (``cuda/swa_attn.cu``) -> out-projection + gated residual
+``force_triton_kernels=True``). Forward: qkvg -> window attention (``cuda/swa_attn.cu``) -> out-projection + gated residual
 + FFN. Backward: FFN (materialised dW operands; Triton with ``swa_dit_ffn_dw="fused"``) -> out-projection -> attention dq,
 dk, dv in one kernel -> qkvg, then the weight gradients as cuBLAS GEMMs over the saved operands. The qkvg forward, the
 out-projection + FFN forward and the FFN backward have two CUDA implementations: team-gm's 64-row wgmma kernels
@@ -39,7 +39,7 @@ the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32
 attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
 backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
 steps), so fp32 training runs the Triton fp32 path. ``settings.swa_dit_tf32=0`` (or ``settings.swa_dit_sm100=0`` /
-``engine_backend="triton"``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
+``force_triton_kernels=True``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
 hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` without a gradient).
 
 fp32 stages elsewhere (q fp32): on sm_90 with ``swa_dit_fp32_cuda`` (default on) and TF32 allowed (matmul precision "high" or
@@ -160,8 +160,8 @@ def native_h100_stages(q) -> bool:
 
 def _composed_cuda(device: torch.device, extra: str | None = None) -> bool:
     """Whether every hand-CUDA extension the composed bf16 stages use (and ``extra``: "fp32" for the fp32 ones) builds / loads on
-    ``device`` (the prebuilt bundle or the JIT); ``engine_backend="triton"`` asks for their Triton kernels instead."""
-    return settings.current().engine_backend != "triton" and _composed_builds(device, extra)
+    ``device`` (the prebuilt bundle or the JIT); ``force_triton_kernels=True`` asks for their Triton kernels instead."""
+    return (not settings.current().force_triton_kernels) and _composed_builds(device, extra)
 
 
 @functools.lru_cache(maxsize=8)
@@ -199,7 +199,7 @@ def _tiled_serves(qh, d_out=None):
 
 def _native_h100_extension(which="qkvg"):
     from miniworld_engine.kernels.swa_dit.cuda.loader import ERRORS, extension
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         raise RuntimeError("native H100 SWA rejects a forced Triton backend")
     ext = extension(which)
     if ext is None:
@@ -418,7 +418,7 @@ def _augments(N: int, B: int) -> int:
 
 def _cuda(which: str, wanted: bool, device: torch.device) -> Any:
     """The hand-CUDA extension for stage ``which``, or None -> the Triton kernel serves the stage."""
-    if not wanted or settings.current().engine_backend == "triton":
+    if not wanted or settings.current().force_triton_kernels:
         return None
     from miniworld_engine.kernels.swa_dit.cuda.loader import extension, is_sm90
 
@@ -436,7 +436,7 @@ def _sm100(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> Any:
     if (
         _SM100_FAILED
         or (not settings.current().swa_dit_sm100)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return None
     from miniworld_engine.kernels.swa_dit.cuda import sm100
@@ -464,11 +464,11 @@ _TF32_FAILED = False
 
 
 def _tf32_off() -> bool:
-    """The switches that keep the Triton fp32 path: ``settings.swa_dit_tf32=0``, ``settings.swa_dit_sm100=0``, engine_backend triton."""
+    """The switches that keep the Triton fp32 path: ``settings.swa_dit_tf32=0``, ``settings.swa_dit_sm100=0``, force_triton_kernels."""
     return (
         (not settings.current().swa_dit_tf32)
         or (not settings.current().swa_dit_sm100)
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     )
 
 
@@ -1603,7 +1603,7 @@ def mod_sm90(c: torch.Tensor, wmod: torch.Tensor) -> bool:
     (any matmul precision: the products are exact) and the extension builds. fp32 c stays on torch's GEMMs: the kernels'
     fp32 variant (bf16 hi / lo planes, 2^-17) is the more accurate but not the faster one next to cuBLAS's TF32."""
     policy = settings.current()
-    if not policy.swa_dit_mod_cuda or policy.engine_backend == "triton" or not c.is_cuda:
+    if not policy.swa_dit_mod_cuda or policy.force_triton_kernels or not c.is_cuda:
         return False
     if c.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or c.dtype != wmod.dtype or c.dtype != torch.bfloat16:
         return False

@@ -75,6 +75,10 @@ def triangle_attention(
     if use_self_attention:
         query = rearrange(F.linear(x, to_query_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
         key = rearrange(F.linear(x, to_key_weight), "B L L2 (H D) -> B H L L2 D", H=n_head)
+        from miniworld_engine.modules.dispatch import triton_blocked
+
+        # a card the engine holds no record for: the PyTorch statements for the attention core and the QK norm (one UnrecordedCardWarning)
+        blocked = pair.is_cuda and triton_blocked("triangle_attention", pair.device, pair, to_value_weight, to_out_weight)
         if use_qk_norm:
             # No `d_head` here any more: the kernel normalizes over the LAST axis and reads its
             # width from the tensor, where F.rms_norm wanted it restated as `normalized_shape`.
@@ -83,9 +87,20 @@ def triangle_attention(
             # rather than held. `eps` is this function's own, so nothing about it changes.
             from miniworld_engine.kernels.rmsnorm.interface import triton_rmsnorm
 
-            query = triton_rmsnorm(query, norm_query_weight, eps)
-            key = triton_rmsnorm(key, norm_key_weight, eps)
-        out = triton_triangle_attention_pair_bias(query, key, value, bias)
+            if blocked:
+                query = F.rms_norm(query, (query.shape[-1],), norm_query_weight, eps)
+                key = F.rms_norm(key, (key.shape[-1],), norm_key_weight, eps)
+            else:
+                query = triton_rmsnorm(query, norm_query_weight, eps)
+                key = triton_rmsnorm(key, norm_key_weight, eps)
+        if blocked:
+            from miniworld_engine.kernels.triangle_attention.reference import (
+                triangle_attention_pair_bias_pytorch,
+            )
+
+            out = triangle_attention_pair_bias_pytorch(query, key, value, bias)
+        else:
+            out = triton_triangle_attention_pair_bias(query, key, value, bias)
     else:
         attention = F.softmax(bias, dim=-1)
         out = torch.einsum("bhjk,bhikd->bhijd", attention, value)

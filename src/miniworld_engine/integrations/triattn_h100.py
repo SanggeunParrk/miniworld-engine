@@ -18,11 +18,9 @@ def native_requested(module, pair):
     """Hopper engine calls require native execution or a contract error."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    # The common runner maps the MiniWorld label to the TRITON family enum.
-    # Both family spellings dispatch into this CUDA implementation on Hopper.
+    # The MiniWorld label resolves to the TRITON family backend (module._backend); on Hopper it dispatches into this CUDA implementation.
     return (
-        module.implementation
-        in {ImplementationType.MINIWORLD, ImplementationType.TRITON}
+        module.implementation == ImplementationType.MINIWORLD
         and pair.is_cuda
         and torch.cuda.get_device_capability(pair.device) == (9, 0)
     )
@@ -34,7 +32,7 @@ def serves(module, pair, mask=None):
         return False
     if (
         module._backend != KernelBackend.TRITON
-        or settings.current().engine_backend == "triton"
+        or settings.current().force_triton_kernels
     ):
         return False
     if not module.use_self_attention or module.use_qk_norm:

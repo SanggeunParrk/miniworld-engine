@@ -10,11 +10,19 @@ This is the single home for two things the modules used to each re-implement:
      * ``MINIWORLD`` — "ours (auto)": pick the fastest correct kernel for the
        running GPU / shape / mode. This is what production should select.
      * ``CUEQUIVARIANCE`` — the vendor baseline (comparison only).
+     * ``ANTHROPIC`` — the Anthropic release's kernels (comparison / opt-in).
 
-   The concrete *technology* backends (``TRITON`` / ``CUDA``) remain
-   accepted for explicit per-impl benchmarking, but they are **internal**: the
-   module never branches on ``ImplementationType`` directly in ``forward`` — it
-   resolves to a :class:`KernelBackend` here and dispatches on that.
+   Triton is **not** a public backend. The concrete technology backends (:class:`KernelBackend`)
+   are internal: the module never branches on ``ImplementationType`` directly in ``forward`` — it
+   resolves to a :class:`KernelBackend` here and dispatches on that. What ``MINIWORLD`` resolves to:
+
+     * H100 (sm_90) / B200 (sm_100): the native CUDA path; a call it does not serve runs the PyTorch
+       reference. Never Triton (:func:`restricted_card`).
+     * every other card: a native CUDA path that serves the call, else the Triton family IF the engine
+       holds a record for that exact card (:mod:`miniworld_engine.autotune.records`), else a
+       :class:`UnrecordedCardWarning` (once per op and card) and the PyTorch reference.
+
+   ``settings.force_triton_kernels`` is the internal A/B switch that forces the Triton family on every card.
 
 2. **GPU-architecture policy.**
    The "B200 (sm_100) → X, H100 (sm_90) → Y" knowledge used to live inline in
@@ -172,19 +180,19 @@ def is_sm86(device: torch.device | None = None) -> bool:
 # --------------------------------------------------------------------------- #
 _CONCRETE = {
     ImplementationType.PYTORCH: KernelBackend.PYTORCH,
-    ImplementationType.TRITON: KernelBackend.TRITON,
-    ImplementationType.CUDA: KernelBackend.CUDA,
     ImplementationType.CUEQUIVARIANCE: KernelBackend.CUEQUIVARIANCE,
     ImplementationType.ANTHROPIC: KernelBackend.ANTHROPIC,
 }
 
 
-def to_kernel_backend(impl: ImplementationType) -> KernelBackend:
-    """Map an already-concrete ``ImplementationType`` to its ``KernelBackend``.
+def to_kernel_backend(impl: ImplementationType | KernelBackend) -> KernelBackend:
+    """Map an already-concrete ``ImplementationType`` to its ``KernelBackend`` (a ``KernelBackend`` passes through).
 
     ``MINIWORLD`` is *not* concrete — call the op's ``resolve_*`` instead. Passing
     it here is a programming error (raises ``InvalidImplementationError``).
     """
+    if isinstance(impl, KernelBackend):
+        return impl
     try:
         return _CONCRETE[impl]
     except KeyError:
@@ -236,20 +244,20 @@ def _trimul_known_best(device: torch.device | None) -> KernelBackend:
 
     override = settings.current().trimul_impl
     if override:
-        return to_kernel_backend(ImplementationType(override.strip().lower()))
+        return KernelBackend(override.strip().lower())
     return KernelBackend.TRITON
 
 
 def restricted_card(device: torch.device | None = None) -> bool:
     """True on H100 (sm_90) and B200 (sm_100): the cards with **no Triton fallback**, on purpose. They run hand-written CUDA and
     cuBLAS; a call no CUDA path serves runs the PyTorch reference (compiled by ``torch.compile`` where the caller compiles), never an
-    untuned Triton kernel. ``settings.triton_on_hopper_blackwell`` (or ``engine_backend="triton"``) lifts it for A/B work."""
+    untuned Triton kernel. ``settings.triton_on_hopper_blackwell`` (or ``force_triton_kernels=True``) lifts it for A/B work."""
     if not torch.cuda.is_available():
         return False
     from miniworld_engine import settings
 
     current = settings.current()
-    if current.triton_on_hopper_blackwell or current.engine_backend == "triton":
+    if current.triton_on_hopper_blackwell or current.force_triton_kernels:
         return False
     index = device.index if device is not None and device.type == "cuda" else None
     return torch.cuda.get_device_capability(index)[0] in (9, 10)
@@ -271,9 +279,26 @@ def fallback_autocast(x: torch.Tensor, module: torch.nn.Module, active: bool = T
     return contextlib.nullcontext()
 
 
-def triton_leg_allowed(device: torch.device | None = None) -> bool:
-    """May a module run its Triton leg on ``device``? False on H100 / B200 (see :func:`restricted_card`): the module takes its PyTorch leg."""
-    return not restricted_card(device)
+def triton_forced(impl: ImplementationType | str = ImplementationType.MINIWORLD) -> bool:
+    """Is the Triton family forced for ``impl``'s modules (``settings.force_triton_kernels``, ``MINIWORLD`` only)?"""
+    from miniworld_engine import settings
+
+    return settings.current().force_triton_kernels and _coerce(impl) == ImplementationType.MINIWORLD
+
+
+def triton_leg_allowed(device: torch.device | None = None, op: str | None = None, *, training: bool = False) -> bool:
+    """May a module run its Triton leg on ``device``? False on H100 / B200 (see :func:`restricted_card`): the module takes its
+    PyTorch leg. With ``op``, also False on a card without a record for what the call launches (:func:`route_for_card`, forward
+    kernels only unless ``training``: one warning per op, card and mode). ``force_triton_kernels`` allows it everywhere."""
+    if restricted_card(device):
+        return False
+    if op is None:
+        return True
+    from miniworld_engine import settings
+
+    if settings.current().force_triton_kernels:
+        return True
+    return _card_gate(op, device, False, "training" if training else "inference") is not KernelBackend.PYTORCH
 
 
 def _torch_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
@@ -331,22 +356,225 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     # the modules before this is asked; what is resolved here is the portable path every other GPU gets.
     "outer_product_mean": KernelBackend.TRITON,
     "msa_pair_weighted_averaging": KernelBackend.TRITON,
+    # The SWA atom attention's pointwise ops and the engine SWADiTBlock: no module-level resolve, but the same per-card rule.
+    "swa_atom_attention": KernelBackend.TRITON,
+    "swa_dit": KernelBackend.TRITON,
 }
 
 
+class UnrecordedCardWarning(UserWarning):
+    """``miniworld`` has no CUDA path for this op on this card and the engine holds no record that its Triton kernels were run
+    and checked here, so the call runs the PyTorch reference. Verify output and speed yourself, or record the card."""
+
+
+class KernelRefusedWarning(UserWarning):
+    """A Triton kernel refused this call (a shape or dtype guard): ``miniworld`` runs the PyTorch reference for it instead."""
+
+
+_refused_warned: set[tuple[str, str, str]] = set()
+_unrecorded_warned: set[tuple[str, str, str]] = set()
+_assume_recorded = False
+
+
+def assume_every_card_recorded(value: bool = True) -> None:
+    """Route ``miniworld`` as if the card held a record for every op. For ``autotune.derive``, which asks what the modules launch."""
+    global _assume_recorded
+    _assume_recorded = value
+_card_cache: dict[object, tuple[str, tuple[int, int]]] = {}
+
+
+def _card_of(device: torch.device | None) -> tuple[str, tuple[int, int]] | None:
+    """``(name, capability)`` of ``device`` (the current one if None), or None when there is no card to ask: no CUDA, or a
+    non-CUDA device."""
+    if not torch.cuda.is_available():
+        return None
+    if device is not None and device.type != "cuda":
+        return None
+    if torch.compiler.is_compiling():
+        # Dynamo cannot trace the driver query: use what an eager call (a module build) cached; a cold cache reads as "no card", i.e. the
+        # kernel family stays, as it did before the per-card rule.
+        index = device.index if device is not None and device.index is not None else 0
+        return _card_cache.get(index)
+    index = device.index if device is not None and device.type == "cuda" and device.index is not None else torch.cuda.current_device()
+    card = _card_cache.get(index)
+    if card is None:
+        card = _card_cache[index] = (torch.cuda.get_device_name(index), tuple(torch.cuda.get_device_capability(index)))
+    return card
+
+
+def route_for_card(
+    op: str,
+    name: str,
+    capability: tuple[int, int],
+    *,
+    native_cuda: bool = False,
+    dtype: str = "bf16",
+    mode: str = "inference",
+    warn: bool = True,
+) -> KernelBackend:
+    """Where ``miniworld`` runs ``op`` on the card ``name`` / ``capability`` for a call in ``mode`` (``"inference"``: no backward is
+    recorded, only the forward kernels run; ``"training"``: all of them), given the forced-Triton switch is off.
+
+    The pure rule (no GPU needed; the manifests are the only input, see :mod:`miniworld_engine.autotune.records`):
+
+      * H100 / B200 (capability major 9 or 10): ``TRITON`` is returned unchanged -- these cards never reach a Triton kernel
+        through ``miniworld`` (:func:`restricted_card`), the modules take their CUDA or PyTorch leg, and no record is consulted.
+      * ``native_cuda`` (a hand-written CUDA path of the engine serves this call on the card): ``TRITON``, the family whose
+        module-level dispatch tries the CUDA path first; a record is not needed for what does not launch.
+      * an autotune BUILD (``settings.capture``): ``TRITON``. The build is how a card's Triton configs are captured and its
+        record is made; refusing it for lack of a record would make a new card unbuildable.
+      * every Triton kernel the op launches in ``mode`` has an ``ok`` manifest row for this exact card and ``dtype``: ``TRITON``.
+        A missing backward kernel therefore blocks training calls only.
+      * otherwise: :class:`UnrecordedCardWarning` once per (op, card, mode) when ``warn``, and ``PYTORCH``.
+    """
+    from miniworld_engine import settings
+
+    if capability[0] in (9, 10) or native_cuda or settings.current().capture or _assume_recorded:
+        return KernelBackend.TRITON
+    from miniworld_engine.autotune import records
+
+    holes = records.missing(op, name, capability, dtype, mode)
+    if not holes:
+        return KernelBackend.TRITON
+    if warn:
+        _warn_unrecorded(op, name, capability, mode, holes)
+    return KernelBackend.PYTORCH
+
+
+def _warn_unrecorded(op: str, name: str, capability: tuple[int, int], mode: str, holes: tuple[str, ...]) -> None:
+    from miniworld_engine.autotune import records
+
+    key = (op, records.card_key(name, capability), mode)
+    if key in _unrecorded_warned:
+        return
+    _unrecorded_warned.add(key)
+    shown = ", ".join(holes[:3]) + (f", ... ({len(holes)} in all)" if len(holes) > 3 else "")
+    calls = "calls that need a backward (training)" if mode == "training" else "this call"
+    warnings.warn(
+        f"{op}: this GPU ({name}, sm_{capability[0]}{capability[1]}) has no record in the engine for {calls}, so miniworld cannot "
+        f"route {op} to its Triton kernels (no 'ok' row in autotune/manifests for: {shown}) and it has no CUDA path for it here. "
+        f"Running the PyTorch reference instead: correct, but not the engine's speed, and nothing was validated on this card. "
+        f"Verify the output and speed yourself, or record the card with `python -m miniworld_engine.autotune.run_all`, or force "
+        f"the Triton kernels with settings.force_triton_kernels=True (A/B work).",
+        UnrecordedCardWarning,
+        stacklevel=5,
+    )
+
+
+def warn_refused(op: str, device: torch.device | None, reason: str) -> None:
+    """``miniworld`` meets a call the op's Triton kernels REFUSE (the guard that refused is ``reason``): it never raises and never
+    diverges silently -- one :class:`KernelRefusedWarning` per (op, card, reason) and the caller runs the PyTorch reference. A CPU tensor
+    is not a refusal worth a warning (there is no kernel to run): the caller does not call this for it."""
+    card = _card_of(device)
+    key = (op, card[0] if card else "no GPU", reason)
+    if key in _refused_warned:
+        return
+    _refused_warned.add(key)
+    warnings.warn(
+        f"{op}: the Triton kernels refuse this call ({reason}); running the PyTorch reference instead (correct, but not the engine's "
+        f"speed). Nothing was validated for this shape on this card: verify the output and speed yourself.",
+        KernelRefusedWarning,
+        stacklevel=3,
+    )
+
+
+def _card_gate(op: str, device: torch.device | None, native_cuda: bool, mode: str = "inference") -> KernelBackend:
+    """:func:`route_for_card` for the card ``device`` names; no card (CPU build, non-CUDA device) keeps ``TRITON``, the family
+    the module falls to once its tensors are on a card."""
+    card = _card_of(device)
+    if card is None:
+        return KernelBackend.TRITON
+    return route_for_card(op, card[0], card[1], native_cuda=native_cuda, mode=mode)
+
+
+class TrainGate:
+    """What a module built on a card recorded for INFERENCE but not for TRAINING remembers: its training calls take the PyTorch
+    reference (:func:`call_backend`), with one warning. Plain attributes, so a compiled forward reads it as constants."""
+
+    __slots__ = ("capability", "holes", "name", "op")
+
+    def __init__(self, op: str, name: str, capability: tuple[int, int], holes: tuple[str, ...]) -> None:
+        self.op, self.name, self.capability, self.holes = op, name, capability, holes
+
+    def note(self) -> None:
+        if not torch.compiler.is_compiling():
+            _warn_unrecorded(self.op, self.name, self.capability, "training", self.holes)
+
+
+def train_gate(
+    op: str,
+    impl: ImplementationType | str,
+    backend: KernelBackend,
+    device: torch.device | None = None,
+    *,
+    native_cuda: bool = False,
+) -> TrainGate | None:
+    """The :class:`TrainGate` of a ``miniworld`` module whose build-time ``backend`` is the Triton family but whose card lacks ``ok``
+    rows for the kernels a backward launches; None when nothing narrows (store it as ``module._train_gate``)."""
+    from miniworld_engine import settings
+
+    if backend is not KernelBackend.TRITON or _coerce(impl) != ImplementationType.MINIWORLD:
+        return None
+    if settings.current().force_triton_kernels or settings.current().capture or _assume_recorded:
+        return None
+    card = _card_of(device)
+    if card is None or card[1][0] in (9, 10) or native_cuda:
+        return None
+    from miniworld_engine.autotune import records
+
+    holes = records.missing(op, card[0], card[1], "bf16", "training")
+    return TrainGate(op, card[0], card[1], holes) if holes else None
+
+
+def call_backend(module: torch.nn.Module, backend: KernelBackend, *tensors: torch.Tensor) -> KernelBackend:
+    """``backend`` for THIS call: a module whose card is recorded for inference only (``module._train_gate``) runs the PyTorch
+    reference when the call needs a backward (:func:`needs_backward`)."""
+    gate = getattr(module, "_train_gate", None)
+    if gate is None or backend is not KernelBackend.TRITON:
+        return backend
+    if not needs_backward(module, *tensors):
+        return backend
+    gate.note()
+    return KernelBackend.PYTORCH
+
+
+def triton_blocked(op: str, device: torch.device | None, *tensors: torch.Tensor) -> bool:
+    """For the weights-as-args ``ops.*`` entry points: must this call NOT run ``op``'s Triton kernels? True on a CUDA card other than
+    H100 / B200 that has no ``ok`` rows for what the call launches (inference; training when a tensor needs a gradient), unless the
+    A/B switch is on: the caller then runs the PyTorch statements, with the same warning as the modules. False everywhere else
+    (H100 / B200 keep their own rule, no card keeps the kernel)."""
+    from miniworld_engine import settings
+
+    if settings.current().force_triton_kernels:
+        return False
+    card = _card_of(device)
+    if card is None or card[1][0] in (9, 10):
+        return False
+    training = torch.is_grad_enabled() and any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
+    mode = "training" if training else "inference"
+    return route_for_card(op, card[0], card[1], mode=mode) is KernelBackend.PYTORCH
+
+
 def resolve(
-    op: str, impl: ImplementationType | str, device: torch.device | None = None
+    op: str,
+    impl: ImplementationType | str,
+    device: torch.device | None = None,
+    *,
+    native_cuda: bool = False,
+    training: bool = False,
 ) -> KernelBackend:
     """Resolve the PUBLIC option to a concrete ``KernelBackend`` for ``op`` on ``device``.
 
-    ``MINIWORLD`` -> the known-best table (unknown op / unknown GPU -> TRITON default);
-    any concrete backend passes through unchanged. Single entry point behind the per-op
-    ``resolve_*`` wrappers kept below for the modules / benchmark harness."""
+    ``MINIWORLD`` -> the known-best table (unknown op / unknown GPU -> TRITON default), and a TRITON result is then
+    gated per card (:func:`route_for_card`: recorded card -> TRITON, else a warning and PYTORCH; H100 / B200 untouched);
+    any concrete backend passes through unchanged. ``native_cuda`` says the caller knows a hand-written CUDA path of the
+    engine serves this very call on this card. Single entry point behind the per-op ``resolve_*`` wrappers kept below for
+    the modules / benchmark harness."""
     impl = _coerce(impl)
     from miniworld_engine import settings
-    if settings.current().engine_backend == "triton":
-        if impl in {ImplementationType.CUDA, ImplementationType.ANTHROPIC}:
-            raise ValueError(f"{op}: {impl.value} conflicts with engine_backend=triton")
+    if settings.current().force_triton_kernels:
+        if impl == ImplementationType.ANTHROPIC:
+            raise ValueError(f"{op}: {impl.value} conflicts with force_triton_kernels=True")
         if impl == ImplementationType.MINIWORLD:
             return KernelBackend.TRITON
     # An explicit CUEQUIVARIANCE request for an op with no cueq kernel (anything outside
@@ -361,12 +589,19 @@ def resolve(
     if impl != ImplementationType.MINIWORLD:
         return to_kernel_backend(impl)
     best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)
-    return best(device) if callable(best) else best
+    backend = best(device) if callable(best) else best
+    mode = "training" if training else "inference"
+    if backend is KernelBackend.TRITON and not (op == "triangle_multiplication" and settings.current().trimul_impl):
+        backend = _card_gate(op, device, native_cuda, mode)
+    elif backend is KernelBackend.CUDA and op == "layernorm" and _card_gate(op, device, native_cuda, mode) is KernelBackend.PYTORCH:
+        # LayerNorm is the CUDA family on every card but its forward is Triton off H100 / B200: the same record rule.
+        backend = KernelBackend.PYTORCH
+    return backend
 
 
 # Thin per-op wrappers (stable API for the modules + benchmark harness + tests).
-def resolve_transition(impl, device=None):
-    return resolve("transition", impl, device)
+def resolve_transition(impl, device=None, **kwargs):
+    return resolve("transition", impl, device, **kwargs)
 
 
 def resolve_triangle_attention(impl, device=None):

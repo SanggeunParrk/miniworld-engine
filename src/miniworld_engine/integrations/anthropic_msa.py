@@ -123,7 +123,7 @@ def wanted(implementation) -> bool:
         return True
     if implementation != ImplementationType.MINIWORLD:
         return False
-    return bool(payload_dir()) and settings.current().engine_backend != "triton"
+    return bool(payload_dir()) and (not settings.current().force_triton_kernels)
 
 
 def _common_refusal(x: torch.Tensor, *, grad: bool) -> str | None:

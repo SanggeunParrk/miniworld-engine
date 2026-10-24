@@ -217,16 +217,13 @@ class OuterProductMean(nn.Module):
                 _pair = _anthropic.outer_product_mean(self, msa, _m)
                 return residual + _pair if residual is not None else _pair
         # The portable Triton path (kernels.outer_product_mean) for every call the native paths above did not take:
-        # other GPUs, other widths, engine_backend="triton". An explicit implementation="triton" refuses with the reason.
-        if self.implementation in (
-            ImplementationType.MINIWORLD,
-            ImplementationType.TRITON,
-        ) and (
-            resolve("outer_product_mean", self.implementation, msa.device)
-            == KernelBackend.TRITON
-        ) and (
-            self.implementation == ImplementationType.TRITON
-            or _dispatch.triton_leg_allowed(msa.device)   # H100 / B200: no Triton fallback, the PyTorch statements below run
+        # other GPUs with a record (dispatch.resolve), other widths, force_triton_kernels. A card without a record resolves to
+        # PYTORCH there (one warning); H100 / B200 take the PyTorch statements below.
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and resolve("outer_product_mean", self.implementation, msa.device,
+                        training=_dispatch.needs_backward(self, msa)) == KernelBackend.TRITON
+            and _dispatch.triton_leg_allowed(msa.device)   # H100 / B200: no Triton fallback, the PyTorch statements below run
         ):
             from miniworld_engine.kernels.outer_product_mean.interface import (
                 refusal,
@@ -240,6 +237,8 @@ class OuterProductMean(nn.Module):
                 interchain=bool(self.mask_interchain and token_asym_id is not None),
                 residual=residual,
             )
+            if why is not None and msa.is_cuda:
+                _dispatch.warn_refused("outer_product_mean", msa.device, why)
             if why is None:
                 return triton_outer_product_mean(
                     msa,
@@ -253,10 +252,6 @@ class OuterProductMean(nn.Module):
                     residual,
                     eps=float(self.ln_msa.eps),
                     normalize_before_proj=self.normalize_before_proj,
-                )
-            if self.implementation == ImplementationType.TRITON:
-                raise NotImplementedError(
-                    f"OuterProductMean(implementation='triton'): {why}"
                 )
         with _dispatch.fallback_autocast(msa, self, self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(msa.device)):
             msa = self.ln_msa(msa)

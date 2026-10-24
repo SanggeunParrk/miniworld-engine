@@ -1,5 +1,5 @@
 # Single-bench config (hydra). Override on the CLI, e.g.
-#   python benchmarks/runners/bench.py target=transition level=module implementations=[pytorch,triton]
+#   python benchmarks/runners/bench.py target=transition level=module implementations=[pytorch,miniworld]
 #   python benchmarks/runners/bench.py target=triangle_multiplication level=module mode=inference
 d_single: 384
 d_pair: 128
@@ -37,9 +37,9 @@ implementations:
   - pytorch
   - cuequivariance
   - miniworld
-# miniworld tries the hand-written CUDA kernels (H100, B200) first and otherwise resolves to the
-# triton path on every arch (see modules/dispatch.py). TriangleMultiplication also accepts,
-# explicitly:
+# miniworld tries the hand-written CUDA kernels (H100, B200) first and otherwise runs the internal Triton
+# family only on a card with a record, else a warning and the PyTorch reference (docs/dispatch.md).
+# TriangleMultiplication also accepts, explicitly (A/B rows: miniworld under settings.force_triton_kernels):
 #   triton | dtv1 | triton_pytorch_ln | triton_ln
 #   anthropic -- Anthropic's SHIPPED trimul_native v5 payload through upstream
 #   trimul_native.face.serve (integrations/anthropic_trimul.update_unidirectional). INFERENCE ONLY

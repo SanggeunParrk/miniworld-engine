@@ -883,7 +883,9 @@ def cmd_build(args: argparse.Namespace) -> int:
         stack = args.case if args.case in STACKS else None
         only = None if args.case == "all" or stack else set(_op_names(args.case))
         units = builder.op_units(only, config_dir=directory, stack=stack)
-        backend = getattr(args, "backend", "auto")
+        backend = getattr(args, "kernels", "auto")
+        if getattr(args, "backend", None) is not None:   # the deprecated --backend {auto,native,triton}
+            backend = {"triton": "portable"}.get(args.backend, args.backend)
         if backend != "auto":
             from miniworld_engine.autotune.native import BUILD_OPS, build_ops_for_arch
             native_ops = build_ops_for_arch((builder.device_sm() or "").replace("_", ""))
@@ -1792,8 +1794,10 @@ def build_parser() -> argparse.ArgumentParser:
                           "`bench_kernel` / `bench_module`.")
     bld.add_argument("config_type", nargs="?", default=DEFAULT_CONFIG_SET,
                      help="config set: a directory of <op>.csv files, or a short name resolving to configs/<name> (e.g. accuracy). Every kernel's grid comes from here.")
-    bld.add_argument("--backend", choices=("auto", "native", "triton"), default="auto",
-                     help="auto follows module dispatch; native/triton explicitly tune per-op drivers")
+    bld.add_argument("--kernels", choices=("auto", "native", "portable"), default="auto",
+                     help="auto follows module dispatch; native tunes the hand-written CUDA per-op drivers, portable the Triton ones "
+                          "(the portable family is internal: it is what miniworld routes to on a card with a record)")
+    bld.add_argument("--backend", choices=("auto", "native", "triton"), default=None, help=argparse.SUPPRESS)  # deprecated spelling of --kernels
     bld.add_argument("--include-alternatives", action="store_true",
                      help="also tune forced fallback backends; default follows production dispatch")
     bld.add_argument("--mode", choices=("both", "train", "eval"), default="both",

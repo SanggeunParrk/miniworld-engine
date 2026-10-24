@@ -22,7 +22,7 @@ def _fused_sm90a_enabled() -> bool:
 
     return (
         settings.current().transition_fused_sm90a
-        and settings.current().engine_backend != "triton"
+        and (not settings.current().force_triton_kernels)
     )
 
 
@@ -32,7 +32,7 @@ def _fused_sm100a_enabled() -> bool:
     Default on; settings.transition_fused_sm100a=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return settings.current().engine_backend != "triton"
+    return (not settings.current().force_triton_kernels)
 
 
 def _fused_sm80_enabled() -> bool:
@@ -40,7 +40,7 @@ def _fused_sm80_enabled() -> bool:
     (training step ~1.44x the Triton residual path).  Default on; settings.transition_fused_sm80=0 to A/B against Triton."""
     from miniworld_engine import settings
 
-    return settings.current().engine_backend != "triton"
+    return (not settings.current().force_triton_kernels)
 
 
 @contextmanager
@@ -87,7 +87,10 @@ class Transition(nn.Module):
         # (resolve() maps cueq->pytorch for non-trimul ops).
         # Resolution lives in modules.dispatch; forward routes on self._backend.
         self.implementation = ImplementationType(implementation)
-        self._backend = resolve_transition(self.implementation)
+        native_cuda = self._native_cuda_serves()
+        self._backend = resolve_transition(self.implementation, native_cuda=native_cuda)
+        # a card recorded for the forward kernels but not the backward ones: training calls take the PyTorch reference
+        self._train_gate = _dispatch.train_gate("transition", self.implementation, self._backend, native_cuda=native_cuda)
 
         self.ln_in = LayerNorm(
             d_hidden, implementation=self.implementation, dtype=torch.bfloat16
@@ -138,16 +141,32 @@ class Transition(nn.Module):
         ):
             # fp32 on TF32 tensor cores: the generic sm_90a kernels (the other fast paths are bf16 only)
             return self._residual_forward(x)
-        backend = _dispatch.guard_dtype(self._backend, x.dtype, op="Transition")
+        backend = _dispatch.guard_dtype(_dispatch.call_backend(self, self._backend, x), x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
         # TRITON / CUDA / CUEQUIVARIANCE(->PYTORCH above): one residual-fused path, which
         # picks the hand-CUDA kernel where it applies and the Triton kernel everywhere else.
         return self._residual_forward(x)
 
+    def _native_cuda_serves(self) -> bool:
+        """A hand-written CUDA path serves this layer on the current card without a Triton record: the sm_80 (A100) fused kernels at
+        d = 128, n = 4 (``kernels.transition.cuda.fused_sm80``; whole 256-row tiles, bf16 are checked per call). Resolved once, when
+        the module is built, by ``dispatch.resolve`` (``native_cuda``)."""
+        from miniworld_engine import settings
+
+        card = _dispatch._card_of(None)
+        return (
+            card is not None
+            and card[1] == (8, 0)
+            and self.d_hidden == 128
+            and self.n == 4
+            and settings.current().transition_fused_sm80
+            and not settings.current().force_triton_kernels
+        )
+
     def _requires_h100_cuda(self, x: torch.Tensor) -> bool:
         # H100 / B200 have no Triton fallback: a MINIWORLD call no CUDA path serves runs the PyTorch reference. An explicit
-        # engine_backend="triton" (or settings.triton_on_hopper_blackwell) is a comparison run and keeps Triton (as for TriMul).
+        # force_triton_kernels=True (or settings.triton_on_hopper_blackwell) is a comparison run and keeps Triton (as for TriMul).
         return (
             self.implementation == ImplementationType.MINIWORLD
             and x.is_cuda

@@ -26,9 +26,7 @@ _LAZY_OPS = {
     "gated_linear": (
         "miniworld_engine.kernels.gated_projection.whole_op", "gated_linear",
     ),
-    "swiglu_ffn": (
-        "miniworld_engine.kernels.transition.triton.fused", "triton_swiglu_ffn",
-    ),
+    "swiglu_ffn": ("miniworld_engine.kernels._ops_routed", "swiglu_ffn"),
     "triangle_multiplicative_update": (
         "miniworld_engine.kernels.trimul_inproj.whole_op",
         "triangle_multiplicative_update",
@@ -57,10 +55,7 @@ _LAZY_OPS = {
         "miniworld_engine.kernels.layernorm_linear.triton.pair_bias",
         "triton_layer_norm_linear",
     ),
-    "layer_norm": (
-        "miniworld_engine.kernels.layernorm.triton.main",
-        "triton_layernorm",
-    ),
+    "layer_norm": ("miniworld_engine.kernels._ops_routed", "layer_norm"),
 }
 
 

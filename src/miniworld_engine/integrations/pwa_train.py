@@ -101,7 +101,7 @@ def wanted(implementation) -> bool:
     ``settings.pwa_infer`` and, when that is unset, ``settings.pwa_train`` (no payload needed; faster than the upstream cell)."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    on = _enabled() and settings.current().engine_backend != "triton"
+    on = _enabled() and (not settings.current().force_triton_kernels)
     return on and implementation in (
         ImplementationType.MINIWORLD,
         ImplementationType.ANTHROPIC,

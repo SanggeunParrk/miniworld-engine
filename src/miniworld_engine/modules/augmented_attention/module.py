@@ -27,14 +27,14 @@ def _bf16_sm90_enabled() -> bool:
     """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm90)."""
     from miniworld_engine import settings
 
-    return settings.current().augmented_attention_bf16_sm90 and settings.current().engine_backend != "triton"
+    return settings.current().augmented_attention_bf16_sm90 and (not settings.current().force_triton_kernels)
 
 
 def _bf16_sm100_enabled() -> bool:
     """Whether a bf16 attention core on sm_100 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm100)."""
     from miniworld_engine import settings
 
-    return settings.current().augmented_attention_bf16_sm100 and settings.current().engine_backend != "triton"
+    return settings.current().augmented_attention_bf16_sm100 and (not settings.current().force_triton_kernels)
 
 
 class AugmentedAttentionPairBias(nn.Module):
@@ -79,6 +79,7 @@ class AugmentedAttentionPairBias(nn.Module):
         self.implementation = ImplementationType(implementation)
         # 'miniworld' (auto) -> the TRITON attention kernel (the only fused one).
         self._backend = resolve_augmented_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("augmented_attention", self.implementation, self._backend)
 
         d_hidden = d_single // n_head
 
@@ -152,7 +153,7 @@ class AugmentedAttentionPairBias(nn.Module):
         if compute_dtype is not None:
             query, key, value, bias = (t.to(compute_dtype) for t in (query, key, value, bias))
 
-        backend = self._backend
+        backend = _dispatch.call_backend(self, self._backend, query, key, value, bias)   # card recorded for inference only: PyTorch for training
         if (
             backend == KernelBackend.TRITON
             and self.implementation == ImplementationType.MINIWORLD

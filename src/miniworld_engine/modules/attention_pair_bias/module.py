@@ -54,6 +54,7 @@ class AttentionPairBias(nn.Module):
         self.use_qk_norm = use_qk_norm
         self.implementation = ImplementationType(implementation)
         self._backend = resolve_augmented_attention(self.implementation)
+        self._train_gate = _dispatch.train_gate("augmented_attention", self.implementation, self._backend)
         if d_hidden is None:
             if d_single % n_head != 0:
                 msg = f"{d_single=} must be divisible by {n_head=}"
@@ -101,7 +102,7 @@ class AttentionPairBias(nn.Module):
             and single.is_cuda
             and _dispatch.restricted_card(single.device)
         )
-        backend = KernelBackend.PYTORCH if no_triton else self._backend
+        backend = KernelBackend.PYTORCH if no_triton else _dispatch.call_backend(self, self._backend, single, pair)
         master = (
             self._backend == KernelBackend.TRITON
             and single.dtype == torch.bfloat16

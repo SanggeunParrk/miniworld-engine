@@ -562,6 +562,11 @@ def derive_all(rows: list[ModuleRow] | None = None, *, on_unit=None,
     require_environment()
     if arch:
         target_arch(arch)
+    # The derivation asks which kernels the modules launch, not whether this card is allowed to launch them: route as if the
+    # card were recorded (a patched arch above carries a real card's name, which no manifest knows).
+    from miniworld_engine.modules import dispatch
+
+    dispatch.assume_every_card_recorded()
     install_no_calibration()
     install_module_apply()
     install_native_recorders()

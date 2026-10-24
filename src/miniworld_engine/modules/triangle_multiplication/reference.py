@@ -7,7 +7,7 @@ so a kernel implementation can be checked against it on both forward output AND
 backward gradients::
 
     ref = TriangleMultiplicationReference(d_pair).cuda()
-    mod = TriangleMultiplication(d_pair, implementation=ImplementationType.TRITON).cuda()
+    mod = TriangleMultiplication(d_pair, implementation=ImplementationType.MINIWORLD).cuda()
     mod.load_state_dict(ref.state_dict())          # share weights
     y_ref = ref(pair, mask);  y_ref.sum().backward()
     y_mod = mod(pair, mask)                          # compare fwd + param.grad (bwd)

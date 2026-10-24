@@ -103,12 +103,9 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
 
     if (not settings.current().bias_only_dit_train) or not torch.is_grad_enabled():
         return False
-    if module.implementation not in (
-        ImplementationType.MINIWORLD,
-        ImplementationType.TRITON,
-    ):
+    if module.implementation != ImplementationType.MINIWORLD:
         return False
-    if settings.current().engine_backend == "triton":
+    if settings.current().force_triton_kernels:
         return False
     from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
