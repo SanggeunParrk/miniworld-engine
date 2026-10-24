@@ -8,6 +8,40 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- Portable Triton paths for the model variants that had no Triton kernel and ran the PyTorch statements on every card without a native CUDA
+  path, routed like the standard ops (`miniworld` on a card with a record, `force_triton_kernels`; a call the kernels refuse warns once
+  with `KernelRefusedWarning` and runs the PyTorch statements). Forward and backward, bf16, validated on H100 under the A/B switch only
+  (no Ampere manifest holds these kernels yet: those cards keep warning and running PyTorch until `autotune.run_all` records them).
+  Record: `docs/records/triton_gaps_a_20261024.md`.
+  - `MSAPairWeightedAveraging` with a head narrower than a `tl.dot` tile -- AF3's `msa_value_dim` 8 (OpenFold3, Protenix, OpenDDE): the
+    five kernels that carry the head width tile it as `next_pow2(max(16, d_hidden))` columns and mask the rest to zero on every load and
+    store, so the padded columns contribute nothing and are never written; any `d_hidden` up to 128 with `n_head * d_hidden` a multiple
+    of 16 is served (was: powers of two >= 16).
+  - `OuterProductMean(projection_bias=True)` (RoseTTAFold3): the biases are added in the projection kernel before the mask; the backward
+    kernel sums `db_left` / `db_right`. `OuterProductMean(groups=G)` (Chai-1): the projection kernel stores the hidden channels group-major,
+    the outer product is one batched GEMM over the groups, and three new kernels (`outer_product_mean_epilogue_ln`,
+    `outer_product_mean_bwd_epilogue_ln_dx`, `outer_product_mean_bwd_epilogue_ln_dw`) gather the pair's products, run Chai-1's product
+    LayerNorm and give its gradients (the projection and `dz W_out` stay in cuBLAS). `kernels.outer_product_mean.reference` takes the
+    variants' arguments.
+  - `TriangleAttention` with `gate_bias` / `out_bias` (RoseTTAFold3), `untransposed_output` and `dual_output` (Chai-1): the variants'
+    epilogue and orientation composed around the family's Triton attention core (`kernels/triangle_attention/triton/variants.py`), so
+    no `[B, L, H, L, L]` logits tensor is built. Heads of 16..128 channels, any width the cuBLAS projections take.
+- Registry rows, drivers (the projection kernels are driven at the base call and both variants; PWA at `d_hidden` 32 and 8) and checkers for
+  the three new kernels; module rows for the variants in `registry_module.csv` (the derivation reaches them).
+
+### Changed
+
+- `OuterProductMean`'s variant branch tries the Triton leg before `_variant_reference` (H100 / B200: unchanged unless the A/B switch is on).
+  The H100 CUDA variant paths (`composed`) step aside for `force_triton_kernels`.
+- `TriangleAttention`'s variant branch (gate / out biases, Chai-1 output forms) tries the Triton core before `_biased_reference`.
+- `_opm_layernorm_gemm_kernel` / `_opm_bwd_layernorm_gemm_kernel` take `K` and `HAS_PBIAS`; the five PWA kernels that carry the head width
+  take `CP`: their autotune keys changed (cached configs of those kernels are re-tuned on first use).
+- The OuterProductMean Triton backward reduces `db_out` straight from the bf16 gradient (`sum(dtype=float32)`, no fp32 copy of `dz`).
+- Fixed: the Triton launchers of OuterProductMean / MSAPairWeightedAveraging passed the same empty tensor for every absent input, which
+  `torch.compile` refuses in an `autograd.Function.apply` (a call with no mask and no residual).
+
 ### Changed
 
 - **Triton is no longer a public backend.** `ImplementationType` has exactly `pytorch`, `miniworld`, `cuequivariance`, `anthropic`

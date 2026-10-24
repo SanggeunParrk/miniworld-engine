@@ -485,11 +485,11 @@ def triton_pair_weighted_averaging(msa: torch.Tensor, pair: torch.Tensor, mask: 
 
     ``keep`` [B, L, D] is the row-broadcast dropout keep-mask (the module's Dropout(broadcast_dim=1)), applied as keep / (1 - p_drop);
     None applies no dropout. Stacks run one at a time. Check :func:`refusal` first."""
-    empty = lambda: msa.new_empty((0,))               # one tensor per absent input (Dynamo refuses the same tensor twice in apply)
+    empty, no_mask = msa.new_empty((0,)), msa.new_empty((0,))   # one tensor per absent input (Dynamo refuses the same tensor twice in apply)
     scale = 1.0 / (1.0 - p_drop) if keep is not None else 1.0
-    outs = [_PairWeightedAveragingTriton.apply(msa[bi], pair[bi], empty() if mask is None else mask[bi], ln_msa_weight, ln_msa_bias,
+    outs = [_PairWeightedAveragingTriton.apply(msa[bi], pair[bi], no_mask if mask is None else mask[bi], ln_msa_weight, ln_msa_bias,
                                                w_value, w_gate, ln_pair_weight, w_bias, w_out,
-                                               empty() if keep is None else keep[bi].to(torch.bfloat16).contiguous(),
+                                               empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),
                                                float(eps_msa), float(eps_pair), float(scale))
             for bi in range(msa.shape[0])]
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)
