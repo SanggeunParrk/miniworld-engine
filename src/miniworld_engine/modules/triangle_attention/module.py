@@ -480,13 +480,13 @@ class TriangleAttention(nn.Module):
 
     def _triton_variant(self, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor | None:
         """The variant update (no residual) on the portable Triton core (``kernels.triangle_attention.triton.variants``), or None when
-        this call is not served there (the caller runs ``_biased_reference``). Served on every card the standard Triton leg is: other
-        GPUs, and H100 / B200 under ``engine_backend="triton"``. bf16 only; forward and backward."""
+        this call is not served there (the caller runs ``_biased_reference``). Served on every card the standard Triton leg is: a card with
+        a record for the op (``dispatch.call_backend``), and any card under ``force_triton_kernels``. bf16 only; forward and backward."""
         if (
-            self._backend != KernelBackend.TRITON
-            or self.implementation not in (ImplementationType.MINIWORLD, ImplementationType.TRITON)
+            _dispatch.call_backend(self, self._backend, pair) != KernelBackend.TRITON
+            or self.implementation != ImplementationType.MINIWORLD
             or not self.use_self_attention
-            or (self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device))
+            or _dispatch.restricted_card(pair.device)
         ):
             return None
         from miniworld_engine.kernels.triangle_attention.triton.variants import (
@@ -499,7 +499,10 @@ class TriangleAttention(nn.Module):
             self.to_out.weight, self.to_gate.bias, self.to_out.bias,
             *((self.to_out_t.weight, self.to_out_t.bias) if self.dual_output else ()),
         )
-        if refusal(pair, weights, self.n_head, self.to_query.weight.shape[0], use_qk_norm=self.use_qk_norm) is not None:
+        why = refusal(pair, weights, self.n_head, self.to_query.weight.shape[0], use_qk_norm=self.use_qk_norm)
+        if why is not None:
+            if pair.is_cuda:
+                _dispatch.warn_refused("triangle_attention", pair.device, why)
             return None
         return triton_triangle_attention_variant(
             pair, mask, self.ln_pair.weight, self.ln_pair.bias, self.to_query.weight, self.to_key.weight, self.to_value.weight,

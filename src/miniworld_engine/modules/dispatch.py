@@ -263,15 +263,6 @@ def restricted_card(device: torch.device | None = None) -> bool:
     return torch.cuda.get_device_capability(index)[0] in (9, 10)
 
 
-def triton_forced() -> bool:
-    """True when the A/B switch asks for the engine's Triton kernels even where a native CUDA path exists (``engine_backend="triton"`` or
-    ``triton_on_hopper_blackwell``): the variant paths that are not behind :func:`resolve` check it before taking their CUDA leg."""
-    from miniworld_engine import settings
-
-    current = settings.current()
-    return bool(current.triton_on_hopper_blackwell or current.engine_backend == "triton")
-
-
 def fallback_autocast(x: torch.Tensor, module: torch.nn.Module, active: bool = True):
     """Context for a PyTorch fallback leg. A bf16 activation next to fp32 master parameters (the engine's mixed-precision layout) runs the
     reference under bf16 autocast, as the caller's own autocast would; anything else runs as is."""

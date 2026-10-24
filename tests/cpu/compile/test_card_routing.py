@@ -436,7 +436,8 @@ def test_opm_refusal_warns_once_and_runs_pytorch(monkeypatch, manifests, cuda_te
 
 
 def test_pwa_refusal_warns_once_and_runs_pytorch(monkeypatch, manifests, cuda_tensors):
-    """value_dim 8 (< 16): the Triton path refuses; it used to fall to PyTorch without a word."""
+    """A head the Triton path does not take (one head of 8 channels: 8 is not a multiple of 16) refuses with a warning, once. value_dim 8
+    with 8 heads, AF3's, is served now (it used to be refused here)."""
     from miniworld_engine.modules.dispatch import KernelRefusedWarning
     from miniworld_engine.modules.msa_pair_weighted_averaging import (
         MSAPairWeightedAveraging,
@@ -444,13 +445,13 @@ def test_pwa_refusal_warns_once_and_runs_pytorch(monkeypatch, manifests, cuda_te
 
     fake_card(monkeypatch, LONG, (8, 6))
     write_manifest(manifests, LONG, (8, 6), ["msa_pair_weighted_averaging"])
-    mod = MSAPairWeightedAveraging(64, 128, 8, 8, implementation=ImplementationType.MINIWORLD).bfloat16().eval()
-    ref = MSAPairWeightedAveraging(64, 128, 8, 8, implementation=ImplementationType.PYTORCH).bfloat16().eval()
+    mod = MSAPairWeightedAveraging(64, 128, 1, 8, implementation=ImplementationType.MINIWORLD).bfloat16().eval()
+    ref = MSAPairWeightedAveraging(64, 128, 1, 8, implementation=ImplementationType.PYTORCH).bfloat16().eval()
     ref.load_state_dict(mod.state_dict())
     msa, pair = torch.randn(1, 4, 16, 64).bfloat16(), torch.randn(1, 16, 16, 128).bfloat16()
     (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, msa, pair), partial(mod, msa, pair))
     assert len(caught) == 1
-    assert "powers of two" in str(caught[0].message)
+    assert "multiple of 16" in str(caught[0].message)
     torch.testing.assert_close(y, ref(msa, pair))
 
 

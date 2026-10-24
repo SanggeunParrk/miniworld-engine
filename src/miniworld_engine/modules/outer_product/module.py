@@ -162,10 +162,8 @@ class OuterProductMean(nn.Module):
         if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
             from miniworld_engine.kernels.outer_product_mean import composed
 
-            # The H100 CUDA paths below step aside for engine_backend="triton" / triton_on_hopper_blackwell (the A/B switch), and an
-            # explicit implementation="triton" never takes them.
-            native = (self.implementation not in (ImplementationType.PYTORCH, ImplementationType.TRITON)
-                      and not _dispatch.triton_forced())
+            # The H100 CUDA paths below step aside for the A/B switch (force_triton_kernels), which runs the Triton family below.
+            native = self.implementation != ImplementationType.PYTORCH and not _dispatch.triton_forced(self.implementation)
             if native and self.to_left.bias is not None and composed.biased_wide_serves(self, msa, mask):
                 return composed.biased_wide(self, msa, mask, token_asym_id, residual)
             if (
@@ -180,14 +178,13 @@ class OuterProductMean(nn.Module):
             if native and composed.serves(self, msa, mask):
                 return composed.inference(self, msa, mask, token_asym_id, residual)
             # The portable Triton path (projection biases folded into the projection kernel, groups as a leading batch axis of the
-            # outer product): every other GPU, engine_backend="triton".
-            if self.implementation in (
-                ImplementationType.MINIWORLD,
-                ImplementationType.TRITON,
-            ) and (
-                resolve("outer_product_mean", self.implementation, msa.device) == KernelBackend.TRITON
-            ) and (
-                self.implementation == ImplementationType.TRITON or _dispatch.triton_leg_allowed(msa.device)
+            # outer product), routed like the standard leg below: a card with a record (dispatch.resolve), force_triton_kernels. A
+            # call the kernels refuse warns once (KernelRefusedWarning) and runs the PyTorch statements.
+            if (
+                self.implementation == ImplementationType.MINIWORLD
+                and resolve("outer_product_mean", self.implementation, msa.device,
+                            training=_dispatch.needs_backward(self, msa)) == KernelBackend.TRITON
+                and _dispatch.triton_leg_allowed(msa.device)
             ):
                 from miniworld_engine.kernels.outer_product_mean.interface import (
                     refusal,
@@ -202,6 +199,8 @@ class OuterProductMean(nn.Module):
                     residual=residual,
                     groups=self.groups,
                 )
+                if why is not None and msa.is_cuda:
+                    _dispatch.warn_refused("outer_product_mean", msa.device, why)
                 if why is None:
                     options = {}
                     if self.groups > 1:
@@ -227,8 +226,6 @@ class OuterProductMean(nn.Module):
                         b_right=self.to_right.bias,
                         **options,
                     )
-                # A variant call the kernels do not take (fp32, mask_interchain, a width outside the tile contract) runs the PyTorch
-                # statements below, as it did before this leg existed -- also for an explicit implementation="triton".
             return self._variant_reference(msa, mask, token_asym_id, residual)
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.
