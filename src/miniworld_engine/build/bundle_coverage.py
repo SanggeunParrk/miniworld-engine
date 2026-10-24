@@ -147,6 +147,19 @@ def cases() -> list[dict]:
     # The Anthropic OPM path (integrations/anthropic_msa) finishes with THIS repo's csrc/opm_epilogue.cu, built once under the name
     # ``miniworld_opm_epilogue`` (no variant suffix: the ``_native*`` ones belong to integrations/opm_train). Needs no payload to build.
     out.append({"kind": "anthropic_ext", "train": False, "dtype": "bfloat16", "heavy": False})
+    # La-Proteina (kernels/pair_embed_geom, pair_embed_adaln; the token DiT block at its widths: 768 / 12 heads x 64 / pair 256 / cond 256 or 128 /
+    # transition x4): the pair builders once, and the batched-pairs block (block_psb under serves_batched) inference and training at the padded
+    # token lengths, B = 5 at 384 (the TOKEN_EMPTY_UNIFORM build) and a larger B elsewhere. H100 only: the others report a skip.
+    out.append({"kind": "la_proteina_pair", "train": True, "dtype": "bfloat16", "heavy": False})
+    for train in (False, True):
+        for length in (128, 256, 384, 512):
+            for d_cond in (256, 128):
+                for qk in (True, False):
+                    if not qk and d_cond != 256:
+                        continue
+                    for b in ((5, 2) if length == 384 else (2, 12)):
+                        out.append({"kind": "la_proteina_dit", "L": length, "train": train, "dtype": "bfloat16", "d_cond": d_cond,  # noqa: PERF401
+                                    "qk": qk, "batch": b, "heavy": False})
     for i, c in enumerate(out):
         c["id"] = i
     return out
@@ -320,6 +333,12 @@ def _run_block(c: dict) -> None:
     elif c["kind"] == "model_variants":
         _model_variants()
         return
+    elif c["kind"] == "la_proteina_pair":
+        _la_proteina_pair()
+        return
+    elif c["kind"] == "la_proteina_dit":
+        _la_proteina_dit(c)
+        return
     elif c["kind"] == "sampler_ops":
         _sampler_ops()
         return
@@ -344,6 +363,65 @@ def _run_block(c: dict) -> None:
     model = model.cuda().to(pdt)
     _randomize(model)
     _step(model, args, c["train"], autocast)
+
+
+def _la_proteina_pair() -> None:
+    """La-Proteina's pair builders, every extension variant once: the encoder pair (inference; training with and without the folded LayerNorm), the
+    decoder pair (training, with and without it) with the table-gradient backward, and the initial pair builder (self-conditioning on / off)."""
+    import torch
+
+    from miniworld_engine.kernels.pair_embed_adaln import pair_embed_adaln
+    from miniworld_engine.kernels.pair_embed_geom import pair_embed_ca, pair_embed_geom, pair_embed_geom_train
+    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90 as geom
+
+    if torch.cuda.get_device_capability() != (9, 0):
+        raise RuntimeError("La-Proteina's pair builders are H100 (sm_90a) kernels")
+    dev = "cuda"
+    for b, n in ((48, 128), (2, 512)):
+        bb = torch.randn(b, n, 4, 3, device=dev) * 0.5
+        flags = [torch.ones(b, n, device=dev, dtype=torch.bool) for _ in range(3)]
+        idx, chains = torch.arange(1, n + 1, device=dev).expand(b, n), torch.zeros(b, n, device=dev, dtype=torch.int32)
+        w = torch.randn(256, 317, device=dev, requires_grad=True)
+        wc = torch.randn(256, 157, device=dev, requires_grad=True)
+        ca = bb[:, :, 1].contiguous()
+        with torch.no_grad():
+            pair_embed_geom(w.detach(), bb, flags[0], flags[1], flags[2], idx, chains)
+        for eps in (None, 1e-5):
+            pair_embed_geom_train(w, bb, flags[0], flags[1], flags[2], idx, chains, ln_eps=eps).float().sum().backward()
+            pair_embed_ca(wc, ca, flags[2], ln_eps=eps).float().sum().backward()
+        for impl in (0, 1):   # the shared-memory read-modify-write backward is the A/B switch MINIWORLD_PAIR_EMBED_BWD_IMPL=0
+            pair, codes = geom.forward(w.detach().t().to(torch.bfloat16).contiguous(), bb, flags[0].to(torch.uint8), flags[1].to(torch.uint8),
+                                       flags[2].to(torch.uint8), idx.to(torch.int32), chains, torch.linspace(0.1, 2, 20, device=dev),
+                                       torch.linspace(-torch.pi, torch.pi, 20, device=dev), with_codes=True)
+            geom.backward(pair, codes, 0, impl=impl)
+        ln_w, ln_b = torch.ones(256, device=dev, requires_grad=True), torch.zeros(256, device=dev, requires_grad=True)
+        wa = torch.randn(256, 187, device=dev, requires_grad=True)
+        gamma, beta = torch.rand(b, 256, device=dev, requires_grad=True), torch.randn(b, 256, device=dev, requires_grad=True)
+        for sc in (None, ca):
+            pair_embed_adaln(wa, ln_w, ln_b, gamma, beta, ca, sc, idx, flags[2]).float().sum().backward()
+    torch.cuda.synchronize()
+
+
+def _la_proteina_dit(c: dict) -> None:
+    """The token DiT block at La-Proteina's widths over ``batch`` independent proteins, each with its own pair (masked), bf16."""
+    import torch
+
+    from miniworld_engine.modules.dit import DiTBlock
+    from miniworld_engine.modules.exceptions import ImplementationType as MI
+
+    b, n, d_cond, train = c["batch"], c["L"], c["d_cond"], c["train"]
+    model = DiTBlock(d_single=768, d_cond=d_cond, d_pair=256, n_head=12, n=4, use_qk_norm=c["qk"], implementation=MI.MINIWORLD).cuda().bfloat16()
+    _randomize(model)
+    model.train(train)
+    single = torch.randn(1, b, n, 768, device="cuda", dtype=torch.bfloat16, requires_grad=train)
+    cond = torch.randn(1, b, n, d_cond, device="cuda", dtype=torch.bfloat16, requires_grad=train)
+    pair = torch.randn(b, n, n, 256, device="cuda", dtype=torch.bfloat16, requires_grad=train)
+    mask = torch.arange(n, device="cuda")[None] < torch.randint(n // 2, n + 1, (b, 1), device="cuda")
+    with torch.set_grad_enabled(train):
+        out = model(single, cond, pair, mask)
+        if train:
+            out.float().sum().backward()
+    torch.cuda.synchronize()
 
 
 def _swa_stages() -> None:

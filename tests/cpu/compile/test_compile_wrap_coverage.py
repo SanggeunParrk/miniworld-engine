@@ -195,6 +195,8 @@ OP_FAMILIES = (
     "swa_gate_out",    # SWA-specific row-keyed gated output projection
     "swa_dit",         # the fused SWA atom DiT block (kernels/swa_dit): one forward op, one backward op
     "token_pair_init", # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
+    "pair_embed_geom", # La-Proteina encoder / decoder pair builders (kernels/pair_embed_geom): forward ops (encoder, training, decoder) and one table-gradient backward op
+    "pair_embed_adaln", # La-Proteina's pair builder (kernels/pair_embed_adaln): one forward op, one backward op
     "smooth_lddt",     # AF3 Alg. 27 smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep, forward and backward ops
     "local_dit",       # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
     "tm1",
