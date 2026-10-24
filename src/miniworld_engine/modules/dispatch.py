@@ -234,6 +234,10 @@ _DEFAULT_BACKEND = KernelBackend.TRITON  # unknown op / unknown GPU -> portable 
 # to the pytorch reference explicitly, because adding this name here would otherwise make it raise).
 _CUEQ_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
 
+# The ops whose module has an ``anthropic`` branch (``KernelBackend.ANTHROPIC``): the Anthropic TriMul payload and its TriangleAttention
+# adapter (``integrations.anthropic``). Other ops reject an explicit ANTHROPIC request in ``resolve``.
+_ANTHROPIC_OPS = frozenset({"triangle_multiplication", "triangle_attention"})
+
 
 def _trimul_known_best(device: torch.device | None) -> KernelBackend:
     """trimul: TRITON family on every arch. The hand-CUDA H100 kernels are not a module-layer
@@ -585,11 +589,11 @@ def resolve(
     # _CUEQ_OPS) falls back to the PYTORCH reference, never the Triton fused path.
     if impl == ImplementationType.CUEQUIVARIANCE and op not in _CUEQ_OPS:
         return KernelBackend.PYTORCH
-    # The Anthropic TriMul payload carries TriMul units only; naming it for another op here is a mistake, not a
-    # fallback (integrations.anthropic_trimul states what it serves and refuses the rest at forward time). The MSA
-    # paths (integrations.anthropic_msa) route inside their own modules and never reach this resolver.
-    if impl == ImplementationType.ANTHROPIC and op != "triangle_multiplication":
-        raise ValueError(f"{op}: the anthropic payload serves triangle_multiplication only")
+    # The Anthropic payload is wired into the modules of _ANTHROPIC_OPS (TriMul, TriangleAttention); naming it for another op
+    # here is a mistake, not a fallback (integrations.anthropic_trimul states what it serves and refuses the rest at forward
+    # time). The MSA paths (integrations.anthropic_msa) route inside their own modules and never reach this resolver.
+    if impl == ImplementationType.ANTHROPIC and op not in _ANTHROPIC_OPS:
+        raise ValueError(f"{op}: the anthropic payload is wired for {', '.join(sorted(_ANTHROPIC_OPS))} only")
     if impl != ImplementationType.MINIWORLD:
         return to_kernel_backend(impl)
     best = _MINIWORLD_KNOWN_BEST.get(op, _DEFAULT_BACKEND)

@@ -90,6 +90,22 @@ and B200 keep what they did. **Not routed** (they call their Triton kernels dire
 `ops.bidirectional_triangle_multiplicative_update`, `ops.conditioned_transition`, `ops.layer_norm_linear`, `ops.rms_norm_modulation`,
 `ops.gated_residual`, and the QK-norm of `ops.triangle_attention`'s fallback; so are the raw `kernels.*` functions.
 
+## The Anthropic payload
+
+`implementation="anthropic"` names the kernels of Anthropic's uplifting-biomolecular-modeling release. It is wired into the modules that
+have a branch for it: `TriangleMultiplication` (the TriMul payload, `TRIMUL_NATIVE_BUILD_DIR`), `TriangleAttention` (use_self_attention=True,
+transposed bias; `integrations.anthropic`, `MINIWORLD_ANTHROPIC_ROOT`), `OuterProductMean` and `MSAPairWeightedAveraging` (the `opt_core` cells,
+`OPT_CORE_DIR`; inference, bf16, sm_90). `modules.dispatch.resolve` accepts the option for the first two (`_ANTHROPIC_OPS`) and rejects it
+for every other op; the two MSA modules route inside themselves. An explicit `anthropic` request that the release's path cannot serve
+raises with the reason (`PayloadUnavailable`), it never reroutes; the engine's own H100 OPM / PWA paths (`opm_train`, `pwa_train`) do not
+answer to it. The epilogue of the OPM path divides by the pair count before the output projection and adds the bias undivided, so an
+`OuterProductMean(normalize_before_proj=False)` (ESMFold2) is refused.
+
+**`miniworld` uses the Anthropic payloads automatically when their variables are set** (`OPT_CORE_DIR` for OPM / PWA, `TRIMUL_NATIVE_BUILD_DIR`
+for TriMul; `TriangleAttention` has no such automatic use) and a call fits them; with the variables unset `miniworld` never touches them.
+This is the behaviour of every release so far and is left as it is; whether `miniworld` should ask for the payload only when
+`implementation="anthropic"` is a decision for the maintainer. To keep a process off the payloads, leave the variables unset.
+
 ## Overrides
 
 | | |
