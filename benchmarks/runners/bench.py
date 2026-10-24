@@ -4568,9 +4568,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
             "modules.dit.DiTBlock -> integrations.token_dit_train.block[fused B200 training block: cuBLAS GEMMs + sm_100a "
             "attn_fwd2 / attn_dkv / attn_dqb + CUDA row kernels (token_dit_train_rows.cu), one opaque op forward and backward]"
         )
-    elif spec.impl in (
-        ImplementationType.MINIWORLD,
-    ):  # both dispatch to the fused runner
+    elif spec.impl == ImplementationType.MINIWORLD:  # dispatches to the fused runner
         why = token_dit_refusal(model.layers[0])
         execution_path = (
             "modules.dit.DiTBlock -> integrations.token_dit.update -> kernels.conditioned_transition.triton."

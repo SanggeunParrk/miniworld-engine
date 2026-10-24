@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import warnings
+from functools import partial
 
 import pytest
 import torch
@@ -126,7 +127,9 @@ def test_one_missing_failed_or_wrong_dtype_kernel_unrecords_the_op(monkeypatch, 
 # ---- (ii) an unrecorded card warns once and runs PyTorch ------------------------------------------------------------
 def test_an_unrecorded_card_warns_once_per_op_and_runs_pytorch(monkeypatch, manifests):
     fake_card(monkeypatch, "Brand New GPU", (8, 9))
-    twice = lambda: dispatch.resolve("transition", "miniworld")   # noqa: E731
+    def twice():
+        return dispatch.resolve("transition", "miniworld")
+
     results, caught = _recorded(UnrecordedCardWarning, twice, twice)
     assert results == [KernelBackend.PYTORCH, KernelBackend.PYTORCH]
     assert len(caught) == 1
@@ -410,7 +413,7 @@ def test_protenix_template_trimul_with_a_wider_hidden_warns_and_runs_pytorch(mon
         mod = build(64, d_hidden=128, implementation=ImplementationType.MINIWORLD, **({"p_drop": 0.0} if build is BidirectionalTriangleMultiplication else {})).bfloat16().eval()
         ref = build(64, d_hidden=128, implementation=ImplementationType.PYTORCH, **({"p_drop": 0.0} if build is BidirectionalTriangleMultiplication else {})).bfloat16().eval()
         ref.load_state_dict(mod.state_dict())
-        (y, _), caught = _recorded(KernelRefusedWarning, lambda: mod(x), lambda: mod(x))     # the second call is silent
+        (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))     # the second call is silent
         assert len(caught) == 1
         assert "d_hidden (128) != d_pair (64)" in str(caught[0].message)
         torch.testing.assert_close(y, ref(x))
@@ -426,7 +429,7 @@ def test_opm_refusal_warns_once_and_runs_pytorch(monkeypatch, manifests, cuda_te
     ref = OuterProductMean(64, 128, 32, implementation=ImplementationType.PYTORCH)
     ref.load_state_dict(mod.state_dict())
     x = torch.randn(1, 8, 16, 64)                      # fp32: the Triton path is bf16
-    (y, _), caught = _recorded(KernelRefusedWarning, lambda: mod(x), lambda: mod(x))
+    (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))
     assert len(caught) == 1
     assert "bf16" in str(caught[0].message)
     torch.testing.assert_close(y, ref(x))
@@ -445,7 +448,7 @@ def test_pwa_refusal_warns_once_and_runs_pytorch(monkeypatch, manifests, cuda_te
     ref = MSAPairWeightedAveraging(64, 128, 8, 8, implementation=ImplementationType.PYTORCH).bfloat16().eval()
     ref.load_state_dict(mod.state_dict())
     msa, pair = torch.randn(1, 4, 16, 64).bfloat16(), torch.randn(1, 16, 16, 128).bfloat16()
-    (y, _), caught = _recorded(KernelRefusedWarning, lambda: mod(msa, pair), lambda: mod(msa, pair))
+    (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, msa, pair), partial(mod, msa, pair))
     assert len(caught) == 1
     assert "powers of two" in str(caught[0].message)
     torch.testing.assert_close(y, ref(msa, pair))
