@@ -507,6 +507,12 @@ def fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
     return () if (nh, dh) == (H, D) else (f"DHP={dh}", f"ROW_WIDTH={nh * dh}")
 
 
+def dq_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
+    """Build defines of ``attn_dq.cu``: ``fwd_defs`` plus the dQ output scale 1/sqrt(head_dim) its epilogue multiplies by (the source's
+    default is 1/sqrt(48); without it a 12 x 64 dQ is 15 % too large and a 24 x 32 one 18 % too small)."""
+    return fwd_defs(nh, dh) + (() if dh == D else (f"RSQDV={dh**-0.5!r}f",))
+
+
 def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D):
     """The token DiT step's inference core (attn_fwd.cu, GATED): qkvg [S L, 3072] bf16 with q in exp2 units, bias_all
     [nb 16, L, L] bf16 in log2 units (masked keys -inf); writes sigmoid(g) softmax(q k^T + bias) v over q for ``block``'s
@@ -615,7 +621,7 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
         )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *ld)).attn_dq(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh))).attn_dq(
         qs, kb, vb, dob, bb, km, lse, dd, dq
     )
     dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
@@ -648,7 +654,7 @@ def backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
     dbias = torch.empty(nh, A, L, L, device=qs.device, dtype=torch.bfloat16)
     ld = fwd_defs(nh, dh)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *ld, "PSB=1", "PSB_DB=1")).attn_dq_psb(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh), "PSB=1", "PSB_DB=1")).attn_dq_psb(
         qs, kb, vb, dob, bb, km, lse, dd, dq, dbias
     )
     _ext("attn_dkv", ("DBIAS=0", "PSB=1", *ld)).attn_dkv(
@@ -783,6 +789,7 @@ __all__ = [
     "augmented_attention_bf16_sm90",
     "augmented_attention_bf16_sm90_psb",
     "backward_psb",
+    "dq_defs",
     "forward_psb",
     "available",
     "backward",

@@ -14,10 +14,10 @@ needs_hopper = pytest.mark.skipif(not HOPPER, reason="the kernels are sm_90a onl
 LOG2E = 1.0 / math.log(2.0)
 
 
-def _inputs(A, L, seed=0, bias_scale=1.0, mask_frac=0.0):
+def _inputs(A, L, seed=0, bias_scale=1.0, mask_frac=0.0, H=16, DH=48):
     g = torch.Generator(device="cuda").manual_seed(seed)
-    q, k, v = (torch.randn(A, 1, L, 16, 48, device="cuda", generator=g) for _ in range(3))
-    bias = torch.randn(16, A, L, L, device="cuda", generator=g) * bias_scale
+    q, k, v = (torch.randn(A, 1, L, H, DH, device="cuda", generator=g) for _ in range(3))
+    bias = torch.randn(H, A, L, L, device="cuda", generator=g) * bias_scale
     mask = (torch.rand(A, 1, L, device="cuda", generator=g) >= mask_frac) if mask_frac else None
     return q, k, v, bias, mask
 
@@ -26,7 +26,7 @@ def _truth(q, k, v, bias, mask, do):
     """fp64 autograd: (O, dq, dk, dv, dbias) in the op's layouts."""
     leaves = [t.detach().double().requires_grad_() for t in (q, k, v, bias)]
     qd, kd, vd, bd = leaves
-    s = torch.einsum("aihd,ajhd->ahij", qd[:, 0], kd[:, 0]) / math.sqrt(48) + bd.permute(1, 0, 2, 3)
+    s = torch.einsum("aihd,ajhd->ahij", qd[:, 0], kd[:, 0]) / math.sqrt(q.shape[-1]) + bd.permute(1, 0, 2, 3)
     if mask is not None:
         s = s.masked_fill(~mask[:, 0][:, None, None, :], torch.finfo(s.dtype).min)
     o = torch.einsum("ahij,ajhd->aihd", torch.softmax(s, -1), vd[:, 0])[:, None]
@@ -95,3 +95,37 @@ def test_the_backward_is_bitwise_repeatable():
         grads.append([t.grad for t in leaves])
     for other in grads[1:]:
         assert all(torch.equal(a, b) for a, b in zip(grads[0], other, strict=True))
+
+
+@needs_hopper
+@pytest.mark.parametrize("layout", [(16, 48), (12, 64), (16, 64), (24, 32)], ids=lambda x: f"{x[0]}x{x[1]}")
+@pytest.mark.parametrize(("A", "L", "mask_frac"), [(3, 256, 0.0), (4, 384, 0.2)])
+def test_the_cores_at_every_head_layout(layout, A, L, mask_frac):
+    """``forward_psb`` / ``backward_psb`` (what the fused block calls) at each head layout of the token DiT, against the fp64 truth
+    on the same terms as above: O, dq, dk, dv and dbias each no worse than 1.3x the bf16-input floor."""
+    from miniworld_engine.kernels.augmented_attention import cuda as K
+
+    H, DH = layout
+    q, k, v, bias, mask = _inputs(A, L, seed=A * 1000 + L + H, mask_frac=mask_frac, H=H, DH=DH)
+    do = torch.randn(A, 1, L, H, DH, device="cuda")
+    truth = _truth(q, k, v, bias, mask, do)
+    r = lambda t: t.bfloat16().float()
+    floor = _truth(r(q), r(k), r(v), (bias * LOG2E).bfloat16().double() / LOG2E, mask, r(do))
+
+    rows = lambda t: t.reshape(A * L, H * DH)
+    qs = rows(q * (LOG2E / math.sqrt(DH))).bfloat16().contiguous()
+    kb, vb = rows(k).bfloat16().contiguous(), rows(v).bfloat16().contiguous()
+    bb = (bias * LOG2E).bfloat16().contiguous()
+    km = None if mask is None else torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
+    o, lse = K.forward_psb(qs, kb, vb, bb, km, A, L, None, H, DH)
+    dob = rows(do).bfloat16().contiguous()
+    dd = (rows(do) * o).reshape(A, L, H, DH).sum(-1).permute(0, 2, 1).contiguous()
+    dq, dk, dv, dbias = K.backward_psb(qs, kb, vb, dob, bb, km, lse, dd, A, L, H, DH)
+    shp = (A, 1, L, H, DH)
+    got = (o.view(shp), dq.view(shp), dk.view(shp), dv.view(shp), dbias.float() * LOG2E)
+    bad = []
+    for name, x, t, f in zip(("O", "dq", "dk", "dv", "dbias"), got, truth, floor, strict=False):
+        e, ef = _rel(x, t), _rel(f, t)
+        if not (math.isfinite(e) and e < 1.3 * ef + 1e-4):
+            bad.append(f"{name} {e:.2e} (floor {ef:.2e})")
+    assert not bad, f"at {H}x{DH}: " + ", ".join(bad)

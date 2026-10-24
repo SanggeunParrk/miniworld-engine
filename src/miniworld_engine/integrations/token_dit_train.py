@@ -473,6 +473,8 @@ def _pack(P, qk, dev, at):
             d_ // P["attention.to_bias.weight"].shape[0],
             rpb=_native_rpb(),
             dc=P["attention.ada_ln_in.to_scale.weight"].shape[1],
+            n=P["transition.expand_a.weight"].shape[0] // d_,
+            dp=P["attention.ln_pair.weight"].shape[0],
         )
         weights = [P[n] for n in names]
         W = dict(
@@ -598,7 +600,13 @@ def _own_cond(cond, fp32) -> bool:
     return fp32 and cond.dtype is torch.float32 and not _native90(cond.device)
 
 
-def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False):
+def _nd(params, qk, D):
+    """(transition expansion n, pair channels of ln_pair) read off the block's parameters: expand_a is [n D, D], ln_pair [dp]."""
+    P = dict(zip(_names_for(qk), params, strict=False))
+    return P["transition.expand_a.weight"].shape[0] // D, P["attention.ln_pair.weight"].shape[0]
+
+
+def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd). The fp32 path
     saves no copy of cond (_own_cond), no copy of v (QK-norm: the core reads it from qkvg) and no LN(pair) (pair_bias_bwd
     recomputes it): those slots are empty [0, n] tensors. H100: q / k / v are always copies (the q pass scales q; the TF32 core's
@@ -636,17 +644,18 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False):
         e((M, D), dtype=f32),
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
-        e((M, 4 * D), dtype=at),
+        e((M, 2 * n * D), dtype=at),   # a | b of the SwiGLU: two [M, n D] halves
         e((M, D), dtype=at),
-        e((0 if (psb or (fp32 and not h100)) else R, DP), dtype=at),
+        e((0 if (psb or (fp32 and not h100)) else R, dp), dtype=at),
         e((0 if psb else R, 2), dtype=f32),
     ]
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False):
+    n, dp = _nd(params, qk, single.shape[-1])
     return [
         torch.empty_like(single),
-        *_saved_like(single, cond, pair, fp32, qk, heads, psb),
+        *_saved_like(single, cond, pair, fp32, qk, heads, psb, n, dp),
     ]
 
 
@@ -680,12 +689,15 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False):
 
     A, _, L, D = single.shape
     DH = D // H
+    nexp, dpw = _nd(params, qk, D)
     T = ext(
         D,
         DH,
         rpb=_native_rpb() if _native90(single.device) else 8,
         empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]),
         dc=cond.shape[-1],
+        n=nexp,
+        dp=dpw,
     )
     names = _names_for(qk)
     P = dict(zip(names, params, strict=False))
@@ -739,21 +751,21 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False):
         # one bias per sample, produced by the caller (head-major [H, A, L, L], log2 units): there is no pair LayerNorm and no
         # bias GEMM in the block, and nothing of either is kept for the backward
         assert h100 and not fp32 and pair.shape == (H, A, L, L), "per-sample bias: the H100 bf16 block"
-        ph = pair.new_empty(0, DP, dtype=at)
+        ph = pair.new_empty(0, dpw, dtype=at)
         pst = pair.new_empty(0, 2, dtype=torch.float32)
         bias = pair
     else:
-        p2 = pair.reshape(R, DP)
+        p2 = pair.reshape(R, dpw)
         pst = torch.empty(R, 2, device=dev)
     if psb:
         pass
     elif h100 or not fp32:
-        ph = torch.empty(R, DP, device=dev, dtype=at)
+        ph = torch.empty(R, dpw, device=dev, dtype=at)
         T.pair_ln(p2, ph, pst, EPS)
         # head-major bias, Wf = Wb diag(wp): natural units for sm_100a, log2 units (and key-permuted for the TF32 core) for sm_90a
         bias = mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
     else:  # B200 fp32: LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
-        ph = pair.new_empty(0, DP, dtype=at)
+        ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev)
         T.pair_bias(
             p2,
@@ -811,13 +823,13 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False):
     x1st = torch.empty(M, 2, device=dev)
     T.res_adaln_b(x, y, Gg, bg1, G, bs2, x1, xt, x1st, EPS)
     Wab = W["Wab"]
-    h = torch.empty(M, 2 * D, device=dev, dtype=at)
+    h = torch.empty(M, nexp * D, device=dev, dtype=at)
     gsw = _swiglu_gemm(xt, Wab)
     if gsw is not None:  # expand GEMM + SwiGLU, a | b saved on the way
-        ab = torch.empty(M, 4 * D, device=dev, dtype=at)
+        ab = torch.empty(M, 2 * nexp * D, device=dev, dtype=at)
         gsw(xt, Wab, h, ab)
     else:
-        ab = mm(xt, Wab.t())  # [M, 2 * 2D] a | b
+        ab = mm(xt, Wab.t())  # [M, 2 * n D] a | b
         rows.swiglu_rows(ab, h)
     Wsq = W["Wsq"]
     z = mm(h, Wsq.t())
@@ -945,7 +957,7 @@ def _native_attn_bwd90(T, qs, k, v, dob, bias, mask, lse, dd, A, L, fp32):
         return dq, dk, dv, dbn.to(torch.bfloat16)
     else:
         sm90._ext(
-            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *bf_defs, *empty_defs)
+            "attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *sm90.dq_defs(H, DH), *empty_defs)
         ).attn_dq(qs, k, v, dob, bias, km, lse, dd, dq)
         sm90._ext("attn_dkv", ("DB_PER_SAMPLE=1", *bf_defs, *empty_defs)).attn_dkv(
             qs, k, v, dob, bias, km, lse, dd, dk, dv, db
@@ -983,8 +995,8 @@ def _native_final90(
         dWn[3 * D :],
         dWg[D:],
         allp,
-        dWab[: 2 * D],
-        dWab[2 * D :],
+        dWab[: dWab.shape[0] // 2],
+        dWab[dWab.shape[0] // 2 :],
         dWsq,
     ]
     if qk:
@@ -1056,12 +1068,15 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
 
     D = single.shape[-1]
     DH = D // H
+    nexp, dpw = _nd(params, qk, D)
     T = ext(
         D,
         DH,
         rpb=_native_rpb() if _native90(single.device) else 8,
         empty_uniform=_empty_uniform90(single.device, single.shape[0], single.shape[2]),
         dc=cond.shape[-1],
+        n=nexp,
+        dp=dpw,
     )
     h100 = _sm90(single.device)
     saved = list(saved)
@@ -1126,7 +1141,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     native = _native90(dev)
     c2, p2 = (
         (None if native else cond.reshape(M, cond.shape[-1]).contiguous()),
-        None if psb else pair.reshape(R, DP),
+        None if psb else pair.reshape(R, dpw),
     )  # native: cond_bwd90 reads cond as given
     if psb:
         bias = pair  # the bias is an input here, not a saved activation
@@ -1139,7 +1154,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dGg = torch.empty(M, 2 * D, device=dev, dtype=at)
     dz = torch.empty(M, D, device=dev, dtype=at)
     T.res_c_bwd(dout, z, Gg, bg2, dz, dGg, part[0])
-    dh = mm(dz, Wsq)  # [M, 2D]
+    dh = mm(dz, Wsq)  # [M, n D]
     dab = torch.empty_like(ab)
     h = torch.empty_like(dh)
     T.swiglu_bwd(dh, ab, dab, h)
@@ -1218,12 +1233,12 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         T.cond_bwd90(dchat, dcg, cond, cst, dc)
         if psb:
             # the bias projection's weights belong to the producer of the biases, which differentiates them itself
-            dWf = torch.zeros(H, DP, device=dev)
+            dWf = torch.zeros(H, dpw, device=dev)
         else:
             dbv = DB.view(H, R)
             dWf = mm32(dbv, ph)
             dph = mm32(dbv.t(), W["Wf_at"])
-            dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
+            dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
             T.pair_ln_bwd(dph, p2, pst, dpair)
         outs = _native_final90(
             T, names, params, W, allp, dWn, dWf, dWqkvg, dWo, dWg, dWab, dWsq, qk
@@ -1231,7 +1246,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         return [
             dx.view(A, 1, L, D),
             dc.view(cond.shape),
-            DB.view(pair.shape) if psb else dpair.view(1, L, L, DP),
+            DB.view(pair.shape) if psb else dpair.view(1, L, L, dpw),
             *outs,
         ]
     T.cond_bwd(dchat, dcg, c2, cst, dc)
@@ -1239,19 +1254,19 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     dw12 = torch.zeros(2, cond.shape[-1], device=dev)
     Ws1, Wb1, Ws2, Wb2 = (Wraw[i * D : (i + 1) * D] for i in range(4))
     T.unfold_lnw(dWn, Ws1, Wb1, Ws2, Wb2, w1, w2, dWu, dw12)
-    dpair = torch.empty(R, DP, device=dev, dtype=pdtype)
+    dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
     if (
         fp32 and not h100
     ):  # B200 fp32: LN(pair) recomputed: dpair and the dWf partials in one pass
-        pwf = torch.empty(T.pair_grid(R), H * DP, device=dev)
+        pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
-        dWf = pwf.sum(0).view(H, DP)
+        dWf = pwf.sum(0).view(H, dpw)
     else:
         dbv = DB.reshape(H, R).to(
             at
         )  # masked key columns are 0 (P = 0); H100: may be a transposed view
-        dWf = mm32(dbv, ph)  # [H, DP]
-        dph = mm32(dbv.t(), Wf.to(at))  # [R, DP]
+        dWf = mm32(dbv, ph)  # [H, dp]
+        dph = mm32(dbv.t(), Wf.to(at))  # [R, dp]
         T.pair_ln_bwd(dph, p2, pst, dpair)
     dWs1, dWb1, dWs2, dWb2 = dWu.split(D)
     grads = {
@@ -1277,8 +1292,8 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         "transition.ada_ln_in.to_bias.weight": dWb2,
         "transition.to_scale.weight": dWg[D:],
         "transition.to_scale.bias": pb[0],
-        "transition.expand_a.weight": dWab[: 2 * D],
-        "transition.expand_b.weight": dWab[2 * D :],
+        "transition.expand_a.weight": dWab[: nexp * D],
+        "transition.expand_b.weight": dWab[nexp * D :],
         "transition.squeeze.weight": dWsq,
     }
     # custom-op outputs may not alias each other: the gradients above are views of a few shared buffers, so each leaves as
@@ -1287,7 +1302,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     torch._foreach_copy_(
         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
     )
-    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, DP), *outs]
+    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs]
 
 
 class _Block(torch.autograd.Function):
@@ -1387,10 +1402,13 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     return out[:A, :, :L] if padded else out
 
 
-def serves_psb(module, single, cond, bias, mask, compute_dtype=None) -> bool:
-    """Can ``block_psb`` run this call: the H100 bf16 block with an attention bias of its own per sample, bias [H, A, L, L]
-    (log2 units, as the block's bias GEMM leaves it). Any L (``block_psb`` pads to the kernels' tile), one batch row. Without
-    autograd it runs the same forward (the saved activations are freed on return)."""
+PSB_COND = (128, 256, 384, 768)  # conditioning widths the row kernels build for (a multiple of 128)
+
+
+def _serves_psb_core(module, single, cond, mask, compute_dtype=None) -> bool:
+    """Everything ``serves_psb`` asks except the bias tensor itself: the settings, the H100 bf16 block, one batch row, the widths
+    (cond in ``PSB_COND``, transition n = 2 or 4, pair channels of ``ln_pair`` 128 or 256, a head layout of LAYOUTS), LayerNorm eps,
+    and a key mask that is one [1, L] row or a row per sample [A, L]."""
     if not settings.current().token_dit_train:
         return False
     if settings.current().force_triton_kernels:
@@ -1405,13 +1423,13 @@ def serves_psb(module, single, cond, bias, mask, compute_dtype=None) -> bool:
     if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] == 0:
         return False
     A, _, L, d = single.shape
-    if tuple(cond.shape) not in ((A, 1, L, 384), (A, 1, L, 768)) or tuple(bias.shape) != (a.n_head, A, L, L):
+    if tuple(cond.shape[:3]) != (A, 1, L) or cond.shape[3] not in PSB_COND:
         return False
-    if bias.dtype is not BF or not bias.is_contiguous():
+    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] not in (2 * d, 4 * d):
         return False
-    if (a.n_head, d) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * d:
+    if a.ln_pair.weight.numel() not in (128, 256):
         return False
-    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) == (1, L)):
+    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) in ((1, L), (A, L))):
         return False
     norms = (
         a.ada_ln_in.ln_in,
@@ -1420,6 +1438,16 @@ def serves_psb(module, single, cond, bias, mask, compute_dtype=None) -> bool:
         module.transition.ada_ln_in.ln_cond,
     )
     return all(n.eps == EPS for n in norms)
+
+
+def serves_psb(module, single, cond, bias, mask, compute_dtype=None) -> bool:
+    """Can ``block_psb`` run this call: the H100 bf16 block with an attention bias of its own per sample, bias [H, A, L, L]
+    (log2 units, as the block's bias GEMM leaves it). Any L (``block_psb`` pads to the kernels' tile), one batch row. Without
+    autograd it runs the same forward (the saved activations are freed on return)."""
+    if not _serves_psb_core(module, single, cond, mask, compute_dtype):
+        return False
+    A, _, L, _ = single.shape
+    return tuple(bias.shape) == (module.attention.n_head, A, L, L) and bias.dtype is BF and bias.is_contiguous()
 
 
 def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
@@ -1438,6 +1466,7 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
     Lp = -(-L // QM) * QM
     if mask is None:
         mask = torch.ones(1, L, device=single.device, dtype=torch.bool)
+    mask = mask.to(torch.bool).contiguous()
     if Lp != L:
         F = torch.nn.functional
         rows = (0, 0, 0, Lp - L)
@@ -1450,4 +1479,47 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
     return out[:, :, :L] if Lp != L else out
 
 
-__all__ = ["block", "block_psb", "serves", "serves_psb"]
+def _batched_mask(mask, B, L):
+    """A [B, L] / [A=1, B, L] key mask of B independent proteins as the [B, L] row per sample ``block_psb`` takes, or None."""
+    if mask is None:
+        return None
+    if mask.ndim == 3 and mask.shape[0] == 1:
+        mask = mask[0]
+    return mask if mask.ndim == 2 and tuple(mask.shape) == (B, L) else False
+
+
+def serves_batched(module, single, cond, pair, mask, compute_dtype=None) -> bool:
+    """A DiTBlock call over B > 1 independent proteins, each with its own pair: ``single`` [1, B, L, d], ``cond`` [1, B, L, dc],
+    ``pair`` [B, L, L, dp], a key mask [B, L] (or none). They run as B samples of ``block_psb``, each with the attention bias its own
+    pair gives."""
+    if single.ndim != 4 or single.shape[0] != 1 or single.shape[1] < 2:
+        return False
+    B, L = single.shape[1], single.shape[2]
+    key = _batched_mask(mask, B, L)
+    if key is False or cond.ndim != 4 or tuple(cond.shape[:3]) != (1, B, L):
+        return False
+    if pair.ndim != 4 or tuple(pair.shape[:3]) != (B, L, L) or pair.shape[3] != module.attention.ln_pair.weight.numel():
+        return False
+    return _serves_psb_core(module, single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1), key, compute_dtype)
+
+
+def block_batched(module, single, cond, pair, mask=None, compute_dtype=None):
+    """The fused block over B independent proteins (see ``serves_batched``). Each protein's attention bias is read off its pair by
+    differentiable torch ops -- LayerNorm, the head projection, log2 units, head-major bf16 -- so the pair, ``ln_pair`` and
+    ``to_bias`` get their gradients from autograd, and everything else from the fused block."""
+    import torch.nn.functional as F
+
+    a = module.attention
+    B, L = single.shape[1], single.shape[2]
+    dp = pair.shape[-1]
+    bias = F.linear(
+        F.layer_norm(pair, (dp,), a.ln_pair.weight.to(pair.dtype), None, a.ln_pair.eps), a.to_bias.weight.to(pair.dtype)
+    )
+    bias = (bias * LOG2E).permute(3, 0, 1, 2).contiguous().to(BF)  # [H, B, L, L]
+    out = block_psb(
+        module, single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1), bias, _batched_mask(mask, B, L), compute_dtype
+    )
+    return out.reshape(1, B, L, -1)
+
+
+__all__ = ["block", "block_batched", "block_psb", "serves", "serves_batched", "serves_psb"]

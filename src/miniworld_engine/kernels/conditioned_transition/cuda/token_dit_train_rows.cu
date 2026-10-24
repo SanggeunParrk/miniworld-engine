@@ -47,12 +47,20 @@ using bf = __nv_bfloat16;
 #define TOKEN_EMPTY_UNIFORM 0
 #endif
 #ifndef TD_DC
-#define TD_DC 384                // conditioning width: 384 (AF3) or 768 (a token DiT conditioned at its own width)
+#define TD_DC 384                // conditioning width: 384 (AF3), 768 (a token DiT conditioned at its own width), 128 / 256 (a multiple of 128)
+#endif
+#ifndef TD_N
+#define TD_N 2                   // transition expansion: SwiGLU hidden width n * D; expand_a / expand_b are [n D, D], squeeze [D, n D]
+#endif
+#ifndef TD_DP
+#define TD_DP 128                // pair channel width of the ln_pair / to_bias weights the pack and the final gradients carry
 #endif
 constexpr int D = TD_D, NT = D / 4, DC = TD_DC, NTC = DC / 4, RPB = TD_RPB, HD = TD_HD;
 static_assert(RPB == 1 || RPB == 2 || RPB == 4 || RPB == 8, "rows per block");
 constexpr int HT = HD / 4, NHH = D / HD;                                   // threads per head, heads
 static_assert(D % HD == 0 && NT % 32 == 0, "token DiT train rows: layout");
+static_assert(DC % 128 == 0, "token DiT train rows: conditioning width is a multiple of 128 (a warp owns 128 columns)");
+constexpr int HID = TD_N * D, DPW = TD_DP;                                // SwiGLU hidden width, pair channels of ln_pair / to_bias
 
 __device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 __device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
@@ -943,10 +951,10 @@ __global__ void train_pack90_k(TrainPack90 p) {
  else if(o==13)v=train_read4(p,12,i);
  else if(o==14)v=train_read4(p,13,i);
  else if(o>=15&&o<=17){
-  v=mul4(train_read4(p,13,i),train_read4(p,12,i%128));
+  v=mul4(train_read4(p,13,i),train_read4(p,12,i%DPW));
   if(o==17)v=mul4(v,make_float4(1.4426950408889634f,1.4426950408889634f,1.4426950408889634f,1.4426950408889634f));
  }else if(o==18)v=train_read4(p,5,i);
- else if(o==19)v=train_read4(p,i/(2*D*D)==0?20:21,i%(2*D*D));
+ else if(o==19)v=train_read4(p,i/(HID*D)==0?20:21,i%(HID*D));
  else v=train_read4(p,22,i);
  if(p.df[o])V4<float>::store((float*)p.dst[o]+i,v);
  else V4<bf>::store((bf*)p.dst[o]+i,v);
@@ -960,7 +968,7 @@ std::vector<at::Tensor> train_pack90(std::vector<at::Tensor> weights,bool qk,boo
   p.src[j]=weights[j].data_ptr();p.sf[j]=weights[j].scalar_type()==at::kFloat;
  }
  std::vector<std::vector<int64_t>> shapes={{DC},{DC},{4*D,DC},{4*D,DC},{2*D,DC},{D},{D},{D},{D},
- {4*D,D},{4*D},{HD},{HD},{128},{NHH,128},{NHH,128},{NHH,128},{NHH,128},{D,D},{4*D,D},{D,2*D}};
+ {4*D,D},{4*D},{HD},{HD},{DPW},{NHH,DPW},{NHH,DPW},{NHH,DPW},{NHH,DPW},{D,D},{2*HID,D},{D,HID}};
  const int aliases[21]={6,14,-1,-1,-1,8,16,11,19,-1,-1,qk?23:-1,qk?24:-1,12,13,-1,-1,-1,5,-1,22};
  std::vector<at::Tensor> out;int total=0;
  for(int o=0;o<21;++o){
@@ -1035,8 +1043,8 @@ __global__ void train_final90_k(TrainGrad90 p) {
   int group=o==1?4:o==8?3:o==11?2:o==16?1:0;
   for(int r=0;r<p.parts;++r)v=add4(v,V4<float>::load(p.allp+r*7*D+group*D+i));
  }else if(o==12){
-  for(int h=0;h<NHH;++h)v=add4(v,mul4(V4<float>::load(p.dwf+h*128+i),V4<float>::load(p.wb+h*128+i)));
- }else if(o==13)v=mul4(V4<float>::load(p.dwf+i),V4<float>::load(p.wp+i%128));
+  for(int h=0;h<NHH;++h)v=add4(v,mul4(V4<float>::load(p.dwf+h*DPW+i),V4<float>::load(p.wb+h*DPW+i)));
+ }else if(o==13)v=mul4(V4<float>::load(p.dwf+i),V4<float>::load(p.wp+i%DPW));
  else if(o==23||o==24){
   for(int h=0;h<NHH;++h)v=add4(v,V4<float>::load(p.qkw+((o-23)*NHH+h)*HD+i));
  }else v=V4<float>::load(p.src[o]+i);
@@ -1074,7 +1082,7 @@ std::vector<at::Tensor> train_final90(std::vector<at::Tensor> params,std::vector
 
 __device__ __forceinline__ int perm90(int x){return (x&~7)+4*(x&1)+((x&7)>>1);}
 __device__ __forceinline__ int inv90(int x){return (x&~7)+2*(x&3)+((x&7)>>2);}
-template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const bool* mask,float* km,float* kmp,int A,int L,bool perm) {
+template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const bool* mask,float* km,float* kmp,int A,int L,bool perm,bool ps=false) {
  long i=(long)blockIdx.x*256+threadIdx.x,n=(long)NHH*L*L;
  if(i<n&&perm){int k=i%L;out[i]=in[i-k+perm90(k)];}
  // The finite fully masked softmax is uniform, but -1e30 + log2(L)
@@ -1082,7 +1090,7 @@ template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const 
  // mask buffer so backward never reconstructs probabilities from that LSE.
  bool empty=false;
  if constexpr(TOKEN_EMPTY_UNIFORM) {
-  if(mask&&(long)blockIdx.x*256<A*L) {
+  if(mask&&!ps&&(long)blockIdx.x*256<A*L) {
    int any=0;for(int k=threadIdx.x;k<L;k+=256)any|=mask[k];
    empty=__syncthreads_or(any)==0;
   }
@@ -1090,7 +1098,8 @@ template<typename AT> __global__ void train_bias90_k(const AT* in,AT* out,const 
  // Keep the marker above the TF32 forward softmax's finite -1e30 clamp.
  // Its magnitude still erases every finite score, giving uniform attention.
  const float masked=empty?-5e29f:-1e30f;
- if(i<A*L){int k=i%L;km[i]=(!mask||mask[k])?0.f:masked;if(kmp)kmp[i]=(!mask||mask[perm90(k)])?0.f:masked;}
+ // ps: a key mask of its own per sample [A, L]; else one [L] row shared by the samples
+ if(i<A*L){int k=i%L;const long mb=ps?i-k:0;km[i]=(!mask||mask[mb+k])?0.f:masked;if(kmp)kmp[i]=(!mask||mask[mb+perm90(k)])?0.f:masked;}
 }
 std::vector<at::Tensor> train_bias90(at::Tensor bias,c10::optional<at::Tensor> mask,int64_t A,bool perm) {
  const at::cuda::CUDAGuard guard(bias.device());const int L=bias.size(1);
@@ -1168,7 +1177,9 @@ std::vector<at::Tensor> train_keymask90(c10::optional<at::Tensor> mask,at::Tenso
  const at::cuda::CUDAGuard guard(ref.device());
  auto km=at::empty({A,L},ref.options().dtype(at::kFloat));auto kmp=perm?at::empty_like(km):km;
  const bool* mp=mask&&mask->defined()?CP<bool>(*mask):nullptr;
- train_bias90_k<float><<<(A*L+255)/256,256,0,S()>>>(nullptr,nullptr,mp,P<float>(km),perm?P<float>(kmp):nullptr,A,L,false);
+ const bool ps=mp&&A>1&&mask->numel()==A*L;   // [A, L]: a mask per sample (a [1, L] / [L] mask is shared)
+ TORCH_CHECK(!mp||ps||mask->numel()==L,"key mask: [L] or [A, L]");
+ train_bias90_k<float><<<(A*L+255)/256,256,0,S()>>>(nullptr,nullptr,mp,P<float>(km),perm?P<float>(kmp):nullptr,A,L,false,ps);
  C10_CUDA_KERNEL_LAUNCH_CHECK();return {km,kmp};
 }
 

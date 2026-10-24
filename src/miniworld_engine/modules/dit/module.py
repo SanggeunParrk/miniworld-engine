@@ -102,6 +102,9 @@ class DiTBlock(nn.Module):
             raise ValueError("extra_pair_bias is served by the Hopper BF16 inference path only")
         if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype):
             return _train.block(self, single, cond, pair, key_mask, compute_dtype)
+        # B > 1 independent proteins (each its own pair): the fused block with an attention bias of its own per sample
+        if _train.serves_batched(self, single, cond, pair, mask, compute_dtype):
+            return _train.block_batched(self, single, cond, pair, mask, compute_dtype)
         kw = {"compute_dtype": compute_dtype} if compute_dtype is not None else {}
         single = self.attention(single, cond, pair, mask, **kw)
         return self.transition(single, cond)
