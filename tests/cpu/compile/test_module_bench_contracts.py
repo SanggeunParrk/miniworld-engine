@@ -40,7 +40,7 @@ def test_auto_graph_regime_is_uniform_for_all_modules(runner, target, mode, expe
 @pytest.fixture
 def runner(monkeypatch):
     names = {"BenchConfig", "AccuracyFields", "BenchResult", "ImplementationSpec",
-             "is_inference_mode", "module_miniworld_spec", "triton_miniworld_spec",
+             "is_inference_mode", "module_miniworld_spec", "portable_miniworld_spec",
              "parse_implementation_spec", "as_bench_result", "tensor_metrics", "_paired_trimul_dropout", "_place"}
     tree = ast.parse(BENCH.read_text())
     body: list[ast.stmt] = [node for node in tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
