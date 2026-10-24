@@ -6,6 +6,54 @@ here. Format loosely follows
 
 The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
+## [Unreleased]
+
+### Added
+
+- `pair_embed_geom` (H100, sm_90a, forward only): the backbone pair embedding of La-Proteina's autoencoder encoder (sequence separation, CA-to-N/CA/C/CB distances,
+  five inter-residue orientation angles, chain product; 317 binned channels per pair, a bias-free Linear, masks) as a gather of up to ten rows of a bf16 table in shared memory.
+  Distances and angles are computed in fp32. Frozen encoder forward at B = 16, L <= 512: 35.4 -> 17.8 ms. Tests: `tests/gpu/sm90/test_pair_embed_geom_gpu.py`.
+- `pair_embed_geom` training path, `pair_embed_ca` and the LayerNorm fusion (H100, sm_90a): `pair_embed_geom_train` is the encoder's backbone pair embedding differentiable
+  in the Linear weight (the binned features are inputs, so the only gradient is the table's: `dT[row] = sum of d pair over the pairs that use the row`, the chain row weighted
+  by the chain product); `pair_embed_ca` is the autoencoder DECODER's pair embedding (sequence separation 127 + CA distance 30 bins, 157 rows) with the same forward and backward.
+  The forward leaves 16 bytes per pair (the packed bins with a live bit, the five angle bins, the chain product). The backward is `dT = F^T dpair` on tensor cores: the bf16 one-hot
+  A fragments of each feature group are built from the codes in registers (nothing is materialised), the dpair tiles come through a cp.async ring and `ldmatrix.trans`, fp32
+  accumulation, one CTA per (64 channels, pair slice), the 33 slice partials added in a fixed order: bitwise deterministic, no atomics. L = 512, B = 16: 40.0 -> 5.3 ms against the
+  earlier shared-memory kernel (kept, `MINIWORLD_PAIR_EMBED_BWD_IMPL=0`). The gradient is that of a bf16-autocast Linear (the weight is rounded to bf16 by an ordinary autograd op,
+  the table gradient is rounded to bf16 once). `ln_eps=`: the kernel returns LayerNorm(pair) over the 256 channels (no affine) -- the input of the attention-bias projection --
+  and never stores the pair; the backward recomputes it from the codes (`pair_embed_geom_ln_bwd`), which removes the separate LayerNorm kernels (fwd + bwd 8.8 ms of the 98 ms kernel
+  time of an autoencoder step at B = 16). Autoencoder training step (4 x H100, bucketed, cap 512, B = 16 per GPU): kernel time per step 98 -> 53 ms with these, the CUDA graph
+  and fused AdamW (0.129 -> 0.067 s/step). Decoder loss bit-identical to the dense builder, encoder loss within 2e-4 (the documented fp32-vs-autocast bin flips).
+  Tests: `tests/gpu/sm90/test_pair_embed_geom_train_gpu.py` (values, weight gradient against the dense builder and against the kernel's own bins, both backward kernels,
+  LayerNorm fusion, bitwise determinism).
+- `pair_embed_adaln` (H100, sm_90a): La-Proteina's pair builder as one kernel pair -- the three binned one-hots (sequence separation, CA
+  distances of x_t and of the self-conditioning input) as a row gather, the affine LayerNorm and the adaptive LayerNorm with the per-sample
+  `gamma` / `beta` (the diffusion-time conditioning is constant over (i, j)), bf16 pair out; the backward is bitwise deterministic (per-CTA
+  partials, fixed-order reduces; the batch is processed in chunks so the bf16 grad of the table sum stays under 512 MiB). 256 channels.
+  La-Proteina denoiser, B = 8, L <= 512: pair builder forward 63.6 -> 5.1 ms, training step 212 -> 128 ms. Tests:
+  `tests/gpu/sm90/test_pair_embed_adaln_gpu.py` (against the dense builder, all parameter gradients, determinism). The backward's table-gradient kernel keeps four
+  pairs' loads in flight.
+- H100 token DiT training over B independent proteins (`DiTBlock` with `single [1, B, L, d]`, `pair [B, L, L, dp]`, a key mask per protein), at
+  La-Proteina's widths: d_cond 128 / 256 / 384 / 768, pair channels 128 / 256, transition x2 or x4, 12 x 64 heads. The fused bf16 block with an
+  attention bias of its own per sample now takes these (`token_dit_train.serves_batched` / `block_batched`, `serves_psb` widened; the row
+  kernels build per `(d_cond, n, d_pair)` with `-DTD_DC/-DTD_N/-DTD_DP`, the per-sample key mask in `train_keymask90`). Trunk of 14 blocks,
+  B = 8, L = 384, bf16 stream: forward 56 -> 13 ms, forward + backward 113 -> 32 ms against the PyTorch block (3.5x), peak memory 18 -> 8 GiB.
+  Tests: `tests/gpu/sm90/test_token_dit_batched_pairs_gpu.py`, the head-layout cases of `test_augmented_attention_psb_gpu.py`.
+- Routing and the prebuilt bundle for the three La-Proteina items above: the pair builders are H100-only (`refusal` / `refusal_ca` say why a call is not served: not CUDA, not capability (9, 0),
+  widths; the caller runs its PyTorch builder, no Triton family exists for them), and `DiTBlock` takes the batched-proteins block only on sm_90 under the existing `token_dit_train` setting; every other card
+  and every call the kernels refuse keeps the module path. `build/bundle_coverage.py` gains `la_proteina_pair` (every pair-builder extension and backward variant) and `la_proteina_dit` (the block at token 768,
+  12 x 64 heads, pair 256, d_cond 256 / 128, x4, inference and training, L = 128 / 256 / 384 / 512, B = 5 at 384 for the empty-uniform build) so a wheel carries them instead of JIT-compiling on a first call.
+
+### Fixed
+
+- Documented hazard (no code change): the H100 token DiT training path rebuilds its weight packs only when a parameter's `_version` changes (`token_dit_train._pack`), and a *fused*
+  optimizer (`torch.optim.Adam(W)(fused=True)`) updates parameters in place without bumping it -- eager steps then run on the previous step's weights (a fused AdamW
+  autoencoder run learned visibly slower, and an eager step disagreed with a CUDA-graph replay of the same state). Call `torch.autograd.graph.increment_version(p)` for every
+  parameter after a fused step (La-Proteina's `graph_step` does); inside a CUDA-graph capture the packs are rebuilt by the graph and need nothing.
+- The sm_90 `attn_dq` kernel multiplied dQ by 1/sqrt(48) whatever the head width (`fwd_defs` never passed `RSQDV`): a 12 x 64 dQ was 15 % too large,
+  a 24 x 32 one 18 % too small. Reached by the per-sample-bias backward and by the shared-bias backward when A is not a multiple of 3.
+  `augmented_attention.cuda.dq_defs` carries the scale; the 16 x 48 build, and its key, are unchanged.
+
 ## [2.3.10] - 2026-10-24
 
 ### Added
@@ -52,6 +100,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - The OuterProductMean Triton backward reduces `db_out` straight from the bf16 gradient (`sum(dtype=float32)`, no fp32 copy of `dz`).
 - Fixed: the Triton launchers of OuterProductMean / MSAPairWeightedAveraging passed the same empty tensor for every absent input, which
   `torch.compile` refuses in an `autograd.Function.apply` (a call with no mask and no residual).
+
 
 ### Changed
 
