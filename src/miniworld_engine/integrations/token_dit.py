@@ -104,7 +104,7 @@ def require_hopper_native(module, single, cond, pair, mask, compute_dtype=None) 
                 f"H100 token DiT requires {detail}; no Triton fallback"
             )
 
-    (not require(settings.current().force_triton_kernels), "the CUDA backend")
+    require(not settings.current().force_triton_kernels, "the CUDA backend")
     require(
         single.dtype in (torch.bfloat16, torch.float32)
         and compute_dtype in (None, single.dtype),

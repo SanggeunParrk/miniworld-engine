@@ -465,7 +465,7 @@ def _require_hopper_training(module, single, cond, pair, mask):
                 f"H100 local atom DiT training requires {detail}; no composed fallback"
             )
 
-    (not require(settings.current().force_triton_kernels), "the CUDA engine backend")
+    require(not settings.current().force_triton_kernels, "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )
@@ -564,7 +564,7 @@ def _require_hopper_inference(module, single, cond, pair, mask):
                 f"H100 local atom DiT inference requires {detail}; no composed fallback"
             )
 
-    (not require(settings.current().force_triton_kernels), "the CUDA engine backend")
+    require(not settings.current().force_triton_kernels, "the CUDA engine backend")
     require(
         module.cross_attention and not a.use_qk_norm, "cross-attention without QK norm"
     )
