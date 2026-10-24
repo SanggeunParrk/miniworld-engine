@@ -7,6 +7,7 @@ class ImplementationType(str, Enum):
     PYTORCH = "pytorch"
     MINIWORLD_ENGINE = "miniworld_engine"
     CUEQUIVARIANCE = "cuequivariance"
+    ANTHROPIC = "anthropic"
     # Source compatibility for old consumers; iteration uses the canonical member.
     MINIWORLD_KERNELS = MINIWORLD_ENGINE
 
