@@ -276,6 +276,40 @@ def read_records(paths: list[Path], require_file: bool = True) -> dict[str, dict
     return entries
 
 
+def stale_keys(entries: dict[str, dict]) -> dict[str, list[str]]:
+    """key -> the package files that changed since the artifact was built, for the entries this checkout can no longer key.
+
+    An artifact's key is a hash of the normalized sources it reached (``material["nodes"]``, labels ``pkg:<path>`` for this
+    package's own files). When any of those files differs now, the loader of THIS tree computes another key and never asks
+    for the recorded one: the artifact is superseded (a recording that ran against an older tree, or ``--keep``). Files
+    outside the package (``file:`` labels) cannot be checked here and never make an entry stale."""
+    from miniworld_engine.kernels import _codegraph as cg
+
+    now: dict[str, str | None] = {}
+    stale: dict[str, list[str]] = {}
+    for key, e in entries.items():
+        changed = []
+        for label, digest in (e.get("material") or {}).get("nodes") or []:
+            if not label.startswith("pkg:"):
+                continue
+            if label not in now:
+                path = cg.PKG_ROOT / label[4:]
+                now[label] = cg.parse_file(str(path)).digest if path.is_file() else None
+            if now[label] != digest:
+                changed.append(label[4:] + ("" if now[label] else " (missing)"))
+        if changed:
+            stale[key] = changed
+    return stale
+
+
+def drop_stale(entries: dict[str, dict]) -> dict[str, dict]:
+    """``entries`` without the superseded ones (:func:`stale_keys`); each dropped artifact is logged."""
+    stale = stale_keys(entries)
+    for key, changed in sorted(stale.items(), key=lambda kv: entries[kv[0]]["name"]):
+        log(f"  stale, not bundled: {entries[key]['name']} {key[:12]} (changed: {', '.join(changed[:2])})")
+    return {k: e for k, e in entries.items() if k not in stale}
+
+
 def _sha256(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as fh:
@@ -458,9 +492,11 @@ def _replay_one(task: dict) -> dict:
                 "detail": f"{exc}\n{traceback.format_exc()}"}
 
 
-def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, only: str = "") -> Path:
-    """Rebuild every recorded recipe in this environment, ``jobs`` at a time; returns the new records file."""
-    recipes = {k: e for k, e in read_records(records, require_file=False).items() if e.get("recipe")}
+def replay(records: list[Path], out: Path, root: Path, arch: str, jobs: int, only: str = "", *, stale: bool = True) -> Path:
+    """Rebuild every recorded recipe in this environment, ``jobs`` at a time; returns the new records file.
+    ``stale=False`` drops the recordings this checkout can no longer key (:func:`stale_keys`) first."""
+    recorded = read_records(records, require_file=False)
+    recipes = {k: e for k, e in (recorded if stale else drop_stale(recorded)).items() if e.get("recipe")}
     if only:
         recipes = {k: e for k, e in recipes.items() if only in e["kind"] or only in e["name"]}
     record = out / "records" / f"replay-{_abi_tag(sys.implementation.cache_tag)}.jsonl"
@@ -525,7 +561,8 @@ def bundle_kernels(args) -> int:
     timings: dict[str, float] = {}
     if args.replay:
         t0 = time.monotonic()
-        rec = replay([Path(p) for p in args.replay], out, root, arch, args.jobs, args.only)
+        rec = replay([Path(p) for p in args.replay], out, root, arch, args.jobs, args.only,
+                     stale=not getattr(args, "drop_stale", False))
         timings["replay"] = time.monotonic() - t0
         records = [rec]
         keep = args.keep  # artifacts of this ABI (and cubins) the replay did not produce are pruned
@@ -554,6 +591,8 @@ def bundle_kernels(args) -> int:
         records = sorted((out / "records").glob("*.jsonl"))
         keep = args.keep
     entries = read_records(records)
+    if getattr(args, "drop_stale", False):
+        entries = drop_stale(entries)
     if not entries:
         log("no artifacts were recorded")
         return 1

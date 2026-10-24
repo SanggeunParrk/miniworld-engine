@@ -2025,6 +2025,9 @@ def build_parser() -> argparse.ArgumentParser:
     bnd.add_argument("--collect-only", action="store_true",
                      help="skip the drivers; package what <out>/records already lists")
     bnd.add_argument("--keep", action="store_true", help="keep artifacts this run did not reach")
+    bnd.add_argument("--drop-stale", action="store_true",
+                     help="leave out the recorded artifacts whose key this checkout can no longer compute (a source they reached "
+                          "changed since they were built); with --keep and an older bundle they are otherwise packed, never loaded")
     bnd.add_argument("--replay", nargs="+", default=[],
                      help="rebuild the artifacts of these records .jsonl in this environment (another Python / torch / "
                           "CUDA), CPU only, instead of running coverage drivers")

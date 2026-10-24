@@ -411,3 +411,22 @@ def test_a_replay_links_with_the_flags_the_key_was_computed_from() -> None:
     assert entry["recipe"]["kwargs"]["extra_ldflags"] is polluted  # the record itself is left alone
     cubin = {"recipe": {"fn": "cubin", "name": "c"}, "material": {}}
     assert kernel_bundle.keyed_recipe(cubin) is cubin["recipe"]
+
+
+def test_stale_keys_are_the_artifacts_this_checkout_cannot_key() -> None:
+    """``dev bundle-kernels --drop-stale``: an artifact built from a source that has since changed (or vanished) is superseded."""
+    from miniworld_engine.build import kernel_bundle as kb
+
+    rel = "kernels/_nvcc.py"
+    current = cg.parse_file(str(cg.PKG_ROOT / rel)).digest
+    entries = {
+        "fresh": {"name": "k/fresh", "material": {"nodes": [[f"pkg:{rel}", current], ["file:cutlass.h", "9" * 64]]}},
+        "changed": {"name": "k/changed", "material": {"nodes": [[f"pkg:{rel}", "0" * 64]]}},
+        "gone": {"name": "k/gone", "material": {"nodes": [["pkg:kernels/no_such_file.cu", "1" * 64]]}},
+        "bare": {"name": "k/bare", "material": {"nodes": []}},
+        "nomaterial": {"name": "k/nomaterial"},
+    }
+    stale = kb.stale_keys(entries)
+    assert set(stale) == {"changed", "gone"}
+    assert "(missing)" in stale["gone"][0]
+    assert set(kb.drop_stale(entries)) == {"fresh", "bare", "nomaterial"}
