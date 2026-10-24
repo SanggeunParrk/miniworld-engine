@@ -94,3 +94,30 @@ def test_a_cpu_call_under_the_option_refuses_rather_than_run():
     opm = OuterProductMean(64, 128, 32, implementation=ImplementationType.ANTHROPIC)
     with pytest.raises(msa.PayloadUnavailable), torch.inference_mode():
         opm(BF16, torch.ones(1, 8, 16, dtype=torch.bool))
+
+
+def test_the_epilogue_refuses_the_convention_that_divides_the_bias(monkeypatch):
+    """ESMFold2's ``normalize_before_proj=False`` divides the learned bias by the pair count too; the epilogue adds it undivided."""
+    monkeypatch.setenv(msa.ENV, "/nonexistent/opt_core")
+    reason = msa.opm_refusal(BF16, 32, 128, grad=False, interchain=False, normalize_before_proj=False)
+    assert reason is not None
+    assert "normalize_before_proj=False" in reason
+    # the default (AF3's convention) is not refused for the convention
+    reason = msa.opm_refusal(BF16, 32, 128, grad=False, interchain=False)
+    assert reason is None or "normalize_before_proj" not in reason
+    with pytest.raises(msa.PayloadUnavailable, match="normalize_before_proj=False"):
+        msa.require_opm(BF16, 32, 128, grad=False, interchain=False, normalize_before_proj=False)
+
+
+def test_the_engines_own_h100_paths_do_not_answer_to_the_anthropic_option():
+    """``implementation="anthropic"`` runs the release's path, never the engine's own OPM / pair weighted averaging first."""
+    from miniworld_engine.integrations import opm_train, pwa_train
+
+    assert not opm_train.wanted(ImplementationType.ANTHROPIC)
+    assert not pwa_train.wanted(ImplementationType.ANTHROPIC)
+
+
+def test_a_module_whose_bias_convention_the_epilogue_cannot_serve_refuses_under_the_option():
+    opm = OuterProductMean(64, 128, 32, implementation=ImplementationType.ANTHROPIC, normalize_before_proj=False)
+    with pytest.raises(msa.PayloadUnavailable, match="normalize_before_proj=False"), torch.inference_mode():
+        opm(BF16, torch.ones(1, 8, 16, dtype=torch.bool))

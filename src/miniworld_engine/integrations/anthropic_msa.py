@@ -145,15 +145,30 @@ def _common_refusal(x: torch.Tensor, *, grad: bool) -> str | None:
 
 
 def opm_refusal(
-    msa: torch.Tensor, d_hidden: int, d_pair: int, *, grad: bool, interchain: bool
+    msa: torch.Tensor,
+    d_hidden: int,
+    d_pair: int,
+    *,
+    grad: bool,
+    interchain: bool,
+    normalize_before_proj: bool = True,
 ) -> str | None:
-    """None if this path can run this OuterProductMean forward, else why it cannot. Never raises."""
+    """None if this path can run this OuterProductMean forward, else why it cannot. Never raises.
+
+    ``normalize_before_proj`` is the module's convention: the epilogue divides by the pair count BEFORE the output
+    projection and adds the bias undivided; ``normalize_before_proj=False`` (ESMFold2) divides the bias too, which
+    this epilogue does not do, so that module is refused (not served with a wrong bias)."""
     try:
         # what the caller asked for comes first: a shape or a flag this path cannot serve is the same answer on
         # any machine, and saying so beats reporting whichever machine the caller happened to be on.
         if interchain:
             return (
                 "mask_interchain is applied after the projection and is not fused here"
+            )
+        if not normalize_before_proj:
+            return (
+                "the epilogue divides by the pair count before the output projection and adds the bias undivided; "
+                "normalize_before_proj=False divides the bias too"
             )
         if (d_hidden, d_pair) != (C_HIDDEN, C_Z):
             return f"the epilogue is built for (d_hidden={C_HIDDEN}, d_pair={C_Z}), got ({d_hidden}, {d_pair})"

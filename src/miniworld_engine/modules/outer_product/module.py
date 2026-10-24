@@ -253,6 +253,7 @@ class OuterProductMean(nn.Module):
             _fused = {
                 "grad": torch.is_grad_enabled(),
                 "interchain": bool(self.mask_interchain and token_asym_id is not None),
+                "normalize_before_proj": self.normalize_before_proj,
             }
             _dims = (self.to_left.weight.shape[0], self.to_out.weight.shape[0])
             if self.implementation == ImplementationType.ANTHROPIC:

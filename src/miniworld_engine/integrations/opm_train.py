@@ -81,11 +81,12 @@ def wanted(implementation) -> bool:
     from miniworld_engine import settings
     from miniworld_engine.modules.exceptions import ImplementationType
 
+    # ``ANTHROPIC`` is not asked here: an explicit ``implementation="anthropic"`` is the Anthropic release's path
+    # (integrations.anthropic_msa), not this engine's own H100 path.
     return (
         _enabled()
         and (not settings.current().force_triton_kernels)
-        and implementation
-        in (ImplementationType.MINIWORLD, ImplementationType.ANTHROPIC)
+        and implementation == ImplementationType.MINIWORLD
     )
 
 
