@@ -51,8 +51,8 @@ def _backward_pairs(names, variants=("base",), extra=None):
         keys = _OPTION_KEYS.get(variant, ())
         fixed = {k: v for k, v in options.items() if k not in keys}
 
-        def call(fn, m, w, _keys=keys, _fixed_opts=fixed):
-            return fn(m, mask, *w[:6], residual=w[6], **dict(zip(_keys, w[7:], strict=True)), **_fixed_opts)
+        def call(fn, m, w, _mask=mask, _keys=keys, _fixed_opts=fixed):
+            return fn(m, _mask, *w[:6], residual=w[6], **dict(zip(_keys, w[7:], strict=True)), **_fixed_opts)
 
         with _no_tf32():
             got = _grads(lambda m, *w: call(triton_outer_product_mean, m, w), [msa, *weights, residual, *(options[k] for k in keys)],

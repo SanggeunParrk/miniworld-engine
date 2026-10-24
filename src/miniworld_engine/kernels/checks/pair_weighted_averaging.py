@@ -3,7 +3,11 @@ the driver's inputs (same keep-mask on both sides). Each backward kernel is scor
 from __future__ import annotations
 
 from miniworld_engine.kernels.checks import _f, _fixed, _grads, _no_tf32
-from miniworld_engine.kernels.drivers.pair_weighted_averaging import _P_DROP, _VALUE_DIMS, _inputs
+from miniworld_engine.kernels.drivers.pair_weighted_averaging import (
+    _P_DROP,
+    _VALUE_DIMS,
+    _inputs,
+)
 
 _NAMES = ("dmsa", "dpair", "dln_msa_weight", "dln_msa_bias", "dw_value", "dw_gate", "dln_pair_weight", "dw_bias",
           "dw_out")
@@ -40,9 +44,10 @@ def _backward_pairs(*names):
     for c in _VALUE_DIMS:
         msa, pair, mask, weights, keep = _inputs(c=c)
         with _no_tf32():
-            got = _grads(lambda m, z, *w: triton_pair_weighted_averaging(m, z, mask, *w, keep=keep, p_drop=_P_DROP),
+            got = _grads(lambda m, z, *w, _mask=mask, _keep=keep: triton_pair_weighted_averaging(m, z, _mask, *w, keep=_keep, p_drop=_P_DROP),
                          [msa, pair, *weights],
-                         lambda m, z, *w: pair_weighted_averaging_reference(m, z, mask, *w, keep=keep, p_drop=_P_DROP), _NAMES)
+                         lambda m, z, *w, _mask=mask, _keep=keep: pair_weighted_averaging_reference(m, z, _mask, *w, keep=_keep,
+                                                                                                    p_drop=_P_DROP), _NAMES)
         pairs.update({(n if c == _VALUE_DIMS[0] else f"{n}_c{c}"): got[n] for n in names})
     return pairs
 

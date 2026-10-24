@@ -60,7 +60,7 @@ def test_tri_variant_contract():
     assert "CUDA" in str(tri_refusal(SimpleNamespace(is_cuda=False), w, 4, 128))
 
 
-@pytest.mark.parametrize("options", [dict(projection_bias=True), dict(groups=8, d_hidden=64), dict(groups=4, d_hidden=32, projection_bias=True)])
+@pytest.mark.parametrize("options", [{"projection_bias": True}, {"groups": 8, "d_hidden": 64}, {"groups": 4, "d_hidden": 32, "projection_bias": True}])
 @pytest.mark.parametrize("normalize_before_proj", [True, False])
 def test_the_kernel_reference_is_the_modules_statements(options, normalize_before_proj):
     """``outer_product_mean_reference`` (explicit weights) equals ``OuterProductMean._variant_reference`` (fp64, CPU)."""

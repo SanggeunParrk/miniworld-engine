@@ -95,11 +95,11 @@ def test_outer_product_mean(mask_kind, normalize_before_proj, d_pair):
 def test_outer_product_mean_variants(monkeypatch, mask_kind, variant):
     """RoseTTAFold3's projection biases and Chai-1's 8 groups (+ product LayerNorm) through the Triton kernels, never the PyTorch
     statements (``_variant_reference`` is made to raise): output and every parameter / input gradient, held to the bf16 statements."""
-    options = {"rf3_before": dict(d_pair=128, d_hidden=32, projection_bias=True),
-               "rf3_after": dict(d_pair=128, d_hidden=32, projection_bias=True, normalize_before_proj=False),
-               "chai1": dict(d_pair=128, d_hidden=64, groups=8),
-               "chai1_wide_pair": dict(d_pair=256, d_hidden=64, groups=8),
-               "chai1_k4": dict(d_pair=128, d_hidden=32, groups=8)}[variant]
+    options = {"rf3_before": {"d_pair": 128, "d_hidden": 32, "projection_bias": True},
+               "rf3_after": {"d_pair": 128, "d_hidden": 32, "projection_bias": True, "normalize_before_proj": False},
+               "chai1": {"d_pair": 128, "d_hidden": 64, "groups": 8},
+               "chai1_wide_pair": {"d_pair": 256, "d_hidden": 64, "groups": 8},
+               "chai1_k4": {"d_pair": 128, "d_hidden": 32, "groups": 8}}[variant]
     torch.manual_seed(0)
     b, s, n = 2, 200, 136
     m = _randomise(OuterProductMean(64, implementation=I.MINIWORLD, **options).to(DEV))
@@ -120,7 +120,7 @@ def test_outer_product_mean_variants(monkeypatch, mask_kind, variant):
 
 @pytest.mark.parametrize("mask_kind", ["none", "ragged", "all_masked"])
 @pytest.mark.parametrize("d_pair", [128, 125])
-@pytest.mark.parametrize("n_head,d_hidden", [(8, 32), (8, 8), (4, 8), (4, 12)])
+@pytest.mark.parametrize(("n_head", "d_hidden"), [(8, 32), (8, 8), (4, 8), (4, 12)])
 def test_pair_weighted_averaging(mask_kind, d_pair, n_head, d_hidden):
     """d_hidden 8 is AF3's msa_value_dim (OpenFold3, Protenix, OpenDDE): the head is a 16-column tile with 8 columns masked."""
     if (n_head, d_hidden) != (8, 32) and d_pair != 128:
@@ -134,7 +134,7 @@ def test_pair_weighted_averaging(mask_kind, d_pair, n_head, d_hidden):
     _compare(m, [msa, pair, mask], _twin(m))
 
 
-@pytest.mark.parametrize("n_head,d_hidden", [(8, 8), (4, 8)])
+@pytest.mark.parametrize(("n_head", "d_hidden"), [(8, 8), (4, 8)])
 def test_narrow_head_is_the_zero_padded_head(n_head, d_hidden):
     """A d_hidden-8 head equals the same head padded with zero projection rows/columns to 16 (the padded columns contribute nothing),
     forward and every gradient, to bf16 round-off of the two cuBLAS contractions."""
@@ -226,7 +226,7 @@ def test_one_compiled_graph_forward_and_backward():
         assert rel(a, b) < 1e-2
 
 
-@pytest.mark.parametrize("options", [dict(d_pair=128, d_hidden=32, projection_bias=True), dict(d_pair=128, d_hidden=64, groups=8)])
+@pytest.mark.parametrize("options", [{"d_pair": 128, "d_hidden": 32, "projection_bias": True}, {"d_pair": 128, "d_hidden": 64, "groups": 8}])
 def test_opm_variants_in_one_compiled_graph(options):
     """The variants' launchers are opaque ops with fakes: forward + backward compile as one graph and agree with eager."""
     from torch._dynamo.testing import CompileCounterWithBackend

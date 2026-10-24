@@ -55,7 +55,7 @@ def _recorded(kind, *calls):
     return results, [w for w in caught if issubclass(w.category, kind)]
 
 
-OPM_VARIANTS = [dict(d_pair=128, d_hidden=32, projection_bias=True), dict(d_pair=128, d_hidden=64, groups=8)]
+OPM_VARIANTS = [{"d_pair": 128, "d_hidden": 32, "projection_bias": True}, {"d_pair": 128, "d_hidden": 64, "groups": 8}]
 
 
 def _opm(options, implementation):
@@ -71,7 +71,8 @@ def test_an_opm_variant_the_kernels_refuse_warns_once_and_runs_pytorch(monkeypat
     ref.load_state_dict(mod.state_dict())
     x = torch.randn(1, 8, 16, 64)                                 # fp32: the Triton path is bf16
     (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))
-    assert len(caught) == 1 and "bf16" in str(caught[0].message)
+    assert len(caught) == 1
+    assert "bf16" in str(caught[0].message)
     torch.testing.assert_close(y, ref(x))
 
 
@@ -84,7 +85,7 @@ def test_an_opm_variant_on_a_cpu_tensor_is_silent(monkeypatch, manifests):
         mod(torch.randn(1, 8, 16, 64))
 
 
-TRI_VARIANTS = [dict(gate_bias=True, out_bias=True), dict(dual_output=True), dict(untransposed_output=True, starting=False, transposed_bias=False)]
+TRI_VARIANTS = [{"gate_bias": True, "out_bias": True}, {"dual_output": True}, {"untransposed_output": True, "starting": False, "transposed_bias": False}]
 
 
 @pytest.mark.parametrize("options", TRI_VARIANTS)
@@ -96,7 +97,8 @@ def test_a_triangle_attention_variant_in_fp32_warns_once_and_runs_pytorch(monkey
     ref.load_state_dict(mod.state_dict())
     x = torch.randn(1, 12, 12, 64)
     (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))
-    assert len(caught) == 1 and "bf16" in str(caught[0].message)
+    assert len(caught) == 1
+    assert "bf16" in str(caught[0].message)
     torch.testing.assert_close(y, ref(x))
 
 
