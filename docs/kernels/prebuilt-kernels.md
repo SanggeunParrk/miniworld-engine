@@ -118,6 +118,10 @@ build is the running torch's):
   commit compiles only the kernels whose code graph changed;
 * artifacts of this Python ABI (and every cubin) that the run no longer reaches are dropped (`--keep` keeps them);
   other ABIs' extensions are kept;
+* `--drop-stale` leaves out the recorded artifacts whose key this checkout can no longer compute (a source in their code graph changed
+  since they were built). Pass the previous release's records next to this release's records and `--drop-stale` to carry over, by recipe,
+  the artifacts that are still valid and that this release's drivers did not happen to reach again (2.3.10: SPLITK / PER_SAMPLE variants a
+  driver's autotuned choice skipped), without packing the superseded ones;
 * artifacts that compile NVIDIA MathDx / cuBLASDx are never bundled (not redistributed; they JIT where used).
 
 `<out>/summary.json` has the counts, sizes and timings; `<out>/logs/engine_cases.jsonl` the result of every coverage
