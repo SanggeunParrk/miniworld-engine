@@ -19,7 +19,9 @@ Dropout: the module's Dropout(broadcast_dim=1) keeps one mask per (token, channe
 
 Every tile, warp count, stage count and persistent program count is an autotune axis (``autotune/configs/grid/<op>.csv``);
 the constants in the kernels are the model dimensions (constexpr). Offsets into the head-major [NH, L, S C] buffers and the
-[S L, NH C] buffers are 64-bit. d_msa and d_hidden must be powers of two >= 16 (spanned by one tile); d_pair is padded to
+[S L, NH C] buffers are 64-bit. d_msa must be a power of two >= 16 (spanned by one tile); d_hidden may be any width up to 128 (the AF3 family's 8 included: the head
+dimension is a tile of next_pow2(max(16, d_hidden)) columns, the columns past d_hidden are masked to zero on every load and store, so they
+contribute nothing and are never written) as long as n_head * d_hidden is a multiple of 16; d_pair is padded to
 the next power of two inside the pair kernels, so any d_pair >= 16 is served.
 """
 from __future__ import annotations
@@ -116,13 +118,15 @@ def _pwa_layernorm_gemm_kernel(M, LNW, LNB, WV, V, S, L, eps, shape_key,
 @triton.autotune(configs=configs_for("pair_weighted_averaging_gate_gemm_triton"), key=["shape_key", "HAS_KEEP"])
 @triton.jit
 def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, shape_key,
-                          D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, HAS_KEEP: tl.constexpr, BS: tl.constexpr):
+                          D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, HAS_KEEP: tl.constexpr,
+                          BS: tl.constexpr):
     # program = (token i, BS MSA rows): out = msa + keep / (1 - p) * sum_h (sigmoid(y Wg_h^T) * o_h) Wo_h^T (runtime head loop)
     i = tl.program_id(0).to(tl.int64)
     s = tl.program_id(1).to(tl.int64) * BS + tl.arange(0, BS)
     sm = s < S
     k = tl.arange(0, D)
-    cc = tl.arange(0, C)
+    cc = tl.arange(0, CP)                                                                     # CP >= C: a head narrower than one
+    cm = cc < C                                                                               # tl.dot tile is zero-padded
     rowp = (s * L + i)[:, None] * D + k[None, :]
     x = tl.load(M + rowp, mask=sm[:, None], other=0.0).to(tl.float32)
     mu = tl.sum(x, axis=1) / D
@@ -131,11 +135,11 @@ def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, s
     y = (xc * rs[:, None] * tl.load(LNW + k)[None, :] + tl.load(LNB + k)[None, :]).to(tl.bfloat16)
     acc = tl.zeros((BS, D), tl.float32)
     for h in range(NH):
-        wgt = tl.load(WG + (h * C + cc)[None, :] * D + k[:, None])                           # [D, C]
+        wgt = tl.load(WG + (h * C + cc)[None, :] * D + k[:, None], mask=cm[None, :], other=0.0)   # [D, CP]
         g = tl.sigmoid(tl.dot(y, wgt))
-        o = tl.load(O + (h * L + i) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None], other=0.0).to(tl.float32)
-        u = (g * o).to(tl.bfloat16)
-        wot = tl.load(WO + k[None, :] * (NH * C) + h * C + cc[:, None])                      # [C, D] = Wo_h^T
+        o = tl.load(O + (h * L + i) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        u = (g * o).to(tl.bfloat16)                                                           # 0 on the padded columns
+        wot = tl.load(WO + k[None, :] * (NH * C) + h * C + cc[:, None], mask=cm[:, None], other=0.0)   # [CP, D] = Wo_h^T
         acc += tl.dot(u, wot)
     if HAS_KEEP:
         acc = acc * tl.load(KEEP + i * D + k).to(tl.float32)[None, :] * scale
@@ -147,20 +151,21 @@ def _pwa_gate_gemm_kernel(M, O, LNW, LNB, WG, WO, KEEP, OUT, S, L, eps, scale, s
                  reset_to_zero=["DWO", "DWG"])
 @triton.jit
 def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DWG, S, L, eps, scale, shape_key,
-                              D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, HAS_KEEP: tl.constexpr, BS: tl.constexpr,
-                              PPS: tl.constexpr):
+                              D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, HAS_KEEP: tl.constexpr,
+                              BS: tl.constexpr, PPS: tl.constexpr):
     # persistent over (token, BS rows) tiles, one head per grid column; dWo_h / dWg_h stay in registers until the end
     pid = tl.program_id(0)
     h = tl.program_id(1)
     nprog = tl.num_programs(0)
     k = tl.arange(0, D)
-    cc = tl.arange(0, C)
+    cc = tl.arange(0, CP)
+    cm = cc < C
     gam = tl.load(LNW + k)
     bet = tl.load(LNB + k)
-    wgt = tl.load(WG + (h * C + cc)[None, :] * D + k[:, None])                               # [D, C]
-    woh = tl.load(WO + k[:, None] * (NH * C) + h * C + cc[None, :])                          # [D, C] = Wo[:, h]
-    dwo = tl.zeros((D, C), tl.float32)
-    dwg = tl.zeros((C, D), tl.float32)
+    wgt = tl.load(WG + (h * C + cc)[None, :] * D + k[:, None], mask=cm[None, :], other=0.0)  # [D, CP]
+    woh = tl.load(WO + k[:, None] * (NH * C) + h * C + cc[None, :], mask=cm[None, :], other=0.0)   # [D, CP] = Wo[:, h]
+    dwo = tl.zeros((D, CP), tl.float32)
+    dwg = tl.zeros((CP, D), tl.float32)
     ntiles = L * tl.cdiv(S, BS)
     for t in range(pid, ntiles, nprog):
         i = (t % L).to(tl.int64)
@@ -178,30 +183,31 @@ def _pwa_bwd_gate_gemm_kernel(M, DR, O, LNW, LNB, WG, WO, KEEP, DO, DGP, DWO, DW
         drb = dr.to(tl.bfloat16)
         g = tl.sigmoid(tl.dot(y, wgt))                                                        # [BS, C]
         hp = (h.to(tl.int64) * L + i) * (S * C) + s[:, None] * C + cc[None, :]
-        o = tl.load(O + hp, mask=sm[:, None], other=0.0).to(tl.float32)
-        du = tl.dot(drb, woh)                                                                 # [BS, C]
-        tl.store(DO + hp, (du * g).to(tl.bfloat16), mask=sm[:, None])
+        o = tl.load(O + hp, mask=sm[:, None] & cm[None, :], other=0.0).to(tl.float32)
+        du = tl.dot(drb, woh)                                                                 # [BS, CP]; 0 on the padded columns
+        tl.store(DO + hp, (du * g).to(tl.bfloat16), mask=sm[:, None] & cm[None, :])
         gp = (du * o * g * (1.0 - g)).to(tl.bfloat16)
-        tl.store(DGP + (s * L + i)[:, None] * (NH * C) + h * C + cc[None, :], gp, mask=sm[:, None])
+        tl.store(DGP + (s * L + i)[:, None] * (NH * C) + h * C + cc[None, :], gp, mask=sm[:, None] & cm[None, :])
         dwo += tl.dot(tl.trans(drb), (g * o).to(tl.bfloat16))
         dwg += tl.dot(tl.trans(gp), y)
-    tl.atomic_add(DWO + k[:, None] * (NH * C) + h * C + cc[None, :], dwo)
-    tl.atomic_add(DWG + (h * C + cc)[:, None] * D + k[None, :], dwg)
+    tl.atomic_add(DWO + k[:, None] * (NH * C) + h * C + cc[None, :], dwo, mask=cm[None, :])
+    tl.atomic_add(DWG + (h * C + cc)[:, None] * D + k[None, :], dwg, mask=cm[:, None])
 
 
 @triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dw_triton"), key=["shape_key"], reset_to_zero=["DWV"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key,
-                                      D: tl.constexpr, C: tl.constexpr, BS: tl.constexpr, PPS: tl.constexpr):
+                                      D: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, BS: tl.constexpr, PPS: tl.constexpr):
     # program = (tile range, head): dWv[h C + c, :] += sum_(s, j) dv[h][j][s C + c] y[s, j, :]
     pid = tl.program_id(0)
     h = tl.program_id(1)
     nprog = tl.num_programs(0)
     k = tl.arange(0, D)
-    cc = tl.arange(0, C)
+    cc = tl.arange(0, CP)
+    cm = cc < C
     gam = tl.load(LNW + k)
     bet = tl.load(LNB + k)
-    acc = tl.zeros((C, D), tl.float32)
+    acc = tl.zeros((CP, D), tl.float32)
     ntiles = L * tl.cdiv(S, BS)
     for t in range(pid, ntiles, nprog):
         j = (t % L).to(tl.int64)
@@ -212,22 +218,24 @@ def _pwa_bwd_layernorm_gemm_dw_kernel(M, DV, LNW, LNB, DWV, S, L, eps, shape_key
         xc = x - mu[:, None]
         rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / D + eps)
         y = (xc * rs[:, None] * gam[None, :] + bet[None, :]).to(tl.bfloat16)
-        dv = tl.load(DV + (h.to(tl.int64) * L + j) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None], other=0.0)
+        dv = tl.load(DV + (h.to(tl.int64) * L + j) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None] & cm[None, :], other=0.0)
         acc += tl.dot(tl.trans(dv), y)
-    tl.atomic_add(DWV + (h * C + cc)[:, None] * D + k[None, :], acc)
+    tl.atomic_add(DWV + (h * C + cc)[:, None] * D + k[None, :], acc, mask=cm[:, None])
 
 
 @triton.autotune(configs=configs_for("pair_weighted_averaging_bwd_layernorm_gemm_dx_dlnw_triton"), key=["shape_key"],
                  reset_to_zero=["DG", "DB"])
 @triton.jit
 def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(M, DR, DGP, DV, LNW, WG, WV, DM, DG, DB, S, L, eps, shape_key,
-                                           D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, BS: tl.constexpr, PPS: tl.constexpr):
+                                           D: tl.constexpr, NH: tl.constexpr, C: tl.constexpr, CP: tl.constexpr, BS: tl.constexpr,
+                                           PPS: tl.constexpr):
     # persistent over (token j, BS MSA rows) tiles: dy = sum_h (dgp_h Wg_h + dv_h Wv_h); LayerNorm backward + dres -> dmsa.
     # One head's [C, D] weight slices per step (not the whole [NH C, D] weights resident): small shared memory on any GPU.
     pid = tl.program_id(0)
     nprog = tl.num_programs(0)
     k = tl.arange(0, D)
-    cc = tl.arange(0, C)
+    cc = tl.arange(0, CP)
+    cm = cc < C
     gam = tl.load(LNW + k)
     dgs = tl.zeros((D,), tl.float32)
     dbs = tl.zeros((D,), tl.float32)
@@ -244,10 +252,10 @@ def _pwa_bwd_layernorm_gemm_dx_dlnw_kernel(M, DR, DGP, DV, LNW, WG, WV, DM, DG, 
         xh = xc * rs[:, None]
         dy = tl.zeros((BS, D), tl.float32)
         for h in range(NH):
-            gp = tl.load(DGP + (s * L + j)[:, None] * (NH * C) + h * C + cc[None, :], mask=sm[:, None], other=0.0)
-            dv = tl.load(DV + (h * L + j) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None], other=0.0)
-            wgh = tl.load(WG + (h * C + cc)[:, None] * D + k[None, :])                       # [C, D]
-            wvh = tl.load(WV + (h * C + cc)[:, None] * D + k[None, :])
+            gp = tl.load(DGP + (s * L + j)[:, None] * (NH * C) + h * C + cc[None, :], mask=sm[:, None] & cm[None, :], other=0.0)
+            dv = tl.load(DV + (h * L + j) * (S * C) + s[:, None] * C + cc[None, :], mask=sm[:, None] & cm[None, :], other=0.0)
+            wgh = tl.load(WG + (h * C + cc)[:, None] * D + k[None, :], mask=cm[:, None], other=0.0)   # [CP, D]
+            wvh = tl.load(WV + (h * C + cc)[:, None] * D + k[None, :], mask=cm[:, None], other=0.0)
             dy += tl.dot(gp, wgh) + tl.dot(dv, wvh)
         dgs += tl.sum(tl.where(sm[:, None], dy * xh, 0.0), axis=0)
         dbs += tl.sum(tl.where(sm[:, None], dy, 0.0), axis=0)
@@ -329,8 +337,12 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, n_head: int, d_hidden: int) -
         if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
             return f"the Triton path is bf16, got {msa.dtype} / {pair.dtype}"
         d_msa, d_pair = msa.shape[-1], pair.shape[-1]
-        if not (_pow2_16(d_msa) and _pow2_16(d_hidden)):
-            return f"d_msa and d_hidden must be powers of two >= 16 (spanned by one tile), got {d_msa}, {d_hidden}"
+        if not _pow2_16(d_msa):
+            return f"d_msa must be a power of two >= 16 (spanned by one tile), got {d_msa}"
+        if d_hidden < 1 or d_hidden > 128:
+            return f"d_hidden must be in 1..128 (a head narrower than one tl.dot step is zero-padded to 16 in the kernels), got {d_hidden}"
+        if n_head * d_hidden % 16:
+            return f"n_head * d_hidden must be a multiple of 16 (the value projection is tiled in 16 columns), got {n_head} * {d_hidden}"
         if d_pair < 16:
             return f"d_pair must be >= 16 (one tl.dot K step), got {d_pair}"
         if n_head < 1:
@@ -338,6 +350,11 @@ def refusal(msa: torch.Tensor, pair: torch.Tensor, n_head: int, d_hidden: int) -
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
+
+
+def _cp(c: int) -> int:
+    """The head width as a tile: the next power of two, at least one tl.dot step (16). Columns past ``c`` are masked to zero."""
+    return max(16, triton.next_power_of_2(c))
 
 
 def _hp(nh: int) -> int:
@@ -381,7 +398,7 @@ def _fwd(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor, lnm_w: torch
     out = torch.empty_like(x)
     _pwa_gate_gemm_kernel[lambda meta: (L, triton.cdiv(S, meta["BS"]))](
         x, o, *lnm, wg.to(bf).contiguous(), wo.to(bf).contiguous(), keep if has_keep else x, out, S, L, eps_m, scale,
-        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C, HAS_KEEP=has_keep)
+        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C, CP=_cp(C), HAS_KEEP=has_keep)
     return [out.view(S, L, D), w, v, o]
 
 
@@ -423,16 +440,16 @@ def _bwd(dres: torch.Tensor, msa: torch.Tensor, pair: torch.Tensor, mask: torch.
     # persistent (programs per SM, head) grids: the per-head weight gradients live in the program's registers
     _pwa_bwd_gate_gemm_kernel[lambda meta: (max(1, min(L * triton.cdiv(S, meta["BS"]), meta["PPS"] * nsm // NH)), NH)](
         x, dr, o, *lnm, wg16, wo.to(bf).contiguous(), keep if has_keep else x, do, dgp, dwo, dwg, S, L, eps_m, scale,
-        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C, HAS_KEEP=has_keep)
+        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C, CP=_cp(C), HAS_KEEP=has_keep)
     dv = torch.bmm(w.transpose(1, 2), do)                                                     # [NH, L(j), S*C]
     dw = torch.bmm(do, v.transpose(1, 2))                                                     # [NH, L(i), L(j)]
     del do
     _pwa_bwd_layernorm_gemm_dw_kernel[lambda meta: (max(1, min(L * triton.cdiv(S, meta["BS"]), meta["PPS"] * nsm // NH)), NH)](
-        x, dv, *lnm, dwv, S, L, eps_m, shape_key=token_key(length_of(msa.shape), D=D, C=C), D=D, C=C)
+        x, dv, *lnm, dwv, S, L, eps_m, shape_key=token_key(length_of(msa.shape), D=D, C=C), D=D, C=C, CP=_cp(C))
     dm = torch.empty_like(x)
     _pwa_bwd_layernorm_gemm_dx_dlnw_kernel[lambda meta: (max(1, min(L * triton.cdiv(S, meta["BS"]), meta["PPS"] * nsm)),)](
         x, dr, dgp, dv, lnm[0], wg16, wv16, dm, dgm, dbm, S, L, eps_m,
-        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C)
+        shape_key=token_key(length_of(msa.shape), D=D, NH=NH, C=C), D=D, NH=NH, C=C, CP=_cp(C))
     dz = torch.empty_like(z)
     _pwa_bwd_layernorm_gemm_softmax_kernel[(L,)](
         z, w, dw, m8, lnz_w.float().contiguous(), wb.to(bf).contiguous(), dz, dwb, dgz, L, eps_z,

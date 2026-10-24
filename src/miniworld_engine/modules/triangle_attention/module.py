@@ -386,7 +386,9 @@ class TriangleAttention(nn.Module):
                     return triattn_h100_sm90.forward(self, pair, mask)
                 if h100_dh.serves(self, pair, mask):
                     return h100_dh.forward(self, pair, mask)
-            out = self._biased_reference(pair, mask)
+            out = self._triton_variant(pair, mask)
+            if out is None:
+                out = self._biased_reference(pair, mask)
             if self.p_drop > 0.0 and self.training:
                 out = out * self._make_drop_scale(pair, self.p_drop)
             return pair + out
@@ -475,6 +477,37 @@ class TriangleAttention(nn.Module):
         if self.p_drop > 0.0 and self.training:
             out = out * self._make_drop_scale(pair, self.p_drop)
         return pair + out
+
+    def _triton_variant(self, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor | None:
+        """The variant update (no residual) on the portable Triton core (``kernels.triangle_attention.triton.variants``), or None when
+        this call is not served there (the caller runs ``_biased_reference``). Served on every card the standard Triton leg is: other
+        GPUs, and H100 / B200 under ``engine_backend="triton"``. bf16 only; forward and backward."""
+        if (
+            self._backend != KernelBackend.TRITON
+            or self.implementation not in (ImplementationType.MINIWORLD, ImplementationType.TRITON)
+            or not self.use_self_attention
+            or (self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device))
+        ):
+            return None
+        from miniworld_engine.kernels.triangle_attention.triton.variants import (
+            refusal,
+            triton_triangle_attention_variant,
+        )
+
+        weights = (
+            self.to_query.weight, self.to_key.weight, self.to_value.weight, self.to_bias.weight, self.to_gate.weight,
+            self.to_out.weight, self.to_gate.bias, self.to_out.bias,
+            *((self.to_out_t.weight, self.to_out_t.bias) if self.dual_output else ()),
+        )
+        if refusal(pair, weights, self.n_head, self.to_query.weight.shape[0], use_qk_norm=self.use_qk_norm) is not None:
+            return None
+        return triton_triangle_attention_variant(
+            pair, mask, self.ln_pair.weight, self.ln_pair.bias, self.to_query.weight, self.to_key.weight, self.to_value.weight,
+            self.to_bias.weight, self.to_gate.weight, self.to_gate.bias, self.to_out.weight, self.to_out.bias,
+            self.to_out_t.weight if self.dual_output else None, self.to_out_t.bias if self.dual_output else None,
+            n_head=self.n_head, starting=self.starting, transposed_bias=self.transposed_bias,
+            untransposed_output=self.untransposed_output, dual_output=self.dual_output, eps=float(self.ln_pair.eps),
+        )
 
     def _biased_reference(
         self,

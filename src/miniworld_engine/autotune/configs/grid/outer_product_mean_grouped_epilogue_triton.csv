@@ -1,0 +1,6 @@
+axis,values
+TI,1 2 4
+BJ,16 32 64
+BN,32 64 128
+num_warps,4 8
+num_stages,1 2 3 4

@@ -110,7 +110,8 @@ class OuterProductMean(nn.Module):
         # RoseTTAFold3: the left / right projections carry a bias (``projection_bias``; masked rows lose it too). Chai-1: ``groups`` = 8
         # outer products of d_hidden / groups wide halves, their G (d_hidden / G)^2 products LayerNorm'd (``product_norm``, eps
         # ``product_norm_eps``) before the out-projection, no division by the pair counts. Both run kernels.outer_product_mean.composed
-        # on H100 (inference) and ``_variant_reference`` elsewhere.
+        # on H100 (inference), the portable Triton path (kernels.outer_product_mean.triton) on the other GPUs, and
+        # ``_variant_reference`` where neither serves.
         if d_hidden % groups:
             raise ValueError(f"d_hidden ({d_hidden}) must be divisible by groups ({groups})")
         self.groups, self.group_width = groups, d_hidden // groups
@@ -161,11 +162,14 @@ class OuterProductMean(nn.Module):
         if self.groups > 1 or self.to_left.bias is not None:  # RoseTTAFold3 / Chai-1 (see the constructor)
             from miniworld_engine.kernels.outer_product_mean import composed
 
-            if (self.implementation != ImplementationType.PYTORCH and self.to_left.bias is not None
-                    and composed.biased_wide_serves(self, msa, mask)):
+            # The H100 CUDA paths below step aside for engine_backend="triton" / triton_on_hopper_blackwell (the A/B switch), and an
+            # explicit implementation="triton" never takes them.
+            native = (self.implementation not in (ImplementationType.PYTORCH, ImplementationType.TRITON)
+                      and not _dispatch.triton_forced())
+            if native and self.to_left.bias is not None and composed.biased_wide_serves(self, msa, mask):
                 return composed.biased_wide(self, msa, mask, token_asym_id, residual)
             if (
-                self.implementation != ImplementationType.PYTORCH
+                native
                 and self.groups == 1
                 and _opm_train.wanted(self.implementation)
                 and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
@@ -173,8 +177,60 @@ class OuterProductMean(nn.Module):
                 and not torch.is_grad_enabled()
             ):
                 return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
-            if self.implementation != ImplementationType.PYTORCH and composed.serves(self, msa, mask):
+            if native and composed.serves(self, msa, mask):
                 return composed.inference(self, msa, mask, token_asym_id, residual)
+            # The portable Triton path (projection biases folded into the projection kernel, groups as a leading batch axis of the
+            # outer product): every other GPU, engine_backend="triton". An explicit implementation="triton" refuses with the reason.
+            if self.implementation in (
+                ImplementationType.MINIWORLD,
+                ImplementationType.TRITON,
+            ) and (
+                resolve("outer_product_mean", self.implementation, msa.device) == KernelBackend.TRITON
+            ) and (
+                self.implementation == ImplementationType.TRITON or _dispatch.triton_leg_allowed(msa.device)
+            ):
+                from miniworld_engine.kernels.outer_product_mean.interface import (
+                    refusal,
+                    triton_outer_product_mean,
+                )
+
+                why = refusal(
+                    msa,
+                    self.to_left.weight.shape[0],
+                    self.to_out.weight.shape[0],
+                    interchain=bool(self.mask_interchain and token_asym_id is not None),
+                    residual=residual,
+                    groups=self.groups,
+                )
+                if why is None:
+                    options = {}
+                    if self.groups > 1:
+                        options = {
+                            "groups": self.groups,
+                            "product_norm_weight": self.product_norm.weight,
+                            "product_norm_bias": self.product_norm.bias,
+                            "product_norm_eps": float(self.product_norm.eps),
+                        }
+                    return triton_outer_product_mean(
+                        msa,
+                        mask,
+                        self.ln_msa.weight,
+                        self.ln_msa.bias,
+                        self.to_left.weight,
+                        self.to_right.weight,
+                        self.to_out.weight,
+                        self.to_out.bias,
+                        residual,
+                        eps=float(self.ln_msa.eps),
+                        normalize_before_proj=self.normalize_before_proj,
+                        b_left=self.to_left.bias,
+                        b_right=self.to_right.bias,
+                        **options,
+                    )
+                if self.implementation == ImplementationType.TRITON:
+                    raise NotImplementedError(
+                        f"OuterProductMean(implementation='triton'): {why}"
+                    )
             return self._variant_reference(msa, mask, token_asym_id, residual)
         # The packaged H100 OPM forward/backward (integrations.opm_train) serves a
         # supported call automatically, including the optional pair residual.

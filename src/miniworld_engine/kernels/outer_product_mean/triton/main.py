@@ -46,11 +46,14 @@ def _nsm(device) -> int:
 
 
 # ---------------------------------------------------------------------------------------------------- kernels
-@triton.autotune(configs=configs_for("outer_product_mean_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK"])
+@triton.autotune(configs=configs_for("outer_product_mean_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK", "HAS_PBIAS"])
 @triton.jit
-def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, A, B, T_, eps, shape_key,
-                               CM: tl.constexpr, CH: tl.constexpr, HAS_MASK: tl.constexpr, BT: tl.constexpr):
-    # a[t] = mask[t] * LN(msa[t]) . W_left^T, b likewise; one program = BT rows of the flattened [S L] tokens
+def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, BL, BR, A, B, T_, eps, shape_key,
+                               CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
+                               HAS_PBIAS: tl.constexpr, BT: tl.constexpr):
+    # a[t] = mask[t] * (LN(msa[t]) . W_left^T [+ b_left]), b likewise; one program = BT rows of the flattened [S L] tokens.
+    # Stored group-major [G, T, K] (G = CH / K groups of K channels; K = CH is the ungrouped [T, CH] layout, same formula), so each
+    # group's [S, L K] operand of the outer product is a plain strided matrix.
     rows = tl.program_id(0).to(tl.int64) * BT + tl.arange(0, BT)
     rm = rows < T_
     cols = tl.arange(0, CM)
@@ -62,14 +65,20 @@ def _opm_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, A, B, T_, eps, shape_k
     ch = tl.arange(0, CH)
     wl = tl.load(WL + ch[None, :] * CM + cols[:, None])                                   # [CM, CH] = W_left^T
     wr = tl.load(WR + ch[None, :] * CM + cols[:, None])
-    a = tl.dot(y, wl).to(tl.bfloat16)
-    b = tl.dot(y, wr).to(tl.bfloat16)
-    if HAS_MASK:
+    a = tl.dot(y, wl)
+    b = tl.dot(y, wr)
+    if HAS_PBIAS:
+        a += tl.load(BL + ch)[None, :]
+        b += tl.load(BR + ch)[None, :]
+    a = a.to(tl.bfloat16)
+    b = b.to(tl.bfloat16)
+    if HAS_MASK:                                                                          # a masked row loses its bias too
         mk = tl.load(MASK + rows, mask=rm, other=0) != 0
         a = tl.where(mk[:, None], a, 0.0)
         b = tl.where(mk[:, None], b, 0.0)
-    tl.store(A + rows[:, None] * CH + ch[None, :], a, mask=rm[:, None])
-    tl.store(B + rows[:, None] * CH + ch[None, :], b, mask=rm[:, None])
+    dst = ((ch // K).to(tl.int64)[None, :] * T_ + rows[:, None]) * K + (ch % K)[None, :]
+    tl.store(A + dst, a, mask=rm[:, None])
+    tl.store(B + dst, b, mask=rm[:, None])
 
 
 @triton.autotune(configs=configs_for("outer_product_mean_epilogue_triton"), key=["shape_key", "HAS_RES", "NORM_FIRST"],
@@ -169,11 +178,12 @@ def _opm_bwd_epilogue_dw_kernel(DZN, O, DWO, L, CH2, shape_key,
     tl.atomic_add(DWO + m[:, None] * (CH * CH) + n[None, :], acc)
 
 
-@triton.autotune(configs=configs_for("outer_product_mean_bwd_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK"],
-                 reset_to_zero=["DWL", "DWR", "DG", "DBETA"])
+@triton.autotune(configs=configs_for("outer_product_mean_bwd_layernorm_gemm_triton"), key=["shape_key", "HAS_MASK", "HAS_PBIAS"],
+                 reset_to_zero=["DWL", "DWR", "DG", "DBETA", "DBL", "DBR"])
 @triton.jit
-def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, DWR, DG, DBETA, T_, eps, shape_key,
-                                   CM: tl.constexpr, CH: tl.constexpr, HAS_MASK: tl.constexpr, BT: tl.constexpr, PPS: tl.constexpr):
+def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, DWR, DG, DBETA, DBL, DBR, T_, eps, shape_key,
+                                   CM: tl.constexpr, CH: tl.constexpr, K: tl.constexpr, HAS_MASK: tl.constexpr,
+                                   HAS_PBIAS: tl.constexpr, BT: tl.constexpr, PPS: tl.constexpr):
     # persistent (PPS programs per SM): the program walks token blocks pid, pid + nprog, ..., keeping dW_left / dW_right / dgamma /
     # dbeta in registers, and adds them once at the end
     pid = tl.program_id(0)
@@ -188,6 +198,9 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
     dwr = tl.zeros((CH, CM), dtype=tl.float32)
     dgs = tl.zeros((CM,), dtype=tl.float32)
     dbs = tl.zeros((CM,), dtype=tl.float32)
+    dbl = tl.zeros((CH,), dtype=tl.float32)
+    dbr = tl.zeros((CH,), dtype=tl.float32)
+    src_ch = ((ch // K).to(tl.int64) * T_)[None, :] * K + (ch % K)[None, :]               # group-major [G, T, K] columns
     nblk = tl.cdiv(T_, BT)
     for blk in range(pid, nblk, nprog):
         rows = blk.to(tl.int64) * BT + tl.arange(0, BT)
@@ -198,12 +211,15 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
         rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / CM + eps)
         xh = xc * rs[:, None]
         y = (xh * g[None, :] + bta[None, :]).to(tl.bfloat16)
-        da = tl.load(DA + rows[:, None] * CH + ch[None, :], mask=rm[:, None], other=0.0)
-        db = tl.load(DB + rows[:, None] * CH + ch[None, :], mask=rm[:, None], other=0.0)
+        da = tl.load(DA + rows[:, None] * K + src_ch, mask=rm[:, None], other=0.0)
+        db = tl.load(DB + rows[:, None] * K + src_ch, mask=rm[:, None], other=0.0)
         if HAS_MASK:
             mk = tl.load(MASK + rows, mask=rm, other=0) != 0
             da = tl.where(mk[:, None], da, 0.0).to(tl.bfloat16)
             db = tl.where(mk[:, None], db, 0.0).to(tl.bfloat16)
+        if HAS_PBIAS:
+            dbl += tl.sum(da.to(tl.float32), axis=0)
+            dbr += tl.sum(db.to(tl.float32), axis=0)
         dwl += tl.dot(tl.trans(da), y)
         dwr += tl.dot(tl.trans(db), y)
         dy = tl.dot(da, wl) + tl.dot(db, wr)                                                 # [BT, CM] fp32
@@ -218,6 +234,119 @@ def _opm_bwd_layernorm_gemm_kernel(M, MASK, LNW, LNB, WL, WR, DA, DB, DM, DWL, D
     tl.atomic_add(DWR + ch[:, None] * CM + cols[None, :], dwr)
     tl.atomic_add(DG + cols, dgs)
     tl.atomic_add(DBETA + cols, dbs)
+    if HAS_PBIAS:
+        tl.atomic_add(DBL + ch, dbl)
+        tl.atomic_add(DBR + ch, dbr)
+
+
+# ---------------------------------------------------------------------------------------------------- grouped kernels (Chai-1)
+# ``groups`` G > 1: per group g an outer product of K = CH / G wide halves, O_g = a_g^T b_g ([L K, L K], one batched GEMM over g), and
+# for the pair (i, j) the G K^2 products p[g, k, l] = O_g[i K + k, j K + l]. Chai-1 LayerNorms those P = G K^2 products (``product_norm``,
+# its own eps) and projects them; there is no division by the pair counts.
+@triton.autotune(configs=configs_for("outer_product_mean_grouped_epilogue_triton"), key=["shape_key", "HAS_RES"],
+                 prune_configs_by={"early_config_prune": _divides(BN="CZ")})
+@triton.jit
+def _opm_grouped_epilogue_kernel(O, GAM, BET, WOT, BIAS, RES, OUT, L, eps, shape_key,
+                                 K: tl.constexpr, P: tl.constexpr, PP: tl.constexpr, CZ: tl.constexpr, HAS_RES: tl.constexpr,
+                                 TI: tl.constexpr, BJ: tl.constexpr, BN: tl.constexpr):
+    # tile = TI rows i x BJ columns j (M = TI BJ pairs) x BN outputs: gather the pair's P products, LayerNorm them, project (K = P)
+    r = tl.arange(0, TI * BJ)
+    i = tl.program_id(0) * TI + r // BJ
+    j = tl.program_id(1) * BJ + r % BJ
+    rm = (i < L) & (j < L)
+    n = tl.program_id(2) * BN + tl.arange(0, BN)
+    pp = tl.arange(0, PP)
+    pm = pp < P
+    g = pp // (K * K)
+    kl = pp % (K * K)
+    lk = L.to(tl.int64) * K
+    col = g.to(tl.int64) * lk * lk + (kl // K) * lk + kl % K
+    row = i.to(tl.int64) * K * lk + j.to(tl.int64) * K
+    x = tl.load(O + row[:, None] + col[None, :], mask=rm[:, None] & pm[None, :], other=0.0).to(tl.float32)
+    mu = tl.sum(x, axis=1) / P
+    xc = tl.where(pm[None, :], x - mu[:, None], 0.0)
+    rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / P + eps)
+    y = (xc * rs[:, None] * tl.load(GAM + pp, mask=pm, other=0.0)[None, :] + tl.load(BET + pp, mask=pm, other=0.0)[None, :]).to(tl.bfloat16)
+    w = tl.load(WOT + pp[:, None] * CZ + n[None, :], mask=pm[:, None], other=0.0)           # [PP, BN]
+    z = tl.dot(y, w) + tl.load(BIAS + n)[None, :]
+    ptr = (i.to(tl.int64) * L + j)[:, None] * CZ + n[None, :]
+    if HAS_RES:
+        z += tl.load(RES + ptr, mask=rm[:, None], other=0.0).to(tl.float32)
+    tl.store(OUT + ptr, z.to(tl.bfloat16), mask=rm[:, None])
+
+
+@triton.autotune(configs=configs_for("outer_product_mean_grouped_bwd_epilogue_dx_triton"), key=["shape_key"],
+                 reset_to_zero=["DGAM", "DBET"], prune_configs_by={"early_config_prune": _divides(BKC="CZ")})
+@triton.jit
+def _opm_grouped_bwd_epilogue_dx_kernel(DZ, O, GAM, BET, WO, DO, Y, DGAM, DBET, L, eps, shape_key,
+                                        K: tl.constexpr, P: tl.constexpr, PP: tl.constexpr, CZ: tl.constexpr,
+                                        TI: tl.constexpr, BJ: tl.constexpr, BKC: tl.constexpr, PPS: tl.constexpr):
+    # persistent over (TI x BJ)-pair tiles: recompute the product LayerNorm (y, kept for dW_out), dy = dz W_out, the LayerNorm backward
+    # -> dO in the grouped layout; dgamma / dbeta stay in registers until the end
+    pid = tl.program_id(0)
+    nprog = tl.num_programs(0)
+    pp = tl.arange(0, PP)
+    pm = pp < P
+    g = pp // (K * K)
+    kl = pp % (K * K)
+    lk = L.to(tl.int64) * K
+    col = g.to(tl.int64) * lk * lk + (kl // K) * lk + kl % K
+    gam = tl.load(GAM + pp, mask=pm, other=0.0)
+    bet = tl.load(BET + pp, mask=pm, other=0.0)
+    dgs = tl.zeros((PP,), tl.float32)
+    dbs = tl.zeros((PP,), tl.float32)
+    r = tl.arange(0, TI * BJ)
+    ntj = tl.cdiv(L, BJ)
+    ntiles = tl.cdiv(L, TI) * ntj
+    for t in range(pid, ntiles, nprog):
+        i = (t // ntj) * TI + r // BJ
+        j = (t % ntj) * BJ + r % BJ
+        rm = (i < L) & (j < L)
+        row = i.to(tl.int64) * K * lk + j.to(tl.int64) * K
+        x = tl.load(O + row[:, None] + col[None, :], mask=rm[:, None] & pm[None, :], other=0.0).to(tl.float32)
+        mu = tl.sum(x, axis=1) / P
+        xc = tl.where(pm[None, :], x - mu[:, None], 0.0)
+        rs = tl.rsqrt(tl.sum(xc * xc, axis=1) / P + eps)
+        xh = xc * rs[:, None]
+        prow = (i.to(tl.int64) * L + j)
+        tl.store(Y + prow[:, None] * P + pp[None, :], (xh * gam[None, :] + bet[None, :]).to(tl.bfloat16), mask=rm[:, None] & pm[None, :])
+        dy = tl.zeros((TI * BJ, PP), tl.float32)
+        for c0 in range(0, CZ, BKC):
+            c = c0 + tl.arange(0, BKC)
+            dz = tl.load(DZ + prow[:, None] * CZ + c[None, :], mask=rm[:, None], other=0.0)
+            w = tl.load(WO + c[:, None] * P + pp[None, :], mask=pm[None, :], other=0.0)      # [BKC, PP]
+            dy += tl.dot(dz, w)
+        dgs += tl.sum(dy * xh, axis=0)
+        dbs += tl.sum(dy, axis=0)
+        dxh = dy * gam[None, :]
+        m1 = tl.sum(dxh, axis=1) / P
+        m2 = tl.sum(dxh * xh, axis=1) / P
+        dp = rs[:, None] * (dxh - m1[:, None] - xh * m2[:, None])
+        tl.store(DO + row[:, None] + col[None, :], dp.to(tl.bfloat16), mask=rm[:, None] & pm[None, :])
+    tl.atomic_add(DGAM + pp, dgs, mask=pm)
+    tl.atomic_add(DBET + pp, dbs, mask=pm)
+
+
+@triton.autotune(configs=configs_for("outer_product_mean_grouped_bwd_epilogue_dw_triton"), key=["shape_key"], reset_to_zero=["DWO"],
+                 prune_configs_by={"early_config_prune": _divides(BM="CZ", BN="P")})
+@triton.jit
+def _opm_grouped_bwd_epilogue_dw_kernel(DZ, Y, DWO, NPAIR, shape_key,
+                                        P: tl.constexpr, CZ: tl.constexpr, BM: tl.constexpr, BN: tl.constexpr, BK: tl.constexpr,
+                                        SPLIT: tl.constexpr):
+    # dWo[c, p] = sum_pairs dz[pair, c] y[pair, p]: M = CZ, N = P, K = L^2 pairs split over SPLIT ranges (fp32 atomics once per program)
+    m = tl.program_id(0) * BM + tl.arange(0, BM)
+    n = tl.program_id(1) * BN + tl.arange(0, BN)
+    per = tl.cdiv(NPAIR, SPLIT)
+    q0 = tl.program_id(2) * per
+    kk = tl.arange(0, BK)
+    acc = tl.zeros((BM, BN), dtype=tl.float32)
+    for qq in range(0, per, BK):
+        q = q0 + qq + kk
+        qm = (q < NPAIR) & (qq + kk < per)
+        a = tl.load(DZ + q[:, None].to(tl.int64) * CZ + m[None, :], mask=qm[:, None], other=0.0)         # [BK, BM]
+        b = tl.load(Y + q[:, None].to(tl.int64) * P + n[None, :], mask=qm[:, None], other=0.0)           # [BK, BN]
+        acc += tl.dot(tl.trans(a), b)
+    tl.atomic_add(DWO + m[:, None] * P + n[None, :], acc)
 
 
 # ---------------------------------------------------------------------------------------------------- launches (opaque to Dynamo)
@@ -225,7 +354,8 @@ def _pow2_16(n: int) -> bool:
     return n >= 16 and n & (n - 1) == 0
 
 
-def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, residual: torch.Tensor | None = None) -> str | None:
+def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, residual: torch.Tensor | None = None,
+            groups: int = 1) -> str | None:
     """None if the Triton path can run this OuterProductMean call, else why it cannot. Never raises."""
     try:
         if interchain:
@@ -241,12 +371,18 @@ def refusal(msa: torch.Tensor, d_hidden: int, d_pair: int, *, interchain: bool, 
             return f"d_msa and d_hidden must be powers of two >= 16 (spanned by one tile), got {d_msa}, {d_hidden}"
         if d_pair % 32:
             return f"d_pair must be a multiple of 32 (the smallest output tile), got {d_pair}"
+        if groups > 1:
+            if d_hidden % groups:
+                return f"d_hidden ({d_hidden}) must be divisible by groups ({groups})"
+            products = groups * (d_hidden // groups) ** 2
+            if products % 16 or products > 1024:
+                return f"the grouped products (groups * (d_hidden / groups)^2 = {products}) must be a multiple of 16 and at most 1024"
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
 
 
-def _fwd_fake(msa, mask, lnw, lnb, wl, wr, wo, bo, residual, eps, norm_first):
+def _fwd_fake(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first):
     """Shapes of `_fwd`'s outputs: out [L, L, CZ], a / b [S L, CH], O [L CH, L CH] bf16, n [L, L] fp32."""
     S, L, _ = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
@@ -256,22 +392,24 @@ def _fwd_fake(msa, mask, lnw, lnb, wl, wr, wo, bo, residual, eps, norm_first):
 
 @opaque(fake=_fwd_fake, name="outer_product_mean_triton_fwd")
 def _fwd(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor,
-         wo: torch.Tensor, bo: torch.Tensor, residual: torch.Tensor, eps: float, norm_first: bool) -> list[torch.Tensor]:
-    """One stack: msa [S, L, CM], mask [S, L] bool (or empty: no mask), residual [L, L, CZ] (or empty).
-    Returns [out [L, L, CZ], a, b [S L, CH], O [L CH, L CH], n [L, L]]; the last four are what the backward reads."""
+         bl: torch.Tensor, br: torch.Tensor, wo: torch.Tensor, bo: torch.Tensor, residual: torch.Tensor, eps: float,
+         norm_first: bool) -> list[torch.Tensor]:
+    """One stack: msa [S, L, CM], mask [S, L] bool (or empty: no mask), residual [L, L, CZ] (or empty), bl / br the projections'
+    biases [CH] (or empty). Returns [out [L, L, CZ], a, b [S L, CH], O [L CH, L CH], n [L, L]]; the last four are what the backward reads."""
     S, L, CM = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
     T_ = S * L
     bf = torch.bfloat16
-    has_mask, has_res = mask.numel() > 0, residual.numel() > 0
+    has_mask, has_res, has_pbias = mask.numel() > 0, residual.numel() > 0, bl.numel() > 0
     x = msa.reshape(T_, CM).contiguous()
     m8 = mask.reshape(T_).contiguous().view(torch.uint8) if has_mask else x
     w_l, w_r = wl.to(bf).contiguous(), wr.to(bf).contiguous()
+    b_l, b_r = (bl.float().contiguous(), br.float().contiguous()) if has_pbias else (x, x)
     a = msa.new_empty((T_, CH), dtype=bf)
     b = msa.new_empty((T_, CH), dtype=bf)
     _opm_layernorm_gemm_kernel[lambda meta: (triton.cdiv(T_, meta["BT"]),)](
-        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), w_l, w_r, a, b, T_, eps,
-        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH), CM=CM, CH=CH, HAS_MASK=has_mask)
+        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), w_l, w_r, b_l, b_r, a, b, T_, eps,
+        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH), CM=CM, CH=CH, K=CH, HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
     o = torch.mm(a.view(S, L * CH).t(), b.view(S, L * CH))                                  # [(i, d), (j, e)]
     if has_mask:
         mf = mask.reshape(S, L).float()
@@ -286,24 +424,25 @@ def _fwd(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Te
     return [out, a, b, o, norm]
 
 
-def _bwd_fake(dz, msa, mask, a, b, o, norm, lnw, lnb, wl, wr, wo, eps, norm_first):
+def _bwd_fake(dz, msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, eps, norm_first):
     """Shapes of `_bwd`'s outputs: dmsa like msa, every parameter gradient fp32 in its parameter's shape."""
     f32 = torch.float32
     return [torch.empty_like(msa), lnw.new_empty(lnw.shape, dtype=f32), lnb.new_empty(lnb.shape, dtype=f32),
             wl.new_empty(wl.shape, dtype=f32), wr.new_empty(wr.shape, dtype=f32), wo.new_empty(wo.shape, dtype=f32),
-            wo.new_empty((wo.shape[0],), dtype=f32)]
+            wo.new_empty((wo.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32)]
 
 
 @opaque(fake=_bwd_fake, name="outer_product_mean_triton_bwd")
 def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tensor, b: torch.Tensor, o: torch.Tensor,
-         norm: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, wo: torch.Tensor, eps: float,
-         norm_first: bool) -> list[torch.Tensor]:
-    """Gradients of one stack: [dmsa, dgamma, dbeta, dW_left, dW_right, dW_out, db_out] (fp32 but dmsa)."""
+         norm: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, bl: torch.Tensor,
+         br: torch.Tensor, wo: torch.Tensor, eps: float, norm_first: bool) -> list[torch.Tensor]:
+    """Gradients of one stack: [dmsa, dgamma, dbeta, dW_left, dW_right, dW_out, db_out, db_left, db_right] (fp32 but dmsa; the last
+    two are zeros when the projections have no bias)."""
     S, L, CM = msa.shape
     CH, CZ = wl.shape[0], wo.shape[0]
     T_ = S * L
     bf = torch.bfloat16
-    has_mask = mask.numel() > 0
+    has_mask, has_pbias = mask.numel() > 0, bl.numel() > 0
     x = msa.reshape(T_, CM).contiguous()
     m8 = mask.reshape(T_).contiguous().view(torch.uint8) if has_mask else x
     dzc = dz.reshape(L * L, CZ).contiguous()
@@ -319,45 +458,177 @@ def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tenso
     dwo = dz.new_zeros((CZ, CH * CH), dtype=torch.float32)
     _opm_bwd_epilogue_dw_kernel[lambda meta: (triton.cdiv(CZ, meta["BM"]), triton.cdiv(CH * CH, meta["BN"]), meta["SPLIT"])](
         dzn, o, dwo, L, CH * CH, shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ)
+    dm, dg, dbeta, dwl, dwr, dbl, dbr = _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, CH, has_mask, has_pbias)
+    return [dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr]
+
+
+def _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask, has_pbias):
+    """The shared tail of both backwards: mask, dy = [dA | dB] W, dW_left / dW_right (and the biases' gradients), LayerNorm backward.
+    dA / dB are [G, S L, K] (K = CH: [S L, CH]). Returns [dmsa [S L, CM], dgamma, dbeta, dW_left, dW_right, db_left, db_right]."""
+    bf = torch.bfloat16
+    T_ = S * L
     dm = torch.empty_like(x)
-    red = dz.new_zeros((2 * CH * CM + 2 * CM,), dtype=torch.float32)
+    red = x.new_zeros((2 * CH * CM + 2 * CM + 2 * CH,), dtype=torch.float32)
     dwl, dwr = red[:CH * CM].view(CH, CM), red[CH * CM:2 * CH * CM].view(CH, CM)
-    dg, dbeta = red[2 * CH * CM:2 * CH * CM + CM], red[2 * CH * CM + CM:]
-    nsm = _nsm(msa.device)
+    dg, dbeta = red[2 * CH * CM:2 * CH * CM + CM], red[2 * CH * CM + CM:2 * CH * CM + 2 * CM]
+    dbl, dbr = red[2 * CH * CM + 2 * CM:2 * CH * CM + 2 * CM + CH], red[2 * CH * CM + 2 * CM + CH:]
+    nsm = _nsm(x.device)
     _opm_bwd_layernorm_gemm_kernel[lambda meta: (min(triton.cdiv(T_, meta["BT"]), meta["PPS"] * nsm),)](
         x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(),
-        dA.view(T_, CH), dB.view(T_, CH), dm, dwl, dwr, dg, dbeta, T_, eps,
-        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH), CM=CM, CH=CH, HAS_MASK=has_mask)
-    return [dm.view(S, L, CM), dg.clone(), dbeta.clone(), dwl.clone(), dwr.clone(), dwo, dbo]
+        dA, dB, dm, dwl, dwr, dg, dbeta, dbl, dbr, T_, eps,
+        shape_key=token_key(length_of((S, L, CM)), CM=CM, CH=CH, **({} if K == CH else {"G": CH // K})), CM=CM, CH=CH, K=K,
+        HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
+    return dm.view(S, L, CM), dg.clone(), dbeta.clone(), dwl.clone(), dwr.clone(), dbl.clone(), dbr.clone()
+
+
+# ---------------------------------------------------------------------------------------------------- grouped launches
+def _pp(p: int) -> int:
+    return max(16, triton.next_power_of_2(p))
+
+
+def _fwd_grouped_fake(msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, residual, eps, eps_prod, groups):
+    """Shapes of `_fwd_grouped`'s outputs: out [L, L, CZ], a / b [S L, CH] (group-major), O [G, L K, L K] bf16."""
+    S, L, _ = msa.shape
+    CH, CZ = wl.shape[0], wo.shape[0]
+    K = CH // groups
+    new = lambda *shape: msa.new_empty(shape, dtype=torch.bfloat16)  # noqa: E731
+    return [new(L, L, CZ), new(S * L, CH), new(S * L, CH), new(groups, L * K, L * K)]
+
+
+@opaque(fake=_fwd_grouped_fake, name="outer_product_mean_triton_fwd_grouped")
+def _fwd_grouped(msa: torch.Tensor, mask: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor,
+                 bl: torch.Tensor, br: torch.Tensor, gam: torch.Tensor, bet: torch.Tensor, wo: torch.Tensor, bo: torch.Tensor,
+                 residual: torch.Tensor, eps: float, eps_prod: float, groups: int) -> list[torch.Tensor]:
+    """One stack of the grouped (Chai-1) variant. Returns [out [L, L, CZ], a, b [S L, CH] (stored [G, S L, K]), O [G, L K, L K]]."""
+    S, L, CM = msa.shape
+    CH, CZ = wl.shape[0], wo.shape[0]
+    K = CH // groups
+    P = groups * K * K
+    T_ = S * L
+    bf = torch.bfloat16
+    has_mask, has_res, has_pbias = mask.numel() > 0, residual.numel() > 0, bl.numel() > 0
+    x = msa.reshape(T_, CM).contiguous()
+    m8 = mask.reshape(T_).contiguous().view(torch.uint8) if has_mask else x
+    b_l, b_r = (bl.float().contiguous(), br.float().contiguous()) if has_pbias else (x, x)
+    a = msa.new_empty((T_, CH), dtype=bf)
+    b = msa.new_empty((T_, CH), dtype=bf)
+    _opm_layernorm_gemm_kernel[lambda meta: (triton.cdiv(T_, meta["BT"]),)](
+        x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(), b_l, b_r, a, b, T_, eps,
+        shape_key=token_key(length_of(msa.shape), CM=CM, CH=CH, G=groups), CM=CM, CH=CH, K=K, HAS_MASK=has_mask, HAS_PBIAS=has_pbias)
+    o = torch.bmm(a.view(groups, S, L * K).transpose(1, 2), b.view(groups, S, L * K))      # [G, (i, k), (j, l)]
+    out = msa.new_empty((L, L, CZ), dtype=bf)
+    res = residual.reshape(L * L, CZ).contiguous() if has_res else out
+    _opm_grouped_epilogue_kernel[lambda meta: (triton.cdiv(L, meta["TI"]), triton.cdiv(L, meta["BJ"]), triton.cdiv(CZ, meta["BN"]))](
+        o, gam.float().contiguous(), bet.float().contiguous(), wo.to(bf).t().contiguous(), bo.float().contiguous(), res, out, L, eps_prod,
+        shape_key=token_key(length_of(msa.shape), K=K, G=groups, CZ=CZ), K=K, P=P, PP=_pp(P), CZ=CZ, HAS_RES=has_res)
+    return [out, a, b, o]
+
+
+def _bwd_grouped_fake(dz, msa, mask, a, b, o, lnw, lnb, wl, wr, bl, br, gam, bet, wo, eps, eps_prod, groups):
+    f32 = torch.float32
+    return [torch.empty_like(msa)] + [t.new_empty(t.shape, dtype=f32) for t in (lnw, lnb, wl, wr, wo, gam, bet)] + \
+        [wo.new_empty((wo.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32), wl.new_empty((wl.shape[0],), dtype=f32)]
+
+
+@opaque(fake=_bwd_grouped_fake, name="outer_product_mean_triton_bwd_grouped")
+def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tensor, b: torch.Tensor, o: torch.Tensor,
+                 lnw: torch.Tensor, lnb: torch.Tensor, wl: torch.Tensor, wr: torch.Tensor, bl: torch.Tensor, br: torch.Tensor,
+                 gam: torch.Tensor, bet: torch.Tensor, wo: torch.Tensor, eps: float, eps_prod: float,
+                 groups: int) -> list[torch.Tensor]:
+    """Gradients of one grouped stack: [dmsa, dgamma, dbeta, dW_left, dW_right, dW_out, dgamma_prod, dbeta_prod, db_out, db_left, db_right]."""
+    S, L, CM = msa.shape
+    CH, CZ = wl.shape[0], wo.shape[0]
+    K = CH // groups
+    P = groups * K * K
+    T_ = S * L
+    bf = torch.bfloat16
+    f32 = torch.float32
+    has_mask, has_pbias = mask.numel() > 0, bl.numel() > 0
+    x = msa.reshape(T_, CM).contiguous()
+    m8 = mask.reshape(T_).contiguous().view(torch.uint8) if has_mask else x
+    dzc = dz.reshape(L * L, CZ).contiguous()
+    dO = dz.new_empty((groups, L * K, L * K), dtype=bf)
+    y = dz.new_empty((L * L, P), dtype=bf)
+    dgam, dbet = dz.new_zeros((P,), dtype=f32), dz.new_zeros((P,), dtype=f32)
+    nsm = _nsm(msa.device)
+    _opm_grouped_bwd_epilogue_dx_kernel[lambda meta: (max(1, min(triton.cdiv(L, meta["TI"]) * triton.cdiv(L, meta["BJ"]), meta["PPS"] * nsm)),)](
+        dzc, o, gam.float().contiguous(), bet.float().contiguous(), wo.to(bf).contiguous(), dO, y, dgam, dbet, L, eps_prod,
+        shape_key=token_key(length_of(msa.shape), K=K, G=groups, CZ=CZ), K=K, P=P, PP=_pp(P), CZ=CZ)
+    dbo = dzc.float().sum(0)
+    dA = torch.bmm(b.view(groups, S, L * K), dO.transpose(1, 2))                            # [G, S, (i, k)]
+    dB = torch.bmm(a.view(groups, S, L * K), dO)                                            # [G, S, (j, l)]
+    del dO
+    dwo = dz.new_zeros((CZ, P), dtype=f32)
+    _opm_grouped_bwd_epilogue_dw_kernel[lambda meta: (triton.cdiv(CZ, meta["BM"]), triton.cdiv(P, meta["BN"]), meta["SPLIT"])](
+        dzc, y, dwo, L * L, shape_key=token_key(length_of(msa.shape), K=K, G=groups, CZ=CZ), P=P, CZ=CZ)
+    dm, dg, dbeta, dwl, dwr, dbl, dbr = _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask, has_pbias)
+    return [dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr]
 
 
 class _OuterProductMeanTriton(torch.autograd.Function):
-    """One MSA stack (no batch axis). ``mask`` / ``residual`` are empty tensors when absent."""
+    """One MSA stack (no batch axis). ``mask`` / ``residual`` / ``bl`` / ``br`` are empty tensors when absent."""
 
     @staticmethod
-    def forward(ctx, msa, mask, lnw, lnb, wl, wr, wo, bo, residual, eps, norm_first):
-        out, a, b, o, norm = _fwd(msa, mask, lnw, lnb, wl, wr, wo, bo, residual, eps, norm_first)
-        ctx.save_for_backward(msa, mask, a, b, o, norm, lnw, lnb, wl, wr, wo, bo)
+    def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first):
+        out, a, b, o, norm = _fwd(msa, mask, lnw, lnb, wl, wr, bl, br, wo, bo, residual, eps, norm_first)
+        ctx.save_for_backward(msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo)
         ctx.eps, ctx.norm_first, ctx.has_res = eps, norm_first, residual.numel() > 0
         return out
 
     @staticmethod
     def backward(ctx, dz):
-        msa, mask, a, b, o, norm, lnw, lnb, wl, wr, wo, bo = ctx.saved_tensors
-        dm, dg, dbeta, dwl, dwr, dwo, dbo = _bwd(dz.contiguous(), msa, mask, a, b, o, norm, lnw, lnb, wl, wr, wo, ctx.eps,
-                                                 ctx.norm_first)
-        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype), dwo.to(wo.dtype),
+        msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo, bo = ctx.saved_tensors
+        dm, dg, dbeta, dwl, dwr, dwo, dbo, dbl, dbr = _bwd(dz.contiguous(), msa, mask, a, b, o, norm, lnw, lnb, wl, wr, bl, br, wo,
+                                                           ctx.eps, ctx.norm_first)
+        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
+                dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dwo.to(wo.dtype),
                 dbo.to(bo.dtype), dz if ctx.has_res else None, None, None)
+
+
+class _OuterProductMeanGroupedTriton(torch.autograd.Function):
+    """One MSA stack of the grouped (Chai-1) variant: ``groups`` outer products, LayerNorm'd products, no pair-count division."""
+
+    @staticmethod
+    def forward(ctx, msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, residual, eps, eps_prod, groups):
+        out, a, b, o = _fwd_grouped(msa, mask, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo, residual, eps, eps_prod, groups)
+        ctx.save_for_backward(msa, mask, a, b, o, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo)
+        ctx.meta, ctx.has_res = (eps, eps_prod, groups), residual.numel() > 0
+        return out
+
+    @staticmethod
+    def backward(ctx, dz):
+        msa, mask, a, b, o, lnw, lnb, wl, wr, bl, br, gam, bet, wo, bo = ctx.saved_tensors
+        dm, dg, dbeta, dwl, dwr, dwo, dgam, dbet, dbo, dbl, dbr = _bwd_grouped(dz.contiguous(), msa, mask, a, b, o, lnw, lnb, wl, wr, bl,
+                                                                               br, gam, bet, wo, *ctx.meta)
+        return (dm, None, dg.to(lnw.dtype), dbeta.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype),
+                dbl.to(bl.dtype) if bl.numel() else None, dbr.to(br.dtype) if br.numel() else None, dgam.to(gam.dtype),
+                dbet.to(bet.dtype), dwo.to(wo.dtype), dbo.to(bo.dtype), dz if ctx.has_res else None, None, None, None)
 
 
 def triton_outer_product_mean(msa: torch.Tensor, mask: torch.Tensor | None, ln_weight: torch.Tensor, ln_bias: torch.Tensor,
                               w_left: torch.Tensor, w_right: torch.Tensor, w_out: torch.Tensor, b_out: torch.Tensor,
-                              residual: torch.Tensor | None = None, *, eps: float = 1e-5, normalize_before_proj: bool = True) -> torch.Tensor:
+                              residual: torch.Tensor | None = None, *, eps: float = 1e-5, normalize_before_proj: bool = True,
+                              b_left: torch.Tensor | None = None, b_right: torch.Tensor | None = None, groups: int = 1,
+                              product_norm_weight: torch.Tensor | None = None, product_norm_bias: torch.Tensor | None = None,
+                              product_norm_eps: float = 0.1) -> torch.Tensor:
     """``residual + OPM(msa)`` (``OPM(msa)`` without a residual), differentiable. msa [B, S, L, CM] bf16, mask [B, S, L] bool.
+
+    ``b_left`` / ``b_right`` (RoseTTAFold3): the projections' biases, masked rows lose them too. ``groups`` > 1 (Chai-1): the hidden
+    channels split into ``groups`` halves with one outer product each, their ``groups * (CH / groups)^2`` products LayerNorm'd
+    (``product_norm_*``, eps ``product_norm_eps``), projected, and NOT divided by the pair counts (``normalize_before_proj`` is moot).
 
     Stacks run one at a time: the mask counts and the grouped outer product are per stack. Check :func:`refusal` first."""
     empty = msa.new_empty((0,))
-    outs = [_OuterProductMeanTriton.apply(msa[bi], empty if mask is None else mask[bi], ln_weight, ln_bias, w_left, w_right, w_out,
-                                          b_out, empty if residual is None else residual[bi], float(eps), bool(normalize_before_proj))
-            for bi in range(msa.shape[0])]
+    bl, br = (empty, empty) if b_left is None else (b_left, b_right)
+    outs = []
+    for bi in range(msa.shape[0]):
+        m = empty if mask is None else mask[bi]
+        r = empty if residual is None else residual[bi]
+        if groups > 1:
+            outs.append(_OuterProductMeanGroupedTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, product_norm_weight,
+                                                             product_norm_bias, w_out, b_out, r, float(eps), float(product_norm_eps),
+                                                             int(groups)))
+        else:
+            outs.append(_OuterProductMeanTriton.apply(msa[bi], m, ln_weight, ln_bias, w_left, w_right, bl, br, w_out, b_out, r,
+                                                      float(eps), bool(normalize_before_proj)))
     return outs[0].unsqueeze(0) if len(outs) == 1 else torch.stack(outs, 0)
