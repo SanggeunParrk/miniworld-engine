@@ -56,3 +56,5 @@ swa_dit_swiglu_bwd_fp32_triton,"(atom tile, augment tile, batch) grid over rows 
 swa_dit_output_bwd_fp32_triton,"(atom tile, augment tile, batch) grid over rows alone; the 128x128 out-projection weight is one whole tile, so there is no column-tile axis to order"
 swa_dit_inproj_bwd_fp32_triton,"(atom tile, augment tile, batch) grid over rows alone; the four 128x128 projection weights are whole tiles, so there is no column-tile axis to order"
 outer_product_mean_bwd_epilogue_ln_dw_triton,"3-D (c block, product block, K split) grid: K = L^2 pairs is the long axis and is split across programs, the M x N output is at most CZ x P, so there is little reuse for a grouped order to find"
+augmented_attention_fwd_window_triton,"1-D-per-window grid (window, batch x head, sample): one program owns a whole 32 x keys window, there is no tile axis to order; the keys are looped in-kernel"
+augmented_attention_bwd_window_triton,"grid (window, batch x head, sample group): one program owns a whole window and loops its samples and key chunks in-kernel; there is no tile axis to order"

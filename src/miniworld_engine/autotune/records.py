@@ -42,6 +42,20 @@ _LEGACY_DTYPE = "bf16"
 #: launches on a card with no native CUDA path. The op names are the ``modules.dispatch`` ones. Family is the registry's
 #: organisational column, not the launcher, so a family shared by two ops is split by kernel name (``gated_projection``:
 #: the pair/token gate GEMMs belong to TriangleAttention, ``swa_gate_out_fwd`` to the SWA atom attention).
+#: The token attention core's kernels (``augmented_attention/triton/main.py``), spelled out because the same family holds the
+#: block-local window kernels (``*_window_triton``), which belong to the atom ops below and must not be held against the token ones.
+_TOKEN_ATTENTION = (
+    "augmented_attention/augmented_attention_fwd_triton",
+    "augmented_attention/augmented_attention_bwd_pre_triton",
+    "augmented_attention/augmented_attention_bwd_reduce_triton",
+    "augmented_attention/augmented_attention_bwd_split_triton",
+    "augmented_attention/augmented_attention_bwd_atomic_triton",
+)
+#: The block-local window attention (32 queries x 128 / 192 keys per window): the atom DiT block's core.
+_WINDOW_ATTENTION = ("augmented_attention/augmented_attention_*_window_triton",)
+#: The inference pair-bias producer of the portable DiT paths: LayerNorm of the pair and its projection to the heads in one pass.
+_PAIR_BIAS = ("layernorm_linear/layernorm_linear_fwd_triton",)
+
 OP_KERNELS: dict[str, tuple[str, ...]] = {
     "transition": ("transition/*",),
     "triangle_multiplication": ("trimul_inproj/*",),
@@ -54,17 +68,22 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     ),
     "adaptive_layernorm": ("adaln/*",),
     "conditioned_transition": ("conditioned_transition/*", "adaln/*"),
-    "augmented_attention": ("augmented_attention/*", "adaln/*"),
+    "augmented_attention": (*_TOKEN_ATTENTION, "adaln/*"),
     "outer_product_mean": ("outer_product_mean/*",),
     "msa_pair_weighted_averaging": ("pair_weighted_averaging/*",),
     "rmsnorm": ("rmsnorm/*",),
     "layernorm": ("layernorm/*",),
     # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py)
     "gated_linear": ("gated_projection/gated_projection_*", "bias_only_attention/*"),
-    "augmented_attention_pair_bias": ("augmented_attention/*",),
+    "augmented_attention_pair_bias": _TOKEN_ATTENTION,
     "swiglu_ffn": ("transition/transition_expand_swiglu_triton",),
     "swa_atom_attention": ("rope/*", "rmsnorm/*", "gated_projection/swa_gate_out_fwd_triton"),
     "swa_dit": ("swa_dit/*", "rmsnorm/*"),
+    # The attention cores of the portable DiT paths (the rest of those blocks is torch ops and the ops above, each with its own rule):
+    # the AF3 / Protenix / OpenFold3 / ESMFold2 atom block (LocalDiTBlock), and the Boltz-2 / RoseTTAFold3 / Chai-1 token and atom stacks.
+    "local_dit": (*_WINDOW_ATTENTION, *_PAIR_BIAS),
+    "dit_variant": (*_TOKEN_ATTENTION, *_PAIR_BIAS),
+    "dit_variant_atom": (*_WINDOW_ATTENTION, *_PAIR_BIAS),
 }
 
 #: The words of a kernel name that make it a training kernel: it saves activations for the backward (`saveact`), is the backward

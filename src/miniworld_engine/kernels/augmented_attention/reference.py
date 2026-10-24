@@ -117,3 +117,66 @@ class AugmentedAttentionPairBiasReference(nn.Module):
     ) -> torch.Tensor:
         """Forward pass; differentiable in ``query``, ``key``, ``value``, ``bias``."""
         return augmented_attention_pair_bias_pytorch(query, key, value, bias, mask)
+
+
+def window_logits_pytorch(
+    query: torch.Tensor,  # (A, B, N, H, D)
+    key: torch.Tensor,  # (A, B, N, H, D)
+    bias: torch.Tensor,  # (B, H, nwin, 32, keys)
+    starts: torch.Tensor,  # (B, nwin) first key of every 32-query window
+    keep: torch.Tensor,  # (B, N) bool: real atoms (live keys and real queries)
+    *,
+    uid: torch.Tensor | None = None,  # (B, N): a real query sees only keys of its own id
+    keys: int = 128,
+    window_half: int | None = None,  # |query - key| position limit
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(logits, key_index, key_batch)``: the window attention's logits ``(A, B, H, nwin, 32, keys)`` in the accumulation dtype, ``-inf``
+    at every key that is not live (outside ``[0, N)``, masked, past ``window_half``, another ``uid``), and the clamped key positions
+    ``(B, nwin, keys)`` with their batch index, for the caller's value gather."""
+    a, b, n, h, d = query.shape
+    nwin = (n + 31) // 32
+    dev = query.device
+    acc = _accumulator_dtype(query.dtype)
+    pos = starts.long()[:, :, None] + torch.arange(keys, device=dev)                       # (B, nwin, keys)
+    inside = (pos >= 0) & (pos < n)
+    cl = pos.clamp(0, n - 1)
+    bidx = torch.arange(b, device=dev)[:, None, None].expand(b, nwin, keys)
+    live_key = inside & keep.bool()[bidx, cl]                                            # (B, nwin, keys)
+    qpos = torch.arange(nwin * 32, device=dev).view(1, nwin, 32)
+    live = live_key[:, :, None, :].expand(b, nwin, 32, keys)
+    if window_half is not None:
+        live = live & ((qpos[..., None] - pos[:, :, None, :]).abs() <= window_half)
+    if uid is not None:
+        qid = torch.nn.functional.pad(uid, (0, nwin * 32 - n)).view(b, nwin, 32, 1)
+        qreal = torch.nn.functional.pad(keep.bool(), (0, nwin * 32 - n), value=False).view(b, nwin, 32, 1)
+        live = live & ((qid == uid[bidx, cl][:, :, None, :]) | ~qreal)
+    qw = torch.nn.functional.pad(query, (0, 0, 0, 0, 0, nwin * 32 - n)).to(acc).view(a, b, nwin, 32, h, d)
+    kw = key.to(acc)[:, bidx, cl]                                                         # (A, B, nwin, keys, H, D)
+    logits = torch.einsum("abwqhd,abwkhd->abhwqk", qw, kw) * d**-0.5 + bias.to(acc)[None]
+    return logits.masked_fill(~live[None, :, None], float("-inf")), cl, bidx
+
+
+def window_attention_pytorch(
+    query: torch.Tensor,  # (A, B, N, H, D)
+    key: torch.Tensor,  # (A, B, N, H, D)
+    value: torch.Tensor,  # (A, B, N, H, D)
+    bias: torch.Tensor,  # (B, H, nwin, 32, keys)
+    starts: torch.Tensor,  # (B, nwin) first key of every 32-query window
+    keep: torch.Tensor,  # (B, N) bool: real atoms (live keys and real queries)
+    *,
+    uid: torch.Tensor | None = None,
+    keys: int = 128,
+    window_half: int | None = None,
+) -> torch.Tensor:
+    """Block-local window attention (``kernels/augmented_attention/triton/window.py``): query ``32 w + i`` of batch ``b`` attends
+    to the keys ``starts[b, w] + j`` (``j < keys``) that lie in ``[0, N)`` and are kept, within ``window_half`` of it and of its
+    ``uid``, with the bias ``bias[b, :, w, i, j]`` added to the scaled logits. A row with no live key gives 0. fp32 throughout,
+    probabilities rounded to the value dtype before the PV product like the kernel; returns ``(A, B, N, H, D)`` in ``query``'s dtype."""
+    a, b, n, h, d = query.shape
+    nwin = (n + 31) // 32
+    acc = _accumulator_dtype(query.dtype)
+    logits, cl, bidx = window_logits_pytorch(query, key, bias, starts, keep, uid=uid, keys=keys, window_half=window_half)
+    p = torch.nan_to_num(torch.softmax(logits, dim=-1))
+    vw = value.to(acc)[:, bidx, cl]
+    out = torch.einsum("abhwqk,abwkhd->abwqhd", p.to(value.dtype).to(acc), vw)
+    return out.reshape(a, b, nwin * 32, h, d)[:, :, :n].to(query.dtype)

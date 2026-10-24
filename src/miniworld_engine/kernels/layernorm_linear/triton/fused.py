@@ -286,3 +286,45 @@ def _lnl_triton_launch(x, ln_weight, ln_bias, weight, bias, eps, *, save_stats):
         Mean=mean, Rstd=rstd, SAVE_STATS=save_stats,
     )
     return y.reshape(*x.shape[:-1], N), mean, rstd
+
+
+def _layernorm_linear_triton_fwd_t_fake(x, ln_weight, ln_bias, weight, eps=1e-5):
+    """(N, rows): ``weight``'s row count by ``x``'s rows."""
+    return x.new_empty((weight.shape[0], x.numel() // x.shape[-1]))
+
+
+@opaque(fake=_layernorm_linear_triton_fwd_t_fake, name="layernorm_linear_fwd_t")
+def layernorm_linear_triton_fwd_t(
+    x: torch.Tensor,          # (..., K) = (..., d_in)
+    ln_weight: torch.Tensor,  # (K,)
+    ln_bias: torch.Tensor,    # (K,)
+    weight: torch.Tensor,     # (N, K) = (d_out, d_in)
+    eps: float = 1e-5,
+) -> torch.Tensor:
+    """``(LayerNorm(x) @ W^T)^T`` as a contiguous ``(N, rows)`` matrix: the same kernel as :func:`layernorm_linear_triton_fwd`, storing its
+    tile transposed (``stride_ym = 1``), so a pair-bias producer gets ``[heads, rows]`` -- the layout the attention kernels read -- with
+    no permute copy. No bias, no saved statistics (an inference producer). fp32 takes the LayerNorm kernel and cuBLAS, as the row-major
+    entry does."""
+    assert x.is_cuda and weight.is_cuda
+    K = x.shape[-1]
+    N = weight.shape[0]
+    assert weight.shape[1] == K, f"weight (N,K) mismatch: {tuple(weight.shape)} vs K={K}"
+    x2 = x.reshape(-1, K)
+    M = x2.shape[0]
+    if x.dtype == torch.float32 or K > 1024 or M == 0:
+        return layernorm_linear_triton_fwd(x2, ln_weight, ln_bias, weight, None, eps).t().contiguous()
+    x2 = x2.contiguous()
+    w = weight.to(x.dtype).contiguous()
+    y = torch.empty(N, M, device=x.device, dtype=x.dtype)
+    dummy = torch.empty(0, device=x.device, dtype=torch.float32)
+    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)  # noqa: E731  (1-D: N looped in-kernel)
+    _lnl_fwd_kernel[grid](
+        x2, w, x2, ln_weight.contiguous(), ln_bias.contiguous(), y,
+        M, N, K, eps,
+        x2.stride(0), x2.stride(1),
+        w.stride(0), w.stride(1),
+        1, M,
+        HAS_BIAS=False, shape_key=both_key(M, N=N, K=K),
+        Mean=dummy, Rstd=dummy, SAVE_STATS=False,
+    )
+    return y

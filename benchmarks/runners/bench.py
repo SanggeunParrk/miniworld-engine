@@ -244,6 +244,10 @@ class BenchConfig(BaseModel):
     tri_b200_cuda: bool = True
     #: TriangleAttention on H100: False sets `module._h100_cuda = False` (the b200style path of `integrations/triattn_h100.py`).
     tri_h100_cuda: bool = True
+    #: "boltz2" / "rosettafold3" / "chai1": the `dit` target (token stack, `modules.dit_variant.DiTVariantStack`) or the `local_dit` target
+    #: (atom stack, `AtomDiTVariantStack`) benches that model's DiT variant instead of the AF3 block; `n_layers` blocks. Not a yaml key:
+    #: `+dit_variant=boltz2`.
+    dit_variant: Literal["", "boltz2", "rosettafold3", "chai1"] = ""
 
     @model_validator(mode="before")
     @classmethod
@@ -4365,6 +4369,137 @@ KERNEL_TARGETS = {
 }
 
 
+def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
+    """The DiT block variants of Boltz-2 / RoseTTAFold3 / Chai-1 (`modules.dit_variant`), reached through the `dit` (token stack, L tokens, 768
+    wide, 16 x 48 heads) or `local_dit` (atom stack, 8 L atoms, 128 wide, 32 x 128 windows, slid key window) targets with `+dit_variant=`.
+
+    * pytorch -- the stack with `implementation=PYTORCH`: `kernels/dit_variants/reference.py`, fp32 norms and softmax.
+    * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (bf16 inference, no gradient), else the
+      reference on H100 / B200, and on any other card the portable path (`kernels/dit_variants/triton/portable.py`: the engine's Triton
+      attention cores) if the card is recorded, else the reference with a warning (`docs/dispatch.md`).
+    * triton -- the same module under `settings.force_triton_kernels` (the A/B switch, any card): the portable path.
+    `execution_path` says which one ran.
+    The conditioning is shared by the samples (the variants' contract); a tenth of the keys are padding (`mask_prob`)."""
+    from miniworld_engine.modules import dit_variant as dv
+
+    if implementation.strip().lower() == ImplementationType.ANTHROPIC.value:
+        raise UnsupportedBenchmark("the DiT variants have no Anthropic composition")
+    spec = triton_miniworld_spec(implementation)
+    if spec.impl not in {ImplementationType.PYTORCH, ImplementationType.MINIWORLD}:
+        raise UnsupportedBenchmark(f"dit_variant does not implement {implementation!r}")
+    name = conf.dit_variant
+    dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
+    is_train = not is_inference_mode(conf.mode)
+    atoms = seq_len * 8
+
+    if atom:
+        options = {"boltz2": dv.BOLTZ2_ATOM, "rosettafold3": dv.ROSETTAFOLD3_ATOM, "chai1": dv.CHAI1_ATOM}[name]
+
+        def build(impl):
+            return dv.AtomDiTVariantStack(conf.n_layers, 128, 128, conf.d_pair_atom, 2, implementation=impl, **options)
+
+        length, width, cond_width, pair_shape = atoms, 128, 128, (atoms // 32, 32, 128, conf.d_pair_atom)
+    else:
+        options = {"boltz2": dv.BOLTZ2, "rosettafold3": dv.ROSETTAFOLD3, "chai1": dv.CHAI1}[name]
+        d_cond, d_pair = options["d_cond"], options["d_pair"]
+
+        def build(impl):
+            return dv.DiTVariantStack(conf.n_layers, conf.d_single_token, d_cond, d_pair, conf.tdit_n_head, 2, implementation=impl,
+                                      **{k: v for k, v in options.items() if k not in ("d_cond", "d_pair")})
+
+        length, width, cond_width, pair_shape = seq_len, conf.d_single_token, d_cond, (seq_len, seq_len, d_pair)
+
+    model = build(spec.impl)
+    torch.manual_seed(0)
+    with torch.no_grad():
+        for prm in model.parameters():
+            if prm.ndim == 2:
+                prm.normal_(std=prm.shape[1] ** -0.5)
+            elif prm.ndim == 1 and prm.numel() > 1:
+                prm.add_(torch.randn_like(prm) * 0.1)
+    state = {k: v.detach().clone() for k, v in model.state_dict().items()}
+    model = _place(model, conf, dtype)
+    model.train(is_train)
+
+    torch.manual_seed(1)
+    single = torch.randn(conf.n_augment, length, width, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    cond = torch.randn(length, cond_width, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    pair = torch.randn(*pair_shape, device=DEVICE, dtype=dtype, requires_grad=is_train)
+    mask = torch.rand(length, device=DEVICE) > conf.mask_prob
+    if atom:
+        mask = torch.arange(length, device=DEVICE) < int(length * (1 - conf.mask_prob))   # the real atoms come first
+    uid = (torch.arange(length, device=DEVICE) // 45).int() if (atom and name == "chai1") else None
+    dy = torch.randn_like(single)
+
+    def call(m, *tensors):
+        return m(*tensors, mask, uid) if atom else m(*tensors, mask)
+
+    if spec.impl == ImplementationType.PYTORCH:
+        execution_path = "kernels.dit_variants.reference[torch]"
+    else:
+        from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.triton import portable
+
+        with torch.set_grad_enabled(is_train):
+            h100 = (interface.atom_serves(model, single, cond, pair, mask, uid) if atom else interface.serves(model, single, cond, pair, mask))
+            tri = (portable.atom_serves(model, single, cond, pair, mask, uid) if atom else portable.serves(model, single, cond, pair, mask))
+        execution_path = (
+            "kernels.dit_variants.interface[H100 CUDA rows + cuBLAS + the token / atom DiT attention core]" if h100
+            else "kernels.dit_variants.triton.portable[reference structure, attention cores "
+                 + ("kernels.augmented_attention.triton.window" if atom else "kernels.augmented_attention.triton.main")
+                 + ", pair LayerNorm once per stack]" if tri
+            else "kernels.dit_variants.reference[torch: neither the H100 path nor the portable path served]")
+
+    accuracy: AccuracyFields = {}
+    reference = "kernels.dit_variants.reference[fp32 IEEE]"
+    if not is_train and single.is_cuda:
+        tf32 = (torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32)
+        try:
+            ref_model = build(ImplementationType.PYTORCH)
+            ref_model.load_state_dict(state)
+            ref_model = ref_model.to(DEVICE).eval()
+            with torch.no_grad():
+                torch.backends.cuda.matmul.allow_tf32 = torch.backends.cudnn.allow_tf32 = False
+                try:
+                    expected = call(ref_model, single.float(), cond.float(), pair.float())
+                finally:
+                    torch.backends.cuda.matmul.allow_tf32, torch.backends.cudnn.allow_tf32 = tf32
+                del ref_model
+                actual = call(model, single, cond, pair)
+            live = int(mask.sum()) if atom else length
+            out_max, out_rel, out_cos = tensor_metrics(actual[:, :live] if atom else actual, expected[:, :live] if atom else expected)
+            accuracy = {"output_max_abs": out_max, "output_rel_frob": out_rel, "output_cosine": out_cos}
+            del actual, expected
+        except torch.cuda.OutOfMemoryError:
+            print(f"  [{implementation}] fp32 reference did not fit at L={length}: no accuracy columns", flush=True)
+        torch.cuda.empty_cache()
+
+    if conf.compile:
+        compile_module_for_benchmark(model)
+    model = fabric.setup_module(model)
+
+    def inference_step():
+        with torch.no_grad():
+            return call(model, single, cond, pair)
+
+    def training_step() -> torch.Tensor:
+        y = call(model, single, cond, pair)
+        fabric.backward(y, dy)
+        return y
+
+    return measured_result(
+        conf=conf,
+        func=inference_step if not is_train else training_step,
+        grad_to_none=[single, cond, pair, *list(model.parameters())],
+        params=list(model.parameters()),
+        is_train=is_train,
+        input_dtype=str(dtype).replace("torch.", ""),
+        parameter_dtype=parameter_dtype_of(model),
+        execution_path=execution_path,
+        reference=reference,
+    )._replace(**accuracy)
+
+
 def bench_module_dit(conf, seq_len, implementation, fabric):
     """Pair-bias token DiT block: augmented attention (pair bias) + conditioned transition, both
     residuals explicit. `modules/dit`.
@@ -4398,6 +4533,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     Inference rows carry accuracy columns against an fp32 `DiTBlock(implementation=PYTORCH)` on
     the same (non-default) weights and inputs.
     """
+    if conf.dit_variant:
+        return _bench_dit_variant(conf, seq_len, implementation, fabric, atom=False)
     from miniworld_engine.modules.dit import DiTBlock
 
     length = seq_len
@@ -5597,6 +5734,8 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     * anthropic -- the block composed from Anthropic's windowed atom attention (apb row fpf_atom) and the atom row kernels of
       their fused atom block (`ditfast.atom_kernels`), torch GEMMs between them (`_anthropic_local_dit_composition`); inference only.
     """
+    if conf.dit_variant:
+        return _bench_dit_variant(conf, seq_len, implementation, fabric, atom=True)
     from miniworld_engine.modules.local_dit import LocalDiTBlock
     from miniworld_engine.modules.local_dit.module import KEYS, QUERIES, windows
 
@@ -5711,12 +5850,18 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
 
         with torch.set_grad_enabled(is_train):
             served = fused.serves(model.layers[0], single, cond, pair, mask)
-        execution_path = (
-            "modules.local_dit.LocalDiTBlock -> integrations.local_dit[local_dit_block_fwd / _bwd: sm_100a window attention + "
-            "pair-bias kernels, atom DiT row kernels]"
-            if served
-            else "modules.local_dit.LocalDiTBlock[reference composition: integrations.local_dit.serves() declined]"
-        )
+        if served:
+            execution_path = (
+                "modules.local_dit.LocalDiTBlock -> integrations.local_dit[local_dit_block_fwd / _bwd: sm_100a window attention + "
+                "pair-bias kernels, atom DiT row kernels]"
+            )
+        elif model.layers[0]._window_triton(single, d_single // n_head):
+            execution_path = (
+                "modules.local_dit.LocalDiTBlock[portable: AdaLN / projections as the module, attention core "
+                "kernels.augmented_attention.triton.window]"
+            )
+        else:
+            execution_path = "modules.local_dit.LocalDiTBlock[reference composition: integrations.local_dit.serves() declined]"
 
     accuracy: AccuracyFields = {}
     reference = "module.reference.torch"

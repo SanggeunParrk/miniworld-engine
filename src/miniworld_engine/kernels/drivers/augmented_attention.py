@@ -14,6 +14,7 @@ from miniworld_engine.kernels.drivers import (
     TensorKw,
     _grad,
     dev,
+    driver_length,
     driver_width,
     ragged,
 )
@@ -85,3 +86,51 @@ def augmented_attention_bwd_atomic_triton() -> None:
         TritonAugmentedAttentionFunction as Fn,
     )
     _grad(Fn.apply(*_aug_qkvb()))
+
+
+# ── augmented_attention / triton / window.py ────────────────────────────────────────────────
+# The atom block's window attention (32 queries x 128 keys, 4 heads x 32, bias per window): an ATOM-stream kernel, driven at the atom
+# ladder (`drivers/conditioned_transition`'s `_M` rule) with the last atoms masked so the slid window and the key mask are both live.
+_WIN_N = ragged(driver_length(1024))
+_WIN_H = 4
+_WIN_D = 32
+_WIN_KEYS = 128
+
+
+def _window_inputs(requires_grad: bool = True):
+    """q/k/v [A, 1, N, 4, 32], bias [1, 4, nwin, 32, 128], keep [1, N] (the last 5 atoms are padding) and the slid window starts."""
+    from miniworld_engine.kernels.augmented_attention.triton.window import plan
+
+    n = _WIN_N
+    nwin = (n + 31) // 32
+    kw: TensorKw = {"device": dev(), "dtype": BF16, "requires_grad": requires_grad}
+    q, k, v = (torch.randn(A, 1, n, _WIN_H, _WIN_D, **kw) for _ in range(3))
+    bias = torch.randn(1, _WIN_H, nwin, 32, _WIN_KEYS, **kw)
+    keep = torch.ones(1, n, dtype=torch.bool, device=dev())
+    keep[:, n - 5:] = False
+    return q, k, v, bias, keep, plan("slide", n, nwin, _WIN_KEYS, keep, dev())
+
+
+def _window_apply(q, k, v, bias, keep, starts):
+    from miniworld_engine.kernels.augmented_attention.triton.window import (
+        window_attention,
+    )
+    return window_attention(q, k, v, bias, starts, keep, keys=_WIN_KEYS)
+
+
+def augmented_attention_fwd_window_triton() -> None:
+    q, k, v, bias, keep, starts = _window_inputs(False)
+    _window_apply(q, k, v, bias, keep, starts)
+
+
+def _window_backward() -> None:
+    q, k, v, bias, keep, starts = _window_inputs()
+    _grad(_window_apply(q, k, v, bias, keep, starts))
+
+
+def augmented_attention_bwd_window_triton() -> None:
+    _window_backward()
+
+
+def augmented_attention_bwd_reduce_window_triton() -> None:
+    _window_backward()

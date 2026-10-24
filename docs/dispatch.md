@@ -63,6 +63,14 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 | LayerNorm | Triton forward, CUDA / Triton backward | same | same | CUDA (general kernel) | warns, PyTorch |
 | SWA atom attention (QK norm + RoPE, gate) | warns (3 / 4 of 6) | warns (4 / 6 of 6) | warns (4 / 6 of 6) | CUDA, else PyTorch | warns, PyTorch |
 | SWADiTBlock | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
+| LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
+| DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | Triton | Triton | Triton | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+| AtomDiTVariantStack (their atom stacks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+
+The three DiT rows are the portable attention cores ([docs/records/triton_dit_portable_20261024.md](records/triton_dit_portable_20261024.md)):
+the window kernels (`augmented_attention_{fwd,bwd,bwd_reduce}_window_triton`) have no row on any card yet, so the atom paths warn and run
+PyTorch until `run_all` has been run there; the token stacks launch the token attention kernels and the `layernorm_linear` forward, which the
+Ampere manifests do record, so by the rule they already take Triton there -- on the strength of those old rows, not of a run of the stack.
 
 Why so many "warns": the Ampere manifests are from 2026-08-31 / 09-01 (v1.0.0), before the OuterProductMean, MSAPairWeightedAveraging,
 SWA and several TriMul / AdaLN / Transition kernels existed, so those kernels have no row. The routing is one function for every card;

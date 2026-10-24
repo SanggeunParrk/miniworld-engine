@@ -116,3 +116,82 @@ def augmented_attention_bwd_atomic_triton() -> dict[str, Pair]:
     # Same math as the split backward, dq accumulated by atomics into one fp32 buffer instead of
     # per-program slots -- so the same reference has to hold.
     return _grads(Fn.apply, _aug_qkvb(), _aug_ref, ("dq", "dk", "dv", "dbias"))
+
+
+# ── augmented_attention / triton / window.py ────────────────────────────────────────────────
+
+
+def _window_ref(keep, starts):
+    from miniworld_engine.kernels.augmented_attention.reference import (
+        window_attention_pytorch,
+    )
+    from miniworld_engine.kernels.drivers.augmented_attention import _WIN_KEYS
+    return lambda q, k, v, bias: window_attention_pytorch(q, k, v, bias, starts, keep, keys=_WIN_KEYS)
+
+
+def augmented_attention_fwd_window_triton() -> dict[str, Pair]:
+    from miniworld_engine.kernels.augmented_attention.reference import (
+        window_logits_pytorch,
+    )
+    from miniworld_engine.kernels.augmented_attention.triton.window import (
+        WindowAttentionFunction as Fn,
+    )
+    from miniworld_engine.kernels.drivers.augmented_attention import (
+        _WIN_KEYS,
+        _window_inputs,
+    )
+    _fp32_matmul()
+    q, k, v, bias, keep, starts = _window_inputs()
+    # save order: (q, k, v, bias, starts, keep, uid, out, lse, lo, hi) -> lse at 8 (natural log, [A, B, H, nwin * 32])
+    out, lse = _fwd_saved(lambda *t: Fn.apply(*t, starts, keep.to(torch.uint8), None, _WIN_KEYS, -1), (q, k, v, bias), 8)
+    qf, kf, vf, bf = (t.detach().float() for t in (q, k, v, bias))
+    logits, _, _ = window_logits_pytorch(qf, kf, bf, starts, keep, keys=_WIN_KEYS)
+    a, b, h, nwin = logits.shape[:4]
+    return {"out": (out, _window_ref(keep, starts)(qf, kf, vf, bf)),
+            "lse": (lse, torch.logsumexp(logits, -1).reshape(a, b, h, nwin * 32))}
+
+
+def augmented_attention_bwd_window_triton() -> dict[str, Pair]:
+    from miniworld_engine.kernels.drivers.augmented_attention import (
+        _window_apply,
+        _window_inputs,
+    )
+    _fp32_matmul()
+    q, k, v, bias, keep, starts = _window_inputs()
+    return _grads(lambda *t: _window_apply(*t, keep, starts), (q, k, v, bias), _window_ref(keep, starts), ("dq", "dk", "dv", "dbias"))
+
+
+def augmented_attention_bwd_reduce_window_triton() -> Pair:
+    from miniworld_engine.kernels.augmented_attention.triton.window import (
+        _window_fold,
+        fold_range,
+    )
+    from miniworld_engine.kernels.drivers.augmented_attention import (
+        _WIN_D,
+        _WIN_H,
+        _WIN_KEYS,
+        _WIN_N,
+        _window_inputs,
+    )
+    n, h, d, keys = _WIN_N, _WIN_H, _WIN_D, _WIN_KEYS
+    _, _, _, _, _, starts = _window_inputs(False)
+    nwin = starts.shape[1]
+    ntile = (n + 31) // 32
+    lo, hi = fold_range(starts, n, keys)
+    dkp = torch.randn(A, 1, nwin, keys, h, d, device=dev(), dtype=torch.float32)
+    dvp = torch.randn_like(dkp)
+    dk = torch.empty(A, 1, n, h, d, device=dev(), dtype=torch.float32)
+    dv = torch.empty_like(dk)
+    from miniworld_engine.autotune.shape_key import atom_key, pack
+    _window_fold[lambda meta: (ntile, A, h * triton.cdiv(d, meta["BLOCK_D"]))](
+        dkp, dvp, dk, dv, starts, lo, hi, dk.stride(0), dk.stride(1), dk.stride(2), dk.stride(3),
+        n, nwin, ntile, 1, H=h, HEAD_DIM=d, KEYS=keys, shape_key=pack(atom_key(n), H=h, HEAD_DIM=d),
+    )
+    # reference: every window's partial added at its keys, dense and in fp32
+    pos = (starts.long()[0][:, None] + torch.arange(keys, device=dev())).reshape(-1)         # [nwin * keys]
+    ok = (pos >= 0) & (pos < n)
+    ref_k = torch.zeros(A, n, h, d, device=dev())
+    ref_v = torch.zeros_like(ref_k)
+    ref_k.index_add_(1, pos[ok], dkp[:, 0].reshape(A, nwin * keys, h, d)[:, ok])
+    ref_v.index_add_(1, pos[ok], dvp[:, 0].reshape(A, nwin * keys, h, d)[:, ok])
+    return torch.stack([dk, dv]), torch.stack([ref_k[:, None], ref_v[:, None]])

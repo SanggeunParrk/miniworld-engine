@@ -359,6 +359,10 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     # The SWA atom attention's pointwise ops and the engine SWADiTBlock: no module-level resolve, but the same per-card rule.
     "swa_atom_attention": KernelBackend.TRITON,
     "swa_dit": KernelBackend.TRITON,
+    # The attention cores of the portable DiT paths: the Triton window / token kernels where the card is recorded (same per-card rule).
+    "local_dit": KernelBackend.TRITON,
+    "dit_variant": KernelBackend.TRITON,
+    "dit_variant_atom": KernelBackend.TRITON,
 }
 
 

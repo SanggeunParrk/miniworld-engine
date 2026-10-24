@@ -30,6 +30,17 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
     no `[B, L, H, L, L]` logits tensor is built. Heads of 16..128 channels, any width the cuBLAS projections take.
 - Registry rows, drivers (the projection kernels are driven at the base call and both variants; PWA at `d_hidden` 32 and 8) and checkers for
   the three new kernels; module rows for the variants in `registry_module.csv` (the derivation reaches them).
+- Portable DiT paths on the engine's Triton kernels, behind `miniworld` on a card the engine holds a record for (`docs/dispatch.md`; H100 / B200 keep
+  CUDA, else PyTorch, and run these under `settings.force_triton_kernels` for A/B work):
+  - `kernels/augmented_attention/triton/window.py` (`window_attention`, `WindowAttentionFunction`): the AlphaFold-3 atom attention (32 queries x 128 / 192 keys per
+    window, per-window pair bias, the slid or clipped key window, key mask, ESMFold2's rank window, Chai-1's same-conformer mask), forward and backward, no
+    `[nwin, 32, keys]` fp32 intermediates and no atomics (the key / value gradients are summed in a fixed order, the bias gradient over fixed sample groups: bitwise
+    reproducible). `LocalDiTBlock` takes it as its attention core (`_window_triton`; AF3 and ESMFold2 variants); registry rows
+    `augmented_attention_{fwd,bwd,bwd_reduce}_window_triton`, op `local_dit` of `autotune.records`.
+  - `kernels/dit_variants/triton/portable.py`: `DiTVariantStack` / `AtomDiTVariantStack` (Boltz-2, RoseTTAFold3, Chai-1) on those cores (token stacks on the
+    token pair-bias attention), the pair's LayerNorm + projection in one pass for every block (`layernorm_linear_triton_fwd_t`), differentiable by autograd.
+    Entry points: `portable.serves` / `portable.atom_serves` (the module's forward calls them after the H100 path).
+  - `bench.py`: `+dit_variant=boltz2|rosettafold3|chai1` on the `dit` (token stack) and `local_dit` (atom stack) targets.
 
 ### Changed
 

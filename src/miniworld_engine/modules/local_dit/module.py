@@ -51,6 +51,11 @@ ESMFOLD2 = {
 }
 
 
+def _needs_grad(*tensors: torch.Tensor) -> bool:
+    """Does a gradient have to flow into any of ``tensors`` in this call?"""
+    return torch.is_grad_enabled() and any(t.requires_grad for t in tensors)
+
+
 def windows(n: int) -> int:
     return (n + QUERIES - 1) // QUERIES
 
@@ -180,6 +185,51 @@ class LocalDiTBlock(DiTBlock):
             att.ada_ln_kv = (AdaptiveRMSNorm(d_single, d_cond) if conditioning == "rms_silu"
                              else AdaptiveLayerNorm(d_single, d_cond, implementation=implementation))
 
+    def _window_triton(self, x, head_dim: int) -> bool:
+        """Does the attention core run on the Triton window kernel (``kernels/augmented_attention/triton/window.py``)? The portable
+        core of the ``miniworld`` backend (op ``local_dit`` of ``modules.dispatch`` / ``autotune.records``): on a card the engine holds a
+        record for (every window kernel the call launches has an ``ok`` manifest row; the backward ones only when the call needs a
+        gradient), never on H100 / B200 (PyTorch is the fallback there by design) unless ``settings.force_triton_kernels`` is on. A
+        card without a record warns once and runs the PyTorch core; a call the kernel refuses (head width > 64, more than 256 keys,
+        float64) warns once (``KernelRefusedWarning``) and does the same."""
+        from miniworld_engine.modules import dispatch
+
+        if self.attention.implementation != ImplementationType.MINIWORLD or not x.is_cuda:
+            return False
+        if not dispatch.triton_leg_allowed(x.device, "local_dit", training=dispatch.needs_backward(self, x)):
+            return False
+        why = (
+            f"head width {head_dim} > 64" if head_dim > 64
+            else f"{self.keys} keys > 256" if self.keys > 256
+            else f"dtype {x.dtype}" if x.dtype not in (torch.bfloat16, torch.float16, torch.float32)
+            else None
+        )
+        if why is not None:
+            dispatch.warn_refused("local_dit", x.device, why)
+            return False
+        return True
+
+    def serves_portable(self, single: torch.Tensor) -> bool:
+        """Does ``forward(single, ...)`` run its attention core on the portable Triton window kernel on this card (the ``miniworld``
+        rule of ``docs/dispatch.md``: a recorded card, or ``settings.force_triton_kernels``; never H100 / B200 by default)? The question
+        a caller's ``serve_*`` seam asks on a card without the engine's CUDA paths; it may warn once (unrecorded card / refused call)."""
+        return self._window_triton(single, single.shape[-1] // self.attention.n_head)
+
+    def _window_core_triton(self, q, k, v, bias, keep, a, b, n, h, d, dtype) -> torch.Tensor:
+        """The window attention on the Triton kernel. ``q, k, v``: [A, B, N, H*D] (norm and rotary already applied), ``bias``
+        [B, H, nwin, 32, keys], ``keep`` [B, N] bool (real atoms first). Returns [A, B, N, H*D] in ``dtype``."""
+        from miniworld_engine.kernels.augmented_attention.triton import (
+            window as _window,
+        )
+
+        nwin, keys = windows(n), self.keys
+        starts = _window.plan(self.key_window, n, nwin, keys, keep, q.device)
+        if starts.shape[0] != b:
+            starts = starts.expand(b, -1).contiguous()
+        q, k, v = (t.to(dtype).reshape(a, b, n, h, d) for t in (q, k, v))
+        out = _window.window_attention(q, k, v, bias, starts, keep, keys=keys, window_half=self.window_half)
+        return out.reshape(a, b, n, h * d)
+
     def attention_delta(self, single, cond, pair, mask=None, rope=None) -> torch.Tensor:
         """The attention's update (no residual), PyTorch: AdaLN, q / k / v / gate, softmax over each 32 x ``keys`` window, gates."""
         att = self.attention
@@ -207,9 +257,20 @@ class LocalDiTBlock(DiTBlock):
             raise ValueError(f"pair must be the trunked atom pair [B, {nwin}, {QUERIES}, {keys}, d_pair], got {tuple(pair.shape)}")
         if self.rope and rope is None:
             raise ValueError("this block rotates q and k: pass rope=(cos, sin), each [B, N, r]")
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
-        bias = (proj(att.to_bias, z, wb) if master else F.linear(z, att.to_bias.weight.to(z.dtype))).permute(0, 4, 1, 2, 3)
+        use_triton = self._window_triton(x, d)
+        if use_triton and not _needs_grad(pair, att.ln_pair.weight, att.to_bias.weight):
+            # inference: LayerNorm + the 16 -> 4 projection in one pass, stored [H, rows] (torch's LayerNorm over 16-wide rows is ~20x slower)
+            from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+                layernorm_linear_triton_fwd_t,
+            )
+
+            ln_w = att.ln_pair.weight
+            bias = layernorm_linear_triton_fwd_t(pair, ln_w, torch.zeros_like(ln_w), att.to_bias.weight, att.ln_pair.eps)
+            bias = bias.view(h, b, nwin, QUERIES, keys).permute(1, 0, 2, 3, 4)
+        else:
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                z = F.layer_norm(pair, (pair.shape[-1],), att.ln_pair.weight.to(pair.dtype), None, att.ln_pair.eps)
+            bias = (proj(att.to_bias, z, wb) if master else F.linear(z, att.to_bias.weight.to(z.dtype))).permute(0, 4, 1, 2, 3)
         q = proj(att.to_query, x, wq, bq)
         # AF3 cross-attention mode: a second AdaLN for K / V (ty types the nn.Module attribute as Tensor). Chained: of the already
         # normalised atoms (Protenix); parallel: of the raw atoms, next to the first one (AlphaFold 3).
@@ -228,35 +289,40 @@ class LocalDiTBlock(DiTBlock):
                 raise ValueError(f"rope tables must be [B, N, r] with r <= {d // 2}, got {tuple(cos.shape)} / {tuple(sin.shape)}")
             q = apply_rope(q.to(wide).reshape(a, b, n, h, d), cos.to(wide), sin.to(wide)).reshape(a, b, n, h * d)
             k = apply_rope(k.to(wide).reshape(a, b, n, h, d), cos.to(wide), sin.to(wide)).reshape(a, b, n, h * d)
-        qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
-        keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
-        if self.key_window == "slide":
-            n_real = keep.sum(-1).long()
-            starts = slide_starts(n_real, nwin, keys)
-            kw = slide_windows(k, starts, keys).reshape(a, b, nwin, keys, h, d)
-            vw = slide_windows(v, starts, keys).reshape(a, b, nwin, keys, h, d)
+        if use_triton:
+            # the portable core: one Triton kernel per window batch, no [nwin, 32, keys] fp32 intermediates (see the method)
+            keep_b = torch.ones(b, n, dtype=torch.bool, device=x.device) if mask is None else mask.bool()
+            out = self._window_core_triton(q, k, v, bias, keep_b, a, b, n, h, d, x.dtype)
         else:
-            kw = _key_windows(k, n, keys=keys).reshape(a, b, nwin, keys, h, d)
-            vw = _key_windows(v, n, keys=keys).reshape(a, b, nwin, keys, h, d)
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
-        if self.key_window == "slide":
-            # the slid window lies inside the real atoms; only a system under `keys` atoms has keys past them
-            valid = slide_windows(keep[None, ..., None], starts, keys)[0, ..., 0] > 0
-            key_pos = starts[:, :, None] + torch.arange(keys, device=x.device)                       # [B, nwin, keys]
-        else:
-            valid = _key_windows(keep[..., None], n, keys=keys)[..., 0] > 0                # [B, nwin, keys]
-            key_pos = (torch.arange(nwin, device=x.device)[:, None] * QUERIES - (keys - QUERIES) // 2
-                       + torch.arange(keys, device=x.device))[None].expand(b, -1, -1)
-        valid = valid[:, :, None, :]                                                               # [B, nwin, 1, keys]
-        if self.window_half is not None:   # +/- window_half by rank among the real atoms = by position (the real atoms come first)
-            query_pos = torch.arange(nwin * QUERIES, device=x.device).view(1, nwin, QUERIES, 1)
-            valid = valid & ((query_pos - key_pos[:, :, None, :]).abs() <= self.window_half)
-        scores = scores.masked_fill(~valid[None, :, None], float("-inf"))
-        probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
-        with torch.autocast(device_type=x.device.type, enabled=False):
-            out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(wide)).to(x.dtype)
-        out = out.reshape(a, b, nwin * QUERIES, h * d)[:, :, :n]
+            qw = F.pad(q, (0, 0, 0, nwin * QUERIES - n)).reshape(a, b, nwin, QUERIES, h, d)
+            keep = torch.ones(b, n, device=x.device) if mask is None else mask.float()
+            if self.key_window == "slide":
+                n_real = keep.sum(-1).long()
+                starts = slide_starts(n_real, nwin, keys)
+                kw = slide_windows(k, starts, keys).reshape(a, b, nwin, keys, h, d)
+                vw = slide_windows(v, starts, keys).reshape(a, b, nwin, keys, h, d)
+            else:
+                kw = _key_windows(k, n, keys=keys).reshape(a, b, nwin, keys, h, d)
+                vw = _key_windows(v, n, keys=keys).reshape(a, b, nwin, keys, h, d)
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                scores = torch.einsum("abwqhd,abwkhd->abhwqk", qw.to(wide), kw.to(wide)) * d**-0.5 + bias.to(wide)[None]
+            if self.key_window == "slide":
+                # the slid window lies inside the real atoms; only a system under `keys` atoms has keys past them
+                valid = slide_windows(keep[None, ..., None], starts, keys)[0, ..., 0] > 0
+                key_pos = starts[:, :, None] + torch.arange(keys, device=x.device)                       # [B, nwin, keys]
+            else:
+                valid = _key_windows(keep[..., None], n, keys=keys)[..., 0] > 0                # [B, nwin, keys]
+                key_pos = (torch.arange(nwin, device=x.device)[:, None] * QUERIES - (keys - QUERIES) // 2
+                           + torch.arange(keys, device=x.device))[None].expand(b, -1, -1)
+            valid = valid[:, :, None, :]                                                               # [B, nwin, 1, keys]
+            if self.window_half is not None:   # +/- window_half by rank among the real atoms = by position (the real atoms come first)
+                query_pos = torch.arange(nwin * QUERIES, device=x.device).view(1, nwin, QUERIES, 1)
+                valid = valid & ((query_pos - key_pos[:, :, None, :]).abs() <= self.window_half)
+            scores = scores.masked_fill(~valid[None, :, None], float("-inf"))
+            probs = torch.nan_to_num(torch.softmax(scores, dim=-1))
+            with torch.autocast(device_type=x.device.type, enabled=False):
+                out = torch.einsum("abhwqk,abwkhd->abwqhd", probs, vw.to(wide)).to(x.dtype)
+            out = out.reshape(a, b, nwin * QUERIES, h * d)[:, :, :n]
         out = proj(att.to_out, torch.sigmoid(gate) * out, wo)
         if rms:   # ESMFold2: the raw gate of the activated conditioning
             return proj(att.to_scale, F.silu(cond)) * out

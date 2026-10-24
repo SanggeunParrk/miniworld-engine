@@ -66,6 +66,17 @@ class DiTVariantBlock(nn.Module):
         self.trans_zero = nn.Linear(d_cond, d)
 
 
+def serves_portable(stack: nn.Module, *inputs: torch.Tensor | None) -> bool:
+    """Would ``stack(*inputs)`` run on the portable Triton path (``kernels/dit_variants/triton/portable.py``) on this card? The inputs
+    are the ones of the stack's forward: ``(single, cond, pair, mask)`` for a :class:`DiTVariantStack`, ``(single, cond, pair, mask, uid)``
+    for an :class:`AtomDiTVariantStack`. True on a card the engine holds a record for (``docs/dispatch.md``) or under
+    ``settings.force_triton_kernels``; False on H100 / B200 by default, where the CUDA path (``kernels.dit_variants.interface.serves``)
+    or the PyTorch reference runs. A caller's ``variant_serves`` seam asks this after the H100 question."""
+    from miniworld_engine.kernels.dit_variants.triton import portable
+
+    return bool(portable.atom_serves(stack, *inputs) if isinstance(stack, AtomDiTVariantStack) else portable.serves(stack, *inputs))
+
+
 class DiTVariantStack(nn.Module):
     """``n_blocks`` variant blocks; ``forward(single [A, L, D], cond [L, c_s] (shared by the samples) or [A, L, c_s], pair [L, L, C],
     mask [L] bool or None)`` -> [A, L, D]."""
@@ -83,6 +94,10 @@ class DiTVariantStack(nn.Module):
 
             if interface.serves(self, single, cond, pair, mask):
                 return interface.inference(self, single, cond, pair, mask)
+            from miniworld_engine.kernels.dit_variants.triton import portable
+
+            if portable.serves(self, single, cond, pair, mask):
+                return portable.stack_forward(self, single, cond, pair, mask)
         return reference.stack_forward(self, single, cond, pair, mask)
 
 
@@ -154,4 +169,8 @@ class AtomDiTVariantStack(nn.Module):
 
             if interface.atom_serves(self, single, cond, pair, mask, uid):
                 return interface.atom_inference(self, single, cond, pair, mask, uid)
+            from miniworld_engine.kernels.dit_variants.triton import portable
+
+            if portable.atom_serves(self, single, cond, pair, mask, uid):
+                return portable.atom_stack_forward(self, single, cond, pair, mask, uid)
         return reference.atom_stack_forward(self, single, cond, pair, mask, uid)

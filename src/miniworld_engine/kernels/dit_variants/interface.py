@@ -19,6 +19,7 @@ import math
 import torch
 import torch.nn.functional as F
 
+from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 
 LOG2E = 1.4426950408889634
@@ -48,7 +49,7 @@ def serves(stack, single, cond, pair, mask) -> bool:
     the conditioning shared by the samples."""
     if torch.is_grad_enabled() or not single.is_cuda or single.dtype is not torch.bfloat16:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+    if torch.cuda.get_device_capability(single.device) != (9, 0) or settings.current().force_triton_kernels:
         return False
     from miniworld_engine.kernels.augmented_attention.cuda import (
         inference_core_supported,
@@ -201,7 +202,7 @@ _ATOM_BIASES: dict = {}
 def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     if torch.is_grad_enabled() or not single.is_cuda or single.dtype is not torch.bfloat16 or single.ndim != 3:
         return False
-    if torch.cuda.get_device_capability(single.device) != (9, 0):
+    if torch.cuda.get_device_capability(single.device) != (9, 0) or settings.current().force_triton_kernels:
         return False
     _, n, d = single.shape
     shared = cond.ndim == 2 or (cond.ndim == 3 and (cond.shape[0] == 1 or cond.stride(0) == 0))
