@@ -58,6 +58,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- Portable Transition on H100 (A/B switch `force_portable_kernels`): row-interleaved expand weights, persistent tensor-map GEMMs on sm_90 (pointer kernels elsewhere), H100 tile sets in the default config lists and a fused squeeze/SwiGLU backward kernel (`transition_bwd_squeeze_swiglu_triton`); all Transition inference rows and training D256 L384 now beat PyTorch, the other training rows are 1.0-1.23x of it. Record: `docs/records/portable_transition_ladder_20261025.md`.
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
 
