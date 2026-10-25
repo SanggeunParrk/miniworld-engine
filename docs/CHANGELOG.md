@@ -65,6 +65,11 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- H100 `sampler_ops` CUDA kernels (`augment_noise`, `align_euler`, `pool_atoms`) are now faster than the portable kernels in every measured cell (A = 1 .. 48, 4k .. 32k atoms, CUDA graph),
+  restoring CUDA < portable < compiled PyTorch: 1.1-1.7x ahead of the portable kernels and 1.05-3.3x faster than the previous CUDA kernels (`augment_noise` 1.05-1.5x, `align_euler` 1.15-1.8x, `pool_atoms` 1.6-3.3x; `pool_atoms` 12.4-13.1 us -> 3.8-4.9 us at A = 1).
+  Programmatic dependent launch between the kernels of an op, partials staged in shared memory and summed in chunk order, 256 / 512-atom chunks for small launches, a one-round-trip gather in
+  `pool_atoms`. Results are bit-identical to before except where the chunk shrinks (small `augment_noise` / `align_euler` launches: fp32 sums associate differently, <= 1.8e-7 relative);
+  `pool_atoms` is bit-identical. Record `docs/records/h100_sampler_ops_cuda_20261025.md`, page [gpus/h100/sampler_ops](gpus/h100/sampler_ops/sampler_ops.md).
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
 
