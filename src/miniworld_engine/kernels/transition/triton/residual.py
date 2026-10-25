@@ -8,7 +8,12 @@ from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
-from miniworld_engine.kernels.transition.triton.main import _expand_swiglu, swiglu_squeeze_backward
+from miniworld_engine.kernels.transition.triton.main import (
+    _expand_swiglu,
+    _expand_swiglu_saveact,
+    swiglu_squeeze_backward,
+)
+from miniworld_engine.kernels.transition.triton.training import dh_gate
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
 
 
@@ -70,17 +75,30 @@ class ResidualTransitionFunction(torch.autograd.Function):
         shape = xn.shape
         xn = xn.reshape(-1, shape[-1]).contiguous()
         key = both_key(rows_of(shape))
-        h = _expand_swiglu(xn, wa, wb, key)
-        ctx.save_for_backward(xn, wa, wb, ws)
+        if any(ctx.needs_input_grad):
+            # training: the forward also keeps the two expand halves, so the backward is ONE GEMM with the gate
+            # epilogue (training.dh_gate) instead of a recompute of both expand GEMMs
+            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key)
+            ctx.save_for_backward(xn, wa, wb, ws, h, a, b)
+        else:
+            h = _expand_swiglu(xn, wa, wb, key)
+            ctx.save_for_backward()
         ctx.shape = shape
+        ctx.key = key
         return squeeze_residual(h, ws, residual.reshape(-1, shape[-1]), key).reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        xn, wa, wb, ws = ctx.saved_tensors
+        xn, wa, wb, ws, h, a, b = ctx.saved_tensors
         flat = dy.reshape(-1, dy.shape[-1]).contiguous()
-        dx, dwa, dwb, dws = swiglu_squeeze_backward(xn, wa, wb, ws, flat, ctx.shape, wa.shape[0])
-        return dx, dwa, dwb, dws, dy
+        if flat.dtype != xn.dtype:
+            flat = flat.to(xn.dtype)
+        dab = dh_gate(flat, ws, a, b, ctx.key)                  # [dA | dB]   (M, 2*ND)
+        dws = torch.matmul(flat.T, h)                           # (D, ND)
+        dwab = torch.matmul(dab.T, xn)                          # [dWa; dWb]  (2*ND, D)
+        dx = torch.matmul(dab, torch.cat((wa, wb), dim=0)).reshape(ctx.shape)
+        nd = wa.shape[0]
+        return dx, dwab[:nd], dwab[nd:], dws, dy
 
 
 def transition_residual(x, gamma, beta, wa, wb, ws, eps):

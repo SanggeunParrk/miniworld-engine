@@ -33,13 +33,15 @@ def get_seq_group(length) -> int:
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'STORE_AB'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
     W1_ptr,
     W2_ptr,
     out_ptr,
+    a_ptr,
+    b_ptr,
     M,
     K: tl.constexpr,
     ND: tl.constexpr,
@@ -49,8 +51,12 @@ def transition_fwd_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    STORE_AB: tl.constexpr = False,
     PREC: tl.constexpr = "ieee",
 ):
+    # STORE_AB: a training forward also stores the two pre-activation halves (rounded to the activation
+    # dtype, as the PyTorch statements hold them), so the backward is one GEMM with a gate epilogue
+    # (kernels/transition/triton/training.py) instead of a recompute of both expand GEMMs.
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
     # and just as fixed. Which end suits the shape is what the tuner now decides.
@@ -91,17 +97,48 @@ def transition_fwd_kernel(
     swish_AB = swish_A * B_tile
 
     out_ptr_ = out_ptr + (offs_m[:, None] * ND + offs_n[None, :])
-    tl.store(
-        out_ptr_,
-        swish_AB.to(out_ptr.dtype.element_ty),
-        mask=((offs_m[:, None] < M) & (offs_n[None, :] < ND)),
-    )
+    store_mask = (offs_m[:, None] < M) & (offs_n[None, :] < ND)
+    tl.store(out_ptr_, swish_AB.to(out_ptr.dtype.element_ty), mask=store_mask)
+    if STORE_AB:
+        tl.store(a_ptr + (offs_m[:, None] * ND + offs_n[None, :]), A_tile.to(a_ptr.dtype.element_ty), mask=store_mask)
+        tl.store(b_ptr + (offs_m[:, None] * ND + offs_n[None, :]), B_tile.to(b_ptr.dtype.element_ty), mask=store_mask)
 
 
 def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
     """The expand activation, (M, ND) in ``x``'s dtype: the two SwiGLU halves are already
     multiplied together in the epilogue, so the width is ``ND`` and not ``2*ND``."""
     return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
+
+
+def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab):
+    M, N = x.shape
+    # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
+    # expanded width; taking it as ``n * N`` made a caller state twice something the weight
+    # already fixes, so an `n` that disagreed with the weight silently read the wrong extent --
+    # and it barred any expansion the ratio cannot spell, which is exactly what an FFN whose
+    # hidden size is rounded to a multiple of 256 has. `conditioned_transition`'s own
+    # `_expand_swiglu` already derives it this way.
+    nd = expand_a_weight.shape[0]
+    expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
+    a, b = (torch.empty_like(expand), torch.empty_like(expand)) if store_ab else (expand, expand)
+    grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
+    transition_fwd_kernel[grid](
+        x,
+        expand_a_weight,
+        expand_b_weight,
+        expand,
+        a,
+        b,
+        M,
+        N,          # K -- the input width
+        nd,         # ND -- the expanded width
+        expand_a_weight.stride(0), expand_a_weight.stride(1),
+        expand_b_weight.stride(0), expand_b_weight.stride(1),
+        shape_key=pack(shape_key, K=N, ND=nd),
+        STORE_AB=store_ab,
+        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
+    )
+    return expand, a, b
 
 
 @opaque(fake=_expand_swiglu_fake, name="transition_expand_swiglu")
@@ -118,30 +155,24 @@ def _expand_swiglu(
     ``kernels._compile``. ``x`` arrives already 2-D and contiguous; ``shape_key`` is computed from
     the PRE-flatten shape by the caller, which is the only place that still knows it.
     """
-    M, N = x.shape
-    # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
-    # expanded width; taking it as ``n * N`` made a caller state twice something the weight
-    # already fixes, so an `n` that disagreed with the weight silently read the wrong extent --
-    # and it barred any expansion the ratio cannot spell, which is exactly what an FFN whose
-    # hidden size is rounded to a multiple of 256 has. `conditioned_transition`'s own
-    # `_expand_swiglu` already derives it this way.
-    nd = expand_a_weight.shape[0]
-    expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
-    grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
-    transition_fwd_kernel[grid](
-        x,
-        expand_a_weight,
-        expand_b_weight,
-        expand,
-        M,
-        N,          # K -- the input width
-        nd,         # ND -- the expanded width
-        expand_a_weight.stride(0), expand_a_weight.stride(1),
-        expand_b_weight.stride(0), expand_b_weight.stride(1),
-        shape_key=pack(shape_key, K=N, ND=nd),
-        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
-    )
-    return expand
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False)[0]
+
+
+def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key):
+    out = x.new_empty((x.shape[0], expand_a_weight.shape[0]))
+    return out, torch.empty_like(out), torch.empty_like(out)
+
+
+@opaque(fake=_expand_swiglu_saveact_fake, name="transition_expand_swiglu_saveact")
+def _expand_swiglu_saveact(
+    x: torch.Tensor,
+    expand_a_weight: torch.Tensor,
+    expand_b_weight: torch.Tensor,
+    shape_key: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The training forward launch: ``(h, a, b)`` with ``h = SwiGLU(a, b)`` and ``a, b`` the two
+    expand halves, each ``(M, n*N)`` in ``x``'s dtype. The backward consumes ``a`` and ``b``."""
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True)
 
 
 def swiglu_squeeze_backward(
