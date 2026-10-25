@@ -68,6 +68,7 @@ MODULE_REGISTRY_EXCEPTIONS: dict[str, str] = {
     "triangle_multiplication_bidirectional": "same as triangle_multiplication",
     "triangle_attention": "pulls in layernorm (bf16|fp32); its own attention kernels are bf16-only",
     "swa_atom_attention": "flash-backed; bf16-only, and it has no registry family of its own",
+    "ladder_ops": "not a module: the performance ladder's harness for function-style ops (pair builders, sampler glue, norms, smooth lDDT); each op fixes its own dtypes",
     "dit": "a BLOCK, not a family: augmented_attention + conditioned_transition. Both are "
            "bf16|fp32 end to end, so the block is -- but no single registry family names it",
     "swa_dit": "the SWA atom DiT block wraps swa_atom_attention, so it inherits its flash bf16-only "

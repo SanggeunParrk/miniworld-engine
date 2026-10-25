@@ -138,6 +138,9 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
     # The AF3 atom DiT block with block-local (32 x 128 window) attention (modules/local_dit). Its engine path is the
     # opaque hand-CUDA ops local_dit_block_fwd / _bwd (integrations/local_dit.py): nothing on it autotunes (BUILDLESS).
     "local_dit": ModuleTarget(()),
+    # The performance ladder's harness for the ops that have no module (pair builders, token-pair init, smooth lDDT, sampler glue, norms):
+    # `bench_module ladder_ops` runs one of them (`+ladder_op=` picks it; the ladder, `miniworld-engine ladder`, runs them all).
+    "ladder_ops": ModuleTarget((), "+ladder_op=layernorm"),
 }
 
 #: Module targets whose engine path launches no autotuned kernel, and why: the pre-bench build has nothing to fill for
@@ -145,6 +148,7 @@ MODULE_TARGETS: dict[str, ModuleTarget] = {
 BUILDLESS: dict[str, str] = {
     "bias_only_dit": "hand-written CUDA (fixed launch shapes, cubins built on first use) and cuBLAS; no Triton",
     "local_dit": "hand-written CUDA window-attention block ops (local_dit_block_fwd / _bwd); no Triton",
+    "ladder_ops": "a measurement harness for function-style ops, not a module: it builds no cache of its own",
 }
 
 #: Named groups so `capture pairformer` means something. A group is just a set of targets.
