@@ -1,0 +1,4 @@
+axis,values
+BLOCK_J,32 64 128 256
+num_warps,1 2 4 8
+num_stages,1

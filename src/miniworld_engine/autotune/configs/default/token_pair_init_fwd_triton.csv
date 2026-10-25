@@ -1,0 +1,6 @@
+BLOCK_J,num_warps,num_stages
+16,4,1
+32,4,1
+32,8,1
+64,8,1
+8,2,1

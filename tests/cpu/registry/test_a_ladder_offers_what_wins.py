@@ -61,6 +61,12 @@ FIXED_AXES = {
     ("qk_norm_rope_bwd_triton", "num_stages"): ([1], "single-pass row reduction has no pipeline loop"),
     ("swa_gate_out_fwd_triton", "BLOCK_N"): ([128], "production guard fixes output width to 128"),
     ("swa_gate_out_fwd_triton", "BLOCK_K"): ([32], "A6000 108-candidate probe selected K32; gate fusion record"),
+    ("pair_embed_geom_bins_triton", "num_stages"): ([1], "no loop in the kernel: one tile of pairs per program, nothing to pipeline"),
+    ("pair_embed_ca_bins_triton", "num_stages"): ([1], "no loop in the kernel: one tile of pairs per program, nothing to pipeline"),
+    ("pair_embed_geom_bwd_reduce_triton", "num_stages"): ([1], "a short sequential sum over the slice partials; the loads are independent of the loop carry"),
+    ("token_pair_init_dw_reduce_triton", "num_stages"): ([1], "a short sequential sum over the slice partials; the loads are independent of the loop carry"),
+    ("pair_embed_adaln_bwd_reduce_triton", "num_stages"): ([1], "a short sequential sum over the partials; the loads are independent of the loop carry"),
+    ("pair_embed_adaln_bwd_triton", "BLOCK_J"): ([16], "sets the grouping of the fp32 parameter-gradient sums (dgamma, dbeta, dln_w, dln_b): one value keeps the bits of the backward independent of the tuner"),
     ("swa_gate_out_fwd_triton", "GROUP_M"): ([1], "one N tile means tile grouping cannot reorder programs"),
 }
 

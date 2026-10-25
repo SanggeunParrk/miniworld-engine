@@ -8,7 +8,9 @@ instead of a one-hot re-materialisation and a long-K weight-gradient GEMM. Exact
 Linears round the weights; this does not). The class-bin and dright sums use global atomics: run-to-run the last bits of
 dright / dW can differ.
 
-Served: B200 (sm_100a) and H100 (sm_90a; the backward there is bitwise deterministic), d_pair 128. The kernels compute in fp32; ``left`` / ``right`` may be fp32 or bf16 (a bf16-autocast
+Served: B200 (sm_100a) and H100 (sm_90a; the backward there is bitwise deterministic) by the CUDA kernels, any other card by the portable kernels (``triton/``;
+bitwise deterministic backward, fp32-accurate table gradient) when the engine holds a record for the card, else by the PyTorch reference with the standard
+warning (``kernels/_pair_route``); d_pair 128. The kernels compute in fp32; ``left`` / ``right`` may be fp32 or bf16 (a bf16-autocast
 caller) and the weights fp32 or bf16 (an fp32 master or bf16 parameters): the autograd function casts them to fp32 outside
 autograd and hands every gradient back in its input's dtype. :func:`refusal` says why anything else is not served; it never
 raises.
@@ -18,8 +20,11 @@ from __future__ import annotations
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._pair_route import CUDA, REFERENCE, restricted_reason, route
+from miniworld_engine.kernels.token_pair_init.reference import token_pair_init_reference
 
 D_PAIR = 128
+_CUDA_CAPS = ((9, 0), (10, 0))
 
 
 def refusal(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond: torch.Tensor, bond: torch.Tensor | None,
@@ -41,13 +46,11 @@ def refusal(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond
         return f"weights must be [{D_PAIR}, {n_rel(r_max, s_max)}] and [{D_PAIR}, 2], got {tuple(w_rel.shape)} / {tuple(w_bond.shape)}"
     if tuple(bond.shape) != (left.shape[0], left.shape[1], left.shape[1]):
         return f"bond must be [B, L, L], got {tuple(bond.shape)}"
-    if torch.cuda.get_device_capability(left.device) not in ((10, 0), (9, 0)):
-        return "served on B200 (sm_100a) and H100 (sm_90a) only"
-    return None
+    return restricted_reason(left.device, _CUDA_CAPS)
 
 
 def _backend(device):
-    """The kernel module of the device: H100 (sm_90a, ``cuda.sm90``) or B200 (sm_100a, ``cuda.sm100``)."""
+    """The CUDA kernel module of the device: H100 (sm_90a, ``cuda.sm90``) or B200 (sm_100a, ``cuda.sm100``)."""
     if torch.cuda.get_device_capability(device) == (9, 0):
         from miniworld_engine.kernels.token_pair_init.cuda import sm90
 
@@ -57,7 +60,7 @@ def _backend(device):
     return sm100
 
 
-def _token_pair_init_fwd_fake(left, right, tbl, ids, bond, r_max, s_max):
+def _token_pair_init_fwd_fake(left, right, tbl, ids, bond, r_max, s_max, portable):
     """z [B, L, L, P] fp32 (the sum of the two streams and the two table lookups; P comes from ``left``)."""
     B, L, P = left.shape
     return torch.empty((B, L, L, P), dtype=torch.float32, device=left.device)
@@ -65,13 +68,17 @@ def _token_pair_init_fwd_fake(left, right, tbl, ids, bond, r_max, s_max):
 
 @opaque(fake=_token_pair_init_fwd_fake, name="token_pair_init_fwd")
 def token_pair_init_fwd(left: torch.Tensor, right: torch.Tensor, tbl: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor,
-                        r_max: int, s_max: int) -> torch.Tensor:
+                        r_max: int, s_max: int, portable: int) -> torch.Tensor:
     """z [B, L, L, 128] from left / right [B, L, 128], tbl [n_rel + 2, 128] = [w_rel^T ; w_bond^T], ids [5, B*L] int32,
     bond [B*L*L] uint8."""
+    if portable:
+        from miniworld_engine.kernels.token_pair_init.triton import portable_forward
+
+        return portable_forward(left, right, tbl, ids, bond, r_max, s_max)
     return _backend(left.device).forward(left, right, tbl, ids, bond, r_max, s_max)
 
 
-def _token_pair_init_bwd_fake(g, ids, bond, r_max, s_max):
+def _token_pair_init_bwd_fake(g, ids, bond, r_max, s_max, portable):
     """[d_left [B, L, P], d_right [B, L, P], d_table [n_rel + 2, P]] fp32; the table rows follow from ``r_max`` / ``s_max``."""
     from miniworld_engine.kernels.token_pair_init.cuda.sm100 import n_rel
 
@@ -82,9 +89,13 @@ def _token_pair_init_bwd_fake(g, ids, bond, r_max, s_max):
 
 
 @opaque(fake=_token_pair_init_bwd_fake, name="token_pair_init_bwd")
-def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, r_max: int, s_max: int) -> list[torch.Tensor]:
+def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, r_max: int, s_max: int, portable: int) -> list[torch.Tensor]:
     """[dleft, dright, dtbl] from dz = g [B, L, L, 128] fp32."""
 
+    if portable:
+        from miniworld_engine.kernels.token_pair_init.triton import portable_backward
+
+        return list(portable_backward(g, ids, bond, r_max, s_max))
     return list(_backend(g.device).backward(g, ids, bond, r_max, s_max))
 
 
@@ -93,20 +104,20 @@ class TokenPairInitFunction(torch.autograd.Function):
     gradients go back in each input's dtype (an fp32 table -- fp32 master weights -- gets its fp32 gradient unrounded)."""
 
     @staticmethod
-    def forward(ctx, left, right, tbl, ids, bond, r_max, s_max):
+    def forward(ctx, left, right, tbl, ids, bond, r_max, s_max, portable):
         ctx.dtypes = (left.dtype, right.dtype, tbl.dtype)
         ctx.save_for_backward(ids, bond)
-        ctx.meta = (r_max, s_max)
+        ctx.meta = (r_max, s_max, portable)
         f32 = torch.float32
         return token_pair_init_fwd(left.to(f32).contiguous(), right.to(f32).contiguous(), tbl.to(f32).contiguous(), ids, bond,
-                                   r_max, s_max)
+                                   r_max, s_max, portable)
 
     @staticmethod
     def backward(ctx, g):
         ids, bond = ctx.saved_tensors
         dleft, dright, dtbl = token_pair_init_bwd(g.float().contiguous(), ids, bond, *ctx.meta)
         dleft, dright, dtbl = (d.to(dt) for d, dt in zip((dleft, dright, dtbl), ctx.dtypes, strict=True))
-        return dleft, dright, dtbl, None, None, None, None
+        return dleft, dright, dtbl, None, None, None, None, None
 
 
 def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor, w_bond: torch.Tensor, asym_id: torch.Tensor,
@@ -117,10 +128,15 @@ def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor
     ``left`` / ``right`` [B, L, 128] fp32 or bf16 (the weights fp32 or bf16; computed in fp32 either way); the five id tensors [B, L] (any integer dtype); ``bond`` [B, L, L] 0/1 (bool, integer or
     float). Check :func:`refusal` first."""
     B, L, _ = left.shape
+    where = route("token_pair_init", left.device, left, right, w_rel, w_bond, cuda_caps=_CUDA_CAPS)
+    if where == REFERENCE:
+        f = torch.float32
+        return token_pair_init_reference(left.to(f), right.to(f), w_rel.to(f), w_bond.to(f), asym_id, residue_idx, token_idx, entity_id, sym_id, bond != 0,
+                                         r_max, s_max)
     ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, B * L)
     bond = (bond != 0).to(torch.uint8).reshape(-1)                     # any nonzero is a bond: the kernel's table has two bond rows
     tbl = torch.cat([w_rel.t(), w_bond.t()], 0).contiguous()
-    return TokenPairInitFunction.apply(left.contiguous(), right.contiguous(), tbl, ids, bond, r_max, s_max)
+    return TokenPairInitFunction.apply(left.contiguous(), right.contiguous(), tbl, ids, bond, r_max, s_max, int(where != CUDA))
 
 
 __all__ = ["D_PAIR", "refusal", "token_pair_init"]

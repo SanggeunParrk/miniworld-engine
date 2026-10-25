@@ -33,6 +33,10 @@
     rmsnorm_adamod       RMSNorm + adaLN-Zero 변조 + 조건부 투영 GEMM 을 한 커널에서
     outer_product_mean   OuterProductMean (MSA -> pair: LN, 좌/우 투영, 마스크, MSA 행 평균 외적, c_hidden^2 -> c_z 투영)
     pair_weighted_averaging  MSAPairWeightedAveraging (pair 로 만든 softmax 가중치로 MSA value 를 평균, 게이트, 출력 투영)
+    pair_embed_geom      La-Proteina 인코더의 backbone pair (서열 간격 + 거리 + 각도 bin 의 one-hot x Linear 를 테이블 행 gather 로, 선택적으로 LN 융합)
+    pair_embed_ca        La-Proteina 디코더의 CA 거리 pair (같은 gather, 157행 테이블; backward 커널은 pair_embed_geom 과 공유)
+    pair_embed_adaln     La-Proteina 의 초기 pair 빌더 (bin gather -> Linear -> 아핀 LN -> 샘플별 adaptive LN)
+    token_pair_init      입력 feature embedder 의 token pair 초기화 (left + right + 상대위치 one-hot Linear + bond Linear)
 
 ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이고, 아래 3개는 다른 모델의
 연산이다. `mpnn_` 접두는 `fused_` 와 달리 정보가 있다 — 어느 모델의 연산인지가 곧 어떤 형상을
@@ -73,6 +77,7 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
     dx dw dbias dlnw   그래디언트 대상. dlnw = LN 의 gamma/beta
     dq dk dv dkdv      어텐션 그래디언트 조각
     stats              mean/rstd 등 통계만
+    bins               pair 마다 bin 코드(거리·각도·서열 간격 bucket)만 계산해 코드 텐서로 쓴다 (gather 커널이 읽는다)
     gemm               행렬곱 본체만
     gate               sigmoid 게이트 곱 (y = sigma(a) * b)
     sigmoid            GEMM 뒤 sigmoid 만 적용 (곱은 다른 커널)

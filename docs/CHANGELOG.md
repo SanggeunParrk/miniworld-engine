@@ -8,6 +8,19 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Added
+
+- Portable kernels for `pair_embed_geom` (+ `pair_embed_ca`, the decoder's CA-distance pair), `pair_embed_adaln` and `token_pair_init`: the same inputs, outputs, masks,
+  `ln_eps` fusion and deterministic backward as the H100 CUDA kernels (bins in registers, a row gather instead of the one-hot Linear; the table / LayerNorm / gamma / beta
+  gradients are fixed-order partial sums and a second reduce kernel, no atomics), for any card. `kernels/_pair_route.py` routes the three ops like the rest of the engine:
+  the CUDA kernels where one exists (H100; `token_pair_init` also B200), the portable kernels on a card the engine holds a record for (and under the internal A/B switch, on every
+  card), otherwise one `UnrecordedCardWarning` and the PyTorch reference; `refusal` / `refusal_ca` no longer require sm_90 (a restricted card without a CUDA kernel of the op still
+  says so). H100 and B200 are unchanged. On H100 against the PyTorch reference, B = 16 .. 48, L = 128 .. 512, CUDA graph: 4-33x faster at 3-11x less memory, and the shapes the
+  reference runs out of memory at (B = 48, L = 512) run; against the CUDA kernels the encoder / decoder pair embeddings are on par or 1.3-1.7x faster in training. Registry rows,
+  drivers, checkers and config sets for the 14 kernels; record: `docs/records/portable_pair_ops_20261025.md`. Tests: `tests/gpu/any/test_pair_embed_geom_portable_gpu.py`,
+  `test_pair_embed_adaln_portable_gpu.py`, `test_token_pair_init_portable_gpu.py`, `tests/gpu/sm90/test_pair_ops_portable_vs_cuda_gpu.py`, `tests/cpu/compile/test_pair_ops_routing.py`.
+  No card other than H100 has been run: the Ampere manifests hold no rows for these kernels, so those cards warn and run PyTorch until `run_all` has recorded them.
+
 ## [2.3.12] - 2026-10-25
 
 ### Removed (BREAKING for code that used the removed names)

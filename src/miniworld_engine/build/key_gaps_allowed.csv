@@ -136,3 +136,24 @@ augmented_attention_bwd_window_triton,PRECISION,"pure function of the tensors' d
 augmented_attention_bwd_window_triton,NEED_DB,"the bias gradient is written only when the bias requires one (training); it adds a store, not a tile"
 augmented_attention_bwd_window_triton,NEED_DKV,"the key / value partials are written only when k or v require a gradient; it adds stores, not a tile"
 augmented_attention_bwd_reduce_window_triton,KEYS,"128 or 192: bounds the covering test of the window loop, the tile shape does not change"
+pair_embed_ca_bins_triton,ND,"the number of distance limits of the decoder pair (29, 30 bins): a loop bound over scalar limit loads, no change to the tile"
+pair_embed_geom_bwd_reduce_triton,NBLK,the number of slice partials added in order (a module constant of the launcher): a loop bound
+pair_embed_adaln_fwd_triton,nS,"the sequence-separation bin count of the op (127 in La-Proteina): a clamp and a table row offset, no change to the tile"
+pair_embed_adaln_fwd_triton,nX,"the CA-distance bin count of the op (30): a table row offset, no change to the tile"
+pair_embed_adaln_fwd_triton,NXL,"the number of distance limits (nX - 1): a loop bound over scalar limit loads, no change to the tile"
+pair_embed_adaln_fwd_triton,NCL,"the number of self-conditioning distance limits (nC - 1): a loop bound over scalar limit loads, no change to the tile"
+pair_embed_adaln_bwd_triton,RB,rows of pairs per program (a module constant of the launcher): a loop bound that also fixes the number of parameter-gradient partials
+pair_embed_adaln_bwd_triton,nS,see pair_embed_adaln_fwd_triton
+pair_embed_adaln_bwd_triton,nX,see pair_embed_adaln_fwd_triton
+pair_embed_adaln_dw_triton,nS,see pair_embed_adaln_fwd_triton
+pair_embed_adaln_dw_triton,nX,see pair_embed_adaln_fwd_triton
+pair_embed_adaln_dw_triton,nC,"the self-conditioning bin count of the op (30): a table row count, no change to the tile"
+pair_embed_adaln_dw_triton,RS,next power of two of nS (the row block of the sequence-separation one-hot): a function of the op's bin counts
+pair_embed_adaln_dw_triton,RX,next power of two of nX: a function of the op's bin counts
+pair_embed_adaln_dw_triton,RC,next power of two of nC: a function of the op's bin counts
+token_pair_init_fwd_triton,rmax,"the relative-position residue clamp of the op (32 in AlphaFold 3): table row offsets and clamp constants, no change to the tile"
+token_pair_init_fwd_triton,smax,"the chain-offset clamp of the op (2 in AlphaFold 3): table row offsets and clamp constants, no change to the tile"
+token_pair_init_dw_triton,rmax,see token_pair_init_fwd_triton
+token_pair_init_dw_triton,smax,see token_pair_init_fwd_triton
+token_pair_init_dw_triton,RBB,"rows of the second table block, next power of two of (n_rel + 2 - 128): a function of rmax and smax"
+token_pair_init_dw_reduce_triton,NBLK,the number of slice partials added in order (a module constant of the launcher): a loop bound

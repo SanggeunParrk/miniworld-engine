@@ -1,0 +1,5 @@
+BLOCK,num_warps,num_stages
+256,4,1
+512,4,1
+1024,8,1
+128,2,1

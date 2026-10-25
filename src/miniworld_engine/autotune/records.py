@@ -72,6 +72,12 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "outer_product_mean": ("outer_product_mean/*",),
     "msa_pair_weighted_averaging": ("pair_weighted_averaging/*",),
     "rmsnorm": ("rmsnorm/*",),
+    # La-Proteina's pair builders and the AF3-style token-pair initialisation (kernels/_pair_route.py): the portable kernels of each; the decoder's CA-distance pair
+    # shares the table-gradient and LayerNorm-backward kernels of the encoder's backbone pair
+    "pair_embed_geom": ("pair_embed_geom/pair_embed_geom_*",),
+    "pair_embed_ca": ("pair_embed_geom/pair_embed_ca_*", "pair_embed_geom/pair_embed_geom_fwd_*", "pair_embed_geom/pair_embed_geom_dw_*", "pair_embed_geom/pair_embed_geom_bwd_*"),
+    "pair_embed_adaln": ("pair_embed_adaln/*",),
+    "token_pair_init": ("token_pair_init/*",),
     "layernorm": ("layernorm/*",),
     # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py)
     "gated_linear": ("gated_projection/gated_projection_*", "bias_only_attention/*"),

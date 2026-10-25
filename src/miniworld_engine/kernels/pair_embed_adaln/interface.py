@@ -6,28 +6,34 @@ as a row gather, two LayerNorms and the per-sample adaptive scale / shift in one
 (127 + 30 + 30 channels per pair), a concatenation, a Linear, the affine LayerNorm, a pair-wide conditioning path and the adaptive
 LayerNorm.  ``gamma`` / ``beta`` are per sample because the conditioning (diffusion times) is constant over (i, j); the caller
 computes them with ordinary autograd.  The output is bf16 (what the attention-bias projection consumes); the backward is bitwise
-deterministic.  Served: H100 (sm_90a), 256 channels.  :func:`refusal` says why anything else is not served; it never raises.
+deterministic.  256 channels.  Served: H100 by the CUDA kernels, any other card by the portable kernels (``triton/``) when the engine holds a record for the
+card, else by the PyTorch reference with the standard warning (``kernels/_pair_route``).  :func:`refusal` says why a call is not served at all; it never raises.
 """
 from __future__ import annotations
 
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._pair_route import CUDA, REFERENCE, cuda_served, restricted_reason, route
+from miniworld_engine.kernels.pair_embed_adaln.reference import pair_embed_adaln_reference
 
 D_PAIR = 256
+_CUDA_CAPS = ((9, 0),)
 
 
 def refusal(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, mask, *, n_sep=127, n_xt=30, n_sc=30, **_) -> str | None:
     """None if the fused op can run this call, else why it cannot. Only metadata is read."""
     if not xt.is_cuda:
         return "the input is not on a CUDA device"
-    if torch.cuda.get_device_capability(xt.device) != (9, 0):
-        return "served on H100 (sm_90a) only"
+    if (why := restricted_reason(xt.device, _CUDA_CAPS)) is not None:
+        return why
     nt = n_sep + n_xt + n_sc
     if tuple(w.shape[:1]) != (D_PAIR,) or w.shape[1] < nt:
         return f"w must be [{D_PAIR}, >= {nt}], got {tuple(w.shape)}"
-    if nt > 220 or max(n_sep, n_xt, n_sc) > 255:
-        return "the kernel packs each bin into 8 bits and keeps 4 copies of the table in shared memory (at most 220 rows)"
+    if max(n_sep, n_xt, n_sc) > 255:
+        return "the kernels pack each bin into 8 bits"
+    if nt > 220 and cuda_served(xt.device, _CUDA_CAPS):
+        return "the CUDA kernel keeps 4 copies of the table in shared memory (at most 220 rows)"
     if xt.dim() != 3 or xt.shape[-1] != 3 or residue_idx.shape != xt.shape[:2] or mask.shape != xt.shape[:2]:
         return "xt must be [B, n, 3] and residue_idx / mask [B, n]"
     if sc is not None and sc.shape != xt.shape:
@@ -37,7 +43,7 @@ def refusal(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, mask, *, n_
     return None
 
 
-def _pair_embed_adaln_fwd_fake(tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2):
+def _pair_embed_adaln_fwd_fake(tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2, portable):
     """[pair bf16 [B, n, n, 256], bins int32 [B, n, n]]: the shapes of the forward (the packed bin codes the backward replays)."""
     B, n = idx.shape
     return [torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=tbl.device),
@@ -48,14 +54,18 @@ def _pair_embed_adaln_fwd_fake(tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xl
 def pair_embed_adaln_fwd(tbl: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor,
                          xt: torch.Tensor, sc: torch.Tensor, idx: torch.Tensor, mask: torch.Tensor, xlim: torch.Tensor,
                          clim: torch.Tensor, has_sc: int, nS: int, nX: int, eps1: float,
-                         eps2: float) -> list[torch.Tensor]:
+                         eps2: float, portable: int) -> list[torch.Tensor]:
     """[pair [B, n, n, 256] bf16, bins [B, n, n] int32] from the table [NT, 256] fp32 (= W^T), LN affine, gamma / beta [B, 256]."""
+    if portable:
+        from miniworld_engine.kernels.pair_embed_adaln.triton import portable_forward
+
+        return list(portable_forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2))
     from miniworld_engine.kernels.pair_embed_adaln.cuda import sm90
 
     return list(sm90.forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2))
 
 
-def _pair_embed_adaln_bwd_fake(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
+def _pair_embed_adaln_bwd_fake(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, portable):
     """[dtbl [NT, 256], dln_w, dln_b [256], dgamma, dbeta [B, 256]], all fp32."""
     B = bins.shape[0]
     f = lambda *s: torch.empty(s, dtype=torch.float32, device=tbl.device)
@@ -64,8 +74,12 @@ def _pair_embed_adaln_bwd_fake(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, e
 
 @opaque(fake=_pair_embed_adaln_bwd_fake, name="pair_embed_adaln_bwd")
 def pair_embed_adaln_bwd(tbl: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor, gamma: torch.Tensor, bins: torch.Tensor,
-                         dout: torch.Tensor, nS: int, nX: int, eps1: float, eps2: float) -> list[torch.Tensor]:
+                         dout: torch.Tensor, nS: int, nX: int, eps1: float, eps2: float, portable: int) -> list[torch.Tensor]:
     """[dtbl [NT, 256], dln_w, dln_b [256], dgamma, dbeta [B, 256]] fp32 from d pair = dout [B, n, n, 256] bf16."""
+    if portable:
+        from miniworld_engine.kernels.pair_embed_adaln.triton import portable_backward
+
+        return list(portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2))
     from miniworld_engine.kernels.pair_embed_adaln.cuda import sm90
 
     return list(sm90.backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2))
@@ -73,13 +87,13 @@ def pair_embed_adaln_bwd(tbl: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor
 
 class PairEmbedAdaLNFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2):
+    def forward(ctx, tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2, portable):
         ctx.dtypes = (tbl.dtype, lnw.dtype, lnb.dtype, gamma.dtype, beta.dtype)
         f32 = torch.float32
         tbl, lnw, lnb, gamma, beta = (t.to(f32).contiguous() for t in (tbl, lnw, lnb, gamma, beta))
-        out, bins = pair_embed_adaln_fwd(tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2)
+        out, bins = pair_embed_adaln_fwd(tbl, lnw, lnb, gamma, beta, xt, sc, idx, mask, xlim, clim, has_sc, nS, nX, eps1, eps2, portable)
         ctx.save_for_backward(tbl, lnw, lnb, gamma, bins)
-        ctx.meta = (nS, nX, eps1, eps2)
+        ctx.meta = (nS, nX, eps1, eps2, portable)
         return out
 
     @staticmethod
@@ -87,7 +101,7 @@ class PairEmbedAdaLNFunction(torch.autograd.Function):
         tbl, lnw, lnb, gamma, bins = ctx.saved_tensors
         dtbl, dlw, dlb, dgamma, dbeta = pair_embed_adaln_bwd(tbl, lnw, lnb, gamma, bins, g.to(torch.bfloat16).contiguous(), *ctx.meta)
         outs = [d.to(dt) for d, dt in zip((dtbl, dlw, dlb, dgamma, dbeta), ctx.dtypes, strict=True)]
-        return (*outs, *([None] * 11))
+        return (*outs, *([None] * 12))
 
 
 def pair_embed_adaln(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, mask, *, n_sep=127, n_xt=30, n_sc=30,
@@ -99,12 +113,17 @@ def pair_embed_adaln(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, ma
     ``residue_idx`` [B, n] integers, ``mask`` [B, n] bool.  Check :func:`refusal` first."""
     dev = xt.device
     nt = n_sep + n_xt + n_sc
+    where = route("pair_embed_adaln", dev, w, ln_weight, ln_bias, gamma, beta)
+    if where == REFERENCE:
+        return pair_embed_adaln_reference(w, ln_weight, ln_bias, gamma, beta, xt.float(), None if sc is None else sc.float(), residue_idx, mask.bool(),
+                                          n_sep=n_sep, n_xt=n_xt, n_sc=n_sc, xt_range=xt_range, sc_range=sc_range, eps1=eps1, eps2=eps2).to(torch.bfloat16)
     tbl = w[:, :nt].t().contiguous()
     xlim = torch.linspace(*xt_range, n_xt - 1, device=dev)
     clim = torch.linspace(*sc_range, n_sc - 1, device=dev)
     return PairEmbedAdaLNFunction.apply(tbl, ln_weight, ln_bias, gamma, beta, xt.float().contiguous(),
                                         (sc if sc is not None else xt).float().contiguous(), residue_idx.to(torch.int32).contiguous(),
-                                        mask.to(torch.uint8).contiguous(), xlim, clim, int(sc is not None), n_sep, n_xt, eps1, eps2)
+                                        mask.to(torch.uint8).contiguous(), xlim, clim, int(sc is not None), n_sep, n_xt, eps1, eps2,
+                                        int(where != CUDA))
 
 
 __all__ = ["D_PAIR", "refusal", "pair_embed_adaln"]
