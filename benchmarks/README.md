@@ -286,6 +286,30 @@ Before treating a benchmark artifact as final, check every item below.
   remains a separate step. Canonical CSV files should be replaced atomically
   after a run finishes, not truncated in place at job start.
 
+## Performance ladder (CUDA < portable < PyTorch)
+
+The maintainer's invariant: the portable (Triton) kernels are always faster than PyTorch, and the hand CUDA kernels are always faster than the portable
+ones. `benchmarks/runners/ladder.py` checks it: for every op, mode, dtype and shape of its grid (`GROUPS`) it drives `bench.py` (module targets;
+`ladder_ops` for the ops without a module: pair builders, token-pair init, smooth lDDT, sampler glue, LayerNorm / RMSNorm) for the three rungs --
+`implementations=pytorch` (the best PyTorch form: `torch.compile` + CUDA graph; eager-in-a-graph and plain eager are reported too, and the PyTorch rung is the
+fastest of the three), `portable` (`settings.force_portable_kernels`) and `miniworld` (the CUDA path on an H100) -- three timing repeats each, and writes a
+table with a verdict per row (OK / VIOLATION(cuda_vs_portable) / VIOLATION(portable_vs_pytorch) / n.a.). The engine rungs are timed compiled and not compiled
+(both CUDA-graph replayed) and the faster counts. Nothing runs on a login node:
+
+```sh
+# plan (no GPU needed beyond python): which bench.py processes a tier/group would run
+miniworld-engine ladder plan --tier core
+# run (a GPU job): --tier smoke|core|full, or --group REGEX; results in --out
+miniworld-engine ladder run --tier core --repeats 3 --out ~/ladder-out
+# table + violation lists (CPU is enough), then the gate (exit 1 on a violation that is not on the allow list)
+miniworld-engine ladder report --out ~/ladder-out --md ladder.md --csv ladder.csv
+miniworld-engine ladder gate --csv ladder.csv --allow docs/records/data/performance_ladder_known.txt
+# the same gate as a test (never in the default run): MINIWORLD_LADDER=1 pytest -m ladder tests/gpu/sm90/test_performance_ladder_gpu.py
+```
+
+Edit the benchmark sources only between runs: `bench.py` refuses to time a row whose engine or benchmark sources changed during the process. Record of
+the first full run: [docs/records/performance_ladder_20261025.md](../docs/records/performance_ladder_20261025.md).
+
 ## Module Benchmark Matrix
 
 `triangle_multiplication_bidirectional` already has its own final artifact set;
