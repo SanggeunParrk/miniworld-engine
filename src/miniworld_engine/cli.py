@@ -1699,6 +1699,18 @@ def cmd_bench_module(args: argparse.Namespace) -> int:
     return _run_bench(args, targets, repo, directory, level="module")
 
 
+def cmd_ladder(args: argparse.Namespace) -> int:
+    """The performance ladder (``benchmarks/runners/ladder.py``): every op's CUDA, portable and PyTorch rung, and the gate that says
+    whether CUDA < portable < PyTorch holds. A source checkout command (it drives ``benchmarks/runners/bench.py``)."""
+    repo = Path(__file__).resolve().parents[2]
+    script = repo / "benchmarks" / "runners" / "ladder.py"
+    if not script.is_file():
+        print(f"{script} not found: `ladder` needs a source checkout", file=sys.stderr)
+        return 2
+    env = {**os.environ, "PYTHONPATH": os.pathsep.join([str(repo / "src"), str(repo), os.environ.get("PYTHONPATH", "")])}
+    return subprocess.call([sys.executable, str(script), *(args.ladder_args or ["--help"])], cwd=repo, env=env)
+
+
 def _resolve_gpus(spec: str) -> list[int]:
     """`--gpus 4` -> [0,1,2,3]; `--gpus 0,3` -> [0,3]; `--gpus all` -> every visible device."""
     if spec == "all":
@@ -2081,6 +2093,11 @@ def build_parser() -> argparse.ArgumentParser:
     # produce a wrong answer -- a forward re-timed under training, or a backward asked for inference.
     bm.add_argument("--mode", default="inference", choices=("inference", "training"))
     bm.set_defaults(func=cmd_bench_module, config_type=None)
+
+    ld = sub.add_parser("ladder", help="the performance ladder (CUDA < portable < PyTorch): plan | run | report | gate")
+    ld.add_argument("ladder_args", nargs=argparse.REMAINDER,
+                    help="passed to benchmarks/runners/ladder.py, e.g. `run --tier core --out DIR`, `gate --csv ladder.csv`")
+    ld.set_defaults(func=cmd_ladder)
 
     return parser
 

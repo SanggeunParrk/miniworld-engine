@@ -127,6 +127,7 @@ testpaths = ["tests"]
 pythonpath = ["."]
 markers = [
   "gpu: needs a CUDA device (excluded from the CPU suite CI runs)",
+  "ladder: the performance-ladder gate (CUDA < portable < PyTorch, benchmarks/runners/ladder.py); minutes of GPU time, H100 only; select it with `-m ladder` and MINIWORLD_LADDER=1",
 ]
 # An unregistered marker is a typo that silently disables a test; refuse it.
 addopts = "--strict-markers"
