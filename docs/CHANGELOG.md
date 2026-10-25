@@ -40,7 +40,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
     PyTorch statements, any dtype, differentiable). The `ValueError` is gone.
   - Transition fp32 on the portable residual path (TF32 tensor cores) wherever torch allows TF32 (the switch the H100 generic kernels follow;
     full-precision fp32 keeps PyTorch) and the card holds fp32 rows (`dispatch.dtype_gate`). Registry rows `transition_expand_swiglu_triton`,
-    `transition_squeeze_residual_triton`, `transition_bwd_swiglu_recompute_triton`, `trimul_input_ln_residual_bwd_triton` now declare fp32 with
+    `transition_squeeze_residual_triton` and `transition_bwd_swiglu_recompute_triton` now declare fp32 with
     measured bands; the Transition kernels take their dot precision from `kernels/_dot_precision.py`; `OP_KERNELS["transition"]` also counts the
     input LayerNorm forward / backward kernels it launches.
   - TriangleAttention variants (gate / out-projection biases, untransposed / dual output) take fp32 master parameters under bf16 activations on
