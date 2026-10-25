@@ -461,16 +461,19 @@ def verdict(row: dict, g: Group) -> dict:
 
     kc, kp, kt = names("cuda"), names("portable"), names("pt_compiled") | names("pt_eager_graph")
 
+    def overlap(a, b):
+        return len(a & b) / len(a | b) if a and b else 0.0
+
     def same(a, b):
         """The two rungs launched (nearly) the same kernels: Jaccard overlap of their top-kernel names >= 0.7."""
-        return bool(a and b) and len(a & b) / len(a | b) >= 0.7
+        return overlap(a, b) >= 0.7
 
     #: the 'cuda' row ran the PyTorch statements: the engine has no CUDA path for the call and H100 / B200 route `miniworld` to the reference there.
     #: Evidence: the same kernels as the PyTorch rung, or (three-rung ops) a time within 3% of the PyTorch rung while the portable rung differs
     cuda_is_pytorch = False
     if has_portable and row["cuda_ms"] and row["pytorch_ms"]:
         t = row["cuda_ms"] / row["pytorch_ms"]
-        cuda_is_pytorch = (same(kc, kt) or abs(t - 1.0) <= 0.03) and not same(kc, kp) and (cp is None or cp >= 1.03)
+        cuda_is_pytorch = (same(kc, kt) or (abs(t - 1.0) <= 0.03 and overlap(kc, kt) >= 0.3)) and not same(kc, kp)
     if has_portable and same(kc, kp):
         cp = None
         why["cuda_vs_portable"] = "cuda rung launched the portable kernels (no distinct CUDA path)"
