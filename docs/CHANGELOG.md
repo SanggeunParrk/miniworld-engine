@@ -10,6 +10,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - The performance ladder (`miniworld-engine ladder {plan,run,report,gate}`, `benchmarks/runners/ladder.py`): for every op, mode, dtype and shape of its grid it times the three rungs
   of the maintainer's invariant -- hand CUDA < portable (Triton) < PyTorch (`torch.compile` + CUDA graph, eager reported next to it) -- through `bench.py`, three repeats each,
   and writes a table with a verdict per row (OK / VIOLATION(cuda_vs_portable) / VIOLATION(portable_vs_pytorch) / n.a.) and a gate that fails on a violation not on the allow list.
@@ -96,6 +97,7 @@ registry's `backend` column describe source code and are unchanged, as are the M
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - `pair_embed_geom` (H100, sm_90a, forward only): the backbone pair embedding of La-Proteina's autoencoder encoder (sequence separation, CA-to-N/CA/C/CB distances,
   five inter-residue orientation angles, chain product; 317 binned channels per pair, a bias-free Linear, masks) as a gather of up to ten rows of a bf16 table in shared memory.
   Distances and angles are computed in fp32. Frozen encoder forward at B = 16, L <= 512: 35.4 -> 17.8 ms. Tests: `tests/gpu/sm90/test_pair_embed_geom_gpu.py`.
@@ -146,6 +148,7 @@ registry's `backend` column describe source code and are unchanged, as are the M
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - Portable Triton paths for the model variants that had no Triton kernel and ran the PyTorch statements on every card without a native CUDA
   path, routed like the standard ops (`miniworld` on a card with a record, `force_triton_kernels`; a call the kernels refuse warns once
   with `KernelRefusedWarning` and runs the PyTorch statements). Forward and backward, bf16, validated on H100 under the A/B switch only
@@ -270,6 +273,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - `kernels/sampler_ops` (H100, fp32 coordinates): the diffusion sampler's glue as a few kernels instead of ~100 small torch ops -- the random
   rigid motion + re-noising (`augment_noise`), the Kabsch alignment (Horn's quaternion method, graph-capturable) + Euler update
   (`align_euler`) and the atom encoder's pooling (`pool_atoms`), with the churn arithmetic on device scalars. One extension, no shape keys
@@ -312,6 +316,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - Boltz-2, RoseTTAFold3 and Chai-1 modules on H100, inference (bf16): `modules.dit_variant` (`DiTVariantStack` / `AtomDiTVariantStack` with
   `BOLTZ2`, `ROSETTAFOLD3`, `CHAI1` and their `_ATOM` options: sigmoid or identity-centred AdaLN, kq LayerNorm, no gating query, no
   atom output projection, up-gate transition, parallel schedule, same-conformer atom mask); `TriangleAttention(gate_bias=, out_bias=,
@@ -343,6 +348,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100 TriMul with a hidden width twice the pair width, one direction, at D64 / D128 (`TriangleMultiplication(d_pair, d_hidden=2 *
   d_pair)`: AF3 / Protenix template blocks, pair 64, hidden 128), inference and training, which ran the PyTorch reference on H100 (the
   dispatch required `d_hidden == d_pair`). Per token it has the bidirectional block's shapes (4 D planes, LN_out over 2 D), so the
@@ -387,6 +393,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 - `LocalDiTBlock(kv_norm="parallel" | "chained", key_window="slide" | "pad")`: AlphaFold 3's atom attention. `kv_norm="parallel"` runs the K/V AdaLN on the
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
   raw atoms next to the first one (Protenix chains it, the default); `key_window="slide"` slides each 128-key window inside the real atoms
   (`[32 w - 48, 32 w + 80)` shifted back, as `AtomCrossAtt.compute_features`) instead of clipping and masking it. Defaults are unchanged. The H100
   mma kernels serve both for inference (`pre90_fwd(..., par)`; the first two and the last windows are recomputed in torch for the slide); a
@@ -429,6 +436,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100 bias-only DiT: a pair bias of its own per augmentation (training, bf16 + TF32), d_cond 384 / 768
   (docs/records/h100_bias_only_dit_per_aug_bias_20261020.md).
 
@@ -457,6 +465,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - Prebuilt CUDA kernels in the engine's own binary wheel (`miniworld_engine/_prebuilt/<arch>/`, docs/kernels/prebuilt-kernels.md):
   every torch extension and cubin is resolved by a content key from its include graph (`kernels/_codegraph.py`:
   normalized sources and the headers they reach, flags without machine paths, arch, torch, CUDA, Python ABI) -- shipped
@@ -542,6 +551,7 @@ pass `engine_backend="triton"`.
   `viz.measure_bars` draws a `PyTorch eager` column in the PyTorch colour.
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100 (sm_90a) smooth lDDT: the B200 CUDA-core kernels (`kernels/smooth_lddt/cuda/sm100/smooth_lddt.cu`) now build for sm_90a and
   `smooth_lddt.refusal` serves compute capability (9, 0) as well as (10, 0). Forward + backward at A = 48: 0.37-0.98 ms
   (N = 4096-8192), 37-180x the fastest PyTorch form (`torch.compile`d dense). Page:
@@ -565,6 +575,7 @@ pass `engine_backend="triton"`.
   [gpus/h100/attention_pair_bias](gpus/h100/attention_pair_bias/attention_pair_bias.md).
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100 token DiT and bias-only DiT at every head layout (16 x 48, 24 x 32, 12 x 64 at d 768; 16 x 64 at d 1024), bf16 and fp32,
   inference and training: `attn_tf32.cu` / `attn_fwd.cu` / `attn_dq.cu` / `attn_dkv.cu` / `attn_dqb.cu` built per layout, `pvx32` templated
   on the head width, pack / row kernels at d 768 or 1024; `tests/gpu/sm90/test_h100_token_dit_layouts_gpu.py`.
@@ -648,6 +659,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100 (sm_90a) TriangleAttention is hand-written CUDA around the attention core for every registered width
   (`integrations/triattn_h100_sm90.py`, `kernels/triangle_attention/cuda/h100_sm90.py`, `h100_sm90_generic.py`, `h100_sources/`):
   d_pair 128 / 4 heads x 32 on fused front, tail and backward kernels (wgmma / TMA), d_pair 64-512 with heads of 16 or 32 channels
@@ -1060,6 +1072,7 @@ pass `engine_backend="triton"`.
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - SWA atom DiT on H100: the weight-gradient GEMMs and the hoisted modulation get hand-CUDA kernels (`kernels/swa_dit/cuda/swa_wgrad.cu`,
   `swa_mod.cu`; stages "wgrad" and "mod" of `cuda/loader.py`). `wgrad` / `wgrad_f32`: a block's dWqkv, dWg, dWo, dWu, dWd in one launch
   (clusters of 8 CTAs split K and sum in rank order through distributed shared memory; bf16 on mma.sync, fp32 on bf16 hi / lo planes:
@@ -1331,6 +1344,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
 
 ### Added
 
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - `ops.gated_residual(x, gate, branch)`: fused linear residual gate with backward.
 - Fused sm_90a Transition, forward and backward, for the AF3 pair width (`d_hidden`
   128, `n` 4, bf16, whole 128-row tiles). Two launches replace five: LayerNorm,
@@ -1450,6 +1464,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
 
 ### Added
 - **`miniworld-engine dev audit`** — verifies the build system and, new, that every
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
   DECLARED `(op, dtype, shape-bucket)` is present in the shipped autotune cache.
   Declared means `registry.csv` crossed with each kernel's `level` and `dtypes`,
   so a hole is reported against the contract rather than against whatever the
