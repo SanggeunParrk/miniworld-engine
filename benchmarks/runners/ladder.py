@@ -599,7 +599,8 @@ def render_md(table, meta) -> str:
     L.append("Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode, an option it does not take) and the engine's portable kernels would be faster than "
              "what `miniworld` runs. The ladder invariant is not testable for them (no CUDA rung); the routing is what a user sees. `speed-up` = PyTorch / portable.\n")
     L.append("| op | mode | dtype | shape | L | miniworld (= PyTorch) ms | portable ms | speed-up lost | weight |\n|---|---|---|---|---|---|---|---|---|")
-    for r in sorted([r for r in table if r.get("routing_gap") and r["portable_ms"]], key=lambda r: -(r["cuda_ms"] / r["portable_ms"])):
+    for r in sorted([r for r in table if r.get("routing_gap") and r["portable_ms"] and r["cuda_ms"] > r["portable_ms"] * 1.01],
+                    key=lambda r: -(r["cuda_ms"] / r["portable_ms"])):
         L.append(f"| {r['op']} | {r['mode']} | {r['dtype']} | {r['shape']} | {r['L']} | {fmt(r['cuda_ms'])} | {fmt(r['portable_ms'])} | {r['cuda_ms'] / r['portable_ms']:.2f}x | {r['weight']} |")
     L.append("")
     L.append("## Violations ranked by size (ratio = lower rung / upper rung; must be < 1)\n")
