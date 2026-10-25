@@ -355,14 +355,23 @@ def _cell(rows: list[dict]) -> dict:
             "dev": r.get("device", ""), "torch": r.get("torch_version", ""), "cos": r.get("output_cosine", "")}
 
 
-def load(out: Path) -> tuple[list[dict], dict]:
-    """The ladder rows of a run directory (``index.jsonl`` + ``csv/``)."""
-    meta = json.loads((out / "provenance.json").read_text()) if (out / "provenance.json").exists() else {}
+def load(outs) -> tuple[list[dict], dict]:
+    """The ladder rows of one or several run directories (``index.jsonl`` + ``csv/``). Later directories replace earlier ones for the same
+    (group, mode, kind): a re-run of a fixed group goes in its own directory and wins."""
+    outs = [Path(o) for o in ([outs] if isinstance(outs, (str, Path)) else outs)]
+    meta: dict = {}
+    recs: dict[tuple, tuple[dict, Path]] = {}
+    for out in outs:
+        m = json.loads((out / "provenance.json").read_text()) if (out / "provenance.json").exists() else {}
+        meta = {**m, "sources": [*meta.get("sources", []), {"dir": str(out), **{k: m.get(k) for k in ("commit", "date", "slurm_job")}}]}
+        here = [json.loads(line) for line in (out / "index.jsonl").read_text().splitlines() if line.strip()]
+        rerun = {(r["group"].partition("@")[0], r["mode"]) for r in here}
+        for k in [k for k in recs if (k[0].partition("@")[0], k[1]) in rerun]:
+            del recs[k]                      # a group re-run in a later directory replaces ALL its earlier records, bf16-params variants too
+        for rec in here:
+            recs[(rec["group"], rec["mode"], rec["kind"])] = (rec, out)
     cells: dict[tuple, dict] = {}   # (group, mode, L, rung) -> cell
-    for line in (out / "index.jsonl").read_text().splitlines():
-        if not line.strip():
-            continue
-        rec = json.loads(line)
+    for rec, out in recs.values():
         g = group_of(rec["group"])
         if g is None:
             continue
@@ -582,12 +591,12 @@ def render_md(table, meta) -> str:
 
 
 def cmd_report(args) -> int:
-    out = Path(args.out)
-    table, meta = load(out)
-    csv_path = Path(args.csv) if args.csv else out / "ladder.csv"
+    outs = [Path(o) for o in args.out]
+    table, meta = load(outs)
+    csv_path = Path(args.csv) if args.csv else outs[-1] / "ladder.csv"
     write_csv(table, csv_path, meta)
     md = render_md(table, meta)
-    Path(args.md).write_text(md) if args.md else (out / "ladder.md").write_text(md)
+    Path(args.md).write_text(md) if args.md else (outs[-1] / "ladder.md").write_text(md)
     n = len(table)
     print(f"{n} ladder rows -> {csv_path}")
     for key in ("OK", "VIOLATION(cuda_vs_portable)", "VIOLATION(portable_vs_pytorch)", "VIOLATION(cuda_vs_pytorch)", "n.a."):
@@ -626,7 +635,7 @@ def build_parser() -> argparse.ArgumentParser:
             if name == "run":
                 s.add_argument("--resume", action="store_true")
         if name == "report":
-            s.add_argument("--out", required=True)
+            s.add_argument("--out", required=True, nargs="+", help="run directories; a later one replaces an earlier one per (group, mode, kind)")
             s.add_argument("--md", default="")
             s.add_argument("--csv", default="")
         if name == "gate":
