@@ -1,7 +1,9 @@
 # Performance ladder: CUDA < portable < PyTorch on one H100 (2026-10-25)
 
-Branch `perf/ladder-audit` (base: `origin/main` at `ae6136cd`; the engine sources under `src/` are those of `ae6136cd`, only `benchmarks/`, `tests/`, the CLI entry
-`ladder` and docs were added). The maintainer's rule: **the portable (Triton) kernels are always faster than PyTorch, and the hand CUDA kernels are always faster than the
+Branch `perf/ladder-audit`, rebased on `origin/main` at `dc896c1e` (only `benchmarks/`, `tests/`, the CLI entry `ladder` and docs were added to `src/`/`docs/`).
+Two engine states were measured: the trunk, diffusion and norm groups at `ae6136cd` (runs A-D) and the La-Proteina pair builders and the sampler glue at `dc896c1e` (run E, after the pair-op CUDA
+rework and the portable sampler kernels landed). Between the two the engine diff touches only `pair_embed_{geom,adaln}` CUDA, `sampler_ops`, `_pair_route.py`, a `dtype=` keyword of `dispatch.portable_blocked`
+and registry rows, so the A-D numbers hold for `dc896c1e`. The maintainer's rule: **the portable (Triton) kernels are always faster than PyTorch, and the hand CUDA kernels are always faster than the
 portable ones.** This record is the first full measurement of that ladder, for every op the engine serves that has a hand-CUDA path, a portable path or both, in inference
 and training, at the production shapes of MiniWorld / FoldForge / La-Proteina. Harness and gate: `benchmarks/runners/ladder.py` ([benchmarks/README.md](../../benchmarks/README.md#performance-ladder-cuda--portable--pytorch)).
 
@@ -26,10 +28,11 @@ and training, at the production shapes of MiniWorld / FoldForge / La-Proteina. H
   `OK`, `VIOLATION(cuda_vs_portable)`, `VIOLATION(portable_vs_pytorch)`, `VIOLATION(cuda_vs_pytorch)` (ops with no portable rung by design), `n.a.` (a rung has no measurement; the
   reason is in the note), `n.a.(cuda rung missing)` (the CUDA row ran the PyTorch statements: routing gap).
 * **Provenance** is in the header line of every generated table below (commit of the reporting run, card, torch) and in `provenance.json` of each run directory
-  (`~/miniworld-engine-scratch/ladder/out_full_{A,B,C,D}`: A = trunk ops, B = diffusion / norms / pair ops, C and D = re-runs of groups that failed for harness reasons).
+  (`~/miniworld-engine-scratch/ladder/out_full_{A,B,C,D,E}`: A = trunk ops, B = diffusion / norms / pair ops, C and D = re-runs of groups that failed for harness reasons, E = pair builders and
+  sampler at `dc896c1e`; a later directory replaces the groups of an earlier one). The pair-op rows of the first pass (before the rework) are in `out_full_B`.
   Raw rows: [data/performance_ladder_20261025.csv](data/performance_ladder_20261025.csv); the debt list the gate test reads: [data/performance_ladder_known.txt](data/performance_ladder_known.txt).
-* Harness checks: the known violations of the brief reproduce (pair_embed_geom forward 1.17-1.18x slower in CUDA, geom train 1.16-1.38x, pair_embed_ca training 1.3-1.73x,
-  adaln fwd+bwd about equal, bias-only DiT bf16 1.03-1.08x slower than compiled PyTorch, DiT `extra_pair_bias` bf16 1.07-1.08x, OPM RF3 training 1.00-1.05x), so the numbers agree with
+* Harness checks: the known violations of the brief reproduce in the first pass at `ae6136cd` (pair_embed_geom forward 1.08-1.18x slower in CUDA, geom train 1.16-1.38x, pair_embed_ca training 1.3-1.73x,
+  adaln fwd+bwd about equal, bias-only DiT bf16 1.03-1.08x slower than compiled PyTorch, DiT `extra_pair_bias` bf16 1.07-1.09x, OPM RF3 training 1.00-1.05x), so the numbers agree with
   the earlier records (`portable_pair_ops_20261025`, `portable_parity_modules_20261025`, `triton_gaps_a_20261024`, `triton_dit_portable_20261024`) within their run-to-run noise.
   `fp32_check_limit=0.01` loosens the harness' compiled-vs-eager consistency check for fp32 tensors (1e-4 -> 1e-2): the fp32 gradients of a bf16 computation differ by 3e-3 between a compiled
   and an eager step, which stopped the PyTorch rung of several training rows from being timed at all.
@@ -40,8 +43,8 @@ and training, at the production shapes of MiniWorld / FoldForge / La-Proteina. H
 
 | verdict | rows |
 |---|---|
-| OK (CUDA < portable < PyTorch where the rungs exist) | 159 |
-| VIOLATION(cuda_vs_portable): the hand CUDA path is slower than (or ties) the portable kernels | 30 |
+| OK (CUDA < portable < PyTorch where the rungs exist) | 171 |
+| VIOLATION(cuda_vs_portable): the hand CUDA path is slower than (or ties) the portable kernels | 18 |
 | VIOLATION(portable_vs_pytorch): the portable kernels are slower than (or tie) compiled + graphed PyTorch | 48 |
 | VIOLATION(cuda_vs_pytorch) (ops with no portable rung by design) | 0 |
 | n.a.(cuda rung missing): `miniworld` runs the PyTorch statements, a routing gap (the portable kernels are faster by more than 1 % in 28 of the 38) | 38 |
@@ -49,7 +52,7 @@ and training, at the production shapes of MiniWorld / FoldForge / La-Proteina. H
 
 (a row can carry two violations, so the verdict counts add to more than the violating rows; the per-op table below has the split.) What holds, in every measured cell: TriAttn,
 bidirectional TriMul (hidden = D, D64 .. D512), OuterProductMean and MSAPairWeightedAveraging at the MiniWorld shapes and PWA value_dim 8, the fused token DiT (bf16, fp32, qk-norm,
-8 / 8 rows), the AF3 LocalDiT atom block (bf16 and fp32, 6 / 6), `pair_embed_adaln` inference, `smooth_lddt` (training and all but one tie), every sampler kernel (0.12-0.58 of PyTorch), SWA
+8 / 8 rows), the AF3 LocalDiT atom block (bf16 and fp32, 6 / 6), `pair_embed_geom` / `pair_embed_ca` / `pair_embed_adaln` inference and `pair_embed_geom` / `pair_embed_ca` training after the pair-op CUDA rework (CUDA 0.70-0.97 of portable), `smooth_lddt` (training and all but one tie), `augment_noise` and `align_euler` (CUDA 0.67-0.88 of portable), SWA
 attention / SWA DiT against PyTorch (0.03-0.09), `AttentionPairBias` at pair 128 (portable 0.87-0.99 of PyTorch, CUDA 0.35-0.40) and the DiT variant stacks / `AugmentedAttention` / the
 ESMFold2 atom block **for the portable rung** (1.2-2.5x faster than PyTorch, where it exists).
 
@@ -59,32 +62,33 @@ ESMFold2 atom block **for the portable rung** (1.2-2.5x faster than PyTorch, whe
    Transition 11 rows (1.04-1.35x, growing with width: D384-D768, inference D768 1.24x and training D768 1.35x), ConditionedTransition 7 (1.04-1.15x), LayerNorm (pair) 5 (1.01-1.07x, forward
    ties), RMSNorm 4 (1.17-1.42x), DiT `extra_pair_bias` 3 (1.07-1.09x), AdaLN fp32 2 (1.09-1.18x), OPM RF3 divide-after 2 (ties). **These can only be judged as real violations of the user's rule on
    Ampere, where the portable kernels are tuned**; on H100 they are the "untuned Hopper build" the earlier records already name.
-2. **CUDA slower than portable (30 rows, 8 ops)**: `pair_embed_geom` 10 / 10 rows (1.08-1.38x: forward 1.08-1.18x, training 1.16-1.38x), `pair_embed_ca` training 5 / 5 (1.31-1.73x),
-   `token_pair_init` inference 5 / 5 (1.00-1.13x), `LayerNorm` (pair) training 2 (1.18 / 1.22x: the H100 CUDA backward routes D128), `AttentionPairBias` at pair width 256 2 (1.03-1.07x),
-   AdaLN bf16 inference L384 (1.03, noise), `smooth_lddt` A48 N1024 inference (1.002, a tie at the 0.16 ms launch floor), RMSNorm inference L384 (1.09x), plus three exact ties (OPM RF3 divide-after,
-   DiT `extra_pair_bias` fp32, `token_pair_init` B48 L256). Other agents are already fixing `pair_embed_geom` / `ca` / `adaln` (worktree `cuda-pair`).
+2. **CUDA slower than portable (18 rows, 9 ops)**: `pool_atoms` 3 / 3 (1.03-1.25x, growing with the atom count), `token_pair_init` inference 5 / 5 (1.00-1.13x; training is OK, 0.61-0.75), `LayerNorm` (pair)
+   training 2 (1.18 / 1.22x: the H100 CUDA backward routes D128) and a forward tie at D256, `AttentionPairBias` at pair width 256 2 (1.03-1.07x), RMSNorm inference L384 (1.09x), AdaLN bf16
+   inference L384 (1.03, noise), `smooth_lddt` A48 N1024 inference (1.002, a tie at the 0.16 ms launch floor) and two exact ties (OPM RF3 divide-after, DiT `extra_pair_bias` fp32). **The La-Proteina pair builders
+   (`pair_embed_geom` 10 / 10 rows, `pair_embed_ca` 5 / 5 training rows: 1.08-1.73x slower in the first pass at `ae6136cd`) are fixed by the pair-op CUDA rework in `dc896c1e`: re-measured there, every
+   geom / ca / adaln-inference row is OK** (CUDA 0.70-0.84 of portable for geom, 0.73-0.97 for ca). Still open in that family: the portable `pair_embed_adaln` backward (below).
 
 **Routing gaps** (separate from violations; no CUDA rung exists, so the ladder is not testable, but the user gets PyTorch although a portable kernel is faster): on H100 `miniworld` runs the
 PyTorch reference for **training** of `AugmentedAttention` (1.67-2.47x slower than the portable kernels at the production shapes), of the Boltz-2 / RoseTTAFold3 / Chai-1 token (1.5-1.6x) and atom
 (2.1-2.3x) stacks and of ESMFold2's atom block (1.9-2.0x), for `AugmentedAttention` inference (1.3-1.6x), for bidirectional TriMul with `d_hidden != d_pair` (D64 / hidden 128: 3.9x inference, 2.6x
 training), and for the OPM model variants with 8 groups (Chai-1, 1.07-1.27x). Weighted by production use (weight 3 = the MiniWorld / FoldForge / La-Proteina shape), the ranked list is in the
-second violations table below: the La-Proteina pair builders (`pair_embed_ca` / `geom` training, `token_pair_init` inference) and the pair LayerNorm backward come first, then the bias-only DiT (all rows) and
-the Transition widths of the token track.
+second violations table below: the pair LayerNorm backward and `token_pair_init` inference (weight 3) come first, then the bias-only DiT (all 14 rows, weight 3 at L256-768), then RMSNorm / Transition widths / `pool_atoms` (weight 2).
 
 ## What the invariant implies for ops with a structurally missing rung
 
-* **Sampler glue (`augment_noise`, `align_euler`, `pool_atoms`) and SWA global attention have no portable path by design** (CUDA kernels + PyTorch reference; SWA attention is FlashAttention-4).
-  The ladder collapses to CUDA < PyTorch, and it holds everywhere: `augment_noise` 0.50-0.58 of compiled PyTorch (0.010 vs 0.018 ms at 4096 atoms, B5), `align_euler` 0.12-0.19
-  (0.017 vs 0.089 ms ... 0.026 vs 0.213 ms at 24,576 atoms), `pool_atoms` 0.16-0.28; SWA global attention 0.032-0.069 (inference 0.076 vs 1.12 ms and 0.133 vs 4.14 ms at 4096 / 8192 atoms, training
-  2.0 vs 29.6 ms and 4.0 vs 116.7 ms), the fused SWA DiT block 0.035-0.090 (bf16) and 0.052-0.066 (fp32). **The PyTorch rung of SWA is not FA2**: it is the module's `implementation=PYTORCH`
-  path, which on this install runs PyTorch's memory-efficient SDPA with a band mask (`fmha_cutlassF` 0.99 ms of the 1.12 ms) and the module's rows; the env has FlashAttention-4 only, FA2 is
-  not installed, so a CUDA-vs-FA2 rung could not be measured. FA4 is itself the attention core of the engine path (`kernel_cutlass_kernel_flash_at...`), so against FA4 the ladder would only
-  compare the fused block around it (RMSNorm-adaLN, SwiGLU, gates), which is the 0.035-0.090 above measured against the SDPA-based reference.
-  Consequence of the invariant for these ops: the gate can only say CUDA < PyTorch; a future portable rung (an Ampere card needs one for the sampler and for SWA) would have to land between
-  the two numbers above, which leaves it room (the SDPA reference is 12-30x slower than the engine's block), i.e. the invariant is satisfiable but not yet testable.
-  `SWADiTBlock` additionally **cannot be compiled** with the engine path in place (the compiled rows fail: `torch._check` / data-dependent guard in `kernels/_capture.py:151` for inference, a
-  Dynamo `autograd.Function` skip for training); the CUDA rung of the SWA DiT rows is therefore the not-compiled, CUDA-graph-replayed block, which is how it is deployed.
-  `force_portable_kernels` on SWA raises (`native H100 SWA rejects force_portable_kernels`), so the portable rung of `SWADiTBlock` is `n.a.` on H100 by construction.
+* **Sampler glue (`augment_noise`, `align_euler`, `pool_atoms`)** had no portable path at `ae6136cd`; `dc896c1e` added one (`kernels/sampler_ops/triton`), so they now have all three rungs: `augment_noise`
+  CUDA 0.84-0.88 of portable and 0.36-0.45 of compiled PyTorch, `align_euler` CUDA 0.67-0.81 of portable and 0.08-0.12 of PyTorch, both OK in every cell (B5, 4096 / 12288 / 24576 atoms). **`pool_atoms`
+  violates the invariant at all three sizes: CUDA 1.03 / 1.15 / 1.25x slower than portable** (0.018 vs 0.017, 0.039 vs 0.034, 0.070 vs 0.056 ms; both 0.16-0.22 of PyTorch). The first pass (no portable
+  rung) had CUDA at 0.16-0.28 of PyTorch for `pool_atoms`, 0.12-0.19 for `align_euler` and 0.50-0.58 for `augment_noise`.
+* **SWA global attention and the SWA DiT block have no portable path by design** (CUDA kernels + PyTorch reference; the attention core is FlashAttention-4). The ladder collapses to CUDA < PyTorch and holds
+  everywhere: SWA attention 0.032-0.069 of compiled PyTorch (inference 0.076 vs 1.12 ms and 0.133 vs 4.14 ms at 4096 / 8192 atoms, training 2.0 vs 29.6 ms and 4.0 vs 116.7 ms), the fused SWA DiT block 0.035-0.090
+  (bf16) and 0.052-0.066 (fp32). **The PyTorch rung of SWA is not FA2**: it is the module's `implementation=PYTORCH` path, which on this install runs PyTorch's memory-efficient SDPA with a band mask (`fmha_cutlassF`
+  0.99 ms of the 1.12 ms); the env has FlashAttention-4 only, FA2 is not installed, so a CUDA-vs-FA2 rung could not be measured. FA4 is itself the attention core of the engine path
+  (`kernel_cutlass_kernel_flash_at...`), so against FA4 the ladder would compare only the fused block around it (RMSNorm-adaLN, SwiGLU, gates). Consequence of the invariant for these ops: the gate can only say
+  CUDA < PyTorch; a future portable rung (an Ampere card needs one for the SWA block) would have to land between the two numbers above (the SDPA reference is 12-30x slower than the engine block), so the invariant is
+  satisfiable but not yet testable. `SWADiTBlock` additionally **cannot be compiled** with the engine path in place (the compiled rows fail: a data-dependent guard in `kernels/_capture.py:151` for inference, a
+  Dynamo `autograd.Function` skip for training); its CUDA rung is the not-compiled, CUDA-graph-replayed block, which is how it is deployed. `force_portable_kernels` on SWA raises (`native H100 SWA rejects
+  force_portable_kernels`), so the portable rung of `SWADiTBlock` is `n.a.` on H100 by construction.
 * **ConditionedTransition and AdaLN have no CUDA path on H100 yet** (`docs/dispatch.md`: "PyTorch (no CUDA path yet)"): their `cuda` column equals the PyTorch statements, the
   cuda_vs_portable pair is a missing rung, and the invariant reduces to portable < PyTorch, which fails (below).
 * **LayerNorm (pair, forward)**: on H100 `layernorm_kernel` forward IS the portable Triton kernel (no distinct CUDA rung); the pair is `n.a.` and the invariant reduces to portable < PyTorch, which
@@ -97,8 +101,8 @@ says what the profile shows and what to look at first; none was verified by a ch
 
 | # | violation | what the profile shows | hypothesis (first thing to look at) |
 |---|---|---|---|
-| 1 | `pair_embed_ca` / `pair_embed_geom` training, CUDA 1.16-1.73x slower than portable (weight 3 at B16) | B16 L384 ca: CUDA `pg_bwd_mma` 1812 us, `pg_ln_bwd` 1260, `pg_fwd_ca` 594 against portable `_geom_dw` 772, `_geom_ln_bwd` 830, `_geom_fwd_gather` 427 (+ `_geom_dw_reduce` 75, `_ca_bins` 22). geom L384: `pg_bwd_mma` 2964 / `pg_fwd` 1756 / `pg_ln_bwd` 1526 against 2015 / 1042 + 151 / 1322 | all three CUDA kernels are slower than their Triton counterparts, the table-gradient MMA kernel by 2.3x (ca) / 1.5x (geom): its tiling / occupancy, not the structure (the portable kernel is the same three-stage design). Being fixed in worktree `cuda-pair` |
-| 2 | `pair_embed_geom` inference 1.08-1.18x | `pg_fwd` 1128 us (L384 B16) against `_geom_fwd_gather` 821 + `_geom_bins` 150 | same kernel family as 1: the CUDA fused forward does the per-pair geometry replicated over the channel tile (the Triton note in `portable_pair_ops_20261025.md`: "one kernel doing both was 5-6x slower"; the CUDA fused kernel pays a smaller version of that) |
+| 1 | `pair_embed_ca` / `pair_embed_geom` CUDA slower than portable (first pass at `ae6136cd`: training 1.16-1.73x, geom inference 1.08-1.18x) | B16 L384 ca: CUDA `pg_bwd_mma` 1812 us, `pg_ln_bwd` 1260, `pg_fwd_ca` 594 against portable `_geom_dw` 772, `_geom_ln_bwd` 830, `_geom_fwd_gather` 427; geom L384: `pg_bwd_mma` 2964 / `pg_fwd` 1756 / `pg_ln_bwd` 1526 against 2015 / 1042 + 151 / 1322 | **fixed in `dc896c1e`** (warp-uniform warpgroup roles so wgmma is no longer serialised, faster forward gather, pipelined LayerNorm backward, wgmma table gradients): re-measured, CUDA is 0.70-0.97 of portable in every geom / ca / adaln-inference cell |
+| 2 | `pool_atoms` CUDA 1.03 / 1.15 / 1.25x slower than portable (4096 / 12288 / 24576 atoms, weight 2) | CUDA `pool_atoms_f...` 11.9 / 65.4 us against portable `_pool` 10.3 / 50.6 us (device time; graph times 0.070 vs 0.056 ms at 24576) | both kernels are one gather + relu + masked mean over the atoms of a token and sit at 0.13-0.22 of PyTorch; the CUDA kernel's gap grows with N, which points at the gather's coalescing / occupancy at large `Q` (read the CUDA kernel's grid and the per-token tile against the Triton `_pool` tile over C; not profiled further). Introduced when the portable kernels landed (`b088341b`); `dc896c1e` says CUDA wins "in every measured cell" (different shapes / timing than this grid: B5 c768) |
 | 3 | `token_pair_init` inference fp32, 1.00-1.13x (weight 3) | `tpi_fwd` 442 us against `_tpi_fwd` 459 at L384 (3 % apart, equal within noise at L384 / 256 B48; 13 % at L128 B16: 67 vs 56 us) | memory-bound output write (`z` [B, L, L, 128]): both kernels sit at the HBM write roofline, the small-L difference is launch / tail; no CUDA headroom to find except at L128 |
 | 4 | LayerNorm (pair) training, CUDA 1.18-1.22x (weight 3) | portable: `layer_norm_bwd_dx_fused` 52 us (L384) / 186 us (L768) + fwd; the CUDA row's profile shows only `layer_norm_bwd_reduce_kernel` 6 us (its main kernels are not visible to the profiler), total 0.104 / 0.360 ms against 0.088 / 0.296 | `layernorm_kernel` routes bf16 128 <= N <= 512 to the hand CUDA backward (tuned at D512: 1.20x there). At **D128** with M = L*L = 147k / 590k rows the persistent Triton backward wins by 18-22 %: look at `_static_bwd_path` / the WAVES constant for N = 128 |
 | 5 | RMSNorm, portable 1.17-1.42x slower than compiled PyTorch; CUDA 1.09x slower than portable at L384 inference (weight 2) | inference L1024 x[48,1024,768]: PyTorch `triton_per_fused__fused_rms_norm` 56 us (79 % of HBM peak), portable `rmsnorm_fwd_kernel` 80 us (56 %). Training L1024: portable `rmsnorm_bwd` 128 + `rmsnorm_fwd` 68 us against inductor 98 + 12 | the Triton RMSNorm is a row-per-program kernel with an untuned (Ampere) `num_warps` / rows-per-program for sm_90 at N = 768; inductor's persistent reduction (one row block per program, rstd recomputed in the backward) does one pass less. Ties within 3 % at L384 (launch-bound) |
@@ -135,13 +139,13 @@ says what the profile shows and what to look at first; none was verified by a ch
 
 ## Generated tables (benchmarks/runners/ladder.py report)
 
-Provenance: commit `95670aa9` (branch `perf/ladder-audit`, dirty=False), card **NVIDIA H100 80GB HBM3**, torch 2.13.0+cu129, run 2026-10-25T18:35:49 on node02, Slurm job 35248.
+Provenance: commit `4b0a102f` (branch `perf/ladder-audit`, dirty=False), card **NVIDIA H100 80GB HBM3**, torch 2.13.0+cu129, run 2026-10-25T19:04:49 on node01, Slurm job 35276.
 
 ### Summary by op
 
 | rows | OK | VIOLATION(cuda_vs_portable) | VIOLATION(portable_vs_pytorch) | VIOLATION(cuda_vs_pytorch) | n.a.(cuda rung missing: no CUDA path, `miniworld` runs PyTorch) | n.a.(other rung missing) |
 |---|---|---|---|---|---|---|
-| 305 | 159 | 30 | 48 | 0 | 38 | 43 |
+| 305 | 171 | 18 | 48 | 0 | 38 | 43 |
 
 | op | rows | OK | cuda>=portable | portable>=pytorch | cuda>=pytorch (no portable) | no CUDA path (routing gap) | other n.a. |
 |---|---|---|---|---|---|---|---|
@@ -174,14 +178,14 @@ Provenance: commit `95670aa9` (branch `perf/ladder-audit`, dirty=False), card **
 | ConditionedTransition | 8 | 0 | 0 | 7 | 0 | 6 | 0 |
 | LayerNorm (pair) | 8 | 1 | 3 | 5 | 0 | 0 | 0 |
 | RMSNorm | 4 | 0 | 1 | 4 | 0 | 0 | 0 |
-| pair_embed_geom | 10 | 0 | 10 | 0 | 0 | 0 | 0 |
-| pair_embed_ca | 10 | 5 | 5 | 0 | 0 | 0 | 0 |
+| pair_embed_geom | 10 | 10 | 0 | 0 | 0 | 0 | 0 |
+| pair_embed_ca | 10 | 10 | 0 | 0 | 0 | 0 | 0 |
 | pair_embed_adaln | 10 | 5 | 0 | 0 | 0 | 0 | 5 |
 | token_pair_init | 10 | 5 | 5 | 0 | 0 | 0 | 0 |
 | smooth_lddt | 6 | 5 | 1 | 0 | 0 | 0 | 0 |
 | sampler augment_noise | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
 | sampler align_euler | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
-| sampler pool_atoms | 3 | 3 | 0 | 0 | 0 | 0 | 0 |
+| sampler pool_atoms | 3 | 0 | 3 | 0 | 0 | 0 | 0 |
 
 ### Routing gaps: the CUDA rung does not exist, `miniworld` on this card runs the PyTorch reference
 
@@ -221,205 +225,154 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 
 | # | op | mode | dtype | shape | L | pair | ratio | CUDA ms | portable ms | PyTorch best ms (form) | weight | cause / note |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 1 | pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.726 | 4.694 | 2.720 | 9.614 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 2 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.714 | 3.628 | 2.116 | 7.261 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 3 | pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.620 | 1.229 | 0.758 | 2.442 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 4 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.590 | 1.622 | 1.020 | 3.242 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 5 | RMSNorm | inference | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.421 | 0.068 | 0.080 | 0.056 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 6 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.384 | 6.208 | 4.484 | 15.244 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 7 | Transition | training | bf16 | D768 | 384 | portable_vs_pytorch | 1.351 | 11.025 | 16.568 | 12.268 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 8 | pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.336 | 7.929 | 5.935 | 20.146 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 9 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.318 | 2.763 | 2.097 | 6.850 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 10 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.308 | 0.438 | 0.335 | 0.856 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 11 | pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.283 | 2.071 | 1.614 | 5.167 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 12 | RMSNorm | training | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.281 | 0.155 | 0.212 | 0.165 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 13 | Transition | training | bf16 | D512 | 384 | portable_vs_pytorch | 1.270 | 6.028 | 7.871 | 6.199 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 14 | Transition | training | bf16 | D384 | 768 | portable_vs_pytorch | 1.243 | 13.659 | 19.940 | 16.043 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 15 | Transition | inference | bf16 | D768 | 384 | portable_vs_pytorch | 1.240 | 3.377 | 5.402 | 4.356 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 16 | RMSNorm | training | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.230 | 0.072 | 0.084 | 0.069 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 17 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 768 | cuda_vs_portable | 1.217 | 0.360 | 0.296 | 0.300 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel; portable_vs_pytorch within noise (ratio 0.984, spread 0.002) |
-| 18 | Transition | training | bf16 | D384 | 384 | portable_vs_pytorch | 1.213 | 3.638 | 4.958 | 4.087 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 19 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 384 | cuda_vs_portable | 1.184 | 0.104 | 0.088 | 0.094 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 20 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.179 | 0.161 | 0.137 | 1.280 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 21 | AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.176 | 0.035 | 0.040 | 0.034 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 22 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.173 | 1.152 | 0.982 | 10.563 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 23 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.168 | 0.528 | 0.452 | 4.693 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 24 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.165 | 0.031 | 0.028 | 0.024 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 25 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.158 | 0.752 | 0.650 | 1.827 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 26 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.153 | 0.144 | 0.171 | 0.148 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 27 | token_pair_init | inference | fp32 in, fp32 out | B16 | 128 | cuda_vs_portable | 1.133 | 0.089 | 0.078 | 0.544 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 28 | Transition | training | bf16 | D256 | 768 | portable_vs_pytorch | 1.127 | 7.166 | 10.165 | 9.019 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 29 | Transition | inference | bf16 | D512 | 384 | portable_vs_pytorch | 1.119 | 1.587 | 2.618 | 2.340 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 30 | pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.114 | 1.434 | 1.287 | 13.683 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 31 | token_pair_init | inference | fp32 in, fp32 out | B48 | 128 | cuda_vs_portable | 1.105 | 0.205 | 0.185 | 1.563 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 32 | Transition | training | bf16 | D256 | 384 | portable_vs_pytorch | 1.104 | 1.844 | 2.580 | 2.337 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 33 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.100 | 0.136 | 0.237 | 0.216 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 34 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | cuda_vs_portable | 1.090 | 0.031 | 0.028 | 0.024 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 35 | AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.088 | 0.641 | 0.699 | 0.643 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 36 | token DiT + extra_pair_bias | inference | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.088 | 0.205 | 0.224 | 0.206 (pt_compiled) | 1 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 37 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.084 | 0.419 | 0.463 | 0.426 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 38 | pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.083 | 0.374 | 0.345 | 3.560 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
-| 39 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.077 | 1.463 | 1.798 | 1.670 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 40 | ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.075 | 2.300 | 2.473 | 2.301 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 41 | ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.074 | 2.979 | 3.206 | 2.986 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 42 | AttentionPairBias | inference | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.073 | 0.158 | 0.147 | 0.152 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel |
-| 43 | bias-only DiT | training | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.073 | 3.054 | 3.578 | 3.336 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 44 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.072 | 2.850 | 3.552 | 3.313 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 45 | ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.072 | 1.238 | 1.335 | 1.245 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 46 | LayerNorm (pair) | training | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.072 | 0.165 | 0.175 | 0.163 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 47 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 512 | portable_vs_pytorch | 1.068 | 0.699 | 0.748 | 0.701 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 48 | Transition | training | fp32 | D256 TF32 | 384 | portable_vs_pytorch | 1.065 | 4.049 | 5.255 | 4.935 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 49 | bias-only DiT | inference | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.062 | 0.124 | 0.301 | 0.284 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 50 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.062 | 4.351 | 5.356 | 5.044 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 51 | bias-only DiT | training | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.061 | 2.889 | 3.515 | 3.314 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 52 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.060 | 0.075 | 0.165 | 0.156 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 53 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.058 | 0.122 | 0.296 | 0.280 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 54 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.058 | 0.120 | 0.131 | 0.124 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 55 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.051 | 0.082 | 0.087 | 0.083 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 56 | Transition | inference | bf16 | D384 | 768 | portable_vs_pytorch | 1.050 | 3.783 | 6.263 | 5.963 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 57 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.050 | 6.688 | 7.578 | 7.218 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 58 | token_pair_init | inference | fp32 in, fp32 out | B16 | 256 | cuda_vs_portable | 1.047 | 0.233 | 0.222 | 2.101 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 59 | bias-only DiT | inference | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.043 | 0.126 | 0.293 | 0.281 (pt_compiled) | 1 | portable path slower than PyTorch |
-| 60 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.042 | 0.231 | 0.453 | 0.435 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 61 | Transition | inference | bf16 | D384 | 384 | portable_vs_pytorch | 1.041 | 0.965 | 1.593 | 1.531 (pt_compiled) | 2 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.041, spread 0.054) |
-| 62 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.040 | 0.059 | 0.059 | 0.056 (pt_compiled) | 2 | portable path slower than PyTorch; cuda_vs_portable within noise (ratio 1.006, spread 0.002) |
-| 63 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.037 | 3.533 | 4.021 | 3.877 (pt_compiled) | 2 | portable path slower than PyTorch |
-| 64 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.036 | 0.032 | 0.032 | 0.031 (pt_compiled) | 3 | portable path slower than PyTorch; cuda_vs_portable within noise (ratio 0.998, spread 0.005) |
-| 65 | ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.035 | 2.894 | 3.004 | 2.902 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 66 | LayerNorm (pair) | inference | fp32 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.034 | 0.057 | 0.057 | 0.055 (pt_compiled) | 1 | portable path slower than PyTorch; n.a.: cuda_vs_portable: cuda rung launched the portable kernels (no distinct CUDA path) |
-| 67 | AttentionPairBias | training | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.033 | 0.419 | 0.406 | 0.423 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel |
-| 68 | token_pair_init | inference | fp32 in, fp32 out | B16 | 384 | cuda_vs_portable | 1.031 | 0.479 | 0.464 | 4.751 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
-| 69 | AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | cuda_vs_portable | 1.029 | 0.026 | 0.025 | 0.027 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.029, spread 0.050) |
-| 70 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.028 | 0.173 | 0.441 | 0.429 (pt_compiled) | 3 | portable path slower than PyTorch |
-| 71 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 256 | portable_vs_pytorch | 1.016 | 0.867 | 0.887 | 0.873 (pt_compiled) | 1 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.016, spread 0.010); n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 72 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 768 | portable_vs_pytorch | 1.010 | 0.107 | 0.107 | 0.106 (pt_compiled) | 3 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.010, spread 0.002); n.a.: cuda_vs_portable: cuda rung launched the portable kernels (no distinct CUDA path) |
-| 73 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | cuda_vs_portable | 1.006 | 0.059 | 0.059 | 0.056 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.006, spread 0.002) |
-| 74 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 384 | portable_vs_pytorch | 1.004 | 1.801 | 1.816 | 1.809 (pt_compiled) | 1 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.004, spread 0.004); n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
-| 75 | token_pair_init | inference | fp32 in, fp32 out | B48 | 256 | cuda_vs_portable | 1.003 | 0.625 | 0.623 | 6.205 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.003, spread 0.066) |
-| 76 | smooth_lddt | inference | fp32 | A48 B1 | 1024 | cuda_vs_portable | 1.002 | 0.161 | 0.161 | 63.153 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.002, spread 0.002) |
-| 77 | OuterProductMean RF3 (bias, divide after) | inference | bf16 | S512 msa64 pair128 | 256 | cuda_vs_portable | 1.001 | 0.221 | 0.221 | 0.333 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.001, spread 0.008) |
-| 78 | token DiT + extra_pair_bias | training | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | cuda_vs_portable | 1.000 | 0.684 | 0.683 | 0.684 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.000, spread 0.010); portable_vs_pytorch within noise (ratio 0.999, spread 0.010) |
+| 1 | RMSNorm | inference | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.421 | 0.068 | 0.080 | 0.056 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 2 | Transition | training | bf16 | D768 | 384 | portable_vs_pytorch | 1.351 | 11.025 | 16.568 | 12.268 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 3 | RMSNorm | training | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.281 | 0.155 | 0.212 | 0.165 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 4 | Transition | training | bf16 | D512 | 384 | portable_vs_pytorch | 1.270 | 6.028 | 7.871 | 6.199 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 5 | sampler pool_atoms | inference | bf16 | B5 c768 | 24576 | cuda_vs_portable | 1.247 | 0.070 | 0.056 | 0.442 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
+| 6 | Transition | training | bf16 | D384 | 768 | portable_vs_pytorch | 1.243 | 13.659 | 19.940 | 16.043 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 7 | Transition | inference | bf16 | D768 | 384 | portable_vs_pytorch | 1.240 | 3.377 | 5.402 | 4.356 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 8 | RMSNorm | training | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.230 | 0.072 | 0.084 | 0.069 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 9 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 768 | cuda_vs_portable | 1.217 | 0.360 | 0.296 | 0.300 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel; portable_vs_pytorch within noise (ratio 0.984, spread 0.002) |
+| 10 | Transition | training | bf16 | D384 | 384 | portable_vs_pytorch | 1.213 | 3.638 | 4.958 | 4.087 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 11 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 384 | cuda_vs_portable | 1.184 | 0.104 | 0.088 | 0.094 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
+| 12 | AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.176 | 0.035 | 0.040 | 0.034 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 13 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.165 | 0.031 | 0.028 | 0.024 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 14 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.153 | 0.144 | 0.171 | 0.148 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 15 | sampler pool_atoms | inference | bf16 | B5 c768 | 12288 | cuda_vs_portable | 1.151 | 0.039 | 0.034 | 0.224 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
+| 16 | token_pair_init | inference | fp32 in, fp32 out | B16 | 128 | cuda_vs_portable | 1.133 | 0.089 | 0.078 | 0.544 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
+| 17 | Transition | training | bf16 | D256 | 768 | portable_vs_pytorch | 1.127 | 7.166 | 10.165 | 9.019 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 18 | Transition | inference | bf16 | D512 | 384 | portable_vs_pytorch | 1.119 | 1.587 | 2.618 | 2.340 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 19 | token_pair_init | inference | fp32 in, fp32 out | B48 | 128 | cuda_vs_portable | 1.105 | 0.205 | 0.185 | 1.563 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
+| 20 | Transition | training | bf16 | D256 | 384 | portable_vs_pytorch | 1.104 | 1.844 | 2.580 | 2.337 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 21 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.100 | 0.136 | 0.237 | 0.216 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 22 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | cuda_vs_portable | 1.090 | 0.031 | 0.028 | 0.024 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
+| 23 | AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.088 | 0.641 | 0.699 | 0.643 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 24 | token DiT + extra_pair_bias | inference | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.088 | 0.205 | 0.224 | 0.206 (pt_compiled) | 1 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 25 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.084 | 0.419 | 0.463 | 0.426 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 26 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.077 | 1.463 | 1.798 | 1.670 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 27 | ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.075 | 2.300 | 2.473 | 2.301 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 28 | ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.074 | 2.979 | 3.206 | 2.986 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 29 | AttentionPairBias | inference | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.073 | 0.158 | 0.147 | 0.152 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel |
+| 30 | bias-only DiT | training | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.073 | 3.054 | 3.578 | 3.336 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 31 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.072 | 2.850 | 3.552 | 3.313 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 32 | ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.072 | 1.238 | 1.335 | 1.245 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 33 | LayerNorm (pair) | training | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.072 | 0.165 | 0.175 | 0.163 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 34 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 512 | portable_vs_pytorch | 1.068 | 0.699 | 0.748 | 0.701 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 35 | Transition | training | fp32 | D256 TF32 | 384 | portable_vs_pytorch | 1.065 | 4.049 | 5.255 | 4.935 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 36 | bias-only DiT | inference | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.062 | 0.124 | 0.301 | 0.284 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 37 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.062 | 4.351 | 5.356 | 5.044 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 38 | bias-only DiT | training | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.061 | 2.889 | 3.515 | 3.314 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 39 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.060 | 0.075 | 0.165 | 0.156 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 40 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.058 | 0.122 | 0.296 | 0.280 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 41 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.058 | 0.120 | 0.131 | 0.124 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 42 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.051 | 0.082 | 0.087 | 0.083 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 43 | Transition | inference | bf16 | D384 | 768 | portable_vs_pytorch | 1.050 | 3.783 | 6.263 | 5.963 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 44 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.050 | 6.688 | 7.578 | 7.218 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 45 | token_pair_init | inference | fp32 in, fp32 out | B16 | 256 | cuda_vs_portable | 1.047 | 0.233 | 0.222 | 2.101 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
+| 46 | bias-only DiT | inference | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.043 | 0.126 | 0.293 | 0.281 (pt_compiled) | 1 | portable path slower than PyTorch |
+| 47 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.042 | 0.231 | 0.453 | 0.435 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 48 | Transition | inference | bf16 | D384 | 384 | portable_vs_pytorch | 1.041 | 0.965 | 1.593 | 1.531 (pt_compiled) | 2 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.041, spread 0.054) |
+| 49 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.040 | 0.059 | 0.059 | 0.056 (pt_compiled) | 2 | portable path slower than PyTorch; cuda_vs_portable within noise (ratio 1.006, spread 0.002) |
+| 50 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.037 | 3.533 | 4.021 | 3.877 (pt_compiled) | 2 | portable path slower than PyTorch |
+| 51 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.036 | 0.032 | 0.032 | 0.031 (pt_compiled) | 3 | portable path slower than PyTorch; cuda_vs_portable within noise (ratio 0.998, spread 0.005) |
+| 52 | ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.035 | 2.894 | 3.004 | 2.902 (pt_compiled) | 2 | portable path slower than PyTorch; n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 53 | LayerNorm (pair) | inference | fp32 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.034 | 0.057 | 0.057 | 0.055 (pt_compiled) | 1 | portable path slower than PyTorch; n.a.: cuda_vs_portable: cuda rung launched the portable kernels (no distinct CUDA path) |
+| 54 | sampler pool_atoms | inference | bf16 | B5 c768 | 4096 | cuda_vs_portable | 1.034 | 0.018 | 0.017 | 0.080 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel |
+| 55 | AttentionPairBias | training | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.033 | 0.419 | 0.406 | 0.423 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel |
+| 56 | token_pair_init | inference | fp32 in, fp32 out | B16 | 384 | cuda_vs_portable | 1.031 | 0.479 | 0.464 | 4.751 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel |
+| 57 | AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | cuda_vs_portable | 1.029 | 0.026 | 0.025 | 0.027 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.029, spread 0.050) |
+| 58 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.028 | 0.173 | 0.441 | 0.429 (pt_compiled) | 3 | portable path slower than PyTorch |
+| 59 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 256 | portable_vs_pytorch | 1.016 | 0.867 | 0.887 | 0.873 (pt_compiled) | 1 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.016, spread 0.010); n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 60 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 768 | portable_vs_pytorch | 1.010 | 0.107 | 0.107 | 0.106 (pt_compiled) | 3 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.010, spread 0.002); n.a.: cuda_vs_portable: cuda rung launched the portable kernels (no distinct CUDA path) |
+| 61 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | cuda_vs_portable | 1.006 | 0.059 | 0.059 | 0.056 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.006, spread 0.002) |
+| 62 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 384 | portable_vs_pytorch | 1.004 | 1.801 | 1.816 | 1.809 (pt_compiled) | 1 | portable path slower than PyTorch; portable_vs_pytorch within noise (ratio 1.004, spread 0.004); n.a.: cuda_vs_portable: no CUDA path serves this call: `miniworld` ran the PyTorch reference |
+| 63 | token_pair_init | inference | fp32 in, fp32 out | B48 | 256 | cuda_vs_portable | 1.003 | 0.625 | 0.623 | 6.205 (pt_compiled) | 2 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.003, spread 0.066) |
+| 64 | smooth_lddt | inference | fp32 | A48 B1 | 1024 | cuda_vs_portable | 1.002 | 0.161 | 0.161 | 63.153 (pt_compiled) | 3 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.002, spread 0.002) |
+| 65 | OuterProductMean RF3 (bias, divide after) | inference | bf16 | S512 msa64 pair128 | 256 | cuda_vs_portable | 1.001 | 0.221 | 0.221 | 0.333 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.001, spread 0.008) |
+| 66 | token DiT + extra_pair_bias | training | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | cuda_vs_portable | 1.000 | 0.684 | 0.683 | 0.684 (pt_compiled) | 1 | CUDA kernel slower than the portable kernel; cuda_vs_portable within noise (ratio 1.000, spread 0.010); portable_vs_pytorch within noise (ratio 0.999, spread 0.010) |
 
 ### Violations ranked by importance (production weight, then size)
 
 | # | weight | op | mode | dtype | shape | L | pair | ratio |
 |---|---|---|---|---|---|---|---|---|
-| 1 | 3 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.714 |
-| 2 | 3 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.590 |
-| 3 | 3 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.384 |
-| 4 | 3 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.318 |
-| 5 | 3 | pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.308 |
-| 6 | 3 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 768 | cuda_vs_portable | 1.217 |
-| 7 | 3 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 384 | cuda_vs_portable | 1.184 |
-| 8 | 3 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.179 |
-| 9 | 3 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 384 | cuda_vs_portable | 1.173 |
-| 10 | 3 | pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 256 | cuda_vs_portable | 1.168 |
-| 11 | 3 | pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 128 | cuda_vs_portable | 1.158 |
-| 12 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 128 | cuda_vs_portable | 1.133 |
-| 13 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.077 |
-| 14 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.072 |
-| 15 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.062 |
-| 16 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.060 |
-| 17 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.058 |
-| 18 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 256 | cuda_vs_portable | 1.047 |
-| 19 | 3 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.036 |
-| 20 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 384 | cuda_vs_portable | 1.031 |
-| 21 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.028 |
-| 22 | 3 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 768 | portable_vs_pytorch | 1.010 |
-| 23 | 3 | smooth_lddt | inference | fp32 | A48 B1 | 1024 | cuda_vs_portable | 1.002 |
-| 24 | 2 | pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.726 |
-| 25 | 2 | pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.620 |
-| 26 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.421 |
-| 27 | 2 | Transition | training | bf16 | D768 | 384 | portable_vs_pytorch | 1.351 |
-| 28 | 2 | pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.336 |
-| 29 | 2 | pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.283 |
-| 30 | 2 | RMSNorm | training | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.281 |
-| 31 | 2 | Transition | training | bf16 | D384 | 768 | portable_vs_pytorch | 1.243 |
-| 32 | 2 | Transition | inference | bf16 | D768 | 384 | portable_vs_pytorch | 1.240 |
-| 33 | 2 | RMSNorm | training | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.230 |
-| 34 | 2 | Transition | training | bf16 | D384 | 384 | portable_vs_pytorch | 1.213 |
-| 35 | 2 | AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.176 |
-| 36 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.165 |
-| 37 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.153 |
-| 38 | 2 | Transition | training | bf16 | D256 | 768 | portable_vs_pytorch | 1.127 |
-| 39 | 2 | pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 256 | cuda_vs_portable | 1.114 |
-| 40 | 2 | token_pair_init | inference | fp32 in, fp32 out | B48 | 128 | cuda_vs_portable | 1.105 |
-| 41 | 2 | Transition | training | bf16 | D256 | 384 | portable_vs_pytorch | 1.104 |
-| 42 | 2 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.100 |
-| 43 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | cuda_vs_portable | 1.090 |
-| 44 | 2 | AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.088 |
-| 45 | 2 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.084 |
-| 46 | 2 | pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 128 | cuda_vs_portable | 1.083 |
-| 47 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.075 |
-| 48 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.074 |
-| 49 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.072 |
-| 50 | 2 | LayerNorm (pair) | training | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.072 |
-| 51 | 2 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 512 | portable_vs_pytorch | 1.068 |
-| 52 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.058 |
-| 53 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.051 |
-| 54 | 2 | Transition | inference | bf16 | D384 | 768 | portable_vs_pytorch | 1.050 |
-| 55 | 2 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.050 |
-| 56 | 2 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.042 |
-| 57 | 2 | Transition | inference | bf16 | D384 | 384 | portable_vs_pytorch | 1.041 |
-| 58 | 2 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.040 |
-| 59 | 2 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.037 |
-| 60 | 2 | ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.035 |
-| 61 | 2 | AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | cuda_vs_portable | 1.029 |
-| 62 | 2 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | cuda_vs_portable | 1.006 |
-| 63 | 2 | token_pair_init | inference | fp32 in, fp32 out | B48 | 256 | cuda_vs_portable | 1.003 |
-| 64 | 1 | Transition | training | bf16 | D512 | 384 | portable_vs_pytorch | 1.270 |
-| 65 | 1 | Transition | inference | bf16 | D512 | 384 | portable_vs_pytorch | 1.119 |
-| 66 | 1 | token DiT + extra_pair_bias | inference | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.088 |
-| 67 | 1 | AttentionPairBias | inference | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.073 |
-| 68 | 1 | bias-only DiT | training | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.073 |
-| 69 | 1 | Transition | training | fp32 | D256 TF32 | 384 | portable_vs_pytorch | 1.065 |
-| 70 | 1 | bias-only DiT | inference | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.062 |
-| 71 | 1 | bias-only DiT | training | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.061 |
-| 72 | 1 | bias-only DiT | inference | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.043 |
-| 73 | 1 | LayerNorm (pair) | inference | fp32 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.034 |
-| 74 | 1 | AttentionPairBias | training | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.033 |
-| 75 | 1 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 256 | portable_vs_pytorch | 1.016 |
-| 76 | 1 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 384 | portable_vs_pytorch | 1.004 |
-| 77 | 1 | OuterProductMean RF3 (bias, divide after) | inference | bf16 | S512 msa64 pair128 | 256 | cuda_vs_portable | 1.001 |
-| 78 | 1 | token DiT + extra_pair_bias | training | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | cuda_vs_portable | 1.000 |
+| 1 | 3 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 768 | cuda_vs_portable | 1.217 |
+| 2 | 3 | LayerNorm (pair) | training | bf16 | x[1,L,L,128] | 384 | cuda_vs_portable | 1.184 |
+| 3 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 128 | cuda_vs_portable | 1.133 |
+| 4 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.077 |
+| 5 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.072 |
+| 6 | 3 | bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.062 |
+| 7 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.060 |
+| 8 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.058 |
+| 9 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 256 | cuda_vs_portable | 1.047 |
+| 10 | 3 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.036 |
+| 11 | 3 | token_pair_init | inference | fp32 in, fp32 out | B16 | 384 | cuda_vs_portable | 1.031 |
+| 12 | 3 | bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | portable_vs_pytorch | 1.028 |
+| 13 | 3 | LayerNorm (pair) | inference | bf16 | x[1,L,L,128] | 768 | portable_vs_pytorch | 1.010 |
+| 14 | 3 | smooth_lddt | inference | fp32 | A48 B1 | 1024 | cuda_vs_portable | 1.002 |
+| 15 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.421 |
+| 16 | 2 | Transition | training | bf16 | D768 | 384 | portable_vs_pytorch | 1.351 |
+| 17 | 2 | RMSNorm | training | bf16 | x[48,L,768] | 1024 | portable_vs_pytorch | 1.281 |
+| 18 | 2 | sampler pool_atoms | inference | bf16 | B5 c768 | 24576 | cuda_vs_portable | 1.247 |
+| 19 | 2 | Transition | training | bf16 | D384 | 768 | portable_vs_pytorch | 1.243 |
+| 20 | 2 | Transition | inference | bf16 | D768 | 384 | portable_vs_pytorch | 1.240 |
+| 21 | 2 | RMSNorm | training | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.230 |
+| 22 | 2 | Transition | training | bf16 | D384 | 384 | portable_vs_pytorch | 1.213 |
+| 23 | 2 | AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.176 |
+| 24 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | portable_vs_pytorch | 1.165 |
+| 25 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.153 |
+| 26 | 2 | sampler pool_atoms | inference | bf16 | B5 c768 | 12288 | cuda_vs_portable | 1.151 |
+| 27 | 2 | Transition | training | bf16 | D256 | 768 | portable_vs_pytorch | 1.127 |
+| 28 | 2 | token_pair_init | inference | fp32 in, fp32 out | B48 | 128 | cuda_vs_portable | 1.105 |
+| 29 | 2 | Transition | training | bf16 | D256 | 384 | portable_vs_pytorch | 1.104 |
+| 30 | 2 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.100 |
+| 31 | 2 | RMSNorm | inference | bf16 | x[48,L,768] | 384 | cuda_vs_portable | 1.090 |
+| 32 | 2 | AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | portable_vs_pytorch | 1.088 |
+| 33 | 2 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.084 |
+| 34 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.075 |
+| 35 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | portable_vs_pytorch | 1.074 |
+| 36 | 2 | ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.072 |
+| 37 | 2 | LayerNorm (pair) | training | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.072 |
+| 38 | 2 | token DiT + extra_pair_bias | training | bf16 | d768 A2 shared-cond +[L,L] bias | 512 | portable_vs_pytorch | 1.068 |
+| 39 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | portable_vs_pytorch | 1.058 |
+| 40 | 2 | ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.051 |
+| 41 | 2 | Transition | inference | bf16 | D384 | 768 | portable_vs_pytorch | 1.050 |
+| 42 | 2 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.050 |
+| 43 | 2 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | portable_vs_pytorch | 1.042 |
+| 44 | 2 | Transition | inference | bf16 | D384 | 384 | portable_vs_pytorch | 1.041 |
+| 45 | 2 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | portable_vs_pytorch | 1.040 |
+| 46 | 2 | bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | portable_vs_pytorch | 1.037 |
+| 47 | 2 | ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | portable_vs_pytorch | 1.035 |
+| 48 | 2 | sampler pool_atoms | inference | bf16 | B5 c768 | 4096 | cuda_vs_portable | 1.034 |
+| 49 | 2 | AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | cuda_vs_portable | 1.029 |
+| 50 | 2 | LayerNorm (pair) | inference | bf16 | x[1,L,L,256] | 384 | cuda_vs_portable | 1.006 |
+| 51 | 2 | token_pair_init | inference | fp32 in, fp32 out | B48 | 256 | cuda_vs_portable | 1.003 |
+| 52 | 1 | Transition | training | bf16 | D512 | 384 | portable_vs_pytorch | 1.270 |
+| 53 | 1 | Transition | inference | bf16 | D512 | 384 | portable_vs_pytorch | 1.119 |
+| 54 | 1 | token DiT + extra_pair_bias | inference | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | portable_vs_pytorch | 1.088 |
+| 55 | 1 | AttentionPairBias | inference | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.073 |
+| 56 | 1 | bias-only DiT | training | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.073 |
+| 57 | 1 | Transition | training | fp32 | D256 TF32 | 384 | portable_vs_pytorch | 1.065 |
+| 58 | 1 | bias-only DiT | inference | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.062 |
+| 59 | 1 | bias-only DiT | training | bf16 | 12x64 | 512 | portable_vs_pytorch | 1.061 |
+| 60 | 1 | bias-only DiT | inference | bf16 | 24x32 | 512 | portable_vs_pytorch | 1.043 |
+| 61 | 1 | LayerNorm (pair) | inference | fp32 | x[1,L,L,128] | 384 | portable_vs_pytorch | 1.034 |
+| 62 | 1 | AttentionPairBias | training | bf16 | 8x48 pair256 | 384 | cuda_vs_portable | 1.033 |
+| 63 | 1 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 256 | portable_vs_pytorch | 1.016 |
+| 64 | 1 | OuterProductMean RF3 (bias, divide after) | training | bf16 | S512 msa64 pair128 | 384 | portable_vs_pytorch | 1.004 |
+| 65 | 1 | OuterProductMean RF3 (bias, divide after) | inference | bf16 | S512 msa64 pair128 | 256 | cuda_vs_portable | 1.001 |
+| 66 | 1 | token DiT + extra_pair_bias | training | fp32 | d768 A2 shared-cond +[L,L] bias | 256 | cuda_vs_portable | 1.000 |
 
 ### Violation detail: where the time goes (top GPU kernels of one call, microseconds x calls)
 
 `torch.profiler` over one call of the timed step, in the regime of the row. A rung that launches many small kernels, or spends its time in a cuBLAS GEMM the other rung fuses, shows it here.
 
-* **pair_embed_ca training bf16 out, fp32 geometry B16 L=384**, cuda_vs_portable ratio 1.714
-  * cuda: `void pg_bwd_mma<1>(__nv_bfloat16 const*,` 1812us x1, `void pg_ln_bwd<1>(__nv_bfloat16 const*, ` 1260us x1, `pg_fwd_ca(__nv_bfloat16 const*, float co` 594us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1
-  * portable: `_geom_ln_bwd` 830us x1, `_geom_dw` 772us x1, `_geom_fwd_gather` 427us x1, `_geom_dw_reduce` 75us x1, `_ca_bins` 22us x1
-* **pair_embed_ca training bf16 out, fp32 geometry B16 L=256**, cuda_vs_portable ratio 1.590
-  * cuda: `void pg_bwd_mma<1>(__nv_bfloat16 const*,` 809us x1, `void pg_ln_bwd<1>(__nv_bfloat16 const*, ` 556us x1, `pg_fwd_ca(__nv_bfloat16 const*, float co` 268us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1
-  * portable: `_geom_dw` 374us x1, `_geom_ln_bwd` 364us x1, `_geom_fwd_gather` 192us x1, `_geom_dw_reduce` 73us x1, `_ca_bins` 12us x1
-* **pair_embed_geom training bf16 out, fp32 geometry B16 L=384**, cuda_vs_portable ratio 1.384
-  * cuda: `void pg_bwd_mma<0>(__nv_bfloat16 const*,` 2964us x1, `pg_fwd(__nv_bfloat16 const*, float const` 1756us x1, `void pg_ln_bwd<0>(__nv_bfloat16 const*, ` 1526us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2
-  * portable: `_geom_dw` 2015us x1, `_geom_ln_bwd` 1322us x1, `_geom_fwd_gather` 1042us x1, `_geom_bins` 151us x1, `_geom_dw_reduce` 81us x1
-* **pair_embed_geom training bf16 out, fp32 geometry B16 L=256**, cuda_vs_portable ratio 1.318
-  * cuda: `void pg_bwd_mma<0>(__nv_bfloat16 const*,` 1330us x1, `pg_fwd(__nv_bfloat16 const*, float const` 790us x1, `void pg_ln_bwd<0>(__nv_bfloat16 const*, ` 658us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 4us x2
-  * portable: `_geom_dw` 918us x1, `_geom_ln_bwd` 592us x1, `_geom_fwd_gather` 462us x1, `_geom_dw_reduce` 83us x1, `_geom_bins` 68us x1
-* **pair_embed_ca training bf16 out, fp32 geometry B16 L=128**, cuda_vs_portable ratio 1.308
-  * cuda: `void pg_bwd_mma<1>(__nv_bfloat16 const*,` 208us x1, `void pg_ln_bwd<1>(__nv_bfloat16 const*, ` 146us x1, `pg_fwd_ca(__nv_bfloat16 const*, float co` 72us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 3us x1
-  * portable: `_geom_dw` 109us x1, `_geom_ln_bwd` 91us x1, `_geom_dw_reduce` 67us x1, `_geom_fwd_gather` 48us x1, `_ca_bins` 5us x1
 * **LayerNorm (pair) training bf16 x[1,L,L,128] L=768**, cuda_vs_portable ratio 1.217
   * cuda: `void layer_norm_bwd_reduce_kernel<c10::B` 6us x1
   * portable: `layer_norm_bwd_dx_fused` 186us x1, `layer_norm_fwd_fused` 98us x1, `void at::native::vectorized_elementwise_` 4us x2, `void at::native::vectorized_elementwise_` 3us x2
 * **LayerNorm (pair) training bf16 x[1,L,L,128] L=384**, cuda_vs_portable ratio 1.184
   * cuda: `void layer_norm_bwd_reduce_kernel<c10::B` 6us x1
   * portable: `layer_norm_bwd_dx_fused` 52us x1, `void at::native::vectorized_elementwise_` 3us x2, `void at::native::vectorized_elementwise_` 2us x1
-* **pair_embed_geom inference bf16 out, fp32 geometry B16 L=128**, cuda_vs_portable ratio 1.179
-  * cuda: `pg_fwd(__nv_bfloat16 const*, float const` 139us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1, `void (anonymous namespace)::elementwise_` 3us x2
-  * portable: `_geom_fwd_gather` 95us x1, `_geom_bins` 22us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1
-* **pair_embed_geom inference bf16 out, fp32 geometry B16 L=384**, cuda_vs_portable ratio 1.173
-  * cuda: `pg_fwd(__nv_bfloat16 const*, float const` 1128us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1, `void (anonymous namespace)::elementwise_` 3us x2
-  * portable: `_geom_fwd_gather` 821us x1, `_geom_bins` 150us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1
-* **pair_embed_geom inference bf16 out, fp32 geometry B16 L=256**, cuda_vs_portable ratio 1.168
-  * cuda: `pg_fwd(__nv_bfloat16 const*, float const` 506us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 4us x2, `void at::native::elementwise_kernel<128,` 3us x1, `void (anonymous namespace)::elementwise_` 3us x2
-  * portable: `_geom_fwd_gather` 369us x1, `_geom_bins` 68us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1
-* **pair_embed_geom training bf16 out, fp32 geometry B16 L=128**, cuda_vs_portable ratio 1.158
-  * cuda: `void pg_bwd_mma<0>(__nv_bfloat16 const*,` 339us x1, `pg_fwd(__nv_bfloat16 const*, float const` 211us x1, `void pg_ln_bwd<0>(__nv_bfloat16 const*, ` 175us x1, `void at::native::unrolled_elementwise_ke` 10us x3, `void at::native::unrolled_elementwise_ke` 5us x2
-  * portable: `_geom_dw` 252us x1, `_geom_ln_bwd` 154us x1, `_geom_fwd_gather` 119us x1, `_geom_dw_reduce` 88us x1, `_geom_bins` 23us x1
 * **token_pair_init inference fp32 in, fp32 out B16 L=128**, cuda_vs_portable ratio 1.133
   * cuda: `tpi_fwd(float const*, float const*, floa` 67us x1, `Memcpy DtoD (Device -> Device)` 7us x4, `void at::native::unrolled_elementwise_ke` 5us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 3us x1
   * portable: `_tpi_fwd` 56us x1, `Memcpy DtoD (Device -> Device)` 7us x4, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 3us x1
@@ -456,27 +409,18 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 * **smooth_lddt inference fp32 A48 B1 L=1024**, cuda_vs_portable ratio 1.002
   * cuda: `slddt_fwd_full` 128us x1, `slddt_prep` 9us x1, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::unrolled_elementwise_ke` 3us x1, `void at::native::reduce_kernel<512, 1, a` 3us x1
   * portable: `smooth_lddt_fwd_kernel` 133us x1, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::reduce_kernel<512, 1, a` 5us x1, `smooth_lddt_prep_kernel` 4us x1, `void at::native::unrolled_elementwise_ke` 3us x1
-* **pair_embed_ca training bf16 out, fp32 geometry B48 L=256**, cuda_vs_portable ratio 1.726
-  * cuda: `void pg_bwd_mma<1>(__nv_bfloat16 const*,` 2337us x1, `void pg_ln_bwd<1>(__nv_bfloat16 const*, ` 1602us x1, `pg_fwd_ca(__nv_bfloat16 const*, float co` 776us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `pg_reduce_tbl(float const*, __nv_bfloat1` 4us x1
-  * portable: `_geom_ln_bwd` 1049us x1, `_geom_dw` 1018us x1, `_geom_fwd_gather` 572us x1, `_geom_dw_reduce` 74us x1, `_ca_bins` 28us x1
-* **pair_embed_ca training bf16 out, fp32 geometry B48 L=128**, cuda_vs_portable ratio 1.620
-  * cuda: `void pg_bwd_mma<1>(__nv_bfloat16 const*,` 604us x1, `void pg_ln_bwd<1>(__nv_bfloat16 const*, ` 414us x1, `pg_fwd_ca(__nv_bfloat16 const*, float co` 196us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1
-  * portable: `_geom_dw` 270us x1, `_geom_ln_bwd` 259us x1, `_geom_fwd_gather` 142us x1, `_geom_dw_reduce` 73us x1, `_ca_bins` 10us x1
 * **RMSNorm inference bf16 x[48,L,768] L=1024**, portable_vs_pytorch ratio 1.421
   * portable: (no profile)
   * pt_compiled: (no profile)
 * **Transition training bf16 D768 L=384**, portable_vs_pytorch ratio 1.351
   * portable: `_transition_expand_gatebwd_kernel` 4241us x1, `transition_fwd_kernel` 2858us x1, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 2828us x2, `_squeeze_residual_kernel` 2017us x1, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NT` 1762us x1
   * pt_compiled: `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 2850us x3, `nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TN` 2845us x3, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_sp` 2634us x3, `triton_poi_fused__unsafe_view_add_mul_si` 1474us x1, `triton_poi_fused__unsafe_view_mul_sigmoi` 877us x1
-* **pair_embed_geom training bf16 out, fp32 geometry B48 L=256**, cuda_vs_portable ratio 1.336
-  * cuda: `void pg_bwd_mma<0>(__nv_bfloat16 const*,` 3893us x1, `pg_fwd(__nv_bfloat16 const*, float const` 2246us x1, `void pg_ln_bwd<0>(__nv_bfloat16 const*, ` 1879us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2
-  * portable: `_geom_dw` 2650us x1, `_geom_ln_bwd` 1758us x1, `_geom_fwd_gather` 1384us x1, `_geom_bins` 180us x1, `_geom_dw_reduce` 82us x1
-* **pair_embed_geom training bf16 out, fp32 geometry B48 L=128**, cuda_vs_portable ratio 1.283
-  * cuda: `void pg_bwd_mma<0>(__nv_bfloat16 const*,` 1000us x1, `pg_fwd(__nv_bfloat16 const*, float const` 569us x1, `void pg_ln_bwd<0>(__nv_bfloat16 const*, ` 494us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2
-  * portable: `_geom_dw` 684us x1, `_geom_ln_bwd` 446us x1, `_geom_fwd_gather` 348us x1, `_geom_dw_reduce` 87us x1, `_geom_bins` 52us x1
 * **RMSNorm training bf16 x[48,L,768] L=1024**, portable_vs_pytorch ratio 1.281
   * portable: `rmsnorm_bwd_kernel` 128us x1, `rmsnorm_fwd_kernel` 68us x1, `void at::native::vectorized_elementwise_` 2us x1, `void at::native::vectorized_elementwise_` 2us x1
   * pt_compiled: `triton_per_fused__fused_rms_norm__fused_` 98us x1, `void at::native::reduce_kernel<128, 4, a` 12us x1, `triton_poi_fused__fused_rms_norm_backwar` 2us x1, `Memset (Device)` 1us x1
+* **sampler pool_atoms inference bf16 B5 c768 L=24576**, cuda_vs_portable ratio 1.247
+  * cuda: `void (anonymous namespace)::pool_atoms_f` 65us x1
+  * portable: `_pool` 51us x1
 * **Transition training bf16 D384 L=768**, portable_vs_pytorch ratio 1.243
   * portable: `_transition_expand_gatebwd_kernel` 5748us x1, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 3195us x2, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_sp` 2793us x2, `_ln_bwd_residual_kernel` 850us x1, `void cublasLt::splitKreduce_kernel<32, 1` 16us x2
   * pt_compiled: `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 3253us x3, `triton_poi_fused__unsafe_view_add_mul_si` 2942us x1, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_sp` 2797us x3, `nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TN` 2105us x2, `triton_poi_fused__unsafe_view_mul_sigmoi` 1752us x1
@@ -498,12 +442,12 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 * **ConditionedTransition inference bf16 d768 A5/A48 L=1024**, portable_vs_pytorch ratio 1.153
   * portable: `_expand_swiglu_kernel` 58us x1, `_squeeze_gate_kernel` 53us x1, `_adaln_gemm_gate_kernel` 20us x1, `triton_poi_fused__to_copy_conditioned_tr` 12us x3, `triton_poi_fused_add_view_4` 7us x1
   * pt_compiled: `nvjet_tst_128x160_64x5_2x1_v_bz_TNT` 37us x2, `nvjet_tst_256x128_64x4_1x4_h_bz_coopA_TN` 28us x2, `nvjet_tst_256x128_64x4_1x4_h_bz_coopA_bi` 18us x2, `triton_poi_fused__to_copy_4` 15us x3, `triton_poi_fused__unsafe_view_mul_silu_5` 12us x1
+* **sampler pool_atoms inference bf16 B5 c768 L=12288**, cuda_vs_portable ratio 1.151
+  * cuda: `void (anonymous namespace)::pool_atoms_f` 36us x1
+  * portable: `_pool` 32us x1
 * **Transition training bf16 D256 L=768**, portable_vs_pytorch ratio 1.127
   * portable: `_transition_expand_gatebwd_kernel` 3149us x1, `transition_fwd_kernel` 1977us x1, `_squeeze_residual_kernel` 1061us x1, `nvjet_tst_128x256_64x4_2x1_v_bz_coopA_NN` 948us x1, `nvjet_tst_128x256_64x4_2x1_v_bz_coopA_sp` 860us x1
   * pt_compiled: `triton_poi_fused__unsafe_view_add_mul_si` 1964us x1, `triton_poi_fused__unsafe_view_mul_sigmoi` 1169us x1, `nvjet_tst_256x128_64x4_1x2_h_bz_coopA_TN` 1131us x2, `nvjet_tst_128x256_64x4_2x1_v_bz_coopA_sp` 1033us x2, `nvjet_tst_128x256_64x4_2x1_v_bz_coopA_NN` 1005us x2
-* **pair_embed_geom inference bf16 out, fp32 geometry B48 L=256**, cuda_vs_portable ratio 1.114
-  * cuda: `pg_fwd(__nv_bfloat16 const*, float const` 1415us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1, `void (anonymous namespace)::elementwise_` 3us x2
-  * portable: `_geom_fwd_gather` 1100us x1, `_geom_bins` 180us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1
 * **token_pair_init inference fp32 in, fp32 out B48 L=128**, cuda_vs_portable ratio 1.105
   * cuda: `tpi_fwd(float const*, float const*, floa` 184us x1, `Memcpy DtoD (Device -> Device)` 7us x4, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1
   * portable: `_tpi_fwd` 166us x1, `Memcpy DtoD (Device -> Device)` 7us x4, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1, `void at::native::unrolled_elementwise_ke` 4us x1
@@ -522,9 +466,6 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 * **token DiT + extra_pair_bias training bf16 d768 A2 shared-cond +[L,L] bias L=256**, portable_vs_pytorch ratio 1.084
   * portable: `void at::native::(anonymous namespace)::` 53us x3, `nvjet_tst_128x64_64x8_2x4_h_bz_NTT` 24us x5, `nvjet_tst_64x48_64x15_2x1_v_bz_NNT` 24us x5, `layer_norm_bwd_dx_fused` 24us x1, `_bwd_x_kernel` 24us x2
   * pt_compiled: `nvjet_tst_64x48_64x15_2x1_v_bz_NNT` 36us x7, `nvjet_tst_48x64_64x15_2x1_v_bz_TNN` 32us x8, `nvjet_tst_64x40_64x16_2x4_h_bz_NNT` 28us x6, `nvjet_tst_128x64_64x8_2x4_h_bz_NTT` 24us x5, `nvjet_tss_64x64_64x13_2x4_h_bz_NTT` 21us x5
-* **pair_embed_geom inference bf16 out, fp32 geometry B48 L=128**, cuda_vs_portable ratio 1.083
-  * cuda: `pg_fwd(__nv_bfloat16 const*, float const` 353us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 5us x2, `void at::native::elementwise_kernel<128,` 3us x1, `void (anonymous namespace)::elementwise_` 3us x2
-  * portable: `_geom_fwd_gather` 276us x1, `_geom_bins` 51us x1, `void at::native::unrolled_elementwise_ke` 11us x3, `void at::native::unrolled_elementwise_ke` 4us x2, `void at::native::elementwise_kernel<128,` 3us x1
 * **ConditionedTransition training bf16 d768 A5/A48 L=768**, portable_vs_pytorch ratio 1.075
   * portable: `_dh_swiglu_bwd_kernel` 373us x1, `nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TN` 356us x2, `nvjet_tss_192x192_64x3_2x1_v_bz_coopB_sp` 325us x3, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 255us x2, `_bwd_x_kernel` 184us x1
   * pt_compiled: `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_NN` 471us x6, `nvjet_tst_192x192_64x4_2x1_v_bz_coopB_TN` 400us x4, `nvjet_tst_192x192_64x3_2x1_v_bz_coopB_sp` 209us x2, `triton_poi_fused__unsafe_view_mul_silu_s` 186us x1, `triton_per_fused__to_copy_add_mul_native` 154us x1
@@ -567,6 +508,9 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 * **ConditionedTransition training fp32 d768 A5/A48 L=384**, portable_vs_pytorch ratio 1.035
   * portable: `sm90_xmma_gemm_f32f32_tf32f32_f32_nt_n_t` 675us x3, `sm90_xmma_gemm_f32f32_tf32f32_f32_tn_n_t` 414us x3, `sm90_xmma_gemm_f32f32_tf32f32_f32_nn_n_t` 398us x2, `sm90_xmma_gemm_f32f32_tf32f32_f32_nn_n_t` 204us x2, `_adaln_fwd_gate_kernel` 192us x1
   * pt_compiled: `sm90_xmma_gemm_f32f32_tf32f32_f32_nt_n_t` 682us x3, `sm90_xmma_gemm_f32f32_tf32f32_f32_nn_n_t` 639us x6, `sm90_xmma_gemm_f32f32_tf32f32_f32_tn_n_t` 510us x6, `void cutlass::Kernel2<cutlass_80_tensoro` 198us x3, `triton_poi_fused__unsafe_view_mul_silu_s` 185us x1
+* **sampler pool_atoms inference bf16 B5 c768 L=4096**, cuda_vs_portable ratio 1.034
+  * cuda: `void (anonymous namespace)::pool_atoms_f` 12us x1
+  * portable: `_pool` 10us x1
 * **AdaLN inference bf16 d768 cond384 A5/A48 L=384**, cuda_vs_portable ratio 1.029
   * cuda: `nvjet_tst_128x96_64x7_2x4_h_bz_bias_TNT` 6us x1, `nvjet_tst_128x96_64x7_2x4_h_bz_TNT` 5us x1, `triton_per_fused__to_copy__unsafe_view_a` 4us x1, `triton_per_fused__to_copy_native_layer_n` 3us x1, `triton_poi_fused__to_copy_0` 2us x1
   * portable: `_adaln_gemm_gate_kernel` 9us x1, `triton_poi_fused__to_copy_adaln_gemm_gat` 5us x2, `_ln_kernel` 4us x1, `triton_poi_fused__to_copy_adaln_gemm_gat` 1us x1
@@ -878,36 +822,36 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 | RMSNorm | inference | bf16 | x[48,L,768] | 1024 | 0.056 | 0.067 | 0.067 | 0.080 | 0.068 | 0.849 | 1.421 | 1.207 | VIOLATION(portable_vs_pytorch) |  |
 | RMSNorm | training | bf16 | x[48,L,768] | 384 | 0.069 | 0.144 | 0.147 | 0.084 | 0.072 | 0.853 | 1.230 | 1.050 | VIOLATION(portable_vs_pytorch) |  |
 | RMSNorm | training | bf16 | x[48,L,768] | 1024 | 0.165 | 0.346 | 0.348 | 0.212 | 0.155 | 0.734 | 1.281 | 0.939 | VIOLATION(portable_vs_pytorch) |  |
-| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 128 | 1.280 | 3.151 | 3.419 | 0.137 | 0.161 | 1.179 | 0.107 | 0.126 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 256 | 4.693 | 12.201 | 12.500 | 0.452 | 0.528 | 1.168 | 0.096 | 0.113 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 384 | 10.563 | 27.633 | 27.943 | 0.982 | 1.152 | 1.173 | 0.093 | 0.109 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 128 | 1.827 | 4.618 | 4.885 | 0.650 | 0.752 | 1.158 | 0.356 | 0.412 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 256 | 6.850 | 17.953 | 18.252 | 2.097 | 2.763 | 1.318 | 0.306 | 0.403 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 384 | 15.244 | 40.557 | 40.919 | 4.484 | 6.208 | 1.384 | 0.294 | 0.407 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 128 | 3.560 | 9.167 | 9.454 | 0.345 | 0.374 | 1.083 | 0.097 | 0.105 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 256 | 13.683 | 37.017 | 37.357 | 1.287 | 1.434 | 1.114 | 0.094 | 0.105 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 128 | 5.167 | 13.517 | 13.805 | 1.614 | 2.071 | 1.283 | 0.312 | 0.401 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 256 | 20.146 | 54.295 | 54.672 | 5.935 | 7.929 | 1.336 | 0.295 | 0.394 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 128 | 0.497 | 1.386 | 1.439 | 0.066 | 0.065 | 0.983 | 0.133 | 0.130 | OK | cuda_vs_portable within noise (ratio 0.983, spread 0.004) |
-| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 256 | 1.841 | 5.543 | 5.594 | 0.215 | 0.206 | 0.959 | 0.117 | 0.112 | OK |  |
-| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 384 | 4.131 | 12.484 | 12.555 | 0.462 | 0.440 | 0.952 | 0.112 | 0.106 | OK |  |
-| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 128 | 0.856 | 2.727 | 2.795 | 0.335 | 0.438 | 1.308 | 0.392 | 0.512 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 256 | 3.242 | 10.839 | 10.907 | 1.020 | 1.622 | 1.590 | 0.315 | 0.500 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 384 | 7.261 | 24.367 | 24.468 | 2.116 | 3.628 | 1.714 | 0.291 | 0.500 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_ca | inference | bf16 out, fp32 geometry | B48 | 128 | 1.398 | 4.164 | 4.213 | 0.165 | 0.159 | 0.960 | 0.118 | 0.113 | OK |  |
-| pair_embed_ca | inference | bf16 out, fp32 geometry | B48 | 256 | 5.446 | 16.694 | 16.757 | 0.610 | 0.579 | 0.949 | 0.112 | 0.106 | OK |  |
-| pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 128 | 2.442 | 8.132 | 8.217 | 0.758 | 1.229 | 1.620 | 0.311 | 0.503 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 256 | 9.614 | 32.550 | 32.644 | 2.720 | 4.694 | 1.726 | 0.283 | 0.488 | VIOLATION(cuda_vs_portable) |  |
-| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 128 | 0.530 | 3.215 | 3.277 | 0.209 | 0.139 | 0.662 | 0.395 | 0.262 | OK |  |
-| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 256 | 1.925 | 12.723 | 12.805 | 0.788 | 0.410 | 0.520 | 0.409 | 0.213 | OK |  |
-| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 384 | 4.373 | 28.648 | 28.756 | 1.737 | 0.987 | 0.568 | 0.397 | 0.226 | OK |  |
-| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 128 | 1.538 | 5.696 | 5.796 | - | 0.975 | - | - | 0.634 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
-| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 256 | 5.774 | 22.426 | 22.518 | - | 3.702 | - | - | 0.641 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
-| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 384 | 12.854 | 50.397 | 50.526 | - | 8.725 | - | - | 0.679 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
-| pair_embed_adaln | inference | bf16 out, fp32 geometry | B48 | 128 | 1.464 | 9.606 | 9.683 | 0.589 | 0.320 | 0.543 | 0.402 | 0.219 | OK |  |
-| pair_embed_adaln | inference | bf16 out, fp32 geometry | B48 | 256 | 5.634 | 38.210 | 38.329 | 2.308 | 0.983 | 0.426 | 0.410 | 0.174 | OK |  |
-| pair_embed_adaln | training | bf16 out, fp32 geometry | B48 | 128 | 4.400 | 16.903 | 17.008 | - | 2.649 | - | - | 0.602 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
-| pair_embed_adaln | training | bf16 out, fp32 geometry | B48 | 256 | 17.365 | 67.197 | 67.362 | - | 10.673 | - | - | 0.615 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
+| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 128 | 1.281 | 3.150 | 3.404 | 0.138 | 0.116 | 0.840 | 0.107 | 0.090 | OK |  |
+| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 256 | 4.671 | 12.178 | 12.493 | 0.450 | 0.371 | 0.823 | 0.096 | 0.079 | OK |  |
+| pair_embed_geom | inference | bf16 out, fp32 geometry | B16 | 384 | 10.572 | 27.632 | 27.962 | 0.983 | 0.802 | 0.816 | 0.093 | 0.076 | OK |  |
+| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 128 | 1.827 | 4.610 | 4.888 | 0.648 | 0.455 | 0.703 | 0.355 | 0.249 | OK |  |
+| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 256 | 6.853 | 17.938 | 18.272 | 2.096 | 1.618 | 0.772 | 0.306 | 0.236 | OK |  |
+| pair_embed_geom | training | bf16 out, fp32 geometry | B16 | 384 | 15.244 | 40.566 | 40.869 | 4.505 | 3.642 | 0.808 | 0.296 | 0.239 | OK |  |
+| pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 128 | 3.559 | 9.156 | 9.456 | 0.345 | 0.270 | 0.783 | 0.097 | 0.076 | OK |  |
+| pair_embed_geom | inference | bf16 out, fp32 geometry | B48 | 256 | 13.678 | 36.970 | 37.353 | 1.280 | 0.973 | 0.760 | 0.094 | 0.071 | OK |  |
+| pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 128 | 5.169 | 13.516 | 13.794 | 1.608 | 1.208 | 0.752 | 0.311 | 0.234 | OK |  |
+| pair_embed_geom | training | bf16 out, fp32 geometry | B48 | 256 | 20.152 | 54.290 | 54.604 | 5.932 | 4.533 | 0.764 | 0.294 | 0.225 | OK |  |
+| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 128 | 0.497 | 1.385 | 1.436 | 0.066 | 0.064 | 0.968 | 0.133 | 0.128 | OK |  |
+| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 256 | 1.842 | 5.544 | 5.596 | 0.214 | 0.197 | 0.918 | 0.116 | 0.107 | OK |  |
+| pair_embed_ca | inference | bf16 out, fp32 geometry | B16 | 384 | 4.129 | 12.490 | 12.561 | 0.462 | 0.416 | 0.901 | 0.112 | 0.101 | OK |  |
+| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 128 | 0.857 | 2.730 | 2.792 | 0.335 | 0.246 | 0.734 | 0.391 | 0.287 | OK |  |
+| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 256 | 3.242 | 10.820 | 10.902 | 1.020 | 0.853 | 0.836 | 0.315 | 0.263 | OK |  |
+| pair_embed_ca | training | bf16 out, fp32 geometry | B16 | 384 | 7.261 | 24.367 | 24.417 | 2.115 | 1.866 | 0.882 | 0.291 | 0.257 | OK |  |
+| pair_embed_ca | inference | bf16 out, fp32 geometry | B48 | 128 | 1.398 | 4.162 | 4.215 | 0.165 | 0.153 | 0.927 | 0.118 | 0.110 | OK |  |
+| pair_embed_ca | inference | bf16 out, fp32 geometry | B48 | 256 | 5.449 | 16.696 | 16.761 | 0.610 | 0.554 | 0.909 | 0.112 | 0.102 | OK |  |
+| pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 128 | 2.445 | 8.145 | 8.209 | 0.758 | 0.647 | 0.853 | 0.310 | 0.265 | OK |  |
+| pair_embed_ca | training | bf16 out, fp32 geometry | B48 | 256 | 9.614 | 32.481 | 32.564 | 2.721 | 2.425 | 0.891 | 0.283 | 0.252 | OK |  |
+| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 128 | 0.531 | 3.217 | 3.292 | 0.208 | 0.138 | 0.663 | 0.392 | 0.260 | OK |  |
+| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 256 | 1.926 | 12.726 | 12.792 | 0.782 | 0.408 | 0.521 | 0.406 | 0.212 | OK |  |
+| pair_embed_adaln | inference | bf16 out, fp32 geometry | B16 | 384 | 4.372 | 28.628 | 28.744 | 1.737 | 0.979 | 0.564 | 0.397 | 0.224 | OK |  |
+| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 128 | 1.536 | 5.706 | 5.799 | - | 0.524 | - | - | 0.341 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
+| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 256 | 5.775 | 22.411 | 22.501 | - | 1.850 | - | - | 0.320 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
+| pair_embed_adaln | training | bf16 out, fp32 geometry | B16 | 384 | 12.851 | 50.351 | 50.474 | - | 4.652 | - | - | 0.362 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
+| pair_embed_adaln | inference | bf16 out, fp32 geometry | B48 | 128 | 1.464 | 9.638 | 9.707 | 0.588 | 0.323 | 0.549 | 0.402 | 0.221 | OK |  |
+| pair_embed_adaln | inference | bf16 out, fp32 geometry | B48 | 256 | 5.634 | 38.175 | 38.299 | 2.324 | 0.989 | 0.426 | 0.413 | 0.176 | OK |  |
+| pair_embed_adaln | training | bf16 out, fp32 geometry | B48 | 128 | 4.403 | 16.894 | 16.993 | - | 1.378 | - | - | 0.313 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
+| pair_embed_adaln | training | bf16 out, fp32 geometry | B48 | 256 | 17.373 | 67.090 | 67.299 | - | 5.244 | - | - | 0.302 | n.a. | n.a.: cuda_vs_portable: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ | portable_vs_pytorch: portable: RuntimeError: pair_embed_adaln_bwd (with implementation in <module 'torch._library.custom_ |
 | token_pair_init | inference | fp32 in, fp32 out | B16 | 128 | 0.544 | 1.285 | 1.362 | 0.078 | 0.089 | 1.133 | 0.144 | 0.163 | VIOLATION(cuda_vs_portable) |  |
 | token_pair_init | inference | fp32 in, fp32 out | B16 | 256 | 2.101 | 4.856 | 4.944 | 0.222 | 0.233 | 1.047 | 0.106 | 0.111 | VIOLATION(cuda_vs_portable) |  |
 | token_pair_init | inference | fp32 in, fp32 out | B16 | 384 | 4.751 | 10.897 | 11.005 | 0.464 | 0.479 | 1.031 | 0.098 | 0.101 | VIOLATION(cuda_vs_portable) |  |
@@ -924,12 +868,12 @@ Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode,
 | smooth_lddt | training | fp32 | A48 B1 | 2048 | 402.8 | 421.3 | 418.6 | 1.497 | 1.059 | 0.708 | 0.004 | 0.003 | OK |  |
 | smooth_lddt | inference | fp32 | A16 B1 | 4096 | 350.3 | 362.6 | 362.7 | 0.815 | 0.594 | 0.728 | 0.002 | 0.002 | OK |  |
 | smooth_lddt | training | fp32 | A16 B1 | 4096 | 548.0 | 572.0 | 571.4 | 2.089 | 1.279 | 0.612 | 0.004 | 0.002 | OK |  |
-| sampler augment_noise | inference | fp32 | B5 | 4096 | 0.018 | 0.059 | 0.240 | - | 0.010 | - | - | 0.576 | OK | no portable rung by design |
-| sampler augment_noise | inference | fp32 | B5 | 12288 | 0.023 | 0.071 | 0.244 | - | 0.012 | - | - | 0.508 | OK | no portable rung by design |
-| sampler augment_noise | inference | fp32 | B5 | 24576 | 0.027 | 0.072 | 0.245 | - | 0.014 | - | - | 0.503 | OK | no portable rung by design |
-| sampler align_euler | inference | fp32 | B5 | 4096 | 0.089 | 0.283 | 1.413 | - | 0.017 | - | - | 0.193 | OK | no portable rung by design |
-| sampler align_euler | inference | fp32 | B5 | 12288 | 0.140 | 0.385 | 1.416 | - | 0.021 | - | - | 0.152 | OK | no portable rung by design |
-| sampler align_euler | inference | fp32 | B5 | 24576 | 0.213 | 0.500 | 1.416 | - | 0.026 | - | - | 0.122 | OK | no portable rung by design |
-| sampler pool_atoms | inference | bf16 | B5 c768 | 4096 | 0.079 | 0.259 | 0.282 | - | 0.022 | - | - | 0.276 | OK | no portable rung by design |
-| sampler pool_atoms | inference | bf16 | B5 c768 | 12288 | 0.224 | 0.720 | 0.741 | - | 0.041 | - | - | 0.182 | OK | no portable rung by design |
-| sampler pool_atoms | inference | bf16 | B5 c768 | 24576 | 0.442 | 1.411 | 1.434 | - | 0.070 | - | - | 0.158 | OK | no portable rung by design |
+| sampler augment_noise | inference | fp32 | B5 | 4096 | 0.018 | 0.059 | 0.239 | 0.009 | 0.008 | 0.881 | 0.511 | 0.450 | OK |  |
+| sampler augment_noise | inference | fp32 | B5 | 12288 | 0.024 | 0.071 | 0.239 | 0.010 | 0.009 | 0.836 | 0.435 | 0.364 | OK |  |
+| sampler augment_noise | inference | fp32 | B5 | 24576 | 0.027 | 0.072 | 0.243 | 0.012 | 0.010 | 0.837 | 0.427 | 0.358 | OK |  |
+| sampler align_euler | inference | fp32 | B5 | 4096 | 0.090 | 0.285 | 1.401 | 0.017 | 0.011 | 0.671 | 0.187 | 0.125 | OK |  |
+| sampler align_euler | inference | fp32 | B5 | 12288 | 0.140 | 0.385 | 1.408 | 0.019 | 0.014 | 0.755 | 0.135 | 0.102 | OK |  |
+| sampler align_euler | inference | fp32 | B5 | 24576 | 0.214 | 0.499 | 1.404 | 0.022 | 0.018 | 0.809 | 0.101 | 0.082 | OK |  |
+| sampler pool_atoms | inference | bf16 | B5 c768 | 4096 | 0.080 | 0.258 | 0.282 | 0.017 | 0.018 | 1.034 | 0.215 | 0.222 | VIOLATION(cuda_vs_portable) |  |
+| sampler pool_atoms | inference | bf16 | B5 c768 | 12288 | 0.224 | 0.720 | 0.741 | 0.034 | 0.039 | 1.151 | 0.152 | 0.175 | VIOLATION(cuda_vs_portable) |  |
+| sampler pool_atoms | inference | bf16 | B5 c768 | 24576 | 0.442 | 1.411 | 1.436 | 0.056 | 0.070 | 1.247 | 0.126 | 0.158 | VIOLATION(cuda_vs_portable) |  |
