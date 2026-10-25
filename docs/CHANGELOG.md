@@ -21,8 +21,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - H100 pair-op CUDA kernels reworked after the portable kernels were measured faster (`docs/records/pair_ops_cuda_vs_portable_20261025.md`): `pair_embed_geom` / `pair_embed_ca` gather kernels with
   16 / 32 warps per CTA, a one-instruction bf16 unpack and a binary-search bucket (output and codes bit-identical to before), a pipelined LayerNorm backward (bit-identical), and wgmma
   table-gradient kernels for `pair_embed_geom` / `pair_embed_ca` (bit-identical to the previous kernel) and `pair_embed_adaln` (fp32 sums in a different fixed order). Against the portable
-  kernels on H100 (CUDA graph, B = 16 .. 48, L = 128 .. 512): encoder forward 1.17-1.39x faster (was 0.84-0.97x), encoder training step 1.23-1.38x (was 0.74-0.87x), `pair_embed_adaln`
-  training 1.8-2.2x (was 0.9-1.1x); the decoder training step improved from 0.57-0.76x to 0.97-1.16x (still DRAM-bound). The kernel sources changed, so their prebuilt-bundle keys change.
+  kernels on H100 (CUDA graph, B = 16 .. 48, L = 128 .. 512): encoder forward 1.17-1.38x faster (was 0.84-0.97x), encoder training step 1.27-1.44x (was 0.74-0.87x), `pair_embed_adaln`
+  training 1.8-2.2x (was 0.9-1.1x); the decoder training step 1.11-1.36x (was 0.57-0.76x). The kernel sources changed, so their prebuilt-bundle keys change.
   `MINIWORLD_PAIR_EMBED_BWD_IMPL` selects the table-gradient kernel (1 wgmma, 2 the previous `mma.sync`, 0 the shared-memory kernel) for A/B runs.
 - Portable kernels for `pair_embed_geom` (+ `pair_embed_ca`, the decoder's CA-distance pair), `pair_embed_adaln` and `token_pair_init`: the same inputs, outputs, masks,
   `ln_eps` fusion and deterministic backward as the H100 CUDA kernels (bins in registers, a row gather instead of the one-hot Linear; the table / LayerNorm / gamma / beta

@@ -193,13 +193,17 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
   if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
   __syncthreads();
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
-  for (int row = blockIdx.x * NWCA + warp; row < B * n; row += gridDim.x * NWCA) {
+  // work item = one chunk of 32 pairs of one row (finer than a row: the tail wave of a launch of a few rows per warp is short)
+  const int nch = (n + 31) / 32;
+  for (long long item = (long long)blockIdx.x * NWCA + warp; item < (long long)B * n * nch; item += (long long)gridDim.x * NWCA) {
+    const int row = (int)(item / nch), jc = (int)(item - (long long)row * nch);
     int b = row / n, i = row % n;
     bool mi = mask[b * n + i];
     const float* pi = ca + (size_t)row * 3;
     float xi = pi[0], yi = pi[1], zi = pi[2];
     __nv_bfloat16* orow = out + (size_t)row * n * C;
-    for (int j0 = 0; j0 < n; j0 += 32) {
+    {
+      const int j0 = jc * 32;
       int j = j0 + lane;
       uint32_t w0 = MASKED;
       if (j < n && mi && mask[b * n + j]) {
@@ -496,7 +500,7 @@ template <int MODE> struct M4 {
 };
 
 template <int MODE>
-__global__ void __launch_bounds__(M4<MODE>::NTH, 1)
+__global__ void __launch_bounds__(M4<MODE>::NTH, MODE == 1 ? 2 : 1)
 pg_bwd_mma4(const __nv_bfloat16* g, const uint4* codes, long long P, float* tpart, int lboA, int sboA, int lboB, int sboB) {
   constexpr int NWG = M4<MODE>::NWG, NTH4 = M4<MODE>::NTH, SC0 = NWG * 128;
   constexpr int NTAB = MODE == 0 ? NT : NT_CA;
@@ -512,8 +516,9 @@ pg_bwd_mma4(const __nv_bfloat16* g, const uint4* codes, long long P, float* tpar
   const int q = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, tig = lane & 3;
   const long long per = (P + NBLK - 1) / NBLK, p0 = (long long)t * per, p1 = min(P, p0 + per);
   const int ntiles = p1 > p0 ? (int)((p1 - p0 + TP - 1) / TP) : 0;
-  const bool scat = tid >= SC0;
-  const int wg = tid >> 7;
+  const int wuni = __shfl_sync(0xffffffffu, tid >> 5, 0);        // warp index known to be uniform: keeps the wgmma out of a 'divergent' path for ptxas
+  const bool scat = wuni >= NWG * 4;
+  const int wg = wuni >> 2;
 
   for (int k = tid; k < 2 * NROWS * 8; k += NTH4) reinterpret_cast<uint4*>(Ab)[k] = make_uint4(0u, 0u, 0u, 0u);
   int prev[2][11];
@@ -761,7 +766,7 @@ void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::
   size_t smem = (size_t)NT_CA * C * sizeof(__nv_bfloat16);
   cudaFuncSetAttribute(pg_fwd_ca, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  int grid = std::min(sms * 2, (B * n + NWCA - 1) / NWCA);
+  int grid = (int)std::min<long long>(sms * 2, ((long long)B * n * ((n + 31) / 32) + NWCA - 1) / NWCA);
   pg_fwd_ca<<<grid, NWCA * 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(),
       dlim.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),

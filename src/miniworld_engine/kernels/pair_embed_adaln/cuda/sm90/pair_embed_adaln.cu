@@ -281,8 +281,9 @@ pe_bwd_tbl4(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int n
   const int q = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, tig = lane & 3;
   const long long per = (P + NBLK - 1) / NBLK, p0 = (long long)t * per, p1 = min(P, p0 + per);
   const int ntiles = p1 > p0 ? (int)((p1 - p0 + TPB - 1) / TPB) : 0;
-  const bool scat = tid >= SC4;
-  const int wg = tid >> 7;
+  const int wuni = __shfl_sync(0xffffffffu, tid >> 5, 0);        // uniform warp index: keeps the wgmma out of a 'divergent' path for ptxas
+  const bool scat = wuni >= NWG4 * 4;
+  const int wg = wuni >> 2;
   for (int k = tid; k < 2 * NR4 * 8; k += NTH4) reinterpret_cast<uint4*>(Ab)[k] = make_uint4(0u, 0u, 0u, 0u);
   int prev[2][3];
 #pragma unroll

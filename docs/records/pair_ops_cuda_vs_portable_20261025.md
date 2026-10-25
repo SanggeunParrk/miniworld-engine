@@ -5,7 +5,7 @@ Branch `perf/h100-pair-ops-cuda`. [portable_pair_ops_20261025.md](portable_pair_
 the encoder + LayerNorm training step (1.15-1.35x) and the decoder + LayerNorm training step (1.3-1.75x), and level for `pair_embed_adaln` training. On H100 the CUDA kernels are
 the product, so this change finds why and fixes the CUDA kernels. `token_pair_init` and the `pair_embed_adaln` forward were already faster in CUDA and are not touched.
 
-Measured on one H100 80GB HBM3 (node01), torch 2.13.0+cu129, CUDA-graph replay (min over 12 rounds of 10 replays after one second of warm-up; the earlier record used the median of 15
+The tables below are the final state of the branch (after the warpgroup-uniformity and work-item fixes of the last bullet of Reading). Measured on one H100 80GB HBM3 (node01), torch 2.13.0+cu129, CUDA-graph replay (min over 12 rounds of 10 replays after one second of warm-up; the earlier record used the median of 15
 single replays, so "before" below is that record's CUDA column, the portable column was re-measured and agrees with the record within 2 %). `scripts` and raw rows: the
 harness is `bench_pair.py` of the parity work (portable = `force_portable_kernels`, CUDA = default).
 
@@ -35,115 +35,113 @@ search), and its table gradient is the same one-hot product on the tensor cores 
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 0.142 | 0.17 | 0.121 | 1.40x | **1.17x** |
-| 16 | 256 | 0.459 | 0.54 | 0.377 | 1.43x | **1.22x** |
+| 16 | 128 | 0.141 | 0.17 | 0.120 | 1.42x | **1.17x** |
+| 16 | 256 | 0.457 | 0.54 | 0.376 | 1.44x | **1.22x** |
 | 16 | 384 | 0.993 | 1.17 | 0.815 | 1.44x | **1.22x** |
-| 16 | 512 | 1.715 | 1.97 | 1.332 | 1.48x | **1.29x** |
-| 32 | 128 | 0.249 | 0.29 | 0.207 | 1.40x | **1.20x** |
-| 32 | 256 | 0.874 | 1.00 | 0.691 | 1.45x | **1.26x** |
-| 32 | 384 | 1.928 | 2.08 | 1.501 | 1.39x | **1.28x** |
-| 32 | 512 | 3.393 | 3.57 | 2.635 | 1.35x | **1.29x** |
+| 16 | 512 | 1.715 | 1.97 | 1.333 | 1.48x | **1.29x** |
+| 32 | 128 | 0.249 | 0.29 | 0.206 | 1.41x | **1.21x** |
+| 32 | 256 | 0.873 | 1.00 | 0.690 | 1.45x | **1.27x** |
+| 32 | 384 | 1.928 | 2.08 | 1.502 | 1.38x | **1.28x** |
+| 32 | 512 | 3.392 | 3.57 | 2.630 | 1.36x | **1.29x** |
 | 48 | 128 | 0.352 | 0.38 | 0.277 | 1.37x | **1.27x** |
-| 48 | 256 | 1.292 | 1.44 | 0.980 | 1.47x | **1.32x** |
-| 48 | 384 | 2.850 | 2.94 | 2.056 | 1.43x | **1.39x** |
-| 48 | 512 | 5.063 | 5.22 | 3.821 | 1.37x | **1.33x** |
+| 48 | 256 | 1.292 | 1.44 | 0.979 | 1.47x | **1.32x** |
+| 48 | 384 | 2.850 | 2.94 | 2.063 | 1.43x | **1.38x** |
+| 48 | 512 | 5.062 | 5.22 | 3.852 | 1.36x | **1.31x** |
 
 #### pair_embed_geom_train + ln_eps, forward + backward (w grad)
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 0.653 | 0.76 | 0.472 | 1.61x | **1.38x** |
-| 16 | 256 | 2.135 | 2.80 | 1.674 | 1.67x | **1.28x** |
-| 16 | 384 | 4.586 | 6.22 | 3.743 | 1.66x | **1.23x** |
-| 16 | 512 | 8.013 | 10.66 | 6.338 | 1.68x | **1.26x** |
-| 32 | 128 | 1.137 | 1.44 | 0.863 | 1.67x | **1.32x** |
-| 32 | 256 | 4.136 | 5.41 | 3.212 | 1.68x | **1.29x** |
-| 32 | 384 | 8.959 | 11.92 | 7.206 | 1.65x | **1.24x** |
-| 32 | 512 | 15.695 | 20.89 | 12.586 | 1.66x | **1.25x** |
-| 48 | 128 | 1.606 | 2.09 | 1.240 | 1.69x | **1.30x** |
-| 48 | 256 | 5.982 | 7.98 | 4.696 | 1.70x | **1.27x** |
-| 48 | 384 | 13.153 | 17.59 | 10.484 | 1.68x | **1.25x** |
-| 48 | 512 | 23.260 | 30.93 | 18.697 | 1.65x | **1.24x** |
+| 16 | 128 | 0.658 | 0.76 | 0.458 | 1.66x | **1.44x** |
+| 16 | 256 | 2.132 | 2.80 | 1.611 | 1.74x | **1.32x** |
+| 16 | 384 | 4.565 | 6.22 | 3.589 | 1.73x | **1.27x** |
+| 16 | 512 | 8.038 | 10.66 | 6.083 | 1.75x | **1.32x** |
+| 32 | 128 | 1.139 | 1.44 | 0.833 | 1.73x | **1.37x** |
+| 32 | 256 | 4.054 | 5.41 | 3.122 | 1.73x | **1.30x** |
+| 32 | 384 | 8.923 | 11.92 | 6.960 | 1.71x | **1.28x** |
+| 32 | 512 | 15.597 | 20.89 | 12.008 | 1.74x | **1.30x** |
+| 48 | 128 | 1.599 | 2.09 | 1.188 | 1.76x | **1.35x** |
+| 48 | 256 | 6.041 | 7.98 | 4.533 | 1.76x | **1.33x** |
+| 48 | 384 | 13.221 | 17.59 | 10.067 | 1.75x | **1.31x** |
+| 48 | 512 | 23.239 | 30.93 | 17.926 | 1.73x | **1.30x** |
 
 #### pair_embed_ca + ln_eps, forward + backward (w grad)
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 0.341 | 0.44 | 0.313 | 1.41x | **1.09x** |
-| 16 | 256 | 1.025 | 1.65 | 0.933 | 1.77x | **1.10x** |
-| 16 | 384 | 2.128 | 3.65 | 2.191 | 1.67x | **0.97x** |
-| 16 | 512 | 3.710 | 6.33 | 3.606 | 1.76x | **1.03x** |
-| 32 | 128 | 0.567 | 0.84 | 0.490 | 1.71x | **1.16x** |
-| 32 | 256 | 1.916 | 3.18 | 1.796 | 1.77x | **1.07x** |
-| 32 | 384 | 4.197 | 7.23 | 4.088 | 1.77x | **1.03x** |
-| 32 | 512 | 7.473 | 12.63 | 7.186 | 1.76x | **1.04x** |
-| 48 | 128 | 0.778 | 1.24 | 0.750 | 1.65x | **1.04x** |
-| 48 | 256 | 2.797 | 4.72 | 2.713 | 1.74x | **1.03x** |
-| 48 | 384 | 6.169 | 10.68 | 6.217 | 1.72x | **0.99x** |
-| 48 | 512 | 10.898 | 18.67 | 10.768 | 1.73x | **1.01x** |
+| 16 | 128 | 0.338 | 0.44 | 0.248 | 1.77x | **1.36x** |
+| 16 | 256 | 1.022 | 1.65 | 0.854 | 1.93x | **1.20x** |
+| 16 | 384 | 2.129 | 3.65 | 1.863 | 1.96x | **1.14x** |
+| 16 | 512 | 3.811 | 6.33 | 3.286 | 1.93x | **1.16x** |
+| 32 | 128 | 0.563 | 0.84 | 0.449 | 1.87x | **1.25x** |
+| 32 | 256 | 1.901 | 3.18 | 1.627 | 1.95x | **1.17x** |
+| 32 | 384 | 4.175 | 7.23 | 3.732 | 1.94x | **1.12x** |
+| 32 | 512 | 7.477 | 12.63 | 6.547 | 1.93x | **1.14x** |
+| 48 | 128 | 0.778 | 1.24 | 0.661 | 1.88x | **1.18x** |
+| 48 | 256 | 2.810 | 4.72 | 2.471 | 1.91x | **1.14x** |
+| 48 | 384 | 6.546 | 10.68 | 5.550 | 1.92x | **1.18x** |
+| 48 | 512 | 10.903 | 18.67 | 9.800 | 1.91x | **1.11x** |
 
 #### pair_embed_adaln, forward
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 0.213 | 0.14 | 0.141 | 0.99x | **1.51x** |
-| 16 | 256 | 0.792 | 0.41 | 0.415 | 0.99x | **1.91x** |
-| 16 | 384 | 1.754 | 0.99 | 0.995 | 0.99x | **1.76x** |
-| 16 | 512 | 3.090 | 1.24 | 1.243 | 1.00x | **2.49x** |
-| 32 | 128 | 0.405 | 0.21 | 0.206 | 1.02x | **1.97x** |
-| 32 | 256 | 1.561 | 0.73 | 0.739 | 0.99x | **2.11x** |
-| 32 | 384 | 3.480 | 1.46 | 1.474 | 0.99x | **2.36x** |
-| 32 | 512 | 6.170 | 2.36 | 2.381 | 0.99x | **2.59x** |
-| 48 | 128 | 0.595 | 0.32 | 0.326 | 0.98x | **1.83x** |
-| 48 | 256 | 2.328 | 0.99 | 1.015 | 0.98x | **2.29x** |
-| 48 | 384 | 5.215 | 2.08 | 2.091 | 0.99x | **2.49x** |
-| 48 | 512 | 9.240 | 3.37 | 3.392 | 0.99x | **2.72x** |
+| 16 | 128 | 0.212 | 0.14 | 0.141 | 0.99x | **1.50x** |
+| 16 | 256 | 0.791 | 0.41 | 0.416 | 0.99x | **1.90x** |
+| 16 | 384 | 1.752 | 0.99 | 0.994 | 1.00x | **1.76x** |
+| 16 | 512 | 3.086 | 1.24 | 1.246 | 1.00x | **2.48x** |
+| 32 | 128 | 0.405 | 0.21 | 0.207 | 1.01x | **1.96x** |
+| 32 | 256 | 1.559 | 0.73 | 0.730 | 1.00x | **2.14x** |
+| 32 | 384 | 3.480 | 1.46 | 1.475 | 0.99x | **2.36x** |
+| 32 | 512 | 6.171 | 2.36 | 2.380 | 0.99x | **2.59x** |
+| 48 | 128 | 0.596 | 0.32 | 0.330 | 0.97x | **1.81x** |
+| 48 | 256 | 2.327 | 0.99 | 0.998 | 0.99x | **2.33x** |
+| 48 | 384 | 5.213 | 2.08 | 2.099 | 0.99x | **2.48x** |
+| 48 | 512 | 9.236 | 3.37 | 3.395 | 0.99x | **2.72x** |
 
 #### pair_embed_adaln, forward + backward (w, ln_w, ln_b, gamma, beta grads)
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 1.046 | 0.98 | 0.530 | 1.85x | **1.97x** |
-| 16 | 256 | 3.269 | 3.71 | 1.827 | 2.03x | **1.79x** |
-| 16 | 384 | 8.825 | 8.74 | 4.625 | 1.89x | **1.91x** |
-| 16 | 512 | 14.767 | 13.99 | 6.630 | 2.11x | **2.23x** |
-| 32 | 128 | 1.693 | 1.87 | 0.918 | 2.04x | **1.84x** |
-| 32 | 256 | 6.419 | 7.28 | 3.501 | 2.08x | **1.83x** |
-| 32 | 384 | 16.349 | 16.13 | 7.962 | 2.03x | **2.05x** |
-| 32 | 512 | 29.281 | 27.98 | 13.157 | 2.13x | **2.23x** |
-| 48 | 128 | 2.778 | 2.65 | 1.356 | 1.95x | **2.05x** |
-| 48 | 256 | 9.524 | 10.69 | 5.090 | 2.10x | **1.87x** |
-| 48 | 384 | 24.131 | 24.14 | 11.831 | 2.04x | **2.04x** |
-| 48 | 512 | 43.778 | 41.67 | 19.749 | 2.11x | **2.22x** |
+| 16 | 128 | 1.032 | 0.98 | 0.530 | 1.85x | **1.95x** |
+| 16 | 256 | 3.278 | 3.71 | 1.841 | 2.02x | **1.78x** |
+| 16 | 384 | 8.809 | 8.74 | 4.669 | 1.87x | **1.89x** |
+| 16 | 512 | 14.691 | 13.99 | 6.706 | 2.09x | **2.19x** |
+| 32 | 128 | 1.692 | 1.87 | 0.927 | 2.02x | **1.83x** |
+| 32 | 256 | 6.420 | 7.28 | 3.539 | 2.06x | **1.81x** |
+| 32 | 384 | 16.339 | 16.13 | 8.034 | 2.01x | **2.03x** |
+| 32 | 512 | 29.262 | 27.98 | 13.436 | 2.08x | **2.18x** |
+| 48 | 128 | 2.760 | 2.65 | 1.370 | 1.93x | **2.01x** |
+| 48 | 256 | 9.512 | 10.69 | 5.154 | 2.07x | **1.85x** |
+| 48 | 384 | 24.108 | 24.14 | 11.926 | 2.02x | **2.02x** |
+| 48 | 512 | 43.798 | 41.67 | 19.950 | 2.09x | **2.20x** |
 
 #### token_pair_init, forward + backward (left, right, w_rel, w_bond grads)
 
 | B | L | portable ms | CUDA before ms | CUDA after ms | CUDA after vs before | portable / CUDA after |
 |---|---|---|---|---|---|---|
-| 16 | 128 | 0.502 | 0.31 | 0.309 | 1.00x | **1.62x** |
-| 16 | 256 | 1.464 | 1.01 | 1.007 | 1.00x | **1.45x** |
-| 16 | 384 | 3.056 | 2.15 | 2.144 | 1.00x | **1.43x** |
-| 16 | 512 | 5.291 | 3.69 | 3.673 | 1.00x | **1.44x** |
-| 32 | 128 | 0.810 | 0.58 | 0.584 | 0.99x | **1.39x** |
-| 32 | 256 | 2.746 | 1.95 | 1.977 | 0.99x | **1.39x** |
-| 32 | 384 | 5.957 | 4.24 | 4.242 | 1.00x | **1.40x** |
-| 32 | 512 | 10.422 | 7.39 | 7.468 | 0.99x | **1.40x** |
-| 48 | 128 | 1.168 | 0.85 | 0.843 | 1.01x | **1.39x** |
-| 48 | 256 | 3.998 | 2.93 | 2.913 | 1.01x | **1.37x** |
-| 48 | 384 | 8.806 | 6.21 | 6.291 | 0.99x | **1.40x** |
-| 48 | 512 | 15.508 | 11.04 | 10.927 | 1.01x | **1.42x** |
+| 16 | 128 | 0.500 | 0.31 | 0.311 | 1.00x | **1.61x** |
+| 16 | 256 | 1.466 | 1.01 | 1.010 | 1.00x | **1.45x** |
+| 16 | 384 | 3.054 | 2.15 | 2.149 | 1.00x | **1.42x** |
+| 16 | 512 | 5.292 | 3.69 | 3.639 | 1.01x | **1.45x** |
+| 32 | 128 | 0.812 | 0.58 | 0.576 | 1.01x | **1.41x** |
+| 32 | 256 | 2.725 | 1.95 | 1.976 | 0.99x | **1.38x** |
+| 32 | 384 | 5.908 | 4.24 | 4.184 | 1.01x | **1.41x** |
+| 32 | 512 | 10.441 | 7.39 | 7.314 | 1.01x | **1.43x** |
+| 48 | 128 | 1.170 | 0.85 | 0.851 | 1.00x | **1.37x** |
+| 48 | 256 | 4.003 | 2.93 | 2.894 | 1.01x | **1.38x** |
+| 48 | 384 | 8.769 | 6.21 | 6.149 | 1.01x | **1.43x** |
+| 48 | 512 | 15.483 | 11.04 | 10.924 | 1.01x | **1.42x** |
 
 ## Reading
 
-* Encoder forward 1.17-1.39x faster than the portable kernel (median 1.28x; before: 0.84-0.97x), encoder training step with LayerNorm 1.23-1.38x (before 0.74-0.87x), adaln training
-  step 1.8-2.2x (before 0.88-1.06x), adaln forward 1.5-2.7x (unchanged), token_pair_init 1.4-1.6x (unchanged).
-* Decoder (`pair_embed_ca` + LayerNorm) forward + backward: CUDA is now 0.97-1.16x of the portable time (median 1.03x; before 0.57-0.76x). **Not at the 1.1x target for L >= 384.** Every
-  kernel of this path is at the DRAM roofline (forward writes 0.54 GB per 16x256x256 pair, LayerNorm backward reads 0.35 and writes 0.54 GB, the table gradient reads 0.54 GB; 65 % to
-  70 % of peak in Nsight Compute), so the only remaining lever is the d-pair round trip between the last two kernels. A fused LayerNorm backward + table gradient kernel (all 157 x 256
-  accumulators in registers, LayerNorm of the tile in a first phase, mma.sync in a second) was built and verified bit-exact against the unfused pair (1 element of 40192 one bf16 ulp
-  apart), but ran 0.81 ms against 0.73 ms for the two kernels because the two phases do not overlap; a wgmma variant (asynchronous products overlapping the next tile's LayerNorm) did not fit in
-  shared memory at 80 pairs per tile and was not built. Skipping the traffic of blocks without a live pair (35 % of the pairs in this benchmark) was also tried (block-live flags, aligned
-  slices) and was slower (extra dependent loads), so it is not part of the change.
+* Encoder forward 1.17-1.38x faster than the portable kernel (median 1.28x; before: 0.84-0.97x), encoder training step with LayerNorm 1.27-1.44x (before 0.74-0.87x), adaln training
+  step 1.78-2.20x (before 0.88-1.06x), adaln forward 1.5-2.7x (unchanged), token_pair_init 1.4-1.6x (unchanged).
+* Decoder (`pair_embed_ca` + LayerNorm) forward + backward: 1.11-1.36x (median 1.15x; before 0.57-0.76x), >= 1.11x at every L >= 384. Two later fixes took it over 1.1x:
+  (1) ptxas warned "wgmma serialized due to program dependence on compiler-inserted WG.DP in divergent path": the warpgroup role (scatter warps vs wgmma warpgroups) was derived from
+  `threadIdx.x`; taking the warp index through `__shfl_sync` (provably warp-uniform) removed the serialisation, table-gradient kernel and `pair_embed_adaln` alike (decoder step 0.93 -> 0.85 ms
+  at B16 L256, 3.58 -> 3.28 ms at L512); (2) `pg_fwd_ca` work items are one 32-pair chunk instead of a whole row: at B16 L384 a row per warp left 1.45 waves (0.57 -> 0.42 ms).
+  A fused LayerNorm backward + table gradient (mma.sync, built earlier) was bit-exact but slower (0.81 vs 0.73 ms) and a wgmma variant is therefore not needed; block-live skipping was slower.
 
 ## La-Proteina end to end (4 x H100, node01, 2026-10-25)
 

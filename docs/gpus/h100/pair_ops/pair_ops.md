@@ -41,11 +41,11 @@ relative to the portable kernels (> 1: CUDA faster); the rework itself, its prof
 
 | op | portable vs PyTorch reference | peak memory vs reference | CUDA vs portable (before the rework -> now) |
 |---|---|---|---|
-| `pair_embed_geom` forward | 25-33x faster | 7.9x less | 0.84-0.97x -> **1.17-1.39x** |
-| `pair_embed_geom_train` + `ln_eps`, forward + backward | 8.5-12.8x | 3.3-4.0x | 0.74-0.87x -> **1.23-1.38x** |
-| `pair_embed_ca` + `ln_eps`, forward + backward | 9.5-15x | 2.8-3.1x | 0.57-0.76x -> 0.97-1.16x (DRAM-bound, see the record) |
+| `pair_embed_geom` forward | 25-33x faster | 7.9x less | 0.84-0.97x -> **1.17-1.38x** |
+| `pair_embed_geom_train` + `ln_eps`, forward + backward | 8.5-12.8x | 3.3-4.0x | 0.74-0.87x -> **1.27-1.44x** |
+| `pair_embed_ca` + `ln_eps`, forward + backward | 9.5-15x | 2.8-3.1x | 0.57-0.76x -> **1.11-1.36x** |
 | `pair_embed_adaln` forward | 16.6-17.9x | 10.5-10.9x | 1.50-2.72x (unchanged) |
-| `pair_embed_adaln`, forward + backward | 6.3-8.0x | 6.7-11x | 0.88-1.06x -> **1.79-2.23x** |
+| `pair_embed_adaln`, forward + backward | 6.3-8.0x | 6.7-11x | 0.88-1.06x -> **1.78-2.20x** |
 | `token_pair_init`, forward + backward | 4.1-5.8x | 4.8-5.3x | 1.37-1.62x (unchanged) |
 
 The reference runs out of memory at B = 48, L = 512 (and for `pair_embed_adaln` training from B = 32, L = 512); the CUDA and portable kernels do not.
