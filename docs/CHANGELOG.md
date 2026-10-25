@@ -10,6 +10,13 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- The performance ladder (`miniworld-engine ladder {plan,run,report,gate}`, `benchmarks/runners/ladder.py`): for every op, mode, dtype and shape of its grid it times the three rungs
+  of the maintainer's invariant -- hand CUDA < portable (Triton) < PyTorch (`torch.compile` + CUDA graph, eager reported next to it) -- through `bench.py`, three repeats each,
+  and writes a table with a verdict per row (OK / VIOLATION(cuda_vs_portable) / VIOLATION(portable_vs_pytorch) / n.a.) and a gate that fails on a violation not on the allow list.
+  `bench.py` gained `+seq_len_values`, `+repeats`, `+kernel_probe`, `+fp32_check_limit`, `+trimul_d_hidden`, `+opm_variant`, `+dit_extra_pair_bias`, `+local_dit_preset`, the `portable`
+  rung for `outer_product` / `msa_pair_weighted_averaging` / `attention_pair_bias` / `bias_only_dit`, `BENCH_TRACEBACK=1`, and a `ladder_ops` module target for the ops without a module
+  (pair builders, `token_pair_init`, `smooth_lddt`, sampler glue, LayerNorm / RMSNorm). Gate test: `MINIWORLD_LADDER=1 pytest -m ladder tests/gpu/sm90/test_performance_ladder_gpu.py`
+  (never in the default run). First full run on an H100: `docs/records/performance_ladder_20261025.md`.
 - Portable kernels for `pair_embed_geom` (+ `pair_embed_ca`, the decoder's CA-distance pair), `pair_embed_adaln` and `token_pair_init`: the same inputs, outputs, masks,
   `ln_eps` fusion and deterministic backward as the H100 CUDA kernels (bins in registers, a row gather instead of the one-hot Linear; the table / LayerNorm / gamma / beta
   gradients are fixed-order partial sums and a second reduce kernel, no atomics), for any card. `kernels/_pair_route.py` routes the three ops like the rest of the engine:
