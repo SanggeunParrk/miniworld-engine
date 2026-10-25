@@ -38,6 +38,15 @@ from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
 
+#: Programs per SM in the persistent forward and backward. 8 keeps enough tiles in flight to saturate HBM at the
+#: 1-4 warp tile shapes the tuner picks, and is within 1-3% of the best of {4, 8, 16} at every
+#: shape measured (x[48, L, 768] bf16, L 384 and 1024). The launch is capped at the tile count.
+_PERSIST_WAVES = 8
+
+
+def _persistent_programs(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
+
 
 @triton.autotune(configs=configs_for("rmsnorm_fwd_triton"), key=["shape_key", "HAS_WEIGHT"])
 @triton.jit
@@ -51,49 +60,63 @@ def rmsnorm_fwd_kernel(
     """``x / sqrt(mean(x^2) + eps) (* w)`` over the last axis. No modulation: the adaLN modulate
     that folds a projection into this step is `rmsnorm_adamod`, its own family; this one is the
     bare normalization the SWA q/k and triangle-attention call sites want."""
-    row = tl.program_id(0).to(tl.int64)
-    rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
-    row_mask = rows < M
+    pid = tl.program_id(0).to(tl.int64)
+    nprog = tl.num_programs(0)
+    tiles = tl.cdiv(M, BLOCK_M1)
 
     if BLOCK_K >= N:
+        # Pipeline only while the staged x tiles fit shared memory (4 stages x 8192 fp32 = 131 KB).
+        PIPE: tl.constexpr = 4 if BLOCK_M1 * BLOCK_K <= 8192 else 1
+        # COVERING TILE, PERSISTENT + pipelined: a fixed number of programs walk the row tiles and
+        # the loads of the next tile are in flight while this one is reduced. The kernel moves
+        # 2 x 28 MB at x[48, 384, 768] bf16 and is HBM-bound, so what is left to win is the idle
+        # time between one tile's stores and the next tile's first load (24.5 -> 24.0 us on H100;
+        # no change at x[48, 1024, 768], which is already on the copy floor).
         cols = tl.arange(0, BLOCK_K)
         col_mask = cols < N
-        mask = row_mask[:, None] & col_mask[None, :]
-        x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                    mask=mask, other=0.0).to(tl.float32)
-        # Masked lanes load 0.0 and contribute exactly nothing to the sum of squares, so the tail
-        # columns need no fixup -- the same reason layernorm dropped its own.
-        var = tl.sum(x * x, axis=1) / N
-        rstd = 1 / tl.sqrt(var + eps)
-        tl.store(Rstd + rows, rstd, mask=row_mask)
-
-        y = x * rstd[:, None]
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            y = y * w[None, :]
-        tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
-    else:
-        ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            mask = row_mask[:, None] & (cols[None, :] < N)
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                        mask=mask, other=0.0).to(tl.float32)
-            ss += tl.sum(x * x, axis=1)
-        rstd = 1 / tl.sqrt(ss / N + eps)
-        tl.store(Rstd + rows, rstd, mask=row_mask)
-
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            col_mask = cols < N
+        for t in tl.range(pid, tiles, nprog, num_stages=PIPE):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
             mask = row_mask[:, None] & col_mask[None, :]
             x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
                         mask=mask, other=0.0).to(tl.float32)
+            # Masked lanes load 0.0 and contribute exactly nothing to the sum of squares, so the
+            # tail columns need no fixup -- the same reason layernorm dropped its own.
+            var = tl.sum(x * x, axis=1) / N
+            rstd = tl.math.rsqrt(var + eps)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
+
             y = x * rstd[:, None]
             if HAS_WEIGHT:
-                w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
                 y = y * w[None, :]
             tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
+    else:
+        for t in range(pid, tiles, nprog):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
+            ss = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                mask = row_mask[:, None] & (cols[None, :] < N)
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0.0).to(tl.float32)
+                ss += tl.sum(x * x, axis=1)
+            rstd = tl.math.rsqrt(ss / N + eps)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
+
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                col_mask = cols < N
+                mask = row_mask[:, None] & col_mask[None, :]
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0.0).to(tl.float32)
+                y = x * rstd[:, None]
+                if HAS_WEIGHT:
+                    w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+                    y = y * w[None, :]
+                tl.store(Y + rows[:, None] * stride_r + cols[None, :] * stride_c, y, mask=mask)
 
 
 @triton.autotune(configs=configs_for("rmsnorm_bwd_triton"), key=["shape_key", "HAS_WEIGHT"],
@@ -110,70 +133,93 @@ def rmsnorm_bwd_kernel(
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     """``dx`` and, with a weight, ``dweight``.
 
-    ``dweight`` is fp32 and accumulated across row tiles with ``atomic_add``, so its buffer is
+    PERSISTENT: the grid is a fixed number of programs (``_persistent_programs``) and each walks
+    the row tiles ``pid, pid + nprog, ...``. That does two things the one-program-per-tile launch
+    could not. The ``dweight`` column sum stays in a register vector across every tile a program
+    visits and is flushed with ONE ``atomic_add`` per program instead of one per row tile -- at
+    49152 rows x 768 that is 528 atomic flushes instead of 6144 -- and the tile loop is software
+    pipelined (``num_stages``), so the loads of the next tile are in flight while this one is
+    reduced. Measured on H100 at x[48, 1024, 768] bf16 the backward went from 128 us to 83 us
+    (docs/records/portable_norms_ladder_20261025.md).
+
+    ``dweight`` is fp32 and accumulated across programs with ``atomic_add``, so its buffer is
     zeroed by the caller (not merely by the autotuner's ``reset_to_zero``, which fires only while
     a config is being benchmarked).
     """
-    row = tl.program_id(0).to(tl.int64)
-    rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
-    row_mask = rows < M
-    rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
+    pid = tl.program_id(0).to(tl.int64)
+    nprog = tl.num_programs(0)
+    tiles = tl.cdiv(M, BLOCK_M1)
 
     if BLOCK_K >= N:
+        # Pipeline the tile loop only while the staged x/dy tiles fit shared memory (3 stages x 2
+        # tensors x 8192 fp32 elements = 196 KB of the 227 KB an H100 offers).
+        PIPE: tl.constexpr = 3 if BLOCK_M1 * BLOCK_K <= 8192 else 1
         cols = tl.arange(0, BLOCK_K)
         col_mask = cols < N
-        mask = row_mask[:, None] & col_mask[None, :]
-        x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                    mask=mask, other=0.0).to(tl.float32)
-        dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                     mask=mask, other=0.0).to(tl.float32)
-        xhat = tl.where(mask, x * rstd[:, None], 0.0)
         if HAS_WEIGHT:
             w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
-            wdy = tl.where(mask, dy * w[None, :], 0.0)
-        else:
-            wdy = tl.where(mask, dy, 0.0)
-        # No c2: without the mean there is only the rstd term in the derivative.
-        c1 = tl.sum(xhat * wdy, axis=1) / N
-        dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
-        tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
-    else:
-        c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            col_mask = cols < N
+        dw_acc = tl.zeros([BLOCK_K], dtype=tl.float32)
+        for t in tl.range(pid, tiles, nprog, num_stages=PIPE):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
             mask = row_mask[:, None] & col_mask[None, :]
+            rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
             x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
                         mask=mask, other=0.0).to(tl.float32)
             dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
                          mask=mask, other=0.0).to(tl.float32)
             xhat = tl.where(mask, x * rstd[:, None], 0.0)
             if HAS_WEIGHT:
-                w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-                tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+                dw_acc += tl.sum(dy * xhat, axis=0)
                 wdy = tl.where(mask, dy * w[None, :], 0.0)
             else:
                 wdy = tl.where(mask, dy, 0.0)
-            c1 += tl.sum(xhat * wdy, axis=1)
-        c1 = c1 / N
-
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            col_mask = cols < N
-            mask = row_mask[:, None] & col_mask[None, :]
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                        mask=mask, other=0.0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                         mask=mask, other=0.0).to(tl.float32)
-            xhat = tl.where(mask, x * rstd[:, None], 0.0)
-            if HAS_WEIGHT:
-                w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-                wdy = tl.where(mask, dy * w[None, :], 0.0)
-            else:
-                wdy = tl.where(mask, dy, 0.0)
+            # No c2: without the mean there is only the rstd term in the derivative.
+            c1 = tl.sum(xhat * wdy, axis=1) / N
             dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
             tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
+        if HAS_WEIGHT:
+            tl.atomic_add(DW + cols, dw_acc, mask=col_mask, sem="relaxed")
+    else:
+        for t in range(pid, tiles, nprog):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
+            rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
+            c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                col_mask = cols < N
+                mask = row_mask[:, None] & col_mask[None, :]
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0.0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                             mask=mask, other=0.0).to(tl.float32)
+                xhat = tl.where(mask, x * rstd[:, None], 0.0)
+                if HAS_WEIGHT:
+                    w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+                    tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+                    wdy = tl.where(mask, dy * w[None, :], 0.0)
+                else:
+                    wdy = tl.where(mask, dy, 0.0)
+                c1 += tl.sum(xhat * wdy, axis=1)
+            c1 = c1 / N
+
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                col_mask = cols < N
+                mask = row_mask[:, None] & col_mask[None, :]
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0.0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                             mask=mask, other=0.0).to(tl.float32)
+                xhat = tl.where(mask, x * rstd[:, None], 0.0)
+                if HAS_WEIGHT:
+                    w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+                    wdy = tl.where(mask, dy * w[None, :], 0.0)
+                else:
+                    wdy = tl.where(mask, dy, 0.0)
+                dx = (wdy - xhat * c1[:, None]) * rstd[:, None]
+                tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
 
 
 @triton.autotune(configs=configs_for("rmsnorm_adamod_fwd_triton"),
@@ -327,7 +373,8 @@ def _rms_fwd(x_2d: torch.Tensor, weight: torch.Tensor | None, eps: float, has_w:
     y = torch.empty_like(x_2d)
     rstd = x_2d.new_empty((m,), dtype=torch.float32)
     empty = x_2d.new_empty((0,))
-    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
+    programs = _persistent_programs(x_2d.device)
+    grid = lambda meta: (min(triton.cdiv(m, meta["BLOCK_M1"]), programs),)
     rmsnorm_fwd_kernel[grid](
         x_2d, y, weight if has_w else empty, rstd,
         x_2d.stride(0), x_2d.stride(1), m, n, eps,
@@ -356,7 +403,8 @@ def _rms_bwd(dy_2d: torch.Tensor, x_2d: torch.Tensor, weight: torch.Tensor | Non
     dx = torch.empty_like(x_2d)
     dw = x_2d.new_zeros((n,), dtype=torch.float32)
     empty = x_2d.new_empty((0,))
-    grid = lambda meta: (triton.cdiv(m, meta["BLOCK_M1"]),)
+    programs = _persistent_programs(x_2d.device)
+    grid = lambda meta: (min(triton.cdiv(m, meta["BLOCK_M1"]), programs),)
     rmsnorm_bwd_kernel[grid](
         dx, dy_2d, dw, x_2d, weight if has_w else empty, rstd,
         x_2d.stride(0), x_2d.stride(1), m, n,
