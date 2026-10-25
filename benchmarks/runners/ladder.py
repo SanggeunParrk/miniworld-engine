@@ -83,7 +83,6 @@ def G(id, op, target, lengths, desc, *over, **kw):
 
 def ops(id, op, ladder_op, lengths, desc, *over, **kw):
     kw.setdefault("rungs", dict(DEFAULT_RUNGS))
-    kw.setdefault("dtype_label", "bf16")
     return G(id, op, "ladder_ops", lengths, desc, f"+ladder_op={ladder_op}", *over, **kw)
 
 
@@ -461,18 +460,23 @@ def verdict(row: dict, g: Group) -> dict:
         return {k[0] for k in row["kernels"].get(rung, []) if not k[0].startswith(("Memcpy", "Memset", "probe failed"))}
 
     kc, kp, kt = names("cuda"), names("portable"), names("pt_compiled") | names("pt_eager_graph")
-    if has_portable and kc and kp and kc == kp:
+
+    def same(a, b):
+        """The two rungs launched (nearly) the same kernels: Jaccard overlap of their top-kernel names >= 0.7."""
+        return bool(a and b) and len(a & b) / len(a | b) >= 0.7
+
+    if has_portable and same(kc, kp):
         cp = None
         why["cuda_vs_portable"] = "cuda rung launched the portable kernels (no distinct CUDA path)"
-    if has_portable and kp and kt and kp == kt:
+    if has_portable and same(kp, kt):
         pp = None
         why["portable_vs_pytorch"] = "portable rung launched the PyTorch kernels (fell back to the PyTorch statements)"
-    if not has_portable and kc and kt and kc == kt:
+    if not has_portable and same(kc, kt):
         cpt = None
         why["cuda_vs_pytorch"] = "cuda rung launched the PyTorch kernels (no CUDA path served the call)"
     #: the 'cuda' row of a three-rung op that launched the PyTorch kernels: H100 routes `miniworld` to the PyTorch reference where no CUDA path
     #: serves the call, so the user gets PyTorch although a faster portable kernel exists -- still a violation of the invariant, but of the routing
-    no_cuda_path = bool(has_portable and kc and kt and kc == kt)
+    no_cuda_path = bool(has_portable and same(kc, kt) and not same(kc, kp))
     pairs = [("cuda_vs_portable", cp), ("portable_vs_pytorch", pp)] if has_portable else [("cuda_vs_pytorch", cpt)]
     rung_ms = {"cuda": row["cuda_ms"], "portable": row["portable_ms"], "pytorch": row["pytorch_ms"]}
     rung_err = {"cuda": row["errors"].get("cuda", ""), "portable": row["errors"].get("portable", ""),
