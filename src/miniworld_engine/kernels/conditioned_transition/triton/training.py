@@ -117,15 +117,16 @@ def _swiglu(a: torch.Tensor, b: torch.Tensor,
     return h
 
 
-def _gate_fake(out, scale, shape_key=None):
+def _gate_fake(out, scale, shape_key=None, residual=None):
     """(M, D) y -- same shape as `out`."""
     return torch.empty_like(out)
 
 
 @opaque(fake=_gate_fake, name="conditioned_transition_gate_fwd")
 def _gate(out: torch.Tensor, scale: torch.Tensor,
-          shape_key: int | None = None) -> torch.Tensor:
-    """y = sigmoid(scale)*out, through the gated_projection ``_sigmul_fwd`` launch."""
+          shape_key: int | None = None, residual: torch.Tensor | None = None) -> torch.Tensor:
+    """y = sigmoid(scale)*out, through the gated_projection ``_sigmul_fwd`` launch; ``residual`` (contiguous, same shape):
+    residual + y in the same pass (the stream add that was a launch of its own)."""
     y = torch.empty_like(out)
     n = out.numel()
     if shape_key is None:
@@ -134,7 +135,10 @@ def _gate(out: torch.Tensor, scale: torch.Tensor,
         # set -- otherwise the same L would bucket differently depending on the launching family.
         shape_key = both_key(rows_of(out.shape))
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_fwd[grid](scale, out, y, n, shape_key=shape_key)
+    if residual is None:
+        _sigmul_fwd[grid](scale, out, y, n, shape_key=shape_key)
+    else:
+        _sigmul_fwd[grid](scale, out, y, n, shape_key=shape_key, r_ptr=residual, HAS_RES=True)
     return y
 
 
@@ -536,7 +540,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     """
 
     @staticmethod
-    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None):
+    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
         from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
         raw_weights = (wa, wb, ws, wsc, bsc)
@@ -556,6 +560,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # module hands us the real atom count A; without it all we could see is M = B*A.
         L = int(length) if length is not None else length_of(x.shape)
         ctx.length = L
+        ctx.has_residual = residual is not None
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
         if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
             # The reroute used to cover ALL of bf16 on the strength of an untested spill
@@ -613,9 +618,13 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # `_gate` launches gated_projection's `_sigmul_fwd`, which is level=BOTH in
             # registry.csv, so it keys on the ROW count while the atom-level kernels above key
             # on L. `out` is the flattened (M, D) matrix, and M is what a both-level bucket is.
-            y = _gate(out, scale, shape_key=both_key(out.shape[0]))
+            y = _gate(out, scale, shape_key=both_key(out.shape[0]),
+                      residual=None if residual is None else residual.contiguous())   # the residual add rides in the gate pass
+            residual = None
         ctx.save_for_backward(x, cond, ab, h, out, scale, wcat, ws, wsc, *raw_weights)
         ctx.ND = ND
+        if residual is not None:   # the fused forwards (token M <= 512, atom M >= 8192) end in their own gate: one add here
+            y = residual + y
         return y
 
     @staticmethod
@@ -624,6 +633,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ND = ctx.ND
         a, b = ab[:, :ND], ab[:, ND:]
         dy = dy.contiguous()
+        dy_res = dy if ctx.has_residual else None   # the residual stream's gradient is the incoming one, untouched
         # gate bwd (fused elementwise: dout, dscale in one flat pass — measured-best)
         # The SAME L the forward keyed on, carried on ctx (x is (M, K) here, so it cannot be
         # re-read). `_sigmul_bwd` is a level=both kernel, so its label uses the union bucket set.
@@ -706,16 +716,16 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             dWa = torch.mm(dab[:, :ND].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, :ND].t() @ x
             dWb = torch.mm(dab[:, ND:].t(), x, out_dtype=torch.float32) if ctx.master else dab[:, ND:].t() @ x
         del dab                                         # (M, 2*ND) -- the largest block here
-        # 8 returns for 8 forward inputs: the trailing None is `length` (an int shape key, not a
+        # 9 returns for 9 forward inputs: the None is `length` (an int shape key, not a
         # differentiable tensor). A missing one is an arity error, which is the point.
-        return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc, None
+        return dx, dcond, dWa.contiguous(), dWb.contiguous(), dWs, dWsc, db_sc, None, dy_res
 
 
-def cond_transition_train(x, cond, wa, wb, ws, wsc, bsc, length=None):
+def cond_transition_train(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
     """Differentiable ConditionedTransition tail (training fwd+bwd via autograd Function).
 
     ``length`` is L -- the ATOM count A of the activation BEFORE the caller flattened it to
     (M, K) -- and is passed POSITIONALLY to ``.apply`` because ``Function.apply`` takes no
     keyword arguments. None falls back to M inside ``forward``.
     """
-    return ConditionedTransitionTailFunction.apply(x, cond, wa, wb, ws, wsc, bsc, length)
+    return ConditionedTransitionTailFunction.apply(x, cond, wa, wb, ws, wsc, bsc, length, residual)

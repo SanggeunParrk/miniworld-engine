@@ -220,7 +220,9 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N: tl.constexpr,
     sy0, sy1, sx0, sx1, sg0, sg1, sd0, sd1, sdx0, sdx1,
-    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key):
+    BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
+    DRES=None, sr0=0, sr1=0, HAS_DRES: tl.constexpr = False):
+    # HAS_DRES: DRES (M, N) is a gradient that joins dx on its way out (the residual stream's), added in fp32 before the one rounding
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -258,6 +260,8 @@ def _bwd_x_kernel(
         c1 = tl.sum(tl.where(cmask[None, :], dxhat * x_hat, 0.0), axis=1) * inv_n
         # x LayerNorm backward (no affine): dx = rstd·(dxhat − meanₖ(dxhat) − x̂·meanₖ(dxhat·x̂))
         dx = rstd * (dxhat - c2[:, None] - x_hat * c1[:, None])
+        if HAS_DRES:
+            dx += tl.load(DRES + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
         tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1,
                  dx.to(DX.dtype.element_ty), mask=mask)
     else:
@@ -291,11 +295,13 @@ def _bwd_x_kernel(
             x_hat = tl.where(cmask[None, :], (x - mean) * rstd, 0.0)
             dxhat = dy * gate
             dx = rstd * (dxhat - c2[:, None] - x_hat * c1[:, None])
+            if HAS_DRES:
+                dx += tl.load(DRES + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
             tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1,
                      dx.to(DX.dtype.element_ty), mask=mask)
 
 
-def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None):
+def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None):
     """D (2N, M) -- transposed, so the wgrad consuming it is a contiguous-K GEMM -- and dx (M, N)
     carrying x's strides, since dx is written in x's layout rather than contiguous."""
     m, n = dy.shape
@@ -308,7 +314,7 @@ def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None):
 
 @opaque(fake=_bwd_x_fake, name="adaln_bwd_x")
 def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torch.Tensor,
-           gate: torch.Tensor, shape_key: int | None = None,
+           gate: torch.Tensor, shape_key: int | None = None, dres: torch.Tensor | None = None,
            ) -> tuple[torch.Tensor, torch.Tensor]:
     """Returns D=(2N,M) [dscale;dy stacked on the 2N axis] and dx=(M,N) (x's layout), one kernel.
     D's (2N,M) layout is chosen so the wgrad D@cond_aff is a contiguous-K GEMM (see kernel note)."""
@@ -347,7 +353,10 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
     # back on the ladder, which is where a config that wins belongs -- the sweep can now pick it,
     # at the row count that makes it win, and record WHY in the cache instead of in a comment.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
+    if dres is None:
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
+    else:   # dx += dres in the same pass (the residual stream's gradient)
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DRES=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DRES=True)
     return D, dx
 
 
@@ -654,7 +663,7 @@ class AdaLNTrainFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond):
+                eps_x, eps_cond, with_stream=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
         from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
         raw_weights = (scale_weight, scale_bias, bias_weight)
@@ -708,10 +717,15 @@ class AdaLNTrainFn(torch.autograd.Function):
         ctx.orig_x_shape = orig_x_shape
         ctx.orig_cond_shape = orig_cond_shape
         ctx.nx = nx
+        ctx.with_stream = with_stream
+        if with_stream:
+            # (y, x): the second output IS x (a view), for a caller that adds x to something downstream (a residual). Its gradient
+            # arrives in THIS backward and joins dx inside `_bwd_x`, so autograd never runs the add of the two paths into x.
+            return y.reshape(orig_x_shape), x.view_as(x)
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    def backward(ctx, dy):
+    def backward(ctx, dy, dstream=None):
         (x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
          lnw, scale_weight, bias_weight, _raw_sw, _raw_sb, _raw_bw, saved_wcat) = ctx.saved_tensors
         nx = ctx.nx
@@ -722,8 +736,12 @@ class AdaLNTrainFn(torch.autograd.Function):
         # ONE kernel: D=(2NX,M) [dscale;dy] AND dx (fused x LN-backward, no affine, in x's layout).
         # L for both backward launches: the pre-flatten atom count the forward stored on ctx.
         shape_key = atom_key(length_of(ctx.orig_x_shape))
-        D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate,
-                       shape_key=shape_key)                          # D=(2NX,M), dx=(M,NX)
+        dres = None
+        if dstream is not None:
+            dres = dstream.reshape(-1, dstream.shape[-1])
+            if dres.stride(-1) != 1:
+                dres = dres.contiguous()
+        D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate, shape_key=shape_key, dres=dres)                          # D=(2NX,M), dx=(M,NX)
         w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
         dW_cat = torch.mm(D, cond_aff, out_dtype=torch.float32) if ctx.master else _mm(D, cond_aff)
@@ -762,11 +780,12 @@ class AdaLNTrainFn(torch.autograd.Function):
             dW_bias.to(bwd),
             None,
             None,
+            None,
         )
 
 
 def adaln_train(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond):
+                eps_x, eps_cond, with_stream=False):
     """Training (fwd+bwd) adaLN: y = σ(scale)·LN(x) + bias, materialize+cuBLAS, symmetric backward."""
     return AdaLNTrainFn.apply(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                              eps_x, eps_cond)
+                              eps_x, eps_cond, with_stream)

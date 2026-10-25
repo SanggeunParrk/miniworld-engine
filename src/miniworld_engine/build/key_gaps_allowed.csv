@@ -160,3 +160,7 @@ token_pair_init_dw_reduce_triton,NBLK,the number of slice partials added in orde
 transition_expand_swiglu_triton,PREC,"pure function of the activation dtype and torch's TF32 switch (kernels/_dot_precision.py: tf32 for fp32 only where torch allows it, ieee otherwise); bf16 ignores it, and the cache keys the dtype"
 transition_squeeze_residual_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
 transition_bwd_swiglu_recompute_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
+cond_transition_squeeze_gate_triton,HAS_RES,"optional residual add in the epilogue (one extra (BM,BN) load, the GEMM schedule tuned for the sum is the same); the flag only says whether the caller has a stream to add to"
+layernorm_fwd_strided_triton,HAS_STATS,"keyed through shape_key: the launcher with HAS_STATS packs N2 (the width of the second reduction) into shape_key, the plain launcher does not, so the two variants never share an entry"
+adaln_bwd_pre_dx_triton,HAS_DRES,"optional gradient added to dx in the epilogue (one extra (BM,BK) load per tile of a memory-bound kernel); tile config is the same either way"
+gated_projection_gate_flat_triton,HAS_RES,"optional residual added in the elementwise pass (one extra load of a memory-bound kernel); BLOCK_E tuned for the sum is the same"

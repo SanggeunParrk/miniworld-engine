@@ -28,6 +28,7 @@ import torch.nn.functional as F
 from jaxtyping import Float
 
 from miniworld_engine import kernels
+from miniworld_engine.kernels import _capture
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.autotune.shape_key import length_of
 from miniworld_engine.integrations.h100_master import is_h100
@@ -128,7 +129,7 @@ class ConditionedTransition(nn.Module):
         """Forward pass. ALWAYS returns the residual output ``x + delta(x, cond)`` (the residual is
         this module's own input). A caller that composes the update some other way (a
         magnitude-preserving sum, a released checkpoint's own residual) takes :meth:`delta`."""
-        return x + self.delta(x, cond)
+        return self._update(x, cond, residual=True)
 
     @typecheck
     def delta(
@@ -144,12 +145,22 @@ class ConditionedTransition(nn.Module):
         kernels, which operate on the already-normalized activation (the kernel is the
         post-AdaLN tail; the AdaLN lives in this module).
         """
-        x = self.ada_ln_in(x, cond)
+        return self._update(x, cond, residual=False)
+
+    def _update(self, x: torch.Tensor, cond: torch.Tensor, *, residual: bool) -> torch.Tensor:
+        """``delta`` (``residual=False``) or ``x + delta`` (``residual=True``). The portable inference path folds the residual add into the
+        squeeze+gate epilogue of its kernel (one launch fewer); every other path adds it here."""
+        x_in = x
+        if residual:
+            x, x_in = self.ada_ln_in.forward_with_stream(x_in, cond)   # x_in: the stream, whose gradient the LayerNorm backward adds in
+        else:
+            x = self.ada_ln_in(x, cond)
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
         if backend == KernelBackend.PORTABLE and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
         if backend == KernelBackend.PYTORCH:
-            return self._reference(x, cond)
+            y = self._reference(x, cond)
+            return x_in + y if residual else y
 
         if backend in {KernelBackend.PORTABLE, KernelBackend.CUEQUIVARIANCE}:
             d = x.shape[-1]
@@ -167,30 +178,45 @@ class ConditionedTransition(nn.Module):
                              else self.expand_a.weight.dtype)
             x2 = x.reshape(-1, d).to(compute_dtype)
             cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
-            master = needs_backward(self, x2, cond2) and compute_dtype == torch.bfloat16 and is_h100(x.device)
-            wa, wb, ws, wsc, bsc = (
-                p if master else p.to(compute_dtype) for p in (self.expand_a.weight, self.expand_b.weight,
-                                             self.squeeze.weight, self.to_scale.weight,
-                                             self.to_scale.bias)
-            )
+            training = needs_backward(self, x2, cond2)
+            master = training and compute_dtype == torch.bfloat16 and is_h100(x.device)
+            params = (self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight,
+                      self.to_scale.bias)
+            if master:
+                wa, wb, ws, wsc, bsc = params
+            elif not training and any(p.dtype != compute_dtype for p in params):
+                # inference: the casts of the fp32 master weights are made once while the weights are unchanged (about a sixth
+                # of a small block's time went to re-casting them at every call), scoped to the CUDA-graph capture
+                wa, wb, ws, wsc, bsc = _capture.param_forms(
+                    f"ct_portable_{compute_dtype}", params, lambda: tuple(p.to(compute_dtype) for p in params))
+            else:
+                wa, wb, ws, wsc, bsc = (p.to(compute_dtype) for p in params)
             # `x2.requires_grad` alone missed the conditioning tensor AND the projection
             # weights, which are parameters -- so a detached x with live weights took the
             # inference path and the gradient vanished silently (the kernels are `@opaque`, so
             # there is no grad_fn and no error). `dispatch.needs_backward` is the one condition
             # both this and AdaptiveLayerNorm now ask.
             with torch.autocast(device_type=device_type, enabled=False):
-                if needs_backward(self, x2, cond2):
+                fold = residual and x_in.dtype == compute_dtype and x_in.shape == x.shape
+                if training:
                     y = kernels.cond_transition_train(
                         x2, cond2,
                         wa, wb, ws, wsc, bsc,
                         length,
+                        x_in.reshape(-1, d) if fold else None,   # the residual add rides in the gate pass of the forward
                     )
+                    if fold:
+                        return y.reshape(*x.shape[:-1], self.d_hidden)
                 else:
                     y = kernels.cond_transition_inference_dispatch(
                         x2, cond2,
                         wa, wb, ws, wsc, bsc,
                         length,
+                        residual=x_in.reshape(-1, d) if fold else None,
                     )
-            return y.reshape(*x.shape[:-1], self.d_hidden)
+                    if fold:
+                        return y.reshape(*x.shape[:-1], self.d_hidden)
+            y = y.reshape(*x.shape[:-1], self.d_hidden)
+            return x_in + y if residual else y
 
         raise InvalidImplementationError(self.implementation)

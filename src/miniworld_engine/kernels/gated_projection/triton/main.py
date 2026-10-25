@@ -225,12 +225,16 @@ triton_gated_projection = TritonGatedProjectionFunction.apply
 # assume every operand is contiguous.
 @triton.autotune(configs=configs_for("gated_projection_gate_flat_triton"), key=['shape_key'])
 @triton.jit
-def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key):
+def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=None, HAS_RES: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
     m = off < n
     g = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
     o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
-    tl.store(a_ptr + off, (g * o).to(a_ptr.dtype.element_ty), mask=m)
+    a = (g * o).to(a_ptr.dtype.element_ty)
+    if HAS_RES:
+        # r_ptr: the residual stream (contiguous, a's dtype); the gated update rounds to that dtype first, as the unfused add does
+        a = (a.to(tl.float32) + tl.load(r_ptr + off, mask=m, other=0.0).to(tl.float32)).to(a_ptr.dtype.element_ty)
+    tl.store(a_ptr + off, a, mask=m)
 
 
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['shape_key'])

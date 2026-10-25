@@ -107,7 +107,7 @@ def _expand_swiglu_kernel(
 @triton.autotune(configs=configs_for("cond_transition_squeeze_gate_triton"), key=['shape_key'])
 @triton.jit
 def _squeeze_gate_kernel(
-    h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr,
+    h_ptr, cond_ptr, ws_ptr, wsc_ptr, bsc_ptr, out_ptr, res_ptr,
     M, ND, D,
     DC: tl.constexpr,
     stride_hm, stride_hn,
@@ -115,10 +115,12 @@ def _squeeze_gate_kernel(
     stride_sd, stride_sn,     # Ws: (D, ND) row-major
     stride_scd, stride_scc,   # Wsc: (D, DC) row-major
     stride_om, stride_od,
+    stride_rm, stride_rd,     # residual (HAS_RES): the stream the gated update is added to
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    HAS_RES: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. Squeeze half of the composed pair.
     pid_m, pid_d = tile_order(
@@ -161,6 +163,13 @@ def _squeeze_gate_kernel(
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
+    if HAS_RES:
+        # the unfused order: the gated update rounds to the stream dtype, then the add rounds again
+        res = tl.load(
+            res_ptr + rows[:, None] * stride_rm + dcols[None, :] * stride_rd,
+            mask=row_mask[:, None] & d_mask[None, :], other=0.0,
+        )
+        y = y.to(out_ptr.dtype.element_ty).to(tl.float32) + res.to(tl.float32)
     tl.store(
         out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
         y, mask=row_mask[:, None] & d_mask[None, :],
@@ -200,15 +209,16 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     return h
 
 
-def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None):
+def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None):
     """(M, D) y -- D = ws.shape[0], the squeezed width, not h's ND."""
     return h.new_empty((h.shape[0], ws.shape[0]))
 
 
 @opaque(fake=_squeeze_gate_fake, name="conditioned_transition_composed_squeeze_gate")
 def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor,
-                  bsc: torch.Tensor, shape_key: int | None = None) -> torch.Tensor:
-    """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D)."""
+                  bsc: torch.Tensor, shape_key: int | None = None,
+                  residual: torch.Tensor | None = None) -> torch.Tensor:
+    """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D); with ``residual`` (M, D): residual + y."""
     M, ND = h.shape
     if shape_key is None:
         raise ValueError(
@@ -222,20 +232,22 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
+    res = out if residual is None else residual
     _squeeze_gate_kernel[grid](
-        h, cond, ws, wsc, bsc, out,
+        h, cond, ws, wsc, bsc, out, res,
         M, ND, D, DC,
         h.stride(0), h.stride(1),
         cond.stride(0), cond.stride(1),
         ws.stride(0), ws.stride(1),
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
-        shape_key=pack(shape_key, ND=ND, DC=DC),
+        res.stride(0), res.stride(1),
+        shape_key=pack(shape_key, ND=ND, DC=DC), HAS_RES=residual is not None,
     )
     return out
 
 
-def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=None):
+def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
     """Two-kernel composed inference for the token stream (large d_hidden).
 
     Same math/signature as ``cond_transition_inference`` but K-tiled, so d>=256 compiles.
@@ -247,6 +259,6 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
     shape_key = atom_key(length if length is not None else length_of(x.shape))
     h = _expand_swiglu(x, wa, wb, shape_key=shape_key)
-    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key)
+    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key, residual=residual)
 
 

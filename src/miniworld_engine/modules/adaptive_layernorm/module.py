@@ -4,6 +4,7 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
+from miniworld_engine.kernels import _capture
 from miniworld_engine.integrations.h100_master import is_h100
 from miniworld_engine.kernels import adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
@@ -56,6 +57,15 @@ class AdaptiveLayerNorm(nn.Module):
         cond: Float[torch.Tensor, "* d_cond"],
     ) -> Float[torch.Tensor, "* d_hidden"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
+        return self._adaln_forward(x, cond, with_stream=False)
+
+    def forward_with_stream(self, x: torch.Tensor, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+        """``(self(x, cond), x)`` for a caller that adds ``x`` to something later (a residual stream). On the portable training path the
+        returned ``x`` is an output of the same autograd node, so its gradient joins the LayerNorm backward's ``dx`` inside the kernel that
+        writes it instead of in a separate add of the two paths into ``x``; everywhere else it is ``x`` itself."""
+        return self._adaln_forward(x, cond, with_stream=True)
+
+    def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
         if backend == KernelBackend.PORTABLE and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
@@ -72,7 +82,8 @@ class AdaptiveLayerNorm(nn.Module):
             bias = master_linear(self.to_bias, cond_norm)
             out = torch.sigmoid(scale) * x_norm + bias
             # the engine's own path returned the compute dtype (bf16 under autocast); torch's LayerNorm would hand back fp32 there
-            return out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
+            out = out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
+            return (out, x) if with_stream else out
 
         if backend == KernelBackend.PORTABLE:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
@@ -88,17 +99,32 @@ class AdaptiveLayerNorm(nn.Module):
             compute_dtype = (torch.get_autocast_dtype(device_type)
                              if torch.is_autocast_enabled(device_type) else x.dtype)
             master = fn is adaln_train and compute_dtype == torch.bfloat16 and is_h100(x.device)
+            params = (self.to_scale.weight, self.to_scale.bias, self.to_bias.weight)
+            if master:
+                w_scale, b_scale, w_bias = params
+            elif fn is adaln_inference and any(p.dtype != compute_dtype for p in params):
+                # inference: the casts of the fp32 master weights are made once while the weights are unchanged (re-casting them at
+                # every call cost as much as the kernels at a small L), scoped to the CUDA-graph capture (``kernels._capture``)
+                w_scale, b_scale, w_bias = _capture.param_forms(
+                    f"adaln_portable_{compute_dtype}", params, lambda: tuple(p.to(compute_dtype) for p in params))
+            else:
+                w_scale, b_scale, w_bias = (p.to(compute_dtype) for p in params)
+            stream = with_stream and fn is adaln_train and x.dtype == compute_dtype
             with torch.autocast(device_type=device_type, enabled=False):
-                return fn(
+                out = fn(
                     x.to(compute_dtype),
                     cond.to(compute_dtype),
                     self.ln_cond.weight,
-                    self.to_scale.weight if master else self.to_scale.weight.to(compute_dtype),
-                    self.to_scale.bias if master else self.to_scale.bias.to(compute_dtype),
-                    self.to_bias.weight if master else self.to_bias.weight.to(compute_dtype),
+                    w_scale,
+                    b_scale,
+                    w_bias,
                     self.ln_in.eps,
                     self.ln_cond.eps,
+                    *((True,) if stream else ()),
                 )
+            if stream:
+                return out
+            return (out, x) if with_stream else out
 
         raise InvalidImplementationError(self.implementation)
 

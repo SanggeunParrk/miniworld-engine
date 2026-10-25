@@ -82,8 +82,8 @@ class BiasOnlyAttention(nn.Module):
         *,
         bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        single_res = single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
-        single = self.ada_ln_in(single, cond)
+        # residual == the ORIGINAL input; the AdaLN hands it back as a stream output of its own node (see forward_with_stream)
+        single, single_res = self.ada_ln_in.forward_with_stream(single, cond)
         value, gate = self.to_value(single), self.to_gate(single)
         if bias is None:
             logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
