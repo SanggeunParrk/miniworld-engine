@@ -153,7 +153,7 @@ def _output_tensors(value, prefix="output"):
     return result
 
 
-def check_execution_outputs(actual, expected):
+def check_execution_outputs(actual, expected, fp32_limit: float = 1e-4):
     """Check timed execution against its eager/capture preparation, not a model accuracy gate.
 
     BF16 eager primitives may round between operations that Inductor fuses. The
@@ -173,7 +173,7 @@ def check_execution_outputs(actual, expected):
         if tensor.is_floating_point():
             lhs, rhs = tensor.float(), reference.float()
             relative = float((lhs - rhs).norm() / rhs.norm().clamp_min(1e-12))
-            limit = 0.02 if tensor.dtype in (torch.bfloat16, torch.float16) else 1e-4
+            limit = 0.02 if tensor.dtype in (torch.bfloat16, torch.float16) else fp32_limit
             diagnostics[name] = {"relative_frobenius": relative, "limit": limit}
             if relative > limit:
                 raise RuntimeError(f"timed execution differs for {name}: relative={relative:g} > {limit:g}")

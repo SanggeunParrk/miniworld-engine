@@ -106,6 +106,7 @@ MODULE_SUPPORTS_FP32: dict[str, bool] = {
     "msa_pair_weighted_averaging": False,
     "attention_pair_bias": False,
     "bias_only_dit": False,
+    "ladder_ops": False,   # per-op dtypes are fixed by the op (bf16 tables / fp32 geometry); `precision` only sets the norms' dtype
 }
 
 

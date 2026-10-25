@@ -156,6 +156,23 @@ class BenchConfig(BaseModel):
     min_seq_len: int = 64
     max_seq_len: int = 384
     seq_len_step: int = 64
+    #: An explicit list of sequence lengths for the `seq_len` sweep (overrides min/max/step). The performance ladder
+    #: (`benchmarks/runners/ladder.py`) asks for the production lengths, which are not an arithmetic progression.
+    seq_len_values: list[int] | None = None
+    #: Timing repeats: the reported value is the median of `repeats` independent `do_bench` medians of the same (graph-replayed or
+    #: compiled) callable; the individual values go to `execution_validation["repeat_ms"]`. 1 keeps the historical single measurement.
+    repeats: int = 1
+    #: triangle_multiplication(_bidirectional): hidden width of the module (None = d_pair; Protenix / FoldForge templates: pair 64, hidden 128).
+    trimul_d_hidden: int | None = None
+    #: ladder_ops target: which op (`benchmarks/runners/ladder_ops.py`: geom, ca, adaln, tpi, smooth_lddt, sampler_*, layernorm, rmsnorm).
+    ladder_op: str = ""
+    #: Relative-Frobenius limit of the execution-consistency check (compiled / graph-replayed result against the eager one) for fp32 tensors.
+    #: 1e-4 is the historical gate; the performance ladder passes 1e-2 because the fp32 *gradients of a bf16 computation* of a compiled and an
+    #: eager step differ by the bf16 rounding of the fused operations (3e-3), which is not a measurement problem (bf16 tensors already get 2e-2).
+    fp32_check_limit: float = 1e-4
+    #: Record the top GPU kernels of one call (`torch.profiler`) in `execution_validation["top_kernels"]`: what the ladder reads to
+    #: confirm that a rung launched the kernel family it names (Inductor `triton_*` / engine kernels / cuBLAS).
+    kernel_probe: bool = False
     min_d_pair: int = 64
     max_d_pair: int = 256
     d_pair_step: int = 64
@@ -306,7 +323,12 @@ class BenchConfig(BaseModel):
             raise ValueError("implementations must not be empty")
         if self.n_layers < 1 or self.n_augment < 1:
             raise ValueError("n_layers and n_augment must be positive")
-        if self.sweep_axis == "seq_len":
+        if self.repeats < 1:
+            raise ValueError("repeats must be positive")
+        if self.sweep_axis == "seq_len" and self.seq_len_values is not None:
+            if not self.seq_len_values or any(v < 1 for v in self.seq_len_values):
+                raise ValueError("seq_len_values must contain positive points")
+        elif self.sweep_axis == "seq_len":
             if (
                 self.min_seq_len < 1
                 or self.max_seq_len < self.min_seq_len
@@ -609,7 +631,7 @@ def measured_result(
         execution_checks["finite_tensors"] = check_finite_outputs(captured_outputs[0])
         if eager_snapshot is not None:
             execution_checks["compiled_vs_eager"] = check_execution_outputs(
-                captured_outputs[0], eager_snapshot
+                captured_outputs[0], eager_snapshot, conf.fp32_check_limit
             )
             del eager_snapshot
         if conf.cudagraph in {"manual", "graphed"}:
@@ -640,7 +662,7 @@ def measured_result(
                 graph.replay()
                 torch.cuda.synchronize()
                 execution_checks["graph_replay"] = check_execution_outputs(
-                    captured_outputs[0], before_capture
+                    captured_outputs[0], before_capture, conf.fp32_check_limit
                 )
             del before_capture
             timed = graph.replay
@@ -649,6 +671,8 @@ def measured_result(
             timed = func
             actual_graph = "disabled"
     require_compile_evidence(conf.compile, evidence)
+    if conf.kernel_probe:
+        execution_checks["top_kernels"] = _top_kernels(func)
     if actual_graph == "disabled":
         captured_outputs[0] = None
         for tensor in grad_to_none:
@@ -656,9 +680,15 @@ def measured_result(
     if conf.metric == "memory":
         value = bench_memory(timed)["median_mb"]
     else:
-        value = bench_time(
-            timed, grad_to_none=[] if actual_graph != "disabled" else grad_to_none
-        )["median_ms"]
+        repeat_ms = [
+            bench_time(
+                timed, grad_to_none=[] if actual_graph != "disabled" else grad_to_none
+            )["median_ms"]
+            for _ in range(conf.repeats)
+        ]
+        value = sorted(repeat_ms)[len(repeat_ms) // 2]
+        if conf.repeats > 1:
+            execution_checks["repeat_ms"] = [round(v, 6) for v in repeat_ms]
     return BenchResult(
         value=value,
         input_dtype=input_dtype,
@@ -673,6 +703,28 @@ def measured_result(
         input_shapes=actual_shapes,
         execution_validation=json.dumps(execution_checks, sort_keys=True),
     )
+
+
+def _top_kernels(func: Callable, n: int = 6) -> list[list]:
+    """[[kernel name, total device microseconds, calls], ...] of one call of ``func``, largest first (best effort)."""
+    try:
+        from torch.profiler import ProfilerActivity, profile
+
+        torch.cuda.synchronize()
+        with profile(activities=[ProfilerActivity.CUDA]) as prof:
+            func()
+            torch.cuda.synchronize()
+        rows = []
+        for ev in prof.key_averages():
+            if str(getattr(ev, "device_type", "")).endswith("CUDA"):
+                total = getattr(ev, "self_device_time_total", None)
+                if total is None:
+                    total = getattr(ev, "self_cuda_time_total", 0.0)
+                rows.append([ev.key[:56], round(float(total), 1), int(ev.count)])
+        rows.sort(key=lambda r: -r[1])
+        return rows[:n]
+    except Exception as exc:  # noqa: BLE001 - a probe never fails a measurement
+        return [["probe failed: " + type(exc).__name__, 0.0, 0]]
 
 
 def actual_compiled_flag(result: BenchResult | None) -> bool | None:
@@ -1025,6 +1077,8 @@ def bench_module_triangle_multiplication(
                 if conf.trimul_direction == "alternating"
                 else conf.trimul_direction == "outgoing"
             )
+        if conf.trimul_d_hidden is not None:
+            kwargs["d_hidden"] = conf.trimul_d_hidden
         return base_cls(conf.d_pair, **kwargs)
 
     torch.manual_seed(0)
@@ -2256,7 +2310,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
 
     key = implementation.strip().lower()
     anthropic_key = ImplementationType.ANTHROPIC.value
-    if key not in {"pytorch", MINIWORLD_IMPL, anthropic_key, anthropic_key + "_hybrid"}:
+    if key not in {"pytorch", MINIWORLD_IMPL, "portable", anthropic_key, anthropic_key + "_hybrid"}:
         raise UnsupportedBenchmark(
             f"outer_product implements pytorch, miniworld, anthropic and anthropic_hybrid, not "
             f"{implementation!r} (cuequivariance ships no OuterProductMean kernel)"
@@ -2277,6 +2331,8 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         if pristine
         else ImplementationType.ANTHROPIC
         if hybrid
+        else ImplementationType.MINIWORLD
+        if key == "portable"
         else ImplementationType(key)
     )
     d_msa, d_hidden = conf.msa_d_msa, 32
@@ -2483,7 +2539,7 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
 
     key = implementation.strip().lower()
     anthropic_key = ImplementationType.ANTHROPIC.value
-    if key not in {"pytorch", MINIWORLD_IMPL, anthropic_key, anthropic_key + "_hybrid"}:
+    if key not in {"pytorch", MINIWORLD_IMPL, "portable", anthropic_key, anthropic_key + "_hybrid"}:
         raise UnsupportedBenchmark(
             f"msa_pair_weighted_averaging implements pytorch, miniworld, anthropic and anthropic_hybrid, "
             f"not {implementation!r} (cuequivariance ships no pair-weighted-averaging kernel)"
@@ -2502,6 +2558,8 @@ def bench_module_msa_pair_weighted_averaging(conf, seq_len, implementation, fabr
         if pristine
         else ImplementationType.ANTHROPIC
         if hybrid
+        else ImplementationType.MINIWORLD
+        if key == "portable"
         else ImplementationType(key)
     )
     d_msa, n_head, d_hidden = conf.msa_d_msa, 8, conf.msa_d_hidden
@@ -2815,7 +2873,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
         if cueq
         else MultiAPB(ImplementationType.PYTORCH)
         if anthropic
-        else MultiAPB(ImplementationType(key))
+        else MultiAPB(ImplementationType.MINIWORLD if key == "portable" else ImplementationType(key))
     )
     model.load_state_dict(state)
     model = _place(model, conf, dtype).train(is_train)
@@ -5928,6 +5986,13 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     )._replace(**accuracy)
 
 
+def bench_module_ladder_ops(conf, seq_len, implementation, fabric):
+    """The ops without a module (pair builders, token-pair init, smooth lDDT, sampler glue, norms); see `ladder_ops.py`."""
+    from benchmarks.runners import ladder_ops
+
+    return ladder_ops.run(sys.modules[__name__], conf, seq_len, implementation)
+
+
 def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     """Bias-only token DiT block (`modules/bias_only_dit`): AF3 Alg. 23 with the attention's query-key half removed --
     softmax(pair bias) v, gated -- then the conditioned transition, at the token widths of the `dit` target.
@@ -6163,6 +6228,7 @@ MODULE_TARGETS = {
     "outer_product": bench_module_outer_product,
     "msa_pair_weighted_averaging": bench_module_msa_pair_weighted_averaging,
     "attention_pair_bias": bench_module_attention_pair_bias,
+    "ladder_ops": bench_module_ladder_ops,
 }
 
 # The naming rules above are checked here, not just written down: a target whose function is named
@@ -6240,12 +6306,14 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             "transition": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             "outer_product": (
                 "pytorch",
+                "portable",
                 "miniworld",
                 ANTHROPIC_IMPL,
                 ANTHROPIC_HYBRID_IMPL,
             ),
             "msa_pair_weighted_averaging": (
                 "pytorch",
+                "portable",
                 "miniworld",
                 ANTHROPIC_IMPL,
                 ANTHROPIC_HYBRID_IMPL,
@@ -6261,7 +6329,8 @@ def target_impls(level: str, target: str) -> tuple[str, ...]:
             "swa_dit": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
             # anthropic: the AF3 atom block composed from their windowed atom attention (fpf_atom) and atom row kernels; inference only
             "local_dit": ("pytorch", "portable", "miniworld", ANTHROPIC_IMPL),
-            "bias_only_dit": ("pytorch", "miniworld"),
+            "bias_only_dit": ("pytorch", "portable", "miniworld"),
+            "ladder_ops": ("pytorch", "portable", "miniworld"),
         }
         if set(supported) != set(MODULE_TARGETS):
             raise RuntimeError("module benchmark implementation matrix is incomplete")
@@ -6996,8 +7065,10 @@ def main(cfg: DictConfig) -> None:
     if conf.sweep_axis == "seq_len":
         sweep_points = [
             (seq_len, conf.d_pair)
-            for seq_len in range(
-                conf.min_seq_len, conf.max_seq_len + 1, conf.seq_len_step
+            for seq_len in (
+                conf.seq_len_values
+                if conf.seq_len_values is not None
+                else range(conf.min_seq_len, conf.max_seq_len + 1, conf.seq_len_step)
             )
         ]
     else:
