@@ -473,7 +473,8 @@ def verdict(row: dict, g: Group) -> dict:
     cuda_is_pytorch = False
     if has_portable and row["cuda_ms"] and row["pytorch_ms"]:
         t = row["cuda_ms"] / row["pytorch_ms"]
-        cuda_is_pytorch = (same(kc, kt) or (abs(t - 1.0) <= 0.03 and overlap(kc, kt) >= 0.3)) and not same(kc, kp)
+        declined = bool(re.search(r"refused|declined|neither the H100|not taken|reference composition|\[statements", row["paths"].get("cuda", "")))
+        cuda_is_pytorch = (declined or same(kc, kt) or (abs(t - 1.0) <= 0.03 and overlap(kc, kt) >= 0.3)) and not same(kc, kp)
     if has_portable and same(kc, kp):
         cp = None
         why["cuda_vs_portable"] = "cuda rung launched the portable kernels (no distinct CUDA path)"
