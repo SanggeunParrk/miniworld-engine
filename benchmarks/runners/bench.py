@@ -7150,6 +7150,10 @@ def main(cfg: DictConfig) -> None:
                         seen_autotuners,
                     )
                 except Exception as exc:
+                    if os.environ.get("BENCH_TRACEBACK"):   # the one-line error of the CSV hides where it came from
+                        import traceback
+
+                        traceback.print_exc()
                     result = None
                     status = (
                         "unsupported"
