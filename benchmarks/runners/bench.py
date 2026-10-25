@@ -631,7 +631,7 @@ def measured_result(
         execution_checks["finite_tensors"] = check_finite_outputs(captured_outputs[0])
         if eager_snapshot is not None:
             execution_checks["compiled_vs_eager"] = check_execution_outputs(
-                captured_outputs[0], eager_snapshot, conf.fp32_check_limit
+                captured_outputs[0], eager_snapshot, getattr(conf, "fp32_check_limit", 1e-4)
             )
             del eager_snapshot
         if conf.cudagraph in {"manual", "graphed"}:
@@ -662,7 +662,7 @@ def measured_result(
                 graph.replay()
                 torch.cuda.synchronize()
                 execution_checks["graph_replay"] = check_execution_outputs(
-                    captured_outputs[0], before_capture, conf.fp32_check_limit
+                    captured_outputs[0], before_capture, getattr(conf, "fp32_check_limit", 1e-4)
                 )
             del before_capture
             timed = graph.replay
@@ -671,7 +671,7 @@ def measured_result(
             timed = func
             actual_graph = "disabled"
     require_compile_evidence(conf.compile, evidence)
-    if conf.kernel_probe:
+    if getattr(conf, "kernel_probe", False):
         execution_checks["top_kernels"] = _top_kernels(func)
     if actual_graph == "disabled":
         captured_outputs[0] = None
@@ -684,10 +684,10 @@ def measured_result(
             bench_time(
                 timed, grad_to_none=[] if actual_graph != "disabled" else grad_to_none
             )["median_ms"]
-            for _ in range(conf.repeats)
+            for _ in range(getattr(conf, "repeats", 1))
         ]
         value = sorted(repeat_ms)[len(repeat_ms) // 2]
-        if conf.repeats > 1:
+        if getattr(conf, "repeats", 1) > 1:
             execution_checks["repeat_ms"] = [round(v, 6) for v in repeat_ms]
     return BenchResult(
         value=value,
