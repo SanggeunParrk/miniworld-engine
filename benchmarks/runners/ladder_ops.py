@@ -24,7 +24,7 @@ import torch.nn.functional as F
 #: ops with no gradient path (the sampler glue runs between denoiser calls, under no_grad)
 FORWARD_ONLY = {"sampler_augment", "sampler_align", "sampler_pool"}
 #: ops that exist only as a CUDA kernel + PyTorch reference (no portable kernel, by design)
-NO_PORTABLE = {"sampler_augment", "sampler_align", "sampler_pool"}
+NO_PORTABLE: set[str] = set()   # since the portable sampler kernels (kernels/sampler_ops/triton) every op of this file has a portable rung
 
 OPS = (
     "geom", "ca", "adaln", "tpi", "smooth_lddt",

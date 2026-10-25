@@ -181,9 +181,9 @@ GROUPS: list[Group] = [
     ops("slddt_A48", "smooth_lddt", "smooth_lddt", (1024, 2048), "A48 B1", "n_augment=48", weight=3, tier="smoke", dtype_label="fp32"),
     ops("slddt_A16", "smooth_lddt", "smooth_lddt", (4096,), "A16 B1", "n_augment=16", weight=3, dtype_label="fp32",
         note="the PyTorch reference cannot run A48 x N4096 (cdist indices overflow int32: illegal memory access)"),
-    ops("samp_aug", "sampler augment_noise", "sampler_augment", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", rungs=dict(NO_PORTABLE), modes=("inference",)),
-    ops("samp_align", "sampler align_euler", "sampler_align", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", rungs=dict(NO_PORTABLE), modes=("inference",)),
-    ops("samp_pool", "sampler pool_atoms", "sampler_pool", (4096, 12288, 24576), "B5 c768", "n_augment=5", weight=2, dtype_label="bf16", rungs=dict(NO_PORTABLE), modes=("inference",)),
+    ops("samp_aug", "sampler augment_noise", "sampler_augment", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
+    ops("samp_align", "sampler align_euler", "sampler_align", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
+    ops("samp_pool", "sampler pool_atoms", "sampler_pool", (4096, 12288, 24576), "B5 c768", "n_augment=5", weight=2, dtype_label="bf16", modes=("inference",)),
 ]
 BY_ID = {g.id: g for g in GROUPS}
 PARAM_VARIANT = "@bf16p"
