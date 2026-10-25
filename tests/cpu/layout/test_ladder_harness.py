@@ -107,3 +107,13 @@ def test_the_cli_exposes_the_ladder() -> None:
 
     args = cli.build_parser().parse_args(["ladder", "plan", "--tier", "smoke"])
     assert args.ladder_args == ["plan", "--tier", "smoke"]
+
+
+def test_a_cuda_row_that_ran_the_pytorch_reference_is_a_routing_gap_not_a_violation() -> None:
+    # miniworld ran the PyTorch statements (same time as PyTorch, different kernels from the portable rung): no CUDA rung exists for the call
+    row = _row(3.0, 2.0, 3.01, kc=("t1", "t2"), kp=("p",), kt=("t1", "t2"))
+    out = ladder.verdict(row, G3)
+    assert out["routing_gap"] and out["verdict"] == "n.a.(cuda rung missing)" and "no CUDA path" in out["causes"].get("cuda_vs_portable", out["note"])
+    # ... and the portable rung is still judged against PyTorch
+    slow = _row(3.0, 3.5, 3.0, kc=("t1",), kp=("p",), kt=("t1",))
+    assert ladder.verdict(slow, G3)["verdict"] == "VIOLATION(portable_vs_pytorch)"

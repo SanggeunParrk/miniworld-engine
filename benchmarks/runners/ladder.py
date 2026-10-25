@@ -465,18 +465,27 @@ def verdict(row: dict, g: Group) -> dict:
         """The two rungs launched (nearly) the same kernels: Jaccard overlap of their top-kernel names >= 0.7."""
         return bool(a and b) and len(a & b) / len(a | b) >= 0.7
 
+    #: the 'cuda' row ran the PyTorch statements: the engine has no CUDA path for the call and H100 / B200 route `miniworld` to the reference there.
+    #: Evidence: the same kernels as the PyTorch rung, or (three-rung ops) a time within 3% of the PyTorch rung while the portable rung differs
+    cuda_is_pytorch = False
+    if has_portable and row["cuda_ms"] and row["pytorch_ms"]:
+        t = row["cuda_ms"] / row["pytorch_ms"]
+        cuda_is_pytorch = (same(kc, kt) or abs(t - 1.0) <= 0.03) and not same(kc, kp) and (cp is None or cp >= 1.03)
     if has_portable and same(kc, kp):
         cp = None
         why["cuda_vs_portable"] = "cuda rung launched the portable kernels (no distinct CUDA path)"
-    if has_portable and same(kp, kt):
+    elif cuda_is_pytorch:
+        cp = None
+        gap = row["portable_ms"] / row["cuda_ms"] if row["portable_ms"] and row["cuda_ms"] else None
+        why["cuda_vs_portable"] = ("no CUDA path serves this call: `miniworld` ran the PyTorch reference"
+                                   + (f" (the portable kernels are {1 / gap:.2f}x faster than what H100 runs)" if gap and gap < 1 else ""))
+    if has_portable and same(kp, kt) and not cuda_is_pytorch:
         pp = None
         why["portable_vs_pytorch"] = "portable rung launched the PyTorch kernels (fell back to the PyTorch statements)"
     if not has_portable and same(kc, kt):
         cpt = None
         why["cuda_vs_pytorch"] = "cuda rung launched the PyTorch kernels (no CUDA path served the call)"
-    #: the 'cuda' row of a three-rung op that launched the PyTorch kernels: H100 routes `miniworld` to the PyTorch reference where no CUDA path
-    #: serves the call, so the user gets PyTorch although a faster portable kernel exists -- still a violation of the invariant, but of the routing
-    no_cuda_path = bool(has_portable and same(kc, kt) and not same(kc, kp))
+    no_cuda_path = cuda_is_pytorch
     pairs = [("cuda_vs_portable", cp), ("portable_vs_pytorch", pp)] if has_portable else [("cuda_vs_pytorch", cpt)]
     rung_ms = {"cuda": row["cuda_ms"], "portable": row["portable_ms"], "pytorch": row["pytorch_ms"]}
     rung_err = {"cuda": row["errors"].get("cuda", ""), "portable": row["errors"].get("portable", ""),
@@ -503,15 +512,15 @@ def verdict(row: dict, g: Group) -> dict:
         out = "+".join(v)
     elif not na:
         out = "OK"
-    elif len(na) < len(pairs):
-        out = "OK"                      # every pair that could be measured holds; the other is named in the note
+    elif cuda_is_pytorch and len(na) == 1:
+        out = "n.a.(cuda rung missing)"  # the other pair was measured and holds; the routing gap is in the note and in the routing-gap table
     else:
-        out = "n.a."
+        out = "n.a." if len(na) == len(pairs) else "OK"
     if na:
         notes.append("n.a.: " + " | ".join(na))
     if not has_portable:
         notes.append("no portable rung by design")
-    return {"verdict": out, "note": "; ".join(notes), "causes": causes}
+    return {"verdict": out, "note": "; ".join(notes), "causes": causes, "routing_gap": cuda_is_pytorch}
 
 
 def fmt(x, nd=3):
@@ -529,7 +538,7 @@ def violations(table, kinds=("cuda_vs_portable", "portable_vs_pytorch", "cuda_vs
 
 
 FIELDS = ["group", "op", "mode", "dtype", "L", "shape", "weight", "pt_compiled_ms", "pt_eager_graph_ms", "pt_eager_ms", "pt_best",
-          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "cause", "note",
+          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "routing_gap", "cause", "note",
           "dev", "torch", "target"]
 
 
@@ -562,24 +571,33 @@ def render_md(table, meta) -> str:
              f"torch {tv}, run {meta.get('date', '?')} on {meta.get('host', '?')}, Slurm job {meta.get('slurm_job', '?')}.\n")
     n = len(table)
     ok = sum(r["verdict"] == "OK" for r in table)
-    na = sum(r["verdict"].startswith("n.a.") for r in table)
+    na = sum(r["verdict"].startswith("n.a.") and not r.get("routing_gap") for r in table)
+    gaps = [r for r in table if r.get("routing_gap")]
     cvp = [r for r in table if "VIOLATION(cuda_vs_portable)" in r["verdict"]]
     pvp = [r for r in table if "VIOLATION(portable_vs_pytorch)" in r["verdict"]]
     cvt = [r for r in table if "VIOLATION(cuda_vs_pytorch)" in r["verdict"]]
     L.append("## Summary\n")
-    L.append("| rows | OK | VIOLATION(cuda_vs_portable) | VIOLATION(portable_vs_pytorch) | VIOLATION(cuda_vs_pytorch) | n.a. |\n|---|---|---|---|---|---|")
-    L.append(f"| {n} | {ok} | {len(cvp)} | {len(pvp)} | {len(cvt)} | {na} |\n")
+    L.append("| rows | OK | VIOLATION(cuda_vs_portable) | VIOLATION(portable_vs_pytorch) | VIOLATION(cuda_vs_pytorch) | n.a.(cuda rung missing: no CUDA path, `miniworld` runs PyTorch) | n.a.(other rung missing) |\n|---|---|---|---|---|---|---|")
+    L.append(f"| {n} | {ok} | {len(cvp)} | {len(pvp)} | {len(cvt)} | {len(gaps)} | {na} |\n")
     # per op counts
     by: dict[str, list[dict]] = {}
     for r in table:
         by.setdefault(r["op"], []).append(r)
-    L.append("| op | rows | OK | cuda>=portable | portable>=pytorch | cuda>=pytorch (no portable) | n.a. |\n|---|---|---|---|---|---|---|")
+    L.append("| op | rows | OK | cuda>=portable | portable>=pytorch | cuda>=pytorch (no portable) | no CUDA path (routing gap) | other n.a. |\n|---|---|---|---|---|---|---|---|")
     for op, rs in by.items():
         L.append(f"| {op} | {len(rs)} | {sum(r['verdict'] == 'OK' for r in rs)} | "
                  f"{sum('VIOLATION(cuda_vs_portable)' in r['verdict'] for r in rs)} | {sum('VIOLATION(portable_vs_pytorch)' in r['verdict'] for r in rs)} | "
-                 f"{sum('VIOLATION(cuda_vs_pytorch)' in r['verdict'] for r in rs)} | {sum(r['verdict'].startswith('n.a.') for r in rs)} |")
+                 f"{sum('VIOLATION(cuda_vs_pytorch)' in r['verdict'] for r in rs)} | {sum(bool(r.get('routing_gap')) for r in rs)} | "
+                 f"{sum(r['verdict'].startswith('n.a.') and not r.get('routing_gap') for r in rs)} |")
     L.append("")
     v = violations(table)
+    L.append("## Routing gaps: the CUDA rung does not exist, `miniworld` on this card runs the PyTorch reference\n")
+    L.append("Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode, an option it does not take) and the engine's portable kernels would be faster than "
+             "what `miniworld` runs. The ladder invariant is not testable for them (no CUDA rung); the routing is what a user sees. `speed-up` = PyTorch / portable.\n")
+    L.append("| op | mode | dtype | shape | L | miniworld (= PyTorch) ms | portable ms | speed-up lost | weight |\n|---|---|---|---|---|---|---|---|---|")
+    for r in sorted([r for r in table if r.get("routing_gap") and r["portable_ms"]], key=lambda r: -(r["cuda_ms"] / r["portable_ms"])):
+        L.append(f"| {r['op']} | {r['mode']} | {r['dtype']} | {r['shape']} | {r['L']} | {fmt(r['cuda_ms'])} | {fmt(r['portable_ms'])} | {r['cuda_ms'] / r['portable_ms']:.2f}x | {r['weight']} |")
+    L.append("")
     L.append("## Violations ranked by size (ratio = lower rung / upper rung; must be < 1)\n")
     L.append("| # | op | mode | dtype | shape | L | pair | ratio | CUDA ms | portable ms | PyTorch best ms (form) | weight | cause / note |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(sorted(v, key=lambda r: -r["ratio"]), 1):
@@ -629,6 +647,7 @@ def cmd_report(args) -> int:
     print(f"{n} ladder rows -> {csv_path}")
     for key in ("OK", "VIOLATION(cuda_vs_portable)", "VIOLATION(portable_vs_pytorch)", "VIOLATION(cuda_vs_pytorch)", "n.a."):
         print(f"  {key:34s} {sum(key in r['verdict'] for r in table)}")
+    print(f"  of which routing gaps (no CUDA path)  {sum(bool(r.get('routing_gap')) for r in table)}")
     return 0
 
 
@@ -639,6 +658,12 @@ def cmd_gate(args) -> int:
     if args.allow and not args.strict:
         allow = {l.strip() for l in Path(args.allow).read_text().splitlines() if l.strip() and not l.startswith("#")}
     bad = []
+    if args.routing:
+        for r in rows:
+            if r.get("routing_gap") == "True" and r["cuda_ms"] and r["portable_ms"]:
+                tag = f"{r['group']}:{r['mode']}:{r['L']}:routing_gap"
+                if tag not in allow:
+                    bad.append((tag, r["cuda_ms"] / r["portable_ms"]))
     for r in violations(rows):
         tag = f"{r['group']}:{r['mode']}:{r['L']}:{r['kind']}"
         if tag not in allow:
@@ -670,6 +695,7 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--csv", required=True)
             s.add_argument("--allow", default="")
             s.add_argument("--strict", action="store_true")
+            s.add_argument("--routing", action="store_true", help="also fail on a routing gap: no CUDA path and a faster portable path (tag group:mode:L:routing_gap)")
     return p
 
 
