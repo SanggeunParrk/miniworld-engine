@@ -197,12 +197,13 @@ class AugmentedAttentionPairBias(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | Bool[torch.Tensor, "A B L"] | None = None,
         *,
         compute_dtype: torch.dtype | None = None,
+        extra_pair_bias: Float[torch.Tensor, "L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """Forward pass. ALWAYS returns the residual output ``single + delta(single, cond, pair, mask)``
         (the residual is this module's own input), so a block just calls ``single = module(...)``.
         A caller that composes the update some other way (a magnitude-preserving sum, a released
         checkpoint's own residual) takes :meth:`delta`."""
-        return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype)
+        return single + self.delta(single, cond, pair, mask, compute_dtype=compute_dtype, extra_pair_bias=extra_pair_bias)
 
     @typecheck
     def delta(
@@ -213,8 +214,14 @@ class AugmentedAttentionPairBias(nn.Module):
         mask: Bool[torch.Tensor, "B L"] | Bool[torch.Tensor, "A B L"] | None = None,
         *,
         compute_dtype: torch.dtype | None = None,
+        extra_pair_bias: Float[torch.Tensor, "L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
         """The update alone (no residual), through the same dispatch as :meth:`forward`.
+
+        ``extra_pair_bias`` [L, L]: an additive logit term for every head, sample and batch row, on top of the pair's own bias
+        (``to_bias(ln_pair(pair))``) and before the key mask, in the dtype of the bias (the structural-token family's relation
+        matrix). Differentiable if it requires a gradient. It rides the attention's ordinary bias input, so every core takes it
+        (the portable attention kernels, the PyTorch einsums).
 
         ``compute_dtype`` sets the precision the ATTENTION CORE runs in, per call. It is taken
         here rather than at construction because the surrounding projections and the core are not
@@ -235,6 +242,10 @@ class AugmentedAttentionPairBias(nn.Module):
         value = self.to_value(single)
         gate = self.to_gate(single)
         bias = self.to_bias(pair)
+        if extra_pair_bias is not None:
+            if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
+                raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
+            bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]   # [B, L, L, H]: the same term for every head
 
         num_aug, batch, len_res = query.shape[:3]
         n_head, hidden_dim = self.n_head, query.shape[-1] // self.n_head

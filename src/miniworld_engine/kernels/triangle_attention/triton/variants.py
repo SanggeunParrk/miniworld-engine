@@ -13,7 +13,7 @@ PyTorch statements, ``TriangleAttention._biased_reference``, build it in fp32). 
     out = Wo u + b_o;  dual: other = Wo_t u + b_t, starting: out + other^T, ending: out^T + other;  else ending: out^T (or out untransposed)
 
 Every projection is a cuBLAS GEMM with its bias in the epilogue; gradients flow through autograd (the core and the gated product carry
-their own backward kernels). bf16 only (the core's contract); the caller checks :func:`refusal` first.
+their own backward kernels). bf16 activations (the core's contract), bf16 or fp32 master parameters (cast inside); the caller checks :func:`refusal` first.
 """
 from __future__ import annotations
 
@@ -35,8 +35,10 @@ def refusal(pair: torch.Tensor, weights: tuple[torch.Tensor, ...], n_head: int, 
             return "the input is not on a CUDA device"
         if pair.ndim != 4 or pair.shape[1] != pair.shape[2]:
             return f"the pair must be [B, L, L, d_pair], got {tuple(pair.shape)}"
-        if pair.dtype != torch.bfloat16 or any(w.dtype != torch.bfloat16 for w in weights if w is not None):
-            return "the Triton variant path is bf16 (activations and parameters)"
+        if pair.dtype != torch.bfloat16:
+            return "the Triton variant path is bf16 (activations)"
+        if any(w.dtype not in (torch.bfloat16, torch.float32) for w in weights if w is not None):
+            return "the Triton variant path takes bf16 or fp32 (master) parameters"
         if d_hidden % n_head:
             return f"d_hidden ({d_hidden}) must be divisible by n_head ({n_head})"
         head = d_hidden // n_head
@@ -58,6 +60,12 @@ def triton_triangle_attention_variant(
     B, L, _, _ = pair.shape
     from miniworld_engine import kernels
     from miniworld_engine.kernels.bias_only_attention import dispatch as bo_dispatch
+
+    # fp32 master parameters under bf16 activations (the mixed-precision layout): the products run in the activation dtype, the casts are
+    # autograd ops, so every gradient comes back in the master dtype (bf16 parameters pass through unchanged). The norm affine stays fp32.
+    cast = lambda w: None if w is None else w.to(pair.dtype)   # noqa: E731
+    w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t = (
+        cast(w) for w in (w_query, w_key, w_value, w_bias, w_gate, b_gate, w_out, b_out, w_out_t, b_out_t))
 
     x = kernels.layernorm_kernel(pair, ln_weight, ln_bias, eps) if bo_dispatch.use_kernels(L) else F.layer_norm(
         pair.float(), (pair.shape[-1],), ln_weight, ln_bias, eps).to(pair.dtype)     # the affine is fp32; short sequences: torch's

@@ -141,12 +141,27 @@ class Transition(nn.Module):
         ):
             # fp32 on TF32 tensor cores: the generic sm_90a kernels (the other fast paths are bf16 only)
             return self._residual_forward(x)
-        backend = _dispatch.guard_dtype(_dispatch.call_backend(self, self._backend, x), x.dtype, op="Transition")
+        backend = _dispatch.call_backend(self, self._backend, x)
+        if x.dtype is torch.float32 and backend == KernelBackend.PORTABLE and x.is_cuda and self._portable_fp32_allowed():
+            # fp32 on TF32 tensor cores (the portable residual path; the H100 CUDA kernels above take the same switch): the card needs
+            # fp32 rows in its record for what this call launches, else one UnrecordedCardWarning and the PyTorch reference
+            backend = _dispatch.dtype_gate("transition", x.device, "fp32", training=_dispatch.needs_backward(self, x))
+        else:
+            backend = _dispatch.guard_dtype(backend, x.dtype, op="Transition")
         if backend == KernelBackend.PYTORCH:
             return self._torch_forward(x) + x
         # PORTABLE / CUDA / CUEQUIVARIANCE(->PYTORCH above): one residual-fused path, which
-        # picks the hand-CUDA kernel where it applies and the Triton kernel everywhere else.
+        # picks the hand-CUDA kernel where it applies and the portable kernel everywhere else (bf16; fp32 on TF32, see above).
         return self._residual_forward(x)
+
+    @staticmethod
+    def _portable_fp32_allowed() -> bool:
+        """The portable fp32 path runs on TF32 tensor cores, and only where torch allows TF32 (``torch.backends.cuda.matmul.allow_tf32`` or
+        ``set_float32_matmul_precision`` not ``"highest"``): the same switch the H100 generic kernels obey. With full-precision fp32 the call
+        keeps the PyTorch reference (cuBLAS fp32), as on H100."""
+        from miniworld_engine.kernels._dot_precision import tf32_allowed
+
+        return tf32_allowed()
 
     def _native_cuda_serves(self) -> bool:
         """A hand-written CUDA path serves this layer on the current card without a Triton record: the sm_80 (A100) fused kernels at

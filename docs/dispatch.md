@@ -39,7 +39,7 @@ call (`dispatch.call_backend`, plain attributes, so a compiled forward reads con
 
 ## A kernel that refuses the call
 
-A portable kernel can refuse a call by a shape or dtype guard (`d_hidden != d_pair` in TriMul, a width that is not a power of two in
+A portable kernel can refuse a call by a shape or dtype guard (a TriMul `d_hidden` / `d_pair` outside the served range, a width that is not a power of two in
 OuterProductMean / MSAPairWeightedAveraging, value_dim < 16, ...). Under `miniworld` that is never an error and never silent: the module
 emits one `KernelRefusedWarning` per (op, card, guard text) and runs the PyTorch reference (`dispatch.warn_refused`). A CPU tensor is not
 a refusal (there is no kernel to run) and does not warn. H100 / B200 are not affected: their modules take the CUDA or PyTorch leg before
@@ -52,7 +52,7 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 
 | op | A100 80GB PCIe (sm80) | RTX A5000 (sm86) | RTX A6000 (sm86) | H100 / B200 | any other card |
 |---|---|---|---|---|---|
-| Transition | CUDA at d=128, n=4; else warns (1 of 7) | warns (1 of 7) | warns (1 of 7) | CUDA, else PyTorch | warns, PyTorch |
+| Transition | CUDA at d=128, n=4; else warns (1 of 5 inference, 2 of 9 training) | warns (1 / 2 of 9) | warns (1 / 2 of 9) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleMultiplication (+ bidirectional) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleAttention (+ bidirectional, bias-only) | portable | portable | portable | CUDA, else PyTorch | warns, PyTorch |
 | AdaptiveLayerNorm | warns (2 of 8) | warns (2 of 8) | warns (2 of 8) | PyTorch (no CUDA path yet) | warns, PyTorch |
@@ -70,6 +70,18 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 | LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
 | DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | portable | portable | portable | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
 | AtomDiTVariantStack (their atom stacks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
+
+**Parts that route through other ops.** `BiasOnlyDiTBlock` builds its AdaptiveLayerNorm, ConditionedTransition and pair LayerNorm with the
+block's implementation, so it has no row of its own: on a card it takes the portable kernels of those three rows when each is recorded
+(the attention core is the batched einsum on every card) and warns per unrecorded part otherwise; H100 / B200 run the CUDA block
+paths and the PyTorch leg of the parts. `DiTBlock(extra_pair_bias=)` rides the attention's bias, so it follows the `AugmentedAttention` row.
+**Transition fp32** (TF32 tensor cores) takes the portable residual path only where torch allows TF32 (`set_float32_matmul_precision` not
+`"highest"` / `allow_tf32`, the switch the H100 generic kernels follow; full-precision fp32 keeps the PyTorch statements), and a card needs
+**fp32** `ok` rows for what the call launches (`records.missing("transition", ..., "fp32", mode)`; the Ampere manifests hold none yet, so
+fp32 warns and runs PyTorch there until `run_all` has been run on the card). **TriMul with `d_hidden != d_pair`** (Protenix / FoldForge
+template: pair 64, hidden 128) is served from the weights up to pair 256 / hidden 512 (both multiples of 16,
+`trimul_inproj.triton.contract.hidden_refusal`); outside that range it is a `KernelRefusedWarning` and PyTorch. **TriangleAttention variants**
+take fp32 master parameters under bf16 activations (cast inside, gradients in the master dtype).
 
 The three DiT rows are the portable attention cores ([docs/records/triton_dit_portable_20261024.md](records/triton_dit_portable_20261024.md)):
 the window kernels (`augmented_attention_{fwd,bwd,bwd_reduce}_window_triton`) have no row on any card yet, so the atom paths warn and run
@@ -141,6 +153,7 @@ replacement when the name is one that 2.3.12 removed (see the CHANGELOG).
   fused sm_80 kernel does not take still reach the portable kernels of that card.
 * The architecture blocks that call kernels directly (`architecture.blocks.swa_atom_transformer`, the standalone `LayerNorm` of
   `architecture.primitives`) obey the H100 / B200 rule (`restricted_card`) but are not gated by records.
-* dtype: the module-level resolve checks bf16, the dtype the fused kernels run (`guard_dtype` sends the rest to PyTorch).
+* dtype: the module-level resolve checks bf16, the dtype the fused kernels run (`guard_dtype` sends the rest to PyTorch). Transition fp32
+  is the exception: it asks for fp32 rows per call (`dispatch.dtype_gate`).
 * LayerNorm is gated by the forward kernels only (all four `layernorm` kernels are `ok` on every recorded card); its backward choice
   ((CUDA vs portable)) stays kernel-internal.

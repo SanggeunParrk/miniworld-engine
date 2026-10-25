@@ -62,6 +62,7 @@ import torch
 from miniworld_engine.autotune.shape_key import both_key
 from miniworld_engine.kernels.drivers import (
     BF16,
+    DTYPE_MODE,
     both_level_is_pair,
     dev,
     driver_heads,
@@ -71,6 +72,12 @@ from miniworld_engine.kernels.drivers import (
     rows2d,
     vec,
 )
+
+if DTYPE_MODE == "fp32":
+    # The fp32 unit of this family is the TF32 one: the module's fp32 path (and the H100 generic kernels) run on TF32 tensor cores and only
+    # where torch allows them, so the launch is made with that switch on (kernels/_dot_precision.py). The checkers put the reference back
+    # on full fp32 before they compute it (checks/transition._exact_reference).
+    torch.set_float32_matmul_precision("high")
 
 EPS = 1e-5
 L_PAIR = driver_length(64)  # L: the pair side length; the activation is (1, L, L, K) before flattening

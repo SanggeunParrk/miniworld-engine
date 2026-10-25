@@ -6,6 +6,7 @@ import triton.language as tl
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton.main import _expand_swiglu, swiglu_squeeze_backward
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
@@ -17,7 +18,7 @@ def _squeeze_residual_kernel(
     H, W, R, Y, M, N: tl.constexpr, K: tl.constexpr,
     shm, shk, swn, swk, srm, srn,
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, PREC: tl.constexpr = "ieee",
 ):
     pm, pn = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1),
                         tl.cdiv(N, BLOCK_N), GROUP_M)
@@ -31,7 +32,7 @@ def _squeeze_residual_kernel(
                     mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
         w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
                     mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
-        acc = tl.dot(h, w, acc, input_precision="ieee")
+        acc = tl.dot(h, w, acc, input_precision=PREC)
     mask = (m[:, None] < M) & (n[None, :] < N)
     residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
     # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
@@ -58,7 +59,7 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
     _squeeze_residual_kernel[lambda c: tile_grid(m, n, c["BLOCK_M1"], c["BLOCK_N"])](
         h, weight, residual, out, m, n, k,
         *h.stride(), *weight.stride(), *residual.stride(),
-        shape_key=pack(shape_key, K=k, N=n),
+        shape_key=pack(shape_key, K=k, N=n), PREC=dot_precision(h.dtype),
     )
     return out
 

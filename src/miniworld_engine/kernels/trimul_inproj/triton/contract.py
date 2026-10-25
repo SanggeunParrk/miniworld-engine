@@ -38,3 +38,22 @@ def packed_backward(grad: torch.Tensor, left: torch.Tensor, right: torch.Tensor,
     torch.bmm(right[h:], grad[h:].transpose(1, 2), out=dl[h:])
     torch.bmm(left[h:], grad[h:], out=dr[h:])
     return (dl, dr)
+
+
+#: The widths the portable TriMul front / back serve when ``d_hidden != d_pair`` (equal widths keep their own, wider, contract): both a
+#: multiple of 16 (the MMA tile) inside this box. Outside it the module refuses (``KernelRefusedWarning``) and runs the PyTorch reference.
+HIDDEN_NE_PAIR_MAX_PAIR = 256
+HIDDEN_NE_PAIR_MAX_HIDDEN = 512
+
+
+def hidden_refusal(d_pair: int, d_hidden: int) -> str | None:
+    """None if the portable TriMul serves ``d_hidden != d_pair`` (the per-direction hidden width of a unidirectional or a bidirectional
+    module), else why not. ``d_hidden == d_pair`` is the family's own contract and is not judged here."""
+    if d_hidden == d_pair:
+        return None
+    if d_pair % 16 or d_hidden % 16:
+        return f"d_hidden ({d_hidden}) and d_pair ({d_pair}) must both be multiples of 16 when they differ"
+    if d_pair > HIDDEN_NE_PAIR_MAX_PAIR or d_hidden > HIDDEN_NE_PAIR_MAX_HIDDEN:
+        return (f"d_hidden ({d_hidden}) != d_pair ({d_pair}) is served up to d_pair {HIDDEN_NE_PAIR_MAX_PAIR} / "
+                f"d_hidden {HIDDEN_NE_PAIR_MAX_HIDDEN}")
+    return None

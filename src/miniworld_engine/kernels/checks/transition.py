@@ -34,7 +34,7 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.kernels.checks import _proj
-from miniworld_engine.kernels.drivers import ACT_DTYPE, rows2d
+from miniworld_engine.kernels.drivers import ACT_DTYPE, DTYPE_MODE, rows2d
 from miniworld_engine.kernels.drivers.transition import (
     EPS,
     K_LARGE,
@@ -44,6 +44,21 @@ from miniworld_engine.kernels.drivers.transition import (
     _pair_x,
     _transition_operands,
 )
+
+
+def _tf32_launch() -> None:
+    """The fp32 unit launches on TF32 tensor cores (``drivers/transition.py`` sets it at import; a checker that ran before this one put it
+    back for its own reference, so each checker asks again). bf16 units: no-op."""
+    if DTYPE_MODE == "fp32":
+        torch.set_float32_matmul_precision("high")
+
+
+def _exact_reference() -> None:
+    """Put the reference's fp32 matmuls on full fp32 AFTER the kernel launched. The fp32 unit's drivers turn TF32 on for the launch
+    (drivers/transition.py); a TF32 reference would round its operands exactly as the kernel does and hide the very error the band is
+    for. bf16 units are unaffected (their references are ``.float()`` products of bf16 values either way)."""
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.set_float32_matmul_precision("highest")
 
 
 def _stats(x2: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
@@ -79,6 +94,7 @@ def transition_expand_swiglu_triton():
     round h to bf16 exactly where the kernel stores it, then squeeze."""
     from miniworld_engine.kernels.transition.triton.main import triton_transition
 
+    _tf32_launch()
     # ``_pair_x()`` -- the driver's own helper for this one launcher. TritonTransitionFunction
     # reads both_key(rows_of(x.shape)) before its view(-1, d), and ``length_of`` refuses the
     # flat (M, K) that ``_transition_operands`` hands every other entry point here. Only x moves;
@@ -88,6 +104,7 @@ def transition_expand_swiglu_triton():
     x = _pair_x()
     y = triton_transition(x, wa, wb, ws, N_EXPAND)
 
+    _exact_reference()
     a, b = _proj(x, wa, wb)
     h = (a * torch.sigmoid(a) * b).to(x.dtype)      # kernel's bf16 `expand` store
     return y, h.float() @ ws.float().T
@@ -151,11 +168,13 @@ def transition_bwd_swiglu_recompute_triton():
         _transition_expand_gatebwd_stacked,
     )
 
+    _tf32_launch()
     x2, g, beta, wa, wb, _ = _transition_operands()
     rstd, c1 = _stats(x2)
     ge = rows2d(ROWS, wa.shape[0])
     h, dAB, xn = _transition_expand_gatebwd_stacked(x2, rstd, c1, g, beta, wa, wb, ge)
 
+    _exact_reference()
     xn_ref = _xn(x2, rstd, c1, g, beta).to(x2.dtype)   # cast to bf16 in-kernel before the dots
     a, b = _proj(xn_ref, wa, wb)
     h_ref, dA, dB = _swiglu_bwd(a, b, ge)
@@ -303,11 +322,14 @@ def transition_bwd_cuda():
 def transition_squeeze_residual_triton():
     from miniworld_engine.kernels.drivers.transition import SHAPE_KEY
     from miniworld_engine.kernels.transition.triton.residual import squeeze_residual
+    _tf32_launch()
     h = rows2d(ROWS, N_EXPAND * K_SMALL)
     w = rows2d(K_SMALL, N_EXPAND * K_SMALL)
     r = rows2d(ROWS, K_SMALL)
+    out = squeeze_residual(h, w, r, SHAPE_KEY)
+    _exact_reference()
     expected = ((h.float() @ w.float().T).to(h.dtype).float() + r.float()).to(r.dtype)
-    return squeeze_residual(h, w, r, SHAPE_KEY), expected
+    return out, expected
 
 
 # ── native Hopper (sm90) CUDA kernels ────────────────────────────────────────────────────────

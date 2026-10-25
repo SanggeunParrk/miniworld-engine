@@ -5,7 +5,7 @@ one cuBLAS contraction computes outgoing or incoming triangles. BF16 training
 uses output LN followed by F567 (projection, gate, dropout and residual), and
 fuses the two input-gradient GEMMs. Input LN backward adds the residual gradient
 in its store. FP32 retains the split GEMMs. Inference keeps the existing fused
-LN/projection/gate output kernel. B=1; d_hidden == d_pair.
+LN/projection/gate output kernel. B=1; d_hidden may differ from d_pair (the widths come from the weights).
 """
 
 from __future__ import annotations
@@ -213,16 +213,17 @@ def trimul_triton(
     """Single-direction Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_uni_infer``) and the merged
     autograd Function for training (``_UniBackHalfTriton``). All-triton/cuBLAS;
-    requires d_hidden == d_pair (the front produces per-side width d_hidden).
+    d_hidden may differ from d_pair (Protenix / FoldForge template TriMul: pair 64, hidden 128): the front projects d_pair -> d_hidden,
+    LN_out and the contraction run at d_hidden, ``to_out`` projects back to d_pair, the output gate stays d_pair -> d_pair.
 
     B==1 by design (inherited from the shared bidir front + bdll layout). B>1 was implemented
     + verified correct but is slower than looping this path per batch (L2 thrashing of large
     bdll intermediates); see notes/trimul_batch_generalization."""
     d = pair.shape[-1]
-    if d_hidden != d:
+    if WL.shape[0] != d_hidden or Wout.shape != (d, d_hidden):
         raise ValueError(
-            f"the portable single-direction trimul requires d_hidden == d_pair "
-            f"(got d_hidden={d_hidden}, d_pair={d})."
+            f"the portable single-direction trimul: the projections are {tuple(WL.shape)} / {tuple(Wout.shape)}, expected "
+            f"({d_hidden}, {d}) / ({d}, {d_hidden}) for d_hidden={d_hidden}, d_pair={d}."
         )
     # The mask is applied to the contraction inputs (left/right), NOT folded into
     # LN_in: x_n must stay unmasked so the output gate sigmoid(x_n@Wg) is unmasked

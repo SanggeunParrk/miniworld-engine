@@ -5,11 +5,12 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.autotune.configs import configs_for
 import torch
 
-# FP32 projections use IEEE dot precision; implicit TF32 changes DiT gradients.
-# The input_precision setting leaves BF16 tensor-core arithmetic unchanged.
+# FP32 projections follow torch's TF32 switch (kernels/_dot_precision.py): IEEE dot precision unless torch allows TF32
+# (implicit TF32 changes DiT gradients, so it is never taken by default). BF16 tensor-core arithmetic is unchanged.
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from jaxtyping import Float
@@ -48,6 +49,7 @@ def transition_fwd_kernel(
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    PREC: tl.constexpr = "ieee",
 ):
     # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
     # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
@@ -82,8 +84,8 @@ def transition_fwd_kernel(
             other=0.0,
         )
 
-        A_tile += tl.dot(x_tile, W1_tile, input_precision="ieee")
-        B_tile += tl.dot(x_tile, W2_tile, input_precision="ieee")
+        A_tile += tl.dot(x_tile, W1_tile, input_precision=PREC)
+        B_tile += tl.dot(x_tile, W2_tile, input_precision=PREC)
 
     swish_A = A_tile * tl.sigmoid(A_tile)
     swish_AB = swish_A * B_tile
@@ -137,6 +139,7 @@ def _expand_swiglu(
         expand_a_weight.stride(0), expand_a_weight.stride(1),
         expand_b_weight.stride(0), expand_b_weight.stride(1),
         shape_key=pack(shape_key, K=N, ND=nd),
+        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
     )
     return expand
 

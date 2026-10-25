@@ -12,10 +12,14 @@ nor the single representation, only on the pair -- ONE softmax serves every augm
 solver step, since the pair carries no noise level. The fast path is therefore a different algorithm (hoisted weights and
 a GEMM per head), not the flash-attention core with an argument switched off.
 
-``implementation=PYTORCH`` is the reference. ``MINIWORLD`` / ``PORTABLE`` (the engine's kernels) take, on B200 in bf16 (or in
+``implementation=PYTORCH`` is the reference. ``MINIWORLD`` / ``PORTABLE`` (the engine's kernels) take, on H100 / B200 in bf16 (or in
 fp32 on TF32 tensor cores: an fp32 block with fp32 inputs, no autocast),
 ``integrations.bias_only_dit`` without autograd and ``integrations.bias_only_dit_train`` with it (CUDA and cuBLAS only), and
-the reference composition everywhere else (the parts are built on the PyTorch reference, so no other backend runs).
+the composition of the parts everywhere else. The parts (AdaptiveLayerNorm, ConditionedTransition, the pair LayerNorm) are built with
+the block's implementation, so they route per card as any module does: H100 / B200 run their PyTorch leg for a call no CUDA block path
+serves; another card runs the portable kernels of the parts (forward and backward, bf16 and fp32) when the engine holds a record for
+it, else the PyTorch statements with one ``UnrecordedCardWarning``. The attention core (softmax of the bias times the value) is the
+batched einsum on every card: one softmax shared by every sample, a cuBLAS GEMM per head, which the portable core kernel does not beat.
 Each part owns its residual (it returns ``x + f(x)``, like every such module in the engine); the block only chains them.
 
 A block may take its pair bias precomputed (``bias=`` [B, H, L, L], head-major): ``pair_bias_all`` (``hoist.py``) makes every block's
@@ -51,15 +55,19 @@ class BiasOnlyAttention(nn.Module):
     ``pair_bias_all``): those are the logits, and ``ln_pair`` / ``to_bias`` / ``pair`` are not read.
     """
 
-    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None) -> None:
+    def __init__(self, d_single: int, d_cond: int, d_pair: int, n_head: int, d_head: int | None = None, *,
+                 implementation: ImplementationType = _REF) -> None:
         super().__init__()
         self.n_head = n_head
         d_hidden = d_head or d_single // n_head          # the head width; n_head x d_head may differ from d_single
-        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond, implementation=_REF)
+        # The parts route per card like every other module (``modules.dispatch``): the CUDA block paths of ``BiasOnlyDiTBlock`` take the
+        # calls they serve (H100 / B200), and on any other card the portable kernels of these parts run where the card is recorded,
+        # the PyTorch statements otherwise (one UnrecordedCardWarning). H100 / B200 resolve the parts to their PyTorch leg.
+        self.ada_ln_in = AdaptiveLayerNorm(d_single, d_cond, implementation=implementation)
         self.to_value = Linear(d_single, d_hidden * n_head, bias=False)
         self.to_gate = Linear(d_single, d_hidden * n_head, bias=False, init="gating")
         # no offset, as in AugmentedAttentionPairBias: a per-head constant on every logit cancels in the softmax
-        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=_REF)
+        self.ln_pair = LayerNorm(d_pair, bias=False, implementation=implementation)
         self.to_bias = Linear(d_pair, n_head, bias=False, init="zero")
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
@@ -113,8 +121,11 @@ class BiasOnlyDiTBlock(nn.Module):
     ) -> None:
         super().__init__()
         self.implementation = ImplementationType(implementation)
-        self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, d_head=d_head)
-        self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=_REF)
+        # only ``miniworld`` reaches the portable kernels; every other value keeps the parts on the PyTorch statements
+        parts = self.implementation if self.implementation == ImplementationType.MINIWORLD else _REF
+        self.attention = BiasOnlyAttention(d_single=d_single, d_cond=d_cond, d_pair=d_pair, n_head=n_head, d_head=d_head,
+                                           implementation=parts)
+        self.transition = ConditionedTransition(d_hidden=d_single, d_cond=d_cond, n=n, implementation=parts)
 
     def _psb_candidate(self, single, cond, pair, bias) -> bool:
         """A pair (or hoisted bias) of its own per sample: ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair] or ``bias``

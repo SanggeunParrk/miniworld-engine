@@ -157,3 +157,6 @@ token_pair_init_dw_triton,rmax,see token_pair_init_fwd_triton
 token_pair_init_dw_triton,smax,see token_pair_init_fwd_triton
 token_pair_init_dw_triton,RBB,"rows of the second table block, next power of two of (n_rel + 2 - 128): a function of rmax and smax"
 token_pair_init_dw_reduce_triton,NBLK,the number of slice partials added in order (a module constant of the launcher): a loop bound
+transition_expand_swiglu_triton,PREC,"pure function of the activation dtype and torch's TF32 switch (kernels/_dot_precision.py: tf32 for fp32 only where torch allows it, ieee otherwise); bf16 ignores it, and the cache keys the dtype"
+transition_squeeze_residual_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
+transition_bwd_swiglu_recompute_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"

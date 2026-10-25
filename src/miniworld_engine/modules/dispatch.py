@@ -496,13 +496,24 @@ def warn_refused(op: str, device: torch.device | None, reason: str) -> None:
     )
 
 
-def _card_gate(op: str, device: torch.device | None, native_cuda: bool, mode: str = "inference") -> KernelBackend:
+def _card_gate(op: str, device: torch.device | None, native_cuda: bool, mode: str = "inference", dtype: str = "bf16") -> KernelBackend:
     """:func:`route_for_card` for the card ``device`` names; no card (CPU build, non-CUDA device) keeps ``PORTABLE``, the family
     the module falls to once its tensors are on a card."""
     card = _card_of(device)
     if card is None:
         return KernelBackend.PORTABLE
-    return route_for_card(op, card[0], card[1], native_cuda=native_cuda, mode=mode)
+    return route_for_card(op, card[0], card[1], native_cuda=native_cuda, mode=mode, dtype=dtype)
+
+
+def dtype_gate(op: str, device: torch.device | None, dtype: str, *, training: bool = False) -> KernelBackend:
+    """The per-CALL record check for a dtype the module-level resolve (bf16) did not vouch for: ``PORTABLE`` when the engine holds ``ok`` rows
+    for what the call launches on this card at ``dtype`` (``"fp32"``), or when the A/B switch / an autotune build asks for the portable family,
+    else a warning (once) and ``PYTORCH``. H100 / B200 are not asked (their modules take their CUDA or PyTorch leg first)."""
+    from miniworld_engine import settings
+
+    if settings.current().force_portable_kernels:
+        return KernelBackend.PORTABLE
+    return _card_gate(op, device, False, "training" if training else "inference", dtype)
 
 
 class TrainGate:

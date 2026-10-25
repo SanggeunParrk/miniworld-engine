@@ -57,7 +57,8 @@ _WINDOW_ATTENTION = ("augmented_attention/augmented_attention_*_window_triton",)
 _PAIR_BIAS = ("layernorm_linear/layernorm_linear_fwd_triton",)
 
 OP_KERNELS: dict[str, tuple[str, ...]] = {
-    "transition": ("transition/*",),
+    # the residual path also launches the input LayerNorm's forward (layernorm family) and its backward with the residual gradient (trimul_inproj family)
+    "transition": ("transition/*", "layernorm/layernorm_fwd_saveact_triton", "trimul_inproj/trimul_input_ln_residual_bwd_triton"),
     "triangle_multiplication": ("trimul_inproj/*",),
     "triangle_attention": (
         "triangle_attention/*",

@@ -30,6 +30,29 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   (chain-ordered structure) to 5.8 ms (atoms in random order) against 45.7 ms for the fastest compiled PyTorch form, and 2 MiB of extra memory against 1.7 GiB; the PyTorch reference
   (`cdist`) takes 1.8 s in chunks of 8 augments and fails with an illegal memory access in one call at that shape. The CUDA kernels stay 2.7-4x faster than the portable ones. Tests:
   `tests/gpu/any/test_smooth_lddt_portable_gpu.py`, `tests/cpu/compile/test_smooth_lddt_routing.py`; page: [gpus/h100/smooth_lddt](gpus/h100/smooth_lddt/smooth_lddt.md).
+- Module-level parity of the portable kernels with the H100 CUDA paths (every card but H100 / B200; the CUDA paths and their speed are untouched):
+  - `BiasOnlyDiTBlock` builds its parts (AdaptiveLayerNorm, ConditionedTransition, the pair LayerNorm) with the block's implementation instead of
+    pinning them to PyTorch: under `miniworld` a recorded card runs their portable kernels, forward and backward, bf16 and fp32 (TF32), for
+    one or several augmentations, a pair of its own per sample, the hoisted bias and key masks; an unrecorded card warns per part and runs
+    PyTorch; H100 / B200 take the CUDA block paths and the PyTorch leg of the parts. The attention core stays the batched einsum.
+  - `DiTBlock(extra_pair_bias=)` (an `[L, L]` logit term for every head) is served on every path: the CUDA path where it exists (H100 bf16
+    inference), otherwise `AugmentedAttentionPairBias(extra_pair_bias=)` adds it to the attention bias (portable attention kernels or the
+    PyTorch statements, any dtype, differentiable). The `ValueError` is gone.
+  - Transition fp32 on the portable residual path (TF32 tensor cores) wherever torch allows TF32 (the switch the H100 generic kernels follow;
+    full-precision fp32 keeps PyTorch) and the card holds fp32 rows (`dispatch.dtype_gate`). Registry rows `transition_expand_swiglu_triton`,
+    `transition_squeeze_residual_triton`, `transition_bwd_swiglu_recompute_triton`, `trimul_input_ln_residual_bwd_triton` now declare fp32 with
+    measured bands; the Transition kernels take their dot precision from `kernels/_dot_precision.py`; `OP_KERNELS["transition"]` also counts the
+    input LayerNorm forward / backward kernels it launches.
+  - TriangleAttention variants (gate / out-projection biases, untransposed / dual output) take fp32 master parameters under bf16 activations on
+    the portable core: the projections are cast to the activation dtype inside, gradients come back in the master dtype.
+  - TriMul with `d_hidden != d_pair` (Protenix / FoldForge template TriMul: pair 64, hidden 128), unidirectional and bidirectional, inference
+    and training, on the portable front / back (the widths come from the weights). Served for pair <= 256 / hidden <= 512, both multiples of 16
+    (`trimul_inproj.triton.contract.hidden_refusal`); outside that range a `KernelRefusedWarning` and PyTorch, as before.
+
+### Changed
+
+- `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
+  GPU kernel when the module was built for the portable family on a CPU host.
 
 ## [2.3.12] - 2026-10-25
 

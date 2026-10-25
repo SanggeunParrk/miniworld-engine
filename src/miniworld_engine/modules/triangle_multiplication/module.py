@@ -101,8 +101,9 @@ class TriangleMultiplication(nn.Module):
         if d_hidden is None:
             d_hidden = d_pair
 
-        # d_hidden != d_pair is not an error here: the Triton front produces per-side width d_pair, so `miniworld` warns
-        # (dispatch.warn_refused) and runs the PyTorch reference for it; the hand-CUDA H100 kernels serve hidden = 2 d_pair at D64 / D128.
+        # d_hidden != d_pair is not an error here: the portable front projects d_pair -> d_hidden from the weights (widths in
+        # `trimul_inproj.triton.contract.hidden_refusal`; outside them `miniworld` warns, `dispatch.warn_refused`, and runs the
+        # PyTorch reference); the hand-CUDA H100 kernels serve hidden = 2 d_pair at D64 / D128.
 
         # The front projects d_pair -> d_hidden, and `to_out` projects d_hidden -> d_pair
         # (AF3 Alg. 12). These four were `Linear(d_pair, d_pair)`, which ignored `d_hidden`
@@ -186,18 +187,19 @@ class TriangleMultiplication(nn.Module):
             if no_triton and backend in (KernelBackend.PORTABLE, KernelBackend.CUDA):
                 backend = KernelBackend.PYTORCH
             if backend == KernelBackend.PORTABLE and self.d_hidden != pair.shape[-1] and pair.is_cuda:
-                # the Triton front produces per-side width d_pair: a wider or narrower hidden (Protenix's template TriMul, pair 64 /
-                # hidden 128) is a refusal, not an error
-                _dispatch.warn_refused(
-                    "triangle_multiplication", pair.device,
-                    f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the portable TriMul needs d_hidden == d_pair",
-                )
-                backend = KernelBackend.PYTORCH
+                # the portable front projects d_pair -> d_hidden from the weights (Protenix's / FoldForge's template TriMul, pair 64 /
+                # hidden 128); outside the served widths it is a refusal, not an error
+                from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+
+                why = hidden_refusal(pair.shape[-1], self.d_hidden)
+                if why is not None:
+                    _dispatch.warn_refused("triangle_multiplication", pair.device, why)
+                    backend = KernelBackend.PYTORCH
             if backend == KernelBackend.PORTABLE:
                 # Fused BDLL pipeline: LN_in -> gated BDLL front (transposed store, no permute) -> ONE
                 # bmm contraction -> fused output stages. BF16 training uses
                 # LN_out + F567; inference also folds LN_out into the back kernel.
-                # Requires d_hidden == d_pair. See
+                # d_hidden may differ from d_pair (contract.hidden_refusal). See
                 # kernels/trimul_inproj/triton/unidirectional.py.
                 # residual + row-broadcast dropout are FUSED into the triton gate store
                 # (gate_elem epilogue) — no external _r() add.
@@ -238,8 +240,8 @@ class TriangleMultiplication(nn.Module):
         BF16 training shares F567 and the two backward fusions with bidirectional
         TriMul. The front emits left/right in channel-major BDLL directly (transposed
         store, no permute) so the contraction lowers to a tensor-core cuBLAS bmm on
-        contiguous operands. Requires ``d_hidden == d_pair`` (the front produces per-side
-        width d_hidden). bf16 / fp32. See kernels/trimul_inproj/triton/unidirectional.py.
+        contiguous operands. ``d_hidden`` may differ from ``d_pair`` (the front produces per-side
+        width d_hidden from the weights). bf16 / fp32. See kernels/trimul_inproj/triton/unidirectional.py.
 
         The Triton back half takes one square plane (B=1, ``trimul_back_triton``); a batched
         input is run plane by plane here so the module keeps its ``[B, L, L, d]`` contract."""

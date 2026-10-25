@@ -29,12 +29,13 @@ import os
 
 import torch
 
-# FP32 projections use IEEE dot precision; implicit TF32 changes DiT gradients.
-# The input_precision setting leaves BF16 tensor-core arithmetic unchanged.
+# FP32 projections follow torch's TF32 switch (kernels/_dot_precision.py) in the expand + gate backward kernel: IEEE dot
+# precision unless torch allows TF32. BF16 tensor-core arithmetic is unchanged.
 from miniworld_engine import settings
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 from jaxtyping import Float
@@ -916,7 +917,7 @@ def _transition_expand_gatebwd_kernel(
     stride_nm, stride_nk,    # xn out: (M, K) row-major
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     NORMALIZE: tl.constexpr, STORE_H: tl.constexpr, STACK_DAB: tl.constexpr,
-    GROUP_M: tl.constexpr,
+    GROUP_M: tl.constexpr, PREC: tl.constexpr = "ieee",
 ):
     # Recompute a=xn@Wa, b=xn@Wb ONCE (tile M,ND; loop K). Emits:
     #   h  = silu(a)*b                  (for dWs = go^T @ h)
@@ -961,8 +962,8 @@ def _transition_expand_gatebwd_kernel(
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
         wb = tl.load(wb_ptr + k[:, None] * stride_bk + cols[None, :] * stride_bn,
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
-        a += tl.dot(xn, wa, out_dtype=tl.float32, input_precision="ieee")
-        b += tl.dot(xn, wb, out_dtype=tl.float32, input_precision="ieee")
+        a += tl.dot(xn, wa, out_dtype=tl.float32, input_precision=PREC)
+        b += tl.dot(xn, wb, out_dtype=tl.float32, input_precision=PREC)
     sig = tl.sigmoid(a)
     silu = a * sig
     goff = rows[:, None] * stride_gm + cols[None, :] * stride_gn
@@ -1029,6 +1030,7 @@ def _transition_expand_gatebwd(x2: torch.Tensor, rstd: torch.Tensor, c1: torch.T
         NORMALIZE=True,
         STORE_H=True,
         STACK_DAB=False,
+        PREC=dot_precision(wa.dtype),
     )
     return h, dA, dB, xn
 
@@ -1061,6 +1063,7 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
         NORMALIZE=True,
         STORE_H=True,
         STACK_DAB=True,
+        PREC=dot_precision(wa.dtype),
     )
     return h, dAB, xn
 
@@ -1093,6 +1096,7 @@ def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool
         NORMALIZE=False,
         STORE_H=store_h,
         STACK_DAB=False,
+        PREC=dot_precision(wa.dtype),
     )
     return (h, dA, dB) if store_h else (dA, dB)
 
@@ -1134,6 +1138,7 @@ def _transition_expand_gatebwd_savedxn_stacked(
         NORMALIZE=False,
         STORE_H=True,
         STACK_DAB=True,
+        PREC=dot_precision(wa.dtype),
     )
     return h, dAB
 

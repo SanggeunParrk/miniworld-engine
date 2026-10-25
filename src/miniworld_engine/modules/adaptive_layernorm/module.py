@@ -57,6 +57,8 @@ class AdaptiveLayerNorm(nn.Module):
     ) -> Float[torch.Tensor, "* d_hidden"]:
         """Forward pass. Routes on the resolved internal backend (``_backend``)."""
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.PORTABLE and not x.is_cuda:
+            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
         if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.

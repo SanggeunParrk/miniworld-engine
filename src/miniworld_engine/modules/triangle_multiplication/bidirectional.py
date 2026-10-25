@@ -166,11 +166,12 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if backend == KernelBackend.PORTABLE and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
-            _dispatch.warn_refused(
-                "triangle_multiplication", pair.device,
-                f"d_hidden ({self.d_hidden}) != d_pair ({pair.shape[-1]}); the portable bidirectional TriMul needs d_hidden == d_pair",
-            )
-            backend = KernelBackend.PYTORCH
+            from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+
+            why = hidden_refusal(pair.shape[-1], self.d_hidden)
+            if why is not None:
+                _dispatch.warn_refused("triangle_multiplication", pair.device, why)
+                backend = KernelBackend.PYTORCH
         if backend == KernelBackend.PORTABLE and not no_triton:
             # Composed-from-unidirectional PORTABLE path (fwd + autograd bwd): reuses
             # the per-direction triton_tm1 front + triton GateElem back. One code
@@ -256,8 +257,8 @@ class BidirectionalTriangleMultiplication(nn.Module):
         unidirectional triton pieces (per-direction ``triton_tm1`` front + triton
         ``GateElem`` back) plus torch einsum/cat/LayerNorm. Same code path for
         inference and training; every stage is autograd-capable so the backward is
-        obtained by composition. Requires ``d_hidden == d_pair`` (as the
-        single-direction triton trimul does). bf16 / fp32.
+        obtained by composition. ``d_hidden`` may differ from ``d_pair`` (as for the
+        single-direction triton trimul). bf16 / fp32.
 
         The Triton kernels take one square plane (B=1); a batched input is run plane by plane
         here so the public module keeps its ``[B, L, L, d]`` contract on every arch."""

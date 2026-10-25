@@ -146,6 +146,8 @@ class ConditionedTransition(nn.Module):
         """
         x = self.ada_ln_in(x, cond)
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.PORTABLE and not x.is_cuda:
+            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
         if backend == KernelBackend.PYTORCH:
             return self._reference(x, cond)
 

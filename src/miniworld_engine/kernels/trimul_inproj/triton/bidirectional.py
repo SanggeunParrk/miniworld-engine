@@ -348,12 +348,12 @@ def bidirectional_trimul_triton(
     """Bidirectional Triton trimul. Returns (B, L, L, d_pair): LN_in (triton, row_scale
     mask), then a forward-only path for inference (``_bidir_infer``) and the merged
     autograd Function for training (``_BidirBackHalfTriton``). All-triton/cuBLAS;
-    requires d_hidden == d_pair (the front produces per-side width 2*d_hidden)."""
+    d_hidden may differ from d_pair (the front produces per-side width 2*d_hidden from the weights)."""
     d = pair.shape[-1]
-    if d_hidden != d:
+    if WL.shape[0] != 2 * d_hidden or Wout.shape != (d, 2 * d_hidden):
         raise ValueError(
-            f"the portable bidirectional trimul requires d_hidden == d_pair "
-            f"(got d_hidden={d_hidden}, d_pair={d})."
+            f"the portable bidirectional trimul: the projections are {tuple(WL.shape)} / {tuple(Wout.shape)}, expected "
+            f"({2 * d_hidden}, {d}) / ({d}, {2 * d_hidden}) for d_hidden={d_hidden}, d_pair={d}."
         )
     # Mask applies to the contraction inputs (left/right), NOT folded into LN_in — so
     # the output gate sigmoid(x_n@Wg) stays unmasked (matches the pytorch reference).

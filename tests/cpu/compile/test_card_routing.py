@@ -419,8 +419,9 @@ def cuda_tensors(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "is_cuda", property(lambda self: True))
 
 
-def test_protenix_template_trimul_with_a_wider_hidden_warns_and_runs_pytorch(monkeypatch, manifests, cuda_tensors):
-    """pair 64 / d_hidden 128: `trimul_triton`'s `d_hidden != d` guard used to raise ValueError off H100 for a `miniworld` module."""
+def test_protenix_template_trimul_with_a_wider_hidden_is_served_and_out_of_range_widths_warn(monkeypatch, manifests, cuda_tensors):
+    """pair 64 / d_hidden 128 (Protenix's / FoldForge's template TriMul): the portable front serves it from the weights, no refusal; a
+    width outside `contract.hidden_refusal`'s range is still a refusal (one warning, once) and the PyTorch reference."""
     from miniworld_engine.modules import (
         BidirectionalTriangleMultiplication,
         TriangleMultiplication,
@@ -430,14 +431,24 @@ def test_protenix_template_trimul_with_a_wider_hidden_warns_and_runs_pytorch(mon
     fake_card(monkeypatch, LONG, (8, 6))
     write_manifest(manifests, LONG, (8, 6), ["triangle_multiplication"])      # LayerNorm unrecorded: it takes the PyTorch statements
     x = torch.randn(1, 8, 8, 64).bfloat16()
+    served = []
     for build in (TriangleMultiplication, BidirectionalTriangleMultiplication):
+        monkeypatch.setattr(build, "_forward_triton", lambda self, pair, mask, ds=None: (served.append(self.d_hidden), pair)[1])
+        extra = {"p_drop": 0.0} if build is BidirectionalTriangleMultiplication else {}
         dispatch._refused_warned.clear()
-        mod = build(64, d_hidden=128, implementation=ImplementationType.MINIWORLD, **({"p_drop": 0.0} if build is BidirectionalTriangleMultiplication else {})).bfloat16().eval()
-        ref = build(64, d_hidden=128, implementation=ImplementationType.PYTORCH, **({"p_drop": 0.0} if build is BidirectionalTriangleMultiplication else {})).bfloat16().eval()
-        ref.load_state_dict(mod.state_dict())
-        (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))     # the second call is silent
-        assert len(caught) == 1
-        assert "d_hidden (128) != d_pair (64)" in str(caught[0].message)
+        mod = build(64, d_hidden=128, implementation=ImplementationType.MINIWORLD, **extra).bfloat16().eval()
+        (y, _), caught = _recorded(KernelRefusedWarning, partial(mod, x), partial(mod, x))
+        assert caught == [] and served[-1] == 128                                  # the portable path was reached, no refusal
+        assert y is x or torch.equal(y, x)
+
+        dispatch._refused_warned.clear()
+        wide = build(64, d_hidden=1024, implementation=ImplementationType.MINIWORLD, **extra).bfloat16().eval()
+        ref = build(64, d_hidden=1024, implementation=ImplementationType.PYTORCH, **extra).bfloat16().eval()
+        ref.load_state_dict(wide.state_dict())
+        n_served = len(served)
+        (y, _), caught = _recorded(KernelRefusedWarning, partial(wide, x), partial(wide, x))     # the second call is silent
+        assert len(caught) == 1 and len(served) == n_served
+        assert "d_hidden (1024)" in str(caught[0].message)
         torch.testing.assert_close(y, ref(x))
 
 

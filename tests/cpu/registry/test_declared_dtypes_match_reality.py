@@ -165,9 +165,14 @@ def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
     assert "_FAST_KERNEL_DTYPES = frozenset({torch.bfloat16})" in src, (
         "dispatch._FAST_KERNEL_DTYPES is no longer bf16-only, so a guarded module CAN be handed "
         "another precision and this test's premise is gone")
+    #: Transition lets fp32 PAST the guard on TF32 tensor cores (``dispatch.dtype_gate``: portable residual path, only where torch allows TF32 and
+    #: the card holds fp32 rows), so the kernels that path launches declare fp32 on purpose. The module source must say so, or the exemption lapses.
+    past_the_guard = {"transition_expand_swiglu_triton", "transition_squeeze_residual_triton", "transition_bwd_swiglu_recompute_triton"}
+    assert "dtype_gate(" in (PKG / "modules" / "transition" / "module.py").read_text(), (
+        "Transition no longer lets fp32 past the guard: these kernels must stop declaring fp32")
     bad = [f"{r['kernel']} ({r['family']}) declares {r['dtypes']}"
            for r in registry_rows()
-           if r["family"] in guarded and r["backend"] == "triton"
+           if r["family"] in guarded and r["backend"] == "triton" and r["kernel"] not in past_the_guard
            and "fp32" in (r["dtypes"] or "").split("|") and "_fp32_" not in r["kernel"]]
     assert not bad, ("kernels behind guard_dtype declaring a precision it never lets through -- "
                      "each doubles its share of every build:\n  " + "\n  ".join(bad))
