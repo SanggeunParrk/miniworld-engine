@@ -166,6 +166,14 @@ class BenchConfig(BaseModel):
     trimul_d_hidden: int | None = None
     #: ladder_ops target: which op (`benchmarks/runners/ladder_ops.py`: geom, ca, adaln, tpi, smooth_lddt, sampler_*, layernorm, rmsnorm).
     ladder_op: str = ""
+    #: dit: add a random [L, L] `extra_pair_bias` to every head's logits (DiTBlock's keyword; the H100 bf16 path folds it into its bias).
+    dit_extra_pair_bias: bool = False
+    #: local_dit: "esmfold2" benches ESMFold2's atom block (`modules.local_dit.ESMFOLD2`: 192 slid keys, RMS / SiLU conditioning, q / k RMSNorm + rotary)
+    #: instead of the AF3 block.
+    local_dit_preset: str = ""
+    #: outer_product: "rf3" (projection bias, RoseTTAFold3), "rf3_after" (the same with the division after the projection), "chai1" (8 groups,
+    #: 64 hidden: pair 256 -- use with `d_pair=256`).
+    opm_variant: str = ""
     #: Relative-Frobenius limit of the execution-consistency check (compiled / graph-replayed result against the eager one) for fp32 tensors.
     #: 1e-4 is the historical gate; the performance ladder passes 1e-2 because the fp32 *gradients of a bf16 computation* of a compiled and an
     #: eager step differ by the bf16 rounding of the fused operations (3e-3), which is not a measurement problem (bf16 tensors already get 2e-2).
@@ -2336,6 +2344,17 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
         else ImplementationType(key)
     )
     d_msa, d_hidden = conf.msa_d_msa, 32
+    opm_kw: dict = {}
+    if conf.opm_variant == "rf3":
+        opm_kw = {"projection_bias": True}
+    elif conf.opm_variant == "rf3_after":
+        opm_kw = {"projection_bias": True, "normalize_before_proj": False}
+    elif conf.opm_variant == "chai1":
+        d_hidden, opm_kw = 64, {"groups": 8}
+    elif conf.opm_variant:
+        raise UnsupportedBenchmark(f"opm_variant must be rf3, rf3_after or chai1, got {conf.opm_variant!r}")
+    if opm_kw and (pristine or hybrid):
+        raise UnsupportedBenchmark("the Anthropic OPM payload has no model-variant options")
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     layer_cls = OuterProductMean
     if pristine:
@@ -2380,7 +2399,7 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    cls(d_msa, conf.d_pair, d_hidden, implementation=layer_impl)
+                    cls(d_msa, conf.d_pair, d_hidden, implementation=layer_impl, **opm_kw)
                     for _ in range(conf.n_layers)
                 ]
             )
@@ -4640,11 +4659,11 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
             )
             self.composed = None
 
-        def forward(self, single, cond, pair, mask=None):
+        def forward(self, single, cond, pair, mask=None, **kw):
             if self.composed is not None:
                 return self.composed(single, cond, pair, mask)
             for layer in self.layers:
-                single = layer(single, cond, pair, mask)
+                single = layer(single, cond, pair, mask, **kw)
             return single
 
     model = MultiDiT(spec.impl)
@@ -4692,6 +4711,12 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
     )
     mask = torch.rand(1, length, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
+    fwd_kw: dict = {}
+    if conf.dit_extra_pair_bias:
+        if anthropic:
+            raise UnsupportedBenchmark("the Anthropic composition has no extra_pair_bias term")
+        # [L, L], added to every head's logits on top of the pair's own bias (relative-position / template bias of the Pairformer-free DiT callers)
+        fwd_kw = {"extra_pair_bias": torch.randn(length, length, device=DEVICE, dtype=dtype)}
 
     def _token_dit_train_serves(block, single, cond, pair, mask) -> bool:
         from miniworld_engine.integrations import token_dit_train
@@ -4794,7 +4819,8 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                 ) = False
                 try:
                     expected = ref_model(
-                        single.float(), cond.float(), pair.float(), mask
+                        single.float(), cond.float(), pair.float(), mask,
+                        **{k: v.float() for k, v in fwd_kw.items()},
                     )
                 finally:
                     (
@@ -4802,7 +4828,7 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
                         torch.backends.cudnn.allow_tf32,
                     ) = tf32
                 del ref_model
-                actual = model(single, cond, pair, mask)
+                actual = model(single, cond, pair, mask, **fwd_kw)
             out_max, out_rel, out_cos = tensor_metrics(actual, expected)
             accuracy = {
                 "output_max_abs": out_max,
@@ -4824,10 +4850,10 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
 
     def inference_step():
         with torch.no_grad():
-            return model(single, cond, pair, mask)
+            return model(single, cond, pair, mask, **fwd_kw)
 
     def training_step() -> torch.Tensor:
-        y = model(single, cond, pair, mask)
+        y = model(single, cond, pair, mask, **fwd_kw)
         fabric.backward(y, dy)
         return y
 
@@ -5818,6 +5844,15 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     is_train = not is_inference_mode(conf.mode)
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
     d_single, d_pair, n_head = conf.d_single_atom, conf.d_pair_atom, 4
+    esm = conf.local_dit_preset == "esmfold2"      # ESMFold2's atom block: 192 slid keys, RMS / SiLU conditioning, q / k RMSNorm + rotary
+    if conf.local_dit_preset not in {"", "esmfold2"}:
+        raise UnsupportedBenchmark(f"local_dit_preset must be '' or 'esmfold2', got {conf.local_dit_preset!r}")
+    if esm and anthropic:
+        raise UnsupportedBenchmark("the Anthropic atom block is the AF3 one, not ESMFold2's")
+    from miniworld_engine.modules.local_dit import ESMFOLD2
+
+    block_kw = dict(ESMFOLD2) if esm else {"cross_attention": True}
+    n_keys = 192 if esm else KEYS
 
     class MultiLocalDiT(nn.Module):
         def __init__(self, impl) -> None:
@@ -5830,19 +5865,19 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
                         d_pair,
                         n_head,
                         n=2,
-                        cross_attention=True,
                         implementation=impl,
+                        **block_kw,
                     )
                     for _ in range(conf.n_layers)
                 ]
             )
             self.composed = None
 
-        def forward(self, single, cond, pair, mask=None):
+        def forward(self, single, cond, pair, mask=None, **kw):
             if self.composed is not None:
                 return self.composed(single, cond, pair, mask)
             for layer in self.layers:
-                single = layer(single, cond, pair, mask)
+                single = layer(single, cond, pair, mask, **kw)
             return single
 
     model = MultiLocalDiT(spec.impl)
@@ -5888,7 +5923,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         1,
         windows(atom_len),
         QUERIES,
-        KEYS,
+        n_keys,
         d_pair,
         device=DEVICE,
         dtype=dtype,
@@ -5896,6 +5931,10 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
     )
     mask = torch.rand(1, atom_len, device=DEVICE) > conf.mask_prob
     dy = torch.randn_like(single)
+    fwd_kw: dict = {}
+    if esm:
+        angle = 3 * torch.randn(1, atom_len, d_single // n_head // 2, device=DEVICE)
+        fwd_kw = {"rope": (angle.cos(), angle.sin())}
 
     if anthropic:
         execution_path = _anthropic_local_dit_composition(
@@ -5907,7 +5946,12 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
         from miniworld_engine.integrations import local_dit as fused
 
         with torch.set_grad_enabled(is_train):
-            served = fused.serves(model.layers[0], single, cond, pair, mask)
+            if esm:
+                from miniworld_engine.integrations import local_dit_h100 as _h100
+
+                served = bool(_h100.matches(model.layers[0], single, cond, pair, mask, fwd_kw["rope"]))
+            else:
+                served = fused.serves(model.layers[0], single, cond, pair, mask)
         if served:
             execution_path = (
                 "modules.local_dit.LocalDiTBlock -> integrations.local_dit[local_dit_block_fwd / _bwd: sm_100a window attention + "
@@ -5936,7 +5980,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
                 ) = False
                 try:
                     expected = ref_model(
-                        single.float(), cond.float(), pair.float(), mask
+                        single.float(), cond.float(), pair.float(), mask, **fwd_kw
                     )
                 finally:
                     (
@@ -5944,7 +5988,7 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
                         torch.backends.cudnn.allow_tf32,
                     ) = tf32
                 del ref_model
-                actual = model(single, cond, pair, mask)
+                actual = model(single, cond, pair, mask, **fwd_kw)
             out_max, out_rel, out_cos = tensor_metrics(actual, expected)
             accuracy = {
                 "output_max_abs": out_max,
@@ -5966,10 +6010,10 @@ def bench_module_local_dit(conf, seq_len, implementation, fabric):
 
     def inference_step():
         with torch.no_grad():
-            return model(single, cond, pair, mask)
+            return model(single, cond, pair, mask, **fwd_kw)
 
     def training_step() -> torch.Tensor:
-        y = model(single, cond, pair, mask)
+        y = model(single, cond, pair, mask, **fwd_kw)
         fabric.backward(y, dy)
         return y
 
