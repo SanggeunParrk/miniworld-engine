@@ -1,17 +1,17 @@
-"""The training backward of the split Transition: one GEMM with the SwiGLU gate-backward epilogue.
+"""The training backward of the split Transition: ONE kernel for the three GEMMs in front of the gate.
 
-The forward (``main._expand_swiglu_saveact``) saves the two expand halves ``a = xn @ Wa^T`` and
-``b = xn @ Wb^T``. The squeeze gradient ``dh = dy @ Ws`` (``Ws`` is ``(D, ND)``) is then the only
-GEMM left in front of the gate::
+For ``h = SwiGLU(a, b)``, ``a = xn @ Wa^T``, ``b = xn @ Wb^T``, ``y = h @ Ws^T`` the backward needs, per tile of the
+``(M, ND)`` hidden activation, the two expand halves (recomputed) and the squeeze gradient ``dh = dy @ Ws``::
 
-    dA = dh * b * (sig(a) + silu(a) * (1 - sig(a)))        dB = dh * silu(a)
+    dA = dh * b * (sig(a) + silu(a) * (1 - sig(a)))        dB = dh * silu(a)        h = silu(a) * b  (for dWs)
 
-``_dh_gate_kernel`` computes a tile of ``dh``, rounds it to the activation dtype (the boundary the
-PyTorch statements have, ``mm`` then the elementwise gate), and applies the gate to the saved ``a``
-and ``b`` tiles in the epilogue, writing ``dA`` and ``dB`` side by side into one ``(M, 2*ND)``
-buffer: ``dx = dAB @ [Wa; Wb]`` and ``[dWa; dWb] = dAB^T @ xn`` are then single stacked GEMMs. Before
-this the backward recomputed both expand GEMMs (``_transition_expand_gatebwd_kernel``) and ran
-``dh`` as a separate cuBLAS call: two extra GEMM passes over the ``(M, ND)`` operand.
+``_squeeze_swiglu_bwd_kernel`` runs the three K = D contractions in one loop (``a``/``b`` as one dot over the row-interleaved
+weight, exactly as the forward does, and ``dh``), rounds ``dh`` to the activation dtype (the boundary of the PyTorch statements,
+``mm`` then the elementwise gate) and applies the gate to the fp32 ``a`` and ``b`` that never leave registers. It writes ``h`` and
+``dA`` / ``dB`` side by side into one ``(M, 2*ND)`` buffer, so ``dx = dAB @ [Wa; Wb]`` and ``[dWa; dWb] = dAB^T @ xn`` are single
+stacked GEMMs. The forward saves nothing for this (``a`` and ``b`` as bf16 moved ``dx`` by ~4e-3 against the hand-CUDA kernels, which
+keep them in fp32; as fp32 they cost two extra ``(M, ND)`` passes each way). Before this the backward ran ``dh`` as a cuBLAS call and
+``_transition_expand_gatebwd_kernel`` (two expand GEMMs, a gate, three stores) after it.
 """
 import torch
 import triton
@@ -22,59 +22,123 @@ from miniworld_engine.autotune.shape_key import pack
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
 
 
-@triton.autotune(configs=configs_for("transition_bwd_dh_gate_triton"), key=["shape_key"])
+@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "USE_TMA"])
 @triton.jit
-def _dh_gate_kernel(
-    G, W, A, B, DAB, M, ND: tl.constexpr, K: tl.constexpr,
-    sgm, sgk, swk, swn, sam, san, sdm, sdn,
+def _squeeze_swiglu_bwd_kernel(
+    X, Wab, G, W, H, DAB, M, ND: tl.constexpr, K: tl.constexpr,
+    sxm, swabn, sgm, swk, swn, shm, sdm,
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, PREC: tl.constexpr = "ieee",
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
+    NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
 ):
-    pm, pn = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M1),
-                        tl.cdiv(ND, BLOCK_N), GROUP_M)
-    rows = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-    cols = pn * BLOCK_N + tl.arange(0, BLOCK_N)
-    ks = tl.arange(0, BLOCK_K)
-    acc = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-    for k0 in range(tl.cdiv(K, BLOCK_K)):
-        kk = k0 * BLOCK_K + ks
-        g = tl.load(G + rows[:, None] * sgm + kk[None, :] * sgk,
-                    mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
-        w = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
-                    mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
-        acc = tl.dot(g, w, acc, input_precision=PREC)
-    mask = (rows[:, None] < M) & (cols[None, :] < ND)
+    n_m = tl.cdiv(M, BLOCK_M1)
+    n_n = tl.cdiv(ND, BLOCK_N)
     et = DAB.dtype.element_ty
-    dh = acc.to(et).to(tl.float32)
-    a = tl.load(A + rows[:, None] * sam + cols[None, :] * san, mask=mask, other=0).to(tl.float32)
-    b = tl.load(B + rows[:, None] * sam + cols[None, :] * san, mask=mask, other=0).to(tl.float32)
-    sig = tl.sigmoid(a)
-    silu = a * sig
-    off = rows[:, None] * sdm + cols[None, :] * sdn
-    tl.store(DAB + off, (dh * b * (sig + silu * (1.0 - sig))).to(et), mask=mask)
-    tl.store(DAB + off + ND * sdn, (dh * silu).to(et), mask=mask)
+    if USE_TMA:
+        # Hopper, aligned operands (see _tma.py): tensor-map loads and stores, one persistent program per SM.
+        # dA and dB are two maps over the two halves of dAB, each clipped at ND, so a ragged last tile of dA
+        # cannot spill into dB.
+        x_desc = tl.make_tensor_descriptor(X, [M, K], [sxm, 1], [BLOCK_M1, BLOCK_K])
+        w_desc = tl.make_tensor_descriptor(Wab, [2 * ND, K], [swabn, 1], [2 * BLOCK_N, BLOCK_K])
+        g_desc = tl.make_tensor_descriptor(G, [M, K], [sgm, 1], [BLOCK_M1, BLOCK_K])
+        s_desc = tl.make_tensor_descriptor(W, [K, ND], [swk, 1], [BLOCK_K, BLOCK_N])
+        h_desc = tl.make_tensor_descriptor(H, [M, ND], [shm, 1], [BLOCK_M1, BLOCK_N])
+        da_desc = tl.make_tensor_descriptor(DAB, [M, ND], [sdm, 1], [BLOCK_M1, BLOCK_N])
+        db_desc = tl.make_tensor_descriptor(DAB + ND, [M, ND], [sdm, 1], [BLOCK_M1, BLOCK_N])
+        for tile in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True):
+            pm, pn = tile_order(tile, n_m, n_n, GROUP_M)
+            acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
+            acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+            for k0 in range(0, K, BLOCK_K):
+                x = x_desc.load([pm * BLOCK_M1, k0])
+                w = w_desc.load([pn * (2 * BLOCK_N), k0])
+                g = g_desc.load([pm * BLOCK_M1, k0])
+                s = s_desc.load([k0, pn * BLOCK_N])
+                acc = tl.dot(x, w.T, acc, input_precision=PREC)
+                acc_dh = tl.dot(g, s, acc_dh, input_precision=PREC)
+            a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
+            dh = acc_dh.to(et).to(tl.float32)
+            sig = tl.sigmoid(a)
+            silu = a * sig
+            h_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (silu * b).to(et))
+            da_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (dh * b * (sig + silu * (1.0 - sig))).to(et))
+            db_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (dh * silu).to(et))
+    else:
+        pm, pn = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
+        rows = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+        cols = pn * BLOCK_N + tl.arange(0, BLOCK_N)
+        wrows = pn * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)
+        ks = tl.arange(0, BLOCK_K)
+        acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
+        acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+        for k0 in range(tl.cdiv(K, BLOCK_K)):
+            kk = k0 * BLOCK_K + ks
+            x = tl.load(X + rows[:, None] * sxm + kk[None, :],
+                        mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+            w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
+                        mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
+            g = tl.load(G + rows[:, None] * sgm + kk[None, :],
+                        mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+            s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
+                        mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
+            acc = tl.dot(x, w, acc, input_precision=PREC)
+            acc_dh = tl.dot(g, s, acc_dh, input_precision=PREC)
+        a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
+        mask = (rows[:, None] < M) & (cols[None, :] < ND)
+        dh = acc_dh.to(et).to(tl.float32)
+        sig = tl.sigmoid(a)
+        silu = a * sig
+        tl.store(H + rows[:, None] * shm + cols[None, :], (silu * b).to(et), mask=mask)
+        off = rows[:, None] * sdm + cols[None, :]
+        tl.store(DAB + off, (dh * b * (sig + silu * (1.0 - sig))).to(et), mask=mask)
+        tl.store(DAB + off + ND, (dh * silu).to(et), mask=mask)
 
 
-def _dh_gate_fake(dy, ws, a, b, shape_key):
-    """``dAB`` stacked ``[dA | dB]``, ``(M, 2*ND)`` in the activation dtype."""
-    return a.new_empty((a.shape[0], 2 * a.shape[1]))
+def _squeeze_swiglu_bwd_fake(xn, w_ab, dy, ws, shape_key):
+    """``(h, dAB)``: ``h`` ``(M, ND)`` and the stacked ``[dA | dB]`` ``(M, 2*ND)``, in the activation dtype."""
+    return dy.new_empty((xn.shape[0], ws.shape[1])), dy.new_empty((xn.shape[0], 2 * ws.shape[1]))
 
 
-@opaque(fake=_dh_gate_fake, name="transition_bwd_dh_gate")
-def dh_gate(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-            shape_key: int) -> torch.Tensor:
-    """``dAB = [dA | dB]`` for ``squeeze(SwiGLU(a, b))`` given ``dy (M, D)``, ``ws (D, ND)`` and the saved
-    ``a``, ``b`` ``(M, ND)`` (all one dtype; ``a`` and ``b`` share a layout)."""
-    m, k = dy.shape
+@opaque(fake=_squeeze_swiglu_bwd_fake, name="transition_bwd_squeeze_swiglu")
+def squeeze_swiglu_bwd(xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor,
+                       shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(h, dAB)`` for ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``: ``xn (M, K)``, ``w_ab (2*ND, K)`` the expand weights
+    row-interleaved (``torch.stack((wa, wb), 1).reshape(2*ND, K)``), ``dy (M, K)``, ``ws (K, ND)``; one dtype."""
+    m, k = xn.shape
     nd = ws.shape[1]
-    if ws.shape[0] != k or a.shape != (m, nd) or b.stride() != a.stride():
-        raise ValueError("dh_gate shapes must be dy[M,D], ws[D,ND], a/b[M,ND]")
-    dab = a.new_empty((m, 2 * nd))
-    _dh_gate_kernel[lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])](
-        dy, ws, a, b, dab, m, nd, k,
-        *dy.stride(), *ws.stride(), *a.stride(), *dab.stride(),
-        shape_key=pack(shape_key, K=k, ND=nd), PREC=dot_precision(dy.dtype),
+    if ws.shape[0] != k or w_ab.shape != (2 * nd, k) or dy.shape != (m, k):
+        raise ValueError("squeeze_swiglu_bwd shapes must be xn[M,K], w_ab[2*ND,K], dy[M,K], ws[K,ND]")
+    h = dy.new_empty((m, nd))
+    dab = dy.new_empty((m, 2 * nd))
+    da, db = dab[:, :nd], dab[:, nd:]
+    use_tma = tma_ok(xn, w_ab, dy, ws, h, da, db)
+    if use_tma:
+        sms = num_sms(dy.device)
+        grid = lambda c: (min(sms, tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])[0]),)  # noqa: E731
+    else:
+        sms = 1
+        grid = lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
+    _squeeze_swiglu_bwd_kernel[grid](
+        xn, w_ab, dy, ws, h, dab, m, nd, k,
+        xn.stride(0), w_ab.stride(0), dy.stride(0), ws.stride(0), ws.stride(1), h.stride(0), dab.stride(0),
+        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, NUM_SMS=sms, PREC=dot_precision(dy.dtype),
     )
-    return dab
+    return h, dab
+
+
+def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key):
+    """``(dx, dWa, dWb, dWs)`` of ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``.
+
+    ``xn (M, K)``, ``wa``/``wb`` ``(ND, K)``, ``ws (K, ND)``, ``dy (M, K)``. One kernel makes ``h`` and ``dAB = [dA | dB]``;
+    ``dx = dAB @ [Wa; Wb]`` and ``[dWa; dWb] = dAB^T @ xn`` are then one stacked GEMM each, ``dWs = dy^T @ h``.
+    """
+    nd = wa.shape[0]
+    w_ab = torch.stack((wa, wb), dim=1).reshape(2 * nd, xn.shape[1])
+    h, dab = squeeze_swiglu_bwd(xn, w_ab, dy, ws, shape_key)
+    dws = torch.matmul(dy.T, h)                               # (K, ND)
+    dwab = torch.matmul(dab.T, xn)                            # [dWa; dWb]  (2*ND, K)
+    dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))        # (M, K)
+    return dx, dwab[:nd], dwab[nd:], dws

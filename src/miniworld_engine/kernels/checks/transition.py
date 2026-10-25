@@ -107,7 +107,13 @@ def transition_expand_swiglu_triton():
     _exact_reference()
     a, b = _proj(x, wa, wb)
     h = (a * torch.sigmoid(a) * b).to(x.dtype)      # kernel's bf16 `expand` store
-    return y, h.float() @ ws.float().T
+    # the training forward: the same kernel with STORE_AB=1 also stores the two expand halves (the activation dtype)
+    from miniworld_engine.kernels.drivers.transition import SHAPE_KEY
+    from miniworld_engine.kernels.transition.triton.main import _expand_swiglu_saveact
+
+    h2, a2, b2 = _expand_swiglu_saveact(x.reshape(-1, x.shape[-1]).contiguous(), wa, wb, SHAPE_KEY)
+    af, bf = _proj(x.reshape(-1, x.shape[-1]), wa, wb)
+    return {"out": (y, h.float() @ ws.float().T), "h": (h2, af * torch.sigmoid(af) * bf), "a": (a2, af), "b": (b2, bf)}
 
 
 def transition_layernorm_expand_swiglu_triton():
@@ -317,6 +323,26 @@ def transition_bwd_cuda():
             )
         out[name] = (actual, expected)
     return out
+
+
+def transition_bwd_squeeze_swiglu_triton():
+    """h = silu(a) * b and dAB = [dA | dB] = [dh * b * silu'(a) | dh * silu(a)], a = xn Wa^T, b = xn Wb^T in fp32,
+    dh = bf16(dy @ Ws)."""
+    from miniworld_engine.kernels.drivers.transition import K_FROM_ND, SHAPE_KEY
+    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd
+
+    _tf32_launch()
+    x2, _, _, wa, wb, ws = _transition_operands(k=K_FROM_ND)
+    nd = wa.shape[0]
+    dy = rows2d(ROWS, K_FROM_ND)
+    w_ab = torch.stack((wa, wb), dim=1).reshape(2 * nd, wa.shape[1])
+    h, dab = squeeze_swiglu_bwd(x2, w_ab, dy, ws, SHAPE_KEY)
+    _exact_reference()
+    a, b = _proj(x2, wa, wb)
+    dh = (dy.float() @ ws.float()).to(dy.dtype).float()
+    sig = torch.sigmoid(a)
+    silu = a * sig
+    return {"h": (h, silu * b), "dA": (dab[:, :nd], dh * b * (sig + silu * (1.0 - sig))), "dB": (dab[:, nd:], dh * silu)}
 
 
 def transition_squeeze_residual_triton():

@@ -50,7 +50,7 @@ the manifest it cites, so this table cannot age past its evidence again.
 
 | declared | kernels | ever executed |
 |---|---|---|
-| sm80 | 155 | yes, on sm86 (which satisfies sm80) |
+| sm80 | 156 | yes, on sm86 (which satisfies sm80) |
 | sm90 | 34 | **no**: the H100 manifest lists them `untested` or not at all |
 | sm100 | 0 | the registry declares none; the hand-written sm_100a paths (TriMul, TriangleAttention, Transition, token DiT, OPM / PWA training) are integrations outside it -- see [b200/b200.md](b200/b200.md) |
 

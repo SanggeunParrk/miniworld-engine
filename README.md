@@ -155,7 +155,7 @@ from the code.
 <!-- BEGIN GENERATED: hardware-support -->
 | arch | GPUs | kernels | backends |
 |---|---|---|---|
-| **sm80+** | A100, A5000, A6000, RTX 4090 | 155 | triton 149, cuda 6 |
+| **sm80+** | A100, A5000, A6000, RTX 4090 | 156 | triton 150, cuda 6 |
 | **sm90+** | H100 | 34 | cuda 30, triton 4 |
 <!-- END GENERATED: hardware-support -->
 
