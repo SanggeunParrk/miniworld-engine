@@ -470,12 +470,15 @@ def verdict(row: dict, g: Group) -> dict:
     if not has_portable and kc and kt and kc == kt:
         cpt = None
         why["cuda_vs_pytorch"] = "cuda rung launched the PyTorch kernels (no CUDA path served the call)"
+    #: the 'cuda' row of a three-rung op that launched the PyTorch kernels: H100 routes `miniworld` to the PyTorch reference where no CUDA path
+    #: serves the call, so the user gets PyTorch although a faster portable kernel exists -- still a violation of the invariant, but of the routing
+    no_cuda_path = bool(has_portable and kc and kt and kc == kt)
     pairs = [("cuda_vs_portable", cp), ("portable_vs_pytorch", pp)] if has_portable else [("cuda_vs_pytorch", cpt)]
     rung_ms = {"cuda": row["cuda_ms"], "portable": row["portable_ms"], "pytorch": row["pytorch_ms"]}
     rung_err = {"cuda": row["errors"].get("cuda", ""), "portable": row["errors"].get("portable", ""),
                 "pytorch": row["errors"].get("pt_compiled", "")}
     parts = {"cuda_vs_portable": ("cuda", "portable"), "portable_vs_pytorch": ("portable", "pytorch"), "cuda_vs_pytorch": ("cuda", "pytorch")}
-    v, na = [], []
+    v, na, causes = [], [], {}
     for name, r in pairs:
         if r is None:
             reason = why.get(name)
@@ -488,6 +491,10 @@ def verdict(row: dict, g: Group) -> dict:
             notes.append(f"{name} within noise (ratio {r:.3f}, spread {noise:.3f})")
         if r >= 1.0:
             v.append(f"VIOLATION({name})")
+            causes[name] = ("no CUDA path: `miniworld` runs the PyTorch reference" if (name == "cuda_vs_portable" and no_cuda_path)
+                            else {"cuda_vs_portable": "CUDA kernel slower than the portable kernel",
+                                  "portable_vs_pytorch": "portable path slower than PyTorch",
+                                  "cuda_vs_pytorch": "CUDA kernel slower than PyTorch"}[name])
     if v:
         out = "+".join(v)
     elif not na:
@@ -500,7 +507,7 @@ def verdict(row: dict, g: Group) -> dict:
         notes.append("n.a.: " + " | ".join(na))
     if not has_portable:
         notes.append("no portable rung by design")
-    return {"verdict": out, "note": "; ".join(notes)}
+    return {"verdict": out, "note": "; ".join(notes), "causes": causes}
 
 
 def fmt(x, nd=3):
@@ -513,12 +520,12 @@ def violations(table, kinds=("cuda_vs_portable", "portable_vs_pytorch", "cuda_vs
         for k, ratio in (("cuda_vs_portable", r["cuda_over_portable"]), ("portable_vs_pytorch", r["portable_over_pytorch"]),
                          ("cuda_vs_pytorch", r["cuda_over_pytorch"])):
             if f"VIOLATION({k})" in r["verdict"] and k in kinds and ratio is not None:
-                out.append({**r, "kind": k, "ratio": ratio})
+                out.append({**r, "kind": k, "ratio": ratio, "cause": r.get("causes", {}).get(k, "")})
     return out
 
 
 FIELDS = ["group", "op", "mode", "dtype", "L", "shape", "weight", "pt_compiled_ms", "pt_eager_graph_ms", "pt_eager_ms", "pt_best",
-          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "note",
+          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "cause", "note",
           "dev", "torch", "target"]
 
 
@@ -528,6 +535,7 @@ def write_csv(table, path: Path, meta: dict) -> None:
         w = csv.DictWriter(f, fieldnames=FIELDS, extrasaction="ignore")
         w.writeheader()
         for r in table:
+            r = {**r, "cause": "; ".join(f"{k}: {v}" for k, v in r.get("causes", {}).items())}
             w.writerow({k: (round(v, 5) if isinstance(v, float) else v) for k, v in r.items() if k in FIELDS})
 
 
@@ -569,10 +577,10 @@ def render_md(table, meta) -> str:
     L.append("")
     v = violations(table)
     L.append("## Violations ranked by size (ratio = lower rung / upper rung; must be < 1)\n")
-    L.append("| # | op | mode | dtype | shape | L | pair | ratio | CUDA ms | portable ms | PyTorch best ms (form) | weight | note |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|")
+    L.append("| # | op | mode | dtype | shape | L | pair | ratio | CUDA ms | portable ms | PyTorch best ms (form) | weight | cause / note |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(sorted(v, key=lambda r: -r["ratio"]), 1):
         L.append(f"| {i} | {r['op']} | {r['mode']} | {r['dtype']} | {r['shape']} | {r['L']} | {r['kind']} | {r['ratio']:.3f} | {fmt(r['cuda_ms'])} | "
-                 f"{fmt(r['portable_ms'])} | {fmt(r['pytorch_ms'])} ({r['pt_best']}) | {r['weight']} | {r['note']} |")
+                 f"{fmt(r['portable_ms'])} | {fmt(r['pytorch_ms'])} ({r['pt_best']}) | {r['weight']} | {r['cause']}{'; ' + r['note'] if r['note'] else ''} |")
     L.append("")
     L.append("## Violations ranked by importance (production weight, then size)\n")
     L.append("| # | weight | op | mode | dtype | shape | L | pair | ratio |\n|---|---|---|---|---|---|---|---|---|")
