@@ -286,6 +286,20 @@ def run_one(spec: dict, g: Group, mode: str, out: Path, log) -> dict:
             retry.append("+allow_eager=true")
         sub = run_one({"kind": "retry", "regime": "compile, no graph", "cmd": retry}, g, mode, out, log)
         rec["retry"] = sub
+    # a CUDA error (illegal address, invalid argument, ...) of a row that shared its process with other rungs may be state left by an earlier rung
+    # (a portable kernel's cached launch parameters read by the CUDA path, a poisoned context): measure that rung alone in a fresh process, with the
+    # kernel probe off (the profiler is the other thing that shares the process). `isolated` records say so in the report.
+    cuda_err = re.compile(r"CUDA error|AcceleratorError|illegal memory|invalid argument|cudaError", re.I)
+    shared = re.search(r"implementations=\[([^\]]*)\]", " ".join(cmd))
+    n_impl = len(shared.group(1).split(",")) if shared else 1
+    bad = sorted({r["implementation"] for r in rows if r["status"] == "failed" and cuda_err.search(r["error"])})
+    if bad and n_impl > 1 and spec["kind"] in ("rungs", "engine_nc"):
+        rec["isolated"] = []
+        for impl in bad:
+            lens = ",".join(sorted({r["seq_len"] for r in rows if r["implementation"] == impl and r["status"] == "failed"}, key=int))
+            iso = [c for c in cmd if not c.startswith(("implementations=", "+seq_len_values=", "name_suffix=", "+kernel_probe="))]
+            iso += [f"implementations=[{impl}]", f"+seq_len_values=[{lens}]", "+kernel_probe=false", f"name_suffix=ladder_{g.id}_{spec['kind']}_iso_{impl}"]
+            rec["isolated"].append(run_one({"kind": "iso", "regime": "own process, no probe", "cmd": iso}, g, mode, out, log))
     return rec
 
 
@@ -390,7 +404,7 @@ def load(outs) -> tuple[list[dict], dict]:
         g = group_of(rec["group"])
         if g is None:
             continue
-        for sub, is_retry in ((rec, False), (rec.get("retry"), True)):
+        for sub, is_retry in ((rec, False), (rec.get("retry"), True), *[(i, True) for i in rec.get("isolated", [])]):
             if not sub or not sub.get("csv"):
                 continue
             by: dict[tuple, list[dict]] = {}
@@ -402,7 +416,7 @@ def load(outs) -> tuple[list[dict], dict]:
                 else:
                     rung = {"pytorch": "pt_compiled", "portable": "portable", "miniworld": "cuda"}.get(impl, impl)
                 c = _cell(rows)
-                c["regime"] = "compile, no graph" if is_retry else rec["regime"]
+                c["regime"] = (sub.get("regime") if is_retry else rec["regime"]) or rec["regime"]
                 key = (g.id, rec["mode"], L, rung)
                 old_c = cells.get(key)
                 if old_c is None or old_c["ms"] is None or (c["ms"] is not None and c["ms"] < old_c["ms"]):
