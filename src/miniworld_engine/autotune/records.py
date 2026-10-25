@@ -79,6 +79,8 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "pair_embed_adaln": ("pair_embed_adaln/*",),
     "token_pair_init": ("token_pair_init/*",),
     "layernorm": ("layernorm/*",),
+    # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
+    "smooth_lddt": ("smooth_lddt/*",),
     # the ops.* facade entry points that launch a single Triton unit (kernels/*/whole_op.py)
     "gated_linear": ("gated_projection/gated_projection_*", "bias_only_attention/*"),
     "augmented_attention_pair_bias": _TOKEN_ATTENTION,

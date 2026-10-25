@@ -41,8 +41,9 @@ FUNCS = ("outer_product_mean", "pair_weighted_averaging", "pair_embed_geom", "pa
          "augmented_attention", "bias_only_attention", "gated_projection", "layernorm",
          # before "rmsnorm": the longer, more specific prefix, as layernorm_linear is
          "rmsnorm_adamod", "rmsnorm",
+         "smooth_lddt",
          "transition", "trimul", "adaln")
-ROLES = ("reduce", "gelu", "input", "output", "inproj", "bwd_reduce", "bwd_pre", "transpose", "epilogue", "layernorm", "sigmoid", "squeeze",
+ROLES = ("reduce", "prep", "gelu", "input", "output", "inproj", "bwd_reduce", "bwd_pre", "transpose", "epilogue", "layernorm", "sigmoid", "squeeze",
          "swiglu", "expand", "softmax", "stats", "bins", "dbias", "dkdv", "dlnw", "gemm", "gate", "fold", "cast",
          "fwd", "bwd", "dx", "dw", "dq", "dk", "dv")
 DETAILS = ("gather", "dual", "ln", "residual", "masked", "rows", "f567", "train", "recompute", "foldstats", "noaffine", "rowscale", "dropres", "inplace", "ktiled",

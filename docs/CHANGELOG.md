@@ -20,6 +20,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   drivers, checkers and config sets for the 14 kernels; record: `docs/records/portable_pair_ops_20261025.md`. Tests: `tests/gpu/any/test_pair_embed_geom_portable_gpu.py`,
   `test_pair_embed_adaln_portable_gpu.py`, `test_token_pair_init_portable_gpu.py`, `tests/gpu/sm90/test_pair_ops_portable_vs_cuda_gpu.py`, `tests/cpu/compile/test_pair_ops_routing.py`.
   No card other than H100 has been run: the Ampere manifests hold no rows for these kernels, so those cards warn and run PyTorch until `run_all` has recorded them.
+- Smooth lDDT on every card: portable kernels for `kernels/smooth_lddt` (`smooth_lddt/triton/main.py`: `smooth_lddt_prep_triton`, `smooth_lddt_fwd_triton`, `smooth_lddt_bwd_triton`;
+  fp32 or bf16 `x_pred`, fp32 compute, the same value, masks, nucleotide radii and analytic coordinate gradient as the H100 / B200 CUDA kernels). No N x N x augment tensor exists:
+  the ground-truth pair set is summarised once per call in 32 x 32 tile flags and the kernels visit only the flagged tiles, recomputing each pair's ground-truth distance from the
+  coordinates. Every reduction has a fixed order and there is no atomic, so value and gradient are bitwise reproducible. `smooth_lddt()` now routes by card: H100 / B200 run the
+  CUDA kernels exactly as before; any other card runs the portable kernels once the engine holds a record for that exact card (op `smooth_lddt` in `autotune.records`), otherwise
+  the PyTorch reference with the usual `UnrecordedCardWarning`; `settings.force_portable_kernels=True` (the A/B switch) runs the portable kernels on any card, H100 and B200 included.
+  `refusal()` no longer rejects a card, only tensors no path can take (not CUDA, dtype, shapes). On an H100 at A = 48, N = 4096 (fwd + bwd, CUDA graph) the portable kernels take 1.7 ms
+  (chain-ordered structure) to 5.8 ms (atoms in random order) against 45.7 ms for the fastest compiled PyTorch form, and 2 MiB of extra memory against 1.7 GiB; the PyTorch reference
+  (`cdist`) takes 1.8 s in chunks of 8 augments and fails with an illegal memory access in one call at that shape. The CUDA kernels stay 2.7-4x faster than the portable ones. Tests:
+  `tests/gpu/any/test_smooth_lddt_portable_gpu.py`, `tests/cpu/compile/test_smooth_lddt_routing.py`; page: [gpus/h100/smooth_lddt](gpus/h100/smooth_lddt/smooth_lddt.md).
 
 ## [2.3.12] - 2026-10-25
 

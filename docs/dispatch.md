@@ -66,6 +66,7 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 | SWADiTBlock | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
 | La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
 | Token-pair initialisation (`token_pair_init`) | warns (1 inference, 4 training of 4) | same | same | CUDA | warns, PyTorch |
+| smooth lDDT (`kernels.smooth_lddt`, the diffusion loss; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
 | LocalDiTBlock window attention (AF3 / Protenix / OpenFold3 / OpenDDE / ESMFold2 atom blocks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 / fp32 inference), else PyTorch | warns, PyTorch |
 | DiTVariantStack (Boltz-2 / RoseTTAFold3 / Chai-1 token stacks) | portable | portable | portable | CUDA (bf16 inference), else PyTorch | warns, PyTorch |
 | AtomDiTVariantStack (their atom stacks) | warns (1 inference, 3 training of 4) | same | same | CUDA (bf16 inference), else PyTorch | warns, PyTorch |

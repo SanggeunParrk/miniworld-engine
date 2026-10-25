@@ -30,6 +30,7 @@
     bias_only_attention  Bias-only Attention
     gated_projection     y = sigma(gate) * proj 계열 (게이트 단독 / GEMM 융합 모두)
     rmsnorm              RMSNorm 계열 (평균을 빼지 않는 LayerNorm; 변조 포함)
+    smooth_lddt          AF3 smooth lDDT 손실 (kernels/smooth_lddt): 정답 쌍 집합 `prep`, 순전파 `fwd`, 해석적 `bwd`
     rmsnorm_adamod       RMSNorm + adaLN-Zero 변조 + 조건부 투영 GEMM 을 한 커널에서
     outer_product_mean   OuterProductMean (MSA -> pair: LN, 좌/우 투영, 마스크, MSA 행 평균 외적, c_hidden^2 -> c_z 투영)
     pair_weighted_averaging  MSAPairWeightedAveraging (pair 로 만든 softmax 가중치로 MSA value 를 평균, 게이트, 출력 투영)
@@ -87,6 +88,7 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
     softmax            키 축 softmax (로짓 -> 가중치; 역전파는 w (dw - sum w dw))
     epilogue           본 GEMM 밖의 후처리 단계
     transpose          레이아웃 변환만
+    prep               정답(ground truth)에서 한 번 만드는 전처리 (타일 플래그, 쌍 개수)
     fold               가중치/텐서 프리폴드
     cast               dtype 변환만 (`dst = static_cast<dst_t>(static_cast<float>(src))`)
 
