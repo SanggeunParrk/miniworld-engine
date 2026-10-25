@@ -169,12 +169,12 @@ GROUPS: list[Group] = [
     ops("ln_pair_D256", "LayerNorm (pair)", "layernorm", (384,), "x[1,L,L,256]", "d_pair=256", weight=2),
     ops("rms_bf16", "RMSNorm", "rmsnorm", (384, 1024), "x[48,L,768]", "n_augment=48", weight=2),
     # ---- La-Proteina pair builders and the token-pair initialisation (B = samples) ------------------------------------------------
-    ops("geom_B16", "pair_embed_geom", "geom", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke"),
-    ops("geom_B48", "pair_embed_geom", "geom", (128, 256), "B48", "n_augment=48", weight=2),
-    ops("ca_B16", "pair_embed_ca", "ca", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke"),
-    ops("ca_B48", "pair_embed_ca", "ca", (128, 256), "B48", "n_augment=48", weight=2),
-    ops("adalnpair_B16", "pair_embed_adaln", "adaln", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke"),
-    ops("adalnpair_B48", "pair_embed_adaln", "adaln", (128, 256), "B48", "n_augment=48", weight=2),
+    ops("geom_B16", "pair_embed_geom", "geom", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke", dtype_label="bf16 out, fp32 geometry"),
+    ops("geom_B48", "pair_embed_geom", "geom", (128, 256), "B48", "n_augment=48", weight=2, dtype_label="bf16 out, fp32 geometry"),
+    ops("ca_B16", "pair_embed_ca", "ca", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke", dtype_label="bf16 out, fp32 geometry"),
+    ops("ca_B48", "pair_embed_ca", "ca", (128, 256), "B48", "n_augment=48", weight=2, dtype_label="bf16 out, fp32 geometry"),
+    ops("adalnpair_B16", "pair_embed_adaln", "adaln", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke", dtype_label="bf16 out, fp32 geometry"),
+    ops("adalnpair_B48", "pair_embed_adaln", "adaln", (128, 256), "B48", "n_augment=48", weight=2, dtype_label="bf16 out, fp32 geometry"),
     ops("tpi_B16", "token_pair_init", "tpi", (128, 256, 384), "B16", "n_augment=16", weight=3, tier="smoke", dtype_label="fp32 in, fp32 out"),
     ops("tpi_B48", "token_pair_init", "tpi", (128, 256), "B48", "n_augment=48", weight=2, dtype_label="fp32 in, fp32 out"),
     # ---- the diffusion loss and the sampler (atoms) -------------------------------------------------------------------------------------
