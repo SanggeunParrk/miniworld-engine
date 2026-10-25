@@ -144,3 +144,16 @@ search), and its table gradient is the same one-hot product on the tensor cores 
   apart), but ran 0.81 ms against 0.73 ms for the two kernels because the two phases do not overlap; a wgmma variant (asynchronous products overlapping the next tile's LayerNorm) did not fit in
   shared memory at 80 pairs per tile and was not built. Skipping the traffic of blocks without a live pair (35 % of the pairs in this benchmark) was also tried (block-live flags, aligned
   slices) and was slower (extra dependent loads), so it is not part of the change.
+
+## La-Proteina end to end (4 x H100, node01, 2026-10-25)
+
+`~/la-proteina` `scripts/ofd` recipe (batch 16 per GPU, cap 512, bucketed, 128-padded, warm cache, `+graph_step=true +opt.fused_adam=true`, fused pair builders, engine blocks),
+engine source on `PYTHONPATH` (JIT fallback on, kernels built on first call), median s/step over steps 600-1200 (LD) / 300-1000 (AE). `base` = origin/main `b088341b` (previous CUDA
+kernels), `new` = this branch. The wheel's reference numbers (LD 0.0538, AE 0.0671, steps and cache state differ) are not comparable one to one.
+
+| stage | base median / mean | new median / mean | change (median) |
+|---|---|---|---|
+| LD | 0.0479 / 0.0576 | 0.0464 / 0.0537 | -3.1 % |
+| AE | 0.0626 / 0.0689 | 0.0610 / 0.0664 | -2.6 % |
+
+No regression; the step is dominated by the trunk, the pair builders are a few percent of it.
