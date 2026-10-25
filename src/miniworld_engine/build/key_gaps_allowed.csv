@@ -160,3 +160,12 @@ token_pair_init_dw_reduce_triton,NBLK,the number of slice partials added in orde
 transition_expand_swiglu_triton,PREC,"pure function of the activation dtype and torch's TF32 switch (kernels/_dot_precision.py: tf32 for fp32 only where torch allows it, ieee otherwise); bf16 ignores it, and the cache keys the dtype"
 transition_squeeze_residual_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
 transition_bwd_swiglu_recompute_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
+sampler_ops_stats_triton,CHUNK,"atoms per program, chosen by the launcher from the atom and sample counts (256 .. 1024): it sets how many partials a sample has, not the tile (BLOCK is the tile)"
+sampler_ops_augment_triton,CHUNK,see sampler_ops_stats_triton
+sampler_ops_augment_triton,CP,next power of two of the number of partials: a function of the launch geometry
+sampler_ops_augment_triton,WINDOW,"the churn rule of the sampler (0: AlphaFold 3 gamma_min rule, 1: EDM window): a branch on two scalars, no change to the tile"
+sampler_ops_augment_triton,CLAMP,"clamp of the churn variance: a max on a scalar, no change to the tile"
+sampler_ops_cov_triton,CHUNK,see sampler_ops_stats_triton
+sampler_ops_cov_triton,CP,see sampler_ops_augment_triton
+sampler_ops_align_triton,CHUNK,see sampler_ops_stats_triton
+sampler_ops_align_triton,CP,see sampler_ops_augment_triton

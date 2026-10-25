@@ -10,6 +10,14 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- Portable kernels for the diffusion sampler glue `kernels/sampler_ops` (`augment_noise`, `align_euler`, `pool_atoms`): the contract and algorithm of the H100 CUDA kernels (the caller's random
+  draws, the churn arithmetic on device scalars in IEEE operations, centres from fixed-order chunk partials, Kabsch rotation by Horn's quaternion method with 12 squarings in scalar registers, no SVD,
+  no atomics, bitwise reproducible), for any card. `sampler_ops.interface` now routes by card like the pair ops (H100 CUDA unchanged; a recorded card or the A/B switch the portable kernels; else
+  one `UnrecordedCardWarning` and the PyTorch reference; `serves()` / `pool_atoms_serves()` accept every card but B200). On H100, CUDA graph, A = 1 .. 48 samples, 4k .. 32k atoms: 3-16x faster than
+  compiled PyTorch for `augment_noise` / `align_euler` and 1.4-6x for `pool_atoms`; within 0.8-1.8x of the CUDA kernels, and faster than them where the CUDA kernels
+  are latency bound (small A, serial partial sum; the pooling at 2-3x). Registry rows `sampler_ops_{stats,augment,cov,align,pool}_triton`; record `docs/records/portable_sampler_ops_20261025.md`;
+  page [gpus/h100/sampler_ops](gpus/h100/sampler_ops/sampler_ops.md). Tests: `tests/gpu/any/test_sampler_ops_portable_gpu.py`, `tests/gpu/sm90/test_sampler_ops_portable_vs_cuda_gpu.py`,
+  `tests/cpu/compile/test_sampler_ops_routing.py`. No card other than H100 has been run.
 - Portable kernels for `pair_embed_geom` (+ `pair_embed_ca`, the decoder's CA-distance pair), `pair_embed_adaln` and `token_pair_init`: the same inputs, outputs, masks,
   `ln_eps` fusion and deterministic backward as the H100 CUDA kernels (bins in registers, a row gather instead of the one-hot Linear; the table / LayerNorm / gamma / beta
   gradients are fixed-order partial sums and a second reduce kernel, no atomics), for any card. `kernels/_pair_route.py` routes the three ops like the rest of the engine:
