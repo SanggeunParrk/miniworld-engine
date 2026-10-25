@@ -9,7 +9,7 @@ import warnings
 
 import pytest
 import torch
-from portable_helpers import portable_on, rel
+from portable_helpers import portable_on, rel, report
 
 from miniworld_engine.modules import BidirectionalTriangleMultiplication, TriangleMultiplication
 from miniworld_engine.modules.dispatch import KernelRefusedWarning
@@ -107,6 +107,7 @@ def test_hidden_ne_pair_matches_pytorch(monkeypatch, widths, kind, training, b, 
         out, g_eng = run(eng, BF)
     assert len(calls) >= 1, "the portable path did not run"
     assert torch.isfinite(out).all()
+    report(f"trimul_hidden_ne_pair {kind} D{d_pair}H{d_hidden} {'train' if training else 'infer'} B{b}L{n}", out, out_16, out_gold, g_eng, g_16, g_gold)
     assert rel(out, out_gold) <= max(1.5 * rel(out_16, out_gold), 3e-3), (rel(out, out_gold), rel(out_16, out_gold))
     for i, (a, r, c) in enumerate(zip(g_eng, g_gold, g_16, strict=True)):
         assert rel(a, r) <= max(1.5 * rel(c, r), 3e-3), (i, rel(a, r), rel(c, r))

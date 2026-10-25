@@ -11,7 +11,7 @@ import warnings
 
 import pytest
 import torch
-from portable_helpers import portable_on, rel
+from portable_helpers import portable_on, rel, report
 
 from miniworld_engine.modules.dispatch import KernelRefusedWarning, UnrecordedCardWarning
 from miniworld_engine.modules.exceptions import ImplementationType as I
@@ -77,6 +77,7 @@ def test_fp32_master_parameters_run_the_portable_core(monkeypatch, case, b, n, r
         out, g_eng = run(m, BF, False)
     rows = (slice(None), slice(0, real), slice(0, real))
     assert torch.isfinite(out[rows]).all()
+    report(f"triattn_variant_fp32_master {CASES[case][:5]}{sorted(options)} B{b}N{n}", out[rows], out_16[rows], out_gold[rows], g_eng, g_16, g_gold)
     assert rel(out[rows], out_gold[rows]) <= max(1.5 * rel(out_16[rows], out_gold[rows]), 2e-3), \
         (CASES[case], rel(out[rows], out_gold[rows]), rel(out_16[rows], out_gold[rows]))
     for i, (a, r, c) in enumerate(zip(g_eng, g_gold, g_16, strict=True)):

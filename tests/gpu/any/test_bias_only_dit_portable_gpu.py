@@ -11,7 +11,7 @@ import warnings
 
 import pytest
 import torch
-from portable_helpers import portable_on, rel
+from portable_helpers import portable_on, rel, report
 
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
 from miniworld_engine.modules.dispatch import KernelBackend, KernelRefusedWarning, UnrecordedCardWarning
@@ -101,6 +101,8 @@ def _compare(width, A, B, L, dtype, training, use_hoist=False, bound_floor=3e-3)
             warnings.simplefilter("error", category)
         out, g_eng = _run(eng, args, dy, dtype, training, use_hoist)
     assert torch.isfinite(out).all()
+    report(f"bias_only_dit w{width[0]}h{width[3]} {str(dtype)[6:]} {'train' if training else 'infer'} A{A}B{B}L{L}{' hoist' if use_hoist else ''}",
+           out, out_ref, out_gold, g_eng, g_ref, g_gold)
     # fp32 engine = TF32 tensor cores (ConditionedTransition's contract); the fp32 PyTorch block is full fp32
     floor = bound_floor if dtype is BF else 6e-3
     factor = 1.5 if dtype is BF else 1.0

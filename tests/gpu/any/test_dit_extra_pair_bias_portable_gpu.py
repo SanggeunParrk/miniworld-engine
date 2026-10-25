@@ -10,7 +10,7 @@ import copy
 
 import pytest
 import torch
-from portable_helpers import portable_on, rel
+from portable_helpers import portable_on, rel, report
 
 from miniworld_engine.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
@@ -78,6 +78,7 @@ def test_extra_pair_bias_matches_pytorch(width, dtype, training, A, B, L):
     out_ref, g_ref = _run(ref, data, dtype, training)
     out, g_eng = _run(eng, data, dtype, training)
     assert torch.isfinite(out).all()
+    report(f"dit_extra_pair_bias w{width[0]}h{width[3]} {str(dtype)[6:]} {'train' if training else 'infer'} A{A}B{B}L{L}", out, out_ref, out_gold, g_eng, g_ref, g_gold)
     floor = 3e-3 if dtype is BF else 6e-3      # fp32 engine = TF32 tensor cores in the portable kernels; the fp32 PyTorch block is full fp32
     factor = 1.5 if dtype is BF else 1.0
     assert rel(out, out_gold) <= max(factor * rel(out_ref, out_gold), floor), (rel(out, out_gold), rel(out_ref, out_gold))

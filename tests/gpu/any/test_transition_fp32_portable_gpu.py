@@ -9,7 +9,7 @@ import contextlib
 import pytest
 import torch
 import torch.nn.functional as F
-from portable_helpers import portable_on, rel
+from portable_helpers import portable_on, rel, report
 
 from miniworld_engine.kernels.transition.triton import residual as residual_mod
 from miniworld_engine.modules import Transition
@@ -92,6 +92,8 @@ def test_fp32_matches_fp64_on_tf32(monkeypatch, d, n, lead, training):
     del want_ref
     assert calls, "the portable residual path did not run"
     assert out.dtype == torch.float32 and torch.isfinite(out).all()
+    report(f"transition_fp32 d{d}n{n}x{'x'.join(map(str, lead))} {'train' if training else 'infer'}", out, out_ref, gold,
+           g_eng if training else (), g_ref if training else (), g_gold if training else ())
     assert rel(out, gold) <= max(2 * rel(out_ref, gold), 4e-3), (rel(out, gold), rel(out_ref, gold))
     if training:
         for i, (a, r, c) in enumerate(zip(g_eng, g_gold, g_ref, strict=True)):
