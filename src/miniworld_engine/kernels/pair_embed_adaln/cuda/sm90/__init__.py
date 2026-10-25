@@ -5,6 +5,7 @@ bound. The backward is bitwise deterministic (no atomics: per-CTA partials summe
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -34,7 +35,10 @@ def forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, n
     return out, bins
 
 
-def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
+IMPL = int(os.environ.get("MINIWORLD_PAIR_EMBED_BWD_IMPL", "1"))   # 1: table gradient on the tensor cores (wgmma), 0: the shared-memory read-modify-write kernel (A/B)
+
+
+def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, impl=None):
     """(dtbl [NT, 256], dln_w, dln_b [256], dgamma, dbeta [B, 256]) from d pair = dout [B, n, n, 256] bf16."""
     B, n = bins.shape[:2]
     NT = tbl.shape[0]
@@ -50,6 +54,6 @@ def backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     dbeta = torch.empty(B, C, device=dev, dtype=torch.float32)
     dlw = torch.empty(C, device=dev, dtype=torch.float32)
     dlb = torch.empty(C, device=dev, dtype=torch.float32)
-    _ext().backward(tbl, lnw, lnb, gamma, bins, dout, dx, part, tpart, dtbl, dgamma, dbeta, dlw, dlb, int(chunk_b), int(nS), int(nX),
+    _ext().backward(tbl, lnw, lnb, gamma, bins, dout, dx, part, tpart, dtbl, dgamma, dbeta, dlw, dlb, int(IMPL if impl is None else impl), int(chunk_b), int(nS), int(nX),
                     float(eps1), float(eps2))
     return dtbl, dlw, dlb, dgamma, dbeta

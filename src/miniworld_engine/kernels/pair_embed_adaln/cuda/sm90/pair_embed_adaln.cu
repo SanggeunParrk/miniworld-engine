@@ -234,6 +234,144 @@ pe_bwd_tbl(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int nX
   }
 }
 
+
+// ---- table gradient on the tensor cores (wgmma) --------------------------------------------------------------------------------------------------
+// dT[row] = sum over the pairs that use the row of dx[pair]  =  onehot^T @ dx.  The one-hot operand (rows x 64 pairs, bf16, 128 B rows, 16-byte chunks XOR-swizzled by
+// the row) lives in shared memory and is written ("scattered") by two extra warps, 3 entries per pair; the dx tile arrives by cp.async; one warpgroup per 64 table rows
+// issues wgmma.m64n64k16 on the two swizzled operands.  CTA (q, t) = channel quarter q of the FIXED pair slice t, tiles in order: bitwise deterministic, no atomics.
+constexpr int TPB = 64, ST4 = 5, NWG4 = 3, SC4 = NWG4 * 128, NTH4 = SC4 + 64, NR4 = NWG4 * 64;
+__device__ __forceinline__ void cp16(void* dst, const void* src, bool pred) {
+  unsigned d = (unsigned)__cvta_generic_to_shared(dst);
+  int sz = pred ? 16 : 0;                                   // src-size 0: zero fill
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(sz));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
+template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
+__device__ __forceinline__ uint64_t wg_desc(unsigned smem_addr, unsigned lbo_bytes, unsigned sbo_bytes) {
+  uint64_t d = 0;
+  d |= (uint64_t)((smem_addr & 0x3FFFFu) >> 4);
+  d |= (uint64_t)((lbo_bytes & 0x3FFFFu) >> 4) << 16;
+  d |= (uint64_t)((sbo_bytes & 0x3FFFFu) >> 4) << 32;
+  d |= (uint64_t)1 << 62;                                   // 128-byte swizzle
+  return d;
+}
+__device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
+template <int N> __device__ __forceinline__ void wg_wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory"); }
+__device__ __forceinline__ void fence_async() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
+__device__ __forceinline__ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\nwgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1, 0, 1;\n}\n"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+               : "l"(da), "l"(db));
+}
+__device__ __forceinline__ void wg_fence_acc(float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; i++) asm volatile("" : "+f"(d[i])::"memory");
+}
+
+__device__ __forceinline__ void st_u16(unsigned addr, unsigned v) { asm volatile("st.shared.u16 [%0], %1;\n" ::"r"(addr), "r"(v)); }
+
+__global__ void __launch_bounds__(NTH4, 1)
+pe_bwd_tbl4(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int nX, int NT, float* tpart) {
+  extern __shared__ __align__(1024) unsigned char dsm0[];
+  unsigned char* dsm = dsm0 + ((1024u - ((unsigned)__cvta_generic_to_shared(dsm0) & 1023u)) & 1023u);
+  unsigned char* Bs = dsm;
+  unsigned char* Ab = dsm + ST4 * TPB * 128;
+  const unsigned as_base = (unsigned)__cvta_generic_to_shared(Ab), bs_base = (unsigned)__cvta_generic_to_shared(Bs);
+  const int q = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, tig = lane & 3;
+  const long long per = (P + NBLK - 1) / NBLK, p0 = (long long)t * per, p1 = min(P, p0 + per);
+  const int ntiles = p1 > p0 ? (int)((p1 - p0 + TPB - 1) / TPB) : 0;
+  const bool scat = tid >= SC4;
+  const int wg = tid >> 7;
+  for (int k = tid; k < 2 * NR4 * 8; k += NTH4) reinterpret_cast<uint4*>(Ab)[k] = make_uint4(0u, 0u, 0u, 0u);
+  int prev[2][3];
+#pragma unroll
+  for (int b = 0; b < 2; b++)
+#pragma unroll
+    for (int k = 0; k < 3; k++) prev[b][k] = -1;
+  float acc[32];
+#pragma unroll
+  for (int i = 0; i < 32; i++) acc[i] = 0.f;
+  auto load_tile = [&](int tile, int stage) {
+    const long long pb = p0 + (long long)tile * TPB;
+    for (int c = tid; c < TPB * 8; c += NTH4) {
+      int kp = c >> 3, ch8 = c & 7;
+      long long pair = pb + kp;
+      bool pred = pair < p1;
+      cp16(Bs + stage * (TPB * 128) + kp * 128 + ((ch8 ^ (kp & 7)) << 4), dx + (size_t)(pred ? pair : 0) * C + q * 64 + ch8 * 8, pred);
+    }
+  };
+  auto word = [&](int tile) -> uint32_t {                    // scatter threads: the bin word of pair (tid - SC4) of `tile` (MASKED outside the slice)
+    const long long pair = p0 + (long long)tile * TPB + (tid - SC4);
+    return pair < p1 ? (uint32_t)bins[pair] : MASKED;
+  };
+  auto scatter = [&](int tile, uint32_t w) {
+    if (!scat) return;
+    const int p = tid - SC4, b = tile & 1;
+    const unsigned buf = as_base + b * (NR4 * 128);
+#pragma unroll
+    for (int k = 0; k < 3; k++) {
+      if (prev[b][k] >= 0) { const int r = prev[b][k]; st_u16(buf + r * 128 + (((p >> 3) ^ (r & 7)) << 4) + ((p & 7) << 1), 0u); }
+    }
+    int rows[3] = {-1, -1, -1};
+    if (!(w & MASKED)) {
+      rows[0] = (int)(w & 255);
+      rows[1] = nS + (int)((w >> 8) & 255);
+      if (w & HAS_SC) rows[2] = nS + nX + (int)((w >> 16) & 255);
+    }
+#pragma unroll
+    for (int k = 0; k < 3; k++) {
+      prev[b][k] = rows[k];
+      if (rows[k] >= 0) { const int r = rows[k]; st_u16(buf + r * 128 + (((p >> 3) ^ (r & 7)) << 4) + ((p & 7) << 1), 0x3F80u); }
+    }
+    fence_async();
+  };
+#pragma unroll
+  for (int s = 0; s < ST4 - 1; s++) {
+    if (s < ntiles) load_tile(s, s);
+    cp_commit();
+  }
+  uint32_t wn = scat ? word(0) : 0u;
+  cp_wait<ST4 - 2>();
+  fence_async();
+  __syncthreads();
+  if (ntiles > 0) scatter(0, wn);
+  wn = scat ? word(1) : 0u;
+  for (int kt = 0; kt < ntiles; kt++) {
+    cp_wait<ST4 - 3>();
+    fence_async();
+    if (!scat) wg_wait<0>();
+    __syncthreads();
+    if (kt + 1 < ntiles) scatter(kt + 1, wn);
+    if (scat) wn = word(kt + 2);
+    if (kt + ST4 - 1 < ntiles) load_tile(kt + ST4 - 1, (kt + ST4 - 1) % ST4);
+    cp_commit();
+    if (scat) continue;
+    const int stage = kt % ST4;
+    const unsigned abase = as_base + (kt & 1) * (NR4 * 128) + wg * (64 * 128);
+    const unsigned bbase = bs_base + stage * (TPB * 128);
+    wg_fence_acc(acc);
+    wg_fence();
+#pragma unroll
+    for (int ks = 0; ks < 4; ks++) wgmma_m64n64k16(acc, wg_desc(abase + ks * 32, 16, 1024), wg_desc(bbase + ks * 16 * 128, 8192, 1024));
+    wg_commit();
+    wg_fence_acc(acc);
+  }
+  cp_wait<0>();
+  if (scat) return;
+  wg_wait<0>();
+  wg_fence_acc(acc);
+#pragma unroll
+  for (int nt = 0; nt < 8; nt++) {
+#pragma unroll
+    for (int hi = 0; hi < 2; hi++) {
+      const int r = 64 * wg + 16 * (warp & 3) + gid + 8 * hi;
+      if (r >= NT) continue;
+      *reinterpret_cast<float2*>(tpart + ((size_t)t * NT + r) * C + q * 64 + nt * 8 + 2 * tig) = make_float2(acc[4 * nt + 2 * hi], acc[4 * nt + 2 * hi + 1]);
+    }
+  }
+}
+
 // dgamma / dbeta [B][256] (sum over the CTAs of the sample), dln_w / dln_b [256] (sum over all CTAs), fixed order
 __global__ void pe_reduce_rows(const float* part, float* dgamma, float* dbeta, float* dlw, float* dlb, int B, int nrb) {
   int c = threadIdx.x, b = blockIdx.x;
@@ -272,7 +410,7 @@ void forward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Ten
 
 void backward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor gamma, torch::Tensor bins, torch::Tensor dout,
               torch::Tensor dx, torch::Tensor part, torch::Tensor tpart, torch::Tensor dtbl, torch::Tensor dgamma,
-              torch::Tensor dbeta, torch::Tensor dlw, torch::Tensor dlb, int64_t chunk_b, int64_t nS, int64_t nX, double e1, double e2) {
+              torch::Tensor dbeta, torch::Tensor dlw, torch::Tensor dlb, int64_t impl, int64_t chunk_b, int64_t nS, int64_t nX, double e1, double e2) {
   const at::cuda::CUDAGuard guard(tbl.device());
   int B = bins.size(0), n = bins.size(1), NT = tbl.size(0);
   int nrb = (n + NW - 1) / NW;
@@ -288,8 +426,15 @@ void backward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Te
                                               bins.data_ptr<int>(), dop, dxp, part.data_ptr<float>() + (size_t)b0 * nrb * 4 * C, b0, n, nrb,
                                               (int)nS, (int)nX, (float)e1, (float)e2);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
+    if (impl == 1 && NT <= NR4) {
+      const size_t sm4 = (size_t)ST4 * TPB * 128 + (size_t)2 * NR4 * 128 + 1024;
+      cudaFuncSetAttribute(pe_bwd_tbl4, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm4);
+      pe_bwd_tbl4<<<dim3(4, NBLK), NTH4, sm4, st>>>(dxp, bins.data_ptr<int>() + (size_t)b0 * n * n, (long long)Bc * n * n, (int)nS, (int)nX, NT,
+                                                    tpart.data_ptr<float>() + (size_t)ch * NBLK * NT * C);
+    } else {
     pe_bwd_tbl<<<dim3(4, NBLK), 128, smem, st>>>(dxp, bins.data_ptr<int>() + (size_t)b0 * n * n, (long long)Bc * n * n, (int)nS, (int)nX, NT,
                                                  tpart.data_ptr<float>() + (size_t)ch * NBLK * NT * C);
+    }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
   }
   pe_reduce_rows<<<B + 1, C, 0, st>>>(part.data_ptr<float>(), dgamma.data_ptr<float>(), dbeta.data_ptr<float>(), dlw.data_ptr<float>(),

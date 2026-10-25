@@ -15,7 +15,14 @@
 #include <stdint.h>
 
 constexpr int C = 256;
-constexpr int NW = 8;
+#ifndef NWF
+#define NWF 16
+#endif
+#ifndef NWC
+#define NWC 32
+#endif
+constexpr int NW = NWF;      // warps per CTA of the encoder forward
+constexpr int NWCA = NWC;    // warps per CTA of the decoder forward
 constexpr int NT = 317;                                  // 127 sep + 4*21 dist + 5*21 angle + 1 chain
 constexpr int R_DIST = 127, R_ANG = 127 + 84, R_CHAIN = 316;
 constexpr uint32_t MASKED = 1u << 31, F_DIST = 1u << 28, F_ORI = 1u << 29;
@@ -27,6 +34,9 @@ __device__ __forceinline__ float wsum(float v) {
   for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
   return v;
 }
+// bf16 -> fp32 of the two halves of a packed word: one instruction each (the compiler turns a bf16x2 unpack into PRMT + SHL for the odd element)
+__device__ __forceinline__ float bf_lo(uint32_t w) { return __uint_as_float(w << 16); }
+__device__ __forceinline__ float bf_hi(uint32_t w) { return __uint_as_float(w & 0xFFFF0000u); }
 // bf16 store of 8 channels per lane; ln != 0: first the LayerNorm (no affine) over the 256 channels of the pair, on the values as a bf16 Linear output
 // would hold them (what torch's layer_norm sees), statistics in fp32
 __device__ __forceinline__ void store_pair(__nv_bfloat16* dst, float (&x)[8], bool ln, float eps) {
@@ -67,10 +77,17 @@ __device__ __forceinline__ float bond(V3 a, V3 b, V3 c) {
   V3 b0 = unit(sub(b, a)), b1 = unit(sub(c, a));
   return atan2f(nrm(cross(b0, b1)), dot(b0, b1));
 }
-__device__ __forceinline__ int bucket(float v, const float* lim, int n) {   // torch.bucketize: limits strictly below v
-  int c = 0;
-  for (int k = 0; k < n; k++) c += (__ldg(lim + k) < v);
-  return c;
+// torch.bucketize(v, lim) with the boundaries ascending (as bucketize requires): the number of limits strictly below v, by a binary search over the
+// (shared-memory) limits; NaN gives 0 as in the linear count.  n <= 31.
+__device__ __forceinline__ int bucket(float v, const float* lim_s, int n) {
+  int pos = 0;
+#pragma unroll
+  for (int s = 16; s; s >>= 1) {
+    const int k = pos + s;
+    const float l = lim_s[min(k, n) - 1];
+    pos += (k <= n && l < v) ? s : 0;
+  }
+  return pos;
 }
 __device__ __forceinline__ V3 atom(const float* bb, int b, int n, int i, int a) {
   const float* p = bb + (((size_t)b * n + i) * 4 + a) * 3;
@@ -82,7 +99,9 @@ pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8
        const float* dlim, const float* alim, __nv_bfloat16* out, uint4* codes, int B, int n, int ln, float eps) {
   extern __shared__ __align__(16) unsigned char smem[];
   __nv_bfloat16* T = reinterpret_cast<__nv_bfloat16*>(smem);          // [NT][C]
+  __shared__ float dlim_s[32], alim_s[32];
   for (int k = threadIdx.x; k < NT * C / 8; k += NW * 32) reinterpret_cast<uint4*>(T)[k] = reinterpret_cast<const uint4*>(tbl)[k];
+  if (threadIdx.x < 32) { dlim_s[threadIdx.x] = threadIdx.x < 20 ? dlim[threadIdx.x] : 0.f; alim_s[threadIdx.x] = threadIdx.x < 20 ? alim[threadIdx.x] : 0.f; }
   __syncthreads();
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
   for (int row = blockIdx.x * NW + warp; row < B * n; row += gridDim.x * NW) {
@@ -101,14 +120,14 @@ pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8
         if (cai && ca[b * n + j]) {
           V3 Nj = atom(bb, b, n, j, 0), CAj = atom(bb, b, n, j, 1), Cj = atom(bb, b, n, j, 2), CBj = atom(bb, b, n, j, 3);
           float d0 = nrm(sub(CAi, Nj)), d1 = nrm(sub(CAi, CAj)), d2 = nrm(sub(CAi, Cj)), d3 = cb[b * n + j] ? nrm(sub(CAi, CBj)) : 0.f;
-          w0 |= F_DIST | ((uint32_t)bucket(d0, dlim, 20) << 8) | ((uint32_t)bucket(d1, dlim, 20) << 13) | ((uint32_t)bucket(d2, dlim, 20) << 18) |
-                ((uint32_t)bucket(d3, dlim, 20) << 23);
+          w0 |= F_DIST | ((uint32_t)bucket(d0, dlim_s, 20) << 8) | ((uint32_t)bucket(d1, dlim_s, 20) << 13) | ((uint32_t)bucket(d2, dlim_s, 20) << 18) |
+                ((uint32_t)bucket(d3, dlim_s, 20) << 23);
           if (cbi) {
             float a0 = dihedral(Ni, CAi, CBi, CBj), a1 = dihedral(Nj, CAj, CBj, CBi), a2 = bond(CAi, CBi, CBj), a3 = bond(CAj, CBj, CBi),
                   a4 = dihedral(CAi, CBi, CBj, CAj);
             w0 |= F_ORI;
-            w1 = (uint32_t)bucket(a0, alim, 20) | ((uint32_t)bucket(a1, alim, 20) << 5) | ((uint32_t)bucket(a2, alim, 20) << 10) |
-                 ((uint32_t)bucket(a3, alim, 20) << 15) | ((uint32_t)bucket(a4, alim, 20) << 20);
+            w1 = (uint32_t)bucket(a0, alim_s, 20) | ((uint32_t)bucket(a1, alim_s, 20) << 5) | ((uint32_t)bucket(a2, alim_s, 20) << 10) |
+                 ((uint32_t)bucket(a3, alim_s, 20) << 15) | ((uint32_t)bucket(a4, alim_s, 20) << 20);
           }
         }
       }
@@ -122,10 +141,9 @@ pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8
         for (int e = 0; e < 8; e++) x[e] = 0.f;
         if (!(p0 & MASKED)) {
           auto add = [&](int r, float scale) {
-            uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
-            const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-            for (int k = 0; k < 4; k++) { float2 f = __bfloat1622float2(h[k]); x[2 * k] += scale * f.x; x[2 * k + 1] += scale * f.y; }
+            const uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
+            x[0] += scale * bf_lo(u.x); x[1] += scale * bf_hi(u.x); x[2] += scale * bf_lo(u.y); x[3] += scale * bf_hi(u.y);
+            x[4] += scale * bf_lo(u.z); x[5] += scale * bf_hi(u.z); x[6] += scale * bf_lo(u.w); x[7] += scale * bf_hi(u.w);
           };
           add(p0 & 127, 1.f);
           if (p0 & F_DIST) {
@@ -149,6 +167,7 @@ pg_fwd(const __nv_bfloat16* tbl, const float* bb, const uint8_t* ca, const uint8
 void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tensor cb, torch::Tensor mask, torch::Tensor idx, torch::Tensor chains,
              torch::Tensor dlim, torch::Tensor alim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps) {
   const at::cuda::CUDAGuard guard(tbl.device());
+  TORCH_CHECK(dlim.numel() <= 31 && alim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
   size_t smem = (size_t)NT * C * sizeof(__nv_bfloat16);
   cudaFuncSetAttribute(pg_fwd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -164,15 +183,17 @@ void forward(torch::Tensor tbl, torch::Tensor bb, torch::Tensor ca, torch::Tenso
 // ---------------------------------------------------------------------------------------------------------------------------------------
 // Decoder pair embedding: pair[b,i,j] = M_ij * (T[sep] + T[127 + bin(|ca_i - ca_j|)]),  table [157][256] (127 sequence separations, 30 CA distances).
 // ---------------------------------------------------------------------------------------------------------------------------------------
-__global__ void __launch_bounds__(NW * 32, 1)
+__global__ void __launch_bounds__(NWCA * 32, 1)
 pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const int* idx, const float* dlim, __nv_bfloat16* out, uint4* codes,
           int B, int n, int nd, int ln, float eps) {
   extern __shared__ __align__(16) unsigned char smem[];
   __nv_bfloat16* T = reinterpret_cast<__nv_bfloat16*>(smem);          // [NT_CA][C]
-  for (int k = threadIdx.x; k < NT_CA * C / 8; k += NW * 32) reinterpret_cast<uint4*>(T)[k] = reinterpret_cast<const uint4*>(tbl)[k];
+  __shared__ float dlim_s[32];
+  for (int k = threadIdx.x; k < NT_CA * C / 8; k += NWCA * 32) reinterpret_cast<uint4*>(T)[k] = reinterpret_cast<const uint4*>(tbl)[k];
+  if (threadIdx.x < 32) dlim_s[threadIdx.x] = threadIdx.x < nd ? dlim[threadIdx.x] : 0.f;
   __syncthreads();
   int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
-  for (int row = blockIdx.x * NW + warp; row < B * n; row += gridDim.x * NW) {
+  for (int row = blockIdx.x * NWCA + warp; row < B * n; row += gridDim.x * NWCA) {
     int b = row / n, i = row % n;
     bool mi = mask[b * n + i];
     const float* pi = ca + (size_t)row * 3;
@@ -185,7 +206,7 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
         const float* pj = ca + ((size_t)b * n + j) * 3;
         float dx = xi - pj[0], dy = yi - pj[1], dz = zi - pj[2];
         float d = sqrtf(dx * dx + dy * dy + dz * dz);
-        w0 = (uint32_t)min(max(idx[b * n + i] - idx[b * n + j] + 63, 0), 126) | ((uint32_t)bucket(d, dlim, nd) << 8);
+        w0 = (uint32_t)min(max(idx[b * n + i] - idx[b * n + j] + 63, 0), 126) | ((uint32_t)bucket(d, dlim_s, nd) << 8);
       }
       if (codes != nullptr && j < n) codes[(size_t)row * n + j] = make_uint4(w0 ^ MASKED, 0u, 0u, 0u);
       int cnt = min(32, n - j0);
@@ -196,10 +217,9 @@ pg_fwd_ca(const __nv_bfloat16* tbl, const float* ca, const uint8_t* mask, const 
         for (int e = 0; e < 8; e++) x[e] = 0.f;
         if (!(p0 & MASKED)) {
           auto add = [&](int r) {
-            uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
-            const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-            for (int k = 0; k < 4; k++) { float2 f = __bfloat1622float2(h[k]); x[2 * k] += f.x; x[2 * k + 1] += f.y; }
+            const uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
+            x[0] += bf_lo(u.x); x[1] += bf_hi(u.x); x[2] += bf_lo(u.y); x[3] += bf_hi(u.y);
+            x[4] += bf_lo(u.z); x[5] += bf_hi(u.z); x[6] += bf_lo(u.w); x[7] += bf_hi(u.w);
           };
           add(p0 & 127);
           add(R_CAD + ((p0 >> 8) & 31));
@@ -416,6 +436,176 @@ pg_bwd_mma(const __nv_bfloat16* g, const uint4* codes, long long P, float* tpart
 }
 
 
+
+constexpr int ST3 = 5;
+// the table rows a pair adds to (and the chain value); returns their number
+template <int MODE>
+__device__ __forceinline__ int scatter_rows(const uint4 c, int (&rows)[11], uint32_t& cvb) {
+  int n = 0;
+  cvb = 0;
+  if (c.x & LIVE) {
+    rows[n++] = (int)(c.x & 127u);
+    if (MODE == 0) {
+      if (c.x & F_DIST) {
+#pragma unroll
+        for (int k = 0; k < 4; k++) rows[n++] = R_DIST + 21 * k + (int)((c.x >> (8 + 5 * k)) & 31u);
+      }
+      if (c.x & F_ORI) {
+#pragma unroll
+        for (int k = 0; k < 5; k++) rows[n++] = R_ANG + 21 * k + (int)((c.y >> (5 * k)) & 31u);
+      }
+      cvb = bf16_bits(__uint_as_float(c.z));
+      if (cvb != 0) rows[n++] = R_CHAIN;
+    } else {
+      rows[n++] = R_CAD + (int)((c.x >> 8) & 31u);
+    }
+  }
+  return n;
+}
+__device__ __forceinline__ void st_u16(unsigned addr, unsigned v) { asm volatile("st.shared.u16 [%0], %1;\n" ::"r"(addr), "r"(v)); }
+
+// ---- tensor-core kernel (wgmma) ----------------------------------------------------------------------------------------------------
+// As version 3 (the one-hot operand A scattered into shared memory, B = the gradient tile), but the products are issued as warpgroup MMAs: one wgmma.m64n64k16 per
+// (64 rows, 16 pairs) with both operands read from shared memory through descriptors (A: K-major, B: N-major, both 128-byte swizzled: exactly the layouts the scatter
+// and the cp.async already produce).  One warpgroup per 64 table rows (5 for the encoder table, 3 for the decoder's), 32 fp32 accumulators per thread.
+__device__ __forceinline__ uint64_t wg_desc(unsigned smem_addr, unsigned lbo_bytes, unsigned sbo_bytes) {
+  uint64_t d = 0;
+  d |= (uint64_t)((smem_addr & 0x3FFFFu) >> 4);
+  d |= (uint64_t)((lbo_bytes & 0x3FFFFu) >> 4) << 16;
+  d |= (uint64_t)((sbo_bytes & 0x3FFFFu) >> 4) << 32;
+  d |= (uint64_t)1 << 62;                                   // 128-byte swizzle
+  return d;
+}
+__device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
+template <int N> __device__ __forceinline__ void wg_wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory"); }
+__device__ __forceinline__ void fence_async() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
+__device__ __forceinline__ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\nwgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1, 0, 1;\n}\n"
+               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
+               : "l"(da), "l"(db));
+}
+__device__ __forceinline__ void wg_fence_acc(float (&d)[32]) {
+#pragma unroll
+  for (int i = 0; i < 32; i++) asm volatile("" : "+f"(d[i])::"memory");
+}
+
+template <int MODE> struct M4 {
+  static constexpr int NWG = MODE == 0 ? 5 : 3;                      // warpgroups = 64-row groups
+  static constexpr int NTH = NWG * 128 + 64;                         // + two scatter warps
+};
+
+template <int MODE>
+__global__ void __launch_bounds__(M4<MODE>::NTH, 1)
+pg_bwd_mma4(const __nv_bfloat16* g, const uint4* codes, long long P, float* tpart, int lboA, int sboA, int lboB, int sboB) {
+  constexpr int NWG = M4<MODE>::NWG, NTH4 = M4<MODE>::NTH, SC0 = NWG * 128;
+  constexpr int NTAB = MODE == 0 ? NT : NT_CA;
+  constexpr int NROWS = NWG * 64;
+  extern __shared__ __align__(1024) unsigned char dsm0[];
+  // layout (1024-byte aligned: the hardware swizzle works on address bits): B stages [ST3][8192], A buffers [2][NROWS * 128], codes [ST3][64 * 16]
+  unsigned char* dsm = dsm0 + ((1024u - ((unsigned)__cvta_generic_to_shared(dsm0) & 1023u)) & 1023u);
+  unsigned char* Bs = dsm;
+  unsigned char* Ab = dsm + ST3 * TP * 128;
+  uint4* Cs = reinterpret_cast<uint4*>(dsm + ST3 * TP * 128 + 2 * NROWS * 128);
+  const unsigned as_base = (unsigned)__cvta_generic_to_shared(Ab);
+  const unsigned bs_base = (unsigned)__cvta_generic_to_shared(Bs);
+  const int q = blockIdx.x, t = blockIdx.y, tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, gid = lane >> 2, tig = lane & 3;
+  const long long per = (P + NBLK - 1) / NBLK, p0 = (long long)t * per, p1 = min(P, p0 + per);
+  const int ntiles = p1 > p0 ? (int)((p1 - p0 + TP - 1) / TP) : 0;
+  const bool scat = tid >= SC0;
+  const int wg = tid >> 7;
+
+  for (int k = tid; k < 2 * NROWS * 8; k += NTH4) reinterpret_cast<uint4*>(Ab)[k] = make_uint4(0u, 0u, 0u, 0u);
+  int prev[2][11];
+#pragma unroll
+  for (int b = 0; b < 2; b++)
+#pragma unroll
+    for (int k = 0; k < 11; k++) prev[b][k] = -1;
+  float acc[32];
+#pragma unroll
+  for (int i = 0; i < 32; i++) acc[i] = 0.f;
+
+  auto load_tile = [&](int tile, int stage) {
+    const long long pb = p0 + (long long)tile * TP;
+    for (int c = tid; c < TP * 8; c += NTH4) {
+      int kp = c >> 3, ch8 = c & 7;
+      long long pair = pb + kp;
+      bool pred = pair < p1;
+      const __nv_bfloat16* src = g + (size_t)(pred ? pair : 0) * C + q * 64 + ch8 * 8;
+      cp16(Bs + stage * (TP * 128) + kp * 128 + ((ch8 ^ (kp & 7)) << 4), src, pred);
+    }
+    if (scat) {
+      long long pair = pb + (tid - SC0);
+      bool pred = pair < p1;
+      cp16(&Cs[stage * TP + (tid - SC0)], codes + (pred ? pair : 0), pred);
+    }
+  };
+  auto scatter = [&](int tile, int stage) {
+    if (!scat) return;
+    const int p = tid - SC0, b = tile & 1;
+    const unsigned buf = as_base + b * (NROWS * 128);
+#pragma unroll
+    for (int k = 0; k < 11; k++) {
+      if (prev[b][k] >= 0) { const int r = prev[b][k]; st_u16(buf + r * 128 + (((p >> 3) ^ (r & 7)) << 4) + ((p & 7) << 1), 0u); }
+    }
+    const bool pred = p0 + (long long)tile * TP + p < p1;
+    const uint4 c = pred ? Cs[stage * TP + p] : make_uint4(0u, 0u, 0u, 0u);
+    int rows[11];
+    uint32_t cvb;
+    const int n = scatter_rows<MODE>(c, rows, cvb);
+#pragma unroll
+    for (int k = 0; k < 11; k++) {
+      prev[b][k] = k < n ? rows[k] : -1;
+      if (k < n) { const int r = rows[k]; st_u16(buf + r * 128 + (((p >> 3) ^ (r & 7)) << 4) + ((p & 7) << 1), (MODE == 0 && r == R_CHAIN) ? cvb : 0x3F80u); }
+    }
+    fence_async();
+  };
+
+#pragma unroll
+  for (int s = 0; s < ST3 - 1; s++) {
+    if (s < ntiles) load_tile(s, s);
+    cp_commit();
+  }
+  cp_wait<ST3 - 2>();
+  fence_async();
+  __syncthreads();
+  if (ntiles > 0) scatter(0, 0);
+  for (int kt = 0; kt < ntiles; kt++) {
+    cp_wait<ST3 - 3>();
+    fence_async();
+    if (!scat) wg_wait<0>();                                  // the products of tile kt - 1 are done: its buffers can be rewritten
+    __syncthreads();
+    if (kt + 1 < ntiles) scatter(kt + 1, (kt + 1) % ST3);
+    if (kt + ST3 - 1 < ntiles) load_tile(kt + ST3 - 1, (kt + ST3 - 1) % ST3);
+    cp_commit();
+    if (scat) continue;
+    const int stage = kt % ST3;
+    const unsigned abase = as_base + (kt & 1) * (NROWS * 128) + wg * (64 * 128);
+    const unsigned bbase = bs_base + stage * (TP * 128);
+    wg_fence_acc(acc);
+    wg_fence();
+#pragma unroll
+    for (int ks = 0; ks < 4; ks++) wgmma_m64n64k16(acc, wg_desc(abase + ks * 32, lboA, sboA), wg_desc(bbase + ks * 16 * 128, lboB, sboB));
+    wg_commit();
+    wg_fence_acc(acc);
+  }
+  cp_wait<0>();
+  if (scat) return;
+  wg_wait<0>();
+  wg_fence_acc(acc);
+#pragma unroll
+  for (int nt = 0; nt < 8; nt++) {
+#pragma unroll
+    for (int hi = 0; hi < 2; hi++) {
+      const int r = 64 * wg + 16 * (warp & 3) + gid + 8 * hi;
+      if (r >= NTAB) continue;
+      float2 v = make_float2(acc[4 * nt + 2 * hi], acc[4 * nt + 2 * hi + 1]);
+      *reinterpret_cast<float2*>(tpart + ((size_t)t * NTAB + r) * C + q * 64 + nt * 8 + 2 * tig) = v;
+    }
+  }
+}
+
+
 // ---- LayerNorm backward with the pair recomputed from the codes ---------------------------------------------------------------------------
 // hat = LN(bf16(T[rows])): the pair itself is never stored; dx = rstd * (dh - mean(dh) - hat * mean(dh * hat)) per pair, written as bf16 (zeros for padding).
 template <int MODE>
@@ -425,10 +615,9 @@ __device__ __forceinline__ void gather_rows(const __nv_bfloat16* T, const uint4&
   if (!(cd.x & LIVE)) return;
   const uint32_t w0 = cd.x ^ MASKED, w1 = cd.y;
   auto add = [&](int r, float scale) {
-    uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
-    const __nv_bfloat162* h = reinterpret_cast<const __nv_bfloat162*>(&u);
-#pragma unroll
-    for (int k = 0; k < 4; k++) { float2 f = __bfloat1622float2(h[k]); x[2 * k] += scale * f.x; x[2 * k + 1] += scale * f.y; }
+    const uint4 u = *reinterpret_cast<const uint4*>(T + (size_t)r * C + c0);
+    x[0] += scale * bf_lo(u.x); x[1] += scale * bf_hi(u.x); x[2] += scale * bf_lo(u.y); x[3] += scale * bf_hi(u.y);
+    x[4] += scale * bf_lo(u.z); x[5] += scale * bf_hi(u.z); x[6] += scale * bf_lo(u.w); x[7] += scale * bf_hi(u.w);
   };
   add(w0 & 127, 1.f);
   if (MODE == 0) {
@@ -449,7 +638,70 @@ __device__ __forceinline__ void gather_rows(const __nv_bfloat16* T, const uint4&
   }
 }
 
-template <int MODE>
+// LayerNorm backward of U pairs at once (each a row of 256 channels over a warp, 8 per lane), written stage by stage over the U pairs so that the U independent
+// shuffle reductions overlap.  Per pair the arithmetic and its order are exactly those of the one-pair version: dx = rstd * (dh - mean(dh) - hat * mean(dh * hat)) with
+// hat = LN(bf16(pair)); a dead pair (code without the live bit) gives zeros.
+template <int MODE, int U>
+__device__ __forceinline__ void ln_bwd_group(const __nv_bfloat16* T, const uint4 (&cd)[U], const uint4 (&gv)[U], int c0, float eps, uint4 (&o)[U]) {
+  float x[U][8], g[U][8], mean[U], rstd[U], t[U];
+#pragma unroll
+  for (int u = 0; u < U; u++) {
+    gather_rows<MODE>(T, cd[u], c0, x[u]);
+    const __nv_bfloat162* gh = reinterpret_cast<const __nv_bfloat162*>(&gv[u]);
+#pragma unroll
+    for (int k = 0; k < 4; k++) { float2 f = __bfloat1622float2(gh[k]); g[u][2 * k] = f.x; g[u][2 * k + 1] = f.y; }
+    t[u] = 0.f;
+#pragma unroll
+    for (int e = 0; e < 8; e++) { x[u][e] = __bfloat162float(__float2bfloat16_rn(x[u][e])); t[u] += x[u][e]; }
+  }
+#pragma unroll
+  for (int off = 16; off; off >>= 1)
+#pragma unroll
+    for (int u = 0; u < U; u++) t[u] += __shfl_xor_sync(0xffffffffu, t[u], off);
+#pragma unroll
+  for (int u = 0; u < U; u++) {
+    mean[u] = t[u] * (1.f / C);
+    t[u] = 0.f;
+#pragma unroll
+    for (int e = 0; e < 8; e++) { float d = x[u][e] - mean[u]; t[u] += d * d; }
+  }
+#pragma unroll
+  for (int off = 16; off; off >>= 1)
+#pragma unroll
+    for (int u = 0; u < U; u++) t[u] += __shfl_xor_sync(0xffffffffu, t[u], off);
+  float a[U], bs[U];
+#pragma unroll
+  for (int u = 0; u < U; u++) {
+    rstd[u] = rsqrtf(t[u] * (1.f / C) + eps);
+    a[u] = 0.f; bs[u] = 0.f;
+#pragma unroll
+    for (int e = 0; e < 8; e++) { x[u][e] = (x[u][e] - mean[u]) * rstd[u]; a[u] += g[u][e]; bs[u] += g[u][e] * x[u][e]; }
+  }
+#pragma unroll
+  for (int off = 16; off; off >>= 1)
+#pragma unroll
+    for (int u = 0; u < U; u++) { a[u] += __shfl_xor_sync(0xffffffffu, a[u], off); bs[u] += __shfl_xor_sync(0xffffffffu, bs[u], off); }
+#pragma unroll
+  for (int u = 0; u < U; u++) {
+    const float am = a[u] * (1.f / C), bm = bs[u] * (1.f / C);
+    uint4 r;
+    __nv_bfloat162* oh = reinterpret_cast<__nv_bfloat162*>(&r);
+#pragma unroll
+    for (int k = 0; k < 4; k++)
+      oh[k] = __floats2bfloat162_rn(rstd[u] * (g[u][2 * k] - am - x[u][2 * k] * bm), rstd[u] * (g[u][2 * k + 1] - am - x[u][2 * k + 1] * bm));
+    o[u] = (cd[u].x & LIVE) ? r : make_uint4(0u, 0u, 0u, 0u);
+  }
+}
+
+// Each warp owns pairs p, p + stride, p + 2 stride, ... (stride = 16 warps x grid), UL of them per step.  The loads are pipelined two steps deep: the codes of step
+// k + 2 and the dh rows of step k + 1 (whose codes arrived one step ago, so the dh of dead pairs is never read) are in flight while step k is computed.
+#ifndef UL_G
+#define UL_G 2
+#endif
+#ifndef UL_C
+#define UL_C 3
+#endif
+template <int MODE, int UL>
 __global__ void __launch_bounds__(16 * 32, 1)
 pg_ln_bwd(const __nv_bfloat16* tbl, const uint4* codes, const __nv_bfloat16* dh, __nv_bfloat16* dx, long long P, float eps) {
   constexpr int NTAB = MODE == 0 ? NT : NT_CA;
@@ -459,41 +711,37 @@ pg_ln_bwd(const __nv_bfloat16* tbl, const uint4* codes, const __nv_bfloat16* dh,
   __syncthreads();
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, c0 = lane * 8;
   const long long stride = (long long)gridDim.x * 16;
-  long long p = (long long)blockIdx.x * 16 + warp;
-  uint4 cd = p < P ? codes[p] : make_uint4(0u, 0u, 0u, 0u);
-  uint4 gv = (p < P && (cd.x & LIVE)) ? *reinterpret_cast<const uint4*>(dh + (size_t)p * C + c0) : make_uint4(0u, 0u, 0u, 0u);
-  for (; p < P; p += stride) {
-    const long long pn = p + stride;                                    // the next pair's loads are in flight while this one is computed
-    uint4 cn = pn < P ? codes[pn] : make_uint4(0u, 0u, 0u, 0u);
-    uint4 gn = (pn < P && (cn.x & LIVE)) ? *reinterpret_cast<const uint4*>(dh + (size_t)pn * C + c0) : make_uint4(0u, 0u, 0u, 0u);
-    uint4 o = make_uint4(0u, 0u, 0u, 0u);
-    if (cd.x & LIVE) {
-      float x[8], g[8];
-      gather_rows<MODE>(T, cd, c0, x);
-      const __nv_bfloat162* gh = reinterpret_cast<const __nv_bfloat162*>(&gv);
+  const long long p0 = (long long)blockIdx.x * 16 + warp;
+  auto ldc = [&](long long p) { return p < P ? codes[p] : make_uint4(0u, 0u, 0u, 0u); };
+  auto ldg = [&](long long p, const uint4& cd) { return (p < P && (cd.x & LIVE)) ? *reinterpret_cast<const uint4*>(dh + (size_t)p * C + c0) : make_uint4(0u, 0u, 0u, 0u); };
+  uint4 cA[UL], gA[UL], cB[UL], gB[UL], cC[UL];
 #pragma unroll
-      for (int k = 0; k < 4; k++) { float2 f = __bfloat1622float2(gh[k]); g[2 * k] = f.x; g[2 * k + 1] = f.y; }
-      float s = 0.f;
+  for (int u = 0; u < UL; u++) { cA[u] = ldc(p0 + u * stride); cB[u] = ldc(p0 + (UL + u) * stride); }
 #pragma unroll
-      for (int e = 0; e < 8; e++) { x[e] = __bfloat162float(__float2bfloat16_rn(x[e])); s += x[e]; }
-      const float mean = wsum(s) * (1.f / C);
-      float q = 0.f;
+  for (int u = 0; u < UL; u++) gA[u] = ldg(p0 + u * stride, cA[u]);
+  for (long long p = p0; p < P; p += UL * stride) {
 #pragma unroll
-      for (int e = 0; e < 8; e++) { float d = x[e] - mean; q += d * d; }
-      const float rstd = rsqrtf(wsum(q) * (1.f / C) + eps);
-      float a = 0.f, bsum = 0.f;
+    for (int u = 0; u < UL; u++) gB[u] = ldg(p + (UL + u) * stride, cB[u]);
 #pragma unroll
-      for (int e = 0; e < 8; e++) { x[e] = (x[e] - mean) * rstd; a += g[e]; bsum += g[e] * x[e]; }
-      a = wsum(a) * (1.f / C);
-      bsum = wsum(bsum) * (1.f / C);
-      __nv_bfloat162* oh = reinterpret_cast<__nv_bfloat162*>(&o);
+    for (int u = 0; u < UL; u++) cC[u] = ldc(p + (2 * UL + u) * stride);
+    {
+      uint4 o[UL];
+      bool any = false;
 #pragma unroll
-      for (int k = 0; k < 4; k++)
-        oh[k] = __floats2bfloat162_rn(rstd * (g[2 * k] - a - x[2 * k] * bsum), rstd * (g[2 * k + 1] - a - x[2 * k + 1] * bsum));
+      for (int u = 0; u < UL; u++) any |= (cA[u].x & LIVE) != 0;
+      if (any) ln_bwd_group<MODE, UL>(T, cA, gA, c0, eps, o);
+      else {
+#pragma unroll
+        for (int u = 0; u < UL; u++) o[u] = make_uint4(0u, 0u, 0u, 0u);
+      }
+#pragma unroll
+      for (int u = 0; u < UL; u++) {
+        const long long pu = p + u * stride;
+        if (pu < P) *reinterpret_cast<uint4*>(dx + (size_t)pu * C + c0) = o[u];
+      }
     }
-    *reinterpret_cast<uint4*>(dx + (size_t)p * C + c0) = o;
-    cd = cn;
-    gv = gn;
+#pragma unroll
+    for (int u = 0; u < UL; u++) { cA[u] = cB[u]; gA[u] = gB[u]; cB[u] = cC[u]; }
   }
 }
 
@@ -505,21 +753,23 @@ __global__ void pg_reduce_tbl(const float* tpart, __nv_bfloat16* dtbl, int NTAB)
   dtbl[k] = __float2bfloat16_rn(s);
 }
 
+
 void forward_ca(torch::Tensor tbl, torch::Tensor ca, torch::Tensor mask, torch::Tensor idx, torch::Tensor dlim, torch::Tensor out, torch::Tensor codes, int64_t ln, double eps) {
   const at::cuda::CUDAGuard guard(tbl.device());
+  TORCH_CHECK(dlim.numel() <= 31, "at most 31 bin limits");
   int B = idx.size(0), n = idx.size(1);
   size_t smem = (size_t)NT_CA * C * sizeof(__nv_bfloat16);
   cudaFuncSetAttribute(pg_fwd_ca, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-  int grid = std::min(sms * 2, (B * n + NW - 1) / NW);
-  pg_fwd_ca<<<grid, NW * 32, smem, at::cuda::getCurrentCUDAStream()>>>(
+  int grid = std::min(sms * 2, (B * n + NWCA - 1) / NWCA);
+  pg_fwd_ca<<<grid, NWCA * 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       reinterpret_cast<const __nv_bfloat16*>(tbl.data_ptr<at::BFloat16>()), ca.data_ptr<float>(), mask.data_ptr<uint8_t>(), idx.data_ptr<int>(),
       dlim.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()),
       codes.defined() && codes.numel() > 0 ? reinterpret_cast<uint4*>(codes.data_ptr<int>()) : nullptr, B, n, (int)dlim.numel(), (int)ln, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// mode 0: geometry table [317][256]; mode 1: decoder table [157][256]. impl 1: tensor cores, impl 0: shared-memory read-modify-write.
+// mode 0: geometry table [317][256]; mode 1: decoder table [157][256]. impl 1: tensor cores (pg_bwd_mma2), impl 2: the first tensor-core kernel, impl 0: shared-memory read-modify-write.
 // dtbl bf16 [NTAB][256], tpart fp32 scratch [NBLK][NTAB][256].
 void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::Tensor dtbl, int64_t mode, int64_t impl) {
   const at::cuda::CUDAGuard guard(g.device());
@@ -529,7 +779,16 @@ void backward(torch::Tensor g, torch::Tensor codes, torch::Tensor tpart, torch::
   int ntab = mode == 0 ? NT : NT_CA;
   auto* gp = reinterpret_cast<const __nv_bfloat16*>(g.data_ptr<at::BFloat16>());
   const uint4* cp = reinterpret_cast<const uint4*>(codes.data_ptr<int>());
-  if (impl == 1) {
+  if (impl == 1) {                                          // wgmma
+    const size_t sm4 = (size_t)ST3 * TP * 128 + (size_t)2 * (mode == 0 ? 320 : 192) * 128 + ST3 * TP * 16 + 1024;
+    if (mode == 0) {
+      cudaFuncSetAttribute(pg_bwd_mma4<0>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm4);
+      pg_bwd_mma4<0><<<dim3(4, NBLK), M4<0>::NTH, sm4, st>>>(gp, cp, P, tpart.data_ptr<float>(), 16, 1024, 8192, 1024);
+    } else {
+      cudaFuncSetAttribute(pg_bwd_mma4<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)sm4);
+      pg_bwd_mma4<1><<<dim3(4, NBLK), M4<1>::NTH, sm4, st>>>(gp, cp, P, tpart.data_ptr<float>(), 16, 1024, 8192, 1024);
+    }
+  } else if (impl == 2) {                                   // the first tensor-core kernel (A/B)
     if (mode == 0) pg_bwd_mma<0><<<dim3(4, NBLK), 13 * 32, 0, st>>>(gp, cp, P, tpart.data_ptr<float>());
     else pg_bwd_mma<1><<<dim3(4, NBLK), 5 * 32, 0, st>>>(gp, cp, P, tpart.data_ptr<float>());
   } else {
@@ -559,11 +818,11 @@ void ln_backward(torch::Tensor tbl, torch::Tensor codes, torch::Tensor dh, torch
   const uint4* cp = reinterpret_cast<const uint4*>(codes.data_ptr<int>());
   auto st = at::cuda::getCurrentCUDAStream();
   if (mode == 0) {
-    cudaFuncSetAttribute(pg_ln_bwd<0>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    pg_ln_bwd<0><<<sms, 16 * 32, smem, st>>>(tp, cp, hp, xp, P, (float)eps);
+    cudaFuncSetAttribute(pg_ln_bwd<0, UL_G>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    pg_ln_bwd<0, UL_G><<<sms, 16 * 32, smem, st>>>(tp, cp, hp, xp, P, (float)eps);
   } else {
-    cudaFuncSetAttribute(pg_ln_bwd<1>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
-    pg_ln_bwd<1><<<sms, 16 * 32, smem, st>>>(tp, cp, hp, xp, P, (float)eps);
+    cudaFuncSetAttribute(pg_ln_bwd<1, UL_C>, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
+    pg_ln_bwd<1, UL_C><<<sms, 16 * 32, smem, st>>>(tp, cp, hp, xp, P, (float)eps);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
