@@ -113,6 +113,9 @@ class _Tail(torch.autograd.Function):
 # ---- D = 768, hidden 2 D, bf16, whole 128-row tiles: the Transition family's wgmma kernels (kernels/transition/cuda/wide), which keep a, b and h of the
 # expand GEMM and fuse the SwiGLU backward into the dh GEMM. The tail's squeeze (h Ws^T) is their squeeze kernel with a zero residual (its rounding is the
 # plain GEMM's: bf16(h Ws^T + 0)); the gate and the residual follow in ``sigmul_fwd``.
+# Measured on the ladder shapes (A = 48, bf16): their expand_saved + squeeze 164 + 87 us against cuBLAS + swiglu_fwd + cuBLAS 124 + 61 + 55, their gate_saved
+# 178 us against cuBLAS dh + swiglu_bwd 63 + 98: a net loss of ~10 us, so the row kernels around cuBLAS stay the route; the path is kept for a faster kernel.
+_USE_WIDE = False
 _ZEROS: dict = {}
 
 
@@ -195,7 +198,7 @@ def ct_tail_train(x, cond, wa, wb, ws, wsc, bsc, residual=None):
     any dtype (rounded to the activations' dtype per call; gradients in the weights' dtype). bf16 D = 768 / hidden 1536 on whole 128-row tiles runs the
     Transition family's wgmma expand / dh kernels, everything else the row kernels around cuBLAS."""
     x, cond = x.contiguous(), cond.contiguous()
-    if x.shape[0] % 128 == 0 and wide_supported(x, wa, ws):
+    if _USE_WIDE and x.shape[0] % 128 == 0 and wide_supported(x, wa, ws):
         return _TailWide.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
     return _Tail.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
 

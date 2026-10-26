@@ -118,15 +118,17 @@ void run_ln(const at::Tensor& cond, const at::Tensor& lnw, const at::Tensor& x, 
 }
 
 // ======================================================================================================================== GEMM + gate
-template <bool F32, int HT, bool SAVE_GATE> struct ACfg {
+template <bool F32, int HT, bool SAVE_GATE, bool AR = false> struct ACfg {
   static constexpr int TBK = F32 ? 32 : 64;
   static constexpr int TBN = 2 * HT;
-  static constexpr int F_SA = TBM * 128, F_SB = TBN * 128, F_ST = F_SA + F_SB;
+  static constexpr int KBT = 6;                                            // AR: the resident A tile is [128 rows] x 6 K slabs (NC = 384 bf16)
+  static constexpr int A_RES = AR ? KBT * TBM * 128 : 0;                  // AR (A-resident): one row block of LN(cond) stays in shared memory while the CTA walks all the column tiles
+  static constexpr int F_SA = TBM * 128, F_SB = TBN * 128, F_ST = AR ? F_SB : F_SA + F_SB;
   static constexpr int STGW = 64 * HT * (F32 ? 4 : 2);
   static constexpr int NSTG = SAVE_GATE ? 2 : 1;                           // staging tiles per consumer warpgroup: y (in place over x), gate
-  static constexpr int NST0 = (225 * 1024 - 2 * NSTG * STGW - 1024) / F_ST;
+  static constexpr int NST0 = (225 * 1024 - A_RES - 2 * NSTG * STGW - 1024) / F_ST;
   static constexpr int NST = NST0 > 6 ? 6 : NST0;
-  static constexpr int STG = NST * F_ST, BAR = STG + 2 * NSTG * STGW, SMEM = BAR + 256;
+  static constexpr int STG = A_RES + NST * F_ST, BAR = STG + 2 * NSTG * STGW, SMEM = BAR + 256;
   static_assert(SMEM + 1024 <= 232448, "shared memory budget");
 };
 template <bool F32, int HT> TMN_DEVI void mma_a(float (&acc)[HT], uint64_t a, uint64_t b) {
@@ -134,13 +136,17 @@ template <bool F32, int HT> TMN_DEVI void mma_a(float (&acc)[HT], uint64_t a, ui
   else { if constexpr (HT == 128) awg_bf16_n256(acc, a, b); else awg_bf16_n128(acc, a, b); }
 }
 
-template <bool F32, int HT, bool SAVE_GATE, bool RNA>
+// AR (A-resident, bf16, NC = 384): a CTA owns a 128-row block of LN(cond) -- loaded once into shared memory -- and walks all the column tiles of it, so
+// only the weight slabs stream through the ring. The small-K GEMM is bound by L2 -> SM traffic, and re-reading the A tile for every column tile was half
+// of it (and the row-block-major walk is how the tile's statistics and bias stay in registers).
+template <bool F32, int HT, bool SAVE_GATE, bool RNA, bool AR>
 __global__ void __launch_bounds__(384, 1)
 adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB, const __grid_constant__ CUtensorMap mX,
              const __grid_constant__ CUtensorMap mY, const __grid_constant__ CUtensorMap mG, const float* __restrict__ bs,
              const float2* __restrict__ st, int M, int NC, int NX) {
-  using C = ACfg<F32, HT, SAVE_GATE>;
-  constexpr int NSTAGE = C::NST, TBK = C::TBK, TBN = C::TBN, F_SA = C::F_SA, F_ST = C::F_ST, NQ = HT / (F32 ? 32 : 64);
+  using C = ACfg<F32, HT, SAVE_GATE, AR>;
+  constexpr int NSTAGE = C::NST, TBK = C::TBK, TBN = C::TBN, F_SA = C::F_SA, F_ST = C::F_ST, NQ = HT / (F32 ? 32 : 64), A_RES = C::A_RES;
+  constexpr int F_B = AR ? A_RES : F_SA;                    // byte offset of the weight tile inside a ring stage (AR: the stage holds it alone, after the A tile)
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   const uint32_t su = smem_u32(sm);
@@ -149,10 +155,20 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
   uint64_t* empty = full + NSTAGE;
   uint64_t* xfull = empty + NSTAGE;                        // [2]: the x tile of each consumer warpgroup has landed
   uint64_t* xfree = xfull + 2;                             // [2]: that warpgroup's staging tiles may be refilled
+  uint64_t* afull = xfree + 2;                             // AR: the A tile of the row block has landed
+  uint64_t* afree = afull + 1;                             // AR: both consumer warpgroups are done with it
   const int MT = (M + TBM - 1) / TBM, NT = NX / HT, KB = NC / TBK, ntiles = MT * NT;
+  // this CTA's tiles: AR: its row blocks, each with all NT column tiles; otherwise every gridDim.x-th tile, row block fastest
+  const int nrb = AR ? (blockIdx.x < MT ? (MT - blockIdx.x + gridDim.x - 1) / gridDim.x : 0) : 0;
+  const int nitems = AR ? nrb * NT : (blockIdx.x < ntiles ? (ntiles - blockIdx.x + gridDim.x - 1) / gridDim.x : 0);
+  auto tile_of = [&](int i, int& m0, int& nt) {
+    if constexpr (AR) { m0 = (blockIdx.x + (i / NT) * gridDim.x) * TBM; nt = i % NT; }
+    else { const int t = blockIdx.x + i * gridDim.x; m0 = (t % MT) * TBM; nt = t / MT; }
+  };
   if (tid == 0) {
     for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 2); }
     for (int c = 0; c < 2; ++c) { mbar_init(xfull + c, 1); mbar_init(xfree + c, 1); }
+    mbar_init(afull, 1); mbar_init(afree, 2);
     fence_barrier_init();
   }
   __syncthreads();
@@ -162,8 +178,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
     setmaxnreg_dec<40>();
     if (tid != 0) return;
     tma_prefetch_desc(&mA); tma_prefetch_desc(&mB);
-    uint32_t it = 0, tl = 0;
-    bool first = true;
+    uint32_t it = 0;
     auto load_x = [&](int m0, int n0, uint32_t tl_) {
       for (int c = 0; c < 2; ++c) {
         if (tl_ > 0) mbar_wait(xfree + c, (tl_ - 1) & 1u);
@@ -172,32 +187,41 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         for (int q = 0; q < NQ; ++q) tma_load_2d(xs + q * 8192, &mX, xfull + c, n0 + q * (F32 ? 32 : 64), m0 + 64 * c);
       }
     };
-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++tl) {
-      const int m0 = (t % MT) * TBM, nt = t / MT, n0 = nt * HT;
+    auto load_a_res = [&](int m0, uint32_t rbl) {            // AR: the row block's A tile, once the consumers are done with the previous one
+      if (rbl > 0) mbar_wait(afree, (rbl - 1) & 1u);
+      mbar_arrive_expect_tx(afull, A_RES);
+      for (int kb = 0; kb < KB; ++kb) tma_load_2d(sm + kb * F_SA, &mA, afull, kb * TBK, m0);
+    };
+    for (int i = 0; i < nitems; ++i) {
+      int m0, nt;
+      tile_of(i, m0, nt);
+      const int n0 = nt * HT;
       int kb0 = 0;
-      if (first) {
-        first = false;
+      if (i == 0) {                                       // weights first, then the activations once the predecessor is done
         const int P = KB < NSTAGE ? KB : NSTAGE;
         for (int kb = 0; kb < P; ++kb) {
-          mbar_arrive_expect_tx(full + kb, F_ST);
-          tma_load_2d(sm + kb * F_ST + F_SA, &mB, full + kb, kb * TBK, n0);
-          tma_load_2d(sm + kb * F_ST + F_SA + HT * 128, &mB, full + kb, kb * TBK, NX + n0);
+          mbar_arrive_expect_tx(full + kb, AR ? C::F_SB : F_ST);
+          tma_load_2d(sm + (AR ? A_RES : 0) + kb * F_ST + (AR ? 0 : F_SA), &mB, full + kb, kb * TBK, n0);
+          tma_load_2d(sm + (AR ? A_RES : 0) + kb * F_ST + (AR ? 0 : F_SA) + HT * 128, &mB, full + kb, kb * TBK, NX + n0);
         }
         pdl_wait();
         TRACE(1);
-        load_x(m0, n0, tl);
-        for (int kb = 0; kb < P; ++kb) tma_load_2d(sm + kb * F_ST, &mA, full + kb, kb * TBK, m0);
+        if constexpr (AR) load_a_res(m0, 0);
+        load_x(m0, n0, 0);
+        if constexpr (!AR) for (int kb = 0; kb < P; ++kb) tma_load_2d(sm + kb * F_ST, &mA, full + kb, kb * TBK, m0);
         it = P; kb0 = P;
       } else {
-        load_x(m0, n0, tl);
+        if constexpr (AR) { if (nt == 0) load_a_res(m0, (uint32_t)(i / NT)); }
+        load_x(m0, n0, (uint32_t)i);
       }
       for (int kb = kb0; kb < KB; ++kb, ++it) {
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
-        mbar_arrive_expect_tx(full + s, F_ST);
-        tma_load_2d(sm + s * F_ST, &mA, full + s, kb * TBK, m0);
-        tma_load_2d(sm + s * F_ST + F_SA, &mB, full + s, kb * TBK, n0);
-        tma_load_2d(sm + s * F_ST + F_SA + HT * 128, &mB, full + s, kb * TBK, NX + n0);
+        uint8_t* stage = sm + (AR ? A_RES : 0) + s * F_ST;
+        mbar_arrive_expect_tx(full + s, AR ? C::F_SB : F_ST);
+        if constexpr (!AR) tma_load_2d(stage, &mA, full + s, kb * TBK, m0);
+        tma_load_2d(stage + (AR ? 0 : F_SA), &mB, full + s, kb * TBK, n0);
+        tma_load_2d(stage + (AR ? 0 : F_SA) + HT * 128, &mB, full + s, kb * TBK, NX + n0);
       }
     }
     return;
@@ -206,10 +230,12 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
   const int cw = wg - 1;
   uint8_t* stg = sm + C::STG + cw * C::NSTG * C::STGW;    // y (over x)
   uint8_t* gst = stg + C::STGW;                           // gate (SAVE_GATE)
-  uint32_t it = 0, tl = 0;
-  for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++tl) {
+  uint32_t it = 0;
+  for (int tl = 0; tl < nitems; ++tl) {
     if (tid == 128) TRACE_TILE(tl, 0);
-    const int m0 = (t % MT) * TBM, nt = t / MT, n0 = nt * HT;
+    int m0, nt;
+    tile_of(tl, m0, nt);
+    const int n0 = nt * HT;
     // the statistics are the predecessor's (ln_rows) output: wait for it, then keep them and the scale bias in registers before the main loop
     // (a global load inside the epilogue, behind its shared-memory asm statements, is a full memory latency per use)
     pdl_wait();
@@ -219,6 +245,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
     float2 bv[HT / 8];
 #pragma unroll
     for (int g = 0; g < HT / 8; ++g) bv[g] = *reinterpret_cast<const float2*>(bs + n0 + 8 * g + 2 * (lane & 3));
+    if constexpr (AR) { if (nt == 0) mbar_wait(afull, (uint32_t)(tl / NT) & 1u); }
     float acc[HT];
 #pragma unroll
     for (int e = 0; e < HT; ++e) acc[e] = 0.f;
@@ -228,7 +255,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       mbar_wait(full + s, (it / NSTAGE) & 1u);
       if (tid == 128 && it == 0) TRACE(2);
       if (tid == 128 && kb == 0) TRACE_TILE(tl, 1);
-      const uint32_t a0 = su + s * F_ST + cw * 8192, b0 = su + s * F_ST + F_SA;
+      const uint32_t a0 = su + (AR ? kb * F_SA : s * F_ST) + cw * 8192, b0 = su + (AR ? A_RES + s * F_ST : s * F_ST + F_SA);
       fence_regs(acc); wgmma_fence();
 #pragma unroll
       for (int ks = 0; ks < 4; ++ks) mma_a<F32, HT>(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
@@ -240,7 +267,8 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
     if (tid == 128 && tl == 0) TRACE(3);
     if (tid == 128) TRACE_TILE(tl, 2);
     if (wtid == 0) mbar_arrive(empty + prev);
-    mbar_wait(xfull + cw, tl & 1u);
+    if constexpr (AR) { if (nt == NT - 1 && wtid == 0) mbar_arrive(afree); }
+    mbar_wait(xfull + cw, (uint32_t)tl & 1u);
     if (tid == 128 && tl == 0) TRACE(4);
     if (tid == 128) TRACE_TILE(tl, 3);
     if constexpr (SAVE_GATE) {                                // the gate staging: free once the previous tile's store has read it
@@ -312,18 +340,19 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
   if (tid == 128) { TRACE(8); TRACE_T(15); }
 }
 
-template <bool F32, int HT, bool SG, bool RNA>
+template <bool F32, int HT, bool SG, bool RNA, bool AR>
 void run_gemm(const at::Tensor& aff, const at::Tensor& wp, const at::Tensor& bs, const at::Tensor& x, const at::Tensor& st,
               const at::Tensor& y, const at::Tensor* gate, int sms, bool pdl) {
-  using C = ACfg<F32, HT, SG>;
+  using C = ACfg<F32, HT, SG, AR>;
   const int64_t M = x.size(0), NX = x.size(1), NC = aff.size(1);
+  TORCH_CHECK(!AR || NC == C::KBT * C::TBK, "the A-resident kernel takes NC = 384 (bf16)");
   TORCH_CHECK(NC % C::TBK == 0 && NX % HT == 0, "shapes: NC % (64 bf16 / 32 fp32), NX % HT");
   const int bc = F32 ? 32 : 64;
   const auto mA = map2d(aff.data_ptr(), F32, M, NC, aff.stride(0), C::TBK, TBM), mB = map2d(wp.data_ptr(), F32, 2 * NX, NC, NC, C::TBK, HT),
              mX = map2d(x.data_ptr(), F32, M, NX, x.stride(0), bc, 64), mY = map2d(y.data_ptr(), F32, M, NX, NX, bc, 64),
              mG = map2d(SG ? gate->data_ptr() : y.data_ptr(), F32, M, NX, 2 * NX, bc, 64);
-  const int tiles = (int)(((M + TBM - 1) / TBM) * (NX / HT));
-  auto k = adaln_gemm_k<F32, HT, SG, RNA>;
+  const int tiles = (int)(((M + TBM - 1) / TBM) * (AR ? 1 : NX / HT));
+  auto k = adaln_gemm_k<F32, HT, SG, RNA, AR>;
   cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
   launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mA, mB, mX, mY, mG, (const float*)bs.data_ptr(), (const float2*)st.data_ptr(), (int)M, (int)NC, (int)NX);
 }
@@ -347,7 +376,7 @@ void ln_rows(torch::Tensor cond, torch::Tensor lnw, torch::Tensor x, torch::Tens
 // aff [M, NC], wp [2 NX, NC] packed per 2 HT rows (HT rows of Wscale, then the same HT rows of Wbias), bs [NX] fp32 (scale bias), x [M, NX],
 // mean / rstd [M] fp32, y [M, NX], gate [M, NX] or undefined (training); rna: y rounded to the TF32 grid (fp32 only: the next GEMM reads it)
 void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Tensor x, torch::Tensor st, torch::Tensor y,
-                c10::optional<torch::Tensor> gate, int64_t sms, int64_t ht, bool rna, bool pdl) {
+                c10::optional<torch::Tensor> gate, int64_t sms, int64_t ht, bool rna, bool pdl, bool ar) {
   const auto dt = x.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && aff.scalar_type() == dt && wp.scalar_type() == dt && y.scalar_type() == dt &&
               bs.scalar_type() == torch::kFloat32 && st.scalar_type() == torch::kFloat32 && st.size(-1) == 2, "dtypes");
@@ -358,12 +387,13 @@ void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Te
   TORCH_CHECK(ht == 128 || ht == 64, "ht: 128 or 64");
   const bool f32 = dt == torch::kFloat32, sg = gate.has_value();
   const at::Tensor* gp = sg ? &*gate : nullptr;
-#define AG(F, H, S, R) run_gemm<F, H, S, R>(aff, wp, bs, x, st, y, gp, sms, pdl)
+#define AG(F, H, S, R) run_gemm<F, H, S, R, false>(aff, wp, bs, x, st, y, gp, sms, pdl)
   if (f32) {
     if (ht == 64) { if (sg) { if (rna) AG(true, 64, true, true); else AG(true, 64, true, false); } else { if (rna) AG(true, 64, false, true); else AG(true, 64, false, false); } }
     else { if (sg) { if (rna) AG(true, 128, true, true); else AG(true, 128, true, false); } else { if (rna) AG(true, 128, false, true); else AG(true, 128, false, false); } }
   } else {
-    if (ht == 64) { if (sg) AG(false, 64, true, false); else AG(false, 64, false, false); }
+    if (ht == 64 && ar) { if (sg) run_gemm<false, 64, true, false, true>(aff, wp, bs, x, st, y, gp, sms, pdl); else run_gemm<false, 64, false, false, true>(aff, wp, bs, x, st, y, gp, sms, pdl); }
+    else if (ht == 64) { if (sg) AG(false, 64, true, false); else AG(false, 64, false, false); }
     else { if (sg) AG(false, 128, true, false); else AG(false, 128, false, false); }
   }
 #undef AG

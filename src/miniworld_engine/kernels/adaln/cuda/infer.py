@@ -121,7 +121,7 @@ def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, wc: torch.Ten
     st = torch.empty(m, 2, device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
     e.ln_rows(cond, lnw, x, aff, st, None, eps_cond, eps_x)
-    e.adaln_gemm(aff, wc, bs, x, st, y, None, num_sms(x.device), ht, rna, True)
+    e.adaln_gemm(aff, wc, bs, x, st, y, None, num_sms(x.device), ht, rna, True, False)
     return y
 
 
@@ -159,8 +159,13 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     stc = torch.empty(m, 2, device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
     sb = torch.empty(m, 2 * nx, device=x.device, dtype=x.dtype)
+    mode = os.environ.get("ADALN_MODE", "h128")   # measured (M = 18432 / 36864 / 49152, bf16): 128-column tiles 68 / 153 / 194 us, 64-column 69 / 160 / 239, A-resident 112 / 183 / 199
+    ar = x.dtype == torch.bfloat16 and cond.shape[1] == 384 and nx % 64 == 0 and mode == "ar"   # A-resident row blocks (see adaln_sm90.cu)
+    if mode == "h64": ht = 64
+    elif mode == "h128": ht = 128
+    elif ar: ht = 64
     e.ln_rows(cond, lnw, x, aff, stx, stc, eps_cond, eps_x)
-    e.adaln_gemm(aff, wc, bs, x, stx, y, sb, num_sms(x.device), ht, False, True)
+    e.adaln_gemm(aff, wc, bs, x, stx, y, sb, num_sms(x.device), ht, False, True, ar)
     return y, aff, stc, stx, sb
 
 
