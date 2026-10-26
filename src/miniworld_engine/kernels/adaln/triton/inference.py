@@ -372,6 +372,34 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
     return y
 
 
+def _cond_affine_stats_saved_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
+    m = cond.shape[0]
+    f = lambda: cond.new_empty((m,), dtype=torch.float32)   # noqa: E731
+    return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype), f(), f(), f(), f())
+
+
+@opaque(fake=_cond_affine_stats_saved_fake, name="adaln_cond_affine_stats_saved")
+def _cond_affine_stats_saved(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: torch.Tensor, eps_x: float,
+                             out_dtype: torch.dtype | None = None, shape_key: int | None = None,
+                             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``_cond_affine_stats`` for the training forward: (cond_aff, rstd_x, c1, mean_c, rstd_c) -- the mean and rstd of LN(cond) are what its backward reads."""
+    M, N = cond.shape
+    N2 = x.shape[1]
+    if shape_key is None:
+        raise ValueError("shape_key is required here: compute it at the caller that still holds the pre-flatten shape")
+    aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
+    f = lambda: torch.empty(M, device=cond.device, dtype=torch.float32)   # noqa: E731
+    rstd, c1, mean_c, rstd_c = f(), f(), f(), f()
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    _ln_kernel[grid](
+        cond, aff, lnw, M, int(N), eps,
+        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
+        x, rstd, c1, int(N2), eps_x, x.stride(0),
+        HAS_W=True, shape_key=pack(shape_key, N=N, N2=N2), HAS_STATS=True, MC=mean_c, RC=rstd_c, SAVE_C=True,
+    )
+    return aff, rstd, c1, mean_c, rstd_c
+
+
 def adaln_inference_materialize(
     x: torch.Tensor,
     cond: torch.Tensor,

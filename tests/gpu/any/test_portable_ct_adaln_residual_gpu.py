@@ -102,3 +102,32 @@ def test_cached_inference_casts_follow_an_in_place_weight_update(make):
             want = ref(x, c)
     assert not torch.equal(before, after), "the weight update was not seen (a stale cached cast)"
     assert rel(after, want) <= 2.5e-2, rel(after, want)
+
+
+def test_bias_only_attention_weights_are_kept_while_the_pair_is_unchanged():
+    """The softmax of the pair bias is kept per (pair, mask, weights) in inference and follows an in-place update of the pair or of a weight."""
+    from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
+
+    torch.manual_seed(0)
+    blk = BiasOnlyDiTBlock(256, 128, 64, 8, implementation=I.MINIWORLD).to(DEV)
+    with torch.no_grad():
+        for p in blk.parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else 0.1 * torch.randn_like(p))
+    ref = BiasOnlyDiTBlock(256, 128, 64, 8, implementation=I.PYTORCH).to(DEV)
+    ref.load_state_dict(blk.state_dict())
+    g = torch.Generator(device=DEV).manual_seed(1)
+    single = torch.randn(2, 1, 96, 256, device=DEV, generator=g)
+    cond = torch.randn(2, 1, 96, 128, device=DEV, generator=g)
+    pair = torch.randn(1, 96, 96, 64, device=DEV, generator=g)
+    mask = torch.rand(1, 96, device=DEV, generator=g) > 0.1
+    with torch.no_grad():
+        first, again = blk(single, cond, pair, mask), blk(single, cond, pair, mask)
+        assert torch.equal(first, again)
+        assert rel(first, ref(single, cond, pair, mask)) <= 6e-3
+        pair.mul_(1.7)
+        after_pair = blk(single, cond, pair, mask)
+        assert not torch.equal(first, after_pair), "an in-place update of the pair was not seen (a stale attention)"
+        assert rel(after_pair, ref(single, cond, pair, mask)) <= 6e-3
+        blk.attention.to_bias.weight.mul_(1.5)
+        ref.attention.to_bias.weight.mul_(1.5)
+        assert rel(blk(single, cond, pair, mask), ref(single, cond, pair, mask)) <= 6e-3

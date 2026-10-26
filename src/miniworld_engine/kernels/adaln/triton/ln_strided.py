@@ -55,7 +55,7 @@ from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, p
 def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
               X2, R2, C2, N2, eps2, sx20,
               HAS_W: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-              shape_key, HAS_STATS: tl.constexpr = False):
+              shape_key, HAS_STATS: tl.constexpr = False, MC=None, RC=None, SAVE_C: tl.constexpr = False):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -80,6 +80,9 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
         rstd = 1.0 / tl.sqrt(var + eps)
+        if SAVE_C:   # the backward of LN(cond) needs its mean and rstd
+            tl.store(MC + rm, mean, mask=rmask)
+            tl.store(RC + rm, rstd, mask=rmask)
         xn = xc * rstd[:, None]
         if HAS_W:
             w = tl.load(W + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
@@ -97,6 +100,9 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
         mean = s / N
         var = ss / N - mean * mean
         rstd = 1.0 / tl.sqrt(var + eps)
+        if SAVE_C:
+            tl.store(MC + rm, mean, mask=rmask)
+            tl.store(RC + rm, rstd, mask=rmask)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N

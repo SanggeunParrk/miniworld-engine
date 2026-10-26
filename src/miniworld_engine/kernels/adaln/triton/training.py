@@ -38,6 +38,7 @@ from ...layernorm_linear.triton.te_style import (
 )
 from ..._tiles import tile_grid, tile_order
 from ...layernorm_linear.triton.stats import stats_triton
+from .inference import _cond_affine_stats_saved
 
 # Both axes are tuned tiles for the two row-wise kernels below. BLOCK_N used to arrive as
 # next_pow2(NX) from the launcher — the whole row, a constant the tuner never saw, which is also
@@ -555,7 +556,7 @@ def set_dgrad_triton(flag) -> None:
 def _adaln_fwd_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y, Gate,
     M, NX: tl.constexpr, NC: tl.constexpr,
-    scn0, sw0, sbw0, sx0, sy0, sg0,
+    scn0, sw0, sw1, sbw0, sbw1, sx0, sy0, sg0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
 ):
@@ -584,9 +585,9 @@ def _adaln_fwd_gate_kernel(
         kmask = kc < NC
         a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
                     mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :],
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
-        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :],
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
         scale += tl.dot(a, w_s, out_dtype=tl.float32)
         bias += tl.dot(a, w_b, out_dtype=tl.float32)
@@ -626,7 +627,7 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
     _adaln_fwd_gate_kernel[grid](
         cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y, gate,
         M, int(NX), int(NC),
-        cond_n.stride(0), scale_wt.stride(0), bias_wt.stride(0), x.stride(0),
+        cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1), x.stride(0),
         y.stride(0), gate.stride(0),
         shape_key=pack(shape_key, NX=NX, NC=NC),
     )
@@ -684,10 +685,6 @@ class AdaLNTrainFn(torch.autograd.Function):
         if cond2d.stride(-1) != 1:
             cond2d = cond2d.contiguous()
 
-        beta0 = scale_bias.new_zeros(nc)
-        cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
-                                                   shape_key=both_key(rows_of(orig_cond_shape)))
-
         ak = atom_key(length_of(orig_x_shape))
         # FORWARD backend (see `_FWD_MODE`): `_pick_fwd` routes the token width to the fused
         # GEMM+gate and the atom width to the sb-GEMM + epilogue; `_FWD_MODE` overrides for A/B.
@@ -701,11 +698,14 @@ class AdaLNTrainFn(torch.autograd.Function):
         if mode == "fused" and not tf32_ok:
             mode = "cublas"
         if mode == "fused":
-            rstd_x, c1 = stats_triton(x2d, eps_x, shape_key=ak)
-            y, gate = _adaln_fwd_gate(cond_aff, scale_weight.t().contiguous(), scale_bias,
-                                      bias_weight.t().contiguous(), x2d, rstd_x, c1, shape_key=ak)
+            # LN(cond) (with its saved mean / rstd) and the statistics of x: one launch; the weights are read in place as (NC, NX) views
+            cond_aff, rstd_x, c1, mean_c, rstd_c = _cond_affine_stats_saved(cond2d, cond_ln_weight, eps_cond, x2d, eps_x, shape_key=ak)
+            y, gate = _adaln_fwd_gate(cond_aff, scale_weight.t(), scale_bias, bias_weight.t(), x2d, rstd_x, c1, shape_key=ak)
             mean_x = c1 / rstd_x   # for the backward; c1 = mean*rstd. (M,) elementwise.
         else:
+            beta0 = scale_bias.new_zeros(nc)
+            cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
+                                                       shape_key=both_key(rows_of(orig_cond_shape)))
             w_cat = torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
             if ctx.master:
                 saved_wcat = w_cat

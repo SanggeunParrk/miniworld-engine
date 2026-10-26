@@ -164,3 +164,4 @@ cond_transition_squeeze_gate_triton,HAS_RES,"optional residual add in the epilog
 layernorm_fwd_strided_triton,HAS_STATS,"keyed through shape_key: the launcher with HAS_STATS packs N2 (the width of the second reduction) into shape_key, the plain launcher does not, so the two variants never share an entry"
 adaln_bwd_pre_dx_triton,HAS_DRES,"optional gradient added to dx in the epilogue (one extra (BM,BK) load per tile of a memory-bound kernel); tile config is the same either way"
 gated_projection_gate_flat_triton,HAS_RES,"optional residual added in the elementwise pass (one extra load of a memory-bound kernel); BLOCK_E tuned for the sum is the same"
+layernorm_fwd_strided_triton,SAVE_C,"flag that stores the mean and rstd of the first reduction (the training forward needs them for the backward); the schedule is the same either way and the variant is keyed through N2 in shape_key"
