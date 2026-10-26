@@ -106,3 +106,17 @@ The user also asked for every near-miss (ratio >= 0.95) to become a clear win (<
 `tr_fp32_D256` training 1.033 (a violation), plus the cuda/portable tie of `tr_fp32_D128` inference. Where the time goes at D768 training (ms, graph): LN 0.17, expand with
 a/b stores ~3.3, squeeze 1.05, dh-gate ~2.4, three cuBLAS GEMMs 4.6 (the same ones PyTorch runs), LN backward 0.5. The Triton persistent kernels do not overlap epilogue
 stores with the next tile's loads (a store-only probe of the dh kernel ran at 1.4 ms against 2.4 with the a/b reads); the remaining margin needs a warp-specialised kernel.
+
+## Follow-up attempts (2026-10-26), none adopted
+
+Targets: every ratio <= 0.95; open rows are listed above. Tried, measured on H100, reverted:
+
+* Exhaustive tile / warps / stages / GROUP_M sweeps (BM 64-256, BN 64-256, BK 32/64, stages 2-5, 1/4/16) of the expand+AB, squeeze and saved-halves backward kernels at
+  D768 L384: best 2.459 / 1.068 / 2.328 ms, the same configs the 24-row default sets already hold. The tile space is exhausted; the gap is the epilogue, not the schedule.
+* `warp_specialize=True` (with and without `flatten`) on the expand and backward persistent loops: 0-1 % (2.346 vs 2.386 ms expand), the backward did not improve.
+* fp32 D256 training: backward that recomputes the halves instead of reading them: 5.20 ms against 5.10 (saved) and 4.93 (PyTorch); at D128 it is 1.745 against 1.909 (D128
+  already passes). Not adopted.
+* CUDA `tr_fp32_D128` inference (generic sm90a, TF32): per-kernel profile at L768 is swiglu GEMM 0.795 ms, squeeze GEMM 0.761 ms, LayerNorm 0.197 ms. The squeeze is bound by
+  the fp32 `h` (M x 512 x 4 B = 1.2 GB written and read back). Walking the rows in 4096-16384-row chunks so `h` stays in L2 made it slower (2.2-2.9 ms: smaller launches plus an
+  output copy). What would win is a TF32-equivalent half-width `h` (fp16 operands for the squeeze, same 10-bit mantissa; ~0.6 ms saved) -- a new mixed-type instantiation of the
+  GEMM template with its own epilogue and TMA maps, not attempted here.
