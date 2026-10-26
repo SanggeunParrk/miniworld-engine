@@ -8,6 +8,7 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 #include "ct_wgmma.cuh"
+#include "../../adaln/cuda/row_math.cuh"
 #include <torch/extension.h>
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
@@ -80,7 +81,7 @@ TMN_DEVI void tma_store_2d(const CUtensorMap* map, const void* src, int c0, int 
 }
 // round an fp32 to the TF32 grid, to nearest (ties away): the value the tensor cores then read exactly (a TMA-fed fp32 operand is truncated)
 TMN_DEVI float tf32_rna(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
-TMN_DEVI float sigmoid_exact(float a) { return rcpf(1.f + __expf(-a)); }   // ex2.approx + rcp.approx: ~1 ulp
+TMN_DEVI float sigmoid_exact(float a) { return rowmath::sigmoid_fast(a); }   // ex2.approx + rcp.approx: ~1 ulp (shared with the row kernels: adaln/cuda/row_math.cuh)
 
 // ---------------------------------------------------------------------------------------------------- host: TMA descriptors
 using EncodeTiled = CUresult (*)(CUtensorMap*, CUtensorMapDataType, cuuint32_t, void*, const cuuint64_t*, const cuuint64_t*,

@@ -40,11 +40,7 @@ TMN_DEVI void load_row(const T<F32>* row, int N, int lane, float (&v)[MAXCH][vec
   }
 }
 
-TMN_DEVI float warp_sum(float s) {
-#pragma unroll
-  for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
-  return s;
-}
+TMN_DEVI float warp_sum(float s) { return rowmath::warp_sum(s); }
 
 // mean and rstd of a row held in ``v`` (two-pass, centred, fp32)
 template <bool F32, int MAXCH>
@@ -288,7 +284,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
           const float2 xv = *p;
           const float mn = rbk ? meanB : meanA, rs = rbk ? rstdB : rstdA;
           const float g0 = sigmoid_exact(acc[ia] + bb.x), g1 = sigmoid_exact(acc[ia + 1] + bb.y);
-          float y0 = g0 * ((xv.x - mn) * rs) + acc[ib], y1 = g1 * ((xv.y - mn) * rs) + acc[ib + 1];
+          float y0 = rowmath::modulate(xv.x, mn, rs, g0, acc[ib]), y1 = rowmath::modulate(xv.y, mn, rs, g1, acc[ib + 1]);
           if (RNA) { y0 = tf32_rna(y0); y1 = tf32_rna(y1); }
           *p = make_float2(y0, y1);
           if constexpr (SAVE_GATE) *reinterpret_cast<float2*>(gst + off) = make_float2(acc[ia] + bb.x, acc[ia + 1] + bb.y);
@@ -313,7 +309,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
           const int ia = 4 * g + e, ib = 4 * (g + HT / 8) + e;
           const float mn = (e >> 1) ? meanB : meanA, rs = (e >> 1) ? rstdB : rstdA;
           pre[q] = acc[ia] + bcol; gt[q] = sigmoid_exact(pre[q]);
-          y[q] = gt[q] * ((xs[q] - mn) * rs) + acc[ib];
+          y[q] = rowmath::modulate(xs[q], mn, rs, gt[q], acc[ib]);
         }
         stsm_x4(smem_u32(stg) + off, pack_bf16(y[0], y[1]), pack_bf16(y[2], y[3]), pack_bf16(y[4], y[5]), pack_bf16(y[6], y[7]));
         if constexpr (SAVE_GATE)

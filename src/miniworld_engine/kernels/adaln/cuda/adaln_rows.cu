@@ -14,18 +14,15 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+#include "row_math.cuh"
 
 namespace {
 using bf = __nv_bfloat16;
 using bf2 = __nv_bfloat162;
 constexpr int WPB = 8;  // warps per block
 
-__device__ __forceinline__ float wsum(float v) {
-#pragma unroll
-  for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
-__device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
+__device__ __forceinline__ float wsum(float v) { return rowmath::warp_sum(v); }
+__device__ __forceinline__ float sigm(float x) { return rowmath::sigmoid(x); }
 
 // a row of N bf16 held as N / 32 floats per lane: element 64 k + 2 lane + {0, 1} is v[2 k + {0, 1}]
 __device__ __forceinline__ float2 ld2(const bf* p) { return __bfloat1622float2(*reinterpret_cast<const bf2*>(p)); }
@@ -89,7 +86,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
   ld_row<N>(SB + row * 2 * N + N, lane, bb);
   stats<N>(x, eps, mean, rstd);
 #pragma unroll
-  for (int i = 0; i < N / 32; ++i) x[i] = sigm(sp[i]) * ((x[i] - mean) * rstd) + bb[i];
+  for (int i = 0; i < N / 32; ++i) x[i] = rowmath::modulate(x[i], mean, rstd, sigm(sp[i]), bb[i]);
   st_row<N>(Y + row * N, lane, x);
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
