@@ -35,6 +35,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
+from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
 
 
 
@@ -202,49 +203,92 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_gemm_swiglu_triton"),
-                 key=["shape_key"])
+                 key=["shape_key"],
+                 prune_configs_by={"early_config_prune": prune_tma(lambda na: (na["Dout"], na["Ws"], na["A"], na["B"], na["Dab"]))})
 @triton.jit
 def _dh_swiglu_bwd_kernel(
     Dout, Ws, A, B, Dab, M, ND: tl.constexpr, D: tl.constexpr,
     sdo0, sw0, sa0, sp0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0,
 ):
     """dab = [da | db] from (dout, ws, a, b), with dh = dout @ ws never reaching HBM.
 
     The split it replaces is a cuBLAS GEMM writing dh (M, ND) followed by a flat elementwise
     pass reading it back. At the token width dh is 113 MB out and 113 MB back, and the
     elementwise half is pure bandwidth -- so the GEMM's spare bandwidth pays for it.
+
+    ``TMA`` (sm_90, bf16; 0 = off, 1 = TMA, 2 = TMA with the epilogue in two column halves, 3 / 4 = the same two with a warp-specialised loop): the same math as a persistent loop over tiles with tensor descriptors for every operand (``kernels/_tma.py``). The
+    epilogue's loads of a / b and its stores of da / db are TMA too, issued per ``BLOCK_N // EPI`` column chunk, so the compiler pipelines them
+    under the MMAs of the next tile instead of running them after the K loop of this one (431 -> 355 us at M = 49152, bf16).
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
-                              tl.cdiv(ND, BLOCK_N), GROUP_M)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    rmask = rows < M
-    nmask = cols < ND
+    if TMA:
+        EPI: tl.constexpr = 2 if (TMA == 2 or TMA == 4) else 1
+        WS: tl.constexpr = TMA >= 3
+        do_d = tl.make_tensor_descriptor(Dout, shape=[M, D], strides=[sdo0, 1], block_shape=[BLOCK_M, BLOCK_K])
+        w_d = tl.make_tensor_descriptor(Ws, shape=[D, ND], strides=[sw0, 1], block_shape=[BLOCK_K, BLOCK_N])
+        a_d = tl.make_tensor_descriptor(A, shape=[M, ND], strides=[sa0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        b_d = tl.make_tensor_descriptor(B, shape=[M, ND], strides=[sa0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        da_d = tl.make_tensor_descriptor(Dab, shape=[M, ND], strides=[sp0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        db_d = tl.make_tensor_descriptor(Dab + ND, shape=[M, ND], strides=[sp0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        n_m = tl.cdiv(M, BLOCK_M)
+        n_n = tl.cdiv(ND, BLOCK_N)
+        for t in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True, warp_specialize=WS):
+            pid_m, pid_n = tile_order(t, n_m, n_n, GROUP_M)
+            om = pid_m * BLOCK_M
+            on = pid_n * BLOCK_N
+            acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+            for k in range(0, D, BLOCK_K):
+                acc = tl.dot(do_d.load([om, k]), w_d.load([k, on]), acc)
+            if EPI == 1:
+                a = a_d.load([om, on]).to(tl.float32)
+                b = b_d.load([om, on]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on], (acc * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on], (acc * (a * sa)).to(Dab.dtype.element_ty))
+            else:
+                h0, h1 = tl.split(tl.permute(tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
+                a = a_d.load([om, on]).to(tl.float32)
+                b = b_d.load([om, on]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on], (h0 * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on], (h0 * (a * sa)).to(Dab.dtype.element_ty))
+                a = a_d.load([om, on + BLOCK_N // 2]).to(tl.float32)
+                b = b_d.load([om, on + BLOCK_N // 2]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on + BLOCK_N // 2], (h1 * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on + BLOCK_N // 2], (h1 * (a * sa)).to(Dab.dtype.element_ty))
+    else:
+        pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                                  tl.cdiv(ND, BLOCK_N), GROUP_M)
+        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        rmask = rows < M
+        nmask = cols < ND
 
-    dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
-    for k0 in range(0, D, BLOCK_K):
-        kc = k0 + tl.arange(0, BLOCK_K)
-        kmask = kc < D
-        do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
-                     mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
-                    mask=kmask[:, None] & nmask[None, :], other=0.0)
-        dh += tl.dot(do, w, out_dtype=tl.float32)
+        dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+        for k0 in range(0, D, BLOCK_K):
+            kc = k0 + tl.arange(0, BLOCK_K)
+            kmask = kc < D
+            do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
+                         mask=rmask[:, None] & kmask[None, :], other=0.0)
+            w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
+                        mask=kmask[:, None] & nmask[None, :], other=0.0)
+            dh += tl.dot(do, w, out_dtype=tl.float32)
 
-    m = rmask[:, None] & nmask[None, :]
-    off = rows[:, None] * sa0 + cols[None, :]
-    a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
-    b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
-    # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
-    # `_swiglu_bwd_kernel`; only where dh comes from differs.
-    sa = tl.sigmoid(a)
-    da = dh * b * (sa * (1.0 + a * (1.0 - sa)))
-    db = dh * (a * sa)
-    base = rows[:, None] * sp0
-    tl.store(Dab + base + cols[None, :], da.to(Dab.dtype.element_ty), mask=m)
-    tl.store(Dab + base + (cols + ND)[None, :], db.to(Dab.dtype.element_ty), mask=m)
+        m = rmask[:, None] & nmask[None, :]
+        off = rows[:, None] * sa0 + cols[None, :]
+        a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
+        b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
+        # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
+        # `_swiglu_bwd_kernel`; only where dh comes from differs.
+        sa = tl.sigmoid(a)
+        da = dh * b * (sa * (1.0 + a * (1.0 - sa)))
+        db = dh * (a * sa)
+        base = rows[:, None] * sp0
+        tl.store(Dab + base + cols[None, :], da.to(Dab.dtype.element_ty), mask=m)
+        tl.store(Dab + base + (cols + ND)[None, :], db.to(Dab.dtype.element_ty), mask=m)
 
 
 def _dh_swiglu_bwd_fake(dout, ws, a, b, shape_key=None):
@@ -265,11 +309,15 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
             "at the caller that still holds the pre-flatten shape and pass it down."
         )
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
-    grid = lambda META: tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    sms = num_sms(a.device.index or 0)
+    ensure_allocator()
+    # a TMA config is a persistent grid (one program per SM, at most one per tile); the others one program per tile
+    grid = lambda META: ((min(sms, triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(ND, META["BLOCK_N"])),) if META.get("TMA")  # noqa: E731
+                         else tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"]))
     _dh_swiglu_bwd_kernel[grid](
         dout, ws, a, b, dab, M, int(ND), int(D),
         dout.stride(0), ws.stride(0), a.stride(0), dab.stride(0),
-        shape_key=pack(shape_key, ND=ND, D=D),
+        shape_key=pack(shape_key, ND=ND, D=D), NUM_SMS=sms,
     )
     return dab
 

@@ -19,8 +19,8 @@
     },
     {
       "kernel": "cond_transition_bwd_gemm_swiglu_triton",
-      "before": 2880,
-      "after": 2880,
+      "before": 18000,
+      "after": 18000,
       "retained_ranked_configs": 114,
       "historical_outside_original_grid": 0,
       "cards": {
