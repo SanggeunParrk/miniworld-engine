@@ -127,12 +127,13 @@ class _Tail(torch.autograd.Function):
         f32 = torch.float32
         o = lambda w: f32 if (w.dtype == f32 and x.dtype != f32) else None  # noqa: E731  fp32 master weights: fp32 gradients, unrounded
         dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
-        dh = torch.mm(dout, wsb)
+        t = (lambda w: w.t().contiguous().t()) if x.dtype is f32 else (lambda w: w)   # TF32: the operand layouts cuBLAS runs fastest (18432 rows: dh -21, dx -72, dcond -23 us)
+        dh = torch.mm(dout, t(wsb))
         dab = swiglu_bwd(dh, ab)
         dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
-        dx = torch.mm(dab, wab)
+        dx = torch.mm(dab, t(wab))
         dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
-        dcond = torch.mm(dsc, wscb)
+        dcond = torch.mm(dsc, t(wscb))
         dbsc = colsum(part).to(dsc.dtype if not o(wsc) else f32)   # the block partials of sum(dscale), summed in a fixed order
         nd = wab.shape[0] // 2
         return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
