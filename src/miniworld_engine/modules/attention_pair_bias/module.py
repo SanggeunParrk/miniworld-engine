@@ -182,17 +182,35 @@ class AttentionPairBias(nn.Module):
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        pair = self.ln_pair(pair)
-        bias = (
-            _h100_master.linear(pair, self.to_bias, wb)
-            if master
-            else self.to_bias(pair)
-        )
-        bias = rearrange(bias, "B L L2 H -> B H L L2")
-        if mask is not None:
-            bias = bias.masked_fill(
-                ~mask[:, None, None, :], torch.finfo(bias.dtype).min
+        if (
+            backend == KernelBackend.PORTABLE
+            and not torch.is_grad_enabled()
+            and pair.dtype == torch.bfloat16
+            and pair.shape[-1] <= 1024
+        ):
+            # portable inference: LayerNorm + the head projection in ONE pass over the pair, stored head-major (the unfused pair LayerNorm
+            # and GEMM read and write it three times); the key mask is the attention kernel's own (it takes it below)
+            from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+                layernorm_linear_triton_fwd_t,
             )
+
+            ln_w = self.ln_pair.weight
+            B_, L_ = pair.shape[0], pair.shape[1]
+            bias = layernorm_linear_triton_fwd_t(
+                pair, ln_w, torch.zeros_like(ln_w), self.to_bias.weight, self.ln_pair.eps
+            ).view(self.n_head, B_, L_, L_).permute(1, 0, 2, 3)
+        else:
+            pair = self.ln_pair(pair)
+            bias = (
+                _h100_master.linear(pair, self.to_bias, wb)
+                if master
+                else self.to_bias(pair)
+            )
+            bias = rearrange(bias, "B L L2 H -> B H L L2")
+            if mask is not None:
+                bias = bias.masked_fill(
+                    ~mask[:, None, None, :], torch.finfo(bias.dtype).min
+                )
         if backend == KernelBackend.PYTORCH:
             out = F.scaled_dot_product_attention(query, key, value, bias)
         elif backend == KernelBackend.PORTABLE:
