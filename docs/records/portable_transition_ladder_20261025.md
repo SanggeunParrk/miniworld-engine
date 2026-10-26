@@ -120,3 +120,60 @@ Targets: every ratio <= 0.95; open rows are listed above. Tried, measured on H10
   the fp32 `h` (M x 512 x 4 B = 1.2 GB written and read back). Walking the rows in 4096-16384-row chunks so `h` stays in L2 made it slower (2.2-2.9 ms: smaller launches plus an
   output copy). What would win is a TF32-equivalent half-width `h` (fp16 operands for the squeeze, same 10-bit mantissa; ~0.6 ms saved) -- a new mixed-type instantiation of the
   GEMM template with its own epilogue and TMA maps, not attempted here.
+
+## Final state (2026-10-26, fp16 halves / fp16 h)
+
+Two range-safe fp16 stores were added (fp16 has the TF32 mantissa, 10 bits, in half the bytes of fp32; fp16's range is smaller, so both carry a device scalar
+that makes overflow impossible and is 1 for ordinary magnitudes -- no host sync, graph capturable, no data dependent fallback):
+
+* portable, fp32 activations, training (`main._launch_expand`, `residual.half_scale`): the saved expand halves are fp16 divided by
+  `max(1, bound / 60000)` with `bound = (sqrt(D) max|gamma| + max|beta|) * max row-L1 norm of Wa, Wb` (LayerNorm output is `z gamma + beta`, `|z| <= sqrt(D)`).
+  Only the residual (LayerNorm) path uses it; `triton_transition` (no LayerNorm, no bound) keeps fp32 halves. fp32 D256 training 5.11 -> 4.89 ms.
+  Error against fp64 equals the fp32 halves' (`tests/gpu/any/test_transition_fp16_halves_gpu.py`: <= 1.5x, ordinary and 2e4-scaled expand weights; measured, fp16 vs
+  fp32 halves: out 1.78e-3 / 1.78e-3, dx 1.44e-3 / 1.43e-3, weight grads 1.64-1.69e-3 / 1.64-1.67e-3 at ordinary scale, identical at 2e4; PyTorch TF32 itself 4.0-5.8e-4 --
+  the portable fp32 path was 3-4x the PyTorch TF32 error before this change, Triton's tf32 dot truncates; unchanged here). A first version with a running-max flag and an in-kernel
+  recompute fallback was 5% SLOWER than fp32 halves (a runtime branch around a K loop inside the persistent loop) and was dropped for the bound.
+* CUDA generic sm90a, fp32 activations, forward, >= 16384 rows (`fused_generic_sm90a._fwd_h16`, `tr90.cuh`, `bind.cu`): `h = silu(a) b` is written by the expand GEMM as fp16 through
+  the staged TMA epilogue (`Tt<__half>`, `swiglu_h16`) and read by the squeeze GEMM on f16 wgmma with Ws as fp16 (`squeeze_res_h16`); `h` and `Ws` are divided by device scalars from the
+  same kind of bound (`h <= |a||b|`, `max|Ws|`). fp32 D128 inference L768 1.587 -> 1.236 ms (swiglu 0.758 -> 0.567, squeeze 0.795 -> 0.484, +0.04 for the scale reductions).
+  Error against fp64 = the PyTorch TF32 statements' (3.31e-4 vs 3.31e-4 at ordinary weights, 5.13e-4 vs 5.13e-4 at 2e4-scaled ones;
+  `tests/gpu/sm90/test_transition_generic_h16_gpu.py`). Training forwards of the fp32 path use it too (the backward recomputes, unchanged).
+  The jit extension revision is v29.
+
+Ladder `tr_` rows at the final commit (3 repeats, ms; ratio = portable / PyTorch best; **bold** = still >= 0.95): no `VIOLATION` of any kind (26 of 26 OK).
+
+| row | PT best | portable before (ratio) | portable now (ratio) | CUDA before | CUDA now | CUDA/portable |
+|---|---|---|---|---|---|---|
+| tr_D128 inference L128 | 0.05674 | 0.04013 (0.70213) | 0.04474 (0.78849) | 0.02256 | 0.02272 | 0.50787 |
+| tr_D128 inference L384 | 0.45206 | 0.28403 (0.62881) | 0.25136 (0.55603) | 0.1127 | 0.11322 | 0.45041 |
+| tr_D128 inference L768 | 1.71059 | 1.0808 (0.63166) | 0.90054 (0.52645) | 0.4089 | 0.40869 | 0.45382 |
+| tr_D128 inference L1024 | 3.03277 | 1.91342 (0.63096) | 1.58997 (0.52426) | 0.74077 | 0.7383 | 0.46435 |
+| tr_D128 training L128 | 0.16054 | 0.15184 (0.9456) | 0.15376 (**0.95774**) | 0.0855 | 0.0855 | 0.55609 |
+| tr_D128 training L384 | 1.21418 | 1.05102 (0.86663) | 1.0137 (0.83488) | 0.54557 | 0.54139 | 0.53408 |
+| tr_D128 training L768 | 4.5144 | 3.99142 (0.88427) | 3.8672 (0.85664) | 2.14944 | 2.12459 | 0.54939 |
+| tr_D128 training L1024 | 7.95731 | 7.04643 (0.88557) | 6.8731 (0.86375) | 3.79789 | 3.75144 | 0.54581 |
+| tr_D256 inference L384 | 0.88022 | 0.81725 (0.92677) | 0.59275 (0.67341) | 0.40698 | 0.40432 | 0.68211 |
+| tr_D256 inference L768 | 3.40576 | 3.3352 (0.97701) | 2.29346 (0.67341) | 1.59293 | 1.59274 | 0.69447 |
+| tr_D256 training L384 | 2.34006 | 2.57963 (1.10389) | 2.15066 (0.91906) | 1.84368 | 1.82032 | 0.8464 |
+| tr_D256 training L768 | 8.99136 | 10.16478 (1.127) | 8.29827 (0.92292) | 7.16554 | 7.03949 | 0.84831 |
+| tr_D384 inference L384 | 1.50861 | 1.59302 (1.04067) | 1.11875 (0.74158) | 0.96509 | 0.9529 | 0.85175 |
+| tr_D384 inference L768 | 5.9239 | 6.26278 (1.05021) | 4.50278 (0.7601) | 3.78282 | 3.78294 | 0.84013 |
+| tr_D384 training L384 | 4.08166 | 4.95818 (1.21326) | 3.86374 (0.94661) | 3.6375 | 3.60317 | 0.93256 |
+| tr_D384 training L768 | 15.80589 | 19.93955 (1.24285) | 15.57312 (**0.98527**) | 13.65914 | 13.53117 | 0.86888 |
+| tr_D512 inference L384 | 2.288 | 2.61818 (1.11877) | 1.81846 (0.79478) | 1.58691 | 1.56702 | 0.86173 |
+| tr_D512 training L384 | 6.14086 | 7.87082 (1.26959) | 6.00083 (**0.9772**) | 6.02837 | 5.97406 | **0.99554** |
+| tr_D768 inference L384 | 4.32843 | 5.4025 (1.24015) | 3.7067 (0.85636) | 3.37702 | 3.37474 | 0.91044 |
+| tr_D768 training L384 | 12.17885 | 16.56752 (1.35052) | 11.88312 (**0.97572**) | 11.02454 | 10.97123 | 0.92326 |
+| tr_fp32_D128 inference L384 | 0.84824 | 0.48819 (0.57718) | 0.41718 (0.49182) | 0.40714 | 0.36381 | 0.87206 |
+| tr_fp32_D128 inference L768 | 3.28317 | 1.86707 (0.56781) | 1.58198 (0.48185) | 1.58835 | 1.23578 | 0.78116 |
+| tr_fp32_D128 training L384 | 2.36739 | 1.98643 (0.83729) | 1.79574 (0.75853) | 1.63805 | 1.5976 | 0.88966 |
+| tr_fp32_D128 training L768 | 9.13896 | 7.74194 (0.84653) | 6.83723 (0.74814) | 6.4143 | 6.09272 | 0.89111 |
+| tr_fp32_D256 inference L384 | 1.69198 | 1.27469 (0.75195) | 1.11094 (0.65659) | 0.99043 | 0.8671 | 0.78051 |
+| tr_fp32_D256 training L384 | 4.91738 | 5.25474 (1.06477) | 4.88107 (**0.99262**) | 4.04851 | 3.87645 | 0.79418 |
+
+Still at or above the 0.95 the user asked for (all are strict wins, none is a violation): portable training D768 0.976, D512 0.977, D384 L768 0.985, D128 L128 0.958, fp32 D256 0.993,
+and the CUDA/portable pair of D512 training (CUDA 5.974 vs portable 6.001 ms, 0.9955). Tried without gain for these (all measured, reverted): exhaustive tile sweeps, `warp_specialize`,
+dropping `b` from the saved activations (`b sigma(a) = h / a`: 12.02 vs 11.96 ms), fp32 recompute backward, cuBLAS squeeze for fp32, row-chunking `h` in L2 for the CUDA fp32 path.
+
+Tests at the final commit: CPU 4333 passed, 2 failed + 2 errors (all four also fail on perf/ladder-audit); GPU, 27 transition-related files of tests/gpu/{any,sm90} with `--maxfail=1000`: 653 passed, 11 failed
+(the 10 that fail on the base commit -- three `*_sm90_cuda` numerical rows without cuBLASDx headers, seven mpnn kernels -- and `test_mpnn_transition_recompute` which passes alone, order dependent).
