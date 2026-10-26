@@ -39,7 +39,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tf32 import tf32_dot
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 
 
 
@@ -289,6 +289,7 @@ def _adaln_gemm_gate_kernel(
     scn0, sw0, sw1, sbw0, sbw1, sx0, sy0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
+    PRE: tl.constexpr = False,
 ):
     """y = sigmoid(CondN @ SW + SB) * (x*rstd - c1) + CondN @ BW, one program per output tile.
 
@@ -325,8 +326,8 @@ def _adaln_gemm_gate_kernel(
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
         w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
-        scale += tf32_dot(a, w_s, out_dtype=tl.float32)
-        bias += tf32_dot(a, w_b, out_dtype=tl.float32)
+        scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
+        bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
 
     # x last: its tile would otherwise sit in shared memory for the whole K loop, and shared
     # memory is what capped the kernel this replaces.
@@ -362,6 +363,9 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
             "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
             "caller that still holds the pre-flatten shape and pass it down."
         )
+    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
+    if pre:
+        scale_wt, bias_wt = tf32_cached((scale_wt, bias_wt), lambda: tf32_grid_many(scale_wt, bias_wt))
     y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
     _adaln_gemm_gate_kernel[grid](
@@ -370,6 +374,7 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
         cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1),
         x.stride(0), y.stride(0),
         shape_key=pack(shape_key, NX=NX, NC=NC),
+        PRE=pre,
     )
     return y
 
@@ -470,6 +475,7 @@ def _adaln_fused_kernel(  # noqa: PLR0915
     M, NX: tl.constexpr, NC: tl.constexpr, eps_x, eps_cond,
     USE_LOW: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K_NX: tl.constexpr, BLOCK_K_NC: tl.constexpr,
     shape_key,
+    PRE: tl.constexpr = False,
 ):
     pid = tl.program_id(0).to(tl.int64)
     rows = pid * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -540,8 +546,8 @@ def _adaln_fused_kernel(  # noqa: PLR0915
                 cond_aff = cond_aff.to(X.dtype.element_ty)
                 sw = sw.to(X.dtype.element_ty)
                 bw = bw.to(X.dtype.element_ty)
-            scale += tf32_dot(cond_aff, sw, out_dtype=tl.float32)
-            bias += tf32_dot(cond_aff, bw, out_dtype=tl.float32)
+            scale += tf32_dot(cond_aff, sw, out_dtype=tl.float32, pre_b=PRE)
+            bias += tf32_dot(cond_aff, bw, out_dtype=tl.float32, pre_b=PRE)
         scale += scale_b[None, :]
         y = tl.sigmoid(scale) * x_hat + bias
         yo = rows[:, None] * syr + xc[None, :] * syc
@@ -578,13 +584,16 @@ def adaln_inference_fused(
     nc = cond2d.shape[-1]
     y = torch.empty_like(x2d)
     use_low = x.dtype in (torch.bfloat16, torch.float16)
+    pre = x.dtype is torch.float32     # the weights are rounded to nearest here, once (kernels/_tf32.py)
+    if pre:
+        scale_weight, bias_weight = tf32_cached((scale_weight, bias_weight), lambda: tf32_grid_many(scale_weight, bias_weight))
     grid = lambda META: (triton.cdiv(m, META["BLOCK_M1"]),)  # noqa: E731
     _adaln_fused_kernel[grid](
         x2d, cond2d, cond_ln_weight, scale_weight, scale_bias, bias_weight, y,
         x2d.stride(0), x2d.stride(1), cond2d.stride(0), cond2d.stride(1),
         scale_weight.stride(0), scale_weight.stride(1),
         bias_weight.stride(0), bias_weight.stride(1), y.stride(0), y.stride(1),
-        m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low,
+        m, NX=nx, NC=nc, eps_x=eps_x, eps_cond=eps_cond, USE_LOW=use_low, PRE=pre,
         # L is x's pre-flatten shape[-2]; m = B*A is the row count, not the shape.
         shape_key=atom_key(length_of(orig_x_shape), NX=nx, NC=nc),
     )

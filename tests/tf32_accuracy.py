@@ -107,7 +107,7 @@ def worst(rows: list[Row]) -> Row:
 
 
 def table(tag: str, rows: list[Row]) -> str:
-    out, grads = rows[0], [r for r in rows[1:]]
+    out, grads = rows[0], rows[1:]
     w = worst(rows)
     g = worst(grads) if grads else None
     s = f"TF32ACC {tag} out={out.engine:.2e}/{out.pytorch:.2e}={out.ratio:.2f}"

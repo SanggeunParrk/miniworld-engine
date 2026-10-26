@@ -29,7 +29,7 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tf32 import tf32_dot
+from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
 
 
 # Reuse the proven, tested TE-style LN building blocks (cuBLAS + Triton, portable).
@@ -384,7 +384,7 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
 def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC: tl.constexpr, K2,
     sd0, sd1, sw0, sw1, sc0, sc1, sdc0, sdc1,
-    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key):
+    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key, PRE: tl.constexpr = False):
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     row = tl.program_id(0).to(tl.int64)
@@ -427,7 +427,7 @@ def _dgrad_condln_kernel(
                         mask=rmask[:, None] & kmask[None, :], other=0.0)
             b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                         mask=kmask[:, None] & ncmask[None, :], other=0.0)
-            acc += tf32_dot(a, b, input_precision="tf32")
+            acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
         cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                        mask=nmask2, other=0.0).to(tl.float32)
         g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -459,7 +459,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tf32_dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -485,7 +485,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tf32_dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -519,6 +519,9 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
         # off `cond` (M, NC), not off D: D is (2NX, M), so its shape[-2] is 2NX, not a length.
         shape_key = atom_key(length_of(cond.shape))
     NC = w_cat.shape[1]
+    pre = D.dtype is torch.float32
+    if pre:
+        w_cat = tf32_grid_many(w_cat)[0]
     dcond = torch.empty_strided((M, NC), cond.stride(), device=cond.device, dtype=cond.dtype)
     dlnw = torch.zeros(NC, dtype=torch.float32, device=cond.device)
     dargs = (D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
@@ -535,7 +538,7 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
     # fired for EVERY build unit too -- no tuning round, nothing captured, no cache entry, and an
     # A5000-measured constant with no arch condition on every card.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
+    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2), PRE=pre)
     return dcond, dlnw.to(lnw.dtype)
 
 
@@ -564,7 +567,7 @@ def _adaln_fwd_gate_kernel(
     scn0, sw0, sw1, sbw0, sbw1, sx0, sy0, sg0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
-    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
 ):
     """Training forward in one kernel: y AND gate=sigmoid(scale), so sb (M, 2NX) never lands.
 
@@ -601,8 +604,8 @@ def _adaln_fwd_gate_kernel(
             bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
             for k in range(0, NC, BLOCK_K):
                 ak = a_d.load([om, k])
-                scale = tf32_dot(ak, s_d.load([on, k]).T, scale)
-                bias = tf32_dot(ak, b_d.load([on, k]).T, bias)
+                scale = tf32_dot(ak, s_d.load([on, k]).T, scale, pre_b=PRE)
+                bias = tf32_dot(ak, b_d.load([on, k]).T, bias, pre_b=PRE)
             rws = om + tl.arange(0, BLOCK_M)
             rstd = tl.load(Rstd + rws, mask=rws < M, other=0.0)[:, None]
             c1 = tl.load(C1 + rws, mask=rws < M, other=0.0)[:, None]
@@ -643,8 +646,8 @@ def _adaln_fwd_gate_kernel(
                           mask=kmask[:, None] & nmask[None, :], other=0.0)
             w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                           mask=kmask[:, None] & nmask[None, :], other=0.0)
-            scale += tf32_dot(a, w_s, out_dtype=tl.float32)
-            bias += tf32_dot(a, w_b, out_dtype=tl.float32)
+            scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
+            bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
         xm = rmask[:, None] & nmask[None, :]
         xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
         rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
@@ -675,6 +678,9 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
             "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
             "caller that still holds the pre-flatten shape and pass it down."
         )
+    pre = x.dtype is torch.float32     # the weights are rounded to nearest here (kernels/_tf32.py); the activation in the kernel
+    if pre:
+        scale_wt, bias_wt = tf32_grid_many(scale_wt, bias_wt)
     y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     sms = num_sms(x.device.index or 0)
@@ -686,7 +692,7 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
         M, int(NX), int(NC),
         cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1), x.stride(0),
         y.stride(0), gate.stride(0),
-        shape_key=pack(shape_key, NX=NX, NC=NC), NUM_SMS=sms,
+        shape_key=pack(shape_key, NX=NX, NC=NC), NUM_SMS=sms, PRE=pre,
     )
     return y, gate
 

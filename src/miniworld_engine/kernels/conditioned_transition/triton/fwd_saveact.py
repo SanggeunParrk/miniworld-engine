@@ -28,7 +28,7 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
-from miniworld_engine.kernels._tf32 import tf32_dot
+from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
 
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
@@ -76,7 +76,7 @@ def _fwd_expand_swiglu_kernel(
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
-    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
 ):
     if TMA:
         # sm_90, 16-bit operands (kernels/_tma.py): a persistent loop over tiles, every operand a tensor descriptor; the SwiGLU and the three
@@ -100,8 +100,8 @@ def _fwd_expand_swiglu_kernel(
             b = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for k in range(0, K, BLOCK_K):
                 xk = x_d.load([om, k])
-                a = tf32_dot(xk, wa_d.load([on, k]).T, a)
-                b = tf32_dot(xk, wb_d.load([on, k]).T, b)
+                a = tf32_dot(xk, wa_d.load([on, k]).T, a, pre_b=PRE)
+                b = tf32_dot(xk, wb_d.load([on, k]).T, b, pre_b=PRE)
             if EPI == 1:
                 h_d.store([om, on], (a * tl.sigmoid(a) * b).to(h_ptr.dtype.element_ty))
                 a_d.store([om, on], a.to(ab_ptr.dtype.element_ty))
@@ -135,8 +135,8 @@ def _fwd_expand_swiglu_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             wb = tl.load(wb_ptr + cols[None, :] * stride_wn + k[:, None] * stride_wk,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
+            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         h = a * tl.sigmoid(a) * b
         m = row_mask[:, None] & col_mask[None, :]
         tl.store(h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn, h, mask=m)
@@ -173,7 +173,7 @@ def _fwd_squeeze_gate_kernel(
     BLOCK_K_ND: tl.constexpr, BLOCK_K_DC: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
-    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
     res_ptr=None, stride_rm=0, HAS_RES: tl.constexpr = False,
 ):
     if TMA:
@@ -198,10 +198,10 @@ def _fwd_squeeze_gate_kernel(
             od = pid_d * BLOCK_N
             out_acc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for n0 in range(0, ND, BLOCK_K_ND):
-                out_acc = tf32_dot(h_d.load([om, n0]), ws_d.load([od, n0]).T, out_acc)
+                out_acc = tf32_dot(h_d.load([om, n0]), ws_d.load([od, n0]).T, out_acc, pre_b=PRE)
             scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for c0 in range(0, DC, BLOCK_K_DC):
-                scale = tf32_dot(c_d.load([om, c0]), wsc_d.load([od, c0]).T, scale)
+                scale = tf32_dot(c_d.load([om, c0]), wsc_d.load([od, c0]).T, scale, pre_b=PRE)
             if EPI == 1:
                 bsc = tl.load(bsc_ptr + od + tl.arange(0, BLOCK_N), mask=od + tl.arange(0, BLOCK_N) < D, other=0.0).to(tl.float32)
                 scale += bsc[None, :]
@@ -246,7 +246,7 @@ def _fwd_squeeze_gate_kernel(
                         mask=row_mask[:, None] & n_mask[None, :], other=0.0)
             ws_t = tl.load(ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
                            mask=n_mask[:, None] & d_mask[None, :], other=0.0)
-            out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+            out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
         for c0 in range(0, DC, BLOCK_K_DC):
             dc = c0 + tl.arange(0, BLOCK_K_DC)
@@ -255,7 +255,7 @@ def _fwd_squeeze_gate_kernel(
                            mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
             wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                             mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
-            scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+            scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
         scale += bsc[None, :]
         y = tl.sigmoid(scale) * out_acc
@@ -291,6 +291,9 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
             "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
             "not a working fallback: length_of refuses a rank-2 shape."
         )
+    pre = x.dtype is torch.float32     # the weights are rounded to nearest here (kernels/_tf32.py); the activation in the kernel
+    if pre:
+        wa, wb = tf32_grid_many(wa, wb)
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     ab = torch.empty(M, 2 * ND, device=x.device, dtype=x.dtype)
@@ -303,7 +306,7 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
         x.stride(0), x.stride(1), wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1), ab.stride(0), ab.stride(1),
-        shape_key=pack(shape_key, ND=ND, K=K), NUM_SMS=sms,
+        shape_key=pack(shape_key, ND=ND, K=K), NUM_SMS=sms, PRE=pre,
     )
     return h, ab
 
@@ -334,6 +337,9 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
         )
     D = ws.shape[0]
     DC = cond.shape[1]
+    pre = h.dtype is torch.float32
+    if pre:
+        ws, wsc = tf32_grid_many(ws, wsc)
     y = torch.empty(M, D, device=h.device, dtype=h.dtype)
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
     scale = torch.empty(M, D, device=h.device, dtype=h.dtype)
@@ -348,7 +354,7 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
         ws.stride(0), ws.stride(1), wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), out.stride(0), out.stride(1),
         scale.stride(0), scale.stride(1),
-        shape_key=pack(shape_key, ND=ND, D=D, DC=DC), NUM_SMS=sms, **extra,
+        shape_key=pack(shape_key, ND=ND, D=D, DC=DC), NUM_SMS=sms, PRE=pre, **extra,
     )
     return y, out, scale
 

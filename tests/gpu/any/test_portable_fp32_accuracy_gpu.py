@@ -24,7 +24,12 @@ from miniworld_engine.modules import (
 )
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 from miniworld_engine.modules.dit import DiTBlock
-from miniworld_engine.modules.dit_variant import BOLTZ2, BOLTZ2_ATOM, AtomDiTVariantStack, DiTVariantStack
+from miniworld_engine.modules.dit_variant import (
+    BOLTZ2,
+    BOLTZ2_ATOM,
+    AtomDiTVariantStack,
+    DiTVariantStack,
+)
 from miniworld_engine.modules.local_dit import LocalDiTBlock
 from miniworld_engine.modules.triangle_attention import TriangleAttention
 from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
