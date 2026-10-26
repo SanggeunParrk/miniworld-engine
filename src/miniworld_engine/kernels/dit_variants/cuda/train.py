@@ -53,9 +53,6 @@ def _mm_t(a, b):
     return torch.mm(a.t(), b)
 
 
-def _empty_like_spec(ref, shape, dtype=None):
-    return ref.new_empty(shape, dtype=dtype or ref.dtype)
-
 
 def _fwd_specs(M, L, at, xdt, par, gating, kq, up):
     D = WIDTH

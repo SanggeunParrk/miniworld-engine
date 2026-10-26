@@ -1,4 +1,6 @@
-"""CUDA row kernels of the DiT block variants (``rows.cu``), sm_90a. Built on first use (``load_extension``), never at import."""
+"""CUDA kernels of the DiT block variants, sm_90a, built on first use (``load_extension``), never at import: ``rows.cu`` (inference rows),
+``train_rows.cu`` (training rows, forward and backward), ``edge.cu`` (the atom stacks' slid edge windows, training); ``train.py`` is the training
+path (autograd Functions over them)."""
 
 from __future__ import annotations
 

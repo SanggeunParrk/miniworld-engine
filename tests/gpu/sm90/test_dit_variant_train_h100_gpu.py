@@ -49,22 +49,22 @@ def _init(stack):
     return stack.cuda()
 
 
-def _case(kind, model, a, length):
-    """(stack, inputs, mask, uid, dy, live rows)."""
+def _case(kind, model, a, length, *, masked=True, window="slide"):
+    """(stack, inputs, mask, uid, dy, live rows). ``masked``: a tenth of the tokens / atoms are padding (else no mask at all)."""
     g = torch.Generator(device="cuda").manual_seed(1)
     if kind == "atom":
         n = length * 8
-        stack = _init(AtomDiTVariantStack(2, 128, 128, 16, 2, **ATOM[model]))
+        stack = _init(AtomDiTVariantStack(2, 128, 128, 16, 2, key_window=window, **ATOM[model]))
         shapes = {"single": (a, n, 128), "cond": (n, 128), "pair": (n // 32, 32, 128, 16)}
-        live = int(n * 0.9)
-        mask = torch.arange(n, device="cuda") < live
+        live = int(n * 0.9) if masked else n
+        mask = torch.arange(n, device="cuda") < live if masked else None
         uid = (torch.arange(n, device="cuda") // 45).int() if model == "chai1" else None
     else:
         o = TOKEN[model]
-        n, live = length, length - 40
+        n, live = length, length - 40 if masked else length
         stack = _init(DiTVariantStack(2, 768, o["d_cond"], o["d_pair"], 16, 2, **{k: v for k, v in o.items() if k not in ("d_cond", "d_pair")}))
         shapes = {"single": (a, n, 768), "cond": (n, o["d_cond"]), "pair": (n, n, o["d_pair"])}
-        mask = torch.arange(n, device="cuda") < live
+        mask = torch.arange(n, device="cuda") < live if masked else None
         uid = None
     inputs = {k: torch.randn(*s, device="cuda", generator=g) for k, s in shapes.items()}
     dy = torch.randn(*shapes["single"], device="cuda", generator=g)
@@ -94,12 +94,9 @@ def _rel(a, b, floor=0.0):
     return ((a - b).norm() / b.norm().clamp_min(floor)).item()
 
 
-@pytest.mark.parametrize("precision", ["bf16", "fp32"])
-@pytest.mark.parametrize("model", list(TOKEN))
-@pytest.mark.parametrize("kind", ["token", "atom"])
-def test_training_matches_fp64(kind, model, precision):
+def _check(kind, model, precision, **case):
     a, length = 6, 256
-    stack, inputs, mask, uid, dy, live = _case(kind, model, a, length)
+    stack, inputs, mask, uid, dy, live = _case(kind, model, a, length, **case)
     bf16 = precision == "bf16"
     dtype = torch.bfloat16 if bf16 else torch.float32
     saved = torch.backends.cuda.matmul.allow_tf32
@@ -122,6 +119,26 @@ def test_training_matches_fp64(kind, model, precision):
         if err_e > ERR_RATIO * err_r + floor:
             bad.append((name, err_e / max(ref.norm().item(), 1e-30), err_r / max(ref.norm().item(), 1e-30)))
     assert not bad, bad
+
+
+@pytest.mark.parametrize("precision", ["bf16", "fp32"])
+@pytest.mark.parametrize("model", list(TOKEN))
+@pytest.mark.parametrize("kind", ["token", "atom"])
+def test_training_matches_fp64(kind, model, precision):
+    _check(kind, model, precision)
+
+
+@pytest.mark.parametrize(
+    ("kind", "model", "case"),
+    [
+        ("token", "rf3", {"masked": False}),                        # no key mask
+        ("atom", "boltz2", {"masked": False}),                      # every atom real: the slid edge windows at the sequence ends
+        ("atom", "chai1", {"window": "pad"}),                       # the padded key window, same-conformer mask, padding atoms
+        ("atom", "rf3", {"masked": False, "window": "pad"}),
+    ],
+)
+def test_training_matches_fp64_other_options(kind, model, case):
+    _check(kind, model, "bf16", **case)
 
 
 @pytest.mark.parametrize("kind", ["token", "atom"])
