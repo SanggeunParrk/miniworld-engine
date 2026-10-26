@@ -1,6 +1,8 @@
 """The token DiT block variants of Boltz-2, RoseTTAFold3 and Chai-1 (FoldForge's dense ``DiffusionTransformer`` with their spec
-flags), inference only. The math is in ``kernels/dit_variants/reference.py``; on H100 a bf16 call without a gradient runs
-``kernels/dit_variants/interface.py`` (CUDA rows + cuBLAS + the token DiT's attention core), anything else the reference.
+flags). The math is in ``kernels/dit_variants/reference.py``; on H100 a bf16 call without a gradient runs
+``kernels/dit_variants/interface.py`` (CUDA rows + cuBLAS + the token DiT's attention core), a call with a gradient (bf16 under autocast or fp32 on
+TF32) ``kernels/dit_variants/cuda/train.py`` (CUDA row kernels forward and backward, cuBLAS, the sm_90a attention cores), anything else the
+portable path or the reference.
 
 The three models' options:
 

@@ -4451,7 +4451,8 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
     wide, 16 x 48 heads) or `local_dit` (atom stack, 8 L atoms, 128 wide, 32 x 128 windows, slid key window) targets with `+dit_variant=`.
 
     * pytorch -- the stack with `implementation=PYTORCH`: `kernels/dit_variants/reference.py`, fp32 norms and softmax.
-    * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (bf16 inference, no gradient), else the
+    * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (inference: bf16 rows + cuBLAS + the token / atom
+      DiT attention core; training: `kernels/dit_variants/cuda/train.py`, bf16 or fp32 TF32), else the
       reference on H100 / B200, and on any other card the portable path (`kernels/dit_variants/triton/portable.py`: the engine's Triton
       attention cores) if the card is recorded, else the reference with a warning (`docs/dispatch.md`).
     * triton -- the same module under `settings.force_portable_kernels` (the A/B switch, any card): the portable path.
@@ -4515,13 +4516,16 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
         execution_path = "kernels.dit_variants.reference[torch]"
     else:
         from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.cuda import train
         from miniworld_engine.kernels.dit_variants.triton import portable
 
         with torch.set_grad_enabled(is_train):
             h100 = (interface.atom_serves(model, single, cond, pair, mask, uid) if atom else interface.serves(model, single, cond, pair, mask))
+            h100_train = (train.atom_serves(model, single, cond, pair, mask, uid) if atom else train.serves(model, single, cond, pair, mask))
             tri = (portable.atom_serves(model, single, cond, pair, mask, uid) if atom else portable.serves(model, single, cond, pair, mask))
         execution_path = (
             "kernels.dit_variants.interface[H100 CUDA rows + cuBLAS + the token / atom DiT attention core]" if h100
+            else "kernels.dit_variants.cuda.train[H100 CUDA training rows + cuBLAS + the sm_90a attention cores, one autograd Function per block]" if h100_train
             else "kernels.dit_variants.triton.portable[reference structure, attention cores "
                  + ("kernels.augmented_attention.triton.window" if atom else "kernels.augmented_attention.triton.main")
                  + ", pair LayerNorm once per stack]" if tri
