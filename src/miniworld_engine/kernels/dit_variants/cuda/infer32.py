@@ -150,6 +150,7 @@ def inference(stack, single, cond, pair, mask):
 
     f32 = torch.float32
     st = torch.empty(m, 2, device=dev, dtype=f32)
+    stq = torch.empty(m, 4, device=dev, dtype=f32) if any(b.kq_norm for b in blocks) else None
     xa = torch.empty(m, d, device=dev, dtype=f32)
     xt = torch.empty_like(xa) if stack.parallel else xa
     qkg = torch.empty(m, 3 * d, device=dev, dtype=f32)
@@ -173,7 +174,7 @@ def inference(stack, single, cond, pair, mask):
         torch.mm(w["wv"], xa.t(), out=vt)
         if blk.kq_norm:
             wq, bq, wk, bk = w["qk"]
-            ext.qkv_prep(qkg[:, :d], qkg[:, d:2 * d], qkg[:, :d], qkg[:, :d], qkg[:, d:2 * d], None, None, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
+            ext.qkv_prep(qkg[:, :d], qkg[:, d:2 * d], qkg[:, :d], qkg[:, :d], qkg[:, d:2 * d], None, stq, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
         else:
             ext.qkv_prep(qkg[:, :d], qkg[:, d:2 * d], qkg[:, :d], qkg[:, :d], qkg[:, d:2 * d], None, None, None, None, None, None, 1.0, 1e-5, False, True)
         attn.tf32_gated_inference(qkg, vt, bias_all, i, a, 2 * d, heads, d // heads)
@@ -254,6 +255,7 @@ def atom_inference(stack, single, cond, pair, mask, uid):
     biases = _capture.lookup_inputs(_ATOM_BIASES, key, lambda: (_bf16._atom_biases(pack, z, kmask, uid, n, eps, slide), pair, mask, uid), limit=2)[0]
 
     st = torch.empty(m, 2, device=dev, dtype=f32)
+    stq = torch.empty(m, 4, device=dev, dtype=f32) if any(b.kq_norm for b in blocks) else None
     xq, xk = torch.empty(m, d, device=dev, dtype=f32), torch.empty(m, d, device=dev, dtype=f32)
     xt = torch.empty_like(xq) if stack.parallel else xq
     k, v = torch.empty(m, d, device=dev, dtype=f32), torch.empty(m, d, device=dev, dtype=f32)
@@ -278,7 +280,7 @@ def atom_inference(stack, single, cond, pair, mask, uid):
             torch.mm(xq, w["wg"].t(), out=g)
         if blk.kq_norm:
             wq, bq, wk, bk = w["qk"]
-            ext.qkv_prep(q, k, v, q, k, v, None, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
+            ext.qkv_prep(q, k, v, q, k, v, stq, wq, bq, wk, bk, 1.0, blk.q_norm.eps, True, True)
         else:
             ext.qkv_prep(q, k, v, q, k, v, None, None, None, None, None, 1.0, 1e-5, False, True)
         bias2, edge = biases[i]
