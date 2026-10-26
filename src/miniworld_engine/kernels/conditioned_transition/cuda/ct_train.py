@@ -123,9 +123,14 @@ def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[t
     return dout, dsc, part
 
 
+# Measured (M = 36864, bf16): the fused wgmma squeeze + gate kernel with the two saved outputs takes 425 us against 108 + 43 + 79 for cuBLAS + addmm + sigmul_fwd
+# (a 128 x 128 tile is bound by L2 -> SM traffic at ~280 TFLOPS; cuBLAS runs 192 x 192): kept for the small-M inference tail, off for training.
+_FUSED_SQUEEZE_TRAIN = False
+
+
 def _fused_squeeze_ok(h, cond, ws) -> bool:
     """The squeeze + gate kernel's tiling: K slabs of 64, whole 128-column output tiles."""
-    return ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
+    return _FUSED_SQUEEZE_TRAIN and ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
 
 
 class _Tail(torch.autograd.Function):
