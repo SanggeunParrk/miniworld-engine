@@ -49,7 +49,7 @@ def supported(x: torch.Tensor) -> bool:
 
 
 def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None):
-    """(w, b, wcode): both in one dtype the kernel reads (bf16 / fp16 / fp32), 16-byte aligned, empty tensors when absent."""
+    """(w, b, wcode): both in one dtype the kernel reads (bf16 / fp16 / fp32), empty tensors when absent (an unaligned one is copied inside the kernel launcher)."""
     ref = weight if weight is not None else bias
     dt = ref.dtype if ref is not None and ref.dtype in _WCODE else torch.float32
     if (weight is not None and weight.dtype != dt) or (bias is not None and bias.dtype != dt):
@@ -57,16 +57,21 @@ def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tenso
     empty = x.new_empty((0,), dtype=dt)
 
     def prep(t):
-        t = t.detach().to(dt).contiguous()
-        return t if t.data_ptr() % 16 == 0 else t.clone()
+        return t.detach().to(dt).contiguous()
 
     return (empty if weight is None else prep(weight)), (empty if bias is None else prep(bias)), _WCODE[dt]
 
 
+def _acc() -> int:
+    """Accumulator copies of the backward workspace (a build constant of the extension)."""
+    return _ext().acc_copies()
+
+
 def _fwd_fake(x, w, b, eps, rms, train, with_ws):
+    """y like x; the workspace and the statistics are empty unless asked for."""
     n, m = x.shape[1], x.shape[0]
     f32 = dict(dtype=torch.float32, device=x.device)
-    return (torch.empty_like(x), torch.empty((2 * n + 1) if with_ws else 0, **f32), torch.empty((2 * m) if train else 0, **f32))
+    return (torch.empty_like(x), torch.empty((_acc() * 2 * n + 1) if with_ws else 0, **f32), torch.empty((2 * m) if train else 0, **f32))
 
 
 @opaque(fake=_fwd_fake, name="layernorm_pipe_fwd")
@@ -75,13 +80,14 @@ def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, rms: boo
     """Forward of contiguous x [M, N]; (y, ws, stats). ``train``: stats = fp32 [M, 2] (mean, rstd) for the backward; ``with_ws``: ws = the
     backward's fp32 workspace [2N + 1], zeroed here (empty when not asked)."""
     f32 = dict(dtype=torch.float32, device=x.device)
-    ws = torch.empty(2 * x.shape[1] + 1 if with_ws else 0, **f32)
+    ws = torch.empty(_acc() * 2 * x.shape[1] + 1 if with_ws else 0, **f32)
     stats = torch.empty(2 * x.shape[0] if train else 0, **f32)
     y = _ext().fwd(x, w, b, float(eps), bool(rms), ws, stats, PER_SM)
     return y, ws, stats
 
 
 def _bwd_fake(dy, x, w, stats, ws, rms, wcode):
+    """dx like x; dw / db [N] in the weight dtype when there is a workspace, else empty."""
     wdt = {v: k for k, v in _WCODE.items()}[wcode]
     n = x.shape[1] if ws.numel() else 0
     return (torch.empty_like(x), torch.empty((n,), dtype=wdt, device=x.device),

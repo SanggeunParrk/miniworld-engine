@@ -44,6 +44,19 @@ template <> __device__ __forceinline__ __half from_f<__half>(float v) { return _
 #ifndef MWP_S4
 #define MWP_S4 3
 #endif
+#ifndef MWP_MINB_BWD
+#define MWP_MINB_BWD (CH * VEC > 12 ? 1 : 2)
+#endif
+#ifndef MWP_MINB_FWD
+#define MWP_MINB_FWD (CH * VEC > 16 ? 1 : 2)
+#endif
+#ifndef MWP_K
+#define MWP_K 4
+#endif
+#ifndef MWP_DIRECT_DEFAULT
+#define MWP_DIRECT_DEFAULT 1
+#endif
+constexpr int ACC_COPIES = MWP_K;  // accumulator copies the CTAs spread their atomics over (the Python side sizes the workspace with the same number)
 constexpr int WARPS = MWP_WARPS;  // warps per CTA
 constexpr int THREADS = WARPS * 32;
 
@@ -170,7 +183,7 @@ __device__ __forceinline__ void row_stats(const float* v, const bool* cvalid, bo
 }
 
 template <typename T, int TPR, int CH, int VEC, bool RMS>
-__global__ void __launch_bounds__(THREADS, (CH * VEC > 16 ? 1 : 2))
+__global__ void __launch_bounds__(THREADS, MWP_MINB_FWD)
     pipe_fwd(const T* __restrict__ x, const void* __restrict__ w, const void* __restrict__ b, int wcode, T* __restrict__ y,
              float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N, float eps) {
   constexpr int RPP = 32 / TPR;
@@ -182,7 +195,7 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 16 ? 1 : 2))
   uint4* ring = smem + warp * (S * CH * 32) + lane;  // this lane's chunk 0 of stage 0
   const unsigned ring_u32 = smem_u32(ring);
   if (ws != nullptr && blockIdx.x == 0)  // zero the backward's workspace (2N sums + the ticket)
-    for (int i = threadIdx.x; i < 2 * N + 1; i += THREADS) ws[i] = 0.f;
+    for (int i = threadIdx.x; i < ACC_COPIES * 2 * N + 1; i += THREADS) ws[i] = 0.f;
   const int64_t W = int64_t(gridDim.x) * WARPS, wid = int64_t(blockIdx.x) * WARPS + warp;
   const int64_t npass = (M + RPP - 1) / RPP;
   const int64_t rstep = W * RPP, estep = rstep * N;
@@ -232,6 +245,53 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 16 ? 1 : 2))
   cp_wait<0>();
 }
 
+// Non-persistent forward for single-chunk rows: a warp takes PW consecutive passes, issues all their loads, then computes and stores; the
+// hardware schedules the CTAs. On rows of 256-512 bytes this keeps HBM busier than the cp.async ring (no startup latency per warp, no lock-step).
+template <typename T, int TPR, int VEC, bool RMS, int PW>
+__global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, const void* __restrict__ w, const void* __restrict__ b, int wcode,
+                                                      T* __restrict__ y, float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N,
+                                                      float eps) {
+  constexpr int RPP = 32 / TPR;
+  constexpr int E = VEC;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int g = lane / TPR, l = lane % TPR;
+  if (ws != nullptr && blockIdx.x == 0)
+    for (int i = threadIdx.x; i < ACC_COPIES * 2 * N + 1; i += THREADS) ws[i] = 0.f;
+  const int64_t wid = int64_t(blockIdx.x) * WARPS + warp;
+  const bool cvalid[1] = {l * VEC < N};
+  const bool pad = TPR * VEC != N;
+  uint4 raw[PW];
+#pragma unroll
+  for (int k = 0; k < PW; ++k) {
+    const int64_t row = (wid * PW + k) * RPP + g;
+    raw[k] = make_uint4(0, 0, 0, 0);
+    if (row < M && cvalid[0]) raw[k] = __ldg(reinterpret_cast<const uint4*>(x + row * int64_t(N) + l * VEC));
+  }
+  float wr[E], br[E];
+  load_affine<TPR, 1, VEC>(w, wcode, 1.f, l, N, wr);
+  load_affine<TPR, 1, VEC>(b, wcode, 0.f, l, N, br);
+  const float inv_n = 1.f / float(N);
+#pragma unroll
+  for (int k = 0; k < PW; ++k) {
+    const int64_t row = (wid * PW + k) * RPP + g;
+    float v[E];
+    const Pack<T, VEC> pk = *reinterpret_cast<const Pack<T, VEC>*>(&raw[k]);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) v[i] = to_f<T>(pk.v[i]);
+    float mean, rstd;
+    row_stats<TPR, 1, VEC, RMS>(v, cvalid, pad, inv_n, eps, mean, rstd);
+    if (row < M) {
+      if (stats != nullptr && l == 0) stats[row] = make_float2(mean, rstd);
+      if (cvalid[0]) {
+        Pack<T, VEC> o;
+#pragma unroll
+        for (int i = 0; i < VEC; ++i) o.v[i] = from_f<T>((v[i] - mean) * rstd * wr[i] + br[i]);
+        *reinterpret_cast<Pack<T, VEC>*>(y + row * int64_t(N) + l * VEC) = o;
+      }
+    }
+  }
+}
+
 // the backward's per-row (mean, rstd): the lanes of a row group read one address
 template <int TPR>
 __device__ __forceinline__ void issue_stats(unsigned sm, const float2*& ps, int64_t& row, const float2* base, int64_t M, int64_t rstep) {
@@ -242,7 +302,7 @@ __device__ __forceinline__ void issue_stats(unsigned sm, const float2*& ps, int6
 }
 
 template <typename T, int TPR, int CH, int VEC, bool RMS, bool WG>
-__global__ void __launch_bounds__(THREADS, (CH * VEC > 12 ? 1 : 2))
+__global__ void __launch_bounds__(THREADS, MWP_MINB_BWD)
     pipe_bwd(const T* __restrict__ dy, const T* __restrict__ x, const void* __restrict__ w, const float2* __restrict__ stats,
              T* __restrict__ dx, float* __restrict__ ws, void* __restrict__ dw_out, void* __restrict__ db_out, int wcode, int64_t M, int N) {
   constexpr int RPP = 32 / TPR;
@@ -294,16 +354,17 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 12 ? 1 : 2))
     slot = slot + 1 == S ? 0 : slot + 1;
     const float rstd = st.y, nmr = -st.x * st.y;  // xhat = x * rstd + nmr
     float s1 = 0.f, s2 = 0.f;
-    float xh[E];
+    float xh[E <= 8 ? E : 1];
     // columns past N carry x = dy = 0: g = 0 there, and so do the sums
 #pragma unroll
     for (int e = 0; e < E; ++e) {
-      xh[e] = fmaf(xv[e], rstd, nmr);
+      const float xhe = fmaf(xv[e], rstd, nmr);
+      if constexpr (E <= 8) xh[e] = xhe;
       const float gg = dv[e] * wr[e];
       s1 += gg;
-      s2 = fmaf(gg, xh[e], s2);
+      s2 = fmaf(gg, xhe, s2);
       if constexpr (WG) {
-        aw[e] = fmaf(dv[e], xh[e], aw[e]);
+        aw[e] = fmaf(dv[e], xhe, aw[e]);
         if constexpr (!RMS) ab[e] += dv[e];
       }
     }
@@ -323,7 +384,8 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 12 ? 1 : 2))
 #pragma unroll
           for (int i = 0; i < VEC; ++i) {
             const int e = c * VEC + i;
-            o.v[i] = from_f<T>(rstd * fmaf(-xh[e], s2, fmaf(dv[e], wr[e], -s1)));
+            const float xhe = E <= 8 ? xh[E <= 8 ? e : 0] : fmaf(xv[e], rstd, nmr);
+            o.v[i] = from_f<T>(rstd * fmaf(-xhe, s2, fmaf(dv[e], wr[e], -s1)));
           }
           *reinterpret_cast<Pack<T, VEC>*>(cout.p + c * TPR * VEC) = o;
         }
@@ -354,9 +416,9 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 12 ? 1 : 2))
       }
     }
     __syncthreads();
-    float* acc_w = ws;
-    float* acc_b = ws + N;
-    unsigned* ticket = reinterpret_cast<unsigned*>(ws + 2 * N);
+    float* acc_w = ws + (blockIdx.x % ACC_COPIES) * 2 * N;
+    float* acc_b = acc_w + N;
+    unsigned* ticket = reinterpret_cast<unsigned*>(ws + ACC_COPIES * 2 * N);
     for (int idx = threadIdx.x; idx < PER; idx += THREADS) {
       float tw = 0.f, tb = 0.f;
 #pragma unroll
@@ -371,19 +433,25 @@ __global__ void __launch_bounds__(THREADS, (CH * VEC > 12 ? 1 : 2))
         if constexpr (!RMS) atomicAdd(acc_b + col, tb);
       }
     }
-    __threadfence();
     __syncthreads();
-    if (threadIdx.x == 0) s_last = atomicAdd(ticket, 1u) == gridDim.x - 1;
+    if (threadIdx.x == 0) {
+      __threadfence();
+      s_last = atomicAdd(ticket, 1u) == gridDim.x - 1;
+    }
     __syncthreads();
     if (!s_last) return;
     __threadfence();
     for (int i = threadIdx.x; i < N; i += THREADS) {
-      const float a = __ldcg(acc_w + i);
-      acc_w[i] = 0.f;
-      float bb = 0.f;
-      if constexpr (!RMS) {
-        bb = __ldcg(acc_b + i);
-        acc_b[i] = 0.f;
+      float a = 0.f, bb = 0.f;
+#pragma unroll
+      for (int k = 0; k < ACC_COPIES; ++k) {
+        float* cw = ws + k * 2 * N;
+        a += __ldcg(cw + i);
+        cw[i] = 0.f;
+        if constexpr (!RMS) {
+          bb += __ldcg(cw + N + i);
+          cw[N + i] = 0.f;
+        }
       }
       if (wcode == 0) {
         reinterpret_cast<float*>(dw_out)[i] = a;
@@ -419,6 +487,15 @@ template <typename T, int TPR, int CH, int VEC, bool RMS>
 void launch_fwd(const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N, float eps, int per_sm,
                 cudaStream_t s) {
   constexpr int RPP = 32 / TPR;
+  if constexpr (CH == 1) {
+    if (per_sm >= 1000 || (per_sm == 0 && MWP_DIRECT_DEFAULT)) {
+      constexpr int PW = sizeof(T) == 4 ? 1 : 2;
+      const int64_t units = ((M + RPP - 1) / RPP + PW - 1) / PW;
+      const int64_t grid = (units + WARPS - 1) / WARPS;
+      direct_fwd<T, TPR, VEC, RMS, PW><<<int(grid), THREADS, 0, s>>>(x, w, b, wcode, y, ws, stats, M, N, eps);
+      return;
+    }
+  }
   constexpr size_t smem = size_t(WARPS) * stages<CH>() * CH * 32 * 16;
   auto k = pipe_fwd<T, TPR, CH, VEC, RMS>;
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem));
@@ -505,8 +582,8 @@ torch::Tensor pipe_forward(torch::Tensor x, torch::Tensor w, torch::Tensor b, do
   const int esz = int(x.element_size());
   TORCH_CHECK((int64_t(N) * esz) % 16 == 0 && reinterpret_cast<uintptr_t>(x.data_ptr()) % 16 == 0, "rows must be 16-byte aligned");
   TORCH_CHECK(!rms || b.numel() == 0, "RMSNorm has no bias");
-  TORCH_CHECK((!w.numel() || reinterpret_cast<uintptr_t>(w.data_ptr()) % 16 == 0) && (!b.numel() || reinterpret_cast<uintptr_t>(b.data_ptr()) % 16 == 0),
-              "weight and bias must be 16-byte aligned");
+  if (w.numel() && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16) w = w.clone();
+  if (b.numel() && reinterpret_cast<uintptr_t>(b.data_ptr()) % 16) b = b.clone();
   auto y = torch::empty_like(x);
   if (M == 0) return y;
   int tpr = 0, ch = 0;
@@ -554,6 +631,7 @@ std::vector<torch::Tensor> pipe_backward(torch::Tensor dy, torch::Tensor x, torc
                   reinterpret_cast<uintptr_t>(dy.data_ptr()) % 16 == 0,
               "rows must be 16-byte aligned");
   TORCH_CHECK(stats.numel() == 2 * M, "stats must be the forward's [M, 2]");
+  if (w.numel() && reinterpret_cast<uintptr_t>(w.data_ptr()) % 16) w = w.clone();
   auto dx = torch::empty_like(x);
   const bool wgrad = ws.numel() > 0;
   torch::Dtype wt = wcode == 0 ? torch::kFloat32 : wcode == 1 ? torch::kBFloat16 : torch::kHalf;
@@ -601,4 +679,5 @@ std::vector<torch::Tensor> pipe_backward(torch::Tensor dy, torch::Tensor x, torc
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &pipe_forward, "pipelined LayerNorm / RMSNorm forward");
   m.def("bwd", &pipe_backward, "pipelined LayerNorm / RMSNorm backward");
+  m.def("acc_copies", []() { return int(mwpipe::ACC_COPIES); }, "accumulator copies of the backward workspace");
 }
