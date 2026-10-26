@@ -8,6 +8,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
+
 ### Added
 
 - Portable kernels for the diffusion sampler glue `kernels/sampler_ops` (`augment_noise`, `align_euler`, `pool_atoms`): the contract and algorithm of the H100 CUDA kernels (the caller's random

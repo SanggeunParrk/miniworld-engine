@@ -22,6 +22,22 @@ D_PAIR = 256
 N_ROWS = 317
 _CUDA_CAPS = ((9, 0),)
 
+_CONSTANTS: dict[tuple, torch.Tensor] = {}
+
+
+def _constant(key: tuple, make) -> torch.Tensor:
+    """A small device constant (bin limits, the default residue index) built once per (key, device) and reused: every call of the builder used to launch its own
+    ``linspace`` / ``arange`` / cast kernels, which at B16 x L128 (a 60 us step) is a sixth of it. Read-only (the kernels never write them). Built only outside a CUDA
+    graph capture (a tensor allocated inside one belongs to the graph pool); a capture that finds none builds it as before."""
+    if torch.compiler.is_compiling():                 # traced: the constant folds into the compiled graph
+        return make()
+    t = _CONSTANTS.get(key)
+    if t is None:
+        t = make()
+        if not torch.cuda.is_current_stream_capturing():
+            _CONSTANTS[key] = t
+    return t
+
 
 def refusal(w, bb, ca_mask, has_cb, mask, residue_idx, chains, *, train=False) -> str | None:
     if not bb.is_cuda:
@@ -247,10 +263,12 @@ def pair_embed_ca(w, ca, mask, residue_idx=None, *, ln_eps=None) -> torch.Tensor
     if where == REFERENCE:
         out = pair_embed_ca_reference(w, ca, mask.bool(), residue_idx).to(torch.bfloat16)
         return out if ln_eps is None else F.layer_norm(out, (D_PAIR,), None, None, ln_eps)
-    idx = residue_idx if residue_idx is not None else torch.arange(1, n + 1, device=dev).expand(B, n)
+    idx = residue_idx.to(torch.int32).contiguous() if residue_idx is not None else _constant(("ca_idx", B, n, str(dev)), lambda: torch.arange(1, n + 1, device=dev, dtype=torch.int32).expand(B, n).contiguous())
     tbl = w.t().to(torch.bfloat16).contiguous()
-    dlim = torch.linspace(0.1, 3.0, 29, device=dev)
-    return _PairEmbedFn.apply(tbl, 1, ca.float().contiguous(), None, None, mask.to(torch.uint8).contiguous(), idx.to(torch.int32).contiguous(), None, dlim, None, ln_eps,
+    dlim = _constant(("ca_dlim", str(dev)), lambda: torch.linspace(0.1, 3.0, 29, device=dev))
+    # a bool mask is already 0 / 1 bytes: no cast kernel
+    m8 = mask.contiguous().view(torch.uint8) if mask.dtype is torch.bool else mask.to(torch.uint8).contiguous()
+    return _PairEmbedFn.apply(tbl, 1, ca.float().contiguous(), None, None, m8, idx, None, dlim, None, ln_eps,
                               int(where != CUDA))
 
 

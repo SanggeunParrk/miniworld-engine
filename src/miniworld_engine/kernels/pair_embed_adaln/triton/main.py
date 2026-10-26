@@ -229,4 +229,5 @@ def portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2):
     dtbl = _reduce(tpart, 1, nchunk * NBLK, NT * C, NT * C, 0, key).view(NT, C)
     dgb = _reduce(part, B, nrb, 512, 1024, 0, key)
     dl = _reduce(part, 1, B * nrb, 512, 1024, 512, key)
-    return dtbl, dl[0, :C].contiguous(), dl[0, C:].contiguous(), dgb[:, :C].contiguous(), dgb[:, C:].contiguous()
+    # clones: for a short sequence (one row block) _reduce returns a view of ``part``, and a custom op must not return outputs that alias each other
+    return dtbl.clone(), dl[0, :C].clone(), dl[0, C:].clone(), dgb[:, :C].clone(), dgb[:, C:].clone()

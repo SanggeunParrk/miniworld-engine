@@ -134,7 +134,8 @@ def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor
         return token_pair_init_reference(left.to(f), right.to(f), w_rel.to(f), w_bond.to(f), asym_id, residue_idx, token_idx, entity_id, sym_id, bond != 0,
                                          r_max, s_max)
     ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, B * L)
-    bond = (bond != 0).to(torch.uint8).reshape(-1)                     # any nonzero is a bond: the kernel's table has two bond rows
+    # a bool tensor is already 0 / 1 bytes: no pass over it (the H100 and portable kernels test `!= 0` themselves); any other dtype: any nonzero is a bond
+    bond = bond.contiguous().view(torch.uint8).reshape(-1) if bond.dtype is torch.bool else (bond != 0).to(torch.uint8).reshape(-1)
     tbl = torch.cat([w_rel.t(), w_bond.t()], 0).contiguous()
     return TokenPairInitFunction.apply(left.contiguous(), right.contiguous(), tbl, ids, bond, r_max, s_max, int(where != CUDA))
 

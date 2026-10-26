@@ -14,13 +14,51 @@ import torch
 
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
-FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full)
+FBLK = 512  # threads per CTA of the whole-structure kernels (slddt_*_full) on B200; H100 picks 128 / 256 / 512 (:func:`_fblk`)
 FULL_SMEM = 110 * 1024   # whole-structure kernels need N * 32 B of shared memory; two CTAs per SM (N <= 3520 atoms) beat the tile kernels
 FORCE_TILE = False  # tests set it to compare the tile kernel with the whole-structure one
 
 
 def _full(n: int) -> bool:
     return not FORCE_TILE and n * 32 <= FULL_SMEM
+
+
+FORCE_FWD = ""   # tests / probes: a fixed forward variant "<threads>s<threads per row>" of FWD_VARIANTS (the whole-structure kernel)
+FORCE_FB = 0     # ... and a fixed backward CTA size (128 / 256 / 512)
+FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
+FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
+
+
+@functools.lru_cache(maxsize=None)
+def _sm_count(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
+
+
+def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
+    """Threads per CTA of the whole-structure kernels. B200 keeps 512. On H100 a launch of A * B * N / 512 CTAs can be smaller than the SM count (A48 x N1024:
+    96 CTAs on 132 SMs, the other SMs idle, 16 warps on the rest): take the largest CTA whose grid has at least ``FBLK_FILL`` CTAs per SM (else the smallest)."""
+    if FORCE_FB:
+        return FORCE_FB
+    if _arch(_dev(x)) != "sm_90a":
+        return FBLK
+    sms = _sm_count(_dev(x))
+    for fb in (512, 256, 128):
+        if n_augment_batch * -(-n // fb) >= FBLK_FILL * sms:
+            return fb
+    return 128
+
+
+def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
+    """Forward whole-structure variant "<threads>s<threads per row>": B200 keeps 512s1; H100 deals each row to S = 2 threads (a launch has only A * B * N rows: A48 x N1024 is 11 warps per SM) and sizes the CTA to the grid."""
+    if FORCE_FWD:
+        return FORCE_FWD
+    if _arch(_dev(x)) != "sm_90a":
+        return "512s1"
+    sms = _sm_count(_dev(x))
+    for v, rows in (("512s2", 256), ("256s2", 128)):   # the largest CTA whose grid still has 1.5 CTAs per SM (measured A16 / A48, N512 - N2048)
+        if n_augment_batch * -(-n // rows) >= 1.5 * sms:
+            return v
+    return "256s2"
 
 
 def _arch(index: int) -> str:
@@ -44,8 +82,8 @@ def _kernels(index: int):
 
     with torch.cuda.device(index):
         # the whole-structure kernels take N * 32 B of dynamic shared memory: the attribute is raised once, the launch size is set per call
-        return tuple(driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if name.endswith("_full") else 0)
-                     for name in ("slddt_prep", "slddt_fwd", "slddt_bwd", "slddt_fwd_full", "slddt_bwd_full"))
+        names = ("slddt_prep", "slddt_fwd", "slddt_bwd", *(f"slddt_fwd_full_{v}" for v in FWD_VARIANTS), *(f"slddt_bwd_full_{fb}" for fb in (128, 256, 512)))
+        return {name: driver.Kernel(cubin(_arch(index)), name, FULL_SMEM if "_full" in name else 0) for name in names}
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -57,7 +95,7 @@ def prep(gt, nuc, mask):
     nuc / mask [B, N] int8; N % 128 == 0. tile bit 0: FM has a bit in the tile, bit 1: UM has one."""
     B, N = mask.shape
     nb = N // BLK
-    prep_k = _kernels(_dev(gt))[0]
+    prep_k = _kernels(_dev(gt))["slddt_prep"]
     tile = torch.empty(B, nb, nb, device=gt.device, dtype=torch.int8)
     cnt = torch.zeros(B, N, device=gt.device, dtype=torch.int32)   # the kernel adds the per-tile counts with integer atomics
     fm = torch.empty(B, N, N // 32, device=gt.device, dtype=torch.int32)   # every word is written
@@ -75,11 +113,13 @@ def forward(x, gt, tile, fm):
     out = torch.empty(A * B, nb, device=x.device, dtype=torch.float32)
     with torch.cuda.device(x.device):
         if _full(N):
-            k = ks[3]
+            v = _fwd_variant(x, A * B, N)
+            fb, s = (int(p) for p in v.split("s"))
+            k = ks[f"slddt_fwd_full_{v}"]
             k.smem = N * 32
-            k((A * B, -(-N // FBLK), 1), (FBLK, 1, 1), x, gt, fm, out, int(B), int(N), int(nb))
+            k((A * B, -(-N // (fb // s)), 1), (fb, 1, 1), x, gt, fm, out, int(B), int(N), int(nb))
         else:
-            ks[1]((A * B, nb, 1), (BLK, 1, 1), x, gt, tile, fm, out, int(B), int(N), int(nb))
+            ks["slddt_fwd"]((A * B, nb, 1), (BLK, 1, 1), x, gt, tile, fm, out, int(B), int(N), int(nb))
     return out
 
 
@@ -91,9 +131,10 @@ def backward(x, gt, nuc, tile, um, go):
     gx = torch.empty_like(x)
     with torch.cuda.device(x.device):
         if _full(N):
-            k = ks[4]
+            fb = _fblk(x, A * B, N)
+            k = ks[f"slddt_bwd_full_{fb}"]
             k.smem = N * 32
-            k((A * B, -(-N // FBLK), 1), (FBLK, 1, 1), x, gt, nuc, um, go, gx, int(B), int(N), int(nb))
+            k((A * B, -(-N // fb), 1), (fb, 1, 1), x, gt, nuc, um, go, gx, int(B), int(N), int(nb))
         else:
-            ks[2]((A * B, nb, 1), (BLK, 1, 1), x, gt, nuc, tile, um, go, gx, int(B), int(N), int(nb))
+            ks["slddt_bwd"]((A * B, nb, 1), (BLK, 1, 1), x, gt, nuc, tile, um, go, gx, int(B), int(N), int(nb))
     return gx

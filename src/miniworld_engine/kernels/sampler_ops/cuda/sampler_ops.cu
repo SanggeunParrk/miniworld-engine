@@ -450,6 +450,64 @@ __global__ void pool_atoms_fast_k(const __nv_bfloat16* __restrict__ x, const voi
   *reinterpret_cast<uint2*>(out + ((size_t)s * tokens + t) * channels + c) = packed;
 }
 
+
+// Wide variant (channels % 8 == 0, the one launched): a thread owns 8 consecutive channels (one 16-byte load per atom row), the rows of SUB atoms are requested at once; the atom loop runs over
+// the real atom count (no 32-wide padding), the channel order of the sums is the atom order, exactly as pool_atoms_fast_k.
+template <int IC, int GC, int MC, int SUB = 4>
+__global__ void pool_atoms_wide_k(const __nv_bfloat16* __restrict__ x, const void* idx, const void* gm, const void* am, __nv_bfloat16* out, int atoms,
+                                  int tokens, int rows, int channels) {
+  const int t = blockIdx.x, s = blockIdx.y, c = threadIdx.x * 8, lane = threadIdx.x & 31;
+  const bool live = c < channels;
+  const __nv_bfloat16* xs = x + (size_t)s * rows * channels + c;
+  float acc[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f}, den = 0.f;
+  for (int g0 = 0; g0 < atoms; g0 += 32) {
+    float ml = 0.f;
+    int rl = NO_ROW;
+    if (g0 + lane < atoms) {
+      const long k = (long)t * atoms + g0 + lane;
+      ml = ldt<MC>(am, k);
+      const float gl = ldt<GC>(gm, k);
+      if (ml != 0.f && gl != 0.f) rl = (int)(long)ldt<IC>(idx, k);
+    }
+    const int nvalid = min(32, atoms - g0);
+    for (int u0 = 0; u0 < nvalid; u0 += SUB) {
+      uint4 raw[SUB];
+      float mu[SUB];
+      bool use[SUB];
+#pragma unroll
+      for (int u = 0; u < SUB; ++u) {
+        mu[u] = __shfl_sync(0xffffffffu, ml, (u0 + u) & 31);
+        const int r = __shfl_sync(0xffffffffu, rl, (u0 + u) & 31);
+        use[u] = (u0 + u < nvalid) && r != NO_ROW;
+        raw[u] = make_uint4(0u, 0u, 0u, 0u);
+        if (live && use[u]) raw[u] = *reinterpret_cast<const uint4*>(xs + (size_t)r * channels);
+      }
+#pragma unroll
+      for (int u = 0; u < SUB; ++u) {
+        if (u0 + u >= nvalid) continue;
+        den += mu[u];
+        if (use[u]) {
+          const unsigned w[4] = {raw[u].x, raw[u].y, raw[u].z, raw[u].w};
+#pragma unroll
+          for (int q = 0; q < 4; ++q) {
+            acc[2 * q] += mu[u] * fmaxf(__uint_as_float(w[q] << 16), 0.f);
+            acc[2 * q + 1] += mu[u] * fmaxf(__uint_as_float(w[q] & 0xffff0000u), 0.f);
+          }
+        }
+      }
+    }
+  }
+  if (!live) return;
+  const float inv = fmaxf(den, 1e-10f);
+  uint4 packed;
+  unsigned* pw = reinterpret_cast<unsigned*>(&packed);
+#pragma unroll
+  for (int q = 0; q < 4; ++q) {
+    __nv_bfloat162 o = __floats2bfloat162_rn(acc[2 * q] / inv, acc[2 * q + 1] / inv);
+    pw[q] = *reinterpret_cast<unsigned*>(&o);
+  }
+  *reinterpret_cast<uint4*>(out + ((size_t)s * tokens + t) * channels + c) = packed;
+}
 __global__ void pool_atoms_k(const __nv_bfloat16* __restrict__ x, const void* idx, int idx_code, const void* gm, int gm_code, const void* am,
                              int am_code, __nv_bfloat16* out, int atoms, int tokens, int rows, int channels) {
   const int t = blockIdx.x, s = blockIdx.y, c = threadIdx.x * 4;
@@ -487,7 +545,10 @@ int code_of(const at::Tensor& t) {
 template <int IC, int GC, int MC>
 void pool_fast(dim3 grid, unsigned threads, cudaStream_t s, const __nv_bfloat16* x, const at::Tensor& idx, const at::Tensor& gm, const at::Tensor& am,
                __nv_bfloat16* out, int A, int T, int R, int C) {
-  pool_atoms_fast_k<IC, GC, MC><<<grid, threads, 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);
+  if (C % 8 == 0)
+    pool_atoms_wide_k<IC, GC, MC><<<grid, (unsigned)(((C / 8) + 31) / 32 * 32), 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);
+  else
+    pool_atoms_fast_k<IC, GC, MC><<<grid, threads, 0, s>>>(x, idx.data_ptr(), gm.data_ptr(), am.data_ptr(), out, A, T, R, C);
 }
 
 template <int IC, int GC>

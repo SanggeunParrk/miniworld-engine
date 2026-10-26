@@ -9,10 +9,15 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels.token_pair_init.cuda.sm100 import P, check_packable, fwd_rows, n_rel
+from miniworld_engine.kernels.token_pair_init.cuda.sm100 import P, check_packable, n_rel
 
 _dir = Path(__file__).parent
 RB = 8
+
+
+def fwd_rows(L: int) -> int:
+    """Rows of z per forward CTA (the kernel loads the class-row table once per CTA and right[j] once per R rows): 4 up to L 256, else 2 (measured L128-L384, B16 / B48)."""
+    return 4 if L <= 256 else 2
 
 
 @functools.lru_cache(maxsize=None)
