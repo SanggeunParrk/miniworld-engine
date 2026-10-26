@@ -2772,23 +2772,38 @@ __global__ __launch_bounds__(384, 1) void opm_fused_kernel(
       if (lane == 0) arrive(wempty + wprev);
     }
     if (DBG == 1 || DBG == 2 || DBG == 3) continue;
-    asm volatile("bar.sync 2, 256;\n" ::: "memory");   // the counts are in shared memory
-    // ---- epilogue: count, bias, residual, bf16, z[i, j, o]
+    asm volatile("bar.sync 2, 256;\n" ::: "memory");   // the counts are in shared memory; every projection wgmma has finished reading Opair
+    // ---- epilogue: count, bias, bf16 -> a [pair][o] tile in the (dead) Opair buffer, then coalesced 16 B rows to z (+ residual)
+    {
+      __nv_bfloat16* st = reinterpret_cast<__nv_bfloat16*>(smem + OP_OFF);   // row stride 272 B: the four lanes of a quad hit four bank groups
 #pragma unroll
-    for (int t2 = 0; t2 < 16; ++t2) {
+      for (int t2 = 0; t2 < 16; ++t2) {
 #pragma unroll
-      for (int h = 0; h < 2; ++h) {          // h: row o + 8 * h
-        const int o = cw * 64 + w4 * 16 + (lane >> 2) + h * 8;
+        for (int h = 0; h < 2; ++h) {          // h: row o + 8 * h
+          const int o = cw * 64 + w4 * 16 + (lane >> 2) + h * 8;
 #pragma unroll
-        for (int u = 0; u < 2; ++u) {        // u: the pair of the column
-          const int p = t2 * 8 + (lane & 3) * 2 + u;
-          const float a = acc2[4 * t2 + 2 * h + u], iv = sInv[p], b = bias_r[h];
-          __nv_bfloat16 v = __float2bfloat16_rn(AFTER ? (a + b) * iv : fmaf(a, iv, b));
-          const size_t zi = ((size_t)(m * 16 + (p >> 3)) * L + (n * 8 + (p & 7))) * 128 + o;
-          if (RESIDUAL != nullptr) v = __hadd(v, RESIDUAL[zi]);
-          Z[zi] = v;
+          for (int u = 0; u < 2; ++u) {        // u: the pair of the column
+            const int p = t2 * 8 + (lane & 3) * 2 + u;
+            const float a = acc2[4 * t2 + 2 * h + u], iv = sInv[p], b = bias_r[h];
+            st[p * 136 + o] = __float2bfloat16_rn(AFTER ? (a + b) * iv : fmaf(a, iv, b));
+          }
         }
       }
+    }
+    asm volatile("bar.sync 2, 256;\n" ::: "memory");
+#pragma unroll
+    for (int v = 0; v < 8; ++v) {
+      const int idx = v * 256 + ctid, p = idx >> 4, ch = idx & 15;
+      uint4 val = *reinterpret_cast<const uint4*>(smem + OP_OFF + p * 272 + ch * 16);
+      const size_t zi = (((size_t)(m * 16 + (p >> 3)) * L + (n * 8 + (p & 7))) * 128) + ch * 8;
+      if (RESIDUAL != nullptr) {
+        const uint4 r = *reinterpret_cast<const uint4*>(RESIDUAL + zi);
+        __nv_bfloat162* a2p = reinterpret_cast<__nv_bfloat162*>(&val);
+        const __nv_bfloat162* r2p = reinterpret_cast<const __nv_bfloat162*>(&r);
+#pragma unroll
+        for (int q2 = 0; q2 < 4; ++q2) a2p[q2] = __hadd2(a2p[q2], r2p[q2]);   // the update is rounded to bf16 first, as the unfused path does
+      }
+      *reinterpret_cast<uint4*>(Z + zi) = val;
     }
   }
 }
