@@ -132,7 +132,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
 
     ``extra`` is an optional [L, L] logit bias added to every head of every block's pair bias (the structural-token
     family's ``structural_pair_attn_bias``). It is folded into the hoisted bias, so it costs one add per pair, not per step.
-    BF16 only: the FP32 bias is key-permuted by its fused kernel.
+    BF16 and FP32 (the FP32 bias is key-permuted: so is the extra term).
     """
     import math
     from ... import _capture
@@ -155,10 +155,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         raise ValueError(
             "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / 128"
         )
-    if extra is not None and (
-        single.dtype is not torch.bfloat16 or tuple(extra.shape) != (L, L)
-    ):
-        raise ValueError("Hopper token extra pair bias requires BF16 and an [L, L] bias")
+    if extra is not None and tuple(extra.shape) != (L, L):
+        raise ValueError("Hopper token extra pair bias requires an [L, L] bias")
     qs = math.log2(math.e) / math.sqrt(D // heads)
     fp32 = single.dtype is torch.float32
     asynchronous = _CANDIDATE_INFER_ASYNC
@@ -232,6 +230,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 bias = torch.mm(wf, zh.t()).view(heads, L, L)
                 if mask is not None:
                     _ext().token_mask90(bias, mask)
+            if extra is not None:
+                # the TF32 core reads the keys in key_perm order: the extra term is laid out the same way (masked keys stay at -1e30)
+                bias += (extra.float() * 1.4426950408889634)[:, key_perm(L, single.device)]
         else:
             bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
             if extra is not None:

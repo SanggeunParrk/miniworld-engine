@@ -291,10 +291,10 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
 
 
 def serves_extra_bias(single, extra) -> bool:
-    """The [L, L] extra pair bias is folded into the Hopper BF16 CUDA path's hoisted bias, and nowhere else."""
+    """The [L, L] extra pair bias is folded into the Hopper (BF16 and FP32) CUDA path's hoisted bias, and nowhere else."""
     return (
         single.is_cuda
-        and single.dtype is torch.bfloat16
+        and single.dtype in (torch.bfloat16, torch.float32)
         and torch.cuda.get_device_capability(single.device) == (9, 0)
         and tuple(extra.shape) == (single.shape[2], single.shape[2])
     )

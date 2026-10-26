@@ -89,7 +89,15 @@ TRN = (
 )
 
 
-def serves(module, single, cond, pair, mask, compute_dtype=None) -> bool:
+def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> bool:
+    if extra is not None and not (
+        single.is_cuda
+        and _sm90(single.device)
+        and extra.ndim == 2
+        and tuple(extra.shape) == (single.shape[2], single.shape[2])
+        and extra.dtype in (BF, torch.float32)
+    ):
+        return False   # the [L, L] logit term is folded into the H100 block's bias GEMM output; nowhere else
     if (not settings.current().token_dit_train) or not torch.is_grad_enabled():
         return False
     if settings.current().force_portable_kernels:
@@ -651,7 +659,7 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
     ]
 
 
-def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False):
+def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False, extra=None):
     n, dp = _nd(params, qk, single.shape[-1])
     return [
         torch.empty_like(single),
@@ -672,15 +680,16 @@ def _fwd(
     fp32: bool,
     heads: int,
     psb: bool = False,
+    extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
     """The block's forward: [out, *saved activations] (every output freshly allocated); ``fp32``: fp32 GEMM operands (on TF32
     tensor cores, whatever the caller's allow_tf32) and the TF32 attention kernels, else bf16. Autocast off: the precision is
     ``fp32``'s, and an enclosing bf16 autocast would otherwise turn the fp32 path's GEMM outputs bf16."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
-        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb)
+        return _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb, extra)
 
 
-def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False):
+def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, extra=None):
     mm, _mm32, addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -764,6 +773,8 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False):
         T.pair_ln(p2, ph, pst, EPS)
         # head-major bias, Wf = Wb diag(wp): natural units for sm_100a, log2 units (and key-permuted for the TF32 core) for sm_90a
         bias = mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
+        if extra is not None:   # an [L, L] logit term for every head, in the bias's log2 units (the H100 block only): one add
+            bias.add_(extra.view(1, L, L), alpha=LOG2E)
     else:  # B200 fp32: LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev)
@@ -1018,12 +1029,13 @@ def _native_final90(
     return [result[n] for n in names]
 
 
-def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb=False):
+def _bwd_fake(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb=False, extra=None):
     return [
         torch.empty_like(single),
         torch.empty_like(cond),
         torch.empty_like(pair),
         *(torch.empty_like(p) for p in params),
+        *([] if extra is None else [torch.empty_like(extra)]),
     ]
 
 
@@ -1042,13 +1054,22 @@ def _bwd(
     fp32: bool,
     heads: int,
     psb: bool = False,
+    extra: torch.Tensor | None = None,
 ) -> list[torch.Tensor]:
     """The block's backward: [d single, d cond, d pair, *d params] in the inputs' dtypes (autocast off, as ``_fwd``); with
     ``psb`` the third is d bias [H, A, L, L]."""
     with _tf32(fp32), torch.autocast("cuda", enabled=False):
         return _bwd_body(
-            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb
+            single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, heads, psb, extra
         )
+
+
+def _xgrad(DB, extra, H, L):
+    """d extra [L, L] (the extra term enters every head's logits once, in natural units: the sum of dbias over the heads) as a
+    one-element list, or none when the caller does not differentiate it."""
+    if extra is None:
+        return []
+    return [DB.reshape(H, L, L).sum(0, dtype=torch.float32).to(extra.dtype)]
 
 
 def _psb_attn_bwd(T, qs, k, v, dob, mask, bias, lse, dd, A, L, H, DH):
@@ -1060,7 +1081,7 @@ def _psb_attn_bwd(T, qs, k, v, dob, mask, bias, lse, dd, A, L, H, DH):
     return sm90.backward_psb(qs, k, v, dob, bias, km, lse, dd, A, L, H, DH)
 
 
-def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H, psb=False):
+def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H, psb=False, extra=None):
     mm, mm32, _addmm = _owned_gemms90(single)
     from miniworld_engine.kernels.augmented_attention import cuda as sm90
     from miniworld_engine.kernels.augmented_attention.cuda import sm100
@@ -1248,6 +1269,7 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
             dc.view(cond.shape),
             DB.view(pair.shape) if psb else dpair.view(1, L, L, dpw),
             *outs,
+            *_xgrad(DB, extra, H, L),
         ]
     T.cond_bwd(dchat, dcg, c2, cst, dc)
     dWu = torch.empty_like(dWn)
@@ -1302,25 +1324,26 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
     torch._foreach_copy_(
         outs, [grads[n].reshape(p.shape) for n, p in zip(names, params, strict=False)]
     )
-    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs]
+    return [dx.view(A, 1, L, D), dc.view(cond.shape), dpair.view(1, L, L, dpw), *outs, *_xgrad(DB, extra, H, L)]
 
 
 class _Block(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, psb, *params):
+    def forward(ctx, single, cond, pair, mask, qk, eq, ek, fp32, heads, psb, extra, *params):
         out, *saved = _fwd(
-            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, psb
+            single, cond, pair, mask, list(params), qk, eq, ek, fp32, heads, psb, extra
         )
-        ctx.save_for_backward(single, cond, pair, *params, *saved)
-        ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, psb)
+        ctx.save_for_backward(single, cond, pair, *params, *saved, extra)
+        ctx.meta = (mask, qk, eq, ek, fp32, len(params), heads, psb, extra is not None and ctx.needs_input_grad[10])
         return out
 
     @staticmethod
     def backward(ctx, dout):
-        mask, qk, eq, ek, fp32, npar, heads, psb = ctx.meta
+        mask, qk, eq, ek, fp32, npar, heads, psb, xgrad = ctx.meta
         vals = ctx.saved_tensors
         single, cond, pair = vals[:3]
-        params, saved = list(vals[3 : 3 + npar]), list(vals[3 + npar :])
+        params, saved, extra = list(vals[3 : 3 + npar]), list(vals[3 + npar : -1]), vals[-1]
+        xg = extra if xgrad else None
         dx, dc, dpair, *pg = _bwd(
             single,
             cond,
@@ -1335,6 +1358,7 @@ class _Block(torch.autograd.Function):
             fp32,
             heads,
             psb,
+            xg,
         )
         if _native90(single.device) and not psb:
             _activate_native_caller(force=True)
@@ -1349,7 +1373,8 @@ class _Block(torch.autograd.Function):
             None,
             None,
             None,
-            *(g if ctx.needs_input_grad[10 + i] else None for i, g in enumerate(pg)),
+            pg.pop() if xgrad else None,
+            *(g if ctx.needs_input_grad[11 + i] else None for i, g in enumerate(pg)),
         )
 
 
@@ -1370,7 +1395,7 @@ def _pad(single, cond, pair, mask, Ap, Lp):
     )
 
 
-def block(module, single, cond, pair, mask=None, compute_dtype=None):
+def block(module, single, cond, pair, mask=None, compute_dtype=None, extra=None):
     """One DiTBlock (attention + transition, both residuals) through the fused training path, in the precision
     ``operand_dtype`` picks. Call ``serves`` first. L is padded to a multiple of 128 and A to an even count where needed
     (``_pad``; a padded call returns the slice of the real samples and rows)."""
@@ -1391,9 +1416,12 @@ def block(module, single, cond, pair, mask=None, compute_dtype=None):
     )  # the caller's tensors: the native hooks attach to their autograd edges, not the pads'
     if padded:
         single, cond, pair, mask = _pad(single, cond, pair, mask, Ap, Lp)
+        if extra is not None:
+            extra = torch.nn.functional.pad(extra, (0, Lp - L, 0, Lp - L))
     params = [module.get_parameter(n) for n in _names_for(qk)]
     out = _Block.apply(
-        single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head), False, *params
+        single, cond, pair.contiguous(), mask, qk, eq, ek, fp32, int(a.n_head), False,
+        None if extra is None else extra.contiguous(), *params
     )
     if _native90(caller[0].device):
         # The result's edges now strongly own leaf AccumulateGrad nodes.
@@ -1474,7 +1502,7 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
         bias = F.pad(bias, (0, Lp - L, 0, Lp - L))
         mask = F.pad(mask.to(torch.bool), (0, Lp - L), value=False)
     out = _Block.apply(
-        single, cond, bias.contiguous(), mask, qk, eq, ek, False, int(a.n_head), True, *params
+        single, cond, bias.contiguous(), mask, qk, eq, ek, False, int(a.n_head), True, None, *params
     )
     return out[:, :, :L] if Lp != L else out
 
