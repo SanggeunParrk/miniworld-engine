@@ -95,7 +95,7 @@ def _wcat_bcat(x, ws, bs, wb):
 
 
 def _fwd_fake(x2, c2, wc, ws, bs, wb, eps_x, eps_c):
-    """Shapes of the CUDA adaLN forward: (y [r, d], LN(cond) like cond, fp32 statistics of cond and of x [r, 2], the gate and bias rows [r, 2d])."""
+    """Output structure of ``adaln_h100_fwd``."""
     r, d = x2.shape
     return (
         x2.new_empty((r, d)),
@@ -119,8 +119,8 @@ def _fwd(
     return y, cn, stc, stx, sb
 
 
-def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs):
-    """Shapes of the CUDA adaLN backward: (dx, dcond, the cond-LN weight gradient, the scale and bias weight gradients in fp32, and the scale-bias gradient, empty without it)."""
+def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, dcres=None):
+    """Output structure of ``adaln_h100_bwd``."""
     d, dc = ws.shape
     return (
         x2.new_empty(x2.shape),
@@ -136,45 +136,90 @@ def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs):
 def _bwd(
     dy2: torch.Tensor, x2: torch.Tensor, c2: torch.Tensor, cn: torch.Tensor, stc: torch.Tensor, stx: torch.Tensor, sb: torch.Tensor,
     wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, has_bs: bool,
+    dres: torch.Tensor | None = None, dcres: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """(dx, dcond, dwc, dWs, dbs (empty without a scale bias), dWb) from dy2 [r, d] and the forward's saved rows."""
+    """(dx, dcond, dwc, dWs, dbs (empty without a scale bias), dWb) from dy2 [r, d] and the forward's saved rows. ``dres`` / ``dcres``: gradients of the
+    stream outputs (x, cond returned as they are for a caller that adds them to something later), which join dx / dcond inside the row kernels that
+    write them instead of in a separate add of the two paths."""
     e = _ext()
     d = x2.shape[-1]
     wcat, _ = _wcat_bcat(x2, ws, bs, wb)
-    dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx)
-    dcn = torch.mm(dsb, wcat)
-    dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32) if dsb.dtype is torch.bfloat16 else torch.mm(dsb.t(), cn)  # [2 d, dc]
-    dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
-    dbs = pbs.sum(0) if has_bs else pbs.new_empty(0)
-    return dx, dcond, pbc.sum(0), dwcat[:d].clone(), dbs, dwcat[d:].clone()
+    dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx, dres)
+    if dsb.dtype is torch.bfloat16:
+        dcn = torch.mm(dsb, wcat)
+        dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
+    else:  # TF32: the layouts cuBLAS runs fastest (measured at 18432 rows: dW 148 -> 119 us, dcn 127 -> 91 us)
+        dcn = torch.mm(dsb, wcat.t().contiguous().t())
+        dwcat = torch.mm(cn.t(), dsb).t()  # [2 d, dc]
+    dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous(), dcres)
+    from .infer import colsum   # fixed-order column sums of the block partials: one launch each instead of a PyTorch reduction
+
+    dbs = colsum(pbs) if has_bs else pbs.new_empty(0)
+    return dx, dcond, colsum(pbc), dwcat[:d].clone(memory_format=torch.contiguous_format), dbs, dwcat[d:].clone(memory_format=torch.contiguous_format)
 
 
 class _AdaLN(torch.autograd.Function):
+    """``wgmma``: the forward is the sm_90a wgmma one (``infer.fwd_saved``) instead of ``ln_cond_fwd`` -> cuBLAS -> ``adaln_fwd``; the saved tensors and the
+    backward are the same. ``streams``: also return x and cond themselves, as outputs of this node, so that their gradients (arriving from whatever adds
+    them to its result) join the backward's row kernels."""
+
     @staticmethod
-    def forward(ctx, x, cond, wc, ws, bs, wb, eps_x, eps_c):  # noqa: D102
+    def forward(ctx, x, cond, wc, ws, bs, wb, eps_x, eps_c, wgmma=False, streams=False):  # noqa: D102
         d, dc = x.shape[-1], cond.shape[-1]
         x2, c2 = x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous()
-        y, cn, stc, stx, sb = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
+        if wgmma:
+            from . import infer
+
+            y, cn, stc, stx, sb = infer.fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c,
+                                                  infer.pick_ht(x2.shape[0], d, infer.num_sms(x2.device)))
+        else:
+            y, cn, stc, stx, sb = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
         if any(ctx.needs_input_grad):
             # the weights are saved too: autograd then refuses an in-place update between the passes
             ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, *([] if bs is None else [bs]))
             ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
-        return y.view(x.shape)
+        return (y.view(x.shape), x.view_as(x), cond.view_as(cond)) if streams else y.view(x.shape)
 
     @staticmethod
-    def backward(ctx, dy):  # noqa: D102
+    def backward(ctx, dy, dxs=None, dcs=None):  # noqa: D102
         x2, c2, cn, stc, stx, sb, wc, ws, wb, *rest = ctx.saved_tensors
         bs = rest[0] if ctx.has_bs else None
         dy2 = dy.reshape(-1, x2.shape[-1]).contiguous()
-        dx, dcond, dwc, dws, dbs, dwb = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs)
-        return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None
+        dres = None if dxs is None else dxs.reshape(-1, x2.shape[-1]).contiguous()
+        dcres = None if dcs is None else dcs.reshape(-1, c2.shape[-1]).contiguous()
+        dx, dcond, dwc, dws, dbs, dwb = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres)
+        return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None, None, None
 
 
-def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5):
+def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5, *, rna: bool = False, streams: bool = False):
     """``sigmoid(LN(c) w_scale^T + b_scale) * LN(x) + LN(c) w_bias^T`` with LN(c) = LayerNorm(cond) * ln_cond_weight; bf16 or fp32 x / cond
     [..., d] / [..., dc]; the weights may be fp32 masters (rounded to bf16 in one pack launch for bf16 activations) or bf16. Returns x's dtype.
-    A ``torch.compile`` trace sees two opaque ops (``adaln_h100_fwd`` / ``adaln_h100_bwd``)."""
-    return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond)
+
+    The ONE entry of the H100 AdaLN; the route is chosen here by mode, dtype and shape:
+
+    * no backward recorded: the sm_90a wgmma kernels of ``infer.py`` (``ln_rows`` + one GEMM with the gate and the LayerNorm of x in its epilogue, the
+      second launch under PDL). ``rna``: round an fp32 result to the TF32 grid (its consumer is a TF32 GEMM);
+    * a backward recorded: the same wgmma forward for bf16 (saving what the backward reads), the row kernels + cuBLAS of ``adaln_rows.cu`` for fp32
+      (measured faster there: 171 against 208 us at 18432 rows), then their backward.
+
+    ``streams`` (training): return ``(y, x, cond)``, the last two being x and cond as outputs of the same autograd node: a caller that adds them to
+    its own result (the residual stream, the gate projection of cond) gets their gradients folded into the backward's row kernels.
+    A ``torch.compile`` trace sees opaque ops (``adaln_cuda_*`` / ``adaln_h100_fwd`` / ``adaln_h100_bwd``)."""
+    from . import infer
+
+    grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, cond, ln_cond_weight, w_scale, b_scale, w_bias))
+    wgmma = infer.supported(x, cond, x.shape[-1], cond.shape[-1])
+    if wgmma and not grad:
+        y = infer.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)
+        return (y, x, cond) if streams else y
+    return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, wgmma and infer.train_supported(x), streams)
 
 
-__all__ = ["adaln", "available", "supported"]
+def wgmma_supported(x, cond) -> bool:
+    """Whether ``adaln()`` takes the sm_90a wgmma route for this call (a consumer that chains a wgmma GEMM on the result asks)."""
+    from . import infer
+
+    return infer.supported(x, cond, x.shape[-1], cond.shape[-1])
+
+
+__all__ = ["adaln", "available", "supported", "wgmma_supported"]

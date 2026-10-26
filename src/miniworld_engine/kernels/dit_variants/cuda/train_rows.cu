@@ -754,22 +754,7 @@ void pair_ln_bwd(at::Tensor z, at::Tensor dxh, at::Tensor dz, double eps) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// out [cols, rows] = in [rows, cols]^T, fp32 or bf16, tiled through shared memory
-template <typename T>
-__global__ void __launch_bounds__(256) dv_transpose_k(const T* __restrict__ IN, T* __restrict__ OUT, long rows, long cols) {
-  __shared__ T tile[32][33];
-  const long c0 = (long)blockIdx.x * 32, r0 = (long)blockIdx.y * 32;
-  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
-  for (int i = ty; i < 32; i += 8) {
-    const long r = r0 + i, c = c0 + tx;
-    if (r < rows && c < cols) tile[i][tx] = IN[r * cols + c];
-  }
-  __syncthreads();
-  for (int i = ty; i < 32; i += 8) {
-    const long c = c0 + i, r = r0 + tx;
-    if (r < rows && c < cols) OUT[c * rows + r] = tile[tx][i];
-  }
-}
+// out [cols, rows] = in [rows, cols]^T, fp32 or bf16: the shared tiled kernel tdr::transpose_k<T, true> (token_dit_common.cuh), bounds-checked for any rows, cols
 
 void transpose2d(at::Tensor in, at::Tensor out) {
   const c10::cuda::CUDAGuard guard(in.device());
@@ -777,8 +762,8 @@ void transpose2d(at::Tensor in, at::Tensor out) {
               in.scalar_type() == out.scalar_type(), "transpose2d: contiguous [rows, cols] -> [cols, rows]");
   const long rows = in.size(0), cols = in.size(1);
   dim3 grid((cols + 31) / 32, (rows + 31) / 32);
-  if (is_bf(in)) dv_transpose_k<bf><<<grid, 256, 0, S_()>>>(CP<bf>(in), P<bf>(out), rows, cols);
-  else dv_transpose_k<float><<<grid, 256, 0, S_()>>>(CP<float>(in), P<float>(out), rows, cols);
+  if (is_bf(in)) tdr::transpose_k<bf, true><<<grid, 256, 0, S_()>>>(CP<bf>(in), P<bf>(out), rows, cols);
+  else tdr::transpose_k<float, true><<<grid, 256, 0, S_()>>>(CP<float>(in), P<float>(out), rows, cols);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

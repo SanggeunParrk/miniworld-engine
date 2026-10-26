@@ -233,9 +233,10 @@ class Settings:
     #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
     #: A is even and there is no key mask. Falls back on anything else (formerly also ``augattn_bf16_sm100``).
     augmented_attention_bf16_sm100: bool = True
-    #: Route the adaptive LayerNorm of an H100 call (bf16 activations, ``AdaptiveLayerNorm`` with the engine implementation) through
-    #: the hand-CUDA row kernels + two cuBLAS GEMMs (kernels/adaln/cuda) instead of the PyTorch leg's ten fp32 elementwise / LayerNorm
-    #: kernels. Falls back on anything else (fp32 activations, other cards, torch.compile tracing).
+    #: Route the adaptive LayerNorm of an H100 call (``AdaptiveLayerNorm`` with the engine implementation; bf16 and fp32) through the
+    #: hand-CUDA kernels (kernels/adaln/cuda: sm_90a wgmma inference and bf16 training forward, row kernels + cuBLAS for fp32 training)
+    #: instead of the PyTorch leg's ten fp32 elementwise / LayerNorm kernels. Falls back on anything else (other cards, widths the
+    #: tiles do not take). One setting, one entry point (``kernels.adaln.cuda.adaln``).
     adaln_h100_cuda: bool = True
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.

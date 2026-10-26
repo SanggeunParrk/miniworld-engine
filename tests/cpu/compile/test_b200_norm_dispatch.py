@@ -42,10 +42,12 @@ def _card(monkeypatch, capability):
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
 @pytest.mark.parametrize(("op", "engine"), [("adaptive_layernorm", KernelBackend.PORTABLE), ("conditioned_transition", KernelBackend.PORTABLE)])
-def test_h100_and_b200_run_the_norms_as_pytorch_ops(monkeypatch, op, engine, capability):
+def test_h100_runs_adaln_and_conditioned_transition_on_cuda_and_b200_as_pytorch_ops(monkeypatch, op, engine, capability):
+    """H100 has hand-written sm_90a kernels for these two (kernels/adaln/cuda, kernels/conditioned_transition/cuda); B200 still runs the PyTorch reference."""
     _card(monkeypatch, capability)
-    assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
-    assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is KernelBackend.PYTORCH
+    expected = KernelBackend.CUDA if capability == (9, 0) else KernelBackend.PYTORCH
+    assert dispatch.resolve(op, "miniworld") is expected
+    assert dispatch.resolve(op, "miniworld", torch.device("cuda", 0)) is expected
 
 
 @pytest.mark.parametrize("capability", [(9, 0), (10, 0)])
