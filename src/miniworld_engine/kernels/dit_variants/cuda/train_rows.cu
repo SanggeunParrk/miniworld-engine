@@ -756,7 +756,7 @@ void pair_ln_bwd(at::Tensor z, at::Tensor dxh, at::Tensor dz, double eps) {
 
 // out [cols, rows] = in [rows, cols]^T, fp32 or bf16, tiled through shared memory
 template <typename T>
-__global__ void __launch_bounds__(256) transpose_k(const T* __restrict__ IN, T* __restrict__ OUT, long rows, long cols) {
+__global__ void __launch_bounds__(256) dv_transpose_k(const T* __restrict__ IN, T* __restrict__ OUT, long rows, long cols) {
   __shared__ T tile[32][33];
   const long c0 = (long)blockIdx.x * 32, r0 = (long)blockIdx.y * 32;
   const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
@@ -777,8 +777,8 @@ void transpose2d(at::Tensor in, at::Tensor out) {
               in.scalar_type() == out.scalar_type(), "transpose2d: contiguous [rows, cols] -> [cols, rows]");
   const long rows = in.size(0), cols = in.size(1);
   dim3 grid((cols + 31) / 32, (rows + 31) / 32);
-  if (is_bf(in)) transpose_k<bf><<<grid, 256, 0, S_()>>>(CP<bf>(in), P<bf>(out), rows, cols);
-  else transpose_k<float><<<grid, 256, 0, S_()>>>(CP<float>(in), P<float>(out), rows, cols);
+  if (is_bf(in)) dv_transpose_k<bf><<<grid, 256, 0, S_()>>>(CP<bf>(in), P<bf>(out), rows, cols);
+  else dv_transpose_k<float><<<grid, 256, 0, S_()>>>(CP<float>(in), P<float>(out), rows, cols);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
