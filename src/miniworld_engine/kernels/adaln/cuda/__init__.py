@@ -95,6 +95,7 @@ def _wcat_bcat(x, ws, bs, wb):
 
 
 def _fwd_fake(x2, c2, wc, ws, bs, wb, eps_x, eps_c):
+    """Shapes of the CUDA adaLN forward: (y [r, d], LN(cond) like cond, fp32 statistics of cond and of x [r, 2], the gate and bias rows [r, 2d])."""
     r, d = x2.shape
     return (
         x2.new_empty((r, d)),
@@ -119,6 +120,7 @@ def _fwd(
 
 
 def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs):
+    """Shapes of the CUDA adaLN backward: (dx, dcond, the cond-LN weight gradient, the scale and bias weight gradients in fp32, and the scale-bias gradient, empty without it)."""
     d, dc = ws.shape
     return (
         x2.new_empty(x2.shape),

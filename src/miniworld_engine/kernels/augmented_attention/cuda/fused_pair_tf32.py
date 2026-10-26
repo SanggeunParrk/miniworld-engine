@@ -90,6 +90,7 @@ def _perm(L, device):
     return _PERMS[key]
 
 def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+    """Shapes of the TF32 pair-fused attention forward (outputs and saved tensors; all like q's dtype)."""
     A, _, L, _, _ = q.shape
     return (
         q.new_empty((A * L, H * D)),
@@ -122,6 +123,7 @@ def _fwd(
 
 
 def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):
+    """Shapes of the TF32 pair-fused attention backward: (dq, dk, dv, dpair, dlnw fp32, dwb fp32)."""
     return (
         qs.new_empty(qs.shape),
         qs.new_empty(qs.shape),

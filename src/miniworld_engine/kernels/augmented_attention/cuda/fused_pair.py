@@ -126,7 +126,8 @@ def supported(q: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.
     )
 
 
-def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+def _fused_fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+    """Shapes of the pair-fused attention forward: (o [A*L, h*d] bf16, lse [A, h, L] fp32, bias [h, L, L] bf16, pair-LN stats [L*L, 2] fp32 for the rows layout, else empty)."""
     A, _, L, nh, dh = q.shape
     kind = _kind(nh, pair.shape[-1])
     return (
@@ -137,7 +138,7 @@ def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
     )
 
 
-@opaque(fake=_fwd_fake, name="augmented_attention_pair_fused_fwd")
+@opaque(fake=_fused_fwd_fake, name="augmented_attention_pair_fused_fwd")
 def _fused_fwd(
     q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None, eps: float
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -166,7 +167,8 @@ def _fused_fwd(
     return o, lse, bias, pst
 
 
-def _bwd_fake(do, q, k, v, pair, lnw, wb, o, lse, bias, pst, eps):
+def _fused_bwd_fake(do, q, k, v, pair, lnw, wb, o, lse, bias, pst, eps):
+    """Shapes of the pair-fused attention backward: (dq, dk, dv like q in bf16, dpair like pair, dlnw and dwb in fp32)."""
     return (
         q.new_empty(q.shape, dtype=torch.bfloat16),
         q.new_empty(q.shape, dtype=torch.bfloat16),
@@ -177,7 +179,7 @@ def _bwd_fake(do, q, k, v, pair, lnw, wb, o, lse, bias, pst, eps):
     )
 
 
-@opaque(fake=_bwd_fake, name="augmented_attention_pair_fused_bwd")
+@opaque(fake=_fused_bwd_fake, name="augmented_attention_pair_fused_bwd")
 def _fused_bwd(
     do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor,
     o: torch.Tensor, lse: torch.Tensor, bias: torch.Tensor, pst: torch.Tensor, eps: float,
