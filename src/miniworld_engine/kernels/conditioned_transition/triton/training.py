@@ -786,7 +786,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         #
         # The two forms are not bitwise equal (different cuBLAS kernels accumulate in a different
         # order), which is a reduction-order difference and not a correctness one.
-        if x.shape[1] <= _ATOM_D_MAX:
+        # H100, bf16, up to ~30k rows: the merged form is the faster one (cuBLAS picks a better kernel for the (2ND, M) x (M, K) product; M = 18432 / 24576:
+        # 138 -> 124 us / 185 -> 173 us); at M = 36864 it picks a worse one (274 -> 305 us), so the split stays there.
+        merged = x.shape[1] <= _ATOM_D_MAX or (ctx.master and dab.shape[0] < 30000)
+        if merged:
             dWcat = torch.mm(dab.t(), x, out_dtype=torch.float32) if ctx.master else dab.t() @ x
             dWa, dWb = dWcat[:ND], dWcat[ND:]
         else:

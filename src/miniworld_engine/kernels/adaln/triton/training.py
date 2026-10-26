@@ -727,7 +727,7 @@ class AdaLNTrainFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond, with_stream=False):
+                eps_x, eps_cond, with_stream=False, with_cond=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
         from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (scale_weight, scale_bias, bias_weight)
@@ -788,14 +788,25 @@ class AdaLNTrainFn(torch.autograd.Function):
         ctx.orig_cond_shape = orig_cond_shape
         ctx.nx = nx
         ctx.with_stream = with_stream
-        if with_stream:
-            # (y, x): the second output IS x (a view), for a caller that adds x to something downstream (a residual). Its gradient
-            # arrives in THIS backward and joins dx inside `_bwd_x`, so autograd never runs the add of the two paths into x.
-            return y.reshape(orig_x_shape), x.view_as(x)
+        ctx.with_cond = with_cond
+        if with_stream or with_cond:
+            ctx.set_materialize_grads(False)
+            # (y, x, cond): the extra outputs ARE x and cond (views), for a caller that adds x to something downstream (a residual) and / or feeds
+            # cond to another consumer. Their gradients arrive in THIS backward and join dx inside `_bwd_x` and dcond inside the cond LayerNorm
+            # backward, so autograd never runs the add of the two paths into x or into cond.
+            outs = [y.reshape(orig_x_shape)]
+            if with_stream:
+                outs.append(x.view_as(x))
+            if with_cond:
+                outs.append(cond.view_as(cond))
+            return tuple(outs)
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    def backward(ctx, dy, dstream=None):
+    def backward(ctx, dy, *extra):
+        extra = list(extra)
+        dstream = extra.pop(0) if ctx.with_stream else None
+        dcond_x = extra.pop(0) if ctx.with_cond else None
         (x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
          lnw, scale_weight, bias_weight, _raw_sw, _raw_sb, _raw_bw, saved_wcat) = ctx.saved_tensors
         nx = ctx.nx
@@ -811,6 +822,11 @@ class AdaLNTrainFn(torch.autograd.Function):
             dres = dstream.reshape(-1, dstream.shape[-1])
             if dres.stride(-1) != 1:
                 dres = dres.contiguous()
+        dcx = None
+        if dcond_x is not None:
+            dcx = dcond_x.reshape(-1, dcond_x.shape[-1])
+            if dcx.stride(-1) != 1:
+                dcx = dcx.contiguous()
         D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate, shape_key=shape_key, dres=dres)                          # D=(2NX,M), dx=(M,NX)
         w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
@@ -826,11 +842,14 @@ class AdaLNTrainFn(torch.autograd.Function):
             # FUSED triton: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) + cond LN-backward in ONE kernel.
             dcond, dlnw = _dgrad_condln(D, w_cat, cond2d, mean_c, rstd_c, lnw,
                                         shape_key=shape_key)
+            if dcx is not None:
+                dcond = dcond + dcx
         else:
             dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c,
                                      list(cond2d.stride()),
-                                     shape_key=both_key(rows_of(ctx.orig_cond_shape)))
+                                     shape_key=both_key(rows_of(ctx.orig_cond_shape)),
+                                     dres=dcx)
             del dcond_aff    # a fresh (M, NC); _ln_bwd was its last reader
 
         # `D` is (2*NX, M) -- the largest tensor in this function, 192 MiB at B=32, L=1024,
@@ -855,11 +874,12 @@ class AdaLNTrainFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
 def adaln_train(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond, with_stream=False):
+                eps_x, eps_cond, with_stream=False, with_cond=False):
     """Training (fwd+bwd) adaLN: y = σ(scale)·LN(x) + bias, materialize+cuBLAS, symmetric backward."""
     return AdaLNTrainFn.apply(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                              eps_x, eps_cond, with_stream)
+                              eps_x, eps_cond, with_stream, with_cond)

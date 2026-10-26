@@ -204,7 +204,7 @@ def _ln_materialize(x: torch.Tensor, gamma: torch.Tensor, beta: torch.Tensor, ep
 def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
                    sdn0, sdn1, sx0, sx1, sdx0, sdx1,
                    BLOCK_M1: tl.constexpr, N_PAD: tl.constexpr, shape_key,
-                   ):
+                   DXR=None, sr0=0, sr1=0, HAS_DXR: tl.constexpr = False):
     # NOTE: one tile per program (atomic_add per block for dγ/dβ). A grid-stride variant (one
     # atomic per program) sped up CONTIGUOUS large-d (d512 0.96→1.07x) but CATASTROPHICALLY
     # regressed m-major d=256 (2.45→0.45x — the strided x/dx access interacts badly with the
@@ -226,6 +226,8 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     c2 = tl.sum(tl.where(cmask[None, :], dxhat, 0.0), axis=1) * inv_n        # meanₖ(dx̂)
     c1 = tl.sum(tl.where(cmask[None, :], dxhat * xhat, 0.0), axis=1) * inv_n  # meanₖ(dx̂·x̂)
     dx = rstd * (dxhat - c2[:, None] - xhat * c1[:, None])
+    if HAS_DXR:   # a gradient that joins dx on its way out (another consumer of the same input), added before the one rounding
+        dx += tl.load(DXR + rm[:, None] * sr0 + cols[None, :] * sr1, mask=mask, other=0.0).to(tl.float32)
     tl.store(DX + rm[:, None] * sdx0 + cols[None, :] * sdx1,
              dx.to(DX.dtype.element_ty), mask=mask)
     pdg = tl.sum(tl.where(mask, dxn * xhat, 0.0), axis=0)
@@ -237,7 +239,7 @@ def _ln_bwd_kernel(DXn, X, G, Mean, Rstd, DX, DG, DB, M, N,
     tl.atomic_add(DB + cols, pdb, mask=cmask, sem="relaxed")
 
 
-def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):
+def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None, dres=None):
     """``dx`` (M, K) at ``dx_strides``, plus ``dgamma`` and ``dbeta`` as (K,) fp32."""
     m, k = x.shape
     # dx is written AT dx_strides (m-major in -> m-major out), so the fake has to carry those
@@ -251,7 +253,7 @@ def _ln_bwd_fake(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=None):
 
 @opaque(fake=_ln_bwd_fake, name="layernorm_linear_bwd_mmajor")
 def _ln_bwd(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor, mean: torch.Tensor,
-            rstd: torch.Tensor, dx_strides: list[int], shape_key: int | None = None,
+            rstd: torch.Tensor, dx_strides: list[int], shape_key: int | None = None, dres: torch.Tensor | None = None,
             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """ONE pass: dx = rstd·(γ·dxn − meanₖ(γ·dxn) − x̂·meanₖ(γ·dxn·x̂)) written at `dx_strides`
     (m-major in→out), plus dγ=Σ_m dxn·x̂ and dβ=Σ_m dxn. x̂ recomputed inside from x (read at its
@@ -267,7 +269,7 @@ def _ln_bwd(dx_normed: torch.Tensor, x: torch.Tensor, gamma: torch.Tensor, mean:
     ``shape_key`` is ``both_key(L)`` from the caller (see ``_ln_materialize``); it is forwarded to
     whichever of the three size-adaptive paths runs."""
     from .mmajor_bwd import ln_bwd_mmajor
-    return ln_bwd_mmajor(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
+    return ln_bwd_mmajor(dx_normed, x, gamma, mean, rstd, dx_strides, shape_key=shape_key, dres=dres)
 
 
 # ───────────────────────── db = Σ_m dY (linear bias grad) ─────────────────────────────────────

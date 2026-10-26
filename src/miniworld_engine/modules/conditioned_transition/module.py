@@ -152,7 +152,8 @@ class ConditionedTransition(nn.Module):
         squeeze+gate epilogue of its kernel (one launch fewer); every other path adds it here."""
         x_in = x
         if residual:
-            x, x_in = self.ada_ln_in.forward_with_stream(x_in, cond)   # x_in: the stream, whose gradient the LayerNorm backward adds in
+            # x_in: the stream, whose gradient the LayerNorm backward adds in; cond: handed on to the gate projection, whose gradient joins dcond there
+            x, x_in, cond = self.ada_ln_in.forward_with_stream_cond(x_in, cond)
         else:
             x = self.ada_ln_in(x, cond)
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
