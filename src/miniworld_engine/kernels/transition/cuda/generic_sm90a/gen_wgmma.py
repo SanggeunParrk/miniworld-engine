@@ -8,6 +8,7 @@ print(
 print("#pragma once")
 print("#include <cstdint>")
 print("#include <cuda_bf16.h>")
+print("#include <cuda_fp16.h>")
 print("namespace tr90 {")
 print(
     "template <typename T, int N> __device__ __forceinline__ void mma(float (&d)[N / 2], uint64_t a, uint64_t b);"
@@ -15,6 +16,7 @@ print(
 for T, shape, ty, tail in (
     ("__nv_bfloat16", "k16", "bf16.bf16", ", 1, 1, 1, 0, 0"),
     ("float", "k8", "tf32.tf32", ", 1, 1, 1"),
+    ("__half", "k16", "f16.f16", ", 1, 1, 1, 0, 0"),
 ):
     for n in NS:
         r = n // 2

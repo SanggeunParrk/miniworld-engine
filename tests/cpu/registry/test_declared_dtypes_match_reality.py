@@ -167,7 +167,8 @@ def test_a_kernel_behind_the_dtype_guard_does_not_declare_fp32():
         "another precision and this test's premise is gone")
     #: Transition lets fp32 PAST the guard on TF32 tensor cores (``dispatch.dtype_gate``: portable residual path, only where torch allows TF32 and
     #: the card holds fp32 rows), so the kernels that path launches declare fp32 on purpose. The module source must say so, or the exemption lapses.
-    past_the_guard = {"transition_expand_swiglu_triton", "transition_squeeze_residual_triton", "transition_bwd_swiglu_recompute_triton"}
+    past_the_guard = {"transition_expand_swiglu_triton", "transition_squeeze_residual_triton", "transition_bwd_swiglu_recompute_triton",
+                      "transition_bwd_squeeze_swiglu_triton"}
     assert "dtype_gate(" in (PKG / "modules" / "transition" / "module.py").read_text(), (
         "Transition no longer lets fp32 past the guard: these kernels must stop declaring fp32")
     bad = [f"{r['kernel']} ({r['family']}) declares {r['dtypes']}"

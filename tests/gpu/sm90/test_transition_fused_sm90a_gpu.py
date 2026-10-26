@@ -187,7 +187,13 @@ def test_agrees_with_the_triton_path_to_bf16(shape, monkeypatch):
     fused = _run(module, x, dy, fused=True)
     triton = _run(module, x, dy, fused=False)
 
-    tolerances = {"out": 4e-3, "dx": 5e-4}
+    # The portable path keeps the expand halves in bf16 (as the PyTorch statements do) instead of recomputing them in fp32, so its
+    # dx / dW differ from this kernel's by the bf16 rounding of those halves. Measured on these shapes against an fp64 run
+    # (docs/records/portable_transition_ladder_20261025.md): portable 4.1e-3 (dx), 4.1-4.3e-3 (LN / expand grads), the bf16
+    # PyTorch statements 4.9e-3 / 5.0-6.0e-3, this kernel 3.5-4.0e-3. The bands below are 1.5 x the bf16 PyTorch statements' own
+    # worst error of that tensor (the repo's yardstick); they were 5e-4 (dx) and 2e-3 while the portable path recomputed in fp32.
+    tolerances = {"out": 4e-3, "dx": 7.5e-3, "expand_a.weight": 7.5e-3, "expand_b.weight": 7.5e-3,
+                  "ln_in.weight": 9e-3, "ln_in.bias": 9e-3}
     for name in triton:
         assert _rel(fused[name], triton[name]) < tolerances.get(name, 2e-3), name
 

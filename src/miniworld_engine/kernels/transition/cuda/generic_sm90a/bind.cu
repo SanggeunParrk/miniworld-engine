@@ -7,6 +7,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda.h>
 #include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
 #include <array>
 #include <cstdlib>
@@ -40,6 +41,7 @@ void expect(bool ok, const char* what) {
 }
 
 bool is_bf16(const torch::Tensor& t) { return t.scalar_type() == torch::kBFloat16; }
+bool is_f16(const torch::Tensor& t) { return t.scalar_type() == torch::kHalf; }
 
 // 2-D row-major [rows][cols] tensor, box = [128 B of columns][box_rows], 128 B swizzle (K-major MMA operand slabs).
 const CUtensorMap& slab_map(const torch::Tensor& t, int box_rows) {
@@ -47,7 +49,7 @@ const CUtensorMap& slab_map(const torch::Tensor& t, int box_rows) {
   static std::map<Key, CUtensorMap> cache;
   static std::mutex lock;
   const uint64_t rows = t.size(0), cols = t.size(1);
-  const int es = is_bf16(t) ? 2 : 4;
+  const int es = (is_bf16(t) || is_f16(t)) ? 2 : 4;
   const Key key{reinterpret_cast<uint64_t>(t.data_ptr()), rows, cols, (uint64_t)box_rows, (uint64_t)es, (uint64_t)t.stride(0)};
   std::lock_guard<std::mutex> guard(lock);
   auto it = cache.find(key);
@@ -61,7 +63,7 @@ const CUtensorMap& slab_map(const torch::Tensor& t, int box_rows) {
   // caching allocator serves every tensor from its pool no runtime call has made the primary context current there: CUDA_ERROR_INVALID_CONTEXT.
   // (cudaSetDevice binds it; cudaFree(0) would do too but is an unsafe call inside a CUDA-graph capture.)
   if (cudaSetDevice(t.get_device()) != cudaSuccess) throw std::runtime_error("cudaSetDevice failed before cuTensorMapEncodeTiled");
-  CUresult r = encoder()(&map, is_bf16(t) ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 : CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 2, t.data_ptr(), dims,
+  CUresult r = encoder()(&map, is_bf16(t) ? CU_TENSOR_MAP_DATA_TYPE_BFLOAT16 : is_f16(t) ? CU_TENSOR_MAP_DATA_TYPE_FLOAT16 : CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 2, t.data_ptr(), dims,
                          strides, box, elem, CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
                          CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
   if (r != CUDA_SUCCESS) throw std::runtime_error("cuTensorMapEncodeTiled failed");
@@ -112,14 +114,14 @@ template <typename T> T* mp(torch::Tensor& t) { return reinterpret_cast<T*>(t.da
 
 void check_act(const torch::Tensor& t, int64_t cols, const char* what) {
   expect(t.is_cuda() && t.dim() == 2 && t.size(1) == cols && t.stride(1) == 1 && t.stride(0) == cols &&
-             (is_bf16(t) || t.scalar_type() == torch::kFloat32), what);
+             (is_bf16(t) || is_f16(t) || t.scalar_type() == torch::kFloat32), what);
 }
 
-template <typename T, int BN, int MODE>
+template <typename T, int BN, int MODE, typename TO = T>
 void launch_gemm(const torch::Tensor& A, const torch::Tensor& B, const torch::Tensor& B2, const torch::Tensor* Xt, torch::Tensor* Ot,
-                 int64_t M, int64_t N, int64_t K, const T* X, void* O) {
-  using C = GemmCfg<BN, Tt<T>::ES, MODE>;
-  static const bool ready = (optin(gemm_kernel<T, BN, MODE>, C::SMEM), true);
+                 int64_t M, int64_t N, int64_t K, const void* X, void* O, const float* SC) {
+  using C = GemmCfg<BN, Tt<T>::ES, MODE, Tt<TO>::ES>;
+  static const bool ready = (optin(gemm_kernel<T, BN, MODE, false, TO>, C::SMEM), true);
   (void)ready;
   const int NW = C::NW;
   const int64_t mtiles = (M + BM - 1) / BM, nt = N / NW;
@@ -129,17 +131,17 @@ void launch_gemm(const torch::Tensor& A, const torch::Tensor& B, const torch::Te
   const CUtensorMap& mo = (C::STAGED && Ot) ? slab_map(*Ot, 64) : slab_map(A, BM);
   const int brows = MODE == MODE_SWIGLU ? BN / 2 : BN;
   const CUtensorMap mb = slab_map(B, brows), mb2 = slab_map(bt2, brows), mA = slab_map(A, BM);
-  launch_gemm_kernel(gemm_kernel<T, BN, MODE>, grid, C::SMEM, mA, mb, mb2, mx, mo, mo, (int)M, (int)N, (int)K, X, O);
+  launch_gemm_kernel(gemm_kernel<T, BN, MODE, false, TO>, grid, C::SMEM, mA, mb, mb2, mx, mo, mo, (int)M, (int)N, (int)K, static_cast<const TO*>(X), O, SC);
 }
 
-template <typename T, int MODE>
+template <typename T, int MODE, typename TO = T>
 void gemm_bn(int bn, const torch::Tensor& A, const torch::Tensor& B, const torch::Tensor& B2, const torch::Tensor* Xt,
-             torch::Tensor* Ot, int64_t M, int64_t N, int64_t K, const T* X, void* O) {
+             torch::Tensor* Ot, int64_t M, int64_t N, int64_t K, const void* X, void* O, const float* SC = nullptr) {
   switch (bn) {
-    case 64: launch_gemm<T, 64, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
-    case 128: launch_gemm<T, 128, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
-    case 192: launch_gemm<T, 192, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
-    case 256: launch_gemm<T, 256, MODE>(A, B, B2, Xt, Ot, M, N, K, X, O); break;
+    case 64: launch_gemm<T, 64, MODE, TO>(A, B, B2, Xt, Ot, M, N, K, X, O, SC); break;
+    case 128: launch_gemm<T, 128, MODE, TO>(A, B, B2, Xt, Ot, M, N, K, X, O, SC); break;
+    case 192: launch_gemm<T, 192, MODE, TO>(A, B, B2, Xt, Ot, M, N, K, X, O, SC); break;
+    case 256: launch_gemm<T, 256, MODE, TO>(A, B, B2, Xt, Ot, M, N, K, X, O, SC); break;
     default: throw std::invalid_argument("transition generic sm90a: unsupported tile width");
   }
 }
@@ -235,7 +237,7 @@ void swiglu_save_bn(const torch::Tensor& xn, const torch::Tensor& wa, const torc
   const int grid = gemm_grid((M + BM - 1) / BM, HID / C::NW);
   launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_SWIGLU_SAVE>, grid, C::SMEM,
       slab_map(xn, BM), slab_map(wa, BN / 2), slab_map(wb, BN / 2), slab_map(h, 64), slab_map(h, 64), slab_map(ab, 64), (int)M, (int)HID,
-      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr);
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, (const float*)nullptr);
 }
 
 template <int BN>
@@ -247,7 +249,7 @@ void gate_ab_bn(const torch::Tensor& dy, const torch::Tensor& ws, const torch::T
   const int grid = gemm_grid((M + BM - 1) / BM, HID / C::NW);
   launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_GATE, true>, grid, C::SMEM,
       slab_map(dy, BM), slab_map(ws, 64), slab_map(ws, 64), slab_map(ab, 64), slab_map(dab, 64), slab_map(dab, 64), (int)M, (int)HID,
-      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr);
+      (int)D, (const __nv_bfloat16*)nullptr, (void*)nullptr, (const float*)nullptr);
 }
 
 template <int BN>
@@ -259,7 +261,7 @@ void dxn_bt_bn(const torch::Tensor& dab, const torch::Tensor& wa, const torch::T
   const int grid = gemm_grid((M + BM - 1) / BM, D / C::NW);
   launch_gemm_kernel(gemm_kernel<__nv_bfloat16, BN, MODE_OUT, true>, grid, C::SMEM,
       slab_map(dab, BM), slab_map(wa, 64), slab_map(wb, 64), slab_map(out, 64), slab_map(out, 64), slab_map(out, 64), (int)M, (int)D,
-      (int)K, (const __nv_bfloat16*)nullptr, (void*)nullptr);
+      (int)K, (const __nv_bfloat16*)nullptr, (void*)nullptr, (const float*)nullptr);
 }
 
 }  // namespace
@@ -334,6 +336,37 @@ torch::Tensor squeeze_res(torch::Tensor h, torch::Tensor ws, torch::Tensor x) {
   const int bn = pick_bn(M, D);
   if (is_bf16(h)) gemm_bn<__nv_bfloat16, MODE_RES>(bn, h, ws, ws, &x, &out, M, D, HID, cp<__nv_bfloat16>(x), out.data_ptr());
   else gemm_bn<float, MODE_RES>(bn, h, ws, ws, &x, &out, M, D, HID, cp<float>(x), out.data_ptr());
+  return out;
+}
+
+
+// fp32 activations on TF32 tensor cores, with the (M, HID) intermediate in fp16: the same 10-bit mantissa as TF32 in half the bytes, which
+// are the dominant traffic of the two GEMMs (written by one, read by the other).  `inv_s` / `s` are fp32 device scalars that keep h inside
+// fp16's range (the caller bounds |h|); the squeeze reads Ws as fp16 too (also divided by its own scale, folded into `s`).
+torch::Tensor swiglu_h16(torch::Tensor xn, torch::Tensor wa, torch::Tensor wb, torch::Tensor inv_s) {
+  const int64_t M = xn.size(0), D = xn.size(1), HID = wa.size(0);
+  check_act(xn, D, "xn"); check_act(wa, D, "wa"); check_act(wb, D, "wb");
+  expect(wa.size(0) == wb.size(0) && HID % 128 == 0 && D % 64 == 0, "hidden width must be a multiple of 128");
+  expect(xn.scalar_type() == torch::kFloat32 && wa.scalar_type() == torch::kFloat32 && wb.scalar_type() == torch::kFloat32, "fp32 operands");
+  expect(inv_s.is_cuda() && inv_s.scalar_type() == torch::kFloat32 && inv_s.numel() == 1, "scale");
+  auto h = torch::empty({M, HID}, xn.options().dtype(torch::kHalf));
+  if (M == 0) return h;
+  const int bn = 2 * pick_width(M, HID, {128, 64}, 2);
+  gemm_bn<float, MODE_SWIGLU, __half>(bn, xn, wa, wb, nullptr, &h, M, HID, D, nullptr, h.data_ptr(), inv_s.data_ptr<float>());
+  return h;
+}
+
+// out = (h Ws^T) * s + x; h fp16 [M, HID], ws fp16 [D, HID], x / out fp32 [M, D].
+torch::Tensor squeeze_res_h16(torch::Tensor h, torch::Tensor ws, torch::Tensor x, torch::Tensor s) {
+  const int64_t M = h.size(0), HID = h.size(1), D = ws.size(0);
+  check_act(h, HID, "h"); check_act(ws, HID, "ws"); check_act(x, D, "x");
+  expect(x.size(0) == M && HID % 64 == 0, "shapes");
+  expect(is_f16(h) && is_f16(ws) && x.scalar_type() == torch::kFloat32, "fp16 h / ws, fp32 x");
+  expect(s.is_cuda() && s.scalar_type() == torch::kFloat32 && s.numel() == 1, "scale");
+  auto out = torch::empty_like(x);
+  if (M == 0) return out;
+  const int bn = pick_bn(M, D);
+  gemm_bn<__half, MODE_RES, float>(bn, h, ws, ws, &x, &out, M, D, HID, cp<float>(x), out.data_ptr(), s.data_ptr<float>());
   return out;
 }
 
@@ -449,6 +482,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_fwd", &ln_fwd);
   m.def("swiglu", &swiglu);
   m.def("squeeze_res", &squeeze_res);
+  m.def("swiglu_h16", &swiglu_h16);
+  m.def("squeeze_res_h16", &squeeze_res_h16);
   m.def("dxn_gemm", &dxn_gemm);
   m.def("gate", &gate);
   m.def("swiglu_save", &swiglu_save);

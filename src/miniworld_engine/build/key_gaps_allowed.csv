@@ -170,3 +170,7 @@ sampler_ops_cov_triton,CHUNK,see sampler_ops_stats_triton
 sampler_ops_cov_triton,CP,see sampler_ops_augment_triton
 sampler_ops_align_triton,CHUNK,see sampler_ops_stats_triton
 sampler_ops_align_triton,CP,see sampler_ops_augment_triton
+transition_bwd_squeeze_swiglu_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
+transition_expand_swiglu_triton,NUM_SMS,"the SM count of the card (1 on the pointer path), i.e. the grid stride of the persistent tensor-map path; the cache is per card, and USE_TMA is keyed"
+transition_squeeze_residual_triton,NUM_SMS,see transition_expand_swiglu_triton
+transition_bwd_squeeze_swiglu_triton,NUM_SMS,see transition_expand_swiglu_triton

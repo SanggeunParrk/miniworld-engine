@@ -12,6 +12,7 @@ import triton.language as tl
 
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
+from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
 
 from jaxtyping import Float
 
@@ -33,75 +34,157 @@ def get_seq_group(length) -> int:
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'STORE_AB', 'HALF', 'USE_TMA'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
-    W1_ptr,
-    W2_ptr,
+    Wab_ptr,
     out_ptr,
+    a_ptr,
+    b_ptr,
+    scale_ptr,
     M,
     K: tl.constexpr,
     ND: tl.constexpr,
-    stride_an, stride_ak, stride_bn, stride_bk,
+    stride_wn, stride_wk,
     BLOCK_M1: tl.constexpr,
     BLOCK_K: tl.constexpr,
     BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    STORE_AB: tl.constexpr = False,
+    HALF: tl.constexpr = False,
+    USE_TMA: tl.constexpr = False,
+    NUM_SMS: tl.constexpr = 1,
     PREC: tl.constexpr = "ieee",
 ):
-    # Visit order, tuned: see kernels/_tiles.py. This walked the COLUMNS first, which is
-    # GROUP_M = 1 on that axis -- the opposite end from the kernels that launch a 2-D grid,
-    # and just as fixed. Which end suits the shape is what the tuner now decides.
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64),
-                              tl.cdiv(M, BLOCK_M1), tl.cdiv(ND, BLOCK_N), GROUP_M)
+    # ``Wab`` is the two expand weights INTERLEAVED row by row (row 2j = Wa[j], row 2j+1 = Wb[j]), so one
+    # dot over a (BLOCK_K, 2*BLOCK_N) weight tile produces the a and b halves of BLOCK_N hidden columns
+    # side by side. One wgmma of N = 2*BLOCK_N reads the activation tile once and keeps the tensor cores
+    # busier than two dots of N = BLOCK_N (measured on H100, bf16: the 128 x 128 dual tile ran at ~520 TFLOPS,
+    # the same tile as one 128 x 256 dot at the squeeze kernel's ~640). The epilogue splits the accumulator.
+    #
+    # STORE_AB: a training forward also stores the two pre-activation halves (rounded to the activation
+    # dtype, as the PyTorch statements hold them), so the backward is one GEMM with a gate epilogue
+    # (kernels/transition/triton/training.py) instead of a recompute of both expand GEMMs.
+    #
+    # USE_TMA (Hopper, aligned operands -- see _tma.py): tensor-map loads and stores in a persistent grid.
+    # Visit order, tuned: see kernels/_tiles.py.
+    n_m = tl.cdiv(M, BLOCK_M1)
+    n_n = tl.cdiv(ND, BLOCK_N)
+    if USE_TMA:
+        x_desc = tl.make_tensor_descriptor(x_ptr, [M, K], [K, 1], [BLOCK_M1, BLOCK_K])
+        w_desc = tl.make_tensor_descriptor(Wab_ptr, [2 * ND, K], [stride_wn, 1], [2 * BLOCK_N, BLOCK_K])
+        out_desc = tl.make_tensor_descriptor(out_ptr, [M, ND], [ND, 1], [BLOCK_M1, BLOCK_N])
+        a_desc = tl.make_tensor_descriptor(a_ptr, [M, ND], [ND, 1], [BLOCK_M1, BLOCK_N])
+        b_desc = tl.make_tensor_descriptor(b_ptr, [M, ND], [ND, 1], [BLOCK_M1, BLOCK_N])
+        for tile in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True):
+            pid_m, pid_n = tile_order(tile, n_m, n_n, GROUP_M)
+            acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), dtype=tl.float32)
+            for k in range(0, K, BLOCK_K):
+                x_tile = x_desc.load([pid_m * BLOCK_M1, k])
+                w_tile = w_desc.load([pid_n * (2 * BLOCK_N), k])
+                acc = tl.dot(x_tile, w_tile.T, acc, input_precision=PREC)
+            A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
+            swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
+            out_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], swish_AB.to(out_ptr.dtype.element_ty))
+            if STORE_AB:
+                if HALF:        # fp16 halves (fp32 activations): stored divided by the (device-side) scale that keeps them in range
+                    A_tile = A_tile * (1.0 / tl.load(scale_ptr))
+                    B_tile = B_tile * (1.0 / tl.load(scale_ptr))
+                a_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], A_tile.to(a_ptr.dtype.element_ty))
+                b_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], B_tile.to(b_ptr.dtype.element_ty))
+    else:
+        pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
 
-    row_start = pid_m * BLOCK_M1
-    col_start = pid_n * BLOCK_N
+        offs_m = pid_m * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_w = pid_n * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)    # rows of Wab
 
-    offs_m = row_start + tl.arange(0, BLOCK_M1)
-    offs_n = col_start + tl.arange(0, BLOCK_N)
+        acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), dtype=tl.float32)
+        for k in range(0, K, BLOCK_K):
+            offs_k = k + tl.arange(0, BLOCK_K)
+            x_tile = tl.load(
+                x_ptr + (offs_m[:, None] * K + offs_k[None, :]),
+                mask=((offs_m[:, None] < M) & (offs_k[None, :] < K)),
+                other=0.0,
+            )
+            w_tile = tl.load(
+                Wab_ptr + (offs_w[None, :] * stride_wn + offs_k[:, None] * stride_wk),
+                mask=((offs_w[None, :] < 2 * ND) & (offs_k[:, None] < K)),
+                other=0.0,
+            )
+            acc = tl.dot(x_tile, w_tile, acc, input_precision=PREC)
 
-    A_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
-    B_tile = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
+        A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
+        swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
 
-    for k in range(0, K, BLOCK_K):
-        offs_k = k + tl.arange(0, BLOCK_K)
-        x_tile = tl.load(
-            x_ptr + (offs_m[:, None] * K + offs_k[None, :]),
-            mask=((offs_m[:, None] < M) & (offs_k[None, :] < K)),
-            other=0.0,
-        )
-        W1_tile = tl.load(
-            W1_ptr + (offs_n[None, :] * stride_an + offs_k[:, None] * stride_ak),
-            mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
-            other=0.0,
-        )
-        W2_tile = tl.load(
-            W2_ptr + (offs_n[None, :] * stride_bn + offs_k[:, None] * stride_bk),
-            mask=((offs_n[None, :] < ND) & (offs_k[:, None] < K)),
-            other=0.0,
-        )
-
-        A_tile += tl.dot(x_tile, W1_tile, input_precision=PREC)
-        B_tile += tl.dot(x_tile, W2_tile, input_precision=PREC)
-
-    swish_A = A_tile * tl.sigmoid(A_tile)
-    swish_AB = swish_A * B_tile
-
-    out_ptr_ = out_ptr + (offs_m[:, None] * ND + offs_n[None, :])
-    tl.store(
-        out_ptr_,
-        swish_AB.to(out_ptr.dtype.element_ty),
-        mask=((offs_m[:, None] < M) & (offs_n[None, :] < ND)),
-    )
+        out_ptr_ = out_ptr + (offs_m[:, None] * ND + offs_n[None, :])
+        store_mask = (offs_m[:, None] < M) & (offs_n[None, :] < ND)
+        tl.store(out_ptr_, swish_AB.to(out_ptr.dtype.element_ty), mask=store_mask)
+        if STORE_AB:
+            if HALF:
+                A_tile = A_tile * (1.0 / tl.load(scale_ptr))
+                B_tile = B_tile * (1.0 / tl.load(scale_ptr))
+            tl.store(a_ptr + (offs_m[:, None] * ND + offs_n[None, :]), A_tile.to(a_ptr.dtype.element_ty), mask=store_mask)
+            tl.store(b_ptr + (offs_m[:, None] * ND + offs_n[None, :]), B_tile.to(b_ptr.dtype.element_ty), mask=store_mask)
 
 
 def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
     """The expand activation, (M, ND) in ``x``'s dtype: the two SwiGLU halves are already
     multiplied together in the epilogue, so the width is ``ND`` and not ``2*ND``."""
     return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
+
+
+#: A/B switch for the tests and records: True keeps the saved halves in fp32 under fp32 activations (the pre-fp16 behaviour).
+_SAVED_HALVES_FP32 = False
+
+
+def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, half_scale=None):
+    M, N = x.shape
+    # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
+    # expanded width; taking it as ``n * N`` made a caller state twice something the weight
+    # already fixes, so an `n` that disagreed with the weight silently read the wrong extent --
+    # and it barred any expansion the ratio cannot spell, which is exactly what an FFN whose
+    # hidden size is rounded to a multiple of 256 has. `conditioned_transition`'s own
+    # `_expand_swiglu` already derives it this way.
+    nd = expand_a_weight.shape[0]
+    expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
+    # fp32 activations (TF32 tensor cores, a 10-bit mantissa): when the caller passes `half_scale` the saved halves are fp16 -- the same
+    # mantissa, half the bytes -- stored divided by that device scalar, which the caller derives from a bound on |a|, |b| (see
+    # residual.half_scale) so that nothing can overflow. No host sync, nothing data dependent to fall back on.
+    half = store_ab and x.dtype == torch.float32 and half_scale is not None and _SAVED_HALVES_FP32 is False
+    hd = torch.float16 if half else x.dtype
+    a, b = (torch.empty(M, nd, dtype=hd, device=x.device) for _ in range(2)) if store_ab else (expand, expand)
+    scale = half_scale if half else expand
+    # both weights as one operand, row-interleaved (2*ND, K): ~10 MB at the widest, a few microseconds
+    w_ab = torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)
+    use_tma = tma_ok(x, w_ab, expand, a, b)
+    if use_tma:
+        sms = num_sms(x.device)
+        grid = lambda META: (min(sms, tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])[0]),)  # noqa: E731
+    else:
+        sms = 1
+        grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
+    transition_fwd_kernel[grid](
+        x,
+        w_ab,
+        expand,
+        a,
+        b,
+        scale,
+        M,
+        N,          # K -- the input width
+        nd,         # ND -- the expanded width
+        w_ab.stride(0), w_ab.stride(1),
+        shape_key=pack(shape_key, K=N, ND=nd),
+        STORE_AB=store_ab,
+        HALF=half,
+        USE_TMA=use_tma,
+        NUM_SMS=sms,
+        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
+    )
+    return expand, a, b
 
 
 @opaque(fake=_expand_swiglu_fake, name="transition_expand_swiglu")
@@ -118,30 +201,28 @@ def _expand_swiglu(
     ``kernels._compile``. ``x`` arrives already 2-D and contiguous; ``shape_key`` is computed from
     the PRE-flatten shape by the caller, which is the only place that still knows it.
     """
-    M, N = x.shape
-    # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
-    # expanded width; taking it as ``n * N`` made a caller state twice something the weight
-    # already fixes, so an `n` that disagreed with the weight silently read the wrong extent --
-    # and it barred any expansion the ratio cannot spell, which is exactly what an FFN whose
-    # hidden size is rounded to a multiple of 256 has. `conditioned_transition`'s own
-    # `_expand_swiglu` already derives it this way.
-    nd = expand_a_weight.shape[0]
-    expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
-    grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
-    transition_fwd_kernel[grid](
-        x,
-        expand_a_weight,
-        expand_b_weight,
-        expand,
-        M,
-        N,          # K -- the input width
-        nd,         # ND -- the expanded width
-        expand_a_weight.stride(0), expand_a_weight.stride(1),
-        expand_b_weight.stride(0), expand_b_weight.stride(1),
-        shape_key=pack(shape_key, K=N, ND=nd),
-        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
-    )
-    return expand
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False)[0]
+
+
+def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key, half_scale=None):
+    """``(h, a, b)``: each ``(M, ND)``, ``h`` in ``x``'s dtype, ``a`` / ``b`` fp16 when ``half_scale`` is given (fp32 ``x``)."""
+    out = x.new_empty((x.shape[0], expand_a_weight.shape[0]))
+    half = x.dtype == torch.float32 and half_scale is not None and _SAVED_HALVES_FP32 is False
+    halves = torch.empty(out.shape, dtype=torch.float16 if half else out.dtype, device=out.device)
+    return out, halves, torch.empty_like(halves)
+
+
+@opaque(fake=_expand_swiglu_saveact_fake, name="transition_expand_swiglu_saveact")
+def _expand_swiglu_saveact(
+    x: torch.Tensor,
+    expand_a_weight: torch.Tensor,
+    expand_b_weight: torch.Tensor,
+    shape_key: int,
+    half_scale: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The training forward launch: ``(h, a, b)`` with ``h = SwiGLU(a, b)`` and ``a, b`` the two expand halves, each ``(M, n*N)``
+    (``x``'s dtype; under fp32 ``x`` with a ``half_scale`` (one fp32 on the device): fp16, stored divided by it). The backward consumes them."""
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True, half_scale)
 
 
 def swiglu_squeeze_backward(
@@ -190,6 +271,7 @@ class TritonTransitionFunction(torch.autograd.Function):
         expand_b_weight: Float[torch.Tensor, "nd d"],
         squeeze_weight: Float[torch.Tensor, "d nd"],
         n: int | None = None,
+        save_act: bool = True,
     ) -> Float[torch.Tensor, "... d"]:
         """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` -- no normalization, no residual.
 
@@ -214,21 +296,18 @@ class TritonTransitionFunction(torch.autograd.Function):
                    f"expand_a_weight is {tuple(expand_a_weight.shape)} -- width {nd}. The "
                    f"weight decides; drop n or make it agree.")
             raise ValueError(msg)
-        expand = _expand_swiglu(
-            x,
-            expand_a_weight,
-            expand_b_weight,
-            # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
-            # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
-            both_key(rows_of(orig_shape)),
-        )
-
-        ctx.save_for_backward(
-            x,
-            expand_a_weight,
-            expand_b_weight,
-            squeeze_weight,
-        )
+        # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
+        # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
+        key = both_key(rows_of(orig_shape))
+        if save_act:
+            # training: keep the expand halves (rounded to the activation dtype, as the PyTorch statements hold them), so the
+            # backward is ONE GEMM with the gate epilogue instead of a recompute of both expand GEMMs
+            expand, a, b = _expand_swiglu_saveact(x, expand_a_weight, expand_b_weight, key)
+            ctx.save_for_backward(x, expand_a_weight, expand_b_weight, squeeze_weight, expand, a, b)
+        else:
+            expand = _expand_swiglu(x, expand_a_weight, expand_b_weight, key)
+            ctx.save_for_backward()
+        ctx.key = key
         ctx.nd = nd
 
         output = torch.matmul(expand, squeeze_weight.T)
@@ -236,30 +315,24 @@ class TritonTransitionFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        (
-            x,
-            expand_a_weight,
-            expand_b_weight,
-            squeeze_weight,
-        ) = ctx.saved_tensors
-        nd = ctx.nd
-        M, N = x.shape
-
+        x, expand_a_weight, expand_b_weight, squeeze_weight, h, a, b = ctx.saved_tensors
         if grad_output.dtype != x.dtype:
             grad_output = grad_output.to(x.dtype)
 
         orig_shape = grad_output.shape
         grad_output = grad_output.reshape(-1, orig_shape[-1]).contiguous()
-        # Backward via the fast STACKED save-xn kernel: one kernel emits h (the SwiGLU output,
-        # for dWs) + dAB=[dA|dB], so the squeeze input is NOT recomputed (no second
-        # transition_fwd_kernel) and dWa/dWb/dxn collapse to single stacked GEMMs. ~9% faster
-        # than the old recompute-expand + transition_bwd_kernel at d>=256 (measured, A100),
-        # bit-for-bit the same math: it consumes the SAVED post-LN xn (`x`) directly, so there
-        # is no LN-boundary or xn-recompute mismatch. (LN backward stays in the module's ln_in.)
-        dx, grad_a_weight, grad_b_weight, grad_squeeze_weight = swiglu_squeeze_backward(
-            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, orig_shape, nd,
+        from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_backward_saved
+
+        dx, grad_a_weight, grad_b_weight, grad_squeeze_weight = swiglu_squeeze_backward_saved(
+            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, ctx.key, saved=(h, a, b),
         )
-        return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None
+        dx = dx.reshape(orig_shape)
+        return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None, None
 
 
-triton_transition = TritonTransitionFunction.apply
+def triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight, n=None):
+    """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` (:class:`TritonTransitionFunction`). The forward keeps the expand halves only when a
+    gradient is wanted: grad mode on and an operand requiring one (``ctx.needs_input_grad`` is true for parameters even under
+    ``torch.no_grad()``, so the flag is decided here)."""
+    save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, expand_a_weight, expand_b_weight, squeeze_weight))
+    return TritonTransitionFunction.apply(x, expand_a_weight, expand_b_weight, squeeze_weight, n, save)
