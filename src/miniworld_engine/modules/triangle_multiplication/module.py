@@ -260,9 +260,11 @@ class TriangleMultiplication(nn.Module):
 
         return trimul_triton(
             pair,
-            self.to_left.weight, self.to_left_gate.weight,
-            self.to_right.weight, self.to_right_gate.weight,
-            self.to_gate.weight, self.to_out.weight,
+            # the projections run in the activation dtype (fp32 master parameters under a bf16 pair: ``tl.dot`` and the contraction
+            # bmm need one dtype); the cast is differentiable, so the master parameters still receive fp32 gradients
+            self.to_left.weight.to(pair.dtype), self.to_left_gate.weight.to(pair.dtype),
+            self.to_right.weight.to(pair.dtype), self.to_right_gate.weight.to(pair.dtype),
+            self.to_gate.weight.to(pair.dtype), self.to_out.weight.to(pair.dtype),
             self.ln_pair.weight, self.ln_pair.bias,
             self.ln_out.weight, self.ln_out.bias,
             self.ln_pair.eps, self.ln_out.eps,
