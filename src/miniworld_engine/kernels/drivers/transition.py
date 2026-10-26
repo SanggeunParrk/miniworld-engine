@@ -173,7 +173,7 @@ def transition_expand_swiglu_triton() -> None:
     from miniworld_engine.kernels.transition.triton.main import _expand_swiglu_saveact
 
     _expand_swiglu_saveact(rows2d(ROWS, K_FROM_ND), wa, wb, SHAPE_KEY,
-                           torch.ones(1, device=wa.device) if wa.dtype == torch.float32 else None)
+                           torch.ones(1, device=wa.device) if DTYPE_MODE == "fp32" else None)
 
 
 def transition_layernorm_expand_swiglu_triton() -> None:
@@ -402,9 +402,9 @@ def transition_bwd_squeeze_swiglu_triton():
 
     nd = wa.shape[0]
     a, b = rows2d(ROWS, nd), rows2d(ROWS, nd)
-    if a.dtype == torch.float32:                # fp32 activations keep fp16 halves + the overflow flag (training forward)
+    if DTYPE_MODE == "fp32":                    # fp32 activations keep fp16 halves + a scale (training forward)
         a, b = a.half(), b.half()
-    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, a, b, SHAPE_KEY, torch.ones(1, device=a.device) if a.dtype != torch.float32 and ws.dtype == torch.float32 else None)
+    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, a, b, SHAPE_KEY, torch.ones(1, device=a.device) if DTYPE_MODE == "fp32" else None)
 
 
 def transition_squeeze_residual_triton():
