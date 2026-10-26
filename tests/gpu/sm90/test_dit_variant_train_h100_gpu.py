@@ -164,12 +164,11 @@ def test_the_training_switch_sends_the_call_to_the_portable_route():
         settings.configure(dit_variant_train_cuda=previous)
 
 
-def test_a_call_without_a_gradient_or_off_the_layout_is_not_served():
+def test_a_call_off_the_layout_is_not_served():
     stack, inputs, mask, *_ = _case("token", "boltz2", 3, 256)
     single, cond, pair = (inputs[k].bfloat16() for k in ("single", "cond", "pair"))
     with torch.no_grad():
-        assert not train.serves(stack, single, cond, pair, mask)
-    single.requires_grad_()
+        assert train.serves(stack, single, cond, pair, mask)       # an fp32 inference call has no other CUDA path (bf16 inference is the interface's first)
     assert train.serves(stack, single, cond, pair, mask)
     assert not train.serves(stack, single[:, :200], cond[:200], pair[:200, :200], mask[:200])      # L not a multiple of 128
     assert not train.serves(stack, single, cond[None].expand(3, -1, -1), pair, mask)               # a conditioning row set per sample

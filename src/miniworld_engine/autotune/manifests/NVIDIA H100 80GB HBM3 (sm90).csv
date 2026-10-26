@@ -1,5 +1,9 @@
 kernel,backend,family,file,status,detail,dtype
+<<<<<<< Updated upstream
 #provenance,2.3.12,cb8369169424,clean,2026-10-25,v2.3.12,
+=======
+#provenance,2.3.9,e9a3c0374240,clean,2026-10-24,v2.3.8-8-ge9a3c037,
+>>>>>>> Stashed changes
 adaln_bwd_dx_dlnw_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel DCond=2.15e-03 DLnW=2.62e-03 (band 1e-02 declared),bf16
 adaln_bwd_pre_dx_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel D=1.49e-03 DX=3.13e-03 (band 1e-02 declared),bf16
 adaln_epilogue_saveact_triton,triton,adaln,miniworld_engine/kernels/adaln/triton/training.py,ok,rel Y=2.65e-03 Mean=2.23e-08 Rstd=1.86e-07 Gate=1.96e-03 (band 1e-02 declared),bf16
@@ -35,7 +39,11 @@ gated_projection_gate_dropres_triton,triton,trimul_inproj,miniworld_engine/kerne
 gated_projection_gate_flat_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
 gated_projection_gate_gemm_triton,triton,bias_only_attention,miniworld_engine/kernels/bias_only_attention/triton/gate_out.py,ok,rel out=3.79e-03 (band 1e-02 declared),bf16
 gated_projection_gate_triton,triton,gated_projection,miniworld_engine/kernels/gated_projection/triton/main.py,ok,rel out=2.15e-03 (band 8e-03 declared),bf16
+<<<<<<< Updated upstream
 layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=4.09e-07 dbeta=1.67e-07 (band 1e-02 declared),bf16
+=======
+layernorm_bwd_atomic_strided_triton,triton,layernorm_linear,miniworld_engine/kernels/layernorm_linear/triton/te_style.py,ok,rel dx=2.60e-03 dgamma=5.04e-07 dbeta=8.35e-08 (band 1e-02 declared),bf16
+>>>>>>> Stashed changes
 layernorm_bwd_atomic_triton,triton,layernorm,miniworld_engine/kernels/layernorm/triton/main.py,ok,rel dx=2.03e-03 dw=2.26e-03 db=2.41e-03 (band 1e-02 declared),bf16
 layernorm_bwd_foldstats_triton,triton,transition,miniworld_engine/kernels/transition/triton/fused.py,ok,rel dx=2.61e-03 dgamma=2.40e-07 dbeta=8.45e-08 (band 9e-03 declared),bf16
 layernorm_bwd_reduce_cuda,cuda,layernorm,miniworld_engine/kernels/layernorm/cuda/layer_norm_cuda_kernel.cu,ok,rel dw=2.26e-03 db=2.41e-03 (band 9e-03 declared),bf16
@@ -105,7 +113,11 @@ transition_fwd_b2b_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition
 transition_expand_gate_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_expand_gate_kernel.cu,ok,rel out=1.94e-03 (band 8e-03 declared),bf16
 transition_bwd_gate_sm90_cuda,cuda,transition,miniworld_engine/kernels/transition/cuda/transition_gatebwd_kernel.cu,ok,rel h=1.94e-03 dAB=2.97e-03 xn=5.27e-04 (band 1e-02 declared),bf16
 trimul_output_f567_train_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/output_fused.py,ok,rel y=4.27e-03 proj=2.95e-03 gate=2.72e-03 (band 1e-02 declared),bf16
+<<<<<<< Updated upstream
 trimul_input_ln_residual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.29e-03 dw=4.83e-07 db=1.63e-07 (band 1e-02 declared),bf16
+=======
+trimul_input_ln_residual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.29e-03 dw=3.22e-07 db=8.17e-08 (band 1e-02 declared),bf16
+>>>>>>> Stashed changes
 trimul_input_dual_bwd_triton,triton,trimul_inproj,miniworld_engine/kernels/trimul_inproj/triton/backward_fused.py,ok,rel dx=2.34e-03 (band 1e-02 declared),bf16
 transition_squeeze_residual_triton,triton,transition,miniworld_engine/kernels/transition/triton/residual.py,ok,rel out=2.14e-03 (band 1e-02 declared),bf16
 mpnn_edge_tail_fwd_gemm_gather_saveact_triton,triton,mpnn_edge_tail,miniworld_engine/kernels/mpnn_edge_tail/triton/compute.py,ok,rel out=6.01e-03 (band 5e-02),bf16
