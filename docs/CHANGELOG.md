@@ -10,6 +10,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 TriMul / OuterProductMean ladder fixes (`docs/records/trimul_opm_ladder_20261026.md`): bidirectional TriMul with hidden 2 D at D64 now runs in CUDA (inference K1/K3 gate; training `d64_h2_bwd.cu`, 3.9x / 2.6x slower than portable before, 0.66 / 0.56x now), RoseTTAFold3 OPM (projection bias) trains in CUDA (0.83-0.87x of portable, was PyTorch), single-direction portable TriMul accepts fp32 master parameters (was a dtype error), portable OPM bias gradient as a GEMV (RF3 divide-after training no longer slower than PyTorch). Chai-1 OPM is still a routing gap.
+
 - Portable kernels for the diffusion sampler glue `kernels/sampler_ops` (`augment_noise`, `align_euler`, `pool_atoms`): the contract and algorithm of the H100 CUDA kernels (the caller's random
   draws, the churn arithmetic on device scalars in IEEE operations, centres from fixed-order chunk partials, Kabsch rotation by Horn's quaternion method with 12 squarings in scalar registers, no SVD,
   no atomics, bitwise reproducible), for any card. `sampler_ops.interface` now routes by card like the pair ops (H100 CUDA unchanged; a recorded card or the A/B switch the portable kernels; else
