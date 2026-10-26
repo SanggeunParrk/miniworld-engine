@@ -14,18 +14,15 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
+#include "row_math.cuh"
 
 namespace {
 using bf = __nv_bfloat16;
 using bf2 = __nv_bfloat162;
 constexpr int WPB = 8;  // warps per block
 
-__device__ __forceinline__ float wsum(float v) {
-#pragma unroll
-  for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
-__device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
+__device__ __forceinline__ float wsum(float v) { return rowmath::warp_sum(v); }
+__device__ __forceinline__ float sigm(float x) { return rowmath::sigmoid(x); }
 
 // a row of N bf16 held as N / 32 floats per lane: element 64 k + 2 lane + {0, 1} is v[2 k + {0, 1}]
 __device__ __forceinline__ float2 ld2(const bf* p) { return __bfloat1622float2(*reinterpret_cast<const bf2*>(p)); }
@@ -89,7 +86,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
   ld_row<N>(SB + row * 2 * N + N, lane, bb);
   stats<N>(x, eps, mean, rstd);
 #pragma unroll
-  for (int i = 0; i < N / 32; ++i) x[i] = sigm(sp[i]) * ((x[i] - mean) * rstd) + bb[i];
+  for (int i = 0; i < N / 32; ++i) x[i] = rowmath::modulate(x[i], mean, rstd, sigm(sp[i]), bb[i]);
   st_row<N>(Y + row * N, lane, x);
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
@@ -97,7 +94,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
                                                         const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
-                                                        float* __restrict__ PB, long R) {
+                                                        float* __restrict__ PB, long R, const T* __restrict__ ADD) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32];
@@ -125,6 +122,12 @@ __global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY
     float dx[N / 32];
 #pragma unroll
     for (int i = 0; i < N / 32; ++i) dx[i] = s2.y * (g[i] - mg - x[i] * mgx);
+    if (ADD) {   // the gradient of the stream the caller adds x to: joins dx in fp32, rounded once
+      float ad[N / 32];
+      ld_row<N>(ADD + row * N, lane, ad);
+#pragma unroll
+      for (int i = 0; i < N / 32; ++i) dx[i] += ad[i];
+    }
     st_row<N>(DX + row * N, lane, dx);
     st_row<N>(DSB + row * 2 * N, lane, dsp);
     st_row<N>(DSB + row * 2 * N + N, lane, dy);
@@ -145,7 +148,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY
 
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const T* __restrict__ DCN, const T* __restrict__ C, const float2* __restrict__ ST,
-                                                          const float* __restrict__ W, T* __restrict__ DC, float* __restrict__ PB, long R) {
+                                                          const float* __restrict__ W, T* __restrict__ DC, float* __restrict__ PB, long R, const T* __restrict__ ADD) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32], w[N / 32];
@@ -176,6 +179,12 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const T* __restrict__ 
     mgx = wsum(mgx) * (1.f / N);
 #pragma unroll
     for (int i = 0; i < N / 32; ++i) d[i] = s2.y * (g[i] - mg - c[i] * mgx);
+    if (ADD) {   // the gradient the caller sends to cond by another path (the tail's gate projection): joins in fp32, rounded once
+      float ad[N / 32];
+      ld_row<N>(ADD + row * N, lane, ad);
+#pragma unroll
+      for (int i = 0; i < N / 32; ++i) d[i] += ad[i];
+    }
     st_row<N>(DC + row * N, lane, d);
   }
 #pragma unroll
@@ -267,7 +276,8 @@ std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   return {y, st};
 }
 
-std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st) {
+std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add) {
+  if (add) { chk_act(*add, "add"); TORCH_CHECK(add->scalar_type() == dy.scalar_type() && add->numel() == dy.numel(), "add shape"); }
   chk_act(dy, "dy");
   TORCH_CHECK(x.scalar_type() == dy.scalar_type() && sb.scalar_type() == dy.scalar_type() && x.is_contiguous() && sb.is_contiguous(), "dtypes");
   chk(st, at::kFloat, "st");
@@ -279,12 +289,13 @@ std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(x));
   auto pb = at::empty({(long)grid, N}, x.options().dtype(at::kFloat));
   ACT_SWITCH(N, x, adaln_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dy), P<T>(x), P<T>(sb), reinterpret_cast<const float2*>(st.data_ptr()), PM<T>(dsb),
-                                                                 PM<T>(dx), pb.data_ptr<float>(), R));
+                                                                 PM<T>(dx), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dsb, dx, pb};
 }
 
-std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor st, at::Tensor w) {
+std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor st, at::Tensor w, c10::optional<at::Tensor> add) {
+  if (add) { chk_act(*add, "add"); TORCH_CHECK(add->scalar_type() == dcn.scalar_type() && add->numel() == dcn.numel(), "add shape"); }
   chk_act(dcn, "dcn");
   TORCH_CHECK(cond.scalar_type() == dcn.scalar_type() && cond.is_contiguous(), "dtypes");
   chk(st, at::kFloat, "st");
@@ -296,7 +307,7 @@ std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor 
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(cond));
   auto pb = at::empty({(long)grid, N}, cond.options().dtype(at::kFloat));
   ACT_SWITCH(N, cond, ln_cond_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dcn), P<T>(cond), reinterpret_cast<const float2*>(st.data_ptr()),
-                                                                       w.data_ptr<float>(), PM<T>(dc), pb.data_ptr<float>(), R));
+                                                                       w.data_ptr<float>(), PM<T>(dc), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dc, pb};
 }

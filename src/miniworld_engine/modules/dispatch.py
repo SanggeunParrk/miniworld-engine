@@ -344,6 +344,23 @@ def _cuda_on_hopper_blackwell(default: KernelBackend) -> Callable[[torch.device 
     return pick
 
 
+def _cuda_on_h100(default: KernelBackend) -> Callable[[torch.device | None], KernelBackend]:
+    """H100 runs this op on its hand-written sm_90a kernels (``KernelBackend.CUDA``; a call they do not serve runs the PyTorch reference);
+    B200 runs PyTorch ops, as :func:`_torch_on_hopper_blackwell`; every other card keeps ``default``. ``force_portable_kernels`` /
+    ``portable_on_hopper_blackwell`` lift the restriction for A/B work (``restricted_card``), and the portable family is then the answer."""
+    torch_pick = _torch_on_hopper_blackwell(default)
+
+    def pick(device: torch.device | None) -> KernelBackend:
+        backend = torch_pick(device)
+        if backend is KernelBackend.PYTORCH and restricted_card(device):
+            index = device.index if device is not None and device.type == "cuda" else None
+            if torch.cuda.get_device_capability(index) == (9, 0):
+                return KernelBackend.CUDA
+        return backend
+
+    return pick
+
+
 #: A fixed backend, or a device-dependent chooser. Spelled out rather than `object` so that
 #: `resolve`'s `best(device) if callable(best) else best` narrows to `KernelBackend` on both
 #: arms instead of returning `object`.
@@ -362,9 +379,9 @@ _MINIWORLD_KNOWN_BEST: dict[str, _KnownBest] = {
     # explicitly so the policy is auditable rather than implicit-by-omission.
     "transition": KernelBackend.PORTABLE,
     "triangle_attention": KernelBackend.PORTABLE,
-    # No CUDA path yet: portable was their implementation; on H100 / B200 they run the PyTorch reference (no portable fallback there).
-    "adaptive_layernorm": _torch_on_hopper_blackwell(KernelBackend.PORTABLE),
-    "conditioned_transition": _torch_on_hopper_blackwell(KernelBackend.PORTABLE),
+    # Portable was their implementation; H100 has hand-written sm_90a kernels (kernels/adaln/cuda, kernels/conditioned_transition/cuda), B200 runs the PyTorch reference (no portable fallback on either).
+    "adaptive_layernorm": _cuda_on_h100(KernelBackend.PORTABLE),
+    "conditioned_transition": _cuda_on_h100(KernelBackend.PORTABLE),
     "augmented_attention": KernelBackend.PORTABLE,
     # The MSA pair. Their native H100 paths (integrations.opm_train / pwa_train) and the Anthropic payload are chosen inside
     # the modules before this is asked; what is resolved here is the portable path every other GPU gets.

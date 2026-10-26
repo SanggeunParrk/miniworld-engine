@@ -1,18 +1,12 @@
 // token_dit_common.cuh -- shared helpers of the token DiT row kernels: sigmoid, warp / block sums, 4-wide fp32 / bf16 vectors.
 #pragma once
 #include <cuda_bf16.h>
+#include "../../adaln/cuda/row_math.cuh"   // the one definition of warp_sum / sigmoid shared with the AdaLN kernels
 
 namespace tdr {
 
-
-
-__device__ __forceinline__ float sigm(float v) { return 1.f / (1.f + __expf(-v)); }
-
-__device__ __forceinline__ float warp_sum(float v) {
-#pragma unroll
-  for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
+__device__ __forceinline__ float sigm(float v) { return rowmath::sigmoid(v); }
+__device__ __forceinline__ float warp_sum(float v) { return rowmath::warp_sum(v); }
 
 // dst [N, M] = src [M, N]^T (either operand dtype): 32 x 32 tiles through shared memory, both sides coalesced. Launch: grid (N / 32, M / 32), 256 threads.
 template <typename T>
