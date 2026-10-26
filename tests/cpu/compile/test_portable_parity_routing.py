@@ -74,7 +74,10 @@ def test_bias_only_parts_take_their_pytorch_leg_on_h100_and_b200(monkeypatch, ma
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         block = BiasOnlyDiTBlock(64, 32, 16, 4, implementation=I.MINIWORLD)
-    assert all(part._backend is KernelBackend.PYTORCH for part in _parts(block))
+    cuda_parts = {"adaptive_layernorm", "conditioned_transition"} if capability == (9, 0) else set()   # H100: hand-written sm_90a AdaLN / ConditionedTransition
+    for part in _parts(block):
+        expected = KernelBackend.CUDA if type(part).__name__.lower() in {n.replace("_", "") for n in cuda_parts} else KernelBackend.PYTORCH
+        assert part._backend is expected
 
 
 @pytest.mark.parametrize("impl", [I.PYTORCH, I.CUEQUIVARIANCE])

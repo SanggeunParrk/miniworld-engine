@@ -185,6 +185,8 @@ def test_routes_run_under_torch_compile(fp32):
         torch.cuda.synchronize()
     names = " ".join(e.key for e in prof.key_averages())
     assert "attn_tf32_fwd_kernel" in names if fp32 else "attn_fwd_kernel" in names, "the compiled module did not launch the CUDA core"
-    assert "adaln_fwd_k" in names, "the compiled module did not launch the CUDA adaLN"
+    # the one AdaLN entry (kernels.adaln.cuda.adaln) picks the row kernels (adaln_fwd_k) or the sm_90a wgmma route (ln_rows_k + adaln_gemm_k)
+    # by mode, dtype and shape: either one is "the CUDA adaLN"
+    assert any(k in names for k in ("adaln_fwd_k", "adaln_gemm_k", "ln_rows_k")), "the compiled module did not launch the CUDA adaLN"
     assert _rel(out[0], eager[0].double()) < (3e-3 if fp32 else 3e-2)
     assert _rel(out[1], eager[1].double()) < (3e-3 if fp32 else 3e-2)

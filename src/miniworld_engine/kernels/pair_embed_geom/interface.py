@@ -132,6 +132,26 @@ def pair_embed_geom_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tens
     return list(sm90.forward_ca(tbl, ca, mask, idx, dlim, with_codes=True))
 
 
+def _pair_embed_ca_fwd_fake(tbl, ca, mask, idx, dlim, eps, portable):
+    """Decoder pair [B, n, n, 256] bf16 (no codes: the forward-only call)."""
+    B, n = idx.shape
+    return torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=tbl.device)
+
+
+@opaque(fake=_pair_embed_ca_fwd_fake, name="pair_embed_ca_fwd")
+def pair_embed_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, idx: torch.Tensor, dlim: torch.Tensor, eps: float,
+                      portable: int) -> torch.Tensor:
+    """Decoder pair [B, n, n, 256] bf16 from the table [157, 256] bf16, or LayerNorm(pair) (no affine) when ``eps`` >= 0; the backward's codes are not written."""
+    ln_eps = eps if eps >= 0 else None
+    if portable:
+        from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward_ca
+
+        return portable_forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
+    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
+
+    return sm90.forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
+
+
 def _pair_embed_geom_bwd_fake(g, codes, mode, portable):
     """Table gradient [317 or 157, 256] bf16, by mode."""
     return torch.empty((N_ROWS if mode == 0 else N_ROWS_CA, D_PAIR), dtype=torch.bfloat16, device=g.device)
@@ -264,10 +284,15 @@ def pair_embed_ca(w, ca, mask, residue_idx=None, *, ln_eps=None) -> torch.Tensor
         out = pair_embed_ca_reference(w, ca, mask.bool(), residue_idx).to(torch.bfloat16)
         return out if ln_eps is None else F.layer_norm(out, (D_PAIR,), None, None, ln_eps)
     idx = residue_idx.to(torch.int32).contiguous() if residue_idx is not None else _constant(("ca_idx", B, n, str(dev)), lambda: torch.arange(1, n + 1, device=dev, dtype=torch.int32).expand(B, n).contiguous())
-    tbl = w.t().to(torch.bfloat16).contiguous()
     dlim = _constant(("ca_dlim", str(dev)), lambda: torch.linspace(0.1, 3.0, 29, device=dev))
     # a bool mask is already 0 / 1 bytes: no cast kernel
     m8 = mask.contiguous().view(torch.uint8) if mask.dtype is torch.bool else mask.to(torch.uint8).contiguous()
+    if not (torch.is_grad_enabled() and w.requires_grad):
+        # forward only: the transposed bf16 table in ONE kernel (transpose + cast) and no codes for a backward that will not run
+        tbl = torch.empty((w.shape[1], w.shape[0]), dtype=torch.bfloat16, device=dev)
+        tbl.copy_(w.detach().t())
+        return pair_embed_ca_fwd(tbl, ca.float().contiguous(), m8, idx, dlim, -1.0 if ln_eps is None else float(ln_eps), int(where != CUDA))
+    tbl = w.t().to(torch.bfloat16).contiguous()
     return _PairEmbedFn.apply(tbl, 1, ca.float().contiguous(), None, None, m8, idx, None, dlim, None, ln_eps,
                               int(where != CUDA))
 
