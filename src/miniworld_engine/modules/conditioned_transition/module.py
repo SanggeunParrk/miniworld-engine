@@ -152,7 +152,7 @@ class ConditionedTransition(nn.Module):
         one GEMM with the gate and the LayerNorm in its epilogue) and the tail (``kernels/conditioned_transition/cuda/ct_inference``: the expand
         GEMM with the SwiGLU in its epilogue, then the squeeze GEMM with the gate and the residual in its epilogue). ``None`` when they do not
         serve the call (another dtype, a width they do not tile, strict fp32): the caller runs the reference."""
-        from miniworld_engine.kernels.adaln.cuda import infer as adaln_cuda
+        from miniworld_engine.kernels.adaln import cuda as adaln_cuda
         from miniworld_engine.kernels.conditioned_transition.cuda import ct_inference
 
         device_type = x_in.device.type
@@ -161,12 +161,12 @@ class ConditionedTransition(nn.Module):
         d = x_in.shape[-1]
         x2 = x_in.reshape(-1, d).to(compute_dtype)
         cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
-        if not (adaln_cuda.supported(x2, cond2, d, cond2.shape[-1])
+        if not (adaln_cuda.available(x2, cond2)
                 and ct_inference.supported(x2, cond2, self.expand_a.weight.shape[0], d)):
             return None
         ada = self.ada_ln_in
         with torch.autocast(device_type=device_type, enabled=False):
-            xn = adaln_cuda.adaln_inference(
+            xn = adaln_cuda.adaln(
                 x2, cond2, ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight,
                 ada.ln_in.eps, ada.ln_cond.eps, rna=compute_dtype == torch.float32)
             fold = residual and x_in.dtype == compute_dtype

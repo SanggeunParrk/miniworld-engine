@@ -69,7 +69,7 @@ TMN_DEVI void row_stats(const float (&v)[MAXCH][vec_of<F32>()], int N, int lane,
 template <bool F32, bool SAVE_C>
 __global__ void __launch_bounds__(256)
 ln_rows_k(const T<F32>* __restrict__ cond, const float* __restrict__ lnw, const T<F32>* __restrict__ x, T<F32>* __restrict__ aff,
-          float* __restrict__ mx, float* __restrict__ rx, float* __restrict__ mc, float* __restrict__ rc, int M, int NC, int NX, float eps_c,
+          float2* __restrict__ sx, float2* __restrict__ sc, int M, int NC, int NX, float eps_c,
           float eps_x) {
   constexpr int VEC = vec_of<F32>(), MAXCH = F32 ? 8 : 4;
   pdl_trigger();
@@ -81,11 +81,11 @@ ln_rows_k(const T<F32>* __restrict__ cond, const float* __restrict__ lnw, const 
   {
     float mean, rstd;
     row_stats<F32, MAXCH>(vx, NX, lane, eps_x, mean, rstd);
-    if (lane == 0) { mx[row] = mean; rx[row] = rstd; }
+    if (lane == 0) sx[row] = make_float2(mean, rstd);
   }
   float mean, rstd;
   row_stats<F32, MAXCH>(v, NC, lane, eps_c, mean, rstd);
-  if (SAVE_C && lane == 0) { mc[row] = mean; rc[row] = rstd; }
+  if (SAVE_C && lane == 0) sc[row] = make_float2(mean, rstd);
 #pragma unroll
   for (int i = 0; i < MAXCH; ++i) {
     const int c = lane + 32 * i;
@@ -110,12 +110,11 @@ ln_rows_k(const T<F32>* __restrict__ cond, const float* __restrict__ lnw, const 
 }
 
 template <bool F32, bool SAVE_C>
-void run_ln(const at::Tensor& cond, const at::Tensor& lnw, const at::Tensor& x, const at::Tensor& aff, const at::Tensor& mx, const at::Tensor& rx,
-            const at::Tensor* mc, const at::Tensor* rc, double eps_c, double eps_x) {
+void run_ln(const at::Tensor& cond, const at::Tensor& lnw, const at::Tensor& x, const at::Tensor& aff, const at::Tensor& sx, const at::Tensor* sc, double eps_c, double eps_x) {
   const int M = (int)cond.size(0), NC = (int)cond.size(1), NX = (int)x.size(1);
   launch(ln_rows_k<F32, SAVE_C>, (unsigned)((M + 7) / 8), 256u, (size_t)0, false, (const T<F32>*)cond.data_ptr(), (const float*)lnw.data_ptr(),
-         (const T<F32>*)x.data_ptr(), (T<F32>*)aff.data_ptr(), (float*)mx.data_ptr(), (float*)rx.data_ptr(),
-         SAVE_C ? (float*)mc->data_ptr() : (float*)nullptr, SAVE_C ? (float*)rc->data_ptr() : (float*)nullptr, M, NC, NX, (float)eps_c, (float)eps_x);
+         (const T<F32>*)x.data_ptr(), (T<F32>*)aff.data_ptr(), (float2*)sx.data_ptr(),
+         SAVE_C ? (float2*)sc->data_ptr() : (float2*)nullptr, M, NC, NX, (float)eps_c, (float)eps_x);
 }
 
 // ======================================================================================================================== GEMM + gate
@@ -139,7 +138,7 @@ template <bool F32, int HT, bool SAVE_GATE, bool RNA>
 __global__ void __launch_bounds__(384, 1)
 adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB, const __grid_constant__ CUtensorMap mX,
              const __grid_constant__ CUtensorMap mY, const __grid_constant__ CUtensorMap mG, const float* __restrict__ bs,
-             const float* __restrict__ mean, const float* __restrict__ rstd, int M, int NC, int NX) {
+             const float2* __restrict__ st, int M, int NC, int NX) {
   using C = ACfg<F32, HT, SAVE_GATE>;
   constexpr int NSTAGE = C::NST, TBK = C::TBK, TBN = C::TBN, F_SA = C::F_SA, F_ST = C::F_ST, NQ = HT / (F32 ? 32 : 64);
   extern __shared__ __align__(1024) uint8_t smem_raw[];
@@ -181,7 +180,8 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         const int P = KB < NSTAGE ? KB : NSTAGE;
         for (int kb = 0; kb < P; ++kb) {
           mbar_arrive_expect_tx(full + kb, F_ST);
-          tma_load_2d(sm + kb * F_ST + F_SA, &mB, full + kb, kb * TBK, nt * TBN);
+          tma_load_2d(sm + kb * F_ST + F_SA, &mB, full + kb, kb * TBK, n0);
+          tma_load_2d(sm + kb * F_ST + F_SA + HT * 128, &mB, full + kb, kb * TBK, NX + n0);
         }
         pdl_wait();
         TRACE(1);
@@ -196,7 +196,8 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         mbar_arrive_expect_tx(full + s, F_ST);
         tma_load_2d(sm + s * F_ST, &mA, full + s, kb * TBK, m0);
-        tma_load_2d(sm + s * F_ST + F_SA, &mB, full + s, kb * TBK, nt * TBN);
+        tma_load_2d(sm + s * F_ST + F_SA, &mB, full + s, kb * TBK, n0);
+        tma_load_2d(sm + s * F_ST + F_SA + HT * 128, &mB, full + s, kb * TBK, NX + n0);
       }
     }
     return;
@@ -212,8 +213,8 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
     // (a global load inside the epilogue, behind its shared-memory asm statements, is a full memory latency per use)
     pdl_wait();
     const int ra = m0 + 64 * cw + 16 * warp + (lane >> 2), rb = ra + 8;
-    const float meanA = ra < M ? mean[ra] : 0.f, rstdA = ra < M ? rstd[ra] : 0.f;
-    const float meanB = rb < M ? mean[rb] : 0.f, rstdB = rb < M ? rstd[rb] : 0.f;
+    const float2 stA = ra < M ? st[ra] : make_float2(0.f, 0.f), stB = rb < M ? st[rb] : make_float2(0.f, 0.f);
+    const float meanA = stA.x, rstdA = stA.y, meanB = stB.x, rstdB = stB.y;
     float2 bv[HT / 8];
 #pragma unroll
     for (int g = 0; g < HT / 8; ++g) bv[g] = *reinterpret_cast<const float2*>(bs + n0 + 8 * g + 2 * (lane & 3));
@@ -258,7 +259,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
           float y0 = g0 * ((xv.x - mn) * rs) + acc[ib], y1 = g1 * ((xv.y - mn) * rs) + acc[ib + 1];
           if (RNA) { y0 = tf32_rna(y0); y1 = tf32_rna(y1); }
           *p = make_float2(y0, y1);
-          if constexpr (SAVE_GATE) *reinterpret_cast<float2*>(gst + off) = make_float2(g0, g1);
+          if constexpr (SAVE_GATE) *reinterpret_cast<float2*>(gst + off) = make_float2(acc[ia] + bb.x, acc[ia + 1] + bb.y);
         }
       }
     } else {
@@ -271,7 +272,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         ldsm_x4(xr, smem_u32(stg) + off);
         const float2 b0 = bv[2 * gp], b1 = bv[2 * gp + 1];
         const int g0 = 2 * gp, g1 = 2 * gp + 1;
-        float gt[8], y[8];
+        float gt[8], pre[8], y[8];
         const float xs[8] = {bf16lo(xr[0]), bf16hi(xr[0]), bf16lo(xr[1]), bf16hi(xr[1]), bf16lo(xr[2]), bf16hi(xr[2]), bf16lo(xr[3]), bf16hi(xr[3])};
 #pragma unroll
         for (int q = 0; q < 8; ++q) {
@@ -279,12 +280,12 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
           const float bcol = (q < 4 ? (e & 1 ? b0.y : b0.x) : (e & 1 ? b1.y : b1.x));
           const int ia = 4 * g + e, ib = 4 * (g + HT / 8) + e;
           const float mn = (e >> 1) ? meanB : meanA, rs = (e >> 1) ? rstdB : rstdA;
-          gt[q] = sigmoid_exact(acc[ia] + bcol);
+          pre[q] = acc[ia] + bcol; gt[q] = sigmoid_exact(pre[q]);
           y[q] = gt[q] * ((xs[q] - mn) * rs) + acc[ib];
         }
         stsm_x4(smem_u32(stg) + off, pack_bf16(y[0], y[1]), pack_bf16(y[2], y[3]), pack_bf16(y[4], y[5]), pack_bf16(y[6], y[7]));
         if constexpr (SAVE_GATE)
-          stsm_x4(smem_u32(gst) + off, pack_bf16(gt[0], gt[1]), pack_bf16(gt[2], gt[3]), pack_bf16(gt[4], gt[5]), pack_bf16(gt[6], gt[7]));
+          stsm_x4(smem_u32(gst) + off, pack_bf16(pre[0], pre[1]), pack_bf16(pre[2], pre[3]), pack_bf16(pre[4], pre[5]), pack_bf16(pre[6], pre[7]));
       }
     }
     if (tid == 128 && tl == 0) TRACE(5);
@@ -306,26 +307,24 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
 }
 
 template <bool F32, int HT, bool SG, bool RNA>
-void run_gemm(const at::Tensor& aff, const at::Tensor& wp, const at::Tensor& bs, const at::Tensor& x, const at::Tensor& mean, const at::Tensor& rstd,
+void run_gemm(const at::Tensor& aff, const at::Tensor& wp, const at::Tensor& bs, const at::Tensor& x, const at::Tensor& st,
               const at::Tensor& y, const at::Tensor* gate, int sms, bool pdl) {
   using C = ACfg<F32, HT, SG>;
   const int64_t M = x.size(0), NX = x.size(1), NC = aff.size(1);
   TORCH_CHECK(NC % C::TBK == 0 && NX % HT == 0, "shapes: NC % (64 bf16 / 32 fp32), NX % HT");
   const int bc = F32 ? 32 : 64;
-  const auto mA = map2d(aff.data_ptr(), F32, M, NC, aff.stride(0), C::TBK, TBM), mB = map2d(wp.data_ptr(), F32, 2 * NX, NC, NC, C::TBK, C::TBN),
+  const auto mA = map2d(aff.data_ptr(), F32, M, NC, aff.stride(0), C::TBK, TBM), mB = map2d(wp.data_ptr(), F32, 2 * NX, NC, NC, C::TBK, HT),
              mX = map2d(x.data_ptr(), F32, M, NX, x.stride(0), bc, 64), mY = map2d(y.data_ptr(), F32, M, NX, NX, bc, 64),
-             mG = map2d(SG ? gate->data_ptr() : y.data_ptr(), F32, M, NX, NX, bc, 64);
+             mG = map2d(SG ? gate->data_ptr() : y.data_ptr(), F32, M, NX, 2 * NX, bc, 64);
   const int tiles = (int)(((M + TBM - 1) / TBM) * (NX / HT));
   auto k = adaln_gemm_k<F32, HT, SG, RNA>;
   cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
-  launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mA, mB, mX, mY, mG, (const float*)bs.data_ptr(), (const float*)mean.data_ptr(),
-         (const float*)rstd.data_ptr(), (int)M, (int)NC, (int)NX);
+  launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mA, mB, mX, mY, mG, (const float*)bs.data_ptr(), (const float2*)st.data_ptr(), (int)M, (int)NC, (int)NX);
 }
 
 // ======================================================================================================================== host entry points
 // cond [M, NC], lnw [NC] fp32, x [M, NX]; writes aff [M, NC], mean / rstd of x [M]; save_c: also mean / rstd of cond
-void ln_rows(torch::Tensor cond, torch::Tensor lnw, torch::Tensor x, torch::Tensor aff, torch::Tensor mx, torch::Tensor rx, c10::optional<torch::Tensor> mc,
-             c10::optional<torch::Tensor> rc, double eps_c, double eps_x) {
+void ln_rows(torch::Tensor cond, torch::Tensor lnw, torch::Tensor x, torch::Tensor aff, torch::Tensor sx, c10::optional<torch::Tensor> sc_, double eps_c, double eps_x) {
   const auto dt = cond.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && x.scalar_type() == dt && aff.scalar_type() == dt && lnw.scalar_type() == torch::kFloat32,
               "bf16 or fp32 activations, fp32 weight");
@@ -333,28 +332,27 @@ void ln_rows(torch::Tensor cond, torch::Tensor lnw, torch::Tensor x, torch::Tens
   const int vec = dt == torch::kFloat32 ? 4 : 8;
   TORCH_CHECK(cond.size(1) % vec == 0 && x.size(1) % vec == 0 && cond.size(1) <= 1024 && x.size(1) <= 1024, "widths: multiple of 8 (4 fp32), <= 1024");
   const at::cuda::CUDAGuard guard(cond.device());
-  const bool f32 = dt == torch::kFloat32, sc = mc.has_value();
-  const at::Tensor* pm = sc ? &*mc : nullptr;
-  const at::Tensor* pr = sc ? &*rc : nullptr;
-  if (f32) { if (sc) run_ln<true, true>(cond, lnw, x, aff, mx, rx, pm, pr, eps_c, eps_x); else run_ln<true, false>(cond, lnw, x, aff, mx, rx, pm, pr, eps_c, eps_x); }
-  else { if (sc) run_ln<false, true>(cond, lnw, x, aff, mx, rx, pm, pr, eps_c, eps_x); else run_ln<false, false>(cond, lnw, x, aff, mx, rx, pm, pr, eps_c, eps_x); }
+  const bool f32 = dt == torch::kFloat32, sc = sc_.has_value();
+  const at::Tensor* pm = sc ? &*sc_ : nullptr;
+  if (f32) { if (sc) run_ln<true, true>(cond, lnw, x, aff, sx, pm, eps_c, eps_x); else run_ln<true, false>(cond, lnw, x, aff, sx, pm, eps_c, eps_x); }
+  else { if (sc) run_ln<false, true>(cond, lnw, x, aff, sx, pm, eps_c, eps_x); else run_ln<false, false>(cond, lnw, x, aff, sx, pm, eps_c, eps_x); }
 }
 
 // aff [M, NC], wp [2 NX, NC] packed per 2 HT rows (HT rows of Wscale, then the same HT rows of Wbias), bs [NX] fp32 (scale bias), x [M, NX],
 // mean / rstd [M] fp32, y [M, NX], gate [M, NX] or undefined (training); rna: y rounded to the TF32 grid (fp32 only: the next GEMM reads it)
-void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Tensor x, torch::Tensor mean, torch::Tensor rstd, torch::Tensor y,
+void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Tensor x, torch::Tensor st, torch::Tensor y,
                 c10::optional<torch::Tensor> gate, int64_t sms, int64_t ht, bool rna, bool pdl) {
   const auto dt = x.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && aff.scalar_type() == dt && wp.scalar_type() == dt && y.scalar_type() == dt &&
-              bs.scalar_type() == torch::kFloat32 && mean.scalar_type() == torch::kFloat32 && rstd.scalar_type() == torch::kFloat32, "dtypes");
+              bs.scalar_type() == torch::kFloat32 && st.scalar_type() == torch::kFloat32 && st.size(-1) == 2, "dtypes");
   TORCH_CHECK(x.stride(1) == 1 && aff.stride(1) == 1 && wp.is_contiguous() && y.is_contiguous() && bs.is_contiguous() && wp.size(0) == 2 * x.size(1) &&
               wp.size(1) == aff.size(1), "layouts");
-  if (gate) TORCH_CHECK(gate->scalar_type() == dt && gate->is_contiguous() && gate->sizes() == y.sizes(), "gate");
+  if (gate) TORCH_CHECK(gate->scalar_type() == dt && gate->is_contiguous() && gate->size(0) == y.size(0) && gate->size(1) == 2 * y.size(1), "pre-activation buffer [M, 2 NX]");
   const at::cuda::CUDAGuard guard(x.device());
   TORCH_CHECK(ht == 128 || ht == 64, "ht: 128 or 64");
   const bool f32 = dt == torch::kFloat32, sg = gate.has_value();
   const at::Tensor* gp = sg ? &*gate : nullptr;
-#define AG(F, H, S, R) run_gemm<F, H, S, R>(aff, wp, bs, x, mean, rstd, y, gp, sms, pdl)
+#define AG(F, H, S, R) run_gemm<F, H, S, R>(aff, wp, bs, x, st, y, gp, sms, pdl)
   if (f32) {
     if (ht == 64) { if (sg) { if (rna) AG(true, 64, true, true); else AG(true, 64, true, false); } else { if (rna) AG(true, 64, false, true); else AG(true, 64, false, false); } }
     else { if (sg) { if (rna) AG(true, 128, true, true); else AG(true, 128, true, false); } else { if (rna) AG(true, 128, false, true); else AG(true, 128, false, false); } }

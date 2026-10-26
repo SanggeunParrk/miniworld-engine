@@ -93,53 +93,75 @@ def rna_tf32(t: torch.Tensor) -> torch.Tensor:
     return ((t.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
 
 
-def pack_weights(w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor, ht: int, dtype: torch.dtype):
-    """([Wscale | Wbias] per tile of ``ht`` output columns, [2 NX, NC] in ``dtype`` (fp32: on the TF32 grid), the scale bias as fp32)."""
-    nx, nc = w_scale.shape
-    ws, wb = w_scale.to(dtype), w_bias.to(dtype)
-    wp = torch.stack([ws.reshape(nx // ht, ht, nc), wb.reshape(nx // ht, ht, nc)], 1).reshape(2 * nx, nc)
+def pack_weights(w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor, dtype: torch.dtype):
+    """([Wscale; Wbias] [2 NX, NC] in ``dtype`` (fp32: on the TF32 grid), the scale bias as fp32 (rounded to ``dtype`` first, as the Triton path's
+    casts do)). The GEMM loads the Wscale and Wbias rows of a tile by two TMA boxes: no per-tile packing."""
+    wc = torch.cat([w_scale, w_bias]).to(dtype)
     if dtype == torch.float32:
-        wp = rna_tf32(wp)
-    return wp.contiguous(), b_scale.to(dtype).float().contiguous()
+        wc = rna_tf32(wc)
+    return wc.contiguous(), b_scale.to(dtype).float().contiguous()
 
 
-def packed(w_scale, b_scale, w_bias, ht, dtype):
+def packed(w_scale, b_scale, w_bias, dtype):
     """``pack_weights`` cached while the parameters are unmodified (``_capture.param_forms``)."""
-    return _capture.param_forms(
-        f"adaln_cuda_{dtype}_{ht}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, ht, dtype)
-    )
+    return _capture.param_forms(f"adaln_cuda_{dtype}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, dtype))
 
 
-def _infer_fake(x, cond, lnw, wp, bs, eps_x, eps_cond, ht, rna):
+def _infer_fake(x, cond, lnw, wc, bs, eps_x, eps_cond, ht, rna):
     return torch.empty_like(x)
 
 
 @opaque(fake=_infer_fake, name="adaln_cuda_inference")
-def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, wp: torch.Tensor, bs: torch.Tensor, eps_x: float, eps_cond: float, ht: int,
+def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, wc: torch.Tensor, bs: torch.Tensor, eps_x: float, eps_cond: float, ht: int,
            rna: bool) -> torch.Tensor:
-    """x [M, NX], cond [M, NC] contiguous; ``wp`` / ``bs`` from :func:`pack_weights`."""
+    """x [M, NX], cond [M, NC] contiguous; ``wc`` / ``bs`` from :func:`pack_weights`."""
     e = ext()
     m, nx = x.shape
     aff = torch.empty_like(cond)
-    stats = torch.empty(2, m, device=x.device, dtype=torch.float32)
+    st = torch.empty(m, 2, device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
-    e.ln_rows(cond, lnw, x, aff, stats[0], stats[1], None, None, eps_cond, eps_x)
-    e.adaln_gemm(aff, wp, bs, x, stats[0], stats[1], y, None, num_sms(x.device), ht, rna, True)
+    e.ln_rows(cond, lnw, x, aff, st, None, eps_cond, eps_x)
+    e.adaln_gemm(aff, wc, bs, x, st, y, None, num_sms(x.device), ht, rna, True)
     return y
 
 
 def adaln_inference(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, *, rna=False, ht=None):
     """AdaLN forward without saving anything for a backward, ``x`` ``(..., NX)`` and ``cond`` ``(..., NC)`` of one dtype (bf16 / fp32 under TF32);
-    the three projections in any dtype (cast and packed once per weight pack). ``rna``: round the fp32 result to the TF32 grid (its consumer is a
-    TF32 GEMM)."""
+    the three projections in any dtype (cast and concatenated once per weight pack). ``rna``: round the fp32 result to the TF32 grid (its consumer
+    is a TF32 GEMM)."""
     shape = x.shape
     nx, nc = shape[-1], cond.shape[-1]
     x2 = x.reshape(-1, nx).contiguous()
     c2 = cond.reshape(-1, nc).contiguous()
     ht = ht or pick_ht(x2.shape[0], nx, num_sms(x.device))
-    wp, bs = packed(w_scale, b_scale, w_bias, ht, x.dtype)
-    y = _infer(x2, c2, lnw.float().contiguous(), wp, bs, float(eps_x), float(eps_cond), ht, rna)
+    wc, bs = packed(w_scale, b_scale, w_bias, x.dtype)
+    y = _infer(x2, c2, lnw.float().contiguous(), wc, bs, float(eps_x), float(eps_cond), ht, rna)
     return y.reshape(shape)
 
 
-__all__ = ["adaln_inference", "ext", "num_sms", "pack_weights", "pick_ht", "supported"]
+def _fwd_fake(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, ht):
+    m, nx = x.shape
+    f = lambda: x.new_empty((m, 2), dtype=torch.float32)  # noqa: E731
+    return x.new_empty((m, nx)), cond.new_empty(cond.shape), f(), f(), x.new_empty((m, 2 * nx))
+
+
+@opaque(fake=_fwd_fake, name="adaln_cuda_train_fwd")
+def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor,
+              eps_x: float, eps_cond: float, ht: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The training forward in the layout of ``adaln_rows``' backward: (y, LN(cond) lnw, its (mean, rstd), the (mean, rstd) of x, sb) with the
+    scale pre-activation in sb[:, :NX] (the second half is not written: the backward does not read it). Weights are cast and concatenated at every
+    call (they change between steps)."""
+    e = ext()
+    m, nx = x.shape
+    wc, bs = pack_weights(w_scale, b_scale, w_bias, x.dtype)
+    aff = torch.empty_like(cond)
+    stx = torch.empty(m, 2, device=x.device, dtype=torch.float32)
+    stc = torch.empty(m, 2, device=x.device, dtype=torch.float32)
+    y = torch.empty_like(x)
+    sb = torch.empty(m, 2 * nx, device=x.device, dtype=x.dtype)
+    e.ln_rows(cond, lnw, x, aff, stx, stc, eps_cond, eps_x)
+    e.adaln_gemm(aff, wc, bs, x, stx, y, sb, num_sms(x.device), ht, False, True)
+    return y, aff, stc, stx, sb
+
+
+__all__ = ["adaln_inference", "ext", "fwd_saved", "num_sms", "pack_weights", "pick_ht", "supported"]
