@@ -99,6 +99,27 @@ def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, 
     return list(_backend(g.device).backward(g, ids, bond, r_max, s_max))
 
 
+def _prep_fake(asym, residue, token, entity, sym, w_rel, w_bond):
+    return [torch.empty((5, asym.numel()), dtype=torch.int32, device=w_rel.device),
+            torch.empty((w_rel.shape[1] + 2, D_PAIR), dtype=torch.float32, device=w_rel.device)]
+
+
+@opaque(fake=_prep_fake, name="token_pair_init_prep")
+def token_pair_init_prep(asym: torch.Tensor, residue: torch.Tensor, token: torch.Tensor, entity: torch.Tensor, sym: torch.Tensor,
+                         w_rel: torch.Tensor, w_bond: torch.Tensor) -> list[torch.Tensor]:
+    """[ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32] in one launch (H100; forward-only calls: no gradient flows through it)."""
+    from miniworld_engine.kernels.token_pair_init.cuda import sm90
+
+    return list(sm90.prep([asym, residue, token, entity, sym], w_rel, w_bond))
+
+
+def _can_prep(ids, w_rel, w_bond) -> bool:
+    """The one-launch glue: H100, contiguous int32 / int64 ids, fp32 weights, nothing differentiates the weights."""
+    return (torch.cuda.get_device_capability(w_rel.device) == (9, 0) and w_rel.dtype == torch.float32 and w_bond.dtype == torch.float32
+            and w_rel.is_contiguous() and w_bond.is_contiguous() and not (torch.is_grad_enabled() and (w_rel.requires_grad or w_bond.requires_grad))
+            and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids))
+
+
 class TokenPairInitFunction(torch.autograd.Function):
     """The kernels read fp32: bf16 ``left`` / ``right`` (autocast) and a bf16 table are cast here, outside autograd, and the
     gradients go back in each input's dtype (an fp32 table -- fp32 master weights -- gets its fp32 gradient unrounded)."""
@@ -133,10 +154,16 @@ def token_pair_init(left: torch.Tensor, right: torch.Tensor, w_rel: torch.Tensor
         f = torch.float32
         return token_pair_init_reference(left.to(f), right.to(f), w_rel.to(f), w_bond.to(f), asym_id, residue_idx, token_idx, entity_id, sym_id, bond != 0,
                                          r_max, s_max)
-    ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, B * L)
+    id5 = [t.reshape(-1) for t in (asym_id, residue_idx, token_idx, entity_id, sym_id)]
+    fast = _can_prep(id5, w_rel, w_bond)
+    if fast:
+        ids, tbl = token_pair_init_prep(*id5, w_rel, w_bond)
+    else:
+        ids = torch.stack([asym_id, residue_idx, token_idx, entity_id, sym_id]).to(torch.int32).reshape(5, B * L)
     # a bool tensor is already 0 / 1 bytes: no pass over it (the H100 and portable kernels test `!= 0` themselves); any other dtype: any nonzero is a bond
     bond = bond.contiguous().view(torch.uint8).reshape(-1) if bond.dtype is torch.bool else (bond != 0).to(torch.uint8).reshape(-1)
-    tbl = torch.cat([w_rel.t(), w_bond.t()], 0).contiguous()
+    if not fast:
+        tbl = torch.cat([w_rel.t(), w_bond.t()], 0).contiguous()
     return TokenPairInitFunction.apply(left.contiguous(), right.contiguous(), tbl, ids, bond, r_max, s_max, int(where != CUDA))
 
 

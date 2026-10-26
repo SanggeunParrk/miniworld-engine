@@ -1,3 +1,4 @@
+
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/adaln.py
 import torch
 import torch.nn as nn
@@ -72,10 +73,33 @@ class AdaptiveLayerNorm(nn.Module):
         of the two paths; everywhere else the second and third outputs are ``x`` and ``cond`` themselves."""
         return self._adaln_forward(x, cond, with_stream=True, with_cond=True)
 
+    def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor, streams: bool = False):
+        """The H100 hand-CUDA AdaLN: the one entry ``kernels.adaln.cuda.adaln`` (setting ``adaln_h100_cuda``), which picks the route by mode, dtype and
+        shape. ``None`` when it does not serve the call (another dtype, a width it does not tile, ...): the caller runs the PyTorch reference."""
+        from miniworld_engine.kernels.adaln import cuda as adaln_cuda
+
+        if self.ln_in.elementwise_affine or self.to_bias.bias is not None:
+            return None
+        device_type = x.device.type
+        grad = needs_backward(self, x, cond)
+        if torch.is_autocast_enabled(device_type) and not grad:
+            dtype = torch.get_autocast_dtype(device_type)   # inference under autocast: the kernels take the compute dtype
+            x, cond = x.to(dtype), cond.to(dtype)
+        if x.dtype != cond.dtype or not adaln_cuda.available(x, cond):
+            return None
+        with torch.autocast(device_type=device_type, enabled=False):
+            return adaln_cuda.adaln(
+                x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps, streams=streams)
+
     def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool, with_cond: bool = False):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
-        if backend == KernelBackend.PORTABLE and not x.is_cuda:
-            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
+        if backend in (KernelBackend.PORTABLE, KernelBackend.CUDA) and not x.is_cuda:
+            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the kernel label): the reference
+        if backend == KernelBackend.CUDA:
+            out = self._cuda_forward(x, cond)
+            if out is not None:
+                return ((out, x, cond) if with_cond else (out, x)) if with_stream else out
+            backend = KernelBackend.PYTORCH   # a call the sm_90a kernels do not serve: the reference
         if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.
@@ -83,16 +107,6 @@ class AdaptiveLayerNorm(nn.Module):
             from miniworld_engine.modules import dispatch as _dispatch
 
             engine_leg = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
-            if engine_leg and x.dtype == cond.dtype and x.dtype in (torch.bfloat16, torch.float32):
-                # H100: the hand-CUDA row kernels + two GEMMs (kernels/adaln/cuda) for bf16 / fp32 activations
-                from miniworld_engine.kernels.adaln import cuda as _adaln_cuda
-
-                if _adaln_cuda.available(x, cond) and not self.ln_in.elementwise_affine and self.to_bias.bias is None:
-                    out = _adaln_cuda.adaln(
-                        x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight,
-                        self.ln_in.eps, self.ln_cond.eps,
-                    )
-                    return ((out, x, cond) if with_cond else (out, x)) if with_stream else out
             x_norm = self.ln_in(x)
             cond_norm = self.ln_cond(cond)
             scale = master_linear(self.to_scale, cond_norm)

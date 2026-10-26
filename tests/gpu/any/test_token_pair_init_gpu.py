@@ -146,3 +146,13 @@ def test_h100_backward_is_bitwise_deterministic(b, l):
     for r in runs[1:]:
         for a, e in zip(r, runs[0], strict=True):
             assert torch.equal(a, e)
+
+
+@pytest.mark.parametrize(("b", "l"), [(1, 384), (2, 130), (1, 1)])
+def test_forward_only_call_is_bitwise_the_training_call(b, l):
+    """No gradient: the five ids and the table come from one launch (H100); the result is bitwise the one made through the differentiable glue (stack / cast / cat)."""
+    (left, right, w_rel, w_bond), ids, bond = _case(b, l, seed=3)
+    train = _run(token_pair_init, (left, right, w_rel, w_bond), ids, bond)
+    with torch.no_grad():
+        only = _run(token_pair_init, (left, right, w_rel.detach(), w_bond.detach()), ids, bond)
+    assert torch.equal(train, only)

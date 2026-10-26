@@ -87,8 +87,16 @@ def test_matches_fp32_reference_and_is_deterministic(
     assert torch.equal(f_out, f_out2)
     assert torch.equal(f_dm, f_dm2)
     assert all(torch.equal(f_g[n], f_g2[n]) for n in f_g)
-    with torch.no_grad():  # inference shares the training forward
-        assert torch.equal(fused(msa, mask, residual=pair), f_out)
+    with torch.no_grad():
+        inf = fused(msa, mask, residual=pair)
+        # Inference of the MiniWorld width is the single fused kernel (`opm_fused_infer`): the same bf16 products as the training forward
+        # (cuBLAS + the epilogue kernel), summed in another order, so equal to bf16 noise but not bitwise; every other width shares the
+        # training forward exactly.
+        if (d_msa, d_pair) == (64, 128):
+            assert cos(inf.float() - pair.float(), f_out.float() - pair.float()) > 0.99999
+            assert torch.equal(fused(msa, mask, residual=pair), inf)
+        else:
+            assert torch.equal(inf, f_out)
 
 
 def test_refusals():

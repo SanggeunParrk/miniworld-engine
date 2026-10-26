@@ -340,7 +340,7 @@ def test_h100_and_b200_resolve_as_before_and_never_warn(monkeypatch, manifests, 
                    "msa_pair_weighted_averaging"):
             assert dispatch.resolve(op, "miniworld") is KernelBackend.PORTABLE     # the family; the modules take their CUDA / PyTorch leg
         for op in ("adaptive_layernorm", "conditioned_transition"):
-            assert dispatch.resolve(op, "miniworld") is KernelBackend.PYTORCH
+            assert dispatch.resolve(op, "miniworld") is (KernelBackend.CUDA if capability == (9, 0) else KernelBackend.PYTORCH)   # H100: sm_90a kernels
         assert dispatch.resolve("layernorm", "miniworld") is KernelBackend.CUDA
         assert dispatch.resolve("rmsnorm", "miniworld") is KernelBackend.CUDA
         assert dispatch.restricted_card()
