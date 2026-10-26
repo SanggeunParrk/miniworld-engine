@@ -236,6 +236,9 @@ class Settings:
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
     transition_gatebwd_wgmma: bool = True
+    #: Route the adaptive LayerNorm of an H100 call through the hand-CUDA kernels (kernels/adaln/cuda: sm_90a wgmma inference path, row kernels + cuBLAS
+    #: training path). Falls back to the PyTorch leg on anything else.
+    adaln_h100_cuda: bool = True
     #: Fuse the layernorm stats pass into the transition kernel. Formerly
     #: MINIWORLD_TRANSITION_FUSE_STATS.
     transition_fuse_stats: bool = False

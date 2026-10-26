@@ -65,10 +65,41 @@ class AdaptiveLayerNorm(nn.Module):
         writes it instead of in a separate add of the two paths into ``x``; everywhere else it is ``x`` itself."""
         return self._adaln_forward(x, cond, with_stream=True)
 
+    def _cuda_train(self, x: torch.Tensor, cond: torch.Tensor):
+        """Training / any call that records a backward: the row kernels + cuBLAS GEMMs of ``kernels/adaln/cuda`` (forward and backward);
+        ``None`` when they do not serve the call."""
+        from miniworld_engine.kernels.adaln import cuda as adaln_rows
+
+        if x.dtype != cond.dtype or self.ln_in.elementwise_affine or self.to_bias.bias is not None or not adaln_rows.available(x, cond):
+            return None
+        return adaln_rows.adaln(
+            x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps)
+
+    def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor):
+        """The H100 sm_90a kernels (``kernels/adaln/cuda``) for a call that records no backward; ``None`` when they do not serve it (another
+        dtype, a width they do not tile, strict fp32)."""
+        from miniworld_engine.kernels.adaln.cuda import infer as adaln_cuda
+
+        device_type = x.device.type
+        compute_dtype = (torch.get_autocast_dtype(device_type)
+                         if torch.is_autocast_enabled(device_type) else x.dtype)
+        xc, cc = x.to(compute_dtype), cond.to(compute_dtype)
+        if not adaln_cuda.supported(xc, cc, xc.shape[-1], cc.shape[-1]):
+            return None
+        with torch.autocast(device_type=device_type, enabled=False):
+            return adaln_cuda.adaln_inference(
+                xc, cc, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight,
+                self.ln_in.eps, self.ln_cond.eps)
+
     def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
-        if backend == KernelBackend.PORTABLE and not x.is_cuda:
-            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
+        if backend in (KernelBackend.PORTABLE, KernelBackend.CUDA) and not x.is_cuda:
+            backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the kernel label): the reference
+        if backend == KernelBackend.CUDA:
+            out = self._cuda_forward(x, cond) if not needs_backward(self, x, cond) else self._cuda_train(x, cond)
+            if out is not None:
+                return (out, x) if with_stream else out
+            backend = KernelBackend.PYTORCH   # a call the sm_90a kernels do not serve: the reference
         if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
             # their unrounded fp32 gradients (``h100_master.master_linear``), as the Triton path's own casts did.

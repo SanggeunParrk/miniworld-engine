@@ -147,15 +147,50 @@ class ConditionedTransition(nn.Module):
         """
         return self._update(x, cond, residual=False)
 
+    def _cuda_update(self, x_in: torch.Tensor, cond: torch.Tensor, *, residual: bool):
+        """The H100 sm_90a kernels for a call that records no backward: the AdaLN (``kernels/adaln/cuda``: LN(cond) with the statistics of x, then
+        one GEMM with the gate and the LayerNorm in its epilogue) and the tail (``kernels/conditioned_transition/cuda/ct_inference``: the expand
+        GEMM with the SwiGLU in its epilogue, then the squeeze GEMM with the gate and the residual in its epilogue). ``None`` when they do not
+        serve the call (another dtype, a width they do not tile, strict fp32): the caller runs the reference."""
+        from miniworld_engine.kernels.adaln.cuda import infer as adaln_cuda
+        from miniworld_engine.kernels.conditioned_transition.cuda import ct_inference
+
+        device_type = x_in.device.type
+        compute_dtype = (torch.get_autocast_dtype(device_type)
+                         if torch.is_autocast_enabled(device_type) else self.expand_a.weight.dtype)
+        d = x_in.shape[-1]
+        x2 = x_in.reshape(-1, d).to(compute_dtype)
+        cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
+        if not (adaln_cuda.supported(x2, cond2, d, cond2.shape[-1])
+                and ct_inference.supported(x2, cond2, self.expand_a.weight.shape[0], d)):
+            return None
+        ada = self.ada_ln_in
+        with torch.autocast(device_type=device_type, enabled=False):
+            xn = adaln_cuda.adaln_inference(
+                x2, cond2, ada.ln_cond.weight, ada.to_scale.weight, ada.to_scale.bias, ada.to_bias.weight,
+                ada.ln_in.eps, ada.ln_cond.eps, rna=compute_dtype == torch.float32)
+            fold = residual and x_in.dtype == compute_dtype
+            y = ct_inference.ct_inference(
+                xn, cond2, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias,
+                x2 if fold else None)
+        y = y.reshape(*x_in.shape[:-1], self.d_hidden)
+        return y if fold or not residual else x_in + y
+
     def _update(self, x: torch.Tensor, cond: torch.Tensor, *, residual: bool) -> torch.Tensor:
         """``delta`` (``residual=False``) or ``x + delta`` (``residual=True``). The portable inference path folds the residual add into the
         squeeze+gate epilogue of its kernel (one launch fewer); every other path adds it here."""
+        if self._backend == KernelBackend.CUDA and x.is_cuda and not needs_backward(self, x, cond):
+            out = self._cuda_update(x, cond, residual=residual)
+            if out is not None:
+                return out
         x_in = x
         if residual:
             x, x_in = self.ada_ln_in.forward_with_stream(x_in, cond)   # x_in: the stream, whose gradient the LayerNorm backward adds in
         else:
             x = self.ada_ln_in(x, cond)
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
+        if backend == KernelBackend.CUDA:
+            backend = KernelBackend.PYTORCH   # a call the sm_90a kernels do not serve (or a training call): the reference
         if backend == KernelBackend.PORTABLE and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the Triton label): the reference
         if backend == KernelBackend.PYTORCH:
