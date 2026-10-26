@@ -131,3 +131,58 @@ def test_bias_only_attention_weights_are_kept_while_the_pair_is_unchanged():
         blk.attention.to_bias.weight.mul_(1.5)
         ref.attention.to_bias.weight.mul_(1.5)
         assert rel(blk(single, cond, pair, mask), ref(single, cond, pair, mask)) <= 6e-3
+
+
+# ---- the persistent TMA configs (sm_90, bf16) against the pointer-based ones, same kernels, same inputs -------------------------------------------------
+
+def _only(kernel, **kw):
+    import triton
+
+    kernel.configs = [triton.Config(kw, num_warps=kw.pop("num_warps", 8), num_stages=kw.pop("num_stages", 3))]
+    kernel.cache = {}
+
+
+@pytest.mark.skipif(not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 9, reason="TMA needs sm_90")
+@pytest.mark.parametrize("tma", [1, 2, 3, 4])
+def test_tma_configs_match_the_pointer_configs(tma):
+    from miniworld_engine.autotune.shape_key import atom_key
+    from miniworld_engine.kernels.adaln.triton import training as adaln_training
+    from miniworld_engine.kernels.conditioned_transition.triton import fwd_saveact, training
+
+    torch.manual_seed(0)
+    M, ND, D, DC, NC, NX = 1000, 1536, 768, 384, 384, 768   # M is not a multiple of any tile
+    key = atom_key(384)
+    R = lambda *s: torch.randn(*s, device=DEV, dtype=BF) * 0.2   # noqa: E731
+    # dh_swiglu_bwd
+    dout, ws, ab = R(M, D), R(D, ND), R(M, 2 * ND)
+    cfg = dict(BLOCK_M=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3)
+    _only(training._dh_swiglu_bwd_kernel, TMA=0, **cfg)
+    ref = training._dh_swiglu_bwd(dout, ws, ab[:, :ND], ab[:, ND:], shape_key=key)
+    _only(training._dh_swiglu_bwd_kernel, TMA=tma, **cfg)
+    assert rel(training._dh_swiglu_bwd(dout, ws, ab[:, :ND], ab[:, ND:], shape_key=key), ref) <= 1e-2
+    # expand + SwiGLU -> (h, ab)
+    x, wa, wb = R(M, D), R(ND, D), R(ND, D)
+    cfg = dict(BLOCK_K=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=8, num_warps=8, num_stages=3)
+    _only(fwd_saveact._fwd_expand_swiglu_kernel, TMA=0, **cfg)
+    ref = fwd_saveact._fwd_expand_swiglu(x, wa, wb, shape_key=key)
+    _only(fwd_saveact._fwd_expand_swiglu_kernel, TMA=tma, **cfg)
+    for got, want in zip(fwd_saveact._fwd_expand_swiglu(x, wa, wb, shape_key=key), ref, strict=True):
+        assert rel(got, want) <= 1e-2
+    # squeeze + gate (+ residual) -> (y, out, scale)
+    h, cond, wsq, wsc, bsc, res = R(M, ND), R(M, DC), R(D, ND), R(D, DC), R(D), R(M, D)
+    cfg = dict(BLOCK_K_DC=64, BLOCK_K_ND=64, BLOCK_M1=128, BLOCK_N=128, GROUP_M=8, num_warps=8, num_stages=3)
+    for residual in (None, res):
+        _only(fwd_saveact._fwd_squeeze_gate_kernel, TMA=0, **cfg)
+        ref = fwd_saveact._fwd_squeeze_gate(h, cond, wsq, wsc, bsc, shape_key=key, residual=residual)
+        _only(fwd_saveact._fwd_squeeze_gate_kernel, TMA=tma, **cfg)
+        for got, want in zip(fwd_saveact._fwd_squeeze_gate(h, cond, wsq, wsc, bsc, shape_key=key, residual=residual), ref, strict=True):
+            assert rel(got, want) <= 1e-2
+    # AdaLN training forward: the weights are the (NC, NX) views of (NX, NC) storage
+    cn, xx, sw, bw, sb = R(M, NC), R(M, NX), R(NX, NC), R(NX, NC), R(NX)
+    rstd, c1 = torch.rand(M, device=DEV) + 0.5, torch.randn(M, device=DEV) * 0.1
+    cfg = dict(BLOCK_M=128, BLOCK_N=128, BLOCK_K=64, GROUP_M=8, num_warps=8, num_stages=3)
+    _only(adaln_training._adaln_fwd_gate_kernel, TMA=0, **cfg)
+    ref = adaln_training._adaln_fwd_gate(cn, sw.t(), sb, bw.t(), xx, rstd, c1, shape_key=key)
+    _only(adaln_training._adaln_fwd_gate_kernel, TMA=tma, **cfg)
+    for got, want in zip(adaln_training._adaln_fwd_gate(cn, sw.t(), sb, bw.t(), xx, rstd, c1, shape_key=key), ref, strict=True):
+        assert rel(got, want) <= 1e-2
