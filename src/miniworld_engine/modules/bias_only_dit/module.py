@@ -36,6 +36,7 @@ from einops import rearrange
 from jaxtyping import Bool, Float
 
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t as _core_t
 from miniworld_engine.integrations import bias_only_dit as _fused
 from miniworld_engine.integrations import bias_only_dit_train as _train
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
@@ -77,6 +78,16 @@ class BiasOnlyAttention(nn.Module):
         self.to_out = Linear(d_hidden * n_head, d_single, bias=False, init="zero")
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
+
+    def _feature_major(self, single) -> bool:
+        """The portable family's training core (``core_t``): a gradient is recorded, ONE pair serves every sample (``single`` [A, 1, L, d]) and the
+        activations are bf16 or fp32 on a CUDA device."""
+        return bool(
+            self.ada_ln_in.implementation == ImplementationType.MINIWORLD
+            and single.is_cuda and single.ndim == 4 and single.shape[1] == 1
+            and single.dtype in (torch.bfloat16, torch.float32)
+            and torch.is_grad_enabled()
+            and (single.requires_grad or any(p.requires_grad for p in self.parameters())))
 
     def _attention_weights(self, pair, mask, bias, dtype):
         """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample.
@@ -122,6 +133,14 @@ class BiasOnlyAttention(nn.Module):
     ) -> Float[torch.Tensor, "A B L d_single"]:
         # residual == the ORIGINAL input; the AdaLN hands it back as a stream output of its own node (see forward_with_stream)
         single, single_res = self.ada_ln_in.forward_with_stream(single, cond)
+        if self._feature_major(single):
+            # training, one pair: the whole core (value / gate GEMM, softmax(bias) v, gate, to_out) in feature-major layout, no permute copies
+            # (``kernels.bias_only_attention.triton.core_t``); the pair-bias softmax stays in autograd and receives dP
+            attention = self._attention_weights(pair, mask, bias, single.dtype)
+            with torch.autocast(device_type="cuda", enabled=False):
+                out = _core_t(single.reshape(-1, single.shape[-1]), self.to_value.weight, self.to_gate.weight, self.to_out.weight,
+                              attention[0].to(single.dtype))
+            return single_res + sigmoid_gate(self.to_scale(cond), out.reshape(single.shape))
         if self.ada_ln_in.implementation == ImplementationType.MINIWORLD:
             # the portable family: the value and the gate projection are one GEMM over the concatenated weights (one read of `single`, one launch,
             # one dgrad and one wgrad in the backward); the PyTorch statements keep the two Linears

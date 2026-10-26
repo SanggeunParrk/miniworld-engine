@@ -721,14 +721,23 @@ class AdaLNTrainFn(torch.autograd.Function):
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                 eps_x, eps_cond, with_stream=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
+        from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
         ctx.master = x.dtype == torch.bfloat16 and scale_weight.dtype == torch.float32 and is_h100(x.device)
-        if ctx.master:
-            scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         saved_wcat = None
+        if ctx.master:
+            # the three fp32 master weights as bf16 in ONE launch; the scale / bias projections land as the halves of their concatenation
+            from miniworld_engine.kernels._cast import cast_pack
+
+            if all(w.is_contiguous() for w in raw_weights):
+                saved_wcat, scale_bias = cast_pack([scale_weight, bias_weight, scale_bias], 2)
+                scale_weight, bias_weight = saved_wcat[:scale_weight.shape[0]], saved_wcat[scale_weight.shape[0]:]
+            else:
+                from miniworld_engine.integrations.h100_master import pack as pack_master
+
+                scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         orig_x_shape = x.shape
         orig_cond_shape = cond.shape
         nx = orig_x_shape[-1]
@@ -761,9 +770,7 @@ class AdaLNTrainFn(torch.autograd.Function):
             beta0 = scale_bias.new_zeros(nc)
             cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
                                                        shape_key=both_key(rows_of(orig_cond_shape)))
-            w_cat = torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
-            if ctx.master:
-                saved_wcat = w_cat
+            w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
             sb = _mm(cond_aff, w_cat.t())                            # (M, 2NX) raw [scale|bias]
             y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias, shape_key=ak)
 

@@ -681,6 +681,16 @@ def measured_result(
     require_compile_evidence(conf.compile, evidence)
     if getattr(conf, "kernel_probe", False):
         execution_checks["top_kernels"] = _top_kernels(func)
+        if os.environ.get("BENCH_PROBE_GRAPH") and timed is not func:
+            timed()
+            torch.cuda.synchronize()
+            saved = os.environ.get("BENCH_PROBE_TRACE")
+            os.environ["BENCH_PROBE_TRACE"] = os.environ["BENCH_PROBE_GRAPH"]
+            _top_kernels(timed)
+            if saved is None:
+                os.environ.pop("BENCH_PROBE_TRACE", None)
+            else:
+                os.environ["BENCH_PROBE_TRACE"] = saved
     if actual_graph == "disabled":
         captured_outputs[0] = None
         for tensor in grad_to_none:
@@ -714,6 +724,7 @@ def measured_result(
 
 
 def _top_kernels(func: Callable, n: int = 6) -> list[list]:
+    n = int(os.environ.get("BENCH_PROBE_N", n))
     """[[kernel name, total device microseconds, calls], ...] of one call of ``func``, largest first (best effort)."""
     try:
         from torch.profiler import ProfilerActivity, profile
@@ -722,13 +733,15 @@ def _top_kernels(func: Callable, n: int = 6) -> list[list]:
         with profile(activities=[ProfilerActivity.CUDA]) as prof:
             func()
             torch.cuda.synchronize()
+        if os.environ.get("BENCH_PROBE_TRACE"):
+            prof.export_chrome_trace(f"{os.environ['BENCH_PROBE_TRACE']}_{int(__import__('time').time()*1000)}.json")
         rows = []
         for ev in prof.key_averages():
             if str(getattr(ev, "device_type", "")).endswith("CUDA"):
                 total = getattr(ev, "self_device_time_total", None)
                 if total is None:
                     total = getattr(ev, "self_cuda_time_total", 0.0)
-                rows.append([ev.key[:56], round(float(total), 1), int(ev.count)])
+                rows.append([ev.key[:int(os.environ.get("BENCH_PROBE_W", 56))], round(float(total), 1), int(ev.count)])
         rows.sort(key=lambda r: -r[1])
         return rows[:n]
     except Exception as exc:  # noqa: BLE001 - a probe never fails a measurement

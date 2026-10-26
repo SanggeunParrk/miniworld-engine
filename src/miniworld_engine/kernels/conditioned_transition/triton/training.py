@@ -595,11 +595,23 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
+        from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
+        wcat = None
         if ctx.master:
-            wa, wb, ws, wsc, bsc = pack_master(raw_weights)
+            # the casts of the five fp32 master weights in ONE launch, the expand weights straight into the halves of their concatenation
+            from miniworld_engine.kernels._cast import cast_pack
+
+            nd0 = wa.shape[0]
+            if all(w.is_contiguous() for w in raw_weights):
+                wcat, ws, wsc, bsc = cast_pack([wa, wb, ws, wsc, bsc], 2)
+                wa, wb = wcat[:nd0], wcat[nd0:]
+            else:
+                from miniworld_engine.integrations.h100_master import pack as pack_master
+
+                wcat = None
+                wa, wb, ws, wsc, bsc = pack_master(raw_weights)
         # FORWARD backend (see _FWD_MODE): cuBLAS GEMMs + fused-triton elementwise (default,
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
@@ -608,7 +620,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ws = ws.contiguous(); wsc = wsc.contiguous(); bsc = bsc.contiguous()
         cond = cond.contiguous()
         ND = wa.shape[0]
-        wcat = torch.cat([wa, wb], dim=0)         # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
+        if wcat is None:
+            wcat = torch.cat([wa, wb], dim=0)     # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
         # ONE L for the whole call, computed once here and reused by the backward via ctx: the
         # module hands us the real atom count A; without it all we could see is M = B*A.
         L = int(length) if length is not None else length_of(x.shape)
