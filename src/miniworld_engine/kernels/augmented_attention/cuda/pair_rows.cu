@@ -197,12 +197,18 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
   constexpr int DPL = DP / 32;
   __shared__ float red[WPB][DP];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
-  float w[NH][DPL], part[NH][DPL];
+  constexpr bool WSM = NH > 8;  // 16 heads: the weights live in shared memory (64 fewer registers: occupancy)
+  __shared__ float wsm[WSM ? NH * DP : 1];
+  float w[WSM ? 1 : NH][DPL], part[NH][DPL];
+  if constexpr (WSM) {
+    for (int c = threadIdx.x; c < NH * DP; c += BT) wsm[c] = W[c];
+    __syncthreads();
+  }
 #pragma unroll
   for (int h = 0; h < NH; ++h)
 #pragma unroll
     for (int i = 0; i < DPL; ++i) {
-      w[h][i] = W[h * DP + lane * DPL + i];
+      if constexpr (!WSM) w[h][i] = W[h * DP + lane * DPL + i];
       part[h][i] = 0.f;
     }
   const long warp = ((long)blockIdx.x * BT + threadIdx.x) >> 5, nwarps = (long)gridDim.x * WPB;
@@ -242,7 +248,7 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
         float s = 0.f;
 #pragma unroll
         for (int h = 0; h < NH; ++h) {
-          s += w[h][i] * d[h];
+          s += (WSM ? wsm[h * DP + lane * DPL + i] : w[WSM ? 0 : h][i]) * d[h];
           part[h][i] += d[h] * x[i];
         }
         g[i] = s;
@@ -292,23 +298,28 @@ __global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_,
 // D[a, h, l] = sum_d dO[a L + l, 48 h + d] O[a L + l, 48 h + d], plus its query-permuted copy and the permuted copy of the LSE
 __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
                                             float* __restrict__ DDP, float* __restrict__ LSEP, long rows, int L) {
-  const long idx = (long)blockIdx.x * 256 + threadIdx.x;
-  const long row = idx >> 4;
-  const int h = idx & 15;
-  if (row >= rows) return;
+  // a block: 16 consecutive rows (one sample: L % 16 == 0) x 16 heads; results staged so every plane is written in 64-B runs
+  __shared__ float s[16][17];
+  const long row0 = (long)blockIdx.x * 16;
+  const int rl = threadIdx.x >> 4, h = threadIdx.x & 15;
+  const long row = row0 + rl;
   const float4* a = reinterpret_cast<const float4*>(DO + row * 768 + h * 48);
   const float4* b = reinterpret_cast<const float4*>(O + row * 768 + h * 48);
-  float s = 0.f;
+  float acc = 0.f;
 #pragma unroll
   for (int i = 0; i < 12; ++i) {
     const float4 x = __ldg(a + i), y = __ldg(b + i);
-    s += x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
+    acc += x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
   }
-  const long smp = row / L;
-  const int l = (int)(row % L);
-  const long o = (smp * 16 + h) * L;
-  DD[o + l] = s;
-  DDP[o + kinv(l)] = s;
+  s[h][rl] = acc;
+  __syncthreads();
+  const int h2 = threadIdx.x >> 4, r2 = threadIdx.x & 15;
+  const long smp = row0 / L;
+  const int l = (int)(row0 % L) + r2;
+  const long o = (smp * 16 + h2) * L;
+  const float v = s[h2][r2];
+  DD[o + l] = v;
+  DDP[o + kinv(l)] = v;
   LSEP[o + kinv(l)] = LSE[o + l];
 }
 
@@ -397,11 +408,10 @@ std::vector<at::Tensor> dd_perm(at::Tensor dO, at::Tensor O, at::Tensor lse, int
   chk(dO, at::kFloat, "dO");
   chk(O, at::kFloat, "O");
   chk(lse, at::kFloat, "lse");
-  TORCH_CHECK(dO.numel() == A * L * 768 && L % 8 == 0, "dd_perm shapes");
+  TORCH_CHECK(dO.numel() == A * L * 768 && L % 16 == 0, "dd_perm shapes");
   const at::cuda::CUDAGuard gd(dO.device());
   auto dd = at::empty({A, 16, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd);
-  const long n = A * L * 16;
-  dd_k<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
+  dd_k<<<(unsigned)(A * L / 16), 256, 0, at::cuda::getCurrentCUDAStream()>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
       dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), A * L, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dd, ddp, lsep};
