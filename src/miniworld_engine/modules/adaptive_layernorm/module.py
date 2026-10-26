@@ -1,4 +1,3 @@
-import contextlib
 
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/adaln.py
 import torch
@@ -68,21 +67,34 @@ class AdaptiveLayerNorm(nn.Module):
         return self._adaln_forward(x, cond, with_stream=True)
 
     def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor):
-        """The H100 hand-CUDA AdaLN (``kernels/adaln/cuda.adaln``, setting ``adaln_h100_cuda``): the sm_90a wgmma kernels for a call that records no
-        backward, the row kernels + cuBLAS for training. ``None`` when they do not serve the call (another dtype, a width they do not tile, ...)."""
+        """The H100 hand-CUDA AdaLN (``kernels/adaln/cuda``, setting ``adaln_h100_cuda``), one route per mode and dtype:
+
+        * no backward recorded (bf16, or fp32 under TF32): the sm_90a wgmma kernels (``infer.adaln_inference``: ``ln_rows`` + one GEMM with the gate and the
+          LayerNorm in its epilogue);
+        * a backward recorded, bf16: the same forward saving what the row kernels' backward reads (``infer.adaln_train``), their backward;
+        * a backward recorded, fp32 (and any call the wgmma tile does not take): the row kernels + cuBLAS of ``adaln_rows.cu`` (``adaln()``).
+
+        ``None`` when none serves the call (another dtype, a width they do not tile, ...): the caller runs the PyTorch reference."""
         from miniworld_engine.kernels.adaln import cuda as adaln_cuda
+        from miniworld_engine.kernels.adaln.cuda import infer
 
         if self.ln_in.elementwise_affine or self.to_bias.bias is not None:
             return None
         device_type = x.device.type
-        if torch.is_autocast_enabled(device_type) and not needs_backward(self, x, cond):
+        grad = needs_backward(self, x, cond)
+        if torch.is_autocast_enabled(device_type) and not grad:
             dtype = torch.get_autocast_dtype(device_type)   # inference under autocast: the kernels take the compute dtype
             x, cond = x.to(dtype), cond.to(dtype)
         if x.dtype != cond.dtype or not adaln_cuda.available(x, cond):
             return None
-        with torch.autocast(device_type=device_type, enabled=False) if not needs_backward(self, x, cond) else contextlib.nullcontext():
-            return adaln_cuda.adaln(
-                x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps)
+        args = (x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps)
+        wgmma = infer.supported(x, cond, x.shape[-1], cond.shape[-1])
+        if not grad:
+            with torch.autocast(device_type=device_type, enabled=False):
+                return infer.adaln_inference(*args) if wgmma else adaln_cuda.adaln(*args)
+        if wgmma and x.dtype == torch.bfloat16:
+            return infer.adaln_train(*args)
+        return adaln_cuda.adaln(*args)
 
     def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call

@@ -52,26 +52,45 @@ def supported(x: torch.Tensor, cond: torch.Tensor, nd: int) -> bool:
 
 
 def _swiglu_fwd_fake(ab):
+    """h [M, ND] of ab [M, 2 ND]."""
     return ab.new_empty((ab.shape[0], ab.shape[1] // 2))
 
 
-@opaque(fake=_swiglu_fwd_fake, name="ct_cuda_swiglu_fwd")
+@opaque(fake=_swiglu_fwd_fake, name="conditioned_transition_cuda_swiglu_fwd")
 def swiglu_fwd(ab: torch.Tensor) -> torch.Tensor:
     return ext().swiglu_fwd(ab)
 
 
-@opaque(fake=lambda dh, ab: torch.empty_like(ab), name="ct_cuda_swiglu_bwd")
+def _swiglu_bwd_fake(dh, ab):
+    """[dA | dB] like ab."""
+    return torch.empty_like(ab)
+
+
+@opaque(fake=_swiglu_bwd_fake, name="conditioned_transition_cuda_swiglu_bwd")
 def swiglu_bwd(dh: torch.Tensor, ab: torch.Tensor) -> torch.Tensor:
+    """da = dh b silu'(a), db = dh silu(a), written as [dA | dB]."""
     return ext().swiglu_bwd(dh, ab)
 
 
-@opaque(fake=lambda out, sp, res: torch.empty_like(out), name="ct_cuda_sigmul_fwd")
+def _sigmul_fwd_fake(out, sp, res):
+    """y like out."""
+    return torch.empty_like(out)
+
+
+@opaque(fake=_sigmul_fwd_fake, name="conditioned_transition_cuda_sigmul_fwd")
 def sigmul_fwd(out: torch.Tensor, sp: torch.Tensor, res: torch.Tensor | None) -> torch.Tensor:
+    """y = res + sigmoid(sp) out (the gated update rounded to the stream dtype before the add)."""
     return ext().sigmul_fwd(out, sp, res)
 
 
-@opaque(fake=lambda dy, out, sp: (torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((1056, dy.shape[-1]), dtype=torch.float32)), name="ct_cuda_sigmul_bwd")
+def _sigmul_bwd_fake(dy, out, sp):
+    """(dout, dscale, the block partials of the column sums of dscale)."""
+    return torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((1056, dy.shape[-1]), dtype=torch.float32)
+
+
+@opaque(fake=_sigmul_bwd_fake, name="conditioned_transition_cuda_sigmul_bwd")
 def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """dout = dy g, dscale = dy out g (1 - g), and the block partials of sum(dscale)."""
     dout, dsc, part = ext().sigmul_bwd(dy, out, sp)
     return dout, dsc, part
 
@@ -127,13 +146,14 @@ def _zeros_like_rows(x: torch.Tensor) -> torch.Tensor:
     return z
 
 
-def _wide_expand_fake(xn, zeros, w1p, ws):
+def _wide_expand_saved_fake(xn, zeros, w1p, ws):
+    """(out, h, a, b) shapes."""
     m, d = xn.shape
     h = ws.shape[1]
     return xn.new_empty((m, d)), xn.new_empty((m, h)), xn.new_empty((m, h)), xn.new_empty((m, h))
 
 
-@opaque(fake=_wide_expand_fake, name="ct_cuda_wide_expand_saved")
+@opaque(fake=_wide_expand_saved_fake, name="conditioned_transition_cuda_wide_expand_saved")
 def _wide_expand_saved(xn: torch.Tensor, zeros: torch.Tensor, w1p: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(h Ws^T, h, a, b) with h = silu(a) b, [a | b] = xn [Wa; Wb]^T (the Transition family's expand_saved + squeeze, zero residual)."""
     from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
@@ -142,7 +162,12 @@ def _wide_expand_saved(xn: torch.Tensor, zeros: torch.Tensor, w1p: torch.Tensor,
     return out, h, a, b
 
 
-@opaque(fake=lambda dy, wst, a, b: dy.new_empty((a.shape[0], 2 * a.shape[1])), name="ct_cuda_wide_gate_saved")
+def _wide_gate_saved_fake(dy, wst, a, b):
+    """[dA | dB] [M, 2 H]."""
+    return dy.new_empty((a.shape[0], 2 * a.shape[1]))
+
+
+@opaque(fake=_wide_gate_saved_fake, name="conditioned_transition_cuda_wide_gate_saved")
 def _wide_gate_saved(dy: torch.Tensor, wst: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """[dA | dB] = SwiGLU backward of dh = dy Ws from the saved a, b (one kernel; dh never reaches HBM)."""
     from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw

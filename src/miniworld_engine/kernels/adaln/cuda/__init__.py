@@ -143,10 +143,8 @@ def _bwd(
     dcn = torch.mm(dsb, wcat)
     dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32) if dsb.dtype is torch.bfloat16 else torch.mm(dsb.t(), cn)  # [2 d, dc]
     dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
-    from . import infer
-
-    dbs = infer.colsum(pbs) if has_bs else pbs.new_empty(0)   # fixed-order column sums of the block partials, one launch each
-    return dx, dcond, infer.colsum(pbc), dwcat[:d].clone(), dbs, dwcat[d:].clone()
+    dbs = pbs.sum(0) if has_bs else pbs.new_empty(0)
+    return dx, dcond, pbc.sum(0), dwcat[:d].clone(), dbs, dwcat[d:].clone()
 
 
 class _AdaLN(torch.autograd.Function):
@@ -154,13 +152,7 @@ class _AdaLN(torch.autograd.Function):
     def forward(ctx, x, cond, wc, ws, bs, wb, eps_x, eps_c):  # noqa: D102
         d, dc = x.shape[-1], cond.shape[-1]
         x2, c2 = x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous()
-        from . import infer
-
-        if infer.supported(x2, c2, d, dc):   # the sm_90a wgmma forward (ln_rows + one GEMM with the gate and the LayerNorm in its epilogue)
-            y, cn, stc, stx, sb = infer.fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c,
-                                                  infer.pick_ht(x2.shape[0], d, infer.num_sms(x2.device)))
-        else:
-            y, cn, stc, stx, sb = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
+        y, cn, stc, stx, sb = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
         if any(ctx.needs_input_grad):
             # the weights are saved too: autograd then refuses an in-place update between the passes
             ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, *([] if bs is None else [bs]))
@@ -176,19 +168,10 @@ class _AdaLN(torch.autograd.Function):
         return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None
 
 
-def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5, *, rna: bool = False):
+def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5):
     """``sigmoid(LN(c) w_scale^T + b_scale) * LN(x) + LN(c) w_bias^T`` with LN(c) = LayerNorm(cond) * ln_cond_weight; bf16 or fp32 x / cond
     [..., d] / [..., dc]; the weights may be fp32 masters (rounded to bf16 in one pack launch for bf16 activations) or bf16. Returns x's dtype.
-
-    One entry, two routes by mode: a call that records no backward runs the sm_90a wgmma kernels of ``infer.py`` (``ln_rows`` + one GEMM with the
-    gate and the LayerNorm of x in its epilogue, two launches; bf16, or fp32 under TF32; ``rna``: the fp32 result is rounded to the TF32 grid for a
-    TF32 GEMM that consumes it); everything else (training, strict fp32, widths the wgmma tile does not take) the row kernels + cuBLAS below.
-    A ``torch.compile`` trace sees opaque ops (``adaln_cuda_inference`` or ``adaln_h100_fwd`` / ``adaln_h100_bwd``)."""
-    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (x, cond, ln_cond_weight, w_scale, b_scale, w_bias) if t is not None)):
-        from . import infer
-
-        if infer.supported(x, cond, x.shape[-1], cond.shape[-1]):
-            return infer.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)
+    A ``torch.compile`` trace sees two opaque ops (``adaln_h100_fwd`` / ``adaln_h100_bwd``)."""
     return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond)
 
 

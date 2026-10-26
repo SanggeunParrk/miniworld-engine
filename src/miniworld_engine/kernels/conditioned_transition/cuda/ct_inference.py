@@ -86,12 +86,14 @@ def packed(wa, wb, ws, wsc, bsc, ht, dtype):
 
 
 def _infer_fake(x, cond, wab, ws, wsc, bsc, residual, ht, bn, rnd, cl):
+    """y [M, D]."""
     return x.new_empty((x.shape[0], ws.shape[0]))
 
 
-@opaque(fake=_infer_fake, name="ct_cuda_inference")
+@opaque(fake=_infer_fake, name="conditioned_transition_cuda_inference")
 def _infer(x: torch.Tensor, cond: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
            residual: torch.Tensor | None, ht: int, bn: int, rnd: bool, cl: int) -> torch.Tensor:
+    """The tail: expand + SwiGLU GEMM, then squeeze + gate (+ residual) GEMM, the second under programmatic dependent launch."""
     e = ext()
     m = x.shape[0]
     nd = wab.shape[0] // 2
@@ -118,3 +120,4 @@ def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=No
 
 
 __all__ = ["ct_inference", "ext", "pack_weights", "supported"]
+

@@ -108,6 +108,7 @@ def packed(w_scale, b_scale, w_bias, dtype):
 
 
 def _infer_fake(x, cond, lnw, wc, bs, eps_x, eps_cond, ht, rna):
+    """y: x's shape and dtype."""
     return torch.empty_like(x)
 
 
@@ -139,13 +140,14 @@ def adaln_inference(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, *, 
     return y.reshape(shape)
 
 
-def _fwd_fake(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, ht):
+def _fwd_saved_fake(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, ht):
+    """(y, LN(cond) lnw, its stats, the stats of x, sb) shapes."""
     m, nx = x.shape
     f = lambda: x.new_empty((m, 2), dtype=torch.float32)  # noqa: E731
     return x.new_empty((m, nx)), cond.new_empty(cond.shape), f(), f(), x.new_empty((m, 2 * nx))
 
 
-@opaque(fake=_fwd_fake, name="adaln_cuda_train_fwd")
+@opaque(fake=_fwd_saved_fake, name="adaln_cuda_train_fwd")
 def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor,
               eps_x: float, eps_cond: float, ht: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The training forward in the layout of ``adaln_rows``' backward: (y, LN(cond) lnw, its (mean, rstd), the (mean, rstd) of x, sb) with the
@@ -169,10 +171,79 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     return y, aff, stc, stx, sb
 
 
-__all__ = ["adaln_inference", "colsum", "ext", "fwd_saved", "num_sms", "pack_weights", "pick_ht", "supported"]
 
 
-@opaque(fake=lambda parts: parts.new_empty((parts.shape[1],)), name="adaln_cuda_colsum")
+
+def _colsum_fake(parts):
+    """[N]: the column sums of [P, N]."""
+    return parts.new_empty((parts.shape[1],))
+
+
+@opaque(fake=_colsum_fake, name="adaln_cuda_colsum")
 def colsum(parts: torch.Tensor) -> torch.Tensor:
     """sum over the rows of ``parts`` [P, N] fp32 in a fixed order (one launch)."""
     return ext().colsum(parts)
+
+
+def _train_bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs):
+    """(dx, dcond, dwc, dWs, dbs, dWb) like ``adaln_h100_bwd``."""
+    d, dc = ws.shape
+    return (
+        x2.new_empty(x2.shape),
+        c2.new_empty(c2.shape),
+        wc.new_empty((dc,), dtype=torch.float32),
+        ws.new_empty((d, dc), dtype=torch.float32),
+        ws.new_empty((d if has_bs else 0,), dtype=torch.float32),
+        ws.new_empty((d, dc), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_train_bwd_fake, name="adaln_cuda_train_bwd")
+def train_bwd(
+    dy2: torch.Tensor, x2: torch.Tensor, c2: torch.Tensor, cn: torch.Tensor, stc: torch.Tensor, stx: torch.Tensor, sb: torch.Tensor,
+    wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, has_bs: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward of ``adaln_h100_bwd`` (the row kernels of ``adaln_rows.cu`` around cuBLAS) with the column sums of its block partials taken by one
+    fixed-order kernel of ours instead of two PyTorch reductions (20 us each at M = 18432)."""
+    from . import _ext as rows_ext
+    from . import _wcat_bcat
+
+    d = x2.shape[-1]
+    e = rows_ext()
+    wcat, _ = _wcat_bcat(x2, ws, bs, wb)
+    dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx)
+    dcn = torch.mm(dsb, wcat)
+    dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32) if dsb.dtype is torch.bfloat16 else torch.mm(dsb.t(), cn)
+    dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
+    dbs = colsum(pbs) if has_bs else pbs.new_empty(0)
+    return dx, dcond, colsum(pbc), dwcat[:d].clone(), dbs, dwcat[d:].clone()
+
+
+class _AdaLNTrain(torch.autograd.Function):
+    """``adaln_rows``' autograd function with the wgmma forward (``fwd_saved``: ``ln_rows`` + one GEMM with the gate and the LayerNorm in its epilogue)
+    in place of ``ln_cond_fwd`` -> cuBLAS -> ``adaln_fwd``; the saved tensors and the backward are the same."""
+
+    @staticmethod
+    def forward(ctx, x, cond, wc, ws, bs, wb, eps_x, eps_c):  # noqa: D102
+        d, dc = x.shape[-1], cond.shape[-1]
+        x2, c2 = x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous()
+        y, cn, stc, stx, sb = fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c, pick_ht(x2.shape[0], d, num_sms(x2.device)))
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, *([] if bs is None else [bs]))
+            ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
+        return y.view(x.shape)
+
+    @staticmethod
+    def backward(ctx, dy):  # noqa: D102
+        x2, c2, cn, stc, stx, sb, wc, ws, wb, *rest = ctx.saved_tensors
+        bs = rest[0] if ctx.has_bs else None
+        dy2 = dy.reshape(-1, x2.shape[-1]).contiguous()
+        dx, dcond, dwc, dws, dbs, dwb = train_bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs)
+        return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None
+
+
+def adaln_train(x, cond, lnw, w_scale, b_scale, w_bias, eps_x=1e-5, eps_cond=1e-5):
+    """Training AdaLN (forward + backward) on the sm_90a wgmma forward; bf16 only (the fp32 forward stays on the row kernels + cuBLAS of ``adaln()``)."""
+    return _AdaLNTrain.apply(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond)
+
+__all__ = ["adaln_inference", "adaln_train", "colsum", "ext", "fwd_saved", "num_sms", "pack_weights", "pick_ht", "supported", "train_bwd"]
