@@ -81,10 +81,11 @@ class AdaptiveLayerNorm(nn.Module):
                 from miniworld_engine.kernels.adaln import cuda as _adaln_cuda
 
                 if _adaln_cuda.available(x, cond) and not self.ln_in.elementwise_affine and self.to_bias.bias is None:
-                    return _adaln_cuda.adaln(
+                    out = _adaln_cuda.adaln(
                         x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight,
                         self.ln_in.eps, self.ln_cond.eps,
                     )
+                    return (out, x) if with_stream else out
             x_norm = self.ln_in(x)
             cond_norm = self.ln_cond(cond)
             scale = master_linear(self.to_scale, cond_norm)
