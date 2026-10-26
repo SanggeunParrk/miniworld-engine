@@ -72,12 +72,13 @@ def _fwd_specs(M, L, at, xdt, par, gating, kq, up):
     return spec
 
 
-def _fwd_fake(x, tab, bias, km, wqkvg, bq, wo, wexp, wsq, qkw, par, sig, gating, kq, up, length, eps, eps_qk):
+def _token_fwd_fake(x, tab, bias, km, wqkvg, bq, wo, wexp, wsq, qkw, par, sig, gating, kq, up, length, eps, eps_qk):
+    """The saved tensors of the block forward (``_NAMES``): shapes and dtypes from ``_fwd_specs``."""
     spec = _fwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, kq, up)
     return [x.new_empty(spec[n][0], dtype=spec[n][1]) for n in _NAMES]
 
 
-@opaque(fake=_fwd_fake, name="dit_variants_token_train_fwd")
+@opaque(fake=_token_fwd_fake, name="dit_variants_token_train_fwd")
 def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.Tensor | None, wqkvg: torch.Tensor, bq: torch.Tensor,
               wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor, qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool,
               kq: bool, up: bool, length: int, eps: float, eps_qk: float) -> list[torch.Tensor]:
@@ -168,16 +169,18 @@ def _tf32_attn_bwd(qs, kb, vb, dob, bias, km, lse, dd, A, L):
                                           lse[..., perm].contiguous(), dd[..., perm].contiguous(), km, km_p, A, L)
     return dq, dk, dv, db_p[..., inv]
 
-def _bwd_fake(dout, x, tab, bias, km, saved, qkw, par, sig, gating, kq, up, length, eps, eps_qk):
+
+def _token_bwd_fake(dout, x, tab, bias, km, saved, qkw, par, sig, gating, kq, up, length, eps, eps_qk):
+    """dx, dtab, dbias, the weight gradients (fp32, the shapes of the packed weights) and the four qk-norm vectors."""
     D = WIDTH
-    return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=torch.float32), bias.new_empty(bias.shape, dtype=torch.float32),
-            tab.new_empty(saved[_SAVED.index("w_qkvg")].shape, dtype=torch.float32), tab.new_empty((D,), dtype=torch.float32),
-            tab.new_empty((D, D), dtype=torch.float32), tab.new_empty(saved[_SAVED.index("w_exp")].shape, dtype=torch.float32),
-            tab.new_empty(saved[_SAVED.index("w_sq")].shape, dtype=torch.float32),
-            *[tab.new_empty((D,), dtype=torch.float32) for _ in range(4)]]
+    f32 = torch.float32
+    return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=f32), bias.new_empty(bias.shape, dtype=f32),
+            tab.new_empty(saved[_SAVED.index("w_qkvg")].shape, dtype=f32), tab.new_empty((D,), dtype=f32), tab.new_empty((D, D), dtype=f32),
+            tab.new_empty(saved[_SAVED.index("w_exp")].shape, dtype=f32), tab.new_empty(saved[_SAVED.index("w_sq")].shape, dtype=f32),
+            tab.new_empty((D,), dtype=f32), tab.new_empty((D,), dtype=f32), tab.new_empty((D,), dtype=f32), tab.new_empty((D,), dtype=f32)]
 
 
-@opaque(fake=_bwd_fake, name="dit_variants_token_train_bwd")
+@opaque(fake=_token_bwd_fake, name="dit_variants_token_train_bwd")
 def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.Tensor | None, saved: list[torch.Tensor],
               qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, kq: bool, up: bool, length: int, eps: float,
               eps_qk: float) -> list[torch.Tensor]:
@@ -270,11 +273,12 @@ class _TokenBlock(torch.autograd.Function):
 
 
 
-def _pair_ln_fake(z, eps, out_bf16):
+def _pair_ln_fwd_fake(z, eps, out_bf16):
+    """The normalised rows: bf16 or z's dtype."""
     return z.new_empty(z.shape, dtype=torch.bfloat16 if out_bf16 else z.dtype)
 
 
-@opaque(fake=_pair_ln_fake, name="dit_variants_pair_ln_fwd")
+@opaque(fake=_pair_ln_fwd_fake, name="dit_variants_pair_ln_fwd")
 def pair_ln_fwd(z: torch.Tensor, eps: float, out_bf16: bool) -> torch.Tensor:
     """LayerNorm (no affine) of the pair rows z [R, C] (C 128 | 256), bf16 or in z's dtype."""
     out = torch.empty(z.shape, device=z.device, dtype=torch.bfloat16 if out_bf16 else z.dtype)
@@ -283,6 +287,7 @@ def pair_ln_fwd(z: torch.Tensor, eps: float, out_bf16: bool) -> torch.Tensor:
 
 
 def _pair_ln_bwd_fake(z, g, eps):
+    """dz: z's shape and dtype."""
     return torch.empty_like(z)
 
 
@@ -441,12 +446,13 @@ def _afwd_specs(M, N, at, xdt, par, gating, proj, kq, up):
     }
 
 
-def _afwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk):
+def _atom_fwd_fake(x, tab, bias2, widx, keys, ebias, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps, eps_qk):
+    """The saved tensors of the atom block forward (``_ANAMES``): shapes and dtypes from ``_afwd_specs``."""
     spec = _afwd_specs(x.shape[0], length, tab.dtype, x.dtype, par, gating, proj, kq, up)
     return [x.new_empty(spec[n][0], dtype=spec[n][1]) for n in _ANAMES]
 
 
-@opaque(fake=_afwd_fake, name="dit_variants_atom_train_fwd")
+@opaque(fake=_atom_fwd_fake, name="dit_variants_atom_train_fwd")
 def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor, wq: torch.Tensor,
              bq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor,
              qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool, length: int, eps: float,
@@ -513,17 +519,18 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     return [res[n] for n in _ANAMES]
 
 
-def _abwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length, eps,
-               eps_qk):
+def _atom_bwd_fake(dout, x, tab, bias2, widx, keys, ebias, saved, wq, wk, wv, wg, wo, wexp, wsq, qkw, par, sig, gating, proj, kq, up, slide, length,
+                   eps, eps_qk):
+    """dx, dtab, dbias2, debias, the weight gradients (fp32) and the four qk-norm vectors."""
     D = ATOM_D
     f32 = torch.float32
     return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=f32), bias2.new_empty(bias2.shape, dtype=f32), ebias.new_empty(ebias.shape, dtype=f32),
             wq.new_empty(wq.shape, dtype=f32), wq.new_empty((D,), dtype=f32), wk.new_empty(wk.shape, dtype=f32), wv.new_empty(wv.shape, dtype=f32),
-            wg.new_empty(wg.shape, dtype=f32), wo.new_empty(wo.shape, dtype=f32), wexp.new_empty(wexp.shape, dtype=f32),
-            wsq.new_empty(wsq.shape, dtype=f32), *[wq.new_empty((D,), dtype=f32) for _ in range(4)]]
+            wg.new_empty(wg.shape, dtype=f32), wo.new_empty(wo.shape, dtype=f32), wexp.new_empty(wexp.shape, dtype=f32), wsq.new_empty(wsq.shape, dtype=f32),
+            wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32), wq.new_empty((D,), dtype=f32)]
 
 
-@opaque(fake=_abwd_fake, name="dit_variants_atom_train_bwd")
+@opaque(fake=_atom_bwd_fake, name="dit_variants_atom_train_bwd")
 def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torch.Tensor, keys: torch.Tensor, ebias: torch.Tensor,
              saved: list[torch.Tensor], wq: torch.Tensor, wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor,
              wsq: torch.Tensor, qkw: list[torch.Tensor], par: bool, sig: bool, gating: bool, proj: bool, kq: bool, up: bool, slide: bool,
