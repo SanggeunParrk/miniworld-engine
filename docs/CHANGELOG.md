@@ -10,6 +10,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- H100 portable training, bias-only DiT and ConditionedTransition: the attention core in feature-major layout (no permute copies), the pair LayerNorm + bias projection in one pass, one-launch weight casts, row-major AdaLN gradient and in-kernel cond-gradient join; portable / PyTorch is now 0.88 - 0.92 for the bias-only DiT and 0.93 - 0.95 for ConditionedTransition bf16 training (fp32 ConditionedTransition 0.965). See `docs/records/portable_bodit_ct_training_20261026.md`.
 - H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
 
 ### Added
