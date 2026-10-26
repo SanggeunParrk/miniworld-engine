@@ -10,7 +10,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
-- H100: hand-CUDA AdaptiveLayerNorm and ConditionedTransition as standalone modules (sm_90a wgmma inference and AdaLN training forward, row-kernel + cuBLAS ConditionedTransition training; ladder CUDA < portable in 14 of 16 rows, fp32 training rows still open) -- `docs/records/adaln_ct_cuda_ladder_20261026.md`.
+- H100: hand-CUDA AdaptiveLayerNorm and ConditionedTransition as standalone modules (sm_90a wgmma inference and bf16 AdaLN training forward, row kernels + cuBLAS training with stream-gradient folds; ladder CUDA < portable in all 16 rows) -- `docs/records/adaln_ct_cuda_ladder_20261026.md`.
 
 - The performance ladder (`miniworld-engine ladder {plan,run,report,gate}`, `benchmarks/runners/ladder.py`): for every op, mode, dtype and shape of its grid it times the three rungs
   of the maintainer's invariant -- hand CUDA < portable (Triton) < PyTorch (`torch.compile` + CUDA graph, eager reported next to it) -- through `bench.py`, three repeats each,
