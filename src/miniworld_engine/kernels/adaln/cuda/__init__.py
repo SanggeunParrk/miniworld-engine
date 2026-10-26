@@ -1,0 +1,116 @@
+"""H100 hand-CUDA adaptive LayerNorm ``y = sigmoid(scale) * LN(x) + bias``, bf16 activations, forward and backward.
+
+``adaln_rows.cu``: one-warp-per-row kernels around the two cuBLAS GEMMs (the [scale | bias] projection of LN(cond) in one GEMM, its
+weight gradient and dcn in two more). The PyTorch leg runs the same computation as ten fp32 elementwise / LayerNorm kernels
+(casts, two statistics passes, the gate chain, a cast back); here it is ``ln_cond_fwd`` -> GEMM -> ``adaln_fwd`` and, backward,
+``adaln_bwd`` -> GEMM x3 -> ``ln_cond_bwd``. Statistics are fp32 and recomputed from the row in registers; every reduction has one
+fixed order (block partials summed in order), so the op is bitwise repeatable.
+
+Contract (``supported``): sm_90, bf16 x / cond, widths in ``WIDTHS`` (a multiple of 64), x.shape[:-1] == cond.shape[:-1].
+"""
+
+from __future__ import annotations
+
+import functools
+from pathlib import Path
+
+import torch
+
+from miniworld_engine import settings
+
+_dir = Path(__file__).parent
+WIDTHS = (128, 256, 384, 512, 768, 1024)
+
+
+@functools.lru_cache(maxsize=None)
+def _ext():
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="adaln_rows_sm90",
+        sources=[str(_dir / "adaln_rows.cu")],
+        extra_cuda_cflags=[
+            *host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+_BUILD_FAILED = False
+
+
+def supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
+    """The contract above (and the ``adaln_h100_cuda`` setting)."""
+    if not settings.current().adaln_h100_cuda or not x.is_cuda or not cond.is_cuda:
+        return False
+    if x.dtype is not torch.bfloat16 or cond.dtype is not torch.bfloat16 or x.shape[:-1] != cond.shape[:-1]:
+        return False
+    if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
+        return False
+    idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
+    return torch.cuda.get_device_capability(idx) == (9, 0)
+
+
+def available(x: torch.Tensor, cond: torch.Tensor) -> bool:
+    """``supported()`` plus a successful build; never under torch.compile tracing or fake tensors."""
+    global _BUILD_FAILED
+    if _BUILD_FAILED or not supported(x, cond):
+        return False
+    from torch._subclasses.fake_tensor import FakeTensor
+
+    if torch.compiler.is_compiling() or isinstance(x, FakeTensor) or isinstance(cond, FakeTensor):
+        return False
+    try:
+        _ext()
+    except Exception as exc:  # noqa: BLE001
+        import warnings
+
+        _BUILD_FAILED = True
+        warnings.warn(f"H100 CUDA adaLN unavailable, keeping the PyTorch leg: {exc!r}", RuntimeWarning, stacklevel=2)
+        return False
+    return True
+
+
+class _AdaLN(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, cond, wc, ws, bs, wb, eps_x, eps_c):  # noqa: D102
+        e = _ext()
+        d, dc = x.shape[-1], cond.shape[-1]
+        x2, c2 = x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous()
+        cn, stc = e.ln_cond_fwd(c2, wc.contiguous(), eps_c)
+        wcat = torch.empty(2 * d, dc, device=x.device, dtype=torch.bfloat16)
+        bcat = torch.empty(2 * d, device=x.device, dtype=torch.bfloat16)
+        e.pack(ws.contiguous(), wb.contiguous(), None if bs is None else bs.contiguous(), wcat, bcat)
+        sb = torch.addmm(bcat, cn, wcat.t())
+        y, stx = e.adaln_fwd(x2, sb, eps_x)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wcat, wc)
+            ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
+        return y.view(x.shape)
+
+    @staticmethod
+    def backward(ctx, dy):  # noqa: D102
+        e = _ext()
+        x2, c2, cn, stc, stx, sb, wcat, wc = ctx.saved_tensors
+        d = x2.shape[-1]
+        dy2 = dy.reshape(-1, d)
+        if dy2.dtype is not torch.bfloat16 or not dy2.is_contiguous():
+            dy2 = dy2.to(torch.bfloat16).contiguous()
+        dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx)
+        dcn = torch.mm(dsb, wcat)
+        dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
+        dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
+        dbs = pbs.sum(0) if ctx.has_bs else None
+        return dx.view(ctx.shape), dcond.view(ctx.cshape), pbc.sum(0), dwcat[:d], dbs, dwcat[d:], None, None
+
+
+def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5):
+    """``sigmoid(LN(c) w_scale^T + b_scale) * LN(x) + LN(c) w_bias^T`` with LN(c) = LayerNorm(cond) * ln_cond_weight; bf16 x / cond
+    [..., d] / [..., dc]; the weights may be fp32 masters (rounded to bf16 in one pack launch) or bf16. Returns bf16 like x."""
+    return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond)
+
+
+__all__ = ["adaln", "available", "supported"]
