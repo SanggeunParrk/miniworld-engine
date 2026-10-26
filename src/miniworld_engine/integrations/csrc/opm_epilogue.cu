@@ -1162,7 +1162,8 @@ __device__ __forceinline__ void ld4(const void* map,void* dst,uint64_t* b,int x,
 #endif
 __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
     const __nv_bfloat16* __restrict__ O,      // [N*CH, N*CH] grouped GEMM output
-    const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1
+    const float* __restrict__ NORM,           // [N, N]  mask counts in fp32, already clamped >= 1 (unused when BITS is set)
+    const unsigned* __restrict__ BITS, int BW, // inference: the mask bit rows [N, BW words]; the count is taken in the kernel
     const __nv_bfloat16* __restrict__ BF,     // [K/16][CZ/8][32][4] pre-swizzled projection weight
     const float* __restrict__ BIAS,           // [CZ]  bf16-rounded bias, held in fp32
     const __nv_bfloat16* __restrict__ RESIDUAL, // optional [1, NI, NJ, CZ]
@@ -1206,7 +1207,21 @@ __global__ __launch_bounds__(THREADS) void opm_epilogue_kernel(
 
   if (tid < NP) {
     const int il = tid / BJ, jl = tid - il * BJ;
-    sInv[tid] = 1.0f / NORM[(i0 + il) * NJ + (j0 + jl)];
+    if (BITS != nullptr) {
+      // inference: the mask count is the popcount of the two tokens' mask bit rows, taken here instead of by a separate
+      // kernel that wrote an [N, N] fp32 table (exact integer count, clamped at 1, the same 1 / n as the table gave)
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(i0 + il) * BW);
+      const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)(j0 + jl) * BW);
+      int cnt = 0;
+#pragma unroll 4
+      for (int k = 0; k < BW / 4; ++k) {
+        const uint4 x = __ldg(bi + k), y = __ldg(bj + k);
+        cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
+      }
+      sInv[tid] = 1.0f / float(max(cnt, 1));
+    } else {
+      sInv[tid] = 1.0f / NORM[(i0 + il) * NJ + (j0 + jl)];
+    }
   }
   for (int v = tid; v < ZW; v += THREADS) sBias[v] = BIAS[z0 + v];
 
@@ -2250,9 +2265,11 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor norm, torch
 }
 
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf, torch::Tensor bias,
-                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after) {
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> out_) {
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
-  TORCH_CHECK(norm.scalar_type() == torch::kFloat32 && norm.is_contiguous(), "norm: contiguous fp32");
+  const bool from_bits = norm.scalar_type() == torch::kInt32;   // inference: the prologue's mask bit rows [N, S/32] instead of the fp32 count
+  TORCH_CHECK((from_bits && norm.dim() == 2 && norm.size(1) % 4 == 0) || norm.scalar_type() == torch::kFloat32, "norm: fp32 count [N, N] or int32 mask bits [N, S/32]");
+  TORCH_CHECK(norm.is_contiguous(), "norm: contiguous");
   TORCH_CHECK(bf.scalar_type() == torch::kBFloat16 && bf.is_contiguous() && bf.numel() == CH * CH * CZ, "bf: Wo [CZ, CH*CH] bf16, contiguous");
   TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == CZ, "bias: fp32 [CZ]");
   TORCH_CHECK(ni % BI == 0, "the epilogue tiles ", BI, " i tokens, got ", ni);
@@ -2263,7 +2280,8 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
                 "residual: contiguous bf16 [1, ni, nj, CZ] on O's device");
   }
   const long M = O.size(1);
-  auto out = torch::empty({1, ni, nj, (long)CZ}, O.options());
+  auto out = out_.has_value() ? *out_ : torch::empty({1, ni, nj, (long)CZ}, O.options());
+  TORCH_CHECK(out.is_contiguous() && out.scalar_type() == torch::kBFloat16 && out.numel() == ni * nj * CZ, "out: contiguous bf16 [1, ni, nj, CZ]");
   dim3 grid((nj / BJ) * NZS, ni / BI);
   auto stream = at::cuda::getCurrentCUDAStream();
   static bool ep_attr = false;                 // the staged weight pushes the tiles past 48 KiB
@@ -2306,7 +2324,8 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
 #endif
   opm_epilogue_kernel<<<grid, THREADS, SMEM_BYTES + 1024, stream>>>(
       reinterpret_cast<const __nv_bfloat16*>(O.data_ptr<at::BFloat16>()),
-      norm.data_ptr<float>(),
+      from_bits ? nullptr : norm.data_ptr<float>(),
+      from_bits ? reinterpret_cast<const unsigned*>(norm.data_ptr<int>()) : nullptr, from_bits ? (int)norm.size(1) : 0,
       reinterpret_cast<const __nv_bfloat16*>(bf.data_ptr<at::BFloat16>()),
       bias.data_ptr<float>(),
       residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
@@ -2360,7 +2379,7 @@ std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p, bool in
   return {g,b,a,c,o,ob,ot,bw};
 }
 std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor mask,
- std::vector<torch::Tensor> p,double eps,bool save_stats){
+ std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm){
  TORCH_CHECK(m.is_cuda()&&m.is_contiguous()&&m.scalar_type()==torch::kBFloat16&&m.dim()==3&&m.size(2)==64,"TMA prologue BF16 [S,N,64]");
  int S=m.size(0),N=m.size(1);
  TORCH_CHECK(S%256==0&&N%64==0&&mask.is_contiguous()&&mask.scalar_type()==torch::kBool&&mask.device()==m.device()&&mask.numel()==S*N&&p.size()==8,"TMA prologue shape/mask");
@@ -2392,12 +2411,13 @@ std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor
  int grid=std::min(tiles,at::cuda::getCurrentDeviceProperties()->multiProcessorCount);
  C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),dim3(grid),dim3(512),args,opm_pro_tma::SMEM,at::cuda::getCurrentCUDAStream()));
  C10_CUDA_KERNEL_LAUNCH_CHECK();
+ if(!with_norm) return {a,b,stats,mk,bits};   // inference: the epilogue counts from the mask bits
  opm_count_launch(bitp,norm.data_ptr<float>(),S,N);
  return {a,b,stats,mk,norm};
 }
 
 std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mask,
-    std::vector<torch::Tensor> p,double eps,bool save_stats) {
+    std::vector<torch::Tensor> p,double eps,bool save_stats,bool with_norm) {
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type()==torch::kBFloat16 && m.dim()==3 && m.size(2)==64,
       "native OPM input must be contiguous BF16 [S,N,64]");
   int S=m.size(0),N=m.size(1);
@@ -2416,6 +2436,7 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
       reinterpret_cast<__nv_bfloat16*>(b.data_ptr()),reinterpret_cast<__nv_bfloat16*>(mk.data_ptr()),
       save_stats?stats.data_ptr<float>():nullptr,S,N,float(eps));
   opm_native_launch(opm_mask_bits_native,dim3((S*N+255)/256),dim3(256),mask.data_ptr<bool>(),reinterpret_cast<unsigned*>(bits.data_ptr()),S,N);
+  if(!with_norm) return {a,b,stats,mk,bits};
   opm_count_launch(reinterpret_cast<const unsigned*>(bits.data_ptr()),norm.data_ptr<float>(),S,N);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {a,b,stats,mk,norm};
@@ -2425,7 +2446,7 @@ std::vector<torch::Tensor> opm_native_prologue(torch::Tensor m,torch::Tensor mas
 // the bit mask the prologue wrote).  Parameters arrive already as gamma / beta fp32 [CM] and Wa / Wb bf16 [32, CM].
 std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask, torch::Tensor gamma, torch::Tensor beta,
                                              torch::Tensor wa, torch::Tensor wb, double eps, bool save_stats,
-                                             c10::optional<torch::Tensor> pbias) {
+                                             c10::optional<torch::Tensor> pbias, bool with_norm) {
   using Cf = opm_pro_wide::Cfg<CM_MSA>;
   TORCH_CHECK(m.is_cuda() && m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == CM_MSA,
               "wide OPM prologue: m is contiguous bf16 [S, N, ", CM_MSA, "]");
@@ -2479,6 +2500,7 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel), dim3(grid), dim3(512), args, Cf::SMEM,
                                   at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if (!with_norm) return {a, b, stats, mk, bits};   // inference: the epilogue counts from the mask bits
   opm_count_launch(bitp, norm.data_ptr<float>(), S, N);
   return {a, b, stats, mk, norm};
 }
@@ -2509,9 +2531,322 @@ std::vector<torch::Tensor> opm_native_cast_grads(std::vector<torch::Tensor> valu
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
 
+
+#if defined(MINIWORLD_OPM_FUSED)
+// ---------------------------------------------------------------------------------------------
+// FUSED outer product mean (inference): the grouped GEMM O[(i,c),(j,e)] = sum_s A2[(i,c),s] BT[(j,e),s] and the c_hidden^2 -> c_z
+// projection in ONE persistent kernel, so O ([N*32, N*32] bf16, 134 MB at N=256, 1.2 GB at N=768) is never written to or read from HBM.
+//
+// The projection is a sum over the pair's 1024 products k = (c, e); it is split by c into four passes, and a CTA's work item is
+// 16 i x 8 j = 128 pairs ("super tile"):
+//   pass q      GEMM tile of 128 rows = (16 i) x (c in [8 q, 8 q + 8)) by 256 columns = (8 j) x (32 e), K = S: two consumer warpgroups
+//               (m64n256 each), a producer warpgroup (warp 0: the A / B tiles by TMA, A through a 3-D map [i][c][s]; warp 1: the weight).
+//               The fp32 accumulator is rounded to bf16 (as cuBLAS' output was) and written to shared memory as Opair[kc][pair][64 k]
+//               (kc = e / 8, k = (c, e % 8) in a row of 128 B; the XOR swizzle by the pair's j makes the fragment stores bank-conflict free).
+//   projection  z^T[o, pair] += W_q[o, k] Opair[pair, k] with wgmma m64n128k16: A = the 64 KiB slice of the weight that belongs to
+//               pass q (k permuted on the host to this layout), B = Opair; the 128 x 128 fp32 result stays in registers across the four passes.
+//   epilogue    / count + bias (or (. + bias) / count when `after`) + residual, bf16, to z; the count is the popcount of the two tokens' mask bits.
+// Against one tile of 32 pairs per weight pass this streams the 256 KiB weight once per 128 pairs instead of once per 32.
+namespace opm_fused {
+#ifndef OPM_FUSED_BK
+#define OPM_FUSED_BK 32
+#endif
+#ifndef OPM_FUSED_STAGES
+#define OPM_FUSED_STAGES 4
+#endif
+#ifndef OPM_FUSED_WST
+#define OPM_FUSED_WST 4
+#endif
+constexpr int BM = 128, BN = 256, BK = OPM_FUSED_BK, STAGES = OPM_FUSED_STAGES;
+static_assert(BK == 64 || BK == 32, "stage K is one 128 B or one 64 B swizzle row");
+constexpr int A_BYTES = BM * BK * 2, B_BYTES = BN * BK * 2, STAGE_BYTES = A_BYTES + B_BYTES;
+constexpr int WSTAGES = OPM_FUSED_WST, WK = 64, W_BYTES = 128 * WK * 2;   // weight stages: [128 o][64 k], SW128
+constexpr int OP_BYTES = 4 * 128 * 128;                                   // Opair: 4 chunks of [128 pairs][64 k] bf16
+constexpr int RING_OFF = 0, OP_OFF = STAGES * STAGE_BYTES, W_OFF = OP_OFF + OP_BYTES, BAR_OFF = W_OFF + WSTAGES * W_BYTES;
+constexpr int SMEM = BAR_OFF + 2048 + 1024;   // barriers + counts, and the slack that aligns the base to 1 KiB
+static_assert(SMEM <= 227 * 1024, "shared memory");
+constexpr int PAIRS = 128;
+constexpr int RASTER = 8;                    // m blocks per raster group (A / B panels stay in L2)
+
+__device__ __forceinline__ uint64_t desc_sw64(const void* p) {
+  const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
+  return uint64_t((a >> 4) & 0x3fff) | (uint64_t(1) << 16) | (uint64_t(32) << 32) | (uint64_t(2) << 62);
+}
+// operand of the mainloop: K-major rows of BK elements, 128 B swizzle for BK 64, 64 B for BK 32
+__device__ __forceinline__ uint64_t desc_k(const void* p) { return BK == 64 ? wg::desc(p) : desc_sw64(p); }
+__device__ __forceinline__ void mma_m64n256k16_ss(uint64_t da, uint64_t db, float* d, int accumulate) {
+  asm volatile(
+      "{\n"
+      ".reg .pred p;\n"
+      "setp.ne.b32 p, %128, 0;\n"
+      "wgmma.mma_async.sync.aligned.m64n256k16.f32.bf16.bf16 {\n"
+      " %0, %1, %2, %3, %4, %5, %6, %7, \n"
+      " %8, %9, %10, %11, %12, %13, %14, %15, \n"
+      " %16, %17, %18, %19, %20, %21, %22, %23, \n"
+      " %24, %25, %26, %27, %28, %29, %30, %31, \n"
+      " %32, %33, %34, %35, %36, %37, %38, %39, \n"
+      " %40, %41, %42, %43, %44, %45, %46, %47, \n"
+      " %48, %49, %50, %51, %52, %53, %54, %55, \n"
+      " %56, %57, %58, %59, %60, %61, %62, %63, \n"
+      " %64, %65, %66, %67, %68, %69, %70, %71, \n"
+      " %72, %73, %74, %75, %76, %77, %78, %79, \n"
+      " %80, %81, %82, %83, %84, %85, %86, %87, \n"
+      " %88, %89, %90, %91, %92, %93, %94, %95, \n"
+      " %96, %97, %98, %99, %100, %101, %102, %103, \n"
+      " %104, %105, %106, %107, %108, %109, %110, %111, \n"
+      " %112, %113, %114, %115, %116, %117, %118, %119, \n"
+      " %120, %121, %122, %123, %124, %125, %126, %127\n"
+      "}, %129, %130, p, 1, 1, 0, 0;\n"
+      "}\n"
+      : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]),
+        "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]),
+        "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]),
+        "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31]),
+        "+f"(d[32]), "+f"(d[33]), "+f"(d[34]), "+f"(d[35]), "+f"(d[36]), "+f"(d[37]), "+f"(d[38]), "+f"(d[39]),
+        "+f"(d[40]), "+f"(d[41]), "+f"(d[42]), "+f"(d[43]), "+f"(d[44]), "+f"(d[45]), "+f"(d[46]), "+f"(d[47]),
+        "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
+        "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63]),
+        "+f"(d[64]), "+f"(d[65]), "+f"(d[66]), "+f"(d[67]), "+f"(d[68]), "+f"(d[69]), "+f"(d[70]), "+f"(d[71]),
+        "+f"(d[72]), "+f"(d[73]), "+f"(d[74]), "+f"(d[75]), "+f"(d[76]), "+f"(d[77]), "+f"(d[78]), "+f"(d[79]),
+        "+f"(d[80]), "+f"(d[81]), "+f"(d[82]), "+f"(d[83]), "+f"(d[84]), "+f"(d[85]), "+f"(d[86]), "+f"(d[87]),
+        "+f"(d[88]), "+f"(d[89]), "+f"(d[90]), "+f"(d[91]), "+f"(d[92]), "+f"(d[93]), "+f"(d[94]), "+f"(d[95]),
+        "+f"(d[96]), "+f"(d[97]), "+f"(d[98]), "+f"(d[99]), "+f"(d[100]), "+f"(d[101]), "+f"(d[102]), "+f"(d[103]),
+        "+f"(d[104]), "+f"(d[105]), "+f"(d[106]), "+f"(d[107]), "+f"(d[108]), "+f"(d[109]), "+f"(d[110]), "+f"(d[111]),
+        "+f"(d[112]), "+f"(d[113]), "+f"(d[114]), "+f"(d[115]), "+f"(d[116]), "+f"(d[117]), "+f"(d[118]), "+f"(d[119]),
+        "+f"(d[120]), "+f"(d[121]), "+f"(d[122]), "+f"(d[123]), "+f"(d[124]), "+f"(d[125]), "+f"(d[126]), "+f"(d[127])
+      : "r"(accumulate), "l"(da), "l"(db)
+      : "memory");
+}
+
+__global__ __launch_bounds__(384, 1) void opm_fused_kernel(
+    const __grid_constant__ CUtensorMap AMAP, const __grid_constant__ CUtensorMap BMAP, const __grid_constant__ CUtensorMap WMAP,
+    const unsigned* __restrict__ BITS, int BW, const float* __restrict__ BIAS, const __nv_bfloat16* __restrict__ RESIDUAL,
+    __nv_bfloat16* __restrict__ Z, int L, int nk, int AFTER) {
+  using namespace opm_pro_tma;
+  const int DBG = AFTER >> 4; AFTER &= 1;   // DBG (probe only): 1 = no projection, 2 = also no Opair conversion, 3 = no epilogue
+  extern __shared__ char smem_raw[];
+  char* smem = smem_raw + ((1024u - (static_cast<uint32_t>(__cvta_generic_to_shared(smem_raw)) & 1023u)) & 1023u);
+  uint64_t* full = reinterpret_cast<uint64_t*>(smem + BAR_OFF);
+  uint64_t* empty = full + STAGES;
+  uint64_t* wfull = empty + STAGES;
+  uint64_t* wempty = wfull + WSTAGES;
+  float* sInvAll = reinterpret_cast<float*>(smem + BAR_OFF + 512);   // [2][PAIRS]
+  const int tid = threadIdx.x, wgi = tid >> 7, warp = tid >> 5, lane = tid & 31;
+  const int gm = L / 16, gn = L / 8, ntiles = gm * gn;
+
+  if (tid == 0) {
+    for (int s = 0; s < STAGES; ++s) { init(full + s, 1); init(empty + s, 8); }
+    for (int s = 0; s < WSTAGES; ++s) { init(wfull + s, 1); init(wempty + s, 8); }
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+
+  auto tile_mn = [&](int t, int& m, int& n) {
+    const int per = RASTER * gn, grp = t / per, first = grp * RASTER;
+    const int gsz = min(RASTER, gm - first), r = t - grp * per;
+    m = first + r % gsz;
+    n = r / gsz;
+  };
+
+  if (wgi == 0) {
+    asm volatile("setmaxnreg.dec.sync.aligned.u32 40;\n" ::: "memory");
+    if (warp == 0 && lane == 0) {          // A / B producer
+      int it = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
+        int m, n; tile_mn(t, m, n);
+        for (int q = 0; q < 4; ++q) {
+          for (int kb = 0; kb < nk; ++kb, ++it) {
+            const int slot = it % STAGES;
+            wait(empty + slot, ((it / STAGES) & 1) ^ 1);
+            expect(full + slot, STAGE_BYTES);
+            char* base = smem + RING_OFF + slot * STAGE_BYTES;
+            ld3(&AMAP, base, full + slot, kb * BK, q * 8, m * 16);
+            ld2(&BMAP, base + A_BYTES, full + slot, kb * BK, n * BN);
+          }
+        }
+      }
+    } else if (warp == 1 && lane == 0) {   // projection weight producer: a pass's 64 KiB slice, 4 stages
+      int wit = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
+        for (int q = 0; q < 4; ++q) {
+          for (int kc = 0; kc < 4; ++kc, ++wit) {
+            if (DBG && DBG != 3) continue;
+            const int slot = wit % WSTAGES;
+            wait(wempty + slot, ((wit / WSTAGES) & 1) ^ 1);
+            expect(wfull + slot, W_BYTES);
+            ld2(&WMAP, smem + W_OFF + slot * W_BYTES, wfull + slot, q * 256 + kc * WK, 0);
+          }
+        }
+      }
+    }
+    return;
+  }
+
+  asm volatile("setmaxnreg.inc.sync.aligned.u32 232;\n" ::: "memory");
+  const int cw = wgi - 1;                  // consumer warpgroup: rows [64 cw, 64 cw + 64) of the tile, o in [64 cw, 64 cw + 64)
+  const int w4 = warp & 3;
+  const int ctid = tid - 128;
+  float bias_r[2];
+  bias_r[0] = BIAS[cw * 64 + w4 * 16 + (lane >> 2)];
+  bias_r[1] = BIAS[cw * 64 + w4 * 16 + (lane >> 2) + 8];
+  int it = 0, wit = 0, ti = 0;
+  float acc[128];
+  float acc2[64];
+  for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++ti) {
+    int m, n; tile_mn(t, m, n);
+    float* sInv = sInvAll + (ti & 1) * PAIRS;
+    if (ctid < 128) {                      // the 128 mask counts of the tile (loads in flight while the pipeline fills)
+      const int il = ctid >> 3, jl = ctid & 7;
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)(m * 16 + il) * BW);
+      const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)(n * 8 + jl) * BW);
+      int cnt = 0;
+#pragma unroll 4
+      for (int k = 0; k < BW / 4; ++k) {
+        const uint4 x = __ldg(bi + k), y = __ldg(bj + k);
+        cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
+      }
+      sInv[ctid] = 1.0f / float(max(cnt, 1));
+    }
+#pragma unroll 1
+    for (int q = 0; q < 4; ++q) {
+      // ---- the outer product of pass q over S
+      int prev = -1;
+#pragma unroll 1
+      for (int kb = 0; kb < nk; ++kb, ++it) {
+        const int slot = it % STAGES;
+        wait(full + slot, (it / STAGES) & 1);
+        const char* base = smem + RING_OFF + slot * STAGE_BYTES;
+        wg::fence();
+#pragma unroll
+        for (int ks = 0; ks < BK / 16; ++ks)
+          mma_m64n256k16_ss(desc_k(base + cw * (64 * BK * 2) + ks * 32), desc_k(base + A_BYTES + ks * 32), acc, (kb | ks) != 0);
+        wg::commit();
+        asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory");
+        if (prev >= 0) {
+          __syncwarp();
+          if (lane == 0) arrive(empty + prev);
+        }
+        prev = slot;
+      }
+      wg::wait();
+      __syncwarp();
+      if (lane == 0) arrive(empty + prev);
+      if (DBG == 2) continue;
+      // ---- the accumulator tile -> Opair[kc = e / 8][pair = 8 i + j][c, e % 8] (bf16, rows of 128 B, 16 B chunks XOR j)
+      {
+        const int i0 = cw * 8 + w4 * 2, c = lane >> 2, e_lo2 = (lane & 3) * 2;
+        char* op = smem + OP_OFF;
+#pragma unroll
+        for (int tt = 0; tt < 32; ++tt) {
+          const int jl = tt >> 2, kc = tt & 3;
+          const int off = kc * 16384 + (i0 * 8 + jl) * 128 + ((c ^ jl) << 4) + e_lo2 * 2;
+          *reinterpret_cast<__nv_bfloat162*>(op + off) = __floats2bfloat162_rn(acc[4 * tt], acc[4 * tt + 1]);
+          *reinterpret_cast<__nv_bfloat162*>(op + off + 1024) = __floats2bfloat162_rn(acc[4 * tt + 2], acc[4 * tt + 3]);
+        }
+      }
+      wg::proxy_fence();
+      asm volatile("bar.sync 2, 256;\n" ::: "memory");
+      if (DBG == 1) continue;
+      // ---- the projection of pass q: z^T += W_q Opair^T
+      int wprev = -1;
+#pragma unroll 1
+      for (int kc = 0; kc < 4; ++kc, ++wit) {
+        const int slot = wit % WSTAGES;
+        wait(wfull + slot, (wit / WSTAGES) & 1);
+        const char* wb = smem + W_OFF + slot * W_BYTES + cw * 8192;
+        const char* ob = smem + OP_OFF + kc * 16384;
+        wg::fence();
+#pragma unroll
+        for (int ks = 0; ks < WK / 16; ++ks)
+          wg::mma_m64n128k16(wg::desc(wb + ks * 32), wg::desc(ob + ks * 32), acc2, (q | kc | ks) != 0);
+        wg::commit();
+        asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory");
+        if (wprev >= 0) {
+          __syncwarp();
+          if (lane == 0) arrive(wempty + wprev);
+        }
+        wprev = slot;
+      }
+      wg::wait();
+      __syncwarp();
+      if (lane == 0) arrive(wempty + wprev);
+    }
+    if (DBG == 1 || DBG == 2 || DBG == 3) continue;
+    asm volatile("bar.sync 2, 256;\n" ::: "memory");   // the counts are in shared memory
+    // ---- epilogue: count, bias, residual, bf16, z[i, j, o]
+#pragma unroll
+    for (int t2 = 0; t2 < 16; ++t2) {
+#pragma unroll
+      for (int h = 0; h < 2; ++h) {          // h: row o + 8 * h
+        const int o = cw * 64 + w4 * 16 + (lane >> 2) + h * 8;
+#pragma unroll
+        for (int u = 0; u < 2; ++u) {        // u: the pair of the column
+          const int p = t2 * 8 + (lane & 3) * 2 + u;
+          const float a = acc2[4 * t2 + 2 * h + u], iv = sInv[p], b = bias_r[h];
+          __nv_bfloat16 v = __float2bfloat16_rn(AFTER ? (a + b) * iv : fmaf(a, iv, b));
+          const size_t zi = ((size_t)(m * 16 + (p >> 3)) * L + (n * 8 + (p & 7))) * 128 + o;
+          if (RESIDUAL != nullptr) v = __hadd(v, RESIDUAL[zi]);
+          Z[zi] = v;
+        }
+      }
+    }
+  }
+}
+}  // namespace opm_fused
+
+torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor bits, torch::Tensor wperm, torch::Tensor bias,
+                              c10::optional<torch::Tensor> residual, int64_t after) {
+  using namespace opm_fused;
+  TORCH_CHECK(CZ == 128 && CM_MSA == 64, "the fused kernel is written for the MiniWorld widths (c_z 128)");
+  TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kBFloat16 && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() && bt.is_contiguous(),
+              "a2 / bt: contiguous bf16 [N * 32, S]");
+  const long rows = a2.size(0), S = a2.size(1), N = rows / CH;
+  TORCH_CHECK(rows % CH == 0 && N % 16 == 0 && S % BK == 0 && S >= BK, "fused OPM: N % 16, S % 64");
+  TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(0) == N && bits.size(1) % 4 == 0, "bits: int32 [N, S / 32]");
+  TORCH_CHECK(wperm.scalar_type() == torch::kBFloat16 && wperm.is_contiguous() && wperm.numel() == 128 * 1024, "wperm: bf16 [128, 1024] (k-permuted)");
+  TORCH_CHECK(bias.scalar_type() == torch::kFloat32 && bias.numel() == 128, "bias: fp32 [128]");
+  if (residual.has_value())
+    TORCH_CHECK(residual->scalar_type() == torch::kBFloat16 && residual->is_contiguous() && residual->numel() == N * N * 128, "residual: bf16 [1, N, N, 128]");
+  auto z = torch::empty({1, N, N, 128}, a2.options());
+  const CUtensorMapSwizzle kswz = BK == 64 ? CU_TENSOR_MAP_SWIZZLE_128B : CU_TENSOR_MAP_SWIZZLE_64B;
+  auto enc = [&](CUtensorMap* map, void* ptr, int rank, uint64_t* dims, uint64_t* strides, uint32_t* box, CUtensorMapSwizzle swz) {
+    uint32_t es[3] = {1, 1, 1};
+    auto rc = tma_encode()(map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, rank, ptr, dims, strides, box, es, CU_TENSOR_MAP_INTERLEAVE_NONE, swz,
+                           CU_TENSOR_MAP_L2_PROMOTION_L2_128B, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+    TORCH_CHECK(rc == CUDA_SUCCESS, "fused OPM TMA encode: ", int(rc));
+  };
+  alignas(64) CUtensorMap amap{}, bmap{}, wmap{};
+  {   // A2 as [i][c][s]: a box of BK k x 8 c x 16 i is the 128 rows (i, c) of one pass
+    uint64_t dims[3] = {(uint64_t)S, 32, (uint64_t)N}, strides[2] = {(uint64_t)S * 2, (uint64_t)S * 64};
+    uint32_t box[3] = {(uint32_t)BK, 8, 16};
+    enc(&amap, a2.data_ptr(), 3, dims, strides, box, kswz);
+  }
+  {
+    uint64_t dims[2] = {(uint64_t)S, (uint64_t)rows}, strides[1] = {(uint64_t)S * 2};
+    uint32_t box[2] = {(uint32_t)BK, (uint32_t)BN};
+    enc(&bmap, bt.data_ptr(), 2, dims, strides, box, kswz);
+  }
+  {
+    uint64_t dims[2] = {1024, 128}, strides[1] = {2048};
+    uint32_t box[2] = {(uint32_t)WK, 128};
+    enc(&wmap, wperm.data_ptr(), 2, dims, strides, box, CU_TENSOR_MAP_SWIZZLE_128B);
+  }
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  const int sms = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
+  const int ntiles = (int)(N / 16) * (int)(N / 8);
+  opm_fused_kernel<<<std::min(sms, ntiles), 384, SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      amap, bmap, wmap, reinterpret_cast<const unsigned*>(bits.data_ptr<int>()), (int)bits.size(1), bias.data_ptr<float>(),
+      residual.has_value() ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
+      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)N, (int)(S / BK), (int)after);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return z;
+}
+#endif  // MINIWORLD_OPM_FUSED
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
-        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0);
+        py::arg("O"), py::arg("norm"), py::arg("bf"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("out") = py::none());
   m.def("opm_dgrad", &opm_dgrad, "fused OPM dO: (dz @ Wo) / n straight into the grouped layout",
         py::arg("dz"), py::arg("norm"), py::arg("bw"), py::arg("ni"), py::arg("nj"), py::arg("after") = 0);
   m.def("opm_dwo", &opm_dwo, "dWo straight off the grouped outer product, no permute");
@@ -2521,10 +2856,13 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("raw_weights")=std::vector<torch::Tensor>{});
   m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128) + exact mask count",
         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
-        py::arg("pbias") = py::none());
+        py::arg("pbias") = py::none(), py::arg("with_norm") = true);
   m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
-  m.def("opm_native_prologue",&opm_native_prologue);
-  m.def("opm_native_prologue_tma",&opm_native_prologue_tma);
+  m.def("opm_native_prologue",&opm_native_prologue,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true);
+  m.def("opm_native_prologue_tma",&opm_native_prologue_tma,py::arg("m"),py::arg("mask"),py::arg("p"),py::arg("eps"),py::arg("save_stats"),py::arg("with_norm")=true);
+#if defined(MINIWORLD_OPM_FUSED)
+  m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0);
+#endif
   m.def("opm_native_cast",&opm_native_cast);
   m.def("opm_native_cast_grads",&opm_native_cast_grads);
 }

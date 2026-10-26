@@ -123,29 +123,36 @@ def biased_wide(module, msa, mask, token_asym_id=None, residual=None):
     m = msa[0].contiguous()
     _, n, cm = m.shape
     cz = module.to_out.weight.shape[0]
-    ext = opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz)
+    fused = opm_train._fused_enabled(m.shape[0], n, training=False, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
+    ext = opm_train._ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
     mk = (mask[0] if mask is not None else torch.ones(m.shape[:2], dtype=torch.bool, device=msa.device)).contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
-    if cm == 64 and cz == 128 and all(t.is_contiguous() and t.dtype in (torch.float32, bf) for t in (module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight, module.to_right.weight,
-                                                                   module.to_out.weight, module.to_out.bias, module.to_left.bias, module.to_right.bias)):
-        # one packing launch for the LayerNorm affine, the bf16 weights, the rounded bias and the projection biases (was six casts and a cat)
-        gam, bet, wa16, wb16, wo16, ob, _, _, pbias = ext.opm_native_pack(
-            [module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight, module.to_right.weight, module.to_out.weight, module.to_out.bias], True,
-            module.to_left.bias, module.to_right.bias)
-        a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias)
-        wo_epi, bo_epi = wo16, ob
+    from miniworld_engine.kernels import _capture
+
+    params = [module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight, module.to_right.weight,
+              module.to_out.weight, module.to_out.bias, module.to_left.bias, module.to_right.bias]
+    if cm == 64 and cz == 128 and all(t.is_contiguous() and t.dtype in (torch.float32, bf) for t in params):
+        # one packing launch for the LayerNorm affine, the bf16 weights, the rounded bias and the projection biases (was six casts and a cat),
+        # made once while the weights are unchanged
+        def forms():
+            gam, bet, wa16, wb16, wo16, ob, _, _, pbias = ext.opm_native_pack(params[:6], True, params[6], params[7])
+            return gam, bet, wa16, wb16, wo16, ob, pbias
     else:
-        pbias = torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous()
-        a2, bt, _, _, norm = ext.opm_prologue_wide(
-            m, mk, module.ln_msa.weight.float().contiguous(), module.ln_msa.bias.float().contiguous(),
-            module.to_left.weight.to(bf).contiguous(), module.to_right.weight.to(bf).contiguous(),
-            float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias)
-        wo_epi, bo_epi = module.to_out.weight.to(bf).contiguous(), module.to_out.bias.to(bf).float().contiguous()
+        def forms():
+            return (module.ln_msa.weight.float().contiguous(), module.ln_msa.bias.float().contiguous(),
+                    module.to_left.weight.to(bf).contiguous(), module.to_right.weight.to(bf).contiguous(),
+                    module.to_out.weight.to(bf).contiguous(), module.to_out.bias.to(bf).float().contiguous(),
+                    torch.cat([module.to_left.bias, module.to_right.bias]).float().contiguous())
+    gam, bet, wa16, wb16, wo_epi, bo_epi, pbias = _capture.param_forms("opm_biased_wide", params, forms)
+    # the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table): no count kernel
+    a2, bt, _, _, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(getattr(module.ln_msa, "eps", 1e-5)), False, pbias, False)
     interchain = module.mask_interchain and token_asym_id is not None
-    z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi,
-                         bo_epi, n, n, None if interchain else residual,
-                         int(not module.normalize_before_proj))
+    res = None if interchain else residual
+    if fused:   # the products stay in shared memory (norm is the mask bit table here)
+        z = ext.opm_fused_infer(a2, bt, norm, opm_train._fused_weight(module.to_out.weight), bo_epi, res, int(not module.normalize_before_proj))
+    else:
+        z = ext.opm_epilogue(torch.mm(a2, bt.t()), norm, wo_epi, bo_epi, n, n, res, int(not module.normalize_before_proj))
     z = z.view(1, n, n, cz)
     if interchain:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
