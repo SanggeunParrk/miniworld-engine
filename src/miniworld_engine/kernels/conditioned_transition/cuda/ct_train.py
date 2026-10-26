@@ -131,7 +131,7 @@ def _wide_expand_fake(xn, zeros, w1p, ws):
 
 
 @opaque(fake=_wide_expand_fake, name="ct_cuda_wide_expand_saved")
-def _wide_expand_saved(xn: torch.Tensor, zeros: torch.Tensor, w1p: torch.Tensor, ws: torch.Tensor):
+def _wide_expand_saved(xn: torch.Tensor, zeros: torch.Tensor, w1p: torch.Tensor, ws: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(h Ws^T, h, a, b) with h = silu(a) b, [a | b] = xn [Wa; Wb]^T (the Transition family's expand_saved + squeeze, zero residual)."""
     from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
 
