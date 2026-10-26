@@ -17,6 +17,7 @@ import math
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import opaque
 
 from . import LOG2E, _is_hopper, tf32_backward, tf32_forward
 
@@ -52,8 +53,10 @@ def available(q, pair, lnw, wb, mask) -> bool:
         return False
     from torch._subclasses.fake_tensor import FakeTensor
 
-    if torch.compiler.is_compiling() or isinstance(q, FakeTensor) or isinstance(pair, FakeTensor):
-        return False
+    if torch.compiler.is_compiling():
+        return True  # two opaque ops in the trace; the extensions build when the op first runs
+    if isinstance(q, FakeTensor) or isinstance(pair, FakeTensor):
+        return False  # dev derive
     try:
         from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
 
@@ -86,54 +89,93 @@ def _perm(L, device):
         _PERMS[key] = (p, torch.argsort(p))
     return _PERMS[key]
 
+def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+    A, _, L, _, _ = q.shape
+    return (
+        q.new_empty((A * L, H * D)),
+        q.new_empty((A, H, L)),
+        q.new_empty((H, L, L)),
+        q.new_empty((A * L, H * D)),
+        q.new_empty((A * L, H * D)),
+        q.new_empty((A * L, H * D)),
+    )
+
+
+@opaque(fake=_fwd_fake, name="augmented_attention_tf32_fwd")
+def _fwd(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None, eps: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(O, LSE, key-permuted bias [H, L, L] in log2 units, q scaled, k, v rounded to the TF32 grid [A L, 768]): the pair pass and the core."""
+    from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+    from .fused_pair import _rows_ext
+
+    A, _, L, _, _ = q.shape
+    qs, kr, vr, vt = _rows_ext().prep_fwd32(
+        q.reshape(A * L, H * D).contiguous(), k.reshape(A * L, H * D).contiguous(), v.reshape(A * L, H * D).contiguous(), LOG2E / math.sqrt(D)
+    )
+    wf = (wb.float() * lnw.float() * LOG2E).contiguous()
+    bias_p = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
+    rows32().pair_bias_tok_cuda(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), True, NEG)
+    o, lse = tf32_forward(qs, kr, vt, bias_p, None, A, L)
+    return o, lse, bias_p, qs, kr, vr
+
+
+def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):
+    return (
+        qs.new_empty(qs.shape),
+        qs.new_empty(qs.shape),
+        qs.new_empty(qs.shape),
+        pair.new_empty(pair.shape),
+        lnw.new_empty(lnw.shape, dtype=torch.float32),
+        wb.new_empty(wb.shape, dtype=torch.float32),
+    )
+
+
+@opaque(fake=_bwd_fake, name="augmented_attention_tf32_bwd")
+def _bwd(
+    do: torch.Tensor, o: torch.Tensor, lse: torch.Tensor, bias_p: torch.Tensor, qs: torch.Tensor, kr: torch.Tensor, vr: torch.Tensor,
+    pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(dq, dk, dv [A L, 768], dpair, dlnw, dwb) of ``_fwd``."""
+    from .fused_pair import _rows_ext
+
+    A = o.shape[0] // pair.shape[1]
+    L = pair.shape[1]
+    e = _rows_ext()
+    dd, dd_p, lse_p, dobr = e.dd_perm(do.contiguous().float(), o, lse, A, L)  # D = rowsum(dO O), its / the LSE's query-permuted copies, dO rounded
+    dq, dk, dv, db_p = tf32_backward(
+        qs, kr, vr, dobr, e.transpose32(qs, 1.0), e.transpose32(kr, 1.0), e.transpose32(dobr, 1.0), bias_p, e.bias_transposed(bias_p, L),
+        lse, dd, lse_p, dd_p, None, None, A, L,
+    )
+    _, inv = _perm(L, qs.device)
+    db = db_p[..., inv].contiguous()  # natural key order, natural units: [H, L, L]
+    wf = (wb.float() * lnw.float()).contiguous()
+    dz, accp = e.pair_rows_bwd32(pair.view(L * L, DP), db, wf, L, eps)
+    dwf = accp.sum(0).view(H, DP)
+    return dq, dk, dv, dz.view(pair.shape), (dwf * wb.float()).sum(0), dwf * lnw.float()
+
 
 class _AttnTf32(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, pair, lnw, wb, mask, eps):  # noqa: D102
-        from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
-
         A, _, L, _, _ = q.shape
-        need_grad = any(ctx.needs_input_grad)
-        qs = (q.reshape(A * L, H * D) * (LOG2E / math.sqrt(D))).contiguous()
-        kk = k.reshape(A * L, H * D).contiguous()
-        from .fused_pair import _rows_ext
-
-        vt = _rows_ext().transpose32(v.reshape(A * L, H * D).contiguous(), 1.0)
-        wf = (wb.float() * lnw.float() * LOG2E).contiguous()
-        bias_p = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
-        rows32().pair_bias_tok_cuda(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), True, NEG)
-        o, lse = tf32_forward(qs, kk, vt, bias_p, None, A, L)
-        if need_grad:
-            ctx.save_for_backward(qs, kk, v.reshape(A * L, H * D).contiguous(), bias_p, o, lse, pair, lnw, wb)
-            ctx.dims, ctx.eps = (A, L), eps
+        o, lse, bias_p, qs, kr, vr = _fwd(q, k, v, pair, lnw, wb, mask, eps)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(o, lse, bias_p, qs, kr, vr, pair, lnw, wb)
+            ctx.eps, ctx.shape = eps, q.shape
         return o.view(A, 1, L, H, D)
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
-        qs, kk, v2, bias_p, o, lse, pair, lnw, wb = ctx.saved_tensors
-        A, L = ctx.dims
-        from .fused_pair import _rows_ext
-
-        e = _rows_ext()
-        _, inv = _perm(L, qs.device)
-        dob = do.reshape(A * L, H * D).contiguous().float()
-        dd, dd_p, lse_p = e.dd_perm(dob, o, lse, A, L)  # D = rowsum(dO O) and its / the LSE's query-permuted copies
-        dq, dk, dv, db_p = tf32_backward(
-            qs, kk, v2, dob, e.transpose32(qs, 1.0), e.transpose32(kk, 1.0), e.transpose32(dob, 1.0), bias_p, e.bias_transposed(bias_p, L),
-            lse, dd, lse_p, dd_p, None, None, A, L,
-        )
-        db = db_p[..., inv].contiguous()  # natural key order, natural units: [H, L, L]
-        from .fused_pair import _rows_ext
-
-        wf = (wb.float() * lnw.float()).contiguous()
-        dz, accp = _rows_ext().pair_rows_bwd32(pair.view(L * L, DP), db, wf, L, ctx.eps)
-        dwf = accp.sum(0).view(H, DP)
-        shp = (A, 1, L, H, D)
-        return dq.view(shp), dk.view(shp), dv.view(shp), dz.view(pair.shape), (dwf * wb.float()).sum(0), dwf * lnw.float(), None, None
+        o, lse, bias_p, qs, kr, vr, pair, lnw, wb = ctx.saved_tensors
+        dq, dk, dv, dz, dlnw, dwb = _bwd(do.reshape(o.shape).contiguous(), o, lse, bias_p, qs, kr, vr, pair, lnw, wb, ctx.eps)
+        shp = ctx.shape
+        return dq.view(shp), dk.view(shp), dv.view(shp), dz, dlnw, dwb, None, None
 
 
 def attention_pair_tf32(q, k, v, pair, lnw, wb, mask=None, eps: float = 1e-5):
-    """See the module docstring; returns fp32 [A, 1, L, 16, 48]. Call ``available()`` first."""
+    """See the module docstring; returns fp32 [A, 1, L, 16, 48]. Call ``available()`` first. A ``torch.compile`` trace sees two opaque ops."""
     return _AttnTf32.apply(q, k, v, pair, lnw, wb, mask, eps)
 
 

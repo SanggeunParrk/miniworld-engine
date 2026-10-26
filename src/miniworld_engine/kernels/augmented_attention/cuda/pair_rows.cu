@@ -283,6 +283,30 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
 __device__ __forceinline__ int kperm(int p) { const int r = p & 7; return p - r + 4 * (r & 1) + (r >> 1); }
 __device__ __forceinline__ int kinv(int k) { const int s = k & 7; return k - s + 2 * (s & 3) + (s >> 2); }
 
+// TF32 round to nearest (ties away from zero) of a finite float: what cuBLAS does to an fp32 operand and what the tensor core would otherwise do by
+// truncation (1.2 - 3x the rounding error end to end, measured)
+__device__ __forceinline__ float rna_tf32(float x) { return __uint_as_float((__float_as_uint(x) + 0x1000u) & 0xffffe000u); }
+
+// q * scale, k, v rounded to the TF32 grid: QS, KR, VR [M, N] and VT [N, M] = VR^T, one pass over q, k, v
+__global__ void __launch_bounds__(256) prep_k(const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ QS,
+                                              float* __restrict__ KR, float* __restrict__ VR, float* __restrict__ VT, long M, long N, float scale) {
+  __shared__ float tile[32][33];
+  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
+  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) {
+    const long idx = (r0 + ty + i) * N + c0 + tx;
+    QS[idx] = rna_tf32(Q[idx] * scale);
+    KR[idx] = rna_tf32(K[idx]);
+    const float v = rna_tf32(V[idx]);
+    VR[idx] = v;
+    tile[ty + i][tx] = v;
+  }
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) VT[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
+}
+
 // dst [N, M] = scale * src [M, N]^T, 32 x 32 tiles through shared memory
 __global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_, float* __restrict__ Dst, long M, long N, float scale) {
   __shared__ float tile[32][33];
@@ -297,7 +321,7 @@ __global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_,
 
 // D[a, h, l] = sum_d dO[a L + l, 48 h + d] O[a L + l, 48 h + d], plus its query-permuted copy and the permuted copy of the LSE
 __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
-                                            float* __restrict__ DDP, float* __restrict__ LSEP, long rows, int L) {
+                                            float* __restrict__ DDP, float* __restrict__ LSEP, float* __restrict__ DOR, long rows, int L) {
   // a block: 16 consecutive rows (one sample: L % 16 == 0) x 16 heads; results staged so every plane is written in 64-B runs
   __shared__ float s[16][17];
   const long row0 = (long)blockIdx.x * 16;
@@ -310,6 +334,7 @@ __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const 
   for (int i = 0; i < 12; ++i) {
     const float4 x = __ldg(a + i), y = __ldg(b + i);
     acc += x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
+    reinterpret_cast<float4*>(DOR + row * 768 + h * 48)[i] = make_float4(rna_tf32(x.x), rna_tf32(x.y), rna_tf32(x.z), rna_tf32(x.w));
   }
   s[h][rl] = acc;
   __syncthreads();
@@ -392,6 +417,20 @@ std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf
   return {dz, acc};
 }
 
+std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, double scale) {
+  chk(q, at::kFloat, "q");
+  chk(k, at::kFloat, "k");
+  chk(v, at::kFloat, "v");
+  const int64_t M = q.size(0), N = q.size(1);
+  TORCH_CHECK(M % 32 == 0 && N % 32 == 0 && k.sizes() == q.sizes() && v.sizes() == q.sizes(), "prep_fwd32 shapes");
+  const at::cuda::CUDAGuard gd(q.device());
+  auto qs = at::empty_like(q), kr = at::empty_like(q), vr = at::empty_like(q), vt = at::empty({N, M}, q.options());
+  prep_k<<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
+      qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(), vt.data_ptr<float>(), M, N, (float)scale);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {qs, kr, vr, vt};
+}
+
 at::Tensor transpose32(at::Tensor src, double scale) {
   chk(src, at::kFloat, "src");
   const int64_t M = src.size(0), N = src.size(1);
@@ -403,18 +442,18 @@ at::Tensor transpose32(at::Tensor src, double scale) {
   return dst;
 }
 
-// dO, O [A L, 768] fp32, lse [A, 16, L] -> (D [A, 16, L], D permuted, lse permuted)
+// dO, O [A L, 768] fp32, lse [A, 16, L] -> (D [A, 16, L], D permuted, lse permuted, dO rounded to the TF32 grid)
 std::vector<at::Tensor> dd_perm(at::Tensor dO, at::Tensor O, at::Tensor lse, int64_t A, int64_t L) {
   chk(dO, at::kFloat, "dO");
   chk(O, at::kFloat, "O");
   chk(lse, at::kFloat, "lse");
   TORCH_CHECK(dO.numel() == A * L * 768 && L % 16 == 0, "dd_perm shapes");
   const at::cuda::CUDAGuard gd(dO.device());
-  auto dd = at::empty({A, 16, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd);
+  auto dd = at::empty({A, 16, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd), dor = at::empty_like(dO);
   dd_k<<<(unsigned)(A * L / 16), 256, 0, at::cuda::getCurrentCUDAStream()>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
-      dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), A * L, (int)L);
+      dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), dor.data_ptr<float>(), A * L, (int)L);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dd, ddp, lsep};
+  return {dd, ddp, lsep, dor};
 }
 
 at::Tensor bias_transposed(at::Tensor bias_p, int64_t L) {
@@ -448,6 +487,7 @@ std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_rows_bwd32", &pair_rows_bwd32);
   m.def("transpose32", &transpose32);
+  m.def("prep_fwd32", &prep_fwd32);
   m.def("dd_perm", &dd_perm);
   m.def("bias_transposed", &bias_transposed);
   m.def("pair_rows_fwd", &pair_rows_fwd);

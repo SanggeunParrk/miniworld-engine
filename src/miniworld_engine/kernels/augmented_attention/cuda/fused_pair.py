@@ -30,6 +30,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
+from miniworld_engine.kernels._compile import opaque
 
 from . import (
     FWD_OP,
@@ -173,65 +174,112 @@ def supported(q: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.
     )
 
 
+def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+    A, _, L, nh, dh = q.shape
+    kind = _kind(nh, pair.shape[-1])
+    return (
+        q.new_empty((A * L, nh * dh), dtype=torch.bfloat16),
+        q.new_empty((A, nh, L), dtype=torch.float32),
+        q.new_empty((nh, L, L), dtype=torch.bfloat16),
+        q.new_empty((L * L, 2) if kind == "rows" else (0, 2), dtype=torch.float32),
+    )
+
+
+@opaque(fake=_fwd_fake, name="augmented_attention_pair_fused_fwd")
+def _fused_fwd(
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None, eps: float
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(O bf16 [A L, W], LSE [A, H, L], bias [H, L, L] bf16 in log2 units, pair-row statistics or an empty [0, 2]): the pair pass and the core."""
+    A, _, L, nh, dh = q.shape
+    W, dp = nh * dh, pair.shape[-1]
+    pair2 = pair.view(L * L, dp)
+    kind = _kind(nh, dp)
+    pst = q.new_empty((0, 2), dtype=torch.float32)
+    if kind == "apb":
+        from .apb import pair_bias
+
+        wf_l2, _ = _wf(wb, lnw, False)
+        bias = pair_bias(pair2, wf_l2, mask, L, eps, NEG)  # [H, L, L] bf16, log2 units
+    elif kind == "atom":
+        bias = _atom_ext().atom_pair_fwd(pair2, _wf32(wb, lnw), mask, L, eps, LOG2E, NEG)
+    elif dp == 256:  # tensor-core forward (bf16 wf in log2 units like the APB kernel), CUDA-core backward
+        wf_l2, _ = _wf(wb, lnw, False)
+        bias, pst = _mma_ext().pair_mma_fwd(pair2, wf_l2, mask, L, eps, NEG)
+    else:
+        bias, pst = _rows_ext().pair_rows_fwd(pair2, _wf32(wb, lnw), mask, L, eps, LOG2E, NEG)
+    qs, kb, vb = _prep(q, k, v, A, L, W, dh)
+    o, lse = FWD_OP(qs, kb, vb, bias, None, True)
+    return o, lse, bias, pst
+
+
+def _prep(q, k, v, A, L, W, dh):
+    """q scaled into the core's log2 units and the bf16 row views of q, k, v."""
+    qs = torch.empty(A * L, W, device=q.device, dtype=torch.bfloat16)
+    qc = q.contiguous()
+    n = qc.numel()
+    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, LOG2E / math.sqrt(dh), BLOCK=4096)
+    return qs, _as_bf16_rows(k, A * L, W), _as_bf16_rows(v, A * L, W)
+
+
+def _bwd_fake(do, q, k, v, pair, lnw, wb, o, lse, bias, pst, eps):
+    return (
+        q.new_empty(q.shape, dtype=torch.bfloat16),
+        q.new_empty(q.shape, dtype=torch.bfloat16),
+        q.new_empty(q.shape, dtype=torch.bfloat16),
+        pair.new_empty(pair.shape),
+        lnw.new_empty(lnw.shape, dtype=torch.float32),
+        wb.new_empty(wb.shape, dtype=torch.float32),
+    )
+
+
+@opaque(fake=_bwd_fake, name="augmented_attention_pair_fused_bwd")
+def _fused_bwd(
+    do: torch.Tensor, q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor,
+    o: torch.Tensor, lse: torch.Tensor, bias: torch.Tensor, pst: torch.Tensor, eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(dq, dk, dv bf16, dpair, dlnw, dwb fp32) of ``_fused_fwd``."""
+    A, _, L, nh, dh = q.shape
+    dp = pair.shape[-1]
+    qs, kb, vb = _prep(q, k, v, A, L, nh * dh, dh)
+    do2 = _as_bf16_rows(do, A * L, nh * dh)
+    dd = _dd(do2, o, A, L, nh, dh)
+    dq, dk, dv, db = backward(qs, kb, vb, do2, bias, None, lse, dd, A, L, nh, dh, out_bf16=True)
+    if not db.is_contiguous():  # A not a multiple of 3: the dK / dV pass leaves it transposed
+        db = db.contiguous()
+    kind = _kind(nh, dp)
+    if kind == "apb":
+        from .apb import acc_n, ext, pair_bias_bwd
+
+        _, wf_nat = _wf(wb, lnw, True)
+        acc = torch.empty(ext().pair_bwd_blocks(pair, nh, L), acc_n(nh, 384), device=pair.device)
+        dz, _, _ = pair_bias_bwd(pair.view(L * L, dp), db, wf_nat, L, eps, acc, 384)
+        o_off = 2 * 384 + 512  # width(16, 384) = 16 x 32: the accumulator's dWf columns
+        dwf = acc[:, o_off : o_off + nh * dp].sum(0).view(nh, dp)
+    elif kind == "atom":
+        dz, accp = _atom_ext().atom_pair_bwd(pair.view(L * L, dp), db, _wf32(wb, lnw), L, eps)
+        dwf = accp.sum(0).view(nh, dp)
+    else:
+        dz, accp = _rows_ext().pair_rows_bwd(pair.view(L * L, dp), db, _wf32(wb, lnw), pst, L, eps)
+        dwf = accp.sum(0).view(nh, dp)
+    shp = (A, 1, L, nh, dh)
+    return dq.view(shp), dk.view(shp), dv.view(shp), dz.view(pair.shape), (dwf * wb.float()).sum(0), dwf * lnw.float()
+
+
 class _AttnFusedPair(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, pair, lnw, wb, mask, eps):  # noqa: D102
         A, _, L, nh, dh = q.shape
-        W, dp = nh * dh, pair.shape[-1]
-        need_grad = any(ctx.needs_input_grad)
-        pair2 = pair.view(L * L, dp)
-        kind, pst = _kind(nh, dp), None
-        if kind == "apb":
-            from .apb import pair_bias
-
-            wf_l2, wf_nat = _wf(wb, lnw, need_grad)
-            bias = pair_bias(pair2, wf_l2, mask, L, eps, NEG)  # [H, L, L] bf16, log2 units
-        elif kind == "atom":
-            wf_nat = _wf32(wb, lnw)
-            bias = _atom_ext().atom_pair_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
-        elif dp == 256:  # tensor-core forward (bf16 wf in log2 units like the APB kernel), CUDA-core backward
-            wf_l2, _ = _wf(wb, lnw, False)
-            bias, pst = _mma_ext().pair_mma_fwd(pair2, wf_l2, mask, L, eps, NEG)
-            wf_nat = _wf32(wb, lnw) if need_grad else None
-        else:
-            wf_nat = _wf32(wb, lnw)
-            bias, pst = _rows_ext().pair_rows_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
-        qs = torch.empty(A * L, W, device=q.device, dtype=torch.bfloat16)
-        qc = q.contiguous()
-        n = qc.numel()
-        _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, LOG2E / math.sqrt(dh), BLOCK=4096)
-        kb, vb = _as_bf16_rows(k, A * L, W), _as_bf16_rows(v, A * L, W)
-        o, lse = FWD_OP(qs, kb, vb, bias, None, True)
-        if need_grad:
-            ctx.save_for_backward(qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb, pst)
-            ctx.dims, ctx.eps = (A, L, nh, dh), eps
+        o, lse, bias, pst = _fused_fwd(q, k, v, pair, lnw, wb, mask, eps)
+        if any(ctx.needs_input_grad):
+            ctx.save_for_backward(q, k, v, pair, lnw, wb, o, lse, bias, pst)
+            ctx.eps = eps
         return o.view(A, 1, L, nh, dh)
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
-        qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb, pst = ctx.saved_tensors
-        A, L, nh, dh = ctx.dims
-        dp = pair.shape[-1]
-        do2 = _as_bf16_rows(do, A * L, nh * dh)
-        dd = _dd(do2, o, A, L, nh, dh)
-        dq, dk, dv, db = backward(qs, kb, vb, do2, bias, None, lse, dd, A, L, nh, dh, out_bf16=True)
-        if not db.is_contiguous():  # A not a multiple of 3: the dK / dV pass leaves it transposed
-            db = db.contiguous()
-        if _kind(nh, dp) == "apb":
-            from .apb import acc_n, ext, pair_bias_bwd
-
-            acc = torch.empty(ext().pair_bwd_blocks(pair, nh, L), acc_n(nh, 384), device=pair.device)
-            dz, _, _ = pair_bias_bwd(pair.view(L * L, dp), db, wf_nat, L, ctx.eps, acc, 384)
-            o_off = 2 * 384 + 512  # width(16, 384) = 16 x 32: the accumulator's dWf columns
-            dwf = acc[:, o_off : o_off + nh * dp].sum(0).view(nh, dp)
-        else:
-            e = _atom_ext().atom_pair_bwd if dp == 16 else (lambda z, d, w, L_, eps_: _rows_ext().pair_rows_bwd(z, d, w, pst, L_, eps_))
-            dz, accp = e(pair.view(L * L, dp), db, wf_nat, L, ctx.eps)
-            dwf = accp.sum(0).view(nh, dp)
-        dwb = dwf * lnw.float()
-        dlnw = (dwf * wb.float()).sum(0)
-        shp = (A, 1, L, nh, dh)
-        return dq.view(shp), dk.view(shp), dv.view(shp), dz.view(pair.shape), dlnw, dwb, None, None
+        q, k, v, pair, lnw, wb, o, lse, bias, pst = ctx.saved_tensors
+        dq, dk, dv, dz, dlnw, dwb = _fused_bwd(do.contiguous(), q, k, v, pair, lnw, wb, o, lse, bias, pst, ctx.eps)
+        return dq.to(q.dtype), dk.to(k.dtype), dv.to(v.dtype), dz, dlnw, dwb, None, None
 
 
 def attention_pair_fused(q, k, v, pair, lnw, wb, mask=None, eps: float = 1e-5):
@@ -245,15 +293,17 @@ _BUILD_FAILED = False
 
 
 def available(q, pair, lnw, wb, mask) -> bool:
-    """``supported()`` plus successful builds (a failure warns once and keeps the unfused route); never under torch.compile tracing or
-    fake tensors (a native extension cannot run on them)."""
+    """``supported()`` plus successful builds (a failure warns once and keeps the unfused route); never on
+    fake tensors outside a ``torch.compile`` trace (``dev derive``)."""
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(q, pair, lnw, wb, mask):
         return False
     from torch._subclasses.fake_tensor import FakeTensor
 
-    if torch.compiler.is_compiling() or isinstance(q, FakeTensor) or isinstance(pair, FakeTensor):
-        return False
+    if torch.compiler.is_compiling():
+        return True  # the route is two opaque ops in the trace; the extensions build when the op first runs
+    if isinstance(q, FakeTensor) or isinstance(pair, FakeTensor):
+        return False  # dev derive: the portable kernels carry the autotune keys
     try:
         from . import fwd_defs
 
