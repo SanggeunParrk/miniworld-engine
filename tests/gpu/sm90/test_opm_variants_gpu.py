@@ -92,8 +92,8 @@ def test_rf3_training_matches_fp64_statements(name, s, n, residual, monkeypatch)
         grads = torch.autograd.grad(y, leaves, dz.to(dtype))
         return y.detach(), grads
 
-    ref_fn = lambda mod, x, r: mod._variant_reference(x, mask, None, r)   # noqa: E731
-    eng_fn = lambda mod, x, r: mod(x, mask, residual=r)                   # noqa: E731
+    ref_fn = lambda mod, x, r: mod._variant_reference(x, mask, None, r)
+    eng_fn = lambda mod, x, r: mod(x, mask, residual=r)
     yg, gg = go(gold, torch.float64, ref_fn)
     yb, gb = go(ref16, torch.bfloat16, ref_fn)
     ye, ge = go(eng, torch.bfloat16, eng_fn)
@@ -139,8 +139,8 @@ def test_chai1_fused_passes_match_fp64_statements(s, n, masked, monkeypatch):
         grads = torch.autograd.grad(y, [x, r, *mod.parameters()], dz.to(dtype))
         return y.detach(), grads
 
-    ref_fn = lambda mod, x, r: mod._variant_reference(x, mask, None, r)   # noqa: E731
-    eng_fn = lambda mod, x, r: mod(x, mask, residual=r)                   # noqa: E731
+    ref_fn = lambda mod, x, r: mod._variant_reference(x, mask, None, r)
+    eng_fn = lambda mod, x, r: mod(x, mask, residual=r)
     yg, gg = go(gold, torch.float64, ref_fn)
     yb, gb = go(ref16, torch.bfloat16, ref_fn)
     ye, ge = go(eng, torch.bfloat16, eng_fn)

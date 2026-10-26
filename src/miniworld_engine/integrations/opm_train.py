@@ -668,7 +668,7 @@ class _OpmMath(torch.autograd.Function):
         bf = torch.bfloat16
         if path != "legacy":
             m = msa[0]
-            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo], not save_stats)   # inference: no transposed Wo / backward weight
             prologue = (
                 ext.opm_native_prologue_tma
                 if path == "tma"

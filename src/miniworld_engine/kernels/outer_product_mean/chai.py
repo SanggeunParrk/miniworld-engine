@@ -57,20 +57,21 @@ def _front(msa, mask, lnw, lnb, wl, wr, eps, save):
     return a, b, st1, o
 
 
-def _fwd_fake(args, eps, eps_prod, train):
+def _fwd_op_fake(args, eps, eps_prod, train):
+    """Shapes of ``_fwd_op``: z [1, N, N, CZ] bf16; with ``train`` also a, b [8, S N, 8], y [N N, 512], the epilogue and prologue statistics."""
     msa, wo = args[0], args[8]
     _, s, n, _ = msa.shape
     bf = torch.bfloat16
-    new = lambda *shape, dt=bf: msa.new_empty(shape, dtype=dt)   # noqa: E731
+    new = lambda *shape, dt=bf: msa.new_empty(shape, dtype=dt)
     if not train:
         return [new(1, n, n, wo.shape[0]), new(0), new(0), new(0), new(0, dt=torch.float32), new(0, dt=torch.float32)]
     return [new(1, n, n, wo.shape[0]), new(G, s * n, K), new(G, s * n, K), new(n * n, P), new(n * n, 2, dt=torch.float32), new(s * n, 2, dt=torch.float32)]
 
 
-@opaque(fake=_fwd_fake, name="opm_chai_fwd")
+@opaque(fake=_fwd_op_fake, name="outer_product_mean_chai_fwd")
 def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) -> list[torch.Tensor]:
+    """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
     from miniworld_engine.kernels.outer_product_mean import cuda
-
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
     a, b, st1, o = _front(msa, mask, lnw, lnb, wl, wr, eps, train)
     wf, bf = _fold(wo, gam, bet, bo)
@@ -80,15 +81,17 @@ def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) 
     return [z, a, b, y, st, st1]
 
 
-def _bwd_fake(args, kept, dz, eps, eps_prod):
+def _bwd_op_fake(args, kept, dz, eps, eps_prod):
+    """Shapes of ``_bwd_op``: one gradient per differentiable argument (msa, LayerNorm, projections, product norm, out-projection), in the argument's dtype."""
     return [torch.empty_like(args[i], dtype=args[i].dtype) for i in (0, 2, 3, 4, 5, 6, 7, 8, 9)]
 
 
-@opaque(fake=_bwd_fake, name="opm_chai_bwd")
+@opaque(fake=_bwd_op_fake, name="outer_product_mean_chai_bwd")
 def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor, eps: float, eps_prod: float) -> list[torch.Tensor]:
+    """Gradients of ``_fwd_op`` (train): [dmsa, dlnw, dlnb, dwl, dwr, dgamma, dbeta, dwo, dbo] from dz and the saved a, b, y, statistics."""
     from miniworld_engine.kernels.outer_product_mean import cuda
 
-    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
+    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, _ = args
     a, b, y, st, st1 = kept
     bf, f32 = torch.bfloat16, torch.float32
     _, s, n, _ = msa.shape

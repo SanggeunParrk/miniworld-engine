@@ -589,8 +589,12 @@ def _update(module, pair, mask, dropscale, *, bidirectional=True):
 
 def _update_hidden2(module, pair, mask, dropscale):
     """Bidirectional hidden 2 D at D64 (``_hidden_twice_bidirectional``): the dedicated hidden-256 training path."""
-    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import training_unit_scale
-    from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_h2 import bidirectional_trimul
+    from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import (
+        training_unit_scale,
+    )
+    from miniworld_engine.kernels.trimul_inproj.cuda.h100_d64_h2 import (
+        bidirectional_trimul,
+    )
 
     rows = pair.shape[0] * pair.shape[1]
     token = torch.empty(0, device=pair.device, dtype=torch.bool) if mask is None else mask.contiguous()

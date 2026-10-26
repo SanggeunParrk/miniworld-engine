@@ -202,6 +202,7 @@ def forward(leaves: list[torch.Tensor], mask: torch.Tensor, ds: torch.Tensor) ->
 
 
 def _forward_nograd_fake(leaves, mask, ds):
+    """y like x (the no-grad dropout forward saves nothing)."""
     return torch.empty_like(leaves[0])
 
 
