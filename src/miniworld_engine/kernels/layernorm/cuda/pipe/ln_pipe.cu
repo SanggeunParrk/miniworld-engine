@@ -182,7 +182,7 @@ __device__ __forceinline__ void row_stats(const float* v, const bool* cvalid, bo
   rstd = rsqrtf(group_sum<TPR>(q) * inv_n + eps);
 }
 
-template <typename T, int TPR, int CH, int VEC, bool RMS>
+template <typename T, int TPR, int CH, int VEC, bool RMS, bool PAD>
 __global__ void __launch_bounds__(THREADS, MWP_MINB_FWD)
     pipe_fwd(const T* __restrict__ x, const void* __restrict__ w, const void* __restrict__ b, int wcode, T* __restrict__ y,
              float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N, float eps) {
@@ -201,8 +201,8 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_FWD)
   const int64_t rstep = W * RPP, estep = rstep * N;
   bool cvalid[CH];
 #pragma unroll
-  for (int c = 0; c < CH; ++c) cvalid[c] = (c * TPR + l) * VEC < N;
-  const bool pad = TPR * CH * VEC != N;
+  for (int c = 0; c < CH; ++c) cvalid[c] = PAD ? ((c * TPR + l) * VEC < N) : true;
+  constexpr bool pad = PAD;
   const float inv_n = 1.f / float(N);
   Cursor<const T> cin{x + (wid * RPP + g) * int64_t(N) + l * VEC, wid * RPP + g};
 #pragma unroll
@@ -247,7 +247,7 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_FWD)
 
 // Non-persistent forward for single-chunk rows: a warp takes PW consecutive passes, issues all their loads, then computes and stores; the
 // hardware schedules the CTAs. On rows of 256-512 bytes this keeps HBM busier than the cp.async ring (no startup latency per warp, no lock-step).
-template <typename T, int TPR, int VEC, bool RMS, int PW>
+template <typename T, int TPR, int VEC, bool RMS, int PW, bool PAD>
 __global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, const void* __restrict__ w, const void* __restrict__ b, int wcode,
                                                       T* __restrict__ y, float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N,
                                                       float eps) {
@@ -258,8 +258,8 @@ __global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, c
   if (ws != nullptr && blockIdx.x == 0)
     for (int i = threadIdx.x; i < ACC_COPIES * 2 * N + 1; i += THREADS) ws[i] = 0.f;
   const int64_t wid = int64_t(blockIdx.x) * WARPS + warp;
-  const bool cvalid[1] = {l * VEC < N};
-  const bool pad = TPR * VEC != N;
+  const bool cvalid[1] = {PAD ? (l * VEC < N) : true};
+  constexpr bool pad = PAD;
   uint4 raw[PW];
 #pragma unroll
   for (int k = 0; k < PW; ++k) {
@@ -483,8 +483,8 @@ template <typename K> int resident_ctas(K kernel, size_t smem) {
   return n < 1 ? 1 : n;
 }
 
-template <typename T, int TPR, int CH, int VEC, bool RMS>
-void launch_fwd(const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N, float eps, int per_sm,
+template <typename T, int TPR, int CH, int VEC, bool RMS, bool PAD>
+void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N, float eps, int per_sm,
                 cudaStream_t s) {
   constexpr int RPP = 32 / TPR;
   if constexpr (CH == 1) {
@@ -492,12 +492,12 @@ void launch_fwd(const T* x, const void* w, const void* b, int wcode, T* y, float
       constexpr int PW = sizeof(T) == 4 ? 1 : 2;
       const int64_t units = ((M + RPP - 1) / RPP + PW - 1) / PW;
       const int64_t grid = (units + WARPS - 1) / WARPS;
-      direct_fwd<T, TPR, VEC, RMS, PW><<<int(grid), THREADS, 0, s>>>(x, w, b, wcode, y, ws, stats, M, N, eps);
+      direct_fwd<T, TPR, VEC, RMS, PW, PAD><<<int(grid), THREADS, 0, s>>>(x, w, b, wcode, y, ws, stats, M, N, eps);
       return;
     }
   }
   constexpr size_t smem = size_t(WARPS) * stages<CH>() * CH * 32 * 16;
-  auto k = pipe_fwd<T, TPR, CH, VEC, RMS>;
+  auto k = pipe_fwd<T, TPR, CH, VEC, RMS, PAD>;
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem));
   static int occ = 0;
   if (!occ) occ = resident_ctas(k, smem);
@@ -505,6 +505,13 @@ void launch_fwd(const T* x, const void* w, const void* b, int wcode, T* y, float
   const int64_t need = ((M + RPP - 1) / RPP + WARPS - 1) / WARPS;
   const int grid = int(need < cap ? need : cap);
   k<<<grid > 0 ? grid : 1, THREADS, smem, s>>>(x, w, b, wcode, y, ws, stats, M, N, eps);
+}
+
+template <typename T, int TPR, int CH, int VEC, bool RMS>
+void launch_fwd(const T* x, const void* w, const void* b, int wcode, T* y, float* ws, float2* stats, int64_t M, int N, float eps, int per_sm,
+                cudaStream_t s) {
+  if (TPR * CH * VEC == N) launch_fwd_pad<T, TPR, CH, VEC, RMS, false>(x, w, b, wcode, y, ws, stats, M, N, eps, per_sm, s);
+  else launch_fwd_pad<T, TPR, CH, VEC, RMS, true>(x, w, b, wcode, y, ws, stats, M, N, eps, per_sm, s);
 }
 
 template <typename T, int TPR, int CH, int VEC, bool RMS, bool WG>

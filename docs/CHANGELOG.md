@@ -10,6 +10,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 pair LayerNorm and RMSNorm training run new pipelined CUDA kernels (`kernels/layernorm/cuda/pipe`: per-warp cp.async ring, saved statistics, one backward kernel with the weight gradient reduced in-kernel) instead of the Triton forward + split backward / `mwln::` kernels: CUDA-rung training 1.26-1.9x slower than portable before, now 0.995-1.09x; RMSNorm inference 1.21-1.32x slower, now 1.01-1.06x; the weight gradient adds atomically (not bit-reproducible), `torch.use_deterministic_algorithms` keeps the general kernels; no cell reaches 0.95 (`docs/records/norms_cuda_ladder_20261026.md`).
 - Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - The performance ladder (`miniworld-engine ladder {plan,run,report,gate}`, `benchmarks/runners/ladder.py`): for every op, mode, dtype and shape of its grid it times the three rungs
   of the maintainer's invariant -- hand CUDA < portable (Triton) < PyTorch (`torch.compile` + CUDA graph, eager reported next to it) -- through `bench.py`, three repeats each,

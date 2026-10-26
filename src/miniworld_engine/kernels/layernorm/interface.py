@@ -32,7 +32,10 @@ def layernorm_kernel(
     x = x.contiguous()
     weight = weight.contiguous()
     bias = bias.contiguous()
-    if _use_pipe(x):
+    needs_grad = torch.is_grad_enabled() and any(t.requires_grad for t in (x, weight, bias))
+    # training: the pipelined kernels (forward + one-kernel backward). A no-grad forward stays on the Triton kernel, which sits on the HBM
+    # floor and measured 1-6% faster than the cp.async forward at every pair LayerNorm shape (docs/records/norms_cuda_ladder_20261026.md).
+    if needs_grad and _use_pipe(x):
         from miniworld_engine.kernels.layernorm.cuda.pipe import layernorm_pipe
 
         return layernorm_pipe(x, weight, bias, eps)
