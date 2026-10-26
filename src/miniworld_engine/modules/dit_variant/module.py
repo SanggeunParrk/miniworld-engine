@@ -96,6 +96,10 @@ class DiTVariantStack(nn.Module):
 
             if interface.serves(self, single, cond, pair, mask):
                 return interface.inference(self, single, cond, pair, mask)
+            from miniworld_engine.kernels.dit_variants.cuda import infer32
+
+            if infer32.serves(self, single, cond, pair, mask):
+                return infer32.inference(self, single, cond, pair, mask)
             from miniworld_engine.kernels.dit_variants.cuda import train
 
             if train.serves(self, single, cond, pair, mask):
@@ -175,6 +179,10 @@ class AtomDiTVariantStack(nn.Module):
 
             if interface.atom_serves(self, single, cond, pair, mask, uid):
                 return interface.atom_inference(self, single, cond, pair, mask, uid)
+            from miniworld_engine.kernels.dit_variants.cuda import infer32
+
+            if infer32.atom_serves(self, single, cond, pair, mask, uid):
+                return infer32.atom_inference(self, single, cond, pair, mask, uid)
             from miniworld_engine.kernels.dit_variants.cuda import train
 
             if train.atom_serves(self, single, cond, pair, mask, uid):

@@ -173,3 +173,33 @@ def test_a_call_without_a_gradient_or_off_the_layout_is_not_served():
     assert train.serves(stack, single, cond, pair, mask)
     assert not train.serves(stack, single[:, :200], cond[:200], pair[:200, :200], mask[:200])      # L not a multiple of 128
     assert not train.serves(stack, single, cond[None].expand(3, -1, -1), pair, mask)               # a conditioning row set per sample
+
+
+@pytest.mark.parametrize("model", list(TOKEN))
+@pytest.mark.parametrize("kind", ["token", "atom"])
+@pytest.mark.parametrize("masked", [True, False])
+def test_fp32_inference_matches_fp64(kind, model, masked):
+    """The fp32 (TF32) inference path (``infer32.py``): the output within 1.5 x the error of the fp32 PyTorch reference against fp64."""
+    from miniworld_engine.kernels.dit_variants.cuda import infer32
+
+    stack, inputs, mask, uid, _, live = _case(kind, model, 5, 256, masked=masked)
+    args32 = [inputs[k].float() for k in ("single", "cond", "pair")]
+    tail = (mask,) + ((uid,) if kind == "atom" else ())
+    saved = torch.backends.cuda.matmul.allow_tf32
+    try:
+        with torch.no_grad():
+            assert (infer32.atom_serves if kind == "atom" else infer32.serves)(stack, *args32, *tail)
+            torch.backends.cuda.matmul.allow_tf32 = False
+            ref64 = copy.deepcopy(stack).double()
+            ref64.implementation = ImplementationType.PYTORCH
+            y64 = ref64(*[t.double() for t in args32], *tail)
+            torch.backends.cuda.matmul.allow_tf32 = True
+            ref32 = copy.deepcopy(stack)
+            ref32.implementation = ImplementationType.PYTORCH
+            yr = ref32(*args32, *tail)
+            ye = stack(*args32, *tail)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = saved
+    rows = slice(0, live)
+    assert torch.isfinite(ye).all()
+    assert _rel(ye[:, rows].double(), y64[:, rows]) <= ERR_RATIO * _rel(yr[:, rows].double(), y64[:, rows])

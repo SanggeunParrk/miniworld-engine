@@ -112,7 +112,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) ln_mod_fwd_k(const XT* __res
 // (VO null: v is not copied). q is scaled by `scale`; kq: q and k are LayerNorm'd over the D columns with an fp32 affine first.
 template <int NT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) qkv_prep_k(const AT* __restrict__ Q, long sq, const AT* __restrict__ K, long sk,
-    const AT* __restrict__ V, long sv, AT* __restrict__ QO, AT* __restrict__ KO, AT* __restrict__ VO, float4* __restrict__ STQK,
+    const AT* __restrict__ V, long sv, AT* __restrict__ QO, long sqo, AT* __restrict__ KO, long sko, AT* __restrict__ VO, long svo, float4* __restrict__ STQK,
     const float* __restrict__ WQ, const float* __restrict__ BQ, const float* __restrict__ WK, const float* __restrict__ BK, float scale,
     float eps, bool kq, bool tf32, long M) {
   __shared__ float red[NT / 32];
@@ -130,9 +130,9 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) qkv_prep_k(const AT* __restr
   }
   float4 qo = mul4(q, scale), vv = VO ? V4<AT>::load(V + row * sv + col) : zero4();
   if (tf32) { qo = rna4(qo); k = rna4(k); vv = rna4(vv); }
-  V4<AT>::store(QO + row * D + col, qo);
-  V4<AT>::store(KO + row * D + col, k);
-  if (VO) V4<AT>::store(VO + row * D + col, vv);
+  V4<AT>::store(QO + row * sqo + col, qo);
+  V4<AT>::store(KO + row * sko + col, k);
+  if (VO) V4<AT>::store(VO + row * svo + col, vv);
 }
 
 // x' = x + sigmoid(gA) ya (fp32, stored); xt = LN(x') f(scT) + shT, stats of x' saved
@@ -540,8 +540,8 @@ void qkv_prep(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor qo, at::Tenso
   const long M = qo.size(0);
   TORCH_CHECK(q.stride(1) == 1 && k.stride(1) == 1 && v.stride(1) == 1, "qkv_prep: row-contiguous inputs");
   DISPATCH_D(D, DISPATCH_A(q,
-    qkv_prep_k<NT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<AT>(q), q.stride(0), CP<AT>(k), k.stride(0), CP<AT>(v), v.stride(0), P<AT>(qo),
-        P<AT>(ko), Po<AT>(vo), Po<float4>(stqk), CPo<float>(wq), CPo<float>(bq), CPo<float>(wk), CPo<float>(bk), (float)scale, (float)eps, kq, tf32, M);
+    qkv_prep_k<NT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<AT>(q), q.stride(0), CP<AT>(k), k.stride(0), CP<AT>(v), v.stride(0), P<AT>(qo), qo.stride(0),
+        P<AT>(ko), ko.stride(0), Po<AT>(vo), (vo && vo->defined()) ? vo->stride(0) : 0L, Po<float4>(stqk), CPo<float>(wq), CPo<float>(bq), CPo<float>(wk), CPo<float>(bk), (float)scale, (float)eps, kq, tf32, M);
   ))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
