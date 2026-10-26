@@ -119,23 +119,31 @@ class AugmentedAttentionPairBias(nn.Module):
         state_dict.pop(f"{prefix}ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
-    def _fused_pair_ok(self, query, pair, mask, compute_dtype, extra_pair_bias) -> bool:
-        """The H100 pair-fused core (``cuda.fused_pair``: pair LayerNorm + head projection + attention in hand-written CUDA) serves this call."""
+    def _fused_pair_core(self, query, pair, mask, compute_dtype, extra_pair_bias):
+        """The H100 pair-fused core that serves this call (``cuda.fused_pair`` for bf16, ``cuda.fused_pair_tf32`` for fp32: the pair
+        LayerNorm + head projection + attention in hand-written CUDA), as an entry function, or None."""
         if (
             extra_pair_bias is not None
             or self._backend != KernelBackend.PORTABLE
-            or (compute_dtype or query.dtype) is not torch.bfloat16
             or not _bf16_sm90_enabled()
             or not query.is_cuda
             or (mask is not None and mask.ndim != 2)
             or self.ln_pair.eps != 1e-5
         ):
-            return False
-        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
+            return None
+        m1 = None if mask is None else mask[0]
+        dt = compute_dtype or query.dtype
+        if dt is torch.bfloat16:
+            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair as mod
 
-        if not fused_pair.available(query, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]):
-            return False
-        return True
+            fn = mod.attention_pair_fused
+        elif dt is torch.float32 and compute_dtype is None and not torch.is_autocast_enabled("cuda"):
+            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+
+            fn = mod.attention_pair_tf32
+        else:
+            return None
+        return fn if mod.available(query, pair, self.ln_pair.weight, self.to_bias.weight, m1) else None
 
     def _kernel_attention_pair_bias(
         self,
@@ -270,11 +278,10 @@ class AugmentedAttentionPairBias(nn.Module):
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        if self._fused_pair_ok(query, pair, mask, compute_dtype, extra_pair_bias):
+        fused = self._fused_pair_core(query, pair, mask, compute_dtype, extra_pair_bias)
+        if fused is not None:
             # H100: the pair LayerNorm + head projection + attention as hand-written CUDA (one read of the pair tensor)
-            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
-
-            out = fused_pair.attention_pair_fused(
+            out = fused(
                 query, key, value, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]
             )
         else:

@@ -42,7 +42,26 @@ from . import (
 
 NEG = -1e30  # a masked key's bias in log2 units: finite, so a fully masked row softmaxes to uniform (the reference's finfo.min fill)
 #: (heads, head width) -> d_pair of the stack the pair kernels of that layout serve
-LAYOUTS = {(16, 48): 128, (4, 32): 16}
+LAYOUTS = {(16, 48, 128), (4, 32, 16), (8, 48, 256)}  # (heads, head width, d_pair)
+
+
+def _kind(nh, dp):
+    """Which pair kernel serves a layout: the tensor-core ``pair_bias`` (16 heads, d_pair 128), the atom thread-per-row kernel (d_pair 16) or the generic warp-per-row one."""
+    return "apb" if (nh, dp) == (16, 128) else "atom" if dp == 16 else "rows"
+
+
+@functools.lru_cache(maxsize=None)
+def _rows_ext():
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="augattn_sm90_pair_rows",
+        sources=[str(_dir / "pair_rows.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
 _dir = Path(__file__).parent
 
 
@@ -124,8 +143,8 @@ def supported(q: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.
     if q.dim() != 5 or q.dtype is not torch.bfloat16 or pair.dtype is not torch.bfloat16:
         return False
     A, B, L, h, d = q.shape
-    dp = LAYOUTS.get((h, d))
-    if dp is None or tuple(pair.shape) != (1, L, L, dp) or tuple(wb.shape) != (h, dp) or tuple(lnw.shape) != (dp,):
+    dp = pair.shape[-1]
+    if (h, d, dp) not in LAYOUTS or tuple(pair.shape) != (1, L, L, dp) or tuple(wb.shape) != (h, dp) or tuple(lnw.shape) != (dp,):
         return False
     if mask is not None and (mask.dim() != 1 or mask.numel() != L or mask.dtype is not torch.bool):
         return False
@@ -144,17 +163,21 @@ class _AttnFusedPair(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, pair, lnw, wb, mask, eps):  # noqa: D102
         A, _, L, nh, dh = q.shape
-        W, dp = nh * dh, LAYOUTS[(nh, dh)]
+        W, dp = nh * dh, pair.shape[-1]
         need_grad = any(ctx.needs_input_grad)
         pair2 = pair.view(L * L, dp)
-        if dp == 128:
+        kind, pst = _kind(nh, dp), None
+        if kind == "apb":
             from .apb import pair_bias
 
             wf_l2, wf_nat = _wf(wb, lnw, need_grad)
             bias = pair_bias(pair2, wf_l2, mask, L, eps, NEG)  # [H, L, L] bf16, log2 units
-        else:
+        elif kind == "atom":
             wf_nat = _wf32(wb, lnw)
             bias = _atom_ext().atom_pair_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
+        else:
+            wf_nat = _wf32(wb, lnw)
+            bias, pst = _rows_ext().pair_rows_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
         qs = torch.empty(A * L, W, device=q.device, dtype=torch.bfloat16)
         qc = q.contiguous()
         n = qc.numel()
@@ -162,21 +185,21 @@ class _AttnFusedPair(torch.autograd.Function):
         kb, vb = _as_bf16_rows(k, A * L, W), _as_bf16_rows(v, A * L, W)
         o, lse = FWD_OP(qs, kb, vb, bias, None, True)
         if need_grad:
-            ctx.save_for_backward(qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb)
+            ctx.save_for_backward(qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb, pst)
             ctx.dims, ctx.eps = (A, L, nh, dh), eps
         return o.view(A, 1, L, nh, dh)
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
-        qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb = ctx.saved_tensors
+        qs, kb, vb, bias, o, lse, pair, wf_nat, lnw, wb, pst = ctx.saved_tensors
         A, L, nh, dh = ctx.dims
-        dp = LAYOUTS[(nh, dh)]
+        dp = pair.shape[-1]
         do2 = _as_bf16_rows(do, A * L, nh * dh)
         dd = _dd(do2, o, A, L, nh, dh)
         dq, dk, dv, db = backward(qs, kb, vb, do2, bias, None, lse, dd, A, L, nh, dh, out_bf16=True)
         if not db.is_contiguous():  # A not a multiple of 3: the dK / dV pass leaves it transposed
             db = db.contiguous()
-        if dp == 128:
+        if _kind(nh, dp) == "apb":
             from .apb import acc_n, ext, pair_bias_bwd
 
             acc = torch.empty(ext().pair_bwd_blocks(pair, nh, L), acc_n(nh, 384), device=pair.device)
@@ -184,7 +207,8 @@ class _AttnFusedPair(torch.autograd.Function):
             o_off = 2 * 384 + 512  # width(16, 384) = 16 x 32: the accumulator's dWf columns
             dwf = acc[:, o_off : o_off + nh * dp].sum(0).view(nh, dp)
         else:
-            dz, accp = _atom_ext().atom_pair_bwd(pair.view(L * L, dp), db, wf_nat, L, ctx.eps)
+            e = _atom_ext().atom_pair_bwd if dp == 16 else (lambda z, d, w, L_, eps_: _rows_ext().pair_rows_bwd(z, d, w, pst, L_, eps_))
+            dz, accp = e(pair.view(L * L, dp), db, wf_nat, L, ctx.eps)
             dwf = accp.sum(0).view(nh, dp)
         dwb = dwf * lnw.float()
         dlnw = (dwf * wb.float()).sum(0)
@@ -216,12 +240,15 @@ def available(q, pair, lnw, wb, mask) -> bool:
         from . import fwd_defs
 
         _core_ext("attn_fwd", fwd_defs(q.shape[3], q.shape[4]))
-        if LAYOUTS[(q.shape[3], q.shape[4])] == 128:
+        kd = _kind(q.shape[3], pair.shape[-1])
+        if kd == "apb":
             from .apb import ext
 
             ext()
-        else:
+        elif kd == "atom":
             _atom_ext()
+        else:
+            _rows_ext()
     except Exception as exc:  # noqa: BLE001
         import warnings
 

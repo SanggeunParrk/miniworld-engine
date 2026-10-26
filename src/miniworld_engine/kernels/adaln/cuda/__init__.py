@@ -1,4 +1,4 @@
-"""H100 hand-CUDA adaptive LayerNorm ``y = sigmoid(scale) * LN(x) + bias``, bf16 activations, forward and backward.
+"""H100 hand-CUDA adaptive LayerNorm ``y = sigmoid(scale) * LN(x) + bias``, bf16 or fp32 activations, forward and backward.
 
 ``adaln_rows.cu``: one-warp-per-row kernels around the two cuBLAS GEMMs (the [scale | bias] projection of LN(cond) in one GEMM, its
 weight gradient and dcn in two more). The PyTorch leg runs the same computation as ten fp32 elementwise / LayerNorm kernels
@@ -46,7 +46,9 @@ def supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
     """The contract above (and the ``adaln_h100_cuda`` setting)."""
     if not settings.current().adaln_h100_cuda or not x.is_cuda or not cond.is_cuda:
         return False
-    if x.dtype is not torch.bfloat16 or cond.dtype is not torch.bfloat16 or x.shape[:-1] != cond.shape[:-1]:
+    if x.dtype is torch.float32 and torch.is_autocast_enabled("cuda"):
+        return False  # autocast would run the fp32 call's GEMMs in bf16: the PyTorch leg decides there
+    if x.dtype not in (torch.bfloat16, torch.float32) or cond.dtype is not x.dtype or x.shape[:-1] != cond.shape[:-1]:
         return False
     if x.shape[-1] not in WIDTHS or cond.shape[-1] not in WIDTHS or x.numel() == 0:
         return False
@@ -81,9 +83,13 @@ class _AdaLN(torch.autograd.Function):
         d, dc = x.shape[-1], cond.shape[-1]
         x2, c2 = x.reshape(-1, d).contiguous(), cond.reshape(-1, dc).contiguous()
         cn, stc = e.ln_cond_fwd(c2, wc.contiguous(), eps_c)
-        wcat = torch.empty(2 * d, dc, device=x.device, dtype=torch.bfloat16)
-        bcat = torch.empty(2 * d, device=x.device, dtype=torch.bfloat16)
-        e.pack(ws.contiguous(), wb.contiguous(), None if bs is None else bs.contiguous(), wcat, bcat)
+        if x.dtype is torch.bfloat16:
+            wcat = torch.empty(2 * d, dc, device=x.device, dtype=torch.bfloat16)
+            bcat = torch.empty(2 * d, device=x.device, dtype=torch.bfloat16)
+            e.pack(ws.contiguous(), wb.contiguous(), None if bs is None else bs.contiguous(), wcat, bcat)
+        else:  # fp32 activations: the GEMMs follow the process's TF32 setting like the module's own linears
+            wcat = torch.cat([ws, wb]).to(torch.float32)
+            bcat = torch.cat([bs if bs is not None else ws.new_zeros(d), ws.new_zeros(d)]).to(torch.float32)
         sb = torch.addmm(bcat, cn, wcat.t())
         y, stx = e.adaln_fwd(x2, sb, eps_x)
         if any(ctx.needs_input_grad):
@@ -102,7 +108,7 @@ class _AdaLN(torch.autograd.Function):
             dy2 = dy2.contiguous()
         dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx)
         dcn = torch.mm(dsb, wcat)
-        dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
+        dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32) if dsb.dtype is torch.bfloat16 else torch.mm(dsb.t(), cn)  # [2 d, dc]
         dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
         dbs = pbs.sum(0) if ctx.has_bs else None
         return dx.view(ctx.shape), dcond.view(ctx.cshape), pbc.sum(0), dwcat[:d], dbs, dwcat[d:], None, None

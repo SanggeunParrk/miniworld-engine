@@ -28,21 +28,24 @@ __device__ __forceinline__ float wsum(float v) {
 __device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + __expf(-x)); }
 
 // a row of N bf16 held as N / 32 floats per lane: element 64 k + 2 lane + {0, 1} is v[2 k + {0, 1}]
-template <int N>
-__device__ __forceinline__ void ld_row(const bf* __restrict__ p, int lane, float (&v)[N / 32]) {
+__device__ __forceinline__ float2 ld2(const bf* p) { return __bfloat1622float2(*reinterpret_cast<const bf2*>(p)); }
+__device__ __forceinline__ float2 ld2(const float* p) { return *reinterpret_cast<const float2*>(p); }
+__device__ __forceinline__ void st2(bf* p, float a, float b) { *reinterpret_cast<bf2*>(p) = __floats2bfloat162_rn(a, b); }
+__device__ __forceinline__ void st2(float* p, float a, float b) { *reinterpret_cast<float2*>(p) = make_float2(a, b); }
+template <int N, typename T>
+__device__ __forceinline__ void ld_row(const T* __restrict__ p, int lane, float (&v)[N / 32]) {
 #pragma unroll
   for (int k = 0; k < N / 64; ++k) {
-    const float2 t = __bfloat1622float2(*reinterpret_cast<const bf2*>(p + 64 * k + 2 * lane));
+    const float2 t = ld2(p + 64 * k + 2 * lane);
     v[2 * k] = t.x;
     v[2 * k + 1] = t.y;
   }
 }
-template <int N>
-__device__ __forceinline__ void st_row(bf* __restrict__ p, int lane, const float (&v)[N / 32]) {
+template <int N, typename T>
+__device__ __forceinline__ void st_row(T* __restrict__ p, int lane, const float (&v)[N / 32]) {
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) *reinterpret_cast<bf2*>(p + 64 * k + 2 * lane) = __floats2bfloat162_rn(v[2 * k], v[2 * k + 1]);
+  for (int k = 0; k < N / 64; ++k) st2(p + 64 * k + 2 * lane, v[2 * k], v[2 * k + 1]);
 }
-// mean and rstd of a row held in registers (two passes over registers: exact)
 template <int N>
 __device__ __forceinline__ void stats(const float (&v)[N / 32], float eps, float& mean, float& rstd) {
   float s = 0.f;
@@ -55,8 +58,8 @@ __device__ __forceinline__ void stats(const float (&v)[N / 32], float eps, float
   rstd = rsqrtf(wsum(q) * (1.f / N) + eps);
 }
 
-template <int N>
-__global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const bf* __restrict__ C, const float* __restrict__ W, bf* __restrict__ CN,
+template <int N, typename T>
+__global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const T* __restrict__ C, const float* __restrict__ W, T* __restrict__ CN,
                                                           float2* __restrict__ ST, long R, float eps) {
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
@@ -74,8 +77,8 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const bf* __restrict__
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
-template <int N>
-__global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const bf* __restrict__ X, const bf* __restrict__ SB, bf* __restrict__ Y,
+template <int N, typename T>
+__global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X, const T* __restrict__ SB, T* __restrict__ Y,
                                                         float2* __restrict__ ST, long R, float eps) {
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
@@ -91,9 +94,9 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const bf* __restrict__ X
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
-template <int N>
-__global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const bf* __restrict__ DY, const bf* __restrict__ X, const bf* __restrict__ SB,
-                                                        const float2* __restrict__ ST, bf* __restrict__ DSB, bf* __restrict__ DX,
+template <int N, typename T>
+__global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
+                                                        const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
                                                         float* __restrict__ PB, long R) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
@@ -140,9 +143,9 @@ __global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const bf* __restrict__ D
   }
 }
 
-template <int N>
-__global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const bf* __restrict__ DCN, const bf* __restrict__ C, const float2* __restrict__ ST,
-                                                          const float* __restrict__ W, bf* __restrict__ DC, float* __restrict__ PB, long R) {
+template <int N, typename T>
+__global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const T* __restrict__ DCN, const T* __restrict__ C, const float2* __restrict__ ST,
+                                                          const float* __restrict__ W, T* __restrict__ DC, float* __restrict__ PB, long R) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32], w[N / 32];
@@ -208,54 +211,65 @@ int nsm_of(const at::Tensor& t) {
 void chk(const at::Tensor& t, at::ScalarType dt, const char* n) {
   TORCH_CHECK(t.is_cuda() && t.scalar_type() == dt && t.is_contiguous(), n, ": contiguous CUDA tensor of the expected dtype");
 }
-const bf* B(const at::Tensor& t) { return reinterpret_cast<const bf*>(t.data_ptr()); }
-bf* BM(at::Tensor& t) { return reinterpret_cast<bf*>(t.data_ptr()); }
+void chk_act(const at::Tensor& t, const char* n) {
+  TORCH_CHECK(t.is_cuda() && t.is_contiguous() && (t.scalar_type() == at::kBFloat16 || t.scalar_type() == at::kFloat), n,
+              ": contiguous bf16 or fp32 CUDA tensor");
+}
+template <typename T> const T* P(const at::Tensor& t) { return reinterpret_cast<const T*>(t.data_ptr()); }
+template <typename T> T* PM(at::Tensor& t) { return reinterpret_cast<T*>(t.data_ptr()); }
 cudaStream_t S() { return at::cuda::getCurrentCUDAStream(); }
 unsigned rows_grid(long R) { return (unsigned)((R + WPB - 1) / WPB); }
 
-#define WIDTH_SWITCH(N, ...)                              \
-  do {                                                    \
-    if ((N) == 128) { constexpr int NN = 128; __VA_ARGS__; }       \
-    else if ((N) == 256) { constexpr int NN = 256; __VA_ARGS__; }  \
-    else if ((N) == 384) { constexpr int NN = 384; __VA_ARGS__; }  \
-    else if ((N) == 512) { constexpr int NN = 512; __VA_ARGS__; }  \
-    else if ((N) == 768) { constexpr int NN = 768; __VA_ARGS__; }  \
-    else if ((N) == 1024) { constexpr int NN = 1024; __VA_ARGS__; }\
+// the row kernels' width (compile-time) and activation dtype (bf16 or fp32, all activations of one call share it)
+#define ACT_SWITCH(N, REF, ...)                                                                  \
+  do {                                                                                           \
+    const bool bf16_ = (REF).scalar_type() == at::kBFloat16;                                     \
+    TORCH_CHECK(bf16_ || (REF).scalar_type() == at::kFloat, "adaln rows: bf16 or fp32");         \
+    if (bf16_) { using T = bf; WIDTH_SWITCH(N, __VA_ARGS__); }                                   \
+    else { using T = float; WIDTH_SWITCH(N, __VA_ARGS__); }                                      \
+  } while (0)
+#define WIDTH_SWITCH(N, ...)                                                                     \
+  do {                                                                                           \
+    if ((N) == 128) { constexpr int NN = 128; __VA_ARGS__; }                                     \
+    else if ((N) == 256) { constexpr int NN = 256; __VA_ARGS__; }                                \
+    else if ((N) == 384) { constexpr int NN = 384; __VA_ARGS__; }                                \
+    else if ((N) == 512) { constexpr int NN = 512; __VA_ARGS__; }                                \
+    else if ((N) == 768) { constexpr int NN = 768; __VA_ARGS__; }                                \
+    else if ((N) == 1024) { constexpr int NN = 1024; __VA_ARGS__; }                              \
     else TORCH_CHECK(false, "adaln rows: width 128 / 256 / 384 / 512 / 768 / 1024, got ", (long)(N)); \
   } while (0)
 }  // namespace
 
 std::vector<at::Tensor> ln_cond_fwd(at::Tensor cond, at::Tensor w, double eps) {
-  chk(cond, at::kBFloat16, "cond");
+  chk_act(cond, "cond");
   chk(w, at::kFloat, "wc");
   const long N = w.numel(), R = cond.numel() / N;
   const at::cuda::CUDAGuard gd(cond.device());
   auto cn = at::empty_like(cond);
   auto st = at::empty({R, 2}, cond.options().dtype(at::kFloat));
-  WIDTH_SWITCH(N, ln_cond_fwd_k<NN><<<rows_grid(R), 32 * WPB, 0, S()>>>(B(cond), w.data_ptr<float>(), BM(cn),
-                                                                         reinterpret_cast<float2*>(st.data_ptr()), R, (float)eps));
+  ACT_SWITCH(N, cond, ln_cond_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(cond), w.data_ptr<float>(), PM<T>(cn),
+                                                                               reinterpret_cast<float2*>(st.data_ptr()), R, (float)eps));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {cn, st};
 }
 
 std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
-  chk(x, at::kBFloat16, "x");
-  chk(sb, at::kBFloat16, "sb");
+  chk_act(x, "x");
+  TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
   const long N = sb.size(1) / 2, R = sb.size(0);
   TORCH_CHECK(x.numel() == R * N, "adaln_fwd shapes");
   const at::cuda::CUDAGuard gd(x.device());
   auto y = at::empty_like(x);
   auto st = at::empty({R, 2}, x.options().dtype(at::kFloat));
-  WIDTH_SWITCH(N, adaln_fwd_k<NN><<<rows_grid(R), 32 * WPB, 0, S()>>>(B(x), B(sb), BM(y), reinterpret_cast<float2*>(st.data_ptr()), R,
-                                                                       (float)eps));
+  ACT_SWITCH(N, x, adaln_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(x), P<T>(sb), PM<T>(y), reinterpret_cast<float2*>(st.data_ptr()), R,
+                                                                          (float)eps));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, st};
 }
 
 std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st) {
-  chk(dy, at::kBFloat16, "dy");
-  chk(x, at::kBFloat16, "x");
-  chk(sb, at::kBFloat16, "sb");
+  chk_act(dy, "dy");
+  TORCH_CHECK(x.scalar_type() == dy.scalar_type() && sb.scalar_type() == dy.scalar_type() && x.is_contiguous() && sb.is_contiguous(), "dtypes");
   chk(st, at::kFloat, "st");
   const long N = sb.size(1) / 2, R = sb.size(0);
   TORCH_CHECK(x.numel() == R * N && dy.numel() == R * N && st.numel() == 2 * R, "adaln_bwd shapes");
@@ -264,15 +278,15 @@ std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at
   auto dx = at::empty_like(x);
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(x));
   auto pb = at::empty({(long)grid, N}, x.options().dtype(at::kFloat));
-  WIDTH_SWITCH(N, adaln_bwd_k<NN><<<grid, 32 * WPB, 0, S()>>>(B(dy), B(x), B(sb), reinterpret_cast<const float2*>(st.data_ptr()), BM(dsb),
-                                                              BM(dx), pb.data_ptr<float>(), R));
+  ACT_SWITCH(N, x, adaln_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dy), P<T>(x), P<T>(sb), reinterpret_cast<const float2*>(st.data_ptr()), PM<T>(dsb),
+                                                                 PM<T>(dx), pb.data_ptr<float>(), R));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dsb, dx, pb};
 }
 
 std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor st, at::Tensor w) {
-  chk(dcn, at::kBFloat16, "dcn");
-  chk(cond, at::kBFloat16, "cond");
+  chk_act(dcn, "dcn");
+  TORCH_CHECK(cond.scalar_type() == dcn.scalar_type() && cond.is_contiguous(), "dtypes");
   chk(st, at::kFloat, "st");
   chk(w, at::kFloat, "wc");
   const long N = w.numel(), R = cond.numel() / N;
@@ -281,8 +295,8 @@ std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor 
   auto dc = at::empty_like(cond);
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(cond));
   auto pb = at::empty({(long)grid, N}, cond.options().dtype(at::kFloat));
-  WIDTH_SWITCH(N, ln_cond_bwd_k<NN><<<grid, 32 * WPB, 0, S()>>>(B(dcn), B(cond), reinterpret_cast<const float2*>(st.data_ptr()),
-                                                                w.data_ptr<float>(), BM(dc), pb.data_ptr<float>(), R));
+  ACT_SWITCH(N, cond, ln_cond_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dcn), P<T>(cond), reinterpret_cast<const float2*>(st.data_ptr()),
+                                                                       w.data_ptr<float>(), PM<T>(dc), pb.data_ptr<float>(), R));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dc, pb};
 }
@@ -297,10 +311,10 @@ void pack(at::Tensor ws, at::Tensor wb, c10::optional<at::Tensor> bs, at::Tensor
   const at::cuda::CUDAGuard gd(ws.device());
   const unsigned grid = (unsigned)std::min<long>((2 * nw + 2 * nb + 255) / 256, 8L * nsm_of(ws));
   if (ws.scalar_type() == at::kFloat) {
-    pack_k<float><<<grid, 256, 0, S()>>>(ws.data_ptr<float>(), wb.data_ptr<float>(), bs ? bs->data_ptr<float>() : nullptr, BM(wcat), BM(bcat), nw, nb);
+    pack_k<float><<<grid, 256, 0, S()>>>(ws.data_ptr<float>(), wb.data_ptr<float>(), bs ? bs->data_ptr<float>() : nullptr, PM<bf>(wcat), PM<bf>(bcat), nw, nb);
   } else {
     TORCH_CHECK(ws.scalar_type() == at::kBFloat16, "pack: fp32 or bf16 weights");
-    pack_k<bf><<<grid, 256, 0, S()>>>(B(ws), B(wb), bs ? B(*bs) : nullptr, BM(wcat), BM(bcat), nw, nb);
+    pack_k<bf><<<grid, 256, 0, S()>>>(P<bf>(ws), P<bf>(wb), bs ? P<bf>(*bs) : nullptr, PM<bf>(wcat), PM<bf>(bcat), nw, nb);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

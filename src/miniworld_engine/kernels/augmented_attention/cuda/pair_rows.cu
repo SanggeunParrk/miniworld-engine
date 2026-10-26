@@ -19,6 +19,7 @@ namespace {
 using bf = __nv_bfloat16;
 constexpr int BT = 256;
 constexpr int WPB = BT / 32;
+constexpr int PF = 4;  // rows whose loads are in flight together
 
 __device__ __forceinline__ float wsum(float v) {
 #pragma unroll
@@ -63,6 +64,20 @@ __device__ __forceinline__ void store_row(bf* __restrict__ z, const float (&x)[D
   else if constexpr (DPL == 4) *reinterpret_cast<uint2*>(z) = make_uint2(o[0], o[1]);
   else *reinterpret_cast<unsigned*>(z) = o[0];
 }
+template <int DPL>
+__device__ __forceinline__ void load_row(const float* __restrict__ z, float (&x)[DPL]) {
+  static_assert(DPL % 4 == 0, "fp32 rows: 4 channels per load");
+#pragma unroll
+  for (int i = 0; i < DPL / 4; ++i) {
+    const float4 a = __ldg(reinterpret_cast<const float4*>(z) + i);
+    x[4 * i] = a.x; x[4 * i + 1] = a.y; x[4 * i + 2] = a.z; x[4 * i + 3] = a.w;
+  }
+}
+template <int DPL>
+__device__ __forceinline__ void store_row(float* __restrict__ z, const float (&x)[DPL]) {
+#pragma unroll
+  for (int i = 0; i < DPL / 4; ++i) reinterpret_cast<float4*>(z)[i] = make_float4(x[4 * i], x[4 * i + 1], x[4 * i + 2], x[4 * i + 3]);
+}
 template <int DP, int DPL>
 __device__ __forceinline__ void normalize(float (&x)[DPL], float eps, float& rstd) {
   float s = 0.f;
@@ -80,47 +95,105 @@ __device__ __forceinline__ void normalize(float (&x)[DPL], float eps, float& rst
   for (int i = 0; i < DPL; ++i) x[i] *= rstd;
 }
 
-template <int DP, int NH>
+// 16 values per lane summed over the warp and scattered: value i ends (summed) in lanes 2i, 2i + 1 -- 16 shuffles for what 16
+// butterfly sums do in 80
+__device__ __forceinline__ float reduce_scatter16(const float (&v)[16], int lane) {
+  float a[8], b[4], c[2];
+  {
+    const bool hi = lane & 16;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) a[i] = (hi ? v[i + 8] : v[i]) + __shfl_xor_sync(0xffffffffu, hi ? v[i] : v[i + 8], 16);
+  }
+  {
+    const bool hi = lane & 8;
+#pragma unroll
+    for (int i = 0; i < 4; ++i) b[i] = (hi ? a[i + 4] : a[i]) + __shfl_xor_sync(0xffffffffu, hi ? a[i] : a[i + 4], 8);
+  }
+  {
+    const bool hi = lane & 4;
+#pragma unroll
+    for (int i = 0; i < 2; ++i) c[i] = (hi ? b[i + 2] : b[i]) + __shfl_xor_sync(0xffffffffu, hi ? b[i] : b[i + 2], 4);
+  }
+  const bool hi = lane & 2;
+  float d = (hi ? c[1] : c[0]) + __shfl_xor_sync(0xffffffffu, hi ? c[0] : c[1], 2);
+  return d + __shfl_xor_sync(0xffffffffu, d, 1);
+}
+
+// NH = 8 heads: slots 0, 1 = sum x, sum x^2; 2 + h = sum_c Wf[h, c] x[c] (raw x: LN folded as rstd (dot - mean sum_c Wf[h, c]))
+template <int DP>
 __global__ void __launch_bounds__(BT) fwd_k(const bf* __restrict__ Z, const float* __restrict__ W, const bool* __restrict__ MASK,
-                                            bf* __restrict__ OUT, long R, int L, float eps, float scale, float neg) {
-  constexpr int DPL = DP / 32;
-  const int lane = threadIdx.x & 31;
+                                            bf* __restrict__ OUT, float2* __restrict__ ST, long R, int L, float eps, float scale, float neg) {
+  constexpr int DPL = DP / 32, NH = 8;
+  __shared__ float stage[WPB][32][NH + 1];
+  __shared__ float sumw[NH];
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float w[NH][DPL];
 #pragma unroll
-  for (int h = 0; h < NH; ++h)
+  for (int h = 0; h < NH; ++h) {
+    float s = 0.f;
 #pragma unroll
-    for (int i = 0; i < DPL; ++i) w[h][i] = W[h * DP + lane * DPL + i] * scale;
+    for (int i = 0; i < DPL; ++i) {
+      w[h][i] = W[h * DP + lane * DPL + i] * scale;
+      s += w[h][i];
+    }
+    s = wsum(s);
+    if (threadIdx.x == 0) sumw[h] = s;
+  }
+  __syncthreads();
   const long warp = ((long)blockIdx.x * BT + threadIdx.x) >> 5, nwarps = (long)gridDim.x * WPB;
   for (long base = warp * 32; base < R; base += nwarps * 32) {
-    float res[NH];
-#pragma unroll
-    for (int h = 0; h < NH; ++h) res[h] = 0.f;
     const int n = (int)min(32L, R - base);
-    for (int r = 0; r < n; ++r) {
-      float x[DPL], rstd;
-      load_row<DPL>(Z + (base + r) * DP + lane * DPL, x);
-      normalize<DP, DPL>(x, eps, rstd);
+    for (int rb = 0; rb < n; rb += PF) {
+      float xb[PF][DPL];
+#pragma unroll
+      for (int q = 0; q < PF; ++q) load_row<DPL>(Z + min(base + rb + q, R - 1) * DP + lane * DPL, xb[q]);
+#pragma unroll
+      for (int q = 0; q < PF; ++q) {
+      const int r = rb + q;
+      if (r >= n) break;
+      float x[DPL];
+#pragma unroll
+      for (int i = 0; i < DPL; ++i) x[i] = xb[q][i];
+      float v[16];
+#pragma unroll
+      for (int i = 0; i < 16; ++i) v[i] = 0.f;
+      float s1 = 0.f, s2 = 0.f;
+#pragma unroll
+      for (int i = 0; i < DPL; ++i) {
+        s1 += x[i];
+        s2 += x[i] * x[i];
+      }
+      v[0] = s1;
+      v[1] = s2;
 #pragma unroll
       for (int h = 0; h < NH; ++h) {
-        float s = 0.f;
+        float d = 0.f;
 #pragma unroll
-        for (int i = 0; i < DPL; ++i) s += w[h][i] * x[i];
-        s = wsum(s);
-        if (lane == r) res[h] = s;
+        for (int i = 0; i < DPL; ++i) d += w[h][i] * x[i];
+        v[2 + h] = d;
+      }
+      const float u = reduce_scatter16(v, lane);
+      const float t1 = __shfl_sync(0xffffffffu, u, 0), t2 = __shfl_sync(0xffffffffu, u, 2);
+      const float mean = t1 * (1.f / DP), rstd = rsqrtf(fmaxf(t2 * (1.f / DP) - mean * mean, 0.f) + eps);
+      const int idx = lane >> 1;
+      if ((lane & 1) == 0 && idx >= 2 && idx < 2 + NH) stage[wp][r][idx - 2] = rstd * (u - mean * sumw[idx - 2]);
+      if (lane == 0) ST[base + r] = make_float2(mean, rstd);
       }
     }
+    __syncwarp();
     if (lane < n) {
       const long row = base + lane;
       const bool drop = MASK != nullptr && !MASK[row % L];
 #pragma unroll
-      for (int h = 0; h < NH; ++h) OUT[(long)h * R + row] = __float2bfloat16_rn(drop ? neg : res[h]);
+      for (int h = 0; h < NH; ++h) OUT[(long)h * R + row] = __float2bfloat16_rn(drop ? neg : stage[wp][lane][h]);
     }
+    __syncwarp();
   }
 }
 
-template <int DP, int NH>
-__global__ void __launch_bounds__(BT) bwd_k(const bf* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
-                                            bf* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
+template <int DP, int NH, typename T, bool HAVE_ST>
+__global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
+                                            const float2* __restrict__ ST, T* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
   constexpr int DPL = DP / 32;
   __shared__ float red[WPB][DP];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
@@ -136,13 +209,31 @@ __global__ void __launch_bounds__(BT) bwd_k(const bf* __restrict__ Z, const floa
   for (long base = warp * 32; base < R; base += nwarps * 32) {
     float dbr[NH];
     const long mine = base + lane;
+    float2 stm = make_float2(0.f, 1.f);
+    if constexpr (HAVE_ST) stm = mine < R ? ST[mine] : stm;
 #pragma unroll
     for (int h = 0; h < NH; ++h) dbr[h] = mine < R ? __ldg(DB + (long)h * R + mine) : 0.f;
     const int n = (int)min(32L, R - base);
-    for (int r = 0; r < n; ++r) {
-      float x[DPL], rstd, d[NH], g[DPL];
-      load_row<DPL>(Z + (base + r) * DP + lane * DPL, x);
-      normalize<DP, DPL>(x, eps, rstd);
+    for (int rb = 0; rb < n; rb += PF) {
+      float xb[PF][DPL];
+#pragma unroll
+      for (int q = 0; q < PF; ++q) load_row<DPL>(Z + min(base + rb + q, R - 1) * DP + lane * DPL, xb[q]);
+#pragma unroll
+      for (int q = 0; q < PF; ++q) {
+      const int r = rb + q;
+      if (r >= n) break;
+      float x[DPL], d[NH], g[DPL];
+#pragma unroll
+      for (int i = 0; i < DPL; ++i) x[i] = xb[q][i];
+      float rstd;
+      if constexpr (HAVE_ST) {
+        const float mean = __shfl_sync(0xffffffffu, stm.x, r);
+        rstd = __shfl_sync(0xffffffffu, stm.y, r);
+#pragma unroll
+        for (int i = 0; i < DPL; ++i) x[i] = (x[i] - mean) * rstd;
+      } else {
+        normalize<DP, DPL>(x, eps, rstd);
+      }
 #pragma unroll
       for (int h = 0; h < NH; ++h) d[h] = __shfl_sync(0xffffffffu, dbr[h], r);
       float mg = 0.f, mgx = 0.f;
@@ -163,9 +254,9 @@ __global__ void __launch_bounds__(BT) bwd_k(const bf* __restrict__ Z, const floa
 #pragma unroll
       for (int i = 0; i < DPL; ++i) g[i] = rstd * (g[i] - mg - x[i] * mgx);
       store_row<DPL>(DZ + (base + r) * DP + lane * DPL, g);
+      }
     }
   }
-  // block partial of dWf, head by head: the warps in order
   for (int h = 0; h < NH; ++h) {
 #pragma unroll
     for (int i = 0; i < DPL; ++i) red[wp][lane * DPL + i] = part[h][i];
@@ -191,16 +282,15 @@ void chk(const at::Tensor& t, at::ScalarType dt, const char* n) {
 
 #define PAIR_SWITCH(DPV, NHV, ...)                                                      \
   do {                                                                                  \
-    if ((DPV) == 128 && (NHV) == 16) { constexpr int DPK = 128, NHK = 16; __VA_ARGS__; } \
-    else if ((DPV) == 128 && (NHV) == 8) { constexpr int DPK = 128, NHK = 8; __VA_ARGS__; } \
-    else if ((DPV) == 256 && (NHV) == 8) { constexpr int DPK = 256, NHK = 8; __VA_ARGS__; } \
-    else if ((DPV) == 256 && (NHV) == 16) { constexpr int DPK = 256, NHK = 16; __VA_ARGS__; } \
-    else if ((DPV) == 64 && (NHV) == 8) { constexpr int DPK = 64, NHK = 8; __VA_ARGS__; } \
-    else TORCH_CHECK(false, "pair_rows: d_pair x heads 128 x 8 / 16, 256 x 8 / 16 or 64 x 8, got ", (long)(DPV), " x ", (long)(NHV)); \
+    TORCH_CHECK((NHV) == 8, "pair_rows: 8 heads, got ", (long)(NHV));                   \
+    if ((DPV) == 128) { constexpr int DPK = 128; __VA_ARGS__; }                         \
+    else if ((DPV) == 256) { constexpr int DPK = 256; __VA_ARGS__; }                    \
+    else if ((DPV) == 64) { constexpr int DPK = 64; __VA_ARGS__; }                      \
+    else TORCH_CHECK(false, "pair_rows: d_pair 64 / 128 / 256, got ", (long)(DPV));     \
   } while (0)
 }  // namespace
 
-at::Tensor pair_rows_fwd(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, int64_t L, double eps, double scale, double neg) {
+std::vector<at::Tensor> pair_rows_fwd(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, int64_t L, double eps, double scale, double neg) {
   chk(z, at::kBFloat16, "pair");
   chk(wf, at::kFloat, "wf");
   const int64_t nh = wf.size(0), dp = wf.size(1), R = L * L;
@@ -211,17 +301,18 @@ at::Tensor pair_rows_fwd(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> 
   }
   const at::cuda::CUDAGuard gd(z.device());
   auto out = at::empty({nh, L, L}, z.options());
+  auto st = at::empty({R, 2}, z.options().dtype(at::kFloat));
   const unsigned grid = (unsigned)std::min<int64_t>((R / 32 + WPB - 1) / WPB, 4L * nsm_of(z));
   const bool* mp = mask ? mask->data_ptr<bool>() : nullptr;
   auto s = at::cuda::getCurrentCUDAStream();
   const bf* zp = reinterpret_cast<const bf*>(z.data_ptr());
   bf* op = reinterpret_cast<bf*>(out.data_ptr());
-  PAIR_SWITCH(dp, nh, fwd_k<DPK, NHK><<<grid, BT, 0, s>>>(zp, wf.data_ptr<float>(), mp, op, R, (int)L, (float)eps, (float)scale, (float)neg));
+  PAIR_SWITCH(dp, nh, fwd_k<DPK><<<grid, BT, 0, s>>>(zp, wf.data_ptr<float>(), mp, op, reinterpret_cast<float2*>(st.data_ptr()), R, (int)L, (float)eps, (float)scale, (float)neg));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return out;
+  return {out, st};
 }
 
-std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps) {
+std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf, at::Tensor st, int64_t L, double eps) {
   chk(z, at::kBFloat16, "pair");
   chk(db, at::kFloat, "dbias");
   chk(wf, at::kFloat, "wf");
@@ -234,12 +325,30 @@ std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf
   auto s = at::cuda::getCurrentCUDAStream();
   const bf* zp = reinterpret_cast<const bf*>(z.data_ptr());
   bf* dp_ = reinterpret_cast<bf*>(dz.data_ptr());
-  PAIR_SWITCH(dp, nh, bwd_k<DPK, NHK><<<grid, BT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), dp_, acc.data_ptr<float>(), R, (float)eps));
+  PAIR_SWITCH(dp, nh, bwd_k<DPK, 8, bf, true><<<grid, BT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), reinterpret_cast<const float2*>(st.data_ptr()), dp_, acc.data_ptr<float>(), R, (float)eps));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dz, acc};
+}
+
+// fp32 pair [L L, 128], 16 heads (the fp32 token stack): dpair and the dWf block partials; the LayerNorm statistics are recomputed
+std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps) {
+  chk(z, at::kFloat, "pair");
+  chk(db, at::kFloat, "dbias");
+  chk(wf, at::kFloat, "wf");
+  const int64_t R = L * L;
+  TORCH_CHECK(wf.size(0) == 16 && wf.size(1) == 128 && z.numel() == R * 128 && db.numel() == 16 * R, "pair_rows_bwd32 shapes");
+  const at::cuda::CUDAGuard gd(z.device());
+  auto dz = at::empty_like(z);
+  const unsigned grid = (unsigned)std::min<int64_t>((R / 32 + WPB - 1) / WPB, 2L * nsm_of(z));
+  auto acc = at::empty({(int64_t)grid, 16 * 128}, z.options());
+  bwd_k<128, 16, float, false><<<grid, BT, 0, at::cuda::getCurrentCUDAStream()>>>(
+      z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), nullptr, dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dz, acc};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("pair_rows_bwd32", &pair_rows_bwd32);
   m.def("pair_rows_fwd", &pair_rows_fwd);
   m.def("pair_rows_bwd", &pair_rows_bwd);
 }

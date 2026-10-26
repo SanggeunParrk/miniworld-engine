@@ -141,6 +141,37 @@ class AttentionPairBias(nn.Module):
             else self.to_value(single)
         )
 
+        fused_out = None
+        if (
+            not self.use_qk_norm
+            and self._backend == KernelBackend.PORTABLE
+            and query.dtype == torch.bfloat16
+            and pair.dtype == torch.bfloat16
+            and pair.shape[-1] != 128
+            and self.ln_pair.eps == 1e-5
+            and (mask is None or mask.ndim == 2)
+        ):
+            # H100: the pair LayerNorm + head projection + attention as hand-written CUDA (kernels/augmented_attention/cuda/fused_pair);
+            # d_pair 128 is served by the native APB path above, other widths (256) land here
+            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
+            from miniworld_engine.modules.augmented_attention.module import _bf16_sm90_enabled
+
+            L_ = query.shape[1]
+            q5, k5, v5 = (t.reshape(1, 1, L_, self.n_head, -1) for t in (query, key, value))
+            if _bf16_sm90_enabled() and fused_pair.available(
+                q5, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]
+            ):
+                fused_out = fused_pair.attention_pair_fused(
+                    q5, k5, v5, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]
+                ).reshape(1, L_, -1)
+        if fused_out is not None:
+            gate = _h100_master.linear(single, self.to_gate, wg) if master else self.to_gate(single)
+            if self.gate_bias:
+                gate = gate + self.gate_bias
+            out = sigmoid_gate(gate, fused_out.to(single.dtype))
+            out = _h100_master.linear(out, self.to_out, wo) if master else self.to_out(out)
+            return single_res + out
+
         query = rearrange(query, "B L (H D) -> B H L D", H=self.n_head)
         key = rearrange(key, "B L (H D) -> B H L D", H=self.n_head)
         value = rearrange(value, "B L (H D) -> B H L D", H=self.n_head)
