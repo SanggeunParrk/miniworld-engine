@@ -152,7 +152,7 @@ def test_training_is_bitwise_repeatable(kind):
 
 
 def test_the_training_switch_sends_the_call_to_the_portable_route():
-    stack, inputs, mask, uid, dy, live = _case("token", "chai1", 3, 256)
+    stack, inputs, mask, *_ = _case("token", "chai1", 3, 256)
     ins = [inputs[k].bfloat16().requires_grad_() for k in ("single", "cond", "pair")]
     previous = settings.current().dit_variant_train_cuda
     try:
@@ -165,7 +165,7 @@ def test_the_training_switch_sends_the_call_to_the_portable_route():
 
 
 def test_a_call_without_a_gradient_or_off_the_layout_is_not_served():
-    stack, inputs, mask, uid, dy, live = _case("token", "boltz2", 3, 256)
+    stack, inputs, mask, *_ = _case("token", "boltz2", 3, 256)
     single, cond, pair = (inputs[k].bfloat16() for k in ("single", "cond", "pair"))
     with torch.no_grad():
         assert not train.serves(stack, single, cond, pair, mask)
