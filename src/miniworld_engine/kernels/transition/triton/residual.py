@@ -99,13 +99,13 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
 
 class ResidualTransitionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, xn, wa, wb, ws, residual, save_act=True):
+    def forward(ctx, xn, wa, wb, ws, residual, save_act=True, half_scale=None):
         shape = xn.shape
         xn = xn.reshape(-1, shape[-1]).contiguous()
         key = both_key(rows_of(shape))
         if save_act:
-            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key)     # training: the halves, see main.TritonTransitionFunction
-            ctx.save_for_backward(xn, wa, wb, ws, h, a, b)
+            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key, half_scale)     # training: the halves, see main.TritonTransitionFunction
+            ctx.save_for_backward(xn, wa, wb, ws, h, a, b, *(() if half_scale is None else (half_scale,)))
         else:
             h = _expand_swiglu(xn, wa, wb, key)
             ctx.save_for_backward()
@@ -115,12 +115,24 @@ class ResidualTransitionFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, dy):
-        xn, wa, wb, ws, h, a, b = ctx.saved_tensors
+        xn, wa, wb, ws, h, a, b, *scale = ctx.saved_tensors
         flat = dy.reshape(-1, dy.shape[-1]).contiguous()
         if flat.dtype != xn.dtype:
             flat = flat.to(xn.dtype)
-        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b))
-        return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None
+        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b), half_scale=scale[0] if scale else None)
+        return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None, None
+
+
+@torch.no_grad()
+def half_scale(gamma, beta, wa, wb):
+    """One fp32 on the device: ``max(1, bound / 60000)`` with ``bound`` >= every |a|, |b| of ``LN(x) @ [Wa; Wb]^T``. LayerNorm output is
+    ``z * gamma + beta`` with ``|z| <= sqrt(D)``, so ``|xn_j| <= sqrt(D) |gamma|_max + |beta|_max`` and ``|a_i| <= that * ||Wa_i||_1``. The saved fp16
+    halves are divided by it: they can never overflow, whatever the weights are, and the scale is 1 for any ordinary magnitude. Device
+    arithmetic only (a few reductions over the weights): graph-capturable, no host sync."""
+    d = wa.shape[1]
+    xn_max = (d ** 0.5) * gamma.abs().max().float() + beta.abs().max().float()
+    w1 = torch.maximum(wa.abs().sum(dim=1).max(), wb.abs().sum(dim=1).max()).float()
+    return (xn_max * w1 * (1.0 / 60000.0)).clamp_min(1.0).reshape(1)
 
 
 def transition_residual(x, gamma, beta, wa, wb, ws, eps):
@@ -129,4 +141,5 @@ def transition_residual(x, gamma, beta, wa, wb, ws, eps):
     xn, residual = input_ln_residual(x, gamma, beta, eps)
     # grad mode and an operand that wants one, decided here: ``ctx.needs_input_grad`` is true for parameters under no_grad too
     save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
-    return ResidualTransitionFunction.apply(xn, wa, wb, ws, residual, save)
+    scale = half_scale(gamma, beta, wa, wb) if save and xn.dtype == torch.float32 else None
+    return ResidualTransitionFunction.apply(xn, wa, wb, ws, residual, save, scale)

@@ -172,7 +172,8 @@ def transition_expand_swiglu_triton() -> None:
     # for the dh/gate backward, and it is what a residual Transition launches under autograd
     from miniworld_engine.kernels.transition.triton.main import _expand_swiglu_saveact
 
-    _expand_swiglu_saveact(rows2d(ROWS, K_FROM_ND), wa, wb, SHAPE_KEY)
+    _expand_swiglu_saveact(rows2d(ROWS, K_FROM_ND), wa, wb, SHAPE_KEY,
+                           torch.ones(1, device=wa.device) if wa.dtype == torch.float32 else None)
 
 
 def transition_layernorm_expand_swiglu_triton() -> None:
@@ -400,7 +401,10 @@ def transition_bwd_squeeze_swiglu_triton():
     from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
 
     nd = wa.shape[0]
-    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, rows2d(ROWS, nd), rows2d(ROWS, nd), SHAPE_KEY)
+    a, b = rows2d(ROWS, nd), rows2d(ROWS, nd)
+    if a.dtype == torch.float32:                # fp32 activations keep fp16 halves + the overflow flag (training forward)
+        a, b = a.half(), b.half()
+    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, a, b, SHAPE_KEY, torch.ones(1, device=a.device) if a.dtype != torch.float32 and ws.dtype == torch.float32 else None)
 
 
 def transition_squeeze_residual_triton():

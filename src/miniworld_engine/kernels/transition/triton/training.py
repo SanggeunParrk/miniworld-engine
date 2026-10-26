@@ -25,14 +25,14 @@ from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
 
 
-@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "USE_TMA", "SAVED"])
+@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "USE_TMA", "SAVED", "HALF"])
 @triton.jit
 def _squeeze_swiglu_bwd_kernel(
-    X, Wab, G, W, H, DAB, SA, SB, M, ND: tl.constexpr, K: tl.constexpr,
+    X, Wab, G, W, H, DAB, SA, SB, SCALE, M, ND: tl.constexpr, K: tl.constexpr,
     sxm, swabn, sgm, swk, swn, shm, sdm, ssm,
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
-    SAVED: tl.constexpr = False,
+    SAVED: tl.constexpr = False, HALF: tl.constexpr = False,
     NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
@@ -66,6 +66,9 @@ def _squeeze_swiglu_bwd_kernel(
             if SAVED:
                 a = sa_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
                 b = sb_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
+                if HALF:        # saved in fp16, divided by the forward's scale
+                    a = a * tl.load(SCALE)
+                    b = b * tl.load(SCALE)
             else:
                 a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
             dh = acc_dh.to(et).to(tl.float32)
@@ -100,6 +103,9 @@ def _squeeze_swiglu_bwd_kernel(
         if SAVED:
             a = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
             b = tl.load(SB + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
+            if HALF:
+                a = a * tl.load(SCALE)
+                b = b * tl.load(SCALE)
         else:
             a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
         dh = acc_dh.to(et).to(tl.float32)
@@ -112,23 +118,27 @@ def _squeeze_swiglu_bwd_kernel(
         tl.store(DAB + off + ND, (dh * silu).to(et), mask=mask)
 
 
-def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b):
+def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
     """Launch the kernel: recompute a, b from ``xn``/``w_ab`` (``saved_a is None``, writes ``h``) or read them (``saved_a``,
-    ``saved_b``, the forward's halves; ``xn`` / ``w_ab`` are then unused and ``h`` is not written)."""
+    ``saved_b``, the forward's halves; ``xn`` / ``w_ab`` are then unused and ``h`` is not written). ``scale`` (fp32 on the device):
+    the halves are fp16 and were stored divided by it."""
     saved = saved_a is not None
     m, k = dy.shape
     nd = ws.shape[1]
     if ws.shape[0] != k:
         raise ValueError("squeeze_swiglu_bwd shapes must be dy[M,K], ws[K,ND]")
+    half = saved and scale is not None
     if saved:
         if saved_a.shape != (m, nd) or saved_b.stride() != saved_a.stride():
             raise ValueError("squeeze_swiglu_bwd: saved a/b must be [M,ND] with one layout")
-        xn = w_ab = h = dy                                   # unused fillers
+        h = xn = w_ab = dy                                   # unused fillers
     else:
         if w_ab.shape != (2 * nd, k) or xn.shape != (m, k):
             raise ValueError("squeeze_swiglu_bwd shapes must be xn[M,K], w_ab[2*ND,K], dy[M,K], ws[K,ND]")
         h = dy.new_empty((m, nd))
         saved_a = saved_b = dy
+    if not half:
+        scale = dy
     dab = dy.new_empty((m, 2 * nd))
     da, db = dab[:, :nd], dab[:, nd:]
     use_tma = tma_ok(xn, w_ab, dy, ws, h, da, db, *((saved_a, saved_b) if saved else ()))
@@ -139,10 +149,10 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b):
         sms = 1
         grid = lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
     _squeeze_swiglu_bwd_kernel[grid](
-        xn, w_ab, dy, ws, h, dab, saved_a, saved_b, m, nd, k,
+        xn, w_ab, dy, ws, h, dab, saved_a, saved_b, scale, m, nd, k,
         xn.stride(0), w_ab.stride(0), dy.stride(0), ws.stride(0), ws.stride(1), h.stride(0), dab.stride(0),
         saved_a.stride(0),
-        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, SAVED=saved, NUM_SMS=sms, PREC=dot_precision(dy.dtype),
+        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, SAVED=saved, HALF=half, NUM_SMS=sms, PREC=dot_precision(dy.dtype),
     )
     return h, dab
 
@@ -161,24 +171,25 @@ def squeeze_swiglu_bwd(xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, w
     return _launch_bwd(xn, w_ab, dy, ws, shape_key, None, None)
 
 
-def _squeeze_swiglu_bwd_saved_fake(dy, ws, a, b, shape_key):
+def _squeeze_swiglu_bwd_saved_fake(dy, ws, a, b, shape_key, scale=None):
     """``dAB`` ``(M, 2*ND)`` in the activation dtype."""
     return dy.new_empty((dy.shape[0], 2 * ws.shape[1]))
 
 
 @opaque(fake=_squeeze_swiglu_bwd_saved_fake, name="transition_bwd_squeeze_swiglu_saved")
-def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor,
-                             shape_key: int) -> torch.Tensor:
-    """``dAB = [dA | dB]`` from ``dy (M, K)``, ``ws (K, ND)`` and the expand halves ``a``, ``b`` ``(M, ND)`` the forward saved
-    (the activation dtype, rounded like the PyTorch statements hold them)."""
-    return _launch_bwd(dy, dy, dy, ws, shape_key, a, b)[1]
+def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor, shape_key: int,
+                             scale: torch.Tensor | None = None) -> torch.Tensor:
+    """``dAB = [dA | dB]`` from ``dy (M, K)``, ``ws (K, ND)`` and the expand halves ``a``, ``b`` ``(M, ND)`` the forward saved (the
+    activation dtype, rounded like the PyTorch statements hold them; under fp32 activations with a ``scale`` they are fp16, the
+    TF32 mantissa, stored divided by that fp32 device scalar)."""
+    return _launch_bwd(dy, dy, dy, ws, shape_key, a, b, scale)[1]
 
 
-def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None):
+def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None, half_scale=None):
     """``(dx, dWa, dWb, dWs)`` of ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``.
 
     ``xn (M, K)``, ``wa``/``wb`` ``(ND, K)``, ``ws (K, ND)``, ``dy (M, K)``; ``saved = (h, a, b)`` are the training forward's
-    ``h = SwiGLU(a, b)`` and halves (``main._expand_swiglu_saveact``) -- without them a, b are recomputed. One kernel makes
+    ``h = SwiGLU(a, b)`` and halves (``main._expand_swiglu_saveact``; ``half_scale``: they are fp16, divided by it) -- without them a, b are recomputed. One kernel makes
     ``dAB = [dA | dB]``; ``dx = dAB @ [Wa; Wb]`` and ``[dWa; dWb] = dAB^T @ xn`` are then one stacked GEMM each, ``dWs = dy^T @ h``.
     """
     nd = wa.shape[0]
@@ -187,7 +198,7 @@ def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None):
         h, dab = squeeze_swiglu_bwd(xn, w_ab, dy, ws, shape_key)
     else:
         h, a, b = saved
-        dab = squeeze_swiglu_bwd_saved(dy, ws, a, b, shape_key)
+        dab = squeeze_swiglu_bwd_saved(dy, ws, a, b, shape_key, half_scale)
     dws = torch.matmul(dy.T, h)                               # (K, ND)
     dwab = torch.matmul(dab.T, xn)                            # [dWa; dWb]  (2*ND, K)
     dx = torch.matmul(dab, torch.cat((wa, wb), dim=0))        # (M, K)

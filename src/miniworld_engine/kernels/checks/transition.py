@@ -111,9 +111,10 @@ def transition_expand_swiglu_triton():
     from miniworld_engine.kernels.drivers.transition import SHAPE_KEY
     from miniworld_engine.kernels.transition.triton.main import _expand_swiglu_saveact
 
-    h2, a2, b2 = _expand_swiglu_saveact(x.reshape(-1, x.shape[-1]).contiguous(), wa, wb, SHAPE_KEY)
+    h2, a2, b2 = _expand_swiglu_saveact(x.reshape(-1, x.shape[-1]).contiguous(), wa, wb, SHAPE_KEY,
+                                        torch.ones(1, device=x.device) if x.dtype == torch.float32 else None)
     af, bf = _proj(x.reshape(-1, x.shape[-1]), wa, wb)
-    return {"out": (y, h.float() @ ws.float().T), "h": (h2, af * torch.sigmoid(af) * bf), "a": (a2, af), "b": (b2, bf)}
+    return {"out": (y, h.float() @ ws.float().T), "h": (h2, af * torch.sigmoid(af) * bf), "a": (a2.float(), af), "b": (b2.float(), bf)}
 
 
 def transition_layernorm_expand_swiglu_triton():
@@ -345,8 +346,9 @@ def transition_bwd_squeeze_swiglu_triton():
     # the saved-halves backward: a, b as the forward stores them (activation dtype)
     from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
 
-    ab, bb = a.to(dy.dtype), b.to(dy.dtype)
-    dab2 = squeeze_swiglu_bwd_saved(dy, ws, ab, bb, SHAPE_KEY)
+    half = dy.dtype == torch.float32            # fp32 activations keep fp16 halves (and the overflow flag); the others the activation dtype
+    ab, bb = (a.half(), b.half()) if half else (a.to(dy.dtype), b.to(dy.dtype))
+    dab2 = squeeze_swiglu_bwd_saved(dy, ws, ab, bb, SHAPE_KEY, torch.ones(1, device=dy.device) if half else None)
     af, bf = ab.float(), bb.float()
     sig2 = torch.sigmoid(af)
     silu2 = af * sig2

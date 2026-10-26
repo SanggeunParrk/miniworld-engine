@@ -34,7 +34,7 @@ def get_seq_group(length) -> int:
 # since their best tiles differ. Miss/stale -> warn once + full grid.
 
 
-@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'STORE_AB', 'USE_TMA'])
+@triton.autotune(configs=configs_for("transition_expand_swiglu_triton"), key=['shape_key', 'STORE_AB', 'HALF', 'USE_TMA'])
 @triton.jit
 def transition_fwd_kernel(
     x_ptr,
@@ -42,6 +42,7 @@ def transition_fwd_kernel(
     out_ptr,
     a_ptr,
     b_ptr,
+    scale_ptr,
     M,
     K: tl.constexpr,
     ND: tl.constexpr,
@@ -52,6 +53,7 @@ def transition_fwd_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     STORE_AB: tl.constexpr = False,
+    HALF: tl.constexpr = False,
     USE_TMA: tl.constexpr = False,
     NUM_SMS: tl.constexpr = 1,
     PREC: tl.constexpr = "ieee",
@@ -87,6 +89,9 @@ def transition_fwd_kernel(
             swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
             out_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], swish_AB.to(out_ptr.dtype.element_ty))
             if STORE_AB:
+                if HALF:        # fp16 halves (fp32 activations): stored divided by the (device-side) scale that keeps them in range
+                    A_tile = A_tile * (1.0 / tl.load(scale_ptr))
+                    B_tile = B_tile * (1.0 / tl.load(scale_ptr))
                 a_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], A_tile.to(a_ptr.dtype.element_ty))
                 b_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], B_tile.to(b_ptr.dtype.element_ty))
     else:
@@ -118,6 +123,9 @@ def transition_fwd_kernel(
         store_mask = (offs_m[:, None] < M) & (offs_n[None, :] < ND)
         tl.store(out_ptr_, swish_AB.to(out_ptr.dtype.element_ty), mask=store_mask)
         if STORE_AB:
+            if HALF:
+                A_tile = A_tile * (1.0 / tl.load(scale_ptr))
+                B_tile = B_tile * (1.0 / tl.load(scale_ptr))
             tl.store(a_ptr + (offs_m[:, None] * ND + offs_n[None, :]), A_tile.to(a_ptr.dtype.element_ty), mask=store_mask)
             tl.store(b_ptr + (offs_m[:, None] * ND + offs_n[None, :]), B_tile.to(b_ptr.dtype.element_ty), mask=store_mask)
 
@@ -128,7 +136,11 @@ def _expand_swiglu_fake(x, expand_a_weight, expand_b_weight, shape_key):
     return x.new_empty((x.shape[0], expand_a_weight.shape[0]))
 
 
-def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab):
+#: A/B switch for the tests and records: True keeps the saved halves in fp32 under fp32 activations (the pre-fp16 behaviour).
+_SAVED_HALVES_FP32 = False
+
+
+def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, half_scale=None):
     M, N = x.shape
     # ND comes from the WEIGHT, not from an expansion ratio. The kernel only ever needed the
     # expanded width; taking it as ``n * N`` made a caller state twice something the weight
@@ -138,7 +150,13 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab):
     # `_expand_swiglu` already derives it this way.
     nd = expand_a_weight.shape[0]
     expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
-    a, b = (torch.empty_like(expand), torch.empty_like(expand)) if store_ab else (expand, expand)
+    # fp32 activations (TF32 tensor cores, a 10-bit mantissa): when the caller passes `half_scale` the saved halves are fp16 -- the same
+    # mantissa, half the bytes -- stored divided by that device scalar, which the caller derives from a bound on |a|, |b| (see
+    # residual.half_scale) so that nothing can overflow. No host sync, nothing data dependent to fall back on.
+    half = store_ab and x.dtype == torch.float32 and half_scale is not None and _SAVED_HALVES_FP32 is False
+    hd = torch.float16 if half else x.dtype
+    a, b = (torch.empty(M, nd, dtype=hd, device=x.device) for _ in range(2)) if store_ab else (expand, expand)
+    scale = half_scale if half else expand
     # both weights as one operand, row-interleaved (2*ND, K): ~10 MB at the widest, a few microseconds
     w_ab = torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)
     use_tma = tma_ok(x, w_ab, expand, a, b)
@@ -154,12 +172,14 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab):
         expand,
         a,
         b,
+        scale,
         M,
         N,          # K -- the input width
         nd,         # ND -- the expanded width
         w_ab.stride(0), w_ab.stride(1),
         shape_key=pack(shape_key, K=N, ND=nd),
         STORE_AB=store_ab,
+        HALF=half,
         USE_TMA=use_tma,
         NUM_SMS=sms,
         PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
@@ -184,10 +204,12 @@ def _expand_swiglu(
     return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, False)[0]
 
 
-def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key):
-    """``(h, a, b)``, each ``(M, ND)`` in ``x``'s dtype."""
+def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key, half_scale=None):
+    """``(h, a, b)``: each ``(M, ND)``, ``h`` in ``x``'s dtype, ``a`` / ``b`` fp16 when ``half_scale`` is given (fp32 ``x``)."""
     out = x.new_empty((x.shape[0], expand_a_weight.shape[0]))
-    return out, torch.empty_like(out), torch.empty_like(out)
+    half = x.dtype == torch.float32 and half_scale is not None and _SAVED_HALVES_FP32 is False
+    halves = torch.empty(out.shape, dtype=torch.float16 if half else out.dtype, device=out.device)
+    return out, halves, torch.empty_like(halves)
 
 
 @opaque(fake=_expand_swiglu_saveact_fake, name="transition_expand_swiglu_saveact")
@@ -196,10 +218,11 @@ def _expand_swiglu_saveact(
     expand_a_weight: torch.Tensor,
     expand_b_weight: torch.Tensor,
     shape_key: int,
+    half_scale: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """The training forward launch: ``(h, a, b)`` with ``h = SwiGLU(a, b)`` and ``a, b`` the two
-    expand halves, each ``(M, n*N)`` in ``x``'s dtype. The backward consumes ``a`` and ``b``."""
-    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True)
+    """The training forward launch: ``(h, a, b)`` with ``h = SwiGLU(a, b)`` and ``a, b`` the two expand halves, each ``(M, n*N)``
+    (``x``'s dtype; under fp32 ``x`` with a ``half_scale`` (one fp32 on the device): fp16, stored divided by it). The backward consumes them."""
+    return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True, half_scale)
 
 
 def swiglu_squeeze_backward(
