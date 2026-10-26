@@ -134,11 +134,15 @@ class AugmentedAttentionPairBias(nn.Module):
         m1 = None if mask is None else mask[0]
         dt = compute_dtype or query.dtype
         if dt is torch.bfloat16:
-            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair as mod
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                fused_pair as mod,
+            )
 
             fn = mod.attention_pair_fused
         elif dt is torch.float32 and compute_dtype is None and not torch.is_autocast_enabled("cuda"):
-            from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                fused_pair_tf32 as mod,
+            )
 
             fn = mod.attention_pair_tf32
         else:

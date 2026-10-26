@@ -154,7 +154,9 @@ class AttentionPairBias(nn.Module):
             # H100: the pair LayerNorm + head projection + attention as hand-written CUDA (kernels/augmented_attention/cuda/fused_pair);
             # d_pair 128 is served by the native APB path above, other widths (256) land here
             from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
-            from miniworld_engine.modules.augmented_attention.module import _bf16_sm90_enabled
+            from miniworld_engine.modules.augmented_attention.module import (
+                _bf16_sm90_enabled,
+            )
 
             L_ = query.shape[1]
             q5, k5, v5 = (t.reshape(1, 1, L_, self.n_head, -1) for t in (query, key, value))

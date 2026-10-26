@@ -73,7 +73,7 @@ def _case(kind, L, A, fp32=False):
 
 
 @needs_hopper
-@pytest.mark.parametrize("kind,L,A", [("token", 384, 3), ("token", 384, 5), ("atom", 128, 3), ("apb", 384, 1)])
+@pytest.mark.parametrize(("kind", "L", "A"), [("token", 384, 3), ("token", 384, 5), ("atom", 128, 3), ("apb", 384, 1)])
 def test_bf16_routes_are_taken_and_hold_the_yardstick(kind, L, A):
     from miniworld_engine.kernels.augmented_attention.cuda import fused_pair
 
@@ -157,5 +157,5 @@ def test_adaln_rows_match_the_pytorch_leg(fp32):
 
     r, e = run(ref, torch.float64), run(m, dt)
     bar = 3e-3 if fp32 else 2e-2
-    for name, a, b in zip(("out", "dx", "dcond", "dWs", "dwc"), e, r):
+    for name, a, b in zip(("out", "dx", "dcond", "dWs", "dwc"), e, r, strict=True):
         assert _rel(a, b) < bar, (name, _rel(a, b))
