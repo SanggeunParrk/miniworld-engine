@@ -115,3 +115,76 @@ def test_captured_in_a_cuda_graph(real):
         graph.replay()
         eager = blk(s2, c2, z2, m2, rope=rope2)
     torch.testing.assert_close(out[:, :, :real], eager[:, :, :real], rtol=0, atol=0)
+
+
+# ----------------------------------------------------------------------------------------------------------------- training (bf16)
+TRAIN_CASES = [(5, 512, 512), (3, 1024, 1000), (2, 640, 193), (1, 300, 300)]
+
+
+def _train_run(blk, a, n, real, dtype, autocast, seed=1):
+    """Output and every gradient (single, the shared conditioning, the pair, every parameter) of one forward + backward, in fp64."""
+    s, c, z, mask, rope = _inputs(a, n, real, seed)
+    g = torch.Generator(device="cuda").manual_seed(seed + 100)
+    dy = torch.randn(a, 1, n, 128, device="cuda", generator=g).to(dtype)
+    s = s.to(dtype).detach().requires_grad_()
+    cb = c[:1].to(dtype).detach().requires_grad_()
+    z = z.to(dtype).detach().requires_grad_()
+    blk.zero_grad(set_to_none=True)
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+        y = blk(s, cb.expand(a, 1, n, 128), z, mask, rope=rope)
+    (y * dy).sum().backward()
+    out = {"out": y.detach()[:, :, :real].double(), "dsingle": s.grad[:, :, :real].double(), "dcond": cb.grad[:, :, :real].double(),
+           "dpair": z.grad.double()}
+    for name, p in blk.named_parameters():
+        out["d." + name] = p.grad.double()
+    return out, (s, cb, z, mask, rope)
+
+
+@pytest.mark.parametrize(("a", "n", "real"), TRAIN_CASES)
+def test_training_matches_fp64_as_well_as_the_module(a, n, real):
+    """The hand-CUDA training step: output and every gradient within 1.5x of the module's own bf16-autocast error against the fp64 module."""
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    own = _block(ImplementationType.PYTORCH).cuda()
+    ref = _block(ImplementationType.PYTORCH).cuda().double()
+    own.load_state_dict(blk.state_dict())
+    ref.load_state_dict(blk.state_dict())
+    expected, _ = _train_run(ref, a, n, real, torch.float64, False)
+    actual, ins = _train_run(blk, a, n, real, torch.bfloat16, True)
+    base, _ = _train_run(own, a, n, real, torch.bfloat16, True)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        assert h100.matches(blk, ins[0], ins[1].expand(a, 1, n, 128), ins[2], ins[3], ins[4])
+    for name, want in expected.items():
+        e, b = _rel(actual[name], want), _rel(base[name], want)
+        assert e <= 1.5 * b + 1e-6, f"{name}: engine {e:.3e} vs module {b:.3e}"
+    assert all(torch.isfinite(v).all() for v in actual.values())
+
+
+def test_training_is_bitwise_repeatable():
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    first, _ = _train_run(blk, 5, 512, 500, torch.bfloat16, True)
+    again, _ = _train_run(blk, 5, 512, 500, torch.bfloat16, True)
+    for name, v in first.items():
+        assert torch.equal(v, again[name]), name
+
+
+def test_training_routing():
+    from miniworld_engine import settings
+
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    s, c, z, mask, rope = _inputs(4, 256, 256)
+    bf = lambda t: t.to(torch.bfloat16).detach().requires_grad_()  # noqa: E731
+    sb, cb, zb = bf(s), bf(c[:1]), bf(z)
+    shared = cb.expand(4, 1, 256, 128)
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        assert h100.matches(blk, sb, shared, zb, mask, rope)
+        # a conditioning of its own per sample, and fp32 activations, keep the composed path under a gradient
+        assert not h100.matches(blk, sb, shared.contiguous(), zb, mask, rope)
+    assert not h100.matches(blk.float(), s.requires_grad_(), c, z, mask, rope)
+    blk = blk.cuda()
+    previous = settings.current().local_dit_esm_train_cuda
+    try:
+        settings.configure(local_dit_esm_train_cuda=False)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert not h100.matches(blk, sb, shared, zb, mask, rope)
+    finally:
+        settings.configure(local_dit_esm_train_cuda=previous)

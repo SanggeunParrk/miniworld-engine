@@ -68,11 +68,18 @@ __device__ __forceinline__ float row_sum(float v, float* red) {
   if constexpr (NT == 32) return warp_sum(v); else return block_sum<NT>(v, red);
 }
 
-// LayerNorm (no affine) of a row: x -> xhat, with mean and rstd
+// ESMFold2 (``rms``): every AdaLN is an affine-free RMSNorm (statistics mean 0, so xhat = x rstd) and the output gates are raw logits
+// (no sigmoid): the same kernels, with these two switches. ``mode`` bit 0: sigmoid scale (Boltz-2 / RF3), bit 1: ESMFold2.
+__device__ __forceinline__ float4 gate_f(float4 v, bool raw) { return raw ? v : sig4(v); }
+__device__ __forceinline__ float4 gate_df(float4 g, bool raw) {
+  return raw ? make_float4(1.f, 1.f, 1.f, 1.f) : mul4(g, sub4(make_float4(1.f, 1.f, 1.f, 1.f), g));
+}
+
+// LayerNorm (no affine) of a row: x -> xhat, with mean and rstd (rms: RMSNorm, mean 0)
 template <int NT>
-__device__ __forceinline__ float4 ln_row(float4 x, float eps, float* red, float& mean, float& rstd) {
+__device__ __forceinline__ float4 ln_row(float4 x, float eps, float* red, float& mean, float& rstd, bool rms = false) {
   constexpr int D = NT * 4;
-  mean = row_sum<NT>(sum4(x), red) / D;
+  mean = rms ? 0.f : row_sum<NT>(sum4(x), red) / D;
   const float4 d = make_float4(x.x - mean, x.y - mean, x.z - mean, x.w - mean);
   rstd = rsqrtf(row_sum<NT>(sum4(mul4(d, d)), red) / D + eps);
   return mul4(d, rstd);
@@ -88,14 +95,15 @@ struct ModP {
 
 template <int NT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) ln_mod_fwd_k(const XT* __restrict__ X, float2* __restrict__ ST, ModP m, int L,
-                                                                  long sTab, float eps, long M, bool sig) {
+                                                                  long sTab, float eps, long M, int mode) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
   if (row >= M) return;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = row % L, col = Geo<NT>::col();
   float mean, rstd;
-  const float4 xh = ln_row<NT>(V4<XT>::load(X + row * D + col), eps, red, mean, rstd);
+  const float4 xh = ln_row<NT>(V4<XT>::load(X + row * D + col), eps, red, mean, rstd, rms);
   if (Geo<NT>::lead()) ST[row] = make_float2(mean, rstd);
 #pragma unroll
   for (int i = 0; i < 3; ++i) {
@@ -139,17 +147,18 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) qkv_prep_k(const AT* __restr
 template <int NT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) res_ln_fwd_k(const XT* __restrict__ X, const AT* __restrict__ YA, const AT* __restrict__ GA,
     const AT* __restrict__ SC, const AT* __restrict__ SH, long sTab, float* __restrict__ XP, AT* __restrict__ XT_, float2* __restrict__ ST,
-    int L, float eps, long M, bool sig) {
+    int L, float eps, long M, int mode) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
   if (row >= M) return;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = row % L, col = Geo<NT>::col();
   float4 x = V4<XT>::load(X + row * D + col);
-  x = fma4(sig4(V4<AT>::load(GA + tok * sTab + col)), V4<AT>::load(YA + row * D + col), x);
+  x = fma4(gate_f(V4<AT>::load(GA + tok * sTab + col), rms), V4<AT>::load(YA + row * D + col), x);
   V4<float>::store(XP + row * D + col, x);
   float mean, rstd;
-  const float4 xh = ln_row<NT>(x, eps, red, mean, rstd);
+  const float4 xh = ln_row<NT>(x, eps, red, mean, rstd, rms);
   if (Geo<NT>::lead()) ST[row] = make_float2(mean, rstd);
   const float4 s = V4<AT>::load(SC + tok * sTab + col), h = V4<AT>::load(SH + tok * sTab + col);
   V4<AT>::store(XT_ + row * D + col, fma4(xh, sig ? sig4(s) : s, h));
@@ -158,14 +167,14 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_ln_fwd_k(const XT* __res
 // out = base + sigmoid(g1) y1 [+ sigmoid(g2) y2]
 template <int NT, typename BT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) res_out_fwd_k(const BT* __restrict__ BASE, const AT* __restrict__ Y1, const AT* __restrict__ G1,
-    const AT* __restrict__ Y2, const AT* __restrict__ G2, long sTab, XT* __restrict__ OUT, int L, long M) {
+    const AT* __restrict__ Y2, const AT* __restrict__ G2, long sTab, XT* __restrict__ OUT, int L, long M, bool raw) {
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
   if (row >= M) return;
   const int tok = row % L, col = Geo<NT>::col();
   float4 x = V4<BT>::load(BASE + row * D + col);
-  x = fma4(sig4(V4<AT>::load(G1 + tok * sTab + col)), V4<AT>::load(Y1 + row * D + col), x);
-  if (Y2) x = fma4(sig4(V4<AT>::load(G2 + tok * sTab + col)), V4<AT>::load(Y2 + row * D + col), x);
+  x = fma4(gate_f(V4<AT>::load(G1 + tok * sTab + col), raw), V4<AT>::load(Y1 + row * D + col), x);
+  if (Y2) x = fma4(gate_f(V4<AT>::load(G2 + tok * sTab + col), raw), V4<AT>::load(Y2 + row * D + col), x);
   V4<XT>::store(OUT + row * D + col, x);
 }
 
@@ -208,24 +217,24 @@ __device__ __forceinline__ void part_put(float* part, long unit, long sPart, int
 template <int NT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) res_bwd_k(const XT* __restrict__ DOUT, const AT* __restrict__ Y1, const AT* __restrict__ G1,
     const AT* __restrict__ Y2, const AT* __restrict__ G2, long sTab, AT* __restrict__ DY1, AT* __restrict__ DY2, float* __restrict__ part,
-    long sPart, int off1, int off2, int L, int S, int A) {
+    long sPart, int off1, int off2, int L, int S, int A, bool raw) {
   constexpr int D = NT * 4;
   const long u = TGeo<NT>::unit();
   if (u >= (long)L * S) return;
   const int tok = u % L, s = u / L, col = Geo<NT>::col();
-  const float4 g1 = sig4(V4<AT>::load(G1 + tok * sTab + col));
-  const float4 g2 = Y2 ? sig4(V4<AT>::load(G2 + tok * sTab + col)) : zero4();
+  const float4 g1 = gate_f(V4<AT>::load(G1 + tok * sTab + col), raw);
+  const float4 g2 = Y2 ? gate_f(V4<AT>::load(G2 + tok * sTab + col), raw) : zero4();
   float4 a1 = zero4(), a2 = zero4();
   for (int a = s; a < A; a += S) {
     const long row = (long)a * L + tok;
     const float4 d = V4<XT>::load(DOUT + row * D + col);
     const float4 y1 = V4<AT>::load(Y1 + row * D + col);
     V4<AT>::store(DY1 + row * D + col, mul4(d, g1));
-    a1 = fma4(mul4(d, y1), mul4(g1, sub4(make_float4(1.f, 1.f, 1.f, 1.f), g1)), a1);
+    a1 = fma4(mul4(d, y1), gate_df(g1, raw), a1);
     if (Y2) {
       const float4 y2 = V4<AT>::load(Y2 + row * D + col);
       V4<AT>::store(DY2 + row * D + col, mul4(d, g2));
-      a2 = fma4(mul4(d, y2), mul4(g2, sub4(make_float4(1.f, 1.f, 1.f, 1.f), g2)), a2);
+      a2 = fma4(mul4(d, y2), gate_df(g2, raw), a2);
     }
   }
   part_put(part, u, sPart, off1, col, a1);
@@ -263,16 +272,18 @@ __global__ void __launch_bounds__(256) glu_bwd_k(const AT* __restrict__ AB, cons
 template <int NT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) res_adaln_bwd_k(const XT* __restrict__ DOUT, const AT* __restrict__ DT, const float* __restrict__ XP,
     const float2* __restrict__ ST, const AT* __restrict__ SC, const AT* __restrict__ GA, long sTab, const AT* __restrict__ YA, float* __restrict__ DXP,
-    AT* __restrict__ DYA, float* __restrict__ part, long sPart, int offSc, int offSh, int offG, int L, int S, int A, bool sig) {
+    AT* __restrict__ DYA, float* __restrict__ part, long sPart, int offSc, int offSh, int offG, int L, int S, int A, int mode) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
   const long u = TGeo<NT>::unit();
   if (u >= (long)L * S) return;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = u % L, s = u / L, col = Geo<NT>::col();
   const float4 sc = V4<AT>::load(SC + tok * sTab + col);
   const float4 f = sig ? sig4(sc) : sc, df = sig ? make_float4(f.x * (1.f - f.x), f.y * (1.f - f.y), f.z * (1.f - f.z), f.w * (1.f - f.w))
                                                  : make_float4(1.f, 1.f, 1.f, 1.f);
-  const float4 ga = sig4(V4<AT>::load(GA + tok * sTab + col));
+  const float4 ga = gate_f(V4<AT>::load(GA + tok * sTab + col), rms);
+  const float4 dga = gate_df(ga, rms);
   float4 asc = zero4(), ash = zero4(), ag = zero4();
   for (int a = s; a < A; a += S) {
     const long row = (long)a * L + tok;
@@ -283,12 +294,12 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_adaln_bwd_k(const XT* __
     const float4 dxh = mul4(dt, f);
     asc = fma4(mul4(dt, xh), df, asc);
     ash = add4(ash, dt);
-    const float m1 = row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
+    const float m1 = rms ? 0.f : row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
     const float4 dln = mul4(sub4(sub4(dxh, make_float4(m1, m1, m1, m1)), mul4(xh, m2)), st.y);
     const float4 dxp = add4(V4<XT>::load(DOUT + row * D + col), dln);
     V4<float>::store(DXP + row * D + col, dxp);
     V4<AT>::store(DYA + row * D + col, mul4(dxp, ga));
-    ag = fma4(mul4(dxp, V4<AT>::load(YA + row * D + col)), mul4(ga, sub4(make_float4(1.f, 1.f, 1.f, 1.f), ga)), ag);
+    ag = fma4(mul4(dxp, V4<AT>::load(YA + row * D + col)), dga, ag);
   }
   part_put(part, u, sPart, offSc, col, asc);
   part_put(part, u, sPart, offSh, col, ash);
@@ -390,11 +401,12 @@ struct AdP {
 
 template <int NT, typename BT, typename XT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __restrict__ X, const float2* __restrict__ ST, const BT* __restrict__ PASS, AdP p,
-    long sTab, XT* __restrict__ DX, float* __restrict__ part, long sPart, int L, int S, int A, bool sig) {
+    long sTab, XT* __restrict__ DX, float* __restrict__ part, long sPart, int L, int S, int A, int mode) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
   const long u = TGeo<NT>::unit();
   if (u >= (long)L * S) return;
+  const bool sig = mode & 1, rms = mode & 2;
   const int tok = u % L, s = u / L, col = Geo<NT>::col();
   float4 f[3], df[3], asc[3], ash[3];
 #pragma unroll
@@ -422,7 +434,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __rest
         ash[i] = add4(ash[i], da);
       }
     }
-    const float m1 = row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
+    const float m1 = rms ? 0.f : row_sum<NT>(sum4(dxh), red) / D, m2 = row_sum<NT>(sum4(mul4(dxh, xh)), red) / D;
     const float4 dln = mul4(sub4(sub4(dxh, make_float4(m1, m1, m1, m1)), mul4(xh, m2)), st.y);
     V4<XT>::store(DX + row * D + col, add4(V4<BT>::load(PASS + row * D + col), dln));
   }
@@ -513,7 +525,7 @@ long flat_grid(long n4) { return std::min<long>((n4 + 255) / 256, 132L * 16); }
 
 // out_i = LN(x) f(sc_i) + sh_i; tab [L, K D]; sc_cols / sh_cols: the column blocks (multiples of D) of each output; st [M, 2] fp32
 void ln_mod_fwd(at::Tensor x, at::Tensor tab, std::vector<int64_t> sc_cols, std::vector<int64_t> sh_cols, std::vector<at::Tensor> outs,
-                at::Tensor st, int64_t L, double eps, bool sig) {
+                at::Tensor st, int64_t L, double eps, int64_t sig) {
   const c10::cuda::CUDAGuard guard(x.device());
   const int D = x.size(1);
   const long M = x.size(0), sTab = tab.size(1);
@@ -527,7 +539,7 @@ void ln_mod_fwd(at::Tensor x, at::Tensor tab, std::vector<int64_t> sc_cols, std:
     m.out[i] = outs[i].data_ptr();
   }
   DISPATCH_D(D, DISPATCH_X(x, DISPATCH_A(tab,
-    ln_mod_fwd_k<NT, XT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<XT>(x), P<float2>(st), m, (int)L, sTab, (float)eps, M, sig);
+    ln_mod_fwd_k<NT, XT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<XT>(x), P<float2>(st), m, (int)L, sTab, (float)eps, M, (int)sig);
   )))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -547,7 +559,7 @@ void qkv_prep(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor qo, at::Tenso
 }
 
 void res_ln_fwd(at::Tensor x, at::Tensor ya, at::Tensor tab, int64_t g_col, int64_t sc_col, int64_t sh_col, at::Tensor xp, at::Tensor xt, at::Tensor st,
-                int64_t L, double eps, bool sig) {
+                int64_t L, double eps, int64_t sig) {
   const c10::cuda::CUDAGuard guard(x.device());
   const int D = x.size(1);
   const long M = x.size(0), sTab = tab.size(1);
@@ -556,13 +568,13 @@ void res_ln_fwd(at::Tensor x, at::Tensor ya, at::Tensor tab, int64_t g_col, int6
   DISPATCH_D(D, DISPATCH_X(x, DISPATCH_A(tab,
     res_ln_fwd_k<NT, XT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<XT>(x), CP<AT>(ya), reinterpret_cast<const AT*>(tb(g_col)),
         reinterpret_cast<const AT*>(tb(sc_col)), reinterpret_cast<const AT*>(tb(sh_col)), sTab, P<float>(xp), P<AT>(xt), P<float2>(st), (int)L,
-        (float)eps, M, sig);
+        (float)eps, M, (int)sig);
   )))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 // base: fp32 (the sequential block's x') or the block input's dtype
-void res_out_fwd(at::Tensor base, at::Tensor y1, at::Tensor tab, int64_t g1_col, c10::optional<at::Tensor> y2, int64_t g2_col, at::Tensor out, int64_t L) {
+void res_out_fwd(at::Tensor base, at::Tensor y1, at::Tensor tab, int64_t g1_col, c10::optional<at::Tensor> y2, int64_t g2_col, at::Tensor out, int64_t L, bool raw) {
   const c10::cuda::CUDAGuard guard(base.device());
   const int D = base.size(1);
   const long M = base.size(0), sTab = tab.size(1);
@@ -572,10 +584,10 @@ void res_out_fwd(at::Tensor base, at::Tensor y1, at::Tensor tab, int64_t g1_col,
   DISPATCH_D(D, DISPATCH_X(out, DISPATCH_A(tab, {
     if (base32)
       res_out_fwd_k<NT, float, XT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<float>(base), CP<AT>(y1), reinterpret_cast<const AT*>(tb(g1_col)),
-          CPo<AT>(y2), reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<XT>(out), (int)L, M);
+          CPo<AT>(y2), reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<XT>(out), (int)L, M, raw);
     else
       res_out_fwd_k<NT, XT, XT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<XT>(base), CP<AT>(y1), reinterpret_cast<const AT*>(tb(g1_col)),
-          CPo<AT>(y2), reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<XT>(out), (int)L, M);
+          CPo<AT>(y2), reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<XT>(out), (int)L, M, raw);
   })))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -614,7 +626,7 @@ void glu_bwd(at::Tensor ab, at::Tensor dh, at::Tensor dab, bool up) {
 }
 
 void res_bwd(at::Tensor dout, at::Tensor y1, at::Tensor tab, int64_t g1_col, at::Tensor dy1, c10::optional<at::Tensor> y2, int64_t g2_col,
-             c10::optional<at::Tensor> dy2, at::Tensor part, int64_t off1, int64_t off2, int64_t L, int64_t S) {
+             c10::optional<at::Tensor> dy2, at::Tensor part, int64_t off1, int64_t off2, int64_t L, int64_t S, bool raw) {
   const c10::cuda::CUDAGuard guard(dout.device());
   const int D = dout.size(1);
   const long M = dout.size(0), sTab = tab.size(1), sPart = part.size(2);
@@ -623,13 +635,13 @@ void res_bwd(at::Tensor dout, at::Tensor y1, at::Tensor tab, int64_t g1_col, at:
   auto tb = [&](int64_t c) { return reinterpret_cast<const char*>(tab.data_ptr()) + c * es; };
   DISPATCH_D(D, DISPATCH_X(dout, DISPATCH_A(tab,
     res_bwd_k<NT, XT, AT><<<rgrid<NT>(L * S), rblock<NT>(), 0, S_()>>>(CP<XT>(dout), CP<AT>(y1), reinterpret_cast<const AT*>(tb(g1_col)), CPo<AT>(y2),
-        reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<AT>(dy1), Po<AT>(dy2), P<float>(part), sPart, (int)off1, (int)off2, (int)L, (int)S, A);
+        reinterpret_cast<const AT*>(tb(g2_col)), sTab, P<AT>(dy1), Po<AT>(dy2), P<float>(part), sPart, (int)off1, (int)off2, (int)L, (int)S, A, raw);
   )))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
 void res_adaln_bwd(at::Tensor dout, at::Tensor dt, at::Tensor xp, at::Tensor st, at::Tensor tab, int64_t sc_col, int64_t g_col, at::Tensor ya,
-                   at::Tensor dxp, at::Tensor dya, at::Tensor part, int64_t off_sc, int64_t off_sh, int64_t off_g, int64_t L, int64_t S, bool sig) {
+                   at::Tensor dxp, at::Tensor dya, at::Tensor part, int64_t off_sc, int64_t off_sh, int64_t off_g, int64_t L, int64_t S, int64_t sig) {
   const c10::cuda::CUDAGuard guard(dout.device());
   const int D = dout.size(1);
   const long M = dout.size(0), sTab = tab.size(1), sPart = part.size(2);
@@ -639,7 +651,7 @@ void res_adaln_bwd(at::Tensor dout, at::Tensor dt, at::Tensor xp, at::Tensor st,
   DISPATCH_D(D, DISPATCH_X(dout, DISPATCH_A(tab,
     res_adaln_bwd_k<NT, XT, AT><<<rgrid<NT>(L * S), rblock<NT>(), 0, S_()>>>(CP<XT>(dout), CP<AT>(dt), CP<float>(xp), CP<float2>(st),
         reinterpret_cast<const AT*>(tb(sc_col)), reinterpret_cast<const AT*>(tb(g_col)), sTab, CP<AT>(ya), P<float>(dxp), P<AT>(dya), P<float>(part), sPart,
-        (int)off_sc, (int)off_sh, (int)off_g, (int)L, (int)S, A, sig);
+        (int)off_sc, (int)off_sh, (int)off_g, (int)L, (int)S, A, (int)sig);
   )))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -689,7 +701,7 @@ void qkv_bwd(at::Tensor dq, c10::optional<at::Tensor> dk, c10::optional<at::Tens
 
 // das: the GEMM results da_i [M, D] (row strides), sc_cols / off_sc / off_sh per input; pass: fp32 or XT [M, D]
 void adaln_bwd(at::Tensor x, at::Tensor st, at::Tensor pass, std::vector<at::Tensor> das, at::Tensor tab, std::vector<int64_t> sc_cols,
-               std::vector<int64_t> off_sc, std::vector<int64_t> off_sh, at::Tensor dx, at::Tensor part, int64_t L, int64_t S, bool sig) {
+               std::vector<int64_t> off_sc, std::vector<int64_t> off_sh, at::Tensor dx, at::Tensor part, int64_t L, int64_t S, int64_t sig) {
   const c10::cuda::CUDAGuard guard(x.device());
   const int D = x.size(1);
   const long M = x.size(0), sTab = tab.size(1), sPart = part.size(2);
@@ -710,10 +722,10 @@ void adaln_bwd(at::Tensor x, at::Tensor st, at::Tensor pass, std::vector<at::Ten
   DISPATCH_D(D, DISPATCH_X(x, DISPATCH_A(tab, {
     if (pass32)
       adaln_bwd_k<NT, float, XT, AT><<<rgrid<NT>(L * S), rblock<NT>(), 0, S_()>>>(CP<XT>(x), CP<float2>(st), CP<float>(pass), p, sTab, P<XT>(dx),
-          P<float>(part), sPart, (int)L, (int)S, A, sig);
+          P<float>(part), sPart, (int)L, (int)S, A, (int)sig);
     else
       adaln_bwd_k<NT, XT, XT, AT><<<rgrid<NT>(L * S), rblock<NT>(), 0, S_()>>>(CP<XT>(x), CP<float2>(st), CP<XT>(pass), p, sTab, P<XT>(dx),
-          P<float>(part), sPart, (int)L, (int)S, A, sig);
+          P<float>(part), sPart, (int)L, (int)S, A, (int)sig);
   })))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

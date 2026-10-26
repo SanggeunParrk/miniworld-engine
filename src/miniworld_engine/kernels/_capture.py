@@ -28,6 +28,7 @@ from __future__ import annotations
 import contextlib
 import ctypes
 import functools
+import weakref
 
 import torch
 
@@ -212,3 +213,25 @@ def param_forms(tag: str, params, build):
     except RuntimeError:
         return build()
     return lookup(_FORMS, key, lambda: (build(), tuple(params)), limit=64)[0]
+
+
+def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64):
+    """The table ``build()`` makes from the per-item input ``tensor``, once per (tensor, version, ``key``) (``lookup_inputs``): the entry keeps a weak
+    reference to the tensor, so a new tensor that reuses a freed address is not served the old one's table, and entries of freed tensors are dropped.
+
+    A sample-expanded conditioning (stride 0 over the samples: a sampler step's view of the fold's one conditioning) is a NEW tensor object at
+    every call over the same small storage, so no weak reference to it outlives the call and the table would be remade at every call -- in a
+    captured step in every replay, for the whole life of the sampler. Such an entry holds the tensor itself (its storage is the fold's one
+    conditioning, which keeps its address from being reused while the entry stands); a view is otherwise named by the tensor it views."""
+    held = any(st == 0 and n > 1 for st, n in zip(tensor.stride(), tensor.shape, strict=True))
+    root = tensor._base if tensor._base is not None else tensor
+    tkey = (tensor.data_ptr(), tensor._version, tuple(tensor.shape), tensor.dtype, tensor.device)
+    entry = lookup_inputs(
+        store,
+        (tkey, key),
+        lambda: (tensor if held else weakref.ref(root), held, build()),
+        limit=limit,
+        valid=lambda e: e[1] or e[0]() is root,
+        alive=lambda e: e[1] or e[0]() is not None,
+    )
+    return entry[2]

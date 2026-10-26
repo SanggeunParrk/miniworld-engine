@@ -184,13 +184,13 @@ def inference(stack, single, cond, pair, mask):
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(x, ya, tab, cols(T_G_A), y2, cols(T_G_T), out, length)
+            ext.res_out_fwd(x, ya, tab, cols(T_G_A), y2, cols(T_G_T), out, length, False)
         else:
             ext.res_ln_fwd(x, ya, tab, cols(T_G_A), cols(T_SC_T), cols(T_SH_T), xp, xt, st, length, b0.adaln_eps, sig)
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(xp, y2, tab, cols(T_G_T), None, 0, out, length)
+            ext.res_out_fwd(xp, y2, tab, cols(T_G_T), None, 0, out, length, False)
         x = out
     return x.view(a, length, d)
 
@@ -301,13 +301,13 @@ def atom_inference(stack, single, cond, pair, mask, uid):
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, n)
+            ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, n, False)
         else:
             ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), xp, xt, st, n, b0.adaln_eps, sig)
             torch.mm(xt, w["wexp"].t(), out=ab)
             ext.glu_fwd(ab, h, blk.up_gate)
             torch.mm(h, w["wsq"].t(), out=y2)
-            ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, n)
+            ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, n, False)
         x = out
     return x.view(a, n, d)
 

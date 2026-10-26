@@ -260,6 +260,9 @@ def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     return _tf32_ready(c_base.device, grad)
 
 
+_MOD_HOIST: dict = {}  # (conditioning tensor, adaLN weight) -> the H100 hoisted modulation of an inference call
+
+
 def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.Tensor:
     """The block's adaLN modulation, once per (batch element, atom): ``[B*S, 6C]`` fp32 = silu(c) @ Wmod^T.
 
@@ -287,7 +290,17 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
             )
             out = SWADiTModulationH100.apply(c, wmod)
             return _native_caller_output(out, c_base, wmod, force=True)
-        return native_h100_mod_fwd(c, wmod)[0]
+        # No gradient: the table is a function of the conditioning and the adaLN weight only, so a sampler's steps (eager) and a captured step
+        # under ``_capture.static_inputs()`` (a replay) read it from the hoist instead of making it again (silu + casts + GEMM, 16-22 us).
+        from miniworld_engine.kernels import _capture
+
+        if torch.compiler.is_compiling():         # the hoist reads storage addresses: a traced graph keeps the opaque op
+            return native_h100_mod_fwd(c, wmod)[0]
+        try:
+            key = ("swa_mod_h100", wmod.data_ptr(), wmod._version, wmod.dtype, tuple(wmod.shape))
+        except RuntimeError:                      # inference tensors carry no version counter: not cached
+            return native_h100_mod_fwd(c, wmod)[0]
+        return _capture.hoisted_table(_MOD_HOIST, c_base, key, lambda: native_h100_mod_fwd(c, wmod)[0])
     if _mod_sm100(
         c_base, wmod
     ):  # B200, bf16, d_cond 128: the sm_100a mod_fwd / mod_bwd kernels

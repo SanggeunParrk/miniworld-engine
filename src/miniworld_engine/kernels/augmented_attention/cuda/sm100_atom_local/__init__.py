@@ -110,6 +110,9 @@ _ESM_KERNELS = {
     "h_pb_esm": ("h_pair_bias_esm", 0),
     "h_esm": ("h_attn_esm", 64 * 168 * 4 + 2 * (64 + 192 + 192) * 40 * 2),
     "h_esm32": ("h_attn_esm_tf32", 64 * 168 * 4 + (64 + 192 + 192) * 36 * 4),
+    "h_esm_dq": ("h_attn_esm_dq", 64 * 168 * 4 + (64 * 2 + 192 * 2) * 40 * 2 + 2 * 64 * 4),
+    "h_esm_dkv": ("h_attn_esm_dkv", 4 * 16 * 164 * 4 + (192 * 2 + 64 * 2) * 40 * 2 + 2 * 192 * 4),
+    "h_pbb_esm": ("h_pair_bias_esm_bwd", 0),
 }
 #: Hopper attention through the mma.sync kernels (False: the wgmma ``*_sm90`` kernels of lattn_{fwd,dq,dkv}.cu).
 HOPPER_MMA_ATTN = True
@@ -1097,7 +1100,56 @@ def attn_esm(q, k, v, bias2, tf32: bool):
     d = _dev(q)
     o = torch.empty_like(q)
     spc = _chunk(A, (N // 64) * NH)
-    _load("h_esm32" if tf32 else "h_esm", d)(
-        (N // 64, NH, (A + spc - 1) // spc), (128, 1, 1), q, k, v, bias2, o, int(N), int(A), int(spc)
-    )
+    grid = (N // 64, NH, (A + spc - 1) // spc)
+    if tf32:
+        _load("h_esm32", d)(grid, (128, 1, 1), q, k, v, bias2, o, int(N), int(A), int(spc))
+    else:
+        _load("h_esm", d)(grid, (128, 1, 1), q, k, v, bias2, o, None, int(N), int(A), int(spc))
     return o
+
+
+def attn_esm_fwd_lse(q, k, v, bias2):
+    """The bf16 forward of :func:`attn_esm` for training: O [A, N, 128] and the row LSE [A, 4, N] fp32 (log2 units; 1e30 for a row with no key)."""
+    A, N, _ = q.shape
+    d = _dev(q)
+    o = torch.empty_like(q)
+    lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
+    spc = _chunk(A, (N // 64) * NH)
+    _load("h_esm", d)((N // 64, NH, (A + spc - 1) // spc), (128, 1, 1), q, k, v, bias2, o, lse, int(N), int(A), int(spc))
+    return o, lse
+
+
+def attn_esm_bwd(q, k, v, do, bias2, lse, dd, dkv):
+    """bf16 backward of the ESMFold2 window attention: dQ, dK, dV into ``dkv`` [A N, >= 384] (row stride ``dkv.stride(0)``, columns 0 / 128 / 256
+    relative to its base) and the bias gradient [4, nwin, 32, 160] fp32 (natural units, by position, summed over the samples). ``lse`` from
+    :func:`attn_esm_fwd_lse`, ``dd`` [A, 4, N] = rowsum(dO * O) per head."""
+    A, N, _ = q.shape
+    d = _dev(q)
+    nwin = nwindows(N)
+    ldd = dkv.stride(0)
+    spc = _chunk(A, (N // 64) * NH)
+    sp = (A + spc - 1) // spc
+    partial = torch.empty(sp, NH, nwin, WQ, ESM_SPAN, device=q.device, dtype=torch.float32)
+    grid = (N // 64, NH, sp)
+    _load("h_esm_dq", d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, partial, int(ldd), int(N), int(A), int(spc))
+    _load("h_esm_dkv", d)(grid, (128, 1, 1), q, k, v, do, bias2, lse, dd, dkv, int(ldd), int(N), int(A), int(spc))
+    return partial.sum(0)
+
+
+def pair_bias_esm_bwd(z, gamma, wb, dbias, nreal, eps=1e-5):
+    """dbias [4, nwin, 32, 160] fp32 (natural units) -> dz (z's shape / dtype), dgamma [16], dWb [4, 16] (fp32); ``nreal`` as in :func:`pair_bias_esm`."""
+    d = _dev(z)
+    n = dbias.shape[1] * WQ
+    z = z.contiguous()
+    rows = z.numel() // DP
+    dz = torch.empty_like(z)
+    nb = min(nsm(d), (rows + 255) // 256)
+    part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    wbf, gf = wb.float().contiguous(), gamma.float().contiguous()
+    _load("h_pbb_esm", d)(
+        (nb, 1, 1), (256, 1, 1), z, wbf, gf, dbias.contiguous(), nreal, dz, part, int(n), float(eps), int(z.dtype == torch.bfloat16)
+    )
+    _load("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wbf, gf, dgamma, dwb, 0)
+    return dz, dgamma, dwb
