@@ -166,7 +166,7 @@ def test_routes_run_under_torch_compile(fp32):
 
     torch.backends.cuda.matmul.allow_tf32 = True
     mw, _, _ = _modules("token")
-    single, cond, pair, mask, dy, dt = _case("token", 384, 3, fp32=fp32)
+    single, cond, pair, mask, dy, _dt = _case("token", 384, 3, fp32=fp32)
     s, c, p = (t.clone().requires_grad_() for t in (single, cond, pair))
 
     def run(m):
