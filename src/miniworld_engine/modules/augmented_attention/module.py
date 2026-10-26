@@ -149,6 +149,22 @@ class AugmentedAttentionPairBias(nn.Module):
             return None
         return fn if mod.available(query, pair, self.ln_pair.weight, self.to_bias.weight, m1) else None
 
+    def _fused_pair_bias_ok(self, pair: torch.Tensor, query: torch.Tensor) -> bool:
+        """Does this call take the fused pair LayerNorm + projection (Triton): a training step (a gradient is recorded), bf16 / fp16 pair, and the
+        attention core that will run is the Triton one (the engine's portable path), on a card the module may run it on."""
+        if (
+            self._backend != KernelBackend.PORTABLE
+            or not pair.is_cuda
+            or pair.dtype not in (torch.bfloat16, torch.float16)
+            or not torch.is_grad_enabled()
+            or not (pair.requires_grad or self.ln_pair.weight.requires_grad or self.to_bias.weight.requires_grad)
+            or self.n_head >= 16 and self.n_head & (self.n_head - 1)
+        ):
+            return False
+        if self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(pair.device):
+            return False   # H100 / B200: the CUDA cores or PyTorch, never an untuned Triton kernel
+        return _dispatch.call_backend(self, self._backend, query, pair) == KernelBackend.PORTABLE
+
     def _kernel_attention_pair_bias(
         self,
         query: torch.Tensor,
@@ -289,8 +305,14 @@ class AugmentedAttentionPairBias(nn.Module):
                 query, key, value, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]
             )
         else:
-            pair = self.ln_pair(pair)
-            bias = self.to_bias(pair)
+            if self._fused_pair_bias_ok(pair, query):
+                # training on the Triton attention core: LayerNorm + head projection in one pass over the pair (the normalised pair never
+                # reaches HBM, and its backward recomputes it), instead of a LayerNorm kernel, a GEMM and their two backwards
+                from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import triton_layer_norm_linear
+
+                bias = triton_layer_norm_linear(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+            else:
+                bias = self.to_bias(self.ln_pair(pair))
             if extra_pair_bias is not None:
                 if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
                     raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
