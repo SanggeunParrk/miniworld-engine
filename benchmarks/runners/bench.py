@@ -4516,15 +4516,17 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
         execution_path = "kernels.dit_variants.reference[torch]"
     else:
         from miniworld_engine.kernels.dit_variants import interface
-        from miniworld_engine.kernels.dit_variants.cuda import train
+        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
         from miniworld_engine.kernels.dit_variants.triton import portable
 
         with torch.set_grad_enabled(is_train):
             h100 = (interface.atom_serves(model, single, cond, pair, mask, uid) if atom else interface.serves(model, single, cond, pair, mask))
             h100_train = (train.atom_serves(model, single, cond, pair, mask, uid) if atom else train.serves(model, single, cond, pair, mask))
+            h100_fp32 = (infer32.atom_serves(model, single, cond, pair, mask, uid) if atom else infer32.serves(model, single, cond, pair, mask))
             tri = (portable.atom_serves(model, single, cond, pair, mask, uid) if atom else portable.serves(model, single, cond, pair, mask))
         execution_path = (
             "kernels.dit_variants.interface[H100 CUDA rows + cuBLAS + the token / atom DiT attention core]" if h100
+            else "kernels.dit_variants.cuda.infer32[H100 CUDA rows + cuBLAS TF32 + the TF32 attention core (hoisted tables and bias), fp32 inference]" if h100_fp32
             else "kernels.dit_variants.cuda.train[H100 CUDA training rows + cuBLAS + the sm_90a attention cores, one autograd Function per block]" if h100_train
             else "kernels.dit_variants.triton.portable[reference structure, attention cores "
                  + ("kernels.augmented_attention.triton.window" if atom else "kernels.augmented_attention.triton.main")
