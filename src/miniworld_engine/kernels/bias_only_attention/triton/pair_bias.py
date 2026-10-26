@@ -88,6 +88,7 @@ def supported(pair: torch.Tensor, n_out: int) -> bool:
 
 
 def _fwd_fake(x, w, eps=1e-5):
+    """(logits^T [N, R], mean [R], rstd [R])."""
     return x.new_empty((w.shape[0], x.shape[0])), x.new_empty(x.shape[0], dtype=torch.float32), x.new_empty(x.shape[0], dtype=torch.float32)
 
 
@@ -104,6 +105,7 @@ def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Ten
 
 
 def _bwd_fake(x, w, dl, mean, rstd):
+    """(dx like ``x``, dW' [N, C] fp32)."""
     return torch.empty_like(x), x.new_empty(w.shape, dtype=torch.float32)
 
 

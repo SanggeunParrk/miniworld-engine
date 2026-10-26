@@ -252,9 +252,12 @@ def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | Non
     M, K = x.shape
     if _override() == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
         return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key, dres=dres)
-    if dres is not None:   # the persistent paths carry no residual input: add it after
-        dx, dg, db = ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
-        return dx + dres, dg, db
+    dx, dg, db = _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
+    return (dx, dg, db) if dres is None else (dx + dres, dg, db)   # the persistent kernels carry no residual input: add it after
+
+
+def _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+    K = x.shape[1]
     if _override() == "canonical":
         return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
                                             shape_key=shape_key)

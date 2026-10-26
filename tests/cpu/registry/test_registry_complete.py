@@ -438,7 +438,11 @@ def test_a_launch_site_does_not_pin_what_the_tuner_owns() -> None:
     # `_fold` (kernels/trimul_inproj/cuda/h100_wide_inference.py) is the same kind: one program per
     # output row folding the LayerNorm affine into the projection weights once per call, not a
     # registered kernel.
-    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel", "_pack", "_fold"}
+    # `_cast_kernel` (kernels/_cast.py) is a one-pass dtype copy of a few weights; `_ln_bias_fwd_kernel` / `_ln_bias_bwd_kernel`
+    # (kernels/bias_only_attention/triton/pair_bias.py) are memory-bound row passes whose single axis (rows per program) was swept once on an H100
+    # (docs/records/portable_bodit_ct_training_20261026.md); none has a registry row, ladder or driver.
+    NOT_TUNED = {"_zero_bias_grad_kernel", "_message_inference_kernel", "_pack", "_fold",
+                 "_cast_kernel", "_ln_bias_fwd_kernel", "_ln_bias_bwd_kernel"}
     pinned: dict[str, str] = {}
     for path in sorted(SRC.rglob("*.py")):
         try:

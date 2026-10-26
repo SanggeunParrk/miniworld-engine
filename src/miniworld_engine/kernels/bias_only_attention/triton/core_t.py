@@ -36,6 +36,7 @@ from miniworld_engine.kernels.gated_projection.triton.main import _sigmul_bwd, _
 
 
 def _core_fwd_fake(vgt, p, shape_key=0):
+    """(out^T, gsig^T), both [C, M] -- half the rows of ``vgt`` each."""
     c = vgt.shape[0] // 2
     return vgt.new_empty((c, vgt.shape[1])), vgt.new_empty((c, vgt.shape[1]))
 
@@ -55,6 +56,7 @@ def _core_fwd(vgt: torch.Tensor, p: torch.Tensor, shape_key: int = 0) -> tuple[t
 
 
 def _core_bwd_fake(dgsigt, vgt, outt, p, shape_key=0):
+    """(dvg^T like ``vgt``, dP like ``p``)."""
     return vgt.new_empty(vgt.shape), p.new_empty(p.shape)
 
 
