@@ -66,7 +66,6 @@ def rmsnorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, eps: float) -> to
         pipe.supported(x)
         and torch.cuda.get_device_capability(x.device) == (9, 0)
         and not settings.current().force_portable_kernels
-        and not torch.are_deterministic_algorithms_enabled()  # the pipelined weight gradient adds atomically (order not fixed)
     ):
         return pipe.rmsnorm_pipe(x, weight, eps)  # H100: the pipelined kernels, one backward kernel (kernels/layernorm/cuda/pipe)
     shape = x.shape

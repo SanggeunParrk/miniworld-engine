@@ -50,13 +50,15 @@ template <> __device__ __forceinline__ __half from_f<__half>(float v) { return _
 #ifndef MWP_MINB_FWD
 #define MWP_MINB_FWD (CH * VEC > 16 ? 1 : 2)
 #endif
-#ifndef MWP_K
-#define MWP_K 4
+#ifndef MWP_BWD_CTAS1
+#define MWP_BWD_CTAS1 1
+#endif
+#ifndef MWP_BWD_CTAS
+#define MWP_BWD_CTAS 0
 #endif
 #ifndef MWP_DIRECT_DEFAULT
 #define MWP_DIRECT_DEFAULT 1
 #endif
-constexpr int ACC_COPIES = MWP_K;  // accumulator copies the CTAs spread their atomics over (the Python side sizes the workspace with the same number)
 constexpr int WARPS = MWP_WARPS;  // warps per CTA
 constexpr int THREADS = WARPS * 32;
 
@@ -194,8 +196,7 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_FWD)
   const int g = lane / TPR, l = lane % TPR;
   uint4* ring = smem + warp * (S * CH * 32) + lane;  // this lane's chunk 0 of stage 0
   const unsigned ring_u32 = smem_u32(ring);
-  if (ws != nullptr && blockIdx.x == 0)  // zero the backward's workspace (2N sums + the ticket)
-    for (int i = threadIdx.x; i < ACC_COPIES * 2 * N + 1; i += THREADS) ws[i] = 0.f;
+  if (ws != nullptr && blockIdx.x == 0 && threadIdx.x == 0) ws[0] = 0.f;  // ws only flags "the backward wants affine gradients"
   const int64_t W = int64_t(gridDim.x) * WARPS, wid = int64_t(blockIdx.x) * WARPS + warp;
   const int64_t npass = (M + RPP - 1) / RPP;
   const int64_t rstep = W * RPP, estep = rstep * N;
@@ -255,8 +256,7 @@ __global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, c
   constexpr int E = VEC;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int g = lane / TPR, l = lane % TPR;
-  if (ws != nullptr && blockIdx.x == 0)
-    for (int i = threadIdx.x; i < ACC_COPIES * 2 * N + 1; i += THREADS) ws[i] = 0.f;
+  if (ws != nullptr && blockIdx.x == 0 && threadIdx.x == 0) ws[0] = 0.f;
   const int64_t wid = int64_t(blockIdx.x) * WARPS + warp;
   const bool cvalid[1] = {PAD ? (l * VEC < N) : true};
   constexpr bool pad = PAD;
@@ -310,7 +310,6 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_BWD)
   constexpr int E = CH * VEC;
   constexpr int SU = S * CH * 32;  // uint4 per warp and stream
   extern __shared__ __align__(16) uint4 smem[];
-  __shared__ int s_last;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   const int g = lane / TPR, l = lane % TPR;
   const uint4* ring_x = smem + warp * SU + lane;
@@ -396,6 +395,10 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_BWD)
   }
   cp_wait<0>();
   if constexpr (WG) {
+    // let the reduce kernel launch behind this one (programmatic dependent launch); it waits for this grid's memory before it reads
+#if __CUDA_ARCH__ >= 900
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
+#endif
     // lanes l and l + TPR hold the same columns of different rows: fold them, then fold the warps of the CTA in shared memory
 #pragma unroll
     for (int e = 0; e < E; ++e) {
@@ -416,9 +419,8 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_BWD)
       }
     }
     __syncthreads();
-    float* acc_w = ws + (blockIdx.x % ACC_COPIES) * 2 * N;
-    float* acc_b = acc_w + N;
-    unsigned* ticket = reinterpret_cast<unsigned*>(ws + ACC_COPIES * 2 * N);
+    // one partial row per CTA, plain stores: pipe_reduce adds the rows in a fixed order (bit-reproducible)
+    float* mine = ws + int64_t(blockIdx.x) * 2 * N;
     for (int idx = threadIdx.x; idx < PER; idx += THREADS) {
       float tw = 0.f, tb = 0.f;
 #pragma unroll
@@ -429,42 +431,51 @@ __global__ void __launch_bounds__(THREADS, MWP_MINB_BWD)
       const int e = idx / TPR, ll = idx % TPR;
       const int col = ((e / VEC) * TPR + ll) * VEC + e % VEC;
       if (col < N) {
-        atomicAdd(acc_w + col, tw);
-        if constexpr (!RMS) atomicAdd(acc_b + col, tb);
+        mine[col] = tw;
+        if constexpr (!RMS) mine[N + col] = tb;
       }
     }
-    __syncthreads();
-    if (threadIdx.x == 0) {
-      __threadfence();
-      s_last = atomicAdd(ticket, 1u) == gridDim.x - 1;
+  }
+}
+
+// dw / db = the sum of the P per-CTA partial rows in a fixed order: 32 columns x 16 row slices per block, converted to the weight dtype
+template <bool RMS>
+__global__ void __launch_bounds__(512) pipe_reduce(const float* __restrict__ part, int P, int N, void* __restrict__ dw_out, void* __restrict__ db_out,
+                                                   int wcode) {
+#if __CUDA_ARCH__ >= 900
+  asm volatile("griddepcontrol.wait;" ::: "memory");
+#endif
+  __shared__ float sm[2][16][33];
+  const int tx = threadIdx.x & 31, sl = threadIdx.x >> 5;
+  const int col = blockIdx.x * 32 + tx;
+  float a = 0.f, b = 0.f;
+  if (col < N) {
+#pragma unroll 16
+    for (int p = sl; p < P; p += 16) {
+      a += part[int64_t(p) * 2 * N + col];
+      if constexpr (!RMS) b += part[int64_t(p) * 2 * N + N + col];
     }
-    __syncthreads();
-    if (!s_last) return;
-    __threadfence();
-    for (int i = threadIdx.x; i < N; i += THREADS) {
-      float a = 0.f, bb = 0.f;
+  }
+  sm[0][sl][tx] = a;
+  sm[1][sl][tx] = b;
+  __syncthreads();
+  if (sl == 0 && col < N) {
+    float ta = 0.f, tb = 0.f;
 #pragma unroll
-      for (int k = 0; k < ACC_COPIES; ++k) {
-        float* cw = ws + k * 2 * N;
-        a += __ldcg(cw + i);
-        cw[i] = 0.f;
-        if constexpr (!RMS) {
-          bb += __ldcg(cw + N + i);
-          cw[N + i] = 0.f;
-        }
-      }
-      if (wcode == 0) {
-        reinterpret_cast<float*>(dw_out)[i] = a;
-        if constexpr (!RMS) reinterpret_cast<float*>(db_out)[i] = bb;
-      } else if (wcode == 1) {
-        reinterpret_cast<__nv_bfloat16*>(dw_out)[i] = __float2bfloat16(a);
-        if constexpr (!RMS) reinterpret_cast<__nv_bfloat16*>(db_out)[i] = __float2bfloat16(bb);
-      } else {
-        reinterpret_cast<__half*>(dw_out)[i] = __float2half(a);
-        if constexpr (!RMS) reinterpret_cast<__half*>(db_out)[i] = __float2half(bb);
-      }
+    for (int i = 0; i < 16; ++i) {
+      ta += sm[0][i][tx];
+      tb += sm[1][i][tx];
     }
-    if (threadIdx.x == 0) *ticket = 0u;
+    if (wcode == 0) {
+      reinterpret_cast<float*>(dw_out)[col] = ta;
+      if constexpr (!RMS) reinterpret_cast<float*>(db_out)[col] = tb;
+    } else if (wcode == 1) {
+      reinterpret_cast<__nv_bfloat16*>(dw_out)[col] = __float2bfloat16(ta);
+      if constexpr (!RMS) reinterpret_cast<__nv_bfloat16*>(db_out)[col] = __float2bfloat16(tb);
+    } else {
+      reinterpret_cast<__half*>(dw_out)[col] = __float2half(ta);
+      if constexpr (!RMS) reinterpret_cast<__half*>(db_out)[col] = __float2half(tb);
+    }
   }
 }
 
@@ -523,10 +534,25 @@ void launch_bwd_wg(const T* dy, const T* x, const void* w, const float2* stats, 
   if (smem > 48 * 1024) cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, int(smem));
   static int occ = 0;
   if (!occ) occ = resident_ctas(k, smem);
+  if (per_sm == 0) per_sm = CH == 1 ? MWP_BWD_CTAS1 : MWP_BWD_CTAS;  // fewer CTAs per SM end the backward sooner (less contention on the partial rows and the tail)
   const int64_t cap = int64_t(num_sms()) * (per_sm > 0 && per_sm < occ ? per_sm : occ);
   const int64_t need = ((M + RPP - 1) / RPP + WARPS - 1) / WARPS;
   const int grid = int(need < cap ? need : cap);
   k<<<grid > 0 ? grid : 1, THREADS, smem, s>>>(dy, x, w, stats, dx, ws, dw, db, wcode, M, N);
+#ifndef MWP_NOREDUCE
+  if constexpr (WG) {
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3((N + 31) / 32);
+    cfg.blockDim = dim3(512);
+    cfg.stream = s;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    at[0].val.programmaticStreamSerializationAllowed = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    cudaLaunchKernelEx(&cfg, pipe_reduce<RMS>, static_cast<const float*>(ws), grid > 0 ? grid : 1, N, dw, db, wcode);
+  }
+#endif
 }
 
 template <typename T, int TPR, int CH, int VEC, bool RMS>
@@ -655,7 +681,9 @@ std::vector<torch::Tensor> pipe_backward(torch::Tensor dy, torch::Tensor x, torc
   int tpr = 0, ch = 0;
   TORCH_CHECK(mwpipe::pick(N * esz / 16, tpr, ch), "width ", N, " is beyond the pipelined kernels");
   const void* wp = w.numel() ? w.data_ptr() : nullptr;
-  float* wsp = wgrad ? ws.data_ptr<float>() : nullptr;
+  // one partial row per CTA (at most 32 CTAs per SM), written by the kernel and reduced by pipe_reduce
+  auto part = wgrad ? torch::empty({int64_t(mwpipe::num_sms()) * 32, 2 * int64_t(N)}, x.options().dtype(torch::kFloat32)) : torch::empty({0}, x.options().dtype(torch::kFloat32));
+  float* wsp = wgrad ? part.data_ptr<float>() : nullptr;
   const float2* stp = reinterpret_cast<const float2*>(stats.data_ptr<float>());
   void* dwp = wgrad ? dw.data_ptr() : nullptr;
   void* dbp = wgrad && !rms ? db.data_ptr() : nullptr;
@@ -686,5 +714,4 @@ std::vector<torch::Tensor> pipe_backward(torch::Tensor dy, torch::Tensor x, torc
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("fwd", &pipe_forward, "pipelined LayerNorm / RMSNorm forward");
   m.def("bwd", &pipe_backward, "pipelined LayerNorm / RMSNorm backward");
-  m.def("acc_copies", []() { return int(mwpipe::ACC_COPIES); }, "accumulator copies of the backward workspace");
 }

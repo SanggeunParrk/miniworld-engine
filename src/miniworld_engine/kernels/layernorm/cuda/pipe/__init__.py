@@ -1,10 +1,10 @@
 """Pipelined LayerNorm / RMSNorm on CUDA (warp-per-row-group, cp.async ring per warp; see ``ln_pipe.cu``).
 
-Rows of 16-byte-aligned width N (``N * itemsize`` a multiple of 16, at most 4096 bytes), bf16 / fp16 / fp32 activations, fp32 statistics,
-optional weight / bias of one dtype (bf16, fp16 or fp32; read in place, gradients handed back in that dtype). The forward stores only ``y``
-(the backward recomputes the statistics from the x it re-reads); the backward is one kernel: dx and the affine gradients (a last-CTA reduction
-over atomically added per-CTA partials, converted to the weight dtype in place). The atomics add in an unspecified order: the affine
-gradients agree to fp32 rounding between replays, not bit for bit (the general kernels are bit-reproducible). Plain CUDA sm_80+.
+Rows of 16-byte-aligned width N (``N * itemsize`` 144 to 2048 bytes, a multiple of 16), bf16 / fp16 / fp32 activations, fp32 statistics,
+optional weight / bias of one dtype (bf16, fp16 or fp32; read in place, gradients handed back in that dtype). The training forward stores
+(mean, rstd) per row; the backward is a kernel for dx plus the per-CTA partial rows of the affine gradients (plain stores) and a tiny reduce
+kernel launched behind it with programmatic dependent launch, which adds the rows in a fixed order and converts to the weight dtype: replays
+are bit-identical. Plain CUDA sm_80+ (griddepcontrol needs sm_90; tuned on H100).
 """
 
 from __future__ import annotations
@@ -62,25 +62,21 @@ def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tenso
     return (empty if weight is None else prep(weight)), (empty if bias is None else prep(bias)), _WCODE[dt]
 
 
-def _acc() -> int:
-    """Accumulator copies of the backward workspace (a build constant of the extension)."""
-    return _ext().acc_copies()
-
 
 def _fwd_fake(x, w, b, eps, rms, train, with_ws):
     """y like x; the workspace and the statistics are empty unless asked for."""
     n, m = x.shape[1], x.shape[0]
     f32 = dict(dtype=torch.float32, device=x.device)
-    return (torch.empty_like(x), torch.empty((_acc() * 2 * n + 1) if with_ws else 0, **f32), torch.empty((2 * m) if train else 0, **f32))
+    return (torch.empty_like(x), torch.empty((1,) if with_ws else 0, **f32), torch.empty((2 * m) if train else 0, **f32))
 
 
 @opaque(fake=_fwd_fake, name="layernorm_pipe_fwd")
 def _fwd(x: torch.Tensor, w: torch.Tensor, b: torch.Tensor, eps: float, rms: bool, train: bool,
          with_ws: bool) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Forward of contiguous x [M, N]; (y, ws, stats). ``train``: stats = fp32 [M, 2] (mean, rstd) for the backward; ``with_ws``: ws = the
-    backward's fp32 workspace [2N + 1], zeroed here (empty when not asked)."""
+    a flag (one element) that the backward wants affine gradients."""
     f32 = dict(dtype=torch.float32, device=x.device)
-    ws = torch.empty(_acc() * 2 * x.shape[1] + 1 if with_ws else 0, **f32)
+    ws = torch.empty(1 if with_ws else 0, **f32)
     stats = torch.empty(2 * x.shape[0] if train else 0, **f32)
     y = _ext().fwd(x, w, b, float(eps), bool(rms), ws, stats, PER_SM)
     return y, ws, stats

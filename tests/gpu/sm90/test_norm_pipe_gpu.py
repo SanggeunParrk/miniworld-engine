@@ -146,3 +146,20 @@ def test_the_engine_entries_route_here_on_h100():
     b = torch.zeros(128, device="cuda", dtype=torch.bfloat16)
     assert rel(layernorm_kernel(x, w, b, EPS), F.layer_norm(x.double(), (128,), w.double(), b.double(), EPS)) < 1e-2
     assert rel(rmsnorm_cuda(x, w, EPS), F.rms_norm(x.double(), (128,), w.double(), EPS)) < 1e-2
+
+
+def test_replays_are_bit_identical():
+    for n, rms in ((128, False), (768, True)):
+        x0 = torch.randn(30011, n, device="cuda", dtype=torch.bfloat16)
+        w0 = torch.rand(n, device="cuda", dtype=torch.bfloat16) + 0.5
+        b0 = torch.randn(n, device="cuda", dtype=torch.bfloat16)
+        dy = torch.randn_like(x0)
+        outs = []
+        for _ in range(3):
+            x, w, b = x0.clone().requires_grad_(), w0.clone().requires_grad_(), b0.clone().requires_grad_()
+            y = pipe.rmsnorm_pipe(x, w, EPS) if rms else pipe.layernorm_pipe(x, w, b, EPS)
+            y.backward(dy)
+            outs.append((y, x.grad, w.grad) + (() if rms else (b.grad,)))
+        for o in outs[1:]:
+            for a, e in zip(o, outs[0], strict=True):
+                assert torch.equal(a, e)
