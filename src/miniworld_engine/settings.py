@@ -402,6 +402,9 @@ class Settings:
     #: The hand-CUDA TRAINING step of the DiT variant stacks (Boltz-2 / RoseTTAFold3 / Chai-1, token and atom) on H100; off = the portable /
     #: reference route. Default on.
     dit_variant_train_cuda: bool = True
+    #: The hand-CUDA TRAINING step of ESMFold2's local atom block (``LocalDiTBlock(**ESMFOLD2)``, bf16, conditioning shared by the samples) on
+    #: H100; off = the portable / reference route. Default on.
+    local_dit_esm_train_cuda: bool = True
     #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
     tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).

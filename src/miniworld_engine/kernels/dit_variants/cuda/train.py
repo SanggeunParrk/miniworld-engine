@@ -125,7 +125,7 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(x, ya, tab, cols(G_A), y2, cols(G_T), out, L)
+        ext.res_out_fwd(x, ya, tab, cols(G_A), y2, cols(G_T), out, L, False)
         xp = buf["xp"]
         st2 = buf["st2"]
     else:
@@ -134,7 +134,7 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(xp, y2, tab, cols(G_T), None, 0, out, L)
+        ext.res_out_fwd(xp, y2, tab, cols(G_T), None, 0, out, L, False)
     res = dict(buf, og=og, lse=lse, xp=xp, st2=st2, w_qkvg=w_qkvg, w_o=w_o, w_exp=w_exp, w_sq=w_sq)
     return [res[n] for n in _NAMES]
 
@@ -200,9 +200,9 @@ def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torc
     dya = torch.empty(M, D, device=dev, dtype=at)
     dy2 = torch.empty(M, D, device=dev, dtype=at)
     if par:
-        ext.res_bwd(dout, ya, tab, cols(G_A), dya, y2, cols(G_T), dy2, part, cols(G_A), cols(G_T), L, S)
+        ext.res_bwd(dout, ya, tab, cols(G_A), dya, y2, cols(G_T), dy2, part, cols(G_A), cols(G_T), L, S, False)
     else:
-        ext.res_bwd(dout, y2, tab, cols(G_T), dy2, None, 0, None, part, cols(G_T), 0, L, S)
+        ext.res_bwd(dout, y2, tab, cols(G_T), dy2, None, 0, None, part, cols(G_T), 0, L, S, False)
     dh = torch.mm(dy2, w_sq)
     dwsq = _mm_t(dy2, h)
     dab = torch.empty_like(ab)
@@ -505,13 +505,13 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, N)
+        ext.res_out_fwd(x, ya, tab, cols(A_G_A), y2, cols(A_G_T), out, N, False)
     else:
         ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), buf["xp"], xt, buf["st2"], N, eps, sig)
         torch.mm(xt, w_exp.t(), out=ab)
         ext.glu_fwd(ab, h, up)
         torch.mm(h, w_sq.t(), out=y2)
-        ext.res_out_fwd(buf["xp"], y2, tab, cols(A_G_T), None, 0, out, N)
+        ext.res_out_fwd(buf["xp"], y2, tab, cols(A_G_T), None, 0, out, N, False)
     res = dict(buf, q=q, og=og, lse=lse, ya=ya if proj else ya.new_empty(0), w_gq=w_gq, w_kv=w_kv, w_o=w_o, w_exp=w_exp, w_sq=w_sq)
     return [res[n] for n in _ANAMES]
 
@@ -552,9 +552,9 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dya = torch.empty(M, D, device=dev, dtype=at)
     dy2 = torch.empty(M, D, device=dev, dtype=at)
     if par:
-        ext.res_bwd(dout, ya, tab, cols(A_G_A), dya, y2, cols(A_G_T), dy2, part, cols(A_G_A), cols(A_G_T), N, S)
+        ext.res_bwd(dout, ya, tab, cols(A_G_A), dya, y2, cols(A_G_T), dy2, part, cols(A_G_A), cols(A_G_T), N, S, False)
     else:
-        ext.res_bwd(dout, y2, tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, N, S)
+        ext.res_bwd(dout, y2, tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, N, S, False)
     dh = torch.mm(dy2, w_sq)
     dwsq = _mm_t(dy2, h)
     dab = torch.empty_like(ab)

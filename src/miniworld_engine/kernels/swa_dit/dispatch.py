@@ -130,7 +130,8 @@ def native_h100_enabled(q, training=None):
     override = settings.current().swa_dit_h100_native
     if override is not None:
         return override and is_sm90(q.device)
-    return is_sm90(q.device)
+    # the A/B switch: force_portable_kernels=True runs the Triton kernels of triton/ on H100 as it does for the other families
+    return is_sm90(q.device) and not settings.current().force_portable_kernels
 
 
 def native_h100_stages(q) -> bool:

@@ -83,7 +83,8 @@ qknorm_fwd_k(const T* __restrict__ q, const T* __restrict__ k, const float* __re
 template <typename T>
 __global__ void __launch_bounds__(WARPS * 32)
 qknorm_bwd_k(T* __restrict__ dq, T* __restrict__ dk, long ld, const T* __restrict__ qr, const T* __restrict__ kr,
-             const float* __restrict__ wq, const float* __restrict__ wk, float* __restrict__ part, long M, float eq, float ek, bool rnd) {
+             const float* __restrict__ wq, const float* __restrict__ wk, float* __restrict__ part, long M, float eq, float ek, bool rnd,
+             const float* __restrict__ cs = nullptr, const float* __restrict__ sn = nullptr, long natoms = 1) {
   __shared__ float red[WARPS][2][4][8][4];                      // [warp][q/k][head][lane in head][dim]
   const int warp = threadIdx.x / 32, lane = threadIdx.x % 32, col = lane * 4, d = (lane % 8) * 4, head = lane / 8;
   T* dg[2] = {dq, dk};
@@ -94,7 +95,16 @@ qknorm_bwd_k(T* __restrict__ dq, T* __restrict__ dk, long ld, const T* __restric
   for (long row = (long)blockIdx.x * WARPS + warp; row < M; row += (long)gridDim.x * WARPS) {
 #pragma unroll
     for (int t = 0; t < 2; ++t) {
-      const float4 x = load4<T>(raw[t] + row * DS + col), dn = load4<T>(dg[t] + row * ld + col);
+      const float4 x = load4<T>(raw[t] + row * DS + col);
+      float4 dn = load4<T>(dg[t] + row * ld + col);
+      if (cs != nullptr) {   // the gradient of the rotated values back through the rotary: the transpose of the forward's rotation
+        const int r = d % 16;
+        const float4 c = *reinterpret_cast<const float4*>(cs + (row % natoms) * 16 + r), s = *reinterpret_cast<const float4*>(sn + (row % natoms) * 16 + r);
+        const float4 p = make_float4(__shfl_xor_sync(0xffffffffu, dn.x, 4), __shfl_xor_sync(0xffffffffu, dn.y, 4),
+                                     __shfl_xor_sync(0xffffffffu, dn.z, 4), __shfl_xor_sync(0xffffffffu, dn.w, 4));
+        const float sg = d < 16 ? 1.f : -1.f;
+        dn = make_float4(dn.x * c.x + sg * p.x * s.x, dn.y * c.y + sg * p.y * s.y, dn.z * c.z + sg * p.z * s.z, dn.w * c.w + sg * p.w * s.w);
+      }
       const float rstd = rsqrtf(octet_sum(x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w) / HD + eps[t]);
       const float4 xh = make_float4(x.x * rstd, x.y * rstd, x.z * rstd, x.w * rstd);
       const float4 wv = *reinterpret_cast<const float4*>(w[t]);
@@ -192,7 +202,31 @@ at::Tensor qknorm_bwd(at::Tensor dq, at::Tensor dk, at::Tensor qr, at::Tensor kr
   return part;
 }
 
+// ESMFold2 (training): :func:`qknorm_bwd` for q / k that were rotated after the norm; cs, sn the forward's tables [natoms, 16].
+at::Tensor qknorm_rope_bwd(at::Tensor dq, at::Tensor dk, at::Tensor qr, at::Tensor kr, at::Tensor wq, at::Tensor wk, double eq, double ek, at::Tensor cs,
+                           at::Tensor sn) {
+  check(dq, "dq"); check(dk, "dk"); check(qr, "q raw"); check(kr, "k raw"); check_w(wq, "wq"); check_w(wk, "wk");
+  TORCH_CHECK(dq.stride(0) == dk.stride(0) && qr.stride(0) == DS && kr.stride(0) == DS, "row strides");
+  TORCH_CHECK(dq.scalar_type() == qr.scalar_type() && dk.scalar_type() == qr.scalar_type() && kr.scalar_type() == qr.scalar_type(), "operands match");
+  TORCH_CHECK(cs.is_cuda() && sn.is_cuda() && cs.scalar_type() == at::kFloat && sn.scalar_type() == at::kFloat && cs.is_contiguous() &&
+              sn.is_contiguous() && cs.dim() == 2 && cs.size(1) == HD / 2 && sn.sizes() == cs.sizes(), "rotary tables: fp32 [N, 16]");
+  const long M = qr.size(0), natoms = cs.size(0);
+  TORCH_CHECK(natoms > 0 && M % natoms == 0, "rows are samples x atoms");
+  TORCH_CHECK(qr.scalar_type() == at::kBFloat16, "qknorm_rope_bwd: bf16");
+  const at::cuda::CUDAGuard guard(qr.device());
+  const int blocks = (int)std::min<long>((M + WARPS - 1) / WARPS, 1056);          // a fixed function of M: the partials' order is too
+  auto part = at::empty({blocks, 2, HD}, qr.options().dtype(at::kFloat));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  qknorm_bwd_k<__nv_bfloat16><<<blocks, WARPS * 32, 0, stream>>>(
+      reinterpret_cast<__nv_bfloat16*>(dq.data_ptr()), reinterpret_cast<__nv_bfloat16*>(dk.data_ptr()), dq.stride(0),
+      reinterpret_cast<const __nv_bfloat16*>(qr.data_ptr()), reinterpret_cast<const __nv_bfloat16*>(kr.data_ptr()), wq.data_ptr<float>(),
+      wk.data_ptr<float>(), part.data_ptr<float>(), M, (float)eq, (float)ek, false, cs.data_ptr<float>(), sn.data_ptr<float>(), natoms);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return part;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("qknorm_rope_bwd", &qknorm_rope_bwd);
   m.def("qknorm_fwd", &qknorm_fwd);
   m.def("qknorm_rope_fwd", &qknorm_rope_fwd);
   m.def("qknorm_bwd", &qknorm_bwd);

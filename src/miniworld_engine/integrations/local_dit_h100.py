@@ -686,8 +686,9 @@ def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
     if a.norm_query.eps != RMS_EPS or a.norm_key.eps != RMS_EPS:
         return False
     params = [*(module.get_parameter(n) for n in _ESM_NAMES.values()), a.norm_query.weight, a.norm_key.weight]
-    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
-        return False   # inference only: the backward kernels know neither the conditioning nor the window
+    grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params))
+    if grad and not _esm_train_serves(single, cond, pair):
+        return False   # a gradient: only the bf16 training step below (fp32, or a conditioning of its own per sample, run the composed path)
     if any(p.device != single.device or not p.is_contiguous() for p in params):
         return False
     if torch.is_autocast_enabled("cuda") and single.dtype != BF:
@@ -779,6 +780,8 @@ def _esm_fwd(
 
 
 def _run_esm(module, single, cond, pair, mask, rope):
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *module.parameters())):
+        return _esm_train(module, single, cond, pair, mask, rope)
     weights, qkw = _esm_weights(module)
     n0 = single.shape[2]
     n = _ld._padded_length(n0)
@@ -788,3 +791,258 @@ def _run_esm(module, single, cond, pair, mask, rope):
         (t[0].float() if n == n0 else torch.nn.functional.pad(t[0].float(), (0, 0, 0, n - n0))).contiguous() for t in rope
     )
     return _esm_fwd(single, cond, pair, kmask, weights, qkw, cos, sin)
+
+
+# --------------------------------------------------------------------------------------------------------------------- ESMFold2 training
+# bf16 forward + backward of ``LocalDiTBlock(**ESMFOLD2)`` with the conditioning shared by the samples. The block is the DiT variants' atom
+# training block (``kernels/dit_variants/cuda/train.py``: row kernels of ``train_rows.cu`` with their ESMFold2 switch -- RMSNorm statistics and raw
+# gates --, cuBLAS for every GEMM) around ESMFold2's own attention: the q / k RMSNorm + rotary (``qknorm_local.cu``) and the rank-window
+# attention (``lattn90_esm.cu``: forward with the row LSE, dQ + bias gradient, dK + dV). What lives on the N atom rows (the conditioning
+# tables) and on the pair (the windowed bias) is made by ordinary torch ops / autograd Functions outside the block, so their gradients chain
+# through the module's own layers:
+#
+#     tables [N, 8 x 128]   silu(cond) . [Ws1; Wb1; Wskv; Wbkv; Wso; Ws2; Wb2; Wst]^T, the scales + 1 (identity-centred), the gates raw
+#     bias2 [4, nwin, 32, 160]   pair_bias_esm (hoist-free: its gradient is needed)
+#     block                 x [A N, 128] bf16 in, tables / bias / weights in; dx, dtables, dbias, dweights out
+A_SC_Q, A_SH_Q, A_SC_K, A_SH_K, A_G_A, A_SC_T, A_SH_T, A_G_T = range(8)
+_RMS_EPS = _QK_EPS   # the RMSNorm epsilon of the engine's RMS layers (``adaptive_layernorm.module.RMS_EPS``: float32's)
+ESM_SPAN_ = 160       # the bias columns per query row (``sm100_atom_local.ESM_SPAN``)
+_RMS_MODE = 2   # train_rows.cu: bit 1 = ESMFold2 (RMSNorm statistics, raw gates), bit 0 = sigmoid scale (not here)
+_ESM_SPLITS = 2
+_ESM_TRAIN_NAMES = ("out", "xq", "xk", "xt", "q", "k", "v", "qn", "kn", "g", "og", "lse", "ya", "y2", "xp", "st1", "st2", "ab", "h",
+                    "w_gq", "w_kv", "w_o", "w_exp", "w_sq")
+_ESM_TRAIN_SAVED = _ESM_TRAIN_NAMES[1:]
+
+
+def _esm_train_serves(single, cond, pair) -> bool:
+    """The training step takes bf16 activations whose conditioning is shared by the samples (one row set: an expanded view, or one sample)."""
+    if not settings.current().local_dit_esm_train_cuda:
+        return False
+    if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
+        return False
+    return single.shape[0] == 1 or _shared(cond)
+
+
+def _esm_rows():
+    from miniworld_engine.kernels.dit_variants import cuda as dv
+
+    return dv.train_ext()
+
+
+def _esm_train_fwd_fake(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wexp, wsq, qkw, length, eps):
+    m = x.shape[0]
+    a = m // length
+    t = lambda *shape, d=BF: x.new_empty(shape, dtype=d)  # noqa: E731
+    spec = {"out": (m, DS), "xq": (m, DS), "xk": (m, DS), "xt": (m, DS), "q": (m, DS), "k": (m, DS), "v": (m, DS), "qn": (m, DS), "kn": (m, DS),
+            "g": (m, DS), "og": (m, DS), "ya": (m, DS), "y2": (m, DS), "ab": (m, 4 * DS), "h": (m, 2 * DS), "w_gq": (2 * DS, DS), "w_kv": (2 * DS, DS),
+            "w_o": (DS, DS), "w_exp": (4 * DS, DS), "w_sq": (DS, 2 * DS)}
+    out = []
+    for n in _ESM_TRAIN_NAMES:
+        if n == "lse":
+            out.append(t(a, NH, length, d=F32))
+        elif n == "xp":
+            out.append(t(m, DS, d=F32))
+        elif n in ("st1", "st2"):
+            out.append(t(m, 2, d=F32))
+        else:
+            out.append(t(*spec[n]))
+    return out
+
+
+@opaque(fake=_esm_train_fwd_fake, name="local_dit_h100_esm_train_fwd")
+def _esm_train_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor, wq: torch.Tensor, bq: torch.Tensor,
+                   wk: torch.Tensor, wv: torch.Tensor, wg: torch.Tensor, wo: torch.Tensor, wexp: torch.Tensor, wsq: torch.Tensor,
+                   qkw: list[torch.Tensor], length: int, eps: float) -> list[torch.Tensor]:
+    """One block's forward: [out, saved ...] (``_ESM_TRAIN_NAMES``). x [A N, 128] bf16, tab [N, 8 x 128] bf16, bias2 [4, nwin, 32, 160] fp32 (log2,
+    -inf off the band), cos / sin fp32 [N, 16], fp32 or bf16 weights (cast here; ``wexp`` = [Wa; Wb]), qkw = the q / k RMSNorm weights [32]."""
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    ext, qk = _esm_rows(), _qk_kernels()
+    m = x.shape[0]
+    n, a = length, m // length
+    cols = lambda c: c * DS  # noqa: E731
+    w_q, w_k, w_v, w_g, w_o, w_exp, w_sq = (w.to(BF, copy=True) for w in (wq, wk, wv, wg, wo, wexp, wsq))
+    w_gq, w_kv = torch.cat([w_g, w_q]), torch.cat([w_k, w_v])
+    new = lambda *shape, d=BF: torch.empty(*shape, device=x.device, dtype=d)  # noqa: E731
+    xq, xk, xt, g, k, v = new(m, DS), new(m, DS), new(m, DS), new(m, DS), new(m, DS), new(m, DS)
+    st1, st2, xp = new(m, 2, d=F32), new(m, 2, d=F32), new(m, DS, d=F32)
+    ext.ln_mod_fwd(x, tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], [xq, xk], st1, n, _RMS_EPS, _RMS_MODE)
+    q = torch.addmm(bq.to(BF), xq, w_q.t())
+    torch.mm(xk, w_k.t(), out=k)
+    torch.mm(xk, w_v.t(), out=v)
+    torch.mm(xq, w_g.t(), out=g)
+    qn, kn = torch.empty_like(q), torch.empty_like(k)
+    qk.qknorm_rope_fwd(q, k, qkw[0].float().contiguous(), qkw[1].float().contiguous(), _RMS_EPS, _RMS_EPS, cos, sin, qn, kn)
+    o, lse = local.attn_esm_fwd_lse(qn.view(a, n, DS), kn.view(a, n, DS), v.view(a, n, DS), bias2)
+    o = o.view(m, DS)
+    og = torch.empty_like(o)
+    ext.gate_fwd(o, g, og)
+    ya = torch.mm(og, w_o.t())
+    ext.res_ln_fwd(x, ya, tab, cols(A_G_A), cols(A_SC_T), cols(A_SH_T), xp, xt, st2, n, _RMS_EPS, _RMS_MODE)
+    ab = torch.mm(xt, w_exp.t())
+    h = new(m, 2 * DS)
+    ext.glu_fwd(ab, h, False)
+    y2 = torch.mm(h, w_sq.t())
+    out = torch.empty_like(x)
+    ext.res_out_fwd(xp, y2, tab, cols(A_G_T), None, 0, out, n, True)
+    res = {"out": out, "xq": xq, "xk": xk, "xt": xt, "q": q, "k": k, "v": v, "qn": qn, "kn": kn, "g": g, "og": og, "lse": lse, "ya": ya, "y2": y2,
+           "xp": xp, "st1": st1, "st2": st2, "ab": ab, "h": h, "w_gq": w_gq, "w_kv": w_kv, "w_o": w_o, "w_exp": w_exp, "w_sq": w_sq}
+    return [res[nm] for nm in _ESM_TRAIN_NAMES]
+
+
+def _esm_train_bwd_fake(dout, x, tab, bias2, cos, sin, saved, qkw, length, eps):
+    f = F32
+    return [torch.empty_like(x), tab.new_empty(tab.shape, dtype=f), bias2.new_empty(bias2.shape, dtype=f), x.new_empty((DS, DS), dtype=f),
+            x.new_empty((DS,), dtype=f), x.new_empty((DS, DS), dtype=f), x.new_empty((DS, DS), dtype=f), x.new_empty((DS, DS), dtype=f),
+            x.new_empty((DS, DS), dtype=f), x.new_empty((4 * DS, DS), dtype=f), x.new_empty((DS, 2 * DS), dtype=f), x.new_empty((32,), dtype=f),
+            x.new_empty((32,), dtype=f)]
+
+
+@opaque(fake=_esm_train_bwd_fake, name="local_dit_h100_esm_train_bwd")
+def _esm_train_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor,
+                   saved: list[torch.Tensor], qkw: list[torch.Tensor], length: int, eps: float) -> list[torch.Tensor]:
+    """[dx, dtab, dbias2, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dwkl] (fp32 but dx)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    ext, qk = _esm_rows(), _qk_kernels()
+    s = dict(zip(_ESM_TRAIN_SAVED, saved, strict=True))
+    m = x.shape[0]
+    n, a = length, m // length
+    dev = x.device
+    sp = min(a, _ESM_SPLITS)
+    cols = lambda c: c * DS  # noqa: E731
+    dout = dout.to(x.dtype).contiguous()
+    part = torch.empty(sp, n, 8 * DS, device=dev, dtype=F32)
+    w_gq, w_kv, w_o, w_exp, w_sq = s["w_gq"], s["w_kv"], s["w_o"], s["w_exp"], s["w_sq"]
+    mmt = lambda p, r: torch.mm(p.t(), r, out_dtype=F32)  # noqa: E731
+    dy2 = torch.empty(m, DS, device=dev, dtype=BF)
+    ext.res_bwd(dout, s["y2"], tab, cols(A_G_T), dy2, None, 0, None, part, cols(A_G_T), 0, n, sp, True)
+    dh = torch.mm(dy2, w_sq)
+    dwsq = mmt(dy2, s["h"])
+    dab = torch.empty_like(s["ab"])
+    ext.glu_bwd(s["ab"], dh, dab, False)
+    dt = torch.mm(dab, w_exp)
+    dwexp = mmt(dab, s["xt"])
+    dxp = torch.empty(m, DS, device=dev, dtype=F32)
+    dya = torch.empty(m, DS, device=dev, dtype=BF)
+    ext.res_adaln_bwd(dout, dt, s["xp"], s["st2"], tab, cols(A_SC_T), cols(A_G_A), s["ya"], dxp, dya, part, cols(A_SC_T), cols(A_SH_T), cols(A_G_A), n, sp,
+                      _RMS_MODE)
+    dog = torch.mm(dya, w_o)
+    dwo = mmt(dya, s["og"])
+    d_o = torch.empty(m, DS, device=dev, dtype=BF)
+    dp = torch.empty(m, 4 * DS, device=dev, dtype=BF)               # [dg | dq | dk | dv]
+    dd = torch.empty(a, NH, n, device=dev, dtype=F32)
+    ext.gate_o_bwd(dog, s["og"], s["g"], d_o, dp[:, :DS], dd, n, DS // NH, False)
+    dbias2 = local.attn_esm_bwd(s["qn"].view(a, n, DS), s["kn"].view(a, n, DS), s["v"].view(a, n, DS), d_o.view(a, n, DS), bias2, s["lse"], dd, dp[:, DS:])
+    qw = [w.float().contiguous() for w in qkw]
+    qpart = qk.qknorm_rope_bwd(dp[:, DS:2 * DS], dp[:, 2 * DS:3 * DS], s["q"], s["k"], qw[0], qw[1], _RMS_EPS, _RMS_EPS, cos, sin)
+    dqkw = qpart.sum(0)
+    dbq = dp[:, DS:2 * DS].sum(0, dtype=F32)
+    dxq = torch.mm(dp[:, :2 * DS], w_gq)
+    dwgq = mmt(dp[:, :2 * DS], s["xq"])
+    dxk = torch.mm(dp[:, 2 * DS:], w_kv)
+    dwkv = mmt(dp[:, 2 * DS:], s["xk"])
+    dx = torch.empty_like(x)
+    ext.adaln_bwd(x, s["st1"], dxp, [dxq, dxk], tab, [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SC_Q), cols(A_SC_K)], [cols(A_SH_Q), cols(A_SH_K)], dx, part, n, sp,
+                  _RMS_MODE)
+    dtab = part.sum(0)
+    return [dx, dtab, dbias2, dwgq[DS:].clone(), dbq, dwkv[:DS].clone(), dwkv[DS:].clone(), dwgq[:DS].clone(), dwo, dwexp, dwsq, dqkw[0].clone(), dqkw[1].clone()]
+
+
+def _esm_pb_fwd_fake(z, gamma, wb, kmask, nreal):
+    return z.new_empty((NH, z.shape[0], 32, ESM_SPAN_), dtype=F32)
+
+
+@opaque(fake=_esm_pb_fwd_fake, name="local_dit_h100_esm_pair_bias_fwd")
+def _esm_pb_fwd(z: torch.Tensor, gamma: torch.Tensor, wb: torch.Tensor, kmask: torch.Tensor | None, nreal: torch.Tensor) -> torch.Tensor:
+    """bias2 [4, nwin, 32, 160] fp32 of the trunked pair z [nwin, 32, 192, 16] (``sm100_atom_local.pair_bias_esm``)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    with torch.cuda.device(z.device):
+        return local.pair_bias_esm(z, gamma, wb, kmask, nreal, z.shape[0] * 32)
+
+
+def _esm_pb_bwd_fake(z, gamma, wb, dbias, nreal):
+    return [torch.empty_like(z), gamma.new_empty((DP,), dtype=F32), wb.new_empty(wb.shape, dtype=F32)]
+
+
+@opaque(fake=_esm_pb_bwd_fake, name="local_dit_h100_esm_pair_bias_bwd")
+def _esm_pb_bwd(z: torch.Tensor, gamma: torch.Tensor, wb: torch.Tensor, dbias: torch.Tensor, nreal: torch.Tensor) -> list[torch.Tensor]:
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    with torch.cuda.device(z.device):
+        dz, dgamma, dwb = local.pair_bias_esm_bwd(z, gamma, wb, dbias, nreal)
+    return [dz, dgamma, dwb]
+
+
+class _EsmPairBias(torch.autograd.Function):
+    """The windowed pair bias of one ESMFold2 block from the trunked pair z [nwin, 32, 192, 16]."""
+
+    @staticmethod
+    def forward(ctx, z, gamma, wb, kmask, nreal):  # noqa: D102
+        ctx.save_for_backward(z, gamma, wb, nreal)
+        return _esm_pb_fwd(z, gamma, wb, kmask, nreal)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dbias):  # noqa: D102
+        z, gamma, wb, nreal = ctx.saved_tensors
+        dz, dgamma, dwb = _esm_pb_bwd(z, gamma, wb, dbias.contiguous(), nreal)
+        return dz, dgamma.to(gamma.dtype), dwb.to(wb.dtype), None, None
+
+
+class _EsmBlock(torch.autograd.Function):
+    """The block: forward saving what the backward reads, backward on the same kernels."""
+
+    @staticmethod
+    def forward(ctx, x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wexp, wsq, wql, wkl, length):  # noqa: D102
+        out, *saved = _esm_train_fwd(x, tab, bias2, cos, sin, wq, bq, wk, wv, wg, wo, wexp, wsq, [wql, wkl], length, _RMS_EPS)
+        ctx.save_for_backward(x, tab, bias2, cos, sin, *saved, wq, wk, wv, wg, wo, wexp, wsq, wql, wkl)
+        ctx.n_saved, ctx.length = len(saved), length
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dout):  # noqa: D102
+        x, tab, bias2, cos, sin, *rest = ctx.saved_tensors
+        saved, (wq, wk, wv, wg, wo, wexp, wsq, wql, wkl) = rest[:ctx.n_saved], rest[ctx.n_saved:]
+        dx, dtab, dbias2, dwq, dbq, dwk, dwv, dwg, dwo, dwexp, dwsq, dwql, dwkl = _esm_train_bwd(
+            dout, x, tab, bias2, cos, sin, list(saved), [wql, wkl], ctx.length, _RMS_EPS)
+        c = lambda g, w: g.to(w.dtype)  # noqa: E731
+        return (dx, dtab.to(tab.dtype), dbias2, None, None, c(dwq, wq), dbq.to(wq.dtype), c(dwk, wk), c(dwv, wv), c(dwg, wg), c(dwo, wo), c(dwexp, wexp),
+                c(dwsq, wsq), c(dwql, wql), c(dwkl, wkl), None)
+
+
+def _esm_train(module, single, cond, pair, mask, rope):
+    """The ESMFold2 block's output stream [A, 1, N, 128] with a gradient on the H100 training kernels (``_esm_train_serves`` accepted the call)."""
+    import torch.nn.functional as Fn
+
+    att, tr = module.attention, module.transition
+    a, _, n0, _ = single.shape
+    n = _ld._padded_length(n0)
+    m = a * n
+    kmask = _ld._keys(mask, n0, n)
+    nreal = (kmask.sum(dtype=torch.int32) if kmask is not None else torch.full((), n0, device=single.device, dtype=torch.int32))
+    cos, sin = ((t[0].float() if n == n0 else Fn.pad(t[0].float(), (0, 0, 0, n - n0))).contiguous() for t in rope)
+    x = _ld._padded(single, n).reshape(m, DS)
+    c = _ld._padded(cond[:1], n).reshape(n, DC)
+    ws = [att.ada_ln_in.to_scale.weight, att.ada_ln_in.to_bias.weight, att.ada_ln_kv.to_scale.weight, att.ada_ln_kv.to_bias.weight, att.to_scale.weight,
+          tr.ada_ln_in.to_scale.weight, tr.ada_ln_in.to_bias.weight, tr.to_scale.weight]
+    ones = torch.zeros(8 * DS, device=single.device, dtype=BF)
+    for blk in (A_SC_Q, A_SC_K, A_SC_T):
+        ones[blk * DS:(blk + 1) * DS] = 1
+    tab = torch.mm(Fn.silu(c), torch.cat(ws).to(BF).t()) + ones
+    z = _ld._trunk(pair, n)
+    bias2 = _EsmPairBias.apply(z.contiguous(), att.ln_pair.weight, att.to_bias.weight, kmask, nreal)
+    wexp = torch.cat([tr.expand_a.weight, tr.expand_b.weight])
+    out = _EsmBlock.apply(x, tab, bias2, cos, sin, att.to_query.weight, att.to_query.bias, att.to_key.weight, att.to_value.weight, att.to_gate.weight,
+                          att.to_out.weight, wexp, tr.squeeze.weight, att.norm_query.weight, att.norm_key.weight, n)
+    return _ld._unpadded(out.view(a, 1, n, DS), single.shape)
