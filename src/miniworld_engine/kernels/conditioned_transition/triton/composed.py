@@ -22,6 +22,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 
 
 
@@ -86,8 +88,8 @@ def _expand_swiglu_kernel(
             wb_ptr + cols[None, :] * stride_wn + k[:, None] * stride_wk,
             mask=k_mask[:, None] & col_mask[None, :], other=0.0,
         )
-        a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-        b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+        a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
+        b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
     h = a * tl.sigmoid(a) * b
     tl.store(
         h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn,
@@ -144,7 +146,7 @@ def _squeeze_gate_kernel(
             ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=n_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+        out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
 
     # scale[:, d_tile] = cond @ Wsc[d_tile, :]^T + b_sc  (DC tiled), y = sigmoid(scale) * out
     scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
@@ -159,7 +161,7 @@ def _squeeze_gate_kernel(
             wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
             mask=dc_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+        scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc

@@ -29,6 +29,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
@@ -118,14 +120,14 @@ def _cond_transition_inference_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a = tl.dot(x, wa, a, out_dtype=tl.float32, input_precision="tf32")
-            b = tl.dot(x, wb, b, out_dtype=tl.float32, input_precision="tf32")
+            a = tf32_dot(x, wa, a, out_dtype=tl.float32, input_precision="tf32")
+            b = tf32_dot(x, wb, b, out_dtype=tl.float32, input_precision="tf32")
         h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # operand dtype -> squeeze dot in bf16/fp32
         ws_t = tl.load(  # (BN, BN): Ws[d, cols]^T
             ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=col_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32, input_precision="tf32")
+        out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32, input_precision="tf32")
 
     # Conditioning gate: scale = cond @ Wsc^T + b_sc ; y = sigmoid(scale) * out.
     # DC is tiled (the full (BLOCK_K_DC, D) Wsc^T tile would blow smem in fp32 at DC=384).
@@ -141,7 +143,7 @@ def _cond_transition_inference_kernel(
             wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
             mask=dc_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        scale = tl.dot(cond, wsc_t, scale, out_dtype=tl.float32, input_precision="tf32")
+        scale = tf32_dot(cond, wsc_t, scale, out_dtype=tl.float32, input_precision="tf32")
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc

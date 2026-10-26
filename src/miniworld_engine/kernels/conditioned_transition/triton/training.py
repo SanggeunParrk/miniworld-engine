@@ -34,6 +34,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 from miniworld_engine.kernels._tma import tma_launchable
 from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
@@ -241,7 +243,7 @@ def _dh_swiglu_bwd_kernel(
             on = pid_n * BLOCK_N
             acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
             for k in range(0, D, BLOCK_K):
-                acc = tl.dot(do_d.load([om, k]), w_d.load([k, on]), acc)
+                acc = tf32_dot(do_d.load([om, k]), w_d.load([k, on]), acc)
             if EPI == 1:
                 a = a_d.load([om, on]).to(tl.float32)
                 b = b_d.load([om, on]).to(tl.float32)
@@ -276,7 +278,7 @@ def _dh_swiglu_bwd_kernel(
                          mask=rmask[:, None] & kmask[None, :], other=0.0)
             w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
                         mask=kmask[:, None] & nmask[None, :], other=0.0)
-            dh += tl.dot(do, w, out_dtype=tl.float32)
+            dh += tf32_dot(do, w, out_dtype=tl.float32)
 
         m = rmask[:, None] & nmask[None, :]
         off = rows[:, None] * sa0 + cols[None, :]
@@ -440,8 +442,8 @@ def _b2b_fwd_train_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-            b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
+            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
         # Preserve the fp32 SwiGLU value through the squeeze. Rounding it to a
         # single bf16 operand adds an avoidable error before the final y cast.
         # Two bf16 components retain the residual while using bf16 tensor cores;
@@ -452,8 +454,8 @@ def _b2b_fwd_train_kernel(
                        mask=col_mask[:, None] & d_mask[None, :], other=0.0)
         if x_ptr.dtype.element_ty == tl.bfloat16:
             h_low = (h_full - h.to(tl.float32)).to(tl.bfloat16)
-            out_acc += tl.dot(h_low, ws_t, out_dtype=tl.float32)
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+            out_acc += tf32_dot(h_low, ws_t, out_dtype=tl.float32)
+        out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
         # emit saved tensors for backward (write the chunk as we go). Only the pid_d==0 column
         # of programs writes them: a/b/h do not depend on the d tile, so every other d program
         # would re-store identical bytes. Folded into the store MASK rather than an `if`, so
@@ -470,7 +472,7 @@ def _b2b_fwd_train_kernel(
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                         mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
-        scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+        scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc

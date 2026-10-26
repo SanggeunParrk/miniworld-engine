@@ -29,6 +29,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 
 # Reuse the proven, tested TE-style LN building blocks (cuBLAS + Triton, portable).
 from ...layernorm_linear.triton.te_style import (
@@ -425,7 +427,7 @@ def _dgrad_condln_kernel(
                         mask=rmask[:, None] & kmask[None, :], other=0.0)
             b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                         mask=kmask[:, None] & ncmask[None, :], other=0.0)
-            acc += tl.dot(a, b, input_precision="tf32")
+            acc += tf32_dot(a, b, input_precision="tf32")
         cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                        mask=nmask2, other=0.0).to(tl.float32)
         g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -457,7 +459,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tl.dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32")
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -483,7 +485,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tl.dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32")
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -599,8 +601,8 @@ def _adaln_fwd_gate_kernel(
             bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
             for k in range(0, NC, BLOCK_K):
                 ak = a_d.load([om, k])
-                scale = tl.dot(ak, s_d.load([on, k]).T, scale)
-                bias = tl.dot(ak, b_d.load([on, k]).T, bias)
+                scale = tf32_dot(ak, s_d.load([on, k]).T, scale)
+                bias = tf32_dot(ak, b_d.load([on, k]).T, bias)
             rws = om + tl.arange(0, BLOCK_M)
             rstd = tl.load(Rstd + rws, mask=rws < M, other=0.0)[:, None]
             c1 = tl.load(C1 + rws, mask=rws < M, other=0.0)[:, None]
@@ -641,8 +643,8 @@ def _adaln_fwd_gate_kernel(
                           mask=kmask[:, None] & nmask[None, :], other=0.0)
             w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                           mask=kmask[:, None] & nmask[None, :], other=0.0)
-            scale += tl.dot(a, w_s, out_dtype=tl.float32)
-            bias += tl.dot(a, w_b, out_dtype=tl.float32)
+            scale += tf32_dot(a, w_s, out_dtype=tl.float32)
+            bias += tf32_dot(a, w_b, out_dtype=tl.float32)
         xm = rmask[:, None] & nmask[None, :]
         xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
         rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]

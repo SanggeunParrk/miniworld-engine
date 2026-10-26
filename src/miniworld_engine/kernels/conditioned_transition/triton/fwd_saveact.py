@@ -28,6 +28,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
 
@@ -98,8 +100,8 @@ def _fwd_expand_swiglu_kernel(
             b = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for k in range(0, K, BLOCK_K):
                 xk = x_d.load([om, k])
-                a = tl.dot(xk, wa_d.load([on, k]).T, a)
-                b = tl.dot(xk, wb_d.load([on, k]).T, b)
+                a = tf32_dot(xk, wa_d.load([on, k]).T, a)
+                b = tf32_dot(xk, wb_d.load([on, k]).T, b)
             if EPI == 1:
                 h_d.store([om, on], (a * tl.sigmoid(a) * b).to(h_ptr.dtype.element_ty))
                 a_d.store([om, on], a.to(ab_ptr.dtype.element_ty))
@@ -133,8 +135,8 @@ def _fwd_expand_swiglu_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             wb = tl.load(wb_ptr + cols[None, :] * stride_wn + k[:, None] * stride_wk,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-            b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
+            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
         h = a * tl.sigmoid(a) * b
         m = row_mask[:, None] & col_mask[None, :]
         tl.store(h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn, h, mask=m)
@@ -196,10 +198,10 @@ def _fwd_squeeze_gate_kernel(
             od = pid_d * BLOCK_N
             out_acc = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for n0 in range(0, ND, BLOCK_K_ND):
-                out_acc = tl.dot(h_d.load([om, n0]), ws_d.load([od, n0]).T, out_acc)
+                out_acc = tf32_dot(h_d.load([om, n0]), ws_d.load([od, n0]).T, out_acc)
             scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
             for c0 in range(0, DC, BLOCK_K_DC):
-                scale = tl.dot(c_d.load([om, c0]), wsc_d.load([od, c0]).T, scale)
+                scale = tf32_dot(c_d.load([om, c0]), wsc_d.load([od, c0]).T, scale)
             if EPI == 1:
                 bsc = tl.load(bsc_ptr + od + tl.arange(0, BLOCK_N), mask=od + tl.arange(0, BLOCK_N) < D, other=0.0).to(tl.float32)
                 scale += bsc[None, :]
@@ -244,7 +246,7 @@ def _fwd_squeeze_gate_kernel(
                         mask=row_mask[:, None] & n_mask[None, :], other=0.0)
             ws_t = tl.load(ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
                            mask=n_mask[:, None] & d_mask[None, :], other=0.0)
-            out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+            out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
         scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
         for c0 in range(0, DC, BLOCK_K_DC):
             dc = c0 + tl.arange(0, BLOCK_K_DC)
@@ -253,7 +255,7 @@ def _fwd_squeeze_gate_kernel(
                            mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
             wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                             mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
-            scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+            scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
         bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
         scale += bsc[None, :]
         y = tl.sigmoid(scale) * out_acc

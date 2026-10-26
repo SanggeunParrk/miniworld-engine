@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
@@ -41,7 +43,7 @@ def _squeeze_residual_kernel(
             for k0 in range(0, K, BLOCK_K):
                 h = h_desc.load([pm * BLOCK_M1, k0])
                 w = w_desc.load([pn * BLOCK_N, k0])
-                acc = tl.dot(h, w.T, acc, input_precision=PREC)
+                acc = tf32_dot(h, w.T, acc, input_precision=PREC)
             residual = r_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
             # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
             y = acc.to(Y.dtype.element_ty).to(tl.float32) + residual
@@ -58,7 +60,7 @@ def _squeeze_residual_kernel(
                         mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
             w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
                         mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
-            acc = tl.dot(h, w, acc, input_precision=PREC)
+            acc = tf32_dot(h, w, acc, input_precision=PREC)
         mask = (m[:, None] < M) & (n[None, :] < N)
         residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
         # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.

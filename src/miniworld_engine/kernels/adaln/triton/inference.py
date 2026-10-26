@@ -39,6 +39,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 
 
 # fp32 matmul precision policy (shared idea with layernorm_linear/te_style).
@@ -323,8 +325,8 @@ def _adaln_gemm_gate_kernel(
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
         w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
-        scale += tl.dot(a, w_s, out_dtype=tl.float32)
-        bias += tl.dot(a, w_b, out_dtype=tl.float32)
+        scale += tf32_dot(a, w_s, out_dtype=tl.float32)
+        bias += tf32_dot(a, w_b, out_dtype=tl.float32)
 
     # x last: its tile would otherwise sit in shared memory for the whole K loop, and shared
     # memory is what capped the kernel this replaces.
@@ -538,8 +540,8 @@ def _adaln_fused_kernel(  # noqa: PLR0915
                 cond_aff = cond_aff.to(X.dtype.element_ty)
                 sw = sw.to(X.dtype.element_ty)
                 bw = bw.to(X.dtype.element_ty)
-            scale += tl.dot(cond_aff, sw, out_dtype=tl.float32)
-            bias += tl.dot(cond_aff, bw, out_dtype=tl.float32)
+            scale += tf32_dot(cond_aff, sw, out_dtype=tl.float32)
+            bias += tf32_dot(cond_aff, bw, out_dtype=tl.float32)
         scale += scale_b[None, :]
         y = tl.sigmoid(scale) * x_hat + bias
         yo = rows[:, None] * syr + xc[None, :] * syc

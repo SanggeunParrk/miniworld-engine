@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
@@ -84,7 +86,7 @@ def transition_fwd_kernel(
             for k in range(0, K, BLOCK_K):
                 x_tile = x_desc.load([pid_m * BLOCK_M1, k])
                 w_tile = w_desc.load([pid_n * (2 * BLOCK_N), k])
-                acc = tl.dot(x_tile, w_tile.T, acc, input_precision=PREC)
+                acc = tf32_dot(x_tile, w_tile.T, acc, input_precision=PREC)
             A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
             swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
             out_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], swish_AB.to(out_ptr.dtype.element_ty))
@@ -114,7 +116,7 @@ def transition_fwd_kernel(
                 mask=((offs_w[None, :] < 2 * ND) & (offs_k[:, None] < K)),
                 other=0.0,
             )
-            acc = tl.dot(x_tile, w_tile, acc, input_precision=PREC)
+            acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC)
 
         A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
         swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
