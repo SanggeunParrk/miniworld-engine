@@ -73,8 +73,8 @@ NOT_A_NORMALISATION = {
      "return (w * gam.float()[None, :]).to(torch.bfloat16).contiguous(), (bo.float() + w @ bet.float()).contiguous()"):
         "The out-projection WEIGHT with the product LayerNorm gamma folded in (the kernel's operand), not a normalized activation.",
     ("outer_product_mean/chai.py",
-     "w = torch.cat([wl, wr]).to(torch.bfloat16).contiguous()"):
-        "The stacked left / right projection WEIGHTS, not a normalized activation.",
+     "return lnw.float().contiguous(), lnb.float().contiguous(), torch.cat([wl, wr]).to(torch.bfloat16).contiguous(), wf, bf"):
+        "The stacked left / right projection WEIGHTS (cached with the fp32 LayerNorm affine), not a normalized activation.",
     ("trimul_inproj/cuda/h100_b7.py",
      'self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)'):
         "Mask storage for the H100 projection path, not a normalized activation.",

@@ -41,7 +41,19 @@ def _fold(wo, gam, bet, bo):
     return (w * gam.float()[None, :]).to(torch.bfloat16).contiguous(), (bo.float() + w @ bet.float()).contiguous()
 
 
-def _front(msa, mask, lnw, lnb, wl, wr, eps, save):
+def _forms(lnw, lnb, wl, wr, gam, bet, wo, bo):
+    """The kernel-dtype forms of the weights, made once while the weights are unchanged (`_capture.param_forms`): (LayerNorm gamma / beta fp32,
+    [W_left; W_right] bf16, W' bf16, b' fp32). With fp32 master parameters this was a handful of cast kernels per call."""
+    from miniworld_engine.kernels import _capture
+
+    def build():
+        wf, bf = _fold(wo, gam, bet, bo)
+        return lnw.float().contiguous(), lnb.float().contiguous(), torch.cat([wl, wr]).to(torch.bfloat16).contiguous(), wf, bf
+
+    return _capture.param_forms("chai_forms", [lnw, lnb, wl, wr, gam, bet, wo, bo], build)
+
+
+def _front(msa, mask, forms, eps, save):
     from miniworld_engine.kernels.outer_product_mean import cuda
 
     _, s, n, _ = msa.shape
@@ -51,8 +63,8 @@ def _front(msa, mask, lnw, lnb, wl, wr, eps, save):
         mk = mask[0].reshape(s * n).contiguous()
         if mk.dtype != torch.bool:
             mk = mk != 0
-    w = torch.cat([wl, wr]).to(torch.bfloat16).contiguous()
-    a, b, st1 = cuda.chai_proj(x, mk, lnw.float().contiguous(), lnb.float().contiguous(), w, eps, save)
+    lnw32, lnb32, w, _, _ = forms
+    a, b, st1 = cuda.chai_proj(x, mk, lnw32, lnb32, w, eps, save)
     o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
     return a, b, st1, o
 
@@ -73,8 +85,9 @@ def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) 
     """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
     from miniworld_engine.kernels.outer_product_mean import cuda
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
-    a, b, st1, o = _front(msa, mask, lnw, lnb, wl, wr, eps, train)
-    wf, bf = _fold(wo, gam, bet, bo)
+    forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
+    a, b, st1, o = _front(msa, mask, forms, eps, train)
+    wf, bf = forms[3], forms[4]
     z, y, st = cuda.chai_epilogue(o, wf, bf, residual if residual.numel() else None, train, eps_prod)
     if not train:
         return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32)]
@@ -98,7 +111,7 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     t = s * n
     cz = wo.shape[0]
     dz2 = dz.reshape(n * n, cz).contiguous()
-    wf, _ = _fold(wo, gam, bet, bo)
+    lnw32, lnb32, wlr, wf, _ = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
     dy = torch.mm(dz2, wf)                                                          # [N N, 512] = dz W'
     dbo = torch.mm(dz2.new_ones((1, n * n)), dz2, out_dtype=f32).reshape(-1)        # sum over the pairs
     dwp = torch.mm(dz2.t(), y, out_dtype=f32)                                       # dW' = dz^T y
@@ -111,14 +124,13 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))                         # [8, S, N K]
     db = torch.bmm(a.view(G, s, n * K), do)
     del do
-    wlr = torch.cat([wl, wr]).to(bf).contiguous()
     x = msa[0].reshape(t, CM).contiguous()
     mk = None
     if mask.numel():
         mk = mask[0].reshape(t).contiguous()
         if mk.dtype != torch.bool:
             mk = mk != 0
-    dcat, ln16, dx, part = cuda.chai_projbwd(x, mk, da.view(G, t, K), db.view(G, t, K), lnw.float().contiguous(), lnb.float().contiguous(), st1, wlr)
+    dcat, ln16, dx, part = cuda.chai_projbwd(x, mk, da.view(G, t, K), db.view(G, t, K), lnw32, lnb32, st1, wlr)
     dw = torch.mm(dcat.t(), ln16, out_dtype=f32)                                    # [128, 64]
     dlw, dlb = part[:, :CM].sum(0), part[:, CM:].sum(0)
     return [dx.view(1, s, n, CM).clone(), dlw.to(lnw.dtype), dlb.to(lnb.dtype), dw[:G * K].to(wl.dtype).clone(), dw[G * K:].to(wr.dtype).clone(),
