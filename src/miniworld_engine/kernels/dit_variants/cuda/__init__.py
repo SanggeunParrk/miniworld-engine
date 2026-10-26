@@ -73,3 +73,26 @@ def parallel_residual(x, outputs):
     """x + sum_i (y_i - x) with fp32 sums and one rounding: a parallel block's output from the residual outputs y_i = x + f_i(x) of its
     parts (each engine module owns its residual). x / y_i contiguous, one shape, bf16 or fp32; one to eight outputs."""
     return ext().parallel_residual(x, list(outputs))
+
+
+@functools.lru_cache(maxsize=None)
+def train_ext():
+    """The training row kernels (``train_rows.cu``): sm_90a, built on first use."""
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="dit_variants_train_rows_sm90a",
+        sources=[str(_dir / "train_rows.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes("90a"),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )

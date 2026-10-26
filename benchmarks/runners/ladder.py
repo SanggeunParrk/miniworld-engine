@@ -142,6 +142,9 @@ GROUPS: list[Group] = [
     G("dit_boltz2", "DiT variant stack", "dit", (384,), "Boltz-2 token", "+dit_variant=boltz2", weight=2),
     G("dit_rf3", "DiT variant stack", "dit", (384,), "RoseTTAFold3 token", "+dit_variant=rosettafold3", weight=2),
     G("dit_chai1", "DiT variant stack", "dit", (384,), "Chai-1 token", "+dit_variant=chai1", weight=2),
+    G("dit_boltz2_fp32", "DiT variant stack", "dit", (384,), "Boltz-2 token", "+dit_variant=boltz2", precision="32", weight=1),
+    G("dit_rf3_fp32", "DiT variant stack", "dit", (384,), "RoseTTAFold3 token", "+dit_variant=rosettafold3", precision="32", weight=1),
+    G("dit_chai1_fp32", "DiT variant stack", "dit", (384,), "Chai-1 token", "+dit_variant=chai1", precision="32", weight=1),
     G("local_bf16", "LocalDiT atom block", "local_dit", (512, 1024), "d128 32x128 (atoms=8L)", weight=3, tier="smoke"),
     G("local_fp32", "LocalDiT atom block", "local_dit", (512,), "d128 32x128 (atoms=8L)", precision="32", weight=2),
     G("local_esm", "LocalDiT ESMFold2 atom block", "local_dit", (512, 1024), "d128 192 keys rotary (atoms=8L)", "+local_dit_preset=esmfold2", "+shared_cond=true",
@@ -149,6 +152,9 @@ GROUPS: list[Group] = [
     G("local_boltz2", "DiT variant stack (atom)", "local_dit", (512,), "Boltz-2 atom", "+dit_variant=boltz2", weight=2),
     G("local_rf3", "DiT variant stack (atom)", "local_dit", (512,), "RoseTTAFold3 atom", "+dit_variant=rosettafold3", weight=2),
     G("local_chai1", "DiT variant stack (atom)", "local_dit", (512,), "Chai-1 atom", "+dit_variant=chai1", weight=2),
+    G("local_boltz2_fp32", "DiT variant stack (atom)", "local_dit", (512,), "Boltz-2 atom", "+dit_variant=boltz2", precision="32", weight=1),
+    G("local_rf3_fp32", "DiT variant stack (atom)", "local_dit", (512,), "RoseTTAFold3 atom", "+dit_variant=rosettafold3", precision="32", weight=1),
+    G("local_chai1_fp32", "DiT variant stack (atom)", "local_dit", (512,), "Chai-1 atom", "+dit_variant=chai1", precision="32", weight=1),
     G("bodit_bf16", "bias-only DiT", "bias_only_dit", (256, 512, 768), "d768 16x48 A5/A48", weight=3, tier="smoke"),
     G("bodit_psb", "bias-only DiT", "bias_only_dit", (256, 512), "d768 16x48 per-sample pair A4", "n_augment=4", "+per_sample_pair=true", modes=("training",),
       weight=2),
@@ -331,8 +337,12 @@ def cmd_run(args) -> int:
     bad = 0
     for g in select(args):
         for mode in g.modes:
+            if args.modes and mode not in args.modes.split(","):
+                continue
             recs = {}
             for spec in commands(g, mode, args.repeats, out):
+                if args.kinds and spec["kind"] not in args.kinds.split(","):
+                    continue
                 if (g.id, mode, spec["kind"]) in done:
                     continue
                 rec = run_one(spec, g, mode, out, log)
@@ -703,6 +713,8 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--tier", default="core", choices=list(TIERS), help="smoke: one cell per op; core: production shapes; full: all served")
             s.add_argument("--group", default="", help="regex over group ids (overrides --tier)")
             s.add_argument("--repeats", type=int, default=3)
+            s.add_argument("--modes", default="", help="comma list of modes to run (default: every mode of the group)")
+            s.add_argument("--kinds", default="", help="comma list of command kinds to run: rungs, engine_nc, eager_graph, eager (default: all four)")
             s.add_argument("--out", default=str(Path.home() / "miniworld-engine-scratch" / "ladder" / "out"))
             if name == "run":
                 s.add_argument("--resume", action="store_true")

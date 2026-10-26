@@ -392,6 +392,9 @@ class Settings:
     token_dit_rows_cuda: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
     token_dit_train: bool = True
+    #: The hand-CUDA TRAINING step of the DiT variant stacks (Boltz-2 / RoseTTAFold3 / Chai-1, token and atom) on H100; off = the portable /
+    #: reference route. Default on.
+    dit_variant_train_cuda: bool = True
     #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
     tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
@@ -696,6 +699,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN": "bias_only_dit_train",
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
     "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
+    "MINIWORLD_DIT_VARIANT_TRAIN_CUDA": "dit_variant_train_cuda",
     "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
     "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
     "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",
