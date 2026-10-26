@@ -21,6 +21,8 @@ after = this branch (run `after3`). Times in us. c/p = CUDA / portable, must be 
 | RMSNorm bf16 | train | x[48,384,768] | 69 | 61 | 73 | 1.192 | 66 | 1.090 |
 | RMSNorm bf16 | train | x[48,1024,768] | 167 | 140 | 156 | 1.113 | 147 | 1.044 |
 
+Floor reference (amortized, 10 launches per graph, same GPU): plain `copy_` of the input = 27.1 us (LN D128 bf16 L384), 100.9 (L768), 51.6 (fp32 D128 L384 and D256 bf16 L384), 19.7 (RMS L384), 51.5 (RMS L1024); the Triton forwards measure 27.2 / 100.7 / 52.0 / 52.4 / 19.2 / 55.5, i.e. the inference rows are floor-limited (the ladder adds ~4 us of graph launch to all of them).
+
 (Run-to-run: a repeat of the whole set (`after2`, same code but the cp.async forward also in LN inference) gave the same c/p within 0.01 on every training / RMSNorm
 row.) **Not fixed: no row reached c/p <= 0.95, and 11 of the 12 rows are still above 1.0** (one is 0.995, a tie). Every row improved or stayed equal against the CUDA
 rung before; the large ones are LN training (1.26 -> 0.995 at L384, 1.32 -> 1.04 at L768, fp32 1.91 -> 1.03) and RMSNorm (1.32 -> 1.06, 1.21 -> 1.01 inference).
