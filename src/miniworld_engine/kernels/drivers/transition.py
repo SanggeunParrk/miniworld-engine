@@ -396,6 +396,11 @@ def transition_bwd_squeeze_swiglu_triton():
     x2, _, _, wa, wb, ws = _transition_operands(k=K_FROM_ND)
     w_ab = torch.stack((wa, wb), dim=1).reshape(2 * wa.shape[0], wa.shape[1])
     squeeze_swiglu_bwd(x2, w_ab, rows2d(ROWS, K_FROM_ND), ws, SHAPE_KEY)
+    # the training backward reads the forward's saved halves instead (SAVED, keyed): what a Transition under autograd launches
+    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
+
+    nd = wa.shape[0]
+    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, rows2d(ROWS, nd), rows2d(ROWS, nd), SHAPE_KEY)
 
 
 def transition_squeeze_residual_triton():

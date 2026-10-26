@@ -342,7 +342,16 @@ def transition_bwd_squeeze_swiglu_triton():
     dh = (dy.float() @ ws.float()).to(dy.dtype).float()
     sig = torch.sigmoid(a)
     silu = a * sig
-    return {"h": (h, silu * b), "dA": (dab[:, :nd], dh * b * (sig + silu * (1.0 - sig))), "dB": (dab[:, nd:], dh * silu)}
+    # the saved-halves backward: a, b as the forward stores them (activation dtype)
+    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
+
+    ab, bb = a.to(dy.dtype), b.to(dy.dtype)
+    dab2 = squeeze_swiglu_bwd_saved(dy, ws, ab, bb, SHAPE_KEY)
+    af, bf = ab.float(), bb.float()
+    sig2 = torch.sigmoid(af)
+    silu2 = af * sig2
+    return {"h": (h, silu * b), "dA": (dab[:, :nd], dh * b * (sig + silu * (1.0 - sig))), "dB": (dab[:, nd:], dh * silu),
+            "dA_saved": (dab2[:, :nd], dh * bf * (sig2 + silu2 * (1.0 - sig2))), "dB_saved": (dab2[:, nd:], dh * silu2)}
 
 
 def transition_squeeze_residual_triton():

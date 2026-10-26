@@ -138,9 +138,7 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab):
     # `_expand_swiglu` already derives it this way.
     nd = expand_a_weight.shape[0]
     expand = torch.empty(M, nd, dtype=x.dtype, device=x.device)
-    # the halves are kept in fp32: the backward gate then sees the same pre-activations the PyTorch-free CUDA
-    # kernels recompute (bf16 halves moved dx by ~4e-3 against them, an order past the parity bands)
-    a, b = (torch.empty(M, nd, dtype=torch.float32, device=x.device) for _ in range(2)) if store_ab else (expand, expand)
+    a, b = (torch.empty_like(expand), torch.empty_like(expand)) if store_ab else (expand, expand)
     # both weights as one operand, row-interleaved (2*ND, K): ~10 MB at the widest, a few microseconds
     w_ab = torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)
     use_tma = tma_ok(x, w_ab, expand, a, b)
@@ -187,9 +185,9 @@ def _expand_swiglu(
 
 
 def _expand_swiglu_saveact_fake(x, expand_a_weight, expand_b_weight, shape_key):
-    """``h (M, ND)`` in ``x``'s dtype and the halves ``a``, ``b`` ``(M, ND)`` in fp32."""
+    """``(h, a, b)``, each ``(M, ND)`` in ``x``'s dtype."""
     out = x.new_empty((x.shape[0], expand_a_weight.shape[0]))
-    return out, torch.empty(out.shape, dtype=torch.float32, device=out.device), torch.empty(out.shape, dtype=torch.float32, device=out.device)
+    return out, torch.empty_like(out), torch.empty_like(out)
 
 
 @opaque(fake=_expand_swiglu_saveact_fake, name="transition_expand_swiglu_saveact")
@@ -200,7 +198,7 @@ def _expand_swiglu_saveact(
     shape_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The training forward launch: ``(h, a, b)`` with ``h = SwiGLU(a, b)`` and ``a, b`` the two
-    expand halves, ``h`` in ``x``'s dtype, ``a`` and ``b`` ``(M, n*N)`` in fp32. The backward consumes ``a`` and ``b``."""
+    expand halves, each ``(M, n*N)`` in ``x``'s dtype. The backward consumes ``a`` and ``b``."""
     return _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, True)
 
 
@@ -250,6 +248,7 @@ class TritonTransitionFunction(torch.autograd.Function):
         expand_b_weight: Float[torch.Tensor, "nd d"],
         squeeze_weight: Float[torch.Tensor, "d nd"],
         n: int | None = None,
+        save_act: bool = True,
     ) -> Float[torch.Tensor, "... d"]:
         """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` -- no normalization, no residual.
 
@@ -277,8 +276,14 @@ class TritonTransitionFunction(torch.autograd.Function):
         # L = shape[-2] of x BEFORE the view(-1, d) above -- one rule for pair
         # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
         key = both_key(rows_of(orig_shape))
-        expand = _expand_swiglu(x, expand_a_weight, expand_b_weight, key)
-        ctx.save_for_backward(x, expand_a_weight, expand_b_weight, squeeze_weight)
+        if save_act:
+            # training: keep the expand halves (rounded to the activation dtype, as the PyTorch statements hold them), so the
+            # backward is ONE GEMM with the gate epilogue instead of a recompute of both expand GEMMs
+            expand, a, b = _expand_swiglu_saveact(x, expand_a_weight, expand_b_weight, key)
+            ctx.save_for_backward(x, expand_a_weight, expand_b_weight, squeeze_weight, expand, a, b)
+        else:
+            expand = _expand_swiglu(x, expand_a_weight, expand_b_weight, key)
+            ctx.save_for_backward()
         ctx.key = key
         ctx.nd = nd
 
@@ -287,7 +292,7 @@ class TritonTransitionFunction(torch.autograd.Function):
 
     @staticmethod
     def backward(ctx, grad_output: torch.Tensor):
-        x, expand_a_weight, expand_b_weight, squeeze_weight = ctx.saved_tensors
+        x, expand_a_weight, expand_b_weight, squeeze_weight, h, a, b = ctx.saved_tensors
         if grad_output.dtype != x.dtype:
             grad_output = grad_output.to(x.dtype)
 
@@ -296,10 +301,15 @@ class TritonTransitionFunction(torch.autograd.Function):
         from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_backward_saved
 
         dx, grad_a_weight, grad_b_weight, grad_squeeze_weight = swiglu_squeeze_backward_saved(
-            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, ctx.key,
+            x, expand_a_weight, expand_b_weight, squeeze_weight, grad_output, ctx.key, saved=(h, a, b),
         )
         dx = dx.reshape(orig_shape)
-        return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None
+        return dx, grad_a_weight, grad_b_weight, grad_squeeze_weight, None, None
 
 
-triton_transition = TritonTransitionFunction.apply
+def triton_transition(x, expand_a_weight, expand_b_weight, squeeze_weight, n=None):
+    """``squeeze(SwiGLU(x @ Wa^T, x @ Wb^T))`` (:class:`TritonTransitionFunction`). The forward keeps the expand halves only when a
+    gradient is wanted: grad mode on and an operand requiring one (``ctx.needs_input_grad`` is true for parameters even under
+    ``torch.no_grad()``, so the flag is decided here)."""
+    save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, expand_a_weight, expand_b_weight, squeeze_weight))
+    return TritonTransitionFunction.apply(x, expand_a_weight, expand_b_weight, squeeze_weight, n, save)

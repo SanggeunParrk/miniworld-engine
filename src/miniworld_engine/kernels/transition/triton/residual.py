@@ -10,6 +10,7 @@ from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton.main import (
     _expand_swiglu,
+    _expand_swiglu_saveact,
     swiglu_squeeze_backward,
 )
 from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
@@ -98,28 +99,34 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
 
 class ResidualTransitionFunction(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, xn, wa, wb, ws, residual):
+    def forward(ctx, xn, wa, wb, ws, residual, save_act=True):
         shape = xn.shape
         xn = xn.reshape(-1, shape[-1]).contiguous()
         key = both_key(rows_of(shape))
-        h = _expand_swiglu(xn, wa, wb, key)
-        ctx.save_for_backward(xn, wa, wb, ws)
+        if save_act:
+            h, a, b = _expand_swiglu_saveact(xn, wa, wb, key)     # training: the halves, see main.TritonTransitionFunction
+            ctx.save_for_backward(xn, wa, wb, ws, h, a, b)
+        else:
+            h = _expand_swiglu(xn, wa, wb, key)
+            ctx.save_for_backward()
         ctx.shape = shape
         ctx.key = key
         return squeeze_residual(h, ws, residual.reshape(-1, shape[-1]), key).reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):
-        xn, wa, wb, ws = ctx.saved_tensors
+        xn, wa, wb, ws, h, a, b = ctx.saved_tensors
         flat = dy.reshape(-1, dy.shape[-1]).contiguous()
         if flat.dtype != xn.dtype:
             flat = flat.to(xn.dtype)
-        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(xn, wa, wb, ws, flat, ctx.key)
-        return dx.reshape(ctx.shape), dwa, dwb, dws, dy
+        dx, dwa, dwb, dws = swiglu_squeeze_backward_saved(xn, wa, wb, ws, flat, ctx.key, saved=(h, a, b))
+        return dx.reshape(ctx.shape), dwa, dwb, dws, dy, None
 
 
 def transition_residual(x, gamma, beta, wa, wb, ws, eps):
     # Returning the identity from the SAME LN Function lets its two gradients meet
     # inside LN backward. No activation copy, separate dx add, or duplicate dgamma/dbeta.
     xn, residual = input_ln_residual(x, gamma, beta, eps)
-    return ResidualTransitionFunction.apply(xn, wa, wb, ws, residual)
+    # grad mode and an operand that wants one, decided here: ``ctx.needs_input_grad`` is true for parameters under no_grad too
+    save = torch.is_grad_enabled() and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
+    return ResidualTransitionFunction.apply(xn, wa, wb, ws, residual, save)
