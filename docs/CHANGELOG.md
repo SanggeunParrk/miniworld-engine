@@ -10,6 +10,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 hand-CUDA TRAINING of the Boltz-2 / RoseTTAFold3 / Chai-1 DiT variant stacks (token and atom, bf16 under autocast and fp32 on TF32): `kernels/dit_variants/cuda/{train.py,train_rows.cu,edge.cu}`, one autograd `Function` (opaque fwd / bwd) per block over CUDA row kernels, cuBLAS and the sm_90a attention cores; before, `miniworld` ran the PyTorch reference there (1.5-2.3x slower than the portable kernels). `settings.dit_variant_train_cuda` (default on) switches it; record `docs/records/dit_variants_cuda_ladder_20261026.md`, tests `tests/gpu/sm90/test_dit_variant_train_h100_gpu.py`.
+
 - Portable kernels for the diffusion sampler glue `kernels/sampler_ops` (`augment_noise`, `align_euler`, `pool_atoms`): the contract and algorithm of the H100 CUDA kernels (the caller's random
   draws, the churn arithmetic on device scalars in IEEE operations, centres from fixed-order chunk partials, Kabsch rotation by Horn's quaternion method with 12 squarings in scalar registers, no SVD,
   no atomics, bitwise reproducible), for any card. `sampler_ops.interface` now routes by card like the pair ops (H100 CUDA unchanged; a recorded card or the A/B switch the portable kernels; else

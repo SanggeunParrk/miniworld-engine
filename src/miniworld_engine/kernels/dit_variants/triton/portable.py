@@ -39,7 +39,12 @@ def _leg_allowed(stack, single, op: str) -> bool:
 
     if stack.implementation != ImplementationType.MINIWORLD:
         return False
-    return dispatch.portable_leg_allowed(single.device, op, training=dispatch.needs_backward(stack, single))
+    needs_backward = dispatch.needs_backward(stack, single)
+    if single.dtype == torch.float32 and not needs_backward and single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
+        # fp32 inference on H100: no hand-CUDA path exists (the CUDA inference rows are bf16), and the portable kernels are measured faster than the
+        # PyTorch reference there (records/dit_variants_cuda_ladder_20261026.md), so this one call is routed to them
+        return stack.implementation == ImplementationType.MINIWORLD
+    return dispatch.portable_leg_allowed(single.device, op, training=needs_backward)
 
 
 def serves(stack, single, cond, pair, mask) -> bool:
