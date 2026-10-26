@@ -184,21 +184,28 @@ class AttentionPairBias(nn.Module):
 
         if (
             backend == KernelBackend.PORTABLE
-            and not torch.is_grad_enabled()
             and pair.dtype == torch.bfloat16
             and pair.shape[-1] <= 1024
         ):
             # portable inference: LayerNorm + the head projection in ONE pass over the pair, stored head-major (the unfused pair LayerNorm
             # and GEMM read and write it three times); the key mask is the attention kernel's own (it takes it below)
-            from miniworld_engine.kernels.layernorm_linear.triton.fused import (
-                layernorm_linear_triton_fwd_t,
-            )
-
             ln_w = self.ln_pair.weight
             B_, L_ = pair.shape[0], pair.shape[1]
-            bias = layernorm_linear_triton_fwd_t(
-                pair, ln_w, torch.zeros_like(ln_w), self.to_bias.weight, self.ln_pair.eps
-            ).view(self.n_head, B_, L_, L_).permute(1, 0, 2, 3)
+            if not torch.is_grad_enabled():
+                from miniworld_engine.kernels.layernorm_linear.triton.fused import (
+                    layernorm_linear_triton_fwd_t,
+                )
+
+                bias = layernorm_linear_triton_fwd_t(
+                    pair, ln_w, torch.zeros_like(ln_w), self.to_bias.weight, self.ln_pair.eps
+                ).view(self.n_head, B_, L_, L_).permute(1, 0, 2, 3)
+            else:
+                from miniworld_engine.kernels.layernorm_linear.autograd import layernorm_linear_triton_fn
+
+                bias = layernorm_linear_triton_fn(
+                    pair, ln_w, torch.zeros_like(ln_w), self.to_bias.weight.to(pair.dtype), None, self.ln_pair.eps, L_
+                )
+                bias = rearrange(bias, "B L L2 H -> B H L L2")
         else:
             pair = self.ln_pair(pair)
             bias = (
