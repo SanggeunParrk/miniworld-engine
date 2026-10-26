@@ -1,7 +1,7 @@
 """H100 pair-fused attention (kernels/augmented_attention/cuda/fused_pair*.py) and the CUDA adaLN rows (kernels/adaln/cuda), through the
 modules that route to them, against an fp64 PyTorch run of the same module.
 
-The yardstick is the repo's: the engine's relative-Frobenius error against fp64 must not exceed 1.5x (fp32 / TF32: 2.0x, see the test) the error of the PyTorch module run in
+The yardstick is the repo's: the engine's relative-Frobenius error against fp64 must not exceed 1.5x the error of the PyTorch module run in
 the same precision (bf16 under autocast, or fp32 with TF32 matmuls). The routes are asserted to be taken (the tests would pass on the PyTorch
 leg too, so a silent fallback is a failure), and the bf16 backward is repeatable bit for bit.
 """
@@ -111,10 +111,7 @@ def test_fp32_token_route_is_taken_and_holds_the_yardstick():
     b = _run(pt, "token", single, cond, pair, mask, dy, dt, False)
     assert taken
     for k in r:
-        # the TF32 attention core rounds P and dS to 10 mantissa bits inside the tensor core (the PyTorch statements keep the softmax in
-        # fp32): measured 1.2 - 1.8x the PyTorch TF32 error (the portable fp32 kernel 1.6 - 2.3x). A bug is far above this floor.
-        bar = 2.0
-        assert _rel(e[k], r[k]) <= bar * _rel(b[k], r[k]), (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
+        assert _rel(e[k], r[k]) <= 1.5 * _rel(b[k], r[k]), (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
 
 
 @needs_hopper
@@ -159,3 +156,35 @@ def test_adaln_rows_match_the_pytorch_leg(fp32):
     bar = 3e-3 if fp32 else 2e-2
     for name, a, b in zip(("out", "dx", "dcond", "dWs", "dwc"), e, r, strict=True):
         assert _rel(a, b) < bar, (name, _rel(a, b))
+
+
+@needs_hopper
+@pytest.mark.parametrize("fp32", [False, True])
+def test_routes_run_under_torch_compile(fp32):
+    """The routes are opaque ops: a compiled module still launches the hand-CUDA cores and matches the eager route."""
+    from torch.profiler import ProfilerActivity, profile
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    mw, _, _ = _modules("token")
+    single, cond, pair, mask, dy, dt = _case("token", 384, 3, fp32=fp32)
+    s, c, p = (t.clone().requires_grad_() for t in (single, cond, pair))
+
+    def run(m):
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=not fp32):
+            o = m(s, c, p, mask)
+        o.backward(dy.to(o.dtype))
+        return o.detach(), s.grad.clone()
+
+    eager = run(mw)
+    s.grad = None
+    mc = torch.compile(mw, dynamic=False)
+    run(mc)
+    s.grad = None
+    with profile(activities=[ProfilerActivity.CUDA]) as prof:
+        out = run(mc)
+        torch.cuda.synchronize()
+    names = " ".join(e.key for e in prof.key_averages())
+    assert "attn_tf32_fwd_kernel" in names if fp32 else "attn_fwd_kernel" in names, "the compiled module did not launch the CUDA core"
+    assert "adaln_fwd_k" in names, "the compiled module did not launch the CUDA adaLN"
+    assert _rel(out[0], eager[0].double()) < (3e-3 if fp32 else 3e-2)
+    assert _rel(out[1], eager[1].double()) < (3e-3 if fp32 else 3e-2)
