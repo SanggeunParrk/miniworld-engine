@@ -187,3 +187,22 @@ def test_portable_fp32_is_within_1p5x_of_the_pytorch_tf32_error(name, train):
     report(f"{name} {'train' if train else 'infer'}", rows)
     bad = [f"{r.name}: {r.engine:.2e} vs {r.pytorch:.2e} ({r.ratio:.2f}x)" for r in rows if r.ratio > YARDSTICK]
     assert not bad, f"worst {worst(rows).ratio:.2f}x\n  " + "\n  ".join(bad)
+
+
+RAGGED = {
+    "transition_d192n2_ragged": lambda: case_transition(192, 2, (1, 70, 70)),
+    "ct_d192": lambda: case_ct(192, 96, 100, 3),
+    "adaln_d192": lambda: case_adaln(192, 96, 100, 3),
+}
+
+
+@pytest.mark.parametrize("name", sorted(RAGGED))
+@pytest.mark.parametrize("train", [True, False], ids=["train", "infer"])
+def test_ragged_widths_stay_within_1p5x(name, train):
+    """Widths that are not a multiple of the K tiles (192, 96): a partial last K tile must not change the rounding."""
+    make, args, call, live = RAGGED[name]()
+    with portable_on():
+        rows = measure(make, args, call, train=train, live=live)
+    report(f"{name} {'train' if train else 'infer'}", rows)
+    bad = [f"{r.name}: {r.engine:.2e} vs {r.pytorch:.2e} ({r.ratio:.2f}x)" for r in rows if r.ratio > YARDSTICK]
+    assert not bad, f"worst {worst(rows).ratio:.2f}x\n  " + "\n  ".join(bad)

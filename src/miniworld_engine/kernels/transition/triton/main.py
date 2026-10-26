@@ -87,7 +87,7 @@ def transition_fwd_kernel(
             for k in range(0, K, BLOCK_K):
                 x_tile = x_desc.load([pid_m * BLOCK_M1, k])
                 w_tile = w_desc.load([pid_n * (2 * BLOCK_N), k])
-                acc = tf32_dot(x_tile, w_tile.T, acc, input_precision=PREC, pre_b=PRE)
+                acc = tf32_dot(x_tile, w_tile.T, acc, input_precision=PREC, pre_a=PRE, pre_b=PRE)
             A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
             swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
             if PRE:         # h feeds a TF32 GEMM next: stored on the TF32 grid (kernels/_tf32.py)
@@ -119,7 +119,7 @@ def transition_fwd_kernel(
                 mask=((offs_w[None, :] < 2 * ND) & (offs_k[:, None] < K)),
                 other=0.0,
             )
-            acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC, pre_b=PRE)
+            acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC, pre_a=PRE, pre_b=PRE)
 
         A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
         swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
@@ -169,7 +169,7 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
     pre = prec == "tf32" and x.dtype is torch.float32     # operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
     stack = lambda: torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)    # noqa: E731
     w_ab = tf32_cached((expand_a_weight, expand_b_weight), lambda: tf32_grid_many(stack()))[0] if pre else stack()
-    x_op = x
+    x_op = tf32_grid_many(x)[0] if pre else x     # also the activation: rounding a loaded A tile in this kernel gave wrong results at K = 192 (ragged K tile)
     use_tma = tma_ok(x_op, w_ab, expand, a, b)
     if use_tma:
         sms = num_sms(x.device)
