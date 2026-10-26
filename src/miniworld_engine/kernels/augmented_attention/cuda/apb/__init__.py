@@ -87,4 +87,13 @@ def pair_bias_bwd(pair2d: torch.Tensor, dbias: torch.Tensor, wf: torch.Tensor, L
     return dz, acc[o:o + heads * DP].view(heads, DP), acc[o + heads * DP:]
 
 
-__all__ = ["DP", "GEOMETRY", "RW", "acc_n", "available", "ext", "pair_bias", "pair_bias_bwd", "width"]
+def pair_bias_stats(pair2d: torch.Tensor, wf: torch.Tensor, mask: torch.Tensor | None, L: int, eps: float, neg: float):
+    """``pair_bias`` that also returns the LayerNorm statistics of every pair row, fp32 [L L, 2] (mean, rstd) -- the backward of the d_pair 256 stack reads
+    them instead of recomputing; ``wf`` [8, 256] runs the 256-wide ring (8 heads), [H, 128] the 128-wide one."""
+    out = torch.empty(wf.shape[0], L, L, device=pair2d.device, dtype=torch.bfloat16)
+    st = torch.empty(L * L, 2, device=pair2d.device, dtype=torch.float32)
+    ext().pair_bias_fwd_stats(pair2d, wf, mask, out, st, int(L), float(eps), float(neg))
+    return out, st
+
+
+__all__ = ["DP", "GEOMETRY", "RW", "acc_n", "available", "ext", "pair_bias", "pair_bias_bwd", "pair_bias_stats", "width"]

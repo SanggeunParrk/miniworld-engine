@@ -18,7 +18,7 @@ PyTorch leg because the native path is d_pair 128 only. The APB portable rung it
   (`BF16_LAYOUTS`), writes O and dQ / dK / dV as bf16 (`FWD_BF16` / `BWD_BF16`, `attn_dqb.cu` gained the bf16 store).
 * `cuda/fused_pair.py`: pair LayerNorm + head projection (one read of the pair tensor, head-major bias in log2 units, key mask folded in as -1e30) + the wgmma core +
   the pair-side backward (dpair, dWf, dlnw). Pair kernels: the existing tensor-core `apb_rows.cu` `pair_bias` (token, d_pair 128), `atom_pair.cu` (d_pair 16),
-  `pair_mma.cu` (d_pair 256 forward on mma.sync) and `pair_rows.cu` (warp per row: the d_pair 256 backward, the fp32 pair backward, the TF32 core's glue).
+  the 256-wide `apb_rows.cu` forward (d_pair 256 forward on mma.sync) and `pair_rows.cu` (warp per row: the d_pair 256 backward, the fp32 pair backward, the TF32 core's glue).
 * `cuda/fused_pair_tf32.py`: the fp32 token stack on the TF32 core (`attn_tf32.cu`) with the fp32 pair bias (`pair_bias_tok_cuda`).
   **Numerics:** the operands (q scaled, k, v, dO) are rounded to the TF32 grid to nearest in the glue kernels (`prep_fwd32`, `dd_perm`), as cuBLAS does; the tensor core
   alone truncates them. Core-level error against fp64: 2.4-3.0x the PyTorch TF32 statements before, 0.83-1.01x after. Module level: every tensor 0.84-1.00x (the earlier 1.75x on the to_query / to_key weight gradients is gone; the
@@ -132,7 +132,7 @@ instead of a bare `autograd.Function` calling the extension. Agent I's inference
 | new | existing equivalent | kept / why |
 |---|---|---|
 | `kernels/adaln/cuda/adaln_rows.cu` | agent I's `adaln_sm90.cu` (inference only); PyTorch leg; Triton `adaln_train` (portable) | canonical, byte-identical origin; has the training backward, bf16 + fp32 |
-| `pair_mma.cu` (d_pair 256 forward) | `apb_rows.cu` `pair_bias_fwd_k` (d_pair 128 hard-wired; the same code) | **a duplicate of the forward with the width a template parameter**; kept separate so the shared APB extension and its prebuilt key do not change; fold back into `apb_rows.cu` as a follow-up |
+| the 256-wide `apb_rows.cu` forward (d_pair 256 forward) | `apb_rows.cu` `pair_bias_fwd_k` (d_pair 128 hard-wired; the same code) | **a duplicate of the forward with the width a template parameter**; kept separate so the shared APB extension and its prebuilt key do not change; fold back into `apb_rows.cu` as a follow-up |
 | `pair_rows.cu` bwd (bf16, d_pair 256) | `apb_rows.cu` `pair_bias_bwd_k` (128 only, TMA) | no 256 variant exists; CUDA-core warp kernel (2x its read bound) |
 | `pair_rows.cu` `pair_rows_bwd32` (fp32 pair backward) | `token_dit_train_rows.cu` `pair_ln_bwd` / `pair_bias_bwd` (need the token DiT block's weight pack / ext object) | standalone entry point for the module; same math |
 | `pair_rows.cu` `transpose32` | `token_dit_train_rows.cu` `transpose` (same tiled kernel, in the token DiT ext) | duplicate of ~10 lines, adds the scale; unify with the DiT ext later |

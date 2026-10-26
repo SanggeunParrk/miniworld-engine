@@ -367,28 +367,22 @@ def available(
 
 
 # --------------------------------------------------------------------------------------------------- glue
-@triton.jit
-def _prep_qkv_kernel(q, k, v, qs, kb, vb, n, scale, BLOCK: tl.constexpr):
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    m = offs < n
-    tl.store(
-        qs + offs,
-        (tl.load(q + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16),
-        mask=m,
-    )
-    tl.store(kb + offs, tl.load(k + offs, mask=m).to(tl.bfloat16), mask=m)
-    tl.store(vb + offs, tl.load(v + offs, mask=m).to(tl.bfloat16), mask=m)
+def _bf16_rows(t, w):
+    """[rows, w] bf16 view of ``t`` (a copy only when it is not already contiguous bf16)."""
+    t = t.reshape(-1, w)
+    if t.dtype is not torch.bfloat16:
+        t = t.to(torch.bfloat16)
+    return t if t.is_contiguous() else t.contiguous()
 
 
 def _prep_qkv(q, k, v, scale):
-    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-    n = q.numel()
-    qs, kb, vb = (
-        torch.empty(n, device=q.device, dtype=torch.bfloat16) for _ in range(3)
-    )
-    _prep_qkv_kernel[(triton.cdiv(n, 4096),)](q, k, v, qs, kb, vb, n, scale, BLOCK=4096)
+    """q scaled into the core's log2 units (one pass) and the bf16 rows of q, k, v: k and v are used as they are when already contiguous bf16."""
     w = q.shape[-2] * q.shape[-1]
-    return qs.view(-1, w), kb.view(-1, w), vb.view(-1, w)
+    qc = q.contiguous()
+    n = qc.numel()
+    qs = torch.empty(n, device=q.device, dtype=torch.bfloat16)
+    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, scale, BLOCK=4096)
+    return qs.view(-1, w), _bf16_rows(k, w), _bf16_rows(v, w)
 
 
 @triton.jit
@@ -402,6 +396,7 @@ def _prep_do_kernel(
     DH: tl.constexpr,
     DP: tl.constexpr,
     ROWS: tl.constexpr,
+    WRITE_DOB: tl.constexpr,
 ):
     r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l)
     hh = tl.arange(0, NH)
@@ -410,18 +405,19 @@ def _prep_do_kernel(
     msk = (dcol[None, :] < DH)[None, :, :] & (r[:, None, None] >= 0)
     g = tl.load(do + ptr, mask=msk, other=0.0).to(tl.float32)
     x = tl.load(o + ptr, mask=msk, other=0.0)
-    tl.store(dob + ptr, g.to(tl.bfloat16), mask=msk)
+    if WRITE_DOB:
+        tl.store(dob + ptr, g.to(tl.bfloat16), mask=msk)
     s = tl.sum(g * x, axis=2)
     tl.store(dd + ((r // L)[:, None] * NH + hh[None, :]) * L + (r % L)[:, None], s)
 
 
-def _prep_do(do, o, A, L, nh=H, dh=D):
-    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32."""
+def _prep_do(do, o, A, L, nh=H, dh=D, write_dob=True):
+    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is)."""
     do = do.reshape(A * L, nh * dh).contiguous()
-    dob = torch.empty(A * L, nh * dh, device=do.device, dtype=torch.bfloat16)
+    dob = torch.empty(A * L, nh * dh, device=do.device, dtype=torch.bfloat16) if write_dob else do
     dd = torch.empty(A, nh, L, device=do.device, dtype=torch.float32)
     _prep_do_kernel[((A * L) // 8,)](
-        do, o.reshape(A * L, nh * dh), dob, dd, L, NH=nh, DH=dh, DP=64, ROWS=8
+        do, o.reshape(A * L, nh * dh), dob, dd, L, NH=nh, DH=dh, DP=64, ROWS=8, WRITE_DOB=write_dob
     )
     return dob, dd
 

@@ -145,7 +145,7 @@ def _bwd(
     e = _rows_ext()
     dd, dd_p, lse_p, dobr = e.dd_perm(do.contiguous().float(), o, lse, A, L)  # D = rowsum(dO O), its / the LSE's query-permuted copies, dO rounded
     dq, dk, dv, db_p = tf32_backward(
-        qs, kr, vr, dobr, e.transpose32(qs, 1.0), e.transpose32(kr, 1.0), e.transpose32(dobr, 1.0), bias_p, e.bias_transposed(bias_p, L),
+        qs, kr, vr, dobr, e.transpose32(qs), e.transpose32(kr), e.transpose32(dobr), bias_p, e.bias_transposed(bias_p, L),
         lse, dd, lse_p, dd_p, None, None, A, L,
     )
     _, inv = _perm(L, qs.device)

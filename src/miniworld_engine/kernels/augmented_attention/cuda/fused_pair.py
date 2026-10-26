@@ -8,7 +8,7 @@ pair LayerNorm, the head projection, a permute copy and a scale pass in PyTorch 
 pair tensor against one here.
 
 Two layouts (``LAYOUTS``): the token stack (16 heads x 48, d_pair 128: ``apb/apb_rows.cu`` ``pair_bias``, tensor-core
-projection) and the dense atom stack (4 heads x 32, d_pair 16: ``atom_pair.cu``, one thread per pair row).
+projection) and the dense atom stack (4 heads x 32, d_pair 16: ``pair_rows.cu``, one thread per pair row).
 
 Contract (``supported``): sm_90, bf16 q / k / v / pair, one batch row, L a multiple of 128, a key mask shared by all samples (or
 none), no extra pair bias. The caller owns every projection; this op takes the LayerNorm weight ``lnw`` [d_pair] and the head
@@ -37,7 +37,9 @@ from . import (
     LOG2E,
     _ext as _core_ext,
     _is_hopper,
-    _scale_bf16_kernel,
+    _bf16_rows,
+    _prep_do,
+    _prep_qkv,
     backward,
 )
 
@@ -51,18 +53,7 @@ def _kind(nh, dp):
     return "apb" if (nh, dp) == (16, 128) else "atom" if dp == 16 else "rows"
 
 
-@functools.lru_cache(maxsize=None)
-def _mma_ext():
-    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-
-    ensure_cuda_home()
-    return load_extension(
-        name="augattn_sm90_pair_mma",
-        sources=[str(_dir / "pair_mma.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
-        extra_cflags=["-std=c++17"],
-        verbose=False,
-    )
+_dir = Path(__file__).parent
 
 
 @functools.lru_cache(maxsize=None)
@@ -73,21 +64,6 @@ def _rows_ext():
     return load_extension(
         name="augattn_sm90_pair_rows",
         sources=[str(_dir / "pair_rows.cu")],
-        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
-        extra_cflags=["-std=c++17"],
-        verbose=False,
-    )
-_dir = Path(__file__).parent
-
-
-@functools.lru_cache(maxsize=None)
-def _atom_ext():
-    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
-
-    ensure_cuda_home()
-    return load_extension(
-        name="augattn_sm90_atom_pair",
-        sources=[str(_dir / "atom_pair.cu")],
         extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
         extra_cflags=["-std=c++17"],
         verbose=False,
@@ -126,31 +102,7 @@ def _wf32(wb: torch.Tensor, lnw: torch.Tensor):
     return out
 
 
-@triton.jit
-def _dd_kernel(do, o, dd, L, NH: tl.constexpr, DH: tl.constexpr, DPAD: tl.constexpr, ROWS: tl.constexpr):
-    r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l)
-    hh = tl.arange(0, NH)
-    dcol = tl.arange(0, DPAD)
-    ptr = r[:, None, None] * (NH * DH) + (hh[:, None] * DH + dcol[None, :])[None, :, :]
-    msk = (dcol[None, :] < DH)[None, :, :] & (r[:, None, None] >= 0)
-    g = tl.load(do + ptr, mask=msk, other=0.0).to(tl.float32)
-    x = tl.load(o + ptr, mask=msk, other=0.0).to(tl.float32)
-    s = tl.sum(g * x, axis=2)
-    tl.store(dd + ((r // L)[:, None] * NH + hh[None, :]) * L + (r % L)[:, None], s)
 
-
-def _dd(do2, o2, A, L, nh, dh):
-    """D = rowsum(dO * O) [A, H, L] fp32."""
-    dd = torch.empty(A, nh, L, device=do2.device, dtype=torch.float32)
-    _dd_kernel[((A * L) // 8,)](do2, o2, dd, L, NH=nh, DH=dh, DPAD=64, ROWS=8)
-    return dd
-
-
-def _as_bf16_rows(t: torch.Tensor, rows: int, width: int) -> torch.Tensor:
-    t = t.reshape(rows, width)
-    if t.dtype is not torch.bfloat16:
-        t = t.to(torch.bfloat16)
-    return t if t.is_contiguous() else t.contiguous()
 
 
 def supported(q: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None) -> bool:
@@ -201,24 +153,17 @@ def _fused_fwd(
         wf_l2, _ = _wf(wb, lnw, False)
         bias = pair_bias(pair2, wf_l2, mask, L, eps, NEG)  # [H, L, L] bf16, log2 units
     elif kind == "atom":
-        bias = _atom_ext().atom_pair_fwd(pair2, _wf32(wb, lnw), mask, L, eps, LOG2E, NEG)
+        bias = _rows_ext().atom_pair_fwd(pair2, _wf32(wb, lnw), mask, L, eps, LOG2E, NEG)
     elif dp == 256:  # tensor-core forward (bf16 wf in log2 units like the APB kernel), CUDA-core backward
         wf_l2, _ = _wf(wb, lnw, False)
-        bias, pst = _mma_ext().pair_mma_fwd(pair2, wf_l2, mask, L, eps, NEG)
+        from .apb import pair_bias_stats
+
+        bias, pst = pair_bias_stats(pair2, wf_l2, mask, L, eps, NEG)
     else:
         bias, pst = _rows_ext().pair_rows_fwd(pair2, _wf32(wb, lnw), mask, L, eps, LOG2E, NEG)
-    qs, kb, vb = _prep(q, k, v, A, L, W, dh)
+    qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(dh))
     o, lse = FWD_OP(qs, kb, vb, bias, None, True)
     return o, lse, bias, pst
-
-
-def _prep(q, k, v, A, L, W, dh):
-    """q scaled into the core's log2 units and the bf16 row views of q, k, v."""
-    qs = torch.empty(A * L, W, device=q.device, dtype=torch.bfloat16)
-    qc = q.contiguous()
-    n = qc.numel()
-    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, LOG2E / math.sqrt(dh), BLOCK=4096)
-    return qs, _as_bf16_rows(k, A * L, W), _as_bf16_rows(v, A * L, W)
 
 
 def _bwd_fake(do, q, k, v, pair, lnw, wb, o, lse, bias, pst, eps):
@@ -240,9 +185,9 @@ def _fused_bwd(
     """(dq, dk, dv bf16, dpair, dlnw, dwb fp32) of ``_fused_fwd``."""
     A, _, L, nh, dh = q.shape
     dp = pair.shape[-1]
-    qs, kb, vb = _prep(q, k, v, A, L, nh * dh, dh)
-    do2 = _as_bf16_rows(do, A * L, nh * dh)
-    dd = _dd(do2, o, A, L, nh, dh)
+    qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(dh))
+    do2 = _bf16_rows(do, nh * dh)
+    _, dd = _prep_do(do2, o, A, L, nh, dh, write_dob=False)  # D only: dO is already the bf16 rows
     dq, dk, dv, db = backward(qs, kb, vb, do2, bias, None, lse, dd, A, L, nh, dh, out_bf16=True)
     if not db.is_contiguous():  # A not a multiple of 3: the dK / dV pass leaves it transposed
         db = db.contiguous()
@@ -256,7 +201,7 @@ def _fused_bwd(
         o_off = 2 * 384 + 512  # width(16, 384) = 16 x 32: the accumulator's dWf columns
         dwf = acc[:, o_off : o_off + nh * dp].sum(0).view(nh, dp)
     elif kind == "atom":
-        dz, accp = _atom_ext().atom_pair_bwd(pair.view(L * L, dp), db, _wf32(wb, lnw), L, eps)
+        dz, accp = _rows_ext().atom_pair_bwd(pair.view(L * L, dp), db, _wf32(wb, lnw), L, eps)
         dwf = accp.sum(0).view(nh, dp)
     else:
         dz, accp = _rows_ext().pair_rows_bwd(pair.view(L * L, dp), db, _wf32(wb, lnw), pst, L, eps)
@@ -314,10 +259,12 @@ def available(q, pair, lnw, wb, mask) -> bool:
 
             ext()
         elif kd == "atom":
-            _atom_ext()
-        else:
             _rows_ext()
-            _mma_ext()
+        else:
+            from .apb import ext
+
+            ext()
+            _rows_ext()
     except Exception as exc:  # noqa: BLE001
         import warnings
 

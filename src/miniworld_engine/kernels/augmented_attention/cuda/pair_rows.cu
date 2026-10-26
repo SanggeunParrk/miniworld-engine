@@ -15,17 +15,14 @@
 #include <cuda_bf16.h>
 #include <c10/cuda/CUDAGuard.h>
 
+#include "../../conditioned_transition/cuda/token_dit_common.cuh"  // tdr::warp_sum, tdr::transpose_k: shared with the token DiT row kernels
+
 namespace {
 using bf = __nv_bfloat16;
 constexpr int BT = 256;
 constexpr int WPB = BT / 32;
 constexpr int PF = 4;  // rows whose loads are in flight together
 
-__device__ __forceinline__ float wsum(float v) {
-#pragma unroll
-  for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
 
 template <int DPL>
 __device__ __forceinline__ void load_row(const bf* __restrict__ z, float (&x)[DPL]) {
@@ -83,14 +80,14 @@ __device__ __forceinline__ void normalize(float (&x)[DPL], float eps, float& rst
   float s = 0.f;
 #pragma unroll
   for (int i = 0; i < DPL; ++i) s += x[i];
-  const float mean = wsum(s) * (1.f / DP);
+  const float mean = tdr::warp_sum(s) * (1.f / DP);
   float v = 0.f;
 #pragma unroll
   for (int i = 0; i < DPL; ++i) {
     x[i] -= mean;
     v += x[i] * x[i];
   }
-  rstd = rsqrtf(wsum(v) * (1.f / DP) + eps);
+  rstd = rsqrtf(tdr::warp_sum(v) * (1.f / DP) + eps);
 #pragma unroll
   for (int i = 0; i < DPL; ++i) x[i] *= rstd;
 }
@@ -136,7 +133,7 @@ __global__ void __launch_bounds__(BT) fwd_k(const bf* __restrict__ Z, const floa
       w[h][i] = W[h * DP + lane * DPL + i] * scale;
       s += w[h][i];
     }
-    s = wsum(s);
+    s = tdr::warp_sum(s);
     if (threadIdx.x == 0) sumw[h] = s;
   }
   __syncthreads();
@@ -255,8 +252,8 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
         mg += s;
         mgx += s * x[i];
       }
-      mg = wsum(mg) * (1.f / DP);
-      mgx = wsum(mgx) * (1.f / DP);
+      mg = tdr::warp_sum(mg) * (1.f / DP);
+      mgx = tdr::warp_sum(mgx) * (1.f / DP);
 #pragma unroll
       for (int i = 0; i < DPL; ++i) g[i] = rstd * (g[i] - mg - x[i] * mgx);
       store_row<DPL>(DZ + (base + r) * DP + lane * DPL, g);
@@ -307,18 +304,6 @@ __global__ void __launch_bounds__(256) prep_k(const float* __restrict__ Q, const
   for (int i = 0; i < 32; i += 8) VT[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
 }
 
-// dst [N, M] = scale * src [M, N]^T, 32 x 32 tiles through shared memory
-__global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_, float* __restrict__ Dst, long M, long N, float scale) {
-  __shared__ float tile[32][33];
-  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
-  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
-#pragma unroll
-  for (int i = 0; i < 32; i += 8) tile[ty + i][tx] = S_[(r0 + ty + i) * N + c0 + tx];
-  __syncthreads();
-#pragma unroll
-  for (int i = 0; i < 32; i += 8) Dst[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i] * scale;
-}
-
 // D[a, h, l] = sum_d dO[a L + l, 48 h + d] O[a L + l, 48 h + d], plus its query-permuted copy and the permuted copy of the LSE
 __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
                                             float* __restrict__ DDP, float* __restrict__ LSEP, float* __restrict__ DOR, long rows, int L) {
@@ -358,6 +343,116 @@ __global__ void __launch_bounds__(256) bias_t_k(const float* __restrict__ B, flo
   const long h = hk / L;
   Z[idx] = B[(h * L + kperm(q)) * L + kinv(k)];
 }
+// ---- the dense atom stack: d_pair 16, a thread per pair row (16 channels are 32 bytes: two 16-byte loads)
+constexpr int C = 16;
+constexpr int ABT = 256;
+
+__device__ __forceinline__ void atom_load_row(const bf* __restrict__ z, float (&x)[C]) {
+  const uint4 a = __ldg(reinterpret_cast<const uint4*>(z)), b = __ldg(reinterpret_cast<const uint4*>(z) + 1);
+  const uint32_t w[8] = {a.x, a.y, a.z, a.w, b.x, b.y, b.z, b.w};
+#pragma unroll
+  for (int i = 0; i < 8; ++i) {
+    x[2 * i] = __uint_as_float(w[i] << 16);
+    x[2 * i + 1] = __uint_as_float(w[i] & 0xffff0000u);
+  }
+}
+
+__device__ __forceinline__ void atom_normalize(float (&x)[C], float eps, float& rstd) {
+  float s = 0.f;
+#pragma unroll
+  for (int c = 0; c < C; ++c) s += x[c];
+  const float mean = s * (1.f / C);
+  float v = 0.f;
+#pragma unroll
+  for (int c = 0; c < C; ++c) {
+    x[c] -= mean;
+    v += x[c] * x[c];
+  }
+  rstd = rsqrtf(v * (1.f / C) + eps);
+#pragma unroll
+  for (int c = 0; c < C; ++c) x[c] *= rstd;
+}
+
+template <int NH>
+__global__ void __launch_bounds__(ABT) atom_fwd_k(const bf* __restrict__ Z, const float* __restrict__ W, const bool* __restrict__ MASK,
+                                            bf* __restrict__ OUT, long R, int L, float eps, float scale, float neg) {
+  __shared__ float w[NH * C];
+  if (threadIdx.x < NH * C) w[threadIdx.x] = W[threadIdx.x] * scale;
+  __syncthreads();
+  for (long r = (long)blockIdx.x * ABT + threadIdx.x; r < R; r += (long)gridDim.x * ABT) {
+    float x[C], rstd;
+    atom_load_row(Z + r * C, x);
+    atom_normalize(x, eps, rstd);
+    const bool drop = MASK != nullptr && !MASK[r % L];
+#pragma unroll
+    for (int h = 0; h < NH; ++h) {
+      float d = 0.f;
+#pragma unroll
+      for (int c = 0; c < C; ++c) d += w[h * C + c] * x[c];
+      OUT[(long)h * R + r] = __float2bfloat16_rn(drop ? neg : d);
+    }
+  }
+}
+
+template <int NH>
+__global__ void __launch_bounds__(ABT) atom_bwd_k(const bf* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
+                                            bf* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
+  __shared__ float w[NH * C];
+  __shared__ float red[ABT / 32][NH * C];
+  if (threadIdx.x < NH * C) w[threadIdx.x] = W[threadIdx.x];
+  __syncthreads();
+  float part[NH * C];
+#pragma unroll
+  for (int i = 0; i < NH * C; ++i) part[i] = 0.f;
+  for (long r = (long)blockIdx.x * ABT + threadIdx.x; r < R; r += (long)gridDim.x * ABT) {
+    float x[C], rstd, db[NH], g[C];
+    atom_load_row(Z + r * C, x);
+    atom_normalize(x, eps, rstd);
+#pragma unroll
+    for (int h = 0; h < NH; ++h) db[h] = __ldg(DB + (long)h * R + r);
+    float mg = 0.f, mgx = 0.f;
+#pragma unroll
+    for (int c = 0; c < C; ++c) {
+      float s = 0.f;
+#pragma unroll
+      for (int h = 0; h < NH; ++h) {
+        s += w[h * C + c] * db[h];
+        part[h * C + c] += db[h] * x[c];
+      }
+      g[c] = s;
+      mg += s;
+      mgx += s * x[c];
+    }
+    mg *= 1.f / C;
+    mgx *= 1.f / C;
+    uint32_t o[8];
+#pragma unroll
+    for (int i = 0; i < 8; ++i) {
+      const float a = rstd * (g[2 * i] - mg - x[2 * i] * mgx), b = rstd * (g[2 * i + 1] - mg - x[2 * i + 1] * mgx);
+      const __nv_bfloat162 p = __floats2bfloat162_rn(a, b);
+      o[i] = *reinterpret_cast<const uint32_t*>(&p);
+    }
+    uint4* dz = reinterpret_cast<uint4*>(DZ + r * C);
+    dz[0] = make_uint4(o[0], o[1], o[2], o[3]);
+    dz[1] = make_uint4(o[4], o[5], o[6], o[7]);
+  }
+  // block partial of dWf: warp shuffle, then the warps in order
+#pragma unroll
+  for (int i = 0; i < NH * C; ++i) {
+    float v = part[i];
+#pragma unroll
+    for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
+    if ((threadIdx.x & 31) == 0) red[threadIdx.x >> 5][i] = v;
+  }
+  __syncthreads();
+  if (threadIdx.x < NH * C) {
+    float v = 0.f;
+#pragma unroll
+    for (int wp = 0; wp < ABT / 32; ++wp) v += red[wp][threadIdx.x];
+    ACC[(long)blockIdx.x * NH * C + threadIdx.x] = v;
+  }
+}
+
 int nsm_of(const at::Tensor& t) {
   int n = 0;
   C10_CUDA_CHECK(cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, t.get_device()));
@@ -376,6 +471,49 @@ void chk(const at::Tensor& t, at::ScalarType dt, const char* n) {
     else TORCH_CHECK(false, "pair_rows: d_pair 64 / 128 / 256, got ", (long)(DPV));     \
   } while (0)
 }  // namespace
+
+at::Tensor atom_pair_fwd(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, int64_t L, double eps, double scale, double neg) {
+  chk(z, at::kBFloat16, "pair");
+  chk(wf, at::kFloat, "wf");
+  const int64_t nh = wf.size(0), R = L * L;
+  TORCH_CHECK(wf.size(1) == C && z.numel() == R * C, "atom_pair_fwd shapes");
+  if (mask) {
+    chk(*mask, at::kBool, "mask");
+    TORCH_CHECK(mask->numel() == L, "mask [L]");
+  }
+  const at::cuda::CUDAGuard gd(z.device());
+  auto out = at::empty({nh, L, L}, z.options());
+  const unsigned grid = (unsigned)std::min<int64_t>((R + ABT - 1) / ABT, 8L * nsm_of(z));
+  const bool* mp = mask ? mask->data_ptr<bool>() : nullptr;
+  auto s = at::cuda::getCurrentCUDAStream();
+  const bf* zp = reinterpret_cast<const bf*>(z.data_ptr());
+  bf* op = reinterpret_cast<bf*>(out.data_ptr());
+  if (nh == 4) atom_fwd_k<4><<<grid, ABT, 0, s>>>(zp, wf.data_ptr<float>(), mp, op, R, (int)L, (float)eps, (float)scale, (float)neg);
+  else if (nh == 8) atom_fwd_k<8><<<grid, ABT, 0, s>>>(zp, wf.data_ptr<float>(), mp, op, R, (int)L, (float)eps, (float)scale, (float)neg);
+  else TORCH_CHECK(false, "atom_pair: 4 or 8 heads");
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+std::vector<at::Tensor> atom_pair_bwd(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps) {
+  chk(z, at::kBFloat16, "pair");
+  chk(db, at::kFloat, "dbias");
+  chk(wf, at::kFloat, "wf");
+  const int64_t nh = wf.size(0), R = L * L;
+  TORCH_CHECK(wf.size(1) == C && z.numel() == R * C && db.numel() == nh * R, "atom_pair_bwd shapes");
+  const at::cuda::CUDAGuard gd(z.device());
+  auto dz = at::empty_like(z);
+  const unsigned grid = (unsigned)std::min<int64_t>((R + ABT - 1) / ABT, 4L * nsm_of(z));
+  auto acc = at::empty({(int64_t)grid, nh * C}, z.options().dtype(at::kFloat));
+  auto s = at::cuda::getCurrentCUDAStream();
+  const bf* zp = reinterpret_cast<const bf*>(z.data_ptr());
+  bf* dp = reinterpret_cast<bf*>(dz.data_ptr());
+  if (nh == 4) atom_bwd_k<4><<<grid, ABT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), dp, acc.data_ptr<float>(), R, (float)eps);
+  else if (nh == 8) atom_bwd_k<8><<<grid, ABT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), dp, acc.data_ptr<float>(), R, (float)eps);
+  else TORCH_CHECK(false, "atom_pair: 4 or 8 heads");
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dz, acc};
+}
 
 std::vector<at::Tensor> pair_rows_fwd(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, int64_t L, double eps, double scale, double neg) {
   chk(z, at::kBFloat16, "pair");
@@ -431,13 +569,13 @@ std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, dou
   return {qs, kr, vr, vt};
 }
 
-at::Tensor transpose32(at::Tensor src, double scale) {
+at::Tensor transpose32(at::Tensor src) {
   chk(src, at::kFloat, "src");
   const int64_t M = src.size(0), N = src.size(1);
   TORCH_CHECK(M % 32 == 0 && N % 32 == 0, "transpose32: multiples of 32");
   const at::cuda::CUDAGuard gd(src.device());
   auto dst = at::empty({N, M}, src.options());
-  transpose_k<<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(src.data_ptr<float>(), dst.data_ptr<float>(), M, N, (float)scale);
+  tdr::transpose_k<float><<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(src.data_ptr<float>(), dst.data_ptr<float>(), M, N);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return dst;
 }
@@ -490,6 +628,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("prep_fwd32", &prep_fwd32);
   m.def("dd_perm", &dd_perm);
   m.def("bias_transposed", &bias_transposed);
+  m.def("atom_pair_fwd", &atom_pair_fwd);
+  m.def("atom_pair_bwd", &atom_pair_bwd);
   m.def("pair_rows_fwd", &pair_rows_fwd);
   m.def("pair_rows_bwd", &pair_rows_bwd);
 }
