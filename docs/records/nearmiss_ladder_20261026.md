@@ -49,3 +49,24 @@ pair embed: `sm90/test_pair_embed_geom{,_train}_gpu.py` 4 + 17, `sm90/test_pair_
 DiT variants: `sm90/test_dit_variant_{train_,}h100_gpu.py` 32 + 34, `any/test_dit_variants_portable_gpu.py` 31; `any/test_token_pair_init_gpu.py` 12.
 `tests/cpu/registry` has 2 failures + 2 errors (`test_no_stale_caches`, `test_key_flags_are_built_on_both_sides`, `test_a_ladder_offers_what_wins`) identically at `e6a635d7` (A5000 / A6000 / H100 autotune caches stale from other branches).
 `dev derive --arch sm86` was re-run (`registry_kernel.units.json`; the sweep page is unchanged).
+
+## Follow-up (2026-10-27, after merging `integ/ladder-all2`)
+
+The DiT `dv_transpose_k` rename above was dropped in favour of the lead's shared `tdr::transpose_k<T, GUARD>` (merge `ac229ea6`; the DiT rows build and measure the same: Chai-1 token fp32 training 5.821 / 6.296 ms = 0.925).
+
+| row | before (`e6a635d7`) CUDA / portable ms, ratio | after, medians of 5 repeats (`out_f2`) | |
+|---|---|---|---|
+| Transition D512 L384 bf16 training | 5.920 / 5.935 = 0.997 | **5.393 / 5.982 = 0.902** | 8.9 % faster CUDA; step 5.12 -> 4.97 ms in the model-level graph |
+| Transition D512 L384 inference | 1.532 / 1.772 = 0.865 | 1.549 / 1.765 = 0.878 | unchanged path |
+| pair_embed_ca B16 L128 / L256 / L384 | 0.958 / 0.908 / 0.895 | 0.936 / 0.882 / 0.869 | |
+| token_pair_init B16 L256 / L384 | 0.958 / 0.985 | 0.960 / 0.959 (0.205 / 0.197 and 0.450 / 0.431 ms) | absolute CUDA time -10 / -10 us; **ratio still > 0.95** |
+
+* **Transition D512, what moved it further** (all bitwise equal output, `dx` checksum identical): ncu on the two hand kernels of the retained-a/b step showed DRAM at 43 % (`wide_expand_saved_kernel`, 1.35 ms) and 57 %
+  (`wide_gate_saved_kernel`, 1.33 ms) with 24-31 % of the cycles an eligible warp: latency / serialisation bound, not bandwidth bound. 64-wide K slabs instead of 32-wide cut the barrier round trips of the short K = 512 mainloop:
+  saved gate TBK 64 x 2 stages (-1 %, 5.12 -> 5.07 ms), split expand TBK 64 x 3 stages (-1.6 %, 5.05 -> 4.97 ms; 32 x 5 -0.7 %, 32 x 4 without half staging +2.4 %, 64 x 2 without half staging +2.4 %, 64 x 3 without half staging does not fit shared memory).
+  D512 only (`WIDE_D == 512`); D768 keeps 32 x 4. A rewrite of the epilogue to overlap it with the next tile's mainloop (ping-pong consumers) was not attempted: both kernels hold the dh accumulators of a 128 x 128 tile in
+  both consumer warpgroups and the shared memory is full (229 KB of 231 KB with the 2 x 64 KB saved A/B tiles), so a ping-pong needs a different tile shape.
+* **token_pair_init**: the glue (4 D2D copies of `torch.stack`, two int32 casts, `torch.cat`) is one launch now (`tpi_prep`, 3 us instead of 15 us; forward-only calls on H100 with int32 / int64 ids and fp32 weights, bitwise equal output, new test),
+  which lowers both rungs. The kernel itself is 181 us (L256) against a 168 us memset of the same output; tried and rejected (microbench with L2 flush, B16): rows per CTA 1/2/3/4/6/8 (4 and 8 equal, 194 us), a persistent grid of 132-528 CTAs (equal or worse), the three rows
+  every pair may add held in registers instead of shared memory (no change: the kernel is not shared-memory bound). CUDA / portable 0.959-0.960 after, medians of 5.
+* APB pair256 training: nothing to do (ladder 0.867 portable / PyTorch, 0.913 CUDA / portable); pool_atoms 0.905-0.924.
