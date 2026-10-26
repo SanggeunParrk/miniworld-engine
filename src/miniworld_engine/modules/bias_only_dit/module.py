@@ -37,6 +37,8 @@ from jaxtyping import Bool, Float
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.bias_only_attention.triton.core_t import bias_only_core_t as _core_t
+from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits as _pair_bias_logits
+from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as _pair_bias_supported
 from miniworld_engine.integrations import bias_only_dit as _fused
 from miniworld_engine.integrations import bias_only_dit_train as _train
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
@@ -79,6 +81,15 @@ class BiasOnlyAttention(nn.Module):
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
 
+    def _fused_pair_bias(self, pair) -> bool:
+        """The portable family's one-pass pair LayerNorm + bias projection (``pair_bias``): a gradient is recorded and the pair is a contiguous
+        bf16 / fp32 CUDA tensor whose channel count the kernel serves."""
+        return bool(
+            self.ada_ln_in.implementation == ImplementationType.MINIWORLD and pair is not None and torch.is_grad_enabled()
+            and self.ln_pair.weight is not None and getattr(self.ln_pair, "bias", None) is None and self.to_bias.bias is None
+            and (pair.requires_grad or self.ln_pair.weight.requires_grad or self.to_bias.weight.requires_grad)
+            and _pair_bias_supported(pair, self.n_head))
+
     def _feature_major(self, single) -> bool:
         """The portable family's training core (``core_t``): a gradient is recorded, ONE pair serves every sample (``single`` [A, 1, L, d]) and the
         activations are bf16 or fp32 on a CUDA device."""
@@ -98,7 +109,10 @@ class BiasOnlyAttention(nn.Module):
         pair and the mask, so their addresses cannot be reused while it lives; an in-place update bumps ``_version`` and misses.
         """
         def build():
-            if bias is None:
+            if bias is None and self._fused_pair_bias(pair):
+                # training: LayerNorm + projection in one pass over the pair, head-major logits (kernels.bias_only_attention.triton.pair_bias)
+                logits = _pair_bias_logits(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
+            elif bias is None:
                 logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
             else:
                 logits = bias.to(dtype)                                         # hoisted (pair_bias_all), head-major already

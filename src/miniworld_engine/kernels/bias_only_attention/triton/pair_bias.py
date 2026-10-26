@@ -1,0 +1,149 @@
+"""The pair bias of the bias-only attention in ONE pass over the pair: ``logits^T[h, r] = (LN0(pair)[r] @ W'^T)[h]``, forward and backward.
+
+``BiasOnlyAttention`` computes ``to_bias(ln_pair(pair))`` where ``ln_pair`` has no offset, so with ``LN0`` the LayerNorm without affine and
+``W' = W diag(gamma)`` (the fold ``modules/bias_only_dit/hoist.py`` already uses) the bias is ``LN0(pair) @ W'^T``: a LayerNorm over the
+``C = d_pair`` channels of every pair entry, then a ``C -> H`` projection. Unfused that is a LayerNorm that reads and writes the whole pair
+(the largest tensor of the block: ``B L L C``), a GEMM that reads the normalised pair again, and in the backward a GEMM that writes a pair
+sized gradient, the LayerNorm backward that reads two and writes one, and a skinny weight-gradient GEMM over all ``B L L`` rows: ~ 270 us
+of a 3.2 ms bias-only DiT training step at L = 512, and all of it is memory traffic. The projection is tiny (``H <= 32`` outputs), so both
+directions fit in one pass that holds a row block in registers:
+
+    forward   x[BR, C] -> mean, rstd -> xhat -> tl.dot(W', xhat^T) -> logits^T[H, BR]       reads the pair once, writes ``H`` values per row
+    backward  dxhat = dlogits^T @ W' ; dx = rstd (dxhat - mean(dxhat) - xhat mean(dxhat xhat)) ; dW' += dlogits @ xhat
+              reads the pair and ``H`` values per row, writes the pair gradient; dW' is accumulated in registers by a persistent program
+              and added to the fp32 result once per program.
+
+The logits come out HEAD-MAJOR (``[H, B*L*L]``, the layout the softmax over the keys wants), so the ``permute(0, 3, 1, 2)`` of the unfused form
+is a view. Fixed launch configurations, no autotune: the kernels are memory-bound row passes whose only free axis (rows per program) was
+swept once on an H100 (``docs/records/portable_bodit_ct_training_20261026.md``).
+"""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tma import num_sms
+
+_FWD_BR = 64
+_BWD_BR = 64
+
+
+@triton.jit
+def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr):
+    pid = tl.program_id(0).to(tl.int64)
+    rows = pid * BR + tl.arange(0, BR)
+    rm = rows < R
+    cols = tl.arange(0, C)
+    x = tl.load(X + rows[:, None] * C + cols[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
+    mean = tl.sum(x, axis=1) / C
+    xc = x - mean[:, None]
+    rstd = tl.rsqrt(tl.sum(xc * xc, axis=1) / C + eps)
+    xh = (xc * rstd[:, None]).to(X.dtype.element_ty)
+    hh = tl.arange(0, NP)
+    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0)
+    acc = tl.dot(w, tl.trans(xh), out_dtype=tl.float32)                       # [NP, BR]
+    tl.store(OUT + hh[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
+    tl.store(MEAN + rows, mean, mask=rm)
+    tl.store(RSTD + rows, rstd, mask=rm)
+
+
+@triton.jit
+def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, C: tl.constexpr, N: tl.constexpr, NP: tl.constexpr, BR: tl.constexpr,
+                        NPROG: tl.constexpr):
+    pid = tl.program_id(0).to(tl.int64)
+    cols = tl.arange(0, C)
+    hh = tl.arange(0, NP)
+    hm = hh < N
+    w = tl.load(W + hh[:, None] * C + cols[None, :], mask=hm[:, None], other=0.0)
+    dw = tl.zeros((NP, C), dtype=tl.float32)
+    for b in range(pid, tl.cdiv(R, BR), NPROG):
+        rows = b * BR + tl.arange(0, BR)
+        rm = rows < R
+        x = tl.load(X + rows[:, None] * C + cols[None, :], mask=rm[:, None], other=0.0).to(tl.float32)
+        mean = tl.load(MEAN + rows, mask=rm, other=0.0)
+        rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
+        xh = (x - mean[:, None]) * rstd[:, None]
+        dl = tl.load(DL + hh[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)   # [NP, BR]
+        dxh = tl.dot(tl.trans(dl), w, out_dtype=tl.float32)                                              # [BR, C]
+        dw += tl.dot(dl, xh.to(X.dtype.element_ty), out_dtype=tl.float32)
+        c1 = tl.sum(dxh, axis=1) / C
+        c2 = tl.sum(dxh * xh, axis=1) / C
+        dx = rstd[:, None] * (dxh - c1[:, None] - xh * c2[:, None])
+        tl.store(DX + rows[:, None] * C + cols[None, :], dx.to(DX.dtype.element_ty), mask=rm[:, None])
+    tl.atomic_add(DW + hh[:, None] * C + cols[None, :], dw, mask=hm[:, None])
+
+
+def _np(n: int) -> int:
+    return max(16, triton.next_power_of_2(n))
+
+
+def supported(pair: torch.Tensor, n_out: int) -> bool:
+    """A power-of-two channel count (the row block holds a whole row) and at most 64 outputs, bf16 or fp32, contiguous."""
+    c = pair.shape[-1]
+    return (pair.is_cuda and pair.dtype in (torch.bfloat16, torch.float32) and c == triton.next_power_of_2(c) and 16 <= c <= 512
+            and 1 <= n_out <= 64 and pair.is_contiguous())
+
+
+def _fwd_fake(x, w, eps=1e-5):
+    return x.new_empty((w.shape[0], x.shape[0])), x.new_empty(x.shape[0], dtype=torch.float32), x.new_empty(x.shape[0], dtype=torch.float32)
+
+
+@opaque(fake=_fwd_fake, name="bias_only_attention_pair_bias_fwd")
+def _fwd(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-5) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """x [R, C], w [N, C] (the folded weights, x's dtype) -> (logits^T [N, R], mean [R], rstd [R])."""
+    r, c = x.shape
+    n = w.shape[0]
+    out = torch.empty((n, r), device=x.device, dtype=x.dtype)
+    mean = torch.empty(r, device=x.device, dtype=torch.float32)
+    rstd = torch.empty_like(mean)
+    _ln_bias_fwd_kernel[(triton.cdiv(r, _FWD_BR),)](x, w, out, mean, rstd, r, eps, C=c, N=n, NP=_np(n), BR=_FWD_BR, num_warps=4, num_stages=2)
+    return out, mean, rstd
+
+
+def _bwd_fake(x, w, dl, mean, rstd):
+    return torch.empty_like(x), x.new_empty(w.shape, dtype=torch.float32)
+
+
+@opaque(fake=_bwd_fake, name="bias_only_attention_pair_bias_bwd")
+def _bwd(x: torch.Tensor, w: torch.Tensor, dl: torch.Tensor, mean: torch.Tensor, rstd: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """-> (dx [R, C] in x's dtype, dW' [N, C] fp32)."""
+    r, c = x.shape
+    n = w.shape[0]
+    dx = torch.empty_like(x)
+    dw = torch.zeros((n, c), device=x.device, dtype=torch.float32)
+    nprog = max(1, min(num_sms(x.device.index or 0) * 2, triton.cdiv(r, _BWD_BR)))
+    _ln_bias_bwd_kernel[(nprog,)](x, w, dl, mean, rstd, dx, dw, r, C=c, N=n, NP=_np(n), BR=_BWD_BR, NPROG=nprog, num_warps=4, num_stages=2)
+    return dx, dw
+
+
+class PairBiasFn(torch.autograd.Function):
+    """``logits^T = (LN0(pair) @ (W diag(gamma))^T)^T`` as [H, B*L*L], differentiable in the pair, ``gamma`` (the LayerNorm weight) and ``W``."""
+
+    @staticmethod
+    def forward(ctx, pair, gamma, weight, eps):
+        c = pair.shape[-1]
+        x = pair.reshape(-1, c)
+        wf = (weight.float() * gamma.float()[None, :]).to(x.dtype)       # the fold; fp32 parameters, rounded once to the activation dtype
+        out, mean, rstd = _fwd(x, wf, eps)
+        ctx.save_for_backward(x, wf, mean, rstd, gamma, weight)
+        ctx.shape = pair.shape
+        return out
+
+    @staticmethod
+    def backward(ctx, dl):
+        x, wf, mean, rstd, gamma, weight = ctx.saved_tensors
+        dl = dl.to(x.dtype).contiguous()
+        dx, dwf = _bwd(x, wf, dl, mean, rstd)
+        dgamma = (dwf * weight.float()).sum(0).to(gamma.dtype)
+        dweight = (dwf * gamma.float()[None, :]).to(weight.dtype)
+        return dx.reshape(ctx.shape), dgamma, dweight, None
+
+
+def pair_bias_logits(pair: torch.Tensor, gamma: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    """``to_bias(ln_pair(pair))`` as head-major logits ``[B, H, L, L]`` for ``pair`` [B, L, L, C] (a view of the kernel's [H, B*L*L] output)."""
+    b, l1, l2, _ = pair.shape
+    out = PairBiasFn.apply(pair, gamma, weight, eps)
+    return out.view(weight.shape[0], b, l1, l2).permute(1, 0, 2, 3)
