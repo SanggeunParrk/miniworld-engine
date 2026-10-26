@@ -11,6 +11,9 @@
 #include "tmn_kernels.cuh"
 using namespace tmn; using namespace tmn::sm90;
 
+#ifndef BWD_BF16
+#define BWD_BF16 0               // 1: dQ is written as bf16 (the caller passes a bf16 tensor)
+#endif
 #ifndef STAGES
 #define STAGES 3
 #endif
@@ -356,8 +359,15 @@ attn_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   for (int h = 0; h < 2; ++h) {
     float* orow = DQ + ((size_t)a * L + m0 + r0 + 8 * h) * DM + qcol;
 #pragma unroll
-    for (int j = 0; j < DH / 8; ++j)
-      *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * RSQD, acc[4 * j + 2 * h + 1] * RSQD);
+    for (int j = 0; j < DH / 8; ++j) {
+      if constexpr (BWD_BF16) {
+        auto* brow = reinterpret_cast<__nv_bfloat16*>(DQ) + ((size_t)a * L + m0 + r0 + 8 * h) * DM + qcol;
+        *reinterpret_cast<__nv_bfloat162*>(brow + j * 8 + cb) =
+            __floats2bfloat162_rn(acc[4 * j + 2 * h] * RSQD, acc[4 * j + 2 * h + 1] * RSQD);
+      } else {
+        *reinterpret_cast<float2*>(orow + j * 8 + cb) = make_float2(acc[4 * j + 2 * h] * RSQD, acc[4 * j + 2 * h + 1] * RSQD);
+      }
+    }
   }
   }  // groups
 }
@@ -399,7 +409,8 @@ void attn_dqb(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   for (auto* t : {&q, &k, &v, &dO})
     TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kBFloat16 && t->size(1) == DM && t->size(0) == A * L, "qkv layout");
   TORCH_CHECK(bias.is_contiguous() && bias.scalar_type() == torch::kBFloat16 && bias.size(2) == L && H * DH == DM, "bias layout");
-  for (auto* t : {&DQ, &DB}) TORCH_CHECK(t->is_contiguous() && t->scalar_type() == torch::kFloat32, "out layout");
+  TORCH_CHECK(DQ.is_contiguous() && DQ.scalar_type() == (BWD_BF16 ? torch::kBFloat16 : torch::kFloat32), "dq layout");
+  TORCH_CHECK(DB.is_contiguous() && DB.scalar_type() == torch::kFloat32, "dbias layout");
   TORCH_CHECK(L % QB == 0 && L % BN == 0 && A % G == 0, "shape");
   // DB: [C, H, L, L] zeroed chunk buffers (C chunks; each CTA walks A / G / C sample groups in order); the caller sums them in order
   const int ngroups = A / G, C = DB.numel() / ((int64_t)H * L * L);
@@ -425,7 +436,7 @@ void attn_dqb(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor d
   }
   kern<<<C * H * mt, 128 * G + 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       mq, mk, mv, mdo, mb, hasm ? kmask->data_ptr<float>() : nullptr, LSE.data_ptr<float>(), Dd.data_ptr<float>(),
-      DQ.data_ptr<float>(), DB.data_ptr<float>(), mdb, L, H, mt, ngi);
+      static_cast<float*>(DQ.data_ptr()), DB.data_ptr<float>(), mdb, L, H, mt, ngi);
   TORCH_CHECK(cudaGetLastError() == cudaSuccess, "launch failed");
 }
 
