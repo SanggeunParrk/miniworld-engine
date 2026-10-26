@@ -317,6 +317,8 @@ def serves(stack, single, cond, pair, mask) -> bool:
 
     if stack.implementation == ImplementationType.PYTORCH or not single.is_cuda or single.ndim != 3:
         return False
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
+        return False
     cfg = settings.current()
     if cfg.force_portable_kernels or not getattr(cfg, "dit_variant_train_cuda", True):
         return False
@@ -666,6 +668,8 @@ def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if stack.implementation == ImplementationType.PYTORCH or not single.is_cuda or single.ndim != 3:
+        return False
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
     cfg = settings.current()
     if cfg.force_portable_kernels or not getattr(cfg, "dit_variant_train_cuda", True):
