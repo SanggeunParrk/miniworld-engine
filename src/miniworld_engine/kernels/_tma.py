@@ -17,16 +17,14 @@ import torch
 import triton
 import triton.language as tl
 
-_ALLOCATOR_SET = False
+def _scratch(size: int, alignment: int, stream) -> torch.Tensor:
+    return torch.empty(size, device="cuda", dtype=torch.int8)
 
 
 def ensure_allocator() -> None:
-    """Triton's scratch allocator for on-device tensor descriptors (once per process)."""
-    global _ALLOCATOR_SET  # noqa: PLW0603
-    if _ALLOCATOR_SET:
-        return
-    triton.set_allocator(lambda size, alignment, stream: torch.empty(size, device="cuda", dtype=torch.int8))
-    _ALLOCATOR_SET = True
+    """Triton's scratch allocator for on-device tensor descriptors. It is a ContextVar, so it is set in the calling thread at every launch
+    (the autograd engine runs a backward in a thread of its own, which does not see the one the forward set)."""
+    triton.set_allocator(_scratch)
 
 
 @functools.lru_cache(maxsize=16)

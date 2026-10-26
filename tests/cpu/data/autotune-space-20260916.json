@@ -70,8 +70,8 @@
     },
     {
       "kernel": "adaln_fwd_gate_triton",
-      "before": 2160,
-      "after": 2160,
+      "before": 18000,
+      "after": 18000,
       "retained_ranked_configs": 61,
       "historical_outside_original_grid": 0,
       "cards": {

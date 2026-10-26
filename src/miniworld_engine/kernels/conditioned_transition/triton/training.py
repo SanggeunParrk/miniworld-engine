@@ -35,6 +35,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
+from miniworld_engine.kernels._tma import tma_launchable
 from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
 
 
@@ -528,7 +529,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
 
 
 # --- token (d>=256): composed 2-kernel forward emitting ab,h,out,scale -----------------
-def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
+def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None, residual=None):
     """token fused composed training forward -> (y, ab=[a|b], h, out, scale)."""
     from .fwd_saveact import _fwd_expand_swiglu, _fwd_squeeze_gate
 
@@ -536,7 +537,7 @@ def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     # (M, ND), so kernel B could not re-derive the same L from its own input anyway.
     h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)   # kernel A: expand+swiglu -> h, ab
     y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc,     # kernel B: squeeze+gate -> out,scale
-                                      shape_key=shape_key)
+                                      shape_key=shape_key, residual=residual)
     return y, ab, h, out, scale
 
 
@@ -560,6 +561,10 @@ def _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
 # the forward must additionally write ab,h,out,scale (saved-for-bwd) that inference never
 # writes, eroding the inference-proven GEMM<->elem fusion win. "auto" routes to the winner.
 _FWD_MODE = "auto"  # {"auto", "cublas", "fused"}
+#: The two persistent TMA forward kernels (expand+SwiGLU -> h, ab; squeeze+gate -> y, out, scale) are correct and reachable, but MEASURED slower than
+#: cuBLAS + the flat passes at M = 49152 (H100, bf16: 500 vs 472 us and 380 vs 315 us): their two-accumulator tiles and three-output epilogues do not
+#: overlap as well as `_dh_swiglu_bwd`'s single-accumulator one. Off; flip for an A/B.
+_TMA_FWD = False
 
 
 def set_forward_mode(name: str):
@@ -610,6 +615,13 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ctx.length = L
         ctx.has_residual = residual is not None
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
+        tma_fwd = (_TMA_FWD and _FWD_MODE == "auto" and x.shape[1] > _ATOM_D_MAX and x.dtype == torch.bfloat16
+                   and tma_launchable(x, wa, wb, ws, wsc, cond)
+                   and (residual is None or tma_launchable(residual)))
+        if tma_fwd:
+            # sm_90, bf16: the two Triton GEMM+epilogue kernels are persistent and TMA-fed (kernels/_tma.py), at cuBLAS speed with the SwiGLU, the gate and
+            # the stream add as their epilogues: no flat pass over (M, 2*ND), no gate pass, no add. The pointer-based forms lose to cuBLAS + the flat passes.
+            mode = "tma"
         if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
             # The reroute used to cover ALL of bf16 on the strength of an untested spill
             # concern: "nothing has benchmarked this kernel at bf16 ... lifting this needs a
@@ -647,7 +659,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # mix nobody had tried is the one that wins. At the atom width both halves win
             # (1.61x and 1.53x, 1.58x together), which is what lifting the reroute above buys.
             mode = "mixed"
-        if mode == "fused":
+        if mode == "tma":
+            y, ab, h, out, scale = _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, shape_key=atom_key(L),
+                                                       residual=None if residual is None else residual.contiguous())
+            residual = None   # folded into the squeeze+gate epilogue
+        elif mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
                                                     shape_key=atom_key(L))
         else:  # "cublas" / "mixed": cuBLAS GEMMs + triton elementwise
