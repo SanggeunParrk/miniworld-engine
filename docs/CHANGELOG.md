@@ -58,6 +58,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
+- Portable ConditionedTransition / AdaLN / bias-only DiT kernels (H100, `force_portable_kernels`): cached weight casts, no transpose copies, LN(cond) + x statistics in one launch, the residual add folded into the squeeze+gate epilogue / gate pass and into the AdaLN backward (`AdaptiveLayerNorm.forward_with_stream`), H100 tile sets in the default configs; 21 of 30 ladder rows of these ops now beat PyTorch (inference all, AdaLN training; ConditionedTransition training bf16 within 1 %), the bf16 training rows of the bias-only DiT are still 2-3 % behind. Record: `docs/records/portable_ct_adaln_biasdit_ladder_20261025.md`.
+
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
 
