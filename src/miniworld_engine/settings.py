@@ -392,6 +392,9 @@ class Settings:
     token_dit_rows_cuda: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
     token_dit_train: bool = True
+    #: The hand-CUDA TRAINING step of the DiT variant stacks (Boltz-2 / RoseTTAFold3 / Chai-1, token and atom) on H100; off = the portable /
+    #: reference route. Default on.
+    dit_variant_train_cuda: bool = True
     #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
     tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
