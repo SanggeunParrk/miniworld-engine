@@ -96,3 +96,26 @@ def train_ext():
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
+
+
+@functools.lru_cache(maxsize=None)
+def edge_ext():
+    """The atom stacks' slid-window edge kernels (``edge.cu``): sm_90a, built on first use."""
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="dit_variants_edge_sm90a",
+        sources=[str(_dir / "edge.cu")],
+        extra_cuda_cflags=[
+            *host_flags(),
+            "-O3",
+            "-std=c++17",
+            "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+            "-U__CUDA_NO_BFLOAT16_OPERATORS__",
+            "-U__CUDA_NO_BFLOAT162_OPERATORS__",
+            *gencodes("90a"),
+        ],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )

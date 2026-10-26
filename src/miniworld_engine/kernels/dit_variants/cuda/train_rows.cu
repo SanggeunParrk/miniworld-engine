@@ -345,8 +345,10 @@ __global__ void __launch_bounds__(NT) qkv_bwd_k(const IT* __restrict__ DQ, long 
   float4 awq = zero4(), abq = zero4(), awk = zero4(), abk = zero4(), aq = zero4();
   float4 wq = zero4(), wk = zero4();
   if (kq) { wq = V4<float>::load(WQ + col); wk = V4<float>::load(WK + col); }
+  const bool store = DKO != nullptr;                               // no outputs: only the column sums of dq
   for (long r = (long)blockIdx.x * rpb, re = std::min<long>(M, r + rpb); r < re; ++r) {
-    float4 dq = V4<IT>::load(DQ + r * sdq + col), dk = V4<IT>::load(DK + r * sdk + col);
+    float4 dq = V4<IT>::load(DQ + r * sdq + col), dk = store ? V4<IT>::load(DK + r * sdk + col) : zero4();
+    if (!store) { aq = add4(aq, dq); continue; }
     if (kq) {
       const float4 st = STQK[r];
       const float4 qh = mul4(sub4(V4<AT>::load(QR + r * sqr + col), make_float4(st.x, st.x, st.x, st.x)), st.y);
@@ -599,40 +601,34 @@ void gate_o_bwd(at::Tensor dog, at::Tensor og, c10::optional<at::Tensor> g, at::
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// rows per block of qkv_bwd (the partial rows: ceil(M / rpb))
-void qkv_bwd(at::Tensor dq, at::Tensor dk, at::Tensor dv, c10::optional<at::Tensor> qr, c10::optional<at::Tensor> kr, c10::optional<at::Tensor> stqk,
-             c10::optional<at::Tensor> wq, c10::optional<at::Tensor> wk, at::Tensor dqo, at::Tensor dko, at::Tensor dvo, at::Tensor part, int64_t rpb, bool kq) {
+// rows per block of qkv_bwd (the partial rows: ceil(M / rpb)). Without dko only the column sums of dq are made ([dbq] per block).
+void qkv_bwd(at::Tensor dq, c10::optional<at::Tensor> dk, c10::optional<at::Tensor> dv, c10::optional<at::Tensor> qr, c10::optional<at::Tensor> kr,
+             c10::optional<at::Tensor> stqk, c10::optional<at::Tensor> wq, c10::optional<at::Tensor> wk, c10::optional<at::Tensor> dqo,
+             c10::optional<at::Tensor> dko, c10::optional<at::Tensor> dvo, at::Tensor part, int64_t rpb, bool kq) {
   const c10::cuda::CUDAGuard guard(dq.device());
   const int D = dq.size(1);
   const long M = dq.size(0), sPart = part.size(1);
   const long blocks = (M + rpb - 1) / rpb;
+  const bool store = dko && dko->defined();
   TORCH_CHECK(part.size(0) >= blocks, "qkv_bwd: partial rows");
-  TORCH_CHECK(dq.stride(1) == 1 && dk.stride(1) == 1 && dv.stride(1) == 1 && dqo.stride(1) == 1 && dko.stride(1) == 1 && dvo.stride(1) == 1, "qkv_bwd: rows");
-  const long sqr = (qr && qr->defined()) ? qr->stride(0) : 0, skr = (kr && kr->defined()) ? kr->stride(0) : 0;
+  TORCH_CHECK(!kq || store, "qkv_bwd: kq needs the outputs");
+  auto s0 = [](const c10::optional<at::Tensor>& t) -> long { return (t && t->defined()) ? t->stride(0) : 0L; };
   const bool in_bf = is_bf(dq);
-  DISPATCH_A(dqo, {
-    if (D == 768) {
-      if (in_bf)
-        qkv_bwd_k<192, bf, AT><<<blocks, 192, 0, S_()>>>(CP<bf>(dq), dq.stride(0), CP<bf>(dk), dk.stride(0), CP<bf>(dv), dv.stride(0), CPo<AT>(qr), sqr,
-            CPo<AT>(kr), skr, CPo<float4>(stqk), CPo<float>(wq), CPo<float>(wk), P<AT>(dqo), dqo.stride(0), P<AT>(dko), dko.stride(0), P<AT>(dvo),
-            dvo.stride(0), P<float>(part), sPart, (int)rpb, kq, M);
-      else
-        qkv_bwd_k<192, float, AT><<<blocks, 192, 0, S_()>>>(CP<float>(dq), dq.stride(0), CP<float>(dk), dk.stride(0), CP<float>(dv), dv.stride(0), CPo<AT>(qr),
-            sqr, CPo<AT>(kr), skr, CPo<float4>(stqk), CPo<float>(wq), CPo<float>(wk), P<AT>(dqo), dqo.stride(0), P<AT>(dko), dko.stride(0), P<AT>(dvo),
-            dvo.stride(0), P<float>(part), sPart, (int)rpb, kq, M);
-    } else if (D == 128) {
-      if (in_bf)
-        qkv_bwd_k<32, bf, AT><<<blocks, 32, 0, S_()>>>(CP<bf>(dq), dq.stride(0), CP<bf>(dk), dk.stride(0), CP<bf>(dv), dv.stride(0), CPo<AT>(qr), sqr,
-            CPo<AT>(kr), skr, CPo<float4>(stqk), CPo<float>(wq), CPo<float>(wk), P<AT>(dqo), dqo.stride(0), P<AT>(dko), dko.stride(0), P<AT>(dvo),
-            dvo.stride(0), P<float>(part), sPart, (int)rpb, kq, M);
-      else
-        qkv_bwd_k<32, float, AT><<<blocks, 32, 0, S_()>>>(CP<float>(dq), dq.stride(0), CP<float>(dk), dk.stride(0), CP<float>(dv), dv.stride(0), CPo<AT>(qr),
-            sqr, CPo<AT>(kr), skr, CPo<float4>(stqk), CPo<float>(wq), CPo<float>(wk), P<AT>(dqo), dqo.stride(0), P<AT>(dko), dko.stride(0), P<AT>(dvo),
-            dvo.stride(0), P<float>(part), sPart, (int)rpb, kq, M);
-    } else {
-      TORCH_CHECK(false, "qkv_bwd: D");
-    }
-  })
+  const at::Tensor& adt = store ? *dko : dq;
+  const int NTX = D == 768 ? 192 : 32;
+  TORCH_CHECK(D == 768 || D == 128, "qkv_bwd: D");
+#define QB_LAUNCH(NTV, ITV, ATV)                                                                                                          \
+  qkv_bwd_k<NTV, ITV, ATV><<<blocks, NTV, 0, S_()>>>(CP<ITV>(dq), dq.stride(0), CPo<ITV>(dk), s0(dk), CPo<ITV>(dv), s0(dv), CPo<ATV>(qr), s0(qr),     \
+      CPo<ATV>(kr), s0(kr), CPo<float4>(stqk), CPo<float>(wq), CPo<float>(wk), Po<ATV>(dqo), s0(dqo), Po<ATV>(dko), s0(dko), Po<ATV>(dvo), s0(dvo),   \
+      P<float>(part), sPart, (int)rpb, kq, M);
+  if (is_bf(adt)) {
+    if (NTX == 192) { if (in_bf) { QB_LAUNCH(192, bf, bf) } else { QB_LAUNCH(192, float, bf) } }
+    else { if (in_bf) { QB_LAUNCH(32, bf, bf) } else { QB_LAUNCH(32, float, bf) } }
+  } else {
+    if (NTX == 192) { if (in_bf) { QB_LAUNCH(192, bf, float) } else { QB_LAUNCH(192, float, float) } }
+    else { if (in_bf) { QB_LAUNCH(32, bf, float) } else { QB_LAUNCH(32, float, float) } }
+  }
+#undef QB_LAUNCH
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
