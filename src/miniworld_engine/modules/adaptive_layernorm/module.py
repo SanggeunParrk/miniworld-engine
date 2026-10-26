@@ -76,6 +76,15 @@ class AdaptiveLayerNorm(nn.Module):
             from miniworld_engine.modules import dispatch as _dispatch
 
             engine_leg = self.implementation == ImplementationType.MINIWORLD and _dispatch.restricted_card(x.device)
+            if engine_leg and x.dtype == cond.dtype and x.dtype in (torch.bfloat16, torch.float32):
+                # H100: the hand-CUDA row kernels + two GEMMs (kernels/adaln/cuda) for bf16 / fp32 activations
+                from miniworld_engine.kernels.adaln import cuda as _adaln_cuda
+
+                if _adaln_cuda.available(x, cond) and not self.ln_in.elementwise_affine and self.to_bias.bias is None:
+                    return _adaln_cuda.adaln(
+                        x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight,
+                        self.ln_in.eps, self.ln_cond.eps,
+                    )
             x_norm = self.ln_in(x)
             cond_norm = self.ln_cond(cond)
             scale = master_linear(self.to_scale, cond_norm)

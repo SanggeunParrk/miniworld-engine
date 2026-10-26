@@ -84,13 +84,14 @@ __device__ __forceinline__ void gram_step(float (&g0)[4], float (&g1)[4], float 
   mma16816(cs, a0, a1, a2, a3, ONES, ONES);
 }
 // (mean, rstd) of rows g and g + 8 from gram_step's accumulators
+template <int DPW = DP>
 __device__ __forceinline__ void gram_stats(const float (&g0)[4], const float (&g1)[4], const float (&cs)[4], float eps, float& mu0,
                                            float& rs0, float& mu1, float& rs1) {
   const int lane = threadIdx.x & 31, g = lane >> 2, src = 4 * g + (g >> 1);
   const float s0 = __shfl_sync(0xffffffffu, (g & 1) ? g0[1] : g0[0], src), s1 = __shfl_sync(0xffffffffu, (g & 1) ? g1[3] : g1[2], src);
-  mu0 = cs[0] * (1.f / DP); mu1 = cs[2] * (1.f / DP);
-  rs0 = rsqrtf(fmaxf(s0 * (1.f / DP) - mu0 * mu0, 0.f) + eps);
-  rs1 = rsqrtf(fmaxf(s1 * (1.f / DP) - mu1 * mu1, 0.f) + eps);
+  mu0 = cs[0] * (1.f / DPW); mu1 = cs[2] * (1.f / DPW);
+  rs0 = rsqrtf(fmaxf(s0 * (1.f / DPW) - mu0 * mu0, 0.f) + eps);
+  rs1 = rsqrtf(fmaxf(s1 * (1.f / DPW) - mu1 * mu1, 0.f) + eps);
 }
 
 // ------------------------------------------------------------------------------------------------ bulk copies (sm_90+)
@@ -121,20 +122,23 @@ __device__ __forceinline__ void mbar_wait(uint64_t* b, uint32_t parity) {
 #ifndef FWD_STAGES
 #define FWD_STAGES 2
 #endif
-constexpr int NSF = FWD_STAGES, FT = 128 * DP * 2, FW = 8, FNT = 32 * FW;   // stages, tile bytes, warps, threads
+constexpr int FW = 8, FNT = 32 * FW;   // warps, threads
+// pair width DPW (128; 256 for 8 heads): tile bytes and ring depth (the wider tile takes one block per SM and three stages)
+template <int DPW = DP> constexpr int fwd_stages() { return DPW > 128 ? 3 : FWD_STAGES; }
+template <int DPW = DP> constexpr int fwd_tile() { return 128 * DPW * 2; }
 template <int NH> constexpr int nhp() { return (NH + 7) / 8 * 8; }    // heads rounded up to the mma's 8
-template <int NH> constexpr int fwd_smem() { return NSF * FT + 2 * nhp<NH>() * (128 + 4) * 4 + NSF * 8; }
+template <int NH, int DPW = DP> constexpr int fwd_smem() { return fwd_stages<DPW>() * fwd_tile<DPW>() + 2 * nhp<NH>() * (128 + 4) * 4 + fwd_stages<DPW>() * 8; }
 // Wf's B fragments (lane (g, q): head g + 8 nt; zero past NH) and sum_c Wf of heads 2q, 2q + 1 (+ 8 nt) for this lane's C columns
-template <int NT8, int NH>
-__device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][8][2], float (&sw0)[NT8], float (&sw1)[NT8]) {
+template <int NT8, int NH, int DPW = DP>
+__device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][DPW / 16][2], float (&sw0)[NT8], float (&sw1)[NT8]) {
   const int lane = threadIdx.x & 31, g = lane >> 2, q = lane & 3;
 #pragma unroll
   for (int nt = 0; nt < NT8; ++nt) {
     float sw = 0.f;
 #pragma unroll
-    for (int s = 0; s < 8; ++s) {
+    for (int s = 0; s < DPW / 16; ++s) {
       const bool live = g + 8 * nt < NH;
-      const uint32_t* wp = reinterpret_cast<const uint32_t*>(W + (live ? g + 8 * nt : 0) * DP + 32 * (s >> 1) + 8 * q + 4 * (s & 1));
+      const uint32_t* wp = reinterpret_cast<const uint32_t*>(W + (live ? g + 8 * nt : 0) * DPW + 32 * (s >> 1) + 8 * q + 4 * (s & 1));
       b[nt][s][0] = live ? wp[0] : 0u; b[nt][s][1] = live ? wp[1] : 0u;
       const float2 u = unpack2(b[nt][s][0]), v = unpack2(b[nt][s][1]);
       sw += u.x + u.y + v.x + v.y;
@@ -144,10 +148,11 @@ __device__ __forceinline__ void wf_frags(const bf* W, uint32_t (&b)[NT8][8][2], 
   }
 }
 
-template <int NH>
+// ST (optional): the (mean, rstd) of every pair row, for a backward that does not recompute them
+template <int NH, int DPW = DP>
 __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z, const bf* __restrict__ W, const bool* __restrict__ MASK,
-    bf* __restrict__ OUT, int L, float eps, float neg) {
-  constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>();
+    bf* __restrict__ OUT, float2* __restrict__ ST, int L, float eps, float neg) {
+  constexpr int NT8 = nhp<NH>() / 8, NHP = nhp<NH>(), NSF = fwd_stages<DPW>(), FT = fwd_tile<DPW>(), UU = DPW / 32;
   extern __shared__ __align__(128) uint8_t smem[];
   float (*out_s)[NHP][128 + 4] = reinterpret_cast<float (*)[NHP][128 + 4]>(smem + NSF * FT);
   uint64_t* full = reinterpret_cast<uint64_t*>(smem + NSF * FT + 2 * NHP * (128 + 4) * 4);
@@ -159,8 +164,8 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
     if (t >= ntiles) return;
     const int i = (int)(t / ntj), j0 = (int)(t % ntj) * 128, rows = min(128, L - j0);
     uint64_t* fb = &full[n % NSF];
-    mbar_expect_tx(fb, (uint32_t)rows * DP * 2);
-    bulk_g2s(smem + (n % NSF) * FT, Z + ((long)i * L + j0) * DP, (uint32_t)rows * DP * 2, fb);
+    mbar_expect_tx(fb, (uint32_t)rows * DPW * 2);
+    bulk_g2s(smem + (n % NSF) * FT, Z + ((long)i * L + j0) * DPW, (uint32_t)rows * DPW * 2, fb);
   };
   if (threadIdx.x == 0) {
     for (int k = 0; k < NSF; ++k) mbar_init(&full[k], 1);
@@ -169,9 +174,9 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
   __syncthreads();
   if (threadIdx.x == 0)
     for (int k = 0; k < NSF; ++k) issue(k);
-  uint32_t b[NT8][8][2];
+  uint32_t b[NT8][DPW / 16][2];
   float sw0[NT8], sw1[NT8];
-  wf_frags<NT8, NH>(W, b, sw0, sw1);
+  wf_frags<NT8, NH, DPW>(W, b, sw0, sw1);
   for (long n = 0;; ++n) {
     const long t = blockIdx.x + n * gridDim.x;
     if (t >= ntiles) break;
@@ -181,15 +186,15 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
     float (*os)[128 + 4] = out_s[n & 1];
     const int rb = warp * 16;
     if (rb < rows) {
-      uint4 r0[4], r1[4];
+      uint4 r0[UU], r1[UU];
 #pragma unroll
-      for (int u = 0; u < 4; ++u) {
-        r0[u] = *reinterpret_cast<const uint4*>(tile + (rb + g) * DP * 2 + 64 * u + 16 * q);
-        r1[u] = *reinterpret_cast<const uint4*>(tile + (rb + g + 8) * DP * 2 + 64 * u + 16 * q);
+      for (int u = 0; u < UU; ++u) {
+        r0[u] = *reinterpret_cast<const uint4*>(tile + (rb + g) * DPW * 2 + 64 * u + 16 * q);
+        r1[u] = *reinterpret_cast<const uint4*>(tile + (rb + g + 8) * DPW * 2 + 64 * u + 16 * q);
       }
       float c[NT8][4] = {}, g0[4] = {}, g1[4] = {}, cs[4] = {};
 #pragma unroll
-      for (int u = 0; u < 4; ++u) {
+      for (int u = 0; u < UU; ++u) {
         const uint32_t u0[4] = {r0[u].x, r0[u].y, r0[u].z, r0[u].w}, u1[4] = {r1[u].x, r1[u].y, r1[u].z, r1[u].w};
 #pragma unroll
         for (int h = 0; h < 2; ++h) {                                       // k step s = 2 u + h: words 2h, 2h + 1
@@ -200,8 +205,12 @@ __global__ void __launch_bounds__(FNT) pair_bias_fwd_k(const bf* __restrict__ Z,
         }
       }
       float m0, rs0, m1, rs1;
-      gram_stats(g0, g1, cs, eps, m0, rs0, m1, rs1);
+      gram_stats<DPW>(g0, g1, cs, eps, m0, rs0, m1, rs1);
       const int jl = rb + g;
+      if (ST != nullptr && q == 0) {
+        ST[(long)i * L + j0 + jl] = make_float2(m0, rs0);
+        ST[(long)i * L + j0 + jl + 8] = make_float2(m1, rs1);
+      }
 #pragma unroll
       for (int nt = 0; nt < NT8; ++nt) {
         const int h0 = 2 * q + 8 * nt;
@@ -805,30 +814,43 @@ int nsm_of(const at::Tensor& t) {
   return nsm;
 }
 
-template <int NH>
-void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::optional<at::Tensor>& mask, at::Tensor& out, int64_t L, double eps,
+template <int NH, int DPW>
+void pair_bias_fwd_t(const at::Tensor& z, const at::Tensor& w, const c10::optional<at::Tensor>& mask, at::Tensor& out, float2* st, int64_t L, double eps,
                      double neg) {
   static bool attr = false;
   if (!attr) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH>()));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bias_fwd_k<NH, DPW>, cudaFuncAttributeMaxDynamicSharedMemorySize, fwd_smem<NH, DPW>()));
     attr = true;
   }
   const long ntiles = L * ((L + 127) / 128);
-  pair_bias_fwd_k<NH><<<(unsigned)std::min<long>(2L * nsm_of(z), ntiles), FNT, fwd_smem<NH>(), S()>>>(
-      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), (int)L, (float)eps, (float)neg);
+  const long per_sm = DPW > 128 ? 1 : 2;  // the 256-wide ring fills the SM's shared memory
+  pair_bias_fwd_k<NH, DPW><<<(unsigned)std::min<long>(per_sm * nsm_of(z), ntiles), FNT, fwd_smem<NH, DPW>(), S()>>>(
+      CP<bf>(z), CP<bf>(w), mask ? CP<bool>(*mask) : nullptr, P<bf>(out), st, (int)L, (float)eps, (float)neg);
 }
-void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L, double eps, double neg) {
+// d_pair 128 (8 / 12 / 16 / 24 heads) or 256 (8 heads); ``stats`` (optional [L L, 2] fp32) receives every row's (mean, rstd)
+void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, c10::optional<at::Tensor> stats, int64_t L, double eps,
+                        double neg) {
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
-  const int64_t nh = w.size(0);
-  TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * DP && w.numel() == nh * DP && out.numel() == nh * L * L, "pair_bias_fwd shapes");
+  const int64_t nh = w.size(0), dp = w.size(1);
+  TORCH_CHECK(dp == DP || (dp == 2 * DP && nh == 8), "pair_bias: d_pair 128, or 256 with 8 heads");
+  TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * dp && w.numel() == nh * dp && out.numel() == nh * L * L, "pair_bias_fwd shapes");
   TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias: 8, 12, 16 or 24 heads");
   if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == L, "mask [L]"); }
+  float2* st = nullptr;
+  if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * L * L, "stats [L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
   const at::cuda::CUDAGuard gd(z.device());
-  if (nh == 8) pair_bias_fwd_t<8>(z, w, mask, out, L, eps, neg);
-  else if (nh == 12) pair_bias_fwd_t<12>(z, w, mask, out, L, eps, neg);
-  else if (nh == 16) pair_bias_fwd_t<16>(z, w, mask, out, L, eps, neg);
-  else pair_bias_fwd_t<24>(z, w, mask, out, L, eps, neg);
+  if (dp == 2 * DP) pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg);
+  else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, L, eps, neg);
+  else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, L, eps, neg);
+  else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, L, eps, neg);
+  else pair_bias_fwd_t<24, DP>(z, w, mask, out, st, L, eps, neg);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+void pair_bias_fwd(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, int64_t L, double eps, double neg) {
+  pair_bias_fwd_impl(z, w, mask, out, c10::nullopt, L, eps, neg);
+}
+void pair_bias_fwd_stats(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> mask, at::Tensor out, at::Tensor stats, int64_t L, double eps, double neg) {
+  pair_bias_fwd_impl(z, w, mask, out, stats, L, eps, neg);
 }
 
 CUtensorMap tensor_map(void* ptr, CUtensorMapDataType dt, int rank, const cuuint64_t* dims, const cuuint64_t* strides,
@@ -1914,6 +1936,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("zero_acc", &zero_acc);
   m.def("pair_bwd_blocks", &pair_bwd_blocks);
   m.def("pair_bias_fwd", &pair_bias_fwd);
+  m.def("pair_bias_fwd_stats", &pair_bias_fwd_stats);
   m.def("pair_bias_bwd", &pair_bias_bwd);
   m.def("ln_rows", &ln_rows);
   m.def("gate_rows", &gate_rows);

@@ -86,3 +86,9 @@ python -m pytest tests/gpu/sm90/test_h100_apb_training_gpu.py tests/gpu/sm100/te
 Other layouts: `+apb_n_head=12|16|24` at `d_single=384`, `+apb_n_head=16 d_single=512`. The fp32 pair-weight oracle needs
 `CUTLASS_PATH` (CUTLASS 4.2 headers) and `settings.configure(apb_h100_exact_dwb=True)`. Dated measurements and the
 investigation: [records/h100_attention_pair_bias_20261013.md](../../../records/h100_attention_pair_bias_20261013.md).
+
+## d_pair 256 (2026-10-26)
+
+The native path above is d_pair 128. At d_pair 256 the module now runs the pair-fused core (`kernels/augmented_attention/cuda/fused_pair.py`: `pair_mma.cu` forward on mma.sync, `pair_rows.cu` backward, the
+wgmma attention cores): 8 x 48, L 384, bf16, ladder CUDA / portable 0.62 (inference, 0.091 ms) and 0.86 (training, 0.349 ms); before, the call ran the PyTorch statements (1.07 / 1.03). Record:
+[attention_cuda_ladder_20261026.md](../../../records/attention_cuda_ladder_20261026.md).

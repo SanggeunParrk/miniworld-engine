@@ -897,19 +897,7 @@ void pair_ln_bwd(at::Tensor dxh, at::Tensor z, at::Tensor pst, at::Tensor dz) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// dst [N, M] = src [M, N]^T (either operand dtype): 32 x 32 tiles through shared memory, both sides coalesced. The fp32 block's
-// TF32 attention core takes q, k, dO (backward) and v (forward) with the tokens contiguous.
-template <typename T>
-__global__ void __launch_bounds__(256) transpose_k(const T* __restrict__ S_, T* __restrict__ Dst, long M, long N) {
-  __shared__ T tile[32][33];
-  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
-  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
-#pragma unroll
-  for (int i = 0; i < 32; i += 8) tile[ty + i][tx] = S_[(r0 + ty + i) * N + c0 + tx];
-  __syncthreads();
-#pragma unroll
-  for (int i = 0; i < 32; i += 8) Dst[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
-}
+// transpose: the tiled kernel is tdr::transpose_k (token_dit_common.cuh), shared with the pair kernels of augmented_attention/cuda/pair_rows.cu.
 
 void transpose(at::Tensor src, at::Tensor dst) {
   const int64_t M = src.size(0), N = src.size(1);
@@ -917,7 +905,7 @@ void transpose(at::Tensor src, at::Tensor dst) {
               && src.scalar_type() == dst.scalar_type(), "transpose: contiguous [M, N] -> [N, M], multiples of 32");
   const at::cuda::CUDAGuard g(src.device());
   TDT_DISPATCH(src.scalar_type(), T, [&] {
-    transpose_k<T><<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, S()>>>(CP<T>(src), P<T>(dst), M, N);
+    tdr::transpose_k<T><<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, S()>>>(CP<T>(src), P<T>(dst), M, N);
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

@@ -224,8 +224,8 @@ class Settings:
     #: training and inference). Falls back on any other shape, dtype or architecture.
     #: MINIWORLD_TRANSITION_FUSED_SM90A=0 also turns it off.
     transition_fused_sm90a: bool = True
-    #: Route the pair-bias attention core, when it is asked to compute in bf16 (``compute_dtype=torch.bfloat16``), on
-    #: sm_90 with 16 heads x 48, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
+    #: Route the pair-bias attention core, when it computes in bf16 (``compute_dtype=torch.bfloat16`` or bf16 q / k / v), on
+    #: sm_90 with 16 heads x 48 or 4 x 32, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
     #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
     #: Falls back on anything else. Read by the module and by the kernel entry itself (formerly also ``augattn_bf16_sm90``).
     augmented_attention_bf16_sm90: bool = True
@@ -233,6 +233,10 @@ class Settings:
     #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
     #: A is even and there is no key mask. Falls back on anything else (formerly also ``augattn_bf16_sm100``).
     augmented_attention_bf16_sm100: bool = True
+    #: Route the adaptive LayerNorm of an H100 call (bf16 activations, ``AdaptiveLayerNorm`` with the engine implementation) through
+    #: the hand-CUDA row kernels + two cuBLAS GEMMs (kernels/adaln/cuda) instead of the PyTorch leg's ten fp32 elementwise / LayerNorm
+    #: kernels. Falls back on anything else (fp32 activations, other cards, torch.compile tracing).
+    adaln_h100_cuda: bool = True
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
     transition_gatebwd_wgmma: bool = True
