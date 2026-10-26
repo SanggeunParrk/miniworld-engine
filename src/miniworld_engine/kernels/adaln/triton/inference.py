@@ -373,6 +373,7 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
 
 
 def _cond_affine_stats_saved_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
+    """(cond_aff (M, NC), rstd_x, c1, mean_c, rstd_c): the four statistics are (M,) fp32 whatever the dtype of x and cond."""
     m = cond.shape[0]
     f = lambda: cond.new_empty((m,), dtype=torch.float32)   # noqa: E731
     return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype), f(), f(), f(), f())
