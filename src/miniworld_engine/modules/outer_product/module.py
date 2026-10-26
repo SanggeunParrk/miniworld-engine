@@ -191,6 +191,12 @@ class OuterProductMean(nn.Module):
                 and not torch.is_grad_enabled()
             ):
                 return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
+            if native and self.groups > 1:   # Chai-1: the fused H100 passes (kernels.outer_product_mean.chai), inference and training
+                from miniworld_engine.kernels.outer_product_mean import chai as _chai
+
+                if _chai.serves(self, msa, mask, training=torch.is_grad_enabled(),
+                                interchain=bool(self.mask_interchain and token_asym_id is not None)):
+                    return _chai.forward(self, msa, mask, token_asym_id, residual)
             if native and composed.serves(self, msa, mask):
                 return composed.inference(self, msa, mask, token_asym_id, residual)
             # The portable Triton path (projection biases folded into the projection kernel, groups as a leading batch axis of the

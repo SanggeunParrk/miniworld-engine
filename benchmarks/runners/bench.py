@@ -2295,6 +2295,14 @@ def _nondefault_parameters(model: nn.Module) -> None:
                 nn.init.normal_(module.bias, std=0.1)
 
 
+def _chai_serves(msa, d_hidden, d_pair) -> bool:
+    """Chai-1's grouped OPM runs the fused H100 passes (``kernels.outer_product_mean.chai``) unless the A/B switch forces the portable kernels."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.outer_product_mean import chai
+
+    return not settings.current().force_portable_kernels and chai.serves_dims(msa, 8, d_hidden // 8, d_pair)
+
+
 def bench_module_outer_product(conf, seq_len, implementation, fabric):
     """OuterProductMean at MiniWorld's MSA-module width, `modules/outer_product`.
 
@@ -2447,6 +2455,8 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
             "HYBRID integrations.anthropic_msa.outer_product_mean[upstream msa_opm "
             "fused_prologue + cuBLAS + OUR csrc/opm_epilogue.cu]"
         )
+    elif impl == ImplementationType.MINIWORLD and conf.opm_variant == "chai1" and _chai_serves(msa, d_hidden, conf.d_pair):
+        execution_path = "kernels.outer_product_mean.chai[fused CUDA prologue + cuBLAS products + TMA/wgmma epilogue]"
     elif impl == ImplementationType.MINIWORLD:
         why = (
             None
