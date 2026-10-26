@@ -143,8 +143,10 @@ def _bwd(
     dcn = torch.mm(dsb, wcat)
     dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32) if dsb.dtype is torch.bfloat16 else torch.mm(dsb.t(), cn)  # [2 d, dc]
     dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous())
-    dbs = pbs.sum(0) if has_bs else pbs.new_empty(0)
-    return dx, dcond, pbc.sum(0), dwcat[:d].clone(), dbs, dwcat[d:].clone()
+    from . import infer
+
+    dbs = infer.colsum(pbs) if has_bs else pbs.new_empty(0)   # fixed-order column sums of the block partials, one launch each
+    return dx, dcond, infer.colsum(pbc), dwcat[:d].clone(), dbs, dwcat[d:].clone()
 
 
 class _AdaLN(torch.autograd.Function):

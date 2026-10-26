@@ -93,10 +93,16 @@ __global__ void sigmul_fwd_k(const typename Vec<F32>::T* __restrict__ out, const
     Vec<F32>::st(y + i * V, v);
   }
 }
+// dout = dy g, dscale = dy out g (1 - g); also the block partials of the column sums of dscale (the gate-bias gradient): the block is a whole number
+// of rows of chunks, so a thread's column chunk never changes and it accumulates in registers; the row slots are summed in order through shared memory.
 template <bool F32>
 __global__ void sigmul_bwd_k(const typename Vec<F32>::T* __restrict__ dy, const typename Vec<F32>::T* __restrict__ out, const typename Vec<F32>::T* __restrict__ sp,
-                             typename Vec<F32>::T* __restrict__ dout, typename Vec<F32>::T* __restrict__ dsc, long chunks) {
+                             typename Vec<F32>::T* __restrict__ dout, typename Vec<F32>::T* __restrict__ dsc, float* __restrict__ part, long chunks, int ndc) {
   constexpr int V = Vec<F32>::N;
+  extern __shared__ float red[];
+  float acc[V];
+#pragma unroll
+  for (int k = 0; k < V; ++k) acc[k] = 0.f;
   for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < chunks; i += (long)gridDim.x * blockDim.x) {
     float d[V], o[V], s[V], a[V], b[V];
     Vec<F32>::ld(dy + i * V, d);
@@ -106,10 +112,20 @@ __global__ void sigmul_bwd_k(const typename Vec<F32>::T* __restrict__ dy, const 
     for (int k = 0; k < V; ++k) {
       const float g = sigm(s[k]);
       a[k] = d[k] * g;
-      b[k] = d[k] * o[k] * g * (1.f - g);
+      b[k] = Vec<F32>::rnd(d[k] * o[k] * g * (1.f - g));
+      acc[k] += b[k];
     }
     Vec<F32>::st(dout + i * V, a);
     Vec<F32>::st(dsc + i * V, b);
+  }
+  const int slot = threadIdx.x / ndc, col = threadIdx.x % ndc, slots = blockDim.x / ndc;
+#pragma unroll
+  for (int k = 0; k < V; ++k) red[slot * ndc * V + col * V + k] = acc[k];
+  __syncthreads();
+  for (int c = threadIdx.x; c < ndc * V; c += blockDim.x) {
+    float t = 0.f;
+    for (int q = 0; q < slots; ++q) t += red[q * ndc * V + c];
+    part[(long)blockIdx.x * ndc * V + c] = t;
   }
 }
 
@@ -176,10 +192,16 @@ std::vector<at::Tensor> sigmul_bwd(at::Tensor dy, at::Tensor out, at::Tensor sp)
   const at::cuda::CUDAGuard g(dy.device());
   auto dout = at::empty_like(dy), dsc = at::empty_like(dy);
   const long chunks = dy.numel() / V;
-  if (f) sigmul_bwd_k<true><<<grid_of(chunks), 256, 0, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), chunks);
-  else sigmul_bwd_k<false><<<grid_of(chunks), 256, 0, S()>>>(P<bf>(dy), P<bf>(out), P<bf>(sp), PM<bf>(dout), PM<bf>(dsc), chunks);
+  const int ndc = (int)(dy.size(-1) / V);
+  const int threads = ndc * std::max(1, 128 / ndc);
+  TORCH_CHECK(threads <= 1024, "width");
+  const unsigned grid = (unsigned)std::min<long>((chunks + threads - 1) / threads, 132L * 8);
+  auto part = at::empty({(long)grid, dy.size(-1)}, dy.options().dtype(at::kFloat));
+  const size_t shm = (size_t)threads / ndc * ndc * V * sizeof(float);
+  if (f) sigmul_bwd_k<true><<<grid, threads, shm, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), PM<float>(part), chunks, ndc);
+  else sigmul_bwd_k<false><<<grid, threads, shm, S()>>>(P<bf>(dy), P<bf>(out), P<bf>(sp), PM<bf>(dout), PM<bf>(dsc), PM<float>(part), chunks, ndc);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dout, dsc};
+  return {dout, dsc, part};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

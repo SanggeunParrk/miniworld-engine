@@ -369,9 +369,36 @@ void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Te
 #undef AG
 }
 
+// ======================================================================================================================== column sums of block partials
+// out[n] = sum_p parts[p, n] in a fixed order (32 columns x 8 row slices a block; the slices are summed in order): the reduction of the per-block partial
+// rows the backward row kernels write (scale-bias gradient, LayerNorm weight gradient). One launch instead of a PyTorch reduction (20 us for 3 MB).
+__global__ void __launch_bounds__(256) colsum_k(const float* __restrict__ parts, float* __restrict__ out, int P, int N) {
+  __shared__ float red[8][33];
+  const int c = blockIdx.x * 32 + (threadIdx.x & 31), s = threadIdx.x >> 5;
+  float v = 0.f;
+  if (c < N) for (int p = s; p < P; p += 8) v += parts[(int64_t)p * N + c];
+  red[s][threadIdx.x & 31] = v;
+  __syncthreads();
+  if (s == 0 && c < N) {
+    float t = 0.f;
+#pragma unroll
+    for (int q = 0; q < 8; ++q) t += red[q][threadIdx.x & 31];
+    out[c] = t;
+  }
+}
+at::Tensor colsum(torch::Tensor parts) {
+  TORCH_CHECK(parts.is_cuda() && parts.is_contiguous() && parts.scalar_type() == torch::kFloat32 && parts.dim() == 2, "parts [P, N] fp32");
+  const at::cuda::CUDAGuard guard(parts.device());
+  auto out = at::empty({parts.size(1)}, parts.options());
+  launch(colsum_k, (unsigned)((parts.size(1) + 31) / 32), 256u, (size_t)0, false, (const float*)parts.data_ptr(), (float*)out.data_ptr(), (int)parts.size(0),
+         (int)parts.size(1));
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_rows", &ln_rows);
   m.def("adaln_gemm", &adaln_gemm);
+  m.def("colsum", &colsum);
 #ifdef CT_TRACE
   m.def("trace", &trace_read);
 #endif

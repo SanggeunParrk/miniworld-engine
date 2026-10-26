@@ -17,6 +17,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels.adaln.cuda.infer import colsum
 
 _dir = Path(__file__).parent
 
@@ -69,10 +70,10 @@ def sigmul_fwd(out: torch.Tensor, sp: torch.Tensor, res: torch.Tensor | None) ->
     return ext().sigmul_fwd(out, sp, res)
 
 
-@opaque(fake=lambda dy, out, sp: (torch.empty_like(dy), torch.empty_like(dy)), name="ct_cuda_sigmul_bwd")
-def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-    dout, dsc = ext().sigmul_bwd(dy, out, sp)
-    return dout, dsc
+@opaque(fake=lambda dy, out, sp: (torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((1056, dy.shape[-1]), dtype=torch.float32)), name="ct_cuda_sigmul_bwd")
+def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    dout, dsc, part = ext().sigmul_bwd(dy, out, sp)
+    return dout, dsc, part
 
 
 class _Tail(torch.autograd.Function):
@@ -94,7 +95,7 @@ class _Tail(torch.autograd.Function):
     def backward(ctx, dy):  # noqa: D102
         x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc = ctx.saved_tensors
         dy = dy.contiguous()
-        dout, dsc = sigmul_bwd(dy, out, sp)
+        dout, dsc, part = sigmul_bwd(dy, out, sp)
         f32 = torch.float32
         o = lambda w: f32 if (w.dtype == f32 and x.dtype != f32) else None  # noqa: E731  fp32 master weights: fp32 gradients, unrounded
         dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
@@ -104,7 +105,7 @@ class _Tail(torch.autograd.Function):
         dx = torch.mm(dab, wab)
         dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
         dcond = torch.mm(dsc, wscb)
-        dbsc = dsc.sum(0, dtype=f32 if o(wsc) else None)
+        dbsc = colsum(part).to(dsc.dtype if not o(wsc) else f32)   # the block partials of sum(dscale), summed in a fixed order
         nd = wab.shape[0] // 2
         return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
 

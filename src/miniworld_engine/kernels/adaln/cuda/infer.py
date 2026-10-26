@@ -164,4 +164,10 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     return y, aff, stc, stx, sb
 
 
-__all__ = ["adaln_inference", "ext", "fwd_saved", "num_sms", "pack_weights", "pick_ht", "supported"]
+__all__ = ["adaln_inference", "colsum", "ext", "fwd_saved", "num_sms", "pack_weights", "pick_ht", "supported"]
+
+
+@opaque(fake=lambda parts: parts.new_empty((parts.shape[1],)), name="adaln_cuda_colsum")
+def colsum(parts: torch.Tensor) -> torch.Tensor:
+    """sum over the rows of ``parts`` [P, N] fp32 in a fixed order (one launch)."""
+    return ext().colsum(parts)
