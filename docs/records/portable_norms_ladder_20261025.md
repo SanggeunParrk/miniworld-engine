@@ -60,3 +60,21 @@ RMSNorm: the CUDA rung (`mwln::ln_fwd_kernel`) is now slower than portable in in
 
 - LN pair bf16 D128 L384 inference: 30.7 vs 30.5 us (1.005), not fixed.
 - H100 tuned-cache rebuild for the four ops.
+
+## Follow-up (2026-10-26): why the inference rows cannot be made a robust win
+
+Question asked: why does Inductor reach the floor and the portable kernel not. Measured on H100 with probes outside the checkout (`~/miniworld-engine-scratch/pvp-c/probe/{why,l2,tma}_probe.py`),
+all variants interleaved in one process with PyTorch (compiled, graph) and re-run over 10 random buffer placements, because one run's ranking moves by up to 3% with where the tensors happen to sit.
+
+- Glue is not the cause. The module call for LN/RMS inference is one kernel node (no cast, view or contiguous copy; `.reshape(-1, D).contiguous()` is a no-op), the same node count as PyTorch's graph.
+- The kernels are the same program. Inductor's LN kernel is `XBLOCK=8, num_warps=2, num_stages=1`, unmasked, `evict_first` loads, `rsqrt`. A literal clone of it (`clone_ln`) times 30.68 us against PyTorch 30.87 and the module 31.10 (D128 L384);
+  RMS L1024 clones (1-4 rows, 1-4 warps) 55.90-56.19 against PyTorch 55.91. A plain copy is at the same place.
+- Memory-policy variants of that kernel, ratio to PyTorch over 10 placements (median, min-max), D128 L384 / L768 / D256 L384:
+  default 0.999 (0.996-1.003) / 0.987 / 0.997; `.cg` loads 0.999 / 0.987 / 0.997; evict_first loads 1.000 / 0.999 / 1.007; evict_first stores 1.001 / 0.988 / 0.988; evict_last stores 1.017 / 0.996 / 1.001.
+  Nothing moves L384 D128 below 0.995 or above a 1.3% gain at the others.
+- TMA (`make_tensor_descriptor` loads/stores, 8-32 rows, 1-4 warps, plain and persistent): 1.02 / 1.00 / 1.00-1.01. Slower; not portable either.
+- L768 achieves 2.89 TB/s, L384 only 2.46 TB/s; the difference is about 4.6 us of fixed launch, ramp and tail that no kernel body changes. That is why only the larger shapes show a real margin (L768: 0.981-0.988).
+- Tuner noise is the one controllable loss: the autotuner picked (16,2) or (8,1) for LN D128 L384 (module 31.1-32.1 us) where (8,2) gives 30.7, and a 4-row RMS config 57.2 us at L1024 where 1-4 row configs give 55.9.
+  Placement reorders near-tied configs, so a tuner cannot lock this in; margins stay within +-1%.
+
+Conclusion: LN pair D128 L384 inference and the other sub-1% inference rows are parity with PyTorch on this card; no portable-side change found that gives a repeatable margin.
