@@ -93,14 +93,15 @@ class _AdaLN(torch.autograd.Function):
         sb = torch.addmm(bcat, cn, wcat.t())
         y, stx = e.adaln_fwd(x2, sb, eps_x)
         if any(ctx.needs_input_grad):
-            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wcat, wc)
+            # the weights themselves are saved too (backward reads their packed copy): autograd then refuses an in-place update between the passes
+            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wcat, wc, ws, wb, *([] if bs is None else [bs]))
             ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
         return y.view(x.shape)
 
     @staticmethod
     def backward(ctx, dy):  # noqa: D102
         e = _ext()
-        x2, c2, cn, stc, stx, sb, wcat, wc = ctx.saved_tensors
+        x2, c2, cn, stc, stx, sb, wcat, wc = ctx.saved_tensors[:8]
         d = x2.shape[-1]
         dy2 = dy.reshape(-1, d)
         # the engine hands this op the gradient of its bf16 output: bf16 (autograd casts a gradient to the output's dtype)
