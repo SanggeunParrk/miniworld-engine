@@ -303,12 +303,19 @@ def _bwd_x_kernel(
                      dx.to(DX.dtype.element_ty), mask=mask)
 
 
+def _d_row_major(dy, n):
+    """Token-width bf16: D is stored ROW-major as (M, 2N) and handed out as its (2N, M) transpose view. The kernel then writes whole rows (coalesced)
+    instead of 16-row column strips of a (2N, M) buffer: 169 -> 137 us at M = 36864; cuBLAS reads either layout of D at the same speed (H100,
+    bf16). The atom width and fp32 keep the (2N, M) buffer they were tuned on."""
+    return n >= 256 and dy.dtype == torch.bfloat16
+
+
 def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None):
-    """D (2N, M) -- transposed, so the wgrad consuming it is a contiguous-K GEMM -- and dx (M, N)
-    carrying x's strides, since dx is written in x's layout rather than contiguous."""
+    """D (2N, M) -- a view of an (M, 2N) buffer at the token width in bf16 (see ``_d_row_major``), else contiguous so the wgrad consuming it is a
+    contiguous-K GEMM -- and dx (M, N) carrying x's strides, since dx is written in x's layout rather than contiguous."""
     m, n = dy.shape
     return (
-        dy.new_empty((2 * n, m)),
+        dy.new_empty((m, 2 * n)).t() if _d_row_major(dy, n) else dy.new_empty((2 * n, m)),
         # dx is written in x's layout, so the fake carries x's strides.
         torch.empty_strided((m, n), x.stride(), device=dy.device, dtype=dy.dtype),
     )
@@ -329,7 +336,8 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
             "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
             "not a working fallback: length_of refuses a rank-2 shape."
         )
-    D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
+    D = (torch.empty(M, 2 * N, device=dy.device, dtype=dy.dtype).t() if _d_row_major(dy, N)
+         else torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype))   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
     args = (dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
             dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
@@ -807,7 +815,11 @@ class AdaLNTrainFn(torch.autograd.Function):
         w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
         dW_cat = torch.mm(D, cond_aff, out_dtype=torch.float32) if ctx.master else _mm(D, cond_aff)
-        dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
+        if D.stride(0) == 1:   # row-major D (token width, bf16): a column sum over strided rows is a skinny GEMM against ones, which reads it at the HBM rate
+            ones = D.new_ones(1, D.shape[1])
+            dsb = (torch.mm(ones, D[:nx].t(), out_dtype=torch.float32) if ctx.master else torch.mm(ones, D[:nx].t())).view(-1)
+        else:
+            dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
 
         use_triton = (cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX) if _DGRAD_TRITON is None else _DGRAD_TRITON
         if use_triton:
