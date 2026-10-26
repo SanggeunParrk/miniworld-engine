@@ -20,6 +20,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <algorithm>
+#include <vector>
 
 constexpr int P = 128;
 constexpr int NWARP = 8;
@@ -261,7 +263,48 @@ void backward(torch::Tensor g, torch::Tensor ids, torch::Tensor bond, torch::Ten
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+
+// The call's glue in ONE launch: ids [5][BL] int32 from the five id tensors (int32 or int64 elements, contiguous) and the fp32 table
+// tbl [nrel + 2][128] = [w_rel^T ; w_bond^T] (what `torch.stack` + `.to(int32)` + `torch.cat` + `.t().contiguous()` made in 6-7 launches).
+struct IdSrc { const void* p[5]; int wide[5]; };
+__global__ void tpi_prep(IdSrc src, int BL, const float* __restrict__ w_rel, const float* __restrict__ w_bond, int nrel, int32_t* __restrict__ ids,
+                         float* __restrict__ tbl) {
+  const long n_ids = 5L * BL, n_tbl = (long)(nrel + 2) * P;
+  for (long t = (long)blockIdx.x * blockDim.x + threadIdx.x; t < n_ids + n_tbl; t += (long)gridDim.x * blockDim.x) {
+    if (t < n_ids) {
+      const int k = (int)(t / BL);
+      const long i = t - (long)k * BL;
+      ids[t] = src.wide[k] ? (int32_t)reinterpret_cast<const int64_t*>(src.p[k])[i] : reinterpret_cast<const int32_t*>(src.p[k])[i];
+    } else {
+      const long u = t - n_ids;
+      const int r = (int)(u / P), c = (int)(u - (long)r * P);
+      tbl[u] = r < nrel ? w_rel[(long)c * nrel + r] : w_bond[(long)c * 2 + (r - nrel)];
+    }
+  }
+}
+
+void prep(std::vector<torch::Tensor> id_tensors, torch::Tensor w_rel, torch::Tensor w_bond, torch::Tensor ids, torch::Tensor tbl) {
+  const at::cuda::CUDAGuard guard(ids.device());
+  TORCH_CHECK(id_tensors.size() == 5, "five id tensors");
+  IdSrc s;
+  const int BL = (int)id_tensors[0].numel();
+  for (int k = 0; k < 5; k++) {
+    const auto& t = id_tensors[k];
+    TORCH_CHECK(t.is_contiguous() && (int)t.numel() == BL, "id tensors must be contiguous and equally long");
+    TORCH_CHECK(t.scalar_type() == at::kInt || t.scalar_type() == at::kLong, "id tensors must be int32 or int64");
+    s.p[k] = t.data_ptr();
+    s.wide[k] = t.scalar_type() == at::kLong;
+  }
+  const int nrel = (int)w_rel.size(1);
+  const long total = 5L * BL + (long)(nrel + 2) * P;
+  const int blocks = (int)std::min<long>((total + 255) / 256, 1056);
+  tpi_prep<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(s, BL, w_rel.data_ptr<float>(), w_bond.data_ptr<float>(), nrel,
+                                                               ids.data_ptr<int32_t>(), tbl.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward);
   m.def("backward", &backward);
+  m.def("prep", &prep);
 }

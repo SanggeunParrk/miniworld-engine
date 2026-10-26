@@ -143,6 +143,8 @@ def _ext(
         revision += "_saved_ab_tma_ring_v1"
     if gate_saved_no_h_stage:
         revision += "_no_unused_h_stage_v1"
+    if width == 512 and (gate_saved_tma or split_fwd):
+        revision += "_k64_v1"   # 64-wide K slabs of the saved gate (2 stages) and of the split expand GEMM (3 stages)
     return load_extension(
         name=f"transition_wide_sm90a_d{width}_c{ctas}{revision}",
         sources=[str(_dir / "bind.cu"), *(str(_dir / s) for s in _SOURCES[width])],
