@@ -322,27 +322,27 @@ __global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_,
 // D[a, h, l] = sum_d dO[a L + l, 48 h + d] O[a L + l, 48 h + d], plus its query-permuted copy and the permuted copy of the LSE
 __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
                                             float* __restrict__ DDP, float* __restrict__ LSEP, float* __restrict__ DOR, long rows, int L) {
-  // a block: 16 consecutive rows (one sample: L % 16 == 0) x 16 heads; results staged so every plane is written in 64-B runs
-  __shared__ float s[16][17];
+  // a block: 16 consecutive rows (one sample: L % 16 == 0) of 192 float4: dO is read, rounded and written, O read, all coalesced; the 12 float4 of a
+  // head are summed in a fixed order from shared memory
+  __shared__ float s[16 * 192];  // the 192 float4 partial dot products of each row
   const long row0 = (long)blockIdx.x * 16;
-  const int rl = threadIdx.x >> 4, h = threadIdx.x & 15;
-  const long row = row0 + rl;
-  const float4* a = reinterpret_cast<const float4*>(DO + row * 768 + h * 48);
-  const float4* b = reinterpret_cast<const float4*>(O + row * 768 + h * 48);
-  float acc = 0.f;
+  const float4* a = reinterpret_cast<const float4*>(DO + row0 * 768);
+  const float4* b = reinterpret_cast<const float4*>(O + row0 * 768);
+  float4* r = reinterpret_cast<float4*>(DOR + row0 * 768);
 #pragma unroll
-  for (int i = 0; i < 12; ++i) {
+  for (int i = threadIdx.x; i < 16 * 192; i += 256) {
     const float4 x = __ldg(a + i), y = __ldg(b + i);
-    acc += x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
-    reinterpret_cast<float4*>(DOR + row * 768 + h * 48)[i] = make_float4(rna_tf32(x.x), rna_tf32(x.y), rna_tf32(x.z), rna_tf32(x.w));
+    r[i] = make_float4(rna_tf32(x.x), rna_tf32(x.y), rna_tf32(x.z), rna_tf32(x.w));
+    s[i] = x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
   }
-  s[h][rl] = acc;
   __syncthreads();
   const int h2 = threadIdx.x >> 4, r2 = threadIdx.x & 15;
   const long smp = row0 / L;
   const int l = (int)(row0 % L) + r2;
   const long o = (smp * 16 + h2) * L;
-  const float v = s[h2][r2];
+  float v = 0.f;  // fixed order: bitwise repeatable
+#pragma unroll
+  for (int j = 0; j < 12; ++j) v += s[r2 * 192 + h2 * 12 + j];
   DD[o + l] = v;
   DDP[o + kinv(l)] = v;
   LSEP[o + kinv(l)] = LSE[o + l];
