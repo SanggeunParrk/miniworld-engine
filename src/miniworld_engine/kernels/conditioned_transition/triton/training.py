@@ -313,7 +313,7 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
     sms = num_sms(a.device.index or 0)
     ensure_allocator()
     # a TMA config is a persistent grid (one program per SM, at most one per tile); the others one program per tile
-    grid = lambda META: ((min(sms, triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(ND, META["BLOCK_N"])),) if META.get("TMA")  # noqa: E731
+    grid = lambda META: ((min(sms, tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])[0]),) if META.get("TMA")  # noqa: E731
                          else tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"]))
     _dh_swiglu_bwd_kernel[grid](
         dout, ws, a, b, dab, M, int(ND), int(D),

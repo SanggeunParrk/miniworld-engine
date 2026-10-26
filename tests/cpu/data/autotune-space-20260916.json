@@ -30,7 +30,7 @@
       },
       "before_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
       "after_sha256": "db896268de0b8a51a3fddfd8168d1191ae1b51fa761c98c3547f3d02a0d92143",
-      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4\n",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\nTMA,0 1 2 3 4\n",
       "withdrawn_heuristic_count": 620,
       "withdrawn_heuristic_sha256": "bd681dd96b0116379ddc73259a5b9061fc8dc57490fc9a64eaa96b7f0ddbc4a3"
     },
@@ -81,7 +81,7 @@
       },
       "before_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
       "after_sha256": "82cae2f65df0e76689648ce2a19769f4b49d1e788cfec4295be1fb1dc495b651",
-      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4\nnum_stages,1 2 3 4\n",
+      "original_grid_csv": "axis,values\nBLOCK_M,64 128 256\nBLOCK_N,64 128 256\nBLOCK_K,16 32 64 128\nGROUP_M,1 2 4 8 16\nnum_warps,1 2 4 8\nnum_stages,1 2 3 4 5\nTMA,0 1 2 3 4\n",
       "withdrawn_heuristic_count": 391,
       "withdrawn_heuristic_sha256": "29fa821f3ea3c8ddadb47db641b6359ba8bdcd801219c58c9b42b8109c7399e9"
     },

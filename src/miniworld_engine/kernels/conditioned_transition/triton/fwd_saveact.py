@@ -295,7 +295,7 @@ def _fwd_expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
     sms = num_sms(x.device.index or 0)
     ensure_allocator()
     # a TMA config is a persistent grid (one program per SM, at most one per tile)
-    grid = lambda meta: ((min(sms, triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(ND, meta["BLOCK_N"])),) if meta.get("TMA")  # noqa: E731
+    grid = lambda meta: ((min(sms, tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])[0]),) if meta.get("TMA")  # noqa: E731
                          else tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"]))
     _fwd_expand_swiglu_kernel[grid](
         x, wa, wb, h, ab, M, ND, K, 2 * ND,
@@ -337,7 +337,7 @@ def _fwd_squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
     scale = torch.empty(M, D, device=h.device, dtype=h.dtype)
     sms = num_sms(h.device.index or 0)
     ensure_allocator()
-    grid = lambda meta: ((min(sms, triton.cdiv(M, meta["BLOCK_M1"]) * triton.cdiv(D, meta["BLOCK_N"])),) if meta.get("TMA")  # noqa: E731
+    grid = lambda meta: ((min(sms, tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])[0]),) if meta.get("TMA")  # noqa: E731
                          else tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"]))
     extra = {} if residual is None else dict(res_ptr=residual, stride_rm=residual.stride(0), HAS_RES=True)
     _fwd_squeeze_gate_kernel[grid](

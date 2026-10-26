@@ -677,7 +677,7 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
     gate = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     sms = num_sms(x.device.index or 0)
     ensure_allocator()
-    grid = lambda META: ((min(sms, triton.cdiv(M, META["BLOCK_M"]) * triton.cdiv(NX, META["BLOCK_N"])),) if META.get("TMA")  # noqa: E731
+    grid = lambda META: ((min(sms, tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])[0]),) if META.get("TMA")  # noqa: E731
                          else tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"]))
     _adaln_fwd_gate_kernel[grid](
         cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y, gate,
