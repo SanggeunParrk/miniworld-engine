@@ -55,8 +55,8 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 | Transition | CUDA at d=128, n=4; else warns (1 of 5 inference, 2 of 9 training) | warns (1 / 2 of 9) | warns (1 / 2 of 9) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleMultiplication (+ bidirectional) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | portable inference; training warns (3 of 8) | CUDA, else PyTorch | warns, PyTorch |
 | TriangleAttention (+ bidirectional, bias-only) | portable | portable | portable | CUDA, else PyTorch | warns, PyTorch |
-| AdaptiveLayerNorm | warns (2 of 8) | warns (2 of 8) | warns (2 of 8) | PyTorch (no CUDA path yet) | warns, PyTorch |
-| ConditionedTransition | warns (2 inference, 3 training of 17) | warns (2 / 3 of 17) | warns (2 / 4 of 17) | PyTorch (no CUDA path yet) | warns, PyTorch |
+| AdaptiveLayerNorm | warns (2 of 8) | warns (2 of 8) | warns (2 of 8) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| ConditionedTransition | warns (2 inference, 3 training of 17) | warns (2 / 3 of 17) | warns (2 / 4 of 17) | CUDA on H100, PyTorch on B200 | warns, PyTorch |
 | AugmentedAttention / AttentionPairBias | warns (2 of 11) | warns (2 of 11) | warns (2 of 11) | CUDA, else PyTorch | warns, PyTorch |
 | OuterProductMean | warns (2 inference, 5 training of 5) | same | same | CUDA, else PyTorch | warns, PyTorch |
 | MSAPairWeightedAveraging | warns (3 inference, 7 training of 7) | same | same | CUDA, else PyTorch | warns, PyTorch |
