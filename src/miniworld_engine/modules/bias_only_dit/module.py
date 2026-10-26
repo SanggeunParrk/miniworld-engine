@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
@@ -121,7 +122,13 @@ class BiasOnlyAttention(nn.Module):
     ) -> Float[torch.Tensor, "A B L d_single"]:
         # residual == the ORIGINAL input; the AdaLN hands it back as a stream output of its own node (see forward_with_stream)
         single, single_res = self.ada_ln_in.forward_with_stream(single, cond)
-        value, gate = self.to_value(single), self.to_gate(single)
+        if self.ada_ln_in.implementation == ImplementationType.MINIWORLD:
+            # the portable family: the value and the gate projection are one GEMM over the concatenated weights (one read of `single`, one launch,
+            # one dgrad and one wgrad in the backward); the PyTorch statements keep the two Linears
+            vg = F.linear(single, torch.cat([self.to_value.weight, self.to_gate.weight], 0))
+            value, gate = vg.split(self.to_value.out_features, dim=-1)
+        else:
+            value, gate = self.to_value(single), self.to_gate(single)
         value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
         # one softmax for every sample: the logits carry no augmentation axis
         attention = self._attention_weights(pair, mask, bias, value.dtype)
