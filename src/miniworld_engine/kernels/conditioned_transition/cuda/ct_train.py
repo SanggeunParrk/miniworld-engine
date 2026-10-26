@@ -58,6 +58,7 @@ def _swiglu_fwd_fake(ab):
 
 @opaque(fake=_swiglu_fwd_fake, name="conditioned_transition_cuda_swiglu_fwd")
 def swiglu_fwd(ab: torch.Tensor) -> torch.Tensor:
+    """h = silu(a) b of ab = [a | b]."""
     return ext().swiglu_fwd(ab)
 
 
@@ -83,15 +84,23 @@ def sigmul_fwd(out: torch.Tensor, sp: torch.Tensor, res: torch.Tensor | None) ->
     return ext().sigmul_fwd(out, sp, res)
 
 
+def sigmul_bwd_blocks(dy: torch.Tensor) -> int:
+    """Blocks of ``sigmul_bwd``'s grid (= rows of its partial-sum buffer): a function of the shape alone, so the fake knows it."""
+    v = 4 if dy.dtype is torch.float32 else 8
+    ndc = dy.shape[-1] // v
+    threads = ndc * max(1, 128 // ndc)
+    return min(-(-(dy.numel() // v) // threads), 132 * 8)
+
+
 def _sigmul_bwd_fake(dy, out, sp):
     """(dout, dscale, the block partials of the column sums of dscale)."""
-    return torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((1056, dy.shape[-1]), dtype=torch.float32)
+    return torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((sigmul_bwd_blocks(dy), dy.shape[-1]), dtype=torch.float32)
 
 
 @opaque(fake=_sigmul_bwd_fake, name="conditioned_transition_cuda_sigmul_bwd")
 def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """dout = dy g, dscale = dy out g (1 - g), and the block partials of sum(dscale)."""
-    dout, dsc, part = ext().sigmul_bwd(dy, out, sp)
+    dout, dsc, part = ext().sigmul_bwd(dy, out, sp, sigmul_bwd_blocks(dy))
     return dout, dsc, part
 
 

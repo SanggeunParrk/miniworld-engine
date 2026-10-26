@@ -183,7 +183,7 @@ at::Tensor sigmul_fwd(at::Tensor out, at::Tensor sp, c10::optional<at::Tensor> r
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return y;
 }
-std::vector<at::Tensor> sigmul_bwd(at::Tensor dy, at::Tensor out, at::Tensor sp) {
+std::vector<at::Tensor> sigmul_bwd(at::Tensor dy, at::Tensor out, at::Tensor sp, int64_t grid_blocks) {
   const bool f = is_f32(dy);
   is_f32(out);
   is_f32(sp);
@@ -195,7 +195,7 @@ std::vector<at::Tensor> sigmul_bwd(at::Tensor dy, at::Tensor out, at::Tensor sp)
   const int ndc = (int)(dy.size(-1) / V);
   const int threads = ndc * std::max(1, 128 / ndc);
   TORCH_CHECK(threads <= 1024, "width");
-  const unsigned grid = (unsigned)std::min<long>((chunks + threads - 1) / threads, 132L * 8);
+  const unsigned grid = (unsigned)grid_blocks;
   auto part = at::empty({(long)grid, dy.size(-1)}, dy.options().dtype(at::kFloat));
   const size_t shm = (size_t)threads / ndc * ndc * V * sizeof(float);
   if (f) sigmul_bwd_k<true><<<grid, threads, shm, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), PM<float>(part), chunks, ndc);
