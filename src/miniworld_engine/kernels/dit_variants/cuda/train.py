@@ -109,7 +109,7 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
         perm = _key_perm(L, x.device)
         bias_p = bias[..., perm].contiguous()
         km_p = None if km is None else km[:, perm].contiguous()
-        vt = vb.t().contiguous()
+        vt = _transpose(vb)
         if gating:
             og, lse = attn.tf32_forward(qs, kb, vt, bias_p, km_p, A, L, qkvg=qkvg)
         else:
@@ -142,6 +142,12 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
 
 
 
+
+def _transpose(t):
+    out = t.new_empty(t.shape[1], t.shape[0])
+    _ext().transpose2d(t, out)
+    return out
+
 def _key_perm(length, device):
     from miniworld_engine.kernels.conditioned_transition import cuda as rows
 
@@ -158,7 +164,7 @@ def _tf32_attn_bwd(qs, kb, vb, dob, bias, km, lse, dd, A, L):
     bias_p = bias[..., perm].contiguous()
     bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()      # [h, key, q position]
     km_p = None if km is None else km[:, perm].contiguous()
-    dq, dk, dv, db_p = attn.tf32_backward(qs, kb, vb, dob, qs.t().contiguous(), kb.t().contiguous(), dob.t().contiguous(), bias_p, bias_tp, lse, dd,
+    dq, dk, dv, db_p = attn.tf32_backward(qs, kb, vb, dob, _transpose(qs), _transpose(kb), _transpose(dob), bias_p, bias_tp, lse, dd,
                                           lse[..., perm].contiguous(), dd[..., perm].contiguous(), km, km_p, A, L)
     return dq, dk, dv, db_p[..., inv]
 
@@ -263,6 +269,44 @@ class _TokenBlock(torch.autograd.Function):
                 *((dwq, dbql, dwk, dbkl) if kq else (None, None, None, None)), None)
 
 
+
+def _pair_ln_fake(z, eps, out_bf16):
+    return z.new_empty(z.shape, dtype=torch.bfloat16 if out_bf16 else z.dtype)
+
+
+@opaque(fake=_pair_ln_fake, name="dit_variants_pair_ln_fwd")
+def pair_ln_fwd(z: torch.Tensor, eps: float, out_bf16: bool) -> torch.Tensor:
+    """LayerNorm (no affine) of the pair rows z [R, C] (C 128 | 256), bf16 or in z's dtype."""
+    out = torch.empty(z.shape, device=z.device, dtype=torch.bfloat16 if out_bf16 else z.dtype)
+    _ext().pair_ln_fwd(z, out, eps)
+    return out
+
+
+def _pair_ln_bwd_fake(z, g, eps):
+    return torch.empty_like(z)
+
+
+@opaque(fake=_pair_ln_bwd_fake, name="dit_variants_pair_ln_bwd")
+def pair_ln_bwd(z: torch.Tensor, g: torch.Tensor, eps: float) -> torch.Tensor:
+    """The LayerNorm backward of the pair rows: dz (z's dtype) from the gradient g of the normalised rows."""
+    dz = torch.empty_like(z)
+    _ext().pair_ln_bwd(z, g, dz, eps)
+    return dz
+
+
+class _PairLN(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, z, eps, out_bf16):  # noqa: D102
+        ctx.save_for_backward(z)
+        ctx.eps = eps
+        return pair_ln_fwd(z, eps, out_bf16)
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, g):  # noqa: D102
+        (z,) = ctx.saved_tensors
+        return pair_ln_bwd(z, g.contiguous(), ctx.eps), None, None
+
 # ------------------------------------------------------------------------------------------------------------------ glue
 def serves(stack, single, cond, pair, mask) -> bool:
     """A token stack call with a gradient on H100: bf16, D = 768 with 16 heads, L a multiple of 128, one conditioning row set shared by
@@ -282,7 +326,7 @@ def serves(stack, single, cond, pair, mask) -> bool:
     blk = stack.blocks[0]
     if single.dtype not in (torch.bfloat16, torch.float32) or (d, blk.n_head) != (WIDTH, HEADS) or length % 128 or cond.ndim != 2 or cond.shape[0] != length:
         return False
-    return (tuple(pair.shape[:2]) == (length, length) and (mask is None or tuple(mask.shape) == (length,))
+    return (tuple(pair.shape[:2]) == (length, length) and pair.shape[-1] in (128, 256) and (mask is None or tuple(mask.shape) == (length,))
             and blk.expand.weight.shape[0] == 4 * d and a > 0)
 
 
@@ -309,7 +353,7 @@ def _pair_biases(stack, pair):
     h = blocks[0].n_head
     eps = blocks[0].pair_norm.eps
     dt = torch.bfloat16 if pair.dtype == torch.bfloat16 or torch.is_autocast_enabled("cuda") else pair.dtype
-    zhat = F.layer_norm(pair.float(), (c,), eps=eps).to(dt).reshape(length * length, c)
+    zhat = _PairLN.apply(pair.reshape(length * length, c).contiguous(), eps, dt == torch.bfloat16)
     w = torch.cat([b.to_pair_bias.weight.float() * b.pair_norm.weight.float()[None, :] for b in blocks]) * LOG2E
     out = torch.mm(w.to(dt), zhat.t())                          # [nb H, L L]
     return [out[h * i:h * (i + 1)].view(h, length, length) for i in range(len(blocks))]

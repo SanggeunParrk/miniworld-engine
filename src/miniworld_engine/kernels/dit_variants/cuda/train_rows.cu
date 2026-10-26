@@ -435,6 +435,57 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) adaln_bwd_k(const XT* __rest
   }
 }
 
+
+// ---------------------------------------------------------------------------------------------------- pair LayerNorm rows
+// LayerNorm of C-wide pair rows (C = 128 or 256, no affine), one warp per row: out = (z - mean) rstd
+template <int C, typename ZT, typename OT>
+__global__ void __launch_bounds__(256) pair_ln_fwd_k(const ZT* __restrict__ Z, OT* __restrict__ OUT, long R, float eps) {
+  constexpr int K = C / 128;
+  const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  if (row >= R) return;
+  float4 z[K];
+  float s = 0.f;
+#pragma unroll
+  for (int k = 0; k < K; ++k) { z[k] = V4<ZT>::load(Z + row * C + k * 128 + lane * 4); s += sum4(z[k]); }
+  const float mean = warp_sum(s) / C;
+  float q = 0.f;
+#pragma unroll
+  for (int k = 0; k < K; ++k) { z[k] = sub4(z[k], make_float4(mean, mean, mean, mean)); q += sum4(mul4(z[k], z[k])); }
+  const float r = rsqrtf(warp_sum(q) / C + eps);
+#pragma unroll
+  for (int k = 0; k < K; ++k) V4<OT>::store(OUT + row * C + k * 128 + lane * 4, mul4(z[k], r));
+}
+
+// dz = rstd (dxhat - mean(dxhat) - xhat mean(dxhat xhat)), the statistics recomputed from z
+template <int C, typename ZT, typename OT>
+__global__ void __launch_bounds__(256) pair_ln_bwd_k(const ZT* __restrict__ Z, const OT* __restrict__ DXH, ZT* __restrict__ DZ, long R, float eps) {
+  constexpr int K = C / 128;
+  const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
+  const int lane = threadIdx.x % 32;
+  if (row >= R) return;
+  float4 z[K], g[K];
+  float s = 0.f;
+#pragma unroll
+  for (int k = 0; k < K; ++k) {
+    z[k] = V4<ZT>::load(Z + row * C + k * 128 + lane * 4);
+    g[k] = V4<OT>::load(DXH + row * C + k * 128 + lane * 4);
+    s += sum4(z[k]);
+  }
+  const float mean = warp_sum(s) / C;
+  float q = 0.f;
+#pragma unroll
+  for (int k = 0; k < K; ++k) { z[k] = sub4(z[k], make_float4(mean, mean, mean, mean)); q += sum4(mul4(z[k], z[k])); }
+  const float r = rsqrtf(warp_sum(q) / C + eps);
+  float a = 0.f, b = 0.f;
+#pragma unroll
+  for (int k = 0; k < K; ++k) { z[k] = mul4(z[k], r); a += sum4(g[k]); b += sum4(mul4(g[k], z[k])); }
+  a = warp_sum(a) / C;
+  b = warp_sum(b) / C;
+#pragma unroll
+  for (int k = 0; k < K; ++k)
+    V4<ZT>::store(DZ + row * C + k * 128 + lane * 4, mul4(sub4(sub4(g[k], make_float4(a, a, a, a)), mul4(z[k], b)), r));
+}
 // ------------------------------------------------------------------------------------------------------------- host
 c10::cuda::CUDAStream S_() { return c10::cuda::getCurrentCUDAStream(); }
 template <typename T> T* P(const at::Tensor& t) { return reinterpret_cast<T*>(t.data_ptr()); }
@@ -667,6 +718,70 @@ void adaln_bwd(at::Tensor x, at::Tensor st, at::Tensor pass, std::vector<at::Ten
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+template <int C, typename ZT, typename OT> void pln_fwd_launch(const at::Tensor& z, const at::Tensor& out, double eps) {
+  const long r = z.size(0);
+  pair_ln_fwd_k<C, ZT, OT><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), P<OT>(out), r, (float)eps);
+}
+template <int C, typename ZT, typename OT> void pln_bwd_launch(const at::Tensor& z, const at::Tensor& dxh, const at::Tensor& dz, double eps) {
+  const long r = z.size(0);
+  pair_ln_bwd_k<C, ZT, OT><<<(r + 7) / 8, 256, 0, S_()>>>(CP<ZT>(z), CP<OT>(dxh), P<ZT>(dz), r, (float)eps);
+}
+
+// out = LN(z) rows [R, C] (C 128 | 256); z / out bf16 or fp32 in any combination
+void pair_ln_fwd(at::Tensor z, at::Tensor out, double eps) {
+  const c10::cuda::CUDAGuard guard(z.device());
+  const int64_t c = z.size(1);
+  TORCH_CHECK((c == 128 || c == 256) && z.is_contiguous() && out.is_contiguous() && out.sizes() == z.sizes(), "pair_ln_fwd: contiguous [rows, 128 | 256]");
+  const bool zb = is_bf(z), ob = is_bf(out);
+#define PLN(C) if (zb) { if (ob) pln_fwd_launch<C, bf, bf>(z, out, eps); else pln_fwd_launch<C, bf, float>(z, out, eps); } \
+               else { if (ob) pln_fwd_launch<C, float, bf>(z, out, eps); else pln_fwd_launch<C, float, float>(z, out, eps); }
+  if (c == 128) { PLN(128) } else { PLN(256) }
+#undef PLN
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// dz (z's dtype) = LN backward of the gradient dxh (bf16 or fp32) of the normalised rows
+void pair_ln_bwd(at::Tensor z, at::Tensor dxh, at::Tensor dz, double eps) {
+  const c10::cuda::CUDAGuard guard(z.device());
+  const int64_t c = z.size(1);
+  TORCH_CHECK((c == 128 || c == 256) && z.is_contiguous() && dxh.is_contiguous() && dz.is_contiguous() && dxh.sizes() == z.sizes() && dz.sizes() == z.sizes(),
+              "pair_ln_bwd: contiguous [rows, 128 | 256]");
+  const bool zb = is_bf(z), ob = is_bf(dxh);
+#define PLN(C) if (zb) { if (ob) pln_bwd_launch<C, bf, bf>(z, dxh, dz, eps); else pln_bwd_launch<C, bf, float>(z, dxh, dz, eps); } \
+               else { if (ob) pln_bwd_launch<C, float, bf>(z, dxh, dz, eps); else pln_bwd_launch<C, float, float>(z, dxh, dz, eps); }
+  if (c == 128) { PLN(128) } else { PLN(256) }
+#undef PLN
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// out [cols, rows] = in [rows, cols]^T, fp32 or bf16, tiled through shared memory
+template <typename T>
+__global__ void __launch_bounds__(256) transpose_k(const T* __restrict__ IN, T* __restrict__ OUT, long rows, long cols) {
+  __shared__ T tile[32][33];
+  const long c0 = (long)blockIdx.x * 32, r0 = (long)blockIdx.y * 32;
+  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
+  for (int i = ty; i < 32; i += 8) {
+    const long r = r0 + i, c = c0 + tx;
+    if (r < rows && c < cols) tile[i][tx] = IN[r * cols + c];
+  }
+  __syncthreads();
+  for (int i = ty; i < 32; i += 8) {
+    const long c = c0 + i, r = r0 + tx;
+    if (r < rows && c < cols) OUT[c * rows + r] = tile[tx][i];
+  }
+}
+
+void transpose2d(at::Tensor in, at::Tensor out) {
+  const c10::cuda::CUDAGuard guard(in.device());
+  TORCH_CHECK(in.dim() == 2 && in.stride(1) == 1 && in.stride(0) == in.size(1) && out.is_contiguous() && out.size(0) == in.size(1) && out.size(1) == in.size(0) &&
+              in.scalar_type() == out.scalar_type(), "transpose2d: contiguous [rows, cols] -> [cols, rows]");
+  const long rows = in.size(0), cols = in.size(1);
+  dim3 grid((cols + 31) / 32, (rows + 31) / 32);
+  if (is_bf(in)) transpose_k<bf><<<grid, 256, 0, S_()>>>(CP<bf>(in), P<bf>(out), rows, cols);
+  else transpose_k<float><<<grid, 256, 0, S_()>>>(CP<float>(in), P<float>(out), rows, cols);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_mod_fwd", &ln_mod_fwd);
   m.def("qkv_prep", &qkv_prep);
@@ -680,4 +795,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_o_bwd", &gate_o_bwd);
   m.def("qkv_bwd", &qkv_bwd);
   m.def("adaln_bwd", &adaln_bwd);
+  m.def("pair_ln_fwd", &pair_ln_fwd);
+  m.def("pair_ln_bwd", &pair_ln_bwd);
+  m.def("transpose2d", &transpose2d);
 }
