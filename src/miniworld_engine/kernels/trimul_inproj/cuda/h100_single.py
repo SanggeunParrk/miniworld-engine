@@ -149,7 +149,7 @@ class Plan:
         else:
             _H100_BMM.bmm(right, f(dt).transpose(-1, -2), out=f(dl))
             _H100_BMM.bmm(left, f(dt), out=f(dr))
-        from ._h100_pack import dense_native
+        from ._h100_pack import dense_native_many
         d = dict(
             n=self.n,
             master_weights=self.master,
@@ -157,8 +157,8 @@ class Plan:
             mask=self.mask,
             ds=self.ds,
             w1=self.w1,
-            wt=[dense_native(w.t()) if T.preserve_d128_training() else w.t().contiguous()
-                for w in (*self.weights, self.wg)],
+            wt=(dense_native_many([w.t() for w in (*self.weights, self.wg)], [w.dtype for w in (*self.weights, self.wg)])   # one launch for the five transposes
+                if T.preserve_d128_training() else [w.t().contiguous() for w in (*self.weights, self.wg)]),
             gi=self.gi,
             bi=self.bi,
         )

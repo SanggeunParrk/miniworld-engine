@@ -466,7 +466,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
 
 
 def _forward_wide(
-    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after
+    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after, pbias=None
 ):
     """The wide composition (d_msa 64 / 128, d_pair 128 / 256 / 384, either normalisation order): the persistent TMA prologue
     (LN + both projections + mask -> A2 / BT, the statistics and the exact mask count), cuBLAS for the grouped outer product,
@@ -488,7 +488,9 @@ def _forward_wide(
         wb.detach().to(bf).contiguous(),
         float(eps),
         bool(save_stats),
+        pbias.detach().float().contiguous() if pbias is not None else None,   # RoseTTAFold3's projection biases [left | right]
     )
+    ctx.has_bias = pbias is not None
     o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
     z = ext.opm_epilogue(
         o,
@@ -536,6 +538,14 @@ def _backward_wide(ctx, dz):
     dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
     dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
     del dO
+    # the projection biases (RoseTTAFold3): left[s, i, c] = mask[s, i] (proj + b_L[c]), so db_L[c] = sum_{s, i} mask[s, i] dA[s, i, c]
+    # (dA is the gradient of the grouped A2 in [s, (i, c)] order), one fp32-accumulated GEMV per side
+    db = None
+    if getattr(ctx, "has_bias", False):
+        ch = dA.shape[1] // n
+        mk = mask16.reshape(1, -1)
+        db = torch.cat([torch.mm(mk, dA.reshape(-1, ch), out_dtype=torch.float32).reshape(-1),
+                        torch.mm(mk, dB.reshape(-1, ch), out_dtype=torch.float32).reshape(-1)])
     if o is None:
         o = torch.mm(a2, bt.t())
     dWo = ext.opm_dwo(dzp, o, n, n)
@@ -570,6 +580,7 @@ def _backward_wide(ctx, dz):
         dbo.to(bo.dtype),
         None,
         None,
+        db,
     )
 
 
@@ -593,12 +604,14 @@ class _OpmMath(torch.autograd.Function):
         residual=None,
         save_stats=True,
         after=False,
+        pbias=None,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
         if (
             (cm, cz) != (CM, CZ)
             or after
+            or pbias is not None
             or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY)
         ):
             return _forward_wide(
@@ -616,6 +629,7 @@ class _OpmMath(torch.autograd.Function):
                 residual,
                 save_stats,
                 after,
+                pbias,
             )
         owned = _owned_blas_for(msa.shape[1], msa.shape[2], training=save_stats)
         ext = _ext(
@@ -739,7 +753,7 @@ class _OpmMath(torch.autograd.Function):
         saved = ctx.saved_tensors
         m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo = saved[:12]
         o = saved[12] if ctx.save_o else None
-        if m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False):
+        if m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False) or getattr(ctx, "has_bias", False):
             return _backward_wide(ctx, dz)
         s, n = m.shape[0], m.shape[1]
         path = _h100_path(s, n, training=True)
@@ -900,6 +914,9 @@ def outer_product_mean(
         and residual.shape == (1, msa.shape[2], msa.shape[2], cz)
     )
     r = residual.contiguous() if fuse else msa.new_empty((0,))
+    # RoseTTAFold3: the left | right projection biases as one fp32 vector (an empty tensor: no biases)
+    pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if module.to_left.bias is not None
+             else msa.new_empty((0,), dtype=torch.float32))
     tensors = [
         msa.contiguous(),
         mask,
@@ -910,6 +927,7 @@ def outer_product_mean(
         module.to_out.weight,
         module.to_out.bias,
         r,
+        pbias,
     ]
     if torch.is_grad_enabled():
         save_o = settings.current().opm_train_save_o
@@ -986,6 +1004,7 @@ def _forward_op(
         save_o,
         residual=args[8] if args[8].numel() else None,
         after=after,
+        pbias=args[9].detach() if args[9].numel() else None,
     )
     sv = ctx.saved_tensors
     kept = list(sv[1:6])
@@ -997,7 +1016,7 @@ def _forward_op(
 
 
 def _backward_fake(args, kept, dz, eps, save_o, after):
-    return [torch.empty_like(args[i]) for i in (0, 2, 3, 4, 5, 6, 7)]
+    return [torch.empty_like(args[i]) for i in (0, 2, 3, 4, 5, 6, 7, 9)]
 
 
 @opaque(fake=_backward_fake, name="opm_h100_bwd")
@@ -1013,20 +1032,23 @@ def _backward_op(
     ctx.eps = eps
     ctx.save_o = save_o
     ctx.after = after
+    ctx.has_bias = bool(args[9].numel())
     k5 = list(kept[:5])
     if k5[0].numel() == 0:
         k5[0] = args[1][0] if args[1].dtype == torch.bool else args[1][0] != 0
     ctx.saved_tensors = (args[0][0], *k5, *args[2:8], *((kept[5],) if save_o else ()))
     gradients = _OpmMath.backward(ctx, dz)
-    return [gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)]
+    db = gradients[10].to(args[9].dtype) if ctx.has_bias else args[9].new_empty((0,))
+    return [*(gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)), db]
 
 
 class OpmTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
-        tensors = list(args[:9])
-        ctx.eps, ctx.save_o, ctx.after = args[9:]
+        tensors = list(args[:10])
+        ctx.eps, ctx.save_o, ctx.after = args[10:]
         ctx.has_residual = bool(tensors[8].numel())
+        ctx.has_bias = bool(tensors[9].numel())
         out, *kept = _forward_op(tensors, ctx.eps, ctx.save_o, ctx.after)
         ctx.save_for_backward(*tensors, *kept)
         return out
@@ -1035,13 +1057,14 @@ class OpmTrainFn(torch.autograd.Function):
     def backward(ctx, dz):
         vals = ctx.saved_tensors
         grads = _backward_op(
-            list(vals[:9]), list(vals[9:]), dz, ctx.eps, ctx.save_o, ctx.after
+            list(vals[:10]), list(vals[10:]), dz, ctx.eps, ctx.save_o, ctx.after
         )
         return (
             grads[0],
             None,
-            *grads[1:],
+            *grads[1:7],
             dz if ctx.has_residual else None,
+            grads[7] if ctx.has_bias else None,
             None,
             None,
             None,
@@ -1076,4 +1099,5 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
         residual=args[8] if args[8].numel() else None,
         save_stats=False,
         after=after,
+        pbias=args[9] if args[9].numel() else None,
     )

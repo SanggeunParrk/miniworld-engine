@@ -164,6 +164,22 @@ class OuterProductMean(nn.Module):
 
             # The H100 CUDA paths below step aside for the A/B switch (force_portable_kernels), which runs the Triton family below.
             native = self.implementation != ImplementationType.PYTORCH and not _dispatch.portable_forced(self.implementation)
+            # RoseTTAFold3 training (a grad-enabled call): the wide fused composition, the projection biases in the prologue and their
+            # gradients off dA / dB (``opm_train``, either normalisation order)
+            if (
+                native
+                and self.groups == 1
+                and self.to_left.bias is not None
+                and torch.is_grad_enabled()
+                and _opm_train.wanted(self.implementation)
+                and msa.is_cuda
+                and torch.cuda.get_device_capability(msa.device) == (9, 0)
+                and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
+                                      interchain=bool(self.mask_interchain and token_asym_id is not None),
+                                      normalize_before_proj=self.normalize_before_proj)
+            ):
+                _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+                return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
             if native and self.to_left.bias is not None and composed.biased_wide_serves(self, msa, mask):
                 return composed.biased_wide(self, msa, mask, token_asym_id, residual)
             if (

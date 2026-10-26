@@ -453,7 +453,10 @@ def _bwd(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: torch.Tenso
     _opm_bwd_epilogue_dx_kernel[lambda meta: (triton.cdiv(L, meta["TI"]), triton.cdiv(L, meta["BJ"]), triton.cdiv(CH * CH, meta["BN"]))](
         dzc, norm, wo.to(bf).contiguous(), dzn, dO, L, CH * CH,
         shape_key=token_key(length_of(msa.shape), CH=CH, CZ=CZ), CH=CH, CZ=CZ)
-    dbo = dzc.sum(0, dtype=torch.float32) if norm_first else (dzc.float() / norm.reshape(L * L, 1)).sum(0)   # ESMFold2 order: bias divided too
+    # the bias gradient is a column sum over the L L pairs: one fp32-accumulated GEMV (ones . dz), not an ATen axis-0 reduction (66 us at L = 256,
+    # 140 us with the fp32 division of the ESMFold2 order, where the bias is divided too: it sums dz / n, which dzn already holds)
+    src = dzc if norm_first else dzn
+    dbo = torch.mm(src.new_ones((1, L * L)), src, out_dtype=torch.float32).reshape(-1)
     dA = torch.mm(b.view(S, L * CH), dO.t())                                                # [S, (i, d)]
     dB = torch.mm(a.view(S, L * CH), dO)                                                    # [S, (j, e)]
     del dO

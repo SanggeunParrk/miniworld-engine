@@ -1013,6 +1013,21 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
       int slot = g % NST, b = g % 2, i = t / nsb, s0 = (t % nsb) * C::BS;
       wait(yf + slot, (g / NST) & 1);
+      // RoseTTAFold3's projection biases are masked like the projections: this thread's 32 columns (MSA rows) of the accumulator keep
+      // their mask bits in one register, read from the tile's mask bytes before the slot is released (the biases used to be masked by
+      // 32 global loads of mask16 per thread and tile, behind the LayerNorm warps' stores)
+      uint32_t kbits = 0;
+      float pb_lo = 0.f, pb_hi = 0.f;
+      if (pbias != nullptr) {
+        const int ch0 = cw * 16 + lane / 4;
+        pb_lo = pbias[ch0]; pb_hi = pbias[ch0 + 8];
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+          const int col = k * 8 + (lane % 4) * 2;
+          kbits |= (sm[slot * MT + col * 16 + (i & 15)] != 0 ? 1u : 0u) << (2 * k);
+          kbits |= (sm[slot * MT + (col + 1) * 16 + (i & 15)] != 0 ? 1u : 0u) << (2 * k + 1);
+        }
+      }
       float acc[64] = {}; wg::fence();
 #pragma unroll
       for (int ks = 0; ks < CMT / 16; ++ks)
@@ -1025,10 +1040,10 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       for (int k = 0; k < 16; ++k) {
         int col = k * 8 + (lane % 4) * 2, ch = cw * 16 + lane / 4, h = col / 64, cc = col % 64;
         __nv_bfloat16* out = st + b * TT + h * 4096;
-        if (pbias != nullptr) {   // RoseTTAFold3's projection biases [a | b], masked like the projections (mask16 of this tile is written)
-          const float k0 = __bfloat162float(mask16[(long)(s0 + col) * N + i]), k1 = __bfloat162float(mask16[(long)(s0 + col + 1) * N + i]);
-          acc[k * 4] += pbias[ch] * k0; acc[k * 4 + 1] += pbias[ch] * k1;
-          acc[k * 4 + 2] += pbias[ch + 8] * k0; acc[k * 4 + 3] += pbias[ch + 8] * k1;
+        if (pbias != nullptr) {   // RoseTTAFold3's projection biases [a | b], masked like the projections (the mask bits of kbits)
+          const float k0 = float((kbits >> (2 * k)) & 1u), k1 = float((kbits >> (2 * k + 1)) & 1u);
+          acc[k * 4] += pb_lo * k0; acc[k * 4 + 1] += pb_lo * k1;
+          acc[k * 4 + 2] += pb_hi * k0; acc[k * 4 + 3] += pb_hi * k1;
         }
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4], acc[k * 4 + 1]);
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch + 8, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4 + 2], acc[k * 4 + 3]);
