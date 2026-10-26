@@ -110,10 +110,94 @@ class _Tail(torch.autograd.Function):
         return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
 
 
+# ---- D = 768, hidden 2 D, bf16, whole 128-row tiles: the Transition family's wgmma kernels (kernels/transition/cuda/wide), which keep a, b and h of the
+# expand GEMM and fuse the SwiGLU backward into the dh GEMM. The tail's squeeze (h Ws^T) is their squeeze kernel with a zero residual (its rounding is the
+# plain GEMM's: bf16(h Ws^T + 0)); the gate and the residual follow in ``sigmul_fwd``.
+_ZEROS: dict = {}
+
+
+def _zeros_like_rows(x: torch.Tensor) -> torch.Tensor:
+    key = (x.device, tuple(x.shape))
+    z = _ZEROS.get(key)
+    if z is None:
+        z = _ZEROS[key] = torch.zeros_like(x)
+    return z
+
+
+def _wide_expand_fake(xn, zeros, w1p, ws):
+    m, d = xn.shape
+    h = ws.shape[1]
+    return xn.new_empty((m, d)), xn.new_empty((m, h)), xn.new_empty((m, h)), xn.new_empty((m, h))
+
+
+@opaque(fake=_wide_expand_fake, name="ct_cuda_wide_expand_saved")
+def _wide_expand_saved(xn: torch.Tensor, zeros: torch.Tensor, w1p: torch.Tensor, ws: torch.Tensor):
+    """(h Ws^T, h, a, b) with h = silu(a) b, [a | b] = xn [Wa; Wb]^T (the Transition family's expand_saved + squeeze, zero residual)."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+
+    out, h, a, b = fw._ext_for(xn, True, 2).fwd_split(xn, zeros, w1p, ws)
+    return out, h, a, b
+
+
+@opaque(fake=lambda dy, wst, a, b: dy.new_empty((a.shape[0], 2 * a.shape[1])), name="ct_cuda_wide_gate_saved")
+def _wide_gate_saved(dy: torch.Tensor, wst: torch.Tensor, a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """[dA | dB] = SwiGLU backward of dh = dy Ws from the saved a, b (one kernel; dh never reaches HBM)."""
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+
+    return fw._ext_for(dy, True, 2).gate_saved(dy, wst, a, b)
+
+
+def wide_supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
+    if x.shape[-1] != 768 or wa.shape[0] != 1536 or x.dtype is not torch.bfloat16:
+        return False
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+
+    return fw.available(x, wa.to(torch.bfloat16) if wa.dtype != torch.bfloat16 else wa, ws)
+
+
+class _TailWide(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
+        from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+        from miniworld_engine.kernels.transition.cuda.fused_sm90a import _cuda_prepare
+
+        dt = x.dtype
+        wa_, wb_, ws_, wst = _cuda_prepare(wa, wb, ws, True)
+        w1p = fw._pack(wa_, wb_, 128)
+        out, h, a, b = _wide_expand_saved(x, _zeros_like_rows(x), w1p, ws_)
+        wscb, bscb = wsc.to(dt), bsc.to(dt)
+        sp = torch.addmm(bscb, cond, wscb.t())
+        y = sigmul_fwd(out, sp, res)
+        ctx.save_for_backward(x, cond, a, b, h, out, sp, wa_, wb_, wst, wscb, wa, ws, wsc)
+        ctx.has_res = res is not None
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):  # noqa: D102
+        x, cond, a, b, h, out, sp, wa_, wb_, wst, wscb, wa, ws, wsc = ctx.saved_tensors
+        dy = dy.contiguous()
+        dout, dsc, part = sigmul_bwd(dy, out, sp)
+        f32 = torch.float32
+        o = lambda w: w.dtype == f32  # noqa: E731  fp32 master weights: fp32 gradients, unrounded
+        dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
+        dab = _wide_gate_saved(dout, wst, a, b)
+        dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
+        dx = torch.mm(dab, torch.cat([wa_, wb_]))
+        dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
+        dcond = torch.mm(dsc, wscb)
+        dbsc = colsum(part).to(dsc.dtype if not o(wsc) else f32)
+        nd = a.shape[1]
+        return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
+
+
 def ct_tail_train(x, cond, wa, wb, ws, wsc, bsc, residual=None):
     """``residual + sigmoid(cond Wsc^T + b) * (silu(x Wa^T) * (x Wb^T)) Ws^T`` with a backward; ``x`` (M, D), ``cond`` (M, DC) of one dtype, the weights in
-    any dtype (rounded to the activations' dtype per call; gradients in the weights' dtype)."""
-    return _Tail.apply(x.contiguous(), cond.contiguous(), wa, wb, ws, wsc, bsc, residual)
+    any dtype (rounded to the activations' dtype per call; gradients in the weights' dtype). bf16 D = 768 / hidden 1536 on whole 128-row tiles runs the
+    Transition family's wgmma expand / dh kernels, everything else the row kernels around cuBLAS."""
+    x, cond = x.contiguous(), cond.contiguous()
+    if x.shape[0] % 128 == 0 and wide_supported(x, wa, ws):
+        return _TailWide.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
+    return _Tail.apply(x, cond, wa, wb, ws, wsc, bsc, residual)
 
 
 __all__ = ["ct_tail_train", "ext", "supported"]

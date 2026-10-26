@@ -25,19 +25,51 @@ TMN_DEVI void pdl_wait() { asm volatile("griddepcontrol.wait;\n" ::: "memory"); 
 TMN_DEVI void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); }
 
 template <typename... KArgs, typename... Args>
-void launch(void (*kernel)(KArgs...), unsigned grid, unsigned block, size_t smem, bool pdl, Args&&... args) {
+void launch_cl(void (*kernel)(KArgs...), unsigned grid, unsigned block, size_t smem, bool pdl, unsigned cluster, Args&&... args) {
   cudaLaunchConfig_t cfg{};
   cfg.gridDim = dim3(grid);
   cfg.blockDim = dim3(block);
   cfg.dynamicSmemBytes = smem;
   cfg.stream = at::cuda::getCurrentCUDAStream();
-  cudaLaunchAttribute attr[1];
-  attr[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
-  attr[0].val.programmaticStreamSerializationAllowed = 1;
+  cudaLaunchAttribute attr[2];
+  unsigned n = 0;
+  if (pdl) {
+    attr[n].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attr[n].val.programmaticStreamSerializationAllowed = 1;
+    ++n;
+  }
+  if (cluster > 1) {
+    attr[n].id = cudaLaunchAttributeClusterDimension;
+    attr[n].val.clusterDim.x = cluster;
+    attr[n].val.clusterDim.y = 1;
+    attr[n].val.clusterDim.z = 1;
+    ++n;
+  }
   cfg.attrs = attr;
-  cfg.numAttrs = pdl ? 1 : 0;
+  cfg.numAttrs = n;
   TORCH_CHECK(cudaLaunchKernelEx(&cfg, kernel, std::forward<Args>(args)...) == cudaSuccess, "kernel launch failed");
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+template <typename... KArgs, typename... Args>
+void launch(void (*kernel)(KArgs...), unsigned grid, unsigned block, size_t smem, bool pdl, Args&&... args) {
+  launch_cl(kernel, grid, block, smem, pdl, 1u, std::forward<Args>(args)...);
+}
+
+// ---------------------------------------------------------------------------------------------------- clusters: TMA multicast of the shared operand
+TMN_DEVI uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+TMN_DEVI void cluster_sync() {
+  asm volatile("barrier.cluster.arrive.release;\nbarrier.cluster.wait.acquire;\n" ::: "memory");
+}
+// arrive on the mbarrier at the same smem offset of CTA ``rank`` of the cluster
+TMN_DEVI void mbar_arrive_remote(uint64_t* bar, uint32_t rank) {
+  uint32_t a;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(a) : "r"(smem_u32(bar)), "r"(rank));
+  asm volatile("mbarrier.arrive.shared::cluster.b64 _, [%0];" :: "r"(a) : "memory");
+}
+// TMA load into the same smem offset of every CTA in ``mask``, each CTA's mbarrier (same offset) receiving the transaction bytes
+TMN_DEVI void tma_load_2d_mc(void* dst, const CUtensorMap* map, uint64_t* bar, int c0, int c1, uint16_t mask) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes.multicast::cluster [%0], [%1, {%3, %4}], [%2], %5;"
+               :: "r"(smem_u32(dst)), "l"(map), "r"(smem_u32(bar)), "r"(c0), "r"(c1), "h"(mask) : "memory");
 }
 
 // ---------------------------------------------------------------------------------------------------- small device helpers
@@ -100,3 +132,20 @@ inline at::Tensor trace_read() {
 #else
 #define TRACE_TILE(tl, k) do {} while (0)
 #endif
+// the number of clusters of CL CTAs a persistent grid can have resident at once (a GPC holds whole clusters only): a larger grid would run its
+// last clusters after the first ones finish
+template <typename K> int max_clusters(K kernel, size_t smem, int cl, int fallback) {
+  if (cl == 1) return fallback;
+  cudaLaunchConfig_t cfg{};
+  cfg.gridDim = dim3(fallback / cl * cl);
+  cfg.blockDim = dim3(384);
+  cfg.dynamicSmemBytes = smem;
+  cudaLaunchAttribute a;
+  a.id = cudaLaunchAttributeClusterDimension;
+  a.val.clusterDim.x = cl; a.val.clusterDim.y = 1; a.val.clusterDim.z = 1;
+  cfg.attrs = &a;
+  cfg.numAttrs = 1;
+  int n = 0;
+  if (cudaOccupancyMaxActiveClusters(&n, (void*)kernel, &cfg) != cudaSuccess || n <= 0) return fallback / cl;
+  return n;
+}

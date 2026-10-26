@@ -30,7 +30,7 @@ def ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="ct_sm90" + ("_trace" if os.environ.get("CT_TRACE") else ""),
+        name="ct_sm90" + ("_trace" if os.environ.get("CT_TRACE") else "") + ("_nomc" if os.environ.get("CT_NOMC") else ""),
         sources=[str(_dir / "ct_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -44,6 +44,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
             *(["-DCT_TRACE"] if os.environ.get("CT_TRACE") else []),
+            *(["-DCT_NOMC_BUILD"] if os.environ.get("CT_NOMC") else []),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
@@ -84,25 +85,25 @@ def packed(wa, wb, ws, wsc, bsc, ht, dtype):
     )
 
 
-def _infer_fake(x, cond, wab, ws, wsc, bsc, residual, ht, bn, rnd):
+def _infer_fake(x, cond, wab, ws, wsc, bsc, residual, ht, bn, rnd, cl):
     return x.new_empty((x.shape[0], ws.shape[0]))
 
 
 @opaque(fake=_infer_fake, name="ct_cuda_inference")
 def _infer(x: torch.Tensor, cond: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
-           residual: torch.Tensor | None, ht: int, bn: int, rnd: bool) -> torch.Tensor:
+           residual: torch.Tensor | None, ht: int, bn: int, rnd: bool, cl: int) -> torch.Tensor:
     e = ext()
     m = x.shape[0]
     nd = wab.shape[0] // 2
     nsm = num_sms(x.device)
     h = torch.empty(m, nd, device=x.device, dtype=x.dtype)
     out = torch.empty(m, ws.shape[0], device=x.device, dtype=x.dtype)
-    e.expand_swiglu(x, wab, h, nsm, ht, rnd, True)
+    e.expand_swiglu(x, wab, h, nsm, ht, rnd, True, cl)
     e.squeeze_gate(h, ws, cond, wsc, bsc, residual, out, nsm, bn, True)
     return out
 
 
-def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=None):
+def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=None, cl=1):
     """``residual + sigmoid(cond Wsc^T + b) * (silu(x Wa^T) * (x Wb^T)) Ws^T`` for ``x`` (M, D) and ``cond`` (M, DC) of one dtype (bf16 / fp32
     under TF32); the weights in any dtype (cast and packed once per weight pack). ``residual`` (M, D) is added after the gated update is rounded to
     ``x``'s dtype, as the unfused ``residual + y``."""
@@ -113,7 +114,7 @@ def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=No
     wab, s, g, bs = packed(wa, wb, ws, wsc, bsc, ht, x.dtype)
     x = x if x.stride(1) == 1 else x.contiguous()
     cond = cond if cond.stride(1) == 1 else cond.contiguous()
-    return _infer(x, cond, wab, s, g, bs, residual, ht, bn, x.dtype == torch.float32)
+    return _infer(x, cond, wab, s, g, bs, residual, ht, bn, x.dtype == torch.float32, cl)
 
 
 __all__ = ["ct_inference", "ext", "pack_weights", "supported"]

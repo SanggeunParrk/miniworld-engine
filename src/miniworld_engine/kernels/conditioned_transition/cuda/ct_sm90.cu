@@ -13,6 +13,11 @@
 using namespace ctk;
 
 constexpr int TBM = 128;
+#ifdef CT_NOMC_BUILD
+constexpr bool CT_NOMC = true;
+#else
+constexpr bool CT_NOMC = false;
+#endif
 
 // ======================================================================================================================== expand + SwiGLU
 // B is Wab packed per tile: tile t = [Wa rows HT t .. HT t + HT - 1 | Wb rows HT t .. HT t + HT - 1] (2 HT rows), so one 128 x 2 HT output tile
@@ -33,7 +38,22 @@ template <bool F32, int HT> TMN_DEVI void mma_e(float (&acc)[HT], uint64_t a, ui
   else { if constexpr (HT == 128) awg_bf16_n256(acc, a, b); else awg_bf16_n128(acc, a, b); }
 }
 
-template <bool F32, int HT, bool RND>
+// the weight slab of a stage: with a cluster of CL CTAs (CL m-tiles of the same output columns) each CTA loads 1 / CL of its rows and multicasts them to
+// all, so the cluster reads the slab from L2 once; a stage is free again when the consumers of every CTA of the cluster have released it
+#define LOADB(stage, kbv, n0v)                                                                                                                  \
+  do {                                                                                                                                          \
+    if constexpr (CL > 1 && !CT_NOMC)                                                                                                         \
+      tma_load_2d_mc(sm + (stage) * F_ST + F_SA + rk * (TBN / CL) * 128, &mB, full + (stage), (kbv) * TBK, (n0v) + rk * (TBN / CL),            \
+                     (uint16_t)((1u << CL) - 1));                                                                                               \
+    else                                                                                                                                        \
+      tma_load_2d(sm + (stage) * F_ST + F_SA, &mB, full + (stage), (kbv) * TBK, (n0v));                                                          \
+  } while (0)
+#define RELEASE(st)                                                                                                                              \
+  do {                                                                                                                                          \
+    mbar_arrive(empty + (st));                                                                                                                  \
+    if constexpr (CL > 1 && !CT_NOMC) mbar_arrive_remote(empty + (st), (uint32_t)(rk ^ 1));                                                               \
+  } while (0)
+template <bool F32, int HT, bool RND, int CL>
 __global__ void __launch_bounds__(384, 1)
 expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB,
                 const __grid_constant__ CUtensorMap mH, int M, int K, int H) {
@@ -45,28 +65,29 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + C::BAR);
   uint64_t* empty = full + NSTAGE;
-  const int MT = (M + TBM - 1) / TBM, NT = H / HT, KB = K / TBK, ntiles = MT * NT;
+  const int MT = (M + TBM - 1) / TBM, NT = H / HT, KB = K / TBK, MP = (MT + CL - 1) / CL, items = MP * NT;
+  const int rk = CL > 1 ? (int)cluster_rank() : 0, cid = blockIdx.x / CL, ncl = gridDim.x / CL;
   if (tid == 0) {
-    for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 2); }
+    for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, CT_NOMC ? 2 : 2 * CL); }
     fence_barrier_init();
   }
-  __syncthreads();
+  if constexpr (CL > 1) cluster_sync(); else __syncthreads();
   pdl_trigger();
   if (wg == 0) {                                                          // ---------------------------------- producer
     setmaxnreg_dec<40>();
-    if (tid != 0) return;
+    if (tid != 0) { if constexpr (CL > 1) cluster_sync(); return; }
     tma_prefetch_desc(&mA); tma_prefetch_desc(&mB);
     uint32_t it = 0;
     bool first = true;
-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
-      const int m0 = (t % MT) * TBM, n0 = (t / MT) * TBN;
+    for (int t = cid; t < items; t += ncl) {
+      const int m0 = ((t % MP) * CL + rk) * TBM, n0 = (t / MP) * TBN;
       int kb0 = 0;
       if (first) {                                                        // weights first, then the activations once the predecessor is done
         first = false;
         const int P = KB < NSTAGE ? KB : NSTAGE;
         for (int kb = 0; kb < P; ++kb) {
           mbar_arrive_expect_tx(full + kb, F_ST);
-          tma_load_2d(sm + kb * F_ST + F_SA, &mB, full + kb, kb * TBK, n0);
+          LOADB(kb, kb, n0);
         }
         pdl_wait();
         for (int kb = 0; kb < P; ++kb) tma_load_2d(sm + kb * F_ST, &mA, full + kb, kb * TBK, m0);
@@ -77,9 +98,10 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         mbar_arrive_expect_tx(full + s, F_ST);
         tma_load_2d(sm + s * F_ST, &mA, full + s, kb * TBK, m0);
-        tma_load_2d(sm + s * F_ST + F_SA, &mB, full + s, kb * TBK, n0);
+        LOADB(s, kb, n0);
       }
     }
+    if constexpr (CL > 1) cluster_sync();
     return;
   }
   setmaxnreg_inc<232>();                                                  // --------------------------------- consumers
@@ -87,8 +109,8 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
   uint8_t* stg = sm + C::STG + cw * C::STGW;
   uint32_t it = 0;
   bool firstt = true;
-  for (int t = blockIdx.x; t < ntiles; t += gridDim.x) {
-    const int m0 = (t % MT) * TBM, nt = t / MT;
+  for (int t = cid; t < items; t += ncl) {
+    const int m0 = ((t % MP) * CL + rk) * TBM, nt = t / MP;
     float acc[HT];
 #pragma unroll
     for (int e = 0; e < HT; ++e) acc[e] = 0.f;
@@ -101,11 +123,11 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
 #pragma unroll
       for (int ks = 0; ks < 4; ++ks) mma_e<F32, HT>(acc, dsw(a0 + ks * 32), dsw(b0 + ks * 32));
       wgmma_commit();
-      if (prev >= 0) { wgmma_wait<1>(); fence_regs(acc); if (wtid == 0) mbar_arrive(empty + prev); }
+      if (prev >= 0) { wgmma_wait<1>(); fence_regs(acc); if (wtid == 0) RELEASE(prev); }
       prev = s;
     }
     wgmma_wait<0>(); fence_regs(acc);
-    if (wtid == 0) mbar_arrive(empty + prev);
+    if (wtid == 0) RELEASE(prev);
     if (!firstt && wtid == 0) tma_store_wait_read<0>();                   // the previous tile's store has left the staging tile
     firstt = false;
     named_bar_sync(1 + cw, 128);
@@ -146,19 +168,21 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
     }
   }
   if (wtid == 0) tma_store_wait_all();
+  if constexpr (CL > 1) cluster_sync();
 }
 
-template <bool F32, int HT, bool RND>
+template <bool F32, int HT, bool RND, int CL>
 void run_expand(const at::Tensor& x, const at::Tensor& wab, const at::Tensor& h, int sms, bool pdl) {
   using C = ECfg<F32, HT>;
   const int64_t M = x.size(0), K = x.size(1), H = h.size(1);
   TORCH_CHECK(K % C::TBK == 0 && H % HT == 0, "shapes: K % (64 bf16 / 32 fp32), H % HT");
-  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, 2 * H, K, K, C::TBK, C::TBN),
+  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, 2 * H, K, K, C::TBK, C::TBN / (CT_NOMC ? 1 : CL)),
              mH = map2d(h.data_ptr(), F32, M, H, H, F32 ? 32 : 64, 64);
-  const int tiles = (int)(((M + TBM - 1) / TBM) * (H / HT));
-  auto k = expand_swiglu_k<F32, HT, RND>;
+  const int items = (int)((((M + TBM - 1) / TBM + CL - 1) / CL) * (H / HT));
+  auto k = expand_swiglu_k<F32, HT, RND, CL>;
   cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
-  launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mA, mB, mH, (int)M, (int)K, (int)H);
+  const int ncl = max_clusters(k, (size_t)C::SMEM + 1024, CL, sms);
+  launch_cl(k, (unsigned)(std::min(items, CL == 1 ? sms : ncl) * CL), 384u, (size_t)C::SMEM + 1024, pdl, (unsigned)CL, mA, mB, mH, (int)M, (int)K, (int)H);
 }
 
 // ======================================================================================================================== squeeze + gate (+ residual)
@@ -368,23 +392,24 @@ void run_squeeze(const at::Tensor& h, const at::Tensor& ws, const at::Tensor& co
 // ======================================================================================================================== host entry points
 // x [M, K] (row stride may exceed K), wab [2H, K] packed per 2 HT rows, h [M, H]: all bf16, or all fp32 (TF32 tensor cores; ``rnd``: h rounded to
 // the TF32 grid to nearest, which the next GEMM then reads exactly).
-void expand_swiglu(torch::Tensor x, torch::Tensor wab, torch::Tensor h, int64_t sms, int64_t ht, bool rnd, bool pdl) {
+void expand_swiglu(torch::Tensor x, torch::Tensor wab, torch::Tensor h, int64_t sms, int64_t ht, bool rnd, bool pdl, int64_t cl) {
   const auto dt = x.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && wab.scalar_type() == dt && h.scalar_type() == dt, "bf16 or fp32 operands, all alike");
   TORCH_CHECK(x.stride(1) == 1 && wab.is_contiguous() && h.is_contiguous() && wab.size(0) == 2 * h.size(1) && wab.size(1) == x.size(1) &&
               h.size(0) == x.size(0), "shapes");
   const at::cuda::CUDAGuard guard(x.device());
   TORCH_CHECK(ht == 128 || ht == 64, "ht: 128 or 64");
+  TORCH_CHECK(cl == 1 || cl == 2, "cluster: 1 or 2");
   const bool f32 = dt == torch::kFloat32;
+#define EX(F, H, R) do { if (cl == 2) run_expand<F, H, R, 2>(x, wab, h, sms, pdl); else run_expand<F, H, R, 1>(x, wab, h, sms, pdl); } while (0)
   if (f32) {
-    if (ht == 64) { if (rnd) run_expand<true, 64, true>(x, wab, h, sms, pdl); else run_expand<true, 64, false>(x, wab, h, sms, pdl); }
-    else { if (rnd) run_expand<true, 128, true>(x, wab, h, sms, pdl); else run_expand<true, 128, false>(x, wab, h, sms, pdl); }
+    if (ht == 64) { if (rnd) EX(true, 64, true); else EX(true, 64, false); }
+    else { if (rnd) EX(true, 128, true); else EX(true, 128, false); }
   } else {
-    if (ht == 64) run_expand<false, 64, false>(x, wab, h, sms, pdl); else run_expand<false, 128, false>(x, wab, h, sms, pdl);
+    if (ht == 64) EX(false, 64, false); else EX(false, 128, false);
   }
+#undef EX
 }
-
-// h [M, ND], ws [D, ND], cond [M, DC], wsc [D, DC], bsc [D] fp32, res [M, D] or undefined, out [M, D]
 void squeeze_gate(torch::Tensor h, torch::Tensor ws, torch::Tensor cond, torch::Tensor wsc, torch::Tensor bsc, c10::optional<torch::Tensor> res,
                   torch::Tensor out, int64_t sms, int64_t bn, bool pdl) {
   const auto dt = h.scalar_type();
