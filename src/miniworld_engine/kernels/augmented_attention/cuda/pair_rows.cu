@@ -271,6 +271,57 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
   }
 }
 
+
+// ------------------------------------------------------------------------------------------------ fp32 TF32-core glue
+// key_perm (conditioned_transition.cuda): position p of each group of 8 holds key perm(p); inv is its inverse
+__device__ __forceinline__ int kperm(int p) { const int r = p & 7; return p - r + 4 * (r & 1) + (r >> 1); }
+__device__ __forceinline__ int kinv(int k) { const int s = k & 7; return k - s + 2 * (s & 3) + (s >> 2); }
+
+// dst [N, M] = scale * src [M, N]^T, 32 x 32 tiles through shared memory
+__global__ void __launch_bounds__(256) transpose_k(const float* __restrict__ S_, float* __restrict__ Dst, long M, long N, float scale) {
+  __shared__ float tile[32][33];
+  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
+  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) tile[ty + i][tx] = S_[(r0 + ty + i) * N + c0 + tx];
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) Dst[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i] * scale;
+}
+
+// D[a, h, l] = sum_d dO[a L + l, 48 h + d] O[a L + l, 48 h + d], plus its query-permuted copy and the permuted copy of the LSE
+__global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
+                                            float* __restrict__ DDP, float* __restrict__ LSEP, long rows, int L) {
+  const long idx = (long)blockIdx.x * 256 + threadIdx.x;
+  const long row = idx >> 4;
+  const int h = idx & 15;
+  if (row >= rows) return;
+  const float4* a = reinterpret_cast<const float4*>(DO + row * 768 + h * 48);
+  const float4* b = reinterpret_cast<const float4*>(O + row * 768 + h * 48);
+  float s = 0.f;
+#pragma unroll
+  for (int i = 0; i < 12; ++i) {
+    const float4 x = __ldg(a + i), y = __ldg(b + i);
+    s += x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
+  }
+  const long smp = row / L;
+  const int l = (int)(row % L);
+  const long o = (smp * 16 + h) * L;
+  DD[o + l] = s;
+  DDP[o + kinv(l)] = s;
+  LSEP[o + kinv(l)] = LSE[o + l];
+}
+
+// Z[h, k, q] = bias_p[h, perm(q), inv(k)]: the backward's transposed bias (key rows, permuted query columns)
+__global__ void __launch_bounds__(256) bias_t_k(const float* __restrict__ B, float* __restrict__ Z, long total, int L) {
+  const long idx = (long)blockIdx.x * 256 + threadIdx.x;
+  if (idx >= total) return;
+  const int q = (int)(idx % L);
+  const long hk = idx / L;
+  const int k = (int)(hk % L);
+  const long h = hk / L;
+  Z[idx] = B[(h * L + kperm(q)) * L + kinv(k)];
+}
 int nsm_of(const at::Tensor& t) {
   int n = 0;
   C10_CUDA_CHECK(cudaDeviceGetAttribute(&n, cudaDevAttrMultiProcessorCount, t.get_device()));
@@ -330,6 +381,43 @@ std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf
   return {dz, acc};
 }
 
+at::Tensor transpose32(at::Tensor src, double scale) {
+  chk(src, at::kFloat, "src");
+  const int64_t M = src.size(0), N = src.size(1);
+  TORCH_CHECK(M % 32 == 0 && N % 32 == 0, "transpose32: multiples of 32");
+  const at::cuda::CUDAGuard gd(src.device());
+  auto dst = at::empty({N, M}, src.options());
+  transpose_k<<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(src.data_ptr<float>(), dst.data_ptr<float>(), M, N, (float)scale);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return dst;
+}
+
+// dO, O [A L, 768] fp32, lse [A, 16, L] -> (D [A, 16, L], D permuted, lse permuted)
+std::vector<at::Tensor> dd_perm(at::Tensor dO, at::Tensor O, at::Tensor lse, int64_t A, int64_t L) {
+  chk(dO, at::kFloat, "dO");
+  chk(O, at::kFloat, "O");
+  chk(lse, at::kFloat, "lse");
+  TORCH_CHECK(dO.numel() == A * L * 768 && L % 8 == 0, "dd_perm shapes");
+  const at::cuda::CUDAGuard gd(dO.device());
+  auto dd = at::empty({A, 16, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd);
+  const long n = A * L * 16;
+  dd_k<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
+      dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), A * L, (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dd, ddp, lsep};
+}
+
+at::Tensor bias_transposed(at::Tensor bias_p, int64_t L) {
+  chk(bias_p, at::kFloat, "bias");
+  TORCH_CHECK(bias_p.numel() == 16 * L * L && L % 8 == 0, "bias_transposed shapes");
+  const at::cuda::CUDAGuard gd(bias_p.device());
+  auto z = at::empty_like(bias_p);
+  const long n = bias_p.numel();
+  bias_t_k<<<(unsigned)((n + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(bias_p.data_ptr<float>(), z.data_ptr<float>(), n, (int)L);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return z;
+}
+
 // fp32 pair [L L, 128], 16 heads (the fp32 token stack): dpair and the dWf block partials; the LayerNorm statistics are recomputed
 std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps) {
   chk(z, at::kFloat, "pair");
@@ -349,6 +437,9 @@ std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_rows_bwd32", &pair_rows_bwd32);
+  m.def("transpose32", &transpose32);
+  m.def("dd_perm", &dd_perm);
+  m.def("bias_transposed", &bias_transposed);
   m.def("pair_rows_fwd", &pair_rows_fwd);
   m.def("pair_rows_bwd", &pair_rows_bwd);
 }

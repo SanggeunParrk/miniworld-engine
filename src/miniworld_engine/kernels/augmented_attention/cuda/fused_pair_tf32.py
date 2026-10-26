@@ -96,7 +96,9 @@ class _AttnTf32(torch.autograd.Function):
         need_grad = any(ctx.needs_input_grad)
         qs = (q.reshape(A * L, H * D) * (LOG2E / math.sqrt(D))).contiguous()
         kk = k.reshape(A * L, H * D).contiguous()
-        vt = v.reshape(A * L, H * D).t().contiguous()
+        from .fused_pair import _rows_ext
+
+        vt = _rows_ext().transpose32(v.reshape(A * L, H * D).contiguous(), 1.0)
         wf = (wb.float() * lnw.float() * LOG2E).contiguous()
         bias_p = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
         rows32().pair_bias_tok_cuda(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), True, NEG)
@@ -110,14 +112,15 @@ class _AttnTf32(torch.autograd.Function):
     def backward(ctx, do):  # noqa: D102
         qs, kk, v2, bias_p, o, lse, pair, lnw, wb = ctx.saved_tensors
         A, L = ctx.dims
-        perm, inv = _perm(L, qs.device)
+        from .fused_pair import _rows_ext
+
+        e = _rows_ext()
+        _, inv = _perm(L, qs.device)
         dob = do.reshape(A * L, H * D).contiguous().float()
-        dd = (dob * o).view(A * L, H, D).sum(-1).view(A, L, H).permute(0, 2, 1).contiguous()  # [A, H, L]
-        t = lambda x: x.t().contiguous()
-        bias_tp = bias_p[:, perm][..., inv].transpose(1, 2).contiguous()
+        dd, dd_p, lse_p = e.dd_perm(dob, o, lse, A, L)  # D = rowsum(dO O) and its / the LSE's query-permuted copies
         dq, dk, dv, db_p = tf32_backward(
-            qs, kk, v2, dob, t(qs), t(kk), t(dob), bias_p, bias_tp, lse, dd, lse[..., perm].contiguous(), dd[..., perm].contiguous(),
-            None, None, A, L,
+            qs, kk, v2, dob, e.transpose32(qs, 1.0), e.transpose32(kk, 1.0), e.transpose32(dob, 1.0), bias_p, e.bias_transposed(bias_p, L),
+            lse, dd, lse_p, dd_p, None, None, A, L,
         )
         db = db_p[..., inv].contiguous()  # natural key order, natural units: [H, L, L]
         from .fused_pair import _rows_ext

@@ -51,6 +51,20 @@ def _kind(nh, dp):
 
 
 @functools.lru_cache(maxsize=None)
+def _mma_ext():
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="augattn_sm90_pair_mma",
+        sources=[str(_dir / "pair_mma.cu")],
+        extra_cuda_cflags=[*host_flags(), "-std=c++17", "-O3", *gencodes("90a"), "--expt-relaxed-constexpr"],
+        extra_cflags=["-std=c++17"],
+        verbose=False,
+    )
+
+
+@functools.lru_cache(maxsize=None)
 def _rows_ext():
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
@@ -175,6 +189,10 @@ class _AttnFusedPair(torch.autograd.Function):
         elif kind == "atom":
             wf_nat = _wf32(wb, lnw)
             bias = _atom_ext().atom_pair_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
+        elif dp == 256:  # tensor-core forward (bf16 wf in log2 units like the APB kernel), CUDA-core backward
+            wf_l2, _ = _wf(wb, lnw, False)
+            bias, pst = _mma_ext().pair_mma_fwd(pair2, wf_l2, mask, L, eps, NEG)
+            wf_nat = _wf32(wb, lnw) if need_grad else None
         else:
             wf_nat = _wf32(wb, lnw)
             bias, pst = _rows_ext().pair_rows_fwd(pair2, wf_nat, mask, L, eps, LOG2E, NEG)
@@ -249,6 +267,7 @@ def available(q, pair, lnw, wb, mask) -> bool:
             _atom_ext()
         else:
             _rows_ext()
+            _mma_ext()
     except Exception as exc:  # noqa: BLE001
         import warnings
 
