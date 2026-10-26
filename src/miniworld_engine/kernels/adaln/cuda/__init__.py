@@ -97,8 +97,9 @@ class _AdaLN(torch.autograd.Function):
         x2, c2, cn, stc, stx, sb, wcat, wc = ctx.saved_tensors
         d = x2.shape[-1]
         dy2 = dy.reshape(-1, d)
-        if dy2.dtype is not torch.bfloat16 or not dy2.is_contiguous():
-            dy2 = dy2.to(torch.bfloat16).contiguous()
+        # the engine hands this op the gradient of its bf16 output: bf16 (autograd casts a gradient to the output's dtype)
+        if not dy2.is_contiguous():
+            dy2 = dy2.contiguous()
         dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx)
         dcn = torch.mm(dsb, wcat)
         dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
