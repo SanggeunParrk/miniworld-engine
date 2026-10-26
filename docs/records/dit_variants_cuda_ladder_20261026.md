@@ -59,11 +59,11 @@ Before, the fp32 inference rows ran the PyTorch reference (0.43-0.50 ms, 1.07-1.
 ## Parity and tests
 
 `tests/gpu/sm90/test_dit_variant_train_h100_gpu.py` (output and every gradient within 1.5x the same-dtype PyTorch error vs fp64; measured 0.8-1.0x; no mask, padded key window, padding atoms,
-Chai-1 `uid`; bitwise repeat; routing). Run with the existing `test_dit_variant_h100_gpu.py`, `test_dit_variants_portable_gpu.py`: green. CPU suite: same 2 failures + 2 errors as the base (`tests/cpu/registry`).
+Chai-1 `uid`; bitwise repeat; routing). With the existing `test_dit_variant_h100_gpu.py`, `test_dit_variants_portable_gpu.py`: 97 passed (including fp32 inference parity, masked and unmasked). CPU suite: same 2 failures + 2 errors as the base (`tests/cpu/registry`).
 `dev derive --arch sm86` re-run (units json).
 
 ## Open
 
 * fp32 token rows are the tightest (Chai-1 0.925): TF32 GEMMs are 3.0 of 5.8 ms, the TF32 attention cores 1.3 ms, and the large fp32 row passes (SwiGLU forward / backward over [M, 3072], the pair LayerNorm) already run at 85-100 % of HBM roofline; further gain needs fusing the SwiGLU into the expand GEMM epilogue for training (an sm90 `SAVE_AB` build), not done.
-* The "other options" pytest cases were added after the last full pytest run; they passed in the parity script, not yet in pytest together with the rest.
-* Edge kernels (atoms) cost ~230 us of ~3 ms; row kernels run at 50-65 % of HBM roofline (no ILP across samples yet).
+* Edge kernels (atoms) cost ~230 us of ~3 ms; the D = 128 row kernels run at 50-65 % of HBM roofline (no ILP across samples yet).
+* ruff: the findings in `benchmarks/runners/ladder.py` and `build/bundle_coverage.py` are on the base commit too (9 and 5 fixable respectively in both trees).
