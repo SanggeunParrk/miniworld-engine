@@ -699,7 +699,6 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN": "bias_only_dit_train",
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
     "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
-    "MINIWORLD_DIT_VARIANT_TRAIN_CUDA": "dit_variant_train_cuda",
     "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
     "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
     "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",

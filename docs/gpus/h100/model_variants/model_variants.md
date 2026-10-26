@@ -29,7 +29,7 @@ diffusion step, so a fold-level split of the diffusion head would remove that wo
 ## Training (2026-10-26)
 
 `DiTVariantStack` / `AtomDiTVariantStack` called with a gradient (any of `single`, `cond`, `pair` or a parameter requires grad) on H100 take
-`kernels/dit_variants/cuda/train.py` (`settings.dit_variant_train_cuda`, `MINIWORLD_DIT_VARIANT_TRAIN_CUDA`; off = the portable / reference route).
+`kernels/dit_variants/cuda/train.py` (`settings.dit_variant_train_cuda`, default on; off = the portable / reference route).
 Contract: bf16 (autocast, fp32 master parameters) or fp32 (TF32 matmuls) activations; **token stack** 768 wide x 16 heads of 48, `L` a multiple of 128, one
 conditioning row set `[L, c]` shared by the samples, key mask `[L]`, pair `[L, L, 128 | 256]`, any number of samples; **atom stack** 128 wide x 4 heads of 32,
 `N` a multiple of 64 (the 32 x 128 windows, slid or padded key window, Chai-1's same-conformer `uid`), conditioning `[N, 128]`, trunked pair `[N / 32, 32, 128, 16]`.
