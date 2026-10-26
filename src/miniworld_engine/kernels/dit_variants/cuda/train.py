@@ -89,7 +89,7 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     M, D = x.shape
     L, A = length, M // length
     at = tab.dtype
-    w_qkvg, w_o, w_exp, w_sq = (w.to(at).contiguous() for w in (wqkvg, wo, wexp, wsq))
+    w_qkvg, w_o, w_exp, w_sq = (w.to(at, copy=True) for w in (wqkvg, wo, wexp, wsq))
     spec = _fwd_specs(M, L, at, x.dtype, par, gating, kq, up)
     buf = {n: torch.empty(spec[n][0], device=x.device, dtype=spec[n][1]) for n in _NAMES if n not in ("w_qkvg", "w_o", "w_exp", "w_sq")}
     a, xt, qkvg, qs, kb, vb, og, ya, y2, st1, ab, h = (buf[n] for n in ("a", "xt", "qkvg", "qs", "kb", "vb", "og", "ya", "y2", "st1", "ab", "h"))
@@ -104,7 +104,7 @@ def token_fwd(x: torch.Tensor, tab: torch.Tensor, bias: torch.Tensor, km: torch.
     torch.addmm(bias_vec, a, w_qkvg.t(), out=qkvg)
     wq, bql, wk, bkl = (qkw if kq else (None, None, None, None))
     scale = LOG2E / math.sqrt(HEAD_DIM)
-    ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, scale, eps_qk, kq)
+    ext.qkv_prep(qkvg[:, :D], qkvg[:, D:2 * D], qkvg[:, 2 * D:3 * D], qs, kb, vb, buf["stqk"] if kq else None, wq, bql, wk, bkl, scale, eps_qk, kq, at == torch.float32)
     if at == torch.float32:                       # the TF32 core: key-permuted bias / mask, v^T
         perm = _key_perm(L, x.device)
         bias_p = bias[..., perm].contiguous()
@@ -212,7 +212,7 @@ def token_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias: torc
     dO = torch.empty(M, D, device=dev, dtype=at)
     dqkvg = torch.empty(M, nq * D, device=dev, dtype=at)
     dd = torch.empty(A, HEADS, L, device=dev, dtype=torch.float32)
-    ext.gate_o_bwd(dog, og, qkvg[:, 3 * D:] if gating else None, dO, dqkvg[:, 3 * D:] if gating else None, dd, L, HEAD_DIM)
+    ext.gate_o_bwd(dog, og, qkvg[:, 3 * D:] if gating else None, dO, dqkvg[:, 3 * D:] if gating else None, dd, L, HEAD_DIM, at == torch.float32)
     if at == torch.float32:
         dq, dk, dv, db = _tf32_attn_bwd(s["qs"], s["kb"], s["vb"], dO, bias, km, s["lse"], dd, A, L)
     else:
@@ -414,10 +414,10 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     M, D = x.shape
     N, A = length, M // length
     at = tab.dtype
-    w_q, w_k, w_v, w_exp, w_sq = (w.to(at).contiguous() for w in (wq, wk, wv, wexp, wsq))
-    w_gq = torch.cat([wg, wq]).to(at).contiguous() if gating else w_q
-    w_kv = torch.cat([wk, wv]).to(at).contiguous()
-    w_o = wo.to(at).contiguous() if proj else wo.new_empty(0)
+    w_q, w_k, w_v, w_exp, w_sq = (w.to(at, copy=True) for w in (wq, wk, wv, wexp, wsq))
+    w_gq = torch.cat([wg, wq]).to(at) if gating else w_q.clone()
+    w_kv = torch.cat([wk, wv]).to(at)
+    w_o = wo.to(at, copy=True) if proj else wo.new_empty(0)
     spec = _afwd_specs(M, N, at, x.dtype, par, gating, proj, kq, up)
     skip = ("w_gq", "w_kv", "w_o", "w_exp", "w_sq", "q", "og", "lse", "ya")
     buf = {n: torch.empty(spec[n][0], device=x.device, dtype=spec[n][1]) for n in _ANAMES if n not in skip}
@@ -433,11 +433,14 @@ def atom_fwd(x: torch.Tensor, tab: torch.Tensor, bias2: torch.Tensor, widx: torc
     g = buf["g"]
     if gating:
         torch.mm(xq, w_gq[:D].t(), out=g)
+    f32 = at == torch.float32
     if kq:
         qn, kn = buf["qn"], buf["kn"]
-        ext.qkv_prep(q, k, v, qn, kn, None, buf["stqk"], qkw[0], qkw[1], qkw[2], qkw[3], 1.0, eps_qk, True)
+        ext.qkv_prep(q, k, v, qn, kn, v if f32 else None, buf["stqk"], qkw[0], qkw[1], qkw[2], qkw[3], 1.0, eps_qk, True, f32)
     else:
         qn, kn = q, k
+        if f32:       # the TF32 core's operands, rounded to nearest in place
+            ext.qkv_prep(q, k, v, q, k, v, None, None, None, None, None, 1.0, eps_qk, False, True)
     o, lse = local.attn_fwd_mma(qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2) if at == torch.bfloat16 else local.attn_fwd_mma32(
         qn.view(A, N, D), kn.view(A, N, D), v.view(A, N, D), bias2)
     if slide:
@@ -518,7 +521,7 @@ def atom_bwd(dout: torch.Tensor, x: torch.Tensor, tab: torch.Tensor, bias2: torc
     dO = torch.empty(M, D, device=dev, dtype=at)
     dp = torch.empty(M, 4 * D, device=dev, dtype=at)               # [dg | dq | dk | dv]
     dd = torch.empty(A, ATOM_H, N, device=dev, dtype=f32)
-    ext.gate_o_bwd(dog, og, s["g"] if gating else None, dO, dp[:, :D] if gating else None, dd, N, ATOM_DH)
+    ext.gate_o_bwd(dog, og, s["g"] if gating else None, dO, dp[:, :D] if gating else None, dd, N, ATOM_DH, at == torch.float32)
     qa, ka = (s["qn"], s["kn"]) if kq else (s["q"], s["k"])
     if slide:
         # the five edge windows are the edge kernels' (their dO / D rows become zeros for the main kernel, which then adds nothing for them)

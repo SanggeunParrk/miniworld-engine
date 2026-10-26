@@ -43,6 +43,8 @@ __device__ __forceinline__ float4 zero4() { return make_float4(0.f, 0.f, 0.f, 0.
 __device__ __forceinline__ float4 fma4(float4 a, float4 b, float4 c) {
   return make_float4(fmaf(a.x, b.x, c.x), fmaf(a.y, b.y, c.y), fmaf(a.z, b.z, c.z), fmaf(a.w, b.w, c.w));
 }
+__device__ __forceinline__ float rna(float x) { unsigned y; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(y) : "f"(x)); return __uint_as_float(y); }
+__device__ __forceinline__ float4 rna4(float4 a) { return make_float4(rna(a.x), rna(a.y), rna(a.z), rna(a.w)); }
 __device__ __forceinline__ float sum4(float4 a) { return a.x + a.y + a.z + a.w; }
 __device__ __forceinline__ float4 sig4(float4 a) { return make_float4(sigm(a.x), sigm(a.y), sigm(a.z), sigm(a.w)); }
 // scale factor f and its derivative d f / d logit, both 4-wide
@@ -112,7 +114,7 @@ template <int NT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) qkv_prep_k(const AT* __restrict__ Q, long sq, const AT* __restrict__ K, long sk,
     const AT* __restrict__ V, long sv, AT* __restrict__ QO, AT* __restrict__ KO, AT* __restrict__ VO, float4* __restrict__ STQK,
     const float* __restrict__ WQ, const float* __restrict__ BQ, const float* __restrict__ WK, const float* __restrict__ BK, float scale,
-    float eps, bool kq, long M) {
+    float eps, bool kq, bool tf32, long M) {
   __shared__ float red[NT / 32];
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
@@ -126,9 +128,11 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) qkv_prep_k(const AT* __restr
     k = fma4(kh, V4<float>::load(WK + col), V4<float>::load(BK + col));
     if (Geo<NT>::lead()) STQK[row] = make_float4(mq, rq, mk, rk);
   }
-  V4<AT>::store(QO + row * D + col, mul4(q, scale));
+  float4 qo = mul4(q, scale), vv = VO ? V4<AT>::load(V + row * sv + col) : zero4();
+  if (tf32) { qo = rna4(qo); k = rna4(k); vv = rna4(vv); }
+  V4<AT>::store(QO + row * D + col, qo);
   V4<AT>::store(KO + row * D + col, k);
-  if (VO) V4<AT>::store(VO + row * D + col, V4<AT>::load(V + row * sv + col));
+  if (VO) V4<AT>::store(VO + row * D + col, vv);
 }
 
 // x' = x + sigmoid(gA) ya (fp32, stored); xt = LN(x') f(scT) + shT, stats of x' saved
@@ -295,7 +299,7 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) res_adaln_bwd_k(const XT* __
 // Ungated: g null, `OG` is o: do = dog, dd = sum dog o. HD = channels per head; the head's threads are HD / 4 of the row's.
 template <int NT, typename AT>
 __global__ void __launch_bounds__(Geo<NT>::THREADS) gate_o_bwd_k(const AT* __restrict__ DOG, const AT* __restrict__ OG, const AT* __restrict__ G, long sg,
-    AT* __restrict__ DO, AT* __restrict__ DG, long sdg, float* __restrict__ DD, int L, int HD, long M) {
+    AT* __restrict__ DO, AT* __restrict__ DG, long sdg, float* __restrict__ DD, int L, int HD, bool tf32, long M) {
   __shared__ float red[NT * Geo<NT>::RPB];
   constexpr int D = NT * 4;
   const long row = Geo<NT>::row();
@@ -309,10 +313,10 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) gate_o_bwd_k(const AT* __res
     p = sum4(prod);
     if (G) {
       const float4 sgm = sig4(V4<AT>::load(G + row * sg + col));
-      V4<AT>::store(DO + row * D + col, mul4(dog, sgm));
+      V4<AT>::store(DO + row * D + col, tf32 ? rna4(mul4(dog, sgm)) : mul4(dog, sgm));
       V4<AT>::store(DG + row * sdg + col, mul4(prod, sub4(make_float4(1.f, 1.f, 1.f, 1.f), sgm)));
     } else {
-      V4<AT>::store(DO + row * D + col, dog);
+      V4<AT>::store(DO + row * D + col, tf32 ? rna4(dog) : dog);
     }
   }
   red[slot] = p;
@@ -479,14 +483,14 @@ void ln_mod_fwd(at::Tensor x, at::Tensor tab, std::vector<int64_t> sc_cols, std:
 
 void qkv_prep(at::Tensor q, at::Tensor k, at::Tensor v, at::Tensor qo, at::Tensor ko, c10::optional<at::Tensor> vo,
               c10::optional<at::Tensor> stqk, c10::optional<at::Tensor> wq, c10::optional<at::Tensor> bq, c10::optional<at::Tensor> wk,
-              c10::optional<at::Tensor> bk, double scale, double eps, bool kq) {
+              c10::optional<at::Tensor> bk, double scale, double eps, bool kq, bool tf32) {
   const c10::cuda::CUDAGuard guard(q.device());
   const int D = qo.size(1);
   const long M = qo.size(0);
   TORCH_CHECK(q.stride(1) == 1 && k.stride(1) == 1 && v.stride(1) == 1, "qkv_prep: row-contiguous inputs");
   DISPATCH_D(D, DISPATCH_A(q,
     qkv_prep_k<NT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<AT>(q), q.stride(0), CP<AT>(k), k.stride(0), CP<AT>(v), v.stride(0), P<AT>(qo),
-        P<AT>(ko), Po<AT>(vo), Po<float4>(stqk), CPo<float>(wq), CPo<float>(bq), CPo<float>(wk), CPo<float>(bk), (float)scale, (float)eps, kq, M);
+        P<AT>(ko), Po<AT>(vo), Po<float4>(stqk), CPo<float>(wq), CPo<float>(bq), CPo<float>(wk), CPo<float>(bk), (float)scale, (float)eps, kq, tf32, M);
   ))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -589,14 +593,14 @@ void res_adaln_bwd(at::Tensor dout, at::Tensor dt, at::Tensor xp, at::Tensor st,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void gate_o_bwd(at::Tensor dog, at::Tensor og, c10::optional<at::Tensor> g, at::Tensor dO, c10::optional<at::Tensor> dg, at::Tensor dd, int64_t L, int64_t hd) {
+void gate_o_bwd(at::Tensor dog, at::Tensor og, c10::optional<at::Tensor> g, at::Tensor dO, c10::optional<at::Tensor> dg, at::Tensor dd, int64_t L, int64_t hd, bool tf32) {
   const c10::cuda::CUDAGuard guard(dog.device());
   const int D = dog.size(1);
   const long M = dog.size(0);
   const long sg = (g && g->defined()) ? g->stride(0) : 0, sdg = (dg && dg->defined()) ? dg->stride(0) : 0;
   DISPATCH_D(D, DISPATCH_A(dog,
     gate_o_bwd_k<NT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<AT>(dog), CP<AT>(og), CPo<AT>(g), sg, P<AT>(dO), Po<AT>(dg), sdg, P<float>(dd), (int)L,
-        (int)hd, M);
+        (int)hd, tf32, M);
   ))
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
