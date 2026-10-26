@@ -61,6 +61,15 @@ _SOURCES = {
 _SAVE_H_D384 = True
 
 
+
+_D512_SAVED_SIDES = (768, 384)
+
+
+def _d512_saved_rows(rows: int) -> bool:
+    """Rows of the D512 training cells that retain a / b (see ``save_ab_enabled``): a square pair of these sides."""
+    return any(rows == s * s for s in _D512_SAVED_SIDES)
+
+
 def save_h_enabled(d: int) -> bool:
     """Keep the forward's SwiGLU intermediate h [M, 4D] for the D >= 384
     backward instead of recomputing-and-storing it in the gate kernel. The D >= 384 forward writes h to HBM anyway (between
@@ -77,13 +86,13 @@ def save_ab_enabled(d: int, rows: int = 0) -> bool:
     its forward is LayerNorm kernel + split expand (the resident LayerNorm tile of ``lnsg`` does not fit at 768)."""
     if d == 768:
         return True
-    return d == 512 and rows == 768 * 768
+    return d == 512 and _d512_saved_rows(rows)
 
 
 def split_fwd_enabled(d: int, rows: int = 0) -> bool:
     if d == 768:
         return True
-    return d == 512 and save_ab_enabled(d, rows) and rows == 768 * 768
+    return d == 512 and save_ab_enabled(d, rows) and _d512_saved_rows(rows)
 
 
 def _sm_count(device: torch.device | int | None = None) -> int:
@@ -181,7 +190,7 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
         repl = (d64_repl or 26) if x.shape[-1] == 64 else 16
         return _ext(x.shape[-1], _sm_count(x.device), repl, n=n)
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
-    saved_tma = x.shape[-1] == 512 and x.shape[0] == 768 * 768 and save_ab
+    saved_tma = x.shape[-1] == 512 and _d512_saved_rows(x.shape[0]) and save_ab
     return _ext(
         x.shape[-1],
         _sm_count(x.device),
@@ -463,7 +472,7 @@ def _bwd_launch(
         aux = _native_ext()
         # The compact kernel uses 89 registers without spills, allowing five
         # resident 128-thread CTAs instead of four for the 112-register plan.
-        compact = d == 512 and asaved is not None and x.shape[0] == 768 * 768
+        compact = d == 512 and asaved is not None and _d512_saved_rows(x.shape[0])
         ln = aux.ln_bwd_compact if compact else aux.ln_bwd
         dx, dgam, dbeta = ln(
             _mm_dx(dab, w_ab),

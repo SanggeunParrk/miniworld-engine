@@ -162,3 +162,17 @@ def test_layernorm_fused_in_the_pair_builder(kind, B, n):
     w3 = w.detach().clone().requires_grad_()
     build(w3, ln_eps=1e-5).backward(dout)
     assert torch.equal(w3.grad, dw), "the backward must be bitwise deterministic"
+
+
+@pytest.mark.parametrize("ln_eps", [None, 1e-5])
+@pytest.mark.parametrize(("B", "n"), [(2, 64), (1, 257)])
+def test_ca_forward_only_call_equals_the_training_forward(B, n, ln_eps):
+    """No gradient needed: the codes are not written and the table is made in one kernel, and the pair is bitwise the training forward's."""
+    g, bb, ca, cb, mask, idx, chains = _inputs(B, n, B * n + 5)
+    cax = bb[:, :, 1] * mask[..., None]
+    w = (torch.randn(256, 157, device="cuda", generator=g) * 0.3).requires_grad_()
+    train = pair_embed_ca(w, cax, mask, ln_eps=ln_eps)
+    with torch.no_grad():
+        fwd_only = pair_embed_ca(w, cax, mask, ln_eps=ln_eps)
+    assert not fwd_only.requires_grad and train.requires_grad
+    assert torch.equal(fwd_only, train)
