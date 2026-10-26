@@ -83,22 +83,23 @@ __device__ float opm_read(const void* p, int i, bool fp32) {
 __global__ void opm_pack_native(const void* g, const void* b, const void* wa,
     const void* wb, const void* wo, const void* bo, int types, float* gf, float* bf,
     __nv_bfloat16* a, __nv_bfloat16* c, __nv_bfloat16* o, float* ob,
-    __nv_bfloat16* ot, __nv_bfloat16* bw) {
+    __nv_bfloat16* ot, __nv_bfloat16* bw, int infer, const void* pbl, const void* pbr, float* pb) {
   int i = blockIdx.x * blockDim.x + threadIdx.x;
   if (i < 64) { gf[i] = opm_read(g,i,types&1); bf[i] = opm_read(b,i,types&2); }
   if (i < 2048) {
     a[i] = __float2bfloat16_rn(opm_read(wa,i,types&4));
     c[i] = __float2bfloat16_rn(opm_read(wb,i,types&8));
   }
-  if (i < 4096) {
+  if (i < 4096 && !infer) {
     int k = i / 64, ch = i % 64;
     float w = opm_read(ch < 32 ? wa : wb, (ch%32)*64+k, types & (ch<32?4:8));
     bw[i] = __float2bfloat16_rn(w * opm_read(g,k,types&1));
   }
   if (i < 128) ob[i] = __bfloat162float(__float2bfloat16_rn(opm_read(bo,i,types&32)));
+  if (pb != nullptr && i < 64) pb[i] = opm_read(i < 32 ? pbl : pbr, i % 32, types & (i < 32 ? 64 : 128));
   if (i < 131072) {
     __nv_bfloat16 v = __float2bfloat16_rn(opm_read(wo,i,types&16));
-    o[i] = v; ot[(i%1024)*128+i/1024] = v;
+    o[i] = v; if (!infer) ot[(i%1024)*128+i/1024] = v;
   }
 }
 __device__ float opm_warp_sum(float x) {
@@ -1013,6 +1014,21 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++g) {
       int slot = g % NST, b = g % 2, i = t / nsb, s0 = (t % nsb) * C::BS;
       wait(yf + slot, (g / NST) & 1);
+      // RoseTTAFold3's projection biases are masked like the projections: this thread's 32 columns (MSA rows) of the accumulator keep
+      // their mask bits in one register, read from the tile's mask bytes before the slot is released (the biases used to be masked by
+      // 32 global loads of mask16 per thread and tile, behind the LayerNorm warps' stores)
+      uint32_t kbits = 0;
+      float pb_lo = 0.f, pb_hi = 0.f;
+      if (pbias != nullptr) {
+        const int ch0 = cw * 16 + lane / 4;
+        pb_lo = pbias[ch0]; pb_hi = pbias[ch0 + 8];
+#pragma unroll
+        for (int k = 0; k < 16; ++k) {
+          const int col = k * 8 + (lane % 4) * 2;
+          kbits |= (sm[slot * MT + col * 16 + (i & 15)] != 0 ? 1u : 0u) << (2 * k);
+          kbits |= (sm[slot * MT + (col + 1) * 16 + (i & 15)] != 0 ? 1u : 0u) << (2 * k + 1);
+        }
+      }
       float acc[64] = {}; wg::fence();
 #pragma unroll
       for (int ks = 0; ks < CMT / 16; ++ks)
@@ -1025,10 +1041,10 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
       for (int k = 0; k < 16; ++k) {
         int col = k * 8 + (lane % 4) * 2, ch = cw * 16 + lane / 4, h = col / 64, cc = col % 64;
         __nv_bfloat16* out = st + b * TT + h * 4096;
-        if (pbias != nullptr) {   // RoseTTAFold3's projection biases [a | b], masked like the projections (mask16 of this tile is written)
-          const float k0 = __bfloat162float(mask16[(long)(s0 + col) * N + i]), k1 = __bfloat162float(mask16[(long)(s0 + col + 1) * N + i]);
-          acc[k * 4] += pbias[ch] * k0; acc[k * 4 + 1] += pbias[ch] * k1;
-          acc[k * 4 + 2] += pbias[ch + 8] * k0; acc[k * 4 + 3] += pbias[ch + 8] * k1;
+        if (pbias != nullptr) {   // RoseTTAFold3's projection biases [a | b], masked like the projections (the mask bits of kbits)
+          const float k0 = float((kbits >> (2 * k)) & 1u), k1 = float((kbits >> (2 * k + 1)) & 1u);
+          acc[k * 4] += pb_lo * k0; acc[k * 4 + 1] += pb_lo * k1;
+          acc[k * 4 + 2] += pb_hi * k0; acc[k * 4 + 3] += pb_hi * k1;
         }
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4], acc[k * 4 + 1]);
         *reinterpret_cast<__nv_bfloat162*>(out + wg::off_n(64, 0, ch + 8, cc / 8) + cc % 8) = __floats2bfloat162_rn(acc[k * 4 + 2], acc[k * 4 + 3]);
@@ -2303,7 +2319,10 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor bf
   return out;
 }
 
-std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p) {
+// infer: inference needs neither the transposed Wo nor the gamma-folded prologue-backward weight (two outputs left empty); pbl / pbr: RoseTTAFold3's projection
+// biases, packed as one fp32 [64] vector ([left | right], the wide prologue's `pbias`) in the same launch.
+std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p, bool infer = false, c10::optional<torch::Tensor> pbl = c10::nullopt,
+                                           c10::optional<torch::Tensor> pbr = c10::nullopt) {
   TORCH_CHECK(p.size()==6,"six parameters required");
   const int sizes[6]={64,64,2048,2048,131072,128};
   int types=0;
@@ -2314,16 +2333,30 @@ std::vector<torch::Tensor> opm_native_pack(std::vector<torch::Tensor> p) {
         "native OPM parameters must be BF16 or FP32");
     if(p[k].scalar_type()==torch::kFloat32)types|=1<<k;
   }
+  TORCH_CHECK(pbl.has_value()==pbr.has_value(), "pbl and pbr come together");
+  if(pbl.has_value()) {
+    int bit=6;
+    for(const torch::Tensor* t:{&*pbl,&*pbr}) {
+      TORCH_CHECK(t->is_cuda() && t->is_contiguous() && t->numel()==32 && (t->scalar_type()==torch::kFloat32 || t->scalar_type()==torch::kBFloat16),
+          "projection biases: contiguous fp32 / bf16 [32]");
+      if(t->scalar_type()==torch::kFloat32)types|=1<<bit;
+      ++bit;
+    }
+  }
   auto fo=p[0].options().dtype(torch::kFloat32), bo=p[0].options().dtype(torch::kBFloat16);
   auto g=torch::empty({64},fo),b=torch::empty({64},fo);
   auto a=torch::empty({32,64},bo),c=torch::empty({32,64},bo),o=torch::empty({128,1024},bo);
-  auto ob=torch::empty({128},fo),ot=torch::empty({1024,128},bo),bw=torch::empty({64,64},bo);
+  auto ob=torch::empty({128},fo);
+  auto ot=torch::empty({infer?0:1024,infer?0:128},bo),bw=torch::empty({infer?0:64,infer?0:64},bo);
+  auto pb=torch::empty({pbl.has_value()?64:0},fo);
   opm_native_launch(opm_pack_native,dim3(512),dim3(256),
       p[0].data_ptr(),p[1].data_ptr(),p[2].data_ptr(),p[3].data_ptr(),p[4].data_ptr(),p[5].data_ptr(),types,
       g.data_ptr<float>(),b.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(a.data_ptr()),
       reinterpret_cast<__nv_bfloat16*>(c.data_ptr()),reinterpret_cast<__nv_bfloat16*>(o.data_ptr()),
-      ob.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(ot.data_ptr()),reinterpret_cast<__nv_bfloat16*>(bw.data_ptr()));
+      ob.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(ot.data_ptr()),reinterpret_cast<__nv_bfloat16*>(bw.data_ptr()),
+      (int)infer,pbl.has_value()?pbl->data_ptr():nullptr,pbr.has_value()?pbr->data_ptr():nullptr,pbl.has_value()?pb.data_ptr<float>():nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+  if(pbl.has_value()) return {g,b,a,c,o,ob,ot,bw,pb};
   return {g,b,a,c,o,ob,ot,bw};
 }
 std::vector<torch::Tensor> opm_native_prologue_tma(torch::Tensor m,torch::Tensor mask,
@@ -2489,7 +2522,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_prologue_wide", &opm_prologue_wide, "persistent TMA OPM prologue at this build's d_msa (64 / 128) + exact mask count",
         py::arg("m"), py::arg("mask"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("eps"), py::arg("save_stats"),
         py::arg("pbias") = py::none());
-  m.def("opm_native_pack",&opm_native_pack);
+  m.def("opm_native_pack",&opm_native_pack,py::arg("p"),py::arg("infer")=false,py::arg("pbl")=py::none(),py::arg("pbr")=py::none());
   m.def("opm_native_prologue",&opm_native_prologue);
   m.def("opm_native_prologue_tma",&opm_native_prologue_tma);
   m.def("opm_native_cast",&opm_native_cast);

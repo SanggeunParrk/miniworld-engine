@@ -36,9 +36,6 @@ ln_pair_D256:inference:384:cuda_vs_portable
 ln_pair_D256:inference:384:portable_vs_pytorch
 ln_pair_D256:training:384:portable_vs_pytorch
 ln_pair_fp32:inference:384:portable_vs_pytorch
-opm_rf3_after:inference:256:cuda_vs_portable
-opm_rf3_after:training:256:portable_vs_pytorch
-opm_rf3_after:training:384:portable_vs_pytorch
 rms_bf16:inference:1024:portable_vs_pytorch
 rms_bf16:inference:384:cuda_vs_portable
 rms_bf16:inference:384:portable_vs_pytorch

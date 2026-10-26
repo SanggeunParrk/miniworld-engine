@@ -261,12 +261,13 @@ def test_chunk_plan_is_the_bidirectional_one():
 
 
 def test_other_hidden_widths_not_served():
-    """Other ratios, hidden 2 D at D256, and the bidirectional module with hidden != D keep the module's other paths."""
+    """Other ratios, hidden 2 D at D256, and the bidirectional module with a hidden width other than D or 2 D at D64 keep the module's other paths
+    (hidden 2 D at D64 is served: test_trimul_h100_bidir_hidden2x_gpu.py)."""
     x64 = torch.zeros(1, 128, 128, 64, device="cuda", dtype=torch.bfloat16)
     x256 = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     odd = TriangleMultiplication(64, d_hidden=96, implementation=ImplementationType.MINIWORLD).cuda()
     wide = TriangleMultiplication(256, d_hidden=512, implementation=ImplementationType.MINIWORLD).cuda()
-    bidir = BidirectionalTriangleMultiplication(64, d_hidden=128, implementation=ImplementationType.MINIWORLD).cuda()
+    bidir = BidirectionalTriangleMultiplication(64, d_hidden=96, implementation=ImplementationType.MINIWORLD).cuda()
     assert not trimul_h100.serves_single(odd, x64)
     assert not trimul_h100.serves_single(wide, x256)
     assert not trimul_h100.serves(bidir, x64)

@@ -69,6 +69,12 @@ NOT_A_NORMALISATION = {
     ("pair_weighted_averaging/triton/main.py",
      "empty if keep is None else keep[bi].to(torch.bfloat16).contiguous(),"):
         "The row-broadcast dropout keep-mask (0 / 1, exact in bf16) as the kernel's operand, not a normalized activation.",
+    ("outer_product_mean/chai.py",
+     "return (w * gam.float()[None, :]).to(torch.bfloat16).contiguous(), (bo.float() + w @ bet.float()).contiguous()"):
+        "The out-projection WEIGHT with the product LayerNorm gamma folded in (the kernel's operand), not a normalized activation.",
+    ("outer_product_mean/chai.py",
+     "w = torch.cat([wl, wr]).to(torch.bfloat16).contiguous()"):
+        "The stacked left / right projection WEIGHTS, not a normalized activation.",
     ("trimul_inproj/cuda/h100_b7.py",
      'self.mask = d["mask"] if mode & 128 else d["mask"].bfloat16().reshape(-1)'):
         "Mask storage for the H100 projection path, not a normalized activation.",
