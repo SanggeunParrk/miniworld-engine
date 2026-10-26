@@ -51,6 +51,25 @@ def supported(x: torch.Tensor, cond: torch.Tensor, nd: int) -> bool:
     return torch.cuda.get_device_capability(idx) == (9, 0)
 
 
+def _squeeze_gate_save_fake(h, cond, ws, wsc, bsc, res):
+    """(y, out, sp) [M, D]."""
+    n = (h.shape[0], ws.shape[0])
+    return h.new_empty(n), h.new_empty(n), h.new_empty(n)
+
+
+@opaque(fake=_squeeze_gate_save_fake, name="conditioned_transition_cuda_squeeze_gate_save")
+def squeeze_gate_save(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
+                      res: torch.Tensor | None) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """bf16 training forward of the tail's second half in one wgmma kernel (``ct_sm90.cu``): y = res + sigmoid(cond Wsc^T + b) (h Ws^T), and the two
+    products the backward needs, out = h Ws^T and sp = cond Wsc^T + b, each rounded to bf16 as the unfused ops round them."""
+    from .ct_inference import ext as ct_ext
+
+    y = torch.empty(h.shape[0], ws.shape[0], device=h.device, dtype=h.dtype)
+    out, sp = torch.empty_like(y), torch.empty_like(y)
+    ct_ext().squeeze_gate(h, ws, cond, wsc, bsc, res, y, torch.cuda.get_device_properties(h.device).multi_processor_count, 128, True, out, sp)
+    return y, out, sp
+
+
 def _swiglu_fwd_fake(ab):
     """h [M, ND] of ab [M, 2 ND]."""
     return ab.new_empty((ab.shape[0], ab.shape[1] // 2))
@@ -104,6 +123,11 @@ def sigmul_bwd(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[t
     return dout, dsc, part
 
 
+def _fused_squeeze_ok(h, cond, ws) -> bool:
+    """The squeeze + gate kernel's tiling: K slabs of 64, whole 128-column output tiles."""
+    return ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
+
+
 class _Tail(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
@@ -112,9 +136,12 @@ class _Tail(torch.autograd.Function):
         wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
         ab = torch.mm(x, wab.t())
         h = swiglu_fwd(ab)
-        out = torch.mm(h, wsb.t())
-        sp = torch.addmm(bscb, cond, wscb.t())
-        y = sigmul_fwd(out, sp, res)
+        if dt is torch.bfloat16 and _fused_squeeze_ok(h, cond, wsb):   # one wgmma kernel for both GEMMs and the gate (+ residual)
+            y, out, sp = squeeze_gate_save(h, cond, wsb, wscb, bsc.float().contiguous(), res)
+        else:
+            out = torch.mm(h, wsb.t())
+            sp = torch.addmm(bscb, cond, wscb.t())
+            y = sigmul_fwd(out, sp, res)
         ctx.save_for_backward(x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc)
         ctx.has_res = res is not None
         return y

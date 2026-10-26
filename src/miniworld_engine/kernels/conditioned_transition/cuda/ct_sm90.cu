@@ -186,12 +186,13 @@ void run_expand(const at::Tensor& x, const at::Tensor& wab, const at::Tensor& h,
 }
 
 // ======================================================================================================================== squeeze + gate (+ residual)
-template <bool F32, int BN> struct SCfg {
+template <bool F32, int BN, bool SAVE = false> struct SCfg {
   static constexpr int TBK = F32 ? 32 : 64;
   static constexpr int F_SA = TBM * 128, F_SB = BN * 128, F_ST = F_SA + F_SB;
   static constexpr int STGW = 64 * BN * (F32 ? 4 : 2);
-  static constexpr int NST = (225 * 1024 - 2 * STGW - 1024) / F_ST > 6 ? 6 : (225 * 1024 - 2 * STGW - 1024) / F_ST;
-  static constexpr int STG = NST * F_ST, BAR = STG + 2 * STGW, SMEM = BAR + 256;
+  static constexpr int NSTG = SAVE ? 3 : 1;   // staging tiles per consumer warpgroup: y (in place over the residual), SAVE: also the squeeze output and the gate pre-activation
+  static constexpr int NST = (225 * 1024 - 2 * NSTG * STGW - 1024) / F_ST > 6 ? 6 : (225 * 1024 - 2 * NSTG * STGW - 1024) / F_ST;
+  static constexpr int STG = NST * F_ST, BAR = STG + 2 * NSTG * STGW, SMEM = BAR + 256;
   static_assert(SMEM + 1024 <= 232448, "shared memory budget");
 };
 template <bool F32, int BN> TMN_DEVI void mma_s(float (&acc)[BN / 2], uint64_t a, uint64_t b) {
@@ -200,12 +201,13 @@ template <bool F32, int BN> TMN_DEVI void mma_s(float (&acc)[BN / 2], uint64_t a
 }
 TMN_DEVI float bf16r(float f) { return __bfloat162float(__float2bfloat16_rn(f)); }
 
-template <bool F32, int BN, bool RES>
+template <bool F32, int BN, bool RES, bool SAVE>
 __global__ void __launch_bounds__(384, 1)
 squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ CUtensorMap mWs, const __grid_constant__ CUtensorMap mC,
                const __grid_constant__ CUtensorMap mWsc, const __grid_constant__ CUtensorMap mR, const __grid_constant__ CUtensorMap mO,
+               const __grid_constant__ CUtensorMap mOs, const __grid_constant__ CUtensorMap mSs,
                const float* __restrict__ bsc, int M, int ND, int DC, int D) {
-  using C = SCfg<F32, BN>;
+  using C = SCfg<F32, BN, SAVE>;
   constexpr int NSTAGE = C::NST, TBK = C::TBK, F_SA = C::F_SA, F_ST = C::F_ST, NQ = BN / (F32 ? 32 : 64);
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
@@ -241,7 +243,7 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
       if constexpr (RES) {
         for (int c = 0; c < 2; ++c) {                       // residual tiles: into each warpgroup's staging once it is free
           if (tl_ > 0) mbar_wait(xfree + c, (tl_ - 1) & 1u);
-          uint8_t* xs = sm + C::STG + c * C::STGW;
+          uint8_t* xs = sm + C::STG + c * C::NSTG * C::STGW;
           mbar_arrive_expect_tx(xfull + c, C::STGW);
           for (int q = 0; q < NQ; ++q) tma_load_2d(xs + q * 8192, &mR, xfull + c, n0 + q * (F32 ? 32 : 64), m0 + 64 * c);
         }
@@ -273,7 +275,9 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
   }
   setmaxnreg_inc<232>();                                  // ------------------------------------------------ consumers
   const int cw = wg - 1;
-  uint8_t* stg = sm + C::STG + cw * C::STGW;
+  uint8_t* stg = sm + C::STG + cw * C::NSTG * C::STGW;
+  uint8_t* ost = stg + C::STGW;                          // SAVE: the squeeze output (rounded to the stream dtype)
+  uint8_t* sst = stg + 2 * C::STGW;                      // SAVE: the gate pre-activation (rounded)
   uint32_t it = 0, tl = 0;
   for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++tl) {
     const int m0 = (t % MT) * TBM, n0 = (t / MT) * BN;
@@ -339,7 +343,17 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         if constexpr (RES) ldsm_x4(xr, ad);
         const int g0 = 2 * gp, g1 = 2 * gp + 1;
         const float2 b0 = bv[2 * gp], b1 = bv[2 * gp + 1];
-        float y[8];
+        float y[8], po[8], ps[8];
+        if constexpr (SAVE) {   // the unfused ops round the squeeze output and the gate projection to the stream dtype before the gate: the same here
+          const float bz[8] = {b0.x, b0.y, b0.x, b0.y, b1.x, b1.y, b1.x, b1.y};
+          const int ib[8] = {4 * g0, 4 * g0 + 1, 4 * g0 + 2, 4 * g0 + 3, 4 * g1, 4 * g1 + 1, 4 * g1 + 2, 4 * g1 + 3};
+#pragma unroll
+          for (int q = 0; q < 8; ++q) {
+            po[q] = bf16r(acc1[ib[q]]);
+            ps[q] = bf16r(acc2[ib[q]] + bz[q]);
+            y[q] = sigmoid_exact(ps[q]) * po[q];
+          }
+        } else {
         y[0] = sigmoid_exact(acc2[4 * g0 + 0] + b0.x) * acc1[4 * g0 + 0];
         y[1] = sigmoid_exact(acc2[4 * g0 + 1] + b0.y) * acc1[4 * g0 + 1];
         y[2] = sigmoid_exact(acc2[4 * g0 + 2] + b0.x) * acc1[4 * g0 + 2];
@@ -348,6 +362,7 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         y[5] = sigmoid_exact(acc2[4 * g1 + 1] + b1.y) * acc1[4 * g1 + 1];
         y[6] = sigmoid_exact(acc2[4 * g1 + 2] + b1.x) * acc1[4 * g1 + 2];
         y[7] = sigmoid_exact(acc2[4 * g1 + 3] + b1.y) * acc1[4 * g1 + 3];
+        }
         if constexpr (RES) {
           y[0] = bf16r(y[0]) + bf16lo(xr[0]); y[1] = bf16r(y[1]) + bf16hi(xr[0]);
           y[2] = bf16r(y[2]) + bf16lo(xr[1]); y[3] = bf16r(y[3]) + bf16hi(xr[1]);
@@ -355,12 +370,22 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
           y[6] = bf16r(y[6]) + bf16lo(xr[3]); y[7] = bf16r(y[7]) + bf16hi(xr[3]);
         }
         stsm_x4(ad, pack_bf16(y[0], y[1]), pack_bf16(y[2], y[3]), pack_bf16(y[4], y[5]), pack_bf16(y[6], y[7]));
+        if constexpr (SAVE) {
+          const uint32_t off = (uint32_t)(ad - smem_u32(stg));
+          stsm_x4(smem_u32(ost) + off, pack_bf16(po[0], po[1]), pack_bf16(po[2], po[3]), pack_bf16(po[4], po[5]), pack_bf16(po[6], po[7]));
+          stsm_x4(smem_u32(sst) + off, pack_bf16(ps[0], ps[1]), pack_bf16(ps[2], ps[3]), pack_bf16(ps[4], ps[5]), pack_bf16(ps[6], ps[7]));
+        }
       }
     }
     fence_proxy_async();
     named_bar_sync(1 + cw, 128);
     if (wtid == 0) {
       for (int q = 0; q < NQ; ++q) tma_store_2d(&mO, stg + q * 8192, n0 + q * (F32 ? 32 : 64), m0 + 64 * cw);
+      if constexpr (SAVE)
+        for (int q = 0; q < NQ; ++q) {
+          tma_store_2d(&mOs, ost + q * 8192, n0 + q * (F32 ? 32 : 64), m0 + 64 * cw);
+          tma_store_2d(&mSs, sst + q * 8192, n0 + q * (F32 ? 32 : 64), m0 + 64 * cw);
+        }
       tma_store_commit();
       if constexpr (RES) {
         tma_store_wait_read<0>();                           // the store has read the staging tile: the producer may refill it
@@ -371,21 +396,22 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
   if (wtid == 0) tma_store_wait_all();
 }
 
-template <bool F32, int BN, bool RES>
+template <bool F32, int BN, bool RES, bool SAVE>
 void run_squeeze(const at::Tensor& h, const at::Tensor& ws, const at::Tensor& cond, const at::Tensor& wsc, const at::Tensor& bsc,
-                 const at::Tensor* res, const at::Tensor& out, int sms, bool pdl) {
-  using C = SCfg<F32, BN>;
+                 const at::Tensor* res, const at::Tensor& out, const at::Tensor* osave, const at::Tensor* ssave, int sms, bool pdl) {
+  using C = SCfg<F32, BN, SAVE>;
   const int64_t M = h.size(0), ND = h.size(1), D = ws.size(0), DC = cond.size(1);
   TORCH_CHECK(ND % C::TBK == 0 && DC % C::TBK == 0 && D % BN == 0, "shapes: ND, DC % (64 bf16 / 32 fp32), D % BN");
   const int bc = F32 ? 32 : 64;
   const auto mH = map2d(h.data_ptr(), F32, M, ND, h.stride(0), C::TBK, TBM), mWs = map2d(ws.data_ptr(), F32, D, ND, ND, C::TBK, BN),
              mC = map2d(cond.data_ptr(), F32, M, DC, cond.stride(0), C::TBK, TBM), mWsc = map2d(wsc.data_ptr(), F32, D, DC, DC, C::TBK, BN),
              mR = map2d(RES ? res->data_ptr() : out.data_ptr(), F32, M, D, RES ? res->stride(0) : D, bc, 64),
-             mO = map2d(out.data_ptr(), F32, M, D, D, bc, 64);
+             mO = map2d(out.data_ptr(), F32, M, D, D, bc, 64), mOs = map2d(SAVE ? osave->data_ptr() : out.data_ptr(), F32, M, D, D, bc, 64),
+             mSs = map2d(SAVE ? ssave->data_ptr() : out.data_ptr(), F32, M, D, D, bc, 64);
   const int tiles = (int)(((M + TBM - 1) / TBM) * (D / BN));
-  auto k = squeeze_gate_k<F32, BN, RES>;
+  auto k = squeeze_gate_k<F32, BN, RES, SAVE>;
   cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM + 1024);
-  launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mH, mWs, mC, mWsc, mR, mO, (const float*)bsc.data_ptr(), (int)M,
+  launch(k, (unsigned)std::min(tiles, sms), 384u, (size_t)C::SMEM + 1024, pdl, mH, mWs, mC, mWsc, mR, mO, mOs, mSs, (const float*)bsc.data_ptr(), (int)M,
          (int)ND, (int)DC, (int)D);
 }
 
@@ -411,25 +437,31 @@ void expand_swiglu(torch::Tensor x, torch::Tensor wab, torch::Tensor h, int64_t 
 #undef EX
 }
 void squeeze_gate(torch::Tensor h, torch::Tensor ws, torch::Tensor cond, torch::Tensor wsc, torch::Tensor bsc, c10::optional<torch::Tensor> res,
-                  torch::Tensor out, int64_t sms, int64_t bn, bool pdl) {
+                  torch::Tensor out, int64_t sms, int64_t bn, bool pdl, c10::optional<torch::Tensor> osave, c10::optional<torch::Tensor> ssave) {
   const auto dt = h.scalar_type();
   TORCH_CHECK((dt == torch::kBFloat16 || dt == torch::kFloat32) && ws.scalar_type() == dt && cond.scalar_type() == dt && wsc.scalar_type() == dt &&
               out.scalar_type() == dt && bsc.scalar_type() == torch::kFloat32, "bf16 or fp32 operands, all alike; bias fp32");
   TORCH_CHECK(h.stride(1) == 1 && cond.stride(1) == 1 && ws.is_contiguous() && wsc.is_contiguous() && out.is_contiguous() && bsc.is_contiguous(), "layouts");
   if (res) TORCH_CHECK(res->scalar_type() == dt && res->stride(1) == 1 && res->sizes() == out.sizes(), "residual");
+  const bool sv = osave.has_value();
+  if (sv) TORCH_CHECK(dt == torch::kBFloat16 && ssave.has_value() && osave->is_contiguous() && ssave->is_contiguous() && osave->sizes() == out.sizes() &&
+                      ssave->sizes() == out.sizes() && osave->scalar_type() == dt && ssave->scalar_type() == dt, "saved outputs: bf16 only, like out");
   const at::cuda::CUDAGuard guard(h.device());
   TORCH_CHECK(bn == 128 || bn == 64, "bn: 128 or 64");
   const bool f32 = dt == torch::kFloat32, r = res.has_value();
   const at::Tensor* rp = r ? &*res : nullptr;
-#define SQ(F, B, R) run_squeeze<F, B, R>(h, ws, cond, wsc, bsc, rp, out, sms, pdl)
-  if (f32) { if (bn == 64) { if (r) SQ(true, 64, true); else SQ(true, 64, false); } else { if (r) SQ(true, 128, true); else SQ(true, 128, false); } }
-  else { if (bn == 64) { if (r) SQ(false, 64, true); else SQ(false, 64, false); } else { if (r) SQ(false, 128, true); else SQ(false, 128, false); } }
+  const at::Tensor* op = sv ? &*osave : nullptr;
+  const at::Tensor* sp = sv ? &*ssave : nullptr;
+#define SQ(F, B, R, S) run_squeeze<F, B, R, S>(h, ws, cond, wsc, bsc, rp, out, op, sp, sms, pdl)
+  if (f32) { if (bn == 64) { if (r) SQ(true, 64, true, false); else SQ(true, 64, false, false); } else { if (r) SQ(true, 128, true, false); else SQ(true, 128, false, false); } }
+  else if (sv) { if (r) SQ(false, 128, true, true); else SQ(false, 128, false, true); }
+  else { if (bn == 64) { if (r) SQ(false, 64, true, false); else SQ(false, 64, false, false); } else { if (r) SQ(false, 128, true, false); else SQ(false, 128, false, false); } }
 #undef SQ
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("expand_swiglu", &expand_swiglu);
-  m.def("squeeze_gate", &squeeze_gate);
+  m.def("squeeze_gate", &squeeze_gate, pybind11::arg("h"), pybind11::arg("ws"), pybind11::arg("cond"), pybind11::arg("wsc"), pybind11::arg("bsc"), pybind11::arg("res"), pybind11::arg("out"), pybind11::arg("sms"), pybind11::arg("bn"), pybind11::arg("pdl"), pybind11::arg("osave") = pybind11::none(), pybind11::arg("ssave") = pybind11::none());
 #ifdef CT_TRACE
   m.def("trace", &trace_read);
 #endif
