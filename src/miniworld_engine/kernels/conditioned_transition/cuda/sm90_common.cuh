@@ -95,3 +95,8 @@ inline at::Tensor trace_read() {
 #define TRACE(slot) do {} while (0)
 #define TRACE_T(slot) do {} while (0)
 #endif
+#ifdef CT_TRACE
+#define TRACE_TILE(tl, k) do { if (blockIdx.x == 0 && (tl) < 12) g_trace[256 + (tl)][k] = clock64(); } while (0)
+#else
+#define TRACE_TILE(tl, k) do {} while (0)
+#endif

@@ -176,11 +176,32 @@ class ConditionedTransition(nn.Module):
         y = y.reshape(*x_in.shape[:-1], self.d_hidden)
         return y if fold or not residual else x_in + y
 
+    def _cuda_train_update(self, x_in: torch.Tensor, cond: torch.Tensor, *, residual: bool):
+        """Training on H100: the AdaLN module (its own hand-CUDA route), then the tail's hand-CUDA forward / backward
+        (``kernels/conditioned_transition/cuda/ct_train``: row kernels between cuBLAS GEMMs). ``None`` when they do not serve the call."""
+        from miniworld_engine.kernels.conditioned_transition.cuda import ct_train
+
+        device_type = x_in.device.type
+        compute_dtype = (torch.get_autocast_dtype(device_type)
+                         if torch.is_autocast_enabled(device_type) else self.expand_a.weight.dtype)
+        d = x_in.shape[-1]
+        cond2 = cond.reshape(-1, cond.shape[-1]).to(compute_dtype)
+        if not ct_train.supported(cond2, cond2, self.expand_a.weight.shape[0]):
+            return None
+        xn = self.ada_ln_in(x_in, cond).reshape(-1, d).to(compute_dtype)
+        fold = residual and x_in.dtype == compute_dtype
+        with torch.autocast(device_type=device_type, enabled=False):
+            y = ct_train.ct_tail_train(
+                xn, cond2, self.expand_a.weight, self.expand_b.weight, self.squeeze.weight, self.to_scale.weight, self.to_scale.bias,
+                x_in.reshape(-1, d) if fold else None)
+        y = y.reshape(*x_in.shape[:-1], d)
+        return y if fold or not residual else x_in + y
+
     def _update(self, x: torch.Tensor, cond: torch.Tensor, *, residual: bool) -> torch.Tensor:
         """``delta`` (``residual=False``) or ``x + delta`` (``residual=True``). The portable inference path folds the residual add into the
         squeeze+gate epilogue of its kernel (one launch fewer); every other path adds it here."""
-        if self._backend == KernelBackend.CUDA and x.is_cuda and not needs_backward(self, x, cond):
-            out = self._cuda_update(x, cond, residual=residual)
+        if self._backend == KernelBackend.CUDA and x.is_cuda:
+            out = (self._cuda_train_update if needs_backward(self, x, cond) else self._cuda_update)(x, cond, residual=residual)
             if out is not None:
                 return out
         x_in = x

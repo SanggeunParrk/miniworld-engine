@@ -208,6 +208,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
   uint8_t* gst = stg + C::STGW;                           // gate (SAVE_GATE)
   uint32_t it = 0, tl = 0;
   for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++tl) {
+    if (tid == 128) TRACE_TILE(tl, 0);
     const int m0 = (t % MT) * TBM, nt = t / MT, n0 = nt * HT;
     // the statistics are the predecessor's (ln_rows) output: wait for it, then keep them and the scale bias in registers before the main loop
     // (a global load inside the epilogue, behind its shared-memory asm statements, is a full memory latency per use)
@@ -226,6 +227,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       const int s = (int)(it % NSTAGE);
       mbar_wait(full + s, (it / NSTAGE) & 1u);
       if (tid == 128 && it == 0) TRACE(2);
+      if (tid == 128 && kb == 0) TRACE_TILE(tl, 1);
       const uint32_t a0 = su + s * F_ST + cw * 8192, b0 = su + s * F_ST + F_SA;
       fence_regs(acc); wgmma_fence();
 #pragma unroll
@@ -236,9 +238,11 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
     }
     wgmma_wait<0>(); fence_regs(acc);
     if (tid == 128 && tl == 0) TRACE(3);
+    if (tid == 128) TRACE_TILE(tl, 2);
     if (wtid == 0) mbar_arrive(empty + prev);
     mbar_wait(xfull + cw, tl & 1u);
     if (tid == 128 && tl == 0) TRACE(4);
+    if (tid == 128) TRACE_TILE(tl, 3);
     if constexpr (SAVE_GATE) {                                // the gate staging: free once the previous tile's store has read it
       if (tl > 0 && wtid == 0) tma_store_wait_read<0>();
       named_bar_sync(1 + cw, 128);
@@ -289,6 +293,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       }
     }
     if (tid == 128 && tl == 0) TRACE(5);
+    if (tid == 128) TRACE_TILE(tl, 4);
     fence_proxy_async();
     named_bar_sync(1 + cw, 128);
     if (wtid == 0) {
@@ -299,6 +304,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       if (tid == 128) TRACE(6);
       tma_store_wait_read<0>();                             // the stores have read the staging tiles: the producer may refill the x tile
       if (tid == 128) TRACE(7);
+      if (tid == 128) TRACE_TILE(tl, 5);
       mbar_arrive(xfree + cw);
     }
   }
