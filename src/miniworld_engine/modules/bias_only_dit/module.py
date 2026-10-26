@@ -31,9 +31,11 @@ from __future__ import annotations
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.integrations import bias_only_dit as _fused
 from miniworld_engine.integrations import bias_only_dit_train as _train
 from miniworld_engine.modules.adaptive_layernorm.module import AdaptiveLayerNorm
@@ -43,6 +45,9 @@ from miniworld_engine.modules.functional import sigmoid_gate
 from miniworld_engine.modules.primitives import LayerNorm, Linear
 
 _REF = ImplementationType.PYTORCH
+
+#: the softmax of the pair bias per (pair, mask, weights), see ``BiasOnlyAttention._attention_weights``
+_ATTENTION: dict = {}
 
 
 class BiasOnlyAttention(nn.Module):
@@ -73,6 +78,39 @@ class BiasOnlyAttention(nn.Module):
         self.to_scale = Linear(d_cond, d_single, bias=True, init="default")
         self.to_scale.bias.data.fill_(-2.0)
 
+    def _attention_weights(self, pair, mask, bias, dtype):
+        """softmax over the keys of the pair bias (masked keys at the largest negative finite logit): [B, H, L, L], shared by every sample.
+
+        It depends on the pair, the mask and two weights only, so an inference call (no gradient) keeps it while those are unchanged -- the pair LayerNorm,
+        the bias GEMM and the softmax are then not run again for the next block call of a sampling loop, or in a CUDA-graph replay under
+        ``static_inputs()`` (``kernels._capture.lookup_inputs``: the pair is the sampler's per-item input, the weights are fixed). The entry holds the
+        pair and the mask, so their addresses cannot be reused while it lives; an in-place update bumps ``_version`` and misses.
+        """
+        def build():
+            if bias is None:
+                logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
+            else:
+                logits = bias.to(dtype)                                         # hoisted (pair_bias_all), head-major already
+            if mask is not None:
+                logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
+            return torch.softmax(logits, dim=-1)
+
+        if (bias is not None or pair is None or torch.is_grad_enabled() or not pair.is_cuda
+                or self.ada_ln_in.implementation != ImplementationType.MINIWORLD):   # the PyTorch statements stay the reference
+            return build()
+        try:
+            key = (pair.data_ptr(), pair._version, tuple(pair.shape), pair.dtype, dtype,
+                   None if mask is None else (mask.data_ptr(), mask._version),
+                   torch.is_autocast_enabled("cuda"),
+                   self.ln_pair.weight.data_ptr(), self.ln_pair.weight._version,
+                   self.to_bias.weight.data_ptr(), self.to_bias.weight._version)
+        except RuntimeError:   # an inference tensor carries no version counter: not cached
+            return build()
+        entry = _capture.lookup_inputs(
+            _ATTENTION, key, lambda: (build(), pair, mask), limit=64,
+            valid=lambda e: e[1] is pair and e[2] is mask)
+        return entry[0]
+
     def forward(
         self,
         single: Float[torch.Tensor, "A B L d_single"],
@@ -82,18 +120,18 @@ class BiasOnlyAttention(nn.Module):
         *,
         bias: Float[torch.Tensor, "B H L L"] | None = None,
     ) -> Float[torch.Tensor, "A B L d_single"]:
-        single_res = single  # residual == the ORIGINAL input (before ada_ln_in rebinds `single`)
-        single = self.ada_ln_in(single, cond)
-        value, gate = self.to_value(single), self.to_gate(single)
-        if bias is None:
-            logits = self.to_bias(self.ln_pair(pair)).permute(0, 3, 1, 2)   # (B, H, L, L)
+        # residual == the ORIGINAL input; the AdaLN hands it back as a stream output of its own node (see forward_with_stream)
+        single, single_res = self.ada_ln_in.forward_with_stream(single, cond)
+        if self.ada_ln_in.implementation == ImplementationType.MINIWORLD:
+            # the portable family: the value and the gate projection are one GEMM over the concatenated weights (one read of `single`, one launch,
+            # one dgrad and one wgrad in the backward); the PyTorch statements keep the two Linears
+            vg = F.linear(single, torch.cat([self.to_value.weight, self.to_gate.weight], 0))
+            value, gate = vg.split(self.to_value.out_features, dim=-1)
         else:
-            logits = bias.to(value.dtype)                                # hoisted (pair_bias_all), head-major already
+            value, gate = self.to_value(single), self.to_gate(single)
         value = rearrange(value, "A B L (H D) -> A B L H D", H=self.n_head)
-        if mask is not None:
-            logits = logits.masked_fill(~mask[:, None, None, :], torch.finfo(logits.dtype).min)
         # one softmax for every sample: the logits carry no augmentation axis
-        attention = torch.softmax(logits, dim=-1)
+        attention = self._attention_weights(pair, mask, bias, value.dtype)
         out = torch.einsum("bhij,abjhd->abihd", attention, value).flatten(-2)
         out = self.to_out(sigmoid_gate(gate, out))
         return single_res + sigmoid_gate(self.to_scale(cond), out)

@@ -125,9 +125,45 @@ def _cond_affine(cond: torch.Tensor, lnw: torch.Tensor, eps: float,
     _ln_kernel[grid](
         cond, aff, lnw, M, int(N), eps,
         cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
+        aff, aff, aff, 0, 0.0, 0,   # no second reduction
         HAS_W=True, shape_key=pack(shape_key, N=N),
     )
     return aff
+
+
+def _cond_affine_stats_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
+    """(cond_aff (M, NC), rstd (M,), c1 (M,)) -- the two statistics are fp32 whatever x's dtype."""
+    m = cond.shape[0]
+    return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype),
+            cond.new_empty((m,), dtype=torch.float32), cond.new_empty((m,), dtype=torch.float32))
+
+
+@opaque(fake=_cond_affine_stats_fake, name="adaln_cond_affine_stats")
+def _cond_affine_stats(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: torch.Tensor, eps_x: float,
+                       out_dtype: torch.dtype | None = None, shape_key: int | None = None,
+                       ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``_cond_affine`` and ``layernorm_stats_triton(x)`` in ONE launch: cond_aff = LN(cond) * lnw, and x's (rstd, c1 = mean * rstd).
+    The two reductions are independent rows of the same grid, so the step before the GEMM costs one launch instead of two."""
+    M, N = cond.shape
+    N2 = x.shape[1]
+    if shape_key is None:
+        raise ValueError(
+            "shape_key is required here: this launcher receives an already-flattened "
+            "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
+            "at the caller that still holds the pre-flatten shape -- atom_key(length_of(x.shape)) "
+            "-- and pass it down."
+        )
+    aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
+    rstd = torch.empty(M, device=cond.device, dtype=torch.float32)
+    c1 = torch.empty(M, device=cond.device, dtype=torch.float32)
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    _ln_kernel[grid](
+        cond, aff, lnw, M, int(N), eps,
+        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
+        x, rstd, c1, int(N2), eps_x, x.stride(0),
+        HAS_W=True, shape_key=pack(shape_key, N=N, N2=N2), HAS_STATS=True,
+    )
+    return aff, rstd, c1
 
 
 # ───── step 3: y = sigmoid(scale)·LN(x) + bias  (fused LN(x) + gate epilogue) ─────
@@ -248,7 +284,7 @@ _THIN_K_TILE = 32
 def _adaln_gemm_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y,
     M, NX: tl.constexpr, NC: tl.constexpr,
-    scn0, sw0, sbw0, sx0, sy0,
+    scn0, sw0, sw1, sbw0, sbw1, sx0, sy0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
 ):
@@ -283,9 +319,9 @@ def _adaln_gemm_gate_kernel(
         kmask = kc < NC
         a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
                     mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :],
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
-        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :],
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
                       mask=kmask[:, None] & nmask[None, :], other=0.0)
         scale += tl.dot(a, w_s, out_dtype=tl.float32)
         bias += tl.dot(a, w_b, out_dtype=tl.float32)
@@ -329,10 +365,40 @@ def _adaln_gemm_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: t
     _adaln_gemm_gate_kernel[grid](
         cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y,
         M, int(NX), int(NC),
-        cond_n.stride(0), scale_wt.stride(0), bias_wt.stride(0), x.stride(0), y.stride(0),
+        cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1),
+        x.stride(0), y.stride(0),
         shape_key=pack(shape_key, NX=NX, NC=NC),
     )
     return y
+
+
+def _cond_affine_stats_saved_fake(cond, lnw, eps, x, eps_x, out_dtype=None, shape_key=None):
+    """(cond_aff (M, NC), rstd_x, c1, mean_c, rstd_c): the four statistics are (M,) fp32 whatever the dtype of x and cond."""
+    m = cond.shape[0]
+    f = lambda: cond.new_empty((m,), dtype=torch.float32)   # noqa: E731
+    return (cond.new_empty(cond.shape, dtype=out_dtype or cond.dtype), f(), f(), f(), f())
+
+
+@opaque(fake=_cond_affine_stats_saved_fake, name="adaln_cond_affine_stats_saved")
+def _cond_affine_stats_saved(cond: torch.Tensor, lnw: torch.Tensor, eps: float, x: torch.Tensor, eps_x: float,
+                             out_dtype: torch.dtype | None = None, shape_key: int | None = None,
+                             ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``_cond_affine_stats`` for the training forward: (cond_aff, rstd_x, c1, mean_c, rstd_c) -- the mean and rstd of LN(cond) are what its backward reads."""
+    M, N = cond.shape
+    N2 = x.shape[1]
+    if shape_key is None:
+        raise ValueError("shape_key is required here: compute it at the caller that still holds the pre-flatten shape")
+    aff = torch.empty(M, N, device=cond.device, dtype=out_dtype or cond.dtype)
+    f = lambda: torch.empty(M, device=cond.device, dtype=torch.float32)   # noqa: E731
+    rstd, c1, mean_c, rstd_c = f(), f(), f(), f()
+    grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
+    _ln_kernel[grid](
+        cond, aff, lnw, M, int(N), eps,
+        cond.stride(0), cond.stride(1), aff.stride(0), aff.stride(1),
+        x, rstd, c1, int(N2), eps_x, x.stride(0),
+        HAS_W=True, shape_key=pack(shape_key, N=N, N2=N2), HAS_STATS=True, MC=mean_c, RC=rstd_c, SAVE_C=True,
+    )
+    return aff, rstd, c1, mean_c, rstd_c
 
 
 def adaln_inference_materialize(
@@ -595,11 +661,11 @@ def adaln_inference(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weig
 
 def adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
                              eps_x, eps_cond):
-    """LN(cond) -> one fused GEMM+gate kernel. The pre-Hopper wide-d path; see the dispatch note.
+    """LN(cond) + the statistics of x (one launch) -> one fused GEMM+gate kernel. The wide-d path.
 
-    The two transposes are 590 KB of copy each, ~1.5 us against this call's ~860 us, and they are
-    what make the dot's K axis contiguous. Caching them on the module would save that 0.35% and
-    cost a second copy of every adaLN weight; it is not worth it until something measures it.
+    The weights are read in place: ``scale_weight.t()`` is a view of the (NX, NC) storage whose K axis is the contiguous one,
+    which is the layout a TF32 / bf16 MMA takes B in. They used to be copied transposed at every call (two launches of ~2.5 us
+    each, more than the whole call at a small L), and the statistics had a launch of their own.
     """
     orig = x.shape
     nx = orig[-1]
@@ -609,18 +675,10 @@ def adaln_inference_gemm_gate(x, cond, cond_ln_weight, scale_weight, scale_bias,
         x2 = x2.contiguous()
     if cond2d.stride(-1) != 1:
         cond2d = cond2d.contiguous()
-    # `_cond_affine`, not `triton_layernorm`: adaLN's cond LN has a WEIGHT and no bias, and
-    # triton_layernorm's kernel takes its bias pointer unconditionally -- there is no HAS_B flag
-    # to pass None through. This is the same launcher the materialize path uses for the same
-    # tensor, so both paths tune one cond-LN kernel rather than two.
+    # `_cond_affine_stats`, not `triton_layernorm`: adaLN's cond LN has a WEIGHT and no bias, and triton_layernorm's kernel takes its
+    # bias pointer unconditionally. It is the weighted-LN launcher the materialize path uses, with x's statistics as a second
+    # reduction of the same grid.
     key_x = atom_key(length_of(orig))
-    cond_n = _cond_affine(cond2d, cond_ln_weight, eps_cond,
-                          shape_key=atom_key(length_of(cond.shape)))
-    # x's LN statistics from the family's own stats kernel rather than a pass inside the fused
-    # kernel: that pass read x a second time, and this one is already registered and tuned.
-    rstd, c1 = stats_triton(x2, eps_x, shape_key=key_x)
-    y = _adaln_gemm_gate(
-        cond_n, scale_weight.t().contiguous(), scale_bias,
-        bias_weight.t().contiguous(), x2, rstd, c1, shape_key=key_x,
-    )
+    cond_n, rstd, c1 = _cond_affine_stats(cond2d, cond_ln_weight, eps_cond, x2, eps_x, shape_key=key_x)
+    y = _adaln_gemm_gate(cond_n, scale_weight.t(), scale_bias, bias_weight.t(), x2, rstd, c1, shape_key=key_x)
     return y.reshape(orig)

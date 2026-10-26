@@ -53,8 +53,9 @@ from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, p
 @triton.autotune(configs=configs_for("layernorm_fwd_strided_triton"), key=['shape_key', 'HAS_W'])
 @triton.jit
 def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
+              X2, R2, C2, N2, eps2, sx20,
               HAS_W: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-              shape_key):
+              shape_key, HAS_STATS: tl.constexpr = False, MC=None, RC=None, SAVE_C: tl.constexpr = False):
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
     rmask = rm < M
@@ -79,6 +80,9 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
         rstd = 1.0 / tl.sqrt(var + eps)
+        if SAVE_C:   # the backward of LN(cond) needs its mean and rstd
+            tl.store(MC + rm, mean, mask=rmask)
+            tl.store(RC + rm, rstd, mask=rmask)
         xn = xc * rstd[:, None]
         if HAS_W:
             w = tl.load(W + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
@@ -96,6 +100,9 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
         mean = s / N
         var = ss / N - mean * mean
         rstd = 1.0 / tl.sqrt(var + eps)
+        if SAVE_C:
+            tl.store(MC + rm, mean, mask=rmask)
+            tl.store(RC + rm, rstd, mask=rmask)
         for n0 in range(0, N, BLOCK_K):
             cols = n0 + tl.arange(0, BLOCK_K)
             cmask = cols < N
@@ -106,3 +113,18 @@ def _ln_kernel(X, Y, W, M, N: tl.constexpr, eps, sx0, sx1, sy0, sy1,
                 w = tl.load(W + cols, mask=cmask, other=0.0).to(tl.float32)[None, :]
                 xn = xn * w
             tl.store(Y + rm[:, None] * sy0 + cols[None, :] * sy1, xn.to(Y.dtype.element_ty), mask=mask)
+    if HAS_STATS:
+        # a second row-wise reduction in the same launch: the LayerNorm statistics of X2 (M, N2), as (rstd, mean * rstd) -- what
+        # `layernorm_stats_triton` returns (the same sums, the same formula), without its own launch
+        s2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        ss2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for n0 in range(0, N2, BLOCK_K):
+            cols = n0 + tl.arange(0, BLOCK_K)
+            mask = rmask[:, None] & (cols[None, :] < N2)
+            x2 = tl.load(X2 + rm[:, None] * sx20 + cols[None, :], mask=mask, other=0.0).to(tl.float32)
+            s2 += tl.sum(x2, axis=1)
+            ss2 += tl.sum(x2 * x2, axis=1)
+        mean2 = s2 / N2
+        rstd2 = tl.rsqrt(ss2 / N2 - mean2 * mean2 + eps2)
+        tl.store(R2 + rm, rstd2, mask=rmask)
+        tl.store(C2 + rm, mean2 * rstd2, mask=rmask)

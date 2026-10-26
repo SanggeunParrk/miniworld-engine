@@ -16,19 +16,23 @@ from __future__ import annotations
 ATOM_D_MAX = 128  # d_hidden <= this -> fused b2b; else composed
 
 
-def cond_transition_inference_dispatch(x, cond, wa, wb, ws, wsc, bsc, length=None):
+def cond_transition_inference_dispatch(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
     """Forward-only (inference) ConditionedTransition tail, routed by d_hidden.
 
     ``length`` is L -- the ATOM count A of the activation BEFORE the caller flattened it to
     (M, K); it is the autotune shape key's input and is passed straight through to whichever
     path d_hidden selects. None lets that path fall back to its row count M, which is A only
     when the batch axis is 1.
+
+    ``residual`` (optional, (M, D) in ``x``'s dtype): the stream the update is added to, ``residual + y``, rounded as the unfused
+    ``residual + y.to(dtype)`` -- folded into the squeeze+gate epilogue on the token path, one add on the atom path.
     """
     d_hidden = x.shape[1]
     if d_hidden <= ATOM_D_MAX:
         from .inference import cond_transition_inference
 
-        return cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc, length)
+        y = cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc, length)
+        return y if residual is None else residual + y
     from .composed import cond_transition_inference_composed
 
-    return cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length)
+    return cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length, residual=residual)
