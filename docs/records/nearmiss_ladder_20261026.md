@@ -28,7 +28,7 @@ code are quoted where they differ).
   Error against an fp64 run of the same inputs (bf16, 1 x 384 x 384 x 512, two seeds): new / PyTorch bf16 = 0.68 (out), 0.78 (dx), 0.69-0.71 (ln weight), 0.65-0.72 (ln bias), 0.85 (expand_a), 0.89 (expand_b), 0.70 (squeeze) -- all <= 1.5x; the
   recompute path was 0.1-0.5e-3 lower (a / b rounded to bf16 once before the backward), the two paths are not bitwise equal. New test: `test_d512_default_training_retains_ab_at_384_and_768_pairs`.
 * **`pair_embed_ca` forward-only glue** (`kernels/pair_embed_geom/interface.py`): without a gradient the call no longer goes through `_PairEmbedFn` (which wrote the backward's int32 codes, 4 MB at B16 L128, and cast the table in
-  two kernels: `.t().to(bf16)` then `.contiguous()`); the new opaque op `pair_embed_ca_fwd` writes no codes, and the table is one transpose + cast kernel (`empty().copy_(w.t())`). Profiler, B16 L128: 2.1 + 3.2 us of glue -> 3.7 us,
+  two kernels: `.t().to(bf16)` then `.contiguous()`); the new opaque op `pair_embed_geom_ca_fwd_only` writes no codes, and the table is one transpose + cast kernel (`empty().copy_(w.t())`). Profiler, B16 L128: 2.1 + 3.2 us of glue -> 3.7 us,
   `pg_fwd_ca` 49.3 -> 48.8 us. Both rungs share this glue (the portable rung takes the same op), so the gain on the ratio is the removed codes write and glue relative to a 55-59 us step. New test: forward-only call bitwise equal to the training forward (with and without the fused LayerNorm).
 
 ## Not moved
