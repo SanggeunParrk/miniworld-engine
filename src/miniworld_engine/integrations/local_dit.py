@@ -55,7 +55,6 @@ turns it off).
 
 from __future__ import annotations
 
-import contextlib
 import warnings
 import weakref
 from types import SimpleNamespace
@@ -68,6 +67,7 @@ from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._tf32 import tf32_grid
+from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32   # the fp32 path's weight gradients on TF32 tensor cores
 
 # ------------------------------------------------------------------------------------------------------------ weights
 # The block's parameters and the kernels' weight packs (stacked / transposed bf16 packs and the backward's transposed A operands).
@@ -1306,17 +1306,6 @@ _P_RND = {
     False: 0b0111,
     True: 0b1101,
 }  # P32 blocks stored tf32-rounded: q, k, v (only MMA operands), not g
-
-
-@contextlib.contextmanager
-def _tf32():
-    """cuBLAS on TF32 tensor cores for the fp32 path's weight gradients (restored after): the path is the TF32 recipe."""
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 _ZEROS32: dict = {}

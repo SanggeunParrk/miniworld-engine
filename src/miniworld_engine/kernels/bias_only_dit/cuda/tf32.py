@@ -24,7 +24,6 @@ once and the callers keep the module's PyTorch path.
 
 from __future__ import annotations
 
-import contextlib
 import functools
 import os
 import warnings
@@ -33,7 +32,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
-from miniworld_engine.kernels._tf32 import tf32_grid
+from miniworld_engine.kernels._tf32 import tf32_grid, tf32_matmul
 from miniworld_engine.kernels.bias_only_dit.cuda import (
     LAYOUTS,
     PTR,
@@ -47,19 +46,7 @@ _dir = Path(__file__).parent
 _SMEM_MAX = 232448
 
 
-@contextlib.contextmanager
-def tf32_gemms(on: bool = True):
-    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs (restored after): the path is the TF32 recipe -- its attention core
-    is TF32 too -- and IEEE fp32 GEMMs would dominate the block."""
-    if not on:
-        yield
-        return
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
+tf32_gemms = tf32_matmul   # cuBLAS on TF32 tensor cores for the fp32 path's GEMMs (restored after)
 
 
 @functools.lru_cache(maxsize=None)

@@ -14,10 +14,10 @@ What each call hoists, and why it may:
           (LayerNorm(cond) statistics are shared too; each block's cond-LayerNorm weight is folded).
 """
 
-import contextlib
-
 import torch
 import torch.nn.functional as F
+
+from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32
 
 from miniworld_engine.kernels.conditioned_transition.triton import (
     token_dit_kernels as K,
@@ -27,21 +27,6 @@ from miniworld_engine.kernels.conditioned_transition.triton.token_dit_attn impor
     attention_gated_in_place2,
     bias_descriptor,
 )
-
-
-@contextlib.contextmanager
-def _tf32(on: bool):
-    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs, whatever the caller's allow_tf32 (restored after): the fp32
-    path is the TF32 recipe -- its attention core is TF32 too -- and IEEE fp32 GEMMs ran the step 5-8x slower."""
-    if not on:
-        yield
-        return
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 def _row_kernels(device):

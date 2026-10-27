@@ -44,13 +44,12 @@ LayerNorm are computed per block rather than once per stack.
 
 from __future__ import annotations
 
-import contextlib
-
 import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32
 
 D, DC, DP, H, DH = 768, 384, 128, 16, 48  # the default layout; serves() takes LAYOUTS
 #: (heads, d_single): 16 x 48, 24 x 32, 12 x 64 and 16 x 64 (d 1024), bf16 and fp32 (the TF32 cores are built per layout too)
@@ -162,21 +161,6 @@ def _f32(t):
 def operand_dtype(single, compute_dtype=None) -> torch.dtype:
     """The dtype of every GEMM operand / saved activation: bf16 when the input or ``compute_dtype`` is bf16, else fp32."""
     return BF if (single.dtype is BF or compute_dtype is BF) else torch.float32
-
-
-@contextlib.contextmanager
-def _tf32(on: bool):
-    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs (restored after): the fp32 path is the TF32 recipe, and IEEE fp32
-    GEMMs ran the block 5-6x slower."""
-    if not on:
-        yield
-        return
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = True
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 def _mm32(a, b):

@@ -24,9 +24,26 @@ activation tiles in the kernel +17 (launches), the same with the rounded weights
 """
 from __future__ import annotations
 
+import contextlib
+
 import torch
 import triton
 import triton.language as tl
+
+
+@contextlib.contextmanager
+def tf32_matmul(on: bool = True):
+    """cuBLAS on TF32 tensor cores for the fp32 path's GEMMs, whatever the caller's ``allow_tf32`` (restored after): the fp32 paths of the DiT
+    blocks are the TF32 recipe, and IEEE fp32 GEMMs ran them 5-8x slower. ``on=False`` leaves the flag alone."""
+    if not on:
+        yield
+        return
+    old = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        yield
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 def tf32_grid(t: torch.Tensor) -> torch.Tensor:
