@@ -11,6 +11,7 @@ same port (the preserved single-sample cells are switched off for the comparison
 import pytest
 import torch
 import torch.nn.functional as F
+from portable_helpers import relative
 
 from miniworld_engine.integrations import trimul_h100
 from miniworld_engine.kernels.trimul_inproj.cuda import (
@@ -40,10 +41,6 @@ def hopper(monkeypatch):
     torch.compiler.reset()
     # B = 1 at D256+ takes the same B200-style port as the batch (the comparison is B samples vs B calls of the same kernels)
     monkeypatch.setattr(trimul_h100, "_legacy_native_faster", lambda *a, **k: False)
-
-
-def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-12))
 
 
 def make(D, direction, seed=0):

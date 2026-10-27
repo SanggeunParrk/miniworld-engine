@@ -10,9 +10,11 @@ import warnings
 import pytest
 import torch
 from fake_card import fake_card, write_manifest
-from settings_helpers import forced_triton as portable_switch   # the internal A/B switch: the one place the tests name it
+from routing_helpers import clean_routing_unrecorded as _clean  # noqa: F401
+from settings_helpers import (
+    forced_triton as portable_switch,  # the internal A/B switch: the one place the tests name it
+)
 
-from miniworld_engine import settings
 from miniworld_engine.autotune import records
 from miniworld_engine.kernels import _pair_route as R
 from miniworld_engine.kernels.sampler_ops import interface, reference
@@ -21,14 +23,6 @@ from miniworld_engine.modules import dispatch
 CAPS = interface._CUDA_CAPS
 A6000 = ("NVIDIA RTX A6000", (8, 6))
 COORD_KERNELS = ["sampler_ops_align_triton", "sampler_ops_augment_triton", "sampler_ops_cov_triton", "sampler_ops_stats_triton"]
-
-
-@pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    previous = settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False)
-    yield
-    settings.configure(**vars(previous))
-    dispatch._unrecorded_warned.clear()
 
 
 def _record(directory, *, pool: bool = True, coords: bool = True):

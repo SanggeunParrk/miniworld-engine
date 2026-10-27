@@ -41,6 +41,9 @@ def override_setting(monkeypatch, name: str, value) -> None:
 
 import contextlib
 
+import pytest
+import torch
+
 
 @contextlib.contextmanager
 def forced_triton():
@@ -52,3 +55,45 @@ def forced_triton():
         settings.configure(**vars(previous))
 
 __all__ = ["forced_triton", "override_setting", "typing"]
+
+
+@pytest.fixture(autouse=True)
+def policy_blackwell_portable_off():
+    if torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("Blackwell (sm_100) required")
+    old = settings.configure(force_portable_kernels=False)
+    try:
+        yield
+    finally:
+        settings.configure(**vars(old))
+
+
+@pytest.fixture(autouse=True)
+def policy_b200_portable_off():
+    if torch.cuda.get_device_capability() != (10, 0):
+        pytest.skip("B200 (sm_100) required")
+    old = settings.configure(force_portable_kernels=False)
+    try:
+        yield
+    finally:
+        settings.configure(**vars(old))
+
+
+@pytest.fixture(autouse=True)
+def policy_portable_off():
+    old = settings.configure(force_portable_kernels=False)
+    try:
+        yield
+    finally:
+        settings.configure(**vars(old))
+
+
+@pytest.fixture(autouse=True)
+def policy_h100_portable_off():
+    if torch.cuda.get_device_capability() != (9, 0):
+        pytest.skip("H100 (sm_90) required")
+    old = settings.configure(force_portable_kernels=False)
+    try:
+        yield
+    finally:
+        settings.configure(**vars(old))

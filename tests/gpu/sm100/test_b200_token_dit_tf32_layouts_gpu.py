@@ -11,9 +11,10 @@ import math
 
 import pytest
 import torch
+from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import override_setting
+from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -23,17 +24,6 @@ pytestmark = [
 ]
 HEADS = [(16, 48), (24, 32), (12, 64), (16, 64)]  # (heads, head dim)
 LAYOUTS = [(h, h * dh) for h, dh in HEADS]  # (heads, d_single)
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
 
 
 def _rel(a, b):
@@ -162,16 +152,6 @@ def test_inference_core_tf32(heads, L):
 
 
 # ------------------------------------------------------------------------------------------------------------- blocks
-def _randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5 * 0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return m
 
 
 def _pair_of_blocks(layout, qk, seed):

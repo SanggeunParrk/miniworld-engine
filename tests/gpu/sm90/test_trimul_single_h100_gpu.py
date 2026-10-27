@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from portable_helpers import relative
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import trimul_h100
@@ -13,13 +14,6 @@ pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
 ]
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
 
 
 def setup(length, outgoing, dropout=0.25):

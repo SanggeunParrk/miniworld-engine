@@ -3,6 +3,7 @@
 import pytest
 import torch
 import torch.nn.functional as F
+from portable_helpers import relative
 
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_b200style as K
 
@@ -60,13 +61,6 @@ def reference(vals, mask, ds, direction):
         t = a.transpose(-1, -2) @ b
     norm = F.layer_norm(t.permute(1, 2, 0), (wp.shape[1],), go, bo, 1e-5)
     return x + ds[None, None] * (norm @ wp.t())[None] * torch.sigmoid(xn @ wg.t())
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
 
 
 def assert_reference(leaves, mask, ds, dy, direction, y, grads):

@@ -12,9 +12,14 @@ import warnings
 import pytest
 import torch
 from portable_helpers import portable_on, rel, report
+from portable_helpers import randomize_normalised as _randomize
 
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
-from miniworld_engine.modules.dispatch import KernelBackend, KernelRefusedWarning, UnrecordedCardWarning
+from miniworld_engine.modules.dispatch import (
+    KernelBackend,
+    KernelRefusedWarning,
+    UnrecordedCardWarning,
+)
 from miniworld_engine.modules.exceptions import ImplementationType as I
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")]
@@ -36,14 +41,6 @@ WIDTHS = [
 def portable():
     with portable_on():
         yield
-
-
-def _randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else
-                    1 + 0.1 * torch.randn_like(p) if name.endswith("weight") else 0.1 * torch.randn_like(p))
-    return m
 
 
 def _block(width, implementation, seed=3):

@@ -11,6 +11,8 @@ import copy
 import pytest
 import torch
 from portable_helpers import portable_on, rel, report
+from portable_helpers import randomize_normalised as _randomize
+from portable_helpers import run_extra_pair_bias as _run
 
 from miniworld_engine.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
@@ -34,30 +36,12 @@ def _block(width, implementation, seed=5):
     return DiTBlock(d_single, d_cond, d_pair, n_head, implementation=implementation).to(DEV)
 
 
-def _randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else
-                    1 + 0.1 * torch.randn_like(p) if name.endswith("weight") else 0.1 * torch.randn_like(p))
-    return m
-
-
 def _data(width, A, B, L):
     d_single, d_cond, d_pair, _ = width
     g = torch.Generator(device=DEV).manual_seed(2)
     r = lambda *s: torch.randn(*s, device=DEV, generator=g)   # noqa: E731
     mask = torch.rand(B, L, device=DEV, generator=g) > 0.1
     return r(A, B, L, d_single), r(A, B, L, d_cond), r(B, L, L, d_pair), mask, 2 * r(L, L), r(A, B, L, d_single)
-
-
-def _run(block, data, dtype, training):
-    single, cond, pair, mask, extra, dy = data
-    single, cond, pair, extra = (t.to(dtype).clone().requires_grad_(training) for t in (single, cond, pair, extra))
-    with torch.enable_grad() if training else torch.no_grad():
-        out = block(single, cond, pair, mask, extra_pair_bias=extra)
-        if not training:
-            return out, ()
-        return out, torch.autograd.grad(out, [single, cond, pair, extra, *block.parameters()], dy.to(dtype), allow_unused=True)
 
 
 @pytest.mark.parametrize("training", [False, True], ids=["infer", "train"])

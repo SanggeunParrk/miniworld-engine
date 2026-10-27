@@ -11,6 +11,7 @@ import gc
 
 import pytest
 import torch
+from portable_helpers import relative
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import triattn_h100_sm90 as tri
@@ -36,13 +37,6 @@ BATCHES = (2, 4, 8, 16, 32, 48)
 LENGTHS = (128, 384, 768)
 #: what the test itself holds next to the call (x, dy, the batched y and dx): cases beyond it are not run ("where memory allows")
 TEST_BYTES = 40 << 30
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
 
 
 def make(

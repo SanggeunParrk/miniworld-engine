@@ -4,6 +4,7 @@ import copy
 
 import pytest
 import torch
+from portable_helpers import relative
 
 from miniworld_engine.kernels.triangle_attention.cuda import h100_triattn as native
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -13,13 +14,6 @@ pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
 ]
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
 
 
 def make(width, starting=True, dropout=0.0, master=False):

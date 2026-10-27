@@ -8,6 +8,7 @@ template stack drives them (FP32 parameters, a bf16 pair, a token mask, row drop
 
 import pytest
 import torch
+from portable_helpers import relative
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import trimul_h100
@@ -31,10 +32,6 @@ def hopper():
     torch.compiler.reset()
     yield
     settings.configure(**vars(old))
-
-
-def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-12))
 
 
 def make(implementation=ImplementationType.MINIWORLD, seed=0, hidden=128, dtype=torch.float32):

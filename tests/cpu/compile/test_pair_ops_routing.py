@@ -10,9 +10,11 @@ import warnings
 import pytest
 import torch
 from fake_card import fake_card, write_manifest
-from settings_helpers import forced_triton as portable_switch   # the internal A/B switch: the one place the tests name it
+from routing_helpers import clean_routing_unrecorded as _clean  # noqa: F401
+from settings_helpers import (
+    forced_triton as portable_switch,  # the internal A/B switch: the one place the tests name it
+)
 
-from miniworld_engine import settings
 from miniworld_engine.autotune import records
 from miniworld_engine.kernels import _pair_route as R
 from miniworld_engine.modules import dispatch
@@ -21,14 +23,6 @@ OPS = ("pair_embed_geom", "pair_embed_ca", "pair_embed_adaln", "token_pair_init"
 GEOM_CAPS = ((9, 0),)
 TPI_CAPS = ((9, 0), (10, 0))
 A6000 = ("NVIDIA RTX A6000", (8, 6))
-
-
-@pytest.fixture(autouse=True)
-def _clean(monkeypatch):
-    previous = settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False)
-    yield
-    settings.configure(**vars(previous))
-    dispatch._unrecorded_warned.clear()
 
 
 def _grad_weight():
@@ -124,9 +118,20 @@ def test_a_tensor_that_is_not_on_a_card_is_the_reference(monkeypatch):
 
 def test_the_entry_points_fall_back_to_the_reference_on_cpu_tensors():
     """`pair_embed_geom` & co. on CPU tensors (no CUDA device anywhere) are the PyTorch reference, bf16 out for the two pair builders."""
-    from miniworld_engine.kernels.pair_embed_adaln import pair_embed_adaln, pair_embed_adaln_reference
-    from miniworld_engine.kernels.pair_embed_geom import pair_embed_ca, pair_embed_ca_reference, pair_embed_geom, pair_embed_geom_reference
-    from miniworld_engine.kernels.token_pair_init import token_pair_init, token_pair_init_reference
+    from miniworld_engine.kernels.pair_embed_adaln import (
+        pair_embed_adaln,
+        pair_embed_adaln_reference,
+    )
+    from miniworld_engine.kernels.pair_embed_geom import (
+        pair_embed_ca,
+        pair_embed_ca_reference,
+        pair_embed_geom,
+        pair_embed_geom_reference,
+    )
+    from miniworld_engine.kernels.token_pair_init import (
+        token_pair_init,
+        token_pair_init_reference,
+    )
 
     g = torch.Generator().manual_seed(0)
     B, n = 2, 12

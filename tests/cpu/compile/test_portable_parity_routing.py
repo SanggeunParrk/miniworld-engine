@@ -8,14 +8,13 @@
 """
 from __future__ import annotations
 
-import dataclasses
 import warnings
 
 import pytest
 import torch
 from fake_card import fake_card, write_manifest
+from routing_helpers import clean_routing_state as _clean  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.autotune import records
 from miniworld_engine.modules import Transition, dispatch
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
@@ -25,24 +24,6 @@ from miniworld_engine.modules.exceptions import ImplementationType as I
 
 A6000 = "NVIDIA RTX A6000"
 BO_OPS = ["adaptive_layernorm", "conditioned_transition", "layernorm"]
-
-
-@pytest.fixture(autouse=True)
-def _clean():
-    previous = settings.current()
-    settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False, b200_portable_kernels=False, capture=False)
-    for cache in (dispatch._card_cache, dispatch._unrecorded_warned, dispatch._refused_warned):
-        cache.clear()
-    yield
-    settings.configure(**dataclasses.asdict(previous))
-    for cache in (dispatch._card_cache, dispatch._unrecorded_warned, dispatch._refused_warned):
-        cache.clear()
-
-
-@pytest.fixture
-def manifests(tmp_path):
-    with records.use_manifest_dir(tmp_path):
-        yield tmp_path
 
 
 def _parts(block):

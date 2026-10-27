@@ -6,8 +6,9 @@ the kernels may not be meaningfully worse than the reference computed in bf16.
 
 import pytest
 import torch
+from portable_helpers import randomize, relative
+from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import triattn_b200
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
@@ -18,25 +19,6 @@ pytestmark = [
 ]
 
 LENGTHS = [128, 256, 384, 512, 640, 768]
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
 
 
 def make(impl, starting=True, p_drop=0.0, dtype=torch.bfloat16, seed=0):
@@ -60,17 +42,6 @@ def pad_mask(length, masked):
     m = torch.ones(1, length, dtype=torch.bool, device="cuda")
     m[0, masked] = False
     return m
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("B200 (sm_100) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
 
 
 def check_inference(ours, ref16, ref32, x, mask):

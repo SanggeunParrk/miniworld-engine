@@ -4,6 +4,7 @@ fp32 (the fused path's TF32 kernels) -- (the switch is off in the second run), a
 
 import pytest
 import torch
+from portable_helpers import randomize_half_std as _randomize
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
@@ -31,18 +32,6 @@ def policy():
 def _rel(a, b):
     a, b = a.detach().double(), b.detach().double()
     return float((a - b).norm() / b.norm().clamp_min(1e-30))
-
-
-def _randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5 * 0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return m
 
 
 def _run(m, single, cond, pair, mask, w, tf32=None):

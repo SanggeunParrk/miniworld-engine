@@ -4,6 +4,9 @@ CUDA graph capture, torch.compile, steady memory over steps, and what it decline
 
 import pytest
 import torch
+from portable_helpers import poison_allocator as _poison
+from portable_helpers import randomize
+from portable_helpers import relative_fp64 as relative64
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
@@ -23,18 +26,6 @@ def relative(a, b):
         (a.detach().float() - b.detach().float()).norm()
         / b.detach().float().norm().clamp_min(1e-30)
     )
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
 
 
 def _sm100_only():
@@ -295,18 +286,6 @@ SWITCHES = (
     "bias_only_dit_bwd_pvpdl",
     "bias_only_dit_bwd_mid",
 )
-
-
-def relative64(a, b):
-    a, b = a.detach().double(), b.detach().double()
-    return float((a - b).norm() / b.norm().clamp_min(1e-30))
-
-
-def _poison(mb=512):
-    """Fill the caching allocator's next blocks with NaN: a buffer read before it is written would show it."""
-    junk = torch.full((mb << 18,), float("nan"), device="cuda")
-    torch.cuda.synchronize()
-    del junk
 
 
 SHAPES64 = [(128, 8, False), (384, 3, True), (640, 4, False), (768, 16, True)]
