@@ -10,6 +10,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- Portable bf16 Transition (training and inference): the SwiGLU gate of the expand and saved-halves backward kernels runs through one `tanh.approx` (`kernels/_fastmath.py`), and the default candidate sets of the expand and LN-backward kernels carry the measured D256 / D384 / D768 winners; D384 L384 training portable / PyTorch 0.995 -> 0.971 (`docs/records/transition_wide_training_20261028.md`).
+
 - The portable Triton family uses no TMA: `tl.make_tensor_descriptor`, the `TMA` config axis and `kernels/_tma.py` / `kernels/transition/triton/_tma.py` are gone from Transition, ConditionedTransition, AdaLN and the DiT-attention bias read (plain pointer loads; the TMA forms stay in git history). H100 is served by hand CUDA, so the Triton family targets the other cards and needs nothing Hopper-only. Measured cost on an H100 with the portable switch (`docs/records/portable_no_tma_20261027.md`): wide bf16 Transition training (D384 and up) loses its persistent-tensor-map kernels and sits at 1.00-1.06 of PyTorch; fp32 D256 training (1.026) is 0.962 with the activation rounded in the kernel and a small-tile config for the backward kernel.
 - Portable (Triton) fp32 kernels round their TF32 operands to nearest before the MMA (`kernels/_tf32.py`): Transition, ConditionedTransition, AdaLN, the attention cores and the DiT blocks were 2.2-5.6x the PyTorch TF32 error against fp64 (Triton truncates), now 1.0-1.3x (`docs/records/portable_fp32_accuracy_20261026.md`); portable fp32 rungs are 0-13 % slower
 
