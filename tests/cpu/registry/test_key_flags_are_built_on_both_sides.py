@@ -87,10 +87,10 @@ ONE_SIDED: dict[tuple[str, str], str] = {
     # branches on the card (`drivers/layernorm.py:_sm90plus`), so the sm80/sm86 caches are
     # legitimately =0 only and an H100 cache will hold both. When that lands,
     # `test_one_sided_entries_are_still_one_sided` retires these two entries on its own.
-    ("layernorm_fwd_saveact_triton", "HAS_ROWSCALE"):
-        "drivers/layernorm.py:91-94 drives =1 only when `_sm90plus()`; below sm90 the triton "
-        "trimul deliberately does not fold the mask into LN_in, and no module passes row_scale "
-        "since the CuTeDSL producers were removed in v2.2.0",
+    ("adaln_bwd_pre_dx_triton", "HAS_DSB"):
+        "the per-op driver builds HAS_DSB=0 only: =1 folds the column sums of dscale into dx through a DSB atomic buffer that "
+        "the checker driver does not allocate (not driven yet; the =1 path is launched by the training backward with the same "
+        "tile config, only its autotune key is missing)",
     ("gated_projection_bwd_gate_dropres_triton", "FROM_PREACT"):
         "drivers/trimul_inproj.py gates the =1 probe on `_sm100()`. The preact form is passed only "
         "by the checker since the sm100 CuTeDSL merged-training paths that launched it were removed "
