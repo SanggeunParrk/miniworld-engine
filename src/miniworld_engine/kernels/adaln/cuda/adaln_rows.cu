@@ -24,24 +24,37 @@ constexpr int WPB = 8;  // warps per block
 __device__ __forceinline__ float wsum(float v) { return rowmath::warp_sum(v); }
 __device__ __forceinline__ float sigm(float x) { return rowmath::sigmoid(x); }
 
-// a row of N bf16 held as N / 32 floats per lane: element 64 k + 2 lane + {0, 1} is v[2 k + {0, 1}]
-__device__ __forceinline__ float2 ld2(const bf* p) { return __bfloat1622float2(*reinterpret_cast<const bf2*>(p)); }
-__device__ __forceinline__ float2 ld2(const float* p) { return *reinterpret_cast<const float2*>(p); }
-__device__ __forceinline__ void st2(bf* p, float a, float b) { *reinterpret_cast<bf2*>(p) = __floats2bfloat162_rn(a, b); }
-__device__ __forceinline__ void st2(float* p, float a, float b) { *reinterpret_cast<float2*>(p) = make_float2(a, b); }
+// a row of N elements held as N / 32 floats per lane in chunks of four consecutive elements (8 B bf16 / 16 B fp32 per lane and load, a warp reads 256 B / 512 B):
+// element 4 (lane + 32 k) + j is v[4 k + j]
+__device__ __forceinline__ float4 ld4(const bf* p) {
+  const uint2 u = *reinterpret_cast<const uint2*>(p);
+  const float2 a = __bfloat1622float2(*reinterpret_cast<const bf2*>(&u.x)), b = __bfloat1622float2(*reinterpret_cast<const bf2*>(&u.y));
+  return make_float4(a.x, a.y, b.x, b.y);
+}
+__device__ __forceinline__ float4 ld4(const float* p) { return *reinterpret_cast<const float4*>(p); }
+__device__ __forceinline__ void st4(bf* p, float4 v) {
+  const bf2 a = __floats2bfloat162_rn(v.x, v.y), b = __floats2bfloat162_rn(v.z, v.w);
+  uint2 u;
+  u.x = *reinterpret_cast<const unsigned*>(&a);
+  u.y = *reinterpret_cast<const unsigned*>(&b);
+  *reinterpret_cast<uint2*>(p) = u;
+}
+__device__ __forceinline__ void st4(float* p, float4 v) { *reinterpret_cast<float4*>(p) = v; }
 template <int N, typename T>
 __device__ __forceinline__ void ld_row(const T* __restrict__ p, int lane, float (&v)[N / 32]) {
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) {
-    const float2 t = ld2(p + 64 * k + 2 * lane);
-    v[2 * k] = t.x;
-    v[2 * k + 1] = t.y;
+  for (int k = 0; k < N / 128; ++k) {
+    const float4 t = ld4(p + 4 * (lane + 32 * k));
+    v[4 * k] = t.x;
+    v[4 * k + 1] = t.y;
+    v[4 * k + 2] = t.z;
+    v[4 * k + 3] = t.w;
   }
 }
 template <int N, typename T>
 __device__ __forceinline__ void st_row(T* __restrict__ p, int lane, const float (&v)[N / 32]) {
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) st2(p + 64 * k + 2 * lane, v[2 * k], v[2 * k + 1]);
+  for (int k = 0; k < N / 128; ++k) st4(p + 4 * (lane + 32 * k), make_float4(v[4 * k], v[4 * k + 1], v[4 * k + 2], v[4 * k + 3]));
 }
 template <int N>
 __device__ __forceinline__ void stats(const float (&v)[N / 32], float eps, float& mean, float& rstd) {
@@ -65,10 +78,12 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const T* __restrict__ 
   ld_row<N>(C + row * N, lane, v);
   stats<N>(v, eps, mean, rstd);
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) {
-    const float2 w = *reinterpret_cast<const float2*>(W + 64 * k + 2 * lane);
-    v[2 * k] = (v[2 * k] - mean) * rstd * w.x;
-    v[2 * k + 1] = (v[2 * k + 1] - mean) * rstd * w.y;
+  for (int k = 0; k < N / 128; ++k) {
+    const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+    v[4 * k] = (v[4 * k] - mean) * rstd * w.x;
+    v[4 * k + 1] = (v[4 * k + 1] - mean) * rstd * w.y;
+    v[4 * k + 2] = (v[4 * k + 2] - mean) * rstd * w.z;
+    v[4 * k + 3] = (v[4 * k + 3] - mean) * rstd * w.w;
   }
   st_row<N>(CN + row * N, lane, v);
   if (lane == 0) ST[row] = make_float2(mean, rstd);
@@ -92,7 +107,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
 }
 
 template <int N, typename T>
-__global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
+__global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
                                                         const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
                                                         float* __restrict__ PB, long R, const T* __restrict__ ADD) {
   __shared__ float red[WPB][N];
@@ -133,10 +148,9 @@ __global__ void __launch_bounds__(32 * WPB) adaln_bwd_k(const T* __restrict__ DY
     st_row<N>(DSB + row * 2 * N + N, lane, dy);
   }
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) {
-    red[wp][64 * k + 2 * lane] = part[2 * k];
-    red[wp][64 * k + 2 * lane + 1] = part[2 * k + 1];
-  }
+  for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+    for (int j = 0; j < 4; ++j) red[wp][4 * (lane + 32 * k) + j] = part[4 * k + j];
   __syncthreads();
   for (int c = threadIdx.x; c < N; c += 32 * WPB) {
     float v = 0.f;
@@ -153,10 +167,12 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const T* __restrict__ 
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32], w[N / 32];
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) {
-    const float2 t = *reinterpret_cast<const float2*>(W + 64 * k + 2 * lane);
-    w[2 * k] = t.x;
-    w[2 * k + 1] = t.y;
+  for (int k = 0; k < N / 128; ++k) {
+    const float4 t = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+    w[4 * k] = t.x;
+    w[4 * k + 1] = t.y;
+    w[4 * k + 2] = t.z;
+    w[4 * k + 3] = t.w;
   }
 #pragma unroll
   for (int i = 0; i < N / 32; ++i) part[i] = 0.f;
@@ -188,10 +204,9 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_bwd_k(const T* __restrict__ 
     st_row<N>(DC + row * N, lane, d);
   }
 #pragma unroll
-  for (int k = 0; k < N / 64; ++k) {
-    red[wp][64 * k + 2 * lane] = part[2 * k];
-    red[wp][64 * k + 2 * lane + 1] = part[2 * k + 1];
-  }
+  for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+    for (int j = 0; j < 4; ++j) red[wp][4 * (lane + 32 * k) + j] = part[4 * k + j];
   __syncthreads();
   for (int c = threadIdx.x; c < N; c += 32 * WPB) {
     float v = 0.f;

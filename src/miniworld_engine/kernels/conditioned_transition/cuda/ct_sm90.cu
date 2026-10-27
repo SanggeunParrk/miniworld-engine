@@ -260,10 +260,9 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         load_x(m0, n0, tl);
         for (int kb = 0; kb < P; ++kb) load_a(kb, kb, m0);
         it = P; kb0 = P;
-      } else {
-        load_x(m0, n0, tl);
       }
       for (int kb = kb0; kb < KB; ++kb, ++it) {
+        if (tl > 0 && kb == KB / 2) load_x(m0, n0, tl);   // half way through the slabs: asking first would hold the ring back behind the previous epilogue
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         mbar_arrive_expect_tx(full + s, F_ST);
@@ -298,6 +297,7 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
       wgmma_commit();
       if (prev >= 0) { wgmma_wait<1>(); fence_regs(acc1); if (wtid == 0) mbar_arrive(empty + prev); }
       prev = s;
+      if constexpr (RES) { if (kb == (KB1 > 1 ? 1 : 0) && tl > 0 && wtid == 0) { tma_store_wait_read<0>(); mbar_arrive(xfree + cw); } }
     }
     for (int kb = 0; kb < KB2; ++kb, ++it) {
       const int s = (int)(it % NSTAGE);
@@ -387,10 +387,6 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
           tma_store_2d(&mSs, sst + q * 8192, n0 + q * (F32 ? 32 : 64), m0 + 64 * cw);
         }
       tma_store_commit();
-      if constexpr (RES) {
-        tma_store_wait_read<0>();                           // the store has read the staging tile: the producer may refill it
-        mbar_arrive(xfree + cw);
-      }
     }
   }
   if (wtid == 0) tma_store_wait_all();

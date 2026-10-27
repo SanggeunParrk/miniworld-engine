@@ -1598,6 +1598,15 @@ def _pair_terms() -> int:
     return 3 if settings.current().bias_only_dit_pair_exact else 1
 
 
+def _cm(W, name):
+    """W[name] as a column-major copy (same values, the operand layout cuBLAS TF32 runs fastest as the weight of a data-gradient GEMM: 25 - 45 % faster
+    at 12288 rows), made once per pack."""
+    v = W.get(name + "_cm")
+    if v is None:
+        v = W[name + "_cm"] = W[name].t().contiguous().t()
+    return v
+
+
 def _wgrad32(a, b):
     """a^T b over the M rows (a [M, N], b [M, K] row-major, any row stride): a weight gradient of the fp32 step, as one bmm over S
     row chunks (strided views, no copies) whose [S, N, K] partials are summed in fp32. cuBLAS runs these long-K, small-output TF32
@@ -1611,6 +1620,8 @@ def _wgrad32(a, b):
     if not forced and torch.cuda.get_device_capability(a.device) == (9, 0):
         S = 1  # Hopper TF32: one GEMM per weight is faster (split-4 costs +746 us a step at A = 48, L768: B200 tuning)
     if S <= 1 or M % S:
+        if b.shape[1] <= 384:   # narrow outputs: cuBLAS TF32 runs (b^T a)^T 1.3 - 1.5x faster than a^T b (M = 12288: dWn 228 -> 154 us, dWgg 93 -> 93 at 24576: 199 -> 148)
+            return torch.mm(b.t(), a).t().contiguous()
         return torch.mm(a.t(), b)
     return torch.bmm(
         a.unflatten(0, (S, M // S)).transpose(1, 2), b.unflatten(0, (S, M // S))
@@ -1913,18 +1924,18 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
                 WsqT = W["WsqT"] = Wsq.t().contiguous()
             glu(dz, WsqT, ab, dab)
         else:
-            dh = torch.mm(dz, Wsq)  # [M, 2D]
+            dh = torch.mm(dz, _cm(W, "Wsq"))  # [M, 2D]
             F.swiglu_bwd_cuda(dh, ab, dab)
         dWsq = _wgrad32(dz, h)
         dxt = torch.mm(
-            dab, Wab, out=dG[:, 3 * D :]
+            dab, _cm(W, "Wab"), out=dG[:, 3 * D :]
         )  # d shift2 = dxt: straight into its dG columns
         dWab = _wgrad32(dab, xt)
         dx1, dy = e(M, D), e(M, D)
         n12 = F.res_adaln_b_bwd_cuda(
             dout, dxt, x, x1st, G, bs2, Gg, bg1, y, dx1, dy, dG, dGg, part[1], part[2]
         )
-        dog = torch.mm(dy, Wo)
+        dog = torch.mm(dy, _cm(W, "Wo"))
         dWo = _wgrad32(dy, og)
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
@@ -1958,14 +1969,14 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
                 do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
             )  # P o (dP - D); masked keys get P = 0
         dxa = torch.mm(
-            dvg, Wvg, out=dG[:, D : 2 * D]
+            dvg, _cm(W, "Wvg"), out=dG[:, D : 2 * D]
         )  # d shift1 = dxa: straight into its dG columns
         dWvg = _wgrad32(dvg, xa)
         dx = e(M, D)
         n3 = F.adaln_a_bwd_cuda(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
-        dchat = torch.mm(dG, Wn)
+        dchat = torch.mm(dG, _cm(W, "Wn"))
         dWn = _wgrad32(dG, chat)
-        dcg = torch.mm(dGg, Wg)
+        dcg = torch.mm(dGg, _cm(W, "Wg"))
         dWgg = _wgrad32(dGg, c2)
         dc = e(M, DC)
         F.cond_bwd_cuda(dchat, dcg, c2, cst, dc)

@@ -144,18 +144,27 @@ def _fwd_saved_fake(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, ht)
     """(y, LN(cond) lnw, its stats, the stats of x, sb) shapes."""
     m, nx = x.shape
     f = lambda: x.new_empty((m, 2), dtype=torch.float32)  # noqa: E731
-    return x.new_empty((m, nx)), cond.new_empty(cond.shape), f(), f(), x.new_empty((m, 2 * nx))
+    return (x.new_empty((m, nx)), cond.new_empty(cond.shape), f(), f(), x.new_empty((m, 2 * nx)),
+            x.new_empty((2 * nx, cond.shape[1]) if x.dtype is torch.bfloat16 else (0,)))
 
 
 @opaque(fake=_fwd_saved_fake, name="adaln_cuda_train_fwd")
 def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor,
-              eps_x: float, eps_cond: float, ht: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+              eps_x: float, eps_cond: float, ht: int) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """The training forward in the layout of ``adaln_rows``' backward: (y, LN(cond) lnw, its (mean, rstd), the (mean, rstd) of x, sb) with the
-    scale pre-activation in sb[:, :NX] (the second half is not written: the backward does not read it). Weights are cast and concatenated at every
-    call (they change between steps)."""
+    scale pre-activation in sb[:, :NX] (the second half is not written: the backward does not read it), and the packed [Ws; Wb] (bf16; an empty tensor
+    for fp32) that the backward reuses. The weights are cast and concatenated at every call (they change between steps): bf16 by the row kernels' one-launch pack."""
     e = ext()
     m, nx = x.shape
-    wc, bs = pack_weights(w_scale, b_scale, w_bias, x.dtype)
+    if x.dtype is torch.bfloat16:
+        from . import _ext as rows_ext
+
+        wc = torch.empty(2 * nx, cond.shape[1], device=x.device, dtype=x.dtype)
+        bcat = torch.empty(2 * nx, device=x.device, dtype=x.dtype)
+        rows_ext().pack(w_scale.contiguous(), w_bias.contiguous(), b_scale.contiguous(), wc, bcat)
+        bs = bcat[:nx].float()
+    else:
+        wc, bs = pack_weights(w_scale, b_scale, w_bias, x.dtype)
     aff = torch.empty_like(cond)
     stx = torch.empty(m, 2, device=x.device, dtype=torch.float32)
     stc = torch.empty(m, 2, device=x.device, dtype=torch.float32)
@@ -168,7 +177,7 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     elif ar: ht = 64
     e.ln_rows(cond, lnw, x, aff, stx, stc, eps_cond, eps_x)
     e.adaln_gemm(aff, wc, bs, x, stx, y, sb, num_sms(x.device), ht, False, True, ar)
-    return y, aff, stc, stx, sb
+    return y, aff, stc, stx, sb, (wc if x.dtype is torch.bfloat16 else wc.new_empty(0))
 
 
 
@@ -188,3 +197,15 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
 def train_supported(x: torch.Tensor) -> bool:
     """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS)."""
     return x.dtype == torch.bfloat16
+
+
+def _colsum2_fake(a, b):
+    """The column sums of a [Pa, Na] and b [Pb, Nb]."""
+    return a.new_empty((a.shape[1],)), b.new_empty((b.shape[1],))
+
+
+@opaque(fake=_colsum2_fake, name="adaln_cuda_colsum2")
+def colsum2(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``colsum`` of two partial-sum buffers in one launch."""
+    oa, ob = ext().colsum2(a, b)
+    return oa, ob

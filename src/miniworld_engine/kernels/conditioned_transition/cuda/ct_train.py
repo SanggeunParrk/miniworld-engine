@@ -70,6 +70,25 @@ def squeeze_gate_save(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
     return y, out, sp
 
 
+def _cast_weights_fake(wa, wb, ws, wsc, bsc):
+    """([Wa; Wb] [2 ND, D], Ws, Wsc, bsc) in bf16."""
+    bf = torch.bfloat16
+    return (wa.new_empty((2 * wa.shape[0], wa.shape[1]), dtype=bf), ws.new_empty(ws.shape, dtype=bf), wsc.new_empty(wsc.shape, dtype=bf),
+            bsc.new_empty(bsc.shape, dtype=bf))
+
+
+@opaque(fake=_cast_weights_fake, name="conditioned_transition_cuda_cast_weights")
+def cast_weights(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor
+                 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The five fp32 master weights of a training step as bf16 in ONE launch; Wa and Wb land in the two halves of their concatenation."""
+    bf = torch.bfloat16
+    nd = wa.shape[0]
+    wab = torch.empty(2 * nd, wa.shape[1], device=wa.device, dtype=bf)
+    wsb, wscb, bscb = (torch.empty(t.shape, device=t.device, dtype=bf) for t in (ws, wsc, bsc))
+    ext().cast_pack([wa.contiguous(), wb.contiguous(), ws.contiguous(), wsc.contiguous(), bsc.contiguous()], [wab[:nd], wab[nd:], wsb, wscb, bscb])
+    return wab, wsb, wscb, bscb
+
+
 def _swiglu_fwd_fake(ab):
     """h [M, ND] of ab [M, 2 ND]."""
     return ab.new_empty((ab.shape[0], ab.shape[1] // 2))
@@ -137,8 +156,11 @@ class _Tail(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
         dt = x.dtype
-        wab = torch.cat([wa, wb]).to(dt)
-        wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
+        if dt is torch.bfloat16 and all(t.dtype is torch.float32 for t in (wa, wb, ws, wsc, bsc)):
+            wab, wsb, wscb, bscb = cast_weights(wa, wb, ws, wsc, bsc)   # one launch for the five casts and the concatenation
+        else:
+            wab = torch.cat([wa, wb]).to(dt)
+            wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
         ab = torch.mm(x, wab.t())
         h = swiglu_fwd(ab)
         if dt is torch.bfloat16 and _fused_squeeze_ok(h, cond, wsb):   # one wgmma kernel for both GEMMs and the gate (+ residual)
