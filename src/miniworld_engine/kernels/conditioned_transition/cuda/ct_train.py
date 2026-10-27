@@ -184,6 +184,7 @@ _XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing r
 
 
 def _sigmul_bwd_x_fake(dy, out, sp):
+    """(dout, dscale, the block partials of the column sums of dscale, dout^T padded to 32 rows)."""
     m = dy.numel() // dy.shape[-1]
     blocks = min(sigmul_bwd_blocks(dy), -(-m // 32))
     return torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((blocks, dy.shape[-1])), dy.new_empty((dy.shape[-1], (m + 31) // 32 * 32))
@@ -196,11 +197,12 @@ def sigmul_bwd_x(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple
     return dout, dsc, part, doutT
 
 
-def _transpose_fake(t):
+def _transpose_f32_fake(t):
+    """t^T: [C, R], same dtype."""
     return t.new_empty((t.shape[1], t.shape[0]))
 
 
-@opaque(fake=_transpose_fake, name="conditioned_transition_cuda_transpose_f32")
+@opaque(fake=_transpose_f32_fake, name="conditioned_transition_cuda_transpose_f32")
 def transpose_f32(t: torch.Tensor) -> torch.Tensor:
     """t^T [C, R] (fp32, contiguous), rounded to the TF32 grid to nearest. The TF32 weight-gradient GEMM dW = G^T X contracts over the ROWS of both
     operands, which makes both of them MN-major for cuBLAS (G^T X: 200 TFLOP/s at 18432 x 3072 x 768); with the SMALLER operand K-major (X^T copied once, 43 us
