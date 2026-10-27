@@ -46,7 +46,7 @@ def get_seq_group(rows) -> int:
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),
-                 key=['shape_key'])
+                 key=['shape_key', 'TC'])
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -161,7 +161,7 @@ def _layer_norm_linear_fwd(
 # projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
 # `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- which is folded into shape_key.
 @triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
-                 key=['shape_key'],
+                 key=['shape_key', 'TC'],
                  reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
 @triton.jit
 def _layer_norm_linear_bwd(

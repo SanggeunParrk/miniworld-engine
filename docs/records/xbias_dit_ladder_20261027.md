@@ -32,13 +32,13 @@ before = integration run `out2_J2` (commit e35029a1), after = this branch. c/p =
 |---|---|---|---|---|---|---|
 | bf16 inference | 256 | 0.152 -> 0.153 | 0.124 -> 0.124 | 0.062 -> 0.062 | 0.502 -> 0.501 | 0.813 -> 0.811 |
 | bf16 inference | 512 | 0.265 -> 0.265 | 0.208 -> 0.209 | 0.075 -> 0.075 | 0.361 -> 0.359 | 0.785 -> 0.791 |
-| bf16 training | 256 | 0.423 -> 0.424 | 0.440 -> 0.415 | 0.425 -> 0.337 | 0.968 -> 0.813 | 1.039 -> 0.978 |
-| bf16 training | 512 | 0.702 -> 0.702 | 0.712 -> 0.634 | 0.698 -> 0.550 | 0.980 -> 0.867 | 1.014 -> 0.904 |
-| fp32 inference | 256 | 0.205 -> 0.206 | 0.176 -> 0.177 | 0.195 -> 0.102 | 1.112 -> 0.578 | 0.858 -> 0.861 |
-| fp32 training | 256 | 0.682 -> 0.686 | 0.633 -> 0.632 | 0.687 (PyTorch, no CUDA rung) -> 0.592 | n.a. -> 0.936 | 0.928 -> 0.922 |
+| bf16 training | 256 | 0.423 -> 0.424 | 0.440 -> 0.420 | 0.425 -> 0.338 | 0.968 -> 0.806 | 1.039 -> 0.990 |
+| bf16 training | 512 | 0.702 -> 0.702 | 0.712 -> 0.637 | 0.698 -> 0.547 | 0.980 -> 0.858 | 1.014 -> 0.907 |
+| fp32 inference | 256 | 0.205 -> 0.206 | 0.176 -> 0.177 | 0.195 -> 0.103 | 1.112 -> 0.579 | 0.858 -> 0.861 |
+| fp32 training | 256 | 0.682 -> 0.686 | 0.633 -> 0.636 | 0.687 (PyTorch, no CUDA rung) -> 0.593 | n.a. -> 0.933 | 0.928 -> 0.929 |
 
-All six rows OK. Not yet a "clear win" (<= 0.95): bf16 training L256 portable / PyTorch 0.978 (the weight casts, 52 us in three foreach copies, and ~190 us of cuBLAS GEMMs are common to both rungs;
-the remaining portable slack is the pair-bias backward, 39 us against an ~11 us HBM floor, and the Triton attention backward), fp32 training L256 CUDA / portable 0.936.
+All six rows OK (final run `out/g`: 0 violations). OPEN, not a clear win (<= 0.95): bf16 training L256 portable / PyTorch 0.97-0.99 across runs (within noise of 1; the harness flags it "within noise") (the weight casts, 52 us in three foreach copies, and ~190 us of cuBLAS GEMMs are common to both rungs;
+the remaining portable slack is the pair-bias backward, 39 us against an ~11 us HBM floor, and the Triton attention backward), fp32 training L256 CUDA / portable 0.933 and p/t 0.929 (<= 0.95 needs more).
 Neighbouring groups (token DiT, DiT variants, aat, apb): no violation in the re-run (`out/f`).
 
 ## Parity
