@@ -22,6 +22,7 @@ using bf = __nv_bfloat16;
 using bf2 = __nv_bfloat162;
 constexpr int WPB = 8;  // warps per block
 
+__device__ __forceinline__ float tf32_rn(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 __device__ __forceinline__ float wsum(float v) { return rowmath::warp_sum(v); }
 __device__ __forceinline__ float sigm(float x) { return rowmath::sigmoid(x); }
 
@@ -110,7 +111,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
                                                         const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
-                                                        float* __restrict__ PB, long R, const T* __restrict__ ADD) {
+                                                        float* __restrict__ PB, long R, const T* __restrict__ ADD, bool RNA) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32];
@@ -145,6 +146,10 @@ __global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__
       for (int i = 0; i < N / 32; ++i) dx[i] += ad[i];
     }
     st_row<N>(DX + row * N, lane, dx);
+    if (RNA && sizeof(T) == 4) {   // the next consumer is a TF32 tensor-core GEMM: hand it the nearest-rounded operand (a TMA-fed fp32 operand is truncated)
+#pragma unroll
+      for (int i = 0; i < N / 32; ++i) { dsp[i] = tf32_rn(dsp[i]); dy[i] = tf32_rn(dy[i]); }
+    }
     st_row<N>(DSB + row * 2 * N, lane, dsp);
     st_row<N>(DSB + row * 2 * N + N, lane, dy);
   }
@@ -376,7 +381,7 @@ std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   return {y, st};
 }
 
-std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add) {
+std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add, bool rna = false) {
   if (add) { chk_act(*add, "add"); TORCH_CHECK(add->scalar_type() == dy.scalar_type() && add->numel() == dy.numel(), "add shape"); }
   chk_act(dy, "dy");
   TORCH_CHECK(x.scalar_type() == dy.scalar_type() && sb.scalar_type() == dy.scalar_type() && x.is_contiguous() && sb.is_contiguous(), "dtypes");
@@ -389,7 +394,7 @@ std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(x));
   auto pb = at::empty({(long)grid, N}, x.options().dtype(at::kFloat));
   ACT_SWITCH(N, x, adaln_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dy), P<T>(x), P<T>(sb), reinterpret_cast<const float2*>(st.data_ptr()), PM<T>(dsb),
-                                                                 PM<T>(dx), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr));
+                                                                 PM<T>(dx), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr, rna));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dsb, dx, pb};
 }
@@ -468,7 +473,7 @@ void pack(at::Tensor ws, at::Tensor wb, c10::optional<at::Tensor> bs, at::Tensor
 struct PackJobs {
   const float* src[8];
   float* dst[8];
-  int rows[8], cols[8], ldd[8], row0[8], col0[8], mode[8];
+  int rows[8], cols[8], ldd[8], row0[8], col0[8], mode[8], rna[8];
   int tile_end[8];   // prefix sums of the 32 x 32 tile counts
   int n;
 };
@@ -483,6 +488,7 @@ __global__ void __launch_bounds__(256) pack_f32_k(PackJobs jb) {
   float* dst = jb.dst[j];
   const long ldd = jb.ldd[j];
   const int mode = jb.mode[j];
+  const bool rna = jb.rna[j] != 0;
   if (mode == 2) {
 #pragma unroll
     for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = 0.f; }
@@ -494,10 +500,10 @@ __global__ void __launch_bounds__(256) pack_f32_k(PackJobs jb) {
   __syncthreads();
   if (mode == 0) {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = tile[ty + 8 * i][tx]; }
+    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = rna ? tf32_rn(tile[ty + 8 * i][tx]) : tile[ty + 8 * i][tx]; }
   } else {
 #pragma unroll
-    for (int i = 0; i < 4; ++i) { const int c = c0 + ty + 8 * i, r = r0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + c) * ldd + jb.col0[j] + r] = tile[tx][ty + 8 * i]; }
+    for (int i = 0; i < 4; ++i) { const int c = c0 + ty + 8 * i, r = r0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + c) * ldd + jb.col0[j] + r] = rna ? tf32_rn(tile[tx][ty + 8 * i]) : tile[tx][ty + 8 * i]; }
   }
 }
 // srcs[k]: fp32 [R, C] (ignored for mode 2: pass any tensor with the block's shape); dsts[k]: fp32 2-D; spec[k] = (mode, row0, col0)
@@ -516,7 +522,7 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
     TORCH_CHECK(row0 + rr <= d.size(0) && col0 + cc <= d.size(1), "pack_f32: destination too small");
     jb.src[k] = s.data_ptr<float>();
     jb.dst[k] = d.data_ptr<float>();
-    jb.rows[k] = R; jb.cols[k] = C; jb.ldd[k] = (int)d.stride(0); jb.row0[k] = row0; jb.col0[k] = col0; jb.mode[k] = mode;
+    jb.rows[k] = R; jb.cols[k] = C; jb.ldd[k] = (int)d.stride(0); jb.row0[k] = row0; jb.col0[k] = col0; jb.mode[k] = mode; jb.rna[k] = spec[k].size() > 3 ? (int)spec[k][3] : 0;
     tiles += ((R + 31) / 32) * ((C + 31) / 32);
     jb.tile_end[k] = tiles;
   }
@@ -529,7 +535,7 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_cond_fwd", &ln_cond_fwd);
   m.def("adaln_fwd", &adaln_fwd);
-  m.def("adaln_bwd", &adaln_bwd);
+  m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
   m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
   m.def("ln_cond_bwd", &ln_cond_bwd);
   m.def("pack", &pack);

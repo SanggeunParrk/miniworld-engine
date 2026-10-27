@@ -105,7 +105,7 @@ def pack_fp32(ws, wb, bs):
     wcatT = torch.empty(dc, 2 * d, device=dev, dtype=f32)
     bcat = torch.zeros(2 * d, device=dev, dtype=f32)
     ws, wb = ws.to(f32).contiguous(), wb.to(f32).contiguous()
-    srcs, dsts, spec = [ws, wb, ws, wb], [wcat, wcat, wcatT, wcatT], [[0, 0, 0], [0, d, 0], [1, 0, 0], [1, 0, d]]
+    srcs, dsts, spec = [ws, wb, ws, wb], [wcat, wcat, wcatT, wcatT], [[0, 0, 0, 1], [0, d, 0, 1], [1, 0, 0, 1], [1, 0, d, 1]]
     if bs is not None:
         srcs.append(bs.to(f32).contiguous().view(1, d))
         dsts.append(bcat.view(1, 2 * d))
@@ -169,10 +169,23 @@ def _bwd(
     write them instead of in a separate add of the two paths."""
     e = _ext()
     d = x2.shape[-1]
-    if wcat is None or wcat.numel() == 0:   # not handed over by the forward: pack again
+    if x2.dtype is torch.float32 and (wcat is None or wcat.numel() == 0 or wcatT is None or wcatT.numel() == 0):   # not handed over by the forward: pack again, one launch
+        wcat, wcatT, _ = pack_fp32(ws, wb, bs)
+    elif wcat is None or wcat.numel() == 0:
         wcat, _ = _wcat_bcat(x2, ws, bs, wb)
-    if x2.dtype is torch.float32 and (wcatT is None or wcatT.numel() == 0):
-        wcatT = wcat.t().contiguous()
+    from . import infer
+
+    if d == 128 and c2.shape[1] == 128 and infer.atom_fused(128, 128):
+        # the atom width: dgrad + the LayerNorm(cond) backward in one wgmma kernel (dcn never reaches HBM); the weight gradient stays a cuBLAS GEMM on dsb
+        dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx, dres, x2.dtype is torch.float32)
+        wt = wcatT if x2.dtype is torch.float32 else wcat.t().contiguous()
+        dcond, pbc = infer.ext().adaln_dgrad_atom(dsb, wt, c2, stc, wc.contiguous(), dcres, infer.num_sms(x2.device))
+        if dsb.dtype is torch.bfloat16:
+            dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)
+        else:
+            dwcat = torch.mm(cn.t(), dsb).t()
+        dbs, dwc = infer.colsum2(pbs, pbc) if has_bs else (pbs.new_empty(0), infer.colsum(pbc))
+        return dx, dcond, dwc, dwcat.contiguous(), dbs
     fm = os.environ.get("ADALN_FM", "auto")
     if x2.dtype is torch.float32 and d in FEATURE_MAJOR_WIDTHS and (fm == "1" or (fm == "auto" and c2.shape[1] >= 768)):
         # TF32 weight gradients want the activation rows (K) contiguous: the row pass writes [dscale ; dy]^T feature-major (tpose.cuh)
@@ -256,7 +269,7 @@ def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5
     if wgmma and not grad:
         y = infer.adaln_inference(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, rna=rna)
         return (y, x, cond) if streams else y
-    return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, wgmma and infer.train_supported(x), streams)
+    return _AdaLN.apply(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x, eps_cond, wgmma and infer.train_supported(x, cond), streams)
 
 
 def wgmma_supported(x, cond) -> bool:

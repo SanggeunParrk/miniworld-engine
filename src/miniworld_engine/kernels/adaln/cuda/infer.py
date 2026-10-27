@@ -107,6 +107,11 @@ def packed(w_scale, b_scale, w_bias, dtype):
     return _capture.param_forms(f"adaln_cuda_{dtype}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, dtype))
 
 
+def atom_fused(nx: int, nc: int) -> bool:
+    """The atom width (NX = NC = 128) runs the one-launch kernel (``ADALN_ATOM=0`` switches it off for A/B timing)."""
+    return nx == 128 and nc == 128 and os.environ.get("ADALN_ATOM", "1") != "0"
+
+
 def _infer_fake(x, cond, lnw, wc, bs, eps_x, eps_cond, ht, rna):
     """y: x's shape and dtype."""
     return torch.empty_like(x)
@@ -118,9 +123,12 @@ def _infer(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, wc: torch.Ten
     """x [M, NX], cond [M, NC] contiguous; ``wc`` / ``bs`` from :func:`pack_weights`."""
     e = ext()
     m, nx = x.shape
+    y = torch.empty_like(x)
+    if atom_fused(nx, cond.shape[1]):   # the atom width: ONE launch (``adaln_atom_k``)
+        e.adaln_atom(cond, lnw, x, wc, bs, y, None, None, None, None, eps_cond, eps_x, rna, num_sms(x.device))
+        return y
     aff = torch.empty_like(cond)
     st = torch.empty(m, 2, device=x.device, dtype=torch.float32)
-    y = torch.empty_like(x)
     e.ln_rows(cond, lnw, x, aff, st, None, eps_cond, eps_x)
     e.adaln_gemm(aff, wc, bs, x, st, y, None, num_sms(x.device), ht, rna, True, False)
     return y
@@ -170,6 +178,9 @@ def fwd_saved(x: torch.Tensor, cond: torch.Tensor, lnw: torch.Tensor, w_scale: t
     stc = torch.empty(m, 2, device=x.device, dtype=torch.float32)
     y = torch.empty_like(x)
     sb = torch.empty(m, 2 * nx, device=x.device, dtype=x.dtype)
+    if atom_fused(nx, cond.shape[1]):
+        e.adaln_atom(cond, lnw, x, wc, bs, y, stx, stc, sb, aff, eps_cond, eps_x, False, num_sms(x.device))
+        return y, aff, stc, stx, sb, (wc if x.dtype is torch.bfloat16 else wc.new_empty(0))
     mode = os.environ.get("ADALN_MODE", "h128")   # measured (M = 18432 / 36864 / 49152, bf16): 128-column tiles 68 / 153 / 194 us, 64-column 69 / 160 / 239, A-resident 112 / 183 / 199
     ar = x.dtype == torch.bfloat16 and cond.shape[1] == 384 and nx % 64 == 0 and mode == "ar"   # A-resident row blocks (see adaln_sm90.cu)
     if mode == "h64": ht = 64
@@ -194,10 +205,11 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
     return ext().colsum(parts)
 
 
-def train_supported(x: torch.Tensor) -> bool:
+def train_supported(x: torch.Tensor, cond: torch.Tensor | None = None) -> bool:
     """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS, except where ``ADALN_FP32_WG`` says otherwise)."""
     if x.dtype == torch.float32:
-        return os.environ.get("ADALN_FP32_WG", "") == "all" or (os.environ.get("ADALN_FP32_WG", "") == "atom" and x.shape[-1] <= 128)
+        mode = os.environ.get("ADALN_FP32_WG", "atom")   # the atom width has the one-launch kernel; the token widths measured slower than cuBLAS + the row kernels
+        return mode == "all" or (mode == "atom" and cond is not None and atom_fused(x.shape[-1], cond.shape[-1]))
     return x.dtype == torch.bfloat16
 
 
