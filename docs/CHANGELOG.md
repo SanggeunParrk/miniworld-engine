@@ -114,6 +114,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 - TriMul H100: removed `h100_sources/b1/common_recompute.cuh` (byte-identical to `h100_sources/common_b7/common_recompute.cuh`) and `h100_sources/b1/ln_recompute.cuh` (a strict prefix of `common_b7/ln_recompute.cuh`, which it only ever served); `h100_b1.py` and `h100_single_output.py` take `-I common_b7`. Last present at 41dc8edf.
 - TriMul H100: removed `h100_sources/uni_wide/front_shared.cuh` (byte-identical to `h100_sources/wide_forward/front_shared.cuh`, 303 lines); the uni_wide inference units take `-I wide_forward`. Last present at fc53ba5b.
+- Triangle attention H100: removed `cuda/h100_sources/fa3_utils.h` (byte-identical to `cuda/fa3_utils.h`); the `front_fused3_sm90` extension takes the parent directory on its include path like the other h100_sources builds. Last present at 8c021b96.
 
 ## [2.3.12] - 2026-10-25
 
