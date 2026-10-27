@@ -151,3 +151,12 @@ The routing flags are read at import (`ADALN_ATOM`, `ADALN_FM`, `CT_FM`, `ADALN_
   `test_h100_bias_only_dit`, `test_bias_only_dit_psb`, `test_h100_module_wiring`, `test_h100_weight_pack`: 203 passed, 36 skipped; `test_token_dit_*`, `test_dit_variant_train`, `test_pair_embed_adaln`, `test_bias_only_dit_portable`,
   `test_bodit_ct_training_portable`: those runs hit the 24 min job cap at about 70 % (no failure before it; not repeated: they do not import the changed modules). CPU suite: the same 2 failures + 2 errors as the base (`test_key_flags_are_built_on_both_sides`, `test_no_stale_caches`, `test_a_ladder_offers_what_wins`);
   `dev derive --arch sm86` re-run (registry units / csv in this commit).
+
+## The hang, reproduced and checked (final code)
+* Old code (`d6e42640`): `adaln_inference` on bf16 d = c = 128, 20480 rows (the shape of `adaln_bf16_atom` L4096 inference and of the AugmentedAttention atom block) did not return in 400 s (child process, `timeout`: exit 124).
+* Final code: `adaln_bf16_atom` (all six rows, inference and training) and `aaa_bf16` (AugmentedAttention atom, bf16, L128 / L384, inference and training) finish in minutes:
+
+| row | PyTorch | portable | CUDA | CUDA / portable |
+|---|---|---|---|---|
+| AugmentedAttention atom inference bf16 L128 / L384 | 0.237 / 1.797 | 0.174 / 1.078 | 0.094 / 0.346 | 0.536 / 0.321 |
+| AugmentedAttention atom training bf16 L128 / L384 | 4.041 / 37.601 | 2.211 / 14.965 | 1.349 / 8.308 | 0.610 / 0.555 |
