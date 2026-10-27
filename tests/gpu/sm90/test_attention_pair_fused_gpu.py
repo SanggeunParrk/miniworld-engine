@@ -23,6 +23,8 @@ def _modules(kind):
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     def make(impl):
+        if kind == "token256":   # the ESMFold2 token DiT: cond 768, d_pair 256
+            return AugmentedAttentionPairBias(768, 768, 256, 16, implementation=impl)
         if kind == "token":
             return AugmentedAttentionPairBias(768, 384, 128, 16, implementation=impl)
         if kind == "atom":
@@ -58,7 +60,7 @@ def _run(m, kind, single, cond, pair, mask, dy, dtype, autocast):
 
 def _case(kind, L, A, fp32=False):
     n = 8 * L if kind == "atom" else L
-    dS, dC, dP = {"token": (768, 384, 128), "atom": (128, 128, 16), "apb": (384, 384, 256)}[kind]
+    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16), "apb": (384, 384, 256)}[kind]
     a = 1 if kind == "apb" else A
     shape = (1, n, dS) if kind == "apb" else (a, 1, n, dS)
     cshape = (a, 1, n, dC)
@@ -94,21 +96,22 @@ def test_bf16_routes_are_taken_and_hold_the_yardstick(kind, L, A):
 
 
 @needs_hopper
-def test_fp32_token_route_is_taken_and_holds_the_yardstick():
+@pytest.mark.parametrize(("kind", "L"), [("token", 384), ("token256", 384), ("atom", 128)])
+def test_fp32_token_route_is_taken_and_holds_the_yardstick(kind, L):
     from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32
 
     torch.backends.cuda.matmul.allow_tf32 = True
-    mw, pt, ref = _modules("token")
-    single, cond, pair, mask, dy, dt = _case("token", 384, 3, fp32=True)
+    mw, pt, ref = _modules(kind)
+    single, cond, pair, mask, dy, dt = _case(kind, L, 3, fp32=True)
     taken = []
     orig = fused_pair_tf32.attention_pair_tf32
     fused_pair_tf32.attention_pair_tf32 = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]
     try:
-        r = _run(ref, "token", single, cond, pair, mask, dy, torch.float64, False)
-        e = _run(mw, "token", single, cond, pair, mask, dy, dt, False)
+        r = _run(ref, kind, single, cond, pair, mask, dy, torch.float64, False)
+        e = _run(mw, kind, single, cond, pair, mask, dy, dt, False)
     finally:
         fused_pair_tf32.attention_pair_tf32 = orig
-    b = _run(pt, "token", single, cond, pair, mask, dy, dt, False)
+    b = _run(pt, kind, single, cond, pair, mask, dy, dt, False)
     assert taken
     for k in r:
         assert _rel(e[k], r[k]) <= 1.5 * _rel(b[k], r[k]), (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
@@ -190,3 +193,24 @@ def test_routes_run_under_torch_compile(fp32):
     assert any(k in names for k in ("adaln_fwd_k", "adaln_gemm_k", "ln_rows_k")), "the compiled module did not launch the CUDA adaLN"
     assert _rel(out[0], eager[0].double()) < (3e-3 if fp32 else 3e-2)
     assert _rel(out[1], eager[1].double()) < (3e-3 if fp32 else 3e-2)
+
+
+@needs_hopper
+@pytest.mark.parametrize("masked", [False, True])
+def test_the_generic_fp32_pair_bias_pass_matches_the_tensor_core_one_at_d_pair_128(masked):
+    """``pair_bias_rows32`` (any d_pair; the d_pair 256 route) reproduces ``pair_bias_tok_cuda`` (d_pair 128 only): same key-permuted layout, mask and units."""
+    from miniworld_engine.kernels.augmented_attention.cuda.fused_pair import _rows_ext
+    from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+    L, dp = 256, 128
+    g = torch.Generator(device="cuda").manual_seed(1)
+    pair = torch.randn(L * L, dp, device="cuda", generator=g) * 2 + 0.5
+    wf = torch.randn(16, dp, device="cuda", generator=g) * 0.1
+    mask = (torch.rand(L, device="cuda", generator=g) > 0.2) if masked else None
+    a = torch.empty(16, L, L, device="cuda")
+    b = torch.empty_like(a)
+    rows32().pair_bias_tok_cuda(pair, wf, a, mask, L, 1e-5, True, -1e30)
+    _rows_ext().pair_bias_rows32(pair, wf, b, mask, L, 1e-5, -1e30)
+    # the tensor-core pass rounds its operands to TF32, this one is fp32 on CUDA cores: the layout agrees exactly, the values to TF32 precision
+    assert float((b - a).norm() / a.norm()) < 1e-3, float((b - a).norm() / a.norm())
+    assert torch.equal(b[..., :8] <= -1e29, a[..., :8] <= -1e29)

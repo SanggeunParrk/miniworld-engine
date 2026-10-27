@@ -68,3 +68,21 @@ def test_fp16_intermediate_holds_the_tf32_yardstick_and_never_overflows(scale, m
                 name, _rel(got[name], want), _rel(base[name], want))
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev
+
+
+@pytest.mark.skipif(not HOPPER, reason="the generic sm_90a Transition")
+@pytest.mark.parametrize("d,hid,scale", [(128, 256, 1.0), (128, 256, 3e4), (256, 512, 1.0), (768, 1536, 1.0), (384, 768, 1e5)])
+def test_the_scale_kernel_agrees_with_the_torch_statements(d, hid, scale):
+    """``h16_scales`` (memset + two kernels) returns the torch statements' values: inv_sh, s and the fp16 Ws, at ordinary and at huge weights."""
+    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as generic
+
+    torch.manual_seed(0)
+    x = torch.randn(8, d, device="cuda")
+    gamma, beta = torch.rand(d, device="cuda") + 0.5, torch.randn(d, device="cuda")
+    wa, wb = (torch.randn(hid, d, device="cuda") * d**-0.5 * scale for _ in range(2))
+    ws = torch.randn(d, hid, device="cuda") * hid**-0.5 * scale
+    got = generic._h16_scales(x, gamma, beta, wa, wb, ws)
+    want = generic._h16_scales_torch(x, gamma, beta, wa, wb, ws)
+    torch.testing.assert_close(got[0], want[0], rtol=1e-5, atol=0)
+    torch.testing.assert_close(got[1], want[1], rtol=1e-5, atol=0)
+    assert torch.equal(got[2], want[2]) or float((got[2].float() - want[2].float()).abs().max()) <= 1e-3 * float(want[2].float().abs().max())

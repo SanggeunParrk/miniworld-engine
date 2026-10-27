@@ -340,6 +340,66 @@ torch::Tensor squeeze_res(torch::Tensor h, torch::Tensor ws, torch::Tensor x) {
 }
 
 
+// Range scales of the fp16 intermediate path, in two launches (a memset and these) instead of the ~20 small torch kernels they replace.
+// st = [max|gamma|, max|beta|, max row L1 norm of Wa / Wb, max|Ws|] (non-negative floats: atomicMax on the bit pattern orders them).
+__global__ void __launch_bounds__(256)
+h16_absmax_kernel(const float* __restrict__ gamma, const float* __restrict__ beta, const float* __restrict__ wa, const float* __restrict__ wb,
+                  const float* __restrict__ ws, float* __restrict__ st, int D, int HID) {
+  const int lane = threadIdx.x & 31;
+  const long long warp = ((long long)blockIdx.x * blockDim.x + threadIdx.x) >> 5, nwarps = ((long long)gridDim.x * blockDim.x) >> 5;
+  float rl1 = 0.f, wmax = 0.f, gmax = 0.f, bmax = 0.f;
+  for (long long r = warp; r < 2LL * HID; r += nwarps) {                         // one warp per row of Wa (then Wb)
+    const float* row = (r < HID ? wa + r * D : wb + (r - HID) * D);
+    float s = 0.f;
+    for (int c = lane; c < D; c += 32) s += fabsf(row[c]);
+    for (int o = 16; o > 0; o >>= 1) s += __shfl_xor_sync(0xffffffffu, s, o);
+    rl1 = fmaxf(rl1, s);
+  }
+  const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x, nt = (long long)gridDim.x * blockDim.x;
+  for (long long i = tid; i < (long long)D * HID; i += nt) wmax = fmaxf(wmax, fabsf(ws[i]));
+  for (long long i = tid; i < D; i += nt) { gmax = fmaxf(gmax, fabsf(gamma[i])); bmax = fmaxf(bmax, fabsf(beta[i])); }
+  for (int o = 16; o > 0; o >>= 1) {
+    rl1 = fmaxf(rl1, __shfl_xor_sync(0xffffffffu, rl1, o)); wmax = fmaxf(wmax, __shfl_xor_sync(0xffffffffu, wmax, o));
+    gmax = fmaxf(gmax, __shfl_xor_sync(0xffffffffu, gmax, o)); bmax = fmaxf(bmax, __shfl_xor_sync(0xffffffffu, bmax, o));
+  }
+  if (lane == 0) {
+    int* p = reinterpret_cast<int*>(st);
+    atomicMax(p + 0, __float_as_int(gmax)); atomicMax(p + 1, __float_as_int(bmax));
+    atomicMax(p + 2, __float_as_int(rl1)); atomicMax(p + 3, __float_as_int(wmax));
+  }
+}
+
+// inv_sh = 1 / s_h, s = s_h * s_w, ws16 = half(Ws / s_w): s_h = max(1, (sqrt(D) max|gamma| + max|beta|)^2 max-row-L1^2 / 60000), s_w = max(1, max|Ws| / 60000)
+__global__ void __launch_bounds__(256)
+h16_apply_kernel(const float* __restrict__ ws, const float* __restrict__ st, __half* __restrict__ ws16, float* __restrict__ inv_sh,
+                 float* __restrict__ s_out, long long n, int D) {
+  const float xn_max = sqrtf((float)D) * st[0] + st[1];
+  const float a_max = xn_max * st[2];
+  const float s_h = fmaxf(a_max * a_max * (1.0f / 60000.0f), 1.0f);
+  const float s_w = fmaxf(st[3] * (1.0f / 60000.0f), 1.0f);
+  const long long tid = (long long)blockIdx.x * blockDim.x + threadIdx.x;
+  if (tid == 0) { inv_sh[0] = 1.0f / s_h; s_out[0] = s_h * s_w; }
+  for (long long i = tid; i < n; i += (long long)gridDim.x * blockDim.x) ws16[i] = __float2half_rn(ws[i] / s_w);
+}
+
+std::vector<torch::Tensor> h16_scales(torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) {
+  const int64_t HID = wa.size(0), D = wa.size(1);
+  check_act(wa, D, "wa"); check_act(wb, D, "wb"); check_act(ws, HID, "ws");
+  expect(wb.size(0) == HID && ws.size(0) == D && gamma.numel() == D && beta.numel() == D, "weight shapes");
+  expect(wa.scalar_type() == torch::kFloat32 && wb.scalar_type() == torch::kFloat32 && ws.scalar_type() == torch::kFloat32 &&
+         gamma.scalar_type() == torch::kFloat32 && beta.scalar_type() == torch::kFloat32 && gamma.is_contiguous() && beta.is_contiguous(), "fp32 operands");
+  auto f32 = wa.options().dtype(torch::kFloat32);
+  auto st = torch::empty({4}, f32), inv_sh = torch::empty({1}, f32), s = torch::empty({1}, f32);
+  auto ws16 = torch::empty({D, HID}, wa.options().dtype(torch::kHalf));
+  auto stream = at::cuda::getCurrentCUDAStream();
+  cudaMemsetAsync(st.data_ptr(), 0, 4 * sizeof(float), stream);
+  h16_absmax_kernel<<<128, 256, 0, stream>>>(gamma.data_ptr<float>(), beta.data_ptr<float>(), cp<float>(wa), cp<float>(wb), cp<float>(ws), st.data_ptr<float>(), (int)D, (int)HID);
+  const long long n = D * HID;
+  const unsigned blocks = (unsigned)std::min<long long>(1024, (n + 255) / 256);
+  h16_apply_kernel<<<blocks, 256, 0, stream>>>(cp<float>(ws), st.data_ptr<float>(), reinterpret_cast<__half*>(ws16.data_ptr()), inv_sh.data_ptr<float>(), s.data_ptr<float>(), n, (int)D);
+  return {inv_sh, s, ws16};
+}
+
 // fp32 activations on TF32 tensor cores, with the (M, HID) intermediate in fp16: the same 10-bit mantissa as TF32 in half the bytes, which
 // are the dominant traffic of the two GEMMs (written by one, read by the other).  `inv_s` / `s` are fp32 device scalars that keep h inside
 // fp16's range (the caller bounds |h|); the squeeze reads Ws as fp16 too (also divided by its own scale, folded into `s`).
@@ -492,4 +552,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("swiglu_bwd", &swiglu_bwd);
   m.def("ln_bwd", &ln_bwd);
   m.def("prep", &prep);
+  m.def("h16_scales", &h16_scales);
 }

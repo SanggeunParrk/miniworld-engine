@@ -27,7 +27,7 @@ from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent / "generic_sm90a"
-_REVISION = "v29"
+_REVISION = "v30"
 MAX_D = 1024
 # `ext.prep` job masks: bit 0 Ws^T, 1-2 the two halves of [Wa;Wb]^T, 3-5 copies of Wa / Wb / Ws (TF32-rounded for fp32 activations)
 _PREP_BWD, _PREP_BWD_ROUNDED, _PREP_ROUNDED_COPIES = 0b000111, 0b011111, 0b111000
@@ -169,7 +169,7 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
 _H16_MIN_ROWS = 16384
 
 
-def _h16_scales(x, gamma, beta, wa, wb, ws):
+def _h16_scales_torch(x, gamma, beta, wa, wb, ws):
     """(1 / s_h, s_h * s_w, ws as fp16 divided by s_w): fp32 device scalars that keep h = silu(a) * b and Ws inside fp16's range.
     |h| <= |a| |b| <= bound^2 with bound = (sqrt(D) max|gamma| + max|beta|) * max row L1 norm of Wa, Wb (LayerNorm output is z gamma + beta with
     |z| <= sqrt(D)); the scale is 1 for any ordinary magnitude. Device arithmetic only: graph-capturable, no host sync."""
@@ -180,6 +180,12 @@ def _h16_scales(x, gamma, beta, wa, wb, ws):
         s_h = (a_max * a_max * (1.0 / 60000.0)).clamp_min(1.0)
         s_w = (ws.abs().max() * (1.0 / 60000.0)).clamp_min(1.0)
         return (1.0 / s_h).reshape(1), (s_h * s_w).reshape(1), (ws / s_w).half()
+
+
+def _h16_scales(x, gamma, beta, wa, wb, ws):
+    """The scales of ``_h16_scales_torch`` from two launches (a memset and ``h16_absmax`` + ``h16_apply``) instead of ~20 small torch kernels, which were
+    ~40 us of a ~35 us call at 16 384 rows. Same values up to the summation order of the row L1 norms (a scale of 1 in any ordinary case)."""
+    return tuple(_ext().h16_scales(gamma.float().contiguous(), beta.float().contiguous(), wa, wb, ws))
 
 
 def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws):

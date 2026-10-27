@@ -1,12 +1,12 @@
 """The fp32 token stack's pair-biased attention on H100: TF32 wgmma cores (``attn_tf32.cu``) with the pair bias folded in.
 
-``softmax(q k^T / sqrt(48) + wf . LN(pair)) v`` for fp32 q / k / v [A, 1, L, 16, 48] and an fp32 pair [1, L, L, 128]: the bias
+``softmax(q k^T / sqrt(48) + wf . LN(pair)) v`` for fp32 q / k / v [A, 1, L, 16, 48] and an fp32 pair [1, L, L, 128 or 256]: the bias
 comes out of ONE pass over the pair (``pair_bias_tok_cuda``: LayerNorm + the 16 head projections + the TF32 core's key
 permutation + the key mask), the core is the TF32 forward / dq-dbias / dk-dv trio of the token DiT's fp32 block, and the
 backward of the pair side is PyTorch (LayerNorm backward, two TF32 GEMMs). Operands are rounded to TF32 inside the tensor core
 like every fp32 matmul of the process (``supported`` is False when TF32 is switched off: the call then keeps full-fp32 math).
 
-Contract: sm_90, fp32 q / k / v / pair, 16 x 48, d_pair 128, one batch row, L a multiple of 128, a key mask shared by all
+Contract: sm_90, fp32 q / k / v / pair, 16 heads x 48 (d_pair 128 or 256) or 4 x 32 (d_pair 16: the dense atom stack), one batch row, L a multiple of 128, a key mask shared by all
 samples (or none).
 """
 
@@ -22,7 +22,9 @@ from miniworld_engine.kernels._compile import opaque
 from . import LOG2E, _is_hopper, tf32_backward, tf32_forward
 
 NEG = -1e30
-H, D, DP = 16, 48, 128
+H, D = 16, 48   # the token stack; the dense atom stack is 4 x 32 (LAYOUTS)
+#: (heads, head width, d_pair) served: the token stack (d_pair 128; 256 for the ESM-style stack) and the dense atom stack
+LAYOUTS = {(16, 48, 128), (16, 48, 256), (4, 32, 16)}
 
 
 def _tf32_on() -> bool:
@@ -36,7 +38,8 @@ def supported(q, pair, lnw, wb, mask) -> bool:
     if q.dim() != 5 or q.dtype is not torch.float32 or pair.dtype is not torch.float32 or not q.is_cuda:
         return False
     A, B, L, h, d = q.shape
-    if (h, d) != (H, D) or B != 1 or L % 128 or tuple(pair.shape) != (1, L, L, DP) or tuple(wb.shape) != (H, DP) or tuple(lnw.shape) != (DP,):
+    dp = pair.shape[-1]
+    if (h, d, dp) not in LAYOUTS or B != 1 or L % 128 or tuple(pair.shape) != (1, L, L, dp) or tuple(wb.shape) != (h, dp) or tuple(lnw.shape) != (dp,):
         return False
     if mask is not None and (mask.dim() != 1 or mask.numel() != L or mask.dtype is not torch.bool):
         return False
@@ -91,7 +94,7 @@ def _perm(L, device):
 
 def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
     """Shapes of the TF32 pair-fused attention forward (outputs and saved tensors; all like q's dtype)."""
-    A, _, L, _, _ = q.shape
+    A, _, L, H, D = q.shape
     return (
         q.new_empty((A * L, H * D)),
         q.new_empty((A, H, L)),
@@ -111,18 +114,22 @@ def _fwd(
 
     from .fused_pair import _rows_ext
 
-    A, _, L, _, _ = q.shape
+    A, _, L, H, D = q.shape
     qs, kr, vr, vt = _rows_ext().prep_fwd32(
         q.reshape(A * L, H * D).contiguous(), k.reshape(A * L, H * D).contiguous(), v.reshape(A * L, H * D).contiguous(), LOG2E / math.sqrt(D)
     )
     wf = (wb.float() * lnw.float() * LOG2E).contiguous()
     bias_p = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
-    rows32().pair_bias_tok_cuda(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), True, NEG)
-    o, lse = tf32_forward(qs, kr, vt, bias_p, None, A, L)
+    DP = pair.shape[-1]
+    if (H, DP) == (16, 128):
+        rows32().pair_bias_tok_cuda(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), True, NEG)
+    else:   # d_pair 256 and the atom stack: the generic passes (the tensor-core one is built for 16 heads x 128 channels)
+        _rows_ext().pair_bias_rows32(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), NEG)
+    o, lse = tf32_forward(qs, kr, vt, bias_p, None, A, L, nh=H, dh=D)
     return o, lse, bias_p, qs, kr, vr
 
 
-def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):
+def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):   # (unchanged shapes for every layout)
     """Shapes of the TF32 pair-fused attention backward: (dq, dk, dv, dpair, dlnw fp32, dwb fp32)."""
     return (
         qs.new_empty(qs.shape),
@@ -143,16 +150,19 @@ def _bwd(
     from .fused_pair import _rows_ext
 
     A = o.shape[0] // pair.shape[1]
+    H = lse.shape[1]
+    D = o.shape[1] // H
     L = pair.shape[1]
     e = _rows_ext()
     dd, dd_p, lse_p, dobr = e.dd_perm(do.contiguous().float(), o, lse, A, L)  # D = rowsum(dO O), its / the LSE's query-permuted copies, dO rounded
     dq, dk, dv, db_p = tf32_backward(
         qs, kr, vr, dobr, e.transpose32(qs), e.transpose32(kr), e.transpose32(dobr), bias_p, e.bias_transposed(bias_p, L),
-        lse, dd, lse_p, dd_p, None, None, A, L,
+        lse, dd, lse_p, dd_p, None, None, A, L, nh=H, dh=D,
     )
     _, inv = _perm(L, qs.device)
     db = db_p[..., inv].contiguous()  # natural key order, natural units: [H, L, L]
     wf = (wb.float() * lnw.float()).contiguous()
+    DP = pair.shape[-1]
     dz, accp = e.pair_rows_bwd32(pair.view(L * L, DP), db, wf, L, eps)
     dwf = accp.sum(0).view(H, DP)
     return dq, dk, dv, dz.view(pair.shape), (dwf * wb.float()).sum(0), dwf * lnw.float()
@@ -166,7 +176,7 @@ class _AttnTf32(torch.autograd.Function):
         if any(ctx.needs_input_grad):
             ctx.save_for_backward(o, lse, bias_p, qs, kr, vr, pair, lnw, wb)
             ctx.eps, ctx.shape = eps, q.shape
-        return o.view(A, 1, L, H, D)
+        return o.view(A, 1, L, *q.shape[-2:])
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
