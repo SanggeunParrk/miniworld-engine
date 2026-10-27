@@ -10,6 +10,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- H100 `DiTBlock(extra_pair_bias=)` ladder rows: the hand-CUDA token block now serves the [L, L] term in TRAINING (bf16 and fp32, gradient to the term included; one-pass pair LayerNorm + bias kernel with the term folded in, one-pass backward) and in fp32 INFERENCE; the portable pair-bias LayerNorm + projection Triton kernel runs on tensor cores with a persistent backward and is used by `AugmentedAttentionPairBias` in training on the Triton core (portable 1.01-1.04x -> 0.90-0.98x PyTorch); see docs/records/xbias_dit_ladder_20261027.md.
 - H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
 
