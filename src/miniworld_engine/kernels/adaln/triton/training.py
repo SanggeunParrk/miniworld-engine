@@ -39,7 +39,6 @@ from ...layernorm_linear.triton.te_style import (
     _ln_materialize,
 )
 from ..._tiles import tile_grid, tile_order
-from ..._tma import ensure_allocator, num_sms, prune_tma
 from ...layernorm_linear.triton.stats import stats_triton
 from .inference import _cond_affine_stats_saved
 
@@ -565,9 +564,7 @@ def set_dgrad_triton(flag) -> None:
     _DGRAD_TRITON = flag
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"],
-                 prune_configs_by={"early_config_prune": prune_tma(
-                     lambda na: (na["CondN"], na["SW"].t(), na["BW"].t(), na["X"], na["Y"], na["Gate"]))})
+@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"])
 @triton.jit
 def _adaln_fwd_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y, Gate,
@@ -575,7 +572,7 @@ def _adaln_fwd_gate_kernel(
     scn0, sw0, sw1, sbw0, sbw1, sx0, sy0, sg0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
-    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
+    PRE: tl.constexpr = False,
 ):
     """Training forward in one kernel: y AND gate=sigmoid(scale), so sb (M, 2NX) never lands.
 
@@ -590,81 +587,33 @@ def _adaln_fwd_gate_kernel(
     here and x_hat is `x*rstd - c1`. mean_x for the backward is recovered as c1/rstd at the
     launcher -- an (M,) elementwise, negligible against this kernel.
     """
-    if TMA:
-        # sm_90, 16-bit operands (kernels/_tma.py): persistent loop, tensor descriptors for every operand. SW / BW arrive as the (NC, NX) views of
-        # the (NX, NC) weights (K contiguous: sw0 == 1), so the descriptors are made on the underlying (NX, NC) matrices. TMA: 1 = plain, 2 = epilogue
-        # in two column halves, 3 / 4 = the same with a warp-specialised loop.
-        EPI: tl.constexpr = 2 if (TMA == 2 or TMA == 4) else 1
-        WS: tl.constexpr = TMA >= 3
-        a_d = tl.make_tensor_descriptor(CondN, shape=[M, NC], strides=[scn0, 1], block_shape=[BLOCK_M, BLOCK_K])
-        s_d = tl.make_tensor_descriptor(SW, shape=[NX, NC], strides=[sw1, 1], block_shape=[BLOCK_N, BLOCK_K])
-        b_d = tl.make_tensor_descriptor(BW, shape=[NX, NC], strides=[sbw1, 1], block_shape=[BLOCK_N, BLOCK_K])
-        x_d = tl.make_tensor_descriptor(X, shape=[M, NX], strides=[sx0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
-        y_d = tl.make_tensor_descriptor(Y, shape=[M, NX], strides=[sy0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
-        g_d = tl.make_tensor_descriptor(Gate, shape=[M, NX], strides=[sg0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
-        n_m = tl.cdiv(M, BLOCK_M)
-        n_n = tl.cdiv(NX, BLOCK_N)
-        for t in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True, warp_specialize=WS):
-            pid_m, pid_n = tile_order(t, n_m, n_n, GROUP_M)
-            om = pid_m * BLOCK_M
-            on = pid_n * BLOCK_N
-            scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-            bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-            for k in range(0, NC, BLOCK_K):
-                ak = a_d.load([om, k])
-                scale = tf32_dot(ak, s_d.load([on, k]).T, scale, pre_b=PRE)
-                bias = tf32_dot(ak, b_d.load([on, k]).T, bias, pre_b=PRE)
-            rws = om + tl.arange(0, BLOCK_M)
-            rstd = tl.load(Rstd + rws, mask=rws < M, other=0.0)[:, None]
-            c1 = tl.load(C1 + rws, mask=rws < M, other=0.0)[:, None]
-            if EPI == 1:
-                cls = on + tl.arange(0, BLOCK_N)
-                sb = tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)
-                g = tl.sigmoid(scale + sb[None, :])
-                y = g * (x_d.load([om, on]).to(tl.float32) * rstd - c1) + bias
-                y_d.store([om, on], y.to(Y.dtype.element_ty))
-                g_d.store([om, on], g.to(Gate.dtype.element_ty))
-            else:
-                s0, s1 = tl.split(tl.permute(tl.reshape(scale, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
-                b0, b1 = tl.split(tl.permute(tl.reshape(bias, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
-                cls = on + tl.arange(0, BLOCK_N // 2)
-                g = tl.sigmoid(s0 + tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)[None, :])
-                y = g * (x_d.load([om, on]).to(tl.float32) * rstd - c1) + b0
-                y_d.store([om, on], y.to(Y.dtype.element_ty))
-                g_d.store([om, on], g.to(Gate.dtype.element_ty))
-                cls = on + BLOCK_N // 2 + tl.arange(0, BLOCK_N // 2)
-                g = tl.sigmoid(s1 + tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)[None, :])
-                y = g * (x_d.load([om, on + BLOCK_N // 2]).to(tl.float32) * rstd - c1) + b1
-                y_d.store([om, on + BLOCK_N // 2], y.to(Y.dtype.element_ty))
-                g_d.store([om, on + BLOCK_N // 2], g.to(Gate.dtype.element_ty))
-    else:
-        pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
-                                  tl.cdiv(NX, BLOCK_N), GROUP_M)
-        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-        cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-        rmask, nmask = rows < M, cols < NX
-        scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-        bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-        for k0 in range(0, NC, BLOCK_K):
-            kc = k0 + tl.arange(0, BLOCK_K)
-            kmask = kc < NC
-            a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
-                        mask=rmask[:, None] & kmask[None, :], other=0.0)
-            w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
-                          mask=kmask[:, None] & nmask[None, :], other=0.0)
-            w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
-                          mask=kmask[:, None] & nmask[None, :], other=0.0)
-            scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
-            bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
-        xm = rmask[:, None] & nmask[None, :]
-        xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
-        rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
-        c1 = tl.load(C1 + rows, mask=rmask, other=0.0)[:, None]
-        sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
-        g = tl.sigmoid(scale + sb[None, :])
-        y = g * (xv * rstd - c1) + bias
-        tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
-        tl.store(Gate + rows[:, None] * sg0 + cols[None, :], g.to(Gate.dtype.element_ty), mask=xm)
+    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                              tl.cdiv(NX, BLOCK_N), GROUP_M)
+    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+    rmask, nmask = rows < M, cols < NX
+    scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+    for k0 in range(0, NC, BLOCK_K):
+        kc = k0 + tl.arange(0, BLOCK_K)
+        kmask = kc < NC
+        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
+                    mask=rmask[:, None] & kmask[None, :], other=0.0)
+        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
+                      mask=kmask[:, None] & nmask[None, :], other=0.0)
+        scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
+        bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
+    xm = rmask[:, None] & nmask[None, :]
+    xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
+    rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
+    c1 = tl.load(C1 + rows, mask=rmask, other=0.0)[:, None]
+    sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
+    g = tl.sigmoid(scale + sb[None, :])
+    y = g * (xv * rstd - c1) + bias
+    tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
+    tl.store(Gate + rows[:, None] * sg0 + cols[None, :], g.to(Gate.dtype.element_ty), mask=xm)
 
 
 def _adaln_fwd_gate_fake(cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, shape_key=None):
@@ -691,16 +640,13 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
         scale_wt, bias_wt = tf32_grid_many(scale_wt, bias_wt)
     y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, NX, device=x.device, dtype=x.dtype)
-    sms = num_sms(x.device.index or 0)
-    ensure_allocator()
-    grid = lambda META: ((min(sms, tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])[0]),) if META.get("TMA")  # noqa: E731
-                         else tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"]))
+    grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
     _adaln_fwd_gate_kernel[grid](
         cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y, gate,
         M, int(NX), int(NC),
         cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1), x.stride(0),
         y.stride(0), gate.stride(0),
-        shape_key=pack(shape_key, NX=NX, NC=NC), NUM_SMS=sms, PRE=pre,
+        shape_key=pack(shape_key, NX=NX, NC=NC), PRE=pre,
     )
     return y, gate
 

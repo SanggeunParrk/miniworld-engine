@@ -20,12 +20,19 @@ swept once on an H100 (``docs/records/portable_bodit_ct_training_20261026.md``).
 
 from __future__ import annotations
 
+import functools
+
 import torch
 import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels._tma import num_sms
+
+
+@functools.lru_cache(maxsize=16)
+def num_sms(index: int) -> int:
+    return torch.cuda.get_device_properties(index).multi_processor_count
+
 
 _FWD_BR = 64
 _BWD_BR = 64

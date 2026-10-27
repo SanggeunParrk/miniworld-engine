@@ -171,18 +171,11 @@ sampler_ops_cov_triton,CP,see sampler_ops_augment_triton
 sampler_ops_align_triton,CHUNK,see sampler_ops_stats_triton
 sampler_ops_align_triton,CP,see sampler_ops_augment_triton
 transition_bwd_squeeze_swiglu_triton,PREC,"same as transition_expand_swiglu_triton: a function of the keyed dtype and torch's TF32 switch"
-transition_expand_swiglu_triton,NUM_SMS,"the SM count of the card (1 on the pointer path), i.e. the grid stride of the persistent tensor-map path; the cache is per card, and USE_TMA is keyed"
-transition_squeeze_residual_triton,NUM_SMS,see transition_expand_swiglu_triton
-transition_bwd_squeeze_swiglu_triton,NUM_SMS,see transition_expand_swiglu_triton
 cond_transition_squeeze_gate_triton,HAS_RES,"optional residual add in the epilogue (one extra (BM,BN) load, the GEMM schedule tuned for the sum is the same); the flag only says whether the caller has a stream to add to"
 layernorm_fwd_strided_triton,HAS_STATS,"keyed through shape_key: the launcher with HAS_STATS packs N2 (the width of the second reduction) into shape_key, the plain launcher does not, so the two variants never share an entry"
 adaln_bwd_pre_dx_triton,HAS_DRES,"optional gradient added to dx in the epilogue (one extra (BM,BK) load per tile of a memory-bound kernel); tile config is the same either way"
 gated_projection_gate_flat_triton,HAS_RES,"optional residual added in the elementwise pass (one extra load of a memory-bound kernel); BLOCK_E tuned for the sum is the same"
 layernorm_fwd_strided_triton,SAVE_C,"flag that stores the mean and rstd of the first reduction (the training forward needs them for the backward); the schedule is the same either way and the variant is keyed through N2 in shape_key"
-adaln_fwd_gate_triton,NUM_SMS,"the SM count of the device: a constant of the card the cache is keyed on (gpu name), only the persistent (TMA) configs read it"
-cond_transition_bwd_gemm_swiglu_triton,NUM_SMS,"the SM count of the device: a constant of the card the cache is keyed on (gpu name), only the persistent (TMA) configs read it"
-cond_transition_expand_swiglu_saveact_triton,NUM_SMS,"the SM count of the device: a constant of the card the cache is keyed on (gpu name), only the persistent (TMA) configs read it"
-cond_transition_squeeze_gate_saveact_triton,NUM_SMS,"the SM count of the device: a constant of the card the cache is keyed on (gpu name), only the persistent (TMA) configs read it"
 cond_transition_squeeze_gate_saveact_triton,HAS_RES,"optional residual read in the epilogue (one extra tile load); the tile schedule tuned for the sum is the same"
 layernorm_bwd_atomic_strided_triton,HAS_DXR,"optional gradient of a second consumer of the same input, added to dx in the epilogue (one extra tile load); the tile schedule tuned for the plain backward is the same"
 adaln_bwd_dx_dlnw_triton,PRE,"pure function of the activation dtype and torch's TF32 switch (it is True only for fp32 operands that feed a TF32 dot: kernels/_tf32.py rounds them to the TF32 grid); bf16 ignores it, and the cache keys the dtype (same judgement as PREC)"
@@ -199,5 +192,6 @@ cond_transition_squeeze_gate_triton,PRE_H,"same as adaln_bwd_dx_dlnw_triton: a f
 cond_transition_squeeze_gate_triton,PRE_W,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch (the weight operand)"
 transition_bwd_squeeze_swiglu_triton,PRE,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch"
 transition_expand_swiglu_triton,PRE,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch"
+transition_expand_swiglu_triton,ROUND_X,"PRE and K % 64 == 0: a function of the keyed dtype and torch's TF32 switch and of K, which is in shape_key"
 transition_squeeze_residual_triton,PRE_H,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch (the hidden operand)"
 transition_squeeze_residual_triton,PRE_W,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch (the weight operand)"
