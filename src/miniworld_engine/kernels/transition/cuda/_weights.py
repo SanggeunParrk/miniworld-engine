@@ -37,3 +37,28 @@ def transposed_contiguous(w: torch.Tensor) -> torch.Tensor:
         del _CACHE[stale]
     _CACHE[key] = (weakref.ref(w), out)
     return out
+
+
+_ROUNDED: dict = {}
+
+
+def tf32_rounded_triple(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, make):
+    """``make(wa, wb, ws)`` -> the three TF32-rounded fp32 copies the generic fp32 forward feeds its tensor cores, reused while the three weights
+    are the same tensors and unchanged (an inference loop). Same rules as :func:`transposed_contiguous`: a weight that requires grad under grad mode,
+    a call under ``torch.compile`` tracing and a call during a CUDA-graph capture never FILL the cache (a capture reads a hit, so warm the loop up once
+    first); an entry holds weak references to its three weights and serves only those very tensor objects (an address freed and reused cannot hit);
+    an entry goes when any of its weights dies or the same weight is cached at a newer version. Returns None when the cache does not apply."""
+    ws3 = (wa, wb, ws)
+    if torch.compiler.is_compiling() or (torch.is_grad_enabled() and any(w.requires_grad for w in ws3)):
+        return None
+    key = tuple((w.data_ptr(), w._version, tuple(w.shape)) for w in ws3) + (wa.dtype, wa.device)
+    hit = _ROUNDED.get(key)
+    if hit is not None and all(r() is w for r, w in zip(hit[0], ws3)):
+        return hit[1]
+    if torch.cuda.is_current_stream_capturing():
+        return None
+    out = make(wa, wb, ws)
+    for stale in [k for k, (refs, _) in _ROUNDED.items() if any(r() is None or any(r() is w for w in ws3) for r in refs)]:
+        del _ROUNDED[stale]
+    _ROUNDED[key] = (tuple(weakref.ref(w) for w in ws3), out)
+    return out

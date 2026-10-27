@@ -23,6 +23,13 @@ constexpr int BT = 256;
 constexpr int WPB = BT / 32;
 constexpr int PF = 4;  // rows whose loads are in flight together
 
+// ------------------------------------------------------------------------------------------------ fp32 TF32-core glue
+// key_perm (conditioned_transition.cuda): position p of each group of 8 holds key perm(p); inv is its inverse
+__device__ __forceinline__ int kperm(int p) { const int r = p & 7; return p - r + 4 * (r & 1) + (r >> 1); }
+__device__ __forceinline__ int kinv(int k) { const int s = k & 7; return k - s + 2 * (s & 3) + (s >> 2); }
+// position of pair row r in a bias/dbias buffer whose key columns are kept in the TF32 core's permuted order (PL = L), or r itself (PL = 0)
+__device__ __forceinline__ long dbpos(long r, int PL) { if (PL == 0) return r; const int j = (int)(r % PL); return r - j + kinv(j); }
+
 
 template <int DPL>
 __device__ __forceinline__ void load_row(const bf* __restrict__ z, float (&x)[DPL]) {
@@ -190,7 +197,7 @@ __global__ void __launch_bounds__(BT) fwd_k(const bf* __restrict__ Z, const floa
 
 template <int DP, int NH, typename T, bool HAVE_ST, int CH = 32>   // CH rows per warp-chunk (8 when few rows must still fill the GPU)
 __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
-                                            const float2* __restrict__ ST, T* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
+                                            const float2* __restrict__ ST, T* __restrict__ DZ, float* __restrict__ ACC, long R, float eps, int PL) {
   constexpr int DPL = DP / 32;
   __shared__ float red[WPB][DP];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
@@ -215,7 +222,8 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
     float2 stm = make_float2(0.f, 1.f);
     if constexpr (HAVE_ST) stm = mine < R ? ST[mine] : stm;
 #pragma unroll
-    for (int h = 0; h < NH; ++h) dbr[h] = mine < R ? __ldg(DB + (long)h * R + mine) : 0.f;
+    const long dpos = mine < R ? dbpos(mine, PL) : 0;
+    for (int h = 0; h < NH; ++h) dbr[h] = mine < R ? __ldg(DB + (long)h * R + dpos) : 0.f;
     const int n = (int)min((long)CH, R - base);
     for (int rb = 0; rb < n; rb += PF) {
       float xb[PF][DPL];
@@ -275,43 +283,50 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
 }
 
 
-// ------------------------------------------------------------------------------------------------ fp32 TF32-core glue
-// key_perm (conditioned_transition.cuda): position p of each group of 8 holds key perm(p); inv is its inverse
-__device__ __forceinline__ int kperm(int p) { const int r = p & 7; return p - r + 4 * (r & 1) + (r >> 1); }
-__device__ __forceinline__ int kinv(int k) { const int s = k & 7; return k - s + 2 * (s & 3) + (s >> 2); }
-
 // TF32 round to nearest (ties away from zero) of a finite float: what cuBLAS does to an fp32 operand and what the tensor core would otherwise do by
 // truncation (1.2 - 3x the rounding error end to end, measured)
 __device__ __forceinline__ float rna_tf32(float x) { return __uint_as_float((__float_as_uint(x) + 0x1000u) & 0xffffe000u); }
 
-// q * scale, k, v rounded to the TF32 grid: QS, KR, VR [M, N] and VT [N, M] = VR^T, one pass over q, k, v
+// q * scale, k, v rounded to the TF32 grid: QS, KR, VR [M, N] and VT [N, M] = VR^T, one pass over q, k, v; with WT (a training forward) also QT = QS^T and
+// KT = KR^T [N, M], which the backward's transposed operands would otherwise cost two more passes for
+template <bool WT>
 __global__ void __launch_bounds__(256) prep_k(const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ QS,
-                                              float* __restrict__ KR, float* __restrict__ VR, float* __restrict__ VT, long M, long N, float scale) {
+                                              float* __restrict__ KR, float* __restrict__ VR, float* __restrict__ VT, float* __restrict__ QT,
+                                              float* __restrict__ KT, long M, long N, float scale) {
   __shared__ float tile[32][33];
+  __shared__ float tq[WT ? 32 : 1][WT ? 33 : 1], tk[WT ? 32 : 1][WT ? 33 : 1];
   const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
   const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
 #pragma unroll
   for (int i = 0; i < 32; i += 8) {
     const long idx = (r0 + ty + i) * N + c0 + tx;
-    QS[idx] = rna_tf32(Q[idx] * scale);
-    KR[idx] = rna_tf32(K[idx]);
+    const float q = rna_tf32(Q[idx] * scale), k = rna_tf32(K[idx]);
+    QS[idx] = q;
+    KR[idx] = k;
     const float v = rna_tf32(V[idx]);
     VR[idx] = v;
     tile[ty + i][tx] = v;
+    if constexpr (WT) { tq[ty + i][tx] = q; tk[ty + i][tx] = k; }
   }
   __syncthreads();
 #pragma unroll
-  for (int i = 0; i < 32; i += 8) VT[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
+  for (int i = 0; i < 32; i += 8) {
+    VT[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
+    if constexpr (WT) { QT[(c0 + ty + i) * M + r0 + tx] = tq[tx][ty + i]; KT[(c0 + ty + i) * M + r0 + tx] = tk[tx][ty + i]; }
+  }
 }
+
 
 // D[a, h, l] = sum_d dO[a L + l, DH h + d] O[a L + l, DH h + d], plus its query-permuted copy and the permuted copy of the LSE (NH heads of width DH)
 template <int NH, int DH>
 __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const float* __restrict__ O, const float* __restrict__ LSE, float* __restrict__ DD,
-                                            float* __restrict__ DDP, float* __restrict__ LSEP, float* __restrict__ DOR, long rows, int L) {
+                                            float* __restrict__ DDP, float* __restrict__ LSEP, float* __restrict__ DOR, float* __restrict__ DOT, long rows, int L) {
   // a block: 16 consecutive rows (one sample: L % 16 == 0) of NH DH / 4 float4: dO is read, rounded and written, O read, all coalesced; the DH / 4
   // float4 of a head are summed in a fixed order from shared memory
   constexpr int F4 = NH * DH / 4, HF = DH / 4;
   __shared__ float s[16 * F4];  // the float4 partial dot products of each row
+  extern __shared__ float dsm[];   // [16][NH DH + 1]: the rounded dO of the block, only with DOT (its transpose is written from here)
+  constexpr int N = NH * DH;
   const long row0 = (long)blockIdx.x * 16;
   const float4* a = reinterpret_cast<const float4*>(DO + row0 * NH * DH);
   const float4* b = reinterpret_cast<const float4*>(O + row0 * NH * DH);
@@ -319,10 +334,17 @@ __global__ void __launch_bounds__(256) dd_k(const float* __restrict__ DO, const 
 #pragma unroll
   for (int i = threadIdx.x; i < 16 * F4; i += 256) {
     const float4 x = __ldg(a + i), y = __ldg(b + i);
-    r[i] = make_float4(rna_tf32(x.x), rna_tf32(x.y), rna_tf32(x.z), rna_tf32(x.w));
+    const float4 rr = make_float4(rna_tf32(x.x), rna_tf32(x.y), rna_tf32(x.z), rna_tf32(x.w));
+    r[i] = rr;
+    if (DOT != nullptr) {
+      float* p = dsm + (i / F4) * (N + 1) + (i % F4) * 4;
+      p[0] = rr.x; p[1] = rr.y; p[2] = rr.z; p[3] = rr.w;
+    }
     s[i] = x.x * y.x + x.y * y.y + x.z * y.z + x.w * y.w;
   }
   __syncthreads();
+  if (DOT != nullptr)   // dO^T [N, rows]: 16 consecutive rows of a column are 64 contiguous bytes
+    for (int idx = threadIdx.x; idx < 16 * N; idx += 256) DOT[(long)(idx / 16) * rows + row0 + (idx % 16)] = dsm[(idx % 16) * (N + 1) + idx / 16];
   const int h2 = threadIdx.x >> 4, r2 = threadIdx.x & 15;
   if (h2 >= NH) return;
   const long smp = row0 / L;
@@ -460,7 +482,7 @@ __global__ void __launch_bounds__(ABT) atom_bwd_k(const bf* __restrict__ Z, cons
 // channels and 64 dWf partial registers instead of 128 (which one warp per row spilled: 40x slower). The warps of a pair exchange the LayerNorm
 // statistics and the two means of g through shared memory under a named barrier.
 __global__ void __launch_bounds__(BT) bwd256_k(const float* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
-                                               float* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
+                                               float* __restrict__ DZ, float* __restrict__ ACC, long R, float eps, int PL) {
   constexpr int DP = 256, NH = 16, HALF = 128;
   __shared__ __align__(16) float wsm[NH * DP];
   __shared__ float red[WPB][HALF];
@@ -477,7 +499,8 @@ __global__ void __launch_bounds__(BT) bwd256_k(const float* __restrict__ Z, cons
   for (long base = gp * 32; base < R; base += npairs * 32) {
     float dbr[NH];
 #pragma unroll
-    for (int h = 0; h < NH; ++h) dbr[h] = __ldg(DB + (long)h * R + base + lane);
+    const long dpos = dbpos(base + lane, PL);
+    for (int h = 0; h < NH; ++h) dbr[h] = __ldg(DB + (long)h * R + dpos);
     for (int rb = 0; rb < 32; rb += PF) {
       float4 xb[PF];
 #pragma unroll
@@ -572,7 +595,7 @@ __global__ void __launch_bounds__(ABT) atom32_fwd_k(const float* __restrict__ Z,
 
 template <int NH>
 __global__ void __launch_bounds__(ABT) atom32_bwd_k(const float* __restrict__ Z, const float* __restrict__ DB, const float* __restrict__ W,
-                                                     float* __restrict__ DZ, float* __restrict__ ACC, long R, float eps) {
+                                                     float* __restrict__ DZ, float* __restrict__ ACC, long R, float eps, int PL) {
   __shared__ float w[NH * C];
   __shared__ float red[ABT / 32][NH * C];
   if (threadIdx.x < NH * C) w[threadIdx.x] = W[threadIdx.x];
@@ -585,7 +608,7 @@ __global__ void __launch_bounds__(ABT) atom32_bwd_k(const float* __restrict__ Z,
     atom_load_row32(Z + r * C, x);
     atom_normalize(x, eps, rstd);
 #pragma unroll
-    for (int h = 0; h < NH; ++h) db[h] = __ldg(DB + (long)h * R + r);
+    for (int h = 0; h < NH; ++h) db[h] = __ldg(DB + (long)h * R + dbpos(r, PL));
     float mg = 0.f, mgx = 0.f;
 #pragma unroll
     for (int c = 0; c < C; ++c) {
@@ -723,12 +746,12 @@ std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf
   auto s = at::cuda::getCurrentCUDAStream();
   const bf* zp = reinterpret_cast<const bf*>(z.data_ptr());
   bf* dp_ = reinterpret_cast<bf*>(dz.data_ptr());
-  PAIR_SWITCH(dp, nh, bwd_k<DPK, 8, bf, true><<<grid, BT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), reinterpret_cast<const float2*>(st.data_ptr()), dp_, acc.data_ptr<float>(), R, (float)eps));
+  PAIR_SWITCH(dp, nh, bwd_k<DPK, 8, bf, true><<<grid, BT, 0, s>>>(zp, db.data_ptr<float>(), wf.data_ptr<float>(), reinterpret_cast<const float2*>(st.data_ptr()), dp_, acc.data_ptr<float>(), R, (float)eps, 0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dz, acc};
 }
 
-std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, double scale) {
+std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, double scale, bool want_t) {
   chk(q, at::kFloat, "q");
   chk(k, at::kFloat, "k");
   chk(v, at::kFloat, "v");
@@ -736,10 +759,17 @@ std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, dou
   TORCH_CHECK(M % 32 == 0 && N % 32 == 0 && k.sizes() == q.sizes() && v.sizes() == q.sizes(), "prep_fwd32 shapes");
   const at::cuda::CUDAGuard gd(q.device());
   auto qs = at::empty_like(q), kr = at::empty_like(q), vr = at::empty_like(q), vt = at::empty({N, M}, q.options());
-  prep_k<<<dim3((unsigned)(N / 32), (unsigned)(M / 32)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(),
-      qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(), vt.data_ptr<float>(), M, N, (float)scale);
+  auto qt = want_t ? at::empty({N, M}, q.options()) : at::empty({1}, q.options()), kt = want_t ? at::empty({N, M}, q.options()) : at::empty({1}, q.options());
+  const dim3 grid((unsigned)(N / 32), (unsigned)(M / 32));
+  auto s = at::cuda::getCurrentCUDAStream();
+  if (want_t)
+    prep_k<true><<<grid, 256, 0, s>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(), qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(),
+        vt.data_ptr<float>(), qt.data_ptr<float>(), kt.data_ptr<float>(), M, N, (float)scale);
+  else
+    prep_k<false><<<grid, 256, 0, s>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(), qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(),
+        vt.data_ptr<float>(), nullptr, nullptr, M, N, (float)scale);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {qs, kr, vr, vt};
+  return {qs, kr, vr, vt, qt, kt};
 }
 
 at::Tensor transpose32(at::Tensor src) {
@@ -761,16 +791,18 @@ std::vector<at::Tensor> dd_perm(at::Tensor dO, at::Tensor O, at::Tensor lse, int
   const int64_t nh = lse.size(1), dh = dO.size(1) / nh;
   TORCH_CHECK(dO.dim() == 2 && dO.numel() == A * L * nh * dh && L % 16 == 0 && ((nh == 16 && dh == 48) || (nh == 4 && dh == 32)), "dd_perm shapes");
   const at::cuda::CUDAGuard gd(dO.device());
-  auto dd = at::empty({A, nh, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd), dor = at::empty_like(dO);
+  auto dd = at::empty({A, nh, L}, dO.options()), ddp = at::empty_like(dd), lsep = at::empty_like(dd), dor = at::empty_like(dO), dot = at::empty({nh * dh, A * L}, dO.options());
   auto s = at::cuda::getCurrentCUDAStream();
-  if (nh == 16)
-    dd_k<16, 48><<<(unsigned)(A * L / 16), 256, 0, s>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
-        dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), dor.data_ptr<float>(), A * L, (int)L);
-  else
-    dd_k<4, 32><<<(unsigned)(A * L / 16), 256, 0, s>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(),
-        dd.data_ptr<float>(), ddp.data_ptr<float>(), lsep.data_ptr<float>(), dor.data_ptr<float>(), A * L, (int)L);
+  auto go = [&](auto kern, int64_t n) {
+    const size_t smem = 16 * (n + 1) * sizeof(float);
+    C10_CUDA_CHECK(cudaFuncSetAttribute(reinterpret_cast<const void*>(kern), cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem));
+    kern<<<(unsigned)(A * L / 16), 256, smem, s>>>(dO.data_ptr<float>(), O.data_ptr<float>(), lse.data_ptr<float>(), dd.data_ptr<float>(), ddp.data_ptr<float>(),
+        lsep.data_ptr<float>(), dor.data_ptr<float>(), dot.data_ptr<float>(), A * L, (int)L);
+  };
+  if (nh == 16) go(dd_k<16, 48>, 768);
+  else go(dd_k<4, 32>, 128);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dd, ddp, lsep, dor};
+  return {dd, ddp, lsep, dor, dot};
 }
 
 at::Tensor bias_transposed(at::Tensor bias_p, int64_t L) {
@@ -784,8 +816,8 @@ at::Tensor bias_transposed(at::Tensor bias_p, int64_t L) {
   return z;
 }
 
-// fp32 pair [L L, 128 or 256], 16 heads (the fp32 token stack): dpair and the dWf block partials; the LayerNorm statistics are recomputed
-std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps) {
+// fp32 pair [L L, 128 or 256], 16 heads (the fp32 token stack): dpair and the dWf block partials; the LayerNorm statistics are recomputed. ``perm``: db keeps the TF32 core's key-permuted columns
+std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor wf, int64_t L, double eps, bool perm) {
   chk(z, at::kFloat, "pair");
   chk(db, at::kFloat, "dbias");
   chk(wf, at::kFloat, "wf");
@@ -805,18 +837,18 @@ std::vector<at::Tensor> pair_rows_bwd32(at::Tensor z, at::Tensor db, at::Tensor 
   auto s = at::cuda::getCurrentCUDAStream();
   if (dp == 16)
     atom32_bwd_k<4><<<(unsigned)acc.size(0), ABT, 0, s>>>(
-        z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps);
+        z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps, perm ? (int)L : 0);
   else if (dp == 128) {
     if (small)
       bwd_k<128, 16, float, false, 8><<<grid, BT, 0, s>>>(
-          z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), nullptr, dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps);
+          z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), nullptr, dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps, perm ? (int)L : 0);
     else
       bwd_k<128, 16, float, false, 32><<<grid, BT, 0, s>>>(
-          z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), nullptr, dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps);
+          z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), nullptr, dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps, perm ? (int)L : 0);
   }
   else
     bwd256_k<<<grid, BT, 0, s>>>(
-        z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps);
+        z.data_ptr<float>(), db.data_ptr<float>(), wf.data_ptr<float>(), dz.data_ptr<float>(), acc.data_ptr<float>(), R, (float)eps, perm ? (int)L : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dz, acc};
 }

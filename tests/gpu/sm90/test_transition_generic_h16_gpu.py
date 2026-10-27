@@ -86,3 +86,59 @@ def test_the_scale_kernel_agrees_with_the_torch_statements(d, hid, scale):
     torch.testing.assert_close(got[0], want[0], rtol=1e-5, atol=0)
     torch.testing.assert_close(got[1], want[1], rtol=1e-5, atol=0)
     assert torch.equal(got[2], want[2]) or float((got[2].float() - want[2].float()).abs().max()) <= 1e-3 * float(want[2].float().abs().max())
+
+
+@pytest.mark.skipif(not HOPPER, reason="the generic sm_90a Transition")
+def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_foreign_copy(monkeypatch):
+    """The TF32-rounded weight copies of the fp32 inference forward are made once per parameter version: reused on a repeated call, rebuilt after an
+    in-place update, never handed to another module that lands on a freed weight's address, and not filled under grad mode."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import _weights
+    from miniworld_engine.modules import Transition
+
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    prev = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        def make(seed):
+            torch.manual_seed(seed)
+            m = Transition(768, n=2, implementation=ImplementationType.MINIWORLD).cuda().float()
+            with torch.no_grad():
+                for p in m.parameters():
+                    if p.ndim == 2:
+                        p.normal_(std=768**-0.5)
+            return m
+
+        def fresh(m, x):
+            _weights._ROUNDED.clear()
+            with torch.no_grad():
+                return m(x)
+
+        x = torch.randn(1, 128, 768, device="cuda")
+        m = make(1)
+        _weights._ROUNDED.clear()
+        with torch.no_grad():
+            y1 = m(x)
+            assert len(_weights._ROUNDED) == 1, "the first inference call did not fill the cache"
+            entry = next(iter(_weights._ROUNDED.values()))[1]
+            y2 = m(x)
+            assert next(iter(_weights._ROUNDED.values()))[1] is entry, "a repeated call rebuilt the copies"
+        assert torch.equal(y1, y2)
+        with torch.no_grad():
+            m.expand_a.weight.mul_(1.5)                                  # in place: the version counter moves
+            y3 = m(x)
+        assert not torch.equal(y3, y1)
+        assert torch.equal(y3, fresh(m, x)), "a stale copy was served after an in-place update"
+        del m, entry
+        for seed in (2, 3, 4):                                           # new weights, quite possibly on the freed addresses
+            m2 = make(seed)
+            with torch.no_grad():
+                y = m2(x)
+            assert torch.equal(y, fresh(m2, x)), "another module was served a dead weight's copies"
+            del m2
+        m3 = make(5)                                                     # grad mode with a parameter requiring grad: nothing is cached
+        _weights._ROUNDED.clear()
+        m3(x)
+        assert not _weights._ROUNDED
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev

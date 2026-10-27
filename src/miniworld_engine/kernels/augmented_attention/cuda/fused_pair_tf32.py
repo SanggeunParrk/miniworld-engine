@@ -92,7 +92,7 @@ def _perm(L, device):
         _PERMS[key] = (p, torch.argsort(p))
     return _PERMS[key]
 
-def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
+def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps, want_t):
     """Shapes of the TF32 pair-fused attention forward (outputs and saved tensors; all like q's dtype)."""
     A, _, L, H, D = q.shape
     return (
@@ -102,21 +102,24 @@ def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps):
         q.new_empty((A * L, H * D)),
         q.new_empty((A * L, H * D)),
         q.new_empty((A * L, H * D)),
+        q.new_empty((H * D, A * L) if want_t else (1,)),
+        q.new_empty((H * D, A * L) if want_t else (1,)),
     )
 
 
 @opaque(fake=_fwd_fake, name="augmented_attention_tf32_fwd")
 def _fwd(
-    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None, eps: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, mask: torch.Tensor | None, eps: float,
+    want_t: bool,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(O, LSE, key-permuted bias [H, L, L] in log2 units, q scaled, k, v rounded to the TF32 grid [A L, 768]): the pair pass and the core."""
     from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
 
     from .fused_pair import _rows_ext
 
     A, _, L, H, D = q.shape
-    qs, kr, vr, vt = _rows_ext().prep_fwd32(
-        q.reshape(A * L, H * D).contiguous(), k.reshape(A * L, H * D).contiguous(), v.reshape(A * L, H * D).contiguous(), LOG2E / math.sqrt(D)
+    qs, kr, vr, vt, qt, kt = _rows_ext().prep_fwd32(
+        q.reshape(A * L, H * D).contiguous(), k.reshape(A * L, H * D).contiguous(), v.reshape(A * L, H * D).contiguous(), LOG2E / math.sqrt(D), want_t
     )
     wf = (wb.float() * lnw.float() * LOG2E).contiguous()
     bias_p = torch.empty(H, L, L, device=q.device, dtype=torch.float32)
@@ -126,10 +129,10 @@ def _fwd(
     else:   # d_pair 256 and the atom stack: the generic passes (the tensor-core one is built for 16 heads x 128 channels)
         _rows_ext().pair_bias_rows32(pair.view(L * L, DP), wf, bias_p, mask, int(L), float(eps), NEG)
     o, lse = tf32_forward(qs, kr, vt, bias_p, None, A, L, nh=H, dh=D)
-    return o, lse, bias_p, qs, kr, vr
+    return o, lse, bias_p, qs, kr, vr, qt, kt
 
 
-def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):   # (unchanged shapes for every layout)
+def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, qt, kt, pair, lnw, wb, eps):   # (unchanged shapes for every layout)
     """Shapes of the TF32 pair-fused attention backward: (dq, dk, dv, dpair, dlnw fp32, dwb fp32)."""
     return (
         qs.new_empty(qs.shape),
@@ -143,7 +146,7 @@ def _bwd_fake(do, o, lse, bias_p, qs, kr, vr, pair, lnw, wb, eps):   # (unchange
 
 @opaque(fake=_bwd_fake, name="augmented_attention_tf32_bwd")
 def _bwd(
-    do: torch.Tensor, o: torch.Tensor, lse: torch.Tensor, bias_p: torch.Tensor, qs: torch.Tensor, kr: torch.Tensor, vr: torch.Tensor,
+    do: torch.Tensor, o: torch.Tensor, lse: torch.Tensor, bias_p: torch.Tensor, qs: torch.Tensor, kr: torch.Tensor, vr: torch.Tensor, qt: torch.Tensor, kt: torch.Tensor,
     pair: torch.Tensor, lnw: torch.Tensor, wb: torch.Tensor, eps: float,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dq, dk, dv [A L, 768], dpair, dlnw, dwb) of ``_fwd``."""
@@ -154,16 +157,14 @@ def _bwd(
     D = o.shape[1] // H
     L = pair.shape[1]
     e = _rows_ext()
-    dd, dd_p, lse_p, dobr = e.dd_perm(do.contiguous().float(), o, lse, A, L)  # D = rowsum(dO O), its / the LSE's query-permuted copies, dO rounded
+    dd, dd_p, lse_p, dobr, dot = e.dd_perm(do.contiguous().float(), o, lse, A, L)  # (dO^T too) # D = rowsum(dO O), its / the LSE's query-permuted copies, dO rounded
     dq, dk, dv, db_p = tf32_backward(
-        qs, kr, vr, dobr, e.transpose32(qs), e.transpose32(kr), e.transpose32(dobr), bias_p, e.bias_transposed(bias_p, L),
+        qs, kr, vr, dobr, qt, kt, dot, bias_p, e.bias_transposed(bias_p, L),
         lse, dd, lse_p, dd_p, None, None, A, L, nh=H, dh=D,
     )
-    _, inv = _perm(L, qs.device)
-    db = db_p[..., inv].contiguous()  # natural key order, natural units: [H, L, L]
     wf = (wb.float() * lnw.float()).contiguous()
     DP = pair.shape[-1]
-    dz, accp = e.pair_rows_bwd32(pair.view(L * L, DP), db, wf, L, eps)
+    dz, accp = e.pair_rows_bwd32(pair.view(L * L, DP), db_p, wf, L, eps, True)   # db_p: [H, L, L] in natural units, key columns still permuted
     dwf = accp.sum(0).view(H, DP)
     return dq, dk, dv, dz.view(pair.shape), (dwf * wb.float()).sum(0), dwf * lnw.float()
 
@@ -172,16 +173,17 @@ class _AttnTf32(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, pair, lnw, wb, mask, eps):  # noqa: D102
         A, _, L, _, _ = q.shape
-        o, lse, bias_p, qs, kr, vr = _fwd(q, k, v, pair, lnw, wb, mask, eps)
+        want_t = any(ctx.needs_input_grad)
+        o, lse, bias_p, qs, kr, vr, qt, kt = _fwd(q, k, v, pair, lnw, wb, mask, eps, want_t)
         if any(ctx.needs_input_grad):
-            ctx.save_for_backward(o, lse, bias_p, qs, kr, vr, pair, lnw, wb)
+            ctx.save_for_backward(o, lse, bias_p, qs, kr, vr, qt, kt, pair, lnw, wb)
             ctx.eps, ctx.shape = eps, q.shape
         return o.view(A, 1, L, *q.shape[-2:])
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
-        o, lse, bias_p, qs, kr, vr, pair, lnw, wb = ctx.saved_tensors
-        dq, dk, dv, dz, dlnw, dwb = _bwd(do.reshape(o.shape).contiguous(), o, lse, bias_p, qs, kr, vr, pair, lnw, wb, ctx.eps)
+        o, lse, bias_p, qs, kr, vr, qt, kt, pair, lnw, wb = ctx.saved_tensors
+        dq, dk, dv, dz, dlnw, dwb = _bwd(do.reshape(o.shape).contiguous(), o, lse, bias_p, qs, kr, vr, qt, kt, pair, lnw, wb, ctx.eps)
         shp = ctx.shape
         return dq.view(shp), dk.view(shp), dv.view(shp), dz, dlnw, dwb, None, None
 

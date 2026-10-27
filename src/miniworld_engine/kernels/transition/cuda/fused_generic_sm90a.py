@@ -285,7 +285,7 @@ def _mm(a: torch.Tensor, b: torch.Tensor, fp32_out: bool) -> torch.Tensor:
     return torch.mm(a, b, out_dtype=torch.float32) if fp32_out else torch.mm(a, b)
 
 
-def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save):
+def _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded):
     """Shapes of the generic forward's outputs (y, the saved tensors); no kernel runs."""
     rows = x.shape[0] if save else 1
     f32 = dict(dtype=torch.float32, device=x.device)
@@ -319,6 +319,7 @@ def _fwd_launch(
     ws: torch.Tensor,
     eps: float,
     save: bool,
+    pre_rounded: bool,
 ) -> tuple[
     torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor
 ]:
@@ -326,10 +327,10 @@ def _fwd_launch(
     [M, 2 HID] = [a | b] and ``h`` [M, HID] (from the fp32 accumulators) when the bf16 training forward keeps them for the backward,
     else 1-element placeholders."""
     if _is_fake(x, wa):
-        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save)
+        return _fwd_launch_fake(x, gamma, beta, wa, wb, ws, eps, save, pre_rounded)
     ext = _ext()
     if (
-        x.dtype is torch.float32
+        x.dtype is torch.float32 and not pre_rounded
     ):  # the MMA would truncate raw fp32 weights: hand it TF32-rounded copies
         _, _, wa, wb, ws = ext.prep(wa, wb, ws, _PREP_ROUNDED_COPIES, True)
     # LayerNorm as its own kernel, not inside the expand GEMM: the in-GEMM normalization measured 5-25 % slower at 768 .. 12 288 rows
@@ -433,7 +434,7 @@ class _GenericTransitionSM90A(torch.autograd.Function):
         masters = (wa, wb, ws)   # saved too: an in-place update of a parameter before backward must raise, as for any autograd op
         wa, wb, ws = _kernel_weights(x, wa, wb, ws)
         out, xn, rstd, c1, ab, h = _fwd_launch(
-            flat, gf, bf, wa, wb, ws, float(eps), True
+            flat, gf, bf, wa, wb, ws, float(eps), True, False
         )
         wcat = (
             torch.cat([wa, wb], 0)
@@ -484,13 +485,23 @@ def transition_generic_sm90a(x, gamma, beta, wa, wb, ws, eps):
         and any(t.requires_grad for t in (x, gamma, beta, wa, wb, ws))
     ):
         shape = x.shape
+        kw = _kernel_weights(x, wa, wb, ws)
+        pre = False
+        if x.dtype is torch.float32 and all(w is o for w, o in zip(kw, (wa, wb, ws))):
+            # fp32: the TF32-rounded weight copies are made once per parameter version (weak-referenced, see _weights), not on every call
+            from ._weights import tf32_rounded_triple
+
+            got = tf32_rounded_triple(wa, wb, ws, lambda a, b, s: tuple(_ext().prep(a, b, s, _PREP_ROUNDED_COPIES, True)[2:]))
+            if got is not None:
+                kw, pre = list(got), True
         out, *_ = _fwd_launch(
             x.reshape(-1, shape[-1]).contiguous(),
             gamma.float().contiguous(),
             beta.float().contiguous(),
-            *_kernel_weights(x, wa, wb, ws),
+            *kw,
             float(eps),
             False,
+            pre,
         )
         return out.reshape(shape)
     return _GenericTransitionSM90A.apply(x, gamma, beta, wa, wb, ws, eps)
