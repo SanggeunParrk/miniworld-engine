@@ -172,3 +172,38 @@ def test_off_the_tile_and_switch_keep_the_module_composition(monkeypatch):
     settings.configure(force_portable_kernels=False, bias_only_dit_psb_infer=False)
     call(eng, single, cond, pair, mask, torch.float32, hoisted=False)
     assert spy.n == 0
+
+
+@pytest.mark.parametrize("dh", [32, 48])
+@pytest.mark.parametrize(("A", "L", "mask_kind"), [(1, 128, "none"), (3, 256, "per_sample"), (4, 384, "shared"), (2, 512, "per_sample"), (5, 512, "none")])
+def test_fp32_inference_core_matches_the_training_core_and_fp64(A, L, mask_kind, dh):
+    """``psb32i_fwd`` (inference: no statistics, all warps in P v) against bo_psb32.cu's forward and the fp64 softmax."""
+    from miniworld_engine.kernels.bias_only_dit import cuda as C
+    from miniworld_engine.kernels.bias_only_dit.cuda import psb_inf
+
+    H = 16
+    g = torch.Generator(device="cuda").manual_seed(3)
+    bias = (torch.randn(H, A, L, L, device="cuda", generator=g) * 2).contiguous()
+    vg = torch.randn(A * L, 2 * H * dh, device="cuda", generator=g)
+    mask = None
+    if mask_kind != "none":
+        mask = torch.rand(A, L, device="cuda", generator=g) > 0.2
+        if mask_kind == "shared":
+            mask = mask[:1].expand(A, L).contiguous()
+        mask[:, 0] = True
+    og = torch.empty(A * L, H * dh, device="cuda")
+    psb_inf.psb32i_fwd(bias.view(H * A * L, L), mask, vg, og, A, H, dh)
+    again = torch.empty_like(og)
+    psb_inf.psb32i_fwd(bias.view(H * A * L, L), mask, vg, again, A, H, dh)
+    assert torch.equal(og, again), "not bitwise repeatable"
+    old = torch.empty_like(og)
+    C.psb32_fwd(bias.view(H * A * L, L), torch.empty(H * A * L, 2, device="cuda"), mask, vg, old, A, H, dh)
+    assert rel(og, old) < 1e-5, rel(og, old)
+    b = bias.double()
+    if mask is not None:
+        b = b.masked_fill(~mask[None, :, None, :], -1e30)
+    p = torch.softmax(b, dim=-1)  # [H, A, L, L]
+    v = vg[:, : H * dh].double().view(A, L, H, dh).permute(2, 0, 1, 3)
+    gate = torch.sigmoid(vg[:, H * dh :].double().view(A, L, H, dh).permute(2, 0, 1, 3))
+    truth = (torch.matmul(p, v) * gate).permute(1, 2, 0, 3).reshape(A * L, H * dh)
+    assert rel(og, truth) < 2e-3, rel(og, truth)

@@ -762,9 +762,13 @@ class FusedBiasOnlyDiT:
         """a = sigmoid(g) softmax(bias + mask) v per (head, sample): vg [S L, 2 DA] (v | g), a [S L, DA]."""
         H, DA = self.h, self.da
         dh = DA // H
-        stats = torch.empty(H * S * L, 2, device=vg.device, dtype=torch.float32)  # (max, 1 / sum) per row: unused here
+        from miniworld_engine.kernels.bias_only_dit.cuda import psb_inf
+
+        stats = None if (self.fp32 and psb_inf.psb32i_served(L, dh)) else torch.empty(H * S * L, 2, device=vg.device, dtype=torch.float32)  # (max, 1 / sum) per row: unused here
         if not self.fp32:
             C.psb_fwd(bias, None, mask, vg, a, S, H, dh, stats=stats)
+        elif psb_inf.psb32i_served(L, dh):  # the inference core (no statistics, deeper prefetch, all warps in the product)
+            psb_inf.psb32i_fwd(bias, mask, vg, a, S, H, dh)
         elif L <= C.PSB32_MAX_L:
             C.psb32_fwd(bias, stats, mask, vg, a, S, H, dh)
         else:  # fp32 beyond the TF32 core's resident-v length: P per (head, sample) by the softmax rows, then one batched GEMM
