@@ -194,7 +194,7 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
     if shape_key is None:
         shape_key = both_key(rows_of(out.shape))   # `_sigmul_bwd` is gated_projection, level=both
     grid = lambda meta: (triton.cdiv(n, meta["BLOCK_E"]),)  # noqa: E731
-    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key)
+    _sigmul_bwd[grid](dy, scale, out, dscale, dout, n, shape_key=shape_key, ROUND_DO=out.dtype is torch.float32)
     return dout, dscale
 
 
@@ -225,20 +225,34 @@ def _dh_swiglu_bwd_kernel(
     rmask = rows < M
     nmask = cols < ND
 
+    m = rmask[:, None] & nmask[None, :]
+    off = rows[:, None] * sa0 + cols[None, :]
+    if PRE:
+        # fp32: a and b are requested before the K loop, so their latency hides behind the MMAs instead of after the last one (and `dout`
+        # arrives already on the TF32 grid, from `_sigmul_bwd`: the A operand needs no rounding pass of its own)
+        a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
+        b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
+
     dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
     for k0 in range(0, D, BLOCK_K):
         kc = k0 + tl.arange(0, BLOCK_K)
         kmask = kc < D
         do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
                      mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
-                    mask=kmask[:, None] & nmask[None, :], other=0.0)
-        dh += tf32_dot(do, w, out_dtype=tl.float32, pre_b=PRE)
+        if PRE:
+            # fp32: Ws arrives as its transpose (ND, D), so the B tile is K-major. A TF32 wgmma reads its operands K-major only; the
+            # (D, ND) tile would be transposed through shared memory first (H100, fp32: M = 18432, d = 768 420 -> 373 us; M = 196608, d = 128 426 -> 315 us, tile search included).
+            wt = tl.load(Ws + cols[:, None] * sw0 + kc[None, :],
+                         mask=nmask[:, None] & kmask[None, :], other=0.0)
+            dh += tf32_dot(do, tl.trans(wt), out_dtype=tl.float32, pre_a=True, pre_b=True)
+        else:
+            w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
+                        mask=kmask[:, None] & nmask[None, :], other=0.0)
+            dh += tf32_dot(do, w, out_dtype=tl.float32, pre_b=PRE)
 
-    m = rmask[:, None] & nmask[None, :]
-    off = rows[:, None] * sa0 + cols[None, :]
-    a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
-    b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
+    if not PRE:
+        a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
+        b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
     # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
     # `_swiglu_bwd_kernel`; only where dh comes from differs.
     sa = tl.sigmoid(a)
@@ -267,8 +281,8 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
             "at the caller that still holds the pre-flatten shape and pass it down."
         )
     pre = dout.dtype is torch.float32     # the weight is rounded to nearest here (kernels/_tf32.py); the gradient in the kernel
-    if pre:
-        ws = tf32_grid_many(ws)[0]
+    if pre:   # rounded, and transposed to (ND, D): the kernel reads the B tile K-major (see `_dh_swiglu_bwd_kernel`)
+        ws = tf32_grid_many(ws.t().contiguous())[0]
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     grid = lambda META: tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
     _dh_swiglu_bwd_kernel[grid](
@@ -668,7 +682,19 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # 6948c77 measured at 1.73x, in the same function.
         dout, dscale = _gate_bwd(out, scale, dy, shape_key=both_key(out.shape[0]))
         # conditioning grads
-        dcond = dscale @ wsc                            # (M, DC)
+        # fp32 (TF32): the three weights the backward multiplies from the right are handed to cuBLAS as K-major copies, `a @ w.t()` of a contiguous
+        # `wT` instead of `a @ w`. The "nn" TF32 kernels (B read N-contiguous) run at 270 TFLOP/s where the "nt" ones reach 350: on an H100,
+        # CUDA-graph replay, M = 18432, d = 768 (10 replays in one graph):
+        #
+        #     dx    dab @ wcat    327 us -> 250 us   (dab @ wcatT.t())
+        #     dh    dout @ ws     164 us -> 131 us
+        #     dcond dscale @ wsc   70 us ->  48 us
+        #
+        # for the weight transposes (12 MB; a few us each in the compiled graph). bf16 stays as it was: its "nn" kernels are not penalised the same way.
+        _tw = dy.dtype == torch.float32 and not ctx.master
+        if _tw:
+            wscT, wcatT = wsc.t().contiguous(), wcat.t().contiguous()
+        dcond = dscale @ wscT.t() if _tw else dscale @ wsc   # (M, DC)
         dWsc = torch.mm(dscale.t(), cond, out_dtype=torch.float32) if ctx.master else dscale.t() @ cond
         db_sc = dscale.sum(0, dtype=torch.float32 if ctx.master else dscale.dtype)
         del dscale                                      # last use; see the `del` note below
@@ -697,13 +723,15 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # bandwidth left to pay for the difference. Everywhere else the fused form wins, so the
         # exception is one cell and not a dtype rule. The flat kernel stays reachable for it.
         # H100 (portable switch on, M = 18432, d = 768, 2026-10-27): the fused kernel takes 407 us after its tile search against about 300 us for the
-        # cuBLAS dh (115 us) plus the flat pass (185 us, at its HBM roofline), so the split stays there too.
+        # cuBLAS dh (115 us) plus the flat pass (185 us, at its HBM roofline), so the split stays there too. With the K-major B tile and the pre-rounded dout the
+        # kernel is 373 us (M = 18432, d = 768, CUDA events, L2 flushed) against 316 us for the split (nt dh GEMM 131 us + the flat pass 185 us): still the split.
+        # At the atom width (M = 196608, d = 128) the same kernel is 315 us against 484 us for the split, and there it is used.
         wide_fp32 = dout.dtype == torch.float32 and x.shape[1] > _ATOM_D_MAX
         if not wide_fp32:
             dab = _dh_swiglu_bwd(dout, ws, a, b, shape_key=shape_key)
             del dout, dy
         else:
-            dh = dout @ ws                              # (M, ND)
+            dh = dout @ ws.t().contiguous().t() if _tw else dout @ ws   # (M, ND)
             del dout, dy
             dab = _swiglu_bwd_packed(a, b, dh, shape_key=shape_key)
             del dh
@@ -718,7 +746,7 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         # `dh` is no longer one of the three: it is fused into the SwiGLU backward above and
         # never allocated, so its 96 MiB is gone from that tally rather than merely freed early.
         # expand bwd. dx stays one concatenated GEMM (vs 2 + add); the WGRAD does not.
-        dx = dab @ wcat                                 # (M, K)
+        dx = dab @ wcatT.t() if _tw else dab @ wcat     # (M, K)
         # The merged wgrad `dab.T @ x` is (2ND, M)x(M, K), and cuBLAS picks a WORSE kernel for it
         # than for the same GEMM at ND. Measured on an A5000, bf16, M=36864, the two halves taken
         # from STRIDED views -- no copy, which is what a real split hands cuBLAS:
