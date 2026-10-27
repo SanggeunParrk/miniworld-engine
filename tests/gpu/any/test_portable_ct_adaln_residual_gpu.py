@@ -70,8 +70,20 @@ def test_training_residual_fold_matches_the_unfused_add(dtype, A, L):
         y = m(x, c) if fold else x + m.delta(x, c)
         y.backward(dy)
         results.append((y.detach(), x.grad, c.grad, *[p.grad.clone() for p in m.parameters()]))
+    # the gradient into the conditioning: the fold joins the two paths' gradients in the cond LayerNorm backward kernel (one rounding), the
+    # unfused add rounds each path to bf16 first; the bf16 cases are therefore held against the fp32 statements, the fold no further off than the add
+    gold = None
+    if dtype is BF:
+        ref = _ct(I.PYTORCH, F32)
+        ref.load_state_dict({k: v.float() for k, v in m.state_dict().items()})
+        xg, cg = (t.detach().float().requires_grad_(True) for t in _xc(A, L, dtype))
+        ref(xg, cg).backward(dy.float())
+        gold = cg.grad
     for i, (a, b) in enumerate(zip(*results, strict=True)):
         assert a.dtype == b.dtype
+        if i == 2 and gold is not None:
+            assert rel(a, gold) <= max(rel(b, gold), 2e-3), (i, rel(a, gold), rel(b, gold))
+            continue
         assert rel(a, b) <= ((0 if dtype is BF else 1e-6) if i == 0 else 2e-3), (i, rel(a, b))
     # the residual's own gradient is dy itself, so x.grad = dy + the update's path
     assert rel(results[0][1], results[1][1]) <= 2e-3

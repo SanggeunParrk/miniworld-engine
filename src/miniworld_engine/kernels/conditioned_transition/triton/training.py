@@ -604,11 +604,23 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
+        from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
+        wcat = None
         if ctx.master:
-            wa, wb, ws, wsc, bsc = pack_master(raw_weights)
+            # the casts of the five fp32 master weights in ONE launch, the expand weights straight into the halves of their concatenation
+            from miniworld_engine.kernels._cast import cast_pack
+
+            nd0 = wa.shape[0]
+            if all(w.is_contiguous() for w in raw_weights):
+                wcat, ws, wsc, bsc = cast_pack([wa, wb, ws, wsc, bsc], 2)
+                wa, wb = wcat[:nd0], wcat[nd0:]
+            else:
+                from miniworld_engine.integrations.h100_master import pack as pack_master
+
+                wcat = None
+                wa, wb, ws, wsc, bsc = pack_master(raw_weights)
         # FORWARD backend (see _FWD_MODE): cuBLAS GEMMs + fused-triton elementwise (default,
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
@@ -617,7 +629,8 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ws = ws.contiguous(); wsc = wsc.contiguous(); bsc = bsc.contiguous()
         cond = cond.contiguous()
         ND = wa.shape[0]
-        wcat = torch.cat([wa, wb], dim=0)         # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
+        if wcat is None:
+            wcat = torch.cat([wa, wb], dim=0)     # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
         # ONE L for the whole call, computed once here and reused by the backward via ctx: the
         # module hands us the real atom count A; without it all we could see is M = B*A.
         L = int(length) if length is not None else length_of(x.shape)
@@ -782,7 +795,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         #
         # The two forms are not bitwise equal (different cuBLAS kernels accumulate in a different
         # order), which is a reduction-order difference and not a correctness one.
-        if x.shape[1] <= _ATOM_D_MAX:
+        # H100, bf16, up to ~30k rows: the merged form is the faster one (cuBLAS picks a better kernel for the (2ND, M) x (M, K) product; M = 18432 / 24576:
+        # 138 -> 124 us / 185 -> 173 us); at M = 36864 it picks a worse one (274 -> 305 us), so the split stays there.
+        merged = x.shape[1] <= _ATOM_D_MAX or (ctx.master and dab.shape[0] < 30000)
+        if merged:
             dWcat = torch.mm(dab.t(), x, out_dtype=torch.float32) if ctx.master else dab.t() @ x
             dWa, dWb = dWcat[:ND], dWcat[ND:]
         else:

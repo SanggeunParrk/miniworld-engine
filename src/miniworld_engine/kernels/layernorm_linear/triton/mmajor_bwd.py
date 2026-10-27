@@ -164,7 +164,7 @@ def _persistent_grid(device) -> int:
 _PERSIST_MIN_M = 300_000
 
 
-def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None, dres=None):
     """Exact te_style atomic path (small-M fallback).
 
     ``shape_key`` is ``both_key(L)`` from the caller: x is the flattened (M, K) matrix here and M
@@ -180,6 +180,7 @@ def _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | No
         dx.stride(0), dx.stride(1),
         N_PAD=triton.next_power_of_2(K),
         shape_key=both_key(0, N=K) if shape_key is None else pack(shape_key, N=K),
+        **({} if dres is None else dict(DXR=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DXR=True)),
     )
     return dx, dg, db
 
@@ -236,7 +237,7 @@ def _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides, *,
     return dx, pdw.sum(0), pdb.sum(0)
 
 
-def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None, dres=None):
     """Drop-in for te_style `_ln_bwd`: dx (m-major, at dx_strides) + dγ + dβ (fp32 (N,)).
 
     Size-adaptive (all bit-exact vs te_style atomic):
@@ -250,7 +251,13 @@ def ln_bwd_mmajor(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | Non
     through unchanged -- the dispatch below picks a kernel, never a key."""
     M, K = x.shape
     if _override() == "atomic" or x.stride(0) != 1 or M < _PERSIST_MIN_M:
-        return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
+        return _ln_bwd_atomic(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key, dres=dres)
+    dx, dg, db = _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, shape_key=shape_key)
+    return (dx, dg, db) if dres is None else (dx + dres, dg, db)   # the persistent kernels carry no residual input: add it after
+
+
+def _ln_bwd_persistent(dxn, x, gamma, mean, rstd, dx_strides, *, shape_key: int | None = None):
+    K = x.shape[1]
     if _override() == "canonical":
         return _ln_bwd_persistent_canonical(dxn, x, gamma, mean, rstd, dx_strides,
                                             shape_key=shape_key)
