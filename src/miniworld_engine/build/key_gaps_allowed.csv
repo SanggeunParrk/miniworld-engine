@@ -195,3 +195,4 @@ transition_expand_swiglu_triton,PRE,"same as adaln_bwd_dx_dlnw_triton: a functio
 transition_expand_swiglu_triton,ROUND_X,"PRE and K % 64 == 0: a function of the keyed dtype and torch's TF32 switch and of K, which is in shape_key"
 transition_squeeze_residual_triton,PRE_H,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch (the hidden operand)"
 transition_squeeze_residual_triton,PRE_W,"same as adaln_bwd_dx_dlnw_triton: a function of the keyed dtype and torch's TF32 switch (the weight operand)"
+gated_projection_bwd_gate_flat_triton,ROUND_DO,"a pure store: fp32 dout is stored on the TF32 grid (round to nearest) when the next kernel reads it as a pre-rounded MMA operand; one extra integer add and mask per element on a bandwidth-bound pass, so no tile choice depends on it"

@@ -5,6 +5,7 @@ import os
 import torch
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tf32 import tf32_grid_tile
 from miniworld_engine import settings
 import triton
 import triton.language as tl
@@ -239,13 +240,16 @@ def _sigmul_fwd(g_ptr, o_ptr, a_ptr, n, BLOCK_E: tl.constexpr, shape_key, r_ptr=
 
 @triton.autotune(configs=configs_for("gated_projection_bwd_gate_flat_triton"), key=['shape_key'])
 @triton.jit
-def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key):
+def _sigmul_bwd(da_ptr, g_ptr, o_ptr, dg_ptr, do_ptr, n, BLOCK_E: tl.constexpr, shape_key, ROUND_DO: tl.constexpr = False):
     off = tl.program_id(0).to(tl.int64) * BLOCK_E + tl.arange(0, BLOCK_E)
     m = off < n
     da = tl.load(da_ptr + off, mask=m, other=0.0).to(tl.float32)
     s = tl.sigmoid(tl.load(g_ptr + off, mask=m, other=0.0).to(tl.float32))
     o = tl.load(o_ptr + off, mask=m, other=0.0).to(tl.float32)
-    tl.store(do_ptr + off, (da * s).to(do_ptr.dtype.element_ty), mask=m)
+    dov = (da * s).to(do_ptr.dtype.element_ty)
+    if ROUND_DO:   # fp32 dout read as a pre-rounded TF32 operand by the next kernel (conditioned_transition/triton/training.py): the grid value, what a cuBLAS TF32 GEMM would round it to
+        dov = tf32_grid_tile(dov)
+    tl.store(do_ptr + off, dov, mask=m)
     tl.store(dg_ptr + off, (da * o * s * (1.0 - s)).to(dg_ptr.dtype.element_ty), mask=m)
 
 
