@@ -39,7 +39,8 @@ def _kernels(fn):
     fn()
     torch.cuda.synchronize()
     with profile(activities=[ProfilerActivity.CUDA]) as p:
-        fn()
+        for _ in range(3):   # (a single call has dropped the first kernel of a programmatic-dependent-launch pair from the trace)
+            fn()
         torch.cuda.synchronize()
     return {e.key for e in p.key_averages() if e.device_time_total > 0}
 
