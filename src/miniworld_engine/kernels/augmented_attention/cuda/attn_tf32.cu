@@ -999,7 +999,7 @@ attn_tf32_dkv_kernel(const __grid_constant__ CUtensorMap mk, const __grid_consta
                      const __grid_constant__ CUtensorMap mqp, const __grid_constant__ CUtensorMap mdop,
                      const __grid_constant__ CUtensorMap mqt, const __grid_constant__ CUtensorMap mdot,
                      const float* __restrict__ BT, const float* __restrict__ LSEP, const float* __restrict__ DDP,
-                     const float* __restrict__ KM, float* __restrict__ DK, float* __restrict__ DV, int L, int A) {
+                     const float* __restrict__ KM, float* __restrict__ DK, float* __restrict__ DV, int L, int A, long ldo) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint8_t* sk = sm;                                                 // k: 2 chunks x QM rows
@@ -1121,9 +1121,9 @@ attn_tf32_dkv_kernel(const __grid_constant__ CUtensorMap mk, const __grid_consta
     const size_t r = (size_t)srow + key + 8 * h;
 #pragma unroll
     for (int j = 0; j < JJ; ++j) {
-      *reinterpret_cast<float2*>(DK + r * DM + hcol + 8 * j + 2 * t) =
+      *reinterpret_cast<float2*>(DK + r * ldo + hcol + 8 * j + 2 * t) =
           make_float2(dk[4 * j + 2 * h] * (1.f / LOG2E), dk[4 * j + 2 * h + 1] * (1.f / LOG2E));
-      *reinterpret_cast<float2*>(DV + r * DM + hcol + 8 * j + 2 * t) = make_float2(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
+      *reinterpret_cast<float2*>(DV + r * ldo + hcol + 8 * j + 2 * t) = make_float2(dv[4 * j + 2 * h], dv[4 * j + 2 * h + 1]);
     }
   }
 }
@@ -1138,7 +1138,7 @@ attn_tf32_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
                      const __grid_constant__ CUtensorMap mkp, const __grid_constant__ CUtensorMap mvp,
                      const __grid_constant__ CUtensorMap mkt, const __grid_constant__ CUtensorMap mdb,
                      const float* __restrict__ BP, const float* __restrict__ LSE, const float* __restrict__ DD,
-                     const float* __restrict__ KMP, float* __restrict__ DQ, int L, int A, int ngi) {
+                     const float* __restrict__ KMP, float* __restrict__ DQ, int L, int A, int ngi, long ldo) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint8_t* sq = sm;                                                 // q: 2 chunks x QM rows, then dO
@@ -1293,7 +1293,7 @@ attn_tf32_dqb_kernel(const __grid_constant__ CUtensorMap mq, const __grid_consta
   for (int i = 0; i < ACC; ++i) fence_reg(dq[i]);
 #pragma unroll
   for (int h = 0; h < 2; ++h) {
-    float* orow = DQ + ((size_t)srow + row + 8 * h) * DM + hcol;
+    float* orow = DQ + ((size_t)srow + row + 8 * h) * ldo + hcol;
 #pragma unroll
     for (int j = 0; j < JJ; ++j)
       *reinterpret_cast<float2*>(orow + 8 * j + 2 * t) = make_float2(dq[4 * j + 2 * h] * RSQD, dq[4 * j + 2 * h + 1] * RSQD);
@@ -1458,7 +1458,8 @@ void attn_tf32_dkv(torch::Tensor q, torch::Tensor dob, torch::Tensor qt, torch::
                    torch::Tensor bt, torch::Tensor lsep, torch::Tensor ddp, c10::optional<torch::Tensor> kmask,
                    torch::Tensor DK, torch::Tensor DV) {
   const int L = bt.size(1), A = q.size(0) / L;
-  for (auto* t : {&q, &dob, &qt, &dot, &k, &v, &bt, &lsep, &ddp, &DK, &DV}) check_f32(*t, "operand");
+  for (auto* t : {&q, &dob, &qt, &dot, &k, &v, &bt, &lsep, &ddp}) check_f32(*t, "operand");
+  for (auto* t : {&DK, &DV}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kFloat32 && t->dim() == 2 && t->stride(1) == 1 && t->stride(0) == DK.stride(0) && t->stride(0) % 2 == 0, "DK / DV: fp32 rows of one stride (column slices of a wider matrix are fine)");
   const uint64_t rows = (uint64_t)A * L;
   TORCH_CHECK(q.size(1) == DM && q.size(0) == (int64_t)rows && qt.size(0) == DM && qt.size(1) == (int64_t)rows && L % QM == 0,
               "shapes");
@@ -1472,7 +1473,7 @@ void attn_tf32_dkv(torch::Tensor q, torch::Tensor dob, torch::Tensor qt, torch::
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   kern<<<A * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       mk, mv, mqp, mdop, mqt, mdot, bt.data_ptr<float>(), lsep.data_ptr<float>(), ddp.data_ptr<float>(),
-      hasm ? kmask->data_ptr<float>() : nullptr, DK.data_ptr<float>(), DV.data_ptr<float>(), L, A);
+      hasm ? kmask->data_ptr<float>() : nullptr, DK.data_ptr<float>(), DV.data_ptr<float>(), L, A, (long)DK.stride(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1482,7 +1483,8 @@ void attn_tf32_dkv(torch::Tensor q, torch::Tensor dob, torch::Tensor qt, torch::
 void attn_tf32_dqb(torch::Tensor q, torch::Tensor dob, torch::Tensor k, torch::Tensor v, torch::Tensor kt, torch::Tensor bp,
                    torch::Tensor lse, torch::Tensor dd, c10::optional<torch::Tensor> kmp, torch::Tensor DQ, torch::Tensor dbp) {
   const int L = bp.size(1), A = q.size(0) / L;
-  for (auto* t : {&q, &dob, &k, &v, &kt, &bp, &lse, &dd, &DQ, &dbp}) check_f32(*t, "operand");
+  for (auto* t : {&q, &dob, &k, &v, &kt, &bp, &lse, &dd, &dbp}) check_f32(*t, "operand");
+  TORCH_CHECK(DQ.is_cuda() && DQ.scalar_type() == torch::kFloat32 && DQ.dim() == 2 && DQ.stride(1) == 1 && DQ.stride(0) % 2 == 0, "DQ: fp32 rows (a column slice of a wider matrix is fine)");
   const uint64_t rows = (uint64_t)A * L;
   TORCH_CHECK(q.size(1) == DM && q.size(0) == (int64_t)rows && kt.size(0) == DM && kt.size(1) == (int64_t)rows
               && L % QM == 0, "shapes");
@@ -1508,7 +1510,7 @@ void attn_tf32_dqb(torch::Tensor q, torch::Tensor dob, torch::Tensor k, torch::T
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   kern<<<C * NH * (L / QM), 128 * NWG + 32, smem, at::cuda::getCurrentCUDAStream()>>>(
       mq, mdo, mkp, mvp, mkt, mdb, bp.data_ptr<float>(), lse.data_ptr<float>(), dd.data_ptr<float>(),
-      hasm ? kmp->data_ptr<float>() : nullptr, DQ.data_ptr<float>(), L, A, ngi);
+      hasm ? kmp->data_ptr<float>() : nullptr, DQ.data_ptr<float>(), L, A, ngi, (long)DQ.stride(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

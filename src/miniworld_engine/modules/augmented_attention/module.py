@@ -149,6 +149,54 @@ class AugmentedAttentionPairBias(nn.Module):
             return None
         return fn if mod.available(query, pair, self.ln_pair.weight, self.to_bias.weight, m1) else None
 
+    def _proj_core_gate(self, single, pair, mask, compute_dtype, extra_pair_bias):
+        """sigmoid(gate) * attention as one node where the fp32 TF32 pair-fused core serves the call (no QK norm), else None."""
+        if self.use_qk_norm or not self._packed_ok(single, compute_dtype, extra_pair_bias) or (mask is not None and mask.ndim != 2):
+            return None
+        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+
+        a, b, l, n = single.shape
+        hd = n // self.n_head
+        m1 = None if mask is None else mask[0]
+        if b != 1 or not mod.supported(single.view(a, b, l, self.n_head, hd), pair, self.ln_pair.weight, self.to_bias.weight, m1):
+            return None
+        if not mod.available(single.view(a, b, l, self.n_head, hd), pair, self.ln_pair.weight, self.to_bias.weight, m1):
+            return None
+        args = (single, self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight, self.to_gate.weight)
+        if not self._packed_weights_ok(*args):
+            return None
+        return mod.proj_core_gate(*args, pair, self.ln_pair.weight, self.to_bias.weight, m1, self.ln_pair.eps, self.n_head)
+
+    def _packed_ok(self, single, compute_dtype, extra_pair_bias) -> bool:
+        """The fp32 H100 packed projection / TF32 core family may serve this call (module-level conditions)."""
+        return not (
+            extra_pair_bias is not None
+            or compute_dtype is not None
+            or self._backend != KernelBackend.PORTABLE
+            or self.implementation != ImplementationType.MINIWORLD
+            or not single.is_cuda
+            or single.dtype is not torch.float32
+            or self.ln_pair.eps != 1e-5
+            or not _bf16_sm90_enabled()
+            or not _dispatch.restricted_card(single.device)
+        )
+
+    def _packed_weights_ok(self, single, wq, bq, wk, wv, wg) -> bool:
+        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+
+        return self.to_key.bias is None and self.to_value.bias is None and self.to_gate.bias is None and mod.packed_qkvg_ok(single, wq, bq, wk, wv, wg)
+
+    def _packed_qkvg(self, single, compute_dtype, extra_pair_bias):
+        """The packed q / k / v / gate projection (one GEMM) where the fp32 TF32 pair-fused core will run, else None."""
+        if not self._packed_ok(single, compute_dtype, extra_pair_bias):
+            return None
+        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+
+        args = (single, self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight, self.to_gate.weight)
+        if not self._packed_weights_ok(*args):
+            return None
+        return mod.packed_qkvg(*args)
+
     def _fused_pair_bias_ok(self, pair: torch.Tensor, query: torch.Tensor) -> bool:
         """Does this call take the fused pair LayerNorm + projection (Triton): a training step (a gradient is recorded), bf16 / fp16 pair, and the
         attention core that will run is the Triton one (the engine's portable path), on a card the module may run it on."""
@@ -282,10 +330,21 @@ class AugmentedAttentionPairBias(nn.Module):
         """
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)
-        query = self.to_query(single)
-        key = self.to_key(single)
-        value = self.to_value(single)
-        gate = self.to_gate(single)
+        whole = self._proj_core_gate(single, pair, mask, compute_dtype, extra_pair_bias)
+        if whole is not None:
+            # H100 fp32 (TF32): packed projection + pair-fused core + output gate as one autograd node (sigmoid(g) * attention)
+            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import gate_mul
+
+            return gate_mul(self.to_scale(cond), self.to_out(whole))
+        packed = self._packed_qkvg(single, compute_dtype, extra_pair_bias)
+        if packed is not None:
+            # H100 fp32 (TF32): the four projections as one GEMM; q / k / v / gate are column views of its result
+            query, key, value, gate = packed
+        else:
+            query = self.to_query(single)
+            key = self.to_key(single)
+            value = self.to_value(single)
+            gate = self.to_gate(single)
 
         num_aug, batch, len_res = query.shape[:3]
         n_head, hidden_dim = self.n_head, query.shape[-1] // self.n_head
@@ -327,6 +386,12 @@ class AugmentedAttentionPairBias(nn.Module):
         out = out.to(in_dtype)
         out = rearrange(out, "A B L H D -> A B L (H D)")
 
+        if packed is not None:
+            # one pass each way for sigmoid(g) * x (instead of a sigmoid, a product and their backward passes), both gates
+            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import gate_mul
+
+            out = self.to_out(gate_mul(gate, out))
+            return gate_mul(self.to_scale(cond), out)
         out = sigmoid_gate(gate, out)
         out = self.to_out(out)
         return sigmoid_gate(self.to_scale(cond), out)

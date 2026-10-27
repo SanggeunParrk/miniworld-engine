@@ -292,7 +292,7 @@ __device__ __forceinline__ float rna_tf32(float x) { return __uint_as_float((__f
 template <bool WT>
 __global__ void __launch_bounds__(256) prep_k(const float* __restrict__ Q, const float* __restrict__ K, const float* __restrict__ V, float* __restrict__ QS,
                                               float* __restrict__ KR, float* __restrict__ VR, float* __restrict__ VT, float* __restrict__ QT,
-                                              float* __restrict__ KT, long M, long N, float scale) {
+                                              float* __restrict__ KT, long M, long N, float scale, long ldq, long ldk, long ldv) {
   __shared__ float tile[32][33];
   __shared__ float tq[WT ? 32 : 1][WT ? 33 : 1], tk[WT ? 32 : 1][WT ? 33 : 1];
   const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
@@ -300,10 +300,11 @@ __global__ void __launch_bounds__(256) prep_k(const float* __restrict__ Q, const
 #pragma unroll
   for (int i = 0; i < 32; i += 8) {
     const long idx = (r0 + ty + i) * N + c0 + tx;
-    const float q = rna_tf32(Q[idx] * scale), k = rna_tf32(K[idx]);
+    const long rr = r0 + ty + i;
+    const float q = rna_tf32(Q[rr * ldq + c0 + tx] * scale), k = rna_tf32(K[rr * ldk + c0 + tx]);
     QS[idx] = q;
     KR[idx] = k;
-    const float v = rna_tf32(V[idx]);
+    const float v = rna_tf32(V[rr * ldv + c0 + tx]);
     VR[idx] = v;
     tile[ty + i][tx] = v;
     if constexpr (WT) { tq[ty + i][tx] = q; tk[ty + i][tx] = k; }
@@ -752,22 +753,20 @@ std::vector<at::Tensor> pair_rows_bwd(at::Tensor z, at::Tensor db, at::Tensor wf
 }
 
 std::vector<at::Tensor> prep_fwd32(at::Tensor q, at::Tensor k, at::Tensor v, double scale, bool want_t) {
-  chk(q, at::kFloat, "q");
-  chk(k, at::kFloat, "k");
-  chk(v, at::kFloat, "v");
+  for (const at::Tensor* t : {&q, &k, &v}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == at::kFloat && t->dim() == 2 && t->stride(1) == 1 && t->stride(0) % 4 == 0, "prep_fwd32: fp32 rows (a column slice of a wider matrix is fine)");
   const int64_t M = q.size(0), N = q.size(1);
   TORCH_CHECK(M % 32 == 0 && N % 32 == 0 && k.sizes() == q.sizes() && v.sizes() == q.sizes(), "prep_fwd32 shapes");
   const at::cuda::CUDAGuard gd(q.device());
-  auto qs = at::empty_like(q), kr = at::empty_like(q), vr = at::empty_like(q), vt = at::empty({N, M}, q.options());
+  auto qs = at::empty({M, N}, q.options()), kr = at::empty({M, N}, q.options()), vr = at::empty({M, N}, q.options()), vt = at::empty({N, M}, q.options());
   auto qt = want_t ? at::empty({N, M}, q.options()) : at::empty({1}, q.options()), kt = want_t ? at::empty({N, M}, q.options()) : at::empty({1}, q.options());
   const dim3 grid((unsigned)(N / 32), (unsigned)(M / 32));
   auto s = at::cuda::getCurrentCUDAStream();
   if (want_t)
     prep_k<true><<<grid, 256, 0, s>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(), qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(),
-        vt.data_ptr<float>(), qt.data_ptr<float>(), kt.data_ptr<float>(), M, N, (float)scale);
+        vt.data_ptr<float>(), qt.data_ptr<float>(), kt.data_ptr<float>(), M, N, (float)scale, q.stride(0), k.stride(0), v.stride(0));
   else
     prep_k<false><<<grid, 256, 0, s>>>(q.data_ptr<float>(), k.data_ptr<float>(), v.data_ptr<float>(), qs.data_ptr<float>(), kr.data_ptr<float>(), vr.data_ptr<float>(),
-        vt.data_ptr<float>(), nullptr, nullptr, M, N, (float)scale);
+        vt.data_ptr<float>(), nullptr, nullptr, M, N, (float)scale, q.stride(0), k.stride(0), v.stride(0));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {qs, kr, vr, vt, qt, kt};
 }
@@ -934,8 +933,81 @@ void pair_bias_rows32(at::Tensor z, at::Tensor wf, at::Tensor out, c10::optional
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
+
+// ---- out = sigmoid(g) * o (fp32), forward and backward in one pass each; g may be a column slice of a wider matrix (row stride ldg)
+__device__ __forceinline__ float sigm(float x) { return 1.f / (1.f + expf(-x)); }
+
+__global__ void __launch_bounds__(256) gate_fwd_k(const float* __restrict__ G, const float* __restrict__ O, float* __restrict__ OUT, long n4, int n, long ldg) {
+  const int c4 = n / 4;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n4; i += (long)gridDim.x * 256) {
+    const long row = i / c4, c = (i % c4) * 4;
+    const float4 g = __ldg(reinterpret_cast<const float4*>(G + row * ldg + c)), o = __ldg(reinterpret_cast<const float4*>(O) + i);
+    reinterpret_cast<float4*>(OUT)[i] = make_float4(sigm(g.x) * o.x, sigm(g.y) * o.y, sigm(g.z) * o.z, sigm(g.w) * o.w);
+  }
+}
+
+__global__ void __launch_bounds__(256) gate_bwd_k(const float* __restrict__ G, const float* __restrict__ O, const float* __restrict__ DY, float* __restrict__ DG, long lddg,
+                                                  float* __restrict__ DO, long n4, int n, long ldg) {
+  const int c4 = n / 4;
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < n4; i += (long)gridDim.x * 256) {
+    const long row = i / c4, c = (i % c4) * 4;
+    const float4 g = __ldg(reinterpret_cast<const float4*>(G + row * ldg + c)), o = __ldg(reinterpret_cast<const float4*>(O) + i), dy = __ldg(reinterpret_cast<const float4*>(DY) + i);
+    const float gv[4] = {g.x, g.y, g.z, g.w}, ov[4] = {o.x, o.y, o.z, o.w}, dv[4] = {dy.x, dy.y, dy.z, dy.w};
+    float dg[4], dd[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const float s = sigm(gv[e]);
+      dd[e] = dv[e] * s;
+      dg[e] = dv[e] * ov[e] * s * (1.f - s);
+    }
+    *reinterpret_cast<float4*>(DG + row * lddg + c) = make_float4(dg[0], dg[1], dg[2], dg[3]);
+    reinterpret_cast<float4*>(DO)[i] = make_float4(dd[0], dd[1], dd[2], dd[3]);
+  }
+}
+
+at::Tensor gate_mul_fwd(at::Tensor g, at::Tensor o) {
+  chk(o, at::kFloat, "o");
+  TORCH_CHECK(g.is_cuda() && g.scalar_type() == at::kFloat && g.dim() == 2 && g.stride(1) == 1 && g.stride(0) % 4 == 0 && g.sizes() == o.sizes() && o.size(1) % 4 == 0, "gate_mul_fwd shapes");
+  const at::cuda::CUDAGuard gd(o.device());
+  auto out = at::empty_like(o);
+  const long n4 = o.numel() / 4;
+  gate_fwd_k<<<(unsigned)std::min<long>((n4 + 255) / 256, 4L * nsm_of(o)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(g.data_ptr<float>(), o.data_ptr<float>(), out.data_ptr<float>(), n4, (int)o.size(1), g.stride(0));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
+std::vector<at::Tensor> gate_mul_bwd(at::Tensor g, at::Tensor o, at::Tensor dy) {
+  chk(o, at::kFloat, "o");
+  chk(dy, at::kFloat, "dy");
+  TORCH_CHECK(g.is_cuda() && g.scalar_type() == at::kFloat && g.dim() == 2 && g.stride(1) == 1 && g.stride(0) % 4 == 0 && g.sizes() == o.sizes() && o.sizes() == dy.sizes() && o.size(1) % 4 == 0, "gate_mul_bwd shapes");
+  const at::cuda::CUDAGuard gd(o.device());
+  auto dg = at::empty_like(o), dd = at::empty_like(o);
+  const long n4 = o.numel() / 4;
+  gate_bwd_k<<<(unsigned)std::min<long>((n4 + 255) / 256, 4L * nsm_of(o)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(g.data_ptr<float>(), o.data_ptr<float>(), dy.data_ptr<float>(),
+      dg.data_ptr<float>(), (long)dg.stride(0), dd.data_ptr<float>(), n4, (int)o.size(1), g.stride(0));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dg, dd};
+}
+
+// the backward with d gate written into a column slice of a wider matrix (the packed gradient of the projections); returns d o
+at::Tensor gate_mul_bwd_into(at::Tensor g, at::Tensor o, at::Tensor dy, at::Tensor dg) {
+  chk(o, at::kFloat, "o");
+  chk(dy, at::kFloat, "dy");
+  TORCH_CHECK(g.is_cuda() && g.scalar_type() == at::kFloat && g.dim() == 2 && g.stride(1) == 1 && g.stride(0) % 4 == 0 && g.sizes() == o.sizes() && o.sizes() == dy.sizes() && o.size(1) % 4 == 0, "gate_mul_bwd_into shapes");
+  TORCH_CHECK(dg.is_cuda() && dg.scalar_type() == at::kFloat && dg.sizes() == o.sizes() && dg.stride(1) == 1 && dg.stride(0) % 4 == 0, "gate_mul_bwd_into: d gate rows");
+  const at::cuda::CUDAGuard gd(o.device());
+  auto dd = at::empty_like(o);
+  const long n4 = o.numel() / 4;
+  gate_bwd_k<<<(unsigned)std::min<long>((n4 + 255) / 256, 4L * nsm_of(o)), 256, 0, at::cuda::getCurrentCUDAStream()>>>(g.data_ptr<float>(), o.data_ptr<float>(), dy.data_ptr<float>(),
+      dg.data_ptr<float>(), (long)dg.stride(0), dd.data_ptr<float>(), n4, (int)o.size(1), g.stride(0));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return dd;
+}
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("pair_rows_bwd32", &pair_rows_bwd32);
+  m.def("gate_mul_fwd", &gate_mul_fwd);
+  m.def("gate_mul_bwd", &gate_mul_bwd);
+  m.def("gate_mul_bwd_into", &gate_mul_bwd_into);
   m.def("pair_bias_rows32", &pair_bias_rows32);
   m.def("transpose32", &transpose32);
   m.def("prep_fwd32", &prep_fwd32);
