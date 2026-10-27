@@ -35,9 +35,17 @@ void wide_lnsg_launch(const CUtensorMap& mx, const CUtensorMap& mw1p, const CUte
 namespace mw_split {
 #undef WAIT0
 #define WAIT0 1
-#define TBK 32
-#define NSTAGE 4
-#define STG_HALF 1
+#if WIDE_D == 512                                         // 64-wide K slabs, 3 stages: -1.6 % of the D512 training step against 32 x 4 (384 x 384 pair)
+#define MW_EXP_TBK 64
+#define MW_EXP_NSTAGE 3
+#else
+#define MW_EXP_TBK 32
+#define MW_EXP_NSTAGE 4
+#endif
+#define MW_EXP_STGHALF 1
+#define TBK MW_EXP_TBK
+#define NSTAGE MW_EXP_NSTAGE
+#define STG_HALF MW_EXP_STGHALF
 #define REG_C 200
 #define MW_EXPAND_ONLY 1
 #define gate_gemm wide_expand_saved_kernel

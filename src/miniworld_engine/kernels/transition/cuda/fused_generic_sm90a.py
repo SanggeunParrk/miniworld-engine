@@ -27,7 +27,7 @@ from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent / "generic_sm90a"
-_REVISION = "v28"
+_REVISION = "v29"
 MAX_D = 1024
 # `ext.prep` job masks: bit 0 Ws^T, 1-2 the two halves of [Wa;Wb]^T, 3-5 copies of Wa / Wb / Ws (TF32-rounded for fp32 activations)
 _PREP_BWD, _PREP_BWD_ROUNDED, _PREP_ROUNDED_COPIES = 0b000111, 0b011111, 0b111000
@@ -162,6 +162,31 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         )
         return False
     return True
+
+
+#: Rows from which the fp32 (TF32) forward keeps the (M, HID) intermediate in fp16 (below it the three launches are latency bound, and the
+#: scale arithmetic below would be a visible share of them).
+_H16_MIN_ROWS = 16384
+
+
+def _h16_scales(x, gamma, beta, wa, wb, ws):
+    """(1 / s_h, s_h * s_w, ws as fp16 divided by s_w): fp32 device scalars that keep h = silu(a) * b and Ws inside fp16's range.
+    |h| <= |a| |b| <= bound^2 with bound = (sqrt(D) max|gamma| + max|beta|) * max row L1 norm of Wa, Wb (LayerNorm output is z gamma + beta with
+    |z| <= sqrt(D)); the scale is 1 for any ordinary magnitude. Device arithmetic only: graph-capturable, no host sync."""
+    with torch.no_grad():
+        d = x.shape[1]
+        xn_max = (d ** 0.5) * gamma.abs().max() + beta.abs().max()
+        a_max = xn_max * torch.maximum(wa.abs().sum(dim=1).max(), wb.abs().sum(dim=1).max())
+        s_h = (a_max * a_max * (1.0 / 60000.0)).clamp_min(1.0)
+        s_w = (ws.abs().max() * (1.0 / 60000.0)).clamp_min(1.0)
+        return (1.0 / s_h).reshape(1), (s_h * s_w).reshape(1), (ws / s_w).half()
+
+
+def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws):
+    """swiglu -> squeeze with h in fp16 (same mantissa as TF32, half the bytes of the traffic that bounds both GEMMs)."""
+    inv_sh, s, ws16 = _h16_scales(x, gamma, beta, wa, wb, ws)
+    h = ext.swiglu_h16(xn, wa, wb, inv_sh)
+    return h, ext.squeeze_res_h16(h, ws16, x, s)
 
 
 def _saves_ab(x: torch.Tensor, save: bool) -> bool:
@@ -304,6 +329,9 @@ def _fwd_launch(
     # LayerNorm as its own kernel, not inside the expand GEMM: the in-GEMM normalization measured 5-25 % slower at 768 .. 12 288 rows
     # (it sits on each CTA's critical path; the separate kernel runs on every SM and overlaps its successor through PDL)
     xn, rstd, c1 = ext.ln_fwd(x, gamma, beta, float(eps), bool(save))
+    if x.dtype is torch.float32 and x.shape[0] >= _H16_MIN_ROWS:
+        h16, out = _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws)
+        return out, xn, rstd, c1, x.new_empty((1, 1)), x.new_empty((1, 1))
     if _saves_ab(x, save):
         h, ab = ext.swiglu_save(xn, wa, wb)
     else:

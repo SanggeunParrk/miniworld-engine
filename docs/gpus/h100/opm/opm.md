@@ -23,6 +23,7 @@ Per call (training adds the right-hand column), the same three kernel boundaries
 | F1 / B4 | prologue: LayerNorm + both projections + mask straight into the grouped layouts A2 `[(i,c), s]` and BT `[(j,e), s]` (+ LN statistics, bit mask) | prologue backward: mask, both projections and the LayerNorm backward in one pass -> dm, dWa, dWb, dgamma, dbeta |
 | GEMM | O = A2 . BT^T, cuBLAS | dA, dB: cuBLAS on the grouped dO (plus O again when the `opm_train_save_o` setting is off) |
 | F3 / B1, B3 | epilogue: permute `[i,j,c,e] -> [(i,j),(c,e)]`, `/ n`, `W_o`, bias, residual, bf16 | dgrad: `dz / n . W_o` into the grouped layout (+ dbias); dWo off the grouped O |
+| F2+F3 inference | **one kernel** `opm_fused_kernel` (`opm_fused_infer`): O = A2 . BT^T and the projection together, see [Fused inference kernel](#fused-inference-kernel); O is never written | n/a |
 | count | `n[i,j] = max(1, sum_s mask[s,i] mask[s,j])` from the bit mask (`opm_count_tiled`, exact) | reused |
 
 Kernels (`opm_epilogue.cu`): `opm_prologue_tma_hopper` (persistent, TMA + WGMMA), `opm_prologue_wgmma_native` (non-TMA),
@@ -30,6 +31,12 @@ Kernels (`opm_epilogue.cu`): `opm_prologue_tma_hopper` (persistent, TMA + WGMMA)
 former Triton-prologue inference cells). The Triton prologue of MiniWorld's `runs/msa_bench_20260921` stays in `opm_train.py` as the reference
 (`_CUDA_PROLOGUE_FOR_LEGACY`); the legacy-composition switch (`MINIWORLD_OPM_H100_CUDA_ONLY`) was removed, so a native CUDA path is the only
 route on H100.
+
+## Fused inference kernel
+
+`opm_fused_infer` (`opm_epilogue.cu`, extension flavour `_fused`, `settings.opm_fused`, default on) serves inference at d_msa 64 / d_pair 128 (MiniWorld, RF3, ESMFold2 order; N % 16, S % 64) and replaces the cuBLAS product + `opm_epilogue_kernel` pair, so the [N*32, N*32] bf16 product (134 MB at L256, 1.2 GB at L768) is neither written nor read. Persistent, 384 threads: a producer warpgroup (warp 0 TMA A / B, warp 1 the weight) and two consumer warpgroups. Work item = 16 i x 8 j = 128 pairs, four passes over c (8 values each): a pass is a 128 x 256 x S wgmma m64n256k16 GEMM (A through a 3-D TMA map [i][c][s]), the fp32 tile is rounded to bf16 and written to shared memory as Opair (k permuted so the fragment stores are conflict free), then z^T += W_q Opair^T (wgmma m64n128k16, the 64 KiB weight slice of the pass, k permuted on the host and cached) with the 128 x 128 fp32 result kept in registers across the passes; the epilogue divides by the popcount of the two tokens' mask bit rows, adds the bias (or divides after it), stages a [pair][o] tile in shared memory and writes coalesced rows (+ residual). Shared memory 227 KiB (ring 4 x 24 KiB, Opair 64 KiB, weight 4 x 16 KiB). Splitting the projection over four passes is what makes the weight stream cheap: with 32 pairs per work item the 256 KiB weight was re-read per tile and the projection cost 5 us per tile (latency and L2 bound), now it costs 12 % of the GEMM (the tensor work it adds).
+
+Measured (CUDA graph, one H100, L256 S1024, kernel alone): cuBLAS 190 us + epilogue 59 us -> 212 us fused (178 mainloop, 14 conversion, 20 projection); the module row 0.308 -> 0.265 ms. Training still uses the unfused forward (the backward needs the product). Test: `tests/gpu/sm90/test_opm_fused_gpu.py`. Record: [opm_fused_ladder_20261026.md](../../../records/opm_fused_ladder_20261026.md).
 
 ## Dispatch (`_h100_path`)
 

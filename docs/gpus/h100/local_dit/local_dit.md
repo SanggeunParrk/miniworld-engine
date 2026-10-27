@@ -331,7 +331,7 @@ Inference (A5, 4096 atoms): bf16 post90 49 us, pre90 24 us, attention 19 us; fp3
 
 AF3 normalises the keys and values with a second AdaLN of the *raw* atoms and gives every query window the 128 keys `[32 w - 48, 32 w + 80)` slid back inside the real atoms. The H100 mma kernels serve both options for inference (fp32/TF32 and bf16): `pre90` takes a `par` flag for the K/V AdaLN input, the slid window is the clipped one except for windows 0 and 1 and the last three real windows, recomputed in torch from the kernels' q/k/v and written over the attention output. Not served (composed path): a call with grad. The real atom count is a device tensor, so a slide runs under CUDA graph capture and below 128 real atoms (keys past the last atom are masked). Checked against the fp64 PyTorch module for real atom counts 140 to 512 (`tests/gpu/sm90/test_h100_local_dit_af3_variant_gpu.py`); speed not measured.
 
-## ESMFold2 variant (`LocalDiTBlock(**ESMFOLD2)`, inference)
+## ESMFold2 variant (`LocalDiTBlock(**ESMFOLD2)`, inference and bf16 training)
 
 ESMFold2's three atom stacks (FoldForge `spec.ESMFOLD2` / `ESMFOLD2_FAST`: the trunk-input encoder, the diffusion encoder and decoder,
 `DiffusionCrossAttTransformer`) are the AF3 block above -- parallel K/V AdaLN, slid window, per-window pair bias, gating query, output
@@ -362,10 +362,25 @@ projection, transition n = 2 -- with four changes, all options of `LocalDiTBlock
   real atom count on the device, so no host read and the call captures) -- since for a real query the band cut to the real atoms always lies inside
   its window's subset. `h_attn_esm` / `h_attn_esm_tf32`: a CTA = 64 queries x 1 head x a chunk of samples stages the 192 positions
   `[q0 - 64, q0 + 128)`; a warp walks the 144 positions its 16 queries can see (18 key tiles against the AF3 kernel's 16).
-- Contract (`local_dit_h100._esm_matches`): exactly the `ESMFOLD2` set at the atom widths, no gradient recorded, the rotary tables `[1, N, 16]`,
-  otherwise as the AF3 block (bf16 or fp32, any A, any N, a `[1, N]` real-first key mask). A call with grad runs the composed PyTorch path.
+- Contract (`local_dit_h100._esm_matches`): exactly the `ESMFOLD2` set at the atom widths, the rotary tables `[1, N, 16]`,
+  otherwise as the AF3 block (bf16 or fp32, any A, any N, a `[1, N]` real-first key mask). A call with grad: bf16 with a conditioning shared by the samples
+  runs the training step below, everything else the composed PyTorch path.
   Bitwise deterministic; runs inside a CUDA graph capture. Tests: `tests/cpu/compile/test_local_dit_esmfold2_variant.py` (the module against a
   per-window definition, fp64), `tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py`.
+
+**Training** (bf16, 2026-10-27; record [esm_local_swa_ladder_20261027](../../../records/esm_local_swa_ladder_20261027.md)): `local_dit_h100._esm_train` -- one
+`autograd.Function` whose forward and backward are the opaque ops `local_dit_h100_esm_train_fwd` / `_bwd`, plus `local_dit_h100_esm_pair_bias_fwd` / `_bwd`. It is the DiT-variant
+atom training block (`kernels/dit_variants/cuda/train.py`) with ESMFold2's pieces: the row kernels of `train_rows.cu` (`ln_mod_fwd`, `res_ln_fwd`, `res_out_fwd`, `glu_fwd`,
+`gate_fwd` and, backward, `res_bwd`, `glu_bwd`, `res_adaln_bwd`, `gate_o_bwd`, `adaln_bwd`; the table gradients are fixed-order partial rows) run with `mode` bit 1 (RMSNorm
+statistics, raw gates); cuBLAS for every GEMM; `qknorm_rope_fwd` / `qknorm_rope_bwd` for the q / k RMSNorm + rotary (the backward rotates the gradient back, then the norm backward);
+the attention is `h_attn_esm` (now also writing the row LSE, log2 units) with `h_attn_esm_dq` (dQ and the bias gradient as per-sample-chunk partials, `[4, nwin, 32, 160]` by
+position) and `h_attn_esm_dkv` (dK, dV: a CTA = 64 keys, a warp 16 keys over the 144 queries that see them, the bias band staged per warp); `h_pair_bias_esm_bwd` maps the bias
+gradient back to the 192 slots of the trunked pair (the slide from the real atom count on the device). The conditioning tables and the windowed pair bias are autograd
+ops outside the block, so `dcond`, `dpair` and the adaLN weights' gradients chain through the module's own layers. Contract (`_esm_train_serves`): bf16 single / cond / pair, fp32 or
+bf16 parameters (autocast allowed), the conditioning shared by the samples (an expanded view, or A = 1); `settings.local_dit_esm_train_cuda=False` turns it off. Not served (composed
+PyTorch path): fp32 (TF32) training, a conditioning of its own per sample. Training step (CUDA graph, A = 48, 4096 / 8192 atoms, shared conditioning): 3.27 / 6.21 ms against the
+portable Triton kernels' 6.56 / 12.80 and the PyTorch reference's 12.66 / 25.74. Output and every gradient (single, conditioning, pair, all parameters) are within 1.5x of the
+module's own bf16 error against the fp64 module (0.88-1.29x measured; bitwise repeatable): `tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py::test_training_*`.
 
 **Parity with FoldForge** (2026-10-21, fp32, the engine's PyTorch path against FoldForge's dense `DiffusionCrossAttTransformer(spec=ESMFOLD2)`
 with its weights copied, gathers from AF3's own featuriser at 192 keys, ragged token layouts, real atoms 150-24 500, A 1 and 5): relative error
@@ -404,6 +419,5 @@ Per kernel (torch profiler, eager, hoist off, A = 5, us; N = 8192 / 24576): bf16
 `h_pair_bias_esm` 39 / 100, `qknorm_rope` 31 / 92, `cond90` 25 / 48. Against the AF3 block at the same A (the tables above, per-sample
 conditioning there) the variant is about 1.3x slower: 25 % more keys per query, the wider pair (192 keys), and the separate q / k pass.
 
-**Not done**: training (the backward row kernels know neither the RMS conditioning nor the raw gates, and the attention backward neither the band
-nor the position-indexed bias; a call with grad runs the composed path); fusing `qknorm_rope` into `pre90`'s epilogue (8-10 % of the block);
+**Not done**: fp32 (TF32) training and a per-sample conditioning under a gradient (composed path); fusing `qknorm_rope` into `pre90`'s epilogue (8-10 % of the inference block);
 a B200 path (the sm100 kernels decline the variant).

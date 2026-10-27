@@ -119,6 +119,36 @@ class AugmentedAttentionPairBias(nn.Module):
         state_dict.pop(f"{prefix}ln_pair.bias", None)
         super()._load_from_state_dict(state_dict, prefix, *args, **kwargs)
 
+    def _fused_pair_core(self, query, pair, mask, compute_dtype, extra_pair_bias):
+        """The H100 pair-fused core that serves this call (``cuda.fused_pair`` for bf16, ``cuda.fused_pair_tf32`` for fp32: the pair
+        LayerNorm + head projection + attention in hand-written CUDA), as an entry function, or None."""
+        if (
+            extra_pair_bias is not None
+            or self._backend != KernelBackend.PORTABLE
+            or not _bf16_sm90_enabled()
+            or not query.is_cuda
+            or (mask is not None and mask.ndim != 2)
+            or self.ln_pair.eps != 1e-5
+        ):
+            return None
+        m1 = None if mask is None else mask[0]
+        dt = compute_dtype or query.dtype
+        if dt is torch.bfloat16:
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                fused_pair as mod,
+            )
+
+            fn = mod.attention_pair_fused
+        elif dt is torch.float32 and compute_dtype is None and not torch.is_autocast_enabled("cuda"):
+            from miniworld_engine.kernels.augmented_attention.cuda import (
+                fused_pair_tf32 as mod,
+            )
+
+            fn = mod.attention_pair_tf32
+        else:
+            return None
+        return fn if mod.available(query, pair, self.ln_pair.weight, self.to_bias.weight, m1) else None
+
     def _kernel_attention_pair_bias(
         self,
         query: torch.Tensor,
@@ -135,7 +165,7 @@ class AugmentedAttentionPairBias(nn.Module):
         kernel actually received (``tensor_dtype_of("Q")``), so casting here is what makes a bf16
         run and an fp32 run land in different cache buckets instead of overwriting each other.
         """
-        if (compute_dtype is torch.bfloat16 and self._backend == KernelBackend.PORTABLE
+        if ((compute_dtype or query.dtype) is torch.bfloat16 and self._backend == KernelBackend.PORTABLE
                 and _bf16_sm90_enabled()):
             from miniworld_engine.kernels.augmented_attention import cuda as cuda_sm90
 
@@ -236,16 +266,10 @@ class AugmentedAttentionPairBias(nn.Module):
         """
         in_dtype = single.dtype
         single = self.ada_ln_in(single, cond)
-        pair = self.ln_pair(pair)
         query = self.to_query(single)
         key = self.to_key(single)
         value = self.to_value(single)
         gate = self.to_gate(single)
-        bias = self.to_bias(pair)
-        if extra_pair_bias is not None:
-            if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
-                raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
-            bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]   # [B, L, L, H]: the same term for every head
 
         num_aug, batch, len_res = query.shape[:3]
         n_head, hidden_dim = self.n_head, query.shape[-1] // self.n_head
@@ -254,17 +278,28 @@ class AugmentedAttentionPairBias(nn.Module):
             x.view(num_aug, batch, len_res, n_head, hidden_dim)
             for x in (query, key, value)
         ]
-
-        if mask is not None and mask.ndim == 2:
-            mask = repeat(mask, "B L -> A B L", A=single.shape[0])
-
         if self.use_qk_norm:
             query = self.norm_query(query)
             key = self.norm_key(key)
 
-        out = self._kernel_attention_pair_bias(
-            query, key, value, bias, mask, compute_dtype=compute_dtype
-        )
+        fused = self._fused_pair_core(query, pair, mask, compute_dtype, extra_pair_bias)
+        if fused is not None:
+            # H100: the pair LayerNorm + head projection + attention as hand-written CUDA (one read of the pair tensor)
+            out = fused(
+                query, key, value, pair, self.ln_pair.weight, self.to_bias.weight, None if mask is None else mask[0]
+            )
+        else:
+            pair = self.ln_pair(pair)
+            bias = self.to_bias(pair)
+            if extra_pair_bias is not None:
+                if extra_pair_bias.ndim != 2 or tuple(extra_pair_bias.shape) != tuple(bias.shape[1:3]):
+                    raise ValueError(f"extra_pair_bias must be [L, L] = {tuple(bias.shape[1:3])}, got {tuple(extra_pair_bias.shape)}")
+                bias = bias + extra_pair_bias.to(bias.dtype)[None, :, :, None]   # [B, L, L, H]: the same term for every head
+            if mask is not None and mask.ndim == 2:
+                mask = repeat(mask, "B L -> A B L", A=single.shape[0])
+            out = self._kernel_attention_pair_bias(
+                query, key, value, bias, mask, compute_dtype=compute_dtype
+            )
         # back to the caller's precision before the gate/out projections, which are the module's
         # dtype -- the cast above is scoped to the core, not a change of the module's dtype.
         out = out.to(in_dtype)

@@ -9,10 +9,15 @@ from pathlib import Path
 
 import torch
 
-from miniworld_engine.kernels.token_pair_init.cuda.sm100 import P, check_packable, fwd_rows, n_rel
+from miniworld_engine.kernels.token_pair_init.cuda.sm100 import P, check_packable, n_rel
 
 _dir = Path(__file__).parent
 RB = 8
+
+
+def fwd_rows(L: int) -> int:
+    """Rows of z per forward CTA (the kernel loads the class-row table once per CTA and right[j] once per R rows): 4 up to L 256, else 2 (measured L128-L384, B16 / B48)."""
+    return 4 if L <= 256 else 2
 
 
 @functools.lru_cache(maxsize=None)
@@ -48,3 +53,12 @@ def backward(g, ids, bond, r_max: int, s_max: int):
     wpart = torch.empty(B * nrb * 4 * nbin * 32, device=dev, dtype=torch.float32)
     _ext().backward(g, ids, bond, dleft, dright, dtbl, dpart, wpart, int(r_max), int(s_max))
     return dleft, dright, dtbl
+
+
+def prep(id_tensors, w_rel, w_bond):
+    """(ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32) in one launch: the five id tensors (contiguous, int32 or int64) and the fp32 weights [128, n_rel] / [128, 2]."""
+    n = id_tensors[0].numel()
+    ids = torch.empty(5, n, device=w_rel.device, dtype=torch.int32)
+    tbl = torch.empty(w_rel.shape[1] + 2, P, device=w_rel.device, dtype=torch.float32)
+    _ext().prep(list(id_tensors), w_rel, w_bond, ids, tbl)
+    return ids, tbl

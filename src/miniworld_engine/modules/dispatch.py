@@ -584,9 +584,9 @@ def call_backend(module: torch.nn.Module, backend: KernelBackend, *tensors: torc
     return KernelBackend.PYTORCH
 
 
-def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tensor) -> bool:
+def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tensor, dtype: str = "bf16") -> bool:
     """For the weights-as-args ``ops.*`` entry points: must this call NOT run ``op``'s portable kernels? True on a CUDA card other than
-    H100 / B200 that has no ``ok`` rows for what the call launches (inference; training when a tensor needs a gradient), unless the
+    H100 / B200 that has no ``ok`` rows for what the call launches (inference; training when a tensor needs a gradient; ``dtype`` is the precision the rows are asked at), unless the
     A/B switch is on: the caller then runs the PyTorch statements, with the same warning as the modules. False everywhere else
     (H100 / B200 keep their own rule, no card keeps the kernel)."""
     from miniworld_engine import settings
@@ -598,7 +598,7 @@ def portable_blocked(op: str, device: torch.device | None, *tensors: torch.Tenso
         return False
     training = torch.is_grad_enabled() and any(isinstance(t, torch.Tensor) and t.requires_grad for t in tensors)
     mode = "training" if training else "inference"
-    return route_for_card(op, card[0], card[1], mode=mode) is KernelBackend.PYTORCH
+    return route_for_card(op, card[0], card[1], dtype=dtype, mode=mode) is KernelBackend.PYTORCH
 
 
 def resolve(

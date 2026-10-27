@@ -45,7 +45,7 @@ def forward_ca(tbl, ca, mask, idx, dlim, with_codes=False, ln_eps=None):
     return (out, codes) if with_codes else out
 
 
-IMPL = int(os.environ.get("MINIWORLD_PAIR_EMBED_BWD_IMPL", "1"))   # 1: tensor cores, 0: the shared-memory read-modify-write kernel (A/B)
+IMPL = int(os.environ.get("MINIWORLD_PAIR_EMBED_BWD_IMPL", "1"))   # 1: wgmma, 2: the first tensor-core kernel (mma.sync), 0: the shared-memory read-modify-write kernel (A/B)
 
 
 def backward(g, codes, mode, impl=None):

@@ -44,8 +44,9 @@ def restricted_reason(device, cuda_caps) -> str | None:
     return f"no CUDA kernel of this op on sm_{cap[0]}{cap[1]}: H100 and B200 run the PyTorch reference where no CUDA kernel serves the call"
 
 
-def route(op: str, device, *tensors: torch.Tensor, cuda_caps=((9, 0),)) -> str:
-    """``CUDA``, ``PORTABLE`` or ``REFERENCE`` for a call of ``op`` (the tensors decide inference / training: a tensor that needs a gradient)."""
+def route(op: str, device, *tensors: torch.Tensor, cuda_caps=((9, 0),), dtype: str = "bf16") -> str:
+    """``CUDA``, ``PORTABLE`` or ``REFERENCE`` for a call of ``op`` (the tensors decide inference / training: a tensor that needs a gradient; ``dtype`` is the
+    precision of the manifest rows the record is asked for)."""
     from miniworld_engine.modules import dispatch
 
     if getattr(device, "type", "cuda") != "cuda" or not torch.cuda.is_available():
@@ -56,4 +57,4 @@ def route(op: str, device, *tensors: torch.Tensor, cuda_caps=((9, 0),)) -> str:
         return CUDA
     if dispatch.restricted_card(device):
         return REFERENCE
-    return REFERENCE if dispatch.portable_blocked(op, device, *tensors) else PORTABLE
+    return REFERENCE if dispatch.portable_blocked(op, device, *tensors, dtype=dtype) else PORTABLE

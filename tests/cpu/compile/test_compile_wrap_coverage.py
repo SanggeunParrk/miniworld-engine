@@ -167,6 +167,7 @@ def test_every_launcher_is_opaque_or_only_reached_through_one() -> None:
 #: and one name carrying a capital from maths notation (``trimul_front_bwd_dW_glogit``).
 OP_FAMILIES = (
     "adaln",
+    "weights_cast",    # kernels/_cast.py: the one-launch bf16 casts of the fp32 master weights a portable training forward makes
     # The seven mpnn families, ported from a branch that predates this file. Their kernels are
     # NOT yet opaque ops -- see MPNN_NOT_OPAQUE below -- but their op names are family-prefixed
     # like everything else, so the naming half of the contract holds today.
@@ -197,8 +198,10 @@ OP_FAMILIES = (
     "token_pair_init", # the input feature embedder pair stream (kernels/token_pair_init): one forward op, one backward op
     "pair_embed_geom", # La-Proteina encoder / decoder pair builders (kernels/pair_embed_geom): forward ops (encoder, training, decoder) and one table-gradient backward op
     "pair_embed_adaln", # La-Proteina's pair builder (kernels/pair_embed_adaln): one forward op, one backward op
+    "sampler_ops",     # the diffusion sampler glue (kernels/sampler_ops): augment + re-noise, Kabsch align + Euler step, encoder pooling
     "smooth_lddt",     # AF3 Alg. 27 smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep, forward and backward ops
     "local_dit",       # the AF3 block-local atom block (integrations/local_dit): one forward op, one backward op
+    "dit_variants",    # the Boltz-2 / RoseTTAFold3 / Chai-1 DiT block variants (kernels/dit_variants/cuda/train.py): token and atom block forward / backward, pair LayerNorm
     "tm1",
     "tm2",
     "transition",

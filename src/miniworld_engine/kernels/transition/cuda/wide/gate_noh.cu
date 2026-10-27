@@ -2,8 +2,8 @@
 // [dA|dB] [M][2H]. 128 rows x 128 hidden tile, 32-wide K slabs, 4 stages, two-pass epilogue, slab released as its MMAs retire.
 // See kernels/gate_gemm2.cu.
 #if MW_GATE_SAVED_TMA && MW_SAVE_AB
-#define TBK 32
-#define NSTAGE 3
+#define TBK 64                                            // 128 B swizzle, two stages: 1 % faster than 32 x 3 (D512, 384 x 384 pair)
+#define NSTAGE 2
 #define STG_HALF 1
 #elif MW_GATE_FULL_STAGE && !MW_SAVE_AB
 #define TBK 32

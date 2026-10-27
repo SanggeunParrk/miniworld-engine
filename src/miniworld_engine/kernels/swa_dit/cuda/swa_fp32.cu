@@ -1627,7 +1627,8 @@ torch::Tensor prep(const torch::Tensor& wqkv, const torch::Tensor& wg, const tor
 // att, y, ffn] -- the layout of the Triton fp32 forward.
 std::vector<torch::Tensor> fwd(torch::Tensor q, torch::Tensor mod, torch::Tensor cs, torch::Tensor sn, torch::Tensor sequ,
                                torch::Tensor wqkv, torch::Tensor wg, torch::Tensor wo, torch::Tensor wu, torch::Tensor wd,
-                               int64_t B, int64_t half_window, double eps, double qk_eps, bool save) {
+                               int64_t B, int64_t half_window, double eps, double qk_eps, bool save,
+                               c10::optional<torch::Tensor> wpre) {
   TORCH_CHECK(half_window == HWIN, "the fp32 CUDA block serves half_window 64");
   TORCH_CHECK(q.dim() == 3 && q.size(2) == C, "q [N, S, 128]");
   const long N = q.size(0), S = q.size(1), M = N * S, A = N / B;
@@ -1639,7 +1640,9 @@ std::vector<torch::Tensor> fwd(torch::Tensor q, torch::Tensor mod, torch::Tensor
   TORCH_CHECK(sequ.is_cuda() && sequ.scalar_type() == torch::kInt && sequ.numel() == N && sequ.is_contiguous(), "seqused int32 [N]");
   const c10::cuda::CUDAGuard guard(q.device());
   const int dev = q.device().index();
-  auto W = prep(wqkv, wg, wo, wu, wd, true);
+  // wpre: the weights as ``prep(..., true)`` returned them (the caller keeps them while the weights are unchanged: an inference call)
+  auto W = (wpre && wpre->defined()) ? *wpre : prep(wqkv, wg, wo, wu, wd, true);
+  TORCH_CHECK(W.is_cuda() && W.scalar_type() == torch::kFloat && W.numel() == F_END, "wpre: the forward prep");
   const float* w = W.data_ptr<float>();
   auto f32 = q.options(), bf = q.options().dtype(torch::kBFloat16);
   auto stream = at::cuda::getCurrentCUDAStream();

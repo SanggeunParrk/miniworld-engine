@@ -113,6 +113,7 @@ FAMILY_MODULES = {
     "autograd.py":      "the family's autograd.Function",
     "compile_native.py": "layernorm only -- see above",
     "composed.py":      "outer_product_mean only -- the Pairformer-side composition of the family's stages",
+    "chai.py":          "outer_product_mean only -- the Chai-1 (8 groups) fused H100 passes: prologue, grouped products, epilogue, backward",
     "kabsch.py":        "sampler_ops only -- Horn's quaternion Kabsch rotation (the Euler update's alignment, graph-capturable)",
 }
 

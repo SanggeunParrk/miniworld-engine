@@ -8,6 +8,26 @@ namespace tdr {
 __device__ __forceinline__ float sigm(float v) { return rowmath::sigmoid(v); }
 __device__ __forceinline__ float warp_sum(float v) { return rowmath::warp_sum(v); }
 
+// dst [N, M] = src [M, N]^T (either operand dtype): 32 x 32 tiles through shared memory, both sides coalesced. Launch: grid (ceil(N / 32), ceil(M / 32)), 256 threads.
+// GUARD = false: M and N are multiples of 32 (the token DiT / pair kernels). GUARD = true: any M, N (bounds-checked; the DiT variant training rows).
+template <typename T, bool GUARD = false>
+__global__ void __launch_bounds__(256) transpose_k(const T* __restrict__ S_, T* __restrict__ Dst, long M, long N) {
+  __shared__ T tile[32][33];
+  const long r0 = (long)blockIdx.y * 32, c0 = (long)blockIdx.x * 32;
+  const int tx = threadIdx.x % 32, ty = threadIdx.x / 32;
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) {
+    if (GUARD && !((r0 + ty + i) < M && (c0 + tx) < N)) continue;
+    tile[ty + i][tx] = S_[(r0 + ty + i) * N + c0 + tx];
+  }
+  __syncthreads();
+#pragma unroll
+  for (int i = 0; i < 32; i += 8) {
+    if (GUARD && !((c0 + ty + i) < N && (r0 + tx) < M)) continue;
+    Dst[(c0 + ty + i) * M + r0 + tx] = tile[tx][ty + i];
+  }
+}
+
 template <typename T> struct V4;
 template <> struct V4<float> {
   static __device__ __forceinline__ float4 load(const float* p) { return *reinterpret_cast<const float4*>(p); }

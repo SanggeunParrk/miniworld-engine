@@ -1,9 +1,14 @@
-# Boltz-2 / RoseTTAFold3 / Chai-1 variants on H100 (sm90), inference
+# Boltz-2 / RoseTTAFold3 / Chai-1 variants on H100 (sm90), inference and training
 
 The modules of these three models whose math differs from the AF3 modules the engine already serves (FoldForge's
-`docs/engine-kernel-gaps.md`, items 1-3b). Inference only (bf16, no grad): a call with grad, another dtype or another card runs each
-module's torch statements. Every heavy product is cuBLAS or an existing engine kernel; the new CUDA is small row / gather / attention
-kernels. Measurements: [../../../records/model_variants_h100_20261022.md](../../../records/model_variants_h100_20261022.md).
+`docs/engine-kernel-gaps.md`, items 1-3b). **Inference** (bf16, no grad): every heavy product is cuBLAS or an existing engine kernel; the new
+CUDA is small row / gather / attention kernels. **Training** (bf16 under autocast with fp32 master parameters, or fp32 on TF32; 2026-10-26): hand-CUDA row
+kernels (forward and backward), cuBLAS GEMMs and the engine's sm_90a attention cores in one autograd `Function` per block; see
+[Training](#training-2026-10-26). A call with another dtype, shape or card runs each module's torch statements (or the portable kernels with
+`force_portable_kernels`). Measurements: [../../../records/model_variants_h100_20261022.md](../../../records/model_variants_h100_20261022.md),
+[../../../records/dit_variants_cuda_ladder_20261026.md](../../../records/dit_variants_cuda_ladder_20261026.md).
+
+The table is the inference path (the training path follows it).
 
 | what | module / option | how | vs compiled torch (CUDA graph) |
 |---|---|---|---|
@@ -20,3 +25,23 @@ kernels. Measurements: [../../../records/model_variants_h100_20261022.md](../../
 Second pass: [../../../records/model_variants_h100_speed_20261022.md](../../../records/model_variants_h100_speed_20261022.md). Not done: Chai-1's grouped OPM is a composition (1.1-1.2x); the token / atom DiT
 variants keep the pair bias of a block per call unless the pair tensor is unchanged (FoldForge recomputes the pair conditioning every
 diffusion step, so a fold-level split of the diffusion head would remove that work); FoldForge wiring of these modules is separate.
+
+## Training (2026-10-26)
+
+`DiTVariantStack` / `AtomDiTVariantStack` called with a gradient (any of `single`, `cond`, `pair` or a parameter requires grad) on H100 take
+`kernels/dit_variants/cuda/train.py` (`settings.dit_variant_train_cuda`, default on; off = the portable / reference route).
+Contract: bf16 (autocast, fp32 master parameters) or fp32 (TF32 matmuls) activations; **token stack** 768 wide x 16 heads of 48, `L` a multiple of 128, one
+conditioning row set `[L, c]` shared by the samples, key mask `[L]`, pair `[L, L, 128 | 256]`, any number of samples; **atom stack** 128 wide x 4 heads of 32,
+`N` a multiple of 64 (the 32 x 128 windows, slid or padded key window, Chai-1's same-conformer `uid`), conditioning `[N, 128]`, trunked pair `[N / 32, 32, 128, 16]`.
+
+| part | what runs |
+|---|---|
+| conditioning, per block | the AdaLN scales / shifts and the residual gates' logits as ONE `[L, K D]` table made by the modules' own layers under autograd (the sigmoid form's weight-only LayerNorm, Chai-1's `+ 1`); the block's kernels return the table's gradient summed over the samples |
+| pair bias | token: one CUDA LayerNorm of the pair rows (`pair_ln_fwd` / `pair_ln_bwd`) and one stacked GEMM `[nb H, C] x [C, L L]` for every block, `log2 e` folded into the weights (the LN bias of Chai-1 only shifts a row's logits: its gradient is exactly zero); atom: `pair_bias_mma` / `pair_bias_bwd_mma` per block |
+| block forward | `ln_mod_fwd` (LN + the AdaLN modulation, one pass for the parallel blocks' two or three outputs) -> cuBLAS q / k / v (/ g) -> `qkv_prep` (scale; RF3's LayerNorm over the whole width) -> attention core -> gate -> out-projection -> `res_ln_fwd` / `res_out_fwd` (residual + gate + the transition's AdaLN) -> cuBLAS expand -> `glu_fwd` (SwiGLU, Boltz-2's up-gate) -> cuBLAS squeeze |
+| block backward | `res_bwd`, `glu_bwd`, `res_adaln_bwd`, `gate_o_bwd` (do, dg and D = rowsum(dog . og) from the saved gated output alone), the attention backward, `qkv_bwd` (RF3's LayerNorm backward + column sums), `adaln_bwd`; weight gradients are cuBLAS (fp32 accumulation, fp32 results). Every reduction over the samples is a fixed-order partial row per (token, split of the samples): no atomics, bitwise repeatable |
+| attention cores | token bf16: `attn_fwd` (gated epilogue) + `attn_dqb` / `attn_dkv`; token fp32: the TF32 `attn_tf32` core (operands rounded to nearest TF32 in the row kernels, v^T and the key-permuted layouts by a tiled transpose); atom: the local DiT's `lattn90` window kernels (`attn_fwd_mma` / `attn_bwd_mma`, bf16 or TF32) |
+| slid key window (atoms) | the five edge windows (0, 1 and the last three real ones) whose keys differ from the clipped window the kernel reads: `edge.cu` (fp32, register-blocked) forward, backward compute (their dO / D rows zeroed for the main kernel) and apply, and the edge bias `LN(z[w]) gamma Wb` with its gradient |
+
+Parity (`tests/gpu/sm90/test_dit_variant_train_h100_gpu.py`): the output and every gradient (inputs, conditioning, pair, each parameter) of the six stacks, bf16 and fp32, are within
+1.5x the error of the same-dtype PyTorch reference against fp64 (measured 0.8-1.0x). Numbers and the ladder: [records/dit_variants_cuda_ladder_20261026.md](../../../records/dit_variants_cuda_ladder_20261026.md).

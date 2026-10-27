@@ -206,29 +206,30 @@ slddt_bwd(const float* __restrict__ X, const float* __restrict__ G, const int8_t
 // the imbalance of the neighbour counts costs once per row (max over the warp of the row total) rather than once per tile. One augment's
 // x and g are float4 (x, y, z, cut^2 of the atom) so a neighbour is two 128-bit shared loads. Same masks, same partial-sum layout
 // [A * B, N / 128] as the tile kernels (a block of 128 rows = 4 warps).
-constexpr int FBLK = 512;
+constexpr int FBLK = 512;   // threads of the default whole-structure CTA; slddt_*_full_{128,256} are the same kernels with smaller CTAs
 
-extern "C" __global__ void __launch_bounds__(FBLK)
-slddt_fwd_full(const float* __restrict__ X, const float* __restrict__ G, const uint32_t* __restrict__ FM, float* __restrict__ OUT,
+template <int FB, int S>
+__device__ __forceinline__ void fwd_full_impl(const float* __restrict__ X, const float* __restrict__ G, const uint32_t* __restrict__ FM, float* __restrict__ OUT,
                int B, int N, int NB) {
     extern __shared__ float4 sm4[];
     float4* sx = sm4;
     float4* sg = sm4 + N;
-    __shared__ float red[FBLK / 32];
+    __shared__ float red[FB / 32];
     const int ab = blockIdx.x, ib = blockIdx.y, b = ab % B, t = threadIdx.x;
     const float* xb = X + (size_t)ab * N * 3;
     const float* gb = G + (size_t)b * N * 3;
-    for (int p = t; p < N; p += FBLK) {
+    for (int p = t; p < N; p += FB) {
         sx[p] = make_float4(xb[p * 3], xb[p * 3 + 1], xb[p * 3 + 2], 0.f);
         sg[p] = make_float4(gb[p * 3], gb[p * 3 + 1], gb[p * 3 + 2], 0.f);
     }
     __syncthreads();
-    const int i = ib * FBLK + t, W = N / 32;
+    constexpr int ROWS = FB / S;               // rows of the CTA: S threads share a row, thread s of S walks the 4-word groups q with q % S == s
+    const int i = ib * ROWS + t / S, sp = t % S, W = N / 32;
     float acc = 0.f;
     if (i < N) {
         const float4 xi = sx[i], gi = sg[i];
         const uint4* row = reinterpret_cast<const uint4*>(FM + ((size_t)b * N + i) * W);
-        for (int q = 0; q < W / 4; ++q) {
+        for (int q = sp; q < W / 4; q += S) {
             const uint4 fw = row[q];
             if (!(fw.x | fw.y | fw.z | fw.w)) continue;
             const uint32_t words[4] = {fw.x, fw.y, fw.z, fw.w};
@@ -251,14 +252,16 @@ slddt_fwd_full(const float* __restrict__ X, const float* __restrict__ G, const u
     for (int o = 16; o > 0; o >>= 1) acc += __shfl_down_sync(0xffffffffu, acc, o);
     if ((t & 31) == 0) red[t >> 5] = acc;
     __syncthreads();
-    if (t < FBLK / BLK) {
-        const int blk = ib * (FBLK / BLK) + t;
-        if (blk < NB) OUT[(size_t)ab * NB + blk] = red[t * 4] + red[t * 4 + 1] + red[t * 4 + 2] + red[t * 4 + 3];
+    if (t < ROWS / BLK) {                      // a partial per 128 rows = 4 * S warps
+        const int blk = ib * (ROWS / BLK) + t;
+        float s = 0.f;
+        for (int w = 0; w < 4 * S; ++w) s += red[t * 4 * S + w];
+        if (blk < NB) OUT[(size_t)ab * NB + blk] = s;
     }
 }
 
-extern "C" __global__ void __launch_bounds__(FBLK)
-slddt_bwd_full(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const uint32_t* __restrict__ UM,
+template <int FB>
+__device__ __forceinline__ void bwd_full_impl(const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const uint32_t* __restrict__ UM,
                const float* __restrict__ GO, float* __restrict__ GX, int B, int N, int NB) {
     extern __shared__ float4 sm4[];
     float4* sx = sm4;      // x, y, z, cut^2 of the atom
@@ -266,13 +269,13 @@ slddt_bwd_full(const float* __restrict__ X, const float* __restrict__ G, const i
     const int ab = blockIdx.x, ib = blockIdx.y, b = ab % B, t = threadIdx.x;
     const float* xb = X + (size_t)ab * N * 3;
     const float* gb = G + (size_t)b * N * 3;
-    for (int p = t; p < N; p += FBLK) {
+    for (int p = t; p < N; p += FB) {
         const float c = NUC[(size_t)b * N + p] ? NUC_CUT : OTHER_CUT;
         sx[p] = make_float4(xb[p * 3], xb[p * 3 + 1], xb[p * 3 + 2], c * c);
         sg[p] = make_float4(gb[p * 3], gb[p * 3 + 1], gb[p * 3 + 2], 0.f);
     }
     __syncthreads();
-    const int i = ib * FBLK + t, W = N / 32;
+    const int i = ib * FB + t, W = N / 32;
     if (i >= N) return;
     const float4 xi = sx[i], gi = sg[i];
     const float ci2 = xi.w;
@@ -308,3 +311,28 @@ slddt_bwd_full(const float* __restrict__ X, const float* __restrict__ G, const i
     float* gx = GX + (size_t)ab * N * 3;
     gx[i * 3] = a0 * go; gx[i * 3 + 1] = a1 * go; gx[i * 3 + 2] = a2 * go;
 }
+
+// The whole-structure kernels at other CTA sizes. Forward: FB threads, S of them per row (the row's 4-word groups are dealt out round-robin), so that a launch
+// with few rows (A48 x N1024 = 49k rows = 11 warps per SM) still keeps the SM's schedulers fed; partials stay one per 128 rows. Backward: FB threads, one per row.
+// A launch of A * B augments of N atoms has A * B * N * S / FB CTAs; when that is fewer than the card has SMs the smaller / split CTAs fill it.
+#define SLDDT_FWD_FULL(FB, S)                                                                                                                          \
+    extern "C" __global__ void __launch_bounds__(FB) slddt_fwd_full_##FB##s##S(const float* __restrict__ X, const float* __restrict__ G,                \
+                                                                               const uint32_t* __restrict__ FM, float* __restrict__ OUT, int B,        \
+                                                                               int N, int NB) {                                                         \
+        fwd_full_impl<FB, S>(X, G, FM, OUT, B, N, NB);                                                                                                 \
+    }
+#define SLDDT_BWD_FULL(FB)                                                                                                                             \
+    extern "C" __global__ void __launch_bounds__(FB) slddt_bwd_full_##FB(                                                                              \
+        const float* __restrict__ X, const float* __restrict__ G, const int8_t* __restrict__ NUC, const uint32_t* __restrict__ UM,                     \
+        const float* __restrict__ GO, float* __restrict__ GX, int B, int N, int NB) {                                                                  \
+        bwd_full_impl<FB>(X, G, NUC, UM, GO, GX, B, N, NB);                                                                                            \
+    }
+SLDDT_FWD_FULL(128, 1)
+SLDDT_FWD_FULL(256, 1)
+SLDDT_FWD_FULL(512, 1)
+SLDDT_FWD_FULL(256, 2)
+SLDDT_FWD_FULL(512, 2)
+SLDDT_FWD_FULL(512, 4)
+SLDDT_BWD_FULL(128)
+SLDDT_BWD_FULL(256)
+SLDDT_BWD_FULL(512)

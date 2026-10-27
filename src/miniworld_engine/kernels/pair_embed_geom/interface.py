@@ -22,6 +22,22 @@ D_PAIR = 256
 N_ROWS = 317
 _CUDA_CAPS = ((9, 0),)
 
+_CONSTANTS: dict[tuple, torch.Tensor] = {}
+
+
+def _constant(key: tuple, make) -> torch.Tensor:
+    """A small device constant (bin limits, the default residue index) built once per (key, device) and reused: every call of the builder used to launch its own
+    ``linspace`` / ``arange`` / cast kernels, which at B16 x L128 (a 60 us step) is a sixth of it. Read-only (the kernels never write them). Built only outside a CUDA
+    graph capture (a tensor allocated inside one belongs to the graph pool); a capture that finds none builds it as before."""
+    if torch.compiler.is_compiling():                 # traced: the constant folds into the compiled graph
+        return make()
+    t = _CONSTANTS.get(key)
+    if t is None:
+        t = make()
+        if not torch.cuda.is_current_stream_capturing():
+            _CONSTANTS[key] = t
+    return t
+
 
 def refusal(w, bb, ca_mask, has_cb, mask, residue_idx, chains, *, train=False) -> str | None:
     if not bb.is_cuda:
@@ -114,6 +130,26 @@ def pair_embed_geom_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tens
     from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
 
     return list(sm90.forward_ca(tbl, ca, mask, idx, dlim, with_codes=True))
+
+
+def _pair_embed_ca_fwd_fake(tbl, ca, mask, idx, dlim, eps, portable):
+    """Decoder pair [B, n, n, 256] bf16 (no codes: the forward-only call)."""
+    B, n = idx.shape
+    return torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=tbl.device)
+
+
+@opaque(fake=_pair_embed_ca_fwd_fake, name="pair_embed_ca_fwd")
+def pair_embed_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, idx: torch.Tensor, dlim: torch.Tensor, eps: float,
+                      portable: int) -> torch.Tensor:
+    """Decoder pair [B, n, n, 256] bf16 from the table [157, 256] bf16, or LayerNorm(pair) (no affine) when ``eps`` >= 0; the backward's codes are not written."""
+    ln_eps = eps if eps >= 0 else None
+    if portable:
+        from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward_ca
+
+        return portable_forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
+    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
+
+    return sm90.forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
 
 
 def _pair_embed_geom_bwd_fake(g, codes, mode, portable):
@@ -247,10 +283,17 @@ def pair_embed_ca(w, ca, mask, residue_idx=None, *, ln_eps=None) -> torch.Tensor
     if where == REFERENCE:
         out = pair_embed_ca_reference(w, ca, mask.bool(), residue_idx).to(torch.bfloat16)
         return out if ln_eps is None else F.layer_norm(out, (D_PAIR,), None, None, ln_eps)
-    idx = residue_idx if residue_idx is not None else torch.arange(1, n + 1, device=dev).expand(B, n)
+    idx = residue_idx.to(torch.int32).contiguous() if residue_idx is not None else _constant(("ca_idx", B, n, str(dev)), lambda: torch.arange(1, n + 1, device=dev, dtype=torch.int32).expand(B, n).contiguous())
+    dlim = _constant(("ca_dlim", str(dev)), lambda: torch.linspace(0.1, 3.0, 29, device=dev))
+    # a bool mask is already 0 / 1 bytes: no cast kernel
+    m8 = mask.contiguous().view(torch.uint8) if mask.dtype is torch.bool else mask.to(torch.uint8).contiguous()
+    if not (torch.is_grad_enabled() and w.requires_grad):
+        # forward only: the transposed bf16 table in ONE kernel (transpose + cast) and no codes for a backward that will not run
+        tbl = torch.empty((w.shape[1], w.shape[0]), dtype=torch.bfloat16, device=dev)
+        tbl.copy_(w.detach().t())
+        return pair_embed_ca_fwd(tbl, ca.float().contiguous(), m8, idx, dlim, -1.0 if ln_eps is None else float(ln_eps), int(where != CUDA))
     tbl = w.t().to(torch.bfloat16).contiguous()
-    dlim = torch.linspace(0.1, 3.0, 29, device=dev)
-    return _PairEmbedFn.apply(tbl, 1, ca.float().contiguous(), None, None, mask.to(torch.uint8).contiguous(), idx.to(torch.int32).contiguous(), None, dlim, None, ln_eps,
+    return _PairEmbedFn.apply(tbl, 1, ca.float().contiguous(), None, None, m8, idx, None, dlim, None, ln_eps,
                               int(where != CUDA))
 
 

@@ -34,7 +34,11 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
+
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
+from miniworld_engine.kernels._tma import tma_launchable
+from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
 
 
 
@@ -202,49 +206,92 @@ def _gate_bwd(out: torch.Tensor, scale: torch.Tensor, dy: torch.Tensor,
 
 
 @triton.autotune(configs=configs_for("cond_transition_bwd_gemm_swiglu_triton"),
-                 key=["shape_key"])
+                 key=["shape_key"],
+                 prune_configs_by={"early_config_prune": prune_tma(lambda na: (na["Dout"], na["Ws"], na["A"], na["B"], na["Dab"]))})
 @triton.jit
 def _dh_swiglu_bwd_kernel(
     Dout, Ws, A, B, Dab, M, ND: tl.constexpr, D: tl.constexpr,
     sdo0, sw0, sa0, sp0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
 ):
     """dab = [da | db] from (dout, ws, a, b), with dh = dout @ ws never reaching HBM.
 
     The split it replaces is a cuBLAS GEMM writing dh (M, ND) followed by a flat elementwise
     pass reading it back. At the token width dh is 113 MB out and 113 MB back, and the
     elementwise half is pure bandwidth -- so the GEMM's spare bandwidth pays for it.
+
+    ``TMA`` (sm_90, bf16; 0 = off, 1 = TMA, 2 = TMA with the epilogue in two column halves, 3 / 4 = the same two with a warp-specialised loop): the same math as a persistent loop over tiles with tensor descriptors for every operand (``kernels/_tma.py``). The
+    epilogue's loads of a / b and its stores of da / db are TMA too, issued per ``BLOCK_N // EPI`` column chunk, so the compiler pipelines them
+    under the MMAs of the next tile instead of running them after the K loop of this one (431 -> 355 us at M = 49152, bf16).
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
-                              tl.cdiv(ND, BLOCK_N), GROUP_M)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    rmask = rows < M
-    nmask = cols < ND
+    if TMA:
+        EPI: tl.constexpr = 2 if (TMA == 2 or TMA == 4) else 1
+        WS: tl.constexpr = TMA >= 3
+        do_d = tl.make_tensor_descriptor(Dout, shape=[M, D], strides=[sdo0, 1], block_shape=[BLOCK_M, BLOCK_K])
+        w_d = tl.make_tensor_descriptor(Ws, shape=[D, ND], strides=[sw0, 1], block_shape=[BLOCK_K, BLOCK_N])
+        a_d = tl.make_tensor_descriptor(A, shape=[M, ND], strides=[sa0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        b_d = tl.make_tensor_descriptor(B, shape=[M, ND], strides=[sa0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        da_d = tl.make_tensor_descriptor(Dab, shape=[M, ND], strides=[sp0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        db_d = tl.make_tensor_descriptor(Dab + ND, shape=[M, ND], strides=[sp0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        n_m = tl.cdiv(M, BLOCK_M)
+        n_n = tl.cdiv(ND, BLOCK_N)
+        for t in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True, warp_specialize=WS):
+            pid_m, pid_n = tile_order(t, n_m, n_n, GROUP_M)
+            om = pid_m * BLOCK_M
+            on = pid_n * BLOCK_N
+            acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+            for k in range(0, D, BLOCK_K):
+                acc = tf32_dot(do_d.load([om, k]), w_d.load([k, on]), acc, pre_b=PRE)
+            if EPI == 1:
+                a = a_d.load([om, on]).to(tl.float32)
+                b = b_d.load([om, on]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on], (acc * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on], (acc * (a * sa)).to(Dab.dtype.element_ty))
+            else:
+                h0, h1 = tl.split(tl.permute(tl.reshape(acc, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
+                a = a_d.load([om, on]).to(tl.float32)
+                b = b_d.load([om, on]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on], (h0 * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on], (h0 * (a * sa)).to(Dab.dtype.element_ty))
+                a = a_d.load([om, on + BLOCK_N // 2]).to(tl.float32)
+                b = b_d.load([om, on + BLOCK_N // 2]).to(tl.float32)
+                sa = tl.sigmoid(a)
+                da_d.store([om, on + BLOCK_N // 2], (h1 * b * (sa * (1.0 + a * (1.0 - sa)))).to(Dab.dtype.element_ty))
+                db_d.store([om, on + BLOCK_N // 2], (h1 * (a * sa)).to(Dab.dtype.element_ty))
+    else:
+        pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                                  tl.cdiv(ND, BLOCK_N), GROUP_M)
+        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        rmask = rows < M
+        nmask = cols < ND
 
-    dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
-    for k0 in range(0, D, BLOCK_K):
-        kc = k0 + tl.arange(0, BLOCK_K)
-        kmask = kc < D
-        do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
-                     mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
-                    mask=kmask[:, None] & nmask[None, :], other=0.0)
-        dh += tl.dot(do, w, out_dtype=tl.float32)
+        dh = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
+        for k0 in range(0, D, BLOCK_K):
+            kc = k0 + tl.arange(0, BLOCK_K)
+            kmask = kc < D
+            do = tl.load(Dout + rows[:, None] * sdo0 + kc[None, :],
+                         mask=rmask[:, None] & kmask[None, :], other=0.0)
+            w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
+                        mask=kmask[:, None] & nmask[None, :], other=0.0)
+            dh += tf32_dot(do, w, out_dtype=tl.float32, pre_b=PRE)
 
-    m = rmask[:, None] & nmask[None, :]
-    off = rows[:, None] * sa0 + cols[None, :]
-    a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
-    b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
-    # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
-    # `_swiglu_bwd_kernel`; only where dh comes from differs.
-    sa = tl.sigmoid(a)
-    da = dh * b * (sa * (1.0 + a * (1.0 - sa)))
-    db = dh * (a * sa)
-    base = rows[:, None] * sp0
-    tl.store(Dab + base + cols[None, :], da.to(Dab.dtype.element_ty), mask=m)
-    tl.store(Dab + base + (cols + ND)[None, :], db.to(Dab.dtype.element_ty), mask=m)
+        m = rmask[:, None] & nmask[None, :]
+        off = rows[:, None] * sa0 + cols[None, :]
+        a = tl.load(A + off, mask=m, other=0.0).to(tl.float32)
+        b = tl.load(B + off, mask=m, other=0.0).to(tl.float32)
+        # h = silu(a)*b, so d/da = b * sa * (1 + a*(1-sa)) and d/db = silu(a). Same expression as
+        # `_swiglu_bwd_kernel`; only where dh comes from differs.
+        sa = tl.sigmoid(a)
+        da = dh * b * (sa * (1.0 + a * (1.0 - sa)))
+        db = dh * (a * sa)
+        base = rows[:, None] * sp0
+        tl.store(Dab + base + cols[None, :], da.to(Dab.dtype.element_ty), mask=m)
+        tl.store(Dab + base + (cols + ND)[None, :], db.to(Dab.dtype.element_ty), mask=m)
 
 
 def _dh_swiglu_bwd_fake(dout, ws, a, b, shape_key=None):
@@ -264,12 +311,19 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
             "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
             "at the caller that still holds the pre-flatten shape and pass it down."
         )
+    pre = dout.dtype is torch.float32     # the weight is rounded to nearest here (kernels/_tf32.py); the gradient in the kernel
+    if pre:
+        ws = tf32_grid_many(ws)[0]
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
-    grid = lambda META: tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    sms = num_sms(a.device.index or 0)
+    ensure_allocator()
+    # a TMA config is a persistent grid (one program per SM, at most one per tile); the others one program per tile
+    grid = lambda META: ((min(sms, tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"])[0]),) if META.get("TMA")  # noqa: E731
+                         else tile_grid(M, ND, META["BLOCK_M"], META["BLOCK_N"]))
     _dh_swiglu_bwd_kernel[grid](
         dout, ws, a, b, dab, M, int(ND), int(D),
         dout.stride(0), ws.stride(0), a.stride(0), dab.stride(0),
-        shape_key=pack(shape_key, ND=ND, D=D),
+        shape_key=pack(shape_key, ND=ND, D=D), NUM_SMS=sms, PRE=pre,
     )
     return dab
 
@@ -362,6 +416,7 @@ def _b2b_fwd_train_kernel(
     BLOCK_K_D: tl.constexpr, BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    PRE: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. This is the b2b, so ND is looped INSIDE the
     # program and every program reads the whole of Wa and Wb -- the weights are what gets re-read
@@ -391,8 +446,8 @@ def _b2b_fwd_train_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-            b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
+            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         # Preserve the fp32 SwiGLU value through the squeeze. Rounding it to a
         # single bf16 operand adds an avoidable error before the final y cast.
         # Two bf16 components retain the residual while using bf16 tensor cores;
@@ -403,8 +458,8 @@ def _b2b_fwd_train_kernel(
                        mask=col_mask[:, None] & d_mask[None, :], other=0.0)
         if x_ptr.dtype.element_ty == tl.bfloat16:
             h_low = (h_full - h.to(tl.float32)).to(tl.bfloat16)
-            out_acc += tl.dot(h_low, ws_t, out_dtype=tl.float32)
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+            out_acc += tf32_dot(h_low, ws_t, out_dtype=tl.float32)
+        out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         # emit saved tensors for backward (write the chunk as we go). Only the pid_d==0 column
         # of programs writes them: a/b/h do not depend on the d tile, so every other d program
         # would re-store identical bytes. Folded into the store MASK rather than an `if`, so
@@ -421,7 +476,7 @@ def _b2b_fwd_train_kernel(
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                         mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
-        scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+        scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
@@ -465,6 +520,9 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
     scale = torch.empty(M, D, device=x.device, dtype=x.dtype)
+    pre = x.dtype is torch.float32
+    if pre:
+        wa, wb, ws, wsc = tf32_grid_many(wa, wb, ws, wsc)
     check_tile_axes("cond_transition_fwd_b2b_saveact_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _b2b_fwd_train_kernel[grid](
@@ -474,13 +532,13 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        shape_key=pack(shape_key, ND=ND, K=K, DC=DC),
+        shape_key=pack(shape_key, ND=ND, K=K, DC=DC), PRE=pre,
     )
     return y, ab, h, out, scale
 
 
 # --- token (d>=256): composed 2-kernel forward emitting ab,h,out,scale -----------------
-def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
+def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None, residual=None):
     """token fused composed training forward -> (y, ab=[a|b], h, out, scale)."""
     from .fwd_saveact import _fwd_expand_swiglu, _fwd_squeeze_gate
 
@@ -488,7 +546,7 @@ def _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
     # (M, ND), so kernel B could not re-derive the same L from its own input anyway.
     h, ab = _fwd_expand_swiglu(x, wa, wb, shape_key=shape_key)   # kernel A: expand+swiglu -> h, ab
     y, out, scale = _fwd_squeeze_gate(h, cond, ws, wsc, bsc,     # kernel B: squeeze+gate -> out,scale
-                                      shape_key=shape_key)
+                                      shape_key=shape_key, residual=residual)
     return y, ab, h, out, scale
 
 
@@ -512,6 +570,10 @@ def _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc, *, shape_key=None):
 # the forward must additionally write ab,h,out,scale (saved-for-bwd) that inference never
 # writes, eroding the inference-proven GEMM<->elem fusion win. "auto" routes to the winner.
 _FWD_MODE = "auto"  # {"auto", "cublas", "fused"}
+#: The two persistent TMA forward kernels (expand+SwiGLU -> h, ab; squeeze+gate -> y, out, scale) are correct and reachable, but MEASURED slower than
+#: cuBLAS + the flat passes at M = 49152 (H100, bf16: 500 vs 472 us and 380 vs 315 us): their two-accumulator tiles and three-output epilogues do not
+#: overlap as well as `_dh_swiglu_bwd`'s single-accumulator one. Off; flip for an A/B.
+_TMA_FWD = False
 
 
 def set_forward_mode(name: str):
@@ -542,11 +604,23 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
+        from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (wa, wb, ws, wsc, bsc)
         ctx.master = x.dtype == torch.bfloat16 and wa.dtype == torch.float32 and is_h100(x.device)
+        wcat = None
         if ctx.master:
-            wa, wb, ws, wsc, bsc = pack_master(raw_weights)
+            # the casts of the five fp32 master weights in ONE launch, the expand weights straight into the halves of their concatenation
+            from miniworld_engine.kernels._cast import cast_pack
+
+            nd0 = wa.shape[0]
+            if all(w.is_contiguous() for w in raw_weights):
+                wcat, ws, wsc, bsc = cast_pack([wa, wb, ws, wsc, bsc], 2)
+                wa, wb = wcat[:nd0], wcat[nd0:]
+            else:
+                from miniworld_engine.integrations.h100_master import pack as pack_master
+
+                wcat = None
+                wa, wb, ws, wsc, bsc = pack_master(raw_weights)
         # FORWARD backend (see _FWD_MODE): cuBLAS GEMMs + fused-triton elementwise (default,
         # measured-best e2e under CUDA graph) OR the fused-triton b2b/composed forward.
         # Both emit the SAME saved tensors (ab=[a|b], h, out, scale) + wcat for the backward.
@@ -555,13 +629,21 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         ws = ws.contiguous(); wsc = wsc.contiguous(); bsc = bsc.contiguous()
         cond = cond.contiguous()
         ND = wa.shape[0]
-        wcat = torch.cat([wa, wb], dim=0)         # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
+        if wcat is None:
+            wcat = torch.cat([wa, wb], dim=0)     # (2*ND, K); backward dx=dab@wcat, dWcat=dab^T@x
         # ONE L for the whole call, computed once here and reused by the backward via ctx: the
         # module hands us the real atom count A; without it all we could see is M = B*A.
         L = int(length) if length is not None else length_of(x.shape)
         ctx.length = L
         ctx.has_residual = residual is not None
         mode = _pick_fwd(x.shape[1], x.shape[0]) if _FWD_MODE == "auto" else _FWD_MODE
+        tma_fwd = (_TMA_FWD and _FWD_MODE == "auto" and x.shape[1] > _ATOM_D_MAX and x.dtype == torch.bfloat16
+                   and tma_launchable(x, wa, wb, ws, wsc, cond)
+                   and (residual is None or tma_launchable(residual)))
+        if tma_fwd:
+            # sm_90, bf16: the two Triton GEMM+epilogue kernels are persistent and TMA-fed (kernels/_tma.py), at cuBLAS speed with the SwiGLU, the gate and
+            # the stream add as their epilogues: no flat pass over (M, 2*ND), no gate pass, no add. The pointer-based forms lose to cuBLAS + the flat passes.
+            mode = "tma"
         if x.dtype == torch.bfloat16 and mode == "fused" and x.shape[1] > _ATOM_D_MAX:
             # The reroute used to cover ALL of bf16 on the strength of an untested spill
             # concern: "nothing has benchmarked this kernel at bf16 ... lifting this needs a
@@ -599,7 +681,11 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
             # mix nobody had tried is the one that wins. At the atom width both halves win
             # (1.61x and 1.53x, 1.58x together), which is what lifting the reroute above buys.
             mode = "mixed"
-        if mode == "fused":
+        if mode == "tma":
+            y, ab, h, out, scale = _composed_fwd_train(x, cond, wa, wb, ws, wsc, bsc, shape_key=atom_key(L),
+                                                       residual=None if residual is None else residual.contiguous())
+            residual = None   # folded into the squeeze+gate epilogue
+        elif mode == "fused":
             y, ab, h, out, scale = _fused_fwd_train(x, cond, wa, wb, ws, wsc, bsc,
                                                     shape_key=atom_key(L))
         else:  # "cublas" / "mixed": cuBLAS GEMMs + triton elementwise
@@ -709,7 +795,10 @@ class ConditionedTransitionTailFunction(torch.autograd.Function):
         #
         # The two forms are not bitwise equal (different cuBLAS kernels accumulate in a different
         # order), which is a reduction-order difference and not a correctness one.
-        if x.shape[1] <= _ATOM_D_MAX:
+        # H100, bf16, up to ~30k rows: the merged form is the faster one (cuBLAS picks a better kernel for the (2ND, M) x (M, K) product; M = 18432 / 24576:
+        # 138 -> 124 us / 185 -> 173 us); at M = 36864 it picks a worse one (274 -> 305 us), so the split stays there.
+        merged = x.shape[1] <= _ATOM_D_MAX or (ctx.master and dab.shape[0] < 30000)
+        if merged:
             dWcat = torch.mm(dab.t(), x, out_dtype=torch.float32) if ctx.master else dab.t() @ x
             dWa, dWb = dWcat[:ND], dWcat[ND:]
         else:

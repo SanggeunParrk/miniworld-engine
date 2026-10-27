@@ -62,6 +62,7 @@ import triton
 
 from miniworld_engine import settings
 from miniworld_engine.autotune.shape_key import atom_key
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
 from miniworld_engine.kernels.swa_dit.interface import (
@@ -130,7 +131,8 @@ def native_h100_enabled(q, training=None):
     override = settings.current().swa_dit_h100_native
     if override is not None:
         return override and is_sm90(q.device)
-    return is_sm90(q.device)
+    # the A/B switch: force_portable_kernels=True runs the Triton kernels of triton/ on H100 as it does for the other families
+    return is_sm90(q.device) and not settings.current().force_portable_kernels
 
 
 def native_h100_stages(q) -> bool:
@@ -800,7 +802,10 @@ def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B,
     dev = q.device
     ext = _fp32_cuda(C, NHID, half_window, dev)
     if ext is not None:
-        outputs = ext.fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, FP32_EPS, save)
+        # An inference call reads the weights as prepared (tf32-rounded / split, K-permuted) once per weight version, not per call: scoped to
+        # the CUDA-graph capture like every pack (``_capture.param_forms``), so a replay under ``static_weights()`` runs no prep kernel.
+        wpre = None if save else _capture.param_forms("swa_fp32_prep", (wqkv, wg, wo, wu, wd), lambda: ext.prep(wqkv, wg, wo, wu, wd, True))
+        outputs = ext.fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, FP32_EPS, save, wpre)
         outputs[0] = outputs[0].view(N, S, C)
         return outputs
     qf = q.reshape(M, C)

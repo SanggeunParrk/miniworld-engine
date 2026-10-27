@@ -79,6 +79,8 @@ OP_KERNELS: dict[str, tuple[str, ...]] = {
     "pair_embed_ca": ("pair_embed_geom/pair_embed_ca_*", "pair_embed_geom/pair_embed_geom_fwd_*", "pair_embed_geom/pair_embed_geom_dw_*", "pair_embed_geom/pair_embed_geom_bwd_*"),
     "pair_embed_adaln": ("pair_embed_adaln/*",),
     "token_pair_init": ("token_pair_init/*",),
+    # the diffusion sampler's rigid-motion glue (fp32 coordinates) and the atom encoder's pooling (bf16), kernels/sampler_ops/interface.py
+    "sampler_ops": ("sampler_ops/*",),
     "layernorm": ("layernorm/*",),
     # the smooth lDDT of the diffusion loss (kernels/smooth_lddt): prep + forward, and the backward in a training call
     "smooth_lddt": ("smooth_lddt/*",),

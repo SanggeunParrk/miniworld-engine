@@ -29,6 +29,8 @@ import torch.nn.functional as F
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
+
 
 # Reuse the proven, tested TE-style LN building blocks (cuBLAS + Triton, portable).
 from ...layernorm_linear.triton.te_style import (
@@ -37,6 +39,7 @@ from ...layernorm_linear.triton.te_style import (
     _ln_materialize,
 )
 from ..._tiles import tile_grid, tile_order
+from ..._tma import ensure_allocator, num_sms, prune_tma
 from ...layernorm_linear.triton.stats import stats_triton
 from .inference import _cond_affine_stats_saved
 
@@ -302,12 +305,19 @@ def _bwd_x_kernel(
                      dx.to(DX.dtype.element_ty), mask=mask)
 
 
+def _d_row_major(dy, n):
+    """Token-width bf16: D is stored ROW-major as (M, 2N) and handed out as its (2N, M) transpose view. The kernel then writes whole rows (coalesced)
+    instead of 16-row column strips of a (2N, M) buffer: 169 -> 137 us at M = 36864; cuBLAS reads either layout of D at the same speed (H100,
+    bf16). The atom width and fp32 keep the (2N, M) buffer they were tuned on."""
+    return n >= 256 and dy.dtype == torch.bfloat16
+
+
 def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None):
-    """D (2N, M) -- transposed, so the wgrad consuming it is a contiguous-K GEMM -- and dx (M, N)
-    carrying x's strides, since dx is written in x's layout rather than contiguous."""
+    """D (2N, M) -- a view of an (M, 2N) buffer at the token width in bf16 (see ``_d_row_major``), else contiguous so the wgrad consuming it is a
+    contiguous-K GEMM -- and dx (M, N) carrying x's strides, since dx is written in x's layout rather than contiguous."""
     m, n = dy.shape
     return (
-        dy.new_empty((2 * n, m)),
+        dy.new_empty((m, 2 * n)).t() if _d_row_major(dy, n) else dy.new_empty((2 * n, m)),
         # dx is written in x's layout, so the fake carries x's strides.
         torch.empty_strided((m, n), x.stride(), device=dy.device, dtype=dy.dtype),
     )
@@ -328,7 +338,8 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
             "-- and pass it down. The `None` default is the signature the @opaque fakes share, "
             "not a working fallback: length_of refuses a rank-2 shape."
         )
-    D = torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype)   # (2N, M)
+    D = (torch.empty(M, 2 * N, device=dy.device, dtype=dy.dtype).t() if _d_row_major(dy, N)
+         else torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype))   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
     args = (dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
             dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
@@ -381,7 +392,7 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
 def _dgrad_condln_kernel(
     D, Wcat, Cond, MeanC, RstdC, LNW, DCond, DLNW, M, NC: tl.constexpr, K2,
     sd0, sd1, sw0, sw1, sc0, sc1, sdc0, sdc1,
-    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key):
+    BLOCK_M1: tl.constexpr, BLOCK_K_NC: tl.constexpr, BLOCK_K_K2: tl.constexpr, shape_key, PRE: tl.constexpr = False):
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
     row = tl.program_id(0).to(tl.int64)
@@ -424,7 +435,7 @@ def _dgrad_condln_kernel(
                         mask=rmask[:, None] & kmask[None, :], other=0.0)
             b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                         mask=kmask[:, None] & ncmask[None, :], other=0.0)
-            acc += tl.dot(a, b, input_precision="tf32")
+            acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
         cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                        mask=nmask2, other=0.0).to(tl.float32)
         g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -456,7 +467,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tl.dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -482,7 +493,7 @@ def _dgrad_condln_kernel(
                             mask=rmask[:, None] & kmask[None, :], other=0.0)
                 b = tl.load(Wcat + kk[:, None] * sw0 + nc[None, :] * sw1,
                             mask=kmask[:, None] & ncmask[None, :], other=0.0)
-                acc += tl.dot(a, b, input_precision="tf32")
+                acc += tf32_dot(a, b, input_precision="tf32", pre_b=PRE)
             cond = tl.load(Cond + rm[:, None] * sc0 + nc[None, :] * sc1,
                            mask=nmask2, other=0.0).to(tl.float32)
             g_w = tl.load(LNW + nc, mask=ncmask, other=0.0).to(tl.float32)[None, :]
@@ -516,6 +527,9 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
         # off `cond` (M, NC), not off D: D is (2NX, M), so its shape[-2] is 2NX, not a length.
         shape_key = atom_key(length_of(cond.shape))
     NC = w_cat.shape[1]
+    pre = D.dtype is torch.float32
+    if pre:
+        w_cat = tf32_grid_many(w_cat)[0]
     dcond = torch.empty_strided((M, NC), cond.stride(), device=cond.device, dtype=cond.dtype)
     dlnw = torch.zeros(NC, dtype=torch.float32, device=cond.device)
     dargs = (D, w_cat, cond, mean_c, rstd_c, lnw, dcond, dlnw, M, int(NC), K2,
@@ -532,7 +546,7 @@ def _dgrad_condln(D: torch.Tensor, w_cat: torch.Tensor, cond: torch.Tensor,
     # fired for EVERY build unit too -- no tuning round, nothing captured, no cache entry, and an
     # A5000-measured constant with no arch condition on every card.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
-    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2))
+    _dgrad_condln_kernel[grid](*dargs, shape_key=pack(shape_key, NC=int(NC), K2=K2), PRE=pre)
     return dcond, dlnw.to(lnw.dtype)
 
 
@@ -551,7 +565,9 @@ def set_dgrad_triton(flag) -> None:
     _DGRAD_TRITON = flag
 
 
-@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"])
+@triton.autotune(configs=configs_for("adaln_fwd_gate_triton"), key=["shape_key"],
+                 prune_configs_by={"early_config_prune": prune_tma(
+                     lambda na: (na["CondN"], na["SW"].t(), na["BW"].t(), na["X"], na["Y"], na["Gate"]))})
 @triton.jit
 def _adaln_fwd_gate_kernel(
     CondN, SW, SB, BW, X, Rstd, C1, Y, Gate,
@@ -559,6 +575,7 @@ def _adaln_fwd_gate_kernel(
     scn0, sw0, sw1, sbw0, sbw1, sx0, sy0, sg0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
 ):
     """Training forward in one kernel: y AND gate=sigmoid(scale), so sb (M, 2NX) never lands.
 
@@ -573,33 +590,81 @@ def _adaln_fwd_gate_kernel(
     here and x_hat is `x*rstd - c1`. mean_x for the backward is recovered as c1/rstd at the
     launcher -- an (M,) elementwise, negligible against this kernel.
     """
-    pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
-                              tl.cdiv(NX, BLOCK_N), GROUP_M)
-    rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
-    cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
-    rmask, nmask = rows < M, cols < NX
-    scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-    bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
-    for k0 in range(0, NC, BLOCK_K):
-        kc = k0 + tl.arange(0, BLOCK_K)
-        kmask = kc < NC
-        a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
-                    mask=rmask[:, None] & kmask[None, :], other=0.0)
-        w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
-                      mask=kmask[:, None] & nmask[None, :], other=0.0)
-        w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
-                      mask=kmask[:, None] & nmask[None, :], other=0.0)
-        scale += tl.dot(a, w_s, out_dtype=tl.float32)
-        bias += tl.dot(a, w_b, out_dtype=tl.float32)
-    xm = rmask[:, None] & nmask[None, :]
-    xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
-    rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
-    c1 = tl.load(C1 + rows, mask=rmask, other=0.0)[:, None]
-    sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
-    g = tl.sigmoid(scale + sb[None, :])
-    y = g * (xv * rstd - c1) + bias
-    tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
-    tl.store(Gate + rows[:, None] * sg0 + cols[None, :], g.to(Gate.dtype.element_ty), mask=xm)
+    if TMA:
+        # sm_90, 16-bit operands (kernels/_tma.py): persistent loop, tensor descriptors for every operand. SW / BW arrive as the (NC, NX) views of
+        # the (NX, NC) weights (K contiguous: sw0 == 1), so the descriptors are made on the underlying (NX, NC) matrices. TMA: 1 = plain, 2 = epilogue
+        # in two column halves, 3 / 4 = the same with a warp-specialised loop.
+        EPI: tl.constexpr = 2 if (TMA == 2 or TMA == 4) else 1
+        WS: tl.constexpr = TMA >= 3
+        a_d = tl.make_tensor_descriptor(CondN, shape=[M, NC], strides=[scn0, 1], block_shape=[BLOCK_M, BLOCK_K])
+        s_d = tl.make_tensor_descriptor(SW, shape=[NX, NC], strides=[sw1, 1], block_shape=[BLOCK_N, BLOCK_K])
+        b_d = tl.make_tensor_descriptor(BW, shape=[NX, NC], strides=[sbw1, 1], block_shape=[BLOCK_N, BLOCK_K])
+        x_d = tl.make_tensor_descriptor(X, shape=[M, NX], strides=[sx0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        y_d = tl.make_tensor_descriptor(Y, shape=[M, NX], strides=[sy0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        g_d = tl.make_tensor_descriptor(Gate, shape=[M, NX], strides=[sg0, 1], block_shape=[BLOCK_M, BLOCK_N // EPI])
+        n_m = tl.cdiv(M, BLOCK_M)
+        n_n = tl.cdiv(NX, BLOCK_N)
+        for t in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True, warp_specialize=WS):
+            pid_m, pid_n = tile_order(t, n_m, n_n, GROUP_M)
+            om = pid_m * BLOCK_M
+            on = pid_n * BLOCK_N
+            scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+            bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+            for k in range(0, NC, BLOCK_K):
+                ak = a_d.load([om, k])
+                scale = tf32_dot(ak, s_d.load([on, k]).T, scale, pre_b=PRE)
+                bias = tf32_dot(ak, b_d.load([on, k]).T, bias, pre_b=PRE)
+            rws = om + tl.arange(0, BLOCK_M)
+            rstd = tl.load(Rstd + rws, mask=rws < M, other=0.0)[:, None]
+            c1 = tl.load(C1 + rws, mask=rws < M, other=0.0)[:, None]
+            if EPI == 1:
+                cls = on + tl.arange(0, BLOCK_N)
+                sb = tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)
+                g = tl.sigmoid(scale + sb[None, :])
+                y = g * (x_d.load([om, on]).to(tl.float32) * rstd - c1) + bias
+                y_d.store([om, on], y.to(Y.dtype.element_ty))
+                g_d.store([om, on], g.to(Gate.dtype.element_ty))
+            else:
+                s0, s1 = tl.split(tl.permute(tl.reshape(scale, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
+                b0, b1 = tl.split(tl.permute(tl.reshape(bias, (BLOCK_M, 2, BLOCK_N // 2)), (0, 2, 1)))
+                cls = on + tl.arange(0, BLOCK_N // 2)
+                g = tl.sigmoid(s0 + tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)[None, :])
+                y = g * (x_d.load([om, on]).to(tl.float32) * rstd - c1) + b0
+                y_d.store([om, on], y.to(Y.dtype.element_ty))
+                g_d.store([om, on], g.to(Gate.dtype.element_ty))
+                cls = on + BLOCK_N // 2 + tl.arange(0, BLOCK_N // 2)
+                g = tl.sigmoid(s1 + tl.load(SB + cls, mask=cls < NX, other=0.0).to(tl.float32)[None, :])
+                y = g * (x_d.load([om, on + BLOCK_N // 2]).to(tl.float32) * rstd - c1) + b1
+                y_d.store([om, on + BLOCK_N // 2], y.to(Y.dtype.element_ty))
+                g_d.store([om, on + BLOCK_N // 2], g.to(Gate.dtype.element_ty))
+    else:
+        pid_m, pid_n = tile_order(tl.program_id(0).to(tl.int64), tl.cdiv(M, BLOCK_M),
+                                  tl.cdiv(NX, BLOCK_N), GROUP_M)
+        rows = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        cols = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        rmask, nmask = rows < M, cols < NX
+        scale = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+        bias = tl.zeros([BLOCK_M, BLOCK_N], tl.float32)
+        for k0 in range(0, NC, BLOCK_K):
+            kc = k0 + tl.arange(0, BLOCK_K)
+            kmask = kc < NC
+            a = tl.load(CondN + rows[:, None] * scn0 + kc[None, :],
+                        mask=rmask[:, None] & kmask[None, :], other=0.0)
+            w_s = tl.load(SW + kc[:, None] * sw0 + cols[None, :] * sw1,
+                          mask=kmask[:, None] & nmask[None, :], other=0.0)
+            w_b = tl.load(BW + kc[:, None] * sbw0 + cols[None, :] * sbw1,
+                          mask=kmask[:, None] & nmask[None, :], other=0.0)
+            scale += tf32_dot(a, w_s, out_dtype=tl.float32, pre_b=PRE)
+            bias += tf32_dot(a, w_b, out_dtype=tl.float32, pre_b=PRE)
+        xm = rmask[:, None] & nmask[None, :]
+        xv = tl.load(X + rows[:, None] * sx0 + cols[None, :], mask=xm, other=0.0).to(tl.float32)
+        rstd = tl.load(Rstd + rows, mask=rmask, other=0.0)[:, None]
+        c1 = tl.load(C1 + rows, mask=rmask, other=0.0)[:, None]
+        sb = tl.load(SB + cols, mask=nmask, other=0.0).to(tl.float32)
+        g = tl.sigmoid(scale + sb[None, :])
+        y = g * (xv * rstd - c1) + bias
+        tl.store(Y + rows[:, None] * sy0 + cols[None, :], y.to(Y.dtype.element_ty), mask=xm)
+        tl.store(Gate + rows[:, None] * sg0 + cols[None, :], g.to(Gate.dtype.element_ty), mask=xm)
 
 
 def _adaln_fwd_gate_fake(cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, shape_key=None):
@@ -621,15 +686,21 @@ def _adaln_fwd_gate(cond_n: torch.Tensor, scale_wt: torch.Tensor, scale_bias: to
             "matrix, and M alone cannot say whether it is L or L*L. Compute the key at the "
             "caller that still holds the pre-flatten shape and pass it down."
         )
+    pre = x.dtype is torch.float32     # the weights are rounded to nearest here (kernels/_tf32.py); the activation in the kernel
+    if pre:
+        scale_wt, bias_wt = tf32_grid_many(scale_wt, bias_wt)
     y = torch.empty(M, NX, device=x.device, dtype=x.dtype)
     gate = torch.empty(M, NX, device=x.device, dtype=x.dtype)
-    grid = lambda META: tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])  # noqa: E731
+    sms = num_sms(x.device.index or 0)
+    ensure_allocator()
+    grid = lambda META: ((min(sms, tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"])[0]),) if META.get("TMA")  # noqa: E731
+                         else tile_grid(M, NX, META["BLOCK_M"], META["BLOCK_N"]))
     _adaln_fwd_gate_kernel[grid](
         cond_n, scale_wt, scale_bias, bias_wt, x, rstd, c1, y, gate,
         M, int(NX), int(NC),
         cond_n.stride(0), scale_wt.stride(0), scale_wt.stride(1), bias_wt.stride(0), bias_wt.stride(1), x.stride(0),
         y.stride(0), gate.stride(0),
-        shape_key=pack(shape_key, NX=NX, NC=NC),
+        shape_key=pack(shape_key, NX=NX, NC=NC), NUM_SMS=sms, PRE=pre,
     )
     return y, gate
 
@@ -664,16 +735,25 @@ class AdaLNTrainFn(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond, with_stream=False):
+                eps_x, eps_cond, with_stream=False, with_cond=False):
         # lazy: a top-of-file import shifts every kernel's line, which Triton hashes into the cache key
-        from miniworld_engine.integrations.h100_master import is_h100, pack as pack_master
+        from miniworld_engine.integrations.h100_master import is_h100
         raw_weights = (scale_weight, scale_bias, bias_weight)
         ctx.dtypes = (x.dtype, cond.dtype, cond_ln_weight.dtype,
                       scale_weight.dtype, scale_bias.dtype, bias_weight.dtype)
         ctx.master = x.dtype == torch.bfloat16 and scale_weight.dtype == torch.float32 and is_h100(x.device)
-        if ctx.master:
-            scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         saved_wcat = None
+        if ctx.master:
+            # the three fp32 master weights as bf16 in ONE launch; the scale / bias projections land as the halves of their concatenation
+            from miniworld_engine.kernels._cast import cast_pack
+
+            if all(w.is_contiguous() for w in raw_weights):
+                saved_wcat, scale_bias = cast_pack([scale_weight, bias_weight, scale_bias], 2)
+                scale_weight, bias_weight = saved_wcat[:scale_weight.shape[0]], saved_wcat[scale_weight.shape[0]:]
+            else:
+                from miniworld_engine.integrations.h100_master import pack as pack_master
+
+                scale_weight, scale_bias, bias_weight = pack_master(raw_weights)
         orig_x_shape = x.shape
         orig_cond_shape = cond.shape
         nx = orig_x_shape[-1]
@@ -706,9 +786,7 @@ class AdaLNTrainFn(torch.autograd.Function):
             beta0 = scale_bias.new_zeros(nc)
             cond_aff, mean_c, rstd_c = _ln_materialize(cond2d, cond_ln_weight, beta0, eps_cond,
                                                        shape_key=both_key(rows_of(orig_cond_shape)))
-            w_cat = torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
-            if ctx.master:
-                saved_wcat = w_cat
+            w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)     # (2NX, NC)
             sb = _mm(cond_aff, w_cat.t())                            # (M, 2NX) raw [scale|bias]
             y, mean_x, rstd_x, gate = _epilogue_train(x2d, sb, eps_x, scale_bias, shape_key=ak)
 
@@ -718,14 +796,25 @@ class AdaLNTrainFn(torch.autograd.Function):
         ctx.orig_cond_shape = orig_cond_shape
         ctx.nx = nx
         ctx.with_stream = with_stream
-        if with_stream:
-            # (y, x): the second output IS x (a view), for a caller that adds x to something downstream (a residual). Its gradient
-            # arrives in THIS backward and joins dx inside `_bwd_x`, so autograd never runs the add of the two paths into x.
-            return y.reshape(orig_x_shape), x.view_as(x)
+        ctx.with_cond = with_cond
+        if with_stream or with_cond:
+            ctx.set_materialize_grads(False)
+            # (y, x, cond): the extra outputs ARE x and cond (views), for a caller that adds x to something downstream (a residual) and / or feeds
+            # cond to another consumer. Their gradients arrive in THIS backward and join dx inside `_bwd_x` and dcond inside the cond LayerNorm
+            # backward, so autograd never runs the add of the two paths into x or into cond.
+            outs = [y.reshape(orig_x_shape)]
+            if with_stream:
+                outs.append(x.view_as(x))
+            if with_cond:
+                outs.append(cond.view_as(cond))
+            return tuple(outs)
         return y.reshape(orig_x_shape)
 
     @staticmethod
-    def backward(ctx, dy, dstream=None):
+    def backward(ctx, dy, *extra):
+        extra = list(extra)
+        dstream = extra.pop(0) if ctx.with_stream else None
+        dcond_x = extra.pop(0) if ctx.with_cond else None
         (x2d, cond2d, cond_aff, gate, mean_x, rstd_x, mean_c, rstd_c,
          lnw, scale_weight, bias_weight, _raw_sw, _raw_sb, _raw_bw, saved_wcat) = ctx.saved_tensors
         nx = ctx.nx
@@ -741,22 +830,34 @@ class AdaLNTrainFn(torch.autograd.Function):
             dres = dstream.reshape(-1, dstream.shape[-1])
             if dres.stride(-1) != 1:
                 dres = dres.contiguous()
+        dcx = None
+        if dcond_x is not None:
+            dcx = dcond_x.reshape(-1, dcond_x.shape[-1])
+            if dcx.stride(-1) != 1:
+                dcx = dcx.contiguous()
         D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate, shape_key=shape_key, dres=dres)                          # D=(2NX,M), dx=(M,NX)
         w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
         dW_cat = torch.mm(D, cond_aff, out_dtype=torch.float32) if ctx.master else _mm(D, cond_aff)
-        dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
+        if D.stride(0) == 1:   # row-major D (token width, bf16): a column sum over strided rows is a skinny GEMM against ones, which reads it at the HBM rate
+            ones = D.new_ones(1, D.shape[1])
+            dsb = (torch.mm(ones, D[:nx].t(), out_dtype=torch.float32) if ctx.master else torch.mm(ones, D[:nx].t())).view(-1)
+        else:
+            dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
 
         use_triton = (cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX) if _DGRAD_TRITON is None else _DGRAD_TRITON
         if use_triton:
             # FUSED triton: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) + cond LN-backward in ONE kernel.
             dcond, dlnw = _dgrad_condln(D, w_cat, cond2d, mean_c, rstd_c, lnw,
                                         shape_key=shape_key)
+            if dcx is not None:
+                dcond = dcond + dcx
         else:
             dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c,
                                      list(cond2d.stride()),
-                                     shape_key=both_key(rows_of(ctx.orig_cond_shape)))
+                                     shape_key=both_key(rows_of(ctx.orig_cond_shape)),
+                                     dres=dcx)
             del dcond_aff    # a fresh (M, NC); _ln_bwd was its last reader
 
         # `D` is (2*NX, M) -- the largest tensor in this function, 192 MiB at B=32, L=1024,
@@ -781,11 +882,12 @@ class AdaLNTrainFn(torch.autograd.Function):
             None,
             None,
             None,
+            None,
         )
 
 
 def adaln_train(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                eps_x, eps_cond, with_stream=False):
+                eps_x, eps_cond, with_stream=False, with_cond=False):
     """Training (fwd+bwd) adaLN: y = σ(scale)·LN(x) + bias, materialize+cuBLAS, symmetric backward."""
     return AdaLNTrainFn.apply(x, cond, cond_ln_weight, scale_weight, scale_bias, bias_weight,
-                              eps_x, eps_cond, with_stream)
+                              eps_x, eps_cond, with_stream, with_cond)

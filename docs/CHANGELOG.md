@@ -8,8 +8,41 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ## [Unreleased]
 
+### Fixed
+
+- Portable (Triton) fp32 kernels round their TF32 operands to nearest before the MMA (`kernels/_tf32.py`): Transition, ConditionedTransition, AdaLN, the attention cores and the DiT blocks were 2.2-5.6x the PyTorch TF32 error against fp64 (Triton truncates), now 1.0-1.3x (`docs/records/portable_fp32_accuracy_20261026.md`); portable fp32 rungs are 0-13 % slower
+
+- H100 portable training, bias-only DiT and ConditionedTransition: the attention core in feature-major layout (no permute copies), the pair LayerNorm + bias projection in one pass, one-launch weight casts, row-major AdaLN gradient and in-kernel cond-gradient join; portable / PyTorch is now 0.88 - 0.92 for the bias-only DiT and 0.93 - 0.95 for ConditionedTransition bf16 training (fp32 ConditionedTransition 0.965). See `docs/records/portable_bodit_ct_training_20261026.md`.
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
+- H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
+
 ### Added
 
+- H100 ESMFold2 local atom block (`LocalDiTBlock(**ESMFOLD2)`) hand-CUDA TRAINING (bf16, conditioning shared by the samples): forward + backward as opaque ops over the DiT-variant row kernels (RMS / raw-gate switch in `train_rows.cu`), cuBLAS and new rank-window attention backward kernels (`lattn90_esm.cu`, `qknorm_rope_bwd`), 0.50 / 0.48x the portable kernels (was the PyTorch fallback, 1.9-2.0x slower than them); SWA DiT: `force_portable_kernels=True` now selects the Triton kernels on H100 (the ladder's portable rung), and the CUDA inference step hoists its modulation table and prepared fp32 weights (0.81-0.94x portable); `settings.local_dit_esm_train_cuda`; record `docs/records/esm_local_swa_ladder_20261027.md`.
+- H100 OuterProductMean inference (MiniWorld and RF3 widths, either normalisation order, optional pair residual) is ONE persistent wgmma/TMA kernel, `opm_fused_infer` in `integrations/csrc/opm_epilogue.cu`: the grouped outer product and the c_hidden^2 -> c_z projection run together and the [N*32, N*32] product never reaches HBM; the mask count comes from the bit rows, packed weights are cached (`_capture.param_forms`), Chai-1 weight forms too. CUDA / portable on the OPM inference rows 0.96-0.97 -> 0.85 (MiniWorld) and 0.94-0.95 -> 0.72-0.76 (RF3); inference equals the training forward to bf16 noise, not bitwise. `settings.opm_fused=False` restores cuBLAS + epilogue. See `docs/records/opm_fused_ladder_20261026.md`.
+- H100 hand-CUDA TRAINING of the Boltz-2 / RoseTTAFold3 / Chai-1 DiT variant stacks (token and atom, bf16 under autocast and fp32 on TF32): `kernels/dit_variants/cuda/{train.py,train_rows.cu,edge.cu}`, one autograd `Function` (opaque fwd / bwd) per block over CUDA row kernels, cuBLAS and the sm_90a attention cores; before, `miniworld` ran the PyTorch reference there (1.5-2.3x slower than the portable kernels). `settings.dit_variant_train_cuda` (default on) switches it; record `docs/records/dit_variants_cuda_ladder_20261026.md`, tests `tests/gpu/sm90/test_dit_variant_train_h100_gpu.py`.
+- H100 TriMul / OuterProductMean ladder fixes (`docs/records/trimul_opm_ladder_20261026.md`): bidirectional TriMul with hidden 2 D at D64 now runs in CUDA (inference K1/K3 gate; training `d64_h2_bwd.cu`, 3.9x / 2.6x slower than portable before, 0.66 / 0.56x now), RoseTTAFold3 OPM (projection bias) trains in CUDA (0.83-0.87x of portable, was PyTorch), single-direction portable TriMul accepts fp32 master parameters (was a dtype error), portable OPM bias gradient as a GEMV (RF3 divide-after training no longer slower than PyTorch). Chai-1 OPM now has fused CUDA inference and training passes.
+
+- H100 `AugmentedAttention` (token 16 x 48 and dense atom 4 x 32, bf16; token fp32 on the TF32 core) and `AttentionPairBias` at d_pair 256 now run hand-CUDA end to end where the CUDA rung used to run the PyTorch statements
+  (its time equalled the PyTorch rung's and was 1.2-2.5x the portable rung): the pair LayerNorm + head projection + wgmma attention + their backward in one autograd function (`kernels/augmented_attention/cuda/fused_pair*.py`,
+  new pair kernels `atom_pair.cu`, `pair_mma.cu`, `pair_rows.cu`)
+  and a CUDA adaptive LayerNorm (`kernels/adaln/cuda`, `settings.adaln_h100_cuda`, bf16 and fp32, also used by every `AdaptiveLayerNorm` call on H100). All routes are opaque custom ops, so they run under `torch.compile` as well as in a plain CUDA graph; the fp32 route rounds its TF32 operands to nearest (error 2.4-3x -> 1.0x the PyTorch TF32 statements). The portable APB inference path fuses the pair LayerNorm and head projection. Ladder CUDA / portable (was 1.03-2.47): token 0.58-0.78 (fp32 0.70 / 0.92), atom 0.32-0.62, APB pair256 0.77 / 0.83. Record `docs/records/attention_cuda_ladder_20261026.md`.
+- Portable kernels for the diffusion sampler glue `kernels/sampler_ops` (`augment_noise`, `align_euler`, `pool_atoms`): the contract and algorithm of the H100 CUDA kernels (the caller's random
+  draws, the churn arithmetic on device scalars in IEEE operations, centres from fixed-order chunk partials, Kabsch rotation by Horn's quaternion method with 12 squarings in scalar registers, no SVD,
+  no atomics, bitwise reproducible), for any card. `sampler_ops.interface` now routes by card like the pair ops (H100 CUDA unchanged; a recorded card or the A/B switch the portable kernels; else
+  one `UnrecordedCardWarning` and the PyTorch reference; `serves()` / `pool_atoms_serves()` accept every card but B200). On H100, CUDA graph, A = 1 .. 48 samples, 4k .. 32k atoms: 3-16x faster than
+  compiled PyTorch for `augment_noise` / `align_euler` and 1.4-6x for `pool_atoms`; within 0.8-1.8x of the CUDA kernels, and faster than them where the CUDA kernels
+  are latency bound (small A, serial partial sum; the pooling at 2-3x). Registry rows `sampler_ops_{stats,augment,cov,align,pool}_triton`; record `docs/records/portable_sampler_ops_20261025.md`;
+  page [gpus/h100/sampler_ops](gpus/h100/sampler_ops/sampler_ops.md). Tests: `tests/gpu/any/test_sampler_ops_portable_gpu.py`, `tests/gpu/sm90/test_sampler_ops_portable_vs_cuda_gpu.py`,
+  `tests/cpu/compile/test_sampler_ops_routing.py`. No card other than H100 has been run.
+- H100 pair-op CUDA kernels reworked after the portable kernels were measured faster (`docs/records/pair_ops_cuda_vs_portable_20261025.md`): `pair_embed_geom` / `pair_embed_ca` gather kernels with
+  16 / 32 warps per CTA, a one-instruction bf16 unpack and a binary-search bucket (output and codes bit-identical to before), a pipelined LayerNorm backward (bit-identical), and wgmma
+  table-gradient kernels for `pair_embed_geom` / `pair_embed_ca` (bit-identical to the previous kernel) and `pair_embed_adaln` (fp32 sums in a different fixed order). Against the portable
+  kernels on H100 (CUDA graph, B = 16 .. 48, L = 128 .. 512): encoder forward 1.17-1.38x faster (was 0.84-0.97x), encoder training step 1.27-1.44x (was 0.74-0.87x), `pair_embed_adaln`
+  training 1.8-2.2x (was 0.9-1.1x); the decoder training step 1.11-1.36x (was 0.57-0.76x). The kernel sources changed, so their prebuilt-bundle keys change.
+  `MINIWORLD_PAIR_EMBED_BWD_IMPL` selects the table-gradient kernel (1 wgmma, 2 the previous `mma.sync`, 0 the shared-memory kernel) for A/B runs.
+- H100 pair LayerNorm and RMSNorm run new pipelined CUDA kernels (`kernels/layernorm/cuda/pipe`: per-warp cp.async ring, saved statistics, one backward kernel plus a PDL-chained fixed-order weight-gradient reduce, bit-reproducible) instead of the Triton forward + split backward / `mwln::` kernels: CUDA-rung training was 1.11-1.91x the portable time, now 0.97-1.02x; RMSNorm inference 1.21-1.32x, now 1.01-1.05x; no row reaches 0.95 and the inference rows sit at the HBM floor (`docs/records/norms_cuda_ladder_20261026.md`).
+- Portable RMSNorm and pair LayerNorm (Triton) were slower than the best PyTorch statement on H100 (RMSNorm 1.17-1.42x, LN pair up to 1.07x): the backward is now a persistent pipelined grid with one dweight/dbias atomic per program, the RMSNorm forward is persistent, the no-grad LayerNorm forward skips mean/rstd, and the default config CSVs fit the 24-config miss cap; all rows but LN pair D128 L384 inference (1.005, HBM floor tie) now beat PyTorch (`docs/records/portable_norms_ladder_20261025.md`).
 - H100: hand-CUDA AdaptiveLayerNorm and ConditionedTransition as standalone modules (sm_90a wgmma inference and bf16 AdaLN training forward, row kernels + cuBLAS training with stream-gradient folds; ladder CUDA < portable in all 16 rows) -- `docs/records/adaln_ct_cuda_ladder_20261026.md`.
 
 - The performance ladder (`miniworld-engine ladder {plan,run,report,gate}`, `benchmarks/runners/ladder.py`): for every op, mode, dtype and shape of its grid it times the three rungs
@@ -60,7 +93,13 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Changed
 
-- Portable ConditionedTransition / AdaLN / bias-only DiT kernels (H100, `force_portable_kernels`): cached weight casts, no transpose copies, LN(cond) + x statistics in one launch, the residual add folded into the squeeze+gate epilogue / gate pass and into the AdaLN backward (`AdaptiveLayerNorm.forward_with_stream`), H100 tile sets in the default configs; 19 of 30 ladder rows of these ops are 5 % or more faster than PyTorch (every inference row, 0.52-0.65 for the bias-only DiT, which now keeps the pair-bias softmax in inference; AdaLN training), the fp32 training rows are 1-3 % faster, the bf16 training rows of ConditionedTransition (tie) and the bias-only DiT (2-3 % behind) are not. Record: `docs/records/portable_ct_adaln_biasdit_ladder_20261025.md`.
+- H100 `sampler_ops` CUDA kernels (`augment_noise`, `align_euler`, `pool_atoms`) are now faster than the portable kernels in every measured cell (A = 1 .. 48, 4k .. 32k atoms, CUDA graph),
+  restoring CUDA < portable < compiled PyTorch: 1.1-1.7x ahead of the portable kernels and 1.05-3.3x faster than the previous CUDA kernels (`augment_noise` 1.05-1.5x, `align_euler` 1.15-1.8x, `pool_atoms` 1.6-3.3x; `pool_atoms` 12.4-13.1 us -> 3.8-4.9 us at A = 1).
+  Programmatic dependent launch between the kernels of an op, partials staged in shared memory and summed in chunk order, 256 / 512-atom chunks for small launches, a one-round-trip gather in
+  `pool_atoms`. Results are bit-identical to before except where the chunk shrinks (small `augment_noise` / `align_euler` launches: fp32 sums associate differently, <= 1.8e-7 relative);
+  `pool_atoms` is bit-identical. Record `docs/records/h100_sampler_ops_cuda_20261025.md`, page [gpus/h100/sampler_ops](gpus/h100/sampler_ops/sampler_ops.md).
+- Portable Transition on H100 (A/B switch `force_portable_kernels`): row-interleaved expand weights, persistent tensor-map GEMMs on sm_90 (pointer kernels elsewhere), H100 tile sets in the default config lists, and a training backward that reads the expand halves the forward saved in the activation dtype (one GEMM with the SwiGLU gate epilogue, `transition_bwd_squeeze_swiglu_triton`); all Transition inference rows and every bf16 training row now beat PyTorch (fp32 D256 training 1.03x), as accurate as the bf16 PyTorch statements (<= 0.89x their error against fp64); the CUDA-vs-portable parity band of `test_agrees_with_the_triton_path_to_bf16` was re-baselined to 1.5x that error. Record: `docs/records/portable_transition_ladder_20261025.md`. The fp32 (TF32) paths keep their (M, HID) intermediate / saved halves in fp16 with a device-side range scale (portable training; hand-CUDA generic forward from 16 384 rows): fp32 D128 inference 1.59 -> 1.24 ms, error equal to the PyTorch TF32 statements'.
+- Portable ConditionedTransition / AdaLN / bias-only DiT kernels (H100, `force_portable_kernels`): cached weight casts, no transpose copies, LN(cond) + x statistics in one launch, the residual add folded into the epilogues and into the AdaLN backward (`AdaptiveLayerNorm.forward_with_stream`), the value and gate projections of the bias-only attention as one GEMM, the pair-bias softmax kept in inference, H100 tile sets in the default configs, and persistent TMA-fed GEMMs (a `TMA` config axis, `kernels/_tma.py`) for the ConditionedTransition backward GEMM and the AdaLN training forward. Ladder, H100: every inference row 0.52-0.85 of PyTorch, AdaLN training 0.79-0.92, ConditionedTransition training 0.97-0.98, bias-only DiT training 0.96-1.004 (five bf16 rows at 1.0 +- 0.5 %: not yet faster). Record: `docs/records/portable_ct_adaln_biasdit_ladder_20261025.md`.
 
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
@@ -136,6 +175,7 @@ registry's `backend` column describe source code and are unchanged, as are the M
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - Registry bands of the two window-attention Triton backward rows (`augmented_attention_bwd_window_triton`, `augmented_attention_bwd_reduce_window_triton`) set at 4x the H100
   `run_all` measurement (bf16); corrects the 2.3.10 bands.
 - Documented hazard (no code change): the H100 token DiT training path rebuilds its weight packs only when a parameter's `_version` changes (`token_dit_train._pack`), and a *fused*
@@ -301,6 +341,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - A CUDA graph captured over more than 64 bf16 Transitions (Boltz-2's trunk: 64 pairformer blocks plus its template, MSA and confidence
   stacks; Chai-1's; RoseTTAFold3's) faulted with an illegal memory access on a later replay. The fused sm90a Transition reads a cached
   `Ws^T` per weight (`kernels/transition/cuda/_weights.py`), a capture reads that eager entry instead of recording the copy, and the cache
@@ -330,6 +371,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - H100 SWA atom DiT (`SWADiTBlock`, `swa_dit_block`, ESMFold2's atom block) ran 5-9x slower than it did on 2026-10-14. Since 2026-10-18 every
   H100 call took the native stages (`_native_h100_fwd` / `_bwd`) instead of the composed hand-CUDA stages documented in
   `docs/gpus/h100/swa_atom_dit`, and inside the native stages the window attention was the untiled `native_attention` for every call whose
@@ -372,6 +414,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - The wheel's sm90 bundles carry the single-direction TriMul training backward for fp32 master parameters fed bf16
   activations (`trimul_h100/single_output/kernel.cu`, `single_b7/joint.cu` with `-DMASTER_FP32=1`, `h100_single`): pdall's
   training step compiled both on its first call with 2.3.4 (and failed without nvcc / CUTLASS). The engine coverage runs the
@@ -382,6 +425,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - The wheel's sm90 bundles also carry what FoldForge reaches: its families' single attention runs the H100 augmented
   attention at a 512-wide row (`augattn_sm90_attn_fwd ... ROW_WIDTH512 ... APB`), which no engine or MiniWorld driver
   reaches, so a FoldForge model compiled it on its first call with 2.3.3. The release coverage now also records FoldForge's
@@ -414,6 +458,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - The wheel's sm90 bundles cover the bias-only token DiT's own paths, not only what MiniWorld's bf16-mixed runs reach: the
   engine coverage (`build/bundle_coverage.py`) now drives the block with a shared pair and a pair per sample, masked,
   hoisted, d_cond 384 / 768, in every precision. 2.3.2 compiled the fp32 rows and the per-sample / hoist-backward kernels on
@@ -438,6 +483,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - The wheel's sm90 bundles now carry MiniWorld's production kernels. 2.3.0 / 2.3.1 were covered by the engine's own
   drivers only, which do not reach the fused SWA atom DiT (`swa_dit`) or the bias-only token DiT (`bias_only_dit`), so a
   MiniWorld model on an H100 still compiled those on its first call. The release coverage now also records MiniWorld's
@@ -451,6 +497,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - `pydantic` is a runtime dependency: `miniworld_engine.architecture` (the block and diffusion configs) imports it, and a
   plain `pip install miniworld-engine` (2.3.0) could not import `DiffusionTransformer` or any other block. It was only in
   the `bench` extra. The kernels and the prebuilt bundles are the same as 2.3.0.
@@ -476,6 +523,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - CUDA 13 builds: 15 sources that named the unversioned `PFN_cuTensorMapEncodeTiled` (removed in CUDA 13) resolve
   `cuTensorMapEncodeTiled` through `cudaGetDriverEntryPointByVersion(..., 12000, ...)` (OPM epilogue, PWA, `ln_vg`,
   `dgv_bwd`, SWA DiT sm90); same SASS under CUDA 12.9. The Hopper atom cubins (`atom_local_sm90`, `local_dit_sm90`) and
@@ -603,6 +651,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - B200 SWA atom DiT: the forward chain (modulation -> qkvg -> attention -> ffn, PDL) hung in CUDA-graph replays with one conditioning
   row per sample (A = 1, B = N) and ragged `seqused`. `ffn_fwd2_a1` (the A = 1 - 3 build of the last kernel) is built with `-DPDL_EARLY=0`
   (no early `griddepcontrol.launch_dependents`), and `qkvg_fwd2_a1` the same way (faster); the other builds are unchanged. A1 inference after the change: 0.031-0.043 ms for
@@ -1019,6 +1068,7 @@ pass `engine_backend="triton"`.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - B200 bias-only DiT: saturated sigmoid gates gave NaN / inf. The fast sigmoid 1 / (1 + 2^(-g log2 e)) takes its reciprocal by Newton
   steps from a bit-trick seed that is valid only for a denominator below 2^126; at g <= -87.3 (inf from -88.7) the seed was garbage.
   `pv_gate_inf` (the bf16 attention core: training forward, 12-launch inference) turned a whole token row to NaN this way in a
@@ -1254,6 +1304,7 @@ GPU qualification of this release is pending.
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - JIT build lock guard (`kernels._nvcc`): honour `load(build_directory=...)` when locating the
   lock, and do not trust an NFSv3 exclusive-create mtime (read back as 1981) when deciding a
   lock is stale -- use max(mtime, ctime) and never reclaim a pre-2000 stamp. Both hung
@@ -1366,6 +1417,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
 
 ### Fixed
 
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - AdaLN GEMM alignment, large compute-efficient attention backward scratch usage,
   mixed-affine LayerNorm and compiled FA4 backward.
 - Wide TriMul packed reduction keys (`KP=4096`), compact CuTe cache selection,
@@ -1610,6 +1662,7 @@ Release map, migration limits and evidence: 2.0.0 (`archive/records-20260928:doc
 
 ### Fixed
 - **A `level=both` kernel keyed its cache on LENGTH, so its two sides shared a
+- H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
   bucket.** A pair activation `(B, L, L, D)` at L=1024 and an atom activation
   `(B, A, D)` at A=1024 both have `shape[-2] == 1024`, so both landed in
   `shape_key=1024` — while the first launches 1,048,576 rows and the second

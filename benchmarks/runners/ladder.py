@@ -142,6 +142,9 @@ GROUPS: list[Group] = [
     G("dit_boltz2", "DiT variant stack", "dit", (384,), "Boltz-2 token", "+dit_variant=boltz2", weight=2),
     G("dit_rf3", "DiT variant stack", "dit", (384,), "RoseTTAFold3 token", "+dit_variant=rosettafold3", weight=2),
     G("dit_chai1", "DiT variant stack", "dit", (384,), "Chai-1 token", "+dit_variant=chai1", weight=2),
+    G("dit_boltz2_fp32", "DiT variant stack", "dit", (384,), "Boltz-2 token", "+dit_variant=boltz2", precision="32", weight=1),
+    G("dit_rf3_fp32", "DiT variant stack", "dit", (384,), "RoseTTAFold3 token", "+dit_variant=rosettafold3", precision="32", weight=1),
+    G("dit_chai1_fp32", "DiT variant stack", "dit", (384,), "Chai-1 token", "+dit_variant=chai1", precision="32", weight=1),
     G("local_bf16", "LocalDiT atom block", "local_dit", (512, 1024), "d128 32x128 (atoms=8L)", weight=3, tier="smoke"),
     G("local_fp32", "LocalDiT atom block", "local_dit", (512,), "d128 32x128 (atoms=8L)", precision="32", weight=2),
     G("local_esm", "LocalDiT ESMFold2 atom block", "local_dit", (512, 1024), "d128 192 keys rotary (atoms=8L)", "+local_dit_preset=esmfold2", "+shared_cond=true",
@@ -149,6 +152,9 @@ GROUPS: list[Group] = [
     G("local_boltz2", "DiT variant stack (atom)", "local_dit", (512,), "Boltz-2 atom", "+dit_variant=boltz2", weight=2),
     G("local_rf3", "DiT variant stack (atom)", "local_dit", (512,), "RoseTTAFold3 atom", "+dit_variant=rosettafold3", weight=2),
     G("local_chai1", "DiT variant stack (atom)", "local_dit", (512,), "Chai-1 atom", "+dit_variant=chai1", weight=2),
+    G("local_boltz2_fp32", "DiT variant stack (atom)", "local_dit", (512,), "Boltz-2 atom", "+dit_variant=boltz2", precision="32", weight=1),
+    G("local_rf3_fp32", "DiT variant stack (atom)", "local_dit", (512,), "RoseTTAFold3 atom", "+dit_variant=rosettafold3", precision="32", weight=1),
+    G("local_chai1_fp32", "DiT variant stack (atom)", "local_dit", (512,), "Chai-1 atom", "+dit_variant=chai1", precision="32", weight=1),
     G("bodit_bf16", "bias-only DiT", "bias_only_dit", (256, 512, 768), "d768 16x48 A5/A48", weight=3, tier="smoke"),
     G("bodit_psb", "bias-only DiT", "bias_only_dit", (256, 512), "d768 16x48 per-sample pair A4", "n_augment=4", "+per_sample_pair=true", modes=("training",),
       weight=2),
@@ -181,9 +187,9 @@ GROUPS: list[Group] = [
     ops("slddt_A48", "smooth_lddt", "smooth_lddt", (1024, 2048), "A48 B1", "n_augment=48", weight=3, tier="smoke", dtype_label="fp32"),
     ops("slddt_A16", "smooth_lddt", "smooth_lddt", (4096,), "A16 B1", "n_augment=16", weight=3, dtype_label="fp32",
         note="the PyTorch reference cannot run A48 x N4096 (cdist indices overflow int32: illegal memory access)"),
-    ops("samp_aug", "sampler augment_noise", "sampler_augment", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", rungs=dict(NO_PORTABLE), modes=("inference",)),
-    ops("samp_align", "sampler align_euler", "sampler_align", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", rungs=dict(NO_PORTABLE), modes=("inference",)),
-    ops("samp_pool", "sampler pool_atoms", "sampler_pool", (4096, 12288, 24576), "B5 c768", "n_augment=5", weight=2, dtype_label="bf16", rungs=dict(NO_PORTABLE), modes=("inference",)),
+    ops("samp_aug", "sampler augment_noise", "sampler_augment", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
+    ops("samp_align", "sampler align_euler", "sampler_align", (4096, 12288, 24576), "B5", "n_augment=5", weight=3, dtype_label="fp32", modes=("inference",)),
+    ops("samp_pool", "sampler pool_atoms", "sampler_pool", (4096, 12288, 24576), "B5 c768", "n_augment=5", weight=2, dtype_label="bf16", modes=("inference",)),
 ]
 BY_ID = {g.id: g for g in GROUPS}
 PARAM_VARIANT = "@bf16p"
@@ -286,6 +292,20 @@ def run_one(spec: dict, g: Group, mode: str, out: Path, log) -> dict:
             retry.append("+allow_eager=true")
         sub = run_one({"kind": "retry", "regime": "compile, no graph", "cmd": retry}, g, mode, out, log)
         rec["retry"] = sub
+    # a CUDA error (illegal address, invalid argument, ...) of a row that shared its process with other rungs may be state left by an earlier rung
+    # (a portable kernel's cached launch parameters read by the CUDA path, a poisoned context): measure that rung alone in a fresh process, with the
+    # kernel probe off (the profiler is the other thing that shares the process). `isolated` records say so in the report.
+    cuda_err = re.compile(r"CUDA error|AcceleratorError|illegal memory|invalid argument|cudaError", re.I)
+    shared = re.search(r"implementations=\[([^\]]*)\]", " ".join(cmd))
+    n_impl = len(shared.group(1).split(",")) if shared else 1
+    bad = sorted({r["implementation"] for r in rows if r["status"] == "failed" and cuda_err.search(r["error"])})
+    if bad and n_impl > 1 and spec["kind"] in ("rungs", "engine_nc"):
+        rec["isolated"] = []
+        for impl in bad:
+            lens = ",".join(sorted({r["seq_len"] for r in rows if r["implementation"] == impl and r["status"] == "failed"}, key=int))
+            iso = [c for c in cmd if not c.startswith(("implementations=", "+seq_len_values=", "name_suffix=", "+kernel_probe="))]
+            iso += [f"implementations=[{impl}]", f"+seq_len_values=[{lens}]", "+kernel_probe=false", f"name_suffix=ladder_{g.id}_{spec['kind']}_iso_{impl}"]
+            rec["isolated"].append(run_one({"kind": "iso", "regime": "own process, no probe", "cmd": iso}, g, mode, out, log))
     return rec
 
 
@@ -317,8 +337,12 @@ def cmd_run(args) -> int:
     bad = 0
     for g in select(args):
         for mode in g.modes:
+            if args.modes and mode not in args.modes.split(","):
+                continue
             recs = {}
             for spec in commands(g, mode, args.repeats, out):
+                if args.kinds and spec["kind"] not in args.kinds.split(","):
+                    continue
                 if (g.id, mode, spec["kind"]) in done:
                     continue
                 rec = run_one(spec, g, mode, out, log)
@@ -390,7 +414,7 @@ def load(outs) -> tuple[list[dict], dict]:
         g = group_of(rec["group"])
         if g is None:
             continue
-        for sub, is_retry in ((rec, False), (rec.get("retry"), True)):
+        for sub, is_retry in ((rec, False), (rec.get("retry"), True), *[(i, True) for i in rec.get("isolated", [])]):
             if not sub or not sub.get("csv"):
                 continue
             by: dict[tuple, list[dict]] = {}
@@ -402,7 +426,7 @@ def load(outs) -> tuple[list[dict], dict]:
                 else:
                     rung = {"pytorch": "pt_compiled", "portable": "portable", "miniworld": "cuda"}.get(impl, impl)
                 c = _cell(rows)
-                c["regime"] = "compile, no graph" if is_retry else rec["regime"]
+                c["regime"] = (sub.get("regime") if is_retry else rec["regime"]) or rec["regime"]
                 key = (g.id, rec["mode"], L, rung)
                 old_c = cells.get(key)
                 if old_c is None or old_c["ms"] is None or (c["ms"] is not None and c["ms"] < old_c["ms"]):
@@ -461,22 +485,35 @@ def verdict(row: dict, g: Group) -> dict:
 
     kc, kp, kt = names("cuda"), names("portable"), names("pt_compiled") | names("pt_eager_graph")
 
+    def overlap(a, b):
+        return len(a & b) / len(a | b) if a and b else 0.0
+
     def same(a, b):
         """The two rungs launched (nearly) the same kernels: Jaccard overlap of their top-kernel names >= 0.7."""
-        return bool(a and b) and len(a & b) / len(a | b) >= 0.7
+        return overlap(a, b) >= 0.7
 
+    #: the 'cuda' row ran the PyTorch statements: the engine has no CUDA path for the call and H100 / B200 route `miniworld` to the reference there.
+    #: Evidence: the same kernels as the PyTorch rung, or (three-rung ops) a time within 3% of the PyTorch rung while the portable rung differs
+    cuda_is_pytorch = False
+    if has_portable and row["cuda_ms"] and row["pytorch_ms"]:
+        t = row["cuda_ms"] / row["pytorch_ms"]
+        declined = bool(re.search(r"refused|declined|neither the H100|not taken|reference composition|\[statements", row.get("paths", {}).get("cuda", "")))
+        cuda_is_pytorch = (declined or same(kc, kt) or (abs(t - 1.0) <= 0.03 and overlap(kc, kt) >= 0.3)) and not same(kc, kp)
     if has_portable and same(kc, kp):
         cp = None
         why["cuda_vs_portable"] = "cuda rung launched the portable kernels (no distinct CUDA path)"
-    if has_portable and same(kp, kt):
+    elif cuda_is_pytorch:
+        cp = None
+        gap = row["portable_ms"] / row["cuda_ms"] if row["portable_ms"] and row["cuda_ms"] else None
+        why["cuda_vs_portable"] = ("no CUDA path serves this call: `miniworld` ran the PyTorch reference"
+                                   + (f" (the portable kernels are {1 / gap:.2f}x faster than what H100 runs)" if gap and gap < 1 else ""))
+    if has_portable and same(kp, kt) and not cuda_is_pytorch:
         pp = None
         why["portable_vs_pytorch"] = "portable rung launched the PyTorch kernels (fell back to the PyTorch statements)"
     if not has_portable and same(kc, kt):
         cpt = None
         why["cuda_vs_pytorch"] = "cuda rung launched the PyTorch kernels (no CUDA path served the call)"
-    #: the 'cuda' row of a three-rung op that launched the PyTorch kernels: H100 routes `miniworld` to the PyTorch reference where no CUDA path
-    #: serves the call, so the user gets PyTorch although a faster portable kernel exists -- still a violation of the invariant, but of the routing
-    no_cuda_path = bool(has_portable and same(kc, kt) and not same(kc, kp))
+    no_cuda_path = cuda_is_pytorch
     pairs = [("cuda_vs_portable", cp), ("portable_vs_pytorch", pp)] if has_portable else [("cuda_vs_pytorch", cpt)]
     rung_ms = {"cuda": row["cuda_ms"], "portable": row["portable_ms"], "pytorch": row["pytorch_ms"]}
     rung_err = {"cuda": row["errors"].get("cuda", ""), "portable": row["errors"].get("portable", ""),
@@ -503,15 +540,15 @@ def verdict(row: dict, g: Group) -> dict:
         out = "+".join(v)
     elif not na:
         out = "OK"
-    elif len(na) < len(pairs):
-        out = "OK"                      # every pair that could be measured holds; the other is named in the note
+    elif cuda_is_pytorch and len(na) == 1:
+        out = "n.a.(cuda rung missing)"  # the other pair was measured and holds; the routing gap is in the note and in the routing-gap table
     else:
-        out = "n.a."
+        out = "n.a." if len(na) == len(pairs) else "OK"
     if na:
         notes.append("n.a.: " + " | ".join(na))
     if not has_portable:
         notes.append("no portable rung by design")
-    return {"verdict": out, "note": "; ".join(notes), "causes": causes}
+    return {"verdict": out, "note": "; ".join(notes), "causes": causes, "routing_gap": cuda_is_pytorch}
 
 
 def fmt(x, nd=3):
@@ -529,7 +566,7 @@ def violations(table, kinds=("cuda_vs_portable", "portable_vs_pytorch", "cuda_vs
 
 
 FIELDS = ["group", "op", "mode", "dtype", "L", "shape", "weight", "pt_compiled_ms", "pt_eager_graph_ms", "pt_eager_ms", "pt_best",
-          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "cause", "note",
+          "portable_ms", "cuda_ms", "cuda_over_portable", "portable_over_pytorch", "cuda_over_pytorch", "noise", "verdict", "routing_gap", "cause", "note",
           "dev", "torch", "target"]
 
 
@@ -562,24 +599,34 @@ def render_md(table, meta) -> str:
              f"torch {tv}, run {meta.get('date', '?')} on {meta.get('host', '?')}, Slurm job {meta.get('slurm_job', '?')}.\n")
     n = len(table)
     ok = sum(r["verdict"] == "OK" for r in table)
-    na = sum(r["verdict"].startswith("n.a.") for r in table)
+    na = sum(r["verdict"].startswith("n.a.") and not r.get("routing_gap") for r in table)
+    gaps = [r for r in table if r.get("routing_gap")]
     cvp = [r for r in table if "VIOLATION(cuda_vs_portable)" in r["verdict"]]
     pvp = [r for r in table if "VIOLATION(portable_vs_pytorch)" in r["verdict"]]
     cvt = [r for r in table if "VIOLATION(cuda_vs_pytorch)" in r["verdict"]]
     L.append("## Summary\n")
-    L.append("| rows | OK | VIOLATION(cuda_vs_portable) | VIOLATION(portable_vs_pytorch) | VIOLATION(cuda_vs_pytorch) | n.a. |\n|---|---|---|---|---|---|")
-    L.append(f"| {n} | {ok} | {len(cvp)} | {len(pvp)} | {len(cvt)} | {na} |\n")
+    L.append("| rows | OK | VIOLATION(cuda_vs_portable) | VIOLATION(portable_vs_pytorch) | VIOLATION(cuda_vs_pytorch) | n.a.(cuda rung missing: no CUDA path, `miniworld` runs PyTorch) | n.a.(other rung missing) |\n|---|---|---|---|---|---|---|")
+    L.append(f"| {n} | {ok} | {len(cvp)} | {len(pvp)} | {len(cvt)} | {len(gaps)} | {na} |\n")
     # per op counts
     by: dict[str, list[dict]] = {}
     for r in table:
         by.setdefault(r["op"], []).append(r)
-    L.append("| op | rows | OK | cuda>=portable | portable>=pytorch | cuda>=pytorch (no portable) | n.a. |\n|---|---|---|---|---|---|---|")
+    L.append("| op | rows | OK | cuda>=portable | portable>=pytorch | cuda>=pytorch (no portable) | no CUDA path (routing gap) | other n.a. |\n|---|---|---|---|---|---|---|---|")
     for op, rs in by.items():
         L.append(f"| {op} | {len(rs)} | {sum(r['verdict'] == 'OK' for r in rs)} | "
                  f"{sum('VIOLATION(cuda_vs_portable)' in r['verdict'] for r in rs)} | {sum('VIOLATION(portable_vs_pytorch)' in r['verdict'] for r in rs)} | "
-                 f"{sum('VIOLATION(cuda_vs_pytorch)' in r['verdict'] for r in rs)} | {sum(r['verdict'].startswith('n.a.') for r in rs)} |")
+                 f"{sum('VIOLATION(cuda_vs_pytorch)' in r['verdict'] for r in rs)} | {sum(bool(r.get('routing_gap')) for r in rs)} | "
+                 f"{sum(r['verdict'].startswith('n.a.') and not r.get('routing_gap') for r in rs)} |")
     L.append("")
     v = violations(table)
+    L.append("## Routing gaps: the CUDA rung does not exist, `miniworld` on this card runs the PyTorch reference\n")
+    L.append("Rows where the hand CUDA path does not serve the call (a dtype, a shape, a mode, an option it does not take) and the engine's portable kernels would be faster than "
+             "what `miniworld` runs. The ladder invariant is not testable for them (no CUDA rung); the routing is what a user sees. `speed-up` = PyTorch / portable.\n")
+    L.append("| op | mode | dtype | shape | L | miniworld (= PyTorch) ms | portable ms | speed-up lost | weight |\n|---|---|---|---|---|---|---|---|---|")
+    for r in sorted([r for r in table if r.get("routing_gap") and r["portable_ms"] and r["cuda_ms"] > r["portable_ms"] * 1.01],
+                    key=lambda r: -(r["cuda_ms"] / r["portable_ms"])):
+        L.append(f"| {r['op']} | {r['mode']} | {r['dtype']} | {r['shape']} | {r['L']} | {fmt(r['cuda_ms'])} | {fmt(r['portable_ms'])} | {r['cuda_ms'] / r['portable_ms']:.2f}x | {r['weight']} |")
+    L.append("")
     L.append("## Violations ranked by size (ratio = lower rung / upper rung; must be < 1)\n")
     L.append("| # | op | mode | dtype | shape | L | pair | ratio | CUDA ms | portable ms | PyTorch best ms (form) | weight | cause / note |\n|---|---|---|---|---|---|---|---|---|---|---|---|---|")
     for i, r in enumerate(sorted(v, key=lambda r: -r["ratio"]), 1):
@@ -629,6 +676,7 @@ def cmd_report(args) -> int:
     print(f"{n} ladder rows -> {csv_path}")
     for key in ("OK", "VIOLATION(cuda_vs_portable)", "VIOLATION(portable_vs_pytorch)", "VIOLATION(cuda_vs_pytorch)", "n.a."):
         print(f"  {key:34s} {sum(key in r['verdict'] for r in table)}")
+    print(f"  of which routing gaps (no CUDA path)  {sum(bool(r.get('routing_gap')) for r in table)}")
     return 0
 
 
@@ -639,6 +687,12 @@ def cmd_gate(args) -> int:
     if args.allow and not args.strict:
         allow = {l.strip() for l in Path(args.allow).read_text().splitlines() if l.strip() and not l.startswith("#")}
     bad = []
+    if args.routing:
+        for r in rows:
+            if r.get("routing_gap") == "True" and r["cuda_ms"] and r["portable_ms"]:
+                tag = f"{r['group']}:{r['mode']}:{r['L']}:routing_gap"
+                if tag not in allow:
+                    bad.append((tag, r["cuda_ms"] / r["portable_ms"]))
     for r in violations(rows):
         tag = f"{r['group']}:{r['mode']}:{r['L']}:{r['kind']}"
         if tag not in allow:
@@ -659,6 +713,8 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--tier", default="core", choices=list(TIERS), help="smoke: one cell per op; core: production shapes; full: all served")
             s.add_argument("--group", default="", help="regex over group ids (overrides --tier)")
             s.add_argument("--repeats", type=int, default=3)
+            s.add_argument("--modes", default="", help="comma list of modes to run (default: every mode of the group)")
+            s.add_argument("--kinds", default="", help="comma list of command kinds to run: rungs, engine_nc, eager_graph, eager (default: all four)")
             s.add_argument("--out", default=str(Path.home() / "miniworld-engine-scratch" / "ladder" / "out"))
             if name == "run":
                 s.add_argument("--resume", action="store_true")
@@ -670,6 +726,7 @@ def build_parser() -> argparse.ArgumentParser:
             s.add_argument("--csv", required=True)
             s.add_argument("--allow", default="")
             s.add_argument("--strict", action="store_true")
+            s.add_argument("--routing", action="store_true", help="also fail on a routing gap: no CUDA path and a faster portable path (tag group:mode:L:routing_gap)")
     return p
 
 

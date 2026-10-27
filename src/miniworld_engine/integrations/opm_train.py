@@ -29,6 +29,7 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any, cast
 
@@ -172,7 +173,26 @@ def _epilogue_half_enabled(s: int, n: int, *, training: bool) -> bool:
     return not training and (s, n) == (1024, 384)
 
 
+def _fused_enabled(s: int, n: int, *, training: bool, cm: int = CM, cz: int = CZ) -> bool:
+    """The inference outer product + projection as ONE kernel (`opm_fused_infer`, csrc/opm_epilogue.cu): the grouped product never goes to HBM.
+    MiniWorld / RF3 widths (d_msa 64, d_pair 128), N % 16, S % 64, either normalisation order, with or without the pair residual."""
+    return (not training and (cm, cz) == (CM, CZ) and n % 16 == 0 and s % 64 == 0 and s >= 64
+            and settings.current().opm_fused and not settings.current().force_portable_kernels)
+
+
+def _fused_weight(wo):
+    """Wo [128, 1024] bf16 with k = (c, e) permuted to (c // 8, e // 8, c % 8, e % 8): the layout `opm_fused_infer` keeps its products in."""
+    from miniworld_engine.kernels import _capture
+
+    return _capture.param_forms(
+        "opm_fused_w", [wo],
+        lambda: wo.detach().to(torch.bfloat16).reshape(128, 4, 8, 4, 8).permute(0, 1, 3, 2, 4).reshape(128, 1024).contiguous())
+
+
 def _owned_blas_for(s: int, n: int, *, training: bool) -> bool:
+
+
+
     """Graph-owned cuBLAS for the qualified exact shapes."""
     return (training and (s, n) == (1024, 768)) or (
         not training and (s, n) == (4096, 128)
@@ -198,6 +218,7 @@ def _ext(
     epi_half=None,
     cm: int = CM,
     cz: int = CZ,
+    fused: bool = False,
 ):
     """This repo's fused OPM kernels for the current card: `csrc/opm_epilogue.cu` (sm_90a) or
     `csrc/sm100/opm_sm100.cu` (sm_100a, the same kernels and signatures on tcgen05 / TMEM).
@@ -223,6 +244,8 @@ def _ext(
         key += "_epi_tma_overlap"
     if epi_half:
         key += "_half"
+    if fused and not sm100 and not wide:   # the fused outer product + projection kernel (csrc/opm_epilogue.cu, MINIWORLD_OPM_FUSED)
+        key += "_fused" + os.environ.get("OPM_FUSED_DEFS", "").replace(" ", "").replace("=", "").replace("-D", "_")
     if wide and not sm100:
         key += f"_{cm}_{cz}"
     if key in _EXT:
@@ -250,6 +273,8 @@ def _ext(
             suffix += "_epi_tma_overlap"
         if epi_half:
             suffix += "_half"
+        if fused and not wide:
+            suffix += "_fused" + os.environ.get("OPM_FUSED_DEFS", "").replace(" ", "").replace("=", "").replace("-D", "_")
         if wide:
             suffix += f"_{cm}_{cz}"
         _EXT[key] = load(
@@ -258,7 +283,8 @@ def _ext(
             extra_cuda_cflags=["-O3", "-gencode=arch=compute_90a,code=sm_90a"]
             + ([f"-DOPM_CM={cm}", f"-DOPM_CZ={cz}"] if wide else [])
             + (["-DMINIWORLD_OPM_EPILOGUE_TMA_OVERLAP=1"] if epi_tma else [])
-            + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else []),
+            + (["-DMINIWORLD_OPM_EPILOGUE_TMA_HALF=1"] if epi_half else [])
+            + (["-DMINIWORLD_OPM_FUSED=1", *os.environ.get("OPM_FUSED_DEFS", "").split()] if fused and not wide else []),
             extra_cflags=["-O3"],
         )
     return _EXT[key]
@@ -466,7 +492,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
 
 
 def _forward_wide(
-    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after
+    ctx, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, save_o, residual, save_stats, after, pbias=None
 ):
     """The wide composition (d_msa 64 / 128, d_pair 128 / 256 / 384, either normalisation order): the persistent TMA prologue
     (LN + both projections + mask -> A2 / BT, the statistics and the exact mask count), cuBLAS for the grouped outer product,
@@ -475,31 +501,38 @@ def _forward_wide(
     m = msa[0].contiguous()
     cm, cz = m.shape[2], wo.shape[0]
     n = m.shape[1]
-    ext = _ext(msa.device, native=True, tma=False, cm=cm, cz=cz)
+    fused = _fused_enabled(m.shape[0], n, training=save_stats, cm=cm, cz=cz) and torch.cuda.get_device_capability(msa.device) == (9, 0)
+    ext = _ext(msa.device, native=True, tma=False, cm=cm, cz=cz, fused=fused)
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
-    a2, bt, stats, mask16, norm = ext.opm_prologue_wide(
-        m,
-        mk,
-        lnw.detach().float().contiguous(),
-        lnb.detach().float().contiguous(),
-        wa.detach().to(bf).contiguous(),
-        wb.detach().to(bf).contiguous(),
-        float(eps),
-        bool(save_stats),
-    )
-    o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
-    z = ext.opm_epilogue(
-        o,
-        norm,
-        wo.detach().to(bf).contiguous(),
-        bo.detach().to(bf).float().contiguous(),
-        n,
-        n,
-        residual,
-        int(after),
-    )
+    def forms():
+        return (
+            lnw.detach().float().contiguous(),
+            lnb.detach().float().contiguous(),
+            wa.detach().to(bf).contiguous(),
+            wb.detach().to(bf).contiguous(),
+            wo.detach().to(bf).contiguous(),
+            bo.detach().to(bf).float().contiguous(),
+            pbias.detach().float().contiguous() if pbias is not None else None,   # RoseTTAFold3's projection biases [left | right]
+        )
+
+    if save_stats:
+        gam, bet, wa16, wb16, wo16, ob, pb = forms()
+    else:   # inference: the kernel-dtype forms of the weights are made once while the weights are unchanged (no cast kernels per call)
+        from miniworld_engine.kernels import _capture
+
+        gam, bet, wa16, wb16, wo16, ob, pb = _capture.param_forms(
+            "opm_wide_infer", [t for t in (lnw, lnb, wa, wb, wo, bo, pbias) if t is not None], forms)
+    # inference: the epilogue takes the mask count from the mask bit rows (`norm` is that int32 [N, S/32] table), no separate count kernel
+    a2, bt, stats, mask16, norm = ext.opm_prologue_wide(m, mk, gam, bet, wa16, wb16, float(eps), bool(save_stats), pb, bool(save_stats))
+    ctx.has_bias = pbias is not None
+    if fused:   # inference: the products stay in shared memory (norm is the mask bit table here)
+        z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), ob, residual, int(after))
+        o = None
+    else:
+        o = torch.mm(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
+        z = ext.opm_epilogue(o, norm, wo16, ob, n, n, residual, int(after))
     ctx.save_o = bool(save_o)
     ctx.after = bool(after)
     ctx.save_for_backward(
@@ -536,6 +569,14 @@ def _backward_wide(ctx, dz):
     dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
     dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
     del dO
+    # the projection biases (RoseTTAFold3): left[s, i, c] = mask[s, i] (proj + b_L[c]), so db_L[c] = sum_{s, i} mask[s, i] dA[s, i, c]
+    # (dA is the gradient of the grouped A2 in [s, (i, c)] order), one fp32-accumulated GEMV per side
+    db = None
+    if getattr(ctx, "has_bias", False):
+        ch = dA.shape[1] // n
+        mk = mask16.reshape(1, -1)
+        db = torch.cat([torch.mm(mk, dA.reshape(-1, ch), out_dtype=torch.float32).reshape(-1),
+                        torch.mm(mk, dB.reshape(-1, ch), out_dtype=torch.float32).reshape(-1)])
     if o is None:
         o = torch.mm(a2, bt.t())
     dWo = ext.opm_dwo(dzp, o, n, n)
@@ -570,6 +611,7 @@ def _backward_wide(ctx, dz):
         dbo.to(bo.dtype),
         None,
         None,
+        db,
     )
 
 
@@ -593,12 +635,14 @@ class _OpmMath(torch.autograd.Function):
         residual=None,
         save_stats=True,
         after=False,
+        pbias=None,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
         if (
             (cm, cz) != (CM, CZ)
             or after
+            or pbias is not None
             or (path == "legacy" and _CUDA_PROLOGUE_FOR_LEGACY)
         ):
             return _forward_wide(
@@ -616,18 +660,22 @@ class _OpmMath(torch.autograd.Function):
                 residual,
                 save_stats,
                 after,
+                pbias,
             )
         owned = _owned_blas_for(msa.shape[1], msa.shape[2], training=save_stats)
+        fused = path != "legacy" and _fused_enabled(msa.shape[1], msa.shape[2], training=save_stats) \
+            and torch.cuda.get_device_capability(msa.device) == (9, 0)
         ext = _ext(
             msa.device,
             native=path != "legacy",
             tma=path == "tma",
-            epi_tma=_epilogue_tma_enabled(
+            epi_tma=not fused and _epilogue_tma_enabled(
                 msa.shape[1], msa.shape[2], training=save_stats
             ),
-            epi_half=_epilogue_half_enabled(
+            epi_half=not fused and _epilogue_half_enabled(
                 msa.shape[1], msa.shape[2], training=save_stats
             ),
+            fused=fused,
         )
         if torch.cuda.get_device_capability(msa.device) == (10, 0):
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
@@ -654,18 +702,32 @@ class _OpmMath(torch.autograd.Function):
         bf = torch.bfloat16
         if path != "legacy":
             m = msa[0]
-            packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo])
+            if save_stats:
+                packed = ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo], False)
+            else:   # inference: no transposed Wo / backward weight; the packed forms are cached while the weights are unchanged
+                from miniworld_engine.kernels import _capture
+
+                packed = _capture.param_forms(
+                    "opm_native_pack_infer",
+                    [lnw, lnb, wa, wb, wo, bo],
+                    lambda: ext.opm_native_pack([lnw, lnb, wa, wb, wo, bo], True),
+                )
             prologue = (
                 ext.opm_native_prologue_tma
                 if path == "tma"
                 else ext.opm_native_prologue
             )
+            # inference: the mask count is taken by the epilogue from the mask bit rows (`norm` is then that int32 [N, S/32] table)
             a2, bt, stats, mask16, norm = prologue(
-                m, mask[0], packed, float(eps), save_stats
+                m, mask[0], packed, float(eps), save_stats, save_stats
             )
-            o = _owned_mm(a2, bt.t(), owned)
             n = m.shape[1]
-            z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
+            if fused:   # inference: the products stay in shared memory (norm is the mask bit table here)
+                z = ext.opm_fused_infer(a2, bt, norm, _fused_weight(wo), packed[5], residual, 0)
+                o = None
+            else:
+                o = _owned_mm(a2, bt.t(), owned)
+                z = ext.opm_epilogue(o, norm, packed[4], packed[5], n, n, residual)
             ctx.save_o = bool(save_o)
             ctx.save_for_backward(
                 m,
@@ -739,7 +801,7 @@ class _OpmMath(torch.autograd.Function):
         saved = ctx.saved_tensors
         m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo = saved[:12]
         o = saved[12] if ctx.save_o else None
-        if m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False):
+        if m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False) or getattr(ctx, "has_bias", False):
             return _backward_wide(ctx, dz)
         s, n = m.shape[0], m.shape[1]
         path = _h100_path(s, n, training=True)
@@ -900,6 +962,9 @@ def outer_product_mean(
         and residual.shape == (1, msa.shape[2], msa.shape[2], cz)
     )
     r = residual.contiguous() if fuse else msa.new_empty((0,))
+    # RoseTTAFold3: the left | right projection biases as one fp32 vector (an empty tensor: no biases)
+    pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if module.to_left.bias is not None
+             else msa.new_empty((0,), dtype=torch.float32))
     tensors = [
         msa.contiguous(),
         mask,
@@ -910,6 +975,7 @@ def outer_product_mean(
         module.to_out.weight,
         module.to_out.bias,
         r,
+        pbias,
     ]
     if torch.is_grad_enabled():
         save_o = settings.current().opm_train_save_o
@@ -986,6 +1052,7 @@ def _forward_op(
         save_o,
         residual=args[8] if args[8].numel() else None,
         after=after,
+        pbias=args[9].detach() if args[9].numel() else None,
     )
     sv = ctx.saved_tensors
     kept = list(sv[1:6])
@@ -997,7 +1064,7 @@ def _forward_op(
 
 
 def _backward_fake(args, kept, dz, eps, save_o, after):
-    return [torch.empty_like(args[i]) for i in (0, 2, 3, 4, 5, 6, 7)]
+    return [torch.empty_like(args[i]) for i in (0, 2, 3, 4, 5, 6, 7, 9)]
 
 
 @opaque(fake=_backward_fake, name="opm_h100_bwd")
@@ -1013,20 +1080,23 @@ def _backward_op(
     ctx.eps = eps
     ctx.save_o = save_o
     ctx.after = after
+    ctx.has_bias = bool(args[9].numel())
     k5 = list(kept[:5])
     if k5[0].numel() == 0:
         k5[0] = args[1][0] if args[1].dtype == torch.bool else args[1][0] != 0
     ctx.saved_tensors = (args[0][0], *k5, *args[2:8], *((kept[5],) if save_o else ()))
     gradients = _OpmMath.backward(ctx, dz)
-    return [gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)]
+    db = gradients[10].to(args[9].dtype) if ctx.has_bias else args[9].new_empty((0,))
+    return [*(gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)), db]
 
 
 class OpmTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
-        tensors = list(args[:9])
-        ctx.eps, ctx.save_o, ctx.after = args[9:]
+        tensors = list(args[:10])
+        ctx.eps, ctx.save_o, ctx.after = args[10:]
         ctx.has_residual = bool(tensors[8].numel())
+        ctx.has_bias = bool(tensors[9].numel())
         out, *kept = _forward_op(tensors, ctx.eps, ctx.save_o, ctx.after)
         ctx.save_for_backward(*tensors, *kept)
         return out
@@ -1035,13 +1105,14 @@ class OpmTrainFn(torch.autograd.Function):
     def backward(ctx, dz):
         vals = ctx.saved_tensors
         grads = _backward_op(
-            list(vals[:9]), list(vals[9:]), dz, ctx.eps, ctx.save_o, ctx.after
+            list(vals[:10]), list(vals[10:]), dz, ctx.eps, ctx.save_o, ctx.after
         )
         return (
             grads[0],
             None,
-            *grads[1:],
+            *grads[1:7],
             dz if ctx.has_residual else None,
+            grads[7] if ctx.has_bias else None,
             None,
             None,
             None,
@@ -1076,4 +1147,5 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
         residual=args[8] if args[8].numel() else None,
         save_stats=False,
         after=after,
+        pbias=args[9] if args[9].numel() else None,
     )

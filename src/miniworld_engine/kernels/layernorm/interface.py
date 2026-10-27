@@ -32,4 +32,20 @@ def layernorm_kernel(
     x = x.contiguous()
     weight = weight.contiguous()
     bias = bias.contiguous()
+    if _use_pipe(x):
+        from miniworld_engine.kernels.layernorm.cuda.pipe import layernorm_pipe
+
+        return layernorm_pipe(x, weight, bias, eps)
     return layernorm_dispatch_compile(x, weight, bias, eps)
+
+
+def _use_pipe(x: torch.Tensor) -> bool:
+    """The pipelined hand-CUDA kernels (``cuda/pipe``) on H100 for rows of 144-2048 bytes, unless the portable rung is forced."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.layernorm.cuda.pipe import supported
+
+    return (
+        supported(x)
+        and torch.cuda.get_device_capability(x.device) == (9, 0)
+        and not settings.current().force_portable_kernels
+    )

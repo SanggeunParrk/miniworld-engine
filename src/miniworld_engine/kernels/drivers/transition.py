@@ -168,6 +168,12 @@ def transition_expand_swiglu_triton() -> None:
     # The pre-flatten (1, L, L, K) activation, not the flat (M, K): the launcher reads
     # both_key(rows_of(x.shape)) before its own view(-1, d), so a flat x makes it bucket M.
     triton_transition(_pair_x(K_FROM_ND), wa, wb, ws, N_EXPAND)
+    # the training forward is the same kernel with STORE_AB=1 (keyed): it also stores the two expand halves
+    # for the dh/gate backward, and it is what a residual Transition launches under autograd
+    from miniworld_engine.kernels.transition.triton.main import _expand_swiglu_saveact
+
+    _expand_swiglu_saveact(rows2d(ROWS, K_FROM_ND), wa, wb, SHAPE_KEY,
+                           torch.ones(1, device=wa.device) if DTYPE_MODE == "fp32" else None)
 
 
 def transition_layernorm_expand_swiglu_triton() -> None:
@@ -381,6 +387,24 @@ def transition_expand_gate_sm90_cuda():
 def transition_bwd_gate_sm90_cuda():
     from miniworld_engine.kernels.drivers import hopper
     return hopper.transition_bwd_gate_sm90_cuda()
+
+
+def transition_bwd_squeeze_swiglu_triton():
+    """_squeeze_swiglu_bwd_kernel via squeeze_swiglu_bwd: (h, dAB = [dA | dB]) from xn, the expand weights, dy and the squeeze
+    weight, at the expanded width the unit declares (like the forward: the bucket carries K and ND)."""
+    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd
+
+    x2, _, _, wa, wb, ws = _transition_operands(k=K_FROM_ND)
+    w_ab = torch.stack((wa, wb), dim=1).reshape(2 * wa.shape[0], wa.shape[1])
+    squeeze_swiglu_bwd(x2, w_ab, rows2d(ROWS, K_FROM_ND), ws, SHAPE_KEY)
+    # the training backward reads the forward's saved halves instead (SAVED, keyed): what a Transition under autograd launches
+    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
+
+    nd = wa.shape[0]
+    a, b = rows2d(ROWS, nd), rows2d(ROWS, nd)
+    if DTYPE_MODE == "fp32":                    # fp32 activations keep fp16 halves + a scale (training forward)
+        a, b = a.half(), b.half()
+    squeeze_swiglu_bwd_saved(rows2d(ROWS, K_FROM_ND), ws, a, b, SHAPE_KEY, torch.ones(1, device=a.device) if DTYPE_MODE == "fp32" else None)
 
 
 def transition_squeeze_residual_triton():

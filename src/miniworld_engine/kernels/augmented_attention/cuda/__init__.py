@@ -310,19 +310,23 @@ def _is_hopper(index: int) -> bool:
     return torch.cuda.get_device_capability(index) == (9, 0)
 
 
+#: (heads, head width) the bf16 cores serve: the token stack (16 x 48) and the dense atom stack (4 x 32).
+BF16_LAYOUTS = ((16, 48), (4, 32))
+
+
 def supported(
     q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
 ) -> bool:
-    """q [A, 1, L, 16, 48] (any float dtype) and a bias of [1, L, L, 16] (``bias_head_major``: [16, 1, L, L]) on sm_90
+    """q [A, 1, L, h, d] with (h, d) in ``BF16_LAYOUTS`` (any float dtype) and a bias of [1, L, L, h] (``bias_head_major``: [h, 1, L, L]) on sm_90
     with L a multiple of 128. The requirements are the kernels' own tile shapes, not a policy."""
     if not settings.current().augmented_attention_bf16_sm90:
         return False
     if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
         return False
     A, B, L, h, d = q.shape
-    if B != 1 or h != H or d != D or L % 128 or L == 0:
+    if B != 1 or (h, d) not in BF16_LAYOUTS or L % 128 or L == 0:
         return False
-    if tuple(bias.shape) != ((H, 1, L, L) if bias_head_major else (1, L, L, H)):
+    if tuple(bias.shape) != ((h, 1, L, L) if bias_head_major else (1, L, L, h)):
         return False
     return _is_hopper(
         q.device.index if q.device.index is not None else torch.cuda.current_device()
@@ -350,7 +354,7 @@ def available(
     ):
         return False
     try:
-        _ext("attn_fwd")
+        _ext("attn_fwd", fwd_defs(q.shape[3], q.shape[4]))
     except Exception as exc:  # noqa: BLE001
         _BUILD_FAILED = True
         warnings.warn(
@@ -363,27 +367,22 @@ def available(
 
 
 # --------------------------------------------------------------------------------------------------- glue
-@triton.jit
-def _prep_qkv_kernel(q, k, v, qs, kb, vb, n, scale, BLOCK: tl.constexpr):
-    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
-    m = offs < n
-    tl.store(
-        qs + offs,
-        (tl.load(q + offs, mask=m).to(tl.float32) * scale).to(tl.bfloat16),
-        mask=m,
-    )
-    tl.store(kb + offs, tl.load(k + offs, mask=m).to(tl.bfloat16), mask=m)
-    tl.store(vb + offs, tl.load(v + offs, mask=m).to(tl.bfloat16), mask=m)
+def _bf16_rows(t, w):
+    """[rows, w] bf16 view of ``t`` (a copy only when it is not already contiguous bf16)."""
+    t = t.reshape(-1, w)
+    if t.dtype is not torch.bfloat16:
+        t = t.to(torch.bfloat16)
+    return t if t.is_contiguous() else t.contiguous()
 
 
 def _prep_qkv(q, k, v, scale):
-    q, k, v = q.contiguous(), k.contiguous(), v.contiguous()
-    n = q.numel()
-    qs, kb, vb = (
-        torch.empty(n, device=q.device, dtype=torch.bfloat16) for _ in range(3)
-    )
-    _prep_qkv_kernel[(triton.cdiv(n, 4096),)](q, k, v, qs, kb, vb, n, scale, BLOCK=4096)
-    return qs.view(-1, H * D), kb.view(-1, H * D), vb.view(-1, H * D)
+    """q scaled into the core's log2 units (one pass) and the bf16 rows of q, k, v: k and v are used as they are when already contiguous bf16."""
+    w = q.shape[-2] * q.shape[-1]
+    qc = q.contiguous()
+    n = qc.numel()
+    qs = torch.empty(n, device=q.device, dtype=torch.bfloat16)
+    _scale_bf16_kernel[(triton.cdiv(n, 4096),)](qc, qs, n, scale, BLOCK=4096)
+    return qs.view(-1, w), _bf16_rows(k, w), _bf16_rows(v, w)
 
 
 @triton.jit
@@ -397,6 +396,7 @@ def _prep_do_kernel(
     DH: tl.constexpr,
     DP: tl.constexpr,
     ROWS: tl.constexpr,
+    WRITE_DOB: tl.constexpr,
 ):
     r = tl.program_id(0) * ROWS + tl.arange(0, ROWS)  # token rows (a * L + l)
     hh = tl.arange(0, NH)
@@ -405,18 +405,19 @@ def _prep_do_kernel(
     msk = (dcol[None, :] < DH)[None, :, :] & (r[:, None, None] >= 0)
     g = tl.load(do + ptr, mask=msk, other=0.0).to(tl.float32)
     x = tl.load(o + ptr, mask=msk, other=0.0)
-    tl.store(dob + ptr, g.to(tl.bfloat16), mask=msk)
+    if WRITE_DOB:
+        tl.store(dob + ptr, g.to(tl.bfloat16), mask=msk)
     s = tl.sum(g * x, axis=2)
     tl.store(dd + ((r // L)[:, None] * NH + hh[None, :]) * L + (r % L)[:, None], s)
 
 
-def _prep_do(do, o, A, L):
-    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32."""
-    do = do.reshape(A * L, H * D).contiguous()
-    dob = torch.empty(A * L, H * D, device=do.device, dtype=torch.bfloat16)
-    dd = torch.empty(A, H, L, device=do.device, dtype=torch.float32)
+def _prep_do(do, o, A, L, nh=H, dh=D, write_dob=True):
+    """dO -> bf16 and D = rowsum(dO * O) as [A, H, L] fp32. ``write_dob=False``: D only (dO is already the bf16 rows the core reads; it is returned as is)."""
+    do = do.reshape(A * L, nh * dh).contiguous()
+    dob = torch.empty(A * L, nh * dh, device=do.device, dtype=torch.bfloat16) if write_dob else do
+    dd = torch.empty(A, nh, L, device=do.device, dtype=torch.float32)
     _prep_do_kernel[((A * L) // 8,)](
-        do, o.reshape(A * L, H * D), dob, dd, L, NH=H, DH=D, DP=64, ROWS=8
+        do, o.reshape(A * L, nh * dh), dob, dd, L, NH=nh, DH=dh, DP=64, ROWS=8, WRITE_DOB=write_dob
     )
     return dob, dd
 
@@ -449,12 +450,12 @@ def _bias_prep(bias_hll):
 FWD_LAUNCHES = [0]
 
 
-def _fwd_launch_fake(qs, kb, vb, bb, km):
-    """O fp32 [A L, H D] (qs's shape) and the LSE fp32 [A, H, L]."""
+def _fwd_launch_fake(qs, kb, vb, bb, km, out_bf16: bool = False):
+    """O [A L, H D] (qs's shape; fp32, or bf16 with ``out_bf16``) and the LSE fp32 [A, H, L]."""
     L = bb.shape[1]
     return (
-        qs.new_empty(qs.shape, dtype=torch.float32),
-        qs.new_empty((qs.shape[0] // L, H, L), dtype=torch.float32),
+        qs.new_empty(qs.shape, dtype=torch.bfloat16 if out_bf16 else torch.float32),
+        qs.new_empty((qs.shape[0] // L, bb.shape[0], L), dtype=torch.float32),
     )
 
 
@@ -465,26 +466,28 @@ def _fwd_launch(
     vb: torch.Tensor,
     bb: torch.Tensor,
     km: torch.Tensor | None,
+    out_bf16: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Attention forward on the prepared operands: (O fp32, LSE fp32)."""
+    """Attention forward on the prepared operands: (O fp32 or bf16, LSE fp32)."""
     FWD_LAUNCHES[0] += 1
     L = bb.shape[1]
-    return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L)
+    nh = bb.shape[0]
+    return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L, nh=nh, dh=qs.shape[1] // nh, out_bf16=out_bf16)
 
 
-def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D):
+def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D, out_bf16=False):
     """The forward kernel on prepared operands, no op wrapper (for callers that are themselves one opaque op, as the fused
     token DiT training block): qs = q log2 e / sqrt 48, kb, vb [A L, 768] bf16 contiguous; bb [16, L, L] bf16 in log2
     units; km None or an additive key mask [A, L] fp32. Returns O fp32 [A L, 768] and the LSE [A, 16, L] (log2); with
     ``qkvg`` (the block's [A L, 3072] q|k|v|g GEMM output) og = sigmoid(g) O in bf16 instead of O -- all the token DiT
     block keeps (its backward takes D = rowsum(dO O) = rowsum(d og * og))."""
     lse = torch.empty(A, nh, L, device=qs.device, dtype=torch.float32)
-    ext = _ext("attn_fwd", fwd_defs(nh, dh))
+    ext = _ext("attn_fwd", (*fwd_defs(nh, dh), *(("FWD_BF16=1",) if out_bf16 else ())))
     if qkvg is not None:
         og = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16)
         ext.attn_fwd_og(qs, kb, vb, bb, km, qkvg, og, lse)
         return og, lse
-    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    o = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.bfloat16 if out_bf16 else torch.float32)
     ext.attn_fwd(qs, kb, vb, bb, km, o, lse)
     return o, lse
 
@@ -603,10 +606,12 @@ def dqb_chunks(A: int) -> int:
     return max(c for c in (1, 2, 3, 4) if groups % c == 0)
 
 
-def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
-    """dQ, dK, dV [A L, 768] fp32 (with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
+def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D, out_bf16=False):
+    """dQ, dK, dV [A L, 768] fp32 (bf16 with ``out_bf16``; with respect to the unscaled q, k, v) and dbias [16, L, L] fp32 (natural units;
     a transposed view when A is not a multiple of 3). dob [A L, 768] bf16 and dd = rowsum(dO O) [A, 16, L] fp32; the other operands as ``forward`` took them."""
-    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=torch.float32)
+    odt = torch.bfloat16 if out_bf16 else torch.float32
+    bd = ("BWD_BF16=1",) if out_bf16 else ()
+    dq = torch.empty(A * L, nh * dh, device=qs.device, dtype=odt)
     dk, dv = torch.empty_like(dq), torch.empty_like(dq)
     ld = fwd_defs(nh, dh)
     if (
@@ -614,18 +619,18 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D):
     ):  # dbias in the dQ pass, three samples summed on chip before the L2 reds
         chunks = dqb_chunks(A)
         dbc = torch.zeros(chunks, nh, L, L, device=qs.device, dtype=torch.float32)
-        _ext("attn_dqb", ld).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
+        _ext("attn_dqb", (*ld, *bd)).attn_dqb(qs, kb, vb, dob, bb, km, lse, dd, dq, dbc)
         db = dbc.sum(0)  # the chunks in order: bitwise repeatable
-        _ext("attn_dkv", ("DBIAS=0", *ld)).attn_dkv(
+        _ext("attn_dkv", ("DBIAS=0", *ld, *bd)).attn_dkv(
             qs, kb, vb, dob, bb, km, lse, dd, dk, dv, db
         )
         return dq, dk, dv, db
     # dbias by per-sample L2 atomics in the dK / dV pass (transposed)
-    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh))).attn_dq(
+    _ext("attn_dq", (*(() if L % 192 == 0 else ("NWG=2",)), *dq_defs(nh, dh), *bd)).attn_dq(
         qs, kb, vb, dob, bb, km, lse, dd, dq
     )
     dbt = torch.zeros(nh, L, L, device=qs.device, dtype=torch.float32)
-    _ext("attn_dkv", ld).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
+    _ext("attn_dkv", (*ld, *bd)).attn_dkv(qs, kb, vb, dob, bb, km, lse, dd, dk, dv, dbt)
     return dq, dk, dv, dbt.transpose(1, 2)
 
 
@@ -697,15 +702,15 @@ def checkpoint_context_keeping_attention():
 class _AttentionBf16Sm90(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, bias, mask, bias_head_major):  # noqa: D102
-        A, _, L, _, _ = q.shape
-        qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(D))
+        A, _, L, nh, dh = q.shape
+        qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(dh))
         bb = _bias_prep(
-            bias.reshape(H, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
+            bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
         )
         km = None
         if mask is not None:
             km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
-        o, lse = FWD_OP(qs, kb, vb, bb, km)
+        o, lse = FWD_OP(qs, kb, vb, bb, km)  # nh, dh follow from bb and qs
         if torch.is_grad_enabled() or any(ctx.needs_input_grad):
             ctx.save_for_backward(
                 qs,
@@ -716,17 +721,17 @@ class _AttentionBf16Sm90(torch.autograd.Function):
                 o,
                 lse,
             )
-        ctx.has_mask, ctx.head_major, ctx.dims = km is not None, bias_head_major, (A, L)
-        return o.view(A, 1, L, H, D)
+        ctx.has_mask, ctx.head_major, ctx.dims = km is not None, bias_head_major, (A, L, nh, dh)
+        return o.view(A, 1, L, nh, dh)
 
     @staticmethod
     def backward(ctx, do):  # noqa: D102
         qs, kb, vb, bb, km, o, lse = ctx.saved_tensors
         km = km if ctx.has_mask else None
-        A, L = ctx.dims
-        dob, dd = _prep_do(do, o, A, L)
-        dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L)
-        shp = (A, 1, L, H, D)
+        A, L, nh, dh = ctx.dims
+        dob, dd = _prep_do(do, o, A, L, nh, dh)
+        dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh, dh)
+        shp = (A, 1, L, nh, dh)
         dbias = db.unsqueeze(1) if ctx.head_major else db.permute(1, 2, 0).unsqueeze(0)
         return dq.view(shp), dk.view(shp), dv.view(shp), dbias, None, None
 

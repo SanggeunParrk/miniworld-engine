@@ -66,6 +66,13 @@ class AdaptiveLayerNorm(nn.Module):
         writes it instead of in a separate add of the two paths into ``x``; everywhere else it is ``x`` itself."""
         return self._adaln_forward(x, cond, with_stream=True)
 
+    def forward_with_stream_cond(self, x: torch.Tensor, cond: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """``(self(x, cond), x, cond)``: like :meth:`forward_with_stream`, and ``cond`` too is returned as an output of the same autograd node, for a
+        caller that feeds it to a second consumer (the ConditionedTransition's gate projection). On the portable training path the second
+        consumer's gradient into ``cond`` joins the cond LayerNorm backward's ``dcond`` inside the kernel that writes it, instead of in a separate add
+        of the two paths; everywhere else the second and third outputs are ``x`` and ``cond`` themselves."""
+        return self._adaln_forward(x, cond, with_stream=True, with_cond=True)
+
     def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor, streams: bool = False):
         """The H100 hand-CUDA AdaLN: the one entry ``kernels.adaln.cuda.adaln`` (setting ``adaln_h100_cuda``), which picks the route by mode, dtype and
         shape. ``None`` when it does not serve the call (another dtype, a width it does not tile, ...): the caller runs the PyTorch reference."""
@@ -84,14 +91,14 @@ class AdaptiveLayerNorm(nn.Module):
             return adaln_cuda.adaln(
                 x, cond, self.ln_cond.weight, self.to_scale.weight, self.to_scale.bias, self.to_bias.weight, self.ln_in.eps, self.ln_cond.eps, streams=streams)
 
-    def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool):
+    def _adaln_forward(self, x: torch.Tensor, cond: torch.Tensor, *, with_stream: bool, with_cond: bool = False):
         backend = call_backend(self, self._backend, x, cond)   # a card recorded for inference only: PyTorch for a training call
         if backend in (KernelBackend.PORTABLE, KernelBackend.CUDA) and not x.is_cuda:
             backend = KernelBackend.PYTORCH   # a CPU tensor (a module built on a CPU host keeps the kernel label): the reference
         if backend == KernelBackend.CUDA:
             out = self._cuda_forward(x, cond)
             if out is not None:
-                return (out, x) if with_stream else out
+                return ((out, x, cond) if with_cond else (out, x)) if with_stream else out
             backend = KernelBackend.PYTORCH   # a call the sm_90a kernels do not serve: the reference
         if backend == KernelBackend.PYTORCH:
             # H100 / B200 resolve MINIWORLD to this leg (no Triton fallback there); fp32 master weights under a bf16 activation keep
@@ -107,7 +114,7 @@ class AdaptiveLayerNorm(nn.Module):
             out = torch.sigmoid(scale) * x_norm + bias
             # the engine's own path returned the compute dtype (bf16 under autocast); torch's LayerNorm would hand back fp32 there
             out = out.to(x.dtype) if engine_leg and x.dtype == torch.bfloat16 else out
-            return (out, x) if with_stream else out
+            return ((out, x, cond) if with_cond else (out, x)) if with_stream else out
 
         if backend == KernelBackend.PORTABLE:
             # training → save-for-backward autograd path; inference → d-aware fused/materialize.
@@ -134,6 +141,7 @@ class AdaptiveLayerNorm(nn.Module):
             else:
                 w_scale, b_scale, w_bias = (p.to(compute_dtype) for p in params)
             stream = with_stream and fn is adaln_train and x.dtype == compute_dtype
+            cond_out = with_cond and stream
             with torch.autocast(device_type=device_type, enabled=False):
                 out = fn(
                     x.to(compute_dtype),
@@ -144,11 +152,11 @@ class AdaptiveLayerNorm(nn.Module):
                     w_bias,
                     self.ln_in.eps,
                     self.ln_cond.eps,
-                    *((True,) if stream else ()),
+                    *((True, cond_out) if stream else ()),
                 )
             if stream:
-                return out
-            return (out, x) if with_stream else out
+                return (*out, cond) if with_cond and not cond_out else out
+            return ((out, x, cond) if with_cond else (out, x)) if with_stream else out
 
         raise InvalidImplementationError(self.implementation)
 

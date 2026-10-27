@@ -224,8 +224,8 @@ class Settings:
     #: training and inference). Falls back on any other shape, dtype or architecture.
     #: MINIWORLD_TRANSITION_FUSED_SM90A=0 also turns it off.
     transition_fused_sm90a: bool = True
-    #: Route the pair-bias attention core, when it is asked to compute in bf16 (``compute_dtype=torch.bfloat16``), on
-    #: sm_90 with 16 heads x 48, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
+    #: Route the pair-bias attention core, when it computes in bf16 (``compute_dtype=torch.bfloat16`` or bf16 q / k / v), on
+    #: sm_90 with 16 heads x 48 or 4 x 32, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
     #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
     #: Falls back on anything else. Read by the module and by the kernel entry itself (formerly also ``augattn_bf16_sm90``).
     augmented_attention_bf16_sm90: bool = True
@@ -233,12 +233,14 @@ class Settings:
     #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
     #: A is even and there is no key mask. Falls back on anything else (formerly also ``augattn_bf16_sm100``).
     augmented_attention_bf16_sm100: bool = True
+    #: Route the adaptive LayerNorm of an H100 call (``AdaptiveLayerNorm`` with the engine implementation; bf16 and fp32) through the
+    #: hand-CUDA kernels (kernels/adaln/cuda: sm_90a wgmma inference and bf16 training forward, row kernels + cuBLAS for fp32 training)
+    #: instead of the PyTorch leg's ten fp32 elementwise / LayerNorm kernels. Falls back on anything else (other cards, widths the
+    #: tiles do not take). One setting, one entry point (``kernels.adaln.cuda.adaln``).
+    adaln_h100_cuda: bool = True
     #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
     #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
     transition_gatebwd_wgmma: bool = True
-    #: Route the adaptive LayerNorm of an H100 call through the hand-CUDA kernels (kernels/adaln/cuda: sm_90a wgmma inference path, row kernels + cuBLAS
-    #: training path). Falls back to the PyTorch leg on anything else.
-    adaln_h100_cuda: bool = True
     #: Fuse the layernorm stats pass into the transition kernel. Formerly
     #: MINIWORLD_TRANSITION_FUSE_STATS.
     transition_fuse_stats: bool = False
@@ -391,10 +393,18 @@ class Settings:
     local_dit_sm100: bool = True
     #: Formerly ``MINIWORLD_OPM_TRAIN_SAVE_O`` (default on).
     opm_train_save_o: bool = True
+    #: ``MINIWORLD_OPM_FUSED``: the inference OuterProductMean on H100 as one fused outer product + projection kernel (default on); False runs cuBLAS + the epilogue kernel.
+    opm_fused: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_ROWS_CUDA`` (default on).
     token_dit_rows_cuda: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
     token_dit_train: bool = True
+    #: The hand-CUDA TRAINING step of the DiT variant stacks (Boltz-2 / RoseTTAFold3 / Chai-1, token and atom) on H100; off = the portable /
+    #: reference route. Default on.
+    dit_variant_train_cuda: bool = True
+    #: The hand-CUDA TRAINING step of ESMFold2's local atom block (``LocalDiTBlock(**ESMFOLD2)``, bf16, conditioning shared by the samples) on
+    #: H100; off = the portable / reference route. Default on.
+    local_dit_esm_train_cuda: bool = True
     #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
     tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
@@ -705,6 +715,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
     "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
     "MINIWORLD_LOCAL_DIT_TF32_FUSED": "local_dit_tf32_fused",
+    "MINIWORLD_OPM_FUSED": "opm_fused",
     "MINIWORLD_OPM_TRAIN": "opm_train",
     "MINIWORLD_OPM_TRAIN_SAVE_O": "opm_train_save_o",
     "MINIWORLD_PLAN_CACHE_DIR": "plan_cache_dir",

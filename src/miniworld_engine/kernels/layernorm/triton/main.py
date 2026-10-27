@@ -46,6 +46,16 @@ def _ln_cuda_bwd_enabled() -> bool:
 # still takes BLOCK_N from its caller.
 
 
+#: Programs per SM in the persistent backward (`layer_norm_bwd_dx_fused`). 8 is within 1-5% of the
+#: best of {4, 8, 16} at every shape measured (bf16/fp32 pair LayerNorm, D 128 and 256, L 384-768);
+#: the launch is capped at the tile count.
+_PERSIST_WAVES = 8
+
+
+def _persistent_programs(device: torch.device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
+
+
 # fmt: off
 
 
@@ -59,8 +69,11 @@ def layer_norm_fwd_fused(
     stride_r, stride_c,
     M, N: tl.constexpr, eps: tl.constexpr,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
-    shape_key, HAS_ROWSCALE: tl.constexpr,
+    shape_key, HAS_ROWSCALE: tl.constexpr, STORE_STATS: tl.constexpr = True,
 ):
+    # STORE_STATS=False (inference: nothing will run a backward) drops the two (M,) fp32 stores. At
+    # x[1, L, L, 128] bf16 that is 8 of every 520 bytes moved per row, 1.5% of a kernel that sits
+    # on the HBM floor. Not part of the autotune key: it changes no tile choice.
     # Map the program id to the rows of X and Y it should compute.
     row = tl.program_id(0).to(tl.int64)
     rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
@@ -79,10 +92,11 @@ def layer_norm_fwd_fused(
         mean = tl.sum(x, axis=1) / N
         xc = tl.where(mask, x - mean[:, None], 0.0)
         var = tl.sum(xc * xc, axis=1) / N
-        rstd = 1 / tl.sqrt(var + eps)
+        rstd = tl.math.rsqrt(var + eps)
 
-        tl.store(Mean + rows, mean, mask=row_mask)
-        tl.store(Rstd + rows, rstd, mask=row_mask)
+        if STORE_STATS:
+            tl.store(Mean + rows, mean, mask=row_mask)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
 
         w = tl.load(W + cols, mask=col_mask, other=0.0)
         b = tl.load(B + cols, mask=col_mask, other=0.0)
@@ -110,11 +124,12 @@ def layer_norm_fwd_fused(
             mean += delta * (tile_count / next_count)
             count = next_count
         var = m2 / N
-        rstd = 1 / tl.sqrt(var + eps)
+        rstd = tl.math.rsqrt(var + eps)
 
         # Write mean / rstd
-        tl.store(Mean + rows, mean, mask=row_mask)
-        tl.store(Rstd + rows, rstd, mask=row_mask)
+        if STORE_STATS:
+            tl.store(Mean + rows, mean, mask=row_mask)
+            tl.store(Rstd + rows, rstd, mask=row_mask)
 
         if HAS_ROWSCALE:  # fold a per-row scale (e.g. AF pair-mask) into the LN epilogue — free
             rs = tl.load(Rowscale + rows, mask=row_mask, other=0.0).to(tl.float32)
@@ -157,98 +172,116 @@ def layer_norm_bwd_dx_fused(
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr,
     shape_key, HAS_ROWSCALE: tl.constexpr,
 ):
-    # Map the program id to the rows of X, DX, and DY it should compute.
-    row = tl.program_id(0).to(tl.int64)
-    rows = tl.arange(0, BLOCK_M1) + row * BLOCK_M1
-    row_mask = rows < M
-    mean = tl.load(Mean + rows, mask=row_mask, other=0.0).to(tl.float32)
-    rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
-    if HAS_ROWSCALE:  # bwd of y = LN(x)*rs: scale incoming grad by rs (then dx/dw/db all follow)
-        rs = tl.load(Rowscale + rows, mask=row_mask, other=0.0).to(tl.float32)
+    # PERSISTENT: a fixed number of programs, each walking the row tiles pid, pid + nprog, ... .
+    # The dw/db column sums stay in register vectors across every tile a program visits and are
+    # flushed with ONE atomic_add each per program, instead of two per row tile; the tile loop is
+    # software pipelined so the next tile's x/dy loads overlap this tile's reductions. Measured
+    # (H100, bf16 x[1, L, L, 128]) the backward went 60 -> 47 us at L=384 and 193 -> 162 us at
+    # L=768 (docs/records/portable_norms_ladder_20261025.md).
+    pid = tl.program_id(0).to(tl.int64)
+    nprog = tl.num_programs(0)
+    tiles = tl.cdiv(M, BLOCK_M1)
 
-    # TWO-PASS over the N tiles. dx needs c1/c2, which reduce over the WHOLE row, so once the
-    # feature axis is tiled the (x, dy) tiles must be visited twice. dw/db do NOT depend on c1/c2
-    # (they reduce over M, per column), so their atomics are issued in pass 1 and pass 2 only
-    # re-reads x/dy and writes dx. dw/db partials are fp32 (w is cast to fp32 before use),
-    # unchanged from the untiled kernel; `reset_to_zero=[DW, DB]` is kept because the autotuner
-    # re-runs every candidate against these accumulators.
+    # TWO-PASS over the N tiles when the feature axis is tiled. dx needs c1/c2, which reduce over
+    # the WHOLE row, so once the feature axis is tiled the (x, dy) tiles must be visited twice. dw/db
+    # do NOT depend on c1/c2 (they reduce over M, per column), so their atomics are issued in pass 1
+    # and pass 2 only re-reads x/dy and writes dx. dw/db partials are fp32 (w is cast to fp32 before
+    # use); `reset_to_zero=[DW, DB]` is kept because the autotuner re-runs every candidate against
+    # these accumulators.
     #
-    # COVERING TILE (BLOCK_K >= N): the two loops are single-trip but the X/DY/W loads are NOT
-    # CSE'd across them (the dw/db tl.atomic_add sits between, and Triton cannot prove the raw
-    # pointers do not alias), so the covering config paid 2x the read traffic instead of collapsing
-    # to the untiled schedule. N and BLOCK_K are both tl.constexpr, so this guard is resolved at
-    # TRACE time and only one branch is emitted.
+    # COVERING TILE (BLOCK_K >= N): one trip over the row, register-held dw/db accumulators. N and
+    # BLOCK_K are both tl.constexpr, so this guard is resolved at TRACE time and only one branch is
+    # emitted.
     if BLOCK_K >= N:
+        # Software-pipeline the tile loop only while the staged x/dy tiles fit shared memory:
+        # 3 stages x 2 tensors x 8192 fp32 elements is 196 KB of the 227 KB an H100 offers.
+        PIPE: tl.constexpr = 3 if BLOCK_M1 * BLOCK_K <= 8192 else 1
         cols = tl.arange(0, BLOCK_K)
         col_mask = cols < N
-        mask = row_mask[:, None] & col_mask[None, :]
-        x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                    mask=mask, other=0).to(tl.float32)
-        dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                     mask=mask, other=0).to(tl.float32)
-        if HAS_ROWSCALE:
-            dy = dy * rs[:, None]
         w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-        xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
-        wdy = tl.where(mask, w[None, :] * dy, 0.0)
-        c1 = tl.sum(xhat * wdy, axis=1) / N
-        c2 = tl.sum(wdy, axis=1) / N
-        # Accumulate partial sums for dw/db (column reduction over this row tile)
+        dw_acc = tl.zeros([BLOCK_K], dtype=tl.float32)
+        db_acc = tl.zeros([BLOCK_K], dtype=tl.float32)
+        for t in tl.range(pid, tiles, nprog, num_stages=PIPE):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
+            mask = row_mask[:, None] & col_mask[None, :]
+            mean = tl.load(Mean + rows, mask=row_mask, other=0.0).to(tl.float32)
+            rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
+            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                        mask=mask, other=0).to(tl.float32)
+            dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                         mask=mask, other=0).to(tl.float32)
+            if HAS_ROWSCALE:  # bwd of y = LN(x)*rs: scale incoming grad by rs (then dx/dw/db all follow)
+                rs = tl.load(Rowscale + rows, mask=row_mask, other=0.0).to(tl.float32)
+                dy = dy * rs[:, None]
+            xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
+            wdy = tl.where(mask, w[None, :] * dy, 0.0)
+            c1 = tl.sum(xhat * wdy, axis=1) / N
+            c2 = tl.sum(wdy, axis=1) / N
+            dw_acc += tl.sum(dy * xhat, axis=0)
+            db_acc += tl.sum(dy, axis=0)
+            dx = (wdy - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
+            tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
         # These atomics only accumulate parameter gradients; no CTA reads their result.
         # The following kernel/stream dependency supplies visibility. Keep GPU-wide
         # atomicity without acquire/release ordering for unrelated activation memory.
-        tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
-        tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask, sem="relaxed")
-        dx = (wdy - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
-        tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
+        tl.atomic_add(DW + cols, dw_acc, mask=col_mask, sem="relaxed")
+        tl.atomic_add(DB + cols, db_acc, mask=col_mask, sem="relaxed")
     else:
-        c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            col_mask = cols < N
-            mask = row_mask[:, None] & col_mask[None, :]
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                        mask=mask, other=0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                         mask=mask, other=0).to(tl.float32)
-            if HAS_ROWSCALE:
-                dy = dy * rs[:, None]
-            w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
-            wdy = tl.where(mask, w[None, :] * dy, 0.0)
-            c1 += tl.sum(xhat * wdy, axis=1)
-            c2 += tl.sum(wdy, axis=1)
-            # Accumulate partial sums for dw/db (column reduction over this row tile)
-            tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
-            tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask, sem="relaxed")
-        c1 = c1 / N
-        c2 = c2 / N
+        for t in range(pid, tiles, nprog):
+            rows = tl.arange(0, BLOCK_M1) + t * BLOCK_M1
+            row_mask = rows < M
+            mean = tl.load(Mean + rows, mask=row_mask, other=0.0).to(tl.float32)
+            rstd = tl.load(Rstd + rows, mask=row_mask, other=0.0).to(tl.float32)
+            if HAS_ROWSCALE:  # bwd of y = LN(x)*rs: scale incoming grad by rs (then dx/dw/db all follow)
+                rs = tl.load(Rowscale + rows, mask=row_mask, other=0.0).to(tl.float32)
+            c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                col_mask = cols < N
+                mask = row_mask[:, None] & col_mask[None, :]
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                             mask=mask, other=0).to(tl.float32)
+                if HAS_ROWSCALE:
+                    dy = dy * rs[:, None]
+                w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+                xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
+                wdy = tl.where(mask, w[None, :] * dy, 0.0)
+                c1 += tl.sum(xhat * wdy, axis=1)
+                c2 += tl.sum(wdy, axis=1)
+                # Accumulate partial sums for dw/db (column reduction over this row tile)
+                tl.atomic_add(DW + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+                tl.atomic_add(DB + cols, tl.sum(dy, axis=0), mask=col_mask, sem="relaxed")
+            c1 = c1 / N
+            c2 = c2 / N
 
-        # Compute + write dx
-        for n0 in range(0, N, BLOCK_K):
-            cols = n0 + tl.arange(0, BLOCK_K)
-            col_mask = cols < N
-            mask = row_mask[:, None] & col_mask[None, :]
-            x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                        mask=mask, other=0).to(tl.float32)
-            dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
-                         mask=mask, other=0).to(tl.float32)
-            if HAS_ROWSCALE:
-                dy = dy * rs[:, None]
-            w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
-            xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
-            wdy = tl.where(mask, w[None, :] * dy, 0.0)
-            dx = (wdy - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
-            tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
+            # Compute + write dx
+            for n0 in range(0, N, BLOCK_K):
+                cols = n0 + tl.arange(0, BLOCK_K)
+                col_mask = cols < N
+                mask = row_mask[:, None] & col_mask[None, :]
+                x = tl.load(X + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                            mask=mask, other=0).to(tl.float32)
+                dy = tl.load(DY + rows[:, None] * stride_r + cols[None, :] * stride_c,
+                             mask=mask, other=0).to(tl.float32)
+                if HAS_ROWSCALE:
+                    dy = dy * rs[:, None]
+                w = tl.load(W + cols, mask=col_mask, other=0.0).to(tl.float32)
+                xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
+                wdy = tl.where(mask, w[None, :] * dy, 0.0)
+                dx = (wdy - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
+                tl.store(DX + rows[:, None] * stride_r + cols[None, :] * stride_c, dx, mask=mask)
 # fmt: on
 
 
-def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key):
+def _ln_fwd_fake(x_2d, weight, bias, rs, eps, has_rs, shape_key, store_stats=True):
     """``y`` like ``x_2d``, plus ``mean`` and ``rstd`` as (M,) -- fp32, not the bf16 of the
     activation: the kernel reduces and stores the row statistics in fp32 and the backward reloads
-    them as such."""
-    m = x_2d.shape[0]
+    them as such. Without ``store_stats`` (inference) the two are empty (0,) placeholders."""
+    m = x_2d.shape[0] if store_stats else 0
     return (
         torch.empty_like(x_2d),
         x_2d.new_empty((m,), dtype=torch.float32),   # mean
@@ -265,6 +298,7 @@ def _ln_fwd(
     eps: float,
     has_rs: bool,
     shape_key: int,
+    store_stats: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """The launch: ``y = LN(x) * rs`` -> ``(y, mean, rstd)``. ``x_2d`` arrives flat and contiguous.
 
@@ -272,18 +306,21 @@ def _ln_fwd(
     and ``save_for_backward`` stay traceable -- see ``kernels._compile``. ``rs`` is None on the
     dense path; the kernel wants a real pointer there, so ``rstd`` stands in as the placeholder it
     never reads (``HAS_ROWSCALE=False``).
+
+    ``store_stats=False`` is the no-grad forward: the statistics are not written and ``mean`` /
+    ``rstd`` come back as empty (0,) tensors that nothing reads.
     """
     M, N = x_2d.shape
     y_2d = torch.empty_like(x_2d)
-    mean = torch.empty(M, dtype=torch.float32, device=x_2d.device)
-    rstd = torch.empty(M, dtype=torch.float32, device=x_2d.device)
+    mean = torch.empty(M if store_stats else 0, dtype=torch.float32, device=x_2d.device)
+    rstd = torch.empty(M if store_stats else 0, dtype=torch.float32, device=x_2d.device)
     # fmt: off
     grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
     layer_norm_fwd_fused[grid](
         x_2d, y_2d, weight, bias, mean, rstd, rs if has_rs else rstd,
         x_2d.stride(0), x_2d.stride(1),
         M, N, eps,
-        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs,
+        shape_key=pack(shape_key, N=N), HAS_ROWSCALE=has_rs, STORE_STATS=store_stats,
     )
     # fmt: on
     return y_2d, mean, rstd
@@ -310,6 +347,8 @@ class TritonLayerNormFunction(torch.autograd.Function):
             # L = x.shape[-2], read BEFORE the reshape above -- one rule for pair
             # (B, L, L, D) and token/atom (B, L, D). Never the row count M.
             both_key(rows_of(x.shape)),
+            # Nothing runs a backward when no input takes a gradient (inference): skip the stats.
+            store_stats=any(ctx.needs_input_grad[:3]),
         )
 
         ctx.save_for_backward(
@@ -407,7 +446,8 @@ def _ln_bwd(
     db = torch.zeros(N, dtype=torch.float32, device=x.device)
 
     # fmt: off
-    grid = lambda META: [triton.cdiv(M, META["BLOCK_M1"])]
+    programs = _persistent_programs(x.device)
+    grid = lambda META: [min(triton.cdiv(M, META["BLOCK_M1"]), programs)]
     layer_norm_bwd_dx_fused[grid](
         dx_2d, dy_2d, dw, db,
         x, weight, mean, rstd, rs if has_rs else rstd,  # rs folds the mask grad in (free)

@@ -7,7 +7,8 @@
 // these kernels never materialise it.  tbl [nbin][128] = [Wrel^T ; Wbond^T] (bins 0..138 relative position, 139 / 140 bond);
 // ids [5][B L] int32 = asym, residue, token, entity, sym; bond [B L L] uint8.
 //
-//   forward   one pass writing z (the only large tensor): the SM100 kernel's, unchanged (plain CUDA cores).
+//   forward   one pass writing z (the only large tensor): a CTA writes R rows (R <= 8) of one batch element; the class-row table arrives by one bulk
+//             (TMA) copy that overlaps the packing of the rows bins, and right[j] is loaded once for the R rows (plain CUDA cores).
 //   backward  BITWISE DETERMINISTIC (the SM100 kernel's global atomics are not): a CTA takes a quarter of the channels (32, one
 //             per lane) of RB rows over every column; its four warps split the columns (j = warp mod 4).  Per position a warp
 //             adds dz to its private shared-memory class-bin gradient (all lanes hit the same bin: no atomics, no conflicts),
@@ -19,6 +20,8 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_runtime.h>
 #include <stdint.h>
+#include <algorithm>
+#include <vector>
 
 constexpr int P = 128;
 constexpr int NWARP = 8;
@@ -60,39 +63,66 @@ __device__ __forceinline__ void pack_rows(uint32_t* pk, const int* ids, const ui
   }
 }
 
+
+// ------------------------------------------------------------------------------------------------ forward v2
+// A CTA writes R rows of z for one batch element.  The class-row table is fetched by one bulk copy (TMA) that overlaps the packing of the R rows' bins; each
+// warp then owns a group of UNR columns at a time: it loads right[j] ONCE and writes the R rows' outputs for them (right is read 1/R times as often as
+// when every row is a CTA of its own).  The sum order per element is that of tpi_fwd: left + right, then the class rows, the entity row, the bond row.
 #ifndef TPI_UNR
 #define TPI_UNR 4
 #endif
 constexpr int UNR = TPI_UNR;
+constexpr int RMAX = 8;
+
+__device__ __forceinline__ void tma_load(void* dst, const void* src, uint32_t bytes, uint64_t* bar) {
+  const uint32_t d = (uint32_t)__cvta_generic_to_shared(dst), b = (uint32_t)__cvta_generic_to_shared(bar);
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;" ::"r"(b), "r"(bytes) : "memory");
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];" ::"r"(d), "l"(src), "r"(bytes), "r"(b)
+               : "memory");
+}
+__device__ __forceinline__ void bar_wait(uint64_t* bar, uint32_t parity) {
+  const uint32_t b = (uint32_t)__cvta_generic_to_shared(bar);
+  asm volatile("{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@p bra DONE_%=;\nbra WAIT_%=;\nDONE_%=:\n}" ::"r"(b), "r"(parity)
+               : "memory");
+}
 
 __global__ void __launch_bounds__(256)
 tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const float* __restrict__ tbl, const int* __restrict__ ids,
-        const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int rows_per_cta) {
-  extern __shared__ __align__(16) float sm[];
+         const uint8_t* __restrict__ bond, float* __restrict__ out, int B, int L, int rmax, int smax, int R) {
+  extern __shared__ __align__(128) float sm[];
   const int nrel = 2 * (2 * rmax + 2) + (2 * smax + 2) + 1, nbin = nrel + 2;
-  uint32_t* pk = (uint32_t*)(sm + nbin * P);
-  for (int idx = threadIdx.x; idx < nbin * (P / 4); idx += blockDim.x) ((float4*)sm)[idx] = ((const float4*)tbl)[idx];
+  uint32_t* pk = (uint32_t*)(sm + nbin * P);                        // [R][L]
+  __shared__ __align__(8) uint64_t bar;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31, BL = B * L;
-  const int tiles = (L + rows_per_cta - 1) / rows_per_cta;
-  const int b = blockIdx.x / tiles, i0 = (blockIdx.x % tiles) * rows_per_cta;
+  const int tiles = (L + R - 1) / R;
+  const int b = blockIdx.x / tiles, i0 = (blockIdx.x % tiles) * R;
+  const int nrows = min(R, L - i0);
+  if (threadIdx.x == 0) {
+    asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;" ::"r"((uint32_t)__cvta_generic_to_shared(&bar)));
+    asm volatile("fence.mbarrier_init.release.cluster;" ::: "memory");
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) tma_load(sm, tbl, (uint32_t)(nbin * P * 4), &bar);
+  pack_rows(pk, ids, bond, BL, L, b, i0, nrows, rmax, smax);
+  float4 lf[RMAX];
+#pragma unroll
+  for (int r = 0; r < RMAX; r++) lf[r] = r < nrows ? ((const float4*)(left + (size_t)(b * L + i0 + r) * P))[lane] : make_float4(0, 0, 0, 0);
+  __syncthreads();
+  bar_wait(&bar, 0);
   const float4* T = (const float4*)sm;
-  for (int i = i0; i < min(i0 + rows_per_cta, L); i++) {
-    __syncthreads();
-    pack_rows(pk, ids, bond, BL, L, b, i, 1, rmax, smax);
-    __syncthreads();
-    const int ri = b * L + i;
-    const float4 lf = ((const float4*)(left + (size_t)ri * P))[lane];
-    float4* orow = (float4*)(out + (size_t)ri * L * P);
-    for (int j0 = warp * UNR; j0 < L; j0 += NWARP * UNR) {
+  float4* obase = (float4*)(out + ((size_t)(b * L + i0) * L) * P);
+  for (int j0 = warp * UNR; j0 < L; j0 += 8 * UNR) {
+    float4 rt[UNR];
+#pragma unroll
+    for (int u = 0; u < UNR; u++) rt[u] = ((const float4*)(right + (size_t)(b * L + min(j0 + u, L - 1)) * P))[lane];
+#pragma unroll
+    for (int r = 0; r < RMAX; r++) if (r < nrows) {
       float4 o[UNR];
 #pragma unroll
       for (int u = 0; u < UNR; u++) {
         const int j = min(j0 + u, L - 1);
-        o[u] = lf + ((const float4*)(right + (size_t)(b * L + j) * P))[lane];
-      }
-#pragma unroll
-      for (int u = 0; u < UNR; u++) {
-        const uint32_t w = pk[min(j0 + u, L - 1)];
+        const uint32_t w = pk[r * L + j];
+        o[u] = lf[r] + rt[u];
         o[u] += T[(w & 255) * 32 + lane];
         o[u] += T[((w >> 8) & 255) * 32 + lane];
         o[u] += T[((w >> 16) & 255) * 32 + lane];
@@ -101,11 +131,10 @@ tpi_fwd(const float* __restrict__ left, const float* __restrict__ right, const f
       }
 #pragma unroll
       for (int u = 0; u < UNR; u++)
-        if (j0 + u < L) __stcs(orow + (size_t)(j0 + u) * 32 + lane, o[u]);
+        if (j0 + u < L) __stcs(obase + ((size_t)r * L + j0 + u) * 32 + lane, o[u]);
     }
   }
 }
-
 // ------------------------------------------------------------------------------------------------ backward
 __global__ void __launch_bounds__(BW * 32)
 tpi_bwd(const float* __restrict__ g, const int* __restrict__ ids, const uint8_t* __restrict__ bond, float* __restrict__ dleft,
@@ -205,18 +234,18 @@ inline int nrel_of(int rmax, int smax) { return 2 * (2 * rmax + 2) + (2 * smax +
 }
 
 void forward(torch::Tensor left, torch::Tensor right, torch::Tensor tbl, torch::Tensor ids, torch::Tensor bond, torch::Tensor out,
-             int64_t rmax, int64_t smax, int64_t rows) {
+              int64_t rmax, int64_t smax, int64_t R) {
   const at::cuda::CUDAGuard guard(left.device());
+  TORCH_CHECK(R >= 1 && R <= RMAX, "rows per CTA: 1..", RMAX);
   const int B = left.size(0), L = left.size(1), nbin = nrel_of(rmax, smax) + 2;
-  const int tiles = (L + rows - 1) / rows;
-  const size_t smem = (size_t)nbin * P * 4 + (size_t)L * 4;
+  const int tiles = (L + R - 1) / R;
+  const size_t smem = (size_t)nbin * P * 4 + (size_t)R * L * 4;
   cudaFuncSetAttribute(tpi_fwd, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
   tpi_fwd<<<B * tiles, 32 * NWARP, smem, at::cuda::getCurrentCUDAStream()>>>(
       left.data_ptr<float>(), right.data_ptr<float>(), tbl.data_ptr<float>(), ids.data_ptr<int>(), bond.data_ptr<uint8_t>(),
-      out.data_ptr<float>(), B, L, (int)rmax, (int)smax, (int)rows);
+      out.data_ptr<float>(), B, L, (int)rmax, (int)smax, (int)R);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
-
 // dleft [B L 128], dright [B L 128], dtbl [nbin 128]: all written (no zero-fill needed); dpart / wpart workspaces
 void backward(torch::Tensor g, torch::Tensor ids, torch::Tensor bond, torch::Tensor dleft, torch::Tensor dright, torch::Tensor dtbl,
               torch::Tensor dpart, torch::Tensor wpart, int64_t rmax, int64_t smax) {
@@ -234,7 +263,48 @@ void backward(torch::Tensor g, torch::Tensor ids, torch::Tensor bond, torch::Ten
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+
+// The call's glue in ONE launch: ids [5][BL] int32 from the five id tensors (int32 or int64 elements, contiguous) and the fp32 table
+// tbl [nrel + 2][128] = [w_rel^T ; w_bond^T] (what `torch.stack` + `.to(int32)` + `torch.cat` + `.t().contiguous()` made in 6-7 launches).
+struct IdSrc { const void* p[5]; int wide[5]; };
+__global__ void tpi_prep(IdSrc src, int BL, const float* __restrict__ w_rel, const float* __restrict__ w_bond, int nrel, int32_t* __restrict__ ids,
+                         float* __restrict__ tbl) {
+  const long n_ids = 5L * BL, n_tbl = (long)(nrel + 2) * P;
+  for (long t = (long)blockIdx.x * blockDim.x + threadIdx.x; t < n_ids + n_tbl; t += (long)gridDim.x * blockDim.x) {
+    if (t < n_ids) {
+      const int k = (int)(t / BL);
+      const long i = t - (long)k * BL;
+      ids[t] = src.wide[k] ? (int32_t)reinterpret_cast<const int64_t*>(src.p[k])[i] : reinterpret_cast<const int32_t*>(src.p[k])[i];
+    } else {
+      const long u = t - n_ids;
+      const int r = (int)(u / P), c = (int)(u - (long)r * P);
+      tbl[u] = r < nrel ? w_rel[(long)c * nrel + r] : w_bond[(long)c * 2 + (r - nrel)];
+    }
+  }
+}
+
+void prep(std::vector<torch::Tensor> id_tensors, torch::Tensor w_rel, torch::Tensor w_bond, torch::Tensor ids, torch::Tensor tbl) {
+  const at::cuda::CUDAGuard guard(ids.device());
+  TORCH_CHECK(id_tensors.size() == 5, "five id tensors");
+  IdSrc s;
+  const int BL = (int)id_tensors[0].numel();
+  for (int k = 0; k < 5; k++) {
+    const auto& t = id_tensors[k];
+    TORCH_CHECK(t.is_contiguous() && (int)t.numel() == BL, "id tensors must be contiguous and equally long");
+    TORCH_CHECK(t.scalar_type() == at::kInt || t.scalar_type() == at::kLong, "id tensors must be int32 or int64");
+    s.p[k] = t.data_ptr();
+    s.wide[k] = t.scalar_type() == at::kLong;
+  }
+  const int nrel = (int)w_rel.size(1);
+  const long total = 5L * BL + (long)(nrel + 2) * P;
+  const int blocks = (int)std::min<long>((total + 255) / 256, 1056);
+  tpi_prep<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(s, BL, w_rel.data_ptr<float>(), w_bond.data_ptr<float>(), nrel,
+                                                               ids.data_ptr<int32_t>(), tbl.data_ptr<float>());
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward);
   m.def("backward", &backward);
+  m.def("prep", &prep);
 }

@@ -470,3 +470,29 @@ def test_backward_as_the_first_call_of_a_process(rows, d, n):
     )
     assert out.returncode == 0, out.stderr[-600:]
     assert "OK" in out.stdout, out.stderr[-600:]
+
+
+@needs_hopper
+def test_d512_default_training_retains_ab_at_384_and_768_pairs(monkeypatch):
+    """D512 n = 4 keeps the forward's a / b (gate backward = dh GEMM only) for the 384 x 384 and 768 x 768 pair; other row counts recompute."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import fused_wide_sm90a as fw
+    from miniworld_engine.modules import Transition
+
+    assert fw.save_ab_enabled(512, 384 * 384) and fw.split_fwd_enabled(512, 384 * 384)
+    assert fw.save_ab_enabled(512, 768 * 768)
+    assert not fw.save_ab_enabled(512, 256 * 256) and not fw.save_ab_enabled(512, 384 * 384 + 128)
+    monkeypatch.setattr(settings, "_ACTIVE", settings.current())
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    monkeypatch.setattr(torch.backends.cuda.matmul, "allow_tf32", False)
+    n = 384
+    module, x, dy = _build((1, n, n, 512), seed=1234)
+    reference = Transition(512, implementation=ImplementationType.PYTORCH).cuda().float()
+    reference.load_state_dict(module.state_dict())
+    xr = x.float().requires_grad_()
+    reference(xr).backward(dy.float())
+    x.requires_grad_()
+    module(x).backward(dy)
+    for got, want in zip((x.grad, *(p.grad for p in module.parameters())), (xr.grad, *(p.grad for p in reference.parameters())), strict=True):
+        cosine = torch.nn.functional.cosine_similarity(got.float().flatten(), want.float().flatten(), dim=0)
+        assert cosine >= 0.999, float(cosine)

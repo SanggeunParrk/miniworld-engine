@@ -681,6 +681,16 @@ def measured_result(
     require_compile_evidence(conf.compile, evidence)
     if getattr(conf, "kernel_probe", False):
         execution_checks["top_kernels"] = _top_kernels(func)
+        if os.environ.get("BENCH_PROBE_GRAPH") and timed is not func:
+            timed()
+            torch.cuda.synchronize()
+            saved = os.environ.get("BENCH_PROBE_TRACE")
+            os.environ["BENCH_PROBE_TRACE"] = os.environ["BENCH_PROBE_GRAPH"]
+            _top_kernels(timed)
+            if saved is None:
+                os.environ.pop("BENCH_PROBE_TRACE", None)
+            else:
+                os.environ["BENCH_PROBE_TRACE"] = saved
     if actual_graph == "disabled":
         captured_outputs[0] = None
         for tensor in grad_to_none:
@@ -714,6 +724,7 @@ def measured_result(
 
 
 def _top_kernels(func: Callable, n: int = 6) -> list[list]:
+    n = int(os.environ.get("BENCH_PROBE_N", n))
     """[[kernel name, total device microseconds, calls], ...] of one call of ``func``, largest first (best effort)."""
     try:
         from torch.profiler import ProfilerActivity, profile
@@ -722,13 +733,15 @@ def _top_kernels(func: Callable, n: int = 6) -> list[list]:
         with profile(activities=[ProfilerActivity.CUDA]) as prof:
             func()
             torch.cuda.synchronize()
+        if os.environ.get("BENCH_PROBE_TRACE"):
+            prof.export_chrome_trace(f"{os.environ['BENCH_PROBE_TRACE']}_{int(__import__('time').time()*1000)}.json")
         rows = []
         for ev in prof.key_averages():
             if str(getattr(ev, "device_type", "")).endswith("CUDA"):
                 total = getattr(ev, "self_device_time_total", None)
                 if total is None:
                     total = getattr(ev, "self_cuda_time_total", 0.0)
-                rows.append([ev.key[:56], round(float(total), 1), int(ev.count)])
+                rows.append([ev.key[:int(os.environ.get("BENCH_PROBE_W", 56))], round(float(total), 1), int(ev.count)])
         rows.sort(key=lambda r: -r[1])
         return rows[:n]
     except Exception as exc:  # noqa: BLE001 - a probe never fails a measurement
@@ -2295,6 +2308,14 @@ def _nondefault_parameters(model: nn.Module) -> None:
                 nn.init.normal_(module.bias, std=0.1)
 
 
+def _chai_serves(msa, d_hidden, d_pair) -> bool:
+    """Chai-1's grouped OPM runs the fused H100 passes (``kernels.outer_product_mean.chai``) unless the A/B switch forces the portable kernels."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.outer_product_mean import chai
+
+    return not settings.current().force_portable_kernels and chai.serves_dims(msa, 8, d_hidden // 8, d_pair)
+
+
 def bench_module_outer_product(conf, seq_len, implementation, fabric):
     """OuterProductMean at MiniWorld's MSA-module width, `modules/outer_product`.
 
@@ -2447,6 +2468,8 @@ def bench_module_outer_product(conf, seq_len, implementation, fabric):
             "HYBRID integrations.anthropic_msa.outer_product_mean[upstream msa_opm "
             "fused_prologue + cuBLAS + OUR csrc/opm_epilogue.cu]"
         )
+    elif impl == ImplementationType.MINIWORLD and conf.opm_variant == "chai1" and _chai_serves(msa, d_hidden, conf.d_pair):
+        execution_path = "kernels.outer_product_mean.chai[fused CUDA prologue + cuBLAS products + TMA/wgmma epilogue]"
     elif impl == ImplementationType.MINIWORLD:
         why = (
             None
@@ -4451,7 +4474,8 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
     wide, 16 x 48 heads) or `local_dit` (atom stack, 8 L atoms, 128 wide, 32 x 128 windows, slid key window) targets with `+dit_variant=`.
 
     * pytorch -- the stack with `implementation=PYTORCH`: `kernels/dit_variants/reference.py`, fp32 norms and softmax.
-    * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (bf16 inference, no gradient), else the
+    * miniworld -- `implementation=MINIWORLD` on this card: the H100 CUDA path where it serves (inference: bf16 rows + cuBLAS + the token / atom
+      DiT attention core; training: `kernels/dit_variants/cuda/train.py`, bf16 or fp32 TF32), else the
       reference on H100 / B200, and on any other card the portable path (`kernels/dit_variants/triton/portable.py`: the engine's Triton
       attention cores) if the card is recorded, else the reference with a warning (`docs/dispatch.md`).
     * triton -- the same module under `settings.force_portable_kernels` (the A/B switch, any card): the portable path.
@@ -4515,13 +4539,18 @@ def _bench_dit_variant(conf, seq_len, implementation, fabric, *, atom: bool):
         execution_path = "kernels.dit_variants.reference[torch]"
     else:
         from miniworld_engine.kernels.dit_variants import interface
+        from miniworld_engine.kernels.dit_variants.cuda import infer32, train
         from miniworld_engine.kernels.dit_variants.triton import portable
 
         with torch.set_grad_enabled(is_train):
             h100 = (interface.atom_serves(model, single, cond, pair, mask, uid) if atom else interface.serves(model, single, cond, pair, mask))
+            h100_train = (train.atom_serves(model, single, cond, pair, mask, uid) if atom else train.serves(model, single, cond, pair, mask))
+            h100_fp32 = (infer32.atom_serves(model, single, cond, pair, mask, uid) if atom else infer32.serves(model, single, cond, pair, mask))
             tri = (portable.atom_serves(model, single, cond, pair, mask, uid) if atom else portable.serves(model, single, cond, pair, mask))
         execution_path = (
             "kernels.dit_variants.interface[H100 CUDA rows + cuBLAS + the token / atom DiT attention core]" if h100
+            else "kernels.dit_variants.cuda.infer32[H100 CUDA rows + cuBLAS TF32 + the TF32 attention core (hoisted tables and bias), fp32 inference]" if h100_fp32
+            else "kernels.dit_variants.cuda.train[H100 CUDA training rows + cuBLAS + the sm_90a attention cores, one autograd Function per block]" if h100_train
             else "kernels.dit_variants.triton.portable[reference structure, attention cores "
                  + ("kernels.augmented_attention.triton.window" if atom else "kernels.augmented_attention.triton.main")
                  + ", pair LayerNorm once per stack]" if tri

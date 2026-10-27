@@ -7,42 +7,42 @@ ladder audit (`docs/records/performance_ladder_20261025.md`, commit 12ae4ac8) fl
 
 ## Result
 
-Of the 30 rows of these three ops (the audit's violations plus the rows that were already fine), 19 are 5 % or more faster than PyTorch, 3 are faster by less (bias-only DiT fp32 training 0.979 / 0.991, ConditionedTransition fp32 training 0.969), and 8 are not faster: the bf16 `training` rows of ConditionedTransition (1.006 / 1.007 / 0.999, a tie) and of the bias-only DiT (1.017 - 1.029). All inference rows and AdaLN training are below 0.95 (bias-only DiT inference 0.52 - 0.65). The unfixed rows are listed below.
+Of the 30 rows of these three ops (the audit's violations plus the rows that were already fine), 19 are 5 % or more faster than PyTorch, and none of the 11 others is slower by more than the repeat spread (0.4 %): ConditionedTransition bf16 training 0.968 - 0.983, ConditionedTransition fp32 training 0.969, bias-only DiT fp32 training 0.961 / 0.993, bias-only DiT bf16 training 0.995 - 1.004 (three of its five rows are ties within the noise and two are 0.4 % over 1.0). None of these reaches the 0.95 that was asked for; why is under "Not fixed". All inference rows and AdaLN training are below 0.95.
 
-ms; ratio = portable / best PyTorch (< 1 wins). "before" = commit 12ae4ac8 (`out_full_A` / `out_full_B`), "after" = the commit that adds this record (`out_final2`).
+ms; ratio = portable / best PyTorch (< 1 wins). "before" = commit 12ae4ac8 (`out_full_A` / `out_full_B`), "after" = the head of this branch (`out_final3`).
 
 | op | mode | dtype | shape | L | PyTorch best (before) | portable before | portable after | ratio before | ratio after |
 |---|---|---|---|---|---|---|---|---|---|
-| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 1024 | 0.041 | 0.039 | 0.032 | 0.958 | 0.782 |
-| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | 0.027 | 0.025 | 0.018 | 0.942 | 0.657 |
-| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 768 | 0.036 | 0.035 | 0.027 | 0.986 | 0.773 |
-| AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | 0.034 | 0.040 | 0.024 | 1.176 | 0.707 |
-| AdaLN | training | bf16 | d768 cond384 A5/A48 | 1024 | 0.885 | 0.793 | 0.735 | 0.896 | 0.829 |
-| AdaLN | training | bf16 | d768 cond384 A5/A48 | 384 | 0.372 | 0.337 | 0.316 | 0.905 | 0.852 |
-| AdaLN | training | bf16 | d768 cond384 A5/A48 | 768 | 0.690 | 0.618 | 0.565 | 0.895 | 0.821 |
-| AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | 0.643 | 0.699 | 0.587 | 1.088 | 0.917 |
-| bias-only DiT | inference | bf16 | 12x64 | 512 | 0.284 | 0.301 | 0.148 | 1.062 | 0.520 |
-| bias-only DiT | inference | bf16 | 24x32 | 512 | 0.281 | 0.293 | 0.157 | 1.042 | 0.561 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | 0.156 | 0.165 | 0.101 | 1.060 | 0.645 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | 0.280 | 0.296 | 0.151 | 1.058 | 0.538 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | 0.429 | 0.441 | 0.224 | 1.028 | 0.518 |
+| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 1024 | 0.041 | 0.039 | 0.032 | 0.958 | 0.778 |
+| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 384 | 0.027 | 0.025 | 0.018 | 0.942 | 0.658 |
+| AdaLN | inference | bf16 | d768 cond384 A5/A48 | 768 | 0.036 | 0.035 | 0.027 | 0.986 | 0.771 |
+| AdaLN | inference | fp32 | d768 cond384 A5/A48 | 384 | 0.034 | 0.040 | 0.024 | 1.176 | 0.711 |
+| AdaLN | training | bf16 | d768 cond384 A5/A48 | 1024 | 0.885 | 0.793 | 0.699 | 0.896 | 0.789 |
+| AdaLN | training | bf16 | d768 cond384 A5/A48 | 384 | 0.372 | 0.337 | 0.305 | 0.905 | 0.822 |
+| AdaLN | training | bf16 | d768 cond384 A5/A48 | 768 | 0.690 | 0.618 | 0.540 | 0.895 | 0.784 |
+| AdaLN | training | fp32 | d768 cond384 A5/A48 | 384 | 0.643 | 0.699 | 0.589 | 1.088 | 0.917 |
+| bias-only DiT | inference | bf16 | 12x64 | 512 | 0.284 | 0.301 | 0.146 | 1.062 | 0.514 |
+| bias-only DiT | inference | bf16 | 24x32 | 512 | 0.281 | 0.293 | 0.154 | 1.042 | 0.546 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | 0.156 | 0.165 | 0.095 | 1.060 | 0.605 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | 0.280 | 0.296 | 0.149 | 1.058 | 0.534 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | 0.429 | 0.441 | 0.218 | 1.028 | 0.507 |
 | bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | 0.216 | 0.237 | 0.140 | 1.100 | 0.653 |
-| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | 0.435 | 0.453 | 0.238 | 1.042 | 0.545 |
-| bias-only DiT | training | bf16 | 12x64 | 512 | 3.314 | 3.515 | 3.364 | 1.061 | 1.017 |
-| bias-only DiT | training | bf16 | 24x32 | 512 | 3.336 | 3.578 | 3.419 | 1.073 | 1.023 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | 1.670 | 1.798 | 1.718 | 1.077 | 1.029 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | 3.313 | 3.552 | 3.385 | 1.072 | 1.024 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | 5.044 | 5.356 | 5.125 | 1.062 | 1.027 |
-| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | 3.877 | 4.021 | 3.774 | 1.037 | 0.979 |
-| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | 7.218 | 7.578 | 7.144 | 1.050 | 0.991 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | 0.148 | 0.171 | 0.126 | 1.153 | 0.845 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | 0.083 | 0.087 | 0.058 | 1.051 | 0.705 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | 0.124 | 0.131 | 0.102 | 1.058 | 0.824 |
-| ConditionedTransition | inference | fp32 | d768 A5/A48 | 384 | 0.137 | 0.125 | 0.108 | 0.913 | 0.789 |
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | 2.986 | 3.206 | 2.990 | 1.074 | 1.006 |
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | 1.245 | 1.335 | 1.250 | 1.072 | 1.007 |
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | 2.301 | 2.473 | 2.300 | 1.075 | 0.999 |
-| ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | 2.902 | 3.004 | 2.803 | 1.035 | 0.969 |
+| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | 0.435 | 0.453 | 0.235 | 1.042 | 0.539 |
+| bias-only DiT | training | bf16 | 12x64 | 512 | 3.314 | 3.515 | 3.300 | 1.061 | 1.000 |
+| bias-only DiT | training | bf16 | 24x32 | 512 | 3.336 | 3.578 | 3.327 | 1.073 | 0.995 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | 1.670 | 1.798 | 1.680 | 1.077 | 1.004 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | 3.313 | 3.552 | 3.307 | 1.072 | 1.001 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | 5.044 | 5.356 | 5.007 | 1.062 | 0.997 |
+| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | 3.877 | 4.021 | 3.706 | 1.037 | 0.961 |
+| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | 7.218 | 7.578 | 7.138 | 1.050 | 0.993 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | 0.148 | 0.171 | 0.125 | 1.153 | 0.839 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | 0.083 | 0.087 | 0.059 | 1.051 | 0.705 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | 0.124 | 0.131 | 0.102 | 1.058 | 0.829 |
+| ConditionedTransition | inference | fp32 | d768 A5/A48 | 384 | 0.137 | 0.125 | 0.109 | 0.913 | 0.798 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | 2.986 | 3.206 | 2.886 | 1.074 | 0.971 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | 1.245 | 1.335 | 1.223 | 1.072 | 0.983 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | 2.301 | 2.473 | 2.228 | 1.075 | 0.968 |
+| ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | 2.902 | 3.004 | 2.804 | 1.035 | 0.969 |
 
 The "before" PyTorch time of a row differs from the "after" one by run-to-run noise (up to 2 %); the ratio after uses the PyTorch time of the same run.
 
@@ -74,38 +74,47 @@ current triton / the kernel source, so the runtime takes the default sets above.
   bias-only DiT inference rows to 0.52 - 0.65; training cannot keep it (the gradient flows through it).
 * **AdaLN training forward.** LN(cond) with its saved mean / rstd and the statistics of x in one launch (`SAVE_C`), the GEMM+gate kernel reads the weights in place (fp32 AdaLN training 0.976 -> 0.917).
 
+## Persistent TMA GEMMs (the one change that moved the training rows)
+
+A Triton GEMM that loads with pointers and lets one program own a tile runs at 55 - 80 % of cuBLAS on an H100. The same GEMM with on-device tensor descriptors (TMA loads and
+stores) in a persistent loop (`tl.range(pid, n_tiles, NUM_SMS, flatten=True)`) matches it: M = 49152, K = 768 / 1536, bf16, 328 vs 323 us, 167 vs 166 us, 183 vs 189 us
+(`kernels/_tma.py`, plumbing; `kernels/_tma.py::prune_tma` takes the TMA configs off a card or an operand that cannot use them). The kernels got a `TMA` config axis
+(0 = off, 1 = TMA, 2 = epilogue in two column halves, 3 / 4 = the same with a warp-specialised loop), so the registry rows, the autotuner and the per-card caches stay as they were:
+
+* `_dh_swiglu_bwd` (the ConditionedTransition backward GEMM with the SwiGLU backward as epilogue): 431 -> 361 us at M = 49152 (bf16).
+* `_adaln_fwd_gate` (AdaLN training forward): 187 -> about 150 us.
+* `_fwd_expand_swiglu` and `_fwd_squeeze_gate` (the forward pair) have the TMA branches too, and are correct (tests), but measured SLOWER than cuBLAS + the flat passes
+  (500 vs 472 us, 380 vs 315 us), and a single-accumulator squeeze with the gate as epilogue only ties (254 vs 256 us): `training._TMA_FWD = False`.
+
+The limit: a fused epilogue is overlapped with the next tile only partly. `_dh_swiglu_bwd` costs its GEMM (190 us) plus about 170 us, which is its 604 MB of epilogue
+traffic at HBM speed; persistent grids of 2 - 3 programs per SM, warp specialisation and BLOCK_N = 256 did not change it. So a fusion wins only where it removes a whole round trip through HBM
+(the dh of the backward: yes; the gate pass after the squeeze GEMM: no, the traffic is the same).
+
 ## Not fixed
 
-Ratio portable / PyTorch, after (ladder rows still marked `portable_vs_pytorch`; those with a ratio inside the repeat spread are marked `noise` in the ladder note):
+Ratio portable / PyTorch, after, of the rows that are not 0.95 or better:
 
-| row | ratio | note |
-|---|---|---|
-| ConditionedTransition training bf16 L384 / 768 / 1024 | 1.007 / 0.999 / 1.006 | tie (ladder: within noise); the remaining launches are the GEMM-fused `_dh_swiglu_bwd` (431 us at L1024, Triton does not reach cuBLAS + a fused pass) and bandwidth-bound elementwise passes both sides run |
-| bias-only DiT training bf16 d768 16x48 L256 / 512 / 768 | 1.029 / 1.024 / 1.027 | 70-150 us of 1.7-5.2 ms. The block's pair LayerNorm forward + backward (`layer_norm_fwd_fused` + `layer_norm_bwd_dx_fused`, 140 us at L512) and the attention-side elementwise ops are opaque ops that inductor cannot fuse into its neighbours, which is what the PyTorch statements get |
-| bias-only DiT training bf16 24x32 / 12x64 L512 | 1.023 / 1.017 | same |
-| bias-only DiT training fp32 L256 / 512, ConditionedTransition training fp32 | 0.979 / 0.991, 0.969 | faster, but by less than 5 %; TF32 cuBLAS GEMMs are equal on both sides and make most of the time |
+| row | ratio |
+|---|---|
+| ConditionedTransition training bf16 L384 / 768 / 1024 | 0.983 / 0.968 / 0.971 |
+| ConditionedTransition training fp32 L384 | 0.969 |
+| bias-only DiT training bf16 d768 16x48 L256 / 512 / 768 | 1.004 / 1.001 / 0.997 |
+| bias-only DiT training bf16 24x32 / 12x64 L512 | 0.995 / 1.000 |
+| bias-only DiT training fp32 L256 / 512 | 0.961 / 0.993 |
 
-AdaLN fp32 training is 0.917 and every inference row is below 0.95. The ladder also prints `VIOLATION(cuda_vs_portable)` on the AdaLN / ConditionedTransition rows
-now: the "CUDA" rung of these two ops on an H100 is the PyTorch fallback (`docs/dispatch.md`: no CUDA path yet), so the portable kernels beat it.
+The training time of both blocks is about 55 % cuBLAS GEMMs that are the same on both sides and about 45 % memory-bound passes; the portable side has fewer kernels (113 against 136 for
+the bias-only DiT at L = 512) and the same total kernel time, so the ratio sits at 1.0 +- 1 % and the remaining 5 % would have to come from a new class of kernel (a warp-specialised
+epilogue GEMM written for the card), not from tiles or fusion at this level. Rejected with numbers: side streams for the weight gradients (CT 1.000 -> 1.018), a persistent /
+prefetching dh kernel with pointer loads (431 -> 472 us), the AdaLN backward without the stacked dy copy (bf16 no change, fp32 AdaLN training 0.917 -> 1.020), a fused pair-LayerNorm + bias kernel
+(not written: the pair LayerNorm forward and backward are 138 us of 3300 and the PyTorch side spends the same).
 
-## Tests
-
-* `tests/gpu/any/test_portable_ct_adaln_residual_gpu.py` (new): the folded residual is the unfused add, forward (bitwise in bf16) and backward, on both training forwards; the
-  cached casts follow an in-place weight update.
-* `tests/gpu/any/test_engine_adaln_alignment.py` follows the kernel's two new stride arguments (no tolerance touched).
-* Parity (`test_bias_only_dit_portable_gpu.py`, `test_conditioned_transition_precision_gpu.py`, determinism, op contracts, numerical): see the commit message / report.
-* CPU suite: the registry key-gap audit (four flags recorded in `build/key_gaps_allowed.csv`), the compile-wrap coverage (a method named `_run` collided with a launcher by name in the audit),
-  the sweep page and the derived registry (`dev derive --arch sm86`) were brought up to date; `test_no_stale_caches` and `test_key_flags_are_built_on_both_sides` fail identically on the base commit.
-
-## Method notes
-
-`BENCH_TOP_K` (all kernels in the `kernel_probe` list) was a local, uncommitted change to `bench.py`. Every tuning number above is a CUDA-graph replay of the
-kernel alone; the ladder rows are the harness's own.
+The ladder prints `VIOLATION(cuda_vs_portable)` on AdaLN / ConditionedTransition rows: the H100 "CUDA" rung of these two ops is the PyTorch fallback (`docs/dispatch.md`), which the portable kernels
+beat; another agent is writing those CUDA kernels (AdaLN route `adaln_rows.cu` / `settings.adaln_h100_cuda`) and nothing here touches CUDA.
 
 ## Notes
 
 * Side effect to know about: a first `dev derive` attempt of this work ran with an unset worktree path and wrote the derived (git-ignored) files
   `src/miniworld_engine/kernels/registry/registry_kernel.csv` and `registry_kernel.units.json` of the MAIN checkout `~/miniworld-engine` (derived from its own sources, arch sm86). No tracked file there changed.
 * Tests run on the H100 for the final tree: `test_portable_ct_adaln_residual_gpu.py` (incl. the attention-keep test), `test_bias_only_dit_portable_gpu.py`, `test_conditioned_transition_precision_gpu.py`,
-  `test_engine_adaln_alignment.py`, `test_determinism_gpu.py`, `test_op_contracts_gpu.py` (106 passed, 1 skipped) and `test_numerical.py -k "adaln or cond_transition or gated_projection or layernorm_fwd_strided or layernorm_stats"` (31 passed).
-  An earlier full `test_numerical.py` run had 10 failures, all in other families (`transition_*_sm90_cuda`, `mpnn_*`). CPU suite: 2 failures, `test_no_stale_caches` and `test_key_flags_are_built_on_both_sides`, identical on the base commit.
+  `test_engine_adaln_alignment.py`, `test_determinism_gpu.py`, `test_op_contracts_gpu.py` (110 passed, 1 skipped, TMA configs included) and `test_numerical.py -k "adaln or cond_transition or gated_projection or layernorm_fwd_strided or layernorm_stats"` (31 passed).
+  An earlier full `test_numerical.py` run had 10 failures, all in other families (`transition_*_sm90_cuda`, `mpnn_*`). CPU suite: 2 failures, `test_no_stale_caches` and `test_key_flags_are_built_on_both_sides`, identical on the base commit. The registry fixture `tests/cpu/data/autotune-space-20260916.json` was updated for the two pinned kernels whose grid gained the `TMA` axis (`cond_transition_bwd_gemm_swiglu`, `adaln_fwd_gate`).

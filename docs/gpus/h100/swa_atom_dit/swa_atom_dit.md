@@ -18,6 +18,13 @@ H100 stages (fp32 rows, exact-fp32 cuBLAS projections, bf16 attention operands a
 (B200, or `swa_dit_h100_native=False`) runs the PyTorch statements instead of the TF32 or Triton fp32 kernels
 (`kernels/swa_dit/interface.py:highest_fp32_on_hopper_blackwell`).
 
+**A/B switch (2026-10-27).** `settings.force_portable_kernels=True` selects the Triton kernels of `triton/*` on H100 for the whole block -- modulation,
+qkvg, window attention, out-projection + FFN, bf16 and fp32, inference and training (`dispatch.native_h100_enabled` is off under it, unless
+`swa_dit_h100_native=True` forces the native stages); this is the ladder's portable rung (record
+[esm_local_swa_ladder_20261027](../../../records/esm_local_swa_ladder_20261027.md): hand CUDA / portable 0.64-0.94, portable / PyTorch 0.04-0.09). The hand-CUDA
+INFERENCE step additionally reads its hoisted modulation table (silu + casts + GEMM, 16-22 us) from `_capture.hoisted_table` (per conditioning tensor, version and adaLN weight;
+not under `torch.compile`, not with a gradient) and the fp32 block's prepared weights (`swa_fp32.cu::prep`, 3.6 us) from `_capture.param_forms`.
+
 ## Which stages run a call (2026-10-21)
 
 `dispatch.native_h100_stages`: bf16, and fp32 under TF32, take the composed stages in the table below (every one hand-CUDA, no

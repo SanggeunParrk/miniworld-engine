@@ -507,6 +507,28 @@ def _model_variants() -> None:
             attention_starting=None, attention_ending=None, transition_pair=Transition(128, 4, implementation=MI.MINIWORLD),
             parallel=True))
         block(torch.randn(1, n, n, 128, device=dev, dtype=bf), None, mask)
+    # their TRAINING path (kernels/dit_variants/cuda/train.py: train_rows.cu, edge.cu and the attention cores it launches), bf16 and fp32 (TF32)
+    from miniworld_engine.kernels.dit_variants.cuda import train as variant_train
+
+    for dtype in (bf, torch.float32):
+        with torch.enable_grad():
+            n = 128
+            for opts in (dv.BOLTZ2, dv.ROSETTAFOLD3, dv.CHAI1):
+                stack = dv.DiTVariantStack(1, **opts).to(dev).to(dtype)
+                _randomize(stack)
+                args = (torch.randn(3, n, 768, device=dev, dtype=dtype, requires_grad=True), torch.randn(n, opts["d_cond"], device=dev, dtype=dtype),
+                        torch.randn(n, n, opts["d_pair"], device=dev, dtype=dtype), torch.ones(n, dtype=torch.bool, device=dev))
+                if variant_train.serves(stack, *args):
+                    stack(*args).sum().backward()
+            n = 512
+            for opts in (dv.BOLTZ2_ATOM, dv.ROSETTAFOLD3_ATOM, dv.CHAI1_ATOM):
+                stack = dv.AtomDiTVariantStack(1, **opts).to(dev).to(dtype)
+                _randomize(stack)
+                uid = torch.arange(n, device=dev) // 40 if opts is dv.CHAI1_ATOM else None
+                args = (torch.randn(2, n, 128, device=dev, dtype=dtype, requires_grad=True), torch.randn(n, 128, device=dev, dtype=dtype),
+                        torch.randn(n // 32, 32, 128, 16, device=dev, dtype=dtype), torch.arange(n, device=dev) < n - 20, uid)
+                if variant_train.atom_serves(stack, *args):
+                    stack(*args).sum().backward()
     torch.cuda.synchronize()
 
 

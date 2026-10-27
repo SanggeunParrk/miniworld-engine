@@ -17,6 +17,7 @@
 #pragma once
 #include "tmn_ptx.cuh"
 #include "wgmma_ops.cuh"
+#include <cuda_fp16.h>
 
 namespace tr90 {
 using namespace tmn;
@@ -33,6 +34,7 @@ template <> struct Tt<__nv_bfloat16> {
   static __device__ __forceinline__ float to_f(__nv_bfloat16 v) { return __bfloat162float(v); }
   static __device__ __forceinline__ __nv_bfloat16 from_f(float v) { return __float2bfloat16_rn(v); }
   static __device__ __forceinline__ float rnaf(float v) { return v; }
+  static __device__ __forceinline__ uint32_t pack2(float a, float b) { return pack_bf16(a, b); }
 };
 template <> struct Tt<float> {
   static constexpr int ES = 4, BK = 32;
@@ -45,6 +47,19 @@ template <> struct Tt<float> {
   static __device__ __forceinline__ float to_f(float v) { return v; }
   static __device__ __forceinline__ float from_f(float v) { return v; }
   static __device__ __forceinline__ float rnaf(float v) { return rna(v); }
+  static __device__ __forceinline__ uint32_t pack2(float, float) { return 0; }      // never staged (4-byte outputs are stored directly)
+};
+
+template <> struct Tt<__half> {
+  // fp16 operand / output: the TF32 mantissa (10 bits) in 2 bytes; wgmma k16 like bf16.
+  static constexpr int ES = 2, BK = 64;
+  static __device__ __forceinline__ float2 ld2(const __half* p) { return __half22float2(*reinterpret_cast<const __half2*>(p)); }
+  static __device__ __forceinline__ void st2(__half* p, float a, float b) { *reinterpret_cast<__half2*>(p) = __floats2half2_rn(a, b); }
+  static __device__ __forceinline__ void st2m(__half* p, float a, float b) { st2(p, a, b); }
+  static __device__ __forceinline__ float to_f(__half v) { return __half2float(v); }
+  static __device__ __forceinline__ __half from_f(float v) { return __float2half_rn(v); }
+  static __device__ __forceinline__ float rnaf(float v) { return v; }
+  static __device__ __forceinline__ uint32_t pack2(float a, float b) { __half2 v = __floats2half2_rn(a, b); return *reinterpret_cast<uint32_t*>(&v); }
 };
 
 enum Mode { MODE_RES = 0, MODE_OUT = 1, MODE_SWIGLU = 2, MODE_SWIGLU_SAVE = 3, MODE_GATE = 4 };
@@ -74,10 +89,10 @@ __device__ __forceinline__ void tma_store_2d(const CUtensorMap* map, uint32_t sr
 __device__ __forceinline__ void pdl_wait() { asm volatile("griddepcontrol.wait;\n" ::: "memory"); }
 __device__ __forceinline__ void pdl_trigger() { asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory"); }
 
-template <int BN, int ES, int MODE> struct GemmCfg {
+template <int BN, int ES, int MODE, int OES = ES> struct GemmCfg {
   static constexpr bool SW = MODE == MODE_SWIGLU || MODE == MODE_SWIGLU_SAVE;
   static constexpr int NW = SW ? BN / 2 : BN;                                  // output columns per tile
-  static constexpr bool STAGED = ES == 2;
+  static constexpr bool STAGED = OES == 2;                       // a 2-byte output is staged through shared memory and stored by TMA
   static_assert(STAGED || (MODE != MODE_SWIGLU_SAVE && MODE != MODE_GATE), "saved-a/b modes are bf16 only");
   static constexpr int NSLOT = (MODE == MODE_GATE || MODE == MODE_SWIGLU_SAVE) ? 2 : 1;   // GATE: a, b (then dA, dB in place)
   static constexpr int STG = STAGED ? NSLOT * 64 * NW * 2 : 0;                 // staging bytes per consumer warpgroup
@@ -100,12 +115,13 @@ template <int BN, int ES, int MODE> struct GemmCfg {
 //   MODE_GATE   : acc = dh = dy Ws; a, b are loaded from mX ([M][2N] as saved), the SwiGLU backward stores dA / dB to mO ([M][2N])
 //                 (h is not needed: the forward saved it from its fp32 accumulators)
 // mX / mO: TMA maps of X and O (bf16 staged epilogue only).
-template <typename T, int BN, int MODE, bool BT = false>
+template <typename T, int BN, int MODE, bool BT = false, typename TO = T>
 __global__ void __launch_bounds__(384, 1)
 gemm_kernel(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUtensorMap mB, const __grid_constant__ CUtensorMap mB2,
             const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mO, const __grid_constant__ CUtensorMap mO2,
-            int M, int N, int K, const T* __restrict__ X, void* __restrict__ O) {
-  using C = GemmCfg<BN, Tt<T>::ES, MODE>;
+            int M, int N, int K, const TO* __restrict__ X, void* __restrict__ O, const float* __restrict__ SC) {
+  using C = GemmCfg<BN, Tt<T>::ES, MODE, Tt<TO>::ES>;
+  const float sc = SC ? *SC : 1.f;                                     // epilogue scale (fp16 h: SWIGLU stores acc / s, RES adds acc * s)
   constexpr int BK = Tt<T>::BK, NSTAGE = C::NSTAGE, NACC = BN / 2, NW = C::NW;
   constexpr bool STAGED = C::STAGED;
   extern __shared__ __align__(1024) uint8_t sm[];
@@ -270,7 +286,7 @@ gemm_kernel(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUte
               const float a0_ = acc[4 * g + 2 * hf], a1_ = acc[4 * g + 2 * hf + 1];
               const float b0_ = acc[4 * (g + BN / 16) + 2 * hf], b1_ = acc[4 * (g + BN / 16) + 2 * hf + 1];
               sts32(stg_addr(stg, g >> 3, rl + 8 * hf, (8 * g + c0) & 63),
-                    pack_bf16(a0_ * sigmoidf_(a0_) * b0_, a1_ * sigmoidf_(a1_) * b1_));
+                    Tt<TO>::pack2(a0_ * sigmoidf_(a0_) * b0_ * sc, a1_ * sigmoidf_(a1_) * b1_ * sc));
             }
         } else {                                                       // OUT
 #pragma unroll
@@ -295,7 +311,7 @@ gemm_kernel(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUte
         tma_store_commit();
       }
     } else if (MODE == MODE_SWIGLU) {
-      T* H = reinterpret_cast<T*>(O);
+      TO* H = reinterpret_cast<TO*>(O);
 #pragma unroll
       for (int g = 0; g < BN / 16; ++g)
 #pragma unroll
@@ -303,7 +319,7 @@ gemm_kernel(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUte
           const int r = r0 + 8 * hf;
           const float a0_ = acc[4 * g + 2 * hf], a1_ = acc[4 * g + 2 * hf + 1];
           const float b0_ = acc[4 * (g + BN / 16) + 2 * hf], b1_ = acc[4 * (g + BN / 16) + 2 * hf + 1];
-          if (r < M) Tt<T>::st2m(H + (size_t)r * N + n0 + 8 * g + c0, a0_ * sigmoidf_(a0_) * b0_, a1_ * sigmoidf_(a1_) * b1_);
+          if (r < M) Tt<TO>::st2m(H + (size_t)r * N + n0 + 8 * g + c0, a0_ * sigmoidf_(a0_) * b0_ * sc, a1_ * sigmoidf_(a1_) * b1_ * sc);
         }
     } else {
 #pragma unroll
@@ -314,10 +330,10 @@ gemm_kernel(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUte
           const float v0 = acc[4 * g + 2 * hf], v1 = acc[4 * g + 2 * hf + 1];
           if (r < M) {
             if (MODE == MODE_RES) {
-              const float2 xr = Tt<T>::ld2(X + (size_t)r * N + c);
-              Tt<T>::st2(reinterpret_cast<T*>(O) + (size_t)r * N + c, v0 + xr.x, v1 + xr.y);
+              const float2 xr = Tt<TO>::ld2(X + (size_t)r * N + c);
+              Tt<TO>::st2(reinterpret_cast<TO*>(O) + (size_t)r * N + c, v0 * sc + xr.x, v1 * sc + xr.y);
             } else {
-              Tt<T>::st2(reinterpret_cast<T*>(O) + (size_t)r * N + c, v0, v1);
+              Tt<TO>::st2(reinterpret_cast<TO*>(O) + (size_t)r * N + c, v0, v1);
             }
           }
         }

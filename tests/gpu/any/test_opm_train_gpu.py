@@ -187,7 +187,10 @@ def test_default_auto_path_compiles_forward_and_backward(module, inputs, monkeyp
     for a, b in zip(actual, expected, strict=True):
         torch.testing.assert_close(a, b, rtol=1e-6, atol=1e-6)
     with torch.no_grad():
-        torch.testing.assert_close(compiled(x, inputs["ragged"]), y, rtol=0, atol=0)
+        # inference is the single fused kernel (same bf16 products, projection summed in another order): equal to bf16 noise, not bitwise
+        w = compiled(x, inputs["ragged"])
+        assert torch.equal(w, compiled(x, inputs["ragged"]))
+        assert ((w.float() - y.float()).norm() / y.float().norm()).item() < 3e-3
 
 
 @pytest.mark.parametrize("length", [384, 768])

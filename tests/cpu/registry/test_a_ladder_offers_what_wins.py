@@ -67,6 +67,11 @@ FIXED_AXES = {
     ("token_pair_init_dw_reduce_triton", "num_stages"): ([1], "a short sequential sum over the slice partials; the loads are independent of the loop carry"),
     ("pair_embed_adaln_bwd_reduce_triton", "num_stages"): ([1], "a short sequential sum over the partials; the loads are independent of the loop carry"),
     ("pair_embed_adaln_bwd_triton", "BLOCK_J"): ([16], "sets the grouping of the fp32 parameter-gradient sums (dgamma, dbeta, dln_w, dln_b): one value keeps the bits of the backward independent of the tuner"),
+    ("sampler_ops_stats_triton", "num_stages"): ([1], "the sub-tile loop of a program is fully unrolled (tl.static_range): there is no pipeline loop"),
+    ("sampler_ops_augment_triton", "num_stages"): ([1], "the sub-tile loop of a program is fully unrolled (tl.static_range): there is no pipeline loop"),
+    ("sampler_ops_cov_triton", "num_stages"): ([1], "the sub-tile loop of a program is fully unrolled (tl.static_range): there is no pipeline loop"),
+    ("sampler_ops_align_triton", "num_stages"): ([1], "the sub-tile loop of a program is fully unrolled (tl.static_range): there is no pipeline loop"),
+    ("sampler_ops_pool_triton", "num_stages"): ([1], "a short loop over the atoms of one token whose loads are independent of the loop carry"),
     ("swa_gate_out_fwd_triton", "GROUP_M"): ([1], "one N tile means tile grouping cannot reorder programs"),
 }
 

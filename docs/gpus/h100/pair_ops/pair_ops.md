@@ -34,17 +34,27 @@ switch is what produced the numbers below. `refusal(...)` / `refusal_ca(...)` re
 No kernel uses atomics for a parameter gradient; every backward is bitwise reproducible for a given launch configuration, and the table-gradient kernels give the same bits in every
 configuration. Details, parity and the full speed / memory tables: [records/portable_pair_ops_20261025.md](../../../records/portable_pair_ops_20261025.md).
 
-## Measurements (2026-10-25)
+## Measurements (2026-10-25, after the CUDA kernel rework)
 
-One H100, torch 2.13.0+cu129, triton 3.7.1, CUDA graph; median over B = 16 / 32 / 48 at L = 128 .. 512 (ranges), reference = the dense PyTorch builder.
+One H100, torch 2.13.0+cu129, triton 3.7.1, CUDA graph; ranges over B = 16 / 32 / 48 at L = 128 .. 512, reference = the dense PyTorch builder. The last column is the CUDA time
+relative to the portable kernels (> 1: CUDA faster); the rework itself, its profile evidence and the full per-shape tables: [records/pair_ops_cuda_vs_portable_20261025.md](../../../records/pair_ops_cuda_vs_portable_20261025.md).
 
-| op | portable vs PyTorch reference | peak memory vs reference | portable vs CUDA kernels |
+| op | portable vs PyTorch reference | peak memory vs reference | CUDA vs portable (before the rework -> now) |
 |---|---|---|---|
-| `pair_embed_geom` forward | 25-33x faster | 7.9x less | 0.84-0.97x of the CUDA time |
-| `pair_embed_geom_train` + `ln_eps`, forward + backward | 8.5-12.8x | 3.3-4.0x | 0.74-0.87x |
-| `pair_embed_ca` + `ln_eps`, forward + backward | 9.5-15x | 2.8-3.1x | 0.57-0.76x |
-| `pair_embed_adaln` forward | 16.6-17.9x | 10.5-10.9x | 1.50-2.72x |
-| `pair_embed_adaln`, forward + backward | 6.3-8.0x | 6.7-11x | 0.88-1.06x |
-| `token_pair_init`, forward + backward | 4.1-5.8x | 4.8-5.3x | 1.34-1.63x |
+| `pair_embed_geom` forward | 25-33x faster | 7.9x less | 0.84-0.97x -> **1.17-1.38x** |
+| `pair_embed_geom_train` + `ln_eps`, forward + backward | 8.5-12.8x | 3.3-4.0x | 0.74-0.87x -> **1.27-1.44x** |
+| `pair_embed_ca` + `ln_eps`, forward + backward | 9.5-15x | 2.8-3.1x | 0.57-0.76x -> **1.11-1.36x** |
+| `pair_embed_adaln` forward | 16.6-17.9x | 10.5-10.9x | 1.50-2.72x (unchanged) |
+| `pair_embed_adaln`, forward + backward | 6.3-8.0x | 6.7-11x | 0.88-1.06x -> **1.78-2.20x** |
+| `token_pair_init`, forward + backward | 4.1-5.8x | 4.8-5.3x | 1.37-1.62x (unchanged) |
 
-The reference runs out of memory at B = 48, L = 512 (and for `pair_embed_adaln` training from B = 32, L = 512); the portable kernels do not.
+The reference runs out of memory at B = 48, L = 512 (and for `pair_embed_adaln` training from B = 32, L = 512); the CUDA and portable kernels do not.
+
+## CUDA kernel structure (sm90)
+
+| kernel | role |
+|---|---|
+| `pg_fwd`, `pg_fwd_ca` | persistent CTAs, 16 / 32 warps, one warp per (b, i) row; bins as torch computes them (bucket by binary search over the limits in shared memory), up to ten bf16 table rows from shared memory summed in fp32, optional LayerNorm, 16 B stores; the 16-byte codes for the backward |
+| `pg_ln_bwd` | LayerNorm backward with the pair recomputed from the codes, `UL` pairs per warp step, loads pipelined two steps deep |
+| `pg_bwd_mma4` | table gradient: the one-hot operand scattered into a swizzled shared-memory tile (two extra warps), `wgmma.m64n64k16` with both operands from shared memory, one warpgroup per 64 table rows, fixed pair slices and tile order, fixed-order reduce: bitwise deterministic. `MINIWORLD_PAIR_EMBED_BWD_IMPL=2` selects the previous `mma.sync` kernel, `0` the shared-memory kernel |
+| `pe_bwd_tbl4` | the same for `pair_embed_adaln` (fp32 partials); `MINIWORLD_PAIR_EMBED_BWD_IMPL=0` selects the previous kernel |

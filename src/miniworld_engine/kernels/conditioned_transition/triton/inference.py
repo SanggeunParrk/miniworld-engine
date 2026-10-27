@@ -29,6 +29,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
+
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
 
@@ -84,6 +86,7 @@ def _cond_transition_inference_kernel(
     BLOCK_K_D: tl.constexpr, BLOCK_K_DC: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    PRE: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. The fused b2b holds h in registers, so the only
     # operands read are x and the weights. `K` is the output width here -- this kernel drops D as a
@@ -118,14 +121,14 @@ def _cond_transition_inference_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a = tl.dot(x, wa, a, out_dtype=tl.float32, input_precision="tf32")
-            b = tl.dot(x, wb, b, out_dtype=tl.float32, input_precision="tf32")
+            a = tf32_dot(x, wa, a, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
+            b = tf32_dot(x, wb, b, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # operand dtype -> squeeze dot in bf16/fp32
         ws_t = tl.load(  # (BN, BN): Ws[d, cols]^T
             ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=col_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32, input_precision="tf32")
+        out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
 
     # Conditioning gate: scale = cond @ Wsc^T + b_sc ; y = sigmoid(scale) * out.
     # DC is tiled (the full (BLOCK_K_DC, D) Wsc^T tile would blow smem in fp32 at DC=384).
@@ -141,7 +144,7 @@ def _cond_transition_inference_kernel(
             wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
             mask=dc_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        scale = tl.dot(cond, wsc_t, scale, out_dtype=tl.float32, input_precision="tf32")
+        scale = tf32_dot(cond, wsc_t, scale, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
@@ -173,6 +176,9 @@ def cond_transition_inference(
     ``length`` is L -- the ATOM count A of the un-flattened activation, supplied by
     modules/conditioned_transition/module.py. None falls back to this matrix's row count M.
     """
+    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, not per tile in the kernel (kernels/_tf32.py)
+    if pre:
+        wa, wb, ws, wsc = tf32_cached((wa, wb, ws, wsc), lambda: tf32_grid_many(wa.contiguous(), wb.contiguous(), ws.contiguous(), wsc.contiguous()))
     M, K = x.shape
     ND = wa.shape[0]
     D = ws.shape[0]
@@ -192,5 +198,6 @@ def cond_transition_inference(
         out.stride(0), out.stride(1),
         shape_key=atom_key(length if length is not None else length_of(x.shape),
                            ND=ND, K=K, DC=DC),
+        PRE=pre,
     )
     return out

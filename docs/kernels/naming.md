@@ -38,6 +38,7 @@
     pair_embed_ca        La-Proteina 디코더의 CA 거리 pair (같은 gather, 157행 테이블; backward 커널은 pair_embed_geom 과 공유)
     pair_embed_adaln     La-Proteina 의 초기 pair 빌더 (bin gather -> Linear -> 아핀 LN -> 샘플별 adaptive LN)
     token_pair_init      입력 feature embedder 의 token pair 초기화 (left + right + 상대위치 one-hot Linear + bond Linear)
+    sampler_ops          확산 샘플러의 rigid-motion glue (무작위 회전/이동 + 재노이즈 `augment`, Kabsch 정렬 + Euler 갱신 `align`, 그 통계 `stats`/`cov`)와 원자 인코더의 `pool`
 
 ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이고, 아래 3개는 다른 모델의
 연산이다. `mpnn_` 접두는 `fused_` 와 달리 정보가 있다 — 어느 모델의 연산인지가 곧 어떤 형상을
@@ -78,6 +79,10 @@ ProteinMPNN 계열. 위 11개는 AlphaFold-3 트렁크·디퓨전의 연산이�
     dx dw dbias dlnw   그래디언트 대상. dlnw = LN 의 gamma/beta
     dq dk dv dkdv      어텐션 그래디언트 조각
     stats              mean/rstd 등 통계만
+    augment            샘플별 무작위 강체 변환(중심화·회전·이동)과 노이즈 재주입 (sampler_ops)
+    cov                마스크 가중 공분산 3x3 의 청크 파셜 (Kabsch 의 입력)
+    align              Horn 사원수로 회전을 구해 정렬하고 Euler 갱신까지 (sampler_ops)
+    pool               원자 행 gather + relu + 마스크 평균 (atom -> token 풀링)
     bins               pair 마다 bin 코드(거리·각도·서열 간격 bucket)만 계산해 코드 텐서로 쓴다 (gather 커널이 읽는다)
     gemm               행렬곱 본체만
     gate               sigmoid 게이트 곱 (y = sigma(a) * b)

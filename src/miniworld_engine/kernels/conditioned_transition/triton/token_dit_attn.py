@@ -16,6 +16,8 @@
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 
 def _cfgs():
     return [triton.Config({"BLOCK_M1": m1, "BLOCK_M2": m2}, num_warps=w, num_stages=s)
@@ -64,15 +66,15 @@ def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
         kk2 = tl.load(kb + k2[:, None] * stride_qk, mask=nk, other=0.0)
         v1 = tl.load(vb + k1[None, :] * stride_qk, mask=nv, other=0.0)
         v2 = tl.load(vb + k2[None, :] * stride_qk, mask=nv, other=0.0)
-        qk = tl.dot(q1, kk1, input_precision=PREC)
+        qk = tf32_dot(q1, kk1, input_precision=PREC)
         if PRESCALED:
             # q carries sm_scale*log2(e) and the bias carries log2(e), both folded into weights when they were
             # packed: the logits are already in the exp2 domain, no per-element scale or bias division
-            qk = tl.dot(q2, kk2, qk, input_precision=PREC) + bias_val
+            qk = tf32_dot(q2, kk2, qk, input_precision=PREC) + bias_val
             m_ij = tl.maximum(tl.maximum(m_i, tl.max(qk, 1)), -1e38)
             qk = qk - m_ij[:, None]
         else:
-            qk = tl.dot(q2, kk2, qk, input_precision=PREC) + bias_val / (qk_scale / 1.44269504)
+            qk = tf32_dot(q2, kk2, qk, input_precision=PREC) + bias_val / (qk_scale / 1.44269504)
             m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
             m_ij = tl.maximum(m_ij, -1e38)
             qk = qk * qk_scale - m_ij[:, None]
@@ -80,8 +82,8 @@ def _attn_fwd_gated(Q, K, V, G, Bias, Mask, sm_scale,
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = l_i * alpha + tl.sum(p, 1)
         pb = p.to(v1.dtype)
-        acc1 = tl.dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
-        acc2 = tl.dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
+        acc1 = tf32_dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
+        acc2 = tf32_dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
         m_i = m_ij
         b_ptr += BLOCK_M2 * stride_bn
         kb += BLOCK_M2 * stride_qm
@@ -164,8 +166,8 @@ def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
             nm = (start_n + offset_n)[:, None] < N_CTX
             kk1 = tl.load(K + kvrow + ro + k1[None, :] * stride_qk, mask=nm, other=0.0)
             kk2 = tl.load(K + kvrow + ro + k2[None, :] * stride_qk, mask=nm, other=0.0)
-        qk = tl.dot(q1, tl.trans(kk1), input_precision=PREC)
-        qk = tl.dot(q2, tl.trans(kk2), qk, input_precision=PREC)
+        qk = tf32_dot(q1, tl.trans(kk1), input_precision=PREC)
+        qk = tf32_dot(q2, tl.trans(kk2), qk, input_precision=PREC)
         # logits already in the exp2 domain: sm_scale*log2(e) is folded into q, log2(e) into the bias
         if HAS_BIAS:
             sc = qk + Bdesc.load([brow, start_n]).to(tl.float32)
@@ -185,8 +187,8 @@ def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
             v1 = tl.load(V + kvrow + ro + k1[None, :] * stride_qk, mask=nm, other=0.0)
             v2 = tl.load(V + kvrow + ro + k2[None, :] * stride_qk, mask=nm, other=0.0)
         pb = p.to(v1.dtype)
-        acc1 = tl.dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
-        acc2 = tl.dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
+        acc1 = tf32_dot(pb, v1, acc1 * alpha[:, None], input_precision=PREC)
+        acc2 = tf32_dot(pb, v2, acc2 * alpha[:, None], input_precision=PREC)
     inv = 1.0 / tl.maximum(l_i, 1e-30)
     grow = G + base + offset_m[:, None].to(tl.int64) * stride_qm
     if EVEN:
