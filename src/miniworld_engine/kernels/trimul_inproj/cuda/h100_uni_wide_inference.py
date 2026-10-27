@@ -100,7 +100,8 @@ def _compile(kind, D, H, cfg, normalize=False):
         flags = ["-DMW_MINB=1", "-DMW_K1_STREAM=0", f"-DWIDTH={D}", f"-DHIDDEN={H}",
                  f"-DMW_NSLOT={slots}", f"-DWAITN={waitn}", f"-DPREGS={pregs}"]
     flags += ["-DTMN_SIGMOID_TANH=1", "-DTMN_WSKIP=1", "-DTMN_MASK_TEMPLATE=1", "-std=c++17",
-              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R)]
+              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R),
+              "-I" + str(T.SOURCES / "wide_forward")]
     unit = T.load_unit(str(T.compile_text(body, flags)), name)
     k = unit.kernel(name)
     k.set_max_dynamic_smem(smem)
