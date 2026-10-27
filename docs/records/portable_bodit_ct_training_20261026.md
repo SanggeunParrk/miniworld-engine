@@ -1,27 +1,27 @@
 | op | mode | dtype | shape | L | PyTorch best (base) | portable before | portable after | portable/PT before | portable/PT after | CUDA (base) | CUDA/portable before | CUDA (after) | CUDA/portable after |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | 1.247 | 1.225 | 1.161 | 0.982 | 0.934 | 1.291 | 1.054 | 1.299 | 1.119 |
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | 2.312 | 2.233 | 2.173 | 0.966 | 0.943 | 2.369 | 1.061 | 2.376 | 1.094 |
-| ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | 2.982 | 2.889 | 2.822 | 0.969 | 0.948 | 3.079 | 1.066 | 3.081 | 1.092 |
-| ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | 2.886 | 2.814 | 2.791 | 0.975 | 0.965 | 2.968 | 1.055 | 2.968 | 1.063 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | 0.083 | 0.058 | 0.059 | 0.695 | 0.707 | 0.078 | 1.352 | 0.079 | 1.344 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | 0.123 | 0.102 | 0.102 | 0.827 | 0.824 | 0.121 | 1.188 | 0.121 | 1.183 |
-| ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | 0.148 | 0.125 | 0.126 | 0.846 | 0.844 | 0.149 | 1.188 | 0.150 | 1.188 |
-| ConditionedTransition | inference | fp32 | d768 A5/A48 | 384 | 0.136 | 0.110 | 0.109 | 0.804 | 0.792 | 0.138 | 1.257 | 0.137 | 1.257 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | 1.674 | 1.686 | 1.534 | 1.007 | 0.911 | 1.472 | 0.873 | 1.471 | 0.959 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | 3.339 | 3.311 | 2.974 | 0.992 | 0.889 | 2.859 | 0.864 | 2.855 | 0.960 |
-| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | 5.062 | 5.005 | 4.460 | 0.989 | 0.880 | 4.367 | 0.872 | 4.351 | 0.976 |
-| bias-only DiT | training | bf16 | 12x64 | 512 | 3.344 | 3.314 | 2.963 | 0.991 | 0.888 | 2.908 | 0.877 | 2.905 | 0.980 |
-| bias-only DiT | training | bf16 | 24x32 | 512 | 3.364 | 3.343 | 2.996 | 0.994 | 0.888 | 3.070 | 0.918 | 3.087 | 1.031 |
-| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | 3.869 | 3.724 | 3.523 | 0.962 | 0.911 | 3.548 | 0.953 | 3.539 | 1.005 |
-| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | 7.310 | 7.186 | 6.727 | 0.983 | 0.922 | 6.752 | 0.939 | 6.757 | 1.004 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | 0.156 | 0.095 | 0.097 | 0.609 | 0.619 | 0.076 | 0.794 | 0.076 | 0.784 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | 0.280 | 0.148 | 0.149 | 0.528 | 0.531 | 0.122 | 0.826 | 0.122 | 0.817 |
-| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | 0.429 | 0.217 | 0.218 | 0.505 | 0.502 | 0.173 | 0.796 | 0.173 | 0.796 |
-| bias-only DiT | inference | bf16 | 12x64 | 512 | 0.285 | 0.145 | 0.145 | 0.510 | 0.507 | 0.125 | 0.858 | 0.125 | 0.865 |
-| bias-only DiT | inference | bf16 | 24x32 | 512 | 0.281 | 0.156 | 0.154 | 0.555 | 0.548 | 0.127 | 0.813 | 0.127 | 0.824 |
-| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | 0.216 | 0.140 | 0.140 | 0.650 | 0.653 | 0.136 | 0.969 | 0.136 | 0.970 |
-| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | 0.436 | 0.235 | 0.235 | 0.539 | 0.541 | 0.231 | 0.982 | 0.231 | 0.980 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 384 | 1.247 | 1.225 | 1.158 | 0.982 | 0.934 | 1.291 | 1.054 | 1.186 | 1.024 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 768 | 2.312 | 2.233 | 2.163 | 0.966 | 0.943 | 2.369 | 1.061 | 2.227 | 1.030 |
+| ConditionedTransition | training | bf16 | d768 A5/A48 | 1024 | 2.982 | 2.889 | 2.802 | 0.969 | 0.943 | 3.079 | 1.066 | 2.889 | 1.031 |
+| ConditionedTransition | training | fp32 | d768 A5/A48 | 384 | 2.886 | 2.814 | 2.787 | 0.975 | 0.966 | 2.968 | 1.055 | 2.618 | 0.939 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 384 | 0.083 | 0.058 | 0.058 | 0.695 | 0.706 | 0.078 | 1.352 | 0.053 | 0.914 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 768 | 0.123 | 0.102 | 0.101 | 0.827 | 0.816 | 0.121 | 1.188 | 0.095 | 0.939 |
+| ConditionedTransition | inference | bf16 | d768 A5/A48 | 1024 | 0.148 | 0.125 | 0.125 | 0.846 | 0.852 | 0.149 | 1.188 | 0.112 | 0.897 |
+| ConditionedTransition | inference | fp32 | d768 A5/A48 | 384 | 0.136 | 0.110 | 0.107 | 0.804 | 0.781 | 0.138 | 1.257 | 0.089 | 0.836 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 256 | 1.674 | 1.686 | 1.505 | 1.007 | 0.905 | 1.472 | 0.873 | 1.457 | 0.968 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 512 | 3.339 | 3.311 | 2.929 | 0.992 | 0.891 | 2.859 | 0.864 | 2.819 | 0.963 |
+| bias-only DiT | training | bf16 | d768 16x48 A5/A48 | 768 | 5.062 | 5.005 | 4.412 | 0.989 | 0.884 | 4.367 | 0.872 | 4.292 | 0.973 |
+| bias-only DiT | training | bf16 | 12x64 | 512 | 3.344 | 3.314 | 2.907 | 0.991 | 0.882 | 2.908 | 0.877 | 2.867 | 0.986 |
+| bias-only DiT | training | bf16 | 24x32 | 512 | 3.364 | 3.343 | 2.950 | 0.994 | 0.885 | 3.070 | 0.918 | 3.031 | 1.028 |
+| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 256 | 3.869 | 3.724 | 3.495 | 0.962 | 0.907 | 3.548 | 0.953 | 3.516 | 1.006 |
+| bias-only DiT | training | fp32 | d768 16x48 A5/A48 | 512 | 7.310 | 7.186 | 6.630 | 0.983 | 0.923 | 6.752 | 0.939 | 6.653 | 1.004 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 256 | 0.156 | 0.095 | 0.095 | 0.609 | 0.607 | 0.076 | 0.794 | 0.076 | 0.795 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 512 | 0.280 | 0.148 | 0.148 | 0.528 | 0.531 | 0.122 | 0.826 | 0.121 | 0.819 |
+| bias-only DiT | inference | bf16 | d768 16x48 A5/A48 | 768 | 0.429 | 0.217 | 0.217 | 0.505 | 0.506 | 0.173 | 0.796 | 0.172 | 0.791 |
+| bias-only DiT | inference | bf16 | 12x64 | 512 | 0.285 | 0.145 | 0.144 | 0.510 | 0.511 | 0.125 | 0.858 | 0.124 | 0.859 |
+| bias-only DiT | inference | bf16 | 24x32 | 512 | 0.281 | 0.156 | 0.154 | 0.555 | 0.552 | 0.127 | 0.813 | 0.126 | 0.814 |
+| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 256 | 0.216 | 0.140 | 0.140 | 0.650 | 0.651 | 0.136 | 0.969 | 0.135 | 0.966 |
+| bias-only DiT | inference | fp32 | d768 16x48 A5/A48 | 512 | 0.436 | 0.235 | 0.233 | 0.539 | 0.538 | 0.231 | 0.982 | 0.230 | 0.987 |
 
 The "PyTorch best" column is the faster of `pt_compiled` / `pt_eager_graph` of the base run; the ratios are those of each run itself (its own PyTorch time), so they differ a little from
 dividing the printed milliseconds. The ladder takes the faster of "compile + graph" and "graph of the eager module" for the portable rung. Run-to-run noise on the shared node is about 1 %.
