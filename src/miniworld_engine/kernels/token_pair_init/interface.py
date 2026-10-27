@@ -99,12 +99,13 @@ def token_pair_init_bwd(g: torch.Tensor, ids: torch.Tensor, bond: torch.Tensor, 
     return list(_backend(g.device).backward(g, ids, bond, r_max, s_max))
 
 
-def _prep_fake(asym, residue, token, entity, sym, w_rel, w_bond):
+def _token_pair_init_prep_fake(asym, residue, token, entity, sym, w_rel, w_bond):
+    """ids [5, B*L] int32 and the table [n_rel + 2, 128] fp32."""
     return [torch.empty((5, asym.numel()), dtype=torch.int32, device=w_rel.device),
             torch.empty((w_rel.shape[1] + 2, D_PAIR), dtype=torch.float32, device=w_rel.device)]
 
 
-@opaque(fake=_prep_fake, name="token_pair_init_prep")
+@opaque(fake=_token_pair_init_prep_fake, name="token_pair_init_prep")
 def token_pair_init_prep(asym: torch.Tensor, residue: torch.Tensor, token: torch.Tensor, entity: torch.Tensor, sym: torch.Tensor,
                          w_rel: torch.Tensor, w_bond: torch.Tensor) -> list[torch.Tensor]:
     """[ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32] in one launch (H100; forward-only calls: no gradient flows through it)."""

@@ -138,7 +138,7 @@ def _pair_embed_ca_fwd_fake(tbl, ca, mask, idx, dlim, eps, portable):
     return torch.empty((B, n, n, D_PAIR), dtype=torch.bfloat16, device=tbl.device)
 
 
-@opaque(fake=_pair_embed_ca_fwd_fake, name="pair_embed_ca_fwd")
+@opaque(fake=_pair_embed_ca_fwd_fake, name="pair_embed_geom_ca_fwd_only")
 def pair_embed_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, idx: torch.Tensor, dlim: torch.Tensor, eps: float,
                       portable: int) -> torch.Tensor:
     """Decoder pair [B, n, n, 256] bf16 from the table [157, 256] bf16, or LayerNorm(pair) (no affine) when ``eps`` >= 0; the backward's codes are not written."""
