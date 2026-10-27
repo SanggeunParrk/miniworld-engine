@@ -23,7 +23,10 @@ KERNELS = REPO / "src" / "miniworld_engine" / "kernels"
 PKG = "miniworld_engine.kernels"
 
 #: Shared Triton helpers outside a ``triton/`` tree.
-SHARED_TRITON_HELPERS = ("_tma.py", "_compile.py", "_tiles.py", "_dot_precision.py")
+#: ``_fastmath.py`` holds ``tl.inline_asm_elementwise("tanh.approx.f32")``: inline PTX is allowed in a Triton file when it is a card-agnostic
+#: instruction (tanh.approx.f32 exists from sm_75 on, like the adaln ``mov.b32`` ptxas workaround), not TMA / Hopper-only data movement
+#: (test_no_tma_in_triton_trees keeps that one green).
+SHARED_TRITON_HELPERS = ("_tma.py", "_compile.py", "_tiles.py", "_dot_precision.py", "_fastmath.py")
 
 #: EXPLICIT exceptions to the import rules: (path under kernels/, imported module) -> why it is not a hand-CUDA call.
 ALLOW_IMPORTS = {
