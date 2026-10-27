@@ -112,7 +112,8 @@ def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=No
     m, d = x.shape
     nd = wa.shape[0]
     ht = ht or pick_ht(m, nd, num_sms(x.device))
-    bn = bn or 128
+    if bn is None:   # output tile columns of the squeeze: a small M gives 30 tiles of 128 (5 row blocks x 6) on 132 SMs, each streaming K = 1920: 64 columns double the CTAs
+        bn = 64 if ((m + 127) // 128) * (d // 128) * 2 <= num_sms(x.device) else 128
     wab, s, g, bs = packed(wa, wb, ws, wsc, bsc, ht, x.dtype)
     x = x if x.stride(1) == 1 else x.contiguous()
     cond = cond if cond.stride(1) == 1 else cond.contiguous()
