@@ -35,6 +35,8 @@ from miniworld_engine import settings
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 
@@ -155,8 +157,8 @@ def _transition_expand_gate_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a = tl.dot(xn, wa, a, out_dtype=tl.float32)
-            b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+            a = tf32_dot(xn, wa, a, out_dtype=tl.float32)
+            b = tf32_dot(xn, wb, b, out_dtype=tl.float32)
             gate = a * tl.sigmoid(a) * b
             tl.store(
                 out_ptr + rows[:, None] * stride_om + cols[None, :] * stride_on,
@@ -205,8 +207,8 @@ def _transition_expand_gate_kernel(
                     wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                     mask=k_mask[:, None] & col_mask[None, :], other=0.0,
                 )
-                a = tl.dot(xn, wa, a, out_dtype=tl.float32)
-                b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+                a = tf32_dot(xn, wa, a, out_dtype=tl.float32)
+                b = tf32_dot(xn, wb, b, out_dtype=tl.float32)
             gate = a * tl.sigmoid(a) * b
             tl.store(
                 out_ptr + rows[:, None] * stride_om + cols[None, :] * stride_on,
@@ -433,14 +435,14 @@ def _transition_b2b_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a = tl.dot(xn, wa, out_dtype=tl.float32)
-            b = tl.dot(xn, wb, out_dtype=tl.float32)
+            a = tf32_dot(xn, wa, out_dtype=tl.float32)
+            b = tf32_dot(xn, wb, out_dtype=tl.float32)
             h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # (BM, BN)
             ws_t = tl.load(  # (BN, BD): Ws[d, cols]^T
                 ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
                 mask=col_mask[:, None] & d_mask[None, :], other=0.0,
             )
-            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+            out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32)
     else:
         if FUSE_STATS:
             # Two sweeps over K (mean, then CENTERED variance) so the fp32 algebra at BLOCK_K_D >= K is
@@ -533,14 +535,14 @@ def _transition_b2b_kernel(
                     wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                     mask=k_mask[:, None] & col_mask[None, :], other=0.0,
                 )
-                a = tl.dot(xn, wa, a, out_dtype=tl.float32)
-                b = tl.dot(xn, wb, b, out_dtype=tl.float32)
+                a = tf32_dot(xn, wa, a, out_dtype=tl.float32)
+                b = tf32_dot(xn, wb, b, out_dtype=tl.float32)
             h = (a * tl.sigmoid(a) * b).to(x_ptr.dtype.element_ty)  # (BM, BN)
             ws_t = tl.load(  # (BN, BD): Ws[d, cols]^T
                 ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
                 mask=col_mask[:, None] & d_mask[None, :], other=0.0,
             )
-            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+            out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32)
     if HAS_LN:
         # Fuse the post-transition residual add: y = transition(x) + x. HAS_LN is what says this
         # launch is the Transition op rather than the bare SwiGLU FFN, and the Transition op's
@@ -709,14 +711,14 @@ def _transition_b2b_ktiled_kernel(
                 wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                 mask=k_mask[:, None] & col_mask[None, :], other=0.0,
             )
-            a_acc = tl.dot(xn, wa, out_dtype=tl.float32)
-            b_acc = tl.dot(xn, wb, out_dtype=tl.float32)
+            a_acc = tf32_dot(xn, wa, out_dtype=tl.float32)
+            b_acc = tf32_dot(xn, wb, out_dtype=tl.float32)
             h = (a_acc * tl.sigmoid(a_acc) * b_acc).to(x_ptr.dtype.element_ty)  # (BM, BN)
             ws_t = tl.load(
                 ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
                 mask=col_mask[:, None] & d_mask[None, :], other=0.0,
             )  # (BN, BD)
-            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+            out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32)
         tl.store(
             out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
             out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None] & d_mask[None, :],
@@ -745,14 +747,14 @@ def _transition_b2b_ktiled_kernel(
                     wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                     mask=k_mask[:, None] & col_mask[None, :], other=0.0,
                 )
-                a_acc += tl.dot(xn, wa, out_dtype=tl.float32)
-                b_acc += tl.dot(xn, wb, out_dtype=tl.float32)
+                a_acc += tf32_dot(xn, wa, out_dtype=tl.float32)
+                b_acc += tf32_dot(xn, wb, out_dtype=tl.float32)
             h = (a_acc * tl.sigmoid(a_acc) * b_acc).to(x_ptr.dtype.element_ty)  # (BM, BN)
             ws_t = tl.load(
                 ws_ptr + cols[:, None] * stride_sn + dcols[None, :] * stride_sd,
                 mask=col_mask[:, None] & d_mask[None, :], other=0.0,
             )  # (BN, BD)
-            out_acc = tl.dot(h, ws_t, out_acc, out_dtype=tl.float32)
+            out_acc = tf32_dot(h, ws_t, out_acc, out_dtype=tl.float32)
         tl.store(
             out_ptr + rows[:, None] * stride_om + dcols[None, :] * stride_od,
             out_acc.to(out_ptr.dtype.element_ty), mask=row_mask[:, None] & d_mask[None, :],
@@ -962,8 +964,8 @@ def _transition_expand_gatebwd_kernel(
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
         wb = tl.load(wb_ptr + k[:, None] * stride_bk + cols[None, :] * stride_bn,
                      mask=k_mask[:, None] & cmask[None, :], other=0.0)
-        a += tl.dot(xn, wa, out_dtype=tl.float32, input_precision=PREC)
-        b += tl.dot(xn, wb, out_dtype=tl.float32, input_precision=PREC)
+        a += tf32_dot(xn, wa, out_dtype=tl.float32, input_precision=PREC)
+        b += tf32_dot(xn, wb, out_dtype=tl.float32, input_precision=PREC)
     sig = tl.sigmoid(a)
     silu = a * sig
     goff = rows[:, None] * stride_gm + cols[None, :] * stride_gn

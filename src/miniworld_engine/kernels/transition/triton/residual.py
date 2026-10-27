@@ -3,6 +3,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
+
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import both_key, pack, rows_of
 from miniworld_engine.kernels._compile import opaque
@@ -26,6 +28,7 @@ def _squeeze_residual_kernel(
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
     BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
     NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
+    PRE_H: tl.constexpr = False, PRE_W: tl.constexpr = False,
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
     n_n = tl.cdiv(N, BLOCK_N)
@@ -41,7 +44,7 @@ def _squeeze_residual_kernel(
             for k0 in range(0, K, BLOCK_K):
                 h = h_desc.load([pm * BLOCK_M1, k0])
                 w = w_desc.load([pn * BLOCK_N, k0])
-                acc = tl.dot(h, w.T, acc, input_precision=PREC)
+                acc = tf32_dot(h, w.T, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
             residual = r_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
             # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
             y = acc.to(Y.dtype.element_ty).to(tl.float32) + residual
@@ -58,7 +61,7 @@ def _squeeze_residual_kernel(
                         mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
             w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
                         mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
-            acc = tl.dot(h, w, acc, input_precision=PREC)
+            acc = tf32_dot(h, w, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
         mask = (m[:, None] < M) & (n[None, :] < N)
         residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
         # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
@@ -66,15 +69,16 @@ def _squeeze_residual_kernel(
         tl.store(Y + m[:, None] * N + n[None, :], y, mask=mask)
 
 
-def _squeeze_residual_fake(h, weight, residual, shape_key):
+def _squeeze_residual_fake(h, weight, residual, shape_key, h_rounded=False):
     """Return the residual-shaped output metadata."""
     return residual.new_empty(residual.shape)
 
 
 @opaque(fake=_squeeze_residual_fake, name="transition_squeeze_residual")
 def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tensor,
-                     shape_key: int) -> torch.Tensor:
-    """Project the hidden state and add the residual in one Triton launch."""
+                     shape_key: int, h_rounded: bool = False) -> torch.Tensor:
+    """Project the hidden state and add the residual in one Triton launch. ``h_rounded``: fp32 ``h`` is already on the TF32 grid (the
+    expand kernel stores it so); otherwise it is rounded here."""
     m, k = h.shape
     n = weight.shape[0]
     if weight.shape[1] != k or residual.shape != (m, n):
@@ -82,6 +86,12 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
     if h.dtype != weight.dtype or residual.dtype != h.dtype:
         raise ValueError("squeeze/residual operands must share dtype")
     out = residual.new_empty((m, n))
+    prec = dot_precision(h.dtype)
+    pre = prec == "tf32" and h.dtype is torch.float32
+    if pre:
+        weight = tf32_cached((weight,), lambda: tf32_grid_many(weight))[0]
+        if not h_rounded:
+            h = tf32_grid_many(h)[0]
     use_tma = tma_ok(h, weight, residual, out)
     if use_tma:
         sms = num_sms(h.device)
@@ -92,7 +102,8 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
     _squeeze_residual_kernel[grid](
         h, weight, residual, out, m, n, k,
         *h.stride(), *weight.stride(), *residual.stride(),
-        shape_key=pack(shape_key, K=k, N=n), USE_TMA=use_tma, NUM_SMS=sms, PREC=dot_precision(h.dtype),
+        shape_key=pack(shape_key, K=k, N=n), USE_TMA=use_tma, NUM_SMS=sms, PREC=prec,
+        PRE_H=pre, PRE_W=pre,
     )
     return out
 
@@ -111,7 +122,7 @@ class ResidualTransitionFunction(torch.autograd.Function):
             ctx.save_for_backward()
         ctx.shape = shape
         ctx.key = key
-        return squeeze_residual(h, ws, residual.reshape(-1, shape[-1]), key).reshape(shape)
+        return squeeze_residual(h, ws, residual.reshape(-1, shape[-1]), key, True).reshape(shape)
 
     @staticmethod
     def backward(ctx, dy):

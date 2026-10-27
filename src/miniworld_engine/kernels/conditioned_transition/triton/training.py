@@ -34,6 +34,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot, tf32_grid_many
+
 from miniworld_engine.kernels._tiles import check_tile_axes, tile_grid, tile_order
 from miniworld_engine.kernels._tma import tma_launchable
 from miniworld_engine.kernels._tma import ensure_allocator, num_sms, prune_tma
@@ -212,7 +214,7 @@ def _dh_swiglu_bwd_kernel(
     sdo0, sw0, sa0, sp0,
     BLOCK_M: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr, shape_key,
-    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0,
+    TMA: tl.constexpr = 0, NUM_SMS: tl.constexpr = 0, PRE: tl.constexpr = False,
 ):
     """dab = [da | db] from (dout, ws, a, b), with dh = dout @ ws never reaching HBM.
 
@@ -241,7 +243,7 @@ def _dh_swiglu_bwd_kernel(
             on = pid_n * BLOCK_N
             acc = tl.zeros((BLOCK_M, BLOCK_N), tl.float32)
             for k in range(0, D, BLOCK_K):
-                acc = tl.dot(do_d.load([om, k]), w_d.load([k, on]), acc)
+                acc = tf32_dot(do_d.load([om, k]), w_d.load([k, on]), acc, pre_b=PRE)
             if EPI == 1:
                 a = a_d.load([om, on]).to(tl.float32)
                 b = b_d.load([om, on]).to(tl.float32)
@@ -276,7 +278,7 @@ def _dh_swiglu_bwd_kernel(
                          mask=rmask[:, None] & kmask[None, :], other=0.0)
             w = tl.load(Ws + kc[:, None] * sw0 + cols[None, :],
                         mask=kmask[:, None] & nmask[None, :], other=0.0)
-            dh += tl.dot(do, w, out_dtype=tl.float32)
+            dh += tf32_dot(do, w, out_dtype=tl.float32, pre_b=PRE)
 
         m = rmask[:, None] & nmask[None, :]
         off = rows[:, None] * sa0 + cols[None, :]
@@ -309,6 +311,9 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
             "(M, D) matrix, and M alone cannot say whether it is L or L*L. Compute the key "
             "at the caller that still holds the pre-flatten shape and pass it down."
         )
+    pre = dout.dtype is torch.float32     # the weight is rounded to nearest here (kernels/_tf32.py); the gradient in the kernel
+    if pre:
+        ws = tf32_grid_many(ws)[0]
     dab = torch.empty(M, 2 * ND, device=a.device, dtype=a.dtype)
     sms = num_sms(a.device.index or 0)
     ensure_allocator()
@@ -318,7 +323,7 @@ def _dh_swiglu_bwd(dout: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: tor
     _dh_swiglu_bwd_kernel[grid](
         dout, ws, a, b, dab, M, int(ND), int(D),
         dout.stride(0), ws.stride(0), a.stride(0), dab.stride(0),
-        shape_key=pack(shape_key, ND=ND, D=D), NUM_SMS=sms,
+        shape_key=pack(shape_key, ND=ND, D=D), NUM_SMS=sms, PRE=pre,
     )
     return dab
 
@@ -411,6 +416,7 @@ def _b2b_fwd_train_kernel(
     BLOCK_K_D: tl.constexpr, BLOCK_N: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    PRE: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. This is the b2b, so ND is looped INSIDE the
     # program and every program reads the whole of Wa and Wb -- the weights are what gets re-read
@@ -440,8 +446,8 @@ def _b2b_fwd_train_kernel(
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
             wb = tl.load(wb_ptr + k[:, None] * stride_wk + cols[None, :] * stride_wn,
                          mask=k_mask[:, None] & col_mask[None, :], other=0.0)
-            a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-            b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+            a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
+            b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         # Preserve the fp32 SwiGLU value through the squeeze. Rounding it to a
         # single bf16 operand adds an avoidable error before the final y cast.
         # Two bf16 components retain the residual while using bf16 tensor cores;
@@ -452,8 +458,8 @@ def _b2b_fwd_train_kernel(
                        mask=col_mask[:, None] & d_mask[None, :], other=0.0)
         if x_ptr.dtype.element_ty == tl.bfloat16:
             h_low = (h_full - h.to(tl.float32)).to(tl.bfloat16)
-            out_acc += tl.dot(h_low, ws_t, out_dtype=tl.float32)
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+            out_acc += tf32_dot(h_low, ws_t, out_dtype=tl.float32)
+        out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
         # emit saved tensors for backward (write the chunk as we go). Only the pid_d==0 column
         # of programs writes them: a/b/h do not depend on the d tile, so every other d program
         # would re-store identical bytes. Folded into the store MASK rather than an `if`, so
@@ -470,7 +476,7 @@ def _b2b_fwd_train_kernel(
                        mask=row_mask[:, None] & dc_mask[None, :], other=0.0)
         wsc_t = tl.load(wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
                         mask=dc_mask[:, None] & d_mask[None, :], other=0.0)
-        scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+        scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
@@ -514,6 +520,9 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
     out = torch.empty(M, D, device=x.device, dtype=x.dtype)
     scale = torch.empty(M, D, device=x.device, dtype=x.dtype)
+    pre = x.dtype is torch.float32
+    if pre:
+        wa, wb, ws, wsc = tf32_grid_many(wa, wb, ws, wsc)
     check_tile_axes("cond_transition_fwd_b2b_saveact_triton", D, K, "D (ws rows)", "K (x columns)")
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _b2b_fwd_train_kernel[grid](
@@ -523,7 +532,7 @@ def _b2b_fwd_train(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: to
         wsc.stride(0), wsc.stride(1),
         y.stride(0), y.stride(1), ab.stride(0), ab.stride(1), h.stride(0), h.stride(1),
         out.stride(0), out.stride(1), scale.stride(0), scale.stride(1),
-        shape_key=pack(shape_key, ND=ND, K=K, DC=DC),
+        shape_key=pack(shape_key, ND=ND, K=K, DC=DC), PRE=pre,
     )
     return y, ab, h, out, scale
 

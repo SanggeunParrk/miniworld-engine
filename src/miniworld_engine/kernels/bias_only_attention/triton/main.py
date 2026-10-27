@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from einops import rearrange, reduce, repeat
 from jaxtyping import Float
 
@@ -61,7 +63,7 @@ def _attn_fwd_inner(
         alpha = tl.maximum(alpha, 0.0)
         l_i = l_i * alpha + l_ij
         acc = acc * alpha[:, None]
-        acc = tl.dot(p.to(v.dtype), v, acc)
+        acc = tf32_dot(p.to(v.dtype), v, acc)
         m_i = m_ij
         b_ptr += BLOCK_M2 * stride_bn
         v_ptr += BLOCK_M2 * stride_vn
@@ -260,9 +262,9 @@ def _attn_bwd_dvdbias(
 
         pT = tl.math.exp2(logitsT)
         pT = tl.maximum(pT, 0.0)
-        dpT = tl.dot(v, tl.trans(do))
+        dpT = tf32_dot(v, tl.trans(do))
         dsT = pT * (dpT - Di[None, :])
-        dv = tl.dot(pT.to(do.dtype), do, dv)
+        dv = tf32_dot(pT.to(do.dtype), do, dv)
 
         tl.store(
             dbiasT_ptrs + offs_m[None, :] * stride_bm,

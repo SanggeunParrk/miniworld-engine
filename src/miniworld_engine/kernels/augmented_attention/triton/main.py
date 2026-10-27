@@ -7,6 +7,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from jaxtyping import Bool, Float
 
 from miniworld_engine.autotune.shape_key import atom_key, pack
@@ -87,7 +89,7 @@ def _attn_fwd_inner(
         k = tl.load(k_ptr, mask=k_mask, other=0.0)
         v = tl.load(v_ptr, mask=v_mask, other=0.0)
 
-        qk = tl.dot(q, k) + bias_val / (qk_scale / 1.44269504)
+        qk = tf32_dot(q, k) + bias_val / (qk_scale / 1.44269504)
         m_ij = tl.maximum(m_i, tl.max(qk, 1) * qk_scale)
         m_ij = tl.maximum(m_ij, -1e38)
         qk = qk * qk_scale - m_ij[:, None]
@@ -97,7 +99,7 @@ def _attn_fwd_inner(
         alpha = tl.math.exp2(m_i - m_ij)
         l_i = l_i * alpha + l_ij
         acc = acc * alpha[:, None]
-        acc = tl.dot(p.to(v.dtype), v, acc)
+        acc = tf32_dot(p.to(v.dtype), v, acc)
 
         m_i = m_ij
         b_ptr += BLOCK_M2 * stride_bn
@@ -345,26 +347,26 @@ def _attn_bwd_dqdkdv(
         m = tl.load(m_ptrs, mask=offs_m < N_QUERY, other=0.0)
         Di = tl.load(d_ptrs, mask=offs_m < N_QUERY, other=0.0)
 
-        qkT = tl.dot(k, qT) + biasT / (qk_scale / 1.44269504)
+        qkT = tf32_dot(k, qT) + biasT / (qk_scale / 1.44269504)
         m_safe = tl.maximum(m, -1e38)
         qkT = qkT * qk_scale - m_safe[None, :]
 
         pT = tl.math.exp2(qkT)
-        dv = tl.dot(pT.to(do.dtype), do, dv)
+        dv = tf32_dot(pT.to(do.dtype), do, dv)
 
-        dpT = tl.dot(v, tl.trans(do))
+        dpT = tf32_dot(v, tl.trans(do))
         dsT = pT * (dpT - Di[None, :])
 
         tl.store(dbiasT_ptrs, dsT, mask=bias_mask)
 
         dsT = dsT.to(qT.dtype)
-        dk = tl.dot(dsT, tl.trans(qT), dk)
+        dk = tf32_dot(dsT, tl.trans(qT), dk)
 
         # store, not atomic_add: each split writes its own slot.
         # Form dQ in query-major order, then transpose for the strided store.
         # The equivalent K.T @ dS.T layout produces an invalid shared-memory
         # WGMMA descriptor for BF16 padded heads with Triton 3.6 / ptxas 12.8.
-        dqT_to_add = tl.trans(tl.dot(tl.trans(dsT), k)) * (qk_scale / 1.44269504)
+        dqT_to_add = tl.trans(tf32_dot(tl.trans(dsT), k)) * (qk_scale / 1.44269504)
         tl.store(dqT_ptrs, dqT_to_add, mask=qT_mask)
 
         qT_ptrs += BLOCK_M1 * stride_tok
