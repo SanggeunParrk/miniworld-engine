@@ -519,6 +519,10 @@ class Settings:
     #: "cublas": the v0 core (batched cuBLAS GEMMs over (head, sample) + torch elementwise ops, P stored). Read per call; same
     #: numbers within rounding, the others kept for A/B. fp32 always takes the cuBLAS core.
     bias_only_dit_psb_core: str = "recompute"
+    #: The bias-only DiT inference step on a pair bias of its own per sample (`integrations/bias_only_dit.serves_psb`, H100, bf16 and
+    #: fp32): `FusedBiasOnlyDiT.step_psb` (the 12-launch step with `psb_fwd` / `psb32_fwd` as the attention core) behind a one-pass
+    #: pair LayerNorm + bias projection; off keeps the module's composition. Read per call.
+    bias_only_dit_psb_infer: bool = True
     #: The hoisted pair bias's backward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 in bf16 (`bo_hoist_bwd.cu`: d LN0, the
     #: LayerNorm backward and dW' in one pass over the pair); False keeps the two cuBLAS GEMMs around `ln0_bwd_rows`. Read per call.
     bias_only_dit_hoist_bwd_fused: bool = True

@@ -714,7 +714,7 @@ class FusedBiasOnlyDiT:
             xin = y
         return out.view(S, 1, L, D)
 
-    def _step(self, single, cond, P, out_dtype=None):
+    def _step(self, single, cond, P, out_dtype=None, psb=None):
         S, B, L, D = single.shape
         assert B == 1 and L % 128 == 0 and D == self.d
         M, nb = S * L, self.nb
@@ -744,11 +744,41 @@ class FusedBiasOnlyDiT:
                 g2 = torch.addmm(self.b2, c, self.w2.t()).view(T, nb, 2, D)
         out = torch.empty(M, D, device=dev, dtype=out_dtype or single.dtype)
         self._run(
-            single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None
+            single.reshape(M, D), g1, g2, P, out, S, L, presig=cond_op is not None, psb=psb
         )
         return out.view(S, 1, L, D)
 
-    def _run(self, single, g1, g2, P, out, S, L, presig=False):
+    def step_psb(self, single, cond, bias, mask=None, out_dtype=None):
+        """The step on a pair bias of its own per sample (one hoisted block): single [S, 1, L, D], cond [S, 1, L, dc] (a conditioning
+        per sample), ``bias`` [H S L, L] (head-major [H, S, L, L], natural logits, in the step's dtype), ``mask`` bool [L] or [S, L] or
+        None. The attention core is ``psb_fwd`` (bf16) / ``psb32_fwd`` (fp32, TF32 mma): softmax(bias + key mask) and the gated
+        P v in one pass, per (head, sample); everything around it is the 12-launch step."""
+        if self.fp32:
+            with _tf32().tf32_gemms():
+                return self._step(single, cond, None, out_dtype, psb=(bias, mask))
+        return self._step(single, cond, None, out_dtype, psb=(bias, mask))
+
+    def _psb_core(self, bias, mask, vg, a, S, L):
+        """a = sigmoid(g) softmax(bias + mask) v per (head, sample): vg [S L, 2 DA] (v | g), a [S L, DA]."""
+        H, DA = self.h, self.da
+        dh = DA // H
+        from miniworld_engine.kernels.bias_only_dit.cuda import psb_inf
+
+        stats = None if (self.fp32 and psb_inf.psb32i_served(L, dh)) else torch.empty(H * S * L, 2, device=vg.device, dtype=torch.float32)  # (max, 1 / sum) per row: unused here
+        if not self.fp32:
+            C.psb_fwd(bias, None, mask, vg, a, S, H, dh, stats=stats)
+        elif psb_inf.psb32i_served(L, dh):  # the inference core (no statistics, deeper prefetch, all warps in the product)
+            psb_inf.psb32i_fwd(bias, mask, vg, a, S, H, dh)
+        elif L <= C.PSB32_MAX_L:
+            C.psb32_fwd(bias, stats, mask, vg, a, S, H, dh)
+        else:  # fp32 beyond the TF32 core's resident-v length: P per (head, sample) by the softmax rows, then one batched GEMM
+            from miniworld_engine.integrations.bias_only_dit_train import _psb_fwd_core
+
+            P = torch.empty(H, S, L, L, device=vg.device, dtype=torch.float32)
+            _tf32().rows32().softmax_t_cuda(bias, P.view(H * S * L, L), None, mask, S)
+            a.copy_(_psb_fwd_core(vg, P, S, L, H, DA))
+
+    def _run(self, single, g1, g2, P, out, S, L, presig=False, psb=None):
         """The blocks for S samples: single, out [S L, D]; g1, g2 the conditioning tables (row period T = their rows);
         ``presig``: their scale and gate tables already hold the sigmoids."""
         H, T, DA = self.h, g1.shape[0], self.da
@@ -757,7 +787,7 @@ class FusedBiasOnlyDiT:
         x, xa, vg, a, y, ab, h = (
             buf[k] for k in ("x", "xa", "vg", "a", "y", "ab", "h")
         )
-        core, gsw = self._core(dev), self._gemm_swiglu(dev, xa)
+        core, gsw = (None if psb is not None else self._core(dev)), self._gemm_swiglu(dev, xa)
         resln, resln_final = (
             self._resln(dev, False, presig),
             self._resln(dev, True, presig),
@@ -768,13 +798,16 @@ class FusedBiasOnlyDiT:
         nocopy = hopper and _H100_NOCOPY and resln is None
         C.adaln_in_rows(single, x[:0] if nocopy else x, g1[:, 0, 0], g1[:, 0, 1], xa, T, EPS, ps)
         sqro = hopper and _H100_SQ_RESOUT and resln is None and not ps and not self.fp32
-        h100_tf32 = self.fp32 and hopper
+        h100_tf32 = self.fp32 and hopper and psb is None
         for b, p in enumerate(self.per):
             if h100_tf32:
                 # TF32 wgmma reads K-major operands only: v^T = Wv xa^T from cuBLAS, g = xa Wg^T beside it
                 torch.mm(p["wvg"][:DA], xa.t(), out=buf["vt"])
                 torch.mm(xa, p["wvg"][DA:].t(), out=buf["gg"])
                 core(buf["vt"], P[b * H : (b + 1) * H].view(H * L, L), a, S, g=buf["gg"])
+            elif psb is not None:
+                torch.mm(xa, p["wvg"].t(), out=vg)
+                self._psb_core(psb[0], psb[1], vg, a, S, L)  # sigmoid(g) * (softmax(bias_s) v) per sample
             else:
                 torch.mm(xa, p["wvg"].t(), out=vg)
                 core(

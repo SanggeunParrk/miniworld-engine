@@ -17,7 +17,7 @@ the per-sample attention is a GEMM per head (`P_h [L, L] x v_h [L, 48]`) with th
 ## Scope and dispatch
 
 Hand-written CUDA and cuBLAS only (no Triton), bf16 and fp32 (TF32 tensor cores, fp32 softmax / norm statistics / residual),
-16 x 48 heads, B == 1, L a multiple of 128 up to 3072 (inference: the sampler's token rungs reach 2560) or 768 (training), a key mask
+16 x 48 heads, B == 1 (a pair of its own per sample, B > 1: [below](#per-sample-pair-bias-inference-2026-10-27)), L a multiple of 128 up to 3072 (inference: the sampler's token rungs reach 2560) or 768 (training), a key mask
 [1, L] or none. Everything else keeps the module's PyTorch composition. `settings.bias_only_dit_h100` (default on) switches the Hopper paths.
 
 - **Inference** (`integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`): one conditioning
@@ -141,7 +141,7 @@ does not lower the per-SM intake that bounds `dpb2`).
 `block(single [1, A, L, d], cond, pair [A, L, L, 128])` (A > 1) or `bias=` [A, H, L, L]: every sample attends with its own
 `softmax(bias_a)`, so nothing is shared across the samples (`pvx` / `dpb2` assume one P per block and are not used). Served by
 `bias_only_dit_train.block_psb` (bf16 and fp32/TF32, H100, L a multiple of 128 up to 768, key mask [1, L] or [A, L], every head layout);
-other calls keep the module's PyTorch composition. The inference runner is unchanged.
+other calls keep the module's PyTorch composition. The inference side of the same call (no gradient) has its own path, [below](#per-sample-pair-bias-inference-2026-10-27).
 
 **Layout.** Bias, P and dbias are head-major `[H, A, L, L]`, natural logits (the token DiT's `pair_biases` uses the same layout but
 log2 units). `pair_bias_all(blocks, pair)` with `pair` [A, L, L, 128] returns `[A, H, L, L]` permuted views of one head-major buffer per
@@ -159,6 +159,32 @@ Numbers, memory, ncu and the rejected list: [h100_bias_only_dit_per_aug_bias_202
 (bf16 A = 48, L 384, 12 blocks: PyTorch compiled 102.1 ms, v1 36.9 ms; fp32 106.0 vs 82.7 ms). The attention kernels reach 34 % (forward) and
 58 % (backward) of DRAM peak, the fused hoist backward 32 %: not SoL90. Tests: `tests/gpu/sm90/test_bias_only_dit_psb_gpu.py`.
 The conditioning width is read off the block's weights; the training row kernels (cond LayerNorm and its backward, unfold, finalize) are templated on it and serve 384 and 768 on H100 (`KERNEL_D_CONDS`), another width keeps the PyTorch composition.
+
+## Per-sample pair bias, inference (2026-10-27)
+
+`block(single [1, B, L, d], cond [1, B, L, 384], pair [B, L, L, 128])` or `bias=` [B, H, L, L] (B > 1, no gradient): before this a per-sample pair
+ran the PyTorch reference on H100. Now served by `integrations/bias_only_dit.serves_psb` / `update_psb` (bf16, and fp32 on TF32; H100; L a
+multiple of 128 up to 768; key mask [1, L] or [B, L]; every head layout; `settings.bias_only_dit_psb_infer`, default on). Full numbers and
+the rejected list: [h100_bodit_psb_inference_20261027.md](../../../records/h100_bodit_psb_inference_20261027.md).
+
+| step | kernel | note |
+|---|---|---|
+| pair LayerNorm + bias | `pair_bias_k` (bf16) / `pair_bias_tc_k` (fp32, TF32 mma) of the training rows, via `bias_only_dit_hoist._hoist_fwd_infer` | ONE pass over the pair, LN on chip, bias written head-major `[H, B, L, L]` (12 / 16 / 24 weight rows, one block; more rows keep LN0 + cuBLAS). The pair is read once: 268 MB at B = 4, L = 512 bf16 in 108 us (floor 89), fp32 536 MB in 208 us (floor 179); LN0 + GEMM took 300 / 562 us |
+| conditioning, AdaLN, v / g, out, expand + SwiGLU, squeeze, residuals | the 12-launch step of `FusedBiasOnlyDiT._run` (`step_psb`) | the B = 1 inference step with a conditioning per sample (rows = B L); nothing is cached across samples |
+| attention core bf16 | `bo_psb.cu` `psb_fwd` | softmax(bias + key mask) and the gated P v in one pass per (head, sample), P never stored |
+| attention core fp32 | `bo_psb32_inf.cu` `psb32i_fwd` (`psb_inf.py`) | `bo_psb32.cu`'s forward without statistics: a 2-3-deep ring of bias tiles, all eight warps in P v (4 key quarters x 2 column halves, fixed-order sum), the gate loaded before the softmax; L <= 512, widths 32 / 48. 99 -> 58 us at B = 4, L = 512; longer L takes the batched-GEMM core |
+
+A pair-fed call (`pair=`, no hoisted bias) runs in chunks of `chunk_samples` samples whose bias stays within `PSB_CHUNK_BYTES` (2 GiB), so a large B
+is split deterministically instead of materialising the whole `[H, B, L, L]` bias. Accuracy: against the fp32-IEEE module < 8e-3 (bf16) /
+2.5e-3 (fp32), against the same samples one at a time (the shared-P path) < 4e-3 / 1.25e-3, bitwise repeatable;
+`tests/gpu/sm90/test_bias_only_dit_psb_infer_gpu.py` (40 tests).
+
+| (rows, B = 4, ms, CUDA-graph, compiled) | L | CUDA | portable | PyTorch | CUDA / portable |
+|---|---|---|---|---|---|
+| inference bf16 | 256 | 0.108 | 0.133 | 0.217 | 0.81 |
+| inference bf16 | 512 | 0.249 | 0.286 | 0.510 | 0.87 |
+| inference fp32 | 256 | 0.196 | 0.218 | 0.340 | 0.90 |
+| inference fp32 | 512 | 0.448 | 0.510 | 0.892 | 0.88 |
 
 ## What was tried and not kept
 

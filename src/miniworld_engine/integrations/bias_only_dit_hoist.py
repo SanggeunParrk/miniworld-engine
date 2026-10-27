@@ -282,6 +282,42 @@ def pair_bias_all(attns, pair) -> tuple[torch.Tensor, ...]:
     return tuple(outs)
 
 
+def _infer_fake(pair2d, wf, eps):
+    return pair2d.new_empty((wf.shape[0], pair2d.shape[0]))
+
+
+@opaque(fake=_infer_fake, name="bias_only_dit_hoist_fwd_infer")
+def _hoist_fwd_infer(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tensor:
+    """``_hoist_fwd`` for a call with no gradient (inference): bias_all^T [N, R] head-major in the pair's dtype. For 12, 16 or 24 weight
+    rows (one block's heads) ONE pass over the pair: the LayerNorm stays on chip and the projection runs on the tensor cores
+    (``pair_bias_k`` bf16, ``pair_bias_tc_k`` fp32 on TF32), so the pair (268 MB at A = 4, L = 512, bf16) is read once and never written
+    back as LN0 -- ``_hoist_fwd`` writes LN0 and reads it again for a GEMM (3 passes). More rows: ``_hoist_fwd``."""
+    n, r = wf.shape[0], pair2d.shape[0]
+    f32 = pair2d.dtype is F32
+    if n not in (12, 16, 24) or r % 128:
+        return _hoist_fwd(pair2d, wf, eps)
+    bias = torch.empty(n, r, device=pair2d.device, dtype=pair2d.dtype)
+    pst = torch.empty(r, 2, device=pair2d.device, dtype=F32)  # the row statistics: only the backward reads them
+    if f32:
+        from miniworld_engine.kernels.bias_only_dit.cuda import tf32
+
+        tf32.rows32().pair_bias_tc_cuda(pair2d, wf, bias, pst, eps, 3 if settings.current().bias_only_dit_pair_exact else 1)
+    else:
+        from miniworld_engine.kernels.bias_only_dit.cuda.train import ext
+
+        ext().pair_bias_cuda(pair2d, wf, bias, pst, eps)
+    return bias
+
+
+def pair_bias_all_infer(attns, pair) -> tuple[torch.Tensor, ...]:
+    """``pair_bias_all_psb`` without a gradient: each block's bias [A, H, L, L] (the permuted view of one head-major [H, A, L, L] slice of
+    ONE buffer), from one pass over the pair for a single block (``_hoist_fwd_infer``). Call ``serves(..., per_sample=True)`` first."""
+    nb, H, A, L = len(attns), attns[0].to_bias.weight.shape[0], pair.shape[0], pair.shape[1]
+    _, _, wf = _fold([p for a in attns for p in (a.ln_pair.weight, a.to_bias.weight)], pair.dtype)
+    ball = _hoist_fwd_infer(pair.contiguous().view(A * L * L, DP), wf, float(attns[0].ln_pair.eps))
+    return tuple(ball[i * H : (i + 1) * H].view(H, A, L, L).permute(1, 0, 2, 3) for i in range(nb))
+
+
 def pair_bias_all_psb(attns, pair) -> tuple[torch.Tensor, ...]:
     """Each attention module's bias [A, H, L, L] for a pair of its own per sample ``pair`` [A, L, L, 128] (A > 1): the ``[A, H, L, L]``
     view of block b's head-major [H, A, L, L] slice of ONE buffer (one LayerNorm pass and one GEMM for every block); differentiable in
@@ -299,4 +335,4 @@ def pair_bias_all_psb(attns, pair) -> tuple[torch.Tensor, ...]:
     return tuple(res)
 
 
-__all__ = ["SINK_ATTR", "pair_bias_all", "pair_bias_all_psb", "serves"]
+__all__ = ["SINK_ATTR", "pair_bias_all", "pair_bias_all_infer", "pair_bias_all_psb", "serves"]

@@ -22,6 +22,8 @@ import torch
 import torch.nn.functional as F
 
 from miniworld_engine.integrations import bias_only_dit_hoist as _fused
+from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import pair_bias_logits as _pair_bias_logits
+from miniworld_engine.kernels.bias_only_attention.triton.pair_bias import supported as _pair_bias_supported
 from miniworld_engine.modules.exceptions import ImplementationType
 
 
@@ -37,6 +39,17 @@ def _reference(attns, pair, eps):
     wf = torch.cat([a.to_bias.weight * a.ln_pair.weight.to(a.to_bias.weight.dtype)[None, :] for a in attns], 0)   # [N, dp]
     b = torch.matmul(ln0, wf.t().to(ln0.dtype))                                                                   # [B, L, L, N]
     return tuple(b[..., i * H:(i + 1) * H].permute(0, 3, 1, 2) for i in range(len(attns)))
+
+
+def _portable(attns, pair, eps):
+    """The portable family's one-pass LayerNorm + projection (``kernels.bias_only_attention.triton.pair_bias``) over the stacked folded weights
+    W'_all = [W_b diag(gamma_b)]: the pair is read once (forward) and once (backward) however many blocks there are, instead of a LayerNorm
+    that reads and writes it and a GEMM that reads it again. The fold is differentiable in autograd, so the weight gradients need no code here."""
+    H = attns[0].to_bias.weight.shape[0]
+    w_all = torch.cat([a.to_bias.weight.float() * a.ln_pair.weight.float()[None, :] for a in attns], 0)       # [N, dp]
+    ones = torch.ones(pair.shape[-1], device=pair.device, dtype=w_all.dtype)
+    logits = _pair_bias_logits(pair, ones, w_all, eps)                                                          # [B, N, L, L], head-major
+    return tuple(logits.unflatten(1, (len(attns), H)).unbind(1))
 
 
 def pair_bias_all(blocks, pair: torch.Tensor, *, implementation: ImplementationType | None = None) -> tuple[torch.Tensor, ...]:
@@ -59,7 +72,11 @@ def pair_bias_all(blocks, pair: torch.Tensor, *, implementation: ImplementationT
     if _fused.serves(ImplementationType(impl), attns, pair):
         return _fused.pair_bias_all(attns, pair)
     if _fused.serves(ImplementationType(impl), attns, pair, per_sample=True):  # a pair per sample: head-major buffers viewed [B, H, L, L]
+        if not torch.is_grad_enabled():  # inference: one pass over the pair per block (LayerNorm on chip), no autograd node
+            return _fused.pair_bias_all_infer(attns, pair)
         return _fused.pair_bias_all_psb(attns, pair)
+    if impl == ImplementationType.MINIWORLD and pair.ndim == 4 and _pair_bias_supported(pair, len(attns) * H):
+        return _portable(attns, pair, eps)
     return _reference(attns, pair, eps)
 
 
