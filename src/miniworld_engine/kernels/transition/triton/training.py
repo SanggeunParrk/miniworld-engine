@@ -24,101 +24,58 @@ from miniworld_engine.autotune.shape_key import pack
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
-from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
 
-
-@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "USE_TMA", "SAVED", "HALF"])
+@triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "SAVED", "HALF"])
 @triton.jit
 def _squeeze_swiglu_bwd_kernel(
     X, Wab, G, W, H, DAB, SA, SB, SCALE, M, ND: tl.constexpr, K: tl.constexpr,
     sxm, swabn, sgm, swk, swn, shm, sdm, ssm,
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
     SAVED: tl.constexpr = False, HALF: tl.constexpr = False,
-    NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
+    PREC: tl.constexpr = "ieee",
     PRE: tl.constexpr = False,
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
     n_n = tl.cdiv(ND, BLOCK_N)
     et = DAB.dtype.element_ty
-    if USE_TMA:
-        # Hopper, aligned operands (see _tma.py): tensor-map loads and stores, one persistent program per SM.
-        # dA and dB are two maps over the two halves of dAB, each clipped at ND, so a ragged last tile of dA
-        # cannot spill into dB.
-        x_desc = tl.make_tensor_descriptor(X, [M, K], [sxm, 1], [BLOCK_M1, BLOCK_K])
-        w_desc = tl.make_tensor_descriptor(Wab, [2 * ND, K], [swabn, 1], [2 * BLOCK_N, BLOCK_K])
-        g_desc = tl.make_tensor_descriptor(G, [M, K], [sgm, 1], [BLOCK_M1, BLOCK_K])
-        s_desc = tl.make_tensor_descriptor(W, [K, ND], [swk, 1], [BLOCK_K, BLOCK_N])
-        h_desc = tl.make_tensor_descriptor(H, [M, ND], [shm, 1], [BLOCK_M1, BLOCK_N])
-        da_desc = tl.make_tensor_descriptor(DAB, [M, ND], [sdm, 1], [BLOCK_M1, BLOCK_N])
-        db_desc = tl.make_tensor_descriptor(DAB + ND, [M, ND], [sdm, 1], [BLOCK_M1, BLOCK_N])
-        sa_desc = tl.make_tensor_descriptor(SA, [M, ND], [ssm, 1], [BLOCK_M1, BLOCK_N])
-        sb_desc = tl.make_tensor_descriptor(SB, [M, ND], [ssm, 1], [BLOCK_M1, BLOCK_N])
-        for tile in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True):
-            pm, pn = tile_order(tile, n_m, n_n, GROUP_M)
-            acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
-            acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-            for k0 in range(0, K, BLOCK_K):
-                g = g_desc.load([pm * BLOCK_M1, k0])
-                s = s_desc.load([k0, pn * BLOCK_N])
-                acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
-                if not SAVED:
-                    x = x_desc.load([pm * BLOCK_M1, k0])
-                    w = w_desc.load([pn * (2 * BLOCK_N), k0])
-                    acc = tf32_dot(x, w.T, acc, input_precision=PREC, pre_b=PRE)
-            if SAVED:
-                a = sa_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
-                b = sb_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
-                if HALF:        # saved in fp16, divided by the forward's scale
-                    a = a * tl.load(SCALE)
-                    b = b * tl.load(SCALE)
-            else:
-                a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
-            dh = acc_dh.to(et).to(tl.float32)
-            sig = tl.sigmoid(a)
-            silu = a * sig
-            if not SAVED:
-                h_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (silu * b).to(et))
-            da_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (dh * b * (sig + silu * (1.0 - sig))).to(et))
-            db_desc.store([pm * BLOCK_M1, pn * BLOCK_N], (dh * silu).to(et))
-    else:
-        pm, pn = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
-        rows = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        cols = pn * BLOCK_N + tl.arange(0, BLOCK_N)
-        wrows = pn * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)
-        ks = tl.arange(0, BLOCK_K)
-        acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
-        acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-        for k0 in range(tl.cdiv(K, BLOCK_K)):
-            kk = k0 * BLOCK_K + ks
-            g = tl.load(G + rows[:, None] * sgm + kk[None, :],
-                        mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
-            s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
-                        mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
-            acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
-            if not SAVED:
-                x = tl.load(X + rows[:, None] * sxm + kk[None, :],
-                            mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
-                w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
-                            mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
-                acc = tf32_dot(x, w, acc, input_precision=PREC, pre_b=PRE)
-        mask = (rows[:, None] < M) & (cols[None, :] < ND)
-        if SAVED:
-            a = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
-            b = tl.load(SB + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
-            if HALF:
-                a = a * tl.load(SCALE)
-                b = b * tl.load(SCALE)
-        else:
-            a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
-        dh = acc_dh.to(et).to(tl.float32)
-        sig = tl.sigmoid(a)
-        silu = a * sig
+    pm, pn = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
+    rows = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    cols = pn * BLOCK_N + tl.arange(0, BLOCK_N)
+    wrows = pn * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)
+    ks = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
+    acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+    for k0 in range(tl.cdiv(K, BLOCK_K)):
+        kk = k0 * BLOCK_K + ks
+        g = tl.load(G + rows[:, None] * sgm + kk[None, :],
+                    mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+        s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
+                    mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
+        acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
         if not SAVED:
-            tl.store(H + rows[:, None] * shm + cols[None, :], (silu * b).to(et), mask=mask)
-        off = rows[:, None] * sdm + cols[None, :]
-        tl.store(DAB + off, (dh * b * (sig + silu * (1.0 - sig))).to(et), mask=mask)
-        tl.store(DAB + off + ND, (dh * silu).to(et), mask=mask)
+            x = tl.load(X + rows[:, None] * sxm + kk[None, :],
+                        mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
+            w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
+                        mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
+            acc = tf32_dot(x, w, acc, input_precision=PREC, pre_b=PRE)
+    mask = (rows[:, None] < M) & (cols[None, :] < ND)
+    if SAVED:
+        a = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
+        b = tl.load(SB + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
+        if HALF:
+            a = a * tl.load(SCALE)
+            b = b * tl.load(SCALE)
+    else:
+        a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
+    dh = acc_dh.to(et).to(tl.float32)
+    sig = tl.sigmoid(a)
+    silu = a * sig
+    if not SAVED:
+        tl.store(H + rows[:, None] * shm + cols[None, :], (silu * b).to(et), mask=mask)
+    off = rows[:, None] * sdm + cols[None, :]
+    tl.store(DAB + off, (dh * b * (sig + silu * (1.0 - sig))).to(et), mask=mask)
+    tl.store(DAB + off + ND, (dh * silu).to(et), mask=mask)
 
 
 def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
@@ -149,27 +106,19 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
     if not half:
         scale = dy
     dab = dy.new_empty((m, 2 * nd))
-    da, db = dab[:, :nd], dab[:, nd:]
-    use_tma = tma_ok(xn, w_ab, dy, ws, h, da, db, *((saved_a, saved_b) if saved else ()))
-    if use_tma:
-        sms = num_sms(dy.device)
-        grid = lambda c: (min(sms, tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])[0]),)  # noqa: E731
-    else:
-        sms = 1
-        grid = lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
+    grid = lambda c: tile_grid(m, nd, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
+
     _squeeze_swiglu_bwd_kernel[grid](
         xn, w_ab, dy, ws, h, dab, saved_a, saved_b, scale, m, nd, k,
         xn.stride(0), w_ab.stride(0), dy.stride(0), ws.stride(0), ws.stride(1), h.stride(0), dab.stride(0),
         saved_a.stride(0),
-        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, SAVED=saved, HALF=half, NUM_SMS=sms, PREC=prec, PRE=pre,
+        shape_key=pack(shape_key, K=k, ND=nd), SAVED=saved, HALF=half, PREC=prec, PRE=pre,
     )
     return h, dab
-
 
 def _squeeze_swiglu_bwd_fake(xn, w_ab, dy, ws, shape_key):
     """``(h, dAB)``: ``h`` ``(M, ND)`` and the stacked ``[dA | dB]`` ``(M, 2*ND)``, in the activation dtype."""
     return dy.new_empty((xn.shape[0], ws.shape[1])), dy.new_empty((xn.shape[0], 2 * ws.shape[1]))
-
 
 @opaque(fake=_squeeze_swiglu_bwd_fake, name="transition_bwd_squeeze_swiglu")
 def squeeze_swiglu_bwd(xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, ws: torch.Tensor,
@@ -179,11 +128,9 @@ def squeeze_swiglu_bwd(xn: torch.Tensor, w_ab: torch.Tensor, dy: torch.Tensor, w
     recomputed in fp32 inside the kernel."""
     return _launch_bwd(xn, w_ab, dy, ws, shape_key, None, None)
 
-
 def _squeeze_swiglu_bwd_saved_fake(dy, ws, a, b, shape_key, scale=None):
     """``dAB`` ``(M, 2*ND)`` in the activation dtype."""
     return dy.new_empty((dy.shape[0], 2 * ws.shape[1]))
-
 
 @opaque(fake=_squeeze_swiglu_bwd_saved_fake, name="transition_bwd_squeeze_swiglu_saved")
 def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor, b: torch.Tensor, shape_key: int,
@@ -192,7 +139,6 @@ def squeeze_swiglu_bwd_saved(dy: torch.Tensor, ws: torch.Tensor, a: torch.Tensor
     activation dtype, rounded like the PyTorch statements hold them; under fp32 activations with a ``scale`` they are fp16, the
     TF32 mantissa, stored divided by that fp32 device scalar)."""
     return _launch_bwd(dy, dy, dy, ws, shape_key, a, b, scale)[1]
-
 
 def swiglu_squeeze_backward_saved(xn, wa, wb, ws, dy, shape_key, saved=None, half_scale=None):
     """``(dx, dWa, dWb, dWs)`` of ``squeeze(SwiGLU(xn @ Wa^T, xn @ Wb^T))``.

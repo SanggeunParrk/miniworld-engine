@@ -115,22 +115,19 @@ def attention_gated_in_place(q, k, v, g, bias, mask, prescaled=False, precision=
 
 # ================================================================================================ v2 core
 # What Anthropic's apb kernel does that the one above did not, adopted here after measuring it 54 us against 64.5 us at
-# L=768: the bias comes through a host-side TMA tensor descriptor; the hot loop carries no bounds masks when the length
+# L=768: the bias is read with plain pointer loads (no TMA); the hot loop carries no bounds masks when the length
 # is a multiple of the key tile; no key mask is applied in the loop (it is folded into the hoisted bias as -inf, which
 # is free because it is sample-invariant); K and V are loaded [BLOCK_N, D] and transposed, the canonical wgmma layout.
-def _desc_pre_hook(nargs):
-    nargs["Bdesc"].block_shape = [nargs["BLOCK_M1"], nargs["BLOCK_M2"]]
-
 
 def _cfgs2():
-    return [triton.Config({"BLOCK_M1": m1, "BLOCK_M2": m2}, num_warps=w, num_stages=s, pre_hook=_desc_pre_hook)
+    return [triton.Config({"BLOCK_M1": m1, "BLOCK_M2": m2}, num_warps=w, num_stages=s)
             for m1 in (64, 128) for m2 in (32, 64, 128) for w in (4, 8) for s in (2, 3, 4)]
 
 
 # restore_value: the output overwrites q, and autotuning runs the kernel once per config.
 @triton.autotune(configs=_cfgs2(), key=["N_CTX", "H", "HEAD_DIM", "PREC"], restore_value=["Q"])
 @triton.jit
-def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
+def _attn_fwd_gated2(Q, K, V, G, Bias, brow0,
                      stride_qz, stride_qm, stride_qh, stride_qk,
                      H: tl.constexpr, N_CTX, HEAD_DIM: tl.constexpr, D1: tl.constexpr, D2: tl.constexpr,
                      EVEN: tl.constexpr, PREC: tl.constexpr, BLOCK_M1: tl.constexpr, BLOCK_M2: tl.constexpr,
@@ -170,7 +167,12 @@ def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
         qk = tf32_dot(q2, tl.trans(kk2), qk, input_precision=PREC)
         # logits already in the exp2 domain: sm_scale*log2(e) is folded into q, log2(e) into the bias
         if HAS_BIAS:
-            sc = qk + Bdesc.load([brow, start_n]).to(tl.float32)
+            bptr = Bias + (brow + tl.arange(0, BLOCK_M1)).to(tl.int64)[:, None] * N_CTX + (start_n + offset_n)[None, :]
+            if EVEN:
+                bt = tl.load(bptr)
+            else:
+                bt = tl.load(bptr, mask=mrow & ((start_n + offset_n) < N_CTX)[None, :], other=0.0)
+            sc = qk + bt.to(tl.float32)
         else:                                      # ablation only: what the bias costs this kernel
             sc = qk
         if not EVEN:
@@ -204,15 +206,15 @@ def _attn_fwd_gated2(Q, K, V, G, Bdesc, brow0,
 
 
 def bias_descriptor(bias_all):
-    """One TMA descriptor over every block's hoisted bias, viewed [nb*H*L, L]; the block shape is set per config."""
-    from triton.tools.tensor_descriptor import TensorDescriptor
+    """The hoisted bias of every block, viewed [nb*H*L, L], read with plain pointer loads. (The name is historical: the kernel used to read it
+    through a TMA tensor descriptor, which is Hopper-only; the portable Triton family uses no descriptor.)"""
     NBH, L, _ = bias_all.shape
-    return TensorDescriptor(bias_all, [NBH * L, L], [L, 1], [64, 64])
+    return bias_all.reshape(NBH * L, L)
 
 
 def attention_gated_in_place2(q, k, v, g, bdesc, block, precision="tf32", _has_bias=True):
     """As ``attention_gated_in_place`` with pre-scaled logits, the key mask already folded into the bias, and the bias
-    read through ``bdesc`` (``bias_descriptor``) at block ``block``'s head rows."""
+    read from ``bdesc`` (``bias_descriptor``: the [nb*H*L, L] view) at block ``block``'s head rows."""
     S, L, H, D = q.shape
     assert k.stride() == q.stride() and v.stride() == q.stride() and g.stride() == q.stride()
     d1 = 1 << (D.bit_length() - 1)
