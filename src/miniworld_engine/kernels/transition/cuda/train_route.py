@@ -70,7 +70,14 @@ def _gatebwd_hook(x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_we
     return None
 
 
-@opaque(fake=_tf._fused_bwd_fake, name="transition_fused_bwd_cuda")
+def _fused_bwd_cuda_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
+                         xn_saved, eps, has_xn, orig_shape, shape_key):
+    """Shapes only: the six real gradients, as the Triton backward."""
+    return _tf._fused_bwd_fake(grad_output, x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight,
+                               xn_saved, eps, has_xn, orig_shape, shape_key)
+
+
+@opaque(fake=_fused_bwd_cuda_fake, name="transition_fused_bwd_cuda")
 def _fused_bwd_cuda(
     grad_output: torch.Tensor, x2: torch.Tensor, rstd: torch.Tensor, c1: torch.Tensor, ln_weight: torch.Tensor,
     ln_bias: torch.Tensor, expand_a_weight: torch.Tensor, expand_b_weight: torch.Tensor, squeeze_weight: torch.Tensor,
@@ -83,7 +90,12 @@ def _fused_bwd_cuda(
     )
 
 
-@opaque(fake=_tf._fused_fwd_fake, name="transition_fused_fwd_cuda")
+def _fused_fwd_cuda_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn, shape_key):
+    """Shapes only, as the Triton forward (which stage runs must not be visible from here)."""
+    return _tf._fused_fwd_fake(x2, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn, shape_key)
+
+
+@opaque(fake=_fused_fwd_cuda_fake, name="transition_fused_fwd_cuda")
 def _fused_fwd_cuda(
     x2: torch.Tensor, ln_weight: torch.Tensor, ln_bias: torch.Tensor, expand_a_weight: torch.Tensor,
     expand_b_weight: torch.Tensor, squeeze_weight: torch.Tensor, n: int, eps: float, save_xn: bool, shape_key: int,

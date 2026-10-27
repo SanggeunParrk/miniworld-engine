@@ -414,7 +414,7 @@ class FusedTokenDiT:
                 qkvg.view(-1)[3 * M * D :].view(D, M),
             )
             if tf32:
-                assert self._bias_perm, "the H100 TF32 core needs a key-permuted bias"
+                assert self._bias_perm, "the TF32 core needs a key-permuted bias"
         keep2 = buf["keep"].view(S, L)
         gsw = self._gemm_swiglu(single.device, xa)
         if self.core == "gated2" and not cuda_core and not tf32:

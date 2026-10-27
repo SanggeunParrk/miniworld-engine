@@ -45,6 +45,10 @@ _BUILD_CALLS = {"load_extension", "load_inline", "_ext"}
 _CARDS = ("A5000", "A6000", "H100", "B200", "A100")
 
 
+def _allowed(rel: str, what: str) -> bool:
+    return any(rel == r and (what == m or what.startswith(m + ".")) for r, m in ALLOW_IMPORTS)
+
+
 def _files() -> list[Path]:
     files = [p for p in KERNELS.glob("*/triton/**/*.py")]
     files += [KERNELS / name for name in SHARED_TRITON_HELPERS if (KERNELS / name).is_file()]
@@ -117,7 +121,7 @@ def test_triton_trees_do_not_reach_for_cuda():
     for path in files:
         rel = path.relative_to(KERNELS).as_posix()
         for kind, what in _violations(path, path.read_text()):
-            if (rel, what) not in ALLOW_IMPORTS:
+            if not _allowed(rel, what):
                 bad.append(f"{rel}: {kind}: {what}")
     assert not bad, "a Triton file must not call hand-CUDA (the caller picks the family):\n  " + "\n  ".join(bad)
 
@@ -128,7 +132,7 @@ def test_allow_listed_exceptions_are_still_needed():
     for path in _files():
         rel = path.relative_to(KERNELS).as_posix()
         seen |= {(rel, what) for _, what in _violations(path, path.read_text())}
-    stale = [k for k in ALLOW_IMPORTS if k not in seen]
+    stale = [k for k in ALLOW_IMPORTS if not any(k[0] == r and (w == k[1] or w.startswith(k[1] + ".")) for r, w in seen)]
     assert not stale, f"stale ALLOW_IMPORTS entries: {stale}"
     assert all(reason.strip() for reason in ALLOW_IMPORTS.values())
 

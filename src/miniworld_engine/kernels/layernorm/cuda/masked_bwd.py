@@ -33,7 +33,12 @@ def use_cuda_bwd(x: torch.Tensor, row_scale: torch.Tensor | None) -> bool:
     )
 
 
-@opaque(fake=_ln_bwd_fake, name="layernorm_bwd_cuda")
+def _ln_bwd_cuda_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_key):
+    """Same outputs as the Triton backward: ``dx`` at ``input_shape``, ``dweight`` / ``dbias`` as (N,) fp32."""
+    return _ln_bwd_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_key)
+
+
+@opaque(fake=_ln_bwd_cuda_fake, name="layernorm_bwd_cuda")
 def _ln_bwd_cuda(
     dy_2d: torch.Tensor,
     x: torch.Tensor,
@@ -45,6 +50,7 @@ def _ln_bwd_cuda(
     input_shape: list[int],
     shape_key: int,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward launches -> ``(dx, dweight, dbias)``: the hand-CUDA warp-per-row kernel (bf16), the Triton backward when it does not take the call."""
     x = x.to(dy_2d.dtype)
     if x.dtype == torch.bfloat16:
         try:

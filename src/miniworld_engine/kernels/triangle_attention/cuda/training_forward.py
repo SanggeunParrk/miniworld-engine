@@ -13,6 +13,8 @@ import sys
 
 import torch
 
+from miniworld_engine.kernels._compile import opaque
+
 _ROOT=Path(__file__).resolve().parent
 _EXT=None
 SUPPORTED_LENGTHS=(384,768,1024)
@@ -67,32 +69,20 @@ def forward(q,k,v,b):
 # --- the caller-side choice between this CUDA forward and the portable Triton one -------------------------------------------------
 # The Triton forward (``triton/main.py:_tri_attn_fwd``) is pure Triton; the choice to take the CUDA forward is made HERE and by
 # ``triangle_attention/interface.py``, never from inside a Triton file.
-def _fwd_fake(q, k, v, bias, shape_key):
+def _routed_fwd_fake(q, k, v, bias, shape_key):
+    """``(out, m)`` exactly as the Triton forward allocates them (projection-layout strided ``out``, fp32 ``m``)."""
     from miniworld_engine.kernels.triangle_attention.triton.main import _tri_attn_fwd_fake
     return _tri_attn_fwd_fake(q, k, v, bias, shape_key)
 
 
-def _opaque_routed():
-    from miniworld_engine.kernels._compile import opaque
+@opaque(fake=_routed_fwd_fake, name="triangle_attention_fwd_routed")
+def routed_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(out, m)``: this CUDA forward where :func:`can_use`, the Triton forward otherwise (the old ``_tri_attn_fwd`` behaviour)."""
     from miniworld_engine.kernels.triangle_attention.triton import main as core
 
-    @opaque(fake=_fwd_fake, name="triangle_attention_fwd_routed")
-    def routed_fwd(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, bias: torch.Tensor, shape_key: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """``(out, m)``: this CUDA forward where :func:`can_use`, the Triton forward otherwise (the old ``_tri_attn_fwd`` behaviour)."""
-        if can_use(q, k, v, bias):
-            return forward(q, k, v, bias)
-        return core._tri_attn_fwd(q, k, v, bias, shape_key)
-
-    return routed_fwd
-
-
-@functools.lru_cache(maxsize=1)
-def _routed():
-    return _opaque_routed()
-
-
-def routed_fwd(q, k, v, bias, shape_key):
-    return _routed()(q, k, v, bias, shape_key)
+    if can_use(q, k, v, bias):
+        return forward(q, k, v, bias)
+    return core._tri_attn_fwd(q, k, v, bias, shape_key)
 
 
 @functools.lru_cache(maxsize=1)
