@@ -68,3 +68,77 @@ def test_fp16_intermediate_holds_the_tf32_yardstick_and_never_overflows(scale, m
                 name, _rel(got[name], want), _rel(base[name], want))
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev
+
+
+@pytest.mark.skipif(not HOPPER, reason="the generic sm_90a Transition")
+@pytest.mark.parametrize("d,hid,scale", [(128, 256, 1.0), (128, 256, 3e4), (256, 512, 1.0), (768, 1536, 1.0), (384, 768, 1e5)])
+def test_the_scale_kernel_agrees_with_the_torch_statements(d, hid, scale):
+    """``h16_scales`` (memset + two kernels) returns the torch statements' values: inv_sh, s and the fp16 Ws, at ordinary and at huge weights."""
+    from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a as generic
+
+    torch.manual_seed(0)
+    x = torch.randn(8, d, device="cuda")
+    gamma, beta = torch.rand(d, device="cuda") + 0.5, torch.randn(d, device="cuda")
+    wa, wb = (torch.randn(hid, d, device="cuda") * d**-0.5 * scale for _ in range(2))
+    ws = torch.randn(d, hid, device="cuda") * hid**-0.5 * scale
+    got = generic._h16_scales(x, gamma, beta, wa, wb, ws)
+    want = generic._h16_scales_torch(x, gamma, beta, wa, wb, ws)
+    torch.testing.assert_close(got[0], want[0], rtol=1e-5, atol=0)
+    torch.testing.assert_close(got[1], want[1], rtol=1e-5, atol=0)
+    assert torch.equal(got[2], want[2]) or float((got[2].float() - want[2].float()).abs().max()) <= 1e-3 * float(want[2].float().abs().max())
+
+
+@pytest.mark.skipif(not HOPPER, reason="the generic sm_90a Transition")
+def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_foreign_copy(monkeypatch):
+    """The TF32-rounded weight copies of the fp32 inference forward are made once per parameter version: reused on a repeated call, rebuilt after an
+    in-place update, never handed to another module that lands on a freed weight's address, and not filled under grad mode."""
+    from miniworld_engine import settings
+    from miniworld_engine.kernels.transition.cuda import _weights
+    from miniworld_engine.modules import Transition
+
+    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    prev = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        def make(seed):
+            torch.manual_seed(seed)
+            m = Transition(768, n=2, implementation=ImplementationType.MINIWORLD).cuda().float()
+            with torch.no_grad():
+                for p in m.parameters():
+                    if p.ndim == 2:
+                        p.normal_(std=768**-0.5)
+            return m
+
+        def fresh(m, x):
+            _weights._ROUNDED.clear()
+            with torch.no_grad():
+                return m(x)
+
+        x = torch.randn(1, 128, 768, device="cuda")
+        m = make(1)
+        _weights._ROUNDED.clear()
+        with torch.no_grad():
+            y1 = m(x)
+            assert len(_weights._ROUNDED) == 1, "the first inference call did not fill the cache"
+            entry = next(iter(_weights._ROUNDED.values()))[1]
+            y2 = m(x)
+            assert next(iter(_weights._ROUNDED.values()))[1] is entry, "a repeated call rebuilt the copies"
+        assert torch.equal(y1, y2)
+        with torch.no_grad():
+            m.expand_a.weight.mul_(1.5)                                  # in place: the version counter moves
+            y3 = m(x)
+        assert not torch.equal(y3, y1)
+        assert torch.equal(y3, fresh(m, x)), "a stale copy was served after an in-place update"
+        del m, entry
+        for seed in (2, 3, 4):                                           # new weights, quite possibly on the freed addresses
+            m2 = make(seed)
+            with torch.no_grad():
+                y = m2(x)
+            assert torch.equal(y, fresh(m2, x)), "another module was served a dead weight's copies"
+            del m2
+        m3 = make(5)                                                     # grad mode with a parameter requiring grad: nothing is cached
+        _weights._ROUNDED.clear()
+        m3(x)
+        assert not _weights._ROUNDED
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = prev

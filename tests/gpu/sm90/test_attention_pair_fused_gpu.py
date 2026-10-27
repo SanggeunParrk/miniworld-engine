@@ -23,6 +23,8 @@ def _modules(kind):
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     def make(impl):
+        if kind == "token256":   # the ESMFold2 token DiT: cond 768, d_pair 256
+            return AugmentedAttentionPairBias(768, 768, 256, 16, implementation=impl)
         if kind == "token":
             return AugmentedAttentionPairBias(768, 384, 128, 16, implementation=impl)
         if kind == "atom":
@@ -58,7 +60,7 @@ def _run(m, kind, single, cond, pair, mask, dy, dtype, autocast):
 
 def _case(kind, L, A, fp32=False):
     n = 8 * L if kind == "atom" else L
-    dS, dC, dP = {"token": (768, 384, 128), "atom": (128, 128, 16), "apb": (384, 384, 256)}[kind]
+    dS, dC, dP = {"token": (768, 384, 128), "token256": (768, 768, 256), "atom": (128, 128, 16), "apb": (384, 384, 256)}[kind]
     a = 1 if kind == "apb" else A
     shape = (1, n, dS) if kind == "apb" else (a, 1, n, dS)
     cshape = (a, 1, n, dC)
@@ -94,22 +96,25 @@ def test_bf16_routes_are_taken_and_hold_the_yardstick(kind, L, A):
 
 
 @needs_hopper
-def test_fp32_token_route_is_taken_and_holds_the_yardstick():
+@pytest.mark.parametrize(("kind", "L"), [("token", 384), ("token256", 384), ("atom", 128)])
+def test_fp32_token_route_is_taken_and_holds_the_yardstick(kind, L):
     from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32
 
     torch.backends.cuda.matmul.allow_tf32 = True
-    mw, pt, ref = _modules("token")
-    single, cond, pair, mask, dy, dt = _case("token", 384, 3, fp32=True)
+    mw, pt, ref = _modules(kind)
+    single, cond, pair, mask, dy, dt = _case(kind, L, 3, fp32=True)
     taken = []
-    orig = fused_pair_tf32.attention_pair_tf32
-    fused_pair_tf32.attention_pair_tf32 = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]
+    orig, orig_whole = fused_pair_tf32.attention_pair_tf32, fused_pair_tf32.proj_core_gate
+    fused_pair_tf32.attention_pair_tf32 = lambda *a, **k: (taken.append("core"), orig(*a, **k))[1]
+    fused_pair_tf32.proj_core_gate = lambda *a, **k: (taken.append("whole"), orig_whole(*a, **k))[1]
     try:
-        r = _run(ref, "token", single, cond, pair, mask, dy, torch.float64, False)
-        e = _run(mw, "token", single, cond, pair, mask, dy, dt, False)
+        r = _run(ref, kind, single, cond, pair, mask, dy, torch.float64, False)
+        e = _run(mw, kind, single, cond, pair, mask, dy, dt, False)
     finally:
-        fused_pair_tf32.attention_pair_tf32 = orig
-    b = _run(pt, "token", single, cond, pair, mask, dy, dt, False)
-    assert taken
+        fused_pair_tf32.attention_pair_tf32, fused_pair_tf32.proj_core_gate = orig, orig_whole
+    b = _run(pt, kind, single, cond, pair, mask, dy, dt, False)
+    assert taken, "the TF32 pair-fused route was not used"
+    assert "whole" in taken, "the packed projection + core + gate node was not used"
     for k in r:
         assert _rel(e[k], r[k]) <= 1.5 * _rel(b[k], r[k]), (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
 
@@ -190,3 +195,96 @@ def test_routes_run_under_torch_compile(fp32):
     assert any(k in names for k in ("adaln_fwd_k", "adaln_gemm_k", "ln_rows_k")), "the compiled module did not launch the CUDA adaLN"
     assert _rel(out[0], eager[0].double()) < (3e-3 if fp32 else 3e-2)
     assert _rel(out[1], eager[1].double()) < (3e-3 if fp32 else 3e-2)
+
+
+@needs_hopper
+@pytest.mark.parametrize("masked", [False, True])
+def test_the_generic_fp32_pair_bias_pass_matches_the_tensor_core_one_at_d_pair_128(masked):
+    """``pair_bias_rows32`` (any d_pair; the d_pair 256 route) reproduces ``pair_bias_tok_cuda`` (d_pair 128 only): same key-permuted layout, mask and units."""
+    from miniworld_engine.kernels.augmented_attention.cuda.fused_pair import _rows_ext
+    from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
+
+    L, dp = 256, 128
+    g = torch.Generator(device="cuda").manual_seed(1)
+    pair = torch.randn(L * L, dp, device="cuda", generator=g) * 2 + 0.5
+    wf = torch.randn(16, dp, device="cuda", generator=g) * 0.1
+    mask = (torch.rand(L, device="cuda", generator=g) > 0.2) if masked else None
+    a = torch.empty(16, L, L, device="cuda")
+    b = torch.empty_like(a)
+    rows32().pair_bias_tok_cuda(pair, wf, a, mask, L, 1e-5, True, -1e30)
+    _rows_ext().pair_bias_rows32(pair, wf, b, mask, L, 1e-5, -1e30)
+    # the tensor-core pass rounds its operands to TF32, this one is fp32 on CUDA cores: the layout agrees exactly, the values to TF32 precision
+    assert float((b - a).norm() / a.norm()) < 1e-3, float((b - a).norm() / a.norm())
+    assert torch.equal(b[..., :8] <= -1e29, a[..., :8] <= -1e29)
+
+
+@needs_hopper
+@pytest.mark.parametrize("kind", ["token", "token256", "atom"])
+def test_fp32_training_step_is_bitwise_repeatable(kind):
+    """The packed projection + core + gate node (fp32, TF32): two identical training steps give identical outputs and gradients."""
+    torch.backends.cuda.matmul.allow_tf32 = True
+    mw, _, _ = _modules(kind)
+    single, cond, pair, mask, dy, dt = _case(kind, 128, 3, fp32=True)
+    a = _run(mw, kind, single, cond, pair, mask, dy, dt, False)
+    b = _run(mw, kind, single, cond, pair, mask, dy, dt, False)
+    for k in a:
+        assert torch.equal(a[k], b[k]), k
+
+
+@needs_hopper
+def test_fp32_inference_without_grad_takes_the_packed_route_and_matches_the_training_forward():
+    from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    mw, _, _ = _modules("token")
+    single, cond, pair, mask, dy, dt = _case("token", 256, 2, fp32=True)
+    taken = []
+    orig = fused_pair_tf32.proj_core_gate
+    fused_pair_tf32.proj_core_gate = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]
+    try:
+        with torch.no_grad():
+            y = mw.delta(single, cond, pair, mask)
+        z = mw.delta(single.clone().requires_grad_(), cond, pair, mask)
+    finally:
+        fused_pair_tf32.proj_core_gate = orig
+    assert len(taken) == 2
+    assert _rel(y, z.detach().double()) < 1e-3   # (the adaLN of the two modes is not the same kernel: close, not bit-equal)
+
+
+@needs_hopper
+def test_the_packed_projection_weights_are_reused_per_version_and_never_stale_or_foreign():
+    """Inference builds the packed [Wq; Wk; Wv; Wg] / bias once per parameter version; an in-place update rebuilds it, a new module never gets a dead one's."""
+    from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as f
+
+    torch.backends.cuda.matmul.allow_tf32 = True
+    single, cond, pair, mask, dy, dt = _case("token", 128, 2, fp32=True)
+
+    def fresh(m):
+        f._PACKED.clear()
+        with torch.no_grad():
+            return m.delta(single, cond, pair, mask)
+
+    mw, _, _ = _modules("token")
+    f._PACKED.clear()
+    with torch.no_grad():
+        y1 = mw.delta(single, cond, pair, mask)
+        assert len(f._PACKED) == 1
+        entry = next(iter(f._PACKED.values()))[1]
+        y2 = mw.delta(single, cond, pair, mask)
+        assert next(iter(f._PACKED.values()))[1] is entry
+    assert torch.equal(y1, y2)
+    with torch.no_grad():
+        mw.to_query.weight.mul_(1.5)
+        y3 = mw.delta(single, cond, pair, mask)
+    assert not torch.equal(y3, y1) and torch.equal(y3, fresh(mw)), "stale packed weights after an in-place update"
+    del mw, entry
+    for _ in range(3):
+        m2, _, _ = _modules("token")
+        with torch.no_grad():
+            y = m2.delta(single, cond, pair, mask)
+        assert torch.equal(y, fresh(m2)), "a module was served another's packed weights"
+        del m2
+    m3, _, _ = _modules("token")                                         # a training call (gradient recorded) fills nothing
+    f._PACKED.clear()
+    m3.delta(single.clone().requires_grad_(), cond, pair, mask)
+    assert not f._PACKED

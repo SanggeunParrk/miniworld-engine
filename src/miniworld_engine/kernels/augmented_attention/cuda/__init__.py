@@ -577,15 +577,20 @@ def tf32_forward(q, k, vt, bias, km, A, L, qkvg=None, nh=H, dh=D):
 
 
 def tf32_backward(
-    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D
+    qs, k, v, dob, qt, kt, dot, bias_p, bias_tp, lse, dd, lse_p, dd_p, km, km_p, A, L, nh=H, dh=D, dpack=None
 ):
     """The TF32 attention backward (attn_tf32.cu dqb + dkv). qs (q in exp2 units), k, v, dob = dO [A L, 768] fp32 and their
     transposes qt, kt, dot [768, A L]; bias_p the forward's key-permuted bias [16, L, L]; bias_tp [16, L(key), L] the bias
     transposed with its query columns permuted; lse, dd [A, 16, L] and lse_p, dd_p their query-permuted copies; km / km_p the
     natural / permuted additive key masks (or None). Returns dQ (for the unscaled q), dK, dV [A L, 768] fp32 and dbias
-    [16, L, L] fp32 with its key columns still permuted (``key_perm`` order)."""
+    [16, L, L] fp32 with its key columns still permuted (``key_perm`` order). ``dpack`` [A L, >= 3 nh dh]: dQ, dK, dV are written into its first three column blocks
+    (and returned as views of it) instead of three fresh tensors."""
     ext = _ext("attn_tf32", tf32_defs(nh, dh))
-    dq, dk, dv = (torch.empty_like(qs) for _ in range(3))
+    n = nh * dh
+    if dpack is None:
+        dq, dk, dv = (torch.empty_like(qs) for _ in range(3))
+    else:
+        dq, dk, dv = (dpack[:, i * n : (i + 1) * n] for i in range(3))
     dbc = torch.zeros(tf32_dqb_chunks(A), nh, L, L, device=qs.device, dtype=torch.float32)
     ext.attn_tf32_dqb(qs, dob, k, v, kt, bias_p, lse, dd, km_p, dq, dbc)
     db_p = dbc.sum(0)  # the chunk buffers in order: bitwise repeatable
