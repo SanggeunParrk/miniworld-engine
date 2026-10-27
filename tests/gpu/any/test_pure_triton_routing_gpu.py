@@ -72,7 +72,7 @@ def test_transition_training_stages_are_chosen_by_the_interface(monkeypatch, for
         monkeypatch.setattr(tcuda, name, (lambda real, name: lambda *a, **k: (seen.append(name), real(*a, **k))[1])(real, name))
     for width, want in ((128, {"transition_b2b_fwd"}), (256, {"transition_b2b_fwd", "transition_expand_gatebwd_wgmma"})):
         seen.clear()
-        x = torch.randn(256, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
+        x = torch.randn(2, 128, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
         ln_w, ln_b = (torch.ones(width, device="cuda", dtype=torch.bfloat16) for _ in range(2))
         wa, wb = (torch.randn(4 * width, width, device="cuda", dtype=torch.bfloat16) * 0.05 for _ in range(2))
         ws = torch.randn(width, 4 * width, device="cuda", dtype=torch.bfloat16) * 0.05
