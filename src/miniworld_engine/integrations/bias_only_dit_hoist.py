@@ -24,7 +24,9 @@ is the two-term split [bf16(LN0) | bf16(LN0 - bf16(LN0))] (K = 256; hi + lo = LN
 to fp32 accumulation; on the fp32 path Y = LN0 (fp32, the TF32 GEMM's operand). LN0 is not kept from the forward.
 
 Per training step that replaces, per block, the pair LayerNorm + projection (``pair_bias``), its backward (``pair_bias_bwd``) and
-the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper runs the same two GEMMs on cuBLAS (bf16, or TF32 for fp32) and the same LN0 rows.
+the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper: the forward is ONE kernel (``bo_hoist_pass.cu`` hoist_fwd, N <= 64: LN0 and the projection on the tensor cores, the normalised pair never
+written), the backward of one block of 16 heads is ONE kernel (hoist_bwd1: d LN0, the LN0 backward and dW' in a single pass over the pair, bf16 and
+fp32/TF32); more blocks keep the bf16 ``bo_hoist_bwd.cu`` kernel (N <= 192), fp32 the two cuBLAS GEMMs (TF32) around the LN0 rows.
 
 bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
@@ -115,6 +117,8 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
+    if settings.current().bias_only_dit_hoist_fwd_fused and HK.pass_fwd_served(pair2d, wf):
+        return HK.pass_fwd(pair2d, wf, eps)  # LayerNorm + projection in one pass over the pair (bo_hoist_pass.cu)
     ln0 = torch.empty_like(pair2d)
     HK.ln0_rows(pair2d, ln0, eps)
     with _gemms(pair2d.dtype):
@@ -136,6 +140,8 @@ def _hoist_bwd(
 
     N, R = dball.shape
     f32 = pair2d.dtype is F32
+    if settings.current().bias_only_dit_hoist_bwd_fused and HK.pass_bwd_served(pair2d, wf):
+        return list(HK.pass_bwd(pair2d, wf, dball, eps))  # one block of 16 heads, bf16 / fp32: one pass over the pair (bo_hoist_pass.cu)
     if settings.current().bias_only_dit_hoist_bwd_fused and HK.fused_bwd_served(pair2d, wf):
         dpair, dwf = HK.hoist_bwd_fused(pair2d, wf, dball, eps)  # one pass over the pair (bo_hoist_bwd.cu)
         return [dpair, dwf]
