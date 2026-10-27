@@ -10,7 +10,7 @@ from pathlib import Path
 
 REPO = next(p for p in Path(__file__).resolve().parents if (p / "pyproject.toml").is_file())
 KERNELS = REPO / "src" / "miniworld_engine" / "kernels"
-SHARED = ("_compile.py", "_tiles.py", "_dot_precision.py", "_tf32.py", "_cast.py", "_capture.py")
+SHARED = ("_compile.py", "_tiles.py", "_dot_precision.py", "_tf32.py", "_cast.py", "_capture.py", "_fastmath.py")
 FORBIDDEN = ("make_tensor_descriptor", "TensorDescriptor", "experimental_descriptor", "_tma import", "import _tma")
 
 
