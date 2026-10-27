@@ -60,6 +60,8 @@ def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
 
         names = graph_kernels(graph)
         assert names, "the captured graph has no kernel node"
+        graph.replay()   # a capture computes nothing: the outputs y / grads are filled by the replay
+        torch.cuda.synchronize()
         assert any("_b2w" in n for n in names), names
         pipelined = not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
         affine_registers = pipelined and direction != 0 and not (
