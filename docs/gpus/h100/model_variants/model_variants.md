@@ -19,7 +19,7 @@ The table is the inference path (the training path follows it).
 | triangle attention, Chai-1 outputs | `untransposed_output=True` (ending node), `dual_output=True` (confidence head) | the same path, the update laid back as the variant has it | as above |
 | OPM, RF3 projection biases | `OuterProductMean(projection_bias=True)` | the wide H100 OPM composition with the biases added in its prologue (else the fused OPM plus the bias terms `(Rs A^T + Ls Bm^T) / cnt + c`) | 1.2-1.5x (1.6-2.1x eager) |
 | OPM, Chai-1 groups | `OuterProductMean(groups=8)` | one projection GEMM, a group split, one batched GEMM over the MSA rows, the products laid out per pair row with the product LayerNorm (`kernels/outer_product_mean/cuda/gather.cu`), the out-projection | 1.1-1.2x |
-| single attention gate bias (Chai-1) | `AttentionPairBias(gate_bias=1.0)` | the composed path (on H100 that is SDPA) with the constant on the gate logits | - |
+| single attention gate bias (Chai-1) | `AttentionPairBias(gate_bias=1.0)` | inference: the native H100 APB path (the constant rides on the packed gate bias of the q/k/v/g GEMM; a 256-wide pair kernel at 16 heads), see [attention_pair_bias](../attention_pair_bias/attention_pair_bias.md); training: the composed path (SDPA) | 0.52-0.57x of portable, 0.35-0.39x of compiled torch (L 384 / 768) |
 | parallel Pairformer (Chai-1, RF3) | `PairformerBlock.from_components(..., parallel=True)` | every part on the block input; `pair + sum_i (y_i - pair)` from the parts' residual outputs in one CUDA pass (fp32 sums, one rounding) | - |
 
 Second pass: [../../../records/model_variants_h100_speed_20261022.md](../../../records/model_variants_h100_speed_20261022.md). Not done: Chai-1's grouped OPM is a composition (1.1-1.2x); the token / atom DiT

@@ -92,3 +92,19 @@ investigation: [records/h100_attention_pair_bias_20261013.md](../../../records/h
 The native path above is d_pair 128. At d_pair 256 the module now runs the pair-fused core (`kernels/augmented_attention/cuda/fused_pair.py`: `pair_mma.cu` forward on mma.sync, `pair_rows.cu` backward, the
 wgmma attention cores): 8 x 48, L 384, bf16, ladder CUDA / portable 0.62 (inference, 0.091 ms) and 0.86 (training, 0.349 ms); before, the call ran the PyTorch statements (1.07 / 1.03). Record:
 [attention_cuda_ladder_20261026.md](../../../records/attention_cuda_ladder_20261026.md).
+
+## Gate bias and Chai-1's width: 16 x 24 heads, d_pair 256 (2026-10-27)
+
+`AttentionPairBias(gate_bias=c)` (the constant on the gate logits, `sigmoid(g + c)`; Chai-1's Pairformer single attention uses 1.0) and Chai-1's shape
+(`d_single` 384 as 16 x 24, `d_pair` 256) run the native path on H100 for **inference** (bf16, B = 1, `L % 128 == 0`, the key mask as before); before, both fell to the composed
+PyTorch statements (`gate_bias != 0` was excluded from the native dispatch, and the native pair kernel was 128 wide for 12 / 16 / 24 heads). Training with a gate bias or at 16-head
+d_pair 256 keeps the composed route.
+
+- The gate bias is not a new kernel term: the packed q | k | v | g bias (`bvec`, added by the one cuBLAS `addmm`) gets `c` on its g rows, once per parameter version (cached with the packs), so the
+  attention core's `sigmoid(g)` epilogue reads `g + c`. A bias of 0 packs the same bytes as before (d_pair 128 calls are unchanged).
+- d_pair 256 at 16 heads: `pair_bias_fwd` (`apb_rows.cu`) instantiates its 256-wide TMA ring for 16 heads (3 stages, one block per SM, 213 KB of shared memory); `Wf = to_bias.weight * ln_pair.weight * log2 e`
+  [16, 256] is made in torch per parameter version (the prep pass is 128 wide). Everything else (row LayerNorm, q | k | v | g GEMM, the wgmma core with heads padded to 32, to_out accumulated onto the residual seed) is the existing 16 x 24 path.
+- Ladder (H100, CUDA graph, `apb_chai`, `apb_gb`, median of 3; ms): record [../../../records/apb_gate_bias_chai_20261027.md](../../../records/apb_gate_bias_chai_20261027.md).
+- Tests: `tests/gpu/sm90/test_apb_gate_bias_h100_gpu.py` (44: output within 1.3x of the bf16 PyTorch module's error against fp32, native route asserted, mask / no mask, bf16 and fp32-master parameters, compiled and CUDA-graph replay bitwise).
+
+Not done: gate bias / 16-head d_pair 256 training (the pair backward kernels are 128 wide for 16 heads); the B200 path keeps `gate_bias == 0` (not measured there).
