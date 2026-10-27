@@ -221,6 +221,63 @@ __global__ void __launch_bounds__(32 * TW) sigmul_bwd_t_k(const float* __restric
   }
 }
 
+// sigmul_bwd_x: sigmul_bwd (row-major dout, dscale, the block partials) plus the K-major copy of dout, [D, ldd]: the left operand of dWs = dout^T h that cuBLAS runs at
+// ~290 TFLOP/s (with dout read MN-major it is ~185). One more write of dout (56 MB at 18432 x 768) instead of a separate transposing kernel (read + write).
+template <int NCH>
+__global__ void __launch_bounds__(32 * TW) sigmul_bwd_x_k(const float* __restrict__ dy, const float* __restrict__ out, const float* __restrict__ sp, float* __restrict__ dout,
+                                                         float* __restrict__ dsc, float* __restrict__ doutT, long ldd, float* __restrict__ part, long R) {
+  constexpr int D = NCH * 128;
+  extern __shared__ float sm[];
+  float* Ta = sm;
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+  float acc[NCH][4];
+#pragma unroll
+  for (int c = 0; c < NCH; ++c)
+#pragma unroll
+    for (int k = 0; k < 4; ++k) acc[c][k] = 0.f;
+  for (long m0 = (long)blockIdx.x * tpose::TR; m0 < R; m0 += (long)gridDim.x * tpose::TR) {
+    const int rows = (int)min((long)tpose::TR, R - m0);
+#pragma unroll
+    for (int c = 0; c < NCH; ++c) {
+      for (int q = 0; q < tpose::TR / TW; ++q) {
+        const int rl = q * TW + wp;
+        if (rl < rows) {
+          const long row = m0 + rl;
+          float d[4], o[4], s[4], a[4], b[4];
+          Vec<true>::ld(dy + row * D + 128 * c + 4 * lane, d);
+          Vec<true>::ld(out + row * D + 128 * c + 4 * lane, o);
+          Vec<true>::ld(sp + row * D + 128 * c + 4 * lane, s);
+#pragma unroll
+          for (int k = 0; k < 4; ++k) {
+            const float g = sigm(s[k]);
+            a[k] = d[k] * g;
+            b[k] = d[k] * o[k] * g * (1.f - g);
+            acc[c][k] += b[k];
+            tpose::put(Ta, 4 * lane + k, rl, a[k]);
+          }
+          Vec<true>::st(dout + row * D + 128 * c + 4 * lane, a);
+          Vec<true>::st(dsc + row * D + 128 * c + 4 * lane, b);
+        }
+      }
+      __syncthreads();
+      tpose::flush(Ta, doutT, ldd, 128 * c, 128, (int)m0, rows, wp, TW, lane);
+      __syncthreads();
+    }
+  }
+  float (*red)[D] = reinterpret_cast<float (*)[D]>(sm);
+#pragma unroll
+  for (int c = 0; c < NCH; ++c)
+#pragma unroll
+    for (int k = 0; k < 4; ++k) red[wp][128 * c + 4 * lane + k] = acc[c][k];
+  __syncthreads();
+  for (int c = threadIdx.x; c < D; c += 32 * TW) {
+    float t = 0.f;
+#pragma unroll
+    for (int w = 0; w < TW; ++w) t += red[w][c];
+    part[(long)blockIdx.x * D + c] = t;
+  }
+}
+
 // fp32 -> bf16 casts of up to eight tensors in ONE launch (the weights of a training step; the PyTorch casts are 4 - 6 launches of 2 - 10 us each).
 // Job j copies n[j] elements of src[j] to dst[j]; a thread block covers a contiguous slice of the concatenated element range.
 struct CastJobs {
@@ -352,6 +409,27 @@ std::vector<at::Tensor> sigmul_bwd_t(at::Tensor dy, at::Tensor out, at::Tensor s
   return {doutT, dscT, part};
 }
 
+// (dout, dsc, part, doutT [D, ldd]); `grid_blocks` as sigmul_bwd_t (the partials have one row per block)
+std::vector<at::Tensor> sigmul_bwd_x(at::Tensor dy, at::Tensor out, at::Tensor sp, int64_t grid_blocks) {
+  TORCH_CHECK(is_f32(dy) && is_f32(out) && is_f32(sp), "fp32 only");
+  const long D = dy.size(-1), M = dy.numel() / D;
+  TORCH_CHECK(D % 128 == 0 && D <= 1024 && out.sizes() == dy.sizes() && sp.sizes() == dy.sizes(), "shapes: D % 128, <= 1024");
+  const at::cuda::CUDAGuard g(dy.device());
+  const long ldd = (M + 31) / 32 * 32;
+  auto dout = at::empty_like(dy), dsc = at::empty_like(dy), doutT = at::empty({D, ldd}, dy.options());
+  const unsigned grid = (unsigned)std::min<long>(grid_blocks, (M + 31) / 32);
+  auto part = at::empty({(long)grid, D}, dy.options());
+  const size_t shm = std::max<size_t>(128 * tpose::LD * sizeof(float), (size_t)TW * D * sizeof(float));
+#define SBX(NCH) sigmul_bwd_x_k<NCH><<<grid, 32 * TW, shm, S()>>>(P<float>(dy), P<float>(out), P<float>(sp), PM<float>(dout), PM<float>(dsc), PM<float>(doutT), ldd, PM<float>(part), M)
+  switch (D / 128) {
+    case 1: SBX(1); break; case 2: SBX(2); break; case 3: SBX(3); break; case 4: SBX(4); break;
+    case 5: SBX(5); break; case 6: SBX(6); break; case 7: SBX(7); break; default: SBX(8); break;
+  }
+#undef SBX
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {dout, dsc, part, doutT};
+}
+
 void cast_pack(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts) {
   TORCH_CHECK(srcs.size() == dsts.size() && !srcs.empty() && srcs.size() <= 8, "1 .. 8 casts");
   CastJobs j{};
@@ -378,4 +456,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("sigmul_bwd", &sigmul_bwd);
   m.def("swiglu_bwd_t", &swiglu_bwd_t);
   m.def("sigmul_bwd_t", &sigmul_bwd_t);
+  m.def("sigmul_bwd_x", &sigmul_bwd_x);
 }

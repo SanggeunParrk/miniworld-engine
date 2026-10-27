@@ -180,6 +180,39 @@ def pack_fp32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.T
     return wab, wabT, wsT, wscT
 
 
+_XT = os.environ.get("CT_XT", "1") != "0"   # read once at import (the routing runs inside traces)
+
+
+def _sigmul_bwd_x_fake(dy, out, sp):
+    m = dy.numel() // dy.shape[-1]
+    blocks = min(sigmul_bwd_blocks(dy), -(-m // 32))
+    return torch.empty_like(dy), torch.empty_like(dy), dy.new_empty((blocks, dy.shape[-1])), dy.new_empty((dy.shape[-1], (m + 31) // 32 * 32))
+
+
+@opaque(fake=_sigmul_bwd_x_fake, name="conditioned_transition_cuda_sigmul_bwd_x")
+def sigmul_bwd_x(dy: torch.Tensor, out: torch.Tensor, sp: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``sigmul_bwd`` (fp32) plus dout^T [D, rows padded to 32] (the K-major left operand of dWs = dout^T h)."""
+    dout, dsc, part, doutT = ext().sigmul_bwd_x(dy, out, sp, sigmul_bwd_blocks(dy))
+    return dout, dsc, part, doutT
+
+
+def _transpose_fake(t):
+    return t.new_empty((t.shape[1], t.shape[0]))
+
+
+@opaque(fake=_transpose_fake, name="conditioned_transition_cuda_transpose_f32")
+def transpose_f32(t: torch.Tensor) -> torch.Tensor:
+    """t^T [C, R] (fp32, contiguous), rounded to the TF32 grid to nearest. The TF32 weight-gradient GEMM dW = G^T X contracts over the ROWS of both
+    operands, which makes both of them MN-major for cuBLAS (G^T X: 200 TFLOP/s at 18432 x 3072 x 768); with the SMALLER operand K-major (X^T copied once, 43 us
+    for 56 MB) the GEMM runs at ~290 and the copy is paid back several times."""
+    from miniworld_engine.kernels.adaln.cuda import _ext as rows_ext
+
+    t = t.contiguous()
+    o = torch.empty(t.shape[1], t.shape[0], device=t.device, dtype=t.dtype)
+    rows_ext().pack_f32([t], [o], [[1, 0, 0, 1]])
+    return o
+
+
 class _Tail(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
@@ -214,15 +247,26 @@ class _Tail(torch.autograd.Function):
             tw = [w.t().contiguous() for w in (wab, wsb, wscb)]
         if x.dtype is torch.float32 and _feature_major_ok(x, ws) and _FM:
             return _backward_feature_major(ctx, dy, x, cond, ab, h, out, sp, wab, wsb, wscb, tw)
-        dout, dsc, part = sigmul_bwd(dy, out, sp)
         f32 = torch.float32
         o = lambda w: f32 if (w.dtype == f32 and x.dtype != f32) else None  # noqa: E731  fp32 master weights: fp32 gradients, unrounded
-        dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
+        xt = x.dtype is f32 and _XT and x.shape[0] % 4 == 0 and x.shape[1] >= 256   # token widths (measured at the atom width, 128: slower)
+        if xt and dy.shape[-1] % 128 == 0 and dy.shape[-1] <= 1024:   # sigmul_bwd also writes dout^T (K-major left operand of dWs)
+            dout, dsc, part, doutT = sigmul_bwd_x(dy, out, sp)
+        else:
+            dout, dsc, part = sigmul_bwd(dy, out, sp)
+            doutT = transpose_f32(dout) if xt else None
+        if xt:   # TF32 weight gradients: the smaller operand goes K-major (rows contiguous), the big gradient stays as it is (see transpose_f32)
+            dws = torch.mm(doutT[:, :dout.shape[0]], h)   # left operand K-major, [D, ND] straight out (no transposing copy)
+        else:
+            dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
         t = (lambda w: w) if x.dtype is not f32 else None   # TF32: the K-major copies packed by the forward (18432 rows: dh -21, dx -72, dcond -23 us)
         k = (lambda i, w: tw[i].t()) if x.dtype is f32 else (lambda i, w: w)
         dh = torch.mm(dout, k(1, wsb))
         dab = swiglu_bwd(dh, ab)
-        dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
+        if xt:
+            dwab = torch.mm(dab.t(), transpose_f32(x).t())
+        else:
+            dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
         dx = torch.mm(dab, k(0, wab))
         dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
         dcond = torch.mm(dsc, k(2, wscb))

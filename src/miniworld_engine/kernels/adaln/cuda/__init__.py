@@ -24,6 +24,8 @@ from miniworld_engine import settings
 _dir = Path(__file__).parent
 WIDTHS = (128, 256, 384, 512, 768, 1024)
 FEATURE_MAJOR_WIDTHS = (256, 384, 512, 768)   # fp32 backward row pass writing the gradient feature-major (``adaln_bwd_t``)
+_XT = os.environ.get("ADALN_XT", "1") != "0"   # fp32 token-width weight gradient with LN(cond)^T as the K-major operand
+_XT_MAX_ROWS = 24576
 _FM = os.environ.get("ADALN_FM", "auto")   # "1": always, "0": never, "auto": a cond of 768 columns or more
 
 
@@ -126,17 +128,29 @@ def _fwd_fake(x2, c2, wc, ws, bs, wb, eps_x, eps_c):
         x2.new_empty((r, 2 * d)),
         x2.new_empty((2 * d, c2.shape[1])),
         x2.new_empty((c2.shape[1], 2 * d) if x2.dtype is torch.float32 else (0,)),
+        x2.new_empty((c2.shape[1], (r + 31) // 32 * 32) if _cnt_ok(x2, c2) else (0,)),
     )
+
+
+def _cnt_ok(x2, c2) -> bool:
+    """fp32 token-width step whose weight gradient takes LN(cond)^T as the K-major operand (``ln_cond_fwd_t``)."""
+    fm = x2.shape[-1] in FEATURE_MAJOR_WIDTHS and (_FM == "1" or (_FM == "auto" and c2.shape[1] >= 768))   # that route has its own feature-major gradients
+    # M <= 24576: at M = 36864 cuBLAS picks a slower "tt" kernel for the K-major copy (dW 222 against 197 us) and the transposed row pass is 28 us dearer (measured: 1050 against 1008 us)
+    return _XT and x2.dtype is torch.float32 and c2.shape[1] in (256, 384, 512) and not fm and x2.shape[0] % 4 == 0 and x2.shape[0] <= _XT_MAX_ROWS
 
 
 @opaque(fake=_fwd_fake, name="adaln_h100_fwd")
 def _fwd(
     x2: torch.Tensor, c2: torch.Tensor, wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, eps_x: float, eps_c: float
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(y, LN(cond) wc, its statistics, x's statistics, [scale | bias] pre-activations, the packed [Ws; Wb], and for fp32 its K-major transpose [dc, 2 d] for
     the backward) of the rows x2 [r, d], c2 [r, dc]."""
     e = _ext()
-    cn, stc = e.ln_cond_fwd(c2, wc.contiguous(), eps_c)
+    if _cnt_ok(x2, c2):
+        cn, stc, cnT = e.ln_cond_fwd_t(c2, wc.contiguous(), eps_c)
+    else:
+        cn, stc = e.ln_cond_fwd(c2, wc.contiguous(), eps_c)
+        cnT = cn.new_empty(0)
     if x2.dtype is torch.float32:
         wcat, wcatT, bcat = pack_fp32(ws, wb, bs)
     else:
@@ -144,10 +158,10 @@ def _fwd(
         wcatT = wcat.new_empty(0)
     sb = torch.addmm(bcat, cn, wcat.t())
     y, stx = e.adaln_fwd(x2, sb, eps_x)
-    return y, cn, stc, stx, sb, wcat, wcatT
+    return y, cn, stc, stx, sb, wcat, wcatT, cnT
 
 
-def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, dcres=None, wcat=None, wcatT=None):
+def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, dcres=None, wcat=None, wcatT=None, cnT=None):
     """Output structure of ``adaln_h100_bwd``."""
     d, dc = ws.shape
     return (
@@ -164,6 +178,7 @@ def _bwd(
     dy2: torch.Tensor, x2: torch.Tensor, c2: torch.Tensor, cn: torch.Tensor, stc: torch.Tensor, stx: torch.Tensor, sb: torch.Tensor,
     wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, has_bs: bool,
     dres: torch.Tensor | None = None, dcres: torch.Tensor | None = None, wcat: torch.Tensor | None = None, wcatT: torch.Tensor | None = None,
+    cnT: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dx, dcond, dwc, [dWs; dWb] as one [2 d, dc] fp32 tensor, dbs (empty without a scale bias)) from dy2 [r, d] and the forward's saved rows. ``dres`` / ``dcres``: gradients of the
     stream outputs (x, cond returned as they are for a caller that adds them to something later), which join dx / dcond inside the row kernels that
@@ -206,7 +221,10 @@ def _bwd(
         dwcat = torch.mm(dsb.t(), cn, out_dtype=torch.float32)  # [2 d, dc]
     else:  # TF32: the layouts cuBLAS runs fastest (measured at 18432 rows: dW 148 -> 119 us, dcn 127 -> 91 us)
         dcn = torch.mm(dsb, wcatT.t())
-        dwcat = torch.mm(cn.t(), dsb).t()  # [2 d, dc]
+        if cnT is not None and cnT.numel() > 0:   # the smaller operand K-major (written by ln_cond_fwd_t): the GEMM comes out [2 d, dc], no transposing copy after it
+            dwcat = torch.mm(dsb.t(), cnT[:, :cn.shape[0]].t())
+        else:
+            dwcat = torch.mm(cn.t(), dsb).t()  # [2 d, dc]
     dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous(), dcres)
     from .infer import colsum, colsum2   # fixed-order column sums of the block partials: one launch each instead of a PyTorch reduction
 
@@ -228,23 +246,23 @@ class _AdaLN(torch.autograd.Function):
 
             y, cn, stc, stx, sb, wcat = infer.fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c,
                                                   infer.pick_ht(x2.shape[0], d, infer.num_sms(x2.device)))
-            wcatT = wcat.new_empty(0)
+            wcatT = cnT = wcat.new_empty(0)
         else:
-            y, cn, stc, stx, sb, wcat, wcatT = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
+            y, cn, stc, stx, sb, wcat, wcatT, cnT = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
         if any(ctx.needs_input_grad):
             # the weights are saved too: autograd then refuses an in-place update between the passes
-            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, wcatT, *([] if bs is None else [bs]))
+            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, wcatT, cnT, *([] if bs is None else [bs]))
             ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
         return (y.view(x.shape), x.view_as(x), cond.view_as(cond)) if streams else y.view(x.shape)
 
     @staticmethod
     def backward(ctx, dy, dxs=None, dcs=None):  # noqa: D102
-        x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, wcatT, *rest = ctx.saved_tensors
+        x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, wcatT, cnT, *rest = ctx.saved_tensors
         bs = rest[0] if ctx.has_bs else None
         dy2 = dy.reshape(-1, x2.shape[-1]).contiguous()
         dres = None if dxs is None else dxs.reshape(-1, x2.shape[-1]).contiguous()
         dcres = None if dcs is None else dcs.reshape(-1, c2.shape[-1]).contiguous()
-        dx, dcond, dwc, dwcat, dbs = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres, wcat, wcatT)
+        dx, dcond, dwc, dwcat, dbs = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres, wcat, wcatT, cnT)
         d = x2.shape[-1]
         return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dwcat[:d], (dbs if ctx.has_bs else None), dwcat[d:], None, None, None, None
 

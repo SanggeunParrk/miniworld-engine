@@ -79,6 +79,7 @@ def _call(m, x, c, bf16):
 # (d, dc, rows): 3 x 700 rows is not a multiple of the 64-row tile of the atom kernels; 2 x 4 x 128 rows exercise the multi-tile loops
 ATOM = (128, 128, (3, 700))
 ESM = (768, 768, (2, 160))
+TOK = (768, 384, (2, 160))   # the 384-wide cond: LN(cond)^T from ln_cond_fwd_t_k is the K-major operand of the AdaLN weight gradient
 
 
 @pytest.mark.parametrize("op", ["adaln", "ct"])
@@ -117,7 +118,7 @@ def test_atom_width_inference(op, bf16, graph):
         assert _has(names, "expand_swiglu_k", "squeeze_gate_k"), names
 
 
-@pytest.mark.parametrize("cfg", [ATOM, ESM], ids=["atom", "token_c768"])
+@pytest.mark.parametrize("cfg", [ATOM, ESM, TOK], ids=["atom", "token_c768", "token_c384"])
 @pytest.mark.parametrize("op", ["adaln", "ct"])
 @pytest.mark.parametrize("bf16", [True, False], ids=["bf16", "fp32"])
 def test_training_gradients_and_kernels(cfg, op, bf16):
@@ -153,10 +154,14 @@ def test_training_gradients_and_kernels(cfg, op, bf16):
     names = _kernels(lambda: run(m, x, c, bf16))
     if cfg is ATOM:
         assert _has(names, "adaln_atom_k", "adaln_dgrad_atom_k"), names
-    elif not bf16:
+    elif not bf16 and cfg is ESM:
         assert _has(names, "adaln_bwd_t_k", "pack_f32_k"), names   # the feature-major row pass; the one-launch weight packing
+    elif not bf16 and cfg is TOK and op == "adaln":
+        assert _has(names, "ln_cond_fwd_t_k", "pack_f32_k"), names   # the K-major copy of LN(cond) comes out of the forward row pass
     if op == "ct" and not bf16:
         assert _has(names, "pack_f32_k"), names
+        if cfg is not ATOM:
+            assert _has(names, "sigmul_bwd_x_k"), names   # dout^T (K-major left operand of dWs) comes out of the gate backward; x^T is a pack_f32 transposition
     assert not any("_kernel" in k and k.startswith("_") for k in names), names   # no Triton kernel
 
 

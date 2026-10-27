@@ -91,6 +91,44 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const T* __restrict__ 
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
+// ln_cond_fwd with the K-major copy of its output: CNT [N, ldd] (row f: feature f of LN(cond) * wc, one column per activation row), written through shared-memory tiles of
+// 32 rows (tpose.cuh). The fp32 weight gradient dW = dsb^T cn then runs as G^T (cnT)^T, the one TF32 layout cuBLAS runs at ~300 TFLOP/s for a left operand it must read MN-major;
+// the copy costs one more write of cn (a separate transposing kernel read it again as well). Same arithmetic as ln_cond_fwd_k.
+template <int N>
+__global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_t_k(const float* __restrict__ C, const float* __restrict__ W, float* __restrict__ CN, float2* __restrict__ ST,
+                                                            float* __restrict__ CNT, long ldd, long R, float eps) {
+  extern __shared__ float Ts[];
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+  const long m0 = (long)blockIdx.x * tpose::TR;
+  const int rows = (int)min((long)tpose::TR, R - m0);
+#pragma unroll
+  for (int q = 0; q < tpose::TR / WPB; ++q) {
+    const int rl = q * WPB + wp;
+    if (rl < rows) {
+      const long row = m0 + rl;
+      float v[N / 32], mean, rstd;
+      ld_row<N>(C + row * N, lane, v);
+      stats<N>(v, eps, mean, rstd);
+#pragma unroll
+      for (int k = 0; k < N / 128; ++k) {
+        const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+        v[4 * k] = (v[4 * k] - mean) * rstd * w.x;
+        v[4 * k + 1] = (v[4 * k + 1] - mean) * rstd * w.y;
+        v[4 * k + 2] = (v[4 * k + 2] - mean) * rstd * w.z;
+        v[4 * k + 3] = (v[4 * k + 3] - mean) * rstd * w.w;
+      }
+      st_row<N>(CN + row * N, lane, v);
+      if (lane == 0) ST[row] = make_float2(mean, rstd);
+#pragma unroll
+      for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) tpose::put(Ts, 4 * (lane + 32 * k) + j, rl, v[4 * k + j]);
+    }
+  }
+  __syncthreads();
+  tpose::flush(Ts, CNT, ldd, 0, N, (int)m0, rows, wp, WPB, lane);
+}
+
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X, const T* __restrict__ SB, T* __restrict__ Y,
                                                         float2* __restrict__ ST, long R, float eps) {
@@ -367,6 +405,32 @@ std::vector<at::Tensor> ln_cond_fwd(at::Tensor cond, at::Tensor w, double eps) {
   return {cn, st};
 }
 
+// fp32: (cn, stats, cnT [N, ldd] with ldd = R rounded up to 32; use cnT[:, :R])
+std::vector<at::Tensor> ln_cond_fwd_t(at::Tensor cond, at::Tensor w, double eps) {
+  chk(cond, at::kFloat, "cond");
+  chk(w, at::kFloat, "wc");
+  const long N = w.numel(), R = cond.numel() / N;
+  TORCH_CHECK(N == 256 || N == 384 || N == 512 || N == 768, "ln_cond_fwd_t: width 256 / 384 / 512 / 768");
+  const at::cuda::CUDAGuard gd(cond.device());
+  const long ldd = (R + 31) / 32 * 32;
+  auto cn = at::empty_like(cond);
+  auto st = at::empty({R, 2}, cond.options());
+  auto cnt = at::empty({N, ldd}, cond.options());
+  const size_t shm = (size_t)N * tpose::LD * sizeof(float);
+  const unsigned grid = (unsigned)((R + 31) / 32);
+#define LT(NN)                                                                                                                                         \
+  do {                                                                                                                                                 \
+    auto k = ln_cond_fwd_t_k<NN>;                                                                                                                       \
+    C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm));                                                    \
+    k<<<grid, 32 * WPB, shm, S()>>>(cond.data_ptr<float>(), w.data_ptr<float>(), cn.data_ptr<float>(), reinterpret_cast<float2*>(st.data_ptr()),         \
+                                    cnt.data_ptr<float>(), ldd, R, (float)eps);                                                                          \
+  } while (0)
+  if (N == 256) LT(256); else if (N == 384) LT(384); else if (N == 512) LT(512); else LT(768);
+#undef LT
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {cn, st, cnt};
+}
+
 std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   chk_act(x, "x");
   TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
@@ -534,6 +598,7 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_cond_fwd", &ln_cond_fwd);
+  m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
   m.def("adaln_fwd", &adaln_fwd);
   m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
   m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
