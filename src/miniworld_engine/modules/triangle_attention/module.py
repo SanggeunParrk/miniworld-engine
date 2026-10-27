@@ -13,7 +13,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from jaxtyping import Bool, Float
 
-from miniworld_engine import kernels
+from miniworld_engine import kernels, settings
 from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import h100_master as _master
 from miniworld_engine.integrations import triattn_b200 as _b200
@@ -206,6 +206,7 @@ class TriangleAttention(nn.Module):
                 getattr(self, "_fuse_bias_backward", True)
                 and torch.is_grad_enabled()
                 and not self.use_qk_norm
+                and not settings.current().force_portable_kernels  # hand-CUDA grouped-bias backward: not on the portable rung
             ):
                 from miniworld_engine.kernels.triangle_attention.cuda.bias_backward import (
                     attention,

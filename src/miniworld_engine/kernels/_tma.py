@@ -12,6 +12,7 @@ A ``TMA`` config of a kernel is only launched where ``tma_launchable`` holds: sm
 from __future__ import annotations
 
 import functools
+import os
 
 import torch
 import triton
@@ -34,6 +35,8 @@ def num_sms(index: int) -> int:
 
 def tma_capable(device: torch.device) -> bool:
     if device.type != "cuda" or not hasattr(tl, "make_tensor_descriptor"):
+        return False
+    if os.environ.get("MINIWORLD_PORTABLE_NO_TMA"):  # the A/B and test hook that sends every TMA kernel to its pointer-based form
         return False
     return torch.cuda.get_device_capability(device)[0] >= 9
 

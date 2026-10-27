@@ -2,15 +2,12 @@
 from miniworld_engine.kernels._compile import opaque
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/layernorm.py
 from miniworld_engine.autotune.configs import configs_for
-import os
-
 import torch
 import triton
 import triton.language as tl
 
 
 from miniworld_engine.autotune.shape_key import both_key, length_of, rows_of, pack
-from miniworld_engine import settings
 
 
 def get_seq_group(length) -> int:
@@ -19,22 +16,7 @@ def get_seq_group(length) -> int:
     return bucket_mixed(length)
 
 
-# Opt-in: route the LN backward (dx/dw/db) through the hand-CUDA warp-per-row kernel for the regime
-# where it beats the triton atomic path STANDALONE (bf16, 128<=N<=512, contiguous, no per-row
-# scale) — measured ~1.1x over the triton atomic bwd on B200. DEFAULT OFF because the win is
-# e2e-NEUTRAL in the trimul training graph: LN_in bwd is ~7% of the step and the CUDA path's second
-# (reduce) kernel launch eats the ~12% compute win at these M (verified graph-time delta within
-# run-to-run noise at L=384/768/1024). Enabling also forces the one-time nvcc JIT build on first
-# `triton_layernorm` import. Set settings.layernorm_cuda_bwd to use it (kernels/layernorm/cuda/ now
-# gencodes sm_80/90/100 + PTX so the ext loads and runs on B200).
-def _ln_cuda_bwd_enabled() -> bool:
-    """Read at call time; see compile_native._ln_bwd_override."""
-    return settings.current().layernorm_cuda_bwd
-
-
-
-
-
+# (The hand-CUDA warp-per-row LN backward is NOT here: it lives in kernels/layernorm/cuda/masked_bwd.py and is chosen by the caller.)
 
 # The two shipped kernels (`layer_norm_fwd_fused`, `layer_norm_bwd_dx_fused`) tile the FEATURE
 # axis too. It used to arrive as BLOCK_N = triton.next_power_of_2(N) from every launch site — the
@@ -385,8 +367,8 @@ def _ln_bwd_fake(dy_2d, x, weight, mean, rstd, rs, has_rs, input_shape, shape_ke
     """``dx`` at the forward's PRE-flatten ``input_shape`` (not ``dy_2d``'s flat (M, N)), plus
     ``dweight`` and ``dbias`` as (N,) fp32.
 
-    Both of the body's paths agree on that: the triton one allocates fp32 accumulators, and the
-    hand-CUDA one calls ``.float()`` on its results before returning them.
+    The Triton body allocates fp32 accumulators; the hand-CUDA backward in ``cuda/masked_bwd.py`` shares this fake and
+    calls ``.float()`` on its results.
     """
     n = x.shape[-1]
     return (
@@ -412,33 +394,10 @@ def _ln_bwd(
 
     Split out of ``TritonLayerNormFunction.backward`` (see ``kernels._compile``). It returns only
     the three real gradients -- a ``torch.library`` schema cannot return ``None``, so the caller
-    re-adds the two ``None`` slots that ``eps`` and ``row_scale`` need. Both the hand-CUDA and the
-    Triton path live in here, so which one a card takes is invisible to the compiled graph -- as it
-    must be, since the fake cannot know.
+    re-adds the two ``None`` slots that ``eps`` and ``row_scale`` need. The Triton backward only.
     """
     x = x.to(dy_2d.dtype)
     M, N = x.shape
-
-    # Hand-CUDA warp-per-row backward (register column-partials, no atomics/shared/spill).
-    # It now supports the row_scale (AF pair-mask) fold: the CUDA kernel scales the incoming
-    # grad by rs per row (dx/dw/db follow, cos=1.0 vs triton). Measured B200 (M=L², N=128,
-    # fwd+bwd of triton_layernorm):
-    #   MASKED (has_rs): CUDA beats triton 1.17x @L512, 1.28x @L1024 — triton pays a real
-    #                    rowscale penalty (+26% bwd) that the CUDA path (one FMA) avoids.
-    #   DENSE  (no rs):  ~neutral (1.00x @L512, 1.07x @L1024) and slightly SLOWER at L384.
-    # So auto-take CUDA for the masked path (always wins), but keep dense behind the opt-in
-    # env flag. Lazy import so the nvcc JIT build only triggers when this path is taken; any
-    # build/run failure falls through to triton.
-    if ((not settings.current().force_portable_kernels) and x.dtype == torch.bfloat16 and 128 <= N <= 512 and (has_rs or _ln_cuda_bwd_enabled())):
-        try:
-            from ..cuda import layer_norm_bwd_cuda
-            dx_c, dw_c, db_c = layer_norm_bwd_cuda(
-                dy_2d, x.contiguous(), weight, mean, rstd,
-                row_scale=rs if has_rs else None,
-            )
-            return dx_c.view(tuple(input_shape)), dw_c.float(), db_c.float()
-        except Exception:  # noqa: BLE001 - portable triton fallback on any CUDA-path failure
-            pass
 
     # allocate output
     dx_2d = torch.empty_like(dy_2d)

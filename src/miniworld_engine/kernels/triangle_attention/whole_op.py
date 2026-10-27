@@ -47,7 +47,7 @@ def triangle_attention(
     ``transposed_bias`` (ending node only): ``True`` projects the pair bias from the transposed pair; ``False`` keeps AlphaFold 3's
     released orientation, the bias of the pair as it is read in the transposed frame.
     """
-    from miniworld_engine.kernels.triangle_attention.triton.main import (
+    from miniworld_engine.kernels.triangle_attention.interface import (
         triton_triangle_attention_pair_bias,
     )
 

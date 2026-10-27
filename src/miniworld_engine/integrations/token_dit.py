@@ -353,9 +353,16 @@ def _infer(
             return cuda.token_inference(
                 single, cond, pair.contiguous(), mask, weights, qk, eq, ek, heads, extra
             )
-    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
-        FusedTokenDiT,
-    )
+    # The caller picks the runner class: the pure-Triton one under force_portable_kernels, else the one with the hand-CUDA rows /
+    # SwiGLU GEMM / attention cores of the card (it degrades to the Triton hooks where the card has none).
+    if settings.current().force_portable_kernels:
+        from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
+            FusedTokenDiT,
+        )
+    else:
+        from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
+            FusedTokenDiTComposed as FusedTokenDiT,
+        )
 
     def build():
         block = SimpleNamespace()
