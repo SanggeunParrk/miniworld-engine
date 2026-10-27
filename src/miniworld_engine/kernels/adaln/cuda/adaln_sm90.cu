@@ -411,7 +411,7 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
       for (int kb = 0; kb < KB; ++kb) tma_load_2d(Wm + kb * WSLAB, &mW, wfull, kb * BC, 0);
     }
     int i = 0;
-    for (int t = (int)blockIdx.x * 2 + cw; t < ntiles; t += stride, ++i) {
+    for (int t = (int)blockIdx.x + cw * (int)gridDim.x; t < ntiles; t += stride, ++i) {
       const int m0 = t * 64;
       if (i > 0) mbar_wait(ydone + cw, (i - 1) & 1u);
       mbar_arrive_expect_tx(cfull + cw, C::BUF);
@@ -470,7 +470,7 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
   else if (wtid < 64) *reinterpret_cast<float4*>(bs_s + 4 * (wtid - 32)) = *reinterpret_cast<const float4*>(bs + 4 * (wtid - 32));
   named_bar_sync(1 + cw, 128);
   int i = 0;
-  for (int t = (int)blockIdx.x * 2 + cw; t < ntiles; t += stride, ++i) {
+  for (int t = (int)blockIdx.x + cw * (int)gridDim.x; t < ntiles; t += stride, ++i) {
     const int m0 = t * 64;
     mbar_wait(cfull + cw, i & 1u);
     // ---- LN(cond) in place (the A operand of the GEMM)
@@ -601,7 +601,7 @@ void run_atom(const at::Tensor& cond, const at::Tensor& lnw, const at::Tensor& x
              mA = map2d(SV ? aff->data_ptr() : y.data_ptr(), F32, M, 128, 128, C::BC, 64);
   auto k = adaln_atom_k<F32, SV, RNA>;
   cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM);
-  const int tiles2 = (int)((M + 127) / 128);
+  const int tiles2 = (int)((M + 63) / 64);   // one 64-row tile a warpgroup; one CTA a tile while the tiles are fewer than the SMs
   launch(k, (unsigned)std::min(tiles2, sms), 384u, (size_t)C::SMEM, false, mC, mW, mX, mY, mA, (const float*)lnw.data_ptr(), (const float*)bs.data_ptr(),
          SV ? (float2*)stx->data_ptr() : (float2*)nullptr, SV ? (float2*)stc->data_ptr() : (float2*)nullptr, SV ? (T<F32>*)sb->data_ptr() : (T<F32>*)nullptr, (int)M,
          (float)eps_c, (float)eps_x);
@@ -655,7 +655,7 @@ adaln_dgrad_atom_k(const __grid_constant__ CUtensorMap mA, const __grid_constant
       for (int kb = 0; kb < KB; ++kb) tma_load_2d(Wm + kb * WSLAB, &mW, wfull, kb * BC, 0);
     }
     uint32_t it = 0;
-    for (int t = (int)blockIdx.x * 2 + cw; t < ntiles; t += stride) {
+    for (int t = (int)blockIdx.x + cw * (int)gridDim.x; t < ntiles; t += stride) {
       const int m0 = t * 64;
       for (int kb = 0; kb < KB; ++kb, ++it) {
         const int s = (int)(it % NS);
@@ -676,14 +676,14 @@ adaln_dgrad_atom_k(const __grid_constant__ CUtensorMap mA, const __grid_constant
 #pragma unroll
   for (int e = 0; e < 32; ++e) part[e] = 0.f;
   uint32_t it = 0;
-  for (int t = (int)blockIdx.x * 2 + cw; t < ntiles; t += stride) {
+  for (int t = (int)blockIdx.x + cw * (int)gridDim.x; t < ntiles; t += stride) {
     const int m0 = t * 64;
     const int rowA = m0 + ea, rowB = m0 + eb;
     const float2 sA = rowA < M ? st[rowA] : make_float2(0.f, 1.f), sB = rowB < M ? st[rowB] : make_float2(0.f, 1.f);
     float acc[64];
 #pragma unroll
     for (int e = 0; e < 64; ++e) acc[e] = 0.f;
-    if (t == (int)blockIdx.x * 2 + cw) mbar_wait(wfull, 0);
+    if (t == (int)blockIdx.x + cw * (int)gridDim.x) mbar_wait(wfull, 0);
     int prev = -1;
     for (int kb = 0; kb < KB; ++kb, ++it) {
       const int s = (int)(it % NS);
@@ -796,7 +796,7 @@ std::vector<torch::Tensor> adaln_dgrad_atom(torch::Tensor dsb, torch::Tensor wt,
   if (add) TORCH_CHECK(add->scalar_type() == dt && add->is_contiguous() && add->numel() == c.numel(), "add");
   const at::cuda::CUDAGuard guard(c.device());
   auto dc = at::empty_like(c);
-  const int grid = (int)std::min<int64_t>((c.size(0) + 127) / 128, sms);
+  const int grid = (int)std::min<int64_t>((c.size(0) + 63) / 64, sms);
   auto pb = at::empty({grid, 128}, c.options().dtype(at::kFloat));
   const at::Tensor* pa = add ? &*add : nullptr;
   if (dt == torch::kFloat32) { if (add) run_dgrad_atom<true, true>(dsb, wt, c, st, lnw, pa, dc, pb, grid); else run_dgrad_atom<true, false>(dsb, wt, c, st, lnw, pa, dc, pb, grid); }
