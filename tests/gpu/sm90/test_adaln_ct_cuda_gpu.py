@@ -34,14 +34,18 @@ def _settings():
 
 
 def _kernels(fn):
-    from torch.profiler import ProfilerActivity, profile
+    """The kernels one call of ``fn`` launches, read from a CUDA graph capture of it, not from the torch profiler: the profiler's
+    CUPTI session dies for good once the process has gone ~20 s without a profiled window, and this file's first calls JIT-build
+    extensions for 80-90 s (a cold cache), so every later window came back empty or without the engine's kernels -- the tests passed
+    or failed with the state of the JIT cache and with what ran before them (see ``tests/cuda_graph_nodes.py``)."""
+    from tests.cuda_graph_nodes import launched_kernels
 
-    fn()
-    torch.cuda.synchronize()
-    with profile(activities=[ProfilerActivity.CUDA]) as p:
-        fn()
-        torch.cuda.synchronize()
-    return {e.key for e in p.key_averages() if e.device_time_total > 0}
+    return set(launched_kernels(fn))
+
+
+def _is_triton(name):
+    """A Triton kernel: its driver name is the plain ``_<op>_kernel`` (C++ symbols, ATen's ``gpu_kernel_impl`` among them, are mangled ``_Z...``)."""
+    return name.startswith("_") and not name.startswith("_Z") and "_kernel" in name
 
 
 def _has(names, *needles):
@@ -97,22 +101,25 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
     pt.load_state_dict(m.state_dict())
     x, c = _inputs(dtype)
     fn = torch.compile(m) if mode == "compiled" else m
+    from tests.cuda_graph_nodes import graph_kernels
+
     with torch.no_grad():
         run = lambda: _call(fn, x, c, bf16)  # noqa: E731
         y = run()
         if mode == "graph":
             run()
             torch.cuda.synchronize()
-            g = torch.cuda.CUDAGraph()
+            g = torch.cuda.CUDAGraph(keep_graph=True)
             with torch.cuda.graph(g):
                 out = run()
             g.replay()
             torch.cuda.synchronize()
             y = out
             replay = lambda: g.replay()  # noqa: E731
+            names = set(graph_kernels(g))
         else:
             replay = run
-        names = _kernels(replay)
+            names = _kernels(replay)
         yr = ref(x.double(), c.double())
         yp = _call(pt, x, c, bf16)
         assert _err(y, yr) <= 1.5 * _err(yp, yr) + 1e-6, (_err(y, yr), _err(yp, yr))
@@ -121,7 +128,7 @@ def test_inference_launches_the_cuda_kernels_and_matches_the_reference(op, bf16,
     assert _has(names, "adaln_gemm_k", "ln_rows_k"), names
     if op == "ct":
         assert _has(names, "expand_swiglu_k", "squeeze_gate_k"), names
-    assert not any("_kernel" in k and k.startswith("_") for k in names), names   # no Triton kernel
+    assert not any(_is_triton(k) for k in names), names   # no Triton kernel
 
 
 @pytest.mark.parametrize("op", ["adaln", "ct"])
@@ -157,7 +164,7 @@ def test_training_gradients_match_the_reference(op, bf16, compiled):
     assert _has(names, "ln_rows_k") or _has(names, "ln_cond_fwd_k"), names
     if op == "ct":
         assert _has(names, "sigmul_bwd_k"), names
-    assert not any("_kernel" in k and k.startswith("_") for k in names), names
+    assert not any(_is_triton(k) for k in names), names
 
 
 @pytest.mark.parametrize("op", ["adaln", "ct"])
@@ -180,4 +187,4 @@ def test_the_ab_switch_runs_the_portable_kernels(op, monkeypatch):
     with torch.no_grad():
         names = _kernels(lambda: m(x, c))
     assert launches, "no Triton kernel launched"
-    assert not any(k.startswith(("adaln_gemm_k", "expand_swiglu_k", "squeeze_gate_k")) or "ln_rows_k" in k for k in names), names
+    assert not any(k.startswith("_Z") and n in k for k in names for n in ("adaln_gemm_k", "expand_swiglu_k", "squeeze_gate_k", "ln_rows_k")), names
