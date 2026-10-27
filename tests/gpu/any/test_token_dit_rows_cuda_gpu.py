@@ -110,7 +110,7 @@ def test_runner_takes_the_cuda_rows_on_b200():
     from types import SimpleNamespace
 
     from miniworld_engine.kernels.conditioned_transition import cuda as C
-    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
+    from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
         _row_kernels,
     )
 

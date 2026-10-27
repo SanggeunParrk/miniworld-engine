@@ -14,10 +14,9 @@ raw-op benches, ``ConditionedTransition`` and the drivers.
 
 from __future__ import annotations
 
-from miniworld_engine.kernels.transition.triton.fused import (
-    triton_swiglu_ffn,
-    triton_transition_fused,
-)
+from miniworld_engine import settings
+from miniworld_engine.kernels.transition.triton import fused as _triton_fused
+from miniworld_engine.kernels.transition.triton.fused import triton_swiglu_ffn
 from miniworld_engine.kernels.transition.triton.main import triton_transition
 
 __all__ = [
@@ -25,3 +24,14 @@ __all__ = [
     "triton_transition",
     "triton_transition_fused",
 ]
+
+
+def triton_transition_fused(x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps=1e-5, save_xn=False):
+    """``y = x + transition(x)`` with the LayerNorm folded in. The caller-side choice of the stages lives here: the portable Triton
+    function (``triton/fused.py``, pure Triton) under ``settings.force_portable_kernels``, else the same function with the hand-CUDA
+    stages plugged in where they apply (``cuda/train_route.py``)."""
+    if settings.current().force_portable_kernels:
+        return _triton_fused.triton_transition_fused(x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn)
+    from miniworld_engine.kernels.transition.cuda import train_route
+
+    return train_route.triton_transition_fused(x, ln_weight, ln_bias, expand_a_weight, expand_b_weight, squeeze_weight, n, eps, save_xn)

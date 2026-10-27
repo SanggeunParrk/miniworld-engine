@@ -29,6 +29,11 @@ def layer_norm(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor 
     if x.is_cuda and portable_blocked("layernorm", x.device, x, *(t for t in (weight, bias) if t is not None)):
         out = F.layer_norm(x, (x.shape[-1],), weight, bias, eps)
         return out if row_scale is None else out * row_scale.reshape(*x.shape[:-1], 1).to(out.dtype)
+    # The caller picks the backward: the hand-CUDA warp-per-row one (B200-measured, masked / opted-in bf16 N 128..512) or the Triton one.
+    from miniworld_engine.kernels.layernorm.cuda.masked_bwd import layernorm_cuda_bwd_autograd, use_cuda_bwd
+
+    if use_cuda_bwd(x, row_scale):
+        return layernorm_cuda_bwd_autograd(x, weight, bias, eps, row_scale)
     from miniworld_engine.kernels.layernorm.triton.main import triton_layernorm
 
     return triton_layernorm(x, weight, bias, eps, row_scale)
