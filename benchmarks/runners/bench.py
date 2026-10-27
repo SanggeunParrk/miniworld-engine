@@ -164,6 +164,10 @@ class BenchConfig(BaseModel):
     repeats: int = 1
     #: triangle_multiplication(_bidirectional): hidden width of the module (None = d_pair; Protenix / FoldForge templates: pair 64, hidden 128).
     trimul_d_hidden: int | None = None
+    #: transition: expansion factor (the conditioning transitions of the registry run n = 2; the trunk ones n = 4) and the stream: "pair" = [1, L, L, d],
+    #: "single" = [1, L, d] (the token conditioning). `d_pair` is the width in both cases.
+    transition_n: int = 4
+    transition_stream: Literal["pair", "single"] = "pair"
     #: ladder_ops target: which op (`benchmarks/runners/ladder_ops.py`: geom, ca, adaln, tpi, smooth_lddt, sampler_*, layernorm, rmsnorm).
     ladder_op: str = ""
     #: dit: add a random [L, L] `extra_pair_bias` to every head's logits (DiTBlock's keyword; the H100 bf16 path folds it into its bias).
@@ -1584,7 +1588,7 @@ def bench_module_transition(
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    cls(conf.d_pair, implementation=layer_spec.impl)
+                    cls(conf.d_pair, n=conf.transition_n, implementation=layer_spec.impl)
                     for _ in range(conf.n_layers)
                 ],
             )
@@ -1597,7 +1601,7 @@ def bench_module_transition(
     torch.manual_seed(0)
     layer_states = []
     for _ in range(conf.n_layers):
-        base = Transition(conf.d_pair, implementation=ImplementationType.PYTORCH)
+        base = Transition(conf.d_pair, n=conf.transition_n, implementation=ImplementationType.PYTORCH)
         # `squeeze` is zero-initialised, which makes every output equal to its residual input and
         # every accuracy column vacuous (an implementation computing any update at all would
         # still match). Non-zero weights make the comparison against the reference mean something.
@@ -1629,7 +1633,8 @@ def bench_module_transition(
     ref_model = fabric.setup_module(ref_model)
 
     torch.manual_seed(1)
-    x = torch.randn(1, seq_len, seq_len, conf.d_pair, device=DEVICE, dtype=dtype)
+    x_shape = (1, seq_len, conf.d_pair) if conf.transition_stream == "single" else (1, seq_len, seq_len, conf.d_pair)
+    x = torch.randn(*x_shape, device=DEVICE, dtype=dtype)
     dy = torch.randn_like(x)
     x.requires_grad = True
 

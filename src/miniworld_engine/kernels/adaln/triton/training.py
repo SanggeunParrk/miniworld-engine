@@ -21,7 +21,7 @@ mirror of the forward's single fused GEMM.
 
 from __future__ import annotations
 
-from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
@@ -218,13 +218,13 @@ def _epilogue_train(x: torch.Tensor, sb: torch.Tensor, eps: float,
 # it is a CSV tile, and the row reduction is what makes this a two-pass kernel.
 
 
-@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=['shape_key'])
+@triton.autotune(configs=configs_for("adaln_bwd_pre_dx_triton"), key=["shape_key", "HAS_DSB"], reset_to_zero=["DSB"])
 @triton.jit
 def _bwd_x_kernel(
     DY, X, MeanX, RstdX, Gate, D, DX, M, N: tl.constexpr,
     sy0, sy1, sx0, sx1, sg0, sg1, sd0, sd1, sdx0, sdx1,
     BLOCK_M1: tl.constexpr, BLOCK_K: tl.constexpr, shape_key,
-    DRES=None, sr0=0, sr1=0, HAS_DRES: tl.constexpr = False):
+    DRES=None, sr0=0, sr1=0, HAS_DRES: tl.constexpr = False, DSB=None, HAS_DSB: tl.constexpr = False):
     # HAS_DRES: DRES (M, N) is a gradient that joins dx on its way out (the residual stream's), added in fp32 before the one rounding
     row = tl.program_id(0).to(tl.int64)
     rm = row * BLOCK_M1 + tl.arange(0, BLOCK_M1)
@@ -258,6 +258,8 @@ def _bwd_x_kernel(
         daddr = cols[None, :] * sd0 + rm[:, None] * sd1
         tl.store(D + daddr, dscale.to(D.dtype.element_ty), mask=mask)
         tl.store(D + daddr + N * sd0, dy.to(D.dtype.element_ty), mask=mask)
+        if HAS_DSB:   # dsb = column sums of dscale, folded in here (one atomic per column per program) instead of a reduction over D afterwards
+            tl.atomic_add(DSB + cols, tl.sum(tl.where(mask, dscale, 0.0), axis=0), mask=cmask, sem="relaxed")
         dxhat = dy * gate
         c2 = tl.sum(tl.where(cmask[None, :], dxhat, 0.0), axis=1) * inv_n
         c1 = tl.sum(tl.where(cmask[None, :], dxhat * x_hat, 0.0), axis=1) * inv_n
@@ -282,6 +284,8 @@ def _bwd_x_kernel(
             daddr = cols[None, :] * sd0 + rm[:, None] * sd1
             tl.store(D + daddr, dscale.to(D.dtype.element_ty), mask=mask)
             tl.store(D + daddr + N * sd0, dy.to(D.dtype.element_ty), mask=mask)
+            if HAS_DSB:
+                tl.atomic_add(DSB + cols, tl.sum(tl.where(mask, dscale, 0.0), axis=0), mask=cmask, sem="relaxed")
             dxhat = dy * gate
             c2 += tl.sum(tl.where(cmask[None, :], dxhat, 0.0), axis=1)
             c1 += tl.sum(tl.where(cmask[None, :], dxhat * x_hat, 0.0), axis=1)
@@ -311,7 +315,7 @@ def _d_row_major(dy, n):
     return n >= 256 and dy.dtype == torch.bfloat16
 
 
-def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None):
+def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None, fold_dsb=False):
     """D (2N, M) -- a view of an (M, 2N) buffer at the token width in bf16 (see ``_d_row_major``), else contiguous so the wgrad consuming it is a
     contiguous-K GEMM -- and dx (M, N) carrying x's strides, since dx is written in x's layout rather than contiguous."""
     m, n = dy.shape
@@ -319,13 +323,14 @@ def _bwd_x_fake(dy, x, mean_x, rstd_x, gate, shape_key=None, dres=None):
         dy.new_empty((m, 2 * n)).t() if _d_row_major(dy, n) else dy.new_empty((2 * n, m)),
         # dx is written in x's layout, so the fake carries x's strides.
         torch.empty_strided((m, n), x.stride(), device=dy.device, dtype=dy.dtype),
+        dy.new_empty((n,), dtype=torch.float32),   # dsb (column sums of dscale; only filled when fold_dsb)
     )
 
 
 @opaque(fake=_bwd_x_fake, name="adaln_bwd_x")
 def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torch.Tensor,
-           gate: torch.Tensor, shape_key: int | None = None, dres: torch.Tensor | None = None,
-           ) -> tuple[torch.Tensor, torch.Tensor]:
+           gate: torch.Tensor, shape_key: int | None = None, dres: torch.Tensor | None = None, fold_dsb: bool = False,
+           ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Returns D=(2N,M) [dscale;dy stacked on the 2N axis] and dx=(M,N) (x's layout), one kernel.
     D's (2N,M) layout is chosen so the wgrad D@cond_aff is a contiguous-K GEMM (see kernel note)."""
     M, N = dy.shape
@@ -340,6 +345,7 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
     D = (torch.empty(M, 2 * N, device=dy.device, dtype=dy.dtype).t() if _d_row_major(dy, N)
          else torch.empty(2 * N, M, device=dy.device, dtype=dy.dtype))   # (2N, M)
     dx = torch.empty_strided((M, N), x.stride(), device=dy.device, dtype=dy.dtype)
+    dsb = torch.zeros(N, device=dy.device, dtype=torch.float32)   # the kernel adds into it when fold_dsb
     args = (dy, x, mean_x, rstd_x, gate, D, dx, M, int(N),
             dy.stride(0), dy.stride(1), x.stride(0), x.stride(1),
             gate.stride(0), gate.stride(1), D.stride(0), D.stride(1),
@@ -365,10 +371,11 @@ def _bwd_x(dy: torch.Tensor, x: torch.Tensor, mean_x: torch.Tensor, rstd_x: torc
     # at the row count that makes it win, and record WHY in the cache instead of in a comment.
     grid = lambda META: (triton.cdiv(M, META["BLOCK_M1"]),)  # noqa: E731
     if dres is None:
-        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N))
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DSB=dsb, HAS_DSB=fold_dsb)
     else:   # dx += dres in the same pass (the residual stream's gradient)
-        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DRES=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DRES=True)
-    return D, dx
+        _bwd_x_kernel[grid](*args, shape_key=pack(shape_key, N=N), DRES=dres, sr0=dres.stride(0), sr1=dres.stride(1), HAS_DRES=True,
+                            DSB=dsb, HAS_DSB=fold_dsb)
+    return D, dx, dsb
 
 
 # ─── fused dgrad + cond LN-backward: dcond_aff = Dᵀ@W_cat (in-kernel GEMM) → dcond, dlnw ───
@@ -669,9 +676,19 @@ def set_forward_mode(name: str) -> None:
     _FWD_MODE = name
 
 
-def _pick_fwd(nx: int) -> str:
-    """Measured-best forward by width: token (nx > _ATOM_D_MAX) -> fused, atom -> cublas."""
-    return "fused" if nx > _ATOM_D_MAX else "cublas"
+@device_constant
+def _cublas_class(device) -> bool:
+    """Is this a card whose cuBLAS TF32 / bf16 GEMMs are so far ahead of a Triton `tl.dot` that the atom width is routed around the in-kernel
+    GEMM of the dgrad (H100, B200: sm90 and later)? Plain compute-capability routing, not a feature the kernels use. The older cards keep the
+    choice that was measured on them (A6000: the fused dgrad 1.17x PyTorch, the cuBLAS-materialised forward at the atom width).
+    Measured on an H100, fp32 and bf16, atoms 1024..8192: fused dgrad 389 us vs cuBLAS dgrad + LN backward 206 us at 4096 atoms."""
+    return device is not None and device.type == "cuda" and torch.cuda.get_device_capability(device)[0] >= 9
+
+
+def _pick_fwd(nx: int, device=None) -> str:
+    """Measured-best forward by width: token (nx > _ATOM_D_MAX) -> fused; atom -> fused on sm90+ (the GEMM+gate kernel beats the cuBLAS sb GEMM
+    plus epilogue there: 4096 atoms fp32 0.99 -> 0.84 of PyTorch together with the dgrad change), cublas on the older cards."""
+    return "fused" if nx > _ATOM_D_MAX or _cublas_class(device) else "cublas"
 
 
 class AdaLNTrainFn(torch.autograd.Function):
@@ -717,7 +734,7 @@ class AdaLNTrainFn(torch.autograd.Function):
         # Both branches emit `gate` (and mean_x, rstd_x) for the backward. `tl.dot` always runs
         # TF32, so strict fp32 (allow_tf32 off) must keep the cuBLAS epilogue whatever the mode --
         # the fused kernel would silently give TF32 numbers.
-        mode = _pick_fwd(nx) if _FWD_MODE == "auto" else _FWD_MODE
+        mode = _pick_fwd(nx, x.device) if _FWD_MODE == "auto" else _FWD_MODE
         tf32_ok = x.dtype in (torch.float16, torch.bfloat16) or (
             x.dtype == torch.float32 and torch.backends.cuda.matmul.allow_tf32
         )
@@ -781,17 +798,21 @@ class AdaLNTrainFn(torch.autograd.Function):
             dcx = dcond_x.reshape(-1, dcond_x.shape[-1])
             if dcx.stride(-1) != 1:
                 dcx = dcx.contiguous()
-        D, dx = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate, shape_key=shape_key, dres=dres)                          # D=(2NX,M), dx=(M,NX)
+        fold_dsb = not (nx >= 256 and dy2d.dtype == torch.bfloat16)   # = not _d_row_major: that layout keeps its skinny-GEMM column sum
+        D, dx, dsb_fold = _bwd_x(dy2d, x2d, mean_x, rstd_x, gate, shape_key=shape_key, dres=dres, fold_dsb=fold_dsb)   # D=(2NX,M), dx=(M,NX)
         w_cat = saved_wcat if saved_wcat is not None else torch.cat([scale_weight, bias_weight], dim=0)
 
         dW_cat = torch.mm(D, cond_aff, out_dtype=torch.float32) if ctx.master else _mm(D, cond_aff)
-        if D.stride(0) == 1:   # row-major D (token width, bf16): a column sum over strided rows is a skinny GEMM against ones, which reads it at the HBM rate
+        if fold_dsb:   # summed inside the dx kernel (fp32 atomics, one per column per program)
+            dsb = dsb_fold if ctx.master else dsb_fold.to(D.dtype)
+        elif D.stride(0) == 1:   # row-major D (token width, bf16): a column sum over strided rows is a skinny GEMM against ones, which reads it at the HBM rate
             ones = D.new_ones(1, D.shape[1])
             dsb = (torch.mm(ones, D[:nx].t(), out_dtype=torch.float32) if ctx.master else torch.mm(ones, D[:nx].t())).view(-1)
         else:
             dsb = D[:nx].sum(dim=1, dtype=torch.float32 if ctx.master else D.dtype)
 
-        use_triton = (cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX) if _DGRAD_TRITON is None else _DGRAD_TRITON
+        use_triton = ((cond2d.shape[1] <= _DGRAD_TRITON_NC_MAX and not _cublas_class(cond2d.device))
+                      if _DGRAD_TRITON is None else _DGRAD_TRITON)
         if use_triton:
             # FUSED triton: dcond_aff = Dᵀ@w_cat (in-kernel GEMM) + cond LN-backward in ONE kernel.
             dcond, dlnw = _dgrad_condln(D, w_cat, cond2d, mean_c, rstd_c, lnw,
@@ -799,7 +820,9 @@ class AdaLNTrainFn(torch.autograd.Function):
             if dcx is not None:
                 dcond = dcond + dcx
         else:
-            dcond_aff = _mm(D.t(), w_cat)                             # cuBLAS dgrad → (M,NC)
+            # fp32 (TF32): the "nn" cuBLAS kernel (right operand N-contiguous) is the slower one; a K-major copy of the (small) weight takes the "nt" kernel
+            w_dg = w_cat.t().contiguous().t() if D.dtype == torch.float32 else w_cat
+            dcond_aff = _mm(D.t(), w_dg)                              # cuBLAS dgrad → (M,NC)
             dcond, dlnw, _ = _ln_bwd(dcond_aff, cond2d, lnw, mean_c, rstd_c,
                                      list(cond2d.stride()),
                                      shape_key=both_key(rows_of(ctx.orig_cond_shape)),
