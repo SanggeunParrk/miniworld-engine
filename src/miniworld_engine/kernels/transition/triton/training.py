@@ -23,6 +23,7 @@ from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import pack
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._dot_precision import dot_precision
+from miniworld_engine.kernels._fastmath import sigmoid_fast
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 @triton.autotune(configs=configs_for("transition_bwd_squeeze_swiglu_triton"), key=["shape_key", "SAVED", "HALF"])
@@ -69,7 +70,10 @@ def _squeeze_swiglu_bwd_kernel(
     else:
         a, b = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
     dh = acc_dh.to(et).to(tl.float32)
-    sig = tl.sigmoid(a)
+    if G.dtype.element_ty == tl.bfloat16:       # dA, dB are rounded to bf16: one tanh.approx is enough (kernels/_fastmath.py)
+        sig = sigmoid_fast(a)
+    else:
+        sig = tl.sigmoid(a)
     silu = a * sig
     if not SAVED:
         tl.store(H + rows[:, None] * shm + cols[None, :], (silu * b).to(et), mask=mask)
