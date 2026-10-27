@@ -13,6 +13,7 @@ import triton.language as tl
 from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many, tf32_grid_tile
 
 from miniworld_engine.kernels._dot_precision import dot_precision
+from miniworld_engine.kernels._fastmath import sigmoid_fast
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 from jaxtyping import Float
@@ -97,7 +98,10 @@ def transition_fwd_kernel(
         acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC, pre_a=PRE and not ROUND_X, pre_b=PRE)
 
     A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
-    swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
+    if x_ptr.dtype.element_ty == tl.float32:
+        swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
+    else:       # 16-bit activations: the gate is rounded to 16 bits, one tanh.approx is enough (kernels/_fastmath.py)
+        swish_AB = (A_tile * sigmoid_fast(A_tile)) * B_tile
 
     if PRE:
         swish_AB = tf32_grid_tile(swish_AB)
