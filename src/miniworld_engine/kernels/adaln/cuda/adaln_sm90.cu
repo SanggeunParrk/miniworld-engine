@@ -260,6 +260,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       wgmma_commit();
       if (prev >= 0) { wgmma_wait<1>(); fence_regs(acc); if (wtid == 0) mbar_arrive(empty + prev); }
       prev = s;
+      if (kb == (KB > 1 ? 1 : 0) && tl > 0 && wtid == 0) { tma_store_wait_read<0>(); mbar_arrive(xfree + cw); }   // the previous tile's stores have read their staging
     }
     wgmma_wait<0>(); fence_regs(acc);
     if (tid == 128 && tl == 0) TRACE(3);
@@ -328,10 +329,8 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         for (int q = 0; q < NQ; ++q) tma_store_2d(&mG, gst + q * 8192, n0 + q * (F32 ? 32 : 64), m0 + 64 * cw);
       tma_store_commit();
       if (tid == 128) TRACE(6);
-      tma_store_wait_read<0>();                             // the stores have read the staging tiles: the producer may refill the x tile
-      if (tid == 128) TRACE(7);
-      if (tid == 128) TRACE_TILE(tl, 5);
-      mbar_arrive(xfree + cw);
+      // (the stores have read the staging tiles, so the producer may refill the x tile: signalled from the next tile's second slab, not here, so that the
+      //  warpgroup does not wait for the store reads before issuing its next MMAs)
     }
   }
   if (wtid == 0) tma_store_wait_all();
