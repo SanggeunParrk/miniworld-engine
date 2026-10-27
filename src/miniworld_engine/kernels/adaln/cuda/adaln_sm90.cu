@@ -371,7 +371,7 @@ template <bool F32> struct AtomCfg {
   static constexpr int WSLAB = 256 * 128;       // bytes of a weight slab: 256 rows (Wscale, then Wbias)
   static constexpr int W_BYTES = KB * WSLAB;
   static constexpr int BUF = KB * SLAB;
-  static constexpr int SMEM = W_BYTES + 2 * BUF + 128 * 8 + 128 * 4 + 16 * 8 + 1024;
+  static constexpr int SMEM = W_BYTES + 2 * BUF + 128 * 8 + 2 * 128 * 4 + 16 * 8 + 1024;
 };
 template <bool F32, bool SAVE, bool RNA>
 __global__ void __launch_bounds__(384, 1)
@@ -386,7 +386,8 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
   uint8_t* bufs[2] = {sm + C::W_BYTES, sm + C::W_BYTES + C::BUF};
   float2* stsm = reinterpret_cast<float2*>(sm + C::W_BYTES + 2 * C::BUF);        // [2][64] row statistics of x
   float* lnw_s = reinterpret_cast<float*>(stsm + 128);                              // [128] the LayerNorm weight of cond
-  uint64_t* wfull = reinterpret_cast<uint64_t*>(lnw_s + 128);
+  float* bs_s = lnw_s + 128;                                                          // [128] the scale bias
+  uint64_t* wfull = reinterpret_cast<uint64_t*>(bs_s + 128);
   uint64_t* cfull = wfull + 1;   // [2] cond tile landed
   uint64_t* adone = cfull + 2;   // [2] the MMAs (and the LN(cond) store) have read the buffer: x may land
   uint64_t* xfull = adone + 2;   // [2] x tile landed
@@ -429,9 +430,6 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
   // for each of the two reductions. Column 64 h + e of the row is element e of the lane's slice in both dtypes.
   const int rrow = 16 * warp + (lane >> 1), hh = lane & 1;   // the row this lane reduces, its half
   const int ea = 16 * warp + (lane >> 2), eb = ea + 8;       // the rows of this lane's accumulator fragment
-  float2 bv[16];
-#pragma unroll
-  for (int g = 0; g < 16; ++g) bv[g] = *reinterpret_cast<const float2*>(bs + 8 * g + 2 * (lane & 3));
   auto slice_addr = [&](int idx) -> uint32_t {   // 16-B chunk idx (0..15 fp32 / 0..7 bf16) of this lane's slice of its row
     if constexpr (F32) return (uint32_t)((2 * hh + (idx >> 3)) * SLAB + rrow * 128 + (((idx & 7) ^ (rrow & 7)) << 4));
     else return (uint32_t)(hh * SLAB + rrow * 128 + ((idx ^ (rrow & 7)) << 4));
@@ -469,6 +467,7 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
     rstd = rsqrtf(q / 128.f + eps);
   };
   if (wtid < 32) *reinterpret_cast<float4*>(lnw_s + 4 * wtid) = *reinterpret_cast<const float4*>(lnw + 4 * wtid);   // (the two warpgroups write the same values)
+  else if (wtid < 64) *reinterpret_cast<float4*>(bs_s + 4 * (wtid - 32)) = *reinterpret_cast<const float4*>(bs + 4 * (wtid - 32));
   named_bar_sync(1 + cw, 128);
   int i = 0;
   for (int t = (int)blockIdx.x * 2 + cw; t < ntiles; t += stride, ++i) {
@@ -532,7 +531,7 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
       const int r0 = 16 * warp + (lane >> 2), c2 = 2 * (lane & 3);
 #pragma unroll
       for (int g = 0; g < 16; ++g) {
-        const float2 bb = bv[g];
+        const float2 bb = *reinterpret_cast<const float2*>(bs_s + 8 * g + c2);
 #pragma unroll
         for (int rbk = 0; rbk < 2; ++rbk) {
           const int ia = 4 * g + 2 * rbk, ib = 4 * (g + 16) + 2 * rbk, c = 8 * g + c2;
@@ -556,7 +555,7 @@ adaln_atom_k(const __grid_constant__ CUtensorMap mC, const __grid_constant__ CUt
         const uint32_t off = (gp >> 2) * SLAB + swz128((uint32_t)mrow, (uint32_t)(col * 2));
         uint32_t xr[4];
         ldsm_x4(xr, bu + off);
-        const float2 b0 = bv[2 * gp], b1 = bv[2 * gp + 1];
+        const float2 b0 = *reinterpret_cast<const float2*>(bs_s + 16 * gp + 2 * (lane & 3)), b1 = *reinterpret_cast<const float2*>(bs_s + 16 * gp + 8 + 2 * (lane & 3));
         const int g0 = 2 * gp, g1 = 2 * gp + 1;
         float pre[8], y[8];
         const float xs[8] = {bf16lo(xr[0]), bf16hi(xr[0]), bf16lo(xr[1]), bf16hi(xr[1]), bf16lo(xr[2]), bf16hi(xr[2]), bf16lo(xr[3]), bf16hi(xr[3])};
@@ -621,7 +620,7 @@ template <bool F32> struct DgCfg {
   static constexpr int WSLAB = 128 * 128;
   static constexpr int W_BYTES = KB * WSLAB;
   static constexpr int RING = NS * SLAB;
-  static constexpr int SMEM = W_BYTES + 2 * RING + 8 * 128 * 4 + 256 + 1024;
+  static constexpr int SMEM = W_BYTES + 2 * RING + 8 * 128 * 4 + 128 * 4 + 256 + 1024;
 };
 template <bool F32, bool ADD>
 __global__ void __launch_bounds__(384, 1)
@@ -634,7 +633,8 @@ adaln_dgrad_atom_k(const __grid_constant__ CUtensorMap mA, const __grid_constant
   uint8_t* Wm = sm;
   uint8_t* rings[2] = {sm + Cf::W_BYTES, sm + Cf::W_BYTES + Cf::RING};
   float* red = reinterpret_cast<float*>(sm + Cf::W_BYTES + 2 * Cf::RING);     // [8 warps][128]
-  uint64_t* wfull = reinterpret_cast<uint64_t*>(red + 8 * 128);
+  float* lnw_s = red + 8 * 128;                                                  // [128]
+  uint64_t* wfull = reinterpret_cast<uint64_t*>(lnw_s + 128);
   uint64_t* full = wfull + 1;           // [2][NS]
   uint64_t* empty = full + 2 * NS;      // [2][NS]
   const int tid = threadIdx.x, wg = tid >> 7, wtid = tid & 127, warp = wtid >> 5, lane = tid & 31;
@@ -670,9 +670,8 @@ adaln_dgrad_atom_k(const __grid_constant__ CUtensorMap mA, const __grid_constant
   const int cw = wg - 1;
   const uint32_t ru = smem_u32(rings[cw]), wu = smem_u32(Wm);
   const int ea = 16 * warp + (lane >> 2), eb = ea + 8;
-  float wl[32];                                             // the LN weight of this lane's 32 columns
-#pragma unroll
-  for (int g = 0; g < 16; ++g) { const float2 q = *reinterpret_cast<const float2*>(lnw + 8 * g + 2 * (lane & 3)); wl[2 * g] = q.x; wl[2 * g + 1] = q.y; }
+  if (wtid < 32) *reinterpret_cast<float4*>(lnw_s + 4 * wtid) = *reinterpret_cast<const float4*>(lnw + 4 * wtid);   // the LN weight of cond (the two warpgroups write the same values)
+  named_bar_sync(1 + cw, 128);
   float part[32];
 #pragma unroll
   for (int e = 0; e < 32; ++e) part[e] = 0.f;
@@ -720,7 +719,8 @@ adaln_dgrad_atom_k(const __grid_constant__ CUtensorMap mA, const __grid_constant
       const float d0 = acc[4 * g], d1 = acc[4 * g + 1], d2 = acc[4 * g + 2], d3 = acc[4 * g + 3];   // (rowA c, rowA c+1, rowB c, rowB c+1)
       part[2 * g] += d0 * x0 + d2 * x2;
       part[2 * g + 1] += d1 * x1 + d3 * x3;
-      const float g0 = d0 * wl[2 * g], g1 = d1 * wl[2 * g + 1], g2 = d2 * wl[2 * g], g3 = d3 * wl[2 * g + 1];
+      const float2 w2 = *reinterpret_cast<const float2*>(lnw_s + 8 * g + 2 * (lane & 3));
+      const float g0 = d0 * w2.x, g1 = d1 * w2.y, g2 = d2 * w2.x, g3 = d3 * w2.y;
       gA[2 * g] = g0; gA[2 * g + 1] = g1; gB[2 * g] = g2; gB[2 * g + 1] = g3;
       xA[2 * g] = x0; xA[2 * g + 1] = x1; xB[2 * g] = x2; xB[2 * g + 1] = x3;
       sa += g0 + g1; sbq += g0 * x0 + g1 * x1; sc += g2 + g3; sd += g2 * x2 + g3 * x3;
