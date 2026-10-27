@@ -65,3 +65,13 @@ def launched_kernels(fn) -> list[str]:
         fn()
     torch.cuda.synchronize()
     return graph_kernels(graph)
+
+
+def kernel_base(name: str) -> str:
+    """The plain kernel identifier of a driver kernel name: an Itanium-mangled C++ symbol (``_Z15my_kernelILi3EEv...``) gives ``my_kernel``,
+    an ``extern "C"`` / Triton name is returned as is. Lets a test compare a kernel name for equality (the profiler used to print
+    ``my_kernel(args)``) without caring about the template and argument mangling."""
+    import re
+
+    m = re.match(r"_ZL?(\d+)", name)
+    return name[m.end(): m.end() + int(m.group(1))] if m else name

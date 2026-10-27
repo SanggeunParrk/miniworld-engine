@@ -57,7 +57,7 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
             for _ in range(3):
                 model(*args, mask)
         torch.cuda.current_stream().wait_stream(stream)
-        graph = torch.cuda.CUDAGraph()
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(graph):
             got = model(*args, mask)
         graph.replay()
@@ -98,19 +98,15 @@ def test_token_h100_cuda_bucket_graph(L, master, monkeypatch):
             flush=True,
         )
         if L == 768 and master:
-            from torch.profiler import ProfilerActivity, profile
+            from tests.cuda_graph_nodes import graph_kernels
 
-            with profile(activities=[ProfilerActivity.CUDA]) as prof:
-                graph.replay()
-                torch.cuda.synchronize()
-            events = [
-                (e.name, e.device_time_total)
-                for e in prof.events()
-                if str(e.device_type).endswith("CUDA")
-            ]
+            # the graph's own kernel nodes (the torch profiler loses records after a cold-cache build), one entry per launch
+            events = graph_kernels(graph)
+            assert events, "the captured graph has no kernel node"
             assert all(
                 "at::native::" not in name and "triton" not in name.lower()
-                for name, _ in events
+                and not (name.startswith("_") and not name.startswith("_Z") and "_kernel" in name)
+                for name in events
             ), events
             print(
                 json.dumps({"audit": "token_native_profile", "events": events}),

@@ -167,7 +167,7 @@ def test_adaln_rows_match_the_pytorch_leg(fp32):
 @pytest.mark.parametrize("fp32", [False, True])
 def test_routes_run_under_torch_compile(fp32):
     """The routes are opaque ops: a compiled module still launches the hand-CUDA cores and matches the eager route."""
-    from torch.profiler import ProfilerActivity, profile
+    from tests.cuda_graph_nodes import launched_kernels
 
     torch.backends.cuda.matmul.allow_tf32 = True
     mw, _, _ = _modules("token")
@@ -185,10 +185,10 @@ def test_routes_run_under_torch_compile(fp32):
     mc = torch.compile(mw, dynamic=False)
     run(mc)
     s.grad = None
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        out = run(mc)
-        torch.cuda.synchronize()
-    names = " ".join(e.key for e in prof.key_averages())
+    out = run(mc)
+    torch.cuda.synchronize()
+    # the kernels come from a CUDA graph capture of one more call (the torch profiler loses records after a cold-cache build)
+    names = " ".join(launched_kernels(lambda: run(mc)))
     assert "attn_tf32_fwd_kernel" in names if fp32 else "attn_fwd_kernel" in names, "the compiled module did not launch the CUDA core"
     # the one AdaLN entry (kernels.adaln.cuda.adaln) picks the row kernels (adaln_fwd_k) or the sm_90a wgmma route (ln_rows_k + adaln_gemm_k)
     # by mode, dtype and shape: either one is "the CUDA adaLN"

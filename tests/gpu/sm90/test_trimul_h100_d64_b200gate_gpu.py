@@ -52,16 +52,14 @@ def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
         with torch.cuda.stream(stream):
             step(); step()
         torch.cuda.current_stream().wait_stream(stream)
-        graph = torch.cuda.CUDAGraph()
+        graph = torch.cuda.CUDAGraph(keep_graph=True)
         with torch.cuda.graph(graph, stream=stream):
             y, grads = step()
-        with torch.profiler.profile(activities=[torch.profiler.ProfilerActivity.CPU,
-                                               torch.profiler.ProfilerActivity.CUDA]) as prof:
-            graph.replay()
-            torch.cuda.synchronize()
-        names = [e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA]
-        if not names:
-            pytest.skip("the profiler returned no CUDA events (CUPTI is not available in this session)")
+        # the graph's own kernel nodes (the torch profiler loses records after a cold-cache build)
+        from tests.cuda_graph_nodes import graph_kernels
+
+        names = graph_kernels(graph)
+        assert names, "the captured graph has no kernel node"
         assert any("_b2w" in n for n in names), names
         pipelined = not ((direction == 0 and length == 128) or (direction == 1 and length == 256))
         affine_registers = pipelined and direction != 0 and not (

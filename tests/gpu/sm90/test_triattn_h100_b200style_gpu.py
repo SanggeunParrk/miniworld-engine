@@ -242,17 +242,11 @@ def test_cuda_dispatch_has_no_triton():
     dy = torch.randn_like(x)
     for _ in range(3):
         native.forward(m, x).backward(dy)
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
-    ) as prof:
-        native.forward(m, x).backward(dy)
-        torch.cuda.synchronize()
-    names = [
-        e.name for e in prof.events() if e.device_type == torch.autograd.DeviceType.CUDA
-    ]
+    # the kernels come from a CUDA graph capture of one step (the torch profiler loses records after a cold-cache build)
+    from tests.cuda_graph_nodes import launched_kernels
+
+    names = launched_kernels(lambda: native.forward(m, x).backward(dy))
+    assert names, "the captured step has no kernel node"
     for kernel in [
         "training_fwd_stream",
         "dq_tma",

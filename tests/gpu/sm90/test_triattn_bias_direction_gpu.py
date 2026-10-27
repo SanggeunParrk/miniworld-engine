@@ -7,7 +7,6 @@ module's own error as the yardstick.
 
 import pytest
 import torch
-from torch.profiler import ProfilerActivity, profile
 
 from miniworld_engine.integrations import triattn_h100_sm90 as triattn_h100
 from miniworld_engine.kernels.triangle_attention.whole_op import triangle_attention
@@ -60,9 +59,11 @@ def key_mask(length):
 
 
 def kernels(fn):
-    with profile(activities=[ProfilerActivity.CUDA]) as prof:
-        fn()
-    return {k.key for k in prof.key_averages() if k.device_type.name == "CUDA"}
+    """The kernels one call of ``fn`` launches, read from a CUDA graph capture (not the torch profiler, whose CUPTI session dies
+    after ~20 s without a profiled window, e.g. while a cold JIT cache builds: see ``tests/cuda_graph_nodes.py``)."""
+    from tests.cuda_graph_nodes import launched_kernels
+
+    return set(launched_kernels(fn))
 
 
 # (d_pair, heads): the fused kernels (128, 4 x 32) and the width-generic path (heads of 32 channels)

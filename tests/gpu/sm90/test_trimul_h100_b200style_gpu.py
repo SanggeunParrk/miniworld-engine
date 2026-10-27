@@ -262,24 +262,12 @@ def test_selected_output_storage_dispatch(d, training):
 
     step()
     torch.cuda.synchronize()
-    with torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ]
-    ) as profile:
-        for _ in range(3):
-            step()
-            torch.cuda.synchronize()
-    names = [
-        event.name
-        for event in profile.events()
-        if event.device_type == torch.autograd.DeviceType.CUDA
-    ]
-    if not names:
-        pytest.skip(
-            "the profiler returned no CUDA events (CUPTI is not available in this session)"
-        )
+    # the kernels come from a CUDA graph capture of one step (the torch profiler loses records after a cold-cache build; the driver
+    # names C++ kernels mangled, so they are compared by their plain identifier)
+    from tests.cuda_graph_nodes import kernel_base, launched_kernels
+
+    names = [kernel_base(n) for n in launched_kernels(step)]
+    assert names, "the captured step has no kernel node"
     if training:
         expected = {
             256: "mw_b200style_k3_scalar_tmasave",
