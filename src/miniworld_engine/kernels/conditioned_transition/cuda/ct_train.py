@@ -12,6 +12,7 @@ come back in fp32) or fp32 on TF32 GEMMs (the process's ``allow_tf32``). Built o
 from __future__ import annotations
 
 import functools
+import os
 from pathlib import Path
 
 import torch
@@ -31,7 +32,7 @@ def ext():
         name="ct_rows_sm90",
         sources=[str(_dir / "ct_rows.cu")],
         extra_cuda_cflags=[
-            *host_flags(), "-O3", "-std=c++17", *gencodes("90a"), "--expt-relaxed-constexpr",
+            *host_flags(), "-O3", "-std=c++17", *gencodes("90a"), "--expt-relaxed-constexpr", f"-I{_dir.parent.parent / 'adaln' / 'cuda'}",
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__", "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__",
         ],
         extra_cflags=["-std=c++17"],
@@ -152,15 +153,38 @@ def _fused_squeeze_ok(h, cond, ws) -> bool:
     return _FUSED_SQUEEZE_TRAIN and ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
 
 
+def pack_fp32(wa, wb, ws, wsc):
+    """fp32 weights of a training step in ONE launch (``adaln.cuda.pack_f32``): [Wa; Wb] [2 ND, D], and the K-major (transposed) right operands of the three
+    TF32 data-gradient GEMMs: [Wa; Wb]^T [D, 2 ND], Ws^T [ND, D], Wsc^T [DC, D] (cuBLAS "nt" kernels: 15 - 25 % faster than "nn"; the PyTorch transposing
+    copies were 40 us a step at 18432 rows)."""
+    from miniworld_engine.kernels.adaln.cuda import _ext as rows_ext
+
+    nd, d = wa.shape
+    dc = wsc.shape[1]
+    dev, f32 = wa.device, torch.float32
+    wab = torch.empty(2 * nd, d, device=dev, dtype=f32)
+    wabT = torch.empty(d, 2 * nd, device=dev, dtype=f32)
+    wsT = torch.empty(nd, d, device=dev, dtype=f32)
+    wscT = torch.empty(dc, d, device=dev, dtype=f32)
+    wa, wb, ws, wsc = (w.contiguous() for w in (wa, wb, ws, wsc))
+    rows_ext().pack_f32([wa, wb, wa, wb, ws, wsc], [wab, wab, wabT, wabT, wsT, wscT], [[0, 0, 0], [0, nd, 0], [1, 0, 0], [1, 0, nd], [1, 0, 0], [1, 0, 0]])
+    return wab, wabT, wsT, wscT
+
+
 class _Tail(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, wa, wb, ws, wsc, bsc, res):  # noqa: D102
         dt = x.dtype
         if dt is torch.bfloat16 and all(t.dtype is torch.float32 for t in (wa, wb, ws, wsc, bsc)):
             wab, wsb, wscb, bscb = cast_weights(wa, wb, ws, wsc, bsc)   # one launch for the five casts and the concatenation
+            wabT = wsT = wscT = None
+        elif dt is torch.float32 and all(t.dtype is torch.float32 for t in (wa, wb, ws, wsc)) and torch.backends.cuda.matmul.allow_tf32:
+            wab, wabT, wsT, wscT = pack_fp32(wa, wb, ws, wsc)
+            wsb, wscb, bscb = ws.contiguous(), wsc.contiguous(), bsc
         else:
             wab = torch.cat([wa, wb]).to(dt)
             wsb, wscb, bscb = ws.to(dt), wsc.to(dt), bsc.to(dt)
+            wabT = wsT = wscT = None
         ab = torch.mm(x, wab.t())
         h = swiglu_fwd(ab)
         if dt is torch.bfloat16 and _fused_squeeze_ok(h, cond, wsb):   # one wgmma kernel for both GEMMs and the gate (+ residual)
@@ -169,29 +193,59 @@ class _Tail(torch.autograd.Function):
             out = torch.mm(h, wsb.t())
             sp = torch.addmm(bscb, cond, wscb.t())
             y = sigmul_fwd(out, sp, res)
-        ctx.save_for_backward(x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc)
+        ctx.save_for_backward(x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc, *([] if wabT is None else [wabT, wsT, wscT]))
         ctx.has_res = res is not None
         return y
 
     @staticmethod
     def backward(ctx, dy):  # noqa: D102
-        x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc = ctx.saved_tensors
+        x, cond, ab, h, out, sp, wab, wsb, wscb, wa, ws, wsc, *tw = ctx.saved_tensors
         dy = dy.contiguous()
+        if x.dtype is torch.float32 and not tw:
+            tw = [w.t().contiguous() for w in (wab, wsb, wscb)]
+        if x.dtype is torch.float32 and _feature_major_ok(x, ws) and os.environ.get("CT_FM", "0") == "1":
+            return _backward_feature_major(ctx, dy, x, cond, ab, h, out, sp, wab, wsb, wscb, tw)
         dout, dsc, part = sigmul_bwd(dy, out, sp)
         f32 = torch.float32
         o = lambda w: f32 if (w.dtype == f32 and x.dtype != f32) else None  # noqa: E731  fp32 master weights: fp32 gradients, unrounded
         dws = torch.mm(dout.t(), h, out_dtype=f32) if o(ws) else torch.mm(dout.t(), h)
-        t = (lambda w: w.t().contiguous().t()) if x.dtype is f32 else (lambda w: w)   # TF32: the operand layouts cuBLAS runs fastest (18432 rows: dh -21, dx -72, dcond -23 us)
-        dh = torch.mm(dout, t(wsb))
+        t = (lambda w: w) if x.dtype is not f32 else None   # TF32: the K-major copies packed by the forward (18432 rows: dh -21, dx -72, dcond -23 us)
+        k = (lambda i, w: tw[i].t()) if x.dtype is f32 else (lambda i, w: w)
+        dh = torch.mm(dout, k(1, wsb))
         dab = swiglu_bwd(dh, ab)
         dwab = torch.mm(dab.t(), x, out_dtype=f32) if o(wa) else torch.mm(dab.t(), x)
-        dx = torch.mm(dab, t(wab))
+        dx = torch.mm(dab, k(0, wab))
         dwsc = torch.mm(dsc.t(), cond, out_dtype=f32) if o(wsc) else torch.mm(dsc.t(), cond)
-        dcond = torch.mm(dsc, t(wscb))
+        dcond = torch.mm(dsc, k(2, wscb))
         dbsc = colsum(part).to(dsc.dtype if not o(wsc) else f32)   # the block partials of sum(dscale), summed in a fixed order
         nd = wab.shape[0] // 2
         return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
 
+
+
+def _feature_major_ok(x, ws) -> bool:
+    """fp32 (TF32) tail with token-width gradients: the weight-gradient GEMMs run on the gradients written feature-major (tpose.cuh). Not the atom width
+    (measured: no difference there)."""
+    d, nd = ws.shape
+    return d >= 256 and d % 128 == 0 and nd % 128 == 0 and d <= 1024
+
+
+def _backward_feature_major(ctx, dy, x, cond, ab, h, out, sp, wab, wsb, wscb, tw):
+    """``_Tail.backward`` for fp32 with dout / dscale / dab produced feature-major ([features, rows]): every weight gradient is a GEMM with the rows contiguous
+    in its left operand (M = 18432: dWab 430 -> ~295 us, dWs 237 -> ~145, dWsc 78 -> ~61); the data-gradient GEMMs read the same buffers as column-major operands."""
+    m = x.shape[0]
+    doutT, dscT, part = ext().sigmul_bwd_t(dy, out, sp, sigmul_bwd_blocks(dy))
+    doutT, dscT = doutT[:, :m], dscT[:, :m]
+    dws = torch.mm(doutT, h)
+    dh = torch.mm(doutT.t(), tw[1].t())
+    dabT = ext().swiglu_bwd_t(dh, ab)[:, :m]
+    dwab = torch.mm(dabT, x)
+    dx = torch.mm(dabT.t(), tw[0].t())
+    dwsc = torch.mm(dscT, cond)
+    dcond = torch.mm(dscT.t(), tw[2].t())
+    dbsc = colsum(part)
+    nd = wab.shape[0] // 2
+    return dx, dcond, dwab[:nd], dwab[nd:], dws, dwsc, dbsc, (dy if ctx.has_res else None)
 
 # ---- D = 768, hidden 2 D, bf16, whole 128-row tiles: the Transition family's wgmma kernels (kernels/transition/cuda/wide), which keep a, b and h of the
 # expand GEMM and fuse the SwiGLU backward into the dh GEMM. The tail's squeeze (h Ws^T) is their squeeze kernel with a zero residual (its rounding is the

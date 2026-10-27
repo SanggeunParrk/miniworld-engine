@@ -195,7 +195,9 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
 
 
 def train_supported(x: torch.Tensor) -> bool:
-    """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS)."""
+    """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS, except where ``ADALN_FP32_WG`` says otherwise)."""
+    if x.dtype == torch.float32:
+        return os.environ.get("ADALN_FP32_WG", "") == "all" or (os.environ.get("ADALN_FP32_WG", "") == "atom" and x.shape[-1] <= 128)
     return x.dtype == torch.bfloat16
 
 
