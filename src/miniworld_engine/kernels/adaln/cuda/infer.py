@@ -116,9 +116,14 @@ def packed(w_scale, b_scale, w_bias, dtype):
     return _capture.param_forms(f"adaln_cuda_{dtype}", (w_scale, b_scale, w_bias), lambda: pack_weights(w_scale, b_scale, w_bias, dtype))
 
 
+# read once at import: the routing functions run inside torch.compile traces, which must not look at the environment
+_ATOM = os.environ.get("ADALN_ATOM", "1") != "0"
+_FP32_WG = os.environ.get("ADALN_FP32_WG", "atom")
+
+
 def atom_fused(nx: int, nc: int) -> bool:
     """The atom width (NX = NC = 128) runs the one-launch kernel (``ADALN_ATOM=0`` switches it off for A/B timing)."""
-    return nx == 128 and nc == 128 and os.environ.get("ADALN_ATOM", "1") != "0"
+    return nx == 128 and nc == 128 and _ATOM
 
 
 def _infer_fake(x, cond, lnw, wc, bs, eps_x, eps_cond, ht, rna):
@@ -217,7 +222,7 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
 def train_supported(x: torch.Tensor, cond: torch.Tensor | None = None) -> bool:
     """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS, except where ``ADALN_FP32_WG`` says otherwise)."""
     if x.dtype == torch.float32:
-        mode = os.environ.get("ADALN_FP32_WG", "atom")   # the atom width has the one-launch kernel; the token widths measured slower than cuBLAS + the row kernels
+        mode = _FP32_WG   # the atom width has the one-launch kernel; the token widths measured slower than cuBLAS + the row kernels
         return mode == "all" or (mode == "atom" and cond is not None and atom_fused(x.shape[-1], cond.shape[-1]))
     return x.dtype == torch.bfloat16
 

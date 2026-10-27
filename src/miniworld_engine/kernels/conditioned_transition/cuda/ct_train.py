@@ -21,6 +21,7 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.adaln.cuda.infer import colsum
 
 _dir = Path(__file__).parent
+_FM = os.environ.get("CT_FM", "0") == "1"   # the feature-major backward (measured: no gain at 18432 rows, see _backward_feature_major)
 
 
 @functools.lru_cache(maxsize=None)
@@ -153,7 +154,15 @@ def _fused_squeeze_ok(h, cond, ws) -> bool:
     return _FUSED_SQUEEZE_TRAIN and ws.shape[0] % 128 == 0 and h.shape[1] % 64 == 0 and cond.shape[1] % 64 == 0 and h.stride(1) == 1 and cond.stride(1) == 1
 
 
-def pack_fp32(wa, wb, ws, wsc):
+def _pack_fp32_fake(wa, wb, ws, wsc):
+    """Output structure of ``conditioned_transition_cuda_pack_fp32``."""
+    nd, d = wa.shape
+    dc = wsc.shape[1]
+    return wa.new_empty((2 * nd, d)), wa.new_empty((d, 2 * nd)), wa.new_empty((nd, d)), wa.new_empty((dc, d))
+
+
+@opaque(fake=_pack_fp32_fake, name="conditioned_transition_cuda_pack_fp32")
+def pack_fp32(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """fp32 weights of a training step in ONE launch (``adaln.cuda.pack_f32``): [Wa; Wb] [2 ND, D], and the K-major (transposed) right operands of the three
     TF32 data-gradient GEMMs: [Wa; Wb]^T [D, 2 ND], Ws^T [ND, D], Wsc^T [DC, D] (cuBLAS "nt" kernels: 15 - 25 % faster than "nn"; the PyTorch transposing
     copies were 40 us a step at 18432 rows)."""
@@ -203,7 +212,7 @@ class _Tail(torch.autograd.Function):
         dy = dy.contiguous()
         if x.dtype is torch.float32 and not tw:
             tw = [w.t().contiguous() for w in (wab, wsb, wscb)]
-        if x.dtype is torch.float32 and _feature_major_ok(x, ws) and os.environ.get("CT_FM", "0") == "1":
+        if x.dtype is torch.float32 and _feature_major_ok(x, ws) and _FM:
             return _backward_feature_major(ctx, dy, x, cond, ab, h, out, sp, wab, wsb, wscb, tw)
         dout, dsc, part = sigmul_bwd(dy, out, sp)
         f32 = torch.float32

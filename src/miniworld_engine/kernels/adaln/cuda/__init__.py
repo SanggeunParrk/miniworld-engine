@@ -24,6 +24,7 @@ from miniworld_engine import settings
 _dir = Path(__file__).parent
 WIDTHS = (128, 256, 384, 512, 768, 1024)
 FEATURE_MAJOR_WIDTHS = (256, 384, 512, 768)   # fp32 backward row pass writing the gradient feature-major (``adaln_bwd_t``)
+_FM = os.environ.get("ADALN_FM", "auto")   # "1": always, "0": never, "auto": a cond of 768 columns or more
 
 
 @functools.lru_cache(maxsize=None)
@@ -186,7 +187,7 @@ def _bwd(
             dwcat = torch.mm(cn.t(), dsb).t()
         dbs, dwc = infer.colsum2(pbs, pbc) if has_bs else (pbs.new_empty(0), infer.colsum(pbc))
         return dx, dcond, dwc, dwcat.contiguous(), dbs
-    fm = os.environ.get("ADALN_FM", "auto")
+    fm = _FM
     if x2.dtype is torch.float32 and d in FEATURE_MAJOR_WIDTHS and (fm == "1" or (fm == "auto" and c2.shape[1] >= 768)):
         # TF32 weight gradients want the activation rows (K) contiguous: the row pass writes [dscale ; dy]^T feature-major (tpose.cuh)
         m = x2.shape[0]
