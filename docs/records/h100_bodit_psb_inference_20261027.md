@@ -75,3 +75,4 @@ touched modules: see the results at the end of this record.
 * `tests/cpu` + `tests/architecture`: 4373 passed, 6 failed, 2 errors -- the same 6 failures and 2 errors on the base commit `8d074bc9`
   (`test_compact_search_space`, `test_the_sweep_page_matches_the_repo`, `test_key_flags_are_built_on_both_sides`, `test_no_stale_caches`,
   `test_a_ladder_offers_what_wins`: stale autotune caches / sweep page, unrelated to this change).
+* `test_pointer_keyed_caches_gpu.py`, `tests/gpu/any/test_bias_only_dit_portable_gpu.py`, `test_bodit_ct_training_portable_gpu.py`: 77 passed, 4 skipped.
