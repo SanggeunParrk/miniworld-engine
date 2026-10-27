@@ -17,14 +17,6 @@
     "sha256": "cfb02167d4bb7b96064a009bcce13489982c6697be33118608435eeadb3d36e2",
     "modified": "2026-10-05 MiniWorld: MASTER_FP32 selects direct FP32 gradient stores; 2026-10-19: batched samples (per-sample dropout-scale rows); sha256 is of the imported original"
   },
-  "h100_sources/b1/common_recompute.cuh": {
-    "source": "experiments/trimul_training_v2/runs/trimul_b1_gate_demote_20260922/common_recompute.cuh",
-    "sha256": "f62f21206c3b16aabed33eaacb74c5e438edf9369884dcecd5f35699c596a22e"
-  },
-  "h100_sources/b1/ln_recompute.cuh": {
-    "source": "experiments/trimul_training_v2/runs/trimul_b1_gate_demote_20260922/ln_recompute.cuh",
-    "sha256": "60d1928712c787b7776b7214c78590f37f065fb062f99aaf1a2926e34adaeedc"
-  },
   "h100_sources/b1/b1_pipeline_math.inc": {
     "source": "experiments/trimul_training_v2/runs/trimul_b1_gate_demote_20260922/b1_pipeline_math.inc",
     "sha256": "4aca631ce8e0e959ba551eb531911e7fdf9efc5382d7e9af7345014cdbccedd4"

@@ -19,7 +19,7 @@ def build(debug=False, master=False):
         "-DMASTER_FP32=" + str(int(master)),
         "-I" + str(T._upstream() / "csrc"),
         "-I" + str(T.SOURCES / "common"),
-        "-I" + str(T.SOURCES / "b1"),
+        "-I" + str(T.SOURCES / "common_b7"),
     ]
     path = T.compile(T.SOURCES / "single_output/kernel.cu", flags)
     u = T.load_unit(str(path), "single_output")

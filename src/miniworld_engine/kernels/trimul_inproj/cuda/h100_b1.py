@@ -23,6 +23,7 @@ def build(count, length, part, defines=()):
         "-Xptxas=-v",
         "-I" + str(inc),
         "-I" + str(SP.P7),
+        "-I" + str(T.SOURCES / "common_b7"),
         "-I" + str(R),
     ] + ["-D%s=%s" % kv for kv in defs.items()]
     deps = [

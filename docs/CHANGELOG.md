@@ -110,6 +110,10 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
 
+### Removed
+
+- TriMul H100: removed `h100_sources/b1/common_recompute.cuh` (byte-identical to `h100_sources/common_b7/common_recompute.cuh`) and `h100_sources/b1/ln_recompute.cuh` (a strict prefix of `common_b7/ln_recompute.cuh`, which it only ever served); `h100_b1.py` and `h100_single_output.py` take `-I common_b7`. Last present at 41dc8edf.
+
 ## [2.3.12] - 2026-10-25
 
 ### Removed (BREAKING for code that used the removed names)
