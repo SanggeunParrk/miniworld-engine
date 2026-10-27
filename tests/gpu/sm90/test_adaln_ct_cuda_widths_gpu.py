@@ -187,3 +187,36 @@ def test_adaln_fp32_small_m_takes_32_column_tiles():
     assert infer.pick_ht_adaln(m, nx, 132, True) == 32 and infer.pick_ht_adaln(m, nx, 132, False) == 64 and infer.pick_ht_adaln(1280, nx, 132, True) == 64
     y32, y64, y128 = (infer.adaln_inference(x, c, lnw, ws, bs, wb, 1e-5, 1e-5, ht=h) for h in (32, 64, 128))
     assert torch.equal(y32, y64) and torch.equal(y64, y128)
+
+
+_HANG_PROBE = r"""
+import sys, torch
+torch.backends.cuda.matmul.allow_tf32 = True
+from miniworld_engine.kernels.adaln.cuda import infer
+nx, nc, m, bf = int(sys.argv[1]), int(sys.argv[2]), int(sys.argv[3]), sys.argv[4] == "bf16"
+dt = torch.bfloat16 if bf else torch.float32
+torch.manual_seed(0)
+x, c = torch.randn(m, nx, device="cuda", dtype=dt), torch.randn(m, nc, device="cuda", dtype=dt)
+lnw, ws, wb, bs = torch.rand(nc, device="cuda") + .5, torch.randn(nx, nc, device="cuda") / 16, torch.randn(nx, nc, device="cuda") / 16, torch.randn(nx, device="cuda")
+y = infer.adaln_inference(x, c, lnw, ws, bs, wb, 1e-5, 1e-5)
+torch.cuda.synchronize()
+cn = torch.nn.functional.layer_norm(c.float(), (nc,), eps=1e-5) * lnw
+ref = torch.sigmoid(cn @ ws.t() + bs) * torch.nn.functional.layer_norm(x.float(), (nx,), eps=1e-5) + cn @ wb.t()
+err = ((y.float() - ref).abs().max() / ref.abs().max()).item()
+print("OK", err)
+sys.exit(0 if err < 5e-2 else 3)
+"""
+
+
+@pytest.mark.parametrize("nx,nc,bf", [(128, 128, "bf16"), (256, 128, "bf16"), (128, 64, "bf16"), (128, 64, "fp32"), (768, 64, "bf16")], ids=lambda v: str(v))
+def test_two_k_slab_wgmma_kernel_does_not_deadlock_with_many_tiles_a_cta(nx, nc, bf):
+    """Regression: with two K slabs (bf16 cond 128, fp32 cond 64) the producer of ``adaln_gemm_k`` asked for the next tile's x at slab ``KB / 2`` = 1, but the consumers release
+    that staging only after consuming slab 1: a wait for a slab not yet requested, a hang as soon as a CTA had a second tile (M = 20480 rows: every bf16 d = c = 128 ladder row).
+    Run in a child process with a timeout: the old code never returns. (The atom-width d = c = 128 route is switched off in the child: it would not reach this kernel.)"""
+    import os
+    import subprocess
+    import sys
+
+    env = dict(os.environ, ADALN_ATOM="0")
+    r = subprocess.run([sys.executable, "-c", _HANG_PROBE, str(nx), str(nc), "20480", bf], env=env, timeout=300, capture_output=True, text=True)
+    assert r.returncode == 0, (r.stdout[-500:], r.stderr[-1500:])

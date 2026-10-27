@@ -209,10 +209,13 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
       } else {
         if constexpr (AR) { if (nt == 0) load_a_res(m0, (uint32_t)(i / NT)); }
       }
+      // the consumers release the x staging after consuming slab `rel` (their second): the request for the next tile's x must come AFTER that slab has been issued, or the
+      // producer waits for a release that needs the slab it has not requested yet (KB = 2, 3: a deadlock; this hung every bf16 d = 128 cond row with two tiles a CTA)
+      const int rel = KB > 1 ? 1 : 0, xk = (KB / 2 > rel) ? KB / 2 : rel + 1;
       for (int kb = kb0; kb < KB; ++kb, ++it) {
         // the x tile is requested half way through the slabs: it needs the previous tile's epilogue stores to be done, and asking first would hold back the slabs of this
         // tile (the ring runs ahead of the consumers) behind that epilogue
-        if (i > 0 && KB > 2 && kb == KB / 2) load_x(m0, n0, (uint32_t)i);   // (KB <= 2: after the loop: the consumers release the staging from slab 1 on, which must have been issued)
+        if (i > 0 && kb == xk) load_x(m0, n0, (uint32_t)i);
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         uint8_t* stage = sm + (AR ? A_RES : 0) + s * F_ST;
@@ -221,7 +224,7 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         tma_load_2d(stage + (AR ? 0 : F_SA), &mB, full + s, kb * TBK, n0);
         tma_load_2d(stage + (AR ? 0 : F_SA) + HT * 128, &mB, full + s, kb * TBK, NX + n0);
       }
-      if (i > 0 && KB <= 2) load_x(m0, n0, (uint32_t)i);
+      if (i > 0 && xk >= KB) load_x(m0, n0, (uint32_t)i);
     }
     return;
   }

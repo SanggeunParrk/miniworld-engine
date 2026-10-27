@@ -261,14 +261,18 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         for (int kb = 0; kb < P; ++kb) load_a(kb, kb, m0);
         it = P; kb0 = P;
       }
+      // the consumers release the residual staging after consuming slab `rel` (1, or 0 for a single K slab of the first range): the request for the next tile's residual must come AFTER that
+      // slab has been issued, or the producer waits for a release that needs the slab it has not requested yet (two slabs: a deadlock)
+      const int rel = KB1 > 1 ? 1 : 0, xk = (KB / 2 > rel) ? KB / 2 : rel + 1;
       for (int kb = kb0; kb < KB; ++kb, ++it) {
-        if (tl > 0 && kb == KB / 2) load_x(m0, n0, tl);   // half way through the slabs: asking first would hold the ring back behind the previous epilogue
+        if (tl > 0 && kb == xk) load_x(m0, n0, tl);   // half way through the slabs: asking first would hold the ring back behind the previous epilogue
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         mbar_arrive_expect_tx(full + s, F_ST);
         load_a(s, kb, m0);
         load_b(s, kb, n0);
       }
+      if (tl > 0 && xk >= KB) load_x(m0, n0, tl);
     }
     return;
   }
