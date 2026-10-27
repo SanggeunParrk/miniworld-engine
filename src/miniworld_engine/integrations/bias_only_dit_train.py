@@ -1734,7 +1734,15 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
         Gg = torch.mm(c2, W["Wg"].t())  # [M, 2D] gate1 | gate2
         xa, xst = e(M, D), e(M, 2)
         F.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
-        vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
+        if _hopper(dev) and not psb:
+            # one flat buffer [M, 2 DA] holding v^T [DA, M] (the wgmma core reads K-major v, the dV / dP GEMMs of the backward feature-major v) then
+            # the gate g [M, DA]: the two GEMMs of one v | g GEMM, no second v^T GEMM
+            vg = e(M, 2 * DA)
+            vt = vg.view(-1)[: M * DA].view(DA, M)
+            torch.mm(W["Wvg"][:DA], xa.t(), out=vt)
+            torch.mm(xa, W["Wvg"][DA:].t(), out=vg.view(-1)[M * DA :].view(M, DA))
+        else:
+            vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
         if psb:
             Pt, pst = torch.empty(0, device=dev), None
             if _psb_core(True, L) == "recompute":  # bo_psb32.cu: the row statistics instead of P, the softmax inside the core below
@@ -1774,12 +1782,11 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
 
                 C32.psb32_fwd(bias.reshape(H * A * L, L), P, _psb_mask(mask, A, L, True), vg, og, A, H, DA // H)
         elif _hopper(dev):
-            # TF32 wgmma reads K-major operands only: v^T = Wv xa^T beside the v | g GEMM (the backward needs v | g)
+            # TF32 wgmma reads K-major operands only: v^T (feature-major, computed above beside g)
             from miniworld_engine.kernels.bias_only_dit.cuda import PvGateCoreH100TF32
 
-            vt = torch.mm(W["Wvg"][:DA], xa.t())
             PvGateCoreH100TF32(dev.index if dev.index is not None else torch.cuda.current_device(), H, DA // H)(
-                vt, P.view(H * L, L), og, A, vg[:, DA:]
+                vt, P.view(H * L, L), og, A, vg.view(-1)[M * DA :].view(M, DA)
             )  # a = sigmoid(g) (P v)
         else:
             _op32("pv", dev, H, DA // H)(
@@ -1939,7 +1946,12 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
         dWo = _wgrad32(dy, og)
         # the bias-only attention's backward
         dvg, do, dd = e(M, 2 * DA), e(M, DA), e(A, H, L)
-        F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
+        hop = _hopper(dev) and not psb  # feature-major v^T | g (see _fwd32_impl); dO leaves the gate pass in the head-major (d, a)-minor layout
+        if hop:
+            vt, gg = vg.view(-1)[: M * DA].view(DA, M), vg.view(-1)[M * DA :].view(M, DA)
+            F.gate_bwd_fold_cuda(dog, og, gg, do, dvg[:, DA:], dd, L)
+        else:
+            F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         dbias = None if psb else e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
         if psb and _psb_core(True, L) == "recompute":  # bo_psb32.cu: P rebuilt from the bias, dV and the bias gradient in one pass
             from miniworld_engine.kernels.bias_only_dit import cuda as C32
@@ -1950,15 +1962,13 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
             )
         elif psb:  # per-sample P: batched GEMMs over (head, sample)
             _psb_bwd_core(do, vg, P, dd, dvg[:, :DA], dbias_out, A, L, H, DA)
-        elif _hopper(dev):
-            # samples folded into the columns: [H, L, A 48] per head is one regular matrix, so dV = P^T dO and
-            # dP = sum_a dO_a v_a^T are each ONE batched cuBLAS TF32 GEMM over the heads
+        elif hop:
+            # feature-major, as the portable core: dO is [H, L, (d, a)] (gate_bwd_fold), v^T [H, (d, a), L] is a view of the forward's v^T, so dV^T = dO^T P and
+            # dP = sum_(d, a) dO v^T are each ONE batched cuBLAS TF32 GEMM over the heads and need no permute copy
             dh_ = DA // H
-            doP = do.view(A, L, H, dh_).permute(2, 1, 0, 3).contiguous().view(H, L, A * dh_)
-            vP = vg.view(A, L, 2 * DA)[..., :DA].unflatten(-1, (H, dh_)).permute(2, 1, 0, 3).contiguous().view(H, L, A * dh_)
-            dvP = torch.bmm(Pt.view(H, L, L), doP)  # dv = P^T do
-            dvg[:, :DA].view(A, L, H, dh_).copy_(dvP.view(H, L, A, dh_).permute(2, 1, 0, 3))
-            dP = torch.bmm(doP, vP.transpose(1, 2))  # [H, L, L]
+            doP = do.view(H, L, dh_ * A)
+            dvt = torch.bmm(doP.transpose(1, 2), P.view(H, L, L)).view(DA, M)  # dV^T [(h, d), (a, l)]
+            dP = torch.bmm(doP, vt.view(H, dh_ * A, L))  # [H, L, L]
             dP.sub_(dd.sum(0).unsqueeze(-1))  # dd [A, H, L] -> sum over the samples
             torch.mul(dP, P.view(H, L, L), out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
         else:
@@ -1968,10 +1978,18 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
             _op32("dpb", dev, H, DA // H)(
                 do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
             )  # P o (dP - D); masked keys get P = 0
-        dxa = torch.mm(
-            dvg, _cm(W, "Wvg"), out=dG[:, D : 2 * D]
-        )  # d shift1 = dxa: straight into its dG columns
-        dWvg = _wgrad32(dvg, xa)
+        if hop:  # dV is feature-major, the gate gradient row-major: two GEMMs into the same dxa / dWvg
+            Wc = _cm(W, "Wvg")
+            dxa = torch.mm(dvt.t(), Wc[:DA], out=dG[:, D : 2 * D])
+            dxa.addmm_(dvg[:, DA:], Wc[DA:])
+            dWvg = e(2 * DA, D)
+            torch.mm(dvt, xa, out=dWvg[:DA])
+            torch.mm(dvg[:, DA:].t(), xa, out=dWvg[DA:])
+        else:
+            dxa = torch.mm(
+                dvg, _cm(W, "Wvg"), out=dG[:, D : 2 * D]
+            )  # d shift1 = dxa: straight into its dG columns
+            dWvg = _wgrad32(dvg, xa)
         dx = e(M, D)
         n3 = F.adaln_a_bwd_cuda(dxa, x, xst, G, bs1, dx1, dx, dG, part[3])
         dchat = torch.mm(dG, _cm(W, "Wn"))

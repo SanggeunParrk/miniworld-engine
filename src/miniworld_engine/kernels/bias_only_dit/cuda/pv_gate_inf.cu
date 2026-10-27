@@ -609,7 +609,7 @@ __global__ __launch_bounds__(256,2) void dpb_pipe(const __grid_constant__ CUtens
 // Two consumer warpgroups own 64 rows each (one m64nTNk16 chain over the samples), a producer thread streams
 // [dO rows | v keys] per sample through a TMA ring; dsum [H, L] = sum_a D is precomputed. Both operands are K-major (channels).
 template<int TN> struct Dpb2Cfg { static constexpr int ST=TN==256?3:4, SB=(128+TN)*128; };   // + the epilogue's P / out chunks (64 KB)
-template<int TN>
+template<int TN,int DHT=48>
 __global__ __launch_bounds__(384,1) void dpb2(const __grid_constant__ CUtensorMap md,const __grid_constant__ CUtensorMap mv,
  const __grid_constant__ CUtensorMap mpp,const __grid_constant__ CUtensorMap mout,
  const bf*__restrict__ p,const float*__restrict__ dsum,bf*__restrict__ out,int L,int A,int H,int DH){
@@ -652,7 +652,7 @@ __global__ __launch_bounds__(384,1) void dpb2(const __grid_constant__ CUtensorMa
      uint32_t a_base=smem_u32(sm)+s*SB+cw*8192,b_base=smem_u32(sm)+s*SB+16384;
      fence_regs(acc);wgmma_fence();
      #pragma unroll
-     for(int k=0;k<3;++k){
+     for(int k=0;k<DHT/16;++k){
        if constexpr(TN==256)mma_n256(acc,ds(a_base+k*32),ds(b_base+k*32));
        else mma_n128(acc,ds(a_base+k*32),ds(b_base+k*32));
      }
@@ -698,18 +698,20 @@ __global__ __launch_bounds__(384,1) void dpb2(const __grid_constant__ CUtensorMa
  }
  if(wtid==0)bulk_wait_all_();
 }
+template<int TN,int DHT> static void dpb2_run(const CUtensorMap&md,const CUtensorMap&mv,const CUtensorMap&mpp,const CUtensorMap&mout,at::Tensor p,at::Tensor dsum,at::Tensor out,int L,int A,int H,int nsm){
+ constexpr int smem=Dpb2Cfg<TN>::ST*Dpb2Cfg<TN>::SB+1024+8*8192+64+1024;
+ cudaFuncSetAttribute(dpb2<TN,DHT>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
+ int grid=std::min<int>(nsm,H*(L/128)*(L/TN));
+ dpb2<TN,DHT><<<grid,384,smem,at::cuda::getCurrentCUDAStream()>>>(md,mv,mpp,mout,(bf*)p.data_ptr(),dsum.data_ptr<float>(),(bf*)out.data_ptr(),L,A,H,DHT);
+}
 void dpb2_launch(at::Tensor d,at::Tensor v,at::Tensor p,at::Tensor dsum,at::Tensor out,int64_t A,int64_t H,int64_t DH,int64_t nsm){
  at::cuda::CUDAGuard guard(d.device());cudaSetDevice(d.get_device());int L=d.size(0)/A;
- TORCH_CHECK(L%128==0&&L<=768&&DH==48&&d.scalar_type()==at::kBFloat16&&dsum.scalar_type()==at::kFloat,"dpb2 shape/dtype");
+ TORCH_CHECK(L%128==0&&L<=768&&(DH==32||DH==48||DH==64)&&d.scalar_type()==at::kBFloat16&&dsum.scalar_type()==at::kFloat,"dpb2 shape/dtype");
  auto md=map(d,64,64),mv=map(v,64,64),mpp=map(p,64,64),mout=map(out,64,64);
- if(L%256==0){ constexpr int TN=256,smem=Dpb2Cfg<TN>::ST*Dpb2Cfg<TN>::SB+1024+8*8192+64+1024;
-   cudaFuncSetAttribute(dpb2<TN>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
-   int grid=std::min<int>(nsm,H*(L/128)*(L/TN));
-   dpb2<TN><<<grid,384,smem,at::cuda::getCurrentCUDAStream()>>>(md,mv,mpp,mout,(bf*)p.data_ptr(),dsum.data_ptr<float>(),(bf*)out.data_ptr(),L,A,H,DH);
- } else { constexpr int TN=128,smem=Dpb2Cfg<TN>::ST*Dpb2Cfg<TN>::SB+1024+8*8192+64+1024;
-   cudaFuncSetAttribute(dpb2<TN>,cudaFuncAttributeMaxDynamicSharedMemorySize,smem);
-   int grid=std::min<int>(nsm,H*(L/128)*(L/TN));
-   dpb2<TN><<<grid,384,smem,at::cuda::getCurrentCUDAStream()>>>(md,mv,mpp,mout,(bf*)p.data_ptr(),dsum.data_ptr<float>(),(bf*)out.data_ptr(),L,A,H,DH);
+ if(L%256==0){
+   if(DH==32)dpb2_run<256,32>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);else if(DH==48)dpb2_run<256,48>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);else dpb2_run<256,64>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);
+ } else {
+   if(DH==32)dpb2_run<128,32>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);else if(DH==48)dpb2_run<128,48>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);else dpb2_run<128,64>(md,mv,mpp,mout,p,dsum,out,L,A,H,nsm);
  }
  C10_CUDA_KERNEL_LAUNCH_CHECK();
 }

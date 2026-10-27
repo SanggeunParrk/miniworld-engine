@@ -81,12 +81,14 @@ def test_pvx32_fp32_matches_fp64(L, S, nh, dh):
 
 
 # ------------------------------------------------------------------------------------------------------ bias gradient
+@pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
 @pytest.mark.parametrize(("L", "A"), [(256, 5), (384, 48), (640, 6), (768, 5), (768, 48)])
-def test_dbias_matches_fp64_and_is_deterministic(L, A):
+def test_dbias_matches_fp64_and_is_deterministic(L, A, nh, dh):
+    H, DH = nh, dh
     torch.manual_seed(L * 7 + A)
     do = torch.randn(A * L, H * DH, device="cuda", dtype=torch.bfloat16)
     vg = torch.randn(A * L, 2 * H * DH, device="cuda", dtype=torch.bfloat16)
-    P = probs(L).to(torch.bfloat16).view(H * L, L)
+    P = probs(L, heads=H).to(torch.bfloat16).view(H * L, L)
     dd = torch.randn(A, H, L, device="cuda")
     out = torch.empty(H * L, L, device="cuda", dtype=torch.bfloat16)
     kern = C.DpbKernel(0, nh=H, dh=DH)
