@@ -143,6 +143,8 @@ class BenchConfig(BaseModel):
     )
     #: attention_pair_bias heads: 8 (x 48, the registry row) or 16 (x 24, AF3 / MiniWorld's confidence-head Pairformer)
     apb_n_head: int = 8
+    #: AttentionPairBias: constant on the gate logits (Chai-1: 1.0; not a yaml key: `+apb_gate_bias=1.0`). Engine rungs only.
+    apb_gate_bias: float = 0.0
     #: dit (token) heads: 16 (x 48 at d_single_token 768, the registry row); 24 (x 32) / 12 (x 64) at 768, 16 x 64 at
     #: `+d_single_token=1024`. Not a yaml key: `+tdit_n_head=24`.
     tdit_n_head: int = 16
@@ -2850,6 +2852,9 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
         )
     upstream = _anthropic_upstream_or_unsupported() if anthropic else None
     n_head = conf.apb_n_head
+    if conf.apb_gate_bias and key not in ("pytorch", "portable", MINIWORLD_IMPL):
+        raise UnsupportedBenchmark("the gate bias is an engine option (the vendor ops have none)")
+    gate_kw = {"gate_bias": conf.apb_gate_bias} if conf.apb_gate_bias else {}
     dtype = torch.float32 if conf.precision == FP32_PRECISION else torch.bfloat16
 
     class CueqAttentionPairBias(AttentionPairBias):
@@ -2886,7 +2891,7 @@ def bench_module_attention_pair_bias(conf, seq_len, implementation, fabric):
             super().__init__()
             self.layers = nn.ModuleList(
                 [
-                    cls(conf.d_single, conf.d_pair, n_head, implementation=layer_impl)
+                    cls(conf.d_single, conf.d_pair, n_head, implementation=layer_impl, **gate_kw)
                     for _ in range(conf.n_layers)
                 ]
             )

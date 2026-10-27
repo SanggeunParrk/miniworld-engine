@@ -45,6 +45,7 @@ from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
+WIDE_DP, WIDE_HEADS = 256, 16  # Chai-1: d_pair 256 with 16 x 24 heads (H100 inference)
 SHAPES = (
     (8, 384),
     (12, 384),
@@ -78,8 +79,17 @@ def _eligible(
         or tuple(module.to_query.weight.shape) != (D, D)
     ):
         return False
+    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0) is served on H100 for inference only: the gate bias
+    # and the 256-wide pair are the H100 inference op's (module docstring); every other call keeps d_pair 128 and no gate bias.
+    dp = module.to_bias.weight.shape[1]
+    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
+    if dp == WIDE_DP:
+        if not (hopper and H == WIDE_HEADS and not torch.is_grad_enabled()):
+            return False
+    elif dp != DP or (module.gate_bias and (not hopper or torch.is_grad_enabled())):
+        return False
     if (
-        tuple(module.to_bias.weight.shape) != (H, DP)
+        tuple(module.to_bias.weight.shape) != (H, dp)
         or module.ln_single.weight is None
         or module.ln_pair.weight is None
     ):
@@ -98,7 +108,7 @@ def _eligible(
     ):
         return False
     L = single.shape[1]
-    if tuple(pair.shape) != (1, L, L, DP) or not pair.is_contiguous():
+    if tuple(pair.shape) != (1, L, L, dp) or not pair.is_contiguous():
         return False
     if mask is not None and tuple(mask.shape) != (1, L):
         return False
@@ -210,21 +220,24 @@ def _geometry(leaves):
 
 
 # ------------------------------------------------------------------------------------------------------------ inference
-def _inference_packs(params, leaves):
+def _inference_packs(params, leaves, gate_bias: float = 0.0):
     """``_prep`` with q scaled into exp2 units and Wf in exp2 units, cached per parameter version (the step reads them every
     call; repacking costs a launch). Keyed on the parameters themselves (``params``), not on ``leaves``, their kernel-dtype casts,
     which are fresh tensors per call for fp32 parameters. Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs
     once, recorded, so each replay packs the weights as they are then."""
     build = lambda: (
-        *_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E),
+        *_prep(leaves, LOG2E / math.sqrt(_geometry(leaves)[1]), LOG2E, gate_bias),
         params,
     )
     return _capture.lookup(
-        _packs, tuple((t.data_ptr(), t._version) for t in params), build, limit=_capture.BLOCK_CACHE_LIMIT
+        _packs,
+        (gate_bias, *((t.data_ptr(), t._version) for t in params)),
+        build,
+        limit=_capture.BLOCK_CACHE_LIMIT,
     )[:5]
 
 
-def _prep(leaves, qs: float, ws: float):
+def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
     """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W], Wf = to_bias.weight * ln_pair.weight * ws [H, 128], Wo
     [D, W] bf16 with padded columns -- or None when there is no padding (8 x 48: to_out.weight as is) --, Wb bf16 [H, 128] or
     None), bf16, one launch. Hopper always packs Wo and Wb (its weights may be an fp32 master that this pass rounds)."""
@@ -237,6 +250,10 @@ def _prep(leaves, qs: float, ws: float):
     wf = wq.new_empty((H, DP), dtype=bf)
     wop = wq.new_empty((D, W), dtype=bf) if (W != D or hopper) else None
     wbo = wq.new_empty((H, DP), dtype=bf) if hopper else None
+    wide = wb.shape[1] == WIDE_DP
+    if wide:  # the prep pass is 128 wide: it packs everything but Wf, which is made below from the full 256 columns
+        wb_full, lnpw_full = wb, lnpw
+        wb, lnpw = wb[:, :DP].contiguous(), lnpw[:DP].contiguous()
     _rows().ext().prep(
         wq,
         bq,
@@ -254,10 +271,14 @@ def _prep(leaves, qs: float, ws: float):
         ws,
         wbo,
     )
+    if wide:
+        wf = (wb_full.float() * lnpw_full.float() * ws).to(bf)
+    if gate_bias:  # sigmoid(g + c): the constant rides on the gate rows of the packed bias (q | k | v | g, W each)
+        bvec[3 * W :] += gate_bias
     return wpack, bvec, wf, wop, wbo
 
 
-def _inference_fake(single, pair, mask, leaves, eps_s, eps_p):
+def _inference_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
     return torch.empty_like(single)
 
 
@@ -269,6 +290,7 @@ def inference(
     leaves: list[torch.Tensor],
     eps_s: float,
     eps_p: float,
+    gate_bias: float = 0.0,
 ) -> torch.Tensor:
     """single [1, L, 384], pair [1, L, L, 128] bf16, mask [L] bool or None, leaves as ``_leaves`` -> single + APB(single)."""
     L = single.shape[1]
@@ -281,7 +303,7 @@ def inference(
     H, _, W, D = _geometry(leaves)
     with torch.cuda.device(dev):
         x = single.view(L, D)
-        wpack, bvec, wf, wop, _ = _inference_packs(params, leaves)
+        wpack, bvec, wf, wop, _ = _inference_packs(params, leaves, gate_bias)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
         y = torch.empty_like(
@@ -290,7 +312,7 @@ def inference(
         rows.ext().ln_rows(x, lnw, lnb, xa, None, eps_s, y)
         qkvg = torch.addmm(bvec, xa, wpack.t())
         neg = -math.inf if torch.cuda.get_device_capability(dev) == (9, 0) else NEG
-        bias = rows.pair_bias(pair.view(L * L, DP), wf, mask, L, eps_p, neg)
+        bias = rows.pair_bias(pair.view(L * L, wf.shape[1]), wf, mask, L, eps_p, neg)
         core = _cores.get((dev.index, H, D))
         if core is None:
             core = _cores[(dev.index, H, D)] = _inference_core(dev, H, D)
@@ -308,6 +330,7 @@ def update_inference(
         _leaves(module),
         module.ln_single.eps,
         module.ln_pair.eps,
+        float(module.gate_bias),
     )
 
 

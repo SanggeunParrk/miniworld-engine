@@ -832,14 +832,14 @@ void pair_bias_fwd_impl(at::Tensor z, at::Tensor w, c10::optional<at::Tensor> ma
                         double neg) {
   chk(z, at::kBFloat16, "pair"); chk(w, at::kBFloat16, "wf"); chk(out, at::kBFloat16, "bias");
   const int64_t nh = w.size(0), dp = w.size(1);
-  TORCH_CHECK(dp == DP || (dp == 2 * DP && nh == 8), "pair_bias: d_pair 128, or 256 with 8 heads");
+  TORCH_CHECK(dp == DP || (dp == 2 * DP && (nh == 8 || nh == 16)), "pair_bias: d_pair 128, or 256 with 8 or 16 heads");
   TORCH_CHECK(L % 16 == 0 && z.numel() == L * L * dp && w.numel() == nh * dp && out.numel() == nh * L * L, "pair_bias_fwd shapes");
   TORCH_CHECK(nh == 8 || nh == 12 || nh == 16 || nh == 24, "pair_bias: 8, 12, 16 or 24 heads");
   if (mask) { chk(*mask, at::kBool, "mask"); TORCH_CHECK(mask->numel() == L, "mask [L]"); }
   float2* st = nullptr;
   if (stats) { chk(*stats, at::kFloat, "stats"); TORCH_CHECK(stats->numel() == 2 * L * L, "stats [L L, 2]"); st = reinterpret_cast<float2*>(stats->data_ptr()); }
   const at::cuda::CUDAGuard gd(z.device());
-  if (dp == 2 * DP) pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg);
+  if (dp == 2 * DP) { if (nh == 16) pair_bias_fwd_t<16, 2 * DP>(z, w, mask, out, st, L, eps, neg); else pair_bias_fwd_t<8, 2 * DP>(z, w, mask, out, st, L, eps, neg); }
   else if (nh == 8) pair_bias_fwd_t<8, DP>(z, w, mask, out, st, L, eps, neg);
   else if (nh == 12) pair_bias_fwd_t<12, DP>(z, w, mask, out, st, L, eps, neg);
   else if (nh == 16) pair_bias_fwd_t<16, DP>(z, w, mask, out, st, L, eps, neg);
