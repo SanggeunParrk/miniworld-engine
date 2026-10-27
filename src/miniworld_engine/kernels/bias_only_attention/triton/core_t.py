@@ -43,16 +43,33 @@ def _core_fwd_fake(vgt, p, shape_key=0):
 
 @opaque(fake=_core_fwd_fake, name="bias_only_attention_core_t_fwd")
 def _core_fwd(vgt: torch.Tensor, p: torch.Tensor, shape_key: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-    """``vgt`` [2C, M] (value rows then gate rows, feature-major), ``p`` [H, L, L] (softmax weights) -> (out^T, gsig^T), both [C, M]:
-    ``out^T = Vt @ P^T`` per head and ``gsig^T = sigmoid(gate^T) * out^T``."""
+    """``vgt`` [2C, M] (value rows then gate rows, feature-major), ``p`` [H, L, L] (softmax weights, one pair: M = A * L) or [B, H, L, L] (a pair
+    per sample: M = B * L, the samples the columns ``b * L ..``) -> (out^T, gsig^T), both [C, M]: ``out^T = Vt @ P^T`` per head and
+    ``gsig^T = sigmoid(gate^T) * out^T``."""
     c, m = vgt.shape[0] // 2, vgt.shape[1]
-    h, length = p.shape[0], p.shape[1]
-    outt = torch.bmm(vgt[:c].view(h, c // h * (m // length), length), p.transpose(1, 2)).view(c, m)
+    if p.ndim == 4:
+        outt = _pv_per_sample(vgt[:c], p)
+    else:
+        h, length = p.shape[0], p.shape[1]
+        outt = torch.bmm(vgt[:c].view(h, c // h * (m // length), length), p.transpose(1, 2)).view(c, m)
     gsigt = torch.empty_like(outt)
     n = outt.numel()
     grid = lambda META: (triton.cdiv(n, META["BLOCK_E"]),)  # noqa: E731
     _sigmul_fwd[grid](vgt[c:], outt, gsigt, n, shape_key=shape_key)
     return outt, gsigt
+
+
+def _pv_per_sample(vt: torch.Tensor, p: torch.Tensor) -> torch.Tensor:
+    """``out^T[:, b L:(b+1) L] = Vt[:, b L:(b+1) L] @ P_b^T`` per head, one batched GEMM (over the heads) per sample on strided views of the
+    feature-major buffers (leading dimension M: a GEMM operand, not a copy)."""
+    nb, h, length = p.shape[0], p.shape[1], p.shape[2]
+    c, m = vt.shape
+    outt = torch.empty_like(vt)
+    v3, o3 = vt.view(h, c // h, m), outt.view(h, c // h, m)
+    for b in range(nb):
+        sl = slice(b * length, (b + 1) * length)
+        torch.bmm(v3[:, :, sl], p[b].transpose(1, 2), out=o3[:, :, sl])
+    return outt
 
 
 def _core_bwd_fake(dgsigt, vgt, outt, p, shape_key=0):
@@ -63,15 +80,24 @@ def _core_bwd_fake(dgsigt, vgt, outt, p, shape_key=0):
 @opaque(fake=_core_bwd_fake, name="bias_only_attention_core_t_bwd")
 def _core_bwd(dgsigt: torch.Tensor, vgt: torch.Tensor, outt: torch.Tensor, p: torch.Tensor,
               shape_key: int = 0) -> tuple[torch.Tensor, torch.Tensor]:
-    """-> (``dvg^T`` [2C, M]: value gradient rows then gate gradient rows, ``dP`` [H, L, L])."""
+    """-> (``dvg^T`` [2C, M]: value gradient rows then gate gradient rows, ``dP`` like ``p``)."""
     c, m = outt.shape
-    h, length = p.shape[0], p.shape[1]
-    rows = c // h * (m // length)
     dvgt = torch.empty_like(vgt)
     doutt = torch.empty_like(outt)
     n = outt.numel()
     grid = lambda META: (triton.cdiv(n, META["BLOCK_E"]),)  # noqa: E731
     _sigmul_bwd[grid](dgsigt, vgt[c:], outt, dvgt[c:], doutt, n, shape_key=shape_key)
+    if p.ndim == 4:
+        nb, h, length = p.shape[0], p.shape[1], p.shape[2]
+        d3, v3, dv3 = doutt.view(h, c // h, m), vgt[:c].view(h, c // h, m), dvgt[:c].view(h, c // h, m)
+        dp = torch.empty(p.shape, device=p.device, dtype=p.dtype)
+        for b in range(nb):
+            sl = slice(b * length, (b + 1) * length)
+            torch.bmm(d3[:, :, sl], p[b], out=dv3[:, :, sl])                           # dVt_h = dOut^T_h @ P_h
+            torch.bmm(d3[:, :, sl].transpose(1, 2), v3[:, :, sl], out=dp[b])           # dP_h = dOut_h @ V_h^T
+        return dvgt, dp
+    h, length = p.shape[0], p.shape[1]
+    rows = c // h * (m // length)
     d3 = doutt.view(h, rows, length)
     torch.bmm(d3, p, out=dvgt[:c].view(h, rows, length))                  # dVt_h = dOut^T_h @ P_h
     dp = torch.bmm(d3.transpose(1, 2), vgt[:c].view(h, rows, length))     # dP_h = dOut_h @ V_h^T, contraction over (d, a)
@@ -95,7 +121,7 @@ class BiasOnlyCoreT(torch.autograd.Function):
                 w_cat, w_out = torch.cat([wv, wg], 0).to(torch.bfloat16), wo.to(torch.bfloat16)
         else:
             w_cat, w_out = torch.cat([wv, wg], 0), wo
-        key = both_key(x.shape[0])
+        key = both_key(x.shape[0])  # M tokens: A * L (one pair), or B * L (``p`` [B, H, L, L], a pair per sample)
         ctx.key = key
         vgt = torch.mm(w_cat, x.t())                 # [2C, M]
         outt, gsigt = _core_fwd(vgt, p, shape_key=key)

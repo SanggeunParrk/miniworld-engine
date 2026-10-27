@@ -90,6 +90,15 @@ class BiasOnlyAttention(nn.Module):
             and (pair.requires_grad or self.ln_pair.weight.requires_grad or self.to_bias.weight.requires_grad)
             and _pair_bias_supported(pair, self.n_head))
 
+    def _feature_major_psb(self, single) -> bool:
+        """The same core for a pair of its own per sample (``single`` [1, B, L, d], B > 1; ``core_t`` with ``p`` [B, H, L, L])."""
+        return bool(
+            self.ada_ln_in.implementation == ImplementationType.MINIWORLD
+            and single.is_cuda and single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1
+            and single.dtype in (torch.bfloat16, torch.float32)
+            and torch.is_grad_enabled()
+            and (single.requires_grad or any(p.requires_grad for p in self.parameters())))
+
     def _feature_major(self, single) -> bool:
         """The portable family's training core (``core_t``): a gradient is recorded, ONE pair serves every sample (``single`` [A, 1, L, d]) and the
         activations are bf16 or fp32 on a CUDA device."""
@@ -154,6 +163,12 @@ class BiasOnlyAttention(nn.Module):
             with torch.autocast(device_type="cuda", enabled=False):
                 out = _core_t(single.reshape(-1, single.shape[-1]), self.to_value.weight, self.to_gate.weight, self.to_out.weight,
                               attention[0].to(single.dtype))
+            return single_res + sigmoid_gate(self.to_scale(cond), out.reshape(single.shape))
+        if self._feature_major_psb(single) and (pair if bias is None else bias) is not None \
+                and (pair if bias is None else bias).shape[0] == single.shape[1]:
+            attention = self._attention_weights(pair, mask, bias, single.dtype)          # [B, H, L, L], a softmax per sample
+            with torch.autocast(device_type="cuda", enabled=False):
+                out = _core_t(single.reshape(-1, single.shape[-1]), self.to_value.weight, self.to_gate.weight, self.to_out.weight, attention.to(single.dtype))
             return single_res + sigmoid_gate(self.to_scale(cond), out.reshape(single.shape))
         if self.ada_ln_in.implementation == ImplementationType.MINIWORLD:
             # the portable family: the value and the gate projection are one GEMM over the concatenated weights (one read of `single`, one launch,

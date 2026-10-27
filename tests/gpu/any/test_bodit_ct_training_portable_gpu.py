@@ -119,3 +119,79 @@ def test_pair_bias_matches_the_layernorm_and_projection(dtype, case):
     assert rel(out, gold_out) <= max(factor * rel(ref_out, gold_out), floor), (rel(out, gold_out), rel(ref_out, gold_out))
     for i, (a, r, ref) in enumerate(zip(g_, gold_g, ref_g, strict=True)):
         assert rel(a, r) <= max(factor * rel(ref, r), 2 * floor), (i, rel(a, r), rel(ref, r))
+
+
+# ---- a pair of its own per sample (``single`` [1, B, L, d], ``p`` [B, H, L, L]): the same core, the same one-pass pair bias -------------
+
+def _core_reference_psb(x, wv, wg, wo, p, B, L):
+    """Per-sample statements: sample b attends with its own weights ``p[b]``."""
+    return torch.cat([_core_reference(x[b * L:(b + 1) * L], wv, wg, wo, p[b], 1, L) for b in range(B)], 0)
+
+
+@pytest.mark.parametrize("dtype", [BF, F32], ids=["bf16", "fp32"])
+@pytest.mark.parametrize("shape", [(4, 64, 16, 48), (3, 100, 12, 64), (2, 48, 24, 32)], ids=["B4-16x48", "B3-12x64-ragged", "B2-24x32"])
+def test_core_t_per_sample_pair_matches_the_einsum_statements(dtype, shape):
+    B, L, H, Dh = shape
+    d, c = 256, H * Dh
+    g = torch.Generator(device=DEV).manual_seed(3)
+    rn = lambda *s, sc=1.0: torch.randn(*s, device=DEV, generator=g, dtype=F32) * sc   # noqa: E731
+    x, wv, wg, wo = rn(B * L, d), rn(c, d, sc=d**-0.5), rn(c, d, sc=d**-0.5), rn(d, c, sc=c**-0.5)
+    p = torch.softmax(rn(B, H, L, L), -1)
+    dy = rn(B * L, d)
+
+    def leaves(dt, master):
+        return (x.to(dt).requires_grad_(True), p.to(dt).requires_grad_(True),
+                [w.to(F32 if master else dt).requires_grad_(True) for w in (wv, wg, wo)])
+
+    xg, pg, wsg = leaves(torch.float64, False)
+    og = _core_reference_psb(xg, *wsg, pg, B, L)
+    gg = torch.autograd.grad(og, [xg, *wsg, pg], dy.double())
+    for master in ([False, True] if dtype is BF else [False]):
+        xr, pr, wsr = leaves(dtype, False)
+        orf = _core_reference_psb(xr, *wsr, pr, B, L)
+        gr = torch.autograd.grad(orf, [xr, *wsr, pr], dy.to(dtype))
+        xe, pe, wse = leaves(dtype, master)
+        oe = bias_only_core_t(xe, *wse, pe)
+        ge = torch.autograd.grad(oe, [xe, *wse, pe], dy.to(dtype))
+        floor = 3e-3 if dtype is BF else 6e-3
+        factor = 1.5 if dtype is BF else 1.0
+        assert rel(oe, og) <= max(factor * rel(orf, og), floor), (rel(oe, og), rel(orf, og))
+        for i, (a, r, ref) in enumerate(zip(ge, gg, gr, strict=True)):
+            assert rel(a, r) <= max(factor * rel(ref, r), 2 * floor), (i, master, rel(a, r), rel(ref, r))
+
+
+@pytest.mark.parametrize("dtype", [BF, F32], ids=["bf16", "fp32"])
+@pytest.mark.parametrize("case", [(1, 2, 40), (3, 4, 33), (2, 2, 64), (2, 1, 48)], ids=["1blk-B2", "3blk-B4-odd-L", "2blk-B2", "2blk-B1"])
+def test_pair_bias_all_portable_matches_the_pytorch_fold(dtype, case):
+    from miniworld_engine.modules.bias_only_dit import pair_bias_all
+    from miniworld_engine.modules.bias_only_dit.module import BiasOnlyAttention
+    from miniworld_engine.modules.exceptions import ImplementationType
+
+    nb, B, L = case
+    H, C = 16, 128
+    g = torch.Generator(device=DEV).manual_seed(4)
+    pair = (torch.randn(B, L, L, C, device=DEV, generator=g) * 2 + 0.5).to(dtype)
+    dl = torch.randn(nb, B, H, L, L, device=DEV, generator=g)
+
+    def run(impl, dt):
+        torch.manual_seed(7)
+        blocks = [BiasOnlyAttention(d_single=64, d_cond=32, d_pair=C, n_head=H, implementation=impl).to(DEV) for _ in range(nb)]
+        for b in blocks:
+            torch.nn.init.normal_(b.to_bias.weight, std=C**-0.5)
+            b.ln_pair.weight.data.add_(0.1 * torch.randn_like(b.ln_pair.weight))
+        pr = pair.to(dt).requires_grad_(True)
+        outs = pair_bias_all(blocks, pr, implementation=impl)
+        params = [q for b in blocks for q in (b.ln_pair.weight, b.to_bias.weight)]
+        loss = sum((o.float() * d.to(F32)).sum() for o, d in zip(outs, dl, strict=True))
+        return outs, torch.autograd.grad(loss, [pr, *params])
+
+    gold, gold_g = run(ImplementationType.PYTORCH, torch.float64)
+    ref, ref_g = run(ImplementationType.PYTORCH, dtype)
+    out, g_ = run(ImplementationType.MINIWORLD, dtype)
+    floor = 3e-3 if dtype is BF else 6e-3
+    factor = 1.5 if dtype is BF else 1.0
+    for o, r, rf in zip(out, gold, ref, strict=True):
+        assert o.shape == (B, H, L, L)
+        assert rel(o, r) <= max(factor * rel(rf, r), floor), (rel(o, r), rel(rf, r))
+    for i, (a, r, rf) in enumerate(zip(g_, gold_g, ref_g, strict=True)):
+        assert rel(a, r) <= max(factor * rel(rf, r), 2 * floor), (i, rel(a, r), rel(rf, r))
