@@ -496,8 +496,6 @@ class Settings:
     pwa_train: bool | None = None
     #: Formerly ``MINIWORLD_PWA_INFER``: like ``pwa_train`` for inference; None follows ``pwa_train``.
     pwa_infer: bool | None = None
-    #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
-    token_pair_init_fused: bool = True
     # ---- H100 native-path switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
     #: Formerly ``MINIWORLD_APB_H100_TRAIN`` (default on): the native H100 CUDA AttentionPairBias training path
     #: (`integrations/attention_pair_bias_b200.py`). Off keeps the legacy comparison path (explicit baseline only).
@@ -718,7 +716,6 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
     "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
     "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
-    "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
     "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",
     "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
     "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
@@ -761,6 +758,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TRIATTN_QG_FWD": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIATTN_QKV_FWD": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIATTN_TRAINING_FWD": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_FUSED_PAIR_INIT": "",  # removed: the setting was never read (the fusion is always on when the op serves the call)
     "MW_WIDE_INFER_CFG": "",  # removed: the default behaviour is the only one
     "TRIMUL_NATIVE_DRIVER": "",  # removed: the default behaviour is the only one
     "TRIMUL_NATIVE_PDL": "",  # removed: the default behaviour is the only one
