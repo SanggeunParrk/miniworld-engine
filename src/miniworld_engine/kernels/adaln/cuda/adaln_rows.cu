@@ -15,12 +15,14 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include "row_math.cuh"
+#include "tpose.cuh"
 
 namespace {
 using bf = __nv_bfloat16;
 using bf2 = __nv_bfloat162;
 constexpr int WPB = 8;  // warps per block
 
+__device__ __forceinline__ float tf32_rn(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
 __device__ __forceinline__ float wsum(float v) { return rowmath::warp_sum(v); }
 __device__ __forceinline__ float sigm(float x) { return rowmath::sigmoid(x); }
 
@@ -89,6 +91,44 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_k(const T* __restrict__ 
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
 
+// ln_cond_fwd with the K-major copy of its output: CNT [N, ldd] (row f: feature f of LN(cond) * wc, one column per activation row), written through shared-memory tiles of
+// 32 rows (tpose.cuh). The fp32 weight gradient dW = dsb^T cn then runs as G^T (cnT)^T, the one TF32 layout cuBLAS runs at ~300 TFLOP/s for a left operand it must read MN-major;
+// the copy costs one more write of cn (a separate transposing kernel read it again as well). Same arithmetic as ln_cond_fwd_k.
+template <int N>
+__global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_t_k(const float* __restrict__ C, const float* __restrict__ W, float* __restrict__ CN, float2* __restrict__ ST,
+                                                            float* __restrict__ CNT, long ldd, long R, float eps) {
+  extern __shared__ float Ts[];
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+  const long m0 = (long)blockIdx.x * tpose::TR;
+  const int rows = (int)min((long)tpose::TR, R - m0);
+#pragma unroll
+  for (int q = 0; q < tpose::TR / WPB; ++q) {
+    const int rl = q * WPB + wp;
+    if (rl < rows) {
+      const long row = m0 + rl;
+      float v[N / 32], mean, rstd;
+      ld_row<N>(C + row * N, lane, v);
+      stats<N>(v, eps, mean, rstd);
+#pragma unroll
+      for (int k = 0; k < N / 128; ++k) {
+        const float4 w = *reinterpret_cast<const float4*>(W + 4 * (lane + 32 * k));
+        v[4 * k] = (v[4 * k] - mean) * rstd * w.x;
+        v[4 * k + 1] = (v[4 * k + 1] - mean) * rstd * w.y;
+        v[4 * k + 2] = (v[4 * k + 2] - mean) * rstd * w.z;
+        v[4 * k + 3] = (v[4 * k + 3] - mean) * rstd * w.w;
+      }
+      st_row<N>(CN + row * N, lane, v);
+      if (lane == 0) ST[row] = make_float2(mean, rstd);
+#pragma unroll
+      for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+        for (int j = 0; j < 4; ++j) tpose::put(Ts, 4 * (lane + 32 * k) + j, rl, v[4 * k + j]);
+    }
+  }
+  __syncthreads();
+  tpose::flush(Ts, CNT, ldd, 0, N, (int)m0, rows, wp, WPB, lane);
+}
+
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X, const T* __restrict__ SB, T* __restrict__ Y,
                                                         float2* __restrict__ ST, long R, float eps) {
@@ -109,7 +149,7 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__ DY, const T* __restrict__ X, const T* __restrict__ SB,
                                                         const float2* __restrict__ ST, T* __restrict__ DSB, T* __restrict__ DX,
-                                                        float* __restrict__ PB, long R, const T* __restrict__ ADD) {
+                                                        float* __restrict__ PB, long R, const T* __restrict__ ADD, bool RNA) {
   __shared__ float red[WPB][N];
   const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
   float part[N / 32];
@@ -144,9 +184,97 @@ __global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_k(const T* __restrict__
       for (int i = 0; i < N / 32; ++i) dx[i] += ad[i];
     }
     st_row<N>(DX + row * N, lane, dx);
+    if (RNA && sizeof(T) == 4) {   // the next consumer is a TF32 tensor-core GEMM: hand it the nearest-rounded operand (a TMA-fed fp32 operand is truncated)
+#pragma unroll
+      for (int i = 0; i < N / 32; ++i) { dsp[i] = tf32_rn(dsp[i]); dy[i] = tf32_rn(dy[i]); }
+    }
     st_row<N>(DSB + row * 2 * N, lane, dsp);
     st_row<N>(DSB + row * 2 * N + N, lane, dy);
   }
+#pragma unroll
+  for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+    for (int j = 0; j < 4; ++j) red[wp][4 * (lane + 32 * k) + j] = part[4 * k + j];
+  __syncthreads();
+  for (int c = threadIdx.x; c < N; c += 32 * WPB) {
+    float v = 0.f;
+#pragma unroll
+    for (int w = 0; w < WPB; ++w) v += red[w][c];
+    PB[(long)blockIdx.x * N + c] = v;
+  }
+}
+
+// fp32 feature-major variant of adaln_bwd_k (the TF32 weight-gradient GEMM wants K = rows contiguous, see tpose.cuh): the gradient D = [dscale ; dy]^T is
+// written as [2 N, ldd] (row f: feature f of dscale, row N + f: feature f of dy, one column per activation row), tiles of 32 rows through shared memory.
+// Same arithmetic and the same fixed-order partials as adaln_bwd_k; dsb [M, 2N] is never materialised. 256 threads; dynamic shared memory N * 33 floats.
+template <int N>
+__global__ void __launch_bounds__(32 * WPB, 2) adaln_bwd_t_k(const float* __restrict__ DY, const float* __restrict__ X, const float* __restrict__ SB,
+                                                           const float2* __restrict__ ST, float* __restrict__ DX, float* __restrict__ D, long ldd,
+                                                           float* __restrict__ PB, long R, const float* __restrict__ ADD) {
+  extern __shared__ float Ts[];
+  const int lane = threadIdx.x & 31, wp = threadIdx.x >> 5;
+  float part[N / 32];
+#pragma unroll
+  for (int i = 0; i < N / 32; ++i) part[i] = 0.f;
+  for (long m0 = (long)blockIdx.x * tpose::TR; m0 < R; m0 += (long)gridDim.x * tpose::TR) {
+    const int rows = (int)min((long)tpose::TR, R - m0);
+    for (int q = 0; q < tpose::TR / WPB; ++q) {
+      const int rl = q * WPB + wp;
+      if (rl < rows) {
+        const long row = m0 + rl;
+        float dy[N / 32], x[N / 32], sp[N / 32];
+        ld_row<N>(DY + row * N, lane, dy);
+        ld_row<N>(X + row * N, lane, x);
+        ld_row<N>(SB + row * 2 * N, lane, sp);
+        const float2 s2 = ST[row];
+        float g[N / 32], dsp[N / 32], mg = 0.f, mgx = 0.f;
+#pragma unroll
+        for (int i = 0; i < N / 32; ++i) {
+          const float xh = (x[i] - s2.x) * s2.y, s = sigm(sp[i]);
+          g[i] = dy[i] * s;
+          dsp[i] = dy[i] * xh * s * (1.f - s);
+          x[i] = xh;
+          mg += g[i];
+          mgx += g[i] * xh;
+          part[i] += dsp[i];
+        }
+        mg = wsum(mg) * (1.f / N);
+        mgx = wsum(mgx) * (1.f / N);
+        float dx[N / 32];
+#pragma unroll
+        for (int i = 0; i < N / 32; ++i) dx[i] = s2.y * (g[i] - mg - x[i] * mgx);
+        if (ADD) {
+          float ad[N / 32];
+          ld_row<N>(ADD + row * N, lane, ad);
+#pragma unroll
+          for (int i = 0; i < N / 32; ++i) dx[i] += ad[i];
+        }
+        st_row<N>(DX + row * N, lane, dx);
+#pragma unroll
+        for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+          for (int j = 0; j < 4; ++j) tpose::put(Ts, 4 * (lane + 32 * k) + j, rl, dsp[4 * k + j]);
+      }
+    }
+    __syncthreads();
+    tpose::flush(Ts, D, ldd, 0, N, (int)m0, rows, wp, WPB, lane);
+    __syncthreads();
+    for (int q = 0; q < tpose::TR / WPB; ++q) {   // the second half of D: dy itself (re-read: it was read a moment ago, an L2 hit)
+      const int rl = q * WPB + wp;
+      if (rl < rows) {
+        float dy[N / 32];
+        ld_row<N>(DY + (m0 + rl) * N, lane, dy);
+#pragma unroll
+        for (int k = 0; k < N / 128; ++k)
+#pragma unroll
+          for (int j = 0; j < 4; ++j) tpose::put(Ts, 4 * (lane + 32 * k) + j, rl, dy[4 * k + j]);
+      }
+    }
+    __syncthreads();
+    tpose::flush(Ts, D, ldd, N, N, (int)m0, rows, wp, WPB, lane);
+    __syncthreads();
+  }
+  float (*red)[N] = reinterpret_cast<float (*)[N]>(Ts);
 #pragma unroll
   for (int k = 0; k < N / 128; ++k)
 #pragma unroll
@@ -277,6 +405,32 @@ std::vector<at::Tensor> ln_cond_fwd(at::Tensor cond, at::Tensor w, double eps) {
   return {cn, st};
 }
 
+// fp32: (cn, stats, cnT [N, ldd] with ldd = R rounded up to 32; use cnT[:, :R])
+std::vector<at::Tensor> ln_cond_fwd_t(at::Tensor cond, at::Tensor w, double eps) {
+  chk(cond, at::kFloat, "cond");
+  chk(w, at::kFloat, "wc");
+  const long N = w.numel(), R = cond.numel() / N;
+  TORCH_CHECK(N == 256 || N == 384 || N == 512 || N == 768, "ln_cond_fwd_t: width 256 / 384 / 512 / 768");
+  const at::cuda::CUDAGuard gd(cond.device());
+  const long ldd = (R + 31) / 32 * 32;
+  auto cn = at::empty_like(cond);
+  auto st = at::empty({R, 2}, cond.options());
+  auto cnt = at::empty({N, ldd}, cond.options());
+  const size_t shm = (size_t)N * tpose::LD * sizeof(float);
+  const unsigned grid = (unsigned)((R + 31) / 32);
+#define LT(NN)                                                                                                                                         \
+  do {                                                                                                                                                 \
+    auto k = ln_cond_fwd_t_k<NN>;                                                                                                                       \
+    C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm));                                                    \
+    k<<<grid, 32 * WPB, shm, S()>>>(cond.data_ptr<float>(), w.data_ptr<float>(), cn.data_ptr<float>(), reinterpret_cast<float2*>(st.data_ptr()),         \
+                                    cnt.data_ptr<float>(), ldd, R, (float)eps);                                                                          \
+  } while (0)
+  if (N == 256) LT(256); else if (N == 384) LT(384); else if (N == 512) LT(512); else LT(768);
+#undef LT
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {cn, st, cnt};
+}
+
 std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   chk_act(x, "x");
   TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
@@ -291,7 +445,7 @@ std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   return {y, st};
 }
 
-std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add) {
+std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add, bool rna = false) {
   if (add) { chk_act(*add, "add"); TORCH_CHECK(add->scalar_type() == dy.scalar_type() && add->numel() == dy.numel(), "add shape"); }
   chk_act(dy, "dy");
   TORCH_CHECK(x.scalar_type() == dy.scalar_type() && sb.scalar_type() == dy.scalar_type() && x.is_contiguous() && sb.is_contiguous(), "dtypes");
@@ -304,9 +458,40 @@ std::vector<at::Tensor> adaln_bwd(at::Tensor dy, at::Tensor x, at::Tensor sb, at
   const unsigned grid = std::min<unsigned>(rows_grid(R), 4u * nsm_of(x));
   auto pb = at::empty({(long)grid, N}, x.options().dtype(at::kFloat));
   ACT_SWITCH(N, x, adaln_bwd_k<NN, T><<<grid, 32 * WPB, 0, S()>>>(P<T>(dy), P<T>(x), P<T>(sb), reinterpret_cast<const float2*>(st.data_ptr()), PM<T>(dsb),
-                                                                 PM<T>(dx), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr));
+                                                                 PM<T>(dx), pb.data_ptr<float>(), R, add ? P<T>(*add) : nullptr, rna));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dsb, dx, pb};
+}
+
+// fp32 feature-major backward row pass: ([2 N, ldd] D = [dscale ; dy]^T with ldd = R rounded up to 32, dx, block partials of the scale-bias gradient)
+std::vector<at::Tensor> adaln_bwd_t(at::Tensor dy, at::Tensor x, at::Tensor sb, at::Tensor st, c10::optional<at::Tensor> add, int64_t gmul = 2) {
+  if (add) { chk_act(*add, "add"); TORCH_CHECK(add->scalar_type() == at::kFloat && add->numel() == dy.numel(), "add shape"); }
+  chk(dy, at::kFloat, "dy");
+  chk(x, at::kFloat, "x");
+  chk(sb, at::kFloat, "sb");
+  chk(st, at::kFloat, "st");
+  const long N = sb.size(1) / 2, R = sb.size(0);
+  TORCH_CHECK(x.numel() == R * N && dy.numel() == R * N && st.numel() == 2 * R, "adaln_bwd_t shapes");
+  TORCH_CHECK(N == 256 || N == 384 || N == 512 || N == 768, "adaln_bwd_t: width 256 / 384 / 512 / 768");
+  const at::cuda::CUDAGuard gd(x.device());
+  const long ldd = (R + 31) / 32 * 32;
+  auto D = at::empty({2 * N, ldd}, x.options());
+  auto dx = at::empty_like(x);
+  const unsigned grid = std::min<unsigned>((unsigned)((R + 31) / 32), (unsigned)gmul * nsm_of(x));
+  auto pb = at::empty({(long)grid, N}, x.options());
+  const size_t shm = (size_t)N * tpose::LD * sizeof(float);
+  const float* addp = add ? add->data_ptr<float>() : nullptr;
+#define BT(NN)                                                                                                                                         \
+  do {                                                                                                                                                 \
+    auto k = adaln_bwd_t_k<NN>;                                                                                                                         \
+    C10_CUDA_CHECK(cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)shm));                                                    \
+    k<<<grid, 32 * WPB, shm, S()>>>(dy.data_ptr<float>(), x.data_ptr<float>(), sb.data_ptr<float>(), reinterpret_cast<const float2*>(st.data_ptr()),    \
+                                    dx.data_ptr<float>(), D.data_ptr<float>(), ldd, pb.data_ptr<float>(), R, addp);                                      \
+  } while (0)
+  if (N == 256) BT(256); else if (N == 384) BT(384); else if (N == 512) BT(512); else BT(768);
+#undef BT
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {D, dx, pb};
 }
 
 std::vector<at::Tensor> ln_cond_bwd(at::Tensor dcn, at::Tensor cond, at::Tensor st, at::Tensor w, c10::optional<at::Tensor> add) {
@@ -345,10 +530,79 @@ void pack(at::Tensor ws, at::Tensor wb, c10::optional<at::Tensor> bs, at::Tensor
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ======================================================================================================================== fp32 weight packing, one launch
+// A training step's fp32 weight operands: concatenations ([Ws; Wb]) and K-major (transposed) copies for the TF32 backward GEMMs (the "nt" cuBLAS kernel), written
+// by ONE launch instead of a PyTorch cat + fill + transposing copy per tensor (5 - 20 us each, 40 - 60 us a step). Job j copies the 2-D fp32 tensor src[j] [R, C] into
+// dst[j] (row stride ldd[j]) at (row0, col0): mode 0 as it is (dst[row0 + r, col0 + c]), mode 1 transposed (dst[row0 + c, col0 + r]), mode 2 zero fill of an R x C block.
+struct PackJobs {
+  const float* src[8];
+  float* dst[8];
+  int rows[8], cols[8], ldd[8], row0[8], col0[8], mode[8], rna[8];
+  int tile_end[8];   // prefix sums of the 32 x 32 tile counts
+  int n;
+};
+__global__ void __launch_bounds__(256) pack_f32_k(PackJobs jb) {
+  __shared__ float tile[32][33];
+  int t = blockIdx.x, j = 0;
+  while (t >= jb.tile_end[j]) ++j;
+  if (j) t -= jb.tile_end[j - 1];
+  const int R = jb.rows[j], C = jb.cols[j], tc = (C + 31) / 32;
+  const int r0 = (t / tc) * 32, c0 = (t % tc) * 32;
+  const int tx = threadIdx.x & 31, ty = threadIdx.x >> 5;
+  float* dst = jb.dst[j];
+  const long ldd = jb.ldd[j];
+  const int mode = jb.mode[j];
+  const bool rna = jb.rna[j] != 0;
+  if (mode == 2) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = 0.f; }
+    return;
+  }
+  const float* src = jb.src[j];
+#pragma unroll
+  for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; tile[ty + 8 * i][tx] = (r < R && c < C) ? src[(long)r * C + c] : 0.f; }
+  __syncthreads();
+  if (mode == 0) {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { const int r = r0 + ty + 8 * i, c = c0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + r) * ldd + jb.col0[j] + c] = rna ? tf32_rn(tile[ty + 8 * i][tx]) : tile[ty + 8 * i][tx]; }
+  } else {
+#pragma unroll
+    for (int i = 0; i < 4; ++i) { const int c = c0 + ty + 8 * i, r = r0 + tx; if (r < R && c < C) dst[(long)(jb.row0[j] + c) * ldd + jb.col0[j] + r] = rna ? tf32_rn(tile[tx][ty + 8 * i]) : tile[tx][ty + 8 * i]; }
+  }
+}
+// srcs[k]: fp32 [R, C] (ignored for mode 2: pass any tensor with the block's shape); dsts[k]: fp32 2-D; spec[k] = (mode, row0, col0)
+void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::vector<std::vector<int64_t>> spec) {
+  TORCH_CHECK(!srcs.empty() && srcs.size() <= 8 && srcs.size() == dsts.size() && srcs.size() == spec.size(), "pack_f32: 1 .. 8 jobs");
+  PackJobs jb{};
+  int tiles = 0;
+  for (size_t k = 0; k < srcs.size(); ++k) {
+    const auto& s = srcs[k];
+    const auto& d = dsts[k];
+    TORCH_CHECK(s.is_cuda() && d.is_cuda() && s.scalar_type() == at::kFloat && d.scalar_type() == at::kFloat && s.dim() == 2 && d.dim() == 2 && s.is_contiguous() &&
+                d.stride(1) == 1, "pack_f32: fp32 2-D, contiguous source, row-contiguous destination");
+    const int mode = (int)spec[k][0], row0 = (int)spec[k][1], col0 = (int)spec[k][2];
+    const int R = (int)s.size(0), C = (int)s.size(1);
+    const int rr = mode == 1 ? C : R, cc = mode == 1 ? R : C;   // extent in the destination
+    TORCH_CHECK(row0 + rr <= d.size(0) && col0 + cc <= d.size(1), "pack_f32: destination too small");
+    jb.src[k] = s.data_ptr<float>();
+    jb.dst[k] = d.data_ptr<float>();
+    jb.rows[k] = R; jb.cols[k] = C; jb.ldd[k] = (int)d.stride(0); jb.row0[k] = row0; jb.col0[k] = col0; jb.mode[k] = mode; jb.rna[k] = spec[k].size() > 3 ? (int)spec[k][3] : 0;
+    tiles += ((R + 31) / 32) * ((C + 31) / 32);
+    jb.tile_end[k] = tiles;
+  }
+  jb.n = (int)srcs.size();
+  const at::cuda::CUDAGuard gd(srcs[0].device());
+  pack_f32_k<<<tiles, 256, 0, S()>>>(jb);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_cond_fwd", &ln_cond_fwd);
+  m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
   m.def("adaln_fwd", &adaln_fwd);
-  m.def("adaln_bwd", &adaln_bwd);
+  m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
+  m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
   m.def("ln_cond_bwd", &ln_cond_bwd);
   m.def("pack", &pack);
+  m.def("pack_f32", &pack_f32);
 }

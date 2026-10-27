@@ -161,9 +161,9 @@ def test_training_gradients_match_the_reference(op, bf16, compiled):
     for i, (a, b, p) in enumerate(zip(mine, r64, theirs)):
         assert _err(a, b) <= 1.5 * _err(p, b) + 1e-6, (i, _err(a, b), _err(p, b))
     names = _kernels(lambda: run(fn, x, c, bf16))
-    assert _has(names, "ln_rows_k") or _has(names, "ln_cond_fwd_k"), names
+    assert _has(names, "ln_rows_k") or _has(names, "ln_cond_fwd_k") or _has(names, "ln_cond_fwd_t_k"), names
     if op == "ct":
-        assert _has(names, "sigmul_bwd_k"), names
+        assert _has(names, "sigmul_bwd_k") or _has(names, "sigmul_bwd_x_k"), names
     assert not any(_is_triton(k) for k in names), names
 
 
