@@ -11,7 +11,6 @@ under programmatic dependent launch. Built on first use (``load_extension``), ne
 from __future__ import annotations
 
 import functools
-import os
 from pathlib import Path
 
 import torch
@@ -31,7 +30,7 @@ def ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="ct_sm90" + ("_trace" if os.environ.get("CT_TRACE") else "") + ("_nomc" if os.environ.get("CT_NOMC") else ""),
+        name="ct_sm90",
         sources=[str(_dir / "ct_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -44,8 +43,6 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *(["-DCT_TRACE"] if os.environ.get("CT_TRACE") else []),
-            *(["-DCT_NOMC_BUILD"] if os.environ.get("CT_NOMC") else []),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,

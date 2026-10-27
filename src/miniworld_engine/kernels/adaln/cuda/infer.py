@@ -30,7 +30,7 @@ def ext():
 
     ensure_cuda_home()
     return load_extension(
-        name="adaln_sm90" + ("_trace" if os.environ.get("CT_TRACE") else ""),
+        name="adaln_sm90",
         sources=[str(_dir / "adaln_sm90.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -43,7 +43,6 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *(["-DCT_TRACE"] if os.environ.get("CT_TRACE") else []),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,

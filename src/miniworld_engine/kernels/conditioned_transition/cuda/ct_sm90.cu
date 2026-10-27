@@ -13,11 +13,6 @@
 using namespace ctk;
 
 constexpr int TBM = 128;
-#ifdef CT_NOMC_BUILD
-constexpr bool CT_NOMC = true;
-#else
-constexpr bool CT_NOMC = false;
-#endif
 
 // ======================================================================================================================== expand + SwiGLU
 // B is Wab packed per tile: tile t = [Wa rows HT t .. HT t + HT - 1 | Wb rows HT t .. HT t + HT - 1] (2 HT rows), so one 128 x 2 HT output tile
@@ -42,7 +37,7 @@ template <bool F32, int HT> TMN_DEVI void mma_e(float (&acc)[HT], uint64_t a, ui
 // all, so the cluster reads the slab from L2 once; a stage is free again when the consumers of every CTA of the cluster have released it
 #define LOADB(stage, kbv, n0v)                                                                                                                  \
   do {                                                                                                                                          \
-    if constexpr (CL > 1 && !CT_NOMC)                                                                                                         \
+    if constexpr (CL > 1)                                                                                                         \
       tma_load_2d_mc(sm + (stage) * F_ST + F_SA + rk * (TBN / CL) * 128, &mB, full + (stage), (kbv) * TBK, (n0v) + rk * (TBN / CL),            \
                      (uint16_t)((1u << CL) - 1));                                                                                               \
     else                                                                                                                                        \
@@ -51,7 +46,7 @@ template <bool F32, int HT> TMN_DEVI void mma_e(float (&acc)[HT], uint64_t a, ui
 #define RELEASE(st)                                                                                                                              \
   do {                                                                                                                                          \
     mbar_arrive(empty + (st));                                                                                                                  \
-    if constexpr (CL > 1 && !CT_NOMC) mbar_arrive_remote(empty + (st), (uint32_t)(rk ^ 1));                                                               \
+    if constexpr (CL > 1) mbar_arrive_remote(empty + (st), (uint32_t)(rk ^ 1));                                                               \
   } while (0)
 template <bool F32, int HT, bool RND, int CL>
 __global__ void __launch_bounds__(384, 1)
@@ -68,7 +63,7 @@ expand_swiglu_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ 
   const int MT = (M + TBM - 1) / TBM, NT = H / HT, KB = K / TBK, MP = (MT + CL - 1) / CL, items = MP * NT;
   const int rk = CL > 1 ? (int)cluster_rank() : 0, cid = blockIdx.x / CL, ncl = gridDim.x / CL;
   if (tid == 0) {
-    for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, CT_NOMC ? 2 : 2 * CL); }
+    for (int s = 0; s < NSTAGE; ++s) { mbar_init(full + s, 1); mbar_init(empty + s, 2 * CL); }
     fence_barrier_init();
   }
   if constexpr (CL > 1) cluster_sync(); else __syncthreads();
@@ -176,7 +171,7 @@ void run_expand(const at::Tensor& x, const at::Tensor& wab, const at::Tensor& h,
   using C = ECfg<F32, HT>;
   const int64_t M = x.size(0), K = x.size(1), H = h.size(1);
   TORCH_CHECK(K % C::TBK == 0 && H % HT == 0, "shapes: K % (64 bf16 / 32 fp32), H % HT");
-  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, 2 * H, K, K, C::TBK, C::TBN / (CT_NOMC ? 1 : CL)),
+  const auto mA = map2d(x.data_ptr(), F32, M, K, x.stride(0), C::TBK, TBM), mB = map2d(wab.data_ptr(), F32, 2 * H, K, K, C::TBK, C::TBN / CL),
              mH = map2d(h.data_ptr(), F32, M, H, H, F32 ? 32 : 64, 64);
   const int items = (int)((((M + TBM - 1) / TBM + CL - 1) / CL) * (H / HT));
   auto k = expand_swiglu_k<F32, HT, RND, CL>;
