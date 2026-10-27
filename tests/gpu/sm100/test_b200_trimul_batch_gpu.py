@@ -6,6 +6,7 @@ samples shows as a large error."""
 
 import pytest
 import torch
+from portable_helpers import relative_float as relative
 
 from miniworld_engine.kernels.trimul_inproj.cuda import b200_infer, b200_train
 
@@ -22,10 +23,6 @@ EPS = 1e-5
 def b200():
     if torch.cuda.get_device_capability() != (10, 0):
         pytest.skip("B200 (sm_100) required")
-
-
-def relative(a, b):
-    return float((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12))
 
 
 def leaves_for(direction, x, seed=0):

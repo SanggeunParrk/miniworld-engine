@@ -7,11 +7,12 @@ conditioning gates and the AdaLN scales far into saturation (|g| up to several h
 training paths, each switch setting that serves a different kernel set, and require finite results within the usual bounds.
 """
 
-import contextlib
 import copy
 
 import pytest
 import torch
+from portable_helpers import relative_fp64 as relative64
+from portable_helpers import tf32_matmul_flag as tf32
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
@@ -59,25 +60,10 @@ def policy():
         settings.configure(**vars(old))
 
 
-@contextlib.contextmanager
-def tf32(on):
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = on
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
-
-
 # bounds against the fp64 block, relative to the PyTorch block in the same dtype (fp32: with TF32 GEMMs, as the kernels). bf16 takes
 # 1.25x where the unsaturated tests take 1.1x: with saturated gates the cond-LN weight gradients are cancellation-dominated (the
 # PyTorch bf16 block itself is 23-27 % off) and the per-step launches, fused or not, sit at 1.13-1.15x of it.
 BOUND = {"bf16": (1.25, 1e-4), "fp32": (1.5, 1e-3)}
-
-
-def relative64(a, b):
-    a, b = a.detach().double(), b.detach().double()
-    return float((a - b).norm() / b.norm().clamp_min(1e-30))
 
 
 @pytest.mark.parametrize("gval", GVALS)

@@ -6,6 +6,8 @@ pair-fed call; every step twice for bitwise determinism."""
 
 import pytest
 import torch
+from portable_helpers import randomize_half_std as randomize
+from settings_helpers import policy_portable_off as policy  # noqa: F401
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as bi
@@ -20,30 +22,9 @@ pytestmark = [
 ]
 
 
-@pytest.fixture(autouse=True)
-def policy():
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
-
-
 def rel(a, b):
     a, b = a.detach().double(), b.detach().double()
     return float((a - b).norm() / b.norm().clamp_min(1e-30))
-
-
-def randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5 * 0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return m
 
 
 def make_pair(nh=16, dh=48):

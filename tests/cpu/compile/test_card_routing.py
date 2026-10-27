@@ -51,12 +51,6 @@ def _recorded(kind, *calls):
     return results, [w for w in caught if issubclass(w.category, kind)]
 
 
-@pytest.fixture
-def manifests(tmp_path):
-    with records.use_manifest_dir(tmp_path):
-        yield tmp_path
-
-
 # ---- (vii) the public enum -------------------------------------------------------------------------------------------
 def test_the_public_enum_has_exactly_four_members():
     assert {m.value for m in ImplementationType} == {"pytorch", "miniworld", "cuequivariance", "anthropic"}

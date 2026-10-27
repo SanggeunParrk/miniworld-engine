@@ -6,9 +6,16 @@ from __future__ import annotations
 
 import pytest
 import torch
-from settings_helpers import forced_triton as portable_switch   # the internal A/B switch: the one place the tests name it
+from portable_helpers import run_pair_init as _run
+from settings_helpers import (
+    forced_triton as portable_switch,  # the internal A/B switch: the one place the tests name it
+)
 
-from miniworld_engine.kernels.token_pair_init import refusal, token_pair_init, token_pair_init_reference
+from miniworld_engine.kernels.token_pair_init import (
+    refusal,
+    token_pair_init,
+    token_pair_init_reference,
+)
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 DEV, P = "cuda", 128
@@ -38,12 +45,6 @@ def _case(b, l, seed=0, r_max=32, s_max=2, grad=True):
     w_rel, w_bond = (torch.randn(P, n_rel, generator=g) * 0.3).to(DEV), (torch.randn(P, 2, generator=g) * 0.3).to(DEV)
     leaves = [t.requires_grad_(grad) for t in (left, right, w_rel, w_bond)]
     return leaves, (asym, resi, tok, ent, sym), bond
-
-
-def _run(fn, leaves, ids, bond, **kw):
-    left, right, w_rel, w_bond = leaves
-    asym, resi, tok, ent, sym = ids
-    return fn(left, right, w_rel, w_bond, asym, resi, tok, ent, sym, bond, **kw)
 
 
 def _rel(a, e):

@@ -63,7 +63,7 @@ def _headers():
     source = T.SOURCES / "inference"
     dest = T.cache_dir() / ("uni_wide_headers_" + T._source_digest().hex()[:16])
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
-        content = (source / name).read_text()
+        content = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
             content = content.replace(
                 "static constexpr int MINB = NCWG == 1 ? 2 : 1;",
@@ -100,7 +100,8 @@ def _compile(kind, D, H, cfg, normalize=False):
         flags = ["-DMW_MINB=1", "-DMW_K1_STREAM=0", f"-DWIDTH={D}", f"-DHIDDEN={H}",
                  f"-DMW_NSLOT={slots}", f"-DWAITN={waitn}", f"-DPREGS={pregs}"]
     flags += ["-DTMN_SIGMOID_TANH=1", "-DTMN_WSKIP=1", "-DTMN_MASK_TEMPLATE=1", "-std=c++17",
-              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R)]
+              "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-I" + str(_headers()), "-I" + str(R),
+              "-I" + str(T.SOURCES / "wide_forward")]
     unit = T.load_unit(str(T.compile_text(body, flags)), name)
     k = unit.kernel(name)
     k.set_max_dynamic_smem(smem)

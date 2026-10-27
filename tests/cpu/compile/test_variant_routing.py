@@ -13,7 +13,6 @@ import torch
 from fake_card import fake_card, write_manifest
 
 from miniworld_engine import settings
-from miniworld_engine.autotune import records
 from miniworld_engine.modules import dispatch
 from miniworld_engine.modules.dispatch import KernelRefusedWarning
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -35,12 +34,6 @@ def _clean():
     settings.configure(**dataclasses.asdict(previous))
     for cache in (dispatch._card_cache, dispatch._unrecorded_warned, dispatch._refused_warned):
         cache.clear()
-
-
-@pytest.fixture
-def manifests(tmp_path):
-    with records.use_manifest_dir(tmp_path):
-        yield tmp_path
 
 
 @pytest.fixture

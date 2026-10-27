@@ -69,7 +69,7 @@ def forward_headers():
     source = T.SOURCES / "inference"
     dest = T.cache_dir() / ("wide_train_headers_" + T._source_digest().hex()[:16])
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
-        text = (source / name).read_text()
+        text = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
             for old, new in (
                 ("static constexpr int MINB = NCWG == 1 ? 2 : 1;",
@@ -95,7 +95,8 @@ def _defines(**values):
 @T.device_cache
 def _unit(source, include, defines, pool=None):
     flags = ["-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-Xptxas=-v",
-             "-I" + _include(include), *defines]
+             "-I" + _include(include),
+             *(("-I" + str(T.ANTHROPIC_V5),) if include == "upstream" else ()), *defines]
     cubin = T.compile(R / source, flags)
     if pool is not None:
         cubin = _register_pool(cubin, *pool)

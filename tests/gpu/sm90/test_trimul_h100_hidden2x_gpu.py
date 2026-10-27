@@ -8,6 +8,7 @@ and the modules are driven as MiniWorld's template stack drives them (FP32 param
 
 import pytest
 import torch
+from portable_helpers import relative
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import trimul_h100
@@ -38,10 +39,6 @@ def hopper():
     torch.compiler.reset()
     yield
     settings.configure(**vars(old))
-
-
-def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-12))
 
 
 def make(width, outgoing, implementation=ImplementationType.MINIWORLD, seed=0):

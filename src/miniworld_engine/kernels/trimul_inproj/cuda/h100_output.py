@@ -42,6 +42,7 @@ def kernel(kind, ln=0, stats=0, pg=False, method=0):
         "-lineinfo",
         "-Xptxas=-v",
         "-I" + str(inc),
+        "-I" + str(T.ANTHROPIC_V5),
     ] + ["-D%s=%s" % v for v in defs.items()]
     out = T.compile(src, flags)
     L = T._launch_module()

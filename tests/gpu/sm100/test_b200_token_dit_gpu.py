@@ -3,9 +3,10 @@ step's attention on the sm_100a gated core (kernels/augmented_attention/cuda/sm1
 
 import pytest
 import torch
+from portable_helpers import randomize, relative
 from settings_helpers import override_setting
+from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import token_dit
 from miniworld_engine.modules.dit import DiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -14,36 +15,6 @@ pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
 ]
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
 
 
 @pytest.mark.parametrize("qk", [False, True])

@@ -110,6 +110,16 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - `AdaptiveLayerNorm`, `ConditionedTransition` and the augmented-attention core run their reference on a CPU tensor instead of reaching a
   GPU kernel when the module was built for the portable family on a CPU host.
 
+### Removed
+
+- TriMul H100: removed `h100_sources/b1/common_recompute.cuh` (byte-identical to `h100_sources/common_b7/common_recompute.cuh`) and `h100_sources/b1/ln_recompute.cuh` (a strict prefix of `common_b7/ln_recompute.cuh`, which it only ever served); `h100_b1.py` and `h100_single_output.py` take `-I common_b7`. Last present at 41dc8edf.
+- TriMul H100: removed `h100_sources/uni_wide/front_shared.cuh` (byte-identical to `h100_sources/wide_forward/front_shared.cuh`, 303 lines); the uni_wide inference units take `-I wide_forward`. Last present at fc53ba5b.
+- Triangle attention H100: removed `cuda/h100_sources/fa3_utils.h` (byte-identical to `cuda/fa3_utils.h`); the `front_fused3_sm90` extension takes the parent directory on its include path like the other h100_sources builds. Last present at 8c021b96.
+- TriMul H100: removed `h100_sources/upstream/csrc/tmn_ptx.cuh`, `h100_sources/upstream/csrc/common/tmn_math.cuh` and `h100_sources/inference/tmn_ptx.cuh`, byte-identical to the pristine v5 copies in `kernels/transition/cuda/anthropic_v5/` (sha256 in its README); the TriMul builds put that directory on their include path behind `upstream/csrc` / `inference` (`_h100_runtime.ANTHROPIC_V5`, `header_path`), so the `inference/common/tmn_math.cuh` overlay still wins. Last present at 1c015020.
+- `integrations/pwa_train.py`: removed the `pwa_fwd2` fallback forward (the `else` branch taken only when `csrc/pwa_fwd3.cu` is absent, which it never is, and its `fwd2` lambda); the fwd3 forward is built unconditionally. `csrc/pwa_fwd2.cu` stays (the plain forward `pwa_plain2` uses it). Last present at d0fa6a56.
+- `settings.token_pair_init_fused` and its variable `MINIWORLD_FUSED_PAIR_INIT`: removed, nothing in the engine read the setting (the fused token pair-init op is used whenever `token_pair_init.refusal(...)` returns `None`); the variable is now reported by the removed-environment warning, and `docs/gpus/b200/token_pair_init/token_pair_init.md` no longer says the setting turns the fusion off. Last present at e8976ba1.
+- Tests: removed the copy-pasted helpers of 43 test modules (`relative` in 4 spellings, `randomize` / `_randomize`, `_poison`, `tf32`, the `policy` / `_clean` / `manifests` fixtures, the two `_run` wrappers of the extra-pair-bias and pair-init tests), identical by AST, now defined once in `tests/portable_helpers.py`, `tests/settings_helpers.py`, `tests/routing_helpers.py` and `tests/cpu/compile/conftest.py`; no test body changed. Last present at 197e9252.
+
 ## [2.3.12] - 2026-10-25
 
 ### Removed (BREAKING for code that used the removed names)

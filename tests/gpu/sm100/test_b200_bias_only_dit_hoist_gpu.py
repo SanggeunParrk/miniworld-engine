@@ -20,6 +20,10 @@ import copy
 import pytest
 import torch
 import torch.nn.functional as Fn
+from portable_helpers import poison_allocator as _poison
+from portable_helpers import randomize
+from portable_helpers import relative_fp64 as relative
+from portable_helpers import tf32_matmul_flag as tf32
 from settings_helpers import override_setting
 
 from miniworld_engine import settings
@@ -43,33 +47,6 @@ pytestmark = [
 LAYOUTS = [(16, 48), (24, 32), (12, 64), (16, 64)]
 BF, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 MW, PT = ImplementationType.MINIWORLD, ImplementationType.PYTORCH
-
-
-def relative(a, b):
-    a, b = a.detach().double(), b.detach().double()
-    return float((a - b).norm() / b.norm().clamp_min(1e-30))
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
-
-
-@contextlib.contextmanager
-def tf32(on):
-    old = torch.backends.cuda.matmul.allow_tf32
-    torch.backends.cuda.matmul.allow_tf32 = on
-    try:
-        yield
-    finally:
-        torch.backends.cuda.matmul.allow_tf32 = old
 
 
 def hopper_serves_layout(n_head, d_head, dtype=None):
@@ -108,13 +85,6 @@ def fused_only():
     finally:
         bo_module.BiasOnlyAttention.forward = old_fwd
         hoist_mod._reference = old_ref
-
-
-def _poison(mb=512):
-    """Fill the caching allocator's next blocks with NaN: a buffer read before it is written would show it."""
-    junk = torch.full((mb << 18,), float("nan"), device="cuda")
-    torch.cuda.synchronize()
-    del junk
 
 
 # ------------------------------------------------------------------------------------------------ pair_bias_all alone

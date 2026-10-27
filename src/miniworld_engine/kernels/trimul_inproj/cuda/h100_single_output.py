@@ -18,8 +18,9 @@ def build(debug=False, master=False):
         "-DSINGLE_DEBUG=" + str(int(debug)),
         "-DMASTER_FP32=" + str(int(master)),
         "-I" + str(T._upstream() / "csrc"),
+        "-I" + str(T.ANTHROPIC_V5),
         "-I" + str(T.SOURCES / "common"),
-        "-I" + str(T.SOURCES / "b1"),
+        "-I" + str(T.SOURCES / "common_b7"),
     ]
     path = T.compile(T.SOURCES / "single_output/kernel.cu", flags)
     u = T.load_unit(str(path), "single_output")
@@ -118,6 +119,7 @@ def k3_build(cfg=(2, 64, 4, 1)):
         "-lineinfo",
         "-Xptxas=-v",
         "-I" + str(T._upstream() / "csrc"),
+        "-I" + str(T.ANTHROPIC_V5),
     ] + ["-D%s=%s" % v for v in defs.items()]
     path = T.compile(T.SOURCES / "output/save_k3.cu", flags)
     k = T.load_unit(str(path), "single_k3").kernel("save_k3")

@@ -5,8 +5,9 @@ packing kernel and kept replaying the weights of capture time."""
 
 import pytest
 import torch
+from portable_helpers import relative_float as relative
+from settings_helpers import policy_b200_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.modules import (
     AttentionPairBias,
@@ -24,21 +25,6 @@ pytestmark = [
 ]
 MW = ImplementationType.MINIWORLD
 BF = torch.bfloat16
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("B200 (sm_100) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
-
-
-def relative(a, b):
-    return float((a.float() - b.float()).norm() / b.float().norm().clamp_min(1e-12))
 
 
 def _rand(*shape, grad=False):

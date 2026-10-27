@@ -254,7 +254,7 @@ def _k100():
 
 def _k(native: bool | None = None, fp32_logits: bool = True):
     """The CUDA extensions, built once (JIT, cached under settings.engine_jit_root). The forward comes from
-    `pwa_fwd3.cu` (register-resident y tiles, 48 KB stages) when that file is present, else from `pwa_fwd2.cu`."""
+    `pwa_fwd3.cu` (register-resident y tiles, 48 KB stages); `pwa_fwd2.cu` stays for the plain forward (`pwa_plain2`)."""
     native = native_aux_enabled() if native is None else native
     key = "all_native" if native else "all"
     if not fp32_logits:
@@ -282,18 +282,12 @@ def _k(native: bool | None = None, fp32_logits: bool = True):
             if (Path(__file__).with_name("csrc") / "pwa_gateout.cu").is_file()
             else None
         )  # gate / out pass over a cuBLAS contraction
-        # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of either forward
-        fwd2 = lambda w16, v, y, wg16, wo16, m, dmask, dscale: k["fwd"].pwa_fwd2(
-            w16, v, y, wg16, wo16, m, True, 1, 4, dmask, dscale
+        # the row-broadcast dropout keep-mask (training) is applied inside the residual epilogue of the forward
+        f3 = build("miniworld_pwa_fwd3", "pwa_fwd3.cu")
+        k["fwd3"] = f3
+        k["forward"] = lambda w16, v, y, wg16, wo16, m, dmask, dscale: f3.pwa_fwd3(
+            w16, v, y, wg16, wo16, m, True, 1, 3, 1, 0, dmask, dscale
         )
-        if (Path(__file__).with_name("csrc") / "pwa_fwd3.cu").is_file():
-            f3 = build("miniworld_pwa_fwd3", "pwa_fwd3.cu")
-            k["fwd3"] = f3
-            k["forward"] = lambda w16, v, y, wg16, wo16, m, dmask, dscale: f3.pwa_fwd3(
-                w16, v, y, wg16, wo16, m, True, 1, 3, 1, 0, dmask, dscale
-            )
-        else:
-            k["forward"] = fwd2
         _EXT[key] = k
     return _EXT[key]
 

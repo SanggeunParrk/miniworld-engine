@@ -4,9 +4,11 @@ the caches (weight pack, hoisted attention weights) against live changes."""
 
 import pytest
 import torch
+from portable_helpers import poison_allocator as _poison
+from portable_helpers import randomize, relative
 from settings_helpers import override_setting
+from settings_helpers import policy_blackwell_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.kernels.bias_only_dit import reference as R
@@ -17,36 +19,6 @@ pytestmark = [
     pytest.mark.gpu,
     pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required"),
 ]
-
-
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (10, 0):
-        pytest.skip("Blackwell (sm_100) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
 
 
 LAYOUTS = [(16, 48), (24, 32), (12, 64), (16, 64)]
@@ -446,13 +418,6 @@ def test_inf3_bf16_block_matches_the_pytorch_block(
         relative(base, want),
     )
     assert relative(got, base) < 0.01
-
-
-def _poison(mb=512):
-    """Fill the caching allocator's next blocks with NaN: a buffer the step reads before writing would show it."""
-    junk = torch.full((mb << 18,), float("nan"), device="cuda")
-    torch.cuda.synchronize()
-    del junk
 
 
 @pytest.mark.parametrize(("n_head", "d_head"), [(16, 48), (16, 64)])

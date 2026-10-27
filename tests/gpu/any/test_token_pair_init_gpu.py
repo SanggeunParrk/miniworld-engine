@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import pytest
 import torch
+from portable_helpers import run_pair_init as _run
 
 from miniworld_engine.kernels.token_pair_init import (
     refusal,
@@ -51,12 +52,6 @@ def _case(b, l, seed=0, r_max=32, s_max=2, grad=True):
     w_bond = (torch.randn(P, 2, generator=g) * 0.3).to(DEV)
     leaves = [t.requires_grad_(grad) for t in (left, right, w_rel, w_bond)]
     return leaves, (asym, resi, tok, ent, sym), bond
-
-
-def _run(fn, leaves, ids, bond, **kw):
-    left, right, w_rel, w_bond = leaves
-    asym, resi, tok, ent, sym = ids
-    return fn(left, right, w_rel, w_bond, asym, resi, tok, ent, sym, bond, **kw)
 
 
 def _rel(a, e):

@@ -6,8 +6,9 @@ Accuracy is judged against an fp32 reference with the bf16 PyTorch module's own 
 
 import pytest
 import torch
+from portable_helpers import randomize, relative
+from settings_helpers import policy_h100_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import triattn_h100_sm90 as triattn_h100
 from miniworld_engine.modules.exceptions import ImplementationType
 from miniworld_engine.modules.triangle_attention.module import TriangleAttention
@@ -31,25 +32,6 @@ CONFIGS = [
 IDS = [f"C{c}-H{h}x{hd // h}" for c, hd, h in CONFIGS]
 
 
-def relative(a, b):
-    return float(
-        (a.detach().float() - b.detach().float()).norm()
-        / b.detach().float().norm().clamp_min(1e-12)
-    )
-
-
-def randomize(module):
-    with torch.no_grad():
-        for name, p in module.named_parameters():
-            if p.ndim == 2:
-                p.normal_(std=p.shape[-1] ** -0.5)
-            elif "weight" in name:
-                p.copy_(1 + 0.1 * torch.randn_like(p))
-            else:
-                p.normal_(std=0.05)
-    return module
-
-
 def make(cfg, impl, starting=True, p_drop=0.0, dtype=torch.bfloat16, seed=0):
     c, hd, h = cfg
     torch.manual_seed(seed)
@@ -66,17 +48,6 @@ def trio(cfg, starting=True, p_drop=0.0):
     ref32 = make(cfg, ImplementationType.PYTORCH, starting, p_drop, dtype=torch.float32)
     ref32.load_state_dict({k: v.float() for k, v in ours.state_dict().items()})
     return ours, ref16, ref32
-
-
-@pytest.fixture(autouse=True)
-def policy():
-    if torch.cuda.get_device_capability() != (9, 0):
-        pytest.skip("H100 (sm_90) required")
-    old = settings.configure(force_portable_kernels=False)
-    try:
-        yield
-    finally:
-        settings.configure(**vars(old))
 
 
 def check_inference(ours, ref16, ref32, x, mask):

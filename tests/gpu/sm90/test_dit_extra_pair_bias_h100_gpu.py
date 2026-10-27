@@ -11,6 +11,8 @@ import copy
 import pytest
 import torch
 from portable_helpers import portable_on, rel, report
+from portable_helpers import randomize_normalised as _randomize
+from portable_helpers import run_extra_pair_bias as _run
 
 from miniworld_engine.integrations import token_dit, token_dit_train
 from miniworld_engine.modules.dit import DiTBlock
@@ -30,29 +32,11 @@ def _block(implementation, seed=5):
     return DiTBlock(*WIDTH, implementation=implementation).to(DEV)
 
 
-def _randomize(m):
-    with torch.no_grad():
-        for name, p in m.named_parameters():
-            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else
-                    1 + 0.1 * torch.randn_like(p) if name.endswith("weight") else 0.1 * torch.randn_like(p))
-    return m
-
-
 def _data(A, L, masked):
     g = torch.Generator(device=DEV).manual_seed(2)
     r = lambda *s: torch.randn(*s, device=DEV, generator=g)   # noqa: E731
     mask = (torch.rand(1, L, device=DEV, generator=g) > 0.1) if masked else None
     return r(A, 1, L, WIDTH[0]), r(A, 1, L, WIDTH[1]), r(1, L, L, WIDTH[2]), mask, 2 * r(L, L), r(A, 1, L, WIDTH[0])
-
-
-def _run(block, data, dtype, training):
-    single, cond, pair, mask, extra, dy = data
-    single, cond, pair, extra = (t.to(dtype).clone().requires_grad_(training) for t in (single, cond, pair, extra))
-    with torch.enable_grad() if training else torch.no_grad():
-        out = block(single, cond, pair, mask, extra_pair_bias=extra)
-        if not training:
-            return out, ()
-        return out, torch.autograd.grad(out, [single, cond, pair, extra, *block.parameters()], dy.to(dtype), allow_unused=True)
 
 
 @pytest.fixture

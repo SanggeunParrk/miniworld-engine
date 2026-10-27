@@ -224,7 +224,7 @@ def _front_ext(cutlass_inc):
     return load_extension(
         name="triattn_h100_front3_sm90_v1",
         sources=[str(_SRC / "front_fused3_sm90.cu")],
-        extra_include_paths=[str(_SRC), str(cutlass_inc)],
+        extra_include_paths=[str(_SRC), str(_SRC.parent), str(cutlass_inc)],
         extra_cflags=["-O3"],
         extra_cuda_cflags=[
             *host_flags(),

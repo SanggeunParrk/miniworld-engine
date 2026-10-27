@@ -8,6 +8,7 @@ error. The modules are driven exactly as MiniWorld's template stack drives them 
 import pytest
 import torch
 import torch.nn.functional as F
+from portable_helpers import relative
 
 from miniworld_engine.integrations import trimul_h100
 from miniworld_engine.kernels.trimul_inproj.cuda import (
@@ -34,10 +35,6 @@ def hopper():
     if torch.cuda.get_device_capability() != (9, 0):
         pytest.skip("H100 (sm_90) required")
     torch.compiler.reset()
-
-
-def relative(a, b):
-    return float((a.detach().float() - b.detach().float()).norm() / b.detach().float().norm().clamp_min(1e-12))
 
 
 def make(direction, seed=0):

@@ -36,7 +36,8 @@ def supports(width, length) -> bool:
 # --------------------------------------------------------------------------- build
 def _flags(include, defines=()):
     return ["-std=c++17", "-O3", "-arch=sm_90a", "--cubin", "-lineinfo", "-Xptxas=-v",
-            "-I" + str(include), *("-D%s=%s" % kv for kv in defines)]
+            "-I" + str(include), "-I" + str(T.ANTHROPIC_V5),
+            *("-D%s=%s" % kv for kv in defines)]
 
 
 def _k3_smem(tile):

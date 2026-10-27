@@ -57,6 +57,7 @@ class Plan:
             "-lineinfo",
             "-Xptxas=-v",
             "-I" + str(inc),
+            "-I" + str(T.ANTHROPIC_V5),
             "-I" + str(T.SOURCES / "common"),
             "-I" + str(T.SOURCES / "common_b7"),
             "-I" + str(T.SOURCES / "b7_384"),
