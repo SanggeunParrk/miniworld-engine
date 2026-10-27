@@ -6186,11 +6186,23 @@ def bench_module_bias_only_dit(conf, seq_len, implementation, fabric):
     if spec.impl == ImplementationType.PYTORCH:
         execution_path = "module.reference.torch"
     elif per_sample:
+        from miniworld_engine.integrations import bias_only_dit as fused_infer
+
         with torch.set_grad_enabled(is_train):
-            served = model.layers[0]._psb_candidate(single, cond, pair, None)
+            served = (
+                model.layers[0]._psb_candidate(single, cond, pair, None)
+                if is_train
+                else fused_infer.serves_psb(model.layers[0], single, cond, pair, mask)
+            )
         execution_path = (
-            "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit_train.block_psb[per-sample pair bias: "
-            "pair_bias_all (one LayerNorm + GEMM for all blocks) + per-sample attention core + token DiT train rows]"
+            (
+                "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit_train.block_psb[per-sample pair bias: "
+                "pair_bias_all (one LayerNorm + GEMM for all blocks) + per-sample attention core + token DiT train rows]"
+                if is_train
+                else "modules.bias_only_dit.BiasOnlyDiTBlock -> integrations.bias_only_dit.update_psb -> kernels.bias_only_dit.cuda."
+                "runner.FusedBiasOnlyDiT.step_psb[per-sample pair bias: one-pass pair LayerNorm + projection (pair_bias_k / pair_bias_tc_k) "
+                "+ psb_fwd / psb32_fwd attention core + cuBLAS GEMMs + CUDA rows]"
+            )
             if served
             else "modules.bias_only_dit.BiasOnlyDiTBlock[reference composition: the per-sample bias path declined]"
         )

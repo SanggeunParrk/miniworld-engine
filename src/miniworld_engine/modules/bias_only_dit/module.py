@@ -265,6 +265,8 @@ class BiasOnlyDiTBlock(nn.Module):
             out = self._forward_psb(single, cond, bias, mask)
             if out is not None:
                 return out
+        if single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1 and _fused.serves_psb(self, single, cond, pair, mask, bias=bias):
+            return _fused.update_psb(self, single, cond, pair, mask, bias=bias)  # a bias of its own per sample, inference (H100)
         if _fused.serves(self, single, cond, pair, mask, bias=bias):
             return _fused.update(self, single, cond, pair, mask, bias=bias)
         if _train.serves(self, single, cond, pair, mask, bias=bias):

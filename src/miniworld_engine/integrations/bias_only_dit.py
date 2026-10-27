@@ -235,6 +235,104 @@ def _infer_bias(
         return runner.step(single, cond, P)
 
 
+def _fake_psb(single, cond, bias, mask, weights):
+    return torch.empty_like(single)
+
+
+@opaque(fake=_fake_psb, name="bias_only_dit_infer_psb")
+def _infer_psb(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    bias: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+) -> torch.Tensor:
+    """The inference step for a bias of its own per sample: single / cond [S, 1, L, d], ``bias`` [H, S, L, L] head-major (natural
+    logits, contiguous), ``mask`` bool [1, L] / [S, L] or None. ``FusedBiasOnlyDiT.step_psb``: nothing is shared across the samples
+    (no P cache), the attention core softmaxes each (head, sample) bias itself."""
+    with torch.cuda.device(single.device):
+        runner = _runner(single, weights)
+        H, S, L = bias.shape[0], bias.shape[1], bias.shape[2]
+        m = None if mask is None else mask.to(torch.bool).contiguous().reshape(-1)
+        return runner.step_psb(single, cond, bias.reshape(H * S * L, L), m)
+
+
+#: Most bias bytes of one pair-fed chunk (``update_psb`` with a pair): the samples of a larger call run as consecutive chunks of
+#: ``chunk_samples`` samples, a function of the shapes only.
+PSB_CHUNK_BYTES = 2 << 30
+
+
+def chunk_samples(n_samples: int, n_head: int, length: int, itemsize: int) -> int:
+    """Samples per chunk so that one chunk's bias [H, S, L, L] stays within ``PSB_CHUNK_BYTES`` (at least one sample)."""
+    return max(1, min(n_samples, PSB_CHUNK_BYTES // (n_head * length * length * itemsize)))
+
+
+def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
+    """Inference with a pair (``pair`` [B, L, L, 128]) or a hoisted bias (``bias`` [B, H, L, L]) of its own per sample: ``single`` /
+    ``cond`` [1, B, L, d], B > 1, no autograd, H100, bf16 or fp32 (TF32), L a multiple of 128 up to 768 (fp32 beyond 512 takes
+    the cuBLAS core), a key mask [1, L] / [B, L] or none."""
+    from miniworld_engine.modules.exceptions import ImplementationType
+
+    if (not settings.current().bias_only_dit) or torch.is_grad_enabled() or not settings.current().bias_only_dit_psb_infer:
+        return False
+    if module.implementation != ImplementationType.MINIWORLD or settings.current().force_portable_kernels:
+        return False
+    from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
+
+    dt = single.dtype
+    src = pair if bias is None else bias
+    if src is None or not (single.is_cuda and h100_enabled(single.device) and dt in (torch.bfloat16, torch.float32)
+                           and cond.dtype is dt and src.dtype is dt):
+        return False
+    if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
+        return False
+    if single.ndim != 4 or single.shape[0] != 1 or single.shape[1] < 2 or single.shape[-1] != D or single.shape[2] % 128:
+        return False
+    _, B, L, _ = single.shape
+    if L > 768 or tuple(cond.shape) != (1, B, L, DC):
+        return False
+    at = module.attention
+    H = at.n_head
+    if bias is None and tuple(pair.shape) != (B, L, L, DP):
+        return False
+    if bias is not None and (tuple(bias.shape) != (B, H, L, L) or bias.device != single.device):
+        return False
+    if mask is not None and not (mask.ndim == 2 and tuple(mask.shape) in ((1, L), (B, L))):
+        return False
+    da = at.to_value.weight.shape[0]
+    if (H, da // H) not in LAYOUTS or module.transition.expand_a.weight.shape[0] != 2 * D:
+        return False
+    norms = (at.ada_ln_in.ln_in, at.ada_ln_in.ln_cond, at.ln_pair, module.transition.ada_ln_in.ln_in, module.transition.ada_ln_in.ln_cond)
+    return all(n.eps == 1e-5 for n in norms)
+
+
+def update_psb(module, single, cond, pair, mask, bias=None):
+    """One block on a bias of its own per sample, inference. ``bias`` [B, H, L, L] (any layout; the hoist's head-major buffer is read
+    without a copy) or the pair [B, L, L, 128], whose bias is then made per chunk of samples (one pass over the pair, LayerNorm on chip) so
+    that a large B never holds more than ``PSB_CHUNK_BYTES`` of bias. Call ``serves_psb`` first."""
+    weights = [module.get_parameter(name) for name in WEIGHTS]
+    _, B, L, _ = single.shape
+    s, c = single.reshape(B, 1, L, -1), cond.reshape(B, 1, L, -1)
+    s = s if s.is_contiguous() else s.contiguous()
+    if mask is not None and mask.shape[0] == 1:
+        mask = mask.reshape(1, L)
+    if bias is not None:
+        hb = bias.permute(1, 0, 2, 3)
+        hb = hb if hb.is_contiguous() else hb.contiguous()
+        return _infer_psb(s, c, hb, mask, weights).reshape(single.shape)
+    H = module.attention.n_head
+    k = chunk_samples(B, H, L, single.element_size())
+    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+
+    outs = []
+    for b0 in range(0, B, k):
+        b1 = min(B, b0 + k)
+        bc = hoist.pair_bias_all_infer([module.attention], pair[b0:b1])[0].permute(1, 0, 2, 3)  # [H, S, L, L]
+        mc = mask if (mask is None or mask.shape[0] == 1) else mask[b0:b1]
+        outs.append(_infer_psb(s[b0:b1], c[b0:b1], bc, mc, weights))
+    return (outs[0] if len(outs) == 1 else torch.cat(outs, 0)).reshape(single.shape)
+
+
 _ALL_TRUE: dict = {}
 
 
@@ -254,4 +352,4 @@ def update(module, single, cond, pair, mask, bias=None):
     return _infer(single.contiguous(), cond, pair, mask, weights)
 
 
-__all__ = ["WEIGHTS", "serves", "update"]
+__all__ = ["WEIGHTS", "chunk_samples", "serves", "serves_psb", "update", "update_psb"]
