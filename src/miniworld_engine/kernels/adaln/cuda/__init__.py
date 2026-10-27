@@ -119,7 +119,7 @@ def _fwd(
     return y, cn, stc, stx, sb
 
 
-def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, dcres=None):
+def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, dcres=None, wcat=None):
     """Output structure of ``adaln_h100_bwd``."""
     d, dc = ws.shape
     return (
@@ -136,14 +136,15 @@ def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, 
 def _bwd(
     dy2: torch.Tensor, x2: torch.Tensor, c2: torch.Tensor, cn: torch.Tensor, stc: torch.Tensor, stx: torch.Tensor, sb: torch.Tensor,
     wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, has_bs: bool,
-    dres: torch.Tensor | None = None, dcres: torch.Tensor | None = None,
+    dres: torch.Tensor | None = None, dcres: torch.Tensor | None = None, wcat: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """(dx, dcond, dwc, dWs, dbs (empty without a scale bias), dWb) from dy2 [r, d] and the forward's saved rows. ``dres`` / ``dcres``: gradients of the
     stream outputs (x, cond returned as they are for a caller that adds them to something later), which join dx / dcond inside the row kernels that
     write them instead of in a separate add of the two paths."""
     e = _ext()
     d = x2.shape[-1]
-    wcat, _ = _wcat_bcat(x2, ws, bs, wb)
+    if wcat is None or wcat.numel() == 0:   # not handed over by the forward: pack again
+        wcat, _ = _wcat_bcat(x2, ws, bs, wb)
     dsb, dx, pbs = e.adaln_bwd(dy2, x2, sb, stx, dres)
     if dsb.dtype is torch.bfloat16:
         dcn = torch.mm(dsb, wcat)
@@ -170,24 +171,25 @@ class _AdaLN(torch.autograd.Function):
         if wgmma:
             from . import infer
 
-            y, cn, stc, stx, sb = infer.fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c,
+            y, cn, stc, stx, sb, wcat = infer.fwd_saved(x2, c2, wc, ws, bs if bs is not None else ws.new_zeros(d), wb, eps_x, eps_c,
                                                   infer.pick_ht(x2.shape[0], d, infer.num_sms(x2.device)))
         else:
             y, cn, stc, stx, sb = _fwd(x2, c2, wc, ws, bs, wb, eps_x, eps_c)
+            wcat = sb.new_empty(0)
         if any(ctx.needs_input_grad):
             # the weights are saved too: autograd then refuses an in-place update between the passes
-            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, *([] if bs is None else [bs]))
+            ctx.save_for_backward(x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, *([] if bs is None else [bs]))
             ctx.shape, ctx.cshape, ctx.has_bs = x.shape, cond.shape, bs is not None
         return (y.view(x.shape), x.view_as(x), cond.view_as(cond)) if streams else y.view(x.shape)
 
     @staticmethod
     def backward(ctx, dy, dxs=None, dcs=None):  # noqa: D102
-        x2, c2, cn, stc, stx, sb, wc, ws, wb, *rest = ctx.saved_tensors
+        x2, c2, cn, stc, stx, sb, wc, ws, wb, wcat, *rest = ctx.saved_tensors
         bs = rest[0] if ctx.has_bs else None
         dy2 = dy.reshape(-1, x2.shape[-1]).contiguous()
         dres = None if dxs is None else dxs.reshape(-1, x2.shape[-1]).contiguous()
         dcres = None if dcs is None else dcs.reshape(-1, c2.shape[-1]).contiguous()
-        dx, dcond, dwc, dws, dbs, dwb = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres)
+        dx, dcond, dwc, dws, dbs, dwb = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres, wcat)
         return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None, None, None
 
 

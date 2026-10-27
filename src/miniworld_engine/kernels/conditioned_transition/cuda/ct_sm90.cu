@@ -388,7 +388,6 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         }
       tma_store_commit();
     }
-    }
   }
   if (wtid == 0) tma_store_wait_all();
 }
