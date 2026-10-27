@@ -63,7 +63,7 @@ def _headers():
     source = T.SOURCES / "inference"
     dest = T.cache_dir() / ("uni_wide_headers_" + T._source_digest().hex()[:16])
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
-        content = (source / name).read_text()
+        content = T.header_path(source, name).read_text()
         if name == "tmn_kernels.cuh":
             content = content.replace(
                 "static constexpr int MINB = NCWG == 1 ? 2 : 1;",

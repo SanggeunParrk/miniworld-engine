@@ -150,6 +150,18 @@ def _upstream():
     return SOURCES / "upstream"
 
 
+# The Anthropic v5 device headers (``tmn_ptx.cuh``, ``common/tmn_math.cuh``) are vendored once, byte-identical to the upstream
+# release, in the Transition family (kernels/transition/cuda/anthropic_v5, sha in its README). ``upstream/csrc`` and ``inference``
+# hold only what differs from them; a build puts ANTHROPIC_V5 on its include path after those directories.
+ANTHROPIC_V5 = SOURCES.parents[2] / "transition" / "cuda" / "anthropic_v5"
+
+
+def header_path(base, name):
+    """``base / name`` when this directory holds the header (an overlay), else the vendored v5 header."""
+    p = Path(base) / name
+    return p if p.is_file() else ANTHROPIC_V5 / name
+
+
 def _launch_module():
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_launch
 

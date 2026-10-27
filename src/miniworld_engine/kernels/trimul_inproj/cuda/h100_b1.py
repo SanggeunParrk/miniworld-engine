@@ -22,6 +22,7 @@ def build(count, length, part, defines=()):
         "-lineinfo",
         "-Xptxas=-v",
         "-I" + str(inc),
+        "-I" + str(T.ANTHROPIC_V5),
         "-I" + str(SP.P7),
         "-I" + str(T.SOURCES / "common_b7"),
         "-I" + str(R),

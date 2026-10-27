@@ -34,6 +34,7 @@ class _Kernels(K.Kernels):
                 "--cubin",
                 "-lineinfo",
                 "-I" + str(inc),
+                "-I" + str(T.ANTHROPIC_V5),
             ] + ["-D%s=%s" % kv for kv in defs.items()]
             path = T.compile_text(source, flags)
             u = T.load_unit(str(path), "inference_%d_%d" % (cz, ch))

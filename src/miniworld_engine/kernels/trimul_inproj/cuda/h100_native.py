@@ -10,7 +10,7 @@ def headers():
     # Preserve upstream; relax only the minimum CTA occupancy for wide K1.
     for name in ("tmn_kernels.cuh", "tmn_ptx.cuh", "common/tmn_math.cuh"):
         p = dst / name
-        s = (src / name).read_text()
+        s = T.header_path(src, name).read_text()
         if name == "tmn_kernels.cuh":
             needle = "static constexpr int MINB = NCWG == 1 ? 2 : 1;"
             assert needle in s
