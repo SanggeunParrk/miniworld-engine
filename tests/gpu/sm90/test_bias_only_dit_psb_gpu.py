@@ -449,6 +449,74 @@ def test_fused_hoist_backward_matches_fp64_and_the_cublas_path(n_rows, rows):
     assert rel(dpair, dpair_c) < 6e-3 and rel(dwf, dwf_c) < 2e-4
 
 
+# ------------------------------------------------------------------------------------------------ the one-pass hoist (bo_hoist_pass.cu)
+def _ln_oracle(pair):
+    x = pair.double()
+    mean, var = x.mean(-1, keepdim=True), x.var(-1, unbiased=False, keepdim=True)
+    rstd = (var + 1e-5).rsqrt()
+    return (x - mean) * rstd, rstd
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("n_rows", [16, 32, 64])
+@pytest.mark.parametrize("rows", [16, 4112, 64 * 1000])
+def test_one_pass_hoist_forward(dtype, n_rows, rows):
+    """``pass_fwd``: bias^T = W' LN0(pair)^T in one pass over the pair (any R multiple of 16, up to 64 bias rows) against an fp64 oracle, against the
+    LayerNorm kernel + GEMM it replaces, bitwise repeatable; the routing (``_hoist_fwd``) takes it."""
+    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    g = torch.Generator(device="cuda").manual_seed(5)
+    pair = (torch.randn(rows, 128, device="cuda", generator=g) * 1.5 + 0.3).to(dtype)
+    wf = (torch.randn(n_rows, 128, device="cuda", generator=g) * 0.2).to(dtype)
+    assert HK.pass_fwd_served(pair, wf)
+    out = HK.pass_fwd(pair, wf)
+    assert out.dtype is dtype and out.shape == (n_rows, rows)
+    assert torch.equal(out, HK.pass_fwd(pair, wf)), "not bitwise repeatable"
+    y, _ = _ln_oracle(pair)
+    want = wf.double() @ y.t()
+    assert rel(out, want) < (6e-3 if dtype is torch.bfloat16 else 1.5e-3)
+    old = settings.configure(bias_only_dit_hoist_fwd_fused=False)
+    try:
+        ref = hoist._hoist_fwd(pair, wf, 1e-5)
+    finally:
+        settings.configure(**vars(old))
+    assert rel(out, ref) < (6e-3 if dtype is torch.bfloat16 else 1.5e-3)
+    assert torch.equal(hoist._hoist_fwd(pair, wf, 1e-5), out)
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
+@pytest.mark.parametrize("rows", [16, 4112, 64 * 1000, 4 * 256 * 256])
+def test_one_pass_hoist_backward(dtype, rows):
+    """``pass_bwd`` (one block of 16 heads, bf16 and fp32 / TF32): d pair and dW' against an fp64 oracle and against the cuBLAS + ln0_bwd_rows path
+    (``bias_only_dit_hoist_bwd_fused=False``), bitwise repeatable, any R multiple of 16."""
+    from miniworld_engine.integrations import bias_only_dit_hoist as hoist
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    g = torch.Generator(device="cuda").manual_seed(13)
+    pair = (torch.randn(rows, 128, device="cuda", generator=g) * 1.5 + 0.3).to(dtype)
+    wf = (torch.randn(16, 128, device="cuda", generator=g) * 0.2).to(dtype)
+    dball = torch.randn(16, rows, device="cuda", generator=g).to(dtype)
+    assert HK.pass_bwd_served(pair, wf)
+    dpair, dwf = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
+    dpair2, dwf2 = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
+    assert torch.equal(dpair, dpair2) and torch.equal(dwf, dwf2), "not bitwise repeatable"
+    assert dpair.dtype is dtype and dwf.dtype is torch.float32 and dwf.shape == (16, 128)
+    old = settings.configure(bias_only_dit_hoist_bwd_fused=False)
+    try:
+        dpair_c, dwf_c = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
+    finally:
+        settings.configure(**vars(old))
+    y, rstd = _ln_oracle(pair)
+    dln = dball.double().t() @ wf.double()
+    want_dp = rstd * (dln - dln.mean(-1, keepdim=True) - y * (dln * y).mean(-1, keepdim=True))
+    want_dw = dball.double() @ y
+    bf = dtype is torch.bfloat16
+    assert rel(dpair, want_dp) < (6e-3 if bf else 2e-3)
+    assert rel(dwf, want_dw) < (2e-4 if bf else 2e-3)          # bf16: hi + lo split; fp32: TF32 operands
+    assert rel(dpair, dpair_c) < (6e-3 if bf else 2e-3) and rel(dwf, dwf_c) < (2e-4 if bf else 2e-3)
+
+
 @pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32])
 @pytest.mark.parametrize(("A", "L"), [(1, 256), (3, 256)])
 def test_conditioning_width_768(dtype, A, L, monkeypatch):

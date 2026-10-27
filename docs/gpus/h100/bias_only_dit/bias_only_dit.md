@@ -153,11 +153,13 @@ the same slot of the hoist's gradient buffer.
 | softmax with per-sample mask / scale | `bias_only_dit_rows.cu`, `bias_only_dit_f32_rows.cu` `softmax_t` | `samples`, `scale`, optional P^T; the shared path is bit-identical |
 | attention core bf16 | `bo_psb.cu` `psb_fwd` / `psb_bwd` | mma.sync, bias tiles by cp.async; recompute (default): the forward keeps (mc, 1/sum) per row, the backward rebuilds P with the forward's arithmetic; `bias_only_dit_psb_core="stored"` writes P, `"cublas"` is the v0 core |
 | attention core fp32 | `bo_psb32.cu` | TF32 mma.sync, recompute form, forward up to L 512 |
-| hoist backward | `bo_hoist_bwd.cu` | d LN0, LN backward and dW' in one pass (bf16, <= 192 bias rows); `bias_only_dit_hoist_bwd_fused` |
+| hoist forward | `bo_hoist_pass.cu` `hoist_fwd` | pair LayerNorm (no affine) + the projection to the head logits in one pass over the pair, per-warp cp.async pipelines over 16-row tiles, mma.sync; bf16 (LN0 rounded to bf16, fp32 accumulation) and fp32 (TF32); up to 64 bias rows; `bias_only_dit_hoist_fwd_fused` |
+| hoist backward, one block (N = 16) | `bo_hoist_pass.cu` `hoist_bwd1` | d LN0 = dbias^T W', the LN0 backward and dW' = dbias LN0 in one pass over the pair (bf16: dW' against the hi + lo split via `movmatrix`; fp32: TF32), no atomics, per-warp -> per-CTA fixed-order partials; `bias_only_dit_hoist_bwd_fused` |
+| hoist backward, several blocks | `bo_hoist_bwd.cu` | d LN0, LN backward and dW' in one pass (bf16, <= 192 bias rows; fp32 and R not a multiple of 16: two cuBLAS GEMMs around `ln0_bwd_rows`); `bias_only_dit_hoist_bwd_fused` |
 
 Numbers, memory, ncu and the rejected list: [h100_bias_only_dit_per_aug_bias_20261020.md](../../../records/h100_bias_only_dit_per_aug_bias_20261020.md)
 (bf16 A = 48, L 384, 12 blocks: PyTorch compiled 102.1 ms, v1 36.9 ms; fp32 106.0 vs 82.7 ms). The attention kernels reach 34 % (forward) and
-58 % (backward) of DRAM peak, the fused hoist backward 32 %: not SoL90. Tests: `tests/gpu/sm90/test_bias_only_dit_psb_gpu.py`.
+58 % (backward) of DRAM peak; the one-pass hoist (2026-10-27, [record](../../../records/h100_bodit_psb_hoist_pass_20261027.md)) 2.65-2.8 TB/s, 91-97 % of a copy kernel's rate. Tests: `tests/gpu/sm90/test_bias_only_dit_psb_gpu.py`.
 The conditioning width is read off the block's weights; the training row kernels (cond LayerNorm and its backward, unfold, finalize) are templated on it and serve 384 and 768 on H100 (`KERNEL_D_CONDS`), another width keeps the PyTorch composition.
 
 ## Per-sample pair bias, inference (2026-10-27)

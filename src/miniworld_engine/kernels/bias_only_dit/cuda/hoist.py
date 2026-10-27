@@ -59,6 +59,70 @@ def bwd_ext():
         extra_cflags=["-std=c++17"], verbose=False)
 
 
+@functools.lru_cache(maxsize=None)
+def pass_ext():
+    """``bo_hoist_pass.cu`` (sm_90a): the forward (LayerNorm + projection) and the one-block backward in one pass over the pair each. Built on first use."""
+    from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
+
+    ensure_cuda_home()
+    return load_extension(
+        name="bias_only_dit_hoist_pass_sm90a",
+        sources=[str(_dir / "bo_hoist_pass.cu")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
+                           "-U__CUDA_NO_BFLOAT16_OPERATORS__", "-U__CUDA_NO_BFLOAT162_OPERATORS__", *gencodes("90a")],
+        extra_cflags=["-std=c++17"], verbose=False)
+
+
+#: Most rows of the folded weights (blocks x heads) the one-pass forward takes
+PASS_FWD_MAX_ROWS = 64
+
+
+def _sm90(t: torch.Tensor) -> bool:
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (9, 0)
+
+
+def pass_fwd_served(pair2d: torch.Tensor, wf: torch.Tensor) -> bool:
+    """The one-pass forward serves bf16 / fp32 pair rows [R, 128] (R a multiple of 16) and at most ``PASS_FWD_MAX_ROWS`` weight rows (a multiple of
+    16) in the pair's dtype, on sm_90."""
+    return (
+        pair2d.dtype in (torch.bfloat16, torch.float32)
+        and wf.dtype is pair2d.dtype
+        and _sm90(pair2d)
+        and pair2d.shape[0] % 16 == 0
+        and wf.shape[0] % 16 == 0
+        and 16 <= wf.shape[0] <= PASS_FWD_MAX_ROWS
+    )
+
+
+def pass_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float = 1e-5) -> torch.Tensor:
+    """bias_all^T [N, R] = W' LN0(pair)^T in the pair's dtype, in one pass over the pair (bf16: LN0 rounded to bf16 for the projection, fp32
+    accumulation; fp32: TF32 operands)."""
+    out = torch.empty(wf.shape[0], pair2d.shape[0], device=pair2d.device, dtype=pair2d.dtype)
+    pass_ext().hoist_fwd(pair2d, wf, out, float(eps))
+    return out
+
+
+def pass_bwd_served(pair2d: torch.Tensor, wf: torch.Tensor) -> bool:
+    """The one-pass backward serves one block of 16 head rows (N = 16), bf16 or fp32 (TF32), R a multiple of 16, on sm_90."""
+    return (
+        pair2d.dtype in (torch.bfloat16, torch.float32)
+        and wf.dtype is pair2d.dtype
+        and _sm90(pair2d)
+        and pair2d.shape[0] % 16 == 0
+        and wf.shape[0] == 16
+    )
+
+
+def pass_bwd(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor, eps: float = 1e-5):
+    """(d pair [R, 128], dW' [16, 128] fp32) for N = 16: d LN0 = dbias^T W', the LayerNorm backward and dW' = dbias LN0 in one pass over the pair;
+    the per-CTA partials of dW' are summed here in a fixed order."""
+    e = pass_ext()
+    dpair = torch.empty_like(pair2d)
+    part = torch.empty(e.hoist_pass_grid(), 16, 128, device=pair2d.device, dtype=torch.float32)
+    e.hoist_bwd1(pair2d, wf, dball, dpair, part, float(eps))
+    return dpair, part.sum(0)
+
+
 #: Most rows of dbias_all (blocks x heads) the fused backward takes
 FUSED_MAX_ROWS = 192
 
@@ -97,4 +161,4 @@ def kernel_attrs() -> list[tuple[str, int, int]]:
     return [tuple(a) for a in ext().func_attrs()]
 
 
-__all__ = ["FUSED_MAX_ROWS", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]
+__all__ = ["PASS_FWD_MAX_ROWS", "FUSED_MAX_ROWS", "pass_bwd", "pass_bwd_served", "pass_ext", "pass_fwd", "pass_fwd_served", "bwd_ext", "ext", "fused_bwd_served", "hoist_bwd_fused", "kernel_attrs", "ln0_bwd_rows", "ln0_rows", "operand_cols"]

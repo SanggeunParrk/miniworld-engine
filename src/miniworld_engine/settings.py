@@ -526,6 +526,10 @@ class Settings:
     #: The hoisted pair bias's backward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 in bf16 (`bo_hoist_bwd.cu`: d LN0, the
     #: LayerNorm backward and dW' in one pass over the pair); False keeps the two cuBLAS GEMMs around `ln0_bwd_rows`. Read per call.
     bias_only_dit_hoist_bwd_fused: bool = True
+    #: The hoisted pair bias's forward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 (`bo_hoist_pass.cu`: the LayerNorm rows and the
+    #: projection to the head logits in one pass over the pair, bf16 and fp32/TF32, up to 64 bias rows); False keeps the LayerNorm kernel + the
+    #: cuBLAS GEMM. The same switch for the backward is `bias_only_dit_hoist_bwd_fused` (which also covers the one-block kernel). Read per call.
+    bias_only_dit_hoist_fwd_fused: bool = True
     #: Formerly ``MINIWORLD_LOCAL_DIT_H100_TRAIN``: None serves the Hopper local atom DiT training block natively when the
     #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
     #: False disables the native Hopper training path.
