@@ -260,10 +260,9 @@ squeeze_gate_k(const __grid_constant__ CUtensorMap mH, const __grid_constant__ C
         load_x(m0, n0, tl);
         for (int kb = 0; kb < P; ++kb) load_a(kb, kb, m0);
         it = P; kb0 = P;
-      } else {
-        load_x(m0, n0, tl);
       }
       for (int kb = kb0; kb < KB; ++kb, ++it) {
+        if (tl > 0 && kb == KB / 2) load_x(m0, n0, tl);   // half way through the slabs: asking first would hold the ring back behind the previous epilogue
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         mbar_arrive_expect_tx(full + s, F_ST);

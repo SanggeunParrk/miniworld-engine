@@ -208,9 +208,11 @@ adaln_gemm_k(const __grid_constant__ CUtensorMap mA, const __grid_constant__ CUt
         it = P; kb0 = P;
       } else {
         if constexpr (AR) { if (nt == 0) load_a_res(m0, (uint32_t)(i / NT)); }
-        load_x(m0, n0, (uint32_t)i);
       }
       for (int kb = kb0; kb < KB; ++kb, ++it) {
+        // the x tile is requested half way through the slabs: it needs the previous tile's epilogue stores to be done, and asking first would hold back the slabs of this
+        // tile (the ring runs ahead of the consumers) behind that epilogue
+        if (i > 0 && kb == KB / 2) load_x(m0, n0, (uint32_t)i);
         const int s = (int)(it % NSTAGE);
         if (it >= NSTAGE) mbar_wait(empty + s, ((it / NSTAGE) - 1) & 1u);
         uint8_t* stage = sm + (AR ? A_RES : 0) + s * F_ST;
