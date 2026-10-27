@@ -85,8 +85,18 @@ def test_no_cuda_means_no_filtering(monkeypatch):
     assert builder.skipped_units(cases, None) == []
 
 
-def test_skips_are_reported_with_reasons():
-    """A dropped unit must be announced -- a silent skip reads as 'covered' in the build log."""
+def test_skips_are_reported_with_reasons(monkeypatch):
+    """A dropped unit must be announced -- a silent skip reads as 'covered' in the build log.
+
+    The portable family has no TMA any more, so no card drops a float32 unit by itself; the matrix is made to refuse one."""
+    real = builder.build_matrix.decide
+
+    def decide(sm, name, impl, dtype):
+        if dtype == "float32":
+            return False, "float32 is not built on this card"
+        return real(sm, name, impl, dtype)
+
+    monkeypatch.setattr(builder.build_matrix, "decide", decide)
     skipped = builder.skipped_units(builder.cases(), "sm_86")
     assert any("float32" in label for label, _ in skipped)
     assert all(reason for _, reason in skipped)
