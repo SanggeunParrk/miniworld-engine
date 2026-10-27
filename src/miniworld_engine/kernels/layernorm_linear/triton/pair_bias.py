@@ -340,7 +340,7 @@ def _fwd_op(
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     M, N = x2.shape
     nh = proj_weight.shape[0]
-    out = torch.empty(M, nh, dtype=torch.float32, device=x.device)
+    out = torch.empty(M, nh, dtype=x.dtype, device=x.device)   # the kernel accumulates in fp32 and stores in the input dtype
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
@@ -361,7 +361,7 @@ def _fwd_op(
         shape_key=both_key(rows_of(x.shape), N=N, NH=nh),
         TC=x.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM,
     )
-    return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
+    return out.reshape(*x.shape[:-1], nh), mean, rstd
 
 
 def _bwd_op_fake(dout, x2, ln_weight, proj_weight, mean, rstd, shape_key=None):
@@ -395,7 +395,10 @@ def _bwd_op(
     """
     M, N = x2.shape
     nh = proj_weight.shape[0]
-    dout2 = dout.reshape(M, nh).contiguous().to(torch.float32)
+    tc = x2.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM
+    dout2 = dout.reshape(M, nh).contiguous()
+    if not tc:
+        dout2 = dout2.to(torch.float32)   # the tensor-core path rounds dout to the input dtype in the kernel: it reads the 16-bit gradient as is
     dx = torch.empty_like(x2)
     dlnw = torch.zeros(N, dtype=torch.float32, device=x2.device)
     dpw = torch.zeros(nh, N, dtype=torch.float32, device=x2.device)
@@ -420,7 +423,7 @@ def _bwd_op(
         N,
         nh,
         USE_DOT=nh >= MIN_TL_DOT_DIM,
-        TC=x2.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM,
+        TC=tc,
         shape_key=both_key(M, N=N, NH=nh) if shape_key is None else pack(shape_key, N=N, NH=nh),
     )
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)

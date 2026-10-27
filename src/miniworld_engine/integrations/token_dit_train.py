@@ -654,9 +654,15 @@ def _saved_like(single, cond, pair, fp32, qk=True, H=H, psb=False, n=2, dp=DP):
         e((M, D), dtype=at),
         e((M, 2 * n * D), dtype=at),   # a | b of the SwiGLU: two [M, n D] halves
         e((M, D), dtype=at),
-        e((0 if (psb or (fp32 and not h100)) else R, dp), dtype=at),
+        e((0 if (psb or (fp32 and not h100) or _pair_fused(h100, fp32, psb, dp)) else R, dp), dtype=at),
         e((0 if psb else R, 2), dtype=f32),
     ]
+
+
+def _pair_fused(h100, fp32, psb, dp) -> bool:
+    """The H100 bf16 block builds its bias with the one-pass pair kernel (LN(pair) Wf^T on TF32 tensor cores, the extra term added in the same
+    pass, no LN(pair) written) and differentiates it with its one-pass backward (dpair and the dWf partials): it keeps no LN(pair) either."""
+    return h100 and not fp32 and not psb and dp == 128
 
 
 def _fwd_fake(single, cond, pair, mask, params, qk, eq, ek, fp32, heads, psb=False, extra=None):
@@ -768,6 +774,13 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         pst = torch.empty(R, 2, device=dev)
     if psb:
         pass
+    elif _pair_fused(h100, fp32, psb, dpw):
+        ph = pair.new_empty(0, dpw, dtype=at)
+        bias = torch.empty(H, L, L, device=dev, dtype=at)
+        T.pair_bias(
+            p2, (W["Wf"].float() * LOG2E).contiguous(), None, bias, pst, L, EPS,
+            None if extra is None else extra.reshape(-1).float().contiguous(), LOG2E,
+        )   # log2 units, rounded once to bf16
     elif h100 or not fp32:
         ph = torch.empty(R, dpw, device=dev, dtype=at)
         T.pair_ln(p2, ph, pst, EPS)
@@ -1255,6 +1268,11 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         if psb:
             # the bias projection's weights belong to the producer of the biases, which differentiates them itself
             dWf = torch.zeros(H, dpw, device=dev)
+        elif _pair_fused(h100, fp32, psb, dpw):
+            dpair = torch.empty(R, dpw, device=dev, dtype=pdtype)
+            part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
+            T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, W["Wf"], dpair, part)   # LN(pair) recomputed; dpair and the dWf partials in one pass
+            dWf = part.sum(0).view(H, dpw)
         else:
             dbv = DB.view(H, R)
             dWf = mm32(dbv, ph)
@@ -1283,6 +1301,10 @@ def _bwd_body(single, cond, pair, mask, params, saved, dout, qk, eq, ek, fp32, H
         pwf = torch.empty(T.pair_grid(R), H * dpw, device=dev)
         T.pair_bias_bwd(DB.view(H, R), p2, pst, Wf, dpair, pwf)
         dWf = pwf.sum(0).view(H, dpw)
+    elif _pair_fused(h100, fp32, psb, dpw):
+        part = torch.empty(T.pair_grid(R), H * dpw, device=dev)
+        T.pair_bias_bwd(DB.reshape(H, R).contiguous(), p2, pst, Wf, dpair, part)
+        dWf = part.sum(0).view(H, dpw)
     else:
         dbv = DB.reshape(H, R).to(
             at
