@@ -15,58 +15,39 @@ from miniworld_engine.kernels.transition.triton.main import (
     _expand_swiglu_saveact,
     swiglu_squeeze_backward,
 )
-from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
 from miniworld_engine.kernels.transition.triton.training import swiglu_squeeze_backward_saved
 from miniworld_engine.kernels.trimul_inproj.triton.backward_fused import input_ln_residual
 
 
-@triton.autotune(configs=configs_for("transition_squeeze_residual_triton"), key=["shape_key", "USE_TMA"])
+@triton.autotune(configs=configs_for("transition_squeeze_residual_triton"), key=["shape_key"])
 @triton.jit
 def _squeeze_residual_kernel(
     H, W, R, Y, M, N: tl.constexpr, K: tl.constexpr,
     shm, shk, swn, swk, srm, srn,
     shape_key, BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr,
-    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
-    NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
+    BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr,
+    PREC: tl.constexpr = "ieee",
     PRE_H: tl.constexpr = False, PRE_W: tl.constexpr = False,
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
     n_n = tl.cdiv(N, BLOCK_N)
-    if USE_TMA:
-        # Hopper, aligned operands (see _tma.py): tensor-map loads and stores, one persistent program per SM
-        h_desc = tl.make_tensor_descriptor(H, [M, K], [shm, 1], [BLOCK_M1, BLOCK_K])
-        w_desc = tl.make_tensor_descriptor(W, [N, K], [swn, 1], [BLOCK_N, BLOCK_K])
-        r_desc = tl.make_tensor_descriptor(R, [M, N], [srm, 1], [BLOCK_M1, BLOCK_N])
-        y_desc = tl.make_tensor_descriptor(Y, [M, N], [N, 1], [BLOCK_M1, BLOCK_N])
-        for tile in tl.range(tl.program_id(0), n_m * n_n, NUM_SMS, flatten=True):
-            pm, pn = tile_order(tile, n_m, n_n, GROUP_M)
-            acc = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-            for k0 in range(0, K, BLOCK_K):
-                h = h_desc.load([pm * BLOCK_M1, k0])
-                w = w_desc.load([pn * BLOCK_N, k0])
-                acc = tf32_dot(h, w.T, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
-            residual = r_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
-            # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
-            y = acc.to(Y.dtype.element_ty).to(tl.float32) + residual
-            y_desc.store([pm * BLOCK_M1, pn * BLOCK_N], y.to(Y.dtype.element_ty))
-    else:
-        pm, pn = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
-        m = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
-        n = pn * BLOCK_N + tl.arange(0, BLOCK_N)
-        k = tl.arange(0, BLOCK_K)
-        acc = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
-        for k0 in range(tl.cdiv(K, BLOCK_K)):
-            kk = k0 * BLOCK_K + k
-            h = tl.load(H + m[:, None] * shm + kk[None, :] * shk,
-                        mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
-            w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
-                        mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
-            acc = tf32_dot(h, w, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
-        mask = (m[:, None] < M) & (n[None, :] < N)
-        residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
-        # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
-        y = acc.to(Y.dtype.element_ty).to(tl.float32) + residual
-        tl.store(Y + m[:, None] * N + n[None, :], y, mask=mask)
+    pm, pn = tile_order(tl.program_id(0).to(tl.int64), n_m, n_n, GROUP_M)
+    m = pm * BLOCK_M1 + tl.arange(0, BLOCK_M1)
+    n = pn * BLOCK_N + tl.arange(0, BLOCK_N)
+    k = tl.arange(0, BLOCK_K)
+    acc = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
+    for k0 in range(tl.cdiv(K, BLOCK_K)):
+        kk = k0 * BLOCK_K + k
+        h = tl.load(H + m[:, None] * shm + kk[None, :] * shk,
+                    mask=(m[:, None] < M) & (kk[None, :] < K), other=0)
+        w = tl.load(W + n[None, :] * swn + kk[:, None] * swk,
+                    mask=(n[None, :] < N) & (kk[:, None] < K), other=0)
+        acc = tf32_dot(h, w, acc, input_precision=PREC, pre_a=PRE_H, pre_b=PRE_W)
+    mask = (m[:, None] < M) & (n[None, :] < N)
+    residual = tl.load(R + m[:, None] * srm + n[None, :] * srn, mask=mask, other=0).to(tl.float32)
+    # Match mm(...).to(activation_dtype) + residual, including the old rounding boundary.
+    y = acc.to(Y.dtype.element_ty).to(tl.float32) + residual
+    tl.store(Y + m[:, None] * N + n[None, :], y, mask=mask)
 
 
 def _squeeze_residual_fake(h, weight, residual, shape_key, h_rounded=False):
@@ -92,17 +73,11 @@ def squeeze_residual(h: torch.Tensor, weight: torch.Tensor, residual: torch.Tens
         weight = tf32_cached((weight,), lambda: tf32_grid_many(weight))[0]
         if not h_rounded:
             h = tf32_grid_many(h)[0]
-    use_tma = tma_ok(h, weight, residual, out)
-    if use_tma:
-        sms = num_sms(h.device)
-        grid = lambda c: (min(sms, tile_grid(m, n, c["BLOCK_M1"], c["BLOCK_N"])[0]),)  # noqa: E731
-    else:
-        sms = 1
-        grid = lambda c: tile_grid(m, n, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
+    grid = lambda c: tile_grid(m, n, c["BLOCK_M1"], c["BLOCK_N"])  # noqa: E731
     _squeeze_residual_kernel[grid](
         h, weight, residual, out, m, n, k,
         *h.stride(), *weight.stride(), *residual.stride(),
-        shape_key=pack(shape_key, K=k, N=n), USE_TMA=use_tma, NUM_SMS=sms, PREC=prec,
+        shape_key=pack(shape_key, K=k, N=n), PREC=prec,
         PRE_H=pre, PRE_W=pre,
     )
     return out
