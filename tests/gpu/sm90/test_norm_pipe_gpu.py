@@ -163,3 +163,28 @@ def test_replays_are_bit_identical():
         for o in outs[1:]:
             for a, e in zip(o, outs[0], strict=True):
                 assert torch.equal(a, e)
+
+
+@pytest.mark.parametrize("n", [128, 256, 64, 72, 768])
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float16, torch.float32], ids=["bf16", "fp16", "fp32"])
+@pytest.mark.parametrize("rms", [False, True], ids=["ln", "rms"])
+def test_no_grad_forward_all_affine_forms(n, dtype, rms):
+    """The inference forward (no statistics, the direct single-chunk kernel at 128 / 256 / fp32-128 wide rows) with weights of the activation dtype,
+    weight only, bias only, neither, and fp32 weights under 16-bit activations; row counts that leave a partial CTA and a partial row group."""
+    if not pipe.supported(torch.empty(1, n, device="cuda", dtype=dtype)):
+        pytest.skip("width outside the pipelined builds")
+    for m in (1, 3, 31, 1003, 6151, 40000):
+        g = torch.Generator(device="cuda").manual_seed(n * 13 + m)
+        x = (torch.randn(m, n, device="cuda", generator=g) * 3 + 0.5).to(dtype)
+        for wdt, has_w, has_b in ((dtype, True, True), (dtype, True, False), (dtype, False, True), (dtype, False, False), (torch.float32, True, True)):
+            if rms and has_b:
+                continue
+            w = (1 + 0.2 * torch.randn(n, device="cuda", generator=g)).to(wdt) if has_w else None
+            b = (0.1 * torch.randn(n, device="cuda", generator=g)).to(wdt) if has_b else None
+            wd = w.double() if w is not None else None
+            bd = b.double() if b is not None else None
+            ref = F.rms_norm(x.double(), (n,), wd, EPS) if rms else F.layer_norm(x.double(), (n,), wd, bd, EPS)
+            with torch.no_grad():
+                y = pipe.rmsnorm_pipe(x, w, EPS) if rms else pipe.layernorm_pipe(x, w, b, EPS)
+            assert y.dtype == dtype and y.shape == x.shape
+            assert rel(y, ref) < TOL[dtype], (n, m, wdt, has_w, has_b)

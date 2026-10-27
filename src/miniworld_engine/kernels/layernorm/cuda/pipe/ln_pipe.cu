@@ -20,6 +20,7 @@
 #include <torch/extension.h>
 
 #include <stdint.h>
+#include <type_traits>
 
 namespace mwpipe {
 
@@ -41,6 +42,9 @@ template <> __device__ __forceinline__ __half from_f<__half>(float v) { return _
 #ifndef MWP_S2
 #define MWP_S2 4
 #endif
+#ifndef MWP_S3
+#define MWP_S3 6  // 96-chunk rows (RMS d768 bf16): six stages put the persistent forward on the Triton kernel at L384 (24.8 -> 23.8 us)
+#endif
 #ifndef MWP_S4
 #define MWP_S4 3
 #endif
@@ -61,9 +65,18 @@ template <> __device__ __forceinline__ __half from_f<__half>(float v) { return _
 #endif
 constexpr int WARPS = MWP_WARPS;  // warps per CTA
 constexpr int THREADS = WARPS * 32;
+#ifndef MWP_D2
+#define MWP_D2 1  // exact-fit single-chunk rows with weights of the activation dtype: direct2_fwd
+#endif
+#ifndef MWP_D2PW
+#define MWP_D2PW 2  // row passes per warp
+#endif
+#ifndef MWP_D2W
+#define MWP_D2W 4  // warps per CTA
+#endif
 
 // stages of the ring (per warp and stream: STAGES x CH x 512 bytes)
-template <int CH> constexpr int stages() { return CH == 1 ? MWP_S1 : (CH == 2 ? MWP_S2 : MWP_S4); }
+template <int CH> constexpr int stages() { return CH == 1 ? MWP_S1 : (CH == 2 ? MWP_S2 : (CH == 3 ? MWP_S3 : MWP_S4)); }
 
 __device__ __forceinline__ unsigned smem_u32(const void* p) { return static_cast<unsigned>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ void cp_async16(unsigned s, const void* gmem, bool pred) {
@@ -292,6 +305,68 @@ __global__ void __launch_bounds__(THREADS) direct_fwd(const T* __restrict__ x, c
   }
 }
 
+// Exact-fit single-chunk rows whose weight / bias have the activation's dtype (the common case): the direct forward again, written the way a
+// plain copy kernel is -- no per-element dtype branches, vector affine loads -- which keeps it at 40 registers (the generic one needs 56: 4
+// resident CTAs of 8 warps per SM instead of 6), which is worth 2-3% on the pair LayerNorm forward (within ~1% of a plain copy). PW row passes per warp, DW warps per CTA.
+template <typename T, int TPR, int VEC, bool RMS, int PW, int DW>
+__global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, const T* __restrict__ w, const T* __restrict__ b, T* __restrict__ y,
+                                                       float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N, float eps) {
+  constexpr int RPP = 32 / TPR;
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int g = lane / TPR, l = lane % TPR;
+  if (ws != nullptr && blockIdx.x == 0 && threadIdx.x == 0) ws[0] = 0.f;
+  const int64_t wid = int64_t(blockIdx.x) * DW + warp;
+  uint4 raw[PW];
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    const int64_t row = (wid * PW + p) * RPP + g;
+    raw[p] = row < M ? __ldg(reinterpret_cast<const uint4*>(x + row * N + l * VEC)) : make_uint4(0, 0, 0, 0);
+  }
+  float wr[VEC], br[VEC];
+#pragma unroll
+  for (int i = 0; i < VEC; ++i) { wr[i] = 1.f; br[i] = 0.f; }
+  if (w != nullptr) {
+    const Pack<T, VEC> pw = *reinterpret_cast<const Pack<T, VEC>*>(w + l * VEC);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) wr[i] = to_f<T>(pw.v[i]);
+  }
+  if (!RMS && b != nullptr) {
+    const Pack<T, VEC> pb = *reinterpret_cast<const Pack<T, VEC>*>(b + l * VEC);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) br[i] = to_f<T>(pb.v[i]);
+  }
+  const float inv_n = 1.f / float(N);
+#pragma unroll
+  for (int p = 0; p < PW; ++p) {
+    const int64_t row = (wid * PW + p) * RPP + g;
+    float v[VEC];
+    const Pack<T, VEC> pk = *reinterpret_cast<const Pack<T, VEC>*>(&raw[p]);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) v[i] = to_f<T>(pk.v[i]);
+    float mean = 0.f;
+    if constexpr (!RMS) {
+      float s = 0.f;
+#pragma unroll
+      for (int i = 0; i < VEC; ++i) s += v[i];
+      mean = group_sum<TPR>(s) * inv_n;
+    }
+    float q = 0.f;
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) {
+      const float d = v[i] - mean;
+      q = fmaf(d, d, q);
+    }
+    const float rstd = rsqrtf(group_sum<TPR>(q) * inv_n + eps);
+    if (row < M) {
+      if (stats != nullptr && l == 0) stats[row] = make_float2(mean, rstd);
+      Pack<T, VEC> o;
+#pragma unroll
+      for (int i = 0; i < VEC; ++i) o.v[i] = from_f<T>((v[i] - mean) * rstd * wr[i] + br[i]);
+      *reinterpret_cast<Pack<T, VEC>*>(y + row * N + l * VEC) = o;
+    }
+  }
+}
+
 // the backward's per-row (mean, rstd): the lanes of a row group read one address
 template <int TPR>
 __device__ __forceinline__ void issue_stats(unsigned sm, const float2*& ps, int64_t& row, const float2* base, int64_t M, int64_t rstep) {
@@ -500,6 +575,18 @@ void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, f
   constexpr int RPP = 32 / TPR;
   if constexpr (CH == 1) {
     if (per_sm >= 1000 || (per_sm == 0 && MWP_DIRECT_DEFAULT)) {
+#if MWP_D2
+      constexpr int WC = std::is_same<T, float>::value ? 0 : (std::is_same<T, __nv_bfloat16>::value ? 1 : 2);
+      if constexpr (!PAD) {
+        if (wcode == WC) {
+          constexpr int PW2 = MWP_D2PW;
+          const int64_t units2 = ((M + RPP - 1) / RPP + PW2 - 1) / PW2;
+          const int64_t grid2 = (units2 + MWP_D2W - 1) / MWP_D2W;
+          direct2_fwd<T, TPR, VEC, RMS, PW2, MWP_D2W><<<int(grid2), MWP_D2W * 32, 0, s>>>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M, N, eps);
+          return;
+        }
+      }
+#endif
       constexpr int PW = sizeof(T) == 4 ? 1 : 2;
       const int64_t units = ((M + RPP - 1) / RPP + PW - 1) / PW;
       const int64_t grid = (units + WARPS - 1) / WARPS;
