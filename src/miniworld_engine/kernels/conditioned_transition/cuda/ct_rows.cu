@@ -241,7 +241,7 @@ void cast_pack(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts) {
   }
   j.n = (int)srcs.size();
   const at::cuda::CUDAGuard g(srcs[0].device());
-  cast_pack_k<<<(unsigned)std::min<long>((total / 4 + 255) / 256, 132L * 8), 256, 0, S()>>>(j);
+  cast_pack_k<<<(unsigned)((total / 4 + 255) / 256), 256, 0, S()>>>(j);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 

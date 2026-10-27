@@ -197,3 +197,15 @@ def colsum(parts: torch.Tensor) -> torch.Tensor:
 def train_supported(x: torch.Tensor) -> bool:
     """The wgmma training forward: bf16 (fp32 training is served by the row kernels + cuBLAS)."""
     return x.dtype == torch.bfloat16
+
+
+def _colsum2_fake(a, b):
+    """The column sums of a [Pa, Na] and b [Pb, Nb]."""
+    return a.new_empty((a.shape[1],)), b.new_empty((b.shape[1],))
+
+
+@opaque(fake=_colsum2_fake, name="adaln_cuda_colsum2")
+def colsum2(a: torch.Tensor, b: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    """``colsum`` of two partial-sum buffers in one launch."""
+    oa, ob = ext().colsum2(a, b)
+    return oa, ob

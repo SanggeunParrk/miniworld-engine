@@ -126,9 +126,8 @@ def _bwd_fake(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, has_bs, dres=None, 
         x2.new_empty(x2.shape),
         c2.new_empty(c2.shape),
         wc.new_empty((dc,), dtype=torch.float32),
-        ws.new_empty((d, dc), dtype=torch.float32),
+        ws.new_empty((2 * d, dc), dtype=torch.float32),
         ws.new_empty((d if has_bs else 0,), dtype=torch.float32),
-        ws.new_empty((d, dc), dtype=torch.float32),
     )
 
 
@@ -137,8 +136,8 @@ def _bwd(
     dy2: torch.Tensor, x2: torch.Tensor, c2: torch.Tensor, cn: torch.Tensor, stc: torch.Tensor, stx: torch.Tensor, sb: torch.Tensor,
     wc: torch.Tensor, ws: torch.Tensor, bs: torch.Tensor | None, wb: torch.Tensor, has_bs: bool,
     dres: torch.Tensor | None = None, dcres: torch.Tensor | None = None, wcat: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-    """(dx, dcond, dwc, dWs, dbs (empty without a scale bias), dWb) from dy2 [r, d] and the forward's saved rows. ``dres`` / ``dcres``: gradients of the
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """(dx, dcond, dwc, [dWs; dWb] as one [2 d, dc] fp32 tensor, dbs (empty without a scale bias)) from dy2 [r, d] and the forward's saved rows. ``dres`` / ``dcres``: gradients of the
     stream outputs (x, cond returned as they are for a caller that adds them to something later), which join dx / dcond inside the row kernels that
     write them instead of in a separate add of the two paths."""
     e = _ext()
@@ -153,10 +152,10 @@ def _bwd(
         dcn = torch.mm(dsb, wcat.t().contiguous().t())
         dwcat = torch.mm(cn.t(), dsb).t()  # [2 d, dc]
     dcond, pbc = e.ln_cond_bwd(dcn, c2, stc, wc.contiguous(), dcres)
-    from .infer import colsum   # fixed-order column sums of the block partials: one launch each instead of a PyTorch reduction
+    from .infer import colsum, colsum2   # fixed-order column sums of the block partials: one launch each instead of a PyTorch reduction
 
-    dbs = colsum(pbs) if has_bs else pbs.new_empty(0)
-    return dx, dcond, colsum(pbc), dwcat[:d].clone(memory_format=torch.contiguous_format), dbs, dwcat[d:].clone(memory_format=torch.contiguous_format)
+    dbs, dwc = colsum2(pbs, pbc) if has_bs else (pbs.new_empty(0), colsum(pbc))
+    return dx, dcond, dwc, dwcat.contiguous(), dbs
 
 
 class _AdaLN(torch.autograd.Function):
@@ -189,8 +188,9 @@ class _AdaLN(torch.autograd.Function):
         dy2 = dy.reshape(-1, x2.shape[-1]).contiguous()
         dres = None if dxs is None else dxs.reshape(-1, x2.shape[-1]).contiguous()
         dcres = None if dcs is None else dcs.reshape(-1, c2.shape[-1]).contiguous()
-        dx, dcond, dwc, dws, dbs, dwb = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres, wcat)
-        return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dws, (dbs if ctx.has_bs else None), dwb, None, None, None, None
+        dx, dcond, dwc, dwcat, dbs = _bwd(dy2, x2, c2, cn, stc, stx, sb, wc, ws, bs, wb, ctx.has_bs, dres, dcres, wcat)
+        d = x2.shape[-1]
+        return dx.view(ctx.shape), dcond.view(ctx.cshape), dwc, dwcat[:d], (dbs if ctx.has_bs else None), dwcat[d:], None, None, None, None
 
 
 def adaln(x, cond, ln_cond_weight, w_scale, b_scale, w_bias, eps_x: float = 1e-5, eps_cond: float = 1e-5, *, rna: bool = False, streams: bool = False):

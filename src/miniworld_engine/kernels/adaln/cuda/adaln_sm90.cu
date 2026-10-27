@@ -63,13 +63,13 @@ TMN_DEVI void row_stats(const float (&v)[MAXCH][vec_of<F32>()], int N, int lane,
 }
 
 template <bool F32, bool SAVE_C>
-__global__ void __launch_bounds__(256)
+__global__ void __launch_bounds__(128)
 ln_rows_k(const T<F32>* __restrict__ cond, const float* __restrict__ lnw, const T<F32>* __restrict__ x, T<F32>* __restrict__ aff,
           float2* __restrict__ sx, float2* __restrict__ sc, int M, int NC, int NX, float eps_c,
           float eps_x) {
   constexpr int VEC = vec_of<F32>(), MAXCH = F32 ? 8 : 4;
   pdl_trigger();
-  const int row = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+  const int row = blockIdx.x * 4 + (threadIdx.x >> 5), lane = threadIdx.x & 31;   // four rows (warps) a block
   if (row >= M) return;
   float vx[MAXCH][VEC], v[MAXCH][VEC];
   load_row<F32, MAXCH>(x + (int64_t)row * NX, NX, lane, vx);       // both rows are requested before either is reduced
@@ -108,7 +108,7 @@ ln_rows_k(const T<F32>* __restrict__ cond, const float* __restrict__ lnw, const 
 template <bool F32, bool SAVE_C>
 void run_ln(const at::Tensor& cond, const at::Tensor& lnw, const at::Tensor& x, const at::Tensor& aff, const at::Tensor& sx, const at::Tensor* sc, double eps_c, double eps_x) {
   const int M = (int)cond.size(0), NC = (int)cond.size(1), NX = (int)x.size(1);
-  launch(ln_rows_k<F32, SAVE_C>, (unsigned)((M + 7) / 8), 256u, (size_t)0, false, (const T<F32>*)cond.data_ptr(), (const float*)lnw.data_ptr(),
+  launch(ln_rows_k<F32, SAVE_C>, (unsigned)((M + 3) / 4), 128u, (size_t)0, false, (const T<F32>*)cond.data_ptr(), (const float*)lnw.data_ptr(),
          (const T<F32>*)x.data_ptr(), (T<F32>*)aff.data_ptr(), (float2*)sx.data_ptr(),
          SAVE_C ? (float2*)sc->data_ptr() : (float2*)nullptr, M, NC, NX, (float)eps_c, (float)eps_x);
 }
@@ -413,6 +413,35 @@ __global__ void __launch_bounds__(256) colsum_k(const float* __restrict__ parts,
     out[c] = t;
   }
 }
+// two column sums in one launch (the scale-bias and the LN-weight gradients of the AdaLN backward)
+__global__ void __launch_bounds__(256) colsum2_k(const float* __restrict__ pa, float* __restrict__ oa, int Pa, int Na, const float* __restrict__ pb, float* __restrict__ ob, int Pb,
+                                                 int Nb) {
+  __shared__ float red[8][33];
+  const int ba = (Na + 31) / 32;
+  const bool second = (int)blockIdx.x >= ba;
+  const float* parts = second ? pb : pa;
+  float* out = second ? ob : oa;
+  const int P = second ? Pb : Pa, N = second ? Nb : Na;
+  const int c = ((int)blockIdx.x - (second ? ba : 0)) * 32 + (threadIdx.x & 31), s = threadIdx.x >> 5;
+  float v = 0.f;
+  if (c < N) for (int p = s; p < P; p += 8) v += parts[(int64_t)p * N + c];
+  red[s][threadIdx.x & 31] = v;
+  __syncthreads();
+  if (s == 0 && c < N) {
+    float t = 0.f;
+#pragma unroll
+    for (int q = 0; q < 8; ++q) t += red[q][threadIdx.x & 31];
+    out[c] = t;
+  }
+}
+std::vector<at::Tensor> colsum2(torch::Tensor a, torch::Tensor b) {
+  TORCH_CHECK(a.is_cuda() && b.is_cuda() && a.is_contiguous() && b.is_contiguous() && a.scalar_type() == torch::kFloat32 && b.scalar_type() == torch::kFloat32 && a.dim() == 2 && b.dim() == 2, "parts [P, N] fp32");
+  const at::cuda::CUDAGuard guard(a.device());
+  auto oa = at::empty({a.size(1)}, a.options()), ob = at::empty({b.size(1)}, b.options());
+  launch(colsum2_k, (unsigned)((a.size(1) + 31) / 32 + (b.size(1) + 31) / 32), 256u, (size_t)0, false, (const float*)a.data_ptr(), (float*)oa.data_ptr(), (int)a.size(0),
+         (int)a.size(1), (const float*)b.data_ptr(), (float*)ob.data_ptr(), (int)b.size(0), (int)b.size(1));
+  return {oa, ob};
+}
 at::Tensor colsum(torch::Tensor parts) {
   TORCH_CHECK(parts.is_cuda() && parts.is_contiguous() && parts.scalar_type() == torch::kFloat32 && parts.dim() == 2, "parts [P, N] fp32");
   const at::cuda::CUDAGuard guard(parts.device());
@@ -426,6 +455,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_rows", &ln_rows);
   m.def("adaln_gemm", &adaln_gemm);
   m.def("colsum", &colsum);
+  m.def("colsum2", &colsum2);
 #ifdef CT_TRACE
   m.def("trace", &trace_read);
 #endif
