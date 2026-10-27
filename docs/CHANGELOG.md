@@ -116,6 +116,7 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 - TriMul H100: removed `h100_sources/uni_wide/front_shared.cuh` (byte-identical to `h100_sources/wide_forward/front_shared.cuh`, 303 lines); the uni_wide inference units take `-I wide_forward`. Last present at fc53ba5b.
 - Triangle attention H100: removed `cuda/h100_sources/fa3_utils.h` (byte-identical to `cuda/fa3_utils.h`); the `front_fused3_sm90` extension takes the parent directory on its include path like the other h100_sources builds. Last present at 8c021b96.
 - TriMul H100: removed `h100_sources/upstream/csrc/tmn_ptx.cuh`, `h100_sources/upstream/csrc/common/tmn_math.cuh` and `h100_sources/inference/tmn_ptx.cuh`, byte-identical to the pristine v5 copies in `kernels/transition/cuda/anthropic_v5/` (sha256 in its README); the TriMul builds put that directory on their include path behind `upstream/csrc` / `inference` (`_h100_runtime.ANTHROPIC_V5`, `header_path`), so the `inference/common/tmn_math.cuh` overlay still wins. Last present at 1c015020.
+- `integrations/pwa_train.py`: removed the `pwa_fwd2` fallback forward (the `else` branch taken only when `csrc/pwa_fwd3.cu` is absent, which it never is, and its `fwd2` lambda); the fwd3 forward is built unconditionally. `csrc/pwa_fwd2.cu` stays (the plain forward `pwa_plain2` uses it). Last present at d0fa6a56.
 
 ## [2.3.12] - 2026-10-25
 
