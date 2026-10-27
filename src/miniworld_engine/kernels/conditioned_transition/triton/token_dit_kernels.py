@@ -6,6 +6,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._compile import opaque
 
 STAT_W = 128
@@ -30,7 +32,7 @@ def _pair_bias_all_kernel(Z, WT, OUT, L, sz, eps, C: tl.constexpr, NB: tl.conste
     for n0 in tl.static_range(0, NB, BN):
         ns = n0 + tl.arange(0, BN)
         nm = ns < NB                                   # a short stack (NB < BN) or NB not a multiple of BN
-        acc = tl.dot(zh, tl.load(WT + cs[:, None] * NB + ns[None, :], mask=nm[None, :], other=0.0))
+        acc = tf32_dot(zh, tl.load(WT + cs[:, None] * NB + ns[None, :], mask=nm[None, :], other=0.0))
         tl.store(OUT + ns[None, :].to(tl.int64) * LL + i * L + js[:, None], acc.to(OUT.dtype.element_ty),
                  mask=jm[:, None] & nm[None, :])
 

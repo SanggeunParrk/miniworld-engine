@@ -22,6 +22,8 @@ from miniworld_engine.kernels._compile import opaque
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many, tf32_grid_tile
+
 
 
 
@@ -59,6 +61,7 @@ def _expand_swiglu_kernel(
     BLOCK_M1: tl.constexpr, BLOCK_N: tl.constexpr, BLOCK_K: tl.constexpr,
     GROUP_M: tl.constexpr,
     shape_key,
+    PRE: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. This kernel is where it was measured -- the
     # 2-D grid it used to launch with is the GROUP_M >= n_m end of the same axis, 4.675 ms against
@@ -86,9 +89,11 @@ def _expand_swiglu_kernel(
             wb_ptr + cols[None, :] * stride_wn + k[:, None] * stride_wk,
             mask=k_mask[:, None] & col_mask[None, :], other=0.0,
         )
-        a += tl.dot(x, wa, out_dtype=tl.float32, input_precision="tf32")
-        b += tl.dot(x, wb, out_dtype=tl.float32, input_precision="tf32")
+        a += tf32_dot(x, wa, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
+        b += tf32_dot(x, wb, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE)
     h = a * tl.sigmoid(a) * b
+    if PRE:         # h feeds the TF32 squeeze GEMM next: stored on the TF32 grid (kernels/_tf32.py)
+        h = tf32_grid_tile(h)
     tl.store(
         h_ptr + rows[:, None] * stride_hm + cols[None, :] * stride_hn,
         h, mask=row_mask[:, None] & col_mask[None, :],
@@ -121,6 +126,8 @@ def _squeeze_gate_kernel(
     GROUP_M: tl.constexpr,
     shape_key,
     HAS_RES: tl.constexpr = False,
+    PRE_H: tl.constexpr = False,
+    PRE_W: tl.constexpr = False,
 ):
     # Visit order, tuned: see kernels/_tiles.py. Squeeze half of the composed pair.
     pid_m, pid_d = tile_order(
@@ -144,7 +151,7 @@ def _squeeze_gate_kernel(
             ws_ptr + n[:, None] * stride_sn + dcols[None, :] * stride_sd,
             mask=n_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        out_acc += tl.dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32")
+        out_acc += tf32_dot(h, ws_t, out_dtype=tl.float32, input_precision="tf32", pre_a=PRE_H, pre_b=PRE_W)
 
     # scale[:, d_tile] = cond @ Wsc[d_tile, :]^T + b_sc  (DC tiled), y = sigmoid(scale) * out
     scale = tl.zeros((BLOCK_M1, BLOCK_N), dtype=tl.float32)
@@ -159,7 +166,7 @@ def _squeeze_gate_kernel(
             wsc_ptr + dcols[None, :] * stride_scd + dc[:, None] * stride_scc,
             mask=dc_mask[:, None] & d_mask[None, :], other=0.0,
         )
-        scale += tl.dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32")
+        scale += tf32_dot(cond, wsc_t, out_dtype=tl.float32, input_precision="tf32", pre_b=PRE_W)
     bsc = tl.load(bsc_ptr + dcols, mask=d_mask, other=0.0)
     scale += bsc[None, :]
     y = tl.sigmoid(scale) * out_acc
@@ -197,6 +204,9 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         )
     ND = wa.shape[0]
     h = torch.empty(M, ND, device=x.device, dtype=x.dtype)
+    pre = x.dtype is torch.float32     # TF32 operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
+    if pre:
+        wa, wb = tf32_cached((wa, wb), lambda: tf32_grid_many(wa, wb))
     grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
     _expand_swiglu_kernel[grid](
         x, wa, wb, h,
@@ -205,11 +215,12 @@ def _expand_swiglu(x: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor,
         wa.stride(0), wa.stride(1),
         h.stride(0), h.stride(1),
         shape_key=pack(shape_key, ND=ND, K=K),
+        PRE=pre,
     )
     return h
 
 
-def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None):
+def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None, h_rounded=False):
     """(M, D) y -- D = ws.shape[0], the squeezed width, not h's ND."""
     return h.new_empty((h.shape[0], ws.shape[0]))
 
@@ -217,7 +228,7 @@ def _squeeze_gate_fake(h, cond, ws, wsc, bsc, shape_key=None, residual=None):
 @opaque(fake=_squeeze_gate_fake, name="conditioned_transition_composed_squeeze_gate")
 def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor,
                   bsc: torch.Tensor, shape_key: int | None = None,
-                  residual: torch.Tensor | None = None) -> torch.Tensor:
+                  residual: torch.Tensor | None = None, h_rounded: bool = False) -> torch.Tensor:
     """y = sigmoid(cond @ Wsc^T + b_sc) * (h @ Ws^T) -> (M, D); with ``residual`` (M, D): residual + y."""
     M, ND = h.shape
     if shape_key is None:
@@ -232,6 +243,13 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
     DC = cond.shape[1]
     out = torch.empty(M, D, device=h.device, dtype=h.dtype)
     grid = lambda meta: tile_grid(M, D, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
+    pre = h.dtype is torch.float32     # TF32 operands rounded to nearest here (h by the expand kernel when ``h_rounded``)
+    if pre:
+        if h_rounded:
+            ws, wsc = tf32_cached((ws, wsc), lambda: tf32_grid_many(ws, wsc))
+        else:
+            h = tf32_grid_many(h)[0]
+            ws, wsc = tf32_cached((ws, wsc), lambda: tf32_grid_many(ws, wsc))
     res = out if residual is None else residual
     _squeeze_gate_kernel[grid](
         h, cond, ws, wsc, bsc, out, res,
@@ -242,7 +260,7 @@ def _squeeze_gate(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc: to
         wsc.stride(0), wsc.stride(1),
         out.stride(0), out.stride(1),
         res.stride(0), res.stride(1),
-        shape_key=pack(shape_key, ND=ND, DC=DC), HAS_RES=residual is not None,
+        shape_key=pack(shape_key, ND=ND, DC=DC), HAS_RES=residual is not None, PRE_H=pre, PRE_W=pre,
     )
     return out
 
@@ -259,6 +277,6 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     wsc = wsc.contiguous(); bsc = bsc.contiguous()
     shape_key = atom_key(length if length is not None else length_of(x.shape))
     h = _expand_swiglu(x, wa, wb, shape_key=shape_key)
-    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key, residual=residual)
+    return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key, residual=residual, h_rounded=True)
 
 

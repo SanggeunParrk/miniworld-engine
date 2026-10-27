@@ -10,6 +10,8 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Fixed
 
+- Portable (Triton) fp32 kernels round their TF32 operands to nearest before the MMA (`kernels/_tf32.py`): Transition, ConditionedTransition, AdaLN, the attention cores and the DiT blocks were 2.2-5.6x the PyTorch TF32 error against fp64 (Triton truncates), now 1.0-1.3x (`docs/records/portable_fp32_accuracy_20261026.md`); portable fp32 rungs are 0-13 % slower
+
 - H100 near-miss ladder rows: D512 Transition training keeps a / b at the 384x384 pair (CUDA / portable 0.997 -> ~0.95), `pair_embed_ca` forward-only glue (0.958 -> 0.934), and the DiT-variant CUDA extension builds again (`transpose_k` name clash); see docs/records/nearmiss_ladder_20261026.md.
 - H100 ladder: `token_pair_init` inference (TMA table + R rows per CTA), `pool_atoms` (16-byte loads), `smooth_lddt` forward / backward launch geometry and `pair_embed_ca` glue now beat the portable kernels in every measured row; the portable `pair_embed_adaln` backward no longer aliases its outputs (training ladder rows measure). See `docs/records/pair_ops_ladder_20261026.md`.
 

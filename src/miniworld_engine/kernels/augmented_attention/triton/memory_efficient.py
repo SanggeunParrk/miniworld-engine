@@ -12,6 +12,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from jaxtyping import Bool, Float
 
 from miniworld_engine._typecheck import typecheck
@@ -79,21 +81,21 @@ def _attn_bwd_dqdkdv(
         m = tl.load(m_ptrs, mask=offs_m < N_CTX, other=0.0)
         Di = tl.load(d_ptrs, mask=offs_m < N_CTX, other=0.0)
 
-        qkT = tl.dot(k, qT) + biasT / (qk_scale / 1.44269504)
+        qkT = tf32_dot(k, qT) + biasT / (qk_scale / 1.44269504)
         m_safe = tl.maximum(m, -1e38)  # Prevent -inf to avoid NaN in subtraction
         qkT = qkT * qk_scale - m_safe[None, :]
 
         pT = tl.math.exp2(qkT)
-        dv = tl.dot(pT.to(do.dtype), do, dv)
+        dv = tf32_dot(pT.to(do.dtype), do, dv)
 
-        dpT = tl.dot(v, tl.trans(do))
+        dpT = tf32_dot(v, tl.trans(do))
         dsT = pT * (dpT - Di[None, :])
 
         tl.atomic_add(dbiasT_ptrs, dsT, mask=bias_mask)
 
         dsT = dsT.to(qT.dtype)
-        dk = tl.dot(dsT, tl.trans(qT), dk)
-        dqT_to_add = tl.dot(tl.trans(k), dsT) * (qk_scale / 1.44269504)
+        dk = tf32_dot(dsT, tl.trans(qT), dk)
+        dqT_to_add = tf32_dot(tl.trans(k), dsT) * (qk_scale / 1.44269504)
         tl.atomic_add(dqT_ptrs, dqT_to_add, qT_mask)
 
         qT_ptrs += BLOCK_M1 * stride_tok

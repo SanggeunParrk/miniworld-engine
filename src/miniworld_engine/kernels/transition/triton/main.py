@@ -10,6 +10,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many, tf32_grid_tile
+
 from miniworld_engine.kernels._dot_precision import dot_precision
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 from miniworld_engine.kernels.transition.triton._tma import num_sms, tma_ok
@@ -57,6 +59,7 @@ def transition_fwd_kernel(
     USE_TMA: tl.constexpr = False,
     NUM_SMS: tl.constexpr = 1,
     PREC: tl.constexpr = "ieee",
+    PRE: tl.constexpr = False,
 ):
     # ``Wab`` is the two expand weights INTERLEAVED row by row (row 2j = Wa[j], row 2j+1 = Wb[j]), so one
     # dot over a (BLOCK_K, 2*BLOCK_N) weight tile produces the a and b halves of BLOCK_N hidden columns
@@ -84,9 +87,11 @@ def transition_fwd_kernel(
             for k in range(0, K, BLOCK_K):
                 x_tile = x_desc.load([pid_m * BLOCK_M1, k])
                 w_tile = w_desc.load([pid_n * (2 * BLOCK_N), k])
-                acc = tl.dot(x_tile, w_tile.T, acc, input_precision=PREC)
+                acc = tf32_dot(x_tile, w_tile.T, acc, input_precision=PREC, pre_a=PRE, pre_b=PRE)
             A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
             swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
+            if PRE:         # h feeds a TF32 GEMM next: stored on the TF32 grid (kernels/_tf32.py)
+                swish_AB = tf32_grid_tile(swish_AB)
             out_desc.store([pid_m * BLOCK_M1, pid_n * BLOCK_N], swish_AB.to(out_ptr.dtype.element_ty))
             if STORE_AB:
                 if HALF:        # fp16 halves (fp32 activations): stored divided by the (device-side) scale that keeps them in range
@@ -114,11 +119,13 @@ def transition_fwd_kernel(
                 mask=((offs_w[None, :] < 2 * ND) & (offs_k[:, None] < K)),
                 other=0.0,
             )
-            acc = tl.dot(x_tile, w_tile, acc, input_precision=PREC)
+            acc = tf32_dot(x_tile, w_tile, acc, input_precision=PREC, pre_a=PRE, pre_b=PRE)
 
         A_tile, B_tile = tl.split(tl.reshape(acc, (BLOCK_M1, BLOCK_N, 2)))
         swish_AB = (A_tile * tl.sigmoid(A_tile)) * B_tile
 
+        if PRE:
+            swish_AB = tf32_grid_tile(swish_AB)
         out_ptr_ = out_ptr + (offs_m[:, None] * ND + offs_n[None, :])
         store_mask = (offs_m[:, None] < M) & (offs_n[None, :] < ND)
         tl.store(out_ptr_, swish_AB.to(out_ptr.dtype.element_ty), mask=store_mask)
@@ -158,8 +165,12 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
     a, b = (torch.empty(M, nd, dtype=hd, device=x.device) for _ in range(2)) if store_ab else (expand, expand)
     scale = half_scale if half else expand
     # both weights as one operand, row-interleaved (2*ND, K): ~10 MB at the widest, a few microseconds
-    w_ab = torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)
-    use_tma = tma_ok(x, w_ab, expand, a, b)
+    prec = dot_precision(x.dtype)
+    pre = prec == "tf32" and x.dtype is torch.float32     # operands rounded to nearest here, once, and h at its store (kernels/_tf32.py)
+    stack = lambda: torch.stack((expand_a_weight, expand_b_weight), dim=1).reshape(2 * nd, N)    # noqa: E731
+    w_ab = tf32_cached((expand_a_weight, expand_b_weight), lambda: tf32_grid_many(stack()))[0] if pre else stack()
+    x_op = tf32_grid_many(x)[0] if pre else x     # also the activation: rounding a loaded A tile in this kernel gave wrong results at K = 192 (ragged K tile)
+    use_tma = tma_ok(x_op, w_ab, expand, a, b)
     if use_tma:
         sms = num_sms(x.device)
         grid = lambda META: (min(sms, tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])[0]),)  # noqa: E731
@@ -167,7 +178,7 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
         sms = 1
         grid = lambda META: tile_grid(M, nd, META["BLOCK_M1"], META["BLOCK_N"])  # noqa: E731
     transition_fwd_kernel[grid](
-        x,
+        x_op,
         w_ab,
         expand,
         a,
@@ -182,7 +193,8 @@ def _launch_expand(x, expand_a_weight, expand_b_weight, shape_key, store_ab, hal
         HALF=half,
         USE_TMA=use_tma,
         NUM_SMS=sms,
-        PREC=dot_precision(x.dtype),   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
+        PREC=prec,   # fp32: TF32 when torch allows it (kernels/_dot_precision.py), else IEEE
+        PRE=pre,
     )
     return expand, a, b
 

@@ -27,6 +27,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
 
 
@@ -104,7 +106,7 @@ def _gate_out_fwd(
             wo_ptr + offs_n[None, :] * stride_wn + kk[:, None] * stride_wd,
             mask=n_ok[None, :] & k_ok[:, None], other=0.0,
         )
-        acc = tl.dot(a, wo.to(a.dtype), acc)
+        acc = tf32_dot(a, wo.to(a.dtype), acc)
 
     tl.store(
         o_ptr + offs_m[:, None] * stride_cm + offs_n[None, :] * stride_cn,
@@ -160,7 +162,7 @@ def _dgrad_epi(
                      mask=mm & nmask[None, :], other=0.0)                  # [BLOCK_M1, BLOCK_K]
         wo = tl.load(wo_ptr + rn[:, None] * s_won + rh[None, :] * s_woh,
                      mask=nmask[:, None] & hm, other=0.0)                  # [BLOCK_K, BLOCK_N]
-        da = tl.dot(do, wo.to(do.dtype), da)                              # BF16 compute, including FP32 master Wo
+        da = tf32_dot(do, wo.to(do.dtype), da)                              # BF16 compute, including FP32 master Wo
     s = tl.sigmoid(tl.load(g_ptr + rm[:, None] * s_gm + rh[None, :] * s_gh,
                            mask=em, other=0.0).to(tl.float32))
     r = tl.load(r_ptr + rm[:, None] * s_rm + rh[None, :] * s_rh, mask=em, other=0.0).to(tl.float32)

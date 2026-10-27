@@ -25,6 +25,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_dot
+
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import atom_key, pack
 from miniworld_engine.kernels._compile import opaque
@@ -112,7 +114,7 @@ def _window_fwd(
         k = tl.load(K + a * ska + b * skb + h * skh + kpos[None, :] * skn + d[:, None], mask=kin[None, :] & dm[:, None], other=0.0)
         bias = tl.load(Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk,
                        mask=(ik < KEYS)[None, :], other=0.0).to(tl.float32)
-        s = tl.dot(q, k, input_precision=PRECISION) * sm_scale + bias
+        s = tf32_dot(q, k, input_precision=PRECISION) * sm_scale + bias
         s = tl.where(live, s, float("-inf"))
         m_new = tl.maximum(m_i, tl.max(s, 1))
         m_safe = tl.where(m_new == float("-inf"), 0.0, m_new)
@@ -120,7 +122,7 @@ def _window_fwd(
         p = tl.math.exp2((s - m_safe[:, None]) * _LOG2E)
         l_i = l_i * alpha + tl.sum(p, 1)
         v = tl.load(V + a * sva + b * svb + h * svh + kpos[:, None] * svn + d[None, :], mask=kin[:, None] & dm[None, :], other=0.0)
-        acc = acc * alpha[:, None] + tl.dot(p.to(v.dtype), v, input_precision=PRECISION)
+        acc = acc * alpha[:, None] + tf32_dot(p.to(v.dtype), v, input_precision=PRECISION)
         m_i = m_new
     o = acc / tl.maximum(l_i, 1e-30)[:, None]
     m_fin = tl.where(m_i == float("-inf"), 0.0, m_i)
@@ -167,11 +169,11 @@ def _window_bwd(
             v = tl.load(V + a * sva + b * svb + h * svh + kpos[:, None] * svn + d[None, :], mask=kin[:, None] & dm[None, :], other=0.0)
             bias = tl.load(Bias + b * sbb + h * sbh + w * sbw + iq[:, None] * sbq + ik[None, :] * sbk,
                            mask=(ik < KEYS)[None, :], other=0.0).to(tl.float32)
-            s = tl.dot(q, tl.trans(k), input_precision=PRECISION) * sm_scale + bias
+            s = tf32_dot(q, tl.trans(k), input_precision=PRECISION) * sm_scale + bias
             p = tl.where(live, tl.math.exp2((s - lse[:, None]) * _LOG2E), 0.0)
-            dp = tl.dot(do, tl.trans(v), input_precision=PRECISION)
+            dp = tf32_dot(do, tl.trans(v), input_precision=PRECISION)
             ds = p * (dp - delta[:, None])
-            dq += tl.dot(ds.to(k.dtype), k, input_precision=PRECISION)
+            dq += tf32_dot(ds.to(k.dtype), k, input_precision=PRECISION)
             if NEED_DB:
                 dbp = DB + (((g * B + b) * H + h) * NW + w) * (32 * KEYS) + iq[:, None] * KEYS + ik[None, :]
                 dbm = (ik < KEYS)[None, :]
@@ -183,8 +185,8 @@ def _window_bwd(
                 # between the dot's result and the load): a block-wide barrier makes this store visible to it
                 tl.debug_barrier()
             if NEED_DKV:
-                dv = tl.dot(tl.trans(p).to(do.dtype), do, input_precision=PRECISION)
-                dk = tl.dot(tl.trans(ds).to(q.dtype), q, input_precision=PRECISION) * sm_scale
+                dv = tf32_dot(tl.trans(p).to(do.dtype), do, input_precision=PRECISION)
+                dk = tf32_dot(tl.trans(ds).to(q.dtype), q, input_precision=PRECISION) * sm_scale
                 part = (((a * B + b) * NW + w) * KEYS + ik[:, None]) * (H * HEAD_DIM) + h * HEAD_DIM + d[None, :]
                 pm = (ik < KEYS)[:, None] & dm[None, :]
                 tl.store(DKP + part, dk, mask=pm)

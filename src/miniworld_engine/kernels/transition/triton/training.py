@@ -17,6 +17,8 @@ import torch
 import triton
 import triton.language as tl
 
+from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
+
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import pack
 from miniworld_engine.kernels._compile import opaque
@@ -34,6 +36,7 @@ def _squeeze_swiglu_bwd_kernel(
     BLOCK_K: tl.constexpr, GROUP_M: tl.constexpr, USE_TMA: tl.constexpr = False,
     SAVED: tl.constexpr = False, HALF: tl.constexpr = False,
     NUM_SMS: tl.constexpr = 1, PREC: tl.constexpr = "ieee",
+    PRE: tl.constexpr = False,
 ):
     n_m = tl.cdiv(M, BLOCK_M1)
     n_n = tl.cdiv(ND, BLOCK_N)
@@ -58,11 +61,11 @@ def _squeeze_swiglu_bwd_kernel(
             for k0 in range(0, K, BLOCK_K):
                 g = g_desc.load([pm * BLOCK_M1, k0])
                 s = s_desc.load([k0, pn * BLOCK_N])
-                acc_dh = tl.dot(g, s, acc_dh, input_precision=PREC)
+                acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
                 if not SAVED:
                     x = x_desc.load([pm * BLOCK_M1, k0])
                     w = w_desc.load([pn * (2 * BLOCK_N), k0])
-                    acc = tl.dot(x, w.T, acc, input_precision=PREC)
+                    acc = tf32_dot(x, w.T, acc, input_precision=PREC, pre_b=PRE)
             if SAVED:
                 a = sa_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
                 b = sb_desc.load([pm * BLOCK_M1, pn * BLOCK_N]).to(tl.float32)
@@ -92,13 +95,13 @@ def _squeeze_swiglu_bwd_kernel(
                         mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
             s = tl.load(W + kk[:, None] * swk + cols[None, :] * swn,
                         mask=(kk[:, None] < K) & (cols[None, :] < ND), other=0)
-            acc_dh = tl.dot(g, s, acc_dh, input_precision=PREC)
+            acc_dh = tf32_dot(g, s, acc_dh, input_precision=PREC, pre_b=PRE)
             if not SAVED:
                 x = tl.load(X + rows[:, None] * sxm + kk[None, :],
                             mask=(rows[:, None] < M) & (kk[None, :] < K), other=0)
                 w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
                             mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
-                acc = tl.dot(x, w, acc, input_precision=PREC)
+                acc = tf32_dot(x, w, acc, input_precision=PREC, pre_b=PRE)
         mask = (rows[:, None] < M) & (cols[None, :] < ND)
         if SAVED:
             a = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
@@ -128,6 +131,12 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
     if ws.shape[0] != k:
         raise ValueError("squeeze_swiglu_bwd shapes must be dy[M,K], ws[K,ND]")
     half = saved and scale is not None
+    prec = dot_precision(dy.dtype)
+    pre = prec == "tf32" and dy.dtype is torch.float32     # TF32 operands rounded to nearest here, once (kernels/_tf32.py)
+    if pre:
+        ws = tf32_cached((ws,), lambda: tf32_grid_many(ws))[0]
+        if not saved:
+            w_ab = tf32_grid_many(w_ab)[0]
     if saved:
         if saved_a.shape != (m, nd) or saved_b.stride() != saved_a.stride():
             raise ValueError("squeeze_swiglu_bwd: saved a/b must be [M,ND] with one layout")
@@ -152,7 +161,7 @@ def _launch_bwd(xn, w_ab, dy, ws, shape_key, saved_a, saved_b, scale=None):
         xn, w_ab, dy, ws, h, dab, saved_a, saved_b, scale, m, nd, k,
         xn.stride(0), w_ab.stride(0), dy.stride(0), ws.stride(0), ws.stride(1), h.stride(0), dab.stride(0),
         saved_a.stride(0),
-        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, SAVED=saved, HALF=half, NUM_SMS=sms, PREC=dot_precision(dy.dtype),
+        shape_key=pack(shape_key, K=k, ND=nd), USE_TMA=use_tma, SAVED=saved, HALF=half, NUM_SMS=sms, PREC=prec, PRE=pre,
     )
     return h, dab
 
