@@ -424,6 +424,53 @@ __global__ void __launch_bounds__(WPB * 32, 2) gate_bwd_k(const float* __restric
   }
 }
 
+
+// gate_bwd_k with DO written head-major with the samples minor, [nh, L, W/nh, A] (the layout the Hopper fp32 dV / dP batched GEMMs read: dO^T_h =
+// [(d, a), l] is its transpose, no permute copy). A block is the 8 samples a0 .. a0 + 7 of ONE token l: the warps stage their rows in shared memory
+// and the block writes 8 consecutive samples of each channel as two float4 (one 32-byte sector), so the transposing store is coalesced.
+template <int NCH>
+__global__ void __launch_bounds__(WPB * 32, 2) gate_bwd_fold_k(const float* __restrict__ DA, const float* __restrict__ AO,
+    const float* __restrict__ G, float* __restrict__ DO, float* __restrict__ DG, float* __restrict__ DD, int L, int A, long gstride,
+    long dgstride, int nh) {
+  constexpr int W = NCH * 128, NQ = NCH * 32;
+  __shared__ float hs[WPB][NQ];
+  __shared__ __align__(16) float ot[WPB][W];
+  const int ntile = (A + WPB - 1) / WPB;
+  const int l = blockIdx.x / ntile, a0 = (blockIdx.x % ntile) * WPB;
+  const int lane = threadIdx.x % 32, w = threadIdx.x / 32, a = a0 + w;
+  const long row = (long)a * L + l;
+  if (a < A) {
+#pragma unroll
+    for (int j = 0; j < NCH; ++j) {
+      const int c = (j * 32 + lane) * 4;
+      const float4 da = ld4(DA + row * W + c), ao = ld4(AO + row * W + c), s = sig4(ld4(G + row * gstride + c));
+      st4(&ot[w][c], mul4(da, s));
+      st4(DG + row * dgstride + c, make_float4(da.x * ao.x * (1.f - s.x), da.y * ao.y * (1.f - s.y), da.z * ao.z * (1.f - s.z),
+                                               da.w * ao.w * (1.f - s.w)));
+      hs[w][j * 32 + lane] = sum4(mul4(da, ao));
+    }
+    __syncwarp();
+    if (lane < nh) {
+      const int qph = NQ / nh;
+      float t = 0.f;
+      for (int k = 0; k < qph; ++k) t += hs[w][lane * qph + k];
+      DD[((long)a * nh + lane) * L + l] = t;
+    }
+  }
+  __syncthreads();
+  const int dh = W / nh;
+  for (int i = threadIdx.x; i < 2 * W; i += WPB * 32) {
+    const int c = i >> 1, half = i & 1, ab = a0 + half * 4, rem = A - ab;
+    if (rem <= 0) continue;
+    const int hh = c / dh, d = c - hh * dh;
+    float* o = DO + (((long)hh * L + l) * dh + d) * A + ab;
+    if (rem >= 4 && (A & 3) == 0) {
+      st4(o, make_float4(ot[half * 4][c], ot[half * 4 + 1][c], ot[half * 4 + 2][c], ot[half * 4 + 3][c]));
+    } else {
+      for (int k = 0; k < 4 && k < rem; ++k) o[k] = ot[half * 4 + k][c];
+    }
+  }
+}
 // ------------------------------------------------------------------------------------------------------------ SwiGLU
 // h = silu(a) b over [M, N] (ab = [a | b] rows of row stride sab >= 2N), four elements per thread
 __global__ void __launch_bounds__(256, 2) swiglu_k(const float* __restrict__ AB, float* __restrict__ H, long M, int N, long sab) {
@@ -1195,7 +1242,24 @@ void gate_bwd(at::Tensor da, at::Tensor ao, at::Tensor g, at::Tensor dout, at::T
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void gate_bwd_fold(at::Tensor da, at::Tensor ao, at::Tensor g, at::Tensor dout, at::Tensor dg, at::Tensor dd, int64_t L) {
+  const int64_t M = da.size(0), W = da.size(1);
+  TORCH_CHECK(W == 768 || W == 1024, "gate_bwd_fold: 768 or 1024 attention channels");
+  for (auto* t : {&da, &ao, &dout}) { f32c(*t, "gate_bwd_fold"); TORCH_CHECK(t->size(1) == W && t->size(0) == M, "gate_bwd_fold: [M, W]"); }
+  f32r(g, "g"); f32r(dg, "dg");
+  const int64_t nh = dd.numel() / M;
+  TORCH_CHECK(dd.scalar_type() == at::kFloat && dd.is_contiguous() && (nh == 12 || nh == 16 || nh == 24) && dd.numel() == M * nh
+              && M % L == 0 && (W / 4) % nh == 0 && W % nh == 0 && (W / nh) % 4 == 0, "gate_bwd_fold: dd [A, 12, 16 or 24, L]");
+  const at::cuda::CUDAGuard gd(da.device());
+  const int A = (int)(M / L), ntile = (A + WPB - 1) / WPB;
+  auto k = W == 768 ? gate_bwd_fold_k<6> : gate_bwd_fold_k<8>;
+  k<<<(unsigned)(L * ntile), WPB * 32, 0, S()>>>(CP<float>(da), CP<float>(ao), CP<float>(g), P<float>(dout), P<float>(dg), P<float>(dd), (int)L, A,
+                                                  g.stride(0), dg.stride(0), (int)nh);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void swiglu(at::Tensor ab, at::Tensor h) {
+
   const int64_t M = h.size(0), N = h.size(1);
   f32r(ab, "ab"); f32c(h, "h");
   TORCH_CHECK(ab.size(0) == M && ab.size(1) == 2 * N && N % 4 == 0, "swiglu: ab [M, 2N] view, h [M, N]");
@@ -1422,7 +1486,7 @@ std::vector<std::tuple<std::string, int64_t, int64_t>> func_attrs() {
   };
 #define FA(...) add(#__VA_ARGS__, (const void*)__VA_ARGS__)
   FA(cond_ln_k<3>); FA(cond_ln_k<6>); FA(adaln_a_k); FA(res_adaln_b_k<2>); FA(res_adaln_b_k<3>); FA(res_c_k); FA(res_c_bwd_k); FA(res_adaln_b_bwd_k);
-  FA(adaln_a_bwd_k); FA(cond_bwd_k<3>); FA(cond_bwd_k<6>); FA(gate_bwd_k<6>); FA(gate_bwd_k<8>); FA(swiglu_k); FA(swiglu_bwd_k); FA(softmax_rows_k<4>);
+  FA(adaln_a_bwd_k); FA(cond_bwd_k<3>); FA(cond_bwd_k<6>); FA(gate_bwd_k<6>); FA(gate_bwd_k<8>); FA(gate_bwd_fold_k<6>); FA(gate_bwd_fold_k<8>); FA(swiglu_k); FA(swiglu_bwd_k); FA(softmax_rows_k<4>);
   FA(softmax_rows_k<8>); FA(softmax_rows_k<16>); FA(softmax_t_k<4>); FA(softmax_t_k<8>); FA(pair_bias_k<12>); FA(pair_bias_k<16>);
   FA(pair_bias_k<24>); FA(pair_bias_bwd_k<12>); FA(pair_bias_bwd_k<16>); FA(pair_bias_bwd_k<24>);
   FA(pair_bias_tc_k<12, 1>); FA(pair_bias_tc_k<16, 1>); FA(pair_bias_tc_k<24, 1>); FA(pair_bias_tc_k<12, 3>); FA(pair_bias_tc_k<16, 3>);
@@ -1449,6 +1513,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("adaln_a_bwd_cuda", &adaln_a_bwd);
   m.def("cond_bwd_cuda", &cond_bwd);
   m.def("gate_bwd_cuda", &gate_bwd);
+  m.def("gate_bwd_fold_cuda", &gate_bwd_fold);
   m.def("swiglu_cuda", &swiglu);
   m.def("swiglu_bwd_cuda", &swiglu_bwd);
   m.def("softmax_rows_cuda", &softmax_rows);

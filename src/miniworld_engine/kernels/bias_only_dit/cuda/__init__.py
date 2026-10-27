@@ -734,7 +734,7 @@ class DpbKernel:
 
     def __call__(self, do, v, P, dd, out, A):
         if h100_enabled(self.device_index):
-            if _H100_DPB2 and self.dh == 48 and do.shape[0] // A >= 384:  # L256: 64 CTAs, the 64 x 64 kernel wins
+            if _H100_DPB2 and self.dh in (32, 48, 64) and do.shape[0] // A >= 384:  # L256: 64 CTAs, the 64 x 64 kernel wins
                 h100_ext().dpb2(do, v, P, dd.sum(0).contiguous(), out, A, self.nh, self.dh, self.nsm)
             else:
                 h100_ext().dpb_pipeline(do, v, P, dd, out, A, self.nh, self.dh)
