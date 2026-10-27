@@ -174,3 +174,16 @@ def test_ct_inference_small_m_squeeze_tile(bf16):
     auto = ci.ct_inference(x, cond, wa, wb, ws, wsc, bsc, res)
     assert torch.equal(auto, y64)   # the small-M rule picked 64
     assert (y64.double() - y128.double()).abs().max() <= 5e-2 * y128.double().abs().max()
+
+
+def test_adaln_fp32_small_m_takes_32_column_tiles():
+    """M = 640 rows (L128 x 5): 64-column tiles give 60 CTAs on 132 SMs, 32-column tiles 120; the result is bitwise the same as the other tilings."""
+    from miniworld_engine.kernels.adaln.cuda import infer
+
+    torch.manual_seed(3)
+    m, nx, nc = 640, 768, 384
+    x, c = torch.randn(m, nx, device="cuda"), torch.randn(m, nc, device="cuda")
+    lnw, ws, wb, bs = torch.rand(nc, device="cuda") + 0.5, torch.randn(nx, nc, device="cuda") / 20, torch.randn(nx, nc, device="cuda") / 20, torch.randn(nx, device="cuda")
+    assert infer.pick_ht_adaln(m, nx, 132, True) == 32 and infer.pick_ht_adaln(m, nx, 132, False) == 64 and infer.pick_ht_adaln(1280, nx, 132, True) == 64
+    y32, y64, y128 = (infer.adaln_inference(x, c, lnw, ws, bs, wb, 1e-5, 1e-5, ht=h) for h in (32, 64, 128))
+    assert torch.equal(y32, y64) and torch.equal(y64, y128)

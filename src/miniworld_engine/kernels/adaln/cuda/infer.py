@@ -72,6 +72,15 @@ def pick_ht(m: int, n: int, nsm: int) -> int:
     return best
 
 
+def pick_ht_adaln(m: int, n: int, nsm: int, f32: bool) -> int:
+    """``pick_ht`` for the AdaLN GEMM, which also takes 32-column tiles (fp32, 64-column output tiles): when 64-column tiles give fewer than half as many CTAs as there are SMs,
+    the weights and the activations are streamed by twice the CTAs (M <= ~640 rows)."""
+    ht = pick_ht(m, n, nsm)
+    if f32 and ht == 64 and n % 32 == 0 and ((m + 127) // 128) * (n // 64) <= nsm // 2:   # measured (M = 640: 9.2 against 10.9 us; at M = 1280 it is 13.4 against 12.2)
+        return 32
+    return ht
+
+
 def supported(x: torch.Tensor, cond: torch.Tensor, nx: int, nc: int) -> bool:
     """sm_90 only, bf16, or fp32 under TF32 (``allow_tf32``): the TF32 tensor cores are what runs, and strict fp32 must stay on cuBLAS."""
     if not (x.is_cuda and cond.is_cuda and x.dtype == cond.dtype):
@@ -142,7 +151,7 @@ def adaln_inference(x, cond, lnw, w_scale, b_scale, w_bias, eps_x, eps_cond, *, 
     nx, nc = shape[-1], cond.shape[-1]
     x2 = x.reshape(-1, nx).contiguous()
     c2 = cond.reshape(-1, nc).contiguous()
-    ht = ht or pick_ht(x2.shape[0], nx, num_sms(x.device))
+    ht = ht or pick_ht_adaln(x2.shape[0], nx, num_sms(x.device), x.dtype is torch.float32)
     wc, bs = packed(w_scale, b_scale, w_bias, x.dtype)
     y = _infer(x2, c2, lnw.float().contiguous(), wc, bs, float(eps_x), float(eps_cond), ht, rna)
     return y.reshape(shape)

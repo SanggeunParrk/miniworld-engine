@@ -128,7 +128,7 @@ template <bool F32, int HT, bool SAVE_GATE, bool AR = false> struct ACfg {
   static_assert(SMEM + 1024 <= 232448, "shared memory budget");
 };
 template <bool F32, int HT> TMN_DEVI void mma_a(float (&acc)[HT], uint64_t a, uint64_t b) {
-  if constexpr (F32) { if constexpr (HT == 128) awg_tf32_n256(acc, a, b); else awg_tf32_n128(acc, a, b); }
+  if constexpr (F32) { if constexpr (HT == 128) awg_tf32_n256(acc, a, b); else if constexpr (HT == 64) awg_tf32_n128(acc, a, b); else awg_tf32_n64(acc, a, b); }
   else { if constexpr (HT == 128) awg_bf16_n256(acc, a, b); else awg_bf16_n128(acc, a, b); }
 }
 
@@ -831,12 +831,13 @@ void adaln_gemm(torch::Tensor aff, torch::Tensor wp, torch::Tensor bs, torch::Te
               wp.size(1) == aff.size(1), "layouts");
   if (gate) TORCH_CHECK(gate->scalar_type() == dt && gate->is_contiguous() && gate->size(0) == y.size(0) && gate->size(1) == 2 * y.size(1), "pre-activation buffer [M, 2 NX]");
   const at::cuda::CUDAGuard guard(x.device());
-  TORCH_CHECK(ht == 128 || ht == 64, "ht: 128 or 64");
+  TORCH_CHECK(ht == 128 || ht == 64 || (ht == 32 && dt == torch::kFloat32), "ht: 128 or 64 (32: fp32 only)");
   const bool f32 = dt == torch::kFloat32, sg = gate.has_value();
   const at::Tensor* gp = sg ? &*gate : nullptr;
 #define AG(F, H, S, R) run_gemm<F, H, S, R, false>(aff, wp, bs, x, st, y, gp, sms, pdl)
   if (f32) {
-    if (ht == 64) { if (sg) { if (rna) AG(true, 64, true, true); else AG(true, 64, true, false); } else { if (rna) AG(true, 64, false, true); else AG(true, 64, false, false); } }
+    if (ht == 32) { if (sg) { if (rna) AG(true, 32, true, true); else AG(true, 32, true, false); } else { if (rna) AG(true, 32, false, true); else AG(true, 32, false, false); } }
+    else if (ht == 64) { if (sg) { if (rna) AG(true, 64, true, true); else AG(true, 64, true, false); } else { if (rna) AG(true, 64, false, true); else AG(true, 64, false, false); } }
     else { if (sg) { if (rna) AG(true, 128, true, true); else AG(true, 128, true, false); } else { if (rna) AG(true, 128, false, true); else AG(true, 128, false, false); } }
   } else {
     if (ht == 64 && ar) { if (sg) run_gemm<false, 64, true, false, true>(aff, wp, bs, x, st, y, gp, sms, pdl); else run_gemm<false, 64, false, false, true>(aff, wp, bs, x, st, y, gp, sms, pdl); }
