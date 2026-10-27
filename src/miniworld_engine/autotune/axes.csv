@@ -106,10 +106,10 @@ layernorm_fwd_saveact_triton,layer_norm_fwd_fused,miniworld_engine/kernels/layer
 layernorm_fwd_saveact_triton,layer_norm_fwd_fused,miniworld_engine/kernels/layernorm/triton/main.py,57,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,1,0,,
 layernorm_fwd_strided_triton,_ln_kernel,miniworld_engine/kernels/adaln/triton/ln_strided.py,55,BLOCK_K,64,128,16,32,64,64 128 256 512 1024,128,16,64,64,0,1,N,1
 layernorm_fwd_strided_triton,_ln_kernel,miniworld_engine/kernels/adaln/triton/ln_strided.py,55,BLOCK_M1,64,128,16,32,64,1 2 4 8 16 32 64 128,64,32,64,64,0,0,,
-layernorm_linear_bwd_fp32_triton,_layer_norm_linear_bwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,160,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,N,1
+layernorm_linear_bwd_fp32_triton,_layer_norm_linear_bwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,160,BLOCK_K_D,64,128,16,32,64,16 32 64 128,128,16,64,64,0,1,N,1
 layernorm_linear_bwd_fp32_triton,_layer_norm_linear_bwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,160,BLOCK_K_NH,64,128,16,32,64,16 32 64,64,32,64,64,0,1,NH,1
 layernorm_linear_bwd_fp32_triton,_layer_norm_linear_bwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,160,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
-layernorm_linear_fwd_fp32_triton,_layer_norm_linear_fwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,51,BLOCK_K_D,64,128,16,32,64,16 32 64,128,16,64,64,0,1,N,1
+layernorm_linear_fwd_fp32_triton,_layer_norm_linear_fwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,51,BLOCK_K_D,64,128,16,32,64,16 32 64 128,128,16,64,64,0,1,N,1
 layernorm_linear_fwd_fp32_triton,_layer_norm_linear_fwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,51,BLOCK_K_NH,64,128,16,32,64,16 32 64,64,32,64,64,0,1,NH,1
 layernorm_linear_fwd_fp32_triton,_layer_norm_linear_fwd,miniworld_engine/kernels/layernorm_linear/triton/pair_bias.py,51,BLOCK_M1,64,128,16,32,64,32 64 128 256,32,64,64,64,1,0,,
 layernorm_linear_fwd_triton,_lnl_fwd_kernel,miniworld_engine/kernels/layernorm_linear/triton/fused.py,53,BLOCK_K,64,128,16,32,64,16 32 64,128,16,64,64,0,1,K,1

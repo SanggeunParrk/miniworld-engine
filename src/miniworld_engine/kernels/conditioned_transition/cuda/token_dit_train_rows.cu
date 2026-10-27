@@ -430,9 +430,15 @@ __device__ __forceinline__ void mma_tf32(float (&d)[4], float a0, float a1, floa
                : "r"(tf32r(a0)), "r"(tf32r(a1)), "r"(tf32r(a2)), "r"(tf32r(a3)), "r"(tf32r(b0)), "r"(tf32r(b1)));
 }
 
-template <typename ZT>
+__device__ __forceinline__ void put_bias(float* p, float v) { *p = v; }
+__device__ __forceinline__ void put_bias(bf* p, float v) { *p = __float2bfloat16_rn(v); }
+
+// OT: the bias dtype (fp32, or bf16 for the bf16 core: one rounding of LN(z) Wf^T + extra); EX: an optional [R] fp32 term (the [L, L] extra pair bias)
+// added to every head, scaled by EXS
+template <typename ZT, typename OT>
 __global__ void __launch_bounds__(256) pair_bias_k(const ZT* __restrict__ Z, long sz, const float* __restrict__ WF,
-    const bool* __restrict__ MASK, float* __restrict__ BIAS, float2* __restrict__ PST, long R, int L, float eps) {
+    const bool* __restrict__ MASK, OT* __restrict__ BIAS, float2* __restrict__ PST, long R, int L, float eps,
+    const float* __restrict__ EX, float EXS) {
   constexpr int S = 132;                                                   // A (rows g, cols t) and B (heads g, cols t): bank 4g + t
   __shared__ __align__(16) float wf[HPAD * S];
   __shared__ __align__(16) float ph[PT * S];
@@ -472,14 +478,14 @@ __global__ void __launch_bounds__(256) pair_bias_k(const ZT* __restrict__ Z, lon
       for (int e = 0; e < 4; ++e) {
         const long r = r0 + mt * 16 + g + (e >= 2 ? 8 : 0);
         const int h = nt * 8 + 2 * t + (e & 1);
-        if (r < R && h < NHH) BIAS[(long)h * R + r] = (MASK != nullptr && !MASK[r % L]) ? -INFINITY : d[e];   // r = query L + key
+        if (r < R && h < NHH) put_bias(BIAS + (long)h * R + r, (MASK != nullptr && !MASK[r % L]) ? -INFINITY : d[e] + (EX != nullptr ? EX[r] * EXS : 0.f));   // r = query L + key
       }
     }
   }
 }
 
-template <typename ZT>
-__global__ void __launch_bounds__(256) pair_bias_bwd_k(const float* __restrict__ DB, const ZT* __restrict__ Z, long sz,
+template <typename ZT, typename DT>
+__global__ void __launch_bounds__(256) pair_bias_bwd_k(const DT* __restrict__ DB, const ZT* __restrict__ Z, long sz,
     const float2* __restrict__ PST, const float* __restrict__ WF, ZT* __restrict__ DZ, float* __restrict__ PART, long R) {
   constexpr int WS = 136, XS = 136, TS = HPAD + 4, AS = PT + 4;
   __shared__ __align__(16) float wf[HPAD * WS];                           // Wf [heads][128]: B of dxh (k = head t, n = column g)
@@ -502,7 +508,7 @@ __global__ void __launch_bounds__(256) pair_bias_bwd_k(const float* __restrict__
     for (int i = threadIdx.x; i < HPAD * PT; i += 256) {                   // dbias[:, tile], 32 consecutive rows per head
       const int h = i / PT, j = i % PT;
       const long r = r0 + j;
-      const float v = (h < NHH && r < R) ? DB[(long)h * R + r] : 0.f;
+      const float v = (h < NHH && r < R) ? static_cast<float>(DB[(long)h * R + r]) : 0.f;
       dba[h * AS + j] = v;
       dbt[j * TS + h] = v;
     }
@@ -719,23 +725,29 @@ void pair_ln(at::Tensor z, at::Tensor ph, at::Tensor pst, double eps) {
 // blocks of the persistent pair-bias kernels (and rows of pair_bias_bwd's dWf partial buffer)
 int64_t pair_grid(int64_t R) {
   const int64_t tiles = (R + PT - 1) / PT;
-  return std::max<int64_t>(1, std::min<int64_t>(tiles, (int64_t)nsm() * occupancy(pair_bias_bwd_k<float>, 256)));
+  return std::max<int64_t>(1, std::min<int64_t>(tiles, (int64_t)nsm() * occupancy(pair_bias_bwd_k<float, float>, 256)));
 }
 
 // z [R, 128] (fp32 or bf16 rows), wf [NHH, 128] fp32, mask [L] bool or none -> bias [NHH, R] fp32 (head-major, masked keys -inf),
 // pst [R, 2] (mean, rstd)
-void pair_bias(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at::Tensor bias, at::Tensor pst, int64_t L, double eps) {
+void pair_bias(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at::Tensor bias, at::Tensor pst, int64_t L, double eps,
+               c10::optional<at::Tensor> extra, double extra_scale) {
   const int64_t R = z.size(0);
   TORCH_CHECK(z.size(1) == 128 && z.stride(1) == 1, "pair_bias: z [R, 128]");
-  f32c(wf, "wf"); f32c(bias, "bias"); f32c(pst, "pst");
+  f32c(wf, "wf"); f32c(pst, "pst");
+  TORCH_CHECK(bias.is_contiguous() && (bias.scalar_type() == at::kFloat || bias.scalar_type() == at::kBFloat16), "pair_bias: bias fp32 or bf16");
+  if (extra) { f32c(*extra, "extra"); TORCH_CHECK(extra->numel() == R, "pair_bias: extra [L, L] fp32"); }
   TORCH_CHECK(wf.numel() == NHH * 128 && bias.numel() == NHH * R && R == L * L, "pair_bias: wf [heads, 128], bias [heads, L, L]");
   if (mask) TORCH_CHECK(mask->scalar_type() == at::kBool && mask->is_contiguous() && mask->numel() == L, "pair_bias: mask [L] bool");
   const at::cuda::CUDAGuard g(z.device());
   const bool* mp = mask ? reinterpret_cast<const bool*>(mask->data_ptr()) : nullptr;
+  const float* ex = extra ? CP<float>(*extra) : nullptr;
   TDT_DISPATCH(z.scalar_type(), ZT, [&] {
-    const int64_t grid = std::max<int64_t>(1, std::min<int64_t>((R + PT - 1) / PT, (int64_t)nsm() * occupancy(pair_bias_k<ZT>, 256)));
-    pair_bias_k<ZT><<<(unsigned)grid, 256, 0, S()>>>(CP<ZT>(z), z.stride(0), CP<float>(wf), mp, P<float>(bias), P<float2>(pst), R,
-                                                     (int)L, (float)eps);
+    TDT_DISPATCH(bias.scalar_type(), OT, [&] {
+      const int64_t grid = std::max<int64_t>(1, std::min<int64_t>((R + PT - 1) / PT, (int64_t)nsm() * occupancy(pair_bias_k<ZT, OT>, 256)));
+      pair_bias_k<ZT, OT><<<(unsigned)grid, 256, 0, S()>>>(CP<ZT>(z), z.stride(0), CP<float>(wf), mp, P<OT>(bias), P<float2>(pst), R,
+                                                           (int)L, (float)eps, ex, (float)extra_scale);
+    });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -745,12 +757,15 @@ void pair_bias(at::Tensor z, at::Tensor wf, c10::optional<at::Tensor> mask, at::
 void pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor part) {
   const int64_t R = z.size(0);
   TORCH_CHECK(z.size(1) == 128 && z.stride(1) == 1 && dz.is_contiguous() && dz.scalar_type() == z.scalar_type(), "pair_bias_bwd: z / dz");
-  f32c(db, "db"); f32c(pst, "pst"); f32c(wf, "wf"); f32c(part, "part");
+  TORCH_CHECK(db.is_contiguous() && (db.scalar_type() == at::kFloat || db.scalar_type() == at::kBFloat16), "pair_bias_bwd: db fp32 or bf16");
+  f32c(pst, "pst"); f32c(wf, "wf"); f32c(part, "part");
   TORCH_CHECK(db.numel() == NHH * R && part.size(1) == NHH * 128, "pair_bias_bwd: db [heads, R], part [blocks, heads 128]");
   const at::cuda::CUDAGuard g(z.device());
   TDT_DISPATCH(z.scalar_type(), ZT, [&] {
-    pair_bias_bwd_k<ZT><<<(unsigned)part.size(0), 256, 0, S()>>>(CP<float>(db), CP<ZT>(z), z.stride(0), CP<float2>(pst), CP<float>(wf),
-                                                                P<ZT>(dz), P<float>(part), R);
+    TDT_DISPATCH(db.scalar_type(), DT, [&] {
+      pair_bias_bwd_k<ZT, DT><<<(unsigned)part.size(0), 256, 0, S()>>>(CP<DT>(db), CP<ZT>(z), z.stride(0), CP<float2>(pst), CP<float>(wf),
+                                                                      P<ZT>(dz), P<float>(part), R);
+    });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
@@ -1262,7 +1277,8 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("res_adaln_b", &res_adaln_b);
   m.def("res_c", &res_c);
   m.def("pair_ln", &pair_ln);
-  m.def("pair_bias", &pair_bias);
+  m.def("pair_bias", &pair_bias, pybind11::arg("z"), pybind11::arg("wf"), pybind11::arg("mask"), pybind11::arg("bias"), pybind11::arg("pst"), pybind11::arg("L"),
+        pybind11::arg("eps"), pybind11::arg("extra") = pybind11::none(), pybind11::arg("extra_scale") = 1.0);
   m.def("pair_bias_bwd", &pair_bias_bwd);
   m.def("pair_grid", &pair_grid);
   m.def("part_rows", &part_rows);

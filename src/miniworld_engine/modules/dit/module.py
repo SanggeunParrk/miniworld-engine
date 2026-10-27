@@ -100,9 +100,10 @@ class DiTBlock(nn.Module):
         key_mask, shared = _shared_key_mask(mask)
         if shared and _h100.serves(self, single, cond, pair, compute_dtype, extra_pair_bias):
             return _h100.update(self, single, cond, pair, key_mask, extra_pair_bias)
-        if extra_pair_bias is None:   # the fused training blocks do not take the term: they are skipped, never silently dropping it
-            if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype):
-                return _train.block(self, single, cond, pair, key_mask, compute_dtype)
+        # the H100 fused training block takes the term (folded into its bias); the other fused blocks do not: skipped, never silently dropping it
+        if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype, extra_pair_bias):
+            return _train.block(self, single, cond, pair, key_mask, compute_dtype, extra_pair_bias)
+        if extra_pair_bias is None:
             # B > 1 independent proteins (each its own pair): the fused block with an attention bias of its own per sample
             if _train.serves_batched(self, single, cond, pair, mask, compute_dtype):
                 return _train.block_batched(self, single, cond, pair, mask, compute_dtype)

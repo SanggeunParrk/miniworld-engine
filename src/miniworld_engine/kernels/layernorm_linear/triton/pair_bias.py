@@ -46,7 +46,7 @@ def get_seq_group(rows) -> int:
 
 
 @triton.autotune(configs=configs_for("layernorm_linear_fwd_fp32_triton"),
-                 key=['shape_key'])
+                 key=['shape_key', 'TC'])
 @triton.jit
 def _layer_norm_linear_fwd(
     x_ptr,
@@ -64,6 +64,7 @@ def _layer_norm_linear_fwd(
     BLOCK_K_D: tl.constexpr,
     BLOCK_K_NH: tl.constexpr,
     shape_key,
+    TC: tl.constexpr = False,
 ):
     # BLOCK_K_D tiles the channel axis (d) and BLOCK_K_NH the projection axis (n_head); when the
     # tuner picks tiles >= the extents, every loop below is a single iteration and this is the
@@ -95,7 +96,10 @@ def _layer_norm_linear_fwd(
             oacc = tl.zeros([BLOCK_M1, BLOCK_K_NH], dtype=tl.float32)
             pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None],
                          mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(tl.float32)
-            oacc = tl.dot(y, pw, oacc, allow_tf32=False)
+            if TC:   # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
+                oacc = tl.dot(y.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), oacc)
+            else:
+                oacc = tl.dot(y, pw, oacc, allow_tf32=False)
             tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc,
                      mask=row_mask[:, None] & h_mask[None, :])
         tl.store(mean_ptr + rows, mean, mask=row_mask)
@@ -141,7 +145,10 @@ def _layer_norm_linear_fwd(
                 y = centered * rstd[:, None] * lnw[None, :]
                 pw = tl.load(pw_ptr + hcols[None, :] * N + cols[:, None],
                              mask=h_mask[None, :] & col_mask[:, None], other=0.0).to(tl.float32)
-                oacc = tl.dot(y, pw, oacc, allow_tf32=False)
+                if TC:   # 16-bit input: the LayerNorm output is rounded to the input dtype and projected on tensor cores, as LayerNorm -> Linear does
+                    oacc = tl.dot(y.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), oacc)
+                else:
+                    oacc = tl.dot(y, pw, oacc, allow_tf32=False)
             tl.store(out_ptr + rows[:, None] * NH + hcols[None, :], oacc,
                      mask=row_mask[:, None] & h_mask[None, :])
         tl.store(mean_ptr + rows, mean, mask=row_mask)
@@ -154,7 +161,7 @@ def _layer_norm_linear_fwd(
 # projection vs the scalar `tl.static_range(NH)` loop): the sole launcher passes `NH=nh` and
 # `USE_DOT=nh >= MIN_TL_DOT_DIM`, so it is a pure function of NH -- which is folded into shape_key.
 @triton.autotune(configs=configs_for("layernorm_linear_bwd_fp32_triton"),
-                 key=['shape_key'],
+                 key=['shape_key', 'TC'],
                  reset_to_zero=['dlnw_ptr', 'dpw_ptr'])
 @triton.jit
 def _layer_norm_linear_bwd(
@@ -176,6 +183,7 @@ def _layer_norm_linear_bwd(
     BLOCK_K_D: tl.constexpr,
     BLOCK_K_NH: tl.constexpr,
     shape_key,
+    TC: tl.constexpr = False,
 ):
     # BLOCK_K_D tiles d, BLOCK_K_NH tiles n_head. dx needs the row sums c1/c2 over ALL of d, so the
     # channel axis is walked TWICE: pass A accumulates c1/c2 (and emits the dpw/dlnw atomics),
@@ -183,96 +191,127 @@ def _layer_norm_linear_bwd(
     # schedule, with the second pass reading an L2-hot row.
     # Parameter sums are initialized before this launch and consumed after it.
     # Keep GPU-wide atomicity; no in-kernel consumer needs acquire/release ordering.
-    rows = (tl.program_id(0) * BLOCK_M1 + tl.arange(0, BLOCK_M1)).to(tl.int64)
-    row_mask = rows < M
-    mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)
-    rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
+    COVER: tl.constexpr = (BLOCK_K_D >= N) & (BLOCK_K_NH >= NH) & USE_DOT   # one tile: the programs are persistent and add their parameter sums once
+    if COVER:
+        acc_dpw = tl.zeros((BLOCK_K_NH, BLOCK_K_D), dtype=tl.float32)
+        acc_dlnw = tl.zeros((BLOCK_K_D,), dtype=tl.float32)
+    nblocks = tl.cdiv(M, BLOCK_M1)
+    for blk in range(tl.program_id(0), nblocks, tl.num_programs(0)):
+        rows = (blk * BLOCK_M1 + tl.arange(0, BLOCK_M1)).to(tl.int64)
+        row_mask = rows < M
+        mean = tl.load(mean_ptr + rows, mask=row_mask, other=0.0)
+        rstd = tl.load(rstd_ptr + rows, mask=row_mask, other=0.0)
+    
+        c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
+        for n0 in range(0, N, BLOCK_K_D):
+            cols = n0 + tl.arange(0, BLOCK_K_D)
+            col_mask = cols < N
+            mask = row_mask[:, None] & col_mask[None, :]
+            offs = rows[:, None] * stride_m + cols[None, :]
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+            xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
+            lnw = tl.load(lnw_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
+            y = xhat * lnw[None, :]
+            dy = tl.zeros((BLOCK_M1, BLOCK_K_D), dtype=tl.float32)
+            if USE_DOT:
+                for h0 in range(0, NH, BLOCK_K_NH):
+                    hcols = h0 + tl.arange(0, BLOCK_K_NH)
+                    h_mask = hcols < NH
+                    dout = tl.load(
+                        dout_ptr + rows[:, None] * NH + hcols[None, :],
+                        mask=row_mask[:, None] & h_mask[None, :],
+                        other=0.0,
+                    )
+                    pw = tl.load(
+                        pw_ptr + hcols[:, None] * N + cols[None, :],
+                        mask=h_mask[:, None] & col_mask[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    if TC:
+                        dy = tl.dot(dout.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), dy)
+                    else:
+                        dy = tl.dot(dout, pw, dy, allow_tf32=False)
+                    if TC:
+                        gp = tl.dot(tl.trans(dout).to(x_ptr.dtype.element_ty), y.to(x_ptr.dtype.element_ty))
+                    else:
+                        gp = tl.dot(tl.trans(dout), y, allow_tf32=False)
+                    if COVER:
+                        acc_dpw += gp
+                    else:
+                        tl.atomic_add(
+                            dpw_ptr + hcols[:, None] * N + cols[None, :], gp, mask=h_mask[:, None] & col_mask[None, :], sem="relaxed",
+                        )
+            else:
+                for j in tl.static_range(NH):
+                    dout_j = tl.load(dout_ptr + rows * NH + j, mask=row_mask, other=0.0)
+                    pw = tl.load(pw_ptr + j * N + cols, mask=col_mask, other=0.0).to(tl.float32)
+                    dy += dout_j[:, None] * pw[None, :]
+                    tl.atomic_add(
+                        dpw_ptr + j * N + cols,
+                        tl.sum(dout_j[:, None] * y, axis=0),
+                        mask=col_mask,
+                        sem="relaxed",
+                    )
+            dy = tl.where(mask, dy, 0.0)
+            dxhat = dy * lnw[None, :]
+            c1 += tl.sum(dxhat * xhat, axis=1)
+            c2 += tl.sum(dxhat, axis=1)
+            if COVER:
+                acc_dlnw += tl.sum(dy * xhat, axis=0)
+            else:
+                tl.atomic_add(dlnw_ptr + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
+        c1 = c1 / N
+        c2 = c2 / N
+    
+        for n0 in range(0, N, BLOCK_K_D):
+            cols = n0 + tl.arange(0, BLOCK_K_D)
+            col_mask = cols < N
+            mask = row_mask[:, None] & col_mask[None, :]
+            offs = rows[:, None] * stride_m + cols[None, :]
+            x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+            xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
+            lnw = tl.load(lnw_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
+            dy = tl.zeros((BLOCK_M1, BLOCK_K_D), dtype=tl.float32)
+            if USE_DOT:
+                for h0 in range(0, NH, BLOCK_K_NH):
+                    hcols = h0 + tl.arange(0, BLOCK_K_NH)
+                    h_mask = hcols < NH
+                    dout = tl.load(
+                        dout_ptr + rows[:, None] * NH + hcols[None, :],
+                        mask=row_mask[:, None] & h_mask[None, :],
+                        other=0.0,
+                    )
+                    pw = tl.load(
+                        pw_ptr + hcols[:, None] * N + cols[None, :],
+                        mask=h_mask[:, None] & col_mask[None, :],
+                        other=0.0,
+                    ).to(tl.float32)
+                    if TC:
+                        dy = tl.dot(dout.to(x_ptr.dtype.element_ty), pw.to(x_ptr.dtype.element_ty), dy)
+                    else:
+                        dy = tl.dot(dout, pw, dy, allow_tf32=False)
+            else:
+                for j in tl.static_range(NH):
+                    dout_j = tl.load(dout_ptr + rows * NH + j, mask=row_mask, other=0.0)
+                    pw = tl.load(pw_ptr + j * N + cols, mask=col_mask, other=0.0).to(tl.float32)
+                    dy += dout_j[:, None] * pw[None, :]
+            dy = tl.where(mask, dy, 0.0)
+            dxhat = dy * lnw[None, :]
+            dx = (dxhat - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
+            tl.store(dx_ptr + offs, dx, mask=mask)
 
-    c1 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-    c2 = tl.zeros([BLOCK_M1], dtype=tl.float32)
-    for n0 in range(0, N, BLOCK_K_D):
-        cols = n0 + tl.arange(0, BLOCK_K_D)
-        col_mask = cols < N
-        mask = row_mask[:, None] & col_mask[None, :]
-        offs = rows[:, None] * stride_m + cols[None, :]
-        x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-        xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
-        lnw = tl.load(lnw_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
-        y = xhat * lnw[None, :]
-        dy = tl.zeros((BLOCK_M1, BLOCK_K_D), dtype=tl.float32)
-        if USE_DOT:
-            for h0 in range(0, NH, BLOCK_K_NH):
-                hcols = h0 + tl.arange(0, BLOCK_K_NH)
-                h_mask = hcols < NH
-                dout = tl.load(
-                    dout_ptr + rows[:, None] * NH + hcols[None, :],
-                    mask=row_mask[:, None] & h_mask[None, :],
-                    other=0.0,
-                )
-                pw = tl.load(
-                    pw_ptr + hcols[:, None] * N + cols[None, :],
-                    mask=h_mask[:, None] & col_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                dy = tl.dot(dout, pw, dy, allow_tf32=False)
-                tl.atomic_add(
-                    dpw_ptr + hcols[:, None] * N + cols[None, :],
-                    tl.dot(tl.trans(dout), y, allow_tf32=False),
-                    mask=h_mask[:, None] & col_mask[None, :],
-                    sem="relaxed",
-                )
-        else:
-            for j in tl.static_range(NH):
-                dout_j = tl.load(dout_ptr + rows * NH + j, mask=row_mask, other=0.0)
-                pw = tl.load(pw_ptr + j * N + cols, mask=col_mask, other=0.0).to(tl.float32)
-                dy += dout_j[:, None] * pw[None, :]
-                tl.atomic_add(
-                    dpw_ptr + j * N + cols,
-                    tl.sum(dout_j[:, None] * y, axis=0),
-                    mask=col_mask,
-                    sem="relaxed",
-                )
-        dy = tl.where(mask, dy, 0.0)
-        dxhat = dy * lnw[None, :]
-        c1 += tl.sum(dxhat * xhat, axis=1)
-        c2 += tl.sum(dxhat, axis=1)
-        tl.atomic_add(dlnw_ptr + cols, tl.sum(dy * xhat, axis=0), mask=col_mask, sem="relaxed")
-    c1 = c1 / N
-    c2 = c2 / N
+    if COVER:
+        cols = tl.arange(0, BLOCK_K_D)
+        hcols = tl.arange(0, BLOCK_K_NH)
+        tl.atomic_add(dpw_ptr + hcols[:, None] * N + cols[None, :], acc_dpw, mask=(hcols < NH)[:, None] & (cols < N)[None, :], sem="relaxed")
+        tl.atomic_add(dlnw_ptr + cols, acc_dlnw, mask=cols < N, sem="relaxed")
 
-    for n0 in range(0, N, BLOCK_K_D):
-        cols = n0 + tl.arange(0, BLOCK_K_D)
-        col_mask = cols < N
-        mask = row_mask[:, None] & col_mask[None, :]
-        offs = rows[:, None] * stride_m + cols[None, :]
-        x = tl.load(x_ptr + offs, mask=mask, other=0.0).to(tl.float32)
-        xhat = tl.where(mask, (x - mean[:, None]) * rstd[:, None], 0.0)
-        lnw = tl.load(lnw_ptr + cols, mask=col_mask, other=0.0).to(tl.float32)
-        dy = tl.zeros((BLOCK_M1, BLOCK_K_D), dtype=tl.float32)
-        if USE_DOT:
-            for h0 in range(0, NH, BLOCK_K_NH):
-                hcols = h0 + tl.arange(0, BLOCK_K_NH)
-                h_mask = hcols < NH
-                dout = tl.load(
-                    dout_ptr + rows[:, None] * NH + hcols[None, :],
-                    mask=row_mask[:, None] & h_mask[None, :],
-                    other=0.0,
-                )
-                pw = tl.load(
-                    pw_ptr + hcols[:, None] * N + cols[None, :],
-                    mask=h_mask[:, None] & col_mask[None, :],
-                    other=0.0,
-                ).to(tl.float32)
-                dy = tl.dot(dout, pw, dy, allow_tf32=False)
-        else:
-            for j in tl.static_range(NH):
-                dout_j = tl.load(dout_ptr + rows * NH + j, mask=row_mask, other=0.0)
-                pw = tl.load(pw_ptr + j * N + cols, mask=col_mask, other=0.0).to(tl.float32)
-                dy += dout_j[:, None] * pw[None, :]
-        dy = tl.where(mask, dy, 0.0)
-        dxhat = dy * lnw[None, :]
-        dx = (dxhat - (xhat * c1[:, None] + c2[:, None])) * rstd[:, None]
-        tl.store(dx_ptr + offs, dx, mask=mask)
+_PERSIST_WAVES = 8
+
+
+def _persistent_programs(device) -> int:
+    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
 
 
 def _fwd_op_fake(x, ln_weight, proj_weight, eps):
@@ -301,7 +340,7 @@ def _fwd_op(
     x2 = x.reshape(-1, x.shape[-1]).contiguous()
     M, N = x2.shape
     nh = proj_weight.shape[0]
-    out = torch.empty(M, nh, dtype=torch.float32, device=x.device)
+    out = torch.empty(M, nh, dtype=x.dtype, device=x.device)   # the kernel accumulates in fp32 and stores in the input dtype
     mean = torch.empty(M, dtype=torch.float32, device=x.device)
     rstd = torch.empty(M, dtype=torch.float32, device=x.device)
 
@@ -320,8 +359,9 @@ def _fwd_op(
         eps,
         # L = x.shape[-2] (the op takes the pre-flatten activation), never the row count M.
         shape_key=both_key(rows_of(x.shape), N=N, NH=nh),
+        TC=x.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM,
     )
-    return out.reshape(*x.shape[:-1], nh).to(x.dtype), mean, rstd
+    return out.reshape(*x.shape[:-1], nh), mean, rstd
 
 
 def _bwd_op_fake(dout, x2, ln_weight, proj_weight, mean, rstd, shape_key=None):
@@ -355,12 +395,19 @@ def _bwd_op(
     """
     M, N = x2.shape
     nh = proj_weight.shape[0]
-    dout2 = dout.reshape(M, nh).contiguous().to(torch.float32)
+    tc = x2.dtype != torch.float32 and nh >= MIN_TL_DOT_DIM
+    dout2 = dout.reshape(M, nh).contiguous()
+    if not tc:
+        dout2 = dout2.to(torch.float32)   # the tensor-core path rounds dout to the input dtype in the kernel: it reads the 16-bit gradient as is
     dx = torch.empty_like(x2)
     dlnw = torch.zeros(N, dtype=torch.float32, device=x2.device)
     dpw = torch.zeros(nh, N, dtype=torch.float32, device=x2.device)
 
-    grid = lambda meta: (triton.cdiv(M, meta["BLOCK_M1"]),)
+    def grid(meta):   # one-tile configs run persistent programs (the kernel loops over row blocks and adds its parameter sums once)
+        blocks = triton.cdiv(M, meta["BLOCK_M1"])
+        one_tile = nh >= MIN_TL_DOT_DIM and meta["BLOCK_K_D"] >= N and meta["BLOCK_K_NH"] >= nh
+        return (min(blocks, _persistent_programs(x2.device)) if one_tile else blocks,)
+
     _layer_norm_linear_bwd[grid](
         dout2,
         x2,
@@ -376,6 +423,7 @@ def _bwd_op(
         N,
         nh,
         USE_DOT=nh >= MIN_TL_DOT_DIM,
+        TC=tc,
         shape_key=both_key(M, N=N, NH=nh) if shape_key is None else pack(shape_key, N=N, NH=nh),
     )
     return dx, dlnw.to(ln_weight.dtype), dpw.to(proj_weight.dtype)
