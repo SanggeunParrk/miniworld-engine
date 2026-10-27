@@ -67,6 +67,7 @@ from torch.autograd.function import once_differentiable
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
+from miniworld_engine.kernels._tf32 import tf32_grid
 
 # ------------------------------------------------------------------------------------------------------------ weights
 # The block's parameters and the kernels' weight packs (stacked / transposed bf16 packs and the backward's transposed A operands).
@@ -1405,9 +1406,7 @@ def _pack32(weights):
             vecs.append(m("attention.ada_ln_kv.ln_cond.weight"))
         flat = torch.cat(mats + vecs)
         nmat = sum(t.numel() for t in mats)
-        flat[:nmat].view(torch.int32).add_(0x1000).bitwise_and_(
-            -0x2000
-        )  # RNA to tf32: half an ulp into the magnitude, drop 13 bits
+        flat[:nmat].copy_(tf32_grid(flat[:nmat]))  # the matrices on the TF32 grid, to nearest
 
         off = [0]
 

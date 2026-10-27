@@ -22,6 +22,9 @@ __device__ __forceinline__ float sigmoid_fast(float v) {
   asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(r) : "f"(1.f + e));
   return r;
 }
+// x on the TF32 grid, to nearest with ties away from zero (what cvt.rna.tf32.f32 gives for finite x; inf and nan keep their patterns): half an ulp of the kept bits
+// added to the magnitude, the low 13 bits cleared. The device twin of the host ``kernels/_tf32.py::tf32_grid``.
+__device__ __forceinline__ float rna_tf32(float x) { return __uint_as_float((__float_as_uint(x) + 0x1000u) & 0xffffe000u); }
 __device__ __forceinline__ float modulate(float x, float mean, float rstd, float gate, float shift) { return gate * ((x - mean) * rstd) + shift; }
 
 }  // namespace rowmath

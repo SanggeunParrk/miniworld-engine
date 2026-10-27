@@ -38,6 +38,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
+from miniworld_engine.kernels._tf32 import tf32_grid
 from miniworld_engine.kernels.swa_dit.cuda import sm100 as _sm
 
 C, H, D, NHID, HW = _sm.C, _sm.H, _sm.D, _sm.NHID, _sm.HW
@@ -450,8 +451,7 @@ def supported_tf32(q: torch.Tensor, nhid: int, half_window: int, eps: float) -> 
 # --------------------------------------------------------------------------------------------------- weight forms (cached per version)
 def _round_tf32(t: torch.Tensor) -> torch.Tensor:
     """fp32 -> fp32 holding the nearest TF32 value, ties away from zero (what ``cvt.rna.tf32.f32`` gives): the weights' MMA operand."""
-    i = t.contiguous().view(torch.int32)
-    return ((i + 0x1000) & -0x2000).view(torch.float32)
+    return tf32_grid(t.contiguous())
 
 
 def _tf32_block_forms(wqkv, wg, wo, wu, wd):

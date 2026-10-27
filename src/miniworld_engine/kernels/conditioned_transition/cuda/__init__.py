@@ -108,11 +108,12 @@ def _tf32_wab(wab, ht=128):
     """[Wa; Wb] -> the SwiGLU GEMM's per-tile packing ([Wa ht rows | Wb ht rows] per tile, ht = 128 or 64), rounded to TF32 (to
     nearest, ties away), once per weight pack (per ht)."""
     from ... import _capture
+    from ..._tf32 import tf32_grid
 
     def build():
         H, K = wab.shape[0] // 2, wab.shape[1]
         w = torch.stack([wab[:H].view(H // ht, ht, K), wab[H:].view(H // ht, ht, K)], 1).reshape(2 * H, K)
-        return ((w.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
+        return tf32_grid(w.contiguous())
 
     # the entry holds ``wab``: a freed pack's address cannot alias another tensor while the entry lives
     return _capture.lookup(

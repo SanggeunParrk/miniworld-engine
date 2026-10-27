@@ -18,7 +18,8 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
-from miniworld_engine.kernels.adaln.cuda.infer import num_sms, pick_ht, rna_tf32
+from miniworld_engine.kernels._tf32 import tf32_grid
+from miniworld_engine.kernels.adaln.cuda.infer import num_sms, pick_ht
 
 _dir = Path(__file__).parent
 _kernels = _dir.parent.parent
@@ -75,7 +76,7 @@ def pack_weights(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torc
     wab = torch.stack([a.reshape(nd // ht, ht, k), b.reshape(nd // ht, ht, k)], 1).reshape(2 * nd, k)
     s, g = ws.to(dtype).contiguous(), wsc.to(dtype).contiguous()
     if dtype == torch.float32:
-        wab, s, g = rna_tf32(wab), rna_tf32(s), rna_tf32(g)
+        wab, s, g = tf32_grid(wab.contiguous()), tf32_grid(s), tf32_grid(g)
     return wab.contiguous(), s, g, bsc.to(dtype).float().contiguous()
 
 

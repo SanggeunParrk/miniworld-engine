@@ -18,6 +18,7 @@ import torch
 
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tf32 import tf32_grid
 
 _dir = Path(__file__).parent
 _kernels = _dir.parent.parent
@@ -97,17 +98,12 @@ def supported(x: torch.Tensor, cond: torch.Tensor, nx: int, nc: int) -> bool:
     return torch.cuda.get_device_capability(idx) == (9, 0) and nx % 64 == 0 and nc % kq == 0 and nx <= 1024 and nc <= 1024
 
 
-def rna_tf32(t: torch.Tensor) -> torch.Tensor:
-    """fp32 -> the TF32 grid, to nearest (ties away), as fp32."""
-    return ((t.contiguous().view(torch.int32) + 0x1000) & ~0x1FFF).view(torch.float32)
-
-
 def pack_weights(w_scale: torch.Tensor, b_scale: torch.Tensor, w_bias: torch.Tensor, dtype: torch.dtype):
     """([Wscale; Wbias] [2 NX, NC] in ``dtype`` (fp32: on the TF32 grid), the scale bias as fp32 (rounded to ``dtype`` first, as the Triton path's
     casts do)). The GEMM loads the Wscale and Wbias rows of a tile by two TMA boxes: no per-tile packing."""
     wc = torch.cat([w_scale, w_bias]).to(dtype)
     if dtype == torch.float32:
-        wc = rna_tf32(wc)
+        wc = tf32_grid(wc.contiguous())
     return wc.contiguous(), b_scale.to(dtype).float().contiguous()
 
 

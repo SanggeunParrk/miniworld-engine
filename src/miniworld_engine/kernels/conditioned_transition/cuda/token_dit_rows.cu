@@ -31,7 +31,7 @@ using namespace tdr;
 // x rounded to TF32 as cvt.rna.tf32.f32 does (half away from zero on the magnitude: add half an ulp of the kept bits, clear the rest;
 // inf and nan keep their patterns): the operand the next TF32 GEMM would round to anyway -- so a GEMM that reads its operands
 // unrounded (the TMA-fed wgmma kernels truncate) sees the bits cuBLAS's rounding would give
-__device__ __forceinline__ float rna_tf32(float v) { return __uint_as_float((__float_as_uint(v) + 0x1000u) & 0xffffe000u); }
+using rowmath::rna_tf32;
 
 template <int NT, typename GT, typename OutT, bool RND = false>
 __device__ __forceinline__ void adaln_store(float4 x, float eps, const GT* ms, const GT* mb, OutT* out, float* red) {

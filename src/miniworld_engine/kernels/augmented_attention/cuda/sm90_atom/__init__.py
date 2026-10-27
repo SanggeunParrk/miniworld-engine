@@ -19,6 +19,7 @@ import torch
 
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels._tf32 import tf32_grid
 
 _dir = Path(__file__).parent
 DS = 128
@@ -162,8 +163,7 @@ def _prep(t: torch.Tensor, tf32: bool) -> torch.Tensor:
 
 def round_tf32(x: torch.Tensor) -> torch.Tensor:
     """x rounded to nearest tf32 (ties away from zero, as cvt.rna.tf32), still fp32."""
-    i = x.contiguous().view(torch.int32)
-    return ((i + 0x1000) & ~0x1FFF).view(torch.float32)
+    return tf32_grid(x.contiguous())
 
 
 # weights, in ``integrations.local_dit.WEIGHTS`` + ``CROSS_WEIGHTS`` order

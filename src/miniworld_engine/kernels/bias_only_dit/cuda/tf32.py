@@ -33,6 +33,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._compile import device_constant
+from miniworld_engine.kernels._tf32 import tf32_grid
 from miniworld_engine.kernels.bias_only_dit.cuda import (
     LAYOUTS,
     PTR,
@@ -1035,8 +1036,7 @@ class TailTF32:
 def round_tf32(t: torch.Tensor) -> torch.Tensor:
     """fp32 -> fp32 holding the nearest TF32 value, ties away from zero (``cvt.rna.tf32.f32``'s rounding): the packed weights of the
     three-kernel step, so its MMAs read round-to-nearest operands instead of truncating the low 13 mantissa bits."""
-    i = t.detach().float().contiguous().view(torch.int32)
-    return ((i + 0x1000) & -0x2000).view(torch.float32)
+    return tf32_grid(t.detach().float().contiguous())
 
 
 _INF3_FAILED = False

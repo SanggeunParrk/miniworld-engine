@@ -39,6 +39,7 @@ from pathlib import Path
 
 import torch
 from miniworld_engine import settings
+from miniworld_engine.kernels._tf32 import tf32_grid
 
 NH, DH, DM, DP = 4, 32, 128, 16
 _dir = Path(__file__).parent
@@ -1019,8 +1020,7 @@ def gemm32(
 def round_tf32(t):
     """t (fp32) rounded to tf32, to nearest with ties away from zero (cvt.rna.tf32.f32): add half a tf32 ulp to the magnitude bits, drop
     the low 13. For the weight operands of gemm32, once per pack (kind::tf32 MMAs truncate)."""
-    i = t.detach().float().contiguous().view(torch.int32)
-    return ((i + 0x1000) & -0x2000).view(torch.float32)
+    return tf32_grid(t.detach().float().contiguous())
 
 
 def _rowgrid(M):

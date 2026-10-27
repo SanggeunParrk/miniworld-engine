@@ -285,7 +285,7 @@ __global__ void __launch_bounds__(BT) bwd_k(const T* __restrict__ Z, const float
 
 // TF32 round to nearest (ties away from zero) of a finite float: what cuBLAS does to an fp32 operand and what the tensor core would otherwise do by
 // truncation (1.2 - 3x the rounding error end to end, measured)
-__device__ __forceinline__ float rna_tf32(float x) { return __uint_as_float((__float_as_uint(x) + 0x1000u) & 0xffffe000u); }
+using rowmath::rna_tf32;
 
 // q * scale, k, v rounded to the TF32 grid: QS, KR, VR [M, N] and VT [N, M] = VR^T, one pass over q, k, v; with WT (a training forward) also QT = QS^T and
 // KT = KR^T [N, M], which the backward's transposed operands would otherwise cost two more passes for
