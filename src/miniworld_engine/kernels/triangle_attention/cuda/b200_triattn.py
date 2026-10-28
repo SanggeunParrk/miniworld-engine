@@ -38,7 +38,7 @@ def _rows_per_task(length: int) -> int:
 @functools.lru_cache(maxsize=None)
 def _core(rows: int = 4):
     ensure_cuda_home()
-    return load_extension(name=f"triattn_b200_core_r{rows}_v8", sources=[str(_SRC / "triattn_sm100.cu")],
+    return load_extension(name=f"triattn_b200_core_r{rows}_v9", sources=[str(_SRC / "triattn_sm100.cu")],
                           extra_cuda_cflags=[*_flags(), f"-DTA_R={rows}"], verbose=False)
 
 
