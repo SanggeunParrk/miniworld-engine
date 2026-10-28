@@ -200,10 +200,11 @@ class SWAAtomBlock(nn.Module):
 
 
 def _pads_atoms(q: torch.Tensor, s: int) -> bool:
-    """Whether the fused block call pads the atom axis: bf16 on B200 (the engine's sm_100a block wants S % 128 == 0)."""
+    """Whether the fused block call pads the atom axis: bf16 or fp32 on B200 (the engine's sm_100a block and its TF32 twin want
+    S % 128 == 0; an unpadded fp32 call at another S would leave the TF32 kernels for the Triton fp32 path)."""
     return (
         s % 128 != 0
-        and q.dtype == torch.bfloat16
+        and q.dtype in (torch.bfloat16, torch.float32)
         and torch.cuda.get_device_capability(q.device) == (10, 0)
     )
 
