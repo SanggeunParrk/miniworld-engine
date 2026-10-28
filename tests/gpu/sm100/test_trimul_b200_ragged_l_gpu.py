@@ -1,7 +1,6 @@
 """B200 TriMul inference at L % 16 != 0: padded to 16 on the host (integrations.trimul_b200._padded_inference; H100's
 62acfe721), against the FP32 PyTorch statement of the module (helpers from the H100 long-L test)."""
 
-import copy
 
 import pytest
 import torch
