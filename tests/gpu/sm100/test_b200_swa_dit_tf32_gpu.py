@@ -205,6 +205,10 @@ def _no_triton(names) -> list[str]:
 
 @pytest.fixture
 def tf32_spy(monkeypatch):
+    # the TF32 block serves fp32 calls that may use TF32: under the default matmul precision 'highest' an fp32 call off the native
+    # H100 stages runs the PyTorch statements on H100 / B200 (main 9897f70e0), so the spied tests run at 'high'
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("high")
     calls = []
     for name in ("block_fwd_tf32", "mod_fwd_tf32"):
         orig = getattr(tf32_fwd, name)
@@ -213,7 +217,8 @@ def tf32_spy(monkeypatch):
             name,
             (lambda o, nm: lambda *a, **k: calls.append(nm) or o(*a, **k))(orig, name),
         )
-    return calls
+    yield calls
+    torch.set_float32_matmul_precision(precision)
 
 
 def test_fwd_kernels_build_without_spills():
