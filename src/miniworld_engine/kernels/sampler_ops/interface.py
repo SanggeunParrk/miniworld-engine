@@ -4,13 +4,13 @@ update) and the atom encoder's pooling, as a few kernels instead of ~100 small t
 
 Where a call runs (the card rule of ``docs/dispatch.md``, ``kernels/_pair_route.py``):
 
-* H100: the CUDA kernels;
+* H100 and B200: the CUDA kernels (built for the card);
 * any other card the engine holds a record for (every portable kernel of ``sampler_ops`` has an ``ok`` row in that card's manifest, at fp32 for the coordinate ops, bf16 for
   the pooling): the portable kernels (``triton/main.py``, same contract and algorithm, bitwise reproducible);
-* any other card: one ``UnrecordedCardWarning`` and the PyTorch reference (``reference.py``); B200 has no CUDA kernel of this op and runs the reference silently;
+* any other card: one ``UnrecordedCardWarning`` and the PyTorch reference (``reference.py``);
 * the internal A/B switch ``settings.force_portable_kernels`` runs the portable kernels on every card, H100 included; a CPU tensor is the reference.
 
-:func:`serves` / :func:`pool_atoms_serves` say whether a caller should hand the call to this module at all (the dtype and layout are the kernels'; the card is any one but B200).
+:func:`serves` / :func:`pool_atoms_serves` say whether a caller should hand the call to this module at all (the dtype and layout are the kernels'; any card the glue routes).
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ import torch
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._pair_route import CUDA, PORTABLE, restricted_reason, route
 
-_CUDA_CAPS = ((9, 0),)
+_CUDA_CAPS = ((9, 0), (10, 0))
 
 
 def _where(device: torch.device, dtype: str) -> str:
@@ -28,7 +28,7 @@ def _where(device: torch.device, dtype: str) -> str:
 
 
 def _card_ok(device: torch.device) -> bool:
-    """Is this a card the glue can be handed to: H100 (CUDA), the A/B switch, or a card that routes by its record (not B200, which runs the reference anyway)."""
+    """Is this a card the glue can be handed to: H100 / B200 (CUDA), the A/B switch, or a card that routes by its record."""
     return device.type == "cuda" and restricted_reason(device, _CUDA_CAPS) is None
 
 
