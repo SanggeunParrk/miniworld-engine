@@ -35,7 +35,7 @@ and the gradients come back in the parameters' dtype. Keys whose bias is masked 
 PyTorch module. The forward softmax offset is the row's running maximum, raised lazily (a chunk of 32 keys whose maximum exceeds it
 by more than 8 log2 units raises it and rescales l, the tile's P in TMEM and O): no overflow whatever the spread of the logits
 (2026-10-28; the earlier offset was fixed at the first 32 keys and overflowed to inf / NaN on trained weights, which H100 fixed in
-cad850743). A row with no finite logit keeps offset 0 in its LSE. d_pair 128 inference caches the packed weights while the
+cad850743). A row with no finite logit keeps offset 0 in its LSE. Cost (2026-10-29, CUDA graph, d_pair 128 inference, B = 1): L128 unchanged, L384 172 -> 181 us (+5 %), L768 904 -> 989 us (+9 %); a variant that computed the chunk maximum only when a chunk's exponential sum passed 2^20 was slower (L768 1075 us) and was not kept. d_pair 128 inference caches the packed weights while the
 parameters are unchanged (`kernels._capture.param_forms`).
 
 ## Starting / ending node · d_pair 128, 4 heads × 32
