@@ -115,7 +115,6 @@ def _map(t, box, dims, strides):
                                          swizzle="128B", l2="128B")
 
 
-_sms = num_sms
 
 
 def _run(x, weights, mask, outgoing, sel=None):
@@ -126,7 +125,7 @@ def _run(x, weights, mask, outgoing, sel=None):
     sel = sel or T.read_config("uni_wide/selection.json")[f"{D}-{key_length}"]
     cfg, normalize = tuple(sel["k1"]), sel["normalize"]
     launch = T._launch_module()
-    sms = _sms(x.device.index)
+    sms = num_sms(x.device.index)
 
     # LN_in (in K1, or one separate pass) + K1: packed gated projections -> ab = [left | right].
     w = x.new_empty((4 * H, D))

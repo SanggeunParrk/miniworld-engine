@@ -156,7 +156,6 @@ def _map(t, box, dims, strides):
                                          swizzle="128B", l2="128B")
 
 
-_sms = num_sms
 
 
 def _run(x, weights, mask):
@@ -213,7 +212,7 @@ def _run(x, weights, mask):
         mask, gi, bi, ab, xs if normalize else None, xn if normalize else None,
         N, N, tj, tiles, 1, N, 1, 1e-5, N * D, D, int(in_place), int(mask is not None),
         *wq_maps])
-    k1.launch((min(tiles, _sms(x.device) * mb), 1, 1), (128 * (a * b // 64 + 1), 1, 1), [p1], smem1)
+    k1.launch((min(tiles, num_sms(x.device) * mb), 1, 1), (128 * (a * b // 64 + 1), 1, 1), [p1], smem1)
 
     # Outgoing and incoming contractions into tri = [out | in].
     tri = x.new_empty((H, N, N))
@@ -240,7 +239,7 @@ def _run(x, weights, mask):
         _map(x, [64, 64], [D, M], [D * 2]),
         _map(y, [64, 64], [D, M], [D * 2]),
         uv, xs, M, M // 128])
-    k3.launch((min(M // 128, _sms(x.device)), 1, 1), (384, 1, 1), [p3], smem3)
+    k3.launch((min(M // 128, num_sms(x.device)), 1, 1), (384, 1, 1), [p3], smem3)
     return y
 
 

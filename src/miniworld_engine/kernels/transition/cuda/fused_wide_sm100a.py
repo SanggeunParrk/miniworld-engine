@@ -215,7 +215,7 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     ):
         return False  # bf16, or an fp32 master the entry casts to bf16 outside autograd
     if (d, n) in REPL:
-        ndx = _sm_count(index) - _ndw(d, n)
+        ndx = num_sms(index) - _ndw(d, n)
         if ndx < 2 or ndx % 2:
             return False
     rows = x.numel() // d
@@ -252,7 +252,6 @@ def _is_fake(*tensors) -> bool:
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
-_sm_count = num_sms
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
@@ -270,7 +269,7 @@ class _Launch:
         self.d, self.m, self.h = x.shape[1], x.shape[0], h
         self.n = h // self.d
         self.tiles = self.m // ROWS
-        self.nsm = _sm_count(x.device.index)
+        self.nsm = num_sms(x.device.index)
         # persistent 2-CTA clusters, a pair walks the leader's tile count; rounded UP to the pair (an odd tile count below the SM
         # count gets a pair with one dummy CTA rather than a second round for one pair)
         self.grid = max(2, min(self.nsm - self.nsm % 2, self.tiles + self.tiles % 2))

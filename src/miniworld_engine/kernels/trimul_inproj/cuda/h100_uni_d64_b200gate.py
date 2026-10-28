@@ -9,6 +9,7 @@ The D64 training path the integration selects (``integrations.trimul_h100``).
 from __future__ import annotations
 
 import torch
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 
@@ -125,7 +126,7 @@ def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     params = L.Struct.fixed("h100_uni64_affinereg_v2:k3", [
         base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
         None, None, 0 if bsz == 1 else rows])
-    k.launch((min(tiles, D64._sms()), 1, 1), (384, 1, 1), [params], smem)
+    k.launch((min(tiles, num_sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
 def _prepare(leaves, mask):
@@ -199,7 +200,7 @@ def _run_backward(leaves, mask, ds, saved, dy, outgoing, master=False):
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(master, T.d64_uni_affine_enabled(x, outgoing), gatepipe=not (outgoing and n == 256))
-    sms = D64._sms()
+    sms = num_sms()
     ntiles = m // 64
     g1 = min(sms, (ntiles + 1) // 2)
     g2 = min(sms, ntiles)

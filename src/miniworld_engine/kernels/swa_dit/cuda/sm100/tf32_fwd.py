@@ -37,6 +37,7 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels._tf32 import tf32_grid
 from miniworld_engine.kernels.swa_dit.cuda import sm100 as _sm
@@ -209,8 +210,8 @@ class ModFwdTf32:
             _f32map(out, [6 * C, R], 6 * C * 4, [32, 128]),
         )
         ntile = (R + 127) // 128
-        ng = mod_groups(R, _sm.nsm())
-        grid = (min(_sm.nsm(), ntile * ng), 1, 1)
+        ng = mod_groups(R, num_sms())
+        grid = (min(num_sms(), ntile * ng), 1, 1)
 
         def run():
             self.k(grid, (512, 1, 1), *maps, int(ntile), int(ng))
@@ -249,9 +250,9 @@ class QkvgFwdTf32:
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
         NG = 1  # projection groups: spread small problems over the SMs
-        while NG < 4 and ntile * NG * 2 <= _sm.nsm():
+        while NG < 4 and ntile * NG * 2 <= num_sms():
             NG *= 2
-        grid = (min(_sm.nsm(), ntile * NG), 1, 1)
+        grid = (min(num_sms(), ntile * NG), 1, 1)
 
         def run():
             self.k(
@@ -309,7 +310,7 @@ class AttnFwdTf32:
             _f32map(Vh.view(rows, D), [D, rows], D * 4, [D, 256], swizzle="128a32"),
         )  # MN-major PV operand
         items = N * (S // 128) * H
-        grid = (min(_sm.nsm(), items), 1, 1)
+        grid = (min(num_sms(), items), 1, 1)
 
         def run():
             self.k(
@@ -357,7 +358,7 @@ class FfnFwdTf32:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(_sm.nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
 
         def run():
             self.k(

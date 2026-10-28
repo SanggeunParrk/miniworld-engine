@@ -561,7 +561,6 @@ def _attn_served(C: int, H: int, half_window: int) -> bool:
     return C == D_ATOM and H == N_HEAD and half_window == HALF_WINDOW
 
 
-_sm_count = num_sms
 
 
 def _pack_ffn64(wu: torch.Tensor) -> torch.Tensor:
@@ -1167,7 +1166,7 @@ def swa_dit_block_bwd(
         if fused_dw:
             dwu32 = torch.zeros(2 * NHID, C, device=dev, dtype=torch.float32)
             dwd32 = torch.zeros(C, NHID, device=dev, dtype=torch.float32)
-            sms = _sm_count(
+            sms = num_sms(
                 dev.index if dev.index is not None else torch.cuda.current_device()
             )
             ns = (

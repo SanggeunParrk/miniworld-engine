@@ -50,7 +50,6 @@ def _divides(**axes):
     return prune
 
 
-_nsm = num_sms
 
 
 # ---------------------------------------------------------------------------------------------------- forward kernels
@@ -428,7 +427,7 @@ def _bwd(dres: torch.Tensor, msa: torch.Tensor, pair: torch.Tensor, mask: torch.
     dr = dres.reshape(S * L, D).contiguous()
     lnm = (lnm_w.float().contiguous(), lnm_b.float().contiguous())
     wg16, wv16 = wg.to(bf).contiguous(), wv.to(bf).contiguous()
-    nsm = _nsm(msa.device)
+    nsm = num_sms(msa.device)
     do = msa.new_empty((NH, L, S * C), dtype=bf)
     dgp = msa.new_empty((S * L, HC), dtype=bf)
     dwo = msa.new_zeros((D, HC), dtype=f32)

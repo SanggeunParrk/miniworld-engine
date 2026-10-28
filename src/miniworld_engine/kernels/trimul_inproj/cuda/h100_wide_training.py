@@ -131,12 +131,7 @@ def _resident_grid(source, entry, include, defines, threads, smem):
     occupancy = _occupancy(k, threads, smem)
     if occupancy < 1:
         raise RuntimeError(f"{entry}: no resident CTA with {smem} B shared memory")
-    return _sms() * occupancy
-
-
-@T.device_cache
-def _sms():
-    return num_sms(torch.cuda.current_device())
+    return num_sms() * occupancy
 
 
 def _cuobjdump():
@@ -548,7 +543,7 @@ def _front(x, w1, ab, mask, gi, bi, xn, stats, pre):
         fields, tiles, threads = _front_params(
             x, x if normalize else xn, w1, ab, mask, gi, bi, None, xn if normalize else None,
             cfg, pre)
-    _launch(k, min(tiles, _sms() * cfg[4]), threads, smem, _params(f"front{D}", fields))
+    _launch(k, min(tiles, num_sms() * cfg[4]), threads, smem, _params(f"front{D}", fields))
 
 
 def _triangle(cell, ab, tri, workspace):
@@ -654,7 +649,7 @@ def _gate(cell, proj, gate, dy, ds, dp, prefix, affine):
         k = _kernel("gate_affine.cu", "mw_early_both_affine_gate", "forward", defines, smem)
         fields += affine
         key = "gate_affine"
-    _launch(k, _sms() * 4, 128, smem, _params(key, fields))
+    _launch(k, num_sms() * 4, 128, smem, _params(key, fields))
 
 
 def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
@@ -679,7 +674,7 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
         smem = {256: 67968, 384: 101760, 512: 70528}[D]
         k = _kernel(source, "mw_independent_output_ln", "upstream", defines, smem)
         # Qualified grids (SMs x the replaced cooperative kernel's residency, D256 doubled).
-        grid = _sms() * {256: 6, 384: 2, 512: 3}[D]
+        grid = num_sms() * {256: 6, 384: 2, 512: 3}[D]
         if native:
             pg, pb = [torch.empty((grid,H),device=tri.device,dtype=torch.float32) for _ in range(2)]
             tail[-3:-1] = [pg,pb]
@@ -807,7 +802,7 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
     k = _kernel(source, entry, "upstream", defines, smem)
     if native:
         grid = (_resident_grid(source, entry, "upstream", defines, 128, smem)
-                if cooperative else _sms()*{256: 6, 384: 5, 512: 4}[D])
+                if cooperative else num_sms()*{256: 6, 384: 5, 512: 4}[D])
         pg, pb = [torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
         fields[5:7] = [pg,pb]
         _launch(k,grid,128,smem,_params(source,fields))
@@ -821,7 +816,7 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
         _launch_cooperative(k, grid, 128, smem, _params(source, fields))
     else:
         # Qualified grid of the cooperative reduction this independent kernel replaced.
-        _launch(k, _sms() * {256: 6, 384: 5, 512: 4}[D], 128, smem, _params(source, fields))
+        _launch(k, num_sms() * {256: 6, 384: 5, 512: 4}[D], 128, smem, _params(source, fields))
 
 
 def _split_input_dw(cell, dxin, xn, partial, workspace, joint):
@@ -871,10 +866,10 @@ def _delta_projection(cell, saved, wp, proj, go, bo, workspace, donor):
     params = _params("compact", [patches, count, capacity, seen, seen[M:], rows, rows_capacity,
                                  norm, compact, projected, proj])
     for entry in ("mw_wide_compact_changed_rows", "mw_wide_gather_changed_norm"):
-        _launch(_kernel("compact_projection_d512.cu", entry, fw, defines), _sms() * 4, 256, 0, params)
+        _launch(_kernel("compact_projection_d512.cu", entry, fw, defines), num_sms() * 4, 256, 0, params)
     _lt(cell, "compact", compact, wp.t(), projected, workspace, donor=donor)
     _launch(_kernel("compact_projection_d512.cu", "mw_wide_scatter_changed_proj", fw, defines),
-            _sms() * 4, 256, 0, params)
+            num_sms() * 4, 256, 0, params)
     smem = 49152 + 128
     k = _kernel("compact_projection_fallback_d512.cu", "mw_wide_compact_projection_fallback", fw,
                 defines, smem)
@@ -894,7 +889,7 @@ def _weight_reduce_d512(cell, partial, dwp):
     floats[7] = partial
     k = _kernel("weight_reduce_d512_l768.cu", "mw_wide512_dwp_reduce", "upstream",
                 _defines(MASTER_FP32=int(dwp.dtype == torch.float32), WIDTH=D, WEIGHT_SPLITS=32))
-    _launch(k, _sms() * 2, 256, 0, _params("weight_reduce", [
+    _launch(k, num_sms() * 2, 256, 0, _params("weight_reduce", [
         *([empty] * 16), *tensors, *floats, n * n, n]))
 
 

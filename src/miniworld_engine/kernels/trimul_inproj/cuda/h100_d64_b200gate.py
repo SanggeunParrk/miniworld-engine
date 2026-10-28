@@ -86,11 +86,6 @@ def _bwd_wg(prof=False, master=False, gatepipe=True):
 
 
 @T.device_cache
-def _sms():
-    return num_sms(torch.cuda.current_device())
-
-
-@T.device_cache
 def _k1():
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_infer_kernel as K
     from miniworld_engine.kernels.trimul_inproj.cuda.h100_inference import _kernels
@@ -179,7 +174,7 @@ def _output(x, tri, wg, wp, gi, bi, go, bo, ds, y, stats):
     params = L.Struct.fixed("h100_d64_gatepipe_selected_v3:k3", [
         base, ds, ymap, ymap, None, None, stats[0], stats[1], stats[2], stats[3], ymap, ymap,
         None, None, 0 if bsz == 1 else rows])
-    k.launch((min(tiles, _sms()), 1, 1), (384, 1, 1), [params], smem)
+    k.launch((min(tiles, num_sms()), 1, 1), (384, 1, 1), [params], smem)
 
 
 def _prepare(leaves, mask):
@@ -264,7 +259,7 @@ def _run_backward(leaves, mask, ds, saved, dy, master=False, direction=0):
     h = WIDTH
     dy = dy.contiguous()
     b1, b2, fin = _bwd_wg(PROF is not None, master, gatepipe=n >= 256)
-    sms = _sms()
+    sms = num_sms()
     ntiles = m // 64
     g1 = min(sms, (ntiles + 1) // 2)
     g2 = min(sms, ntiles)

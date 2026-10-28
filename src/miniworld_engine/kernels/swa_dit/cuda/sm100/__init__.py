@@ -97,11 +97,6 @@ def _map(t, dims, strides, box, swizzle=128, dtype="bf16"):
 
 
 # --------------------------------------------------------------------------------------------------- kernels (host side)
-def nsm():
-    """Streaming multiprocessors of the current device."""
-    return num_sms()
-
-
 def tiling(A):
     """(SP augments, AT atoms) of a 128-row tile: SP = min(A, 16), AT = 128 // SP (the modulation tile holds AT <= 25 rows)."""
     SP = min(A, 16)
@@ -154,7 +149,7 @@ class QkvgFwd:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
 
         def run():
             self.k(
@@ -285,7 +280,7 @@ class QkvgBwd:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
         ns = self.smem_plan(AT)
 
         def run():
@@ -336,7 +331,7 @@ class AttnDq:
             _map(dQh.view(rows, D), [D, rows], D * 2, [D, 128], swizzle=64),
         )
         items = N * (S // 128) * 2
-        grid = (min(nsm(), items), 1, 1)
+        grid = (min(num_sms(), items), 1, 1)
 
         def run():
             self.k(
@@ -394,7 +389,7 @@ class AttnDkv:
             _map(dVh.view(rows, D), [D, rows], D * 2, [D, 128], swizzle=64),
         )
         items = N * (S // 128) * 2
-        grid = (min(nsm(), items), 1, 1)
+        grid = (min(num_sms(), items), 1, 1)
 
         def run():
             self.k(grid, (384, 1, 1), *maps, seqused, int(S), int(N), float(D**-0.5))
@@ -416,7 +411,7 @@ class AttnDkvq(AttnDkv):
         run0, (dKh, dVh) = super().bind(Qh, Kh, Vh, dO, lse, dv, seqused, dKh, dVh)
         dQh = torch.empty_like(Qh) if dQh is None else dQh
         maps = run0.keep[:8]
-        grid = (min(nsm(), N * (S // 128) * 2), 1, 1)
+        grid = (min(num_sms(), N * (S // 128) * 2), 1, 1)
         if grid[0] not in self.bufs:  # kept: the kernel resets the counters it uses
             self.bufs[grid[0]] = (
                 torch.empty(
@@ -488,7 +483,7 @@ class OprojBwd:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
         auxst = (AT * 512 + 1023) // 1024 * 1024
         ns = min(12, (232448 - 2 * auxst - 512) // 16384)
         assert ns >= 8, (AT, ns)
@@ -558,7 +553,7 @@ class FfnBwdGate:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
         auxst = (AT * 512 + 1023) // 1024 * 1024
         ns = min(8, (232448 - 2 * 49152 - 2 * auxst - 512) // 8192)
         assert ns >= 4, (AT, ns)
@@ -622,7 +617,7 @@ class FfnBwdDy:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
         auxst = (AT * 512 + 1023) // 1024 * 1024
         ns = min(28, (232448 - 2 * auxst - 2048 - 512 - 1024) // 8192)
         assert ns >= 14, (AT, ns)
@@ -708,7 +703,7 @@ class FfnFwd2:
         ntile = nab * nag * B
         cl = self.cl
         grid = (
-            max(cl, min(self.max_ctas or nsm(), ntile) // cl * cl),
+            max(cl, min(self.max_ctas or num_sms(), ntile) // cl * cl),
             1,
             1,
         )  # a multiple of the cluster size (idle CTAs still multicast)
@@ -764,7 +759,7 @@ class AttnFwd2:
             _map(O, [C, N * S], C * 2, [D, 128], swizzle=64),
         )
         items = N * (S // 128) * (H // self.heads_per_item)
-        grid = (min(nsm(), items), 1, 1)
+        grid = (min(num_sms(), items), 1, 1)
 
         def run():
             self.k(
@@ -854,7 +849,7 @@ class QkvgFwd2:
         )
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(self.max_ctas or nsm(), ntile), 1, 1)
+        grid = (min(self.max_ctas or num_sms(), ntile), 1, 1)
 
         def run():
             self.k(
@@ -1151,7 +1146,7 @@ def block_fwd(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, save, half_win
             attn_global_fwd(Qh, Kh, Vh, seqused, O, lse)
         else:
             O = torch.empty(N * S, C, device=q.device, dtype=torch.bfloat16)
-            at = K.attn1h if Qh.shape[0] * (S // 128) * 4 <= nsm() else K.attn
+            at = K.attn1h if Qh.shape[0] * (S // 128) * 4 <= num_sms() else K.attn
             run, _, _ = at.bind(Qh, Kh, Vh, seqused, O=O, LSE=lse)
             run()
         run, (out, q1, att, y, ffn) = (K.ffn if A >= 4 else K.ffna).bind(
@@ -1240,7 +1235,7 @@ def block_bwd(
         else:
             dQh = torch.empty(N, H, S, D, device=dev, dtype=torch.bfloat16)
             dKh, dVh = torch.empty_like(dQh), torch.empty_like(dQh)
-            if N * (S // 128) * 2 >= 2 * nsm():
+            if N * (S // 128) * 2 >= 2 * num_sms():
                 run, _ = K.dkvq.bind(
                     qh, kh, vh, dO, lse, Dv, seqused, dKh=dKh, dVh=dVh, dQh=dQh
                 )

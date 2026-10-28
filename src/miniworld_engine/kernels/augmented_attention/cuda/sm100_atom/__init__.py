@@ -151,7 +151,6 @@ def load_all(device_index: int) -> None:
         atom_kernel(name, device_index)
 
 
-nsm = num_sms   # SM count of a device index
 
 
 def _dev(t: torch.Tensor) -> int:
@@ -256,12 +255,12 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.0):
             _map(c, [DM, M], DM * 2, [64, 64]),
             _map(W, [DM, 6 * DM], DM * 2, [64, 128]),
         )
-        wide = M > 64 * nsm(d)
+        wide = M > 64 * num_sms(d)
         waves = float(hopper_waves) if wide else 1.0
         if waves not in (0.5, 1.0, 2.0, 4.0):
             raise ValueError("Hopper conditioning waves must be 0.5, 1, 2 or 4")
         atom_kernel("cond1" if wide else "cond", d)(
-            (min(int(waves * nsm(d)), (M + 63) // 64), 2, 1),
+            (min(int(waves * num_sms(d)), (M + 63) // 64), 2, 1),
             (160, 1, 1),
             *maps,
             g1,
@@ -280,7 +279,7 @@ def cond_fwd(c, W, b, g1, g2, eps=1e-5, *, hopper_waves=2.0):
     ntile = M // 32
     d = _dev(c)
     atom_kernel("cond", d)(
-        (min(nsm(d) // 2, ntile), 2, 1),
+        (min(num_sms(d) // 2, ntile), 2, 1),
         (384, 1, 1),
         *maps,
         g1,
@@ -308,7 +307,7 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
             _map(W, [DM, 4 * DM], DM * 2, [64, 128]),
         )
         atom_kernel("pre_cross" if cross else "pre", d)(
-            (min((2 if cross else 1) * nsm(d), (M + 63) // 64), 1, 1),
+            (min((2 if cross else 1) * num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             *maps,
             bq,
@@ -338,7 +337,7 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     ntile = M // 32
     d = _dev(a)
     atom_kernel("pre", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         bq,
@@ -374,7 +373,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     ntile = M // 32
     d = _dev(a)
     atom_kernel("prex", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         bq,
@@ -402,11 +401,11 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
             _map(Wu, [DM, 4 * DM], DM * 2, [64, 128]),
             _map(Wd, [2 * DM, DM], DM * 4, [64, 128]),
         )
-        wide = M > 64 * nsm(d)
+        wide = M > 64 * num_sms(d)
         packed = wide and packed_hopper
         name = "post2_packed" if packed else "post2" if wide else "post"
         atom_kernel(name, d)(
-            (min((2 if wide else 1) * nsm(d), (M + 63) // 64), 1, 1),
+            (min((2 if wide else 1) * num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             a,
             o,
@@ -434,7 +433,7 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
     ntile = M // 16
     d = _dev(a)
     atom_kernel("post", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         int(ntile),
@@ -458,7 +457,7 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
             _map(WsT, [DM, 2 * DM], DM * 2, [64, 128]),
         )
         atom_kernel("trg", d)(
-            (min(nsm(d), (M + 63) // 64), 1, 1),
+            (min(num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             dy,
             t,
@@ -487,7 +486,7 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     ntile = M // 16
     d = _dev(dy)
     atom_kernel("trg", d)(
-        (min(nsm(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
+        (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
     )
     return DT, HH, DAB
 
@@ -507,7 +506,7 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
             _map(WoT, [DM, DM], DM * 2, [64, 128]),
         )
         atom_kernel("postb", d)(
-            (min(nsm(d), (M + 63) // 64), 1, 1),
+            (min(num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             DAB,
             dy,
@@ -549,7 +548,7 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     ntile = M // 16
     d = _dev(dy)
     atom_kernel("postb", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         Dd,
@@ -568,7 +567,7 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     if _hopper(_dev(a)):
         d = _dev(a)
         atom_kernel("preb", d)(
-            (min(nsm(d), (M + 63) // 64), 1, 1),
+            (min(num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             dP,
             a,
@@ -596,7 +595,7 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     ntile = M // 16
     d = _dev(a)
     atom_kernel("preb", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         DBIAS,
@@ -631,7 +630,7 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5)
     ntile = M // 16
     d = _dev(a)
     atom_kernel("prebx", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         DBIAS,
@@ -655,7 +654,7 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     if _hopper(_dev(c)):
         d = _dev(c)
         atom_kernel("condb", d)(
-            (min(nsm(d), (M + 63) // 64), 1, 1),
+            (min(num_sms(d), (M + 63) // 64), 1, 1),
             (160, 1, 1),
             dmod,
             c,
@@ -681,7 +680,7 @@ def cond_bwd(dmod, c, WmodT, g1, g2, DG, eps=1e-5):
     ntile = M // 16
     d = _dev(c)
     atom_kernel("condb", d)(
-        (min(nsm(d), ntile), 1, 1),
+        (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
         g1,
@@ -814,10 +813,10 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
     p = torch.empty(M, 4 * DM, device=s.device, dtype=F32)
     d = _dev(s)
     tiles = M // 128
-    nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
+    nfull = _nfull(tiles, num_sms(d)) if nfull is None else int(nfull)
     units = nfull + 2 * (tiles - nfull)
     fused_kernel32("pre", d)(
-        (min(nsm(d), units), 1, 1),
+        (min(num_sms(d), units), 1, 1),
         (384, 1, 1),
         _tm32(wp, (32, 256)),
         _tm32(p, (32, 32)),
@@ -852,10 +851,10 @@ def post32(o, g, s, so, s2, b2, st, wo, wu, ws, eps=1e-5, nfull=None):
     out = torch.empty(M, DM, device=s.device, dtype=F32)
     d = _dev(s)
     tiles = M // 128
-    nfull = _nfull(tiles, nsm(d)) if nfull is None else int(nfull)
+    nfull = _nfull(tiles, num_sms(d)) if nfull is None else int(nfull)
     units = nfull + 2 * (tiles - nfull)
     fused_kernel32("post", d)(
-        (min(nsm(d), units), 1, 1),
+        (min(num_sms(d), units), 1, 1),
         (384, 1, 1),
         _tm32(wo, (32, 128)),
         _tm32(wu, (32, 256)),
@@ -951,7 +950,7 @@ def gemm32(
     n = w.shape[0] - b_row0 if n is None else n
     d = _dev(a)
     # 256-column tiles halve the A traffic, but at small M they leave most SMs idle: 128 when the 256-wide tiling has fewer than one wave
-    wide = mode == SWIGLU or (n % 256 == 0 and (M // 128) * (n // 256) >= nsm(d))
+    wide = mode == SWIGLU or (n % 256 == 0 and (M // 128) * (n // 256) >= num_sms(d))
     nt = 256 if wide else 128
     assert M % 128 == 0 and k % 32 == 0 and n % nt == 0, (M, k, n, nt)
     assert mode != SWIGLU or n == 512
@@ -975,7 +974,7 @@ def gemm32(
     ):
         # the gated residual with res and gate by TMA (gemm_rg_tf32.cu): 144 -> ~60 us at 196608 rows
         atom_kernel32("gemm_rg", d)(
-            (min(nsm(d), tiles), 1, 1),
+            (min(num_sms(d), tiles), 1, 1),
             (512, 1, 1),
             ma,
             mb,
@@ -989,7 +988,7 @@ def gemm32(
         )
         return out
     atom_kernel32("gemm", d)(
-        (min(nsm(d), tiles), 1, 1),
+        (min(num_sms(d), tiles), 1, 1),
         (512, 1, 1),
         ma,
         mb,
@@ -1186,7 +1185,7 @@ def colsum32(x):
         x.stride(),
     )
     d = _dev(x)
-    g = max(1, min(2 * nsm(d), (M + 7) // 8))
+    g = max(1, min(2 * num_sms(d), (M + 7) // 8))
     part = torch.empty(g, cols, device=x.device, dtype=F32)
     atom_kernel32("colsum", d)(
         (g, cols // DM, 1), (256, 1, 1), x, int(x.stride(0)), part, int(cols), int(M)
@@ -1200,7 +1199,7 @@ def ln_bwd32(c, dc, dcn1, g1, dcn2, g2, dcn3=None, g3=None, eps=1e-5):
     d = _dev(c)
     dg = torch.zeros(3 * DM, device=c.device, dtype=F32)
     atom_kernel32("ln_b", d)(
-        (max(1, min(4 * nsm(d), (M + 7) // 8)), 1, 1),
+        (max(1, min(4 * num_sms(d), (M + 7) // 8)), 1, 1),
         (256, 1, 1),
         c,
         dc,
@@ -1273,7 +1272,7 @@ class AtomDw:
         dt = F32 if f32 else torch.bfloat16
         esz = 4 if f32 else 2
         box, sw, dname = ([32, 32], "128a32", "f32") if f32 else ([64, 32], 128, "bf16")
-        nsm_ = nsm(self.dev)
+        nsm_ = num_sms(self.dev)
         tab, out, raw = _DwTab(), _DwOut(), bytearray(2 * _DW_MAXP * 128)
         weights = [A.shape[1] + B.shape[1] for A, B, _ in problems]
         total = sum(weights)

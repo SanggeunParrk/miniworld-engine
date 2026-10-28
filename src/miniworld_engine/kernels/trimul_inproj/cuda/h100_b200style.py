@@ -12,6 +12,7 @@ from functools import lru_cache
 import torch
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._compile import opaque
 from . import _h100_runtime as T
 from . import h100_uni_wide_inference as I
@@ -203,7 +204,7 @@ def _front_rs(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         fields += [dpl, dcat, dcat.shape[1]]
     fields.append(0 if rows == n else rows)   # K1Params.rows (batched samples; 0 = one sample)
     kernel.launch(
-        (min(tiles, mb * I._sms(x.device.index)), 1, 1),
+        (min(tiles, mb * num_sms(x.device.index)), 1, 1),
         (128 * (a * b // 64 + 1), 1, 1),
         [T._launch_module().Struct(fields)],
         smem,
@@ -354,7 +355,7 @@ def _run_forward(leaves, mask, ds, direction, save, out=None):
             n,
         ]
         kernel.launch(
-            (min(m // 128, I._sms(x.device.index)), 1, 1),
+            (min(m // 128, num_sms(x.device.index)), 1, 1),
             (384, 1, 1),
             [T._launch_module().Struct(fields)],
             smem,

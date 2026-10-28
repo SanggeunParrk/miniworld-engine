@@ -1,5 +1,6 @@
 """Shared-resident front retaining half of the input-LN values in registers."""
 
+from miniworld_engine.kernels._device import num_sms
 from . import _h100_runtime as T
 from . import h100_uni_wide_inference as I
 
@@ -97,7 +98,7 @@ def front(x, w1, mask, gi, bi, ab, xs, dpl=None, dcat=None, xn=None):
         int(xn is not None),
     ]
     kernel.launch(
-        (min(m // tokens, I._sms(x.device.index)), 1, 1),
+        (min(m // tokens, num_sms(x.device.index)), 1, 1),
         (128 * (tokens // 64 + 1), 1, 1),
         [T._launch_module().Struct(fields)],
         smem,

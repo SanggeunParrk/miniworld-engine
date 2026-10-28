@@ -55,7 +55,6 @@ def _divides(**axes):
     return prune
 
 
-_nsm = num_sms
 
 
 # ---------------------------------------------------------------------------------------------------- kernels
@@ -477,7 +476,7 @@ def _ln_gemm_bwd(x, m8, lnw, lnb, wl, wr, dA, dB, eps, S, L, CM, CH, K, has_mask
     dwl, dwr = red[:CH * CM].view(CH, CM), red[CH * CM:2 * CH * CM].view(CH, CM)
     dg, dbeta = red[2 * CH * CM:2 * CH * CM + CM], red[2 * CH * CM + CM:2 * CH * CM + 2 * CM]
     dbl, dbr = red[2 * CH * CM + 2 * CM:2 * CH * CM + 2 * CM + CH], red[2 * CH * CM + 2 * CM + CH:]
-    nsm = _nsm(x.device)
+    nsm = num_sms(x.device)
     _opm_bwd_layernorm_gemm_kernel[lambda meta: (min(triton.cdiv(T_, meta["BT"]), meta["PPS"] * nsm),)](
         x, m8, lnw.float().contiguous(), lnb.float().contiguous(), wl.to(bf).contiguous(), wr.to(bf).contiguous(),
         dA, dB, dm, dwl, dwr, dg, dbeta, dbl, dbr, T_, eps,
@@ -554,7 +553,7 @@ def _bwd_grouped(dz: torch.Tensor, msa: torch.Tensor, mask: torch.Tensor, a: tor
     dzc = dz.reshape(L * L, CZ).contiguous()
     dO = dz.new_empty((groups, L * K, L * K), dtype=bf)
     dgam, dbet = dz.new_zeros((P,), dtype=f32), dz.new_zeros((P,), dtype=f32)
-    nsm = _nsm(msa.device)
+    nsm = num_sms(msa.device)
     dy = torch.mm(dzc, wo.to(bf))                                                           # [L L, P], cuBLAS
     _opm_grouped_bwd_epilogue_dx_kernel[lambda meta: (max(1, min(L * triton.cdiv(L, meta["BJ"]), meta["PPS"] * nsm)),)](
         dy, o, gam.float().contiguous(), dO, dgam, dbet, L, eps_prod,

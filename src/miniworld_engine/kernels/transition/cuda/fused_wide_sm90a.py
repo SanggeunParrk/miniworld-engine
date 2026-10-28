@@ -97,7 +97,6 @@ def split_fwd_enabled(d: int, rows: int = 0) -> bool:
     return d == 512 and save_ab_enabled(d, rows) and _d512_saved_rows(rows)
 
 
-_sm_count = num_sms
 
 
 @functools.lru_cache(maxsize=8)
@@ -184,19 +183,19 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
     if (
         x.shape[-1] == 768
     ):  # n = 2 only: saved a / b and the split forward are the whole path
-        return _ext(768, _sm_count(x.device), save_ab=True, split_fwd=True, n=n)
+        return _ext(768, num_sms(x.device), save_ab=True, split_fwd=True, n=n)
     d64_repl = settings.current().transition_d64_repl
     if (
         n != 4
     ):  # the n = 4 experiments below are tuned for hidden = 4 D; other n runs the plain build
         # D64 backward: weight CTAs = hidden slices (n) x replicas; measured best 26 replicas at n = 2 (16 at n = 4)
         repl = (d64_repl or 26) if x.shape[-1] == 64 else 16
-        return _ext(x.shape[-1], _sm_count(x.device), repl, n=n)
+        return _ext(x.shape[-1], num_sms(x.device), repl, n=n)
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
     saved_tma = x.shape[-1] == 512 and _d512_saved_rows(x.shape[0]) and save_ab
     return _ext(
         x.shape[-1],
-        _sm_count(x.device),
+        num_sms(x.device),
         d64_repl or 16,
         save_ab,
         save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
@@ -344,7 +343,7 @@ def _fwd_launch(
             return out, xn, rstd, c1, h
         return out, x.new_empty((1, 768)), rstd.new_empty((1,)), c1.new_empty((1,)), h
     ext = _ext_for(x, n=n)
-    variant = _d64_variant(x.shape[0], _sm_count(x.device)) if x.shape[-1] == 64 and not save else 0
+    variant = _d64_variant(x.shape[0], num_sms(x.device)) if x.shape[-1] == 64 and not save else 0
     if variant:
         # 64-row tiles: one consumer warpgroup per CTA (2 or 3 CTAs per SM), more tiles in flight than the 128-row build
         out = ext.fwd_small(x, gamma, beta, wa, wb, wst if wst is not None else transposed_contiguous(ws), float(eps), variant)

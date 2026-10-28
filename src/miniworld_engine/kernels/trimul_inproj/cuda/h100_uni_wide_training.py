@@ -18,6 +18,7 @@ from __future__ import annotations
 import torch
 from torch.autograd.function import once_differentiable
 
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -60,7 +61,7 @@ def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
     ]
     if preln:
         _ln_in_512(x, gi, bi, xn)
-    grid = min(tiles, W._sms() * minb)
+    grid = min(tiles, num_sms() * minb)
     W._launch(k, grid, threads, smem,
               W._params(f"uni_front{D}", fields))
 
@@ -68,7 +69,7 @@ def _front(x, w1, ab, mask, gi, bi, xn, pre, hidden=None):
 def _ln_in_512(x, gi, bi, xn):
     M = x.shape[1] * x.shape[2]
     k = W._kernel("ln_in_d512.cu", "mw_ln_in_d512", "upstream", ())
-    W._launch(k, W._sms() * 4, 256, 0, W._params("uni_ln_in512", [x, xn, gi, bi, M, 1e-5]))
+    W._launch(k, num_sms() * 4, 256, 0, W._params("uni_ln_in512", [x, xn, gi, bi, M, 1e-5]))
 
 
 def _triangle(ab, tri, outgoing):
@@ -173,7 +174,7 @@ def _gate(proj, gate, dy, ds, dp, prefix):
     k = W._kernel("gate.cu", "mw_prefix_gate_epi", "forward", defines, smem)
     fields = [W._rows(proj, D, M), W._rows(gate, D, M), W._rows(dy, D, M), W._rows(ds, D, n),
               W._rows(dp, D, M), W._map(prefix, [64, 64], [M, D], [M * 2]), M, n]
-    W._launch(k, W._sms() * 4, 128, smem, W._params(f"uni_gate{D}", fields))
+    W._launch(k, num_sms() * 4, 128, smem, W._params(f"uni_gate{D}", fields))
 
 
 #: Output-LN backward per H: (source family, rows per tile, min blocks per SM). The "d256" source
@@ -248,7 +249,7 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
     source = f"input_ln_d{D}_l384.cu"
     k = W._kernel(source, "mw_independent_input_ln", "upstream", defines, smem)
     maps = [W._map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
-    grid = W._sms() * {256: 6, 384: 5, 512: 4}[D]
+    grid = num_sms() * {256: 6, 384: 5, 512: 4}[D]
     if native:
         pg,pb=[torch.empty((grid,D),device=x.device,dtype=torch.float32) for _ in range(2)]
     else:

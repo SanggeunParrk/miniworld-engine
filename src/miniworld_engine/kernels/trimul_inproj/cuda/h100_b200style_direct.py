@@ -1,5 +1,6 @@
 """K1 consumes row-major projection weights and the original token mask."""
 
+from miniworld_engine.kernels._device import num_sms
 from . import h100_b200style as K
 from . import h100_uni_wide_inference as I
 from . import _h100_runtime as T
@@ -76,7 +77,7 @@ def front(x, weights, token_mask, gi, bi, ab, xs):
     param = T._launch_module().Struct(fields)
     assert len(param.pack()) == 1024
     kernel.launch(
-        (min(tiles, mb * I._sms(x.device.index)), 1, 1),
+        (min(tiles, mb * num_sms(x.device.index)), 1, 1),
         (128 * (a * b // 64 + 1), 1, 1),
         [param],
         smem,

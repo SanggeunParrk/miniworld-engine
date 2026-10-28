@@ -136,7 +136,7 @@ def _chunk(A: int, tiles: int = 0) -> int:
 def _mma_bias(bias, km, n, d):
     out = torch.empty_like(bias)
     _load("h_prep", d)(
-        (min(8 * nsm(d), (bias.numel() + 255) // 256), 1, 1),
+        (min(8 * num_sms(d), (bias.numel() + 255) // 256), 1, 1),
         (256, 1, 1),
         bias,
         km,
@@ -195,7 +195,6 @@ def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
 
 
-nsm = num_sms   # SM count of a device index
 
 
 def nwindows(n: int) -> int:
@@ -284,7 +283,7 @@ def attn_fwd(q, k, v, bias, kmask=None):
         )
         return o, lse
     nq = (N + 127) // 128
-    sp = max(1, min(A, nsm(d) // (nq * NH)))
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
     _load("fwd", d)(
         (nq * NH * sp, 1, 1),
@@ -369,7 +368,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
                 int(spc),
             )
             _load("db_samples", d)(
-                (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+                (min(4 * num_sms(d), (dbias.numel() + 255) // 256), 1, 1),
                 (256, 1, 1),
                 partial,
                 dbias,
@@ -410,7 +409,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
             int(A),
         )
         _load("db_samples", d)(
-            (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+            (min(4 * num_sms(d), (dbias.numel() + 255) // 256), 1, 1),
             (256, 1, 1),
             partial,
             dbias,
@@ -422,7 +421,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
     nq = (N + 127) // 128
     sp = max(
-        1, min(A, nsm(d) // (nq * NH))
+        1, min(A, num_sms(d) // (nq * NH))
     )  # split the samples when there are few chunks
     _load("dq", d)(
         (nq * NH * sp, 1, 1),
@@ -443,7 +442,7 @@ def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     )
     nk = (N + 112 + 127) // 128
     sp = (
-        2 if 2 * nk * NH <= nsm(d) and A > 1 else 1
+        2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
     )  # two sample halves add into dbias exactly (0 + a + b)
     _load("dkv", d)(
         (nk * NH * sp, 1, 1),
@@ -496,7 +495,7 @@ def pair_bias_fwd(z, gamma, wb, eps=1e-5):
     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
     d = _dev(z)
     _load("pb_f", d)(
-        (min(4 * nsm(d), (rows + 255) // 256), 1, 1),
+        (min(4 * num_sms(d), (rows + 255) // 256), 1, 1),
         (256, 1, 1),
         z.contiguous(),
         wb,
@@ -517,7 +516,7 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
         z.shape, device=z.device, dtype=z.dtype
     )  # contiguous, like the z.contiguous() the kernel reads (a view-able dpair)
     d = _dev(z)
-    nb = min(nsm(d), (rows + 255) // 256)
+    nb = min(num_sms(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
@@ -541,7 +540,7 @@ def pair_bias_bwd(z, gamma, wb, dbias, eps=1e-5):
 # ------------------------------------------------------------------------------------------------ cross-attention mode (second AdaLN for K / V)
 def _row_grid(M, d):
     """Blocks of the row kernels of ``lcross.cu``: a row per half-warp (16 rows per block), persistent at 8 blocks per SM."""
-    return max(1, min(8 * nsm(d), (M + 15) // 16))
+    return max(1, min(8 * num_sms(d), (M + 15) // 16))
 
 
 def cond_ln(c, gamma, eps=1e-5):
@@ -649,7 +648,7 @@ def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
     M = a.shape[0]
     d = _dev(a)
     _load("a1x", d)(
-        (min(nsm(d) * 4, (M + 7) // 8), 1, 1),
+        (min(num_sms(d) * 4, (M + 7) // 8), 1, 1),
         (256, 1, 1),
         a,
         mod,
@@ -665,7 +664,7 @@ def adaln1_extra(a, mod, dx1, ds, dmod, dbias, eps=1e-5):
 def kv_bias_hopper(dmkv):
     """sm_90a. d (scale bias) [128] fp32 = column sums of dmkv[:, :128]'s pre-sigmoid gradient, in a fixed order."""
     d = _dev(dmkv)
-    nb = 4 * nsm(d)
+    nb = 4 * num_sms(d)
     partial = torch.empty(nb, DM, device=dmkv.device, dtype=torch.float32)
     out = torch.empty(DM, device=dmkv.device, dtype=torch.float32)
     _load("kv_bias_part", d)((nb, 1, 1), (256, 1, 1), dmkv, partial, int(dmkv.shape[0]))
@@ -778,7 +777,7 @@ def attn_fwd32(q, k, v, bias, kmask=None):
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
     km = _u8(kmask)
     nq = (N + 127) // 128
-    sp = max(1, min(A, nsm(d) // (nq * NH)))
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
     _load32("fwd32", d)(
         (nq * NH * sp, 1, 1),
         (544, 1, 1),
@@ -810,7 +809,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     qcol, kcol, vcol = cols
     nq = (N + 127) // 128
     sp = max(
-        1, min(A, nsm(d) // (nq * NH))
+        1, min(A, num_sms(d) // (nq * NH))
     )  # split the samples when there are few chunks
     _load32("dq32", d)(
         (nq * NH * sp, 1, 1),
@@ -833,7 +832,7 @@ def attn_bwd32(q, k, v, do, bias, lse, dd, dp, cols, kmask=None):
     )
     nk = (N + 112 + 127) // 128
     sp = (
-        2 if 2 * nk * NH <= nsm(d) and A > 1 else 1
+        2 if 2 * nk * NH <= num_sms(d) and A > 1 else 1
     )  # two sample halves add into dbias exactly (0 + a + b)
     _load32("dkv32", d)(
         (nk * NH * sp, 1, 1),
@@ -871,7 +870,7 @@ def pair_bias_fwd32(z, gamma, wb, eps=1e-5):
     out = torch.empty(NH, nwin, WQ, WK, device=z.device, dtype=torch.float32)
     d = _dev(z)
     _load32("pb_f32", d)(
-        (min(4 * nsm(d), (rows + 255) // 256), 1, 1),
+        (min(4 * num_sms(d), (rows + 255) // 256), 1, 1),
         (256, 1, 1),
         z,
         wb,
@@ -891,7 +890,7 @@ def pair_bias_bwd32(z, gamma, wb, dbias, eps=1e-5):
     wb, gamma, bf = _params(wb, gamma)
     dz = torch.empty_like(z)
     d = _dev(z)
-    nb = min(nsm(d), (rows + 255) // 256)
+    nb = min(num_sms(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
@@ -921,7 +920,7 @@ def pair_bias_mma(z, gamma, wb, kmask, n, eps=1e-5):
     rows = z.numel() // DP
     out = torch.empty(NH, z.shape[0], WQ, WK, device=z.device, dtype=torch.float32)
     _load("h_pb", d)(
-        (min(8 * nsm(d), (rows + 255) // 256), 1, 1),
+        (min(8 * num_sms(d), (rows + 255) // 256), 1, 1),
         (256, 1, 1),
         z.contiguous(),
         gamma.float().contiguous(),
@@ -1029,7 +1028,7 @@ def attn_bwd_mma(q, k, v, do, bias2, lse, dd, dkv, tf32: bool):
         int(spc),
     )
     _load("db_samples", d)(
-        (min(4 * nsm(d), (dbias.numel() + 255) // 256), 1, 1),
+        (min(4 * num_sms(d), (dbias.numel() + 255) // 256), 1, 1),
         (256, 1, 1),
         partial,
         dbias,
@@ -1045,7 +1044,7 @@ def pair_bias_bwd_mma(z, gamma, wb, dbias, eps=1e-5):
     rows = z.numel() // DP
     z = z.contiguous()
     dz = torch.empty_like(z)
-    nb = min(nsm(d), (rows + 255) // 256)
+    nb = min(num_sms(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
@@ -1078,7 +1077,7 @@ def pair_bias_esm(z, gamma, wb, kmask, nreal, n, eps=1e-5):
     d = _dev(z)
     out = torch.empty(NH, z.shape[0], WQ, ESM_SPAN, device=z.device, dtype=torch.float32)
     _load("h_pb_esm", d)(
-        (min(8 * nsm(d), (out[0].numel() + 255) // 256), 1, 1),
+        (min(8 * num_sms(d), (out[0].numel() + 255) // 256), 1, 1),
         (256, 1, 1),
         z.contiguous(),
         gamma.float().contiguous(),
@@ -1143,7 +1142,7 @@ def pair_bias_esm_bwd(z, gamma, wb, dbias, nreal, eps=1e-5):
     z = z.contiguous()
     rows = z.numel() // DP
     dz = torch.empty_like(z)
-    nb = min(nsm(d), (rows + 255) // 256)
+    nb = min(num_sms(d), (rows + 255) // 256)
     part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
     dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
     dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)

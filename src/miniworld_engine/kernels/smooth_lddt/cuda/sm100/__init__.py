@@ -31,7 +31,6 @@ FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
 FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
 
 
-_sm_count = num_sms
 
 
 def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
@@ -41,7 +40,7 @@ def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:
         return FORCE_FB
     if _arch(_dev(x)) != "sm_90a":
         return FBLK
-    sms = _sm_count(_dev(x))
+    sms = num_sms(_dev(x))
     for fb in (512, 256, 128):
         if n_augment_batch * -(-n // fb) >= FBLK_FILL * sms:
             return fb
@@ -54,7 +53,7 @@ def _fwd_variant(x: torch.Tensor, n_augment_batch: int, n: int) -> str:
         return FORCE_FWD
     if _arch(_dev(x)) != "sm_90a":
         return "512s1"
-    sms = _sm_count(_dev(x))
+    sms = num_sms(_dev(x))
     for v, rows in (("512s2", 256), ("256s2", 128)):   # the largest CTA whose grid still has 1.5 CTAs per SM (measured A16 / A48, N512 - N2048)
         if n_augment_batch * -(-n // rows) >= 1.5 * sms:
             return v

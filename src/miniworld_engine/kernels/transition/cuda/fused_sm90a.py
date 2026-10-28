@@ -116,7 +116,6 @@ def _cuda_prepare(wa, wb, ws, transpose=True):
     return (*packed, fresh[-1])
 
 
-_sm_count = num_sms
 
 
 # D128 forward build constants (the measured configuration; every one is a compile-time macro of transition_fused_fwd_sm90a_kernel.cu).
@@ -186,7 +185,7 @@ def _build_ext(ctas: int, dw_repl: int, save: bool, n: int):
 
 
 def _ext_for(x: torch.Tensor, save: bool = True, n: int = 4):
-    return _ext(_sm_count(x.device), DW_REPL, save, n)
+    return _ext(num_sms(x.device), DW_REPL, save, n)
 
 
 @functools.lru_cache(maxsize=8)
@@ -357,7 +356,7 @@ def _select_schedule(args, *, backward, save):
 
     x = args[1] if backward else args[0]
     n = (args[6] if backward else args[3]).shape[0] // 128
-    sms = _sm_count(x.device)
+    sms = num_sms(x.device)
     grid = transition_candidates(sms, backward=backward, n=n)
     symbol = "transition_fused_bwd_native" if backward else "transition_fused_fwd"
 
