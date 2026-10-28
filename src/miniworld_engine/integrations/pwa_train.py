@@ -153,12 +153,10 @@ def refusal(
             if not 0 < n <= _wide.NMAX or s == 0:
                 return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
             return None
-        if n % 128 or s % 2:
+        if n % 128 or (s % 2 and cap != (10, 0)):
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
-        if cap == (10, 0) and (
-            s % 128 or n > 1024
-        ):  # ln_vg / dv_bwd tiles are 128 MSA rows; pair_fwd holds a row of N
-            return f"the sm_100a kernels need S a multiple of 128 and N <= 1024, got N={n}, S={s}"
+        if cap == (10, 0) and n > 1024:  # pair_fwd holds a row of N; S is padded to the 128-row tiles (_pad_depth)
+            return f"the sm_100a kernels need N <= 1024, got N={n}, S={s}"
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -926,12 +924,26 @@ def _is_wide(module) -> bool:
     ) != (D, DZ, H, C)
 
 
+def _pad_depth(msa: torch.Tensor) -> tuple[torch.Tensor, int]:
+    """B200: the MSA depth padded to the kernels' 128-row tiles (ln_vg / dv_bwd), with the original depth. The MSA rows are independent
+    (each row averages its own values with the shared pair weights), so zero rows change no real row; the pad rows of the output are
+    dropped and the pad's backward drops their gradient. Other cards, or a depth already a multiple of 128: unchanged."""
+    s = msa.shape[1]
+    ps = -s % 128
+    if not ps or torch.cuda.get_device_capability(msa.device) != (10, 0):
+        return msa, s
+    return torch.nn.functional.pad(msa, (0, 0, 0, 0, 0, ps)), s
+
+
 def pair_weighted_averaging(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
     if _is_wide(module):
         return _wide.pair_weighted_averaging(module, msa, pair, mask)
+    msa, s0 = _pad_depth(msa)
+    if s0 != msa.shape[1]:
+        return pair_weighted_averaging(module, msa, pair, mask)[:, :s0]
     n = msa.shape[2]
     if torch.cuda.get_device_capability(msa.device) == (
         10,
@@ -1122,6 +1134,9 @@ def _inference_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch
 def pair_weighted_averaging_inference(module, msa, pair, mask):
     if _is_wide(module):
         return _wide.pair_weighted_averaging_inference(module, msa, pair, mask)
+    msa, s0 = _pad_depth(msa)
+    if s0 != msa.shape[1]:
+        return pair_weighted_averaging_inference(module, msa, pair, mask)[:, :s0].contiguous()
     mask = (
         mask
         if mask is not None
