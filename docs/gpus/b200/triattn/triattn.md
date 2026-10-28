@@ -32,7 +32,11 @@ Starting and ending node both run it; the ending node's pair, output, dy and dx 
 module's own broadcast draw (`_make_drop_scale`, row-broadcast for the starting node, column for the ending node), applied
 inside the output kernel and its backward. Parameters may be bf16 or fp32 (master weights): one pack kernel stages them
 and the gradients come back in the parameters' dtype. Keys whose bias is masked get `finfo(bf16).min`, as in the
-PyTorch module; a pair row whose first 32 keys are all masked is handled (the softmax offset falls back to 0).
+PyTorch module. The forward softmax offset is the row's running maximum, raised lazily (a chunk of 32 keys whose maximum exceeds it
+by more than 8 log2 units raises it and rescales l, the tile's P in TMEM and O): no overflow whatever the spread of the logits
+(2026-10-28; the earlier offset was fixed at the first 32 keys and overflowed to inf / NaN on trained weights, which H100 fixed in
+cad850743). A row with no finite logit keeps offset 0 in its LSE. d_pair 128 inference caches the packed weights while the
+parameters are unchanged (`kernels._capture.param_forms`).
 
 ## Starting / ending node · d_pair 128, 4 heads × 32
 
