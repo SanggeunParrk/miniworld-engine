@@ -158,11 +158,12 @@ def _host_ready() -> bool:
 def serves_inference(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None = None
 ) -> bool:
-    return (
-        not torch.is_grad_enabled()
-        and single.shape[1] % 16 == 0
-        and _eligible(module, single, pair, mask)
-    )
+    """Inference at L % 16 == 0 (the pair kernels' row groups); on B200 any L (``update_inference`` pads to 16 on the host)."""
+    if torch.is_grad_enabled():
+        return False
+    if single.shape[1] % 16 and not (single.is_cuda and _cap(single.device) == (10, 0)):
+        return False
+    return _eligible(module, single, pair, mask)
 
 
 def serves_train(
@@ -369,9 +370,23 @@ def _chunks(single, pair, mask):
         yield single[b : b + n], pair[b : b + n], None if mask is None else mask[b : b + n]
 
 
+def _padded_inference(module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    """B200 at L % 16 != 0: single / pair padded with zero tokens to the next multiple of 16, the pad tokens masked as keys (their
+    bias column is the masked-key fill, so no real query attends to them); the pad query rows of the output are dropped."""
+    B, L = single.shape[0], single.shape[1]
+    Lp = -(-L // 16) * 16
+    s = torch.nn.functional.pad(single, (0, 0, 0, Lp - L))
+    p = torch.nn.functional.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L))
+    m = torch.zeros(B, Lp, device=single.device, dtype=torch.bool)
+    m[:, :L] = True if mask is None else mask.reshape(B, L) != 0
+    return update_inference(module, s, p, m)[:, :L].contiguous()
+
+
 def update_inference(
     module, single: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if single.shape[1] % 16:
+        return _padded_inference(module, single, pair, mask)
     if single.shape[0] > max_batch():
         return torch.cat([update_inference(module, *c) for c in _chunks(single, pair, mask)])
     return inference(
