@@ -67,7 +67,6 @@ from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.kernels._tf32 import tf32_grid
-from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32   # the fp32 path's weight gradients on TF32 tensor cores
 
 # ------------------------------------------------------------------------------------------------------------ weights
 # The block's parameters and the kernels' weight packs (stacked / transposed bf16 packs and the backward's transposed A operands).

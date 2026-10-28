@@ -17,6 +17,7 @@ from torch.autograd.function import once_differentiable
 from miniworld_engine import settings
 from miniworld_engine.integrations import local_dit as _ld
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._tf32 import tf32_matmul
 
 DS, DC, DP, NH = 128, 128, 16, 4
 F32 = torch.float32
@@ -530,7 +531,7 @@ def _mmT(a, b, tf32):
         with _fp32_exact():
             return torch.mm(a.t(), b)
     if tf32:
-        with _ld._tf32():
+        with tf32_matmul():
             return torch.mm(a.t(), b)
     return torch.mm(a.t(), b, out_dtype=torch.float32)
 
