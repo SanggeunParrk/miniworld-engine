@@ -206,3 +206,25 @@ def test_apb_b200_compiled(shape):
         n
     ) in ge:  # the column sums (dWf, ln weights, dbq) add per-block partials atomically
         assert _rel(gc.get(n, gc.get("_orig_mod." + n)), ge[n]) < 1e-3, n
+
+
+@pytest.mark.parametrize("shape", [(8, 384), (16, 384)])
+@pytest.mark.parametrize("masked", [False, True])
+@pytest.mark.parametrize("L", [100, 203])
+def test_apb_b200_inference_ragged_length(L, masked, shape):
+    """L % 16 != 0 on B200: padded to 16 on the host, the pad tokens masked as keys and their rows dropped
+    (attention_pair_bias_b200._padded_inference); the same bar as test_apb_b200_inference."""
+    from miniworld_engine.integrations import attention_pair_bias_b200 as b200
+
+    ref, ours, tb = _modules(shape=shape)
+    single, pair, mask = _inputs(L, masked, d=shape[1])
+    sb, pb = single.bfloat16(), pair.bfloat16()
+    with torch.no_grad():
+        assert b200.serves_inference(ours, sb, pb, mask)
+        want = ref(single, pair, mask)
+        got = ours(sb, pb, mask)
+        base = tb(sb, pb, mask)
+    assert got.dtype == torch.bfloat16 and got.shape == single.shape
+    assert torch.isfinite(got.float()).all()
+    e, e0 = _rel(got, want), _rel(base, want)
+    assert e < 1.3 * e0 + 1e-3, (e, e0)
