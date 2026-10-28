@@ -108,15 +108,15 @@ def _token_pair_init_prep_fake(asym, residue, token, entity, sym, w_rel, w_bond)
 @opaque(fake=_token_pair_init_prep_fake, name="token_pair_init_prep")
 def token_pair_init_prep(asym: torch.Tensor, residue: torch.Tensor, token: torch.Tensor, entity: torch.Tensor, sym: torch.Tensor,
                          w_rel: torch.Tensor, w_bond: torch.Tensor) -> list[torch.Tensor]:
-    """[ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32] in one launch (H100; forward-only calls: no gradient flows through it)."""
+    """[ids [5, B*L] int32, tbl [n_rel + 2, 128] fp32] in one launch (H100 / B200; forward-only calls: no gradient flows through it)."""
     from miniworld_engine.kernels.token_pair_init.cuda import sm90
 
     return list(sm90.prep([asym, residue, token, entity, sym], w_rel, w_bond))
 
 
 def _can_prep(ids, w_rel, w_bond) -> bool:
-    """The one-launch glue: H100, contiguous int32 / int64 ids, fp32 weights, nothing differentiates the weights."""
-    return (torch.cuda.get_device_capability(w_rel.device) == (9, 0) and w_rel.dtype == torch.float32 and w_bond.dtype == torch.float32
+    """The one-launch glue: H100 or B200, contiguous int32 / int64 ids, fp32 weights, nothing differentiates the weights."""
+    return (torch.cuda.get_device_capability(w_rel.device) in ((9, 0), (10, 0)) and w_rel.dtype == torch.float32 and w_bond.dtype == torch.float32
             and w_rel.is_contiguous() and w_bond.is_contiguous() and not (torch.is_grad_enabled() and (w_rel.requires_grad or w_bond.requires_grad))
             and all(t.dtype in (torch.int32, torch.int64) and t.is_contiguous() for t in ids))
 
