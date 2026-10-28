@@ -34,7 +34,9 @@ def _row_kernels(device):
 
             cuda_rows.available()
             return cuda_rows
-        except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows
+        except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton rows (not on B200: no engine Triton fallback there)
+            if torch.cuda.get_device_capability(device) == (10, 0):
+                raise
             import warnings
 
             warnings.warn(
@@ -107,25 +109,28 @@ class FusedTokenDiTComposed(FusedTokenDiT):
         idx = device.index if device.index is not None else torch.cuda.current_device()
         cores = self.__dict__.setdefault("_cuda_cores", {})
         if idx not in cores:
+            if torch.compiler.is_compiling():
+                return None   # not cached: the core is built (outside a trace) by the first eager call, not pinned to Triton for good
             from miniworld_engine.kernels.augmented_attention import cuda as sm90
             from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
             core = None
-            if not torch.compiler.is_compiling():
-                try:
-                    if sm100.inference_core_supported(self.dtype, L, D, H, idx):
-                        core = sm100.GatedInferenceCore(idx, self.dtype, H, D // H)
-                    elif sm90.inference_core_supported(self.dtype, L, D, H, idx):
-                        sm90._ext("attn_fwd")
-                        core = sm90.gated_inference
-                except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core
-                    import warnings
+            try:
+                if sm100.inference_core_supported(self.dtype, L, D, H, idx):
+                    core = sm100.GatedInferenceCore(idx, self.dtype, H, D // H)
+                elif sm90.inference_core_supported(self.dtype, L, D, H, idx):
+                    sm90._ext("attn_fwd")
+                    core = sm90.gated_inference
+            except Exception as exc:  # noqa: BLE001 -- a failed build keeps the Triton core (not on B200)
+                if torch.cuda.get_device_capability(device) == (10, 0):
+                    raise
+                import warnings
 
-                    warnings.warn(
-                        f"CUDA token DiT core unavailable, keeping the Triton core: {exc!r}",
-                        RuntimeWarning,
-                        stacklevel=2,
-                    )
+                warnings.warn(
+                    f"CUDA token DiT core unavailable, keeping the Triton core: {exc!r}",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
             cores[idx] = core
         core = cores[idx]
         multiple = 128 if torch.cuda.get_device_capability(device) == (9, 0) else 8

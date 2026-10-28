@@ -40,7 +40,6 @@ Everything else keeps the Triton path, and so do fake tensors and torch.compile 
 from __future__ import annotations
 
 import functools
-import warnings
 from pathlib import Path
 
 import torch
@@ -134,7 +133,7 @@ def available(
     mask: torch.Tensor | None = None,
     bias_head_major: bool = False,
 ) -> bool:
-    """``supported()`` plus successful builds; a build failure warns once and keeps the Triton path."""
+    """``supported()`` plus successful builds; a build failure raises."""
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(q, bias, mask, bias_head_major):
         return False
@@ -153,14 +152,8 @@ def available(
             ("attn_dkv", "augattn_dkv_sm100"),
         ):
             _sm100_kernel(stem, func, _index(q))
-    except Exception as exc:  # noqa: BLE001
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"sm100 bf16 augmented attention unavailable, keeping the portable path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # B200 has no engine Triton / silent PyTorch fallback: a build or load failure is an error
+        raise RuntimeError(f"sm100 bf16 augmented attention kernels failed to build or load on B200: {exc!r}") from exc
     return True
 
 

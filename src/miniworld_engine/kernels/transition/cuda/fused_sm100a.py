@@ -28,7 +28,6 @@ import re
 import subprocess
 import sys
 import tempfile
-import warnings
 from pathlib import Path
 
 import torch
@@ -237,7 +236,7 @@ _WEIGHT_DTYPES = (torch.bfloat16, torch.float32)
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful (cached) build; a build failure warns once and keeps the existing path."""
+    """``supported()`` plus a successful (cached) build; a build failure raises."""
     global _BUILD_FAILED
     if _BUILD_FAILED or not supported(x, wa, ws):
         return False
@@ -245,14 +244,8 @@ def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
         return True
     try:
         _ext()
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED = True
-        warnings.warn(
-            f"fused sm100a Transition unavailable, keeping the existing path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # B200 has no engine Triton / silent PyTorch fallback: a build or load failure is an error
+        raise RuntimeError(f"fused sm100a Transition kernels failed to build or load on B200: {exc!r}") from exc
     return True
 
 

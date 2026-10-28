@@ -35,7 +35,6 @@ atomics), so a replay is bit-identical.
 
 import functools
 import os
-import warnings
 
 import torch
 
@@ -226,23 +225,15 @@ _BUILD_FAILED: set[tuple[int, int]] = set()
 
 
 def available(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
-    """``supported()`` plus a successful build of this (width, n), both cached; a build failure warns once and keeps the existing
-    path."""
+    """``supported()`` plus a successful build of this (width, n), both cached; a build failure raises."""
     if not supported(x, wa, ws) or _dn(x, wa) in _BUILD_FAILED:
         return False
     if torch.compiler.is_compiling() or _is_fake(x, wa, ws):
         return True
     try:
         _load(*_dn(x, wa))
-    except Exception as exc:  # noqa: BLE001 -- any build failure means "use the other path"
-        _BUILD_FAILED.add(_dn(x, wa))
-        warnings.warn(
-            f"wide sm100a Transition (D={x.shape[-1]}, n={wa.shape[0] // x.shape[-1]}) unavailable, keeping the existing "
-            f"path: {exc!r}",
-            RuntimeWarning,
-            stacklevel=2,
-        )
-        return False
+    except Exception as exc:  # B200 has no engine Triton / silent PyTorch fallback: a build or load failure is an error
+        raise RuntimeError(f"wide sm100a Transition kernels failed to build or load on B200: {exc!r}") from exc
     return True
 
 
