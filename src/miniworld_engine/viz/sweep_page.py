@@ -19,7 +19,6 @@ import collections
 import csv
 import html
 import json
-import pathlib
 from pathlib import Path
 
 PKG = Path(__file__).resolve().parents[1]
@@ -70,10 +69,6 @@ def _coverage() -> dict[str, float]:
     return _coverage_raw()
 
 
-def _coverage_mismatch() -> dict[str, float]:
-    return {}
-
-
 def _coverage_raw() -> dict[str, float]:
     from miniworld_engine.autotune import derive
     rows = derive.kernel_rows("sm86")
@@ -81,37 +76,6 @@ def _coverage_raw() -> dict[str, float]:
     wanted = collections.Counter(r["kernel"] for r in rows)
     missing = collections.Counter(op for op, _key in report["missing"])
     return {op: (n - missing[op]) / n for op, n in wanted.items()}
-
-
-def _prune_fn_name(path: pathlib.Path, symbol: str) -> str | None:
-    """The function named in ``@triton.autotune(prune_configs_by={'early_config_prune': X})``.
-
-    Read from the SOURCE, not from the decorated object: `autotune/cache.py`'s reader replaces
-    `Autotuner.early_config_prune` with its own wrapper at import, so asking the live object gives
-    the cache reader's heuristic subset (24 for every kernel) instead of the kernel's own prune.
-    """
-    import ast
-
-    try:
-        tree = ast.parse(path.read_text())
-    except (OSError, SyntaxError):
-        return None
-    want = symbol.split(".")[-1]
-    for node in ast.walk(tree):
-        if not isinstance(node, ast.FunctionDef) or node.name != want:
-            continue
-        for dec in node.decorator_list:
-            if not isinstance(dec, ast.Call):
-                continue
-            for kw in dec.keywords:
-                if kw.arg != "prune_configs_by" or not isinstance(kw.value, ast.Dict):
-                    continue
-                for k, v in zip(kw.value.keys, kw.value.values, strict=True):
-                    if getattr(k, "value", None) == "early_config_prune":
-                        return getattr(v, "id", None)
-    return None
-
-
 
 
 def _derived_rows(sm: str | None) -> list[dict]:

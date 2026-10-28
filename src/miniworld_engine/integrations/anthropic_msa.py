@@ -238,20 +238,6 @@ def require_pwa(*a, **kw) -> None:
         )
 
 
-def _swizzle_b(wot: torch.Tensor) -> torch.Tensor:
-    """[K, c_z] -> [K/16][c_z/8][32][4] in mma.m16n8k16 B-fragment order, so the epilogue reads a whole
-    fragment with one 8-byte per-thread load. b0 = k (lane%4)*2 + {0,1}, b1 = that + 8, n = lane/4."""
-    k, n = wot.shape
-    kk = torch.arange(k // 16, device=wot.device)[:, None, None]
-    nn = torch.arange(n // 8, device=wot.device)[None, :, None]
-    lane = torch.arange(32, device=wot.device)[None, None, :]
-    idx_n = nn * 8 + lane // 4
-    k_lo = (lane % 4) * 2
-    return torch.stack(
-        [wot[kk * 16 + k_lo + off, idx_n] for off in (0, 1, 8, 9)], dim=-1
-    ).contiguous()
-
-
 def _opm_pack(module) -> dict[str, Any]:
     """The weights this path needs, in the layouts the kernels want. Built once per module (inference weights)."""
     pack = getattr(module, "_anthropic_msa_pack", None)

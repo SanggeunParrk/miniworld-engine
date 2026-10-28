@@ -226,9 +226,6 @@ class Settings:
     #: Fuse the layernorm stats pass into the transition kernel. Formerly
     #: MINIWORLD_TRANSITION_FUSE_STATS.
     transition_fuse_stats: bool = False
-    #: Version-B backward that saves xn instead of recomputing it. Formerly
-    #: TRANSITION_SAVEDXN_SPLIT_BWD.
-    transition_savedxn_split_bwd: bool = False
     #: Privatised dgamma/dbeta accumulators in the transition LN backward (1.31x at L=1024; the
     #: alternative is a single-accumulator atomic path). Formerly
     #: MINIWORLD_TRANSITION_LNBWD_PRIVATIZE.
@@ -408,8 +405,6 @@ class Settings:
     pwa_train: bool | None = None
     #: Formerly ``MINIWORLD_PWA_INFER``: like ``pwa_train`` for inference; None follows ``pwa_train``.
     pwa_infer: bool | None = None
-    #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
-    token_pair_init_fused: bool = True
     # ---- H100 native-path switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
     #: H100 AttentionPairBias training: True recomputes the pair-weight (``to_bias.weight``) gradient in fp32 from bf16-rounded
     #: inputs (the "shadow": 1.45e-2 against an fp64 truth, about 2.4x the step); False (default) keeps the fused kernel's dWf
@@ -419,20 +414,6 @@ class Settings:
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None
-    #: Formerly ``MINIWORLD_TRANSITION_D64_REPL``; 0 keeps the built-in value (26 at n = 2, 16 at n = 4): D64 backward weight replicas.
-    transition_d64_repl: int = 0
-    #: Formerly ``MINIWORLD_TRANSITION_D64_VARIANT``; 0 picks the D64 inference build by row count (13 / 12 = 64-row tile, LayerNorm in
-    #: the wgmma A fragment, 3 / 2 CTAs per SM; 2 / 3 / 14 / 15 earlier builds, forced only).
-    transition_d64_variant: int = 0
-    #: Formerly ``MINIWORLD_TRANSITION_DW_REPL``; 0 keeps the built-in value (8 at n = 4, 15 at n = 2): D128 backward weight replicas.
-    transition_dw_repl: int = 0
-    #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
-    #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
-    #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
-    trimul_h100_native_buckets: bool | None = None
-    #: Formerly ``MINIWORLD_TRIMUL_H100_PRESERVE_D128`` / ``_PRESERVE_D256`` / ``_PRESERVE_WIDE`` (widths 384 and 512 together):
-    #: pair widths whose preserved native glue is selected explicitly; takes effect with ``trimul_h100_native_buckets=True``.
-    trimul_h100_preserve_widths: frozenset[int] = frozenset()
 
     def autotunes(self, kernel: str) -> bool:
         """Is ``kernel``'s full config grid unlocked for this run?"""
@@ -587,7 +568,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
     "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
     "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
-    "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
+    "MINIWORLD_FUSED_PAIR_INIT": "",  # removed: the default behaviour is the only one
     "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",
     "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
     "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
@@ -686,9 +667,9 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TOKEN_DIT_H100_TRAIN_PACK_ASYNC": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_H100_TRAIN_RPB": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_TRAIN_FP32": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_TRANSITION_D64_REPL": "transition_d64_repl",
-    "MINIWORLD_TRANSITION_D64_VARIANT": "transition_d64_variant",
-    "MINIWORLD_TRANSITION_DW_REPL": "transition_dw_repl",
+    "MINIWORLD_TRANSITION_D64_REPL": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_D64_VARIANT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRANSITION_DW_REPL": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_H100_AFFINE_PARALLEL": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_H100_AFFINE_WARP_STORE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_H100_COMPACT_LN": "",  # removed: the default behaviour is the only one
@@ -733,10 +714,10 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_TRIMUL_H100_INFER_FAST_AUX": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_INFER_OWNED_BLAS": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_K3W_NATIVE_RESIDUAL": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS": "trimul_h100_native_buckets",
-    "MINIWORLD_TRIMUL_H100_PRESERVE_D128": "trimul_h100_preserve_widths",
-    "MINIWORLD_TRIMUL_H100_PRESERVE_D256": "trimul_h100_preserve_widths",
-    "MINIWORLD_TRIMUL_H100_PRESERVE_WIDE": "trimul_h100_preserve_widths",
+    "MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_PRESERVE_D128": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_PRESERVE_D256": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TRIMUL_H100_PRESERVE_WIDE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_TRAIN_CUDA": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_TRAIN_FUSED_PREP": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRIMUL_H100_WARP_LN": "",  # removed: the default behaviour is the only one

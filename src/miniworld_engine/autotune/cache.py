@@ -548,38 +548,6 @@ def build_rev(op: str) -> int:
     return _build_revs().get(op, 1)
 
 
-def _entries_survive(data: dict, configs) -> bool:
-    """Is every stored winner still a legal config in the CURRENT grid?
-
-    The reset rule this answers. `store_ranked_configs` used to clear the file whenever
-    `config_space_hash` moved, which conflates two very different edits:
-
-    * the grid GREW -- a config nobody benched now exists, so every stored winner is a claim about
-      a smaller space than the one being searched. Genuinely stale.
-    * the grid was NARROWED and every stored winner survived the cut -- the winner beat everything
-      in the OLD space, and the new space is a subset of it, so the same config is still the best
-      of the new space. Strictly MORE valid than before, and deleting it is pure loss.
-
-    Narrowing a ladder to what the cache proves it needs is the repository's own recommended
-    maintenance (`test_a_fully_measured_kernel_carries_its_own_ladder` derives such a narrowing and
-    demands it). Charging a full rebuild for it made that maintenance cost 25 GPU-hours of
-    re-measuring configs whose winners were already known -- so the tests asked for a change the
-    cache then punished.
-
-    Membership of every winner is the exact test: it holds iff no winner was cut, which for a
-    subset edit is the whole question. If the grid grew, a winner can still be a member while the
-    new values were never benched -- so the caller only reaches here when the space did not grow.
-    """
-    if not configs:
-        return False            # cannot tell -> reset, the safe direction
-    live = {_sig(c) for c in configs}
-    for ranked in (data.get("entries") or {}).values():
-        for cfg in ranked:
-            if _sig_from_dict(cfg) not in live:
-                return False
-    return True
-
-
 # All registered Triton families share the same physical-workload compatibility
 # contract. Legacy entries still supply runtime candidates, never attributed timing
 # evidence for a new build. The registry enforces the `_triton` naming suffix.

@@ -28,20 +28,11 @@ constexpr int TILE = KR * 64;                                                 //
 
 // byte offset of 16 B chunk c (0..3) of row r in a [rows][32] bf16 tile (64 B rows); XOR swizzle makes 8-row ldmatrix reads conflict-free
 __device__ __forceinline__ int sw(int r, int c) { return r * 64 + ((c ^ ((r >> 1) & 3)) << 4); }
-__device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool ok) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(ok ? 16 : 0) : "memory");
-}
+using swa_mma::cp16;  // swa_ptx.cuh
 __device__ __forceinline__ void cp_wait_all() { asm volatile("cp.async.wait_group 0;\n" ::: "memory"); }
-__device__ __forceinline__ void ldsm4(uint32_t a, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
-}
-__device__ __forceinline__ void ldsm4t(uint32_t a, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
-  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
-}
-__device__ __forceinline__ void mma(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
+using swa_mma::ldsm4;  // swa_ptx.cuh
+using swa_mma::ldsm4t;
+using swa_mma::mma;
 __device__ __forceinline__ float ex2(float x) { float y; asm("ex2.approx.ftz.f32 %0, %1;" : "=f"(y) : "f"(x)); return y; }
 constexpr float LOG2E = 1.4426950408889634f;
 

@@ -28,10 +28,6 @@ def adaln_inputs(has_sc: int = 1, b: int = _B, n: int = _L):
             torch.linspace(0.1, 3.0, _NX - 1, device=d), torch.linspace(0.1, 3.0, _NC - 1, device=d), _NS, _NX, _EPS, _EPS)
 
 
-def _bwd_args(args, bins):
-    return (*args[:5], bins, torch.randn(args[5].shape[0], args[5].shape[1], args[5].shape[1], 256, device=dev()).to(torch.bfloat16), _NS, _NX, _EPS, _EPS)
-
-
 def pair_embed_adaln_fwd_triton() -> None:
     from miniworld_engine.kernels.pair_embed_adaln.triton import portable_forward
 
@@ -40,7 +36,10 @@ def pair_embed_adaln_fwd_triton() -> None:
 
 
 def _backward(has_sc: int = 1):
-    from miniworld_engine.kernels.pair_embed_adaln.triton import portable_backward, portable_forward
+    from miniworld_engine.kernels.pair_embed_adaln.triton import (
+        portable_backward,
+        portable_forward,
+    )
 
     args = adaln_inputs(has_sc)
     _, bins = portable_forward(*args)

@@ -29,26 +29,16 @@ _TRAIN_FUSED_PREP_UNSCOPED = True  # D64 fused preparation outside the qualified
 _D64_UNI_AFFINE_FORCED = False  # uni outgoing D64: the affine-split backward instead of the affine-register one
 
 
-def _native_buckets():
-    """None: only the qualified cells; True: explicit native buckets; False: every native training cell off."""
-    return settings.current().trimul_h100_native_buckets
-
-
 def _preserved_width(width):
-    """Explicit preserved glue: native buckets forced on and the width selected."""
-    s = settings.current()
-    if width == 128 and s.trimul_h100_native_buckets is None:
-        return True  # D128 serves every length 128..1024 natively by default (2026-10-13)
-    return s.trimul_h100_native_buckets is True and width in s.trimul_h100_preserve_widths
+    """The preserved native glue: D128 serves every length 128..1024 natively (2026-10-13); the wider widths keep the qualified cells."""
+    return width == 128
 
 
 def d64_training(x, outgoing=False, bidirectional=False):
     """Qualified compact-mask D64 preparation (the bidirectional L384 cell; no single-direction cell is qualified, so
     ``outgoing`` does not change the answer); keep wide-preservation policy separate."""
-    if (not bidirectional or x.ndim != 4 or x.shape[1] != x.shape[2]   # any batch: B samples share the B = 1 scope
-            or x.shape[-1] != 64 or x.shape[1] != 384):
-        return False
-    return _native_buckets() is not False
+    # any batch: B samples share the B = 1 scope
+    return bidirectional and x.ndim == 4 and x.shape[1] == x.shape[2] and x.shape[-1] == 64 and x.shape[1] == 384
 
 
 def d64_uni_owned_bmm_enabled(length):
@@ -76,8 +66,6 @@ def d128_training(x, outgoing=True, bidirectional=False):
     """Preserved D128 path (``_preserved_width``; the direction does not change the answer)."""
     if x.shape[-1] != 128:
         return False
-    if _native_buckets() is False:
-        return False
     return _preserved_width(128)
 
 
@@ -92,10 +80,8 @@ def preserved_d128_context(enabled):
 
 
 def uni_d256_training(x, outgoing):
-    """Qualified outgoing L384 default; trimul_h100_native_buckets=False keeps the old diagnostic path."""
+    """Qualified outgoing L384 default."""
     if x.shape[-1] != 256:
-        return False
-    if _native_buckets() is False:
         return False
     return _preserved_width(256) or (outgoing and x.ndim == 4
                                      and tuple(x.shape[:3]) == (1, 384, 384))
@@ -113,12 +99,10 @@ def preserved_d256_context(enabled):
 
 
 def bidi_training(x):
-    """Qualified bidirectional native cells; trimul_h100_native_buckets / preserve_widths retain diagnostic routes."""
+    """Qualified bidirectional native cells."""
     width = x.shape[-1]
     if (x.ndim != 4 or x.shape[0] != 1 or x.shape[1] != x.shape[2]
             or x.shape[1] not in (384, 768) or width not in (256, 384, 512)):
-        return False
-    if _native_buckets() is False:
         return False
     return _preserved_width(width) or (width == 256 and x.shape[1] == 768)
 
@@ -198,8 +182,7 @@ def uni_training(x, outgoing):
     # D512 serves both directions (GP_DIR 1/2 in contract_gp); D384 L384 stays outgoing-only.
     return (bucket
             and ((x.shape[-1] == 512)
-                 or (outgoing and x.shape[-1] == 384 and x.shape[1] == 384))
-            and _native_buckets() is not False)
+                 or (outgoing and x.shape[-1] == 384 and x.shape[1] == 384)))
 
 
 def preserve_training(width):

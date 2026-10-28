@@ -5,7 +5,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from settings_helpers import override_setting
 
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_single, h100_training
 from miniworld_engine.kernels.trimul_inproj.cuda._h100_pack import owned_training_mask
@@ -24,8 +23,6 @@ def native_candidate(monkeypatch):
         pytest.skip("full H100 required")
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
-    override_setting(monkeypatch, "trimul_h100_native_buckets", True)
-    override_setting(monkeypatch, "trimul_h100_preserve_widths", frozenset({128}))
     for constant in (
         "_TRAIN_CUDA_UNSCOPED",
         "_TRAIN_FUSED_PREP_UNSCOPED",

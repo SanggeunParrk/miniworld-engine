@@ -47,7 +47,7 @@ NS = {64: (4, 2), 256: (4, 2), 384: (4, 2), 512: (4, 2), 768: (2,)}
 ROWS = 128
 
 _SOURCES = {
-    64: ("d64_fwd.cu", "d64_fwd_small.cu", "d64_fwd_small3.cu", "d64_fwd_h32x4.cu", "d64_fwd_h32x5.cu", "d64_fwd_small_f2.cu", "d64_fwd_small_f3.cu", "d64_bwd.cu"),
+    64: ("d64_fwd.cu", "d64_fwd_small_f2.cu", "d64_fwd_small_f3.cu", "d64_bwd.cu"),
     256: ("d256_fwd.cu", "gate.cu", "dxln.cu"),
     384: ("lnsg.cu", "squeeze.cu", "gate.cu", "gate_noh.cu"),
     512: ("lnsg.cu", "squeeze.cu", "gate.cu", "gate_noh.cu"),
@@ -185,19 +185,18 @@ def _ext_for(x: torch.Tensor, save_ab: bool = False, n: int = 4):
         x.shape[-1] == 768
     ):  # n = 2 only: saved a / b and the split forward are the whole path
         return _ext(768, num_sms(x.device), save_ab=True, split_fwd=True, n=n)
-    d64_repl = settings.current().transition_d64_repl
     if (
         n != 4
     ):  # the n = 4 experiments below are tuned for hidden = 4 D; other n runs the plain build
         # D64 backward: weight CTAs = hidden slices (n) x replicas; measured best 26 replicas at n = 2 (16 at n = 4)
-        repl = (d64_repl or 26) if x.shape[-1] == 64 else 16
+        repl = 26 if x.shape[-1] == 64 else 16
         return _ext(x.shape[-1], num_sms(x.device), repl, n=n)
     # The selected L768/D512 training path retains a/b; inference passes save_ab=False.
     saved_tma = x.shape[-1] == 512 and _d512_saved_rows(x.shape[0]) and save_ab
     return _ext(
         x.shape[-1],
         num_sms(x.device),
-        d64_repl or 16,
+        16,
         save_ab,
         save_ab and split_fwd_enabled(x.shape[-1], x.shape[0]),
         affine_parallel=x.shape[-1] == 64,
@@ -283,13 +282,8 @@ def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
 
 def _d64_variant(rows: int, sms: int = 132) -> int:
     """D = 64 inference build for ``rows`` (a multiple of 64): 13 / 12 = the 64-row tile with LayerNorm in the wgmma A-fragment layout (xn
-    stays in registers) at 3 / 2 CTAs per SM -- the fastest builds at every measured row count (n = 2 and 4); 0 = the 128-row tile; 2 / 3 =
-    the earlier 64-row builds (LayerNorm through shared memory), 14 / 15 = hidden chunks of 32 (both kept for the record, forced only).  3 / SM
-    unless the 2 / SM build's waves are fuller by more than 2 % (a wave: 3 x 64 or 2 x 64 rows per SM).
-    ``settings.transition_d64_variant`` (0 = auto) forces one."""
-    force = settings.current().transition_d64_variant
-    if force:
-        return force
+    stays in registers) at 3 / 2 CTAs per SM -- the fastest builds at every measured row count (n = 2 and 4); 0 = the 128-row tile.  3 / SM
+    unless the 2 / SM build's waves are fuller by more than 2 % (a wave: 3 x 64 or 2 x 64 rows per SM)."""
     if rows % 64 != 0 or rows < 64:
         return 0
     if rows <= 6144:

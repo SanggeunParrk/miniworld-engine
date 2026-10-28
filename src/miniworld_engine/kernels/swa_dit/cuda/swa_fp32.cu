@@ -59,7 +59,7 @@ __device__ __forceinline__ uint64_t desc(const void* p) {  // K-major, 128 B swi
   return d;
 }
 #include "gen/wgmma_tf32.inc"
-template <int K> __device__ __forceinline__ void wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(K) : "memory"); }
+using ::swa_wg::wait;  // swa_ptx.cuh
 }  // namespace wg
 
 namespace tma {
@@ -73,9 +73,7 @@ using ::store_4d;
 using ::store_5d;
 using ::store_commit;
 using ::store_wait_read;
-__device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
-  asm volatile("{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAIT_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
-}
+using ::swa_tma::wait;  // swa_ptx.cuh (load_2d / 4d / 5d below take a pointer: their own text)
 __device__ __forceinline__ void load_2d(const void* map, void* dst, uint64_t* bar, int c0, int c1) {
   asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
                :: "r"(sa(dst)), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1) : "memory");

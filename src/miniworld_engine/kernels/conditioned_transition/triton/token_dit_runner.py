@@ -39,13 +39,6 @@ def _t(w):
     return w.detach().t().contiguous()
 
 
-def _norm_eps(norm):
-    """The eps an engine RMSNorm applies to bf16 / fp32 input (its float32 default when unset), or a plain ``eps``."""
-    if hasattr(norm, "effective_eps"):
-        return float(norm.effective_eps(torch.float32))
-    return float(norm.eps)
-
-
 def attention_in_place(q, k, v, bias, mask, m, key):
     """The engine's forward attention kernel, launched with the output written over q.
 

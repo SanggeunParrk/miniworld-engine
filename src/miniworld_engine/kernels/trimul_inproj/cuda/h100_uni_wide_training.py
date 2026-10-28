@@ -19,7 +19,6 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 from miniworld_engine.kernels.trimul_inproj.cuda import h100_wide_training as W
@@ -360,8 +359,6 @@ class _Training(torch.autograd.Function):
 def single_trimul(outgoing, *args):
     """(x, wl, wlg, wr, wrg, wg, wp, gi, bi, go, bo, pair_mask[n,n], dropscale[n,D]) -> y."""
     native = T.uni_training(args[0], outgoing)
-    if settings.current().trimul_h100_native_buckets is True and not native:
-        return native_buckets(False, outgoing, *args)
     if not torch.is_grad_enabled():
         leaves = list(args[:11])
         if native:

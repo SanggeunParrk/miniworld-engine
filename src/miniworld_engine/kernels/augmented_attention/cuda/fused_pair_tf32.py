@@ -79,19 +79,6 @@ def available(q, pair, lnw, wb, mask) -> bool:
     return True
 
 
-_PERMS: dict = {}
-
-
-def _perm(L, device):
-    """key_perm and its inverse, built once per (L, device) (outside CUDA-graph capture the first call builds them)."""
-    key = (L, str(device))
-    if key not in _PERMS:
-        from miniworld_engine.kernels.conditioned_transition.cuda import key_perm
-
-        p = key_perm(L, device)
-        _PERMS[key] = (p, torch.argsort(p))
-    return _PERMS[key]
-
 def _fwd_fake(q, k, v, pair, lnw, wb, mask, eps, want_t):
     """Shapes of the TF32 pair-fused attention forward (outputs and saved tensors; all like q's dtype)."""
     A, _, L, H, D = q.shape

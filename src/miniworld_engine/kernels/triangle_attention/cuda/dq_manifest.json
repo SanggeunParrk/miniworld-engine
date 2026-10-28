@@ -11,9 +11,10 @@
   ],
   "artifact": "package_rebuild",
   "files": {
-    "dq.cu": "3b50549c448fc97a6ba36cf4f3f26dfd1750102cff12272b3e6ba2c55d270abf",
+    "dq.cu": "2ffb3e0e9ba14ed4d07372d6b06c06c52446273058933639a3f329ad31f3c4b0",
+    "dq_common.cuh": "b56349e238b251324ab1493a8f4c713cf1a45da742e28e33348432032575ea12",
     "dq_backward.py": "8b9b9142076757249b0a26b896c9e22d6aa75ee7ad8c34fc7da4c3efb250a335",
-    "build_dq.py": "f5e5c7bc15d923feb1136e964bd2b2adae2c34221fca75434a7dbbd491cc3e45",
+    "build_dq.py": "e622570b0cd0d1b09fff114d6d9e2cda65a722313a49151d3a8e8574b4e4124d",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
     "triattn_dq_rs_softmax_overlap.so": "9ac98bf0d997b924a3c6757b79fc146566a752673628c9e2e07ff228a0acd896"
   }

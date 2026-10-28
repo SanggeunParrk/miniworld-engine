@@ -11,17 +11,12 @@ from typing import Any
 def transition_candidates(sms, *, backward=False, n=4):
     """Schedules of the D128 fused Transition. The backward gives the weight role ``2 n`` hidden slices times ``dw_repl``
     replicas; the best split moves with the slice count (8 at n = 4, 15 at n = 2)."""
-    from miniworld_engine import settings  # avoid an import cycle
-
     if sms <= 8:
         raise ValueError("fused Transition requires more than 8 SMs")
     slices = 2 * n
     replica = min(
         15 if n == 2 else 8, (sms - 1) // slices
     )  # measured on H100 (n = 2: 14-15 best, 16 is 4 % slower)
-    replica = min(
-        settings.current().transition_dw_repl or replica, (sms - 1) // slices
-    )  # experiment override
     default = {"ctas": sms, "dw_repl": replica}
     ctas = (sms, max(16, sms // 2), sms * 2)
     replicas = (

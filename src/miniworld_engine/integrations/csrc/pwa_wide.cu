@@ -20,6 +20,7 @@
 #include <cuda.h>
 #include <map>
 #include "wgmma_n64.cuh"
+#include "sm90_ptx.cuh"
 
 #ifndef PW_D
 #define PW_D 128
@@ -46,8 +47,8 @@ __device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool pred) {
   const int sz = pred ? 16 : 0;
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(sz) : "memory");
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory"); }
+using csrc_sm90::mma::cp_commit;
+using csrc_sm90::mma::cp_wait;
 __device__ __forceinline__ uint32_t pack2(float a, float b) {
   const __nv_bfloat162 h = __float22bfloat162_rn(make_float2(a, b));
   return *reinterpret_cast<const uint32_t*>(&h);

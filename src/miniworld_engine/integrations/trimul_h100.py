@@ -266,13 +266,10 @@ def _b200style_update(module, pair, mask, dropscale, bidirectional, out=None):
 
 
 def _native_buckets_enabled(pair=None):
-    """True = explicit native buckets. Unset (None): D64 / D128 take them at every length 128..1024 (2026-10-13: 1.2-2.4x
+    """D64 / D128 take the native buckets at every length 128..1024 (2026-10-13: 1.2-2.4x
     over the Triton fallback they otherwise get outside L384 / L768); D256+ keep the qualified cells only (the explicit
     buckets measured 2.6x slower there at L384 / L768)."""
-    policy = settings.current().trimul_h100_native_buckets
-    if policy is None and pair is not None:
-        return pair.shape[-1] in (64, 128)
-    return policy is True
+    return pair is not None and pair.shape[-1] in (64, 128)
 
 
 def _selected_uni_d256(module, pair):
@@ -618,7 +615,7 @@ def _native_training_enabled():
 def native_training_dropout(module, pair, probability):
     """Share the hand-CUDA Philox primitive; preserve PyTorch RNG progression. (B samples: the selection of one launch's chunk.)"""
     one = _one_chunk(module, pair, False)
-    if not (_b200style_serves(module, one) or settings.current().trimul_h100_native_buckets is True or _selected_wide_training(module, one) or _selected_d64_training(module, one) or (one.shape[-1] == 64 and _native_training_enabled())) or not _serves_one(module, one):
+    if not (_b200style_serves(module, one) or _selected_wide_training(module, one) or _selected_d64_training(module, one) or (one.shape[-1] == 64 and _native_training_enabled())) or not _serves_one(module, one):
         return None
     from miniworld_engine.kernels.triangle_attention.cuda.h100_triattn import extension
     return extension("pack").drop_scale(pair, probability).reshape(

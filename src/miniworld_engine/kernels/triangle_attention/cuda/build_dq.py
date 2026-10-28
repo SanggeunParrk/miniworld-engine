@@ -29,7 +29,7 @@ module = load(name=module_name, sources=[str(ROOT / "dq.cu")],
               "--expt-extended-lambda", "-lineinfo", "-Xptxas=-v"], verbose=True)
 shutil.copy2(module.__file__, ROOT / (binary + ".new"))
 os.replace(ROOT / (binary + ".new"), ROOT / binary)
-files = ["dq.cu", "dq_backward.py", "build_dq.py", "fa3_utils.h", binary]
+files = ["dq.cu", "dq_common.cuh", "dq_backward.py", "build_dq.py", "fa3_utils.h", binary]
 data = dict(torch=str(torch.__version__), python_abi=sys.implementation.cache_tag, arch="sm_90a",
             module_name=module_name, binary=binary, lengths=previous["lengths"],
             artifact="package_rebuild",

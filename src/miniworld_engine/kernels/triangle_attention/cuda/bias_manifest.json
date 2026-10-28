@@ -13,9 +13,10 @@
   "row_group": 8,
   "artifact": "package_rebuild",
   "files": {
-    "bias_fusion.cu": "401b3c654c2e0b2d34bb843966c92c05ce7d9eed7d76d46ab8f25045343ac8e2",
-    "bias_backward.py": "267c45b39485f56563d940997a9bb09c0c7b89098ad8dc6aad518e5c78fda3dc",
-    "build_bias.py": "509b25514799ab72f9601bc5a2216949a6d3a28baf05b16fd8fa85fd336c95ac",
+    "bias_fusion.cu": "aac1d9e2d775e7c48b75c77f87642b0e437bc2b1a8ebda5cd31c4555ba6a966d",
+    "bias_fusion_common.cuh": "e137c18157bdf3bec866187619fb618ed8accdae124005ae20f69ebf79db84c8",
+    "bias_backward.py": "c1227918fb6a288970d16f27c9b9482d2201f7bfecf7cd69a420a149b4aa2d64",
+    "build_bias.py": "24d6d024e0b12d952df8f9622eada6557e6fb82f846995ce5307382bb90b5626",
     "fa3_utils.h": "776172706a741081ba0a32058ca6d0ce94bea976a5689d0965b162eaf7f5d9cc",
     "triattn_bias_rs8_async_q4.so": "a449d0969eb225832d9b12603b83eed32b880c143bfc1923a28516e06e7633a3"
   }

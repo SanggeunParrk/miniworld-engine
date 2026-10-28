@@ -169,25 +169,6 @@ def _row_gemm(
 # standalone weight address memory differently, which is exactly the kind of thing a
 # tuned tile choice can depend on.
 
-def _configs():
-    return [
-        triton.Config({"BLOCK_M1": m, "BLOCK_K": k}, num_warps=w, num_stages=s)
-        for m in (64, 128, 256)
-        for k in (32, 64, 128)
-        for w in (4, 8)
-        for s in (1, 2, 3)
-    ]
-
-
-def _elementwise_configs():
-    return [
-        triton.Config({"BLOCK_M1": m}, num_warps=w, num_stages=s)
-        for m in (64, 128, 256, 512)
-        for w in (4, 8)
-        for s in (1, 2, 3)
-    ]
-
-
 # ---- forward -------------------------------------------------------------------------
 @triton.autotune(
     configs=configs_for("mpnn_edge_tail_fwd_gemm_gather_saveact_triton"),

@@ -1,5 +1,6 @@
 // The sm_90a PTX helpers the integrations/csrc wgmma + TMA kernels share (dgv_bwd, ln_vg, opm_epilogue, pwa_*): wgmma
-// fragments and groups, setmaxnreg, mbarrier, TMA bulk tensor copies and bulk groups, cluster barriers. One definition
+// fragments and groups, setmaxnreg, mbarrier, TMA bulk tensor copies and bulk groups, cluster barriers, and (`mma`) the mma.sync /
+// cp.async group helpers of pair3 / pair_wide / pwa_wide. One definition
 // each; a file brings the ones it uses into its own `wg` / `tma` namespace with `using csrc_sm90::wg::x;`. A helper whose
 // text differs between the kernels (opm_epilogue's other wgmma shapes, pwa_fwd2's templated reg_alloc, ...) stays in its file.
 #pragma once
@@ -256,5 +257,15 @@ template <int N> __device__ __forceinline__ void wait_read() { asm volatile("cp.
 __device__ __forceinline__ void wait_all() { asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory"); }
 __device__ __forceinline__ void wait_read() { asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory"); }
 }  // namespace tma
+
+namespace mma {
+// the mma.sync / cp.async helpers of the pair-side and wide PWA kernels (pair3, pair_wide, pwa_wide)
+__device__ __forceinline__ void mma_bf16(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
+template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory"); }
+}  // namespace mma
 
 }  // namespace csrc_sm90

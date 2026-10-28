@@ -47,11 +47,6 @@ from miniworld_engine.autotune.shape_key import both_key, pack, length_of, rows_
 from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
 
 AUTOTUNE = settings.current().autotunes("transition")
-def use_savedxn_split_bwd() -> bool:
-    """Read at call time; see layernorm.compile_native._ln_bwd_override."""
-    return settings.current().transition_savedxn_split_bwd
-
-
 _TRANSITION_LNBWD_PRIVATIZE_REPLICAS = 64
 
 
@@ -1059,39 +1054,6 @@ def _transition_expand_gatebwd_stacked(x2, rstd, c1, gamma, beta, wa, wb, grad_e
     return h, dAB, xn
 
 
-def _transition_expand_gatebwd_savedxn(xn, wa, wb, grad_expand, *, store_h: bool = True,
-                                       shape_key: int | None = None):
-    """Version B: reuse the SAVED xn (no normalize, no emit) + recompute a,b once -> (h, dA, dB).
-
-    ``xn`` is the (M, K) normalized x emitted and saved by the forward kernel. The gatebwd
-    kernel reads it directly as the GEMM operand (NORMALIZE=False), so the stats / gamma /
-    beta and the inline-normalize-per-N-tile work are skipped entirely.
-    """
-    M, K = xn.shape
-    ND = wa.shape[0]
-    h = torch.empty_like(grad_expand) if store_h else grad_expand
-    dA = torch.empty_like(grad_expand)
-    dB = torch.empty_like(grad_expand)
-    grid = lambda meta: tile_grid(M, ND, meta["BLOCK_M1"], meta["BLOCK_N"])  # noqa: E731
-    _transition_expand_gatebwd_kernel[grid](
-        xn, xn, xn, xn, xn,          # rstd/c1/g/beta unused when NORMALIZE=False (pass xn as filler)
-        wa, wb, grad_expand,
-        h, dA, dB, dA, xn,           # dAB/xn_ptr unused — pass existing tensors as filler
-        M, ND, K, _shape_key(shape_key, M, ND=ND, K=K),
-        xn.stride(0), xn.stride(1),
-        wa.stride(0), wa.stride(1), wb.stride(0), wb.stride(1),
-        grad_expand.stride(0), grad_expand.stride(1),
-        dA.stride(0), dA.stride(1),
-        dA.stride(0), dA.stride(1),
-        xn.stride(0), xn.stride(1),
-        NORMALIZE=False,
-        STORE_H=store_h,
-        STACK_DAB=False,
-        PREC=dot_precision(wa.dtype),
-    )
-    return (h, dA, dB) if store_h else (dA, dB)
-
-
 def _transition_expand_gatebwd_savedxn_stacked_fake(xn, wa, wb, grad_expand, shape_key=None):
     """``h`` like ``grad_expand`` (M, ND), plus the stacked ``dAB`` (M, 2*ND) -- dA in the first ND
     columns, dB in the next -- which is the packing the two larger downstream GEMMs consume."""
@@ -1469,25 +1431,6 @@ def _fused_bwd_impl(
     #   B (has_xn):   reuse the saved xn (no re-normalize).
     #   A (recompute): re-normalize x from saved stats inline.
     # Both emit stacked dAB=[dA|dB] so stages (3)(4)(5)(6) below are version-INDEPENDENT.
-    # use_savedxn_split_bwd() keeps the old split comparator (has_xn only, default off).
-    if has_xn and use_savedxn_split_bwd():
-        h, dA, dB = _transition_expand_gatebwd_savedxn(
-            xn_saved, expand_a_weight, expand_b_weight, grad_expand, shape_key=shape_key,
-        )
-        xn = xn_saved
-        dWs = go.t() @ h
-        dWa = dA.t() @ xn
-        dWb = dB.t() @ xn
-        d_xn = dA @ expand_a_weight + dB @ expand_b_weight
-        dx, dgamma, dbeta = _transition_ln_bwd(d_xn, x2, rstd, c1, ln_weight,
-                                              shape_key=shape_key, ln_bwd_hook=ln_bwd_hook)
-        return (
-            _finalize_dx(dx),
-            dgamma.to(ln_weight.dtype),
-            dbeta.to(ln_bias.dtype),
-            dWa, dWb, dWs,
-        )
-
     if has_xn:
         h, dAB = _transition_expand_gatebwd_savedxn_stacked(
             xn_saved, expand_a_weight, expand_b_weight, grad_expand, shape_key=shape_key,

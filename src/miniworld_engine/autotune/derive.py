@@ -399,7 +399,6 @@ def install_native_recorders() -> None:
             # TriangleAttention's prebuilt extensions (their opaque wrappers run eagerly here).
             ("kernels.triangle_attention.cuda", (("_dgrad", "_dgrad_fake"),)),
             ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_backward_fake"),)),
-            ("kernels.triangle_attention.cuda.wgrad_backward", (("_backward", "_backward_fake"),)),
             ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_backward_fake"),)),
         )
 

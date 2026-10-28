@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 import torch
-from settings_helpers import override_setting
 
 pytestmark = [pytest.mark.gpu, pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA required")]
 
@@ -25,7 +24,6 @@ def test_dispatch_and_all_gradients(length, direction, master, monkeypatch):
     helpers = runpy.run_path(str(Path(__file__).with_name("test_trimul_h100_b200style_gpu.py")))
     from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
-    override_setting(monkeypatch, "trimul_h100_native_buckets", True)
     for constant in ("_TRAIN_CUDA_UNSCOPED", "_TRAIN_FUSED_PREP_UNSCOPED", "_CUDA_AUX_UNSCOPED"):
         monkeypatch.setattr(T, constant, True)
     previous = settings.configure(force_portable_kernels=False)

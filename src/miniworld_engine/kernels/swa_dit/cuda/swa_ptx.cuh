@@ -1,6 +1,6 @@
 // The PTX helpers the sm_90a SWA atom DiT kernels share (mbarrier / TMA bulk tensor copies, wgmma groups, cp.async groups, bf16 packing):
-// one definition each, included by every swa_*.cu that uses them. A helper whose body differs between the kernels (load_2d / load_4d of
-// swa_fp32.cu, the cp16 / ldsm4 / ldsm4t of swa_fp32.cu and swa_slab.cu, the mbarrier and wgmma waits) stays in its file.
+// one definition each, included by every swa_*.cu that uses them. A helper whose body differs between the kernels (load_2d / 4d / 5d of
+// swa_fp32.cu, the cp16 / ldsm4 / ldsm4t / mma of swa_fp32.cu and swa_slab.cu, swa_mod.cu's cp16) stays in its file.
 #pragma once
 #include <cstdint>
 #include <cuda_bf16.h>
@@ -48,3 +48,54 @@ __device__ __forceinline__ float2 unpack(uint32_t u) {
   const __nv_bfloat162 v = *reinterpret_cast<const __nv_bfloat162*>(&u);
   return make_float2(__low2float(v), __high2float(v));
 }
+
+// The helpers below have one text per group of kernels; each group's is in its own namespace (a file brings its group's in with
+// `using`), since two groups use the same name for a different text.
+
+// mma.sync / ldmatrix / cp.async of the warp-level kernels (swa_attn, swa_mod, swa_wgrad)
+namespace swa_mma {
+__device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool ok) {
+  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(ok ? 16 : 0) : "memory");
+}
+__device__ __forceinline__ void ldsm4(uint32_t a, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
+}
+__device__ __forceinline__ void ldsm4t(uint32_t a, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
+  asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
+}
+__device__ __forceinline__ void mma(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
+  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
+               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
+}
+}  // namespace swa_mma
+
+// the wgmma group wait of the warp-specialised kernels (swa_qkvg_fwd, swa_ffn_fwd, swa_ffn_bwd, swa_fp32)
+namespace swa_wg {
+template <int K> __device__ __forceinline__ void wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(K) : "memory"); }
+}  // namespace swa_wg
+
+// their mbarrier wait and TMA loads (swa_fp32 takes the wait only: its loads address shared memory by pointer)
+namespace swa_tma {
+__device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
+  asm volatile("{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAIT_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void load_2d(const void* map, uint32_t dst, uint64_t* bar, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1) : "memory");
+}
+__device__ __forceinline__ void load_4d(const void* map, uint32_t dst, uint64_t* bar, int c0, int c1, int c2, int c3) {
+  asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
+}
+}  // namespace swa_tma
+
+// the mbarrier wait and 2-D TMA load of the one-warpgroup kernels (swa_mod_wg, swa_wgrad_wg, swa_wgrad_wg_f32)
+namespace swa_tma1 {
+__device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
+  asm volatile("{\n.reg .pred p;\nW_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
+}
+__device__ __forceinline__ void tma2d(const void* map, void* dst, uint64_t* bar, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
+               :: "r"(sa(dst)), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1) : "memory");
+}
+}  // namespace swa_tma1

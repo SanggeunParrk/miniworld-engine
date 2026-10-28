@@ -65,12 +65,7 @@ class Front(torch.autograd.Function):
         dy=[g.reshape(-1,w.shape[0]).contiguous() for g,w in zip((dq,dk,dv,dg,db),weights)]
         dx,dgamma,dbeta=_backward(dy,weights,x,mean,rstd,gamma,residual,x.shape[1],ctx.ending)
         zz=z.reshape(-1,128)
-        from miniworld_engine.kernels.triangle_attention.cuda import wgrad_backward
-        needed=ctx.needs_input_grad[5:]
-        if all(needed[:4]) and wgrad_backward.can_use(dy[:4],zz):
-            dw=[*wgrad_backward.backward(dy[:4],zz),dy[4].T@zz if needed[4] else None]
-        else:
-            dw=[g.T@zz if n else None for g,n in zip(dy,needed)]
+        dw=[g.T@zz if n else None for g,n in zip(dy,ctx.needs_input_grad[5:])]
         return dx,dgamma,dbeta,None,None,*dw
 
 def forward(model,pair,mask=None):

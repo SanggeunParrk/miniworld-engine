@@ -7,6 +7,7 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <cuda_pipeline.h>
+#include "sm90_ptx.cuh"
 
 namespace {
 constexpr int DZ = 128, H = 8, NWARP = 8, THREADS = NWARP * 32, GJ = 16;
@@ -43,10 +44,7 @@ __device__ __forceinline__ void ldm_a(uint32_t tile, int ks, int lane, uint32_t*
   const int m = lane >> 3, r = (lane & 7) + ((m & 1) << 3), ch = 2 * ks + (m >> 1);
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(a[0]), "=r"(a[1]), "=r"(a[2]), "=r"(a[3]) : "r"(tile + tile_off(r, ch)));
 }
-__device__ __forceinline__ void mma_bf16(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
-  asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
-               : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
+using csrc_sm90::mma::mma_bf16;
 __device__ __forceinline__ void cp_tile(uint32_t dst, const __nv_bfloat16* src_row0, int lane) {   // 16 rows x 256 B, 8 chunks per lane
 #pragma unroll
   for (int q = 0; q < 8; ++q) {
@@ -54,8 +52,8 @@ __device__ __forceinline__ void cp_tile(uint32_t dst, const __nv_bfloat16* src_r
     asm volatile("cp.async.cg.shared.global [%0], [%1], 16;\n" :: "r"(dst + tile_off(r, ch)), "l"(src_row0 + (long)r * DZ + ch * 8) : "memory");
   }
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory"); }
+using csrc_sm90::mma::cp_commit;
+using csrc_sm90::mma::cp_wait;
 
 // ---------------------------------------------------------------- forward ----------------------------------------------------------------
 __global__ void __launch_bounds__(THREADS, 2) pair_fwd_kernel(const __nv_bfloat16* __restrict__ Z, const __nv_bfloat16* __restrict__ MASK,

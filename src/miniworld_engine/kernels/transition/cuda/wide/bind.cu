@@ -27,14 +27,6 @@ void wide_d64_fwd_small_f2_launch(const CUtensorMap&, const CUtensorMap&, const 
                                   const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
 void wide_d64_fwd_small_f3_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                                   const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
-void wide_d64_fwd_h32x4_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
-                               const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
-void wide_d64_fwd_h32x5_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
-                               const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
-void wide_d64_fwd_small3_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
-                                const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
-void wide_d64_fwd_small_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
-                               const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
 void wide_d64_fwd_launch(const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&, const CUtensorMap&,
                          const float*, const float*, __nv_bfloat16*, __nv_bfloat16*, float*, float*, int, int, float, int, cudaStream_t);
 int wide_d64_bwd_ndw();
@@ -184,7 +176,7 @@ std::vector<torch::Tensor> fwd(torch::Tensor x, torch::Tensor gamma, torch::Tens
 #if WIDE_D == 64
 // Inference forward in 64-row tiles (one consumer warpgroup per CTA); M a multiple of 64.  Same arguments as fwd with save = false.
 torch::Tensor fwd_small(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb, torch::Tensor wst,
-                        double eps, int64_t per_sm = 2) {
+                        double eps, int64_t per_sm = 13) {
   const int64_t M = x.size(0);
   bf16_2d(x, M, D, "x must be contiguous bf16 [M, D]");
   expect(M % 64 == 0, "row count must be a whole number of 64-row tiles");
@@ -194,21 +186,10 @@ torch::Tensor fwd_small(torch::Tensor x, torch::Tensor gamma, torch::Tensor beta
   auto f32 = x.options().dtype(torch::kFloat32);
   auto xn = torch::empty({1, D}, x.options());
   auto rstd = torch::empty({1}, f32), c1 = torch::empty({1}, f32);
-  if (per_sm == 12 || per_sm == 13) {                         // LayerNorm in the A-fragment layout, 2 / 3 CTAs per SM
-    (per_sm == 12 ? wide_d64_fwd_small_f2_launch : wide_d64_fwd_small_f3_launch)(
-        rm(x, 64, 64), rm(wa, 64, 64), rm(wb, 64, 64), rm(wst, 64, 64), rm(out, 64, 64), fp(gamma), fp(beta), bp(xn), bp(out), fp(rstd),
-        fp(c1), (int)M, (int)(M / 64), (float)eps, 0, at::cuda::getCurrentCUDAStream());
-    return out;
-  }
-  if (per_sm >= 14) {                                         // 14 / 15: hidden chunks of 32 units (the h32 builds, 4 / 5 CTAs per SM)
-    (per_sm == 14 ? wide_d64_fwd_h32x4_launch : wide_d64_fwd_h32x5_launch)(
-        rm(x, 64, 64), rm(wa, 64, 32), rm(wb, 64, 32), rm(wst, 64, 32), rm(out, 64, 64), fp(gamma), fp(beta), bp(xn), bp(out), fp(rstd),
-        fp(c1), (int)M, (int)(M / 64), (float)eps, 0, at::cuda::getCurrentCUDAStream());
-    return out;
-  }
-  (per_sm == 3 ? wide_d64_fwd_small3_launch : wide_d64_fwd_small_launch)(
-      rm(x, 64, 64), rm(wa, 64, 64), rm(wb, 64, 64), rm(wst, 64, 64), rm(out, 64, 64), fp(gamma), fp(beta), bp(xn), bp(out), fp(rstd),
-      fp(c1), (int)M, (int)(M / 64), (float)eps, 0, at::cuda::getCurrentCUDAStream());
+  expect(per_sm == 12 || per_sm == 13, "per_sm must be 12 or 13 (LayerNorm in the A-fragment layout, 2 / 3 CTAs per SM)");
+  (per_sm == 12 ? wide_d64_fwd_small_f2_launch : wide_d64_fwd_small_f3_launch)(
+    rm(x, 64, 64), rm(wa, 64, 64), rm(wb, 64, 64), rm(wst, 64, 64), rm(out, 64, 64), fp(gamma), fp(beta), bp(xn), bp(out), fp(rstd),
+    fp(c1), (int)M, (int)(M / 64), (float)eps, 0, at::cuda::getCurrentCUDAStream());
   return out;
 }
 #endif
@@ -386,7 +367,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #if WIDE_D == 64
   m.def("bwd_master", &bwd_master);
   m.def("bwd", [](torch::Tensor dy, torch::Tensor x, torch::Tensor xn, torch::Tensor rs, torch::Tensor c1, torch::Tensor g, torch::Tensor wa, torch::Tensor wb, torch::Tensor ws) { return bwd_master(dy,x,xn,rs,c1,g,wa,wb,ws,false); }, "D = 64 fused Transition backward");
-  m.def("fwd_small", &fwd_small, "D = 64 inference forward, 64-row tiles", py::arg("x"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("wst"), py::arg("eps"), py::arg("per_sm") = 2);
+  m.def("fwd_small", &fwd_small, "D = 64 inference forward, 64-row tiles", py::arg("x"), py::arg("gamma"), py::arg("beta"), py::arg("wa"), py::arg("wb"), py::arg("wst"), py::arg("eps"), py::arg("per_sm") = 13);
 #endif
 #if WIDE_D >= 256
   m.def("gate", &gate, "backward gate stage: h, [dA|dB]");

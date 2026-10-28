@@ -191,7 +191,7 @@ What produced the small-row numbers (all measured):
 
 | change | effect |
 |---|---|
-| D64 forward in 64-row tiles (`NWG = 1`, one consumer warpgroup, 2 CTAs / SM, `wide/d64_fwd_small.cu`), inference up to 20 480 rows | removes a +2.5 µs step at 96+ tiles: n = 2 12 288 rows 9.9 -> 7.3 µs, 3072 rows 7.1 -> 5.7; bit-identical output |
+| D64 forward in 64-row tiles (`NWG = 1`, one consumer warpgroup, 2 CTAs / SM, `wide/d64_fwd_small.cu`, since replaced by `d64_fwd_small_f2.cu` / `_f3.cu` and removed), inference up to 20 480 rows | removes a +2.5 µs step at 96+ tiles: n = 2 12 288 rows 9.9 -> 7.3 µs, 3072 rows 7.1 -> 5.7; bit-identical output |
 | squeeze-weight transpose cached by storage / version (`cuda/_weights.py`) | -1.7 µs kernel + gap per call (D64 768 rows 8.6 -> 6.8) |
 | generic kernels below 3 072 .. 16 384 rows (`prefers_generic`, per D, mode and n) | D256 3072 rows 44 -> 18 µs, D384 77 -> 30, D512 117 -> 40 |
 | weight-gradient GEMMs on a second stream in the training backward (`_weight_grads_aside`, rows <= 12 288 (D64) / 3 072 (D128 .. 384) / 768 (D512)) | 1.25 - 1.28x at D64 / 128 768 - 3072 rows, 1.03 - 1.13x D256 / 384; 1 - 3 % loss at 49 152+ rows so it is off there |

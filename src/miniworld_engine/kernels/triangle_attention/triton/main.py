@@ -141,10 +141,6 @@ def _attn_bwd_preprocess(
     tl.store(Delta + off_hz * N_CTX + off_m, delta, mask=off_m < N_CTX)
 
 
-def _next_pow2(x: int) -> int:
-    return 1 << (int(x) - 1).bit_length() if x > 1 else 1
-
-
 # Static-shared-memory estimate for the dkdv/dq backward configs, used by the device-smem
 # prune to drop unlaunchable configs BEFORE the autotuner tries (and dies on) them. The
 # kernel's smem is dominated by the num_stages-pipelined [BLOCK_M1 x HEAD_DIM_PAD] q/do loads plus

@@ -227,7 +227,7 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     the Version A stacked launcher TritonTransitionFusedFunction.backward takes by default."""
     from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
     from miniworld_engine.kernels.transition.triton.fused import (
-        _transition_expand_gatebwd_savedxn,
+        _transition_expand_gatebwd_savedxn_stacked,
         _transition_expand_gatebwd_stacked,
     )
 
@@ -239,15 +239,9 @@ def transition_bwd_swiglu_recompute_triton() -> None:
     _transition_expand_gatebwd_stacked(x2, rstd, c1, g, b, wa, wb, grad_expand,
                                        shape_key=SHAPE_KEY)          # NORMALIZE=1, STORE_H=1
     # The Version B (saved-xn) backward is the SAME kernel with NORMALIZE=False -- it reads the
-    # already-normalized xn as the GEMM operand instead of recomputing it -- and it varies STORE_H
-    # on top of that (fused.py:1052-1077, 1093-1117). Both are keyed; neither was driven, so the
-    # whole saved-xn half of this kernel ran on the heuristic subset.
-    _transition_expand_gatebwd_savedxn(x2, wa, wb, grad_expand, store_h=True,
-                                       shape_key=SHAPE_KEY)          # NORMALIZE=0, STORE_H=1
-    # STORE_H=0 is NOT driven: fused.py:1052 defaults `store_h=True` and its caller takes that
-    # default (fused.py:1573, implicitly). NORMALIZE=0 is,
-    # because the saved-xn backward really runs it -- replay asked for (NORMALIZE=0, STORE_H=1)
-    # six times.
+    # already-normalized xn as the GEMM operand instead of recomputing it -- stacked like Version A.
+    _transition_expand_gatebwd_savedxn_stacked(x2, wa, wb, grad_expand,
+                                               shape_key=SHAPE_KEY)  # NORMALIZE=0, STORE_H=1
 
 
 def layernorm_bwd_foldstats_triton() -> None:
@@ -398,7 +392,9 @@ def transition_bwd_squeeze_swiglu_triton():
     w_ab = torch.stack((wa, wb), dim=1).reshape(2 * wa.shape[0], wa.shape[1])
     squeeze_swiglu_bwd(x2, w_ab, rows2d(ROWS, K_FROM_ND), ws, SHAPE_KEY)
     # the training backward reads the forward's saved halves instead (SAVED, keyed): what a Transition under autograd launches
-    from miniworld_engine.kernels.transition.triton.training import squeeze_swiglu_bwd_saved
+    from miniworld_engine.kernels.transition.triton.training import (
+        squeeze_swiglu_bwd_saved,
+    )
 
     nd = wa.shape[0]
     a, b = rows2d(ROWS, nd), rows2d(ROWS, nd)

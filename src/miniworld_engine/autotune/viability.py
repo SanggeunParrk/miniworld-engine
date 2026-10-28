@@ -323,11 +323,6 @@ def fit(measured: dict[tuple, int], configs: list[dict]) -> dict[int, Fit | None
     return out
 
 
-def _limit_hint(pts) -> float:
-    """Scale for judging a bias, without the caller having to pass the device limit in twice."""
-    return max((y for *_, y in pts), default=1.0)
-
-
 def _raw(piece: Piece, tile: dict, stages: int, names: list[str], affine: bool) -> float:
     """Shared memory this fit predicts, in whichever of the two shapes it was built as.
 
@@ -381,14 +376,6 @@ def _piece_full(points, names: list[str], affine: bool = True) -> Piece | None:
         return None
     coef = _solve(rows, [y for *_, y in points])
     return None if coef is None else Piece(coef=dict(zip(cols, coef, strict=True)))
-
-
-def _piece(points: list[tuple[dict, float]], names: list[str]) -> Piece | None:
-    if len(points) < 2:
-        return None
-    rows = [[_feature_value(n, t) for n in names] for t, _ in points]
-    coef = _solve(rows, [y for _, y in points])
-    return None if coef is None else Piece(coef=dict(zip(names, coef, strict=True)))
 
 
 def dominated_by(c: dict, axes: list[str], bad: list[dict]) -> bool:

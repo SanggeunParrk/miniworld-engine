@@ -29,7 +29,7 @@ module = load(name=module_name, sources=[str(ROOT / "bias_fusion.cu")],
               "--expt-extended-lambda", "-lineinfo", "-Xptxas=-v"], verbose=True)
 shutil.copy2(module.__file__, ROOT / (binary + ".new"))
 os.replace(ROOT / (binary + ".new"), ROOT / binary)
-files = ["bias_fusion.cu", "bias_backward.py", "build_bias.py", "fa3_utils.h", binary]
+files = ["bias_fusion.cu", "bias_fusion_common.cuh", "bias_backward.py", "build_bias.py", "fa3_utils.h", binary]
 data = dict(torch=str(torch.__version__), python_abi=sys.implementation.cache_tag, arch="sm_90a",
             module_name=module_name, binary=binary, lengths=previous["lengths"],
             partial_dtype="fp32", row_group=previous['row_group'], artifact="package_rebuild",

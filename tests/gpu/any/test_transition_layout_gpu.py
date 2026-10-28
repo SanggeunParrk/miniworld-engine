@@ -49,8 +49,7 @@ def test_transition_strided_forward_and_all_gradients(tiles, dtype, shape):
                                    atol=0.01 if dtype == torch.bfloat16 else 2e-5, msg=label)
 
 
-@pytest.mark.parametrize("variant", ["saved_stacked", "saved_split", "saved_no_h",
-                                    "recompute_stacked", "recompute_split"])
+@pytest.mark.parametrize("variant", ["saved_stacked", "recompute_stacked", "recompute_split"])
 def test_gate_backward_uses_independent_input_and_output_strides(tiles, variant):
     from miniworld_engine.kernels.transition.triton import fused
     torch.manual_seed(51)
@@ -66,9 +65,6 @@ def test_gate_backward_uses_independent_input_and_output_strides(tiles, variant)
     def run(x, wa, wb, dh):
         if variant == "saved_stacked":
             return fused._transition_expand_gatebwd_savedxn_stacked(x, wa, wb, dh)
-        if variant.startswith("saved_"):
-            return fused._transition_expand_gatebwd_savedxn(x, wa, wb, dh,
-                                                           store_h=variant != "saved_no_h")
         f = (fused._transition_expand_gatebwd_stacked if variant.endswith("stacked")
              else fused._transition_expand_gatebwd)
         return f(x, rstd, mean * rstd, gamma, beta, wa, wb, dh)

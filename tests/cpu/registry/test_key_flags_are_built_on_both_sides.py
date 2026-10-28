@@ -75,8 +75,7 @@ ONE_SIDED: dict[tuple[str, str], str] = {
         "the Transition module itself now takes the residual path and never calls this kernel",
     ("transition_layernorm_expand_swiglu_triton", "SAVE_XN"): "same call sites",
     ("transition_bwd_swiglu_recompute_triton", "STORE_H"):
-        "fused.py defaults store_h=True and its one caller (the savedxn backward in fused.py) "
-        "takes the default. No caller anywhere passes False",
+        "every launcher (the stacked backwards in fused.py) stores h. No caller anywhere passes False",
     ("adaln_epilogue_saveact_triton", "HAS_SB"):
         "training.py:206 keys on `scale_bias is not None`, and the sole launcher (training.py:699) "
         "always passes to_scale.bias -- built at modules/adaptive_layernorm/module.py:42 with "

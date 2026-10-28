@@ -63,18 +63,6 @@ def _adaln_ref(x, cond, lnw, ws, sb, wb):
     return gate * x_hat + bias, x_hat, cond_norm, gate, rstd_x, rstd_c
 
 
-def _gate_bwd_saved(gate, x_norm, dy):
-    """(dscale, dxn) by fp32 autograd through y = sigmoid(scale)*x_norm, at the SAVED gate.
-
-    ``scale`` is pinned at ``logit(gate)`` so ``sigmoid(scale)`` reproduces the saved gate the
-    kernel actually read; autograd then supplies the sigmoid derivative and the product rule.
-    """
-    s = torch.logit(gate.float()).detach().requires_grad_(True)
-    xn = x_norm.float().detach().requires_grad_(True)
-    (torch.sigmoid(s) * xn).backward(dy.float())
-    return s.grad, xn.grad
-
-
 def layernorm_fwd_strided():
     """ln_strided._ln_kernel (HAS_W=True) via inference._cond_affine: aff = LN(cond) * lnw.
 

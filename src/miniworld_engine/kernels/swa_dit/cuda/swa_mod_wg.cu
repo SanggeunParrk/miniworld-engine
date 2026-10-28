@@ -16,13 +16,8 @@ using bf16 = __nv_bfloat16;
 constexpr int MW = 768, C = 128;
 constexpr int SMEM = 16384 + 2 * 32768 + 64 + 1024;
 
-__device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
-  asm volatile("{\n.reg .pred p;\nW_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
-}
-__device__ __forceinline__ void tma2d(const void* map, void* dst, uint64_t* bar, int c0, int c1) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
-               :: "r"(sa(dst)), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1) : "memory");
-}
+using swa_tma1::wait;  // swa_ptx.cuh
+using swa_tma1::tma2d;
 // K-major, 128 B swizzle: 8-row groups 1 KB apart
 __device__ __forceinline__ uint64_t desc(const void* p) {
   uint64_t d = static_cast<uint64_t>((sa(p) >> 4) & 0x3FFFu);
