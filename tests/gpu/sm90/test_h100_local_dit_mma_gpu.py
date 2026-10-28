@@ -9,7 +9,6 @@ padded lengths and key masks, the opaque ops under a CUDA graph, and that the ke
 
 import pytest
 import torch
-from settings_helpers import override_setting
 
 from miniworld_engine.integrations import local_dit_h100 as h100
 from miniworld_engine.kernels import _capture
@@ -197,14 +196,12 @@ def test_cuda_graph_replay_inference_and_training():
     assert torch.equal(sx.grad, ref_grads[0])
 
 
-def test_fallback_outside_contract(monkeypatch):
+def test_fallback_outside_contract():
     """A non-cross block, QK norm, an unsupported dtype mix or a non-contiguous input keeps the previous routes (matches() is False)."""
     blk = _block()
     s, c, z, _, mask = _inputs(2, 256, False)
     assert h100.matches(blk, s, c, z, mask)
     assert not h100.matches(blk, s.bfloat16(), c, z, mask)  # mixed activation dtypes
-    override_setting(monkeypatch, "local_dit_h100_mma", False)
-    assert not h100.matches(blk, s, c, z, mask)
 
 
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])

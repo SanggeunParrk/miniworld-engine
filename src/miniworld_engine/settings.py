@@ -219,28 +219,10 @@ class Settings:
     #: kernel behind benches / ConditionedTransition) through the hand-CUDA b2b forward.
     #: Formerly MINIWORLD_TRANSITION_CUDA_B2B.
     transition_cuda_b2b: bool = True
-    #: Route d=128/n=4 bf16 Transition on sm_90 through the fused hand-CUDA forward and
-    #: backward (two launches instead of five; ~1.9x the Triton residual path at L=384, both
-    #: training and inference). Falls back on any other shape, dtype or architecture.
-    #: MINIWORLD_TRANSITION_FUSED_SM90A=0 also turns it off.
-    transition_fused_sm90a: bool = True
-    #: Route the pair-bias attention core, when it computes in bf16 (``compute_dtype=torch.bfloat16`` or bf16 q / k / v), on
-    #: sm_90 with 16 heads x 48 or 4 x 32, B == 1 and L a multiple of 128, through the hand-CUDA forward and backward
-    #: (kernels/augmented_attention/cuda: fwd+bwd 2.5x the bf16 Triton core at L=768, A=48, peak memory -1.9 GB).
-    #: Falls back on anything else. Read by the module and by the kernel entry itself (formerly also ``augattn_bf16_sm90``).
-    augmented_attention_bf16_sm90: bool = True
-    #: The same routing on sm_100 (B200) through the tcgen05 forward and backward
+    #: Route the bf16 pair-bias attention core on sm_100 (B200) through the tcgen05 forward and backward
     #: (kernels/augmented_attention/cuda/sm100: fwd+bwd 3.0x the bf16 Triton core at L=768, A=48), when additionally
     #: A is even and there is no key mask. Falls back on anything else (formerly also ``augattn_bf16_sm100``).
     augmented_attention_bf16_sm100: bool = True
-    #: Route the adaptive LayerNorm of an H100 call (``AdaptiveLayerNorm`` with the engine implementation; bf16 and fp32) through the
-    #: hand-CUDA kernels (kernels/adaln/cuda: sm_90a wgmma inference and bf16 training forward, row kernels + cuBLAS for fp32 training)
-    #: instead of the PyTorch leg's ten fp32 elementwise / LayerNorm kernels. Falls back on anything else (other cards, widths the
-    #: tiles do not take). One setting, one entry point (``kernels.adaln.cuda.adaln``).
-    adaln_h100_cuda: bool = True
-    #: Route the sm90 large-d (K in {256,512}) gate-backward through the hand-CUDA WGMMA kernel
-    #: (beats the Triton recompute). Formerly MINIWORLD_TRANSITION_GATEBWD_WGMMA.
-    transition_gatebwd_wgmma: bool = True
     #: Fuse the layernorm stats pass into the transition kernel. Formerly
     #: MINIWORLD_TRANSITION_FUSE_STATS.
     transition_fuse_stats: bool = False
@@ -282,21 +264,6 @@ class Settings:
     #: 135b7966 + 4) has a diffusion loss of 0.13 with the correct fp32 angles and 0.057 with these. Turn this on to resume or
     #: evaluate such checkpoints; leave it off for anything trained from scratch.
     rope_angles_bf16_compat: bool = False
-    #: Serve the qkvg forward (RMSNorm + adaLN + Q/K/V/gate projections + q/k-norm + RoPE) with the hand-CUDA sm_90a
-    #: wgmma kernel on sm_90; off (or any other card, or a failed build) takes the Triton kernel. Formerly SWA_QKVG_FWD.
-    swa_dit_qkvg_fwd_cuda: bool = True
-    #: Same for the out-projection + gated residual + SwiGLU FFN forward. Formerly SWA_FFN_FWD.
-    swa_dit_ffn_fwd_cuda: bool = True
-    #: Same for the FFN backward (used with `swa_dit_ffn_dw="mat"` only). Formerly SWA_FFN_BWD.
-    swa_dit_ffn_bwd_cuda: bool = True
-    #: Serve the bf16 window attention -- forward, and the backward's dq / dk / dv as ONE kernel -- with the hand-CUDA sm_90a
-    #: kernels (`cuda/swa_attn.cu`); off (or any other card, or a failed build) takes `_swa_attn_fwd_kernel` and
-    #: `_swa_attn_bwd_{dq,dkv}_kernel`.
-    swa_dit_attn_cuda: bool = True
-    #: Same for the bf16 out-projection backward (`cuda/swa_slab.cu`; else `_swa_oproj_bwd_kernel`).
-    swa_dit_oproj_bwd_cuda: bool = True
-    #: Same for the bf16 qkvg backward (`cuda/swa_slab.cu`; else `_swa_qkvg_bwd_kernel`).
-    swa_dit_qkvg_bwd_cuda: bool = True
     #: Which hand-CUDA kernels serve the stages that have two (the qkvg forward, the out-projection + FFN forward, the FFN
     #: backward): "slab" (`cuda/swa_slab.cu`, 16-row slabs per 4-warp group, mma.sync -- built for the small row counts the
     #: block mostly runs at), "wgmma" (team-gm's 64-row wgmma kernels), or "auto" (by row count, see
@@ -308,21 +275,6 @@ class Settings:
     #: dtype of dq1, the gradient handed from the FFN half of the backward to the attention half, on the Triton FFN
     #: backward (the hand-CUDA one writes bf16). Formerly SWA_DQ1.
     swa_dit_dq1: Literal["bf16", "fp32"] = "bf16"
-    #: Serve the fp32 block (q fp32) with the hand-CUDA sm_90a kernels of `kernels/swa_dit/cuda/swa_fp32.cu` on sm_90:
-    #: every stage -- qkvg, window attention, out-projection + FFN and their backwards -- on tf32 wgmma with
-    #: rna-rounded operands (cuBLAS's TF32; the FFN weights split in two tf32 halves) and a bf16-operand window
-    #: attention (FlashAttention-4's). Only while torch's fp32 matmul precision allows TF32 ("high" / "medium"); under
-    #: "highest", off, on any other card, or on a failed build the fp32 Triton kernels serve. The weight gradients are
-    #: torch GEMMs either way.
-    swa_dit_fp32_cuda: bool = True
-    #: Serve the hoisted adaLN modulation (`swa_dit_hoist_modulation`: silu(c) Wmod^T and its backward) with the hand-CUDA
-    #: sm_90a kernels of `kernels/swa_dit/cuda/swa_mod.cu` on sm_90, bf16 (any matmul precision) or fp32 (TF32 allowed). Off
-    #: or on any other card, the fp32 GEMMs of torch serve.
-    swa_dit_mod_cuda: bool = True
-    #: The four weight-gradient GEMMs of the bf16 block backward (dWqkv | dWg, dWo, dWu, dWd) as ONE hand-CUDA launch
-    #: (`kernels/swa_dit/cuda/swa_wgrad.cu`, clusters of 8 CTAs splitting K, summed in rank order) instead of four cuBLAS GEMMs.
-    #: sm_90, bf16, on the all-CUDA backward only.
-    swa_dit_wgrad_cuda: bool = True
 
     # ---- diagnostics ----------------------------------------------------------------------- #
     #: jaxtyped+beartype decoration on annotated functions. Off by default: it is a per-call cost.
@@ -340,8 +292,6 @@ class Settings:
     # ---- kernel switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT`` (default on).
     bias_only_dit: bool = True
-    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_HOIST`` (default on).
-    bias_only_dit_hoist: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TRAIN`` (default on).
     bias_only_dit_train: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1`` (default on).
@@ -386,18 +336,8 @@ class Settings:
     local_dit_sm100: bool = True
     #: Formerly ``MINIWORLD_OPM_TRAIN_SAVE_O`` (default on).
     opm_train_save_o: bool = True
-    #: ``MINIWORLD_OPM_FUSED``: the inference OuterProductMean on H100 as one fused outer product + projection kernel (default on); False runs cuBLAS + the epilogue kernel.
-    opm_fused: bool = True
-    #: Formerly ``MINIWORLD_TOKEN_DIT_ROWS_CUDA`` (default on).
-    token_dit_rows_cuda: bool = True
     #: Formerly ``MINIWORLD_TOKEN_DIT_TRAIN`` (default on).
     token_dit_train: bool = True
-    #: The hand-CUDA TRAINING step of the DiT variant stacks (Boltz-2 / RoseTTAFold3 / Chai-1, token and atom) on H100; off = the portable /
-    #: reference route. Default on.
-    dit_variant_train_cuda: bool = True
-    #: The hand-CUDA TRAINING step of ESMFold2's local atom block (``LocalDiTBlock(**ESMFOLD2)``, bf16, conditioning shared by the samples) on
-    #: H100; off = the portable / reference route. Default on.
-    local_dit_esm_train_cuda: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
     swa_dit_sm100: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_TF32`` (default on).
@@ -408,23 +348,10 @@ class Settings:
     transition_fused_sm100a: bool = True
     #: Formerly ``MINIWORLD_TRANSITION_FUSED_SM80`` (default on).
     transition_fused_sm80: bool = True
-    #: Formerly ``MINIWORLD_TRANSITION_WIDE_SM90A`` (default on).
-    transition_wide_sm90a: bool = True
     #: Formerly ``MINIWORLD_TRANSITION_WIDE_SAVE_H`` (default off).
     transition_wide_save_h: bool = False
-    #: The generic sm_90a Transition kernels (any width multiple of 64, any hidden multiple of 128, ragged rows, fp32 on TF32);
-    #: off leaves only the tuned fused / wide builds. Formerly ``MINIWORLD_TRANSITION_GENERIC_SM90A`` (default on).
-    transition_generic_sm90a: bool = True
     #: Prefer the generic kernels where they beat a tuned build at small row counts. Formerly ``MINIWORLD_TRANSITION_GENERIC_SMALL``.
     transition_generic_small: bool = True
-    #: Training bf16 forwards of the generic path keep a | b for the backward. Formerly ``MINIWORLD_TRANSITION_GENERIC_SAVE_AB``.
-    transition_generic_save_ab: bool = True
-    #: Force the cuBLAS parts of the generic bf16 path: comma separated ``f3`` / ``gate`` / ``dxn``, ``all`` or ``none``; None keeps
-    #: the measured row-count plan. Formerly ``MINIWORLD_TRANSITION_GENERIC_CUBLAS``.
-    transition_generic_cublas: str | None = None
-    #: Overlap the weight gradients with the dxn -> ln_bwd chain at the row counts where it pays. Formerly
-    #: ``MINIWORLD_TRANSITION_GENERIC_DW_ASIDE`` (default on).
-    transition_generic_dw_aside: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU`` (default off).
     bias_only_dit_tf32_glu: bool = False
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_TF32_GLU_BWD`` (default on).
@@ -449,8 +376,6 @@ class Settings:
     bias_only_dit_tf32_dpb_pair: bool | None = None
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL``.
     bias_only_dit_bwd_tail: str = "split3"
-    #: Formerly ``MINIWORLD_TOKEN_DIT_GEMM_SWIGLU``.
-    token_dit_gemm_swiglu: str = "auto"
     #: Formerly ``MINIWORLD_TF32_FUSED_UNITS``.
     tf32_fused_units: str = "auto"
     #: Formerly ``MINIWORLD_TRANSITION_SM100_REPL``; 0 keeps the built-in value.
@@ -486,39 +411,11 @@ class Settings:
     #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel.
     token_pair_init_fused: bool = True
     # ---- H100 native-path switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
-    #: Formerly ``MINIWORLD_APB_H100_TRAIN`` (default on): the native H100 CUDA AttentionPairBias training path
-    #: (`integrations/attention_pair_bias_b200.py`). Off keeps the legacy comparison path (explicit baseline only).
-    apb_h100_train: bool = True
     #: H100 AttentionPairBias training: True recomputes the pair-weight (``to_bias.weight``) gradient in fp32 from bf16-rounded
     #: inputs (the "shadow": 1.45e-2 against an fp64 truth, about 2.4x the step); False (default) keeps the fused kernel's dWf
     #: (bf16 operands, fp32 accumulation: 1.9e-2, the same error as the bf16 PyTorch module, the Triton path and every other
     #: gradient of the block).
     apb_h100_exact_dwb: bool = False
-    #: Formerly ``MINIWORLD_AUGATTN_TF32_SM90`` (default on): serve the fp32 token-DiT inference core with the hand-CUDA TF32 kernel
-    #: (`attn_tf32.cu`) on sm_90; off keeps the Triton core.
-    augattn_tf32_sm90: bool = True
-    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_H100`` (default on): the native Hopper bias-only DiT kernels
-    #: (`kernels/bias_only_dit/cuda`); off takes the sm_100 / composed route.
-    bias_only_dit_h100: bool = True
-    #: The bias-only DiT training block on a pair bias of its own per sample (`bias_only_dit_train.block_psb`), bf16: the attention
-    #: core. "recompute" (default): the forward keeps two floats per softmax row and no P, the backward rebuilds P from the bias
-    #: (`kernels/bias_only_dit/cuda/bo_psb.cu`); "stored": the same kernels with P written by the forward and read by the backward;
-    #: "cublas": the v0 core (batched cuBLAS GEMMs over (head, sample) + torch elementwise ops, P stored). Read per call; same
-    #: numbers within rounding, the others kept for A/B. fp32 always takes the cuBLAS core.
-    bias_only_dit_psb_core: str = "recompute"
-    #: The bias-only DiT inference step on a pair bias of its own per sample (`integrations/bias_only_dit.serves_psb`, H100, bf16 and
-    #: fp32): `FusedBiasOnlyDiT.step_psb` (the 12-launch step with `psb_fwd` / `psb32_fwd` as the attention core) behind a one-pass
-    #: pair LayerNorm + bias projection; off keeps the module's composition. Read per call.
-    bias_only_dit_psb_infer: bool = True
-    #: Formerly ``MINIWORLD_LOCAL_DIT_H100_TRAIN``: None serves the Hopper local atom DiT training block natively when the
-    #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
-    #: False disables the native Hopper training path.
-    local_dit_h100_train: bool | None = None
-    #: The H100 local atom DiT on warp-level tensor-core kernels (``integrations/local_dit_h100``): fp32 inference (TF32). Off keeps the
-    #: previous routes.
-    local_dit_h100_mma: bool = True
-    local_dit_h100_mma_fp32: bool = True
-    local_dit_h100_mma_bf16: bool = True
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None
@@ -529,9 +426,6 @@ class Settings:
     transition_d64_variant: int = 0
     #: Formerly ``MINIWORLD_TRANSITION_DW_REPL``; 0 keeps the built-in value (8 at n = 4, 15 at n = 2): D128 backward weight replicas.
     transition_dw_repl: int = 0
-    #: Run the H100 TriMul contractions through cuBLAS with a zero workspace (no semaphore memset before each GEMM, same kernels,
-    #: bitwise equal results; ``kernels/trimul_inproj/cuda/_h100_bmm.py``). Off falls back to ``torch.bmm``.
-    trimul_h100_zero_workspace_bmm: bool = True
     #: Formerly ``MINIWORLD_TRIMUL_H100_NATIVE_BUCKETS``: None = only the qualified native cells; True also serves the unqualified
     #: lengths 128..1024 and the preserved wide glue for the widths in ``trimul_h100_preserve_widths``; False disables every
     #: native TriMul training cell (formerly NATIVE_BUCKETS=0).
@@ -660,7 +554,7 @@ def engine_jit_root() -> Path:
 #: the variable ("" when the switch was removed). Setting one now changes nothing, so it is reported instead of ignored silently.
 _REMOVED_ENVIRONMENT = {
     "MINIWORLD_AUGATTN_BF16_SM100": "augmented_attention_bf16_sm100",
-    "MINIWORLD_AUGATTN_BF16_SM90": "augmented_attention_bf16_sm90",
+    "MINIWORLD_AUGATTN_BF16_SM90": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT": "bias_only_dit",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_DG": "bias_only_dit_bwd_dg",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_FUSED": "bias_only_dit_bwd_fused",
@@ -672,7 +566,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_COND": "bias_only_dit_cond",
     "MINIWORLD_BIAS_ONLY_DIT_CORE": "bias_only_dit_core",
     "MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR": "bias_only_dit_dpb_pair",
-    "MINIWORLD_BIAS_ONLY_DIT_HOIST": "bias_only_dit_hoist",
+    "MINIWORLD_BIAS_ONLY_DIT_HOIST": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_INF3": "bias_only_dit_inf3",
     "MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA": "bias_only_dit_inf3_2cta",
@@ -698,7 +592,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
     "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
     "MINIWORLD_LOCAL_DIT_TF32_FUSED": "local_dit_tf32_fused",
-    "MINIWORLD_OPM_FUSED": "opm_fused",
+    "MINIWORLD_OPM_FUSED": "",  # removed: the default behaviour is the only one
     "MINIWORLD_OPM_TRAIN": "opm_train",
     "MINIWORLD_OPM_TRAIN_SAVE_O": "opm_train_save_o",
     "MINIWORLD_PLAN_CACHE_DIR": "plan_cache_dir",
@@ -713,17 +607,17 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_SWA_GLOBAL_BF16": "swa_global_bf16",
     "MINIWORLD_TF32_FUSED_UNITS": "tf32_fused_units",
     "MINIWORLD_TF32_PDL": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU": "token_dit_gemm_swiglu",
-    "MINIWORLD_TOKEN_DIT_ROWS_CUDA": "token_dit_rows_cuda",
+    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_TOKEN_DIT_ROWS_CUDA": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_TRAIN": "token_dit_train",
     "MINIWORLD_TRANSITION_FUSED_SM100A": "transition_fused_sm100a",
     "MINIWORLD_TRANSITION_FUSED_SM80": "transition_fused_sm80",
-    "MINIWORLD_TRANSITION_FUSED_SM90A": "transition_fused_sm90a",
+    "MINIWORLD_TRANSITION_FUSED_SM90A": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_SM100_NVCC": "transition_sm100_nvcc",
     "MINIWORLD_TRANSITION_SM100_REPL": "transition_sm100_repl",
     "MINIWORLD_TRANSITION_WIDE_REPL": "transition_wide_repl",
     "MINIWORLD_TRANSITION_WIDE_SAVE_H": "transition_wide_save_h",
-    "MINIWORLD_TRANSITION_WIDE_SM90A": "transition_wide_sm90a",
+    "MINIWORLD_TRANSITION_WIDE_SM90A": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TRANSITION_WIDE_SMALL_FWD_TILES": "transition_wide_small_fwd_tiles",
     "MINIWORLD_TRANSITION_WIDE_SMALL_TILES": "transition_wide_small_tiles",
     "MINIWORLD_TDIT32_WGRAD_SPLIT": "",  # removed: the default behaviour is the only one
@@ -750,12 +644,12 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_APB_H100_SHADOW_IO": "",  # removed: the default behaviour is the only one
     "MINIWORLD_APB_H100_SHADOW_PAIR_LN": "",  # removed: the default behaviour is the only one
     "MINIWORLD_APB_H100_SHADOW_PAIR_PROJECT": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_APB_H100_TRAIN": "apb_h100_train",
+    "MINIWORLD_APB_H100_TRAIN": "",  # removed: the default behaviour is the only one
     "MINIWORLD_APB_PYTORCH_NULL_BETA": "",  # removed: the default behaviour is the only one
     "MINIWORLD_ATOM_H100_COND_WAVES": "",  # removed: the default behaviour is the only one
     "MINIWORLD_ATOM_H100_POST_PACKED": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_AUGATTN_TF32_SM90": "augattn_tf32_sm90",
-    "MINIWORLD_BIAS_ONLY_DIT_H100": "bias_only_dit_h100",
+    "MINIWORLD_AUGATTN_TF32_SM90": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_BIAS_ONLY_DIT_H100": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_H100_FP32_LOGITS": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_H100_INFER_ASYNC": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_H100_PIPELINE": "",  # removed: the default behaviour is the only one
@@ -764,7 +658,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_DIT_H100_CALLER_NATIVE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_LOCAL_DIT_H100": "",  # removed: the default behaviour is the only one
     "MINIWORLD_LOCAL_DIT_H100_OWNED_BLAS": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_LOCAL_DIT_H100_TRAIN": "local_dit_h100_train",
+    "MINIWORLD_LOCAL_DIT_H100_TRAIN": "",  # removed: the default behaviour is the only one
     "MINIWORLD_OPM_H100_CUBLAS_COUNT": "",  # removed: the default behaviour is the only one
     "MINIWORLD_OPM_H100_CUDA_ONLY": "",  # removed: the default behaviour is the only one
     "MINIWORLD_OPM_H100_EPILOGUE_HALF": "",  # removed: the default behaviour is the only one

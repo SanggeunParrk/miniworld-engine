@@ -7,9 +7,9 @@ seqused. A forward kernel is scored on the output; each backward kernel on the g
 gradient of the hoisted modulation, which every backward kernel accumulates a slice of).
 
 The block dispatches on the activation dtype, so a row is checked at the precision it declares and refuses the other
-(``MINIWORLD_DRIVER_DTYPE``). The bf16 Triton rows pin the hand-CUDA stages off; each bf16 ``*_sm90_cuda`` row turns on
-its own stage alone, so its error is not shared with another CUDA stage, and raises (arch-gated) off sm_90. The fp32
-Triton rows pin the fp32 CUDA extension off; the ``*_fp32_sm90_cuda`` rows run it (all stages at once -- it is one
+(``MINIWORLD_DRIVER_DTYPE``). The Triton rows (bf16 and fp32) pin ``force_portable_kernels``; each bf16
+``*_sm90_cuda`` row runs the block with every hand-CUDA stage it serves (there is no per-stage switch) and raises
+(arch-gated) off sm_90; the ``*_fp32_sm90_cuda`` rows run the fp32 CUDA extension (all stages at once -- it is one
 forward and one backward launch sequence) under TF32-allowing matmul precision, which is the only precision it serves.
 The reference runs with TF32 off: the fp32 kernels' TF32 projections and bf16 attention operands are part of the error
 their band prices.
@@ -30,9 +30,7 @@ from miniworld_engine.kernels.drivers.swa_dit import (
 
 _NAMES = ("dq", "dmod", "dw_qkv", "dw_gate", "dw_out", "dw_up", "dw_down")
 _SHAPE = {"a": 8, "b": 2, "s": 333, "seed": 1}
-_CUDA_ONLY = {"force_portable_kernels": False, "swa_dit_qkvg_fwd_cuda": False, "swa_dit_ffn_fwd_cuda": False,
-              "swa_dit_ffn_bwd_cuda": False, "swa_dit_attn_cuda": False, "swa_dit_oproj_bwd_cuda": False,
-              "swa_dit_qkvg_bwd_cuda": False}
+_CUDA = {"force_portable_kernels": False}
 
 
 def _forward_pair(precision, **pins):
@@ -102,60 +100,60 @@ def swa_dit_inproj_bwd_triton():
 
 def swa_dit_inproj_fwd_sm90_cuda():
     _require_cuda("qkvg")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_qkvg_fwd_cuda": True, "swa_dit_rows_impl": "wgmma"})
+    return _forward_pair("bf16", **{**_CUDA, "swa_dit_rows_impl": "wgmma"})
 
 
 def swa_dit_output_swiglu_fwd_sm90_cuda():
     _require_cuda("fwd")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_ffn_fwd_cuda": True, "swa_dit_rows_impl": "wgmma"})
+    return _forward_pair("bf16", **{**_CUDA, "swa_dit_rows_impl": "wgmma"})
 
 
 def swa_dit_swiglu_bwd_sm90_cuda():
     _require_cuda("bwd")
     return _backward_pairs(("dq", "dmod", "dw_up", "dw_down"), "bf16",
-                           **{**_CUDA_ONLY, "swa_dit_ffn_bwd_cuda": True, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "wgmma"})
+                           **{**_CUDA, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "wgmma"})
 
 
 def swa_dit_softmax_fwd_sm90_cuda():
     _require_cuda("attn")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_attn_cuda": True})
+    return _forward_pair("bf16", **_CUDA)
 
 
 def swa_dit_softmax_bwd_sm90_cuda():
     """The attention backward's dq / dk / dv reach the reference through dq and dW_qkv (and dmod via the qkvg backward)."""
     _require_cuda("attn")
-    return _backward_pairs(("dq", "dmod", "dw_qkv"), "bf16", **{**_CUDA_ONLY, "swa_dit_attn_cuda": True})
+    return _backward_pairs(("dq", "dmod", "dw_qkv"), "bf16", **_CUDA)
 
 
 def swa_dit_output_bwd_sm90_cuda():
     _require_cuda("slab")
-    return _backward_pairs(("dq", "dmod", "dw_out", "dw_gate"), "bf16", **{**_CUDA_ONLY, "swa_dit_oproj_bwd_cuda": True})
+    return _backward_pairs(("dq", "dmod", "dw_out", "dw_gate"), "bf16", **_CUDA)
 
 
 def swa_dit_inproj_bwd_sm90_cuda():
     _require_cuda("slab")
-    return _backward_pairs(("dq", "dmod", "dw_qkv", "dw_gate"), "bf16", **{**_CUDA_ONLY, "swa_dit_qkvg_bwd_cuda": True})
+    return _backward_pairs(("dq", "dmod", "dw_qkv", "dw_gate"), "bf16", **_CUDA)
 
 
 def swa_dit_inproj_fwd_rows_sm90_cuda():
     _require_cuda("slab")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_qkvg_fwd_cuda": True, "swa_dit_rows_impl": "slab"})
+    return _forward_pair("bf16", **{**_CUDA, "swa_dit_rows_impl": "slab"})
 
 
 def swa_dit_output_fwd_rows_sm90_cuda():
     _require_cuda("slab")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_ffn_fwd_cuda": True, "swa_dit_rows_impl": "slab"})
+    return _forward_pair("bf16", **{**_CUDA, "swa_dit_rows_impl": "slab"})
 
 
 def swa_dit_swiglu_fwd_rows_sm90_cuda():
     _require_cuda("slab")
-    return _forward_pair("bf16", **{**_CUDA_ONLY, "swa_dit_ffn_fwd_cuda": True, "swa_dit_rows_impl": "slab"})
+    return _forward_pair("bf16", **{**_CUDA, "swa_dit_rows_impl": "slab"})
 
 
 def swa_dit_swiglu_bwd_rows_sm90_cuda():
     _require_cuda("slab")
     return _backward_pairs(("dq", "dmod", "dw_up", "dw_down"), "bf16",
-                           **{**_CUDA_ONLY, "swa_dit_ffn_bwd_cuda": True, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"})
+                           **{**_CUDA, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"})
 
 
 def swa_dit_inproj_fwd_fp32_triton():
@@ -194,7 +192,7 @@ def _modulation_pairs(names):
     c = torch.randn(b, s, 128, generator=g).to("cuda", torch.bfloat16).requires_grad_()
     w = (torch.randn(768, 128, generator=g) * 0.05).to("cuda", torch.bfloat16).requires_grad_()
     gm = torch.randn(b * s, 768, generator=g).to("cuda")
-    with _pinned(force_portable_kernels=False, swa_dit_mod_cuda=True):
+    with _pinned(force_portable_kernels=False):
         mod = swa_dit_hoist_modulation(c, w)
         mod.backward(gm)
     c64, w64 = c.detach().double().requires_grad_(), w.detach().double().requires_grad_()
@@ -216,8 +214,7 @@ def _wgrad_pairs():
     _require_cuda("wgrad")
     _require_cuda("slab")
     _require_cuda("attn")
-    pins = {"force_portable_kernels": False, "swa_dit_wgrad_cuda": True, "swa_dit_ffn_bwd_cuda": True, "swa_dit_oproj_bwd_cuda": True,
-            "swa_dit_qkvg_bwd_cuda": True, "swa_dit_attn_cuda": True, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"}
+    pins = {"force_portable_kernels": False, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"}
     return _backward_pairs(("dw_qkv", "dw_gate", "dw_out", "dw_up", "dw_down"), "bf16", **pins)
 
 

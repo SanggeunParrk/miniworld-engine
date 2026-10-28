@@ -10,7 +10,6 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._device import num_sms
-from miniworld_engine import settings
 
 _dir = str(Path(__file__).parent)
 
@@ -22,14 +21,12 @@ def interleave(wa: torch.Tensor, wb: torch.Tensor) -> torch.Tensor:
 
 #: Below this many rows the (tile pair, chunk) items leave most SM pairs idle in the last round (L384, S = 5: 96 items on 74
 #: pairs, 14.0 us against cuBLAS + the SwiGLU row pass's 13.7); at M = 3840 (L768) it is 18.4 against 22.3 us.
-#: settings.token_dit_gemm_swiglu=1 forces it, =0 turns it off.
 MIN_ROWS = 3840
 
 
 def supported(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
-    """bf16 on sm_100, K a multiple of 64, H a multiple of 128 and of K, and M >= MIN_ROWS unless forced."""
-    mode = settings.current().token_dit_gemm_swiglu
-    if mode == "0" or (mode == "auto" and x.shape[0] < MIN_ROWS):
+    """bf16 on sm_100, K a multiple of 64, H a multiple of 128 and of K, and M >= MIN_ROWS."""
+    if x.shape[0] < MIN_ROWS:
         return False
     if not (x.is_cuda and x.dtype is torch.bfloat16 and w_ab.dtype is torch.bfloat16):
         return False
@@ -132,9 +129,8 @@ MIN_ROWS_SM90 = 128
 
 
 def supported_sm90(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
-    """bf16 or fp32 (TF32) on sm_90, M a multiple of 128 (>= MIN_ROWS_SM90 unless forced), K a multiple of 64 / 32, H of 128."""
-    mode = settings.current().token_dit_gemm_swiglu
-    if mode == "0" or (mode == "auto" and x.shape[0] < MIN_ROWS_SM90):
+    """bf16 or fp32 (TF32) on sm_90, M a multiple of 128 (>= MIN_ROWS_SM90), K a multiple of 64 / 32, H of 128."""
+    if x.shape[0] < MIN_ROWS_SM90:
         return False
     if not (
         x.is_cuda
@@ -142,7 +138,7 @@ def supported_sm90(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
         and w_ab.dtype is x.dtype
     ):
         return False
-    # fp32 (TF32) is opt-in: its TMA-fed operands are truncated to TF32 where cuBLAS rounds them -- 1.6e-3 against 4.2e-4 for
+    # fp32 (TF32) is refused: its TMA-fed operands are truncated to TF32 where cuBLAS rounds them -- 1.6e-3 against 4.2e-4 for
     # cuBLAS + the row pass -- and it wins only at M = 3840 (70.9 vs 85.5 us; 47.6 vs 45.9 at 1920, 759 vs 725 at 36864)
     if x.dtype is torch.float32:
         return False

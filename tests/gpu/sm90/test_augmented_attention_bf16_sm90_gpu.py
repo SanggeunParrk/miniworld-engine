@@ -142,11 +142,11 @@ def test_module_bf16_core_takes_the_kernels_and_keeps_the_triton_error():
     finally:
         cuda_sm90.augmented_attention_bf16_sm90 = orig
     assert calls, "the bf16 core did not take the sm_90 kernels"
-    prev = settings.configure(augmented_attention_bf16_sm90=False)
+    prev = settings.configure(force_portable_kernels=True)
     try:
         tri = run(eng, compute_dtype=torch.bfloat16)
     finally:
-        settings.configure(augmented_attention_bf16_sm90=prev.augmented_attention_bf16_sm90)
+        settings.configure(force_portable_kernels=prev.force_portable_kernels)
     for name, a, b, t in zip(("out", "dsingle", "dcond", "dpair"), sm90, tri, truth, strict=False):
         es, et = _rel(a, t), _rel(b, t)
         assert es < 1.5 * et + 1e-4, f"{name}: sm90 {es:.2e} vs triton bf16 {et:.2e}"

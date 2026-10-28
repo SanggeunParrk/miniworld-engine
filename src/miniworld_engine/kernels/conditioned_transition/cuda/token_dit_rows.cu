@@ -8,7 +8,7 @@
 //   qknorm_rows         q, k (columns 0-767, 768-1535 of a row) <- RMSNorm per 48-wide head * weight, in place (QK-norm)
 //   adaln_in_rows       x = xin (the step's input, any dtype, into the fp32 residual) and out = AdaLN(x), one pass
 //   resgate_out_rows    out = x + sigmoid(gl[tok]) * y in the output dtype (the block's last residual, no fp32 write-back)
-//   layernorm_rows      out = LN(z), C = 384, no affine (the conditioning rows), any in / out dtype
+//   layernorm_rows      out = LN(z), C = 128 / 256 / 384, no affine (the conditioning rows, the DiT variants' pair rows)
 //
 // tok = row % L: the AdaLN / gate tables are per token, shared by the samples of a step. Every operand is read and
 // written once; sums in fp32. One block per row, a thread owns 4 consecutive columns (a 16-B fp32 / 8-B bf16 vector),
@@ -81,29 +81,34 @@ __global__ void __launch_bounds__(NT) resgate_out_rows_kernel(const float* __res
   V4<FT>::store(OUT + row * (NT * 4) + col, x);
 }
 
-// LayerNorm of C = 384 rows, no affine: one warp per row (3 float4 per lane), 8 rows per block
-template <typename ZT, typename OutT>
-__global__ void __launch_bounds__(256) layernorm384_rows_kernel(const ZT* __restrict__ Z, OutT* __restrict__ OUT, long R,
-    long sz, float eps) {
+// LayerNorm of C-wide rows (C = 128, 256 or 384), no affine: one warp per row (C / 128 float4 per lane), 8 rows per block.
+// The one LN-rows kernel of the row extensions (the token DiT conditioning rows, the hoisted pair rows, the DiT variants'
+// pair rows). PERM (C = 128): row r lands at the position of its key (r % 8 = 4 i + j -> 2 j + i within its group of 8),
+// the key order of the H100 TF32 attention core.
+template <int C, typename ZT, typename OutT>
+__global__ void __launch_bounds__(256) layernorm_rows_kernel(const ZT* __restrict__ Z, OutT* __restrict__ OUT, long R,
+    long sz, float eps, bool perm) {
+  constexpr int K = C / 128;
   const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
   const int lane = threadIdx.x % 32;
   if (row >= R) return;
-  float4 z[3];
+  float4 z[K];
   float s = 0.f;
 #pragma unroll
-  for (int k = 0; k < 3; ++k) { z[k] = V4<ZT>::load(Z + row * sz + k * 128 + lane * 4); s += z[k].x + z[k].y + z[k].z + z[k].w; }
-  const float mean = warp_sum(s) / 384.f;
+  for (int k = 0; k < K; ++k) { z[k] = V4<ZT>::load(Z + row * sz + k * 128 + lane * 4); s += z[k].x + z[k].y + z[k].z + z[k].w; }
+  const float mean = warp_sum(s) / (float)C;
   float q = 0.f;
 #pragma unroll
-  for (int k = 0; k < 3; ++k) {
+  for (int k = 0; k < K; ++k) {
     z[k].x -= mean; z[k].y -= mean; z[k].z -= mean; z[k].w -= mean;
     q += z[k].x * z[k].x + z[k].y * z[k].y + z[k].z * z[k].z + z[k].w * z[k].w;
   }
-  const float rstd = rsqrtf(warp_sum(q) / 384.f + eps);
+  const float rstd = rsqrtf(warp_sum(q) / (float)C + eps);
+  const long orow = perm ? row - (row & 7) + 2 * (row & 3) + ((row >> 2) & 1) : row;
 #pragma unroll
-  for (int k = 0; k < 3; ++k) {
+  for (int k = 0; k < K; ++k) {
     z[k].x *= rstd; z[k].y *= rstd; z[k].z *= rstd; z[k].w *= rstd;
-    V4<OutT>::store(OUT + row * 384 + k * 128 + lane * 4, z[k]);
+    V4<OutT>::store(OUT + orow * C + k * 128 + lane * 4, z[k]);
   }
 }
 
@@ -139,22 +144,6 @@ __global__ void __launch_bounds__(512) swiglu_rows_kernel(const T* __restrict__ 
     o.x = a.x * sigm(a.x) * b.x; o.y = a.y * sigm(a.y) * b.y; o.z = a.z * sigm(a.z) * b.z; o.w = a.w * sigm(a.w) * b.w;
     V4<T>::store(OUT + row * N + c, o);
   }
-}
-
-// LayerNorm of C = 128 rows, no affine (the pair rows): one warp per row, 8 rows per block. PERM: row r lands at the
-// position of its key (r % 8 = 4 i + j -> 2 j + i within its group of 8), the key order of the H100 TF32 attention core.
-template <typename ZT, typename OutT>
-__global__ void __launch_bounds__(256) layernorm128_rows_kernel(const ZT* __restrict__ Z, OutT* __restrict__ OUT, long R,
-    long sz, float eps, bool perm) {
-  const long row = (long)blockIdx.x * 8 + threadIdx.x / 32;
-  const int lane = threadIdx.x % 32;
-  if (row >= R) return;
-  float4 z = V4<ZT>::load(Z + row * sz + lane * 4);
-  const float mean = warp_sum(z.x + z.y + z.z + z.w) / 128.f;
-  z.x -= mean; z.y -= mean; z.z -= mean; z.w -= mean;
-  const float rstd = rsqrtf(warp_sum(z.x * z.x + z.y * z.y + z.z * z.z + z.w * z.w) / 128.f + eps);
-  z.x *= rstd; z.y *= rstd; z.z *= rstd; z.w *= rstd;
-  V4<OutT>::store(OUT + (perm ? row - (row & 7) + 2 * (row & 3) + ((row >> 2) & 1) : row) * 128 + lane * 4, z);
 }
 
 // QK-norm in place: one block of D / 2 threads per row (D = the model width), the first half on q (columns 0 .. D - 1), the
@@ -335,18 +324,28 @@ void resgate_out_rows(at::Tensor x, at::Tensor y, at::Tensor gl, at::Tensor out,
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void layernorm_rows(at::Tensor z, at::Tensor out, double eps) {
+template <int C>
+void launch_layernorm_rows(const at::Tensor& z, const at::Tensor& out, double eps, bool perm) {
   const int64_t R = z.size(0);
-  TORCH_CHECK(z.size(1) == 384 && out.is_contiguous() && out.size(1) == 384 && out.size(0) == R, "layernorm_rows: [R, 384]");
-  check_rows(z, "z", 384);
-  const at::cuda::CUDAGuard g(z.device());
   TDR_DISPATCH(z.scalar_type(), ZT, [&] {
     TDR_DISPATCH(out.scalar_type(), OT, [&] {
-      layernorm384_rows_kernel<ZT, OT><<<(unsigned)((R + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-          ptr<const ZT>(z), ptr<OT>(out), R, z.stride(0), (float)eps);
+      layernorm_rows_kernel<C, ZT, OT><<<(unsigned)((R + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+          ptr<const ZT>(z), ptr<OT>(out), R, z.stride(0), (float)eps, perm);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+// out = LN(z), no affine, C = 128, 256 or 384 columns (fp32 or bf16 in / out)
+void layernorm_rows(at::Tensor z, at::Tensor out, double eps) {
+  const int64_t R = z.size(0), C = z.size(1);
+  TORCH_CHECK((C == 128 || C == 256 || C == 384) && out.is_contiguous() && out.size(1) == C && out.size(0) == R,
+              "layernorm_rows: [R, 128 | 256 | 384]");
+  check_rows(z, "z", C);
+  const at::cuda::CUDAGuard g(z.device());
+  if (C == 128) launch_layernorm_rows<128>(z, out, eps, false);
+  else if (C == 256) launch_layernorm_rows<256>(z, out, eps, false);
+  else launch_layernorm_rows<384>(z, out, eps, false);
 }
 
 void gate_rows(at::Tensor o, at::Tensor gt, at::Tensor out) {
@@ -383,13 +382,7 @@ void layernorm128_rows(at::Tensor z, at::Tensor out, double eps, bool perm) {
   TORCH_CHECK(z.size(1) == 128 && out.is_contiguous() && out.size(1) == 128 && out.size(0) == R, "layernorm128_rows");
   check_rows(z, "z", 128);
   const at::cuda::CUDAGuard g(z.device());
-  TDR_DISPATCH(z.scalar_type(), ZT, [&] {
-    TDR_DISPATCH(out.scalar_type(), OT, [&] {
-      layernorm128_rows_kernel<ZT, OT><<<(unsigned)((R + 7) / 8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
-          ptr<const ZT>(z), ptr<OT>(out), R, z.stride(0), (float)eps, perm);
-    });
-  });
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  launch_layernorm_rows<128>(z, out, eps, perm);
 }
 
 // d: the model width (q = columns 0 .. d - 1, k = d .. 2d - 1); the head dim is the weights' length (d / heads)

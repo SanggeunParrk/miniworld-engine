@@ -307,8 +307,6 @@ def _pad8(L: int) -> int:
 def _cuda_rows() -> bool:
     """The fused step's CUDA row kernels are on (and build): the runner takes them on H100 and B200."""
 
-    if not settings.current().token_dit_rows_cuda:
-        return False
     return _cuda_rows_available()
 
 

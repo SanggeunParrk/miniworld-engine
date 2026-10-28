@@ -3,7 +3,7 @@
 ``triton/token_dit_runner.FusedTokenDiT`` is the pure-Triton runner (Triton row kernels, cuBLAS GEMMs, the Triton gated core). This subclass
 only OVERRIDES its hooks with the hand-CUDA choices that used to be made inside that file by compute capability:
 
-* the row passes: CUDA on sm_90 and sm_100 (``settings.token_dit_rows_cuda``), Triton elsewhere or when the extension does not build;
+* the row passes: CUDA on sm_90 and sm_100, Triton elsewhere or when the extension does not build;
 * the expand GEMM with the SwiGLU epilogue (``gemm_swiglu``): sm_100a bf16, sm_90a bf16 / fp32;
 * the attention core: the upstream B200 bf16 / TF32 cores or the H100 bf16 16 x 48 core, and the H100 fp32 TF32 core.
 
@@ -22,11 +22,10 @@ from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner imp
 
 def _row_kernels(device):
     """The row passes between the GEMMs: CUDA on H100 and B200 (``kernels/conditioned_transition/cuda``), Triton elsewhere
-    or when the extension does not build. settings.token_dit_rows_cuda=0 keeps Triton there too."""
+    or when the extension does not build."""
     if (
         device.type == "cuda"
         and torch.cuda.get_device_capability(device) in ((9, 0), (10, 0))
-        and settings.current().token_dit_rows_cuda
     ):
         try:
             from miniworld_engine.kernels.conditioned_transition import (

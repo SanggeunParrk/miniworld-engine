@@ -77,8 +77,6 @@ def _settings():
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """sm_90, bf16 (or fp32 with TF32 allowed), D a multiple of 64 up to 1024, hidden a multiple of 128, weights bf16 or fp32 (cast to the activation dtype inside; the
     weight gradients come back in the weights' own dtype).  Any row count."""
-    if not _settings().transition_generic_sm90a:
-        return False
     if not x.is_cuda or x.dtype not in (torch.bfloat16, torch.float32):
         return False
     for w in (wa, ws):
@@ -197,19 +195,12 @@ def _fwd_h16(ext, x, xn, gamma, beta, wa, wb, ws):
 
 def _saves_ab(x: torch.Tensor, save: bool) -> bool:
     """Training bf16 forwards keep a | b for the backward (no recompute GEMM there); TF32 keeps the recompute (a, b in fp32 would double the bytes)."""
-    return save and x.dtype is torch.bfloat16 and _settings().transition_generic_save_ab
+    return save and x.dtype is torch.bfloat16
 
 
 def _cublas_plan(rows: int, d: int, hid: int) -> tuple[bool, bool, bool]:
     """(F3 as cuBLAS addmm, gate as cuBLAS dh GEMM + SwiGLU-backward kernel, dxn as cuBLAS over [Wa;Wb]) for a bf16 call: below the row
-    counts where the hand-written tiles fill the SMs, cuBLAS's tile shapes win (measured; ``settings.transition_generic_cublas`` = any of
-    ``f3`` / ``gate`` / ``dxn`` comma-separated, ``none`` or ``all`` forces)."""
-    force = _settings().transition_generic_cublas
-    if force is not None:
-        parts = {p.strip() for p in force.split(",")}
-        if "all" in parts:
-            parts = {"f3", "gate", "dxn"}
-        return "f3" in parts, "gate" in parts, "dxn" in parts
+    counts where the hand-written tiles fill the SMs, cuBLAS's tile shapes win (measured)."""
     return (
         False,
         False,
@@ -237,8 +228,6 @@ _DW_ASIDE_ROWS = {64: 12288, 128: 3072, 256: 3072, 384: 3072, 512: 768}
 
 
 def _dw_aside_enabled(rows: int | None = None, d: int | None = None) -> bool:
-    if not _settings().transition_generic_dw_aside:
-        return False
     if rows is None or d is None:
         return True
     limit = _DW_ASIDE_ROWS.get(d)

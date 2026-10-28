@@ -17,7 +17,6 @@ import weakref
 
 import torch
 
-from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
 from . import LOG2E, _is_hopper, tf32_backward, tf32_forward
@@ -34,7 +33,7 @@ def _tf32_on() -> bool:
 
 def supported(q, pair, lnw, wb, mask) -> bool:
     """The contract above."""
-    if not settings.current().augattn_tf32_sm90 or not _tf32_on():
+    if not _tf32_on():
         return False
     if q.dim() != 5 or q.dtype is not torch.float32 or pair.dtype is not torch.float32 or not q.is_cuda:
         return False
@@ -259,7 +258,7 @@ class _PackedQKVG(torch.autograd.Function):
 
 def packed_qkvg_ok(x, wq, bq, wk, wv, wg) -> bool:
     """The packed projection applies: fp32 TF32 on an H100, the core's own row contract (one batch row, L a multiple of 128), fp32 weights, bias on the query only."""
-    if not settings.current().augattn_tf32_sm90 or not _tf32_on() or torch.is_autocast_enabled("cuda"):
+    if not _tf32_on() or torch.is_autocast_enabled("cuda"):
         return False
     if x.dtype is not torch.float32 or not x.is_cuda or x.dim() != 4 or x.shape[1] != 1 or x.shape[2] % 128 or bq is None:
         return False

@@ -3,7 +3,6 @@ operand layouts the fused runner hands them (per-token tables as strided column 
 
 import pytest
 import torch
-from settings_helpers import override_setting
 
 pytestmark = [
     pytest.mark.gpu,
@@ -136,7 +135,7 @@ def test_gemm_swiglu_sm100_matches_fp32(M, monkeypatch):
         for _ in range(2)
     )
     w_ab = torch.cat([wa, wb]).contiguous()
-    override_setting(monkeypatch, "token_dit_gemm_swiglu", "1")
+    monkeypatch.setattr(gemm_swiglu, "MIN_ROWS", 0)  # below its row threshold too
     assert gemm_swiglu.supported(x, w_ab)
     out = torch.full((M, H), float("nan"), device="cuda", dtype=torch.bfloat16)
     gemm_swiglu.GemmSwiglu(torch.cuda.current_device())(x, w_ab, out)
@@ -152,7 +151,7 @@ def test_gemm_swiglu_sm100_matches_fp32(M, monkeypatch):
     reason="H100",
 )
 @pytest.mark.parametrize("M", [128, 1920])
-def test_gemm_swiglu_sm90_matches_fp32(M, monkeypatch):
+def test_gemm_swiglu_sm90_matches_fp32(M):
     """The restored H100 fused GEMM follows upstream's [Wa; Wb] pack and supports the minimum tile."""
     from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
@@ -164,7 +163,6 @@ def test_gemm_swiglu_sm90_matches_fp32(M, monkeypatch):
         for _ in range(2)
     )
     wab = torch.cat([wa, wb]).contiguous()
-    override_setting(monkeypatch, "token_dit_gemm_swiglu", "1")
     assert gemm_swiglu.supported_sm90(x, wab)
     out = torch.full((M, H), float("nan"), device="cuda", dtype=torch.bfloat16)
     gemm_swiglu.GemmSwigluSm90(torch.cuda.current_device())(x, wab, out)

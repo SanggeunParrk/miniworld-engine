@@ -69,7 +69,7 @@ def test_transition_training_stages_are_chosen_by_the_interface(monkeypatch, for
     seen = []
     for name in ("transition_b2b_fwd", "transition_expand_gatebwd_wgmma"):
         real = getattr(tcuda, name)
-        monkeypatch.setattr(tcuda, name, (lambda real, name: lambda *a, **k: (seen.append(name), real(*a, **k))[1])(real, name))
+        monkeypatch.setattr(tcuda, name, (lambda real, name: lambda *a, **k: (seen.append(name), real(*a, **k))[1])(real, name))  # noqa: B023 -- bound by the outer call
     for width, want in ((128, {"transition_b2b_fwd"}), (256, {"transition_b2b_fwd", "transition_expand_gatebwd_wgmma"})):
         seen.clear()
         x = torch.randn(2, 128, width, device="cuda", dtype=torch.bfloat16, requires_grad=True)
@@ -80,29 +80,13 @@ def test_transition_training_stages_are_chosen_by_the_interface(monkeypatch, for
         assert set(seen) == (set() if forced else want), (width, seen)
 
 
-@pytest.mark.skipif(_cap() != (9, 0) if torch.cuda.is_available() else True, reason="H100")
-@pytest.mark.parametrize("forced", [False, True])
-def test_triangle_attention_cuda_forward_is_chosen_by_the_interface(monkeypatch, forced):
-    from miniworld_engine.kernels.triangle_attention.cuda import training_forward
-
-    if not training_forward._artifact_ready():
-        pytest.skip("the prebuilt training forward is not available")
-    settings.configure(force_portable_kernels=forced)
-    real = training_forward.forward
-    calls = []
-    monkeypatch.setattr(training_forward, "forward", lambda *a: (calls.append(1), real(*a))[1])
-    L = 384
-    base = torch.randn(1, L, L, 4, 32, device="cuda", dtype=torch.bfloat16)
-    q, k, v = (base.clone().permute(0, 3, 1, 2, 4).requires_grad_() for _ in range(3))
-    bias = torch.randn(1, 4, L, L, device="cuda", dtype=torch.bfloat16)
-    out = kernels.triton_triangle_attention_pair_bias(q, k, v, bias)
-    out.sum().backward()
-    assert bool(calls) is (not forced)
-
-
 def test_the_token_dit_runner_class_is_picked_by_the_caller():
-    from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import FusedTokenDiTComposed
-    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import FusedTokenDiT
+    from miniworld_engine.kernels.conditioned_transition.cuda.token_dit_composed import (
+        FusedTokenDiTComposed,
+    )
+    from miniworld_engine.kernels.conditioned_transition.triton.token_dit_runner import (
+        FusedTokenDiT,
+    )
 
     assert issubclass(FusedTokenDiTComposed, FusedTokenDiT)
     # the Triton runner takes no CUDA hook at all

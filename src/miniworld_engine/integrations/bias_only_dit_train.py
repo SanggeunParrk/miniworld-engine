@@ -566,14 +566,14 @@ def _width(params):
 
 
 def _psb_core(f32=False, L=0) -> str:
-    """The per-sample attention core: "recompute" / "stored" (bo_psb.cu, bf16) or "cublas" (the v0 core). fp32 (bo_psb32.cu, TF32) has the
-    recompute form only, up to L 512 (the forward keeps v resident); "stored" means "recompute" there, longer L the cuBLAS core."""
-    core = settings.current().bias_only_dit_psb_core
+    """The per-sample attention core: "recompute" (bo_psb.cu, bf16: the forward keeps two floats per softmax row and no P, the backward
+    rebuilds P from the bias). fp32 (bo_psb32.cu, TF32) has it up to L 512 (the forward keeps v resident); longer L takes "cublas" (the
+    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored)."""
     if f32:
         from miniworld_engine.kernels.bias_only_dit.cuda import PSB32_MAX_L
 
-        return "cublas" if core == "cublas" or L > PSB32_MAX_L else "recompute"
-    return core
+        return "cublas" if L > PSB32_MAX_L else "recompute"
+    return "recompute"
 
 
 def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
@@ -723,21 +723,8 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
 
     def pair_part():
         """The attention weights P (and P^T): pair bias -> softmax. Reads the pair and the mask only."""
-        if psb:  # per-sample bias: one softmax per (head, sample) row, with its sample's key mask
-            core = _psb_core()
-            if core == "recompute":  # no P: the forward keeps the two row statistics the backward rebuilds it from
-                return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
-            P = torch.empty(H, A, L, L, device=dev, dtype=BF)
-            if core == "stored":
-                return P, torch.empty(0, device=dev, dtype=BF), None  # bo_psb.cu: the softmax is inside the core below
-            C.softmax_t(
-                bias.reshape(H * A * L, L),
-                P.view(H * A * L, L),
-                None,
-                _psb_mask(mask, A, L, False),
-                A,
-            )
-            return P, torch.empty(0, device=dev, dtype=BF), None
+        if psb:  # per-sample bias: no P, the forward keeps the two row statistics the backward rebuilds it from (bo_psb.cu)
+            return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
         P = torch.empty(H, L, L, device=dev, dtype=BF)
         if bias is None:
             p2 = pair.reshape(R, DP)
@@ -777,21 +764,9 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
     P, Pt, pst = pair_part()
-    if psb and _psb_core() != "cublas":
+    if psb:
         og = torch.empty(M, DA, device=dev, dtype=BF)
-        C.psb_fwd(
-            bias.reshape(H * A * L, L),
-            None if _psb_core() == "recompute" else P.view(H * A * L, L),
-            _psb_mask(mask, A, L, False),
-            vg,
-            og,
-            A,
-            H,
-            DA // H,
-            stats=P if _psb_core() == "recompute" else None,
-        )
-    elif psb:
-        og = _psb_fwd_core(vg, P, A, L, H, DA)
+        C.psb_fwd(bias.reshape(H * A * L, L), None, _psb_mask(mask, A, L, False), vg, og, A, H, DA // H, stats=P)
     else:
         og = torch.empty(M, DA, device=dev, dtype=BF)
         _op("pv", dev, H, DA // H)(
@@ -1099,7 +1074,7 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    if psb and _psb_core() == "recompute":  # one pass over the bias: P rebuilt, dV and the bias gradient (bo_psb.cu)
+    if psb:  # one pass over the bias: P rebuilt, dV and the bias gradient (bo_psb.cu)
         C.psb_bwd(
             bias.reshape(H * A * L, L),
             do,
@@ -1113,10 +1088,6 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
             stats=P,
             mask=_psb_mask(mask, A, L, False),
         )
-    elif psb and _psb_core() == "stored":  # one pass over P: dV and the bias gradient (bo_psb.cu)
-        C.psb_bwd(P.view(H * A * L, L), do, vg, dd, dbias_out.view(H * A * L, L), dvg, A, H, DA // H)
-    elif psb:  # per-sample P: dV and dbias are batched GEMMs over (head, sample), nothing summed over the samples
-        _psb_bwd_core(do, vg, P, dd, dvg[:, :DA], dbias_out, A, L, H, DA)
     else:
         dbias = (
             torch.empty(H * L, L, device=dev, dtype=BF)
@@ -1893,7 +1864,7 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
     (chat, cst, G, Gg, xst, xa, vg, P, Pt, og, y, x1st, xt, ab, h, z) = saved[:16]
     pst = saved[16] if dbias_out is None else None
     W = _pack32(dict(zip(NAMES, params, strict=True)), single.device)
-    Wn, Wraw, Wg, Wvg, Wo, Wab, Wsq = (
+    Wn, Wraw, Wg, Wvg, Wo, _Wab, Wsq = (
         W["Wn"],
         W["Wraw"],
         W["Wg"],

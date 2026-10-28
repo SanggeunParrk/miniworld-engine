@@ -17,13 +17,10 @@ from miniworld_engine.modules.primitives import LayerNorm, Linear
 def _fused_sm90a_enabled() -> bool:
     """Whether to route the d=128/n=4 bf16 residual path on sm_90 through the fused hand-CUDA
     forward and backward (two launches instead of five, ~1.9x the Triton residual path on both
-    sides). Default on; set settings.transition_fused_sm90a=0 to A/B against Triton."""
+    sides). Off only with ``force_portable_kernels``."""
     from miniworld_engine import settings
 
-    return (
-        settings.current().transition_fused_sm90a
-        and (not settings.current().force_portable_kernels)
-    )
+    return not settings.current().force_portable_kernels
 
 
 def _fused_sm100a_enabled() -> bool:

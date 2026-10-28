@@ -9,7 +9,6 @@ import torch
 from portable_helpers import randomize_half_std as randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as bi
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
 from miniworld_engine.modules.exceptions import ImplementationType
@@ -142,17 +141,13 @@ def test_other_head_layouts(nh, monkeypatch):
     assert rel(got, truth) < 2.5e-3
 
 
-def test_off_the_tile_and_switch_keep_the_module_composition(monkeypatch):
+def test_off_the_tile_keeps_the_module_composition(monkeypatch):
     ref, eng = make_pair()
     spy = Spy(monkeypatch)
     single, cond, pair, mask = make_inputs(2, 200, "per_sample")  # L off the 128 tile
     got = call(eng, single, cond, pair, mask, torch.float32, hoisted=False)
     truth = call(ref, single, cond, pair, mask, torch.float32, hoisted=False)
     assert spy.n == 0 and rel(got, truth) < 1e-3  # the module composition on TF32 GEMMs
-    single, cond, pair, mask = make_inputs(2, 128, "none")
-    settings.configure(force_portable_kernels=False, bias_only_dit_psb_infer=False)
-    call(eng, single, cond, pair, mask, torch.float32, hoisted=False)
-    assert spy.n == 0
 
 
 @pytest.mark.parametrize("dh", [32, 48])

@@ -556,7 +556,7 @@ _GSW: dict = {}
 
 def _swiglu_gemm(xt, wab):
     """The sm_100a expand GEMM with the SwiGLU epilogue that also writes [a | b] (``gemm_swiglu2_sm100.cu -DSAVE_AB``) where
-    it applies (bf16, B200, M >= its row threshold, settings.token_dit_gemm_swiglu); None keeps cuBLAS + the SwiGLU rows."""
+    it applies (bf16, B200, M >= its row threshold); None keeps cuBLAS + the SwiGLU rows."""
     from miniworld_engine.kernels.conditioned_transition.cuda import gemm_swiglu
 
     if not gemm_swiglu.supported(xt, wab):
@@ -1497,7 +1497,7 @@ def block_psb(module, single, cond, bias, mask=None, compute_dtype=None):
     eq = float(a.norm_query.effective_eps(torch.float32)) if qk else 0.0
     ek = float(a.norm_key.effective_eps(torch.float32)) if qk else 0.0
     params = [module.get_parameter(n) for n in _names_for(qk)]
-    A, _, L, _ = single.shape
+    _, _, L, _ = single.shape
     Lp = -(-L // QM) * QM
     if mask is None:
         mask = torch.ones(1, L, device=single.device, dtype=torch.bool)

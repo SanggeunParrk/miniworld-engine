@@ -20,3 +20,12 @@ def transposed_contiguous(w: torch.Tensor) -> torch.Tensor:
     if torch.is_grad_enabled() and w.requires_grad:
         return w.t().contiguous()
     return _capture.param_forms("transition_ws_t", (w,), lambda: w.t().contiguous())
+
+
+def tf32_rounded_triple(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, make):
+    """``make(wa, wb, ws)`` -> the three TF32-rounded fp32 copies the generic fp32 forward feeds its tensor cores, reused while the three
+    weights are the same tensors and unchanged (an inference loop); another weight form of ``param_forms``. None (no cache) for weights that
+    require grad under grad mode, or under ``torch.compile`` tracing."""
+    if torch.compiler.is_compiling() or (torch.is_grad_enabled() and any(w.requires_grad for w in (wa, wb, ws))):
+        return None
+    return _capture.param_forms("transition_tf32_triple", (wa, wb, ws), lambda: make(wa, wb, ws))

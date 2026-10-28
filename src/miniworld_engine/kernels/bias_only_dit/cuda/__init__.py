@@ -45,9 +45,7 @@ H100_MAX_L = 3072
 
 def h100_enabled(device) -> bool:
     """Native Hopper kernels; per-shape speed qualification is recorded separately."""
-    return settings.current().bias_only_dit_h100 and torch.cuda.get_device_capability(
-        device
-    ) == (9, 0)
+    return torch.cuda.get_device_capability(device) == (9, 0)
 
 
 def _h100_group(samples, length, heads, width, sms):

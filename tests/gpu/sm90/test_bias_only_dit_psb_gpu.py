@@ -13,7 +13,6 @@ import torch
 from portable_helpers import randomize_half_std as randomize
 from settings_helpers import policy_portable_off as policy  # noqa: F401
 
-from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit_train as bt
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
@@ -350,25 +349,6 @@ def test_psb_kernels_match_fp64_and_are_bitwise_repeatable(H, dh, A, L, mask_kin
     C.psb_fwd(bias.view(-1, L), None, km, vg, og3, A, H, dh, stats=stats)
     C.psb_bwd(bias.view(-1, L), do, vg, dd, dbias3.view(-1, L), dvg3, A, H, dh, stats=stats, mask=km)
     assert torch.equal(og, og3) and torch.equal(dvg, dvg3) and torch.equal(dbias, dbias3), "recompute differs from stored P"
-
-
-@pytest.mark.parametrize("core", ["stored", "cublas"])
-@pytest.mark.parametrize(("A", "L", "mask_kind"), [(3, 256, "per_sample"), (5, 384, "none"), (4, 640, "shared")])
-def test_recompute_core_agrees_with_the_other_cores(core, A, L, mask_kind):
-    """The default core (P rebuilt from the bias in the backward) against the stored-P kernels and the v0 cuBLAS core."""
-    ref, eng = make_pair()
-    single, cond, pair, mask, w = make_inputs(A, L, mask_kind)
-    old = settings.configure(bias_only_dit_psb_core=core)
-    try:
-        other = run(eng, single, cond, pair, mask, w, torch.bfloat16, tf32=True, autocast=True)
-    finally:
-        settings.configure(**vars(old))
-    assert settings.current().bias_only_dit_psb_core == "recompute"
-    v1 = run(eng, single, cond, pair, mask, w, torch.bfloat16, tf32=True, autocast=True)
-    m = metrics(v1, other)
-    assert m["whole_cos"] > 1 - 1e-5 and m["out_rel"] < 2e-3, m
-    if core == "stored":   # same arithmetic, P just takes a trip through HBM: bit for bit
-        assert all(torch.equal(v1[k], other[k]) for k in v1), "recompute and stored-P differ"
 
 
 @pytest.mark.parametrize(("H", "dh"), [(16, 48), (24, 32), (12, 64)])

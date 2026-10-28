@@ -22,33 +22,16 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 
-#include "../../conditioned_transition/cuda/token_dit_common.cuh"
+#include "bo_rows.cuh"
 
 namespace {
 using namespace tdr;
+using namespace bor;
 
 constexpr int WPB = 4;                                   // rows (warps) per block
 
-__device__ __forceinline__ float sg(float v) { return __fdividef(1.f, 1.f + __expf(-v)); }
 // a table entry that passes through a sigmoid: already applied by the table kernel when ps (cond_tables_sm100.cu)
 __device__ __forceinline__ float gs(float v, bool ps) { return ps ? v : sg(v); }
-
-// the row's mean and rstd from the NCH float4 chunks a lane holds
-template <int NCH>
-__device__ __forceinline__ void row_stats(const float4 (&x)[NCH], float eps, float& mean, float& rstd) {
-  constexpr float inv = 1.f / (NCH * 128);
-  float s = 0.f;
-#pragma unroll
-  for (int j = 0; j < NCH; ++j) s += (x[j].x + x[j].y) + (x[j].z + x[j].w);
-  mean = warp_sum(s) * inv;
-  float q = 0.f;
-#pragma unroll
-  for (int j = 0; j < NCH; ++j) {
-    const float a = x[j].x - mean, b = x[j].y - mean, c = x[j].z - mean, d = x[j].w - mean;
-    q += (a * a + b * b) + (c * c + d * d);
-  }
-  rstd = rsqrtf(warp_sum(q) * inv + eps);
-}
 
 // out = (x - mean) rstd sigmoid(ms) + mb for this lane's chunks
 template <int NCH, typename GT, typename OT>

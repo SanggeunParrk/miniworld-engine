@@ -37,8 +37,6 @@ def matches(module, single, cond, pair, mask, rope=None) -> bool:
         return _esm_matches(module, single, cond, pair, mask, rope)
     if not (single.is_cuda and _hopper(single)):
         return False
-    if not settings.current().local_dit_h100_mma:
-        return False
     if not module.cross_attention or (
         torch.is_autocast_enabled("cuda") and single.dtype != BF
     ):
@@ -59,16 +57,10 @@ def matches(module, single, cond, pair, mask, rope=None) -> bool:
         return False   # the kernels take torch's default eps (the float32 one for bf16 and fp32 alike)
     dt = (single.dtype, cond.dtype, pair.dtype)
     if dt == (F32, F32, F32):
-        if (
-            any(p.dtype != F32 for p in params)
-            or not settings.current().local_dit_h100_mma_fp32
-        ):
+        if any(p.dtype != F32 for p in params):
             return False
     elif dt == (BF, BF, BF):
-        if (
-            any(p.dtype not in (F32, BF) for p in params)
-            or not settings.current().local_dit_h100_mma_bf16
-        ):
+        if any(p.dtype not in (F32, BF) for p in params):
             return False
     else:
         return False
@@ -675,7 +667,7 @@ def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
     from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
     from miniworld_engine.modules.dispatch import KernelBackend
 
-    if not (single.is_cuda and _hopper(single)) or not settings.current().local_dit_h100_mma:
+    if not (single.is_cuda and _hopper(single)):
         return False
     if settings.current().force_portable_kernels or module.attention._backend != KernelBackend.PORTABLE:
         return False
@@ -696,10 +688,10 @@ def _esm_matches(module, single, cond, pair, mask, rope) -> bool:
         return False
     dt = (single.dtype, cond.dtype, pair.dtype)
     if dt == (F32, F32, F32):
-        if any(p.dtype != F32 for p in params) or not settings.current().local_dit_h100_mma_fp32:
+        if any(p.dtype != F32 for p in params):
             return False
     elif dt == (BF, BF, BF):
-        if any(p.dtype not in (F32, BF) for p in params) or not settings.current().local_dit_h100_mma_bf16:
+        if any(p.dtype not in (F32, BF) for p in params):
             return False
     else:
         return False
@@ -817,8 +809,6 @@ _ESM_TRAIN_SAVED = _ESM_TRAIN_NAMES[1:]
 
 def _esm_train_serves(single, cond, pair) -> bool:
     """The training step takes bf16 activations whose conditioning is shared by the samples (one row set: an expanded view, or one sample)."""
-    if not settings.current().local_dit_esm_train_cuda:
-        return False
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):
         return False
     return single.shape[0] == 1 or _shared(cond)

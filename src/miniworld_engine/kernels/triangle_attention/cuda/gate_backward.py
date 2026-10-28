@@ -6,7 +6,7 @@ from miniworld_engine.kernels._compile import device_constant,opaque
 from miniworld_engine.autotune.shape_key import token_key
 from miniworld_engine.kernels.triangle_attention.triton import main as core
 from miniworld_engine.kernels.bias_only_attention.triton.gate_out import _fwd
-from miniworld_engine.kernels.triangle_attention.cuda import bias_backward, dq_backward, ln_backward, training_forward
+from miniworld_engine.kernels.triangle_attention.cuda import bias_backward, dq_backward, ln_backward
 _ROOT=Path(__file__).resolve().parent
 _EXT=None
 
@@ -62,7 +62,7 @@ class AttentionGate(torch.autograd.Function):
     @staticmethod
     def forward(ctx,q,k,v,b,gate,w):
         L=q.shape[2];b=b.contiguous()
-        out,m=training_forward.routed_fwd(q,k,v,b,token_key(L))
+        out,m=core._tri_attn_fwd(q,k,v,b,token_key(L))
         out2=out.permute(0,2,3,1,4).reshape(-1,128).contiguous()
         gate2=gate.reshape(-1,128).contiguous()
         y=_fwd(gate2,out2,w,shape_key=token_key(L))

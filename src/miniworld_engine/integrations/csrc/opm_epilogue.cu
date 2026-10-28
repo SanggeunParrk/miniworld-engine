@@ -26,6 +26,7 @@
 #include <cuda_pipeline.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
+#include "sm90_ptx.cuh"
 
 namespace {
 
@@ -213,6 +214,10 @@ __global__ void opm_finish_native(const float* red,const float* gamma,const floa
 // chunk index XOR-ed by the row.  It is the one form that is both a plain row-major destination for
 // cp.async and something wgmma can address; a padded stride cannot be both (see KCP above).
 namespace wg {
+using csrc_sm90::wg::commit;
+using csrc_sm90::wg::fence;
+using csrc_sm90::wg::proxy_fence;
+using csrc_sm90::wg::wait;
 constexpr int ROWS = 128;                       // rows per swizzled block, both operands
 constexpr uint32_t SBO = 64;                    // uint128 between one group of 8 rows and the next
 
@@ -698,16 +703,6 @@ __device__ __forceinline__ void mma_m64n136k16_mn(uint64_t da, uint64_t db, floa
       : "memory");
 }
 
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-// wgmma reads shared memory through the async proxy.  A tile filled by cp.async is already visible
-// there; one filled by ordinary shared stores is NOT, and the multiply silently reads stale memory
-// (it cost a day's worth of NaN in the prologue).  All three kernels here stage with cp.async, so
-// none of them needs this -- but any kernel that does not, does.
-__device__ __forceinline__ void proxy_fence() {
-  asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");
-}
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void wait()   { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
 }  // namespace wg
 
 // One 64-MSA-row tile per token. LN/affine rounding, the two projections,
@@ -1057,6 +1052,9 @@ __global__ __launch_bounds__(512, 1) void opm_prologue_tma_wide(
 // the descriptor can describe a 4-D box, and the grouped layout dO[(i,c),(j,e)] IS a 4-D box --
 // the scatter the kernel used to do by hand is exactly one TMA store.
 namespace tma {
+using csrc_sm90::tma::commit;
+using csrc_sm90::tma::wait_all;
+using csrc_sm90::tma::wait_read;
 // Same 128-byte XOR swizzle wgmma uses, which is what lets the accumulator reach shared without
 // bank conflicts: rows of 64 bf16, the 16-byte chunk index XORed by the row index mod 8.
 __device__ __forceinline__ int sw128(int row, int col64) {
@@ -1067,14 +1065,6 @@ __device__ __forceinline__ void store_4d(const void* map, uint32_t src, int c0, 
                " [%0, {%2, %3, %4, %5}], [%1];\n"
                :: "l"(map), "r"(src), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
-__device__ __forceinline__ void commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-// .read is the cheap wait: it retires as soon as the descriptor has finished READING shared memory,
-// which is all that is needed before refilling the tile.  Plain wait_group waits for the write to
-// land in L2 and would serialise the store against the next tile's math.
-__device__ __forceinline__ void wait_read() {
-  asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory");
-}
-__device__ __forceinline__ void wait_all() { asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory"); }
 // stmatrix is ldmatrix run backwards, and its register layout is exactly the mma accumulator's, so
 // four 8x8 tiles of a converted accumulator leave in one instruction instead of sixteen 4-byte
 // stores.  Same wavefronts, a quarter of the instructions -- and this kernel issues 2.4M of them.

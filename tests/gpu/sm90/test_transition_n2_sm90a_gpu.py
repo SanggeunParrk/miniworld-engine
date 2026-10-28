@@ -4,8 +4,8 @@ PyTorch fp32 reference bounds both, and the module really dispatches to the nati
 import copy
 
 import pytest
-from settings_helpers import override_setting
 import torch
+from settings_helpers import override_setting
 
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -49,7 +49,7 @@ def _run(module, x, dy, *, fused, fp32=False):
     if fp32:
         mod = mod.float()
         x, dy = x.float(), dy.float()
-    settings.configure(force_portable_kernels=not fused, transition_fused_sm90a=fused)
+    settings.configure(force_portable_kernels=not fused)
     xx = x.clone().requires_grad_()
     y = mod(xx)
     y.backward(dy)
@@ -100,7 +100,7 @@ def test_n2_no_grad_forward_is_the_training_forward(d, monkeypatch):
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
     module, x, _ = _build((1, 16, 32, d))
-    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False)
     with torch.no_grad():
         inference = module(x)
     train = module(x.clone().requires_grad_())

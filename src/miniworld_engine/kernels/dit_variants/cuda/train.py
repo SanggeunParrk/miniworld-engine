@@ -320,7 +320,7 @@ def serves(stack, single, cond, pair, mask) -> bool:
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
     cfg = settings.current()
-    if cfg.force_portable_kernels or not getattr(cfg, "dit_variant_train_cuda", True):
+    if cfg.force_portable_kernels:
         return False
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False
@@ -672,7 +672,7 @@ def atom_serves(stack, single, cond, pair, mask, uid) -> bool:
     if not (torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *stack.parameters()))):
         return False
     cfg = settings.current()
-    if cfg.force_portable_kernels or not getattr(cfg, "dit_variant_train_cuda", True):
+    if cfg.force_portable_kernels:
         return False
     if torch.cuda.get_device_capability(single.device) != (9, 0):
         return False

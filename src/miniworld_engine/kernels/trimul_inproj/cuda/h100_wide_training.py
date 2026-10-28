@@ -663,7 +663,7 @@ def _output_ln(cell, tri, dt, dn, mu, rs, go, dgo, dbo, defer=False):
                        LN_MINBLOCKS=minblocks)
     if native:
         defines += _defines(MW_LN_PARTIALS=1)
-    source = f"output_ln_d{D}_l{n}.cu"
+    source = f"output_ln_d{D}_l{n}.cu" if n == 384 or D == 512 else "output_ln_l768.cu"
     tail = [dn, mu, rs, go, dgo, dbo, M]
     if n == 384:
         # One 3D map per tensor: [M, 64 channels, H/64 groups] for tri/dt, rows for dn.
@@ -794,7 +794,7 @@ def _input_ln(cell, x, dxn, dy, dx, gi, dgi, dbi, partial, dw, dwg, cooperative,
         fields.append(dwg)
     fields.append(M)
     if n == 384:
-        source, entry = f"input_ln_d{D}_l384.cu", "mw_independent_input_ln"
+        source, entry = ("input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu"), "mw_independent_input_ln"
     elif D == 512:
         source, entry = "input_reduce_d512_l768.cu", "mw_wide_joint_input_reduce"
     else:

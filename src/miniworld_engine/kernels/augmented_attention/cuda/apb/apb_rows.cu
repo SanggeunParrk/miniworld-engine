@@ -47,14 +47,6 @@ constexpr int DP = 128, RW = 4, NT = RW * 32;           // d_pair; row kernels: 
 // accumulator (fp32, zeroed per step): dlnw [d] | dlnb [d] | dbq [W] | dWf [NH, DP] | per-head dbias sums [NH]
 __host__ __device__ constexpr int acc_n(int d, int nh, int w) { return 2 * d + w + nh * DP + nh; }
 
-__device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
-__device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
-__device__ __forceinline__ float sum4(float4 a) { return a.x + a.y + a.z + a.w; }
-__device__ __forceinline__ float4 sig4(float4 a) { return make_float4(sigm(a.x), sigm(a.y), sigm(a.z), sigm(a.w)); }
-__device__ __forceinline__ float4 bfround(float4 a) {
-  return make_float4(__bfloat162float(__float2bfloat16_rn(a.x)), __bfloat162float(__float2bfloat16_rn(a.y)),
-                     __bfloat162float(__float2bfloat16_rn(a.z)), __bfloat162float(__float2bfloat16_rn(a.w)));
-}
 __device__ __forceinline__ uint32_t pack2(float a, float b) {
   __nv_bfloat162 v = __floats2bfloat162_rn(a, b);
   return *reinterpret_cast<uint32_t*>(&v);
@@ -634,7 +626,7 @@ __global__ void __launch_bounds__(NT) qkv_bwd_k(const float* __restrict__ DQ, co
       for (int k = 0; k < V; ++k) v[k] = add4(v[k], p[k]);
     }
 #pragma unroll
-    for (int k = 0; k < V; ++k) v[k] = bfround(v[k]);
+    for (int k = 0; k < V; ++k) v[k] = rnd<bf>(v[k]);
     stv<V>(DQKVG + r * 4 * WD, v);
     float4 t[V];
     ldv<V>(DK + r * WD, t); stv<V>(DQKVG + r * 4 * WD + WD, t);

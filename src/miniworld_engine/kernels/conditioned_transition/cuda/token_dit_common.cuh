@@ -8,6 +8,21 @@ namespace tdr {
 __device__ __forceinline__ float sigm(float v) { return rowmath::sigmoid(v); }
 __device__ __forceinline__ float warp_sum(float v) { return rowmath::warp_sum(v); }
 
+// 4-wide fp32 lane arithmetic
+__device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
+__device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
+__device__ __forceinline__ float4 zero4() { return make_float4(0.f, 0.f, 0.f, 0.f); }
+__device__ __forceinline__ float sum4(float4 a) { return a.x + a.y + a.z + a.w; }
+__device__ __forceinline__ float4 sig4(float4 a) { return make_float4(sigm(a.x), sigm(a.y), sigm(a.z), sigm(a.w)); }
+__device__ __forceinline__ float4 dsig4(float4 v, float4 s) {   // v * s * (1 - s)
+  return make_float4(v.x * s.x * (1.f - s.x), v.y * s.y * (1.f - s.y), v.z * s.z * (1.f - s.z), v.w * s.w * (1.f - s.w));
+}
+template <typename AT> __device__ __forceinline__ float4 rnd(float4 a) { return a; }   // the value a store of AT keeps
+template <> __device__ __forceinline__ float4 rnd<__nv_bfloat16>(float4 a) {           // (sums use what was stored)
+  return make_float4(__bfloat162float(__float2bfloat16_rn(a.x)), __bfloat162float(__float2bfloat16_rn(a.y)),
+                     __bfloat162float(__float2bfloat16_rn(a.z)), __bfloat162float(__float2bfloat16_rn(a.w)));
+}
+
 // dst [N, M] = src [M, N]^T (either operand dtype): 32 x 32 tiles through shared memory, both sides coalesced. Launch: grid (ceil(N / 32), ceil(M / 32)), 256 threads.
 // GUARD = false: M and N are multiples of 32 (the token DiT / pair kernels). GUARD = true: any M, N (bounds-checked; the DiT variant training rows).
 template <typename T, bool GUARD = false>

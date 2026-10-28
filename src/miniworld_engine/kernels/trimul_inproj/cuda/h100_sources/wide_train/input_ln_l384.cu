@@ -1,4 +1,5 @@
-// Frozen generated source: early_both_affine_init.IndependentInputLN(CachedInput, packed).
+// Frozen generated source: early_both_affine_init.IndependentInputLN(CachedInput, packed) at D256, (CachedInput split 4, packed)
+// at D512: one text (SPLITS was the literal 8 / 4 of each width).
 // Research snapshot trimul_d256_bwd_sol90_stage2_20260923 (experiments/trimul_large_d_vast);
 // flattened text of the qualified checkpoint chain. Edit only with a new qualification.
 // SPDX-License-Identifier: Apache-2.0
@@ -7,6 +8,7 @@
 #include <cooperative_groups.h>
 using namespace tmn;using namespace tmn::sm90;using bf=__nv_bfloat16;
 constexpr int D=WIDTH,NT=INPUT_THREADS,ROWS=INPUT_ROWS,SB=ROWS*D*2;
+constexpr int SPLITS=D==512?4:8;   // K splits of the weight-gradient partials
 #if MASTER_FP32
 using MasterDW=float;
 TMN_DEVI float master_value(float v){return v;}
@@ -83,7 +85,7 @@ void mw_independent_input_ln(__grid_constant__ const Params p){
  for(int i=blockIdx.x*NT+tid;i<4*D*D;i+=gridDim.x*NT){
   int which=i/(D*D),j=(i%(D*D))*2;float a=0,b=0;
   #pragma unroll
-  for(int s=0;s<8;++s){float2 v=*reinterpret_cast<const float2*>(p.part+size_t(s)*11*D*D+(3+2*which)*D*D+j);a+=v.x;b+=v.y;}
+  for(int s=0;s<SPLITS;++s){float2 v=*reinterpret_cast<const float2*>(p.part+size_t(s)*11*D*D+(3+2*which)*D*D+j);a+=v.x;b+=v.y;}
   #if MASTER_FP32
   p.dw[which][j]=a;p.dw[which][j+1]=b;
 #else

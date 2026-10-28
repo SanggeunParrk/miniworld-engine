@@ -24,8 +24,6 @@ namespace {
 using namespace tdr;
 using bf = __nv_bfloat16;
 constexpr int WQ = 32, WK = 128, NH = 4, DH = 32, DM = 128, PC = 16;
-__device__ __forceinline__ float4 zero4() { return make_float4(0.f, 0.f, 0.f, 0.f); }
-__device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 
 template <typename T> __device__ __forceinline__ float ld(const T* p) { return static_cast<float>(*p); }
 template <> __device__ __forceinline__ float ld<bf>(const bf* p) { return __bfloat162float(*p); }

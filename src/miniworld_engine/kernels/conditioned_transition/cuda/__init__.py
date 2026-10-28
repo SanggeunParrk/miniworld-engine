@@ -354,7 +354,8 @@ def resgate_out_rows(x, y, gl, out, L):
 
 
 def layernorm_rows(z, out, eps=1e-5):
-    """out = LN(z) over 384 columns, no affine (the conditioning rows), z / out fp32 or bf16."""
+    """out = LN(z) over 128, 256 or 384 columns, no affine (the conditioning rows, the DiT variants' pair rows), z / out fp32
+    or bf16."""
     _ext().layernorm_rows_cuda(z, out, float(eps))
 
 

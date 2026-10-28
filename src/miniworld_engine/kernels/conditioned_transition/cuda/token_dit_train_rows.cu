@@ -62,18 +62,6 @@ static_assert(D % HD == 0 && NT % 32 == 0, "token DiT train rows: layout");
 static_assert(DC % 128 == 0, "token DiT train rows: conditioning width is a multiple of 128 (a warp owns 128 columns)");
 constexpr int HID = TD_N * D, DPW = TD_DP;                                // SwiGLU hidden width, pair channels of ln_pair / to_bias
 
-__device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
-__device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
-__device__ __forceinline__ float4 sig4(float4 a) { return make_float4(sigm(a.x), sigm(a.y), sigm(a.z), sigm(a.w)); }
-__device__ __forceinline__ float sum4(float4 a) { return a.x + a.y + a.z + a.w; }
-template <typename AT> __device__ __forceinline__ float4 rnd(float4 a) { return a; }   // the value a store of AT keeps
-template <> __device__ __forceinline__ float4 rnd<bf>(float4 a) {                      // (sums use what was stored)
-  return make_float4(__bfloat162float(__float2bfloat16_rn(a.x)), __bfloat162float(__float2bfloat16_rn(a.y)),
-                     __bfloat162float(__float2bfloat16_rn(a.z)), __bfloat162float(__float2bfloat16_rn(a.w)));
-}
-__device__ __forceinline__ float4 dsig4(float4 v, float4 s) {   // v * s * (1 - s)
-  return make_float4(v.x * s.x * (1.f - s.x), v.y * s.y * (1.f - s.y), v.z * s.z * (1.f - s.z), v.w * s.w * (1.f - s.w));
-}
 // Column sums leave a block as one row of a [blocks, width] partial buffer (plain stores); the host sums the rows. Atomics
 // from every block onto the same 768 addresses serialised in L2 (res_c_bwd 105 us instead of ~20 at L384, A48).
 __device__ __forceinline__ void part_store(float* part, long stride, float4 v) {

@@ -139,7 +139,12 @@ class _LayerNorm(torch.autograd.Function):
 
 def layernorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None, eps: float = 1e-5) -> torch.Tensor:
     """LayerNorm over the last dimension; ``y`` in ``x``'s dtype, fp32 statistics; weight / bias optional, any float dtype (fp32
-    gradients handed back in the parameters' dtype)."""
+    gradients handed back in the parameters' dtype). On H100 the rows ``pipe`` takes go to its pipelined kernels (``pipe.serves``), as
+    in ``rmsnorm_cuda``: one CUDA LayerNorm entry, the general kernels for every other width or card."""
+    from miniworld_engine.kernels.layernorm.cuda import pipe
+
+    if pipe.serves(x):
+        return pipe.layernorm_pipe(x, weight, bias, eps)
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()
     needs_grad = torch.is_grad_enabled() and any(t is not None and t.requires_grad for t in (x, weight, bias))

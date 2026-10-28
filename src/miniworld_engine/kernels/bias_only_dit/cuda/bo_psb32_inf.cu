@@ -15,16 +15,12 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <c10/cuda/CUDAGuard.h>
 #include <algorithm>
+#include "bo_ptx.cuh"
 
 namespace {
 template <typename T> T* P_(at::Tensor t) { return reinterpret_cast<T*>(t.data_ptr()); }
 
-__device__ __forceinline__ uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void cp_async16(void* s, const void* g) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(smem_u32(s)), "l"(g));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" ::"n"(N)); }
+using namespace bop;
 __device__ __forceinline__ float tf32f(float x) {
   uint32_t r;
   asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x));

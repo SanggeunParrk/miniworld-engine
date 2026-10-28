@@ -24,10 +24,10 @@ from miniworld_engine.modules.primitives import LayerNorm, Linear, RMSNorm
 
 
 def _bf16_sm90_enabled() -> bool:
-    """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (settings.augmented_attention_bf16_sm90)."""
+    """Whether a bf16 attention core on sm_90 may use the hand-CUDA kernels (not with ``force_portable_kernels``)."""
     from miniworld_engine import settings
 
-    return settings.current().augmented_attention_bf16_sm90 and (not settings.current().force_portable_kernels)
+    return not settings.current().force_portable_kernels
 
 
 def _bf16_sm100_enabled() -> bool:
@@ -153,7 +153,9 @@ class AugmentedAttentionPairBias(nn.Module):
         """sigmoid(gate) * attention as one node where the fp32 TF32 pair-fused core serves the call (no QK norm), else None."""
         if self.use_qk_norm or not self._packed_ok(single, compute_dtype, extra_pair_bias) or (mask is not None and mask.ndim != 2):
             return None
-        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+        from miniworld_engine.kernels.augmented_attention.cuda import (
+            fused_pair_tf32 as mod,
+        )
 
         a, b, l, n = single.shape
         hd = n // self.n_head
@@ -182,7 +184,9 @@ class AugmentedAttentionPairBias(nn.Module):
         )
 
     def _packed_weights_ok(self, single, wq, bq, wk, wv, wg) -> bool:
-        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+        from miniworld_engine.kernels.augmented_attention.cuda import (
+            fused_pair_tf32 as mod,
+        )
 
         return self.to_key.bias is None and self.to_value.bias is None and self.to_gate.bias is None and mod.packed_qkvg_ok(single, wq, bq, wk, wv, wg)
 
@@ -190,7 +194,9 @@ class AugmentedAttentionPairBias(nn.Module):
         """The packed q / k / v / gate projection (one GEMM) where the fp32 TF32 pair-fused core will run, else None."""
         if not self._packed_ok(single, compute_dtype, extra_pair_bias):
             return None
-        from miniworld_engine.kernels.augmented_attention.cuda import fused_pair_tf32 as mod
+        from miniworld_engine.kernels.augmented_attention.cuda import (
+            fused_pair_tf32 as mod,
+        )
 
         args = (single, self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight, self.to_gate.weight)
         if not self._packed_weights_ok(*args):
@@ -333,7 +339,9 @@ class AugmentedAttentionPairBias(nn.Module):
         whole = self._proj_core_gate(single, pair, mask, compute_dtype, extra_pair_bias)
         if whole is not None:
             # H100 fp32 (TF32): packed projection + pair-fused core + output gate as one autograd node (sigmoid(g) * attention)
-            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import gate_mul
+            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
+                gate_mul,
+            )
 
             return gate_mul(self.to_scale(cond), self.to_out(whole))
         packed = self._packed_qkvg(single, compute_dtype, extra_pair_bias)
@@ -367,7 +375,9 @@ class AugmentedAttentionPairBias(nn.Module):
             if self._fused_pair_bias_ok(pair, query):
                 # training on the Triton attention core: LayerNorm + head projection in one pass over the pair (the normalised pair never
                 # reaches HBM, and its backward recomputes it), instead of a LayerNorm kernel, a GEMM and their two backwards
-                from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import triton_layer_norm_linear
+                from miniworld_engine.kernels.layernorm_linear.triton.pair_bias import (
+                    triton_layer_norm_linear,
+                )
 
                 bias = triton_layer_norm_linear(pair, self.ln_pair.weight, self.to_bias.weight, self.ln_pair.eps)
             else:
@@ -388,7 +398,9 @@ class AugmentedAttentionPairBias(nn.Module):
 
         if packed is not None:
             # one pass each way for sigmoid(g) * x (instead of a sigmoid, a product and their backward passes), both gates
-            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import gate_mul
+            from miniworld_engine.kernels.augmented_attention.cuda.fused_pair_tf32 import (
+                gate_mul,
+            )
 
             out = self.to_out(gate_mul(gate, out))
             return gate_mul(self.to_scale(cond), out)

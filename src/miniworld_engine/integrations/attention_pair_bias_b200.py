@@ -7,7 +7,6 @@ buckets, so H100 training reconstructs that FP32 rounding with native CUDA and
 cuBLAS (ln_pair has no beta, so only dWb is repaired). This accuracy-first shadow
 materializes extra FP32 workspaces: the B200 tensor lifetimes and former fast-path
 latency do not describe this training default.
-``settings.apb_h100_train = False`` retains the explicit legacy comparison path.
 
 Contract: bf16 activations, B = 1, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
@@ -57,11 +56,6 @@ LOG2E = math.log2(math.e)
 NEG = -1e30  # masked keys: finite, so a fully masked sample stays NaN-free
 _packs: dict = {}
 _cores: dict = {}
-
-
-def native_training_enabled() -> bool:
-    """Validated H100 CUDA training; explicit zero retains the legacy baseline."""
-    return settings.current().apb_h100_train
 
 
 def _eligible(
@@ -116,7 +110,6 @@ def _eligible(
     return capability == (10, 0) or (
         capability == (9, 0)
         and L % 128 == 0
-        and (not torch.is_grad_enabled() or native_training_enabled())
     )
 
 

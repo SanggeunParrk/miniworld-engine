@@ -151,17 +151,17 @@ def test_training_is_bitwise_repeatable(kind):
         assert torch.equal(runs[0][1][name], runs[1][1][name]), name
 
 
-def test_the_training_switch_sends_the_call_to_the_portable_route():
+def test_force_portable_sends_the_call_to_the_portable_route():
     stack, inputs, mask, *_ = _case("token", "chai1", 3, 256)
     ins = [inputs[k].bfloat16().requires_grad_() for k in ("single", "cond", "pair")]
-    previous = settings.current().dit_variant_train_cuda
+    previous = settings.current().force_portable_kernels
     try:
         with torch.autocast("cuda", dtype=torch.bfloat16):
             assert train.serves(stack, *ins, mask)
-            settings.configure(dit_variant_train_cuda=False)
+            settings.configure(force_portable_kernels=True)
             assert not train.serves(stack, *ins, mask)
     finally:
-        settings.configure(dit_variant_train_cuda=previous)
+        settings.configure(force_portable_kernels=previous)
 
 
 def test_a_call_without_a_gradient_or_off_the_layout_is_not_served():

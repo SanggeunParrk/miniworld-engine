@@ -18,7 +18,7 @@ the per-sample attention is a GEMM per head (`P_h [L, L] x v_h [L, 48]`) with th
 
 Hand-written CUDA and cuBLAS only (no Triton), bf16 and fp32 (TF32 tensor cores, fp32 softmax / norm statistics / residual),
 16 x 48 heads, B == 1 (a pair of its own per sample, B > 1: [below](#per-sample-pair-bias-inference-2026-10-27)), L a multiple of 128 up to 3072 (inference: the sampler's token rungs reach 2560) or 768 (training), a key mask
-[1, L] or none. Everything else keeps the module's PyTorch composition. `settings.bias_only_dit_h100` (default on) switches the Hopper paths.
+[1, L] or none. Everything else keeps the module's PyTorch composition.
 
 - **Inference** (`integrations/bias_only_dit.py` -> `kernels/bias_only_dit/cuda/runner.py`, `FusedBiasOnlyDiT`): one conditioning
   per sample or one shared by the samples. Per call: the conditioning tables (LN rows + two cuBLAS GEMMs; bf16 up to 384 table rows:
@@ -151,7 +151,7 @@ the same slot of the hoist's gradient buffer.
 | piece | file | note |
 |---|---|---|
 | softmax with per-sample mask / scale | `bias_only_dit_rows.cu`, `bias_only_dit_f32_rows.cu` `softmax_t` | `samples`, `scale`, optional P^T; the shared path is bit-identical |
-| attention core bf16 | `bo_psb.cu` `psb_fwd` / `psb_bwd` | mma.sync, bias tiles by cp.async; recompute (default): the forward keeps (mc, 1/sum) per row, the backward rebuilds P with the forward's arithmetic; `bias_only_dit_psb_core="stored"` writes P, `"cublas"` is the v0 core |
+| attention core bf16 | `bo_psb.cu` `psb_fwd` / `psb_bwd` | mma.sync, bias tiles by cp.async; recompute: the forward keeps (mc, 1/sum) per row, the backward rebuilds P with the forward's arithmetic (the stored-P form of the same kernels is tested bit for bit) |
 | attention core fp32 | `bo_psb32.cu` | TF32 mma.sync, recompute form, forward up to L 512 |
 | hoist forward | `bo_hoist_pass.cu` `hoist_fwd` | pair LayerNorm (no affine) + the projection to the head logits in one pass over the pair, per-warp cp.async pipelines over 16-row tiles, mma.sync; bf16 (LN0 rounded to bf16, fp32 accumulation) and fp32 (TF32); up to 64 bias rows; `bias_only_dit_hoist_fwd_fused` |
 | hoist backward, one block (N = 16) | `bo_hoist_pass.cu` `hoist_bwd1` | d LN0 = dbias^T W', the LN0 backward and dW' = dbias LN0 in one pass over the pair (bf16: dW' against the hi + lo split via `movmatrix`; fp32: TF32), no atomics, per-warp -> per-CTA fixed-order partials; `bias_only_dit_hoist_bwd_fused` |
@@ -166,7 +166,7 @@ The conditioning width is read off the block's weights; the training row kernels
 
 `block(single [1, B, L, d], cond [1, B, L, 384], pair [B, L, L, 128])` or `bias=` [B, H, L, L] (B > 1, no gradient): before this a per-sample pair
 ran the PyTorch reference on H100. Now served by `integrations/bias_only_dit.serves_psb` / `update_psb` (bf16, and fp32 on TF32; H100; L a
-multiple of 128 up to 768; key mask [1, L] or [B, L]; every head layout; `settings.bias_only_dit_psb_infer`, default on). Full numbers and
+multiple of 128 up to 768; key mask [1, L] or [B, L]; every head layout). Full numbers and
 the rejected list: [h100_bodit_psb_inference_20261027.md](../../../records/h100_bodit_psb_inference_20261027.md).
 
 | step | kernel | note |

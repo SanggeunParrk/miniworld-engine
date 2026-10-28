@@ -23,11 +23,6 @@ from miniworld_engine.kernels.transition.triton import fused as _tf
 __all__ = ["triton_transition_fused"]
 
 
-def _gatebwd_wgmma_enabled() -> bool:
-    """The sm90 large-d (K in {256,512}) Version-A gate-backward through the hand-CUDA WGMMA kernel; ``settings.transition_gatebwd_wgmma`` A/Bs it."""
-    return settings.current().transition_gatebwd_wgmma
-
-
 def _cuda_b2b_train_enabled() -> bool:
     """The inference b2b CUDA kernel for the TRAINING forward too (same toggle as the inference dispatch)."""
     return settings.current().transition_cuda_b2b
@@ -55,8 +50,7 @@ def _ln_bwd_hook(dxn, x2, rstd, c1, gamma):
 def _gatebwd_hook(x2, rstd, c1, ln_weight, ln_bias, expand_a_weight, expand_b_weight, grad_expand):
     """sm90 hand-CUDA WGMMA fused expand + gate-backward (d=256 ~1.02-1.05x, d=512 ~1.07-1.18x; d=128 stays Triton where it wins)."""
     if (
-        _gatebwd_wgmma_enabled()
-        and torch.cuda.get_device_capability(x2.device)[0] == 9  # Hopper (sm_90a)
+        torch.cuda.get_device_capability(x2.device)[0] == 9  # Hopper (sm_90a)
         and x2.shape[-1] in (256, 512)
         and x2.dtype == torch.bfloat16
         and x2.shape[0] % 128 == 0

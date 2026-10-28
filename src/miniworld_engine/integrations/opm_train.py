@@ -178,7 +178,7 @@ def _fused_enabled(s: int, n: int, *, training: bool, cm: int = CM, cz: int = CZ
     """The inference outer product + projection as ONE kernel (`opm_fused_infer`, csrc/opm_epilogue.cu): the grouped product never goes to HBM.
     MiniWorld / RF3 widths (d_msa 64, d_pair 128), N % 16, S % 64, either normalisation order, with or without the pair residual."""
     return (not training and (cm, cz) == (CM, CZ) and n % 16 == 0 and s % 64 == 0 and s >= 64
-            and settings.current().opm_fused and not settings.current().force_portable_kernels)
+            and not settings.current().force_portable_kernels)
 
 
 def _fused_weight(wo):

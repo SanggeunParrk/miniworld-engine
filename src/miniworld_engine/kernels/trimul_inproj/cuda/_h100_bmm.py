@@ -124,14 +124,12 @@ _enabled = None
 
 
 def bmm(a, b, out):
-    """``torch.bmm(a, b, out=out)``, without the cuBLAS workspace when the engine setting allows it and the operands are plain bf16."""
+    """``torch.bmm(a, b, out=out)``, without the cuBLAS workspace when the operands are plain bf16."""
     global _enabled
     if _enabled is None:
-        from miniworld_engine import settings
-
         try:
             _cublas()
-            _enabled = bool(settings.current().trimul_h100_zero_workspace_bmm)
+            _enabled = True
         except OSError:
             _enabled = False
     if _enabled and a.is_cuda and supports(a, b, out):

@@ -115,10 +115,9 @@ def supported(q: torch.Tensor, pair: torch.Tensor, lnw: torch.Tensor, wb: torch.
         return False
     if mask is not None and (mask.dim() != 1 or mask.numel() != L or mask.dtype is not torch.bool):
         return False
-    # the attention core's own gate: sm_90, B == 1, L % 128, the setting
+    # the attention core's own gate: sm_90, B == 1, L % 128
     return bool(
-        settings.current().augmented_attention_bf16_sm90
-        and q.is_cuda
+        q.is_cuda
         and pair.is_cuda
         and B == 1
         and L % 128 == 0

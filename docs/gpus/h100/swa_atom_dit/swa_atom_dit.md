@@ -66,13 +66,12 @@ Anthropic's kernels round GEMM operands to bf16 for an fp32 call too, so our bf1
   backward the attention side shares one [M, 4C] buffer.
 - fp32: `swa_fp32.cu` is one `fwd` and one `bwd` call; tf32 wgmma with round-to-nearest operands, the FFN weights split in two
   tf32 passes (hi + lo), residual stream / norms / modulation / gates / RoPE / SwiGLU / every saved tensor in fp32, the window
-  attention on bf16 operands. It is served while TF32 is allowed (`torch.set_float32_matmul_precision("high"/"medium")`) and
-  `swa_dit_fp32_cuda` is on; under "highest" off the native H100 stages the block runs the PyTorch statements (the
+  attention on bf16 operands. It is served while TF32 is allowed (`torch.set_float32_matmul_precision("high"/"medium")`); under
+  "highest" off the native H100 stages the block runs the PyTorch statements (the
   `SWAAtomTransformer` fused path and `modules.swa_dit.SWADiTBlock` alike; `tests/gpu/sm90/test_swa_fp32_highest_gpu.py`).
-- Dispatch is gated on compute capability 9.0 (`cuda/loader.py:is_sm90`); other GPUs take the portable path. Switches:
-  `swa_dit_qkvg_fwd_cuda`, `swa_dit_ffn_fwd_cuda`, `swa_dit_ffn_bwd_cuda`, `swa_dit_attn_cuda`, `swa_dit_oproj_bwd_cuda`,
-  `swa_dit_qkvg_bwd_cuda`, `swa_dit_rows_impl`, `swa_dit_fp32_cuda`, `swa_dit_mod_cuda`, `swa_dit_wgrad_cuda` (all default on);
-  `force_portable_kernels=True` turns them all off.
+- Dispatch is gated on compute capability 9.0 (`cuda/loader.py:is_sm90`); other GPUs take the portable path. No per-stage
+  switch: every hand-CUDA stage serves wherever its kernel does; `force_portable_kernels=True` turns them all off
+  (`swa_dit_rows_impl` picks slab / wgmma for the stages that have both).
 
 ## Weight gradients and modulation (2026-10-14)
 

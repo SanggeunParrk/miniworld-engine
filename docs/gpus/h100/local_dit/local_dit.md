@@ -11,8 +11,7 @@ residual; d_single = d_cond = 128, d_pair = 16, 4 heads x 32. Module summary: [h
 inside, the padded atoms masked as keys), a `[1, N]` bool key mask or none, contiguous `single` / `cond` `[A, 1, N, 128]` and pair
 `[1, nwin, 32, 128, 16]`; **fp32** activations with fp32 parameters (no autocast) run the TF32 kernels, **bf16** activations (fp32 master or
 bf16 parameters, autocast allowed) the bf16 ones; inference and training. Anything else runs the module composition (on H100 its PyTorch
-statements: no portable-kernel fallback, see [dispatch.md](../dispatch.md));
-`settings.local_dit_h100_mma{,_fp32,_bf16}` switch the path off.
+statements: no portable-kernel fallback, see [dispatch.md](../dispatch.md)).
 
 **QK-norm** (`use_qk_norm=True`: a per-head RMSNorm of q and k over the head width, one weight each, as the token DiT): two row kernels around the
 fused stages, `kernels/augmented_attention/cuda/qknorm_local.cu` -- the forward normalises `pre90`'s q and k into the tensors the attention reads (the raw ones
@@ -103,7 +102,7 @@ mode=<inference|training> n_augment=<A> sweep_axis=seq_len min_seq_len=<atoms / 
 bf16 rows are `bf16-mixed` (fp32 master parameters under autocast), fp32 rows `precision=32`. Anthropic = `opt_core`'s atom block
 (composed from their windowed attention and row kernels; inference only). PyTorch compiled = `torch.compile` of the module's reference
 composition; PyTorch eager = the same composition without it (training under a CUDA graph). portable path = this tree with
-`local_dit_h100_mma=False`: the Triton + CUDA-piece path that served H100 before the kernels of this page. × = the fastest other column /
+`local_dit_h100_mma=False` (a switch removed since): the Triton + CUDA-piece path that served H100 before the kernels of this page. × = the fastest other column /
 ours. The Length is the atom count (Length, Dimension) = (atoms, d_single). — : not measured (the bf16 `torch.compile` training step
 fails the harness's run-to-run check, 3e-3 against 1e-4; its numbers under the CUDA-graph measurement are in the wide matrix below).
 
@@ -377,7 +376,7 @@ the attention is `h_attn_esm` (now also writing the row LSE, log2 units) with `h
 position) and `h_attn_esm_dkv` (dK, dV: a CTA = 64 keys, a warp 16 keys over the 144 queries that see them, the bias band staged per warp); `h_pair_bias_esm_bwd` maps the bias
 gradient back to the 192 slots of the trunked pair (the slide from the real atom count on the device). The conditioning tables and the windowed pair bias are autograd
 ops outside the block, so `dcond`, `dpair` and the adaLN weights' gradients chain through the module's own layers. Contract (`_esm_train_serves`): bf16 single / cond / pair, fp32 or
-bf16 parameters (autocast allowed), the conditioning shared by the samples (an expanded view, or A = 1); `settings.local_dit_esm_train_cuda=False` turns it off. Not served (composed
+bf16 parameters (autocast allowed), the conditioning shared by the samples (an expanded view, or A = 1); Not served (composed
 PyTorch path): fp32 (TF32) training, a conditioning of its own per sample. Training step (CUDA graph, A = 48, 4096 / 8192 atoms, shared conditioning): 3.27 / 6.21 ms against the
 portable Triton kernels' 6.56 / 12.80 and the PyTorch reference's 12.66 / 25.74. Output and every gradient (single, conditioning, pair, all parameters) are within 1.5x of the
 module's own bf16 error against the fp64 module (0.88-1.29x measured; bitwise repeatable): `tests/gpu/sm90/test_h100_local_dit_esmfold2_gpu.py::test_training_*`.

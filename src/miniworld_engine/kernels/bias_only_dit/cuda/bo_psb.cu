@@ -20,18 +20,14 @@
 #include <c10/cuda/CUDAGuard.h>
 #include <cuda_bf16.h>
 #include <algorithm>
+#include "bo_ptx.cuh"
 
 namespace {
 using bf = __nv_bfloat16;
 
 template <typename T> T* P_(at::Tensor t) { return reinterpret_cast<T*>(t.data_ptr()); }
 
-__device__ __forceinline__ uint32_t smem_u32(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void cp_async16(void* s, const void* g) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(smem_u32(s)), "l"(g));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;" ::"n"(N)); }
+using namespace bop;
 
 __device__ __forceinline__ void mma16816(float (&d)[4], uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint32_t b0, uint32_t b1) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0,%1,%2,%3}, {%4,%5,%6,%7}, {%8,%9}, {%0,%1,%2,%3};"
@@ -197,9 +193,6 @@ __device__ __forceinline__ void soft_rows2(bf* __restrict__ row0, bf* __restrict
   }
 }
 
-__device__ __forceinline__ void cp_async16_u(uint32_t s, const void* g) {
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16;" ::"r"(s), "l"(g));
-}
 
 // BM = 32: the 8 warps are 2 row groups x 2 column halves x 2 key halves (partial sums added through shared memory); BM = 64: 4 x 2 x 1.
 template <int DH, int BM, bool MASKED, bool STORE_P>
@@ -228,7 +221,7 @@ __global__ void __launch_bounds__(256, 2) psb_fwd_k(const bf* __restrict__ BIAS,
       const int r = 2 * warp + hh + 16 * j;
 #pragma unroll
       for (int k = 0; k < 6; ++k)
-        if (k < nch) cp_async16_u(dst + (r * pitch + k * 128) * 2, src + (long)r * L + k * 128);
+        if (k < nch) cp_async16(dst + (r * pitch + k * 128) * 2, src + (long)r * L + k * 128);
     }
   };
   load_tile(0, rb0);

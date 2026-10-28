@@ -180,11 +180,3 @@ def test_training_routing():
         # a conditioning of its own per sample, and fp32 activations, keep the composed path under a gradient
         assert not h100.matches(blk, sb, shared.contiguous(), zb, mask, rope)
     assert not h100.matches(blk.float(), s.requires_grad_(), c, z, mask, rope)
-    blk = blk.cuda()
-    previous = settings.current().local_dit_esm_train_cuda
-    try:
-        settings.configure(local_dit_esm_train_cuda=False)
-        with torch.autocast("cuda", dtype=torch.bfloat16):
-            assert not h100.matches(blk, sb, shared, zb, mask, rope)
-    finally:
-        settings.configure(local_dit_esm_train_cuda=previous)

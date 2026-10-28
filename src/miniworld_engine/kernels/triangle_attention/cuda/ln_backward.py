@@ -73,7 +73,7 @@ class Front(torch.autograd.Function):
             dw=[g.T@zz if n else None for g,n in zip(dy,needed)]
         return dx,dgamma,dbeta,None,None,*dw
 
-def unfused_forward(model,pair,mask=None):
+def forward(model,pair,mask=None):
     B,L,_,C=pair.shape
     q,k,v,g,b,residual=Front.apply(pair,model.ln_pair.weight,model.ln_pair.bias,model.ln_pair.eps,not model.starting,
         model.to_query.weight,model.to_key.weight,model.to_value.weight,model.to_gate.weight,model.to_bias.weight)
@@ -96,15 +96,3 @@ def unfused_forward(model,pair,mask=None):
     if model.p_drop>0 and model.training:out=out*model._make_drop_scale(pair,model.p_drop)
     return residual+out
 
-
-def forward(model,pair,mask=None):
-    from miniworld_engine.kernels.triangle_attention.cuda import qkv_projection_attention
-    if qkv_projection_attention.can_use(model,pair,mask):
-        return qkv_projection_attention.forward(model,pair,mask)
-    from miniworld_engine.kernels.triangle_attention.cuda import qg_projection_attention
-    if qg_projection_attention.can_use(model,pair,mask):
-        return qg_projection_attention.forward(model,pair,mask)
-    from miniworld_engine.kernels.triangle_attention.cuda import q_projection_attention
-    if q_projection_attention.can_use(model,pair,mask):
-        return q_projection_attention.forward(model,pair,mask)
-    return unfused_forward(model,pair,mask)

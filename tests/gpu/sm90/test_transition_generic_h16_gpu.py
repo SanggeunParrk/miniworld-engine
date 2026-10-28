@@ -37,7 +37,7 @@ def test_fp16_intermediate_holds_the_tf32_yardstick_and_never_overflows(scale, m
     from miniworld_engine.modules import Transition
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False)
     prev = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = True
     try:
@@ -96,7 +96,7 @@ def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_f
     from miniworld_engine.kernels.transition.cuda import _weights
     from miniworld_engine.modules import Transition
 
-    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False)
     prev = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = True
     try:

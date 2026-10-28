@@ -202,8 +202,6 @@ def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     are literals, and a whole number of 128-row tiles because the persistent grid has no
     ragged-tail path.
     """
-    if not settings.current().transition_fused_sm90a:
-        return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     if not _is_hopper(

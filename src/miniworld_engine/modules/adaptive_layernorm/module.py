@@ -5,9 +5,8 @@ import torch.nn as nn
 from jaxtyping import Float
 
 from miniworld_engine._typecheck import typecheck
-from miniworld_engine.kernels import _capture
 from miniworld_engine.integrations.h100_master import is_h100
-from miniworld_engine.kernels import adaln_inference, adaln_train
+from miniworld_engine.kernels import _capture, adaln_inference, adaln_train
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
     call_backend,
@@ -74,7 +73,7 @@ class AdaptiveLayerNorm(nn.Module):
         return self._adaln_forward(x, cond, with_stream=True, with_cond=True)
 
     def _cuda_forward(self, x: torch.Tensor, cond: torch.Tensor, streams: bool = False):
-        """The H100 hand-CUDA AdaLN: the one entry ``kernels.adaln.cuda.adaln`` (setting ``adaln_h100_cuda``), which picks the route by mode, dtype and
+        """The H100 hand-CUDA AdaLN: the one entry ``kernels.adaln.cuda.adaln``, which picks the route by mode, dtype and
         shape. ``None`` when it does not serve the call (another dtype, a width it does not tile, ...): the caller runs the PyTorch reference."""
         from miniworld_engine.kernels.adaln import cuda as adaln_cuda
 

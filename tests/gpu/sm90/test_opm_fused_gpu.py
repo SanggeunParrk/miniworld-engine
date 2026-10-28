@@ -95,7 +95,7 @@ def test_fused_matches_the_unfused_composition(name, s, n, monkeypatch):
         fused = m(msa.bfloat16(), mask, residual=pair)
         assert calls
         calls.clear()
-        override_setting(monkeypatch, "opm_fused", False)
+        override_setting(monkeypatch, "force_portable_kernels", True)
         unfused = m(msa.bfloat16(), mask, residual=pair)
         assert not calls
     d = (fused.float() - unfused.float()).abs()

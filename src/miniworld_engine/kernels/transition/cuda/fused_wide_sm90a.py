@@ -214,8 +214,6 @@ def _is_hopper(index: int) -> bool:
 def supported(x: torch.Tensor, wa: torch.Tensor, ws: torch.Tensor) -> bool:
     """Whether these kernels can run this call: sm_90, bf16, D in ``WIDTHS`` with hidden 4 D, whole 128-row tiles.
     The requirements are the kernels' own (literal tile shapes, persistent grids without a ragged tail), not a policy."""
-    if not settings.current().transition_wide_sm90a:
-        return False
     if not x.is_cuda or x.dtype is not torch.bfloat16:
         return False
     if not _is_hopper(

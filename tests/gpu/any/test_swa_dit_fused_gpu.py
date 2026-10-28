@@ -49,18 +49,10 @@ pytestmark = [
 DEV, BF = "cuda", torch.bfloat16
 C, H, HIDDEN, HW = 128, 4, 256, 64
 
-#: The bf16 hand-CUDA stages: the three team-gm ones, then the attention side (window attention fwd + bwd, out-projection
-#: backward, qkvg backward).
-LEGACY_STAGES = (
-    "swa_dit_qkvg_fwd_cuda",
-    "swa_dit_ffn_fwd_cuda",
-    "swa_dit_ffn_bwd_cuda",
-)
-NEW_STAGES = ("swa_dit_attn_cuda", "swa_dit_oproj_bwd_cuda", "swa_dit_qkvg_bwd_cuda")
-TRITON = dict.fromkeys(LEGACY_STAGES + NEW_STAGES, False)
+#: The Triton kernels (the one switch: force_portable_kernels), and every bf16 hand-CUDA stage.
+TRITON = {"force_portable_kernels": True}
 CUDA = {
     "force_portable_kernels": False,
-    **dict.fromkeys(LEGACY_STAGES + NEW_STAGES, True),
     "swa_dit_ffn_dw": "mat",
     "swa_dit_rows_impl": "auto",
 }
@@ -77,21 +69,6 @@ PATHS = {
         **CUDA,
         "swa_dit_rows_impl": "wgmma",
     },  # ... with team-gm's wgmma kernels for those
-    "cuda_legacy": {
-        **CUDA,
-        **dict.fromkeys(NEW_STAGES, False),
-        "swa_dit_rows_impl": "wgmma",
-    },  # team-gm's three stages only
-}
-#: One hand-CUDA kernel at a time (everything else Triton): the attention-side stages, and the slab kernels of the stages that also
-#: have a team-gm wgmma kernel.
-ONE_STAGE = {
-    "attn": {"swa_dit_attn_cuda": True},
-    "oproj_bwd": {"swa_dit_oproj_bwd_cuda": True},
-    "qkvg_bwd": {"swa_dit_qkvg_bwd_cuda": True},
-    "qkvg_fwd_slab": {"swa_dit_qkvg_fwd_cuda": True, "swa_dit_rows_impl": "slab"},
-    "ffn_fwd_slab": {"swa_dit_ffn_fwd_cuda": True, "swa_dit_rows_impl": "slab"},
-    "ffn_bwd_slab": {"swa_dit_ffn_bwd_cuda": True, "swa_dit_rows_impl": "slab"},
 }
 
 
@@ -234,18 +211,16 @@ def test_the_cuda_stages_agree_with_the_triton_kernels(path):
         assert frob < 1e-2, (name, frob)
 
 
-@pytest.mark.parametrize("stage", sorted(ONE_STAGE))
+@pytest.mark.parametrize("path", ["cuda_slab", "cuda_wgmma"])
 @pytest.mark.parametrize(("a", "b", "s"), [(48, 1, 257), (1, 3, 300), (8, 2, 130)])
-def test_each_cuda_stage_agrees_with_the_triton_kernels_it_replaces(stage, a, b, s):
-    """One hand-CUDA kernel on, everything else Triton: the block's output and every gradient against all-Triton.
-    This also runs the layout hand-offs between a CUDA stage and its Triton neighbours (head-major attention gradients vs
-    the CUDA stages' shared [M, 4C] buffer, dG in or out of it)."""
+def test_the_cuda_stages_agree_with_the_triton_kernels_at_ragged_shapes(path, a, b, s):
+    """Every hand-CUDA stage on: the block's output and every gradient against all-Triton, at ragged atom counts."""
     _needs_cuda_stages()
     leaves, cos, sin, seqused = _case(a, b, s, seed=6)
     dy = torch.randn(a * b, s, C, device=DEV, dtype=BF)
     settings.configure(**TRITON)
     out_t, grads_t = _run(_fused, leaves, dy, cos, sin, seqused, b)
-    settings.configure(**{**TRITON, "force_portable_kernels": False, **ONE_STAGE[stage]})
+    settings.configure(**PATHS[path])
     out_c, grads_c = _run(_fused, leaves, dy, cos, sin, seqused, b)
     failures = []
     for name, got, want in [
@@ -255,7 +230,7 @@ def test_each_cuda_stage_agrees_with_the_triton_kernels_it_replaces(stage, a, b,
         frob, _peak = _rel(got, want)
         if frob > 1e-2:
             failures.append(f"{name}: rel_frob={frob:.2e}")
-    assert not failures, f"{stage} A={a} B={b} S={s}:\n  " + "\n  ".join(failures)
+    assert not failures, f"{path} A={a} B={b} S={s}:\n  " + "\n  ".join(failures)
 
 
 def test_the_attention_side_cuda_kernels_match_triton_kernel_by_kernel():
@@ -658,18 +633,18 @@ def _needs_fp32_cuda():
 
 @contextlib.contextmanager
 def _fp32_path(path: str):
-    """The fp32 block on ``path`` for the duration: "triton" pins the CUDA extension off; "cuda" pins it on under "high"
+    """The fp32 block on ``path`` for the duration: "triton" pins force_portable_kernels; "cuda" runs the extension under "high"
     matmul precision (TF32 allowed -- the only precision it serves) and checks that it really is what serves."""
     from miniworld_engine.kernels.swa_dit.dispatch import _fp32_cuda
 
     previous = torch.get_float32_matmul_precision()
     if path == "cuda":
         _needs_fp32_cuda()
-        settings.configure(force_portable_kernels=False, swa_dit_fp32_cuda=True)
+        settings.configure(force_portable_kernels=False)
         torch.set_float32_matmul_precision("high")
         assert _fp32_cuda(C, HIDDEN, HW, torch.device(DEV)) is not None
     else:
-        settings.configure(swa_dit_fp32_cuda=False)
+        settings.configure(force_portable_kernels=True)
     try:
         yield
     finally:

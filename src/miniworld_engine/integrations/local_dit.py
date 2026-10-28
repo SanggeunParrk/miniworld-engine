@@ -399,13 +399,10 @@ class _Unserved(NotImplementedError):
 
 def _serves_hopper_training(module, single, cond, pair, mask):
     """Hopper training: True (native CUDA), None (not Hopper / not training: the other routes decide) or, for a call outside
-    the native geometry, None as well -- the module's composed path serves it. ``local_dit_h100_train=True`` set
-    explicitly keeps the contract error."""
+    the native geometry, None as well -- the module's composed path serves it."""
     try:
         return _require_hopper_training(module, single, cond, pair, mask)
     except _Unserved:
-        if settings.current().local_dit_h100_train is True:
-            raise
         return None
 
 
@@ -429,10 +426,6 @@ def _require_hopper_training(module, single, cond, pair, mask):
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
         return None
-    # Preserve the explicit diagnostic comparison switch, outside production.
-    if settings.current().local_dit_h100_train is False:
-        return False
-
     def require(ok, detail):
         if not ok:
             raise _Unserved(

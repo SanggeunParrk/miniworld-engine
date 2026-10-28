@@ -45,8 +45,6 @@ import torch
 import triton
 import triton.language as tl
 
-from miniworld_engine import settings
-
 from ..._compile import opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
@@ -319,8 +317,6 @@ def supported(
 ) -> bool:
     """q [A, 1, L, h, d] with (h, d) in ``BF16_LAYOUTS`` (any float dtype) and a bias of [1, L, L, h] (``bias_head_major``: [h, 1, L, L]) on sm_90
     with L a multiple of 128. The requirements are the kernels' own tile shapes, not a policy."""
-    if not settings.current().augmented_attention_bf16_sm90:
-        return False
     if not q.is_cuda or q.dim() != 5 or not q.is_floating_point():
         return False
     A, B, L, h, d = q.shape
@@ -497,8 +493,7 @@ def inference_core_supported(
 ) -> bool:
     """The fused token DiT step's gated core fits: bf16, 16 heads x 48, L a multiple of 128, H100."""
     return (
-        settings.current().augmented_attention_bf16_sm90
-        and dtype is torch.bfloat16
+        dtype is torch.bfloat16
         and (d, h) == (H * D, H)
         and L % 128 == 0
         and _is_hopper(device_index)
@@ -542,11 +537,9 @@ def tf32_fwd_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
 def tf32_inference_core_supported(
     dtype: torch.dtype, L: int, d: int, h: int, device_index: int
 ) -> bool:
-    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, h heads of width d / h (``TF32_LAYOUTS``; ``d`` is the attention width), L a multiple of 128, H100.
-    ``settings.augattn_tf32_sm90 = False`` keeps the Triton core."""
+    """The fp32 step's TF32 core (attn_tf32.cu) fits: fp32, h heads of width d / h (``TF32_LAYOUTS``; ``d`` is the attention width), L a multiple of 128, H100."""
     return (
-        settings.current().augattn_tf32_sm90
-        and dtype is torch.float32
+        dtype is torch.float32
         and h > 0
         and d % h == 0
         and (h, d // h) in TF32_LAYOUTS

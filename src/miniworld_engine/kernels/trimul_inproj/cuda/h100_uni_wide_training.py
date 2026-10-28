@@ -8,7 +8,7 @@ The bidirectional wide sources (``h100_sources/wide_train``) compiled for hidden
   backward  ``gate.cu`` (dProj, gate-logit gradient) -> dn GEMM -> ``output_ln_d{D}_l384.cu``
             (WIDTH=D/2) -> ``contract_gp_d384_l384.cu`` with GP_DIR (one direction; dl / dr are
             never materialised, the epilogue writes the gate/projection preactivation gradients)
-            -> weight GEMMs -> dX GEMM -> ``input_ln_d{D}_l384.cu`` (input LN + residual,
+            -> weight GEMMs -> dX GEMM -> ``input_ln_l384.cu`` / ``input_ln_d384_l384.cu`` (input LN + residual,
             INPUT_NO_REDUCE: weight gradients come from the GEMMs).
 B=1, BF16 pair and projection weights, FP32 LayerNorm affine, LN eps 1e-5.
 """
@@ -246,7 +246,7 @@ def _input_ln(x, dxn, dy, dx, gi, dgi, dbi, defer=False):
     if native:
         defines += W._defines(MW_LN_PARTIALS=1)
     smem = max(3 * 16 * D * 2 + 128, 2 * 4 * D * 4) + D * 4
-    source = f"input_ln_d{D}_l384.cu"
+    source = "input_ln_d384_l384.cu" if D == 384 else "input_ln_l384.cu"
     k = W._kernel(source, "mw_independent_input_ln", "upstream", defines, smem)
     maps = [W._map(t, [64, 16], [D, M], [D * 2]) for t in (x, dxn, dy, dx)]
     grid = num_sms() * {256: 6, 384: 5, 512: 4}[D]

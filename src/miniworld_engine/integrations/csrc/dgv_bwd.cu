@@ -15,6 +15,7 @@
 #include <cuda_bf16.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
+#include "sm90_ptx.cuh"
 
 namespace {
 constexpr int D = 64, KD = 512, KB = KD / 64;
@@ -23,6 +24,14 @@ constexpr int TILE = 64 * 64;
 constexpr int THREADS = 384;                             // two consumer warpgroups + one producer warpgroup
 
 namespace wg {
+using csrc_sm90::wg::commit;
+using csrc_sm90::wg::fence;
+using csrc_sm90::wg::mma_m64n32k16_kk;
+using csrc_sm90::wg::mma_m64n32k16_mm;
+using csrc_sm90::wg::proxy_fence;
+using csrc_sm90::wg::reg_alloc;
+using csrc_sm90::wg::reg_dealloc;
+using csrc_sm90::wg::wait;
 __device__ __forceinline__ int off(int r, int kc) { return r * 64 + ((kc ^ (r & 7)) << 3); }
 __device__ __forceinline__ uint64_t desc(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
@@ -40,68 +49,6 @@ __device__ __forceinline__ uint64_t desc64(const void* p) {
   d |= (static_cast<uint64_t>(32) << 32);
   d |= (static_cast<uint64_t>(2) << 62);
   return d;
-}
-// both K-major, n = 32: the dy GEMM (a warpgroup owns 32 of the 64 output columns)
-__device__ __forceinline__ void mma_m64n32k16_kk(uint64_t da, uint64_t db, float* d, int accumulate) {
-  asm volatile(
-      "{\n"
-      ".reg .pred p;\n"
-      "setp.ne.b32 p, %16, 0;\n"
-      "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {\n"
-      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
-      " %8, %9, %10, %11, %12, %13, %14, %15},\n"
-      " %17, %18, p, 1, 1, 0, 0;\n"
-      "}\n"
-      :
-        "+f"(d[0]),
-        "+f"(d[1]),
-        "+f"(d[2]),
-        "+f"(d[3]),
-        "+f"(d[4]),
-        "+f"(d[5]),
-        "+f"(d[6]),
-        "+f"(d[7]),
-        "+f"(d[8]),
-        "+f"(d[9]),
-        "+f"(d[10]),
-        "+f"(d[11]),
-        "+f"(d[12]),
-        "+f"(d[13]),
-        "+f"(d[14]),
-        "+f"(d[15])
-      : "r"(accumulate), "l"(da), "l"(db)
-      : "memory");
-}
-// A MN-major (the y tile), B MN-major (a dv head tile): the transposed dWv block of one head
-__device__ __forceinline__ void mma_m64n32k16_mm(uint64_t da, uint64_t db, float* d, int accumulate) {
-  asm volatile(
-      "{\n"
-      ".reg .pred p;\n"
-      "setp.ne.b32 p, %16, 0;\n"
-      "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {\n"
-      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
-      " %8, %9, %10, %11, %12, %13, %14, %15},\n"
-      " %17, %18, p, 1, 1, 1, 1;\n"
-      "}\n"
-      :
-        "+f"(d[0]),
-        "+f"(d[1]),
-        "+f"(d[2]),
-        "+f"(d[3]),
-        "+f"(d[4]),
-        "+f"(d[5]),
-        "+f"(d[6]),
-        "+f"(d[7]),
-        "+f"(d[8]),
-        "+f"(d[9]),
-        "+f"(d[10]),
-        "+f"(d[11]),
-        "+f"(d[12]),
-        "+f"(d[13]),
-        "+f"(d[14]),
-        "+f"(d[15])
-      : "r"(accumulate), "l"(da), "l"(db)
-      : "memory");
 }
 // A MN-major (the dgv tile read transposed), B MN-major (the y tile): the dWgv m-tile
 __device__ __forceinline__ void mma_m64n64k16_mm(uint64_t da, uint64_t db, float* d, int accumulate) {
@@ -153,42 +100,20 @@ __device__ __forceinline__ void mma_m64n64k16_mm(uint64_t da, uint64_t db, float
       : "memory");
 }
 
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(N) : "memory"); }
-__device__ __forceinline__ void reg_dealloc() { asm volatile("setmaxnreg.dec.sync.aligned.u32 24;\n" ::: "memory"); }
-__device__ __forceinline__ void reg_alloc() { asm volatile("setmaxnreg.inc.sync.aligned.u32 240;\n" ::: "memory"); }
-__device__ __forceinline__ void proxy_fence() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 }  // namespace wg
 
 namespace tma {
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void bar_init(uint64_t* b, uint32_t count) {
-  asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" :: "r"(sa(b)), "r"(count) : "memory");
-}
-__device__ __forceinline__ void bar_init_fence() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
-__device__ __forceinline__ void expect_tx(uint64_t* b, uint32_t bytes) {
-  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(sa(b)), "r"(bytes) : "memory");
-}
-__device__ __forceinline__ void arrive(uint64_t* b) {
-  asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(sa(b)) : "memory");
-}
-__device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
-  asm volatile("{\n.reg .pred p;\nWAIT_%=:\n"
-               "mbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n"
-               "@!p bra WAIT_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
-}
-__device__ __forceinline__ void load_2d(const void* map, uint32_t dst, uint64_t* bar, int c0, int c1) {
-  asm volatile("cp.async.bulk.tensor.2d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
-               :: "r"(dst), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1) : "memory");
-}
-__device__ __forceinline__ void store_2d(const void* map, uint32_t src, int c0, int c1) {
-  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0, {%2, %3}], [%1];\n"
-               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
-}
-__device__ __forceinline__ void commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" :: "n"(N) : "memory"); }
-__device__ __forceinline__ void wait_all() { asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory"); }
+using csrc_sm90::tma::arrive;
+using csrc_sm90::tma::bar_init;
+using csrc_sm90::tma::bar_init_fence;
+using csrc_sm90::tma::commit;
+using csrc_sm90::tma::expect_tx;
+using csrc_sm90::tma::load_2d;
+using csrc_sm90::tma::sa;
+using csrc_sm90::tma::store_2d;
+using csrc_sm90::tma::wait;
+using csrc_sm90::tma::wait_all;
+using csrc_sm90::tma::wait_read;
 }  // namespace tma
 
 __device__ __forceinline__ uint32_t pack2(float a, float b) {

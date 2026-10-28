@@ -41,8 +41,8 @@ def transition_sm90a(x, ln_weight, ln_bias, wa, wb, ws, eps, n):
     Order: the generic kernels where they are the faster pick even though a tuned build would take the call
     (``fused_generic_sm90a.prefers_generic``), then ``fused_sm90a`` (d=128), ``fused_wide_sm90a`` (d=64/256/384/512/768) and
     ``fused_generic_sm90a`` (any other width, ragged rows, fp32 on TF32). Each ``available`` is the kernel's own requirement plus a
-    successful build. The caller decides whether the sm_90a kernels are switched on (``settings.transition_fused_sm90a`` and an
-    engine backend other than ``"triton"``)."""
+    successful build. The caller skips them only for an engine backend of ``"triton"``
+    (``force_portable_kernels``)."""
     from . import fused_generic_sm90a, fused_sm90a, fused_wide_sm90a
 
     training = torch.is_grad_enabled() and any(t.requires_grad for t in (x, ln_weight, wa, wb, ws))

@@ -89,16 +89,6 @@ def test_gate_rejects_everything_it_is_not_built_for():
     )
 
 
-@pytest.mark.skipif(not CUDA, reason="needs a GPU to build the operands")
-def test_env_switch_turns_the_gate_off(monkeypatch):
-    from miniworld_engine.kernels.transition.cuda import fused_sm90a
-
-    wa, ws = _weights()
-    x = torch.randn(128, 128, device="cuda", dtype=torch.bfloat16)
-    override_setting(monkeypatch, "transition_fused_sm90a", "0")
-    assert not fused_sm90a.supported(x, wa, ws)
-
-
 def _build(shape, seed=72):
     from miniworld_engine.modules import Transition
 
@@ -130,7 +120,7 @@ def _run(module, x, dy, *, fused, fp32=False):
         mod = mod.float()
         x, dy = x.float(), dy.float()
     settings.configure(
-        force_portable_kernels=not fused, transition_fused_sm90a=fused
+        force_portable_kernels=not fused
     )
     xx = x.clone().requires_grad_()
     y = mod(xx)
@@ -261,7 +251,7 @@ def test_persistent_input_refill_graph(monkeypatch):
     from miniworld_engine import settings
 
     monkeypatch.setattr(settings, "_ACTIVE", settings.current())
-    settings.configure(force_portable_kernels=False, transition_fused_sm90a=True)
+    settings.configure(force_portable_kernels=False)
     module, x, dy = _build((1, 384, 384, 128))
     with torch.no_grad():
         module.ln_in.weight.copy_(1 + 0.2 * torch.randn_like(module.ln_in.weight))

@@ -33,7 +33,7 @@ accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtyp
 same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp32.
 
 ``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
-``modules.bias_only_dit.hoist``. settings.bias_only_dit_hoist=0 (read per call) turns it off;
+``modules.bias_only_dit.hoist``.
 """
 
 from __future__ import annotations
@@ -58,8 +58,6 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
     [1, L, L, 128]."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    if not settings.current().bias_only_dit_hoist:
-        return False
     if implementation != ImplementationType.MINIWORLD:
         return False
     if settings.current().force_portable_kernels:

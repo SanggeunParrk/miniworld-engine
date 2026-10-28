@@ -24,7 +24,6 @@ from portable_helpers import poison_allocator as _poison
 from portable_helpers import randomize
 from portable_helpers import relative_fp64 as relative
 from portable_helpers import tf32_matmul_flag as tf32
-from settings_helpers import override_setting
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import bias_only_dit as INF
@@ -175,7 +174,7 @@ def test_pair_bias_all_against_fp64(nb, n_head, d_head, dtype):
 
 @pytest.mark.parametrize("dtype", [BF, F32])
 def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
-    """The PyTorch fold (implementation PYTORCH, and the engine path with settings.bias_only_dit_hoist=0) against fp64, the same
+    """The PyTorch fold (implementation PYTORCH) against fp64, the same
     API; a backward through two of three biases: the third block's gradients are zero, the rest as fp64 with a zero d bias."""
     L, nb, H, DH = 256, 3, 16, 48
     attns = attentions(nb, H, DH, dtype, seed=9)
@@ -208,7 +207,7 @@ def test_pair_bias_all_pytorch_fold_and_unused_biases(dtype):
         assert relative(dws[i], w_dws[i]) < tol["dW"], i
 
 
-def test_serves_and_declines(monkeypatch):
+def test_serves_and_declines():
     attns = attentions(2, 16, 48, BF)
     p = torch.randn(1, 256, 256, 128, device="cuda", dtype=BF)
     assert HO.serves(MW, attns, p)
@@ -221,8 +220,6 @@ def test_serves_and_declines(monkeypatch):
     assert not HO.serves(MW, attns, p.float())  # fp32 needs fp32 weights
     with torch.autocast("cuda", dtype=BF):
         assert not HO.serves(MW, a32, p.float())  # fp32 under autocast: the fold
-    override_setting(monkeypatch, "bias_only_dit_hoist", "0")
-    assert not HO.serves(MW, attns, p)
     with pytest.raises(ValueError, match="must share eps and head count"):
         pair_bias_all(
             [*attns, *attentions(1, 24, 32, BF)], p, implementation=MW

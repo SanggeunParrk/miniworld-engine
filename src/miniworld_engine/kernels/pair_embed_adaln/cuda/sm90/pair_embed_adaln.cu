@@ -20,6 +20,8 @@
 #include <cuda_runtime.h>
 #include <stdint.h>
 
+#include "../../../pair_embed_geom/cuda/sm90/pe_sm90.cuh"
+
 constexpr int C = 256;
 constexpr int NW = 8;                       // warps per rows-kernel CTA = rows per CTA
 constexpr int NBLK = 33;                    // table kernel: CTAs per channel quarter
@@ -29,11 +31,6 @@ constexpr int NBLK = 33;                    // table kernel: CTAs per channel qu
 constexpr uint32_t MASKED = 1u << 31;
 constexpr uint32_t HAS_SC = 1u << 24;
 
-__device__ __forceinline__ float wsum(float v) {
-#pragma unroll
-  for (int o = 16; o; o >>= 1) v += __shfl_xor_sync(0xffffffffu, v, o);
-  return v;
-}
 __device__ __forceinline__ void ld8(const float* p, float* o) {
   float4 a = *reinterpret_cast<const float4*>(p), b = *reinterpret_cast<const float4*>(p + 4);
   o[0] = a.x; o[1] = a.y; o[2] = a.z; o[3] = a.w; o[4] = b.x; o[5] = b.y; o[6] = b.z; o[7] = b.w;
@@ -240,36 +237,6 @@ pe_bwd_tbl(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int nX
 // the row) lives in shared memory and is written ("scattered") by two extra warps, 3 entries per pair; the dx tile arrives by cp.async; one warpgroup per 64 table rows
 // issues wgmma.m64n64k16 on the two swizzled operands.  CTA (q, t) = channel quarter q of the FIXED pair slice t, tiles in order: bitwise deterministic, no atomics.
 constexpr int TPB = 64, ST4 = 5, NWG4 = 3, SC4 = NWG4 * 128, NTH4 = SC4 + 64, NR4 = NWG4 * 64;
-__device__ __forceinline__ void cp16(void* dst, const void* src, bool pred) {
-  unsigned d = (unsigned)__cvta_generic_to_shared(dst);
-  int sz = pred ? 16 : 0;                                   // src-size 0: zero fill
-  asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" ::"r"(d), "l"(src), "r"(sz));
-}
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" ::"n"(N)); }
-__device__ __forceinline__ uint64_t wg_desc(unsigned smem_addr, unsigned lbo_bytes, unsigned sbo_bytes) {
-  uint64_t d = 0;
-  d |= (uint64_t)((smem_addr & 0x3FFFFu) >> 4);
-  d |= (uint64_t)((lbo_bytes & 0x3FFFFu) >> 4) << 16;
-  d |= (uint64_t)((sbo_bytes & 0x3FFFFu) >> 4) << 32;
-  d |= (uint64_t)1 << 62;                                   // 128-byte swizzle
-  return d;
-}
-__device__ __forceinline__ void wg_fence() { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void wg_commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void wg_wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" ::"n"(N) : "memory"); }
-__device__ __forceinline__ void fence_async() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
-__device__ __forceinline__ void wgmma_m64n64k16(float (&d)[32], uint64_t da, uint64_t db) {
-  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, 1, 0;\nwgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {%0,%1,%2,%3,%4,%5,%6,%7,%8,%9,%10,%11,%12,%13,%14,%15,%16,%17,%18,%19,%20,%21,%22,%23,%24,%25,%26,%27,%28,%29,%30,%31}, %32, %33, p, 1, 1, 0, 1;\n}\n"
-               : "+f"(d[0]), "+f"(d[1]), "+f"(d[2]), "+f"(d[3]), "+f"(d[4]), "+f"(d[5]), "+f"(d[6]), "+f"(d[7]), "+f"(d[8]), "+f"(d[9]), "+f"(d[10]), "+f"(d[11]), "+f"(d[12]), "+f"(d[13]), "+f"(d[14]), "+f"(d[15]), "+f"(d[16]), "+f"(d[17]), "+f"(d[18]), "+f"(d[19]), "+f"(d[20]), "+f"(d[21]), "+f"(d[22]), "+f"(d[23]), "+f"(d[24]), "+f"(d[25]), "+f"(d[26]), "+f"(d[27]), "+f"(d[28]), "+f"(d[29]), "+f"(d[30]), "+f"(d[31])
-               : "l"(da), "l"(db));
-}
-__device__ __forceinline__ void wg_fence_acc(float (&d)[32]) {
-#pragma unroll
-  for (int i = 0; i < 32; i++) asm volatile("" : "+f"(d[i])::"memory");
-}
-
-__device__ __forceinline__ void st_u16(unsigned addr, unsigned v) { asm volatile("st.shared.u16 [%0], %1;\n" ::"r"(addr), "r"(v)); }
 
 __global__ void __launch_bounds__(NTH4, 1)
 pe_bwd_tbl4(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int nX, int NT, float* tpart) {

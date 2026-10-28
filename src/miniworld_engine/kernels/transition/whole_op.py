@@ -49,7 +49,7 @@ def transition(
         msg = (f"transition: expand_a_weight has {expand_a_weight.shape[0]} rows, expected "
                f"n * d_hidden = {n} * {x.shape[-1]}")
         raise ValueError(msg)
-    if settings.current().transition_fused_sm90a and (not settings.current().force_portable_kernels):
+    if not settings.current().force_portable_kernels:
         from miniworld_engine.kernels.transition.cuda import transition_sm90a
 
         out = transition_sm90a(

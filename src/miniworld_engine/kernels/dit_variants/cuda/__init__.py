@@ -63,8 +63,11 @@ def glu_rows(ab, out, up):
 
 
 def ln_rows(z, out, eps=1e-5):
-    """out = LN(z), no affine, z / out bf16 [rows, 128 | 256]."""
-    ext().ln_rows(z, out, float(eps))
+    """out = LN(z), no affine, z / out bf16 [rows, 128 | 256]: the row extensions' one LN-rows kernel
+    (``conditioned_transition/cuda/token_dit_rows.cu`` ``layernorm_rows``)."""
+    from miniworld_engine.kernels.conditioned_transition import cuda as rows
+
+    rows.layernorm_rows(z, out, eps)
 
 
 def available() -> bool:

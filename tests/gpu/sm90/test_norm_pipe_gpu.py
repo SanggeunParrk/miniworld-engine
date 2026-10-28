@@ -132,14 +132,14 @@ def test_cuda_graph_and_compile():
 
 def test_the_engine_entries_route_here_on_h100():
     from miniworld_engine import settings
-    from miniworld_engine.kernels.layernorm.interface import _use_pipe
+    from miniworld_engine.kernels.layernorm.cuda.pipe import serves
 
     x = torch.randn(2, 64, 64, 128, device="cuda", dtype=torch.bfloat16)
-    assert _use_pipe(x)
-    assert not _use_pipe(x[..., :40].contiguous())  # 80-byte rows: the general kernels
+    assert serves(x)
+    assert not serves(x[..., :40].contiguous())  # 80-byte rows: the general kernels
     settings.configure(force_portable_kernels=True)
     try:
-        assert not _use_pipe(x)
+        assert not serves(x)
     finally:
         settings.configure(force_portable_kernels=False)
     w = torch.rand(128, device="cuda", dtype=torch.bfloat16)

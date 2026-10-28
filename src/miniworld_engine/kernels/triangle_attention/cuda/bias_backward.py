@@ -10,7 +10,6 @@ import torch
 import triton
 from miniworld_engine.kernels._compile import device_constant,opaque
 from miniworld_engine.autotune.shape_key import token_key,pack
-from miniworld_engine.kernels.triangle_attention.cuda import training_forward
 
 _ROOT=Path(__file__).resolve().parent
 _EXT=None
@@ -82,7 +81,7 @@ class _Attention(torch.autograd.Function):
     def forward(ctx,q,k,v,b,native_dq):
         from miniworld_engine.kernels.triangle_attention.triton import main as core
         b=b.contiguous()
-        out,m=training_forward.routed_fwd(q,k,v,b,token_key(q.shape[2]))
+        out,m=core._tri_attn_fwd(q,k,v,b,token_key(q.shape[2]))
         ctx.save_for_backward(q,k,v,b,m,out)
         ctx.native_dq=native_dq
         return out

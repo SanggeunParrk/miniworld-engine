@@ -50,8 +50,8 @@ _BUILD_FAILED = False
 
 
 def supported(x: torch.Tensor, cond: torch.Tensor) -> bool:
-    """The contract above (and the ``adaln_h100_cuda`` setting)."""
-    if not settings.current().adaln_h100_cuda or not x.is_cuda or not cond.is_cuda:
+    """The contract above."""
+    if not x.is_cuda or not cond.is_cuda:
         return False
     if x.dtype is torch.float32 and torch.is_autocast_enabled("cuda"):
         return False  # autocast would run the fp32 call's GEMMs in bf16: the PyTorch leg decides there

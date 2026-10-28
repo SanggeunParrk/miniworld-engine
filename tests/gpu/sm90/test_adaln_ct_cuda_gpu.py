@@ -25,12 +25,12 @@ A, L, D, DC = 2, 128, 768, 384
 
 @pytest.fixture(autouse=True)
 def _settings():
-    previous = settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False, adaln_h100_cuda=True)
+    previous = settings.configure(force_portable_kernels=False, portable_on_hopper_blackwell=False)
     prev_tf32 = torch.backends.cuda.matmul.allow_tf32
     torch.backends.cuda.matmul.allow_tf32 = True
     yield
     torch.backends.cuda.matmul.allow_tf32 = prev_tf32
-    settings.configure(**{f: getattr(previous, f) for f in ("force_portable_kernels", "portable_on_hopper_blackwell", "adaln_h100_cuda")})
+    settings.configure(**{f: getattr(previous, f) for f in ("force_portable_kernels", "portable_on_hopper_blackwell")})
 
 
 def _kernels(fn):

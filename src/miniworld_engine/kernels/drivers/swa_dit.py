@@ -9,17 +9,18 @@ launch keys on ``atom_key(S, A=A, ...)`` -- the augment count exactly -- so each
   A = 48   diffusion training (``num_augment: 48`` in every MiniWorld phase-2 config)
   A = 5    diffusion evaluation samples (inference forward only)
 
-Every bf16 Triton driver pins the hand-CUDA stages off (``settings.swa_dit_*_cuda=False``): on sm_90 they would otherwise
-take the qkvg and FFN stages and the Triton kernel would never launch. The forward drivers run the inference forward
+Every Triton driver pins ``force_portable_kernels``: on sm_90 the hand-CUDA stages would otherwise take every stage and
+the Triton kernel would never launch. The forward drivers run the inference forward
 (SAVE=0) and the training forward (SAVE=1); ``swa_dit_swiglu_bwd_triton`` runs both FFN weight-gradient modes (DWOPS=1
-and 0), so every key flag is built on both sides. The ``*_sm90_cuda`` drivers pin their stage on and raise when the
-extension is not available, rather than quietly timing the Triton fallback.
+and 0), so every key flag is built on both sides. The ``*_sm90_cuda`` drivers run the block with every hand-CUDA stage it serves and raise when
+their extension is not available, rather than quietly timing the Triton fallback.
 
 The block dispatches on the activation dtype, so which kernels a driver reaches is the process's
 ``MINIWORLD_DRIVER_DTYPE``: the ``*_fp32_*`` rows are fp32 and the rest bf16, and each driver refuses to run at the
-other precision rather than tune the other half's kernels under its name. The ``*_fp32_triton`` drivers pin the fp32
-CUDA extension off; the ``*_fp32_sm90_cuda`` drivers pin it on and run under TF32-allowing matmul precision, the only
-one it serves (every stage of ``cuda/swa_fp32.cu`` launches in each fp32 forward or backward, so they share drivers).
+other precision rather than tune the other half's kernels under its name. The ``*_fp32_triton`` drivers pin
+``force_portable_kernels``; the ``*_fp32_sm90_cuda`` drivers run the fp32 CUDA extension under TF32-allowing matmul
+precision, the only one it serves (every stage of ``cuda/swa_fp32.cu`` launches in each fp32 forward or backward, so
+they share drivers).
 """
 from __future__ import annotations
 
@@ -49,8 +50,7 @@ _TRAIN_AUGMENTS = (1, 48)
 _INFER_AUGMENTS = (1, 5, 48)
 
 #: The Triton kernels on every card: every hand-CUDA stage off.
-_TRITON = {"swa_dit_qkvg_fwd_cuda": False, "swa_dit_ffn_fwd_cuda": False, "swa_dit_ffn_bwd_cuda": False,
-           "swa_dit_attn_cuda": False, "swa_dit_oproj_bwd_cuda": False, "swa_dit_qkvg_bwd_cuda": False}
+_TRITON = {"force_portable_kernels": True}
 
 
 @contextlib.contextmanager
@@ -191,47 +191,45 @@ def swa_dit_inproj_bwd_triton() -> None:
 def swa_dit_inproj_fwd_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("qkvg")
-    _forward(force_portable_kernels=False, swa_dit_qkvg_fwd_cuda=True, swa_dit_rows_impl="wgmma")
+    _forward(force_portable_kernels=False, swa_dit_rows_impl="wgmma")
 
 
 def swa_dit_output_swiglu_fwd_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("fwd")
-    _forward(force_portable_kernels=False, swa_dit_ffn_fwd_cuda=True, swa_dit_rows_impl="wgmma")
+    _forward(force_portable_kernels=False, swa_dit_rows_impl="wgmma")
 
 
 def swa_dit_swiglu_bwd_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("bwd")
-    _backward(force_portable_kernels=False, swa_dit_ffn_bwd_cuda=True, swa_dit_ffn_dw="mat", swa_dit_rows_impl="wgmma")
+    _backward(force_portable_kernels=False, swa_dit_ffn_dw="mat", swa_dit_rows_impl="wgmma")
 
 
 def swa_dit_softmax_fwd_sm90_cuda() -> None:
     """The window attention forward (inference and training forwards)."""
     _require("bf16")
     _require_cuda("attn")
-    _forward(force_portable_kernels=False, swa_dit_attn_cuda=True)
+    _forward(force_portable_kernels=False)
 
 
 def swa_dit_softmax_bwd_sm90_cuda() -> None:
-    """The window attention backward (dq, dk, dv in one kernel), at both of its output layouts: into the CUDA qkvg
-    backward's buffer, and head-major for the Triton qkvg backward."""
+    """The window attention backward (dq, dk, dv in one kernel), into the CUDA qkvg backward's buffer."""
     _require("bf16")
     _require_cuda("attn")
-    _backward(force_portable_kernels=False, swa_dit_attn_cuda=True, swa_dit_qkvg_bwd_cuda=True)
-    _backward(force_portable_kernels=False, swa_dit_attn_cuda=True, swa_dit_qkvg_bwd_cuda=False)
+    _backward(force_portable_kernels=False)
 
 
 def swa_dit_output_bwd_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _backward(force_portable_kernels=False, swa_dit_oproj_bwd_cuda=True)
+    _backward(force_portable_kernels=False)
 
 
 def swa_dit_inproj_bwd_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _backward(force_portable_kernels=False, swa_dit_qkvg_bwd_cuda=True)
+    _backward(force_portable_kernels=False)
 
 
 # The slab kernels of the stages that also have a team-gm wgmma kernel (``swa_dit_rows_impl`` pinned to "slab").
@@ -239,25 +237,25 @@ def swa_dit_inproj_bwd_sm90_cuda() -> None:
 def swa_dit_inproj_fwd_rows_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _forward(force_portable_kernels=False, swa_dit_qkvg_fwd_cuda=True, swa_dit_rows_impl="slab")
+    _forward(force_portable_kernels=False, swa_dit_rows_impl="slab")
 
 
 def swa_dit_output_fwd_rows_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _forward(force_portable_kernels=False, swa_dit_ffn_fwd_cuda=True, swa_dit_rows_impl="slab")
+    _forward(force_portable_kernels=False, swa_dit_rows_impl="slab")
 
 
 def swa_dit_swiglu_fwd_rows_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _forward(force_portable_kernels=False, swa_dit_ffn_fwd_cuda=True, swa_dit_rows_impl="slab")
+    _forward(force_portable_kernels=False, swa_dit_rows_impl="slab")
 
 
 def swa_dit_swiglu_bwd_rows_sm90_cuda() -> None:
     _require("bf16")
     _require_cuda("slab")
-    _backward(force_portable_kernels=False, swa_dit_ffn_bwd_cuda=True, swa_dit_ffn_dw="mat", swa_dit_rows_impl="slab")
+    _backward(force_portable_kernels=False, swa_dit_ffn_dw="mat", swa_dit_rows_impl="slab")
 
 
 # ---- the hoisted modulation and the weight-gradient GEMMs (sm_90a, cuda/swa_mod.cu, cuda/swa_wgrad.cu) ----------------
@@ -267,7 +265,7 @@ def _modulation(*, backward: bool) -> None:
     from miniworld_engine.kernels.swa_dit.interface import swa_dit_hoist_modulation
 
     g = torch.Generator(device="cpu").manual_seed(0)
-    with _pinned(force_portable_kernels=False, swa_dit_mod_cuda=True):
+    with _pinned(force_portable_kernels=False):
         for b in (1, 3):
             c = (torch.randn(b, _S, _C, generator=g)).to(dev(), BF16).requires_grad_(backward)
             w = (torch.randn(6 * _C, _C, generator=g) * 0.05).to(dev(), BF16).requires_grad_(backward)
@@ -292,8 +290,7 @@ def swa_dit_gemm_bwd_sm90_cuda() -> None:
 
 #: Every bf16 stage on the hand-CUDA slab kernels, so the backward reaches the one-launch weight-gradient kernel (it serves up
 #: to ``dispatch._WGRAD_MAX_ROWS`` rows: the A = 1 backward here, not the 48-augment one).
-_WGRAD = {"force_portable_kernels": False, "swa_dit_wgrad_cuda": True, "swa_dit_ffn_bwd_cuda": True, "swa_dit_oproj_bwd_cuda": True,
-          "swa_dit_qkvg_bwd_cuda": True, "swa_dit_attn_cuda": True, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"}
+_WGRAD = {"force_portable_kernels": False, "swa_dit_ffn_dw": "mat", "swa_dit_rows_impl": "slab"}
 
 
 def swa_dit_dw_sm90_cuda() -> None:
@@ -306,8 +303,8 @@ def swa_dit_dw_sm90_cuda() -> None:
 
 
 # ---- fp32 Triton (the window attention kernels are shared with bf16 and driven by its rows) -------------------------
-#: The fp32 Triton kernels on every card: the fp32 CUDA extension off.
-_TRITON_FP32 = {"swa_dit_fp32_cuda": False}
+#: The fp32 Triton kernels on every card.
+_TRITON_FP32 = {"force_portable_kernels": True}
 
 
 def swa_dit_inproj_fwd_fp32_triton() -> None:
@@ -337,7 +334,7 @@ def swa_dit_inproj_bwd_fp32_triton() -> None:
 
 # ---- fp32 CUDA (sm_90a, cuda/swa_fp32.cu): one extension, every stage; not autotuned (fixed tiles) ------------------
 #: The fp32 CUDA extension pinned on.
-_CUDA_FP32 = {"force_portable_kernels": False, "swa_dit_fp32_cuda": True}
+_CUDA_FP32 = {"force_portable_kernels": False}
 
 
 @contextlib.contextmanager
@@ -398,7 +395,7 @@ def swa_dit_dw_fp32_sm90_cuda() -> None:
     _require_cuda("fp32")
     _require_cuda("wgwg32")
     with tf32_allowed():
-        _backward(**_CUDA_FP32, swa_dit_wgrad_cuda=True)
+        _backward(**_CUDA_FP32)
 
 
 def swa_dit_transpose_sm90_cuda() -> None:
@@ -409,7 +406,7 @@ def swa_dit_transpose_sm90_cuda() -> None:
     _require_cuda("pack")
     _require_cuda("bwd")
     _require_cuda("fwd")
-    with _pinned(force_portable_kernels=False, swa_dit_ffn_fwd_cuda=True, swa_dit_ffn_bwd_cuda=True, swa_dit_rows_impl="wgmma"):
+    with _pinned(force_portable_kernels=False, swa_dit_rows_impl="wgmma"):
         args = _inputs(a=_A)
         q, mod = (t.detach().requires_grad_() for t in args[:2])
         weights = [w.detach().requires_grad_() for w in args[5:10]]

@@ -15,7 +15,7 @@
 // instead of 128. LN0 is no longer kept from the forward: this pass recomputes it.
 //
 // x the pair rows as the forward read them (bf16 or fp32), dy = d LN0 (fp32), dx in its own dtype (bf16 or fp32). The row
-// statistics are recomputed from x with the forward kernel's arithmetic (layernorm128_rows_kernel: the same sums in the same
+// statistics are recomputed from x with the forward kernel's arithmetic (layernorm_rows_kernel<128>: the same sums in the same
 // order), so y is the forward's fp32 value.
 //
 // SYNC PROTOCOL. None beyond the warp: one warp per RPW consecutive rows (all of their loads issued before any math); a lane owns
@@ -78,7 +78,7 @@ __global__ void __launch_bounds__(WPB * 32) ln0_bwd_rows_kernel(const XT* __rest
   }
 #pragma unroll
   for (int k = 0; k < RPW; ++k) {
-    // the forward's statistics (layernorm128_rows_kernel), then y
+    // the forward's statistics (layernorm_rows_kernel<128>), then y
     float4 y = x[k];
     const float mean = warp_sum(y.x + y.y + y.z + y.w) / 128.f;
     y.x -= mean; y.y -= mean; y.z -= mean; y.w -= mean;

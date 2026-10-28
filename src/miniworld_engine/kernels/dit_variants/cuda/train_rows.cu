@@ -35,18 +35,14 @@ namespace {
 using namespace tdr;
 using bf = __nv_bfloat16;
 
-__device__ __forceinline__ float4 add4(float4 a, float4 b) { return make_float4(a.x + b.x, a.y + b.y, a.z + b.z, a.w + b.w); }
 __device__ __forceinline__ float4 sub4(float4 a, float4 b) { return make_float4(a.x - b.x, a.y - b.y, a.z - b.z, a.w - b.w); }
-__device__ __forceinline__ float4 mul4(float4 a, float4 b) { return make_float4(a.x * b.x, a.y * b.y, a.z * b.z, a.w * b.w); }
+using tdr::mul4;                                     // + the scalar overload below
 __device__ __forceinline__ float4 mul4(float4 a, float s) { return make_float4(a.x * s, a.y * s, a.z * s, a.w * s); }
-__device__ __forceinline__ float4 zero4() { return make_float4(0.f, 0.f, 0.f, 0.f); }
 __device__ __forceinline__ float4 fma4(float4 a, float4 b, float4 c) {
   return make_float4(fmaf(a.x, b.x, c.x), fmaf(a.y, b.y, c.y), fmaf(a.z, b.z, c.z), fmaf(a.w, b.w, c.w));
 }
 __device__ __forceinline__ float rna(float x) { unsigned y; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(y) : "f"(x)); return __uint_as_float(y); }
 __device__ __forceinline__ float4 rna4(float4 a) { return make_float4(rna(a.x), rna(a.y), rna(a.z), rna(a.w)); }
-__device__ __forceinline__ float sum4(float4 a) { return a.x + a.y + a.z + a.w; }
-__device__ __forceinline__ float4 sig4(float4 a) { return make_float4(sigm(a.x), sigm(a.y), sigm(a.z), sigm(a.w)); }
 // scale factor f and its derivative d f / d logit, both 4-wide
 template <bool SIG> __device__ __forceinline__ float4 sc_f(float4 v) { if constexpr (SIG) return sig4(v); else return v; }
 template <bool SIG> __device__ __forceinline__ float4 sc_df(float4 f) {

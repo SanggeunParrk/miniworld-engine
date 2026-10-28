@@ -20,6 +20,7 @@
 #include <cuda_pipeline.h>
 #include <cuda.h>
 #include <cudaTypedefs.h>
+#include "sm90_ptx.cuh"
 
 namespace {
 constexpr int H = 8, C = 32, D = 64, HC = H * C;
@@ -28,6 +29,13 @@ constexpr int TILE = 64 * 64;                            // a [64 rows][64] bf16
 static_assert(D == 64 && NB == 64 && BJ == 64, "all tiles are 64 wide: one 128-byte swizzle block");
 
 namespace wg {
+using csrc_sm90::wg::commit;
+using csrc_sm90::wg::fence;
+using csrc_sm90::wg::mma_m64n32k16_kk;
+using csrc_sm90::wg::mma_m64n64k16_kmn;
+using csrc_sm90::wg::mma_m64n64k16_rs;
+using csrc_sm90::wg::proxy_fence;
+using csrc_sm90::wg::wait;
 constexpr uint32_t SBO = 64;
 // element offset of chunk kc (8 values) of row r in a [rows][64] tile, 128-byte XOR swizzle
 __device__ __forceinline__ int off(int r, int kc) { return r * 64 + ((kc ^ (r & 7)) << 3); }
@@ -50,144 +58,16 @@ __device__ __forceinline__ uint64_t desc64(const void* p) {
   d |= (static_cast<uint64_t>(2) << 62);
   return d;
 }
-// A K-major [m][k], B MN-major [k][n]: the contraction of a weight row block with a head-major activation tile
-__device__ __forceinline__ void mma_m64n64k16_kmn(uint64_t da, uint64_t db, float* d, int accumulate) {
-  asm volatile(
-      "{\n"
-      ".reg .pred p;\n"
-      "setp.ne.b32 p, %32, 0;\n"
-      "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {\n"
-      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
-      " %8, %9, %10, %11, %12, %13, %14, %15,\n"
-      " %16, %17, %18, %19, %20, %21, %22, %23,\n"
-      " %24, %25, %26, %27, %28, %29, %30, %31},\n"
-      " %33, %34, p, 1, 1, 0, 1;\n"
-      "}\n"
-      :
-        "+f"(d[0]),
-        "+f"(d[1]),
-        "+f"(d[2]),
-        "+f"(d[3]),
-        "+f"(d[4]),
-        "+f"(d[5]),
-        "+f"(d[6]),
-        "+f"(d[7]),
-        "+f"(d[8]),
-        "+f"(d[9]),
-        "+f"(d[10]),
-        "+f"(d[11]),
-        "+f"(d[12]),
-        "+f"(d[13]),
-        "+f"(d[14]),
-        "+f"(d[15]),
-        "+f"(d[16]),
-        "+f"(d[17]),
-        "+f"(d[18]),
-        "+f"(d[19]),
-        "+f"(d[20]),
-        "+f"(d[21]),
-        "+f"(d[22]),
-        "+f"(d[23]),
-        "+f"(d[24]),
-        "+f"(d[25]),
-        "+f"(d[26]),
-        "+f"(d[27]),
-        "+f"(d[28]),
-        "+f"(d[29]),
-        "+f"(d[30]),
-        "+f"(d[31])
-      : "r"(accumulate), "l"(da), "l"(db)
-      : "memory");
-}
-// both K-major, n = 32: the per-head gate / output projections
-__device__ __forceinline__ void mma_m64n32k16_kk(uint64_t da, uint64_t db, float* d, int accumulate) {
-  asm volatile(
-      "{\n"
-      ".reg .pred p;\n"
-      "setp.ne.b32 p, %16, 0;\n"
-      "wgmma.mma_async.sync.aligned.m64n32k16.f32.bf16.bf16 {\n"
-      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
-      " %8, %9, %10, %11, %12, %13, %14, %15},\n"
-      " %17, %18, p, 1, 1, 0, 0;\n"
-      "}\n"
-      :
-        "+f"(d[0]),
-        "+f"(d[1]),
-        "+f"(d[2]),
-        "+f"(d[3]),
-        "+f"(d[4]),
-        "+f"(d[5]),
-        "+f"(d[6]),
-        "+f"(d[7]),
-        "+f"(d[8]),
-        "+f"(d[9]),
-        "+f"(d[10]),
-        "+f"(d[11]),
-        "+f"(d[12]),
-        "+f"(d[13]),
-        "+f"(d[14]),
-        "+f"(d[15])
-      : "r"(accumulate), "l"(da), "l"(db)
-      : "memory");
-}
-// A from registers (the previous accumulator, packed to bf16), B K-major: the out-projection
-__device__ __forceinline__ void mma_m64n64k16_rs(uint32_t a0, uint32_t a1, uint32_t a2, uint32_t a3, uint64_t db, float* d, int accumulate) {
-  asm volatile(
-      "{\n"
-      ".reg .pred p;\n"
-      "setp.ne.b32 p, %32, 0;\n"
-      "wgmma.mma_async.sync.aligned.m64n64k16.f32.bf16.bf16 {\n"
-      " %0, %1, %2, %3, %4, %5, %6, %7,\n"
-      " %8, %9, %10, %11, %12, %13, %14, %15,\n"
-      " %16, %17, %18, %19, %20, %21, %22, %23,\n"
-      " %24, %25, %26, %27, %28, %29, %30, %31},\n"
-      " {%33, %34, %35, %36}, %37, p, 1, 1, 0;\n"
-      "}\n"
-      :
-        "+f"(d[0]),
-        "+f"(d[1]),
-        "+f"(d[2]),
-        "+f"(d[3]),
-        "+f"(d[4]),
-        "+f"(d[5]),
-        "+f"(d[6]),
-        "+f"(d[7]),
-        "+f"(d[8]),
-        "+f"(d[9]),
-        "+f"(d[10]),
-        "+f"(d[11]),
-        "+f"(d[12]),
-        "+f"(d[13]),
-        "+f"(d[14]),
-        "+f"(d[15]),
-        "+f"(d[16]),
-        "+f"(d[17]),
-        "+f"(d[18]),
-        "+f"(d[19]),
-        "+f"(d[20]),
-        "+f"(d[21]),
-        "+f"(d[22]),
-        "+f"(d[23]),
-        "+f"(d[24]),
-        "+f"(d[25]),
-        "+f"(d[26]),
-        "+f"(d[27]),
-        "+f"(d[28]),
-        "+f"(d[29]),
-        "+f"(d[30]),
-        "+f"(d[31])
-      : "r"(accumulate), "r"(a0), "r"(a1), "r"(a2), "r"(a3), "l"(db)
-      : "memory");
-}
 
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void wait()   { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
 __device__ __forceinline__ void wait1()  { asm volatile("wgmma.wait_group.sync.aligned 1;\n" ::: "memory"); }
-__device__ __forceinline__ void proxy_fence() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 }  // namespace wg
 
 namespace tma {
+using csrc_sm90::tma::commit;
+using csrc_sm90::tma::store_2d;
+using csrc_sm90::tma::store_3d;
+using csrc_sm90::tma::wait_all;
+using csrc_sm90::tma::wait_read;
 __device__ __forceinline__ int sw128(int row, int col64) {
   return row * 64 + (((col64 >> 3) ^ (row & 7)) << 3) + (col64 & 7);
 }
@@ -198,17 +78,6 @@ __device__ __forceinline__ int sw64nat(int tok, int si, int c) {
   const int line = si * BI + tok;
   return line * 32 + ((((c >> 3) ^ ((line >> 1) & 3))) << 3) + (c & 7);
 }
-__device__ __forceinline__ void store_3d(const void* map, uint32_t src, int c0, int c1, int c2) {
-  asm volatile("cp.async.bulk.tensor.3d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4}], [%1];\n"
-               :: "l"(map), "r"(src), "r"(c0), "r"(c1), "r"(c2) : "memory");
-}
-__device__ __forceinline__ void store_2d(const void* map, uint32_t src, int c0, int c1) {
-  asm volatile("cp.async.bulk.tensor.2d.global.shared::cta.tile.bulk_group [%0, {%2, %3}], [%1];\n"
-               :: "l"(map), "r"(src), "r"(c0), "r"(c1) : "memory");
-}
-__device__ __forceinline__ void commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-__device__ __forceinline__ void wait_all() { asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory"); }
-__device__ __forceinline__ void wait_read() { asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory"); }
 }  // namespace tma
 
 __device__ __forceinline__ uint32_t pack2(float a, float b) {

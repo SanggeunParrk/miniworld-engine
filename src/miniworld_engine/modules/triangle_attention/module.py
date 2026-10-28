@@ -439,18 +439,6 @@ class TriangleAttention(nn.Module):
                 )
         if (
             not self._bias_untransposed
-            and pair.dtype == torch.bfloat16
-            and self.to_value.weight.dtype == torch.float32
-            and self._backend == KernelBackend.PORTABLE
-        ):
-            from miniworld_engine.kernels.triangle_attention.cuda import (
-                qg_projection_attention,
-            )
-
-            if qg_projection_attention.can_use(self, pair, mask):
-                return qg_projection_attention.forward(self, pair, mask)
-        if (
-            not self._bias_untransposed
             and getattr(self, "_fuse_front_backward", True)
             and getattr(self, "_fuse_projection_backward", True)
             and torch.is_grad_enabled()

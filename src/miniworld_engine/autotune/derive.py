@@ -401,9 +401,6 @@ def install_native_recorders() -> None:
             ("kernels.triangle_attention.cuda.ln_backward", (("_backward", "_backward_fake"),)),
             ("kernels.triangle_attention.cuda.wgrad_backward", (("_backward", "_backward_fake"),)),
             ("kernels.triangle_attention.cuda.gate_backward", (("gate_backward", "_gate_backward_fake"),)),
-            ("kernels.triangle_attention.cuda.q_projection_attention", (("native", "_native_fake"),)),
-            ("kernels.triangle_attention.cuda.qg_projection_attention", (("native", "_native_fake"),)),
-            ("kernels.triangle_attention.cuda.qkv_projection_attention", (("native", "_native_fake"),)),
         )
 
         def native_contract(fake, selector=None):
@@ -422,16 +419,13 @@ def install_native_recorders() -> None:
                 setattr(module, entry, native_contract(getattr(module, fake), selector))
 
         # TriangleAttention leaf extension calls without a fake of their own. Shapes and dtypes
-        # mirror training_forward.cu / bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed
+        # mirror bias_fusion.cu / dq.cu: BF16 [1,L,L,128] buffers viewed
         # as (1,4,L,L,32) projection layout, FP32 logsumexp, BF16 bias gradient.
         from miniworld_engine.kernels.triangle_attention.cuda import (
             bias_backward as tri_bias,
         )
         from miniworld_engine.kernels.triangle_attention.cuda import (
             dq_backward as tri_dq,
-        )
-        from miniworld_engine.kernels.triangle_attention.cuda import (
-            training_forward as tri_fwd,
         )
 
         def projection_like(q):
@@ -440,8 +434,6 @@ def install_native_recorders() -> None:
             return q.new_empty((1, L, L, 128)).view(1, L, L, 4, 32).permute(0, 3, 1, 2, 4)
 
         # Shape-only fakes replace the leaf extension wrappers (monkeypatch; see ln_cuda below).
-        tri_fwd.forward = lambda q, k, v, b: (  # ty: ignore[invalid-assignment]
-            projection_like(q), q.new_empty((1, 4, q.shape[2], q.shape[2]), dtype=torch.float32))
         tri_bias.native_backward = lambda q, k, v, b, m, delta, dy: (  # ty: ignore[invalid-assignment]
             projection_like(q), projection_like(q), torch.empty_like(b))
         tri_dq.backward = lambda q, k, v, b, m, delta, dy: projection_like(q)  # ty: ignore[invalid-assignment]

@@ -2,6 +2,7 @@
 // through 128-byte-swizzled K-major descriptors, rs64 takes A as the four register fragments of an accumulator tile.
 #pragma once
 #include <cuda_bf16.h>
+#include "sm90_ptx.cuh"
 namespace wgw {
 __device__ __forceinline__ void ss64(uint64_t da, uint64_t db, float* d, int accumulate) {
   asm volatile(
@@ -100,11 +101,10 @@ __device__ __forceinline__ void rs64(uint32_t a0, uint32_t a1, uint32_t a2, uint
       : "memory");
 }
 
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void wait()   { asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory"); }
-// cp.async data and ordinary shared stores reach wgmma through the async proxy only after this fence
-__device__ __forceinline__ void proxy_fence() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
+using csrc_sm90::wg::commit;  // sm90_ptx.cuh
+using csrc_sm90::wg::fence;
+using csrc_sm90::wg::proxy_fence;
+using csrc_sm90::wg::wait;
 // K-major operand descriptor, 128-byte swizzle: rows of 64 bf16, eight-row groups 1 KiB apart
 __device__ __forceinline__ uint64_t desc(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));

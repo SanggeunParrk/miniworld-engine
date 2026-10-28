@@ -24,9 +24,8 @@ Dispatch order (`modules/transition/module.py::_residual_forward`, `kernels/tran
 hidden 4 D; bf16, rows % 128 = 0) → `fused_generic_sm90a` (everything else the table lists) → sm_100 / sm_80 paths (they reject sm_90) → on H100
 the PyTorch reference (the Triton residual path on other cards or on request). fp32 enters `Transition.forward` through the same gate (`_generic_sm90a_serves`) instead of the bf16-only
 `guard_dtype` PyTorch fallback, and only when TF32 is allowed (`torch.set_float32_matmul_precision("high")` or
-`torch.backends.cuda.matmul.allow_tf32`, the switch cuBLAS follows); with exact fp32 the PyTorch reference keeps running. Opt-outs:
-`Settings` fields `transition_generic_sm90a=False` (generic only), `transition_wide_sm90a=False` (the wide tuned builds),
-`transition_fused_sm90a=False` (all three; also `MINIWORLD_TRANSITION_FUSED_SM90A=0`). `transition_wide_repl` overrides the D = 64, n = 2
+`torch.backends.cuda.matmul.allow_tf32`, the switch cuBLAS follows); with exact fp32 the PyTorch reference keeps running. No
+opt-out switch: only `force_portable_kernels` sends Transition to Triton. `transition_wide_repl` overrides the D = 64, n = 2
 backward's weight-role replicas.
 Every launch is an opaque op with a fake, so all of it traces under `torch.compile(fullgraph=True)` and captures in a CUDA graph.
 
@@ -72,8 +71,8 @@ truncate them, a one-sided error that made y 4.5x less accurate than cuBLAS TF32
 | F3 `gemm_kernel<RES>` | y = h Ws^T + x: the residual tile is TMA-loaded into the staging buffer during the mainloop, added in place | 57 |
 
 In the bf16 training forward F2 is `gemm_kernel<SWIGLU_SAVE>`: it also stores `[a | b]` (bf16, `[M, 2 HID]`) and keeps `h` (from the fp32
-accumulators) for the backward, as TE does. fp32 / TF32 keeps the recompute backward below (`settings.transition_generic_save_ab=False` selects it for bf16
-too; it is ~10 % slower at large M and its dx / dW errors are 10-25 % lower).
+accumulators) for the backward, as TE does. fp32 / TF32 keeps the recompute backward below
+(for bf16 it was ~10 % slower at large M, with dx / dW errors 10-25 % lower).
 
 ##### Backward (bf16, a | b and h saved)
 

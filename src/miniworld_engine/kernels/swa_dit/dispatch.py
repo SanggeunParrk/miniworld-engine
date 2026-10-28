@@ -8,10 +8,9 @@ Unsupported native contracts and failed builds raise. Candidate timings do not d
 Moved from team-gm ``swa_fused_triton.block_fwd`` / ``block_bwd`` (commit 14f2c73). The launch sequence, the buffers and
 the arguments are team-gm's; what differs is the engine plumbing:
 
-* the CUDA-vs-Triton choice reads ``settings`` instead of team-gm's environment switches
-  (``SWA_QKVG_FWD`` / ``SWA_FFN_FWD`` / ``SWA_FFN_BWD`` -> ``swa_dit_{qkvg_fwd,ffn_fwd,ffn_bwd}_cuda``,
-  ``SWA_FFN_DW`` -> ``swa_dit_ffn_dw``, ``SWA_DQ1`` -> ``swa_dit_dq1``; same defaults), and
-  ``force_portable_kernels=True`` turns every CUDA stage off, as it does for the other families;
+* team-gm's per-stage CUDA switches (``SWA_QKVG_FWD`` / ``SWA_FFN_FWD`` / ``SWA_FFN_BWD``) are gone: every hand-CUDA stage
+  serves wherever its kernel does, and ``force_portable_kernels=True`` turns every CUDA stage off, as it does for the
+  other families (``SWA_FFN_DW`` -> ``swa_dit_ffn_dw``, ``SWA_DQ1`` -> ``swa_dit_dq1``; same defaults);
 * the CUDA kernels build through ``cuda/loader.py`` (``settings.engine_jit_root``) and any failure falls back to Triton;
 * each Triton launch passes ``shape_key=atom_key(S, A=..., C=C[, NHID=NHID])`` where team-gm passed ``SB = log2(rows)``:
   the atom count S bucketed like every other atom-level kernel, and the AUGMENT COUNT A = N // B exactly, always -- the
@@ -42,7 +41,7 @@ steps), so fp32 training runs the Triton fp32 path. ``settings.swa_dit_tf32=0`` 
 ``force_portable_kernels=True``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
 hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` without a gradient).
 
-fp32 stages elsewhere (q fp32): on sm_90 with ``swa_dit_fp32_cuda`` (default on) and TF32 allowed (matmul precision "high" or
+fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
 "medium"), every stage is the hand-CUDA extension ``cuda/swa_fp32.cu`` -- one ``fwd`` and one ``bwd`` call, tf32 wgmma
 with rna-rounded operands (split weights in the FFN) and a bf16 window attention; otherwise ``triton/forward_fp32.py``
 and ``triton/backward_fp32.py`` for qkvg, out-projection + FFN and their backwards, around the SAME window-attention
@@ -154,7 +153,7 @@ def native_h100_stages(q) -> bool:
         return True
     if q.dtype == torch.float32:
         # _fp32_cuda's test, with the precision read as a constant under torch.compile (this runs in the autograd.Function's forward)
-        composed = (settings.current().swa_dit_fp32_cuda and _matmul_precision() != "highest"
+        composed = (_matmul_precision() != "highest"
                     and _composed_cuda(q.device, "fp32"))
     else:
         composed = q.dtype == torch.bfloat16 and _composed_cuda(q.device)
@@ -691,11 +690,10 @@ def swa_dit_block_fwd(
     M = N * S
     A = _augments(N, B)
     NHID = wd.shape[1]
-    policy = settings.current()
     qf = q.reshape(M, C)
     served = C == D_ATOM and H == N_HEAD and NHID == N_HIDDEN and q.dtype == torch.bfloat16
-    impl_q = _rows_cuda("qkvg", policy.swa_dit_qkvg_fwd_cuda and served, M, N // B, q.device)
-    impl_f = _rows_cuda("fwd", policy.swa_dit_ffn_fwd_cuda and served, M, N // B, q.device)
+    impl_q = _rows_cuda("qkvg", served, M, N // B, q.device)
+    impl_f = _rows_cuda("fwd", served, M, N // B, q.device)
     if impl_q[0] == "slab":
         Qh, Kh, Vh, G, Xs, PQs, PKs = impl_q[1].qkvg_fwd(qf, mod, cos, sin, wqkv, wg, N, B, S, eps, FP32_EPS, save)
     elif impl_q[0] == "wgmma":
@@ -716,7 +714,7 @@ def swa_dit_block_fwd(
         _swa_qkvg_fwd_kernel[lambda m: (triton.cdiv(M, m["BR"]),)](  # ty: ignore[invalid-argument-type]  # ty cannot bind triton's self-typed __call__
             qf, mod, cos, sin, wqkv, wg, Qh, Kh, Vh, G, r1, Xs, PQs, PKs, M, S, B, eps, FP32_EPS,
             shape_key=atom_key(S, A=A, C=C), C=C, H=H, D=D, MODW=6 * C, SAVE=save)
-    ext = _cuda("attn", policy.swa_dit_attn_cuda and _attn_served(C, H, half_window), q.device)
+    ext = _cuda("attn", _attn_served(C, H, half_window), q.device)
     if ext is not None:
         O, lse = ext.attn_fwd(Qh, Kh, Vh, seqused, D ** -0.5)
     else:
@@ -782,14 +780,14 @@ def _fp32_cuda(C: int, NHID: int, half_window: int, device: torch.device) -> Any
     fp32. There the Triton kernels' tf32x3 FFN serves instead, off H100 / B200 (there "highest" never reaches this: the callers run the
     PyTorch statements, interface.highest_fp32_on_hopper_blackwell). Read on every call, like the other settings.
     """
-    wanted = (settings.current().swa_dit_fp32_cuda and torch.get_float32_matmul_precision() != "highest"
+    wanted = (torch.get_float32_matmul_precision() != "highest"
               and C == D_ATOM and NHID == N_HIDDEN and half_window == HALF_WINDOW)
     return _cuda("fp32", wanted, device)
 
 
 def _swa_dit_fwd_fp32_launch(q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, B, half_window, eps, save):
-    """The fp32 forward: qkvg -> window attention on bf16 operands -> out-proj + FFN, as the CUDA extension (sm_90,
-    ``swa_dit_fp32_cuda``) or ``forward_fp32``'s Triton kernels around the shared attention kernel. Same outputs as the
+    """The fp32 forward: qkvg -> window attention on bf16 operands -> out-proj + FFN, as the CUDA extension (sm_90)
+    or ``forward_fp32``'s Triton kernels around the shared attention kernel. Same outputs as the
     bf16 forward; everything but the attention operands (Q / K / V, O) is fp32."""
     N, S, C = q.shape
     H = N_HEAD
@@ -1123,13 +1121,13 @@ def swa_dit_block_bwd(
     dy2 = dy.reshape(M, C)
     dwu: torch.Tensor | None = None
     dwd: torch.Tensor | None = None
-    wanted = policy.swa_dit_ffn_bwd_cuda and not fused_dw and C == D_ATOM and NHID == N_HIDDEN and q.dtype == torch.bfloat16
+    wanted = not fused_dw and C == D_ATOM and NHID == N_HIDDEN and q.dtype == torch.bfloat16
     impl_f = _rows_cuda("bwd", wanted, M, A, dev)
     # the attention side on hand-CUDA (sm_90) -- see _bwd_attention_side
     served = C == D_ATOM and H == N_HEAD and q.dtype == torch.bfloat16 and dq1_dtype == torch.bfloat16
-    ext_o = _cuda("slab", policy.swa_dit_oproj_bwd_cuda and served, dev)
-    ext_a = _cuda("attn", policy.swa_dit_attn_cuda and _attn_served(C, H, half_window) and q.dtype == torch.bfloat16, dev)
-    ext_q = _cuda("slab", policy.swa_dit_qkvg_bwd_cuda and served, dev)
+    ext_o = _cuda("slab", served, dev)
+    ext_a = _cuda("attn", _attn_served(C, H, half_window) and q.dtype == torch.bfloat16, dev)
+    ext_q = _cuda("slab", served, dev)
     # dmod: the slab kernels own its column blocks and store (no accumulation) when one slab holds every augment (A in 1, 2, 4, 8,
     # 16: swa_slab.cu pick_sp), so only the other paths need it zeroed
     plain = A in (1, 2, 4, 8, 16) and impl_f[0] == "slab" and ext_o is not None and ext_q is not None
@@ -1179,7 +1177,7 @@ def swa_dit_block_bwd(
                 shape_key=atom_key(S, A=Ak, C=C, NHID=NHID), NSPLIT=0, C=C, NHID=NHID, MODW=6 * C)
             dwu, dwd = dwu32, dwd32
     if ext_o is not None or ext_a is not None or ext_q is not None:
-        served_w = (policy.swa_dit_wgrad_cuda and ext_q is not None and dwu is None and C == D_ATOM and NHID == N_HIDDEN
+        served_w = (ext_q is not None and dwu is None and C == D_ATOM and NHID == N_HIDDEN
                     and q.dtype == torch.bfloat16)
         # TMA + wgmma kernel at every row count (bit-identical to the mma.sync one, faster than cuBLAS up to 196k rows); the
         # mma.sync kernel serves where it does not build, cuBLAS above its row limit
@@ -1378,7 +1376,7 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
 def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd, qh, kh, vh, g, o, lse, q1, x, pq, pk,
                              att, y, ffn, B, half_window, eps):
     """The fp32 backward: FFN -> out-projection -> the attention backward on bf16 operands (dO, and dQ / dK / dV, in
-    bf16 as FlashAttention-4 has them) -> qkvg, as the CUDA extension (sm_90, ``swa_dit_fp32_cuda``) or
+    bf16 as FlashAttention-4 has them) -> qkvg, as the CUDA extension (sm_90) or
     ``backward_fp32``'s Triton kernels around the shared attention kernels; fp32 weight gradients from torch GEMMs over
     the fp32 operands either way."""
     N, S, C = q.shape
@@ -1391,7 +1389,7 @@ def _swa_dit_bwd_fp32_launch(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu, wd
         dq, dmod, dP, datt, gated, dab, hh, dffn = _swa_dit_bwd_fp32_triton(dy, q, mod, cos, sin, seqused, wqkv, wg, wo, wu,
                                                                             wd, qh, kh, vh, g, o, lse, q1, pq, pk, att, y,
                                                                             ffn, B, half_window, eps)
-    served_w = settings.current().swa_dit_wgrad_cuda and C == D_ATOM and NHID == N_HIDDEN
+    served_w = C == D_ATOM and NHID == N_HIDDEN
     # TMA + wgmma on bf16 hi / lo planes up to _WGRAD_F32_WG_MAX_ROWS (ties cuBLAS's TF32 at 49k rows, ahead below, 60x closer to
     # fp32); the mma.sync kernel where it does not build; above, cuBLAS's TF32 GEMMs are faster
     ext_w = _cuda("wgwg32", served_w and N * S <= _WGRAD_F32_WG_MAX_ROWS, q.device) or _cuda(
@@ -1606,7 +1604,7 @@ def mod_sm90(c: torch.Tensor, wmod: torch.Tensor) -> bool:
     (any matmul precision: the products are exact) and the extension builds. fp32 c stays on torch's GEMMs: the kernels'
     fp32 variant (bf16 hi / lo planes, 2^-17) is the more accurate but not the faster one next to cuBLAS's TF32."""
     policy = settings.current()
-    if not policy.swa_dit_mod_cuda or policy.force_portable_kernels or not c.is_cuda:
+    if policy.force_portable_kernels or not c.is_cuda:
         return False
     if c.shape[-1] != D_ATOM or tuple(wmod.shape) != (6 * D_ATOM, D_ATOM) or c.dtype != wmod.dtype or c.dtype != torch.bfloat16:
         return False

@@ -48,6 +48,19 @@ def supported(x: torch.Tensor) -> bool:
     return row % 16 == 0 and MIN_ROW_BYTES <= row <= MAX_ROW_BYTES
 
 
+def serves(x: torch.Tensor) -> bool:
+    """The H100 rung of LayerNorm / RMSNorm: these kernels take ``x`` on sm_90 (``supported(x)``) unless the portable rung is
+    forced. Every CUDA norm entry asks this one gate (``layernorm.interface.layernorm_kernel``, ``general.layernorm_cuda``,
+    ``rmsnorm.cuda.rmsnorm_cuda``)."""
+    from miniworld_engine import settings
+
+    return (
+        supported(x)
+        and torch.cuda.get_device_capability(x.device) == (9, 0)
+        and not settings.current().force_portable_kernels
+    )
+
+
 def _affine_args(x: torch.Tensor, weight: torch.Tensor | None, bias: torch.Tensor | None):
     """(w, b, wcode): both in one dtype the kernel reads (bf16 / fp16 / fp32), empty tensors when absent (an unaligned one is copied inside the kernel launcher)."""
     ref = weight if weight is not None else bias
@@ -139,4 +152,4 @@ def rmsnorm_pipe(x: torch.Tensor, weight: torch.Tensor | None, eps: float = 1e-5
     return _Norm.apply(x2, weight, None, float(eps), True).reshape(shape)
 
 
-__all__ = ["layernorm_pipe", "rmsnorm_pipe", "supported"]
+__all__ = ["layernorm_pipe", "rmsnorm_pipe", "serves", "supported"]

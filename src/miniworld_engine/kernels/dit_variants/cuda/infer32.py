@@ -42,7 +42,7 @@ def _enabled(stack, single) -> bool:
 
     cfg = settings.current()
     return (stack.implementation != ImplementationType.PYTORCH and single.is_cuda and single.ndim == 3 and single.dtype == torch.float32
-            and not cfg.force_portable_kernels and getattr(cfg, "dit_variant_train_cuda", True)
+            and not cfg.force_portable_kernels
             and torch.cuda.get_device_capability(single.device) == (9, 0))
 
 

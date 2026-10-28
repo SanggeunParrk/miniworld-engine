@@ -432,7 +432,7 @@ forward (`softmax_t` reads b and writes P / P^T beside it), no `pair_bias_bwd` /
 launch count of the block backward stays 11 at the bf16 defaults (pair_bias_bwd_fin -> finalize); the forward loses one. Inference
 on a given bias makes P = softmax(bias) per call (`softmax_rows`) and runs the same step; a sampler keeps the pair, whose P is made
 once per pair for every solver step (MiniWorld's `hoist_pair_bias` hoists only under autograd). Switches, read per call:
-`settings.bias_only_dit_hoist=0` (the PyTorch fold), `settings.bias_only_dit_hoist_wsplit=S` (the dW' row chunks; 1: one GEMM).
+The hoist has no switch: implementation PYTORCH takes the PyTorch fold; the dW' row chunks are the split heuristic's.
 `ln0_bwd_rows` is one warp per row pair with shuffles only (no shared memory, barriers or atomics): bitwise repeatable.
 
 Measured (B200, 2026-10-10, hoist2; `bench_scripts/bo_hoist_bench.py`): 24 blocks of 16 x 48, A = 48, bf16, checkpointing off, one

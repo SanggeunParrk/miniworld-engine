@@ -59,14 +59,9 @@ class _RMSNorm(torch.autograd.Function):
 def rmsnorm_cuda(x: torch.Tensor, weight: torch.Tensor | None, eps: float) -> torch.Tensor:
     """RMSNorm over the last dimension; ``y`` in ``x``'s dtype, fp32 statistics; ``weight`` optional, any float dtype (its fp32
     gradient handed back in its dtype)."""
-    from miniworld_engine import settings
     from miniworld_engine.kernels.layernorm.cuda import pipe
 
-    if (
-        pipe.supported(x)
-        and torch.cuda.get_device_capability(x.device) == (9, 0)
-        and not settings.current().force_portable_kernels
-    ):
+    if pipe.serves(x):
         return pipe.rmsnorm_pipe(x, weight, eps)  # H100: the pipelined kernels, one backward kernel (kernels/layernorm/cuda/pipe)
     shape = x.shape
     x2 = x.reshape(-1, shape[-1]).contiguous()

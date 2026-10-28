@@ -273,7 +273,7 @@ def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
     the cuBLAS core), a key mask [1, L] / [B, L] or none."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
-    if (not settings.current().bias_only_dit) or torch.is_grad_enabled() or not settings.current().bias_only_dit_psb_infer:
+    if (not settings.current().bias_only_dit) or torch.is_grad_enabled():
         return False
     if module.implementation != ImplementationType.MINIWORLD or settings.current().force_portable_kernels:
         return False

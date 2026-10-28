@@ -328,7 +328,7 @@ def test_token_dit_bf16_step_runs_the_sm90_core(qk, monkeypatch):
     with torch.no_grad():
         got = m(x, c, p, mask)
         assert calls, "the bf16 step did not take the sm_90a core"
-        override_setting(monkeypatch, "augmented_attention_bf16_sm90", False)
+        override_setting(monkeypatch, "force_portable_kernels", True)
         token_dit._RUNNERS.clear()
         tri = m(x, c, p, mask)
     assert torch.isfinite(got).all()
@@ -358,7 +358,7 @@ def test_token_dit_fp32_step_runs_the_tf32_core(qk, monkeypatch):
     with torch.no_grad():
         got = m(x, c, p, mask)
         assert calls, "the fp32 step did not take the TF32 core"
-        override_setting(monkeypatch, "augattn_tf32_sm90", False)
+        override_setting(monkeypatch, "force_portable_kernels", True)
         token_dit._RUNNERS.clear()
         tri = m(x, c, p, mask)
     assert torch.isfinite(got).all()

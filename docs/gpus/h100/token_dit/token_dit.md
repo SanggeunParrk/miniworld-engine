@@ -54,10 +54,9 @@ two paths that `modules/dit` dispatches to (the same two integrations as on B200
   - **fp32**: `attn_tf32.cu` forward (og, fp32), `attn_tf32_dqb` (dQ; dbias as one TMA bulk reduce-add per 64 x 64 dS tile) and
     `attn_tf32_dkv` (dK, dV); q, k, dO transposed by a tiled CUDA transpose for the products that contract over tokens.
 
-Switches are `Settings` fields (all default on; set with `settings.configure(...)`): `token_dit_rows_cuda` (inference rows),
-`augmented_attention_bf16_sm90` (bf16 cores), `augattn_tf32_sm90` (fp32 inference core), `token_dit_train` (training block).
-The fp32 training block has no switch any more (it is always served when the training block is). `token_dit_gemm_swiglu=False`
-keeps cuBLAS + the row pass.
+Switch: the `Settings` field `token_dit_train` (training block, default on; set with `settings.configure(...)`). The fp32 inference core has no switch.
+The fp32 training block has no switch any more (it is always served when the training block is).
+The fused expand GEMM + SwiGLU serves bf16 wherever it applies (no switch).
 
 Every attention kernel here is bitwise deterministic run to run (6 runs, `torch.equal`, every output without atomics);
 the bf16 kernels now issue `fence.proxy.async` before releasing a TMA stage (or the parked q tile) they read with

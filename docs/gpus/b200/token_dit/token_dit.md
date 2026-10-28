@@ -68,8 +68,8 @@ kernel" (△ = fastest measured, a kernel of the group below 70 % SoL; — = not
 autotunes -- the CUDA row kernels have fixed launch shapes, the sm_100a kernels are cubins built on first use into
 `settings.engine_jit_root` (keyed by source and flags), the SwiGLU GEMM choice is a fixed row threshold.
 
-Switches (all default on): `settings.token_dit_rows_cuda`, `settings.augattn_bf16_sm100`,
-`settings.token_dit_gemm_swiglu` (`auto` = M >= 3840, `1` forces, `0` off), `settings.token_dit_train`.
+Switches (all default on): `settings.augattn_bf16_sm100`,
+`settings.token_dit_train`; the fused expand GEMM + SwiGLU serves bf16 at M >= 3840 (no switch).
 
 ## Inference
 

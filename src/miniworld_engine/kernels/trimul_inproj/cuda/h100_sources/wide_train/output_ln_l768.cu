@@ -1,4 +1,5 @@
-// Frozen generated source: wide_tuned_stats_ln.TunedStatsLN(CachedLN rows 32, minblocks 3).
+// Frozen generated source: wide_stats_ln.StatsLN(CachedLN rows 32) at D384, wide_tuned_stats_ln.TunedStatsLN(CachedLN rows 32,
+// minblocks 3) at D256: one text (minblocks is LN_MINBLOCKS; STATS was the literal 2*SB+128+4*H of each width).
 // Research snapshot trimul_d256_bwd_sol90_stage2_20260923 (experiments/trimul_large_d_vast);
 // flattened text of the qualified checkpoint chain. Edit only with a new qualification.
 // SPDX-License-Identifier: Apache-2.0
@@ -11,7 +12,7 @@ struct Params {CUtensorMap tri,dt,dnmap;const bf* dn;const float *mu,*rs,*gamma;
 #ifdef LN_STATS_OFFSET   // MiniWorld: set by the single-direction build (H = WIDTH * 2 of that build)
 constexpr int STATS=LN_STATS_OFFSET;
 #else
-constexpr int STATS=67712;
+constexpr int STATS=2*SB+128+4*H;
 #endif
 TMN_DEVI void load_stats(const Params& p,uint8_t* dst,uint64_t* bar,int row){
  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0],[%1],%2,[%3];"::"r"(smem_u32(dst)),"l"(p.mu+row),"n"(ROWS*4),"r"(smem_u32(bar)):"memory");
