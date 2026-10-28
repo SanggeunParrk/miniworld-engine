@@ -18,6 +18,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <type_traits>
+#include "swa_ptx.cuh"
 
 namespace {
 constexpr int C = 128, N = 256, HC = 32, NCH = N / HC, BR = 64;
@@ -39,6 +40,9 @@ constexpr int BYTES = SEND + NBAR * 8;
 constexpr int XTF = BR * 32;                              // fp32 [64][32] block (floats)
 
 namespace wg {
+using ::commit;  // swa_ptx.cuh
+using ::fence;
+using ::proxy_fence;
 __device__ __forceinline__ int off32(int r, int c4) { return r * 32 + ((c4 ^ (r & 7)) << 2); }
 __device__ __forceinline__ uint64_t desc(const void* p) {
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
@@ -49,18 +53,20 @@ __device__ __forceinline__ uint64_t desc(const void* p) {
   return d;
 }
 #include "gen/wgmma_bf16.inc"
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
 template <int K> __device__ __forceinline__ void wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(K) : "memory"); }
-__device__ __forceinline__ void proxy_fence() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 }  // namespace wg
 
 namespace tma {
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void bar_init(uint64_t* b, uint32_t count) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" :: "r"(sa(b)), "r"(count) : "memory"); }
-__device__ __forceinline__ void bar_init_fence() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
-__device__ __forceinline__ void expect_tx(uint64_t* b, uint32_t bytes) { asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(sa(b)), "r"(bytes) : "memory"); }
-__device__ __forceinline__ void arrive(uint64_t* b) { asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(sa(b)) : "memory"); }
+using ::arrive;  // swa_ptx.cuh
+using ::bar_init;
+using ::bar_init_fence;
+using ::expect_tx;
+using ::load_3d;
+using ::sa;
+using ::store_4d;
+using ::store_5d;
+using ::store_commit;
+using ::store_wait_read;
 __device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAIT_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
 }
@@ -72,12 +78,6 @@ __device__ __forceinline__ void load_4d(const void* map, uint32_t dst, uint64_t*
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
                :: "r"(dst), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
-__device__ __forceinline__ void store_4d(const void* map, const void* src, int c0, int c1, int c2, int c3) {
-  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
-               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
-}
-__device__ __forceinline__ void store_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-template <int K> __device__ __forceinline__ void store_wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" :: "n"(K) : "memory"); }
 }  // namespace tma
 // byte offset of bf16 element c (< 32) of row r in a [64 rows][64 B] staging tile, 64 B swizzle (conflict-free fragment writes)
 __device__ __forceinline__ int off64(int r, int c) { return r * 64 + ((((c >> 3) ^ (r >> 1)) & 3) << 4) + (c & 7) * 2; }
@@ -87,11 +87,6 @@ __device__ __forceinline__ float sigmoid(float x) { return rcp_approx(1.f + __ex
 __device__ __forceinline__ void red_add_v4(float* p, float4 v) {
   asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};\n" :: "l"(p), "f"(v.x), "f"(v.y), "f"(v.z), "f"(v.w) : "memory");
 }
-__device__ __forceinline__ uint32_t pack(float lo, float hi) {
-  __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
-  return *reinterpret_cast<uint32_t*>(&v);
-}
-__device__ __forceinline__ float rnb(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ float4 ld4(const __nv_bfloat16* p) {       // 4 bf16 (8 B) -> float4
   const uint2 u = *reinterpret_cast<const uint2*>(p);
   const __nv_bfloat162 a = *reinterpret_cast<const __nv_bfloat162*>(&u.x), b = *reinterpret_cast<const __nv_bfloat162*>(&u.y);

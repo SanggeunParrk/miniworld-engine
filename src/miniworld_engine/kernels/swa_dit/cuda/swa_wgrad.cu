@@ -15,6 +15,7 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <cooperative_groups.h>
+#include "swa_ptx.cuh"
 
 namespace {
 using bf16 = __nv_bfloat16;
@@ -32,22 +33,15 @@ struct Jobs {
   int lda[NJOB], ldb[NJOB], ldo[NJOB];
 };
 
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ void cp16(uint32_t dst, const void* src, bool ok) {
   asm volatile("cp.async.cg.shared.global [%0], [%1], 16, %2;\n" :: "r"(dst), "l"(src), "r"(ok ? 16 : 0) : "memory");
 }
-__device__ __forceinline__ void cp_commit() { asm volatile("cp.async.commit_group;\n" ::: "memory"); }
-template <int N> __device__ __forceinline__ void cp_wait() { asm volatile("cp.async.wait_group %0;\n" :: "n"(N) : "memory"); }
 __device__ __forceinline__ void ldsm4t(uint32_t a, uint32_t& r0, uint32_t& r1, uint32_t& r2, uint32_t& r3) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r0), "=r"(r1), "=r"(r2), "=r"(r3) : "r"(a));
 }
 __device__ __forceinline__ void mma(float* c, const uint32_t* a, uint32_t b0, uint32_t b1) {
   asm volatile("mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 {%0, %1, %2, %3}, {%4, %5, %6, %7}, {%8, %9}, {%0, %1, %2, %3};\n"
                : "+f"(c[0]), "+f"(c[1]), "+f"(c[2]), "+f"(c[3]) : "r"(a[0]), "r"(a[1]), "r"(a[2]), "r"(a[3]), "r"(b0), "r"(b1));
-}
-__device__ __forceinline__ uint32_t pack(float lo, float hi) {
-  __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
-  return *reinterpret_cast<uint32_t*>(&v);
 }
 
 __global__ void __cluster_dims__(CL, 1, 1) __launch_bounds__(256) wgrad_kernel(Jobs jobs, int M, int kper) {

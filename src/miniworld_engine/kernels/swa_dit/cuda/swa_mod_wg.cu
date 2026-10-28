@@ -8,6 +8,7 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
+#include "swa_ptx.cuh"
 #include "pdl.cuh"
 
 namespace {
@@ -15,9 +16,6 @@ using bf16 = __nv_bfloat16;
 constexpr int MW = 768, C = 128;
 constexpr int SMEM = 16384 + 2 * 32768 + 64 + 1024;
 
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void bar_init(uint64_t* b, uint32_t n) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" :: "r"(sa(b)), "r"(n) : "memory"); }
-__device__ __forceinline__ void expect_tx(uint64_t* b, uint32_t bytes) { asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(sa(b)), "r"(bytes) : "memory"); }
 __device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nW_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
 }

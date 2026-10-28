@@ -38,13 +38,13 @@
 #include <ATen/cuda/CUDAContext.h>
 #include <cuda_bf16.h>
 #include <algorithm>
+#include "swa_ptx.cuh"
 #include "pdl.cuh"
 
 namespace {
 constexpr int C = 128, H = 4, D = 32, NH = 256, MODW = 6 * C;
 using bf16 = __nv_bfloat16;
 
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
 __device__ __forceinline__ void ldsm4(uint32_t a, uint32_t (&r)[4]) {
   asm volatile("ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%0, %1, %2, %3}, [%4];\n" : "=r"(r[0]), "=r"(r[1]), "=r"(r[2]), "=r"(r[3]) : "r"(a));
 }
@@ -60,15 +60,6 @@ __device__ __forceinline__ void cp16(uint32_t dst, const void* src) {
 }
 __device__ __forceinline__ void cp_wait_all() { asm volatile("cp.async.commit_group;\ncp.async.wait_group 0;\n" ::: "memory"); }
 __device__ __forceinline__ void group_sync(int grp) { asm volatile("bar.sync %0, 128;\n" :: "r"(1 + grp) : "memory"); }
-__device__ __forceinline__ uint32_t pack(float lo, float hi) {
-  __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
-  return *reinterpret_cast<uint32_t*>(&v);
-}
-__device__ __forceinline__ float2 unpack(uint32_t u) {
-  const __nv_bfloat162 v = *reinterpret_cast<const __nv_bfloat162*>(&u);
-  return make_float2(__low2float(v), __high2float(v));
-}
-__device__ __forceinline__ float rnb(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 __device__ __forceinline__ float sigmoidf_(float x) { return 1.f / (1.f + __expf(-x)); }
 __device__ __forceinline__ void red4(float* p, float a, float b, float c, float d) {
   asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};\n" :: "l"(p), "f"(a), "f"(b), "f"(c), "f"(d) : "memory");

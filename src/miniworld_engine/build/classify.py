@@ -107,6 +107,20 @@ def _cu_bodies(text: str) -> dict[str, tuple[str, set[str]]]:
     return out
 
 
+def _with_local_includes(path: Path, text: str, seen: set | None = None) -> str:
+    """``text`` followed by the local headers it includes (``#include "x.cuh"`` next to the file, transitively): a helper moved
+    into a shared header (the wgmma group calls of ``swa_ptx.cuh``) is still a same-file callee to the closure."""
+    seen = {path.resolve()} if seen is None else seen
+    parts = [text]
+    for name in re.findall(r'^\s*#\s*include\s+"([^"]+)"', text, flags=re.MULTILINE):
+        header = (path.parent / name).resolve()
+        if header in seen or not header.is_file():
+            continue
+        seen.add(header)
+        parts.append(_with_local_includes(header, header.read_text(), seen))
+    return "\n".join(parts)
+
+
 def closure(bodies: dict[str, tuple[str, set[str]]], root: str) -> str:
     """Concatenated source of `root` and everything it transitively calls in this file."""
     if root not in bodies:
@@ -132,7 +146,7 @@ def source_closure(path: Path, symbol: str, seen: set | None = None) -> str:
     seen.add(identity)
     text = path.read_text()
     if path.suffix != ".py":
-        return closure(_cu_bodies(text), symbol)
+        return closure(_cu_bodies(_with_local_includes(path, text)), symbol)
     bodies = _py_bodies(text)
     source = closure(bodies, symbol)
     if not source:

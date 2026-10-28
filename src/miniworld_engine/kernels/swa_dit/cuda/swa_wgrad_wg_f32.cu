@@ -9,6 +9,7 @@
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
 #include <cooperative_groups.h>
+#include "swa_ptx.cuh"
 #include "pdl.cuh"
 
 namespace {
@@ -24,10 +25,6 @@ struct Jobs {
   float* out[NJOB];
 };
 
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void bar_init(uint64_t* b, uint32_t n) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" :: "r"(sa(b)), "r"(n) : "memory"); }
-__device__ __forceinline__ void expect_tx(uint64_t* b, uint32_t bytes) { asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(sa(b)), "r"(bytes) : "memory"); }
-__device__ __forceinline__ void arrive(uint64_t* b) { asm volatile("mbarrier.arrive.shared::cta.b64 _, [%0];\n" :: "r"(sa(b)) : "memory"); }
 __device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nW_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra W_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
 }
@@ -63,10 +60,6 @@ __device__ __forceinline__ void wgmma_ss(uint64_t da, uint64_t db, float* d) {
         "+f"(d[48]), "+f"(d[49]), "+f"(d[50]), "+f"(d[51]), "+f"(d[52]), "+f"(d[53]), "+f"(d[54]), "+f"(d[55]),
         "+f"(d[56]), "+f"(d[57]), "+f"(d[58]), "+f"(d[59]), "+f"(d[60]), "+f"(d[61]), "+f"(d[62]), "+f"(d[63])
       : "l"(da), "l"(db));
-}
-__device__ __forceinline__ uint32_t pack(float lo, float hi) {
-  __nv_bfloat162 v = __floats2bfloat162_rn(lo, hi);
-  return *reinterpret_cast<uint32_t*>(&v);
 }
 
 __device__ __forceinline__ void split4(float4 v, uint2& hi, uint2& lo) {

@@ -39,6 +39,7 @@
 #include <cuda.h>
 #include <cudaTypedefs.h>
 #include <cuda_bf16.h>
+#include "swa_ptx.cuh"
 
 namespace {
 constexpr int C = 128, H = 4, D = 32, NHID = 256, MODW = 6 * C, HWIN = 64;
@@ -46,6 +47,9 @@ constexpr int STAGE = 16384;
 
 // ---------------------------------------------------------------- wgmma / TMA / barrier primitives
 namespace wg {
+using ::commit;  // swa_ptx.cuh
+using ::fence;
+using ::proxy_fence;
 __device__ __forceinline__ uint64_t desc(const void* p) {  // K-major, 128 B swizzle, 8-row groups 1024 B apart
   const uint32_t a = static_cast<uint32_t>(__cvta_generic_to_shared(p));
   uint64_t d = static_cast<uint64_t>((a >> 4) & 0x3FFFull);
@@ -55,17 +59,20 @@ __device__ __forceinline__ uint64_t desc(const void* p) {  // K-major, 128 B swi
   return d;
 }
 #include "gen/wgmma_tf32.inc"
-__device__ __forceinline__ void fence()  { asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory"); }
-__device__ __forceinline__ void commit() { asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory"); }
 template <int K> __device__ __forceinline__ void wait() { asm volatile("wgmma.wait_group.sync.aligned %0;\n" :: "n"(K) : "memory"); }
-__device__ __forceinline__ void proxy_fence() { asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory"); }
 }  // namespace wg
 
 namespace tma {
-__device__ __forceinline__ uint32_t sa(const void* p) { return static_cast<uint32_t>(__cvta_generic_to_shared(p)); }
-__device__ __forceinline__ void bar_init(uint64_t* b, uint32_t count) { asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;\n" :: "r"(sa(b)), "r"(count) : "memory"); }
-__device__ __forceinline__ void bar_init_fence() { asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory"); }
-__device__ __forceinline__ void expect_tx(uint64_t* b, uint32_t bytes) { asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" :: "r"(sa(b)), "r"(bytes) : "memory"); }
+using ::arrive;  // swa_ptx.cuh
+using ::bar_init;
+using ::bar_init_fence;
+using ::expect_tx;
+using ::load_3d;
+using ::sa;
+using ::store_4d;
+using ::store_5d;
+using ::store_commit;
+using ::store_wait_read;
 __device__ __forceinline__ void wait(uint64_t* b, uint32_t parity) {
   asm volatile("{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAIT_%=;\n}\n" :: "r"(sa(b)), "r"(parity) : "memory");
 }
@@ -81,16 +88,6 @@ __device__ __forceinline__ void load_5d(const void* map, void* dst, uint64_t* ba
   asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6, %7}], [%2];\n"
                :: "r"(sa(dst)), "l"(map), "r"(sa(bar)), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4) : "memory");
 }
-__device__ __forceinline__ void store_4d(const void* map, const void* src, int c0, int c1, int c2, int c3) {
-  asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
-               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
-}
-__device__ __forceinline__ void store_5d(const void* map, const void* src, int c0, int c1, int c2, int c3, int c4) {
-  asm volatile("cp.async.bulk.tensor.5d.global.shared::cta.bulk_group [%0, {%2, %3, %4, %5, %6}], [%1];\n"
-               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3), "r"(c4) : "memory");
-}
-__device__ __forceinline__ void store_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
-template <int K> __device__ __forceinline__ void store_wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" :: "n"(K) : "memory"); }
 __device__ __forceinline__ void store_wait_all() { asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory"); }
 }  // namespace tma
 
