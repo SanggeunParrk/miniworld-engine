@@ -68,8 +68,9 @@ did not change them. Step time-roofline SoL (pair bytes / 3.35 TB/s) ~55 % at L7
 
 ## Open
 
-- QK-norm has no CUDA path: on H100 it runs the PyTorch reference (no portable-kernel fallback, [dispatch.md](../dispatch.md)); fp32 activations are served by the TF32 path below.
-- The fp32 backward runs its attention gradients as cuBLAS fp32 GEMMs; a fused exact-fp32 (or 3xTF32) wgmma backward would remove the S / dP / dS round trips (about 25 % of the 8 x 48 training step).
+- fp32 activations and QK-norm have no CUDA path: on H100 they run the PyTorch reference (no portable-kernel fallback,
+  [dispatch.md](../dispatch.md)). Carried over from the 2026-09-30 status snapshot
+  ([docs/records/h100_status_20260930.md](../../../records/h100_status_20260930.md), item 9).
 
 ## Reproduce
 
@@ -107,37 +108,3 @@ d_pair 256 keeps the composed route.
 - Tests: `tests/gpu/sm90/test_apb_gate_bias_h100_gpu.py` (44: output within 1.3x of the bf16 PyTorch module's error against fp32, native route asserted, mask / no mask, bf16 and fp32-master parameters, compiled and CUDA-graph replay bitwise).
 
 Not done: gate bias / 16-head d_pair 256 training (the pair backward kernels are 128 wide for 16 heads); the B200 path keeps `gate_bias == 0` (not measured there).
-
-## fp32 (TF32) path (2026-10-27)
-
-fp32 activations with TF32 matmuls (`set_float32_matmul_precision("high")` / `allow_tf32`) run hand-written CUDA on H100:
-`kernels/augmented_attention/cuda/apb_tf32.py` + `apb_tf32.cu`, with the TF32 wgmma core `attn_tf32.cu` of the token stack built for the layout's heads.
-Before, the call ran the PyTorch reference (CUDA = PyTorch, 1.22-1.26x slower than the portable Triton rung). Layouts: 8 x 48, 12 x 32, 16 x 24 (run as 16 x 32, zero-padded
-columns), 16 x 32, 24 x 16; d_pair 128, and 256 for 8 heads; one batch row, L a multiple of 128, optional key mask, `gate_bias`. Anything else keeps the PyTorch statements.
-
-- Forward (inference = training forward): `ln_single` -> one cuBLAS GEMM over `[Wq | Wk | Wv | Wg]` -> `apb_prep` (q + bias scaled to exp2 units and rounded to the TF32 grid, k, v^T) ->
-  `pb_fwd` (pair LayerNorm + the head projection in one pass of the pair, `mma.sync` TF32, bias written in the core's key order with the mask folded in) -> `attn_tf32_fwd`
-  -> `apb_gate` -> cuBLAS `addmm` (to_out + residual).
-- Backward: the gate gradient (`apb_bwd_prep`), then **exact fp32** cuBLAS GEMMs (S = q k^T, dP = dO v^T), `apb_bwd_rows` (softmax rows, D = rowsum(P dP), dS = P (dP - D); dS is also the
-  pair-bias gradient), fp32 GEMMs for dq, dk, dv, `apb_post`, TF32 GEMMs for dx and dW, `pb_bwd_tc` (d_pair 128: dpair + dWf partials on `mma.sync`) or `pb_bwd_rows` (d_pair 256: FMA pipe).
-- Why exact fp32 in the backward: the TF32 core's dq / dk (dS and dP rounded to the TF32 grid, the same kernels as the token stack) gave to_query / to_key gradients at 2.4x the error of the
-  PyTorch TF32 module (a hi + lo split of dS alone did not help: 2.37x); the exact core gives 0.97-1.02x on every tensor.
-- Bitwise repeatable (fixed grids, fixed-order partial sums); CUDA-graph replay equals eager; `torch.compile` launches the CUDA core (two opaque ops, `apb_tf32_fwd` / `apb_tf32_bwd`).
-
-Accuracy (relative Frobenius vs fp64, ours / PyTorch TF32, 8 x 48 pair 128 L 384, 20 % masked keys): output 1.01, dsingle 0.99, dpair 0.99, dWq 1.02, dWk 1.01, dWv 1.00, dW to_bias 1.00,
-dlnw_pair 0.94, dWg 1.01, dWo 1.00 (bar 1.5). Tests: `tests/gpu/sm90/test_apb_tf32_gpu.py` (8x48 L384 / 768, 16 x 24, 12 x 32, pair 256, mask / gate_bias, inference, repeatability, graph, compile, fallbacks).
-
-Ladder (`benchmarks/runners/ladder.py`, groups `apb_fp32`, `apb_fp32_h16`, `apb_fp32_p256`; CUDA graph / compiled, H100 SXM, ms):
-
-| row | CUDA | portable | PyTorch (best) | CUDA / portable |
-|---|---|---|---|---|
-| 8x48 pair128 inference L384 | 0.0834 | 0.1595 | 0.1907 | 0.52 |
-| 8x48 pair128 inference L768 | 0.1803 | 0.4096 | 0.4760 | 0.44 |
-| 8x48 pair128 training L384 | 0.2703 | 0.4672 | 0.5630 | 0.58 |
-| 8x48 pair128 training L768 | 0.6706 | 1.1797 | 1.3791 | 0.57 |
-| 16x24 pair128 inference L384 | 0.0857 | 0.1605 | 0.1896 | 0.53 |
-| 16x24 pair128 training L384 | 0.3039 | 0.4548 | 0.5547 | 0.67 |
-| 8x48 pair256 inference L384 | 0.1118 | 0.2328 | 0.2676 | 0.48 |
-| 8x48 pair256 training L384 | 0.4252 | 0.6447 | 0.7729 | 0.66 |
-
-Record: [attention_pair_bias_fp32_20261027.md](../../../records/attention_pair_bias_fp32_20261027.md).

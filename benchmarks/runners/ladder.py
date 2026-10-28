@@ -105,10 +105,6 @@ GROUPS: list[Group] = [
     G("ta_D128", "TriAttn", "triangle_attention", (128, 384, 768), "D128 4x32", "d_pair=128", weight=3, tier="smoke"),
     G("ta_D256", "TriAttn", "triangle_attention", (384,), "D256 8x32", "d_pair=256", "+tri_n_head=8", weight=2),
     G("ta_D64", "TriAttn", "triangle_attention", (384,), "D64 2x32", "d_pair=64", "+tri_n_head=2", weight=1, tier="full"),
-    # ---- fp32 (TF32) rows for the pair modules (audit 2026-10-27) -------------------------------------------------------------------
-    G("ta_fp32_D128", "TriAttn", "triangle_attention", (384, 768), "D128 4x32 TF32", "d_pair=128", precision="32", weight=2),
-    G("opm_fp32", "OuterProductMean", "outer_product", (256, 384), "S1024 msa64 pair128 TF32", "d_pair=128", precision="32", weight=2),
-    G("pwa_fp32", "MSAPairWeightedAveraging", "msa_pair_weighted_averaging", (256, 384), "S1024 8x32 pair128 TF32", "d_pair=128", precision="32", weight=2),
     # ---- Transition (n = 4; bf16, and fp32 on TF32) -------------------------------------------------------------------------------------
     G("tr_D128", "Transition", "transition", (128, 384, 768, 1024), "D128", "d_pair=128", weight=3, tier="smoke"),
     G("tr_D256", "Transition", "transition", (384, 768), "D256", "d_pair=256", weight=2),
@@ -143,10 +139,6 @@ GROUPS: list[Group] = [
       "+apb_gate_bias=1.0", modes=("inference",), weight=2),
     G("apb_gb", "AttentionPairBias gate bias 1.0", "attention_pair_bias", (384,), "16x24 pair128", "d_pair=128", "+apb_n_head=16",
       "+apb_gate_bias=1.0", modes=("inference",), weight=1, tier="full"),
-    # fp32 (TF32) rows: the hand-CUDA TF32 path (kernels/augmented_attention/cuda/apb_tf32.py), audit 2026-10-27
-    G("apb_fp32", "AttentionPairBias", "attention_pair_bias", (384, 768), "8x48 pair128 TF32", "d_pair=128", precision="32", weight=3),
-    G("apb_fp32_h16", "AttentionPairBias", "attention_pair_bias", (384,), "16x24 pair128 TF32", "d_pair=128", "+apb_n_head=16", precision="32", weight=2),
-    G("apb_fp32_p256", "AttentionPairBias", "attention_pair_bias", (384,), "8x48 pair256 TF32", "d_pair=256", precision="32", weight=1),
     G("aat_bf16", "AugmentedAttention token", "augmented_attention_token", (384, 768), "d768 A5/A48", weight=2),
     G("aat_fp32", "AugmentedAttention token", "augmented_attention_token", (128, 384, 768), "d768 cond384 pair128 A5/A48", precision="32", weight=2),
     G("aat_bf16_c768", "AugmentedAttention token", "augmented_attention_token", (128, 384, 768), "d768 cond768 pair256 A5/A48 (ESMFold2)", "d_single=768", "d_pair=256", weight=2),

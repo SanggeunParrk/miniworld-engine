@@ -96,11 +96,6 @@ class AttentionPairBias(nn.Module):
             return _b200.update_inference(self, single, pair, mask)
         if _b200.serves_train(self, single, pair, mask):
             return _b200.update_train(self, single, pair, mask)
-        # H100 fp32 (TF32): the hand-CUDA pair-fused core (kernels/augmented_attention/cuda/apb_tf32.py), inference and training
-        if self.implementation == ImplementationType.MINIWORLD and single.is_cuda and _dispatch.restricted_card(single.device) and not self.use_qk_norm:
-            out = self._forward_tf32(single, pair, mask)
-            if out is not None:
-                return out
         # H100 / B200 have no Triton fallback: a MINIWORLD call the native CUDA path does not serve runs the PyTorch attention.
         no_triton = (
             self.implementation == ImplementationType.MINIWORLD
@@ -247,20 +242,3 @@ class AttentionPairBias(nn.Module):
         out = sigmoid_gate(gate, out)
         out = _h100_master.linear(out, self.to_out, wo) if master else self.to_out(out)
         return single_res + out
-
-    def _forward_tf32(self, single, pair, mask):
-        """The fp32 (TF32) hand-CUDA path on H100 (``kernels.augmented_attention.cuda.apb_tf32``); None when it does not serve the call."""
-        from miniworld_engine.kernels.augmented_attention.cuda import apb_tf32
-
-        if single.dtype != torch.float32 or torch.is_autocast_enabled("cuda") or self.ln_pair.eps != 1e-5:
-            return None
-        d_hidden = self.to_query.weight.shape[0] // self.n_head
-        if not apb_tf32.available(single, pair, self.n_head, d_hidden, mask):
-            return None
-        x = self.ln_single(single)
-        L = single.shape[1]
-        og = apb_tf32.attention_pair_tf32(
-            x, pair, self.to_query.weight, self.to_query.bias, self.to_key.weight, self.to_value.weight, self.to_gate.weight,
-            self.ln_pair.weight, self.to_bias.weight, mask, self.ln_pair.eps, self.gate_bias, self.n_head, d_hidden,
-        )
-        return torch.addmm(single.reshape(L, -1), og, self.to_out.weight.t()).view(single.shape)
