@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: Apache-2.0
 // Bidirectional TriMul training backward at pair width D = 64 with hidden width 128 PER DIRECTION (H = 256 contraction channels, the
-// output LayerNorm normalises 256 channels), sm_90a, wgmma + TMA.  Derived from d64_bwd_wg_gatepipe.cu (hidden 64 per direction, H = 128):
+// output LayerNorm normalises 256 channels), sm_90a, wgmma + TMA.  Derived from d64_bwd_wg.cu (GATEPIPE=1) (hidden 64 per direction, H = 128):
 // the registers of that kernel hold a whole 128-channel row of dxhat and the dWp partial, so the 256-channel block is split by channel
 // halves; the only coupling between the halves is the output LayerNorm (the row sums s1, s2 and the projection p), which a first
 // kernel computes for the whole row.

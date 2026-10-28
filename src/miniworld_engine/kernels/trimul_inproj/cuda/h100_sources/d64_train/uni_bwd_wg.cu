@@ -1,6 +1,5 @@
-// EXPERIMENT: register-resident uni B7 affine sums.
-// EXPERIMENT: overlap B7 gate with final weight-gradient group.
-// EXPERIMENT: B200 gate input-gradient placement; original baseline preserved.
+// GATEPIPE=1: the gate input-gradient MMA joins the final weight-gradient group of the last dxn accumulation; GATEPIPE=0: a
+// separate gate group (the baseline). AFFINE_REG=1 (with GATEPIPE=1): the B7 affine sums stay in registers and are published once.
 // SPDX-License-Identifier: Apache-2.0
 // Single-direction TriMul training backward at pair width D = 64 (hidden 64, one contraction), sm_90a, wgmma + TMA.
 // Derived from the former d64_bwd_wg.cu (bidirectional, H = 128; removed, see git history): the output side keeps one [64][64] Wp tile and a 64-channel
@@ -409,7 +408,14 @@ DEVI int unperm(int r) { return ((r >> 4) & 1) * 32 + (r >> 5) * 16 + (r & 15); 
     stsm4(afrag(SCRB, 16 * w, 32 * (HC), lane), ag); \
     stsm4(afrag(SCRB, 16 * w, 32 * (HC) + 16, lane), ap); } while (0)
 
-extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const __grid_constant__ B2Params P) {
+#if AFFINE_REG
+#define UNI_B2W uni64_b2w_affinereg
+#elif GATEPIPE
+#define UNI_B2W uni64_b2w_gatepipe
+#else
+#define UNI_B2W uni64_b2w_b7gate
+#endif
+extern "C" __global__ void __launch_bounds__(256, 1) UNI_B2W(const __grid_constant__ B2Params P) {
   using namespace b2;
   extern __shared__ __align__(1024) uint8_t smem[];
   const int tid = threadIdx.x, wtid = tid & 127, w = wtid >> 5, lane = tid & 31, gq = lane >> 2, q = lane & 3;
@@ -434,7 +440,11 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
         *reinterpret_cast<const uint4*>(P.wg + row * 64 + g * 8);
   }
   if (tid < 64) { sGi[tid] = P.gi[tid]; sBi[tid] = P.bi[tid]; }
+#if AFFINE_REG
   float affine_sum[4] = {0.f, 0.f, 0.f, 0.f};
+#else
+  for (int i = tid; i < 8 * 128; i += 256) reinterpret_cast<float*>(smem + REDW)[i] = 0.f;
+#endif
   if (tid == 0) {
     mbar_init(sb + BAR, 1); mbar_init(sb + BAR + 8, 1);
     fence_barrier_init();
@@ -531,6 +541,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
       const uint32_t wb = sb + W1 + (2 * side + c) * 8192;
 #pragma unroll
       for (int ks = 0; ks < 4; ++ks) mma64<0, 1>(dxn, kdesc(scr + 32 * ks), mdesc(wb + 2048 * ks), c > 0 || ks > 0);
+#if GATEPIPE
       // The final dxn accumulation includes the gate before the existing
       // group commit. Its operands are already resident; keep the original
       // projection-then-gate summation order and wait once for the whole tail.
@@ -539,6 +550,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
         for (int ks = 0; ks < 4; ++ks)
           mma64<0, 1>(dxn, kdesc(s + DXG + 32 * ks), mdesc(sb + WGATE + 2048 * ks), 1);
       }
+#endif
 #pragma unroll
       for (int ks = 0; ks < 4; ++ks) mma64<1, 1>(Gx[c], mdesc(scr + 2048 * ks), mdesc(sb + XN + 2048 * ks), 1);
       wg_commit();
@@ -549,6 +561,18 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
 #pragma unroll
     for (int c = 0; c < 2; ++c) fence_acc(Gx[c]);
     PF(2);
+#if !GATEPIPE
+    // Only side 0 adds the gate contribution; the existing exchange sums sides.
+    if (side == 0) {
+      wg_fence();
+#pragma unroll
+      for (int ks = 0; ks < 4; ++ks)
+        mma64<0, 1>(dxn, kdesc(s + DXG + 32 * ks), mdesc(sb + WGATE + 2048 * ks), 1);
+      wg_commit();
+      wg_wait<0>();
+      fence_acc(dxn);
+    }
+#endif
     // ---- exchange: side 0 finalises rows A (16 w + gq), side 1 rows B; each hands the other its half
     {
       const uint32_t mine = s + (side ? DR : DL), other = s + (side ? DL : DR);   // dl / dr consumed
@@ -633,7 +657,11 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
         }
         const int base = quantity * 64 + 8 * (4 * ((lane >> 4) & 1) + 2 * ((lane >> 3) & 1) + ((lane >> 2) & 1)) + 2 * q;
 #pragma unroll
+#if AFFINE_REG
         for (int i = 0; i < 2; ++i) affine_sum[2 * quantity + i] += v[i];
+#else
+        for (int i = 0; i < 2; ++i) sRedW[base+i] += v[i];
+#endif
       }
 #else
       float v[32];
@@ -662,7 +690,11 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
         const int a = base + 8 * (i >> 1) + (i & 1);
+#if AFFINE_REG
         affine_sum[i] += v[i];
+#else
+        sRedW[a] += v[i];
+#endif
       }
 #endif
     }
@@ -689,6 +721,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
       *reinterpret_cast<float2*>(out + (row0 + pB) * 64 + col) = make_float2(fB * Gx[c][4 * j + 2], fB * Gx[c][4 * j + 3]);
     }
   }
+#if AFFINE_REG
   // Publish each thread's persistent sums once, in the original lane layout.
 #if UNI_AFFINE_SPLIT
 #pragma unroll
@@ -701,6 +734,7 @@ extern "C" __global__ void __launch_bounds__(256, 1) uni64_b2w_affinereg(const _
   const int affine_base = ((lane >> 4) & 1) * 64 + 8 * (4 * ((lane >> 3) & 1) + 2 * ((lane >> 2) & 1)) + 2 * q;
 #pragma unroll
   for (int i = 0; i < 4; ++i) sRedW[affine_base + 8 * (i >> 1) + (i & 1)] = affine_sum[i];
+#endif
 #endif
   __syncthreads();
   if (tid < 128) {

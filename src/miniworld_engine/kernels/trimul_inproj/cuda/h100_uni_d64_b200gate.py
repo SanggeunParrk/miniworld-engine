@@ -51,7 +51,7 @@ def _k3(tile):
     return k, smem
 
 
-B1W_SMEM, B2W_SMEM = 171008, 170560  # == b1::SMEM, b2::SMEM in uni_bwd_wg_affinereg.cu / _gatepipe.cu / _b7gate.cu
+B1W_SMEM, B2W_SMEM = 171008, 170560  # == b1::SMEM, b2::SMEM in uni_bwd_wg.cu (every variant)
 B1W_SLOT, B2W_SLOT = 4096 + 128 + 4096, 16384 + 128
 FINW_OUT = B2W_SLOT + B1W_SLOT
 
@@ -64,8 +64,9 @@ def _bwd_wg(master=False, affine_split=False, gatepipe=True):
     # Outgoing L256 has no reproducible complete-workload improvement.
     # Full-module gains are qualified for the nonsplit affine reduction.
     # Preserve the separately forced split configuration and the L256 fallback.
-    source = ("uni_bwd_wg_affinereg.cu" if not affine_split else "uni_bwd_wg_gatepipe.cu") if gatepipe else "uni_bwd_wg_b7gate.cu"
-    cubin = T.compile(R / source, D64._flags(R, defines))
+    # one source (h100_sources/d64_train/uni_bwd_wg.cu): b7gate, gatepipe, or gatepipe with the register-resident affine sums
+    defines += [("GATEPIPE", int(gatepipe)), ("AFFINE_REG", int(gatepipe and not affine_split))]
+    cubin = T.compile(R / "uni_bwd_wg.cu", D64._flags(R, defines))
     unit = T.load_unit(str(cubin), "uni64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("uni64_b1w_b7gate", (("uni64_b2w_affinereg" if not affine_split else "uni64_b2w_gatepipe") if gatepipe else "uni64_b2w_b7gate"), "uni64_finw_b7gate"))
     b1.set_max_dynamic_smem(B1W_SMEM)

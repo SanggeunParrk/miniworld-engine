@@ -65,7 +65,7 @@ def _k3(tile):
     return k, smem
 
 
-B1W_SMEM, B2W_SMEM = 211968, 232000  # == b1::SMEM, b2::SMEM in d64_bwd_wg_gatepipe.cu / d64_bwd_wg_b7gate.cu
+B1W_SMEM, B2W_SMEM = 211968, 232000  # == b1::SMEM, b2::SMEM in d64_bwd_wg.cu (both variants)
 B1W_SLOT, B2W_SLOT = 8192 + 256 + 4096, 32768 + 128
 FINW_OUT = B2W_SLOT + B1W_SLOT
 
@@ -76,8 +76,8 @@ def _bwd_wg(prof=False, master=False, gatepipe=True):
     if prof:
         defines.append(("D64_PROF", 1))
     # The short bidirectional cell has no consistent F+B gain.
-    source = "d64_bwd_wg_gatepipe.cu" if gatepipe else "d64_bwd_wg_b7gate.cu"
-    cubin = T.compile(R / source, _flags(R, defines))
+    defines.append(("GATEPIPE", int(gatepipe)))   # one source (h100_sources/d64_train/d64_bwd_wg.cu) for both gate placements
+    cubin = T.compile(R / "d64_bwd_wg.cu", _flags(R, defines))
     unit = T.load_unit(str(cubin), "d64_bwd_wg")
     b1, b2, fin = (unit.kernel(n) for n in ("d64_b1w_b7gate", ("d64_b2w_gatepipe" if gatepipe else "d64_b2w_b7gate"), "d64_finw_b7gate"))
     b1.set_max_dynamic_smem(B1W_SMEM)
