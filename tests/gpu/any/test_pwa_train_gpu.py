@@ -188,12 +188,13 @@ def test_refusals(module, inputs):
             pt.refusal(inputs["msa"], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID)
             is None
         )
+        # N = 320 is off the 128-token tiles: refused on H100, padded to 384 on B200 (_pad_b200)
         assert (
             pt.refusal(
                 inputs["msa"][:, :, :320], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID
             )
-            is not None
-        )
+            is None
+        ) == (torch.cuda.get_device_capability() == (10, 0))
     assert (
         pt.refusal(inputs["msa"], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID)
         is not None
@@ -212,11 +213,13 @@ def test_refusals(module, inputs):
     not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
     reason="the depth pad is the sm_100a path's",
 )
-@pytest.mark.parametrize("depth", [200, 129])
-def test_sm100_pads_a_ragged_depth(module, inputs, depth):
-    """B200 at an MSA depth off the 128-row tiles: padded with zero rows, which change no real row; matches the engine's own path as
-    the unpadded depth does (test_fused_training_path_matches_the_engines_own), gradients included."""
-    cut = {k: (v[:, :depth].contiguous() if k in ("msa", "gz") else v) for k, v in inputs.items()}
+@pytest.mark.parametrize(("depth", "length"), [(200, L), (129, L), (S, 300), (200, 203)])
+def test_sm100_pads_a_ragged_depth(module, inputs, depth, length):
+    """B200 at an MSA depth and / or a token count off the 128-row tiles: padded with zero rows (independent MSA rows) and masked pad
+    tokens (no real token averages over them); matches the engine's own path as the unpadded shape does
+    (test_fused_training_path_matches_the_engines_own), gradients included."""
+    cut = {"msa": inputs["msa"][:, :depth, :length].contiguous(), "gz": inputs["gz"][:, :depth, :length].contiguous(),
+           "pair": inputs["pair"][:, :length, :length].contiguous(), "ragged": inputs["ragged"][:, :length].contiguous()}
     out_e, dmsa_e, dpair_e, g_e = _run(module, cut, "ragged", fused=False)
     out_f, dmsa_f, dpair_f, g_f = _run(module, cut, "ragged", fused=True)
     assert out_f.shape == out_e.shape
