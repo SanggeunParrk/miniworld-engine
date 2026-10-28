@@ -28,6 +28,7 @@ import triton.language as tl
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels._tf32 import tf32_dot
 
 
 _FWD_BR = 64
@@ -47,7 +48,7 @@ def _ln_bias_fwd_kernel(X, W, OUT, MEAN, RSTD, R, eps, C: tl.constexpr, N: tl.co
     xh = (xc * rstd[:, None]).to(X.dtype.element_ty)
     hh = tl.arange(0, NP)
     w = tl.load(W + hh[:, None] * C + cols[None, :], mask=(hh < N)[:, None], other=0.0)
-    acc = tl.dot(w, tl.trans(xh), out_dtype=tl.float32)                       # [NP, BR]
+    acc = tf32_dot(w, tl.trans(xh))                                            # [NP, BR]; fp32: TF32 rounded to nearest
     tl.store(OUT + hh[:, None] * R + rows[None, :], acc.to(OUT.dtype.element_ty), mask=(hh < N)[:, None] & rm[None, :])
     tl.store(MEAN + rows, mean, mask=rm)
     tl.store(RSTD + rows, rstd, mask=rm)
@@ -70,8 +71,8 @@ def _ln_bias_bwd_kernel(X, W, DL, MEAN, RSTD, DX, DW, R, C: tl.constexpr, N: tl.
         rstd = tl.load(RSTD + rows, mask=rm, other=0.0)
         xh = (x - mean[:, None]) * rstd[:, None]
         dl = tl.load(DL + hh[:, None] * R + rows[None, :], mask=hm[:, None] & rm[None, :], other=0.0)   # [NP, BR]
-        dxh = tl.dot(tl.trans(dl), w, out_dtype=tl.float32)                                              # [BR, C]
-        dw += tl.dot(dl, xh.to(X.dtype.element_ty), out_dtype=tl.float32)
+        dxh = tf32_dot(tl.trans(dl), w)                                                                  # [BR, C]
+        dw = tf32_dot(dl, xh.to(X.dtype.element_ty), dw)
         c1 = tl.sum(dxh, axis=1) / C
         c2 = tl.sum(dxh * xh, axis=1) / C
         dx = rstd[:, None] * (dxh - c1[:, None] - xh * c2[:, None])

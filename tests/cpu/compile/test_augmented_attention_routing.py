@@ -7,6 +7,7 @@ from miniworld_engine.kernels.augmented_attention import interface
 from miniworld_engine.kernels.augmented_attention.whole_op import (
     augmented_attention_pair_bias,
 )
+from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.augmented_attention.module import (
     AugmentedAttentionPairBias,
 )
@@ -61,6 +62,8 @@ def test_module_routes_to_selected_backend(monkeypatch, kernel_type):
 
     monkeypatch.setattr(interface, "_pair_bias_compute_efficient", compute)
     monkeypatch.setattr(interface, "_pair_bias_memory_efficient", atomic)
+    # the routing under test is the portable one: on an H100 / B200 host the restricted-card rule would send the call to PyTorch
+    monkeypatch.setattr(_dispatch, "restricted_card", lambda *a, **k: False)
     kwargs = {} if kernel_type is None else {"kernel_type": kernel_type}
     module = AugmentedAttentionPairBias(8, 8, 4, 2, implementation=ImplementationType.MINIWORLD, **kwargs)
     q = torch.randn(2, 1, 5, 2, 4)

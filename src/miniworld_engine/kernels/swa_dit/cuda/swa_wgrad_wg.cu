@@ -4,7 +4,8 @@
 // 11 output tiles of 128 x 128, K = M rows. A cluster of 8 CTAs owns a tile and splits K 8 ways (contiguous, multiples of 64 rows);
 // each CTA: 1 producer warp (TMA, 4 stages of 64 rows x (A 128 + B 128) bf16 = 32 KB), 2 consumer warpgroups (m64 each, n128, the
 // fp32 accumulator in registers). After the K loop the 128 x 128 fp32 tile is parked in shared memory and, after a cluster barrier,
-// every CTA sums 16 rows over the eight partials in rank order (distributed shared memory) and stores bf16: deterministic.
+// every CTA sums 16 rows over the eight partials in rank order (distributed shared memory) and stores bf16 (or fp32 for an fp32
+// master, f32_out): deterministic.
 // Operand smem layout: two 64-wide blocks of [64 k rows][64 elements] with 128 B rows, 128 B swizzle (TMA box {64, 64}); a wgmma
 // reads it as an MN-major operand (transpose bits 1): leading offset = one block (8 KB), stride offset = 8 rows (1 KB).
 #include <torch/extension.h>
@@ -25,7 +26,7 @@ constexpr int SMEM = ST * STAGE_BYTES + 2 * ST * 8 + 1024;   // + barriers + 1 K
 struct Maps { alignas(64) CUtensorMap m[8]; };
 struct Jobs {
   int amap[NJOB], acol[NJOB], bmap[NJOB], bcol[NJOB], ldo[NJOB];
-  bf16* out[NJOB];
+  void* out[NJOB];                                 // bf16, or fp32 (F32: an fp32 master's unrounded gradient)
 };
 
 using swa_tma1::wait;  // swa_ptx.cuh
@@ -60,6 +61,7 @@ __device__ __forceinline__ void wgmma_ss(uint64_t da, uint64_t db, float* d) {
       : "l"(da), "l"(db));
 }
 
+template <bool F32>
 __global__ void __cluster_dims__(CL, 1, 1) __launch_bounds__(288, 1)
 wgrad_wg_kernel(const __grid_constant__ Maps maps, const Jobs jobs, int M, int kper) {
   extern __shared__ unsigned char smem_raw[];
@@ -138,9 +140,15 @@ wgrad_wg_kernel(const __grid_constant__ Maps maps, const Jobs jobs, int M, int k
       s[0] += v0.x; s[1] += v0.y; s[2] += v0.z; s[3] += v0.w;
       s[4] += v1.x; s[5] += v1.y; s[6] += v1.z; s[7] += v1.w;
     }
-    uint4 o;
-    o.x = pack(s[0], s[1]); o.y = pack(s[2], s[3]); o.z = pack(s[4], s[5]); o.w = pack(s[6], s[7]);
-    *reinterpret_cast<uint4*>(jobs.out[job] + (size_t)row * jobs.ldo[job] + col) = o;
+    if constexpr (F32) {
+      float* dst = static_cast<float*>(jobs.out[job]) + (size_t)row * jobs.ldo[job] + col;
+      *reinterpret_cast<float4*>(dst) = make_float4(s[0], s[1], s[2], s[3]);
+      *reinterpret_cast<float4*>(dst + 4) = make_float4(s[4], s[5], s[6], s[7]);
+    } else {
+      uint4 o;
+      o.x = pack(s[0], s[1]); o.y = pack(s[2], s[3]); o.z = pack(s[4], s[5]); o.w = pack(s[6], s[7]);
+      *reinterpret_cast<uint4*>(static_cast<bf16*>(jobs.out[job]) + (size_t)row * jobs.ldo[job] + col) = o;
+    }
   }
   cluster.sync();
 }
@@ -177,9 +185,9 @@ CUtensorMap map2d(const torch::Tensor& t, int64_t M, int64_t cols) {   // [M][co
 
 // same contract as swa_wgrad.cu ``wgrad``
 std::vector<torch::Tensor> wgrad(torch::Tensor dP, torch::Tensor x, torch::Tensor datt, torch::Tensor gated, torch::Tensor dab,
-                                 torch::Tensor y, torch::Tensor dffn, torch::Tensor hh) {
+                                 torch::Tensor y, torch::Tensor dffn, torch::Tensor hh, bool f32_out) {
   const int64_t M = dP.size(0);
-  auto o = dP.options();
+  auto o = f32_out ? dP.options().dtype(torch::kFloat32) : dP.options();
   auto dwq = torch::empty({384, 128}, o), dwg = torch::empty({128, 128}, o), dwo = torch::empty({128, 128}, o), dwu = torch::empty({512, 128}, o),
        dwd = torch::empty({128, 256}, o);
   if (M == 0) {
@@ -193,7 +201,9 @@ std::vector<torch::Tensor> wgrad(torch::Tensor dP, torch::Tensor x, torch::Tenso
   int j = 0;
   auto add = [&](int am, int ac, int bm, int bc, torch::Tensor& out, int64_t row0, int ldo, int col0) {
     jb.amap[j] = am; jb.acol[j] = ac; jb.bmap[j] = bm; jb.bcol[j] = bc; jb.ldo[j] = ldo;
-    jb.out[j] = reinterpret_cast<bf16*>(out.data_ptr()) + row0 * ldo + col0;
+    const int64_t off = row0 * ldo + col0;
+    jb.out[j] = f32_out ? static_cast<void*>(static_cast<float*>(out.data_ptr()) + off)
+                        : static_cast<void*>(reinterpret_cast<bf16*>(out.data_ptr()) + off);
     ++j;
   };
   for (int i = 0; i < 3; ++i) add(0, i * 128, 1, 0, dwq, i * 128, 128, 0);
@@ -202,12 +212,15 @@ std::vector<torch::Tensor> wgrad(torch::Tensor dP, torch::Tensor x, torch::Tenso
   for (int i = 0; i < 4; ++i) add(4, i * 128, 5, 0, dwu, i * 128, 128, 0);
   for (int i = 0; i < 2; ++i) add(6, 0, 7, i * 128, dwd, 0, 256, i * 128);
   const int kper = static_cast<int>((((M + CL - 1) / CL) + KB - 1) / KB * KB);
-  cudaFuncSetAttribute(wgrad_wg_kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
-  pdl_launch(wgrad_wg_kernel, dim3(CL, NJOB), 288, SMEM, at::cuda::getCurrentCUDAStream(), true, maps, jb, static_cast<int>(M), kper);
+  auto kernel = f32_out ? wgrad_wg_kernel<true> : wgrad_wg_kernel<false>;
+  cudaFuncSetAttribute(kernel, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM);
+  pdl_launch(kernel, dim3(CL, NJOB), 288, SMEM, at::cuda::getCurrentCUDAStream(), true, maps, jb, static_cast<int>(M), kper);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dwq, dwg, dwo, dwu, dwd};
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("wgrad", &wgrad, "bf16 weight gradients of the SWA atom block backward, one launch, TMA + wgmma");
+  m.def("wgrad", &wgrad, "weight gradients of the SWA atom block backward (bf16 operands; bf16 or, f32_out, fp32 out), one launch, TMA + wgmma",
+        py::arg("dP"), py::arg("x"), py::arg("datt"), py::arg("gated"), py::arg("dab"), py::arg("y"), py::arg("dffn"), py::arg("hh"),
+        py::arg("f32_out") = false);
 }

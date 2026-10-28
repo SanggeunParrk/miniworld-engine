@@ -452,21 +452,16 @@ def test_a_cuda_graph_replays_the_training_step(path):
     eager_out, eager_grads = _run(_fused, fresh, dy, cos, sin, seqused, b)
     # The modulation gradient (so the conditioning's and the adaLN weight's) is accumulated with fp32 atomics whose order
     # differs run to run, so two EAGER steps differ there too: the replay may differ from eager by what eager differs from
-    # itself (x4), and by no more than rounding elsewhere.
-    again_out, again_grads = _run(_fused, fresh, dy, cos, sin, seqused, b)
-    for name, got, want, again in zip(
-        ("out", *NAMES),
-        replayed,
-        [eager_out, *eager_grads],
-        [again_out, *again_grads],
-        strict=True,
-    ):
+    # itself (x4), and by no more than rounding elsewhere. That self-difference is itself a draw from the atomic order, so it is
+    # taken as the largest of several eager reruns: one small draw made the bound fail ~1 run in 6 with nothing wrong.
+    # The two modulation gradients are bf16 roundings of those fp32 sums, so a few flipped roundings put a floor under the
+    # difference: replay vs eager measured 1e-7 .. 2e-5 there (docs/gpus/h100/swa_atom_dit), hence 4e-5 for them, 1e-5 elsewhere.
+    agains = [_run(_fused, fresh, dy, cos, sin, seqused, b) for _ in range(4)]
+    for i, (name, got, want) in enumerate(zip(("out", *NAMES), replayed, [eager_out, *eager_grads], strict=True)):
+        noise = max(_rel(([again_out, *again_grads])[i], want)[0] for again_out, again_grads in agains)
+        floor = 4e-5 if name in ("c_base", "w_adaln") else 1e-5
         frob, _peak = _rel(got, want)
-        assert frob <= max(1e-5, 4 * _rel(again, want)[0]), (
-            name,
-            frob,
-            _rel(again, want)[0],
-        )
+        assert frob <= max(floor, 4 * noise), (name, frob, noise)
 
 
 @pytest.mark.parametrize("path", ["triton", "cuda"])

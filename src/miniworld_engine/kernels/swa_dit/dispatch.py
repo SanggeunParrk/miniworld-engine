@@ -383,11 +383,15 @@ def _native_h100_mod_fwd_fake(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.T
 def native_h100_mod_fwd(c: torch.Tensor, w: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """(silu-free fp32 c @ w^T, c as fp32, w as fp32) on the H100 native copy kernels and cuBLAS."""
     ext = _native_h100_extension()
+    if c.dtype == torch.bfloat16 and w.dtype != torch.bfloat16:
+        # An fp32 master weight in a bf16 block: rounded to bf16 here, as the block's other projections and the sm_100a
+        # modulation take it, so the master and the bf16 model compute the same table; the gradient stays unrounded.
+        w = w.to(torch.bfloat16)
     a, w32 = torch.empty_like(c, dtype=torch.float32), torch.empty_like(w, dtype=torch.float32)
     ext.native_copy([c], [a], 1)
     ext.native_copy([w], [w32], 0)
     with torch.autocast("cuda", enabled=False):
-        if c.dtype == torch.bfloat16 and w.dtype == torch.bfloat16:
+        if c.dtype == torch.bfloat16:
             # A bf16 block: bf16 operands -- the module's own GEMM precision -- on the tensor cores, fp32 accumulation and output.
             # The fp32 copies ran an FFMA GEMM (A 5, 8192 atoms: 49 us shared, 228 us per-sample conditioning rows).
             return torch.mm(a.to(torch.bfloat16), w.t(), out_dtype=torch.float32), a, w32
@@ -1181,18 +1185,21 @@ def swa_dit_block_bwd(
                     and q.dtype == torch.bfloat16)
         # TMA + wgmma kernel at every row count (bit-identical to the mma.sync one, faster than cuBLAS up to 196k rows); the
         # mma.sync kernel serves where it does not build, cuBLAS above its row limit
-        ext_w = _cuda("wgwg", served_w, dev) or _cuda("wgrad", served_w and M <= _WGRAD_MAX_ROWS, dev)
+        ext_ww = _cuda("wgwg", served_w, dev)
+        ext_w = ext_ww or _cuda("wgrad", served_w and M <= _WGRAD_MAX_ROWS, dev)
         side = _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqkv, wg, wo, qh, kh, vh,
                                    g, o, lse, x, pq, pk, att, dmod, B, half_window, eps, Ak, raw=ext_w is not None)
         if ext_w is not None:
             dq, dP, datt, gated = side
-            dwqkv, dwg, dwo, dwu, dwd = ext_w.wgrad(dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
-            # the weight gradients leave as fp32, as the contract (and the fake) says; the autograd node casts them
+            args = (dP, x.reshape(M, C), datt, gated, dab, y.reshape(M, C), dffn, hh)
+            # the weight gradients leave as fp32, unrounded, as the contract (and the fake) says -- an fp32 master keeps them; the
+            # autograd node casts them. The TMA + wgmma kernel stores its fp32 sums; the mma.sync fallback stores bf16.
+            dwqkv, dwg, dwo, dwu, dwd = ext_ww.wgrad(*args, f32_out=True) if ext_ww is not None else ext_w.wgrad(*args)
             return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
         dq, dwqkv, dwg, dwo = side
         if dwu is None or dwd is None:
-            dwu = dab.t() @ y
-            dwd = dffn.t() @ hh
+            dwu = _mm32(dab.t(), y)
+            dwd = _mm32(dffn.t(), hh)
         return [dq.view(N, S, C), dmod, *(w.float() for w in (dwqkv, dwg, dwo, dwu, dwd))]
     _swa_oproj_bwd_kernel[grid_t](
         dq1,
@@ -1357,8 +1364,8 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
         dq = ext_q.qkvg_bwd(q.reshape(M, C), pq, pk, dq1, mod, dmod, cos, sin, wqkv, wg, dP, A, B, S, eps, FP32_EPS)
         if raw:
             return dq, dP, datt, gated
-        dwqkv = dP[:, :3 * C].t() @ x
-        dwg = dP[:, 3 * C:].t() @ x
+        dwqkv = _mm32(dP[:, :3 * C].t(), x)
+        dwg = _mm32(dP[:, 3 * C:].t(), x)
     else:
         assert heads is not None
         dQh, dKh, dVh = heads
@@ -1367,9 +1374,9 @@ def _bwd_attention_side(ext_o, ext_a, ext_q, dq1, q, mod, cos, sin, seqused, wqk
         _swa_qkvg_bwd_kernel[grid_t](
             q.reshape(M, C), mod, cos, sin, wqkv, wg, pq, pk, dQh, dKh, dVh, dG.contiguous(), dq1, dq, dPt, dmod, S, A, B,
             eps, FP32_EPS, shape_key=atom_key(S, A=Ak, C=C), C=C, H=H, D=D, MODW=6 * C)
-        dwqkv = dPt[:, :3 * C].t() @ x
-        dwg = dPt[:, 3 * C:].t() @ x
-    dwo = datt.t() @ gated
+        dwqkv = _mm32(dPt[:, :3 * C].t(), x)
+        dwg = _mm32(dPt[:, 3 * C:].t(), x)
+    dwo = _mm32(datt.t(), gated)
     return dq, dwqkv, dwg, dwo
 
 
