@@ -222,13 +222,20 @@ class Transition(nn.Module):
             )
 
             pa, pb, ps = self.expand_a.weight, self.expand_b.weight, self.squeeze.weight
+            # the B200 kernels take whole 128-row tiles; the rows are independent, so another row count (a pair track at a ragged L)
+            # is padded with zero rows and cut back: their dy is zero, so they add nothing to any weight gradient
+            d = x.shape[-1] if x.ndim else 0
+            rows = x.numel() // d if d else 0
+            xs = x
+            if rows and rows % fused_sm100a.ROWS:
+                xs = torch.nn.functional.pad(x.reshape(rows, d), (0, 0, 0, -rows % fused_sm100a.ROWS))
             for kern, entry in (
                 (fused_sm100a, fused_sm100a.transition_fused_sm100a),
                 (fused_wide_sm100a, fused_wide_sm100a.transition_wide_sm100a),
             ):
-                if kern.available(x, pa, ps):
-                    return entry(
-                        x,
+                if kern.available(xs, pa, ps):
+                    out = entry(
+                        xs,
                         self.ln_in.weight,
                         self.ln_in.bias,
                         pa,
@@ -236,6 +243,7 @@ class Transition(nn.Module):
                         ps,
                         self.ln_in.eps,
                     )
+                    return out if xs is x else out[:rows].reshape(x.shape)
 
         if _fused_sm90a_enabled():
             from miniworld_engine.kernels.transition.cuda import transition_sm90a
