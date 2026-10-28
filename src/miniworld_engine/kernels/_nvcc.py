@@ -748,6 +748,31 @@ TOOLCHAINS: dict[str, Callable[[], tuple[str, list[str]]]] = {
 }
 
 
+#: Toolchains whose nvcc is not torch's (``torch.version.cuda`` is already in every key): a cubin built by one of them keys on the
+#: toolchain and the nvcc release it resolved to, so a 12.9 and a 13.1 build of the same source never share a cache entry or a bundle
+#: slot (the B200 families pick the newest nvcc that knows sm_100a, which differs between hosts). The torch-matched toolchains keep
+#: their keys (and the H100 wheel's prebuilt artifacts stay valid).
+_KEYED_TOOLCHAINS = ("sm100",)
+
+
+@functools.lru_cache(maxsize=None)
+def _nvcc_release(nvcc: str) -> str:
+    """``V13.1.80``-style version of ``nvcc`` (its ``--version`` line), cached per path."""
+    import re
+
+    res = subprocess.run([nvcc, "--version"], capture_output=True, text=True, timeout=120, check=False)
+    found = re.search(r"release [\d.]+, (V[\d.]+)", res.stdout)
+    return found.group(1) if found else (res.stdout.strip().splitlines() or ["unknown"])[-1]
+
+
+def _toolchain_versions(toolchain: str) -> dict[str, str] | None:
+    from miniworld_engine.kernels import _codegraph as cg
+
+    if toolchain not in _KEYED_TOOLCHAINS:
+        return None
+    return {**cg._versions(), "toolchain": toolchain, "nvcc": _nvcc_release(TOOLCHAINS[toolchain]()[0])}
+
+
 def _safe(stem: str) -> str:
     import re
 
@@ -776,7 +801,7 @@ def cubin(name: str, flags: list[str] | tuple[str, ...], *, source: str | Path |
     ctx = cg.context()
     root: str | cg.TextRoot = cg.TextRoot(f"text:{name}", text, str(fam_dir)) if text is not None else str(source)
     graph = cg.closure([root], cg.include_dirs_of(flags), ctx)
-    material = cg.key_material("cubin", name, graph, flags, ctx=ctx)
+    material = cg.key_material("cubin", name, graph, flags, ctx=ctx, versions=_toolchain_versions(toolchain))
     key = cg.key_of(material)
     recipe = {"fn": "cubin", "name": name, "flags": flags, "source": None if source is None else str(source), "text": text,
               "family": family, "toolchain": toolchain, "ptxas_log": ptxas_log, "timeout": timeout, "jit": ctx.jit,
