@@ -16,6 +16,8 @@ import warnings
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine import settings
 from miniworld_engine.kernels.bias_only_dit.cuda import _dir, h100_ext
 
@@ -106,7 +108,7 @@ class Inf3H100:
 
     def __init__(self, device_index: int, nh: int, dh: int):
         self.device_index, self.nh, self.dh = device_index, nh, dh
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.x = ext()
         self.core_ext = h100_ext()
 

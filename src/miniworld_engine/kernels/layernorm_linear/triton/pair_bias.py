@@ -14,6 +14,8 @@ without a graph break -- surviving ``torch.compile`` is the entire point.
 
 from miniworld_engine.autotune.configs import configs_for
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 import triton
 import triton.language as tl
@@ -311,7 +313,7 @@ _PERSIST_WAVES = 8
 
 
 def _persistent_programs(device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
+    return num_sms(device) * _PERSIST_WAVES
 
 
 def _fwd_op_fake(x, ln_weight, proj_weight, eps):

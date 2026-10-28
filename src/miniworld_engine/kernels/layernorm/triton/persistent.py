@@ -26,6 +26,7 @@ Forward is unchanged (reuses ``layer_norm_fwd_fused``); only the backward differ
 from __future__ import annotations
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.autotune.configs import configs_for
 
 import torch
@@ -152,7 +153,7 @@ def _ln_bwd_persistent(
 
 
 def _persistent_grid(device: torch.device) -> int:
-    sm = torch.cuda.get_device_properties(device).multi_processor_count
+    sm = num_sms(device)
     return sm * PERSIST_WAVES
 
 

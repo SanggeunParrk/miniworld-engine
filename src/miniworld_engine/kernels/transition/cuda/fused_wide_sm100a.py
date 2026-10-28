@@ -39,6 +39,8 @@ import warnings
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from ..._compile import opaque
 from .fused_sm100a import _ext, _is_b200, build_cubins
 from miniworld_engine import settings
@@ -250,9 +252,7 @@ def _is_fake(*tensors) -> bool:
     return any(isinstance(t, FakeTensor) for t in tensors)
 
 
-@functools.lru_cache(maxsize=8)
-def _sm_count(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
+_sm_count = num_sms
 
 
 def _mm_f32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:

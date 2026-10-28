@@ -20,6 +20,8 @@ from __future__ import annotations
 from functools import lru_cache
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 
 from miniworld_engine.kernels._compile import opaque
@@ -113,9 +115,7 @@ def _map(t, box, dims, strides):
                                          swizzle="128B", l2="128B")
 
 
-@lru_cache(None)
-def _sms(index):
-    return torch.cuda.get_device_properties(index).multi_processor_count
+_sms = num_sms
 
 
 def _run(x, weights, mask, outgoing, sel=None):

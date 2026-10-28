@@ -1,6 +1,8 @@
 """Single-direction output forward and on-chip B1 derivatives."""
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 SMEM = 181248
@@ -178,7 +180,7 @@ class Output:
             ]
         )
         self.grid = min(
-            tiles, torch.cuda.get_device_properties(x.device).multi_processor_count
+            tiles, num_sms(x.device)
         )
         self.inputs = (x, tri, wp, wg, gi, bi, go, bo, ds)
 

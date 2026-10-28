@@ -16,6 +16,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels._tf32 import tf32_grid
@@ -47,15 +49,6 @@ def ext():
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
-
-
-@functools.lru_cache(maxsize=8)
-def _nsm(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
-
-
-def num_sms(device: torch.device) -> int:
-    return _nsm(device.index if device.index is not None else torch.cuda.current_device())
 
 
 def pick_ht(m: int, n: int, nsm: int) -> int:

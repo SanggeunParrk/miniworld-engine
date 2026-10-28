@@ -24,6 +24,8 @@ import warnings
 from pathlib import Path
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 
 _dir = Path(__file__).parent
@@ -466,7 +468,7 @@ class PvGateCoreH100TF32:
     def __init__(self, device_index: int, nh: int = 16, dh: int = 48):
         assert dh in (32, 48, 64) and nh * dh in (768, 1024), (nh, dh)
         self.device_index, self.nh, self.dh = device_index, nh, dh
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
 
     def __call__(self, vt, P, out, S, g):
         h100_ext().pv_cta_tf32(vt, P, out, S, g, self.nh, self.dh, self.nsm)
@@ -507,7 +509,7 @@ class PvGateCore:
             pdl,
             p_early,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def early(self) -> bool:
@@ -667,7 +669,7 @@ class DpbKernel:
 
         self._sm100, self._tm, self.device_index = sm100, sm100._tm, device_index
         self.nh, self.dh = nh, dh or 768 // nh
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
         self._pair_k = None
 
@@ -798,7 +800,7 @@ class PvDpb:
             single,
         )
         self.nh, self.dh = nh, dh or 768 // nh
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
         h = (
             hashlib.sha256()
@@ -907,7 +909,7 @@ class GemmSwigluAB:
             cluster=2,
             smem=self.SMEM,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def _bind(self, x, w, ab, h):
@@ -969,7 +971,7 @@ class ResLnGemm:
         self._sm100, self._tm, self.final = sm100, sm100._tm, final
         self.defs = (*defs, *(("PRESIG",) if presig else ()))
         self.device_index = device_index
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def kernel(self, cl: int):
@@ -1063,7 +1065,7 @@ class CondTables:
             defs=(f"NT={_COND_NT}",),
             smem=self.SMEM,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def _bind(self, c, w, bias, colsum, out, n_g1, eps):

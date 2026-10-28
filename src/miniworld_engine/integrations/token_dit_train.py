@@ -49,6 +49,7 @@ import torch
 from miniworld_engine import settings
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels._tf32 import tf32_matmul as _tf32
 
 D, DC, DP, H, DH = 768, 384, 128, 16, 48  # the default layout; serves() takes LAYOUTS
@@ -174,7 +175,7 @@ def _mm32(a, b):
     n, m = a.shape
     k = b.shape[1]
     tiles = -(-n // 128) * -(-k // 128)
-    nsm = torch.cuda.get_device_properties(a.device).multi_processor_count
+    nsm = num_sms(a.device)
     s = 1
     if tiles < 128 and not _sm90(a.device) and b.is_contiguous() and a.t().is_contiguous():
         # (Hopper: the split costs ~440 us a step at A = 48, L768 -- measured dWo / dWg / dWn / dWsq 207 / 284 / 436 / 444 us as

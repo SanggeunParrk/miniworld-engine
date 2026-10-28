@@ -15,6 +15,8 @@ import os
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 PDL = True  # programmatic dependent launch of K1 / K3 (TMN_PDL builds only)
 MASK_CODE = {
     torch.float32: 1,
@@ -547,9 +549,9 @@ class Kernels:
         self.verify = verify
         self._units = {}
         self._kern = {}
-        self.sms = torch.cuda.get_device_properties(
+        self.sms = num_sms(
             self.device_index
-        ).multi_processor_count
+        )
         self._has = {}
 
     # ---------------------------------------------------------------- loading

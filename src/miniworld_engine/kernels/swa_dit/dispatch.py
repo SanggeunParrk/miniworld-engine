@@ -64,6 +64,7 @@ from miniworld_engine import settings
 from miniworld_engine.autotune.shape_key import atom_key
 from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._compile import device_constant, opaque
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd
 from miniworld_engine.kernels.swa_dit.interface import (
     D_ATOM,
@@ -560,9 +561,7 @@ def _attn_served(C: int, H: int, half_window: int) -> bool:
     return C == D_ATOM and H == N_HEAD and half_window == HALF_WINDOW
 
 
-@functools.lru_cache(maxsize=16)
-def _sm_count(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
+_sm_count = num_sms
 
 
 def _pack_ffn64(wu: torch.Tensor) -> torch.Tensor:

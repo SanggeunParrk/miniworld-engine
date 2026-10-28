@@ -29,6 +29,8 @@ from __future__ import annotations
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 # FP32 projections use IEEE dot precision; implicit TF32 changes DiT gradients.
 # The input_precision setting leaves BF16 tensor-core arithmetic unchanged.
 import triton
@@ -45,7 +47,7 @@ _PERSIST_WAVES = 8
 
 
 def _persistent_programs(device: torch.device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
+    return num_sms(device) * _PERSIST_WAVES
 
 
 @triton.autotune(configs=configs_for("rmsnorm_fwd_triton"), key=["shape_key", "HAS_WEIGHT"])

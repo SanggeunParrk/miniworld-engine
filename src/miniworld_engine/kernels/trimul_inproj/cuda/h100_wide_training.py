@@ -25,6 +25,8 @@ import warnings
 from pathlib import Path
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
@@ -134,7 +136,7 @@ def _resident_grid(source, entry, include, defines, threads, smem):
 
 @T.device_cache
 def _sms():
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return num_sms(torch.cuda.current_device())
 
 
 def _cuobjdump():

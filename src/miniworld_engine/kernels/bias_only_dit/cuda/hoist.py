@@ -15,6 +15,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 _dir = Path(__file__).parent
 
 
@@ -144,7 +146,7 @@ def hoist_bwd_fused(pair2d: torch.Tensor, wf: torch.Tensor, dball: torch.Tensor,
     partials of dW' are summed here, in a fixed order."""
     R, N = pair2d.shape[0], wf.shape[0]
     npt = (N + 15) // 16
-    grid = min(torch.cuda.get_device_properties(pair2d.device).multi_processor_count, R // 64)
+    grid = min(num_sms(pair2d.device), R // 64)
     dpair = torch.empty_like(pair2d)
     part = torch.empty(grid, npt * 16, 128, device=pair2d.device, dtype=torch.float32)
     bwd_ext().hoist_bwd(pair2d, wf, dball, dpair, part, float(eps))

@@ -44,6 +44,8 @@ import warnings
 from pathlib import Path
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 
 H, D = 16, 48
@@ -167,7 +169,7 @@ def _tm(t, dims, stride_bytes, box, **kw):
 def _grid(items: int, device_index: int) -> tuple[int, int, int]:
     return (
         min(
-            torch.cuda.get_device_properties(device_index).multi_processor_count, items
+            num_sms(device_index), items
         ),
         1,
         1,
@@ -260,7 +262,7 @@ def forward_tf32(q, k, v, bias_hll, A, L, heads: int = H, dh: int = D):
 def _dqb_split(items: int, A: int, dev: int) -> int:
     """attn_dqb_tf32's sample groups: the largest NS dividing A with items x NS <= the SM count (1 when the items alone fill
     the GPU). L = 128 at 16 heads: 32 items -> NS = 4 at A = 48."""
-    nsm = torch.cuda.get_device_properties(dev).multi_processor_count
+    nsm = num_sms(dev)
     return max(
         [
             s
@@ -532,7 +534,7 @@ class GatedInferenceCore:
                 defs=_tdit_defs(heads, dh),
             )
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs: dict = {}
 
     def _bind(self, qkvg, vt, bias, block, S, L):
@@ -667,7 +669,7 @@ class ApbInferenceCore:
             device_index,
             defs=_apb_defs(heads, True, d),
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
 
     def _bind(self, qkvg, bias, L):
         W, es, H_, dh = qkvg.shape[1], qkvg.element_size(), self.heads, self.dhp

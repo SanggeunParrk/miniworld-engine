@@ -40,6 +40,7 @@ import triton.language as tl
 from miniworld_engine.autotune.configs import configs_for
 from miniworld_engine.autotune.shape_key import length_of, token_key
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import num_sms
 
 
 def _divides(**axes):
@@ -54,8 +55,7 @@ def _divides(**axes):
     return prune
 
 
-def _nsm(device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
+_nsm = num_sms
 
 
 # ---------------------------------------------------------------------------------------------------- kernels

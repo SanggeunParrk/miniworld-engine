@@ -15,6 +15,8 @@ between the kernels differs: all 2 D channels in the module's one direction inst
 from __future__ import annotations
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 from torch.autograd.function import once_differentiable
 
@@ -85,7 +87,7 @@ def _bwd_wg(prof=False, master=False, gatepipe=True):
 
 @T.device_cache
 def _sms():
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return num_sms(torch.cuda.current_device())
 
 
 @T.device_cache

@@ -11,6 +11,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 
 _dir = Path(__file__).parent
 BLK = 128   # atoms per tile / threads per CTA (slddt_*: one thread per atom row)
@@ -29,9 +31,7 @@ FWD_VARIANTS = ("128s1", "256s1", "512s1", "256s2", "512s2", "512s4")
 FBLK_FILL = 2   # H100 backward: the largest CTA (512 / 256 / 128 threads) whose grid keeps FBLK_FILL CTAs per SM (else the smallest)
 
 
-@functools.lru_cache(maxsize=None)
-def _sm_count(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
+_sm_count = num_sms
 
 
 def _fblk(x: torch.Tensor, n_augment_batch: int, n: int) -> int:

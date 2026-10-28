@@ -29,6 +29,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from ..._compile import opaque
 from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
@@ -114,8 +116,7 @@ def _cuda_prepare(wa, wb, ws, transpose=True):
     return (*packed, fresh[-1])
 
 
-def _sm_count(device: torch.device | int | None = None) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
+_sm_count = num_sms
 
 
 # D128 forward build constants (the measured configuration; every one is a compile-time macro of transition_fused_fwd_sm90a_kernel.cu).

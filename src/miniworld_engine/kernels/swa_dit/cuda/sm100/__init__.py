@@ -32,6 +32,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels import _capture
 
 C, H, D, NHID, HW = 128, 4, 32, 256, 64
@@ -94,15 +96,10 @@ def _map(t, dims, strides, box, swizzle=128, dtype="bf16"):
     return driver.TensorMap(t, dims, strides, box, swizzle=swizzle, dtype=dtype)
 
 
-@functools.lru_cache(maxsize=16)
-def _nsm(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
-
-
 # --------------------------------------------------------------------------------------------------- kernels (host side)
 def nsm():
     """Streaming multiprocessors of the current device."""
-    return _nsm(torch.cuda.current_device())
+    return num_sms()
 
 
 def tiling(A):

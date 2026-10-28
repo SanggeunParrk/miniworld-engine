@@ -27,6 +27,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from ..._compile import opaque
 from ._weights import transposed_contiguous
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
@@ -95,8 +97,7 @@ def split_fwd_enabled(d: int, rows: int = 0) -> bool:
     return d == 512 and save_ab_enabled(d, rows) and _d512_saved_rows(rows)
 
 
-def _sm_count(device: torch.device | int | None = None) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count
+_sm_count = num_sms
 
 
 @functools.lru_cache(maxsize=8)

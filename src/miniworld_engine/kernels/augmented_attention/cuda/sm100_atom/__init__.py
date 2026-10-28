@@ -38,6 +38,8 @@ import functools
 from pathlib import Path
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 from miniworld_engine.kernels._tf32 import tf32_grid
 
@@ -149,9 +151,7 @@ def load_all(device_index: int) -> None:
         atom_kernel(name, device_index)
 
 
-@functools.lru_cache(maxsize=8)
-def nsm(device_index: int) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
+nsm = num_sms   # SM count of a device index
 
 
 def _dev(t: torch.Tensor) -> int:

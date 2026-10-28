@@ -32,6 +32,8 @@ Every call owns its buffers.
 """
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
@@ -269,7 +271,7 @@ def backward_small(leaves: list[torch.Tensor], mask: torch.Tensor | None, ds: to
     nch = p // 64
     sg = _b7_source_groups(n, nch)
     nflag7 = sg * B7_RD * nch if d == 128 else 0
-    nsm = torch.cuda.get_device_properties(x.device).multi_processor_count
+    nsm = num_sms(x.device)
     shapes = [(d, d), (d, h), (nsm, 2 * h), (2 * p, d), (nsm, 2 * d)]
     sizes = [int(torch.Size(s).numel()) for s in shapes]
     E = _ext()

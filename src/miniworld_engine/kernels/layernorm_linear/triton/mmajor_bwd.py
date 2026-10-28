@@ -20,6 +20,7 @@ back to the te_style atomic kernel, which is faster there.
 """
 from __future__ import annotations
 from miniworld_engine.autotune.configs import configs_for
+from miniworld_engine.kernels._device import num_sms
 
 
 import torch
@@ -155,7 +156,7 @@ def _ln_bwd_mmajor_kernel(
 
 
 def _persistent_grid(device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count * _WAVES
+    return num_sms(device) * _WAVES
 
 
 # Persistent wins once there are enough M-tiles to fill the grid AND amortize the reduce;

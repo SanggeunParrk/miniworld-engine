@@ -17,6 +17,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.adaln.cuda.infer import colsum
 
@@ -68,7 +70,7 @@ def squeeze_gate_save(h: torch.Tensor, cond: torch.Tensor, ws: torch.Tensor, wsc
 
     y = torch.empty(h.shape[0], ws.shape[0], device=h.device, dtype=h.dtype)
     out, sp = torch.empty_like(y), torch.empty_like(y)
-    ct_ext().squeeze_gate(h, ws, cond, wsc, bsc, res, y, torch.cuda.get_device_properties(h.device).multi_processor_count, 128, True, out, sp)
+    ct_ext().squeeze_gate(h, ws, cond, wsc, bsc, res, y, num_sms(h.device), 128, True, out, sp)
     return y, out, sp
 
 

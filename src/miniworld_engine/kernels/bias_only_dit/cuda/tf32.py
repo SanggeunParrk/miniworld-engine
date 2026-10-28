@@ -31,6 +31,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels._compile import device_constant
 from miniworld_engine.kernels._tf32 import tf32_grid, tf32_matmul
 from miniworld_engine.kernels.bias_only_dit.cuda import (
@@ -145,7 +147,7 @@ class PvGateCoreTF32:
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
         self.device_index, self.pdl = device_index, pdl
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def kernel(self, sg: int, gate: bool = True):
@@ -262,7 +264,7 @@ class GemmGluTF32:
             cluster=2,
             smem=glu_smem(bwd),
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def _bind(self, x, w, ab, out):
@@ -385,7 +387,7 @@ class Dpb32:
         self.nh, self.dh = nh, dh or 768 // nh
         assert (self.nh, self.dh) in LAYOUTS, (nh, dh)
         self.hp = 2 if self.dh == 32 else 1
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
         self._pair_k, self.last = None, "single"
 
@@ -730,7 +732,7 @@ class FrontTF32:
             da,
             trace,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs = _Runs()
 
     def kernel(self, cl: int):

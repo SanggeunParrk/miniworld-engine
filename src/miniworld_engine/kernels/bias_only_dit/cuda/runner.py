@@ -53,6 +53,8 @@ import weakref
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine import settings
 
@@ -250,7 +252,7 @@ class FusedBiasOnlyDiT:
                 # its 128 x 256 tiles under-fill the SMs at few rows (<= half a wave) and lose a whole second wave just past one:
                 # there cuBLAS + the SwiGLU rows is faster (2026-10-19, us: M128 10.6 -> 6.0, M640 10.6 -> 9.7, M1536 19.2 -> 17.6)
                 tiles = (xa.shape[0] // 128) * (wab.shape[0] // 256)
-                nsm = torch.cuda.get_device_properties(idx).multi_processor_count
+                nsm = num_sms(idx)
                 small = _H100_EXPAND_ROWS and (tiles <= nsm // 2 or nsm < tiles <= nsm * 11 // 10)
                 self._ops[key] = (
                     gemm_swiglu.GemmSwigluSm90(idx)

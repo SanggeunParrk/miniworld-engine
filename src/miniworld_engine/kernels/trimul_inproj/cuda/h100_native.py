@@ -1,5 +1,7 @@
 from pathlib import Path
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 
@@ -165,9 +167,9 @@ class Front:
         )
         self.grid = min(
             tiles,
-            torch.cuda.get_device_properties(
+            num_sms(
                 torch.cuda.current_device()
-            ).multi_processor_count
+            )
             * mb,
         )
         self.threads = 128 * (bi * bj // 64 + 1)
@@ -202,9 +204,9 @@ class Output:
         )
         self.grid = min(
             tiles,
-            torch.cuda.get_device_properties(
+            num_sms(
                 torch.cuda.current_device()
-            ).multi_processor_count,
+            ),
         )
 
     def __call__(self):

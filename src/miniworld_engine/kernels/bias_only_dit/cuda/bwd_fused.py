@@ -21,6 +21,8 @@ import warnings
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine.kernels.bias_only_dit.cuda import _descriptors, _dir
 from miniworld_engine import settings
 
@@ -252,7 +254,7 @@ class TailBwd:
             False,
             0,
         )  # -DTRACE: qauto -- each call's items at the next trace indices (graph copies)
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.maps = _Maps()
 
     def __call__(
@@ -458,7 +460,7 @@ class MidBwd:
             cluster=2,
             smem=SMEM_MID,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.maps = _Maps()
         self.qauto, self.qnext = (
             False,
@@ -606,7 +608,7 @@ class Wgrad:
 
     def __init__(self, device_index: int, da: int, trace: bool = False):
         self.idx, self.da = device_index, da
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.plan, wmax = wgrad_plan(da, self.nsm)
         self.k = _sm100()._sm100_kernel(
             "bo_wgrad",

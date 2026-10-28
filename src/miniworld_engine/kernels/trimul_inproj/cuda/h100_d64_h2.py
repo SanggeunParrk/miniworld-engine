@@ -13,6 +13,8 @@ contractions, ``b2w`` per half in two passes (the second adds the first's dxn an
 from __future__ import annotations
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine.kernels._compile import opaque
@@ -82,7 +84,7 @@ def _bwd(master=False):
 
 @T.device_cache
 def _sms():
-    return torch.cuda.get_device_properties(torch.cuda.current_device()).multi_processor_count
+    return num_sms(torch.cuda.current_device())
 
 
 @T.device_cache

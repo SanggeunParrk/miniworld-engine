@@ -27,11 +27,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine.kernels._compile import opaque
-
-
-@functools.lru_cache(maxsize=16)
-def num_sms(index: int) -> int:
-    return torch.cuda.get_device_properties(index).multi_processor_count
+from miniworld_engine.kernels._device import num_sms
 
 
 _FWD_BR = 64

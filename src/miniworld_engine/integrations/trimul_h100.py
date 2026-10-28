@@ -8,6 +8,7 @@ import functools
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.modules.exceptions import ImplementationType
 
 #: Widths with a packaged bidirectional CUDA training path (D64, D128 and the wide port).
@@ -345,7 +346,7 @@ def _serves_one(module, pair: torch.Tensor) -> bool:
     # Cooperative B1/B7 grids were qualified on full 132-SM H100s, not MIG slices.
     if (
         pair.shape[-1] == 128
-        and torch.cuda.get_device_properties(pair.device).multi_processor_count != 132
+        and num_sms(pair.device) != 132
     ):
         return False
     return all(

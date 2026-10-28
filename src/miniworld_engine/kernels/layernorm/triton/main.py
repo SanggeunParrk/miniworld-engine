@@ -1,5 +1,6 @@
 
 from miniworld_engine.kernels._compile import opaque
+from miniworld_engine.kernels._device import num_sms
 # vendored from team-gm psk/benchmark@e085d6d : src/team_gm/modules/kernels/layernorm.py
 from miniworld_engine.autotune.configs import configs_for
 import torch
@@ -35,7 +36,7 @@ _PERSIST_WAVES = 8
 
 
 def _persistent_programs(device: torch.device) -> int:
-    return torch.cuda.get_device_properties(device).multi_processor_count * _PERSIST_WAVES
+    return num_sms(device) * _PERSIST_WAVES
 
 
 # fmt: off

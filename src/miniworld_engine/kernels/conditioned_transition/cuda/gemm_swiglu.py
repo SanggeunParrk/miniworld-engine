@@ -8,6 +8,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine import settings
 
 _dir = str(Path(__file__).parent)
@@ -75,7 +77,7 @@ class GemmSwiglu:
             cluster=2,
             smem=self.SMEM,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.runs: dict = {}
 
     def _bind(self, x, w_ab, out, ab=None):
@@ -181,7 +183,7 @@ class GemmSwigluSm90:
             extra_cflags=["-std=c++17"],
             verbose=False,
         )
-        self.nsm = torch.cuda.get_device_properties(device_index).multi_processor_count
+        self.nsm = num_sms(device_index)
         self.packed: dict = {}
 
     def __call__(self, x, w_ab, out):

@@ -16,6 +16,8 @@ import json
 from functools import lru_cache
 
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_bmm as _H100_BMM
 import torch.nn.functional as F
 import triton
@@ -154,8 +156,7 @@ def _map(t, box, dims, strides):
                                          swizzle="128B", l2="128B")
 
 
-def _sms(device):
-    return torch.cuda.get_device_properties(device).multi_processor_count
+_sms = num_sms
 
 
 def _run(x, weights, mask):

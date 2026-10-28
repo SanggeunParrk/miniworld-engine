@@ -1,5 +1,7 @@
 from pathlib import Path
 import torch
+
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.trimul_inproj.cuda import _h100_runtime as T
 
 R = T.SOURCES / "output"
@@ -120,9 +122,9 @@ def front(d, pg=False, method=0, bufs=None):
         (
             min(
                 tiles,
-                torch.cuda.get_device_properties(
+                num_sms(
                     torch.cuda.current_device()
-                ).multi_processor_count,
+                ),
             ),
             1,
             1,
@@ -252,9 +254,9 @@ def output(d, tri, ln=1, stats=0, pg=False, method=0, bufs=None):
         (
             min(
                 tiles,
-                torch.cuda.get_device_properties(
+                num_sms(
                     torch.cuda.current_device()
-                ).multi_processor_count,
+                ),
             ),
             1,
             1,

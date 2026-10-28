@@ -30,6 +30,8 @@ from pathlib import Path
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
+
 from miniworld_engine import settings
 
 NH, DH, DM, DP = 4, 32, 128, 16
@@ -193,9 +195,7 @@ def _dev(t: torch.Tensor) -> int:
     return t.device.index if t.device.index is not None else torch.cuda.current_device()
 
 
-@functools.lru_cache(maxsize=8)
-def nsm(device_index: int) -> int:
-    return torch.cuda.get_device_properties(device_index).multi_processor_count
+nsm = num_sms   # SM count of a device index
 
 
 def nwindows(n: int) -> int:
