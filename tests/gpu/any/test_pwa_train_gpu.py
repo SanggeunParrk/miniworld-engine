@@ -198,14 +198,33 @@ def test_refusals(module, inputs):
         pt.refusal(inputs["msa"], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID)
         is not None
     )  # not opted in
-    if torch.cuda.get_device_capability() == (10, 0):  # sm_100a: 128-row MSA tiles
+    if torch.cuda.get_device_capability() == (10, 0):  # sm_100a: a depth off the 128-row MSA tiles is padded (_pad_depth)
         with opted_in():
             assert (
                 pt.refusal(
                     inputs["msa"][:, :200], inputs["pair"], D_MSA, D_PAIR, HEADS, D_HID
                 )
-                is not None
+                is None
             )
+
+
+@pytest.mark.skipif(
+    not torch.cuda.is_available() or torch.cuda.get_device_capability() != (10, 0),
+    reason="the depth pad is the sm_100a path's",
+)
+@pytest.mark.parametrize("depth", [200, 129])
+def test_sm100_pads_a_ragged_depth(module, inputs, depth):
+    """B200 at an MSA depth off the 128-row tiles: padded with zero rows, which change no real row; matches the engine's own path as
+    the unpadded depth does (test_fused_training_path_matches_the_engines_own), gradients included."""
+    cut = {k: (v[:, :depth].contiguous() if k in ("msa", "gz") else v) for k, v in inputs.items()}
+    out_e, dmsa_e, dpair_e, g_e = _run(module, cut, "ragged", fused=False)
+    out_f, dmsa_f, dpair_f, g_f = _run(module, cut, "ragged", fused=True)
+    assert out_f.shape == out_e.shape
+    assert rel(out_f, out_e) < 8e-3
+    assert rel(dmsa_f.float() - cut["gz"].float(), dmsa_e.float() - cut["gz"].float()) < 2e-2
+    assert rel(dpair_f, dpair_e) < 1e-2
+    for n in PARAMS:
+        assert rel(g_f[n], g_e[n]) < 2e-2, n
 
 
 def test_fused_dropout_is_the_modules_row_dropout(module, inputs):
