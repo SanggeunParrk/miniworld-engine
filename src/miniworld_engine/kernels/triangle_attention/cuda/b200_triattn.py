@@ -14,6 +14,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _SRC = Path(__file__).with_name("b200_sources")
@@ -130,8 +131,15 @@ def fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, d
     B, L, _, _ = pair.shape
     x = pair.contiguous().view(-1, C)
     m = _mod()
-    w4, wo16, prm = m.tri_pack_params(wq.contiguous(), wk.contiguous(), wv.contiguous(), wg.contiguous(), wo.contiguous(),
-                                      lnw.contiguous(), lnb.contiguous(), wb.contiguous())
+
+    def pack():
+        return m.tri_pack_params(wq.contiguous(), wk.contiguous(), wv.contiguous(), wg.contiguous(), wo.contiguous(),
+                                 lnw.contiguous(), lnb.contiguous(), wb.contiguous())
+
+    # inference: the packed weights are cached while the parameters are unchanged (kernels._capture.param_forms, as H100 caches its
+    # pack on the module) -- one launch fewer per call; training keeps a fresh pack per call (it is saved for the backward, and a
+    # custom op's outputs may not share storage with a cache)
+    w4, wo16, prm = pack() if need else _capture.param_forms("triattn_b200_pack", (wq, wk, wv, wg, wo, lnw, lnb, wb), pack)
     lw, lb, wbf = prm[0], prm[1], prm[2:]
     q, k, v, g, bias = m.tri_front(x, lw, lb, eps, w4, wbf, mask if mask is not None else _empty_mask(pair.device), B, L, trans)
     shp = (B, L, L, H, D)
