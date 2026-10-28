@@ -23,11 +23,11 @@ from miniworld_engine._typecheck import typecheck
 from miniworld_engine.integrations import anthropic_trimul as _anthropic
 from miniworld_engine.integrations import trimul_b200 as _b200
 from miniworld_engine.integrations import trimul_h100 as _h100
+from miniworld_engine.integrations import trimul_h100_f32 as _h100f32
 from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     KernelBackend,
 )
-from miniworld_engine.modules import dispatch as _dispatch
 from miniworld_engine.modules.dispatch import (
     resolve_triangle_multiplication as _resolve_trimul_backend,
 )
@@ -143,6 +143,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if _b200.serves_train(self, pair, bidirectional=True):
             return _b200.update_train(self, pair, mask, _ds, bidirectional=True)
 
+        if _h100f32.serves(self, pair, mask, _ds):
+            return _h100f32.update(self, pair, mask, _ds)
+
         if (torch.is_grad_enabled() or _ds is not None) and _h100.serves(self, pair):
             return _h100.update(self, pair, mask, _ds)
 
@@ -166,7 +169,9 @@ class BidirectionalTriangleMultiplication(nn.Module):
         if backend == KernelBackend.CUEQUIVARIANCE:
             return _r(self._forward_cuequivariance(pair, mask))
         if backend == KernelBackend.PORTABLE and not no_triton and self.d_hidden != pair.shape[-1] and pair.is_cuda:
-            from miniworld_engine.kernels.trimul_inproj.triton.contract import hidden_refusal
+            from miniworld_engine.kernels.trimul_inproj.triton.contract import (
+                hidden_refusal,
+            )
 
             why = hidden_refusal(pair.shape[-1], self.d_hidden)
             if why is not None:
