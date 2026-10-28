@@ -106,8 +106,6 @@ GROUPS: list[Group] = [
     G("ta_D256", "TriAttn", "triangle_attention", (384,), "D256 8x32", "d_pair=256", "+tri_n_head=8", weight=2),
     G("ta_D64", "TriAttn", "triangle_attention", (384,), "D64 2x32", "d_pair=64", "+tri_n_head=2", weight=1, tier="full"),
     # ---- fp32 (TF32) rows for the pair modules (audit 2026-10-27) -------------------------------------------------------------------
-    G("tm_fp32_D128", "TriMul outgoing", "triangle_multiplication", (384, 768), "D128 TF32", "d_pair=128", precision="32", weight=2),
-    G("tmb_fp32_D128", "TriMul bidirectional", "triangle_multiplication_bidirectional", (384, 768), "D128 TF32", "d_pair=128", precision="32", weight=2),
     G("ta_fp32_D128", "TriAttn", "triangle_attention", (384, 768), "D128 4x32 TF32", "d_pair=128", precision="32", weight=2),
     G("opm_fp32", "OuterProductMean", "outer_product", (256, 384), "S1024 msa64 pair128 TF32", "d_pair=128", precision="32", weight=2),
     G("pwa_fp32", "MSAPairWeightedAveraging", "msa_pair_weighted_averaging", (256, 384), "S1024 8x32 pair128 TF32", "d_pair=128", precision="32", weight=2),

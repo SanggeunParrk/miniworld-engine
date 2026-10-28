@@ -1,7 +1,7 @@
 # TriangleMultiplication on H100 (sm90)
 
 Kernel-level status of the TriMul modules on H100; the module-level summary is in
-[h100.md](../h100.md). bf16 (the fp32 / TF32 bidirectional D128 path has its own [section](#fp32-activations-on-tf32-tensor-cores--bidirectional-d128-2026-10-27)); columns are (Length, Dimension). H100 = CUDA; a shape
+[h100.md](../h100.md). bf16 only; columns are (Length, Dimension). H100 = CUDA; a shape
 without a CUDA path is 미구현 (it runs the PyTorch reference: no portable-kernel fallback on H100, see [dispatch.md](../dispatch.md)). Figures: one box per kernel, left to right, HBM reads (blue,
 left) and writes (red, right); generated from `figures/trimul_bidir.json` by
 `python -m miniworld_engine.viz.kernel_flow`, then `rsvg-convert -z 2 -b white` to PNG.
@@ -539,79 +539,6 @@ Outgoing + incoming in one module (h = D per direction), one output LayerNorm ov
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
 
-## FP32 activations on TF32 tensor cores · bidirectional D128 (2026-10-27)
-
-`BidirectionalTriangleMultiplication(128)`, `implementation="miniworld"`, fp32 pair and fp32 parameters, TF32 allowed (`torch.set_float32_matmul_precision`
-not `"highest"`, or `allow_tf32`: the switch cuBLAS follows), no autocast. Inference and training, hand-CUDA from end to end (no Triton on H100): the front
-(input LN, the four gated projections) and the back (output LN, output projection, gate, residual) are wgmma-TF32 kernels around two cuBLAS TF32 batched
-contractions. Before this path fp32 ran the PyTorch statements on H100 (no CUDA path, no portable fallback), 1.96-3.56x slower than the portable Triton rung.
-Dispatch: `integrations/trimul_h100_f32.py`, kernels `kernels/trimul_inproj/cuda/h100_f32.py`, sources
-`kernels/trimul_inproj/cuda/h100_f32_sources/` (`tmf32.cuh` forward, `tmf32_bwd.cuh` backward, `bind.cu`, `wgmma_tf32.cuh`). The extension builds on first use (like the
-Transition generic kernels; no prebuilt cubin yet).
-
-| item | contract |
-|---|---|
-| shapes | D = hidden = 128 (256 channels per side), `L x L` pair, inference any L >= 16, training L a multiple of 4 (other lengths run the PyTorch statements); `mask` `[B, L]` bool, row-dropout scale `[B, 1, L, 128]` |
-| batch | B samples run one after the other (the planes are `[channel][token]` of one sample); a batch whose saved state would pass half the device's total memory (`CHECKPOINT_FRACTION`, 3.3 GB per sample at L768) runs every sample checkpointed |
-| numerics | every matmul operand rounded to nearest TF32 (what cuBLAS does), fp32 accumulation, fp32 everywhere else; no atomics: y and every gradient are bitwise run to run |
-| refused | bf16 / fp16, autocast, matmul precision `"highest"`, other widths, single direction, `settings.force_portable_kernels`, non-H100 |
-
-**Layouts.** TF32 wgmma needs both operands K-major in shared memory, so every GEMM runs tokens-as-rows on `[rows][K]` activations and `[out][in]` weights, except the
-LN_out backward, which puts the channels in the M dimension. The contraction planes are channel-major `[512][T]` (left 0..255, right 256..511; T = L^2): the
-front writes them in place (a lane quad stores one 32-byte sector of 8 tokens of one channel) and cuBLAS reads them with no copy
-(outgoing = `left[:128] @ right[:128]^T`, incoming = `left[128:]^T @ right[128:]`).
-
-### Inference
-
-| stage | kernel | what it does | L384 / L768 (us) |
-|---|---|---|---|
-| P1 | `pack_kernel` | TF32-rounded, packed weights `[Wlg; Wl; Wrg; Wr]` (1024 x 128), `Wo`, `Wg` (the D128 module stores the front matrices column-major: copied row-major) | 4 / 5 |
-| F0 | `ln_in_kernel` | input LN, one warp per row, `x_n` rounded to TF32 | 51 / 198 |
-| F1 | `front_kernel` | wgmma m64n256k8 TF32, 4-stage TMA ring, one producer warpgroup + two consumer warpgroups; work unit = 128 tokens x (128 gate + 128 projection rows of one side), epilogue `sigmoid(g) p pm` stored channel-major | 183 / 713 |
-| F2 | cuBLAS | two TF32 batched contractions (128 channels each) | 92 + 91 / 515 + 379 |
-| F3a | `ln_out_t_kernel` | output LN over the 256 channels + transpose to token-major rows (64 tokens per block through shared memory) | 123 / 475 |
-| F3b | `back_kernel` | projection (K 256) and gate (K 128) as two wgmma accumulators over one tile, `y = x + ds sigmoid(g) proj` in the epilogue | 141 / 537 |
-
-Kernel time of one call (profiler): 686 us at L384, 2823 us at L768. The stages are memory-bound except F1 (217 TFLOP/s at L768) and F2 (260-310 TFLOP/s).
-
-### Training
-
-The forward is the inference path plus the saved tensors (`x_n`, LN statistics, planes, `tri`, `on`, gate logit, projection). The pre-activations g, p are **not**
-saved: writing them cost 1.3 ms at L768 and the backward recomputes them in the same GEMM that forms the gradient (`front_bwd_kernel`).
-
-| stage | kernel | what it does | L768 (ms) |
-|---|---|---|---|
-| B1 | `gate_bwd_kernel` | `d_proj`, `d_glogit` and the two per-token LN_out sums `s1 = d_proj . (Wo w)`, `s2 = d_proj . (proj - Wo b)` (the LN backward needs no cross-channel reduction in a GEMM) | 0.50 |
-| B3 | `lnout_bwd_kernel` | `d_on = d_proj Wo` as wgmma with the channels as M (Wo^T resident in shared memory): LN backward and the channel-major write of `d_tri` on the accumulators; dgamma / dbeta_out in registers | 0.81 |
-| B5 | `front_bwd_kernel` | the front GEMM again, epilogue `d_g = d p s (1 - s) pm`, `d_p = d s pm` from the planes' gradient -> `d_pre [1024][T]` | 1.64 |
-| B2 / B4 / B6 | cuBLAS | `dW_o`, `dW_g` (K = T, small tiles), the four contraction gradients, `dW_front = d_pre x_n`, `dx_n = d_pre^T W + d_glogit Wg`; with the two forward contractions 11 calls | 5.3 (of the 11.07 ms) |
-| B7 | `ln_in_bwd_kernel` | input LN backward + the residual gradient, per-block dgamma / dbeta partials summed in a fixed order | 0.40 |
-
-Kernel time of one forward + backward (profiler): 2.87 ms at L384, 11.07 ms at L768 (the probe's input clones included, about 0.4 ms at L768).
-
-### Accuracy (against an fp64 run of the same maths; yardstick = the module's PyTorch statements under TF32)
-
-H100, torch 2.13.0+cu129, random weights and inputs, a token mask, row dropout. Error = relative Frobenius norm against fp64.
-
-| L | y: engine / PyTorch TF32 | worst gradient ratio (x and 10 parameters) | bitwise run to run |
-|---|---|---|---|
-| 384 | 1.248e-4 / 1.248e-4 (1.00) | 1.07 (`ln_pair.weight`) | y and every gradient |
-| 768 | 1.247e-4 / 1.247e-4 (1.00) | 1.03 | y and every gradient |
-
-Inference at L384 / L768: 1.000 / 1.000. The portable Triton rung on the same weights (training, L384): y 1.11x, gradients up to 1.54-1.60x of PyTorch's error (x,
-`ln_pair.bias`, `to_left`, `to_right` weights): at the edge of the 1.5x convention, which the CUDA path does not need.
-
-### Ladder (ms, CUDA graph, H100, `benchmarks/runners/ladder.py`, group `tmb_fp32_D128`, 3 repeats)
-
-See [records/trimul_h100_fp32_20261027.md](../../../records/trimul_h100_fp32_20261027.md): CUDA / portable / best PyTorch.
-
-Tests: `tests/gpu/sm90/test_trimul_f32_h100_gpu.py` (inference L16-1024 with and without mask / dropout, training gradients L16-512, batch = samples, checkpointed
-batch bitwise equal, module dispatch and opt-out, CUDA-graph capture of forward + backward and of inference), `tests/cpu/kernels/test_trimul_h100_f32_dispatch.py`.
-
-Rejected / not done: saving g and p (+1.3 ms at L768); fusing `ln_out_t` into `back_kernel` (saves the 1.2 GB round trip of `on`, about 0.4 ms at L768, needs an in-kernel
-channel-to-token transpose); fusing `dx_n` and the input LN backward into `front_bwd_kernel` (A operand from registers with a permuted K, saves about 0.5 ms at L768);
-the contraction gradients on cuBLAS already run 210-310 TFLOP/s.
-
 ## Single direction (`TriangleMultiplication`, outgoing / incoming)
 
 One contraction, hidden = D (hidden = 2D at D64 / D128: [below](#hidden-twice-the-width-one-direction-d64--d128)), bf16 only. Both directions run the same kernels (`GP_DIR` / the transposed contraction operand selects the
@@ -681,7 +608,7 @@ ms. cuEquivariance 0.12 is the same module with `implementation=cuequivariance` 
 
 ## Open
 
-- Single direction in fp32 and the bidirectional fp32 path at widths other than D128 (bf16 only today); kernel flow figures for the single direction and for the fp32 path.
+- Single direction in fp32 (bf16 only today); kernel flow figures for the single direction.
 - D512 single-direction training at L768 (17.1 ms): front 2.7 ms (latency bound; multicast, N-split and BI=2 variants measured and
   not faster), `contract_gp` 2.5 ms (at its DRAM traffic), output-LN backward 1.2 ms (reads 0.7 GB more than needed). Each remaining
   item is 1 - 3 % of the step.
