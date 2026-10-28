@@ -128,20 +128,47 @@ def _common_ok(module, pair: torch.Tensor) -> bool:
     return module.ln_pair.eps == 1e-5 and module.ln_out.eps == 1e-5
 
 
+#: Inference pads L to this granule on the host (``_padded_inference``): the kernels take L % 16 == 0.
+_GRANULE = 16
+
+
+def _padded_length(n: int) -> int:
+    return -(-n // _GRANULE) * _GRANULE
+
+
 def serves_inference(module, pair: torch.Tensor, *, bidirectional: bool, dropscale: torch.Tensor | None = None) -> bool:
     """Inference (no autograd) at every width D64-D512, either direction, any B (``b200_infer``; B > ``max_batch`` or more than fit
-    in memory: several launches)."""
+    in memory: several launches), any L >= 1 (L % 16 != 0: padded on the host, ``_padded_inference``; not with a row-dropout scale)."""
     if torch.is_grad_enabled() or not _common_ok(module, pair):
         return False
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import supports
 
+    npad = _padded_length(pair.shape[1])
+    if npad != pair.shape[1] and dropscale is not None:
+        return False
     one = _one_chunk(module, pair, True, bidirectional)
-    if one.shape[0] * one.shape[1] * one.shape[1] >= 2 ** 31:
+    if one.shape[0] * npad * npad >= 2 ** 31:
         return False
     direction = 0 if bidirectional else (1 if module.outgoing else 2)
-    if not supports(pair.shape[-1], pair.shape[1], dropscale is not None, module.d_hidden, direction):
+    if not supports(pair.shape[-1], npad, dropscale is not None, module.d_hidden, direction):
         return False
     return torch.cuda.get_device_capability(pair.device) == (10, 0)
+
+
+def _padded_inference(module, pair: torch.Tensor, mask: torch.Tensor | None, *, bidirectional: bool) -> torch.Tensor:
+    """L % 16 != 0 (H100's 62acfe721, the same argument): each sample is padded to the next multiple of 16 with zero pair entries on
+    masked pad tokens. k1w forms the pair mask m[i] & m[j] from the token mask, so a pad token's left / right rows and columns are zero
+    and every real pair (i, j) contracts the same terms as without the pad; the pad rows of the output are dropped."""
+    bsz, n, d = pair.shape[0], pair.shape[1], pair.shape[-1]
+    npad = _padded_length(n)
+    x = pair.new_zeros((bsz, npad, npad, d))
+    x[:, :n, :n] = pair
+    token = torch.zeros((bsz, npad), device=pair.device, dtype=torch.bool)
+    if mask is None:
+        token[:, :n] = True
+    else:
+        token[:, :n] = mask.reshape(bsz, n) != 0
+    return update_inference(module, x, token, None, bidirectional=bidirectional)[:, :n, :n].contiguous()
 
 
 def _inference_params(module, bf):
@@ -165,6 +192,8 @@ def update_inference(module, pair: torch.Tensor, mask: torch.Tensor | None, drop
     from miniworld_engine.kernels.trimul_inproj.cuda.b200_infer import inference, inference_into
 
     bsz, n, d = pair.shape[0], pair.shape[1], pair.shape[-1]
+    if n % _GRANULE:
+        return _padded_inference(module, pair, mask, bidirectional=bidirectional)
     token_mask = None if mask is None else mask.reshape(bsz * n).to(torch.bool).contiguous()
     params = _inference_params(module, pair.dtype)
     scale = None if dropscale is None else dropscale.reshape(bsz * n, d).contiguous()
