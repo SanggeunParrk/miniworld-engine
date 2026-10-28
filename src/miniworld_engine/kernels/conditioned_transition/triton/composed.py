@@ -47,7 +47,7 @@ from miniworld_engine.kernels._tf32 import tf32_cached, tf32_dot, tf32_grid_many
 # the key at the caller. Every live caller passes `length`; the drivers and checkers pass
 # `shape_key=` directly.
 from miniworld_engine.kernels._tiles import tile_grid, tile_order
-from miniworld_engine.autotune.shape_key import atom_key, length_of, pack
+from miniworld_engine.autotune.shape_key import atom_key, both_key, length_of, pack
 
 
 @triton.autotune(configs=configs_for("cond_transition_expand_swiglu_triton"), key=['shape_key'])
@@ -280,3 +280,34 @@ def cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length=Non
     return _squeeze_gate(h, cond, ws, wsc, bsc, shape_key=shape_key, residual=residual, h_rounded=True)
 
 
+
+
+def _cond_transition_inference_cublas_fake(x, cond, wa, wb, ws, wsc, bsc, length=None, residual=None):
+    """(M, D) y -- D = ws.shape[0]."""
+    return x.new_empty((x.shape[0], ws.shape[0]))
+
+
+@opaque(fake=_cond_transition_inference_cublas_fake, name="conditioned_transition_inference_cublas")
+def cond_transition_inference_cublas(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor,
+                                     wsc: torch.Tensor, bsc: torch.Tensor, length: int | None = None,
+                                     residual: torch.Tensor | None = None) -> torch.Tensor:
+    """The fp32 token-stream inference tail as the training forward runs it: the expand and squeeze GEMMs on cuBLAS (TF32), the SwiGLU
+    and the gate as the Triton row passes (``training._swiglu`` / ``training._gate``, the residual add in the gate pass). The Triton
+    TF32 GEMMs of the composed pair measured 1.5x cuBLAS's on an H100 at d768 (expand 87 against 57 us, 5 x 768 tokens, L2 flushed),
+    which put the whole block behind the compiled PyTorch statements; in bf16 the composed kernels stay."""
+    from miniworld_engine.kernels import _capture
+    from miniworld_engine.kernels._tf32 import tf32_matmul
+
+    from .training import _gate, _swiglu
+
+    ND = wa.shape[0]
+    L = int(length) if length is not None else length_of(x.shape)
+    wcat = _capture.param_forms("ct_inference_wcat", (wa, wb), lambda: torch.cat([wa, wb], dim=0))
+    x = x.contiguous()
+    cond = cond.contiguous()
+    with tf32_matmul():
+        ab = torch.mm(x, wcat.t())                    # (M, 2 ND): [a | b]
+        h = _swiglu(ab[:, :ND], ab[:, ND:], shape_key=atom_key(L))
+        out = torch.mm(h, ws.t())
+        scale = torch.addmm(bsc, cond, wsc.t())
+    return _gate(out, scale, shape_key=both_key(out.shape[0]), residual=None if residual is None else residual.contiguous())

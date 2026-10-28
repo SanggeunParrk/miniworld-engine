@@ -93,7 +93,14 @@ def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_f
     """The TF32-rounded weight copies of the fp32 inference forward are made once per parameter version: reused on a repeated call, rebuilt after an
     in-place update, never handed to another module that lands on a freed weight's address, and not filled under grad mode."""
     from miniworld_engine import settings
-    from miniworld_engine.kernels.transition.cuda import _weights
+    from miniworld_engine.kernels import _capture
+
+    def rounded():  # the TF32-rounded weight forms (one weight-form store, kernels._capture.param_forms)
+        return {k: v for k, v in _capture._FORMS.items() if k[1][0] == "transition_tf32_triple"}
+
+    def clear_rounded():
+        for k in list(rounded()):
+            del _capture._FORMS[k]
     from miniworld_engine.modules import Transition
 
     settings.configure(force_portable_kernels=False)
@@ -110,19 +117,19 @@ def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_f
             return m
 
         def fresh(m, x):
-            _weights._ROUNDED.clear()
+            clear_rounded()
             with torch.no_grad():
                 return m(x)
 
         x = torch.randn(1, 128, 768, device="cuda")
         m = make(1)
-        _weights._ROUNDED.clear()
+        clear_rounded()
         with torch.no_grad():
             y1 = m(x)
-            assert len(_weights._ROUNDED) == 1, "the first inference call did not fill the cache"
-            entry = next(iter(_weights._ROUNDED.values()))[1]
+            assert len(rounded()) == 1, "the first inference call did not fill the cache"
+            entry = next(iter(rounded().values()))[1]
             y2 = m(x)
-            assert next(iter(_weights._ROUNDED.values()))[1] is entry, "a repeated call rebuilt the copies"
+            assert next(iter(rounded().values()))[1] is entry, "a repeated call rebuilt the copies"
         assert torch.equal(y1, y2)
         with torch.no_grad():
             m.expand_a.weight.mul_(1.5)                                  # in place: the version counter moves
@@ -137,8 +144,8 @@ def test_fp32_inference_reuses_the_rounded_weights_and_never_serves_a_stale_or_f
             assert torch.equal(y, fresh(m2, x)), "another module was served a dead weight's copies"
             del m2
         m3 = make(5)                                                     # grad mode with a parameter requiring grad: nothing is cached
-        _weights._ROUNDED.clear()
+        clear_rounded()
         m3(x)
-        assert not _weights._ROUNDED
+        assert not rounded()
     finally:
         torch.backends.cuda.matmul.allow_tf32 = prev

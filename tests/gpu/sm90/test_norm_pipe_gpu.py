@@ -188,3 +188,25 @@ def test_no_grad_forward_all_affine_forms(n, dtype, rms):
                 y = pipe.rmsnorm_pipe(x, w, EPS) if rms else pipe.layernorm_pipe(x, w, b, EPS)
             assert y.dtype == dtype and y.shape == x.shape
             assert rel(y, ref) < TOL[dtype], (n, m, wdt, has_w, has_b)
+
+
+@pytest.mark.parametrize(("shape", "dtype"), [((1, 256, 256, 128), torch.bfloat16), ((1, 300, 301, 128), torch.bfloat16),
+                                              ((1, 200, 200, 256), torch.bfloat16), ((48, 1000, 128), torch.float32)],
+                         ids=["pair256", "pair300-ragged", "pair200-d256", "fp32"])
+@pytest.mark.parametrize("rms", [False, True], ids=["ln", "rms"])
+def test_bulk_inference_forward_equals_the_direct_one(shape, dtype, rms):
+    """Inference rows of 8-48 MB take the TMA bulk forward (``bulk_fwd``), the training forward the direct kernel: same per-row
+    arithmetic, so the two outputs are bitwise equal, ragged last tile included; and both match fp64."""
+    g = torch.Generator(device="cuda").manual_seed(sum(shape))
+    n = shape[-1]
+    x = (torch.randn(*shape, device="cuda", generator=g) * 2 + 0.3).to(dtype)
+    w = (1 + 0.2 * torch.randn(n, device="cuda", generator=g)).to(dtype)
+    b = None if rms else (0.1 * torch.randn(n, device="cuda", generator=g)).to(dtype)
+    norm = (lambda t, ww: pipe.rmsnorm_pipe(t, ww, EPS)) if rms else (lambda t, ww: pipe.layernorm_pipe(t, ww, b, EPS))
+    assert 8 << 20 <= x.numel() * x.element_size() <= 48 << 20
+    with torch.no_grad():
+        bulk = norm(x, w)
+    direct = norm(x, w.detach().clone().requires_grad_())   # a gradient wanted: the training forward, statistics saved
+    assert torch.equal(bulk, direct.detach())
+    ref = F.rms_norm(x.double(), (n,), w.double(), EPS) if rms else F.layer_norm(x.double(), (n,), w.double(), b.double(), EPS)
+    assert rel(bulk, ref) < TOL[dtype]

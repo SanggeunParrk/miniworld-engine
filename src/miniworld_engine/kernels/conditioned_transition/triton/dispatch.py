@@ -5,13 +5,17 @@ Inference routes by d_hidden:
     whole (M, ND) SwiGLU + out_acc[BM, D] live in registers, h never hits HBM. Fastest
     when K fits one BLOCK_K and the working set fits smem.
   - token (d_hidden >= 256): the composed two-kernel path (``composed.py``) — K-tiled
-    expand+SwiGLU writes h:(M, ND) to HBM, then K-tiled squeeze+gate. Always compiles.
+    expand+SwiGLU writes h:(M, ND) to HBM, then K-tiled squeeze+gate. Always compiles. fp32 takes
+    cuBLAS (TF32) for the two GEMMs and the Triton SwiGLU / gate row passes instead
+    (``composed.cond_transition_inference_cublas``): the Triton TF32 GEMMs lost to cuBLAS by 1.5x there.
 
 Training (forward that saves for backward + backward) lives in ``training.py`` as a
 torch.autograd.Function; the inference paths save nothing.
 """
 
 from __future__ import annotations
+
+import torch
 
 ATOM_D_MAX = 128  # d_hidden <= this -> fused b2b; else composed
 
@@ -33,6 +37,10 @@ def cond_transition_inference_dispatch(x, cond, wa, wb, ws, wsc, bsc, length=Non
 
         y = cond_transition_inference(x, cond, wa, wb, ws, wsc, bsc, length)
         return y if residual is None else residual + y
+    if x.dtype is torch.float32:
+        from .composed import cond_transition_inference_cublas
+
+        return cond_transition_inference_cublas(x, cond, wa, wb, ws, wsc, bsc, length, residual)
     from .composed import cond_transition_inference_composed
 
     return cond_transition_inference_composed(x, cond, wa, wb, ws, wsc, bsc, length, residual=residual)

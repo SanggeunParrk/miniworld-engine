@@ -45,7 +45,7 @@ import torch
 import triton
 import triton.language as tl
 
-from ..._compile import opaque
+from ..._compile import device_constant, opaque
 from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _dir = Path(__file__).parent
@@ -336,21 +336,24 @@ def available(
     q: torch.Tensor, bias: torch.Tensor, bias_head_major: bool = False
 ) -> bool:
     """``supported()`` plus successful builds; a build failure warns once and keeps the Triton path."""
-    global _BUILD_FAILED
     if _BUILD_FAILED or not supported(q, bias, bias_head_major):
         return False
-    # Under FakeTensorMode (``dev derive``) or while torch.compile traces, keep the Triton path: a native extension
-    # cannot run on fake tensors, and the Triton path is the one with fakes and autotune keys to record.
+    # Under FakeTensorMode outside a compile (``dev derive``) keep the Triton path: it is the one with autotune keys to
+    # record. Under torch.compile the cores are reachable: the forward and backward launches are opaque ops with fakes.
     from torch._subclasses.fake_tensor import FakeTensor
 
-    if (
-        torch.compiler.is_compiling()
-        or isinstance(q, FakeTensor)
-        or isinstance(bias, FakeTensor)
-    ):
+    if not torch.compiler.is_compiling() and (isinstance(q, FakeTensor) or isinstance(bias, FakeTensor)):
         return False
+    return _builds(int(q.shape[3]), int(q.shape[4]))
+
+
+@device_constant
+def _builds(nh: int, dh: int) -> bool:
+    """The forward extension for this head layout builds (a constant to a compiled graph); a failure warns once and keeps the
+    portable path."""
+    global _BUILD_FAILED
     try:
-        _ext("attn_fwd", fwd_defs(q.shape[3], q.shape[4]))
+        _ext("attn_fwd", fwd_defs(nh, dh))
     except Exception as exc:  # noqa: BLE001
         _BUILD_FAILED = True
         warnings.warn(
@@ -469,6 +472,31 @@ def _fwd_launch(
     L = bb.shape[1]
     nh = bb.shape[0]
     return forward(qs, kb, vb, bb, km, qs.shape[0] // L, L, nh=nh, dh=qs.shape[1] // nh, out_bf16=out_bf16)
+
+
+def _fwd_natural_launch_fake(q, kb, vb, bias, km, out_bf16: bool = False):
+    """O like q (fp32, or bf16 with ``out_bf16``) and the LSE fp32 [A, H, L]."""
+    return _fwd_launch_fake(q, kb, vb, bias, km, out_bf16)
+
+
+@opaque(fake=_fwd_natural_launch_fake, name="augmented_attention_bf16_sm90_fwd_natural")
+def _fwd_natural_launch(
+    q: torch.Tensor,
+    kb: torch.Tensor,
+    vb: torch.Tensor,
+    bias: torch.Tensor,
+    km: torch.Tensor | None,
+    out_bf16: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The forward on natural-unit operands (``APB_NATURAL``: q unscaled, bias [H, L, L] bf16 as the module computed it; the
+    kernel applies 1 / sqrt(d) and log2 e itself), so an inference call needs no scale pass over q or the bias. (O, LSE)."""
+    L, nh = bias.shape[1], bias.shape[0]
+    A, dh = q.shape[0] // L, q.shape[1] // nh
+    lse = torch.empty(A, nh, L, device=q.device, dtype=torch.float32)
+    o = torch.empty(A * L, nh * dh, device=q.device, dtype=torch.bfloat16 if out_bf16 else torch.float32)
+    defs = (*fwd_defs(nh, dh), "APB_NATURAL=1", f"RSQDV={dh**-0.5!r}f", *(("FWD_BF16=1",) if out_bf16 else ()))
+    _ext("attn_fwd", defs).attn_fwd(q, kb, vb, bias, km, o, lse)
+    return o, lse
 
 
 def forward(qs, kb, vb, bb, km, A, L, qkvg=None, nh=H, dh=D, out_bf16=False):
@@ -632,6 +660,32 @@ def backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=H, dh=D, out_bf16=False)
     return dq, dk, dv, dbt.transpose(1, 2)
 
 
+def _bwd_launch_fake(qs, kb, vb, dob, bb, km, lse, dd, out_bf16: bool = False):
+    """dQ, dK, dV like qs (fp32, or bf16 with ``out_bf16``) and dbias fp32 [H, L, L]."""
+    dq = qs.new_empty(qs.shape, dtype=torch.bfloat16 if out_bf16 else torch.float32)
+    return dq, torch.empty_like(dq), torch.empty_like(dq), qs.new_empty((bb.shape[0], bb.shape[1], bb.shape[1]), dtype=torch.float32)
+
+
+@opaque(fake=_bwd_launch_fake, name="augmented_attention_bf16_sm90_bwd")
+def _bwd_launch(
+    qs: torch.Tensor,
+    kb: torch.Tensor,
+    vb: torch.Tensor,
+    dob: torch.Tensor,
+    bb: torch.Tensor,
+    km: torch.Tensor | None,
+    lse: torch.Tensor,
+    dd: torch.Tensor,
+    out_bf16: bool = False,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``backward`` as one op (so a compiled graph reaches it): dbias comes back as the kernels wrote it, [key, query] per head
+    when A is not a multiple of 3 -- the caller transposes; nh and dh follow from bb and qs."""
+    L, nh = bb.shape[1], bb.shape[0]
+    A = qs.shape[0] // L
+    dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh=nh, dh=qs.shape[1] // nh, out_bf16=out_bf16)
+    return dq, dk, dv, (db.transpose(1, 2) if A % 3 else db)
+
+
 # --------------------------------------------------------------------------------------------------- per-sample bias
 # The same cores with one bias PER SAMPLE (build define ``PSB=1``): bias [H, A, L, L], the layout a stacked bias GEMM leaves
 # (rows of the [H A L, L] TMA map are (head A + sample) L + query). Nothing is shared between the samples any more, so the
@@ -696,19 +750,23 @@ def checkpoint_context_keeping_attention():
     return create_selective_checkpoint_contexts(policy)
 
 
+def _key_mask(mask, A, L):
+    """The additive key mask [A, L] fp32 the kernels read (0 attend, -1e30 masked), or None."""
+    return None if mask is None else torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
+
+
 # --------------------------------------------------------------------------------------------------- op
 class _AttentionBf16Sm90(torch.autograd.Function):
     @staticmethod
     def forward(ctx, q, k, v, bias, mask, bias_head_major):  # noqa: D102
         A, _, L, nh, dh = q.shape
+        km = _key_mask(mask, A, L)
+        bf = all(t.dtype is torch.bfloat16 for t in (q, k, v))
         qs, kb, vb = _prep_qkv(q, k, v, LOG2E / math.sqrt(dh))
-        bb = _bias_prep(
-            bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
-        )
-        km = None
-        if mask is not None:
-            km = torch.where(mask.reshape(A, L), 0.0, -1e30).float().contiguous()
-        o, lse = FWD_OP(qs, kb, vb, bb, km)  # nh, dh follow from bb and qs
+        bb = _bias_prep(bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1))
+        # bf16 q / k / v (the module under autocast): O and, backward, dQ / dK / dV leave the kernels as bf16 -- the dtype autograd
+        # and the next op want them in, with no cast pass over them
+        o, lse = FWD_OP(qs, kb, vb, bb, km, bf)  # nh, dh follow from bb and qs
         if torch.is_grad_enabled() or any(ctx.needs_input_grad):
             ctx.save_for_backward(
                 qs,
@@ -719,7 +777,7 @@ class _AttentionBf16Sm90(torch.autograd.Function):
                 o,
                 lse,
             )
-        ctx.has_mask, ctx.head_major, ctx.dims = km is not None, bias_head_major, (A, L, nh, dh)
+        ctx.has_mask, ctx.head_major, ctx.dims, ctx.bf = km is not None, bias_head_major, (A, L, nh, dh), bf
         return o.view(A, 1, L, nh, dh)
 
     @staticmethod
@@ -727,8 +785,10 @@ class _AttentionBf16Sm90(torch.autograd.Function):
         qs, kb, vb, bb, km, o, lse = ctx.saved_tensors
         km = km if ctx.has_mask else None
         A, L, nh, dh = ctx.dims
-        dob, dd = _prep_do(do, o, A, L, nh, dh)
-        dq, dk, dv, db = backward(qs, kb, vb, dob, bb, km, lse, dd, A, L, nh, dh)
+        dob, dd = _prep_do(do, o, A, L, nh, dh, write_dob=do.dtype is not torch.bfloat16)
+        dq, dk, dv, db = _bwd_launch(qs, kb, vb, dob, bb, km, lse, dd, ctx.bf)
+        if A % 3:
+            db = db.transpose(1, 2)  # the kernels wrote it [key, query]
         shp = (A, 1, L, nh, dh)
         dbias = db.unsqueeze(1) if ctx.head_major else db.permute(1, 2, 0).unsqueeze(0)
         return dq.view(shp), dk.view(shp), dv.view(shp), dbias, None, None
@@ -737,13 +797,24 @@ class _AttentionBf16Sm90(torch.autograd.Function):
 def augmented_attention_bf16_sm90(
     q, k, v, bias, mask=None, *, bias_head_major: bool = False
 ):
-    """``softmax(q k^T / sqrt(48) + bias) v`` in bf16 with fp32 accumulation; returns fp32 [A, 1, L, 16, 48].
+    """``softmax(q k^T / sqrt(48) + bias) v`` in bf16 with fp32 accumulation; returns [A, 1, L, 16, 48], bf16 when q, k and v are bf16
+    (and so their gradients), else fp32.
 
     q, k, v: [A, 1, L, 16, 48] (fp32 or bf16). bias: [1, L, L, 16], or [16, 1, L, L] with ``bias_head_major`` (the
     layout the token DiT's hoisted pair bias is produced in -- no permute copy). mask: key mask [A, 1, L] or [1, L]
     (True = attend). Call ``available()`` first."""
     if mask is not None and mask.dim() == 2:
         mask = mask[None].expand(q.shape[0], *mask.shape)
+    if not (torch.is_grad_enabled() and any(t.requires_grad for t in (q, k, v, bias))):
+        # no gradient: the natural-unit build reads q and the bias as they are (no scale pass over either)
+        A, _, L, nh, dh = q.shape
+        w = nh * dh
+        bhll = bias.reshape(nh, L, L) if bias_head_major else bias[0].permute(2, 0, 1)
+        o, _ = _fwd_natural_launch(
+            _bf16_rows(q, w), _bf16_rows(k, w), _bf16_rows(v, w), bhll.to(torch.bfloat16).contiguous(), _key_mask(mask, A, L),
+            all(t.dtype is torch.bfloat16 for t in (q, k, v)),
+        )
+        return o.view(A, 1, L, nh, dh)
     return _AttentionBf16Sm90.apply(q, k, v, bias, mask, bias_head_major)
 
 

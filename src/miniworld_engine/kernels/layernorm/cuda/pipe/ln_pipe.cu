@@ -313,6 +313,10 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
                                                        float* __restrict__ ws, float2* __restrict__ stats, int64_t M, int N, float eps) {
   constexpr int RPP = 32 / TPR;
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900  // programmatic dependent launch (launched with it on sm_90+): the next launch overlaps this one
+  asm volatile("griddepcontrol.launch_dependents;\n" ::: "memory");
+  asm volatile("griddepcontrol.wait;\n" ::: "memory");  // x and the weights may be the predecessor's output
+#endif
   const int g = lane / TPR, l = lane % TPR;
   if (ws != nullptr && blockIdx.x == 0 && threadIdx.x == 0) ws[0] = 0.f;
   const int64_t wid = int64_t(blockIdx.x) * DW + warp;
@@ -365,6 +369,148 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
       *reinterpret_cast<Pack<T, VEC>*>(y + row * N + l * VEC) = o;
     }
   }
+}
+
+// Inference forward of exact-fit single-chunk rows on sm_90 (no statistics, no workspace): rows are contiguous, so a tile of BK_TB bytes is ONE
+// TMA bulk copy (cp.async.bulk, no tensor map) into shared memory, normalised in place by the CTA and written back by ONE bulk store. A
+// persistent CTA keeps BK_ST tiles in flight; the copy engine moves the bytes instead of 16-byte thread loads and stores. Taken for the activation
+// sizes where it measured ahead of the direct forward (MWP_BK_MIN .. MWP_BK_MAX below).
+#ifndef MWP_BK
+#define MWP_BK 1
+#endif
+#ifndef MWP_BK_TB
+#define MWP_BK_TB 16384  // bytes per tile
+#endif
+#ifndef MWP_BK_ST
+#define MWP_BK_ST 4  // tiles in flight per CTA
+#endif
+#ifndef MWP_BK_W
+#define MWP_BK_W 8  // warps per CTA
+#endif
+// the activation sizes (bytes) the bulk forward takes: measured against the direct forward on an H100 (L2 flushed between calls, as the ladder
+// times), x[1, L, L, 128] bf16: L256 (17 MB) 0.98x and L384 (38 MB) 0.96x the Triton kernel where the direct forward is 1.03x / 1.01x; at
+// L128 (4 MB) the persistent ring does not fill (1.14x) and from ~75 MB (L768, or L384 at 256 columns) it falls behind the direct forward.
+#ifndef MWP_BK_MIN
+#define MWP_BK_MIN (int64_t(8) << 20)
+#endif
+#ifndef MWP_BK_MAX
+#define MWP_BK_MAX (int64_t(48) << 20)
+#endif
+__device__ __forceinline__ void bk_wait(unsigned mbar, unsigned phase) {
+  asm volatile(
+      "{\n.reg .pred p;\nWAIT_%=:\nmbarrier.try_wait.parity.shared::cta.b64 p, [%0], %1;\n@!p bra WAIT_%=;\n}\n" ::"r"(mbar), "r"(phase)
+      : "memory");
+}
+template <int TB> __device__ __forceinline__ void bk_load(unsigned dst, const void* src, unsigned bytes, unsigned mbar) {
+  asm volatile("mbarrier.arrive.expect_tx.shared::cta.b64 _, [%0], %1;\n" ::"r"(mbar), "r"(bytes) : "memory");
+  asm volatile("cp.async.bulk.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1], %2, [%3];\n" ::"r"(dst), "l"(src), "r"(bytes),
+               "r"(mbar)
+               : "memory");
+}
+template <typename T, int TPR, int VEC, bool RMS>
+__global__ void __launch_bounds__(MWP_BK_W * 32) bulk_fwd(const T* __restrict__ x, const T* __restrict__ w, const T* __restrict__ b,
+                                                          T* __restrict__ y, int64_t M, int N, float eps) {
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+  constexpr int RPP = 32 / TPR;                  // rows per warp pass
+  constexpr int RB = TPR * VEC * int(sizeof(T));  // row bytes
+  constexpr int R = MWP_BK_TB / RB;              // rows per tile
+  constexpr int PASSES = R / (RPP * MWP_BK_W);
+  static_assert(R % (RPP * MWP_BK_W) == 0, "a tile is a whole number of CTA passes");
+  extern __shared__ __align__(128) unsigned char bk_smem[];
+  __shared__ __align__(8) unsigned long long bars[MWP_BK_ST];
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int g = lane / TPR, l = lane % TPR;
+  const int64_t tiles = (M + R - 1) / R;
+  const unsigned sbase = smem_u32(bk_smem);
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (int s = 0; s < MWP_BK_ST; ++s) asm volatile("mbarrier.init.shared::cta.b64 [%0], 1;\n" ::"r"(smem_u32(&bars[s])) : "memory");
+    asm volatile("fence.mbarrier_init.release.cluster;\n" ::: "memory");
+  }
+  __syncthreads();
+  if (threadIdx.x == 0) {
+#pragma unroll
+    for (int s = 0; s < MWP_BK_ST; ++s) {
+      const int64_t t = blockIdx.x + int64_t(s) * gridDim.x;
+      if (t < tiles) {
+        const int64_t r0 = t * R;
+        const unsigned bytes = unsigned((M - r0 < R ? M - r0 : R) * RB);
+        bk_load<MWP_BK_TB>(sbase + s * MWP_BK_TB, x + r0 * N, bytes, smem_u32(&bars[s]));
+      }
+    }
+  }
+  float wr[VEC], br[VEC];
+#pragma unroll
+  for (int i = 0; i < VEC; ++i) { wr[i] = 1.f; br[i] = 0.f; }
+  if (w != nullptr) {
+    const Pack<T, VEC> pw = *reinterpret_cast<const Pack<T, VEC>*>(w + l * VEC);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) wr[i] = to_f<T>(pw.v[i]);
+  }
+  if (!RMS && b != nullptr) {
+    const Pack<T, VEC> pb = *reinterpret_cast<const Pack<T, VEC>*>(b + l * VEC);
+#pragma unroll
+    for (int i = 0; i < VEC; ++i) br[i] = to_f<T>(pb.v[i]);
+  }
+  const float inv_n = 1.f / float(N);
+  for (int64_t i = 0;; ++i) {
+    const int64_t t = blockIdx.x + i * gridDim.x;
+    if (t >= tiles) break;
+    const int s = int(i % MWP_BK_ST);
+    const unsigned phase = unsigned((i / MWP_BK_ST) & 1);
+    const int64_t r0 = t * R;
+    const int rows = int(M - r0 < R ? M - r0 : R);
+    bk_wait(smem_u32(&bars[s]), phase);
+    const unsigned buf = sbase + s * MWP_BK_TB;
+#pragma unroll
+    for (int p = 0; p < PASSES; ++p) {
+      const int r = (p * MWP_BK_W + warp) * RPP + g;
+      const unsigned a = buf + r * RB + l * 16;
+      uint4 raw = make_uint4(0, 0, 0, 0);
+      if (r < rows) asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];\n" : "=r"(raw.x), "=r"(raw.y), "=r"(raw.z), "=r"(raw.w) : "r"(a));
+      const Pack<T, VEC> pk = *reinterpret_cast<const Pack<T, VEC>*>(&raw);
+      float v[VEC];
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) v[k] = to_f<T>(pk.v[k]);
+      float mean = 0.f;
+      if constexpr (!RMS) {
+        float sm = 0.f;
+#pragma unroll
+        for (int k = 0; k < VEC; ++k) sm += v[k];
+        mean = group_sum<TPR>(sm) * inv_n;
+      }
+      float q = 0.f;
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) {
+        const float d = v[k] - mean;
+        q = fmaf(d, d, q);
+      }
+      const float rstd = rsqrtf(group_sum<TPR>(q) * inv_n + eps);
+      Pack<T, VEC> o;
+#pragma unroll
+      for (int k = 0; k < VEC; ++k) o.v[k] = from_f<T>((v[k] - mean) * rstd * wr[k] + br[k]);
+      const uint4 ov = *reinterpret_cast<const uint4*>(&o);
+      if (r < rows) asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};\n" ::"r"(a), "r"(ov.x), "r"(ov.y), "r"(ov.z), "r"(ov.w) : "memory");
+    }
+    asm volatile("fence.proxy.async.shared::cta;\n" ::: "memory");  // the generic-proxy writes, before the bulk store reads them
+    __syncthreads();
+    if (threadIdx.x == 0) {
+      asm volatile("cp.async.bulk.global.shared::cta.bulk_group [%0], [%1], %2;\n" ::"l"(y + r0 * N), "r"(buf), "r"(unsigned(rows * RB))
+                   : "memory");
+      asm volatile("cp.async.bulk.commit_group;\n" ::: "memory");
+      const int64_t tn = t + int64_t(MWP_BK_ST) * gridDim.x;
+      if (tn < tiles) {
+        asm volatile("cp.async.bulk.wait_group.read 0;\n" ::: "memory");  // the store has read the stage: refill it
+        const int64_t rn = tn * R;
+        const unsigned bytes = unsigned((M - rn < R ? M - rn : R) * RB);
+        bk_load<MWP_BK_TB>(buf, x + rn * N, bytes, smem_u32(&bars[s]));
+      }
+    }
+  }
+  if (threadIdx.x == 0) asm volatile("cp.async.bulk.wait_group 0;\n" ::: "memory");
+#else
+  __trap();
+#endif
 }
 
 // the backward's per-row (mean, rstd): the lanes of a row group read one address
@@ -554,6 +700,15 @@ __global__ void __launch_bounds__(512) pipe_reduce(const float* __restrict__ par
   }
 }
 
+inline int sm_major() {
+  static int cached[64] = {0};
+  int dev = 0;
+  cudaGetDevice(&dev);
+  if (dev < 0 || dev >= 64) dev = 0;
+  if (!cached[dev]) cudaDeviceGetAttribute(&cached[dev], cudaDevAttrComputeCapabilityMajor, dev);
+  return cached[dev];
+}
+
 inline int num_sms() {
   static int cached[64] = {0};
   int dev = 0;
@@ -578,10 +733,42 @@ void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, f
 #if MWP_D2
       constexpr int WC = std::is_same<T, float>::value ? 0 : (std::is_same<T, __nv_bfloat16>::value ? 1 : 2);
       if constexpr (!PAD) {
+#if MWP_BK
+        const int64_t bytes = M * int64_t(N) * int64_t(sizeof(T));
+        if (wcode == WC && stats == nullptr && ws == nullptr && sm_major() >= 9 && bytes >= MWP_BK_MIN && bytes <= MWP_BK_MAX) {
+          auto k = bulk_fwd<T, TPR, VEC, RMS>;
+          constexpr int smem = MWP_BK_ST * MWP_BK_TB;
+          static int occ = 0;
+          if (!occ) {
+            cudaFuncSetAttribute(k, cudaFuncAttributeMaxDynamicSharedMemorySize, smem);
+            cudaOccupancyMaxActiveBlocksPerMultiprocessor(&occ, k, MWP_BK_W * 32, smem);
+            if (occ < 1) occ = 1;
+          }
+          constexpr int64_t R = MWP_BK_TB / (TPR * VEC * int64_t(sizeof(T)));
+          const int64_t tiles = (M + R - 1) / R;
+          const int64_t cap = int64_t(num_sms()) * occ;
+          k<<<int(tiles < cap ? tiles : cap), MWP_BK_W * 32, smem, s>>>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, M, N, eps);
+          return;
+        }
+#endif
         if (wcode == WC) {
           constexpr int PW2 = MWP_D2PW;
           const int64_t units2 = ((M + RPP - 1) / RPP + PW2 - 1) / PW2;
           const int64_t grid2 = (units2 + MWP_D2W - 1) / MWP_D2W;
+          if (sm_major() >= 9) {
+            cudaLaunchConfig_t cfg = {};
+            cfg.gridDim = dim3(unsigned(grid2));
+            cfg.blockDim = dim3(MWP_D2W * 32);
+            cfg.stream = s;
+            cudaLaunchAttribute at[1];
+            at[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+            at[0].val.programmaticStreamSerializationAllowed = 1;
+            cfg.attrs = at;
+            cfg.numAttrs = 1;
+            cudaLaunchKernelEx(&cfg, direct2_fwd<T, TPR, VEC, RMS, PW2, MWP_D2W>, x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M,
+                               N, eps);
+            return;
+          }
           direct2_fwd<T, TPR, VEC, RMS, PW2, MWP_D2W><<<int(grid2), MWP_D2W * 32, 0, s>>>(x, static_cast<const T*>(w), static_cast<const T*>(b), y, ws, stats, M, N, eps);
           return;
         }
