@@ -23,10 +23,6 @@ __device__ float aux_sum(float v) {
   __syncthreads();
   return v;
 }
-struct AuxCast {
-  const void* src[6]; bf* dst[6];
-  int count[6], cols[6], s0[6], s1[6], fp32[6];
-};
 struct AuxCopyN {
   const void* src[6]; void* dst[6];
   int count[6], cols[6], s0[6], s1[6], src32[6], dst32[6];
@@ -54,13 +50,6 @@ extern "C" __global__ void mw_aux_dense_copy(const void* src,void* dst,
 }
 extern "C" __global__ void mw_aux_zero_bytes(unsigned char* dst,int n) {
   for(int i=blockIdx.x*256+threadIdx.x;i<n;i+=gridDim.x*256)dst[i]=0;
-}
-extern "C" __global__ void mw_aux_cast(AuxCast p) {
-  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
-  if (i<p.count[leaf]) {
-    int j=(i/p.cols[leaf])*p.s0[leaf]+(i%p.cols[leaf])*p.s1[leaf];
-    p.dst[leaf][i]=__float2bfloat16_rn(aux_read(p.src[leaf],j,p.fp32[leaf]));
-  }
 }
 struct AuxPack {
   bf* dst; const void* w[4]; int rows,cols;

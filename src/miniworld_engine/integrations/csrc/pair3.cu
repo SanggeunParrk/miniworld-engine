@@ -339,21 +339,6 @@ __global__ void __launch_bounds__(THREADS, 2) pair_bwd_kernel(const __nv_bfloat1
 
 // Live graph-safe preparation; no cached casts of mutable master parameters.
 namespace {
-struct CopyDesc { const void* src; void* dst; long size; int src_type, dst_type; };
-struct CopyBatch { CopyDesc v[12]; int count; };
-__device__ float read_value(const void* p, int type, long i) {
-  return type == 0 ? __bfloat162float(static_cast<const __nv_bfloat16*>(p)[i]) : static_cast<const float*>(p)[i];
-}
-__global__ void pwa_cast_kernel(CopyBatch args) {
-  for (int k = blockIdx.y; k < args.count; k += gridDim.y) {
-    const auto a = args.v[k];
-    for (long i = blockIdx.x * blockDim.x + threadIdx.x; i < a.size; i += gridDim.x * blockDim.x) {
-      const float value = read_value(a.src, a.src_type, i);
-      if (a.dst_type == 0) static_cast<__nv_bfloat16*>(a.dst)[i] = __float2bfloat16(value);
-      else static_cast<float*>(a.dst)[i] = value;
-    }
-  }
-}
 __global__ void pwa_mask_kernel(const bool* key, __nv_bfloat16* out, int n) {
   for (long i = blockIdx.x * blockDim.x + threadIdx.x; i < (long)n*n; i += gridDim.x * blockDim.x)
     out[i] = __float2bfloat16(key == nullptr || key[i % n] ? 1.f : 0.f);
@@ -395,30 +380,6 @@ __global__ void pwa_wgv_kernel(const __nv_bfloat16* g,const __nv_bfloat16* v,__n
   int i=blockIdx.x*blockDim.x+threadIdx.x;
   if(i<64*512){int row=i/512,col=i%512;out[i]=col<256?g[col*64+row]:v[(col-256)*64+row];}
 }
-}
-std::vector<torch::Tensor> pwa_cast(std::vector<torch::Tensor> src, std::vector<int64_t> types, bool force) {
-  TORCH_CHECK(src.size()<=12 && src.size()==types.size(), "at most 12 matching casts");
-  CopyBatch args{}; std::vector<torch::Tensor> out;
-  long largest=0;
-  for(size_t k=0;k<src.size();++k) {
-    const auto& x=src[k];TORCH_CHECK(x.is_cuda()&&x.is_contiguous()&&(x.scalar_type()==torch::kFloat||x.scalar_type()==torch::kBFloat16),"contiguous fp32/bf16 casts only");
-    TORCH_CHECK(types[k]==0||types[k]==1,"dtype: 0 bf16, 1 fp32");
-    const auto type=types[k]==0?torch::kBFloat16:torch::kFloat;
-    if(!force&&x.scalar_type()==type){out.push_back(x);continue;}
-    auto y=torch::empty_like(x,x.options().dtype(type));out.push_back(y);
-    args.v[args.count++]={x.data_ptr(),y.data_ptr(),x.numel(),int(x.scalar_type()==torch::kFloat),int(types[k])};
-    largest=std::max(largest,x.numel());
-  }
-  if(args.count) {
-    cudaKernel_t kernel;
-    C10_CUDA_CHECK(cudaGetKernel(&kernel, pwa_cast_kernel));
-    void* launch_args[] = {&args};
-    C10_CUDA_CHECK(cudaLaunchKernel(reinterpret_cast<const void*>(kernel),
-        dim3(std::min<long>((largest+255)/256,132),args.count), dim3(256),
-        launch_args, 0, at::cuda::getCurrentCUDAStream()));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-  }
-  return out;
 }
 torch::Tensor pwa_mask(torch::Tensor like, c10::optional<torch::Tensor> mask, int64_t n) {
   if(mask)TORCH_CHECK(mask->is_cuda()&&mask->is_contiguous()&&mask->scalar_type()==torch::kBool&&mask->numel()==n,"contiguous bool token mask");
@@ -568,7 +529,7 @@ torch::Tensor pwa_shadow_dropout(torch::Tensor x,torch::Tensor keep,double proba
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, mod) {
   mod.def("shadow_pack", &pwa_shadow_pack); mod.def("shadow_dropout", &pwa_shadow_dropout);
   mod.def("shadow_pack_tiled", &pwa_shadow_pack_tiled);
-  mod.def("cast", &pwa_cast); mod.def("mask", &pwa_mask); mod.def("transpose", &pwa_transpose); mod.def("wgv", &pwa_wgv);
+  mod.def("mask", &pwa_mask); mod.def("transpose", &pwa_transpose); mod.def("wgv", &pwa_wgv);
   mod.def("pair_fwd3", &pair_fwd3, "pair LN -> proj_z -> mask -> softmax (tensor cores)", py::arg("z"), py::arg("mask"), py::arg("ln_w"), py::arg("eps"), py::arg("wb"));
   mod.def("pair_bwd3", &pair_bwd3, "pair backward (tensor cores): (dz, dWb, dgamma)", py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("ln_w"), py::arg("eps"), py::arg("wb"), py::arg("key") = c10::nullopt);
 }

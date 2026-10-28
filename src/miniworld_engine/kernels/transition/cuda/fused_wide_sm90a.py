@@ -28,6 +28,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels import _cast_cuda
 
 from ..._compile import opaque
 from ._weights import transposed_contiguous
@@ -487,7 +488,9 @@ def _bwd_launch(
         )  # D768: 3 resident CTAs per SM (170 registers)
     # The opaque op forbids even disjoint output views of one storage. Copy/cast
     # all three leaves together, producing the final parameter-gradient dtype.
-    dwa, dwb, dws = _native_ext().cast([dwab[:h], dwab[h:], dws], [fp32_dw] * 3, True)
+    dwa, dwb, dws = _cast_cuda.cast(
+        [dwab[:h], dwab[h:], dws], [torch.float32 if fp32_dw else torch.bfloat16] * 3, force=True
+    )
     return dx, dgam, dbeta, dwa, dwb, dws
 
 
@@ -548,8 +551,8 @@ class _WideTransitionSM90A(torch.autograd.Function):
             b,
         )
         if any(dw.dtype != dt for dw, dt in zip((dwa, dwb, dws), (adt, bwdt, sdt))):
-            dwa, dwb, dws = _native_ext().cast(
-                [dwa, dwb, dws], [dt == torch.float32 for dt in (adt, bwdt, sdt)], False
+            dwa, dwb, dws = _cast_cuda.cast(
+                [dwa, dwb, dws], [torch.float32 if dt == torch.float32 else torch.bfloat16 for dt in (adt, bwdt, sdt)]
             )
         return (
             dx.reshape(ctx.shape),

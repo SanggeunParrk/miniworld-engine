@@ -18,6 +18,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine.kernels._device import num_sms
+from miniworld_engine.kernels import _cast_cuda
 
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.kernels.adaln.cuda.infer import colsum
@@ -89,7 +90,7 @@ def cast_weights(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torc
     nd = wa.shape[0]
     wab = torch.empty(2 * nd, wa.shape[1], device=wa.device, dtype=bf)
     wsb, wscb, bscb = (torch.empty(t.shape, device=t.device, dtype=bf) for t in (ws, wsc, bsc))
-    ext().cast_pack([wa.contiguous(), wb.contiguous(), ws.contiguous(), wsc.contiguous(), bsc.contiguous()], [wab[:nd], wab[nd:], wsb, wscb, bscb])
+    _cast_cuda.cast_into([wa, wb, ws, wsc, bsc], [wab[:nd], wab[nd:], wsb, wscb, bscb])
     return wab, wsb, wscb, bscb
 
 

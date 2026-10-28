@@ -278,29 +278,6 @@ __global__ void __launch_bounds__(32 * TW) sigmul_bwd_x_k(const float* __restric
   }
 }
 
-// fp32 -> bf16 casts of up to eight tensors in ONE launch (the weights of a training step; the PyTorch casts are 4 - 6 launches of 2 - 10 us each).
-// Job j copies n[j] elements of src[j] to dst[j]; a thread block covers a contiguous slice of the concatenated element range.
-struct CastJobs {
-  const float* src[8];
-  __nv_bfloat16* dst[8];
-  long end[8];  // prefix sums of the element counts
-  int n;
-};
-__global__ void cast_pack_k(CastJobs jobs) {   // four elements a thread (all sizes are multiples of four)
-  const long quads = jobs.end[jobs.n - 1] / 4;
-  for (long i = (long)blockIdx.x * blockDim.x + threadIdx.x; i < quads; i += (long)gridDim.x * blockDim.x) {
-    int j = 0;
-    while (4 * i >= jobs.end[j]) ++j;
-    const long o = 4 * i - (j ? jobs.end[j - 1] : 0);
-    const float4 v = *reinterpret_cast<const float4*>(jobs.src[j] + o);
-    const __nv_bfloat162 a = __floats2bfloat162_rn(v.x, v.y), b = __floats2bfloat162_rn(v.z, v.w);
-    uint2 u;
-    u.x = *reinterpret_cast<const unsigned*>(&a);
-    u.y = *reinterpret_cast<const unsigned*>(&b);
-    *reinterpret_cast<uint2*>(jobs.dst[j] + o) = u;
-  }
-}
-
 cudaStream_t S() { return at::cuda::getCurrentCUDAStream(); }
 unsigned grid_of(long chunks) { return (unsigned)std::min<long>((chunks + 255) / 256, 132L * 16); }
 bool is_f32(const at::Tensor& t) {
@@ -430,26 +407,7 @@ std::vector<at::Tensor> sigmul_bwd_x(at::Tensor dy, at::Tensor out, at::Tensor s
   return {dout, dsc, part, doutT};
 }
 
-void cast_pack(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts) {
-  TORCH_CHECK(srcs.size() == dsts.size() && !srcs.empty() && srcs.size() <= 8, "1 .. 8 casts");
-  CastJobs j{};
-  long total = 0;
-  for (size_t k = 0; k < srcs.size(); ++k) {
-    TORCH_CHECK(srcs[k].is_cuda() && srcs[k].scalar_type() == at::kFloat && srcs[k].is_contiguous() && dsts[k].scalar_type() == at::kBFloat16 &&
-                dsts[k].is_contiguous() && dsts[k].numel() == srcs[k].numel(), "cast_pack: contiguous fp32 -> bf16 of equal size"); TORCH_CHECK(srcs[k].numel() % 4 == 0, "cast_pack: sizes multiples of 4");
-    j.src[k] = reinterpret_cast<const float*>(srcs[k].data_ptr());
-    j.dst[k] = reinterpret_cast<__nv_bfloat16*>(dsts[k].data_ptr());
-    total += srcs[k].numel();
-    j.end[k] = total;
-  }
-  j.n = (int)srcs.size();
-  const at::cuda::CUDAGuard g(srcs[0].device());
-  cast_pack_k<<<(unsigned)((total / 4 + 255) / 256), 256, 0, S()>>>(j);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
-  m.def("cast_pack", &cast_pack);
   m.def("swiglu_fwd", &swiglu_fwd);
   m.def("swiglu_bwd", &swiglu_bwd);
   m.def("sigmul_fwd", &sigmul_fwd);

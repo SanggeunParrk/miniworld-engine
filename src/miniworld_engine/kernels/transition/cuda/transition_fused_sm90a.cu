@@ -57,14 +57,6 @@ __global__ void pair_layout_k(const bf* a,const bf* b,bf* out,int h,int d,int bl
     }
   }
 }
-struct Cast { const void* src[8];void* dst[8];int n[8],sf[8],df[8]; };
-__global__ void cast_k(Cast p){
-  int leaf=blockIdx.y,i=blockIdx.x*256+threadIdx.x;
-  if(i>=p.n[leaf])return;
-  float v=rd(p.src[leaf],i,p.sf[leaf]);
-  if(p.df[leaf])static_cast<float*>(p.dst[leaf])[i]=v;
-  else static_cast<bf*>(p.dst[leaf])[i]=__float2bfloat16_rn(v);
-}
 __device__ float wsum(float x){for(int q=16;q;q>>=1)x=__fadd_rn(x,__shfl_xor_sync(0xffffffff,x,q));return x;}
 // Each persistent warp owns rows and keeps its affine-gradient sums in registers.
 // A second fixed-order reduction replaces the old global floating-point atomics.
@@ -265,19 +257,6 @@ at::Tensor pair_layout(at::Tensor a,at::Tensor b,int block,bool transpose){
     dim3(((2*h+31)/32)*((d+31)/32)),dim3(256),args,0,at::cuda::getCurrentCUDAStream()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
 }
-std::vector<at::Tensor> cast(std::vector<at::Tensor> in,std::vector<bool> fp32,bool force){
-  TORCH_CHECK(!in.empty()&&in.size()<=8&&in.size()==fp32.size(),"one to eight cast tensors required");
-  c10::cuda::CUDAGuard guard(in[0].device());Cast p{};std::vector<at::Tensor> out;int maxn=0;
-  for(int j=0;j<(int)in.size();++j){
-    check(in[j]);TORCH_CHECK(in[j].is_contiguous()&&in[j].device()==in[0].device(),"contiguous tensors on one device required");
-    auto dt=fp32[j]?at::kFloat:at::kBFloat16;bool copy=force||in[j].scalar_type()!=dt;
-    out.push_back(copy?at::empty(in[j].sizes(),in[j].options().dtype(dt)):in[j]);
-    p.src[j]=in[j].data_ptr();p.dst[j]=out[j].data_ptr();p.n[j]=copy?in[j].numel():0;
-    p.sf[j]=in[j].scalar_type()==at::kFloat;p.df[j]=fp32[j];maxn=std::max(maxn,p.n[j]);
-  }
-  if(maxn)cast_k<<<dim3((maxn+255)/256,in.size()),256,0,at::cuda::getCurrentCUDAStream()>>>(p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
-}
 std::vector<at::Tensor> ln_bwd(at::Tensor dy,at::Tensor x,at::Tensor gamma,at::Tensor rs,at::Tensor c1,at::Tensor residual,int waves){
   c10::cuda::CUDAGuard guard(x.device());
   for(auto* t:{&dy,&x,&residual})TORCH_CHECK(t->is_cuda()&&t->is_contiguous()&&t->scalar_type()==at::kBFloat16&&t->sizes()==x.sizes(),"LN BF16 rows");
@@ -382,7 +361,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME,m){
   m.def("ln_bwd_compact",&ln_bwd_compact);
   m.def("ln_fwd",&ln_fwd);
   m.def("reduce_affine",&reduce_affine);
-  m.def("prepare",&prepare);m.def("pair_layout",&pair_layout);m.def("cast",&cast);m.def("ln_bwd",&ln_bwd);
+  m.def("prepare",&prepare);m.def("pair_layout",&pair_layout);m.def("ln_bwd",&ln_bwd);
 }
 #else
 // Torch bindings for the fused sm_90a Transition forward and backward.

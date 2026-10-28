@@ -5,6 +5,7 @@ import triton
 import triton.language as tl
 import torch
 from . import _h100_runtime as T
+from miniworld_engine.kernels import _cast_cuda
 from miniworld_engine.kernels._compile import opaque
 
 # Captured cuBLAS scratch belongs to each graph's allocator pool, rather than
@@ -221,13 +222,9 @@ def cast_weights(weights):
     out = [w if w.dtype == torch.bfloat16 and (i < 4 or w.is_contiguous())
            else torch.empty(w.shape, device=w.device, dtype=torch.bfloat16)
            for i, w in enumerate(weights)]
-    counts = [0 if a is b else a.numel() for a, b in zip(weights, out)]
-    if max(counts):
-        p = T._launch_module().Struct([
-            *weights, *out, *counts, *(w.shape[1] for w in weights),
-            *(w.stride(0) for w in weights), *(w.stride(1) for w in weights),
-            *(int(w.dtype == torch.float32) for w in weights)])
-        _launch("mw_aux_cast", ((max(counts)+255)//256, 6, 1), [p])
+    pairs = [(w, o) for w, o in zip(weights, out) if o is not w]
+    if pairs:
+        _cast_cuda.cast_into([w for w, _ in pairs], [o for _, o in pairs])
     return out
 
 

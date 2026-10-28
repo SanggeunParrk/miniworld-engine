@@ -40,7 +40,7 @@ import torch
 from torch.autograd.function import once_differentiable
 
 from miniworld_engine import settings
-from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _capture, _cast_cuda
 from miniworld_engine.kernels._compile import opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
@@ -659,10 +659,8 @@ class _Training(torch.autograd.Function):
                     g.to(dt) for g, dt in zip(grads, ctx.param_dtypes, strict=True)
                 ]
             else:
-                grads = (
-                    _rows()
-                    .ext()
-                    .cast_grads(grads, [dt == torch.float32 for dt in ctx.param_dtypes])
+                grads = _cast_cuda.cast(
+                    grads, [torch.float32 if dt == torch.float32 else torch.bfloat16 for dt in ctx.param_dtypes]
                 )
             from miniworld_engine.integrations.token_dit_train import (
                 _activate_native_caller,

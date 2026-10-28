@@ -36,6 +36,7 @@ import triton.language as tl
 
 from miniworld_engine import settings
 from miniworld_engine.integrations import pwa_wide as _wide
+from miniworld_engine.kernels import _cast_cuda
 
 H, C, D, DZ = 8, 32, 64, 128
 HC = H * C
@@ -516,7 +517,7 @@ def _cast_h100_matrices(*weights):
         9,
         0,
     ):
-        return tuple(_k()["pair3"].cast(list(weights), [0] * len(weights), False))
+        return tuple(_cast_cuda.cast(weights, [torch.bfloat16] * len(weights)))
     if torch.cuda.get_device_capability(weights[0].device) == (9, 0) and any(
         w.dtype != torch.bfloat16 for w in weights
     ):
@@ -528,7 +529,7 @@ def _cast_h100_matrices(*weights):
 
 def _h100_float(*weights):
     if native_aux_enabled():
-        return tuple(_k()["pair3"].cast(list(weights), [1] * len(weights), False))
+        return tuple(_cast_cuda.cast(weights, [torch.float32] * len(weights)))
     return tuple(w.float().contiguous() for w in weights)
 
 
@@ -770,10 +771,10 @@ class _PwaMath(torch.autograd.Function):
             key = getattr(ctx, "key_mask", None)
             key = key if key is not None and key.numel() else None
             dz, dWb, dzw = k["pair3"].pair_bwd3(z, w16, dw, zw, eps_z, wb16, key)
-            leaves = k["pair3"].cast(
+            leaves = _cast_cuda.cast(
                 [dlw, dlb, dWv, dWg, dzw, dWb, dWo],
                 [
-                    int(w.dtype == torch.float32)
+                    torch.float32 if w.dtype == torch.float32 else torch.bfloat16
                     for w in (lnm_w, lnm_b, wv, wg, lnz_w, wb, wo)
                 ],
                 True,
@@ -861,24 +862,22 @@ def _inference_math(
         )
     )
     if native:
-        lnz_w, lnm_w, lnm_b = k["pair3"].cast(
+        lnz_w, lnm_w, lnm_b = _cast_cuda.cast(
             [
                 module.ln_pair.weight.detach(),
                 module.ln_msa.weight.detach(),
                 module.ln_msa.bias.detach(),
             ],
-            [1] * 3,
-            False,
+            [torch.float32] * 3,
         )
-        wb16, wv16, wg16, wo16 = k["pair3"].cast(
+        wb16, wv16, wg16, wo16 = _cast_cuda.cast(
             [
                 module.to_bias.weight.detach(),
                 module.to_value.weight.detach(),
                 module.to_gate.weight.detach(),
                 module.to_out.weight.detach(),
             ],
-            [0] * 4,
-            False,
+            [torch.bfloat16] * 4,
         )
     else:
         lnz_w = module.ln_pair.weight.detach().float().contiguous()

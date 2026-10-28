@@ -202,20 +202,6 @@ __global__ void opm_finish_native(const float* red,const float* gamma,const floa
     dg[i]=g;de[i]=b;
   }
 }
-__global__ void opm_cast_native_kernel(const float* src,__nv_bfloat16* dst,long count) {
-  long i=(long)blockIdx.x*blockDim.x+threadIdx.x;
-  if(i<count)dst[i]=__float2bfloat16_rn(src[i]);
-}
-struct OpmGradCast { const float* src[6]; void* dst[6]; int sizes[6],fp32[6]; };
-__global__ void opm_grad_cast_native(OpmGradCast p) {
-  int i=blockIdx.x*blockDim.x+threadIdx.x;
-  #pragma unroll
-  for(int k=0;k<6;++k)if(i<p.sizes[k]) {
-    float v=p.src[k][i];
-    if(p.fp32[k])static_cast<float*>(p.dst[k])[i]=v;
-    else static_cast<__nv_bfloat16*>(p.dst[k])[i]=__float2bfloat16_rn(v);
-  }
-}
 
 // ---------------------------------------------------------------------------------------------
 // Hopper warpgroup mma.  Both operands are addressed in shared memory through descriptors, so there
@@ -2505,32 +2491,6 @@ std::vector<torch::Tensor> opm_prologue_wide(torch::Tensor m, torch::Tensor mask
   return {a, b, stats, mk, norm};
 }
 
-torch::Tensor opm_native_cast(torch::Tensor value,torch::Tensor like) {
-  TORCH_CHECK(value.is_cuda() && value.is_contiguous() && value.scalar_type()==torch::kFloat32,
-      "native gradient cast requires contiguous FP32");
-  TORCH_CHECK(like.device()==value.device() && like.numel()==value.numel(),"native gradient cast shape/device");
-  if(like.scalar_type()==torch::kFloat32)return value;
-  TORCH_CHECK(like.scalar_type()==torch::kBFloat16,"native gradient cast destination must be BF16/FP32");
-  auto out=torch::empty(value.sizes(),like.options());
-  opm_native_launch(opm_cast_native_kernel,dim3((value.numel()+255)/256),dim3(256),
-      value.data_ptr<float>(),reinterpret_cast<__nv_bfloat16*>(out.data_ptr()),value.numel());
-  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
-}
-std::vector<torch::Tensor> opm_native_cast_grads(std::vector<torch::Tensor> values,std::vector<torch::Tensor> likes) {
-  TORCH_CHECK(values.size()==6 && likes.size()==6,"six gradients and parameters required");
-  OpmGradCast p{};std::vector<torch::Tensor> out;int count=0;
-  for(int k=0;k<6;++k) {
-    TORCH_CHECK(values[k].is_contiguous() && values[k].scalar_type()==torch::kFloat32
-        && values[k].device()==likes[k].device() && values[k].numel()==likes[k].numel(),"native gradient cast contract");
-    TORCH_CHECK(likes[k].scalar_type()==torch::kFloat32 || likes[k].scalar_type()==torch::kBFloat16,"native gradient type");
-    out.push_back(torch::empty(likes[k].sizes(),likes[k].options()));
-    p.src[k]=values[k].data_ptr<float>();p.dst[k]=out.back().data_ptr();p.sizes[k]=values[k].numel();
-    p.fp32[k]=likes[k].scalar_type()==torch::kFloat32;count=std::max(count,p.sizes[k]);
-  }
-  opm_native_launch(opm_grad_cast_native,dim3((count+255)/256),dim3(256),p);
-  C10_CUDA_KERNEL_LAUNCH_CHECK();return out;
-}
-
 
 #if defined(MINIWORLD_OPM_FUSED)
 // ---------------------------------------------------------------------------------------------
@@ -2878,6 +2838,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
 #if defined(MINIWORLD_OPM_FUSED)
   m.def("opm_fused_infer", &opm_fused_infer, "fused outer product + projection (inference)", py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0);
 #endif
-  m.def("opm_native_cast",&opm_native_cast);
-  m.def("opm_native_cast_grads",&opm_native_cast_grads);
 }

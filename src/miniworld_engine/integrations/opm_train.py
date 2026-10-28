@@ -38,6 +38,7 @@ import triton
 import triton.language as tl
 
 from miniworld_engine import settings
+from miniworld_engine.kernels import _cast_cuda
 
 CM, CH, CZ = 64, 32, 128
 # (d_msa, d_pair) served on sm_90a: MiniWorld, Protenix-v2 / ESMFold2, OpenDDE (d_hidden 32 throughout).  The widths other than
@@ -882,8 +883,10 @@ class _OpmMath(torch.autograd.Function):
                 True,
                 packed[2:4],
             )
-            grads = ext.opm_native_cast_grads(
-                [dgam, dbet, dWa, dWb, dWo, dbo], [lnw, lnb, wa, wb, wo, bo]
+            grads = _cast_cuda.cast(
+                [dgam, dbet, dWa, dWb, dWo, dbo],
+                [torch.float32 if p.dtype == torch.float32 else torch.bfloat16 for p in (lnw, lnb, wa, wb, wo, bo)],
+                force=True,
             )
             return (dm, None, *grads, None, None)
         bw = (
