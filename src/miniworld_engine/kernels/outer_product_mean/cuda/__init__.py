@@ -1,4 +1,6 @@
-"""CUDA pass of the composed OuterProductMean (``gather.cu``), sm_90a. Built on first use (``load_extension``), never at import."""
+"""CUDA pass of the composed OuterProductMean (``gather.cu``: plain CUDA, no architecture-specific instructions), built for the device's
+architecture (sm_90a on H100, sm_100a on B200: RoseTTAFold3's biased OPM on the fused B200 path finishes here too). Built on first use
+(``load_extension``), never at import."""
 
 from __future__ import annotations
 
@@ -8,15 +10,21 @@ from pathlib import Path
 _dir = Path(__file__).parent
 
 
-@functools.lru_cache(maxsize=None)
 def ext():
+    import torch
+
+    return _ext("90a" if torch.cuda.get_device_capability() == (9, 0) else "100a")
+
+
+@functools.lru_cache(maxsize=None)
+def _ext(arch: str):
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="opm_gather_sm90a",
+        name=f"opm_gather_sm{arch}",
         sources=[str(_dir / "gather.cu")],
-        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes("90a")],
+        extra_cuda_cflags=[*host_flags(), "-O3", "-std=c++17", *gencodes(arch)],
         extra_cflags=["-std=c++17"],
         verbose=False,
     )
