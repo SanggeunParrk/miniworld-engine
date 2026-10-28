@@ -35,11 +35,11 @@ B200 (sm_100a), bf16, the served widths (``cuda/sm100.supported``): every stage 
 
 fp32 stages, B200 (sm_100a) at the served widths with S a multiple of 128 (``cuda/sm100/tf32_fwd.supported_tf32``): every stage on
 the hand-written TF32 tensor-core kernels (``tcgen05.mma kind::tf32``) -- ``tf32_fwd.block_fwd_tf32`` (``_tf32``), the window
-attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference. A training forward (``save``) would take them only with a TF32
-backward, and there is none at the moment (``_tf32_bwd_ready``: the first one was removed for giving different gradients on identical
-steps), so fp32 training runs the Triton fp32 path. ``settings.swa_dit_tf32=0`` (or ``settings.swa_dit_sm100=0`` /
-``force_portable_kernels=True``) keeps the Triton fp32 path for inference too, and so does a build or load failure (warned once). The
-hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` without a gradient).
+attention included (TF32 Q / K / V / P, fp32 softmax) -- for inference and training: a training forward (``save``) keeps fp32 saves
+that the TF32 backward (``cuda/sm100/tf32_bwd.block_bwd_tf32``, rebuilt after the first one was removed for giving different
+gradients on identical steps) reads, so fp32 training launches no Triton kernel. ``settings.swa_dit_tf32=0`` (or
+``settings.swa_dit_sm100=0`` / ``force_portable_kernels=True``) keeps the Triton fp32 path, and so does a build or load failure (warned
+once). The hoisted modulation has the same split (``swa_dit_mod_fwd_tf32`` / ``swa_dit_mod_bwd_tf32``).
 
 fp32 stages elsewhere (q fp32): on sm_90 with TF32 allowed (matmul precision "high" or
 "medium"), every stage is the hand-CUDA extension ``cuda/swa_fp32.cu`` -- one ``fwd`` and one ``bwd`` call, tf32 wgmma

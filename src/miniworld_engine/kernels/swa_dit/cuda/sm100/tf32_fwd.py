@@ -304,7 +304,7 @@ class AttnFwdTf32:
             _f32map(Vh.view(rows, D), [D, rows], D * 4, [D, 256], swizzle="128a32"),
         )  # MN-major PV operand
         items = N * (S // 128) * H
-        grid = (min(_sm.nsm(), items), 1, 1)
+        grid = (min(num_sms(), items), 1, 1)
         omap = _f32map(O, [C, N * S], C * 4, [16, 128], swizzle=64)         # O [N S, C] rows, store box (16 channels, 128 rows)
 
         def run():

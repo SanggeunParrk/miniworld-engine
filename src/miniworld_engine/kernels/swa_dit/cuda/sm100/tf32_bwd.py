@@ -8,6 +8,7 @@ import functools
 
 import torch
 
+from miniworld_engine.kernels._device import num_sms
 from miniworld_engine.kernels.swa_dit.cuda import sm100 as _sm
 from miniworld_engine.kernels.swa_dit.cuda.sm100 import tf32_fwd as _f
 
@@ -60,7 +61,7 @@ class FfnBwdGateTf32:
                 out_map(dffn, C), out_map(hh, NHID), out_map(dab, 2 * NHID))
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(_sm.nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
 
         def run():
             self.k(grid, (384, 1, 1), *maps, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile))
@@ -109,7 +110,7 @@ class OprojBwdFusedTf32:
                 _f._rows_map(do, A, B, S, SP, AT), mdp)
         nab, nag = (S + AT - 1) // AT, (A + SP - 1) // SP
         ntile = nab * nag * B
-        grid = (min(_sm.nsm(), ntile), 1, 1)
+        grid = (min(num_sms(), ntile), 1, 1)
 
         def run():
             self.k(grid, (384, 1, 1), *maps, dv, int(S), int(A), int(B), int(SP), int(AT), int(nab), int(nag), int(ntile))
@@ -161,7 +162,7 @@ class AttnBwdTf32:
               self._mat(k2, rows, D, 32, "128a32"))
         mk = (self._mat(q2, rows, D, 32), self._mat(q2, rows, D, 32, "128a32"), self._mat(k2, rows, D, 128), self._mat(v2, rows, D, 128),
               self._mat(do, N * S, C, 32), self._mat(do, N * S, C, 32, "128a32"))
-        grid = (min(_sm.nsm(), N * (S // 128) * H), 1, 1)
+        grid = (min(num_sms(), N * (S // 128) * H), 1, 1)
         scale = float(D ** -0.5)
 
         def run():
@@ -189,7 +190,7 @@ class DwTf32:
         pairs = ((dp, x), (datt, gated), (dab, y), (dffn, hh))
         for a, b in pairs:
             assert a.is_contiguous() and b.is_contiguous() and a.shape[0] == M and b.shape[0] == M and M % 16 == 0
-        nsm = _sm.nsm()
+        nsm = num_sms()
         ns = tuple(max(1, min(round(f * nsm), M // 256)) for f in self.FRAC)
         dev = dp.device
         maps = []
