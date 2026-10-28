@@ -75,13 +75,6 @@ def pvdpb_on() -> bool:
     return settings.current().bias_only_dit_bwd_pvdpb
 
 
-def pv_pdl_on() -> bool:
-    """pv dV after the tail as a programmatic dependent launch (pv_gate_inf.cu's -DPDL_INF build: its setup overlaps the tail's
-    last wave, griddepcontrol.wait before it reads do) -- the default; settings.bias_only_dit_bwd_pvpdl=0 launches it plainly.
-    Read per call."""
-    return settings.current().bias_only_dit_bwd_pvpdl
-
-
 def step_bufs(dev) -> None:
     """Make the fused step's persistent counters (pair_bias_bwd_fin's barrier) before the step allocates anything."""
     pb_bar(dev)
@@ -755,7 +748,6 @@ __all__ = [
     "ops",
     "pb_bar",
     "pbfin_on",
-    "pv_pdl_on",
     "pvdpb_on",
     "read_events",
     "step_bufs",

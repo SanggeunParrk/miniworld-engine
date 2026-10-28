@@ -283,7 +283,6 @@ SWITCHES = (
     "bias_only_dit_bwd_fused",
     "bias_only_dit_bwd_pbfin",
     "bias_only_dit_bwd_pvdpb",
-    "bias_only_dit_bwd_pvpdl",
     "bias_only_dit_bwd_mid",
 )
 

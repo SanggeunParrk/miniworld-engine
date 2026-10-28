@@ -5,6 +5,7 @@ shared or none. Perturbed (non-zero) weights: zero-initialised ones make most gr
 bitwise determinism. The shared-pair path ([1, H, L, L] bias, one P for all samples) keeps its own tests
 (``test_h100_bias_only_dit_gpu.py``)."""
 
+import contextlib
 import math
 
 import pytest
@@ -17,6 +18,22 @@ from miniworld_engine.integrations import bias_only_dit_train as bt
 from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock
 from miniworld_engine.modules.exceptions import ImplementationType
+
+
+@contextlib.contextmanager
+def _unfused_hoist(*served):
+    """Make the fused hoist kernels (``kernels.bias_only_dit.cuda.hoist.<served>``) refuse, so the call takes the unfused path."""
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    saved = {name: getattr(HK, name) for name in served}
+    try:
+        for name in served:
+            setattr(HK, name, lambda *a, **k: False)
+        yield
+    finally:
+        for name, fn in saved.items():
+            setattr(HK, name, fn)
+
 
 pytestmark = [
     pytest.mark.gpu,
@@ -401,7 +418,7 @@ def test_psb32_kernels_match_fp64_and_are_bitwise_repeatable(H, dh, A, L, mask_k
 @pytest.mark.parametrize("rows", [4096, 64 * 1000])
 def test_fused_hoist_backward_matches_fp64_and_the_cublas_path(n_rows, rows):
     """d pair and dW' of ``bias_only_dit_hoist._hoist_bwd``: the one-pass kernel against an fp64 oracle and against the cuBLAS + ln0_bwd_rows
-    path (switched by settings.bias_only_dit_hoist_bwd_fused), bitwise repeatable."""
+    path (the fused kernels refused), bitwise repeatable."""
     from miniworld_engine.integrations import bias_only_dit_hoist as hoist
 
     g = torch.Generator(device="cuda").manual_seed(11)
@@ -412,11 +429,8 @@ def test_fused_hoist_backward_matches_fp64_and_the_cublas_path(n_rows, rows):
     dpair, dwf = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
     dpair2, dwf2 = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
     assert torch.equal(dpair, dpair2) and torch.equal(dwf, dwf2), "not bitwise repeatable"
-    old = settings.configure(bias_only_dit_hoist_bwd_fused=False)
-    try:
+    with _unfused_hoist("pass_bwd_served", "fused_bwd_served"):
         dpair_c, dwf_c = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
-    finally:
-        settings.configure(**vars(old))
     x = pair.double()
     mean, var = x.mean(-1, keepdim=True), x.var(-1, unbiased=False, keepdim=True)
     rstd = (var + 1e-5).rsqrt()
@@ -456,11 +470,8 @@ def test_one_pass_hoist_forward(dtype, n_rows, rows):
     y, _ = _ln_oracle(pair)
     want = wf.double() @ y.t()
     assert rel(out, want) < (6e-3 if dtype is torch.bfloat16 else 1.5e-3)
-    old = settings.configure(bias_only_dit_hoist_fwd_fused=False)
-    try:
+    with _unfused_hoist("pass_fwd_served"):
         ref = hoist._hoist_fwd(pair, wf, 1e-5)
-    finally:
-        settings.configure(**vars(old))
     assert rel(out, ref) < (6e-3 if dtype is torch.bfloat16 else 1.5e-3)
     assert torch.equal(hoist._hoist_fwd(pair, wf, 1e-5), out)
 
@@ -469,7 +480,7 @@ def test_one_pass_hoist_forward(dtype, n_rows, rows):
 @pytest.mark.parametrize("rows", [16, 4112, 64 * 1000, 4 * 256 * 256])
 def test_one_pass_hoist_backward(dtype, rows):
     """``pass_bwd`` (one block of 16 heads, bf16 and fp32 / TF32): d pair and dW' against an fp64 oracle and against the cuBLAS + ln0_bwd_rows path
-    (``bias_only_dit_hoist_bwd_fused=False``), bitwise repeatable, any R multiple of 16."""
+    (the fused kernels refused), bitwise repeatable, any R multiple of 16."""
     from miniworld_engine.integrations import bias_only_dit_hoist as hoist
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
@@ -482,11 +493,8 @@ def test_one_pass_hoist_backward(dtype, rows):
     dpair2, dwf2 = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
     assert torch.equal(dpair, dpair2) and torch.equal(dwf, dwf2), "not bitwise repeatable"
     assert dpair.dtype is dtype and dwf.dtype is torch.float32 and dwf.shape == (16, 128)
-    old = settings.configure(bias_only_dit_hoist_bwd_fused=False)
-    try:
+    with _unfused_hoist("pass_bwd_served", "fused_bwd_served"):
         dpair_c, dwf_c = hoist._hoist_bwd(pair, wf, dball, 1e-5, hoist._split(rows))
-    finally:
-        settings.configure(**vars(old))
     y, rstd = _ln_oracle(pair)
     dln = dball.double().t() @ wf.double()
     want_dp = rstd * (dln - dln.mean(-1, keepdim=True) - y * (dln * y).mean(-1, keepdim=True))

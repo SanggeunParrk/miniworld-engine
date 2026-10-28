@@ -49,8 +49,7 @@ and ``static_inputs()`` covers it (a static capture replays no packing kernel). 
 launch and one grouped GEMM, and its block is three kernels: ``atom_pre_tf32`` (AdaLN 1, the K / V AdaLN, the four projections),
 the attention, ``atom_post_tf32`` (gate, Wo, both gated residuals, AdaLN 2, SwiGLU, Ws) -- the unfused kernels' arithmetic with the
 activations kept on chip (``settings.local_dit_tf32_fused=0``: the unfused kernels; training always runs them, they save the
-activations). The fp32 kernels launch with programmatic dependent launch (``sm100_atom.PDL32``, ``settings.tf32_pdl=0``
-turns it off).
+activations). The fp32 kernels launch with programmatic dependent launch.
 """
 
 from __future__ import annotations

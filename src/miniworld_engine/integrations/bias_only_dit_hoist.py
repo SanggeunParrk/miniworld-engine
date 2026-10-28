@@ -34,7 +34,6 @@ same structure, the GEMMs on TF32 tensor cores (``tf32_gemms``), every tensor fp
 
 ``serves()`` is the gate (B200 or H100, an engine implementation, pair [1, L, L, 128] bf16 or fp32); anything else takes the PyTorch fold of
 ``modules.bias_only_dit.hoist``. settings.bias_only_dit_hoist=0 (read per call) turns it off;
-settings.bias_only_dit_hoist_wsplit=S (read per call) sets the row chunks of the dW' GEMM (1: one GEMM).
 """
 
 from __future__ import annotations
@@ -88,11 +87,7 @@ def serves(implementation, attns, pair, per_sample=False) -> bool:
 
 def _split(R: int) -> int:
     """Row chunks of the dW' = dbias_all Y GEMM (its [nb H, K] output alone is a few tiles): 48 where it divides R, else 64, else one
-    GEMM; settings.bias_only_dit_hoist_wsplit=S forces S (when it divides R)."""
-    forced = settings.current().bias_only_dit_hoist_wsplit
-    if forced:
-        s = int(forced)
-        return s if s > 1 and R % s == 0 else 1
+    GEMM."""
     return next((s for s in (48, 64) if R % s == 0), 1)
 
 
@@ -117,7 +112,7 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
-    if settings.current().bias_only_dit_hoist_fwd_fused and HK.pass_fwd_served(pair2d, wf):
+    if HK.pass_fwd_served(pair2d, wf):
         return HK.pass_fwd(pair2d, wf, eps)  # LayerNorm + projection in one pass over the pair (bo_hoist_pass.cu)
     ln0 = torch.empty_like(pair2d)
     HK.ln0_rows(pair2d, ln0, eps)
@@ -140,9 +135,9 @@ def _hoist_bwd(
 
     N, R = dball.shape
     f32 = pair2d.dtype is F32
-    if settings.current().bias_only_dit_hoist_bwd_fused and HK.pass_bwd_served(pair2d, wf):
+    if HK.pass_bwd_served(pair2d, wf):
         return list(HK.pass_bwd(pair2d, wf, dball, eps))  # one block of 16 heads, bf16 / fp32: one pass over the pair (bo_hoist_pass.cu)
-    if settings.current().bias_only_dit_hoist_bwd_fused and HK.fused_bwd_served(pair2d, wf):
+    if HK.fused_bwd_served(pair2d, wf):
         dpair, dwf = HK.hoist_bwd_fused(pair2d, wf, dball, eps)  # one pass over the pair (bo_hoist_bwd.cu)
         return [dpair, dwf]
     K = HK.operand_cols(pair2d.dtype)

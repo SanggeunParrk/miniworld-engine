@@ -144,7 +144,7 @@ def supported_sm90(x: torch.Tensor, w_ab: torch.Tensor) -> bool:
         return False
     # fp32 (TF32) is opt-in: its TMA-fed operands are truncated to TF32 where cuBLAS rounds them -- 1.6e-3 against 4.2e-4 for
     # cuBLAS + the row pass -- and it wins only at M = 3840 (70.9 vs 85.5 us; 47.6 vs 45.9 at 1920, 759 vs 725 at 36864)
-    if x.dtype is torch.float32 and not settings.current().token_dit_gemm_swiglu_fp32:
+    if x.dtype is torch.float32:
         return False
     idx = x.device.index if x.device.index is not None else torch.cuda.current_device()
     H = w_ab.shape[0] // 2

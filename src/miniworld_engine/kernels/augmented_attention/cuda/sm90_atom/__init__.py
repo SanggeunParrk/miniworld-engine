@@ -129,7 +129,7 @@ def kernel(kind: str, tf32: bool, device_index: int, rms: bool = False):
             cubin(stem, tf32, nwarp(base, tf32), _MINB.get((base, tf32), 1), defs),
             func,
             _smem(kind, tf32),
-            pdl=settings.current().local_dit_h100_pdl,
+            pdl=True,
         )
 
 

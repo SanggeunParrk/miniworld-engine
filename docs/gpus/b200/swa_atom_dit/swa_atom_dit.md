@@ -298,7 +298,7 @@ Two additions around the block, both for MiniWorld's input embedder (SWA atom bl
   the kernels above. bf16 and B200 only, `refusal()` says why a call is not served, and the output and every gradient match the
   windowed block at a window that covers the sequence (`tests/gpu/sm100/test_b200_swa_dit_global_gpu.py`). **At A = 1 it is slower than
   the per-op path**: 1.25 ms against 1.08 ms for the same embedder (opt-in switches of the consumer model code,
-  `settings.swa_fused=1` and `settings.swa_global_bf16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
+  `SWAAtomTransformer.Config(fused_triton=True)` (formerly `settings.swa_fused=1`) and `settings.swa_global_bf16=1`; the stream runs in bf16, a precision change for an fp32 caller), so
   MiniWorld keeps it opt-in.
 
 The weight-pack cache (`kernels/swa_dit/cuda/sm100._cached`) is keyed on the tensor objects (weak references) and their versions since

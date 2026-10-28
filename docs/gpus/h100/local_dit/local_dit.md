@@ -289,7 +289,7 @@ Inference (A5, 4096 atoms): bf16 post90 49 us, pre90 24 us, attention 19 us; fp3
   (bf16 332 -> 377 us, fp32 478 -> 565 us at A48 / 4096 atoms): the persistent grid (2 CTAs per SM) loses the hardware's tile-level
   load balancing and the activation loads are not overlapped across tiles; a dedicated producer warp (160 threads) halves the CTAs per SM
   (255 registers x 160 threads) and `setmaxnreg` with a producer warpgroup caps the compile at 128 registers (spills). Kept: cp.async ring.
-- Programmatic dependent launch between the kernels (`settings.local_dit_h100_pdl`, wait at the top of every kernel): +-1 us on the
+- Programmatic dependent launch between the kernels (always on since the `settings.local_dit_h100_pdl` switch was removed; wait at the top of every kernel): +-1 us on the
   inference chains (the launch gaps inside a CUDA graph are already small); on by default, harmless. An early `launch_dependents` made
   the next kernel's CTAs sit resident while the previous one still had CTAs to run (96 vs 92 us).
 - The same TMA ring without persistence (grid = tiles, thread 0 producing, mbarriers instead of CTA barriers): bf16 332 -> 328 us

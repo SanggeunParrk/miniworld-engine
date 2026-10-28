@@ -271,7 +271,7 @@ class Settings:
     # defaults. `force_portable_kernels` turns every *_cuda stage off as well.
     #: Let `modules.swa_dit.SWADiTBlock` (implementation other than pytorch) run the fused block when
     #: `kernels.swa_dit.interface.refusal` accepts the call (bf16 or fp32, d_atom 128 / 4 heads, window 128, SwiGLU hidden 256);
-    #: off keeps the per-op path. Formerly team-gm's opt-in MINIWORLD_SWA_FUSED on SWAAtomTransformer.
+    #: off keeps the per-op path. (`architecture.blocks.swa_atom_transformer.SWAAtomTransformer` opts in by its config, `fused_triton`.)
     swa_dit_fused: bool = True
     #: B200 only: keep the engine's portable norm kernels (`LayerNorm` / `RMSNorm` with implementation MINIWORLD) instead of
     #: PyTorch ops that `torch.compile` fuses (the default on B200: no portable kernels on that card). Other cards are unaffected.
@@ -356,8 +356,6 @@ class Settings:
     bias_only_dit_bwd_mid: bool = False
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB`` (default on).
     bias_only_dit_bwd_pvdpb: bool = True
-    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_BWD_PVPDL`` (default on).
-    bias_only_dit_bwd_pvpdl: bool = True
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_PAIR_EXACT`` (default off).
     bias_only_dit_pair_exact: bool = False
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_CORE`` (default on).
@@ -400,14 +398,10 @@ class Settings:
     #: The hand-CUDA TRAINING step of ESMFold2's local atom block (``LocalDiTBlock(**ESMFOLD2)``, bf16, conditioning shared by the samples) on
     #: H100; off = the portable / reference route. Default on.
     local_dit_esm_train_cuda: bool = True
-    #: Formerly ``MINIWORLD_TF32_PDL`` (default on).
-    tf32_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_SM100`` (default on).
     swa_dit_sm100: bool = True
     #: Formerly ``MINIWORLD_SWA_DIT_TF32`` (default on).
     swa_dit_tf32: bool = True
-    #: Formerly ``MINIWORLD_SWA_FUSED`` (default off).
-    swa_fused: bool = False
     #: Formerly ``MINIWORLD_SWA_GLOBAL_BF16`` (default off).
     swa_global_bf16: bool = False
     #: Formerly ``MINIWORLD_TRANSITION_FUSED_SM100A`` (default on).
@@ -447,8 +441,6 @@ class Settings:
     bias_only_dit_inf3_cl: int | None = None
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_INF3_TAIL_CL``: force this value; None lets the heuristic choose.
     bias_only_dit_inf3_tail_cl: int | None = None
-    #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT``: force this value; None lets the heuristic choose.
-    bias_only_dit_hoist_wsplit: int | None = None
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT``: force this value; None lets the heuristic choose.
     bias_only_dit_wgrad_split: int | None = None
     #: Formerly ``MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR``: True / False forces it; None lets the heuristic choose.
@@ -518,13 +510,6 @@ class Settings:
     #: fp32): `FusedBiasOnlyDiT.step_psb` (the 12-launch step with `psb_fwd` / `psb32_fwd` as the attention core) behind a one-pass
     #: pair LayerNorm + bias projection; off keeps the module's composition. Read per call.
     bias_only_dit_psb_infer: bool = True
-    #: The hoisted pair bias's backward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 in bf16 (`bo_hoist_bwd.cu`: d LN0, the
-    #: LayerNorm backward and dW' in one pass over the pair); False keeps the two cuBLAS GEMMs around `ln0_bwd_rows`. Read per call.
-    bias_only_dit_hoist_bwd_fused: bool = True
-    #: The hoisted pair bias's forward (`integrations/bias_only_dit_hoist.py`) in one kernel on sm_90 (`bo_hoist_pass.cu`: the LayerNorm rows and the
-    #: projection to the head logits in one pass over the pair, bf16 and fp32/TF32, up to 64 bias rows); False keeps the LayerNorm kernel + the
-    #: cuBLAS GEMM. The same switch for the backward is `bias_only_dit_hoist_bwd_fused` (which also covers the one-block kernel). Read per call.
-    bias_only_dit_hoist_fwd_fused: bool = True
     #: Formerly ``MINIWORLD_LOCAL_DIT_H100_TRAIN``: None serves the Hopper local atom DiT training block natively when the
     #: call is inside the native geometry and lets the composed path serve everything else; True raises instead of falling back;
     #: False disables the native Hopper training path.
@@ -534,14 +519,9 @@ class Settings:
     local_dit_h100_mma: bool = True
     local_dit_h100_mma_fp32: bool = True
     local_dit_h100_mma_bf16: bool = True
-    #: programmatic dependent launch between the kernels of the H100 local atom DiT (the next kernel's launch overlaps the previous one's tail)
-    local_dit_h100_pdl: bool = True
     #: Formerly ``MINIWORLD_SWA_H100_CUDA_ONLY``: None runs the native Hopper SWA DiT block for the shapes it is qualified for and
     #: falls back elsewhere; True forces it (an unsupported call raises); False disables it.
     swa_dit_h100_native: bool | None = None
-    #: Formerly ``MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32`` (default off): allow the TF32 build of the fused GEMM + SwiGLU for fp32
-    #: activations. Its TMA-fed operands are truncated to TF32 where cuBLAS rounds them (1.6e-3 against 4.2e-4); wins only at M = 3840.
-    token_dit_gemm_swiglu_fp32: bool = False
     #: Formerly ``MINIWORLD_TRANSITION_D64_REPL``; 0 keeps the built-in value (26 at n = 2, 16 at n = 4): D64 backward weight replicas.
     transition_d64_repl: int = 0
     #: Formerly ``MINIWORLD_TRANSITION_D64_VARIANT``; 0 picks the D64 inference build by row count (13 / 12 = 64-row tile, LayerNorm in
@@ -687,13 +667,13 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_BWD_MID": "bias_only_dit_bwd_mid",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_PBFIN": "bias_only_dit_bwd_pbfin",
     "MINIWORLD_BIAS_ONLY_DIT_BWD_PVDPB": "bias_only_dit_bwd_pvdpb",
-    "MINIWORLD_BIAS_ONLY_DIT_BWD_PVPDL": "bias_only_dit_bwd_pvpdl",
+    "MINIWORLD_BIAS_ONLY_DIT_BWD_PVPDL": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_BWD_TAIL": "bias_only_dit_bwd_tail",
     "MINIWORLD_BIAS_ONLY_DIT_COND": "bias_only_dit_cond",
     "MINIWORLD_BIAS_ONLY_DIT_CORE": "bias_only_dit_core",
     "MINIWORLD_BIAS_ONLY_DIT_DPB_PAIR": "bias_only_dit_dpb_pair",
     "MINIWORLD_BIAS_ONLY_DIT_HOIST": "bias_only_dit_hoist",
-    "MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT": "bias_only_dit_hoist_wsplit",
+    "MINIWORLD_BIAS_ONLY_DIT_HOIST_WSPLIT": "",  # removed: the default behaviour is the only one
     "MINIWORLD_BIAS_ONLY_DIT_INF3": "bias_only_dit_inf3",
     "MINIWORLD_BIAS_ONLY_DIT_INF3_2CTA": "bias_only_dit_inf3_2cta",
     "MINIWORLD_BIAS_ONLY_DIT_INF3_BF16": "bias_only_dit_inf3_bf16",
@@ -729,10 +709,10 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_STATIC_WEIGHTS": "static_weights",
     "MINIWORLD_SWA_DIT_SM100": "swa_dit_sm100",
     "MINIWORLD_SWA_DIT_TF32": "swa_dit_tf32",
-    "MINIWORLD_SWA_FUSED": "swa_fused",
+    "MINIWORLD_SWA_FUSED": "",  # removed: SWAAtomTransformer.Config.fused_triton opts a model in
     "MINIWORLD_SWA_GLOBAL_BF16": "swa_global_bf16",
     "MINIWORLD_TF32_FUSED_UNITS": "tf32_fused_units",
-    "MINIWORLD_TF32_PDL": "tf32_pdl",
+    "MINIWORLD_TF32_PDL": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU": "token_dit_gemm_swiglu",
     "MINIWORLD_TOKEN_DIT_ROWS_CUDA": "token_dit_rows_cuda",
     "MINIWORLD_TOKEN_DIT_TRAIN": "token_dit_train",
@@ -801,7 +781,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_SWA_H100_OWNED_LT_WGRAD": "",  # removed: the default behaviour is the only one
     "MINIWORLD_SWA_H100_REUSE_FFN_BWD": "",  # removed: the default behaviour is the only one
     "MINIWORLD_SWA_H100_TILED_ATTENTION": "",  # removed: the default behaviour is the only one
-    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32": "token_dit_gemm_swiglu_fp32",
+    "MINIWORLD_TOKEN_DIT_GEMM_SWIGLU_FP32": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_H100_CALLER_NATIVE": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_H100_EMPTY_UNIFORM": "",  # removed: the default behaviour is the only one
     "MINIWORLD_TOKEN_DIT_H100_GRAD_REDUCE": "",  # removed: the default behaviour is the only one

@@ -1313,7 +1313,7 @@ def _bwd_fused_step(
         )
         counts = [n0, n0, n0]
     # dv = P^T do and dbias = P o (dP - D) (masked keys get P = 0): one launch (bo_pvdpb.cu, BWF.pvdpb_on; the shapes where the bias
-    # gradient runs on single CTAs), or pv dV as a programmatic dependent (BWF.pv_pdl_on) and dpb / dpbx2
+    # gradient runs on single CTAs), or pv dV as a programmatic dependent launch and dpb / dpbx2
     dbias = (
         torch.empty(H * L, L, device=dev, dtype=BF)
         if dbias_out is None
@@ -1335,7 +1335,7 @@ def _bwd_fused_step(
             A,
         )
     ):
-        _op("pvpdl" if BWF.pv_pdl_on() else "pv", dev, H, DA // H)(
+        _op("pvpdl", dev, H, DA // H)(
             do, Pt.view(H * L, L), dvg[:, :DA], A
         )
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)

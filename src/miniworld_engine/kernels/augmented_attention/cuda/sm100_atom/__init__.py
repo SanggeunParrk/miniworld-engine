@@ -729,19 +729,9 @@ KERNELS_TF32 = {
     "colsum": ("rows_tf32", "f32_colsum", 0),
 }
 
-#: Programmatic dependent launch for the fp32 path's kernels (``settings.tf32_pdl``, default on). Every one of them executes
-#: ``griddepcontrol.wait`` before its first global-memory access (after its smem / TMEM setup), so it may be scheduled while the previous
-#: kernel drains: the launch latency and the setup overlap the previous kernel's tail. ``set_pdl32`` flips the loaded kernels (A/B timing).
-PDL32 = [settings.current().tf32_pdl]
-_PDL32_LOADED: list = []
-
-
-def set_pdl32(on: bool) -> bool:
-    """Turn programmatic dependent launch of the loaded (and later loaded) fp32-path kernels on or off; returns the previous setting."""
-    prev, PDL32[0] = PDL32[0], bool(on)
-    for k in _PDL32_LOADED:
-        k.pdl = PDL32[0]
-    return prev
+# The fp32 path's kernels launch with programmatic dependent launch: every one of them executes ``griddepcontrol.wait`` before its first
+# global-memory access (after its smem / TMEM setup), so it may be scheduled while the previous kernel drains -- the launch latency and the
+# setup overlap the previous kernel's tail.
 
 
 @functools.lru_cache(maxsize=None)
@@ -750,9 +740,7 @@ def atom_kernel32(name: str, device_index: int):
 
     stem, func, smem = KERNELS_TF32[name]
     with torch.cuda.device(device_index):
-        k = driver.Kernel(cubin_tf32(stem), func, smem, pdl=PDL32[0])
-    _PDL32_LOADED.append(k)
-    return k
+        return driver.Kernel(cubin_tf32(stem), func, smem, pdl=True)
 
 
 #: the fused inference kernels of the fp32 path (``fused_tf32.cu``; loaded apart from KERNELS_TF32 so a failure costs the fusion only)
@@ -768,9 +756,7 @@ def fused_kernel32(name: str, device_index: int):
 
     stem, func, smem = KERNELS_FUSED32[name]
     with torch.cuda.device(device_index):
-        k = driver.Kernel(cubin_tf32(stem), func, smem, pdl=PDL32[0])
-    _PDL32_LOADED.append(k)
-    return k
+        return driver.Kernel(cubin_tf32(stem), func, smem, pdl=True)
 
 
 def load_fused32(device_index: int) -> None:

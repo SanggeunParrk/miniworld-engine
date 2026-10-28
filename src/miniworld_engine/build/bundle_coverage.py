@@ -253,8 +253,8 @@ def _run_block(c: dict) -> None:
         )
         from miniworld_engine.modules.swa_atom_attention import build_attention_params
 
-        # esmfold2 runs the fused block (kernels/swa_dit), as MiniWorld does (MINIWORLD_SWA_FUSED): settings.swa_fused is off by
-        # default, and without it no engine case reached the fused block's extensions (2.3.0 - 2.3.6 got them from MiniWorld only).
+        # esmfold2 runs the fused block (kernels/swa_dit), as MiniWorld does (MINIWORLD_SWA_FUSED); the config pins it whatever
+        # settings.swa_dit_fused says (2.3.0 - 2.3.6 got the fused block's extensions from MiniWorld only).
         config = SWAAtomTransformer.Config(n_block=1, block_style="af3" if c["variant"].startswith("af3") else "esmfold2",
                                            global_attn=c["variant"] == "af3_global",
                                            fused_triton=True if c["variant"] == "esmfold2" else None)
@@ -285,14 +285,19 @@ def _run_block(c: dict) -> None:
         return
     elif c["kind"] == "trimul_hidden2x":
         from miniworld_engine.modules.exceptions import ImplementationType as MI
-        from miniworld_engine.modules.triangle_multiplication import TriangleMultiplication
+        from miniworld_engine.modules.triangle_multiplication import (
+            TriangleMultiplication,
+        )
 
         d, b, n = c["d"], c["batch"], c["L"]
         model = TriangleMultiplication(d, d_hidden=2 * d, outgoing=c["outgoing"], implementation=MI.MINIWORLD,
                                        p_drop=0.25 if c["train"] else 0.0)
         args = (torch.randn(b, n, n, d, device="cuda", dtype=dt), torch.ones(b, n, device="cuda", dtype=torch.bool))
     elif c["kind"] == "bias_only_dit":
-        from miniworld_engine.modules.bias_only_dit import BiasOnlyDiTBlock, pair_bias_all
+        from miniworld_engine.modules.bias_only_dit import (
+            BiasOnlyDiTBlock,
+            pair_bias_all,
+        )
         from miniworld_engine.modules.exceptions import ImplementationType as MI
 
         blocks = [BiasOnlyDiTBlock(d_cond=c["d_cond"], implementation=MI.MINIWORLD).cuda().to(pdt)
@@ -371,7 +376,11 @@ def _la_proteina_pair() -> None:
     import torch
 
     from miniworld_engine.kernels.pair_embed_adaln import pair_embed_adaln
-    from miniworld_engine.kernels.pair_embed_geom import pair_embed_ca, pair_embed_geom, pair_embed_geom_train
+    from miniworld_engine.kernels.pair_embed_geom import (
+        pair_embed_ca,
+        pair_embed_geom,
+        pair_embed_geom_train,
+    )
     from miniworld_engine.kernels.pair_embed_geom.cuda import sm90 as geom
 
     if torch.cuda.get_device_capability() != (9, 0):

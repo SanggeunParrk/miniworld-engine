@@ -258,7 +258,8 @@ class SWAAtomTransformer(nn.Module):
         # SwiGLU hidden 256, no MP options): three kernels per block forward (bf16: CUDA wgmma on H100, Triton elsewhere;
         # fp32: Triton), the adaLN modulation hoisted to the augment-invariant conditioning. Same parameters (checkpoint
         # compatible).
-        # None -> env settings.swa_fused ("1" on).
+        # Opt-in per model (None or False: the per-op path). At A = 1 on a global window the fused block is slower than the per-op
+        # path (B200 1.25 against 1.08 ms), so it is the config's choice -- formerly settings.swa_fused / MINIWORLD_SWA_FUSED.
         fused_triton: bool | None = None
 
     def __init__(self, config: Config) -> None:
@@ -327,12 +328,7 @@ class SWAAtomTransformer(nn.Module):
         self, q: torch.Tensor, c: torch.Tensor, attention_params: tuple
     ) -> bool:
         cfg = self.config
-        want = (
-            cfg.fused_triton
-            if cfg.fused_triton is not None
-            else settings.current().swa_fused
-        )
-        if not want or not q.is_cuda:
+        if not cfg.fused_triton or not q.is_cuda:
             return False
         from miniworld_engine.kernels.swa_dit.interface import (
             highest_fp32_on_hopper_blackwell,
