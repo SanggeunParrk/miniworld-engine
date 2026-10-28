@@ -331,7 +331,7 @@ def _cuda_rows_available() -> bool:
 
         return cuda_rows.available()
     except Exception:
-        if torch.cuda.get_device_capability() == (9, 0):
+        if torch.cuda.get_device_capability() in ((9, 0), (10, 0)):   # no engine Triton fallback on H100 / B200
             raise
         return False
 
