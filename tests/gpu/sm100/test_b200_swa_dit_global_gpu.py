@@ -123,9 +123,15 @@ def test_refusal_serves_global_in_bf16_only():
         is not None
     )  # neither 64 nor global
     f32 = [t.float() for t in (q, wqkv, wg, wo, wu, wd)]
-    assert "global attention" in (
-        refusal(f32[0], cos, sin, seqused, *f32[1:], n_head=H, half_window=BIG) or ""
-    )
+    # under matmul precision 'highest' the refusal names that rule first (fp32 'highest' runs the PyTorch statements on B200);
+    # the global-attention reason is the one for an fp32 call that may use TF32
+    precision = torch.get_float32_matmul_precision()
+    torch.set_float32_matmul_precision("high")
+    try:
+        why = refusal(f32[0], cos, sin, seqused, *f32[1:], n_head=H, half_window=BIG) or ""
+    finally:
+        torch.set_float32_matmul_precision(precision)
+    assert "global attention" in why, why
 
 
 # (A, B, S): the embedder's A = 1 (S = 4096 in the model), small A, A = 48
