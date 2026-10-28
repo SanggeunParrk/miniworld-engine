@@ -153,10 +153,14 @@ def refusal(
             if not 0 < n <= _wide.NMAX or s == 0:
                 return f"the wide pair kernels hold one row of logits: 0 < N <= {_wide.NMAX}, got N={n}, S={s}"
             return None
-        if n % 128 or (s % 2 and cap != (10, 0)):
+        if cap == (10, 0):  # N and S are padded to 128 (_pad_b200); pair_fwd holds a row of the padded N
+            if n == 0 or s == 0:
+                return f"empty MSA stack, got N={n}, S={s}"
+            if -(-n // 128) * 128 > 1024:
+                return f"the sm_100a kernels need N <= 1024 (after the pad to 128), got N={n}, S={s}"
+            return None
+        if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
-        if cap == (10, 0) and n > 1024:  # pair_fwd holds a row of N; S is padded to the 128-row tiles (_pad_depth)
-            return f"the sm_100a kernels need N <= 1024, got N={n}, S={s}"
         return None
     except Exception as exc:
         return f"{type(exc).__name__}: {exc}"
@@ -924,15 +928,22 @@ def _is_wide(module) -> bool:
     ) != (D, DZ, H, C)
 
 
-def _pad_depth(msa: torch.Tensor) -> tuple[torch.Tensor, int]:
-    """B200: the MSA depth padded to the kernels' 128-row tiles (ln_vg / dv_bwd), with the original depth. The MSA rows are independent
-    (each row averages its own values with the shared pair weights), so zero rows change no real row; the pad rows of the output are
-    dropped and the pad's backward drops their gradient. Other cards, or a depth already a multiple of 128: unchanged."""
-    s = msa.shape[1]
-    ps = -s % 128
-    if not ps or torch.cuda.get_device_capability(msa.device) != (10, 0):
-        return msa, s
-    return torch.nn.functional.pad(msa, (0, 0, 0, 0, 0, ps)), s
+def _pad_b200(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None):
+    """B200: the MSA depth S and the token count N padded to the kernels' 128-row tiles -> (msa, pair, mask, S, N), the original S / N.
+    The MSA rows are independent (each averages its own values with the shared pair weights), so zero rows change no real row; the pad
+    tokens are masked as keys (the [1, N] key mask, False on the pad), so no real token averages over them, and their own rows are
+    dropped with the pad rows; the pad's backward drops their gradient. Other cards, or S and N already multiples of 128: unchanged."""
+    s, n = msa.shape[1], msa.shape[2]
+    ps, pn = -s % 128, -n % 128
+    if not (ps or pn) or torch.cuda.get_device_capability(msa.device) != (10, 0):
+        return msa, pair, mask, s, n
+    msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))
+    if pn:
+        pair = torch.nn.functional.pad(pair, (0, 0, 0, pn, 0, pn))
+        keep = torch.zeros(1, n + pn, device=msa.device, dtype=torch.bool)
+        keep[:, :n] = True if mask is None else mask.reshape(1, n) != 0
+        mask = keep
+    return msa, pair, mask, s, n
 
 
 def pair_weighted_averaging(
@@ -941,9 +952,9 @@ def pair_weighted_averaging(
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
     if _is_wide(module):
         return _wide.pair_weighted_averaging(module, msa, pair, mask)
-    msa, s0 = _pad_depth(msa)
-    if s0 != msa.shape[1]:
-        return pair_weighted_averaging(module, msa, pair, mask)[:, :s0]
+    msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
+    if (s0, n0) != tuple(msa.shape[1:3]):
+        return pair_weighted_averaging(module, msa, pair, mask)[:, :s0, :n0]
     n = msa.shape[2]
     if torch.cuda.get_device_capability(msa.device) == (
         10,
@@ -1134,9 +1145,9 @@ def _inference_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch
 def pair_weighted_averaging_inference(module, msa, pair, mask):
     if _is_wide(module):
         return _wide.pair_weighted_averaging_inference(module, msa, pair, mask)
-    msa, s0 = _pad_depth(msa)
-    if s0 != msa.shape[1]:
-        return pair_weighted_averaging_inference(module, msa, pair, mask)[:, :s0].contiguous()
+    msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
+    if (s0, n0) != tuple(msa.shape[1:3]):
+        return pair_weighted_averaging_inference(module, msa, pair, mask)[:, :s0, :n0].contiguous()
     mask = (
         mask
         if mask is not None
