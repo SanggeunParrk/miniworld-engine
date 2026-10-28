@@ -19,6 +19,10 @@ Served when `implementation=miniworld`, bf16 contiguous `[B, L, L, D]` input (an
 - training: D64 / D128 either direction: L a multiple of 128 (L <= 10240); D256 / D384 / D512: L a multiple of 16.
 Every other shape runs the portable path.
 
+Inference takes any L: a length that is not a multiple of 16 is padded on the host to the next multiple (zero pair entries on
+masked pad tokens; `k1w` forms the pair mask from the token mask, so pad tokens contribute nothing and the pad rows are dropped),
+as H100 does (2026-10-28). Training keeps L % 16 == 0.
+
 ## Batched samples (B <= 48 per launch, any B per call, every width)
 
 Every width takes B samples in one call, inference and training, bidirectional and either single direction (and one direction at
