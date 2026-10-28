@@ -54,7 +54,7 @@ def test_dead_entries_are_dropped_and_a_newer_version_replaces_the_older():
         _weights.transposed_contiguous(w)
         w.add_(1)
         _weights.transposed_contiguous(w)
-    assert sum(ref() is w for ref, _ in _weights._CACHE.values()) == 1
+    assert sum(refs[0]() is w for refs, _ in _weights._CACHE.values()) == 1
 
 
 def test_live_weights_keep_their_entries_past_a_model_s_worth_of_blocks():

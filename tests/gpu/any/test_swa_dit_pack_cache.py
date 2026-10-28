@@ -13,16 +13,22 @@ import gc
 import pytest
 import torch
 
+from miniworld_engine.kernels import _capture
 from miniworld_engine.kernels.swa_dit.cuda import sm100
+
+
+def _packs():
+    """The sm_100a block's entries in the shared weight-form store."""
+    return [k for k in _capture._FORMS if k[1][0][0] == "swa_dit_sm100"]
 
 
 @pytest.fixture(autouse=True)
 def _fresh_cache(monkeypatch, request):
-    sm100._PACKS.clear()
+    _capture._FORMS.clear()
     if request.node.get_closest_marker("gpu") is None:  # the graph test below needs the real capture state
         monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: False)
     yield
-    sm100._PACKS.clear()
+    _capture._FORMS.clear()
 
 
 def _counting(fn):
@@ -101,7 +107,7 @@ def test_inference_tensors_are_never_cached():
     first, second = sm100._cached(pack, w), sm100._cached(pack, w)
     assert len(calls) == 2
     assert torch.equal(first, second)
-    assert not sm100._PACKS
+    assert not _packs()
 
 
 def test_nothing_is_cached_while_a_graph_is_captured(monkeypatch):
@@ -113,7 +119,7 @@ def test_nothing_is_cached_while_a_graph_is_captured(monkeypatch):
     sm100._cached(pack, w)
     sm100._cached(pack, w)
     assert len(calls) == 2
-    assert not sm100._PACKS
+    assert not _packs()
 
 
 @pytest.mark.gpu

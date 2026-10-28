@@ -56,7 +56,6 @@ turns it off).
 from __future__ import annotations
 
 import warnings
-import weakref
 from types import SimpleNamespace
 
 import torch
@@ -152,36 +151,12 @@ def _pack(weights, backward=False):
     return wc, wp, wo, wb
 
 
-#: Packs keyed by the weights' tensor objects (held weakly), valid while every version is unchanged. An address reused by a new
-#: tensor with the same shape and version must not be served the old tensor's pack, so identity -- not (pointer, version) -- decides.
-_PACKS: dict = {}
-
-
+# The packs are ``kernels._capture.param_forms``: the weights' tensor objects (held weakly) and versions decide, not an address a new
+# tensor may reuse.
 def _weights(weights, backward=False):
     """Scoped to the CUDA-graph capture (``kernels._capture``): a capture packs once and records it. ``backward`` only matters on Hopper
     (the pack then also holds the transposed A operands) and is part of the key."""
-    try:
-        versions = tuple(w._version for w in weights)
-    except (
-        RuntimeError
-    ):  # inference tensors carry no version counter: nothing could invalidate an entry
-        return _pack(weights, backward)
-    key = _capture.scoped((bool(backward), *(id(w) for w in weights)))
-    if key is None:
-        return _pack(weights, backward)
-    hit = _PACKS.get(key)
-    if hit is not None:
-        refs, seen, pack = hit
-        if seen == versions and all(
-            r() is w for r, w in zip(refs, weights, strict=True)
-        ):
-            return pack
-    _capture.prune(_PACKS)
-    if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
-        _PACKS.pop(next(iter(_PACKS)))
-    pack = _pack(weights, backward)
-    _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
-    return pack
+    return _capture.param_forms(("local_dit", bool(backward)), weights, lambda: _pack(weights, backward))
 
 
 def _padded(t, n):
@@ -1459,49 +1434,22 @@ def _pack32_bwd(weights):
     return bk
 
 
-_PACKS32: dict = {}
-_PACKS32B: dict = {}
-
-
-def _cached32(store, weights, build):
+def _cached32(build, weights):
     """``build(weights)``, reused while every weight's tensor object and version are unchanged; scoped to the CUDA-graph capture
     (``kernels._capture``) as the bf16 packs are -- except under ``kernels._capture.static_inputs()``, whose contract (the weights AND the
     conditioning / pair keep their contents between replays) covers the weights: a capture then serves from, and fills, the eager entry and a
     replay runs no packing kernel (``static_weights()`` has the same effect through ``scoped``)."""
-    try:
-        versions = tuple(w._version for w in weights)
-    except (
-        RuntimeError
-    ):  # inference tensors carry no version counter: nothing could invalidate an entry
-        return build(weights)
-    raw = ("tf32", *(id(w) for w in weights))
-    key = (None, raw) if _capture._STATIC_INPUTS[0] else _capture.scoped(raw)
-    if key is None:
-        return build(weights)
-    hit = store.get(key)
-    if hit is not None:
-        refs, seen, pack = hit
-        if seen == versions and all(
-            r() is w for r, w in zip(refs, weights, strict=True)
-        ):
-            return pack
-    if not _capture._STATIC_INPUTS[0]:
-        _capture.prune(store)
-    if len(store) >= 64:  # a model's worth of blocks; drop the oldest
-        store.pop(next(iter(store)))
-    pack = build(weights)
-    store[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
-    return pack
+    return _capture.param_forms(("local_dit_tf32", build.__name__), weights, lambda: build(weights), inputs_scope=True)
 
 
 def _weights32(weights):
     """The forward pack (``_pack32``), cached (``_cached32``)."""
-    return _cached32(_PACKS32, weights, _pack32)
+    return _cached32(_pack32, weights)
 
 
 def _weights32_bwd(weights):
     """The backward pack (``_pack32_bwd``), cached (``_cached32``)."""
-    return _cached32(_PACKS32B, weights, _pack32_bwd)
+    return _cached32(_pack32_bwd, weights)
 
 
 def _cond_tables32(cond, c2_fn, n, weights, pk, cross, save):

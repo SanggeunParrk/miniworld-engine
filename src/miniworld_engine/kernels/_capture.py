@@ -96,7 +96,7 @@ def _capture_info():
 
 def _graph_capture_id() -> int | None:
     """None outside a capture; inside one, the id of the capture sequence (0 when it cannot be read) -- whatever is declared static."""
-    if not torch.cuda.is_current_stream_capturing():
+    if not torch.cuda.is_available() or not torch.cuda.is_current_stream_capturing():   # a CPU-only process captures nothing
         return None
     try:
         fn = _capture_info()
@@ -144,17 +144,35 @@ def prune(store: dict, cid: int | bool | None = False) -> None:
         del store[k]
 
 
+#: id(store) -> the eager keys a capture under ``static_weights()`` / ``static_inputs()`` read or filled. A replay reads those entries, so the
+#: count limit never evicts them (evicting one freed memory a captured graph still read); they go with the store's other eviction rules.
+_PINNED: dict[int, set] = {}
+
+
+def _pin_if_static_capture(store: dict, sk) -> set:
+    pinned = _PINNED.setdefault(id(store), set())
+    if sk[0] is None and _graph_capture_id() is not None:
+        pinned.add(sk)
+    return pinned
+
+
+def _evict(store: dict, pinned: set, limit: int, keep) -> None:
+    """Drop the oldest entries that no static capture reads until fewer than ``limit`` are left (or only pinned ones)."""
+    for k in [k for k in store if k not in pinned and k != keep][: max(0, len(store) - limit + 1)]:
+        del store[k]
+
+
 def lookup(store: dict, key, build, limit: int = 64):
     """``build()``, cached in ``store`` under ``key`` within the current scope (see the module docstring)."""
     sk = scoped(key)
     if sk is None:
         return build()
+    pinned = _pin_if_static_capture(store, sk)
     hit = store.get(sk)
     if hit is not None:
         return hit
     prune(store)
-    while len(store) >= limit:
-        store.pop(next(iter(store)))
+    _evict(store, pinned, limit, sk)
     out = store[sk] = build()
     return out
 
@@ -177,6 +195,7 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
         if cid == 0:
             return build()
     sk = (cid, key)
+    pinned = _pin_if_static_capture(store, sk)
     hit = store.get(sk)
     if hit is not None and (valid is None or valid(hit)):
         return hit
@@ -185,34 +204,54 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     if alive is not None:
         for k in [k for k, e in store.items() if not alive(e)]:
             del store[k]
-    while len(store) >= limit and sk not in store:
-        store.pop(next(iter(store)))
+    if sk not in store:
+        _evict(store, pinned, limit, sk)
     out = store[sk] = build()
     return out
 
 
+#: (scope, (tag, ((pointer, version, dtype, shape), ...))) -> (weak references to the parameters, the forms). Also the Transition's ``Ws^T``
+#: (``transition/cuda/_weights.py``) and what FoldForge clears before it loads a model.
 _FORMS: dict = {}
 
 
-def param_forms(tag: str, params, build):
-    """``build()`` -- the kernel-dtype forms of some parameters (casts, contiguous copies, folds) -- cached while the very same
-    parameter storages are unmodified, scoped to the capture like every weight pack (``lookup``): an eager call and a captured step
-    under ``static_weights()`` share the entry, so a replay re-runs none of the cast kernels; a capture without it records them once
+def param_forms(tag, params, build, *, inputs_scope: bool = False):
+    """``build()`` -- the kernel-dtype forms of some parameters (casts, contiguous copies, transposes, folds) -- cached while the very same
+    parameter tensors are alive and unmodified, scoped to the capture like every weight pack (``lookup``): an eager call and a captured
+    step under ``static_weights()`` share the entry, so a replay re-runs none of the cast kernels; a capture without it records them once
     and every replay casts the weights as they are then.
 
     The reason it exists: with fp32 master parameters over bf16 activations every call casts every weight, ~10 small kernels per
     block per call (about 6-12 us), which made inference of the small blocks 10-50 % slower than with bf16 parameters. The key is
-    (pointer, version, dtype, shape) of each parameter and the entry keeps the parameters alive, so a freed storage's address cannot
-    alias a different tensor. A fused optimizer step does not bump ``_version`` -- as for every other pack, call
-    ``torch.autograd.graph.increment_version(params)`` after it. Inference tensors carry no version counter: not cached."""
+    (pointer, version, dtype, shape) of each parameter and an entry serves only the very tensors it was made from (weak references:
+    a freed storage's address reused by another tensor at the same version misses). An entry lives as long as its parameters and is
+    replaced when they are cached at a newer version -- never evicted by count: a captured graph reads the entry it hit, and a size cap
+    that freed a live entry freed memory a replay still read (the Transition's 64-entry ``Ws^T`` cache faulted Boltz-2's trunk graph so).
+    A fused optimizer step does not bump ``_version`` -- as for every other pack, call ``torch.autograd.graph.increment_version(params)``
+    after it. Inference tensors carry no version counter: not cached.
+
+    ``inputs_scope``: ``static_inputs()`` (whose contract covers the weights too) also shares the eager entry with a capture, as
+    ``static_weights()`` does for every call. ``tag`` names the form (any hashable)."""
+    params = tuple(params)
     try:
-        key = (
-            tag,
-            tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params),
-        )
+        key = (tag, tuple((p.data_ptr(), p._version, p.dtype, tuple(p.shape)) for p in params))
     except RuntimeError:
         return build()
-    return lookup(_FORMS, key, lambda: (build(), tuple(params)), limit=64)[0]
+    sk = (None, key) if inputs_scope and _STATIC_INPUTS[0] else scoped(key)
+    if sk is None:
+        return build()
+    hit = _FORMS.get(sk)
+    if hit is not None and all(r() is p for r, p in zip(hit[0], params, strict=True)):
+        return hit[1]
+    prune(_FORMS)
+    ids = [id(p) for p in params]
+    for k in [k for k, (refs, _) in _FORMS.items()
+              if any(r() is None for r in refs)
+              or (k[0] == sk[0] and k[1][0] == tag and [id(r()) for r in refs] == ids)]:
+        del _FORMS[k]
+    value = build()
+    _FORMS[sk] = (tuple(weakref.ref(p) for p in params), value)
+    return value
 
 
 def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64):

@@ -9,7 +9,6 @@ run eagerly inside the ops (also under a CUDA-graph capture), and the autograd f
 
 from __future__ import annotations
 
-import weakref
 from typing import Any
 
 import torch
@@ -75,12 +74,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
     return _kind(module, pair, mask) is not None
 
 
-# ---------------------------------------------------------------- weight packs (cached while the parameters are unchanged)
-#: Packs keyed by the weights' tensor objects (held weakly), valid while every version is unchanged; scoped to a CUDA-graph capture by
-#: ``kernels._capture`` (a capture packs once and records the packing kernels, so each replay repacks the current weights).
-_PACKS: dict = {}
-
-
+# ---------------------------------------------------------------- weight packs (``kernels._capture.param_forms``: cached while the parameters are unchanged)
 def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
     def build():
         with torch.no_grad():
@@ -96,28 +90,7 @@ def _packed(kind: int, weights: tuple[torch.Tensor, ...]):
 
             return pack_weights(*weights)
 
-    try:
-        versions = tuple(w._version for w in weights)
-    except (
-        RuntimeError
-    ):  # inference tensors carry no version counter: nothing could invalidate an entry
-        return build()
-    key = _capture.scoped((kind, tuple(id(w) for w in weights)))
-    if key is None:
-        return build()
-    hit = _PACKS.get(key)
-    if hit is not None:
-        refs, seen, pack = hit
-        if seen == versions and all(
-            r() is w for r, w in zip(refs, weights, strict=True)
-        ):
-            return pack
-    _capture.prune(_PACKS)
-    if len(_PACKS) >= 64:  # a model's worth of blocks; drop the oldest
-        _PACKS.pop(next(iter(_PACKS)))
-    pack = build()
-    _PACKS[key] = (tuple(weakref.ref(w) for w in weights), versions, pack)
-    return pack
+    return _capture.param_forms(("triattn_h100_sm90", kind), weights, build)
 
 
 # ---------------------------------------------------------------- custom ops
