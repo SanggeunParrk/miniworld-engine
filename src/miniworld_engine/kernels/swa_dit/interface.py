@@ -242,7 +242,7 @@ def _mod_sm100(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
 def _mod_tf32(c_base: torch.Tensor, wmod: torch.Tensor) -> bool:
     """Whether the hoisted modulation runs on the sm_100a TF32 kernel (mod_fwd_tf32): B200, fp32 c and Wmod, d_cond = C = 128, rows a
     multiple of 128, the TF32 kernels load (``settings.swa_dit_tf32=0`` / ``settings.swa_dit_sm100=0`` / ``force_portable_kernels=True``
-    keep the torch fp32 GEMM) -- and no gradient is recorded (there is no TF32 backward at the moment: ``dispatch._tf32_bwd_ready``).
+    keep the torch fp32 GEMM); with a gradient its backward is the TF32 ``swa_dit_mod_bwd_tf32``.
     Traceable: tensor metadata and the per-device constant ``dispatch._tf32_ready`` (which owns the build / load)."""
     if not (
         c_base.is_cuda and c_base.dtype == torch.float32 and wmod.dtype == torch.float32
@@ -269,7 +269,7 @@ def swa_dit_hoist_modulation(c_base: torch.Tensor, wmod: torch.Tensor) -> torch.
     ``c_base`` [B, S, d_cond] is the augment-invariant conditioning (``c[a*B + b] == c_base[b]``), or the per-row
     conditioning [N, S, d_cond] when there is no augment structure. silu runs in ``c_base``'s dtype, then the product is
     accumulated and kept in fp32 (as the engine's rmsnorm_adamod keeps its projections in registers). Differentiable. On B200 a
-    bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call without a gradient the TF32 mod_fwd_tf32 kernel.
+    bf16 call runs the sm_100a mod_fwd / mod_bwd kernels, an fp32 call the TF32 mod_fwd_tf32 / mod_bwd_tf32 kernels.
     """
     from miniworld_engine.kernels.swa_dit.dispatch import (
         native_h100_enabled,
