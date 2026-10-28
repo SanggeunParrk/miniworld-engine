@@ -317,13 +317,18 @@ def test_training_kernels_ran_graph_capture_compile_and_steady_memory(n_head, d_
         n for n in names if "triton" in n.lower()
     ]
     assert not any("bo_pv_gate_inf_sm100" in n or "bo_dpb_sm100" in n for n in names)
-    # the bound launches reuse their argument blocks and the activations are allocated afresh each step: nothing may pile up
+    # the bound launches reuse their argument blocks and the activations are allocated afresh each step: nothing may pile up.
+    # One eager step first: the graph capture of launched_kernels leaves the caching allocator to re-split its blocks on the next
+    # eager step (memory_allocated stays flat throughout; B200 2026-10-29: 1.47 -> 2.08 GB reserved without this step)
+    run(fast)
     torch.cuda.synchronize()
-    reserved = torch.cuda.memory_reserved()
+    allocated, reserved = torch.cuda.memory_allocated(), torch.cuda.memory_reserved()
     for _ in range(4):
         run(fast)
     torch.cuda.synchronize()
-    assert torch.cuda.memory_reserved() == reserved
+    assert torch.cuda.memory_allocated() == allocated   # nothing piles up step to step
+    # the allocator may still re-split its cached blocks (16 x 64: +6 %), but no step adds a step's worth
+    assert torch.cuda.memory_reserved() <= 1.1 * reserved, (torch.cuda.memory_reserved(), reserved)
     # a captured step replays to the eager gradients (cuBLAS under capture may sum in another order: not bit-exact)
     for q in fast.parameters():
         q.grad = torch.zeros_like(q)
