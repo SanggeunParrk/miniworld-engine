@@ -6,7 +6,7 @@ Triton forward (``_ln_fwd``); only the three gradients differ.
 
 Measured B200 (M=L^2, N=128, fwd+bwd): MASKED (a ``row_scale``, the AF pair mask) CUDA beats Triton 1.17x @L512, 1.28x @L1024 -- Triton pays a
 real row-scale penalty (+26% bwd) the CUDA path (one FMA) avoids. DENSE is ~neutral (1.00x @L512, 1.07x @L1024, slower at L384), so a dense LN
-takes this path only under ``settings.layernorm_cuda_bwd`` (opt-in). Any build or run failure of the CUDA kernel falls back to the Triton backward.
+takes this path only under ``settings.layernorm_bwd_path = "cuda"`` (opt-in). Any build or run failure of the CUDA kernel falls back to the Triton backward.
 """
 
 from __future__ import annotations
@@ -29,7 +29,7 @@ def use_cuda_bwd(x: torch.Tensor, row_scale: torch.Tensor | None) -> bool:
         and not cfg.force_portable_kernels
         and x.dtype == torch.bfloat16
         and 128 <= x.shape[-1] <= 512
-        and (row_scale is not None or cfg.layernorm_cuda_bwd)
+        and (row_scale is not None or cfg.layernorm_bwd_path == "cuda")
     )
 
 

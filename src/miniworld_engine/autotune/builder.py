@@ -147,11 +147,6 @@ SWITCHES: dict[str, tuple[tuple, tuple[str, ...]]] = {
     "ln_bwd_path": (("persistent", "atomic", "cuda"), ("train",)),
     "ln_out_bwd_path": (("split", "fused"), ("train",)),
     "trimul_impl": (("portable",), ("eval", "train")),
-    # The rest of settings.py's backend selectors. They were left out when SWITCHES was written
-    # and each one is a set of kernels no unit ever reached: measured against the shipped A6000
-    # cache, 26 kernels with working drivers were in the cache and in NO derived unit, and the
-    # far side of these switches is where most of them live.
-    "layernorm_cuda_bwd": ((True,), ("train",)),
 }
 
 #: switch name -> the ``settings`` field it pins, and how to parse the CLI string back to a value.
@@ -164,7 +159,6 @@ SWITCH_SETTINGS: dict[str, tuple[str, Callable[[str], object]]] = {
     "ln_bwd_path": ("layernorm_bwd_path", str),
     "ln_out_bwd_path": ("layernorm_out_bwd_path", str),
     "trimul_impl": ("trimul_impl", str),
-    "layernorm_cuda_bwd": ("layernorm_cuda_bwd", lambda v: v == "True"),
 }
 
 

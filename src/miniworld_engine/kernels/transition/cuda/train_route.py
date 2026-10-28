@@ -36,7 +36,7 @@ def _cuda_b2b_train_enabled() -> bool:
 def _ln_bwd_hook(dxn, x2, rstd, c1, gamma):
     """Hand-CUDA warp-per-row LN backward (~1.10x over privatized Triton at K=128). CUDA takes ``mean``; it is recovered from c1 = mean * rstd."""
     if (
-        settings.current().transition_lnbwd_cuda
+        settings.current().layernorm_bwd_path in (None, "cuda")   # a "persistent" / "atomic" pin takes the Triton backward
         and x2.dtype in (torch.float16, torch.bfloat16)
         and gamma.dtype == x2.dtype
         and x2.shape[1] <= 512

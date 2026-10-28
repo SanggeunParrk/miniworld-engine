@@ -9,7 +9,7 @@ Two rules hold everywhere in this file:
 
 * **Same operands as the driver.** Every checker imports the shapes and calls the same
   launcher as its twin in ``drivers_trans.py`` (``_transition_operands``, ``ROWS``,
-  ``TRIMUL_ROWS``/``TRIMUL_D``, and the ``settings.configure(transition_lnbwd_cuda=False)``
+  ``TRIMUL_ROWS``/``TRIMUL_D``, and the ``settings.configure(layernorm_bwd_path="atomic")``
   bypass), so a passing check speaks about the launch the runner actually recorded.
 * **Reference = what the source computes, not what the op is named.** Where a kernel takes
   precomputed state (LayerNorm ``rstd``/``c1``), the reference is fed the SAME state, and
@@ -196,8 +196,8 @@ def layernorm_bwd_foldstats_triton():
     """LN backward from saved stats -> (dx, dgamma, dbeta), the dgamma/dbeta column partials
     scattered over NUM_REPLICAS fp32 buffers and summed by the launcher.
 
-    ``transition_lnbwd_cuda`` defaults True and would route bf16/K<=512 to the hand-CUDA LN
-    backward instead of this kernel, so it is switched off for the launch exactly as the
+    An unpinned ``layernorm_bwd_path`` would route bf16/K<=512 to the hand-CUDA LN
+    backward instead of this kernel, so it is pinned to "atomic" for the launch exactly as the
     driver does. Reference: fp32 autograd through ``F.layer_norm`` -- an independent
     derivation of dx/dgamma/dbeta rather than a restatement of the kernel's own algebra
     (which would hide a wrong mean/rstd fold)."""
@@ -208,17 +208,12 @@ def layernorm_bwd_foldstats_triton():
     rstd, c1 = _stats(x2)
     dxn = torch.empty_like(x2).normal_()
 
-    # Pinned only while the settings still declare it (v2.2.0 retires the legacy transition_*
-    # switches); the driver applies the same guard.
-    pinned = hasattr(settings.current(), "transition_lnbwd_cuda")
-    if pinned:
-        previous = settings.current().transition_lnbwd_cuda
-        settings.configure(transition_lnbwd_cuda=False)
+    previous = settings.current().layernorm_bwd_path
+    settings.configure(layernorm_bwd_path="atomic")
     try:
         dx, dgamma, dbeta = _transition_ln_bwd(dxn, x2, rstd, c1, g)
     finally:
-        if pinned:
-            settings.configure(transition_lnbwd_cuda=previous)
+        settings.configure(layernorm_bwd_path=previous)
 
     xf = x2.float().requires_grad_(True)
     gf = g.float().requires_grad_(True)

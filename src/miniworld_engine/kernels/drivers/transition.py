@@ -251,9 +251,9 @@ def transition_bwd_swiglu_recompute_triton() -> None:
 
 
 def layernorm_bwd_foldstats_triton() -> None:
-    """_transition_ln_bwd_kernel via _transition_ln_bwd. ``transition_lnbwd_cuda`` defaults to
-    True and would route bf16/K<=512 to the hand-CUDA LN backward instead, so it is turned off
-    for this launch; PRIVATIZE_DGDB is driven at BOTH values."""
+    """_transition_ln_bwd_kernel via _transition_ln_bwd. ``layernorm_bwd_path`` unpinned would route
+    bf16/K<=512 to the hand-CUDA LN backward instead, so it is pinned to "atomic" (the Triton
+    backward) for this launch; PRIVATIZE_DGDB is driven at BOTH values."""
     from miniworld_engine import settings
     from miniworld_engine.kernels.layernorm_linear.triton.stats import stats_triton
     from miniworld_engine.kernels.transition.triton.fused import _transition_ln_bwd
@@ -264,7 +264,7 @@ def layernorm_bwd_foldstats_triton() -> None:
     # production sets it, so =0 is reachable only from a build-harness pin. Both pins are applied
     # only while the settings still declare them (v2.2.0 retires the legacy transition_* switches).
     current = settings.current()
-    pins = {name: value for name, value in (("transition_lnbwd_cuda", False),
+    pins = {name: value for name, value in (("layernorm_bwd_path", "atomic"),
                                             ("transition_lnbwd_privatize", True))
             if hasattr(current, name)}
     previous = {name: getattr(current, name) for name in pins}

@@ -90,7 +90,7 @@ def test_cuda_training_and_graph_no_native_engine_calls(monkeypatch, kind, width
 
     force_portable(True)
     settings.configure(
-        layernorm_cuda_bwd=True
+        layernorm_bwd_path="cuda"
     )  # strict policy must beat this native opt-in
     native_calls = []
 

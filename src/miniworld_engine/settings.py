@@ -244,9 +244,6 @@ class Settings:
     #: Fuse the layernorm stats pass into the transition kernel. Formerly
     #: MINIWORLD_TRANSITION_FUSE_STATS.
     transition_fuse_stats: bool = False
-    #: Use the hand-CUDA layernorm backward inside transition. Formerly
-    #: MINIWORLD_TRANSITION_LNBWD_CUDA.
-    transition_lnbwd_cuda: bool = True
     #: Version-B backward that saves xn instead of recomputing it. Formerly
     #: TRANSITION_SAVEDXN_SPLIT_BWD.
     transition_savedxn_split_bwd: bool = False
@@ -262,8 +259,6 @@ class Settings:
     #: `_resolve_bwd_path` only honours an override that is in `_VALID_BWD_PATHS`, so a
     #: still-declared "partial" would have fallen through to calibration with no warning.
     layernorm_bwd_path: Literal["persistent", "atomic", "cuda"] | None = None
-    #: Use the hand-CUDA layernorm backward. Formerly MINIWORLD_LN_IN_CUDA.
-    layernorm_cuda_bwd: bool = False
     #: Force one layernorm_linear out-backward path. Formerly MINIWORLD_LNOUT_BWD.
     layernorm_out_bwd_path: str | None = None
 
