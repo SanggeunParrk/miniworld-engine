@@ -18,7 +18,6 @@ import copy
 
 import pytest
 import torch
-from portable_helpers import poison_allocator as _poison
 from portable_helpers import randomize
 from portable_helpers import relative_fp64 as relative
 from portable_helpers import tf32_matmul_flag as tf32
