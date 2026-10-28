@@ -409,9 +409,13 @@ def swa_dit_block(
     from miniworld_engine.kernels import _capture
 
     dt = q.dtype
-    wk = _capture.param_forms(
-        f"swa_block_{dt}", weights, lambda: tuple(w.to(dt) for w in weights)
-    )
+    if torch.compiler.is_compiling():
+        # traced: the casts are graph ops (the cache's capture-id query is a graph break, and a compiled graph needs no cache)
+        wk = tuple(w.to(dt) for w in weights)
+    else:
+        wk = _capture.param_forms(
+            f"swa_block_{dt}", weights, lambda: tuple(w.to(dt) for w in weights)
+        )
     return swa_dit_block_fwd(
         q, mod, cos, sin, seqused, *wk, B, half_window, FP32_EPS, False
     )[0]
