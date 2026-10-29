@@ -123,3 +123,51 @@ def test_chai1_training_is_deterministic_and_graph_safe(served):
     for a, b in zip(captured, first, strict=True):
         assert torch.equal(a, b)
     assert served
+
+
+@pytest.mark.parametrize(("b", "interchain"), [(1, True), (2, False), (2, True)])
+@pytest.mark.parametrize("n", [128, 100])
+@pytest.mark.parametrize("master", ["bf16", "fp32"])
+def test_chai1_interchain_and_batch(b, interchain, n, master, served):
+    """The interchain mask (B200: in the epilogue, y / rstd / the dbias weight zero for a pair of two chains) and a batch of MSA stacks
+    (one at a time), training and inference, against the fp64 statements."""
+    m = build()
+    m.mask_interchain = interchain
+    s = 256
+    g = torch.Generator(device="cuda").manual_seed(5)
+    msa = torch.randn(b, s, n, 64, device="cuda", generator=g)
+    mask = torch.rand(b, s, n, device="cuda", generator=g) > 0.2
+    pair = torch.randn(b, n, n, 256, device="cuda", generator=g)
+    dz = torch.randn(b, n, n, 256, device="cuda", generator=g)
+    asym = torch.zeros(b, n, dtype=torch.long, device="cuda")
+    asym[:, n // 3:] += 1
+    asym[0, (2 * n) // 3:] += 1
+    gold = copy.deepcopy(m).double()
+    ref16 = copy.deepcopy(m).to(torch.bfloat16)
+    eng = copy.deepcopy(m) if master == "fp32" else copy.deepcopy(m).to(torch.bfloat16)
+
+    def go(mod, dtype, fn, autocast=False):
+        x = msa.to(dtype).clone().requires_grad_()
+        r = pair.to(dtype).clone().requires_grad_()
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            y = fn(mod, x, r)
+        return y.detach(), torch.autograd.grad(y, [x, r, *mod.parameters()], dz.to(y.dtype))
+
+    yg, gg = go(gold, torch.float64, lambda mod, x, r: mod._variant_reference(x, mask, asym, r))
+    yb, gb = go(ref16, torch.bfloat16, lambda mod, x, r: mod._variant_reference(x, mask, asym, r))
+    ye, ge = go(eng, torch.bfloat16, lambda mod, x, r: mod(x, mask, token_asym_id=asym, residual=r), autocast=master == "fp32")
+    assert served, "the Chai-1 kernels did not serve the call"
+    upd = lambda y: y.double() - pair.bfloat16().double()
+    assert rel(upd(ye), yg - pair.double()) <= max(1.5 * rel(upd(yb), yg - pair.double()), 1e-2)
+    if interchain:
+        cross = asym[:, :, None] != asym[:, None, :]
+        assert torch.equal(ye[cross], pair.bfloat16()[cross])
+    names = ["msa", "residual", *(n_ for n_, _ in m.named_parameters())]
+    for nm, a, bb, c in zip(names, ge, gb, gg, strict=True):
+        assert torch.isfinite(a).all(), nm
+        assert rel(a, c) <= max(1.5 * rel(bb, c), 2e-2), f"{nm}: engine {rel(a, c):.2e} vs bf16 statements {rel(bb, c):.2e}"
+    served.clear()
+    with torch.no_grad():
+        yi = eng(msa.bfloat16(), mask, token_asym_id=asym, residual=pair.bfloat16())
+    assert served
+    assert rel(upd(yi), yg - pair.double()) <= max(1.5 * rel(upd(yb), yg - pair.double()), 1e-2)

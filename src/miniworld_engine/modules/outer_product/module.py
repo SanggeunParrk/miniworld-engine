@@ -180,7 +180,8 @@ class OuterProductMean(nn.Module):
                                       normalize_before_proj=self.normalize_before_proj)
             ):
                 _m = mask if mask is not None else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
-                return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
+                return _opm_train.outer_product_mean(self, msa, _m, residual=residual,
+                                                     token_asym_id=token_asym_id if self.mask_interchain else None)
             if native and self.to_left.bias is not None and composed.biased_wide_serves(self, msa, mask):
                 return composed.biased_wide(self, msa, mask, token_asym_id, residual)
             if (
@@ -275,7 +276,9 @@ class OuterProductMean(nn.Module):
                     if mask is not None
                     else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 )
-                return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
+                # the interchain mask (B200: in the epilogue / dgrad) and a batch of MSA stacks (B200: one at a time)
+                return _opm_train.outer_product_mean(self, msa, _m, residual=residual,
+                                                     token_asym_id=token_asym_id if self.mask_interchain else None)
         # B200 inference the sm_100a kernels do not take (a batch of MSA stacks; the interchain mask; widths beyond opm_train.SM100_D_MSA /
         # SM100_D_PAIR): the composed CUDA / cuBLAS path (kernels.outer_product_mean.composed), not the PyTorch statements
         if (
