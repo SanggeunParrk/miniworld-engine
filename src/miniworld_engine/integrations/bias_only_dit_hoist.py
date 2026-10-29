@@ -27,11 +27,14 @@ Per training step that replaces, per block, the pair LayerNorm + projection (``p
 the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper: the forward is ONE kernel (``bo_hoist_pass.cu`` hoist_fwd, N <= 64: LN0 and the projection on the tensor cores, the normalised pair never
 written), the backward of one block of 16 heads is ONE kernel (hoist_bwd1: d LN0, the LN0 backward and dW' in a single pass over the pair, bf16 and
 fp32/TF32); more blocks keep the bf16 ``bo_hoist_bwd.cu`` kernel (N <= 192), fp32 the two cuBLAS GEMMs (TF32) around the LN0 rows.
-B200, bf16 (``settings.bias_only_dit_hoist_sm100``, R a multiple of 128): the forward is ONE kernel for N <= 128 and the backward ONE
-kernel for N <= 64 (``kernels/bias_only_dit/cuda/bo_hoist_sm100.cu``): the projection on tcgen05 from the raw pair rows with the
-LayerNorm applied in the epilogue as rstd (x W'^T - mean s), and d LN0 on tcgen05, the LN0 backward and dW' = S - mean_k S with
-S = (dbias diag(rstd)) x accumulated in tensor memory -- one read of the pair each way, as the per-sample pair (A L^2 rows) needs.
-More rows, or fp32: the LayerNorm rows + cuBLAS above.
+B200, bf16 and fp32 (``settings.bias_only_dit_hoist_sm100``, R a multiple of 128, up to ``hoist.SM100_MAX_ROWS`` weight rows: 192
+bf16 / 128 fp32, past which the path below is faster; ``kernels/bias_only_dit/cuda/bo_hoist_sm100.cu``):
+the forward is one pass over the pair per range of weight rows (bf16 384 / fp32 128 rows per launch, NP <= 128-row chunks inside):
+bf16 projects the raw pair rows on tcgen05 with the LayerNorm applied in the epilogue as rstd (x W'^T - mean s), fp32 normalises the
+tile in shared memory and projects it on kind::tf32. The backward is one pass for bf16 N <= 64 (d LN0 on tcgen05, the LN0 backward and
+dW' = S - mean_k S with S = (dbias diag(rstd)) x accumulated in tensor memory); more rows, and fp32, stream the weight rows in chunks
+(bf16 64, fp32 32: d LN0 summed over the chunks, S in tensor memory for 256 rows per launch, S-only launches past that; fp32 takes
+S = xhat^T dbias from the tile normalised in place). The LayerNorm rows + cuBLAS above remain the path off B200 and with the switch off.
 
 bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
