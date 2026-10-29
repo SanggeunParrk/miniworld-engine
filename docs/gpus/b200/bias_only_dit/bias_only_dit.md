@@ -537,6 +537,49 @@ a captured step and torch.compile at L2048).
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ |
 
+### T9 · a pair bias of its own per sample (2026-10-29; bf16 and fp32, L <= 768)
+
+`BiasOnlyDiTBlock(single [1, A, L, d], cond, pair [A, L, L, 128])` (or a hoisted bias [A, H, L, L] from `pair_bias_all`): each
+sample attends with its own `softmax(bias_a)`, so P cannot be shared or hoisted. Before this change B200 sent it to the module's
+composition (the training gate refused per-sample bias; inference was Hopper-only). Now training (`bias_only_dit_train.block_psb`,
+the same `_BlockPSB` function as Hopper's) and inference (`bias_only_dit.update_psb` -> `runner.step_psb`) run the shared-bias cores'
+**`-DPSB` builds**; nothing else of the block changes (conditioning tables, rows, GEMMs, the hoist with its per-sample buffers).
+
+- `softmax_t` (T2) already took a [H, A, L, L] bias with a key mask per sample: it writes P and P^T per (head, sample) plane
+  (inference: P only). Masked keys are -3e38 before the max, so a sample whose keys are **all** masked gets uniform rows -- the
+  module's `finfo.min` fill gives the same -- and never NaN (the training cores of AttentionPairBias, which fold the mask as -1e30 into
+  `exp2(t log2 e - m log2 e)`, are a different kernel).
+- `pv_gate_inf.cu -DPSB` (SG = 1; `PvGateCore(psb=True)`): an item is (head, query tile, sample) and its P tile is the sample's plane,
+  TMA row (h A + a) L + m0; forward a = sigmoid(g) (P_a v_a), dV = P_a^T do_a (GATE = 0 on P^T). Every plane is read once.
+- `dpb_sm100.cu -DPSB` (`DpbKernel(psb=True)`): items over (sample, head group, query tile, key tile), the K loop the one sample,
+  dbias_{h,a} = P_{h,a} o (do_a v_a^T - D_{h,a}) into [H, A, L, L] (nothing summed over the samples), and the key mask (one [L] or
+  [A, L]) zeroes the masked keys -- the module's `masked_fill` does, which matters only for an all-masked sample's uniform P. No
+  CTA-pair (`dpbx2`) form; the key tile from `_dpb_nj` over A x head groups.
+- fp32: `pv_gate_tf32.cu -DPSB` and `dpb32_sm100.cu -DPSB`, the same changes (the fp32 `softmax_t`).
+- The backward is the per-step launch sequence (the fused tail of T6 assumes one P); P and P^T are stored, [H, A, L, L] each (bf16:
+  2 x 906 MB at A48 L768, 16 x 48).
+
+Measured (training, 16 x 48, A = 48, bf16 activations with fp32 master parameters under autocast, a key mask per sample, CUDA graph
+on, GPU 7 of node 2 beside the utilisation filler; before = d879e180, where the call ran the module's composition; ms):
+
+| L | the block alone on a per-sample bias leaf [A, H, L, L] (whole fwd + bwd captured, median of 7 x 10 replays): before / now / PyTorch eager | `bench.py ... per_sample_pair=true n_augment=48` (hoist + block, graph on): before / now / PyTorch compiled |
+|---|---|---|
+| 384 | 3.900 / **1.858** / 5.051 | 6.623 / **5.363** / 4.755 |
+| 768 | 11.800 / **5.303** / 14.552 | 22.721 / **19.248** / 17.948 |
+
+The block is 2.1-2.2x faster; the whole step is behind compiled PyTorch because of the **per-sample hoist** (`pair_bias_all_psb`:
+LayerNorm rows, cuBLAS, `ln0_bwd_rows` over the A L^2 pair rows -- 1.8 GB of pair at L384): profiled at L384 (eager), the hoist's
+`ln0_bwd_rows` 1.65 ms, `layernorm_rows` 0.99 ms, elementwise casts ~0.8 ms and its GEMMs ~0.7 ms of a 6.3 ms step, against the
+block's attention kernels (softmax_t 151 us, pv_gate_inf PSB 2 x 56, dpb PSB 138). That hoist (one read of the pair forward, one
+backward, LN folded in as the APB pair kernels do) is the next lever; it is not part of this change.
+
+Registers (ptxas, sm_100a): `pv_gate_inf -DPSB` 76-132, `dpb_sm100 -DPSB` 86-111, `pv_gate_tf32 -DPSB` 85-108, `dpb32_sm100 -DPSB`
+112-113 (cap 128); no spills. Tests: `tests/gpu/sm100/test_b200_bias_only_dit_psb_gpu.py` (192: the PSB cores against fp64 for every
+layout, S 1 / 3 / 5 / 48, L128-768, masks none / shared / per sample with an all-masked sample, bitwise reruns; the training block
+bf16 and fp32 against the fp32 module (the Hopper per-sample bars: bf16 loss / output within 8e-3, gradient cosine 1 - 8e-4; fp32
+2.5e-3, 1 - 2e-4) at (A, L) = (2, 256), (5, 384), (4, 384 one sample all masked), (48, 384), (3, 768), (5, 768), the other layouts,
+a hoisted three-block stack, a captured step bitwise eager; inference bf16 within 1.3x the bf16 module's error and fp32 within 2.5e-3).
+
 ## fp32 path (TF32)
 
 Status (2026-10-20): built (nvcc 13.1 cubins), tested and measured on B200. `tests/gpu/sm100/test_b200_bias_only_dit_tf32_gpu.py`:

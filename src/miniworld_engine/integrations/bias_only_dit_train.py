@@ -39,6 +39,15 @@ token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 /
 B200: up to 3072, the forward core and dV on ``pv_stream_sm100.cu`` past 768, ``softmax_t`` to 3072 keys, the rest length-free), a per-sample
 conditioning [A, 1, L, 384], a key mask [1, L] or none, LayerNorm eps 1e-5. settings.bias_only_dit_train=0 turns it off.
 
+A pair bias of its own per sample (``block_psb``, bias [H, A, L, L] head-major; ``BiasOnlyDiTBlock`` with ``single`` [1, A, L, d]
+and a pair [A, L, L, 128] or a hoisted [A, H, L, L] bias): Hopper runs ``bo_psb.cu``; B200 (bf16 or fp32, L a multiple of 128 up to
+768) runs the shared-bias cores' ``-DPSB`` builds (fp32: ``pv_gate_tf32`` / ``dpb32_sm100``, the same way) -- ``softmax_t`` makes P
+and P^T per (head, sample) plane [H, A, L, L] (a per-sample
+key mask [A, L] or one [1, L]; a fully masked sample's rows are uniform, as the module's finfo.min fill makes them, never NaN),
+``pv_gate_inf`` reads its item's sample's P tile (forward a = sigmoid(g) (P v), dV = P^T do), ``dpb_sm100`` writes
+dbias_{h,a} = P_{h,a} o (do_a v_a^T - D_{h,a}) per sample; the backward is the per-step launch sequence (no fused tail), and the bias
+gradient goes into the hoist's buffer (``sink``) like the shared one.
+
 Hoisted pair bias (``block(..., bias=b)``, b [1, H, L, L] in the step's dtype from ``pair_bias_all``,
 ``integrations/bias_only_dit_hoist.py``): the block's own autograd function without the pair -- the forward skips ``pair_bias``
 (softmax_t reads b and writes P / P^T beside it), the backward skips ``pair_bias_bwd`` (and its ``pair_bias_bwd_fin`` merge): the bias
@@ -99,7 +108,8 @@ NAMES = ["attention." + n for n in ATT] + ["transition." + n for n in TRN]
 
 def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -> bool:
     """``bias``: the block's hoisted pair bias [1, H, L, L] (then ``pair`` is not read and may be None). ``per_sample``: the bias
-    of its own per sample, [H, A, L, L] head-major, natural logits (``serves_psb``; H100 only, ``pair`` is not read)."""
+    of its own per sample, [H, A, L, L] head-major, natural logits (``serves_psb``; H100 / B200 bf16 / fp32, B200 up to L 768;
+    ``pair`` is not read)."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if (not settings.current().bias_only_dit_train) or not torch.is_grad_enabled():
@@ -113,7 +123,7 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
     if not (
         single.is_cuda
         and (
-            (torch.cuda.get_device_capability(single.device) == (10, 0) and not per_sample)
+            torch.cuda.get_device_capability(single.device) == (10, 0)
             or h100_enabled(single.device)
         )
     ):
@@ -121,6 +131,9 @@ def serves(module, single, cond, pair, mask=None, bias=None, per_sample=False) -
     if per_sample and bias is None:
         return False
     dt = single.dtype
+    b200_psb = per_sample and not h100_enabled(single.device)
+    if b200_psb and single.shape[2] > 768:
+        return False  # B200 per-sample bias: the -DPSB builds of the bf16 / TF32 cores, L up to 768
     src = pair if bias is None else bias  # the pair, or the block's hoisted bias
     if (
         src is None
@@ -552,6 +565,10 @@ def _op(kind, dev, nh=16, dh=48):
             if kind == "swiglu"
             else C.PvGateCore(idx, nh=nh, dh=dh, pdl=True)
             if kind == "pvpdl"
+            else C.PvGateCore(idx, nh=nh, dh=dh, psb=True)  # a P plane per (head, sample)
+            if kind == "pvpsb"
+            else C.DpbKernel(idx, nh=nh, dh=dh, psb=True)
+            if kind == "dpbpsb"
             else {"pv": C.PvGateCore, "dpb": C.DpbKernel, "pvdpb": C.PvDpb}[kind](
                 idx, nh=nh, dh=dh
             )
@@ -573,10 +590,13 @@ def _width(params):
     return params[NAMES.index("attention.to_value.weight")].shape[0]
 
 
-def _psb_core(f32=False, L=0) -> str:
+def _psb_core(f32=False, L=0, dev=None) -> str:
     """The per-sample attention core: "recompute" (bo_psb.cu, bf16: the forward keeps two floats per softmax row and no P, the backward
     rebuilds P from the bias). fp32 (bo_psb32.cu, TF32) has it up to L 512 (the forward keeps v resident); longer L takes "cublas" (the
-    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored)."""
+    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored). B200 (``dev`` sm_100): "stored" -- P and P^T [H, A, L, L] from
+    softmax_t, the -DPSB builds of pv_gate_inf / dpb_sm100 (fp32: pv_gate_tf32 / dpb32_sm100)."""
+    if dev is not None and dev.type == "cuda" and torch.cuda.get_device_capability(dev) == (10, 0):
+        return "stored"
     if f32:
         from miniworld_engine.kernels.bias_only_dit.cuda import PSB32_MAX_L
 
@@ -591,6 +611,7 @@ def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
     A, _, L, _ = single.shape
     M, R, e = A * L, L * L, single.new_empty
     f32 = torch.float32
+    core = _psb_core(at is F32, L, single.device) if psb else None
     return [
         e((M, DC), dtype=at),
         e((M, 2), dtype=f32),
@@ -599,8 +620,8 @@ def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
         e((M, 2), dtype=f32),
         e((M, D), dtype=at),
         e((M, 2 * DA), dtype=at),
-        (e((H, A, L, 2), dtype=f32) if _psb_core(at is F32, L) == "recompute" else e((H, A, L, L), dtype=at)) if psb else e((H, L, L), dtype=at),
-        e((0,) if psb else (H, L, L), dtype=at),
+        (e((H, A, L, 2), dtype=f32) if core == "recompute" else e((H, A, L, L), dtype=at)) if psb else e((H, L, L), dtype=at),
+        e((H, A, L, L) if core == "stored" else (0,) if psb else (H, L, L), dtype=at),
         e((M, DA), dtype=at),
         e((M, D), dtype=at),
         e((M, 2), dtype=f32),
@@ -727,10 +748,15 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
     H, DA = W["Wf_bf"].shape[0], W["Wo"].shape[1]  # heads, attention channels (LAYOUTS)
     A, _, L, _ = single.shape
     M, R, dev = A * L, L * L, single.device
+    b200 = not C.h100_enabled(dev)
     x = single.reshape(M, D).contiguous()  # the input as it is: the first residual rows
 
     def pair_part():
         """The attention weights P (and P^T): pair bias -> softmax. Reads the pair and the mask only."""
+        if psb and b200:  # per-sample bias on B200: P and P^T per (head, sample) plane, the sample's key mask folded in
+            P, Pt = (torch.empty(H, A, L, L, device=dev, dtype=BF) for _ in range(2))
+            C.softmax_t(bias.reshape(H * A * L, L), P.view(H * A * L, L), Pt.view(H * A * L, L), _psb_mask(mask, A, L, True), A)
+            return P, Pt, None
         if psb:  # per-sample bias: no P, the forward keeps the two row statistics the backward rebuilds it from (bo_psb.cu)
             return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
         P = torch.empty(H, L, L, device=dev, dtype=BF)
@@ -772,7 +798,10 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
     BT.adaln_a_cuda(x, G, W["bs1"], xa, xst, EPS)
     vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
     P, Pt, pst = pair_part()
-    if psb:
+    if psb and b200:
+        og = torch.empty(M, DA, device=dev, dtype=BF)
+        _op("pvpsb", dev, H, DA // H)(vg[:, :DA], P.view(H * A * L, L), og, A, g=vg[:, DA:])  # a = sigmoid(g) (P_a v) per sample
+    elif psb:
         og = torch.empty(M, DA, device=dev, dtype=BF)
         C.psb_fwd(bias.reshape(H * A * L, L), None, _psb_mask(mask, A, L, False), vg, og, A, H, DA // H, stats=P)
     else:
@@ -1082,7 +1111,12 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    if psb:  # one pass over the bias: P rebuilt, dV and the bias gradient (bo_psb.cu)
+    if psb and not C.h100_enabled(dev):  # B200: the stored P / P^T planes, the -DPSB cores
+        _op("pvpsb", dev, H, DA // H)(do, Pt.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a
+        _op("dpbpsb", dev, H, DA // H)(
+            do, vg[:, :DA], P.view(H * A * L, L), dd, dbias_out.view(H * A * L, L), A, mask=_psb_mask(mask, A, L, True)
+        )  # dbias_a = P_a o (do_a v_a^T - D_a), 0 on the masked keys (a fully masked sample's uniform P included)
+    elif psb:  # one pass over the bias: P rebuilt, dV and the bias gradient (bo_psb.cu)
         C.psb_bwd(
             bias.reshape(H * A * L, L),
             do,
@@ -1629,9 +1663,12 @@ def _op32(kind, dev, nh, dh):
     if (kind, idx, nh, dh) not in _OPS32:
         from miniworld_engine.kernels.bias_only_dit.cuda import tf32
 
-        _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.Dpb32}[
-            kind
-        ](idx, nh=nh, dh=dh)
+        if kind in ("pvpsb", "dpbpsb"):  # B200 per-sample bias: a P plane per (head, sample)
+            _OPS32[(kind, idx, nh, dh)] = {"pvpsb": tf32.PvGateCoreTF32, "dpbpsb": tf32.Dpb32}[kind](idx, nh=nh, dh=dh, psb=True)
+        else:
+            _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.Dpb32}[
+                kind
+            ](idx, nh=nh, dh=dh)
     return _OPS32[(kind, idx, nh, dh)]
 
 
@@ -1722,7 +1759,13 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
             torch.mm(xa, W["Wvg"][DA:].t(), out=vg.view(-1)[M * DA :].view(M, DA))
         else:
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
-        if psb:
+        b200_psb = psb and not _hopper(dev)
+        if b200_psb:  # B200: P and P^T per (head, sample) plane (the sample's key mask folded in), the -DPSB TF32 cores
+            P, Pt, pst = e(H, A, L, L), e(H, A, L, L), None
+            F.softmax_t_cuda(
+                bias.reshape(H * A * L, L), P.view(H * A * L, L), Pt.view(H * A * L, L), _psb_mask(mask, A, L, True), A
+            )
+        elif psb:
             Pt, pst = torch.empty(0, device=dev), None
             if _psb_core(True, L) == "recompute":  # bo_psb32.cu: the row statistics instead of P, the softmax inside the core below
                 P = e(H, A, L, 2)
@@ -1754,8 +1797,10 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
                 Pt.view(H * L, L),
                 None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
             )
-        og = e(M, DA) if (not psb or _psb_core(True, L) == "recompute") else _psb_fwd_core(vg, P, A, L, H, DA)
-        if psb:
+        og = e(M, DA) if (not psb or b200_psb or _psb_core(True, L) == "recompute") else _psb_fwd_core(vg, P, A, L, H, DA)
+        if b200_psb:
+            _op32("pvpsb", dev, H, DA // H)(vg[:, :DA], P.view(H * A * L, L), og, A, g=vg[:, DA:])  # a = sigmoid(g) (P_a v) per sample
+        elif psb:
             if _psb_core(True, L) == "recompute":
                 from miniworld_engine.kernels.bias_only_dit import cuda as C32
 
@@ -1932,7 +1977,12 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
         else:
             F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         dbias = None if psb else e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
-        if psb and _psb_core(True, L) == "recompute":  # bo_psb32.cu: P rebuilt from the bias, dV and the bias gradient in one pass
+        if psb and not _hopper(dev):  # B200: the stored P / P^T planes, the -DPSB TF32 cores
+            _op32("pvpsb", dev, H, DA // H)(do, Pt.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a
+            _op32("dpbpsb", dev, H, DA // H)(
+                do, vg[:, :DA], P.view(H * A * L, L), dd, dbias_out.view(H * A * L, L), A, mask=_psb_mask(mask, A, L, True)
+            )  # dbias_a = P_a o (do_a v_a^T - D_a), 0 on the masked keys
+        elif psb and _psb_core(True, L) == "recompute":  # bo_psb32.cu: P rebuilt from the bias, dV and the bias gradient in one pass
             from miniworld_engine.kernels.bias_only_dit import cuda as C32
 
             C32.psb32_bwd(
@@ -2083,7 +2133,7 @@ class _BlockH(torch.autograd.Function):
 
 
 class _BlockPSB(torch.autograd.Function):
-    """A block on a bias of its own per sample, bf16 or fp32 (Hopper): ``bias`` [H, A, L, L] head-major, natural logits (the layout
+    """A block on a bias of its own per sample, bf16 or fp32 (Hopper; B200 bf16): ``bias`` [H, A, L, L] head-major, natural logits (the layout
     ``token_dit_pair_bias.pair_biases`` leaves, there in log2 units); the bias gradient (same layout and units) is the gradient of
     ``bias``."""
 
@@ -2126,7 +2176,7 @@ class _BlockPSB(torch.autograd.Function):
 
 
 def serves_psb(module, single, cond, bias, mask=None) -> bool:
-    """Can ``block_psb`` run this call: the Hopper bf16 / fp32 (TF32) training block on a bias of its own per sample, ``bias``
+    """Can ``block_psb`` run this call: the Hopper bf16 / fp32 (TF32) or the B200 bf16 training block on a bias of its own per sample, ``bias``
     [H, A, L, L] natural logits (A = single.shape[0], one batch row), L a multiple of 128 up to 768, a key mask [1, L] or [A, L]
     (bool) or none. Anything else keeps the module's PyTorch composition."""
     return serves(module, single, cond, None, mask, bias=bias, per_sample=True)

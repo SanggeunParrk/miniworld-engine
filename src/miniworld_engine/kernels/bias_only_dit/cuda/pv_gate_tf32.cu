@@ -36,6 +36,8 @@
 // programmatic dependent launch -- launch_dependents after setup, griddepcontrol.wait before the producer reads v and before the
 // epilogue reads g or stores a -- and the gated output rounded to the nearest TF32 (cvt.rna), since a is bo_tail_tf32's MMA operand.
 // Without it the cubin is the training path's / the default inference path's, unchanged.
+// -DPSB (with SG=1): a pair bias of its own per sample -- P is [H, S, L, L] (a plane per (head, sample)) and an item's P chunks are
+// its sample's: the TMA row is (h S + a) L + m0 (pv_gate_inf.cu's -DPSB).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -56,6 +58,12 @@ using namespace s100;
 #define DHEAD 48
 #endif
 constexpr int DH = DHEAD, NH = NHEAD, QM = 128, KC = 32;                     // KC: keys per stage (one 128-B fp32 row of P)
+#ifdef PSB
+static_assert(SG == 1, "PSB: one sample per work item (each sample its own P)");
+constexpr bool PSB_P = true;
+#else
+constexpr bool PSB_P = false;
+#endif
 static_assert(DH == 32 || DH == 48 || DH == 64, "head width 32, 48 or 64");
 constexpr int NA = (DH + 31) / 32;                                           // 32-channel atoms of a v chunk
 constexpr int WB = DH - 32;                                                  // channels of the second staging half: 0, 16, 32
@@ -156,7 +164,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
           if (g >= NST) mbar_wait(&B.empty[s], ((g / NST) - 1) & 1);
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.full[s], TP + ns * TV);
-          tma_load_2d(st, &mp, &B.full[s], c * KC, h * L + m0);
+          tma_load_2d(st, &mp, &B.full[s], c * KC, (PSB_P ? h * S + a0 : h) * L + m0);
           for (int k = 0; k < ns; ++k)
 #pragma unroll
             for (int a = 0; a < NA; ++a)

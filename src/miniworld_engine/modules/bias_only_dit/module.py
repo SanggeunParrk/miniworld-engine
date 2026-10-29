@@ -215,8 +215,8 @@ class BiasOnlyDiTBlock(nn.Module):
 
     def _psb_candidate(self, single, cond, pair, bias) -> bool:
         """A pair (or hoisted bias) of its own per sample: ``single`` [1, B, L, d] with ``pair`` [B, L, L, d_pair] or ``bias``
-        [B, H, L, L], B > 1 (the samples folded into the batch axis, each attending with its own bias). Training on Hopper only
-        (``integrations.bias_only_dit_train.block_psb``)."""
+        [B, H, L, L], B > 1 (the samples folded into the batch axis, each attending with its own bias). Training on Hopper (bf16 / fp32)
+        and B200 (bf16 / fp32) (``integrations.bias_only_dit_train.block_psb``)."""
         if (pair is None and bias is None) or not torch.is_grad_enabled() or self.implementation is _REF:
             return False
         if not (single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1):
@@ -226,7 +226,9 @@ class BiasOnlyDiTBlock(nn.Module):
             return False
         from miniworld_engine.kernels.bias_only_dit.cuda import h100_enabled
 
-        return bool(single.is_cuda and h100_enabled(single.device) and src.dtype is single.dtype)
+        if not (single.is_cuda and src.dtype is single.dtype):
+            return False
+        return bool(h100_enabled(single.device) or torch.cuda.get_device_capability(single.device) == (10, 0))
 
     def _forward_psb(self, single, cond, bias, mask):
         """The fused per-sample-bias block (``bias_only_dit_train.block_psb``) on ``bias`` [B, H, L, L], or None when it does not serve
@@ -266,7 +268,7 @@ class BiasOnlyDiTBlock(nn.Module):
             if out is not None:
                 return out
         if single.ndim == 4 and single.shape[0] == 1 and single.shape[1] > 1 and _fused.serves_psb(self, single, cond, pair, mask, bias=bias):
-            return _fused.update_psb(self, single, cond, pair, mask, bias=bias)  # a bias of its own per sample, inference (H100)
+            return _fused.update_psb(self, single, cond, pair, mask, bias=bias)  # a bias of its own per sample, inference (H100, B200)
         if _fused.serves(self, single, cond, pair, mask, bias=bias):
             return _fused.update(self, single, cond, pair, mask, bias=bias)
         if _train.serves(self, single, cond, pair, mask, bias=bias):

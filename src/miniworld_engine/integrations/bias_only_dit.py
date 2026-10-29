@@ -284,8 +284,9 @@ def chunk_samples(n_samples: int, n_head: int, length: int, itemsize: int) -> in
 
 def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
     """Inference with a pair (``pair`` [B, L, L, 128]) or a hoisted bias (``bias`` [B, H, L, L]) of its own per sample: ``single`` /
-    ``cond`` [1, B, L, d], B > 1, no autograd, H100, bf16 or fp32 (TF32), L a multiple of 128 up to 768 (fp32 beyond 512 takes
-    the cuBLAS core), a key mask [1, L] / [B, L] or none."""
+    ``cond`` [1, B, L, d], B > 1, no autograd, H100 (bf16 or fp32 (TF32); fp32 beyond 512 takes the cuBLAS core) or B200 (bf16 or
+    fp32: the per-sample softmax and the ``-DPSB`` build of ``pv_gate_inf`` / ``pv_gate_tf32``), L a multiple of 128 up to 768, a key
+    mask [1, L] / [B, L] or none."""
     from miniworld_engine.modules.exceptions import ImplementationType
 
     if (not settings.current().bias_only_dit) or torch.is_grad_enabled():
@@ -296,8 +297,12 @@ def serves_psb(module, single, cond, pair, mask=None, bias=None) -> bool:
 
     dt = single.dtype
     src = pair if bias is None else bias
-    if src is None or not (single.is_cuda and h100_enabled(single.device) and dt in (torch.bfloat16, torch.float32)
-                           and cond.dtype is dt and src.dtype is dt):
+    if src is None or not single.is_cuda:
+        return False
+    b200 = torch.cuda.get_device_capability(single.device) == (10, 0)
+    if not ((h100_enabled(single.device) or b200) and dt in (torch.bfloat16, torch.float32)):
+        return False
+    if not (cond.dtype is dt and src.dtype is dt):
         return False
     if dt is torch.float32 and (module.attention.to_value.weight.dtype is not torch.float32 or torch.is_autocast_enabled("cuda")):
         return False
