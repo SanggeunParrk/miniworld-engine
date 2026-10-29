@@ -527,7 +527,7 @@ KERNELS_ESM32 = {
     "esm_qk_b32": ("lesm", "local_esm_qkrope_bwd_f32", 0),
     "esm_qk_fin": ("lesm", "local_esm_qk_fin", 0),
     "esm_dq32": ("lattn_esm_dq_tf32", "local_attn_esm_dq_tf32", 229632),
-    "esm_dkv32": ("lattn_esm_dkv_tf32", "local_attn_esm_dkv_tf32", 166144),
+    "esm_dkv32": ("lattn_esm_dkv_tf32", "local_attn_esm_dkv_tf32", 200960),
     "esm_bias_s": ("lesm", "local_esm_bias_scatter", 0),
 }
 
@@ -588,12 +588,16 @@ def attn_esm_bwd32(q, k, v, do, bias2, lse, dd, dq, dkv):
     _load_esm32("esm_dq32", d)(
         (nq * NH * sp, 1, 1), (512, 1, 1),
         _rows32(q, 128), _rows32(k, 256), _rows32(v, 256), _rows32(do, 128), lse, dd, _rows32(k, 256, "128a32"),
-        bias2, dq, int(ldd), dbias, int(N), int(A), int(nwin), int(sp),
+        bias2, _tmap(dq, (128, N, A), (ldd * 4, N * ldd * 4), (16, 32, 1), 64, "f32"), dbias, int(N), int(A), int(nwin), int(sp),
     )
+    out = dkv[:, 128:384]                                           # dK at its column 128, dV at 256: TMA stores of 32 rows x 16 columns
     _load_esm32("esm_dkv32", d)(
         (nq * NH * sp, 1, 1), (512, 1, 1),
-        _rows32(q, 256), _rows32(q, 256, "128a32"), _rows32(k, 128), _rows32(v, 128), _rows32(do, 256), _rows32(do, 256, "128a32"),
-        _vec(lse, 256), _vec(dd, 256), bias2, dkv, int(ldd), int(N), int(A), int(nwin), int(sp),   # dkv: dK at its column 128, dV at 256
+        _rows32(q, 224), _rows32(q, 32), _rows32(q, 224, "128a32"), _rows32(q, 32, "128a32"),
+        _rows32(do, 224), _rows32(do, 32), _rows32(do, 224, "128a32"), _rows32(do, 32, "128a32"),
+        _rows32(k, 128), _rows32(v, 128), _vec(lse, 256), _vec(dd, 256),
+        _tmap(out, (256, N, A), (ldd * 4, N * ldd * 4), (16, 32, 1), 64, "f32"),
+        bias2, int(N), int(A), int(nwin), int(sp),
     )
     return dbias.sum(0) if sp > 1 else dbias
 

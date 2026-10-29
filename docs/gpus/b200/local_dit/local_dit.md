@@ -447,24 +447,40 @@ weight gradients in one `atom_dw` (TF32) launch.
 
 | kernel | design |
 |---|---|
-| `lattn_esm_dq_tf32.cu` `local_attn_esm_dq_tf32` | query-centric; S cols 0..255, dP 256..511, dS fp32 in place over S (each warp writes exactly the cells it read: no barrier), dQ = dS K into cols 256..287 with K read a second time MN-major (one 32 KB slot); two 96 KB stages (q, dO, k, v); LSE / D one global load per thread and the bias read per 8-column chunk from L2 (the dbias sums hold 33 registers; with the bias also in registers, or with the stage's six TMA issues in warp 15's code, 128 registers spilled) |
-| `lattn_esm_dkv_tf32.cu` `local_attn_esm_dkv_tf32` | key-centric; fp32 P^T / dS^T fill S^T / dP^T and dV / dK need their own columns, so the 256 queries go in two halves through one buffer (S^T_h 0..127, dP^T_h 128..255, dV 256..287, dK 288..319, accumulated over the halves); q and dO K-major and MN-major in one 162 KB stage |
-
-Both: 512 threads, 128 registers, no spills; deterministic (the bias gradient as in the bf16 kernel).
+| `lattn_esm_dq_tf32.cu` `local_attn_esm_dq_tf32` | query-centric; S cols 0..255, dP 256..511, dS fp32 in place over S (each warp writes exactly the cells it read: no barrier), dQ = dS K into cols 256..287 with K read a second time MN-major (one 32 KB slot); two 96 KB stages (q, dO, k, v); the bias of a warp's cells and their dbias sums in registers, each with the triangle pair merged (32 + 1; the TMEM reads 4 columns at a time to fit 128 registers), LSE / D loaded before the sample's MMAs are waited for; dQ leaves through per-warp TMA stores staged in the MN-major k slot once dQ has read it |
+| `lattn_esm_dkv_tf32.cu` `local_attn_esm_dkv_tf32` | key-centric; fp32 P^T / dS^T fill S^T / dP^T and dV / dK need their own columns, so the 256 queries go in two phases: cells 0..6 (S^T 0..223, dP^T 224..447, dV 448..479, dK 480..511), then cell 7 (seen by key quadrant 3 only) over cell 0's columns -- every lane quadrant has five cells in phase 1 and at most one in phase 2; q and dO K-major and MN-major in boxes of 224 and 32 queries, each operand in its own slot (196 KB in all) so the next sample's loads go out as soon as a slot is read; dK / dV leave through per-warp TMA stores staged in the phase-1 MN-major slot |
+Both: 512 threads, <= 128 registers, no spills; deterministic (the bias gradient as in the bf16 kernel).
 
 Measured, one block, forward + backward as one CUDA graph, fp32 (TF32 on for the module path), shared conditioning, ms:
 
 | (A, N) | B200 kernels | module path (B200) | x |
 |---|---|---|---|
-| (48, 4096) | 4.203 | 23.53 | 5.6 |
-| (48, 8192) | 8.163 | 46.77 | 5.7 |
+| (48, 4096) | 3.829 | 23.53 | 6.1 |
+| (48, 8192) | 7.429 | 46.77 | 6.3 |
 
-At (48, 4096) (eager profile, us): gemm32 1008, atom_dw 476, adaln_bwd (3) 451, attention dQ 416, attention dK / dV 374, adaln (3) 235,
-gemm_rg 213, swiglu_bwd 212, attention forward 144. The TF32 attention backward (790 us, the bf16 one 262) is the lever left: the dK / dV
-kernel's single stage leaves its loads unoverlapped, the dQ kernel reads its bias from L2. Accuracy (every gradient against fp64): the
+At (48, 4096) (eager profile, us, before the attention-backward work below): gemm32 1008, atom_dw 476, adaln_bwd (3) 451, attention dQ 416,
+attention dK / dV 374, adaln (3) 235, gemm_rg 213, swiglu_bwd 212, attention forward 144. Accuracy (every gradient against fp64): the
 activations' gradients equal the module path with TF32 on (d single 4.5e-4 / 4.5e-4), the weight gradients 1.2-1.5x it (the `atom_dw`
 TF32 products, as in the AF3 block's fp32 path). Tests (same file): seven training shapes against fp64 (`ef < 1.5 em + 1e-3`), bitwise
 repeatable.
+
+**Attention backward (2026-10-29, round 3).** The TF32 attention backward was 790 us at (48, 4096) against 262 us in bf16. Measured by
+switching parts off (a kernel variant without the MMAs, without the TMEM traffic, without the loads, without the stores): the dQ kernel's
+bias came per 8-column chunk from L2 (four serial L2 round trips per cell: 196 of its 422 us), both kernels' per-thread `st.global` of
+dQ / dK / dV were one 16-B transaction per lane (~75 us in dK / dV, ~43 in dQ), and splitting dK / dV's queries into halves of 128 gave key
+quadrants 0 and 3 four cells in one half (8 cell-times on the critical path per sample instead of 5-6); the single load stage cost ~40 us.
+Now: the bias in registers (dQ), TMA stores, the 7 + 1 cell phases and per-operand slots (dK / dV, a rewrite). dQ, dK, dV and dbias are
+bitwise the previous kernels' (same MMA order and roundings). Attention backward alone (CUDA graph of 20 calls, us):
+
+| (A, N) | before | dQ bias in registers | + dK / dV slots | + dK / dV phases, TMA stores | + dQ TMA stores |
+|---|---|---|---|---|---|
+| (48, 4096) | 789.4 | 612.1 | 565.8 | 459.7 | 412.4 |
+| (48, 8192) | 1570.8 | 1228.7 | 1131.9 | 922.8 | 822.0 |
+| (5, 4096) | 98.1 | 82.5 | 81.9 | 72.2 | 69.1 |
+| (1, 2048) | 32.2 | 33.3 | 33.0 | 31.0 | 30.5 |
+
+At (48, 4096): dQ 422 -> 196 us, dK / dV 370 -> 222 us. The training step above went 4.188 -> 3.829 ms (N 4096) and 8.168 -> 7.429 ms
+(N 8192), same harness.
 
 ## Not covered
 
