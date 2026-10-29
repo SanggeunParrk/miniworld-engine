@@ -27,6 +27,11 @@ Per training step that replaces, per block, the pair LayerNorm + projection (``p
 the accumulation of a [L, L, 128] pair gradient, by one pass of each for all blocks. Hopper: the forward is ONE kernel (``bo_hoist_pass.cu`` hoist_fwd, N <= 64: LN0 and the projection on the tensor cores, the normalised pair never
 written), the backward of one block of 16 heads is ONE kernel (hoist_bwd1: d LN0, the LN0 backward and dW' in a single pass over the pair, bf16 and
 fp32/TF32); more blocks keep the bf16 ``bo_hoist_bwd.cu`` kernel (N <= 192), fp32 the two cuBLAS GEMMs (TF32) around the LN0 rows.
+B200, bf16 (``settings.bias_only_dit_hoist_sm100``, R a multiple of 128): the forward is ONE kernel for N <= 128 and the backward ONE
+kernel for N <= 64 (``kernels/bias_only_dit/cuda/bo_hoist_sm100.cu``): the projection on tcgen05 from the raw pair rows with the
+LayerNorm applied in the epilogue as rstd (x W'^T - mean s), and d LN0 on tcgen05, the LN0 backward and dW' = S - mean_k S with
+S = (dbias diag(rstd)) x accumulated in tensor memory -- one read of the pair each way, as the per-sample pair (A L^2 rows) needs.
+More rows, or fp32: the LayerNorm rows + cuBLAS above.
 
 bf16 (pair bf16; the weights in any dtype, folded in fp32 and rounded to bf16 as the per-block pack rounds Wf): bf16 operands, fp32
 accumulation, the bias in bf16, d LN0 and dW' in fp32, d pair in the pair's dtype. fp32 (pair and weights fp32, no autocast): the
@@ -110,6 +115,8 @@ def _hoist_fwd(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torch.Tens
     """bias_all^T [N, R] (head-major, every block's) in the pair's dtype, freshly allocated (LN0 is a temporary)."""
     from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
 
+    if HK.sm100_served(pair2d, wf):
+        return HK.sm100_fwd(pair2d, wf, eps)  # B200: LayerNorm folded into a tcgen05 projection, one pass (bo_hoist_sm100.cu)
     if HK.pass_fwd_served(pair2d, wf):
         return HK.pass_fwd(pair2d, wf, eps)  # LayerNorm + projection in one pass over the pair (bo_hoist_pass.cu)
     ln0 = torch.empty_like(pair2d)
@@ -133,6 +140,8 @@ def _hoist_bwd(
 
     N, R = dball.shape
     f32 = pair2d.dtype is F32
+    if HK.sm100_served(pair2d, wf, bwd=True):
+        return list(HK.sm100_bwd(pair2d, wf, dball, eps))  # B200: the whole backward in one pass over the pair (bo_hoist_sm100.cu)
     if HK.pass_bwd_served(pair2d, wf):
         return list(HK.pass_bwd(pair2d, wf, dball, eps))  # one block of 16 heads, bf16 / fp32: one pass over the pair (bo_hoist_pass.cu)
     if HK.fused_bwd_served(pair2d, wf):
@@ -290,9 +299,14 @@ def _hoist_fwd_infer(pair2d: torch.Tensor, wf: torch.Tensor, eps: float) -> torc
     """``_hoist_fwd`` for a call with no gradient (inference): bias_all^T [N, R] head-major in the pair's dtype. For 12, 16 or 24 weight
     rows (one block's heads) ONE pass over the pair: the LayerNorm stays on chip and the projection runs on the tensor cores
     (``pair_bias_k`` bf16, ``pair_bias_tc_k`` fp32 on TF32), so the pair (268 MB at A = 4, L = 512, bf16) is read once and never written
-    back as LN0 -- ``_hoist_fwd`` writes LN0 and reads it again for a GEMM (3 passes). More rows: ``_hoist_fwd``."""
+    back as LN0 -- ``_hoist_fwd`` writes LN0 and reads it again for a GEMM (3 passes). More rows: ``_hoist_fwd``. B200 bf16 (up to 128
+    rows): ``bo_hoist_sm100.cu``'s forward, the training hoist's kernel."""
     n, r = wf.shape[0], pair2d.shape[0]
     f32 = pair2d.dtype is F32
+    from miniworld_engine.kernels.bias_only_dit.cuda import hoist as HK
+
+    if HK.sm100_served(pair2d, wf):  # B200 bf16: the training forward's kernel (bo_hoist_sm100.cu; 5-9 % faster than pair_bias_k)
+        return HK.sm100_fwd(pair2d, wf, eps)
     if n not in (12, 16, 24) or r % 128:
         return _hoist_fwd(pair2d, wf, eps)
     bias = torch.empty(n, r, device=pair2d.device, dtype=pair2d.dtype)
