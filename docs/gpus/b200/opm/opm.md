@@ -12,10 +12,69 @@ Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, d_msa 64
 (`normalize_before_proj=False`, the count dividing the projection and its bias, since 2026-10-29: the epilogue takes the order as a flag,
 the training backward takes dbias = sum dz / n off the dgrad's dz / n), no interchain masking, inference and training alike; a length that
 is not a multiple of 64 / a depth that is not a multiple of 256 is padded with masked rows. The pair residual is added in the epilogue
-(its gradient is `dz` itself). B200 inference the kernels do not take (d_msa 128 / d_pair 256 / 384, a batch of MSA stacks, the
-interchain mask, RoseTTAFold3's projection biases when wider than MiniWorld's, Chai-1's groups) runs the composed CUDA / cuBLAS path
-(`kernels/outer_product_mean/composed.py`, as H100); RoseTTAFold3 at d_msa 64 / d_pair 128 runs this path plus the bias terms
-(`composed.biased_on_fused`). Training of those options still runs the PyTorch statements.
+(its gradient is `dz` itself). Since 2026-10-29 (second pass) the other FoldForge widths, RoseTTAFold3's projection biases and Chai-1's
+groups are sm_100a kernels too, inference and training (`csrc/sm100/opm_wide_sm100.cu`, below). B200 inference those kernels do not take
+(a batch of MSA stacks, the interchain mask in training, d_msa 256 / d_pair 512) runs the composed CUDA / cuBLAS path
+(`kernels/outer_product_mean/composed.py`, as H100).
+
+## FoldForge widths, RoseTTAFold3, Chai-1 (`opm_wide_sm100.cu`, 2026-10-29)
+
+One extension (`opm_train._ext_wide`), the stages of `opm_sm100.cu`; MiniWorld's (64, 128) without biases keeps `opm_sm100.cu`.
+
+- **d_msa 64 / 128 x d_pair 128 / 256 / 384, projection biases** (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384),
+  RoseTTAFold3 (64, 128) + biases), `integrations/opm_train.py`, either order:
+  - prologue `opm_wprologue_sm100<CM>`: d_msa 128 is two 128B-swizzled 64-channel k blocks per x tile (one 4-D box), K = 128 in eight
+    k steps, one CTA an SM (four x stages); the projection biases are added in the drain to the MSA rows whose mask bit is set (the
+    LayerNorm warps leave the tile's bits in a shared ring), so a masked row keeps its zero as `(proj + b) * mask` does. The biases go
+    in through `_forward_sm100(pbias=...)`, inference included: `composed.biased_on_fused` (which added bias terms after a bias-less
+    fused call) is gone.
+  - epilogue `opm_wepilogue_sm100<NW>`: c_z 256 is one N = 256 accumulator, c_z 384 two N = 192 slices; O is read once / twice.
+  - dgrad `opm_wdgrad_sm100<CZ>`: the dz tile stays in a ring of 128-z units (one more than a tile, so the next tile's first unit
+    lands under this tile's last chunk), Wo streams as [64 z x 128 n] sub-chunks, dbias per unit on the tensor core.
+  - dWo `opm_wdwo_sm100<CZ>`: every 128-wide c_z slice of a column part accumulates in one CTA's TMEM (2 x 256 / 3 x 128 columns),
+    so O is read once; split-K partials summed in split order.
+  - prologue backward at d_msa 128 `opm_wprologue_bwd_sm100`: one group of eight compute warps (two threads a row, 64 channels each,
+    their row sums combined through shared memory), dy double-buffered; the masked column sums of dA / dB (dbeta, dW's beta term, the
+    projection-bias gradients) by two cuBLAS GEMVs. At d_msa 64 the existing kernel's row 64 of R is exactly those sums.
+- **Chai-1** (8 groups of 8, d_hidden 64, product LayerNorm, c_z 128 / 256), `kernels/outer_product_mean/chai.py`; any length / depth
+  (padded to 32 / 128 with masked rows):
+  - `opm_chai_prologue_sm100`: tile = 8 tokens x 16 MSA rows, D[row][channel] on the tensor core, group-major a / b by 128-byte boxes.
+  - products: one cuBLAS batched GEMM (O [8, 8N, 8N]).
+  - `opm_chai_epilogue_sm100`: the pair tile of O (4 i x 32 j) lands by 4-D TMA boxes straight into the no-swizzle K-major core-matrix
+    layout (8 consecutive j of one row are 128 contiguous bytes of O: the gather costs no thread work), statistics in one shifted pass as
+    the eight group blocks land, normalisation in place, one GEMM against W' = W_out . gamma (N = c_z, K = 512); per-group barriers let the
+    next tile's blocks load under this tile's GEMM. Training writes y and the statistics.
+  - backward: dy = dz W', dW' = dz^T y, dbias (cuBLAS); `opm_chai_lnbwd_sm100` (CUDA cores, shared-memory staged, memory-bound) into the
+    grouped layout; dA^T / dB^T by two batched GEMMs; `opm_chai_prologue_bwd_sm100` (the d_msa 64 prologue backward with 64 + 64 channels:
+    dA^T tiles are the dy GEMM's MN-major A and the dW GEMM's K-major B).
+- ptxas (nvcc 13.1): no spills in any of these kernels.
+- Tests: `tests/gpu/sm100/test_opm_wide_b200_gpu.py`, `test_opm_chai_b200_gpu.py` (fp64 statements, bf16 / fp32 master, masks, ragged
+  shapes, determinism, CUDA graph), `test_opm_variants_b200_gpu.py`.
+
+Measured 2026-10-29 on one B200 (GPU 4 of node 2, nvcc 13.1 kernels), S1024, bf16 activations:
+
+Training (`benchmarks/runners/bench.py target=outer_product level=module mode=training +n_msa=1024`, bf16-mixed with fp32 master
+parameters, CUDA graph, ms; before = the PyTorch statements B200 ran, after = these kernels; a cell is noisy by about +-4 % run to run):
+
+| width / option | L384 before | L384 after | L768 before | L768 after |
+|---|---|---|---|---|
+| (128, 256) Protenix-v2 / ESMFold2 | 1.490 | 1.16-1.21 | 5.405 | 4.28-4.34 |
+| (128, 384) OpenDDE | 1.600 | 1.27-1.37 | 5.657 | 4.81-4.97 |
+| (64, 128) RoseTTAFold3 biases | 1.351 | 0.89-0.96 | 4.563 | 3.48-3.56 |
+| (64, 128) RoseTTAFold3, after-order | 1.309 | 0.93-1.00 | 4.637 | 3.44-3.78 |
+| (128, 256) with the biases | 1.511 | 1.15-1.21 | 4.938 | 3.89-4.15 |
+| (64, 256) Chai-1, 8 groups | 1.172 | 0.823 | 3.844 | 2.894 |
+| (64, 128) MiniWorld (unchanged kernels) | 0.894 | 0.93-0.96 | 3.659 | 3.32-3.35 |
+
+Inference (module call with the pair residual, bf16 module, CUDA graph, us; the composed CUDA / cuBLAS path B200 ran before against
+today's path, same script, no torch.compile): (128, 256) L384 1479 -> 338, L768 5401 -> 1267; (128, 384) L384 1566 -> 390,
+L768 5576 -> 1502; RoseTTAFold3 (64, 128) L384 1361 -> 285, (128, 256) 1476 -> 340; Chai-1 L384 443 -> 242, L768 1477 -> 800.
+
+Where the time goes (L768 S1024, training, torch profiler): the three O / dA / dB GEMMs are ~2.3 ms at every width; (128, 256): epilogue
+0.45 ms, dgrad 0.49, dWo 0.24, prologue backward 0.09, prologue 0.06 (MiniWorld's (64, 128): 0.24 / 0.31 / 0.20 / 0.06 / 0.04). The
+epilogue and dgrad stream the whole Wo once per 128-pair tile (the L2 -> SM intake bounds them, as at c_z 128); a cta_group::2 version
+(M = 256 pairs sharing each Wo slice) is what is left there. Chai-1: epilogue 0.55 ms (single 128 KiB tile buffer: the next tile's
+statistics wait for its last group block), product-norm backward 0.39 ms (HBM: dy, y in, dO out), prologue 0.06, prologue backward 0.11.
 
 #### Fused inference kernel (`opm_fused_sm100`, `opm_fused_infer`)
 
