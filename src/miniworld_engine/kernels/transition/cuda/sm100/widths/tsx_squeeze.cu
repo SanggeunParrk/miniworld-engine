@@ -9,6 +9,7 @@
 // Ws K-blocks do not depend on the expand, so the first ring stages are loaded before griddepcontrol.wait.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
 using namespace s100;
 
 #ifndef DIM
@@ -129,16 +130,16 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
       uint32_t v[32];
       tmem_ld32(trow + cc, v);
       tmem_wait_ld();
+      uint32_t o[16];
 #pragma unroll
       for (int i = 0; i < 4; ++i) {
         const uint4 x4 = xv[cc / 8 + i];
         const uint32_t xw[4] = {x4.x, x4.y, x4.z, x4.w};
-        uint32_t o[4];
 #pragma unroll
         for (int k = 0; k < 4; ++k)
-          o[k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(v[8 * i + 2 * k]), bf16hi(xw[k]) + __uint_as_float(v[8 * i + 2 * k + 1]));
-        stg128(out + grow * D_ + c0 + cc + 8 * i, make_uint4(o[0], o[1], o[2], o[3]));
+          o[4 * i + k] = pack_bf16(bf16lo(xw[k]) + __uint_as_float(v[8 * i + 2 * k]), bf16hi(xw[k]) + __uint_as_float(v[8 * i + 2 * k + 1]));
       }
+      store_t(out + (size_t)row0 * D_ + c0 + cc + store_t_off<16>(r, lane, D_, 2), D_, o, lane);
     }
     tc_fence_before();
   }
@@ -187,14 +188,14 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
         }
       }
     }
+    uint32_t o[W_ / 2];
 #pragma unroll
     for (int i = 0; i < W_ / 8; ++i) {
       const uint32_t xw[4] = {xv[i].x, xv[i].y, xv[i].z, xv[i].w};
-      uint32_t o[4];
 #pragma unroll
-      for (int k = 0; k < 4; ++k) o[k] = pack_bf16(bf16lo(xw[k]) + sum[8 * i + 2 * k], bf16hi(xw[k]) + sum[8 * i + 2 * k + 1]);
-      stg128(out + grow * D_ + c0 + 8 * i, make_uint4(o[0], o[1], o[2], o[3]));
+      for (int k = 0; k < 4; ++k) o[4 * i + k] = pack_bf16(bf16lo(xw[k]) + sum[8 * i + 2 * k], bf16hi(xw[k]) + sum[8 * i + 2 * k + 1]);
     }
+    store_t(out + (size_t)row0 * D_ + c0 + store_t_off<W_ / 2>(r, lane, D_, 2), D_, o, lane);
   }
 #endif
   __syncthreads();

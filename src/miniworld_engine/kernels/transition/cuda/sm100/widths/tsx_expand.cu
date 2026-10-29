@@ -10,6 +10,7 @@
 // LayerNorm launch this one follows writes them (the training forward's fused cast, wpre = 0), after it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
 using namespace s100;
 
 #ifndef DIM
@@ -100,7 +101,6 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
     // 4-7 the chunk's first CH / 2 units, 8-11 the second)
     const int r = (warp & 3) * 32 + lane, g = (warp - 4) >> 2;
     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
-    const size_t off = (size_t)(row0 + r) * H_ + h0 + g * HC;
     mbar_wait(&B.mma_done, 0);
     tc_fence_after();
     uint32_t av[HC], bv[HC], hp[HC / 2], ap[HC / 2], bp[HC / 2];
@@ -116,15 +116,12 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
       ap[k] = pack_bf16(a0, a1);
       bp[k] = pack_bf16(b0, b1);
     }
-#pragma unroll
-    for (int q = 0; q < HC / 8; ++q)
-      stg128(hs + off + q * 8, make_uint4(hp[4 * q], hp[4 * q + 1], hp[4 * q + 2], hp[4 * q + 3]));
+    constexpr int GR = HC / 8;                                  // rows per store group (2 or 4)
+    const size_t toff = (size_t)(row0 + (r & ~(GR - 1))) * H_ + h0 + g * HC + (lane & (GR - 1)) * 8;
+    store_t(hs + toff, H_, hp, lane);
     if (save) {
-#pragma unroll
-      for (int q = 0; q < HC / 8; ++q) {
-        stg128(as_ + off + q * 8, make_uint4(ap[4 * q], ap[4 * q + 1], ap[4 * q + 2], ap[4 * q + 3]));
-        stg128(bs + off + q * 8, make_uint4(bp[4 * q], bp[4 * q + 1], bp[4 * q + 2], bp[4 * q + 3]));
-      }
+      store_t(as_ + toff, H_, ap, lane);
+      store_t(bs + toff, H_, bp, lane);
     }
   }
   __syncthreads();

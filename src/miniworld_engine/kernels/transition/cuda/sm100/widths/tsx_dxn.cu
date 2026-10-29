@@ -13,6 +13,7 @@
 // Wa / Wb ring stages are loaded before griddepcontrol.wait (forward weights); [dA | dB], x, dy and the statistics after it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
 using namespace s100;
 
 #ifndef DIM
@@ -239,23 +240,23 @@ transition_sx_dxn(const __grid_constant__ CUtensorMap mdab, const __grid_constan
   }
   cluster_arrive();                                            // done reading the peers' row sums
   if (epi) {
+    uint32_t o[16];
 #pragma unroll
     for (int q = 0; q < 4; ++q) {
       const uint32_t x4[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w}, d4[4] = {dyv[q].x, dyv[q].y, dyv[q].z, dyv[q].w};
       const float4 ga = __ldg(reinterpret_cast<const float4*>(gamma + c0 + q * 8));
       const float4 gc = __ldg(reinterpret_cast<const float4*>(gamma + c0 + q * 8 + 4));
       const float g8[8] = {ga.x, ga.y, ga.z, ga.w, gc.x, gc.y, gc.z, gc.w};
-      uint32_t o[4];
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int i = 8 * q + 2 * e;
         const float x0 = (bf16lo(x4[e]) - mean) * rs, x1 = (bf16hi(x4[e]) - mean) * rs;
         const float w0 = g8[2 * e] * bf16lo(np[i / 2]), w1 = g8[2 * e + 1] * bf16hi(np[i / 2]);
         const uint32_t t = pack_bf16((w0 - (x0 * ca + cbv)) * rs, (w1 - (x1 * ca + cbv)) * rs);
-        o[e] = pack_bf16(bf16lo(t) + bf16lo(d4[e]), bf16hi(t) + bf16hi(d4[e]));
+        o[4 * q + e] = pack_bf16(bf16lo(t) + bf16lo(d4[e]), bf16hi(t) + bf16hi(d4[e]));
       }
-      stg128(dx + grow * D_ + c0 + q * 8, make_uint4(o[0], o[1], o[2], o[3]));
     }
+    store_t(dx + (size_t)row0 * D_ + c0 + store_t_off<16>(r, lane, D_, 2), D_, o, lane);
   }
   cluster_wait();                                              // no CTA leaves while a peer may still read its row sums
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, NB); }

@@ -10,6 +10,7 @@
 // passed its own griddepcontrol.wait -- so the products and the tile stores run while d_xn finishes; only the partial sums wait for it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
 using namespace s100;
 
 #ifndef DIM
@@ -99,7 +100,7 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
     // ---------------------------------------------------------------------------------------- the fp32 tile: one row per thread
     const int r = (warp & 3) * 32 + lane;
     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
-    const size_t ro = (size_t)(m0 + r) * ldo + n0;
+    const size_t ro0 = (size_t)m0 * ldo + n0;                  // the tile's first element
     mbar_wait(&B.acc_full, 0);
     tc_fence_after();
 #pragma unroll 1
@@ -108,15 +109,12 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
       tmem_ld32(trow + c0, v);
       tmem_wait_ld();
       if (obf16) {
-        __nv_bfloat16* o = reinterpret_cast<__nv_bfloat16*>(outp) + ro + c0;
         uint32_t p[16];
 #pragma unroll
         for (int i = 0; i < 16; ++i) p[i] = pack_bf16(__uint_as_float(v[2 * i]), __uint_as_float(v[2 * i + 1]));
-#pragma unroll
-        for (int i = 0; i < 4; ++i) stg128(o + 8 * i, make_uint4(p[4 * i], p[4 * i + 1], p[4 * i + 2], p[4 * i + 3]));
+        store_t(reinterpret_cast<__nv_bfloat16*>(outp) + ro0 + c0 + store_t_off<16>(r, lane, ldo, 2), ldo, p, lane);
       } else {
-#pragma unroll
-        for (int i = 0; i < 8; ++i) stg128(outp + ro + c0 + 4 * i, make_uint4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]));
+        store_t(outp + ro0 + c0 + store_t_off<32>(r, lane, ldo, 4), ldo, v, lane);
       }
     }
     tc_fence_before();
