@@ -44,6 +44,9 @@ CM, CH, CZ = 64, 32, 128
 # (d_msa, d_pair) served on sm_90a: MiniWorld, Protenix-v2 / ESMFold2, OpenDDE (d_hidden 32 throughout).  The widths other than
 # MiniWorld's run the wide composition: persistent TMA prologue at d_msa 64 / 128, cuBLAS contraction, the c_z-sliced epilogue.
 SHAPES = ((64, 128), (128, 256), (128, 384))
+# sm_100a: MiniWorld's width on csrc/sm100/opm_sm100.cu; every other (d_msa, d_pair) pair of these and RoseTTAFold3's projection biases on
+# csrc/sm100/opm_wide_sm100.cu (the same stages: d_msa 128 prologue / prologue backward, c_z cut into 128-wide slices)
+SM100_D_MSA, SM100_D_PAIR = (64, 128), (128, 256, 384)
 _EXT: dict[str, Any] = {}
 
 
@@ -105,7 +108,8 @@ def refusal(
     try:
         if not _enabled():
             return "settings.opm_train=False disables the native path"
-        if d_hidden != CH or (d_msa, d_pair) not in SHAPES:
+        sm100 = msa.is_cuda and torch.cuda.get_device_capability(msa.device) == (10, 0)
+        if d_hidden != CH or (not sm100 and (d_msa, d_pair) not in SHAPES):
             return f"the kernels serve d_hidden={CH} and (d_msa, d_pair) in {SHAPES}, got ({d_msa}, {d_hidden}, {d_pair})"
         if interchain:
             return (
@@ -120,8 +124,8 @@ def refusal(
             return "the kernels are built for sm_90a and sm_100a"
         if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
             return "the sm_100a backward kernels are not built yet"
-        if cap == (10, 0) and (d_msa, d_pair) != (CM, CZ):
-            return "the sm_100a kernels serve d_msa 64 / d_pair 128 (either normalisation order)"
+        if cap == (10, 0) and (d_msa not in SM100_D_MSA or d_pair not in SM100_D_PAIR):
+            return f"the sm_100a kernels serve d_msa in {SM100_D_MSA} and d_pair in {SM100_D_PAIR} (either normalisation order)"
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         s, n = msa.shape[1], msa.shape[2]
@@ -471,16 +475,54 @@ def _fused_sm100_enabled(s: int, n: int) -> bool:
 _FUSED_SM100_CELLS: frozenset[tuple[int, int]] = frozenset()
 
 
-def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False):
+def _ext_wide(device=None):
+    """`csrc/sm100/opm_wide_sm100.cu`: the B200 OPM kernels at the other widths (d_msa 64 / 128, d_pair 128 / 256 / 384) and with
+    RoseTTAFold3's projection biases; MiniWorld's width keeps `opm_sm100.cu`."""
+    if "sm100_wide" not in _EXT:
+        from miniworld_engine.kernels._nvcc import load_extension as load
+
+        csrc = Path(__file__).with_name("csrc")
+        _EXT["sm100_wide"] = load(
+            name="miniworld_opm_wide_sm100",
+            sources=[str(csrc / "sm100" / "opm_wide_sm100.cu")],
+            extra_include_paths=[str(csrc / "sm100")],
+            extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a"],
+            extra_cflags=["-O3"],
+        )
+    return _EXT["sm100_wide"]
+
+
+def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
     statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, and the epilogue, which counts
     the mask per pair from the bits instead of taking a separate [N, N] count.  `after`: the count divides the projection
-    and its bias (ESMFold2's order, and AF3's as released)."""
+    and its bias (ESMFold2's order, and AF3's as released).  `pbias` (RoseTTAFold3's left | right projection biases, [64]):
+    the prologue adds them to the projections, masked like them; widths other than MiniWorld's and the biases run
+    `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices)."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
+    cm, cz = m.shape[2], wo.shape[0]
+    if (cm, cz) != (CM, CZ) or pbias is not None:
+        wext = _ext_wide(msa.device)
+        # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
+        pb = pbias.detach().to(bf).float().contiguous() if pbias is not None else m.new_empty((0,), dtype=torch.float32)
+        a2, bt, stats, bits = wext.opm_wprologue(
+            m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps),
+            wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous(), pb, bool(save_stats))
+        n = m.shape[1]
+        wo16, bo16 = wo.detach().to(bf).contiguous(), bo.detach().to(bf).contiguous()
+        if not save_stats and cz == CZ and _fused_sm100_enabled(m.shape[0], n):
+            z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
+            return z, m, mk, bits, a2, bt, stats, None
+        o = torch.matmul(a2, bt.t())
+        if cz == CZ:
+            z = ext.opm_epilogue(o, bits, wo16, bo16, n, n, residual, int(after))
+        else:
+            z = wext.opm_wepilogue(o, bits, wo16, bo16, n, n, residual, int(after))
+        return z, m, mk, bits, a2, bt, stats, o
     a2, bt, _, stats, bits = ext.opm_prologue(
         m,
         mk,
@@ -658,11 +700,12 @@ class _OpmMath(torch.autograd.Function):
         pbias=None,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
-        if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: MiniWorld widths, either order (see `refusal`)
+        if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: every width of `refusal`, either order, the biases
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
-                _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after
+                _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after, pbias
             )
             ctx.save_o = bool(save_o)
+            ctx.has_bias = pbias is not None
             ctx.save_for_backward(m, mk, bits, a2, bt, stats, lnw, lnb, wa, wb, wo, bo, *((o,) if save_o else ()))
             ctx.eps = eps
             return z
@@ -824,37 +867,34 @@ class _OpmMath(torch.autograd.Function):
                 epi_half=_epilogue_half_enabled(s, n, training=True),
             )
         if sm100:
-            # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
-            dO, dzp, dbo = ext.opm_dgrad(
-                dz[0].contiguous(),
-                norm,
-                wo.detach().to(bf).contiguous(),
-                n,
-                n,
-                int(bo.dtype == bf),
-            )
+            # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100.  MiniWorld's width
+            # runs opm_sm100.cu; c_z 256 / 384 the c_z-sliced dgrad / dWo and d_msa 128 the wide prologue backward (opm_wide_sm100.cu)
+            cm, cz = m.shape[2], wo.shape[0]
+            wext = _ext_wide(dz.device) if (cm, cz) != (CM, CZ) else None
+            wo16 = wo.detach().to(bf).contiguous()
+            dgrad = ext.opm_dgrad if cz == CZ else wext.opm_wdgrad
+            dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf))
             if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
-                dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, CZ), out_dtype=torch.float32).view(CZ)
+                dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, cz), out_dtype=torch.float32).view(cz)
             dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
             dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
             del dO
             if o is None:
                 o = torch.matmul(a2, bt.t())
-            dWo = ext.opm_dwo(
-                dzp, o, n, n, int(wo.dtype == bf)
-            )  # gradients come back in the parameters' dtype
+            dwo = ext.opm_dwo if cz == CZ else wext.opm_wdwo
+            dWo = dwo(dzp, o, n, n, int(wo.dtype == bf))  # gradients come back in the parameters' dtype
             del o
-            dm, dWa, dWb, dgam, dbet = ext.opm_prologue_bwd(
-                dA,
-                dB,
-                m,
-                stats,
-                mask16,
-                lnw.detach(),
-                lnb.detach(),
-                wa.detach().to(bf).contiguous(),
-                wb.detach().to(bf).contiguous(),
-            )
+            wa16, wb16 = wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous()
+            if cm == CM:
+                # ssa: the masked column sums of [dA dB] (the kernel's row 64 of R), = RoseTTAFold3's projection-bias gradients
+                dm, dWa, dWb, dgam, dbet, red = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw.detach(), lnb.detach(), wa16, wb16)
+                ssa = red.reshape(-1)[CM * CM:CM * CM + 2 * CH]
+            else:
+                # d_msa 128: the masked column sums leave the kernel (its dW GEMM's 128 rows are the channels): one GEMV a side
+                mkf = mask16.reshape(1, -1).to(bf)
+                ssa = torch.cat([torch.mm(mkf, dA.view(-1, CH), out_dtype=torch.float32).view(-1),
+                                 torch.mm(mkf, dB.view(-1, CH), out_dtype=torch.float32).view(-1)])
+                dm, dWa, dWb, dgam, dbet = wext.opm_wprologue_bwd(dA, dB, m, stats, mask16, lnw.detach(), lnb.detach(), wa16, wb16, ssa)
             return (
                 dm,
                 None,
@@ -866,6 +906,7 @@ class _OpmMath(torch.autograd.Function):
                 dbo.to(bo.dtype),
                 None,
                 None,
+                ssa.clone() if getattr(ctx, "has_bias", False) else None,
             )
         if path != "legacy":
             if dz.dtype != bf or not dz.is_contiguous():
@@ -1146,6 +1187,7 @@ def _inference_fake(args, eps, after):
 def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Tensor:
     # No training activations or LN statistics escape the inference boundary.
     if torch.cuda.get_device_capability(args[0].device) == (10, 0):
+        # the projection biases (args[9]) go into the prologue: no caller has to add them afterwards
         return _forward_sm100(
             _ext(args[0].device),
             *args[:8],
@@ -1153,6 +1195,7 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
             residual=args[8] if args[8].numel() else None,
             save_stats=False,
             after=after,
+            pbias=args[9] if args[9].numel() else None,
         )[0]
     return _OpmMath.forward(
         _SavedContext(),

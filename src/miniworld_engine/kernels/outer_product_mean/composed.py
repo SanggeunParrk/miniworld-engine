@@ -62,47 +62,6 @@ def inference(module, msa, mask, token_asym_id=None, residual=None):
     return residual + pair if residual is not None else pair
 
 
-def _bias_terms(module):
-    """(A [F, K], Bm [F, K], c [F]) of the out-projection W [F, K K] and the left / right biases b_L, b_R: A = sum_d W[:, d, :] b_L[d],
-    Bm = sum_e W[:, :, e] b_R[e], c = b_L^T W b_R (fp32)."""
-    k = module.group_width
-    w = module.to_out.weight.float().view(-1, k, k)
-    bl, br = module.to_left.bias.float(), module.to_right.bias.float()
-    a = torch.einsum("fde,d->fe", w, bl)
-    bm = torch.einsum("fde,e->fd", w, br)
-    return a, bm, torch.einsum("fd,d->f", bm, bl)
-
-
-def biased_on_fused(module, msa, mask, token_asym_id=None, residual=None):
-    """RoseTTAFold3's biased projections on the fused H100 OPM (``integrations.opm_train``, which reads the weights only), plus the bias terms:
-    with L = mask (W_L m + b_L) = L0 + mask b_L (likewise R), the outer product O = O0 + b_L (x) Rs + Ls (x) b_R + cnt b_L (x) b_R, where
-    Rs[i, j] = sum_s mask[s, i] R0[s, j], Ls[i, j] = sum_s L0[s, i] mask[s, j]; projected and divided by the clamped counts (the out bias
-    and the division order are the fused path's), the terms add (Rs A^T + Ls Bm^T) / cnt + c (cnt > 0) to its output."""
-    from miniworld_engine.integrations import opm_train
-    from miniworld_engine.kernels.outer_product_mean import cuda
-
-    B, S, N, _ = msa.shape
-    K = module.group_width
-    bf = torch.bfloat16
-    keep = (mask if mask is not None else torch.ones(B, S, N, dtype=torch.bool, device=msa.device)).to(bf)
-    out = opm_train.outer_product_mean(module, msa, keep.bool(), residual=None).contiguous()
-    m = module.ln_msa(msa) * keep[..., None]                                             # L0 = mask (W_L m) = W_L (mask m)
-    l0 = torch.matmul(m, module.to_left.weight.to(bf).t())                               # [B, S, N, K]
-    r0 = torch.matmul(m, module.to_right.weight.to(bf).t())
-    keep_t = keep.transpose(1, 2)                                                        # [B, N, S]
-    rs = torch.bmm(keep_t, r0.reshape(B, S, N * K), out_dtype=torch.float32)           # [b, i, (j e)]
-    # Ls[i, j, d] = sum_s mask[s, j] L0[s, i, d]: per i, mask^T [N, S] @ L0[:, i] [S, K] -> (i, j, d) rows without a transpose
-    ls = torch.stack([torch.bmm(keep_t[b].expand(N, N, S), l0[b].permute(1, 0, 2), out_dtype=torch.float32) for b in range(B)])
-    a, bm, c = _bias_terms(module)
-    count = torch.bmm(keep_t, keep, out_dtype=torch.float32)                             # [B, N, N]
-    c1 = torch.mm(rs.view(-1, K).to(bf), a.to(bf).t(), out_dtype=torch.float32)
-    c2 = torch.mm(ls.reshape(-1, K).to(bf), bm.to(bf).t(), out_dtype=torch.float32)
-    cuda.bias_finish(out, c1, c2, count, c.contiguous())
-    if module.mask_interchain and token_asym_id is not None:
-        out = out * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(out.dtype)
-    return residual + out if residual is not None else out
-
-
 def biased_wide_serves(module, msa, mask) -> bool:
     """The wide H100 composition takes the biases in its prologue: one sample, S % 256, N % 64, d_msa 64 / 128, 32 + 32 projections."""
     if torch.is_grad_enabled() or not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
