@@ -271,6 +271,7 @@ def attn_fwd(q, k, v, bias, kmask=None):
                 int(N),
                 int(A),
                 int(spc),
+                1,
             )
             return o, lse
         maps = tuple(
@@ -952,15 +953,23 @@ def attn_fwd_mma32(q, k, v, bias2):
     return o, lse
 
 
-def attn_fwd_mma(q, k, v, bias2):
-    """bf16 window attention forward on the mma.sync kernel. q, k, v [A, N, 128] bf16, bias2 from ``pair_bias_mma`` -> O bf16, LSE."""
+def attn_fwd_mma(q, k, v, bias2, groups: int = 1):
+    """bf16 window attention forward on the mma.sync kernel. q, k, v [A, N, 128] bf16, bias2 from ``pair_bias_mma`` -> O bf16, LSE.
+
+    ``groups`` = G > 1: G distinct pairs (one per trunk_seed). The A samples are laid out [A / G][G] (sample j * G + group reads group's bias),
+    bias2 = the G ``pair_bias_mma`` results stacked, [G, 4, nwin, 32, 128] fp32. A CTA walks the samples of one group, so its bias tile
+    still serves its whole chunk of samples."""
     A, N, _ = q.shape
+    G = int(groups)
+    if A % G:
+        raise ValueError("samples must be a whole number of [A / groups][groups] rows")
     d = _dev(q)
     o = torch.empty_like(q)
     lse = torch.empty(A, NH, N, device=q.device, dtype=torch.float32)
-    spc = _chunk(A, (N // 64) * NH)
+    Ag = A // G
+    spc = _chunk(Ag, (N // 64) * NH * G)
     _load("h_fwd", d)(
-        (N // 64, NH, (A + spc - 1) // spc),
+        (N // 64, NH, G * ((Ag + spc - 1) // spc)),
         (128, 1, 1),
         q,
         k,
@@ -971,6 +980,7 @@ def attn_fwd_mma(q, k, v, bias2):
         int(N),
         int(A),
         int(spc),
+        G,
     )
     return o, lse
 

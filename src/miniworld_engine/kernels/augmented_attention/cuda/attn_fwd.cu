@@ -154,7 +154,7 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
                 const __grid_constant__ CUtensorMap mg,
                 const float* __restrict__ KM, float* __restrict__ O, float* __restrict__ LSE, __nv_bfloat16* __restrict__ QKVG,
                 __nv_bfloat16* __restrict__ OG,
-                int L, int H, int A, int mt) {
+                int L, int H, int A, int mt, int nbg) {
   extern __shared__ __align__(1024) uint8_t smem_raw[];
   uint8_t* sm = reinterpret_cast<uint8_t*>((reinterpret_cast<uintptr_t>(smem_raw) + 1023) & ~uintptr_t(1023));
   uint64_t* full = reinterpret_cast<uint64_t*>(sm + STAGES * ST_BYTES);
@@ -178,7 +178,9 @@ attn_fwd_kernel(const __grid_constant__ CUtensorMap mq, const __grid_constant__ 
   const int wgi = tid >> 7;                                         // consumer warpgroup index
   const int wg = wgi % NWG, kspl = wgi / NWG;                       // its 64-row group, and its key split
   const int nblocks = L / BN;
-  const int brow = (PSB ? head * A + samp : head) * L + m0;         // this tile's first row in the [H (A) L, L] bias map
+  // nbg distinct biases, bias [H, nbg, L, L], the samples laid out [A / nbg][nbg]: sample s reads bias s % nbg. nbg = 1: one bias per head shared by
+  // every sample [H, L, L]; nbg = A: one bias per sample (the PSB layout); 1 < nbg < A: one per trunk_seed (each its own pair), shared by its A / nbg samples
+  const int brow = (nbg > 1 ? head * nbg + samp % nbg : head) * L + m0;                             // this tile's first row in the [H nbg L, L] bias map
 
   if (tid == 0) {
     for (int s = 0; s < STAGES; ++s) { mbar_init(&full[s], NISS); mbar_init(&empty[s], FCLS * 4 * NWG); }
@@ -467,7 +469,7 @@ CUtensorMap tile_map(void* ptr, uint64_t rows, uint64_t cols, uint64_t stride, u
 template <typename K>
 void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, const CUtensorMap& mv, const CUtensorMap& mb,
             const CUtensorMap& mg,
-            const float* km, float* O, float* LSE, __nv_bfloat16* qkvg, int L, int H, int A, int mt,
+            const float* km, float* O, float* LSE, __nv_bfloat16* qkvg, int L, int H, int A, int mt, int nbg,
             __nv_bfloat16* og = nullptr) {
   const size_t smem = 1024 + STAGES * ST_BYTES + 256 + QM * DH * 2 + (size_t)(APB_KS - 1) * NWG * 128 * (DH / 2 + 4) * 4;   // + g tile, key-split scratch
   cudaFuncSetAttribute(kern, cudaFuncAttributeMaxDynamicSharedMemorySize, (int)smem);
@@ -480,7 +482,7 @@ void launch(K kern, int grid, const CUtensorMap& mq, const CUtensorMap& mk, cons
   at[0].id = cudaLaunchAttributeClusterDimension;
   at[0].val.clusterDim.x = FCLS; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
   cfg.attrs = at; cfg.numAttrs = 1;
-  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, mg, km, O, LSE, qkvg, og, L, H, A, mt) == cudaSuccess, "launch failed");
+  TORCH_CHECK(cudaLaunchKernelEx(&cfg, kern, mq, mk, mv, mb, mg, km, O, LSE, qkvg, og, L, H, A, mt, nbg) == cudaSuccess, "launch failed");
 }
 }  // namespace
 
@@ -504,7 +506,8 @@ void attn_fwd(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tensor b
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * (PSB ? A : 1) * L, L, L, BN, QM);
   TORCH_CHECK(A % FCLS == 0, "A must be a multiple of the cluster size");
   launch(hasm ? attn_fwd_kernel<true, 0> : attn_fwd_kernel<false, 0>, A * H * mt, mq, mk, mv, mb, mq,   // (no g tile)
-         hasm ? kmask->data_ptr<float>() : nullptr, reinterpret_cast<float*>(O.data_ptr()), LSE.data_ptr<float>(), nullptr, L, H, A, mt);
+         hasm ? kmask->data_ptr<float>() : nullptr, reinterpret_cast<float*>(O.data_ptr()), LSE.data_ptr<float>(), nullptr, L, H, A, mt,
+         PSB ? A : 1);
 }
 
 // The token DiT training forward (MODE 2): as attn_fwd, but og = sigmoid(g) O [A L, 768] bf16 (g from qkvg [A L, 3072]) in place
@@ -530,7 +533,7 @@ void attn_fwd_og(torch::Tensor q, torch::Tensor k, torch::Tensor v, torch::Tenso
                      CU_TENSOR_MAP_SWIZZLE_NONE);
   launch(hasm ? attn_fwd_kernel<true, 2> : attn_fwd_kernel<false, 2>, A * H * mt, mq, mk, mv, mb, mg,
          hasm ? kmask->data_ptr<float>() : nullptr, nullptr, LSE.data_ptr<float>(),
-         reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, A, mt, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
+         reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr()), L, H, A, mt, PSB ? A : 1, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
 }
 
 // AttentionPairBias training forward (MODE 3): qkvg [L, 4 W] bf16 (q | k | v | g, natural units), bias [H, L, L] bf16 (natural
@@ -553,19 +556,22 @@ void attn_fwd_o_og(torch::Tensor qkvg, torch::Tensor bias, torch::Tensor O, torc
   auto mb = tile_map(bias.data_ptr(), (uint64_t)H * L, L, L, BN, QM);
   auto mg = tile_map(base + 3 * DM, L, DM, 4 * DM, DH, QM, CU_TENSOR_MAP_SWIZZLE_NONE);
   launch(attn_fwd_kernel<false, 3>, H * mt, mq, mk, mv, mb, mg, nullptr, O.data_ptr<float>(), LSE.data_ptr<float>(), base, L, H, 1,
-         mt, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
+         mt, 1, reinterpret_cast<__nv_bfloat16*>(OG.data_ptr()));
 }
 
 // The inference core: qkvg [S*L, 3072] bf16 (q | k | v | g, q in exp2 units: sm_scale log2 e folded into Wq, bq or the
 // qk-norm weight), bias_all [nb*H, L, L] bf16 (log2 units, masked keys -inf), block = which H-row slice of it. Writes
 // sigmoid(g) softmax(q k^T + bias) v over q.
-void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t S) {
+// ``nbg`` distinct hoisted biases (one per trunk_seed, each its own pair): bias_all [nb * H * nbg, L, L], the S samples laid out [S / nbg][nbg]
+// (sample s reads bias s % nbg); nbg = 1 is the one-bias core.
+void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t S, int64_t nbg) {
   const int L = bias_all.size(1), H = DM / DH;
+  TORCH_CHECK(nbg >= 1 && S % nbg == 0, "samples must be a whole number of [S / nbg][nbg] groups");
   TORCH_CHECK(qkvg.is_contiguous() && qkvg.scalar_type() == torch::kBFloat16 && qkvg.size(1) == 4 * DM
               && qkvg.size(0) == S * L, "qkvg layout");
   TORCH_CHECK(bias_all.is_contiguous() && bias_all.scalar_type() == torch::kBFloat16 && bias_all.size(2) == L
-              && bias_all.size(0) >= (block + 1) * H, "bias layout");
-  TORCH_CHECK(!PSB, "the inference core shares one hoisted bias");
+              && bias_all.size(0) >= (block + 1) * H * nbg, "bias layout");
+  TORCH_CHECK(!PSB, "the inference core takes its biases per group, not per sample");
   TORCH_CHECK(L % QM == 0 && FCLS == 1, "L must be a multiple of the query tile");
   const int mt = L / QM;
   auto* base = reinterpret_cast<__nv_bfloat16*>(qkvg.data_ptr());
@@ -573,9 +579,9 @@ void attn_inf(torch::Tensor qkvg, torch::Tensor bias_all, int64_t block, int64_t
   auto mq = tile_map(base, rows, DM, 4 * DM, QW, QM);
   auto mk = tile_map(base + DM, rows, DM, 4 * DM, QW, BN);
   auto mv = tile_map(base + 2 * DM, rows, DM, 4 * DM, QW, BN);
-  auto mb = tile_map(reinterpret_cast<__nv_bfloat16*>(bias_all.data_ptr()) + (size_t)block * H * L * L, (uint64_t)H * L, L, L, BN, QM);
+  auto mb = tile_map(reinterpret_cast<__nv_bfloat16*>(bias_all.data_ptr()) + (size_t)block * H * nbg * L * L, (uint64_t)H * nbg * L, L, L, BN, QM);
   auto mg = tile_map(base + 3 * DM, rows, DM, 4 * DM, DH, QM, CU_TENSOR_MAP_SWIZZLE_NONE);
-  launch(attn_fwd_kernel<false, 1>, (int)S * H * mt, mq, mk, mv, mb, mg, nullptr, nullptr, nullptr, base, L, H, (int)S, mt);
+  launch(attn_fwd_kernel<false, 1>, (int)S * H * mt, mq, mk, mv, mb, mg, nullptr, nullptr, nullptr, base, L, H, (int)S, mt, (int)nbg);
 }
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {

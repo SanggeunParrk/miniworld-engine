@@ -114,7 +114,7 @@ class ApbInferenceCore:
             raise ValueError(
                 "Hopper APB inference requires one sample and head-major bias"
             )
-        self.extension.attn_inf(qkvg, bias, 0, 1)
+        self.extension.attn_inf(qkvg, bias, 0, 1, 1)
         return qkvg
 
 
@@ -539,11 +539,15 @@ def dq_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:
     return fwd_defs(nh, dh) + (() if dh == D else (f"RSQDV={dh**-0.5!r}f",))
 
 
-def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D):
+def gated_inference(qkvg, bias_all, block, S, nh=H, dh=D, groups=1):
     """The token DiT step's inference core (attn_fwd.cu, GATED): qkvg [S L, 3072] bf16 with q in exp2 units, bias_all
     [nb 16, L, L] bf16 in log2 units (masked keys -inf); writes sigmoid(g) softmax(q k^T + bias) v over q for ``block``'s
-    slice of the bias."""
-    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all, int(block), int(S))
+    slice of the bias.
+
+    ``groups`` > 1: ``groups`` distinct hoisted biases (one per trunk_seed, each its own pair), bias_all [nb H, groups, L, L] with the
+    samples laid out [A][groups][L] (S = A groups): sample s reads group s % groups. The same build serves every ``groups`` (a kernel argument)."""
+    L = bias_all.shape[-1]
+    _ext("attn_fwd", fwd_defs(nh, dh)).attn_inf(qkvg, bias_all.view(-1, L, L), int(block), int(S), int(groups))
 
 
 def tf32_defs(nh: int = H, dh: int = D) -> tuple[str, ...]:

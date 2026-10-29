@@ -122,13 +122,18 @@ constexpr int F_SMEM = F_BIAS + FSTG * F_STAGE;
 
 extern "C" __global__ __launch_bounds__(128) void h_attn_fwd(const bf16* __restrict__ q, const bf16* __restrict__ k, const bf16* __restrict__ v,
                                                               const float* __restrict__ bias, bf16* __restrict__ out, float* __restrict__ lse,
-                                                              int N, int A, int spc) {
+                                                              int N, int A, int spc, int G) {
   pdl_wait();
   extern __shared__ __align__(16) uint8_t sm[];
   float* sb = reinterpret_cast<float*>(sm);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
-  const int q0 = 64 * blockIdx.x, h = blockIdx.y, a0 = blockIdx.z * spc, a1 = min(A, a0 + spc), nwin = N / 32, w0 = q0 / 32;
+  // G > 1: G distinct pairs (trunk_seeds), the samples laid out [A / G][G] (sample = j * G + group) and one bias [4, nwin, 32, 128] per group;
+  // a CTA walks the samples of ONE group (stride G), so its bias tile still serves its whole chunk. G = 1 is the one-bias kernel.
+  const int grp = G > 1 ? blockIdx.z % G : 0, chunk = G > 1 ? blockIdx.z / G : blockIdx.z;
+  const int Ag = A / G, j0 = chunk * spc, nj = min(Ag, j0 + spc) - j0, a0 = j0 * G + grp;
+  const int q0 = 64 * blockIdx.x, h = blockIdx.y, nwin = N / 32, w0 = q0 / 32;
   const int win = warp >> 1;
+  bias += (size_t)grp * 4 * nwin * 32 * 128;
   // bias of the CTA's two windows [64 rows][128] -> padded rows
   for (int i = tid; i < 64 * 32; i += 128) {
     const int r = i >> 5, c = i & 31;
@@ -141,16 +146,17 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_fwd(const bf16* __restr
     load_rows(b + 64 * ST * 2, k, a, h, q0 - 48, 160, N, tid);
     load_rows(b + (64 + 160) * ST * 2, v, a, h, q0 - 48, 160, N, tid);
   };
-  if (a0 < a1) load(0, a0);
+  if (nj > 0) load(0, a0);
   cp_commit();
-  for (int a = a0; a < a1; ++a) {
-    const int s = (a - a0) & 1;
+  for (int j = 0; j < nj; ++j) {
+    const int a = a0 + j * G;
+    const int s = j & 1;
     if (FSTG == 1) {
-      if (a > a0) load(0, a);
+      if (j > 0) load(0, a);
       cp_commit();
       cp_wait<0>();
     } else {
-      if (a + 1 < a1) load(s ^ 1, a + 1);
+      if (j + 1 < nj) load(s ^ 1, a + G);
       cp_commit();
       cp_wait<1>();
     }
@@ -216,7 +222,7 @@ extern "C" __global__ __launch_bounds__(128) void h_attn_fwd(const bf16* __restr
 #pragma unroll
       for (int n = 0; n < 4; ++n) { on[n][0] = o[n][0] * i0; on[n][1] = o[n][1] * i0; on[n][2] = o[n][2] * i1; on[n][3] = o[n][3] * i1; }
       // the warp's own Q rows (read only by this warp, already in registers) serve as the staging area
-      store16x32(sm + F_BIAS + (((a - a0) % FSTG)) * F_STAGE + warp * 16 * ST * 2, on, 1.f, out + ((size_t)a * N + q0 + 16 * warp) * 128 + h * 32, 128, lane);
+      store16x32(sm + F_BIAS + (j % FSTG) * F_STAGE + warp * 16 * ST * 2, on, 1.f, out + ((size_t)a * N + q0 + 16 * warp) * 128 + h * 32, 128, lane);
     }
     if (t == 0) {
       lse[((size_t)a * 4 + h) * N + r0] = l0 > 0.f ? n0 + __log2f(l0) : 1e30f;

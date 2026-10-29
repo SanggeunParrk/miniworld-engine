@@ -145,11 +145,11 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         torch.is_grad_enabled()
         or single.dtype not in (torch.bfloat16, torch.float32)
         or pair.dtype != single.dtype
-        or B != 1
+        or (B != 1 and single.dtype is not torch.bfloat16)   # B trunk_seeds: bf16 only (the TF32 core keeps one shared bias)
         or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
         or L % 128
         or cond.shape[-1] != 384
-        or tuple(pair.shape) != (1, L, L, 128)
+        or tuple(pair.shape) != (B, L, L, 128)
         or not pair.is_contiguous()
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
@@ -212,7 +212,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         _TOKEN_PACKS, key, prepare, limit=_capture.BLOCK_CACHE_LIMIT
     )
     w1, b1, w2, b2, wf, wqkvg, bqkvg, wo, wab_fp32, ws, nq, nk, wab = packed
-    mask = None if mask is None else mask.reshape(L)
+    # B trunk_seeds of one input share the key mask (the caller passes it expanded over B, stride 0): its first row serves them all
+    mask = None if mask is None else mask.reshape(-1, L)[0]
     # The augmented-attention module fills fully masked rows with a finite
     # negative value, so its reference softmax is uniform on that edge.
     # AttentionPairBias has a separate zero-probability reference contract.
@@ -235,7 +236,11 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 # the TF32 core reads the keys in key_perm order: the extra term is laid out the same way (masked keys stay at -1e30)
                 bias += (extra.float() * 1.4426950408889634)[:, key_perm(L, single.device)]
         else:
-            bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+            if B == 1:
+                bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+            else:
+                # one bias per trunk_seed (its own pair), laid out [H, B, L, L] for the grouped attention (NBG = B); built once per trajectory
+                bias = torch.stack([apb.pair_bias(pair[b].reshape(L * L, 128), wf, mask, L, 1e-5, -1e30) for b in range(B)], dim=1).contiguous()
             if extra is not None:
                 # the bias is in the attention's base-2 domain (``wf`` carries log2 e); a masked key stays at -1e30
                 bias += extra.float() * 1.4426950408889634
@@ -262,7 +267,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         limit=_capture.BLOCK_CACHE_LIMIT,
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
-    c = cond[0, 0] if shared else cond.reshape(-1, 384)
+    c = cond[0].reshape(-1, 384) if shared else cond.reshape(-1, 384)   # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))
     P = c.shape[0]
     cn = single.new_empty((P, 384))
     cc = torch.empty_like(cn)
@@ -278,7 +283,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         torch.cuda.current_stream(single.device).wait_event(cond_ready)
     g1 = torch.addmm(b1, cn, w1.t()).view(P, 4, D)
     g2 = torch.addmm(b2, cc, w2.t()).view(P, 2, D)
-    M = A * L
+    M = A * B * L
     x = single.new_empty((M, D), dtype=torch.float32)
     xa = single.new_empty((M, D))
     adaln_in_rows(single.view(M, D), x, g1[:, 0], g1[:, 1], xa, P, 1e-5)
@@ -295,7 +300,7 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         vt = torch.mm(wqkvg[3 * D :], xa.t())
         attention.tf32_gated_inference(qkvg, vt, bias, 0, A, 2 * D, heads, D // heads)
     else:
-        attention.gated_inference(qkvg, bias, 0, A, heads, D // heads)
+        attention.gated_inference(qkvg, bias, 0, A * B, heads, D // heads, B)
     y = torch.mm(qkvg[:, :D], wo.t())
     # the fused kernel loses to cuBLAS + the SwiGLU rows below ~768 rows (its 128 x 256 tiles leave SMs idle): measured per cell
     fused_expand = fp32 and _FP32_SWIGLU_GEMM and M >= 768 and _swiglu_gemm_ok(xa, wab_fp32)

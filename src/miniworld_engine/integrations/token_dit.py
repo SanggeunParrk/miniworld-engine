@@ -243,7 +243,15 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if compute_dtype is not None and compute_dtype != single.dtype:
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] < 8:
+    if single.ndim != 4 or single.shape[2] < 8:
+        return False
+    if single.shape[1] != 1 and not (
+        # B trunk_seeds, each its own pair (the grouped-bias attention): bf16 on H100 only, a pair per trunk_seed
+        single.dtype is torch.bfloat16
+        and pair.ndim == 4
+        and pair.shape[0] == single.shape[1]
+        and torch.cuda.get_device_capability(single.device) == (9, 0)
+    ):
         return False
     d = single.shape[-1]
     if (a.n_head, d) not in LAYOUTS or (
@@ -446,6 +454,9 @@ _ALL_TRUE: dict = {}
 
 
 def update(module, single, cond, pair, mask, extra=None):
+    if single.shape[1] > 1 and mask is not None and (mask.shape[0] != single.shape[1] or mask.stride(0) != 0):
+        # B trunk_seeds of one input: the key mask is [B, L], one mask expanded over B (the grouped core reads one)
+        raise ValueError("B > 1 token DiT takes one key mask expanded over B (stride 0)")
     if (
         _native_fp32_inference(module, single)
         and mask is not None

@@ -25,6 +25,13 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
 
 ### Added
 
+- H100 token / atom DiT inference with several trunk_seeds in one call (trunk_seed x diffusion_seed batching, e.g. 5 x 5): the
+  sm_90a attention core takes `nbg` distinct hoisted biases (one per trunk_seed, each its own pair; sample s reads bias s % nbg;
+  nbg = 1 the shared-bias core, nbg = A the PSB layout), `conditioned_transition.cuda.token_inference` takes B trunk_seeds,
+  the local atom attention (`lattn90`) takes G groups, and the token / local DiT routing passes them. Protenix-v1 L512 5 x 5
+  end to end 7.36 -> 6.82 s; the grouped denoiser equals the per-trunk_seed step exactly. Tests: test_token_dit_trunk_seeds_gpu,
+  test_local_attn_groups_gpu, test_h100_local_dit_groups_gpu, test_dit_groups_all_routes_gpu.
+
 - H100 bias-only DiT with a pair of its own per sample (`bodit_psb`): the hoisted pair bias is one pass over the pair each way in hand CUDA (`kernels/bias_only_dit/cuda/bo_hoist_pass.cu`: forward LayerNorm + projection, one-block backward d LN0 + LayerNorm backward + dW', bf16 and fp32/TF32, bitwise repeatable); training CUDA / portable 1.11-1.53 -> 0.85-0.89 (`docs/records/h100_bodit_psb_hoist_pass_20261027.md`). New switch `settings.bias_only_dit_hoist_fwd_fused`.
 - H100 `AttentionPairBias` inference with `gate_bias` (Chai-1: 1.0) and at Chai-1's width (16 x 24 heads, `d_pair` 256) runs the native CUDA path (the constant is added to the g rows of the packed q|k|v|g bias; `pair_bias_fwd` instantiates its 256-wide ring for 16 heads); before, both ran the composed PyTorch statements. Ladder CUDA / portable 0.52-0.57 (`apb_chai`, `apb_gb`); ladder groups and `+apb_gate_bias` in `bench.py`; record `docs/records/apb_gate_bias_chai_20261027.md`, test `tests/gpu/sm90/test_apb_gate_bias_h100_gpu.py`. Training with a gate bias is unchanged (composed).
 
