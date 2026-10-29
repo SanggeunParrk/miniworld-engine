@@ -113,6 +113,8 @@ void local_attn_fwd_sm90(const __grid_constant__ CUtensorMap mq,
 // sums through shared memory; P (packed bf16, out-of-band cells zero) goes over the S buffer as the TMEM A operand of O += P V (B = the V
 // tile, MN-major). The previous sample's O / l is drained (band quarters 0, 1: shared memory + TMA store; quarter 2: LSE) while this
 // sample's P is formed. Warp 16 issues the TMA loads (3 stages, refilled when a sample's MMAs commit) and the MMAs.
+// Slid key window (SPE > 0, slide.cuh): the last 8 SPE CTAs are edge CTAs (the moved windows over their slid keys); the others skip
+// the moved windows' O / LSE.
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
 #include "slide.cuh"
@@ -145,9 +147,9 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   float* sbias = reinterpret_cast<float*>(sm + O_B);
   float* red = reinterpret_cast<float*>(sm + O_R);                   // [kind 2][parity 2][warp 16][lane 32]: row max / row sum partials
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int nedge = 2 * NH * SPE;                                    // the slid window's edge CTAs come first (slide.cuh; SPE = 0: none)
-  const bool edge = (int)blockIdx.x < nedge;
-  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? 0 : nedge);
+  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const bool edge = (int)blockIdx.x >= nmain;
+  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
   const int pair = bx / sp, part = bx - pair * sp;
   const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
   const int nr = SPE > 0 ? slide_nreal(kmask, N, sred) : N;

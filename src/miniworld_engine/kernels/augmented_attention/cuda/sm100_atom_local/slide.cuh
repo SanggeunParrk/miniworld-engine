@@ -7,7 +7,8 @@
 // [max(n_real - 128, 0), n_real)); every other window keeps its clipped keys. The moved windows of each of those two groups share their
 // keys, so one "edge" CTA per (group, head, sample range) runs the kernel's own per-CTA program over them: 128 query rows from the group's
 // first window and the group's 128 keys at the start of the CTA's key range, every window of the CTA at band offset 0 (its slot j = key
-// column j). The edge CTAs come first in the grid (blockIdx.x < 2 * 4 * SPE); the clipped-window CTAs skip the moved windows (forward / dQ:
+// column j). The edge CTAs come last in the grid (the last 2 * 4 * SPE): they fill the SMs the clipped-window CTAs leave free, or else run
+// as a short tail (SPE splits their samples finer than the main split). The clipped-window CTAs skip the moved windows (forward / dQ:
 // their rows are not stored; dK / dV: their cells are masked and their dbias windows not written), the edge CTAs write only theirs.
 // n_real is the key mask's population count, taken on the device by every CTA (no host read: CUDA-graph capturable, a replay with another
 // mask is right), or N without a mask.

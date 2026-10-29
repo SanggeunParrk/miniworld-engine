@@ -1,6 +1,6 @@
 """AlphaFold 3's atom block options on the B200 kernels (``integrations.local_dit``): the K/V AdaLN of the raw atoms
 (``kv_norm="parallel"``: ``pre_fwd`` / ``pre_bwd`` ``-DPARALLEL=1``, the fp32 kernels likewise) in inference and training, and the slid key
-window (``key_window="slide"``: ``sm100_atom_local.slide_edges`` after the window kernel) in inference -- against the fp64 PyTorch module,
+window (``key_window="slide"``: edge CTAs of the attention kernels, ``sm100_atom_local/slide.cuh``) -- against the fp64 PyTorch module,
 no worse than the module path in the same dtype, on the real atoms (which come first, as the slid window requires)."""
 
 import pytest

@@ -318,8 +318,8 @@ def _esm_variant(module) -> bool:
 def _b200_af3_servable(module, single, cond, pair) -> bool:
     """AlphaFold 3's K/V norm (``kv_norm="parallel"``) and slid key window (``key_window="slide"``) on B200, inference and training:
     the parallel norm by ``pre_fwd`` / ``pre_bwd`` ``-DPARALLEL=1`` (the fused / unfused fp32 kernels likewise), the slid window by
-    edge CTAs of the attention forward (``sm100_atom_local/slide.cuh``: the windows it moves) and ``slide_bwd_prep`` / ``slide_bwd``
-    (their gradients around the clipped-window backward). ESMFold2's options are not served here."""
+    edge CTAs of the attention kernels (``sm100_atom_local/slide.cuh``: the windows it moves, forward and backward) and ``lslide.cu``
+    (their dK / dV partials added). ESMFold2's options are not served here."""
     if _esm_variant(module):
         return False
     return single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)
@@ -1002,8 +1002,6 @@ def _block_bwd(
             n,
             part=tsums,
         )
-        if slide:  # the moved windows' dO / D rows out of the clipped-window kernels' way
-            slid = local.slide_bwd_prep(do, dd, _keys(mask, n0, n), n0, a)
         db = local.attn_bwd(
             q.view(a, n, DS_),
             k.view(a, n, DS_),
@@ -1014,11 +1012,8 @@ def _block_bwd(
             dd,
             dp,
             _keys(mask, n0, n),
+            slide=slide,  # the windows the slid key window moves: edge CTAs of the same launches
         )
-        if slide:  # ... and their gradients over the slid keys
-            dpv = dp.view(a, n, 4 * DS_)
-            local.slide_bwd(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n), n0, lse, slid,
-                            dpv[..., 0:DS_], dpv[..., DS_ : 2 * DS_], dpv[..., 2 * DS_ : 3 * DS_], db)
         dz, dgamma, dwb = local.pair_bias_bwd(
             _trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db
         )
@@ -1812,8 +1807,6 @@ def _block_bwd32(
             dgated, p[:, gc : gc + DS_], o.view(m, DS_), dp[:, gc : gc + DS_], a, n
         )
         p3 = p.view(a, n, 4 * DS_)
-        if slide:
-            slid = local.slide_bwd_prep(do, dd, _keys(mask, n0, n), n0, a)
         db = local.attn_bwd32(
             p3[..., qc : qc + DS_],
             p3[..., kc : kc + DS_],
@@ -1825,11 +1818,8 @@ def _block_bwd32(
             dp,
             (qc, kc, vc),
             _keys(mask, n0, n),
+            slide=slide,
         )
-        if slide:
-            dpv = dp.view(a, n, 4 * DS_)
-            local.slide_bwd(p3[..., qc : qc + DS_], p3[..., kc : kc + DS_], p3[..., vc : vc + DS_], bias, _keys(mask, n0, n), n0, lse, slid,
-                            dpv[..., qc : qc + DS_], dpv[..., kc : kc + DS_], dpv[..., vc : vc + DS_], db)
         dz, dgamma, dwb = local.pair_bias_bwd32(
             _trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db
         )
