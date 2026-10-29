@@ -50,6 +50,9 @@ constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 #ifndef QPAIR
 #define QPAIR 0
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16
 #endif
@@ -106,6 +109,9 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
                    float* __restrict__ O, float* __restrict__ LSE, int L, int A
 #if KSPLIT
                    , int NS
+#endif
+#if KMASK
+                   , const uint32_t* __restrict__ KMB
 #endif
                    ) {
 #if !KSPLIT
@@ -219,10 +225,17 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
     if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
     const f2 CQ = mk2(RSQDV, RSQDV), L2E = mk2(LOG2E, LOG2E);
     float m_i = -INFINITY, l_i = 0.f;
+#if KMASK
+    static_assert(!QPAIR, "the per-sample key mask is built for the sample pairs");
+    const uint32_t* kmrow = KMB;                                           // this warpgroup's sample's mask words
+#endif
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
       const int s = G % ST;
       if (n == 0) { m_i = -INFINITY; l_i = 0.f; }
+#if KMASK
+      if (n == 0) { int a0, m0, head, sp; item_of(li, a0, m0, head, sp); kmrow = KMB + (size_t)(a0 + w) * (L / 32); }
+#endif
       mbar_wait(&B.kv_full[s], (G / ST) & 1);                              // the bias tile of this block
       mbar_wait(&B.s_full[w][G & 1], (G >> 1) & 1);
       if (w == 0 && r == 0) TR(2, G);
@@ -243,6 +256,16 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
             t[cc * 16 + q * 4 + e] = fma2(mk2u(v[q * 8 + 2 * e], v[q * 8 + 2 * e + 1]), CQ, mk2(bf16lo(bb[e]), bf16hi(bb[e])));
         }
       }
+#if KMASK
+      {
+        const uint2 kw = __ldg(reinterpret_cast<const uint2*>(kmrow) + n);   // BN = 64 keys: two words; t[k] holds keys 2 k, 2 k + 1
+        const uint64_t km = ((uint64_t)kw.y << 32) | kw.x;
+        if (~km)
+#pragma unroll
+          for (int k = 0; k < BN / 2; ++k)
+            t[k] = mk2(((km >> (2 * k)) & 1u) ? lo2(t[k]) : -1e30f, ((km >> (2 * k + 1)) & 1u) ? hi2(t[k]) : -1e30f);
+      }
+#endif
       if (G >= 1) { tc_fence_before(); }
       float mxp[4] = {-INFINITY, -INFINITY, -INFINITY, -INFINITY};         // four independent chains
 #pragma unroll
