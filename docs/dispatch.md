@@ -64,7 +64,7 @@ Generated from the manifests in the tree (`records.missing(op, card, mode=)`, `b
 | LayerNorm | portable forward, CUDA / portable backward | same | same | CUDA (general kernel) | warns, PyTorch |
 | SWA atom attention (QK norm + RoPE, gate) | warns (3 / 4 of 6) | warns (4 / 6 of 6) | warns (4 / 6 of 6) | CUDA, else PyTorch | warns, PyTorch |
 | SWADiTBlock | warns (3 / 9 of 11) | warns (4 / 11 of 11) | warns (4 / 11 of 11) | CUDA, else PyTorch | warns, PyTorch |
-| La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | same | same | CUDA on H100, PyTorch on B200 | warns, PyTorch |
+| La-Proteina pair builders (`pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`) | warns (2 inference, 5 training of 5 for the encoder / decoder pair; 1 / 4 of 4 for the initial pair) | same | same | CUDA (H100 and B200) | warns, PyTorch |
 | Token-pair initialisation (`token_pair_init`) | warns (1 inference, 4 training of 4) | same | same | CUDA | warns, PyTorch |
 | smooth lDDT (`kernels.smooth_lddt`, the diffusion loss; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
 | Diffusion sampler glue (`kernels.sampler_ops`: `augment_noise`, `align_euler`, `pool_atoms`; called directly, not a module) | warns (no record) | warns | warns | CUDA | warns, PyTorch |
@@ -101,11 +101,11 @@ the SWA kernels; on A5000 / A6000 also `rmsnorm_fwd`.
 ## The La-Proteina pair ops
 
 `pair_embed_geom` / `pair_embed_ca` (the autoencoder's backbone and CA-distance pair), `pair_embed_adaln` (the denoiser's initial pair) and `token_pair_init` are not modules:
-callers ask `refusal(...)` and then call the op, and the op routes itself (`kernels/_pair_route.py`, one rule for the three): the CUDA kernels where one exists (H100; for the
-token-pair initialisation also B200); any other card with a record for every kernel the call launches (`OP_KERNELS`: `pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`,
+callers ask `refusal(...)` and then call the op, and the op routes itself (`kernels/_pair_route.py`, one rule for the three): the CUDA kernels where one exists (H100 and
+B200); any other card with a record for every kernel the call launches (`OP_KERNELS`: `pair_embed_geom`, `pair_embed_ca`, `pair_embed_adaln`,
 `token_pair_init`; a call that needs a gradient also needs the backward kernels) runs the portable kernels; otherwise one `UnrecordedCardWarning` and the PyTorch reference.
 H100 / B200 never run the portable kernels, except under the internal A/B switch. A CPU tensor is the PyTorch reference. `refusal` returns the reason for a restricted card without a CUDA kernel
-of the op (B200, for the pair builders) and None otherwise; it never warns.
+of the op (none at present) and None otherwise; it never warns.
 
 ## The diffusion sampler glue
 
