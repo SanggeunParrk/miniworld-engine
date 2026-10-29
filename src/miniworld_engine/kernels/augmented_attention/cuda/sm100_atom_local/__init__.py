@@ -9,6 +9,8 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_fwd.cu   O and the row LSE.
   lattn_dq.cu    dQ (window-local).
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
+  lslide.cu      AlphaFold 3's slid key window: the (at most five) windows whose slid keys differ from the clipped ones, recomputed
+                 over their slid keys after the window kernel (inference).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
                  (the K / V AdaLN and its backward are inside ``sm100_atom``'s pre_fwd / pre_bwd, ``-DCROSS=1``).
 
@@ -37,7 +39,7 @@ from miniworld_engine import settings
 NH, DH, DM, DP = 4, 32, 128, 16
 WQ, WK, KOFF = 32, 128, 48
 _dir = Path(__file__).parent
-SOURCES = ("lattn_fwd", "lattn_dq", "lattn_dkv", "lbias", "lcross")
+SOURCES = ("lattn_fwd", "lattn_dq", "lattn_dkv", "lbias", "lcross", "lslide")
 
 
 @functools.lru_cache(maxsize=None)
@@ -69,6 +71,7 @@ KERNELS = {
     "pb_fin": ("lbias", "local_bias_fin", 0),
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
+    "slide": ("lslide", "local_slide_edges", 0),
 }
 
 
@@ -301,6 +304,24 @@ def attn_fwd(q, k, v, bias, kmask=None):
         int(sp),
     )
     return o, lse
+
+
+def slide_edges(q, k, v, bias, kmask, o, n0, lse=None):
+    """AlphaFold 3's slid key window (``lslide.cu``): after ``attn_fwd`` / ``attn_fwd32`` ran the clipped windows, recompute the windows
+    whose slid keys differ (0, 1 and the last three real ones, chosen on the device from the key mask's real atom count, or ``n0``
+    without a mask) over their slid keys, in place in ``o`` [A, N, 128] (and ``lse`` [A, 4, N] when given). q, k, v [A, N, 128] views with
+    one row stride (bf16 projections or fp32 column blocks of P32); bias [4, nwin, 32, 128] fp32."""
+    A, N, _ = o.shape
+    ld = q.stride(1)
+    assert k.stride(1) == v.stride(1) == ld and q.stride(0) == k.stride(0) == v.stride(0) == N * ld and q.stride(2) == 1
+    assert o.is_contiguous() and q.dtype == o.dtype
+    d = _dev(q)
+    kern = _load32("slide32", d) if q.dtype == torch.float32 else _load("slide", d)
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 4:  # the kernel counts the mask a word at a time
+        km = km.clone()
+    kern((5, NH, A), (512, 1, 1), q, k, v, int(ld), bias, km, o, lse, int(N), int(n0))
+    return o
 
 
 def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
@@ -730,6 +751,7 @@ KERNELS_TF32 = {
     "pb_f32": ("lbias_tf32", "local_bias_fwd_f32", 0),
     "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
     "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
+    "slide32": ("lslide", "local_slide_edges_f32", 0),
 }
 
 

@@ -1,7 +1,7 @@
 // fused_tf32.cu — the fp32 (TF32) path's inference row stages fused around the attention (sm_100a, tcgen05 kind::tf32): two kernels in place
 // of the eight launches (3 AdaLNs, the gate, 4 GEMMs) atom_gemm_tf32 / rows_tf32 take, with the same arithmetic.
 //
-//   atom_pre_tf32   x1 = LN(s) s1 + b1  (cross mode: xkv = LN(x1) mks + mkb)  ->  P = [x1 | x1 | xkv | xkv] . Wp^T  (+ bq on q),
+//   atom_pre_tf32   x1 = LN(s) s1 + b1  (cross mode: xkv = LN(x1) mks + mkb; cross = 2, AlphaFold 3's parallel K / V norm: LN(s) mks + mkb)  ->  P = [x1 | x1 | xkv | xkv] . Wp^T  (+ bq on q),
 //                   P [M, 512] fp32 with the q / k / v blocks rounded to tf32 (RNA: they only feed the attention's MMAs)
 //   atom_post_tf32  gated = sigmoid(g) o;  a1 = s + so (gated Wo^T);  x2 = LN(a1) s2 + b2;  h = silu(x2 Wa^T) (x2 Wb^T);
 //                   out = a1 + st (h Ws^T)                                                              out [M, 128] fp32
@@ -261,6 +261,19 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
             sf[k] = ldg4(b1 + row * mld + 4 * lane);
           }
           ln4x4(x, eps);
+          if (want_kv && cross == 2) {                               // AlphaFold 3: xkv = LN(s) mks + mkb, from the same statistics
+            float4 kc[4], kf[4];
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+              const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
+              kc[k] = ldg4(mks + row * kld + 4 * lane);
+              kf[k] = ldg4(mkb + row * kld + 4 * lane);
+            }
+#pragma unroll
+            for (int k = 0; k < 4; ++k)
+              sts128(opnd(kvt, e + 8 * (k0 + k), lane), u4(rna(fmaf(x[k][0], kc[k].x, kf[k].x)), rna(fmaf(x[k][1], kc[k].y, kf[k].y)),
+                                                           rna(fmaf(x[k][2], kc[k].z, kf[k].z)), rna(fmaf(x[k][3], kc[k].w, kf[k].w))));
+          }
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
             x[k][0] = fmaf(x[k][0], sc[k].x, sf[k].x); x[k][1] = fmaf(x[k][1], sc[k].y, sf[k].y);
@@ -268,7 +281,7 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
             if (x1_to_a) sts128(opnd(sa, e + 8 * (k0 + k), lane), u4(rna(x[k][0]), rna(x[k][1]), rna(x[k][2]), rna(x[k][3])));
           }
         }
-        if (want_kv) {                                               // xkv = LN(x1) mks + mkb (x1 exact)
+        if (want_kv && cross != 2) {                                 // xkv = LN(x1) mks + mkb (x1 exact)
           float4 kc[4], kf[4];
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
