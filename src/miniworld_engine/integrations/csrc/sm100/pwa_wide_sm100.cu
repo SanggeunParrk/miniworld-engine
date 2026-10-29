@@ -1113,7 +1113,7 @@ constexpr int RT = BS * D;                      // dres -> dout' (64 KiB)
 constexpr int SLOT = 128 * 64;                  // one weight slot (16 KiB)
 constexpr int WRS = 6;
 constexpr int THREADS = 352;
-constexpr int SMEM = 1024 + (YT + RT + WRS * SLOT) * 2 + 512;
+constexpr int SMEM = 1024 + (YT + RT + WRS * SLOT) * 2 + D * 2 + 512;
 constexpr int HH = HC / 2;                      // a half's value channels (128)
 constexpr uint32_t ID_G = idesc_bf16(128, HH, 0, 0);
 constexpr uint32_t ID_DU = idesc_bf16(128, HH, 0, 1);
@@ -1126,6 +1126,7 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
     const __grid_constant__ CUtensorMap ymap,     // y [S][N][D] as (D, N, S), box (64, 1, 128), 128B swizzle
     const __grid_constant__ CUtensorMap rmap,     // dres, same
     const __grid_constant__ CUtensorMap dpmap,    // dout', same (the dropout only)
+    const __grid_constant__ CUtensorMap kmap,     // keep [N][D], box (D, 1) (the dropout only)
     const __grid_constant__ CUtensorMap gmap,     // Wg [HC][D], box (64, 128)
     const __grid_constant__ CUtensorMap wmap,     // Wo [D][HC] as (HC, D), box (64, 64)
     const __nv_bfloat16* __restrict__ O,          // o head-major [H][N][S*C]
@@ -1140,8 +1141,9 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
   __nv_bfloat16* sY = reinterpret_cast<__nv_bfloat16*>(smb);
   __nv_bfloat16* sR = sY + YT;
   __nv_bfloat16* sW = sR + RT;
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sW + WRS * SLOT);
-  uint64_t* full = bars;             // [1] the y | dres tile landed
+  __nv_bfloat16* sMK = sW + WRS * SLOT;   // the tile's keep row [D] (one per token)
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sMK + D);
+  uint64_t* full = bars;             // [1] the y | dres (| keep) tile landed
   uint64_t* yempty = full + 1;       // [1] the tile's last GEMM retired
   uint64_t* rdy = yempty + 1;        // [1] count 8: dout' in place
   uint64_t* accf = rdy + 1;          // [2] a half's G | DU ready
@@ -1171,11 +1173,12 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
           wait(yempty, (lt - 1) & 1);
           if (DMASK != nullptr) bulk_wait_read<0>();   // the previous dout' store has read the tile
         }
-        expect_tx(full, (YT + RT) * 2);
+        expect_tx(full, (YT + RT) * 2 + (DMASK != nullptr ? D * 2 : 0));
         for (int kb = 0; kb < KB; ++kb) {
           load_3d(&ymap, sY + kb * BS * 64, full, kb * 64, n, s0);
           load_3d(&rmap, sR + kb * BS * 64, full, kb * 64, n, s0);
         }
+        if (DMASK != nullptr) load_2d(&kmap, sMK, full, 0, n);
         if (DMASK != nullptr) {                  // dout' leaves for dWo's GEMM once the prep wrote it
           wait(rdy, lt & 1);
           for (int kb = 0; kb < KB; ++kb) store_3d(&dpmap, sR + kb * BS * 64, kb * 64, n, s0);
@@ -1238,13 +1241,13 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
       const int t = (int)blockIdx.x + lt * (int)gridDim.x, n = t / NSB, s = (t % NSB) * BS + r;
       wait(full, lt & 1);
       if (DMASK != nullptr) {                    // dout' = dres . keep / (1 - p) in place: row r, channel half pp (keep is per token, channel)
-        const __nv_bfloat16* dr = DMASK + (size_t)n * D;
+        const uint4* km = reinterpret_cast<const uint4*>(sMK);
 #pragma unroll 4
         for (int e = 0; e < D / 16; ++e) {
           const int g8 = pp * (D / 16) + e, blk = g8 >> 3, c8 = g8 & 7;
           __nv_bfloat16* p = sR + blk * BS * 64 + r * 64 + ((c8 ^ (r & 7)) << 3);
           uint4 v = *reinterpret_cast<uint4*>(p);
-          const uint4 kp = __ldg(reinterpret_cast<const uint4*>(dr + g8 * 8));
+          const uint4 kp = km[g8];
           const uint32_t* vw = reinterpret_cast<const uint32_t*>(&v);
           const uint32_t* kw = reinterpret_cast<const uint32_t*>(&kp);
           uint4 o;
@@ -1756,6 +1759,8 @@ std::vector<torch::Tensor> glue_w(torch::Tensor o, torch::Tensor y, torch::Tenso
     return make_map<3>(t.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)(N * D)}, {64, 1, (uint32_t)BS}, CU_TENSOR_MAP_SWIZZLE_128B, w);
   };
   CUtensorMap ym = nat(y, "y"), rm = nat(dres, "dres"), dpm = nat(dout, "dout");
+  CUtensorMap km = dm != nullptr ? make_map<2>(dmask->data_ptr(), {(uint64_t)D, (uint64_t)N}, {(uint64_t)D}, {(uint32_t)D, 1}, CU_TENSOR_MAP_SWIZZLE_NONE, "keep")
+                                 : ym;
   CUtensorMap gm = make_map<2>(wg.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, (uint32_t)HH}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
   CUtensorMap wm = make_map<2>(wo.data_ptr(), {(uint64_t)HC, (uint64_t)D}, {(uint64_t)HC}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
   const int ntiles = (int)(N * (S / BS));
@@ -1763,7 +1768,7 @@ std::vector<torch::Tensor> glue_w(torch::Tensor o, torch::Tensor y, torch::Tenso
   auto st = at::cuda::getCurrentCUDAStream();
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(glue_ws_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-  glue_ws_sm100<<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, ym, rm, dpm, gm, wm,
+  glue_ws_sm100<<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, ym, rm, dpm, km, gm, wm,
                                              reinterpret_cast<const __nv_bfloat16*>(o.data_ptr<at::BFloat16>()),
                                              reinterpret_cast<__nv_bfloat16*>(dO.data_ptr<at::BFloat16>()),
                                              reinterpret_cast<__nv_bfloat16*>(dgv.data_ptr<at::BFloat16>()),
