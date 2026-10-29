@@ -3,8 +3,8 @@
 // One cluster of SK CTAs per (128-row tile, 64-column output block): tiles x D / 64 x SK CTAs (144 at [1, 768, 384] with SK = 4).
 // CTA k of a cluster runs the hidden slice [k H / SK, (k + 1) H / SK) through a ring of (h, Ws) K-blocks into a [128 x 64] fp32
 // accumulator in tensor memory. The partials are summed through L2: CTA o owns output columns [o 64 / SK, (o + 1) 64 / SK) of the
-// block; every CTA stores the other owners' columns into their shared memory (distributed shared memory), a cluster barrier
-// (release / acquire) orders the stores, and each owner adds the SK partials in rank order (deterministic), adds the residual (loaded
+// block; every CTA stores the other owners' columns into their shared memory (distributed shared memory, st.async completing on the
+// owner's barrier: no cluster barrier), and each owner adds the SK partials in rank order (deterministic), adds the residual (loaded
 // while the products run) and stores bf16 -- one rounding.
 // Ws K-blocks do not depend on the expand, so the first ring stages are loaded before griddepcontrol.wait.
 // SPDX-License-Identifier: Apache-2.0
@@ -34,7 +34,7 @@ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 constexpr uint32_t IDESC = idesc_bf16(128, NB);
 
 struct Bars {
-  uint64_t full[STG], empty[STG], acc_full;
+  uint64_t full[STG], empty[STG], acc_full, red_full;
   uint32_t tmem;
 };
 
@@ -42,11 +42,6 @@ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
   if constexpr (N == 32) tmem_ld32(taddr, r); else tmem_ld16(taddr, r);
 }
 
-DEVI void st_cluster_v4(uint32_t addr, uint32_t rank, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
-  uint32_t r;
-  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(addr), "r"(rank));
-  asm volatile("st.shared::cluster.v4.b32 [%0], {%1, %2, %3, %4};" :: "r"(r), "r"(a), "r"(b), "r"(c), "r"(d) : "memory");
-}
 
 // maps: h [M][H] (box 64 x 128), ws [D][H] (box 64 x NB). x / out [M][D] bf16.
 extern "C" __global__ void __launch_bounds__(256, 1)
@@ -62,6 +57,7 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
   if (tid == 0) {
     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
     mbar_init(&B.acc_full, 1);
+    if (SK > 1) { mbar_init(&B.red_full, 1); mbar_expect_tx(&B.red_full, (SK - 1) * ROWS * W_ * 4); }   // the other ranks' partials
     fence_barrier_init();
     fence_proxy_async();
     prefetch_map(&mh); prefetch_map(&mws);
@@ -161,15 +157,17 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
 #pragma unroll
         for (int i = 0; i < W_; ++i) acc[i] = __uint_as_float(v[i]);
       } else {
-        const uint32_t dst = su + O_RED + (uint32_t)((rank * ROWS + r) * W_ * 4);
+        const uint32_t dst = su + O_RED + (uint32_t)(rank * ROWS * W_ * 4);
 #pragma unroll
-        for (int i = 0; i < W_ / 4; ++i) st_cluster_v4(dst + 16 * i, o, v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
+        for (int i = 0; i < W_ / 4; ++i)
+          st_async_v4(dst + swz16((uint32_t)(r * (W_ / 4) + i)), smem_u32(&B.red_full), (uint32_t)o, v[4 * i], v[4 * i + 1], v[4 * i + 2],
+                      v[4 * i + 3]);
       }
     }
     tc_fence_before();
   }
-  cluster_sync();                                              // release / acquire: every partial is in its owner's shared memory
   if (warp >= 4) {
+    mbar_wait(&B.red_full, 0);                                 // every other rank's partial of these columns is here
     float sum[W_];
 #pragma unroll
     for (int i = 0; i < W_; ++i) sum[i] = 0.f;
@@ -179,10 +177,10 @@ transition_sx_squeeze(const __grid_constant__ CUtensorMap mh, const __grid_const
 #pragma unroll
         for (int i = 0; i < W_; ++i) sum[i] += acc[i];
       } else {
-        const uint32_t src = su + O_RED + (uint32_t)((o * ROWS + r) * W_ * 4);
+        const uint32_t src = su + O_RED + (uint32_t)(o * ROWS * W_ * 4);
 #pragma unroll
         for (int i = 0; i < W_ / 4; ++i) {
-          const uint4 t = lds128(src + 16 * i);
+          const uint4 t = lds128(src + swz16((uint32_t)(r * (W_ / 4) + i)));
           sum[4 * i] += __uint_as_float(t.x); sum[4 * i + 1] += __uint_as_float(t.y);
           sum[4 * i + 2] += __uint_as_float(t.z); sum[4 * i + 3] += __uint_as_float(t.w);
         }
