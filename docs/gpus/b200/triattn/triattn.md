@@ -21,8 +21,8 @@ B200, `modules.dispatch.restricted_card`):
 - the module's backend is PORTABLE (`implementation=miniworld`), `module._b200_cuda` is True
   (the default; False keeps the Triton kernels, e.g. as a benchmark baseline) and `(not settings.force_portable_kernels)`;
 - `d_pair = d_hidden = 128`, `n_head = 4`, no QK-norm;
-- `pair` is a bf16 CUDA tensor `[B, L, L, 128]` with any L >= 16 (a length that is not a multiple of 128 runs zero-padded to the next
-  one, the pad keys masked, the pad rows and columns cut from the result) and any B (up to `max_batch` = 48 samples a launch, more in
+- `pair` is a bf16 CUDA tensor `[B, L, L, 128]` with any L >= 16 (a length that is not a multiple of 128 is read and written as it is,
+  the kernels' tiles cover the next multiple: [Ragged lengths](#ragged-lengths-without-padded-copies-2026-10-29)) and any B (up to `max_batch` = 48 samples a launch, more in
   chunks: [Batched samples](#batched-samples-b--1-any-length-and-chunking-2026-10-20)), `mask` is None or bool `[B, L]`;
 - compute capability (10, 0).
 
@@ -303,8 +303,9 @@ paths; the launches are opaque custom ops, so the module compiles to one graph).
   are one autograd node (`_Chunked`) that keeps every chunk's saved tensors when they fit next to one chunk's backward, else reruns
   each chunk's forward in the backward (`checkpoint`); y and dx are copied into the batch's tensors and the parameter gradients come
   back in fp32 (the chunks get an exact fp32 cast of the parameters) and are summed in chunk order, rounded once.
-- **Any length:** L that is not a multiple of 128 runs zero-padded to the next multiple (pad keys masked per sample, pad rows and
-  columns cut; padded training is exact: the pad tokens' gradient rows are zero). L < 16 runs the module's PyTorch statements.
+- **Any length:** L that is not a multiple of 128 runs on the next multiple's tiles without padded copies (pad keys masked per sample,
+  pad rows and columns read as zeros and never written; exact in training: the pad tokens' gradient rows are zero; see
+  [Ragged lengths](#ragged-lengths-without-padded-copies-2026-10-29)). L < 16 runs the module's PyTorch statements.
   Long crops: L 1536 / 2048 / 2560 (and the ragged 1000) are served for inference and training; at B = 1 a d_pair 128 training step
   at L2560 holds about 24 GB.
 - **Attention core forward in sample groups:** with four pair rows a task (L > 384) the persistent kernel's static round robin lets
@@ -882,7 +883,8 @@ every parameter gradient), median of 5 rounds of 3-50 replays, ms; before = the 
 
 Peak memory at L 731: 5.0 / 10.9 GiB (inference / training, d_pair 512) after, 17.7 / 28.6 GiB before. Kernel times at L 731, d_pair 512
 4 × 128 (`torch.profiler`, eager, µs): inference `triattn_fwd128` 2231, `tri_wfront` 1059, `tri_wtail` 472, the pad of the 731 crop to 768
-and the cut of the result 1233 + 156 (torch elementwise copies of the wide path's padding; absent at L 768); training `triattn_bwd128_kv` 2775,
+and the cut of the result 1233 + 156 (torch elementwise copies of the wide path's padding; absent at L 768; removed since, see
+[Ragged lengths](#ragged-lengths-without-padded-copies-2026-10-29): L 731 inference 5.13 -> 3.83 ms, training 15.65 -> 12.89 ms); training `triattn_bwd128_kv` 2775,
 `triattn_bwd128_q` 2014, `triattn_fwd128` 2234, `tri_whbwd` 1522, `tri_wfront` 1069, cuBLAS 1062, `tri_wgbwd` 892, `tri_wtail` 740, the
 pad / cut copies 2468 + 720. (The 16 × 32 core at the same width, L 768: forward 2698, key side 3616, query side 3575.)
 Tests: `tests/gpu/sm100/test_triattn_b200_variants_gpu.py` (seven 96 / 128 cases with the options, inference at three shapes, training
@@ -909,3 +911,64 @@ The forward cores consume their bias tiles before releasing them (the released v
 their rings after in-place rewrites and `cp.async.bulk.wait_group.read`, and `tri_wgrad`'s `he` / `de` releases follow the loads'
 consumers in the same thread; those were left as they are. 500 reruns of each core (head dim 32 / 64 / 128: forward o / lse, dQ, dK,
 dV) and 100-300 of the fused module (y; dW_q|k|v|g|o with `triattn_b200_deterministic_wgrad`) are bitwise equal.
+
+## Ragged lengths without padded copies (2026-10-29)
+
+A length that is not a multiple of 128 (FoldForge's crops, e.g. L 731) used to run on a zero-padded copy of the pair (`F.pad` to the next
+multiple, a padded key mask, the result and dx cut back, dy padded in training): 0.35 ms of copies at d_pair 128 L 731 inference and
+1.3 ms at d_pair 512. Now no copy is made, on both paths, both nodes, inference and training: the kernels that touch the caller's
+pair-shaped tensors read and write them unpadded, and only the intermediates (q, k, v, g, bias, o, lse, the LN statistics, the gradient
+rows) have the padded length, so the attention cores are unchanged.
+
+- Geometry (`sm100.cuh`, `load_rows` / `store_rows` / `reduce_rows` / `row_at`): a kernel's row tiles still cover [B, Lp, Lp] (Lp the next
+  multiple of 128); a ragged call's caller tensors (x, y, dy, dx, and the wide path's dy_s and u) go through 4-D maps (c, j, i, b) whose
+  bounds are the caller's L, with a box of consecutive j at one i for the starting node (the ending node's box runs along i, as before).
+  TMA fills the rows and columns beyond L with zeros (the old zero padding) and drops their stores and reduce-adds (the old cut); raw
+  per-thread reads of x (the wide tail's residual with dropout, the wide front's row statistics at C >= 384) read zeros there. A whole-tile
+  length keeps the 2-D map of the starting node (the same code path as before). The front masks the keys beyond L itself (`tri_front`:
+  the caller's length is a kernel parameter -- derived from the geometry word it spilled 12 B; `tri_wfront`), the mask stays [B, L]; the
+  dropout scale [B, L, C] is read at the clamped position (the pad rows' updates are dropped, their dy is zero).
+- Bits: y is the same bits as the explicitly padded call (every case of the test below); dW_q|k|v|g on the wide path too; dx and dW_b /
+  dγ / dβ within the run-to-run spread of the dbias reduce-add (the padded call against itself: up to 3.8e-5 relative at L 731); dW_o on
+  the wide path within 2e-5 measured (test bound 5e-5): dy_s^T u now runs over the caller's B L² rows instead of B Lp² (cuBLAS). A reduction length that is not a
+  multiple of 8 runs as K - K % 8 on cuBLAS plus the last rows in fp32 (`_mm32`): cuBLAS 12.9 (torch's default
+  `allow_bf16_reduced_precision_reduction`) returned the [256, K] x [K, 256] product with 0.7-1.4 % relative error at K = 16641 / 16643
+  (4.5e-6 at 16640 / 16644), which the batched test caught at L 129 (d_pair 256).
+- `plan` / `_bytes_per_token`: no padded copies to count (the working set is per padded token as before).
+- Registers (ptxas, nvcc 13.1): no new spills (`tri_front` 128 / 0, `tri_wtail`, `tri_wgbwd`, `tri_whbwd` unchanged or ±1 register);
+  the eight-drain-warp `tri_wfront` is no longer instantiated for C > 256, where it was never launched (four of those instances
+  spilled 28 B). `tri_wgrad`'s 72 B spill is unchanged (before this change too).
+
+CUDA graph, B = 1, the last 11 keys masked, bf16-mixed (fp32 parameters, bf16 pair, autocast), inference with `static_weights`, training =
+forward + backward with dropout 0.25, dx and every parameter gradient; median of 5 rounds of 3-50 replays, mean of two interleaved runs
+(before, after, before, after), node 2 GPU 1 (a utilisation filler resident); before = b98cd541, ms:
+
+| case (d_pair, heads) | mode | L 731 before | after | × | L 768 before | after |
+|---|---|---|---|---|---|---|
+| 128, 4 × 32, starting (fused) | inference | 1.256 | 0.916 | 1.37 | 0.908 | 0.909 |
+| 128, 4 × 32, starting (fused) | training | 4.276 | 3.492 | 1.22 | 3.497 | 3.500 |
+| 128, 4 × 32, ending (fused) | inference | 1.278 | 0.924 | 1.38 | 0.928 | 0.929 |
+| 128, 4 × 32, ending (fused) | training | 4.309 | 3.505 | 1.23 | 3.526 | 3.527 |
+| 64, 4 × 16, starting | inference | 1.048 | 0.870 | 1.20 | 0.868 | 0.869 |
+| 64, 4 × 16, starting | training | 3.820 | 3.426 | 1.11 | 3.415 | 3.416 |
+| 256, 8 × 32, starting | inference | 2.457 | 1.783 | 1.38 | 1.808 | 1.796 |
+| 256, 8 × 32, starting | training | 8.544 | 7.093 | 1.20 | 6.988 | 6.989 |
+| 256, 4 × 64, starting (Chai-1) | inference | 2.304 | 1.622 | 1.42 | 1.618 | 1.613 |
+| 256, 4 × 64, starting (Chai-1) | training | 7.486 | 6.058 | 1.24 | 5.940 | 5.944 |
+| 512, 4 × 128, starting | inference | 5.125 | 3.826 | 1.34 | 3.766 | 3.774 |
+| 512, 4 × 128, starting | training | 15.65 | 12.89 | 1.22 | 12.62 | 12.65 |
+
+L 731 now costs what L 768 costs (the kernels run the padded tiles' work: 1.10× the work of 731²; -0.7 / +1.9 % against L 768); L 768 is unchanged
+(-0.7 / +0.2 %). The earlier tables of this page at L 347 / 731 (model options, heads of 96 / 128) were measured with the copies.
+
+Tests: `tests/gpu/sm100/test_triattn_b200_ragged_gpu.py` (100): L 333 / 517 / 700 / 731 × the fused path (both nodes) and the wide cores
+(4 × 16 ending with B = 2, 8 × 32, 4 × 64 ending, 4 × 96) × inference / training (dropout 0.25, a fixed draw, fp32 master parameters):
+against the explicitly padded call (the bits above), and against the module's PyTorch statements in fp64 within 1.25× the bf16
+statements' error (+1e-3 output, +2e-3 gradients); CUDA-graph replay of a ragged call (inference and a training step) against eager.
+`test_triattn_b200_batch_plan.py`: the padded length no longer adds copies to the working set (that assertion changed: padded == whole-tile
+bytes per token).
+
+Heads of 96 channels still run zero-padded to 128 (4/3 of the head-dim-128 core's QK^T / PV work): a native 96 needs the three head-dim-128
+kernels re-planned (K = 96 in QK^T as one 64-column half and one 32-column half, N = 96 in PV and in the gradient products, the TMEM column
+plan and the delta quarters), not a change that falls out of this one; not done.
+
