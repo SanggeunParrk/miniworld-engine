@@ -116,9 +116,9 @@ def test_declines_what_it_does_not_serve():
         assert not bias_only_dit.serves(
             fast, x.float(), c.float(), p.float()
         )  # bf16 only
-        assert not bias_only_dit.serves(
+        assert bias_only_dit.serves(
             fast, x[:, :, :200], c[:, :, :200], p[:, :200, :200]
-        )  # L % 128
+        )  # L % 128: B200 pads it on the host (test_b200_bias_only_dit_pad_gpu.py)
         assert not bias_only_dit.serves(
             fast, x, c, p, torch.ones(5, 384, device="cuda", dtype=torch.bool)
         )  # a mask per sample
