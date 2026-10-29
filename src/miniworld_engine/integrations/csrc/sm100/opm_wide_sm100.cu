@@ -30,8 +30,9 @@ constexpr int CH = 32, NCH = CH * CH;
 template <int CM>
 struct WPro {
   static constexpr int BS = 128, KB = CM / 64;
-  static constexpr int NST = CM == 64 ? 3 : 4;
-  static constexpr int NACC = 2;
+  // d_msa 256 (IntelliFold-v2): a 64 KiB x tile, so two x stages and one accumulator (the drain of a tile is short next to its loads)
+  static constexpr int NST = CM == 64 ? 3 : CM == 128 ? 4 : 2;
+  static constexpr int NACC = CM == 256 ? 1 : 2;
   static constexpr int CTAS = CM == 64 ? 2 : 1;
   static constexpr int XT = BS * CM;
   static constexpr int TT = 2 * 64 * 64;
@@ -92,6 +93,62 @@ __device__ __forceinline__ void ln_half_row(__nv_bfloat16* tile, int r, int hf, 
     uint4 o;
     o.x = pack2(y0.x, y0.y) & keep; o.y = pack2(y1.x, y1.y) & keep; o.z = pack2(y2.x, y2.y) & keep; o.w = pack2(y3.x, y3.y) & keep;
     *reinterpret_cast<uint4*>(xr + ((c8 ^ (r & 7)) << 3)) = o;
+  }
+  mean_out = mean;
+  rstd_out = rstd;
+}
+
+// d_msa 256: the same row split (two threads a row, 128 channels each = two of the four 64-channel k blocks), but 128 channels do not
+// fit a thread's registers as fp32 pairs: three passes over the swizzled rows in shared memory (sum; centred squares; normalise and
+// write), 16 channels at a time.  The same statistics as `ln_half_row` (mean, then the centred variance).
+__device__ __forceinline__ void ln_half_row256(__nv_bfloat16* tile, int r, int hf, const float* sLN, bool mkb, float eps, float& mean_out,
+                                               float& rstd_out) {
+  constexpr int BS = 128, CM = 256;
+  auto chunk = [&](int k) -> __nv_bfloat16* {      // k = 0..15: k block hf * 2 + k / 8, 16-byte chunk k % 8 of row r
+    return tile + (hf * 2 + (k >> 3)) * BS * 64 + r * 64 + (((k & 7) ^ (r & 7)) << 3);
+  };
+  float2 sa = make_float2(0.f, 0.f), sb = sa;
+#pragma unroll 8
+  for (int k = 0; k < 16; ++k) {
+    const uint4 u = *reinterpret_cast<const uint4*>(chunk(k));
+    sa = add2(sa, add2(bf2f(u.x), bf2f(u.y)));
+    sb = add2(sb, add2(bf2f(u.z), bf2f(u.w)));
+  }
+  const float2 sm = add2(sa, sb);
+  float sum = sm.x + sm.y;
+  sum += __shfl_xor_sync(0xffffffffu, sum, 16);
+  const float mean = sum * (1.f / CM);
+  const float2 nm = make_float2(-mean, -mean);
+  float2 va = make_float2(0.f, 0.f), vb = va;
+  asm volatile("" ::: "memory");                   // re-read the row: 64 registers of it held across the passes spilled
+#pragma unroll 8
+  for (int k = 0; k < 16; ++k) {
+    const uint4 u = *reinterpret_cast<const uint4*>(chunk(k));
+    const float2 x0 = add2(bf2f(u.x), nm), x1 = add2(bf2f(u.y), nm), x2 = add2(bf2f(u.z), nm), x3 = add2(bf2f(u.w), nm);
+    va = fma2(x0, x0, fma2(x1, x1, va));
+    vb = fma2(x2, x2, fma2(x3, x3, vb));
+  }
+  const float2 vs = add2(va, vb);
+  float var = vs.x + vs.y;
+  var += __shfl_xor_sync(0xffffffffu, var, 16);
+  const float rstd = 1.f / sqrtf(var * (1.f / CM) + eps);
+  const float2 rs = make_float2(rstd, rstd);
+  const uint32_t keep = mkb ? 0xffffffffu : 0u;
+  asm volatile("" ::: "memory");
+#pragma unroll 4
+  for (int k = 0; k < 16; ++k) {
+    uint4* p = reinterpret_cast<uint4*>(chunk(k));
+    const uint4 u = *p;
+    const int cb = hf * 128 + k * 8;
+    const float4 g0 = *reinterpret_cast<const float4*>(sLN + cb), g1 = *reinterpret_cast<const float4*>(sLN + cb + 4);
+    const float4 b0 = *reinterpret_cast<const float4*>(sLN + CM + cb), b1 = *reinterpret_cast<const float4*>(sLN + CM + cb + 4);
+    const float2 y0 = fma2(mul2(add2(bf2f(u.x), nm), rs), make_float2(g0.x, g0.y), make_float2(b0.x, b0.y));
+    const float2 y1 = fma2(mul2(add2(bf2f(u.y), nm), rs), make_float2(g0.z, g0.w), make_float2(b0.z, b0.w));
+    const float2 y2 = fma2(mul2(add2(bf2f(u.z), nm), rs), make_float2(g1.x, g1.y), make_float2(b1.x, b1.y));
+    const float2 y3 = fma2(mul2(add2(bf2f(u.w), nm), rs), make_float2(g1.z, g1.w), make_float2(b1.z, b1.w));
+    uint4 o;
+    o.x = pack2(y0.x, y0.y) & keep; o.y = pack2(y1.x, y1.y) & keep; o.z = pack2(y2.x, y2.y) & keep; o.w = pack2(y3.x, y3.y) & keep;
+    *p = o;
   }
   mean_out = mean;
   rstd_out = rstd;
@@ -189,7 +246,8 @@ __global__ void __launch_bounds__(448, WPro<CM>::CTAS) opm_wprologue_sm100(
       wait(xfull + st, (lt / NST) & 1);
       const bool mkb = sM[st * MT + r * 16 + (i & 15)] != 0;
       float mean, rstd;
-      ln_half_row<CM>(sX + st * XT, r, hf, sLN, mkb, eps, mean, rstd);
+      if constexpr (CM == 256) ln_half_row256(sX + st * XT, r, hf, sLN, mkb, eps, mean, rstd);
+      else ln_half_row<CM>(sX + st * XT, r, hf, sLN, mkb, eps, mean, rstd);
       if (STATS != nullptr && hf == 0) STATS[(size_t)i * S + s0 + r] = make_float2(mean, rstd);
       const unsigned bal = __ballot_sync(0xffffffffu, mkb);    // lanes 0-15: this warp's 16 rows
       if (lane == 0) {
@@ -436,7 +494,8 @@ struct WDg {
   static constexpr int NC = 128, NCK = NCH / NC;
   static constexpr int NZB = CZ / 128, NZS = CZ / 64;
   static constexpr int UNIT = NP * 128;              // elements
-  static constexpr int NB = NZB + 1;
+  static constexpr int NB = CZ <= 384 ? NZB + 1 : NZB;   // c_z 512: four 32 KiB units fill the ring (the next tile's first unit
+                                                       // lands once the last chunk has read it, under the chunk's other units)
   static constexpr int WOS = 128 * 64;               // [2 n blocks][64 z][64 n]
   static constexpr int NWO = 3;
   static constexpr int OUT = NP * NC;
@@ -653,7 +712,7 @@ struct WDw {
   static constexpr int AT = NP * CZ;                 // dz/n tile [CZ / 64 z blocks][64 pairs][64 z]
   static constexpr int BT = NP * NHALF;              // O tile [NCB c][64 pairs][32 e]
   static constexpr int STAGE = AT + BT;
-  static constexpr int NST = 3;
+  static constexpr int NST = CZ >= 512 ? 2 : 3;      // c_z 512: an 80 KiB stage
   static constexpr int THREADS = 192;
   static constexpr int SMEM = 1024 + NST * STAGE * 2 + 256;
   static constexpr int MN = NHALF < 256 ? NHALF : 256;
@@ -770,7 +829,10 @@ __global__ void __launch_bounds__(192, 1) opm_wdwo_sm100(
 // opm_prologue_bwd_sm100's tile (one token x 128 MSA rows) and roles.  A row is 128 channels, which a thread cannot keep with its
 // TMEM gradient row, so the eight compute warps form ONE group: warps q and q + 4 take the same 32 rows, each 64 channels, and
 // combine their two row sums through shared memory; the dy accumulator is double-buffered, so the next tile's dy GEMM runs
-// under this tile's compute.  The dW GEMM's A operand (mask . xh) is exactly M = 128 channels: the masked column sums leave the
+// under this tile's compute.  d_msa 256 (IntelliFold-v2): a CTA PAIR (cluster of two) takes each tile, each CTA 128 of the channels --
+// its own x half, Wf columns, dm half and rows of R -- so every per-CTA buffer is the d_msa 128 kernel's; the four partial row sums
+// (two warp halves x two CTAs) are exchanged through distributed shared memory (each thread stores its pair into the peer's ring and
+// arrives on the peer's barrier) and added in one fixed order in both CTAs.  The dW GEMM's A operand (mask . xh) is exactly M = 128 channels: the masked column sums leave the
 // kernel (the host's GEMV over dA / dB, which also gives RoseTTAFold3's projection-bias gradients).
 namespace wpb {
 constexpr int CM = 128, BS = 128, KB = 2;
@@ -782,7 +844,7 @@ constexpr int MKT = BS * 16;
 constexpr int STAGE_A = 2 * DAT * 2;
 constexpr int STAGE_X = 36864;                             // bytes: x | stats | mask, padded to 1 KiB
 constexpr int THREADS = 352;                               // warp 0: da/db, warp 1: MMA, warps 2-9: compute, warp 10: x
-constexpr int SMEM = 1024 + NSA * STAGE_A + NSX * STAGE_X + (XT + XT + 64 * CM) * 2 + 2 * BS * 8 + 256;
+constexpr int SMEM = 1024 + NSA * STAGE_A + NSX * STAGE_X + (XT + XT + 64 * CM) * 2 + 2 * 4 * BS * 8 + 256;
 static_assert(XT * 2 + STAT * 4 + MKT <= STAGE_X && STAGE_A % 1024 == 0 && STAGE_X % 1024 == 0, "stage layout");
 constexpr uint32_t IDESC_DY = idesc_bf16(128, CM, 0, 1);   // A = [da|db] K-major, B = Wf MN-major (N = 128 channels)
 constexpr uint32_t IDESC_DW = idesc_bf16(128, 64, 1, 1);   // A = (mask . xh)^T MN-major (M = 128 channels), B = [da db] MN-major
@@ -790,19 +852,34 @@ constexpr int D2 = 2 * CM;                                 // TMEM column of the
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace wpb
 
-template <typename WT_>
+__device__ __forceinline__ uint32_t cl_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+__device__ __forceinline__ void cl_sync() { asm volatile("barrier.cluster.arrive.aligned;\nbarrier.cluster.wait.aligned;\n" ::: "memory"); }
+__device__ __forceinline__ uint32_t cl_map(uint32_t a, uint32_t rank) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;\n" : "=r"(r) : "r"(a), "r"(rank));
+  return r;
+}
+__device__ __forceinline__ void wait_cluster(uint64_t* b, uint32_t parity) {   // acquire at cluster scope: the peer's stores are visible
+  asm volatile("{\n.reg .pred p;\nWCLU_%=:\nmbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], %1;\n@!p bra WCLU_%=;\n}\n"
+               :: "r"(sa(b)), "r"(parity) : "memory");
+}
+
+template <typename WT_, int NCTA>
 __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
     int N, int S, int ntiles,
     const __grid_constant__ CUtensorMap damap,    // dA [S][N*32] as (32, N, S), box (32, 1, 128), 64B swizzle
     const __grid_constant__ CUtensorMap dbmap,
-    const __grid_constant__ CUtensorMap xmap,     // m [S][N][128] as (64, N, S, 2), box (64, 1, 128, 2), 128B swizzle
+    const __grid_constant__ CUtensorMap xmap,     // m [S][N][128 NCTA] as (64, N, S, 2 NCTA), box (64, 1, 128, 2), 128B swizzle
     const __grid_constant__ CUtensorMap smap,     // stats [N][S][2] fp32 as (2S, N), box (256, 1)
     const __grid_constant__ CUtensorMap mmap,     // mask [S][N] bytes, box (16, 128)
     const __nv_bfloat16* __restrict__ WA, const __nv_bfloat16* __restrict__ WB, const WT_* __restrict__ GAM,
     const __grid_constant__ CUtensorMap dmmap,    // dm, same layout as m
-    float* __restrict__ PART) {                   // [grid][128 k][64 ce] = R
+    float* __restrict__ PART) {                   // [clusters][128 NCTA k][64 ce] = R
   using namespace wpb;
+  constexpr int CMT = CM * NCTA;                  // the row's channels; this CTA's are rank * 128 .. + 127
   const int NSB = S / BS;
+  const int rank = NCTA == 2 ? (int)cl_rank() : 0;
+  const int cid = blockIdx.x / NCTA, ncl = gridDim.x / NCTA;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   unsigned char* sStage = smb;                                                    // [NSA][da | db]
@@ -810,8 +887,8 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
   __nv_bfloat16* sA2 = reinterpret_cast<__nv_bfloat16*>(sXs + NSX * STAGE_X);     // [2 kb][128 s][64]: mask . xh
   __nv_bfloat16* sDM = sA2 + XT;                                                  // [2 kb][128 s][64]
   __nv_bfloat16* sWF = sDM + XT;                                                  // [2 n blocks][64 ce][64 k]
-  float2* sRED = reinterpret_cast<float2*>(sWF + 64 * CM);                        // [2 halves][128 rows] (gs, gx)
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sRED + 2 * BS);
+  float2* sRED = reinterpret_cast<float2*>(sWF + 64 * CM);                        // [2 tiles][2 CTAs][2 halves][128 rows] (gs, gx)
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sRED + 2 * 4 * BS);
   uint64_t* full = bars;             // [NSA]
   uint64_t* empty = full + NSA;      // [NSA]  the dW GEMM of the stage's tile retired
   uint64_t* xfull = empty + NSA;     // [NSX]
@@ -821,27 +898,29 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
   uint64_t* a2f = d1e + 2;           // [1]    count 8
   uint64_t* a2e = a2f + 1;           // [1]
   uint64_t* done = a2e + 1;          // [1]
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
+  uint64_t* xred = done + 1;         // [2] count 256: the peer's compute threads stored their row sums here (NCTA 2)
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(xred + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int k = 0; k < NSA; ++k) { bar_init(full + k, 1); bar_init(empty + k, 1); }
     for (int k = 0; k < NSX; ++k) { bar_init(xfull + k, 1); bar_init(xempty + k, 8); }
-    for (int k = 0; k < 2; ++k) { bar_init(d1f + k, 1); bar_init(d1e + k, 8); }
+    for (int k = 0; k < 2; ++k) { bar_init(d1f + k, 1); bar_init(d1e + k, 8); bar_init(xred + k, 256); }
     bar_init(a2f, 8); bar_init(a2e, 1);
     bar_init(done, 1);
     bar_init_fence();
   }
-  // Wf [ce][k] = W[ce][k] gamma[k] in bf16, MN-major for the dy GEMM: n block k / 64, row ce, 128B swizzle
+  // Wf [ce][k] = W[ce][k] gamma[k] in bf16 (this CTA's 128 k), MN-major for the dy GEMM: n block k / 64, row ce, 128B swizzle
   for (int v = tid; v < 64 * CM / 2; v += THREADS) {
-    const int row = v / (CM / 2), k = (v % (CM / 2)) * 2;
-    const __nv_bfloat16* w = row < CH ? WA + row * CM : WB + (row - CH) * CM;
-    const float2 wv = bf2f(*reinterpret_cast<const uint32_t*>(w + k));
-    *reinterpret_cast<uint32_t*>(sWF + (k >> 6) * 64 * 64 + sw128(row, k & 63)) = pack2(wv.x * to_f(GAM[k]), wv.y * to_f(GAM[k + 1]));
+    const int row = v / (CM / 2), k = (v % (CM / 2)) * 2, kg = rank * CM + k;
+    const __nv_bfloat16* w = row < CH ? WA + row * CMT : WB + (row - CH) * CMT;
+    const float2 wv = bf2f(*reinterpret_cast<const uint32_t*>(w + kg));
+    *reinterpret_cast<uint32_t*>(sWF + (k >> 6) * 64 * 64 + sw128(row, k & 63)) = pack2(wv.x * to_f(GAM[kg]), wv.y * to_f(GAM[kg + 1]));
   }
   if (warp == 1) tmem_alloc(tslot, 512);
   fence_proxy_async();
   tc_fence_before();
   __syncthreads();
+  if constexpr (NCTA == 2) cl_sync();             // the peer's barriers are initialised before any remote arrive
   tc_fence_after();
   const uint32_t tmem = *tslot;
   auto stage_ptr = [&](int st) { return sStage + st * STAGE_A; };
@@ -850,7 +929,7 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
   if (warp == 0) {
     if (lane == 0) {
       int g = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
+      for (int t = cid; t < ntiles; t += ncl, ++g) {
         const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NSA;
         if (g >= NSA) wait(empty + st, ((g / NSA) - 1) & 1);
         unsigned char* p = stage_ptr(st);
@@ -862,12 +941,12 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
   } else if (warp == 10) {
     if (lane == 0) {
       int g = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++g) {
+      for (int t = cid; t < ntiles; t += ncl, ++g) {
         const int i = t / NSB, s0 = (t % NSB) * BS, st = g % NSX;
         if (g >= NSX) wait(xempty + st, ((g / NSX) - 1) & 1);
         unsigned char* p = xstage_ptr(st);
         expect_tx(xfull + st, XT * 2 + STAT * 4 + MKT);
-        load_4d(&xmap, p, xfull + st, 0, i, s0, 0);
+        load_4d(&xmap, p, xfull + st, 0, i, s0, rank * KB);
         load_2d(&smap, p + XT * 2, xfull + st, 2 * s0, i);
         load_2d(&mmap, p + XT * 2 + STAT * 4, xfull + st, i & ~15, s0);
       }
@@ -886,7 +965,7 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
         mma_commit(a2e);
       };
       int lt = 0;
-      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+      for (int t = cid; t < ntiles; t += ncl, ++lt) {
         const int st = lt % NSA, b = lt & 1;
         wait(full + st, (lt / NSA) & 1);
         if (lt >= 2) wait(d1e + b, ((lt >> 1) - 1) & 1);
@@ -906,7 +985,7 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
     const int q = warp & 3, wh = (warp - 2) >> 2, r = q * 32 + lane;
     const bool leader = (warp == 2 && lane == 0);
     int lt = 0;
-    for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+    for (int t = cid; t < ntiles; t += ncl, ++lt) {
       const int i = t / NSB, s0 = (t % NSB) * BS, sx = lt % NSX, b = lt & 1;
       wait(xfull + sx, (lt / NSX) & 1);
       const unsigned char* px = xstage_ptr(sx);
@@ -921,76 +1000,100 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
       if (lane == 0) arrive(xempty + sx);
       wait(d1f + b, (lt >> 1) & 1);
       tc_fence_after();
-      float gv[64];
-      tmem_ld32(tmem_at(tmem + b * CM + wh * 64, q * 32, 0), gv);
-      tmem_ld32(tmem_at(tmem + b * CM + wh * 64, q * 32, 32), gv + 32);
-      tmem_wait_ld();
-      tc_fence_before();
-      __syncwarp();
-      if (lane == 0) arrive(d1e + b);
+      // the gradient row is read from TMEM twice (here and for dm): not held across the row-sum exchange, where 64 more live
+      // registers spilled; the dy buffer is released after the second read (the next dy GEMM uses the other buffer)
+      // the gradient row 32 channels at a time, read from TMEM twice (row sums, then dm): a thread holding all 64 next to its x row
+      // spilled; the dy buffer is released after the second read (the next dy GEMM uses the other buffer)
       const float mean = stt.x, rstd = stt.y;
       const float2 nm = make_float2(-mean, -mean), rs = make_float2(rstd, rstd), m2 = make_float2(mk, mk);
+      const uint32_t gt = tmem_at(tmem + b * CM + wh * 64, q * 32, 0);
       float2 gsa = make_float2(0.f, 0.f), gsb = gsa, gxa = gsa, gxb = gsa;
 #pragma unroll
-      for (int c8 = 0; c8 < 8; ++c8) {
-        const uint32_t uw[4] = {xu[c8].x, xu[c8].y, xu[c8].z, xu[c8].w};
+      for (int hh = 0; hh < 2; ++hh) {
+        float gv[32];
+        tmem_ld32(gt + hh * 32, gv);
+        tmem_wait_ld();
 #pragma unroll
-        for (int k = 0; k < 4; ++k) {
-          const int e = c8 * 4 + k;
-          const float2 xh = mul2(add2(bf2f(uw[k]), nm), rs);
-          const float2 g2 = mul2(make_float2(gv[2 * e], gv[2 * e + 1]), m2);
-          if (k & 1) { gsb = add2(gsb, g2); gxb = fma2(g2, xh, gxb); }
-          else { gsa = add2(gsa, g2); gxa = fma2(g2, xh, gxa); }
+        for (int c4 = 0; c4 < 4; ++c4) {
+          const int c8 = hh * 4 + c4;
+          const uint32_t uw[4] = {xu[c8].x, xu[c8].y, xu[c8].z, xu[c8].w};
+#pragma unroll
+          for (int k = 0; k < 4; ++k) {
+            const int e = c4 * 4 + k;
+            const float2 xh = mul2(add2(bf2f(uw[k]), nm), rs);
+            const float2 g2 = mul2(make_float2(gv[2 * e], gv[2 * e + 1]), m2);
+            if (k & 1) { gsb = add2(gsb, g2); gxb = fma2(g2, xh, gxb); }
+            else { gsa = add2(gsa, g2); gxa = fma2(g2, xh, gxa); }
+          }
         }
       }
       gsa = add2(gsa, gsb); gxa = add2(gxa, gxb);
-      sRED[wh * BS + r] = make_float2(gsa.x + gsa.y, gxa.x + gxa.y);
+      float2* red = sRED + (NCTA == 2 ? (lt & 1) * 4 * BS : 0);   // a CTA pair: double-buffered (the peer runs up to a tile ahead)
+      const float2 mine = make_float2(gsa.x + gsa.y, gxa.x + gxa.y);
+      red[(rank * 2 + wh) * BS + r] = mine;
+      if constexpr (NCTA == 2) {                 // and into the peer's ring, then arrive on the peer's barrier (release: the store first)
+        const uint32_t peer = (uint32_t)(rank ^ 1);
+        const uint32_t ra_ = cl_map(sa(red + (rank * 2 + wh) * BS + r), peer);
+        asm volatile("st.shared::cluster.v2.f32 [%0], {%1, %2};\n" :: "r"(ra_), "f"(mine.x), "f"(mine.y) : "memory");
+        asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];\n" :: "r"(cl_map(sa(xred + (lt & 1)), peer)) : "memory");
+      }
       if (lt >= 1) wait(a2e, (lt - 1) & 1);      // the dW GEMM of the previous tile retired: sA2 is free
       if (leader) bulk_wait_read<0>();           // the previous dm store has left sDM
       named_sync(1, 256);
-      const float2 p0 = sRED[r], p1 = sRED[BS + r];   // the two halves in a fixed order: both threads of a row agree bitwise
-      const float gs = p0.x + p1.x, gx = p0.y + p1.y;
-      const float ra = -rstd * gs * (1.f / CM), rb = rstd * gx * (1.f / CM);
+      if constexpr (NCTA == 2) wait_cluster(xred + (lt & 1), (lt >> 1) & 1);
+      // the partial sums in one fixed order (CTA 0's halves, then CTA 1's): every thread of a row, in both CTAs, agrees bitwise
+      float2 p0 = red[r];
+#pragma unroll
+      for (int h = 1; h < 2 * NCTA; ++h) { const float2 ph = red[h * BS + r]; p0.x += ph.x; p0.y += ph.y; }
+      const float ra = -rstd * p0.x * (1.f / CMT), rb = rstd * p0.y * (1.f / CMT);
       __nv_bfloat16* dmr = sDM + wh * BS * 64 + r * 64;
       __nv_bfloat16* a2r = sA2 + wh * BS * 64 + r * 64;
       {
         const float2 ra2 = make_float2(ra, ra), nrb = make_float2(-rb, -rb);
 #pragma unroll
-        for (int c8 = 0; c8 < 8; ++c8) {
-          const uint32_t uw[4] = {xu[c8].x, xu[c8].y, xu[c8].z, xu[c8].w};
-          uint4 d, a;
-          uint32_t* dw_ = reinterpret_cast<uint32_t*>(&d);
-          uint32_t* aw = reinterpret_cast<uint32_t*>(&a);
+        for (int hh = 0; hh < 2; ++hh) {
+          float gv[32];
+          tmem_ld32(gt + hh * 32, gv);
+          tmem_wait_ld();
+          if (hh == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(d1e + b); }
 #pragma unroll
-          for (int k = 0; k < 4; ++k) {
-            const int e = c8 * 4 + k;
-            const float2 xh = mul2(add2(bf2f(uw[k]), nm), rs);
-            const float2 g2 = mul2(make_float2(gv[2 * e], gv[2 * e + 1]), m2);
-            const float2 dd = fma2(xh, nrb, fma2(g2, rs, ra2));
-            const float2 aa = mul2(xh, m2);
-            dw_[k] = pack2(dd.x, dd.y);
-            aw[k] = pack2(aa.x, aa.y);
+          for (int c4 = 0; c4 < 4; ++c4) {
+            const int c8 = hh * 4 + c4;
+            const uint32_t uw[4] = {xu[c8].x, xu[c8].y, xu[c8].z, xu[c8].w};
+            uint4 d, a;
+            uint32_t* dw_ = reinterpret_cast<uint32_t*>(&d);
+            uint32_t* aw = reinterpret_cast<uint32_t*>(&a);
+#pragma unroll
+            for (int k = 0; k < 4; ++k) {
+              const int e = c4 * 4 + k;
+              const float2 xh = mul2(add2(bf2f(uw[k]), nm), rs);
+              const float2 g2 = mul2(make_float2(gv[2 * e], gv[2 * e + 1]), m2);
+              const float2 dd = fma2(xh, nrb, fma2(g2, rs, ra2));
+              const float2 aa = mul2(xh, m2);
+              dw_[k] = pack2(dd.x, dd.y);
+              aw[k] = pack2(aa.x, aa.y);
+            }
+            const int off = (c8 ^ (r & 7)) << 3;
+            *reinterpret_cast<uint4*>(dmr + off) = d;
+            *reinterpret_cast<uint4*>(a2r + off) = a;
           }
-          const int off = (c8 ^ (r & 7)) << 3;
-          *reinterpret_cast<uint4*>(dmr + off) = d;
-          *reinterpret_cast<uint4*>(a2r + off) = a;
         }
       }
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) arrive(a2f);
       named_sync(1, 256);
-      if (leader) { store_4d(&dmmap, sDM, 0, i, s0, 0); bulk_commit(); }
+      if (leader) { store_4d(&dmmap, sDM, 0, i, s0, rank * KB); bulk_commit(); }
     }
     if (leader) bulk_wait<0>();
-    if (wh == 0) {                                 // R: TMEM lane = k (0-127), 64 columns ce
+    if (wh == 0) {                                 // R: TMEM lane = k (0-127 of this CTA's), 64 columns ce
       wait(done, 0);
       tc_fence_after();
       float v[32];
       for (int c0 = 0; c0 < 64; c0 += 32) {
         tmem_ld32(tmem_at(tmem + D2, q * 32, c0), v);
         tmem_wait_ld();
-        float* out = PART + ((size_t)blockIdx.x * CM + r) * 64 + c0;
+        float* out = PART + ((size_t)cid * CMT + rank * CM + r) * 64 + c0;
 #pragma unroll
         for (int k = 0; k < 32; k += 4) *reinterpret_cast<float4*>(out + k) = make_float4(v[k], v[k + 1], v[k + 2], v[k + 3]);
       }
@@ -998,6 +1101,7 @@ __global__ void __launch_bounds__(wpb::THREADS, 1) opm_wprologue_bwd_sm100(
   }
   tc_fence_before();
   __syncthreads();
+  if constexpr (NCTA == 2) cl_sync();             // no CTA leaves while its peer may still store into it
   if (warp == 1) tmem_dealloc(tmem, 512);
 }
 
@@ -1010,9 +1114,11 @@ __global__ void __launch_bounds__(256) opm_wpbwd_finalize(const float* __restric
                                                           const GT* __restrict__ GAM, const GT* __restrict__ BET, float* __restrict__ DWA,
                                                           float* __restrict__ DWB, GT* __restrict__ DGAM, GT* __restrict__ DBET) {
   constexpr int HALF = CE / 2;
-  __shared__ float sR[CM * CE], sS[CE], sG[CM], sB[CM];
+  constexpr bool STAGED = CM * CE <= 8192;        // d_msa 256: R (64 KiB) is read from global memory instead
+  __shared__ float sRs[STAGED ? CM * CE : 1], sS[CE], sG[CM], sB[CM];
   const int t = threadIdx.x;
-  for (int v = t; v < CM * CE; v += 256) sR[v] = __ldcg(RED + v);
+  if (STAGED) for (int v = t; v < CM * CE; v += 256) sRs[v] = __ldcg(RED + v);
+  const float* sR = STAGED ? sRs : RED;
   if (t < CE) sS[t] = __ldcg(SSA + t);
   if (t < CM) { sG[t] = to_f(GAM[t]); sB[t] = to_f(BET[t]); }
   __syncthreads();
@@ -1763,7 +1869,7 @@ std::vector<torch::Tensor> opm_wprologue(torch::Tensor m, torch::Tensor mask, to
                                          torch::Tensor wa, torch::Tensor wb, torch::Tensor pbias, bool save_stats) {
   TORCH_CHECK(m.is_cuda() && m.scalar_type() == torch::kBFloat16 && m.is_contiguous() && m.dim() == 3, "m: [S, N, CM] bf16");
   const long S = m.size(0), N = m.size(1), CM = m.size(2);
-  TORCH_CHECK(CM == 64 || CM == 128, "d_msa 64 or 128");
+  TORCH_CHECK(CM == 64 || CM == 128 || CM == 256, "d_msa 64, 128 or 256");
   TORCH_CHECK(S % 128 == 0 && N % 32 == 0, "S % 128, N % 32");
   TORCH_CHECK(mask.scalar_type() == torch::kBool && mask.is_contiguous() && mask.numel() == S * N, "mask: bool [S, N]");
   TORCH_CHECK(wa.scalar_type() == torch::kBFloat16 && wa.is_contiguous() && wa.numel() == CH * CM, "wa: bf16 [32, d_msa]");
@@ -1779,7 +1885,8 @@ std::vector<torch::Tensor> opm_wprologue(torch::Tensor m, torch::Tensor mask, to
   auto* bp = reinterpret_cast<uint32_t*>(bits.data_ptr<int>());
   const float* pb = has_pb ? pbias.data_ptr<float>() : nullptr;
   if (CM == 64) prologue_launch<64>(m, mask, lnw, lnb, eps, wa, wb, pb, sp, bp, A2, BT);
-  else prologue_launch<128>(m, mask, lnw, lnb, eps, wa, wb, pb, sp, bp, A2, BT);
+  else if (CM == 128) prologue_launch<128>(m, mask, lnw, lnb, eps, wa, wb, pb, sp, bp, A2, BT);
+  else prologue_launch<256>(m, mask, lnw, lnb, eps, wa, wb, pb, sp, bp, A2, BT);
   return {A2, BT, stats, bits};
 }
 
@@ -1817,7 +1924,7 @@ torch::Tensor opm_wepilogue(torch::Tensor O, torch::Tensor bits, torch::Tensor w
               bits.size(1) % 4 == 0, "bits: int32 [N, S/32]");
   TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.dim() == 2 && wo.size(1) == NCH, "wo: bf16 [c_z, 1024]");
   const long CZ = wo.size(0);
-  TORCH_CHECK(CZ == 128 || CZ == 256 || CZ == 384, "c_z 128, 256 or 384");
+  TORCH_CHECK(CZ == 128 || CZ == 256 || CZ == 384 || CZ == 512, "c_z 128, 256, 384 or 512");
   TORCH_CHECK((bias.scalar_type() == torch::kFloat32 || bias.scalar_type() == torch::kBFloat16) && bias.is_contiguous() && bias.numel() == CZ,
               "bias: fp32 or bf16 [c_z]");
   const bool has_res = residual.has_value() && residual->numel() > 0;
@@ -1826,7 +1933,7 @@ torch::Tensor opm_wepilogue(torch::Tensor O, torch::Tensor bits, torch::Tensor w
   auto out = torch::empty({1, ni, nj, CZ}, O.options());
   const torch::Tensor* res = has_res ? &residual.value() : nullptr;
   if (CZ == 128) epilogue_launch<128>(O, bits, wo, bias, ni, nj, res, out, after);
-  else if (CZ == 256) epilogue_launch<256>(O, bits, wo, bias, ni, nj, res, out, after);
+  else if (CZ == 256 || CZ == 512) epilogue_launch<256>(O, bits, wo, bias, ni, nj, res, out, after);   // c_z 512: two N = 256 slices
   else epilogue_launch<192>(O, bits, wo, bias, ni, nj, res, out, after);
   return out;
 }
@@ -1863,7 +1970,8 @@ std::vector<torch::Tensor> opm_wdgrad(torch::Tensor dz, torch::Tensor bits, torc
   TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(1) % 4 == 0, "bits: int32 [N, S/32]");
   if (CZ == 128) return dgrad_launch<128>(dz, bits, wo, ni, nj, grad_bf16);
   if (CZ == 256) return dgrad_launch<256>(dz, bits, wo, ni, nj, grad_bf16);
-  TORCH_CHECK(CZ == 384, "c_z 128, 256 or 384");
+  if (CZ == 512) return dgrad_launch<512>(dz, bits, wo, ni, nj, grad_bf16);
+  TORCH_CHECK(CZ == 384, "c_z 128, 256, 384 or 512");
   return dgrad_launch<384>(dz, bits, wo, ni, nj, grad_bf16);
 }
 
@@ -1894,35 +2002,83 @@ torch::Tensor opm_wdwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t n
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
   const long CZ = dzp.size(2);
   if (CZ == 256) return dwo_launch<256>(dzp, O, ni, nj, grad_bf16);
-  TORCH_CHECK(CZ == 384, "c_z 256 or 384");
+  if (CZ == 512) return dwo_launch<512>(dzp, O, ni, nj, grad_bf16);
+  TORCH_CHECK(CZ == 384, "c_z 256, 384 or 512");
   return dwo_launch<384>(dzp, O, ni, nj, grad_bf16);
 }
 
-// d_msa 128: dA, dB [S, N*32], m [S, N, 128], stats [N, S, 2], mask bool [S, N], gamma / beta, wa / wb bf16 [32, 128],
-// ssa fp32 [64] (the masked column sums of [dA dB]) -> [dm [1, S, N, 128], dWa, dWb fp32 [32, 128], dgamma, dbeta (gamma's dtype)]
+template <typename WT_, int NCTA>
+static void wpbwd_launch(int N, int S, int ntiles, int grid, const CUtensorMap& dam, const CUtensorMap& dbm, const CUtensorMap& xm,
+                         const CUtensorMap& sm, const CUtensorMap& mm, const __nv_bfloat16* wap, const __nv_bfloat16* wbp, const WT_* gp,
+                         const CUtensorMap& dmm, float* part, cudaStream_t st) {
+  using namespace wpb;
+  static bool attr = false;
+  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wprologue_bwd_sm100<WT_, NCTA>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
+  cudaLaunchConfig_t cfg = {};
+  cfg.gridDim = dim3(grid);
+  cfg.blockDim = dim3(THREADS);
+  cfg.dynamicSmemBytes = SMEM;
+  cfg.stream = st;
+  cudaLaunchAttribute at[1];
+  at[0].id = cudaLaunchAttributeClusterDimension;
+  at[0].val.clusterDim.x = NCTA; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+  cfg.attrs = at;
+  cfg.numAttrs = 1;
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, opm_wprologue_bwd_sm100<WT_, NCTA>, N, S, ntiles, dam, dbm, xm, sm, mm, wap, wbp, gp, dmm, part));
+}
+
+// the clusters of NCTA CTAs that can be resident at once (a pair takes two SMs of one GPC: fewer than half the SMs)
+template <typename WT_, int NCTA>
+static int wpbwd_clusters(int dev) {
+  static int n = 0;
+  if (n == 0) {
+    if (NCTA == 1) { n = num_sms(dev); return n; }
+    C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wprologue_bwd_sm100<WT_, NCTA>, cudaFuncAttributeMaxDynamicSharedMemorySize, wpb::SMEM));
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(NCTA * (num_sms(dev) / NCTA));
+    cfg.blockDim = dim3(wpb::THREADS);
+    cfg.dynamicSmemBytes = wpb::SMEM;
+    cudaLaunchAttribute at[1];
+    at[0].id = cudaLaunchAttributeClusterDimension;
+    at[0].val.clusterDim.x = NCTA; at[0].val.clusterDim.y = 1; at[0].val.clusterDim.z = 1;
+    cfg.attrs = at;
+    cfg.numAttrs = 1;
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&n, (void*)opm_wprologue_bwd_sm100<WT_, NCTA>, &cfg));
+    TORCH_CHECK(n > 0, "opm_wprologue_bwd_sm100: no CTA pair fits an SM pair");
+  }
+  return n;
+}
+
+// d_msa 128 / 256: dA, dB [S, N*32], m [S, N, CM], stats [N, S, 2], mask bool [S, N], gamma / beta, wa / wb bf16 [32, CM],
+// ssa fp32 [64] (the masked column sums of [dA dB]) -> [dm [1, S, N, CM], dWa, dWb fp32 [32, CM], dgamma, dbeta (gamma's dtype)]
 std::vector<torch::Tensor> opm_wprologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Tensor stats, torch::Tensor mask,
                                              torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb, torch::Tensor ssa) {
   using namespace wpb;
-  TORCH_CHECK(m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && m.size(2) == CM, "m: [S, N, 128] bf16");
-  const long S = m.size(0), N = m.size(1);
+  TORCH_CHECK(m.is_contiguous() && m.scalar_type() == torch::kBFloat16 && m.dim() == 3 && (m.size(2) == 128 || m.size(2) == 256),
+              "m: [S, N, 128 | 256] bf16");
+  const long S = m.size(0), N = m.size(1), CMT = m.size(2);
+  const int ncta = (int)(CMT / CM);
   TORCH_CHECK(S % BS == 0, "S must be a multiple of ", BS);
   TORCH_CHECK(dA.is_contiguous() && dB.is_contiguous() && dA.numel() == S * N * CH && dB.numel() == S * N * CH, "dA, dB: [S, N*32]");
   TORCH_CHECK(stats.is_contiguous() && stats.scalar_type() == torch::kFloat32 && stats.numel() == S * N * 2, "stats: fp32 [N, S, 2]");
   TORCH_CHECK(mask.is_contiguous() && mask.scalar_type() == torch::kBool && mask.numel() == S * N, "mask: bool [S, N]");
   TORCH_CHECK(wa.scalar_type() == torch::kBFloat16 && wb.scalar_type() == torch::kBFloat16 && wa.is_contiguous() && wb.is_contiguous() &&
-              wa.numel() == CH * CM && wb.numel() == CH * CM, "wa, wb: bf16 [32, 128]");
-  TORCH_CHECK(gamma.scalar_type() == beta.scalar_type() && gamma.is_contiguous() && beta.is_contiguous(), "gamma, beta");
+              wa.numel() == CH * CMT && wb.numel() == CH * CMT, "wa, wb: bf16 [32, d_msa]");
+  TORCH_CHECK(gamma.scalar_type() == beta.scalar_type() && gamma.is_contiguous() && beta.is_contiguous() && gamma.numel() == CMT, "gamma, beta");
   TORCH_CHECK(ssa.scalar_type() == torch::kFloat32 && ssa.is_contiguous() && ssa.numel() == 2 * CH, "ssa: fp32 [64]");
   const bool gf = gamma.scalar_type() == torch::kFloat32;
-  auto dm = torch::empty({1, S, N, (long)CM}, m.options());
+  TORCH_CHECK(gf || gamma.scalar_type() == torch::kBFloat16, "gamma: fp32 or bf16");
+  const int dev = m.device().index();
+  auto dm = torch::empty({1, S, N, CMT}, m.options());
   const int ntiles = (int)(N * (S / BS));
-  const int grid = std::min(ntiles, num_sms(m.device().index()));
-  auto part = torch::empty({grid, (long)CM, 64}, m.options().dtype(torch::kFloat32));
+  const int maxcl = ncta == 1 ? num_sms(dev) : (gf ? wpbwd_clusters<float, 2>(dev) : wpbwd_clusters<__nv_bfloat16, 2>(dev));
+  const int clusters = std::min(ntiles, maxcl);
+  auto part = torch::empty({clusters, CMT, 64}, m.options().dtype(torch::kFloat32));
   CUtensorMap dam = make_map<3>(dA.data_ptr(), {(uint64_t)CH, (uint64_t)N, (uint64_t)S}, {(uint64_t)CH, (uint64_t)N * CH}, {CH, 1, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "dA");
   CUtensorMap dbm = make_map<3>(dB.data_ptr(), {(uint64_t)CH, (uint64_t)N, (uint64_t)S}, {(uint64_t)CH, (uint64_t)N * CH}, {CH, 1, BS}, CU_TENSOR_MAP_SWIZZLE_64B, "dB");
-  CUtensorMap xm = make_map<4>(m.data_ptr(), {64, (uint64_t)N, (uint64_t)S, (uint64_t)KB}, {(uint64_t)CM, (uint64_t)N * CM, 64}, {64, 1, BS, KB},
+  CUtensorMap xm = make_map<4>(m.data_ptr(), {64, (uint64_t)N, (uint64_t)S, (uint64_t)(CMT / 64)}, {(uint64_t)CMT, (uint64_t)N * CMT, 64}, {64, 1, BS, KB},
                                CU_TENSOR_MAP_SWIZZLE_128B, "m");
-  CUtensorMap dmm = make_map<4>(dm.data_ptr(), {64, (uint64_t)N, (uint64_t)S, (uint64_t)KB}, {(uint64_t)CM, (uint64_t)N * CM, 64}, {64, 1, BS, KB},
+  CUtensorMap dmm = make_map<4>(dm.data_ptr(), {64, (uint64_t)N, (uint64_t)S, (uint64_t)(CMT / 64)}, {(uint64_t)CMT, (uint64_t)N * CMT, 64}, {64, 1, BS, KB},
                                 CU_TENSOR_MAP_SWIZZLE_128B, "dm");
   CUtensorMap sm = make_map<2>(stats.data_ptr(), {(uint64_t)(2 * S), (uint64_t)N}, {(uint64_t)(2 * S)}, {2 * BS, 1}, CU_TENSOR_MAP_SWIZZLE_NONE, "stats",
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
@@ -1931,28 +2087,35 @@ std::vector<torch::Tensor> opm_wprologue_bwd(torch::Tensor dA, torch::Tensor dB,
   auto st = at::cuda::getCurrentCUDAStream();
   const auto* wap = reinterpret_cast<const __nv_bfloat16*>(wa.data_ptr<at::BFloat16>());
   const auto* wbp = reinterpret_cast<const __nv_bfloat16*>(wb.data_ptr<at::BFloat16>());
+  const int grid = clusters * ncta;
+  float* pp = part.data_ptr<float>();
   if (gf) {
-    static bool attr = false;
-    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wprologue_bwd_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    opm_wprologue_bwd_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, dam, dbm, xm, sm, mm, wap, wbp, gamma.data_ptr<float>(), dmm,
-        part.data_ptr<float>());
+    if (ncta == 1) wpbwd_launch<float, 1>((int)N, (int)S, ntiles, grid, dam, dbm, xm, sm, mm, wap, wbp, gamma.data_ptr<float>(), dmm, pp, st);
+    else wpbwd_launch<float, 2>((int)N, (int)S, ntiles, grid, dam, dbm, xm, sm, mm, wap, wbp, gamma.data_ptr<float>(), dmm, pp, st);
   } else {
-    TORCH_CHECK(gamma.scalar_type() == torch::kBFloat16, "gamma: fp32 or bf16");
-    static bool attr = false;
-    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_wprologue_bwd_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    opm_wprologue_bwd_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, dam, dbm, xm, sm, mm, wap, wbp,
-        reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), dmm, part.data_ptr<float>());
+    const auto* gp = reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>());
+    if (ncta == 1) wpbwd_launch<__nv_bfloat16, 1>((int)N, (int)S, ntiles, grid, dam, dbm, xm, sm, mm, wap, wbp, gp, dmm, pp, st);
+    else wpbwd_launch<__nv_bfloat16, 2>((int)N, (int)S, ntiles, grid, dam, dbm, xm, sm, mm, wap, wbp, gp, dmm, pp, st);
   }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  auto red = colsum(part);                                           // [CM * 64], the CTAs' partials in split order
-  auto dwa = torch::empty({(long)CH, (long)CM}, wa.options().dtype(torch::kFloat32)), dwb = torch::empty({(long)CH, (long)CM}, wb.options().dtype(torch::kFloat32));
-  auto dgam = torch::empty({(long)CM}, gamma.options()), dbet = torch::empty({(long)CM}, beta.options());
-  if (gf) opm_wpbwd_finalize<CM, 64, float><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(),
-      beta.data_ptr<float>(), dwa.data_ptr<float>(), dwb.data_ptr<float>(), dgam.data_ptr<float>(), dbet.data_ptr<float>());
-  else opm_wpbwd_finalize<CM, 64, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp,
-      reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>()),
-      dwa.data_ptr<float>(), dwb.data_ptr<float>(), reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>()),
-      reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>()));
+  auto red = colsum(part);                                           // [CMT * 64], the clusters' partials in split order
+  auto dwa = torch::empty({(long)CH, CMT}, wa.options().dtype(torch::kFloat32)), dwb = torch::empty({(long)CH, CMT}, wb.options().dtype(torch::kFloat32));
+  auto dgam = torch::empty({CMT}, gamma.options()), dbet = torch::empty({CMT}, beta.options());
+  if (gf) {
+    if (CMT == 128) opm_wpbwd_finalize<128, 64, float><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(),
+        beta.data_ptr<float>(), dwa.data_ptr<float>(), dwb.data_ptr<float>(), dgam.data_ptr<float>(), dbet.data_ptr<float>());
+    else opm_wpbwd_finalize<256, 64, float><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp, gamma.data_ptr<float>(),
+        beta.data_ptr<float>(), dwa.data_ptr<float>(), dwb.data_ptr<float>(), dgam.data_ptr<float>(), dbet.data_ptr<float>());
+  } else {
+    const auto* gp = reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>());
+    const auto* bp = reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>());
+    auto* dgp = reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>());
+    auto* dbp = reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>());
+    if (CMT == 128) opm_wpbwd_finalize<128, 64, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp, gp, bp,
+        dwa.data_ptr<float>(), dwb.data_ptr<float>(), dgp, dbp);
+    else opm_wpbwd_finalize<256, 64, __nv_bfloat16><<<1, 256, 0, st>>>(red.data_ptr<float>(), ssa.data_ptr<float>(), wap, wbp, gp, bp,
+        dwa.data_ptr<float>(), dwb.data_ptr<float>(), dgp, dbp);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dm, dwa, dwb, dgam, dbet};
 }
@@ -2134,7 +2297,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_wdgrad", &opm_wdgrad, "sm100 OPM dO at c_z 128 / 256 / 384", py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"),
         py::arg("grad_bf16") = 0);
   m.def("opm_wdwo", &opm_wdwo, "sm100 OPM dWo at c_z 256 / 384", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
-  m.def("opm_wprologue_bwd", &opm_wprologue_bwd, "sm100 OPM prologue backward at d_msa 128");
+  m.def("opm_wprologue_bwd", &opm_wprologue_bwd, "sm100 OPM prologue backward at d_msa 128 / 256");
   m.def("opm_chai_prologue", &opm_chai_prologue, "sm100 Chai-1 OPM prologue: LN + both projections + mask, group-major");
   m.def("opm_chai_epilogue", &opm_chai_epilogue, "sm100 Chai-1 OPM epilogue: product LayerNorm + out-projection (+ residual), y / stats saved",
         py::arg("O"), py::arg("wf"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("save") = false, py::arg("eps") = 0.1);
