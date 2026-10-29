@@ -1992,6 +1992,7 @@ _ESM_ZEROS = {"attention.to_scale.bias", "transition.to_scale.bias"}
 _ESM_CONST: dict = {}
 _ESM_READY: dict = {}
 _ESM_TRAIN_READY: dict = {}
+_ESM32_READY: dict = {}
 
 
 def _esm_const(device, value: float):
@@ -2066,6 +2067,26 @@ def _esm_train_ready(index: int) -> bool:
     return ok
 
 
+def _esm32_ready(index: int) -> bool:
+    """Build and load ESMFold2's fp32-path kernels (``sm100_atom_local.KERNELS_ESM32``) on ``index`` once; False after one warning on failure
+    (fp32 calls then keep the module path)."""
+    ok = _ESM32_READY.get(index)
+    if ok is not None:
+        return ok
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    try:
+        local.load_esm32(index)
+        ok = True
+    except Exception as exc:  # a toolchain or driver problem keeps the module path
+        warnings.warn(f"sm_100a ESMFold2 fp32 atom kernels unavailable, keeping the module path for fp32: {exc!r}", RuntimeWarning, stacklevel=2)
+        ok = False
+    _ESM32_READY[index] = ok
+    return ok
+
+
 def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
     """B200, exactly ESMFold2's option set at the atom widths, bf16 single / cond / pair (bf16 or fp32 parameters), inference or training
     (``_EsmBlock``), B = 1, the rotary tables [1, N, 16]."""
@@ -2086,7 +2107,11 @@ def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
         return False
     params = list(module.parameters())
     grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params))
-    if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):  # (under autocast too: the activations are bf16 either way)
+    fp32 = (single.dtype, cond.dtype, pair.dtype) == (F32, F32, F32)
+    if fp32:   # the fp32 path (TF32 tensor cores): fp32 parameters, no autocast, inference
+        if grad or (not st.local_dit_tf32) or torch.is_autocast_enabled("cuda") or any(p.dtype != F32 for p in params):
+            return False
+    elif (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):  # (under autocast too: the activations are bf16 either way)
         return False
     if any(p.dtype not in (BF, F32) or p.device != single.device for p in params):
         return False
@@ -2105,6 +2130,8 @@ def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
     if (a.n_head, a.to_query.weight.shape[0], a.to_bias.weight.shape[1], tr.expand_a.weight.shape[0]) != (NH_, DS_, DP_, 2 * DS_):
         return False
     index = single.device.index if single.device.index is not None else torch.cuda.current_device()
+    if fp32:
+        return _kernels32_ready(index) and _esm_ready(index) and _esm32_ready(index)
     return _kernels_ready(index) and _esm_ready(index) and (not grad or _esm_train_ready(index))
 
 
@@ -2187,6 +2214,8 @@ def _esm_block(module, single, cond, pair, mask, rope):
     )
     a = module.attention
     weights, qkw = _esm_weights(module), [a.norm_query.weight, a.norm_key.weight]
+    if single.dtype == F32:   # the fp32 path (TF32 tensor cores)
+        return _esm_fwd32(single, cond, pair, mask, weights, qkw, cos, sin, False)[0]
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights, *qkw)):
         return _EsmBlock.apply(mask, cos, sin, single, cond, pair, *weights, *qkw)
     return _esm_fwd(single, cond, pair, mask, weights, qkw, cos, sin)
@@ -2384,3 +2413,127 @@ class _EsmBlock(torch.autograd.Function):
         it = iter(g)
         out = [None if (name in _ESM_ONES or name in _ESM_ZEROS) else next(it) for name in (*WEIGHTS, *CROSS_WEIGHTS)]
         return (None, None, None, ds, dc, dpair, *out, next(it), next(it))
+
+
+# ------------------------------------------------------------------------------------------------------------ ESMFold2: the fp32 path (TF32)
+# fp32 activations and parameters (no autocast): the fp32 path's unfused kernels with their RMS builds (``sm100_atom`` rows_tf32.cu
+# ``f32_adaln_rms`` ..., gemm_tf32.cu) around ESMFold2's TF32 attention (``lattn_esm_tf32.cu``) and the fp32 q / k norm + rotary:
+#
+#     silu32 -> gemm32 (the eight tables at once; hoisted) -> AdaLN 1 RMS -> q | g -> K / V AdaLN RMS (of the raw atoms) -> k | v
+#     -> q / k norm + rotary (tf32-rounded) -> esm_bias (fp32 pair; hoisted) -> attention -> gate -> Wo + gated residual -> AdaLN 2 RMS
+#     -> SwiGLU -> Ws + gated residual
+#
+# Layouts: tab [M, 1024] = [s1 | bi1 | s2 | bi2 | so | st | kv_scale | kv_shift] (the scales hold 1 + s: their bias is 1, nothing sigmoid),
+# P32 [M, 512] = [q | g | k | v] (v rounded to tf32 in the epilogue: only the attention's MMAs read it).
+_ESM_ONES32 = 0b01000101   # tab blocks whose bias is 1: s1, s2, the K / V scale
+
+
+def _esm_pack32(weights, qkw):
+    """The fp32 forward operands of ESMFold2's block in one flat fp32 buffer (matrices tf32-rounded): wcond [1024, 128] (the
+    ``_ESM_COND_BWD`` order = tab's), wp [512, 128] = [Wq; Wg; Wk; Wv], wu [512, 128] interleaved, wo, ws; bcond [1024], bp [512]; the q / k
+    norm weights [32] each (unrounded)."""
+    named = dict(zip((*WEIGHTS, *CROSS_WEIGHTS), weights, strict=True))
+
+    def build():
+        def m(name):
+            return named[name].detach().float().reshape(-1)
+
+        with torch.no_grad():
+            dev = weights[0].device
+            wa, wb = m("transition.expand_a.weight").view(2 * DS_, DS_), m("transition.expand_b.weight").view(2 * DS_, DS_)
+            mats = [m(name) for name in _ESM_COND_BWD]
+            mats += [m(f"attention.to_{p}.weight") for p in ("query", "gate", "key", "value")]
+            mats += [wa[:DS_].reshape(-1), wb[:DS_].reshape(-1), wa[DS_:].reshape(-1), wb[DS_:].reshape(-1)]
+            mats += [m("attention.to_out.weight"), m("transition.squeeze.weight")]
+            ones = torch.ones(DS_, device=dev, dtype=F32)
+            zeros = torch.zeros(DS_, device=dev, dtype=F32)
+            vecs = [ones if (_ESM_ONES32 >> i) & 1 else zeros for i in range(8)]
+            vecs += [m("attention.to_query.bias"), zeros, zeros, zeros]
+            vecs += [w.detach().float().reshape(-1) for w in qkw]
+            flat = torch.cat(mats + vecs)
+            nmat = sum(t.numel() for t in mats)
+            flat[:nmat].copy_(tf32_grid(flat[:nmat]))
+            off = [0]
+
+            def take(n):
+                t = flat[off[0] : off[0] + n]
+                off[0] += n
+                return t
+
+            pk = SimpleNamespace()
+            pk.wcond = take(8 * DS_ * DS_).view(8 * DS_, DS_)
+            pk.wp = take(4 * DS_ * DS_).view(4 * DS_, DS_)
+            pk.wu = take(4 * DS_ * DS_).view(4 * DS_, DS_)
+            pk.wo = take(DS_ * DS_).view(DS_, DS_)
+            pk.ws = take(2 * DS_ * DS_).view(DS_, 2 * DS_)
+            pk.bcond = take(8 * DS_)
+            pk.bp = take(4 * DS_)
+            pk.wq, pk.wk = take(32), take(32)
+            assert off[0] == flat.numel()
+            pk.flat = flat
+        return pk
+
+    return _capture.param_forms(("local_dit_esm_tf32",), [*weights, *qkw], build, inputs_scope=True)
+
+
+def _esm_fwd32_fake(single, cond, pair, mask, weights, qkw, cos, sin, save):
+    return [torch.empty_like(single)]
+
+
+@opaque(fake=_esm_fwd32_fake, name="local_dit_block_esm_fwd_tf32")
+def _esm_fwd32(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    qkw: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    save: bool,
+) -> list[torch.Tensor]:
+    """ESMFold2's block on the fp32 path: [out [A, 1, N, 128] fp32] (inference; ``save`` is reserved for training)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+
+    a, _, n0, _ = single.shape
+    n = _padded_length(n0)
+    m = a * n
+    dev = single.device
+    with torch.cuda.device(dev):
+        pk = _esm_pack32(weights, qkw)
+        s2 = _padded(single, n).reshape(m, DS_).contiguous()
+        wkey = tuple((w.data_ptr(), w._version) for w in weights)
+
+        def tables():
+            c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+            return rows.gemm32(rows.silu32(c2), pk.wcond, bias=pk.bcond)
+
+        tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
+        keys = _keys(mask, n0, n)
+
+        def bias():
+            return local.esm_bias(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], keys, n0)
+
+        if _hoisting() and not save:
+            mk = None if mask is None else _tkey(mask)
+            bias2 = _hoisted(_HOIST_BIAS, pair, ("esm32", wkey[_GAMMA], wkey[_WBIAS], n, mk), bias)
+        else:
+            bias2 = bias()
+        x1 = rows.adaln32(s2, tab[:, _S1], tab[:, _B1], eps=RMS_EPS, rms=True)
+        p = torch.empty(m, 4 * DS_, device=dev, dtype=F32)
+        rows.gemm32(x1, pk.wp, p, n=2 * DS_, bias=pk.bp)                      # q | g
+        xkv = rows.adaln32(s2, tab[:, 6 * DS_ : 7 * DS_], tab[:, 7 * DS_ :], eps=RMS_EPS, rms=True)
+        rows.gemm32(xkv, pk.wp, p, n=2 * DS_, b_row0=2 * DS_, ocol0=2 * DS_, rndmask=0b1000)   # k | v (v rounded)
+        qn, kn = local.esm_qkrope32(p[:, 0:DS_], p[:, 2 * DS_ : 3 * DS_], pk.wq, pk.wk, cos, sin, RMS_EPS)
+        p3 = p.view(a, n, 4 * DS_)
+        o = local.attn_esm32(qn.view(a, n, DS_), kn.view(a, n, DS_), p3[..., 3 * DS_ :], bias2)
+        gated = rows.gate32(p[:, DS_ : 2 * DS_], o.view(m, DS_))
+        a1 = rows.gemm32(gated, pk.wo, mode=rows.RESID_GATE, res=s2, gate=tab[:, _SO])
+        x2 = rows.adaln32(a1, tab[:, _S2], tab[:, _B2], eps=RMS_EPS, rms=True)
+        h = rows.gemm32(x2, pk.wu, mode=rows.SWIGLU)
+        out = rows.gemm32(h, pk.ws, mode=rows.RESID_GATE, res=a1, gate=tab[:, _ST])
+    return [_unpadded(out.view(a, 1, n, DS_), single.shape)]

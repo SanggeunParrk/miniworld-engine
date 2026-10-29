@@ -775,6 +775,11 @@ KERNELS_TF32 = {
     "gate_b": ("rows_tf32", "f32_gate_bwd", 0),
     "ln_b": ("rows_tf32", "f32_ln_bwd", 0),
     "colsum": ("rows_tf32", "f32_colsum", 0),
+    "adaln_rms": ("rows_tf32", "f32_adaln_rms", 0),
+    "adaln_b_rms": ("rows_tf32", "f32_adaln_bwd_rms", 0),
+    "tail_b_rms": ("rows_tf32", "f32_tail_bwd_rms", 0),
+    "silu": ("rows_tf32", "f32_silu", 0),
+    "silu_b": ("rows_tf32", "f32_silu_bwd", 0),
 }
 
 # The fp32 path's kernels launch with programmatic dependent launch: every one of them executes ``griddepcontrol.wait`` before its first
@@ -1101,10 +1106,10 @@ def ln32(c, g1, g2, g3=None, eps=1e-5, out=None):
     return o1, o2, o3
 
 
-def adaln32(a, scale, shift, eps=1e-5):
-    """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M, 128] views (the stored sigmoid scale)."""
+def adaln32(a, scale, shift, eps=1e-5, rms=False):
+    """LN(a) * scale + shift: a [M, 128] fp32, scale / shift fp32 [M, 128] views (the stored sigmoid scale). ``rms`` (ESMFold2): RMS(a)."""
     out = _new(a)
-    atom_kernel32("adaln", _dev(a))(
+    atom_kernel32("adaln_rms" if rms else "adaln", _dev(a))(
         _rowgrid(a.shape[0]),
         (256, 1, 1),
         a,
@@ -1119,6 +1124,20 @@ def adaln32(a, scale, shift, eps=1e-5):
     return out
 
 
+def silu32(c):
+    """silu(c): c [M, 128] fp32 (contiguous) -> [M, 128] fp32 (ESMFold2's conditioning, the operand of every table)."""
+    out = _new(c)
+    atom_kernel32("silu", _dev(c))(_rowgrid(c.shape[0]), (256, 1, 1), c, out, int(c.shape[0]))
+    return out
+
+
+def silu_bwd32(c, g):
+    """g silu'(c): c, g [M, 128] fp32 (contiguous) -> [M, 128] fp32."""
+    out = _new(c)
+    atom_kernel32("silu_b", _dev(c))(_rowgrid(c.shape[0]), (256, 1, 1), c, g, out, int(c.shape[0]))
+    return out
+
+
 def gate32(g, o):
     """sigmoid(g) * o: g a fp32 [M, 128] view, o [M, 128]."""
     out = _new(o)
@@ -1128,10 +1147,10 @@ def gate32(g, o):
     return out
 
 
-def tail_bwd32(dy, t, st, dst):
-    """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st)."""
+def tail_bwd32(dy, t, st, dst, rms=False):
+    """-> dt = dy * st; dst (a view, written) = dy * t * st (1 - st) (``rms``, ESMFold2's raw gate: dy * t)."""
     dt = _new(dy)
-    atom_kernel32("tail_b", _dev(dy))(
+    atom_kernel32("tail_b_rms" if rms else "tail_b", _dev(dy))(
         _rowgrid(dy.shape[0]),
         (256, 1, 1),
         dy,
@@ -1156,14 +1175,14 @@ def swiglu_bwd32(dh, u):
 
 
 def adaln_bwd32(
-    a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5
+    a, scale, dx, dres, dscale, dshift, y=None, so=None, dso=None, eps=1e-5, rms=False
 ):
     """AdaLN backward: -> da = dres + LN backward of dx * scale; dscale (view) = dx LN(a) scale (1 - scale), dshift (view) = dx. With y:
     also d so (view) = da y so (1 - so) and the returned dyo = da so (the attention output gate upstream of a1 = a + so y)."""
     M = a.shape[0]
     da = _new(a)
     dyo = _new(a) if y is not None else None
-    atom_kernel32("adaln_b", _dev(a))(
+    atom_kernel32("adaln_b_rms" if rms else "adaln_b", _dev(a))(
         _rowgrid(M),
         (256, 1, 1),
         a,

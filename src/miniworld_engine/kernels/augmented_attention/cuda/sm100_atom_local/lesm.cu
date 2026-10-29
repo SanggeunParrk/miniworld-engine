@@ -242,3 +242,100 @@ local_esm_silu_bwd(const __nv_bfloat16* __restrict__ c, const float* __restrict_
     *reinterpret_cast<uint2*>(sc + 4 * i) = make_uint2(pk(s[0], s[1]), pk(s[2], s[3]));
   }
 }
+
+// ------------------------------------------------------------------------------------------------ the fp32 path (TF32 attention)
+//   local_esm_qkrope_f32      local_esm_qkrope on fp32 q, k [M, 128] (rows ld apart) -> qo, ko fp32 (rows ldo apart), rounded to tf32 (RNA:
+//                             they only feed the attention's kind::tf32 MMAs, which would truncate)
+//   local_esm_qkrope_bwd_f32  local_esm_qkrope_bwd on fp32 gradients (in place, rows ldd apart; the norm weights' partials as there)
+DEVI float rna32(float x) { uint32_t r; asm("cvt.rna.tf32.f32 %0, %1;" : "=r"(r) : "f"(x)); return __uint_as_float(r); }
+
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_qkrope_f32(const float* __restrict__ q, const float* __restrict__ k, int ld, const float* __restrict__ wq, const float* __restrict__ wk,
+                     const float* __restrict__ cs, const float* __restrict__ sn, float* __restrict__ qo, float* __restrict__ ko, int ldo, int M,
+                     int n, float eps) {
+  const int row = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31;
+  if (row >= M) return;
+  const int c = 4 * (lane & 7);
+  const bool lo = c < 16;
+  const int atom = row % n;
+  const float4 cv = *reinterpret_cast<const float4*>(cs + (size_t)atom * 16 + (c & 15));
+  const float4 sv = *reinterpret_cast<const float4*>(sn + (size_t)atom * 16 + (c & 15));
+#pragma unroll
+  for (int t = 0; t < 2; ++t) {
+    const float* wt = t ? wk : wq;
+    float4 x = *reinterpret_cast<const float4*>((t ? k : q) + (size_t)row * ld + 4 * lane);
+    float ss = x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
+    ss += __shfl_xor_sync(0xffffffffu, ss, 1); ss += __shfl_xor_sync(0xffffffffu, ss, 2); ss += __shfl_xor_sync(0xffffffffu, ss, 4);
+    const float r = rsqrtf(ss * (1.f / 32.f) + eps);
+    const float4 wv = *reinterpret_cast<const float4*>(wt + c);
+    x.x *= r * wv.x; x.y *= r * wv.y; x.z *= r * wv.z; x.w *= r * wv.w;
+    float4 y;
+    y.x = __shfl_xor_sync(0xffffffffu, x.x, 4); y.y = __shfl_xor_sync(0xffffffffu, x.y, 4);
+    y.z = __shfl_xor_sync(0xffffffffu, x.z, 4); y.w = __shfl_xor_sync(0xffffffffu, x.w, 4);
+    float4 o;
+    if (lo) {
+      o.x = x.x * cv.x - y.x * sv.x; o.y = x.y * cv.y - y.y * sv.y; o.z = x.z * cv.z - y.z * sv.z; o.w = x.w * cv.w - y.w * sv.w;
+    } else {
+      o.x = x.x * cv.x + y.x * sv.x; o.y = x.y * cv.y + y.y * sv.y; o.z = x.z * cv.z + y.z * sv.z; o.w = x.w * cv.w + y.w * sv.w;
+    }
+    *reinterpret_cast<float4*>((t ? ko : qo) + (size_t)row * ldo + 4 * lane) = make_float4(rna32(o.x), rna32(o.y), rna32(o.z), rna32(o.w));
+  }
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_qkrope_bwd_f32(float* __restrict__ dq, float* __restrict__ dk, int ldd, const float* __restrict__ q, const float* __restrict__ k, int ld,
+                         const float* __restrict__ wq, const float* __restrict__ wk, const float* __restrict__ cs, const float* __restrict__ sn,
+                         float* __restrict__ part, int M, int n, float eps) {
+  __shared__ float red[8][64];
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int c = 4 * (lane & 7);
+  const bool lo = c < 16;
+  float gw[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
+  for (int row = blockIdx.x * 8 + warp; row < M; row += gridDim.x * 8) {
+    const int atom = row % n;
+    const float4 cv = *reinterpret_cast<const float4*>(cs + (size_t)atom * 16 + (c & 15));
+    const float4 sv = *reinterpret_cast<const float4*>(sn + (size_t)atom * 16 + (c & 15));
+#pragma unroll
+    for (int t = 0; t < 2; ++t) {
+      float* g = (t ? dk : dq) + (size_t)row * ldd + 4 * lane;
+      const float* wt = t ? wk : wq;
+      const float4 x = *reinterpret_cast<const float4*>((t ? k : q) + (size_t)row * ld + 4 * lane);
+      const float4 dy = *reinterpret_cast<const float4*>(g);
+      float4 y;
+      y.x = __shfl_xor_sync(0xffffffffu, dy.x, 4); y.y = __shfl_xor_sync(0xffffffffu, dy.y, 4);
+      y.z = __shfl_xor_sync(0xffffffffu, dy.z, 4); y.w = __shfl_xor_sync(0xffffffffu, dy.w, 4);
+      float4 d;
+      if (lo) {
+        d.x = dy.x * cv.x + y.x * sv.x; d.y = dy.y * cv.y + y.y * sv.y; d.z = dy.z * cv.z + y.z * sv.z; d.w = dy.w * cv.w + y.w * sv.w;
+      } else {
+        d.x = dy.x * cv.x - y.x * sv.x; d.y = dy.y * cv.y - y.y * sv.y; d.z = dy.z * cv.z - y.z * sv.z; d.w = dy.w * cv.w - y.w * sv.w;
+      }
+      float ss = x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
+      ss += __shfl_xor_sync(0xffffffffu, ss, 1); ss += __shfl_xor_sync(0xffffffffu, ss, 2); ss += __shfl_xor_sync(0xffffffffu, ss, 4);
+      const float r = rsqrtf(ss * (1.f / 32.f) + eps);
+      const float4 wv = *reinterpret_cast<const float4*>(wt + c);
+      const float u0 = x.x * r, u1 = x.y * r, u2 = x.z * r, u3 = x.w * r;
+      gw[t][0] += d.x * u0; gw[t][1] += d.y * u1; gw[t][2] += d.z * u2; gw[t][3] += d.w * u3;
+      const float g0 = d.x * wv.x, g1 = d.y * wv.y, g2 = d.z * wv.z, g3 = d.w * wv.w;
+      float m = g0 * u0 + g1 * u1 + g2 * u2 + g3 * u3;
+      m += __shfl_xor_sync(0xffffffffu, m, 1); m += __shfl_xor_sync(0xffffffffu, m, 2); m += __shfl_xor_sync(0xffffffffu, m, 4);
+      m *= 1.f / 32.f;
+      *reinterpret_cast<float4*>(g) = make_float4(r * (g0 - u0 * m), r * (g1 - u1 * m), r * (g2 - u2 * m), r * (g3 - u3 * m));
+    }
+  }
+#pragma unroll
+  for (int t = 0; t < 2; ++t)
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      float v = gw[t][e];
+      v += __shfl_xor_sync(0xffffffffu, v, 8); v += __shfl_xor_sync(0xffffffffu, v, 16);
+      if (lane < 8) red[warp][32 * t + c + e] = v;
+    }
+  __syncthreads();
+  if (threadIdx.x < 64) {
+    float s = 0.f;
+#pragma unroll
+    for (int w = 0; w < 8; ++w) s += red[w][threadIdx.x];
+    part[(size_t)blockIdx.x * 64 + threadIdx.x] = s;
+  }
+}

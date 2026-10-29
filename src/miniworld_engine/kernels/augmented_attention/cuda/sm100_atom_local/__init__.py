@@ -517,6 +517,74 @@ def esm_bias_bwd(z, gamma, wb, dbias2, kmask, n0, eps=1e-5):
     return dz, dgamma, dwb
 
 
+#: ESMFold2's fp32-path kernels on sm_100a (TF32 attention: ``lattn_esm_tf32.cu``; the fp32 q / k norm + rotary of ``lesm.cu``), loaded apart
+#: (``load_esm32``).
+KERNELS_ESM32 = {
+    "esm32": ("lattn_esm_tf32", "local_attn_esm_tf32", 188672),
+    "esm_qk32": ("lesm", "local_esm_qkrope_f32", 0),
+    "esm_qk_b32": ("lesm", "local_esm_qkrope_bwd_f32", 0),
+    "esm_qk_fin": ("lesm", "local_esm_qk_fin", 0),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _load_esm32(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_ESM32[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(cubin(stem), func, smem)
+
+
+def load_esm32(device_index: int) -> None:
+    """Build and load ESMFold2's fp32-path kernels on the device (raises on any failure)."""
+    for name in KERNELS_ESM32:
+        _load_esm32(name, device_index)
+
+
+def esm_qkrope32(q, k, wq, wk, cos, sin, eps):
+    """:func:`esm_qkrope` on fp32 q, k [M, 128] views (one row stride, unit column stride) -> qo, ko [M, 128] fp32, tf32-rounded (RNA)."""
+    M = q.shape[0]
+    assert q.stride(0) == k.stride(0) and q.stride(1) == k.stride(1) == 1 and q.dtype == k.dtype == torch.float32
+    assert cos.dtype == sin.dtype == torch.float32 and cos.is_contiguous() and sin.is_contiguous() and cos.shape[1] == 16
+    qo, ko = torch.empty(M, DM, device=q.device, dtype=q.dtype), torch.empty(M, DM, device=q.device, dtype=q.dtype)
+    _load_esm32("esm_qk32", _dev(q))(((M + 7) // 8, 1, 1), (256, 1, 1), q, k, int(q.stride(0)), wq, wk, cos, sin, qo, ko, int(DM), int(M),
+                                     int(cos.shape[0]), float(eps))
+    return qo, ko
+
+
+def esm_qkrope_bwd32(dq, dk, q, k, wq, wk, cos, sin, eps):
+    """:func:`esm_qkrope_bwd` on fp32: dq, dk [M, 128] fp32 views (in place), q / k the fp32 projections -> the norm weights' gradients [64]."""
+    M = q.shape[0]
+    assert dq.stride(0) == dk.stride(0) and dq.stride(1) == dk.stride(1) == 1 and q.stride(0) == k.stride(0) and q.stride(1) == k.stride(1) == 1
+    d = _dev(q)
+    nb = max(1, min(4 * num_sms(d), (M + 7) // 8))
+    part = torch.empty(nb, 64, device=q.device, dtype=torch.float32)
+    out = torch.empty(64, device=q.device, dtype=torch.float32)
+    _load_esm32("esm_qk_b32", d)((nb, 1, 1), (256, 1, 1), dq, dk, int(dq.stride(0)), q, k, int(q.stride(0)), wq, wk, cos, sin, part,
+                                 int(M), int(cos.shape[0]), float(eps))
+    _load_esm32("esm_qk_fin", d)((1, 1, 1), (512, 1, 1), part, int(nb), out)
+    return out
+
+
+def attn_esm32(q, k, v, bias2, lse=None):
+    """ESMFold2's atom attention on the fp32 path (``lattn_esm_tf32.cu``, tcgen05 kind::tf32): q, k, v fp32 [A, N, 128] views (unit column
+    stride, any row stride; tf32-rounded), bias2 [4, nwin, 32, 160] (``esm_bias``) -> O [A, N, 128] fp32 (and the row LSE, log2 units, into
+    ``lse`` [A, 4, N] when given)."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    o = torch.empty(A, N, DM, device=q.device, dtype=torch.float32)
+    nq = N // 128
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    _load_esm32("esm32", d)(
+        (nq * NH * sp, 1, 1), (512, 1, 1),
+        _rows32(q, 128), _rows32(k, 256), _rows32(v, 256, "128a32"), _out32(o),
+        bias2, lse, int(N), int(A), int(nwin), int(sp),
+    )
+    return o
+
+
 def slide_bwd_prep(do, dd, kmask, n0, A):
     """Before the clipped-window backward of a slid-window block: the moved windows' rows of dO [A N, 128] and D [A, 4, N] are copied out and
     zeroed in place (``lslide.cu``) -> the saved (sdo, sdd) for ``slide_bwd``."""
