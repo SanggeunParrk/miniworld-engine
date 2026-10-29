@@ -493,6 +493,43 @@ def _ext_wide(device=None):
     return _EXT["sm100_wide"]
 
 
+# B200 training backward: dWo (an HBM-bound hand kernel) runs on a side stream on a few SMs while cuBLAS computes dA and dB on the
+# others (an SM-count target for those two GEMMs).  The GEMMs are bound by the 1000 W cap, not by their SM count, so they lose little
+# of their rate to the carve-out while dWo's time leaves the step.  {c_z: CTA budget} where it measured faster (docs/gpus/b200/opm/opm.md).
+_DWO_SIDE_CTAS: dict[int, int] = {128: 16, 256: 16}
+_DWO_SIDE_MIN_N = 128      # (L128 S1024 MiniWorld width: 0.167 -> 0.154 ms; shorter lengths are not measured)
+_SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+
+
+def _dwo_side_ctas(cz: int, s: int, n: int) -> int:
+    """The dWo CTA budget beside the gradient GEMMs (0: dWo after them on every SM)."""
+    if n < _DWO_SIDE_MIN_N or not hasattr(torch._C, "_set_sm_carveout_experimental"):
+        return 0
+    return _DWO_SIDE_CTAS.get(cz, 0)
+
+
+def _side_stream(device) -> torch.cuda.Stream:
+    idx = torch.device(device).index if torch.device(device).index is not None else torch.cuda.current_device()
+    if idx not in _SIDE_STREAMS:
+        _SIDE_STREAMS[idx] = torch.cuda.Stream(device=idx)
+    return _SIDE_STREAMS[idx]
+
+
+class _sm_carveout:
+    """cuBLAS leaves `n` SMs free for the GEMMs issued inside (CUBLASLT_MATMUL_DESC_SM_COUNT_TARGET, recorded into a CUDA graph)."""
+
+    def __init__(self, n: int):
+        self.n = n
+
+    def __enter__(self):
+        self.prev = torch._C._get_sm_carveout_experimental()
+        torch._C._set_sm_carveout_experimental(self.n)
+
+    def __exit__(self, *exc):
+        torch._C._set_sm_carveout_experimental(self.prev)
+        return False
+
+
 def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None, asym=None):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
     statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, the mask counts [N, N] off the bits (one small
@@ -886,14 +923,29 @@ class _OpmMath(torch.autograd.Function):
             dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None))
             if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
                 dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, cz), out_dtype=torch.float32).view(cz)
-            dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
-            dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
-            del dO
             if o is None:
                 o = torch.matmul(a2, bt.t())
             dwo = ext.opm_dwo if cz == CZ else wext.opm_wdwo
-            dWo = dwo(dzp, o, n, n, int(wo.dtype == bf))  # gradients come back in the parameters' dtype
-            del o
+            side = _dwo_side_ctas(cz, s, n)
+            if side:
+                # dWo (HBM-bound) on `side` SMs of a side stream while the two power-bound gradient GEMMs run on the rest
+                main = torch.cuda.current_stream(dz.device)
+                aux = _side_stream(dz.device)
+                aux.wait_stream(main)
+                with torch.cuda.stream(aux):
+                    dWo = dwo(dzp, o, n, n, int(wo.dtype == bf), side)
+                dzp.record_stream(aux)
+                o.record_stream(aux)
+                with _sm_carveout(side):
+                    dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
+                    dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
+                main.wait_stream(aux)
+                dWo.record_stream(main)
+            else:
+                dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
+                dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
+                dWo = dwo(dzp, o, n, n, int(wo.dtype == bf))  # gradients come back in the parameters' dtype
+            del dO, o
             wa16, wb16 = wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous()
             if cm == CM:
                 # ssa: the masked column sums of [dA dB] (the kernel's row 64 of R), = RoseTTAFold3's projection-bias gradients
