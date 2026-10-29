@@ -227,6 +227,7 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
           {
             float2 acc = make_float2(0.f, 0.f);
             float s32[2][32];
+            float lfall = 0.f, lfc[4];
             tmem_ld32(sb, s32[0]);
             tmem_wait_ld();
 #pragma unroll
@@ -244,51 +245,17 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
               for (int i2 = 2; i2 < 32; i2 += 2) { c0 = fmaxf(c0, sc[i2]); c1 = fmaxf(c1, sc[i2 + 1]); }
               const float cm = fmaxf(c0, c1);                        // the chunk's maximum, relative to the offset (absolute if !have)
               const bool up = have ? cm > TA_TAU : cm > -1e30f;
-              if (__any_sync(0xffffffffu, up)) {                     // rare: warp-uniform, as tcgen05.ld / st are warp-collective
-                const float d = up ? cm : 0.f;
-                const float f = up ? (have ? ex2f(-d) : 0.f) : 1.f;  // scale of what was summed under the old offset (none if !have)
-                if (up) {
-                  mr = have ? mr + d : d;
-#pragma unroll
-                  for (int i2 = 0; i2 < 32; ++i2) sc[i2] -= d;
+              if (up) {                                              // raise the offset: this chunk and the running sum here; the
+                if (have) {                                          // P chunks already in TMEM and O_r after the loop (lfall)
+                  const float f = ex2f(-cm);
+                  acc.x *= f; acc.y *= f;
+                  lfall -= cm;
                 }
-                acc.x *= f; acc.y *= f; l[rr] *= f;
-                if (c > 0) {                                         // this tile's P chunks 0 .. c-1, already in TMEM
-                  tmem_wait_st();
-                  for (int c2 = 0; c2 < c; ++c2) {
-                    float pw[16];
-                    tmem_ld16(sb + c2 * 16, pw);
-                    tmem_wait_ld();
-                    uint32_t pq[16];
+                mr = have ? mr + cm : cm;                            // first finite chunk: nothing summed yet, nothing to rescale
 #pragma unroll
-                    for (int k2 = 0; k2 < 16; ++k2) {
-                      const float2 pp = bf2f(__float_as_uint(pw[k2]));
-                      pq[k2] = pack2(pp.x * f, pp.y * f);
-                    }
-                    tmem_st8(sb + c2 * 16, pq);
-                    tmem_st8(sb + c2 * 16 + 8, pq + 8);
-                  }
-                }
-                if (j > 0) {                                         // O_r of the previous key tiles (this task's: the PV of tile 0
-                  // overwrote the last task's O). PV(previous tile, row r) is sub-step xs - R: the MMA warp issues every PV up to
-                  // xs - NS before QK^T(xs), whose commit we waited on, so with R > NS it is complete; else wait for its stage.
-                  if constexpr (R <= NS) {
-                    const int yp = xs - R;
-                    wait(kve + yp % NKV, (yp / NKV) & 1);
-                    tc_fence_after();
-                  }
-                  const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
-                  float ov[32];
-                  tmem_ld32(oa, ov);
-                  tmem_wait_ld();
-                  uint32_t oq[32];
-#pragma unroll
-                  for (int k2 = 0; k2 < 32; ++k2) oq[k2] = __float_as_uint(ov[k2] * f);
-#pragma unroll
-                  for (int k2 = 0; k2 < 32; k2 += 8) tmem_st8(oa + k2, oq + k2);
-                }
-                tmem_wait_st();                                      // (the waits above also landed the prefetch of chunk c + 1)
+                for (int i2 = 0; i2 < 32; ++i2) sc[i2] -= cm;
               }
+              lfc[c] = lfall;                                        // log2 of the scale chunk c's P was written under
               uint32_t pk[16];
 #pragma unroll
               for (int k2 = 0; k2 < 16; ++k2) {
@@ -304,6 +271,46 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
               tmem_st8(sb + c * 16 + 8, pk + 8);
             }
             lr = acc.x + acc.y;
+            if (__any_sync(0xffffffffu, lfall != 0.f)) {           // rare, warp-uniform (tcgen05.ld / st are warp-collective)
+              // the tile's P chunks written before a raise, and O_r (previous tiles) and l_r, to the final offset. The PV of this tile
+              // has not been issued (it waits for pf below); O_r is this task's from key tile 1 on (tile 0's PV overwrote it), and
+              // PV(previous tile, row r) = sub-step xs - R is complete when R > NS (issued before QK^T(xs), whose commit we waited
+              // on), else waited on through its K/V stage barrier
+              tmem_wait_st();
+#pragma unroll
+              for (int c2 = 0; c2 < 3; ++c2) {
+                const float f = ex2f(lfall - lfc[c2]);
+                float pw[16];
+                tmem_ld16(sb + c2 * 16, pw);
+                tmem_wait_ld();
+                uint32_t pq[16];
+#pragma unroll
+                for (int k2 = 0; k2 < 16; ++k2) {
+                  const float2 pp = bf2f(__float_as_uint(pw[k2]));
+                  pq[k2] = pack2(pp.x * f, pp.y * f);
+                }
+                tmem_st8(sb + c2 * 16, pq);
+                tmem_st8(sb + c2 * 16 + 8, pq + 8);
+              }
+              const float fo = ex2f(lfall);
+              if (j > 0) {
+                if constexpr (R <= NS) {
+                  const int yp = xs - R;
+                  wait(kve + yp % NKV, (yp / NKV) & 1);
+                  tc_fence_after();
+                }
+                const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
+                float ov[32];
+                tmem_ld32(oa, ov);
+                tmem_wait_ld();
+                uint32_t oq[32];
+#pragma unroll
+                for (int k2 = 0; k2 < 32; ++k2) oq[k2] = __float_as_uint(ov[k2] * fo);
+#pragma unroll
+                for (int k2 = 0; k2 < 32; k2 += 8) tmem_st8(oa + k2, oq + k2);
+              }
+              l[rr] *= fo;
+            }
           }
           tmem_wait_st();
           tc_fence_before();
