@@ -78,20 +78,26 @@ def pack_weights(wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torc
 
 
 def packed(wa, wb, ws, wsc, bsc, ht, dtype):
+    """``pack_weights`` once per parameter version. Called inside the opaque op, so a compiled caller runs it at run time and reuses it
+    (traced, it was recomputed at every call of FoldForge's compiled Protenix-v2 sampler); a capture reads the eager entry
+    its warm-up made (inference forms, grad off)."""
     return _capture.param_forms(
-        f"ct_cuda_{dtype}_{ht}", (wa, wb, ws, wsc, bsc), lambda: pack_weights(wa, wb, ws, wsc, bsc, ht, dtype)
+        f"ct_cuda_{dtype}_{ht}", (wa, wb, ws, wsc, bsc), lambda: pack_weights(wa, wb, ws, wsc, bsc, ht, dtype),
+        capture_reads_eager=True,
     )
 
 
-def _infer_fake(x, cond, wab, ws, wsc, bsc, residual, ht, bn, rnd, cl):
+def _infer_fake(x, cond, wa, wb, ws, wsc, bsc, residual, ht, bn, rnd, cl):
     """y [M, D]."""
     return x.new_empty((x.shape[0], ws.shape[0]))
 
 
 @opaque(fake=_infer_fake, name="conditioned_transition_cuda_inference")
-def _infer(x: torch.Tensor, cond: torch.Tensor, wab: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
+def _infer(x: torch.Tensor, cond: torch.Tensor, wa: torch.Tensor, wb: torch.Tensor, ws: torch.Tensor, wsc: torch.Tensor, bsc: torch.Tensor,
            residual: torch.Tensor | None, ht: int, bn: int, rnd: bool, cl: int) -> torch.Tensor:
-    """The tail: expand + SwiGLU GEMM, then squeeze + gate (+ residual) GEMM, the second under programmatic dependent launch."""
+    """The tail: expand + SwiGLU GEMM, then squeeze + gate (+ residual) GEMM, the second under programmatic dependent launch. The
+    weights arrive as parameters and are packed here (``packed``), at run time even under ``torch.compile``."""
+    wab, ws, wsc, bsc = packed(wa, wb, ws, wsc, bsc, ht, x.dtype)
     e = ext()
     m = x.shape[0]
     nd = wab.shape[0] // 2
@@ -112,10 +118,9 @@ def ct_inference(x, cond, wa, wb, ws, wsc, bsc, residual=None, *, ht=None, bn=No
     ht = ht or pick_ht(m, nd, num_sms(x.device))
     if bn is None:   # output tile columns of the squeeze: a small M gives 30 tiles of 128 (5 row blocks x 6) on 132 SMs, each streaming K = 1920: 64 columns double the CTAs
         bn = 64 if ((m + 127) // 128) * (d // 128) * 2 <= num_sms(x.device) else 128
-    wab, s, g, bs = packed(wa, wb, ws, wsc, bsc, ht, x.dtype)
     x = x if x.stride(1) == 1 else x.contiguous()
     cond = cond if cond.stride(1) == 1 else cond.contiguous()
-    return _infer(x, cond, wab, s, g, bs, residual, ht, bn, x.dtype == torch.float32, cl)
+    return _infer(x, cond, wa, wb, ws, wsc, bsc, residual, ht, bn, x.dtype == torch.float32, cl)
 
 
 __all__ = ["ct_inference", "ext", "pack_weights", "supported"]

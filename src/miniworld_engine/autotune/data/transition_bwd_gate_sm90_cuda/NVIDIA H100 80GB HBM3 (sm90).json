@@ -1,0 +1,5787 @@
+{
+  "build_rev": 1,
+  "config_space": [
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+    "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+  ],
+  "config_space_hash": "f66f3a5d795b",
+  "driver_id_scheme": 2,
+  "driver_identity": "4f4acfe36a6b",
+  "entries": {
+    "bfloat16|([((147456, 128), (128, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((147456, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.3481610123540314,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.3482997249549543,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.35033180020379684,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.3504416909016354,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.36764099686234086,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((147456, 256), (256, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((147456, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.7584425706129807,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.7597762474646935,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.8237799962361654,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.8335253397623699,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.8363194546457065,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((384, 128), (128, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((384, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.02316989039096995,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.023256473353343646,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.02337080860830681,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.023416155750311696,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.0246625448528089,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((384, 256), (256, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((384, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.050739865873302814,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.05087626710229991,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.051200605865217685,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.05139956456173509,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.055279067993164066,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((589824, 128), (128, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((589824, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 1.360027101304796,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 1.3612524668375652,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 1.3666315608554416,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 1.3682644102308483,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 1.4331449059879078,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((589824, 256), (256, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((589824, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 3.014920949935913,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 3.0354020595550537,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 3.2262378692626954,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 3.2791093190511065,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 3.2843807220458983,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((768, 128), (128, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((768, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.023160246773060306,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.023262012195469854,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.023344953446907183,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.023752401347148386,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 64,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.024893414107779212,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ],
+    "bfloat16|([((768, 256), (256, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((768, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.0503869376170724,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 3,
+          "warpgroups": 1
+        },
+        "ms": 0.05051861372471468,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.05083320176072896,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 1,
+          "stages": 2,
+          "warpgroups": 1
+        },
+        "ms": 0.05102937212461754,
+        "num_stages": 0,
+        "num_warps": 0
+      },
+      {
+        "kwargs": {
+          "bn": 64,
+          "kt": 128,
+          "min_blocks": 2,
+          "stages": 1,
+          "warpgroups": 1
+        },
+        "ms": 0.054268269194770104,
+        "num_stages": 0,
+        "num_warps": 0
+      }
+    ]
+  },
+  "entry_grids": {
+    "bfloat16|([((147456, 128), (128, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((147456, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      "f66f3a5d795b"
+    ],
+    "bfloat16|([((147456, 256), (256, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((147456, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      "49f4a9056357"
+    ],
+    "bfloat16|([((384, 128), (128, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((384, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      "f66f3a5d795b"
+    ],
+    "bfloat16|([((384, 256), (256, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((384, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      "49f4a9056357"
+    ],
+    "bfloat16|([((589824, 128), (128, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((589824, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      "f66f3a5d795b"
+    ],
+    "bfloat16|([((589824, 256), (256, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((589824, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      "49f4a9056357"
+    ],
+    "bfloat16|([((768, 128), (128, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((768, 512), (512, 1), 'torch.bfloat16')], (False,))": [
+      "f66f3a5d795b"
+    ],
+    "bfloat16|([((768, 256), (256, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((768, 1024), (1024, 1), 'torch.bfloat16')], (False,))": [
+      "49f4a9056357"
+    ]
+  },
+  "env_identity": "7efec5ac14d2",
+  "gpu": "NVIDIA H100 80GB HBM3 (sm90)",
+  "grids": {
+    "49f4a9056357": [
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+    ],
+    "f66f3a5d795b": [
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+      "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+    ]
+  },
+  "key_scheme": 3,
+  "measurements": {
+    "bfloat16|([((147456, 128), (128, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((147456, 512), (512, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3481610123540314,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3482997249549543,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.35033180020379684,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.3504416909016354,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.36764099686234086,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3481610123540314,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3482997249549543,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.35033180020379684,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.3504416909016354,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.36764099686234086,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.36876251448446246,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3698138621316027,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.37000948588053384,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.3700214185212788,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.37020048454626286,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.39785253906249995,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.3985414197368007,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.4057953842287141,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.4228619469536675,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.4424624443054199,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.44419099603380474,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.4447575309059837,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.7238470806795008,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.7264371759751264,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.7916384358559885,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.805635389734487,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8075200065237577,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8127866025830879,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8136178313708696,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.8170371133773053,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.8171758495393346,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.8187029202779135,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.8194735844930012,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.833383592508607,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.8346448672019829,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.8347031868110268,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.8498002742898876,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8611539539537931,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8613173501533375,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.881596292768206,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.0777453961579697,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.0779648656430454,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.0809213804162066,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.0818340882011082,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.7442474365234375,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.7445233889988492,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.772585732596261,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 1.781625134604318,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.841902838812934,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((147456, 256), (256, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((147456, 1024), (1024, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.7584425706129807,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.7597762474646935,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8237799962361654,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8335253397623699,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8363194546457065,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.7584425706129807,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.7597762474646935,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8237799962361654,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.8335253397623699,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8363194546457065,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.8380198074599444,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.8651727709853858,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.8654307315224095,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.941400168077001,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.9428430703970102,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.9669634501139324,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.0158819754918418,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.0735961665277896,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.078645540320355,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 1.0869376288519965,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.2796939458602514,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.2832929765855945,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.6496826807657876,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.6510277430216471,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.6574682871500652,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.6730433496935615,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.67582788138554,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.676424815736968,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.6778383583858094,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.6873964112380455,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 1.697472013276199,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.7221330915178572,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.738685131072998,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.7438119479588101,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.743819441114153,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 1.7483771869114468,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.7732908385140556,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 2.169883810955545,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 2.171869941379713,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 2.172578204761852,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 2.174166592684659,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 2.222678531299938,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 2.224908308549361,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 3.6107361133282003,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.6655101776123047,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.7541920588566704,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.960374673207601,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((384, 128), (128, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((384, 512), (512, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.02316989039096995,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023256473353343646,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.02337080860830681,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023416155750311696,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.0246625448528089,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.02316989039096995,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023256473353343646,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.02337080860830681,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023416155750311696,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.0246625448528089,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.02491973338527146,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.02601961352399006,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.026362610152711997,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.02645475214177912,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.026494438355111047,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.026546064700189914,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.02674956548781622,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.028925443099716962,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.0295050461702139,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.03169314738466371,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.03175207644092794,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.032095647965783305,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04436468168069388,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04457581998929695,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.04574640612369331,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.045758954409895275,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04639338476360602,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.046469757285520816,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.046477668163636854,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.04666441328385297,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04680806012889046,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.046933930495689655,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04693638731851306,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04695304195769589,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.05104738414877712,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.05302125526050146,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.05303244895123421,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.053220185529305436,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.053246532167707174,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06254375620426142,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06379487389722335,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06403524151202106,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.06532059699553132,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06550423007784478,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.08406776943900969,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.0851302341711881,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.08513229288519385,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.09106334287728836,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.09244990211530749,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((384, 256), (256, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((384, 1024), (1024, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.050739865873302814,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05087626710229991,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.051200605865217685,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05139956456173509,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.055279067993164066,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.050739865873302814,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05087626710229991,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.051200605865217685,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05139956456173509,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.055279067993164066,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.0555357668833871,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.056463043668081477,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.0567252537277894,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05703060733926013,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05719722492152852,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.06427989792924674,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.06440856857517166,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06460206631831486,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06504243543778343,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06865496821589656,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06987902111797939,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.07679045277257118,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09169219584947222,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09176782186558184,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09265582005780443,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09271238906754142,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09327172505036566,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.0935472143264044,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09517809983763867,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09531139282591314,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.09573482580614183,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.09583067100808579,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.10084744049197852,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.10093558936148453,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.1068526162501271,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.1071512899666189,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.10862114255791469,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.11438857239562196,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.13265186114452598,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.13400392766219718,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.13751126137100347,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.143303255702174,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.14476249358233284,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.19938718594186675,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.20113626340540444,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.21962282816569012,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.22802888905560528,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((589824, 128), (128, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((589824, 512), (512, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.360027101304796,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.3612524668375652,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.3666315608554416,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.3682644102308483,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.4331449059879078,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.360027101304796,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.3612524668375652,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.3666315608554416,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.3682644102308483,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.4331449059879078,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.436251303728889,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.4409519644344555,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.441157677594353,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 1.4420743269078873,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 1.4421044517965877,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.5539889931678772,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 1.5552985072135925,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.589587611536826,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.664955202738444,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 1.7428251675197055,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 1.7476085935320174,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 1.750361715044294,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 2.820833879358628,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 2.8387257071102363,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.148849105834961,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.1787968953450525,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.181822840372721,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.19703369140625,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.1973504384358726,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.2006389617919924,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.2021546681722004,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.2154942830403646,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 3.238676325480143,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.286529032389323,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.289633051554362,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.2922720591227215,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.3306336720784504,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 3.3705096926007956,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 3.3713919775826593,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.470380510602679,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 4.291079261086204,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 4.297435760498047,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 4.297970858487216,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 4.301237799904563,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 6.895997728620257,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 6.896644592285156,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 6.984080178397042,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 7.139686856951032,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 7.3442319234212246,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((589824, 256), (256, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((589824, 1024), (1024, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.014920949935913,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.0354020595550537,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 3.2262378692626954,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.2791093190511065,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.2843807220458983,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.014920949935913,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.0354020595550537,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 3.2262378692626954,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.2791093190511065,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 3.2843807220458983,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 3.304204813639323,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.3851920536586215,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 3.391439982822963,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.6968922248253455,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.7026805877685547,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 3.805774835439829,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 3.9870120684305825,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 4.212081388993697,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 4.23045522516424,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 4.270384008234197,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 4.997694227430555,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 5.009962717692057,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 6.543643406459264,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 6.547712053571429,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 6.601426260811942,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 6.605865206037249,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 6.62322725568499,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 6.6278582981654575,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 6.677771432059152,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 6.713341576712471,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 6.743078776768275,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 6.872301646641322,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 6.913668768746512,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 6.963894980294364,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 6.985906328473773,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 6.995071956089564,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 7.090845652988978,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 8.569453048706055,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 8.581862258911134,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 8.604121780395507,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 8.614774322509765,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 8.77896957397461,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 8.786454391479491,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 14.250181198120117,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 14.505850474039713,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 14.790831883748371,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 15.477610270182293,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((768, 128), (128, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((768, 512), (512, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023160246773060306,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023262012195469854,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023344953446907183,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023752401347148386,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.024893414107779212,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023160246773060306,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.023262012195469854,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023344953446907183,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.023752401347148386,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.024893414107779212,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.02493630009089589,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.02617858246927153,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.026352788393314067,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.026373426070124467,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.026469719409942628,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.026473945244810636,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.026611933131126843,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.029031655005423346,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.029772474992694878,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.031896020464328906,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.031922827216343104,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.03254583660437136,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04448989946015027,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04467067118710692,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.045597267150878903,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.04560577961350468,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.04667890604732898,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.0467180155500581,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04679989814758301,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04680149503309809,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.04699473672740617,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04702136261889679,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.04704940925210209,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.047116605859053765,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.05105554735338366,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.0525708654124266,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.05278525560864446,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.05286008467585404,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.05294063508354964,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.0629541891183591,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.0641656018127969,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.06425680122896464,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06440875492178996,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06582204149184326,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.08411058121257359,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.08482703418596416,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.08508037078423009,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.09151479534636764,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.09280237896751811,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    },
+    "bfloat16|([((768, 256), (256, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((768, 1024), (1024, 1), 'torch.bfloat16')], (False,))": {
+      "b363ecfb26dbcffc2185": {
+        "entries": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.0503869376170724,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05051861372471468,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05083320176072896,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05102937212461754,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.054268269194770104,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "searched": [
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 128), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 1), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 128), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 1), ('stages', 3), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 1), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 2), ('warpgroups', 2)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 1)), 0, 0)",
+          "((('bn', 64), ('kt', 64), ('min_blocks', 2), ('stages', 3), ('warpgroups', 2)), 0, 0)"
+        ],
+        "timings": [
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.0503869376170724,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05051861372471468,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05083320176072896,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05102937212461754,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.054268269194770104,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.05451671342204388,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05601608335739908,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.05632312519678438,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05670360461283287,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.05687177482838637,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.06289660981217401,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.06318066065961664,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06406436920166016,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06463090510789485,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.06799920638283154,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.06946351045479804,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.07689631276963002,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09171247929614212,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09200426069477932,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09244482548791204,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09251550916011933,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.09338186351397565,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 1
+            },
+            "ms": 0.0934611922719886,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09503826030249735,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 1
+            },
+            "ms": 0.09510452863082144,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.09588787806173243,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.09594748253915825,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.10046268923394763,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 1
+            },
+            "ms": 0.10055279878019555,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.10627193245836483,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.10651608905055493,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 1,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.10813844701746007,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 1,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.1137281113904288,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.1308068924761833,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.13099893610528174,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.136288043204437,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.14229558382420182,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 64,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.1427913721056952,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.19748755106850274,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 128,
+              "min_blocks": 2,
+              "stages": 1,
+              "warpgroups": 2
+            },
+            "ms": 0.19847268324631911,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 2,
+              "warpgroups": 2
+            },
+            "ms": 0.218773452690364,
+            "num_stages": 0,
+            "num_warps": 0
+          },
+          {
+            "kwargs": {
+              "bn": 128,
+              "kt": 64,
+              "min_blocks": 2,
+              "stages": 3,
+              "warpgroups": 2
+            },
+            "ms": 0.22700232404717652,
+            "num_stages": 0,
+            "num_warps": 0
+          }
+        ],
+        "workload": {
+          "bench_clear_mb": 0,
+          "bench_rep_ms": 0,
+          "implementation": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+          "kind": "native",
+          "regime": "cuda_graph_warm",
+          "scheme": 1
+        }
+      }
+    }
+  },
+  "native_runtime_profiles": {
+    "bfloat16|([((147456, 128), (128, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((147456, 512), (512, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((147456, 256), (256, 1), 'torch.bfloat16'), ((147456,), (1,), 'torch.float32'), ((147456,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((147456, 1024), (1024, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((384, 128), (128, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((384, 512), (512, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((384, 256), (256, 1), 'torch.bfloat16'), ((384,), (1,), 'torch.float32'), ((384,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((384, 1024), (1024, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((589824, 128), (128, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((589824, 512), (512, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((589824, 256), (256, 1), 'torch.bfloat16'), ((589824,), (1,), 'torch.float32'), ((589824,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((589824, 1024), (1024, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((768, 128), (128, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((128,), (1,), 'torch.bfloat16'), ((128,), (1,), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((512, 128), (128, 1), 'torch.bfloat16'), ((768, 512), (512, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185",
+    "bfloat16|([((768, 256), (256, 1), 'torch.bfloat16'), ((768,), (1,), 'torch.float32'), ((768,), (1,), 'torch.float32'), ((256,), (1,), 'torch.bfloat16'), ((256,), (1,), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((1024, 256), (256, 1), 'torch.bfloat16'), ((768, 1024), (1024, 1), 'torch.bfloat16')], (False,))": "b363ecfb26dbcffc2185"
+  },
+  "op": "transition_bwd_gate_sm90_cuda",
+  "op_identity": "c51c8b992414306bc6e379ed0b4b141f5da1c5db0f2815071b4f7a97c2225f0e",
+  "provenance": {
+    "built_utc": "2026-10-29T10:38:29+00:00",
+    "torch": "2.13.0+cu129",
+    "triton": "3.7.1"
+  },
+  "schema": 1
+}

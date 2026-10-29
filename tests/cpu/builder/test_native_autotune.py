@@ -206,8 +206,56 @@ def test_runtime_reader_accepts_native_grid_and_invalidates_source(monkeypatch):
     monkeypatch.setattr(cache, "_scheme_stale", lambda *_: False)
     assert native.choose_config("x", configs, dtype="bf16", bucket="shape") == configs[1]
     data["op_identity"] = "old-source"
-    with pytest.warns(UserWarning, match="source/environment changed"):
+    with pytest.warns(UserWarning, match="native cache source changed"):
         assert native.choose_config("x", configs, dtype="bf16", bucket="shape") == configs[0]
+
+
+def test_runtime_reader_serves_a_cache_measured_under_another_toolchain(monkeypatch):
+    """The cu129 wheel's native cache read by the cu130 wheel (or under another triton / ptxas): same source, so the
+    measured winner is served, silently, instead of the declared default."""
+    import warnings
+
+    from miniworld_engine.autotune import cache
+    settings.configure(run_autotune=False)
+    configs = [{"tile_m": 64}, {"tile_m": 128}]
+    data = {"op_identity": "source-v1", "env_identity": "cu129",
+            "entries": {"bf16|shape": [cache.config_to_dict({"kwargs": configs[1]}, 0.1)]}}
+    monkeypatch.setattr(cache, "gpu_key", lambda _: "test-sm90")
+    monkeypatch.setattr(cache, "env_identity", lambda: "cu130")
+    monkeypatch.setattr(cache, "_load", lambda *_: data)
+    monkeypatch.setattr(cache, "_scheme_stale", lambda *_: False)
+    monkeypatch.setattr(native, "source_identity", lambda: "source-v1")
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert native.choose_config("x", configs, dtype="bf16", bucket="shape") == configs[1]
+
+
+def test_runtime_reader_serves_the_nearest_measured_workload_of_the_same_form(monkeypatch):
+    """An unmeasured length or batch takes the closest measured workload's winner; a different feature width does not."""
+    import warnings
+
+    from miniworld_engine.autotune import cache
+    settings.configure(run_autotune=False)
+    configs = [{"tile_m": 64}, {"tile_m": 128}, {"tile_m": 256}]
+    w = torch.empty(64, 64)
+    key = lambda *shape: native.tensor_key(torch.empty(*shape), w, extra=(0,))
+    data = {"op_identity": "source-v1", "env_identity": "env", "entries": {
+        f"bf16|{key(1, 128, 128, 64)}": [cache.config_to_dict({"kwargs": configs[1]}, 0.1)],
+        f"bf16|{key(1, 512, 512, 64)}": [cache.config_to_dict({"kwargs": configs[2]}, 0.1)],
+    }}
+    monkeypatch.setattr(cache, "gpu_key", lambda _: "test-sm90")
+    monkeypatch.setattr(cache, "env_identity", lambda: "env")
+    monkeypatch.setattr(cache, "_load", lambda *_: data)
+    monkeypatch.setattr(cache, "_scheme_stale", lambda *_: False)
+    monkeypatch.setattr(native, "source_identity", lambda: "source-v1")
+    pick = lambda bucket: native.choose_config("x", configs, dtype="bf16", bucket=bucket)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert pick(key(1, 137, 137, 64)) == configs[1]           # a 137-token protein: the 128 winner
+        assert pick(key(4, 128, 128, 64)) == configs[1]           # four templates stacked: the single-sample winner
+        assert pick(key(1, 480, 480, 64)) == configs[2]
+    with pytest.warns(UserWarning, match="no tuned autotune cache entry for this shape"):
+        assert pick(key(1, 128, 128, 128)) == configs[0]          # another feature width is another kernel's workload
 
 
 @pytest.mark.parametrize("op", sorted(native.BUILD_OPS))

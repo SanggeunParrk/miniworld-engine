@@ -64,6 +64,8 @@ def source_identity() -> str:
 
     Changing candidate policy preserves measurements of unchanged kernels. Kernel,
     launcher, conversion/validation and benchmark changes still invalidate them.
+    ``native_compile.py`` is not part of it: it only decides where and how candidates are
+    compiled ahead of the measurement, and a compiled extension is keyed by its own sources.
     """
     root = Path(__file__).resolve().parents[1]
     digest = hashlib.sha256()
@@ -78,11 +80,12 @@ def source_identity() -> str:
     paths += sorted((root / "kernels").rglob("*.cu"))
     paths += [Path(__file__),
               Path(__file__).with_name("hopper_cuda_config.py"),
-              Path(__file__).with_name("native_compile.py"),
               Path(__file__).with_name("native_history.py"),
               Path(__file__).with_name("fused_config.py")]
     for path in paths:
-        if "notes" not in path.parts:
+        # what a wheel ships, so an install computes the identity its caches were measured under: `notes` (optimization
+        # logs) and `gen` (build-time generator scripts) are left out of the package (pyproject `exclude`)
+        if not {"notes", "gen"} & set(path.relative_to(root).parts):
             digest.update(str(path.relative_to(root)).encode())
             digest.update(path.read_bytes())
     return digest.hexdigest()
@@ -160,6 +163,36 @@ class _CacheConfigView(Sequence):
         return as_cfg_dict({"kwargs": dict(self._candidates[index])})
 
 
+def _on_cuda(value) -> bool:
+    """Whether a launcher's output holds a CUDA tensor (a stand-in launcher returning numbers is timed the eager way)."""
+    import torch
+
+    if isinstance(value, torch.Tensor):
+        return value.is_cuda
+    if isinstance(value, (tuple, list)):
+        return any(_on_cuda(v) for v in value)
+    if isinstance(value, dict):
+        return any(_on_cuda(v) for v in value.values())
+    return False
+
+
+def _warm_ms(fn, bencher, graph: bool = True) -> float:
+    """Median of CUDA-graph replays of ``fn`` with no L2 flush between them: the regime these kernels run in (a captured step of
+    a sampler or a trunk, the ladder's graph rungs). ``do_bench``'s flushed-cache timing kept the hand-tuned TriMul default out of
+    its top five at 384 tokens (a 37 MB pair: the size where L2 residency decides), and the tile it picked was 16-19 % slower than
+    that default once the pair stayed in L2. A call that cannot be captured is timed the eager way."""
+    import torch
+    from triton.testing import do_bench_cudagraph
+
+    if graph:
+        try:
+            return float(do_bench_cudagraph(fn, rep=50, return_mode="median"))
+        except Exception:  # a non-capturable launcher (or no device): the eager timer
+            if torch.cuda.is_available():
+                torch.cuda.synchronize()
+    return float(bencher._do_bench(fn, quantiles=None, return_mode="median"))
+
+
 def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None, validate=None):
     """Resolve one config; in a build, measure every candidate once per exact workload.
 
@@ -189,7 +222,7 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None,
     from miniworld_engine.autotune import cache, capture, native_history
     from miniworld_engine.autotune.native_compile import precompile
 
-    measurement = {"scheme": 1, "kind": "native", "implementation": identity,
+    measurement = {"scheme": 1, "kind": "native", "implementation": identity, "regime": "cuda_graph_warm",
                    "bench_clear_mb": settings.current().bench_clear_mb,
                    "bench_rep_ms": settings.current().bench_rep_ms}
     gk = gpu_key(device_index)
@@ -247,8 +280,7 @@ def choose_config(op, candidates, *, dtype, bucket, device_index=None, run=None,
                             if validate is not None:
                                 validate(c, output)
                             torch.cuda.synchronize(device_index)
-                            ms = float(bencher._do_bench(lambda c=c: run(c), quantiles=None,
-                                                        return_mode="median"))
+                            ms = _warm_ms(lambda c=c: run(c), bencher, graph=_on_cuda(output))
                             if not math.isfinite(ms) or ms <= 0:
                                 raise RuntimeError(f"invalid measurement {ms}")
                             record = {"status": "ok", "ms": ms}

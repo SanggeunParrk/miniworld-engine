@@ -405,6 +405,9 @@ class Settings:
     pwa_train: bool | None = None
     #: Formerly ``MINIWORLD_PWA_INFER``: like ``pwa_train`` for inference; None follows ``pwa_train``.
     pwa_infer: bool | None = None
+    #: Formerly MiniWorld's ``MINIWORLD_FUSED_PAIR_INIT``: the fused token pair-init kernel. The engine does not read it, but
+    #: MiniWorld's ``InputEmbedder`` does (``settings.current().token_pair_init_fused``), so it stays a setting.
+    token_pair_init_fused: bool = True
     # ---- H100 native-path switches (formerly MINIWORLD_* environment variables; name = the variable without its prefix, lower case)
     #: H100 AttentionPairBias training: True recomputes the pair-weight (``to_bias.weight``) gradient in fp32 from bf16-rounded
     #: inputs (the "shadow": 1.45e-2 against an fp64 truth, about 2.4x the step); False (default) keeps the fused kernel's dWf
@@ -568,7 +571,7 @@ _REMOVED_ENVIRONMENT = {
     "MINIWORLD_BIAS_ONLY_DIT_TRAIN_PACK1": "bias_only_dit_train_pack1",
     "MINIWORLD_BIAS_ONLY_DIT_WGRAD_SPLIT": "bias_only_dit_wgrad_split",
     "MINIWORLD_ENGINE_JIT_ROOT": "engine_jit_root",
-    "MINIWORLD_FUSED_PAIR_INIT": "",  # removed: the default behaviour is the only one
+    "MINIWORLD_FUSED_PAIR_INIT": "token_pair_init_fused",
     "MINIWORLD_LOCAL_DIT_HOIST": "local_dit_hoist",
     "MINIWORLD_LOCAL_DIT_SM100": "local_dit_sm100",
     "MINIWORLD_LOCAL_DIT_TF32": "local_dit_tf32",
