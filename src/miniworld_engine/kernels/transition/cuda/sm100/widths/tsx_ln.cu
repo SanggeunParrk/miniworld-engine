@@ -1,9 +1,11 @@
 // tsx_ln.cu -- the Transition forward at SMALL M, first of three programmatic-dependent kernels: the input LayerNorm
 // (-DDIM=<D>), sm_100a, bf16 in / bf16 out with fp32 statistics. One warp per row (D / 128 eight-byte chunks per lane, coalesced),
 // two-pass statistics from registers, xn = bf16((x rs - mean rs) gamma + beta) -- the arithmetic of the other builds' LayerNorm
-// (tsmall_w.cu / tfwd_d384.cu: fp32x2, the same association). Writes xn always (the expand's A operand) and, with save, rstd and
+// (tfwd_d384.cu: fp32x2, the same association). Writes xn always (the expand's A operand) and, with save, rstd and
 // c1 = mean rstd for the backward. Normalising once per tile here instead of in every (tile, hidden chunk) CTA of the expand takes the
 // LayerNorm (instruction bound: ~4k cycles per 128 x 384 tile) off the expand's critical path.
+// With ncast > 0 the blocks past the rows also cast three fp32 master matrices (ncast elements each) to the kernels' bf16 copies
+// (round to nearest even, as .to): the training forward's per-step weight cast rides in this launch instead of one of its own.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -18,10 +20,34 @@ DEVI f2 unpack_bf16x2(uint32_t w) { return mk2u(w << 16, w & 0xffff0000u); }
 
 extern "C" __global__ void __launch_bounds__(WPB * 32)
 transition_sx_ln(const __nv_bfloat16* __restrict__ x, const float* __restrict__ gamma, const float* __restrict__ beta,
-                 __nv_bfloat16* __restrict__ xn, float* __restrict__ rstd, float* __restrict__ c1, int M, float eps, int save) {
-  const int lane = threadIdx.x & 31, row = blockIdx.x * WPB + (threadIdx.x >> 5);
+                 __nv_bfloat16* __restrict__ xn, float* __restrict__ rstd, float* __restrict__ c1, int M, float eps, int save,
+                 const float* __restrict__ w0, const float* __restrict__ w1, const float* __restrict__ w2, __nv_bfloat16* __restrict__ o0,
+                 __nv_bfloat16* __restrict__ o1, __nv_bfloat16* __restrict__ o2, int ncast) {
+  const int lane = threadIdx.x & 31, nrb = (M + WPB - 1) / WPB, row = blockIdx.x * WPB + (threadIdx.x >> 5);
   pdl_wait();
   pdl_launch();
+  if ((int)blockIdx.x >= nrb) {                                // weight casts: two 8-element groups per thread, loads first
+    const int n8 = ncast / 8, i0 = ((blockIdx.x - nrb) * blockDim.x + threadIdx.x) * 2;
+    float4 v[4];
+#pragma unroll
+    for (int u = 0; u < 2; ++u) {
+      const int i = i0 + u, w = i / n8, j = i - w * n8;
+      if (i < 3 * n8) {
+        const float4* src = reinterpret_cast<const float4*>(w == 0 ? w0 : w == 1 ? w1 : w2) + 2 * j;
+        v[2 * u] = __ldg(src); v[2 * u + 1] = __ldg(src + 1);
+      }
+    }
+#pragma unroll
+    for (int u = 0; u < 2; ++u) {
+      const int i = i0 + u, w = i / n8, j = i - w * n8;
+      if (i < 3 * n8) {
+        const float4 a = v[2 * u], b = v[2 * u + 1];
+        reinterpret_cast<uint4*>(w == 0 ? o0 : w == 1 ? o1 : o2)[j] =
+            make_uint4(pack_bf16(a.x, a.y), pack_bf16(a.z, a.w), pack_bf16(b.x, b.y), pack_bf16(b.z, b.w));
+      }
+    }
+    return;
+  }
   if (row >= M) return;
   const uint2* xr = reinterpret_cast<const uint2*>(x + (size_t)row * D_);
   uint2 v[PER];
