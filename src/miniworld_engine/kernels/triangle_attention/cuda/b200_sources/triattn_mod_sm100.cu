@@ -391,7 +391,10 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
           xw[c * 4] = u.x; xw[c * 4 + 1] = u.y; xw[c * 4 + 2] = u.z; xw[c * 4 + 3] = u.w;
         }
         tmem_wait_ld();
-        if (ch == 3) { tc_fence_before(); __syncwarp(); if (lane == 0) { arrive(ae + b); arrive(xe); } }
+        if (ch == 3) {                            // (xe: the residual tile's reads ordered before its release by the proxy fence -- an arrive
+          fence_proxy_async();                    // alone does not wait for outstanding LDS, and the next tile's TMA load overwrote them)
+          tc_fence_before(); __syncwarp(); if (lane == 0) { arrive(ae + b); arrive(xe); }
+        }
         uint32_t w[16];
         if (DROP != nullptr) {                    // row (b, i, j): scale row (b, j), channels 32 ch ..
           const long row = (long)t * BM + r;

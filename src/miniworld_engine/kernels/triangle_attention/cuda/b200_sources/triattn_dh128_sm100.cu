@@ -571,9 +571,10 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd128_kv(
           }
         }
         tmem_wait_ld();
+        fence_proxy_async();                        // the bias^T tile's reads, before its release: an arrive alone does not wait for them
         tc_fence_before();
         __syncwarp();
-        if (lane == 0) arrive(A(se + gi));          // the group's S^T buffer takes its next stage
+        if (lane == 0) { arrive(A(se + gi)); arrive(A(be + bs)); }   // the group's S^T buffer takes its next stage
         uint32_t pk[16], dk[16];
 #pragma unroll
         for (int j = 0; j < 8; ++j) {
@@ -605,10 +606,7 @@ __global__ void __launch_bounds__(KB_THREADS, 1) triattn_bwd128_kv(
         tmem_wait_st();
         tc_fence_before();
         __syncwarp();
-        // the bias^T tile is released only now: an mbarrier arrive does not wait for this thread's outstanding shared loads (ptxas
-        // issued it ahead of the bias LDS when it followed them directly, and the next TMA load overwrote rows the slowest warp had
-        // not read yet); here every bias value has been consumed by the P^T | dS^T this thread stored
-        if (lane == 0) { arrive(A(pf + gi)); arrive(A(be + bs)); }
+        if (lane == 0) arrive(A(pf + gi));
       }
       // ---- the drain: group 0 dV, group 1 dK (x scale), a thread a key row, 32 channels at a time ----
       wait(A(dfr), lt & 1);
@@ -820,6 +818,9 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd128_q(
         }
         lse = sLD[row];
         dl = sLD[BM + row] + sLD[2 * BM + row] + sLD[3 * BM + row] + sLD[4 * BM + row];
+        fence_proxy_async();                        // the staging's reads, before its release: an arrive alone does not wait for them
+        __syncwarp();
+        if (lane == 0) arrive(A(ae));
         tmem_wait_st();
         tc_fence_before();
         __syncwarp();
@@ -842,6 +843,9 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd128_q(
             }
           }
         }
+        fence_proxy_async();                        // the bias tile's reads, before its release
+        __syncwarp();
+        if (lane == 0) arrive(A(be + bs));
         wait(A(sf + b), (y / QB_NS) & 1);
         tc_fence_after();
         const uint32_t tb = tmem_at(tmem + b * 128, qq * 32, 0);
@@ -863,13 +867,7 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd128_q(
         tmem_wait_st();
         tc_fence_before();
         __syncwarp();
-        // the bias tile and (after the first sub-tile) the staging with lse / delta are released only once their values were consumed
-        // by the dS this thread stored: an mbarrier arrive does not wait for outstanding shared loads
-        if (lane == 0) {
-          arrive(A(pf + b));
-          arrive(A(be + bs));
-          if (kb == 0) arrive(A(ae));
-        }
+        if (lane == 0) arrive(A(pf + b));
         // the group's [128 q][32 k] piece -> shared -> one TMA reduce-add
         {
           if (lead) bulk_wait_read<0>();              // the previous reduce has read the buffer
