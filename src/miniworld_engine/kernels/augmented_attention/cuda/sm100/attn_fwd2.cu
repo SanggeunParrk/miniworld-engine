@@ -19,6 +19,9 @@
 // normalised partial O in O[chunk][A L] and its partial LSE in LSE[chunk][A][NHEAD][L]; apb_rows' ksplit_combine merges the
 // chunks (weights 2^(LSE_c - max)). The exponent is formed as (t - m) log2 e (an exact difference) instead of one FMA, so a chunk
 // whose keys are all masked (t = m = -1e30) gives p = 1 instead of 2^(the FMA's rounding error): finite, and weighted 0 later.
+// -DGATE=1 (the AugmentedAttention module route, sample pairs only): the epilogue writes og = sigmoid(g) O as bf16 instead of O --
+// g read per row from GP (row stride ldg elements: the gate columns of the q|k|v|g GEMM output), og through the moa map (a bf16
+// [W, A L] map, box [DH, 128], 128-B swizzle; mob unused). O itself is not written (the backward takes og: D = rowsum(dog og)).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -59,6 +62,10 @@ constexpr int TQ = QM * 128, TK = BN * 128, TB = QM * BN * 2;
 #ifndef KSPLIT
 #define KSPLIT 0
 #endif
+#ifndef GATE
+#define GATE 0
+#endif
+static_assert(!GATE || (!QPAIR && TST), "the gated epilogue is built for the sample pairs with the staged stores");
 static_assert(!KSPLIT || QPAIR, "the key split is built for the query-tile pairs");
 // stage: k0 | k1 | v0 | v1 | bias (sample pairs) or k | v | bias0 | bias1 (query-tile pairs), 48 KB either way
 constexpr int STB = QPAIR ? 2 * TK + 2 * TB : 4 * TK + TB;
@@ -112,6 +119,9 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
 #endif
 #if KMASK
                    , const uint32_t* __restrict__ KMB
+#endif
+#if GATE
+                   , const uint16_t* __restrict__ GP, int ldg   // bf16 bits
 #endif
                    ) {
 #if !KSPLIT
@@ -329,12 +339,22 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
       if (n == nb - 1) {
         // ---- epilogue of the item: O = acc / l (fp32), LSE = m log2 e + log2 l
         int a0, m0, head, sp; item_of(li, a0, m0, head, sp);
+#if GATE
+        uint4 gv[DH / 8];                                                  // this row's gate (issued before the last PV completes)
+        {
+          const uint4* gp = reinterpret_cast<const uint4*>(GP + ((size_t)(a0 + w) * L + m0 + r) * ldg + head * DH);
+#pragma unroll
+          for (int q = 0; q < DH / 8; ++q) gv[q] = __ldg(gp + q);
+        }
+#endif
         mbar_wait(&B.p_free[w], G & 1);
         tc_fence_after();
         const float inv = 1.f / l_i;
         const int a = QPAIR ? a0 : a0 + w, rbase = row_of(a0, m0, w) - a * L, row = rbase + (int)r;   // row within sample a
         const int orb = (sp * A + a) * L + rbase;                          // the tile's first row in O ([chunk][A L] with the key split)
+#if !GATE
         float* orow = O + ((size_t)orb + r) * (NHEAD * DH) + head * DH;
+#endif
         uint32_t ov[DH];
 #pragma unroll
         for (int cc = 0; cc < DH / 16; ++cc) tmem_ld16(trow + T_O + w * 64 + cc * 16, *reinterpret_cast<uint32_t(*)[16]>(ov + 16 * cc));
@@ -342,6 +362,26 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
         tc_fence_before();
         __syncwarp();
         if (lane == 0) mbar_arrive(&B.o_free[w]);
+#if GATE
+        {                                                                  // og = sigmoid(g) O, bf16, one [128 rows][DH] box
+          const uint32_t xa = su + O_X + w * (XA + XB);
+          if (r == 0) tma_store_wait_read0();                              // the previous item's store has left the staging buffer
+          named_bar_sync(1 + w, 128);
+#pragma unroll
+          for (int q = 0; q < DH / 8; ++q) {
+            const uint32_t gg[4] = {gv[q].x, gv[q].y, gv[q].z, gv[q].w};
+            uint32_t o4[4];
+#pragma unroll
+            for (int e = 0; e < 4; ++e)
+              o4[e] = pack_bf16(__uint_as_float(ov[8 * q + 2 * e]) * inv * sigmoid_kit(bf16lo(gg[e])),
+                                __uint_as_float(ov[8 * q + 2 * e + 1]) * inv * sigmoid_kit(bf16hi(gg[e])));
+            sts128(xa + sw128(r, q), make_uint4(o4[0], o4[1], o4[2], o4[3]));
+          }
+          fence_proxy_async();
+          named_bar_sync(1 + w, 128);
+          if (r == 0) { tma_store_2d(&moa, xa, head * DH, orb); tma_store_commit(); }
+        }
+#else
         if (TST && DH == 64) {                                             // 64 columns: two 32-column halves through xa, in turn
           const uint32_t xa = su + O_X + w * (XA + XB);
 #pragma unroll
@@ -386,6 +426,7 @@ augattn_fwd2_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant
             *reinterpret_cast<float4*>(orow + 4 * k) = make_float4(__uint_as_float(ov[4 * k]) * inv, __uint_as_float(ov[4 * k + 1]) * inv,
                                                                    __uint_as_float(ov[4 * k + 2]) * inv, __uint_as_float(ov[4 * k + 3]) * inv);
         }
+#endif
         if (live(m0, w)) LSE[(((size_t)sp * A + a) * NHEAD + head) * L + row] = m_i * LOG2E + __log2f(l_i);
       }
     }
