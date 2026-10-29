@@ -1396,48 +1396,58 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
 // thread only needs its row's mean / rstd.  CTA = persistent over rows i; tile = row i x 128 j.
 // (Writing bf16(LN(z)) over the tile first, as the module rounds, measured the same error against fp32 but 1.5x slower: the
 // per-element normalisation made the kernel fp32-issue-bound.)
-//   warp 12: z tiles by TMA (ring);  warp 13: acc[j][16] = z . Wg^T (M = 128 j, N = 16: 8 heads padded, K = 128);
+//   warp 12: z by TMA in units of UB 64-channel blocks [UB][128 j][64 d] (UB 2: d_pair 128 / 256, the whole d_pair 128 tile as one stage;
+//            UB 1: d_pair 384); the ring holds NSU units;
+//   warp 13: acc[j][16] = z . Wg^T (M = 128 j, N = 16: 8 heads padded, K = DZ, unit by unit);
 //   warps 0-7: row statistics (thread = row j = TMEM lane), the logits -> a bf16 row buffer [8][N] in shared memory; two groups
 //   of four take alternate tiles (the per-row sums are latency-bound at one warp per SMSP), each with its own TMEM accumulator;
 //   warps 8-11: softmax over j of the previous row, straight to global (two row buffers: the rows overlap).
-namespace pf2 {
-constexpr int DZ = 128, BJ = 128, HP = 16, NMAX = 1024;
-constexpr int ZT = BJ * DZ;                                // z tile [2 d blocks][128 j][64], 128B swizzle (32 KiB)
-constexpr int NST = 5;
-constexpr int WGT = HP * DZ;                               // Wg [2 d blocks][16 h][64], rows 8-15 zero (4 KiB)
-constexpr int LB = H * NMAX;                               // one row's logits [8][NMAX] bf16 (16 KiB)
-constexpr int THREADS = 448;
-constexpr int SMEM = 1024 + (NST * ZT + WGT + 2 * LB) * 2 + H * 4 + 256;
-constexpr uint32_t IDESC = idesc_bf16(128, HP, 0, 0);
-static_assert(SMEM <= 232448, "one CTA per SM");
-}  // namespace pf2
+// Built per (DZ, NMAX): d_pair 128 (MiniWorld, Chai-1), 256 (Protenix-v2, ESMFold2), 384 (OpenDDE); a row of up to 1024 or 2048 logits.
+// At NMAX 2048 the softmax reads the row three times from shared memory (max, sum, store) instead of holding it in registers.
+template <int DZ_, int NMAX_>
+struct PF {
+  static constexpr int DZ = DZ_, BJ = 128, HP = 16, NMAX = NMAX_;
+  static constexpr int KB = DZ / 64;                         // 64-channel blocks of a tile
+  static constexpr int UB = KB % 2 == 0 ? 2 : 1;             // blocks per ring unit (one barrier round per unit)
+  static constexpr int KU = KB / UB;                         // units per tile
+  static constexpr int UT = UB * BJ * 64;                    // one unit [UB][128 j][64], 128B swizzle
+  static constexpr int NSU = (NMAX <= 1024 ? 10 : 8) / UB;   // ring units: 160 / 128 KiB of z (1024: the five 32 KiB stages of before)
+  static constexpr int WGT = HP * DZ;                        // Wg [KB d blocks][16 h][64], rows 8-15 zero
+  static constexpr int LB = H * NMAX;                        // one row's logits [8][NMAX] bf16
+  static constexpr int THREADS = 448;
+  static constexpr int SMEM = 1024 + (NSU * UT + WGT + 2 * LB) * 2 + H * 4 + 512;
+  static constexpr uint32_t IDESC = idesc_bf16(128, HP, 0, 0);
+  static_assert(DZ % 64 == 0 && SMEM <= 232448, "one CTA per SM");
+};
 
-template <typename WT_, typename LT_>
-__global__ void __launch_bounds__(pf2::THREADS, 1) pair_fwd_sm100(
+template <typename WT_, typename LT_, int DZ_, int NMAX_>
+__global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
     int N, float eps,
-    const __grid_constant__ CUtensorMap zmap,     // z [N*N][128], box (64, 128), 128B swizzle
+    const __grid_constant__ CUtensorMap zmap,     // z [N*N][DZ], box (64, 128), 128B swizzle
     const uint8_t* __restrict__ MASK,             // key mask [N] (bool)
     const LT_* __restrict__ LNW,
-    const WT_* __restrict__ WB,                   // proj_z weight [H][128]
+    const WT_* __restrict__ WB,                   // proj_z weight [H][DZ]
     __nv_bfloat16* __restrict__ W) {              // softmax [H][N][N]
-  using namespace pf2;
+  using P = PF<DZ_, NMAX_>;
+  constexpr int DZ = P::DZ, BJ = P::BJ, HP = P::HP, NMAX = P::NMAX, UB = P::UB, KU = P::KU, UT = P::UT, NSU = P::NSU, WGT = P::WGT, LB = P::LB;
+  constexpr int THREADS = P::THREADS;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
-  __nv_bfloat16* sZ = reinterpret_cast<__nv_bfloat16*>(smb);   // [NST][ZT]
-  __nv_bfloat16* sWg = sZ + NST * ZT;
+  __nv_bfloat16* sZ = reinterpret_cast<__nv_bfloat16*>(smb);   // [NSU][UT]
+  __nv_bfloat16* sWg = sZ + NSU * UT;
   __nv_bfloat16* sL = sWg + WGT;                                 // [2][H][NMAX]
   float* sSC = reinterpret_cast<float*>(sL + 2 * LB);            // s[8]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sSC + H);
-  uint64_t* full = bars;             // [NST]
-  uint64_t* empty = full + NST;      // [NST] count 5: the MMA + the 4 statistics warps
-  uint64_t* accf = empty + NST;      // [2]
+  uint64_t* full = bars;             // [NSU]
+  uint64_t* empty = full + NSU;      // [NSU] count 5: the MMA + the 4 statistics warps of the tile's group
+  uint64_t* accf = empty + NSU;      // [2]
   uint64_t* acce = accf + 2;         // [2] count 4
   uint64_t* rowf = acce + 2;         // [2] count 8: a row's logits written (both groups)
   uint64_t* rowe = rowf + 2;         // [2] count 4: its softmax stored
   uint32_t* tslot = reinterpret_cast<uint32_t*>(rowe + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NST; ++k) { bar_init(full + k, 1); bar_init(empty + k, 5); }
+    for (int k = 0; k < NSU; ++k) { bar_init(full + k, 1); bar_init(empty + k, 5); }
     for (int k = 0; k < 2; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); bar_init(rowf + k, 8); bar_init(rowe + k, 4); }
     bar_init_fence();
   }
@@ -1462,33 +1472,37 @@ __global__ void __launch_bounds__(pf2::THREADS, 1) pair_fwd_sm100(
 
   if (warp == 12) {
     if (lane == 0) {
-      int g = 0;
+      int u = 0;
       for (int i = blockIdx.x; i < N; i += gridDim.x)
-        for (int jb = 0; jb < NJB; ++jb, ++g) {
-          const int st = g % NST;
-          if (g >= NST) wait(empty + st, ((g / NST) - 1) & 1);
-          expect_tx(full + st, ZT * 2);
-          for (int b = 0; b < 2; ++b) load_2d(&zmap, sZ + st * ZT + b * BJ * 64, full + st, b * 64, i * N + jb * BJ);
-        }
+        for (int jb = 0; jb < NJB; ++jb)
+          for (int ku = 0; ku < KU; ++ku, ++u) {
+            const int st = u % NSU;
+            if (u >= NSU) wait(empty + st, ((u / NSU) - 1) & 1);
+            expect_tx(full + st, UT * 2);
+            for (int b = 0; b < UB; ++b) load_2d(&zmap, sZ + st * UT + b * BJ * 64, full + st, (ku * UB + b) * 64, i * N + jb * BJ);
+          }
     }
   } else if (warp == 13) {
-    int g = 0;
+    int g = 0, u = 0;
     for (int i = blockIdx.x; i < N; i += gridDim.x)
       for (int jb = 0; jb < NJB; ++jb, ++g) {
-        const int st = g % NST, b = g & 1;
+        const int b = g & 1;
         if (g >= 2) wait(acce + b, ((g >> 1) - 1) & 1);
-        wait(full + st, (g / NST) & 1);
-        tc_fence_after();
-        if (elect_one()) {
-          const __nv_bfloat16* zt = sZ + st * ZT;
+        for (int ku = 0; ku < KU; ++ku, ++u) {
+          const int st = u % NSU;
+          wait(full + st, (u / NSU) & 1);
+          tc_fence_after();
+          if (elect_one()) {
+            const __nv_bfloat16* zt = sZ + st * UT;
 #pragma unroll
-          for (int ks = 0; ks < DZ / 16; ++ks)
-            mma_ss(tmem + b * HP, desc_k128(zt + (ks >> 2) * BJ * 64 + (ks & 3) * 16), desc_k128(sWg + (ks >> 2) * HP * 64 + (ks & 3) * 16),
-                   IDESC, ks ? 1u : 0u);
-          mma_commit(empty + st);
-          mma_commit(accf + b);
+            for (int ks = 0; ks < 4 * UB; ++ks)
+              mma_ss(tmem + b * HP, desc_k128(zt + (ks >> 2) * BJ * 64 + (ks & 3) * 16),
+                     desc_k128(sWg + (ku * UB + (ks >> 2)) * HP * 64 + (ks & 3) * 16), P::IDESC, (ku | ks) ? 1u : 0u);
+            mma_commit(empty + st);
+            if (ku == KU - 1) mma_commit(accf + b);
+          }
+          __syncwarp();
         }
-        __syncwarp();
       }
   } else if (warp < 8) {
     const int grp = warp >> 2, j = (warp & 3) * 32 + lane;   // tile row = TMEM lane; group grp takes the tiles g = grp (mod 2)
@@ -1499,25 +1513,28 @@ __global__ void __launch_bounds__(pf2::THREADS, 1) pair_fwd_sm100(
       if (r >= 2) wait(rowe + lb, ((r >> 1) - 1) & 1);
       __nv_bfloat16* L = sL + lb * LB;
       for (int jb = 0; jb < NJB; ++jb, ++g) {
-        const int st = g % NST, b = g & 1;
+        const int b = g & 1;
         if (b != grp) continue;
-        wait(full + st, (g / NST) & 1);
-        // one pass over the row in shared memory, shifted by its first element (no cancellation for rows far from zero mean;
-        // holding the 128 values in registers spilled)
-        const __nv_bfloat16* zr = sZ + st * ZT + j * 64;
-        const float k0 = __bfloat162float(zr[0]);
-        const float2 nk = make_float2(-k0, -k0);
-        float2 a0 = make_float2(0.f, 0.f), a1 = a0, q0 = a0, q1 = a0;
+        // one pass over the row in shared memory, unit by unit, shifted by its first element (no cancellation for rows far from
+        // zero mean; holding the values in registers spilled)
+        float k0 = 0.f;
+        float2 a0 = make_float2(0.f, 0.f), a1 = a0, q0 = a0, q1 = a0, nk = a0;
+        for (int ku = 0; ku < KU; ++ku) {
+          const int u = g * KU + ku, st = u % NSU;
+          wait(full + st, (u / NSU) & 1);
+          const __nv_bfloat16* zr = sZ + st * UT + j * 64;
+          if (ku == 0) { k0 = __bfloat162float(zr[0]); nk = make_float2(-k0, -k0); }
 #pragma unroll
-        for (int q = 0; q < 16; ++q) {
-          const uint4 v = *reinterpret_cast<const uint4*>(zr + (q >> 3) * BJ * 64 + (((q & 7) ^ (j & 7)) << 3));
-          const float2 x0 = add2(bf2f(v.x), nk), x1 = add2(bf2f(v.y), nk), x2 = add2(bf2f(v.z), nk), x3 = add2(bf2f(v.w), nk);
-          a0 = add2(a0, add2(x0, x1)); a1 = add2(a1, add2(x2, x3));
-          q0 = fma2(x0, x0, fma2(x1, x1, q0)); q1 = fma2(x2, x2, fma2(x3, x3, q1));
+          for (int q = 0; q < 8 * UB; ++q) {
+            const uint4 v = *reinterpret_cast<const uint4*>(zr + (q >> 3) * BJ * 64 + (((q & 7) ^ (j & 7)) << 3));
+            const float2 x0 = add2(bf2f(v.x), nk), x1 = add2(bf2f(v.y), nk), x2 = add2(bf2f(v.z), nk), x3 = add2(bf2f(v.w), nk);
+            a0 = add2(a0, add2(x0, x1)); a1 = add2(a1, add2(x2, x3));
+            q0 = fma2(x0, x0, fma2(x1, x1, q0)); q1 = fma2(x2, x2, fma2(x3, x3, q1));
+          }
+          fence_proxy_async();                   // order the unit's reads before the next TMA write into it (another proxy)
+          __syncwarp();
+          if (lane == 0) arrive(empty + st);
         }
-        fence_proxy_async();                     // order the stage's reads before the next TMA write into it (another proxy)
-        __syncwarp();
-        if (lane == 0) arrive(empty + st);
         a0 = add2(a0, a1); q0 = add2(q0, q1);
         const float m1 = (a0.x + a0.y) * (1.f / DZ);                    // mean - k0
         const float mean = k0 + m1;
@@ -1550,30 +1567,56 @@ __global__ void __launch_bounds__(pf2::THREADS, 1) pair_fwd_sm100(
       for (int hh = 0; hh < 2; ++hh) {
         const int h = h0 + hh;
         const __nv_bfloat16* L = sL + lb * LB + h * NMAX;
-        float2 e[KMAX];
-        float mx = -INFINITY;
-#pragma unroll
-        for (int k = 0; k < KMAX; ++k) {
-          const int jj = lane * 2 + k * 64;
-          e[k] = jj < N ? bf2f(*reinterpret_cast<const uint32_t*>(L + jj)) : make_float2(-INFINITY, -INFINITY);
-          mx = fmaxf(mx, fmaxf(e[k].x, e[k].y));
-        }
-#pragma unroll
-        for (int off = 16; off >= 1; off >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, off));
-        float den = 0.f;
-#pragma unroll
-        for (int k = 0; k < KMAX; ++k) {             // (x - max) first: a fully masked row (all -1e30) is exactly uniform
-          e[k].x = exp2f((e[k].x - mx) * 1.4426950408889634f); e[k].y = exp2f((e[k].y - mx) * 1.4426950408889634f);
-          den += e[k].x + e[k].y;
-        }
-#pragma unroll
-        for (int off = 16; off >= 1; off >>= 1) den += __shfl_xor_sync(0xffffffffu, den, off);
-        const float inv = 1.f / den;
         uint32_t* out = reinterpret_cast<uint32_t*>(W + ((size_t)h * N + i) * N);
+        if constexpr (NMAX <= 1024) {
+          float2 e[KMAX];
+          float mx = -INFINITY;
 #pragma unroll
-        for (int k = 0; k < KMAX; ++k) {
-          const int jj = lane * 2 + k * 64;
-          if (jj < N) out[jj >> 1] = pack2(e[k].x * inv, e[k].y * inv);
+          for (int k = 0; k < KMAX; ++k) {
+            const int jj = lane * 2 + k * 64;
+            e[k] = jj < N ? bf2f(*reinterpret_cast<const uint32_t*>(L + jj)) : make_float2(-INFINITY, -INFINITY);
+            mx = fmaxf(mx, fmaxf(e[k].x, e[k].y));
+          }
+#pragma unroll
+          for (int off = 16; off >= 1; off >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, off));
+          float den = 0.f;
+#pragma unroll
+          for (int k = 0; k < KMAX; ++k) {             // (x - max) first: a fully masked row (all -1e30) is exactly uniform
+            e[k].x = exp2f((e[k].x - mx) * 1.4426950408889634f); e[k].y = exp2f((e[k].y - mx) * 1.4426950408889634f);
+            den += e[k].x + e[k].y;
+          }
+#pragma unroll
+          for (int off = 16; off >= 1; off >>= 1) den += __shfl_xor_sync(0xffffffffu, den, off);
+          const float inv = 1.f / den;
+#pragma unroll
+          for (int k = 0; k < KMAX; ++k) {
+            const int jj = lane * 2 + k * 64;
+            if (jj < N) out[jj >> 1] = pack2(e[k].x * inv, e[k].y * inv);
+          }
+        } else {
+          // the same arithmetic in three passes over the shared row (a 2048-long row held in registers would not fit)
+          float mx = -INFINITY;
+#pragma unroll 4
+          for (int jj = lane * 2; jj < N; jj += 64) {
+            const float2 x = bf2f(*reinterpret_cast<const uint32_t*>(L + jj));
+            mx = fmaxf(mx, fmaxf(x.x, x.y));
+          }
+#pragma unroll
+          for (int off = 16; off >= 1; off >>= 1) mx = fmaxf(mx, __shfl_xor_sync(0xffffffffu, mx, off));
+          float den = 0.f;
+#pragma unroll 4
+          for (int jj = lane * 2; jj < N; jj += 64) {
+            const float2 x = bf2f(*reinterpret_cast<const uint32_t*>(L + jj));
+            den += exp2f((x.x - mx) * 1.4426950408889634f) + exp2f((x.y - mx) * 1.4426950408889634f);
+          }
+#pragma unroll
+          for (int off = 16; off >= 1; off >>= 1) den += __shfl_xor_sync(0xffffffffu, den, off);
+          const float inv = 1.f / den;
+#pragma unroll 4
+          for (int jj = lane * 2; jj < N; jj += 64) {
+            const float2 x = bf2f(*reinterpret_cast<const uint32_t*>(L + jj));
+            out[jj >> 1] = pack2(exp2f((x.x - mx) * 1.4426950408889634f) * inv, exp2f((x.y - mx) * 1.4426950408889634f) * inv);
+          }
         }
       }
       __syncwarp();
@@ -1665,17 +1708,13 @@ std::vector<torch::Tensor> pwa_wprep_host(torch::Tensor wg, torch::Tensor wv, to
   return {wot, wgvt};
 }
 
-// z [N, N, 128] bf16, key mask [N] (bool), LayerNorm scale [128] and proj_z weight [8, 128] (fp32 or bf16) -> w [H, N, N] bf16
-torch::Tensor pair_fwd(torch::Tensor z, torch::Tensor mask, torch::Tensor lnw, double eps, torch::Tensor wb) {
-  using namespace pf2;
-  TORCH_CHECK(z.is_contiguous() && z.scalar_type() == torch::kBFloat16 && z.dim() == 3 && z.size(2) == DZ && z.size(0) == z.size(1), "z: [N, N, 128] bf16");
+// z [N, N, DZ] bf16 (DZ 128 / 256 / 384), key mask [N] (bool), LayerNorm scale [DZ] and proj_z weight [8, DZ] (fp32 or bf16) -> w [H, N, N] bf16.
+// N a multiple of 128, at most 2048 (the build holding a row of 1024 logits up to N 1024, the 2048 one above).
+template <int DZ, int NMAX>
+static void pair_fwd_launch(const torch::Tensor& z, const torch::Tensor& mask, const torch::Tensor& lnw, double eps, const torch::Tensor& wb, torch::Tensor& w) {
+  using P = PF<DZ, NMAX>;
   const long N = z.size(0);
-  TORCH_CHECK(N % BJ == 0 && N <= NMAX, "N must be a multiple of 128, at most 1024");
-  TORCH_CHECK(mask.is_contiguous() && mask.scalar_type() == torch::kBool && mask.numel() == N, "mask: [N] bool (the key axis)");
-  TORCH_CHECK(lnw.is_contiguous() && lnw.numel() == DZ, "LN scale [128]");
-  TORCH_CHECK(wb.is_contiguous() && wb.numel() == H * DZ, "wb: [8, 128]");
-  auto w = torch::empty({(long)H, N, N}, z.options());
-  CUtensorMap zm = make_map<2>(z.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
+  CUtensorMap zm = make_map<2>(z.data_ptr(), {(uint64_t)DZ, (uint64_t)(N * N)}, {(uint64_t)DZ}, {64, (uint32_t)P::BJ}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
   const int grid = std::min((int)N, num_sms(z.device().index()));
   auto st = at::cuda::getCurrentCUDAStream();
   const auto* mp = reinterpret_cast<const uint8_t*>(mask.data_ptr<bool>());
@@ -1683,9 +1722,9 @@ torch::Tensor pair_fwd(torch::Tensor z, torch::Tensor mask, torch::Tensor lnw, d
   auto launch = [&](auto wt, auto lt) {
     using WT = decltype(wt); using LT = decltype(lt);
     static bool attr = false;
-    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_sm100<WT, LT>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    pair_fwd_sm100<WT, LT><<<grid, THREADS, SMEM, st>>>((int)N, (float)eps, zm, mp, reinterpret_cast<const LT*>(lnw.data_ptr()),
-                                                        reinterpret_cast<const WT*>(wb.data_ptr()), wp);
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_fwd_sm100<WT, LT, DZ, NMAX>, cudaFuncAttributeMaxDynamicSharedMemorySize, P::SMEM)); attr = true; }
+    pair_fwd_sm100<WT, LT, DZ, NMAX><<<grid, P::THREADS, P::SMEM, st>>>((int)N, (float)eps, zm, mp, reinterpret_cast<const LT*>(lnw.data_ptr()),
+                                                                        reinterpret_cast<const WT*>(wb.data_ptr()), wp);
   };
   const bool wf = wb.scalar_type() == torch::kFloat32, lf = lnw.scalar_type() == torch::kFloat32;
   TORCH_CHECK((wf || wb.scalar_type() == torch::kBFloat16) && (lf || lnw.scalar_type() == torch::kBFloat16), "weights: fp32 or bf16");
@@ -1694,6 +1733,21 @@ torch::Tensor pair_fwd(torch::Tensor z, torch::Tensor mask, torch::Tensor lnw, d
   else if (lf) launch(__nv_bfloat16{}, float{});
   else launch(__nv_bfloat16{}, __nv_bfloat16{});
   C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
+torch::Tensor pair_fwd(torch::Tensor z, torch::Tensor mask, torch::Tensor lnw, double eps, torch::Tensor wb) {
+  TORCH_CHECK(z.is_contiguous() && z.scalar_type() == torch::kBFloat16 && z.dim() == 3 && z.size(0) == z.size(1), "z: [N, N, d_pair] bf16");
+  const long N = z.size(0), DZ = z.size(2);
+  TORCH_CHECK(DZ == 128 || DZ == 256 || DZ == 384, "d_pair must be 128, 256 or 384");
+  TORCH_CHECK(N % 128 == 0 && N <= 2048, "N must be a multiple of 128, at most 2048");
+  TORCH_CHECK(mask.is_contiguous() && mask.scalar_type() == torch::kBool && mask.numel() == N, "mask: [N] bool (the key axis)");
+  TORCH_CHECK(lnw.is_contiguous() && lnw.numel() == DZ, "LN scale [d_pair]");
+  TORCH_CHECK(wb.is_contiguous() && wb.numel() == H * DZ, "wb: [8, d_pair]");
+  auto w = torch::empty({(long)H, N, N}, z.options());
+  const bool big = N > 1024;
+  if (DZ == 128) { if (big) pair_fwd_launch<128, 2048>(z, mask, lnw, eps, wb, w); else pair_fwd_launch<128, 1024>(z, mask, lnw, eps, wb, w); }
+  else if (DZ == 256) { if (big) pair_fwd_launch<256, 2048>(z, mask, lnw, eps, wb, w); else pair_fwd_launch<256, 1024>(z, mask, lnw, eps, wb, w); }
+  else { if (big) pair_fwd_launch<384, 2048>(z, mask, lnw, eps, wb, w); else pair_fwd_launch<384, 1024>(z, mask, lnw, eps, wb, w); }
   return w;
 }
 
@@ -1926,7 +1980,7 @@ torch::Tensor pwa_gate_out(torch::Tensor o, torch::Tensor msa, torch::Tensor lnw
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("ln_vg", &ln_vg, "sm100 LayerNorm + value projection: (v head-major [H,N,S*C], y [S,N,64])",
         py::arg("m"), py::arg("lnw"), py::arg("lnb"), py::arg("wv"), py::arg("eps") = 1e-5, py::arg("want_y") = true);
-  m.def("pair_fwd", &pair_fwd, "sm100 pair-side forward: LN_z folded into proj_z (tensor core on raw z) -> key mask -> softmax over j",
+  m.def("pair_fwd", &pair_fwd, "sm100 pair-side forward (d_pair 128 / 256 / 384, N <= 2048): LN_z folded into proj_z (tensor core on raw z) -> key mask -> softmax over j",
         py::arg("z"), py::arg("mask"), py::arg("lnw"), py::arg("eps"), py::arg("wb"));
   m.def("pair_bwd", &pair_bwd, "sm100 pair-side backward: softmax-bwd -> proj_z-bwd -> LN_z-bwd -> (dz, dWb, dgamma_z)",
         py::arg("z"), py::arg("w16"), py::arg("dw"), py::arg("lnw"), py::arg("eps"), py::arg("wb"), py::arg("wb_bf16") = 0, py::arg("ln_bf16") = 0);

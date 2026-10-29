@@ -16,7 +16,8 @@ dy never rounds to bf16).
 
 On sm_100a (B200) the same boundaries run `csrc/sm100/pwa_sm100.cu`: forward pair_fwd (LN_z folded into proj_z), ln_vg,
 cuBLAS bmm (o = w . v), pwa_gate_out; backward pwa_glue2 (do, dyg = dgp . Wg, dWo, dWg -- dgp stays on chip), cuBLAS bmm
-(dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd.
+(dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd. B200 inference takes N up to 2048 (pair_fwd's 2048-logit build), training up
+to 1024; the wide widths are inference only on B200 (`pwa_wide`).
 
 Automatic in auto mode; settings.pwa_train=0 disables this path. It serves a grad-enabled call of a module built with
 implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
@@ -122,17 +123,17 @@ def refusal(
     try:
         if not _enabled():
             return "settings.pwa_train / pwa_infer disables the native path"
+        cap = torch.cuda.get_device_capability(msa.device) if msa.is_cuda else None
         wide = (d_msa, d_pair, n_head, d_hidden) != (D, DZ, H, C)
-        if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden):
+        if wide and not _wide.supported(d_msa, d_pair, n_head, d_hidden, cap):
             return (
                 f"the kernels serve (d_msa={D}, d_pair={DZ}, n_head={H}, d_hidden={C}) and, wide, d_msa in {_wide.DMSA}, "
-                f"d_pair in {_wide.DPAIR}, {H} heads x d_hidden in {_wide.DHID}; got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+                f"d_pair in {_wide.DPAIR}, {H} heads x d_hidden in {_wide.DHID} (B200 also 32 at d_msa 64); got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
             )
         if msa.dtype != torch.bfloat16 or pair.dtype != torch.bfloat16:
             return f"the kernels are bf16, got {msa.dtype} / {pair.dtype}"
         if not msa.is_cuda:
             return "the input is not on a CUDA device"
-        cap = torch.cuda.get_device_capability(msa.device)
         if cap not in ((9, 0), (10, 0)):
             return "the kernels are built for sm_90a and sm_100a"
         if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
@@ -147,6 +148,14 @@ def refusal(
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
+        if wide and cap == (10, 0):  # inference only; N and S padded to 128, pair_fwd holds a row of the padded N (<= 2048)
+            if torch.is_grad_enabled() or dropout:
+                return "the sm_100a wide kernels serve inference only (no backward kernels at these widths)"
+            if n == 0 or s == 0:
+                return f"empty MSA stack, got N={n}, S={s}"
+            if -(-n // 128) * 128 > _wide.NMAX_B200:
+                return f"the sm_100a kernels need N <= {_wide.NMAX_B200} (after the pad to 128), got N={n}, S={s}"
+            return None
         if wide:  # the wide path pads the length to a multiple of 16 itself; any depth
             if cap != (9, 0):
                 return "the wide kernels are built for sm_90a"
@@ -156,8 +165,9 @@ def refusal(
         if cap == (10, 0):  # N and S are padded to 128 (_pad_b200); pair_fwd holds a row of the padded N
             if n == 0 or s == 0:
                 return f"empty MSA stack, got N={n}, S={s}"
-            if -(-n // 128) * 128 > 1024:
-                return f"the sm_100a kernels need N <= 1024 (after the pad to 128), got N={n}, S={s}"
+            nb_max = 1024 if torch.is_grad_enabled() or dropout else NMAX_INFER   # the backward pair kernel: N <= 1024
+            if -(-n // 128) * 128 > nb_max:
+                return f"the sm_100a kernels need N <= {nb_max} (after the pad to 128), got N={n}, S={s}"
             return None
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
