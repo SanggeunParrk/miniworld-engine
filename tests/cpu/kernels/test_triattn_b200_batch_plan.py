@@ -86,12 +86,13 @@ def test_smaller_device_smaller_chunks():
 
 
 def test_working_set_counts_the_padded_length():
-    """L = 720 runs at 768: its per-token bytes include the padded copies. The ending node reads and writes the caller's layout
-    directly (no transposed copies): the same working set as the starting node."""
+    """L = 720 runs at 768: its intermediates have the padded length (``plan`` counts tokens at 768), but the kernels read and write
+    the caller's unpadded tensors (no padded copies: the same bytes per token as a whole-tile length). The ending node reads and
+    writes the caller's layout directly (no transposed copies): the same working set as the starting node."""
     for kind, c, h in PATHS:
         base = tri._bytes_per_token(kind, c, h, False, False)
         padded = tri._bytes_per_token(kind, c, h, True, False)
-        assert all(p > e for p, e in zip(padded, base, strict=True))
+        assert padded == base
         assert tri._bytes_per_token(kind, c, h, False, True) == base
         assert tri._bytes_per_token(kind, c, h, True, True) == padded
         assert tri.plan(kind, 4, 720, c, h, True, B200) == tri.plan(kind, 4, 768, c, h, True, B200)
