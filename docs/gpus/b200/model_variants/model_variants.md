@@ -12,7 +12,7 @@ sm_100a: plain CUDA, no architecture-specific instruction) and cuBLAS for the pl
 
 | path | B200 kernels | what differs from AF3 and how it is served |
 |---|---|---|
-| token, bf16 inference (`interface.py`) | `augmented_attention/cuda/sm100/attn_inf.cu` (`GatedInferenceCore`) | q \| k \| v \| g in exp2 units, the bias of every block one head-major [nb 16, L, L] log2 tensor (masked keys -inf), no gating query (Chai-1): gate column +1e4; RF3's kq LayerNorm: `qk_ln_rows` with the logit scale in its affine. Any L that is a multiple of 8 (H100: of 128) |
+| token, bf16 inference (`interface.py`) | `augmented_attention/cuda/sm100/attn_inf.cu` (`GatedInferenceCore`) | q \| k \| v \| g in exp2 units, the bias of every block one head-major [nb 16, L, L] log2 tensor (masked keys -inf), no gating query (Chai-1): gate column +1e4; RF3's kq LayerNorm: `qk_ln_rows` with the logit scale in its affine. Any L that is a multiple of 8 (H100: of 128) ; the GEMM-epilogue kernels `kernels/dit_variants/cuda/dit_gemm_sm100.cu` (below) |
 | token, fp32 inference (`cuda/infer32.py`) | `attn_inf_tf32.cu` (TF32 tensor cores) | q \| k \| g + v^T, the bias in natural key order (H100's TF32 core takes it key-permuted) |
 | token, training (`cuda/train.py`) | `attn_fwd2` / `attn_dkv` / `attn_dqb` (bf16), `attn_fwd_tf32` / `attn_dkv_tf32` / `attn_dqb_tf32` (fp32) | q, k, v unscaled (column views of the q \| k \| v \| g GEMM without kq-norm), bias in natural units with the masked keys -inf, the fp32 O gated by the new row kernel `ogate_fwd`; dbias comes back in natural units. Deterministic `-DDET=1 -DDQPART=1` builds (below). Odd A: one zero sample padded in. RF3 / Chai-1 bf16 at M >= 3840: the expand GEMM with the SwiGLU in its epilogue (`gemm_swiglu2_sm100 -DSAVE_AB`) |
 | atom, all paths | `sm100_atom_local`: `lattn_fwd` / `lattn_dq` / `lattn_dkv` and the `*_tf32` twins with the slid key window inside (`slide.cuh` edge CTAs, `lslide` adds their dK / dV partials), `lbias` (pair bias) | the pair bias in natural units from `lbias` per block (per-block or shared pair norm, output channel 4 b + h); Chai-1's same-conformer mask folded in as -inf at the keys each window really reads (the slid ones for "slide": the edge CTAs read the same bias slots over their slid keys); N padded to a multiple of 128 (zero rows, the padded keys masked) |
@@ -101,7 +101,62 @@ Inference A = 5, training A = 48; token L384, atom 4096. B200 "before" is the co
 | RoseTTAFold3 atom, training | fp32 | 5.541 | (6.354 graph off) | 2.848 | 1.95 |
 | Chai-1 atom, training | fp32 | 4.770 | 5.327 | 2.338 | 2.04 |
 
-Not done / open: one-block bf16 token inference at A = 5 is latency-bound (1.26-1.35x over H100, under the 1.4x line): per block it is still the
+## GEMM-epilogue fusion of the bf16 token step (2026-10-29)
+
+`kernels/dit_variants/cuda/dit_gemm_sm100.cu` (host `cuda/dit_gemm.py`), hand CUDA sm_100a, two kernels:
+
+* `dit_glu_gemm_sm100` -- the expand GEMM with the GLU in its epilogue: h = silu(a) b, and Boltz-2's up-gated silu(a) b u (three
+  operands, the up weight concatenated under [Wg; Wv]) -- the up-gate no longer runs cuBLAS + the GLU row pass. 2-CTA
+  (`cta_group::2`) persistent over (256-row tile pair, hidden chunk) items: 128-unit chunks (N 256) for two operands, 64-unit (N 192)
+  for three; [a | b | u] double-buffered in tensor memory, h staged in shared memory, TMA stores.
+* `dit_res_gemm_sm100` -- the to_out / squeeze GEMMs with the residual and the next AdaLN in their epilogue: x += gA (o Wo^T)
+  [+ gT (h Wsq^T)] (two accumulators for a parallel block), then x written back and LN(x) f(ms) + mb for one or two AdaLNs, or the
+  stack's bf16 output. One 8-CTA cluster per 128-row tile (a CTA per 96 columns, 1-CTA MMA, the A tile multicast over the cluster);
+  the x and gate tiles come in by TMA during the main loop (cp.async where a tile's table rows wrap around L), the AdaLN tables into
+  the ring once it is done; the row's LayerNorm partials meet over distributed shared memory (`st.async`) and are combined (Chan).
+* Per step the gate and AdaLN-scale logits of the conditioning tables become sigmoid values once (`rows.cu` `sigmoid_tables`, L rows),
+  and the conditioning LayerNorm is one CUDA pass (`layernorm_rows` at 384, `ln_mod_rows` at 768) instead of cast + LN + cast.
+* Both kernels use programmatic dependent launch (`griddepcontrol`; the prologue -- barriers, tensor-memory allocation, the cluster
+  barrier, ~1 us -- overlaps the previous kernel). No spills (ptxas: GLU 158-166, RES 127-136 registers of 168).
+
+Routing (`interface._inference_b200`, measured): sequential blocks (Boltz-2) take `glu_gemm` at every M (to_out / squeeze stay cuBLAS
++ the residual row pass: the 1-CTA res_gemm with a single accumulator measured slower than them at L 384, A 5); parallel blocks (RF3,
+Chai-1) take glu_gemm + the two-accumulator res_gemm up to M = 2048 rows (one wave of 8-CTA clusters), with one block only for the
+sigmoid AdaLN (RF3), i.e. where it measured faster. Kernels a block: Boltz-2 8 -> 7, RF3 / Chai-1 9 / 8 -> 6 / 5.
+
+Measured (B200 node 2, `bench.py level=module target=dit +dit_variant=<model>`, compile, CUDA graph, bf16-mixed, A = 5, one run per
+cell; "before" = the row-pass step of the same build, `interface.FUSED_B200 = False`), ms:
+
+| model | blocks | L384 before / after | L768 before / after |
+|---|---|---|---|
+| Boltz-2 | 1 | 0.0880 / **0.0818** | 0.1393 / **0.1269** |
+| RoseTTAFold3 | 1 | 0.0860 / **0.0838** | 0.1309 (row-pass step kept) |
+| Chai-1 | 1 | 0.0799 (row-pass step kept) | 0.1269 (row-pass step kept) |
+| Boltz-2 | 24 | 1.576 / **1.508** | 2.778 / **2.597** |
+| RoseTTAFold3 | 24 | 1.594 / **1.549** | 2.631 (kept; fused measured 2.955) |
+| Chai-1 | 16 | 1.057 / **1.030** | 1.766 (kept; fused measured 2.002) |
+
+One block against H100 (0.118 / 0.108 / 0.108 ms, the table above): Boltz-2 1.44x (was 1.34x on the same day's row-pass step),
+RF3 1.29x, Chai-1 1.35x.
+
+Why not more (kernel-level, M = 1920, CUDA-graph replays of the kernel alone): a tcgen05 kernel carries ~2 us of fixed cost here
+(launch 0.8, tensor-memory alloc / dealloc 0.6, cluster barriers, the first TMA), the fp32 residual's epilogue traffic is the row
+pass's own (x read and written, the per-token tables re-read per sample), and the GEMMs are TMA-ingress bound (~55 B/clk/SM) like
+cuBLAS. res_gemm one accumulator + LN 10.8 us against cuBLAS + `res_rows` 10.6; two accumulators + two AdaLNs 18.5 against 21.4;
+glu_gemm up-gate 15.0 against 16.9, plain SwiGLU 14.4 against 14.0 (cuBLAS + glu_rows). Things measured on the way: a 2-CTA, 6-CTA
+cluster res_gemm (48 SMs at M 1920) was epilogue-bound at 30 us; one row per thread with direct global accesses serialised in L1
+(32 lines a warp instruction); a release-scope DSMEM arrive waited for the thread's in-flight cp.async (3 us; `st.async` fixed it);
+volatile shared-memory asm serialised the epilogue math; the epilogue sigmoid was MUFU-bound (hence the per-step sigmoid of the
+tables).
+
+Tests: `tests/gpu/sm100/test_b200_dit_gemm_gpu.py` (both kernels against fp32 math of the same operands, within 1.5x the unfused
+path's error; raw and pre-sigmoided tables; M 200-3840 incl. M not a multiple of 128 and tables wrapping L; a captured chain replayed
+3000 times bitwise equal) and `test_b200_dit_variant_gpu.py` (unchanged bars).
+
+Not done / open: a 2-CTA res_gemm (16-CTA cluster, 256 x 96 pairs) would cut its main loop by ~25 % and is what the sequential
+blocks' to_out / squeeze would need to pay; the RES path past one wave (L 768); fusing RF3's kq LayerNorm into the projection GEMM.
+
+Before this (2026-10-29 morning): one-block bf16 token inference at A = 5 is latency-bound (1.26-1.35x over H100, under the 1.4x line): per block it is still the
 H100 path's ~9 launches (rows, cuBLAS, the attention core); the levers are the gate and the residual rows in the attention / GEMM epilogues
 and the AF3 runner's per-step conditioning hoist across sampler steps. Boltz-2's up-gate transition (silu(g) v u) keeps cuBLAS + the GLU
 row pass (the SwiGLU GEMM has no third operand). The fp32 token training rows are TF32 GEMM-bound (1.5x over compiled PyTorch).
