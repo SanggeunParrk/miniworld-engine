@@ -1,8 +1,9 @@
 """MSAPairWeightedAveraging training on B200 beyond MiniWorld's shape at N <= 1024 (integrations.pwa_train / pwa_wide, csrc/sm100):
 
 * the widths FoldForge's predictors use: AF3 / Protenix-v1 (d_msa 64, d_pair 128, 8 x 8), Protenix-v2 (128 / 256 / 8 x 8), OpenDDE
-  (128 / 384 / 8 x 8), ESMFold2 (128 / 256 / 8 x 16) on pwa_wide_sm100.cu's glue_w / dvb_w, Chai-1 (64 / 256 / 8 x 32) on the MiniWorld
-  MSA kernels, every d_pair on pair_bwd (d_pair 128 / 256 / 384 / 512);
+  (128 / 384 / 8 x 8), ESMFold2 (128 / 256 / 8 x 16) on pwa_wide_sm100.cu's glue_w / dvb_w, IntelliFold-v2 (256 / 512 / 8 x 32) on its
+  weight-streaming glue_ws / dvb_ws, Chai-1 (64 / 256 / 8 x 32) on the MiniWorld MSA kernels, every d_pair on pair_bwd (d_pair 128 / 256 /
+  384 / 512);
 * token counts 1024 < N <= 2048, MiniWorld's width and the wide ones;
 * the module's row dropout (against references that take the kernels' keep-mask), fp32 master parameters under autocast, CUDA-graph
   replay of a training step, bitwise-repeatable gradients.
@@ -32,6 +33,7 @@ FOLDFORGE = {  # (d_msa, d_pair, d_hidden): DenseSpec msa_channel / pair_channel
     "esmfold2": (128, 256, 16),
     "chai1": (64, 256, 32),
     "miniworld": (64, 128, 32),
+    "intellifold2": (256, 512, 32),
 }
 PARAMS = ("ln_msa.weight", "ln_msa.bias", "to_value.weight", "to_gate.weight", "ln_pair.weight", "to_bias.weight", "to_out.weight")
 P_DROP = 0.15
@@ -121,29 +123,29 @@ def check(family, n, s, masked=True, p_drop=0.0, master=False):
         assert rel(a, t) <= bar * rel(b, t), (family, name, rel(a, t), rel(b, t))
 
 
-@pytest.mark.parametrize("family", ["af3", "protenix2", "opendde", "esmfold2", "chai1"])
+@pytest.mark.parametrize("family", ["af3", "protenix2", "opendde", "esmfold2", "chai1", "intellifold2"])
 @pytest.mark.parametrize(("n", "s"), [(203, 129), (384, 256)])
 def test_foldforge_widths(family, n, s):
     check(family, n, s)
 
 
 @pytest.mark.parametrize(("family", "n"), [("miniworld", 1536), ("miniworld", 2048), ("af3", 1100), ("opendde", 2048), ("esmfold2", 1536),
-                                           ("chai1", 1100)])
+                                           ("chai1", 1100), ("intellifold2", 1100), ("intellifold2", 2048)])
 def test_long_training(family, n):
     check(family, n, 128)
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2", "chai1", "miniworld"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "chai1", "miniworld", "intellifold2"])
 def test_row_dropout(family):
     check(family, 384, 256, p_drop=P_DROP)
 
 
-@pytest.mark.parametrize("family", ["af3", "opendde"])
+@pytest.mark.parametrize("family", ["af3", "opendde", "intellifold2"])
 def test_fp32_master_under_autocast(family):
-    check(family, 300, 200, masked=False, p_drop=P_DROP if family == "opendde" else 0.0, master=True)
+    check(family, 300, 200, masked=False, p_drop=P_DROP if family != "af3" else 0.0, master=True)
 
 
-@pytest.mark.parametrize("family", ["protenix2", "esmfold2", "chai1"])
+@pytest.mark.parametrize("family", ["protenix2", "esmfold2", "chai1", "intellifold2"])
 def test_repeatable_gradients(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -153,7 +155,7 @@ def test_repeatable_gradients(family):
         assert torch.equal(u, v), name
 
 
-@pytest.mark.parametrize("family", ["af3", "esmfold2"])
+@pytest.mark.parametrize("family", ["af3", "esmfold2", "intellifold2"])
 def test_cuda_graph_training_step(family):
     d_msa, d_pair, d_hidden = FOLDFORGE[family]
     m = make(d_msa, d_pair, d_hidden)
@@ -239,6 +241,8 @@ def test_refusals():
     mw = torch.empty(1, 128, 2048, 64, device=DEV, dtype=BF)
     assert pt.refusal(mw, z, 64, 128, 8, 32) is None                                    # MiniWorld width, training at N 2048
     x256 = torch.empty(1, 128, 256, 256, device=DEV, dtype=BF)
-    assert "backward" in pt.refusal(x256, z, 256, 512, 8, 32)                           # IntelliFold-v2: inference only
+    assert pt.refusal(x256, z, 256, 512, 8, 32) is None                                 # IntelliFold-v2 trains (glue_ws / dvb_ws)
+    assert pt.refusal(x256, z, 256, 512, 8, 32, dropout=True) is None
     with torch.no_grad():
         assert pt.refusal(x256, z, 256, 512, 8, 32) is None
+    assert pt.refusal(x256, z, 256, 384, 8, 32) is not None                             # d_msa 256 only with IntelliFold-v2's d_pair

@@ -350,10 +350,13 @@ def _inference_b200(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
 #   cuBLAS   dWo = dout'^T go, [dWg; dWv] = dgv^T y (fp32 out)
 #   pair_bwd dz, dWb, dgamma_z
 TRAIN_B200 = ((64, 8), (128, 8), (128, 16))  # (d_msa, d_hidden) with the wide backward kernels; 64 x 32 trains on pwa_train (MiniWorld's MSA side)
+# IntelliFold-v2 (256 / 512 / 8 x 32) trains on its own backward build (glue_ws / dvb_ws: the weights stream through a ring) and pair_bwd<512>
 
 
 def trains_b200(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
-    """The widths B200 trains: the wide backward here, or (d_msa 64, 8 x 32) on the MiniWorld kernels at any served d_pair."""
+    """The widths B200 trains: the wide backward here, (d_msa 64, 8 x 32) on the MiniWorld kernels at any served d_pair, and IntelliFold-v2."""
+    if (d_msa, d_pair, n_head, d_hidden) == INTELLIFOLD2:
+        return True
     return n_head == H and d_pair in DPAIR and ((d_msa, d_hidden) in TRAIN_B200 or (d_msa, d_hidden) == (64, 32))
 
 
