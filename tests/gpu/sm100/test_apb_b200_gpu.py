@@ -44,6 +44,38 @@ def test_pair_bias_forward_and_backward(L, heads):
     assert _rel(hs, dbias.double().sum((1, 2))) < 1e-4
 
 
+@pytest.mark.parametrize("S", [1, 2])
+@pytest.mark.parametrize("L", [128, 384, 768])
+def test_pair_bias_d256_forward_and_backward(L, S):
+    """Chai-1's width: 16 heads over a 256-wide pair (the 256-wide rings of pair_bias_fwd / pair_bias_bwd; the backward's dWf runs
+    column-wise), S samples, against fp64; the per-sample dbias planes keep their samples apart."""
+    from miniworld_engine.kernels.augmented_attention.cuda import apb
+
+    heads, dp = 16, 256
+    g = torch.Generator(device="cuda").manual_seed(L + S)
+    pair = (torch.randn(S, L, L, dp, device="cuda", generator=g) * 1.5 + 0.3).to(torch.bfloat16)
+    wf = (torch.randn(heads, dp, device="cuda", generator=g) * dp ** -0.5).to(torch.bfloat16)
+    mask = torch.rand(S, L, device="cuda", generator=g) > 0.2
+    got = apb.pair_bias(pair.view(S * L * L, dp), wf, mask, L, 1e-5, -1e30).float().view(S, heads, L, L)
+    xh = torch.nn.functional.layer_norm(pair.double(), (dp,), eps=1e-5)
+    want = torch.einsum("sijc,hc->shij", xh, wf.double())
+    keep = mask[:, None, None, :].expand_as(got)
+    assert (got[~keep] == torch.tensor(-1e30).bfloat16().float()).all()
+    assert _rel(got[keep], want[keep]) < 1e-2
+    dbias = torch.randn(S, heads, L, L, device="cuda", generator=g)
+    dz, dwf, hs = apb.pair_bias_bwd(pair.view(S * L * L, dp), dbias, wf, L, 1e-5)
+    p = pair.double().requires_grad_()
+    w = wf.double().requires_grad_()
+    torch.einsum("sijc,hc->shij", torch.nn.functional.layer_norm(p, (dp,), eps=1e-5), w).backward(dbias.double())
+    assert _rel(dz.view(S, L, L, dp), p.grad) < 1e-2
+    for s in range(S):
+        assert _rel(dz.view(S, L, L, dp)[s], p.grad[s]) < 1e-2
+    assert _rel(dwf, w.grad) < 1e-2
+    assert _rel(hs, dbias.double().sum((0, 2, 3))) < 1e-4
+    dz2, _, _ = apb.pair_bias_bwd(pair.view(S * L * L, dp), dbias, wf, L, 1e-5)
+    assert torch.equal(dz, dz2)  # (dWf here goes through atomics into one row; the module's block-partial rows are bitwise)
+
+
 GEOMETRY = {(8, 384): (48, 48), (12, 384): (32, 32), (16, 384): (24, 32), (24, 384): (16, 16), (16, 512): (32, 32)}
 SHAPES = list(GEOMETRY)          # heads -> (real head dim, head width in memory: 16 x 24 zero-padded to 32)
 
