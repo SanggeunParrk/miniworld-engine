@@ -2,7 +2,8 @@
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
 (``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
-32-channel heads, inference and training; any L >= 16, B samples per call in deterministic chunks) serve the whole module."""
+32-channel heads, inference and training, 64-channel heads for inference; any L >= 16, B samples per call in deterministic chunks)
+serve the whole module, with the model options below (bias orientation, gate / out biases; Chai-1's outputs for inference)."""
 
 import math
 from contextlib import contextmanager
@@ -66,8 +67,8 @@ class TriangleAttention(nn.Module):
         projected from the transposed pair, the orientation the queries and keys are in (the supplementary-information
         and OpenFold convention). ``False``: the bias is projected from the pair as it is and read in the transposed
         frame, i.e. the transpose of the ``True`` bias (AlphaFold 3's released code). Starting-node attention has one
-        orientation and ignores it. Training is served by the composed legs; the H100 hand-CUDA kernels serve the
-        ``False`` orientation for inference only, the B200 kernels not at all.
+        orientation and ignores it. The H100 hand-CUDA kernels serve the ``False`` orientation for inference only (training runs
+        the composed legs there); the B200 kernels serve it for inference and training.
     implementation : ImplementationType
         Implementation to use.
 
@@ -163,8 +164,8 @@ class TriangleAttention(nn.Module):
 
         self.to_value = Linear(d_pair, d_hidden, bias=False, init="glorot")
         self.to_bias = Linear(d_pair, n_head, bias=False, init="default")
-        # RoseTTAFold3 gives the gate and the out-projection a bias (``gate_bias`` / ``out_bias``): the H100 sm90 kernels serve
-        # them for inference, anything else runs ``_biased_reference``.
+        # RoseTTAFold3 gives the gate and the out-projection a bias (``gate_bias`` / ``out_bias``): the B200 kernels serve them
+        # (inference and training), the H100 sm90 kernels for inference, anything else runs ``_biased_reference``.
         self.to_gate = Linear(d_pair, d_hidden, bias=gate_bias, init="gating")
         self.to_out = Linear(d_hidden, d_pair, bias=out_bias, init="zero")
         # Chai-1: the ending node returns its update as the transposed pair has it (``untransposed_output``); the confidence head adds
@@ -378,11 +379,14 @@ class TriangleAttention(nn.Module):
         not a flag on this module."""
         variant_output = self.untransposed_output or self.dual_output
         if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
-            # RoseTTAFold3's biases, Chai-1's output variants: the H100 kernels for inference, else the torch statements
+            # RoseTTAFold3's biases, Chai-1's output variants: the B200 kernels (Chai-1's outputs for inference), the H100 kernels
+            # for inference, else the torch statements
             from miniworld_engine.integrations import triattn_h100_sm90
             from miniworld_engine.kernels.triangle_attention.cuda import h100_dh
 
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
+                if _b200.kind_of(self, pair, mask) is not None:
+                    return _b200.forward(self, pair, mask)
                 if not variant_output and triattn_h100_sm90.serves(self, pair, mask):
                     return triattn_h100_sm90.forward(self, pair, mask)
                 if h100_dh.serves(self, pair, mask):
@@ -407,8 +411,8 @@ class TriangleAttention(nn.Module):
                 raise RuntimeError(
                     "Anthropic TriangleAttention requires eval() when dropout is enabled"
                 )
-        # the B200 kernels project the ending node's bias from the transposed pair only (transposed_bias=True)
-        if not self._bias_untransposed and _b200.kind_of(self, pair, mask) is not None:
+        # the B200 kernels (either bias orientation of the ending node)
+        if _b200.kind_of(self, pair, mask) is not None:
             with _nvtx_range(self.nvtx_name, self.nvtx_enabled):
                 return _b200.forward(self, pair, mask)
         from miniworld_engine.integrations import triattn_h100, triattn_h100_sm90

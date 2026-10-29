@@ -3,7 +3,13 @@
 //
 //   q | k | v | g, bias = LN(x) . [Wq; Wk; Wv; Wg; Wb]^T   tri_wfront<C, ND>  2-CTA clusters; bias head-major, masked keys = finfo(bf16).min
 //   o = attention(q, k, v, bias)                          triattn_fwd
-//   out = x + drop o ((sigmoid(g) o o) . Wo^T)            tri_wtail<C>       without dropout the residual enters the accumulator by MMA
+//   out = x + drop o ((sigmoid(g) o o) . Wo^T [+ bo])     tri_wtail<C>       without dropout the residual enters the accumulator by MMA
+//
+// Model options (FoldForge's families): RoseTTAFold3's gate / out-projection biases (bg added to g in the front's drain, bo to the
+// accumulator in the tail's drain, both in fp32 before the one rounding); AlphaFold 3's ending-node bias orientation (`BT`: the bias of
+// the pair as it is, i.e. row (b, j, k) of the attention layout writes bias[b, h, k, j], its key j); Chai-1's output variants are host
+// compositions of the tail (its residual / output orientation, or two tails for the dual output).  Heads of 64 channels (HDp = 64 heads)
+// take the separate core triattn_dh64_sm100.cu.
 //
 // Backward (b200_triattn.WideTrain): tri_scale_rows (dy_s = dy o drop, with dropout) -> tri_wgbwd<C> (do, dg, u = sigmoid(g) o o,
 // delta) -> the core's backward (dq, dk, dv, dbias) -> tri_db_rows -> tri_whbwd<C> (dx and [xhat | 1], from the row statistics
@@ -156,7 +162,8 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
     const __grid_constant__ CUtensorMap ymap,                                               // out [R][C], box (32, 32), 64B swizzle
     const __nv_bfloat16* __restrict__ X,                                                    // residual [R][C] (dropout path)
     const __nv_bfloat16* __restrict__ DROP, int L,          // dropout scale [B][L (the row's last index)][C] or nullptr
-    const int TRANS) {                                      // 1: x / out in the ending node's layout (see load_rows)
+    const int TRANS,                                        // 1: x / out in the ending node's layout (see load_rows)
+    const float* __restrict__ OB) {                         // out-projection bias [C] fp32 (inside the dropout), or nullptr
   using T = WT<C>;
   constexpr int CO = T::CO, KX = CO / 64;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -302,6 +309,10 @@ __global__ void __launch_bounds__(448, 1) tri_wtail_sm100(int ntiles, int KC, in
         }
         tmem_wait_ld();
         if (k == CO / 32 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(ae + acc); }
+        if (OB != nullptr) {                                         // the column's bias (one address across the warp)
+#pragma unroll
+          for (int i = 0; i < 32; ++i) v[i] += __ldg(OB + c0 + k * 32 + i);
+        }
         if (DROP != nullptr) {
           const uint4* sp = reinterpret_cast<const uint4*>(DROP + ((row / ((long)L * L)) * L + row % L) * C + c0 + k * 32);
 #pragma unroll
@@ -418,7 +429,9 @@ template <int C, int ND> struct WF {
   static_assert(NW >= 2, "front W stages");
 };
 
-template <int C, int ND, bool TRANS>   // TRANS: x in the ending node's layout (see load_rows); compile-time (a runtime flag spilled)
+// TRANS: x in the ending node's layout (see load_rows); compile-time (a runtime flag spilled).  GBIAS: the gate bias is added in the
+// drain (built with ND = 4 only: at ND = 8's 96 registers it spilled)
+template <int C, int ND, bool TRANS, bool GBIAS>
 __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles, int L, int HDp, int NH, int NBR, float eps,
     const __grid_constant__ CUtensorMap xmap,                                   // x [R][C], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,                                   // W [4 HDp + 16][C], box (64, NBR / 2), 128B swizzle
@@ -427,7 +440,9 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
     const __nv_bfloat16* __restrict__ X,                                        // x [R][C] (row statistics, one x buffer)
     const float* __restrict__ LNW, const float* __restrict__ LNB, const bool* __restrict__ MASK,
     __nv_bfloat16* __restrict__ BIAS,                                           // [B][NH][L][L]
-    float2* __restrict__ STATS) {                                               // (mean, rstd) [R] for the backward, or nullptr
+    float2* __restrict__ STATS,                                                 // (mean, rstd) [R] for the backward, or nullptr
+    const float* __restrict__ GB,                                               // gate bias [HDp] fp32 (padded layout; GBIAS)
+    const int BT) {                                                             // 1: bias[b, h, k, j] from row (b, j, k) (see the header)
   using T = WF<C, ND>;
   extern __shared__ __align__(1024) unsigned char raw[];
   if ((sa(raw) & 1023u) != 0u) __trap();                                              // SMEM carries no alignment slack
@@ -682,8 +697,11 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
             const int kx = (int)(row % L);
             const long bj = row / L;
             const int j = (int)(bj % L), bb = (int)(bj / L);
-            const bool keep = MASK == nullptr || MASK[(long)bb * L + kx];
-            for (int h = 0; h < NH; ++h) BIAS[(((long)bb * NH + h) * L + j) * L + kx] = keep ? __float2bfloat16_rn(v[h]) : lo;
+            // BT: this row's bias is bias[k][j] of the attention's (query, key) frame, its key j; the stores of a warp are then
+            // strided by L (32 sectors, merged in L2)
+            const int qi = BT ? kx : j, ki = BT ? j : kx;
+            const bool keep = MASK == nullptr || MASK[(long)bb * L + ki];
+            for (int h = 0; h < NH; ++h) BIAS[(((long)bb * NH + h) * L + qi) * L + ki] = keep ? __float2bfloat16_rn(v[h]) : lo;
           }
           continue;
         }
@@ -694,6 +712,7 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
           continue;
         }
         const int ten = b / NBT, c0 = (b % NBT) * NBR;
+        const float* gbp = GBIAS && ten == 3 ? GB + c0 : nullptr;
         for (int rd = hv; rd < NRD; rd += ND / 4) {            // two 32-column slices a round: one TMEM wait, one fence, one commit
           const int ch = 2 * rd;
           const bool two = ch + 1 < NSL;
@@ -702,6 +721,14 @@ __global__ void __launch_bounds__((10 + ND) * 32, 1) tri_wfront_sm100(int ntiles
           if (two) tmem_ld32(tmem_at(tmem + acc * 256 + ch * 32 + 32, qq * 32, 0), v[1]);
           tmem_wait_ld();
           if (rd + ND / 4 >= NRD) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_lead_relaxed(bae + 8 * acc); }
+          if (GBIAS && gbp != nullptr) {                         // g + gate bias, in fp32 before the bf16 rounding (one address
+#pragma unroll                                                   // across the warp: broadcast loads)
+            for (int i = 0; i < 32; ++i) v[0][i] += __ldg(gbp + ch * 32 + i);
+            if (two) {
+#pragma unroll
+              for (int i = 0; i < 32; ++i) v[1][i] += __ldg(gbp + ch * 32 + 32 + i);
+            }
+          }
           if (lane == 0) bulk_wait_read<T::FB == 4 ? 1 : 0>();  // (4 buffers) all but the last round read: this round's two are free
           __syncwarp();
 #pragma unroll
@@ -756,19 +783,21 @@ __global__ void __launch_bounds__(256) tri_scale_rows(const __nv_bfloat16* __res
 }
 
 // ---- dbias fp32 [B][H][L][L] -> rows [R][64] bf16 (row (b, j, k): its H heads, then zeros), the head backward's A block
+// bt: the bias orientation of tri_wfront's BT (row (b, j, k) produced bias[b, h, k, j]: its gradient is dbias[b, h, k, j])
 __global__ void __launch_bounds__(256) tri_db_rows(const float* __restrict__ DB, __nv_bfloat16* __restrict__ OUT, long ldo, int H, int L,
-                                                   long R) {
+                                                   long R, int bt) {
   const long row = (long)blockIdx.x * blockDim.x + threadIdx.x;
   if (row >= R) return;
   const int kx = (int)(row % L);
   const long bj = row / L;
   const int j = (int)(bj % L), b = (int)(bj / L);
+  const long at = bt ? (long)kx * L + j : (long)j * L + kx;
   uint32_t w[32];
 #pragma unroll
   for (int i = 0; i < 32; ++i) {
     const int h0 = 2 * i, h1 = 2 * i + 1;
-    const float a = h0 < H ? DB[(((long)b * H + h0) * L + j) * L + kx] : 0.f;
-    const float c = h1 < H ? DB[(((long)b * H + h1) * L + j) * L + kx] : 0.f;
+    const float a = h0 < H ? DB[((long)b * H + h0) * L * L + at] : 0.f;
+    const float c = h1 < H ? DB[((long)b * H + h1) * L * L + at] : 0.f;
     w[i] = pk2(a, c);
   }
   uint4* dst = reinterpret_cast<uint4*>(OUT + row * ldo);
@@ -1320,7 +1349,7 @@ torch::Tensor tri_gate_mul_h(torch::Tensor g, torch::Tensor o) {
 // ---- fused wide tail: g [R, HDp] (dense rows at a 16-byte-multiple stride), o [R, HDp], x [R, C], wo [C, HDp] -> x + (sigmoid(g) o o) . wo^T
 template <int C>
 static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const torch::Tensor& x, const torch::Tensor& wo, torch::Tensor& out,
-                         const __nv_bfloat16* drop, long L, bool trans) {
+                         const __nv_bfloat16* drop, long L, bool trans, const float* ob) {
   using T = WT<C>;
   const long R = x.size(0), HDp = o.size(1);
   auto m2 = [&](const torch::Tensor& t, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t b0, uint32_t b1, CUtensorMapSwizzle sw, const char* w) {
@@ -1335,13 +1364,15 @@ static void launch_wtail(const torch::Tensor& g, const torch::Tensor& o, const t
   const int ntiles = (int)(R / WBM);
   tri_wtail_sm100<C><<<std::min(ntiles * T::NH, num_sms(x.device().index())), 448, T::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       ntiles, (int)(HDp / 64), drop == nullptr ? 1 : 0, gm, om, wm, xm, ym, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
-      drop, (int)L, trans ? 1 : 0);
+      drop, (int)L, trans ? 1 : 0, ob);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-// out_: a contiguous [R, C] bf16 tensor (or a view of one: a chunk's rows of a batch's output) to write into, or empty (fresh)
+// out_: a contiguous [R, C] bf16 tensor (or a view of one: a chunk's rows of a batch's output) to write into, or empty (fresh); it may be
+// x itself (each item reads its own rows / columns of x before it writes them: the dual output's second tail runs in place)
+// ob: the out-projection bias, fp32 [C], or empty
 torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_,
-                          bool trans) {
+                          bool trans, torch::Tensor ob) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(o.scalar_type() == torch::kBFloat16 && o.is_contiguous() && o.dim() == 2 && o.size(0) == R && o.size(1) % 64 == 0, "o: [R, HDp]");
@@ -1358,24 +1389,30 @@ torch::Tensor tri_wtail_h(torch::Tensor g, torch::Tensor o, torch::Tensor x, tor
   if (given) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == R * C && out_.device() == x.device(),
                          "out: contiguous bf16 with R x C elements");
   auto out = given ? out_.view({R, C}) : torch::empty_like(x);
+  const float* obp = nullptr;
+  if (ob.defined() && ob.numel() > 0) {
+    TORCH_CHECK(ob.scalar_type() == torch::kFloat32 && ob.is_contiguous() && ob.numel() == C && ob.device() == x.device(), "ob: fp32 [C]");
+    obp = ob.data_ptr<float>();
+  }
   switch (C) {
-    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L, trans); break;
-    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L, trans); break;
-    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L, trans); break;
-    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L, trans); break;
-    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L, trans); break;
-    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L, trans); break;
-    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L, trans); break;
-    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L, trans); break;
+    case 64: launch_wtail<64>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 128: launch_wtail<128>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 192: launch_wtail<192>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 256: launch_wtail<256>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 320: launch_wtail<320>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 384: launch_wtail<384>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 448: launch_wtail<448>(g, o, x, wo, out, dp, L, trans, obp); break;
+    case 512: launch_wtail<512>(g, o, x, wo, out, dp, L, trans, obp); break;
     default: TORCH_CHECK(false, "tri_wtail: C must be a multiple of 64 in 64 .. 512");
   }
   return out;
 }
 
 // ---- fused wide front: x [R, C], LN w / b [C], W [4 HDp + 16, C] bf16 -> (q, k, v, g [R, HDp] bf16, bias [B, NH, L, L] bf16)
-template <int C, int ND, bool TR>
+template <int C, int ND, bool TR, bool GBIAS>
 static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
-                             long HDp, long NH, const bool* mp, long L, long NBR, std::vector<torch::Tensor>& outs, float2* stp) {
+                             long HDp, long NH, const bool* mp, long L, long NBR, std::vector<torch::Tensor>& outs, float2* stp,
+                             const float* gbp, int bt) {
   constexpr bool trans = TR;
   using T = WF<C, ND>;
   const long R = x.size(0);
@@ -1396,34 +1433,39 @@ static void launch_wfront_nd(const torch::Tensor& x, const torch::Tensor& lw, co
   static int ncl[16] = {0};                               // co-resident 2-CTA clusters (the persistent grid must be one wave)
   const int dev = x.device().index();
   if (ncl[dev] == 0) {
-    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND, TR>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
+    C10_CUDA_CHECK(cudaFuncSetAttribute(tri_wfront_sm100<C, ND, TR, GBIAS>, cudaFuncAttributeMaxDynamicSharedMemorySize, T::SMEM));
     cfg.gridDim = dim3(num_sms(dev) & ~1);
-    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND, TR>), &cfg));
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&ncl[dev], reinterpret_cast<const void*>(&tri_wfront_sm100<C, ND, TR, GBIAS>), &cfg));
     TORCH_CHECK(ncl[dev] >= 1, "tri_wfront: no 2-CTA cluster fits");
   }
   cfg.gridDim = dim3(std::min(2 * ncl[dev], ntiles));
-  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND, TR>, ntiles, (int)L, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
+  C10_CUDA_CHECK(cudaLaunchKernelEx(&cfg, tri_wfront_sm100<C, ND, TR, GBIAS>, ntiles, (int)L, (int)HDp, (int)NH, (int)NBR, (float)eps, xm, wm, wb,
                                     Maps4{{om[0], om[1], om[2], om[3]}}, reinterpret_cast<const __nv_bfloat16*>(x.data_ptr<at::BFloat16>()),
                                     (const float*)lw.data_ptr<float>(), (const float*)lb.data_ptr<float>(), mp,
-                                    reinterpret_cast<__nv_bfloat16*>(outs[4].data_ptr<at::BFloat16>()), stp));
+                                    reinterpret_cast<__nv_bfloat16*>(outs[4].data_ptr<at::BFloat16>()), stp, gbp, bt));
 }
 
 template <int C>
 static void launch_wfront(const torch::Tensor& x, const torch::Tensor& lw, const torch::Tensor& lb, double eps, const torch::Tensor& W,
-                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp, bool trans) {
+                          long HDp, long NH, const bool* mp, long L, std::vector<torch::Tensor>& outs, float2* stp, bool trans,
+                          const float* gbp, int bt) {
   long NBR = 0;                                           // rows per output block: the largest divisor of HDp <= 256, a multiple of 32
   for (long d = 256; d >= 32 && !NBR; d -= 32) if (HDp % d == 0) NBR = d;
-  if (C <= 256 && NBR >= 128) {
-    if (trans) launch_wfront_nd<C, 8, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
-    else launch_wfront_nd<C, 8, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+  if (gbp != nullptr) {                                   // the gate bias: the four-warp drain (see tri_wfront_sm100)
+    if (trans) launch_wfront_nd<C, 4, true, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
+    else launch_wfront_nd<C, 4, false, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
+  } else if (C <= 256 && NBR >= 128) {
+    if (trans) launch_wfront_nd<C, 8, true, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
+    else launch_wfront_nd<C, 8, false, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
   } else {
-    if (trans) launch_wfront_nd<C, 4, true>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
-    else launch_wfront_nd<C, 4, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp);
+    if (trans) launch_wfront_nd<C, 4, true, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
+    else launch_wfront_nd<C, 4, false, false>(x, lw, lb, eps, W, HDp, NH, mp, L, NBR, outs, stp, gbp, bt);
   }
 }
 
+// gb: the gate bias in the padded HDp layout, fp32 [HDp], or empty; bt: the bias orientation (see the header)
 std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch::Tensor b, double eps, torch::Tensor W, int64_t NH,
-                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats, bool trans) {
+                                        torch::Tensor mask, int64_t B, int64_t L, torch::Tensor stats, bool trans, torch::Tensor gb, bool bt) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.dim() == 2, "x: [R, C] bf16");
   const long R = x.size(0), C = x.size(1);
   TORCH_CHECK(R == B * L * L && L % WBM == 0, "rows = B*L*L, L % 128");
@@ -1439,18 +1481,23 @@ std::vector<torch::Tensor> tri_wfront_h(torch::Tensor x, torch::Tensor w, torch:
   const bool* mp = nullptr;
   torch::Tensor mk;
   if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  const float* gbp = nullptr;
+  if (gb.defined() && gb.numel() > 0) {
+    TORCH_CHECK(gb.scalar_type() == torch::kFloat32 && gb.is_contiguous() && gb.numel() == HDp && gb.device() == x.device(), "gb: fp32 [HDp]");
+    gbp = gb.data_ptr<float>();
+  }
   auto opt = x.options();
   std::vector<torch::Tensor> outs = {torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt), torch::empty({R, HDp}, opt),
                                      torch::empty({R, HDp}, opt), torch::empty({B, NH, L, L}, opt)};
   switch (C) {
-    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
-    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans); break;
+    case 64: launch_wfront<64>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 128: launch_wfront<128>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 192: launch_wfront<192>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 256: launch_wfront<256>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 320: launch_wfront<320>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 384: launch_wfront<384>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 448: launch_wfront<448>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
+    case 512: launch_wfront<512>(x, lw, lb, eps, W, HDp, NH, mp, L, outs, stp, trans, gbp, bt ? 1 : 0); break;
     default: TORCH_CHECK(false, "tri_wfront: C must be a multiple of 64 in 64 .. 512");
   }
   return outs;
@@ -1471,7 +1518,7 @@ torch::Tensor tri_scale_rows_h(torch::Tensor dy, torch::Tensor drop, int64_t L, 
   return out;
 }
 
-torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L) {
+torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int64_t L, bool bt) {
   TORCH_CHECK(db.is_cuda() && db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.dim() == 4 && db.size(0) == B, "db: fp32 [B, H, L, L]");
   const int H = (int)db.size(1);
   TORCH_CHECK(H <= 64, "heads <= 64");
@@ -1479,7 +1526,7 @@ torch::Tensor tri_db_rows_h(torch::Tensor db, torch::Tensor out, int64_t B, int6
   TORCH_CHECK(out.scalar_type() == torch::kBFloat16 && out.dim() == 2 && out.size(0) == R && out.size(1) == 64 && out.stride(1) == 1 &&
               out.stride(0) % 8 == 0, "out: [R, 64] bf16 view, dense rows at a 16-byte-multiple stride");
   tri_db_rows<<<(unsigned)((R + 255) / 256), 256, 0, at::cuda::getCurrentCUDAStream()>>>(db.data_ptr<float>(),
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R);
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), out.stride(0), H, (int)L, R, bt ? 1 : 0);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1636,7 +1683,7 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_scale_rows", &tri_scale_rows_h, "dy o drop[b, j, :]", py::arg("dy"), py::arg("drop"), py::arg("L"), py::arg("trans"));
   m.def("tri_db_rows", &tri_db_rows_h, "dbias [B, H, L, L] fp32 -> rows [R, 64] bf16 (into a view)", py::arg("db"), py::arg("out"),
-        py::arg("B"), py::arg("L"));
+        py::arg("B"), py::arg("L"), py::arg("bt"));
   m.def("tri_wgbwd", &tri_wgbwd_h, "wide gate backward: (do, dg, u, delta); dg into a view", py::arg("dys"), py::arg("g"), py::arg("o"),
         py::arg("wot"), py::arg("dg_out"), py::arg("B"), py::arg("L"), py::arg("trans"));
   m.def("tri_whbwd", &tri_whbwd_h, "wide head backward: (dx, xhat | 1)", py::arg("D"), py::arg("x"), py::arg("dy"), py::arg("lnw"),
@@ -1645,9 +1692,9 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("lnb"), py::arg("dwo"), py::arg("NH"), py::arg("hd"), py::arg("fp32_out"));
   m.def("tri_wfront", &tri_wfront_h, "fused LN + [q | k | v | g | bias] projections for any width",
         py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("W"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"),
-        py::arg("stats"), py::arg("trans"));
+        py::arg("stats"), py::arg("trans"), py::arg("gb"), py::arg("bt"));
   m.def("tri_wtail", &tri_wtail_h, "fused x + (sigmoid(g) o o) . Wo^T for any width", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"),
-        py::arg("drop"), py::arg("L"), py::arg("out"), py::arg("trans"));
+        py::arg("drop"), py::arg("L"), py::arg("out"), py::arg("trans"), py::arg("ob"));
   m.def("tri_ln_rows", &tri_ln_rows_h, "LayerNorm over C (64 .. 512) rows: bf16 -> bf16", py::arg("x"), py::arg("w"), py::arg("b"), py::arg("eps"), py::arg("xcopy"));
   m.def("tri_bias_heads", &tri_bias_heads_h, "bias columns of the projection -> head-major masked bias [B, NH, L, L]",
         py::arg("P"), py::arg("cb"), py::arg("NH"), py::arg("mask"), py::arg("B"), py::arg("L"));
