@@ -243,7 +243,7 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
         return False
     if compute_dtype is not None and compute_dtype != single.dtype:
         return False
-    if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] < 8:
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[2] < 1:
         return False
     d = single.shape[-1]
     if (a.n_head, d) not in LAYOUTS or (
@@ -291,12 +291,15 @@ def serves(module, single, cond, pair, compute_dtype=None, extra=None):
 
 
 def serves_extra_bias(single, extra) -> bool:
-    """The [L, L] extra pair bias is folded into the Hopper (BF16 and FP32) CUDA path's hoisted bias, and nowhere else."""
+    """The [L, L] extra pair bias is folded into the hoisted bias of the Hopper and Blackwell (BF16 and FP32) CUDA paths (B200: added
+    to the cached [H, L, L] log2-unit bias once per pair / extra, so the solver steps read it for free)."""
     return (
         single.is_cuda
         and single.dtype in (torch.bfloat16, torch.float32)
-        and torch.cuda.get_device_capability(single.device) == (9, 0)
+        and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))
+        and extra.ndim == 2
         and tuple(extra.shape) == (single.shape[2], single.shape[2])
+        and extra.dtype in (torch.bfloat16, torch.float32)
     )
 
 
@@ -342,7 +345,8 @@ def _infer(
 ) -> torch.Tensor:
     """``weights``: WEIGHTS, then QK_WEIGHTS when the block has QK-norm (eq / ek its RMSNorm eps; unused otherwise).
 
-    ``extra``: an [L, L] logit bias for every head (Hopper CUDA path only; ``serves`` rejects it elsewhere)."""
+    ``extra``: an [L, L] logit bias for every head (H100: folded by the native step; B200: added to the hoisted bias, which is
+    cached per pair, mask and extra)."""
     if torch.cuda.get_device_capability(single.device) == (9, 0):
         from miniworld_engine.integrations.token_dit_train import _tf32
         from miniworld_engine.kernels.conditioned_transition import cuda
@@ -407,7 +411,7 @@ def _infer(
         assert (
             mask is not None
         )  # off sm_90 ``update`` fills a missing mask with all-True
-        pinned = (pair, mask)  # the cache entry below keeps the caller's tensors alive
+        pinned = (pair, mask, extra)  # the cache entry below keeps the caller's tensors alive
         bkey = _capture.scoped(
             (
                 pair.data_ptr(),
@@ -416,6 +420,11 @@ def _infer(
                 pair.stride(),
                 mask.data_ptr(),
                 mask._version,
+                *(
+                    ()
+                    if extra is None
+                    else (extra.data_ptr(), extra._version, tuple(extra.shape), extra.stride(), extra.dtype)
+                ),
             )
         )
         hit = runner.__dict__.get("_bias_cache")
@@ -431,6 +440,15 @@ def _infer(
                     mask.to(torch.bool), (0, L8 - L), value=False
                 )
             bias = runner.hoist(pair.contiguous(), mask)
+            if extra is not None:
+                # the [L, L] logit term for every head, in the bias's log2 units: one add, rounded once into the bias's dtype
+                # (padded keys stay -inf; the padded query rows are dropped)
+                e = extra if L8 == L else torch.nn.functional.pad(extra, (0, L8 - L, 0, L8 - L))
+                if getattr(runner, "_bias_perm", False):  # a key-permuted bias (the H100 TF32 core's layout)
+                    from miniworld_engine.kernels.conditioned_transition.cuda import key_perm
+
+                    e = e[:, key_perm(L8, e.device)]
+                bias.add_(e.view(1, L8, L8), alpha=1.4426950408889634)
             if bkey is not None:
                 runner._bias_cache = (bkey, bias, pinned)
         if L8 == L:

@@ -89,8 +89,8 @@ class DiTBlock(nn.Module):
         """AF3 Alg. 23; each part returns its residual output (stream in, stream out).
 
         ``extra_pair_bias`` [L, L] is added to every head's attention logits, on top of the pair's own bias (the
-        structural-token family's relation matrix). The Hopper BF16 CUDA path folds it into the hoisted bias; every other call
-        runs the composed path, where the term is added to the attention bias (``AugmentedAttentionPairBias``'s
+        structural-token family's relation matrix). The H100 and B200 CUDA paths (bf16 and fp32, inference and training) add it to
+        the block's bias, with a gradient in training; every other call runs the composed path, where the term is added to the attention bias (``AugmentedAttentionPairBias``'s
         ``extra_pair_bias``), so the portable attention kernels and the PyTorch statements serve it in any dtype, with a
         gradient.
 
@@ -100,7 +100,7 @@ class DiTBlock(nn.Module):
         key_mask, shared = _shared_key_mask(mask)
         if shared and _h100.serves(self, single, cond, pair, compute_dtype, extra_pair_bias):
             return _h100.update(self, single, cond, pair, key_mask, extra_pair_bias)
-        # the H100 fused training block takes the term (folded into its bias); the other fused blocks do not: skipped, never silently dropping it
+        # the H100 / B200 fused training blocks take the term (added to their bias); the batched block does not: skipped, never silently dropping it
         if shared and _train.serves(self, single, cond, pair, key_mask, compute_dtype, extra_pair_bias):
             return _train.block(self, single, cond, pair, key_mask, compute_dtype, extra_pair_bias)
         if extra_pair_bias is None:

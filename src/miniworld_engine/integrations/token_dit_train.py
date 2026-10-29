@@ -92,12 +92,12 @@ TRN = (
 def serves(module, single, cond, pair, mask, compute_dtype=None, extra=None) -> bool:
     if extra is not None and not (
         single.is_cuda
-        and _sm90(single.device)
+        and torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))
         and extra.ndim == 2
         and tuple(extra.shape) == (single.shape[2], single.shape[2])
         and extra.dtype in (BF, torch.float32)
     ):
-        return False   # the [L, L] logit term is folded into the H100 block's bias GEMM output; nowhere else
+        return False   # the [L, L] logit term is added to the block's bias (H100 log2 units, B200 natural units); nowhere else
     if (not settings.current().token_dit_train) or not torch.is_grad_enabled():
         return False
     if settings.current().force_portable_kernels:
@@ -771,8 +771,8 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
         T.pair_ln(p2, ph, pst, EPS)
         # head-major bias, Wf = Wb diag(wp): natural units for sm_100a, log2 units (and key-permuted for the TF32 core) for sm_90a
         bias = mm(W["Wf_l2"] if h100 else W["Wf_at"], ph.t()).view(H, L, L)
-        if extra is not None:   # an [L, L] logit term for every head, in the bias's log2 units (the H100 block only): one add
-            bias.add_(extra.view(1, L, L), alpha=LOG2E)
+        if extra is not None:   # an [L, L] logit term for every head, in the bias's units (H100 log2, B200 natural): one add
+            bias.add_(extra.view(1, L, L), alpha=LOG2E if h100 else 1.0)
     else:  # B200 fp32: LN(pair) folded straight into the bias, fp32 FMAs, key mask as -inf; LN(pair) not kept
         ph = pair.new_empty(0, dpw, dtype=at)
         bias = torch.empty(H, L, L, device=dev)
@@ -785,6 +785,8 @@ def _fwd_body(single, cond, pair, mask, params, qk, eq, ek, fp32, H, psb=False, 
             L,
             EPS,
         )
+        if extra is not None:   # natural units; the masked key columns stay -inf
+            bias.add_(extra.view(1, L, L))
     if psb:
         km = T.train_keymask90(mask, qn, A, L, False)[0]
         og, LSE = sm90.forward_psb(qn, kn, vc, bias, km, A, L, qkvg, H, DH)  # sigmoid(g) o, no O
