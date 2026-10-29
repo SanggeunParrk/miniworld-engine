@@ -115,6 +115,7 @@ void local_attn_fwd_sm90(const __grid_constant__ CUtensorMap mq,
 // sample's P is formed. Warp 16 issues the TMA loads (3 stages, refilled when a sample's MMAs commit) and the MMAs.
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
+#include "slide.cuh"
 using namespace s100;
 
 constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QN = 128, KN = 224, NST = 3, BSTR = 33;
@@ -134,8 +135,9 @@ DEVI void tmem_st16z(uint32_t taddr) {
 extern "C" __global__ void __launch_bounds__(544, 1)
 local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ CUtensorMap tm_k, const __grid_constant__ CUtensorMap tm_v,
                   const __grid_constant__ CUtensorMap tm_o, const float* __restrict__ gbias, const uint8_t* __restrict__ kmask,
-                  float* __restrict__ LSE, int N, int A, int nwin, int SP) {
+                  float* __restrict__ LSE, int N, int A, int nwin, int SP, int SPE) {
   extern __shared__ __align__(1024) uint8_t sm[];
+  __shared__ int sred[32];
   const uint32_t su = smem_u32(sm);
   uint64_t* bars = reinterpret_cast<uint64_t*>(sm + O_BAR);
   uint64_t *full = bars, *sready = bars + NST, *tready = bars + NST + 2, *oready = bars + NST + 3, *empty = bars + NST + 4;
@@ -143,11 +145,17 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   float* sbias = reinterpret_cast<float*>(sm + O_B);
   float* red = reinterpret_cast<float*>(sm + O_R);                   // [kind 2][parity 2][warp 16][lane 32]: row max / row sum partials
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int pair = blockIdx.x / SP, part = blockIdx.x - pair * SP;
-  const int jc = pair >> 2, h = pair & 3;
-  const int q0 = 128 * jc, kb = q0 - KOFF;
-  const int a_lo = (int)((long)A * part / SP), a_hi = (int)((long)A * (part + 1) / SP);
-  const int nit = a_hi - a_lo;
+  const int nedge = 2 * NH * SPE;                                    // the slid window's edge CTAs come first (slide.cuh; SPE = 0: none)
+  const bool edge = (int)blockIdx.x < nedge;
+  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? 0 : nedge);
+  const int pair = bx / sp, part = bx - pair * sp;
+  const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
+  const int nr = SPE > 0 ? slide_nreal(kmask, N, sred) : N;
+  int wf = 0, kbe = 0;
+  const bool live = !edge || slide_group(jc, nr, wf, kbe);
+  const int q0 = edge ? 32 * wf : 128 * jc, kb = edge ? kbe : q0 - KOFF;
+  const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);
+  const int nit = live ? a_hi - a_lo : 0;
   const bool ctl = warp == 16;                                       // TMA + MMA warp (no TMEM lanes)
 
   if (tid == 0) {
@@ -158,9 +166,11 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   }
   if (warp == 0) tmem_alloc(smem_u32(tptr), 512);
   const int qd = warp & 3, qt = warp >> 2;
-  const int wq = 4 * jc + qd;
+  const int wq = (q0 >> 5) + qd;
+  const int qdb = edge ? 0 : qd;                                     // the window's first band cell (an edge CTA: its keys start the range)
+  const bool keep = SPE == 0 || (edge ? slide_mine(jc, wq, nr) : !slide_moved(wq, nr));   // this CTA writes the window's O / LSE
   if (!ctl) {
-    const int key = 32 * wq - KOFF + 32 * qt + lane;
+    const int key = kb + 32 * qdb + 32 * qt + lane;
     const bool kok = key >= 0 && key < N && (kmask == nullptr || kmask[key]);
     const float* src = gbias + (((size_t)h * nwin + (wq < nwin ? wq : 0)) * WQ) * WK + 32 * qt + lane;
 #pragma unroll 8
@@ -225,10 +235,11 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
   } else {
 
   const uint32_t tl = tm + ((uint32_t)(32 * qd) << 16);
-  const int x0 = 32 * qd + 32 * qt;
+  const int x0 = 32 * qdb + 32 * qt;
   const float* sb = sbias + warp * 32 * BSTR + lane;
   const int qrow = q0 + 32 * qd + lane;
   auto drain = [&](int itd, float mm) {                              // O / l (band quarters 0, 1) and LSE (quarter 2) of sample itd
+    if (!keep) return;
     const int par = itd & 1, a = a_lo + itd;
     const float* rsum = red + ((1 * 2 + par) * 16) * 32;
     const float lt = rsum[qd * 32 + lane] + rsum[(qd + 4) * 32 + lane] + rsum[(qd + 8) * 32 + lane] + rsum[(qd + 12) * 32 + lane];
@@ -297,7 +308,7 @@ local_attn_fwd(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__
     }
     rsum[warp * 32 + lane] = l;
     tmem_st16(tl + 224 * b + x0 / 2, pw);
-    if (qt < 3) tmem_st16z(tl + 224 * b + (qt < qd ? 16 * qt : 16 * qt + 64));
+    if (qt < 3) tmem_st16z(tl + 224 * b + (qt < qdb ? 16 * qt : 16 * qt + 64));
     if (it >= 1) {                                                   // the previous sample's O (its MMAs ran during this softmax)
       mbar_wait(oready, (it - 1) & 1);
       tc_fence_after();
