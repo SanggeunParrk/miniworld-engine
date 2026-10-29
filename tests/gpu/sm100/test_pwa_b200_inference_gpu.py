@@ -7,7 +7,7 @@
 
 Each against an fp32 copy of the module: the update within 1.15x of the module's own bf16 PyTorch statements' error (the bar of
 tests/gpu/any/test_pwa_train_gpu.py), the call served by the kernels (not the PyTorch fallback), CUDA-graph replay, and the refusals
-(training at the wide widths, N > 2048, training N > 1024)."""
+(an unbuilt width, N > 2048). Training at these widths and N: test_pwa_b200_training_gpu.py."""
 import copy
 
 import pytest
@@ -132,13 +132,13 @@ def test_refusals():
     dims = (128, 256, 8, 16)
     with torch.no_grad():
         assert pt.refusal(x, z, *dims) is None
-        assert pt.refusal(x, z, *dims, dropout=True) is not None
+        assert pt.refusal(x, z, *dims, dropout=True) is None                        # the row dropout: served (training)
         assert pt.refusal(x[:, :, :1], z, 128, 256, 8, 32) is not None              # d_msa 128 x 32: not built
         big = torch.empty(1, 1, 2049, 128, device=DEV, dtype=BF)
         assert "2048" in pt.refusal(big, z, *dims)
         assert pt.refusal(torch.empty(1, 1, 2048, 128, device=DEV, dtype=BF), z, *dims) is None
-    assert "inference only" in pt.refusal(x, z, *dims)                              # grad enabled: the wide kernels have no backward on B200
+    assert pt.refusal(x, z, *dims) is None                                          # grad enabled: the wide widths train too
     mw = torch.empty(1, 128, 1100, 64, device=DEV, dtype=BF)
-    assert "1024" in pt.refusal(mw, z, 64, 128, 8, 32)                               # MiniWorld width, training: N <= 1024
+    assert pt.refusal(mw, z, 64, 128, 8, 32) is None                                 # MiniWorld width, training at N > 1024
     with torch.no_grad():
         assert pt.refusal(mw, z, 64, 128, 8, 32) is None
