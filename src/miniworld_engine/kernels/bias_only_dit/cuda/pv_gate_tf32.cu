@@ -38,6 +38,10 @@
 // Without it the cubin is the training path's / the default inference path's, unchanged.
 // -DPSB (with SG=1): a pair bias of its own per sample -- P is [H, S, L, L] (a plane per (head, sample)) and an item's P chunks are
 // its sample's: the TMA row is (h S + a) L + m0 (pv_gate_inf.cu's -DPSB).
+// -DPMN (with GATE=0; the training backward's dV = P^T dO without a stored P^T): P is given as the forward stored it and read as the
+// MN-major A operand -- an item's M tile is 128 KEYS and its K loop the queries: a stage's A chunk is 32 query rows x 128 keys of P
+// as four TMA boxes [32 q][32 keys] (SW128 with 32-B atoms, 4 KB each, LBO 4 KB: the four 32-key MN atoms), 8 queries (1 KB) per K
+// step -- the v operand's form. Everything else (stage size, accumulators, epilogue rows = the item's 128 keys) is unchanged.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -64,6 +68,12 @@ constexpr bool PSB_P = true;
 #else
 constexpr bool PSB_P = false;
 #endif
+#ifdef PMN
+static_assert(GATE == 0, "PMN: the ungated dV product");
+constexpr int A_MN = 1;
+#else
+constexpr int A_MN = 0;
+#endif
 static_assert(DH == 32 || DH == 48 || DH == 64, "head width 32, 48 or 64");
 constexpr int NA = (DH + 31) / 32;                                           // 32-channel atoms of a v chunk
 constexpr int WB = DH - 32;                                                  // channels of the second staging half: 0, 16, 32
@@ -89,9 +99,9 @@ constexpr int NW = DH;
 constexpr int TNEED = 2 * SG * NW;
 static_assert(TNEED <= 512, "two accumulator sets of SG x NW columns");
 constexpr uint32_t TCOLS = TNEED <= 32 ? 32 : TNEED <= 64 ? 64 : TNEED <= 128 ? 128 : TNEED <= 256 ? 256 : 512;
-constexpr uint32_t I_PV = idesc_tf32(QM, DH, 0, 1);                          // A = P K-major, B = v MN-major
+constexpr uint32_t I_PV = idesc_tf32(QM, DH, A_MN, 1);                       // A = P K-major (PMN: MN-major), B = v MN-major
 #ifdef BATCHN
-constexpr uint32_t I_PVB = idesc_tf32(QM, SG * NW, 0, 1);                    // the group's samples side by side in N
+constexpr uint32_t I_PVB = idesc_tf32(QM, SG * NW, A_MN, 1);                    // the group's samples side by side in N
 #endif
 
 DEVI void tma_store_wait_read1() { asm volatile("cp.async.bulk.wait_group.read 1;" ::: "memory"); }
@@ -164,7 +174,13 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
           if (g >= NST) mbar_wait(&B.empty[s], ((g / NST) - 1) & 1);
           const uint32_t st = su + O_ST + s * STB;
           mbar_expect_tx(&B.full[s], TP + ns * TV);
+#ifdef PMN
+#pragma unroll
+          for (int e = 0; e < QM / 32; ++e)                     // keys m0 + 32 e: the e-th MN atom of the A chunk
+            tma_load_2d(st + e * TVA, &mp, &B.full[s], m0 + 32 * e, (PSB_P ? h * S + a0 : h) * L + c * KC);
+#else
           tma_load_2d(st, &mp, &B.full[s], c * KC, (PSB_P ? h * S + a0 : h) * L + m0);
+#endif
           for (int k = 0; k < ns; ++k)
 #pragma unroll
             for (int a = 0; a < NA; ++a)
@@ -185,7 +201,13 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
         mbar_wait(&B.full[s], (g / NST) & 1);
         tc_fence_after();
         const uint32_t st = su + O_ST + s * STB;
+#ifdef PMN
+        const uint64_t dp = desc_mn32b(st, TVA);                  // four 32-key atoms TVA apart; 8 queries = 1 KB per K step
+        constexpr int AKS = 1024 >> 4;
+#else
         const uint64_t dp = desc_k128(st);
+        constexpr int AKS = 2;                                    // 8 keys = 32 B of the K-major row
+#endif
         if (elect_one()) {
 #ifdef BATCHN
           {
@@ -193,7 +215,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
             const uint32_t d = tmem + (uint32_t)(b * SG * NW);
 #pragma unroll
             for (int ks = 0; ks < KC / 8; ++ks)
-              umma_ss_tf32(d, dp + (uint64_t)(ks * 2), dv + (uint64_t)((ks * 1024) >> 4), I_PVB, (c > 0 || ks > 0) ? 1u : 0u);
+              umma_ss_tf32(d, dp + (uint64_t)(ks * AKS), dv + (uint64_t)((ks * 1024) >> 4), I_PVB, (c > 0 || ks > 0) ? 1u : 0u);
           }
 #else
           for (int k = 0; k < ns; ++k) {
@@ -202,7 +224,7 @@ bo_pv_gate_tf32_sm100(const __grid_constant__ CUtensorMap mp, const __grid_const
             const uint32_t d = tmem + (uint32_t)((b * SG + k) * DH);
 #pragma unroll
             for (int ks = 0; ks < KC / 8; ++ks)
-              umma_ss_tf32(d, dp + (uint64_t)(ks * 2), dv + (uint64_t)((ks * 1024) >> 4), I_PV, (c > 0 || ks > 0) ? 1u : 0u);
+              umma_ss_tf32(d, dp + (uint64_t)(ks * AKS), dv + (uint64_t)((ks * 1024) >> 4), I_PV, (c > 0 || ks > 0) ? 1u : 0u);
           }
 #endif
           tc_commit(&B.empty[s]);

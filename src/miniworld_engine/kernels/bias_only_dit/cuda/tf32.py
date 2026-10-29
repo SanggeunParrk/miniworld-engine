@@ -138,13 +138,22 @@ class PvGateCoreTF32:
     16-byte aligned row stride. Bound launches (their TMA descriptors carry the pointers) are cached per (buffers, strides, S, L).
     ``pdl``: the three-kernel inference step's build (``-DPDL_INF``: programmatic dependent launch, the gated output rounded to TF32
     for the tail's MMA), launched with the PDL attribute; default off (the training step and the default inference step).
-    ``psb``: a pair bias of its own per sample -- P [nh, S, L, L] (``-DPSB``, one sample per work item); no PDL."""
+    ``psb``: a pair bias of its own per sample -- P [nh, S, L, L] (``-DPSB``, one sample per work item); no PDL.
+    ``pmn``: the training backward's dV = P^T dO from P itself (``-DPMN``: P read as the MN-major A operand, items over 128-key
+    tiles; ungated) -- no P^T is made."""
 
     def __init__(
-        self, device_index: int, nh: int = 16, dh: int | None = None, pdl: bool = False, psb: bool = False
+        self,
+        device_index: int,
+        nh: int = 16,
+        dh: int | None = None,
+        pdl: bool = False,
+        psb: bool = False,
+        pmn: bool = False,
     ):
         assert not (psb and pdl), "the per-sample build has no PDL form"
-        self.psb = psb
+        assert not (pmn and pdl), "the dV build has no PDL form"
+        self.psb, self.pmn = psb, pmn
         from miniworld_engine.kernels.augmented_attention.cuda import sm100
 
         self._sm100, self._tm = sm100, sm100._tm
@@ -187,6 +196,7 @@ class PvGateCoreTF32:
                 f"DHEAD={self.dh}",
                 *batch,
                 *(("PSB",) if self.psb else ()),
+                *(("PMN",) if self.pmn else ()),
             ),
             smem=_pv_smem(self.dh, sg),
         )
@@ -208,7 +218,12 @@ class PvGateCoreTF32:
     def _bind(self, v, P, out, S, L, g):
         M, nh, dh = v.shape[0], self.nh, self.dh
         tm = self._tm
-        mp = tm(P, [L, (nh * S if self.psb else nh) * L], L * 4, [32, 128], dtype="f32")
+        planes = nh * S if self.psb else nh
+        mp = (
+            tm(P, [L, planes * L], L * 4, [32, 32], swizzle="128a32", dtype="f32")  # PMN: [32 queries][32 keys] MN atoms
+            if self.pmn
+            else tm(P, [L, planes * L], L * 4, [32, 128], dtype="f32")
+        )
         mv = tm(v, [nh * dh, M], _f32_rows(v), [32, 32], swizzle="128a32", dtype="f32")
         ga, gb = self._halves(out if g is None else g, M)
         oa, ob = self._halves(out, M)
@@ -220,7 +235,8 @@ class PvGateCoreTF32:
 
     def __call__(self, v, P, out, S, g=None):
         """v [S L, nh dh] view, P [nh L, L] contiguous ([nh S L, L] with ``psb``), out [S L, nh dh] view, g [S L, nh dh] view or None;
-        all fp32."""
+        all fp32. ``pmn``: v is dO, P the forward's P (not P^T), g None; out = dV."""
+        assert g is None or not self.pmn
         L = v.shape[0] // S
         assert (
             P.dtype is torch.float32

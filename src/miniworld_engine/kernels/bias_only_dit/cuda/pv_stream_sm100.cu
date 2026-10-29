@@ -30,6 +30,14 @@
 // -DPDL_INF (the bf16 three-kernel inference step's K2, and the training backward's programmatic-dependent dV): launch_dependents
 // after setup, griddepcontrol.wait before the producer's first load and before the epilogue reads g or stores a. No P_EARLY form:
 // P and v share every stage.
+// -DPMN (GATE=0; the training backward's dV = P^T dO WITHOUT a stored P^T): A is P itself, read as the MN-major operand. An item is
+// (head, 128-KEY tile, group) and its K loop walks the queries: a stage's A is P[queries c KC .. + 63][keys m0 .. m0 + 127] as two
+// TMA boxes [64 keys][64 queries] (SW128, 8 KB each; LBO = 8 KB between the two 64-key atoms, SBO 1 KB per 8 queries), 16 queries
+// (2 KB) per K step; B is the group's dO tiles [64 queries][DH] in v's place (MN-major as before). The bytes per stage, the pipeline
+// and the epilogue (rows (a0 + k) L + m0 of dV: the item's keys) are the K-major form's. Any L a multiple of 128: the shared-bias
+// training path's dV at every length, and the per-sample one below.
+// -DPSB (with SG = 1; a pair bias of its own per sample): P is [H, S, L, L], a plane per (head, sample); an item's P rows start at
+// (h S + a0) L (pv_gate_inf.cu's -DPSB). With PMN this is the per-sample dV = P_a^T dO_a from P alone.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -49,6 +57,18 @@ using namespace s100;
 #ifndef DHEAD
 #define DHEAD 48
 #endif
+#ifdef PSB
+static_assert(SG == 1, "PSB: one sample per work item (each sample its own P plane)");
+constexpr bool PSB_P = true;
+#else
+constexpr bool PSB_P = false;
+#endif
+#ifdef PMN
+static_assert(GATE == 0, "PMN: the backward's dV (no gate)");
+constexpr bool P_MN = true;
+#else
+constexpr bool P_MN = false;
+#endif
 constexpr int DH = DHEAD, NH = NHEAD, QM = 128, KC = 64, NQC = DH / 8;       // KC: keys per stage; NQC: 16-byte chunks of a head row
 static_assert(DH == 32 || DH == 48 || DH == 64, "head width 32, 48 or 64");
 static_assert(SG >= 1 && SG <= 4, "two accumulator sets of SG x 64 columns within 512");
@@ -63,7 +83,7 @@ static_assert(STB % 1024 == 0 && XG % 1024 == 0 && TV % 1024 == 0, "1 KB alignme
 constexpr int NW = 64;                                                       // accumulator columns per sample (one MN atom)
 constexpr int TNEED = 2 * SG * NW;
 constexpr uint32_t TCOLS = TNEED <= 64 ? 64 : TNEED <= 128 ? 128 : TNEED <= 256 ? 256 : 512;
-constexpr uint32_t I_PVB = idesc_bf16(QM, SG * NW, 0, 1);                    // A = P K-major, B = the group's v tiles MN-major
+constexpr uint32_t I_PVB = idesc_bf16(QM, SG * NW, P_MN ? 1 : 0, 1);        // A = P K-major (PMN: MN-major), B = the v tiles MN-major
 
 // o * sigmoid(g) for a pair of channels, packed f32x2 (pv_gate_inf.cu's gate_pair: exponentials on MUFU, the reciprocal on the FMA
 // pipe, seed clamped so that g <= -87.3 stays finite)
@@ -126,7 +146,7 @@ bo_pv_stream_sm100(const __grid_constant__ CUtensorMap mp, const __grid_constant
     // ------------------------------------------------------------------------------------------------ TMA producer
     if (lane == 0) {
 #ifdef PDL_INF
-      pdl_wait();                                                 // v (and in training P^T): earlier kernels' outputs
+      pdl_wait();                                                 // v (and in training P / P^T): earlier kernels' outputs
 #endif
       int g = 0;
       for (int li = 0; li < my; ++li) {
@@ -138,7 +158,13 @@ bo_pv_stream_sm100(const __grid_constant__ CUtensorMap mp, const __grid_constant
           // the P chunk, and the group's v tiles as ONE 3-D box [DH][64 keys][SG samples] (TV apart; samples past S zero-filled,
           // the full box counts): two TMA instructions per stage (a box per sample: 2-6 % slower, round 1)
           mbar_expect_tx(&B.full[s], TP + SG * (KC * DH * 2));
-          tma_load_2d(st, &mp, &B.full[s], c * KC, h * L + m0);
+          const int prow = (PSB_P ? h * S + a0 : h) * L;          // the item's P plane ([H L, L], or [H S L, L] per sample)
+          if (P_MN) {                                             // P[queries c KC .. + 63][keys m0 .. + 127]: two 64-key boxes
+            tma_load_2d(st, &mp, &B.full[s], m0, prow + c * KC);
+            tma_load_2d(st + TP / 2, &mp, &B.full[s], m0 + 64, prow + c * KC);
+          } else {
+            tma_load_2d(st, &mp, &B.full[s], c * KC, prow + m0);
+          }
           tma_load_3d(st + TP, &mv, &B.full[s], h * DH, c * KC, a0);
         }
       }
@@ -155,13 +181,14 @@ bo_pv_stream_sm100(const __grid_constant__ CUtensorMap mp, const __grid_constant
         mbar_wait(&B.full[s], (g / NST) & 1);
         tc_fence_after();
         const uint32_t st = su + O_ST + s * STB;
-        const uint64_t dp = desc_k128(st);
+        const uint64_t dp = P_MN ? desc_mn128(st, TP / 2) : desc_k128(st);   // PMN: the two 64-key atoms 8 KB apart
         const uint64_t dv = desc_mn128(st + TP, TV);              // every sample's v tile, TV apart: N = SG x 64
         if (elect_one()) {
           const uint32_t d = tmem + (uint32_t)(b * SG * NW);
 #pragma unroll
           for (int ks = 0; ks < KC / 16; ++ks)                    // 16 keys: 32 B of a P row, 16 rows (2 KB) of a v tile
-            umma_ss(d, dp + (uint64_t)(ks * 2), dv + (uint64_t)((ks * 2048) >> 4), I_PVB, (c > 0 || ks > 0) ? 1u : 0u);
+            umma_ss(d, dp + (uint64_t)(P_MN ? ((ks * 2048) >> 4) : ks * 2), dv + (uint64_t)((ks * 2048) >> 4), I_PVB,
+                    (c > 0 || ks > 0) ? 1u : 0u);
           tc_commit(&B.empty[s]);
           if (c == nk - 1) tc_commit(&B.acc_full[b]);
         }
