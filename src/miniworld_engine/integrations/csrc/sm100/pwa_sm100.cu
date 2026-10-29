@@ -1417,6 +1417,7 @@ struct PF {
   static constexpr int THREADS = 448;
   static constexpr int SMEM = 1024 + (NSU * UT + WGT + 2 * LB) * 2 + H * 4 + 512;
   static constexpr uint32_t IDESC = idesc_bf16(128, HP, 0, 0);
+  static_assert(2 * NSU <= 32, "full-barrier phase bits in one word");
   static_assert(DZ % 64 == 0 && SMEM <= 232448, "one CTA per SM");
 };
 
@@ -1438,8 +1439,12 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
   __nv_bfloat16* sL = sWg + WGT;                                 // [2][H][NMAX]
   float* sSC = reinterpret_cast<float*>(sL + 2 * LB);            // s[8]
   uint64_t* bars = reinterpret_cast<uint64_t*>(sSC + H);
-  uint64_t* full = bars;             // [NSU]
-  uint64_t* empty = full + NSU;      // [NSU] count 5: the MMA + the 4 statistics warps of the tile's group
+  // A unit's landing completes full[group of its tile][slot]: the two statistics groups take alternate tiles, and with one barrier per
+  // slot a group could wait on a slot whose previous load (the other group's) had not landed yet -- a parity two phases ahead, which
+  // passes at once (d_pair 384: 6 units a tile over 8 / 10 slots). Per group, a slot's phases are exactly the group's own uses, in
+  // order; the MMA and each group keep their phase bits per (group, slot).
+  uint64_t* full = bars;             // [2][NSU]
+  uint64_t* empty = full + 2 * NSU;  // [NSU] count 5: the MMA + the 4 statistics warps of the tile's group
   uint64_t* accf = empty + NSU;      // [2]
   uint64_t* acce = accf + 2;         // [2] count 4
   uint64_t* rowf = acce + 2;         // [2] count 8: a row's logits written (both groups)
@@ -1447,7 +1452,7 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
   uint32_t* tslot = reinterpret_cast<uint32_t*>(rowe + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NSU; ++k) { bar_init(full + k, 1); bar_init(empty + k, 5); }
+    for (int k = 0; k < NSU; ++k) { bar_init(full + k, 1); bar_init(full + NSU + k, 1); bar_init(empty + k, 5); }
     for (int k = 0; k < 2; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); bar_init(rowf + k, 8); bar_init(rowe + k, 4); }
     bar_init_fence();
   }
@@ -1472,25 +1477,28 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
 
   if (warp == 12) {
     if (lane == 0) {
-      int u = 0;
+      int u = 0, g = 0;
       for (int i = blockIdx.x; i < N; i += gridDim.x)
-        for (int jb = 0; jb < NJB; ++jb)
+        for (int jb = 0; jb < NJB; ++jb, ++g)
           for (int ku = 0; ku < KU; ++ku, ++u) {
             const int st = u % NSU;
+            uint64_t* f = full + (g & 1) * NSU + st;
             if (u >= NSU) wait(empty + st, ((u / NSU) - 1) & 1);
-            expect_tx(full + st, UT * 2);
-            for (int b = 0; b < UB; ++b) load_2d(&zmap, sZ + st * UT + b * BJ * 64, full + st, (ku * UB + b) * 64, i * N + jb * BJ);
+            expect_tx(f, UT * 2);
+            for (int b = 0; b < UB; ++b) load_2d(&zmap, sZ + st * UT + b * BJ * 64, f, (ku * UB + b) * 64, i * N + jb * BJ);
           }
     }
   } else if (warp == 13) {
     int g = 0, u = 0;
+    uint32_t fph = 0;                            // phase bits of full[group][slot]
     for (int i = blockIdx.x; i < N; i += gridDim.x)
       for (int jb = 0; jb < NJB; ++jb, ++g) {
         const int b = g & 1;
         if (g >= 2) wait(acce + b, ((g >> 1) - 1) & 1);
         for (int ku = 0; ku < KU; ++ku, ++u) {
-          const int st = u % NSU;
-          wait(full + st, (u / NSU) & 1);
+          const int st = u % NSU, fb = b * NSU + st;
+          wait(full + fb, (fph >> fb) & 1u);
+          fph ^= 1u << fb;
           tc_fence_after();
           if (elect_one()) {
             const __nv_bfloat16* zt = sZ + st * UT;
@@ -1508,6 +1516,7 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
     const int grp = warp >> 2, j = (warp & 3) * 32 + lane;   // tile row = TMEM lane; group grp takes the tiles g = grp (mod 2)
     const __nv_bfloat16 masked = __float2bfloat16_rn(-1e30f);
     int g = 0, r = 0;
+    uint32_t fph = 0;                            // phase bits of this group's full[grp][slot]
     for (int i = blockIdx.x; i < N; i += gridDim.x, ++r) {
       const int lb = r & 1;
       if (r >= 2) wait(rowe + lb, ((r >> 1) - 1) & 1);
@@ -1521,7 +1530,8 @@ __global__ void __launch_bounds__(448, 1) pair_fwd_sm100(
         float2 a0 = make_float2(0.f, 0.f), a1 = a0, q0 = a0, q1 = a0, nk = a0;
         for (int ku = 0; ku < KU; ++ku) {
           const int u = g * KU + ku, st = u % NSU;
-          wait(full + st, (u / NSU) & 1);
+          wait(full + grp * NSU + st, (fph >> st) & 1u);
+          fph ^= 1u << st;
           const __nv_bfloat16* zr = sZ + st * UT + j * 64;
           if (ku == 0) { k0 = __bfloat162float(zr[0]); nk = make_float2(-k0, -k0); }
 #pragma unroll
