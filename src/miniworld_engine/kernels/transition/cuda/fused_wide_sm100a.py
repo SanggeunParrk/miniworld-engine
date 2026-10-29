@@ -97,6 +97,10 @@ SMALL_FWD_TILES = 16
 SX_CH = (32, 64)
 #: squeeze builds: (output columns per cluster, hidden split = cluster size)
 SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
+#: weight-gradient output tile widths (columns per CTA), narrowest first
+SX_DW_NT = (64, 128, 192)
+#: weight-gradient tile width, None: automatic (kept for A/B runs)
+SX_DW_NT_FORCE = None
 
 
 def _sx(d: int, tiles: int) -> bool:
@@ -130,6 +134,19 @@ def _sx_sq(d: int, tiles: int, h: int, nsm: int) -> tuple[int, int]:
 def _sx_dxn_resident(d: int, n: int, index: int) -> int:
     """Resident 12-CTA clusters of the K-split d_xn kernel (7 on a 148-SM B200: clusters must fit a GPC)."""
     return int(_load(d, n).max_active_clusters(f"d{d}n{n}_sx_dxn2", "transition_sx_dxn", 384, 2 * (d // 64)))
+
+
+def _sx_dw_nt(d: int, h: int, busy: int, nsm: int) -> int:
+    """Output tile width of the weight-gradient kernel: the narrowest whose CTAs fit the SMs the d_xn clusters (``busy`` CTAs, one SM
+    each) leave free -- the products run while d_xn finishes, and a CTA left waiting for a d_xn SM starts its whole K loop after it --
+    else the widest. Round sx2, [1, 768, 384] training: n = 2 (72 d_xn CTAs) 64 -> 128, n = 4 128 -> 192."""
+    if SX_DW_NT_FORCE is not None:
+        return SX_DW_NT_FORCE
+    fits = [nt for nt in SX_DW_NT if d % nt == 0 and h % nt == 0]
+    for nt in fits:
+        if (d // 128) * (h // nt) + (2 * h // 128) * (d // nt) + busy <= nsm:
+            return nt
+    return fits[-1]
 
 
 def _sx_ks(d: int, n: int, tiles: int, index: int) -> int:
@@ -197,7 +214,7 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
             ),
             ("sx_gate", "widths/tsx_gate.cu", dim),
             *((f"sx_dxn{k}", "widths/tsx_dxn.cu", (*dim, f"-DKS={k}")) for k in (1, 2)),
-            *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in (64, 128)),
+            *((f"sx_dw{nt}", "widths/tsx_dw.cu", (*dim, f"-DNT={nt}")) for nt in SX_DW_NT if d % nt == 0 and h % nt == 0),
         )
         if d == 384
         else ()
@@ -849,7 +866,7 @@ def _bwd_sx_launch(
     wd = dict(dtype=torch.bfloat16 if wgrad_bf16 else torch.float32, device=x.device)
     dwab = torch.empty((2 * h, d), **wd)  # dWa then dWb
     dws = torch.empty((d, h), **wd)
-    nt = 64 if (d // 128) * (h // 64) + (2 * h // 128) * (d // 64) <= k.nsm else 128
+    nt = _sx_dw_nt(d, h, tiles * (d // 64) * ks, k.nsm)
     k.run(
         f"sx_dw{nt}",
         "transition_sx_dw",

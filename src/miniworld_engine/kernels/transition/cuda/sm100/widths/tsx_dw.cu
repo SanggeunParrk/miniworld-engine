@@ -1,12 +1,13 @@
 // tsx_dw.cu -- the Transition backward at SMALL M, third kernel: the weight gradients and dgamma / dbeta (-DDIM=<D> -DHID=<H>
-// -DNT=<64 | 128>), sm_100a, bf16 operands, fp32 results, a programmatic dependent launch after tsx_dxn.cu.
+// -DNT=<64 | 128 | 192>), sm_100a, bf16 operands, fp32 results, a programmatic dependent launch after tsx_dxn.cu.
 //   dWs  [D][H]   = dy^T h      over the M rows: (D / 128) x (H / NT) output tiles
 //   dWab [2H][D]  = dab^T xn    (dWa rows, then dWb rows): (2 H / 128) x (D / NT) output tiles
-// one CTA per output tile (108 at [1, 768, 384] for n = 2 with NT = 64 and n = 4 with NT = 128), K = M through a TMA ring; both operands
-// are the row-major activations read MN-major (no transposed copies). The first 2 D / 128 CTAs also add the d_xn kernel's per-tile
-// dgamma | dbeta partials in tile order (deterministic).
+// one CTA per output tile, K = M through a TMA ring; both operands are the row-major activations read MN-major (no transposed copies).
+// The host picks the widest NT whose CTAs fit beside the d_xn clusters in one wave (54 at [1, 768, 384] n = 2 with NT = 128, 72 at
+// n = 4 with NT = 192: a CTA that waits for a d_xn SM to free starts its whole K loop after d_xn ends). The first 2 D / 128 CTAs also
+// add the d_xn kernel's per-tile dgamma | dbeta partials in tile order (deterministic).
 // Every operand is a forward save, the backward input or the gate's output -- complete before the d_xn kernel this launch follows
-// passed its own griddepcontrol.wait -- so the products run while d_xn finishes; only the partial sums wait for it.
+// passed its own griddepcontrol.wait -- so the products and the tile stores run while d_xn finishes; only the partial sums wait for it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -22,9 +23,10 @@ using namespace s100;
 #endif
 constexpr int D_ = DIM, H_ = HID, ROWS = 128;
 constexpr int T1 = (D_ / 128) * (H_ / NT);                     // dWs tiles; the dWab tiles follow
-static_assert(D_ % 128 == 0 && D_ % NT == 0 && H_ % NT == 0 && (NT == 64 || NT == 128), "whole output tiles");
+static_assert(D_ % 128 == 0 && D_ % NT == 0 && H_ % NT == 0 && (NT == 64 || NT == 128 || NT == 192), "whole output tiles");
 constexpr int ABT = 128 * 128, BBT = NT * 128;                 // A: [64 k][128 m'] (two 64-wide MN blocks), B: [64 k][NT n']
 constexpr int STG = NT == 64 ? 6 : 5;
+constexpr int TCOLS = NT == 192 ? 256 : NT;                    // tensor-memory allocation (a power of two)
 constexpr int O_A = 0, O_B = STG * ABT, O_BAR = O_B + STG * BBT, SMEM_BYTES = O_BAR + 256;
 static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 constexpr uint32_t IDESC = idesc_bf16(128, NT, 1, 1);
@@ -61,7 +63,7 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
     fence_proxy_async();
     prefetch_map(ma); prefetch_map(mb);
   }
-  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), NT); tmem_relinquish(); }
+  if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
   tc_fence_before();
   __syncthreads();
   tc_fence_after();
@@ -94,15 +96,6 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
       __syncwarp();
     }
   } else if (warp >= 4) {
-    pdl_wait();                                                // the d_xn kernel's dgamma | dbeta partials
-    pdl_launch();
-    if ((int)blockIdx.x < 2 * D_ / 128) {                      // dgamma | dbeta = sum over the tiles' partials, in order
-      const int c = blockIdx.x * 128 + (tid - 128);
-      float s = 0.f;
-#pragma unroll 4
-      for (int i = 0; i < tiles; ++i) s += part[(size_t)i * 2 * D_ + c];
-      dgb[c] = s;
-    }
     // ---------------------------------------------------------------------------------------- the fp32 tile: one row per thread
     const int r = (warp & 3) * 32 + lane;
     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
@@ -127,9 +120,18 @@ transition_sx_dw(const __grid_constant__ CUtensorMap mdy, const __grid_constant_
       }
     }
     tc_fence_before();
+    pdl_wait();                                                // the d_xn kernel's dgamma | dbeta partials
+    pdl_launch();
+    if ((int)blockIdx.x < 2 * D_ / 128) {                      // dgamma | dbeta = sum over the tiles' partials, in order
+      const int c = blockIdx.x * 128 + (tid - 128);
+      float s = 0.f;
+#pragma unroll 4
+      for (int i = 0; i < tiles; ++i) s += part[(size_t)i * 2 * D_ + c];
+      dgb[c] = s;
+    }
   }
   __syncthreads();
-  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, NT); }
+  if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TCOLS); }
 }
 
 extern "C" __device__ int transition_smem_bytes = SMEM_BYTES;
