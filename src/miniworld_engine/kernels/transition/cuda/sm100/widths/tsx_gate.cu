@@ -6,6 +6,7 @@
 // GEMMs over dab, xn, dy and h. Ws K-blocks are loaded before griddepcontrol.wait (the forward's cast, long complete).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsx_store.cuh"
 using namespace s100;
 
 #ifndef DIM
@@ -107,12 +108,9 @@ transition_sx_gate(const __grid_constant__ CUtensorMap mdy, const __grid_constan
 #pragma unroll
       for (int k = 0; k < 4; ++k) gate_pair(v[8 * q + 2 * k], v[8 * q + 2 * k + 1], a4[k], b4[k], da[4 * q + k], db[4 * q + k]);
     }
-    __nv_bfloat16* pa = dab + (size_t)(row0 + r) * (2 * H_) + h0 + g * 32;
-#pragma unroll
-    for (int q = 0; q < 4; ++q) {
-      stg128(pa + q * 8, make_uint4(da[4 * q], da[4 * q + 1], da[4 * q + 2], da[4 * q + 3]));
-      stg128(pa + H_ + q * 8, make_uint4(db[4 * q], db[4 * q + 1], db[4 * q + 2], db[4 * q + 3]));
-    }
+    __nv_bfloat16* pa = dab + (size_t)(row0 + (r & ~3)) * (2 * H_) + h0 + g * 32 + (lane & 3) * 8;
+    store_t(pa, 2 * H_, da, lane);
+    store_t(pa + H_, 2 * H_, db, lane);
   }
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, CH); }
