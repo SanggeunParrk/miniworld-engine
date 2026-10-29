@@ -94,7 +94,7 @@ def test_bitwise_deterministic():
             assert torch.equal(blk(*ins, mask, rope=rope), first)
 
 
-def test_fp32_activations_or_a_missing_rope_are_not_served():
+def test_what_is_served():
     blk = _block(ImplementationType.MINIWORLD).cuda().bfloat16()
     s, c, z, mask, rope = _inputs(1, 256, 200)
     ins = (s.bfloat16(), c.bfloat16(), z.bfloat16())
@@ -102,7 +102,59 @@ def test_fp32_activations_or_a_missing_rope_are_not_served():
     with torch.no_grad():
         assert local_dit.serves(blk, *ins, mask, rope)
         assert not local_dit.serves(blk, *ins, mask, None)
-        assert not local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 activations: the module path
+        assert not local_dit.serves(blk, s, c, z, mask, rope)     # fp32 activations, bf16 parameters: the module path
+        assert local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 activations and parameters: the TF32 kernels
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            assert not local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 under autocast: the module path
+
+
+# ------------------------------------------------------------------------------------------------ the fp32 path (TF32), inference
+@pytest.mark.parametrize(("a", "n", "real"), CASES)
+def test_fp32_matches_the_pytorch_module(a, n, real, monkeypatch):
+    """fp32 activations and parameters on the TF32 kernels against the fp64 module, no worse than the fp32 module path with TF32 on."""
+    blk = _block(ImplementationType.MINIWORLD).cuda().eval()
+    ref = _block(ImplementationType.PYTORCH).cuda().double().eval()
+    ref.load_state_dict(blk.state_dict())
+    s, c, z, mask, rope = _inputs(a, n, real)
+    calls = []
+    orig = local_dit._esm_fwd32
+    monkeypatch.setattr(local_dit, "_esm_fwd32", lambda *x: calls.append("fp32") or orig(*x))
+    with torch.no_grad():
+        expected = ref(s.double(), c.double(), z.double(), mask, rope=tuple(t.double() for t in rope))
+        actual = blk(s, c, z, mask, rope=rope)
+        assert calls == ["fp32"], calls
+        override_setting(monkeypatch, "local_dit_sm100", "0")
+        tf32 = torch.backends.cuda.matmul.allow_tf32
+        torch.backends.cuda.matmul.allow_tf32 = True
+        try:
+            own = blk(s, c, z, mask, rope=rope)
+        finally:
+            torch.backends.cuda.matmul.allow_tf32 = tf32
+    assert actual.dtype == torch.float32 and torch.isfinite(actual).all()
+    ef, em = _rel(actual[:, :, :real], expected[:, :, :real]), _rel(own[:, :, :real], expected[:, :, :real])
+    assert ef < 1.5 * em + 1e-3, f"sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+def test_fp32_bitwise_deterministic_and_captured():
+    """Repeatable bit for bit, and a CUDA-graph capture replays right with new inputs and another mask."""
+    blk = _block(ImplementationType.MINIWORLD).cuda().requires_grad_(False)
+    s, c, z, mask, rope = _inputs(2, 512, 512, seed=3)
+    s2, c2, z2, _, rope2 = _inputs(2, 512, 512, seed=4)
+    static = [t.clone() for t in (s, c, z, mask, *rope)]
+    with torch.no_grad():
+        first = blk(static[0], static[1], static[2], static[3], rope=(static[4], static[5]))
+        assert torch.equal(blk(static[0], static[1], static[2], static[3], rope=(static[4], static[5])), first)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            out = blk(static[0], static[1], static[2], static[3], rope=(static[4], static[5]))
+        m2 = torch.zeros_like(mask)
+        m2[:, :400] = True
+        for t, new in zip(static, (s2, c2, z2, m2, *rope2), strict=True):
+            t.copy_(new)
+        graph.replay()
+        eager = blk(s2, c2, z2, m2, rope=rope2)
+    torch.testing.assert_close(out[:, :, :400], eager[:, :, :400], rtol=0, atol=0)
 
 
 # ------------------------------------------------------------------------------------------------ training (bf16)

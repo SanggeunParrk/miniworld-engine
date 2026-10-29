@@ -371,8 +371,35 @@ under autocast, bf16 parameters}, the shared conditioning as one expanded leaf, 
 (all but the query bias, whose column sum uses atomics as in the AF3 block); a whole training step captured in a CUDA graph and replayed
 with new inputs and another mask.
 
+## ESMFold2's block: fp32 inference (TF32, 2026-10-29)
+
+fp32 activations with fp32 parameters (no autocast) run `_esm_fwd32`: the fp32 path's unfused kernels with RMS builds around ESMFold2's
+TF32 attention. Tables: `f32_silu` then one `gemm32` of silu(c) against the eight conditioning weights (tab [M, 1024] = [s1 | bi1 | s2 |
+bi2 | so | st | kv scale | kv shift], the scales' bias 1; hoisted per conditioning tensor), AdaLN 1 / the K / V AdaLN / AdaLN 2 by
+`f32_adaln_rms` (`rows_tf32.cu`), q | g and k | v by `gemm32` (v tf32-rounded in the epilogue), the q / k norm + rotary by `lesm.cu`
+`local_esm_qkrope_f32` (outputs rounded to tf32, RNA), the bias by `local_esm_bias` on the fp32 pair (hoisted), the attention by
+`lattn_esm_tf32.cu` `local_attn_esm_tf32`, then the fp32 path's gate, Wo + gated residual, SwiGLU and Ws + gated residual.
+
+`lattn_esm_tf32.cu`: lattn_esm.cu's geometry with lattn_fwd_tf32.cu's fp32 conventions -- q / k K-major and v MN-major (128-B swizzle,
+32-B atoms) in two 80 KB stages, fp32 P in place over S. P fills all 256 columns of S, so there is one S buffer (cols 0..255) and O at
+256..287; the next sample's QK^T is issued right after this sample's PV. The bias of a warp's cells sits in registers (the triangle pair in
+32 + 1); 512 threads (warp 15 also loads and issues), 128 registers, no spills.
+
+Measured, one block, CUDA graph under `static_weights()` + `static_inputs()`, conditioning shared, us (module path: fp32 with TF32 on):
+
+| (A, N) | B200 kernels | module path (B200) | x |
+|---|---|---|---|
+| (5, 4096) | 121.5 | 1963.5 | 16.2 |
+| (5, 2048) | 81.6 | 1080.8 | 13.2 |
+| (5, 1024) | 57.4 | 657.7 | 11.5 |
+| (1, 4096) | 53.6 | 1255.1 | 23.4 |
+
+Accuracy against the fp64 module: 3.73e-4 at every shape, the module path with TF32 on the same (3.72-3.73e-4). Tests (same file): the eight
+inference shapes against fp64 (`ef < 1.5 em + 1e-3`), bitwise repeatable, a CUDA-graph capture replayed with new inputs and another mask,
+and what is served (fp32 activations need fp32 parameters and no autocast).
+
 ## Not covered
 
-B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 with a gradient, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).
