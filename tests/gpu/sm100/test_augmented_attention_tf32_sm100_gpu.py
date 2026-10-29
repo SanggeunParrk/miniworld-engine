@@ -173,19 +173,19 @@ def test_pair_fused_tf32_backward_is_bitwise_repeatable(H, DH):
             assert torch.equal(x, y), f"{name} differs between runs"
 
 
-def _aa_modules(d, dc, dp, H):
+def _aa_modules(d, dc, dp, H, qk=False):
     from miniworld_engine.modules import AugmentedAttentionPairBias
     from miniworld_engine.modules.exceptions import ImplementationType as IT
 
     torch.manual_seed(3)
-    mw = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.MINIWORLD).cuda()
+    mw = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.MINIWORLD).cuda()
     with torch.no_grad():
         for p in mw.parameters():
             p.normal_(0, p.shape[-1] ** -0.5) if p.dim() > 1 else p.normal_(0, 0.1)
         mw.ln_pair.weight.add_(1.0)
-    pt = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.PYTORCH).cuda()
+    pt = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.PYTORCH).cuda()
     pt.load_state_dict(mw.state_dict())
-    ref = AugmentedAttentionPairBias(d, dc, dp, H, implementation=IT.PYTORCH).cuda().double()
+    ref = AugmentedAttentionPairBias(d, dc, dp, H, use_qk_norm=qk, implementation=IT.PYTORCH).cuda().double()
     ref.load_state_dict({k: v.double() for k, v in mw.state_dict().items()})
     return mw, pt, ref
 
@@ -214,23 +214,26 @@ def _aa_case(A, L, d, dc, dp, pair_dtype, seed=5):
 
 
 @pytest.mark.parametrize(("d", "H"), [(768, 16), (768, 24), (768, 12), (1024, 16)])
-def test_module_fp32_takes_the_pair_fused_core_and_holds_the_yardstick(d, H):
-    """AugmentedAttentionPairBias (MINIWORLD) in fp32 on B200 (TF32 matmuls allowed) runs the TF32 pair-fused core, within 1.5x the
-    PyTorch module's error (fp32, TF32 matmuls) against an fp64 run, for the output and every gradient checked."""
-    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import fused_pair
+@pytest.mark.parametrize("qk", [False, True])
+def test_module_fp32_takes_the_pair_fused_core_and_holds_the_yardstick(d, H, qk):
+    """AugmentedAttentionPairBias (MINIWORLD) in fp32 on B200 (TF32 matmuls allowed) runs the TF32 kernels -- the module route
+    (``sm100.module_route``, since 2026-10-29), QK-norm on or off -- within 1.5x the PyTorch module's error (fp32, TF32
+    matmuls) against an fp64 run, for the output and every gradient checked."""
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import module_route
 
     torch.backends.cuda.matmul.allow_tf32 = True
-    mw, pt, ref = _aa_modules(d, 384, 128, H)
+    mw, pt, ref = _aa_modules(d, 384, 128, H, qk)
     single, cond, pair, mask, dy = _aa_case(3, 256, d, 384, 128, torch.float32)
     taken = []
-    orig = fused_pair.attention_pair_sm100
-    fused_pair.attention_pair_sm100 = lambda *a, **k: (taken.append(1), orig(*a, **k))[1]  # ty: ignore[invalid-assignment] -- spy
+    mod, name = module_route, "module_update"
+    orig = getattr(mod, name)
+    setattr(mod, name, lambda *a, **k: (taken.append(1), orig(*a, **k))[1])
     try:
         e = _aa_run(mw, single, cond, pair, mask, dy, torch.float32, False)
     finally:
-        fused_pair.attention_pair_sm100 = orig
+        setattr(mod, name, orig)
     r = _aa_run(ref, single, cond, pair, mask, dy, torch.float64, False)
     b = _aa_run(pt, single, cond, pair, mask, dy, torch.float32, False)
-    assert taken, "the TF32 pair-fused sm100 core was not used"
+    assert taken, f"the TF32 sm100 {name} route was not used"
     for k in r:
         assert _rel(e[k], r[k]) <= 1.5 * _rel(b[k], r[k]) + 1e-6, (k, _rel(e[k], r[k]), _rel(b[k], r[k]))
