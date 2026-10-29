@@ -61,7 +61,7 @@ def _core(rows: int = 4):
 @functools.lru_cache(maxsize=1)
 def _mod():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_mod_v10", sources=[str(_SRC / "triattn_mod_sm100.cu")],
+    return load_extension(name="triattn_b200_mod_v11", sources=[str(_SRC / "triattn_mod_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
