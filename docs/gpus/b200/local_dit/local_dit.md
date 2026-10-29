@@ -331,11 +331,48 @@ At (5, 4096): post_fwd 22.5, attention 21.7, pre_fwd 15.8, q / k norm + rotary 6
 real atoms): 5.2-5.3e-3, the module path's own bf16 run 4.8-5.0e-3, at all eight test shapes. Tests:
 `tests/gpu/sm100/test_b200_local_dit_esmfold2_gpu.py` (eight (A, N, real atoms) shapes incl. N not a multiple of 128, under 192 real atoms
 and FoldForge's A = 5 with a shared conditioning; fp32 parameters under autocast and bf16 parameters; `ef < 2 em + 1e-3`; bitwise
-repeatable; graph capture replayed with another mask and inputs; a gradient, fp32 activations or a missing rotary keep the module path).
-Not served yet: fp32 activations and training (module path).
+repeatable; graph capture replayed with another mask and inputs; fp32 activations or a missing rotary keep the module path).
+
+## ESMFold2's block: bf16 training (2026-10-29)
+
+A call that records a gradient (bf16 activations; bf16 parameters, or fp32 master parameters under autocast) runs `_EsmBlock`
+(`integrations/local_dit.py`): the inference stages with their activations saved (nothing hoisted), then
+
+    tr_bwd_gate RMS -> post_bwd RMS (dO, D) -> esm dq (+ dbias) / dkv -> q / k norm + rotary backward -> pair-bias backward
+    -> pre_bwd RMS (AdaLN 1 + the K / V AdaLN, dmkv) -> [dmod | dmkv] [Wmod; Wkv] (cuBLAS, K = 1024) -> SiLU backward -> atom_dw
+
+| stage | kernel | what it does |
+|---|---|---|
+| transition gate, AdaLN 2, attention input | `tr_bwd_gate.cu` / `post_bwd.cu` / `pre_bwd.cu -DCROSS=1 -DPARALLEL=1` with `-DRMS=1` (`sm100_atom.KERNELS_ESM_TRAIN`) | RMSNorm backward (no centring term), the raw `(1 + s)` scales and raw gates (no sigmoid backward); `pre_bwd` writes dmkv into columns 768..1023 of the gradient table (the row kernels' tensor maps take the row stride of a column view) |
+| attention dQ + bias gradient | `sm100_atom_local/lattn_esm_dq.cu` `local_attn_esm_dq` | query-centric, `lattn_esm.cu`'s frame (128 queries x 256 key positions, TMEM lane = query): S cols 0..255, dP cols 256..511, dS packed over S, dQ = dS K into cols 128..159; dbias summed over the samples in registers (the triangular cells 0 and 4 of a row share 33 registers: cell 0 is zero left of the diagonal, cell 4 right of it), written once per CTA (sample splits: one plane each, summed in order) |
+| attention dK, dV | `lattn_esm_dkv.cu` `local_attn_esm_dkv` | key-centric: 128 keys see the 256 queries within +/- 64; S^T cols 0..255, dP^T 256..511, P^T / dS^T packed over them, dV into cols 128..159, dK into 384..415; the bias of (query, key) per warp in shared memory |
+| q / k norm + rotary backward | `lesm.cu` `local_esm_qkrope_bwd` (+ `local_esm_qk_fin`) | in place over dP's q / k blocks: rotary transposed, RMSNorm backward from the saved q / k; the norm weights' gradients as block partials summed in order |
+| pair-bias backward | `lbias.cu` `local_esm_bias_bwd` (+ `local_bias_fin`) | pair row (w, i, slot) takes dbias at position `start_w + slot` (the slide recomputed from the mask on the device), then `lbias.cu`'s LN backward |
+| conditioning | cuBLAS `[dmod \| dmkv] [Wsc1; Wbi1; Wsc2; Wbi2; Wos; Wts; Wkv_s; Wkv_b]` (fp32 out) + `lesm.cu` `local_esm_silu_bwd` | every table of the block is a product of silu(c): one K = 1024 product, dc = rn(g silu'(c)), and sc = rn(silu(c)) for the weight gradients |
+| weight gradients | `atom_dw` (8 problems: the eight conditioning weights as two problems against sc) | as in the AF3 block |
+
+The two attention kernels have 512 threads (warp 15 also issues the loads and the MMAs; 128 registers, no spills). A sample's MMAs wait for
+its predecessor's dQ (dK / dV) drain only for the half of S whose columns hold it: dP and the first half of S are issued right after dQ.
+
+Measured, one block, forward + backward as one CUDA graph, bf16-mixed (fp32 master parameters, bf16 autocast), conditioning shared by the
+samples (an expanded view), gradients into fresh tensors, ms:
+
+| (A, N) | B200 kernels | module path (B200) | x |
+|---|---|---|---|
+| (48, 4096) | 1.859 | 23.38 | 12.6 |
+| (48, 8192) | 3.531 | 46.94 | 13.3 |
+
+At (48, 4096) (eager profile, us): atom_dw 252, post_bwd 171, attention dK / dV 138, post_fwd 129, attention dQ 124, tr_bwd_gate 118,
+attention forward 108, pre_bwd 107, cond_fwd 104, pre_fwd 96, the K = 1024 conditioning product 85, q / k backward 77, torch's
+materialisation of the expanded conditioning (forward and backward) 77, q / k forward 46, SiLU backward 37, pair-bias backward 27.
+Accuracy (the test's shapes, every gradient against the fp64 module): 1.0-1.2x the module path's own bf16 error (e.g. at (2, 512, 400 real):
+output 5.6e-3 / 5.2e-3, d single 6.7e-3 / 6.3e-3, dWq 1.34e-2 / 1.27e-2). Tests (same file): seven training shapes x {fp32 parameters
+under autocast, bf16 parameters}, the shared conditioning as one expanded leaf, `ef < 1.5 em + 3e-3` on every gradient; bitwise repeatable
+(all but the query bias, whose column sum uses atomics as in the AF3 block); a whole training step captured in a CUDA graph and replayed
+with new inputs and another mask.
 
 ## Not covered
 
-B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 or with a gradient, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).

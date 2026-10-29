@@ -9,6 +9,7 @@
 //                      the rotary with per-atom tables cos / sin [n, 16] (row r is atom r % n): channel c < 16 pairs with c + 16,
 //                      (a, b) -> (a cos - b sin, b cos + a sin). A warp per row, 4 channels a lane (8 lanes a head; the partner is lane ^ 4).
 //                      q, k [M, 128] (rows ld apart) bf16 -> qo, ko [M, 128] bf16.
+// Training: local_esm_qkrope_bwd (+ local_esm_qk_fin), local_esm_silu_bwd (below); the pair bias's backward is lbias.cu's local_esm_bias_bwd.
 // SPDX-License-Identifier: Apache-2.0
 #include <cuda_bf16.h>
 #include <cstdint>
@@ -135,5 +136,109 @@ local_esm_qkrope(const __nv_bfloat16* __restrict__ q, const __nv_bfloat16* __res
     }
     __nv_bfloat16* dst = t ? ko : qo;
     *reinterpret_cast<uint2*>(dst + (size_t)row * DM + 4 * lane) = make_uint2(pk(o.x, o.y), pk(o.z, o.w));
+  }
+}
+
+// ------------------------------------------------------------------------------------------------ training (backward)
+//   local_esm_qkrope_bwd  the backward of local_esm_qkrope, in place: dq, dk [M, 128] bf16 (rows ldd apart; the gradients of the rotated q / k)
+//                         -> the gradients of the projections' q / k (pre-norm). Rotary transposed, (da', db') -> (da' cos + db' sin,
+//                         db' cos - da' sin); RMSNorm backward per head from the saved q / k (recomputed statistics): u = x r, g = dy w,
+//                         dx = r (g - u mean(g u)). The norm weights' gradients sum_rows dy u per channel (the 4 heads add) leave as per-block
+//                         partials [gridDim.x, 64] (q 0..31, k 32..63), summed in block order by local_esm_qk_fin (deterministic).
+//   local_esm_silu_bwd    ESMFold2's conditioning: every table is a product of sc = rn(silu(c)); g [M, 128] fp32 = the tables' gradient times their
+//                         stacked weights -> dc = rn(g silu'(c)) and sc (the weight gradients' operand), bf16.
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_qkrope_bwd(__nv_bfloat16* __restrict__ dq, __nv_bfloat16* __restrict__ dk, int ldd, const __nv_bfloat16* __restrict__ q,
+                     const __nv_bfloat16* __restrict__ k, int ld, const float* __restrict__ wq, const float* __restrict__ wk,
+                     const float* __restrict__ cs, const float* __restrict__ sn, float* __restrict__ part, int M, int n, float eps) {
+  __shared__ float red[8][64];
+  const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+  const int c = 4 * (lane & 7);
+  const bool lo = c < 16;
+  float gw[2][4] = {{0.f, 0.f, 0.f, 0.f}, {0.f, 0.f, 0.f, 0.f}};
+  for (int row = blockIdx.x * 8 + warp; row < M; row += gridDim.x * 8) {
+    const int atom = row % n;
+    const float4 cv = *reinterpret_cast<const float4*>(cs + (size_t)atom * 16 + (c & 15));
+    const float4 sv = *reinterpret_cast<const float4*>(sn + (size_t)atom * 16 + (c & 15));
+#pragma unroll
+    for (int t = 0; t < 2; ++t) {
+      __nv_bfloat16* g = (t ? dk : dq) + (size_t)row * ldd + 4 * lane;
+      const float* wt = t ? wk : wq;
+      const float4 x = ld4((t ? k : q) + (size_t)row * ld + 4 * lane);
+      const float4 dy = ld4(g);
+      float4 y;                                                      // the partner channels' gradient (c ^ 16 on lane ^ 4)
+      y.x = __shfl_xor_sync(0xffffffffu, dy.x, 4); y.y = __shfl_xor_sync(0xffffffffu, dy.y, 4);
+      y.z = __shfl_xor_sync(0xffffffffu, dy.z, 4); y.w = __shfl_xor_sync(0xffffffffu, dy.w, 4);
+      float4 d;                                                      // the gradient before the rotary
+      if (lo) {                                                      // a: da' cos + db' sin
+        d.x = dy.x * cv.x + y.x * sv.x; d.y = dy.y * cv.y + y.y * sv.y; d.z = dy.z * cv.z + y.z * sv.z; d.w = dy.w * cv.w + y.w * sv.w;
+      } else {                                                       // b: db' cos - da' sin
+        d.x = dy.x * cv.x - y.x * sv.x; d.y = dy.y * cv.y - y.y * sv.y; d.z = dy.z * cv.z - y.z * sv.z; d.w = dy.w * cv.w - y.w * sv.w;
+      }
+      float ss = x.x * x.x + x.y * x.y + x.z * x.z + x.w * x.w;
+      ss += __shfl_xor_sync(0xffffffffu, ss, 1); ss += __shfl_xor_sync(0xffffffffu, ss, 2); ss += __shfl_xor_sync(0xffffffffu, ss, 4);
+      const float r = rsqrtf(ss * (1.f / 32.f) + eps);
+      const float4 wv = *reinterpret_cast<const float4*>(wt + c);
+      const float u0 = x.x * r, u1 = x.y * r, u2 = x.z * r, u3 = x.w * r;
+      gw[t][0] += d.x * u0; gw[t][1] += d.y * u1; gw[t][2] += d.z * u2; gw[t][3] += d.w * u3;
+      const float g0 = d.x * wv.x, g1 = d.y * wv.y, g2 = d.z * wv.z, g3 = d.w * wv.w;
+      float m = g0 * u0 + g1 * u1 + g2 * u2 + g3 * u3;
+      m += __shfl_xor_sync(0xffffffffu, m, 1); m += __shfl_xor_sync(0xffffffffu, m, 2); m += __shfl_xor_sync(0xffffffffu, m, 4);
+      m *= 1.f / 32.f;
+      *reinterpret_cast<uint2*>(g) = make_uint2(pk(r * (g0 - u0 * m), r * (g1 - u1 * m)), pk(r * (g2 - u2 * m), r * (g3 - u3 * m)));
+    }
+  }
+  // the four heads of a lane octet add (lanes l, l ^ 8, l ^ 16, l ^ 24), then the warps in order
+#pragma unroll
+  for (int t = 0; t < 2; ++t)
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      float v = gw[t][e];
+      v += __shfl_xor_sync(0xffffffffu, v, 8); v += __shfl_xor_sync(0xffffffffu, v, 16);
+      if (lane < 8) red[warp][32 * t + c + e] = v;
+    }
+  __syncthreads();
+  if (threadIdx.x < 64) {
+    float s = 0.f;
+#pragma unroll
+    for (int w = 0; w < 8; ++w) s += red[w][threadIdx.x];
+    part[(size_t)blockIdx.x * 64 + threadIdx.x] = s;
+  }
+}
+
+// part [nb, 64] -> out [64] (q's weight 0..31, k's 32..63): 512 threads, thread (j, e) sums the blocks j, j + 8, .. of entry e, then the eight
+// sums add in order (a fixed order: deterministic)
+extern "C" __global__ void __launch_bounds__(512)
+local_esm_qk_fin(const float* __restrict__ part, int nb, float* __restrict__ out) {
+  __shared__ float red[8][64];
+  const int e = threadIdx.x & 63, j = threadIdx.x >> 6;
+  float s = 0.f;
+  for (int b = j; b < nb; b += 8) s += part[(size_t)b * 64 + e];
+  red[j][e] = s;
+  __syncthreads();
+  if (threadIdx.x < 64) {
+    float t = 0.f;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) t += red[i][e];
+    out[e] = t;
+  }
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_silu_bwd(const __nv_bfloat16* __restrict__ c, const float* __restrict__ g, __nv_bfloat16* __restrict__ dc, __nv_bfloat16* __restrict__ sc,
+                   long long n4) {
+  for (long long i = (long long)blockIdx.x * blockDim.x + threadIdx.x; i < n4; i += (long long)gridDim.x * blockDim.x) {
+    const float4 x = ld4(c + 4 * i);
+    const float4 gv = *reinterpret_cast<const float4*>(g + 4 * i);
+    const float xs[4] = {x.x, x.y, x.z, x.w}, gs[4] = {gv.x, gv.y, gv.z, gv.w};
+    float d[4], s[4];
+#pragma unroll
+    for (int e = 0; e < 4; ++e) {
+      const float sg = 1.f / (1.f + __expf(-xs[e]));
+      s[e] = xs[e] * sg;
+      d[e] = gs[e] * sg * (1.f + xs[e] * (1.f - sg));
+    }
+    *reinterpret_cast<uint2*>(dc + 4 * i) = make_uint2(pk(d[0], d[1]), pk(d[2], d[3]));
+    *reinterpret_cast<uint2*>(sc + 4 * i) = make_uint2(pk(s[0], s[1]), pk(s[2], s[3]));
   }
 }

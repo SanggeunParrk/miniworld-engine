@@ -11,6 +11,8 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
   lattn_dkv.cu   dK, dV and dbias (key-centric: 16 keys see exactly 4 query windows = 128 queries; dbias is summed over the samples).
   lslide.cu      AlphaFold 3's slid key window: the (at most five) windows whose slid keys differ from the clipped ones, recomputed
                  over their slid keys after the window kernel (inference).
+  lattn_esm.cu, lattn_esm_dq.cu, lattn_esm_dkv.cu, lesm.cu   ESMFold2's 192-key rank-window attention (forward; dQ + bias gradient;
+                 dK / dV) and its q / k RMSNorm + rotary, position-indexed pair bias and conditioning SiLU (inference and training).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
                  (the K / V AdaLN and its backward are inside ``sm100_atom``'s pre_fwd / pre_bwd, ``-DCROSS=1``).
 
@@ -408,6 +410,111 @@ def attn_esm_sm100(q, k, v, bias2, lse=None):
         int(sp),
     )
     return o
+
+
+#: ESMFold2's training kernels on sm_100a (bf16): the attention backward (``lattn_esm_dq.cu``: dQ + the bias gradient; ``lattn_esm_dkv.cu``: dK,
+#: dV), the q / k RMSNorm + rotary backward and the conditioning's SiLU backward (``lesm.cu``), the position-indexed pair bias backward
+#: (``lbias.cu``; its block partials reduced by ``local_bias_fin``). Loaded apart from the inference kernels (``load_esm_train``).
+KERNELS_ESM_TRAIN = {
+    "esm_dq": ("lattn_esm_dq", "local_attn_esm_dq", 193280),
+    "esm_dkv": ("lattn_esm_dkv", "local_attn_esm_dkv", 200960),
+    "esm_qk_b": ("lesm", "local_esm_qkrope_bwd", 0),
+    "esm_qk_fin": ("lesm", "local_esm_qk_fin", 0),
+    "esm_silu_b": ("lesm", "local_esm_silu_bwd", 0),
+    "esm_bias_b": ("lbias", "local_esm_bias_bwd", 0),
+    "pb_fin": ("lbias", "local_bias_fin", 0),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _load_esm_train(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_ESM_TRAIN[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(cubin(stem), func, smem)
+
+
+def load_esm_train(device_index: int) -> None:
+    """Build and load ESMFold2's training kernels on the device (raises on any failure)."""
+    for name in KERNELS_ESM_TRAIN:
+        _load_esm_train(name, device_index)
+
+
+def attn_esm_bwd_sm100(q, k, v, do, bias2, lse, dd, dkv):
+    """The backward of :func:`attn_esm_sm100` (tcgen05): q, k, v, do [A, N, 128] bf16 contiguous (q / k the normalised, rotated ones), bias2
+    [4, nwin, 32, 160] (log2), lse [A, 4, N] (the forward's, log2), dd [A, 4, N] = rowsum(dO O) per head -> dQ, dK, dV (bf16) into the column
+    blocks 0 / 1 / 2 of dkv [A N, 512] (row stride dkv.stride(0)); returns the bias gradient [4, nwin, 32, 160] fp32 (natural units, by
+    position, summed over the samples in a fixed order: deterministic)."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    ldd = dkv.stride(0)
+    nq = N // 128
+    out = _tmap(dkv, (dkv.shape[1], N, A), (ldd * 2, N * ldd * 2), (16, 32, 1), 0)
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    dbias = torch.empty((sp, NH, nwin, WQ, ESM_SPAN) if sp > 1 else (NH, nwin, WQ, ESM_SPAN), device=q.device, dtype=torch.float32)
+    _load_esm_train("esm_dq", d)(
+        (nq * NH * sp, 1, 1), (512, 1, 1),
+        _rows(q, 128), _rows(k, 256), _rows(v, 256), _rows(do, 128), _vec(lse, 128), _vec(dd, 128), out,
+        bias2, dbias, int(N), int(A), int(nwin), int(sp),
+    )
+    sp2 = max(1, min(A, num_sms(d) // (nq * NH)))
+    _load_esm_train("esm_dkv", d)(
+        (nq * NH * sp2, 1, 1), (512, 1, 1),
+        _rows(q, 256), _rows(k, 128), _rows(v, 128), _rows(do, 256), _vec(lse, 256), _vec(dd, 256), out,
+        bias2, int(N), int(A), int(nwin), int(sp2),
+    )
+    return dbias.sum(0) if sp > 1 else dbias
+
+
+def esm_qkrope_bwd(dq, dk, q, k, wq, wk, cos, sin, eps):
+    """The backward of :func:`esm_qkrope`, in place: dq, dk [M, 128] bf16 views with one row stride (the gradients of the rotated q / k) become
+    the gradients of q / k [M, 128] (the projections' bf16 outputs, one row stride). -> the norm weights' gradients [64] fp32 (q 0..31, k 32..63,
+    summed over the rows and heads in a fixed order)."""
+    M = q.shape[0]
+    assert dq.stride(0) == dk.stride(0) and dq.stride(1) == dk.stride(1) == 1 and q.stride(0) == k.stride(0) and q.stride(1) == k.stride(1) == 1
+    assert cos.dtype == sin.dtype == torch.float32 and cos.is_contiguous() and sin.is_contiguous() and cos.shape[1] == 16
+    d = _dev(q)
+    nb = max(1, min(4 * num_sms(d), (M + 7) // 8))
+    part = torch.empty(nb, 64, device=q.device, dtype=torch.float32)
+    out = torch.empty(64, device=q.device, dtype=torch.float32)
+    _load_esm_train("esm_qk_b", d)((nb, 1, 1), (256, 1, 1), dq, dk, int(dq.stride(0)), q, k, int(q.stride(0)), wq, wk, cos, sin, part,
+                                   int(M), int(cos.shape[0]), float(eps))
+    _load_esm_train("esm_qk_fin", d)((1, 1, 1), (512, 1, 1), part, int(nb), out)
+    return out
+
+
+def esm_silu_bwd(c, g):
+    """c [M, 128] bf16 (the conditioning), g [M, 128] fp32 (the tables' gradient times their weights) -> dc = rn(g silu'(c)), sc = rn(silu(c))."""
+    assert c.is_contiguous() and g.is_contiguous() and g.dtype == torch.float32 and c.shape == g.shape
+    dc, sc = torch.empty_like(c), torch.empty_like(c)
+    n4 = c.numel() // 4
+    d = _dev(c)
+    _load_esm_train("esm_silu_b", d)((max(1, min(8 * num_sms(d), (n4 + 255) // 256)), 1, 1), (256, 1, 1), c, g, dc, sc, int(n4))
+    return dc, sc
+
+
+def esm_bias_bwd(z, gamma, wb, dbias2, kmask, n0, eps=1e-5):
+    """The backward of :func:`esm_bias`: z the trunked pair [nwin, 32, 192, 16] bf16 (contiguous), dbias2 [4, nwin, 32, 160] fp32 (natural
+    units) -> dz (z's shape, bf16), dgamma [16], dWb [4, 16] (fp32; the block partials summed in order)."""
+    nwin = z.shape[0]
+    N = 32 * nwin
+    assert tuple(z.shape) == (nwin, 32, ESM_KEYS, DP) and z.is_contiguous() and z.dtype == torch.bfloat16 and N % 128 == 0
+    d = _dev(z)
+    wb, gamma, bf = _params(wb, gamma)
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 16:
+        km = km.clone()
+    rows = z.numel() // DP
+    dz = torch.empty_like(z)
+    nb = min(num_sms(d), (rows + 255) // 256)
+    part = torch.empty(nb, NH * DP, device=z.device, dtype=torch.float32)
+    dgamma = torch.empty(DP, device=z.device, dtype=torch.float32)
+    dwb = torch.empty(NH, DP, device=z.device, dtype=torch.float32)
+    _load_esm_train("esm_bias_b", d)((nb, 1, 1), (256, 1, 1), z, wb, gamma, dbias2.contiguous(), km, dz, part, int(N), int(n0), float(eps), bf)
+    _load_esm_train("pb_fin", d)((1, 1, 1), (64, 1, 1), part, int(nb), wb, gamma, dgamma, dwb, bf)
+    return dz, dgamma, dwb
 
 
 def slide_bwd_prep(do, dd, kmask, n0, A):
