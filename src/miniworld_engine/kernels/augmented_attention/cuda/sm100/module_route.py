@@ -10,21 +10,23 @@ autocast copies were ~2/3 of a training step. Here (``aa_rows.cu`` for every row
   training forward   one cast launch (fp32 master weights -> bf16 [Wq; Wk; Wv; Wg], [bq, 0], Wo, Wsc, bsc; fp32 path: one packing launch)
                      | addmm q|k|v|g (cuBLAS) | [fp32: q|k|v rounded to the TF32 grid in place] | the pair pass (LayerNorm + head
                      projection in one read of the pair, ``fused_pair._pair_bias``) [+ ``aam_bias_fix``: extra_pair_bias, padding, per-sample
-                     or fp32 key masks] | the tcgen05 core on q / k / v column views (attn_fwd2 / attn_fwd_tf32) | ``aam_gate_o`` | mm Wo |
-                     addmm Wsc | ``aam_res_gate`` (gate + residual)
-  training backward  ``aam_res_gate_bwd`` | mm dWo, mm d og | ``aam_gate_bwd`` (dO for the core, D = rowsum(dO O), d gate into the
-                     q|k|v|g gradient) | attn_dkv + attn_dqb built -DDET=1 -DDQPART=1 (TF32: dK / dV straight into the q|k|v|g gradient)
-                     | ``aam_finish`` (dQ partials summed in order into the q|k|v|g gradient, bf16 dK / dV converted, dbq partials) |
+                     or fp32 key masks] | the tcgen05 core on q / k / v column views (attn_fwd2 / attn_fwd_tf32 built -DGATE=1: the
+                     epilogue writes og = sigmoid(g) O, O is never stored) | mm Wo | addmm Wsc | ``aam_res_gate`` (gate + residual)
+  training backward  ``aam_res_gate_bwd`` | mm dWo, mm d og | ``aam_gate_bwd`` (dO for the core, D = rowsum(dog og) = rowsum(dO O), d
+                     gate into the q|k|v|g gradient) | attn_dkv + attn_dqb built -DDET=1 -DDQPART=1 (dK / dV straight into the q|k|v|g
+                     gradient: bf16 attn_dkv -DOBF=1) | ``aam_finish`` (the per key chunk dQ partials summed in order into the q|k|v|g
+                     gradient, dbq partials) |
                      mm dx, mm dW q|k|v|g | the pair backward (``aam_dbias_fix`` first when the bias was fixed) | mm d cond, mm dWsc |
                      one fixed-order column-sum launch for dbq and dbsc
-  inference (bf16)   cached weight casts (q pre-scaled into exp2 units) | addmm | pair pass (log2 units) [+ ``aam_bias_fix``] | ``attn_inf``
-                     (sigmoid(g) o written over q; any A, odd A without a pad sample; any L, the bias rows padded to a multiple of 8) | mm
-                     Wo (reading the q columns) | addmm Wsc | ``aam_res_gate``
-  inference (fp32)   the training forward's kernels, nothing saved
+  inference          cached weight casts (q pre-scaled into exp2 units) | addmm | pair pass (log2 units) [+ ``aam_bias_fix``] | the
+                     inference core, sigmoid(g) o written over q (any A, odd A without a pad sample; any L, the bias rows padded to a
+                     multiple of 16): bf16 ``attn_inf`` on q|k|v|g; fp32 ``attn_inf_tf32`` on q|k|g + v^T (``aam_vt_f32``: v transposed
+                     to [d, A, L padded to 4] on the TF32 grid, q / k rounded in place) | mm Wo (reading the q columns) | addmm Wsc |
+                     ``aam_res_gate``
 
 QK-norm (per-head RMSNorm of q and k): ``aam_qknorm`` after the GEMM (training: normalized copies, the rstd kept; inference: in place)
 and ``aam_qknorm_bwd`` after the core's backward (in place in the q|k|v|g gradient). A key mask per sample: the cores built -DKMASK=1
-(the mask as bits, ``aam_pack_kmask``; masked keys' P exactly 0 in the backward).
+(the mask as bits, ``aam_pack_kmask``; masked keys' P exactly 0 in the backward; attn_inf_tf32 included).
 
 Every gradient is bitwise repeatable (fixed-order sums, the deterministic core backward). Contract (``supported``): sm_100, q / k / v
 heads at a token DiT layout (``TDIT_HEADS``), B == 1, QK-norm on or off, d_pair 128 (bf16 pair: also 256 at 16 heads), a key mask [L]
@@ -43,8 +45,8 @@ import torch.nn.functional as F
 from miniworld_engine import settings
 from miniworld_engine.kernels._compile import opaque
 
-from . import TDIT_HEADS, _grid, _index, _is_blackwell, _rs, _sm100_kernel, _tdit_defs, _tm, forward, forward_tf32
-from .fused_pair import NEG, _bwd_bf16, _core_defs, _finish_grid, _pair_bias, _tf32_on, _wf
+from . import TDIT_HEADS, _grid, _index, _is_blackwell, _rs, _sm100_kernel, _tdit_defs, _tm
+from .fused_pair import NEG, _core_defs, _finish_grid, _pair_bias, _tf32_on, _wf
 
 BF = torch.bfloat16
 F32 = torch.float32
@@ -96,20 +98,22 @@ def _build(dev: int, H: int, DH: int, dtype: torch.dtype, pair_dtype: torch.dtyp
     for a per-sample key mask (-DKMASK=1)."""
     kd = ("KMASK=1",) if kmask else ()
     td, cd = (*_tdit_defs(H, DH), *kd), (*_core_defs(H, DH), *kd)
-    for name in ("aam_gate_o_bf16", "aam_res_gate_bb", "aam_bias_fix_bf16", "aam_dbias_fix", "aam_round_qkv", "aam_finish_bf16", "aam_pack_kmask"):
+    for name in ("aam_res_gate_bb", "aam_bias_fix_bf16", "aam_dbias_fix", "aam_round_qkv", "aam_vt_f32", "aam_finish_bf16", "aam_pack_kmask"):
         _k(name, dev)
-    if dtype is BF and not train:
-        _sm100_kernel("attn_inf", "augattn_inf_sm100", dev, defs=td)
+    if not train:
+        if dtype is BF:
+            _sm100_kernel("attn_inf", "augattn_inf_sm100", dev, defs=td)
+        else:
+            _sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", dev, defs=td)
     elif dtype is BF:
-        _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=td)
-        _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=cd)
+        _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=(*td, "GATE=1"))
+        _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=(*cd, "OBF=1"))
         _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=(*cd, "DQPART=1"))
         _sm100_kernel("glue", "bias_transpose_bf16", dev, smem=0)
     else:
-        _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=td)
-        if train:
-            _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=cd)
-            _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=(*cd, "DQPART=1"))
+        _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=(*td, "GATE=1"))
+        _sm100_kernel("attn_dkv_tf32", "augattn_dkv_tf32_sm100", dev, defs=cd)
+        _sm100_kernel("attn_dqb_tf32", "augattn_dqb_tf32_sm100", dev, defs=(*cd, "DQPART=1"))
     if pair_dtype is BF:
         from ..apb import ext
 
@@ -182,14 +186,6 @@ def _weights(wq, bq, wk, wv, wg, wo, wsc, bsc, dt, qscale: float = 1.0):
 # --------------------------------------------------------------------------------------------------- row passes
 def _n4grid(n4: int, dev: int):
     return _finish_grid(n4, dev)
-
-
-def _gate_o(O, g, og):
-    dev = _index(O)
-    M, W = O.shape
-    n8 = M * W // 8
-    name = "aam_gate_o_bf16" if og.dtype is BF else "aam_gate_o_f32"
-    _k(name, dev)(_n4grid(n8, dev), (256, 1, 1), O, g, int(g.stride(0)), og, int(n8), int(W))
 
 
 def _res_gate(res, sp, y, out, L, Lp):
@@ -307,30 +303,32 @@ def _km_defs(km) -> tuple[str, ...]:
     return () if km is None else ("KMASK=1",)
 
 
-def _core_fwd(q, k, v, bias, A, L, H, DH, bf: bool, km):
-    """The training forward core (``attn_fwd2`` / ``attn_fwd_tf32``; ``km``: the per-sample key mask bits, built -DKMASK=1):
-    O [A L, W] fp32, LSE [A, H, L]."""
-    if km is None:
-        return (forward if bf else forward_tf32)(q, k, v, bias, A, L, H, DH)
+def _core_fwd(q, k, v, g, bias, A, L, H, DH, bf: bool, km):
+    """The training forward core built -DGATE=1 (``attn_fwd2`` / ``attn_fwd_tf32``; ``km``: the per-sample key mask bits, built
+    -DKMASK=1): og = sigmoid(g) O [A L, W] in the compute dtype (``g`` the gate columns), LSE [A, H, L]."""
     dev = _index(q)
     W = H * DH
-    O = torch.empty(A * L, W, device=q.device, dtype=F32)
+    dt = q.dtype
+    og = torch.empty(A * L, W, device=q.device, dtype=dt)
     LSE = torch.empty(A, H, L, device=q.device, dtype=F32)
-    defs = (*_tdit_defs(H, DH), "KMASK=1")
+    defs = (*_tdit_defs(H, DH), *_km_defs(km), "GATE=1")
     grid = _grid((A // 2) * H * (L // 128), dev)
+    kx = () if km is None else (km,)
+    gx = (g, int(g.stride(0)))
+    dims = [W, A * L]
     if bf:
+        mo = _tm(og, dims, W * 2, [DH, 128])
         maps = (
-            _tm(q, [W, A * L], _rs(q), [DH, 128]),
-            _tm(k, [W, A * L], _rs(k), [DH, 64]),
-            _tm(v, [W, A * L], _rs(v), [DH, 64]),
+            _tm(q, dims, _rs(q), [DH, 128]),
+            _tm(k, dims, _rs(k), [DH, 64]),
+            _tm(v, dims, _rs(v), [DH, 64]),
             _tm(bias, [L, H * L], L * 2, [64, 128]),
-            _tm(O, [W, A * L], W * 4, [32, 128], swizzle=128, dtype="f32"),
-            _tm(O, [W, A * L], W * 4, [16, 128], swizzle=64, dtype="f32"),
+            mo,
+            mo,
         )
-        _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=defs)(grid, (384, 1, 1), *maps, O, LSE, int(L), int(A), km)
+        _sm100_kernel("attn_fwd2", "augattn_fwd2_sm100", dev, defs=defs)(grid, (384, 1, 1), *maps, None, LSE, int(L), int(A), *kx, *gx)
     else:
         f32 = dict(dtype="f32")
-        dims = [W, A * L]
         maps = (
             _tm(q, dims, _rs(q), [32, 128], swizzle=128, **f32),
             _tm(q, dims, _rs(q), [16, 128], swizzle=64, **f32),
@@ -338,17 +336,17 @@ def _core_fwd(q, k, v, bias, A, L, H, DH, bf: bool, km):
             _tm(k, dims, _rs(k), [16, 32], swizzle=64, **f32),
             _tm(v, dims, _rs(v), [32, 32], swizzle="128a32", **f32),
             _tm(bias, [L, H * L], L * 4, [32, 128], swizzle=128, **f32),
-            _tm(O, dims, W * 4, [32, 128], swizzle=128, **f32),
-            _tm(O, dims, W * 4, [16, 128], swizzle=64, **f32),
+            _tm(og, dims, W * 4, [32, 128], swizzle=128, **f32),
+            _tm(og, dims, W * 4, [16, 128], swizzle=64, **f32),
         )
-        _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=defs)(grid, (384, 1, 1), *maps, LSE, int(L), int(A), km)
-    return O, LSE
+        _sm100_kernel("attn_fwd_tf32", "augattn_fwd_tf32_sm100", dev, defs=defs)(grid, (384, 1, 1), *maps, LSE, int(L), int(A), *kx, *gx)
+    return og, LSE
 
 
-def _bwd_bf16_km(q2, k2, v2, dob, bias, LSE, Dd, A, L, H, DH, km):
-    """``fused_pair._bwd_bf16`` with the per-sample key mask (-DKMASK=1): (dQ partials, dK, dV, dbias) fp32."""
-    if km is None:
-        return _bwd_bf16(q2, k2, v2, dob, bias, LSE, Dd, A, L, H, DH)
+def _bwd_bf16_into(q2, k2, v2, dob, bias, LSE, Dd, A, L, H, DH, dk, dv, km):
+    """The bf16 core's deterministic backward with dK / dV written as bf16 straight into ``dk`` / ``dv`` (column views of the q|k|v|g
+    gradient; ``attn_dkv`` built -DOBF=1) and ``km`` the per-sample key mask bits (-DKMASK=1) or None: (dQ partials [L / 128, A L, W],
+    dbias [H, L, L]) fp32."""
     from . import bias_transpose
 
     dev = _index(q2)
@@ -356,19 +354,16 @@ def _bwd_bf16_km(q2, k2, v2, dob, bias, LSE, Dd, A, L, H, DH, km):
     f32 = dict(dtype="f32")
     bias_t = bias_transpose(bias)
     DQ = torch.empty(nch, M, W, device=q2.device, dtype=F32)
-    DK, DV = (torch.empty(M, W, device=q2.device, dtype=F32) for _ in range(2))
     DB = torch.empty(H, L, L, device=q2.device, dtype=F32)
     dims = [W, M]
+    mk, mv = _tm(dk, dims, _rs(dk), [DH, 128]), _tm(dv, dims, _rs(dv), [DH, 128])
     dkv_maps = (
         _tm(q2, dims, _rs(q2), [DH, 64]),
         _tm(k2, dims, _rs(k2), [DH, 128]),
         _tm(v2, dims, _rs(v2), [DH, 128]),
         _tm(dob, dims, _rs(dob), [DH, 64]),
         _tm(bias_t, [L, H * L], L * 2, [64, 128]),
-        _tm(DK, dims, W * 4, [32, 128], swizzle=128, **f32),
-        _tm(DK, dims, W * 4, [16, 128], swizzle=64, **f32),
-        _tm(DV, dims, W * 4, [32, 128], swizzle=128, **f32),
-        _tm(DV, dims, W * 4, [16, 128], swizzle=64, **f32),
+        mk, mk, mv, mv,
     )
     dq_dims = [W, nch * M]
     dqb_maps = (
@@ -377,14 +372,15 @@ def _bwd_bf16_km(q2, k2, v2, dob, bias, LSE, Dd, A, L, H, DH, km):
         _tm(DQ, dq_dims, W * 4, [32, 128], swizzle=128, **f32),
         _tm(DQ, dq_dims, W * 4, [16, 128], swizzle=64, **f32),
     )
-    cd = (*_core_defs(H, DH), "KMASK=1")
-    _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=cd)(
-        _grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, DK, DV, None, int(L), int(A), km
+    cd = (*_core_defs(H, DH), *_km_defs(km))
+    kx = () if km is None else (km,)
+    _sm100_kernel("attn_dkv", "augattn_dkv_sm100", dev, defs=(*cd, "OBF=1"))(
+        _grid(A * H * (L // 128), dev), (384, 1, 1), *dkv_maps, LSE, Dd, None, None, None, int(L), int(A), *kx
     )
     _sm100_kernel("attn_dqb", "augattn_dqb_sm100", dev, defs=(*cd, "DQPART=1"))(
-        _grid(H * (L // 128) * nch, dev), (384, 1, 1), *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A), km
+        _grid(H * (L // 128) * nch, dev), (384, 1, 1), *dqb_maps, LSE, Dd, DQ, DB, int(L), int(A), *kx
     )
-    return DQ, DK, DV, DB
+    return DQ, DB
 
 
 # --------------------------------------------------------------------------------------------------- training forward
@@ -402,21 +398,18 @@ def _fixed(mask, extra, pair_dtype, train: bool, L: int, Lb: int, Lp: int) -> bo
     return Lp != Lb or Lb != L or extra is not None or (mask is not None and not fold)
 
 
-def _fwd_fake(x, cond, res, pair, mask, extra, params, eps, heads, train, out_dtype, qke):
+def _fwd_fake(x, cond, res, pair, mask, extra, params, eps, heads, out_dtype, qke):
     A, _, L, D = x.shape
     dt = x.dtype
-    if not train:
-        return [x.new_empty((A, 1, L, D), dtype=out_dtype), *(x.new_empty((0, 1)) for _ in range(16))]
     Ap, Lp, Lb = _dims(A, L)
     Mp, M = Ap * Lp, A * L
     e = x.new_empty
-    st = (Lb * Lb, 2) if (train and pair.dtype is F32) else (0, 2)
+    st = (Lb * Lb, 2) if pair.dtype is F32 else (0, 2)
     padded = (Ap, Lp) != (A, L)
     return [
         e((A, 1, L, D), dtype=out_dtype),
         e((Mp if padded else 0, D), dtype=dt),         # x padded
         e((Mp, 4 * D), dtype=dt),                       # q|k|v|g
-        e((Mp, D), dtype=F32),                          # O
         e((Ap, heads, Lp), dtype=F32),                  # LSE
         e((Mp, D), dtype=dt),                           # og
         e((heads, Lp, Lp), dtype=dt),                   # bias
@@ -441,10 +434,10 @@ def _own_w(w, dt) -> bool:
 @opaque(fake=_fwd_fake, name="augmented_attention_module_sm100_fwd")
 def _fwd(
     x: torch.Tensor, cond: torch.Tensor, res: torch.Tensor | None, pair: torch.Tensor, mask: torch.Tensor | None, extra: torch.Tensor | None,
-    params: list[torch.Tensor], eps: float, heads: int, train: bool, out_dtype: torch.dtype, qke: list[float],
+    params: list[torch.Tensor], eps: float, heads: int, out_dtype: torch.dtype, qke: list[float],
 ) -> list[torch.Tensor]:
-    """[out, *saved]: see the module docstring (training forward); ``train`` False keeps nothing for a backward (empty saved slots).
-    ``qke``: the QK-norm epsilons (q, k) with its weights the last two ``params``, or empty (no QK-norm)."""
+    """[out, *saved]: see the module docstring (training forward). ``qke``: the QK-norm epsilons (q, k) with its weights the last two
+    ``params``, or empty (no QK-norm)."""
     from miniworld_engine.kernels._tf32 import tf32_matmul
 
     wq, bq, wk, wv, wg, wo, wsc, bsc, lnw, wb = params[:10]
@@ -466,35 +459,31 @@ def _fwd(
             c0 = 2 * D if qke else 0
             n4 = Mp * (3 * D - c0) // 4
             _k("aam_round_qkv", _index(x))(_n4grid(n4, _index(x)), (256, 1, 1), qkvg[:, c0:], int(4 * D), int(n4), int(3 * D - c0))
-        bias, pst, _ = _bias(pair, lnw, wb, mask, extra, eps, bf, train, L, Lb, Lp, H)
+        bias, pst, _ = _bias(pair, lnw, wb, mask, extra, eps, bf, True, L, Lb, Lp, H)
         km = _kmask(mask, A, Ap, L, Lp // 32) if (mask is not None and mask.dim() == 2) else None
         q, k, v, g = (qkvg[:, i * D : (i + 1) * D] for i in range(4))
         qn = kn = rq = None
         if qke:
             qn, kn = (torch.empty(Mp, D, device=dev, dtype=dt) for _ in range(2))
-            rq = torch.empty(Mp, 2 * H, device=dev, dtype=F32) if train else None
+            rq = torch.empty(Mp, 2 * H, device=dev, dtype=F32)
             _qknorm(qkvg, params[10], params[11], qn, kn, rq, H, DH, qke, 1.0)
             q, k = qn, kn
-        O, LSE = _core_fwd(q, k, v, bias, Ap, Lp, H, DH, bf, km)
-        og = torch.empty(Mp, D, device=dev, dtype=dt)
-        _gate_o(O, g, og)
+        og, LSE = _core_fwd(q, k, v, g, bias, Ap, Lp, H, DH, bf, km)
         y = torch.mm(og, wo_.t())
         sp = torch.addmm(bsc_, cond.reshape(M, cond.shape[-1]), wsc_.t())
         out = torch.empty(A, 1, L, D, device=dev, dtype=out_dtype)
         _res_gate(None if res is None else res.reshape(M, D), sp, y, out.view(M, D), L, Lp)
     e = x.new_empty
-    if not train:
-        return [out, *(e((0, 1)) for _ in range(16))]
     # custom-op outputs may not alias the inputs: the fp32 path's Wo / Wsc are the parameters themselves (the caller keeps those)
     wo_c = wo_ if wo_ is not wo else e((0, D))
     wsc_c = wsc_ if wsc_ is not wsc else e((0, wsc.shape[1]))
     kmo = km if km is not None else e((0,), dtype=torch.int32)
     qx = [qn, kn, rq] if qke else [e((0, D)), e((0, D)), e((0, 2 * H), dtype=F32)]
-    return [out, xp if padded else e((0, D)), qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo_c, wsc_c, kmo, *qx]
+    return [out, xp if padded else e((0, D)), qkvg, LSE, og, bias, y, sp, pst, wcat, wo_c, wsc_c, kmo, *qx]
 
 
 # --------------------------------------------------------------------------------------------------- training backward
-def _bwd_fake(dout, x, xp, cond, pair, extra, lnw, wb, qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk, eps,
+def _bwd_fake(dout, x, xp, cond, pair, extra, lnw, wb, qkvg, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk, eps,
               has_res, fixed):
     A, _, L, D = x.shape
     dt = x.dtype
@@ -553,7 +542,7 @@ def _bwd_tf32_into(q, k, v, do, bias, LSE, Dd, A, L, H, DH, dk, dv, km=None):
 @opaque(fake=_bwd_fake, name="augmented_attention_module_sm100_bwd")
 def _bwd(
     dout: torch.Tensor, x: torch.Tensor, xp: torch.Tensor, cond: torch.Tensor, pair: torch.Tensor, extra: torch.Tensor | None,
-    lnw: torch.Tensor, wb: torch.Tensor, qkvg: torch.Tensor, O: torch.Tensor, LSE: torch.Tensor, og: torch.Tensor, bias: torch.Tensor,
+    lnw: torch.Tensor, wb: torch.Tensor, qkvg: torch.Tensor, LSE: torch.Tensor, og: torch.Tensor, bias: torch.Tensor,
     y: torch.Tensor, sp: torch.Tensor, pst: torch.Tensor, wcat: torch.Tensor, wo: torch.Tensor, wsc: torch.Tensor, km: torch.Tensor,
     qn: torch.Tensor, kn: torch.Tensor, rq: torch.Tensor, nq: torch.Tensor | None, nk: torch.Tensor | None, eps: float, has_res: bool,
     fixed: bool,
@@ -593,7 +582,7 @@ def _bwd(
         dd = torch.empty(Ap, H, Lp, device=x.device, dtype=F32)
         g = qkvg[:, 3 * D :]
         _k("aam_gate_bwd_bf16" if bf else "aam_gate_bwd_f32", dev)(
-            (_row_blocks(Mp, dev), 1, 1), (D // 8, RB, 1), dog, O, g, int(g.stride(0)), dob, dd, dqkvg[:, 3 * D :], int(4 * D), int(Mp), int(Lp),
+            (_row_blocks(Mp, dev), 1, 1), (D // 8, RB, 1), dog, og, g, int(g.stride(0)), dob, dd, dqkvg[:, 3 * D :], int(4 * D), int(Mp), int(Lp),
             int(H), int(DH)
         )
         q, k, v = (qkvg[:, i * D : (i + 1) * D] for i in range(3))
@@ -602,16 +591,12 @@ def _bwd(
             q, k = qn, kn
         dbq = torch.empty(D, device=x.device, dtype=F32)
         kmb = km if km.numel() else None
-        if bf:
-            DQ, DK, DV, DB = _bwd_bf16_km(q, k, v, dob, bias, LSE, dd, Ap, Lp, H, DH, kmb)
-            _k("aam_finish_bf16", dev)(
-                (nbr, 1, 1), (D // 8, RB, 1), DQ, int(DQ.shape[0]), int(Mp * D), DK, DV, dqkvg, int(4 * D), int(Mp), int(D), part, dbq, _counter(dev, 1)
-            )
-        else:
-            DQ, DB = _bwd_tf32_into(q, k, v, dob, bias, LSE, dd, Ap, Lp, H, DH, dqkvg[:, D : 2 * D], dqkvg[:, 2 * D : 3 * D], kmb)
-            _k("aam_finish_f32", dev)(
-                (nbr, 1, 1), (D // 8, RB, 1), DQ, int(DQ.shape[0]), int(Mp * D), dqkvg, int(4 * D), int(Mp), int(D), part, dbq, _counter(dev, 1)
-            )
+        DQ, DB = (_bwd_bf16_into if bf else _bwd_tf32_into)(
+            q, k, v, dob, bias, LSE, dd, Ap, Lp, H, DH, dqkvg[:, D : 2 * D], dqkvg[:, 2 * D : 3 * D], kmb
+        )
+        _k("aam_finish_bf16" if bf else "aam_finish_f32", dev)(
+            (nbr, 1, 1), (D // 8, RB, 1), DQ, int(DQ.shape[0]), int(Mp * D), dqkvg, int(4 * D), int(Mp), int(D), part, dbq, _counter(dev, 1)
+        )
         del DQ
         dnq, dnk = (x.new_empty((0,), dtype=F32) for _ in range(2))
         if qk:   # dq / dk of the normalized q / k -> of the raw ones, in place; dbq and the norm weights' gradients from its partials
@@ -670,8 +655,8 @@ class _Route(torch.autograd.Function):
     @staticmethod
     def forward(ctx, x, cond, res, pair, mask, extra, eps, heads, out_dtype, qke, *params):  # noqa: D102
         A, _, L, D = x.shape
-        out, xp, qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq = _fwd(
-            x, cond, res, pair, mask, extra, list(params), eps, heads, True, out_dtype, list(qke)
+        out, xp, qkvg, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq = _fwd(
+            x, cond, res, pair, mask, extra, list(params), eps, heads, out_dtype, list(qke)
         )
         if wo.numel() == 0:
             wo = params[5]
@@ -680,16 +665,16 @@ class _Route(torch.autograd.Function):
         Ap, Lp, Lb = _dims(A, L)
         fixed = _fixed(mask, extra, pair.dtype, True, L, Lb, Lp)
         nqk = (params[10], params[11]) if qke else (None, None)
-        ctx.save_for_backward(x, xp, cond, pair, extra, params[8], params[9], qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, *nqk)
+        ctx.save_for_backward(x, xp, cond, pair, extra, params[8], params[9], qkvg, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, *nqk)
         ctx.meta = (eps, res is not None, fixed, [p.dtype for p in params], extra is not None and ctx.needs_input_grad[5])
         return out
 
     @staticmethod
     def backward(ctx, dout):  # noqa: D102
-        x, xp, cond, pair, extra, lnw, wb, qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk = ctx.saved_tensors
+        x, xp, cond, pair, extra, lnw, wb, qkvg, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk = ctx.saved_tensors
         eps, has_res, fixed, pdt, xgrad = ctx.meta
         dnq, dnk, dx, dcond, dpair, dlnw, dwb, dWcat, dbq, dWo, dWsc, dbsc, dxt = _bwd(
-            dout, x, xp, cond, pair, extra, lnw, wb, qkvg, O, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk, eps, has_res,
+            dout, x, xp, cond, pair, extra, lnw, wb, qkvg, LSE, og, bias, y, sp, pst, wcat, wo, wsc, km, qn, kn, rq, nq, nk, eps, has_res,
             fixed
         )
         D = x.shape[-1]
@@ -701,38 +686,47 @@ class _Route(torch.autograd.Function):
                 (dxt.to(extra.dtype) if xgrad else None), None, None, None, None, *pg)
 
 
-# --------------------------------------------------------------------------------------------------- inference (bf16): attn_inf
-def _inf_bf16_fake(x, cond, res, pair, mask, extra, params, eps, heads, out_dtype, qke):
+# --------------------------------------------------------------------------------------------------- inference: attn_inf / attn_inf_tf32
+def _inf_fake(x, cond, res, pair, mask, extra, params, eps, heads, out_dtype, qke):
     return x.new_empty(x.shape, dtype=out_dtype)
 
 
-@opaque(fake=_inf_bf16_fake, name="augmented_attention_module_sm100_inf_bf16")
-def _inf_bf16(
+@opaque(fake=_inf_fake, name="augmented_attention_module_sm100_inf")
+def _inf(
     x: torch.Tensor, cond: torch.Tensor, res: torch.Tensor | None, pair: torch.Tensor, mask: torch.Tensor | None, extra: torch.Tensor | None,
     params: list[torch.Tensor], eps: float, heads: int, out_dtype: torch.dtype, qke: list[float],
 ) -> torch.Tensor:
-    """The bf16 inference update (see the module docstring); QK-norm (``qke``): q / k normalized in place, q scaled after it."""
+    """The inference update (see the module docstring); QK-norm (``qke``): q / k normalized in place, q scaled after it."""
     from miniworld_engine.kernels import _capture
+    from miniworld_engine.kernels._tf32 import tf32_matmul
 
     wq, bq, wk, wv, wg, wo, wsc, bsc, lnw, wb = params[:10]
     A, _, L, D = x.shape
     H, DH = heads, D // heads
     M = A * L
     dev = _index(x)
+    dt = x.dtype
+    bf = dt is BF
     qs = LOG2E * DH**-0.5
     ws = (wq, bq, wk, wv, wg, wo, wsc, bsc)
     wscale = 1.0 if qke else qs   # QK-norm: the scale follows the norm (in the norm pass)
-    wcat, bcat, wo_, wsc_, bsc_ = _capture.param_forms(("aa_sm100_inf", wscale), ws, lambda: _weights(*ws, BF, qscale=wscale))
+    wcat, bcat, wo_, wsc_, bsc_ = _capture.param_forms(("aa_sm100_inf", dt, wscale), ws, lambda: _weights(*ws, dt, qscale=wscale))
     Lb = _ceil(L, PM)   # the pair pass's length and the bias rows' pitch (a multiple of 16: the 16-byte TMA stride holds)
-    with torch.autocast("cuda", enabled=False):
+    with tf32_matmul(not bf), torch.autocast("cuda", enabled=False):
         qkvg = torch.addmm(bcat, x.reshape(M, D), wcat.t())
-        if qke:
+        if qke:   # (fp32: q / k on the TF32 grid)
             _qknorm(qkvg, params[10], params[11], qkvg[:, :D], qkvg[:, D : 2 * D], None, H, DH, qke, qs)
-        bias, _, _ = _bias(pair, lnw, wb, mask, extra, eps, True, False, L, Lb, Lb, H, log2=True)
+        bias, _, _ = _bias(pair, lnw, wb, mask, extra, eps, bf, False, L, Lb, Lb, H, log2=True)
         km = None
         if mask is not None and mask.dim() == 2:
             km = _kmask(mask, A, A, L, 2 * -(-L // 64))
-        _attn_inf(qkvg, bias, A, L, Lb, H, DH, dev, km)
+        if bf:
+            _attn_inf(qkvg, bias, A, L, Lb, H, DH, dev, km)
+        else:
+            Lv = _ceil(L, 4)   # v^T's row pitch (16-byte rows)
+            vt = torch.empty(D, A, Lv, device=x.device, dtype=F32)
+            _k("aam_vt_f32", dev)((D // 32, -(-M // 32), 1), (32, 8, 1), qkvg, int(4 * D), vt, int(M), int(L), int(Lv), int(D), int(not qke))
+            _attn_inf32(qkvg, vt, bias, A, L, Lb, Lv, H, DH, dev, km)
         y = torch.mm(qkvg[:, :D], wo_.t())
         sp = torch.addmm(bsc_, cond.reshape(M, cond.shape[-1]), wsc_.t())
         out = torch.empty(A, 1, L, D, device=x.device, dtype=out_dtype)
@@ -772,6 +766,40 @@ def _attn_inf(qkvg, bias, S, L, Lb, H, DH, dev, km=None):
     run()
 
 
+def _attn_inf32(qkvg, vt, bias, S, L, Lb, Lv, H, DH, dev, km=None):
+    """attn_inf_tf32 over the q / k / g columns of q|k|v|g [S L, 4 W] fp32 (exp2 units, q / k on the TF32 grid), v^T [W, S, Lv]
+    (TF32 grid) and the bias [H, Lb, Lb] (exp2 units): sigmoid(g) o written over q. Every row past L (a sample's queries, v^T's and
+    the bias's keys) loads as zeros (3-D maps of extent L), keys past L masked in the kernel. Bindings cached by the addresses."""
+    from miniworld_engine.kernels._device import num_sms
+
+    W = qkvg.shape[1] // 4
+    rs = 4 * W * 4
+    key = (dev, qkvg.data_ptr(), vt.data_ptr(), bias.data_ptr(), S, L, Lb, Lv, H, DH, None if km is None else km.data_ptr())
+    run = _INF_RUNS.get(key)
+    if run is None:
+        q, k, g = qkvg[:, :W], qkvg[:, W : 2 * W], qkvg[:, 3 * W :]
+        f32 = dict(dtype="f32")
+        a = lambda t, rows: _tm(t, [W, L, S], [rs, L * rs], [32, rows, 1], swizzle=128, **f32)  # noqa: E731
+        b = lambda t, rows: _tm(t, [W, L, S], [rs, L * rs], [16, rows, 1], swizzle=64, **f32)  # noqa: E731
+        maps = (
+            a(q, 128), b(q, 128), a(k, 32), b(k, 32),
+            _tm(vt, [L, S, W], [Lv * 4, S * Lv * 4], [32, 1, DH], swizzle=128, **f32),   # v^T: key, sample, channel
+            _tm(bias, [L, L, H], [Lb * 4, Lb * Lb * 4], [32, 128, 1], swizzle=128, **f32),
+            a(g, 128), b(g, 128),
+        )
+        for m in maps:
+            m.keep = None
+        grid = (min(num_sms(dev), ((S + 1) // 2) * H * -(-L // 128)), 1, 1)
+        kx = () if km is None else (km, int(km.shape[1]))
+        run = _sm100_kernel("attn_inf_tf32", "augattn_inf_tf32_sm100", dev, defs=(*_tdit_defs(H, DH), *_km_defs(km))).bind(
+            grid, (384, 1, 1), *maps, int(L), int(S), *kx
+        )
+        if len(_INF_RUNS) >= 64:
+            _INF_RUNS.clear()
+        _INF_RUNS[key] = run
+    run()
+
+
 # --------------------------------------------------------------------------------------------------- entry
 def module_update(x, cond, res, pair, mask, extra, params, eps: float, heads: int, out_dtype: torch.dtype, qke=()):
     """``res + delta`` (``res`` None: ``delta``) for the module's AdaLN output ``x`` [A, 1, L, d] (the compute dtype), ``cond`` [A, 1, L, dc]
@@ -784,9 +812,7 @@ def module_update(x, cond, res, pair, mask, extra, params, eps: float, heads: in
         mask = mask.to(torch.bool)
         mask = (mask.reshape(-1) if mask.dim() == 1 or mask.shape[0] == 1 else mask.reshape(mask.shape[0], -1)).contiguous()
     if not train:
-        if x.dtype is BF:
-            return _inf_bf16(x, cond, res, pair, mask, extra, list(params), eps, heads, out_dtype, list(qke))
-        return _fwd(x, cond, res, pair, mask, extra, list(params), eps, heads, False, out_dtype, list(qke))[0]
+        return _inf(x, cond, res, pair, mask, extra, list(params), eps, heads, out_dtype, list(qke))
     return _Route.apply(x, cond, res, pair, mask, extra, eps, heads, out_dtype, tuple(qke), *params)
 
 

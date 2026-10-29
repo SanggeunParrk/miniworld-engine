@@ -17,8 +17,10 @@
 //   * 32-key blocks (not 64), so three stages of k, v and an fp32 bias tile fit next to the q ring and the g / o staging.
 //   * P is fp32 in TMEM (32 columns per buffer, double-buffered); TMEM: S[w][b] at w * 64 + b * 32, P[w][b] at
 //     128 + w * 64 + b * 32, O[w] at 256 + w * 64 (48 columns).
-// L is any multiple of 8, as in attn_inf.cu: 3-D maps (columns, row of the sample, sample | head; v^T: key, sample, channel) make
-// TMA zero-fill the tails and clip the stores, and the last key block's keys past L are masked to -inf.
+// L is any length whose bias / v^T row pitch keeps the 16-byte TMA strides (the token DiT step: L a multiple of 8; the
+// AugmentedAttention module route: any L, those rows padded to their own pitch), as in attn_inf.cu: 3-D maps (columns, row of
+// the sample, sample | head; v^T: key, sample, channel) make TMA zero-fill the tails and clip the stores, and the last key
+// block's keys past L are masked to -inf.
 //
 // Head layouts (-DNHEAD -DDHP, as the bf16 core; none = 16 x 48; the logits come pre-scaled, so no RSQDV): a DH-wide fp32 row is
 // NA 32-column boxes in the 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the
@@ -39,6 +41,10 @@ using namespace s100;
 #ifndef NHEAD
 #define NHEAD 16
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, KW] bits (bit j of word n: key 32 n + j attends; KW
+#endif                                   // covering the 32-key blocks), a masked key's logit -1e30 (finite: a fully masked row softmaxes to
+                                         // uniform, as the masked bias)
 static_assert(DHP == 64 || DHP == 48 || DHP == 32, "TF32 head width 64, 48 or 32");
 #ifndef ST
 #define ST (DHP == 64 ? 2 : 3)
@@ -75,7 +81,11 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_constant__ CUtensorMap mqb,
                        const __grid_constant__ CUtensorMap mka, const __grid_constant__ CUtensorMap mkb,
                        const __grid_constant__ CUtensorMap mvt, const __grid_constant__ CUtensorMap mb,
-                       const __grid_constant__ CUtensorMap mga, const __grid_constant__ CUtensorMap mgb, int L, int A) {
+                       const __grid_constant__ CUtensorMap mga, const __grid_constant__ CUtensorMap mgb, int L, int A
+#if KMASK
+                       , const uint32_t* __restrict__ KMB, int KW
+#endif
+                       ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -195,11 +205,17 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     if (PP && w == 1) named_bar_arrive(3, 256);
     const uint32_t xa = su + O_X + w * XG, xb = xa + NA * QA;              // A boxes at xa + j QA, the B box at xb
     float m_i = -INFINITY, l_i = 0.f;
+#if KMASK
+    const uint32_t* kmrow = KMB;                                           // this warpgroup's sample's mask words
+#endif
     for (int G = 0, li = 0, n = 0; G < nblk; ++G, ++n) {
       if (n == nb) { n = 0; ++li; }
       const int s = G % ST;
       if (n == 0) {
         m_i = -INFINITY; l_i = 0.f;
+#if KMASK
+        { int a0, m0, head; item_of(li, a0, m0, head); kmrow = KMB + (size_t)min(a0 + w, A - 1) * KW; }
+#endif
         if (r == 0) {                                                      // this item's g tile into the (drained) staging buffer
           int a0, m0, head; item_of(li, a0, m0, head);
           tma_store_wait_read0();
@@ -229,7 +245,16 @@ augattn_inf_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         }
       }
       if (G >= 1) { tc_fence_before(); }
-      if (const int kv = L - n * BN; kv < BN) {                            // the last block's keys past L (kv is a multiple of 8)
+#if KMASK
+      {
+        const uint32_t km = __ldg(kmrow + n);                              // BN = 32 keys: one word
+        if (km != 0xffffffffu)
+#pragma unroll
+          for (int j = 0; j < BN; ++j)
+            if (!((km >> j) & 1u)) t[j] = -1e30f;
+      }
+#endif
+      if (const int kv = L - n * BN; kv < BN) {                            // the last block's keys past L
 #pragma unroll
         for (int j = 0; j < BN; ++j) if (j >= kv) t[j] = -INFINITY;
       }
