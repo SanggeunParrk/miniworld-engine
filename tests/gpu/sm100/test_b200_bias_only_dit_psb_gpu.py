@@ -88,6 +88,33 @@ def test_pv_gate_inf_per_sample(nh, dh, A, L, gate, f32):
 
 
 @pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
+@pytest.mark.parametrize(("A", "L"), [(1, 128), (3, 384), (5, 768), (48, 384)])
+@pytest.mark.parametrize("f32", [False, True], ids=["bf16", "tf32"])
+def test_dv_from_p_per_sample(nh, dh, A, L, f32):
+    """dv_a = P_{h,a}^T do_a per head and sample with P read as the MN-major A operand (``pv_stream_sm100.cu`` / ``pv_gate_tf32.cu``
+    -DPMN -DPSB: the training backward's dV without a P^T plane), do and dv column views of wider rows, against fp64; bitwise reruns."""
+    g = torch.Generator(device="cuda").manual_seed(A * 1000 + L + nh + 2)
+    DA, dev = nh * dh, torch.cuda.current_device()
+    dt = torch.float32 if f32 else torch.bfloat16
+    P, _ = _planes(nh, A, L, g)
+    P = P.to(dt)
+    do = torch.randn(A * L, 2 * DA, device="cuda", generator=g).to(dt)[:, DA:]
+    out = torch.full((A * L, 2 * DA), float("nan"), device="cuda", dtype=dt)
+    if f32:
+        core = _tf32().PvGateCoreTF32(dev, nh=nh, dh=dh, psb=True, pmn=True)
+    else:
+        core = C.PvStreamCore(dev, nh=nh, dh=dh, pmn=True, psb=True)
+    core(do, P.view(nh * A * L, L), out[:, :DA], A)
+    dO = do.double().view(A, L, nh, dh).permute(2, 0, 1, 3)                              # [H, A, L, dh]
+    want = torch.einsum("haij,haid->hajd", P.double(), dO).permute(1, 2, 0, 3).reshape(A * L, DA)
+    assert rel(out[:, :DA], want) < (2e-3 if f32 else 1e-2), rel(out[:, :DA], want)
+    assert out[:, DA:].isnan().all(), "only dv's columns are written"
+    again = torch.empty_like(out)
+    core(do, P.view(nh * A * L, L), again[:, :DA], A)
+    assert torch.equal(out[:, :DA], again[:, :DA])
+
+
+@pytest.mark.parametrize(("nh", "dh"), LAYOUTS)
 @pytest.mark.parametrize(("A", "L"), [(1, 128), (3, 384), (5, 768), (48, 256)])
 @pytest.mark.parametrize("mask_kind", ["none", "shared", "per_sample"])
 @pytest.mark.parametrize("f32", [False, True], ids=["bf16", "tf32"])

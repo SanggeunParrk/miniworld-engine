@@ -575,6 +575,8 @@ def _op(kind, dev, nh=16, dh=48):
             if kind == "pvpsb"
             else C.DpbKernel(idx, nh=nh, dh=dh, psb=True)
             if kind == "dpbpsb"
+            else C.PvStreamCore(idx, nh=nh, dh=dh, pmn=True, psb=True)  # dv_a = P_a^T do_a from P (no P^T)
+            if kind == "dvpsb"
             else {"pv": C.PvGateCore, "dpb": C.DpbKernel, "pvdpb": C.PvDpb}[kind](
                 idx, nh=nh, dh=dh
             )
@@ -599,8 +601,9 @@ def _width(params):
 def _psb_core(f32=False, L=0, dev=None) -> str:
     """The per-sample attention core: "recompute" (bo_psb.cu, bf16: the forward keeps two floats per softmax row and no P, the backward
     rebuilds P from the bias). fp32 (bo_psb32.cu, TF32) has it up to L 512 (the forward keeps v resident); longer L takes "cublas" (the
-    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored). B200 (``dev`` sm_100): "stored" -- P and P^T [H, A, L, L] from
-    softmax_t, the -DPSB builds of pv_gate_inf / dpb_sm100 (fp32: pv_gate_tf32 / dpb32_sm100)."""
+    v0 core: batched cuBLAS GEMMs + torch elementwise ops, P stored). B200 (``dev`` sm_100): "stored" -- P [H, A, L, L] from softmax_t
+    (no P^T: dV reads P as the MN-major operand), the -DPSB builds of pv_gate_inf / dpb_sm100 and pv_stream_sm100 -DPMN for dV (fp32:
+    pv_gate_tf32 / dpb32_sm100, pv_gate_tf32 -DPMN for dV)."""
     if dev is not None and dev.type == "cuda" and torch.cuda.get_device_capability(dev) == (10, 0):
         return "stored"
     if f32:
@@ -627,7 +630,7 @@ def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
         e((M, D), dtype=at),
         e((M, 2 * DA), dtype=at),
         (e((H, A, L, 2), dtype=f32) if core == "recompute" else e((H, A, L, L), dtype=at)) if psb else e((H, L, L), dtype=at),
-        e((H, A, L, L) if core == "stored" else (0,) if psb else (H, L, L), dtype=at),
+        e((0,) if psb else (H, L, L), dtype=at),
         e((M, DA), dtype=at),
         e((M, D), dtype=at),
         e((M, 2), dtype=f32),
@@ -759,10 +762,10 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
 
     def pair_part():
         """The attention weights P (and P^T): pair bias -> softmax. Reads the pair and the mask only."""
-        if psb and b200:  # per-sample bias on B200: P and P^T per (head, sample) plane, the sample's key mask folded in
-            P, Pt = (torch.empty(H, A, L, L, device=dev, dtype=BF) for _ in range(2))
-            C.softmax_t(bias.reshape(H * A * L, L), P.view(H * A * L, L), Pt.view(H * A * L, L), _psb_mask(mask, A, L, True), A)
-            return P, Pt, None
+        if psb and b200:  # per-sample bias on B200: P per (head, sample) plane, the sample's key mask folded in; no P^T (dV reads P)
+            P = torch.empty(H, A, L, L, device=dev, dtype=BF)
+            C.softmax_t(bias.reshape(H * A * L, L), P.view(H * A * L, L), None, _psb_mask(mask, A, L, True), A)
+            return P, torch.empty(0, device=dev, dtype=BF), None
         if psb:  # per-sample bias: no P, the forward keeps the two row statistics the backward rebuilds it from (bo_psb.cu)
             return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
         P = torch.empty(H, L, L, device=dev, dtype=BF)
@@ -1122,8 +1125,8 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
     do = torch.empty(M, DA, device=dev, dtype=BF)
     dd = torch.empty(A, H, L, device=dev)
     C.gate_bwd_rows(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
-    if psb and not C.h100_enabled(dev):  # B200: the stored P / P^T planes, the -DPSB cores
-        _op("pvpsb", dev, H, DA // H)(do, Pt.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a
+    if psb and not C.h100_enabled(dev):  # B200: the stored P planes, the -DPSB cores
+        _op("dvpsb", dev, H, DA // H)(do, P.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a, P read MN-major
         _op("dpbpsb", dev, H, DA // H)(
             do, vg[:, :DA], P.view(H * A * L, L), dd, dbias_out.view(H * A * L, L), A, mask=_psb_mask(mask, A, L, True)
         )  # dbias_a = P_a o (do_a v_a^T - D_a), 0 on the masked keys (a fully masked sample's uniform P included)
@@ -1676,6 +1679,8 @@ def _op32(kind, dev, nh, dh):
 
         if kind in ("pvpsb", "dpbpsb"):  # B200 per-sample bias: a P plane per (head, sample)
             _OPS32[(kind, idx, nh, dh)] = {"pvpsb": tf32.PvGateCoreTF32, "dpbpsb": tf32.Dpb32}[kind](idx, nh=nh, dh=dh, psb=True)
+        elif kind == "dvpsb":  # dv_a = P_a^T do_a from P (the MN-major A operand): no P^T
+            _OPS32[(kind, idx, nh, dh)] = tf32.PvGateCoreTF32(idx, nh=nh, dh=dh, psb=True, pmn=True)
         else:
             _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.Dpb32}[
                 kind
@@ -1771,11 +1776,9 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
         else:
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
         b200_psb = psb and not _hopper(dev)
-        if b200_psb:  # B200: P and P^T per (head, sample) plane (the sample's key mask folded in), the -DPSB TF32 cores
-            P, Pt, pst = e(H, A, L, L), e(H, A, L, L), None
-            F.softmax_t_cuda(
-                bias.reshape(H * A * L, L), P.view(H * A * L, L), Pt.view(H * A * L, L), _psb_mask(mask, A, L, True), A
-            )
+        if b200_psb:  # B200: P per (head, sample) plane (the sample's key mask folded in), the -DPSB TF32 cores; no P^T
+            P, Pt, pst = e(H, A, L, L), e(0), None
+            F.softmax_t_cuda(bias.reshape(H * A * L, L), P.view(H * A * L, L), None, _psb_mask(mask, A, L, True), A)
         elif psb:
             Pt, pst = torch.empty(0, device=dev), None
             if _psb_core(True, L) == "recompute":  # bo_psb32.cu: the row statistics instead of P, the softmax inside the core below
@@ -1988,8 +1991,8 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
         else:
             F.gate_bwd_cuda(dog, og, vg[:, DA:], do, dvg[:, DA:], dd, L)
         dbias = None if psb else e(H * L, L) if dbias_out is None else dbias_out.view(H * L, L)
-        if psb and not _hopper(dev):  # B200: the stored P / P^T planes, the -DPSB TF32 cores
-            _op32("pvpsb", dev, H, DA // H)(do, Pt.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a
+        if psb and not _hopper(dev):  # B200: the stored P planes, the -DPSB TF32 cores
+            _op32("dvpsb", dev, H, DA // H)(do, P.view(H * A * L, L), dvg[:, :DA], A)  # dv_a = P_a^T do_a, P read MN-major
             _op32("dpbpsb", dev, H, DA // H)(
                 do, vg[:, :DA], P.view(H * A * L, L), dd, dbias_out.view(H * A * L, L), A, mask=_psb_mask(mask, A, L, True)
             )  # dbias_a = P_a o (do_a v_a^T - D_a), 0 on the masked keys
