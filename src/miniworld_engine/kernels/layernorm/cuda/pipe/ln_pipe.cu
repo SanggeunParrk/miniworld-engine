@@ -324,7 +324,11 @@ __global__ void __launch_bounds__(DW * 32) direct2_fwd(const T* __restrict__ x, 
 #pragma unroll
   for (int p = 0; p < PW; ++p) {
     const int64_t row = (wid * PW + p) * RPP + g;
-    raw[p] = row < M ? __ldg(reinterpret_cast<const uint4*>(x + row * N + l * VEC)) : make_uint4(0, 0, 0, 0);
+    raw[p] = make_uint4(0, 0, 0, 0);
+    // a plain global load, not ld.global.nc: at the HBM floor (x[1, 768, 768, 128] bf16, the Triton kernel at a plain copy's 2.87 TB/s) the
+    // non-coherent path measured 0.3-0.4% slower
+    if (row < M)
+      asm volatile("ld.global.v4.u32 {%0,%1,%2,%3}, [%4];\n" : "=r"(raw[p].x), "=r"(raw[p].y), "=r"(raw[p].z), "=r"(raw[p].w) : "l"(x + row * N + l * VEC));
   }
   float wr[VEC], br[VEC];
 #pragma unroll
@@ -755,7 +759,9 @@ void launch_fwd_pad(const T* x, const void* w, const void* b, int wcode, T* y, f
           constexpr int PW2 = MWP_D2PW;
           const int64_t units2 = ((M + RPP - 1) / RPP + PW2 - 1) / PW2;
           const int64_t grid2 = (units2 + MWP_D2W - 1) / MWP_D2W;
-          if (sm_major() >= 9) {
+          // programmatic dependent launch only for small activations, where overlapping the predecessor's tail pays: past MWP_BK_MIN every
+          // CTA of a launch this large waiting at griddepcontrol.wait cost 0.4-0.8% at the HBM floor (and 1.7x with one-warp CTAs)
+          if (sm_major() >= 9 && M * int64_t(N) * int64_t(sizeof(T)) < MWP_BK_MIN) {
             cudaLaunchConfig_t cfg = {};
             cfg.gridDim = dim3(unsigned(grid2));
             cfg.blockDim = dim3(MWP_D2W * 32);

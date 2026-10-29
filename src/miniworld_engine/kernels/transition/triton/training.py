@@ -45,6 +45,10 @@ def _squeeze_swiglu_bwd_kernel(
     cols = pn * BLOCK_N + tl.arange(0, BLOCK_N)
     wrows = pn * (2 * BLOCK_N) + tl.arange(0, 2 * BLOCK_N)
     ks = tl.arange(0, BLOCK_K)
+    mask = (rows[:, None] < M) & (cols[None, :] < ND)
+    if SAVED:  # the saved halves are issued before the K loop, so their (large) reads overlap the dh contraction
+        sa = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0)
+        sb = tl.load(SB + rows[:, None] * ssm + cols[None, :], mask=mask, other=0)
     acc = tl.zeros((BLOCK_M1, 2 * BLOCK_N), tl.float32)
     acc_dh = tl.zeros((BLOCK_M1, BLOCK_N), tl.float32)
     for k0 in range(tl.cdiv(K, BLOCK_K)):
@@ -60,10 +64,9 @@ def _squeeze_swiglu_bwd_kernel(
             w = tl.load(Wab + wrows[None, :] * swabn + kk[:, None],
                         mask=(wrows[None, :] < 2 * ND) & (kk[:, None] < K), other=0)
             acc = tf32_dot(x, w, acc, input_precision=PREC, pre_b=PRE)
-    mask = (rows[:, None] < M) & (cols[None, :] < ND)
     if SAVED:
-        a = tl.load(SA + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
-        b = tl.load(SB + rows[:, None] * ssm + cols[None, :], mask=mask, other=0).to(tl.float32)
+        a = sa.to(tl.float32)
+        b = sb.to(tl.float32)
         if HALF:
             a = a * tl.load(SCALE)
             b = b * tl.load(SCALE)
