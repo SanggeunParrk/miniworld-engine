@@ -1,8 +1,8 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
-(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16-, 32- or
-64-channel heads, inference and training; any L >= 16, B samples per call in deterministic chunks) serve the whole module, with the
+(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16-, 32-, 64-, 96- or
+128-channel heads, inference and training; any L >= 16, B samples per call in deterministic chunks) serve the whole module, with the
 model options below (bias orientation, gate / out biases, Chai-1's outputs)."""
 
 import math

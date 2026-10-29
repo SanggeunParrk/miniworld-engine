@@ -1,12 +1,13 @@
 """Automatic dispatch to the B200 (sm_100a) TriangleAttention, bf16, inference and training (with the module's broadcast dropout):
 d_pair = d_hidden = 128 with 4 heads x 32 on the fused kernels (``FUSED``: tri_front / tri_tail / tri_gate_bwd / tri_head_bwd /
-tri_wgrad around the attention core), d_pair 64-512 with heads of 16 / 32 channels on the wide kernels (``GENERIC``: tri_wfront /
+tri_wgrad around the attention core), d_pair 64-512 with heads of 16 / 32 / 64 / 96 / 128 channels on the wide kernels (``GENERIC``: tri_wfront /
 tri_wtail / tri_wgbwd / tri_whbwd / cuBLAS / tri_wfinish), both in ``kernels/triangle_attention/cuda/b200_triattn.py``.
 
 The model options FoldForge's families set (``_options``) run on the same kernels: AlphaFold 3's ending-node bias orientation
 (``transposed_bias=False``: both paths for inference, the wide path for training), and on the wide path, inference and training,
 RoseTTAFold3's gate / out-projection biases, heads of 64 channels (Chai-1, RoseTTAFold3's templates, IntelliFold-2: the head-dim-64
-core and its backward) and Chai-1's output variants (``untransposed_output`` / ``dual_output``).
+core and its backward), heads of 96 / 128 channels (AF3's four heads at d_pair 384 / 512: the head-dim-128 core and its backward, 96
+zero-padded to 128) and Chai-1's output variants (``untransposed_output`` / ``dual_output``).
 Any length L >= 16: the kernels take whole 128-token tiles, a length that is not a multiple of 128 is zero-padded (the pad keys
 masked, the pad rows and columns cut from the result). Any number of samples B (templates, structures or augments folded into the
 batch): up to ``max_batch`` per launch, more (or more than fit in memory) in launches run one after another (``plan``).
@@ -103,7 +104,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
 
 
 def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    """The wide kernels (d_pair 64 .. 512, heads of 16 / 32 / 64 channels; the model options) serve this call."""
+    """The wide kernels (d_pair 64 .. 512, heads of 16 / 32 / 64 / 96 / 128 channels; the model options) serve this call."""
     return _kind(module, pair, mask) == GENERIC
 
 
@@ -340,7 +341,7 @@ def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: 
         # inference: q | k | v | g, o; bias (bf16 per head)
         # saved: q | k | v | g, o; bias; lse (fp32 per head)   backward: do, dg, dq, dk, dv; delta, dbias, bias^T (fp32 per head)
         return 10 * c + 2 * h + extra, 10 * c + 6 * h + extra, 10 * c + 12 * h + extra
-    hd = (64 if head_dim == 64 else 32) * h  # heads padded to 32 channels (64-channel heads as they are)
+    hd = (32 if head_dim <= 32 else 64 if head_dim == 64 else 128) * h  # heads padded to 32 channels (64 as they are, 96 to 128)
     # inference: q | k | v | g, o; bias
     # saved: q | k | v | g, o; bias; lse; the LN statistics (8 B)
     # backward: dy o drop; D = [dq | dk | dv | dg | 64 dbias columns]; do, u (and u2: the dual output); delta (per 32-channel half),

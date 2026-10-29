@@ -245,10 +245,11 @@ def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e
 
 
 # ------------------------------------------------------------------------------------------------------------------------------
-# Other widths: d_pair C in 64 .. 512 (a multiple of 64), heads of 16, 32 or 64 channels. Forward: tri_wfront (LN + the five
+# Other widths: d_pair C in 64 .. 512 (a multiple of 64), heads of 16, 32, 64, 96 or 128 channels. Forward: tri_wfront (LN + the five
 # projections as 2-CTA products, weights streamed in 64-column chunks; row statistics kept when training) -> the head-dim-32
-# core above (a head dim of 16 is zero-padded to 32) or the head-dim-64 core (triattn_dh64_sm100.cu, forward + backward) ->
-# tri_wtail (sigmoid gate + out-projection + dropout + residual).
+# core above (a head dim of 16 is zero-padded to 32), the head-dim-64 core (triattn_dh64_sm100.cu, forward + backward) or the
+# head-dim-128 core (triattn_dh128_sm100.cu, forward + backward; a head dim of 96 is zero-padded to 128) -> tri_wtail (sigmoid gate +
+# out-projection + dropout + residual).
 # The model options of FoldForge's families ride on the same kernels: the gate / out-projection biases (RoseTTAFold3; the front's
 # drain adds bg to g, the tail's drain bo to the update), AlphaFold 3's ending-node bias orientation (``bt``: the front writes the
 # bias of the pair as it is; the backward reads its gradient so), and Chai-1's outputs (``out_mode``): 1 = the ending node's update
@@ -260,8 +261,8 @@ def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e
 # drain) -> the core's backward -> tri_whbwd ([dq | dk | dv | dg | db] . W on tcgen05, the LN backward and the residual in its
 # drain, xhat | 1 written) -> the weight gradients from G = D^T [xhat | 1] (one cuBLAS GEMM, K = L^2) by the algebra of the
 # d_pair 128 path, finished by tri_wfinish. All hand kernels in triattn_wide_sm100.cu.
-WIDE_HEAD_DIMS = (16, 32, 64)
-TRAIN_HEAD_DIMS = (16, 32, 64)        # every head dim has a backward (64: triattn_dh64_sm100.cu)
+WIDE_HEAD_DIMS = (16, 32, 64, 96, 128)
+TRAIN_HEAD_DIMS = (16, 32, 64, 96, 128)   # every head dim has a backward (64: triattn_dh64_sm100.cu, 96 / 128: triattn_dh128_sm100.cu)
 WIDE_MAX_HEADS = 16                   # the packed bias block is 16 rows
 WIDE_MAX_HDP = 512                    # the front's q | k | v | g blocks and the tail's K
 
@@ -269,7 +270,7 @@ WIDE_MAX_HDP = 512                    # the front's q | k | v | g blocks and the
 @functools.lru_cache(maxsize=1)
 def _wide():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_wide_v35", sources=[str(_SRC / "triattn_wide_sm100.cu")],
+    return load_extension(name="triattn_b200_wide_v36", sources=[str(_SRC / "triattn_wide_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -280,9 +281,17 @@ def _core64():
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
+@functools.lru_cache(maxsize=1)
+def _core128():
+    ensure_cuda_home()
+    return load_extension(name="triattn_b200_dh128_v1", sources=[str(_SRC / "triattn_dh128_sm100.cu")],
+                          extra_cuda_cflags=_flags(), verbose=False)
+
+
 def slot(head_dim: int) -> int:
-    """Channels a head takes in the packed q | k | v | g layout: 32 (16 zero-padded) or 64."""
-    return 64 if head_dim == 64 else D
+    """Channels a head takes in the packed q | k | v | g layout: 32 (16 zero-padded), 64, or 128 (96 zero-padded: its padded q / k / v /
+    g channels come out 0, meet zero columns of Wo and add nothing to the scores; the softmax scale stays 1/sqrt(96))."""
+    return 32 if head_dim <= 32 else 64 if head_dim == 64 else 128
 
 
 def wide_supports(d_pair: int, d_hidden: int, n_head: int, length: int, training: bool = False) -> bool:
@@ -295,8 +304,8 @@ def wide_supports(d_pair: int, d_hidden: int, n_head: int, length: int, training
 
 
 def pack_wide_weights(wq, wk, wv, wg, wb, wo, gb=None, ob=None, wo2=None, ob2=None):
-    """-> (wcat, wo_p, wo_t, wall_t, gb_p, ob, wo2_p, ob2), HDp = heads x slot(head dim) (a 16-channel head is zero-padded to 32: its
-    padded q / k / v / g channels come out 0 and meet zero columns of Wo):
+    """-> (wcat, wo_p, wo_t, wall_t, gb_p, ob, wo2_p, ob2), HDp = heads x slot(head dim) (a 16-channel head is zero-padded to 32, a
+    96-channel head to 128: its padded q / k / v / g channels come out 0 and meet zero columns of Wo):
       wcat   [Wq; Wk; Wv; Wg; Wb (16 rows)]  [4 HDp + 16, C] bf16   the front's B
       wo_p   Wo                               [C, HDp] bf16          the tail's B
       wo_t   Wo^T                             [HDp, C] bf16          the gate backward's B ([Wo^T | Wo2^T] [HDp, 2C] with wo2)
@@ -359,6 +368,12 @@ def _core64_forward(q, k, v, bias, scale, need=False):
     return o, lse
 
 
+def _core128_forward(q, k, v, bias, scale, need=False):
+    """The head-dim-128 core over [B, N, S, H, 128] tensors -> (out [B, N, S, H, 128], base-2 lse [B, N, H, S] or empty unless `need`)."""
+    o, lse, _ = _core128().triattn_fwd128(q, k, v, bias, scale, q.new_empty(0), need, q.new_empty(0, dtype=torch.float32))
+    return o, lse
+
+
 def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, drop=None, need=False, out=None, trans=False, bt=False,
                  out_mode=0):
     """-> (y [B, L, L, C], saved = (q, k, v, g, bias, o, lse, stats)): lse / stats empty unless `need`; every saved tensor is a fresh
@@ -374,10 +389,8 @@ def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, 
     q, k, v, g, bias = w.tri_wfront(x, lnw, lnb, eps, wcat, n_head, mask if mask is not None else _empty_mask(pair.device), B, L, stats, trans,
                                     gb if gb is not None else E32, bt)
     shp = (B, L, L, n_head, S)
-    if S == D:
-        o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
-    else:
-        o, lse = _core64_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
+    core = _core_forward if S == D else _core64_forward if S == 64 else _core128_forward
+    o, lse = core(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
     o2 = o.view(-1, HDp)
     dt = drop if drop is not None else x.new_empty(0)
     # the first (or only) out-projection: the ending node's update goes back to the pair's layout, except Chai-1's untransposed output;
@@ -425,9 +438,9 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
         e = _core(_rows_per_task(L))
         _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
                                     E32, cut(0), cut(1), cut(2))
-    else:                                                     # delta per 32-channel half [B, L, 2 heads, L]: the core adds the halves
-        _, _, _, db = _core64().triattn_bwd64(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
-                                              cut(0), cut(1), cut(2))
+    else:                     # delta per 32-channel slice [B, L, S/32 x heads, L]: the core adds a head's slices where it reads them
+        bwd = _core64().triattn_bwd64 if S == 64 else _core128().triattn_bwd128
+        _, _, _, db = bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5, cut(0), cut(1), cut(2))
     w.tri_db_rows(db, cut(4, 64), B, L, bt)
     dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, L, trans)
     # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
