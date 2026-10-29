@@ -109,7 +109,8 @@ GROUPS: list[Group] = [
     G("tr_D128", "Transition", "transition", (128, 384, 768, 1024), "D128", "d_pair=128", weight=3, tier="smoke"),
     G("tr_D256", "Transition", "transition", (384, 768), "D256", "d_pair=256", weight=2),
     G("tr_D384", "Transition", "transition", (384, 768), "D384", "d_pair=384", weight=2),
-    G("tr_D512", "Transition", "transition", (384,), "D512", "d_pair=512", weight=1),
+    # D512 is no registry row; FoldForge reaches it only for IntelliFold2 inference, so training is not a ladder row
+    G("tr_D512", "Transition", "transition", (384,), "D512", "d_pair=512", modes=("inference",), weight=1),
     G("tr_D768", "Transition", "transition", (384,), "D768", "d_pair=768", weight=2),
     G("tr_fp32_D128", "Transition", "transition", (384, 768), "D128 TF32", "d_pair=128", precision="32", weight=2),
     G("tr_fp32_D256", "Transition", "transition", (384,), "D256 TF32", "d_pair=256", precision="32", weight=1, tier="full"),
