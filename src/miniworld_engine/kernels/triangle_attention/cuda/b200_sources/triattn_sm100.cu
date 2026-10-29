@@ -998,55 +998,53 @@ __global__ void __launch_bounds__(QB_THREADS, 1) triattn_bwd_q_sm100(
       }
     }
   } else if (warp == 1) {
+    // Issue loop: the converged warp runs it and one elected lane's tcgen05 ops are predicated (an `if (elect_one())` block per MMA
+    // group cost a branch / warp sync and a uniform-register waterfall per MMA: ~400 clk to issue a stage's dQ GEMMs, on the
+    // critical path of the two S buffers); ring slots and phases are incremental counters (no divisions by QB_NKV).
+    const uint32_t L = elect_one() ? 1u : 0u;
     const int mytasks = (int)blockIdx.x < ntasks ? (ntasks - 1 - (int)blockIdx.x) / (int)gridDim.x + 1 : 0;
     const int total = mytasks * SPT;
     const uint64_t dK0 = desc_k64(sKV), dM0 = sdesc(sa(sKV), QB_KT * 2, 512, 4);
     constexpr uint64_t SLOT = 2 * QB_KT * 2 / 16, MAT = QB_KT * 2 / 16;
-    auto stt = [&](int y, int lt, int w) {
-      const int r = w % QR, sl = y % QB_NKV, b = y % QB_NS;
-      if (w == 0) wait(A(at), lt & 1);
-      wait(A(kvf + sl), (y / QB_NKV) & 1);
-      tc_fence_after();
-      if (elect_one()) {
-        const uint64_t bk = dK0 + sl * SLOT;
-        const uint32_t d = tmem + b * 128, a = tmem + QB_COL_A + r * 16;
-        mma_ts(d, a, bk, ID_SQ, 0u);
-        mma_ts(d, a + 8, bk + 2, ID_SQ, 1u);
-        mma_ts(d + 64, a + QR * 16, bk + MAT, ID_SQ, 0u);
-        mma_ts(d + 64, a + QR * 16 + 8, bk + MAT + 2, ID_SQ, 1u);
-        mma_commit(A(sf + b));
-      }
-      __syncwarp();
-    };
-    auto grad = [&](int y, int w) {
-      const int kb = w / QR, r = w % QR, sl = y % QB_NKV, b = y % QB_NS;
-      wait(A(pf + b), (y / QB_NS) & 1);
-      tc_fence_after();
-      if (elect_one()) {
-        const uint64_t bm = dM0 + sl * SLOT;
-        const uint32_t acc = kb ? 1u : 0u, d = tmem + QB_COL_G + r * 32;
-#pragma unroll
-        for (int ks = 0; ks < QB_KW / 16; ++ks) {
-          const uint32_t a = tmem + b * 128 + 64 + (ks >> 1) * 32 + (ks & 1) * 8;
-          mma_ts(d, a, bm + ks * 64, ID_G, (acc | ks) ? 1u : 0u);
-        }
-        mma_commit(A(kve + sl));
-        if (w == SPT - 1) mma_commit(A(df));
-      }
-      __syncwarp();
-    };
-    int y = 0, ylt = 0, yw = 0, pw = 0;
+    static_assert(QB_NS == 2, "S buffers: y & 1");
+    const uint32_t ata = A(at), kvfa = A(kvf), kvea = A(kve), sfa = A(sf), pfa = A(pf), dfa = A(df);
+    const uint32_t tA = tmem + QB_COL_A, tG = tmem + QB_COL_G;
+    int y = 0, ylt = 0, yw = 0, ysl = 0, yslp = 0;   // S / dP GEMMs: stage, task, stage in task, K | V slot and its phase
+    int pw = 0, psl = 0, pb = 0, pbp = 0;            // dQ GEMMs: stage in task, K | V slot, S buffer and its pf phase
     for (int p = 0; p < total; ++p) {
       // a task's first S waits for its TMEM operands, which the grad warps copy only after draining the previous task's
       // accumulators: issue it after the previous task's last gradient GEMM
       while (y < total && y < p + QB_NS && (yw != 0 || y == p)) {
-        stt(y, ylt, yw);
+        const int r = yw % QR, b = y & 1;
+        if (yw == 0) wait(ata, ylt & 1);
+        wait(kvfa + ysl * 8, yslp);
+        tc_fence_after();
+        const uint64_t bk = dK0 + ysl * SLOT;
+        const uint32_t d = tmem + b * 128, a = tA + r * 16;
+        mma_ts_if(L, d, a, bk, ID_SQ, 0u);
+        mma_ts_if(L, d, a + 8, bk + 2, ID_SQ, 1u);
+        mma_ts_if(L, d + 64, a + QR * 16, bk + MAT, ID_SQ, 0u);
+        mma_ts_if(L, d + 64, a + QR * 16 + 8, bk + MAT + 2, ID_SQ, 1u);
+        mma_commit_if(L, sfa + b * 8);
         ++y;
+        if (++ysl == QB_NKV) { ysl = 0; yslp ^= 1; }
         if (++yw == SPT) { yw = 0; ++ylt; }
       }
-      grad(p, pw);
+      const int kb = pw / QR, r = pw % QR;
+      wait(pfa + pb * 8, pbp);
+      tc_fence_after();
+      const uint64_t bm = dM0 + psl * SLOT;
+      const uint32_t acc = kb ? 1u : 0u, d = tG + r * 32, a0 = tmem + pb * 128 + 64;
+#pragma unroll
+      for (int ks = 0; ks < QB_KW / 16; ++ks)
+        mma_ts_if(L, d, a0 + (ks >> 1) * 32 + (ks & 1) * 8, bm + ks * 64, ID_G, (acc | ks) ? 1u : 0u);
+      mma_commit_if(L, kvea + psl * 8);
+      if (pw == SPT - 1) mma_commit_if(L, dfa);
+      if (++psl == QB_NKV) psl = 0;
+      pbp ^= pb; pb ^= 1;                              // pf phase (p / 2) & 1 of buffer p & 1
       if (++pw == SPT) pw = 0;
     }
+    __syncwarp();
   } else {
     const int qq = warp & 3, row = qq * 32 + lane;   // TMEM lane = query row of the tile
     const int gi = (warp - 2) >> 2, c0 = gi * 32;    // key columns of a stage; rows gi, gi + 2 for the Q / dO copy and dQ drain
