@@ -11,6 +11,7 @@
 //   gate_rows_inplace      o <- o * sigmoid(g)
 //   glu_rows       out = silu(g) * v [* u],  row = [g | v | u]  (u: Boltz-2's up-gate)
 //   parallel_residual  out = x + sum_i (y_i - x): a parallel block (Chai-1, RoseTTAFold3) from its parts' residual outputs
+//   sigmoid_tables     the step's gate and AdaLN-scale logits (conditioning tables, L rows) into sigmoid values, once per step
 //
 // tok = row % L: the AdaLN / gate tables are per token (atom), shared by the samples. One block per row, a thread owns 4
 // consecutive columns; sums in fp32.
@@ -183,6 +184,29 @@ __global__ void __launch_bounds__(256) parallel_residual_kernel(const T* __restr
   }
 }
 
+// the step's conditioning tables, once per step: every gate logit, and every AdaLN scale logit (the first D of each 2 D of the mod
+// table: per block scA | shA | scT | shT), into sigmoid values in place; flat over 8-wide bf16 pieces of both tables, one launch
+__global__ void __launch_bounds__(256) sigmoid_tables_kernel(__nv_bfloat16* __restrict__ G, long ng8, __nv_bfloat16* __restrict__ T,
+                                                             long nt8, int d8) {
+  for (long e = (long)blockIdx.x * 256 + threadIdx.x; e < ng8 + nt8; e += (long)gridDim.x * 256) {
+    __nv_bfloat16* p;
+    if (e < ng8) {
+      p = G + 8 * e;
+    } else {
+      const long f = e - ng8, pair = f / d8;                 // f in pieces of the scale halves: piece f of scale block `pair`
+      p = T + 8 * (pair * 2 * d8 + (f - pair * d8));
+    }
+    uint4 u = *reinterpret_cast<uint4*>(p);
+    __nv_bfloat162* h = reinterpret_cast<__nv_bfloat162*>(&u);
+#pragma unroll
+    for (int k = 0; k < 4; ++k) {
+      const float2 v = __bfloat1622float2(h[k]);
+      h[k] = __floats2bfloat162_rn(sigm(v.x), sigm(v.y));
+    }
+    *reinterpret_cast<uint4*>(p) = u;
+  }
+}
+
 // ------------------------------------------------------------------------------------------------ host
 using BF = __nv_bfloat16;
 
@@ -311,6 +335,17 @@ void glu_rows(at::Tensor ab, at::Tensor out, bool up) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// t_gate [L, *] bf16 contiguous (all of it), t_mod [L, *] bf16 contiguous (the scale halves of its 2 d-wide pieces) or None
+void sigmoid_tables(at::Tensor g, c10::optional<at::Tensor> t, int64_t d) {
+  TORCH_CHECK(g.is_cuda() && g.scalar_type() == at::kBFloat16 && g.is_contiguous() && g.numel() % 8 == 0 && d % 8 == 0, "sigmoid_tables: g");
+  if (t) TORCH_CHECK(t->scalar_type() == at::kBFloat16 && t->is_contiguous() && t->numel() % (2 * d) == 0, "sigmoid_tables: t");
+  const long ng8 = g.numel() / 8, nt8 = t ? t->numel() / 16 : 0;
+  const at::cuda::OptionalCUDAGuard guard(g.device());
+  sigmoid_tables_kernel<<<flat_grid(ng8 + nt8), 256, 0, at::cuda::getCurrentCUDAStream()>>>(
+      bfw(g), ng8, t ? bfw(*t) : nullptr, nt8, (int)(d / 8));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 at::Tensor parallel_residual(at::Tensor x, std::vector<at::Tensor> ys) {
   TORCH_CHECK(x.is_cuda() && x.is_contiguous() && (x.scalar_type() == at::kBFloat16 || x.scalar_type() == at::kFloat) && x.numel() % 4 == 0,
               "x: contiguous bf16 / fp32, numel % 4 == 0");
@@ -342,4 +377,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("gate_rows_inplace", &gate_rows_inplace);
   m.def("glu_rows", &glu_rows);
   m.def("parallel_residual", &parallel_residual);
+  m.def("sigmoid_tables", &sigmoid_tables);
 }

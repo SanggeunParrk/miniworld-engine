@@ -228,7 +228,150 @@ def _inference(stack, single, cond, pair, mask):
     return out.view(A, L, D)
 
 
-_inference_b200 = torch.compiler.disable(_inference)
+_ONES: dict = {}
+
+
+def _cond_ln(s: torch.Tensor) -> torch.Tensor:
+    """LN(s) (weight-free, eps 1e-5) of the bf16 conditioning rows in one CUDA pass: ``layernorm_rows`` at 384 columns, the variants'
+    ``ln_mod_rows`` with an identity modulation at 768 (fp32 scratch rows); F.layer_norm (cast, LN, cast: three kernels) otherwise."""
+    from miniworld_engine.kernels.dit_variants import cuda
+
+    rows, c = s.shape
+    out = torch.empty_like(s)
+    if c in (128, 256, 384):
+        cuda.ln_rows(s, out, 1e-5)
+    elif c == 768:
+        key = (s.device, c)
+        if key not in _ONES:
+            _ONES[key] = (torch.ones(1, c, device=s.device, dtype=s.dtype), torch.zeros(1, c, device=s.device, dtype=s.dtype))
+        one, zero = _ONES[key]
+        cuda.ln_mod_rows(torch.empty(rows, c, device=s.device, dtype=torch.float32), [(one, zero, out)], 1, 1e-5, False, xin=s)
+    else:
+        out = F.layer_norm(s.float(), (c,), eps=1e-5).to(s.dtype)
+    return out
+
+
+def _fused_b200(stack, single, b0) -> bool:
+    """The B200 step with the GEMM-epilogue kernels (``cuda/dit_gemm.py``): the 768-wide token stack, bf16, the expand weight [Wg; Wv]
+    (and Boltz-2's up weight) of a hidden width the GLU GEMM tiles."""
+    from miniworld_engine.kernels.dit_variants.cuda import dit_gemm
+
+    if not FUSED_B200 or not dit_gemm.available(single):
+        return False
+    width = b0.expand.weight.shape[0] // 2
+    return single.shape[-1] == dit_gemm.D and width % 128 == 0 and b0.expand.weight.shape[1] == dit_gemm.D
+
+
+#: B200: the transition's expand GEMM with the (up-)GLU in its epilogue and the to_out / squeeze GEMMs with the residual + gate and the
+#: next AdaLN in theirs (``cuda/dit_gemm.py``); False keeps cuBLAS + the CUDA row passes (the H100 path's step)
+FUSED_B200 = True
+
+
+#: the parallel blocks' fused step serves up to this many rows: res_gemm takes one 8-CTA cluster per 128 rows, and past one wave of
+#: clusters (16 on the 148 SMs) it ran two (L 768, A 5: RF3 2.96 against 2.63 ms for 24 blocks)
+PARALLEL_MAX_ROWS = 2048
+
+
+def _parallel_pays(m: int, nb: int, b0) -> bool:
+    """Where the parallel blocks' fused step measured faster than the row-pass step (B200, 2026-10-29, bench.py, compile + CUDA graph):
+    up to PARALLEL_MAX_ROWS rows, and for one block only with the sigmoid AdaLN (RF3 83.8 against 86.0 us at L 384; Chai-1's
+    identity AdaLN, 83.8 against 79.9: its one block has no conditioning LayerNorm to save and pays the tables' sigmoid pass)."""
+    return m <= PARALLEL_MAX_ROWS and (nb > 1 or not b0.attn_adaln.identity_scale)
+
+
+#: the conditioning tables' gate and AdaLN-scale logits turned into sigmoid values once per step (L rows) instead of in every epilogue
+#: (S L rows); measured per stack (see the docs)
+PRESIG = True
+
+
+@torch.compiler.disable
+def _inference_b200(stack, single, cond, pair, mask):
+    """The bf16 token stack on B200. Per step: the conditioning tables as on H100 (the conditioning LayerNorm in one CUDA pass).
+    Per block:
+
+        parallel (RF3, Chai-1)  q|k|v|g GEMM (cuBLAS), [kq LayerNorm,] the attention core, the expand GEMM with the GLU in its epilogue
+                                (glu_gemm), and the to_out and squeeze GEMMs into two accumulators with x += gA o + gT h and the
+                                next block's LayerNorm + both AdaLNs in their epilogue (res_gemm) -- five kernels a block (RF3 six),
+                                against nine on the row-pass step; the last block writes the stack's output from that epilogue
+        sequential (Boltz-2)    q|k|v|g GEMM, the core, to_out GEMM + the residual / AdaLN row pass, the expand GEMM with the
+                                up-gated GLU in its epilogue (glu_gemm), squeeze GEMM + the residual / AdaLN row pass -- seven
+                                (the to_out / squeeze GEMMs with the residual + LayerNorm in a 1-CTA epilogue measured slower
+                                than cuBLAS + the row pass at L 384, A 5: see the docs)
+
+    With ``PRESIG`` (parallel blocks) the gate and AdaLN-scale logits of the conditioning tables become sigmoid values once per step
+    (L rows) and the epilogues apply them as they are."""
+    blocks = list(stack.blocks)
+    b0 = blocks[0]
+    nb, H = len(blocks), b0.n_head
+    A, L, D = single.shape
+    M = A * L
+    if not _fused_b200(stack, single, b0) or (stack.parallel and not _parallel_pays(M, nb, b0)):
+        return _inference_unfused_b200(stack, single, cond, pair, mask)
+    from miniworld_engine.kernels.dit_variants import cuda
+    from miniworld_engine.kernels.dit_variants.cuda import dit_gemm, sm100
+
+    pack = _static_pack(_PACKS, stack, _pack)
+    bf = torch.bfloat16
+    s = (cond if cond.ndim == 2 else cond[0]).to(bf).contiguous()
+    sig = not b0.attn_adaln.identity_scale
+    sm = _cond_ln(s) if sig else s
+    t_mod = torch.addmm(pack["mod_b"], sm, pack["mod_w"].t())     # [L, nb 4 D]: per block scA | shA | scT | shT
+    t_gate = torch.addmm(pack["gate_b"], s, pack["gate_w"].t())   # [L, nb 2 D]: per block gA | gT
+    presig = PRESIG and stack.parallel
+    if presig:
+        cuda.sigmoid_tables(t_gate, t_mod if sig else None, D)
+    key = (pair.data_ptr(), pair._version, tuple(pair.shape), pair.stride(),
+           None if mask is None else (mask.data_ptr(), mask._version), pack["pair_w"].data_ptr())
+    bias = _capture.lookup_inputs(_BIASES, key, lambda: _bias_all(pack, pair, mask, b0.pair_norm.eps, nb * H), limit=2)[0]
+
+    dev = single.device
+    x = torch.empty(M, D, device=dev, dtype=torch.float32)
+    xa = torch.empty(M, D, device=dev, dtype=bf)
+    xt = torch.empty_like(xa) if stack.parallel else xa
+    qkvg = torch.empty(M, 4 * D, device=dev, dtype=bf)
+    if not b0.gating:
+        qkvg[:, 3 * D:].fill_(_NO_GATE)
+    width = b0.expand.weight.shape[0] // 2
+    h = torch.empty(M, width, device=dev, dtype=bf)
+    out = torch.empty(M, D, device=dev, dtype=bf)
+    eps = b0.adaln_eps
+    nops = 3 if b0.up_gate else 2
+    sig_mod = sig and not presig                     # the AdaLN f() the kernels still apply
+
+    def mod(i, j):
+        o = 4 * i * D
+        return t_mod[:, o + 2 * j * D:o + (2 * j + 1) * D], t_mod[:, o + (2 * j + 1) * D:o + (2 * j + 2) * D]
+
+    for i, (blk, w) in enumerate(zip(blocks, pack["blocks"], strict=True)):
+        ga, gt = t_gate[:, 2 * i * D:(2 * i + 1) * D], t_gate[:, (2 * i + 1) * D:(2 * i + 2) * D]
+        last = i == nb - 1
+        if i == 0:
+            mods = [(*mod(0, 0), xa), *([(*mod(0, 1), xt)] if stack.parallel else [])]
+            cuda.ln_mod_rows(x, mods, L, eps, sig_mod, xin=single.reshape(M, D))
+        torch.addmm(w["bqkv"], xa, w["wqkv"].t(), out=qkvg if blk.gating else qkvg[:, :3 * D])
+        if blk.kq_norm:
+            wq, bq, wk, bk, qeps = w["qk"]
+            cuda.qk_ln_rows(qkvg[:, :D], qkvg[:, D:2 * D], wq, bq, wk, bk, qeps)
+        sm100.gated_inference(qkvg, bias, i, A, H, D // H)
+        o = qkvg[:, :D]
+        if stack.parallel:
+            nxt = () if last else [(*mod(i + 1, 0), xa), (*mod(i + 1, 1), xt)]
+            dit_gemm.glu_gemm(xt, w["wexp"], h, nops)
+            dit_gemm.res_gemm(x, o, w["wo"], ga, L, a2=h, w2=w["wsq"], g2=gt, mods=nxt, final=out if last else None,
+                              sig=sig_mod, sig_g=not presig, eps=eps)
+        else:
+            mst, mbt = mod(i, 1)
+            cuda.res_rows(x, torch.mm(o, w["wo"].t()), ga, L, ms=mst, mb=mbt, out_ln=xt, eps=eps, sig=sig)
+            dit_gemm.glu_gemm(xt, w["wexp"], h, nops)
+            if last:
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, final=out)
+            else:
+                msa, mba = mod(i + 1, 0)
+                cuda.res_rows(x, torch.mm(h, w["wsq"].t()), gt, L, ms=msa, mb=mba, out_ln=xa, eps=eps, sig=sig)
+    return out.view(A, L, D)
+
+
+_inference_unfused_b200 = torch.compiler.disable(_inference)
 
 
 # ------------------------------------------------------------------------------------------------------------------------- atom
