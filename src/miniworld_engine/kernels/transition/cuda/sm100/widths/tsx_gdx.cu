@@ -36,8 +36,7 @@ constexpr int O_RED = O_GEND;                                  // partner's part
                                                                // with the 16-B chunks swizzled (sw128): conflict-free row accesses
 constexpr int O_RS = O_RED + ROWS * 32 * 4;                    // row sums of every CTA: [CLS source ranks][128 rows] float2
 constexpr int O_CP = O_RS + CLS * ROWS * 8;                    // column partials [4 quadrants][2][OW] fp32
-constexpr int O_GM = O_CP + 4 * 2 * OW * 4;                    // gamma of the owned columns [OW] fp32
-constexpr int O_RH = O_GM + OW * 4;                            // the two column halves' row sums [2][128] float2
+constexpr int O_RH = O_CP + 4 * 2 * OW * 4;                    // the two column halves' row sums [2][128] float2
 constexpr int O_DED = (O_RH + 2 * ROWS * 8 + 1023) / 1024 * 1024;
 constexpr int SMAX = 232448 - 512;
 constexpr int NDED_MAX = (SMAX - O_DED) / STB, NGR_MAX = O_GEND / STB;
@@ -50,7 +49,7 @@ constexpr int TC = GN + NB <= 128 ? 128 : 256;                 // tensor memory:
 constexpr uint32_t IDESC_G = idesc_bf16(128, GN, 0, 1), IDESC_X = idesc_bf16(128, NB, 0, 1);
 
 struct Bars {
-  uint64_t w_full, dy_full[NKD], mma_done, full[STG], empty[STG], acc_full, red_full, rs_full;
+  uint64_t w_full, dy_full[NKD], mma_done, full[STG], empty[STG], acc_full, red_full, rs_full, flag_clear;
   uint32_t tmem;
 };
 static_assert(sizeof(Bars) <= 512, "barrier block");
@@ -96,8 +95,8 @@ DEVI uint32_t cl_addr(uint32_t addr, uint32_t rank) {
 }
 // maps: dy [M][D] (box 64 x 128), ws [D][H] (box 64 units x 64 rows, MN-major), dab [M][2 H] (box 64 x 128), wa / wb [H][D] (box
 // 64 cols x 64 rows, MN-major). a / b [M][H] bf16, dab (the same tensor as mdab) written here. part [tiles][2 D] fp32 dgamma | dbeta
-// partials; flags [tiles] (uninitialised): cleared before griddepcontrol.launch_dependents, set to 1 (gpu-scope release) once the
-// tile's [dA | dB] is in global memory.
+// partials; flags [tiles] (uninitialised): the tile's rank 0 clears it before griddepcontrol.launch_dependents and sets it to 1
+// (gpu-scope release) once the cluster barrier has seen every CTA's [dA | dB] stored.
 extern "C" __global__ void __launch_bounds__(384, 1)
 transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mws,
                   const __nv_bfloat16* __restrict__ as_, const __nv_bfloat16* __restrict__ bs, __nv_bfloat16* __restrict__ dab,
@@ -122,7 +121,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
     mbar_init(&B.w_full, 1); mbar_init(&B.mma_done, 1);
     for (int kb = 0; kb < NKD; ++kb) mbar_init(&B.dy_full[kb], 1);
     for (int s = 0; s < STG; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
-    mbar_init(&B.acc_full, 1); mbar_init(&B.red_full, 1); mbar_init(&B.rs_full, 1);
+    mbar_init(&B.acc_full, 1); mbar_init(&B.red_full, 1); mbar_init(&B.rs_full, 1); mbar_init(&B.flag_clear, 1);
     fence_barrier_init();
     fence_proxy_async();
     prefetch_map(&mdy); prefetch_map(&mws); prefetch_map(&mdab); prefetch_map(&mwa); prefetch_map(&mwb);
@@ -133,7 +132,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
       for (int gb = 0; gb < GPC; ++gb) tma_load_2d(su + O_WS + kb * WSB + gb * 8192, &mws, &B.w_full, h0 + gb * 64, kb * 64);
     for (int kb = 0; kb < NDED; ++kb) { mbar_expect_tx(&B.full[kb], STB); load_w(kb); }
     mbar_expect_tx(&B.red_full, ROWS * OW * 4);                // the partner's partial (st.async, any time after the setup sync)
-    mbar_expect_tx(&B.rs_full, CLS * ROWS * 8);                // every CTA's row sums (this one's included)
+    mbar_expect_tx(&B.rs_full, (CLS - 1) * ROWS * 8);          // the other CTAs' row sums (bulk copies)
   }
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TC); tmem_relinquish(); }
   tc_fence_before();
@@ -141,13 +140,25 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
   cluster_sync_relaxed();                                      // every CTA of the cluster runs before any distributed-shared access
   tc_fence_after();
   const uint32_t tmem = B.tmem;
-  pdl_wait();                                                  // dy (and the forward's a, b) complete and visible
-  if (tid == 0 && rank == 0) {                                 // clear this tile's flag before the weight-gradient kernel may start
+  // the forward's a, b: written by the expand launch, complete before this launch could start (every launch on this path passes
+  // griddepcontrol.wait before its launch_dependents), so they load before the wait: one 64-unit row segment per thread, through
+  // 4-lane groups (load_t: 8 rows x 64 B per load)
+  const int gr = (warp & 3) * 32 + lane, gg = (warp - 4) >> 2;   // gate: row, 32-unit half of each chunk
+  uint4 av[GPC][4], bv[GPC][4];
+  if (warp >= 4) {
+#pragma unroll
+    for (int c = 0; c < GPC; ++c) {
+      const size_t off = (size_t)row0 * H_ + h0 + c * 64 + gg * 32 + store_t_off<16>(gr, lane, H_, 2);
+      load_t<16>(as_ + off, H_, av[c], lane);
+      load_t<16>(bs + off, H_, bv[c], lane);
+    }
+  }
+  pdl_wait();                                                  // dy complete and visible
+  if (warp == 3 && lane == 0 && rank == 0) {                   // clear this tile's flag before the weight-gradient kernel may start
     flags[tile] = 0;
     asm volatile("fence.acq_rel.gpu;" ::: "memory");
+    mbar_arrive(&B.flag_clear);
   }
-  if (tid >= 32 && tid < 32 + OW) reinterpret_cast<float*>(sm + O_GM)[tid - 32] = gamma[own0 + tid - 32];
-  __syncthreads();                                             // (the flag is cleared before this CTA's launch_dependents below)
 
   if (warp == 0) {
     if (lane == 0) {
@@ -156,6 +167,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
         tma_load_2d(su + O_DY + kb * DYB, &mdy, &B.dy_full[kb], kb * 64, row0);
       }
       mbar_wait(&B.mma_done, 0);                               // the gate products have read dy and Ws: their stages are free
+      if (rank == 0) mbar_wait(&B.flag_clear, 0);
       pdl_launch();                                            // the weight-gradient kernel may start: not earlier, its dWs loads
                                                                // would compete with this tile's dy (its dWab waits for the flags)
       for (int kb = NDED; kb < STG; ++kb) { mbar_expect_tx(&B.full[kb], STB); load_w(kb); }
@@ -213,15 +225,8 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
   } else if (warp >= 4) {
     // ------------------------------------------------------------------------------------------ gate: one row per thread, warps 4-7
     // units 0..31 of each 64-unit chunk, warps 8-11 units 32..63
-    const int r = (warp & 3) * 32 + lane, g = (warp - 4) >> 2;
+    const int r = gr, g = gg;
     const uint32_t trow = tmem + ((uint32_t)((warp & 3) * 32) << 16);
-    uint4 av[GPC][4], bv[GPC][4];
-#pragma unroll
-    for (int c = 0; c < GPC; ++c) {
-      const size_t off = (size_t)(row0 + r) * H_ + h0 + c * 64 + g * 32;
-#pragma unroll
-      for (int q = 0; q < 4; ++q) { av[c][q] = ldg128(as_ + off + q * 8); bv[c][q] = ldg128(bs + off + q * 8); }
-    }
     mbar_wait(&B.mma_done, 0);
     tc_fence_after();
 #pragma unroll
@@ -247,7 +252,9 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
     cluster_arrive_rx();
     if (warp == 3) {
       cluster_wait();
-      if (rank == 0 && lane == 0) {                            // publish the tile for the weight-gradient kernel
+      // publish the tile for the weight-gradient kernel. (Per-CTA flags set right after each CTA's own stores let its dWa | dWb
+      // loads start ~0.8 us earlier but overlap this kernel's d_xn loads: they ended ~1 us later, measured.)
+      if (rank == 0 && lane == 0) {
         asm volatile("fence.acq_rel.gpu;" ::: "memory");     // cumulative over the peers' stores acquired by the cluster barrier
         asm volatile("st.relaxed.gpu.global.b32 [%0], %1;" :: "l"(flags + tile), "r"(1) : "memory");
       }
@@ -266,19 +273,30 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
   uint32_t np[8];                                              // d_xn in bf16, packed pairs
   uint4 xv[2], dyv[2];
   uint32_t v[16];
+  float gm[16];                                                // gamma of this thread's 16 columns
   if (epi) {
 #pragma unroll
     for (int q = 0; q < 2; ++q) { xv[q] = ldg128(xg + grow * D_ + c0 + q * 8); dyv[q] = ldg128(dyg + grow * D_ + c0 + q * 8); }
+#pragma unroll
+    for (int q = 0; q < 4; ++q) {
+      const float4 t = __ldg(reinterpret_cast<const float4*>(gamma + c0) + q);
+      gm[4 * q] = t.x; gm[4 * q + 1] = t.y; gm[4 * q + 2] = t.z; gm[4 * q + 3] = t.w;
+    }
     rs = rstd[grow];
     mean = c1g[grow] / rs;
     mbar_wait(&B.acc_full, 0);
     tc_fence_after();
-    tmem_ld16(trow + (1 - ks) * OW + g * 16, v);               // the partner's half of this block -> its shared memory
-    tmem_wait_ld();
-    const uint32_t partner = (uint32_t)(ks ? rank - NBLK : rank + NBLK);
+    tmem_ld16(trow + (1 - ks) * OW + g * 16, v);               // the partner's half of this block -> its shared memory: staged in
+    tmem_wait_ld();                                            // ring stage 0 (free once the products are done), one bulk copy
+    const uint32_t stg0 = stage_addr(su, 0);
 #pragma unroll
-    for (int i = 0; i < 4; ++i)
-      st_async_v4(su + O_RED + sw128(r, g * 4 + i), smem_u32(&B.red_full), partner, v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]);
+    for (int i = 0; i < 4; ++i) sts128(stg0 + sw128(r, g * 4 + i), make_uint4(v[4 * i], v[4 * i + 1], v[4 * i + 2], v[4 * i + 3]));
+    fence_proxy_async();
+    named_bar_sync(1, 256);
+    if (tid == 128) {
+      dsm_bulk(su + O_RED, stg0, ROWS * OW * 4, smem_u32(&B.red_full), (uint32_t)(ks ? rank - NBLK : rank + NBLK));
+      asm volatile("cp.async.bulk.commit_group;" ::: "memory");
+    }
     tmem_ld16(trow + ks * OW + g * 16, v);
     tmem_wait_ld();
     tc_fence_before();
@@ -302,9 +320,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
 #pragma unroll
     for (int q = 0; q < 2; ++q) {
       const uint32_t x4[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w};
-      const float4 ga = *reinterpret_cast<const float4*>(sm + O_GM + g * 64 + q * 32);
-      const float4 gc = *reinterpret_cast<const float4*>(sm + O_GM + g * 64 + q * 32 + 16);
-      const float g8[8] = {ga.x, ga.y, ga.z, ga.w, gc.x, gc.y, gc.z, gc.w};
+      const float* g8 = gm + 8 * q;
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int i = 8 * q + 2 * e;
@@ -319,9 +335,8 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
     named_bar_sync(1, 256);
     const float2 h0v = reinterpret_cast<const float2*>(sm + O_RH)[r], h1v = reinterpret_cast<const float2*>(sm + O_RH)[ROWS + r];
     pa = h0v.x + h1v.x; pb = h0v.y + h1v.y;                    // this CTA's 32 columns of the row, halves in order
-#pragma unroll 1
-    for (int q = 0; q < CLS / 2; ++q)                          // to every CTA of the cluster (this one too), slot [rank][r]
-      st_async_v2f(su + O_RS + (uint32_t)((rank * ROWS + r) * 8), smem_u32(&B.rs_full), (uint32_t)((rank + g * (CLS / 2) + q) % CLS), pa, pb);
+    if (g == 0) reinterpret_cast<float2*>(sm + O_RS)[rank * ROWS + r] = make_float2(pa, pb);   // slot [rank] of every CTA
+    fence_proxy_async();
     // dgamma | dbeta column partials: sum over the warp's 32 rows (lane l -> column g 16 + (l & 15)), then the quadrants
     const float sg = reduce_scatter16(cg, lane), sb = reduce_scatter16(cb, lane);
     float* cp = reinterpret_cast<float*>(sm + O_CP);
@@ -330,6 +345,11 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
       cp[((warp & 3) * 2 + 1) * OW + g * 16 + lane] = sb;
     }
     named_bar_sync(1, 256);
+    if (tid == 160) {                                          // this CTA's row sums to the other CTAs (slot [rank])
+      const uint32_t slot = su + O_RS + (uint32_t)(rank * ROWS * 8);
+      for (int q = 1; q < CLS; ++q) dsm_bulk(slot, slot, ROWS * 8, smem_u32(&B.rs_full), (uint32_t)((rank + q) % CLS));
+      asm volatile("cp.async.bulk.commit_group;" ::: "memory");
+    }
     if (tid < 128 + 2 * OW) {                                  // this tile's partial of the owned columns
       const int k = tid - 128, which = k / OW, c = k % OW;
       float s = 0.f;
@@ -352,9 +372,7 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
 #pragma unroll
     for (int q = 0; q < 2; ++q) {
       const uint32_t x4[4] = {xv[q].x, xv[q].y, xv[q].z, xv[q].w}, d4[4] = {dyv[q].x, dyv[q].y, dyv[q].z, dyv[q].w};
-      const float4 ga = *reinterpret_cast<const float4*>(sm + O_GM + g * 64 + q * 32);
-      const float4 gc = *reinterpret_cast<const float4*>(sm + O_GM + g * 64 + q * 32 + 16);
-      const float g8[8] = {ga.x, ga.y, ga.z, ga.w, gc.x, gc.y, gc.z, gc.w};
+      const float* g8 = gm + 8 * q;
 #pragma unroll
       for (int e = 0; e < 4; ++e) {
         const int i = 8 * q + 2 * e;
@@ -367,7 +385,8 @@ transition_sx_gdx(const __grid_constant__ CUtensorMap mdy, const __grid_constant
     store_t(dx + (size_t)row0 * D_ + c0 + store_t_off<8>(r, lane, D_, 2), D_, o, lane);
   }
   // no cluster barrier at the end: every distributed-shared write into this CTA (partner partial, row sums) completed on its own
-  // barriers above, and this CTA reads no peer's shared memory
+  // barriers above, and this CTA reads no peer's shared memory; its own outgoing bulk copies have read their sources
+  if (tid == 128 || tid == 160) asm volatile("cp.async.bulk.wait_group.read 0;" ::: "memory");
   __syncthreads();
   if (warp == 2) { tc_fence_after(); tmem_dealloc(tmem, TC); }
 }
