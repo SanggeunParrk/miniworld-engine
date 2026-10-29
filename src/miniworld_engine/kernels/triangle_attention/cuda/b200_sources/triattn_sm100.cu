@@ -8,10 +8,11 @@
 //   MMA warp:      S = Q_r . K_{r,j}^T                (M = 128 q, N = 128 k, K = 32) into a TMEM buffer
 //   softmax warps: x = S * scale*log2e + bias * log2e; p = 2^(x - m_r); l_r += p; P (bf16) written over the S buffer in TMEM
 //   MMA warp:      O_r += P . V_{r,j}                  (A = P from TMEM, B = V MN-major, N = 32)
-// The softmax offset m_r is the row's running maximum, raised lazily (only when a chunk of 32 keys exceeds it by more than TA_TAU log2
-// units; l_r, the tile's P chunks already in TMEM and O_r are then rescaled -- a rare, warp-uniform branch), so p <= 2^TA_TAU for any
-// spread of the logits. (It used to be fixed at the first 32 keys' maximum, which overflowed to inf / NaN when a later logit exceeded
-// it by ~126 log2 units, as trained weights do; the H100 kernel made the same change.) FLAGS counts rows whose sum left (0, 3e38).
+// The softmax offset m_r starts at the maximum of the row's first 32 keys and is raised only when a tile's exponentials sum past 2^64
+// (a logit ~57+ log2 units above it): a rare, warp-uniform branch after the tile's chunk loop recomputes the tile from q / k, raises
+// the offset to the tile maximum and rescales l_r and O_r, so p < 2^64 for any spread of the logits (an offset that never moved
+// overflowed to inf / NaN on trained weights). The steady state carries no running maximum. FLAGS counts rows whose sum left
+// (0, 3e38).
 // Warps: 0 = TMA producer (Q of the task's rows, K|V per sub-step, the bias tile per key tile), 1 = MMA issue, 2-5 / 6-9 = two softmax
 // groups (rows 0, 2 / 1, 3 of the task: sub-step x uses S buffer x & 1 = r & 1) + their rows' epilogue.  A task always has R rows
 // (rows past N are computed on row N-1 and not stored), so the sub-step parity is the row parity.
@@ -37,7 +38,7 @@ constexpr int KVT = BN * D;                                // K or V tile [128 k
 constexpr int BT = BM * BN;                                // bias tile [2 key halves][128 q][64], 128B swizzle, bf16 (32 KiB)
 constexpr int NKV = TA_NKV, NB = 2;
 constexpr int THREADS = 448;                               // 0 TMA, 1 MMA, 2-5 / 6-9 softmax groups (even / odd rows), 10-13 epilogue
-constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
+constexpr int SMEM = 1024 + (2 * R * QT + NKV * 2 * KVT + NB * BT) * 2 + 2 * 2 * R * BM * 4 + 2 * R * BM * 4 + 512;   // + the row sums / offsets for the epilogue
 constexpr int NS = 3;                                      // S/P TMEM buffers: with two, a group's buffer sat idle through PV + QK^T
 constexpr int COL_S = 0, COL_O = NS * BN;                  // S/P [NS][128] | O [R rows][32] (single: the next task's first PV waits the drain)
 constexpr uint32_t ID_S = idesc_bf16(128, BN, 0, 0);       // A = Q K-major, B = K K-major
@@ -49,9 +50,9 @@ __device__ __forceinline__ float ex2f(float x) { float y; asm("ex2.approx.ftz.f3
 #ifndef TA_POLY
 #define TA_POLY 0        // half of the exponentials on the FMA pipe (the MUFU's 16 / clk / SM is the softmax's bound)
 #endif
-#ifndef TA_TAU
-#define TA_TAU 8.f       // forward: a chunk raises a row's offset only when its maximum exceeds it by more than this many log2 units
-#endif
+// forward: a tile whose exponentials sum past TA_PMAX raises the row's offset (so p, l_r and O_r stay ~2^64 at most: far from
+// overflow); under TA_PMIN a provisional offset (every key so far masked) takes the tile maximum
+constexpr float TA_PMAX = 0x1p64f, TA_PMIN = 0x1p-64f;
 #ifndef TB_POLY
 #define TB_POLY 0        // the same split in both backward kernels (each recomputes P: one ex2 per score)
 #endif
@@ -70,6 +71,13 @@ __device__ __forceinline__ float2 ex2_poly2(float2 x) {
 }
 
 
+__device__ __forceinline__ void tmem_st1(uint32_t taddr, uint32_t v) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x1.b32 [%0], {%1};\n" :: "r"(taddr), "r"(v) : "memory");
+}
+__device__ __forceinline__ void tmem_st4(uint32_t taddr, const uint32_t* r) {
+  asm volatile("tcgen05.st.sync.aligned.32x32b.x4.b32 [%0], {%1,%2,%3,%4};\n" :: "r"(taddr), "r"(r[0]), "r"(r[1]), "r"(r[2]), "r"(r[3]) : "memory");
+}
+
 __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     int N, int H, int S, int ntasks, float scl,          // scl = scale * log2(e)
     const __grid_constant__ CUtensorMap qmap,            // q [B*N*S][H*32] bf16 (the projection's layout), box (32, 128) at column h*32, 64B swizzle
@@ -78,7 +86,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     const __grid_constant__ CUtensorMap bmap,            // bias bf16 [B*H*S][S], box (64, 128), 128B swizzle
     __nv_bfloat16* __restrict__ OUT,                     // [B*N*S][H*32]
     float* __restrict__ LSE,                             // [B, N, H, S] base-2 log-sum-exp for the backward, or nullptr
-    int* __restrict__ FLAGS) {
+    int* __restrict__ FLAGS,
+    const __nv_bfloat16* __restrict__ QG,                // q / k [B*N*S rows at stride LD][H*32]: the overflow guard's recompute
+    const __nv_bfloat16* __restrict__ KG, int LD) {
   const int QTILES = S / BM, NK = S / BN, NG = (N + R - 1) / R;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -87,7 +97,9 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
   __nv_bfloat16* sB = sKV + NKV * 2 * KVT;                       // [NB][BT]
   float* sL = reinterpret_cast<float*>(sB + NB * BT);            // [2 tasks][R][128] row sums
   float* sM = sL + 2 * R * BM;                                   // [2 tasks][R][128] row offsets
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sM + 2 * R * BM);
+  float* sRM = sM + 2 * R * BM;                                  // [R][128] the softmax rows' offsets
+  float* sRL = sRM + R * BM;                                     // [R][128] their running sums; -1: the offset is provisional
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sRL + R * BM);
   uint64_t* qf = bars;               // [2]   the task's Q tiles landed
   uint64_t* qe = qf + 2;             // [2]   the task's last QK^T retired
   uint64_t* kvf = qe + 2;            // [NKV]
@@ -195,19 +207,24 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
     for (int t = blockIdx.x; t < ntasks; t += gridDim.x, ++lt) {
       int bh, qt, g; decode(t, bh, qt, g);
       const int ob = lt & 1;
-      float m[R / 2], l[R / 2];
+      // the rows' offset and sum (-1: provisional offset) live in shared memory, each thread its own slots: the rare overflow
+      // branch below then has no register results, and the steady-state loop keeps its schedule (with them in registers: +3 %)
 #pragma unroll
-      for (int r = 0; r < R / 2; ++r) { m[r] = -INFINITY; l[r] = 0.f; }   // no finite logit seen yet
+      for (int rr = 0; rr < R / 2; ++rr) { const int o = (gi + 2 * rr) * BM + row; sRM[o] = 0.f; sRL[o] = 0.f; }
       for (int j = 0; j < NK; ++j, ++jb) {
         const int bs = jb % NB;
         wait(bf + bs, (jb / NB) & 1);
         const __nv_bfloat16* brow = sB + bs * BT + row * 64;
+#pragma unroll
         for (int rr = 0; rr < R / 2; ++rr) {
           const int r = gi + 2 * rr, xs = x + r, b = xs % NS;
           wait(sf + b, (xs / NS) & 1);
           tc_fence_after();
           const uint32_t sb = tmem_at(tmem + COL_S + b * BN, q * 32, 0);
-          float mr = m[rr], lr = 0.f;
+          float* const mslot = sRM + r * BM + row;
+          float* const lslot = sRL + r * BM + row;
+          float mr = *mslot, lr = 0.f;
+          bool rare;
           const float2 sc2 = make_float2(scl, scl), l2 = make_float2(L2E, L2E);
           // x = S * scale*log2e + bias * log2e for chunk c (32 keys), bias from the staged tile
           auto logits = [&](int c, float* s32, float2 nm0) {   // x = S * scale*log2e + bias * log2e + nm0 (two FFMA2 a pair)
@@ -227,35 +244,25 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
           {
             float2 acc = make_float2(0.f, 0.f);
             float s32[2][32];
-            float lfall = 0.f, lfc[4];
             tmem_ld32(sb, s32[0]);
             tmem_wait_ld();
 #pragma unroll
             for (int c = 0; c < 4; ++c) {
               if (c + 1 < 4) tmem_ld32(sb + (c + 1) * 32, s32[(c + 1) & 1]);
               float* sc = s32[c & 1];
-              // The offset is the row's running maximum, raised lazily (FlashAttention-4; the H100 kernel's TA_TAU): a chunk of 32
-              // keys raises it only when its maximum exceeds it by more than TA_TAU log2 units, so every p <= 2^TA_TAU whatever the
-              // spread of the logits (an offset fixed at the first 32 keys overflowed to inf / NaN on trained weights). x - offset:
-              const bool have = mr > -INFINITY;                     // -inf until a finite logit was seen (masked keys: -inf)
-              const float nm = have ? -mr : 0.f;
-              logits(c, sc, make_float2(nm, nm));
-              float c0 = sc[0], c1 = sc[1];
+              if (j == 0 && c == 0) {            // the row's offset: the first 32 keys' maximum (raised after a tile, if need be)
+                logits(c, sc, make_float2(0.f, 0.f));
+                float m0 = sc[0], m1 = sc[1];
 #pragma unroll
-              for (int i2 = 2; i2 < 32; i2 += 2) { c0 = fmaxf(c0, sc[i2]); c1 = fmaxf(c1, sc[i2 + 1]); }
-              const float cm = fmaxf(c0, c1);                        // the chunk's maximum, relative to the offset (absolute if !have)
-              const bool up = have ? cm > TA_TAU : cm > -1e30f;
-              if (up) {                                              // raise the offset: this chunk and the running sum here; the
-                if (have) {                                          // P chunks already in TMEM and O_r after the loop (lfall)
-                  const float f = ex2f(-cm);
-                  acc.x *= f; acc.y *= f;
-                  lfall -= cm;
-                }
-                mr = have ? mr + cm : cm;                            // first finite chunk: nothing summed yet, nothing to rescale
+                for (int i2 = 2; i2 < 32; i2 += 2) { m0 = fmaxf(m0, sc[i2]); m1 = fmaxf(m1, sc[i2 + 1]); }
+                mr = fmaxf(m0, m1);
+                if (!(mr > -1e30f)) { mr = 0.f; *lslot = -1.f; }   // the first 32 keys all masked: -inf - -inf would be NaN
+                *mslot = mr;
 #pragma unroll
-                for (int i2 = 0; i2 < 32; ++i2) sc[i2] -= cm;
+                for (int i2 = 0; i2 < 32; ++i2) sc[i2] -= mr;
+              } else {
+                logits(c, sc, make_float2(-mr, -mr));
               }
-              lfc[c] = lfall;                                        // log2 of the scale chunk c's P was written under
               uint32_t pk[16];
 #pragma unroll
               for (int k2 = 0; k2 < 16; ++k2) {
@@ -271,52 +278,132 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
               tmem_st8(sb + c * 16 + 8, pk + 8);
             }
             lr = acc.x + acc.y;
-            if (__any_sync(0xffffffffu, lfall != 0.f)) {           // rare, warp-uniform (tcgen05.ld / st are warp-collective)
-              // the tile's P chunks written before a raise, and O_r (previous tiles) and l_r, to the final offset. The PV of this tile
-              // has not been issued (it waits for pf below); O_r is this task's from key tile 1 on (tile 0's PV overwrote it), and
-              // PV(previous tile, row r) = sub-step xs - R is complete when R > NS (issued before QK^T(xs), whose commit we waited
-              // on), else waited on through its K/V stage barrier
-              tmem_wait_st();
+          }
+          {
+            // Overflow guard, after the chunk loop (a running maximum or a branch inside the loop cost 4-15 %: the loop is one
+            // schedule).  A tile whose sum passed TA_PMAX (or is inf / NaN) has its raw S recomputed from q / k in global memory
+            // (the first half of the S buffer is already P, which may hold inf), the offset raised to the tile maximum, P
+            // rewritten and l_r, O_r rescaled.  A row whose first 32 keys were all masked has the provisional offset 0 (l slot
+            // -1) and takes the tile maximum once a tile under it sums below TA_PMIN with a finite bias (underflow, not a mask).
+            // Measured on the steady state (the branch is never taken there), each of these cost 1-3 %: a 32-wide body (it spilled
+            // loop invariants: the body works 8 columns at a time in loops not unrolled), the branch's results in registers (the
+            // row state is in shared memory instead), a shared-memory load before the vote (it reads only this tile's sum; a sum
+            // under TA_PMIN -- a masked tile, keys far below the offset -- enters too and mostly leaves at the bias check).
+            rare = __any_sync(0xffffffffu, !(lr <= TA_PMAX) || !(lr >= TA_PMIN));
+            if (rare) {                                             // rare, warp-uniform (tcgen05.ld / st are warp-collective)
+              const float l0 = *lslot;
+              const bool prov = l0 < 0.f;
+              const float lo = fmaxf(l0, 0.f);
+              const bool hi = !(lr <= TA_PMAX);                     // (also inf / NaN)
+              bool need = hi || (prov && !(lr >= TA_PMIN));         // (prov && !need: a sum in range, offset 0 is as good as any)
+              if (!hi && need) {                                    // provisional: is any key of this tile unmasked for the row?
+                bool fin = false;
+#pragma unroll 1
+                for (int e = 0; e < 16; ++e) {
+                  const uint4 u = *reinterpret_cast<const uint4*>(brow + (e >> 3) * BM * 64 + (e & 7) * 8);
+                  const uint32_t w[4] = {u.x, u.y, u.z, u.w};
 #pragma unroll
-              for (int c2 = 0; c2 < 3; ++c2) {
-                const float f = ex2f(lfall - lfc[c2]);
-                float pw[16];
-                tmem_ld16(sb + c2 * 16, pw);
-                tmem_wait_ld();
-                uint32_t pq[16];
-#pragma unroll
-                for (int k2 = 0; k2 < 16; ++k2) {
-                  const float2 pp = bf2f(__float_as_uint(pw[k2]));
-                  pq[k2] = pack2(pp.x * f, pp.y * f);
+                  for (int k2 = 0; k2 < 4; ++k2) fin |= (w[k2] & 0xffffu) != 0xff80u || (w[k2] >> 16) != 0xff80u;
                 }
-                tmem_st8(sb + c2 * 16, pq);
-                tmem_st8(sb + c2 * 16 + 8, pq + 8);
+                need = fin;
               }
-              const float fo = ex2f(lfall);
-              if (j > 0) {
-                if constexpr (R <= NS) {
-                  const int yp = xs - R;
-                  wait(kve + yp % NKV, (yp / NKV) & 1);
-                  tc_fence_after();
+              if (!__any_sync(0xffffffffu, need)) {
+                *lslot = prov && !(lr >= TA_PMIN) ? l0 : lo + lr;   // a masked tile keeps a provisional offset
+              } else {
+                int bh, qt, g; decode(t, bh, qt, g);              // (not kept live through the softmax loop: registers)
+                tmem_wait_st();
+                const uint4* qp = reinterpret_cast<const uint4*>(QG + ((size_t)row0(bh, g * R + r) + qt * BM + row) * (size_t)LD + hcol(bh));
+                const __nv_bfloat16* kp = KG + ((size_t)row0(bh, g * R + r) + j * BN) * (size_t)LD + hcol(bh);
+                const uint4 q0 = qp[0], q1 = qp[1], q2 = qp[2], q3 = qp[3];
+                const uint32_t qw[16] = {q0.x, q0.y, q0.z, q0.w, q1.x, q1.y, q1.z, q1.w, q2.x, q2.y, q2.z, q2.w, q3.x, q3.y, q3.z, q3.w};
+#pragma unroll 1
+                for (int kk = 0; kk < BN; ++kk) {                   // raw S = q . k (fp32) over the S buffer, a key at a time
+                  const uint4* kr = reinterpret_cast<const uint4*>(kp + (size_t)kk * LD);
+                  float2 a = make_float2(0.f, 0.f);
+#pragma unroll
+                  for (int e = 0; e < 4; ++e) {
+                    const uint4 u = kr[e];
+                    const uint32_t w[4] = {u.x, u.y, u.z, u.w};
+#pragma unroll
+                    for (int k2 = 0; k2 < 4; ++k2) a = fma2(bf2f(w[k2]), bf2f(qw[e * 4 + k2]), a);
+                  }
+                  tmem_st1(sb + kk, __float_as_uint(a.x + a.y));
                 }
-                const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
-                float ov[32];
-                tmem_ld32(oa, ov);
-                tmem_wait_ld();
-                uint32_t oq[32];
+                tmem_wait_st();
+                // x = S * scale*log2e + bias * log2e + nm for keys 8 i .. 8 i + 7
+                auto logits8 = [&](int i, float* t, float nm) {
+                  const uint4 u = *reinterpret_cast<const uint4*>(brow + (i >> 3) * BM * 64 + (((i & 7) ^ (row & 7)) << 3));
+                  const uint32_t w[4] = {u.x, u.y, u.z, u.w};
 #pragma unroll
-                for (int k2 = 0; k2 < 32; ++k2) oq[k2] = __float_as_uint(ov[k2] * fo);
+                  for (int k2 = 0; k2 < 4; ++k2) {
+                    const float2 xx = fma2(bf2f(w[k2]), l2, fma2(make_float2(t[2 * k2], t[2 * k2 + 1]), sc2, make_float2(nm, nm)));
+                    t[2 * k2] = xx.x; t[2 * k2 + 1] = xx.y;
+                  }
+                };
+                float tm = -INFINITY;                               // the tile maximum, relative to the offset
+#pragma unroll 1
+                for (int i = 0; i < BN / 8; ++i) {
+                  float t[8];
+                  tmem_ld8(sb + i * 8, t);
+                  tmem_wait_ld();
+                  logits8(i, t, -mr);
 #pragma unroll
-                for (int k2 = 0; k2 < 32; k2 += 8) tmem_st8(oa + k2, oq + k2);
+                  for (int k2 = 0; k2 < 8; ++k2) tm = fmaxf(tm, t[k2]);
+                }
+                float f = 1.f, mn = mr;
+                if (need && tm > -1e30f) {
+                  f = prov ? 0.f : ex2f(-tm);                       // provisional: everything summed so far is exactly 0
+                  mn = mr + tm;
+                }
+                float2 a2 = make_float2(0.f, 0.f);
+#pragma unroll 1
+                for (int i = 0; i < BN / 8; ++i) {                  // P of keys 8 i .. covers S columns 4 i .. 4 i + 3, already read
+                  float t[8];
+                  tmem_ld8(sb + i * 8, t);
+                  tmem_wait_ld();
+                  logits8(i, t, -mn);
+                  uint32_t pk[4];
+#pragma unroll
+                  for (int k2 = 0; k2 < 4; ++k2) {
+                    const float2 pv = make_float2(ex2f(t[2 * k2]), ex2f(t[2 * k2 + 1]));
+                    a2 = add2(a2, pv);
+                    pk[k2] = pack2(pv.x, pv.y);
+                  }
+                  tmem_st4(sb + i * 4, pk);
+                }
+                const float a = a2.x + a2.y;
+                *lslot = prov && !(a >= TA_PMIN) ? -1.f : lo * f + a;   // still provisional: every key so far masked
+                *mslot = mn;
+                // O_r: this task's from key tile 1 on (tile 0's PV overwrote it); the PV of this tile waits for pf below, and
+                // PV(previous tile, row r) = sub-step xs - R is complete when R > NS (issued before QK^T(xs), whose commit we
+                // waited on), else waited on through its K/V stage barrier
+                if (j > 0) {
+                  if constexpr (R <= NS) {
+                    const int yp = xs - R;
+                    wait(kve + yp % NKV, (yp / NKV) & 1);
+                    tc_fence_after();
+                  }
+                  const uint32_t oa = tmem_at(tmem + COL_O + r * D, q * 32, 0);
+#pragma unroll 1
+                  for (int i = 0; i < D / 8; ++i) {
+                    float ov[8];
+                    tmem_ld8(oa + i * 8, ov);
+                    tmem_wait_ld();
+                    uint32_t oq[8];
+#pragma unroll
+                    for (int k2 = 0; k2 < 8; ++k2) oq[k2] = __float_as_uint(ov[k2] * f);
+                    tmem_st8(oa + i * 8, oq);
+                  }
+                }
               }
-              l[rr] *= fo;
             }
           }
           tmem_wait_st();
           tc_fence_before();
           __syncwarp();
           if (lane == 0) arrive(pf + b);
-          m[rr] = mr; l[rr] += lr;
+          if (!rare) *lslot = fmaxf(*lslot, 0.f) + lr;            // (clears a provisional offset: the sum was in range)
+
         }
         x += R;
         __syncwarp();
@@ -324,7 +411,10 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
       }
       // hand the row sums to the epilogue warps
 #pragma unroll
-      for (int rr = 0; rr < R / 2; ++rr) { sL[((lt & 1) * R + gi + 2 * rr) * BM + row] = l[rr]; sM[((lt & 1) * R + gi + 2 * rr) * BM + row] = m[rr]; }
+      for (int rr = 0; rr < R / 2; ++rr) {
+        const int r = gi + 2 * rr;
+        sL[((lt & 1) * R + r) * BM + row] = fmaxf(sRL[r * BM + row], 0.f); sM[((lt & 1) * R + r) * BM + row] = sRM[r * BM + row];
+      }
       __syncwarp();
       if (lane == 0) arrive(lf + (lt & 1));
     }
@@ -337,33 +427,36 @@ __global__ void __launch_bounds__(THREADS, 1) triattn_fwd_sm100(
       wait(of, lt & 1);
       wait(lf + (lt & 1), (lt >> 1) & 1);
       tc_fence_after();
-      float o[R][32];
-#pragma unroll
-      for (int r = 0; r < R; ++r) tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o[r]);
-      tmem_wait_ld();
-      tc_fence_before();
-      __syncwarp();
-      if (lane == 0) arrive(oe);                 // O is free for the next task's PV GEMMs
+      // O_r / l_r packed to bf16 a row at a time (64 registers for the task's 4 rows, not 128 fp32: the 448-thread kernel's
+      // 128-register cap made the old all-rows-in-fp32 drain spill)
+      uint32_t ob[R][16];
       int bad = 0;
 #pragma unroll
       for (int r = 0; r < R; ++r) {
-        if (g * R + r >= N) continue;            // a padding row
+        float o[32];
+        tmem_ld32(tmem_at(tmem + COL_O + r * D, q * 32, 0), o);
         const float lr = sL[((lt & 1) * R + r) * BM + row];
         const float inv = 1.f / lr;
-        bad |= !(lr > 0.f) || !(lr < 3.0e38f);
+        if (g * R + r < N) bad |= !(lr > 0.f) || !(lr < 3.0e38f);
+        tmem_wait_ld();
+#pragma unroll
+        for (int k2 = 0; k2 < 16; ++k2) ob[r][k2] = pack2(o[2 * k2] * inv, o[2 * k2 + 1] * inv);
+      }
+      tc_fence_before();
+      __syncwarp();
+      if (lane == 0) arrive(oe);                 // O is free for the next task's PV GEMMs
+#pragma unroll
+      for (int r = 0; r < R; ++r) {
+        if (g * R + r >= N) continue;            // a padding row
         if (LSE != nullptr) {                     // base 2: lse = m + log2(l), [B, N, H, S]
           const int b_ = bh / H, h_ = bh % H;
+          const float lr = sL[((lt & 1) * R + r) * BM + row];
           const float mo = sM[((lt & 1) * R + r) * BM + row];
           LSE[((size_t)(b_ * N + g * R + r) * H + h_) * S + qt * BM + row] = (mo > -INFINITY ? mo : 0.f) + __log2f(lr);
         }
         uint4* dst = reinterpret_cast<uint4*>(OUT + ((size_t)row0(bh, g * R + r) + qt * BM + row) * (H * D) + hcol(bh));
 #pragma unroll
-        for (int c8 = 0; c8 < 4; ++c8) {
-          uint4 w;
-          w.x = pack2(o[r][c8 * 8 + 0] * inv, o[r][c8 * 8 + 1] * inv); w.y = pack2(o[r][c8 * 8 + 2] * inv, o[r][c8 * 8 + 3] * inv);
-          w.z = pack2(o[r][c8 * 8 + 4] * inv, o[r][c8 * 8 + 5] * inv); w.w = pack2(o[r][c8 * 8 + 6] * inv, o[r][c8 * 8 + 7] * inv);
-          dst[c8] = w;
-        }
+        for (int c8 = 0; c8 < 4; ++c8) dst[c8] = make_uint4(ob[r][c8 * 4], ob[r][c8 * 4 + 1], ob[r][c8 * 4 + 2], ob[r][c8 * 4 + 3]);
       }
       if (bad) atomicAdd(FLAGS, 1);
     }
@@ -1129,7 +1222,8 @@ std::vector<torch::Tensor> triattn_fwd(torch::Tensor q, torch::Tensor k, torch::
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(triattn_fwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   const float scl = (float)scale * L2E;
   triattn_fwd_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)N, (int)H, (int)S, ntasks, scl, qm, km, vm, bm,
-      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>());
+      reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()), want_lse ? lse.data_ptr<float>() : nullptr, flags.data_ptr<int>(),
+      reinterpret_cast<const __nv_bfloat16*>(q.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(k.data_ptr<at::BFloat16>()), (int)ld);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {out, lse, flags};
 }
