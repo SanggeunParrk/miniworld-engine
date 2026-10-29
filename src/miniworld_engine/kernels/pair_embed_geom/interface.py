@@ -5,7 +5,8 @@
 as a row gather of up to ten table rows in shared memory instead of 316 fp32 one-hot channels per pair, a concatenation and a Linear.
 :func:`pair_embed_geom` is the forward-only form (the encoder is frozen in the flow stage; the output is not differentiable); :func:`pair_embed_geom_train` is differentiable in the
 weight (autoencoder training) and :func:`pair_embed_ca` is the autoencoder decoder's pair embedding (sequence separation + CA distances, 157 rows); both can fold the attention-bias
-LayerNorm into the kernel (``ln_eps``). bf16 pair out.  256 channels.  Served: H100 by the CUDA kernels, any other card by the portable kernels (``triton/``, a gather per pair too, a deterministic
+LayerNorm into the kernel (``ln_eps``). bf16 pair out.  256 channels.  Served: H100 and B200 by the CUDA kernels (``cuda/sm90``, ``cuda/sm100``: the same
+forward gathers, the table gradient on wgmma / tcgen05), any other card by the portable kernels (``triton/``, a gather per pair too, a deterministic
 table-gradient reduction) when the engine holds a record for the card, else by the PyTorch reference with the standard warning (``kernels/_pair_route``);
 :func:`refusal` says why a call is not served at all; it never raises.
 """
@@ -20,7 +21,18 @@ from miniworld_engine.kernels.pair_embed_geom.reference import pair_embed_ca_ref
 
 D_PAIR = 256
 N_ROWS = 317
-_CUDA_CAPS = ((9, 0),)
+_CUDA_CAPS = ((9, 0), (10, 0))
+
+
+def _cuda(t: torch.Tensor):
+    """The CUDA build for the tensor's card: ``cuda.sm100`` on B200, ``cuda.sm90`` on H100."""
+    if torch.cuda.get_device_capability(t.device) == (10, 0):
+        from miniworld_engine.kernels.pair_embed_geom.cuda import sm100
+
+        return sm100
+    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
+
+    return sm90
 
 _CONSTANTS: dict[tuple, torch.Tensor] = {}
 
@@ -67,16 +79,14 @@ def pair_embed_geom_fwd(tbl: torch.Tensor, bb: torch.Tensor, ca: torch.Tensor, c
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward
 
         return portable_forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim)
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return sm90.forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim)
+    return _cuda(tbl).forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim)
 
 
 def pair_embed_geom(w, bb, ca_mask, has_cb, mask, residue_idx, chains) -> torch.Tensor:
     """pair [B, n, n, 256] bf16 (not differentiable). ``w`` [256, >= 317] Linear weight (columns: sep 127 | 4 x 21 distances | 5 x 21 angles |
     chain), ``bb`` [B, n, 4, 3] fp32 nm, the masks [B, n] bool, ``residue_idx`` / ``chains`` [B, n] integers. Check :func:`refusal` first."""
     dev = bb.device
-    where = route("pair_embed_geom", dev)
+    where = route("pair_embed_geom", dev, cuda_caps=_CUDA_CAPS)
     if where == REFERENCE:
         with torch.no_grad():
             return pair_embed_geom_reference(w.detach(), bb, ca_mask.bool(), has_cb.bool(), mask.bool(), residue_idx, chains).to(torch.bfloat16)
@@ -108,9 +118,7 @@ def pair_embed_geom_fwd_train(tbl: torch.Tensor, bb: torch.Tensor, ca: torch.Ten
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward
 
         return list(portable_forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True))
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return list(sm90.forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True))
+    return list(_cuda(tbl).forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True))
 
 
 def _pair_embed_geom_ca_fwd_fake(tbl, ca, mask, idx, dlim, portable):
@@ -127,9 +135,7 @@ def pair_embed_geom_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tens
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward_ca
 
         return list(portable_forward_ca(tbl, ca, mask, idx, dlim, with_codes=True))
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return list(sm90.forward_ca(tbl, ca, mask, idx, dlim, with_codes=True))
+    return list(_cuda(tbl).forward_ca(tbl, ca, mask, idx, dlim, with_codes=True))
 
 
 def _pair_embed_ca_fwd_fake(tbl, ca, mask, idx, dlim, eps, portable):
@@ -147,9 +153,7 @@ def pair_embed_ca_fwd(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.Tensor, i
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward_ca
 
         return portable_forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return sm90.forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
+    return _cuda(tbl).forward_ca(tbl, ca, mask, idx, dlim, ln_eps=ln_eps)
 
 
 def _pair_embed_geom_bwd_fake(g, codes, mode, portable):
@@ -164,9 +168,7 @@ def pair_embed_geom_bwd(g: torch.Tensor, codes: torch.Tensor, mode: int, portabl
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_backward
 
         return portable_backward(g, codes, mode)
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return sm90.backward(g, codes, mode)
+    return _cuda(g).backward(g, codes, mode)
 
 
 def _pair_embed_geom_fwd_ln_fake(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, eps, portable):
@@ -182,9 +184,7 @@ def pair_embed_geom_fwd_ln(tbl: torch.Tensor, bb: torch.Tensor, ca: torch.Tensor
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward
 
         return list(portable_forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True, ln_eps=eps))
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return list(sm90.forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True, ln_eps=eps))
+    return list(_cuda(tbl).forward(tbl, bb, ca, cb, mask, idx, chains, dlim, alim, with_codes=True, ln_eps=eps))
 
 
 def _pair_embed_geom_ca_fwd_ln_fake(tbl, ca, mask, idx, dlim, eps, portable):
@@ -200,9 +200,7 @@ def pair_embed_geom_ca_fwd_ln(tbl: torch.Tensor, ca: torch.Tensor, mask: torch.T
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_forward_ca
 
         return list(portable_forward_ca(tbl, ca, mask, idx, dlim, with_codes=True, ln_eps=eps))
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return list(sm90.forward_ca(tbl, ca, mask, idx, dlim, with_codes=True, ln_eps=eps))
+    return list(_cuda(tbl).forward_ca(tbl, ca, mask, idx, dlim, with_codes=True, ln_eps=eps))
 
 
 def _pair_embed_geom_ln_bwd_fake(tbl, codes, dh, mode, eps, portable):
@@ -217,9 +215,7 @@ def pair_embed_geom_ln_bwd(tbl: torch.Tensor, codes: torch.Tensor, dh: torch.Ten
         from miniworld_engine.kernels.pair_embed_geom.triton import portable_ln_backward
 
         return portable_ln_backward(tbl, codes, dh, mode, eps)
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90
-
-    return sm90.ln_backward(tbl, codes, dh, mode, eps)
+    return _cuda(tbl).ln_backward(tbl, codes, dh, mode, eps)
 
 
 class _PairEmbedFn(torch.autograd.Function):
@@ -251,7 +247,7 @@ def pair_embed_geom_train(w, bb, ca_mask, has_cb, mask, residue_idx, chains, *, 
     rounded to bf16 once). Use under ``torch.autocast(bfloat16)``: the output is bf16. ``ln_eps``: return LayerNorm(pair) over the 256 channels
     (no affine, that eps; the pair is never stored and the backward recomputes it) -- what the engine's attention-bias projection reads."""
     dev = bb.device
-    where = route("pair_embed_geom", dev, w)
+    where = route("pair_embed_geom", dev, w, cuda_caps=_CUDA_CAPS)
     if where == REFERENCE:
         out = pair_embed_geom_reference(w, bb, ca_mask.bool(), has_cb.bool(), mask.bool(), residue_idx, chains).to(torch.bfloat16)
         return out if ln_eps is None else F.layer_norm(out, (D_PAIR,), None, None, ln_eps)
@@ -279,7 +275,7 @@ def pair_embed_ca(w, ca, mask, residue_idx=None, *, ln_eps=None) -> torch.Tensor
     ``ca`` [B, n, 3] fp32 nm (the caller zeroes padded residues, as the decoder does), ``residue_idx`` defaults to 1 .. n."""
     dev = ca.device
     B, n = mask.shape
-    where = route("pair_embed_ca", dev, w)
+    where = route("pair_embed_ca", dev, w, cuda_caps=_CUDA_CAPS)
     if where == REFERENCE:
         out = pair_embed_ca_reference(w, ca, mask.bool(), residue_idx).to(torch.bfloat16)
         return out if ln_eps is None else F.layer_norm(out, (D_PAIR,), None, None, ln_eps)
