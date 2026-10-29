@@ -131,7 +131,7 @@ __global__ void __launch_bounds__(32 * WPB) ln_cond_fwd_t_k(const float* __restr
 
 template <int N, typename T>
 __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X, const T* __restrict__ SB, T* __restrict__ Y,
-                                                        float2* __restrict__ ST, long R, float eps) {
+                                                        float2* __restrict__ ST, long R, float eps, bool rna) {
   const int lane = threadIdx.x & 31;
   const long row = (long)blockIdx.x * WPB + (threadIdx.x >> 5);
   if (row >= R) return;
@@ -142,6 +142,10 @@ __global__ void __launch_bounds__(32 * WPB) adaln_fwd_k(const T* __restrict__ X,
   stats<N>(x, eps, mean, rstd);
 #pragma unroll
   for (int i = 0; i < N / 32; ++i) x[i] = rowmath::modulate(x[i], mean, rstd, sigm(sp[i]), bb[i]);
+  if (rna) {   // fp32 output whose consumer is a TF32 MMA that truncates its operands (the B200 ConditionedTransition tail): on the TF32 grid
+#pragma unroll
+    for (int i = 0; i < N / 32; ++i) x[i] = tf32_rn(x[i]);
+  }
   st_row<N>(Y + row * N, lane, x);
   if (lane == 0) ST[row] = make_float2(mean, rstd);
 }
@@ -431,7 +435,7 @@ std::vector<at::Tensor> ln_cond_fwd_t(at::Tensor cond, at::Tensor w, double eps)
   return {cn, st, cnt};
 }
 
-std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
+std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps, bool rna) {
   chk_act(x, "x");
   TORCH_CHECK(sb.scalar_type() == x.scalar_type() && sb.is_contiguous(), "sb dtype");
   const long N = sb.size(1) / 2, R = sb.size(0);
@@ -440,7 +444,7 @@ std::vector<at::Tensor> adaln_fwd(at::Tensor x, at::Tensor sb, double eps) {
   auto y = at::empty_like(x);
   auto st = at::empty({R, 2}, x.options().dtype(at::kFloat));
   ACT_SWITCH(N, x, adaln_fwd_k<NN, T><<<rows_grid(R), 32 * WPB, 0, S()>>>(P<T>(x), P<T>(sb), PM<T>(y), reinterpret_cast<float2*>(st.data_ptr()), R,
-                                                                          (float)eps));
+                                                                          (float)eps, rna && x.scalar_type() == at::kFloat));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {y, st};
 }
@@ -596,10 +600,57 @@ void pack_f32(std::vector<at::Tensor> srcs, std::vector<at::Tensor> dsts, std::v
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+// ======================================================================================================================== column sums of block partials
+// out[n] = sum_p parts[p, n] in a fixed order (32 columns x 8 row slices a block, the slices summed in order). The sm_90a extension
+// (adaln_sm90.cu) has the same kernels; these are the ones B200 (sm_100a) runs, where that extension does not build.
+__global__ void __launch_bounds__(256) colsum_rows_k(const float* __restrict__ pa, float* __restrict__ oa, int Pa, int Na,
+                                                     const float* __restrict__ pb, float* __restrict__ ob, int Pb, int Nb) {
+  __shared__ float red[8][33];
+  const int ba = (Na + 31) / 32;
+  const bool second = (int)blockIdx.x >= ba;
+  const float* parts = second ? pb : pa;
+  float* out = second ? ob : oa;
+  const int P = second ? Pb : Pa, N = second ? Nb : Na;
+  const int c = ((int)blockIdx.x - (second ? ba : 0)) * 32 + (threadIdx.x & 31), s = threadIdx.x >> 5;
+  float v = 0.f;
+  if (c < N) for (int p = s; p < P; p += 8) v += parts[(int64_t)p * N + c];
+  red[s][threadIdx.x & 31] = v;
+  __syncthreads();
+  if (s == 0 && c < N) {
+    float t = 0.f;
+#pragma unroll
+    for (int q = 0; q < 8; ++q) t += red[q][threadIdx.x & 31];
+    out[c] = t;
+  }
+}
+std::vector<at::Tensor> colsum2(at::Tensor a, at::Tensor b) {
+  chk(a, at::kFloat, "parts a");
+  chk(b, at::kFloat, "parts b");
+  TORCH_CHECK(a.dim() == 2 && b.dim() == 2, "parts [P, N] fp32");
+  const at::cuda::CUDAGuard gd(a.device());
+  auto oa = at::empty({a.size(1)}, a.options()), ob = at::empty({b.size(1)}, b.options());
+  colsum_rows_k<<<(unsigned)((a.size(1) + 31) / 32 + (b.size(1) + 31) / 32), 256, 0, S()>>>(
+      P<float>(a), PM<float>(oa), (int)a.size(0), (int)a.size(1), P<float>(b), PM<float>(ob), (int)b.size(0), (int)b.size(1));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return {oa, ob};
+}
+at::Tensor colsum(at::Tensor parts) {
+  chk(parts, at::kFloat, "parts");
+  TORCH_CHECK(parts.dim() == 2, "parts [P, N] fp32");
+  const at::cuda::CUDAGuard gd(parts.device());
+  auto out = at::empty({parts.size(1)}, parts.options());
+  colsum_rows_k<<<(unsigned)((parts.size(1) + 31) / 32), 256, 0, S()>>>(P<float>(parts), PM<float>(out), (int)parts.size(0),
+                                                                          (int)parts.size(1), nullptr, nullptr, 0, 0);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
+  m.def("colsum", &colsum);
+  m.def("colsum2", &colsum2);
   m.def("ln_cond_fwd", &ln_cond_fwd);
   m.def("ln_cond_fwd_t", &ln_cond_fwd_t);
-  m.def("adaln_fwd", &adaln_fwd);
+  m.def("adaln_fwd", &adaln_fwd, py::arg("x"), py::arg("sb"), py::arg("eps"), py::arg("rna") = false);
   m.def("adaln_bwd", &adaln_bwd, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("rna") = false);
   m.def("adaln_bwd_t", &adaln_bwd_t, py::arg("dy"), py::arg("x"), py::arg("sb"), py::arg("st"), py::arg("add") = py::none(), py::arg("gmul") = 2);
   m.def("ln_cond_bwd", &ln_cond_bwd);

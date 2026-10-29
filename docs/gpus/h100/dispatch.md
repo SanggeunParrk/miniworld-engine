@@ -42,8 +42,9 @@ with a correct result. `modules.dispatch.restricted_card(device)` is the single 
 * RMSNorm (`modules.RMSNorm` MINIWORLD) runs the general CUDA RMSNorm (`kernels/rmsnorm/cuda`, the LayerNorm kernel without mean
   and bias; same widths, dtypes and determinism; returns the input dtype); a multi-dimension `normalized_shape` or a CPU tensor runs
   the PyTorch statements.
-* AdaptiveLayerNorm and ConditionedTransition run their hand-written sm_90a kernels on H100 (`dispatch._cuda_on_h100`, `KernelBackend.CUDA`: `kernels/adaln/cuda`,
-  `kernels/conditioned_transition/cuda`; a call they do not serve runs the PyTorch reference) and resolve to PyTorch on B200 (open work there).
+* AdaptiveLayerNorm and ConditionedTransition run hand-written CUDA on H100 and B200 (`dispatch._cuda_on_hopper_blackwell`, `KernelBackend.CUDA`:
+  `kernels/adaln/cuda`, `kernels/conditioned_transition/cuda`; a call they do not serve runs the PyTorch reference). H100 runs the sm_90a wgmma
+  kernels; B200 the architecture-neutral row kernels around cuBLAS (AdaLN, the training tail) and the tcgen05 inference tail `ct_sm100`.
 * TriMul (single / bidirectional), TriangleAttention (single / bidirectional / bias-only), AttentionPairBias, AugmentedAttention,
   OuterProductMean, MSAPairWeightedAveraging, Transition and the SWA RMS norm take the CUDA path where it exists and the PyTorch statements
   otherwise. The former `ValueError` refusals of those modules ("H100 ... requires the native CUDA contract") are gone.
