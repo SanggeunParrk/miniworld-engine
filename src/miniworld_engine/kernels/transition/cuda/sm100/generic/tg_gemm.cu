@@ -6,6 +6,10 @@
 //   MODE 2  PLAIN    out = A B^T, fp32                                           (d_xn of the backward)
 //   MODE 3  GATE     dh = dy Ws, a = xn Wa^T, b = xn Wb^T -> h, [dA | dB]         (SwiGLU backward; three accumulators, two phases)
 //   MODE 4  CTGATE   y = res + sigmoid(cond Wsc^T + bsc) * (h Ws^T)               (ConditionedTransition squeeze + gate; two phases)
+//   MODE 5  SWIGLU_AB  MODE 0 that also stores a, b (into [a | b], columns hoff apart): the forward at a few row tiles
+//   MODE 6  GATE_AB  dh = dy Ws, a, b read from the forward's [a | b] (res, row stride ldres, b at column hoff) -> h, [dA | dB]
+//                    (the backward at a few row tiles: one operand phase instead of GATE's two, whose recompute of a, b doubles the
+//                    per-CTA operand intake that bounds a sub-wave grid)
 //
 // -DF32=1: fp32 activations on the TF32 tensor cores (kind::tf32; the operands are expected on the TF32 grid, the outputs that feed a
 // later TF32 GEMM are rounded to it), else bf16 (kind::f16). Any M (TMA zero-fills the tail rows of the last 128-row tile and clips
@@ -17,6 +21,11 @@
 // staging buffer. Accumulators are double-buffered in tensor memory (2 x NACC x BN columns), so the epilogue of tile i overlaps the main loop
 // of tile i + 1. Operands stream through an NST-deep ring of [A | B_0 | B_1] K-blocks of 128 bytes per row (64 bf16 / 32 fp32), 128-B
 // swizzled, K-major on both sides (nn.Linear weights as stored).
+//
+// Split K (KS > 1, single-phase epilogues; the host uses it with PLAIN): tile t is (K slice t / (M tiles x N tiles), output tile); slice s
+// sums K-blocks [s nk / KS, (s + 1) nk / KS) and stores its fp32 partial at rows s MSTR + m of the output map (slabs of MSTR >= M rows),
+// which the consumer adds in slice order (tg_ln_bwd_*, tg_splitsum). At a few row tiles this puts every SM on a GEMM whose output tiles
+// alone would leave most of them idle, each walking 1 / KS of the K loop.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -31,19 +40,21 @@ using namespace s100;
 #define BN 128
 #endif
 
-constexpr int NACC = MODE == 0 ? 2 : MODE == 3 ? 3 : MODE == 4 ? 2 : 1;   // accumulators per tile
+constexpr bool SWG = MODE == 0 || MODE == 5;                             // the SwiGLU forward epilogues
+constexpr bool GAT = MODE == 3 || MODE == 6;                             // the gate (SwiGLU backward) epilogues: h, dA, dB
+constexpr int NACC = SWG ? 2 : MODE == 3 ? 3 : MODE == 4 ? 2 : 1;        // accumulators per tile
 constexpr int NPH = (MODE == 3 || MODE == 4) ? 2 : 1;                     // operand phases (A, K) per tile
-constexpr int NBS = (MODE == 0 || MODE == 3) ? 2 : 1;                     // B tiles per ring stage (the widest phase)
+constexpr int NBS = (SWG || MODE == 3) ? 2 : 1;                           // B tiles per ring stage (the widest phase)
 __host__ __device__ constexpr int ph_acc0(int p) { return p == 0 ? 0 : 1; }
-__host__ __device__ constexpr int ph_nacc(int p) { return MODE == 0 ? 2 : (MODE == 3 && p == 1) ? 2 : 1; }
+__host__ __device__ constexpr int ph_nacc(int p) { return SWG ? 2 : (MODE == 3 && p == 1) ? 2 : 1; }
 
 constexpr int ESZ = F32 ? 4 : 2;                     // activation / operand element bytes
 constexpr int BKE = 128 / ESZ;                       // elements per 128-byte K-block row
 constexpr bool OUT_F32 = F32 || MODE == 2;           // PLAIN writes fp32 whatever the operands
 constexpr int OCG = OUT_F32 ? 32 : 64;               // output columns per 128-byte staging row
 constexpr int UPG = OCG / 32;                        // 32-column TMEM loads per output group
-constexpr int NOUT = MODE == 3 ? 3 : 1;              // staged outputs per group (GATE: h, dA, dB)
-constexpr int STG_PAR = MODE == 3 ? 1 : 2;           // staging buffers per output (double-buffered except GATE)
+constexpr int NOUT = (GAT || MODE == 5) ? 3 : 1;     // staged outputs per group (GATE: h, dA, dB; SWIGLU_AB: h, a, b)
+constexpr int STG_PAR = NOUT == 3 ? 1 : 2;           // staging buffers per output (double-buffered but for three outputs)
 constexpr int A_BYTES = 128 * 128, B_BYTES = BN * 128, STAGE = A_BYTES + NBS * B_BYTES;
 constexpr int SLAB = 32 * 128;                       // one warp's staging slab: 32 rows x 128 B
 constexpr int NEPI = 8;                              // epilogue warps: two per TMEM lane quarter, splitting the columns
@@ -121,12 +132,12 @@ extern "C" __global__ void __launch_bounds__(64 + 32 * NEPI, 1)
 tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ CUtensorMap mA1, const __grid_constant__ CUtensorMap mB0,
               const __grid_constant__ CUtensorMap mB1, const __grid_constant__ CUtensorMap mB2, const __grid_constant__ CUtensorMap mO0,
               const __grid_constant__ CUtensorMap mO1, const void* __restrict__ res, const float* __restrict__ bias, int M, int N, int K0,
-              int K1, int ldres, int hoff) {
+              int K1, int ldres, int hoff, int KS, int MSTR) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
-  const int NT = (N + BN - 1) / BN, tiles = ((M + 127) / 128) * NT;
+  const int NT = (N + BN - 1) / BN, MNT = ((M + 127) / 128) * NT, tiles = MNT * KS;
 
   if (threadIdx.x == 0) {
     for (int s = 0; s < NST; ++s) { mbar_init(&B.full[s], 1); mbar_init(&B.empty[s], 1); }
@@ -147,12 +158,13 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
     if (lane == 0) {
       int it = 0;
       for (int t = blockIdx.x; t < tiles; t += gridDim.x) {
-        const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
+        const int ks = t / MNT, tt = t % MNT;
+        const int m0 = (tt / NT) * 128, n0 = (tt % NT) * BN;
 #pragma unroll
         for (int p = 0; p < NPH; ++p) {
           const CUtensorMap* ma = p == 0 ? &mA0 : &mA1;
-          const int nk = (p == 0 ? K0 : K1) / BKE, a0 = ph_acc0(p), na = ph_nacc(p);
-          for (int k = 0; k < nk; ++k, ++it) {
+          const int nk = (p == 0 ? K0 : K1) / BKE / KS, a0 = ph_acc0(p), na = ph_nacc(p), kb0 = ks * nk;
+          for (int k = kb0; k < kb0 + nk; ++k, ++it) {
             const int s = it % NST;
             mbar_wait(&B.empty[s], ((it / NST) & 1) ^ 1);
             mbar_expect_tx(&B.full[s], A_BYTES + na * B_BYTES);
@@ -178,7 +190,7 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
         const uint32_t dbase = tmem + buf * TCOLS;
 #pragma unroll
         for (int p = 0; p < NPH; ++p) {
-          const int nk = (p == 0 ? K0 : K1) / BKE, a0 = ph_acc0(p), na = ph_nacc(p);
+          const int nk = (p == 0 ? K0 : K1) / BKE / KS, a0 = ph_acc0(p), na = ph_nacc(p);
           for (int k = 0; k < nk; ++k, ++it) {
             const int s = it % NST;
             mbar_wait(&B.full[s], (it / NST) & 1);
@@ -209,7 +221,8 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
     int tc = 0, grp = 0;
     for (int t = blockIdx.x; t < tiles; t += gridDim.x, ++tc) {
       const int buf = tc & 1;
-      const int m0 = (t / NT) * 128, n0 = (t % NT) * BN;
+      const int ks = t / MNT, tt = t % MNT;
+      const int m0 = (tt / NT) * 128, n0 = (tt % NT) * BN;
       const int row = m0 + q4 * 32 + lane;
       mbar_wait(&B.accf[buf], (tc >> 1) & 1);
       tc_fence_after();
@@ -228,12 +241,18 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
           for (int j = 0; j < NACC; ++j) tmem_ld32(tb + j * BN + col, acc[j]);
           tmem_wait_ld();
           float o0[32];
-#if MODE == 0
+#if MODE == 0 || MODE == 5
+#if MODE == 5
+          float o1[32], o2[32];
+#endif
 #pragma unroll
           for (int e = 0; e < 32; ++e) {
             const float a = __uint_as_float(acc[0][e]), b = __uint_as_float(acc[1][e]);
             const float h = a * sigm(a) * b;
             o0[e] = F32 ? tf32r(h) : h;
+#if MODE == 5
+            o1[e] = a; o2[e] = b;                            // as GATE's recompute sees them (fp32: unrounded; bf16: the saved rounding)
+#endif
           }
 #elif MODE == 1
           load_res32(res, (long)row * ldres + n0 + col, row < M, o0);
@@ -253,6 +272,19 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
             o1[e] = F32 ? tf32r(da) : da;                    // dA, dB: the d_xn GEMM's A operand
             o2[e] = F32 ? tf32r(db) : db;
           }
+#elif MODE == 6
+          float o1[32], o2[32], av[32], bv[32];
+          load_res32(res, (long)row * ldres + n0 + col, row < M, av);
+          load_res32(res, (long)row * ldres + hoff + n0 + col, row < M, bv);
+#pragma unroll
+          for (int e = 0; e < 32; ++e) {
+            const float dh = __uint_as_float(acc[0][e]), a = av[e], b = bv[e];
+            const float s = sigm(a), l = a * s;
+            o0[e] = l * b;                                   // h (the dWs operand, cuBLAS)
+            const float da = dh * b * (s + l * (1.f - s)), db = dh * l;
+            o1[e] = F32 ? tf32r(da) : da;
+            o2[e] = F32 ? tf32r(db) : db;
+          }
 #elif MODE == 4
           if (ldres > 0) load_res32(res, (long)row * ldres + n0 + col, row < M, o0);   // ldres 0: no residual
           else {
@@ -266,7 +298,7 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
           }
 #endif
           stage32(stg + (uint32_t)(0 * STG_PAR + par) * SLAB, r, u, o0);
-#if MODE == 3
+#if MODE == 3 || MODE == 5 || MODE == 6
           stage32(stg + (uint32_t)(1 * STG_PAR + par) * SLAB, r, u, o1);
           stage32(stg + (uint32_t)(2 * STG_PAR + par) * SLAB, r, u, o2);
 #endif
@@ -274,9 +306,9 @@ tg_gemm_sm100(const __grid_constant__ CUtensorMap mA0, const __grid_constant__ C
         fence_proxy_async();
         if (UPG == 2) named_bar_sync(1 + q4, 64); else __syncwarp();
         if (storer && lane == 0) {
-          const int r0 = m0 + q4 * 32;
+          const int r0 = ks * MSTR + m0 + q4 * 32;
           tma_store_2d(&mO0, stg + (uint32_t)(0 * STG_PAR + par) * SLAB, c0, r0);
-#if MODE == 3
+#if MODE == 3 || MODE == 5 || MODE == 6
           tma_store_2d(&mO1, stg + (uint32_t)(1 * STG_PAR + par) * SLAB, c0, r0);
           tma_store_2d(&mO1, stg + (uint32_t)(2 * STG_PAR + par) * SLAB, hoff + c0, r0);
 #endif

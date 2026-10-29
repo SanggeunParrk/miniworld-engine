@@ -234,3 +234,44 @@ def test_training_replay_is_bit_identical():
 
     a, b = step(), step()
     assert all(torch.equal(u, v) for u, v in zip(a, b))
+
+
+@pytest.mark.parametrize("dt", [torch.float32, torch.bfloat16], ids=["fp32", "bf16"])
+def test_single_track_takes_the_small_m_paths_and_they_match_the_plain_ones(monkeypatch, dt):
+    """A single track (a few row tiles): the forward keeps a, b (SWIGLU_AB) for the backward's GATE_AB, the backward's d_xn GEMM splits K
+    into fp32 slabs the LayerNorm backward adds in order, and the squeeze runs on cuBLAS. The same step with those turned off (GATE recomputing
+    a, b; one K slice) agrees: fp32 to the summation order, bf16 to the bf16 rounding of the saved a, b."""
+    d, n = (384, 4) if dt is torch.float32 else (768, 4)
+    ours, _, _ = _modules(d, n, dt)
+    torch.manual_seed(2)
+    x = torch.randn(1, 300, d, device="cuda", dtype=dt)
+    dy = torch.randn_like(x)
+    calls = []
+    real = g._K.gemm
+
+    def gemm(self, name, m, nn, *a, **kw):
+        calls.append((name, kw.get("ks", 1)))
+        return real(self, name, m, nn, *a, **kw)
+
+    monkeypatch.setattr(g._K, "gemm", gemm)
+
+    def step():
+        xx = x.clone().requires_grad_(True)
+        for p in ours.parameters():
+            p.grad = None
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=dt is torch.bfloat16):
+            y = ours(xx)
+        y.backward(dy)
+        return [y.detach().float(), xx.grad.float()] + [p.grad.float() for p in ours.parameters()]
+
+    fast = step()
+    names = dict(calls)
+    assert {"swiglu_ab", "gate_ab", "plain"} <= set(names) and "gate" not in names and names["plain"] > 1, calls
+    monkeypatch.setattr(g, "AB_FORCE", False)
+    monkeypatch.setattr(g, "DXN_ROUTE", "nosplit")
+    calls.clear()
+    plain = step()
+    assert ("gate", 1) in calls and ("plain", 1) in calls, calls
+    tol = 1e-5 if dt is torch.float32 else 2e-2
+    for i, (u, v) in enumerate(zip(fast, plain, strict=True)):
+        assert _rel(u, v) < tol, (i, _rel(u, v))
