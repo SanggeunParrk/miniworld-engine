@@ -274,6 +274,20 @@ class OuterProductMean(nn.Module):
                     else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 )
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
+        # B200 inference the sm_100a kernels do not take (d_msa / d_pair other than 64 / 128: Protenix-v2, OpenDDE, ESMFold2 widths; a
+        # batch of MSA stacks; the interchain mask): the composed CUDA / cuBLAS path (kernels.outer_product_mean.composed), not the PyTorch
+        # statements
+        if (
+            self.implementation == ImplementationType.MINIWORLD
+            and not torch.is_grad_enabled()
+            and msa.is_cuda
+            and torch.cuda.get_device_capability(msa.device) == (10, 0)
+            and not _dispatch.portable_forced(self.implementation)
+        ):
+            from miniworld_engine.kernels.outer_product_mean import composed
+
+            if composed.serves(self, msa, mask):
+                return composed.inference(self, msa, mask, token_asym_id, residual)
         # `implementation="anthropic"` refuses with the reason; `miniworld` uses the fused path where it
         # fits and falls through to the statements below where it does not. See integrations.anthropic_msa.
         if _anthropic.wanted(self.implementation):

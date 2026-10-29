@@ -1,4 +1,4 @@
-"""H100 inference of the OuterProductMean variants the fused OPM kernels do not take (``modules.outer_product.OuterProductMean``):
+"""H100 / B200 inference of the OuterProductMean variants the fused OPM kernels do not take (``modules.outer_product.OuterProductMean``):
 
     RoseTTAFold3   left / right projections with a bias (``projection_bias``): masked rows lose the bias too
     Chai-1         ``groups = 8``: per group an outer product of 8-wide halves, the 512 products LayerNorm'd (``product_norm``), no count
@@ -17,7 +17,7 @@ import torch
 def serves(module, msa: torch.Tensor, mask: torch.Tensor | None) -> bool:
     if torch.is_grad_enabled() or not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4:
         return False
-    if torch.cuda.get_device_capability(msa.device) != (9, 0):
+    if torch.cuda.get_device_capability(msa.device) not in ((9, 0), (10, 0)):   # B200: the same composition (gather.cu builds for sm_100a)
         return False
     g, k = module.groups, module.group_width
     return k % 8 == 0 and g * k * k in (512, 1024) and (mask is None or mask.shape == msa.shape[:3])

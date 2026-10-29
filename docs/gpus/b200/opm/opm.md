@@ -8,9 +8,33 @@ Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (r
 Dispatch: `integrations/opm_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
 kernels: `integrations/csrc/sm100/opm_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
-Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, `normalize_before_proj` (the AF3 order), no
-interchain masking, N (length) a multiple of 64 and S (MSA depth) a multiple of 256, inference and training alike. The pair residual is added in
-the epilogue (its gradient is `dz` itself). Every other call runs the portable portable path.
+Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, d_msa 64 / d_pair 128, either normalisation order
+(`normalize_before_proj=False`, the count dividing the projection and its bias, since 2026-10-29: the epilogue takes the order as a flag,
+the training backward takes dbias = sum dz / n off the dgrad's dz / n), no interchain masking, inference and training alike; a length that
+is not a multiple of 64 / a depth that is not a multiple of 256 is padded with masked rows. The pair residual is added in the epilogue
+(its gradient is `dz` itself). B200 inference the kernels do not take (d_msa 128 / d_pair 256 / 384, a batch of MSA stacks, the
+interchain mask, RoseTTAFold3's projection biases when wider than MiniWorld's, Chai-1's groups) runs the composed CUDA / cuBLAS path
+(`kernels/outer_product_mean/composed.py`, as H100); RoseTTAFold3 at d_msa 64 / d_pair 128 runs this path plus the bias terms
+(`composed.biased_on_fused`). Training of those options still runs the PyTorch statements.
+
+#### Fused inference kernel (`opm_fused_sm100`, `opm_fused_infer`)
+
+The grouped outer product and the c_hidden^2 -> c_z projection in one persistent kernel on CTA pairs, so the [N*32, N*32] product
+(1.2 GB at L768) is never written: per pair of CTAs an item of 32 i x 8 j, four passes over c (8 values each) as cta_group::2
+M 256 x N 256 products into two of three rotating 128-column TMEM slots (the next pass starts once the shared slot is drained), eight
+warps drain the slot to a bf16 Opair tile in shared memory (the H100 kernel's k permutation and weight), the projection is a
+cta_group::2 M 256 x N 128 product into TMEM columns 384-511 (each CTA holds the weight rows of its 64 outputs), four warps finish
+(count, bias, either order, residual). Measured against cuBLAS + the epilogue kernel (CUDA graph, steady state under the 1000 W cap,
+2026-10-29, us): S1024 L128 41 / 38, L256 140 / 137, L384 288 / 293, L512 505 / 513, L640 788 / 800, L768 1141 / 1144; S2048 L384
+521 / 503, L768 2062 / 1959; S4096 L384 1001 / 917, L768 4014 / 3632; through the module harness (ms, today's path -> fused,
+two runs each) S1024 L384 0.309 / 0.295 -> 0.303 / 0.294, L512 0.496 / 0.494 -> 0.503 / 0.514, L640 0.729 / 0.731 -> 0.808 / 0.795,
+L768 1.043 / 1.058 -> 1.153 / 1.051, S4096 L768 3.528 / 3.687 -> 3.472 / 3.651. It wins at no cell beyond noise, so the default
+dispatch does not serve it (`_FUSED_SM100_CELLS` is empty; the tests route it explicitly); it does avoid the product buffer.
+Its mainloop alone measures 909 us at L768 S1024 and 3773 us at S4096 against cuBLAS's 894 / 3331 for the same GEMM with the product
+written: per unit of energy it is ~13 % behind cuBLAS's mainloop at long K, which eats the saved HBM traffic. What is left: that
+mainloop gap (cuBLAS runs nvjet 128x256_64x6_2x1_2cta, the same tile; neither 6 stages, the raster nor a 2-D A box closed it), and
+the pass-to-pass gap (0.5-1 us of a 7-8 us pass at L768 S1024; it was 1.5-2 us while the drain warps released the slots with a
+release-scope cluster arrive).
 
 ## OuterProductMean (`OuterProductMean`)
 
