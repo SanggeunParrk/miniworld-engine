@@ -17,7 +17,7 @@ sees those within +/- 64 of it by rank among the real atoms.
 
 The reference path below is plain PyTorch (the window gather by ``unfold``); on a B200 ``integrations/local_dit`` serves bf16 calls
 with the sm_100a kernels of ``kernels/augmented_attention/cuda/sm100_atom_local``, and fp32 calls (fp32 parameters) with their TF32 twins.
-ESMFold2's block is served there for bf16 inference and training and fp32 (TF32) inference (``integrations/local_dit._esm_block``).
+ESMFold2's block is served there for bf16 and fp32 (TF32) inference and training (``integrations/local_dit._esm_block``).
 """
 
 from __future__ import annotations

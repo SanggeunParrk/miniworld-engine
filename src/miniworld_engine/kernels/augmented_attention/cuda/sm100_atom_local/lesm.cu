@@ -339,3 +339,44 @@ local_esm_qkrope_bwd_f32(float* __restrict__ dq, float* __restrict__ dk, int ldd
     part[(size_t)blockIdx.x * 64 + threadIdx.x] = s;
   }
 }
+
+// local_esm_bias_scatter: the bias gradient by position dbias2 [4, nwin, 32, 160] -> by trunked-pair slot [4, nwin * 32 * 192] (natural units;
+// slot s of window w holds position start_w + s, zero where that is outside [0, 160) of the query's span), the input of lbias_tf32.cu's
+// local_bias_bwd_f32 (the fp32 pair's backward). n_real as in local_esm_bias (the mask's population count per block, or n0).
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_bias_scatter(const float* __restrict__ dbias2, const uint8_t* __restrict__ km, float* __restrict__ out, int N, int n0) {
+  __shared__ int red[8];
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  int nr = n0;
+  if (km != nullptr) {
+    int c = 0;
+    for (int i = 16 * tid; i < N; i += 16 * blockDim.x) {
+      const uint4 b = *reinterpret_cast<const uint4*>(km + i);
+      const uint32_t w4[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        c += ((w4[j] & 0xffu) != 0) + ((w4[j] & 0xff00u) != 0) + ((w4[j] & 0xff0000u) != 0) + ((w4[j] >> 24) != 0);
+    }
+#pragma unroll
+    for (int off = 16; off >= 1; off >>= 1) c += __shfl_xor_sync(0xffffffffu, c, off);
+    if (lane == 0) red[warp] = c;
+  }
+  __syncthreads();
+  if (km != nullptr) {
+    nr = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) nr += red[i];
+  }
+  const int nwin = N / 32;
+  const size_t rows = (size_t)nwin * 32 * KEYS, plane = (size_t)nwin * 32 * SPAN;
+  for (size_t r = (size_t)blockIdx.x * blockDim.x + tid; r < rows; r += (size_t)gridDim.x * blockDim.x) {
+    const int slot = (int)(r % KEYS), wi = (int)(r / (32 * KEYS)), i = (int)((r / KEYS) % 32);
+    const int first = 32 * wi - (KEYS - 32) / 2;
+    const int start = first < 0 ? 0 : min(first, nr - KEYS);
+    const int c = start + slot - 32 * wi + HALF;
+    const bool ok = c >= 0 && c < SPAN;
+    const size_t e = ((size_t)wi * 32 + i) * SPAN + (ok ? c : 0);
+#pragma unroll
+    for (int h = 0; h < 4; ++h) out[h * rows + r] = ok ? dbias2[h * plane + e] : 0.f;
+  }
+}
