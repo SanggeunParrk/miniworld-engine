@@ -530,6 +530,25 @@ class _sm_carveout:
         return False
 
 
+def _bf16_params(ext, ps):
+    """bf16 forms of the parameters `ps` (Wa, Wb, Wo, the bias[, the projection biases]): with fp32 master parameters ONE launch writes
+    them all into one flat buffer (`opm_cast_bf16`, segments at 64-element boundaries) -- a cast kernel each, in the forward and again in
+    the backward, were seven launches of the training step.  Returns the views and the buffer (None when every parameter is bf16 already,
+    as with bf16 parameters: no kernel)."""
+    if all(p.dtype == torch.bfloat16 for p in ps):
+        return [p.detach().contiguous() for p in ps], None
+    flat = ext.opm_cast_bf16([p.detach().contiguous() for p in ps])
+    return _bf16_views(flat, ps), flat
+
+
+def _bf16_views(flat, ps):
+    views, off = [], 0
+    for p in ps:
+        views.append(flat[off:off + p.numel()].view(p.shape))
+        off += (p.numel() + 63) // 64 * 64
+    return views
+
+
 def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None, asym=None):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
     statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, the mask counts [N, N] off the bits (one small
@@ -537,32 +556,43 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
     and its bias (ESMFold2's order, and AF3's as released).  `pbias` (RoseTTAFold3's left | right projection biases, [64]):
     the prologue adds them to the projections, masked like them; widths other than MiniWorld's and the biases run
     `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices).  `asym` (int32 [N] chain ids, the interchain mask): the epilogue
-    zeroes the update of a pair of two chains (the residual passes through)."""
+    zeroes the update of a pair of two chains (the residual passes through).  The last value returned is the flat bf16 buffer of the
+    parameters' bf16 forms (`_bf16_params`; None with bf16 parameters), which the training backward reuses."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
     if mk.dtype != torch.bool:
         mk = mk != 0
     cm, cz = m.shape[2], wo.shape[0]
+    (wa16, wb16, wo16, bo16, *pb16), w16 = _bf16_params(ext, [wa, wb, wo, bo, *((pbias,) if pbias is not None else ())])
     if (cm, cz) != (CM, CZ) or pbias is not None:
         wext = _ext_wide(msa.device)
         # the biases in bf16, as the module's bf16 Linear adds them (its fp32 accumulation, one rounding of the sum)
-        pb = pbias.detach().to(bf).float().contiguous() if pbias is not None else m.new_empty((0,), dtype=torch.float32)
+        pb = pb16[0].float() if pbias is not None else m.new_empty((0,), dtype=torch.float32)
         a2, bt, stats, bits = wext.opm_wprologue(
-            m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps),
-            wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous(), pb, bool(save_stats))
+            m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps), wa16, wb16, pb, bool(save_stats))
         n = m.shape[1]
-        wo16, bo16 = wo.detach().to(bf).contiguous(), bo.detach().to(bf).contiguous()
         if not save_stats and cz == CZ and asym is None and _fused_sm100_enabled(m.shape[0], n):
             z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
-            return z, m, mk, bits, a2, bt, stats, None
+            return z, m, mk, bits, a2, bt, stats, None, w16
         o = torch.matmul(a2, bt.t())
         norm = ext.opm_norm(bits)   # the mask counts [N, N] (one small kernel; the epilogue and the dgrad read them, one tile ahead)
         if cz == CZ:
             z = ext.opm_epilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
         else:
             z = wext.opm_wepilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
-        return z, m, mk, norm, a2, bt, stats, o
+        return z, m, mk, norm, a2, bt, stats, o, w16
+    a2, bt, _, stats, bits = ext.opm_prologue(m, mk, lnw.detach().contiguous(), lnb.detach().contiguous(), float(eps), wa16, wb16,
+                                              save_stats, False)
+    n = m.shape[1]
+    if not save_stats and asym is None and _fused_sm100_enabled(m.shape[0], n):
+        # inference: the products stay on chip (k-permuted weight as H100's fused kernel; the bias rounded to bf16 as below)
+        z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
+        return z, m, mk, bits, a2, bt, stats, None, w16
+    o = torch.matmul(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
+    norm = ext.opm_norm(bits)     # the mask counts [N, N], read by the epilogue and the dgrad
+    z = ext.opm_epilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
+    return z, m, mk, norm, a2, bt, stats, o, w16
     a2, bt, _, stats, bits = ext.opm_prologue(
         m,
         mk,
@@ -744,9 +774,10 @@ class _OpmMath(torch.autograd.Function):
     ):
         cm, cz = msa.shape[3], wo.shape[0]
         if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: every width of `refusal`, either order, the biases, interchain
-            z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
+            z, m, mk, bits, a2, bt, stats, o, w16 = _forward_sm100(
                 _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after, pbias, asym
             )
+            ctx.w16 = w16   # the parameters' bf16 forms (one flat buffer, or None), reused by the backward
             ctx.save_o = bool(save_o)
             ctx.has_bias = pbias is not None
             ctx.asym = asym
@@ -917,7 +948,11 @@ class _OpmMath(torch.autograd.Function):
             # backward (opm_wide_sm100.cu)
             cm, cz = m.shape[2], wo.shape[0]
             wext = _ext_wide(dz.device)
-            wo16 = wo.detach().to(bf).contiguous()
+            w16 = getattr(ctx, "w16", None)
+            if w16 is not None:   # the forward's bf16 forms of Wa, Wb, Wo (no cast kernel here)
+                wa16, wb16, wo16 = _bf16_views(w16, [wa, wb, wo])
+            else:
+                wa16, wb16, wo16 = (w.detach().to(bf).contiguous() for w in (wa, wb, wo))
             dgrad = wext.opm_wdgrad
             # the interchain mask (chain ids): a pair of two chains passes no gradient (dO, dz/n and dbias without it)
             dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None))
@@ -946,7 +981,6 @@ class _OpmMath(torch.autograd.Function):
                 dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
                 dWo = dwo(dzp, o, n, n, int(wo.dtype == bf))  # gradients come back in the parameters' dtype
             del dO, o
-            wa16, wb16 = wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous()
             if cm == CM:
                 # ssa: the masked column sums of [dA dB] (the kernel's row 64 of R), = RoseTTAFold3's projection-bias gradients
                 dm, dWa, dWb, dgam, dbet, red = ext.opm_prologue_bwd(dA, dB, m, stats, mask16, lnw.detach(), lnb.detach(), wa16, wb16)
@@ -1159,6 +1193,7 @@ def _forward_fake(args, eps, save_o, after):
                 device=m.device,
                 dtype=torch.bfloat16,
             ),
+            torch.empty((_bf16_flat_numel(args),), device=m.device, dtype=torch.bfloat16),
         ]
     return [
         torch.empty((1, n, n, CZ), device=m.device, dtype=torch.bfloat16),
@@ -1170,7 +1205,16 @@ def _forward_fake(args, eps, save_o, after):
         torch.empty(
             (n * CH, n * CH) if save_o else (0,), device=m.device, dtype=torch.bfloat16
         ),
+        torch.empty((0,), device=m.device, dtype=torch.bfloat16),
     ]
+
+
+def _bf16_flat_numel(args) -> int:
+    """The length of `_bf16_params`' flat buffer for these op arguments (0: every parameter bf16, no buffer)."""
+    ps = [args[4], args[5], args[6], args[7], *((args[9],) if args[9].numel() else ())]
+    if all(p.dtype == torch.bfloat16 for p in ps):
+        return 0
+    return sum((p.numel() + 63) // 64 * 64 for p in ps)
 
 
 from miniworld_engine.kernels._compile import opaque
@@ -1197,7 +1241,9 @@ def _forward_op(
         kept[0] = args[0].new_empty(
             (0,)
         )  # sm_100a keeps the bool mask itself, a view of an input: re-derived in the backward
-    return [out, *kept, sv[12] if save_o else args[0].new_empty((0,))]
+    w16 = getattr(ctx, "w16", None)   # sm_100a: the parameters' bf16 forms (flat), for the backward
+    return [out, *kept, sv[12] if save_o else args[0].new_empty((0,)),
+            w16 if w16 is not None else args[0].new_empty((0,), dtype=torch.bfloat16)]
 
 
 def _backward_fake(args, kept, dz, eps, save_o, after):
@@ -1223,6 +1269,7 @@ def _backward_op(
     if k5[0].numel() == 0:
         k5[0] = args[1][0] if args[1].dtype == torch.bool else args[1][0] != 0
     ctx.saved_tensors = (args[0][0], *k5, *args[2:8], *((kept[5],) if save_o else ()))
+    ctx.w16 = kept[6] if len(kept) > 6 and kept[6].numel() else None
     gradients = _OpmMath.backward(ctx, dz)
     db = gradients[10].to(args[9].dtype) if ctx.has_bias else args[9].new_empty((0,))
     return [*(gradients[i] for i in (0, 2, 3, 4, 5, 6, 7)), db]

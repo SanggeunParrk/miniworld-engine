@@ -1,9 +1,10 @@
-"""B200 OuterProductMean training: dWo on a side stream beside the dA / dB GEMMs.
+"""B200 OuterProductMean training: dWo on a side stream beside the dA / dB GEMMs, and the parameters' bf16 forms in one launch.
 
 From L128 the training backward runs dWo (``opm_dwo`` / ``opm_wdwo`` with a CTA budget, ``opm_train._DWO_SIDE_CTAS``) on a side stream while
-cuBLAS computes dA and dB on the remaining SMs (``opm_train._sm_carveout``).  Held here: the fp64 statements' accuracy bars (as
-``test_opm_wide_b200_gpu``), every gradient but dWo bitwise equal to the serial order and dWo equal up to its fp32 split order, bitwise run
-to run and inside a CUDA graph.  Needs a B200.
+cuBLAS computes dA and dB on the remaining SMs (``opm_train._sm_carveout``); the forward writes the bf16 forms of Wa, Wb, Wo and the bias
+(fp32 master parameters) with one kernel (``opm_cast_bf16``) and the backward reuses them.  Held here: the fp64 statements' accuracy bars
+(as ``test_opm_wide_b200_gpu``), every gradient but dWo bitwise equal to the serial order and dWo equal up to its fp32 split order, bitwise
+run to run and inside a CUDA graph, and the cast kernel bitwise equal to ``Tensor.to(torch.bfloat16)``.  Needs a B200.
 """
 
 import copy
@@ -165,3 +166,18 @@ def test_side_stream_is_deterministic_and_graph_safe(master, served, monkeypatch
         assert torch.equal(a, b)
     assert calls and served() > 0
 
+
+def test_cast_kernel_is_tensor_to_bf16():
+    ext = opm_train._ext(torch.device("cuda"))
+    g = torch.Generator(device="cuda").manual_seed(0)
+    ps = [torch.randn(32, 64, device="cuda", generator=g) * 3, torch.randn(32, 64, device="cuda", generator=g),
+          torch.randn(384, 1024, device="cuda", generator=g) / 32, torch.randn(37, device="cuda", generator=g),
+          torch.randn(5, 7, device="cuda", generator=g).bfloat16()]
+    ps[0][0, :4] = torch.tensor([1.0 + 2 ** -8, 1.0 + 3 * 2 ** -8, -(2 ** -130), 3.0e38])   # ties to even, a denormal, a large value
+    views, flat = opm_train._bf16_params(ext, ps)
+    assert flat is not None and flat.numel() == opm_train._bf16_flat_numel([None] * 4 + ps[:4] + [None, ps[4]])
+    for v, p in zip(views, ps, strict=True):
+        assert v.dtype == torch.bfloat16 and v.shape == p.shape and v.data_ptr() % 128 == 0
+        assert torch.equal(v, p.to(torch.bfloat16))
+    views, flat = opm_train._bf16_params(ext, [p.bfloat16() for p in ps])
+    assert flat is None

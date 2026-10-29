@@ -1127,6 +1127,56 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
 }
 }  // namespace
 
+// The parameters' bf16 forms in ONE launch (fp32 master parameters: Wa, Wb, Wo, the bias -> one flat bf16 buffer, each segment at a
+// 64-element boundary so its view is a 128-byte aligned TMA base), instead of a cast kernel per parameter in the forward and again in
+// the backward (the training step keeps this buffer for its backward).  Round to nearest even, as Tensor.to(torch.bfloat16).
+namespace {
+constexpr int CAST_MAX = 8;
+struct CastSegs {
+  const void* src[CAST_MAX];
+  long off[CAST_MAX + 1];      // padded offsets into the flat buffer; off[n] = its length
+  long len[CAST_MAX];
+  int f32[CAST_MAX];
+  int n;
+};
+__global__ void __launch_bounds__(256) opm_cast_bf16_kernel(const __grid_constant__ CastSegs seg, __nv_bfloat16* __restrict__ OUT) {
+  const long total = seg.off[seg.n];
+  for (long i = (long)blockIdx.x * 256 + threadIdx.x; i < total; i += (long)gridDim.x * 256) {
+    int k = 0;
+    while (k + 1 < seg.n && i >= seg.off[k + 1]) ++k;
+    const long j = i - seg.off[k];
+    __nv_bfloat16 v = __float2bfloat16_rn(0.f);
+    if (j < seg.len[k])
+      v = seg.f32[k] ? __float2bfloat16_rn(__ldg(static_cast<const float*>(seg.src[k]) + j)) : static_cast<const __nv_bfloat16*>(seg.src[k])[j];
+    OUT[i] = v;
+  }
+}
+}  // namespace
+
+// fp32 / bf16 tensors -> one flat bf16 buffer (segment k at off[k], off[k + 1] = off[k] + numel rounded up to 64)
+torch::Tensor opm_cast_bf16(std::vector<torch::Tensor> ts) {
+  TORCH_CHECK(!ts.empty() && (int)ts.size() <= CAST_MAX, "opm_cast_bf16: 1 to ", CAST_MAX, " tensors");
+  CastSegs seg{};
+  seg.n = (int)ts.size();
+  long off = 0;
+  for (int k = 0; k < seg.n; ++k) {
+    const auto& t = ts[k];
+    TORCH_CHECK(t.is_cuda() && t.is_contiguous() && (t.scalar_type() == torch::kFloat32 || t.scalar_type() == torch::kBFloat16),
+                "opm_cast_bf16: contiguous fp32 / bf16 CUDA tensors");
+    seg.src[k] = t.data_ptr();
+    seg.f32[k] = t.scalar_type() == torch::kFloat32;
+    seg.len[k] = t.numel();
+    seg.off[k] = off;
+    off += (t.numel() + 63) / 64 * 64;
+  }
+  seg.off[seg.n] = off;
+  auto out = torch::empty({off}, ts[0].options().dtype(torch::kBFloat16));
+  const int blocks = (int)std::max<long>(1, std::min<long>((off + 255) / 256, 2L * num_sms(ts[0].device().index())));
+  opm_cast_bf16_kernel<<<blocks, 256, 0, at::cuda::getCurrentCUDAStream()>>>(seg, reinterpret_cast<__nv_bfloat16*>(out.data_ptr<at::BFloat16>()));
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return out;
+}
+
 // `norm`: fp32 [ni, nj] mask counts, or int32 [N, S/32] -- the prologue's bit mask, counted per pair in-kernel
 // the mask counts n[i][j] = max(1, popc(bits_i & bits_j)) as fp32 [N, N], off the prologue's bit rows int32 [N, S/32]
 torch::Tensor opm_norm(torch::Tensor bits) {
@@ -1451,6 +1501,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(),
         py::arg("after") = 0, py::arg("asym") = py::none());
+  m.def("opm_cast_bf16", &opm_cast_bf16, "sm100 OPM: the parameters' bf16 forms in one launch (one flat buffer, 64-element aligned segments)");
   m.def("opm_norm", &opm_norm, "sm100 OPM mask counts [N, N] (clamped >= 1) off the prologue's bit rows", py::arg("bits"));
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
   m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("ctas") = 0);
