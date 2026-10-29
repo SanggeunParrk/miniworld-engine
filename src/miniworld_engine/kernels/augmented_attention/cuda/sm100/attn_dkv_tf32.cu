@@ -17,6 +17,9 @@
 // Head layouts (-DNHEAD -DDHP -DRSQDV, as the bf16 cores; none = 16 x 48): a DH-wide fp32 row is NA 32-column boxes in the
 // 128-B swizzle and NBX 16-column ones in the 64-B swizzle (48 = 32 + 16, 32 = 32, 64 = 32 + 32); the MN-major q / dO NV
 // 32-column atoms. smem (3 stages): 16 x 48 184 KB, 24 x 32 132 KB, 12 x 64 / 16 x 64 212 KB.
+// -DDET=1 (deterministic dK / dV): the two issuers' accumulating MMAs run in block order -- the issuer of block G waits until the
+// other issuer's dV / dK MMAs of block G - 1 have completed (its ds_free commit) -- so dK / dV are bitwise the same run to run
+// (without it the accumulation order of the two warpgroups' blocks follows their timing).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -35,6 +38,9 @@ using namespace s100;
 #endif
 #ifndef NHEAD
 #define NHEAD 16
+#endif
+#ifndef DET
+#define DET 0                            // 1: dK / dV accumulated in block order (bitwise repeatable)
 #endif
 #ifndef RSQDV
 #define RSQDV 0.14433756729740643f       // 1 / sqrt(head dim): 1 / sqrt 48; 1 / sqrt 32 = 0.17677669529663687f; 1 / sqrt 64 = 0.125f
@@ -220,6 +226,7 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         else __nanosleep(20);
       }
       if (n <= 1 && li >= 1) mbar_wait(&B.acc_free, (li - 1) & 1);          // the previous item's dK / dV have been read out (and zeroed)
+      if (DET && G >= 1) mbar_wait(&B.ds_free[1 - w], ((G - 1) >> 1) & 1); // block G - 1's dV / dK MMAs (the other issuer) are done
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB;
       // q / dO as MN-major B: queries as rows (8 queries = 1 KB per K step), two 32-column atoms 4 KB apart

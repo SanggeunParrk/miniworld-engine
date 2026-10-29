@@ -13,6 +13,9 @@
 // -DBPS=1 (AttentionPairBias): every sample has its own bias planes, bias^T [A, NHEAD, L(key), L(query)] (the token DiT shares one
 // [NHEAD, L, L] across its A samples); nothing else changes (A = 1 is the single-sample layout).
 // TMEM: S^T[w] at w * 128, dP^T[w] at w * 128 + 64, P^T[w] at 256 + w * 64 (bf16), dS^T[w] at 288 + w * 64, dK at 384, dV at 432.
+// -DDET=1 (deterministic dK / dV): the two issuers' accumulating MMAs run in block order -- the issuer of block G waits until the
+// other issuer's dV / dK MMAs of block G - 1 have completed (its ds_free commit) -- so dK / dV are bitwise the same run to run
+// (without it the accumulation order of the two warpgroups' blocks follows their timing).
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -34,6 +37,9 @@ using namespace s100;
 #endif
 #ifndef QSPLIT
 #define QSPLIT 0
+#endif
+#ifndef DET
+#define DET 0                            // 1: dK / dV accumulated in block order (bitwise repeatable)
 #endif
 #ifndef DHP
 #define DHP 48                           // head width in memory and in the MMAs: 48 (token DiT 16 x 48), 64, 32, 16; 16 x 24: 32 (the
@@ -206,6 +212,7 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
         else __nanosleep(20);
       }
       if (n <= 1 && li >= 1) mbar_wait(&B.acc_free, (li - 1) & 1);          // the previous item's dK / dV have been read out (and zeroed)
+      if (DET && G >= 1) mbar_wait(&B.ds_free[1 - w], ((G - 1) >> 1) & 1); // block G - 1's dV / dK MMAs (the other issuer) are done
       tc_fence_after();
       const uint32_t st = su + O_ST + s * STB;
       const uint64_t dq = desc_mn128(st, 8192), ddo = desc_mn128(st + TQ, 8192);
