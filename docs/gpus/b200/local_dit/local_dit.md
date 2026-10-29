@@ -264,8 +264,37 @@ exp / reciprocal alone, and about 1600 instructions per tile per SMSP), `atom_dw
 epilogue into one wait (`cond_fwd`; `post_fwd` 136 -> 132), three input stages in the cross `pre_fwd` (a two-deep xkv ring waits on the
 previous tile's store: 167 us), staggering `pre_fwd`, mixing polynomial `ex2` into the sigmoids (MUFU and issue slots break even).
 
+## AlphaFold 3's options: parallel K/V norm, slid key window (2026-10-29)
+
+FoldForge builds its AF3-family atom blocks as `LocalDiTBlock(cross_attention=True, kv_norm=..., key_window=...)`; in its "fast" mode every
+family takes AlphaFold 3's `kv_norm="parallel"` (the K / V AdaLN normalises the raw atoms `s`, next to AdaLN 1, instead of AdaLN 1's output)
+and `key_window="slide"` (a window's 128 keys start at `S_w = min(max(32 w - 48, 0), max(n_real - 128, 0))`, shifted back inside the real
+atoms, which come first). Both ran the PyTorch statements on B200 before; now:
+
+| option | inference | training | how |
+|---|---|---|---|
+| `kv_norm="parallel"` | bf16, fp32 | bf16, fp32 | `pre_fwd.cu` / `pre_bwd.cu` `-DPARALLEL=1` (`sm100_atom.KERNELS["prexp"]`, `["prebxp"]`): xkv = LN(s) sigmoid(pre + bs) + shift from the statistics AdaLN 1 already has; in the backward the K / V AdaLN's LN backward reads the staged `s` (x1 is not loaded) and goes into d single. fp32: `atom_pre_tf32` with `cross = 2`, the unfused path `adaln32(s, ..)` / `adaln_bwd32(s, ..)` |
+| `key_window="slide"` | bf16, fp32 | module path | the clipped-window attention kernel, then `sm100_atom_local/lslide.cu` `local_slide_edges(_f32)` recomputes the windows the slide moves -- 0, 1 and the last three real ones, picked on the device from the key mask's population count (no host read: CUDA-graph capturable, a replay with another mask is right), a window listed twice or not moved skipped -- over their slid keys (same per-window bias tensor: the trunked pair is laid out from the window's first key either way) and overwrites their rows of O |
+
+The edge kernel is a CTA per (listed window, head, sample), 512 threads on CUDA cores (scores with the key row in registers, softmax by
+warp shuffles, P V a thread per (query, 2 channels)). It costs a constant ~9-10 us per call (latency of five serial phases in one CTA; the
+work is 5 x 32 queries); measured inference of one cross block, CUDA graph under `static_weights()` + `static_inputs()`, us:
+
+| (A, N) | bf16 chained / pad | bf16 parallel / pad | bf16 parallel / slide | fp32 chained / pad | fp32 parallel / pad | fp32 parallel / slide |
+|---|---|---|---|---|---|---|
+| (5, 4096) | 48.2 | 48.0 | 57.8 | 115.4 | 112.9 | 123.0 |
+| (5, 1024) | 27.3 | 27.1 | 36.1 | 44.0 | 41.6 | 51.8 |
+| (1, 4096) | 24.2 | 23.8 | 32.7 | 42.5 | 40.0 | 50.4 |
+
+A gradient through the slid window keeps the module path (the backward kernels know the clipped window only: the edge windows' dQ, dK, dV,
+dbias would need the same treatment). Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (the three option pairs x eight
+(A, N, real atoms) cases incl. FoldForge's A = 5, N 1024, under 128 real atoms and windows listed twice; bf16 and fp32 against the fp64
+module, `ef < 1.5 em + 3e-3` (bf16) / `1e-3` (fp32, em = the module path on TF32), on the real atoms; fp32 parameters with bf16
+activations; graph capture with a mask changed between replays; parallel-norm training, every gradient; a gradient through the slid
+window is not served). Without the edge kernel the slide cases fail (checked).
+
 ## Not covered
 
-B > 1, QK-norm, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm, ESMFold2's block (192 keys, rank window, RMS / SiLU conditioning, rotary), training through AF3's slid key window, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).

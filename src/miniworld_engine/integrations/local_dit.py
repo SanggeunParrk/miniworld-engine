@@ -189,7 +189,7 @@ _FAILED = False
 F32 = torch.float32
 _LOADED32: set[int] = set()
 _FAILED32 = False
-_ROW_KERNELS = ("cond", "pre", "prex", "post", "trg", "postb", "preb", "prebx", "condb")
+_ROW_KERNELS = ("cond", "pre", "prex", "prexp", "post", "trg", "postb", "preb", "prebx", "prebxp", "condb")
 #: The parameters of the cross-attention mode's second AdaLN (keys / values), appended to ``WEIGHTS``.
 CROSS_WEIGHTS = (
     "attention.ada_ln_kv.ln_cond.weight",
@@ -315,13 +315,34 @@ def _esm_variant(module) -> bool:
             or getattr(module, "conditioning", "layernorm") != "layernorm" or getattr(module, "rope", False))
 
 
+def _b200_af3_servable(module, single, cond, pair) -> bool:
+    """AlphaFold 3's K/V norm (``kv_norm="parallel"``) and slid key window (``key_window="slide"``) on B200: the parallel norm in inference
+    and training (``pre_fwd`` / ``pre_bwd`` ``-DPARALLEL=1``, the fused / unfused fp32 kernels likewise), the slid window in inference only
+    (``sm100_atom_local.slide_edges`` recomputes the windows it moves; the backward kernels know the clipped window only). ESMFold2's
+    options are not served here."""
+    if _esm_variant(module):
+        return False
+    if not (single.is_cuda and torch.cuda.get_device_capability(single.device) == (10, 0)):
+        return False
+    if module.key_window == "slide":
+        params = [module.get_parameter(n) for n in (*WEIGHTS, *CROSS_WEIGHTS)]
+        if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
+            return False
+    return True
+
+
+def _af3_flags(module) -> tuple[bool, bool]:
+    """(parallel K/V norm, slid key window) of a block."""
+    return getattr(module, "kv_norm", "chained") == "parallel", getattr(module, "key_window", "pad") == "slide"
+
+
 def serves(module, single, cond, pair, mask, rope=None) -> bool:
     from miniworld_engine.integrations import local_dit_h100
 
     if local_dit_h100.matches(module, single, cond, pair, mask, rope):
         return True
-    if _af3_variant(module):
-        return False  # only the H100 mma kernels know AlphaFold 3's K/V norm and key window; the others keep the composed path
+    if _af3_variant(module) and not _b200_af3_servable(module, single, cond, pair):
+        return False
     qualified = _serves_hopper_training(module, single, cond, pair, mask)
     if qualified is not None:
         return qualified
@@ -746,7 +767,7 @@ def _trunk(pair, n):
 
 
 # ------------------------------------------------------------------------------------------------------------ the two ops
-def _fwd_fake(single, cond, pair, mask, weights, save):
+def _fwd_fake(single, cond, pair, mask, weights, save, parallel=False, slide=False):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -788,9 +809,12 @@ def _block_fwd(
     mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     save: bool,
+    parallel: bool = False,
+    slide: bool = False,
 ) -> list[torch.Tensor]:
     """The block output [A, 1, N, 128] bf16 and, when ``save``, the activations the backward reads (mod, q, k, v, sg, x1, bias, O, LSE,
-    u, a2, x2, t: all fresh tensors)."""
+    u, a2, x2, t: all fresh tensors). ``parallel``: AlphaFold 3's K/V AdaLN of the raw atoms; ``slide``: its slid key window (inference)."""
+    assert not (slide and save), "the slid key window is served for inference only"
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -831,7 +855,7 @@ def _block_fwd(
             bs = _kv_pack(weights)[1]
             w_pre, b_pre = wp
             q, k, v, sg, x1, xkv = rows.pre_fwd_kv(
-                s2, mod, w_pre, b_pre, mkv, bs, save=save
+                s2, mod, w_pre, b_pre, mkv, bs, save=save, parallel=parallel
             )
         else:
             q, k, v, sg, x1 = rows.pre_fwd(s2, mod, *wp, save=save)
@@ -843,6 +867,8 @@ def _block_fwd(
             bias,
             _keys(mask, n0, n),
         )
+        if slide:  # the windows the slid key window moves, over their slid keys
+            local.slide_edges(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n), o, n0)
         out, u, a2, x2, t = rows.post_fwd(
             s2,
             o.view(m, DS_),
@@ -892,7 +918,7 @@ def _wgrad(dout, x):
     return torch.mm(dout.t(), x, out_dtype=torch.float32)
 
 
-def _bwd_fake(dy, single, cond, pair, mask, weights, saved):
+def _bwd_fake(dy, single, cond, pair, mask, weights, saved, parallel=False):
     return [
         torch.empty_like(single),
         torch.empty_like(cond),
@@ -910,8 +936,10 @@ def _block_bwd(
     mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     saved: list[torch.Tensor],
+    parallel: bool = False,
 ) -> list[torch.Tensor]:
-    """d single, d cond, d pair, then one gradient per weight in ``WEIGHTS`` order, in the weight's dtype (all fresh tensors)."""
+    """d single, d cond, d pair, then one gradient per weight in ``WEIGHTS`` order, in the weight's dtype (all fresh tensors).
+    ``parallel``: AlphaFold 3's K/V AdaLN of the raw atoms."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -1027,7 +1055,7 @@ def _block_bwd(
                 dg_kv = torch.zeros(DS_, device=dev)
                 # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
                 ds, dmkv = rows.pre_bwd_kv(
-                    dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs
+                    dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs, parallel=parallel
                 )
             else:
                 ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
@@ -1190,13 +1218,15 @@ def _block_bwd(
 
 # ------------------------------------------------------------------------------------------------------------ autograd
 class _LocalBlock(torch.autograd.Function):
-    """The whole block forward and backward on the sm_100a kernels; gradients for single, cond, pair and every weight."""
+    """The whole block forward and backward on the sm_100a kernels; gradients for single, cond, pair and every weight. ``parallel``:
+    AlphaFold 3's K/V AdaLN of the raw atoms."""
 
     @staticmethod
-    def forward(ctx, mask, single, cond, pair, *weights):
-        out, *saved = _block_fwd(single, cond, pair, mask, list(weights), True)
+    def forward(ctx, parallel, mask, single, cond, pair, *weights):
+        out, *saved = _block_fwd(single, cond, pair, mask, list(weights), True, parallel)
         ctx.save_for_backward(mask, single, cond, pair, *saved, *weights)
         ctx.n_saved = len(saved)
+        ctx.parallel = parallel
         return out
 
     @staticmethod
@@ -1204,18 +1234,18 @@ class _LocalBlock(torch.autograd.Function):
     def backward(ctx, dy):
         mask, single, cond, pair, *rest = ctx.saved_tensors
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
-        grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved))
+        grads = _block_bwd(dy, single, cond, pair, mask, list(weights), list(saved), ctx.parallel)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
             from miniworld_engine.integrations.token_dit_train import (
                 _activate_native_caller,
             )
 
             _activate_native_caller(force=True)
-        return (None, *grads)
+        return (None, None, *grads)
 
 
-def _infer(single, cond, pair, mask, weights):
-    return _block_fwd(single, cond, pair, mask, list(weights), False)[0]
+def _infer(single, cond, pair, mask, weights, parallel=False, slide=False):
+    return _block_fwd(single, cond, pair, mask, list(weights), False, parallel, slide)[0]
 
 
 def block(module, single, cond, pair, mask=None, rope=None):
@@ -1228,16 +1258,17 @@ def block(module, single, cond, pair, mask=None, rope=None):
         module.get_parameter(name)
         for name in (*WEIGHTS, *(CROSS_WEIGHTS if module.cross_attention else ()))
     ]
+    parallel, slide = _af3_flags(module)
     if single.dtype == F32:  # the fp32 path (TF32 tensor cores)
         if torch.is_grad_enabled() and any(
             t.requires_grad for t in (single, cond, pair, *weights)
         ):
-            return _LocalBlock32.apply(mask, single, cond, pair, *weights)
-        return _infer32(single, cond, pair, mask, weights)
+            return _LocalBlock32.apply(parallel, mask, single, cond, pair, *weights)
+        return _infer32(single, cond, pair, mask, weights, parallel, slide)
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (single, cond, pair, *weights)
     ):
-        out = _LocalBlock.apply(mask, single, cond, pair, *weights)
+        out = _LocalBlock.apply(parallel, mask, single, cond, pair, *weights)
         if single.is_cuda and torch.cuda.get_device_capability(single.device) == (9, 0):
             from miniworld_engine.integrations.token_dit_train import (
                 _native_caller_hooks,
@@ -1245,7 +1276,7 @@ def block(module, single, cond, pair, mask=None, rope=None):
 
             _native_caller_hooks(single, cond, pair, *weights, force=True)
         return out
-    return _infer(single, cond, pair, mask, weights)
+    return _infer(single, cond, pair, mask, weights, parallel, slide)
 
 
 # ============================================================================================================ the fp32 path (TF32)
@@ -1518,7 +1549,7 @@ def _pair_bias32(pair, n, weights, save):
     )
 
 
-def _fwd_fake32(single, cond, pair, mask, weights, save):
+def _fwd_fake32(single, cond, pair, mask, weights, save, parallel=False, slide=False):
     out = torch.empty_like(single)
     if not save:
         return [out]
@@ -1561,9 +1592,13 @@ def _block_fwd32(
     mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     save: bool,
+    parallel: bool = False,
+    slide: bool = False,
 ) -> list[torch.Tensor]:
     """The fp32 path's forward: the block output [A, 1, N, 128] fp32 and, when ``save``, the activations the backward reads (mod32, cn1,
-    cn2, x1, P32, bias, O, LSE, gated, y, a1, x2, u, t; cross mode: cnkv, mkv, xkv -- all fresh fp32 tensors)."""
+    cn2, x1, P32, bias, O, LSE, gated, y, a1, x2, u, t; cross mode: cnkv, mkv, xkv -- all fresh fp32 tensors). ``parallel`` / ``slide``:
+    AlphaFold 3's K/V AdaLN of the raw atoms / slid key window (inference)."""
+    assert not (slide and save), "the slid key window is served for inference only"
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
     from miniworld_engine.kernels.augmented_attention.cuda import (
         sm100_atom_local as local,
@@ -1599,6 +1634,7 @@ def _block_fwd32(
                 _P_RND[cross],
                 mks=mkv[:, :DS_] if cross else None,
                 mkb=mkv[:, DS_:] if cross else None,
+                parallel=parallel,
             )
             bias = _pair_bias32(pair, n, weights, save)
             p3 = p.view(a, n, 4 * DS_)
@@ -1609,6 +1645,8 @@ def _block_fwd32(
                 bias,
                 _keys(mask, n0, n),
             )
+            if slide:
+                local.slide_edges(p3[..., qc : qc + DS_], p3[..., kc : kc + DS_], p3[..., vc : vc + DS_], bias, _keys(mask, n0, n), o, n0)
             out = rows.post32(
                 o.view(m, DS_),
                 p[:, gc : gc + DS_],
@@ -1627,7 +1665,7 @@ def _block_fwd32(
         xkv = None
         if cross:  # q | g from x1, k | v from a second AdaLN of x1
             rows.gemm32(x1, pk.wp, p, n=2 * DS_, bias=pk.bp, rndmask=_P_RND[cross])
-            xkv = rows.adaln32(x1, mkv[:, :DS_], mkv[:, DS_:])
+            xkv = rows.adaln32(s2 if parallel else x1, mkv[:, :DS_], mkv[:, DS_:])
             rows.gemm32(
                 xkv,
                 pk.wp,
@@ -1648,6 +1686,8 @@ def _block_fwd32(
             bias,
             _keys(mask, n0, n),
         )
+        if slide:
+            local.slide_edges(p3[..., qc : qc + DS_], p3[..., kc : kc + DS_], p3[..., vc : vc + DS_], bias, _keys(mask, n0, n), o, n0)
         gated = rows.gate32(p[:, gc : gc + DS_], o.view(m, DS_))
         y = torch.empty(m, DS_, device=dev, dtype=F32) if save else None
         a1 = rows.gemm32(
@@ -1691,6 +1731,7 @@ def _block_bwd32(
     mask: torch.Tensor | None,
     weights: list[torch.Tensor],
     saved: list[torch.Tensor],
+    parallel: bool = False,
 ) -> list[torch.Tensor]:
     """The fp32 path's backward: d single, d cond, d pair, then one gradient per weight (``WEIGHTS`` order, the weight's dtype)."""
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
@@ -1757,13 +1798,21 @@ def _block_bwd32(
             dx1q = rows.gemm32(dp, pk.wpT, k=2 * DS_)
             dxkv = rows.gemm32(dp, pk.wpT, k=2 * DS_, a_col0=2 * DS_, b_col0=2 * DS_)
             dmkv = torch.empty(m, 2 * DS_, device=dev, dtype=F32)
-            dx1, _ = rows.adaln_bwd32(
-                x1, mkv[:, :DS_], dxkv, dx1q, dmkv[:, :DS_], dmkv[:, DS_:]
-            )
+            if parallel:  # the K / V AdaLN of s: its LN backward joins the residual's gradient
+                dres, _ = rows.adaln_bwd32(
+                    s2, mkv[:, :DS_], dxkv, da1, dmkv[:, :DS_], dmkv[:, DS_:]
+                )
+                dx1 = dx1q
+            else:
+                dx1, _ = rows.adaln_bwd32(
+                    x1, mkv[:, :DS_], dxkv, dx1q, dmkv[:, :DS_], dmkv[:, DS_:]
+                )
+                dres = da1
         else:
             dx1 = rows.gemm32(dp, pk.wpT)  # K = 512
+            dres = da1
         ds, _ = rows.adaln_bwd32(
-            s2, mod[:, _S1], dx1, da1, dmod[:, _S1], dmod[:, _B1]
+            s2, mod[:, _S1], dx1, dres, dmod[:, _S1], dmod[:, _B1]
         )  # AdaLN 1 + the residual
         dc = rows.gemm32(
             dmod, pk.wmodT, k=2 * DS_, a_col0=4 * DS_, b_col0=4 * DS_
@@ -1889,10 +1938,11 @@ class _LocalBlock32(torch.autograd.Function):
     """The fp32 path's block forward and backward (TF32 kernels); gradients for single, cond, pair and every weight."""
 
     @staticmethod
-    def forward(ctx, mask, single, cond, pair, *weights):
-        out, *saved = _block_fwd32(single, cond, pair, mask, list(weights), True)
+    def forward(ctx, parallel, mask, single, cond, pair, *weights):
+        out, *saved = _block_fwd32(single, cond, pair, mask, list(weights), True, parallel)
         ctx.save_for_backward(mask, single, cond, pair, *saved, *weights)
         ctx.n_saved = len(saved)
+        ctx.parallel = parallel
         return out
 
     @staticmethod
@@ -1900,9 +1950,9 @@ class _LocalBlock32(torch.autograd.Function):
     def backward(ctx, dy):
         mask, single, cond, pair, *rest = ctx.saved_tensors
         saved, weights = rest[: ctx.n_saved], rest[ctx.n_saved :]
-        grads = _block_bwd32(dy, single, cond, pair, mask, list(weights), list(saved))
-        return (None, *grads)
+        grads = _block_bwd32(dy, single, cond, pair, mask, list(weights), list(saved), ctx.parallel)
+        return (None, None, *grads)
 
 
-def _infer32(single, cond, pair, mask, weights):
-    return _block_fwd32(single, cond, pair, mask, list(weights), False)[0]
+def _infer32(single, cond, pair, mask, weights, parallel=False, slide=False):
+    return _block_fwd32(single, cond, pair, mask, list(weights), False, parallel, slide)[0]
