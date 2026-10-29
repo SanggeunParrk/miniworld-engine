@@ -191,12 +191,13 @@ DEVI int units_of(int units) {                                       // this CTA
 DEVI int post_units(int M, int nfull) { return units_of(nfull + 2 * ((M >> 7) - nfull)); }
 
 // ==================================================================================================================== pre
-// s [M, 128] (row stride 128), s1 / b1 rows mld apart, mks / mkb (cross) rows kld apart, bq [128]; mwp: Wp [512, 128] (box 32 x 256);
+// s [M, 128] (row stride 128), s1 / b1 rows mld apart, mks / mkb (cross) rows kld apart (the tables: mrows rows, row r read at r % mrows --
+// mrows < M when the samples share the conditioning), bq [128]; mwp: Wp [512, 128] (box 32 x 256);
 // mp: P [M, 512] (box 32 x 32). rndmask: the 128-column blocks of P stored tf32-rounded. nfull: see the header.
 extern "C" __global__ void __maxnreg__(128)
 atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ CUtensorMap mp, const float* __restrict__ s,
               const float* __restrict__ s1, const float* __restrict__ b1, int mld, const float* __restrict__ mks, const float* __restrict__ mkb,
-              int kld, const float* __restrict__ bq, int cross, int rndmask, int M, float eps, int nfull) {
+              int kld, const float* __restrict__ bq, int cross, int rndmask, int M, float eps, int nfull, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -231,9 +232,9 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
     }
   } else if (warp == 3) {
     for (int i = 0; i < my && i < 2; ++i) {                          // the first two units' rows into L2
-      const int m0 = tile_of(unit(i)) * 128, cb = half_of(unit(i));
-      pf_rows(s, 128, m0, 128, lane); pf_rows(s1, mld, m0, 128, lane); pf_rows(b1, mld, m0, 128, lane);
-      if (cross && cb != 0) { pf_rows(mks, kld, m0, 128, lane); pf_rows(mkb, kld, m0, 128, lane); }
+      const int m0 = tile_of(unit(i)) * 128, cb = half_of(unit(i)), t0 = m0 % mrows;
+      pf_rows(s, 128, m0, 128, lane); pf_rows(s1, mld, t0, 128, lane); pf_rows(b1, mld, t0, 128, lane);
+      if (cross && cb != 0) { pf_rows(mks, kld, t0, 128, lane); pf_rows(mkb, kld, t0, 128, lane); }
     }
   } else if (warp >= 4) {
     const int e = warp - 4, qd = warp & 3, wg = e >> 2;
@@ -243,6 +244,7 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
     for (int i = 0; i < my; ++i) {
       const int cb = half_of(unit(i));
       const int m0 = tile_of(unit(i)) * 128;
+      const size_t tsh = (size_t)(m0 - m0 % mrows);                   // table row = row - tsh (row % mrows: mrows a multiple of 128)
       const bool x1_to_a = cb != 1 || !cross;                       // tile A holds x1, or (cross, k | v half) xkv
       const bool want_kv = cross && cb != 0;
       const uint32_t kvt = cb < 0 ? sh : sa;
@@ -257,8 +259,8 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
             const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
             const float4 sv = ldg4(s + row * 128 + 4 * lane);
             x[k][0] = sv.x; x[k][1] = sv.y; x[k][2] = sv.z; x[k][3] = sv.w;
-            sc[k] = ldg4(s1 + row * mld + 4 * lane);
-            sf[k] = ldg4(b1 + row * mld + 4 * lane);
+            sc[k] = ldg4(s1 + (row - tsh) * mld + 4 * lane);
+            sf[k] = ldg4(b1 + (row - tsh) * mld + 4 * lane);
           }
           ln4x4(x, eps);
           if (want_kv && cross == 2) {                               // AlphaFold 3: xkv = LN(s) mks + mkb, from the same statistics
@@ -266,8 +268,8 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
 #pragma unroll
             for (int k = 0; k < 4; ++k) {
               const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
-              kc[k] = ldg4(mks + row * kld + 4 * lane);
-              kf[k] = ldg4(mkb + row * kld + 4 * lane);
+              kc[k] = ldg4(mks + (row - tsh) * kld + 4 * lane);
+              kf[k] = ldg4(mkb + (row - tsh) * kld + 4 * lane);
             }
 #pragma unroll
             for (int k = 0; k < 4; ++k)
@@ -286,8 +288,8 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
             const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
-            kc[k] = ldg4(mks + row * kld + 4 * lane);
-            kf[k] = ldg4(mkb + row * kld + 4 * lane);
+            kc[k] = ldg4(mks + (row - tsh) * kld + 4 * lane);
+            kf[k] = ldg4(mkb + (row - tsh) * kld + 4 * lane);
           }
           ln4x4(x, eps);
 #pragma unroll
@@ -332,13 +334,13 @@ atom_pre_tf32(const __grid_constant__ CUtensorMap mwp, const __grid_constant__ C
 }
 
 // ==================================================================================================================== post
-// o [M, 128] (row stride 128), g rows gld apart, s [M, 128], so / s2 / b2 / st rows mld apart; mwo: Wo [128, 128] (box 32 x 128), mwu: the
+// o [M, 128] (row stride 128), g rows gld apart, s [M, 128], so / s2 / b2 / st rows mld apart (mrows rows, read at r % mrows); mwo: Wo [128, 128] (box 32 x 128), mwu: the
 // interleaved [Wa_0; Wb_0; Wa_1; Wb_1] [512, 128] (box 32 x 256), mws: Ws [128, 256] (box 32 x 128). out [M, 128]. nfull: see the header.
 extern "C" __global__ void __maxnreg__(168)
 atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ CUtensorMap mwu, const __grid_constant__ CUtensorMap mws,
                const float* __restrict__ o, const float* __restrict__ g, int gld, const float* __restrict__ s, const float* __restrict__ so,
                const float* __restrict__ s2, const float* __restrict__ b2, const float* __restrict__ st, int mld, float* __restrict__ out,
-               int M, float eps, int nfull) {
+               int M, float eps, int nfull, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -388,9 +390,9 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
     const int my = post_units(M, nfull);
     for (int i = 0; i < my && i < 2; ++i) {                          // the first two units' rows into L2
       const int2 ur = unit_rows((int)blockIdx.x + i * (int)gridDim.x, nfull);
-      const int m0 = ur.x, rt = ur.y;
-      pf_rows(o, 128, m0, rt, lane); pf_rows(g, gld, m0, rt, lane); pf_rows(s, 128, m0, rt, lane); pf_rows(so, mld, m0, rt, lane);
-      pf_rows(s2, mld, m0, rt, lane); pf_rows(b2, mld, m0, rt, lane); pf_rows(st, mld, m0, rt, lane);
+      const int m0 = ur.x, rt = ur.y, t0 = m0 % mrows;
+      pf_rows(o, 128, m0, rt, lane); pf_rows(g, gld, m0, rt, lane); pf_rows(s, 128, m0, rt, lane); pf_rows(so, mld, t0, rt, lane);
+      pf_rows(s2, mld, t0, rt, lane); pf_rows(b2, mld, t0, rt, lane); pf_rows(st, mld, t0, rt, lane);
     }
   } else if (warp >= 4) {
     const int e = warp - 4, qd = warp & 3, wg = e >> 2;
@@ -401,6 +403,7 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
     for (int i = 0; i < my; ++i) {
       const int2 ur = unit_rows((int)blockIdx.x + i * (int)gridDim.x, nfull);
       const int m0 = ur.x, rt = ur.y;
+      const size_t tsh = (size_t)(m0 - m0 % mrows);                   // table row = row - tsh (row % mrows: mrows a multiple of 128)
       const bool act = 32 * qd < rt;                                 // this warp's TMEM lane quadrant holds unit rows
       const int nr = rt >> 3;                                        // warp-per-row phases: rows per warp
       // ---------------------------------------------------------------- warp per row: gated = sigmoid(g) o -> tile A
@@ -442,7 +445,7 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
           for (int k = 0; k < 4; ++k) {
             const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
             sv[k] = ldg4(s + row * 128 + 4 * lane);
-            gv[k] = ldg4(so + row * mld + 4 * lane);
+            gv[k] = ldg4(so + (row - tsh) * mld + 4 * lane);
           }
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
@@ -458,8 +461,8 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
 #pragma unroll
           for (int k = 0; k < 2; ++k) {
             const size_t row = (size_t)(m0 + e + 8 * (k0 + h2 + k));
-            sc[k] = ldg4(s2 + row * mld + 4 * lane);
-            sf[k] = ldg4(b2 + row * mld + 4 * lane);
+            sc[k] = ldg4(s2 + (row - tsh) * mld + 4 * lane);
+            sf[k] = ldg4(b2 + (row - tsh) * mld + 4 * lane);
           }
 #pragma unroll
           for (int k = 0; k < 2; ++k)
@@ -515,7 +518,7 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
           for (int k = 0; k < 4; ++k) {
             const size_t row = (size_t)(m0 + e + 8 * (k0 + k));
             sv[k] = ldg4(s + row * 128 + 4 * lane);
-            gv[k] = ldg4(so + row * mld + 4 * lane);
+            gv[k] = ldg4(so + (row - tsh) * mld + 4 * lane);
           }
 #pragma unroll
           for (int k = 0; k < 4; ++k) {
@@ -525,7 +528,7 @@ atom_post_tf32(const __grid_constant__ CUtensorMap mwo, const __grid_constant__ 
         }
         float4 tv[4];
 #pragma unroll
-        for (int k = 0; k < 4; ++k) tv[k] = ldg4(st + (size_t)(m0 + e + 8 * (k0 + k)) * mld + 4 * lane);
+        for (int k = 0; k < 4; ++k) tv[k] = ldg4(st + ((size_t)(m0 + e + 8 * (k0 + k)) - tsh) * mld + 4 * lane);
 #pragma unroll
         for (int k = 0; k < 4; ++k) {
           const int rr = e + 8 * (k0 + k);
