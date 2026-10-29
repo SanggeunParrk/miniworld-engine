@@ -6,7 +6,7 @@ as a row gather, two LayerNorms and the per-sample adaptive scale / shift in one
 (127 + 30 + 30 channels per pair), a concatenation, a Linear, the affine LayerNorm, a pair-wide conditioning path and the adaptive
 LayerNorm.  ``gamma`` / ``beta`` are per sample because the conditioning (diffusion times) is constant over (i, j); the caller
 computes them with ordinary autograd.  The output is bf16 (what the attention-bias projection consumes); the backward is bitwise
-deterministic.  256 channels.  Served: H100 by the CUDA kernels, any other card by the portable kernels (``triton/``) when the engine holds a record for the
+deterministic.  256 channels.  Served: H100 and B200 by the CUDA kernels (``cuda/sm90``, ``cuda/sm100``), any other card by the portable kernels (``triton/``) when the engine holds a record for the
 card, else by the PyTorch reference with the standard warning (``kernels/_pair_route``).  :func:`refusal` says why a call is not served at all; it never raises.
 """
 from __future__ import annotations
@@ -18,7 +18,18 @@ from miniworld_engine.kernels._pair_route import CUDA, REFERENCE, cuda_served, r
 from miniworld_engine.kernels.pair_embed_adaln.reference import pair_embed_adaln_reference
 
 D_PAIR = 256
-_CUDA_CAPS = ((9, 0),)
+_CUDA_CAPS = ((9, 0), (10, 0))
+
+
+def _cuda(t: torch.Tensor):
+    """The CUDA build for the tensor's card: ``cuda.sm100`` on B200, ``cuda.sm90`` on H100."""
+    if torch.cuda.get_device_capability(t.device) == (10, 0):
+        from miniworld_engine.kernels.pair_embed_adaln.cuda import sm100
+
+        return sm100
+    from miniworld_engine.kernels.pair_embed_adaln.cuda import sm90
+
+    return sm90
 
 
 def refusal(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, mask, *, n_sep=127, n_xt=30, n_sc=30, **_) -> str | None:
@@ -60,9 +71,7 @@ def pair_embed_adaln_fwd(tbl: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor
         from miniworld_engine.kernels.pair_embed_adaln.triton import portable_forward
 
         return list(portable_forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2))
-    from miniworld_engine.kernels.pair_embed_adaln.cuda import sm90
-
-    return list(sm90.forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2))
+    return list(_cuda(tbl).forward(tbl, lnw, lnb, gamma, beta, xt, sc, has_sc, idx, mask, xlim, clim, nS, nX, eps1, eps2))
 
 
 def _pair_embed_adaln_bwd_fake(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2, portable):
@@ -80,9 +89,7 @@ def pair_embed_adaln_bwd(tbl: torch.Tensor, lnw: torch.Tensor, lnb: torch.Tensor
         from miniworld_engine.kernels.pair_embed_adaln.triton import portable_backward
 
         return list(portable_backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2))
-    from miniworld_engine.kernels.pair_embed_adaln.cuda import sm90
-
-    return list(sm90.backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2))
+    return list(_cuda(tbl).backward(tbl, lnw, lnb, gamma, bins, dout, nS, nX, eps1, eps2))
 
 
 class PairEmbedAdaLNFunction(torch.autograd.Function):
@@ -113,7 +120,7 @@ def pair_embed_adaln(w, ln_weight, ln_bias, gamma, beta, xt, sc, residue_idx, ma
     ``residue_idx`` [B, n] integers, ``mask`` [B, n] bool.  Check :func:`refusal` first."""
     dev = xt.device
     nt = n_sep + n_xt + n_sc
-    where = route("pair_embed_adaln", dev, w, ln_weight, ln_bias, gamma, beta)
+    where = route("pair_embed_adaln", dev, w, ln_weight, ln_bias, gamma, beta, cuda_caps=_CUDA_CAPS)
     if where == REFERENCE:
         return pair_embed_adaln_reference(w, ln_weight, ln_bias, gamma, beta, xt.float(), None if sc is None else sc.float(), residue_idx, mask.bool(),
                                           n_sep=n_sep, n_xt=n_xt, n_sc=n_sc, xt_range=xt_range, sc_range=sc_range, eps1=eps1, eps2=eps2).to(torch.bfloat16)

@@ -382,10 +382,10 @@ def _la_proteina_pair() -> None:
         pair_embed_geom,
         pair_embed_geom_train,
     )
-    from miniworld_engine.kernels.pair_embed_geom.cuda import sm90 as geom
+    from miniworld_engine.kernels.pair_embed_geom.interface import _cuda
 
-    if torch.cuda.get_device_capability() != (9, 0):
-        raise RuntimeError("La-Proteina's pair builders are H100 (sm_90a) kernels")
+    if torch.cuda.get_device_capability() not in ((9, 0), (10, 0)):
+        raise RuntimeError("La-Proteina's pair builders are H100 (sm_90a) / B200 (sm_100a) kernels")
     dev = "cuda"
     for b, n in ((48, 128), (2, 512)):
         bb = torch.randn(b, n, 4, 3, device=dev) * 0.5
@@ -394,12 +394,13 @@ def _la_proteina_pair() -> None:
         w = torch.randn(256, 317, device=dev, requires_grad=True)
         wc = torch.randn(256, 157, device=dev, requires_grad=True)
         ca = bb[:, :, 1].contiguous()
+        geom = _cuda(bb)
         with torch.no_grad():
             pair_embed_geom(w.detach(), bb, flags[0], flags[1], flags[2], idx, chains)
         for eps in (None, 1e-5):
             pair_embed_geom_train(w, bb, flags[0], flags[1], flags[2], idx, chains, ln_eps=eps).float().sum().backward()
             pair_embed_ca(wc, ca, flags[2], ln_eps=eps).float().sum().backward()
-        for impl in (0, 1):   # the shared-memory read-modify-write backward is the A/B switch MINIWORLD_PAIR_EMBED_BWD_IMPL=0
+        for impl in (0, 1):   # the shared-memory read-modify-write backward is the A/B switch MINIWORLD_PAIR_EMBED_BWD_IMPL=0 (one build per card)
             pair, codes = geom.forward(w.detach().t().to(torch.bfloat16).contiguous(), bb, flags[0].to(torch.uint8), flags[1].to(torch.uint8),
                                        flags[2].to(torch.uint8), idx.to(torch.int32), chains, torch.linspace(0.1, 2, 20, device=dev),
                                        torch.linspace(-torch.pi, torch.pi, 20, device=dev), with_codes=True)

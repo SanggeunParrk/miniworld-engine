@@ -1,6 +1,6 @@
 """Where the three pair ops (`pair_embed_geom` / `pair_embed_ca`, `pair_embed_adaln`, `token_pair_init`) run on each card (`kernels/_pair_route.py`, `docs/dispatch.md`):
 
-CUDA where a hand-written kernel serves the card (H100; for the token-pair initialisation also B200), the portable kernels on a card the engine holds a record for, the
+CUDA where a hand-written kernel serves the card (H100 and B200), the portable kernels on a card the engine holds a record for, the
 PyTorch reference with one `UnrecordedCardWarning` on any other card, and never the portable kernels on H100 / B200 unless the internal A/B switch is on. No GPU is
 needed: the card is faked (`tests/fake_card.py`) and the manifests are written into a temp directory."""
 from __future__ import annotations
@@ -20,7 +20,7 @@ from miniworld_engine.kernels import _pair_route as R
 from miniworld_engine.modules import dispatch
 
 OPS = ("pair_embed_geom", "pair_embed_ca", "pair_embed_adaln", "token_pair_init")
-GEOM_CAPS = ((9, 0),)
+GEOM_CAPS = ((9, 0), (10, 0))   # pair_embed_geom / _ca / _adaln: kernels/*/interface._CUDA_CAPS
 TPI_CAPS = ((9, 0), (10, 0))
 A6000 = ("NVIDIA RTX A6000", (8, 6))
 
@@ -42,16 +42,22 @@ def test_the_kernels_of_each_op_by_mode():
 
 
 @pytest.mark.parametrize("op", OPS)
-def test_h100_runs_cuda_and_b200_only_where_a_cuda_kernel_exists(monkeypatch, op):
+def test_h100_and_b200_run_cuda(monkeypatch, op):
+    from miniworld_engine.kernels.pair_embed_adaln.interface import _CUDA_CAPS as adaln_caps
+    from miniworld_engine.kernels.pair_embed_geom.interface import _CUDA_CAPS as geom_caps
+
+    assert geom_caps == adaln_caps == GEOM_CAPS
     caps = TPI_CAPS if op == "token_pair_init" else GEOM_CAPS
     dev = fake_card(monkeypatch, "NVIDIA H100 80GB HBM3", (9, 0))
     assert R.route(op, dev, _grad_weight(), cuda_caps=caps) == R.CUDA
     dev = fake_card(monkeypatch, "NVIDIA B200", (10, 0))
     with warnings.catch_warnings():
-        warnings.simplefilter("error")                    # B200 without a CUDA kernel of the op: the reference, silently
+        warnings.simplefilter("error")
         got = R.route(op, dev, _grad_weight(), cuda_caps=caps)
-    assert got == (R.CUDA if op == "token_pair_init" else R.REFERENCE)
-    assert (R.restricted_reason(dev, caps) is None) == (op == "token_pair_init")
+    assert got == R.CUDA
+    assert R.restricted_reason(dev, caps) is None
+    # a restricted card without a CUDA kernel of the op (H100 / B200 rule) is the reference, silently
+    assert R.route(op, dev, _grad_weight(), cuda_caps=((9, 0),)) == R.REFERENCE
 
 
 @pytest.mark.parametrize("op", OPS)
@@ -61,7 +67,7 @@ def test_the_ab_switch_puts_every_card_on_the_portable_kernels(monkeypatch, op):
         with portable_switch():
             assert R.route(op, dev, _grad_weight()) == R.PORTABLE
             assert R.restricted_reason(dev, GEOM_CAPS) is None
-        assert R.cuda_served(dev, GEOM_CAPS) == (cap == (9, 0))
+        assert R.cuda_served(dev, GEOM_CAPS) == (cap in ((9, 0), (10, 0)))
 
 
 @pytest.mark.parametrize("op", OPS)

@@ -232,6 +232,7 @@ pe_bwd_tbl(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int nX
 }
 
 
+#ifndef PE_SM100   // sm_100a has no wgmma: the B200 build (cuda/sm100) includes this file with PE_SM100 and brings its own table-gradient kernel
 // ---- table gradient on the tensor cores (wgmma) --------------------------------------------------------------------------------------------------
 // dT[row] = sum over the pairs that use the row of dx[pair]  =  onehot^T @ dx.  The one-hot operand (rows x 64 pairs, bf16, 128 B rows, 16-byte chunks XOR-swizzled by
 // the row) lives in shared memory and is written ("scattered") by two extra warps, 3 entries per pair; the dx tile arrives by cp.async; one warpgroup per 64 table rows
@@ -340,6 +341,8 @@ pe_bwd_tbl4(const __nv_bfloat16* dx, const int* bins, long long P, int nS, int n
   }
 }
 
+#endif  // PE_SM100
+
 // dgamma / dbeta [B][256] (sum over the CTAs of the sample), dln_w / dln_b [256] (sum over all CTAs), fixed order
 __global__ void pe_reduce_rows(const float* part, float* dgamma, float* dbeta, float* dlw, float* dlb, int B, int nrb) {
   int c = threadIdx.x, b = blockIdx.x;
@@ -376,6 +379,7 @@ void forward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Ten
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+#ifndef PE_SM100
 void backward(torch::Tensor tbl, torch::Tensor lnw, torch::Tensor lnb, torch::Tensor gamma, torch::Tensor bins, torch::Tensor dout,
               torch::Tensor dx, torch::Tensor part, torch::Tensor tpart, torch::Tensor dtbl, torch::Tensor dgamma,
               torch::Tensor dbeta, torch::Tensor dlw, torch::Tensor dlb, int64_t impl, int64_t chunk_b, int64_t nS, int64_t nX, double e1, double e2) {
@@ -415,3 +419,4 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("forward", &forward);
   m.def("backward", &backward);
 }
+#endif  // PE_SM100
