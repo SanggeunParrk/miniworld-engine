@@ -1074,6 +1074,17 @@ __global__ void __launch_bounds__(dbw::THREADS, 1) dvb_w_sm100(
 // do = DU g, dgp = DU o g (1 - g), go = g o.
 //   warp 0: the y | dres tile (one stage) and the dout' store;  warp 1: tcgen05;  warps 2-9: the dropout prep and the drain (a row and two
 //   heads of the half a thread);  warp 10: the weight ring (16 KiB slots: a half's Wg k-block [128 hc][64 d] or Wo k-block [2][64 d][64 hc]).
+// 32 bytes (one whole sector) per thread and instruction: a thread-a-row drain writes / reads 64-byte row chunks of rows that lie far
+// apart, and 16-byte accesses left every sector half written per instruction (glue_ws's dgp / go stores took 58 % of the kernel)
+__device__ __forceinline__ void st256(void* p, const uint4& a, const uint4& b) {
+  asm volatile("st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};\n"
+               :: "l"(p), "r"(a.x), "r"(a.y), "r"(a.z), "r"(a.w), "r"(b.x), "r"(b.y), "r"(b.z), "r"(b.w) : "memory");
+}
+__device__ __forceinline__ void ld256(const void* p, uint4& a, uint4& b) {
+  asm volatile("ld.global.nc.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];\n"
+               : "=r"(a.x), "=r"(a.y), "=r"(a.z), "=r"(a.w), "=r"(b.x), "=r"(b.y), "=r"(b.z), "=r"(b.w) : "l"(p));
+}
+
 namespace gws {
 constexpr int BS = 128;
 constexpr int YT = BS * D;                      // y [KB][128 s][64], 128B swizzle (64 KiB)
@@ -1234,14 +1245,17 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
 #pragma unroll
         for (int hh = 0; hh < 2; ++hh) {
           const uint4* op = reinterpret_cast<const uint4*>(O + ((size_t)((hf * 4 + pp * 2 + hh) * N + n) * S + s) * C);
-#pragma unroll
-          for (int e = 0; e < 4; ++e) ov[hh][e] = __ldg(op + e);
+          ld256(op, ov[hh][0], ov[hh][1]);
+          ld256(op + 2, ov[hh][2], ov[hh][3]);
         }
         wait(accf + hf, lt & 1);
         tc_fence_after();
-#pragma unroll
+#pragma unroll 1
         for (int hh = 0; hh < 2; ++hh) {
           const int h = hf * 4 + pp * 2 + hh, col = (pp * 2 + hh) * C;
+          uint4 oc[4];                           // this head's o (a select, not a dynamic index: the loop is not unrolled)
+#pragma unroll
+          for (int e = 0; e < 4; ++e) oc[e] = hh ? ov[1][e] : ov[0][e];
           uint4* dop = reinterpret_cast<uint4*>(DO + ((size_t)(h * N + n) * S + s) * C);
           uint4* dgp = reinterpret_cast<uint4*>(DGV + ((size_t)s * N + n) * 2 * HC + h * C);
           uint4* gop = reinterpret_cast<uint4*>(GO + ((size_t)s * N + n) * HC + h * C);
@@ -1252,14 +1266,14 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
             tmem_ld16(tmem_at(tmem + hf * 2 * HH + HH + col + c16 * 16, q * 32, 0), du);
             tmem_wait_ld();
             if (hh == 1 && c16 == C / 16 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + hf); }
+            uint4 vdo[2], vdg[2], vgo[2];
 #pragma unroll
             for (int e2 = 0; e2 < 2; ++e2) {
               const int e = c16 * 2 + e2;
-              const uint32_t* ow = reinterpret_cast<const uint32_t*>(&ov[hh][e]);
-              uint4 vdo, vdg, vgo;
-              uint32_t* wdo = reinterpret_cast<uint32_t*>(&vdo);
-              uint32_t* wdg = reinterpret_cast<uint32_t*>(&vdg);
-              uint32_t* wgo = reinterpret_cast<uint32_t*>(&vgo);
+              const uint32_t* ow = reinterpret_cast<const uint32_t*>(&oc[e]);
+              uint32_t* wdo = reinterpret_cast<uint32_t*>(&vdo[e2]);
+              uint32_t* wdg = reinterpret_cast<uint32_t*>(&vdg[e2]);
+              uint32_t* wgo = reinterpret_cast<uint32_t*>(&vgo[e2]);
 #pragma unroll
               for (int k = 0; k < 4; ++k) {             // as glue_w: do = du g, dgp = du o g (1 - g), go = g o
                 const int c = e2 * 8 + 2 * k;
@@ -1272,8 +1286,10 @@ __global__ void __launch_bounds__(gws::THREADS, 1) glue_ws_sm100(
                 const float2 go2 = mul2(g2, o2);
                 wdo[k] = pack2(do2.x, do2.y); wdg[k] = pack2(dg2.x, dg2.y); wgo[k] = pack2(go2.x, go2.y);
               }
-              dop[e] = vdo; dgp[e] = vdg; gop[e] = vgo;
             }
+            st256(dop + 2 * c16, vdo[0], vdo[1]);
+            st256(dgp + 2 * c16, vdg[0], vdg[1]);
+            st256(gop + 2 * c16, vgo[0], vgo[1]);
           }
         }
       }
@@ -1444,8 +1460,8 @@ __global__ void __launch_bounds__(dws::THREADS, 1) dvb_ws_sm100(
       const float rstd = 1.f / sqrtf((v2.x + v2.y) * (1.f / D) + eps);
       const float2 rs = make_float2(rstd, rstd);
       uint4 rv[4];                               // dres of the first 32-channel chunk, in flight through pass 2
-#pragma unroll
-      for (int e = 0; e < 4; ++e) rv[e] = __ldg(rrow + e);
+      ld256(rrow, rv[0], rv[1]);
+      ld256(rrow + 2, rv[2], rv[3]);
       wait(accf + b, (lt >> 1) & 1);
       tc_fence_after();
       // ---- pass 2: the row sums of gamma dy and gamma dy xhat; the column sums of dy xhat and dy (dgamma, dbeta) ----
@@ -1484,22 +1500,22 @@ __global__ void __launch_bounds__(dws::THREADS, 1) dvb_ws_sm100(
 #pragma unroll
         for (int e = 0; e < 4; ++e) cur[e] = rv[e];
         if (k + 1 < NC) {
-#pragma unroll
-          for (int e = 0; e < 4; ++e) rv[e] = __ldg(rrow + (c0 + 32) / 8 + e);
+          ld256(rrow + (c0 + 32) / 8, rv[0], rv[1]);
+          ld256(rrow + (c0 + 32) / 8 + 2, rv[2], rv[3]);
         }
         float2 dy[16];
         tmem_ld32(tmem_at(tmem + b * D, q * 32, c0), reinterpret_cast<float*>(dy));
         tmem_wait_ld();
         if (k == NC - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
         const float2* gam2 = reinterpret_cast<const float2*>(sLN + c0);
+        uint4 mo[4];
 #pragma unroll
         for (int e = 0; e < 4; ++e) {
           const int c8 = ((c0 & 63) >> 3) + e;
           const uint4 u = *reinterpret_cast<const uint4*>(X + (c0 >> 6) * BS * 64 + r * 64 + ((c8 ^ (r & 7)) << 3));
           const uint32_t xw[4] = {u.x, u.y, u.z, u.w};
           const uint32_t* rw = reinterpret_cast<const uint32_t*>(&cur[e]);
-          uint4 o;
-          uint32_t* ow = reinterpret_cast<uint32_t*>(&o);
+          uint32_t* ow = reinterpret_cast<uint32_t*>(&mo[e]);
 #pragma unroll
           for (int j = 0; j < 4; ++j) {
             const int kk = e * 4 + j;
@@ -1508,8 +1524,9 @@ __global__ void __launch_bounds__(dws::THREADS, 1) dvb_ws_sm100(
             const float2 d2 = fma2(fma2(xh, ns2, add2(gd, ns1)), rs, bf2f(rw[j]));
             ow[j] = pack2(d2.x, d2.y);
           }
-          mrow[c0 / 8 + e] = o;
         }
+        st256(mrow + c0 / 8, mo[0], mo[1]);
+        st256(mrow + c0 / 8 + 2, mo[2], mo[3]);
       }
       __syncwarp();
       if (lane == 0) arrive(xempty + xs);
