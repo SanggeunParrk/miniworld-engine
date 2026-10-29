@@ -72,6 +72,12 @@ def glu_rows(ab, out, up):
     ext().glu_rows(ab, out, bool(up))
 
 
+def sigmoid_tables(t_gate, t_mod, d):
+    """In place, one launch: t_gate <- sigmoid(t_gate) (all of it) and, when given, the AdaLN scale columns of t_mod (the first d of
+    every 2 d: per block scA | shA | scT | shT) <- sigmoid; both bf16 contiguous [L, *]."""
+    ext().sigmoid_tables(t_gate, t_mod, int(d))
+
+
 def ln_rows(z, out, eps=1e-5):
     """out = LN(z), no affine, z / out bf16 [rows, 128 | 256]: the row extensions' one LN-rows kernel
     (``conditioned_transition/cuda/token_dit_rows.cu`` ``layernorm_rows``)."""
