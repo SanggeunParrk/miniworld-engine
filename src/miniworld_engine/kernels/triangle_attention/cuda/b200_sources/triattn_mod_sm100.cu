@@ -57,10 +57,11 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm100(
     const __grid_constant__ CUtensorMap vmap,
     const __grid_constant__ CUtensorMap gmap,
     const float* __restrict__ LNW, const float* __restrict__ LNB, const float* __restrict__ WB,   // [128], [128], [4][128]
-    const bool* __restrict__ MASK,                        // [B][L] key mask or nullptr
+    const bool* __restrict__ MASK,                        // [B][KL] key mask or nullptr
     __nv_bfloat16* __restrict__ BIAS,                     // [B][4][L][L]
-    const int TRANS,                                      // 1: x / y / dy / dx in the ending node's layout (see load_rows)
-    const int BT) {                                       // 1: row (b, j, k) -> bias[b, h, k, j] (see the header)
+    const int TRANS,                                      // geometry of x / y / dy / dx (see load_rows)
+    const int BT,                                         // 1: row (b, j, k) -> bias[b, h, k, j] (see the header)
+    const int KL) {                                       // the caller's length (L, or less for a ragged length)
   using namespace fr;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -185,7 +186,8 @@ __global__ void __launch_bounds__(fr::THREADS, 1) tri_front_sm100(
         const long bj = row / L;
         const int j = (int)(bj % L), b = (int)(bj / L);
         const int qi = BT ? kx : j, ki = BT ? j : kx;
-        const bool keep = MASK == nullptr || MASK[(long)b * L + ki];
+        // keys beyond the caller's length KL are a ragged length's pad: masked (KL a parameter: derived from TRANS it spilled)
+        const bool keep = ki < KL && (MASK == nullptr || MASK[(long)b * KL + ki]);
 #pragma unroll
         for (int h = 0; h < NH; ++h)
           BIAS[(((long)b * NH + h) * L + qi) * L + ki] = keep ? __float2bfloat16_rn(bacc[h]) : __float2bfloat16_rn(-3.3895313892515355e38f);
@@ -276,7 +278,7 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
     const __grid_constant__ CUtensorMap xmap,
     const __grid_constant__ CUtensorMap wmap,             // Wo [128][128], box (64, 128), 128B swizzle
     const __grid_constant__ CUtensorMap ymap,             // out [R][128], box (32, 128), 64B swizzle (TMA stores)
-    const int TRANS) {                                    // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int TRANS) {                                    // geometry of x / y / dy / dx (see load_rows)
   using namespace tl;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -398,7 +400,7 @@ __global__ void __launch_bounds__(tl::THREADS, 1) tri_tail_sm100(
         uint32_t w[16];
         if (DROP != nullptr) {                    // row (b, i, j): scale row (b, j), channels 32 ch ..
           const long row = (long)t * BM + r;
-          const uint4* sp = reinterpret_cast<const uint4*>(DROP + ((row / ((long)L * L)) * L + row % L) * C + ch * 32);
+          const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, false) * C + ch * 32);
 #pragma unroll
           for (int c = 0; c < 4; ++c) {
             const uint4 u = __ldg(sp + c);
@@ -468,7 +470,7 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
     __nv_bfloat16* __restrict__ DWO16,
     const __nv_bfloat16* __restrict__ DROP,               // [B][L][128] dropout scale or nullptr: du / dWo see dy o drop, the seed dy
     const int DET,                                        // 1: per-CTA partials (deterministic), 0: fp32 atomics into DWO
-    const int TRANS) {                                    // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int TRANS) {                                    // geometry of x / y / dy / dx (see load_rows)
   using namespace gb;
   const bool drop = DROP != nullptr;
   extern __shared__ __align__(1024) unsigned char raw[];
@@ -567,7 +569,7 @@ __global__ void __launch_bounds__(gb::THREADS, 1) tri_gate_bwd_sm100(
       if (drop) {                                  // dy <- dy o drop in place (row r, channel half gi), after the seed store read it
         wait(sr, lt & 1);
         const long row = (long)t * BM + r;
-        const uint4* sp = reinterpret_cast<const uint4*>(DROP + ((row / ((long)L * L)) * L + row % L) * C + gi * 64);
+        const uint4* sp = reinterpret_cast<const uint4*>(DROP + drop_row(row, L, TRANS, false) * C + gi * 64);
         __nv_bfloat16* dr = sDy + (lt & 1) * XT + gi * BM * 64 + r * 64;
 #pragma unroll
         for (int c8 = 0; c8 < 8; ++c8) {
@@ -697,7 +699,7 @@ __global__ void __launch_bounds__(hb::THREADS, 1) tri_head_bwd_sm100(
     const __grid_constant__ CUtensorMap wmap,             // W4 [512][128], box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap rmap,             // dpair [R][128] (the seed; reduce-add target), box (64, 128), 128B swizzle
     const float* __restrict__ DB,                         // dbias [B, 4, L, L] fp32
-    const int TRANS) {                                    // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int TRANS) {                                    // geometry of x / y / dy / dx (see load_rows)
   using namespace hb;
   extern __shared__ __align__(1024) unsigned char raw[];
   if (sa(raw) & 1023u) __trap();
@@ -906,7 +908,7 @@ __global__ void __launch_bounds__(wg::THREADS, 1) tri_wgrad_sm100(
     __nv_bfloat16* __restrict__ DGB,                      // dgamma [128] | dbeta [128] | dWb [4][128]
     const int want_finish,                                // bit 1: deterministic (per-CTA partials: VEC slots, mtmap over the M_t slots)
     const __grid_constant__ CUtensorMap mtmap,            // MT fp32 [4*128 c][128 o] (reduce-add target) or the slots [grid*4*128 c][128 o]; box (32, 128), 128B swizzle
-    const int TRANS) {                                    // 1: x / y / dy / dx in the ending node's layout (see load_rows)
+    const int TRANS) {                                    // geometry of x / y / dy / dx (see load_rows)
   using namespace wg;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -1362,9 +1364,12 @@ std::vector<torch::Tensor> tri_pack_params(torch::Tensor wq, torch::Tensor wk, t
 // seed gate_bwd wrote; dx is added in place)
 void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::Tensor dg, torch::Tensor db, torch::Tensor x,
                   torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor dpair, int64_t B, int64_t L,
-                  bool trans) {
+                  bool trans, int64_t lr) {
   const long R = B * L * L;
-  for (const auto* t : {&dq, &dk, &dv, &dg, &x, &dpair}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo), Rr = B * Lr * Lr;   // x and dpair: the caller's [B, Lr, Lr, 128]
+  for (const auto* t : {&dq, &dk, &dv, &dg}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
+  for (const auto* t : {&x, &dpair}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == Rr * C, "x / dpair: [B, Lr, Lr, 128] bf16");
   TORCH_CHECK(db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.numel() == B * NH * L * L, "db fp32 [B, 4, L, L]");
   TORCH_CHECK(w4.scalar_type() == torch::kBFloat16 && w4.is_contiguous() && w4.size(0) == 4 * C, "w4 [512, 128] bf16");
   const bool packed = lnw.scalar_type() == torch::kFloat32 && lnb.scalar_type() == torch::kFloat32 && wb.scalar_type() == torch::kFloat32 &&
@@ -1378,14 +1383,14 @@ void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::T
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap m0 = m2(dq, R, 128, "dq"), m1 = m2(dk, R, 128, "dk"), m2_ = m2(dv, R, 128, "dv"), m3 = m2(dg, R, 128, "dg");
-  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0);
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
   CUtensorMap wm = m2(w4, 4 * C, 256, "w4");
-  CUtensorMap rm = make_rows_map(dpair.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "dpair", trans ? L : 0);
+  CUtensorMap rm = make_rows_map(dpair.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "dpair", L, geo);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_head_bwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, hb::SMEM)); attr = true; }
   const int ntiles = (int)(R / hb::BM);
   tri_head_bwd_sm100<<<std::min(ntiles, num_sms(x.device().index())), hb::THREADS, hb::SMEM, stream>>>(
-      (int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, wm, rm, db.data_ptr<float>(), trans ? 1 : 0);
+      (int)L, ntiles, (float)eps, m0, m1, m2_, m3, xm, wm, rm, db.data_ptr<float>(), geo);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
@@ -1395,9 +1400,12 @@ void tri_head_bwd(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::T
 // vector sums) is added in CTA order by tri_slot_sum: the parameter gradients are the same bits every run.
 std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::Tensor dv, torch::Tensor dg, torch::Tensor db, torch::Tensor x,
                                      double eps, int64_t B, int64_t L, torch::Tensor w4, torch::Tensor wb, torch::Tensor lnw, torch::Tensor lnb, bool finish,
-                                     torch::Tensor dwo32, torch::Tensor ws, bool fp32_out, bool det, bool trans) {
+                                     torch::Tensor dwo32, torch::Tensor ws, bool fp32_out, bool det, bool trans, int64_t lr) {
   const long R = B * L * L;
-  for (const auto* t : {&dq, &dk, &dv, &dg, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo);
+  for (const auto* t : {&dq, &dk, &dv, &dg}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == R * C, "[R, 128] bf16 inputs");
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.numel() == B * Lr * Lr * C, "x: [B, Lr, Lr, 128] bf16");
   TORCH_CHECK(db.scalar_type() == torch::kFloat32 && db.is_contiguous() && db.numel() == B * NH * L * L, "db fp32 [B, 4, L, L]");
   auto opt = x.options().dtype(torch::kFloat32);
   const int ntiles = (int)(R / wg::BM), grid = std::min(ntiles, num_sms(x.device().index()));
@@ -1425,7 +1433,7 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
   auto m2 = [&](const torch::Tensor& t, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap m0 = m2(dq, "dq"), m1 = m2(dk, "dk"), m2_ = m2(dv, "dv"), m3 = m2(dg, "dg");
-  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0);
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
   CUtensorMap mtm = make_map<2>((det ? mts : mt).data_ptr(), {(uint64_t)C, (uint64_t)(det ? grid : 1) * 4 * C}, {(uint64_t)C}, {32, 128},
                                 CU_TENSOR_MAP_SWIZZLE_128B, "mt", CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
   static bool attr = false;
@@ -1435,7 +1443,7 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
       reinterpret_cast<unsigned*>(ticket.data_ptr<int>()), finish ? reinterpret_cast<const __nv_bfloat16*>(w4.data_ptr<at::BFloat16>()) : nullptr,
       finish ? lw.data_ptr<float>() : nullptr, finish ? lb.data_ptr<float>() : nullptr, finish ? wbf.data_ptr<float>() : nullptr,
       finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dw.data_ptr<at::BFloat16>()),
-      finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), det ? 2 : 0, mtm, trans ? 1 : 0);
+      finish && fp32_out ? nullptr : reinterpret_cast<__nv_bfloat16*>(dgb.data_ptr<at::BFloat16>()), det ? 2 : 0, mtm, geo);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   const bool wo_ = dwo32.defined() && dwo32.numel() > 0;
   if (wo_) TORCH_CHECK(dwo32.scalar_type() == torch::kFloat32 && dwo32.is_contiguous() && dwo32.numel() % (C * C) == 0 && (det || dwo32.numel() == C * C),
@@ -1474,12 +1482,15 @@ std::vector<torch::Tensor> tri_wgrad(torch::Tensor dq, torch::Tensor dk, torch::
 // (one per CTA; tri_wgrad adds them in CTA order and finishes),
 // dpair [R, 128] bf16 = dy: the seed head_bwd adds dx into)
 std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch::Tensor o, torch::Tensor wo, int64_t B, int64_t L,
-                                        torch::Tensor dwo_ws, torch::Tensor drop, bool det, bool trans) {
-  for (const auto* t : {&dy, &g, &o}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == B * L * L * C, "dy / g / o: [R, 128] bf16");
+                                        torch::Tensor dwo_ws, torch::Tensor drop, bool det, bool trans, int64_t lr) {
+  for (const auto* t : {&g, &o}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == B * L * L * C, "g / o: [R, 128] bf16");
   const long R = B * L * L;
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo), Rr = B * Lr * Lr;   // dy and the dx seed: the caller's [B, Lr, Lr, 128]
+  TORCH_CHECK(dy.is_cuda() && dy.scalar_type() == torch::kBFloat16 && dy.is_contiguous() && dy.numel() == Rr * C, "dy: [B, Lr, Lr, 128] bf16");
   TORCH_CHECK(L % gb::BM == 0, "L % 128");
   if (drop.defined() && drop.numel() > 0)
-    TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() == B * L * C, "drop: [B, L, 128] bf16 contiguous");
+    TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() == B * Lr * C, "drop: [B, Lr, 128] bf16 contiguous");
   auto opt = dy.options();
   auto dO = torch::empty({R, C}, opt), dG = torch::empty({R, C}, opt);
   auto delta = torch::empty({B, L, 4, L}, opt.dtype(torch::kFloat32));
@@ -1489,22 +1500,22 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
   auto dwo = det ? torch::empty({grid_, C, C}, opt.dtype(torch::kFloat32))
            : (dwo_ws.defined() && dwo_ws.numel() == C * C && dwo_ws.scalar_type() == torch::kFloat32) ? dwo_ws.view({C, C})
                                                                                                     : torch::zeros({C, C}, opt.dtype(torch::kFloat32));
-  auto dwo16 = torch::empty({C, C}, opt), seed = torch::empty({R, C}, opt);
+  auto dwo16 = torch::empty({C, C}, opt), seed = torch::empty({Rr, C}, opt);
   static torch::Tensor ticket;
   if (!ticket.defined() || ticket.device() != dy.device()) ticket = torch::zeros({1}, opt.dtype(torch::kInt32));
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap gm = m2(g, R, "g"), om = m2(o, R, "o"), wm = m2(wo, C, "wo"), dom = m2(dO, R, "do"), dgm = m2(dG, R, "dg");
   // dy and the seed of dx (= dy, the residual's share) in the caller's layout
-  CUtensorMap dym = make_rows_map(dy.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "dy", trans ? L : 0);
-  CUtensorMap sm_ = make_rows_map(seed.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "seed", trans ? L : 0);
+  CUtensorMap dym = make_rows_map(dy.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "dy", L, geo);
+  CUtensorMap sm_ = make_rows_map(seed.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "seed", L, geo);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_gate_bwd_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, gb::SMEM)); attr = true; }
   tri_gate_bwd_sm100<<<grid_, gb::THREADS, gb::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)L, ntiles_, dym, gm, om, wm, dom, dgm, sm_, delta.data_ptr<float>(), dwo.data_ptr<float>(), reinterpret_cast<unsigned*>(ticket.data_ptr<int>()),
       reinterpret_cast<__nv_bfloat16*>(dwo16.data_ptr<at::BFloat16>()),
       drop.defined() && drop.numel() > 0 ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, det ? 1 : 0,
-      trans ? 1 : 0);
+      geo);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dG, delta, dwo, seed};
 }
@@ -1512,29 +1523,32 @@ std::vector<torch::Tensor> tri_gate_bwd(torch::Tensor dy, torch::Tensor g, torch
 // out = x + (sigmoid(g) o o) . Wo^T; g, o, x [R, 128] bf16, wo [128, 128] bf16; out_: a contiguous [R, 128] bf16 tensor (or a view of
 // one, e.g. a chunk's rows of a batch's output) to write the result into, or empty (a fresh tensor)
 torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch::Tensor wo, torch::Tensor drop, int64_t L, torch::Tensor out_,
-                       bool trans) {
-  for (const auto* t : {&g, &o, &x}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == g.numel(), "g / o / x: [R, 128] bf16");
+                       bool trans, int64_t lr) {
+  for (const auto* t : {&g, &o}) TORCH_CHECK(t->is_cuda() && t->scalar_type() == torch::kBFloat16 && t->is_contiguous() && t->numel() == g.numel(), "g / o: [R, 128] bf16");
   const long R = g.numel() / C;
-  TORCH_CHECK(R % tl::BM == 0, "rows % 128");
+  TORCH_CHECK(R % tl::BM == 0 && R % (L * L) == 0, "rows % 128, rows = B L^2");
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo), Rr = R / (L * L) * Lr * Lr;   // x and the output: the caller's [B, Lr, Lr, 128]
+  TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.numel() == Rr * C, "x: [B, Lr, Lr, 128] bf16");
   TORCH_CHECK(wo.scalar_type() == torch::kBFloat16 && wo.is_contiguous() && wo.numel() == C * C, "wo [128, 128] bf16");
   const bool given = out_.defined() && out_.numel() > 0;
-  if (given) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == R * C && out_.device() == g.device(),
-                         "out: contiguous bf16 with R x 128 elements");
-  auto out = given ? out_.view({R, C}) : torch::empty({R, C}, g.options());
+  if (given) TORCH_CHECK(out_.scalar_type() == torch::kBFloat16 && out_.is_contiguous() && out_.numel() == Rr * C && out_.device() == g.device(),
+                         "out: contiguous bf16 with B Lr^2 x 128 elements");
+  auto out = given ? out_.view({Rr, C}) : torch::empty({Rr, C}, g.options());
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
   CUtensorMap gm = m2(g, R, "g"), om = m2(o, R, "o"), wm = m2(wo, C, "wo");
   // x and the output in the caller's layout (the ending node's [B, L, L, 128] read and written through 4-D maps)
-  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0);
-  CUtensorMap ym = make_rows_map(out.data_ptr(), C, R, C, 32, 128, CU_TENSOR_MAP_SWIZZLE_64B, "out", trans ? L : 0);
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo);
+  CUtensorMap ym = make_rows_map(out.data_ptr(), C, R, C, 32, 128, CU_TENSOR_MAP_SWIZZLE_64B, "out", L, geo);
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(tri_tail_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, tl::SMEM)); attr = true; }
   const int ntiles = (int)(R / tl::BM);
   const bool dr = drop.defined() && drop.numel() > 0;
-  if (dr) TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() * L == R * C && R % (L * L) == 0,
-                      "drop: [B, L, 128] bf16 contiguous");
+  if (dr) TORCH_CHECK(drop.scalar_type() == torch::kBFloat16 && drop.is_contiguous() && drop.numel() == R / (L * L) * Lr * C,
+                      "drop: [B, Lr, 128] bf16 contiguous");
   tri_tail_sm100<<<std::min(ntiles, num_sms(g.device().index())), tl::THREADS, tl::SMEM, at::cuda::getCurrentCUDAStream()>>>(ntiles, (int)L,
-      dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, gm, om, xm, wm, ym, trans ? 1 : 0);
+      dr ? reinterpret_cast<const __nv_bfloat16*>(drop.data_ptr<at::BFloat16>()) : nullptr, gm, om, xm, wm, ym, geo);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1542,10 +1556,12 @@ torch::Tensor tri_tail(torch::Tensor g, torch::Tensor o, torch::Tensor x, torch:
 // x [R, 128] bf16 (R = B * L * L rows (b, j, k)); w4 = [Wq; Wk; Wv; Wg] [512, 128] bf16; wb [4, 128]; mask [B, L] bool or empty
 // -> (q, k, v, g [R, 128] bf16, bias [B, 4, L, L] bf16 with masked keys at -inf)
 std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::Tensor lnb, double eps, torch::Tensor w4, torch::Tensor wb,
-                                     torch::Tensor mask, int64_t B, int64_t L, bool trans, bool bt) {
+                                     torch::Tensor mask, int64_t B, int64_t L, bool trans, bool bt, int64_t lr) {
   TORCH_CHECK(x.is_cuda() && x.scalar_type() == torch::kBFloat16 && x.is_contiguous() && x.size(-1) == C, "x: [R, 128] bf16");
-  const long R = x.numel() / C;
-  TORCH_CHECK(R == B * L * L && L % fr::BM == 0, "rows = B * L * L, L % 128 == 0");
+  const long R = B * L * L;
+  const int geo = rows_geo(trans, L, lr);
+  const long Lr = geo_rows_len(L, geo);                     // x: the caller's [B, Lr, Lr, 128]; L: the kernels' (whole tiles)
+  TORCH_CHECK(x.numel() == B * Lr * Lr * C && L % fr::BM == 0, "x: B Lr^2 rows, L % 128 == 0");
   TORCH_CHECK(w4.scalar_type() == torch::kBFloat16 && w4.is_contiguous() && w4.size(0) == 4 * C && w4.size(1) == C, "w4 [512, 128] bf16");
   auto opt = x.options();
   auto q = torch::empty({R, C}, opt), k = torch::empty({R, C}, opt), v = torch::empty({R, C}, opt), g = torch::empty({R, C}, opt);
@@ -1553,10 +1569,10 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   auto lw = lnw.to(torch::kFloat32).contiguous(), lb = lnb.to(torch::kFloat32).contiguous(), wbf = wb.to(torch::kFloat32).contiguous();
   const bool* mp = nullptr;
   torch::Tensor mk;
-  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * L, "mask [B, L]"); mp = mk.data_ptr<bool>(); }
+  if (mask.numel() > 0) { mk = mask.to(torch::kBool).contiguous(); TORCH_CHECK(mk.numel() == B * Lr, "mask [B, Lr]"); mp = mk.data_ptr<bool>(); }
   auto m2 = [&](const torch::Tensor& t, uint64_t rows, uint32_t br, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, rows}, {(uint64_t)C}, {64, br}, CU_TENSOR_MAP_SWIZZLE_128B, what); };
-  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", trans ? L : 0), wm = m2(w4, 4 * C, 256, "w4");
+  CUtensorMap xm = make_rows_map(x.data_ptr(), C, R, C, 64, 128, CU_TENSOR_MAP_SWIZZLE_128B, "x", L, geo), wm = m2(w4, 4 * C, 256, "w4");
   auto o2 = [&](const torch::Tensor& t, const char* what) {
     return make_map<2>(t.data_ptr(), {(uint64_t)C, (uint64_t)R}, {(uint64_t)C}, {32, 32}, CU_TENSOR_MAP_SWIZZLE_64B, what); };
   CUtensorMap qm = o2(q, "q"), km = o2(k, "k"), vm = o2(v, "v"), gm = o2(g, "g");
@@ -1565,7 +1581,7 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
   const int ntiles = (int)(R / fr::BM);
   tri_front_sm100<<<std::min(ntiles, num_sms(x.device().index())), fr::THREADS, fr::SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)R, (int)L, ntiles, (float)eps, xm, wm, qm, km, vm, gm, lw.data_ptr<float>(), lb.data_ptr<float>(), wbf.data_ptr<float>(), mp,
-      reinterpret_cast<__nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), trans ? 1 : 0, bt ? 1 : 0);
+      reinterpret_cast<__nv_bfloat16*>(bias.data_ptr<at::BFloat16>()), geo, bt ? 1 : 0, (int)Lr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {q, k, v, g, bias};
 }
@@ -1573,17 +1589,17 @@ std::vector<torch::Tensor> tri_front(torch::Tensor x, torch::Tensor lnw, torch::
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("tri_head_bwd", &tri_head_bwd, "sm100 TriangleAttention head backward: projection dgrad + LN backward + residual (added into dpair in place)",
         py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("dg"), py::arg("db"), py::arg("x"), py::arg("w4"), py::arg("wb"), py::arg("lnw"), py::arg("lnb"),
-        py::arg("eps"), py::arg("dpair"), py::arg("B"), py::arg("L"), py::arg("trans"));
+        py::arg("eps"), py::arg("dpair"), py::arg("B"), py::arg("L"), py::arg("trans"), py::arg("lr") = 0);
   m.def("tri_wgrad", &tri_wgrad, "sm100 TriangleAttention parameter gradients: finish -> (dW_q|k|v|g [4,128,128], dgamma|dbeta|dWb [6,128]) bf16; raw -> (M, cs, B, cdb)",
         py::arg("dq"), py::arg("dk"), py::arg("dv"), py::arg("dg"), py::arg("db"), py::arg("x"), py::arg("eps"), py::arg("B"), py::arg("L"),
         py::arg("w4"), py::arg("wb"), py::arg("lnw"), py::arg("lnb"), py::arg("finish") = true, py::arg("dwo32") = torch::Tensor(),
-        py::arg("ws") = torch::Tensor(), py::arg("fp32_out") = false, py::arg("det") = false, py::arg("trans") = false);
+        py::arg("ws") = torch::Tensor(), py::arg("fp32_out") = false, py::arg("det") = false, py::arg("trans") = false, py::arg("lr") = 0);
   m.def("tri_gate_bwd", &tri_gate_bwd, "sm100 TriangleAttention gate backward: (do, dg, delta, dWo)", py::arg("dy"), py::arg("g"), py::arg("o"), py::arg("wo"), py::arg("B"), py::arg("L"),
-        py::arg("dwo_ws"), py::arg("drop"), py::arg("det") = false, py::arg("trans") = false);
+        py::arg("dwo_ws"), py::arg("drop"), py::arg("det") = false, py::arg("trans") = false, py::arg("lr") = 0);
   m.def("tri_tail", &tri_tail, "sm100 TriangleAttention tail: x + (sigmoid(g) o o) . Wo^T", py::arg("g"), py::arg("o"), py::arg("x"), py::arg("wo"), py::arg("drop"), py::arg("L"),
-        py::arg("out") = torch::Tensor(), py::arg("trans") = false);
+        py::arg("out") = torch::Tensor(), py::arg("trans") = false, py::arg("lr") = 0);
   m.def("tri_pack_params", &tri_pack_params, "one-launch parameter pack: (w4 bf16 [512,128], wo bf16 [128,128], lnw|lnb|Wb fp32 [6,128])");
   m.def("tri_front", &tri_front, "sm100 TriangleAttention front: LN + q|k|v|g projections + head-major (masked) bias",
         py::arg("x"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("w4"), py::arg("wb"), py::arg("mask"), py::arg("B"), py::arg("L"),
-        py::arg("trans") = false, py::arg("bt") = false);
+        py::arg("trans") = false, py::arg("bt") = false, py::arg("lr") = 0);
 }
