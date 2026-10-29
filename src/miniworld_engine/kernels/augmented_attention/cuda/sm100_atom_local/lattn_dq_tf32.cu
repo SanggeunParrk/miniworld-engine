@@ -14,8 +14,11 @@
 // mask folded in as -inf).
 // Threads: 17 warps (544; <= 120 registers): 16 dS warps (one query row per thread), warp 16 issues the TMA loads (lane 0) and the
 // MMAs (whole warp, elect_one). Warps of band quarter < 2 drain 32 x 16 of dQ each (64-B swizzled staging + TMA store).
+// Slid key window (SPE > 0, slide.cuh): the last 8 SPE CTAs are edge CTAs (the moved windows' dQ over their slid keys); the others
+// skip the moved windows' dQ.
 // SPDX-License-Identifier: Apache-2.0
 #include "../sm100/sm100.cuh"
+#include "slide.cuh"
 using namespace s100;
 
 constexpr int NH = 4, DH = 32, WQ = 32, WK = 128, KOFF = 48, QN = 128, KN = 224, NST = 2;
@@ -39,18 +42,25 @@ extern "C" __global__ void __launch_bounds__(544, 1)
 local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_constant__ CUtensorMap tm_k, const __grid_constant__ CUtensorMap tm_v,
                    const __grid_constant__ CUtensorMap tm_km, const __grid_constant__ CUtensorMap tm_do, const __grid_constant__ CUtensorMap tm_l,
                    const __grid_constant__ CUtensorMap tm_d, const __grid_constant__ CUtensorMap tm_o, const float* __restrict__ gbias,
-                   const uint8_t* __restrict__ kmask, int qcol, int N, int A, int nwin, int SP) {
+                   const uint8_t* __restrict__ kmask, int qcol, int N, int A, int nwin, int SP, int SPE) {
   extern __shared__ __align__(1024) uint8_t sm[];
+  __shared__ int sred[32];
   const uint32_t su = smem_u32(sm);
   uint64_t* bars = reinterpret_cast<uint64_t*>(sm + O_BAR);
   uint64_t *full1 = bars, *full2 = bars + 2, *sready = bars + 3, *tready = bars + 4, *dready = bars + 5, *empty2 = bars + 6;
   uint32_t* tptr = reinterpret_cast<uint32_t*>(sm + O_BAR + 128);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
-  const int pair = blockIdx.x / SP, part = blockIdx.x - pair * SP;
-  const int jc = pair >> 2, h = pair & 3;
-  const int q0 = 128 * jc, kb = q0 - KOFF;
-  const int a_lo = (int)((long)A * part / SP), a_hi = (int)((long)A * (part + 1) / SP);
-  const int nit = a_hi - a_lo;
+  const int nmain = (int)gridDim.x - 2 * NH * SPE;                  // the slid window's edge CTAs come last (slide.cuh; SPE = 0: none)
+  const bool edge = (int)blockIdx.x >= nmain;
+  const int sp = edge ? SPE : SP, bx = (int)blockIdx.x - (edge ? nmain : 0);
+  const int pair = bx / sp, part = bx - pair * sp;
+  const int jc = pair >> 2, h = pair & 3;                            // (an edge CTA: jc = its group)
+  const int nr = SPE > 0 ? slide_nreal(kmask, N, sred) : N;
+  int wf = 0, kbe = 0;
+  const bool live = !edge || slide_group(jc, nr, wf, kbe);
+  const int q0 = edge ? 32 * wf : 128 * jc, kb = edge ? kbe : q0 - KOFF;
+  const int a_lo = (int)((long)A * part / sp), a_hi = (int)((long)A * (part + 1) / sp);
+  const int nit = live ? a_hi - a_lo : 0;
   const bool ctl = warp == 16;                                       // TMA + MMA warp (no TMEM lanes)
 
   if (tid == 0) {
@@ -60,10 +70,12 @@ local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_consta
   }
   if (warp == 0) tmem_alloc(smem_u32(tptr), 512);
   const int qd = warp & 3, qt = warp >> 2;
-  const int wq = 4 * jc + qd;                                        // this quadrant's window; lane = query of it
+  const int wq = (q0 >> 5) + qd;                                     // this quadrant's window; lane = query of it
+  const int qdb = edge ? 0 : qd;                                     // the window's first band cell (an edge CTA: its keys start the range)
+  const bool keep = SPE == 0 || (edge ? slide_mine(jc, wq, nr) : !slide_moved(wq, nr));   // this CTA writes the window's dQ
   float bl[32];
   if (!ctl) {
-    const int key0 = 32 * wq - KOFF + 32 * qt;
+    const int key0 = kb + 32 * qdb + 32 * qt;
     const float4* src = reinterpret_cast<const float4*>(gbias + (((size_t)h * nwin + (wq < nwin ? wq : 0)) * WQ + lane) * WK + 32 * qt);
 #pragma unroll
     for (int g = 0; g < 8; ++g) {
@@ -147,10 +159,10 @@ local_attn_dq_tf32(const __grid_constant__ CUtensorMap tm_q, const __grid_consta
     }
   } else {
     const uint32_t tl = tm + ((uint32_t)(32 * qd) << 16);
-    const int x0 = 32 * qd + 32 * qt;                                // chunk-relative key column of the band quarter
-    const int z0 = 32 * (qt < qd ? qt : qt + 4);                     // the out-of-band block this warp zeroes (qt < 3)
+    const int x0 = 32 * qdb + 32 * qt;                               // chunk-relative key column of the band quarter
+    const int z0 = 32 * (qt < qdb ? qt : qt + 4);                    // the out-of-band block this warp zeroes (qt < 3)
     auto drain = [&](int itd) {                                      // warps with qt < 2: 32 queries x 16 columns of dQ
-      if (qt >= 2) return;
+      if (qt >= 2 || !keep) return;
       uint32_t v[16];
       tmem_ld16(tl + C_DQ + 16 * qt, v);
       tmem_wait_ld();
