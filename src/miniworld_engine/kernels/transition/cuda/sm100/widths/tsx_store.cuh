@@ -36,4 +36,24 @@ template <int N> DEVI size_t store_t_off(int r, int lane, size_t ld, int elem_by
   constexpr int C = N / 4;
   return (size_t)(r & ~(C - 1)) * ld + (size_t)((lane & (C - 1)) * 16 / elem_bytes);
 }
+
+// distributed shared memory stores that complete on the destination CTA's mbarrier (complete_tx): the receiver waits on its own
+// barrier, the sender needs no release (the cluster-scope releases of barrier.cluster / mbarrier.arrive.release cost ~1 us each in
+// these kernels, measured with globaltimer stamps). addr / bar: this CTA's shared addresses, mapped to CTA `rank`.
+DEVI uint32_t dsm_map(uint32_t addr, uint32_t rank) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, %2;" : "=r"(r) : "r"(addr), "r"(rank));
+  return r;
+}
+DEVI void st_async_v4(uint32_t addr, uint32_t bar, uint32_t rank, uint32_t a, uint32_t b, uint32_t c, uint32_t d) {
+  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v4.b32 [%0], {%1, %2, %3, %4}, [%5];"
+               :: "r"(dsm_map(addr, rank)), "r"(a), "r"(b), "r"(c), "r"(d), "r"(dsm_map(bar, rank)) : "memory");
+}
+DEVI void st_async_v2f(uint32_t addr, uint32_t bar, uint32_t rank, float a, float b) {
+  asm volatile("st.async.shared::cluster.mbarrier::complete_tx::bytes.v2.f32 [%0], {%1, %2}, [%3];"
+               :: "r"(dsm_map(addr, rank)), "f"(a), "f"(b), "r"(dsm_map(bar, rank)) : "memory");
+}
+// byte offset of 16-byte chunk L of a row-major buffer, swizzled within 128-byte lines (chunk position ^ line & 7) so that a warp
+// accessing the same chunk of 32 consecutive rows spreads over the banks
+DEVI uint32_t swz16(uint32_t L) { return ((L >> 3) << 7) | (((L & 7u) ^ ((L >> 3) & 7u)) << 4); }
 }  // namespace s100
