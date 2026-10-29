@@ -1393,49 +1393,58 @@ struct CEp {
   static constexpr int AT = NP * 512;
   static constexpr int BST = CZ * 64;
   static constexpr int NBS = 2;
-  static constexpr int THREADS = 480;              // 0: O, 1: MMA, 2-9: LayerNorm, 10-13: drain, 14: W'
-  static constexpr int SMEM = 1024 + (AT + NBS * BST) * 2 + 512;
+  static constexpr int NB64 = CZ / 64, OBLK = NP * 64;   // output staging: a ring of two [BI][BJ][64] blocks (64 columns each)
+  static constexpr int THREADS = 512;              // 0: O, 1: MMA, 2-9: LayerNorm, 10-13: drain, 14: W', 15: y stores
+  static constexpr int SMEM = 1024 + (AT + NBS * BST + 2 * OBLK) * 2 + CZ * 4 + 512;
   static constexpr uint32_t IDESC = idesc_bf16(128, CZ);
   static constexpr int TMEM_COLS = 2 * CZ <= 256 ? 256 : 512;
   static_assert(SMEM <= 232448, "one CTA per SM");
 };
 
 template <int CZ, bool SAVE>
-__global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
+__global__ void __launch_bounds__(512, 1) opm_chai_epilogue_sm100(
     int N, int ntiles, float eps,
     const __grid_constant__ CUtensorMap omap,      // O [8][N 8][N 8] as ((j % 8, l) 64, k 8, j / 8, g N + i), box (64, 8, 4, 4), no swizzle
     const __grid_constant__ CUtensorMap wmap,      // W' [CZ][512], box (64, CZ), 128B swizzle
+    const __grid_constant__ CUtensorMap zmap,      // z [N][N][CZ] as (64, N j, CZ / 64, N i), box (64, BJ, 1, BI), 128B swizzle
+    const __grid_constant__ CUtensorMap rmap,      // the residual, same layout
+    const __grid_constant__ CUtensorMap ymap,      // y [N N][512] as (l 8, j % 8, (g, k) 64, j / 8, i), box (8, 8, 8, 4, 4): a group block
     const float* __restrict__ BIAS,                // b' [CZ] fp32
-    const __nv_bfloat16* __restrict__ RES, __nv_bfloat16* __restrict__ Z, __nv_bfloat16* __restrict__ Y, float* __restrict__ STATS,
+    int has_res, float* __restrict__ STATS,
     const int* __restrict__ ASYM,                  // chain ids [N] (the interchain mask: a pair of two chains gets no update), or nullptr
     __nv_bfloat16* __restrict__ WS) {              // training with ASYM: [N N] 1 / 0 (same chain or not), the dbias GEMV's weights
   using C = CEp<CZ>;
-  constexpr int BI = C::BI, BJ = C::BJ, NP = C::NP, BST = C::BST, NBS = C::NBS;
+  constexpr int BI = C::BI, BJ = C::BJ, NP = C::NP, BST = C::BST, NBS = C::NBS, NB64 = C::NB64, OBLK = C::OBLK;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sA = reinterpret_cast<__nv_bfloat16*>(smb);     // [8 g][128 pairs][64]
   __nv_bfloat16* sB = sA + C::AT;                                 // [NBS][CZ][64]
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sB + NBS * BST);
-  // per group g: the O block landed / normalised (pairs of groups (gg, gg + 4): count 8 LN warps) / read by the GEMM.  Groups go in
-  // the order 0, 4, 1, 5, 2, 6, 3, 7 (the two thread halves of a row normalise gg and gg + 4 at once), so the next tile's first
-  // blocks load while this tile's last ones are normalised and multiplied
+  __nv_bfloat16* sOut = sB + NBS * BST;                           // [2][BI][BJ][64]
+  float* sBias = reinterpret_cast<float*>(sOut + 2 * OBLK);       // [CZ]
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sBias + CZ);
+  // per group g: the O block landed / normalised (pairs of groups (gg, gg + 4): count 8 LN warps) / read by the GEMM / (training) y
+  // stored from it.  Groups go in the order 0, 4, 1, 5, 2, 6, 3, 7 (the two thread halves of a row normalise gg and gg + 4 at
+  // once), so the next tile's first blocks load while this tile's last ones are normalised and multiplied
   uint64_t* afull = bars;            // [8]
   uint64_t* anorm = afull + 8;       // [4] count 8
   uint64_t* aempty = anorm + 4;      // [8]
-  uint64_t* bfull = aempty + 8;      // [NBS]
+  uint64_t* ystore = aempty + 8;     // [8] (training) the group block's y store has left shared memory
+  uint64_t* bfull = ystore + 8;      // [NBS]
   uint64_t* bempty = bfull + NBS;    // [NBS]
   uint64_t* accf = bempty + NBS;     // [2]
   uint64_t* acce = accf + 2;         // [2] count 4
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(acce + 2);
+  uint64_t* resf = acce + 2;         // [2] a staging block's residual landed
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(resf + 2);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int njb = N / BJ;
   if (tid == 0) {
-    for (int k = 0; k < 8; ++k) { bar_init(afull + k, 1); bar_init(aempty + k, 1); }
+    for (int k = 0; k < 8; ++k) { bar_init(afull + k, 1); bar_init(aempty + k, 1); bar_init(ystore + k, 1); }
     for (int k = 0; k < 4; ++k) bar_init(anorm + k, 8);
     for (int k = 0; k < NBS; ++k) { bar_init(bfull + k, 1); bar_init(bempty + k, 1); }
-    for (int k = 0; k < 2; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); }
+    for (int k = 0; k < 2; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 4); bar_init(resf + k, 1); }
     bar_init_fence();
   }
+  for (int c = tid; c < CZ; c += C::THREADS) sBias[c] = BIAS[c];   // b' in shared memory (per-element __ldg of it sat on the drain's path)
   if (warp == 1) tmem_alloc(tslot, C::TMEM_COLS);
   tc_fence_before();
   __syncthreads();
@@ -1449,7 +1458,10 @@ __global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
         const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ;
         for (int q = 0; q < 8; ++q) {
           const int g = (q & 1) * 4 + (q >> 1);
-          if (lt >= 1) wait(aempty + g, (lt - 1) & 1);
+          if (lt >= 1) {
+            wait(aempty + g, (lt - 1) & 1);
+            if (SAVE) wait(ystore + g, (lt - 1) & 1);
+          }
           expect_tx(afull + g, NP * 64 * 2);
           load_4d(&omap, sA + g * NP * 64, afull + g, 0, 0, j0 >> 3, g * N + i0);
         }
@@ -1465,6 +1477,25 @@ __global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
           expect_tx(bfull + s, BST * 2);
           load_2d(&wmap, sB + s * BST, bfull + s, g * 64, 0);
         }
+    }
+  } else if (warp == 15) {
+    // (training) y = the normalised group blocks, stored by TMA straight from the GEMM's operand (one 5-D box a group: 16-byte rows
+    // of 8 products); the threads wrote y as rows of their own before, 32 lines per warp store (~200 of 544 us at L768)
+    if (SAVE && lane == 0) {
+      int lt = 0;
+      for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
+        const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ;
+        for (int gg = 0; gg < 4; ++gg) {
+          wait(anorm + gg, lt & 1);
+          store_5d(&ymap, sA + gg * NP * 64, 0, 0, gg * 8, j0 >> 3, i0);
+          store_5d(&ymap, sA + (gg + 4) * NP * 64, 0, 0, (gg + 4) * 8, j0 >> 3, i0);
+          bulk_commit();
+          bulk_wait_read<0>();
+          arrive(ystore + gg);
+          arrive(ystore + gg + 4);
+        }
+      }
+      bulk_wait<0>();
     }
   } else if (warp == 1) {
     if (lane == 0) {
@@ -1520,11 +1551,9 @@ __global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
       const float rstd = rsqrtf(fmaxf(s2 * (1.f / 512.f) - d1 * d1, 0.f) + eps);
       const float2 nm = make_float2(-mean, -mean), rs = make_float2(rstd, rstd);
       const long pr = (long)(i0 + (r >> 5)) * N + j0 + (r & 31);
-      // the interchain mask in training: a pair of two chains keeps y = 0 and rstd = 0 (its dW' rows and its product-norm gradient
-      // vanish) and weight 0 in the dbias sum
-      const uint32_t keep = (ASYM == nullptr || __ldg(ASYM + i0 + (r >> 5)) == __ldg(ASYM + j0 + (r & 31))) ? 0xffffffffu : 0u;
-      // y (training): this thread's 256 normalised products are 512 contiguous bytes of the pair's row, written as they are made
-      uint4* yrow = SAVE ? reinterpret_cast<uint4*>(Y + pr * 512 + hf * 256) : nullptr;
+      // the interchain mask in training: a pair of two chains is normalised to zeros (its y, its GEMM row: the drain keeps the residual
+      // there anyway), rstd 0 (its product-norm gradient vanishes) and weight 0 in the dbias sum
+      const uint32_t keep = (!SAVE || ASYM == nullptr || __ldg(ASYM + i0 + (r >> 5)) == __ldg(ASYM + j0 + (r & 31))) ? 0xffffffffu : 0u;
 #pragma unroll 1
       for (int gg = 0; gg < 4; ++gg) {
         __nv_bfloat16* row = sA + (hf * 4 + gg) * NP * 64 + roff;
@@ -1533,9 +1562,8 @@ __global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
           uint4 u = *reinterpret_cast<const uint4*>(row + c * 64);
           const float2 x0 = mul2(add2(bf2f(u.x), nm), rs), x1 = mul2(add2(bf2f(u.y), nm), rs);
           const float2 x2 = mul2(add2(bf2f(u.z), nm), rs), x3 = mul2(add2(bf2f(u.w), nm), rs);
-          u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
+          u.x = pack2(x0.x, x0.y) & keep; u.y = pack2(x1.x, x1.y) & keep; u.z = pack2(x2.x, x2.y) & keep; u.w = pack2(x3.x, x3.y) & keep;
           *reinterpret_cast<uint4*>(row + c * 64) = u;
-          if (SAVE) yrow[gg * 8 + c] = make_uint4(u.x & keep, u.y & keep, u.z & keep, u.w & keep);
         }
         fence_proxy_async();
         __syncwarp();
@@ -1547,40 +1575,66 @@ __global__ void __launch_bounds__(480, 1) opm_chai_epilogue_sm100(
       }
     }
   } else {
-    // drain: TMEM lane = pair q * 32 + lane, columns = c_z
-    const int q = warp & 3, p = q * 32 + lane;
-    int lt = 0;
+    // drain: TMEM lane = pair p = q * 32 + lane (i0 + p / 32, j0 + p % 32), columns = c_z, 64 at a time through a ring of two staging
+    // blocks stored by TMA; a block's residual is loaded as soon as the block two before it has left the ring slot (so the next tile's
+    // first blocks land under this tile's last ones).  Rows of z / the residual per thread (32 lines a warp access) were ~190 of 544 us
+    const int q = warp & 3, p = q * 32 + lane, il = p >> 5, jl = p & 31;
+    const bool lead_thr = (warp == 10 && lane == 0);
+    const int nmy = (int)blockIdx.x < ntiles ? (ntiles - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
+    auto res_load = [&](int k) {                   // the k-th block of this CTA (tile k / NB64, columns 64 (k % NB64))
+      const int t = (int)blockIdx.x + (k / NB64) * (int)gridDim.x, h = k % NB64;
+      expect_tx(resf + (k & 1), OBLK * 2);
+      load_4d(&rmap, sOut + (k & 1) * OBLK, resf + (k & 1), 0, (t % njb) * BJ, h, (t / njb) * BI);
+    };
+    if (lead_thr && has_res) for (int k = 0; k < 2 && k < nmy * NB64; ++k) res_load(k);
+    int lt = 0, kb = 0;
     for (int t = blockIdx.x; t < ntiles; t += gridDim.x, ++lt) {
       const int i0 = (t / njb) * BI, j0 = (t % njb) * BJ, b = lt & 1;
-      const size_t zo = ((size_t)(i0 + (p >> 5)) * N + j0 + (p & 31)) * CZ;
-      const uint32_t keep = (ASYM == nullptr || __ldg(ASYM + i0 + (p >> 5)) == __ldg(ASYM + j0 + (p & 31))) ? 0xffffffffu : 0u;
+      const uint32_t keep = (ASYM == nullptr || __ldg(ASYM + i0 + il) == __ldg(ASYM + j0 + jl)) ? 0xffffffffu : 0u;
       wait(accf + b, (lt >> 1) & 1);
       tc_fence_after();
 #pragma unroll 1
-      for (int c0 = 0; c0 < CZ; c0 += 32) {
-        float v[32];
-        tmem_ld32(tmem_at(tmem + b * CZ, q * 32, c0), v);
+      for (int h = 0; h < NB64; ++h, ++kb) {
+        const int s = kb & 1;
+        float v[64];
+        tmem_ld32(tmem_at(tmem + b * CZ, q * 32, h * 64), v);
+        tmem_ld32(tmem_at(tmem + b * CZ, q * 32, h * 64 + 32), v + 32);
         tmem_wait_ld();
-        if (c0 + 32 == CZ) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
+        if (h == NB64 - 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive(acce + b); }
+        if (has_res) wait(resf + s, (kb >> 1) & 1);   // (either way the store two blocks back has left this slot: the leader waited
+                                                      // for it before the last block's barrier)
+        __nv_bfloat16* row = sOut + s * OBLK + p * 64;
+        const float* bh = sBias + h * 64;
 #pragma unroll
-        for (int u8 = 0; u8 < 4; ++u8) {
+        for (int c8 = 0; c8 < 8; ++c8) {
+          const int sw = (c8 ^ (jl & 7)) << 3;
           uint4 o;
           uint32_t* ow = reinterpret_cast<uint32_t*>(&o);
           uint4 rr = make_uint4(0, 0, 0, 0);
-          if (RES != nullptr) rr = __ldg(reinterpret_cast<const uint4*>(RES + zo + c0 + u8 * 8));
+          if (has_res) rr = *reinterpret_cast<const uint4*>(row + sw);
           const __nv_bfloat162* rh = reinterpret_cast<const __nv_bfloat162*>(&rr);
+          const float4 b0 = *reinterpret_cast<const float4*>(bh + c8 * 8), b1 = *reinterpret_cast<const float4*>(bh + c8 * 8 + 4);
+          const float bb[8] = {b0.x, b0.y, b0.z, b0.w, b1.x, b1.y, b1.z, b1.w};
 #pragma unroll
           for (int u = 0; u < 4; ++u) {
-            const float2 bb = __ldg(reinterpret_cast<const float2*>(BIAS + c0 + u8 * 8 + u * 2));
-            __nv_bfloat162 x = __float22bfloat162_rn(make_float2(v[u8 * 8 + u * 2] + bb.x, v[u8 * 8 + u * 2 + 1] + bb.y));
+            __nv_bfloat162 x = __float22bfloat162_rn(make_float2(v[c8 * 8 + u * 2] + bb[2 * u], v[c8 * 8 + u * 2 + 1] + bb[2 * u + 1]));
             *reinterpret_cast<uint32_t*>(&x) &= keep;
-            if (RES != nullptr) x = __hadd2(x, rh[u]);
+            if (has_res) x = __hadd2(x, rh[u]);
             ow[u] = *reinterpret_cast<uint32_t*>(&x);
           }
-          *reinterpret_cast<uint4*>(Z + zo + c0 + u8 * 8) = o;
+          *reinterpret_cast<uint4*>(row + sw) = o;
+        }
+        fence_proxy_async();
+        named_sync(1, 128);
+        if (lead_thr) {
+          store_4d(&zmap, sOut + s * OBLK, 0, j0, h, i0);
+          bulk_commit();
+          bulk_wait_read<0>();                     // the block has left its slot: the block two ahead may land in it
+          if (has_res && kb + 2 < nmy * NB64) res_load(kb + 2);
         }
       }
     }
+    if (lead_thr) bulk_wait<0>();
   }
   tc_fence_before();
   __syncthreads();
@@ -2280,15 +2334,21 @@ static void chai_epilogue_launch(torch::Tensor& O, torch::Tensor& wf, torch::Ten
   CUtensorMap om = make_map<4>(O.data_ptr(), {64, 8, (uint64_t)(N / 8), (uint64_t)(8 * N)}, {NK, 64, 8 * NK}, {64, 8, 4, 4},
                                CU_TENSOR_MAP_SWIZZLE_NONE, "O");
   CUtensorMap wm = make_map<2>(wf.data_ptr(), {512, (uint64_t)CZ}, {512}, {64, (uint32_t)CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "wf");
+  CUtensorMap zm = make_map<4>(z.data_ptr(), {64, (uint64_t)N, (uint64_t)(CZ / 64), (uint64_t)N}, {(uint64_t)CZ, 64, (uint64_t)N * CZ},
+                               {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "z");
+  CUtensorMap rm = res ? make_map<4>(res->data_ptr(), {64, (uint64_t)N, (uint64_t)(CZ / 64), (uint64_t)N}, {(uint64_t)CZ, 64, (uint64_t)N * CZ},
+                                     {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "res") : zm;
+  // y [N N][512]: element (pair (i, j), g, k, l) at (i N + j) 512 + 64 g + 8 k + l, as (l, j % 8, (g, k), j / 8, i) -- the box of one
+  // group lands / leaves as the GEMM operand's [i][j / 8][k][j % 8][l]
+  CUtensorMap ym = SAVE ? make_map<5>(y.data_ptr(), {8, 8, 64, (uint64_t)(N / 8), (uint64_t)N}, {512, 8, 8 * 512, (uint64_t)N * 512}, {8, 8, 8, 4, 4},
+                                      CU_TENSOR_MAP_SWIZZLE_NONE, "y") : zm;
   const int ntiles = (int)((N / C::BI) * (N / C::BJ));
   const int grid = std::min(ntiles, num_sms(O.device().index()));
   static bool attr = false;
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_chai_epilogue_sm100<CZ, SAVE>, cudaFuncAttributeMaxDynamicSharedMemorySize, C::SMEM)); attr = true; }
   opm_chai_epilogue_sm100<CZ, SAVE><<<grid, C::THREADS, C::SMEM, at::cuda::getCurrentCUDAStream()>>>(
-      (int)N, ntiles, (float)eps, om, wm, bias.data_ptr<float>(),
-      res ? reinterpret_cast<const __nv_bfloat16*>(res->data_ptr<at::BFloat16>()) : nullptr,
-      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), SAVE ? reinterpret_cast<__nv_bfloat16*>(y.data_ptr<at::BFloat16>()) : nullptr,
-      SAVE ? stats.data_ptr<float>() : nullptr, asym, ws.numel() ? reinterpret_cast<__nv_bfloat16*>(ws.data_ptr<at::BFloat16>()) : nullptr);
+      (int)N, ntiles, (float)eps, om, wm, zm, rm, ym, bias.data_ptr<float>(), res ? 1 : 0, SAVE ? stats.data_ptr<float>() : nullptr, asym,
+      ws.numel() ? reinterpret_cast<__nv_bfloat16*>(ws.data_ptr<at::BFloat16>()) : nullptr);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
