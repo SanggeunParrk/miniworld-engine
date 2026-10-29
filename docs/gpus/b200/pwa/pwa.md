@@ -36,12 +36,12 @@ serves them in inference (`integrations/pwa_wide.py`, `refusal` in `pwa_train.py
 | 128 / 384 / 8 x 8 | OpenDDE | `pair_fwd<384>` + (128, 8) | + (128, 8), `pair_bwd_w<384>` |
 | 128 / 256 / 8 x 16 | ESMFold2 | `pair_fwd<256>` + (128, 16) | + (128, 16), `pair_bwd_w<256>` |
 | 64 / 256 / 8 x 32 | Chai-1 (not served on H100) | `pair_fwd<256>` + (64, 32) | `pwa_sm100.cu`'s MSA side + `pair_bwd_w<256>` |
-| 256 / 512 / 8 x 32 | IntelliFold-v2 (not served on H100) | `pair_fwd<512>` + (256, 32), weights streamed | not yet (`pair_bwd_w<512>` is built) |
+| 256 / 512 / 8 x 32 | IntelliFold-v2 (not served on H100) | `pair_fwd<512>` + (256, 32), weights streamed | + `glue_ws` / `dvb_ws` (256, 32), weights streamed, `pair_bwd_w<512>` |
 
 - `pair_fwd` is built per (d_pair, NMAX): z arrives in units of two 64-channel blocks (one for d_pair 384), so a wider pair is more
   units per tile; NMAX 2048 holds a row of 2048 logits and its softmax reads the row three times from shared memory. The d_pair 128,
   NMAX 1024 build gives the previous kernel's bits at the previous speed (L384 / 768 / 1024: 14.5 / 38.4 / 54.9 us vs 14.5 / 38.6 /
-  55.0). Not on B200: IntelliFold-v2 training (its MSA-side backward at d_msa 256; the pair side's `pair_bwd_w<512>` is built and tested).
+  55.0).
 - d_msa 256 (IntelliFold-v2): a projection's weights are 128 KiB, too much next to the 64 KiB tiles, so they stream through a shared-memory
   ring of k-blocks in the order the MMA warp takes them: `ln_vg_w` two [256][64] Wv slots (one x stage, one v staging buffer),
   `gate_out_w` three 32 KiB slots (a gate half's Wg rows, then an out half's Wo k-blocks; one stage, one TMEM gate region, one out
@@ -76,46 +76,69 @@ process's matmul filler on the card. "PyTorch" is the module's statements (what 
 
 ## Beyond MiniWorld's shape: training (2026-10-29)
 
-B200 trains every width of the table above but IntelliFold-v2 (Chai-1 on the MiniWorld kernels) and every width at N up to 2048 (`pwa_wide._train_b200`,
-`pwa_train.refusal`). Forward as inference with y and o kept (`ln_vg_w` with y, `gate_out_w` with the row-dropout keep-mask); backward:
+B200 trains every width of the table above (Chai-1 on the MiniWorld kernels) at N up to 2048 (`pwa_wide._train_b200`, `pwa_train.refusal`). Forward as inference with y and o kept (`ln_vg_w` with y, `gate_out_w` with the row-dropout keep-mask); backward:
 
 | step | kernel | work |
 |---|---|---|
-| B1 | `glue_w` (`pwa_wide_sm100.cu`) | dout' = dres keep / (1 - p) in place; G = y Wg^T, DU = dout' Wo (tcgen05, TMEM); a thread a row: do = DU g (over o, head-major), dgp = DU o g (1 - g) (over y), go = g o (over dout'); all out by TMA |
+| B1 | `glue_w` (`pwa_wide_sm100.cu`) | tile = one token x 128 MSA rows; dout' = dres keep / (1 - p) in place (the keep row lands with the tile); G = y Wg^T, DU = dout' Wo (tcgen05, TMEM, two buffers); a thread a row: do = DU g (o read / do written from registers: a head block is 128 consecutive rows), dgp = DU o g (1 - g) (over y), go = g o (staging tile); dgp / go / dout' out by TMA, issued and waited by the producer |
 | B2 | cuBLAS | dv = w^T . do, dw = do . v^T (bmm); dWo = dout'^T go (fp32 out) |
 | B3 | `dvb_w` | dy = [dgp \| dv] [Wg; Wv] (tcgen05; dv's [128 s][C] head blocks are the K-major A as the contraction left them), dm = LN_bwd(dy) + dres, dgamma / dbeta; dv also stored in natural layout next to dgp |
 | B4 | cuBLAS | [dWg; dWv] = [dgp \| dv]^T y (fp32 out) |
 | B5 | `pair_sdot` + `pair_bwd` (`pair_bwd_w<256 / 384 / 512>`) | dz, dWb, dgamma_z |
 
-- `glue_w` / `dvb_w` are built where 8 d_hidden <= d_msa (the o / y / dres tiles of a 128-row tile hold the outputs in place); two
-  stages where they fit (64, 8 both; 128, 8 `dvb_w`), one otherwise. dgamma / dbeta are fp32 column sums (a warp reduce-scatter per 32
-  channels, fixed order): `dv_bwd`'s tensor-core sum rounds every dy . xhat to bf16 first, which left dgamma as noisy as the module's
-  own bf16 error.
+- `glue_w` / `dvb_w` are built where 8 d_hidden <= d_msa <= 128. `glue_w`'s stage is y | dres only (four stages at 64 / 8 x 8, two at
+  128 / 8 x 8 and 128 / 8 x 16), and no drain warp waits on a bulk store: the producer issues dout' once the prep is done and dgp / go
+  once the tile is drained, and reloads a stage after those stores have read it (a per-tile trace of the previous (s, 128 i) form at
+  128 / 8 x 16: one o | y | dres stage, ~2 us of keep-mask load latency in the prep and the drain waiting on every store, 8.6 us a tile
+  for 4.1 us of traffic). `dvb_w` stages dgp | dv | x | dres, two where they fit (64, 8 and 128, 8), one at 128, 8 x 16. dgamma / dbeta
+  are fp32 column sums (a warp reduce-scatter per 32 channels, fixed order): `dv_bwd`'s tensor-core sum rounds every dy . xhat to bf16
+  first, which left dgamma as noisy as the module's own bf16 error.
+- IntelliFold-v2 (256 / 8 x 32): a 128-row tile is 64 KiB and each projection weight 128 KiB, so `glue_ws` / `dvb_ws` keep no weight
+  resident: `glue_ws` holds the y | dres tile (one stage) and streams Wg / Wo through six 16 KiB slots in the MMA warp's order, G / DU
+  per head half into two 256-column TMEM regions (one half drains while the next half's GEMMs run); `dvb_ws` streams dy's eight k-blocks
+  as 48 KiB units (the dgp or dv k-block and the matching [Wg; Wv] rows), dy double-buffered in TMEM, x in two stages. Their drains read
+  o / dres and write do / dgp / go / dm straight from registers, 32 bytes a thread and instruction (st / ld.global.v8.b32): with 16-byte
+  accesses every instruction left 32 sectors half written (glue_ws 542 -> 287 us at (768, 512)).
 - `pair_bwd_w` keeps the z tile in shared memory and runs the LayerNorm in three passes over it, 32 channels at a time; dz is written over
   z and leaves block by block; the dWb / dgamma_z GEMM reads raw z (M = dbr^T z - dbr^T mean with dbr = bf16(db rstd)), so no normalised
-  copy is written; at d_pair 512 dzn = db . Wb (K = 16) is issued once per pass and chunk (TMEM holds M beside half a row).
+  copy is written; at d_pair 512 dzn = db . Wb (K = 16) is issued once per pass and chunk (TMEM holds M beside half a row). Two z tiles
+  are in flight at d_pair 256 and 384 (one db^T / dbr^T buffer, the slice buffer sized for bf16 dw: 384 takes exactly 232448 bytes), one at
+  512 (two would be 256 KiB). A per-tile trace at 256 shows the loads hidden and the three passes latency-bound (5.4 us a tile, two
+  compute warps a scheduler): that, not the stage count, is what is left (d_pair 256 runs at ~3 TB/s).
 - Accuracy (`tests/gpu/sm100/test_pwa_b200_training_gpu.py`): output, d_msa, d_pair and every parameter gradient against an fp32 copy
   within 1.15x of the module's own bf16 statements' error, ln_msa.weight within 1.25x (its sum over rows cancels heavily: our error
   stays 7-9e-3 at (203, 129) while the module's moves 6.3-10.8e-3 with the seed); ragged, N 1100-2048, row dropout, fp32 master
   parameters under autocast; bitwise-repeatable gradients, CUDA-graph replay.
 
 Training step (forward + backward of one module call), CUDA graph, bf16-mixed (fp32 parameters under autocast), p_drop 0.15, random
-key mask (90 % kept), ms; GPU 2 of node 2. "PyTorch" is the module's statements (what B200 ran for these calls before).
+key mask (90 % kept), ms; GPU 2 of node 2. "PyTorch" is the module's statements (what B200 ran for these calls before); "before" is the
+2026-10-29 morning kernels (IntelliFold-v2: PyTorch, it was not served). Both include the harness's accumulation of the leaf gradients
+(a bf16 add over the pair gradient, 0.11-0.35 ms of these steps).
 
-| width | (N, S) | PyTorch | CUDA | speed-up |
-|---|---|---|---|---|
-| AF3 64 / 128 / 8 x 8 | (384, 1024) | 1.199 | 0.534 | 2.25x |
-| AF3 | (768, 1024) | 2.514 | 1.062 | 2.37x |
-| Protenix-v2 128 / 256 / 8 x 8 | (384, 1024) | 1.689 | 0.794 | 2.13x |
-| Protenix-v2 | (768, 512) | 2.207 | 1.083 | 2.04x |
-| OpenDDE 128 / 384 / 8 x 8 | (384, 1024) | 1.821 | 0.850 | 2.14x |
-| OpenDDE | (768, 512) | 2.729 | 1.290 | 2.12x |
-| ESMFold2 128 / 256 / 8 x 16 | (384, 1024) | 2.169 | 1.024 | 2.12x |
-| ESMFold2 | (768, 512) | 2.702 | 1.332 | 2.03x |
-| Chai-1 64 / 256 / 8 x 32 | (384, 1024) | 2.707 | 0.841 | 3.22x |
-| Chai-1 | (768, 1024) | 5.749 | 1.894 | 3.04x |
-| MiniWorld 64 / 128 / 8 x 32 | (1536, 512) | 7.084 | 2.743 | 2.58x |
-| MiniWorld | (2048, 512) | 10.623 | 4.406 | 2.41x |
+| width | (N, S) | PyTorch | before | CUDA | speed-up |
+|---|---|---|---|---|---|
+| AF3 64 / 128 / 8 x 8 | (384, 1024) | 1.199 | 0.532 | 0.518 | 2.32x |
+| AF3 | (768, 1024) | 2.518 | 1.066 | 1.019 | 2.47x |
+| Protenix-v2 128 / 256 / 8 x 8 | (384, 1024) | 1.691 | 0.795 | 0.778 | 2.17x |
+| Protenix-v2 | (768, 512) | 2.208 | 1.082 | 1.065 | 2.07x |
+| OpenDDE 128 / 384 / 8 x 8 | (384, 1024) | 1.824 | 0.849 | 0.820 | 2.22x |
+| OpenDDE | (768, 512) | 2.731 | 1.292 | 1.217 | 2.24x |
+| ESMFold2 128 / 256 / 8 x 16 | (384, 1024) | 2.174 | 1.022 | 0.961 | 2.26x |
+| ESMFold2 | (768, 512) | 2.703 | 1.328 | 1.265 | 2.14x |
+| Chai-1 64 / 256 / 8 x 32 | (384, 1024) | 2.708 | 0.838 | 0.840 | 3.22x |
+| Chai-1 | (768, 1024) | 5.754 | 1.894 | 1.896 | 3.04x |
+| MiniWorld 64 / 128 / 8 x 32 | (1536, 512) | 7.090 | 2.743 | 2.719 | 2.61x |
+| MiniWorld | (2048, 512) | 10.630 | 4.406 | 4.440 | 2.39x |
+| IntelliFold-v2 256 / 512 / 8 x 32 | (384, 512) | 2.354 | (2.353) | 1.159 | 2.03x |
+| IntelliFold-v2 | (768, 512) | 5.213 | (5.214) | 2.549 | 2.04x |
+| IntelliFold-v2 | (384, 1024) | 4.153 | (4.147) | 1.913 | 2.17x |
+
+Kernels alone at (N 768, S 512) (CUDA events, median of 30, p_drop 0.15; bytes = the kernel's HBM reads + writes): `glue_w` 128 / 8 x 16
+200 -> 144 us (4.9 TB/s), 128 / 8 x 8 121 -> 107 us (4.7 TB/s); `glue_ws` 271 us (5.2 TB/s), `dvb_ws` 314 us (3.9 TB/s); `pair_bwd`
+(sdot + pair_bwd_w + finish, N 768) d_pair 256 / 384 / 512: 203 / 267 / 411 us (384 was 321-326). Open: `dvb_w` (3.3-4.4 TB/s; a
+unit-ring form with resident weights and dm stored from x in place measured 15-25 % slower at d_msa <= 128 and was not kept),
+`pair_bwd_w`'s per-tile latency (above), and dWo = dout'^T go / dWg = dgp^T y inside the glue (go and dout' still round-trip through HBM
+into cuBLAS).
 
 ## MSAPairWeightedAveraging (`MSAPairWeightedAveraging`)
 
