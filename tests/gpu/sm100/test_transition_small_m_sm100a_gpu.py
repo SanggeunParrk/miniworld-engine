@@ -122,3 +122,37 @@ def test_inference_output_equals_the_training_forward():
     with torch.autocast("cuda", dtype=torch.bfloat16):
         tr = mod(x.clone().requires_grad_())
     assert torch.equal(inf, tr.detach())
+
+
+def test_training_forward_reads_the_masters_of_this_step():
+    """With fp32 masters the LayerNorm launch writes the bf16 copies and the expand (a programmatic dependent launch) must read them
+    only after griddepcontrol.wait. A CUDA graph (where the launches are staged back to back) flips the masters in place right
+    before the forward, as an optimizer step would write them; every replay's output is held to the fp32 module of that step: a copy
+    read early would carry the previous step's sign."""
+    mod = _module(2, True)
+    x = torch.randn(1, 768, 384, device="cuda", dtype=torch.bfloat16)
+    xx = x.clone().requires_grad_()
+    mats = (mod.expand_a.weight, mod.expand_b.weight, mod.squeeze.weight)
+
+    def step():
+        with torch.no_grad():
+            for p in mats:
+                p.mul_(-1.0)
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return mod(xx)
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(2):
+            step()
+    torch.cuda.current_stream().wait_stream(side)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        y = step()
+    for _ in range(12):
+        graph.replay()
+        torch.cuda.synchronize()
+        with torch.no_grad():
+            ref = copy.deepcopy(mod).float()(x.float())
+        assert _rel(y.detach().float(), ref) < 1e-2

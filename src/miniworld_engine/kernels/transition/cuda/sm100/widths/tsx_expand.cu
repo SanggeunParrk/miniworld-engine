@@ -6,7 +6,8 @@
 // chunk of Wa and Wb (CH rows each), K-block by K-block with a barrier each so the products start as the data lands, runs
 // [a | b] = xn [Wa_j; Wb_j]^T (M 128, N 2 CH, K D) into tensor memory, and writes h = bf16(silu(a) b) (and, with save, a and b for the
 // backward). No cross-CTA reduction: h goes through L2 (M x H bf16) to the squeeze.
-// The weight K-blocks are loaded before griddepcontrol.wait (parameters, or the cast that ran before the LayerNorm kernel).
+// The weight K-blocks are loaded before griddepcontrol.wait when they are parameters or an earlier launch's cast (wpre = 1); when the
+// LayerNorm launch this one follows writes them (the training forward's fused cast, wpre = 0), after it.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -41,7 +42,7 @@ template <int N> DEVI void tld(uint32_t taddr, uint32_t (&r)[N]) {
 extern "C" __global__ void __launch_bounds__(384, 1)
 transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_constant__ CUtensorMap mwa,
                      const __grid_constant__ CUtensorMap mwb, __nv_bfloat16* __restrict__ hs, __nv_bfloat16* __restrict__ as_,
-                     __nv_bfloat16* __restrict__ bs, int save) {
+                     __nv_bfloat16* __restrict__ bs, int save, int wpre) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -54,11 +55,12 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
     fence_barrier_init();
     fence_proxy_async();
     prefetch_map(&mxn); prefetch_map(&mwa); prefetch_map(&mwb);
-    for (int kb = 0; kb < NKB; ++kb) {                          // weights first: they do not depend on the LayerNorm kernel
-      mbar_expect_tx(&B.full[kb], KBT + WKB);
-      tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], kb * 64, h0);
-      tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], kb * 64, h0);
-    }
+    if (wpre)
+      for (int kb = 0; kb < NKB; ++kb) {                        // weights first: they do not depend on the LayerNorm kernel
+        mbar_expect_tx(&B.full[kb], KBT + WKB);
+        tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], kb * 64, h0);
+        tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], kb * 64, h0);
+      }
   }
   if (warp == 2) { tmem_alloc(smem_u32(&B.tmem), TCOLS); tmem_relinquish(); }
   tc_fence_before();
@@ -70,7 +72,14 @@ transition_sx_expand(const __grid_constant__ CUtensorMap mxn, const __grid_const
 
   if (warp == 0) {
     if (lane == 0)
-      for (int kb = 0; kb < NKB; ++kb) tma_load_2d(su + O_X + kb * KBT, &mxn, &B.full[kb], kb * 64, row0);
+      for (int kb = 0; kb < NKB; ++kb) {
+        if (!wpre) {                                           // the LayerNorm launch wrote the weights: complete only now
+          mbar_expect_tx(&B.full[kb], KBT + WKB);
+          tma_load_2d(su + O_W + kb * WKB, &mwa, &B.full[kb], kb * 64, h0);
+          tma_load_2d(su + O_W + kb * WKB + CH * 128, &mwb, &B.full[kb], kb * 64, h0);
+        }
+        tma_load_2d(su + O_X + kb * KBT, &mxn, &B.full[kb], kb * 64, row0);
+      }
   } else if (warp == 1) {
     // ------------------------------------------------------------------------------------------ MMA issue (converged warp)
 #pragma unroll 1
