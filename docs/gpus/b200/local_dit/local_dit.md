@@ -274,7 +274,7 @@ atoms, which come first). Both ran the PyTorch statements on B200 before; now:
 | option | inference | training | how |
 |---|---|---|---|
 | `kv_norm="parallel"` | bf16, fp32 | bf16, fp32 | `pre_fwd.cu` / `pre_bwd.cu` `-DPARALLEL=1` (`sm100_atom.KERNELS["prexp"]`, `["prebxp"]`): xkv = LN(s) sigmoid(pre + bs) + shift from the statistics AdaLN 1 already has; in the backward the K / V AdaLN's LN backward reads the staged `s` (x1 is not loaded) and goes into d single. fp32: `atom_pre_tf32` with `cross = 2`, the unfused path `adaln32(s, ..)` / `adaln_bwd32(s, ..)` |
-| `key_window="slide"` | bf16, fp32 | module path | the clipped-window attention kernel, then `sm100_atom_local/lslide.cu` `local_slide_edges(_f32)` recomputes the windows the slide moves -- 0, 1 and the last three real ones, picked on the device from the key mask's population count (no host read: CUDA-graph capturable, a replay with another mask is right), a window listed twice or not moved skipped -- over their slid keys (same per-window bias tensor: the trunked pair is laid out from the window's first key either way) and overwrites their rows of O |
+| `key_window="slide"` | bf16, fp32 | bf16, fp32 | the clipped-window attention kernel, then `sm100_atom_local/lslide.cu` `local_slide_edges(_f32)` recomputes the windows the slide moves -- 0, 1 and the last three real ones, picked on the device from the key mask's population count (no host read: CUDA-graph capturable, a replay with another mask is right), a window listed twice or not moved skipped -- over their slid keys (same per-window bias tensor: the trunked pair is laid out from the window's first key either way) and overwrites their rows of O (and of the LSE in training). Backward: `local_slide_bwd_prep` copies those windows' dO / D rows out and zeroes them (the clipped-window kernels then see dS = 0 there), `local_slide_bwd` (a CTA per moved window, head, sample) recomputes P, dP, dS over the slid keys, writes dQ and fp32 dK / dV / dbias partials, `local_slide_bwd_fin` sums the partials in a fixed order into dk / dv and the moved windows' dbias (deterministic) |
 
 The edge kernel is a CTA per (listed window, head, sample), 512 threads on CUDA cores (scores with the key row in registers, softmax by
 warp shuffles, P V a thread per (query, 2 channels)). It costs a constant ~9-10 us per call (latency of five serial phases in one CTA; the
@@ -286,12 +286,23 @@ work is 5 x 32 queries); measured inference of one cross block, CUDA graph under
 | (5, 1024) | 27.3 | 27.1 | 36.1 | 44.0 | 41.6 | 51.8 |
 | (1, 4096) | 24.2 | 23.8 | 32.7 | 42.5 | 40.0 | 50.4 |
 
-A gradient through the slid window keeps the module path (the backward kernels know the clipped window only: the edge windows' dQ, dK, dV,
-dbias would need the same treatment). Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (the three option pairs x eight
+Training step (one cross block, forward + backward, CUDA graph), ms:
+
+| (A, N) | chained / pad | parallel / pad | parallel / slide |
+|---|---|---|---|
+| bf16 (48, 4096) | 1.589 | 1.610 | 1.853 |
+| fp32 (48, 4096) | 3.881 | 3.882 | 4.130 |
+| bf16 (5, 1024) | 0.265 | 0.262 | 0.316 |
+
+The slid window's backward (prep, a CUDA-core CTA per moved window x head x sample, the ordered sum) costs ~0.24 ms at A48: a lever left
+(tensor cores for its five 32 x 128 products, or the window offsets inside the clipped-window kernels).
+
+Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (the three option pairs x eight
 (A, N, real atoms) cases incl. FoldForge's A = 5, N 1024, under 128 real atoms and windows listed twice; bf16 and fp32 against the fp64
 module, `ef < 1.5 em + 3e-3` (bf16) / `1e-3` (fp32, em = the module path on TF32), on the real atoms; fp32 parameters with bf16
-activations; graph capture with a mask changed between replays; parallel-norm training, every gradient; a gradient through the slid
-window is not served). Without the edge kernel the slide cases fail (checked).
+activations; graph capture with a mask changed between replays; training for the three option pairs x seven shapes, bf16 and fp32, every
+gradient, the loss on the real atoms; the slid-window gradients bitwise repeatable). Without the edge kernels the slide cases fail (checked,
+inference and training).
 
 ## ESMFold2's block: bf16 inference (2026-10-29)
 
@@ -325,6 +336,6 @@ Not served yet: fp32 activations and training (module path).
 
 ## Not covered
 
-B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 or with a gradient, training through AF3's slid key window, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 or with a gradient, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).

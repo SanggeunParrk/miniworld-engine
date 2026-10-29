@@ -72,6 +72,9 @@ KERNELS = {
     "cond_ln": ("lcross", "local_cond_ln", 0),
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
     "slide": ("lslide", "local_slide_edges", 0),
+    "slide_p": ("lslide", "local_slide_bwd_prep", 0),
+    "slide_b": ("lslide", "local_slide_bwd", 75520),
+    "slide_f": ("lslide", "local_slide_bwd_fin", 0),
 }
 
 
@@ -404,6 +407,47 @@ def attn_esm_sm100(q, k, v, bias2, lse=None):
         int(sp),
     )
     return o
+
+
+def slide_bwd_prep(do, dd, kmask, n0, A):
+    """Before the clipped-window backward of a slid-window block: the moved windows' rows of dO [A N, 128] and D [A, 4, N] are copied out and
+    zeroed in place (``lslide.cu``) -> the saved (sdo, sdd) for ``slide_bwd``."""
+    N = dd.shape[2]
+    assert do.is_contiguous() and dd.is_contiguous() and do.shape[0] == A * N
+    f32 = do.dtype == torch.float32
+    d = _dev(do)
+    sdo = torch.empty(5, A, WQ, DM, device=do.device, dtype=do.dtype)
+    sdd = torch.empty(5, A, NH, WQ, device=do.device, dtype=torch.float32)
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 16:
+        km = km.clone()
+    (_load32("slide_p32", d) if f32 else _load("slide_p", d))((5, A, 1), (256, 1, 1), do, dd, km, sdo, sdd, int(N), int(n0), int(A))
+    return sdo, sdd
+
+
+def slide_bwd(q, k, v, bias, kmask, n0, lse, saved, dq, dk, dv, dbias):
+    """After the clipped-window backward of a slid-window block (its dO / D rows of the moved windows zeroed by ``slide_bwd_prep``, whose
+    ``saved`` they are): the moved windows' gradients over their slid keys -- dQ written into ``dq``, dK / dV added into ``dk`` / ``dv``, their
+    dbias windows of ``dbias`` [4, nwin, 32, 128] written (summed over the samples in order; deterministic). q, k, v, dq, dk, dv [A, N, 128]
+    views with one row stride each (q / k / v one, the gradients one); lse [A, 4, N] (the slid forward's)."""
+    A, N, _ = q.shape
+    ld, ldd = q.stride(1), dq.stride(1)
+    assert k.stride(1) == v.stride(1) == ld and dk.stride(1) == dv.stride(1) == ldd
+    f32 = q.dtype == torch.float32
+    d = _dev(q)
+    sdo, sdd = saved
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 16:
+        km = km.clone()
+    skv = torch.empty(5, A, WK, NH, 64, device=q.device, dtype=torch.float32)
+    sdb = torch.empty(5, A, NH, WQ, WK, device=q.device, dtype=torch.float32)
+    (_load32("slide_b32", d) if f32 else _load("slide_b", d))(
+        (5, NH, A), (256, 1, 1), q, k, v, int(ld), bias, km, lse, sdo, sdd, dq, int(ldd), skv, sdb, int(N), int(n0), int(A)
+    )
+    total = skv.numel() + 5 * NH * WQ * WK
+    (_load32("slide_f32", d) if f32 else _load("slide_f", d))(
+        (min(8 * num_sms(d), (total + 255) // 256), 1, 1), (256, 1, 1), km, skv, sdb, dk, dv, int(ldd), dbias, int(N), int(n0), int(A)
+    )
 
 
 def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
@@ -834,6 +878,9 @@ KERNELS_TF32 = {
     "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
     "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
     "slide32": ("lslide", "local_slide_edges_f32", 0),
+    "slide_p32": ("lslide", "local_slide_bwd_prep_f32", 0),
+    "slide_b32": ("lslide", "local_slide_bwd_f32", 75520),
+    "slide_f32": ("lslide", "local_slide_bwd_fin_f32", 0),
 }
 
 
