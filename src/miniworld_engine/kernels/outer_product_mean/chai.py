@@ -1,4 +1,5 @@
-"""Chai-1 OuterProductMean (``groups = 8``, d_hidden 64, product LayerNorm) on H100: fused CUDA passes (``cuda/chai.cu``).
+"""Chai-1 OuterProductMean (``groups = 8``, d_hidden 64, product LayerNorm): fused CUDA passes on H100 (``cuda/chai.cu``) and B200
+(``integrations/csrc/sm100/opm_wide_sm100.cu``: tcgen05 prologue / epilogue / prologue backward, a CUDA-core product-norm backward).
 
     prologue   LayerNorm of the MSA rows + both projections + mask -> a, b [8, S N, 8] (group-major)         ``cuda.chai_proj``
     products   O[g] = a_g^T b_g over the MSA rows: one cuBLAS batched GEMM                                  [8, N K, N K]
@@ -7,6 +8,13 @@
 The product LayerNorm's affine folds into the out-projection: W' = W_out . gamma (columns), b' = b_out + W_out beta.
 Backward: dy = dz W' and dW' = dz^T y, dbias = sum dz (cuBLAS); the LayerNorm backward scatters dy into the grouped layout (``cuda.chai_bwd``);
 dA = b dO^T, dB = a dO (two batched GEMMs); the projection / LayerNorm backward of the MSA rows in torch.  dgamma = sum_o W dW', dbeta = W^T dbias.
+
+B200 (sm_100a), the same stages: ``opm_chai_prologue`` (LayerNorm + both projections on the tensor core, D[s][channel], stored group-major),
+the batched GEMM, ``opm_chai_epilogue`` (the pair tile of O gathered by 5-D TMA boxes into the K-major layout, normalised in shared
+memory, one tcgen05 GEMM against W', y and the statistics saved for training), and in the backward ``opm_chai_lnbwd`` (the product
+norm's backward into the grouped layout) and ``opm_chai_prologue_bwd`` (dm and the projection / LayerNorm gradients, R and the masked
+column sums on the tensor core).  A length that is not a multiple of 32 / a depth that is not a multiple of 128 is padded (masked rows add
+no product; padded pairs are cut away).
 """
 
 from __future__ import annotations
@@ -18,9 +26,17 @@ from miniworld_engine.kernels._compile import opaque
 G, K, P, CM = 8, 8, 512, 64
 
 
+def _sm100(t: torch.Tensor) -> bool:
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (10, 0)
+
+
 def serves_dims(msa: torch.Tensor, groups: int, group_width: int, d_pair: int, *, mask: torch.Tensor | None = None, projection_bias: bool = False) -> bool:
     if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
         return False
+    if _sm100(msa):   # B200: any length / depth (padded), c_z 128 / 256
+        _, s, n, cm = msa.shape
+        return (groups == G and group_width == K and cm == CM and n > 0 and s > 0 and d_pair in (128, 256) and not projection_bias
+                and (mask is None or mask.shape == msa.shape[:3]))
     if torch.cuda.get_device_capability(msa.device) != (9, 0):
         return False
     _, s, n, cm = msa.shape
@@ -80,10 +96,39 @@ def _fwd_op_fake(args, eps, eps_prod, train):
     return [new(1, n, n, wo.shape[0]), new(G, s * n, K), new(G, s * n, K), new(n * n, P), new(n * n, 2, dt=torch.float32), new(s * n, 2, dt=torch.float32)]
 
 
+def _ext100():
+    from miniworld_engine.integrations import opm_train
+
+    return opm_train._ext_wide()
+
+
+def _mask100(msa, mask):
+    """The bool [S, N] mask of the B200 kernels (all rows valid without one)."""
+    if not mask.numel():
+        return torch.ones(msa.shape[1:3], dtype=torch.bool, device=msa.device)
+    mk = mask[0].contiguous()
+    return mk if mk.dtype == torch.bool else mk != 0
+
+
+def _fwd_sm100(args, eps, eps_prod, train):
+    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
+    _, s, n, _ = msa.shape
+    ext = _ext100()
+    lnw32, lnb32, wlr, wf, bf = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
+    a, b, st1 = ext.opm_chai_prologue(msa[0].contiguous(), _mask100(msa, mask), lnw32, lnb32, float(eps), wlr[:G * K], wlr[G * K:], bool(train))
+    o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
+    z, y, st = ext.opm_chai_epilogue(o, wf, bf, residual if residual.numel() else None, bool(train), float(eps_prod))
+    if not train:
+        return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32)]
+    return [z, a, b, y, st, st1.view(-1, 2)]    # st1: [N, S, 2] (token-major), viewed as the [S N, 2] the fake declares
+
+
 @opaque(fake=_fwd_op_fake, name="outer_product_mean_chai_fwd")
 def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) -> list[torch.Tensor]:
     """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
     from miniworld_engine.kernels.outer_product_mean import cuda
+    if _sm100(args[0]):
+        return _fwd_sm100(args, eps, eps_prod, train)
     msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
     forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
     a, b, st1, o = _front(msa, mask, forms, eps, train)
@@ -119,6 +164,17 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     dwo = dwp * gam.float()[None, :] + dbo[:, None] * bet.float()[None, :]                  # W' = W gamma, b' = b + W beta
     dgam = (w32 * dwp).sum(0)
     dbet = w32.t() @ dbo
+    if _sm100(dz):
+        ext = _ext100()
+        do = ext.opm_chai_lnbwd(dy, y, st, n)
+        del dy
+        da = torch.bmm(do, b.view(G, s, n * K).transpose(1, 2))                     # dA^T [8, N K, S]: the kernel's MSA-row-contiguous tiles
+        db = torch.bmm(do.transpose(1, 2), a.view(G, s, n * K).transpose(1, 2))     # dB^T
+        del do
+        dx, dwl, dwr, dlw, dlb = ext.opm_chai_prologue_bwd(da, db, msa[0].contiguous(), st1.view(n, s, 2), _mask100(msa, mask), lnw32, lnb32,
+                                                           wlr[:G * K], wlr[G * K:])
+        return [dx, dlw.to(lnw.dtype), dlb.to(lnb.dtype), dwl.to(wl.dtype), dwr.to(wr.dtype), dgam.to(gam.dtype), dbet.to(bet.dtype),
+                dwo.to(wo.dtype), dbo.to(bo.dtype)]
     do = cuda.chai_bwd(dy, y, st, n)
     del dy
     da = torch.bmm(b.view(G, s, n * K), do.transpose(1, 2))                         # [8, S, N K]
@@ -158,7 +214,15 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
     n = msa.shape[2]
     interchain = module.mask_interchain and token_asym_id is not None
     empty = msa.new_empty(0)
-    fuse = residual is not None and not interchain and residual.dtype == msa.dtype
+    pn = ps = 0
+    if _sm100(msa):   # B200: a length to a multiple of 32, a depth to a multiple of 128, with masked rows (no product)
+        pn, ps = -n % 32, -msa.shape[1] % 128
+        if pn or ps:
+            if mask is None:
+                mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
+            msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))
+            mask = torch.nn.functional.pad(mask, (0, pn, 0, ps))
+    fuse = residual is not None and not interchain and residual.dtype == msa.dtype and not pn
     args = [msa.contiguous(), empty if mask is None else mask, module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight,
             module.to_right.weight, module.product_norm.weight, module.product_norm.bias, module.to_out.weight, module.to_out.bias,
             residual.contiguous() if fuse else empty]
@@ -167,7 +231,9 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
         z = _ChaiFn.apply(eps, eps_prod, *args)
     else:
         z = _fwd_op(args, eps, eps_prod, False)[0]
-    z = z.view(1, n, n, -1)
+    z = z.view(1, n + pn, n + pn, -1)
+    if pn:
+        z = z[:, :n, :n]
     if interchain:
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
     return residual + z if residual is not None and not fuse else z
