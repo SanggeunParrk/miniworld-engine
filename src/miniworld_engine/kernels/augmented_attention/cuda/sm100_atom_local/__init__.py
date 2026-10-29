@@ -323,6 +323,89 @@ def slide_edges(q, k, v, bias, kmask, o, n0, lse=None):
     return o
 
 
+#: ESMFold2's atom attention on sm_100a (``LocalDiTBlock(**ESMFOLD2)``, bf16 inference), loaded apart from KERNELS (``load_esm``)
+KERNELS_ESM = {
+    "esm": ("lattn_esm", "local_attn_esm", 191232),
+    "esm_bias": ("lesm", "local_esm_bias", 0),
+    "esm_qk": ("lesm", "local_esm_qkrope", 0),
+}
+
+
+@functools.lru_cache(maxsize=None)
+def _load_esm(name: str, device_index: int):
+    from miniworld_engine.kernels.augmented_attention.cuda.sm100 import driver
+
+    stem, func, smem = KERNELS_ESM[name]
+    with torch.cuda.device(device_index):
+        return driver.Kernel(cubin(stem), func, smem)
+
+
+def load_esm(device_index: int) -> None:
+    """Build and load ESMFold2's attention kernels on the device (raises on any failure)."""
+    for name in KERNELS_ESM:
+        _load_esm(name, device_index)
+
+
+def esm_bias(z, gamma, wb, kmask, n0, eps=1e-5):
+    """ESMFold2's pair bias by position (``lesm.cu`` ``local_esm_bias``): z the trunked pair [nwin, 32, 192, 16] (bf16 or fp32,
+    contiguous), gamma [16], Wb [4, 16], kmask [N] or None (then all n0 = N atoms are real) -> bias2 [4, nwin, 32, 160] fp32 (log2 units,
+    -inf where the position is not a key of the query)."""
+    nwin = z.shape[0]
+    N = 32 * nwin
+    assert tuple(z.shape) == (nwin, 32, ESM_KEYS, DP) and z.is_contiguous() and N % 128 == 0
+    d = _dev(z)
+    out = torch.empty(NH, nwin, 32, ESM_SPAN, device=z.device, dtype=torch.float32)
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 16:
+        km = km.clone()
+    wb_, g_ = wb.contiguous(), gamma.contiguous()
+    flags = int(wb_.dtype == torch.bfloat16) | (int(g_.dtype == torch.bfloat16) << 1) | (int(z.dtype == torch.bfloat16) << 2)
+    assert {wb_.dtype, g_.dtype, z.dtype} <= {torch.bfloat16, torch.float32}
+    _load_esm("esm_bias", d)((min(4 * num_sms(d), (nwin * 32 * ESM_SPAN + 255) // 256), 1, 1), (256, 1, 1), z, g_, wb_, km, out,
+                             int(N), int(n0), float(eps), flags)
+    return out
+
+
+def esm_qkrope(q, k, wq, wk, cos, sin, eps):
+    """ESMFold2's q / k RMSNorm (per head, weights fp32 [32], contiguous) and rotary (tables cos / sin fp32 [n, 16], row r is atom r % n): q, k [M, 128]
+    bf16 views with one row stride -> qo, ko [M, 128] bf16 (``lesm.cu`` ``local_esm_qkrope``)."""
+    M = q.shape[0]
+    assert q.stride(0) == k.stride(0) and q.stride(1) == k.stride(1) == 1 and q.dtype == k.dtype == torch.bfloat16
+    assert cos.dtype == sin.dtype == torch.float32 and cos.is_contiguous() and sin.is_contiguous() and cos.shape[1] == 16
+    qo, ko = torch.empty(M, DM, device=q.device, dtype=q.dtype), torch.empty(M, DM, device=q.device, dtype=q.dtype)
+    assert wq.dtype == wk.dtype == torch.float32 and wq.is_contiguous() and wk.is_contiguous()
+    _load_esm("esm_qk", _dev(q))(((M + 7) // 8, 1, 1), (256, 1, 1), q, k, int(q.stride(0)), wq, wk,
+                                 cos, sin, qo, ko, int(M), int(cos.shape[0]), float(eps))
+    return qo, ko
+
+
+def attn_esm_sm100(q, k, v, bias2, lse=None):
+    """ESMFold2's atom attention (``lattn_esm.cu``, tcgen05): q, k, v [A, N, 128] bf16 (contiguous; q / k normalised and rotated), bias2
+    [4, nwin, 32, 160] (``esm_bias``) -> O [A, N, 128] bf16 (and the row LSE, log2 units, into ``lse`` [A, 4, N] when given)."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    o = torch.empty_like(q)
+    nq = (N + 127) // 128
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
+    _load_esm("esm", d)(
+        (nq * NH * sp, 1, 1),
+        (544, 1, 1),
+        _rows(q, 128),
+        _rows(k, 256),
+        _rows(v, 256),
+        out,
+        bias2,
+        lse,
+        int(N),
+        int(A),
+        int(nwin),
+        int(sp),
+    )
+    return o
+
+
 def attn_bwd(q, k, v, do, bias, lse, dd, dkv, kmask=None):
     """dQ, dK, dV (bf16) into dkv [A N, 512] (blocks 0 / 1 / 2) and dbias [4, nwin, 32, 128] fp32 (summed over the samples).
 

@@ -177,6 +177,10 @@ void atom_pre_cross_fwd_sm90(const __grid_constant__ CUtensorMap ma,
 #include "sm100.cuh"
 using namespace s100;
 
+#ifndef RMS
+#define RMS 0                              // ESMFold2: RMSNorm statistics (the K / V AdaLN's scale raw, identity-centred by its bias)
+#endif
+
 #ifndef DIAG
 #define DIAG 0
 #endif
@@ -207,7 +211,7 @@ struct Bars {
   uint32_t tmem;
 };
 DEVI float sigm(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
-DEVI float sigm_x(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }       // the K / V AdaLN's scale
+DEVI float sigm_x(float x) { return RMS ? x : __fdividef(1.f, 1.f + __expf(-x)); }   // the K / V AdaLN's scale (RMS: raw)
 DEVI float rnb(float x) { return __bfloat162float(__float2bfloat16_rn(x)); }
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t badd2(uint32_t a, uint32_t b) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -371,7 +375,7 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
 #pragma unroll
       for (int e = 0; e < 16; ++e) sum += x[e];
       sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
-      const float mean = sum * (1.f / C);
+      const float mean = RMS ? 0.f : sum * (1.f / C);                       // RMS (ESMFold2): x rsqrt(mean(x^2) + eps)
       float var = 0.f;
 #pragma unroll
       for (int e = 0; e < 16; ++e) { const float d = x[e] - mean; var += d * d; }

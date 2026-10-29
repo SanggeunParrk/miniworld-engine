@@ -215,6 +215,9 @@ using namespace s100;
 #ifndef NI
 #define NI 4
 #endif
+#ifndef RMS
+#define RMS 0                      // ESMFold2: every table from rn(silu(c)), no sigmoid (scales identity-centred by their bias 1); gridDim.y = 3,
+#endif                             // the third half the K / V AdaLN's [scale | shift] into mout2 (its third projection is not stored)
 constexpr int C = 128;
 constexpr int KBLK = 4096;                                                 // [32 rows][64] bf16, SW128
 constexpr int T_ = 2 * KBLK;                                               // [32][128] row-major tile (8 KB)
@@ -241,7 +244,7 @@ DEVI void stsm4t(uint32_t a, const uint32_t (&r)[4]) {
 
 extern "C" __global__ void __launch_bounds__(384, 1)
 atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constant__ CUtensorMap mw, const __grid_constant__ CUtensorMap mout,
-                    const float* __restrict__ G1, const float* __restrict__ G2, const float* __restrict__ BIAS, int ntile, float eps) {
+                    const __grid_constant__ CUtensorMap mout2, const float* __restrict__ G1, const float* __restrict__ G2, const float* __restrict__ BIAS, int ntile, float eps) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -298,7 +301,7 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
       if (elect_one()) {
 #pragma unroll
         for (int p = 0; p < 3; ++p) {
-          const uint32_t xa = p < 2 ? su + O_X + ab * T_ : su + O_IN + s * T_;
+          const uint32_t xa = (RMS || p < 2) ? su + O_X + ab * T_ : su + O_IN + s * T_;
 #pragma unroll
           for (int ks = 0; ks < 8; ++ks)
             umma_ts(tmem + T_ACC + 128 * ab + 32 * p, tmem + T_W + 64 * p + ks * 8, desc_k128(xa + (ks >> 2) * KBLK) + (uint64_t)((ks & 3) * 2), I_32,
@@ -317,7 +320,13 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
         const int ob = T & 1;
         mbar_wait(&B.ofull[ob], (T >> 1) & 1);
         for (int p = 0; p < 3; ++p)
-          for (int kb = 0; kb < 2; ++kb) tma_store_2d(&mout, su + O_O + ob * OST + p * T_ + kb * KBLK, 384 * hk + 128 * p + 64 * kb, row0(T));
+          for (int kb = 0; kb < 2; ++kb) {
+            if (RMS && hk == 2) {
+              if (p < 2) tma_store_2d(&mout2, su + O_O + ob * OST + p * T_ + kb * KBLK, 128 * p + 64 * kb, row0(T));
+            } else {
+              tma_store_2d(&mout, su + O_O + ob * OST + p * T_ + kb * KBLK, 384 * hk + 128 * p + 64 * kb, row0(T));
+            }
+          }
         tma_store_commit();
         tma_store_wait_read0();
         mbar_arrive(&B.ofree[ob]);
@@ -336,7 +345,7 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
 #pragma unroll
     for (int kb = 0; kb < 2; ++kb)
 #pragma unroll
-      for (int e = 0; e < 8; ++e) gk[8 * kb + e] = __ldg(G + 64 * kb + 8 * ak + e);
+      for (int e = 0; e < 8; ++e) gk[8 * kb + e] = RMS ? 1.f : __ldg(G + 64 * kb + 8 * ak + e);
     // epilogue: lane i addresses row fj = 16 wg + 8 ((i >> 3) & 1) + (i & 7) of channel group 8 (i >> 4) of a 16-lane half
     const uint32_t fj = (uint32_t)(16 * wg + 8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
     float bias[3][4];                                                      // channel lb + 16 L + 8 h + lane / 4 of projection p: [p][2 L + h]
@@ -358,6 +367,19 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
 #pragma unroll
         for (int e = 0; e < 4; ++e) { x[8 * kb + 2 * e] = bf16lo(w4[e]); x[8 * kb + 2 * e + 1] = bf16hi(w4[e]); }
       }
+#if RMS
+#pragma unroll
+      for (int kb = 0; kb < 2; ++kb) {                                     // rn(silu(c))
+        uint32_t o[4];
+#pragma unroll
+        for (int e = 0; e < 4; ++e) {
+          const int k = 8 * kb + 2 * e;
+          o[e] = pack_bf16(x[k] * sigm(x[k]), x[k + 1] * sigm(x[k + 1]));
+        }
+        sts128(xs + kb * KBLK + aoff, make_uint4(o[0], o[1], o[2], o[3]));
+      }
+      (void)eps; (void)gk;
+#else
       float sum = 0.f;
 #pragma unroll
       for (int e = 0; e < 16; ++e) sum += x[e];
@@ -378,6 +400,7 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
         }
         sts128(xs + kb * KBLK + aoff, make_uint4(o[0], o[1], o[2], o[3]));
       }
+#endif
       fence_proxy_async();
       named_bar_sync(1 + wg, 128);
       if (qw == 0 && lane == 0) mbar_arrive(&B.xfull[xb]);
@@ -395,7 +418,7 @@ atom_cond_fwd_sm100(const __grid_constant__ CUtensorMap mc, const __grid_constan
       tmem_wait_ld();
 #pragma unroll
       for (int p = 0; p < 3; ++p) {
-        const bool gate = p != 1;
+        const bool gate = !RMS && p != 1;
 #pragma unroll
         for (int L = 0; L < 2; ++L) {
           uint32_t r[4];
