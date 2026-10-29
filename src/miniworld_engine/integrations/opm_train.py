@@ -30,6 +30,7 @@ bf16 on sm_90a, normalize_before_proj, no interchain mask. Fuses the optional pa
 from __future__ import annotations
 
 import os
+import warnings
 from pathlib import Path
 from typing import Any, cast
 
@@ -499,6 +500,8 @@ def _ext_wide(device=None):
 _DWO_SIDE_CTAS: dict[int, int] = {128: 16, 256: 16}
 _DWO_SIDE_MIN_N = 128      # (L128 S1024 MiniWorld width: 0.167 -> 0.154 ms; shorter lengths are not measured)
 _SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+# torch warns once a process that its SM carve-out is experimental; the engine sets it only around those two GEMMs (and checks it exists)
+warnings.filterwarnings("ignore", message="Setting the SM carveout for matmuls is a temporary experimental mitigation")
 
 
 def _dwo_side_ctas(cz: int, s: int, n: int) -> int:
@@ -955,9 +958,9 @@ class _OpmMath(torch.autograd.Function):
                 wa16, wb16, wo16 = (w.detach().to(bf).contiguous() for w in (wa, wb, wo))
             dgrad = wext.opm_wdgrad
             # the interchain mask (chain ids): a pair of two chains passes no gradient (dO, dz/n and dbias without it)
-            dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None))
-            if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
-                dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, cz), out_dtype=torch.float32).view(cz)
+            # z = (O Wo^T + b) / n (`after`): the dgrad's dbias is sum dz / n
+            dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None),
+                                 int(getattr(ctx, "after", False)))
             if o is None:
                 o = torch.matmul(a2, bt.t())
             dwo = ext.opm_dwo if cz == CZ else wext.opm_wdwo
