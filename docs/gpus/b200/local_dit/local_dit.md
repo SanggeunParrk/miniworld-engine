@@ -398,8 +398,37 @@ Accuracy against the fp64 module: 3.73e-4 at every shape, the module path with T
 inference shapes against fp64 (`ef < 1.5 em + 1e-3`), bitwise repeatable, a CUDA-graph capture replayed with new inputs and another mask,
 and what is served (fp32 activations need fp32 parameters and no autocast).
 
+## ESMFold2's block: fp32 training (TF32, 2026-10-29)
+
+fp32 activations and parameters with a gradient run `_EsmBlock32`: `_esm_fwd32` with its activations saved, then the fp32 path's backward
+(`tail_bwd32` / `adaln_bwd32` with `-RMS` kernels: raw gates and scales, RMSNorm backward; `gemm32` for every activation gradient) around
+the TF32 attention backward, the fp32 q / k backward (`local_esm_qkrope_bwd_f32`), the pair-bias backward (`lesm.cu`
+`local_esm_bias_scatter` -> `lbias_tf32.cu` `local_bias_bwd_f32`), the conditioning as one K = 1024 `gemm32` + `f32_silu_bwd`, and the
+weight gradients in one `atom_dw` (TF32) launch.
+
+| kernel | design |
+|---|---|
+| `lattn_esm_dq_tf32.cu` `local_attn_esm_dq_tf32` | query-centric; S cols 0..255, dP 256..511, dS fp32 in place over S (each warp writes exactly the cells it read: no barrier), dQ = dS K into cols 256..287 with K read a second time MN-major (one 32 KB slot); two 96 KB stages (q, dO, k, v); LSE / D one global load per thread and the bias read per 8-column chunk from L2 (the dbias sums hold 33 registers; with the bias also in registers, or with the stage's six TMA issues in warp 15's code, 128 registers spilled) |
+| `lattn_esm_dkv_tf32.cu` `local_attn_esm_dkv_tf32` | key-centric; fp32 P^T / dS^T fill S^T / dP^T and dV / dK need their own columns, so the 256 queries go in two halves through one buffer (S^T_h 0..127, dP^T_h 128..255, dV 256..287, dK 288..319, accumulated over the halves); q and dO K-major and MN-major in one 162 KB stage |
+
+Both: 512 threads, 128 registers, no spills; deterministic (the bias gradient as in the bf16 kernel).
+
+Measured, one block, forward + backward as one CUDA graph, fp32 (TF32 on for the module path), shared conditioning, ms:
+
+| (A, N) | B200 kernels | module path (B200) | x |
+|---|---|---|---|
+| (48, 4096) | 4.203 | 23.53 | 5.6 |
+| (48, 8192) | 8.163 | 46.77 | 5.7 |
+
+At (48, 4096) (eager profile, us): gemm32 1008, atom_dw 476, adaln_bwd (3) 451, attention dQ 416, attention dK / dV 374, adaln (3) 235,
+gemm_rg 213, swiglu_bwd 212, attention forward 144. The TF32 attention backward (790 us, the bf16 one 262) is the lever left: the dK / dV
+kernel's single stage leaves its loads unoverlapped, the dQ kernel reads its bias from L2. Accuracy (every gradient against fp64): the
+activations' gradients equal the module path with TF32 on (d single 4.5e-4 / 4.5e-4), the weight gradients 1.2-1.5x it (the `atom_dw`
+TF32 products, as in the AF3 block's fp32 path). Tests (same file): seven training shapes against fp64 (`ef < 1.5 em + 1e-3`), bitwise
+repeatable.
+
 ## Not covered
 
-B > 1, QK-norm outside ESMFold2's block, ESMFold2's block in fp32 with a gradient, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
+B > 1, QK-norm outside ESMFold2's block, fp16, other GPUs; fp32 activations with bf16 parameters or under autocast (module path: serving them would change the precision rules -- autocast keeps the residual stream fp32, the bf16 kernels round it to bf16 per block). The cross-attention mode of the AF3 / Protenix atom blocks (`cross_attention=True`: keys and
 values projected from a second AdaLN `attention.ada_ln_kv` of the already normalised atoms) is served, but its extra work is the K / V AdaLN
 inside `pre_fwd` / `pre_bwd` (above), the conditioning LayerNorm and its backward in `lcross.cu` and cuBLAS GEMMs for the modulation tables (one `cn Wm^T` forward, one `dmkv Wm` backward).
