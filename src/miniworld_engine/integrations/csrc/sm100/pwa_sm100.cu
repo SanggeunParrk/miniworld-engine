@@ -40,6 +40,21 @@ __device__ __forceinline__ float sigmoid_t(float x) {
   return fmaf(0.5f, t, 0.5f);
 }
 
+// 32 bytes per thread and instruction (one whole sector)
+__device__ __forceinline__ void st256(void* p, const uint32_t* w) {
+  asm volatile("st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};\n"
+               :: "l"(p), "r"(w[0]), "r"(w[1]), "r"(w[2]), "r"(w[3]), "r"(w[4]), "r"(w[5]), "r"(w[6]), "r"(w[7]) : "memory");
+}
+__device__ __forceinline__ float tanh_f(float x) {
+  float t;
+  asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(x));
+  return t;
+}
+__device__ __forceinline__ void ld256(const void* p, uint32_t* w) {
+  asm volatile("ld.global.nc.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];\n"
+               : "=r"(w[0]), "=r"(w[1]), "=r"(w[2]), "=r"(w[3]), "=r"(w[4]), "=r"(w[5]), "=r"(w[6]), "=r"(w[7]) : "l"(p));
+}
+
 namespace lv {
 constexpr int BS = 128;
 constexpr int NST = 3;
@@ -247,9 +262,9 @@ static_assert(SMEM <= 232448, "one CTA per SM");
 
 template <typename WT_>
 __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
-    int N, int ntiles, float eps, const WT_* __restrict__ LNW, const WT_* __restrict__ LNB,
-    const __grid_constant__ CUtensorMap omap,     // o head-major [H*N][S*C], box (32, 128), 64B swizzle
-    const __grid_constant__ CUtensorMap ymap,     // msa [M][64], box (64, 128), 128B swizzle: y = LN(msa) is recomputed here
+    int N, int S, int ntiles, float eps, const WT_* __restrict__ LNW, const WT_* __restrict__ LNB,
+    const __grid_constant__ CUtensorMap omap,     // o head-major as (32 c, S, H*N), box (32, 128, 1), 64B swizzle: a head's block is 8 KiB contiguous
+    const __grid_constant__ CUtensorMap ymap,     // msa [S][N][64] as (64, N, S), box (64, 1, 128), 128B swizzle: y = LN(msa) is recomputed here
     const __grid_constant__ CUtensorMap gmap,     // Wg [256][64], box (64, 256), 128B swizzle
     const __grid_constant__ CUtensorMap wmap,     // Wo [64][256], box (64, 64), 128B swizzle
     const __nv_bfloat16* __restrict__ MSA, __nv_bfloat16* __restrict__ OUT,
@@ -297,15 +312,13 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
       load_2d(&gmap, sWg, wf, 0, 0);
       for (int kb = 0; kb < 4; ++kb) load_2d(&wmap, sWo + kb * D * 64, wf, kb * 64, 0);
       for (int lt = 0; lt < nt; ++lt) {
-        const int m0 = ((int)blockIdx.x + lt * (int)gridDim.x) * BM, st = lt % NST;
+        const int t = (int)blockIdx.x + lt * (int)gridDim.x, st = lt % NST;
+        const int n = t / (S / BM), s0 = (t % (S / BM)) * BM;          // tile = token n x 128 MSA rows (o as 8 KiB runs)
         if (lt >= NST) wait(empty + st, ((lt / NST) - 1) & 1);
         __nv_bfloat16* p = stage(lt);
         expect_tx(full + st, STAGE * 2);
-        // a tile is 128 i of one s: o arrives as 64-byte pieces per (head, i), but the residual / output rows of a warp are 4 KiB
-        // contiguous (one token x 128 s tiles read o as 8 KiB runs and measured 5-12 % slower: their row stores scatter)
-        const int s = m0 / N, i0 = m0 % N;
-        for (int h = 0; h < H; ++h) load_2d(&omap, p + h * BM * C, full + st, s * C, h * N + i0);
-        load_2d(&ymap, p + OT, full + st, 0, m0);
+        for (int h = 0; h < H; ++h) load_3d(&omap, p + h * BM * C, full + st, 0, s0, h * N + n);
+        load_3d(&ymap, p + OT, full + st, 0, n, s0);
       }
     }
   } else if (warp == 1) {
@@ -446,7 +459,11 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
       for (int lt = 0; lt < nt; ++lt) layernorm(lt);
     } else
     for (int lt = 0; lt < nt; ++lt) {
-      const int row = ((int)blockIdx.x + lt * (int)gridDim.x) * BM + r, b = lt & 1;
+      const int t = (int)blockIdx.x + lt * (int)gridDim.x, b = lt & 1;
+      const int n = t / (S / BM), row = ((t % (S / BM)) * BM + r) * N + n;   // the thread's row (s0 + r, n): 128 contiguous bytes
+      uint32_t res[32];                                   // the residual row, 32 bytes an instruction, in flight during the wait
+#pragma unroll
+      for (int k = 0; k < 4; ++k) ld256(MSA + (size_t)row * D + k * 16, res + 8 * k);
 
       wait(outf + b, (lt >> 1) & 1);
       tc_fence_after();
@@ -462,12 +479,10 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
       tc_fence_before();
       __syncwarp();
       if (lane == 0) arrive(oute + b);
-      const uint4* rp = reinterpret_cast<const uint4*>(MSA + (size_t)row * D);
-      uint4* op = reinterpret_cast<uint4*>(OUT + (size_t)row * D);
-      const __nv_bfloat16* dr = DMASK != nullptr ? DMASK + (size_t)(row % N) * D : nullptr;
+      const __nv_bfloat16* dr = DMASK != nullptr ? DMASK + (size_t)n * D : nullptr;
 #pragma unroll
       for (int c8 = 0; c8 < 8; ++c8) {
-        uint4 rv = __ldg(rp + c8);
+        uint4 rv = make_uint4(res[4 * c8], res[4 * c8 + 1], res[4 * c8 + 2], res[4 * c8 + 3]);
         uint4 dmv = dr != nullptr ? *reinterpret_cast<const uint4*>(dr + c8 * 8) : make_uint4(0, 0, 0, 0);
         uint32_t* rw = reinterpret_cast<uint32_t*>(&rv);
         const uint32_t* dw = reinterpret_cast<const uint32_t*>(&dmv);
@@ -483,8 +498,10 @@ __global__ void __launch_bounds__(go::THREADS, 1) pwa_gate_out_sm100(
           const float2 res = bf2f(rw[k2]);
           rw[k2] = pack2(res.x + u0, res.y + u1);
         }
-        op[c8] = rv;
+        res[4 * c8] = rv.x; res[4 * c8 + 1] = rv.y; res[4 * c8 + 2] = rv.z; res[4 * c8 + 3] = rv.w;
       }
+#pragma unroll
+      for (int k = 0; k < 4; ++k) st256(OUT + (size_t)row * D + k * 16, res + 8 * k);
     }
   }
   tc_fence_before();
@@ -528,20 +545,6 @@ static_assert(COL_YG + 2 * 64 == 512, "TMEM: 512 columns");
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace gl2
 
-// 32 bytes per thread and instruction (one whole sector)
-__device__ __forceinline__ void st256(void* p, const uint32_t* w) {
-  asm volatile("st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};\n"
-               :: "l"(p), "r"(w[0]), "r"(w[1]), "r"(w[2]), "r"(w[3]), "r"(w[4]), "r"(w[5]), "r"(w[6]), "r"(w[7]) : "memory");
-}
-__device__ __forceinline__ float tanh_f(float x) {
-  float t;
-  asm("tanh.approx.f32 %0, %1;" : "=f"(t) : "f"(x));
-  return t;
-}
-__device__ __forceinline__ void ld256(const void* p, uint32_t* w) {
-  asm volatile("ld.global.nc.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];\n"
-               : "=r"(w[0]), "=r"(w[1]), "=r"(w[2]), "=r"(w[3]), "=r"(w[4]), "=r"(w[5]), "=r"(w[6]), "=r"(w[7]) : "l"(p));
-}
 
 __global__ void __launch_bounds__(gl2::THREADS, 1) pwa_glue2_sm100(
     int N, int S, int ntiles,
@@ -2374,14 +2377,13 @@ torch::Tensor pwa_gate_out(torch::Tensor o, torch::Tensor msa, torch::Tensor lnw
   using namespace go;
   TORCH_CHECK(o.is_contiguous() && o.dim() == 3 && o.size(0) == H && o.scalar_type() == torch::kBFloat16, "o: head-major [H, N, S*C] bf16");
   const long N = o.size(1), S = o.size(2) / C, M = S * N;
-  TORCH_CHECK(M % BM == 0, "S * N must be a multiple of 128");
+  TORCH_CHECK(S % BM == 0, "S must be a multiple of 128");
   TORCH_CHECK(msa.is_contiguous() && msa.numel() == M * D, "msa: [S, N, 64]");
   TORCH_CHECK(lnw.scalar_type() == lnb.scalar_type() && lnw.is_contiguous() && lnb.is_contiguous() && lnw.numel() == D, "LayerNorm affine [64]");
   TORCH_CHECK(wgw.is_contiguous() && wgw.sizes() == torch::IntArrayRef({HC, D}) && wow.is_contiguous() && wow.sizes() == torch::IntArrayRef({D, HC}), "wg [256, 64], wo [64, 256]");
   auto out = torch::empty({S, N, D}, msa.options());
-  TORCH_CHECK(N % BM == 0, "N must be a multiple of 128");
-  CUtensorMap om = make_map<2>(o.data_ptr(), {(uint64_t)(S * C), (uint64_t)(H * N)}, {(uint64_t)(S * C)}, {C, BM}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
-  CUtensorMap ym = make_map<2>(msa.data_ptr(), {(uint64_t)D, (uint64_t)M}, {(uint64_t)D}, {64, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "msa");
+  CUtensorMap om = make_map<3>(o.data_ptr(), {(uint64_t)C, (uint64_t)S, (uint64_t)(H * N)}, {(uint64_t)C, (uint64_t)(S * C)}, {C, BM, 1}, CU_TENSOR_MAP_SWIZZLE_64B, "o");
+  CUtensorMap ym = make_map<3>(msa.data_ptr(), {(uint64_t)D, (uint64_t)N, (uint64_t)S}, {(uint64_t)D, (uint64_t)(N * D)}, {64, 1, BM}, CU_TENSOR_MAP_SWIZZLE_128B, "msa");
   CUtensorMap gm = make_map<2>(wgw.data_ptr(), {(uint64_t)D, (uint64_t)HC}, {(uint64_t)D}, {64, HC}, CU_TENSOR_MAP_SWIZZLE_128B, "wg");
   CUtensorMap wm = make_map<2>(wow.data_ptr(), {(uint64_t)HC, (uint64_t)D}, {(uint64_t)HC}, {64, D}, CU_TENSOR_MAP_SWIZZLE_128B, "wo");
   const __nv_bfloat16* dmp = nullptr;
@@ -2397,12 +2399,12 @@ torch::Tensor pwa_gate_out(torch::Tensor o, torch::Tensor msa, torch::Tensor lnw
   if (lnw.scalar_type() == torch::kFloat32) {
     static bool attr = false;
     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_gate_out_sm100<float>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    pwa_gate_out_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps, lnw.data_ptr<float>(), lnb.data_ptr<float>(), om, ym, gm, wm, mp, outp, dmp, (float)dscale);
+    pwa_gate_out_sm100<float><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps, lnw.data_ptr<float>(), lnb.data_ptr<float>(), om, ym, gm, wm, mp, outp, dmp, (float)dscale);
   } else {
     TORCH_CHECK(lnw.scalar_type() == torch::kBFloat16, "LayerNorm affine: fp32 or bf16");
     static bool attr = false;
     if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(pwa_gate_out_sm100<__nv_bfloat16>, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
-    pwa_gate_out_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, ntiles, (float)eps,
+    pwa_gate_out_sm100<__nv_bfloat16><<<grid, THREADS, SMEM, st>>>((int)N, (int)S, ntiles, (float)eps,
         reinterpret_cast<const __nv_bfloat16*>(lnw.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(lnb.data_ptr<at::BFloat16>()),
         om, ym, gm, wm, mp, outp, dmp, (float)dscale);
   }
