@@ -274,11 +274,23 @@ kernels that one `[1, 1, N, 128]` view (`_shared_cond`), and:
   per sample row; every sm_100a row kernel (`pre_fwd`, `post_fwd`, `tr_bwd_gate`, `post_bwd`, `pre_bwd`, all builds) reads table row
   `r % mrows` (a new kernel argument: the tables' row count, M for per-sample tables). The torch copy that materialised the expanded
   conditioning (twice per step) is gone.
-- backward: the row kernels still write the tables' gradient per sample row (dmod, and dmkv into the same [A N, 1024] table);
-  `sm100_atom_local` `lcross.cu` `local_sample_sum` sums it over the samples in a fixed order (fp32 sums, deterministic), so `cond_bwd`, the
-  cross mode's `cond_ln_bwd` and K / V modulation product, ESMFold2's K = 1024 product and SiLU backward, and the conditioning's weight
-  gradients (their own `atom_dw` launch) run on N rows instead of A N. Autograd sums the `[1, 1, N, 128]` view's gradient back into the
-  expanded tensor's base.
+- backward: `tr_bwd_gate`, `post_bwd` and `pre_bwd` (every build) sum the tables' gradient over the samples themselves (2026-10-29, round 3;
+  `sm100_atom/tsum.cuh`). With shared tables their 16-row tiles go in the sample-inner order g = t A + a (table tile t, sample a), cut into
+  one contiguous range per warpgroup (slot u = 2 CTA + warpgroup of U = 2 x grid: [floor(T u / U), floor(T (u + 1) / U))), so a warpgroup
+  runs through the samples of a table tile in order; after each tile every compute thread adds its 8-column chunks of the tile's table
+  gradient (the bf16 values the per-sample path stored) into fp32 sums -- registers in `tr_bwd_gate` (16) and `post_bwd` (32), the warpgroup's
+  free TMEM columns for `post_bwd`'s last 16 and all of `pre_bwd`'s (32, 64 in the cross builds, whose registers are at the 168 cap) -- and
+  where a table tile's run ends writes them as a partial (t, u - owner(t A)); `lcross.cu` `local_table_sum` adds each table tile's partials
+  in slot order into the bf16 [N, 1024] gradient (deterministic; about two fp32 partials per table row, ~32 MB at (48, 4096), instead
+  of 400 MB of per-sample rows read by the sample sum). The per-sample stores of dmod / dmkv are gone. `cond_bwd`, the cross mode's `cond_ln_bwd` and K / V modulation product,
+  ESMFold2's K = 1024 product and SiLU backward, and the conditioning's weight gradients (their own `atom_dw` launch) run on N rows. Autograd
+  sums the `[1, 1, N, 128]` view's gradient back into the expanded tensor's base. (Round 2 wrote the gradient per sample row and summed it
+  with `local_sample_sum`, 74 us at (48, 4096).)
+- fp32 path (training, AF3 / Protenix and ESMFold2 blocks): the same `[1, 1, N, 128]` view; the tables are made on N rows, `f32_adaln(_rms)`
+  and the gated-residual GEMMs (`gemm_tf32.cu`, `gemm_rg_tf32.cu`: the gate's row / TMA coordinate modulo the table rows) read row r % N, and
+  the table-gradient kernels `f32_tail_bwd(_rms)` / `f32_adaln_bwd(_rms)` take a warp per table row that runs through the samples' rows
+  in order, summing dscale / dshift / dgate in registers (fp32, fixed order) and writing them once; the conditioning's LayerNorm / SiLU
+  backward, its products and weight gradients run on N rows. fp32 inference keeps per-sample tables (they are hoisted per call).
 
 Measured, one block, forward + backward as one CUDA graph, bf16-mixed, the conditioning one expanded leaf; "per-sample" is the previous path
 (the same harness with `_shared_cond` off), ms:
@@ -292,15 +304,35 @@ Measured, one block, forward + backward as one CUDA graph, bf16-mixed, the condi
 | ESMFold2 | (48, 4096) | 1.798 | 1.489 | 1.21 |
 | ESMFold2 | (48, 8192) | 3.389 | 2.761 | 1.23 |
 
-At (48, 4096), chained / pad (eager profile, us): cond_fwd 114 -> 9, cond_bwd 109 -> 11, atom_dw 252 -> 162 + 19 (the N-row launch), the
-materialising copies 77 -> 0; added: the sample sum 74 (400 MB read at 5.4 TB/s) and autograd's slice / expand backward of the view (~24).
-What is left: summing over the samples inside `tr_bwd_gate` / `post_bwd` / `pre_bwd` (a sample-inner tile schedule with fp32 accumulators;
-`pre_bwd`'s cross build is at its 168-register cap, its accumulators would go to its 128 free TMEM columns) would drop the sample sum and
-the per-sample table-gradient stores. The fp32 path keeps per-sample tables (its row kernels index the tables by row).
+At (48, 4096), chained / pad (eager profile, us; round 2): cond_fwd 114 -> 9, cond_bwd 109 -> 11, atom_dw 252 -> 162 + 19 (the N-row
+launch), the materialising copies 77 -> 0; added: the sample sum 74 (400 MB read at 5.4 TB/s) and autograd's slice / expand backward of the
+view (~24). Round 3, the sums in the row kernels (eager profile, chained / pad, (48, 4096), us): the sample sum 74.5 -> the partial sum 11.0,
+`post_bwd` 152 -> 137 (its 384 per-sample columns no longer stored), `pre_bwd` 117 -> 116 and `tr_bwd_gate` 116 -> 116 (their saved stores
+are paid back by the per-tile sums and the extra named barrier).
+
+Training step, one block, CUDA graph, the conditioning one expanded leaf; "before" is the 6fb200f9 kernels (round 2: bf16 with the sample
+sum, fp32 with per-sample tables), "now" all of round 3 (for the slide and ESMFold2 rows it includes the slid-window backward and the TF32
+attention backward above), ms:
+
+| block | dtype | (A, N) | before | now | x |
+|---|---|---|---|---|---|
+| cross, chained / pad | bf16 | (48, 4096) | 1.257 | 1.204 | 1.04 |
+| cross, chained / pad | bf16 | (48, 8192) | 2.351 | 2.174 | 1.08 |
+| cross, parallel / slide | bf16 | (48, 4096) | 1.496 | 1.286 | 1.16 |
+| cross, parallel / slide | bf16 | (48, 8192) | 2.562 | 2.257 | 1.14 |
+| ESMFold2 | bf16 | (48, 4096) | 1.491 | 1.403 | 1.06 |
+| ESMFold2 | bf16 | (48, 8192) | 2.764 | 2.565 | 1.08 |
+| cross, chained / pad | fp32 | (48, 4096) | 3.986 | 2.610 | 1.53 |
+| cross, chained / pad | fp32 | (48, 8192) | 7.681 | 4.935 | 1.56 |
+| cross, parallel / slide | fp32 | (48, 4096) | 4.226 | 2.717 | 1.56 |
+| cross, parallel / slide | fp32 | (48, 8192) | 7.921 | 5.049 | 1.57 |
+| ESMFold2 | fp32 | (48, 4096) | 4.202 | 2.833 | 1.48 |
+| ESMFold2 | fp32 | (48, 8192) | 8.169 | 5.410 | 1.51 |
+
 
 Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (`-k shared`: cross / self mode x chained / pad and parallel / slide x
-three (A, N, real) shapes up to A = 16, every gradient of the expanded leaf against the fp64 module, `ef < 1.5 em + 3e-3`, the sample sum
-ran; the expanded and the materialised conditioning give bit-identical inference outputs); ESMFold2's training tests run the shared path
+three (A, N, real) shapes up to A = 16, every gradient of the expanded leaf against the fp64 module, `ef < 1.5 em + 3e-3`, the table sum
+ran; `test_shared_conditioning_training_fp32`: the same cases on the fp32 path, `ef < 1.5 em + 1e-3` against the module path with TF32 on; the expanded and the materialised conditioning give bit-identical inference outputs); ESMFold2's training tests run the shared path
 (their shared cases).
 
 ## AlphaFold 3's options: parallel K/V norm, slid key window (2026-10-29)
