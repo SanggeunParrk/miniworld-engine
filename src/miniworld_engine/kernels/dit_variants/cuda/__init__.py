@@ -1,6 +1,7 @@
-"""CUDA kernels of the DiT block variants, sm_90a, built on first use (``load_extension``), never at import: ``rows.cu`` (inference rows),
-``train_rows.cu`` (training rows, forward and backward), ``edge.cu`` (the atom stacks' slid edge windows, training); ``train.py`` is the training
-path (autograd Functions over them)."""
+"""CUDA kernels of the DiT block variants, built on first use (``load_extension``), never at import, for the card in use: sm_90a on H100,
+sm_100a on B200 (plain CUDA row kernels: no architecture-specific instruction, one build per card). ``rows.cu`` (inference rows),
+``train_rows.cu`` (training rows, forward and backward), ``edge.cu`` (the atom stacks' slid edge windows, H100 only: B200 takes the local
+DiT's ``lslide.cu``); ``train.py`` is the training path (autograd Functions over them), ``sm100.py`` the B200 attention glue."""
 
 from __future__ import annotations
 
@@ -12,13 +13,22 @@ import torch
 _dir = Path(__file__).parent
 
 
-@functools.lru_cache(maxsize=None)
+def _arch() -> str:
+    """The build of the current card: "100a" on B200 (capability 10.0), else "90a"."""
+    return "100a" if torch.cuda.get_device_capability() == (10, 0) else "90a"
+
+
 def ext():
+    return _ext(_arch())
+
+
+@functools.lru_cache(maxsize=None)
+def _ext(arch: str):
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="dit_variants_rows_sm90a",
+        name=f"dit_variants_rows_sm{arch}",
         sources=[str(_dir / "rows.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -27,7 +37,7 @@ def ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *gencodes("90a"),
+            *gencodes(arch),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
@@ -71,7 +81,7 @@ def ln_rows(z, out, eps=1e-5):
 
 
 def available() -> bool:
-    return torch.cuda.is_available() and torch.cuda.get_device_capability() == (9, 0)
+    return torch.cuda.is_available() and torch.cuda.get_device_capability() in ((9, 0), (10, 0))
 
 
 def parallel_residual(x, outputs):
@@ -80,14 +90,18 @@ def parallel_residual(x, outputs):
     return ext().parallel_residual(x, list(outputs))
 
 
-@functools.lru_cache(maxsize=None)
 def train_ext():
-    """The training row kernels (``train_rows.cu``): sm_90a, built on first use."""
+    """The training row kernels (``train_rows.cu``): sm_90a or sm_100a (the card in use), built on first use."""
+    return _train_ext(_arch())
+
+
+@functools.lru_cache(maxsize=None)
+def _train_ext(arch: str):
     from ..._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
     ensure_cuda_home()
     return load_extension(
-        name="dit_variants_train_rows_sm90a",
+        name=f"dit_variants_train_rows_sm{arch}",
         sources=[str(_dir / "train_rows.cu")],
         extra_cuda_cflags=[
             *host_flags(),
@@ -96,7 +110,7 @@ def train_ext():
             "-U__CUDA_NO_BFLOAT16_CONVERSIONS__",
             "-U__CUDA_NO_BFLOAT16_OPERATORS__",
             "-U__CUDA_NO_BFLOAT162_OPERATORS__",
-            *gencodes("90a"),
+            *gencodes(arch),
         ],
         extra_cflags=["-std=c++17"],
         verbose=False,
