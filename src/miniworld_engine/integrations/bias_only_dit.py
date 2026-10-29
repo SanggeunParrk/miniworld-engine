@@ -18,7 +18,9 @@ bf16 step, which is also what a failed build falls back to.
 ``serves()`` is the whole gate: no autograd, the engine's kernels (implementation MINIWORLD), B200 or H100, bf16 or fp32, the
 token widths (768; the attention as 16 heads x 48, 24 x 32, 12 x 64 or 16 x 64 / cond 384 / pair 128, or 256 on H100 / transition n = 2), B == 1, L a multiple of 128 (bf16 up to 3072 on B200 -- past 768 the
 attention core streams P, ``pv_stream_sm100.cu`` -- fp32 up to 768; 3072 on H100: ``core_supported``), a key mask [1, L] or
-none, LayerNorm eps 1e-5. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
+none, LayerNorm eps 1e-5. B200 serves any other L up to those bounds by padding on the host (``update``): single / cond with
+zero rows, the pair (or the hoisted bias) with zero rows and columns, the key mask with False -- so the padded keys get
+P = 0 and no real row sees them -- and returns the first L rows. The conditioning may be one per sample or one shared by the samples (sample axis 1 or stride 0).
 settings.bias_only_dit=0 turns it off. Anything else keeps the module's PyTorch composition.
 
 A block given its pair bias precomputed (``bias`` [1, H, L, L] in the step's dtype, from ``pair_bias_all``) runs the same step on
@@ -99,12 +101,9 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         or torch.is_autocast_enabled("cuda")
     ):
         return False  # fp32 = an fp32 block; under autocast the module path keeps its casts
-    if (
-        single.ndim != 4
-        or single.shape[1] != 1
-        or single.shape[-1] != D
-        or single.shape[2] % 128
-    ):
+    if single.ndim != 4 or single.shape[1] != 1 or single.shape[-1] != D or single.shape[2] < 1:
+        return False
+    if single.shape[2] % 128 and not _pads(single):
         return False
     A, _, L, _ = single.shape
     if (
@@ -148,7 +147,16 @@ def serves(module, single, cond, pair, mask=None, bias=None) -> bool:
         if single.device.index is not None
         else torch.cuda.current_device()
     )
-    return core_supported(single.dtype, L, da, at.n_head, idx)
+    return core_supported(single.dtype, _lp(L), da, at.n_head, idx)
+
+
+def _pads(single) -> bool:
+    """B200 pads an L off the cores' 128-row tile on the host (``update``); H100 keeps its multiples of 128."""
+    return torch.cuda.get_device_capability(single.device) == (10, 0)
+
+
+def _lp(L: int) -> int:
+    return -(-L // 128) * 128
 
 
 def _fake(single, cond, pair, mask, weights):
@@ -206,7 +214,12 @@ def _infer(
         if pkey is not None and hit is not None and hit[0] == pkey:
             P = hit[1]
         else:
-            P = runner.hoist(pair.contiguous(), mask)
+            L, Lp = pair.shape[1], single.shape[2]
+            if Lp != L:  # B200 host padding (``update``): zero pair rows / columns, the padded keys masked (P = 0)
+                F = torch.nn.functional
+                P = runner.hoist(F.pad(pair, (0, 0, 0, Lp - L, 0, Lp - L)).contiguous(), F.pad(mask.to(torch.bool), (0, Lp - L), value=False))
+            else:
+                P = runner.hoist(pair.contiguous(), mask)
             if pkey is not None:
                 # the entry keeps its key tensors alive: a freed address cannot alias another tensor
                 runner._p_cache = (pkey, P, (pair, mask))
@@ -225,7 +238,8 @@ def _infer_bias(
     mask: torch.Tensor,
     weights: list[torch.Tensor],
 ) -> torch.Tensor:
-    """``_infer`` on a hoisted bias [1, H, L, L]: P = softmax(bias) over the keys (masked keys 0), made per call."""
+    """``_infer`` on a hoisted bias [1, H, L, L]: P = softmax(bias) over the keys (masked keys 0), made per call. L is single's
+    (``update`` pads the bias and the mask with it)."""
     with torch.cuda.device(single.device):
         runner = _runner(single, weights)
         H, L = bias.shape[1], bias.shape[2]
@@ -343,6 +357,28 @@ def update_psb(module, single, cond, pair, mask, bias=None):
 
 
 _ALL_TRUE: dict = {}
+#: padded conditioning per caller tensor (``_padded_cond``)
+_PAD_COND: dict = {}
+
+
+def _padded_cond(cond, Lp):
+    """cond with zero rows to Lp (a shared cond stays one table), one tensor per caller tensor (address, version, layout; a weak reference
+    guards a reused address): the runner's conditioning tables are keyed on the tensor they read, so a sampler that hands every block the
+    same cond gets the same padded tensor, and the tables made from it, as an unpadded call would. Scoped like those tables
+    (``kernels._capture.lookup_inputs``)."""
+    import weakref
+
+    shared = cond.shape[0] == 1 or cond.stride(0) == 0
+    src = cond[:1] if shared else cond
+    key = ("padc", cond.data_ptr(), cond._version, tuple(cond.shape), cond.stride(), cond.dtype, cond.device, Lp)
+    return _capture.lookup_inputs(
+        _PAD_COND,
+        key,
+        lambda: (weakref.ref(cond), torch.nn.functional.pad(src, (0, 0, 0, Lp - src.shape[2]))),
+        limit=16,
+        valid=lambda e: e[0]() is cond,
+        alive=lambda e: e[0]() is not None,
+    )[1]
 
 
 def update(module, single, cond, pair, mask, bias=None):
@@ -356,6 +392,20 @@ def update(module, single, cond, pair, mask, bias=None):
                 (1, single.shape[2]), device=single.device, dtype=torch.bool
             )
     weights = [module.get_parameter(name) for name in WEIGHTS]
+    L = single.shape[2]
+    Lp = _lp(L)
+    if Lp != L:
+        # B200 at L % 128 != 0: zero single / cond rows (a shared cond stays one table), the pair / bias padded with zero rows and
+        # columns and the padded keys masked out (P = 0 there); the padded query rows are computed and dropped. The pair is padded
+        # inside ``_infer`` on a P-cache miss only, so the cache stays keyed on the caller's pair.
+        F = torch.nn.functional
+        s, c = F.pad(single, (0, 0, 0, Lp - L)), _padded_cond(cond, Lp)
+        if bias is not None:
+            mp = F.pad(mask.to(torch.bool).reshape(1, L), (0, Lp - L), value=False)
+            out = _infer_bias(s, c, F.pad(bias, (0, Lp - L, 0, Lp - L)).contiguous(), mp, weights)
+        else:
+            out = _infer(s, c, pair, mask, weights)
+        return out[:, :, :L].contiguous()
     if bias is not None:
         return _infer_bias(single.contiguous(), cond, bias.contiguous(), mask, weights)
     return _infer(single.contiguous(), cond, pair, mask, weights)
