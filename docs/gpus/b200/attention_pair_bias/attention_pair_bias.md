@@ -60,7 +60,14 @@ kernels, same bits; the A/B switch). fp32 master weights go straight into `prep`
   check rejects (16 x 24, L640). Since 2026-10-20 the parameter-gradient column sums (dWf, ln weights, dbq) are deterministic
   too: `ln_bwd` / `qkv_bwd` (grid capped at two blocks per SM, a block walking several rows) and `pair_bias_bwd` write one
   block partial row each and `finalize` reduces them in a fixed order (`acc_reduce_k`, as on H100): every output and gradient
-  is bitwise run to run (five steps under a NaN-poisoned allocator, `test_b200_apb_host_gpu.py`).
+  is bitwise run to run (five steps under a NaN-poisoned allocator, `test_b200_apb_host_gpu.py`). That held only most of the
+  time until 2026-10-29: inside `attn_dkv` / `attn_dqb` the CTA's two MMA issuers accumulated dK / dV and a step's dQ onto one
+  TMEM accumulator in the order their warpgroups got there, so B = 5 against five single calls (12 x 32, L768) differed about one
+  run in five. The backward cores are now built `-DDET=1` (`_apb_defs`, both the Python sequence and the C++ host path's cubin
+  resolver, and the token DiT per-sample-bias block that calls `apb_backward`): the issuer of a block waits for the other
+  issuer's accumulating MMAs of the previous block to complete. Cost within the measurement noise (training step, CUDA graph,
+  8 x 48: L256 / 384 / 768 112.4 / 143.8 / 272.1 us vs 112.1 / 143.6 / 272.1 without; token DiT over 48 proteins L384 / 768 6.92 /
+  23.8 ms both); `test_backward_cores_are_bitwise_repeatable`.
 - **Key split (forward / inference cores).** At B = 1 the cores had 16-48 work items for 148 SMs. Built `-DKSPLIT=1` they split
   the key blocks into NS equal chunks; a work item is (sample, head, query-tile pair, chunk) and leaves its chunk's
   normalised partial O (fp32) and partial LSE; `ksplit_combine` merges the chunks in order (weights 2^(LSE_c - max)), gates
