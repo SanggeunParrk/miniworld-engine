@@ -798,6 +798,13 @@ constexpr int D2 = 128;                                    // TMEM column of the
 static_assert(SMEM <= 232448, "one CTA per SM");
 }  // namespace pb
 
+// x, unchanged, but opaque to the optimiser: a value formed from it inside a loop is not hoisted out of the loop (and kept live
+// across it) by loop-invariant code motion
+__device__ __forceinline__ int opaque_reg(int x) {
+  asm volatile("mov.b32 %0, %0;" : "+r"(x));
+  return x;
+}
+
 template <typename WT_>
 __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
     int N, int S, int ntiles,
@@ -929,9 +936,12 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
       const __nv_bfloat16* xr = reinterpret_cast<const __nv_bfloat16*>(px) + r * 64;
       const float2 stt = reinterpret_cast<const float2*>(px + XT * 2)[r];
       const float mk = px[XT * 2 + STAT * 4 + r * 16 + (i & 15)] ? 1.f : 0.f;
+      // the row's swizzle phase, formed anew each tile: hoisted out of the loop, the 24 swizzled addresses it gives (x, dm and the
+      // dW operand, 8 chunks each) were kept in registers across the tiles and spilled 44 bytes under the 352-thread cap
+      const int rx = opaque_reg(r & 7);
       uint4 xu[8];
 #pragma unroll
-      for (int c8 = 0; c8 < 8; ++c8) xu[c8] = *reinterpret_cast<const uint4*>(xr + ((c8 ^ (r & 7)) << 3));
+      for (int c8 = 0; c8 < 8; ++c8) xu[c8] = *reinterpret_cast<const uint4*>(xr + ((c8 ^ rx) << 3));
       // the loads above may still be in flight here (their values are used only after the TMEM wait), and the next TMA write into
       // this slot is another proxy: without the proxy fence it could land first (seen as run-to-run differences in whole rows)
       fence_proxy_async();
@@ -990,13 +1000,13 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
             dw_[k] = pack2(dd.x, dd.y);
             aw[k] = pack2(aa.x, aa.y);
           }
-          const int off = (c8 ^ (r & 7)) << 3;
+          const int off = (c8 ^ rx) << 3;
           *reinterpret_cast<uint4*>(dmr + off) = d;
           *reinterpret_cast<uint4*>(a2r + off) = a;
         }
       }
       // the mask column: element (r, 0) of the second block, i.e. its chunk 0 ^ (r & 7)
-      *reinterpret_cast<uint4*>(a2r + XT + ((0 ^ (r & 7)) << 3)) = make_uint4(mk != 0.f ? 0x3f80u : 0u, 0u, 0u, 0u);
+      *reinterpret_cast<uint4*>(a2r + XT + (rx << 3)) = make_uint4(mk != 0.f ? 0x3f80u : 0u, 0u, 0u, 0u);
       fence_proxy_async();
       __syncwarp();
       if (lane == 0) arrive(a2f + gr);
