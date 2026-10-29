@@ -874,12 +874,14 @@ class _OpmMath(torch.autograd.Function):
                 epi_half=_epilogue_half_enabled(s, n, training=True),
             )
         if sm100:
-            # sm_100a: `mask16` is the bool mask, `norm` the fp32 [N, N] mask counts, `stats` [N][S][2] -- see _forward_sm100.  MiniWorld's width
-            # runs opm_sm100.cu; c_z 256 / 384 the c_z-sliced dgrad / dWo and d_msa 128 the wide prologue backward (opm_wide_sm100.cu)
+            # sm_100a: `mask16` is the bool mask, `norm` the fp32 [N, N] mask counts, `stats` [N][S][2] -- see _forward_sm100.  The dgrad is
+            # the CTA-pair kernel of opm_wide_sm100.cu at every c_z (MiniWorld's 128 included: 327 -> 292 us at L768 S1024); MiniWorld's width
+            # keeps opm_sm100.cu's dWo and prologue backward, c_z 256 / 384 / 512 the c_z-sliced dWo and d_msa 128 / 256 the wide prologue
+            # backward (opm_wide_sm100.cu)
             cm, cz = m.shape[2], wo.shape[0]
-            wext = _ext_wide(dz.device) if (cm, cz) != (CM, CZ) else None
+            wext = _ext_wide(dz.device)
             wo16 = wo.detach().to(bf).contiguous()
-            dgrad = ext.opm_dgrad if cz == CZ else wext.opm_wdgrad
+            dgrad = wext.opm_wdgrad
             # the interchain mask (chain ids): a pair of two chains passes no gradient (dO, dz/n and dbias without it)
             dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None))
             if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
