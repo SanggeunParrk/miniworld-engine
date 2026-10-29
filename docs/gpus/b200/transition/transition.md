@@ -409,7 +409,9 @@ per-tile kernels would keep one SM pair per tile busy. Up to 16 tiles both direc
 (PDL: each kernel's prologue -- barriers, tensor memory, the weight K-blocks -- overlaps the previous kernel) sized for a few tiles on
 all 148 SMs (`sm100/widths/tsx_*.cu`, round sx, 2026-10-29). Every operand is read in its own layout (W_s, W_a / W_b and the
 activations MN-major where the product needs it), so no transposed or concatenated weight copy is made per call; with fp32 master
-parameters the training forward's bf16 casts run as extra blocks of the LayerNorm launch. Columns below are (L, D) of [1, L, 384],
+parameters the training forward's bf16 casts run as extra blocks of the LayerNorm launch. Since round sx3 the backward's gate and
+d_xn run as one launch on one 12-CTA cluster per tile while every tile's cluster is resident (up to 7 tiles), beside the
+weight-gradient launch: forward three launches, backward two. Columns below are (L, D) of [1, L, 384],
 n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384 path above.
 
 ### Inference and training
@@ -438,7 +440,7 @@ n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384
 | 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B1 · gate (dh = dy W_s, W_s MN-major + SwiGLU backward from the saved a, b) over (tile, 64-unit chunk) CTAs
+##### B1 · gate + d_xn + LayerNorm backward + residual, one 12-CTA cluster per tile (up to 7 tiles; 8-16 tiles: the gate over (tile, 64-unit chunk) CTAs, then B1b)
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
@@ -446,7 +448,7 @@ n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384
 | 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B2 · d_xn = dA W_a + dB W_b + LayerNorm backward + residual, one cluster per tile (6 column blocks x K halves)
+##### B1b · 8-16 tiles: d_xn = dA W_a + dB W_b + LayerNorm backward + residual, one cluster per tile (6 column blocks x K halves)
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
@@ -454,7 +456,7 @@ n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384
 | 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B3 · dW_s, dW_a | dW_b (fp32, or bf16 for bf16 parameters) + dgamma / dbeta over (output tile) CTAs, 64 / 128 / 192 columns each: the narrowest whose CTAs fit beside B2's clusters
+##### B2 · dW_s, dW_a | dW_b (fp32, or bf16 for bf16 parameters) + dgamma / dbeta over (output tile) CTAs, 64 / 128 / 192 columns each: the narrowest whose CTAs fit beside B1's clusters (beside the fused B1: dW_a | dW_b read a tile's [dA | dB] once its flag is set)
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
@@ -501,6 +503,51 @@ CTAs bump instead of `griddepcontrol.wait` (B2's 12-CTA clusters only become res
 fence + atomic cost ~1 µs: 3 µs slower); dgamma / dbeta summed by B2's last CTA (an end-of-kernel atomic: ~2.5 µs slower than B3's
 sum); half of the gate's sigmoids on the FMA pipe (no change outside the ±1 µs run-to-run spread). Left: one kernel for B1 + B2 per
 row tile (the gate chunks of a tile on its B2 cluster), which also needs B3 to learn of `[dA | dB]` without B2's completion.
+
+(Rounds sx / sx2 name the backward kernels B1 gate, B2 d_xn, B3 weight gradients; the tables above use the round-sx3 names.)
+
+**Round sx3 (2026-10-29).** Per-CTA globaltimer stamps of the [1, 768, 384] n = 2 training chain (an instrumented copy of the
+kernels, graph replays) showed where the ~28.5 µs of kernels went: the d_xn clusters became resident only as gate CTAs left and then
+paid their own griddepcontrol.wait (~1.1 µs after the gate's last CTA) and prologue; the row-per-thread epilogue stores (32 rows ×
+16 B per warp store) kept the LSU busy ~1 µs per 32 KB tile; each cluster-scope release (barrier.cluster arrive, mbarrier
+arrive.release.cluster) cost ~0.5-1 µs; d_xn's exchange buffer was read 32-way bank conflicted; a fence.acq_rel.gpu ahead of a
+`__syncthreads` delayed every rank-0 gate. Changes:
+
+- `widths/tsx_store.cuh`: `store_t` / `load_t` transpose 16-byte chunks inside 2- / 4- / 8-lane groups, so each store writes
+  16 rows × 32 B, 8 × 64 B or 4 × 128 B (every tsx epilogue; the gate's a / b loads); `st.async` / bulk-copy / swizzle helpers.
+- `tsx_squeeze.cu`: the CTA pair's partials go by `st.async` to the owner's mbarrier (no cluster barrier), swizzled buffer.
+- `tsx_gdx.cu` (B1): gate and d_xn on one cluster per tile (rank c: the gate of its 64-unit chunk(s), then d_xn block
+  (c mod 6, K half c / 6) as `tsx_dxn.cu` with KS = 2). Between them a barrier.cluster (after `fence.proxy.async`): the tile's
+  [dA | dB] is in global memory; the d_xn ring has 2 stages of its own (weights loaded before griddepcontrol.wait) and 6 / 8 over
+  the gate's dy and W_s buffers (weights loaded once the gate products are done). The K halves' exchange is one 16 KB bulk copy
+  (`cp.async.bulk` shared::cta -> shared::cluster, complete_tx on the partner's barrier), the row sums one 1 KB bulk copy per
+  peer; the epilogue runs on eight warps (16 owned columns each). a / b load before griddepcontrol.wait (forward saves).
+- `tsx_dw.cu` (B2) launches once every B1 CTA's gate products are done (earlier, its dW_s loads slowed the gate's dy); its
+  dW_a | dW_b CTAs read a tile's [dA | dB] after the tile's flag (B1 rank 0, gpu-scope release after the cluster barrier; B1 clears
+  it before launch_dependents, so the per-call flag buffer needs no memset).
+
+Numerics: B1's [dA | dB] (hence dW), the output and the forward are bit-identical to the gate -> d_xn launches; dx, dgamma and dbeta
+differ only by the fp32 order of the two 16-column halves' row and column sums (`test_fused_gate_dxn_equals_the_two_launches`:
+rel < 2e-3). Measured 2026-10-29 (B200 node 2 GPU 5, module call in a CUDA graph under the harness above, median of 5 × 50 replays,
+min over 2-3 rounds, *before* = engine 6fb200f9 alternated with *after* = this round, µs; training includes the six `.grad`
+accumulation adds, ~9 µs; this harness's replay times step in ~2 µs quanta):
+
+| shape (n) | training, bf16 params | training, fp32 masters | inference, bf16 params | inference, fp32 masters |
+|---|---|---|---|---|
+| [1, 768, 384] (2) | 39.0 -> **32.8** | 37.2 -> **32.8** | 12.3 -> **10.6** | 12.3 -> **10.4** |
+| [1, 768, 384] (4) | 45.2 -> **39.0** | 45.1 -> **41.0** | 14.4 -> 14.4 | 14.4 -> 14.4 |
+| [1, 384, 384] (2) | 34.9 -> **30.8** | 36.9 -> **32.8** | 10.3 -> 10.3 | 10.3 -> 10.3 |
+| [1, 384, 384] (4) | 43.0 -> **37.2** | 42.4 -> **37.8** | 12.4 -> 12.3 | 12.4 -> 12.4 |
+
+H100 (generic kernels) does [1, 768, 384] n = 2 training in 33.1 µs. nsys (graph replay, bf16, n = 2): the kernels end at 23.0 µs
+(forward 10.6, B1 to 21.1, B2 to 23.0; before 28.5); n = 4: 30.6 (before 36.3). 8-16 tiles (two-launch backward: the stores and the
+squeeze exchange only), fp32 masters, training: [1, 1024, 384] n = 2 41.0 -> 36.9, n = 4 61.5 -> 53.3; [1, 1536, 384] 45.0 -> 40.9 /
+65.6 -> 57.3; [1, 2048, 384] 59.4 -> 50.7 / 87.0 -> 75.7. The pair cells (D128 / 256 / 384, L384 / 768, n = 4, fp32 masters) run
+other kernels and re-measured within ±0.7 %. Tried and not kept: per-CTA [dA | dB] flags set right after each CTA's own gate stores
+(B2's dW_a | dW_b loads started ~0.8 µs earlier but overlapped B1's d_xn loads and ended ~1 µs later: 32.8 -> 34.0 µs); the dy
+tile multicast over B1's cluster (gate products ~0.3 µs later); the expand's xn multicast over 4-CTA clusters (+4 µs). Left: B1's
+d_xn loads (192 KB per CTA, ~2.8 µs) and gate (~3.3 µs from its griddepcontrol.wait to the stores); B2's dgamma / dbeta sum waits
+for B1's completion (~1.3 µs after it); the LayerNorm in the expand (one forward launch fewer) needs the fp32-master casts a home.
 
 No kernel on these paths is autotuned, so nothing needs a cache (✓).
 
@@ -609,8 +656,8 @@ widths without a tuned build.
   residual (`widths/tgemm_nd.cu`; D768 as two 384-column launches). F2 deals (tile pair, 128-unit chunk) items over all SMs up to
   1152 tiles and whole tile pairs above. The backward's **B1** (`widths/tgate_ab.cu`) fuses `dh = dy W_s` with the SwiGLU backward
   from the saved `a, b`, then B3 / B4 as at D256.
-- **Small M, D384** (`widths/tsx_ln.cu`, `tsx_expand.cu`, `tsx_squeeze.cu`, `tsx_gate.cu`, `tsx_dxn.cu`, `tsx_dw.cu`; see
-  [Small M](#small-m-d384-at-most-16-tiles)). The bound is the per-SM TMA intake (~60 B/clk), not the products: the squeeze splits a
+- **Small M, D384** (`widths/tsx_ln.cu`, `tsx_expand.cu`, `tsx_squeeze.cu`, `tsx_gdx.cu` up to 7 tiles or `tsx_gate.cu` +
+  `tsx_dxn.cu`, `tsx_dw.cu`; see [Small M](#small-m-d384-at-most-16-tiles); the B2 / B3 below are the round-sx2 names). The bound is the per-SM TMA intake (~60 B/clk), not the products: the squeeze splits a
   row tile's hidden units over a CTA pair (fp32 partials through distributed shared memory) and B2 splits K into the `dA W_a` and
   `dB W_b` halves (pairwise mbarrier exchange) while the 12-CTA clusters are all resident (≤ 7 tiles); B2's row sums for the
   LayerNorm backward cross the cluster through distributed shared memory under split arrive / wait barriers; dgamma / dbeta are
