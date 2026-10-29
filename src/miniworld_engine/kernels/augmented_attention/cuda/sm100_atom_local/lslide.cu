@@ -1,17 +1,11 @@
-// lslide.cu — AlphaFold 3's slid key window (``LocalDiTBlock(key_window="slide")``) on top of the clipped-window attention kernels.
+// lslide.cu — the backward of AlphaFold 3's slid key window (``LocalDiTBlock(key_window="slide")``) around the clipped-window backward kernels.
 //
 // A slid window starts at S_w = min(max(32 w - 48, 0), max(n_real - 128, 0)) instead of 32 w - 48 (n_real: the real atoms, which come
 // first; the trunked pair is laid out from the window's first key either way, so the per-window bias tensor is the same). Only the first
-// two windows and the last three real windows can differ from the clipped window (a window ends at 32 w + 80), so the attention kernels
-// run the clipped geometry and this kernel recomputes those five windows over their slid keys and overwrites their rows of O (and of the
-// LSE, when given). The five window indices come from the real atom count on the device (the key mask's population count, or n0 without
-// a mask): no host read, so the call is CUDA-graph capturable and a replay with another mask is right. A window listed twice is done once.
-//
-// Forward: one CTA (2 warps) per (listed window, head, sample); S = Q K^T and O = P V on tensor cores (mma.sync: bf16, or tf32 on the fp32
-// path with every operand rounded to nearest), the softmax on the S fragments. A window the slide does not move is skipped. Keys at or past
-// n_real are masked (-inf); a query with no valid key outputs 0.
-//   q, k, v: [A, N, *] rows ld elements apart (bf16: the projections, ld 128; fp32: column blocks of P32, ld 512), head h at 32 h;
-//   bias [4, nwin, 32, 128] fp32; km [N] uint8 or null; o [A, N, 128] (q's dtype), lse [A, 4, N] fp32 (log2 units) or null.
+// two windows and the last three real windows can differ from the clipped window (a window ends at 32 w + 80). The forward runs them
+// inside the attention kernels (slide.cuh); here the backward recomputes those windows over their slid keys. The window indices come from
+// the real atom count on the device (the key mask's population count, or n0 without a mask): no host read, so the call is CUDA-graph
+// capturable and a replay with another mask is right. A window listed twice is done once.
 // SPDX-License-Identifier: Apache-2.0
 #include <cuda_bf16.h>
 #include <cstdint>
@@ -160,112 +154,9 @@ DEVI void stage_bias(float (*s)[BST], const float* __restrict__ bw) {
   }
 }
 
-// ---- forward: one CTA (2 warps: 16 queries each) per (listed window, head, sample). S = Q K^T and O = P V on tensor cores (q, k, v exact
-// in the operand type: bf16, or tf32-rounded on the fp32 path), the softmax on the S fragments (a query row lives in one lane quad).
-constexpr int FWD_THREADS = 64;
-constexpr int SLIDE_FWD_SMEM = ((WQ + 2 * WK) * (DH + 1) + WQ * BST) * 4;
-static_assert(SLIDE_FWD_SMEM == 54912, "keep sm100_atom_local.KERNELS['slide'] in step");
-template <typename T>
-DEVI void slide_edges(const T* __restrict__ q, const T* __restrict__ k, const T* __restrict__ v, int ld, const float* __restrict__ bias,
-                      const uint8_t* __restrict__ km, T* __restrict__ o, float* __restrict__ lse, int N, int n0) {
-  constexpr bool F32 = sizeof(T) == 4;
-  extern __shared__ __align__(16) float smf[];                         // dynamic: SLIDE_FWD_SMEM bytes
-  float(*qs)[DH + 1] = reinterpret_cast<float(*)[DH + 1]>(smf);
-  float(*ks)[DH + 1] = reinterpret_cast<float(*)[DH + 1]>(smf + WQ * (DH + 1));
-  float(*vs)[DH + 1] = reinterpret_cast<float(*)[DH + 1]>(smf + (WQ + WK) * (DH + 1));
-  float(*bs)[BST] = reinterpret_cast<float(*)[BST]>(smf + (WQ + 2 * WK) * (DH + 1));
-  float(*ps)[WK + 1] = reinterpret_cast<float(*)[WK + 1]>(smf + WQ * (DH + 1));   // P over K once S is done
-  static_assert(WQ * (WK + 1) <= WK * (DH + 1) && ((WQ + 2 * WK) * (DH + 1)) % 4 == 0, "layout");
-  __shared__ int red[FWD_THREADS / 32];
-  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31, g = lane >> 2, t = lane & 3;
-  const int h = blockIdx.y, a = blockIdx.z, nwin = N / WQ;
-  const int nr = real_count(km, N, n0, red);
-  int w, start;
-  if (!edge_window(blockIdx.x, nr, nwin, w, start)) return;
-  const size_t base = (size_t)a * N;
-  const int kvalid = min(nr, N) - start;                               // keys start + j, j < kvalid, are real
-  const float* bw = bias + (((size_t)h * nwin + w) * WQ) * WK;
-  stage_bias<FWD_THREADS>(bs, bw);
-  stage_rows<WQ, FWD_THREADS>(qs, q, base + WQ * w, ld, h, WQ);
-  stage_rows<WK, FWD_THREADS>(ks, k, base + start, ld, h, kvalid);
-  stage_rows<WK, FWD_THREADS>(vs, v, base + start, ld, h, kvalid);
-  __syncthreads();
-  // S for queries 16 warp .. (16 key tiles of 8)
-  float c[WK / 8][4];
-#pragma unroll
-  for (int nt = 0; nt < WK / 8; ++nt) {
-    c[nt][0] = c[nt][1] = c[nt][2] = c[nt][3] = 0.f;
-    tile_mma<F32, DH>(c[nt], [&](int m, int kk) { return qs[16 * warp + m][kk]; }, [&](int kk, int n) { return ks[8 * nt + n][kk]; });
-  }
-  float mx[2] = {-INFINITY, -INFINITY};
-#pragma unroll
-  for (int nt = 0; nt < WK / 8; ++nt)
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const int r = g + 8 * (i >> 1), j = 8 * nt + 2 * t + (i & 1);
-      const float s = j < kvalid ? fmaf(c[nt][i], QSCALE, bs[16 * warp + r][j]) : -INFINITY;
-      c[nt][i] = s;
-      mx[i >> 1] = fmaxf(mx[i >> 1], s);
-    }
-  float sum[2] = {0.f, 0.f};
-#pragma unroll
-  for (int x = 0; x < 2; ++x) {
-    mx[x] = fmaxf(mx[x], __shfl_xor_sync(0xffffffffu, mx[x], 1));
-    mx[x] = fmaxf(mx[x], __shfl_xor_sync(0xffffffffu, mx[x], 2));
-  }
-#pragma unroll
-  for (int nt = 0; nt < WK / 8; ++nt)
-#pragma unroll
-    for (int i = 0; i < 4; ++i) {
-      const float m = mx[i >> 1];
-      const float e = m == -INFINITY ? 0.f : __expf(c[nt][i] - m);
-      c[nt][i] = e;
-      sum[i >> 1] += e;
-    }
-#pragma unroll
-  for (int x = 0; x < 2; ++x) {
-    sum[x] += __shfl_xor_sync(0xffffffffu, sum[x], 1);
-    sum[x] += __shfl_xor_sync(0xffffffffu, sum[x], 2);
-  }
-  const float inv[2] = {sum[0] > 0.f ? 1.f / sum[0] : 0.f, sum[1] > 0.f ? 1.f / sum[1] : 0.f};
-  if (lse != nullptr && t == 0)
-#pragma unroll
-    for (int x = 0; x < 2; ++x)
-      lse[((size_t)a * NH + h) * N + WQ * w + 16 * warp + g + 8 * x] = sum[x] > 0.f ? (mx[x] + logf(sum[x])) * LOG2E : -INFINITY;
-  __syncthreads();                                                     // every warp's S read K: P goes over it
-#pragma unroll
-  for (int nt = 0; nt < WK / 8; ++nt)
-#pragma unroll
-    for (int i = 0; i < 4; ++i) ps[16 * warp + g + 8 * (i >> 1)][8 * nt + 2 * t + (i & 1)] = c[nt][i] * inv[i >> 1];
-  __syncwarp();                                                        // (a warp reads only its own 16 rows of P)
-  // O = P V for queries 16 warp .. (4 channel tiles of 8)
-#pragma unroll
-  for (int nt = 0; nt < DH / 8; ++nt) {
-    float oc[4] = {0.f, 0.f, 0.f, 0.f};
-    tile_mma<F32, WK>(oc, [&](int m, int kk) { return ps[16 * warp + m][kk]; }, [&](int kk, int n) { return vs[kk][8 * nt + n]; });
-#pragma unroll
-    for (int x = 0; x < 2; ++x) {
-      T* op = o + (base + WQ * w + 16 * warp + g + 8 * x) * DM + DH * h + 8 * nt + 2 * t;
-      st_f(op, oc[2 * x]); st_f(op + 1, oc[2 * x + 1]);
-    }
-  }
-}
-
-extern "C" __global__ void __launch_bounds__(FWD_THREADS, 8)
-local_slide_edges(const __nv_bfloat16* q, const __nv_bfloat16* k, const __nv_bfloat16* v, int ld, const float* bias, const uint8_t* km,
-                  __nv_bfloat16* o, float* lse, int N, int n0) {
-  slide_edges(q, k, v, ld, bias, km, o, lse, N, n0);
-}
-
-extern "C" __global__ void __launch_bounds__(FWD_THREADS, 8)
-local_slide_edges_f32(const float* q, const float* k, const float* v, int ld, const float* bias, const uint8_t* km, float* o, float* lse,
-                      int N, int n0) {
-  slide_edges(q, k, v, ld, bias, km, o, lse, N, n0);
-}
-
 // =================================================================================================================== training (backward)
-// The slid windows' gradients, around the clipped-window backward kernels (the forward with ``save`` ran slide_edges with the LSE, so O and
-// the LSE of the moved windows are right):
+// The slid windows' gradients, around the clipped-window backward kernels (the forward wrote O and
+// the LSE of the moved windows over their slid keys):
 //   local_slide_bwd_prep   grid (5, A): the moved windows' rows of dO [A N, 128] and D [A, 4, N] are copied to sdo [5][A][32][128] /
 //                          sdd [5][A][4][32] and zeroed in place -- the clipped-window kernels then give those queries dS = P (dP - D) = 0
 //                          (no dQ, dK, dV or dbias from them)
