@@ -665,14 +665,14 @@ class _PwaMath(torch.autograd.Function):
         bf = torch.bfloat16
         dres0 = dres[0].contiguous()
         # the residual's gradient is dres itself; the update's is dres * mask / (1 - p) (what autograd of x * mask / (1-p) gives)
-        wv16, wg16, wo16 = _cast_h100_matrices(wv, wg, wo)
         if torch.cuda.get_device_capability(m.device) == (10, 0):
             k = _k100()["pwa"]
-            # the parameter gradients come out of the kernels in the parameters' dtype (.to below is then a no-op): no cast launches
-            wot, wgvT = k.pwa_wprep(wg16, wv16, wo16)  # Wo^T, [Wg; Wv]^T: one launch
+            # the parameter gradients come out of the kernels in the parameters' dtype (.to below is then a no-op): no cast launches;
+            # pwa_wprep reads the (fp32 or bf16) parameters itself: Wo^T, [Wg; Wv]^T, Wg / 2 in bf16, one launch
+            wot, wgvT, wgh = k.pwa_wprep(wg.detach().contiguous(), wv.detach().contiguous(), wo.detach().contiguous())
             # glue2: dgp never leaves the chip -- its consumers (dWg = dgp^T y, dyg = dgp Wg) run inside; dv_bwd adds dv Wv to dyg
             d_o, dyg, dWo, dWg = k.pwa_glue2(
-                o, y, dres0, wg16, wot, dmask, ctx.dscale, int(wo.dtype == bf)
+                o, y, dres0, wgh, wot, dmask, ctx.dscale, int(wo.dtype == bf)
             )
             dv = torch.bmm(
                 w16.transpose(1, 2), d_o
@@ -720,6 +720,7 @@ class _PwaMath(torch.autograd.Function):
         assert (
             k is not None
         )  # the sm_100 branch above returned; dres and m share a device, so _k() ran
+        wv16, wg16, wo16 = _cast_h100_matrices(wv, wg, wo)
         native = native_aux_enabled()
         wot = k["pair3"].transpose(wo16) if native else wo16.t().contiguous()
         dgv = torch.empty(
