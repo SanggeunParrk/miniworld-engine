@@ -102,7 +102,7 @@ class InputFeatureEmbedder(nn.Module):
         # Imported here: the architecture package imports `miniworld_engine.modules`, which imports this file.
         from miniworld_engine.architecture.blocks._engine_impl import to_engine_impl
         from miniworld_engine.architecture.blocks.swa_atom_transformer import SWAAtomTransformer
-        from miniworld_engine.architecture.primitives import Linear
+        from miniworld_engine.architecture.primitives import LayerNorm, Linear
         from miniworld_engine.modules.primitives import RMSNorm
 
         if features not in ("legacy", "esmfold2"):
@@ -118,8 +118,9 @@ class InputFeatureEmbedder(nn.Module):
         self.to_atom_single_cond = Linear(n_in, d_atom, init="default", bias=False)
         if features == "esmfold2":
             # ESMFold2's ``atom_norm``: the projected features are layer-normed once; the result starts the atom stream and is the
-            # condition of every block, so the adaLN modulation sees a bounded input
-            self.atom_norm = nn.LayerNorm(d_atom)
+            # condition of every block, so the adaLN modulation sees a bounded input. The engine LayerNorm (H100 / B200: the general
+            # CUDA LayerNorm) rather than nn.LayerNorm's PyTorch kernels; same parameter names, so checkpoints load unchanged
+            self.atom_norm = LayerNorm(d_atom, implementation=implementation)
         self.atom_transformer = SWAAtomTransformer(
             SWAAtomTransformer.Config(
                 d_atom=d_atom,
@@ -142,7 +143,7 @@ class InputFeatureEmbedder(nn.Module):
         # Terminal norm of the pre-norm stack (GPT-2 / LLaMA ``ln_f``): affine-free, no parameters. ESMFold2 has none; the linear
         # read-out takes an affine LayerNorm, as an LLM's final norm before its head.
         if token_pool == "linear":
-            self.atom_out_norm = nn.LayerNorm(d_atom)
+            self.atom_out_norm = LayerNorm(d_atom, implementation=implementation)
         elif features == "esmfold2":
             self.atom_out_norm = nn.Identity()
         else:
