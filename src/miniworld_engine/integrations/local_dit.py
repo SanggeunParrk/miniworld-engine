@@ -1978,7 +1978,7 @@ def _infer32(single, cond, pair, mask, weights, parallel=False, slide=False):
 #     cond_fwd RMS (hoisted: mod + the K / V tables) -> pre_fwd RMS -> esm_qkrope -> esm_bias (hoisted) -> attn_esm -> post_fwd RMS
 #
 # The row kernels take the AF3 block's 27 parameter slots; ESMFold2 has no conditioning LayerNorm and no projection biases, so those slots hold
-# constants (the LN weights 1, the scale biases 1, the gate biases 0). A gradient, fp32 activations or other options keep the module path.
+# constants (the LN weights 1, the scale biases 1, the gate biases 0). Training: ``_EsmBlock`` below. fp32 activations or other options keep the module path.
 ESM_OPTIONS = (True, "parallel", "slide", 192, 64, "rms_silu", True, True)
 _ESM_ONES = {
     "attention.ada_ln_in.ln_cond.weight",
@@ -1991,6 +1991,7 @@ _ESM_ONES = {
 _ESM_ZEROS = {"attention.to_scale.bias", "transition.to_scale.bias"}
 _ESM_CONST: dict = {}
 _ESM_READY: dict = {}
+_ESM_TRAIN_READY: dict = {}
 
 
 def _esm_const(device, value: float):
@@ -2041,9 +2042,33 @@ def _esm_ready(index: int) -> bool:
     return ok
 
 
+def _esm_train_ready(index: int) -> bool:
+    """Build and load ESMFold2's training kernels (``sm100_atom.KERNELS_ESM_TRAIN``, ``sm100_atom_local.KERNELS_ESM_TRAIN``) on ``index`` once;
+    False after one warning on failure (training calls then keep the module path, inference is unaffected)."""
+    ok = _ESM_TRAIN_READY.get(index)
+    if ok is not None:
+        return ok
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+
+    try:
+        for name in rows.KERNELS_ESM_TRAIN:
+            rows.atom_kernel(name, index)
+        local.load_esm_train(index)
+        rows.atom_dw(index, False)
+        ok = True
+    except Exception as exc:  # a toolchain or driver problem keeps the module path
+        warnings.warn(f"sm_100a ESMFold2 atom training kernels unavailable, keeping the module path: {exc!r}", RuntimeWarning, stacklevel=2)
+        ok = False
+    _ESM_TRAIN_READY[index] = ok
+    return ok
+
+
 def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
-    """B200, exactly ESMFold2's option set at the atom widths, bf16 single / cond / pair (bf16 or fp32 parameters), inference (no gradient
-    recorded), B = 1, the rotary tables [1, N, 16]."""
+    """B200, exactly ESMFold2's option set at the atom widths, bf16 single / cond / pair (bf16 or fp32 parameters), inference or training
+    (``_EsmBlock``), B = 1, the rotary tables [1, N, 16]."""
     from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
     from miniworld_engine.modules.dispatch import KernelBackend
 
@@ -2060,8 +2085,7 @@ def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
     if options != ESM_OPTIONS or a.norm_query.eps != RMS_EPS or a.norm_key.eps != RMS_EPS or a.ln_pair.eps != EPS:
         return False
     params = list(module.parameters())
-    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params)):
-        return False
+    grad = torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *params))
     if (single.dtype, cond.dtype, pair.dtype) != (BF, BF, BF):  # (under autocast too: the activations are bf16 either way)
         return False
     if any(p.dtype not in (BF, F32) or p.device != single.device for p in params):
@@ -2081,7 +2105,7 @@ def _b200_esm_servable(module, single, cond, pair, mask, rope) -> bool:
     if (a.n_head, a.to_query.weight.shape[0], a.to_bias.weight.shape[1], tr.expand_a.weight.shape[0]) != (NH_, DS_, DP_, 2 * DS_):
         return False
     index = single.device.index if single.device.index is not None else torch.cuda.current_device()
-    return _kernels_ready(index) and _esm_ready(index)
+    return _kernels_ready(index) and _esm_ready(index) and (not grad or _esm_train_ready(index))
 
 
 def _esm_cond_pack(weights, wc):
@@ -2155,11 +2179,208 @@ def _esm_fwd(
 
 
 def _esm_block(module, single, cond, pair, mask, rope):
-    """ESMFold2's block on the sm_100a kernels; ``serves()`` must have accepted the call (inference)."""
+    """ESMFold2's block on the sm_100a kernels; ``serves()`` must have accepted the call (inference, or training through ``_EsmBlock``)."""
     n0 = single.shape[2]
     n = _padded_length(n0)
     cos, sin = (
         (t[0].float() if n == n0 else F.pad(t[0].float(), (0, 0, 0, n - n0))).contiguous() for t in rope
     )
     a = module.attention
-    return _esm_fwd(single, cond, pair, mask, _esm_weights(module), [a.norm_query.weight, a.norm_key.weight], cos, sin)
+    weights, qkw = _esm_weights(module), [a.norm_query.weight, a.norm_key.weight]
+    if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights, *qkw)):
+        return _EsmBlock.apply(mask, cos, sin, single, cond, pair, *weights, *qkw)
+    return _esm_fwd(single, cond, pair, mask, weights, qkw, cos, sin)
+
+
+# ------------------------------------------------------------------------------------------------------------ ESMFold2 training (bf16)
+# The forward saves what the backward reads; the backward runs
+#
+#     tr_bwd_gate RMS -> post_bwd RMS (dO, D) -> esm dq (+ dbias) / dkv -> q / k norm + rotary backward -> esm pair-bias backward
+#     -> pre_bwd RMS (AdaLN 1 and the K / V AdaLN, dmkv) -> [dmod | dmkv] [Wmod; Wkv] (cuBLAS, K = 1024) -> SiLU backward -> atom_dw
+#
+# (``-DRMS=1`` builds of the row kernels; ``lattn_esm_dq.cu`` / ``lattn_esm_dkv.cu``, ``lesm.cu``, ``lbias.cu``). Every conditioning table of
+# ESMFold2's block is a product of silu(c), so the conditioning's gradient is one K = 1024 product of the eight tables' gradients (the
+# backward layout of dmod, then the K / V AdaLN's [scale | shift]) and the weight gradients of all eight are two grouped problems against
+# sc = rn(silu(c)). The constant slots of ``_esm_weights`` get no gradient.
+_ESM_SAVED = ("mod", "mkv", "q", "k", "qn", "kn", "v", "sg", "x1", "xkv", "bias2", "o", "lse", "u", "a2", "x2", "t")
+_ESM_GRAD = tuple(name for name in (*WEIGHTS, *CROSS_WEIGHTS) if name not in _ESM_ONES and name not in _ESM_ZEROS)
+_ESM_COND_BWD = (   # the weights of [dmod | dmkv] in the backward layout: [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts | dkv_scale | dkv_shift]
+    "attention.ada_ln_in.to_scale.weight",
+    "attention.ada_ln_in.to_bias.weight",
+    "transition.ada_ln_in.to_scale.weight",
+    "transition.ada_ln_in.to_bias.weight",
+    "attention.to_scale.weight",
+    "transition.to_scale.weight",
+    "attention.ada_ln_kv.to_scale.weight",
+    "attention.ada_ln_kv.to_bias.weight",
+)
+
+
+def _esm_train_fwd_fake(single, cond, pair, mask, weights, qkw, cos, sin):
+    a, _, n0, _ = single.shape
+    n = _padded_length(n0)
+    m = a * n
+    t = lambda w=DS_, d=BF: single.new_empty((m, w), dtype=d)  # noqa: E731
+    nwin = n // QUERIES
+    shapes = {"mod": t(6 * DS_), "mkv": t(2 * DS_), "bias2": single.new_empty((NH_, nwin, QUERIES, 160), dtype=F32),
+              "lse": single.new_empty((a, NH_, n), dtype=F32)}
+    return [torch.empty_like(single), *(shapes[k] if k in shapes else t() for k in _ESM_SAVED)]
+
+
+@opaque(fake=_esm_train_fwd_fake, name="local_dit_block_esm_train_fwd")
+def _esm_train_fwd(
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    qkw: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> list[torch.Tensor]:
+    """ESMFold2's block output [A, 1, N, 128] bf16 and the activations its backward reads (``_ESM_SAVED``; nothing hoisted)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+
+    a, _, n0, _ = single.shape
+    n = _padded_length(n0)
+    m = a * n
+    with torch.cuda.device(single.device):
+        wc, wp, wo, _ = _weights(weights[: len(WEIGHTS)], backward=True)
+        wrms, brms = _esm_cond_pack(weights, wc)
+        s2 = _padded(single, n).reshape(m, DS_).contiguous()
+        c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+        mod, mkv = rows.cond_fwd(c2, wrms, brms, wc[2], wc[3], rms=True)
+        keys = _keys(mask, n0, n)
+        bias2 = local.esm_bias(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], keys, n0)
+        bs = _kv_pack(weights)[1]
+        q, k, v, sg, x1, xkv = rows.pre_fwd_kv(s2, mod, wp[0], wp[1], mkv, bs, save=True, eps=RMS_EPS, parallel=True, rms=True)
+        wq, wk = _capture.param_forms(("local_dit_esm_qk",), qkw, lambda: [w.detach().float().contiguous() for w in qkw])
+        qn, kn = local.esm_qkrope(q, k, wq, wk, cos, sin, RMS_EPS)
+        lse = torch.empty(a, NH_, n, device=single.device, dtype=F32)
+        o = local.attn_esm_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), bias2, lse=lse)
+        out, u, a2, x2, t = rows.post_fwd(s2, o.view(m, DS_), sg, mod, *wo, save=True, eps=RMS_EPS, rms=True)
+    out = _unpadded(out.view(a, 1, n, DS_), single.shape)
+    return [out, mod, mkv, q, k, qn, kn, v, sg, x1, xkv, bias2, o.view(m, DS_), lse, u, a2, x2, t]
+
+
+def _esm_cond_bwd_pack(weights):
+    """[Wsc1; Wbi1; Wsc2; Wbi2; Wos; Wts; Wkv_scale; Wkv_shift] [1024, 128] bf16: the weights of the backward layout of [dmod | dmkv]."""
+    named = dict(zip((*WEIGHTS, *CROSS_WEIGHTS), weights, strict=True))
+    ws = [named[name] for name in _ESM_COND_BWD]
+
+    def build():
+        with torch.no_grad():
+            return torch.cat([w.to(BF) for w in ws]).contiguous()
+
+    return _capture.param_forms(("local_dit_esm_cond_bwd",), ws, build)
+
+
+def _esm_bwd_fake(dy, single, cond, pair, mask, weights, qkw, cos, sin, saved):
+    named = dict(zip((*WEIGHTS, *CROSS_WEIGHTS), weights, strict=True))
+    return [torch.empty_like(single), torch.empty_like(cond), torch.empty_like(pair), *(torch.empty_like(named[k]) for k in _ESM_GRAD),
+            *(torch.empty_like(w) for w in qkw)]
+
+
+@opaque(fake=_esm_bwd_fake, name="local_dit_block_esm_bwd")
+def _esm_bwd(
+    dy: torch.Tensor,
+    single: torch.Tensor,
+    cond: torch.Tensor,
+    pair: torch.Tensor,
+    mask: torch.Tensor | None,
+    weights: list[torch.Tensor],
+    qkw: list[torch.Tensor],
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+    saved: list[torch.Tensor],
+) -> list[torch.Tensor]:
+    """d single, d cond, d pair, the gradients of ``_ESM_GRAD`` and of the q / k norm weights, each in its parameter's dtype (fresh tensors)."""
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom as rows
+    from miniworld_engine.kernels.augmented_attention.cuda import (
+        sm100_atom_local as local,
+    )
+    from miniworld_engine.modules.adaptive_layernorm.module import RMS_EPS
+
+    mod, mkv, q, k, qn, kn, v, sg, x1, xkv, bias2, o, lse, u, a2, x2, t = saved
+    a, _, n0, _ = single.shape
+    n = _padded_length(n0)
+    m = a * n
+    dev = single.device
+    with torch.cuda.device(dev):
+        wc, wp, wo, wb = _weights(weights[: len(WEIGHTS)], backward=True)
+        s2 = _padded(single, n).reshape(m, DS_).contiguous()
+        c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+        dy = _padded(dy, n).reshape(m, DS_).to(BF).contiguous()
+        dmod = torch.empty(m, 8 * DS_, device=dev, dtype=BF)   # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts | dkv_scale | dkv_shift]
+        dm6 = dmod[:, : 6 * DS_]
+        dp = torch.empty(m, 4 * DS_, device=dev, dtype=BF)      # [dq | dk | dv | dg]
+        dbias_cols = torch.zeros(6 * DS_, device=dev)          # (ESMFold2 has none of these biases: discarded)
+        dbq = torch.zeros(DS_, device=dev)
+        dbs = torch.zeros(DS_, device=dev)
+        dd = torch.empty(a, NH_, n, device=dev)
+        dt, hh, dab = rows.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dm6, dbias_cols[640:], rms=True)
+        da, du, gated, do = rows.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dm6, dp, dd, dbias_cols, n, eps=RMS_EPS, rms=True)
+        db2 = local.attn_esm_bwd_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias2, lse, dd, dp)
+        wq, wk = _capture.param_forms(("local_dit_esm_qk",), qkw, lambda: [w.detach().float().contiguous() for w in qkw])
+        dqkw = local.esm_qkrope_bwd(dp[:, :DS_], dp[:, DS_ : 2 * DS_], q, k, wq, wk, cos, sin, RMS_EPS)
+        keys = _keys(mask, n0, n)
+        dz, dgamma, dwb = local.esm_bias_bwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db2, keys, n0)
+        bs = _kv_pack(weights)[1]
+        ds, _ = rows.pre_bwd_kv(dp, s2, mod, da, wb["WpT"], dm6, dbias_cols, dbq, x1, mkv, bs, dbs, eps=RMS_EPS, parallel=True, rms=True,
+                                dmkv=dmod[:, 6 * DS_ :])
+        g = torch.mm(dmod, _esm_cond_bwd_pack(weights), out_dtype=F32)   # the tables' gradient through their weights, fp32
+        dc, sc = local.esm_silu_bwd(c2, g)
+        A_ = "attention."
+        spec = [
+            (dt, hh, [("transition.squeeze.weight", 0)]),
+            (dab, x2, [("transition.expand_a.weight", 0), ("transition.expand_a.weight", 1),
+                       ("transition.expand_b.weight", 0), ("transition.expand_b.weight", 1)]),
+            (du, gated, [(A_ + "to_out.weight", 0)]),
+            (dmod[:, : 4 * DS_], sc, [(name, 0) for name in _ESM_COND_BWD[:4]]),
+            (dmod[:, 4 * DS_ :], sc, [(name, 0) for name in _ESM_COND_BWD[4:]]),
+            (dp[:, 0:DS_], x1, [(A_ + "to_query.weight", 0)]),
+            (dp[:, 3 * DS_ : 4 * DS_], x1, [(A_ + "to_gate.weight", 0)]),
+            (dp[:, DS_ : 3 * DS_], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
+        ]
+        fused = _fused_wgrads(spec, weights, WEIGHTS + CROSS_WEIGHTS, False, dev, m)
+    named = dict(zip((*WEIGHTS, *CROSS_WEIGHTS), weights, strict=True))
+    extra = {"attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb}
+    grads = [fused[name] if name in fused else extra[name].to(named[name].dtype).reshape(named[name].shape).clone() for name in _ESM_GRAD]
+    dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
+    return [
+        _unpadded(ds.view(a, 1, n, DS_), single.shape),
+        _unpadded(dc.view(a, 1, n, DC_), cond.shape),
+        dpair,
+        *grads,
+        dqkw[:32].to(qkw[0].dtype).clone(),
+        dqkw[32:].to(qkw[1].dtype).clone(),
+    ]
+
+
+class _EsmBlock(torch.autograd.Function):
+    """ESMFold2's block forward and backward on the sm_100a kernels (bf16 activations); gradients for single, cond, pair and every parameter
+    (the constant slots of ``_esm_weights`` get None)."""
+
+    @staticmethod
+    def forward(ctx, mask, cos, sin, single, cond, pair, *params):
+        nw = len(WEIGHTS) + len(CROSS_WEIGHTS)
+        weights, qkw = list(params[:nw]), list(params[nw:])
+        out, *saved = _esm_train_fwd(single, cond, pair, mask, weights, qkw, cos, sin)
+        ctx.save_for_backward(mask, cos, sin, single, cond, pair, *saved, *params)
+        ctx.n_saved = len(saved)
+        return out
+
+    @staticmethod
+    @once_differentiable
+    def backward(ctx, dy):
+        mask, cos, sin, single, cond, pair, *rest = ctx.saved_tensors
+        saved, params = rest[: ctx.n_saved], rest[ctx.n_saved :]
+        nw = len(WEIGHTS) + len(CROSS_WEIGHTS)
+        ds, dc, dpair, *g = _esm_bwd(dy, single, cond, pair, mask, list(params[:nw]), list(params[nw:]), cos, sin, list(saved))
+        it = iter(g)
+        out = [None if (name in _ESM_ONES or name in _ESM_ZEROS) else next(it) for name in (*WEIGHTS, *CROSS_WEIGHTS)]
+        return (None, None, None, ds, dc, dpair, *out, next(it), next(it))
