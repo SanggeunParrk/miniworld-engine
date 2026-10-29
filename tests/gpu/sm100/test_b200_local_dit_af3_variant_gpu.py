@@ -231,10 +231,10 @@ def test_shared_conditioning_training(cross, kv_norm, key_window, a, n, real, mo
     calls = []
     from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
 
-    orig = local.sample_sum
-    monkeypatch.setattr(local, "sample_sum", lambda *x, **k: calls.append("sum") or orig(*x, **k))
+    orig = local.TableSums.finish
+    monkeypatch.setattr(local.TableSums, "finish", lambda *x, **k: calls.append("sum") or orig(*x, **k))
     fused = _train_shared(eng, s, c0, z, w, mask, BF)
-    assert calls == ["sum"], calls                       # the shared path ran (the tables' gradient summed once)
+    assert calls == ["sum"], calls                       # the shared path ran (the tables' gradient summed over the samples in the row kernels)
     override_setting(monkeypatch, "local_dit_sm100", "0")
     module = _train_shared(eng, s, c0, z, w, mask, BF)
     assert set(fused) == set(truth)
@@ -245,6 +245,53 @@ def test_shared_conditioning_training(cross, kv_norm, key_window, a, n, real, mo
         assert torch.isfinite(f).all(), k
         ef, em = _rel(f, t), _rel(m, t)
         assert ef < 1.5 * em + 3e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+@pytest.mark.parametrize("cross", [True, False], ids=["cross", "self"])
+@pytest.mark.parametrize(("kv_norm", "key_window"), [("chained", "pad"), ("parallel", "slide")])
+@pytest.mark.parametrize(("a", "n", "real"), [(4, 512, 450), (3, 300, 300), (16, 256, 256)])
+def test_shared_conditioning_training_fp32(cross, kv_norm, key_window, a, n, real, monkeypatch):
+    """The fp32 path (TF32) with a shared conditioning: the tables made once ([N, ..] read at row r % N by the fp32 row kernels and the
+    gated-residual GEMMs), their gradient summed over the samples in the AdaLN / tail backward kernels, the conditioning's backward on N
+    rows; every gradient against the fp64 module, no worse than the module path with TF32 on."""
+    if not cross and kv_norm == "parallel":
+        pytest.skip("the parallel K/V norm needs the cross mode")
+    torch.manual_seed(7)
+    kw = dict(cross_attention=cross, kv_norm=kv_norm, key_window=key_window)
+    ref = LocalDiTBlock(implementation=ImplementationType.PYTORCH, **kw)
+    with torch.no_grad():
+        for name, p in ref.named_parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
+    eng = LocalDiTBlock(implementation=ImplementationType.MINIWORLD, **kw)
+    eng.load_state_dict(ref.state_dict())
+    ref, eng = ref.cuda().double(), eng.cuda().float()
+    s, c, z, mask = _inputs(a, n, real, seed=8)
+    c0 = c[:1]
+    w = torch.randn(a, 1, n, 128, device="cuda", dtype=torch.float64)
+    w[:, :, real:] = 0
+    truth = _train_shared(ref, s, c0, z, w, mask, torch.float64)
+    from miniworld_engine.integrations import local_dit
+
+    seen = []
+    orig = local_dit._LocalBlock32.apply
+    monkeypatch.setattr(local_dit._LocalBlock32, "apply", lambda *x: seen.append(x[4].shape[0]) or orig(*x))
+    fused = _train_shared(eng, s, c0, z, w, mask, F32)
+    assert seen == [1], seen                             # the fp32 kernels ran on the one [1, 1, N] conditioning
+    override_setting(monkeypatch, "local_dit_sm100", "0")
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        module = _train_shared(eng, s, c0, z, w, mask, F32)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+    assert set(fused) == set(truth)
+    for k in truth:
+        f, t, m = fused[k], truth[k], module[k]
+        if k == "out":
+            f, t, m = f[:, :, :real], t[:, :, :real], m[:, :, :real]
+        assert torch.isfinite(f).all(), k
+        ef, em = _rel(f, t), _rel(m, t)
+        assert ef < 1.5 * em + 1e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
 
 
 def test_shared_conditioning_matches_the_materialised_one():

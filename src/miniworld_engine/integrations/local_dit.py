@@ -971,6 +971,7 @@ def _block_bwd(
         c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
         dy = _padded(dy, n).reshape(m, DS_).to(BF).contiguous()
         dtab = torch.empty(m, (8 if cross else 6) * DS_, device=dev, dtype=BF) if shared else None   # per sample row: [dmod | dmkv]
+        tsums = local.TableSums(a, n, cross, dev) if shared else None   # (shared: the row kernels sum it over the samples instead)
         dmod = (
             dtab[:, : 6 * DS_] if shared else torch.empty(m, 6 * DS_, device=dev, dtype=BF)
         )  # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts]
@@ -984,7 +985,7 @@ def _block_bwd(
         )
         dd = torch.empty(a, NH_, n, device=dev)
         dt, hh, dab = rows.tr_bwd_gate(
-            dy, t, mod, x2, wo[1], wb["WsT"], dmod, dbias_cols[640:]
+            dy, t, mod, x2, wo[1], wb["WsT"], dmod, dbias_cols[640:], part=tsums
         )
         da, du, gated, do = rows.post_bwd(
             dab,
@@ -1001,6 +1002,7 @@ def _block_bwd(
             dd,
             dbias_cols,
             n,
+            part=tsums,
         )
         if slide:  # the moved windows' dO / D rows out of the clipped-window kernels' way
             slid = local.slide_bwd_prep(do, dd, _keys(mask, n0, n), n0, a)
@@ -1065,12 +1067,12 @@ def _block_bwd(
                 # dk Wk + dv Wv through the K / V AdaLN into dx1, then AdaLN 1: one kernel; dmkv = [d pre-sigmoid scale | dxkv]
                 ds, dmkv = rows.pre_bwd_kv(
                     dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, x1, mkv, bs, dbs, parallel=parallel,
-                    dmkv=dtab[:, 6 * DS_ :] if shared else None,
+                    dmkv=dtab[:, 6 * DS_ :] if shared else None, part=tsums,
                 )
             else:
-                ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq)
-            if shared:  # the tables' gradient summed over the samples (fixed order): the conditioning backward runs on N rows
-                dsum = local.sample_sum(dtab, a)
+                ds = rows.pre_bwd(dp, s2, mod, da, wb["WpT"], dmod, dbias_cols, dbq, part=tsums)
+            if shared:  # the tables' gradient summed over the samples (in the row kernels, fixed order): the conditioning backward on N rows
+                dsum = tsums.finish()
                 dmod = dsum[:, : 6 * DS_]
                 if cross:
                     dmkv = dsum[:, 6 * DS_ :]
@@ -1295,8 +1297,8 @@ def block(module, single, cond, pair, mask=None, rope=None):
     if single.dtype == F32:  # the fp32 path (TF32 tensor cores)
         if torch.is_grad_enabled() and any(
             t.requires_grad for t in (single, cond, pair, *weights)
-        ):
-            return _LocalBlock32.apply(parallel, slide, mask, single, cond, pair, *weights)
+        ):   # training: a conditioning shared by the samples makes its tables once and sums their gradient over the samples
+            return _LocalBlock32.apply(parallel, slide, mask, single, _shared_cond(single, cond), pair, *weights)
         return _infer32(single, cond, pair, mask, weights, parallel, slide)
     if torch.is_grad_enabled() and any(
         t.requires_grad for t in (single, cond, pair, *weights)
@@ -1593,11 +1595,14 @@ def _fwd_fake32(single, cond, pair, mask, weights, save, parallel=False, slide=F
     def tile(width=DS_):
         return single.new_empty((m, width))
 
+    def ctile(width=DS_):                                            # the conditioning's rows (n when shared by the samples)
+        return single.new_empty((cond.shape[0] * n, width))
+
     saved = [
         out,
-        tile(6 * DS_),
-        tile(),
-        tile(),
+        ctile(6 * DS_),
+        ctile(),
+        ctile(),
         tile(),
         tile(4 * DS_),
         single.new_empty((NH_, n // QUERIES, QUERIES, KEYS)),
@@ -1611,7 +1616,7 @@ def _fwd_fake32(single, cond, pair, mask, weights, save, parallel=False, slide=F
         tile(),
     ]
     return (
-        [*saved, tile(), tile(2 * DS_), tile()]
+        [*saved, ctile(), ctile(2 * DS_), tile()]
         if len(weights) > len(WEIGHTS)
         else saved
     )
@@ -1647,7 +1652,7 @@ def _block_fwd32(
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         mod, cn1, cn2, cnkv, mkv = _cond_tables32(
             cond,
-            lambda: _padded(cond, n).reshape(m, DC_).contiguous(),
+            lambda: _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous(),   # (training: one [1, 1, N] conditioning when shared)
             n,
             weights,
             pk,
@@ -1783,11 +1788,12 @@ def _block_bwd32(
         pk = _weights32_bwd(weights)
         qc, kc, vc, gc = _P_COLS[cross]
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
-        c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+        rc = cond.shape[0] * n                                       # the tables' rows: n when the samples share the conditioning
+        c2 = _padded(cond, n).reshape(rc, DC_).contiguous()
         dy = _padded(dy, n).reshape(m, DS_).float().contiguous()
         dmod = torch.empty(
-            m, 6 * DS_, device=dev, dtype=F32
-        )  # d [s1 | bi1 | s2 | bi2 | so | st] (pre-sigmoid for the gates)
+            rc, 6 * DS_, device=dev, dtype=F32
+        )  # d [s1 | bi1 | s2 | bi2 | so | st] (pre-sigmoid for the gates; summed over the samples in the row kernels when shared)
         dt = rows.tail_bwd32(dy, t, mod[:, _ST], dmod[:, _ST])  # out = a1 + st t
         dh = rows.gemm32(dt, pk.wsT)  # [m, 256]
         dab, hh = rows.swiglu_bwd32(dh, u)
@@ -1837,7 +1843,7 @@ def _block_bwd32(
             cnkv, mkv, xkv = extra
             dx1q = rows.gemm32(dp, pk.wpT, k=2 * DS_)
             dxkv = rows.gemm32(dp, pk.wpT, k=2 * DS_, a_col0=2 * DS_, b_col0=2 * DS_)
-            dmkv = torch.empty(m, 2 * DS_, device=dev, dtype=F32)
+            dmkv = torch.empty(rc, 2 * DS_, device=dev, dtype=F32)
             if parallel:  # the K / V AdaLN of s: its LN backward joins the residual's gradient
                 dres, _ = rows.adaln_bwd32(
                     s2, mkv[:, :DS_], dxkv, da1, dmkv[:, :DS_], dmkv[:, DS_:]
@@ -1937,7 +1943,14 @@ def _block_bwd32(
                     ],
                 )
             ]
-        fused = _fused_wgrads(spec, weights, names, True, dev, m)
+        if rc != m:  # shared conditioning: the tables' products have n rows, their own launch
+            cond_names = {"attention.ada_ln_in.to_scale.weight", "transition.ada_ln_in.to_scale.weight", "attention.to_scale.weight",
+                          "attention.ada_ln_kv.to_scale.weight"}
+            cspec = [e for e in spec if e[2][0][0] in cond_names]
+            fused = _fused_wgrads([e for e in spec if e[2][0][0] not in cond_names], weights, names, True, dev, m)
+            fused.update(_fused_wgrads(cspec, weights, names, True, dev, rc))
+        else:
+            fused = _fused_wgrads(spec, weights, names, True, dev, m)
     grads: dict[str, torch.Tensor] = {
         "attention.ada_ln_in.ln_cond.weight": dgc[0:128],
         "attention.ada_ln_in.to_scale.bias": dcols[0:128],
@@ -1968,7 +1981,7 @@ def _block_bwd32(
     dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [
         _unpadded(ds.view(a, 1, n, DS_), single.shape),
-        _unpadded(dc.view(a, 1, n, DC_), cond.shape),
+        _unpadded(dc.view(cond.shape[0], 1, n, DC_), cond.shape),
         dpair,
         *per_weight,
     ]
@@ -2244,8 +2257,8 @@ def _esm_block(module, single, cond, pair, mask, rope):
     a = module.attention
     weights, qkw = _esm_weights(module), [a.norm_query.weight, a.norm_key.weight]
     if single.dtype == F32:   # the fp32 path (TF32 tensor cores)
-        if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights, *qkw)):
-            return _EsmBlock32.apply(mask, cos, sin, single, cond, pair, *weights, *qkw)
+        if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights, *qkw)):   # (shared conditioning: tables once)
+            return _EsmBlock32.apply(mask, cos, sin, single, _shared_cond(single, cond), pair, *weights, *qkw)
         return _esm_fwd32(single, cond, pair, mask, weights, qkw, cos, sin, False)[0]
     cond = _shared_cond(single, cond)
     if torch.is_grad_enabled() and any(t.requires_grad for t in (single, cond, pair, *weights, *qkw)):
@@ -2381,13 +2394,15 @@ def _esm_bwd(
         dy = _padded(dy, n).reshape(m, DS_).to(BF).contiguous()
         dmod = torch.empty(m, 8 * DS_, device=dev, dtype=BF)   # [dsc1 | dbi1 | dsc2 | dbi2 | dos | dts | dkv_scale | dkv_shift]
         dm6 = dmod[:, : 6 * DS_]
+        tsums = local.TableSums(a, n, True, dev) if shared else None   # (shared: the row kernels sum the tables' gradient over the samples)
         dp = torch.empty(m, 4 * DS_, device=dev, dtype=BF)      # [dq | dk | dv | dg]
         dbias_cols = torch.zeros(6 * DS_, device=dev)          # (ESMFold2 has none of these biases: discarded)
         dbq = torch.zeros(DS_, device=dev)
         dbs = torch.zeros(DS_, device=dev)
         dd = torch.empty(a, NH_, n, device=dev)
-        dt, hh, dab = rows.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dm6, dbias_cols[640:], rms=True)
-        da, du, gated, do = rows.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dm6, dp, dd, dbias_cols, n, eps=RMS_EPS, rms=True)
+        dt, hh, dab = rows.tr_bwd_gate(dy, t, mod, x2, wo[1], wb["WsT"], dm6, dbias_cols[640:], rms=True, part=tsums)
+        da, du, gated, do = rows.post_bwd(dab, dy, a2, mod, u, sg, o, wb["WuT"], wb["WoT"], dm6, dp, dd, dbias_cols, n, eps=RMS_EPS, rms=True,
+                                          part=tsums)
         db2 = local.attn_esm_bwd_sm100(qn.view(a, n, DS_), kn.view(a, n, DS_), v.view(a, n, DS_), do.view(a, n, DS_), bias2, lse, dd, dp)
         wq, wk = _capture.param_forms(("local_dit_esm_qk",), qkw, lambda: [w.detach().float().contiguous() for w in qkw])
         dqkw = local.esm_qkrope_bwd(dp[:, :DS_], dp[:, DS_ : 2 * DS_], q, k, wq, wk, cos, sin, RMS_EPS)
@@ -2395,8 +2410,8 @@ def _esm_bwd(
         dz, dgamma, dwb = local.esm_bias_bwd(_trunk(pair, n), weights[_GAMMA], weights[_WBIAS], db2, keys, n0)
         bs = _kv_pack(weights)[1]
         ds, _ = rows.pre_bwd_kv(dp, s2, mod, da, wb["WpT"], dm6, dbias_cols, dbq, x1, mkv, bs, dbs, eps=RMS_EPS, parallel=True, rms=True,
-                                dmkv=dmod[:, 6 * DS_ :])
-        dtab = local.sample_sum(dmod, a) if shared else dmod      # summed over the samples (fixed order) when they share the conditioning
+                                dmkv=dmod[:, 6 * DS_ :], part=tsums)
+        dtab = tsums.finish() if shared else dmod      # summed over the samples (in the row kernels, fixed order) when they share the conditioning
         g = torch.mm(dtab, _esm_cond_bwd_pack(weights), out_dtype=F32)   # the tables' gradient through their weights, fp32
         dc, sc = local.esm_silu_bwd(c2, g)
         A_ = "attention."
@@ -2529,7 +2544,7 @@ def _esm_fwd32_fake(single, cond, pair, mask, weights, qkw, cos, sin, save):
     n = _padded_length(n0)
     m = a * n
     widths = {"tab": 8 * DS_, "p": 4 * DS_, "u": 4 * DS_}
-    shapes = {"bias2": (NH_, n // QUERIES, QUERIES, 160), "lse": (a, NH_, n)}
+    shapes = {"bias2": (NH_, n // QUERIES, QUERIES, 160), "lse": (a, NH_, n), "tab": (cond.shape[0] * n, 8 * DS_)}
     return [out, *(single.new_empty(shapes[k] if k in shapes else (m, widths.get(k, DS_))) for k in _ESM_SAVED32)]
 
 
@@ -2561,8 +2576,8 @@ def _esm_fwd32(
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
         wkey = tuple((w.data_ptr(), w._version) for w in weights)
 
-        def tables():
-            c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+        def tables():   # (training with a shared conditioning: [N, 1024], read at row r % N)
+            c2 = _padded(cond, n).reshape(cond.shape[0] * n, DC_).contiguous()
             return rows.gemm32(rows.silu32(c2), pk.wcond, bias=pk.bcond)
 
         tab = _hoisted(_HOIST_COND, cond, ("esm32", wkey, n), tables) if (_hoisting() and not save) else tables()
@@ -2650,9 +2665,10 @@ def _esm_bwd32_op(
     with torch.cuda.device(dev):
         pk, bk = _esm_pack32(weights, qkw), _esm_pack32_bwd(weights, qkw)
         s2 = _padded(single, n).reshape(m, DS_).contiguous()
-        c2 = _padded(cond, n).reshape(m, DC_).contiguous()
+        rc = cond.shape[0] * n                                   # the tables' rows: n when the samples share the conditioning
+        c2 = _padded(cond, n).reshape(rc, DC_).contiguous()
         dy = _padded(dy, n).reshape(m, DS_).float().contiguous()
-        dtab = torch.empty(m, 8 * DS_, device=dev, dtype=F32)   # d [s1 | bi1 | s2 | bi2 | so | st | kv scale | kv shift]
+        dtab = torch.empty(rc, 8 * DS_, device=dev, dtype=F32)  # d [s1 | bi1 | s2 | bi2 | so | st | kv scale | kv shift] (summed over the samples)
         dt = rows.tail_bwd32(dy, t, tab[:, _ST], dtab[:, _ST], rms=True)
         dab, hh = rows.swiglu_bwd32(rows.gemm32(dt, bk.wsT), u)
         dx2 = rows.gemm32(dab, bk.wuT)
@@ -2687,14 +2703,18 @@ def _esm_bwd32_op(
             (dp[:, : 2 * DS_], x1, [(A_ + "to_query.weight", 0), (A_ + "to_gate.weight", 0)]),
             (dp[:, 2 * DS_ :], xkv, [(A_ + "to_key.weight", 0), (A_ + "to_value.weight", 0)]),
         ]
-        fused = _fused_wgrads(spec, weights, WEIGHTS + CROSS_WEIGHTS, True, dev, m)
+        if rc != m:  # shared conditioning: the tables' products have n rows, their own launch
+            fused = _fused_wgrads(spec[:3] + spec[5:], weights, WEIGHTS + CROSS_WEIGHTS, True, dev, m)
+            fused.update(_fused_wgrads(spec[3:5], weights, WEIGHTS + CROSS_WEIGHTS, True, dev, rc))
+        else:
+            fused = _fused_wgrads(spec, weights, WEIGHTS + CROSS_WEIGHTS, True, dev, m)
     named = dict(zip((*WEIGHTS, *CROSS_WEIGHTS), weights, strict=True))
     extra = {"attention.to_query.bias": dbq, "attention.ln_pair.weight": dgamma, "attention.to_bias.weight": dwb}
     grads = [fused[name] if name in fused else extra[name].to(named[name].dtype).reshape(named[name].shape).clone() for name in _ESM_GRAD]
     dpair = dz[: pair.shape[1]].reshape(pair.shape).clone()
     return [
         _unpadded(ds.view(a, 1, n, DS_), single.shape),
-        _unpadded(dc.view(a, 1, n, DC_), cond.shape),
+        _unpadded(dc.view(cond.shape[0], 1, n, DC_), cond.shape),
         dpair,
         *grads,
         dqkw[:32].to(qkw[0].dtype).clone(),

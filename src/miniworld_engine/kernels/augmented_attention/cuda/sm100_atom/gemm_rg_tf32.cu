@@ -53,7 +53,7 @@ DEVI void ld_chunk(uint32_t taddr, float (&v)[32]) {
 extern "C" __global__ void __launch_bounds__(512, 1)
 atom_gemm_rg_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mo,
                   const __grid_constant__ CUtensorMap mo2, const __grid_constant__ CUtensorMap mres, const __grid_constant__ CUtensorMap mgate,
-                  int M, int K, int save2) {
+                  int M, int K, int save2, int grows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -145,7 +145,7 @@ atom_gemm_rg_tf32(const __grid_constant__ CUtensorMap ma, const __grid_constant_
         const int r0 = tile_m0(i) + 32 * qd;
         mbar_expect_tx(&B.rg[e], 2 * EPB);
         tma_load_2d(rbuf, &mres, &B.rg[e], 32 * c, r0);
-        tma_load_2d(gbuf, &mgate, &B.rg[e], 32 * c, r0);
+        tma_load_2d(gbuf, &mgate, &B.rg[e], 32 * c, r0 % grows);         // (the gate table may be shared by the samples)
       }
     };
     if (my > 0) fetch(0, wg);

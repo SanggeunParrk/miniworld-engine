@@ -350,3 +350,35 @@ local_sample_sum(const __nv_bfloat16* __restrict__ x, int ldx, __nv_bfloat16* __
         make_uint4(pack_bf16(acc[0], acc[1]), pack_bf16(acc[2], acc[3]), pack_bf16(acc[4], acc[5]), pack_bf16(acc[6], acc[7]));
   }
 }
+
+// local_table_sum: the shared conditioning's table gradient out [mrows, ldo] (bf16) from the row kernels' partials (sm100_atom/tsum.cuh):
+// out[16 t + r, c] = the sum over the slots of table tile t of part[t][j][r][c'] (fp32, in slot order: deterministic). Up to three sources
+// (p, C, split, col0, col1; grid y; p null: none): column c' of a source goes to col0 + c' (c' < split) or col1 + c' - split. A thread
+// per (table row, 8 columns). The slots of tile t are the warpgroup slots u = owner(t A) .. owner(t A + A - 1) whose range is not
+// empty (lo(u) = floor(ntile u / U), owner(g) = floor(((g + 1) U - 1) / ntile)), slot j = u - owner(t A).
+DEVI int ts_lo(int v, int U, int ntile) { return (int)(((long long)ntile * v) / U); }
+DEVI int ts_owner(int g, int U, int ntile) { return (int)((((long long)g + 1) * U - 1) / ntile); }
+extern "C" __global__ void __launch_bounds__(256)
+local_table_sum(const float* __restrict__ p0, int C0, int sp0, int a0, int b0, const float* __restrict__ p1, int C1, int sp1, int a1, int b1,
+                const float* __restrict__ p2, int C2, int sp2, int a2, int b2, __nv_bfloat16* __restrict__ out, int ldo, int mrows, int A, int U,
+                int ntile, int J) {
+  const int src = blockIdx.y;                                           // the source: grid y
+  const float* __restrict__ p = src == 0 ? p0 : src == 1 ? p1 : p2;
+  const int C = src == 0 ? C0 : src == 1 ? C1 : C2, sp = src == 0 ? sp0 : src == 1 ? sp1 : sp2;
+  const int ca = src == 0 ? a0 : src == 1 ? a1 : a2, cb = src == 0 ? b0 : src == 1 ? b1 : b2;
+  if (p == nullptr) return;
+  const int groups = C >> 3, total = mrows * groups;                    // (< 2^31)
+  for (int e = blockIdx.x * blockDim.x + threadIdx.x; e < total; e += gridDim.x * blockDim.x) {
+    const int row = e / groups, c = 8 * (e - row * groups), t = row >> 4, r = row & 15;
+    const int u0 = ts_owner(t * A, U, ntile), u1 = ts_owner(t * A + A - 1, U, ntile);
+    float acc[8] = {0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f};
+    for (int u = u0; u <= u1; ++u) {
+      if (ts_lo(u + 1, U, ntile) == ts_lo(u, U, ntile)) continue;     // (an empty range: no tile, no partial)
+      const float4* s = reinterpret_cast<const float4*>(p + ((((size_t)t * J + (u - u0)) * 16 + r) * C + c));
+      const float4 x = s[0], y = s[1];
+      acc[0] += x.x; acc[1] += x.y; acc[2] += x.z; acc[3] += x.w; acc[4] += y.x; acc[5] += y.y; acc[6] += y.z; acc[7] += y.w;
+    }
+    *reinterpret_cast<uint4*>(out + (size_t)row * ldo + (c < sp ? ca + c : cb + c - sp)) =
+        make_uint4(pack_bf16(acc[0], acc[1]), pack_bf16(acc[2], acc[3]), pack_bf16(acc[4], acc[5]), pack_bf16(acc[6], acc[7]));
+  }
+}

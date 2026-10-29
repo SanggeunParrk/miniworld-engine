@@ -64,6 +64,16 @@ DEVI void red4(float* p, float a, float b, float c, float d) {
   if (row >= M) return;                                                   \
   const int ch = 4 * lane;
 
+// The table-gradient kernels below (tail / AdaLN backward): a warp per table row i (mrows rows; mrows < M when the A = M / mrows samples share
+// one conditioning, table row = r % mrows) runs through the rows a mrows + i in the samples' order: the per-row outputs as before, the
+// tables' gradient summed over the samples in registers (fp32, fixed order) and written once.
+#define TABLE_ROWS                                                        \
+  pdl_wait();                                                             \
+  pdl_launch();                                                           \
+  const int irow = blockIdx.x * 8 + (threadIdx.x >> 5), lane = threadIdx.x & 31; \
+  if (irow >= mrows) return;                                              \
+  const int ch = 4 * lane, nsamp = M / mrows;
+
 extern "C" __global__ void __launch_bounds__(256)
 f32_ln_aff(const float* __restrict__ c, const float* __restrict__ g1, float* __restrict__ o1, const float* __restrict__ g2,
            float* __restrict__ o2, const float* __restrict__ g3, float* __restrict__ o3, float* __restrict__ oc, int ld, int M, float eps) {
@@ -86,12 +96,12 @@ f32_ln_aff(const float* __restrict__ c, const float* __restrict__ g1, float* __r
 
 extern "C" __global__ void __launch_bounds__(256)
 f32_adaln(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ sh, int shld,
-          float* __restrict__ out, int M, float eps) {
+          float* __restrict__ out, int M, float eps, int mrows) {
   ROW_OF_WARP
   float x[4], s[4], b[4];
   ld4(a + (size_t)row * C + ch, x);
-  ld4(sc + (size_t)row * scld + ch, s);
-  ld4(sh + (size_t)row * shld + ch, b);
+  ld4(sc + (size_t)(row % mrows) * scld + ch, s);
+  ld4(sh + (size_t)(row % mrows) * shld + ch, b);
   norm128(x, eps);
 #pragma unroll
   for (int i = 0; i < 4; ++i) x[i] = fmaf(x[i], s[i], b[i]);
@@ -111,16 +121,20 @@ f32_gate(const float* __restrict__ g, int gld, const float* __restrict__ o, floa
 
 extern "C" __global__ void __launch_bounds__(256)
 f32_tail_bwd(const float* __restrict__ dy, const float* __restrict__ t, const float* __restrict__ st, int stld, float* __restrict__ dt,
-             float* __restrict__ dst, int dstld, int M) {
-  ROW_OF_WARP
-  float d[4], tv[4], s[4], o[4], p[4];
-  ld4(dy + (size_t)row * C + ch, d);
-  ld4(t + (size_t)row * C + ch, tv);
-  ld4(st + (size_t)row * stld + ch, s);
+             float* __restrict__ dst, int dstld, int M, int mrows) {
+  TABLE_ROWS
+  float s[4], p[4] = {0.f, 0.f, 0.f, 0.f};
+  ld4(st + (size_t)irow * stld + ch, s);
+  for (int a = 0; a < nsamp; ++a) {
+    const size_t row = (size_t)a * mrows + irow;
+    float d[4], tv[4], o[4];
+    ld4(dy + row * C + ch, d);
+    ld4(t + row * C + ch, tv);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] = d[i] * tv[i] * s[i] * (1.f - s[i]); }
-  st4(dt + (size_t)row * C + ch, o);
-  st4(dst + (size_t)row * dstld + ch, p);
+    for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] += d[i] * tv[i] * s[i] * (1.f - s[i]); }
+    st4(dt + row * C + ch, o);
+  }
+  st4(dst + (size_t)irow * dstld + ch, p);
 }
 
 // u / dab [M, 512]: hidden column j of half hb = j / 128 sits at 256 hb + j % 128 (a) and 256 hb + 128 + j % 128 (b)
@@ -147,36 +161,40 @@ f32_swiglu_bwd(const float* __restrict__ dh, const float* __restrict__ u, float*
 }
 
 extern "C" __global__ void __launch_bounds__(256)
-f32_adaln_bwd(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
+f32_adaln_bwd(const float* __restrict__ a_, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
               float* __restrict__ da, float* __restrict__ dsc, int dscld, float* __restrict__ dsh, int dshld, const float* __restrict__ y,
-              const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps) {
-  ROW_OF_WARP
-  float x[4], s[4], d[4], dl[4], o[4], p[4];
-  ld4(a + (size_t)row * C + ch, x);
-  ld4(sc + (size_t)row * scld + ch, s);
-  ld4(dx + (size_t)row * C + ch, d);
-  const float rstd = norm128(x, eps);                                    // x = LN(a)
+              const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps, int mrows) {
+  TABLE_ROWS
+  float s[4], g[4], psc[4] = {0.f, 0.f, 0.f, 0.f}, psh[4] = {0.f, 0.f, 0.f, 0.f}, pso[4] = {0.f, 0.f, 0.f, 0.f};
+  ld4(sc + (size_t)irow * scld + ch, s);
+  if (y != nullptr) ld4(so + (size_t)irow * sold + ch, g);
+  for (int a = 0; a < nsamp; ++a) {
+    const size_t row = (size_t)a * mrows + irow;
+    float x[4], d[4], dl[4], o[4];
+    ld4(a_ + row * C + ch, x);
+    ld4(dx + row * C + ch, d);
+    const float rstd = norm128(x, eps);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; p[i] = d[i] * x[i] * s[i] * (1.f - s[i]); }
-  ln_back(x, dl, rstd, o);
-  if (dres != nullptr) {
-    float r[4];
-    ld4(dres + (size_t)row * C + ch, r);
+    for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; psc[i] += d[i] * x[i] * s[i] * (1.f - s[i]); psh[i] += d[i]; }
+    ln_back(x, dl, rstd, o);
+    if (dres != nullptr) {
+      float r[4];
+      ld4(dres + row * C + ch, r);
 #pragma unroll
-    for (int i = 0; i < 4; ++i) o[i] += r[i];
+      for (int i = 0; i < 4; ++i) o[i] += r[i];
+    }
+    st4(da + row * C + ch, o);
+    if (y != nullptr) {                                                 // a1 = a + so * y upstream: the output gate's gradients
+      float yv[4], q[4];
+      ld4(y + row * C + ch, yv);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { pso[i] += o[i] * yv[i] * g[i] * (1.f - g[i]); q[i] = o[i] * g[i]; }
+      st4(dyo + row * C + ch, q);
+    }
   }
-  st4(da + (size_t)row * C + ch, o);
-  st4(dsc + (size_t)row * dscld + ch, p);
-  st4(dsh + (size_t)row * dshld + ch, d);
-  if (y != nullptr) {                                                   // a1 = a + so * y upstream: the output gate's gradients
-    float yv[4], g[4], q[4];
-    ld4(y + (size_t)row * C + ch, yv);
-    ld4(so + (size_t)row * sold + ch, g);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) { p[i] = o[i] * yv[i] * g[i] * (1.f - g[i]); q[i] = o[i] * g[i]; }
-    st4(dso + (size_t)row * dsold + ch, p);
-    st4(dyo + (size_t)row * C + ch, q);
-  }
+  st4(dsc + (size_t)irow * dscld + ch, psc);
+  st4(dsh + (size_t)irow * dshld + ch, psh);
+  if (y != nullptr) st4(dso + (size_t)irow * dsold + ch, pso);
 }
 
 // rows are (sample, atom) pairs of an [A, n] grid: D[a, h, i] for row a n + i; head h = channels 32 h .. 32 h + 31 = lanes 8 h .. 8 h + 7
@@ -318,12 +336,12 @@ DEVI void rms_back(const float (&xn)[4], const float (&dl)[4], float rstd, float
 
 extern "C" __global__ void __launch_bounds__(256)
 f32_adaln_rms(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ sh, int shld,
-              float* __restrict__ out, int M, float eps) {
+              float* __restrict__ out, int M, float eps, int mrows) {
   ROW_OF_WARP
   float x[4], s[4], b[4];
   ld4(a + (size_t)row * C + ch, x);
-  ld4(sc + (size_t)row * scld + ch, s);
-  ld4(sh + (size_t)row * shld + ch, b);
+  ld4(sc + (size_t)(row % mrows) * scld + ch, s);
+  ld4(sh + (size_t)(row % mrows) * shld + ch, b);
   rms128(x, eps);
 #pragma unroll
   for (int i = 0; i < 4; ++i) x[i] = fmaf(x[i], s[i], b[i]);
@@ -331,50 +349,58 @@ f32_adaln_rms(const float* __restrict__ a, const float* __restrict__ sc, int scl
 }
 
 extern "C" __global__ void __launch_bounds__(256)
-f32_adaln_bwd_rms(const float* __restrict__ a, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
+f32_adaln_bwd_rms(const float* __restrict__ a_, const float* __restrict__ sc, int scld, const float* __restrict__ dx, const float* __restrict__ dres,
                   float* __restrict__ da, float* __restrict__ dsc, int dscld, float* __restrict__ dsh, int dshld, const float* __restrict__ y,
-                  const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps) {
-  ROW_OF_WARP
-  float x[4], s[4], d[4], dl[4], o[4], p[4];
-  ld4(a + (size_t)row * C + ch, x);
-  ld4(sc + (size_t)row * scld + ch, s);
-  ld4(dx + (size_t)row * C + ch, d);
-  const float rstd = rms128(x, eps);                                     // x = RMS(a)
+                  const float* __restrict__ so, int sold, float* __restrict__ dso, int dsold, float* __restrict__ dyo, int M, float eps, int mrows) {
+  TABLE_ROWS
+  float s[4], g[4], psc[4] = {0.f, 0.f, 0.f, 0.f}, psh[4] = {0.f, 0.f, 0.f, 0.f}, pso[4] = {0.f, 0.f, 0.f, 0.f};
+  ld4(sc + (size_t)irow * scld + ch, s);
+  if (y != nullptr) ld4(so + (size_t)irow * sold + ch, g);
+  for (int a = 0; a < nsamp; ++a) {
+    const size_t row = (size_t)a * mrows + irow;
+    float x[4], d[4], dl[4], o[4];
+    ld4(a_ + row * C + ch, x);
+    ld4(dx + row * C + ch, d);
+    const float rstd = rms128(x, eps);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; p[i] = d[i] * x[i]; }
-  rms_back(x, dl, rstd, o);
-  if (dres != nullptr) {
-    float r[4];
-    ld4(dres + (size_t)row * C + ch, r);
+    for (int i = 0; i < 4; ++i) { dl[i] = d[i] * s[i]; psc[i] += d[i] * x[i]; psh[i] += d[i]; }
+    rms_back(x, dl, rstd, o);
+    if (dres != nullptr) {
+      float r[4];
+      ld4(dres + row * C + ch, r);
 #pragma unroll
-    for (int i = 0; i < 4; ++i) o[i] += r[i];
+      for (int i = 0; i < 4; ++i) o[i] += r[i];
+    }
+    st4(da + row * C + ch, o);
+    if (y != nullptr) {                                                 // a1 = a + so * y upstream: the output gate's gradients
+      float yv[4], q[4];
+      ld4(y + row * C + ch, yv);
+#pragma unroll
+      for (int i = 0; i < 4; ++i) { pso[i] += o[i] * yv[i]; q[i] = o[i] * g[i]; }
+      st4(dyo + row * C + ch, q);
+    }
   }
-  st4(da + (size_t)row * C + ch, o);
-  st4(dsc + (size_t)row * dscld + ch, p);
-  st4(dsh + (size_t)row * dshld + ch, d);
-  if (y != nullptr) {                                                   // a1 = a + so * y upstream (so raw)
-    float yv[4], g[4], q[4];
-    ld4(y + (size_t)row * C + ch, yv);
-    ld4(so + (size_t)row * sold + ch, g);
-#pragma unroll
-    for (int i = 0; i < 4; ++i) { p[i] = o[i] * yv[i]; q[i] = o[i] * g[i]; }
-    st4(dso + (size_t)row * dsold + ch, p);
-    st4(dyo + (size_t)row * C + ch, q);
-  }
+  st4(dsc + (size_t)irow * dscld + ch, psc);
+  st4(dsh + (size_t)irow * dshld + ch, psh);
+  if (y != nullptr) st4(dso + (size_t)irow * dsold + ch, pso);
 }
 
 extern "C" __global__ void __launch_bounds__(256)
 f32_tail_bwd_rms(const float* __restrict__ dy, const float* __restrict__ t, const float* __restrict__ st, int stld, float* __restrict__ dt,
-                 float* __restrict__ dst, int dstld, int M) {
-  ROW_OF_WARP
-  float d[4], tv[4], s[4], o[4], p[4];
-  ld4(dy + (size_t)row * C + ch, d);
-  ld4(t + (size_t)row * C + ch, tv);
-  ld4(st + (size_t)row * stld + ch, s);
+                 float* __restrict__ dst, int dstld, int M, int mrows) {
+  TABLE_ROWS
+  float s[4], p[4] = {0.f, 0.f, 0.f, 0.f};
+  ld4(st + (size_t)irow * stld + ch, s);
+  for (int a = 0; a < nsamp; ++a) {
+    const size_t row = (size_t)a * mrows + irow;
+    float d[4], tv[4], o[4];
+    ld4(dy + row * C + ch, d);
+    ld4(t + row * C + ch, tv);
 #pragma unroll
-  for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] = d[i] * tv[i]; }
-  st4(dt + (size_t)row * C + ch, o);
-  st4(dst + (size_t)row * dstld + ch, p);
+    for (int i = 0; i < 4; ++i) { o[i] = d[i] * s[i]; p[i] += d[i] * tv[i]; }
+    st4(dt + row * C + ch, o);
+  }
+  st4(dst + (size_t)irow * dstld + ch, p);
 }
 
 extern "C" __global__ void __launch_bounds__(256)

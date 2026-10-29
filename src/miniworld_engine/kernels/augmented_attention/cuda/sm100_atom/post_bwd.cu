@@ -142,9 +142,11 @@ void atom_post_bwd_sm90(const __nv_bfloat16* dab,const __nv_bfloat16* dy,const _
 // row stage (LayerNorm recompute and backward, gates) eight threads per row, 16 channels each; the leader thread issues the TMA stores.
 // Stage (48 KB): dab [16][512] | dy -> gated | a2 -> da | s2 -> dsc2 | so -> dos | u -> du | sg -> dg | o -> dO | dx2.
 // TMEM: Wu^T 0 (256 columns: hidden 0-255 = Wa at 0, Wb at 128), Wo^T 256; warpgroup w's accumulators at 384 + 64 w: dxa 0, dxb 16, dgated 32.
-// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows); then the
+// tiles go in the sample-inner order and the tables' gradient is summed over the samples here into PART [N / 16][J][16][C] (tsum.cuh)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsum.cuh"
 using namespace s100;
 
 #ifndef NSW
@@ -190,13 +192,12 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
                     const __grid_constant__ CUtensorMap mo, const __grid_constant__ CUtensorMap mwut, const __grid_constant__ CUtensorMap mwot,
                     const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mdu,
                     const __grid_constant__ CUtensorMap mgated, const __grid_constant__ CUtensorMap mdo, const __grid_constant__ CUtensorMap mdp,
-                    float* __restrict__ Dd, float* __restrict__ DBIAS, int N, int ntile, float eps, int mrows) {
+                    float* __restrict__ Dd, float* __restrict__ DBIAS, int N, int ntile, float eps, int mrows, float* __restrict__ PART, int J) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int ntT = (int)blockIdx.x < ntile ? (ntile - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  auto row0 = [&](int T) { return R * ((int)blockIdx.x + T * (int)gridDim.x); };
   auto stage = [&](int w, int i) { return su + (uint32_t)((w * NSW + i % NSW) * STG); };
 
   if (tid == 0) {
@@ -217,6 +218,8 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
   if (warp == 0 || warp == 2) {
     // ------------------------------------------------------------------------------------------------ TMA producers (warp 0: warpgroup 0, 2: 1)
     const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     if (lane == 0) {
       if (w == 0) {
         // Wu^T (units 0-3: hidden 128 u ..) and Wo^T (unit 4) as K-major SW64 [128][32] atoms
@@ -228,8 +231,8 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
       }
       mbar_wait(&B.wfree, 0);
       pdl_wait();                                                          // DAB / dy come from the previous kernels
-      for (int i = 0; 2 * i + w < ntT; ++i) {
-        const int s = i % NSW, r0 = row0(2 * i + w);
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
         const uint32_t st = stage(w, i);
         uint64_t* bar = &B.infull[w][s];
@@ -248,15 +251,17 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
     } else if (lane == 1) {
       // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
       pdl_wait();
-      for (int i = 0; 2 * i + w < ntT; ++i) {
-        const int s = i % NSW, r0 = row0(2 * i + w);
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
         const uint32_t st = stage(w, i);
         mbar_wait(&B.stfull[w][s], (i / NSW) & 1);
         for (int kb = 0; kb < 2; ++kb) {
           tma_store_2d(&mda, st + O_A2 + kb * KB, 64 * kb, r0);
-          tma_store_2d(&mdmod, st + O_S2 + kb * KB, 256 + 64 * kb, r0);    // dsc2 -> block 2
-          tma_store_2d(&mdmod, st + O_X + kb * KB, 384 + 64 * kb, r0);     // dbi2 = dx2 -> block 3
-          tma_store_2d(&mdmod, st + O_SO + kb * KB, 512 + 64 * kb, r0);    // dos -> block 4
+          if (!S.A) {                                                      // (shared conditioning: summed over the samples here)
+            tma_store_2d(&mdmod, st + O_S2 + kb * KB, 256 + 64 * kb, r0);  // dsc2 -> block 2
+            tma_store_2d(&mdmod, st + O_X + kb * KB, 384 + 64 * kb, r0);   // dbi2 = dx2 -> block 3
+            tma_store_2d(&mdmod, st + O_SO + kb * KB, 512 + 64 * kb, r0);  // dos -> block 4
+          }
           tma_store_2d(&mdu, st + O_U + kb * KB, 64 * kb, r0);
           tma_store_2d(&mgated, st + O_DY + kb * KB, 64 * kb, r0);
           tma_store_2d(&mdo, st + O_O + kb * KB, 64 * kb, r0);
@@ -271,6 +276,8 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
   } else if (warp == 1 || warp == 3) {
     // ------------------------------------------------------------------------------------------------ MMA issuers (warp 1: warpgroup 0, 3: 1)
     const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     if (w == 0) {
       mbar_wait(&B.wfull, 0);
       tc_fence_after();
@@ -285,7 +292,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
     mbar_wait(&B.wfree, 0);
     const uint32_t ta = tmem + T_ACC + 64 * w;
     auto bdesc = [&](uint32_t base, int ks) { return desc_k128(base + (ks >> 2) * KB) + (uint64_t)((ks & 3) * 2); };
-    for (int i = 0; 2 * i + w < ntT; ++i) {
+    for (int i = 0; i < S.cnt; ++i) {
       const uint32_t st = stage(w, i);
       mbar_wait(&B.infull[w][i % NSW], (i / NSW) & 1);
       tc_fence_after();
@@ -310,18 +317,29 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
   } else {
     // ------------------------------------------------------------------------------------------------ compute warpgroups
     const int w = (warp - 4) >> 2, qw = warp & 3, ct = tid & 127;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     const uint32_t lb = (uint32_t)qw * 32;
     const bool leader = qw == 0 && lane == 0;
     const uint32_t ta = tmem + T_ACC + 64 * w;
     const int ar = ct >> 3, ak = ct & 7;
     const uint32_t aoff = sw128((uint32_t)ar, (uint32_t)ak);
+    float tacc[4][8];                                          // shared conditioning: this thread's table-gradient sums (fp32)
+#pragma unroll
+    for (int b = 0; b < 4; ++b)
+#pragma unroll
+      for (int e = 0; e < 8; ++e) tacc[b][e] = 0.f;
+    if (S.A) {                                                       // the sums kept in TMEM start at zero
+      tsum_tmem_zero8((ta + 48) + ((uint32_t)(32 * qw) << 16));
+      tsum_tmem_zero8((ta + 56) + ((uint32_t)(32 * qw) << 16));
+    }
     const uint32_t fj = (uint32_t)(8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
     auto faddr = [&](uint32_t base, uint32_t ch) { return base + (ch >> 6) * KB + fj * 128u + ((((ch & 63u) >> 3) ^ (fj & 7u)) << 4); };
     float bs2[16], bso[16];                                                // d bsc2, d bos over this thread's rows (channels 8 ak + e, 64 + 8 ak + e)
 #pragma unroll
     for (int e = 0; e < 16; ++e) { bs2[e] = 0.f; bso[e] = 0.f; }
-    for (int i = 0; 2 * i + w < ntT; ++i) {
-      const int r0 = row0(2 * i + w);
+    for (int i = 0; i < S.cnt; ++i) {
+      const int r0 = S.row(i);
       const uint32_t st = stage(w, i);
       // ---- P1: dx2 = rn(rn(dxa) + rn(dxb)) -> row-major
       mbar_wait(&B.infull[w][i % NSW], (i / NSW) & 1);                     // (the stage's tiles are visible to these threads)
@@ -446,6 +464,34 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
       fence_proxy_async();
       tc_fence_before();
       named_bar_sync(1 + w, 128);
+      if (S.A) {                                                       // shared conditioning: add this tile's table gradient
+        tsum_add8(tacc[0], lds128(st + O_S2 + aoff));
+        tsum_add8(tacc[1], lds128(st + O_S2 + KB + aoff));
+        tsum_add8(tacc[2], lds128(st + O_X + aoff));
+        tsum_add8(tacc[3], lds128(st + O_X + KB + aoff));
+        asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+        tsum_tmem_add8((ta + 48) + ((uint32_t)(32 * qw) << 16), lds128(st + O_SO + aoff));
+        tsum_tmem_add8((ta + 56) + ((uint32_t)(32 * qw) << 16), lds128(st + O_SO + KB + aoff));
+        if (S.run_end(i)) {                                            // the end of a table tile's run: its partial out
+          float* pp = PART + (S.slot(i, J) * 16 + ar) * 384 + 8 * ak;
+          tsum_put8(pp + 64 * 0, tacc[0]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[0][e] = 0.f;
+          tsum_put8(pp + 64 * 1, tacc[1]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[1][e] = 0.f;
+          tsum_put8(pp + 64 * 2, tacc[2]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[2][e] = 0.f;
+          tsum_put8(pp + 64 * 3, tacc[3]);
+#pragma unroll
+          for (int e = 0; e < 8; ++e) tacc[3][e] = 0.f;
+          asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+          tsum_tmem_put8((ta + 48) + ((uint32_t)(32 * qw) << 16), pp + 64 * 4);
+          tsum_tmem_put8((ta + 56) + ((uint32_t)(32 * qw) << 16), pp + 64 * 5);
+        }
+        named_bar_sync(1 + w, 128);                                    // every thread has read the stage
+      }
       if (leader) mbar_arrive(&B.stfull[w][i % NSW]);                      // the store thread of this warpgroup takes it from here
     }
     // d bsc2 (dmod block 2), d bos (block 4): the 16 threads sharing a chunk column -> shared sums -> one red.add per channel

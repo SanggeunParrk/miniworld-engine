@@ -132,9 +132,11 @@ extern "C" __global__ void atom_grad_pack_sm90(const float* p0,const float* p1,c
 // -DPARALLEL=1 (AlphaFold 3, xkv = LN(a) sigmoid(pre + bs) + shift): the K / V AdaLN's backward reads the staged a (x1 is not loaded) and its
 // LN backward is added to d single instead of dx1.
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
-// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows); then the
+// tiles go in the sample-inner order and the tables' gradient is summed over the samples here into PART [N / 16][J][16][C] (tsum.cuh)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
+#include "tsum.cuh"
 using namespace s100;
 
 #ifndef CROSS
@@ -186,13 +188,12 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
                    const __grid_constant__ CUtensorMap mda, const __grid_constant__ CUtensorMap mwt, const __grid_constant__ CUtensorMap mds,
                    const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mx1, const __grid_constant__ CUtensorMap mmkv,
                    const __grid_constant__ CUtensorMap mdmkv, float* __restrict__ DBIAS, float* __restrict__ DBQ, float* __restrict__ DBS,
-                   const float* __restrict__ BS, int ntile, float eps, int mrows) {
+                   const float* __restrict__ BS, int ntile, float eps, int mrows, float* __restrict__ PART, int J) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int ntT = (int)blockIdx.x < ntile ? (ntile - (int)blockIdx.x + (int)gridDim.x - 1) / (int)gridDim.x : 0;
-  auto row0 = [&](int T) { return R * ((int)blockIdx.x + T * (int)gridDim.x); };
   auto stage = [&](int w, int i) { return su + (uint32_t)((w * NSW + i % NSW) * STG); };
 
   if (tid == 0) {
@@ -213,6 +214,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
   if (warp == 0 || warp == 2) {
     // ------------------------------------------------------------------------------------------------ TMA producers (warp 0: warpgroup 0, 2: 1)
     const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     if (lane == 0) {
       if (w == 0) {
         mbar_expect_tx(&B.wfull, 4 * 32768);                              // W^T units: projection p = columns 128 p ..
@@ -220,8 +223,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       }
       mbar_wait(&B.wfree, 0);
       pdl_wait();                                                          // dP / DA come from the previous kernels
-      for (int i = 0; 2 * i + w < ntT; ++i) {
-        const int s = i % NSW, r0 = row0(2 * i + w);
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
         const uint32_t st = stage(w, i);
         uint64_t* bar = &B.infull[w][s];
@@ -241,15 +244,17 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
     } else if (lane == 1) {
       // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work
       pdl_wait();
-      for (int i = 0; 2 * i + w < ntT; ++i) {
-        const int s = i % NSW, r0 = row0(2 * i + w);
+      for (int i = 0; i < S.cnt; ++i) {
+        const int s = i % NSW, r0 = S.row(i);
         const uint32_t st = stage(w, i);
         mbar_wait(&B.stfull[w][s], (i / NSW) & 1);
         for (int kb = 0; kb < 2; ++kb) {
           tma_store_2d(&mds, st + O_DA + kb * KB, 64 * kb, r0);
-          tma_store_2d(&mdmod, st + O_S1 + kb * KB, 64 * kb, r0);          // dsc1 -> block 0
-          tma_store_2d(&mdmod, st + O_X + kb * KB, 128 + 64 * kb, r0);     // dbi1 = dx1 -> block 1
-          if (CROSS) {
+          if (!S.A) {                                                      // (shared conditioning: summed over the samples here)
+            tma_store_2d(&mdmod, st + O_S1 + kb * KB, 64 * kb, r0);        // dsc1 -> block 0
+            tma_store_2d(&mdmod, st + O_X + kb * KB, 128 + 64 * kb, r0);   // dbi1 = dx1 -> block 1
+          }
+          if (CROSS && !S.A) {
             tma_store_2d(&mdmkv, st + O_MP + kb * KB, 64 * kb, r0);        // dmkv = [dpre | dxkv]
             tma_store_2d(&mdmkv, st + O_DXKV + kb * KB, 128 + 64 * kb, r0);
           }
@@ -263,6 +268,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
   } else if (warp == 1 || warp == 3) {
     // ------------------------------------------------------------------------------------------------ MMA issuers (warp 1: warpgroup 0, 3: 1)
     const int w = warp >> 1;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     if (w == 0) {
       mbar_wait(&B.wfull, 0);
       tc_fence_after();
@@ -276,7 +283,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
     }
     mbar_wait(&B.wfree, 0);
     const uint32_t ta = tmem + T_ACC + 64 * w;
-    for (int i = 0; 2 * i + w < ntT; ++i) {
+    for (int i = 0; i < S.cnt; ++i) {
       const uint32_t st = stage(w, i);
       mbar_wait(&B.infull[w][i % NSW], (i / NSW) & 1);
       if (i > 0) mbar_wait(&B.dxfree[w], (i - 1) & 1);
@@ -295,11 +302,25 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
   } else {
     // ------------------------------------------------------------------------------------------------ compute warpgroups
     const int w = (warp - 4) >> 2, qw = warp & 3, ct = tid & 127;
+    TileSched S;
+    S.init(w, ntT, ntile, mrows);
     const uint32_t lb = (uint32_t)qw * 32;
     const bool leader = qw == 0 && lane == 0;
     const uint32_t ta = tmem + T_ACC + 64 * w;
     const int ar = ct >> 3, ak = ct & 7;
     const uint32_t aoff = sw128((uint32_t)ar, (uint32_t)ak);
+    if (S.A) {                                                       // the sums kept in TMEM start at zero
+      tsum_tmem_zero8((tmem + 384 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+      tsum_tmem_zero8((tmem + 392 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+      tsum_tmem_zero8((tmem + 400 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+      tsum_tmem_zero8((tmem + 408 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+      if (CROSS) {
+        tsum_tmem_zero8((tmem + 416 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+        tsum_tmem_zero8((tmem + 424 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+        tsum_tmem_zero8((tmem + 432 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+        tsum_tmem_zero8((tmem + 440 + 64 * w) + ((uint32_t)(32 * qw) << 16));
+      }
+    }
     const uint32_t fj = (uint32_t)(8 * ((lane >> 3) & 1) + (lane & 7)), fh = (uint32_t)(lane >> 4);
     auto faddr = [&](uint32_t base, uint32_t ch) { return base + (ch >> 6) * KB + fj * 128u + ((((ch & 63u) >> 3) ^ (fj & 7u)) << 4); };
     float bs1[16], bq[16], bsk[16], bsr[16];                               // d bsc1, d bq, d bs over this thread's rows (channels 8 ak + e, 64 + 8 ak + e), bs
@@ -308,8 +329,8 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       bs1[e] = 0.f; bq[e] = 0.f; bsk[e] = 0.f;
       bsr[e] = CROSS ? __ldg(BS + 64 * (e >> 3) + 8 * ak + (e & 7)) : 0.f;
     }
-    for (int i = 0; 2 * i + w < ntT; ++i) {
-      const int r0 = row0(2 * i + w);
+    for (int i = 0; i < S.cnt; ++i) {
+      const int r0 = S.row(i);
       const uint32_t st = stage(w, i);
       mbar_wait(&B.infull[w][i % NSW], (i / NSW) & 1);
       // ---- P1: dx1 = the bf16 sum of the four projections' input gradients -> row-major
@@ -467,6 +488,34 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
       }
       fence_proxy_async();
       named_bar_sync(1 + w, 128);
+      if (S.A) {                                                       // shared conditioning: add this tile's table gradient
+        asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+        tsum_tmem_add8((tmem + 384 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_S1 + aoff));
+        tsum_tmem_add8((tmem + 392 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_S1 + KB + aoff));
+        tsum_tmem_add8((tmem + 400 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_X + aoff));
+        tsum_tmem_add8((tmem + 408 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_X + KB + aoff));
+        if (CROSS) {
+          tsum_tmem_add8((tmem + 416 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_MP + aoff));
+          tsum_tmem_add8((tmem + 424 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_MP + KB + aoff));
+          tsum_tmem_add8((tmem + 432 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_DXKV + aoff));
+          tsum_tmem_add8((tmem + 440 + 64 * w) + ((uint32_t)(32 * qw) << 16), lds128(st + O_DXKV + KB + aoff));
+        }
+        if (S.run_end(i)) {                                            // the end of a table tile's run: its partial out
+          float* pp = PART + (S.slot(i, J) * 16 + ar) * (CROSS ? 512 : 256) + 8 * ak;
+          asm volatile("tcgen05.wait::st.sync.aligned;" ::: "memory");
+          tsum_tmem_put8((tmem + 384 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 0);
+          tsum_tmem_put8((tmem + 392 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 1);
+          tsum_tmem_put8((tmem + 400 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 2);
+          tsum_tmem_put8((tmem + 408 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 3);
+          if (CROSS) {
+            tsum_tmem_put8((tmem + 416 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 4);
+            tsum_tmem_put8((tmem + 424 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 5);
+            tsum_tmem_put8((tmem + 432 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 6);
+            tsum_tmem_put8((tmem + 440 + 64 * w) + ((uint32_t)(32 * qw) << 16), pp + 64 * 7);
+          }
+        }
+        named_bar_sync(1 + w, 128);                                    // every thread has read the stage
+      }
       if (leader) mbar_arrive(&B.stfull[w][i % NSW]);                      // the store thread of this warpgroup takes it from here
     }
     float* red = reinterpret_cast<float*>(sm + O_RED);                      // [8 warps][NRED]
