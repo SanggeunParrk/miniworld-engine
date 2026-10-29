@@ -16,7 +16,9 @@ sections. The MSA residual and the module's row-broadcast dropout
 Design notes:
 - The contractions o = w · v and dv = wᵀ · do run on cuBLAS `bmm`: 5-15 % faster than a tcgen05 kernel of ours at L256-1024,
   same bits. The gate / out pass reads o back; that round trip is the structural gap to the energy floor (the inference sweep
-  runs at 44-65 % of it). A token-major gate / out tile (o read in 8 KB runs) scattered the output rows and was 5-12 % slower.
+  runs at 44-65 % of it). Since 2026-10-30 the gate / out pass (and the backward glue) take one token x 128 MSA rows a tile: a head's
+  o block is one 8 KiB run and the scattered 128-byte residual / output rows go 32 bytes an instruction (an earlier token-major
+  attempt stored them 16 bytes at a time and was 5-12 % slower; this form is 18-20 % faster, next section).
 - The pair-side forward folds LN_z into proj_z (the tensor core reads raw z): same error against fp32 as rounding
   bf16(LN_z(z)) first, 1.5x faster than that form.
 - The backward glue keeps dgp on chip: it forms dW_g = yᵀ dgp and the gate branch of dy (dgp · W_g) itself, and the MSA-side
@@ -139,6 +141,61 @@ Kernels alone at (N 768, S 512) (CUDA events, median of 30, p_drop 0.15; bytes =
 unit-ring form with resident weights and dm stored from x in place measured 15-25 % slower at d_msa <= 128 and was not kept),
 `pair_bwd_w`'s per-tile latency (above), and dWo = dout'^T go / dWg = dgp^T y inside the glue (go and dout' still round-trip through HBM
 into cuBLAS).
+
+## Training at MiniWorld's width (2026-10-30)
+
+MiniWorld trains this module at (N 384, S 1024) (crop 384, `msa_subsample_per_recycle` 1024). Its training step was profiled
+first (eager, per-kernel CUDA time at (384, 1024)): `pwa_glue2` 180 us, `pwa_gate_out` 102, the three cuBLAS contractions 228,
+`dv_bwd` 75, `ln_vg` 52, the pair side 47. The two largest hand kernels were rebuilt:
+
+- `pwa_glue2`: a per-head clock64 trace of the (128 i, 2 s) form gave ~3000 cycles a head, a third of it the drain waiting for
+  the next head's gate GEMMs (they waited on the per-head Wg_h / Wo_h^T reload, queued behind the previous head's weight-gradient
+  GEMMs), plus ~13k cycles a tile at the tile boundary (the next tile's dres / y and keep mask loaded only after the last head's
+  GEMMs). Now: tile = one token x 128 s (dv_bwd's), heads in pairs (G | DU at N = 64, dWo / dWg at M = 64, N = 64, dyg
+  double-buffered in TMEM), Wg / 2 and Wo^T resident, the keep row by TMA with the tile and the next tile's dout' prepared a pair
+  ahead, o / do / dyg straight from registers (32-byte accesses), and the elementwise math on t = tanh(G / 2) (the gate GEMM reads
+  Wg / 2 from `pwa_wprep`; dgp is kept doubled -- exact -- for its GEMMs, `glue2_finish` halves dWg): ~40 % fewer instructions a
+  value. do and dyg are bitwise the previous kernel's, dWo / dWg within 2e-6 relative (summation order). `pwa_wprep` reads the
+  fp32 or bf16 parameters itself, so the backward's three weight casts are gone.
+- `pwa_gate_out` / `gate_out_w` (every width): the token-major tile above, output bitwise unchanged.
+
+Kernels alone (CUDA events, median of 30, GPU 1 of node 2, dropout on), us:
+
+| kernel | (N, S) | before | after |
+|---|---|---|---|
+| `pwa_glue2` 64 / 8 x 32 | (384, 1024) | 195 | 141 |
+| `pwa_glue2` | (768, 1024) | 351 | 251 |
+| `pwa_gate_out` 64 / 8 x 32 | (384, 1024) | 106.6 | 87.0 |
+| `pwa_gate_out` | (768, 1024) | 192.6 | 156.7 |
+| `pwa_gate_out` | (2048, 1024) | 486.3 | 385.5 |
+| `gate_out_w` 256 / 8 x 32 (IntelliFold-v2) | (768, 512) | 387.6 | 276.8 |
+| `gate_out_w` 64 / 8 x 8 (AF3) | (768, 1024) | 147.7 | 109.8 |
+| `gate_out_w` 128 / 8 x 8 | (768, 512) | 149.6 | 105.6 |
+| `gate_out_w` 128 / 8 x 16 (ESMFold2) | (768, 512) | 165.7 | 112.5 |
+
+Training step (forward + backward of one module call), CUDA graph, bf16-mixed (fp32 parameters), p_drop 0.15, random key mask,
+median of 3 x 20 replays, GPU 1 of node 2, ms ("before" = 50cb977e, the morning table's kernels):
+
+| width | (N, S) | before | after |
+|---|---|---|---|
+| MiniWorld 64 / 128 / 8 x 32 | (384, 1024) | 0.784 | 0.704 |
+| MiniWorld | (768, 1024) | 1.688 | 1.549 |
+| MiniWorld | (1536, 512) | 2.687 | 2.541 |
+| MiniWorld | (2048, 512) | 4.408 | 4.167 |
+| Chai-1 64 / 256 / 8 x 32 | (384, 1024) | 0.840 | 0.758 |
+| Chai-1 | (768, 1024) | 1.877 | 1.741 |
+| AF3 64 / 128 / 8 x 8 | (384, 1024) | 0.521 | 0.500 |
+| AF3 | (768, 1024) | 1.013 | 0.975 |
+| Protenix-v2 128 / 256 / 8 x 8 | (384, 1024) | 0.774 | 0.729 |
+| OpenDDE 128 / 384 / 8 x 8 | (768, 512) | 1.217 | 1.172 |
+| ESMFold2 128 / 256 / 8 x 16 | (768, 512) | 1.266 | 1.212 |
+| IntelliFold-v2 256 / 512 / 8 x 32 | (384, 512) | 1.158 | 1.102 |
+| IntelliFold-v2 | (768, 512) | 2.523 | 2.421 |
+
+Open: `pwa_glue2` still runs at ~3.9-4.4 TB/s (copy reaches 6.2 on this card): a trace of the new form shows the drain's
+elementwise pass (~800-1000 cycles a pair; `tanh.approx.f16x2` issues two MUFU ops, so it halves nothing) and the wait for the next
+tile's stage (~850 cycles a tile) as what is left; moving the keep-mask prep to the producer warp measured 20 % slower and was not
+kept, nor was an o prefetch two pairs ahead (4 % slower). `dvb_w` and `pair_bwd_w` are as above.
 
 ## MSAPairWeightedAveraging (`MSAPairWeightedAveraging`)
 
