@@ -274,8 +274,8 @@ the dropout scale before adding the residual (its drain then reads x).
 | 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-The bias-only variant (`use_self_attention=False`), heads of 64 / 96 / 128 channels (the module's default of 4 heads at
-d_pair ≥ 256) and `BidirectionalTriangleAttention` are not served.
+The bias-only variant (`use_self_attention=False`), heads of 96 / 128 channels (the module's default of 4 heads at d_pair 384 / 512)
+and `BidirectionalTriangleAttention` are not served; heads of 64 channels: [Model options](#model-options-for-foldforge-2026-10-29).
 
 ## Batched samples (B > 1), any length and chunking (2026-10-20)
 
@@ -771,8 +771,8 @@ kernels (`integrations/triattn_b200.py` `_options` / `_kind`):
 |---|---|---|---|---|
 | `transposed_bias=False` (ending node, the bias of the pair as it is) | AF3, Boltz-2, OpenBind, IntelliFold-2, RF3, Chai-1 | fused (d_pair 128) / wide | yes | wide path |
 | `gate_bias` / `out_bias` | RoseTTAFold3 | wide | yes | yes |
-| 64-channel heads | Chai-1 (256, 4 × 64), RF3 templates (64, 4 × 64), IntelliFold-2 (512, 8 × 64) | wide + `triattn_dh64_sm100.cu` | yes | no (PyTorch) |
-| `untransposed_output`, `dual_output` | Chai-1 trunk / templates, confidence head | wide | yes | no (PyTorch) |
+| 64-channel heads | Chai-1 (256, 4 × 64), RF3 templates (64, 4 × 64), IntelliFold-2 (512, 8 × 64) | wide + `triattn_dh64_sm100.cu` | yes | yes |
+| `untransposed_output`, `dual_output` | Chai-1 trunk / templates, confidence head | wide | yes | yes |
 
 - Bias orientation: the front's bias drain (`tri_front` / `tri_wfront`, flag `BT`) writes row (b, j, k)'s bias at [b, h, k, j] (its key j for
   the mask); the backward's `tri_db_rows` reads the gradient in the same orientation. The fused backward reads dbias tile-contiguously, so
@@ -781,9 +781,23 @@ kernels (`integrations/triattn_b200.py` `_options` / `_kind`):
   registers), the out bias to the update in the tail's drain before the one rounding of pair + update. Their gradients: d bg from the ones
   column of G = D^T [xhat | 1], d bo = dy_s^T 1 (cuBLAS).
 - 64-channel heads: `triattn_dh64_sm100.cu`, the head-dim-32 core's schedule on [128][64] 128B-swizzled Q / K / V (QK^T K = 64, PV N = 64),
-  two pair rows a task (TMEM 3 × 128 S/P + 2 × 64 O), three K|V stages, 226.5 KiB shared memory; 128 registers, no spills. Forward only.
+  two pair rows a task (TMEM 3 × 128 S/P + 2 × 64 O), three K|V stages, 226.5 KiB shared memory; 128 registers, no spills. In training
+  the softmax warps write the base-2 LSE at the task's end.
+- Their backward (2026-10-29), the head-dim-32 core's two kernels on 64-channel operands, recomputing P from the LSE: `triattn_bwd64_kv`
+  (dK, dV) takes ONE pair row a task, because a 64-channel accumulator row takes 64 TMEM columns: S^T | dP^T of the two gradient groups
+  (2 × 128) + their P^T | dS^T (2 × 64) + dV | dK (128) = 512; the groups alternate the row's 64-query stages, each stage with its own
+  fp32 bias^T tile (three stages in flight, 211.5 KiB); the drain stores dV (group 0) and dK (group 1) from registers. `triattn_bwd64_q`
+  (dQ, dbias) takes two pair rows a task (S | dP 2 × 128, dQ 2 × 64, Q | dO 2 × 2 × 32 bf16 columns), dbias summed over the task's rows
+  in registers and TMA reduce-added as on the head-dim-32 path. Delta comes from the gate backward per 32-channel half ([B, L, 2H, L]) and
+  the two halves are added where they are read. ptxas: 165 / 143 registers (352 / 320 threads), no spills. The rest of the backward is
+  the wide path's (`tri_wgbwd`, `tri_whbwd`, cuBLAS, `tri_wfinish` with 64-channel slots).
 - Chai-1's outputs are tail compositions: untransposed = the tail writes the starting-node layout; dual = a second tail (`to_out_t`) adds
-  its update transposed into the first one's output in place.
+  its update transposed into the first one's output in place. With dropout the scale stays on the caller's broadcast axis, which for those
+  tails lies across the kernel rows (`tri_wtail` `dfirst`: the row's first position). Backward: untransposed runs `tri_wgbwd` in the
+  starting-node orientation; dual runs it once over K = 2C, du = dy_s · Wo + dy_sᵀ · Wo_t (the second half of the K loop reads dy_s
+  through the other orientation's tensor map against Wo_tᵀ) and stores u in both orientations, so dWo_t = dy_sᵀ u_t pairs them as dWo
+  does; d bo_t = d bo (the same rows of dy_s). The gate backward's next-slice loads now derive their coordinates from the current slice's
+  (a separate load cursor spilled 12 B in the ending-node instances; all `tri_wgbwd` instances: 0 spills).
 
 Inference, CUDA graph, bf16, a padded crop (L real = 347 / 731, 11 keys masked), the module's PyTorch statements before:
 
@@ -803,3 +817,22 @@ Inference, CUDA graph, bf16, a padded crop (L real = 347 / 731, 11 keys masked),
 The `transposed_bias=False` bias stores are strided by L (32 sectors a warp store, merged in L2): +3 % on the fused d_pair-128 module at
 L 731. Training (fp32 master parameters, dropout 0.25, CUDA graph, L 768): AF3 ending `transposed_bias=False` 3.79 ms on the wide path
 (fused `True` 3.54 ms, PyTorch 36.5 ms), RF3 trunk with biases 3.93 ms (PyTorch 73.0 ms). Tests: `tests/gpu/sm100/test_triattn_b200_variants_gpu.py`.
+
+Training of the 64-channel heads and Chai-1's outputs (2026-10-29): one training step (forward + backward, dropout 0.25, dx and every
+parameter gradient), bf16-mixed (fp32 parameters, bf16 pair under autocast), one CUDA graph per step, median of 5 × 3-50 replays, the
+last 11 keys masked, GPU 0 of node 2 (a utilisation filler resident); "before" = the same harness on d879e180, where these calls ran the
+module's PyTorch statements (`_attention`, or `_biased_reference` for the biases / Chai-1's outputs). ms:
+
+| case (d_pair, heads) | B | L 384 before | after | × | L 731 before | after | × |
+|---|---|---|---|---|---|---|---|
+| Chai-1 trunk starting (256, 4 × 64) | 1 | 6.78 | 1.22 | 5.5 | 49.2 | 7.53 | 6.5 |
+| Chai-1 trunk ending, untransposed (256, 4 × 64) | 1 | 11.57 | 1.25 | 9.2 | 83.9 | 7.59 | 11.0 |
+| Chai-1 confidence ending, dual (256, 4 × 64) | 1 | 11.95 | 1.43 | 8.3 | 85.2 | 8.27 | 10.3 |
+| Chai-1 template ending, untransposed (64, 4 × 32) | 4 | 39.95 | 2.24 | 17.9 | 287.0 | 14.62 | 19.6 |
+| RF3 template ending, biases (64, 4 × 64) | 4 | 44.89 | 3.87 | 11.6 | 323.9 | 23.14 | 14.0 |
+| IntelliFold-2 trunk ending (512, 8 × 64) | 1 | 13.78 | 2.93 | 4.7 | 100.9 | 17.13 | 5.9 |
+
+Peak memory at L 731: 5.6-15.6 GiB after, 26-99 GiB before. Accuracy (`test_variant_training`, every option × dropout 0 / 0.25, L 256
+with 26 keys masked, output, dx and every parameter gradient against fp32 autograd): the worst gradient sits at 0.50-0.68 of the bar
+(1.25 × the bf16 module's error + 2e-3). Determinism as on the rest of the wide path: dW_q|k|v|g|o, the gate / out biases and Wo_t are
+the same bits run to run; dx, dγ, dβ and dW_b carry the query-side kernel's fp32 reduce-add of dbias.

@@ -4,9 +4,9 @@ tri_wgrad around the attention core), d_pair 64-512 with heads of 16 / 32 channe
 tri_wtail / tri_wgbwd / tri_whbwd / cuBLAS / tri_wfinish), both in ``kernels/triangle_attention/cuda/b200_triattn.py``.
 
 The model options FoldForge's families set (``_options``) run on the same kernels: AlphaFold 3's ending-node bias orientation
-(``transposed_bias=False``: both paths for inference, the wide path for training), RoseTTAFold3's gate / out-projection biases (the
-wide path, inference and training), and, for inference on the wide path, heads of 64 channels (Chai-1, RoseTTAFold3's templates,
-IntelliFold-2: the head-dim-64 core) and Chai-1's output variants (``untransposed_output`` / ``dual_output``).
+(``transposed_bias=False``: both paths for inference, the wide path for training), and on the wide path, inference and training,
+RoseTTAFold3's gate / out-projection biases, heads of 64 channels (Chai-1, RoseTTAFold3's templates, IntelliFold-2: the head-dim-64
+core and its backward) and Chai-1's output variants (``untransposed_output`` / ``dual_output``).
 Any length L >= 16: the kernels take whole 128-token tiles, a length that is not a multiple of 128 is zero-padded (the pad keys
 masked, the pad rows and columns cut from the result). Any number of samples B (templates, structures or augments folded into the
 batch): up to ``max_batch`` per launch, more (or more than fit in memory) in launches run one after another (``plan``).
@@ -86,8 +86,6 @@ def _kind(module, pair: torch.Tensor, mask: torch.Tensor | None) -> int | None:
         return None
     bt, biases, mode = _options(module)
     training = _needs_grad(module, pair)
-    if training and mode:
-        return None                                   # Chai-1's outputs: inference only
     if module.n_head == 4 and d_pair == 128 and d_hidden == 128 and not biases and not mode and not (bt and training):
         return FUSED
     from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
@@ -105,7 +103,7 @@ def serves(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool
 
 
 def serves_wide(module, pair: torch.Tensor, mask: torch.Tensor | None = None) -> bool:
-    """The wide kernels (d_pair 64 .. 512, heads of 16 / 32 channels, 64 for inference; the model options) serve this call."""
+    """The wide kernels (d_pair 64 .. 512, heads of 16 / 32 / 64 channels; the model options) serve this call."""
     return _kind(module, pair, mask) == GENERIC
 
 
@@ -216,21 +214,22 @@ def _fwd_fake(kind, args, eps, n_head, head_dim, trans, variant):
 def _fwd_op(kind: int, args: list[torch.Tensor], eps: float, n_head: int, head_dim: int, trans: bool, variant: int) -> list[torch.Tensor]:
     from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
 
-    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, _, _, mask, drop = args
+    pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, mask, drop = args
     mask = _opt(mask)
     drop = _opt(drop)
     if kind == FUSED:
         out, saved = k.fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask, eps, drop, True, None, trans)
     else:
-        out, saved = k.wide_forward(pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo, _opt(gb), _opt(ob), None, None)), n_head, head_dim,
-                                    mask, eps, drop, True, None, trans, bool(variant & _BT))
+        packed = _packed((wq, wk, wv, wg, wb, wo, _opt(gb), _opt(ob), _opt(wo2), _opt(ob2)))
+        out, saved = k.wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask, eps, drop, True, None, trans, bool(variant & _BT),
+                                    variant >> 1)
     return [out, *saved]
 
 
 def _bwd_fake(kind, args, saved, eps, n_head, head_dim, trans, variant):
     """The backward's stacked gradients (``b200_triattn.split_grads`` takes them apart): fused (dpair, [dgamma; dbeta; dWb],
-    [dWq; dWk; dWv; dWg], dWo), wide (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo, [dbg; dbo] fp32); weight gradients
-    fp32 when Wq is."""
+    [dWq; dWk; dWv; dWg], dWo), wide (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo, [dbg; dbo] fp32, dWo_t (the dual
+    output's, else empty)); weight gradients fp32 when Wq is."""
     dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, *_ = args
     dt = torch.float32 if wq.dtype == torch.float32 else torch.bfloat16
     kw: dict[str, Any] = {"device": pair.device, "dtype": dt}
@@ -240,7 +239,7 @@ def _bwd_fake(kind, args, saved, eps, n_head, head_dim, trans, variant):
         return [torch.empty_like(pair), torch.empty(6, C, **kw), torch.empty(4, C, C, **kw), torch.empty(C, C, **kw)]
     hd = wq.shape[0]
     return [torch.empty_like(pair), torch.empty(2, C, **f32), torch.empty(4, hd, C, **kw), torch.empty(n_head, C, **kw),
-            torch.empty(C, hd, **kw), torch.empty(hd + C, **f32)]
+            torch.empty(C, hd, **kw), torch.empty(hd + C, **f32), torch.empty((C, hd) if variant >> 1 == 2 else (0,), **kw)]
 
 
 @opaque(fake=_bwd_fake, name="triattn_b200_bwd")
@@ -248,17 +247,18 @@ def _bwd_op(kind: int, args: list[torch.Tensor], saved: list[torch.Tensor], eps:
             trans: bool, variant: int) -> list[torch.Tensor]:
     from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
 
-    dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, drop = args
+    dy, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, drop = args
     drop = _opt(drop)
     dtypes = tuple(t.dtype for t in (lnw, lnb, wq, wk, wv, wg, wb, wo))
     if kind == FUSED:
         return list(k.fused_backward(dy, pair, eps, drop, list(saved), dtypes, trans))
-    return list(k.wide_backward(dy, pair, lnw, lnb, _packed((wq, wk, wv, wg, wb, wo, _opt(gb), _opt(ob), None, None)), n_head, head_dim,
-                                eps, drop, list(saved), dtypes, trans, bool(variant & _BT)))
+    packed = _packed((wq, wk, wv, wg, wb, wo, _opt(gb), _opt(ob), _opt(wo2), _opt(ob2)))
+    return list(k.wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, list(saved), dtypes, trans, bool(variant & _BT),
+                                variant >> 1))
 
 
 def _grads(kind, raw, params):
-    """(dpair, the ten parameters' gradients): None for an absent (empty) bias."""
+    """(dpair, the twelve parameters' gradients): None for an absent (empty) bias or second out-projection."""
     from miniworld_engine.kernels.triangle_attention.cuda.b200_triattn import (
         split_grads,
     )
@@ -268,22 +268,22 @@ def _grads(kind, raw, params):
 
 class _TriAttnFn(torch.autograd.Function):
     """pair + drop o TriangleAttention(pair): one op forward (the tensors the backward reads come back as outputs), one op backward.
-    Gradients come back in the parameters' dtype; gb / ob (the gate / out-projection biases) are empty when the module has none."""
+    Gradients come back in the parameters' dtype; gb / ob (the gate / out-projection biases) and wo2 / ob2 (the dual output's second
+    out-projection) are empty when the module has none."""
 
     @staticmethod
-    def forward(ctx, kind, eps, n_head, head_dim, trans, variant, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, mask, drop):
-        E = pair.new_empty(0)
-        out, *saved = _fwd_op(kind, [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, E, E, mask, drop], eps, n_head, head_dim, trans,
+    def forward(ctx, kind, eps, n_head, head_dim, trans, variant, pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, mask, drop):
+        out, *saved = _fwd_op(kind, [pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, mask, drop], eps, n_head, head_dim, trans,
                               variant)
-        ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, drop, *saved)
+        ctx.save_for_backward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, drop, *saved)
         ctx.cfg = (kind, eps, n_head, head_dim, trans, variant)
         return out
 
     @staticmethod
     def backward(ctx, dy):
-        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, drop, *saved = ctx.saved_tensors
+        pair, lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2, drop, *saved = ctx.saved_tensors
         kind, eps, n_head, head_dim, trans, variant = ctx.cfg
-        params = (lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob)
+        params = (lnw, lnb, wq, wk, wv, wg, wb, wo, gb, ob, wo2, ob2)
         raw = _bwd_op(kind, [dy.contiguous(), pair, *params, drop], saved, eps, n_head, head_dim, trans, variant)
         return (None,) * 6 + tuple(_grads(kind, raw, params)) + (None, None)
 
@@ -326,7 +326,8 @@ CHUNK_MEMORY_FRACTION = 0.85
 _SLACK = 1 << 30
 
 
-def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: bool, head_dim: int = 32) -> tuple[int, int, int]:
+def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: bool, head_dim: int = 32, dual: bool = False
+                     ) -> tuple[int, int, int]:
     """(inference working set, training saved tensors, training backward working set) in bytes per pair token of one sample, on top
     of the caller's tensors (pair and output; in training also dy and dx)."""
     c, h = d_pair, n_head
@@ -342,11 +343,12 @@ def _bytes_per_token(kind: int, d_pair: int, n_head: int, padded: bool, ending: 
     hd = (64 if head_dim == 64 else 32) * h  # heads padded to 32 channels (64-channel heads as they are)
     # inference: q | k | v | g, o; bias
     # saved: q | k | v | g, o; bias; lse; the LN statistics (8 B)
-    # backward: dy o drop; D = [dq | dk | dv | dg | 64 dbias columns]; do, u; delta, dbias, bias^T; [xhat | 1] (C + 64)
+    # backward: dy o drop; D = [dq | dk | dv | dg | 64 dbias columns]; do, u (and u2: the dual output); delta (per 32-channel half),
+    # dbias, bias^T; [xhat | 1] (C + 64)
     return (
         10 * hd + 2 * h + extra,
         10 * hd + 6 * h + 8 + extra,
-        4 * c + 12 * hd + 12 * h + 256 + extra,
+        4 * c + (14 if dual else 12) * hd + (16 if head_dim == 64 else 12) * h + 256 + extra,
     )
 
 
@@ -360,6 +362,7 @@ def plan(
     total_memory: int,
     ending: bool = False,
     head_dim: int = 32,
+    dual: bool = False,
 ) -> tuple[int, bool]:
     """(chunk, checkpoint): the samples one launch takes and whether training chunks rerun their forward in the backward (instead of
     keeping their saved tensors); chunk >= batch is one call.
@@ -367,7 +370,7 @@ def plan(
     limit = max_batch(kind, length)
     lp = _padded(length)
     tokens = lp * lp
-    work_inf, held, work_bwd = _bytes_per_token(kind, d_pair, n_head, lp != length, ending, head_dim)
+    work_inf, held, work_bwd = _bytes_per_token(kind, d_pair, n_head, lp != length, ending, head_dim, dual)
     budget = CHUNK_MEMORY_FRACTION * total_memory - _SLACK
     c = d_pair
 
@@ -440,10 +443,10 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
     index = pair.device.index if pair.device.index is not None else torch.cuda.current_device()
     ending = not module.starting
     head_dim = module.to_query.weight.shape[0] // module.n_head
-    chunk, checkpoint = plan(kind, B, L, C, module.n_head, needs_grad or drop is not None, _total_memory(index), ending, head_dim)
+    bt, _, mode = _options(module)
+    chunk, checkpoint = plan(kind, B, L, C, module.n_head, needs_grad or drop is not None, _total_memory(index), ending, head_dim, mode == 2)
     params = _params(module, pair)
     eps = module.ln_pair.eps
-    bt, _, mode = _options(module)
     variant = (_BT if bt else 0) | mode << 1
     # the ending node: the kernels read and write the caller's layout (trans)
     x, trans = pair, ending
@@ -453,7 +456,7 @@ def forward(module, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tens
         out = _infer_chunks(kind, params, x, mask, drop, _split(B, chunk), eps, module.n_head, head_dim, trans, variant)
     else:
         out = _Chunked.apply(
-            kind, eps, module.n_head, head_dim, trans, variant, tuple(_split(B, chunk)), checkpoint, x, *params[:10],
+            kind, eps, module.n_head, head_dim, trans, variant, tuple(_split(B, chunk)), checkpoint, x, *params,
             mask if mask is not None else pair.new_empty(0, dtype=torch.bool),
             drop if drop is not None else pair.new_empty(0),
         )
@@ -485,7 +488,7 @@ def _forward_one(kind, params, x, mask, drop, needs_grad, eps, n_head, head_dim,
     if d is None and not needs_grad:
         out = _infer_op(kind, [xp, *params, mask_t, drop_t], eps, n_head, head_dim, trans, variant)
     else:
-        out = _TriAttnFn.apply(kind, eps, n_head, head_dim, trans, variant, xp, *params[:10], mask_t, drop_t)
+        out = _TriAttnFn.apply(kind, eps, n_head, head_dim, trans, variant, xp, *params, mask_t, drop_t)
     if xp.shape[1] != L:
         out = out[:, :L, :L]
     return out
@@ -529,14 +532,13 @@ class _Chunked(torch.autograd.Function):
     def forward(ctx, kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint, x, *rest):
         *params, mask, drop = rest
         p32 = [p.float() for p in params]
-        E = x.new_empty(0)
         L = x.shape[1]
         out = torch.empty(x.shape, dtype=x.dtype, device=x.device)
         saved: list[torch.Tensor] = []
         start = 0
         for n in sizes:
             xc, m, d = _chunk_inputs(x, mask, drop, start, n)
-            o, *s = _fwd_op(kind, [xc, *p32, E, E, m, d], eps, n_head, head_dim, trans, variant)
+            o, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim, trans, variant)
             out[start:start + n] = o[:, :L, :L]
             del o
             if not checkpoint:
@@ -550,10 +552,9 @@ class _Chunked(torch.autograd.Function):
     @staticmethod
     def backward(ctx, dy):
         x, *rest = ctx.saved_tensors
-        params, (mask, drop), saved = rest[:10], rest[10:12], rest[12:]
+        params, (mask, drop), saved = rest[:12], rest[12:14], rest[14:]
         kind, eps, n_head, head_dim, trans, variant, sizes, checkpoint = ctx.cfg
         p32 = [p.float() for p in params]
-        E = x.new_empty(0)
         L = x.shape[1]
         Lp = _padded(L)
         per = len(saved) // len(sizes)
@@ -563,7 +564,7 @@ class _Chunked(torch.autograd.Function):
         for c, n in enumerate(sizes):
             xc, m, d = _chunk_inputs(x, mask, drop, start, n)
             if checkpoint:
-                _, *s = _fwd_op(kind, [xc, *p32, E, E, m, d], eps, n_head, head_dim, trans, variant)
+                _, *s = _fwd_op(kind, [xc, *p32, m, d], eps, n_head, head_dim, trans, variant)
             else:
                 s = list(saved[c * per:(c + 1) * per])
             g = dy[start:start + n]

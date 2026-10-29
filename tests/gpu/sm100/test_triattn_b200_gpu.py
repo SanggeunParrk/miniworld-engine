@@ -276,15 +276,15 @@ def test_wide_repacks_after_a_weight_update():
     check_wide(ours, ref16, ref32, x, None)
 
 
-def test_wide_head_dim_64_served_for_inference_only():
-    """64-channel heads (Chai-1, RoseTTAFold3's templates, IntelliFold-2) run the head-dim-64 core, forward only: a call that keeps
-    a backward runs the module's PyTorch statements (accuracy: test_triattn_b200_variants_gpu.py)."""
+def test_wide_head_dim_64_served():
+    """64-channel heads (Chai-1, RoseTTAFold3's templates, IntelliFold-2) run the head-dim-64 core, inference and training (its
+    backward: triattn_dh64_sm100.cu; accuracy: test_triattn_b200_variants_gpu.py)."""
     four = make_wide(ImplementationType.MINIWORLD, 256, 256, 4)         # 64-channel heads
     x = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     with torch.no_grad():
         assert triattn_b200.serves_wide(four.eval(), x)
-    assert not triattn_b200.serves_wide(four.train(), x)
-    assert triattn_b200.serves_wide(make_wide(ImplementationType.MINIWORLD, 256, 256, 8).train(), x)   # training is served
+    assert triattn_b200.serves_wide(four.train(), x)
+    assert triattn_b200.serves_wide(make_wide(ImplementationType.MINIWORLD, 256, 256, 8).train(), x)
 
 
 def wide_grads(cfg, starting, length, p_drop, seed=1234):
