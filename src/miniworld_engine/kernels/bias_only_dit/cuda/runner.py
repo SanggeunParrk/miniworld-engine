@@ -59,6 +59,8 @@ from miniworld_engine.kernels.bias_only_dit import cuda as C
 from miniworld_engine import settings
 
 EPS = 1e-5
+#: B200 per-sample-bias cores (``PvGateCore(psb=True)``) per (device, heads, head width)
+_PSB_CORES: dict = {}
 
 
 def _tf32():
@@ -770,6 +772,22 @@ class FusedBiasOnlyDiT:
         """a = sigmoid(g) softmax(bias + mask) v per (head, sample): vg [S L, 2 DA] (v | g), a [S L, DA]."""
         H, DA = self.h, self.da
         dh = DA // H
+        if not C.h100_enabled(vg.device):
+            # B200: P per (head, sample) by the softmax rows (the sample's key mask folded in; a fully masked sample's rows are uniform,
+            # never NaN), then the -DPSB build of pv_gate_inf (bf16) / pv_gate_tf32 (fp32): each work item one sample's P
+            P = torch.empty(H * S * L, L, device=vg.device, dtype=vg.dtype)
+            if self.fp32:
+                _tf32().rows32().softmax_t_cuda(bias, P, None, mask, S)
+            else:
+                C.softmax_t(bias, P, None, mask, S)
+            idx = vg.device.index if vg.device.index is not None else torch.cuda.current_device()
+            core = _PSB_CORES.get((idx, H, dh, self.fp32))
+            if core is None:
+                core = _PSB_CORES[(idx, H, dh, self.fp32)] = (
+                    _tf32().PvGateCoreTF32(idx, nh=H, dh=dh, psb=True) if self.fp32 else C.PvGateCore(idx, nh=H, dh=dh, psb=True)
+                )
+            core(vg[:, :DA], P, a, S, g=vg[:, DA:])
+            return
         from miniworld_engine.kernels.bias_only_dit.cuda import psb_inf
 
         stats = None if (self.fp32 and psb_inf.psb32i_served(L, dh)) else torch.empty(H * S * L, 2, device=vg.device, dtype=torch.float32)  # (max, 1 / sum) per row: unused here
