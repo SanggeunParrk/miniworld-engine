@@ -560,39 +560,53 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(192, 1) opm_wepilogu
 
 // ---------------------------------------------------------------------------------------------
 // DGRAD at c_z = CZ on CTA PAIRS: dO[(i,c),(j,e)] = (sum_z dz[i,j,z] Wo[z,(c,e)]) / n[i,j] in the grouped layout, dz/n, dbias = sum dz.
-// A cluster of two CTAs takes two neighbouring 128-pair tiles; per 128-column chunk of dO one cta_group::2 product M 256 (both CTAs'
-// pairs) x N 128 (each CTA lands HALF of the chunk's Wo columns, 64 n) x K = c_z, in K = 128 stages (8 MMAs a wait).  Each CTA keeps
-// its tile's dz in a ring of 128-z units ([2 halves][128 pairs][64 z], the A operand) for the tile's eight chunks; its own TMEM holds
-// its pairs' rows of the accumulators.  Against the single-CTA kernel: half the Wo bytes per CTA and tile, and half the shared-memory
-// operand traffic per FLOP (an M 128 x N 128 product reads 128 bytes a clock, all of the SM's shared-memory bandwidth, and the drain's
-// staging competed with it), twice the work per MMA instruction and per wait.  dbias += dz^T 1 over each unit by one M 256 x N 16
-// product (each CTA's rows its own pairs' sums; the ones live in the leader's half of B).  A unit is released after the tile's last
-// chunk read it (multicast commit) and the CTA's eight drain warps took dz/n; the leader's MMA learns that both CTAs' units landed from
-// a forwarding warp in each CTA.
+// A cluster of two CTAs takes two neighbouring 128-pair tiles; per 256-column chunk of dO one cta_group::2 product M 256 (both CTAs'
+// pairs) x N 256 (each CTA lands HALF of the chunk's Wo columns, 128 n) x K = c_z, in K = 128 stages (8 MMAs a wait), into one of two
+// 256-column TMEM accumulators (all 512 columns).  N 256: at N 128 (the previous chunk) the MMAs ran at ~0.95 PF with every load and
+// store compiled out (c_z 512, L768), at N 256 at ~1.5 PF -- per MMA a CTA reads A (4 KiB) and its half of B from shared memory, and
+// at N 128 that was 96 bytes a clock.  Each CTA keeps its tile's dz in a ring of 128-z units ([2 halves][128 pairs][64 z], the A
+// operand) for the tile's four chunks; its own TMEM holds its pairs' rows of the accumulators.  The two accumulators fill TMEM, so
+// dbias = sum dz is not a tensor-core product (it was M 256 x N 16 per unit into 16 more columns): the drain warps, which read every
+// dz row for dz/n anyway, reduce their 32 rows across the warp (a fixed butterfly, fp32), keep the per-warp sums over the CTA's tiles
+// in registers and add the four warps in a fixed order at the end (deterministic).  A unit is released after the tile's last chunk
+// read it (multicast commit) and the CTA's eight drain warps took dz/n; the leader's MMA learns that both CTAs' units landed from a
+// forwarding warp in each CTA.  dz/n and dO leave through one staging ring by TMA (a 32 KiB box: a dz/n unit or half a chunk of dO).
 template <int CZ>
 struct WDg {
   static constexpr int BI = 4, BJ = 32, NP = BI * BJ;
-  static constexpr int NC = 128, NCK = NCH / NC;
+  static constexpr int NC = 256, NCK = NCH / NC;     // 4 chunks of 8 c
   static constexpr int NZB = CZ / 128;               // units = K stages per chunk
   static constexpr int UNIT = NP * 128;              // elements
-  static constexpr int NB = CZ <= 384 ? NZB + 1 : NZB;
-  static constexpr int WOS = 128 * 64;               // this CTA's half of a stage of Wo: [128 z][64 n]
-  static constexpr int NWO = 3;
-  static constexpr int OUT = NP * NC;
-  static constexpr int NOUT = CZ >= 384 ? 1 : 2;
-  static constexpr int NACC = 3;
-  static constexpr int ONES = 8 * NP;                // this CTA's 8 of the 16 B rows: [2 k blocks][8][64]
+  static constexpr int NB = CZ <= 256 ? NZB + 1 : NZB;
+  static constexpr int WOS = 128 * 128;              // this CTA's half of a stage of Wo: [2 n blocks][128 z][64 n]
+  static constexpr int NWO = 2;
+  static constexpr int OUT = NP * 128;               // a staging box: half a chunk of dO [4 i][4 c][32 j][32 e] or a dz/n unit
+  static constexpr int NOUT = CZ >= 512 ? 1 : 2;
+  static constexpr int NACC = 2;
   static constexpr int THREADS = 384;                // 0: Wo, 1: MMA (leader), 2-9: drain, 10: dz units, 11: unit-landed forwarder
-  static constexpr int SMEM = 1024 + (NB * UNIT + NWO * WOS + NOUT * OUT + ONES) * 2 + 512;
+  static constexpr int SMEM = 1024 + (NB * UNIT + NWO * WOS + NOUT * OUT) * 2 + 512;
   static constexpr uint32_t IDESC = idesc_bf16(256, NC, 0, 1);
-  static constexpr uint32_t IDESC_BO = idesc_bf16(256, 16, 1, 0);
-  static constexpr int BO_COL = NACC * NC;
   static_assert(SMEM <= 232448, "one CTA per SM");
-  static_assert(BO_COL + NZB * 16 <= 512, "TMEM columns");
+  static_assert(NACC * NC <= 512, "TMEM columns");
+  static_assert(NZB * 2 * 4 * 64 * 4 <= OUT * 2, "the dbias partials fit a staging box");
 };
 
 __device__ __forceinline__ void arrive_leader_release(uint64_t* bar) {   // release, cluster scope: this thread's prior shared stores first
   asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];\n" :: "r"(cl_map(sa(bar), 0)) : "memory");
+}
+
+// sum over the warp's 32 lanes of v[0..63] (fixed butterfly, reduce-scatter): lane l returns the sums of z = 2 l, 2 l + 1
+__device__ __forceinline__ float2 warp_colsum64(float (&v)[64], int lane) {
+#pragma unroll
+  for (int m = 16, k = 32; m >= 1; m >>= 1, k >>= 1) {
+    const bool up = (lane & m) != 0;
+#pragma unroll
+    for (int e = 0; e < k; ++e) {
+      const float send = up ? v[e] : v[e + k], keep = up ? v[e + k] : v[e];
+      v[e] = keep + __shfl_xor_sync(0xffffffffu, send, m);
+    }
+  }
+  return make_float2(v[0], v[1]);
 }
 
 template <int CZ>
@@ -601,49 +615,37 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
     const __grid_constant__ CUtensorMap dzmap,    // dz as (64 z, NJ j, CZ / 64, NI i), box (64, BJ, 1, BI), 128B swizzle
     const __grid_constant__ CUtensorMap womap,    // Wo [CZ][NCH] as (NCH n, CZ z), box (64 n, 128 z), 128B swizzle
     const __grid_constant__ CUtensorMap domap,    // dO as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
-    __nv_bfloat16* __restrict__ DZP,              // dz/n [NI][NJ][CZ]
+    const __grid_constant__ CUtensorMap dzpmap,   // dz/n [NI][NJ][CZ], as dzmap
     const float* __restrict__ NORM, float* __restrict__ DBO,   // the mask counts [NI][NJ] (clamped >= 1); the dbias partials [grid][CZ]
     const int* __restrict__ ASYM) {               // chain ids [N] (the interchain mask), or nullptr
   using C = WDg<CZ>;
   constexpr int BJ = C::BJ, BI = C::BI, NP = C::NP, NC = C::NC, NCK = C::NCK, NZB = C::NZB, UNIT = C::UNIT, NB = C::NB;
-  constexpr int WOS = C::WOS, NWO = C::NWO, OUT = C::OUT, NOUT = C::NOUT, NACC = C::NACC, BO_COL = C::BO_COL;
+  constexpr int WOS = C::WOS, NWO = C::NWO, OUT = C::OUT, NOUT = C::NOUT, NACC = C::NACC;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
   __nv_bfloat16* sDZ = reinterpret_cast<__nv_bfloat16*>(smb);
   __nv_bfloat16* sWO = sDZ + NB * UNIT;
   __nv_bfloat16* sOUT = sWO + NWO * WOS;
-  __nv_bfloat16* sONE = sOUT + NOUT * OUT;
-  uint64_t* bars = reinterpret_cast<uint64_t*>(sONE + C::ONES);
+  uint64_t* bars = reinterpret_cast<uint64_t*>(sOUT + NOUT * OUT);
   uint64_t* dzf = bars;              // [NB] this CTA's unit landed
   uint64_t* dze = dzf + NB;          // [NB] count 9: the tile's last chunk read it (multicast commit) and the 8 drain warps took dz/n
   uint64_t* dzf2 = dze + NB;         // [NB] (leader) count 2: both CTAs' units landed (the forwarders)
-  uint64_t* dzm = dzf2 + NB;         // [NB] (leader) count 16: both CTAs' drains zeroed the unit's interchain rows
-  uint64_t* wof = dzm + NB;          // [NWO] (leader) both halves of the Wo stage landed
+  uint64_t* wof = dzf2 + NB;         // [NWO] (leader) both halves of the Wo stage landed
   uint64_t* woe = wof + NWO;         // [NWO] (multicast commit)
   uint64_t* accf = woe + NWO;        // [NACC] (multicast commit)
   uint64_t* acce = accf + NACC;      // [NACC] (leader) count 16: both CTAs' drains took the accumulator
-  uint64_t* bod = acce + NACC;       // [1] (multicast commit) the last dbias GEMM retired
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(bod + 1);
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(acce + NACC);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   const int rank = (int)cl_rank();
   const bool lead_cta = rank == 0;
   const int cl = blockIdx.x >> 1, ncl = gridDim.x >> 1;
   if (tid == 0) {
-    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzf2 + k, 2); bar_init(dzm + k, 16); }
+    for (int k = 0; k < NB; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzf2 + k, 2); }
     for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
     for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 16); }
-    bar_init(bod, 1);
     bar_init_fence();
   }
-  // the ones of the dbias GEMM: B[n][k] = 1 for n == 0 (the leader's first row), zero elsewhere (rows 1-7 here, 8-15 in the peer)
-  for (int v = tid; v < C::ONES / 8; v += C::THREADS) {
-    const int row = (v / 8) % 8;
-    uint4 o = make_uint4(0u, 0u, 0u, 0u);
-    if (lead_cta && row == 0) o = make_uint4(0x3f803f80u, 0x3f803f80u, 0x3f803f80u, 0x3f803f80u);
-    reinterpret_cast<uint4*>(sONE)[v] = o;
-  }
   if (warp == 1) tmem_alloc2(tslot, 512);
-  fence_proxy_async();
   tc_fence_before();
   __syncthreads();
   cl_sync();
@@ -685,7 +687,8 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
             const int w = g % NWO;
             if (g >= NWO) wait(woe + w, ((g / NWO) - 1) & 1);
             if (lead_cta) expect_tx(wof + w, 2 * WOS * 2);
-            load_2d_2sm(&womap, sWO + w * WOS, wof + w, k * NC + rank * 64, zs * 128);
+            for (int b = 0; b < 2; ++b)
+              load_2d_2sm(&womap, sWO + w * WOS + b * 128 * 64, wof + w, k * NC + rank * (NC / 2) + b * 64, zs * 128);
           }
     }
   } else if (warp == 1) {
@@ -704,14 +707,6 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
               wait(dzf2 + d, ((u0 + zs) / NB) & 1);
               tc_fence_after();
             }
-            if (k == NCK - 1) {                  // its last: dbias += dz^T . 1 over it (raw dz; interchain rows zeroed by the drains, which
-              wait(dzm + d, ((u0 + zs) / NB) & 1);   // took this tile's dz/n long before: no wait in practice)
-              tc_fence_after();
-#pragma unroll
-              for (int kk = 0; kk < NP / 16; ++kk)
-                mma2_ss(tmem + BO_COL + zs * 16, desc_mn128(du + kk * 16 * 64, NP * 64 * 2),
-                        desc_k128(sONE + (kk >> 2) * 8 * 64 + (kk & 3) * 16), C::IDESC_BO, (lt | kk) ? 1u : 0u);
-            }
             wait(wof + w, (gw / NWO) & 1);
             tc_fence_after();
             const __nv_bfloat16* wo = sWO + w * WOS;
@@ -725,13 +720,15 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
           commit2(accf + a);
         }
       }
-      commit2(bod);
     }
   } else {
     const int q = warp & 3, grp = (warp - 2) >> 2;
     const int p = q * 32 + lane, il = p / BJ, jl = p % BJ;
     const bool leader = (warp == 2 && lane == 0);
-    int lt = 0, g = 0;
+    int lt = 0, g = 0, ring = 0;              // ring: uses of the staging ring (dz/n units, then dO half-chunks, per tile)
+    float2 dbs[NZB];                          // this warp's dbias sums over the CTA's tiles: z = unit zu, half grp, 2 lane, 2 lane + 1
+#pragma unroll
+    for (int zu = 0; zu < NZB; ++zu) dbs[zu] = make_float2(0.f, 0.f);
     // this thread's pair count, loaded one tile ahead (off the drain's critical path)
     auto count_of = [&](int tp) { int i0_, j0_; tile_of(tp, i0_, j0_); return __ldg(NORM + (size_t)(i0_ + il) * NJ + j0_ + jl); };
     float nrm_next = cl < npairs ? count_of(cl) : 1.f;
@@ -741,75 +738,100 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(384, 1) opm_wdgrad_s
       const int u0 = lt * NZB;
       const float nrm = nrm_next;
       if (tp + ncl < npairs) nrm_next = count_of(tp + ncl);
-      // the interchain mask: a pair of two chains passes no gradient (inv 0 for dO and dz/n; its dz rows zeroed for dbias)
+      // the interchain mask: a pair of two chains passes no gradient (inv 0 for dO and dz/n, and its dz row left out of dbias)
       const bool same = ASYM == nullptr || __ldg(ASYM + i0 + il) == __ldg(ASYM + j0 + jl);
       const float inv = same ? 1.0f / nrm : 0.f;
       const float2 inv2 = make_float2(inv, inv);
-      uint4* dst = reinterpret_cast<uint4*>(DZP + ((size_t)(i0 + il) * NJ + j0 + jl) * CZ);
-      for (int zu = 0; zu < NZB; ++zu) {         // dz/n for dWo: this warp's 64 z of each unit, straight to global
+#pragma unroll
+      for (int zu = 0; zu < NZB; ++zu, ++ring) {  // dz/n for dWo (through the staging ring, by TMA) and the dbias sums
         const int d = (u0 + zu) % NB;
         wait(dzf + d, ((u0 + zu) / NB) & 1);
-        __nv_bfloat16* rp = sDZ + d * UNIT + grp * NP * 64 + p * 64;
+        const int roff = grp * NP * 64 + p * 64;
+        const __nv_bfloat16* rp = sDZ + d * UNIT + roff;
         uint4 row[8];
 #pragma unroll
         for (int c8 = 0; c8 < 8; ++c8) row[c8] = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
-        if (ASYM != nullptr) {
-          // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way.  The
-          // proxy fence (a full CTA memory barrier) comes before this thread's global stores below, which it would otherwise wait for
-          if (!same)
-#pragma unroll
-            for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
-          fence_proxy_async();
-        }
+        if (leader) bulk_wait_read<NOUT - 1>();  // the ring slot's previous store has read it
+        named_sync(1, 256);
+        __nv_bfloat16* sp = sOUT + (ring % NOUT) * OUT;   // the unit's layout: [2 halves][128 pairs][64 z], 128B swizzle
+        float zv[64];
+        const float keep = same ? 1.f : 0.f;
 #pragma unroll
         for (int c8 = 0; c8 < 8; ++c8) {
           uint4 u = row[c8];
-          const float2 x0 = mul2(bf2f(u.x), inv2), x1 = mul2(bf2f(u.y), inv2), x2 = mul2(bf2f(u.z), inv2), x3 = mul2(bf2f(u.w), inv2);
-          u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
-          dst[zu * 16 + grp * 8 + c8] = u;
+          const uint32_t uw[4] = {u.x, u.y, u.z, u.w};
+          uint32_t ow[4];
+#pragma unroll
+          for (int k = 0; k < 4; ++k) {
+            const float2 x = bf2f(uw[k]);
+            zv[c8 * 8 + 2 * k] = x.x * keep;
+            zv[c8 * 8 + 2 * k + 1] = x.y * keep;
+            const float2 y = mul2(x, inv2);
+            ow[k] = pack2(y.x, y.y);
+          }
+          *reinterpret_cast<uint4*>(sp + roff + ((c8 ^ (p & 7)) << 3)) = make_uint4(ow[0], ow[1], ow[2], ow[3]);
         }
         __syncwarp();
-        if (lane == 0) { arrive(dze + d); arrive_leader_release(dzm + d); }
-      }
-      for (int k = 0; k < NCK; ++k, ++g) {
-        const int a = g % NACC, ob = g % NOUT;
-        wait(accf + a, (g / NACC) & 1);
-        tc_fence_after();
-        if (leader) bulk_wait_read<NOUT - 1>();
-        named_sync(1, 256);
-        __nv_bfloat16* box = sOUT + ob * OUT;
-#pragma unroll
-        for (int cc = 0; cc < 2; ++cc) {
-          const int cl4 = grp * 2 + cc;
-          float v[32];
-          tmem_ld32(tmem_at(tmem + a * NC, q * 32, cl4 * 32), v);
-          tmem_wait_ld();
-          if (cc == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_leader(acce + a); }
-          const int row = (il * 4 + cl4) * BJ + jl;
-          __nv_bfloat16* rp = box + row * 32;
-#pragma unroll
-          for (int c8 = 0; c8 < 4; ++c8) {
-            const float2 x0 = mul2(make_float2(v[c8 * 8 + 0], v[c8 * 8 + 1]), inv2), x1 = mul2(make_float2(v[c8 * 8 + 2], v[c8 * 8 + 3]), inv2);
-            const float2 x2 = mul2(make_float2(v[c8 * 8 + 4], v[c8 * 8 + 5]), inv2), x3 = mul2(make_float2(v[c8 * 8 + 6], v[c8 * 8 + 7]), inv2);
-            uint4 o;
-            o.x = pack2(x0.x, x0.y); o.y = pack2(x1.x, x1.y); o.z = pack2(x2.x, x2.y); o.w = pack2(x3.x, x3.y);
-            *reinterpret_cast<uint4*>(rp + ((c8 ^ ((row >> 1) & 3)) << 3)) = o;
-          }
-        }
+        if (lane == 0) arrive(dze + d);
         fence_proxy_async();
         named_sync(1, 256);
-        if (leader) { store_4d(&domap, box, 0, j0, k * 4, i0); bulk_commit(); }
+        if (leader) {
+          for (int h = 0; h < 2; ++h) store_4d(&dzpmap, sp + h * NP * 64, 0, j0, zu * 2 + h, i0);
+          bulk_commit();
+        }
+        const float2 cs = warp_colsum64(zv, lane);
+        dbs[zu].x += cs.x;
+        dbs[zu].y += cs.y;
+      }
+      for (int k = 0; k < NCK; ++k, ++g) {
+        const int a = g % NACC;
+        wait(accf + a, (g / NACC) & 1);
+        tc_fence_after();
+#pragma unroll 1
+        for (int sc = 0; sc < 2; ++sc, ++ring) {   // two halves of the chunk, 4 c each, one staging box apiece
+          if (leader) bulk_wait_read<NOUT - 1>();
+          named_sync(1, 256);
+          __nv_bfloat16* box = sOUT + (ring % NOUT) * OUT;
+#pragma unroll
+          for (int cc = 0; cc < 2; ++cc) {
+            const int cl4 = grp * 2 + cc;
+            float v[32];
+            tmem_ld32(tmem_at(tmem + a * NC + sc * 128, q * 32, cl4 * 32), v);
+            tmem_wait_ld();
+            if (sc == 1 && cc == 1) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_leader(acce + a); }
+            const int row = (il * 4 + cl4) * BJ + jl;
+            __nv_bfloat16* rp = box + row * 32;
+#pragma unroll
+            for (int c8 = 0; c8 < 4; ++c8) {
+              const float2 x0 = mul2(make_float2(v[c8 * 8 + 0], v[c8 * 8 + 1]), inv2), x1 = mul2(make_float2(v[c8 * 8 + 2], v[c8 * 8 + 3]), inv2);
+              const float2 x2 = mul2(make_float2(v[c8 * 8 + 4], v[c8 * 8 + 5]), inv2), x3 = mul2(make_float2(v[c8 * 8 + 6], v[c8 * 8 + 7]), inv2);
+              uint4 o;
+              o.x = pack2(x0.x, x0.y); o.y = pack2(x1.x, x1.y); o.z = pack2(x2.x, x2.y); o.w = pack2(x3.x, x3.y);
+              *reinterpret_cast<uint4*>(rp + ((c8 ^ ((row >> 1) & 3)) << 3)) = o;
+            }
+          }
+          fence_proxy_async();
+          named_sync(1, 256);
+          if (leader) { store_4d(&domap, box, 0, j0, k * 8 + sc * 4, i0); bulk_commit(); }
+        }
       }
     }
-    // this CTA's dbias partial: TMEM lane = z of a unit, column BO_COL + 16 unit (its own pairs' sums)
-    wait(bod, 0);
-    tc_fence_after();
+    // this CTA's dbias partial: the four warps of each half add their sums in a fixed order (through staging box 0, once its last store
+    // has read it)
+    if (leader) bulk_wait_read<0>();
+    named_sync(1, 256);
+    float* red = reinterpret_cast<float*>(sOUT);                     // [NZB][2 halves][4 warps][64 z]
+#pragma unroll
+    for (int zu = 0; zu < NZB; ++zu)
+      *reinterpret_cast<float2*>(red + ((zu * 2 + grp) * 4 + q) * 64 + 2 * lane) = dbs[zu];
+    named_sync(1, 256);
+    if (q == 0) {
 #pragma unroll 1
-    for (int zu = 0; zu < NZB; ++zu) {
-      float v[8];
-      tmem_ld8(tmem_at(tmem + BO_COL + zu * 16, q * 32, 0), v);
-      tmem_wait_ld();
-      if (grp == 0) DBO[(size_t)blockIdx.x * CZ + zu * 128 + q * 32 + lane] = v[0];
+      for (int zu = 0; zu < NZB; ++zu) {
+        const float* r = red + (zu * 2 + grp) * 4 * 64;
+        for (int z = lane; z < 64; z += 32)
+          DBO[(size_t)blockIdx.x * CZ + zu * 128 + grp * 64 + z] = ((r[z] + r[64 + z]) + r[128 + z]) + r[192 + z];
+      }
     }
     if (leader) bulk_wait<0>();
   }
@@ -2155,8 +2177,10 @@ static std::vector<torch::Tensor> dgrad_launch(torch::Tensor& dz, torch::Tensor&
   CUtensorMap wom = make_map<2>(wo.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
   CUtensorMap dom = make_map<4>(dO.data_ptr(), {32, (uint64_t)nj, 32, (uint64_t)ni}, {32, M, 32 * M}, {32, (uint32_t)C::BJ, 4, (uint32_t)C::BI},
                                 CU_TENSOR_MAP_SWIZZLE_64B, "dO");
+  CUtensorMap dzpm = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)(CZ / 64), (uint64_t)ni}, {(uint64_t)CZ, 64, (uint64_t)nj * CZ},
+                                 {64, (uint32_t)C::BJ, 1, (uint32_t)C::BI}, CU_TENSOR_MAP_SWIZZLE_128B, "dz/n");
   opm_wdgrad_sm100<CZ><<<2 * clusters, C::THREADS, C::SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, npairs, dzm, wom, dom,
-      reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()), norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym);
+      dzpm, norm.data_ptr<float>(), dbo_part.data_ptr<float>(), asym);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
