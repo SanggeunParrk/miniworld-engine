@@ -14,7 +14,7 @@ from pathlib import Path
 import torch
 
 from miniworld_engine import settings
-from miniworld_engine.kernels import _capture
+from miniworld_engine.kernels import _capture, _gemm
 from miniworld_engine.kernels._nvcc import ensure_cuda_home, gencodes, host_flags, load_extension
 
 _SRC = Path(__file__).with_name("b200_sources")
@@ -421,23 +421,12 @@ def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, 
     return (out if out is not None else y.view(B, L, L, C)), (q, k, v, g, bias, o, lse, stats)
 
 
-def _mm32_once(a, b):
-    try:
-        return torch.mm(a, b, out_dtype=torch.float32)
-    except TypeError:                                            # a torch without mm(out_dtype=)
-        return torch.mm(a, b).float()
-
-
 def _mm32(a, b):
-    """a @ b on cuBLAS with fp32 output (bf16 operands, fp32 accumulation).  A reduction length K that is not a multiple of 8 (the
-    caller's B L^2 rows at a ragged length) runs as K - K % 8 on cuBLAS plus the last rows in fp32: cuBLAS 12.9 on B200 (torch's
-    default allow_bf16_reduced_precision_reduction) returned [256, K] x [K, 256] products with 0.7-1.4 % relative error at K = 16641 /
-    16643, 4.5e-6 at 16640 / 16644 (measured 2026-10-29 against fp64)."""
-    k = a.shape[1]
-    r = k % 8
-    if r == 0 or k <= r:
-        return _mm32_once(a, b)
-    return _mm32_once(a[:, :k - r], b[:k - r]).addmm_(a[:, k - r:].float(), b[k - r:].float())
+    """a @ b on cuBLAS with an fp32 result (bf16 operands, fp32 accumulation), through ``kernels._gemm.mm``: a reduction over the
+    caller's B L^2 rows at a ragged length that is not a multiple of 64 runs as its multiple-of-64 head plus the last K % 64 rows, which
+    cuBLAS 12.9's split-K kernels drop on B200 for some K (splitting off K % 8 only, as before, missed every K that is a multiple of 8,
+    e.g. 508^2 = 258 064)."""
+    return _gemm.mm(a, b, out_dtype=torch.float32)
 
 
 def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved, dtypes, trans=False, bt=False, out_mode=0):
