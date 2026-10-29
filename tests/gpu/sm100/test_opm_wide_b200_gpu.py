@@ -1,5 +1,6 @@
 """B200 OuterProductMean at the FoldForge widths on the sm_100a kernels (``csrc/sm100/opm_wide_sm100.cu`` through ``integrations.opm_train``):
-d_msa 64 / 128 x d_pair 128 / 256 / 384 (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384)), either normalisation order, RoseTTAFold3's
+d_msa 64 / 128 / 256 x d_pair 128 / 256 / 384 / 512 (Protenix-v2 / ESMFold2 (128, 256), OpenDDE (128, 384), IntelliFold-v2 (256, 512)), either
+normalisation order, RoseTTAFold3's
 projection biases, inference AND training.
 
 Against the fp64 statements (``_variant_reference``): the engine's bf16 error held to 1.5x the bf16 statements' own (outputs) / 2x
@@ -39,6 +40,8 @@ WIDTHS = {
     "w64_256": (64, 256, {}),
     "w64_384_bias": (64, 384, {"projection_bias": True}),
     "w128_128": (128, 128, {}),
+    "intellifold2": (256, 512, {}),                  # IntelliFold-v2: d_msa 256 (a CTA pair per prologue-backward tile), c_z 512
+    "w256_after_bias": (256, 128, {"projection_bias": True, "normalize_before_proj": False}),
 }
 
 
@@ -130,7 +133,7 @@ def test_training_matches_fp64_statements(name, s, n, master, served):
         assert e <= max(2.0 * r, 1e-2), f"{name} d{nm}: engine {e:.2e} vs bf16 statements {r:.2e}"
 
 
-@pytest.mark.parametrize("name", ["rf3_before", "opendde_after", "rf3_wide"])
+@pytest.mark.parametrize("name", ["rf3_before", "opendde_after", "rf3_wide", "intellifold2"])
 def test_training_is_deterministic_and_graph_safe(name, served):
     d_msa, d_pair, options = WIDTHS[name]
     m = build(d_msa, d_pair, options, torch.bfloat16)
