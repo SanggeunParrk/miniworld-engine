@@ -45,10 +45,12 @@ dgrad: since the fourth pass every c_z, 128 included, runs `opm_wdgrad_sm100` (t
     TMEM); each CTA keeps its tile's dz in a ring of 128-z units (the A operand). dz / n and dO leave through one staging ring of
     32 KiB TMA boxes (a dz / n unit in the unit's own layout, half a chunk of dO). dbias = sum dz is not a tensor-core product (no TMEM
     columns are left): the drain warps reduce the dz rows they read for dz / n over the warp (a fixed fp32 butterfly), keep the sums
-    over the CTA's tiles in registers and add the four warps in a fixed order. A forwarding warp tells the leader's MMA that its CTA's
+    over the CTA's tiles in registers and add the four warps in a fixed order (with the division after the projection the same butterfly
+    sums dz / n: since the fifth pass no cuBLAS GEMV). A forwarding warp tells the leader's MMA that its CTA's
     unit landed. The interchain mask: inv 0 for the pair (dO, dz / n), its dz row left out of dbias by a 0 factor.
   - dWo `opm_wdwo_sm100<CZ>`: every 128-wide c_z slice of a column part accumulates in one CTA's TMEM (2 x 256 / 3 x 128 / 4 x 128
-    columns), so O is read once; split-K partials summed in split order.
+    columns), so O is read once; split-K partials summed in split order. In training at c_z 128 / 256 it runs on a side stream on 16 CTAs
+    beside the dA / dB GEMMs (fifth pass, below).
   - prologue backward at d_msa 128 `opm_wprologue_bwd_sm100<WT, 1>`: one group of eight compute warps (two threads a row, 64 channels
     each, their row sums combined through shared memory), dy double-buffered, the gradient row read from TMEM 32 columns at a time
     (twice: row sums, then dm); the masked column sums of dA / dB (dbeta, dW's beta term, the projection-bias gradients) by two
@@ -155,6 +157,41 @@ Fourth pass (2026-10-29, GPU 4 of node 2; commits 743b1b0b, 4aa944d6, cb20bbfe):
   2 x 618 GF at 512) and runs a hand mainloop, which in the fused inference kernel measured ~13 % behind cuBLAS per unit of energy at
   this K: at the cap that loses more than the dgrad it replaces. The O GEMM cannot drop its output (dWo reads O; `opm_train_save_o=0`
   recomputes it), and dWo is a hand kernel already.
+
+Fifth pass (2026-10-29/30, GPU 4 of node 2; commits 36dac513, a09d6b7d, 66f98930):
+
+- dWo beside the gradient GEMMs. The training step's GEMMs are bound by the 1000 W cap, not by their SM count, while dWo is HBM-bound
+  (O read once, 1.36 GB at L768). At c_z 128 / 256 the backward now runs dWo on a side stream on 16 CTAs (`opm_dwo` / `opm_wdwo(ctas=16)`;
+  the MiniWorld-width kernel takes a 4-stage ring in that mode: alone at L768 1111 -> 878 us on 16 CTAs, 228 / 243 us on 148) while cuBLAS
+  computes dA and dB with an SM-count target of 148 - 16 (torch's SM carve-out around those two calls, recorded into the CUDA graph;
+  `opm_train._DWO_SIDE_CTAS`, from L128). Chain alone (dgrad + dA + dB + dWo, L768): 2393 -> 2294 us. Budgets 12 / 16 equal, 8 / 20 /
+  24 / 32 / 48 slower (dWo too slow on 8 SMs; at 116-128 SMs cuBLAS picks slower 2x4-cluster tiles); c_z 384 / 512 keep the serial order
+  (16 or 32 CTAs slower: the 8-part wide kernel re-reads dz/n 8x). The split count follows the budget: dWo's fp32 order changes (rel
+  3.7e-5 at L384; the tensor core's accumulation over 9x longer chains per CTA shrinks magnitudes slightly), every other gradient is
+  bitwise unchanged, deterministic per budget (`tests/gpu/sm100/test_opm_side_dwo_b200_gpu.py`).
+- The parameters' bf16 forms (fp32 master) in one launch (`opm_cast_bf16`, one flat buffer kept for the backward): seven cast kernels a
+  step become one (MiniWorld width 21 -> 15 kernels a step); L384 0.948 -> 0.943 ms, (128, 256) 1.104 -> 1.098.
+- The division after the projection: dbias = sum dz / n is the dgrad's own butterfly (fp32 products) instead of a cuBLAS GEMV over the
+  bf16 dz/n (split-K + reduce): (64, 128) L384 0.955 -> 0.940, L768 3.504 -> 3.464; (128, 256) L384 1.120 -> 1.097; (128, 384) L768
+  4.587 -> 4.508 ms. That dbias moves by rel 1.5e-3 (no bf16-rounded terms); the before order is bitwise unchanged.
+- Tried and dropped: dz/n not written by the dgrad (dWo scaling its dz tiles in shared memory). The dgrad alone gained 7-10 % (L768: c_z
+  128 290 -> 268, 256 401 -> 370, 384 544 -> 505, 512 676 -> 608 us) but the scaling pass sits between each stage's TMA landing and its
+  MMA in a 3-4 stage ring: dWo alone c_z 128 230 -> 307 us (16 CTAs 877 -> 2243), 512 654 -> 1118; the step 3.47 -> 4.0 ms at L768.
+- Training step, own CUDA-graph harness (as the fourth pass: fp32 master parameters under bf16 autocast, fwd + bwd in one graph, S1024,
+  timed 3 x 1 s after the filler yielded, two interleaved runs, ms, fourth pass -> fifth): (64, 128) L128 0.167 -> 0.154, L256 0.484 ->
+  0.462, L384 0.981 -> 0.943, L512 1.652 -> 1.596, L768 3.588 -> 3.467; (128, 256) L128 0.238 -> 0.220, L256 0.582 -> 0.569, L384
+  1.126 -> 1.098, L768 4.02 -> 3.92; (128, 384) L768 4.51 -> 4.51; (256, 512) L384 1.516 -> 1.513, L768 5.21 -> 5.22.
+  `bench.py ... cudagraph=manual` (triton do_bench: 100 ms with an L2 flush between steps, so the card is not at its power-capped steady
+  state; two interleaved runs, ms): (64, 128) L384 0.981 / 0.981 -> 0.942 / 0.977, L768 3.242 / 3.462 -> 3.470 / 3.575; (128, 256)
+  1.032 / 1.100 -> 1.040 / 1.093, 3.998 / 4.047 -> 3.595 / 3.778; (128, 384) 1.146 / 1.179 -> 1.155 / 1.237, 4.538 / 4.567 -> 4.219 /
+  4.248; (256, 512) 1.440 / 1.470 -> 1.387 / 1.451, 4.748 / 4.946 -> 5.124 / 5.187 -- within its +-8 % run-to-run spread (the last
+  width runs the same kernels but for the one cast launch). The side-stream dWo relies on the GEMMs being power-bound: off the cap they
+  would lose the 16 SMs' share.
+- Where the time goes now (MiniWorld width, L768, profiler over graph replays, us): the three GEMMs 829 / 799 / 709, dgrad 278,
+  epilogue 237, prologue backward 58 (+ its column sum and finalize 15), the harness's copy of the leaf pair gradient 51 (`memcpy`,
+  AccumulateGrad: not in a model), prologue 44, mask counts 10, the cast 4; dWo 1104 on its 16 SMs, under the GEMMs. Left: the dgrad's
+  dz/n stores (above: worth ~8 % of it, if dWo could take dz/n without a pass on the stage's critical path), c_z 384 / 512's dWo beside
+  the GEMMs (needs a dWo that runs well on a few SMs: CTA pairs, or a split that does not re-read dz/n per column part).
 
 #### Fused inference kernel (`opm_fused_sm100`, `opm_fused_infer`)
 
