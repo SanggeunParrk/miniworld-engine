@@ -403,45 +403,83 @@ must fit 512 tensor-memory columns).
 
 ## Small M (D384, at most 16 tiles)
 
-A single-stream activation [1, L, 384] is L / 128 ≤ 6 tiles (the diffusion conditioning at inference); per-tile kernels would keep
-one SM pair per tile busy. Up to 16 tiles the forward is one kernel per cluster of CL CTAs that split the hidden units and sum their
-partial accumulators through an fp32 L2 scratch (CL the largest of 12 / 6 / 4 / 2 whose clusters are all resident at once, by the
-driver's `cuOccupancyMaxActiveClusters`), and the backward gate deals (tile pair, 256-unit block) items over all SMs. Columns below
-are (L, D) of [1, L, 384], n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384 path above.
+A single-stream activation [1, L, 384] is L / 128 ≤ 6 tiles (the pairformer's single track, the diffusion conditioning at inference);
+per-tile kernels would keep one SM pair per tile busy. Up to 16 tiles both directions run chains of programmatic dependent launches
+(PDL: each kernel's prologue -- barriers, tensor memory, the weight K-blocks -- overlaps the previous kernel) sized for a few tiles on
+all 148 SMs (`sm100/widths/tsx_*.cu`, round sx, 2026-10-29). Every operand is read in its own layout (W_s, W_a / W_b and the
+activations MN-major where the product needs it), so no transposed or concatenated weight copy is made per call; with fp32 master
+parameters the training forward's bf16 casts run as extra blocks of the LayerNorm launch. Columns below are (L, D) of [1, L, 384],
+n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384 path above.
 
 ### Inference and training
 
-##### F1 · LN + expand + SwiGLU + squeeze + residual, cluster hidden split (training: saves x_n, rstd, c1, h, a, b)
+##### F1 · LayerNorm, one warp per row (training: saves x_n, rstd, c1; fp32 masters: + the three weight casts)
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B1 · gate (dh GEMM + SwiGLU backward from the saved a, b; item schedule)
+##### F2 · expand + SwiGLU over (tile, 32- / 64-unit hidden chunk) CTAs (training: saves h, a, b)
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B3 · d_xn GEMM
+##### F3 · squeeze + residual over (tile, 32- / 64-column block) clusters, hidden split over a CTA pair
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B4 · LayerNorm backward + residual (+ reduction)
+##### B1 · gate (dh = dy W_s, W_s MN-major + SwiGLU backward from the saved a, b) over (tile, 64-unit chunk) CTAs
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
 | implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
-| 성능 확인 | ✗ | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+##### B2 · d_xn = dA W_a + dB W_b + LayerNorm backward + residual, one cluster per tile (6 column blocks x K halves)
+
+| (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
+|---|---|---|---|---|---|---|
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+##### B3 · dW_s, dW_a | dW_b (fp32, or bf16 for bf16 parameters) + dgamma / dbeta over (output tile) CTAs
+
+| (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
+|---|---|---|---|---|---|---|
+| implementation | CUDA | CUDA | CUDA | CUDA | CUDA | CUDA |
+| 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
+| cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+
+Measured 2026-10-29 (B200, node 2 GPU 5, the module call in a CUDA graph under bf16 autocast, median of 5 × 50 replays, µs;
+the B200 port session's harness `/NHNHOME/WORKSPACE/26mohw002_A/psk6950/scratch/port1028/bench_port.py`, not shipped; *before* = engine a014b518, the cluster forward `tsmall_w` + the D512-style
+backward with per-call `W_s^T` / `[W_a; W_b]^T` copies; the training step includes the harness's `.grad` accumulation adds, ~11 µs):
+
+| shape (n) | params | inference before | inference after | training before | training after |
+|---|---|---|---|---|---|
+| [1, 768, 384] (2) | bf16 | 16.5 | **10.4-12.3** | 90.1 | **39.2** |
+| [1, 768, 384] (4) | bf16 | 20.5 | **14.4** | 110.6 | **49.2** |
+| [1, 384, 384] (2) | bf16 | 16.5 | **10.3** | 88.1 | **36.9** |
+| [1, 384, 384] (4) | bf16 | 20.5 | **12.3** | 108.6 | **45.1** |
+| [1, 768, 384] (2) | fp32 masters | 22.6 | **14.4** | 89.7 | **41.0** |
+| [1, 768, 384] (4) | fp32 masters | 26.7 | **16.7** | 111.0 | **53.3** |
+| [1, 384, 384] (2) | fp32 masters | 22.6 | **12.4** | 88.4 | **39.9** |
+| [1, 384, 384] (4) | fp32 masters | 26.7 | **14.9** | 108.7 | **47.8** |
+
+(The [1, 768, 384] n = 2 inference cell measured 10.4 and 12.3 µs in different sessions with the same code -- before 16.5 in both;
+fp32-master inference includes the in-graph weight cast of a capture without `static_weights`.) At 10-16 tiles the chains are ~2× the
+per-tile path (L2048 n = 4: inference 28.7 vs 49.2 µs, training 94.2 vs 151.8 µs). H100 (generic kernels, 3 + PDL) does
+[1, 768, 384] n = 2 in 11.8 / 33.1 µs.
 
 No kernel on these paths is autotuned, so nothing needs a cache (✓).
 
@@ -480,8 +518,13 @@ No kernel on these paths is autotuned, so nothing needs a cache (✓).
   residual (`widths/tgemm_nd.cu`; D768 as two 384-column launches). F2 deals (tile pair, 128-unit chunk) items over all SMs up to
   1152 tiles and whole tile pairs above. The backward's **B1** (`widths/tgate_ab.cu`) fuses `dh = dy W_s` with the SwiGLU backward
   from the saved `a, b`, then B3 / B4 as at D256.
-- **Small M, D384** (`widths/tsmall_w.cu`): see [Small M](#small-m-d384-at-most-16-tiles); the backward is the D512-style chain with the
-  gate's item schedule.
+- **Small M, D384** (`widths/tsx_ln.cu`, `tsx_expand.cu`, `tsx_squeeze.cu`, `tsx_gate.cu`, `tsx_dxn.cu`, `tsx_dw.cu`; see
+  [Small M](#small-m-d384-at-most-16-tiles)). The bound is the per-SM TMA intake (~60 B/clk), not the products: the squeeze splits a
+  row tile's hidden units over a CTA pair (fp32 partials through distributed shared memory) and B2 splits K into the `dA W_a` and
+  `dB W_b` halves (pairwise mbarrier exchange) while the 12-CTA clusters are all resident (≤ 7 tiles); B2's row sums for the
+  LayerNorm backward cross the cluster through distributed shared memory under split arrive / wait barriers; dgamma / dbeta are
+  per-tile partials summed in tile order by B3. The LayerNorm runs once per row in F1 instead of in each of the 12-48 CTAs that share
+  a tile (it is instruction bound: ~4k cycles per 128 × 384 tile).
 - Numerics are the sm_90a contract (same rounding points; `x_n`, `h`, `dA`, `dB`, `d_xn` in bf16, fp32 accumulation; at D ≥ 384 `a, b`
   saved in bf16); vs the fp32 module every (D, n) is at least as close as the portable path
   (`tests/gpu/sm100/test_transition_fused_sm100a_gpu.py`, `tests/gpu/sm100/test_transition_fused_wide_sm100a_gpu.py`: 1 / 3 / 15 / 1152
@@ -576,8 +619,8 @@ kernels landed (those widths' kernels are unchanged since).
 | single [1, 384, 384] (2) | 14.7 | 16.7 | **16.8** | 0.87 | 55.7 | 53.9 | **88.3** | 0.61 |
 | single [1, 768, 384] (2) | 16.7 | 17.8 | **18.6** | 0.90 | 59.6 | 61.7 | **90.3** | 0.66 |
 
-At ≤ 6 tiles (the single stream [1, L, 384]) the cluster forward is on par with Triton and ~12 % behind torch.compile at inference,
-and training is 1.5-1.6x slower than both (the small-M backward is a four-kernel chain on a few tiles); every other shape above is
-faster than both.
+At ≤ 6 tiles (the single stream [1, L, 384]) the cluster forward was on par with Triton and ~12 % behind torch.compile at inference,
+and training 1.5-1.6x slower than both; superseded on 2026-10-29 by the PDL chains (see [Small M](#small-m-d384-at-most-16-tiles):
+[1, 768, 384] n = 2 inference 10.4-12.3, training 39.2 µs). Every other shape above is faster than both.
 The diffusion conditioning's training batch [48, L, 384] n = 2 went from 220.7 / 328.9 µs (L384 / L768, three-kernel forward and
 backward chain) to 174.2 / 296.8 µs with the fused D384 kernels.
