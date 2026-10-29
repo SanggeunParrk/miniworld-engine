@@ -120,10 +120,8 @@ def refusal(
             return "the kernels are built for sm_90a and sm_100a"
         if cap == (10, 0) and torch.is_grad_enabled() and not _SM100_TRAIN:
             return "the sm_100a backward kernels are not built yet"
-        if cap == (10, 0) and (
-            (d_msa, d_pair) != (CM, CZ) or not normalize_before_proj
-        ):
-            return "the sm_100a kernels serve d_msa 64 / d_pair 128 with the AF3 normalisation order"
+        if cap == (10, 0) and (d_msa, d_pair) != (CM, CZ):
+            return "the sm_100a kernels serve d_msa 64 / d_pair 128 (either normalisation order)"
         if msa.shape[0] != 1:
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         s, n = msa.shape[1], msa.shape[2]
@@ -458,10 +456,26 @@ def fused_prologue(
     return A2, BT, stats
 
 
-def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats):
+def _fused_sm100_enabled(s: int, n: int) -> bool:
+    """B200 inference: the outer product + projection as ONE kernel (`opm_fused_infer`, csrc/sm100/opm_sm100.cu) at the cells where it
+    measured faster than cuBLAS + the epilogue kernel (`_FUSED_SM100_CELLS`; docs/gpus/b200/opm/opm.md)."""
+    return (n, s) in _FUSED_SM100_CELLS and not settings.current().force_portable_kernels
+
+
+# (N, S) after the wrapper's padding (N % 64, S % 256) where the fused kernel is served: none, as measured 2026-10-29 (B200, CUDA graph).
+# Module harness (bench.py, ms, two runs each; today's path -> fused): S1024 L128 0.057 / 0.055 -> 0.057 / 0.057, L384 0.309 / 0.295 ->
+# 0.303 / 0.294, L512 0.496 / 0.494 -> 0.503 / 0.514, L640 0.729 / 0.731 -> 0.808 / 0.795, L768 1.043 / 1.058 -> 1.153 / 1.051;
+# S4096 L768 3.528 / 3.687 -> 3.472 / 3.651.  Kernel pair in steady state under the 1000 W cap (us, cuBLAS + epilogue -> fused): S1024
+# L384 293 -> 288, L512 513 -> 505, L640 800 -> 788, L768 1144 -> 1141; S2048 +4-8 %; S4096 +9-10 %.  A cell goes here once it wins
+# on the harness (docs/gpus/b200/opm/opm.md: what is left is the fused mainloop's energy per product).
+_FUSED_SM100_CELLS: frozenset[tuple[int, int]] = frozenset()
+
+
+def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
     statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, and the epilogue, which counts
-    the mask per pair from the bits instead of taking a separate [N, N] count."""
+    the mask per pair from the bits instead of taking a separate [N, N] count.  `after`: the count divides the projection
+    and its bias (ESMFold2's order, and AF3's as released)."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
@@ -478,8 +492,12 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         save_stats,
         False,
     )
-    o = torch.matmul(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
     n = m.shape[1]
+    if not save_stats and _fused_sm100_enabled(m.shape[0], n):
+        # inference: the products stay on chip (k-permuted weight as H100's fused kernel; the bias rounded to bf16 as below)
+        z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo.detach().to(bf).contiguous(), residual, int(after))
+        return z, m, mk, bits, a2, bt, stats, None
+    o = torch.matmul(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
     z = ext.opm_epilogue(
         o,
         bits,
@@ -488,6 +506,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         n,
         n,
         residual,
+        int(after),
     )
     return z, m, mk, bits, a2, bt, stats, o
 
@@ -639,6 +658,14 @@ class _OpmMath(torch.autograd.Function):
         pbias=None,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
+        if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: MiniWorld widths, either order (see `refusal`)
+            z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
+                _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after
+            )
+            ctx.save_o = bool(save_o)
+            ctx.save_for_backward(m, mk, bits, a2, bt, stats, lnw, lnb, wa, wb, wo, bo, *((o,) if save_o else ()))
+            ctx.eps = eps
+            return z
         path = _h100_path(msa.shape[1], msa.shape[2], training=save_stats)
         if (
             (cm, cz) != (CM, CZ)
@@ -678,28 +705,6 @@ class _OpmMath(torch.autograd.Function):
             ),
             fused=fused,
         )
-        if torch.cuda.get_device_capability(msa.device) == (10, 0):
-            z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
-                ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats
-            )
-            ctx.save_o = bool(save_o)
-            ctx.save_for_backward(
-                m,
-                mk,
-                bits,
-                a2,
-                bt,
-                stats,
-                lnw,
-                lnb,
-                wa,
-                wb,
-                wo,
-                bo,
-                *((o,) if save_o else ()),
-            )
-            ctx.eps = eps
-            return z
         bf = torch.bfloat16
         if path != "legacy":
             m = msa[0]
@@ -802,19 +807,23 @@ class _OpmMath(torch.autograd.Function):
         saved = ctx.saved_tensors
         m, mask16, norm, a2, bt, stats, lnw, lnb, wa, wb, wo, bo = saved[:12]
         o = saved[12] if ctx.save_o else None
-        if m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False) or getattr(ctx, "has_bias", False):
+        sm100 = torch.cuda.get_device_capability(dz.device) == (10, 0)
+        if not sm100 and (m.shape[2] != CM or wo.shape[0] != CZ or getattr(ctx, "after", False) or getattr(ctx, "has_bias", False)):
             return _backward_wide(ctx, dz)
         s, n = m.shape[0], m.shape[1]
-        path = _h100_path(s, n, training=True)
-        owned = _owned_blas_for(s, n, training=True)
-        ext = _ext(
-            dz.device,
-            native=path != "legacy",
-            tma=path == "tma",
-            epi_tma=_epilogue_tma_enabled(s, n, training=True),
-            epi_half=_epilogue_half_enabled(s, n, training=True),
-        )
-        if torch.cuda.get_device_capability(dz.device) == (10, 0):
+        if sm100:
+            ext = _ext(dz.device)
+        else:
+            path = _h100_path(s, n, training=True)
+            owned = _owned_blas_for(s, n, training=True)
+            ext = _ext(
+                dz.device,
+                native=path != "legacy",
+                tma=path == "tma",
+                epi_tma=_epilogue_tma_enabled(s, n, training=True),
+                epi_half=_epilogue_half_enabled(s, n, training=True),
+            )
+        if sm100:
             # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100
             dO, dzp, dbo = ext.opm_dgrad(
                 dz[0].contiguous(),
@@ -824,6 +833,8 @@ class _OpmMath(torch.autograd.Function):
                 n,
                 int(bo.dtype == bf),
             )
+            if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
+                dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, CZ), out_dtype=torch.float32).view(CZ)
             dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
             dB = torch.mm(a2.t(), dO)  # [s, (j,e)]
             del dO
@@ -1141,6 +1152,7 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
             eps=eps,
             residual=args[8] if args[8].numel() else None,
             save_stats=False,
+            after=after,
         )[0]
     return _OpmMath.forward(
         _SavedContext(),

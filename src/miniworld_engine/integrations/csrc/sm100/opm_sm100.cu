@@ -43,7 +43,7 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
     const __grid_constant__ CUtensorMap rmap,     // the residual, same layout
     const float* __restrict__ NORM,               // [NI][NJ] mask counts (clamped >= 1), or nullptr: counted from BITS
     const uint32_t* __restrict__ BITS, int W,     // the prologue's bit mask [N][W = S/32]
-    const void* __restrict__ BIAS, int bias_bf16, int has_res) {
+    const void* __restrict__ BIAS, int bias_bf16, int has_res, int after) {
   using namespace ep;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -167,7 +167,10 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
             // the stock module's bias is added in fp32 after a bf16 rounding (the cuBLASLt epilogue): a bf16 bias is exact
             const float2 bb = bias_bf16 ? __bfloat1622float2(__ldg(reinterpret_cast<const __nv_bfloat162*>(BIAS) + (n >> 1)))
                                         : __ldg(reinterpret_cast<const float2*>(BIAS) + (n >> 1));
-            __nv_bfloat162 x = __float22bfloat162_rn(make_float2(fmaf(v[c8 * 8 + u * 2], inv, bb.x), fmaf(v[c8 * 8 + u * 2 + 1], inv, bb.y)));
+            // `after` (ESMFold2 / AF3-as-released order): the count divides the projection and its bias
+            const float a0 = v[c8 * 8 + u * 2], a1 = v[c8 * 8 + u * 2 + 1];
+            __nv_bfloat162 x = after ? __float22bfloat162_rn(make_float2((a0 + bb.x) * inv, (a1 + bb.y) * inv))
+                                     : __float22bfloat162_rn(make_float2(fmaf(a0, inv, bb.x), fmaf(a1, inv, bb.y)));
             if (has_res) x = __hadd2(x, rh[u]);  // round the update first: bf16 OPM + bf16 residual
             ow[u] = *reinterpret_cast<uint32_t*>(&x);
           }
@@ -1008,11 +1011,317 @@ __global__ void __launch_bounds__(pb::THREADS, 1) opm_prologue_bwd_sm100(
   __syncthreads();
   if (warp == 1) tmem_dealloc(tmem, 256);
 }
+
+// ---------------------------------------------------------------------------------------------
+// FUSED INFERENCE: the grouped outer product O[(i,c),(j,e)] = sum_s A2[(i,c),s] BT[(j,e),s] and the c_hidden^2 -> c_z projection
+// in ONE persistent kernel on CTA PAIRS; O ([N*32, N*32] bf16, 1.2 GB at L768) never reaches HBM.  The H100 kernel's
+// (`opm_fused_infer`, ../opm_epilogue.cu) boundaries and k order; the instructions are tcgen05 / TMEM:
+//
+// Item = 32 i x 8 j for the cluster, 16 i x 8 j = 128 pairs per CTA.  The projection is a sum over k = (c, e), split by c into four
+// passes q (c in [8q, 8q + 8)), so a CTA's pass is the product of its 128 rows (16 i x 8 c) by 256 columns (8 j x 32 e), K = S:
+//   mainloop   cta_group::2 M 256 x N 256 x K 16 products (A: this CTA's 128 rows; B split by N: each CTA loads 4 j = 128 rows of
+//              BT; columns 0-127 the leader's j, 128-255 the peer's).  Per CTA and stage: 32 KiB for 128 x 256 x 64 products (a
+//              single-CTA 128 x 256 tile loads 48 KiB; two N 128 products per k step read A twice and ran the mainloop 35 % slower).
+//   drain      8 warps: TMEM -> registers -> bf16 (the rounding cuBLAS' output had) -> Opair[e / 8][pair = 8 i + j][(c, e % 8)],
+//              128-byte rows, 16-byte chunk c ^ j (conflict free); the H100 k permutation, so the same permuted weight serves.
+//   projection cta_group::2 M 256 (both CTAs' 128 pairs) x N 128 (o; each CTA holds the weight rows of its 64 o) x K 256 per pass,
+//              into TMEM columns 384-511, accumulated over the four passes.
+//   epilogue   4 warps: / count (popcount of the two tokens' mask bit rows) + bias (or (. + bias) / count when `after`), bf16,
+//              + residual (the update rounded first, as the unfused path), straight to z.
+// TMEM: three 128-column slots; pass p accumulates in columns [128 (p & 1), + 256), i.e. slots (p & 1, (p & 1) + 1), so consecutive
+// passes share slot 1 only: the drain empties slot 1 first and the next pass starts then, the drain of the other half and the
+// projection overlap the next mainloop (the projection of pass p is issued between the k steps of pass p + 1, as soon as both CTAs'
+// Opair is written).  Columns 384-511: z.
+//
+// Roles (512 threads): warp 0 lane 0 A / B producer (each CTA, completing on the leader's barriers); warp 1 TMEM alloc, lane 0 of
+// the leader issues every MMA; warp 2 lane 0 weight producer; warps 4-11 drain; warps 12-15 epilogue.
+namespace fz {
+constexpr int BK = 64;                       // s per stage (one 128-byte swizzle row)
+constexpr int NST = 4;
+constexpr int ATILE = 128 * BK;              // this CTA's 16 i x 8 c rows (elements)
+constexpr int BTILE = 128 * BK;              // this CTA's 4 j x 32 e rows
+constexpr int STAGE = ATILE + BTILE;
+constexpr int OPC = 128 * 64;                // Opair chunk [128 pairs][64 k]
+constexpr int WC = 64 * 64;                  // weight chunk [64 o][64 k]
+constexpr int THREADS = 512;
+constexpr int O_OP = NST * STAGE * 2, O_W = O_OP + 4 * OPC * 2, O_BAR = O_W + 4 * WC * 2;
+constexpr int SMEM = 1024 + O_BAR + 256;
+constexpr uint32_t IDESC = idesc_bf16(256, 256), IDESC_P = idesc_bf16(256, 128);
+constexpr uint32_t ZCOL = 384;
+constexpr int RASTER = 4;                    // i blocks per raster group (A / B panels stay in L2)
+static_assert(SMEM <= 232448, "one CTA per SM");
+
+__device__ __forceinline__ uint32_t cluster_rank() { uint32_t r; asm volatile("mov.u32 %0, %%cluster_ctarank;" : "=r"(r)); return r; }
+__device__ __forceinline__ void cluster_sync() { asm volatile("barrier.cluster.arrive.aligned;\nbarrier.cluster.wait.aligned;\n" ::: "memory"); }
+// TMA into this CTA's shared memory, the transaction counted on the LEADER's barrier (peer bit cleared)
+__device__ __forceinline__ void load_2d_2sm(const void* map, uint32_t dst, uint32_t bar, int c0, int c1) {
+  asm volatile("cp.async.bulk.tensor.2d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(bar & 0xFEFFFFFFu), "r"(c0), "r"(c1) : "memory");
+}
+__device__ __forceinline__ void load_3d_2sm(const void* map, uint32_t dst, uint32_t bar, int c0, int c1, int c2) {
+  asm volatile("cp.async.bulk.tensor.3d.cta_group::2.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5}], [%2];\n"
+               :: "r"(dst), "l"(map), "r"(bar & 0xFEFFFFFFu), "r"(c0), "r"(c1), "r"(c2) : "memory");
+}
+__device__ __forceinline__ void mma2(uint32_t d, uint64_t a, uint64_t b, uint32_t idesc, uint32_t acc) {
+  asm volatile("{\n.reg .pred p;\nsetp.ne.b32 p, %4, 0;\ntcgen05.mma.cta_group::2.kind::f16 [%0], %1, %2, %3, p;\n}\n"
+               :: "r"(d), "l"(a), "l"(b), "r"(idesc), "r"(acc) : "memory");
+}
+// arrives on the barrier at this offset in both CTAs once every MMA issued so far has completed
+__device__ __forceinline__ void commit2(uint32_t bar) {
+  asm volatile("tcgen05.commit.cta_group::2.mbarrier::arrive::one.shared::cluster.multicast::cluster.b64 [%0], %1;\n"
+               :: "r"(bar), "h"((uint16_t)3) : "memory");
+}
+__device__ __forceinline__ void arrive_leader(uint32_t bar) {   // release, cluster scope, on the leader's barrier at this offset
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, 0;\n" : "=r"(r) : "r"(bar));
+  asm volatile("mbarrier.arrive.release.cluster.shared::cluster.b64 _, [%0];\n" :: "r"(r) : "memory");
+}
+// relaxed: for TMEM-drained signals, whose ordering tcgen05.fence::before_thread_sync already carries (a release arrive waited
+// ~1-2K clk for this thread's earlier shared stores and sat on the critical path between passes)
+__device__ __forceinline__ void arrive_leader_relaxed(uint32_t bar) {
+  uint32_t r;
+  asm volatile("mapa.shared::cluster.u32 %0, %1, 0;\n" : "=r"(r) : "r"(bar));
+  asm volatile("mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [%0];\n" :: "r"(r) : "memory");
+}
+__device__ __forceinline__ void wait_cl(uint32_t b, uint32_t parity) {
+  asm volatile("{\n.reg .pred p;\nWCL_%=:\nmbarrier.try_wait.parity.acquire.cluster.shared::cta.b64 p, [%0], %1;\n@!p bra WCL_%=;\n}\n"
+               :: "r"(b), "r"(parity) : "memory");
+}
+__device__ __forceinline__ uint32_t test_cl(uint32_t b, uint32_t parity) {   // non-blocking (try_wait may suspend the issuing thread)
+  uint32_t ok;
+  asm volatile("{\n.reg .pred p;\nmbarrier.test_wait.parity.acquire.cluster.shared::cta.b64 p, [%1], %2;\nselp.u32 %0, 1, 0, p;\n}\n"
+               : "=r"(ok) : "r"(b), "r"(parity) : "memory");
+  return ok;
+}
+// the slot of half hh (0: the leader's j, 1: the peer's) of pass p, and the half the drain empties first (the one in slot 1)
+__device__ __forceinline__ int slot(int p, int hh) { return (p & 1) + hh; }
+__device__ __forceinline__ int first_half(int p) { return (p & 1) ? 0 : 1; }
+}  // namespace fz
+
+__global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_fused_sm100(
+    int N, int nk, int nitems,
+    const __grid_constant__ CUtensorMap amap,     // A2 as (s, c 32, i N), box (64, 8, 16), 128B swizzle
+    const __grid_constant__ CUtensorMap bmap,     // BT [N*32][S], box (64, 128)
+    const __grid_constant__ CUtensorMap wmap,     // the k-permuted Wo [128][1024], box (64, 64)
+    const uint32_t* __restrict__ BITS, int W,     // the prologue's bit mask [N][W = S/32]
+    const void* __restrict__ BIAS, int bias_bf16,
+    const __nv_bfloat16* __restrict__ RES, __nv_bfloat16* __restrict__ Z, int after) {
+  using namespace fz;
+  extern __shared__ __align__(1024) unsigned char raw[];
+  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  const uint32_t sb = sa(smb);
+  const uint32_t bars = sb + O_BAR;               // 8-byte barriers: full[4] empty[4] accf[3] acce[3] opf ope wf we zf ze, then the slot
+  const uint32_t FULL = bars, EMPTY = bars + 8 * NST, ACCF = EMPTY + 8 * NST, ACCE = ACCF + 24, OPF = ACCE + 24, OPE = OPF + 8,
+                 WF = OPE + 8, WE = WF + 8, ZF = WE + 8, ZE = ZF + 8;
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(smb + O_BAR + (ZE + 8 - bars));
+  uint64_t* bp = reinterpret_cast<uint64_t*>(smb + O_BAR);
+  const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
+  const int rank = (int)cluster_rank();
+  const bool leader = rank == 0;
+  const int cl = blockIdx.x >> 1, ncl = gridDim.x >> 1;
+  const int nib = N / 32, njb = N / 8;
+  const int my = nitems > cl ? (nitems - cl + ncl - 1) / ncl : 0;
+  auto item = [&](int li, int& ib, int& jb) {
+    const int t = cl + li * ncl, per = RASTER * njb, grp = t / per, first = grp * RASTER;
+    const int gsz = min(RASTER, nib - first), r = t - grp * per;
+    ib = first + r % gsz;
+    jb = r / gsz;
+  };
+  if (tid == 0) {
+    for (int s = 0; s < NST; ++s) { bar_init(bp + s, 1); bar_init(bp + NST + s, 1); }
+    uint64_t* q = bp + 2 * NST;
+    for (int r = 0; r < 3; ++r) { bar_init(q + r, 1); bar_init(q + 3 + r, 16); }
+    q += 6;
+    bar_init(q + 0, 16);  // opf: 8 drain warps x 2 CTAs
+    bar_init(q + 1, 1);   // ope
+    bar_init(q + 2, 1);   // wf
+    bar_init(q + 3, 1);   // we
+    bar_init(q + 4, 1);   // zf
+    bar_init(q + 5, 8);   // ze: 4 epilogue warps x 2 CTAs
+    bar_init_fence();
+    prefetch_map(&amap); prefetch_map(&bmap); prefetch_map(&wmap);
+  }
+  if (warp == 1) {
+    asm volatile("tcgen05.alloc.cta_group::2.sync.aligned.shared::cta.b32 [%0], 512;\n" :: "r"(sa(tslot)) : "memory");
+    asm volatile("tcgen05.relinquish_alloc_permit.cta_group::2.sync.aligned;\n" ::: "memory");
+  }
+  tc_fence_before();
+  __syncthreads();
+  cluster_sync();
+  tc_fence_after();
+  const uint32_t tmem = *tslot;
+
+  if (warp == 0) {
+    if (lane == 0) {                                // A / B ring, both CTAs
+      int g = 0;
+      for (int li = 0; li < my; ++li) {
+        int ib, jb; item(li, ib, jb);
+        const int i0 = ib * 32 + 16 * rank, jrow = (jb * 8 + 4 * rank) * CH;
+        for (int q = 0; q < 4; ++q)
+          for (int kb = 0; kb < nk; ++kb, ++g) {
+            const int s = g % NST;
+            if (g >= NST) wait(EMPTY + 8 * s, ((g / NST) - 1) & 1);
+            if (leader) expect_tx(FULL + 8 * s, 2 * STAGE * 2);
+            const uint32_t st = sb + s * STAGE * 2;
+            load_3d_2sm(&amap, st, FULL + 8 * s, kb * BK, q * 8, i0);
+            load_2d_2sm(&bmap, st + ATILE * 2, FULL + 8 * s, kb * BK, jrow);
+          }
+      }
+    }
+  } else if (warp == 2) {
+    if (lane == 0) {                    // the pass's weight slice: this CTA's 64 o x 256 k
+      int p = 0;
+      for (int li = 0; li < my; ++li)
+        for (int q = 0; q < 4; ++q, ++p) {
+          if (p >= 1) wait(WE, (p - 1) & 1);
+          if (leader) expect_tx(WF, 2 * 4 * WC * 2);
+          for (int eo = 0; eo < 4; ++eo) load_2d_2sm(&wmap, sb + O_W + eo * WC * 2, WF, q * 256 + eo * 64, 64 * rank);
+        }
+    }
+  } else if (warp == 1) {
+    if (leader && lane == 0) {                      // every MMA, both CTAs' operands
+      int g = 0, p = 0, pp = -1, ru[3] = {0, 0, 0};
+      auto proj = [&](int pq) {
+        const int q = pq & 3, li = pq >> 2;
+        if (q == 0 && li >= 1) wait_cl(ZE, (li - 1) & 1);
+        wait(WF, pq & 1);
+        tc_fence_after();
+#pragma unroll
+        for (int eo = 0; eo < 4; ++eo)
+#pragma unroll
+          for (int ks = 0; ks < 4; ++ks)
+            mma2(tmem + ZCOL, sdesc(sb + O_OP + eo * OPC * 2 + ks * 32, 16, 1024, 2), sdesc(sb + O_W + eo * WC * 2 + ks * 32, 16, 1024, 2),
+                   IDESC_P, (q | eo | ks) ? 1u : 0u);
+        commit2(OPE);
+        commit2(WE);
+        if (q == 3) commit2(ZF);
+      };
+      for (int li = 0; li < my; ++li)
+        for (int q = 0; q < 4; ++q, ++p) {
+          const int r0 = slot(p, 0), r1 = slot(p, 1);
+          if (ru[r0]) wait_cl(ACCE + 8 * r0, (ru[r0] - 1) & 1);
+          if (ru[r1]) wait_cl(ACCE + 8 * r1, (ru[r1] - 1) & 1);
+          tc_fence_after();
+          const uint32_t d = tmem + r0 * 128;
+          for (int kb = 0; kb < nk; ++kb, ++g) {
+            const int s = g % NST;
+            wait(FULL + 8 * s, (g / NST) & 1);
+            tc_fence_after();
+            const uint32_t st = sb + s * STAGE * 2;
+#pragma unroll
+            for (int ks = 0; ks < BK / 16; ++ks) {
+              mma2(d, sdesc(st + ks * 32, 16, 1024, 2), sdesc(st + ATILE * 2 + ks * 32, 16, 1024, 2), IDESC, (kb | ks) ? 1u : 0u);
+            }
+            commit2(EMPTY + 8 * s);
+            if (pp >= 0 && test_cl(OPF, pp & 1)) { proj(pp); pp = -1; }
+          }
+          commit2(ACCF + 8 * r0);
+          commit2(ACCF + 8 * r1);
+          ++ru[r0]; ++ru[r1];
+          if (pp >= 0) { wait_cl(OPF, pp & 1); proj(pp); }
+          pp = p;
+        }
+      if (pp >= 0) { wait_cl(OPF, pp & 1); proj(pp); }
+    }
+  } else if (warp >= 4 && warp < 12) {
+    // ---------------- drain: TMEM lane m = (i, c) of this CTA's 16 i x 8 c; of each half (4 j), warps 4-7 take 2 j, warps 8-11 the other 2
+    const int sp = warp & 3, wh = (warp - 4) >> 2;
+    const int m = sp * 32 + lane, il = m >> 3, c = m & 7;
+    int p = 0, ru[3] = {0, 0, 0};
+    for (int li = 0; li < my; ++li)
+      for (int q = 0; q < 4; ++q, ++p) {
+#pragma unroll 1
+        for (int h = 0; h < 2; ++h) {
+          const int hhalf = h == 0 ? first_half(p) : 1 - first_half(p), r = slot(p, hhalf);
+          wait(ACCF + 8 * r, ru[r] & 1);
+          tc_fence_after();
+          float v[64];
+          const uint32_t ta = tmem_at(tmem + r * 128, sp * 32, wh * 64);   // slot r holds half hhalf: 4 j x 32 e
+          tmem_ld32(ta, v);
+          tmem_ld32(ta + 32, v + 32);
+          tmem_wait_ld();
+          tc_fence_before();
+          __syncwarp();
+          if (lane == 0) arrive_leader_relaxed(ACCE + 8 * r);
+          ++ru[r];
+          if (h == 0 && p >= 1) wait(OPE, (p - 1) & 1);   // the previous pass's projection has read Opair
+#pragma unroll
+          for (int bb = 0; bb < 2; ++bb) {
+            const int jl = 4 * hhalf + 2 * wh + bb;       // half hhalf: the leader's (0) or the peer's (1) 4 j
+            const uint32_t rowa = sb + O_OP + (il * 8 + jl) * 128 + ((c ^ jl) << 4);
+#pragma unroll
+            for (int eo = 0; eo < 4; ++eo) {
+              const float* x = v + bb * 32 + eo * 8;
+              asm volatile("st.shared.v4.b32 [%0], {%1, %2, %3, %4};\n"
+                           :: "r"(rowa + eo * OPC * 2), "r"(pack2(x[0], x[1])), "r"(pack2(x[2], x[3])), "r"(pack2(x[4], x[5])),
+                              "r"(pack2(x[6], x[7])) : "memory");
+            }
+          }
+        }
+        fence_proxy_async();
+        __syncwarp();
+        if (lane == 0) arrive_leader(OPF);
+      }
+  } else if (warp >= 12) {
+    // ---------------- epilogue: TMEM lane = pair 8 i + j of this CTA, column = o
+    const int sp = warp & 3, pr = sp * 32 + lane, il = pr >> 3, jl = pr & 7;
+    for (int li = 0; li < my; ++li) {
+      int ib, jb; item(li, ib, jb);
+      const int i = ib * 32 + 16 * rank + il, j = jb * 8 + jl;
+      const uint4* bi = reinterpret_cast<const uint4*>(BITS + (size_t)i * W);
+      const uint4* bj = reinterpret_cast<const uint4*>(BITS + (size_t)j * W);
+      int cnt = 0;
+#pragma unroll 4
+      for (int w = 0; w < W / 4; ++w) {
+        const uint4 a = __ldg(bi + w), b = __ldg(bj + w);
+        cnt += __popc(a.x & b.x) + __popc(a.y & b.y) + __popc(a.z & b.z) + __popc(a.w & b.w);
+      }
+      const float inv = 1.0f / (float)max(cnt, 1);
+      const size_t zo = ((size_t)i * N + j) * CZ;
+      wait(ZF, li & 1);
+      tc_fence_after();
+#pragma unroll 1
+      for (int cb = 0; cb < 4; ++cb) {
+        float v[32];
+        tmem_ld32(tmem_at(tmem + ZCOL, sp * 32, cb * 32), v);
+        tmem_wait_ld();
+        if (cb == 3) { tc_fence_before(); __syncwarp(); if (lane == 0) arrive_leader_relaxed(ZE); }
+#pragma unroll
+        for (int u8 = 0; u8 < 4; ++u8) {
+          uint4 o;
+          uint32_t* ow = reinterpret_cast<uint32_t*>(&o);
+          uint4 rr = make_uint4(0, 0, 0, 0);
+          if (RES != nullptr) rr = __ldg(reinterpret_cast<const uint4*>(RES + zo + cb * 32 + u8 * 8));
+          const __nv_bfloat162* rh = reinterpret_cast<const __nv_bfloat162*>(&rr);
+#pragma unroll
+          for (int u = 0; u < 4; ++u) {
+            const int n = cb * 32 + u8 * 8 + u * 2;
+            const float2 bb = bias_bf16 ? __bfloat1622float2(__ldg(reinterpret_cast<const __nv_bfloat162*>(BIAS) + (n >> 1)))
+                                        : __ldg(reinterpret_cast<const float2*>(BIAS) + (n >> 1));
+            const float a0 = v[u8 * 8 + u * 2], a1 = v[u8 * 8 + u * 2 + 1];
+            __nv_bfloat162 x = after ? __float22bfloat162_rn(make_float2((a0 + bb.x) * inv, (a1 + bb.y) * inv))
+                                     : __float22bfloat162_rn(make_float2(fmaf(a0, inv, bb.x), fmaf(a1, inv, bb.y)));
+            if (RES != nullptr) x = __hadd2(x, rh[u]);
+            ow[u] = *reinterpret_cast<uint32_t*>(&x);
+          }
+          *reinterpret_cast<uint4*>(Z + zo + cb * 32 + u8 * 8) = o;
+        }
+      }
+    }
+  }
+  tc_fence_before();
+  __syncthreads();
+  cluster_sync();
+  if (warp == 1) {
+    tc_fence_after();
+    asm volatile("tcgen05.dealloc.cta_group::2.sync.aligned.b32 %0, 512;\n" :: "r"(tmem) : "memory");
+  }
+}
 }  // namespace
 
 // `norm`: fp32 [ni, nj] mask counts, or int32 [N, S/32] -- the prologue's bit mask, counted per pair in-kernel
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo, torch::Tensor bias,
-                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual) {
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after) {
   using namespace ep;
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   TORCH_CHECK(O.size(0) == ni * CH && O.size(1) == nj * CH, "O: [ni*32, nj*32]");
@@ -1040,7 +1349,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo
   opm_epilogue_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)ni, (int)nj, ntiles, am, bm, zm, rm, bits ? nullptr : norm.data_ptr<float>(),
       bits ? reinterpret_cast<const uint32_t*>(norm.data_ptr<int>()) : nullptr, bits ? (int)norm.size(1) : 0,
-      bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0, has_res ? 1 : 0);
+      bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0, has_res ? 1 : 0, (int)after);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1264,13 +1573,65 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
   return {dm, dwa, dwb, dgam, dbet};
 }
 
+
+// The fused inference outer product + projection (opm_fused_sm100).  a2 / bt: the prologue's [N*32, S]; bits: its int32 [N, S/32] mask;
+// wperm: Wo [128, 1024] with k = (c, e) permuted to (c / 8, e / 8, c % 8, e % 8) (opm_train._fused_weight, as H100); bias fp32 / bf16.
+torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor bits, torch::Tensor wperm, torch::Tensor bias,
+                              c10::optional<torch::Tensor> residual, int64_t after) {
+  using namespace fz;
+  TORCH_CHECK(a2.is_cuda() && a2.scalar_type() == torch::kBFloat16 && a2.is_contiguous() && a2.dim() == 2 && bt.sizes() == a2.sizes() &&
+              bt.scalar_type() == torch::kBFloat16 && bt.is_contiguous(), "a2 / bt: contiguous bf16 [N * 32, S]");
+  const long rows = a2.size(0), S = a2.size(1), N = rows / CH;
+  TORCH_CHECK(rows % CH == 0 && N % 32 == 0 && S % 128 == 0 && S >= 128, "fused OPM (sm100): N % 32, S % 128");
+  TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(0) == N && bits.size(1) == S / 32,
+              "bits: int32 [N, S / 32]");
+  TORCH_CHECK(wperm.scalar_type() == torch::kBFloat16 && wperm.is_contiguous() && wperm.numel() == CZ * NCH, "wperm: bf16 [128, 1024] (k-permuted)");
+  TORCH_CHECK((bias.scalar_type() == torch::kFloat32 || bias.scalar_type() == torch::kBFloat16) && bias.is_contiguous() && bias.numel() == CZ,
+              "bias: fp32 or bf16 [128]");
+  const bool has_res = residual.has_value() && residual->numel() > 0;
+  if (has_res)
+    TORCH_CHECK(residual->scalar_type() == torch::kBFloat16 && residual->is_contiguous() && residual->numel() == N * N * CZ,
+                "residual: contiguous bf16 [1, N, N, 128]");
+  auto z = torch::empty({1, N, N, (long)CZ}, a2.options());
+  CUtensorMap am = make_map<3>(a2.data_ptr(), {(uint64_t)S, (uint64_t)CH, (uint64_t)N}, {(uint64_t)S, (uint64_t)S * CH}, {64, 8, 16},
+                               CU_TENSOR_MAP_SWIZZLE_128B, "A2");
+  CUtensorMap bm = make_map<2>(bt.data_ptr(), {(uint64_t)S, (uint64_t)rows}, {(uint64_t)S}, {64, 128}, CU_TENSOR_MAP_SWIZZLE_128B, "BT");
+  CUtensorMap wm = make_map<2>(wperm.data_ptr(), {(uint64_t)NCH, (uint64_t)CZ}, {(uint64_t)NCH}, {64, 64}, CU_TENSOR_MAP_SWIZZLE_128B, "Wo");
+  const int nitems = (int)((N / 32) * (N / 8));
+  static bool attr = false;
+  static int max_clusters = 0;
+  if (!attr) {
+    C10_CUDA_CHECK(cudaFuncSetAttribute(opm_fused_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM));
+    // the persistent grid: as many CTA pairs as can be resident at once (a pair takes two SMs of one GPC; the runtime reports 64 on
+    // this 148-SM card), so no pair of the grid waits for a second wave
+    cudaLaunchConfig_t cfg = {};
+    cfg.gridDim = dim3(2 * (num_sms(a2.device().index()) / 2));
+    cfg.blockDim = dim3(THREADS);
+    cfg.dynamicSmemBytes = SMEM;
+    C10_CUDA_CHECK(cudaOccupancyMaxActiveClusters(&max_clusters, (void*)opm_fused_sm100, &cfg));
+    TORCH_CHECK(max_clusters > 0, "opm_fused_sm100: no CTA pair fits an SM pair");
+    attr = true;
+  }
+  const int clusters = std::min(nitems, max_clusters);
+  opm_fused_sm100<<<2 * clusters, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
+      (int)N, (int)(S / BK), nitems, am, bm, wm, reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)(S / 32),
+      bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0,
+      has_res ? reinterpret_cast<const __nv_bfloat16*>(residual->data_ptr<at::BFloat16>()) : nullptr,
+      reinterpret_cast<__nv_bfloat16*>(z.data_ptr<at::BFloat16>()), (int)after);
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+  return z;
+}
+
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
-        py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none());
+        py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(),
+        py::arg("after") = 0);
   m.def("opm_dgrad", &opm_dgrad, "sm100 fused OPM dO: (dz @ Wo) / n straight into the grouped layout, dz/n and dbias alongside",
         py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
   m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",
         py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("save_stats") = true, py::arg("want_norm") = false);
+  m.def("opm_fused_infer", &opm_fused_infer, "sm100 fused outer product + projection (inference): the grouped product never reaches HBM",
+        py::arg("a2"), py::arg("bt"), py::arg("bits"), py::arg("wperm"), py::arg("bias"), py::arg("residual") = py::none(), py::arg("after") = 0);
 }
