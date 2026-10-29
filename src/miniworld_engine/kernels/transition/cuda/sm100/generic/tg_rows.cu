@@ -4,7 +4,8 @@
 //   tg_ln_bwd_*   dx = dy + LN backward of d_xn (fp32) through gamma; per-block partial sums of d_xn xhat (dgamma) and d_xn (dbeta);
 //                 tg_ln_bwds_* the same over the sum of a split-K GEMM's partial slabs, added in slab order
 //   tg_colsum     column sums of [P, N] fp32 partials in a fixed order (dgamma | dbeta; the ConditionedTransition's gate bias)
-//   tg_splitsum   out = res + the sum of a split-K GEMM's fp32 partial slabs in slab order (the squeeze + residual at small M)
+//   tg_splitsum   out = res + the sum of a split-K GEMM's fp32 partial slabs in slab order (the squeeze's split route, kept for A/B runs:
+//                 at small M the host takes cuBLAS addmm, measured faster than the split GEMM plus this launch)
 //   tg_prep       the weights in the activation dtype (fp32: on the TF32 grid), and for the backward Ws^T and [Wa; Wb]^T
 //
 // A row is TPR consecutive lanes (8 / 16 / 32: a warp holds 32 / TPR rows, so a narrow row does not leave lanes idle), a lane loading
