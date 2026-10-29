@@ -125,7 +125,8 @@ class LocalDiTBlock(DiTBlock):
     window sees fewer keys (the default), or ``"slide"`` shifted back inside the real atoms (AlphaFold 3: the first two windows start at 0,
     the last ones end at atom ``N - 1``); the trunked pair is read as laid out from the window's first key either way. ``"slide"`` takes
     the real atom count ``N`` from the key mask, whose real atoms must come first; under 128 real atoms there is no valid window and the
-    keys past ``N`` are masked. The H100 mma kernels serve both for inference; a call with grad runs the composed path.
+    keys past ``N`` are masked. The H100 mma kernels serve both for inference; on B200 the sm_100a kernels serve the parallel norm in
+    inference and training and the slid window in inference; a call with grad through the slid window runs the composed path.
 
     ESMFold2's options (:data:`ESMFOLD2` holds the set): ``keys`` is the window's key count (128, or 192 centred the same way:
     ``[32 w - 80, 32 w + 112)``, and the pair is ``[B, nwin, 32, keys, d_pair]``); ``window_half`` lets query ``i`` see key ``j`` only when
