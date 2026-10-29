@@ -10,7 +10,8 @@ latency do not describe this training default.
 
 Contract: bf16 activations, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
-128 (inference also 256 with 16 heads, and a gate bias: Chai-1's 16 x 24, d_pair 256, gate_bias 1.0), no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
+128 (also 256 with 16 heads, and a gate bias: Chai-1's 16 x 24, d_pair 256, gate_bias 1.0; H100: inference only, B200: inference and
+training), no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
 training: L a multiple of 128. B200: any number of samples B (each its own pair and key mask; up to ``max_batch()`` per launch,
 more in fixed chunks of that size); H100: B = 1.
 
@@ -47,7 +48,7 @@ from miniworld_engine.kernels._compile import device_constant, opaque
 from miniworld_engine.modules.exceptions import ImplementationType
 
 DP = 128
-WIDE_DP, WIDE_HEADS = 256, 16  # Chai-1: d_pair 256 with 16 x 24 heads (H100 inference)
+WIDE_DP, WIDE_HEADS = 256, 16  # Chai-1: d_pair 256 with 16 x 24 heads (H100 inference; B200 inference and training)
 SHAPES = (
     (8, 384),
     (12, 384),
@@ -109,15 +110,17 @@ def _eligible(
         or tuple(module.to_query.weight.shape) != (D, D)
     ):
         return False
-    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0) is served on H100 and B200 for inference only: the
-    # gate bias rides on the g rows of the packed bias, the 256-wide pair takes pair_bias_fwd's 256-wide ring (module docstring);
-    # training keeps d_pair 128 and no gate bias.
+    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0): the gate bias rides on the g rows of the packed bias
+    # (so the gate pass and its backward see sigmoid(g + c); the constant has no gradient), the 256-wide pair takes pair_bias_fwd's /
+    # pair_bias_bwd's 256-wide rings (module docstring). H100 serves it for inference only; B200 for training too.
     dp = module.to_bias.weight.shape[1]
-    native = torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))
+    capability = torch.cuda.get_device_capability(single.device)
+    native = capability in ((9, 0), (10, 0))
+    trains = capability == (10, 0) or not torch.is_grad_enabled()
     if dp == WIDE_DP:
-        if not (native and H == WIDE_HEADS and not torch.is_grad_enabled()):
+        if not (native and H == WIDE_HEADS and trains):
             return False
-    elif dp != DP or (module.gate_bias and (not native or torch.is_grad_enabled())):
+    elif dp != DP or (module.gate_bias and (not native or not trains)):
         return False
     if (
         tuple(module.to_bias.weight.shape) != (H, dp)
@@ -275,22 +278,20 @@ def _inference_packs(params, leaves, gate_bias: float = 0.0):
 
 
 def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
-    """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W], Wf = to_bias.weight * ln_pair.weight * ws [H, 128], Wo
-    [D, W] bf16 with padded columns -- or None when there is no padding (8 x 48: to_out.weight as is) --, Wb bf16 [H, 128] or
-    None), bf16, one launch. Hopper always packs Wo and Wb (its weights may be an fp32 master that this pass rounds)."""
+    """(W q | k | v | g [4 W, D] (padded rows, q x qs), its bias [4 W] (the gate bias on the g rows), Wf = to_bias.weight *
+    ln_pair.weight * ws [H, d_pair], Wo [D, W] bf16 with padded columns -- or None when there is no padding (8 x 48: to_out.weight as
+    is) --, Wb bf16 [H, d_pair] or None), bf16, one launch (d_pair 128 or 256). Hopper always packs Wo and Wb (its weights may be an
+    fp32 master that this pass rounds)."""
     _, _, wq, bq, wk, wv, wg, wo, lnpw, wb = leaves
     H, _, W, D = _geometry(leaves)
     hopper = _cap(wq.device) == (9, 0)
     bf = torch.bfloat16
+    dp = wb.shape[1]
     wpack = wq.new_empty((4 * W, D), dtype=bf)
     bvec = wq.new_empty((4 * W,), dtype=bf)
-    wf = wq.new_empty((H, DP), dtype=bf)
+    wf = wq.new_empty((H, dp), dtype=bf)
     wop = wq.new_empty((D, W), dtype=bf) if (W != D or hopper) else None
-    wbo = wq.new_empty((H, DP), dtype=bf) if hopper else None
-    wide = wb.shape[1] == WIDE_DP
-    if wide:  # the prep pass is 128 wide: it packs everything but Wf, which is made below from the full 256 columns
-        wb_full, lnpw_full = wb, lnpw
-        wb, lnpw = wb[:, :DP].contiguous(), lnpw[:DP].contiguous()
+    wbo = wq.new_empty((H, dp), dtype=bf) if hopper else None
     _rows().ext().prep(
         wq,
         bq,
@@ -307,11 +308,8 @@ def _prep(leaves, qs: float, ws: float, gate_bias: float = 0.0):
         qs,
         ws,
         wbo,
+        float(gate_bias),  # sigmoid(g + c): the constant rides on the real gate rows of the packed bias (q | k | v | g, W each)
     )
-    if wide:
-        wf = (wb_full.float() * lnpw_full.float() * ws).to(bf)
-    if gate_bias:  # sigmoid(g + c): the constant rides on the gate rows of the packed bias (q | k | v | g, W each)
-        bvec[3 * W :] += gate_bias
     return wpack, bvec, wf, wop, wbo
 
 
@@ -402,11 +400,12 @@ def update_inference(
 
 
 # ------------------------------------------------------------------------------------------------------------- training
-def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
+def _forward_fake(single, pair, mask, leaves, eps_s, eps_p, gate_bias=0.0):
     """y and the saved set: xa, (mean, rstd), qkvg, bias, O, LSE, og, Wf, W q | k | v | g (and the padded Wo for 16 x 24)."""
     NB, L = single.shape[0], single.shape[1]
     M = NB * L
     H, _, W, D = _geometry(leaves)
+    dp = leaves[9].shape[1]
     e, f32 = single.new_empty, torch.float32
     out = [
         torch.empty_like(single),
@@ -417,14 +416,14 @@ def _forward_fake(single, pair, mask, leaves, eps_s, eps_p):
         e((M, W), dtype=f32),
         e((NB * H, L), dtype=f32),
         e((M, W)),
-        e((H, DP)),
+        e((H, dp)),
         e((4 * W, D)),
     ]
     hopper = _cap(single.device) == (9, 0)
     return (
         out
         + ([e((D, W))] if W != D or hopper else [])
-        + ([e((H, DP))] if hopper else [])
+        + ([e((H, dp))] if hopper else [])
     )
 
 
@@ -436,14 +435,16 @@ def forward(
     leaves: list[torch.Tensor],
     eps_s: float,
     eps_p: float,
+    gate_bias: float = 0.0,
 ) -> list[torch.Tensor]:
     NB, L = single.shape[0], single.shape[1]
     rows = _rows()
     lnw, lnb = leaves[0], leaves[1]
     H, _, W, D = _geometry(leaves)
+    dp = leaves[9].shape[1]
     with torch.cuda.device(single.device):
         x = single.view(NB * L, D)
-        wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0)
+        wpack, bvec, wf, wop, wbo = _prep(leaves, 1.0, 1.0, gate_bias)
         wo = leaves[7] if wop is None else wop
         xa = torch.empty_like(x)
         st = x.new_empty((NB * L, 2), dtype=torch.float32)
@@ -455,7 +456,7 @@ def forward(
             if _cap(single.device) == (9, 0)
             else NEG
         )
-        bias = rows.pair_bias(pair.view(NB * L * L, DP), wf, mask, L, eps_p, neg)
+        bias = rows.pair_bias(pair.view(NB * L * L, dp), wf, mask, L, eps_p, neg)
         core = _training_core(single.device)
         if _cap(single.device) == (9, 0):
             # The gate is the attention epilogue: O (fp32, for the backward's D) and og = sigmoid(g) O in one pass.
@@ -499,6 +500,7 @@ def backward(
     E = rows.ext()
     lnw, lnpw = leaves[0], leaves[8]
     H, _, W, D = _geometry(leaves)
+    dp = leaves[9].shape[1]
     xa, st, qkvg, bias, O, LSE, og, wf, wpack = saved[:9]
     # [D, W] bf16 and Wb bf16: packed by ``prep`` on Hopper (its leaves may be an fp32 master), the leaf itself otherwise
     wo = saved[9] if len(saved) > 9 else leaves[7]
@@ -513,7 +515,7 @@ def backward(
         if _cap(x.device) != (9, 0):
             rows_a = min(rows_a, 2 * _nsm(x.device))
         rows_b = E.pair_bwd_blocks(x, H, L, NB)
-        acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D), device=x.device)
+        acc = torch.empty(max(rows_a, rows_b), rows.acc_n(H, D, dp), device=x.device)
         dog = dy2 @ wo  # [L, W]: zero in the pads (Wo's pad columns are zero)
         dwo = torch.mm(
             dy2.t(), og, out_dtype=f32
@@ -540,7 +542,7 @@ def backward(
         dwp = torch.mm(dqkvg.t(), xa, out_dtype=f32)
         dx = torch.empty_like(x)
         E.ln_bwd(dxa, x, st, lnw, dy2, dx, acc, rows_a)
-        dz, _, _ = rows.pair_bias_bwd(pair.view(M * L, DP), DB, wf, L, eps_p, acc, D)
+        dz, _, _ = rows.pair_bias_bwd(pair.view(M * L, dp), DB, wf, L, eps_p, acc, D)
         # custom-op outputs may not alias: every parameter gradient leaves as its own tensor, written by one kernel
         outs = [torch.empty(t.shape, dtype=f32, device=t.device) for t in leaves]
         E.finalize(dwp, dwo, acc, wb, lnpw, outs, rows_a, rows_b)
@@ -678,7 +680,7 @@ def _pair_weight_shadow(
 
 class _Training(torch.autograd.Function):
     @staticmethod
-    def forward(ctx, eps_s, eps_p, mask, single, pair, *leaves):
+    def forward(ctx, eps_s, eps_p, gate_bias, mask, single, pair, *leaves):
         ctx.param_dtypes = [t.dtype for t in leaves]
         params = leaves
         ctx.beta_shadow = _cap(single.device) == (9, 0)
@@ -695,7 +697,7 @@ class _Training(torch.autograd.Function):
             and settings.current().apb_h100_exact_dwb
         )
         leaves = _kernel_leaves(leaves)
-        y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p)
+        y, *saved = forward(single, pair, mask, leaves, eps_s, eps_p, gate_bias)
         ctx.eps = (eps_s, eps_p)
         ctx.saved_count = len(saved)
         ctx.save_for_backward(
@@ -732,8 +734,9 @@ class _Training(torch.autograd.Function):
             )
 
             _activate_native_caller(force=True)
-            return (None, None, None, dx, dz, *grads)
+            return (None, None, None, None, dx, dz, *grads)
         return (
+            None,
             None,
             None,
             None,
@@ -749,10 +752,10 @@ class _TrainingHost(torch.autograd.Function):
     each parameter's dtype (a no-op for an fp32 master)."""
 
     @staticmethod
-    def forward(ctx, eps_s, eps_p, ns, nq, mask, single, pair, *params):
+    def forward(ctx, eps_s, eps_p, ns, nq, gate_bias, mask, single, pair, *params):
         ctx.param_dtypes = [t.dtype for t in params]
         ctx.nq = nq
-        y, *saved = torch.ops.apb_b200.train_fwd(single, pair, mask, list(params), eps_s, eps_p, ns)
+        y, *saved = torch.ops.apb_b200.train_fwd(single, pair, mask, list(params), eps_s, eps_p, ns, gate_bias)
         ctx.eps_p = eps_p
         ctx.save_for_backward(mask, single, pair, *params, *saved)
         return y
@@ -764,6 +767,7 @@ class _TrainingHost(torch.autograd.Function):
         mask, single, pair = v[0], v[1], v[2]
         dx, dz, *grads = torch.ops.apb_b200.train_bwd(single, pair, mask, list(v[3:13]), list(v[13:]), dy, ctx.eps_p, ctx.nq)
         return (
+            None,
             None,
             None,
             None,
@@ -786,6 +790,7 @@ def update_train(
             module.ln_pair.eps,
             _sm100().apb_ksplit(single.shape[1], module.n_head, single.shape[2]),
             _sm100().apb_qsplit(single.shape[1], module.n_head),
+            float(module.gate_bias),
             mask,
             single,
             pair,
@@ -794,6 +799,7 @@ def update_train(
     out = _Training.apply(
         module.ln_single.eps,
         module.ln_pair.eps,
+        float(module.gate_bias),
         _mask(mask, single.shape[0] * single.shape[1]),
         single,
         pair,

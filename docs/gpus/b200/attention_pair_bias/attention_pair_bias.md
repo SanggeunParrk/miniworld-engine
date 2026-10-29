@@ -89,6 +89,40 @@ kernels, same bits; the A/B switch). fp32 master weights go straight into `prep`
 kernels have fixed launch shapes, the sm_100a attention cores are cubins built on first use into
 `settings.engine_jit_root` (keyed by source and flags, one per layout), the row kernels an extension built on first use.
 
+## Chai-1's width and the gate bias in training (2026-10-29)
+
+Chai-1's Pairformer single attention (16 x 24 heads, d_single 384, **d_pair 256**, `gate_bias = 1.0`) now trains on the native path
+too (inference since 2026-10-27), in both the C++ host path and the Python sequence; H100 keeps refusing training for it.
+
+- **Gate bias.** The module's `gate_bias` is a constant (a float, not a parameter): `prep` writes it on the real g columns of the
+  packed q | k | v | g bias, so qkvg's g is g + c and every gate pass (`gate_rows` / the key-split combine, `gate_bwd`) sees
+  sigmoid(g + c) with no change. It has no gradient; dWg is dg^T xa as before (dg = dog o s (1 - s) at s = sigmoid(g + c)).
+- **d_pair 256.** `prep` / `finalize` take the pair width off `to_bias.weight` (Wf, Wb and dWb [16, 256], dln_pair.weight [256]; the
+  accumulator's dWf block is [16, 256]); the forward uses `pair_bias_fwd`'s 256-wide ring (as inference). `pair_bias_bwd` is
+  templated on the width: its tile is four 64-column SW128 boxes (64 KB of pair + 8 KB of dbias, three stages, 230 KB of shared
+  memory), the dx^ / dpair pass walks eight 32-column chunks. Holding the dWf tiles of all 256 columns per warp (128 accumulators)
+  spilled 644 B, so at 256 the dWf runs **column-wise**: after the row pass (statistics into shared memory, dpair out) warp w takes
+  columns 32 w .. 32 w + 31 over every 16-row group of the tile (16 accumulators, B = rstd dbias rebuilt from shared memory, the
+  mean term over all the tile's rows), so a warp's columns are the block's and the end reduce sums one slot. 255 registers, no spills;
+  the 128-wide builds are unchanged (same code path, same bits).
+
+Measured (`bench.py target=attention_pair_bias level=module mode=training d_pair=256 +apb_n_head=16 +apb_gate_bias=1.0`, fp32 master
+under autocast bf16, compiled, CUDA graph on / off, B = 1, GPU 7 of node 2 with only the utilisation filler beside it; before = d879e180,
+where this call ran the module's PyTorch statements; ms):
+
+| L | before (graph on / off) | PyTorch compiled (graph on) | now (graph on / off) | x before (graph on) |
+|---|---|---|---|---|
+| 256 | 0.223 / 0.764 | 0.216 | **0.113** / 0.318 | 1.98 |
+| 384 | 0.317 / 0.915 | 0.299 | **0.152** / 0.574 | 2.09 |
+| 768 | 0.778 / 0.902 | 0.717 | **0.371** / 0.475 | 2.10 |
+
+Accuracy (`tests/gpu/sm100/test_b200_apb_gate_bias_gpu.py`): output and every input / parameter gradient within 1.3x the bf16 PyTorch
+module's error against the fp32 module at (16 x 24, d_pair 256, gate 1.0 / 0.0), (16 x 24, 128, 1.0), (8 x 48, 128, 1.0), (12 x 32,
+128, 0.5), L128 / 384, key mask on / off, bf16 parameters and an fp32 master, host and Python paths; the host path bitwise the Python
+sequence, the step bitwise run to run, B = 3 bitwise its one-sample calls (output, dsingle, dpair), a captured training step bitwise
+eager. `tests/gpu/sm100/test_apb_b200_gpu.py::test_pair_bias_d256_forward_and_backward`: the 256-wide pair kernels against fp64 (S 1 /
+2, L128-768).
+
 ## Kernels
 
 `kernels/augmented_attention/cuda/apb/apb_rows.cu` (pair kernels and row passes; built for sm_100 only) and
