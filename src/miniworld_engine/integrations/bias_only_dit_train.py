@@ -571,6 +571,8 @@ def _op(kind, dev, nh=16, dh=48):
             if kind == "dpbpsb"
             else C.PvStreamCore(idx, nh=nh, dh=dh, pmn=True, psb=True)  # dv_a = P_a^T do_a from P (no P^T)
             if kind == "dvpsb"
+            else C.PvStreamCore(idx, nh=nh, dh=dh, pmn=True, pdl=kind == "dvpmnpdl")  # dv = P^T do from P (no P^T)
+            if kind in ("dvpmn", "dvpmnpdl")
             else {"pv": C.PvGateCore, "dpb": C.DpbKernel, "pvdpb": C.PvDpb}[kind](
                 idx, nh=nh, dh=dh
             )
@@ -607,6 +609,19 @@ def _psb_core(f32=False, L=0, dev=None) -> str:
     return "recompute"
 
 
+def _pt_kept(dev, L, at) -> bool:
+    """Does the shared-bias forward write P^T for the backward's dV? B200 takes P itself as the MN-major A operand of dV
+    (``pv_stream_sm100.cu`` / ``pv_gate_tf32.cu`` -DPMN) except bf16 at L <= 768, where the TMEM core on P^T (``pv_gate_inf``, and
+    ``bo_pvdpb`` beside the bias gradient) is the faster dV: A = 48, 16 x 48, dV on P^T / on P + the P^T half of softmax_t, us --
+    L384 16.8 / 17.5 + 1.5, L768 46.2 / 53.4 + 4.1 (fp32: L768 114.2 / 121.1, but softmax_t 21.5 -> 12.2 without P^T). Elsewhere
+    (Hopper) P^T as before."""
+    if dev.type != "cuda" or torch.cuda.get_device_capability(dev) != (10, 0):
+        return True
+    from miniworld_engine.kernels.bias_only_dit.cuda import B200_TMEM_MAX_L
+
+    return at is BF and L <= B200_TMEM_MAX_L
+
+
 def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
     """Shapes / dtypes of the forward's saved activations (the fake implementation and the contract of _fwd / _fwd32); H heads,
     DA attention channels, ``at`` the activations' dtype (bf16, or fp32 on the TF32 path). ``psb``: the per-sample attention
@@ -624,7 +639,8 @@ def _saved_like(single, pair, H, DA, DC, at=BF, psb=False):
         e((M, D), dtype=at),
         e((M, 2 * DA), dtype=at),
         (e((H, A, L, 2), dtype=f32) if core == "recompute" else e((H, A, L, L), dtype=at)) if psb else e((H, L, L), dtype=at),
-        e((0,) if psb else (H, L, L), dtype=at),
+        # no P^T: an empty [0, L, L] (a 1-D empty saved tensor trips inductor's backward placeholders: as_strided rank mismatch)
+        e(((0, L, L) if core == "stored" else (0,)) if psb else (H, L, L) if _pt_kept(single.device, L, at) else (0, L, L), dtype=at),
         e((M, DA), dtype=at),
         e((M, D), dtype=at),
         e((M, 2), dtype=f32),
@@ -759,7 +775,7 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
         if psb and b200:  # per-sample bias on B200: P per (head, sample) plane, the sample's key mask folded in; no P^T (dV reads P)
             P = torch.empty(H, A, L, L, device=dev, dtype=BF)
             C.softmax_t(bias.reshape(H * A * L, L), P.view(H * A * L, L), None, _psb_mask(mask, A, L, True), A)
-            return P, torch.empty(0, device=dev, dtype=BF), None
+            return P, torch.empty(0, L, L, device=dev, dtype=BF), None
         if psb:  # per-sample bias: no P, the forward keeps the two row statistics the backward rebuilds it from (bo_psb.cu)
             return torch.empty(H, A, L, 2, device=dev), torch.empty(0, device=dev, dtype=BF), None
         P = torch.empty(H, L, L, device=dev, dtype=BF)
@@ -779,13 +795,12 @@ def _fwd_impl(single, cond, pair, bias, mask, params, psb=False):
                 None,
                 bias.reshape(H * L, L),
             )  # hoisted (pair_bias_all): read, not written
-        Pt = torch.empty(
-            H, L, L, device=dev, dtype=BF
-        )  # P^T for the backward's dV, from the softmax kernel
+        kept = _pt_kept(dev, L, BF)  # P^T for the backward's dV (bf16 L <= 768 on B200), from the softmax kernel
+        Pt = torch.empty((H if kept else 0, L, L), device=dev, dtype=BF)
         C.softmax_t(
             logits,
             P.view(H * L, L),
-            Pt.view(H * L, L),
+            Pt.view(H * L, L) if kept else None,
             None if mask is None else mask.reshape(L).contiguous(),
         )
         return P, Pt, pst
@@ -1139,7 +1154,10 @@ def _bwd_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fals
             if dbias_out is None
             else dbias_out.view(H * L, L)
         )
-        _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
+        if Pt.numel():
+            _op("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
+        else:
+            _op("dvpmn", dev, H, DA // H)(do, P.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do, P read MN-major
         _op("dpb", dev, H, DA // H)(
             do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
         )  # P o (dP - D); masked keys get P = 0
@@ -1336,7 +1354,8 @@ def _bwd_fused_step(
         else dbias_out.view(H * L, L)
     )
     if not (
-        BWF.pvdpb_on()
+        Pt.numel()
+        and BWF.pvdpb_on()
         and _pvdpb(
             dev,
             H,
@@ -1351,9 +1370,10 @@ def _bwd_fused_step(
             A,
         )
     ):
-        _op("pvpdl", dev, H, DA // H)(
-            do, Pt.view(H * L, L), dvg[:, :DA], A
-        )
+        if Pt.numel():
+            _op("pvpdl", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)
+        else:  # L > 768: dv = P^T do from P (pv_stream_sm100 -DPMN), as a programmatic dependent launch
+            _op("dvpmnpdl", dev, H, DA // H)(do, P.view(H * L, L), dvg[:, :DA], A)
         _op("dpb", dev, H, DA // H)(do, vg[:, :DA], P.view(H * L, L), dd, dbias, A)
     dx = torch.empty(M, D, device=dev, dtype=single.dtype)
     dc = torch.empty(M, DC, device=dev, dtype=cond.dtype)
@@ -1668,8 +1688,8 @@ def _op32(kind, dev, nh, dh):
 
         if kind in ("pvpsb", "dpbpsb"):  # B200 per-sample bias: a P plane per (head, sample)
             _OPS32[(kind, idx, nh, dh)] = {"pvpsb": tf32.PvGateCoreTF32, "dpbpsb": tf32.Dpb32}[kind](idx, nh=nh, dh=dh, psb=True)
-        elif kind == "dvpsb":  # dv_a = P_a^T do_a from P (the MN-major A operand): no P^T
-            _OPS32[(kind, idx, nh, dh)] = tf32.PvGateCoreTF32(idx, nh=nh, dh=dh, psb=True, pmn=True)
+        elif kind in ("dvpsb", "dvpmn"):  # dv(_a) = P(_a)^T do(_a) from P (the MN-major A operand): no P^T
+            _OPS32[(kind, idx, nh, dh)] = tf32.PvGateCoreTF32(idx, nh=nh, dh=dh, psb=kind == "dvpsb", pmn=True)
         else:
             _OPS32[(kind, idx, nh, dh)] = {"pv": tf32.PvGateCoreTF32, "dpb": tf32.Dpb32}[
                 kind
@@ -1766,7 +1786,7 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
             vg = torch.mm(xa, W["Wvg"].t())  # [M, 2 DA] v | g
         b200_psb = psb and not _hopper(dev)
         if b200_psb:  # B200: P per (head, sample) plane (the sample's key mask folded in), the -DPSB TF32 cores; no P^T
-            P, Pt, pst = e(H, A, L, L), e(0), None
+            P, Pt, pst = e(H, A, L, L), e(0, L, L), None
             F.softmax_t_cuda(bias.reshape(H * A * L, L), P.view(H * A * L, L), None, _psb_mask(mask, A, L, True), A)
         elif psb:
             Pt, pst = torch.empty(0, device=dev), None
@@ -1793,11 +1813,12 @@ def _fwd32_impl(single, cond, pair, bias, mask, params, psb=False):
                 bias.reshape(H * L, L),
             )  # hoisted (pair_bias_all): read, not written
         if not psb:
-            Pt = e(H, L, L)
+            kept = _pt_kept(dev, L, F32)  # B200: no P^T (dV reads P as the MN-major operand)
+            Pt = e(H if kept else 0, L, L)
             F.softmax_t_cuda(
                 logits,
                 P.view(H * L, L),
-                Pt.view(H * L, L),
+                Pt.view(H * L, L) if kept else None,
                 None if mask is None else mask.reshape(L).to(torch.bool).contiguous(),
             )
         og = e(M, DA) if (not psb or b200_psb or _psb_core(True, L) == "recompute") else _psb_fwd_core(vg, P, A, L, H, DA)
@@ -2004,9 +2025,10 @@ def _bwd32_impl(single, cond, pair, mask, params, saved, dout, dbias_out, psb=Fa
             dP.sub_(dd.sum(0).unsqueeze(-1))  # dd [A, H, L] -> sum over the samples
             torch.mul(dP, P.view(H, L, L), out=dbias.view(H, L, L))  # P o (dP - D); masked keys get P = 0
         else:
-            _op32("pv", dev, H, DA // H)(
-                do, Pt.view(H * L, L), dvg[:, :DA], A
-            )  # dv = P^T do
+            if Pt.numel():
+                _op32("pv", dev, H, DA // H)(do, Pt.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do
+            else:
+                _op32("dvpmn", dev, H, DA // H)(do, P.view(H * L, L), dvg[:, :DA], A)  # dv = P^T do, P read MN-major
             _op32("dpb", dev, H, DA // H)(
                 do, vg[:, :DA], P.view(H * L, L), dd, dbias, A
             )  # P o (dP - D); masked keys get P = 0
