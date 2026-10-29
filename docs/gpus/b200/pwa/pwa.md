@@ -8,8 +8,9 @@ Figures: one box per kernel, left to right, HBM reads (blue, left) and writes (r
 Dispatch: `integrations/pwa_train.py` (the H100 integration; compute capability (10, 0) selects the sm_100a extension);
 kernels: `integrations/csrc/sm100/pwa_sm100.cu` (tcgen05 / TMEM / TMA), one extension.
 
-Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), N (length) a multiple of 128 up
-to 1024 and S (MSA depth) a multiple of 128, inference and training alike. The MSA residual and the module's row-broadcast dropout
+Served when `implementation=miniworld` (or `anthropic`), bf16, batch 1, a token key mask (or none), any N (length) and S (MSA depth)
+(both padded to 128, pad tokens masked as keys): training up to N 1024, inference up to N 2048; the wide widths (next section) in
+inference only. The MSA residual and the module's row-broadcast dropout
 (`drop_msa`, training) are applied in the gate / out-projection pass. Every other call runs the portable portable path.
 
 Design notes:
@@ -21,6 +22,46 @@ Design notes:
 - The backward glue keeps dgp on chip: it forms dW_g = yᵀ dgp and the gate branch of dy (dgp · W_g) itself, and the MSA-side
   tail adds dv · W_v; dgamma / dbeta and the pair side's parameter gradients come from tensor-core sums (per-head
   M = dbᵀ x̂, 1ᵀ [dy x̂ | dy]) instead of per-tile warp reduce-scatters.
+
+## Beyond MiniWorld's shape: inference (2026-10-29)
+
+FoldForge's predictors run the module at other widths (DenseSpec `msa_channel` / `pair_channel` / `msa_value_dim`, 8 heads). B200
+serves them in inference (`integrations/pwa_wide.py`, `refusal` in `pwa_train.py`), and every width up to N 2048:
+
+| width (d_msa / d_pair / 8 x d_hidden) | families | kernels |
+|---|---|---|
+| 64 / 128 / 8 x 32 | MiniWorld, Boltz-2, RoseTTAFold3 | `pwa_sm100.cu` (training too, N <= 1024) |
+| 64 / 128 / 8 x 8 | AF3, OpenFold3, Protenix-v1 | `pair_fwd<128>` + `pwa_wide_sm100.cu` (64, 8) |
+| 128 / 256 / 8 x 8 | Protenix-v2 | `pair_fwd<256>` + (128, 8) |
+| 128 / 384 / 8 x 8 | OpenDDE | `pair_fwd<384>` + (128, 8) |
+| 128 / 256 / 8 x 16 | ESMFold2 | `pair_fwd<256>` + (128, 16) |
+| 64 / 256 / 8 x 32 | Chai-1 (not served on H100) | `pair_fwd<256>` + (64, 32) |
+
+- `pair_fwd` is built per (d_pair, NMAX): z arrives in units of two 64-channel blocks (one for d_pair 384), so a wider pair is more
+  units per tile; NMAX 2048 holds a row of 2048 logits and its softmax reads the row three times from shared memory. The d_pair 128,
+  NMAX 1024 build gives the previous kernel's bits at the previous speed (L384 / 768 / 1024: 14.5 / 38.4 / 54.9 us vs 14.5 / 38.6 /
+  55.0). Not on B200: IntelliFold-v2 (256 / 512 / 8 x 32), training at these widths, training at N > 1024.
+- `pwa_wide_sm100.cu` (`ln_vg_w`, `gate_out_w`) is `ln_vg` / `pwa_gate_out` per (d_msa, d_hidden): the msa tile is d_msa / 64
+  swizzled blocks, the [rows][C] value / o tiles take the swizzle of a C * 2-byte row, the LayerNorm is a thread a row in three passes.
+- Accuracy: the update against an fp32 copy of the module is within 1.01-1.04x of the module's own bf16 statements' error at every
+  width (`tests/gpu/sm100/test_pwa_b200_inference_gpu.py`, bar 1.15x).
+
+Inference, one module call (residual included), CUDA graph, bf16 module, ms; random mask (90 % kept); GPU 2 of node 2 with another
+process's matmul filler on the card. "PyTorch" is the module's statements (what B200 ran for these calls before).
+
+| width | (N, S) | PyTorch | CUDA | speed-up |
+|---|---|---|---|---|
+| AF3 64 / 128 / 8 x 8 | (512, 1024) | 0.454 | 0.157 | 2.88x |
+| AF3 | (1024, 1024) | 1.071 | 0.334 | 3.20x |
+| AF3 | (2048, 512) | 1.864 | 0.542 | 3.44x |
+| Protenix-v2 128 / 256 / 8 x 8 | (1024, 1024) | 1.387 | 0.558 | 2.48x |
+| OpenDDE 128 / 384 / 8 x 8 | (1024, 1024) | 1.735 | 0.597 | 2.91x |
+| OpenDDE | (2048, 512) | 3.978 | 1.020 | 3.90x |
+| ESMFold2 128 / 256 / 8 x 16 | (1024, 1024) | 1.960 | 0.666 | 2.94x |
+| Chai-1 64 / 256 / 8 x 32 | (1024, 1024) | 2.939 | 0.741 | 3.97x |
+| MiniWorld 64 / 128 / 8 x 32 | (1024, 1024) | 2.782 | 0.695 | 4.00x |
+| MiniWorld | (1536, 1024) | 4.602 | 1.328 | 3.47x |
+| MiniWorld | (2048, 1024) | 6.681 | 2.068 | 3.23x |
 
 ## MSAPairWeightedAveraging (`MSAPairWeightedAveraging`)
 
