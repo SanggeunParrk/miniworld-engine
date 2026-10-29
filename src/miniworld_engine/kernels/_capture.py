@@ -21,6 +21,14 @@ DiT inference block goes from 84 us to 200 us). ``static_weights()`` (or ``setti
 scoping is off and a capture serves from, and fills, the same caches as an eager call, as the integrations did before the scoping.
 Under it an in-place weight update after the capture is *not* seen by replays -- do not set it around a training graph, nor around a
 sampling run inside one. The benchmark harness sets it for ``mode=inference``.
+
+**Under ``torch.compile``.** None of this is traced: while Dynamo traces (``torch.compiler.is_compiling()``) every entry point here returns
+``build()`` and touches no store. The cache logic reads storage addresses, version counters, weak references and the driver's capture
+state -- none of it is graph material (Dynamo raised on it: ``data_ptr`` is data-dependent, the weak-reference comprehension an internal
+``NameError``), and a graph break there splits a compiled model at every no-grad call of a Transition / TriMul / ... (the recycles of a
+training step). The forms are then ops of the compiled graph: they run at every call of it -- in a CUDA graph captured over it, at
+every replay, so a replay after an optimizer step reads the new weights (the scoped behaviour, never the stale one) -- and inductor
+fuses the casts. A compiled region that wants no per-call casts keeps its weights in the kernel dtype.
 """
 
 from __future__ import annotations
@@ -166,7 +174,9 @@ def _evict(store: dict, pinned: set, limit: int, keep) -> None:
 
 
 def lookup(store: dict, key, build, limit: int = 64):
-    """``build()``, cached in ``store`` under ``key`` within the current scope (see the module docstring)."""
+    """``build()``, cached in ``store`` under ``key`` within the current scope (see the module docstring). Traced: ``build()``."""
+    if torch.compiler.is_compiling():
+        return build()
     sk = scoped(key)
     if sk is None:
         return build()
@@ -190,7 +200,9 @@ def lookup_inputs(store: dict, key, build, limit: int = 64, valid=None, alive=No
     ``alive(entry)`` of every entry when the store is pruned (False: the tensor is gone, the entry is dropped).
 
     The scope is the capture itself, not ``capture_id()``: ``static_weights()`` says nothing about the inputs, so a capture under it alone
-    still makes its own tables and a replay remakes them."""
+    still makes its own tables and a replay remakes them. Traced (``torch.compile``): ``build()``, no store."""
+    if torch.compiler.is_compiling():
+        return build()
     if _STATIC_INPUTS[0]:
         cid = None
     else:
@@ -242,7 +254,9 @@ def param_forms(tag, params, build, *, inputs_scope: bool = False, capture_reads
     ``inputs_scope``: ``static_inputs()`` (whose contract covers the weights too) also shares the eager entry with a capture, as
     ``static_weights()`` does for every call. ``capture_reads_eager``: a capture is served the eager entry its warm-up made, without
     ``static_weights()`` -- for the inference-only forms (grad off), the contract ``kernels._tf32.tf32_cached`` has for the portable kernels;
-    such an entry is then held for good. ``tag`` names the form (any hashable)."""
+    such an entry is then held for good. ``tag`` names the form (any hashable).
+
+    Traced (``torch.compile``): ``build()``, the forms become graph ops (module docstring) -- no graph break, no cache entry."""
     if torch.compiler.is_compiling():
         # A cache keyed on tensor identity cannot be traced (Dynamo died on the weak references: FoldForge's compiled Protenix-v2
         # sampler, AdaLN inference). Traced, the forms are computed in the graph; the opaque ops call this at run time and cache.
@@ -281,7 +295,10 @@ def hoisted_table(store: dict, tensor: torch.Tensor, key, build, limit: int = 64
     A sample-expanded conditioning (stride 0 over the samples: a sampler step's view of the fold's one conditioning) is a NEW tensor object at
     every call over the same small storage, so no weak reference to it outlives the call and the table would be remade at every call -- in a
     captured step in every replay, for the whole life of the sampler. Such an entry holds the tensor itself (its storage is the fold's one
-    conditioning, which keeps its address from being reused while the entry stands); a view is otherwise named by the tensor it views."""
+    conditioning, which keeps its address from being reused while the entry stands); a view is otherwise named by the tensor it views.
+    Traced (``torch.compile``): ``build()``, no store."""
+    if torch.compiler.is_compiling():
+        return build()
     held = any(st == 0 and n > 1 for st, n in zip(tensor.stride(), tensor.shape, strict=True))
     root = tensor._base if tensor._base is not None else tensor
     tkey = (tensor.data_ptr(), tensor._version, tuple(tensor.shape), tensor.dtype, tensor.device)
