@@ -174,6 +174,19 @@ count), which puts a wheel with sm90 and sm100 for two CUDA builds near 135 MB, 
 ask PyPI for a larger per-file limit (a pypi/support request), ship one CUDA build, or drop `-lineinfo` from the
 cubins.
 
+**Split wheels (2.4.0 on).** 2.4.0's sm90 kernels for two CUDA builds come to 111-112 MB in one wheel, so the release
+uses `dev build-wheel --split`. It writes:
+
+* one kernel wheel per variant, `miniworld-engine-kernels-<arch>-cu<XY>`. It is a platform wheel per Python ABI, pinned to
+  the artifacts' torch minor, and its files sit at `miniworld_engine/_prebuilt/<arch>-cu<XY>/`. pip installs them into the
+  engine package, where the loader already looks, so the loader is unchanged.
+* the pure engine wheel (`py3-none-any`), which requires every kernel wheel at its own version where they exist (Linux
+  x86-64, Python 3.10 / 3.12).
+
+`pip install miniworld-engine==<v>` therefore installs the same kernels a single wheel carried, and each file holds one CUDA
+build (about 56 MB for 2.4.0). Elsewhere the engine installs without them and JIT-builds, as from an sdist. A new arch
+(sm100) adds its own kernel wheels rather than growing an existing one.
+
 **CUDA 13.** Builds that worked only under CUDA 12.x: 15 sources named the unversioned `PFN_cuTensorMapEncodeTiled`
 (gone in CUDA 13) and resolved it with the deprecated `cudaGetDriverEntryPoint`; they now take
 `PFN_cuTensorMapEncodeTiled_v12000` through `cudaGetDriverEntryPointByVersion(..., 12000, ...)` (CUDA >= 12.5), as

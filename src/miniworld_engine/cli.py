@@ -2053,6 +2053,10 @@ def build_parser() -> argparse.ArgumentParser:
     bwh.add_argument("--prebuilt-root", default="", help="default: the package's _prebuilt/")
     bwh.add_argument("--out", default="dist", help="directory for the wheel")
     bwh.add_argument("--strict", action="store_true", help="fail on a binary-check (auditwheel-style) finding")
+    bwh.add_argument("--split", action="store_true",
+                     help="one kernel wheel per <arch>-cu<XY> (miniworld-engine-kernels-<arch>-cu<XY>, installing into the "
+                          "engine's _prebuilt/) and a pure engine wheel that requires them: each file stays under PyPI's "
+                          "100 MB limit")
     bwh.set_defaults(func=cmd_build_wheel)
 
     cgr = dev.add_parser("code-graph",

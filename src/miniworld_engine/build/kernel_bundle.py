@@ -652,10 +652,78 @@ def _record_hash(data: bytes) -> str:
     return "sha256=" + base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b"=").decode()
 
 
+#: ``--split``: where the engine's kernel wheels exist (one per Python ABI the release replays), so an install elsewhere does
+#: not ask for a wheel no index carries; there the engine JIT-builds as from an sdist.
+KERNEL_WHEEL_MARKER = ('sys_platform == "linux" and platform_machine == "x86_64" and '
+                       '(python_version == "3.10" or python_version == "3.12")')
+
+
+def kernel_dist_name(variant: str) -> str:
+    """``sm90-cu129`` -> ``miniworld-engine-kernels-sm90-cu129``: the distribution that carries one ``_prebuilt/`` variant."""
+    return f"miniworld-engine-kernels-{variant}"
+
+
+def _write_wheel(path: Path, files: list[tuple[str, bytes]], dist_info: str, metadata: str, tag: str,
+                 purelib: bool) -> None:
+    """A wheel from (name, bytes) pairs plus its ``METADATA`` / ``WHEEL`` / ``RECORD``."""
+    record = []
+    with zipfile.ZipFile(path, "w", compression=zipfile.ZIP_DEFLATED) as z:
+        wheel_meta = (f"Wheel-Version: 1.0\nGenerator: miniworld-engine build-wheel\n"
+                      f"Root-Is-Purelib: {'true' if purelib else 'false'}\nTag: {tag}\n")
+        for n, data in [*files, (f"{dist_info}/METADATA", metadata.encode()), (f"{dist_info}/WHEEL", wheel_meta.encode())]:
+            z.writestr(n, data)
+            record.append(f"{n},{_record_hash(data)},{len(data)}")
+        record.append(f"{dist_info}/RECORD,,")
+        z.writestr(f"{dist_info}/RECORD", "\n".join(record) + "\n")
+
+
+def build_split_wheels(base: Path, variants: list[tuple[str, list[tuple[str, bytes]], str]], major_minor: str,
+                       tag: str, out: Path) -> list[Path]:
+    """``--split``: one platform wheel per prebuilt variant, named ``miniworld-engine-kernels-<variant>``, whose files sit
+    at ``miniworld_engine/_prebuilt/<variant>/`` (pip installs them into the engine package, where ``prebuilt`` looks:
+    no loader change), pinned to the engine version and the artifacts' torch minor; and the pure engine wheel, which
+    requires every kernel wheel at the same version where they exist (``KERNEL_WHEEL_MARKER``). Each file is one CUDA
+    build's kernels, so each stays under PyPI's per-file limit; an install still pulls the same set as one wheel did."""
+    with zipfile.ZipFile(base) as zin:
+        names = zin.namelist()
+        dist_info = next(n.split("/")[0] for n in names if n.endswith(".dist-info/METADATA"))
+        version = dist_info.removeprefix("miniworld_engine-").removesuffix(".dist-info")
+        meta = zin.read(f"{dist_info}/METADATA").decode()
+        lic = [(n, zin.read(n)) for n in names if n.startswith(f"{dist_info}/licenses/")]
+        engine_files = [(n, zin.read(n)) for n in names
+                        if n not in (f"{dist_info}/METADATA", f"{dist_info}/WHEEL", f"{dist_info}/RECORD")]
+    wheels = []
+    requires = []
+    for variant, files, builds in variants:
+        dist = kernel_dist_name(variant)
+        norm = dist.replace("-", "_")
+        k_info = f"{norm}-{version}.dist-info"
+        k_meta = (f"Metadata-Version: 2.4\nName: {dist}\nVersion: {version}\n"
+                  f"Summary: miniworld-engine prebuilt kernels for {variant} ({builds}); installed by miniworld-engine=={version}\n"
+                  f"License-Expression: MIT AND Apache-2.0 AND BSD-3-Clause\n"
+                  + "".join(f"License-File: {n.split('/licenses/', 1)[1]}\n" for n, _ in lic)
+                  + f"Requires-Python: >=3.10\nRequires-Dist: torch=={major_minor}.*\n"
+                  f"Description-Content-Type: text/markdown\n\n"
+                  f"Prebuilt GPU kernels of [miniworld-engine](https://pypi.org/project/miniworld-engine/) {version} for "
+                  f"`{variant}` ({builds}). Installed by `pip install miniworld-engine=={version}`; not used on its own.\n")
+        wheel = out / f"{norm}-{version}-{tag}-{tag}-{MANYLINUX}.whl"
+        _write_wheel(wheel, [*files, *((n.replace(f"{dist_info}/", f"{k_info}/", 1), d) for n, d in lic)], k_info, k_meta,
+                     f"{tag}-{tag}-{MANYLINUX}", purelib=False)
+        wheels.append(wheel)
+        requires.append(f"Requires-Dist: {dist}=={version}; {KERNEL_WHEEL_MARKER}\n")
+    # the engine: the pure wheel as setuptools built it, plus the kernel requirements (before the first blank line: the
+    # description follows it)
+    head, sep, body = meta.partition("\n\n")
+    engine = out / f"miniworld_engine-{version}-py3-none-any.whl"
+    _write_wheel(engine, engine_files, dist_info, head + "\n" + "".join(requires).rstrip("\n") + sep + body,
+                 "py3-none-any", purelib=True)
+    return [engine, *wheels]
+
+
 def build_wheel(args) -> int:
     """The engine's platform wheel: setuptools builds the pure wheel, then the prebuilt artifacts of this Python ABI
     go in as package data, the torch requirement is pinned to the artifacts' torch minor, and the tag says
-    ``cpXY-cpXY-manylinux_2_28_x86_64``."""
+    ``cpXY-cpXY-manylinux_2_28_x86_64``. ``--split``: ``build_split_wheels``."""
     from miniworld_engine.kernels import _codegraph as cg
 
     root = Path(args.prebuilt_root).resolve() if args.prebuilt_root else prebuilt.PREBUILT_DIR
@@ -664,6 +732,10 @@ def build_wheel(args) -> int:
     here = cg.python_abi()
     tag = _abi_tag(here)
     with tempfile.TemporaryDirectory() as tmp:
+        # setuptools copies the package into REPO_ROOT/build/lib and never deletes from it: a file removed from src/ since
+        # the last build would ship, and change the installed kernels' native-cache identity (2.4.0 caught four deleted .cu)
+        for stale in (REPO_ROOT / "build" / "lib", *(REPO_ROOT / "build").glob("bdist.*")):
+            shutil.rmtree(stale, ignore_errors=True)
         log(f"building the pure wheel of {REPO_ROOT} with {sys.executable}")
         subprocess.run([sys.executable, "-m", "pip", "wheel", str(REPO_ROOT), "--no-deps", "--no-build-isolation",
                         "-q", "-w", tmp], check=True)
@@ -674,6 +746,7 @@ def build_wheel(args) -> int:
             return 1
         torch_versions = set()
         extra: list[tuple[str, bytes]] = []
+        variants: list[tuple[str, list[tuple[str, bytes]], str]] = []
         binaries: list[Path] = []
         unpacked = Path(tmp) / "unpacked"
         for mf in manifests:
@@ -683,13 +756,16 @@ def build_wheel(args) -> int:
             keep = {k: a for k, a in manifest["artifacts"].items()
                     if a["kind"] == "cubin" or _entry_python(a) == here}
             dropped = len(manifest["artifacts"]) - len(keep)
+            variants.append((arch_dir.name, [], f"torch {manifest['torch']} / CUDA {manifest['cuda']}"))
             manifest = dict(manifest, artifacts=keep, pythons=[here])
             prefix = f"miniworld_engine/_prebuilt/{arch_dir.name}"
             extra.append((f"{prefix}/{prebuilt.MANIFEST}", (json.dumps(manifest, indent=1, sort_keys=True) + "\n").encode()))
+            variants[-1][1].append(extra[-1])
             for a in keep.values():
                 for rel in [a["path"], *[str(Path(a["path"]).with_suffix(s)) for s in a.get("sidecars") or []]]:
                     data = (arch_dir / rel).read_bytes()
                     extra.append((f"{prefix}/{rel}", data))
+                    variants[-1][1].append(extra[-1])
                     if rel.endswith(".so"):
                         p = unpacked / arch_dir.name / rel
                         p.parent.mkdir(parents=True, exist_ok=True)
@@ -705,6 +781,16 @@ def build_wheel(args) -> int:
         problems = check_binaries(binaries)
         for p in problems:
             log(f"  binary check: {p}")
+        if getattr(args, "split", False):
+            wheels = build_split_wheels(base, variants, major_minor, tag, out)
+            for w in wheels:
+                size = w.stat().st_size
+                log(f"wheel: {w} ({size / 1e6:.1f} MB)" + ("  over PyPI's 100 MB file limit" if size > 100e6 else ""))
+            if problems:
+                log(f"  {len(problems)} binary check finding(s): the {MANYLINUX} tag is not honest until they are fixed")
+                return 3 if args.strict else 0
+            log(f"  binary check: {len(binaries)} shared objects, no findings")
+            return 0
         with zipfile.ZipFile(base) as zin:
             names = zin.namelist()
             dist_info = next(n.split("/")[0] for n in names if n.endswith(".dist-info/METADATA"))
