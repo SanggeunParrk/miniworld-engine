@@ -36,11 +36,16 @@ serves them in inference (`integrations/pwa_wide.py`, `refusal` in `pwa_train.py
 | 128 / 384 / 8 x 8 | OpenDDE | `pair_fwd<384>` + (128, 8) | + (128, 8), `pair_bwd_w<384>` |
 | 128 / 256 / 8 x 16 | ESMFold2 | `pair_fwd<256>` + (128, 16) | + (128, 16), `pair_bwd_w<256>` |
 | 64 / 256 / 8 x 32 | Chai-1 (not served on H100) | `pair_fwd<256>` + (64, 32) | `pwa_sm100.cu`'s MSA side + `pair_bwd_w<256>` |
+| 256 / 512 / 8 x 32 | IntelliFold-v2 (not served on H100) | `pair_fwd<512>` + (256, 32), weights streamed | not yet (`pair_bwd_w<512>` is built) |
 
 - `pair_fwd` is built per (d_pair, NMAX): z arrives in units of two 64-channel blocks (one for d_pair 384), so a wider pair is more
   units per tile; NMAX 2048 holds a row of 2048 logits and its softmax reads the row three times from shared memory. The d_pair 128,
   NMAX 1024 build gives the previous kernel's bits at the previous speed (L384 / 768 / 1024: 14.5 / 38.4 / 54.9 us vs 14.5 / 38.6 /
-  55.0). Not on B200: IntelliFold-v2's MSA side (d_msa 256, 8 x 32: its pair side, d_pair 512, has `pair_fwd<512>` / `pair_bwd_w<512>`).
+  55.0). Not on B200: IntelliFold-v2 training (its MSA-side backward at d_msa 256; the pair side's `pair_bwd_w<512>` is built and tested).
+- d_msa 256 (IntelliFold-v2): a projection's weights are 128 KiB, too much next to the 64 KiB tiles, so they stream through a shared-memory
+  ring of k-blocks in the order the MMA warp takes them: `ln_vg_w` two [256][64] Wv slots (one x stage, one v staging buffer),
+  `gate_out_w` three 32 KiB slots (a gate half's Wg rows, then an out half's Wo k-blocks; one stage, one TMEM gate region, one out
+  buffer); its LayerNorm reads gamma / beta through L1 (no shared-memory copy).
 - `pair_fwd`'s z ring: the two statistics groups take alternate tiles, so each waits its own full barrier per slot (a shared one let a
   group pass on a slot whose previous load, the other group's, had not landed: d_pair 384 gave different logits run to run, 512 at
   N > 1024 faulted; fixed 2026-10-29, d_pair 128 / 256 bitwise unchanged).
@@ -65,10 +70,13 @@ process's matmul filler on the card. "PyTorch" is the module's statements (what 
 | MiniWorld 64 / 128 / 8 x 32 | (1024, 1024) | 2.782 | 0.695 | 4.00x |
 | MiniWorld | (1536, 1024) | 4.602 | 1.328 | 3.47x |
 | MiniWorld | (2048, 1024) | 6.681 | 2.068 | 3.23x |
+| IntelliFold-v2 256 / 512 / 8 x 32 | (512, 1024) | 1.683 | 0.742 | 2.27x |
+| IntelliFold-v2 | (1024, 1024) | 3.860 | 1.630 | 2.37x |
+| IntelliFold-v2 | (2048, 512) | 6.513 | 2.411 | 2.70x |
 
 ## Beyond MiniWorld's shape: training (2026-10-29)
 
-B200 trains every width of the table above (Chai-1 on the MiniWorld kernels) and every width at N up to 2048 (`pwa_wide._train_b200`,
+B200 trains every width of the table above but IntelliFold-v2 (Chai-1 on the MiniWorld kernels) and every width at N up to 2048 (`pwa_wide._train_b200`,
 `pwa_train.refusal`). Forward as inference with y and o kept (`ln_vg_w` with y, `gate_out_w` with the row-dropout keep-mask); backward:
 
 | step | kernel | work |
