@@ -1401,20 +1401,24 @@ __global__ void __launch_bounds__(pb2::THREADS, 1) pair_bwd_sm100(
 //   * dzn = db . Wb (K = 16) is recomputed per pass where a row does not fit TMEM next to M (d_pair 512: two chunks of 128 columns a
 //     channel half, issued four times a tile -- one tcgen05.mma each).
 // Thread = (row j = TMEM lane, channel half hf = warp / 4); warp 8 producer, warp 9 MMA.
-template <int DZ_>
+template <int DZ_, int DTS_ = 2>                             // DTS_: sizeof(dw) (bf16 from the cuBLAS contraction; fp32 accepted)
 struct PBW {
   static constexpr int DZ = DZ_, BJ = 128, HP = 16, KB = DZ / 64, DH = DZ / 2;
   static constexpr int ZB = BJ * 64;                         // one z block [128 j][64], 128B swizzle (16 KiB)
   static constexpr int NCH = DZ > 384 ? 2 : 1;               // dzn chunks a pass
   static constexpr int DHC = DH / NCH;                       // TMEM columns a channel half takes per chunk
   static constexpr int R = NCH == 1 ? 1 : 2 * NCH;           // dzn GEMM rounds a tile (P2 and P3 share one when it fits)
-  static constexpr int DBT = HP * BJ;                        // db^T / dbr^T [2 j blocks][16 h][64 j] (4 KiB)
+  static constexpr int DBT = HP * BJ;                        // db^T / dbr^T [2 j blocks][16 h][64 j] (4 KiB), one each
   static constexpr int WBT = HP * DZ;                        // Wb [KB][16 h][64 d], rows 8-15 zero
   static constexpr int WT = H * BJ;
-  static constexpr int WDB = 7 * 1024;                       // w slice | dw slice (fp32 or bf16) | row sums
+  static constexpr int WDB = (WT * (2 + DTS_) + H * 4 + 127) & ~127;   // w slice | dw slice | row sums (TMA destinations: 128-byte aligned)
   static constexpr int THREADS = 320;
   static constexpr int COL_M = 2 * DHC;                      // dzn [0, 2 DHC), M^T blocks [DZ / 128][16]
-  static constexpr int FIX = 1024 + (4 * DBT + WBT) * 2 + 2 * WDB + DZ * 4 + 2 * 2 * 2 * BJ * 4 + 1024;
+  // one db^T / dbr^T (the next tile's are written after the GEMMs reading them retired), WDB sized for dw's type, the barriers in 384
+  // bytes and 896 bytes of alignment slack (the dynamic window starts 1024-aligned after the 1 KiB system reserve; the kernel traps
+  // otherwise): d_pair 384 fits two z tiles (one before: the next tile's loads waited for the previous tile's last store)
+  static constexpr int ALIGN = 896;
+  static constexpr int FIX = ALIGN + (2 * DBT + WBT) * 2 + 2 * WDB + DZ * 4 + 2 * 2 * 2 * BJ * 4 + 384;
   static constexpr int NZ = FIX + 2 * KB * ZB * 2 <= 232448 ? 2 : 1;   // z tiles in flight
   static constexpr int SMEM = FIX + NZ * KB * ZB * 2;
   static constexpr int PSTRIDE = H * DZ + H;                 // a CTA's partials: M [8][DZ] | correction [8]
@@ -1435,15 +1439,17 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
     const LT_* __restrict__ LNW,
     const WT_* __restrict__ WB,                   // proj_z weight [H][DZ]
     float* __restrict__ PART) {                   // [grid][PSTRIDE]
-  using P = PBW<DZ_>;
+  using P = PBW<DZ_, (int)sizeof(DT_)>;
   constexpr int DZ = P::DZ, BJ = P::BJ, HP = P::HP, KB = P::KB, DH = P::DH, ZB = P::ZB, NCH = P::NCH, DHC = P::DHC, R = P::R;
   constexpr int DBT = P::DBT, WBT = P::WBT, WT = P::WT, WDB = P::WDB, NZ = P::NZ, COL_M = P::COL_M;
   extern __shared__ __align__(1024) unsigned char raw[];
-  unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
+  const uint32_t pad = (1024u - (sa(raw) & 1023u)) & 1023u;
+  if (pad > (uint32_t)P::ALIGN) __trap();                        // FIX keeps ALIGN bytes of slack, not 1024
+  unsigned char* smb = raw + pad;
   __nv_bfloat16* sZ = reinterpret_cast<__nv_bfloat16*>(smb);   // [NZ * KB][ZB]
-  __nv_bfloat16* sDB = sZ + NZ * KB * ZB;                        // [2][DBT] db^T
-  __nv_bfloat16* sDBR = sDB + 2 * DBT;                           // [2][DBT] bf16(db rstd)^T
-  __nv_bfloat16* sWBt = sDBR + 2 * DBT;                          // [KB][16][64]
+  __nv_bfloat16* sDB = sZ + NZ * KB * ZB;                        // [DBT] db^T
+  __nv_bfloat16* sDBR = sDB + DBT;                               // [DBT] bf16(db rstd)^T
+  __nv_bfloat16* sWBt = sDBR + DBT;                              // [KB][16][64]
   unsigned char* sWD = reinterpret_cast<unsigned char*>(sWBt + WBT);   // [2][WDB]
   float* sLN = reinterpret_cast<float*>(sWD + 2 * WDB);          // gamma [DZ]
   float* sX = sLN + DZ;                                          // [2 exchanges][2 halves][2 values][128 rows]
@@ -1453,21 +1459,21 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
   uint64_t* wde = zempty + NZ * KB;      // [2] count 4: w / dw / row sums read
   uint64_t* dbf = wde + 2;               // [2] count 4: db^T written
   uint64_t* dbrf = dbf + 2;              // [2] count 4: dbr^T written
-  uint64_t* dbe = dbrf + 2;              // [2] the tile's last dzn GEMM retired
-  uint64_t* mdone = dbe + 2;             // [2] the tile's M GEMM retired (z may be overwritten, dbr^T reused)
-  uint64_t* dznf = mdone + 2;            // [1] a dzn round complete
+  uint64_t* dbe = dbrf + 2;              // [1] the tile's last dzn GEMM retired (db^T may be rewritten)
+  uint64_t* mdone = dbe + 1;             // [1] the tile's M GEMM retired (z may be overwritten, dbr^T rewritten)
+  uint64_t* dznf = mdone + 1;            // [1] a dzn round complete
   uint64_t* dzne = dznf + 1;             // [1] count 8: a dzn round drained
   uint64_t* done = dzne + 1;             // [1]
-  float* sRed = reinterpret_cast<float*>(done + 1);              // [4][8] the correction's warp sums
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(sRed + 4 * H);
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(done + 1);
+  float* sRed = sX;                      // [4][8] the correction's warp sums, at the end (exchange slot 0 is free by then)
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
     for (int k = 0; k < NZ * KB; ++k) { bar_init(zfull + k, 1); bar_init(zempty + k, 1); }
-    for (int k = 0; k < 2; ++k) { bar_init(wde + k, 4); bar_init(dbf + k, 4); bar_init(dbrf + k, 4); bar_init(dbe + k, 1); bar_init(mdone + k, 1); }
-    bar_init(dznf, 1); bar_init(dzne, 8); bar_init(done, 1);
+    for (int k = 0; k < 2; ++k) { bar_init(wde + k, 4); bar_init(dbf + k, 4); bar_init(dbrf + k, 4); }
+    bar_init(dbe, 1); bar_init(mdone, 1); bar_init(dznf, 1); bar_init(dzne, 8); bar_init(done, 1);
     bar_init_fence();
   }
-  for (int v = tid; v < 4 * DBT / 8; v += P::THREADS) reinterpret_cast<uint4*>(sDB)[v] = make_uint4(0u, 0u, 0u, 0u);   // rows 8-15 stay zero
+  for (int v = tid; v < 2 * DBT / 8; v += P::THREADS) reinterpret_cast<uint4*>(sDB)[v] = make_uint4(0u, 0u, 0u, 0u);   // rows 8-15 stay zero
   for (int v = tid; v < HP * DZ; v += P::THREADS) {          // Wb as the MN-major B operand: [d block][h][64 d]
     const int h = v / DZ, d = v % DZ;
     sWBt[(d >> 6) * HP * 64 + sw128(h, d & 63)] = h < H ? __float2bfloat16_rn(to_f(WB[h * DZ + d])) : __float2bfloat16_rn(0.f);
@@ -1496,7 +1502,7 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
             unsigned char* wd = sWD + b * WDB;
             load_3d(&wmap, wd, zfull + slot, j0, i, 0);
             load_3d(&dwmap, wd + WT * 2, zfull + slot, j0, i, 0);
-            load_2d(&sdmap, wd + WT * 6, zfull + slot, 0, i);
+            load_2d(&sdmap, wd + WT * (2 + (int)sizeof(DT_)), zfull + slot, 0, i);
           }
         }
       }
@@ -1513,10 +1519,10 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
         if (elect_one()) {                               // dzn = db . Wb for chunk c of both channel halves: one K = 16 step each
 #pragma unroll
           for (int hf = 0; hf < 2; ++hf)
-            mma_ss(tmem + hf * DHC, desc_mn128(sDB + b * DBT, HP * 64 * 2),
+            mma_ss(tmem + hf * DHC, desc_mn128(sDB, HP * 64 * 2),
                    desc_mn128(sWBt + ((hf * DH + c * DHC) >> 6) * HP * 64, HP * 64 * 2), P::ID_DZN, 0u);
           mma_commit(dznf);
-          if (r == R - 1) mma_commit(dbe + b);
+          if (r == R - 1) mma_commit(dbe);
         }
         __syncwarp();
         if (r == 0) {                                    // M^T += z^T . dbr^T over the tile's 128 j
@@ -1529,8 +1535,8 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
 #pragma unroll
               for (int ks = 0; ks < BJ / 16; ++ks)
                 mma_ss(tmem + COL_M + mb * HP, desc_mn128(sZ + (sb + 2 * mb) * ZB + ks * 16 * 64, ZB * 2),
-                       desc_k128(sDBR + b * DBT + (ks >> 2) * HP * 64 + (ks & 3) * 16), P::ID_M, (lt | ks) ? 1u : 0u);
-            mma_commit(mdone + b);
+                       desc_k128(sDBR + (ks >> 2) * HP * 64 + (ks & 3) * 16), P::ID_M, (lt | ks) ? 1u : 0u);
+            mma_commit(mdone);
           }
           __syncwarp();
         }
@@ -1560,9 +1566,9 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
         const unsigned char* wd = sWD + b * WDB;
         const __nv_bfloat16* ws = reinterpret_cast<const __nv_bfloat16*>(wd);
         const DT_* dws = reinterpret_cast<const DT_*>(wd + WT * 2);
-        const float* sdot = reinterpret_cast<const float*>(wd + WT * 6);
-        if (lt >= 2) wait(dbe + b, ((lt >> 1) - 1) & 1);
-        __nv_bfloat16* dbt = sDB + b * DBT + (j >> 6) * HP * 64;
+        const float* sdot = reinterpret_cast<const float*>(wd + WT * (2 + (int)sizeof(DT_)));
+        if (lt >= 1) wait(dbe, (lt - 1) & 1);
+        __nv_bfloat16* dbt = sDB + (j >> 6) * HP * 64;
 #pragma unroll
         for (int h = 0; h < H; ++h) {
           const __nv_bfloat16 d16 = __float2bfloat16_rn(__bfloat162float(ws[h * BJ + j]) * (to_f(dws[h * BJ + j]) - sdot[h]));
@@ -1598,8 +1604,8 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
       const float rstd = 1.f / sqrtf(fmaxf(tsq * (1.f / DZ) - m1 * m1, 0.f) + eps);
       const float2 nm = make_float2(-m1, -m1), rs2 = make_float2(rstd, rstd);
       if (hf == 0) {                                     // dbr = bf16(db rstd) -> dbr^T, the M GEMM's B; the correction sum_j dbr mean_j
-        if (lt >= 2) wait(mdone + b, ((lt >> 1) - 1) & 1);
-        __nv_bfloat16* dbrt = sDBR + b * DBT + (j >> 6) * HP * 64;
+        if (lt >= 1) wait(mdone, (lt - 1) & 1);
+        __nv_bfloat16* dbrt = sDBR + (j >> 6) * HP * 64;
 #pragma unroll
         for (int h = 0; h < H; ++h) {
           const __nv_bfloat16 r16 = __float2bfloat16_rn(db[h] * rstd);
@@ -1651,7 +1657,7 @@ __global__ void __launch_bounds__(320, 1) pair_bwd_w_sm100(
       xchg(1, gsa.x + gsa.y, gxa.x + gxa.y, gs, gx);
       gs *= (1.f / DZ); gx *= (1.f / DZ);
       // ---- pass 3: dz = rstd (g - gs - xhat gx), written over z (the M GEMM has read it), stored block by block ----
-      wait(mdone + b, (lt >> 1) & 1);
+      wait(mdone, lt & 1);
       const float2 ngs = make_float2(-gs, -gs), ngx = make_float2(-gx, -gx);
 #pragma unroll 1
       for (int c = 0; c < NCH; ++c) {
@@ -2241,7 +2247,7 @@ std::vector<torch::Tensor> dv_bwd(torch::Tensor dvh, torch::Tensor dyg, torch::T
 template <int DZ>
 static std::vector<torch::Tensor> pair_bwd_w_launch(const torch::Tensor& z, const torch::Tensor& w16, const torch::Tensor& dw, const torch::Tensor& lnw,
                                                     double eps, const torch::Tensor& wb, int64_t wb_bf16, int64_t ln_bf16) {
-  using P = PBW<DZ>;
+  using P = PBW<DZ>;                                             // BJ / PSTRIDE / THREADS (SMEM depends on dw's type: below)
   const long N = z.size(0);
   auto dz = torch::empty_like(z);
   const int ntiles = (int)(N * (N / P::BJ));
@@ -2267,8 +2273,9 @@ static std::vector<torch::Tensor> pair_bwd_w_launch(const torch::Tensor& z, cons
     auto kbody = [&](auto dt) {
       using DT = decltype(dt);
       static bool a = false;
-      if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_w_sm100<WT, LT, DT, DZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, P::SMEM)); a = true; }
-      pair_bwd_w_sm100<WT, LT, DT, DZ><<<grid, P::THREADS, P::SMEM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm,
+      constexpr int SM = PBW<DZ, (int)sizeof(DT)>::SMEM;
+      if (!a) { C10_CUDA_CHECK(cudaFuncSetAttribute(pair_bwd_w_sm100<WT, LT, DT, DZ>, cudaFuncAttributeMaxDynamicSharedMemorySize, SM)); a = true; }
+      pair_bwd_w_sm100<WT, LT, DT, DZ><<<grid, P::THREADS, SM, st>>>((int)N, ntiles, (float)eps, zm, dzm, wm, dwm, sdm,
           reinterpret_cast<const LT*>(lnw.data_ptr()), reinterpret_cast<const WT*>(wb.data_ptr()), part.data_ptr<float>());
     };
     if (dwf) kbody(float{}); else kbody(__nv_bfloat16{});
