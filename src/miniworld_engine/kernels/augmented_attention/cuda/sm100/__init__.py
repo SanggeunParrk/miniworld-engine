@@ -25,6 +25,8 @@ The kernels (``sm100.cuh`` holds the tcgen05 / TMA / mbarrier helpers):
                 a 64-wide one two; the 64-wide builds drop a pipeline stage where three do not fit (attn_fwd_tf32 /
                 attn_inf_tf32: 2 stages, attn_dqb_tf32: one K slot).
   glue.cu       dO -> bf16 with D = rowsum(dO O), and the bf16 bias transpose attn_dkv reads.
+  fused_pair.py the AugmentedAttention module's pair-fused core on these kernels (pair LayerNorm + head projection, bf16 / TF32 core,
+                deterministic backward: the dK / dV and dQ passes built -DDET=1 -DDQPART=1), every TDIT_HEADS layout, any A.
 
 Numerics against fp64 at A = 48: O 1.6e-3, dq 3.0e-3, dk 2.9e-3, dv 2.9e-3, dbias 2.4e-3 (bf16-input-rounding floor). The fp32
 kernels: O, dq, dk, dv, dbias within 3e-3 of fp64 (tests/gpu/sm100/test_augmented_attention_tf32_sm100_gpu.py).
