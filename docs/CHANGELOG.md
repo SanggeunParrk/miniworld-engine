@@ -55,6 +55,12 @@ The public surface is enforced by `tests/cpu/compile/test_public_api.py`.
   - Tests: `tests/gpu/sm90/test_token_dit_pair256_gpu.py`, `tests/gpu/sm90/test_bias_only_dit_pair256_gpu.py`.
   - The kernel bundle's coverage runs the pair-256 diffusion and bias-only cases.
 - H100 `sampler_ops` CUDA calls are opaque ops, so a compiled sampler no longer breaks its graph at them.
+- `InputFeatureEmbedder(features="esmfold2")`: ESMFold2's own atom encoder (element one-hot, an affine LayerNorm that starts the
+  atom stream and conditions every block, no terminal norm), without atom names.
+- `InputFeatureEmbedder(token_pool="linear")`: the LayerNorm -> Linear -> token-mean read-out, no ReLU.
+- Both defaults (`"legacy"`, `"relu"`) are unchanged, so existing checkpoints load as before. MiniWorld's `input_features` /
+  `input_token_pool` options need these. They are a composition of existing kernels: the 2.4.0 bundle serves them (46 H100
+  tests pass on the bundle alone, no JIT).
 - Split wheels (`dev build-wheel --split`). The prebuilt kernels ship as one wheel per arch / CUDA build:
   `miniworld-engine-kernels-sm90-cu129` and `miniworld-engine-kernels-sm90-cu130`. Their files install into the engine's
   `_prebuilt/`. The engine wheel is pure and requires both at its own version on Linux x86-64 with Python 3.10 / 3.12.
