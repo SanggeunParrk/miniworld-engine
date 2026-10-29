@@ -58,15 +58,30 @@ def _augment_noise_portable(coords: torch.Tensor, mask: torch.Tensor, rv: torch.
     return [noisy, sc]
 
 
+def _augment_noise_cuda_fake(coords, mask, rv, tr, noise, sigma, sigma_next, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale, variance_floor, clamp):
+    """[noisy (the shape of ``coords``), sc [4]], both fp32."""
+    return [torch.empty_like(coords), torch.empty(4, dtype=coords.dtype, device=coords.device)]
+
+
+@opaque(fake=_augment_noise_cuda_fake, name="sampler_ops_augment_noise_sm90")
+def _augment_noise_cuda(coords: torch.Tensor, mask: torch.Tensor, rv: torch.Tensor, tr: torch.Tensor, noise: torch.Tensor, sigma: torch.Tensor,
+                        sigma_next: torch.Tensor, window: int, gamma: float, gamma_min: float, sigma_min: float, sigma_max: float, noise_scale: float,
+                        variance_floor: float, clamp: bool) -> list[torch.Tensor]:
+    """``[noisy, sc]`` of the sm_90a kernel (``cuda/sampler_ops.cu``); an op, so a compiled sampler launches it instead of breaking the graph."""
+    from miniworld_engine.kernels.sampler_ops.cuda import ext
+
+    noisy, sc = ext().augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale,
+                                    variance_floor, clamp)
+    return [noisy, sc]
+
+
 def augment_noise(coords, mask, rv, tr, noise, sigma, sigma_next, *, window, gamma, gamma_min, sigma_min, sigma_max, noise_scale,
                   variance_floor, clamp):
     """``(noisy, sc)``: ``coords`` centred (mask-weighted), rotated by the Gram-Schmidt frame of ``rv`` ``[B, 2, 3]``, translated by
     ``tr`` ``[B, 3]``, masked, plus ``magnitude * noise``; ``sc[0]`` is ``sigma_hat`` (a device scalar, ``sc[:1].squeeze()`` is a view)."""
     where = _where(coords.device, "fp32")
     if where == CUDA:
-        from miniworld_engine.kernels.sampler_ops.cuda import ext
-
-        noisy, sc = ext().augment_noise(
+        noisy, sc = _augment_noise_cuda(
             coords.contiguous(), mask, rv.contiguous(), tr.contiguous(), noise.contiguous(), sigma, sigma_next,
             int(window), float(gamma), float(gamma_min), float(sigma_min), float(sigma_max), float(noise_scale), float(variance_floor),
             bool(clamp))
@@ -97,13 +112,25 @@ def _align_euler_portable(noisy: torch.Tensor, denoised: torch.Tensor, mask: tor
     return portable_align_euler(noisy, denoised, mask, sc, sigma_next, step_scale)
 
 
+def _align_euler_cuda_fake(noisy, denoised, mask, sc, sigma_next, step_scale):
+    """The updated coordinates, the shape of ``noisy``."""
+    return torch.empty_like(noisy)
+
+
+@opaque(fake=_align_euler_cuda_fake, name="sampler_ops_align_euler_sm90")
+def _align_euler_cuda(noisy: torch.Tensor, denoised: torch.Tensor, mask: torch.Tensor, sc: torch.Tensor, sigma_next: torch.Tensor,
+                      step_scale: float) -> torch.Tensor:
+    """The Euler update of the sm_90a kernel (``cuda/sampler_ops.cu``), as an op for compiled samplers."""
+    from miniworld_engine.kernels.sampler_ops.cuda import ext
+
+    return ext().align_euler(noisy, denoised, mask, sc, sigma_next, step_scale)
+
+
 def align_euler(noisy, denoised, mask, sc, sigma_next, step_scale):
     """The Euler update from ``noisy`` aligned onto ``denoised`` (weights ``mask``), with ``sigma_hat = sc[0]``."""
     where = _where(noisy.device, "fp32")
     if where == CUDA:
-        from miniworld_engine.kernels.sampler_ops.cuda import ext
-
-        return ext().align_euler(noisy.contiguous(), denoised.contiguous(), mask, sc, sigma_next, float(step_scale))
+        return _align_euler_cuda(noisy.contiguous(), denoised.contiguous(), mask, sc, sigma_next, float(step_scale))
     if where == PORTABLE:
         return _align_euler_portable(noisy.contiguous(), denoised.contiguous(), mask.contiguous(), sc, sigma_next, float(step_scale))
     from miniworld_engine.kernels.sampler_ops import reference
@@ -124,6 +151,19 @@ def _pool_atoms_portable(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.
     return portable_pool_atoms(x, idx, gather_mask, atom_mask)
 
 
+def _pool_atoms_cuda_fake(x, idx, gather_mask, atom_mask):
+    """[S, T, C] in the dtype of ``x`` (bf16)."""
+    return torch.empty(x.shape[0], idx.shape[0], x.shape[2], dtype=x.dtype, device=x.device)
+
+
+@opaque(fake=_pool_atoms_cuda_fake, name="sampler_ops_pool_atoms_sm90")
+def _pool_atoms_cuda(x: torch.Tensor, idx: torch.Tensor, gather_mask: torch.Tensor, atom_mask: torch.Tensor) -> torch.Tensor:
+    """The encoder pooling of the sm_90a kernel (``cuda/sampler_ops.cu``), as an op for compiled callers."""
+    from miniworld_engine.kernels.sampler_ops.cuda import ext
+
+    return ext().pool_atoms(x, idx, gather_mask, atom_mask)
+
+
 def pool_atoms(x, idx, gather_mask, atom_mask):
     """The atom encoder's pooling in one pass: ``out[s, t] = sum_a m[t, a] relu(g[t, a] x[s, idx[t, a]]) / max(sum_a m[t, a], 1e-10)`` in bf16.
 
@@ -131,9 +171,7 @@ def pool_atoms(x, idx, gather_mask, atom_mask):
     and ``atom_mask`` its atom mask, all ``[T, A]``."""
     where = _where(x.device, "bf16")
     if where == CUDA:
-        from miniworld_engine.kernels.sampler_ops.cuda import ext
-
-        return ext().pool_atoms(x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
+        return _pool_atoms_cuda(x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
     if where == PORTABLE:
         return _pool_atoms_portable(x.contiguous(), idx.contiguous(), gather_mask.contiguous(), atom_mask.contiguous())
     from miniworld_engine.kernels.sampler_ops import reference
