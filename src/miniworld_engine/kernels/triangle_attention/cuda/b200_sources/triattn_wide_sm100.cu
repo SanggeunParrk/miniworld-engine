@@ -1234,7 +1234,7 @@ __global__ void __launch_bounds__((2 + WH<C>::ND) * 32, 1) tri_whbwd_sm100(int n
 }
 
 // ---- parameter gradients from G = D^T [xhat | 1] (fp32 [4 HDp + 64][C + 64]):  for a projection row o of W (padded layout: SL = 32
-// channels a head, 16 zero-padded, or 64,
+// channels a head, 16 zero-padded, 64, or 128, 96 zero-padded,
 // the rows of wcat): dW[o][c] = G[o][c] gamma[c] + G[o][C] beta[c];  dgamma[c] = sum_o W[o][c] G[o][c];  dbeta[c] = sum_o W[o][c] G[o][C];
 // rows of zero-padded channels are skipped in the outputs (their W rows are 0).  Grid (C/32 + dWo blocks, row chunks of FR rows):
 // threads (8 rows x 32 columns), coalesced along c; each block leaves its dgamma / dbeta partial in PART [chunk][2][C], which
@@ -1682,7 +1682,8 @@ std::vector<torch::Tensor> tri_wfinish_h(torch::Tensor G, torch::Tensor wcat, to
   TORCH_CHECK(C % 32 == 0 && wcat.scalar_type() == torch::kBFloat16 && wcat.is_contiguous() && wcat.size(0) == 4 * HDp + 16 && wcat.size(1) == C,
               "wcat: [4 HDp + 16, C] bf16");
   TORCH_CHECK(dwo.scalar_type() == torch::kFloat32 && dwo.is_contiguous() && dwo.size(0) == C && dwo.size(1) == HDp, "dWo: fp32 [C, HDp]");
-  TORCH_CHECK((NH * 32 == HDp && (hd == 16 || hd == 32)) || (NH * 64 == HDp && hd == 64), "heads x 32 (head dim 16 / 32) or x 64 = HDp");
+  TORCH_CHECK((NH * 32 == HDp && (hd == 16 || hd == 32)) || (NH * 64 == HDp && hd == 64) || (NH * 128 == HDp && (hd == 96 || hd == 128)),
+              "heads x 32 (head dim 16 / 32), x 64 or x 128 (head dim 96 / 128) = HDp");
   auto gam = lnw.to(torch::kFloat32).contiguous(), bet = lnb.to(torch::kFloat32).contiguous();
   auto opt = G.options().dtype(fp32_out ? torch::kFloat32 : torch::kBFloat16);
   auto dw = torch::empty({4, HD, C}, opt), dwb = torch::empty({NH, C}, opt), dwou = torch::empty({C, HD}, opt);

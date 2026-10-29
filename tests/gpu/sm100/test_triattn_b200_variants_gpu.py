@@ -2,7 +2,9 @@
 AlphaFold 3's ending-node bias orientation (``transposed_bias=False``: AF3, Boltz-2, OpenBind, IntelliFold-2, RoseTTAFold3, Chai-1),
 RoseTTAFold3's gate / out-projection biases, heads of 64 channels (Chai-1's trunk and confidence head at d_pair 256, RoseTTAFold3's
 template stack at d_pair 64, IntelliFold-2's trunk at d_pair 512) and Chai-1's output variants (the ending node's update left
-untransposed; the confidence head's dual output).
+untransposed; the confidence head's dual output).  Heads of 96 / 128 channels (the head-dim-128 core, 96 zero-padded) have no
+FoldForge family row (every DenseSpec width is 16, 32 or 64 channels a head); they are the module's default d_hidden = d_pair at
+AlphaFold 3's four heads for d_pair 384 / 512, tested with the same options.
 
 Inference (FoldForge's use) against the module's fp64 torch reference (``_biased_reference``), the yardstick the same reference
 run in bf16: the kernels may not be meaningfully worse (the bar of the other B200 TriangleAttention tests, on the update).
@@ -44,6 +46,14 @@ VARIANTS = {
     "chai1-confidence-starting": (256, 256, 4, True, False, {"dual_output": True}),
     "chai1-confidence-ending": (256, 256, 4, False, False, {"dual_output": True}),
     "chai1-template-ending": (64, 128, 4, False, False, {"untransposed_output": True}),
+    # heads of 96 / 128 channels (no FoldForge row: d_pair 384 / 512 at four heads, the module's default d_hidden), with the options
+    "h96-384-starting": (384, 384, 4, True, True, {}),                         # 4 x 96 (zero-padded to 128)
+    "h96-384-ending-af3": (384, 384, 4, False, False, {}),
+    "h128-512-starting": (512, 512, 4, True, True, {}),                        # 4 x 128
+    "h128-512-ending-af3": (512, 512, 4, False, False, {}),
+    "h128-256-biases-ending": (256, 256, 2, False, False, RF3),               # 2 x 128, gate / out biases
+    "h96-192-untransposed": (192, 192, 2, False, False, {"untransposed_output": True}),   # 2 x 96
+    "h128-256-dual-starting": (256, 256, 2, True, False, {"dual_output": True}),
 }
 # (B, padded length, real length): whole tiles, a padded crop, two samples
 SHAPES = [(1, 256, 256), (1, 384, 333), (2, 192, 150)]
@@ -106,12 +116,23 @@ def test_paths():
     with torch.no_grad():
         assert tri.kind_of(plain64, x256) == tri.GENERIC
     assert tri.kind_of(plain64.train(), x256) == tri.GENERIC
+    x512 = torch.zeros(1, 128, 128, 512, device="cuda", dtype=torch.bfloat16)
+    for d_pair, heads, x in ((512, 4, x512), (384, 4, x512[..., :384]), (256, 2, x256)):       # 4 x 128, 4 x 96, 2 x 128
+        wide = _module(d_pair, d_pair, heads, True, True, {}).bfloat16()
+        with torch.no_grad():
+            assert tri.kind_of(wide, x) == tri.GENERIC
+        assert tri.kind_of(wide.train(), x) == tri.GENERIC
+    eight = _module(512, 1024, 8, True, True, {}).bfloat16()                   # 8 x 128: 1024 packed channels, beyond the wide kernels
+    with torch.no_grad():
+        assert tri.kind_of(eight, x512) is None
 
 
 # training: every option, at the family shapes
 TRAIN = ["af3-trunk-ending", "af3-template-ending", "boltz2-template-ending", "rf3-trunk-starting", "rf3-trunk-ending",
          "rf3-template-starting", "rf3-template-ending", "chai1-trunk-starting", "chai1-trunk-ending", "chai1-confidence-starting",
-         "chai1-confidence-ending", "chai1-template-ending", "if2-trunk-starting", "if2-trunk-ending"]
+         "chai1-confidence-ending", "chai1-template-ending", "if2-trunk-starting", "if2-trunk-ending",
+         "h96-384-starting", "h96-384-ending-af3", "h128-512-starting", "h128-512-ending-af3", "h128-256-biases-ending",
+         "h96-192-untransposed", "h128-256-dual-starting"]
 
 
 def _trio(variant):
@@ -168,7 +189,8 @@ def test_variant_training(variant, p_drop):
         assert err <= 1.25 * err16 + 2e-3, (variant, n, err, err16)
 
 
-@pytest.mark.parametrize("variant", ["af3-trunk-ending", "chai1-confidence-ending", "rf3-template-starting"])
+@pytest.mark.parametrize("variant", ["af3-trunk-ending", "chai1-confidence-ending", "rf3-template-starting", "h128-512-ending-af3",
+                                     "h96-384-starting"])
 def test_variant_cuda_graph_capture(variant):
     """The variant paths launch nothing host-dependent: inference captures and replays in a CUDA graph."""
     m = _module(*VARIANTS[variant]).bfloat16()
@@ -188,3 +210,26 @@ def test_variant_cuda_graph_capture(variant):
         graph.replay()
     torch.cuda.synchronize()
     assert relative(out, eager) < 1e-3
+
+
+def test_head_dim_128_core_repeatable():
+    """The head-dim-128 core gives the same bits call after call: forward, dQ, dK, dV (dbias carries fp32 reduce-adds).  Guards the
+    release of shared buffers read with ordinary loads (an early mbarrier arrive let the next TMA load overwrite a bias tile the slowest
+    warp had not read: dK / dV of one key quarter differed in 10-19 of 300 calls at this shape)."""
+    from miniworld_engine.kernels.triangle_attention.cuda import b200_triattn as k
+
+    torch.manual_seed(0)
+    B, N, H, D = 4, 256, 2, 128
+    q, kk, v = (torch.randn(B, N, N, H, D, device="cuda").to(torch.bfloat16) for _ in range(3))
+    bias = (torch.randn(B, H, N, N, device="cuda") * 2).to(torch.bfloat16)
+    o0, lse = k._core128_forward(q, kk, v, bias, D ** -0.5, True)
+    do = torch.randn(B, N, N, H, D, device="cuda").to(torch.bfloat16)
+    delta = (do.float() * o0.float()).view(B, N, N, H, 4, 32).sum(-1).permute(0, 1, 3, 4, 2).reshape(B, N, 4 * H, N).contiguous()
+    E = q.new_empty(0)
+    r0 = k._core128().triattn_bwd128(q, kk, v, bias, do, lse, delta, D ** -0.5, E, E, E)
+    for _ in range(60):
+        o, l2 = k._core128_forward(q, kk, v, bias, D ** -0.5, True)
+        assert torch.equal(o, o0) and torch.equal(l2, lse)
+        r = k._core128().triattn_bwd128(q, kk, v, bias, do, lse, delta, D ** -0.5, E, E, E)
+        for a, b in zip(r[:3], r0[:3], strict=True):
+            assert torch.equal(a, b)
