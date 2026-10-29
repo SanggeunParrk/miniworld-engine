@@ -21,7 +21,7 @@ static_assert(SMEM_BYTES <= 232448, "shared memory budget");
 constexpr uint32_t IDESC = idesc_bf16(128, CH, 0, 1);
 
 struct Bars {
-  uint64_t w_full, dy_full, mma_done;
+  uint64_t w_full, dy_full[NKB], mma_done;
   uint32_t tmem;
 };
 
@@ -47,7 +47,8 @@ transition_sx_gate(const __grid_constant__ CUtensorMap mdy, const __grid_constan
   const int tile = blockIdx.x / NCHK, j = blockIdx.x % NCHK, row0 = tile * ROWS, h0 = j * CH;
 
   if (tid == 0) {
-    mbar_init(&B.w_full, 1); mbar_init(&B.dy_full, 1); mbar_init(&B.mma_done, 1);
+    mbar_init(&B.w_full, 1); mbar_init(&B.mma_done, 1);
+    for (int kb = 0; kb < NKB; ++kb) mbar_init(&B.dy_full[kb], 1);
     fence_barrier_init();
     fence_proxy_async();
     prefetch_map(&mdy); prefetch_map(&mws);
@@ -64,24 +65,26 @@ transition_sx_gate(const __grid_constant__ CUtensorMap mdy, const __grid_constan
 
   if (warp == 0) {
     if (lane == 0) {
-      mbar_expect_tx(&B.dy_full, NKB * KBT);
-      for (int kb = 0; kb < NKB; ++kb) tma_load_2d(su + O_DY + kb * KBT, &mdy, &B.dy_full, kb * 64, row0);
+      for (int kb = 0; kb < NKB; ++kb) {                       // a barrier per K-block: the products start as dy lands
+        mbar_expect_tx(&B.dy_full[kb], KBT);
+        tma_load_2d(su + O_DY + kb * KBT, &mdy, &B.dy_full[kb], kb * 64, row0);
+      }
     }
   } else if (warp == 1) {
     mbar_wait(&B.w_full, 0);
-    mbar_wait(&B.dy_full, 0);
-    tc_fence_after();
-    if (elect_one()) {
-#pragma unroll
-      for (int kb = 0; kb < NKB; ++kb) {
-        const uint64_t da = desc_k128(su + O_DY + kb * KBT), db = desc_mn128(su + O_W + kb * WKB, WKB);
+#pragma unroll 1
+    for (int kb = 0; kb < NKB; ++kb) {
+      mbar_wait(&B.dy_full[kb], 0);
+      tc_fence_after();
+      const uint64_t da = desc_k128(su + O_DY + kb * KBT), db = desc_mn128(su + O_W + kb * WKB, WKB);
+      if (elect_one()) {
 #pragma unroll
         for (int ks = 0; ks < 4; ++ks)
           umma_ss(tmem, da + (uint64_t)(ks * 2), db + (uint64_t)((ks * 2048) >> 4), IDESC, (kb > 0 || ks > 0) ? 1u : 0u);
+        if (kb == NKB - 1) tc_commit(&B.mma_done);
       }
-      tc_commit(&B.mma_done);
+      __syncwarp();
     }
-    __syncwarp();
   } else if (warp >= 4) {
     // ------------------------------------------------------------------------------------------ gate: one row per thread, warps 4-7
     // units 0..31 of the chunk, 8-11 units 32..63
