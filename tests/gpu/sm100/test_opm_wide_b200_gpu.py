@@ -190,3 +190,114 @@ def test_the_inference_op_applies_the_projection_biases_itself(d_msa, d_pair, af
     assert calls == [True, True], calls    # the sm_100a op, handed the biases (zeroed the second time)
     assert rel(got, want) < 1e-2, rel(got, want)
     assert rel(unbiased, want) > 10 * rel(got, want)
+
+
+# the interchain mask (``mask_interchain`` with chain ids) and a batch of MSA stacks: B200 serves both on the sm_100a kernels (the epilogue
+# zeroes the update of a pair of two chains, the dgrad its gradient; the batch runs one stack at a time)
+CHAIN_WIDTHS = {"miniworld": (64, 128, {}), "rf3_after": (64, 128, {"projection_bias": True, "normalize_before_proj": False}),
+                "protenix2": (128, 256, {}), "opendde_after": (128, 384, {"normalize_before_proj": False}), "intellifold2": (256, 512, {})}
+
+
+def chained(b, n, *, seed=4):
+    """chain ids [b, n]: three chains in the first sample, two (different cut) in the others."""
+    asym = torch.zeros(b, n, dtype=torch.long, device="cuda")
+    for k in range(b):
+        cuts = (n // 3, (2 * n) // 3) if k == 0 else (n // 2 + 7 * k,)
+        for c in cuts:
+            asym[k, c:] += 1
+    return asym
+
+
+@pytest.mark.parametrize("name", list(CHAIN_WIDTHS))
+@pytest.mark.parametrize(("b", "interchain"), [(1, True), (2, False), (2, True)])
+@pytest.mark.parametrize("master", ["bf16", "fp32"])
+def test_interchain_and_batch_training(name, b, interchain, master, served):
+    d_msa, d_pair, options = CHAIN_WIDTHS[name]
+    s, n = 256, 100
+    m = build(d_msa, d_pair, {**options, "mask_interchain": interchain})
+    msas, masks = zip(*(inputs(s, n, d_msa, seed=1 + k) for k in range(b)), strict=True)
+    msa, mask = torch.cat(msas), torch.cat(masks)
+    g = torch.Generator(device="cuda").manual_seed(3)
+    pair = torch.randn(b, n, n, d_pair, device="cuda", generator=g)
+    gz = torch.randn(b, n, n, d_pair, device="cuda", generator=g) * 0.1
+    asym = chained(b, n)
+    gold, ref16 = copy.deepcopy(m).double(), copy.deepcopy(m).bfloat16()
+    eng = copy.deepcopy(m) if master == "fp32" else copy.deepcopy(m).bfloat16()
+
+    def run(mod, x, p, statements, autocast=False):
+        x = x.clone().requires_grad_(True)
+        p = p.clone().requires_grad_(True)
+        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+            out = mod._variant_reference(x, mask, asym, p) if statements else mod(x, mask, token_asym_id=asym, residual=p)
+        return out, torch.autograd.grad(out, (x, p, *mod.parameters()), gz.to(out.dtype))
+
+    want, wgrads = run(gold, msa.double(), pair.double(), True)
+    base, bgrads = run(ref16, msa.bfloat16(), pair.bfloat16(), True)
+    got, ggrads = run(eng, msa.bfloat16(), pair.bfloat16(), False, autocast=master == "fp32")
+    assert served() > 0, "the sm_100a kernels did not serve the call"
+    upd, wupd = got.float() - pair.bfloat16().float(), want - pair.double()
+    assert rel(upd, wupd) <= max(1.5 * rel(base.double() - pair.bfloat16().double(), wupd), 1e-3)
+    if interchain:   # a pair of two chains gets exactly the residual, its update and its gradient exactly zero
+        cross = (asym[:, :, None] != asym[:, None, :])
+        assert torch.equal(got[cross], pair.bfloat16()[cross].to(got.dtype))
+    names = ["msa", "pair", *(n_ for n_, _ in eng.named_parameters())]
+    for nm, a, bb, w in zip(names, ggrads, bgrads, wgrads, strict=True):
+        assert torch.isfinite(a).all(), nm
+        e, r = rel(a, w), rel(bb, w)
+        assert e <= max(2.0 * r, 1e-2), f"{name} d{nm}: engine {e:.2e} vs bf16 statements {r:.2e}"
+
+
+@pytest.mark.parametrize("name", ["miniworld", "rf3_after", "intellifold2"])
+@pytest.mark.parametrize("b", [1, 2])
+def test_interchain_inference(name, b, served):
+    d_msa, d_pair, options = CHAIN_WIDTHS[name]
+    s, n = 256, 128
+    m = build(d_msa, d_pair, {**options, "mask_interchain": True})
+    msas, masks = zip(*(inputs(s, n, d_msa, seed=1 + k) for k in range(b)), strict=True)
+    msa, mask = torch.cat(msas), torch.cat(masks)
+    pair = torch.randn(b, n, n, d_pair, device="cuda", generator=torch.Generator(device="cuda").manual_seed(2))
+    asym = chained(b, n)
+    gold, ref16, eng = copy.deepcopy(m).double(), copy.deepcopy(m).bfloat16(), copy.deepcopy(m).bfloat16()
+    with torch.no_grad():
+        want = gold._variant_reference(msa.double(), mask, asym, pair.double())
+        base = ref16._variant_reference(msa.bfloat16(), mask, asym, pair.bfloat16())
+        got = eng(msa.bfloat16(), mask, token_asym_id=asym, residual=pair.bfloat16())
+    assert served() > 0
+    cross = (asym[:, :, None] != asym[:, None, :])
+    assert torch.equal(got[cross], pair.bfloat16()[cross])
+    assert rel(got - pair.bfloat16(), want - pair.double()) <= max(1.5 * rel(base.double() - pair.bfloat16().double(), want - pair.double()), 1e-3)
+
+
+def test_interchain_training_is_deterministic_and_graph_safe(served):
+    m = build(128, 256, {"mask_interchain": True}, torch.bfloat16)
+    msa, mask = inputs(512, 128, 128)
+    msa = torch.cat([msa, msa.flip(1)]).bfloat16()
+    mask = torch.cat([mask, mask.flip(1)])
+    pair = torch.randn(2, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
+    gz = torch.randn_like(pair) * 0.1
+    asym = chained(2, 128)
+    x = msa.clone().requires_grad_(True)
+
+    def step():
+        out = m(x, mask, token_asym_id=asym, residual=pair)
+        return (out, *torch.autograd.grad(out, (x, *m.parameters()), gz))
+
+    first, second = step(), step()
+    for a, b in zip(first, second, strict=True):
+        assert torch.equal(a, b)
+    s = torch.cuda.Stream()
+    s.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(s):
+        step()
+    torch.cuda.current_stream().wait_stream(s)
+    torch.cuda.synchronize()
+    torch.autograd.graph.set_override_stale_capture_stream(True)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = step()
+    for _ in range(2):
+        graph.replay()
+    torch.cuda.synchronize()
+    for a, b in zip(captured, first, strict=True):
+        assert torch.equal(a, b)
+    assert served() > 0

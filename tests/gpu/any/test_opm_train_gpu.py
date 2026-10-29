@@ -130,6 +130,7 @@ def test_refusals(inputs):
     )  # not opted in
     with opted_in():
         assert ot.refusal(inputs["msa"], D_MSA, D_HID, D_PAIR, **kw) is None
+        # the interchain mask: served on sm_100a (the epilogue / dgrad take the chain ids), refused on sm_90a
         assert (
             ot.refusal(
                 inputs["msa"],
@@ -139,8 +140,8 @@ def test_refusals(inputs):
                 interchain=True,
                 normalize_before_proj=True,
             )
-            is not None
-        )
+            is None
+        ) == (torch.cuda.get_device_capability(inputs["msa"].device) == (10, 0))
         # the ESMFold2 order (divide after the projection) and a ragged depth are served: the epilogue takes the order as a flag,
         # and the wrapper pads length / depth with masked rows
         assert (
