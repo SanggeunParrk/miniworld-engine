@@ -318,7 +318,7 @@ def _esm_variant(module) -> bool:
 def _b200_af3_servable(module, single, cond, pair) -> bool:
     """AlphaFold 3's K/V norm (``kv_norm="parallel"``) and slid key window (``key_window="slide"``) on B200, inference and training:
     the parallel norm by ``pre_fwd`` / ``pre_bwd`` ``-DPARALLEL=1`` (the fused / unfused fp32 kernels likewise), the slid window by
-    ``sm100_atom_local`` ``slide_edges`` (the windows it moves, recomputed after the window kernel) and ``slide_bwd_prep`` / ``slide_bwd``
+    edge CTAs of the attention forward (``sm100_atom_local/slide.cuh``: the windows it moves) and ``slide_bwd_prep`` / ``slide_bwd``
     (their gradients around the clipped-window backward). ESMFold2's options are not served here."""
     if _esm_variant(module):
         return False
@@ -865,10 +865,8 @@ def _block_fwd(
             v.view(a, n, DS_),
             bias,
             _keys(mask, n0, n),
+            slide=slide,  # the windows the slid key window moves: edge CTAs of the same launch
         )
-        if slide:  # the windows the slid key window moves, over their slid keys (their LSE too, for the backward)
-            local.slide_edges(q.view(a, n, DS_), k.view(a, n, DS_), v.view(a, n, DS_), bias, _keys(mask, n0, n), o, n0,
-                              lse=lse if save else None)
         out, u, a2, x2, t = rows.post_fwd(
             s2,
             o.view(m, DS_),
@@ -1681,9 +1679,8 @@ def _block_fwd32(
                 p3[..., vc : vc + DS_],
                 bias,
                 _keys(mask, n0, n),
+                slide=slide,
             )
-            if slide:
-                local.slide_edges(p3[..., qc : qc + DS_], p3[..., kc : kc + DS_], p3[..., vc : vc + DS_], bias, _keys(mask, n0, n), o, n0)
             out = rows.post32(
                 o.view(m, DS_),
                 p[:, gc : gc + DS_],
@@ -1722,10 +1719,8 @@ def _block_fwd32(
             p3[..., vc : vc + DS_],
             bias,
             _keys(mask, n0, n),
+            slide=slide,
         )
-        if slide:
-            local.slide_edges(p3[..., qc : qc + DS_], p3[..., kc : kc + DS_], p3[..., vc : vc + DS_], bias, _keys(mask, n0, n), o, n0,
-                              lse=lse if save else None)
         gated = rows.gate32(p[:, gc : gc + DS_], o.view(m, DS_))
         y = torch.empty(m, DS_, device=dev, dtype=F32) if save else None
         a1 = rows.gemm32(

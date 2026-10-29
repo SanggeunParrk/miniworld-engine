@@ -76,7 +76,6 @@ KERNELS = {
     "cln_b": ("lcross", "local_cond_ln_bwd", 0),
     "ssum": ("lcross", "local_sample_sum", 0),
     "tsum": ("lcross", "local_table_sum", 0),
-    "slide": ("lslide", "local_slide_edges", 54912),
     "slide_p": ("lslide", "local_slide_bwd_prep", 0),
     "slide_b": ("lslide", "local_slide_bwd", 92416),
     "slide_f": ("lslide", "local_slide_bwd_fin", 0),
@@ -251,9 +250,21 @@ def _u8(kmask):
     return kmask.to(torch.uint8).contiguous()
 
 
-def attn_fwd(q, k, v, bias, kmask=None):
+def _slide_mask(km):
+    """The key mask as the slid-window CTAs count it (16 bytes at a time: 16-B aligned)."""
+    return km.clone() if km is not None and km.data_ptr() % 16 else km
+
+
+def _edge_split(main_ctas, sp, d):
+    """Sample splits of the slid window's edge CTAs (2 groups x 4 heads each, ``slide.cuh``): as many as the SMs the clipped-window CTAs
+    leave free take (at most the main split), at least one."""
+    return max(1, min(sp, (num_sms(d) - main_ctas) // (2 * NH)))
+
+
+def attn_fwd(q, k, v, bias, kmask=None, slide=False):
     """q, k, v [A, N, 128] bf16 (contiguous); bias [4, nwin, 32, 128] fp32; kmask [N] bool/uint8 or None -> O [A, N, 128] bf16,
-    LSE [A, 4, N] fp32 (log2). tcgen05: a CTA per (128-query chunk, head) and sample range."""
+    LSE [A, 4, N] fp32 (log2). tcgen05: a CTA per (128-query chunk, head) and sample range. ``slide``: AlphaFold 3's slid key window
+    (``slide.cuh``: the windows it moves run in edge CTAs of the same launch; the real atom count is the mask's population count)."""
     A, N, _ = q.shape
     nwin = nwindows(N)
     d = _dev(q)
@@ -294,9 +305,12 @@ def attn_fwd(q, k, v, bias, kmask=None):
         return o, lse
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    spe = _edge_split(nq * NH * sp, sp, d) if slide else 0
+    if slide:
+        km = _slide_mask(km)
     out = _tmap(o, (DM, N, A), (DM * 2, N * DM * 2), (16, 32, 1), 0)
     _load("fwd", d)(
-        (nq * NH * sp, 1, 1),
+        ((nq * sp + 2 * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows(q, 128),
         _rows(k, 224),
@@ -309,26 +323,9 @@ def attn_fwd(q, k, v, bias, kmask=None):
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
     return o, lse
-
-
-def slide_edges(q, k, v, bias, kmask, o, n0, lse=None):
-    """AlphaFold 3's slid key window (``lslide.cu``): after ``attn_fwd`` / ``attn_fwd32`` ran the clipped windows, recompute the windows
-    whose slid keys differ (0, 1 and the last three real ones, chosen on the device from the key mask's real atom count, or ``n0``
-    without a mask) over their slid keys, in place in ``o`` [A, N, 128] (and ``lse`` [A, 4, N] when given). q, k, v [A, N, 128] views with
-    one row stride (bf16 projections or fp32 column blocks of P32); bias [4, nwin, 32, 128] fp32."""
-    A, N, _ = o.shape
-    ld = q.stride(1)
-    assert k.stride(1) == v.stride(1) == ld and q.stride(0) == k.stride(0) == v.stride(0) == N * ld and q.stride(2) == 1
-    assert o.is_contiguous() and q.dtype == o.dtype
-    d = _dev(q)
-    kern = _load32("slide32", d) if q.dtype == torch.float32 else _load("slide", d)
-    km = _u8(kmask)
-    if km is not None and km.data_ptr() % 16:  # the kernel counts the mask 16 bytes at a time
-        km = km.clone()
-    kern((5, NH, A), (64, 1, 1), q, k, v, int(ld), bias, km, o, lse, int(N), int(n0))
-    return o
 
 
 #: ESMFold2's atom attention on sm_100a (``LocalDiTBlock(**ESMFOLD2)``, bf16 inference), loaded apart from KERNELS (``load_esm``)
@@ -1146,7 +1143,6 @@ KERNELS_TF32 = {
     "pb_f32": ("lbias_tf32", "local_bias_fwd_f32", 0),
     "pb_b32": ("lbias_tf32", "local_bias_bwd_f32", 0),
     "pb_fin32": ("lbias_tf32", "local_bias_fin_f32", 0),
-    "slide32": ("lslide", "local_slide_edges_f32", 54912),
     "slide_p32": ("lslide", "local_slide_bwd_prep_f32", 0),
     "slide_b32": ("lslide", "local_slide_bwd_f32", 92416),
 }
@@ -1181,7 +1177,7 @@ def _out32(t):
     return _tmap(t, (C, N, A), (C * 4, N * C * 4), (16, 32, 1), 64, "f32")
 
 
-def attn_fwd32(q, k, v, bias, kmask=None):
+def attn_fwd32(q, k, v, bias, kmask=None, slide=False):
     """The fp32 path: q, k, v fp32 [A, N, 128] views (unit column stride, any row stride); bias [4, nwin, 32, 128] fp32; kmask [N] or None
     -> O [A, N, 128] fp32, LSE [A, 4, N] fp32 (log2). tcgen05 kind::tf32: a CTA per (128-query chunk, head) and sample range."""
     A, N, _ = q.shape
@@ -1192,8 +1188,11 @@ def attn_fwd32(q, k, v, bias, kmask=None):
     km = _u8(kmask)
     nq = (N + 127) // 128
     sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    spe = _edge_split(nq * NH * sp, sp, d) if slide else 0
+    if slide:
+        km = _slide_mask(km)
     _load32("fwd32", d)(
-        (nq * NH * sp, 1, 1),
+        ((nq * sp + 2 * spe) * NH, 1, 1),
         (544, 1, 1),
         _rows32(q, 128),
         _rows32(k, 224),
@@ -1206,6 +1205,7 @@ def attn_fwd32(q, k, v, bias, kmask=None):
         int(A),
         int(nwin),
         int(sp),
+        int(spe),
     )
     return o, lse
 
