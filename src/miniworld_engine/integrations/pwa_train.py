@@ -16,8 +16,8 @@ dy never rounds to bf16).
 
 On sm_100a (B200) the same boundaries run `csrc/sm100/pwa_sm100.cu`: forward pair_fwd (LN_z folded into proj_z), ln_vg,
 cuBLAS bmm (o = w . v), pwa_gate_out; backward pwa_glue2 (do, dyg = dgp . Wg, dWo, dWg -- dgp stays on chip), cuBLAS bmm
-(dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd. B200 inference takes N up to 2048 (pair_fwd's 2048-logit build), training up
-to 1024; the wide widths are inference only on B200 (`pwa_wide`).
+(dv = w^T . do, dw = do . v^T), dv_bwd, pair_bwd. B200 takes N up to 2048 (pair_fwd's 2048-logit build), inference and training;
+pair_fwd / pair_bwd take d_pair 128 / 256 / 384 / 512, so Chai-1's 64 / 256 / 8 x 32 trains here too; the other wide widths run `pwa_wide`.
 
 Automatic in auto mode; settings.pwa_train=0 disables this path. It serves a grad-enabled call of a module built with
 implementation="miniworld" or "anthropic" when the shapes fit (d_msa=64, d_pair=128, 8 heads x 32, batch 1,
@@ -144,13 +144,16 @@ def refusal(
         native = native_aux_enabled(msa) or (
             not torch.is_grad_enabled() and native_inference_enabled(msa.device)
         )
-        # the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward one is built for N <= 1024
+        # H100: the forward pair kernel holds H rows of N logits in shared memory (N <= 2048); the backward one is built for N <= 1024
         n_max = 1024 if torch.is_grad_enabled() else NMAX_INFER
         if cap == (9, 0) and native and (n == 0 or s == 0 or n > n_max):
             return f"the CUDA-only H100 path needs positive S and N <= {n_max}, got N={n}, S={s}"
-        if wide and cap == (10, 0):  # inference only; N and S padded to 128, pair_fwd holds a row of the padded N (<= 2048)
-            if torch.is_grad_enabled() or dropout:
-                return "the sm_100a wide kernels serve inference only (no backward kernels at these widths)"
+        if wide and cap == (10, 0):  # N and S padded to 128, pair_fwd holds a row of the padded N (<= 2048)
+            if (torch.is_grad_enabled() or dropout) and not _wide.trains_b200(d_msa, d_pair, n_head, d_hidden):
+                return (
+                    f"the sm_100a wide backward serves (d_msa, d_hidden) in {_wide.TRAIN_B200} and (64, 32), d_pair in {_wide.DPAIR}; "
+                    f"got ({d_msa}, {d_pair}, {n_head}, {d_hidden})"
+                )
             if n == 0 or s == 0:
                 return f"empty MSA stack, got N={n}, S={s}"
             if -(-n // 128) * 128 > _wide.NMAX_B200:
@@ -165,9 +168,8 @@ def refusal(
         if cap == (10, 0):  # N and S are padded to 128 (_pad_b200); pair_fwd holds a row of the padded N
             if n == 0 or s == 0:
                 return f"empty MSA stack, got N={n}, S={s}"
-            nb_max = 1024 if torch.is_grad_enabled() or dropout else NMAX_INFER   # the backward pair kernel: N <= 1024
-            if -(-n // 128) * 128 > nb_max:
-                return f"the sm_100a kernels need N <= {nb_max} (after the pad to 128), got N={n}, S={s}"
+            if -(-n // 128) * 128 > NMAX_INFER:   # pair_fwd's longest row of logits; the backward kernels take any N
+                return f"the sm_100a kernels need N <= {NMAX_INFER} (after the pad to 128), got N={n}, S={s}"
             return None
         if n % 128 or s % 2:
             return f"N must be a multiple of 128 and S even, got N={n}, S={s}"
@@ -938,6 +940,12 @@ def _is_wide(module) -> bool:
     ) != (D, DZ, H, C)
 
 
+def _miniworld_msa_side(module) -> bool:
+    """MiniWorld's MSA width (d_msa 64, 8 heads x 32) at any pair width: on B200 the MiniWorld kernels train it (pair_fwd / pair_bwd take
+    d_pair 128 / 256 / 384 / 512; Chai-1's 64 / 256 / 8 x 32)."""
+    return (module.to_value.weight.shape[1], module.n_head, module.to_value.weight.shape[0] // module.n_head) == (D, H, C)
+
+
 def _pad_b200(msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None):
     """B200: the MSA depth S and the token count N padded to the kernels' 128-row tiles -> (msa, pair, mask, S, N), the original S / N.
     The MSA rows are independent (each averages its own values with the shared pair weights), so zero rows change no real row; the pad
@@ -960,7 +968,7 @@ def pair_weighted_averaging(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask): the residual is INCLUDED (the forward kernel adds it)."""
-    if _is_wide(module):
+    if _is_wide(module) and not (_miniworld_msa_side(module) and torch.cuda.get_device_capability(msa.device) == (10, 0)):
         return _wide.pair_weighted_averaging(module, msa, pair, mask)
     msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
     if (s0, n0) != tuple(msa.shape[1:3]):

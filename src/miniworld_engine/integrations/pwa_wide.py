@@ -2,9 +2,10 @@
 d_pair 128 / 256 / 384, 8 heads x 8 / 16 value channels (Protenix-v2, ESMFold2, OpenDDE), any MSA depth, any length up to
 1024 (a length that is not a multiple of 16 is padded with masked tokens), inference and training, bf16.
 
-On sm_100a (B200), inference only: the same widths plus 8 x 32 at d_msa 64 (Chai-1's d_pair 256), N up to 2048 (the depth and
-the length padded to 128, pad tokens masked as keys): pair_fwd of `csrc/sm100/pwa_sm100.cu` (d_pair 128 / 256 / 384), ln_vg_w and
-gate_out_w of `csrc/sm100/pwa_wide_sm100.cu` (one build per (d_msa, d_hidden)), the contraction on cuBLAS bmm.
+On sm_100a (B200): the same widths plus 8 x 32 at d_msa 64 (Chai-1's d_pair 256), N up to 2048 (the depth and the length padded
+to 128, pad tokens masked as keys), inference and training: pair_fwd / pair_bwd of `csrc/sm100/pwa_sm100.cu` (d_pair 128 / 256 / 384),
+ln_vg_w, gate_out_w and the backward's glue_w / dvb_w of `csrc/sm100/pwa_wide_sm100.cu` (one build per (d_msa, d_hidden)), the
+contractions and the weight gradients on cuBLAS (`_train_b200` below). Chai-1 trains on the MiniWorld MSA kernels (`pwa_train.py`).
 
 The structure is the B200 one (`csrc/sm100/pwa_sm100.cu`), written for wgmma instead of tcgen05:
 
@@ -334,6 +335,131 @@ def _inference_b200(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.T
     return out[:, :s0, :n0].contiguous() if tuple(out.shape[1:3]) != (s0, n0) else out
 
 
+# ---------------------------------------------------------------------------------------------
+# B200 training at the wide widths: the forward above with y and o kept (ln_vg_w(want_y), gate_out_w with the dropout keep-mask),
+# the backward on pwa_wide_sm100.cu's glue_w / dvb_w, pwa_sm100.cu's pair_bwd (d_pair 128 / 256 / 384 / 512) and cuBLAS for the
+# contractions and the weight gradients:
+#   glue_w   do (head-major), dgp -> dgv[..., :HC], go, dout' (the dropout)        dv = w^T . do, dw = do . v^T (bmm)
+#   dvb_w    dm = LN_bwd([dgp | dv] [Wg; Wv]) + dres, dgamma, dbeta; dv -> dgv[..., HC:]
+#   cuBLAS   dWo = dout'^T go, [dWg; dWv] = dgv^T y (fp32 out)
+#   pair_bwd dz, dWb, dgamma_z
+TRAIN_B200 = ((64, 8), (128, 8), (128, 16))  # (d_msa, d_hidden) with the wide backward kernels; 64 x 32 trains on pwa_train (MiniWorld's MSA side)
+
+
+def trains_b200(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
+    """The widths B200 trains: the wide backward here, or (d_msa 64, 8 x 32) on the MiniWorld kernels at any served d_pair."""
+    return n_head == H and d_pair in DPAIR and ((d_msa, d_hidden) in TRAIN_B200 or (d_msa, d_hidden) == (64, 32))
+
+
+def _mm32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
+    """a @ b for bf16 operands with an fp32 result (the weight gradients are fp32 for fp32 master parameters)."""
+    try:
+        return torch.mm(a, b, out_dtype=torch.float32)
+    except TypeError:  # an older torch without out_dtype
+        return torch.mm(a.float(), b.float())
+
+
+def _forward_b200_math(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
+    from miniworld_engine.integrations.pwa_train import _k100
+
+    msa, pair, km, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
+    bf = torch.bfloat16
+    m, z = msa[0], pair[0]
+    n, d_msa = m.shape[1], m.shape[2]
+    kv = _value100(d_msa, wv.shape[0] // H)
+    w16 = _k100()["pwa"].pair_fwd(z, km, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous())
+    lnw, lnb = lnm_w.detach().contiguous(), lnm_b.detach().to(lnm_w.dtype).contiguous()
+    v, y = kv.ln_vg_w(m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, True)
+    o = torch.bmm(w16, v)
+    dmask, dscale = None, 1.0
+    if p_drop > 0:  # the module's drop_msa: one keep-mask per (token, channel) shared over the MSA rows
+        dmask = (torch.rand(n, d_msa, device=m.device, dtype=bf) > p_drop).to(bf)
+        dscale = 1.0 / (1.0 - p_drop)
+    out = kv.gate_out_w(o, m, lnw, lnb, eps_m, wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous(), dmask, dscale)
+    return [out, w16, v, y, o, dmask if dmask is not None else m.new_empty((0,))]
+
+
+def _forward_b200_fake(args, eps_m, eps_z, p_drop):
+    m = args[0]
+    _, s, n, d = m.shape
+    hc = args[5].shape[0]
+    dev, bf = m.device, torch.bfloat16
+    return [
+        torch.empty((s, n, d), device=dev, dtype=bf),
+        torch.empty((H, n, n), device=dev, dtype=bf),
+        torch.empty((H, n, s * (hc // H)), device=dev, dtype=bf),
+        torch.empty((s, n, d), device=dev, dtype=bf),
+        torch.empty((H, n, s * (hc // H)), device=dev, dtype=bf),
+        torch.empty((n, d) if p_drop else (0,), device=dev, dtype=bf),
+    ]
+
+
+@opaque(fake=_forward_b200_fake, name="pwa_b200w_fwd")
+def _forward_b200_op(args: list[torch.Tensor], eps_m: float, eps_z: float, p_drop: float) -> list[torch.Tensor]:
+    return _forward_b200_math(args, eps_m, eps_z, p_drop)
+
+
+@opaque(fake=_backward_fake, name="pwa_b200w_bwd")
+def _backward_b200_op(
+    args: list[torch.Tensor], kept: list[torch.Tensor], dres: torch.Tensor, eps_m: float, eps_z: float, p_drop: float
+) -> list[torch.Tensor]:
+    from miniworld_engine.integrations.pwa_train import _k100
+
+    msa, pair, _km, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
+    w16, v, y, o, dmask = kept
+    bf = torch.bfloat16
+    m, z = msa[0], pair[0]
+    s, n, d_msa = m.shape
+    hc = wv.shape[0]
+    kv = _value100(d_msa, hc // H)
+    wg16, wv16, wo16 = wg.to(bf).contiguous(), wv.to(bf).contiguous(), wo.to(bf).contiguous()
+    dres = dres.contiguous()
+    do, dgv, go, dout = kv.glue_w(o, y, dres, wg16, wo16, dmask if p_drop else None, 1.0 / (1.0 - p_drop) if p_drop else 1.0)
+    dv = torch.bmm(w16.transpose(1, 2), do)  # head-major [H, N, S*C]
+    dw = torch.bmm(do, v.transpose(1, 2))  # [H, N, N] bf16, as the module's own
+    dm, dlw, dlb = kv.dvb_w(dv, dgv, m, dres, wg16, wv16, lnm_w.detach().contiguous(), eps_m)
+    rows = s * n
+    dwo = _mm32(dout.view(rows, d_msa).t(), go.view(rows, hc))  # [D, HC]
+    dwgv = _mm32(dgv.view(rows, 2 * hc).t(), y.view(rows, d_msa))  # [2 HC, D]: dWg over dWv
+    dz, dwb, dzw = _k100()["pwa"].pair_bwd(
+        z, w16, dw, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous(), int(wb.dtype == bf), int(lnz_w.dtype == bf)
+    )
+    cp = lambda t, ref: t.to(ref.dtype, copy=True)  # a custom op's returns may not alias each other
+    return [dm, dz, cp(dlw, lnm_w), cp(dlb, lnm_b), cp(dwgv[hc:], wv), cp(dwgv[:hc], wg), dzw, dwb, cp(dwo, wo)]
+
+
+class PwaWideB200Fn(torch.autograd.Function):
+    @staticmethod
+    def forward(ctx, *args):
+        tensors = list(args[:10])
+        ctx.eps_m, ctx.eps_z, ctx.p_drop = args[10:]
+        out, *kept = _forward_b200_op(tensors, ctx.eps_m, ctx.eps_z, ctx.p_drop)
+        ctx.save_for_backward(*tensors, *kept)
+        return out[None]
+
+    @staticmethod
+    def backward(ctx, dy):
+        vals = ctx.saved_tensors
+        g = _backward_b200_op(list(vals[:10]), list(vals[10:]), dy[0], ctx.eps_m, ctx.eps_z, ctx.p_drop)
+        return (g[0][None], g[1][None], None, *g[2:], None, None, None)
+
+
+def _train_b200(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    from miniworld_engine.integrations.pwa_train import _pad_b200
+
+    eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
+    eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    p_drop = float(module.drop_msa.p_drop) if module.training else 0.0
+    msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
+    n = msa.shape[2]
+    km = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask.reshape(n).to(torch.bool).contiguous()
+    out = PwaWideB200Fn.apply(
+        msa.contiguous(), pair.contiguous(), km, module.ln_msa.weight, module.ln_msa.bias, module.to_value.weight,
+        module.to_gate.weight, module.ln_pair.weight, module.to_bias.weight, module.to_out.weight, eps_m, eps_z, p_drop,
+    )
+    return out[:, :s0, :n0] if tuple(out.shape[1:3]) != (s0, n0) else out
+
+
 def _on_b200(t: torch.Tensor) -> bool:
     return t.is_cuda and torch.cuda.get_device_capability(t.device) == (10, 0)
 
@@ -343,7 +469,7 @@ def pair_weighted_averaging(
 ) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask) with grad: the residual and the row dropout are inside the kernel."""
     if _on_b200(msa):
-        raise RuntimeError("pwa_wide: the sm_100a wide kernels serve inference only (no grad, no dropout); pwa_train.refusal routes training elsewhere")
+        return _train_b200(module, msa, pair, mask)
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     p_drop = float(module.drop_msa.p_drop) if module.training else 0.0
