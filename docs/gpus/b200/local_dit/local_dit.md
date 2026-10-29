@@ -315,9 +315,11 @@ atoms, which come first). Both ran the PyTorch statements on B200 before; now:
 | `kv_norm="parallel"` | bf16, fp32 | bf16, fp32 | `pre_fwd.cu` / `pre_bwd.cu` `-DPARALLEL=1` (`sm100_atom.KERNELS["prexp"]`, `["prebxp"]`): xkv = LN(s) sigmoid(pre + bs) + shift from the statistics AdaLN 1 already has; in the backward the K / V AdaLN's LN backward reads the staged `s` (x1 is not loaded) and goes into d single. fp32: `atom_pre_tf32` with `cross = 2`, the unfused path `adaln32(s, ..)` / `adaln_bwd32(s, ..)` |
 | `key_window="slide"` | bf16, fp32 | bf16, fp32 | the clipped-window attention kernel, then `sm100_atom_local/lslide.cu` `local_slide_edges(_f32)` recomputes the windows the slide moves -- 0, 1 and the last three real ones, picked on the device from the key mask's population count (no host read: CUDA-graph capturable, a replay with another mask is right), a window listed twice or not moved skipped -- over their slid keys (same per-window bias tensor: the trunked pair is laid out from the window's first key either way) and overwrites their rows of O (and of the LSE in training). Backward: `local_slide_bwd_prep` copies those windows' dO / D rows out and zeroes them (the clipped-window kernels then see dS = 0 there), `local_slide_bwd` (a CTA per moved window, head, sample) recomputes P, dP, dS over the slid keys, writes dQ and fp32 dK / dV / dbias partials, `local_slide_bwd_fin` sums the partials in a fixed order into dk / dv and the moved windows' dbias (deterministic) |
 
-The edge kernel is a CTA per (listed window, head, sample), 512 threads on CUDA cores (scores with the key row in registers, softmax by
-warp shuffles, P V a thread per (query, 2 channels)). It costs a constant ~9-10 us per call (latency of five serial phases in one CTA; the
-work is 5 x 32 queries); measured inference of one cross block, CUDA graph under `static_weights()` + `static_inputs()`, us:
+The edge kernel is a CTA per (listed window, head, sample), 2 warps: S = Q K^T and O = P V on tensor cores (`mma.sync`: bf16, or tf32
+with the operands rounded to nearest on the fp32 path), the softmax on the S fragments. It costs a constant ~10 us per call (latency of
+its serial phases in one CTA: the mask count, the staging loads, the two products; the work is 5 x 32 queries); measured inference of one
+cross block, CUDA graph under `static_weights()` + `static_inputs()`, us (before the 2026-10-29 round-3 rewrite; the rewrite left these
+within 1 us):
 
 | (A, N) | bf16 chained / pad | bf16 parallel / pad | bf16 parallel / slide | fp32 chained / pad | fp32 parallel / pad | fp32 parallel / slide |
 |---|---|---|---|---|---|---|
@@ -325,16 +327,28 @@ work is 5 x 32 queries); measured inference of one cross block, CUDA graph under
 | (5, 1024) | 27.3 | 27.1 | 36.1 | 44.0 | 41.6 | 51.8 |
 | (1, 4096) | 24.2 | 23.8 | 32.7 | 42.5 | 40.0 | 50.4 |
 
-Training step (one cross block, forward + backward, CUDA graph), ms:
+Training step (one cross block, forward + backward, CUDA graph, conditioning shared by the samples), ms; "before" is the CUDA-core
+backward described below:
 
-| (A, N) | chained / pad | parallel / pad | parallel / slide |
+| (A, N) | parallel / pad | parallel / slide, before | parallel / slide, now |
 |---|---|---|---|
-| bf16 (48, 4096) | 1.589 | 1.610 | 1.853 |
-| fp32 (48, 4096) | 3.881 | 3.882 | 4.130 |
-| bf16 (5, 1024) | 0.265 | 0.262 | 0.316 |
+| bf16 (48, 4096) | 1.249 | 1.497 (+0.248) | 1.363 (+0.091) |
+| fp32 (48, 4096) | 3.987 | 4.225 (+0.238) | 4.092 (+0.108) |
+| bf16 (5, 1024) | 0.252 | 0.301 (+0.049) | 0.290 (+0.038) |
 
-The slid window's backward (prep, a CUDA-core CTA per moved window x head x sample, the ordered sum) costs ~0.24 ms at A48: a lever left
-(tensor cores for its five 32 x 128 products, or the window offsets inside the clipped-window kernels).
+**Slid-window backward (round 3).** The first version was a CTA per (moved window, head, sample) on CUDA cores (512 threads, the five
+32 x 128 products as shared-memory dot products: bound by shared-memory loads, 114 us at (48, 4096)), whose dK / dV went to fp32 partials
+[5][A][128][4][64] summed with the dbias partials by a fixed-order kernel (53 us), plus the CUDA-core forward edges (47 us). Now
+(`lslide.cu`): `local_slide_bwd` is a CTA (4 warps) per (key group, head, sample): the moved windows of a group share their slid keys
+(group 0: windows 0, 1 at keys [0, 128); group 1: the last three at [max(n_real - 128, 0), ..)), so the CTA sums their dK / dV in its MMA
+accumulators and adds them into dk / dv itself through shared memory and 16-B read-modify-writes -- one writer per key (when the groups'
+keys overlap, n_real < 256, group 0's CTA does both in order). The products are `mma.sync` tiles (S, dP; dQ = dS K; dK += dS^T Q, dV +=
+P^T dO); operands, the window's bias, P and dS are staged in shared memory (every load of a thread issued before any is stored). dS is
+the window's dbias partial; `local_slide_bwd_fin` only sums those over the samples. At (48, 4096) (eager profile): backward 114 + 53 ->
+49 + 5 us, forward edges 47 -> 28 us, prep 11 us. Measured inside the backward CTA (global timer marks): legacy `mma.sync` on B200 is slow
+and the operand fragments come from shared memory one 4-B load per element, so the S / dP phase (32 tensor-core instructions and ~130
+fragment loads per warp) still takes ~5 us per window; tcgen05 (M = 128 keys for S^T, dP^T, dK, dV; dQ from two windows) is the next step.
+The backward kernel has 128 threads and up to 168 registers (no spills); the edge kernel 64 threads, <= 128.
 
 Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (the three option pairs x eight
 (A, N, real atoms) cases incl. FoldForge's A = 5, N 1024, under 128 real atoms and windows listed twice; bf16 and fp32 against the fp64
