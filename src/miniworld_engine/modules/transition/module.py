@@ -194,11 +194,12 @@ class Transition(nn.Module):
         """Whether the generic sm_90a kernels take this activation (fp32 / TF32 included)."""
         if not _fused_sm90a_enabled():
             return False
-        from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a
+        from miniworld_engine.kernels.transition.cuda import fused_generic_sm90a, fused_generic_sm100a
 
+        # (and the B200 generic kernels, ``fused_generic_sm100a``: the same contract on tcgen05, fp32 on kind::tf32)
         return fused_generic_sm90a.available(
             x, self.expand_a.weight, self.squeeze.weight
-        )
+        ) or fused_generic_sm100a.available(x, self.expand_a.weight, self.squeeze.weight)
 
     def _residual_forward(self, x: torch.Tensor) -> torch.Tensor:
         """Residual-fused Transition: LN, expand-SwiGLU, squeeze with the residual folded into
@@ -244,6 +245,11 @@ class Transition(nn.Module):
                         self.ln_in.eps,
                     )
                     return out if xs is x else out[:rows].reshape(x.shape)
+            from miniworld_engine.kernels.transition.cuda import fused_generic_sm100a
+
+            # every other width / hidden width, fp32 (TF32) and any row count: the generic tcgen05 kernels (no padding)
+            if fused_generic_sm100a.available(x, pa, ps):
+                return fused_generic_sm100a.transition_generic_sm100a(x, self.ln_in.weight, self.ln_in.bias, pa, pb, ps, self.ln_in.eps)
 
         if _fused_sm90a_enabled():
             from miniworld_engine.kernels.transition.cuda import transition_sm90a
