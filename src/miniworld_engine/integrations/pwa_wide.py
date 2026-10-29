@@ -2,6 +2,10 @@
 d_pair 128 / 256 / 384, 8 heads x 8 / 16 value channels (Protenix-v2, ESMFold2, OpenDDE), any MSA depth, any length up to
 1024 (a length that is not a multiple of 16 is padded with masked tokens), inference and training, bf16.
 
+On sm_100a (B200), inference only: the same widths plus 8 x 32 at d_msa 64 (Chai-1's d_pair 256), N up to 2048 (the depth and
+the length padded to 128, pad tokens masked as keys): pair_fwd of `csrc/sm100/pwa_sm100.cu` (d_pair 128 / 256 / 384), ln_vg_w and
+gate_out_w of `csrc/sm100/pwa_wide_sm100.cu` (one build per (d_msa, d_hidden)), the contraction on cuBLAS bmm.
+
 The structure is the B200 one (`csrc/sm100/pwa_sm100.cu`), written for wgmma instead of tcgen05:
 
 Forward   pair_fwd3 (csrc/pair_wide.cu: LayerNorm(d_pair) -> proj_z -> key mask -> softmax over j, mma.sync, d_pair a compile-time
@@ -32,11 +36,33 @@ DMSA = (64, 128)
 DPAIR = (128, 256, 384)
 DHID = (8, 16)
 NMAX = 1024  # the pair kernels hold one row of logits in shared memory
+NMAX_B200 = 2048  # B200 inference: pair_fwd holds a row of up to 2048 logits (N padded to 128)
 _EXT: dict[str, Any] = {}
 
 
-def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int) -> bool:
-    return n_head == H and d_msa in DMSA and d_pair in DPAIR and d_hidden in DHID
+def supported(d_msa: int, d_pair: int, n_head: int, d_hidden: int, cap: tuple[int, int] | None = None) -> bool:
+    """The widths this path serves; on B200 (``cap`` (10, 0)) also 8 x 32 value channels at d_msa 64 (Chai-1: d_msa 64, d_pair 256)."""
+    if n_head != H or d_msa not in DMSA or d_pair not in DPAIR:
+        return False
+    return d_hidden in DHID or (cap == (10, 0) and d_msa == 64 and d_hidden == 32)
+
+
+def _value100(d_msa: int, d_hidden: int):
+    """B200: ln_vg_w / gate_out_w of `csrc/sm100/pwa_wide_sm100.cu`, built for (d_msa, d_hidden)."""
+    name = f"miniworld_pwa_wide_sm100_{d_msa}_{d_hidden}"
+    if name in _EXT:
+        return _EXT[name]
+    from miniworld_engine.kernels._nvcc import load_extension as load
+
+    csrc = Path(__file__).with_name("csrc") / "sm100"
+    _EXT[name] = load(
+        name=name,
+        sources=[str(csrc / "pwa_wide_sm100.cu")],
+        extra_include_paths=[str(csrc)],
+        extra_cuda_cflags=["-O3", "-gencode=arch=compute_100a,code=sm_100a", "--use_fast_math", f"-DPW_D={d_msa}", f"-DPW_C={d_hidden}"],
+        extra_cflags=["-O3"],
+    )
+    return _EXT[name]
 
 
 def _load(name: str, src: str, flags: list[str]):
@@ -274,10 +300,50 @@ def _prepare(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor |
     return msa.contiguous(), pair.contiguous(), km.contiguous(), n
 
 
+def _infer_b200_fake(args, eps_m, eps_z):
+    return torch.empty_like(args[0][0])
+
+
+@opaque(fake=_infer_b200_fake, name="pwa_b200w_infer")
+def _inference_b200_op(args: list[torch.Tensor], eps_m: float, eps_z: float) -> torch.Tensor:
+    """B200: msa + PWA(msa, pair, key mask) [S, N, d_msa] from msa [1, S, N, d_msa], pair [1, N, N, d_pair] (S, N multiples of 128),
+    the [N] bool key mask and the module's weights (any float dtype; the projections are cast to bf16)."""
+    from miniworld_engine.integrations.pwa_train import _k100
+
+    msa, pair, km, lnm_w, lnm_b, wv, wg, lnz_w, wb, wo = args
+    bf = torch.bfloat16
+    m, z = msa[0], pair[0]
+    kv = _value100(m.shape[2], wv.shape[0] // H)
+    w16 = _k100()["pwa"].pair_fwd(z, km, lnz_w.detach().contiguous(), eps_z, wb.detach().contiguous())
+    lnw, lnb = lnm_w.detach().contiguous(), lnm_b.detach().to(lnm_w.dtype).contiguous()
+    v, _ = kv.ln_vg_w(m, lnw, lnb, wv.detach().to(bf).contiguous(), eps_m, False)
+    return kv.gate_out_w(torch.bmm(w16, v), m, lnw, lnb, eps_m, wg.detach().to(bf).contiguous(), wo.detach().to(bf).contiguous(), None, 1.0)
+
+
+def _inference_b200(module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None) -> torch.Tensor:
+    from miniworld_engine.integrations.pwa_train import _pad_b200
+
+    eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
+    eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
+    msa, pair, mask, s0, n0 = _pad_b200(msa, pair, mask)
+    n = msa.shape[2]
+    km = torch.ones(n, dtype=torch.bool, device=msa.device) if mask is None else mask.reshape(n).to(torch.bool).contiguous()
+    args = [msa.contiguous(), pair.contiguous(), km, module.ln_msa.weight, module.ln_msa.bias, module.to_value.weight, module.to_gate.weight,
+            module.ln_pair.weight, module.to_bias.weight, module.to_out.weight]
+    out = _inference_b200_op(args, eps_m, eps_z)[None]
+    return out[:, :s0, :n0].contiguous() if tuple(out.shape[1:3]) != (s0, n0) else out
+
+
+def _on_b200(t: torch.Tensor) -> bool:
+    return t.is_cuda and torch.cuda.get_device_capability(t.device) == (10, 0)
+
+
 def pair_weighted_averaging(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
     """msa + MSAPairWeightedAveraging(msa, pair, mask) with grad: the residual and the row dropout are inside the kernel."""
+    if _on_b200(msa):
+        raise RuntimeError("pwa_wide: the sm_100a wide kernels serve inference only (no grad, no dropout); pwa_train.refusal routes training elsewhere")
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     p_drop = float(module.drop_msa.p_drop) if module.training else 0.0
@@ -303,6 +369,8 @@ def pair_weighted_averaging(
 def pair_weighted_averaging_inference(
     module, msa: torch.Tensor, pair: torch.Tensor, mask: torch.Tensor | None
 ) -> torch.Tensor:
+    if _on_b200(msa):
+        return _inference_b200(module, msa, pair, mask)
     eps_m = float(getattr(module.ln_msa, "eps", 1e-5))
     eps_z = float(getattr(module.ln_pair, "eps", 1e-5))
     m, z, km, n = _prepare(module, msa, pair, mask)

@@ -104,7 +104,7 @@ class MSAPairWeightedAveraging(nn.Module):
                 self.to_value.weight.shape[0] // self.n_head,
             )
             if _pwa_train.serves(
-                msa, pair, *_dims
+                msa, pair, *_dims, dropout=bool(self.training and self.drop_msa.p_drop > 0)
             ):  # drop_msa is fused into the path (training only)
                 if torch.is_grad_enabled() or (
                     self.training and self.drop_msa.p_drop > 0
