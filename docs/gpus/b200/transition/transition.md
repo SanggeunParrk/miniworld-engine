@@ -454,7 +454,7 @@ n = 2 or 4. Larger calls (the training batch [48, L, 384]) run the per-tile D384
 | 성능 확인 | ✗ | ✗ | ✓ | ✗ | ✗ | ✓ |
 | cache build | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-##### B3 · dW_s, dW_a | dW_b (fp32, or bf16 for bf16 parameters) + dgamma / dbeta over (output tile) CTAs
+##### B3 · dW_s, dW_a | dW_b (fp32, or bf16 for bf16 parameters) + dgamma / dbeta over (output tile) CTAs, 64 / 128 / 192 columns each: the narrowest whose CTAs fit beside B2's clusters
 
 | (Length, Dimension) | (128, 384) | (256, 384) | (384, 384) | (512, 384) | (640, 384) | (768, 384) |
 |---|---|---|---|---|---|---|
@@ -482,6 +482,26 @@ fp32-master inference includes the in-graph weight cast of a capture without `st
 per-tile path (L2048 n = 4: inference 28.7 vs 49.2 µs, training 94.2 vs 151.8 µs). H100 (generic kernels, 3 + PDL) does
 [1, 768, 384] n = 2 in 11.8 / 33.1 µs.
 
+**Round sx2 (2026-10-29).** B3's 108 CTAs (64-column tiles) next to B2's 72 exceeded the 148 SMs at [1, 768, 384]: the CTAs left over
+started their whole K loop only after B2 ended, ~5 µs after it instead of ~2. B3 now takes the narrowest output tile width (64 / 128 /
+192 columns, `SX_DW_NT`) whose CTAs fit the SMs B2 leaves free (n = 2: 128, n = 4: 192) and stores its tile before
+`griddepcontrol.wait`, so only the dgamma / dbeta sum waits for B2. Training step, same conditions as above (the harness
+`scratch/k2tr2/bench_tr.py`, not shipped; min of two runs of 5 × 50 replays; before = engine d879e180):
+
+| shape (n) | bf16 params before | bf16 params after | fp32 masters before | fp32 masters after |
+|---|---|---|---|---|
+| [1, 768, 384] (2) | 41.0 | **37.0** | 41.0 | **39.0** |
+| [1, 768, 384] (4) | 49.2 | **46.4** | 49.6 | **45.1** |
+| [1, 384, 384] (2) | 36.9 | **34.9** | 36.9 | **36.9** |
+| [1, 384, 384] (4) | 43.1 | **41.6** | 44.7 | **43.0** |
+
+Of the ~37 µs at [1, 768, 384] n = 2 (bf16), ~9 µs are the harness's six `.grad` accumulation adds; the kernels end at ~28.5 µs
+(nsys, graph replay): F1-F3 12.0, B1 +5.3, B2 +9.3, B3 +2.0. Tried and not kept: B2 starting per tile on arrival counters the gate
+CTAs bump instead of `griddepcontrol.wait` (B2's 12-CTA clusters only become resident as gate CTAs leave their GPC, and the gate's
+fence + atomic cost ~1 µs: 3 µs slower); dgamma / dbeta summed by B2's last CTA (an end-of-kernel atomic: ~2.5 µs slower than B3's
+sum); half of the gate's sigmoids on the FMA pipe (no change outside the ±1 µs run-to-run spread). Left: one kernel for B1 + B2 per
+row tile (the gate chunks of a tile on its B2 cluster), which also needs B3 to learn of `[dA | dB]` without B2's completion.
+
 No kernel on these paths is autotuned, so nothing needs a cache (✓).
 
 ## Generic path (any width, row count and fp32)
@@ -498,15 +518,21 @@ Kernels (`sm100/generic/`):
 * `tg_gemm.cu`: one persistent, warp-specialised tcgen05 GEMM (320 threads: a TMA producer warp, an MMA warp, eight epilogue warps,
   two per TMEM lane quarter), accumulators double-buffered in tensor memory, operands K-major on both sides through a 128-B-swizzled
   ring, epilogue staged through swizzled shared memory and TMA-stored. Built per epilogue: SWIGLU (two accumulators, h = silu(a) b),
-  RESID (+ x), PLAIN (fp32 d_xn), GATE (three accumulators over two operand phases: dh = dy Ws and a, b recomputed from x_n, writing
-  h and [dA | dB]) and CTGATE (the ConditionedTransition's squeeze and gate projection, see `kernels/conditioned_transition/cuda/ct_sm100.py`);
-  output tiles 128 / 64 / 32 columns, the widest that gives every SM a tile.
-* `tg_rows.cu`: LayerNorm forward / backward (16-B vectors, 8-32 lanes per row), the TF32 rounding of dy, the fixed-order column sums,
-  the weight preparation (activation dtype, TF32 grid, Ws^T and [Wa; Wb]^T in one launch).
+  RESID (+ x), PLAIN (fp32 d_xn; optionally split over K: slice s stores its fp32 partial in its own slab of rows), GATE (three
+  accumulators over two operand phases: dh = dy Ws and a, b recomputed from x_n, writing h and [dA | dB]), SWIGLU_AB (SWIGLU that also
+  stores a, b), GATE_AB (dh = dy Ws with a, b read from the forward's copy: one operand phase) and CTGATE (the ConditionedTransition's
+  squeeze and gate projection, see `kernels/conditioned_transition/cuda/ct_sm100.py`); output tiles 128 / 64 / 32 columns, the widest
+  where that gives every SM a tile, else the plan below.
+* `tg_rows.cu`: LayerNorm forward / backward (16-B vectors, 8-32 lanes per row; the backward's per-block dgamma / dbeta partials reduced
+  slot-parallel; `tg_ln_bwds_*` adds a split-K d_xn's slabs in slab order), the TF32 rounding of dy, the fixed-order column sums, the
+  weight preparation (activation dtype, TF32 grid; with the backward's Ws^T and [Wa; Wb]^T transposed through 32 x 32 shared-memory tiles).
 
-Forward: LN -> SWIGLU -> RESID (cuBLAS `addmm` below half a wave of output tiles: a single track). Backward: GATE -> cuBLAS dWs, [dWa; dWb]
-(fp32 out) -> PLAIN d_xn (cuBLAS below half a wave) -> LN backward with the residual -> column sums. The forward saves only x_n and the
-statistics. Accuracy (tests): within 1.5x the error of the same-dtype PyTorch statements against fp64, output and every gradient.
+Forward: LN -> SWIGLU -> RESID. Backward: GATE -> cuBLAS dWs, [dWa; dWb] (fp32 out) -> PLAIN d_xn -> LN backward with the residual ->
+column sums. The forward saves only x_n and the statistics. At a few row tiles (a single track, where the widest tiles leave SMs idle)
+`_plan` picks each GEMM's tile width -- and for d_xn a K split -- by waves x per-CTA operand intake, the squeeze runs on cuBLAS `addmm`
+(it splits K inside one launch: 0-4 µs faster than the split PLAIN plus a summing launch), and a training forward keeps a, b
+(SWIGLU_AB) for GATE_AB while the gate grid is under one wave. Accuracy (tests): within 1.5x the error of the same-dtype PyTorch
+statements against fp64, output and every gradient.
 
 Measured 2026-10-29, CUDA graph replay, µs (before = the PyTorch statements B200 ran for these calls):
 
@@ -522,8 +548,31 @@ Measured 2026-10-29, CUDA graph replay, µs (before = the PyTorch statements B20
 | module fp32 [1, 768, 384] n4 inference / training | 31.6 / 99.6 | 24.8 / 106.3 | 1.27x / 0.94x |
 
 Generic GEMMs alone (bf16, 90 000 rows): D128 n4 SWIGLU 43 µs (548 TFLOP/s), RESID 27 µs (441); D256 n4 SWIGLU 108 µs (876), RESID
-70 µs (672). Left: the single-track training step (a few row tiles: the K-serial GATE / GEMM tiles, launch count), the LN kernels at
-D >= 256 (~50 µs for 90 000 x 256 bf16, latency-bound), and a fused one-kernel forward for widths without a tuned build.
+70 µs (672).
+
+**Small M (2026-10-29).** The module in fp32 (fp32 parameters and activations, TF32 allowed) and bf16-mixed, a single track; CUDA graph,
+min of two runs of 5 × 50 replays, µs, training incl. the harness's `.grad` adds (`scratch/k2tr2/bench_tr.py`, not shipped; before =
+engine d879e180, PyTorch = the module's PyTorch statements in the same harness):
+
+| call | before | after | PyTorch |
+|---|---|---|---|
+| fp32 [1, 768, 384] n4 training / inference | 121.7 / 28.8 | **92.2 / 25.8** | 125.2 / 44.8 |
+| fp32 [1, 768, 384] n2 training | 98.0 | **77.9** | 110.6 |
+| fp32 [1, 384, 384] n4 training | 104.5 | **77.9** | 113.0 |
+| fp32 [1, 300, 384] n4 training | 106.5 | **75.8** | 108.6 |
+| fp32 [1, 768, 512] n2 training / inference | 143.4 / 34.9 | **91.9 / 26.7** | 120.8 / 41.0 |
+| fp32 [1, 154, 768] n2 training | 145.4 | **98.3** | 112.7 |
+| fp32 [1, 768, 256] n4 / [1, 768, 128] n2 training | 96.3 / 69.7 | **76.4 / 61.5** | 110.7 / 94.3 |
+| bf16-mixed [1, 300, 768] n4 / [1, 2048, 768] n4 training | 190.9 / 330.9 | **105.3 / 209.8** | |
+
+What moved (fp32 [1, 768, 384] n4, kernels alone): the weight preparation's scattered transposes 14 -> 4 µs, the LayerNorm backward
+18 -> 4.7 µs (12 blocks of 64 rows each walking 8 rows, and 8-32 serial read-modify-write rounds per block for the partials), GATE
+20 -> 13.5 µs (64-column tiles in one wave instead of 32 in two), d_xn split K 4 ways (9.9 µs; cuBLAS 10.8, the K-serial GEMM 19.6 at
+D512). Larger calls are unchanged (fp32 pair [1, 384, 384, 128] / 256 n4 training 971 -> 964 / 2540 -> 2525 µs; the LayerNorm
+backward's split-K variant is a separate instantiation so the large-M one keeps 64 registers and four blocks per SM). Every call above
+is faster than the PyTorch statements. Left: the generic GEMMs at a few row tiles run at ~2x their operand-intake model (prologue and
+epilogue latency: GATE_AB 12.5 µs at [768, 1536, 384] fp32, cuBLAS's plain GEMM of that size 5.5), and a fused one-kernel forward for
+widths without a tuned build.
 
 ## How the kernels work
 
@@ -565,7 +614,7 @@ D >= 256 (~50 µs for 90 000 x 256 bf16, latency-bound), and a fused one-kernel 
   row tile's hidden units over a CTA pair (fp32 partials through distributed shared memory) and B2 splits K into the `dA W_a` and
   `dB W_b` halves (pairwise mbarrier exchange) while the 12-CTA clusters are all resident (≤ 7 tiles); B2's row sums for the
   LayerNorm backward cross the cluster through distributed shared memory under split arrive / wait barriers; dgamma / dbeta are
-  per-tile partials summed in tile order by B3. The LayerNorm runs once per row in F1 instead of in each of the 12-48 CTAs that share
+  per-tile partials summed in tile order by B3, whose output tiles are sized so its CTAs run beside B2's clusters (round sx2). The LayerNorm runs once per row in F1 instead of in each of the 12-48 CTAs that share
   a tile (it is instruction bound: ~4k cycles per 128 × 384 tile).
 - Numerics are the sm_90a contract (same rounding points; `x_n`, `h`, `dA`, `dB`, `d_xn` in bf16, fp32 accumulation; at D ≥ 384 `a, b`
   saved in bf16); vs the fp32 module every (D, n) is at least as close as the portable path
