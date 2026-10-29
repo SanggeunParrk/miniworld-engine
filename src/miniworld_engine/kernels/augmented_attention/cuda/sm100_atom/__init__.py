@@ -117,6 +117,12 @@ KERNELS_ESM = {
     "pre_rms": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "RMS=1")),
     "post_rms": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True, ("RMS=1",)),
 }
+#: ... and the backward builds of ESMFold2's training block (``-DRMS=1``: RMSNorm backward, raw scales and gates), loaded apart (``KERNELS_ESM_TRAIN``)
+KERNELS_ESM_TRAIN = {
+    "trg_rms": ("tr_bwd_gate", "atom_tr_bwd_gate_sm100", _SMEM, True, ("RMS=1",)),
+    "postb_rms": ("post_bwd", "atom_post_bwd_sm100", _SMEM, True, ("RMS=1",)),
+    "prebxp_rms": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1", "RMS=1")),
+}
 
 
 @functools.lru_cache(maxsize=8)
@@ -149,7 +155,8 @@ def atom_kernel(name: str, device_index: int):
     if _hopper(device_index) and name not in _HOPPER_KERNELS:
         raise NotImplementedError(f"Atom Hopper kernel {name} is not implemented")
     stem, func, smem, pdl, *defs = (
-        _HOPPER_KERNELS if _hopper(device_index) else KERNELS_ESM if name in KERNELS_ESM else KERNELS
+        _HOPPER_KERNELS if _hopper(device_index)
+        else KERNELS_ESM if name in KERNELS_ESM else KERNELS_ESM_TRAIN if name in KERNELS_ESM_TRAIN else KERNELS
     )[name]
     return _load_atom_kernel(stem, func, device_index, smem, pdl, *defs)
 
@@ -182,12 +189,14 @@ def _map(t, dims, stride, box, swizzle=128, dtype="bf16"):
 
 
 def _rows(t, cols=DM):
-    """Row-major bf16 [M, cols] as 32-row x 64-column boxes (128-B swizzle)."""
-    return _map(t, [cols, t.shape[0]], cols * 2, [64, 32])
+    """Row-major bf16 [M, cols] (rows t.stride(0) apart: a column view of a wider tensor works) as 32-row x 64-column boxes (128-B swizzle)."""
+    assert t.stride(-1) == 1
+    return _map(t, [cols, t.shape[0]], t.stride(0) * 2, [64, 32])
 
 
 def _rows16(t, cols=DM):
-    return _map(t, [cols, t.shape[0]], cols * 2, [64, 16])
+    assert t.stride(-1) == 1
+    return _map(t, [cols, t.shape[0]], t.stride(0) * 2, [64, 16])
 
 
 # --------------------------------------------------------------------------------------------------- weights
@@ -476,8 +485,9 @@ def post_fwd(a, o, g, mod, Wo, Wu, Wd, save=False, eps=1e-5, *, packed_hopper=Fa
     return (out, *sv)
 
 
-def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
-    """dy, t, mod (st), x2 -> DT [M, 128], HH [M, 256], DAB [M, 512]; dts into dmod[:, 640:768]; d bts += the column sums."""
+def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts, rms=False):
+    """dy, t, mod (st), x2 -> DT [M, 128], HH [M, 256], DAB [M, 512]; dts into dmod[:, 640:768]; d bts += the column sums. ``rms`` (ESMFold2):
+    the gate st is raw (no sigmoid backward). dmod may be a column view of a wider tensor (rows dmod.stride(0) apart)."""
     M = dy.shape[0]
     dev = dy.device
     DT = torch.empty(M, DM, device=dev, dtype=torch.bfloat16)
@@ -518,14 +528,15 @@ def tr_bwd_gate(dy, t, mod, x2, Wu, WsT, dmod, dbts):
     )
     ntile = M // 16
     d = _dev(dy)
-    atom_kernel("trg", d)(
+    atom_kernel("trg_rms" if rms else "trg", d)(
         (min(num_sms(d), ntile), 1, 1), (384, 1, 1), *maps, dbts, int(ntile)
     )
     return DT, HH, DAB
 
 
-def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1e-5):
-    """-> DA, DU, GATED, DO [M, 128]; dmod blocks 2-4, dP block 3 (dg), D [A, 4, N]; d bsc2 / d bos into DBIAS."""
+def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1e-5, rms=False):
+    """-> DA, DU, GATED, DO [M, 128]; dmod blocks 2-4, dP block 3 (dg), D [A, 4, N]; d bsc2 / d bos into DBIAS. ``rms`` (ESMFold2): AdaLN 2 an
+    RMSNorm with a raw scale, the output gate raw."""
     M = dy.shape[0]
 
     def new():
@@ -580,7 +591,7 @@ def post_bwd(DAB, dy, a2, mod, u, sg, o, WuT, WoT, dmod, dP, Dd, DBIAS, N, eps=1
     )
     ntile = M // 16
     d = _dev(dy)
-    atom_kernel("postb", d)(
+    atom_kernel("postb_rms" if rms else "postb", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
@@ -641,14 +652,17 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     return DS
 
 
-def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5, parallel=False):
+def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5, parallel=False, rms=False, dmkv=None):
     """The cross-attention mode's ``pre_bwd``: dP = [dq | dk | dv | dg] with WT the real [Wq; Wk; Wv; Wg]^T; k and v come from xkv = LN(x1)
     sigmoid(mkv[:, :128] + bs) + mkv[:, 128:], whose backward (dxkv = dk Wk + dv Wv, in the kernel) is added to dx1 before AdaLN 1's.
     -> d single [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | dxkv]; d bs (fp32 [128]) is added into DBS. ``parallel`` (AlphaFold 3,
-    xkv = LN(a) ..): the K / V AdaLN's LN backward goes into d single (x1 is not read)."""
+    xkv = LN(a) ..): the K / V AdaLN's LN backward goes into d single (x1 is not read). ``rms`` (ESMFold2, with ``parallel``): RMSNorm
+    statistics, the scales raw. ``dmkv``: where dmkv goes (a [M, 256] view, e.g. columns of a wider gradient tensor), else a fresh tensor."""
+    assert not rms or parallel
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
-    dmkv = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
+    if dmkv is None:
+        dmkv = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
     maps = (
         _rows16(dP, 4 * DM),
         _rows16(a),
@@ -663,7 +677,7 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5,
     )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("prebxp" if parallel else "prebx", d)(
+    atom_kernel("prebxp_rms" if rms else "prebxp" if parallel else "prebx", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,

@@ -5,6 +5,7 @@
 //
 // Backward from dbias [4, rows] (fp32): dz [rows, 16] (z's dtype) and per-block partial G[h, c] = sum_r dbias[h, r] LN(z[r])[c]
 // (local_bias_fin sums the blocks: dWb = G * gamma, dgamma = sum_h G * Wb). Wb and gamma are read as given (bf16 or fp32).
+// local_esm_bias_bwd: the same for ESMFold2's trunked pair [nwin, 32, 192, 16], whose bias lesm.cu re-indexes by position.
 // SPDX-License-Identifier: Apache-2.0
 #include "local.cuh"
 
@@ -62,39 +63,8 @@ local_bias_fwd(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb,
   }
 }
 
-extern "C" __global__ void __launch_bounds__(256)
-local_bias_bwd(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, const float* __restrict__ dbias,
-               __nv_bfloat16* __restrict__ dz, float* __restrict__ part, int rows, float eps, int is_bf16) {
-  __shared__ float sw[64], red[8][64];
-  load_w(sw, wb, gamma, is_bf16);
-  __syncthreads();
-  float G[64];
-#pragma unroll
-  for (int i = 0; i < 64; ++i) G[i] = 0.f;
-  for (long long r = (long long)blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += (long long)gridDim.x * blockDim.x) {
-    float x[16], rstd;
-    load_row(z, r, x);
-    normalise(x, eps, rstd);                                           // x = zhat
-    float db[4], dzh[16];
-#pragma unroll
-    for (int h = 0; h < 4; ++h) db[h] = dbias[(size_t)h * rows + r];
-#pragma unroll
-    for (int c = 0; c < 16; ++c) {
-      dzh[c] = db[0] * sw[c] + db[1] * sw[16 + c] + db[2] * sw[32 + c] + db[3] * sw[48 + c];
-#pragma unroll
-      for (int h = 0; h < 4; ++h) G[h * 16 + c] += db[h] * x[c];
-    }
-    float m1 = 0.f, m2 = 0.f;
-#pragma unroll
-    for (int c = 0; c < 16; ++c) { m1 += dzh[c]; m2 += dzh[c] * x[c]; }
-    m1 *= 0.0625f; m2 *= 0.0625f;
-    uint32_t o[8];
-#pragma unroll
-    for (int i = 0; i < 8; ++i)
-      o[i] = pack_bf16(rstd * (dzh[2 * i] - m1 - x[2 * i] * m2), rstd * (dzh[2 * i + 1] - m1 - x[2 * i + 1] * m2));
-    *reinterpret_cast<uint4*>(dz + (size_t)r * 16) = make_uint4(o[0], o[1], o[2], o[3]);
-    *reinterpret_cast<uint4*>(dz + (size_t)r * 16 + 8) = make_uint4(o[4], o[5], o[6], o[7]);
-  }
+// the block's 64 partial sums G (one set per thread) -> part[blockIdx.x][64] (lane reduce-scatter, then the 8 warps in order)
+DEVI void block_partials(float (&G)[64], float (*red)[64], float* __restrict__ part) {
   const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
   // reduce-scatter of the 64 partial sums over the 32 lanes (62 shuffles instead of 320): after the five steps lane l holds the
   // sums of indices 2 l' and 2 l' + 1 with l' = the lane bits reversed into the index (bit4 -> 32, bit3 -> 16, ... bit0 -> 2)
@@ -155,6 +125,101 @@ local_bias_bwd(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb,
     for (int wv = 0; wv < 8; ++wv) s += red[wv][threadIdx.x];
     part[(size_t)blockIdx.x * 64 + threadIdx.x] = s;
   }
+}
+
+// one pair row's backward: dbias db[4] (natural units) -> dz[r] (bf16), G[h, c] += db[h] zhat[c]
+DEVI void row_bwd(const __nv_bfloat16* __restrict__ z, size_t r, const float (&db)[4], const float* sw, float (&G)[64],
+                  __nv_bfloat16* __restrict__ dz, float eps) {
+  float x[16], rstd;
+  load_row(z, r, x);
+  normalise(x, eps, rstd);                                           // x = zhat
+  float dzh[16];
+#pragma unroll
+  for (int c = 0; c < 16; ++c) {
+    dzh[c] = db[0] * sw[c] + db[1] * sw[16 + c] + db[2] * sw[32 + c] + db[3] * sw[48 + c];
+#pragma unroll
+    for (int h = 0; h < 4; ++h) G[h * 16 + c] += db[h] * x[c];
+  }
+  float m1 = 0.f, m2 = 0.f;
+#pragma unroll
+  for (int c = 0; c < 16; ++c) { m1 += dzh[c]; m2 += dzh[c] * x[c]; }
+  m1 *= 0.0625f; m2 *= 0.0625f;
+  uint32_t o[8];
+#pragma unroll
+  for (int i = 0; i < 8; ++i)
+    o[i] = pack_bf16(rstd * (dzh[2 * i] - m1 - x[2 * i] * m2), rstd * (dzh[2 * i + 1] - m1 - x[2 * i + 1] * m2));
+  *reinterpret_cast<uint4*>(dz + (size_t)r * 16) = make_uint4(o[0], o[1], o[2], o[3]);
+  *reinterpret_cast<uint4*>(dz + (size_t)r * 16 + 8) = make_uint4(o[4], o[5], o[6], o[7]);
+}
+
+extern "C" __global__ void __launch_bounds__(256)
+local_bias_bwd(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, const float* __restrict__ dbias,
+               __nv_bfloat16* __restrict__ dz, float* __restrict__ part, int rows, float eps, int is_bf16) {
+  __shared__ float sw[64], red[8][64];
+  load_w(sw, wb, gamma, is_bf16);
+  __syncthreads();
+  float G[64];
+#pragma unroll
+  for (int i = 0; i < 64; ++i) G[i] = 0.f;
+  for (long long r = (long long)blockIdx.x * blockDim.x + threadIdx.x; r < rows; r += (long long)gridDim.x * blockDim.x) {
+    float db[4];
+#pragma unroll
+    for (int h = 0; h < 4; ++h) db[h] = dbias[(size_t)h * rows + r];
+    row_bwd(z, r, db, sw, G, dz, eps);
+  }
+  block_partials(G, red, part);
+}
+
+// ESMFold2's pair bias backward (lesm.cu ``local_esm_bias`` reads the trunked pair z [nwin, 32, 192, 16] by position): pair row r = (w, i, slot)
+// holds the bias of the key at p = start_w + slot (start_w: AlphaFold 3's slide of [32 w - 80, 32 w + 112) back inside the n_real real atoms),
+// which is dbias2[h][w][i][c] at c = p - 32 w + 64 when c lies in [0, 160) (zero where p is not a key of the query: dS is zero there), 0 otherwise.
+// dbias2 [4, nwin, 32, 160] fp32, natural units. n_real is the key mask's population count (per block, on the device), or n0 without a mask.
+extern "C" __global__ void __launch_bounds__(256)
+local_esm_bias_bwd(const __nv_bfloat16* __restrict__ z, const void* __restrict__ wb, const void* __restrict__ gamma, const float* __restrict__ dbias2,
+                   const uint8_t* __restrict__ km, __nv_bfloat16* __restrict__ dz, float* __restrict__ part, int N, int n0, float eps, int is_bf16) {
+  __shared__ float sw[64], red[8][64];
+  __shared__ int cnt[8];
+  load_w(sw, wb, gamma, is_bf16);
+  const int tid = threadIdx.x, lane = tid & 31, warp = tid >> 5;
+  int nr = n0;
+  if (km != nullptr) {
+    int c = 0;
+    for (int i = 16 * tid; i < N; i += 16 * blockDim.x) {           // N is a multiple of 128: whole 16-byte groups
+      const uint4 b = *reinterpret_cast<const uint4*>(km + i);
+      const uint32_t w4[4] = {b.x, b.y, b.z, b.w};
+#pragma unroll
+      for (int j = 0; j < 4; ++j)
+        c += ((w4[j] & 0xffu) != 0) + ((w4[j] & 0xff00u) != 0) + ((w4[j] & 0xff0000u) != 0) + ((w4[j] >> 24) != 0);
+    }
+#pragma unroll
+    for (int off = 16; off >= 1; off >>= 1) c += __shfl_xor_sync(0xffffffffu, c, off);
+    if (lane == 0) cnt[warp] = c;
+  }
+  __syncthreads();
+  if (km != nullptr) {
+    nr = 0;
+#pragma unroll
+    for (int i = 0; i < 8; ++i) nr += cnt[i];
+  }
+  const int nwin = N / 32;
+  const size_t rows = (size_t)nwin * 32 * 192, plane = (size_t)nwin * 32 * 160;
+  float G[64];
+#pragma unroll
+  for (int i = 0; i < 64; ++i) G[i] = 0.f;
+  for (size_t r = (size_t)blockIdx.x * blockDim.x + tid; r < rows; r += (size_t)gridDim.x * blockDim.x) {
+    const int slot = (int)(r % 192), wi = (int)(r / (32 * 192)), i = (int)((r / 192) % 32);
+    const int first = 32 * wi - 80;
+    const int start = first < 0 ? 0 : min(first, nr - 192);
+    const int c = start + slot - 32 * wi + 64;
+    float db[4] = {0.f, 0.f, 0.f, 0.f};
+    if (c >= 0 && c < 160) {
+      const size_t e = ((size_t)wi * 32 + i) * 160 + c;
+#pragma unroll
+      for (int h = 0; h < 4; ++h) db[h] = dbias2[h * plane + e];
+    }
+    row_bwd(z, r, db, sw, G, dz, eps);
+  }
+  block_partials(G, red, part);
 }
 
 // the sum of the per-block partials G[h, c] -> dgamma[c] = sum_h G[h, c] Wb[h, c] (fp32 [16]) and dWb[h, c] = G[h, c] gamma[c] (fp32 [4, 16])

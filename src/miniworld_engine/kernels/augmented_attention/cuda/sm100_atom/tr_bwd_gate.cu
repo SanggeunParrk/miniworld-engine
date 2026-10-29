@@ -123,6 +123,9 @@ using namespace s100;
 #ifndef NSW
 #define NSW 2                              // input stages per warpgroup
 #endif
+#ifndef RMS
+#define RMS 0                              // ESMFold2: the transition's gate st is raw (W silu(c)): dts = rn(dy t), no sigmoid backward
+#endif
 constexpr int R = 16;
 constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
 constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
@@ -286,7 +289,7 @@ atom_tr_bwd_gate_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_con
         for (int e = 0; e < 4; ++e) {
           dt[e] = bmul2(d4[e], s4[e]);
           const uint32_t dst = bmul2(d4[e], t4[e]);
-          ds[e] = sig_bwd2(dst, s4[e]);
+          ds[e] = RMS ? dst : sig_bwd2(dst, s4[e]);
           bsum[8 * kb + 2 * e] += bf16lo(ds[e]);
           bsum[8 * kb + 2 * e + 1] += bf16hi(ds[e]);
         }

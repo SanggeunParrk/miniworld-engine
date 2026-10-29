@@ -148,6 +148,9 @@ using namespace s100;
 #ifndef ORD
 #define ORD 0                              // the order of the four bf16 additions (autograd's)
 #endif
+#ifndef RMS
+#define RMS 0                              // ESMFold2 (with CROSS, PARALLEL): RMSNorm AdaLNs, the scales raw (1 + s: their tables hold s + 1)
+#endif
 constexpr int R = 16;
 constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
 constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
@@ -164,7 +167,7 @@ struct Bars {
   uint64_t wfull, wfree, infull[2][NSW], infree[2][NSW], stfull[2][NSW], dxfull[2], dxfree[2];
   uint32_t tmem;
 };
-DEVI float sigm_x(float x) { return __fdividef(1.f, 1.f + __expf(-x)); }
+DEVI float sigm_x(float x) { return RMS ? x : __fdividef(1.f, 1.f + __expf(-x)); }   // the K / V AdaLN's scale (RMS: raw)
 DEVI uint32_t bmul2(uint32_t a, uint32_t b) { uint32_t r; asm("mul.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t badd2(uint32_t a, uint32_t b) { uint32_t r; asm("add.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
 DEVI uint32_t bsub2(uint32_t a, uint32_t b) { uint32_t r; asm("sub.rn.bf16x2 %0, %1, %2;" : "=r"(r) : "r"(a), "r"(b)); return r; }
@@ -357,7 +360,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
 #pragma unroll
         for (int e = 0; e < 16; ++e) sum += y[e];
         sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
-        const float mean = sum * (1.f / 128.f);
+        const float mean = RMS ? 0.f : sum * (1.f / 128.f);
         float var = 0.f;
 #pragma unroll
         for (int e = 0; e < 16; ++e) { y[e] -= mean; var += y[e] * y[e]; }
@@ -377,7 +380,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
               const int k = 8 * kb + 2 * e + j;
               y[k] *= rstd;                                                 // LN(x1)
               const float sk = sigm_x((j ? bf16hi(p4[e]) : bf16lo(p4[e])) + bsr[k]);
-              d2[j] = dy[k] * y[k] * sk * (1.f - sk);                       // d pre-sigmoid scale
+              d2[j] = RMS ? dy[k] * y[k] : dy[k] * y[k] * sk * (1.f - sk);  // d pre-sigmoid scale (RMS: of the raw one)
               dxn[k] = dy[k] * sk;
               bsk[k] += d2[j];
               s1 += dxn[k];
@@ -389,7 +392,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         }
         s1 += __shfl_xor_sync(~0u, s1, 1); s1 += __shfl_xor_sync(~0u, s1, 2); s1 += __shfl_xor_sync(~0u, s1, 4);
         s2 += __shfl_xor_sync(~0u, s2, 1); s2 += __shfl_xor_sync(~0u, s2, 2); s2 += __shfl_xor_sync(~0u, s2, 4);
-        const float m1 = s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
+        const float m1 = RMS ? 0.f : s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb)
 #pragma unroll
@@ -414,7 +417,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
 #pragma unroll
         for (int e = 0; e < 16; ++e) sum += x[e];
         sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
-        const float mean = sum * (1.f / 128.f);
+        const float mean = RMS ? 0.f : sum * (1.f / 128.f);
         float var = 0.f;
 #pragma unroll
         for (int e = 0; e < 16; ++e) { x[e] -= mean; var += x[e] * x[e]; }
@@ -435,7 +438,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
           for (int e = 0; e < 4; ++e) {
             const int k = 8 * kb + 2 * e;
             x[k] *= rstd; x[k + 1] *= rstd;
-            dsc[4 * kb + e] = sig_bwd2(bmul2(d4[e], pack_bf16(x[k], x[k + 1])), g4[e]);
+            dsc[4 * kb + e] = RMS ? bmul2(d4[e], pack_bf16(x[k], x[k + 1])) : sig_bwd2(bmul2(d4[e], pack_bf16(x[k], x[k + 1])), g4[e]);
             const uint32_t dn = bmul2(d4[e], g4[e]);
             dxn[k] = bf16lo(dn); dxn[k + 1] = bf16hi(dn);
             s1 += dxn[k] + dxn[k + 1];
@@ -445,7 +448,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         }
         s1 += __shfl_xor_sync(~0u, s1, 1); s1 += __shfl_xor_sync(~0u, s1, 2); s1 += __shfl_xor_sync(~0u, s1, 4);
         s2 += __shfl_xor_sync(~0u, s2, 1); s2 += __shfl_xor_sync(~0u, s2, 2); s2 += __shfl_xor_sync(~0u, s2, 4);
-        const float m1 = s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
+        const float m1 = RMS ? 0.f : s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
           const uint4 dau = lds128(st + O_DA + kb * KB + aoff);

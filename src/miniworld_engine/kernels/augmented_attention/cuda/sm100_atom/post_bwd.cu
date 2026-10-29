@@ -149,6 +149,9 @@ using namespace s100;
 #ifndef NSW
 #define NSW 2                              // input stages per warpgroup
 #endif
+#ifndef RMS
+#define RMS 0                              // ESMFold2: AdaLN 2 an RMSNorm with a raw (1 + s) scale, the attention's output gate so raw
+#endif
 constexpr int R = 16;
 constexpr int KB = R * 128;                                                // [16 rows][64] bf16, SW128 (2 KB)
 constexpr int T_ = 2 * KB;                                                 // [16][128] row-major tile (4 KB)
@@ -353,7 +356,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
 #pragma unroll
         for (int e = 0; e < 16; ++e) sum += x[e];
         sum += __shfl_xor_sync(~0u, sum, 1); sum += __shfl_xor_sync(~0u, sum, 2); sum += __shfl_xor_sync(~0u, sum, 4);
-        const float mean = sum * (1.f / 128.f);
+        const float mean = RMS ? 0.f : sum * (1.f / 128.f);              // RMS: no centring (and no m1 term below)
         float var = 0.f;
 #pragma unroll
         for (int e = 0; e < 16; ++e) { x[e] -= mean; var += x[e] * x[e]; }
@@ -370,7 +373,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
             const int k = 8 * kb + 2 * e;
             x[k] *= rstd; x[k + 1] *= rstd;
             const uint32_t xn = pack_bf16(x[k], x[k + 1]);
-            dsc[4 * kb + e] = sig_bwd2(bmul2(d4[e], xn), g4[e]);
+            dsc[4 * kb + e] = RMS ? bmul2(d4[e], xn) : sig_bwd2(bmul2(d4[e], xn), g4[e]);
             const uint32_t dn = bmul2(d4[e], g4[e]);
             dxn[k] = bf16lo(dn); dxn[k + 1] = bf16hi(dn);
             s1 += dxn[k] + dxn[k + 1];
@@ -379,7 +382,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
         }
         s1 += __shfl_xor_sync(~0u, s1, 1); s1 += __shfl_xor_sync(~0u, s1, 2); s1 += __shfl_xor_sync(~0u, s1, 4);
         s2 += __shfl_xor_sync(~0u, s2, 1); s2 += __shfl_xor_sync(~0u, s2, 2); s2 += __shfl_xor_sync(~0u, s2, 4);
-        const float m1 = s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
+        const float m1 = RMS ? 0.f : s1 * (1.f / 128.f), m2 = s2 * (1.f / 128.f);
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
           const uint4 dy = lds128(st + O_DY + kb * KB + aoff), so = lds128(st + O_SO + kb * KB + aoff), u = lds128(st + O_U + kb * KB + aoff);
@@ -390,7 +393,7 @@ atom_post_bwd_sm100(const __grid_constant__ CUtensorMap mdab, const __grid_const
             const int k = 8 * kb + 2 * e;
             const uint32_t dl = pack_bf16(rstd * (dxn[k] - m1 - x[k] * m2), rstd * (dxn[k + 1] - m1 - x[k + 1] * m2));
             da[e] = badd2(y4[e], dl);
-            dos[e] = sig_bwd2(bmul2(da[e], u4[e]), o4[e]);
+            dos[e] = RMS ? bmul2(da[e], u4[e]) : sig_bwd2(bmul2(da[e], u4[e]), o4[e]);
             du[e] = bmul2(da[e], o4[e]);
             bs2[k] += bf16lo(dsc[4 * kb + e]); bs2[k + 1] += bf16hi(dsc[4 * kb + e]);
             bso[k] += bf16lo(dos[e]); bso[k + 1] += bf16hi(dos[e]);

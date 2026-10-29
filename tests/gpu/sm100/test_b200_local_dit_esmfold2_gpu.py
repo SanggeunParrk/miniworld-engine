@@ -1,6 +1,6 @@
-"""ESMFold2's atom block (``LocalDiTBlock(**ESMFOLD2)``) on the B200 kernels (``integrations.local_dit``, bf16 inference) against the fp64
-PyTorch module: the RMS / SiLU row kernels (``-DRMS=1``), the q / k RMSNorm + rotary and position-indexed pair bias of ``lesm.cu`` and the
-160-position rank-window attention of ``lattn_esm.cu``."""
+"""ESMFold2's atom block (``LocalDiTBlock(**ESMFOLD2)``) on the B200 kernels (``integrations.local_dit``, bf16 inference and training)
+against the fp64 PyTorch module: the RMS / SiLU row kernels (``-DRMS=1``), the q / k RMSNorm + rotary and position-indexed pair bias of
+``lesm.cu``, the 160-position rank-window attention of ``lattn_esm.cu`` and its backward (``lattn_esm_dq.cu``, ``lattn_esm_dkv.cu``)."""
 
 import pytest
 import torch
@@ -94,15 +94,131 @@ def test_bitwise_deterministic():
             assert torch.equal(blk(*ins, mask, rope=rope), first)
 
 
-def test_a_gradient_fp32_or_a_missing_rope_is_not_served():
+def test_fp32_activations_or_a_missing_rope_are_not_served():
     blk = _block(ImplementationType.MINIWORLD).cuda().bfloat16()
     s, c, z, mask, rope = _inputs(1, 256, 200)
     ins = (s.bfloat16(), c.bfloat16(), z.bfloat16())
-    assert not local_dit.serves(blk, *ins, mask, rope)            # the parameters record a gradient
+    assert local_dit.serves(blk, *ins, mask, rope)                # training (the parameters record a gradient): _EsmBlock
     with torch.no_grad():
         assert local_dit.serves(blk, *ins, mask, rope)
         assert not local_dit.serves(blk, *ins, mask, None)
         assert not local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 activations: the module path
+
+
+# ------------------------------------------------------------------------------------------------ training (bf16)
+def _train(m, ins, w, mask, rope, *, autocast=False, shared=False, dtype=torch.bfloat16):
+    """Forward + backward of a weighted sum of the output; -> the output and every gradient. ``shared``: the conditioning is one [1, 1, N, d]
+    leaf expanded over the samples (FoldForge's call), its gradient the samples' sum."""
+    leaves = [t.detach().clone().to(dtype).requires_grad_() for t in ins]
+    if shared:
+        leaves[1] = ins[1][:1].detach().clone().to(dtype).requires_grad_()
+    args = list(leaves)
+    if shared:
+        args[1] = leaves[1].expand(ins[0].shape[0], *leaves[1].shape[1:])
+    with torch.autocast("cuda", dtype=torch.bfloat16, enabled=autocast):
+        out = m(*args, mask, rope=rope)
+    (out.double() * w).sum().backward()
+    res = {"out": out.detach(), "dsingle": leaves[0].grad, "dcond": leaves[1].grad, "dpair": leaves[2].grad}
+    res.update({n: p.grad.clone() for n, p in m.named_parameters()})
+    m.zero_grad(set_to_none=True)
+    return res
+
+
+TRAIN_CASES = [(2, 512, 400), (3, 300, 300), (1, 384, 150), (2, 640, 193), (5, 1024, 1000), (1, 256, 256), (2, 1024, 1024)]
+
+
+@pytest.mark.parametrize(("a", "n", "real"), TRAIN_CASES)
+@pytest.mark.parametrize("params", ["fp32-autocast", "bf16"])
+def test_training_matches_the_pytorch_module(a, n, real, params, monkeypatch):
+    """Every gradient (and the output) against the fp64 module, no worse than the module path's own bf16 run, give or take. The loss reads
+    the real atoms only."""
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    ref = _block(ImplementationType.PYTORCH).cuda().double()
+    ref.load_state_dict(blk.state_dict())
+    autocast = params == "fp32-autocast"
+    if not autocast:
+        blk = blk.bfloat16()
+    s, c, z, mask, rope = _inputs(a, n, real, seed=5)
+    ins = (s, c, z)
+    w = torch.randn(a, 1, n, 128, device="cuda", dtype=torch.float64)
+    w[:, :, real:] = 0
+    shared = a > 1 and n % 2 == 0
+    truth = _train(ref, ins, w, mask, tuple(t.double() for t in rope), dtype=torch.float64, shared=shared)
+    calls = []
+    orig = local_dit._EsmBlock.apply
+    monkeypatch.setattr(local_dit._EsmBlock, "apply", lambda *x: calls.append("train") or orig(*x))
+    fused = _train(blk, ins, w, mask, rope, autocast=autocast, shared=shared)
+    assert calls == ["train"], calls
+    override_setting(monkeypatch, "local_dit_sm100", "0")
+    module = _train(blk, ins, w, mask, rope, autocast=autocast, shared=shared)
+    assert set(fused) == set(truth)
+    for k in truth:
+        f, t, m = fused[k], truth[k], module[k]
+        if k == "out":
+            f, t, m = f[:, :, :real], t[:, :, :real], m[:, :, :real]
+        assert f.dtype == m.dtype and f.shape == m.shape, k
+        assert torch.isfinite(f).all(), k
+        ef, em = _rel(f, t), _rel(m, t)
+        assert ef < 1.5 * em + 3e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+def test_training_is_deterministic():
+    """Every gradient but the query bias's (its column sum uses atomics, as in the AF3 block) is bitwise repeatable."""
+    blk = _block(ImplementationType.MINIWORLD).cuda().bfloat16()
+    s, c, z, mask, rope = _inputs(4, 1024, 1000, seed=11)
+    w = torch.randn(4, 1, 1024, 128, device="cuda", dtype=torch.float64)
+    first = _train(blk, (s, c, z), w, mask, rope, shared=True)
+    for _ in range(2):
+        again = _train(blk, (s, c, z), w, mask, rope, shared=True)
+        for k in first:
+            if k != "attention.to_query.bias":
+                assert torch.equal(first[k], again[k]), k
+
+
+def test_training_step_in_a_cuda_graph():
+    """A whole training step (forward and backward) captured in a CUDA graph and replayed with new inputs and another mask matches eager."""
+    blk = _block(ImplementationType.MINIWORLD).cuda().bfloat16()
+    s, c, z, mask, rope = _inputs(2, 512, 512, seed=12)
+    s2, c2, z2, _, rope2 = _inputs(2, 512, 512, seed=13)
+    w = torch.randn(2, 1, 512, 128, device="cuda", dtype=torch.bfloat16)
+    st = [t.bfloat16().clone().requires_grad_(i != 3) if t.is_floating_point() else t.clone()
+          for i, t in enumerate((s, c, z, mask))]
+    cs = [t.clone() for t in rope]
+
+    def step():
+        out = blk(st[0], st[1], st[2], st[3], rope=(cs[0], cs[1]))
+        (out * w).float().sum().backward()
+        return out
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        for _ in range(2):
+            step()
+    torch.cuda.current_stream().wait_stream(side)
+    for t in (*st[:3], *blk.parameters()):
+        t.grad = None
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        out = step()
+    m2 = torch.zeros_like(mask)
+    m2[:, :400] = True
+    with torch.no_grad():
+        for t, new in zip((*st, *cs), (s2.bfloat16(), c2.bfloat16(), z2.bfloat16(), m2, *rope2), strict=True):
+            t.copy_(new)
+    graph.replay()
+    torch.cuda.synchronize()
+    got = {"out": out.detach().clone(), "ds": st[0].grad.clone(), "dz": st[2].grad.clone(),
+           **{n: p.grad.clone() for n, p in blk.named_parameters()}}
+    for t in (*st[:3], *blk.parameters()):
+        t.grad = None
+    eager = step()
+    ref = {"out": eager.detach(), "ds": st[0].grad, "dz": st[2].grad, **{n: p.grad for n, p in blk.named_parameters()}}
+    for k in ref:
+        if k == "attention.to_query.bias":
+            torch.testing.assert_close(got[k], ref[k], rtol=1e-2, atol=1e-2)
+        else:
+            assert torch.equal(got[k], ref[k]), k
 
 
 @pytest.mark.parametrize("real", [512, 400, 150])
