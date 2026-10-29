@@ -14,6 +14,9 @@ and shared memory does:
     512   LN -> expand + SwiGLU (saves h, a, b) -> squeeze  gate (dh GEMM + SwiGLU bwd from the saved a, b) -> fp32 dW GEMMs ->
                                                            d_xn GEMM -> LN bwd
     768   (n = 2) as 512, the squeeze / d_xn GEMMs run as two 384-column halves (the accumulator would need 768 TMEM columns)
+    384   at most 16 row tiles (a single-stream [B, L, 384] activation; round sx, ``SMALL_FWD_TILES``): LayerNorm -> expand + SwiGLU ->
+          squeeze as three programmatic dependent launches sized for a few tiles on all SMs; backward gate -> d_xn + LayerNorm
+          backward (one 6-CTA cluster per tile) -> fp32 dW GEMMs
 
 All kernels are tcgen05 / TMA / 2-CTA-cluster kernels except the LayerNorm ones; the weight gradients are cuBLAS GEMMs with an
 fp32 output. At D >= 384 the forward keeps a and b (bf16) for the backward instead of recomputing them in fp32: ~2 x M x nD bf16
@@ -79,34 +82,59 @@ def _small(tiles: int) -> bool:
     return tiles <= (settings.current().transition_wide_small_tiles or SMALL_TILES)
 
 
-#: D = 384 forward at small M: one kernel per tile cluster, LayerNorm + expand + SwiGLU + squeeze + residual with the hidden
-#: dimension split over the cluster's CL CTAs and the partial accumulators summed through an fp32 L2 scratch
-#: (sm100/widths/tsmall_w.cu, round n2). CL is the largest of SMALL_CLS whose clusters are all resident at once (the driver's
-#: cuOccupancyMaxActiveClusters: 12-CTA clusters do not pack a 148-SM B200 twelve to a wave), up to SMALL_FWD_TILES tiles (the
-#: measured break-even with the per-tile forward: 16 tiles; at 24 the per-tile forward is 1.6x faster).
-#: settings.transition_wide_small_fwd_tiles overrides it (0: off).
+#: D = 384 at small M: up to SMALL_FWD_TILES tiles both directions take the round-sx kernels below (settings.
+#: transition_wide_small_fwd_tiles overrides the bound for A/B runs).
 SMALL_FWD_TILES = 16
-SMALL_CLS = (12, 6, 4, 2)
 
 
-@functools.lru_cache(maxsize=64)
-def _resident_clusters(d: int, n: int, cl: int, index: int) -> int:
-    return int(
-        _load(d, n).max_active_clusters(
-            f"d{d}n{n}_small{cl}", "transition_small_w_sm100", 512, cl
-        )
-    )
+#: D = 384 at small M (at most SMALL_FWD_TILES tiles; a single-stream [B, L, 384] activation): chains of programmatic dependent
+#: launches sized for a few row tiles on all 148 SMs (sm100/widths/tsx_*.cu, round sx). Forward: LayerNorm (one warp per row) ->
+#: expand + SwiGLU over (tile, CH-unit hidden chunk) CTAs -> squeeze + residual over (tile, column block, hidden split) clusters.
+#: Backward: gate over (tile, 64-unit chunk) CTAs -> d_xn + LayerNorm backward + dgamma / dbeta over one 6-CTA cluster per tile ->
+#: the weight gradients (cuBLAS, fp32 out). Ws and Wa / Wb are read in their own layouts (MN-major operands): no transposed or
+#: concatenated weight copies per call.
+SX_CH = (32, 64)
+#: squeeze builds: (output columns per cluster, hidden split = cluster size)
+SX_SQ = ((32, 1), (64, 1), (32, 2), (64, 2))
 
 
-def _small_cl(d: int, n: int, tiles: int, index: int) -> int:
-    """Cluster size of the small-M forward for this call, 0 when the per-tile path runs."""
-    if d != 384 or tiles > (
-        settings.current().transition_wide_small_fwd_tiles or SMALL_FWD_TILES
-    ):
-        return 0
-    return next(
-        (c for c in SMALL_CLS if tiles <= _resident_clusters(d, n, c, index)), 0
-    )
+def _sx(d: int, tiles: int) -> bool:
+    return d == 384 and tiles <= (settings.current().transition_wide_small_fwd_tiles or SMALL_FWD_TILES)
+
+
+def _sx_ch(h: int, tiles: int, nsm: int) -> int:
+    """Hidden units per expand CTA: the narrowest chunk whose CTAs fit one wave."""
+    return next((c for c in SX_CH if tiles * (h // c) <= nsm), SX_CH[-1])
+
+
+#: (columns, split) of the squeeze, None: automatic (kept for A/B runs)
+SX_SQ_FORCE = None
+
+
+def _sx_sq(d: int, tiles: int, h: int, nsm: int) -> tuple[int, int]:
+    """Squeeze decomposition (output columns per cluster, hidden split = cluster size). The per-SM TMA intake of the h tile bounds this
+    kernel, so the h rows are split over a CTA pair whose fp32 partials meet in distributed shared memory while the pairs fit one wave
+    (2-CTA clusters pack 74 to a wave on a 148-SM B200), and 32-column blocks keep every SM busy; round sx, measured at
+    [1, 768 / 384, 384] (n = 2: 4.1 vs 4.5 us unsplit; n = 4: 5.8 vs 7.4)."""
+    if SX_SQ_FORCE is not None:
+        return SX_SQ_FORCE
+    if tiles * (d // 32) * 2 <= nsm:
+        return 32, 2
+    if tiles * (d // 64) * 2 <= nsm:
+        return (64, 2) if h >= 4 * d else (32, 1)
+    return 64, 1
+
+
+_SX_COUNTERS: dict = {}
+
+
+def _sx_counter(device: torch.device) -> torch.Tensor:
+    """The d_xn kernel's per-column-block arrival counters (zero between launches: the last CTA resets its own), per device and stream."""
+    key = (device.index, torch.cuda.current_stream(device).cuda_stream)
+    t = _SX_COUNTERS.get(key)
+    if t is None:
+        t = _SX_COUNTERS[key] = torch.zeros(16, dtype=torch.int32, device=device)
+    return t
 
 
 def _dn(x: torch.Tensor, wa: torch.Tensor) -> tuple[int, int]:
@@ -158,28 +186,27 @@ def _specs(d: int, n: int) -> tuple[tuple[str, str, tuple[str, ...]], ...]:
             ("squeeze", "widths/tgemm_nd.cu", (f"-DDIM={nd}", f"-DKDIM={h}")),
         )
     )
+    sx = (
+        (
+            ("sx_ln", "widths/tsx_ln.cu", (f"-DDIM={d}",)),
+            *((f"sx_expand{c}", "widths/tsx_expand.cu", (*dim, f"-DCH={c}")) for c in SX_CH),
+            *(
+                (f"sx_sq{nb}_{k}", "widths/tsx_squeeze.cu", (*dim, f"-DNBW={nb}", f"-DSK={k}"))
+                for nb, k in SX_SQ
+            ),
+            ("sx_gate", "widths/tsx_gate.cu", dim),
+            ("sx_dxn", "widths/tsx_dxn.cu", dim),
+        )
+        if d == 384
+        else ()
+    )
     return (
         *fwd,
+        *sx,
         ("gate", "widths/tgate_ab.cu", (*dim, "-DNO_H")),
         ("gate_is", "widths/tgate_ab.cu", (*dim, "-DNO_H", "-DITEM_SCHED")),
         dxn,
         lnb,
-        *(
-            (
-                spec
-                for c in SMALL_CLS
-                for spec in (
-                    (f"small{c}", "widths/tsmall_w.cu", (*dim, f"-DCL={c}")),
-                    (
-                        f"small{c}_ab",
-                        "widths/tsmall_w.cu",
-                        (*dim, f"-DCL={c}", "-DSAVE_AB"),
-                    ),
-                )
-            )
-            if d == 384
-            else ()
-        ),
     )
 
 
@@ -269,9 +296,9 @@ class _Launch:
     def tmap(self, t, inner, outer, box_inner=64, box_outer=64, row_stride=-1):
         return self.ext.tmap(t, inner, outer, box_inner, box_outer, row_stride)
 
-    def run(self, cubin, kernel, grid, args, block=512, cluster=2):
+    def run(self, cubin, kernel, grid, args, block=512, cluster=2, pdl=False):
         self.ext.launch_kernel(
-            f"d{self.d}n{self.n}_{cubin}", kernel, grid, block, cluster, list(args)
+            f"d{self.d}n{self.n}_{cubin}", kernel, grid, block, cluster, list(args), pdl
         )
 
     def rows(self, t):  # [M, D] activation map
@@ -371,41 +398,52 @@ def _fwd_launch(
             ),
         )
         return out, xn, rstd, c1, ph(), ph(), ph()
-    cl = _small_cl(d, k.n, tiles, x.device.index)
-    if cl:
-        xn = torch.empty_like(x) if save else x.new_empty((1, d))
-        hid, a, b = (
+    if _sx(d, tiles):  # three programmatic-dependent kernels sized for a few tiles (round sx: tsx_ln, tsx_expand, tsx_squeeze)
+        xn = torch.empty_like(x)  # the expand's A operand, kept for the backward with save
+        hid = torch.empty((m, h), dtype=x.dtype, device=x.device)
+        a, b = (
             (torch.empty((m, h), dtype=x.dtype, device=x.device) if save else ph())
-            for _ in range(3)
+            for _ in range(2)
         )
-        part = torch.empty((tiles * cl * 128, d), dtype=torch.float32, device=x.device)
-        mx = k.tmap(x, d, m, 64, 128)
         k.run(
-            f"small{cl}_ab" if save else f"small{cl}",
-            "transition_small_w_sm100",
-            tiles * cl,
+            "sx_ln",
+            "transition_sx_ln",
+            (m + 7) // 8,
+            (x, gamma, beta, xn, rstd, c1, m, float(eps), int(save)),
+            block=256,
+            cluster=1,
+            pdl=True,
+        )
+        ch = _sx_ch(h, tiles, k.nsm)
+        k.run(
+            f"sx_expand{ch}",
+            "transition_sx_expand",
+            tiles * (h // ch),
             (
-                mx,
-                k.tmap(wa, d, h),
-                k.tmap(wb, d, h),
-                k.tmap(ws, h, d),
-                k.tmap(xn, d, m, 64, 128) if save else mx,
-                k.tmap(part, d, tiles * cl * 128, 32, 128),
-                x,
-                out,
-                gamma,
-                beta,
-                rstd,
-                c1,
+                k.tmap(xn, d, m, 64, 128),
+                k.tmap(wa, d, h, 64, ch),
+                k.tmap(wb, d, h, 64, ch),
                 hid,
                 a,
                 b,
-                float(eps),
                 int(save),
             ),
-            block=512,
-            cluster=cl,
+            block=384,
+            cluster=1,
+            pdl=True,
         )
+        nb, sk = _sx_sq(d, tiles, h, k.nsm)
+        k.run(
+            f"sx_sq{nb}_{sk}",
+            "transition_sx_squeeze",
+            tiles * (d // nb) * sk,
+            (k.tmap(hid, h, m, 64, 128), k.tmap(ws, h, d, 64, nb), x, out),
+            block=256,
+            cluster=sk,
+            pdl=True,
+        )
+        if not save:
+            return out, x.new_empty((1, d)), rstd, c1, ph(), ph(), ph()
         return out, xn, rstd, c1, hid, a, b
     if d == 384:  # one fused kernel (round n2, tfwd_d384.cu)
         xn = torch.empty_like(x) if save else x.new_empty((1, d))
@@ -691,6 +729,96 @@ def _bwd_launch(
     )  # outputs of a custom op must not alias each other
 
 
+def _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b):
+    """Output structure only: (dx, dgamma | dbeta [2 D], dWa | dWb [2 H, D], dWs [D, H]); fp32 gradients but dx."""
+    f32 = dict(dtype=torch.float32, device=x.device)
+    return (
+        torch.empty_like(x),
+        torch.empty((2 * x.shape[1],), **f32),
+        torch.empty((2 * wa.shape[0], wa.shape[1]), **f32),
+        torch.empty(ws.shape, **f32),
+    )
+
+
+@opaque(fake=_bwd_sx_fake, name="transition_wide_bwd_sx_sm100a")
+def _bwd_sx_launch(
+    dy: torch.Tensor,
+    x: torch.Tensor,
+    xn: torch.Tensor,
+    rstd: torch.Tensor,
+    c1: torch.Tensor,
+    gamma: torch.Tensor,
+    wa: torch.Tensor,
+    wb: torch.Tensor,
+    ws: torch.Tensor,
+    hid: torch.Tensor,
+    a: torch.Tensor,
+    b: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The small-M backward at D = 384 (round sx): gate (tsx_gate.cu) -> d_xn + LayerNorm backward + dgamma / dbeta (tsx_dxn.cu, a
+    programmatic dependent launch) -> the weight gradients as two cuBLAS GEMMs with fp32 outputs. Returns (dx, dgamma | dbeta,
+    dWa | dWb, dWs); the caller splits the packed ones (outputs of a custom op must not alias each other)."""
+    if _is_fake(dy, x):
+        return _bwd_sx_fake(dy, x, xn, rstd, c1, gamma, wa, wb, ws, hid, a, b)
+    k = _Launch(x, wa.shape[0])
+    d, h, m, tiles = k.d, k.h, k.m, k.tiles
+    f32 = dict(dtype=torch.float32, device=x.device)
+    dx = torch.empty_like(x)
+    dab = torch.empty((m, 2 * h), dtype=x.dtype, device=x.device)
+    k.run(
+        "sx_gate",
+        "transition_sx_gate",
+        tiles * (h // 64),
+        (k.tmap(dy, d, m, 64, 128), k.tmap(ws, h, d), a, b, dab),
+        block=384,
+        cluster=1,
+        pdl=True,
+    )
+    part = torch.empty((tiles, 2 * d), **f32)
+    dgb = torch.empty((2 * d,), **f32)
+    k.run(
+        "sx_dxn",
+        "transition_sx_dxn",
+        tiles * (d // 64),
+        (
+            k.tmap(dab, 2 * h, m, 64, 128),
+            k.tmap(wa, d, h),
+            k.tmap(wb, d, h),
+            x,
+            dy,
+            rstd,
+            c1,
+            gamma,
+            dx,
+            part,
+            dgb,
+            _sx_counter(x.device),
+            tiles,
+        ),
+        block=384,
+        cluster=d // 64,
+        pdl=True,
+    )
+    dwab = _mm_f32(dab.t(), xn)  # [2H, D]: dWa then dWb
+    dws = _mm_f32(dy.t(), hid)  # [D, H]
+    return dx, dgb, dwab, dws
+
+
+def _bf16_forms(wa, wb, ws, dtype):
+    """The kernels' bf16 copies of the matrices: one launch for all three (``_cast_cuda``, bit-identical to ``.to``) where it can run,
+    else ``.to``; a bf16 contiguous parameter is used as it is."""
+    if (
+        dtype is torch.bfloat16
+        and not torch.compiler.is_compiling()
+        and not _is_fake(wa, wb, ws)
+        and all(w.is_contiguous() for w in (wa, wb, ws))
+    ):
+        from miniworld_engine.kernels import _cast_cuda
+
+        return tuple(_cast_cuda.cast((wa, wb, ws), [dtype] * 3))
+    return tuple(w.to(dtype).contiguous() for w in (wa, wb, ws))
+
+
 class _WideTransitionSM100A(torch.autograd.Function):
     """``y = transition(x) + x`` for (D, n) in ``SHAPES``; the forward saves xn and the LayerNorm statistics (and h, a, b at
     D >= 384). The parameters keep their dtype (bf16, or an fp32 master): the kernels get bf16 casts made here, outside autograd,
@@ -702,7 +830,7 @@ class _WideTransitionSM100A(torch.autograd.Function):
         ctx.param_dtypes = (gamma.dtype, beta.dtype, wa.dtype, wb.dtype, ws.dtype)
         flat = x.reshape(-1, shape[-1]).contiguous()
         gf, bf = gamma.float().contiguous(), beta.float().contiguous()
-        wa, wb, ws = (w.to(x.dtype).contiguous() for w in (wa, wb, ws))
+        wa, wb, ws = _bf16_forms(wa, wb, ws, x.dtype)
         out, xn, rstd, c1, hid, a, b = _fwd_launch(
             flat, gf, bf, wa, wb, ws, float(eps), True
         )
@@ -714,6 +842,20 @@ class _WideTransitionSM100A(torch.autograd.Function):
     def backward(ctx, dy):
         flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b = ctx.saved_tensors
         gdt, bdt, adt, bwdt, sdt = ctx.param_dtypes
+        d, h = flat.shape[1], wa.shape[0]
+        if _sx(d, flat.shape[0] // ROWS):
+            dx, dgb, dwab, dws = _bwd_sx_launch(
+                dy.reshape(-1, d).contiguous(), flat, xn, rstd, c1, gf, wa, wb, ws, hid, a, b
+            )
+            return (
+                dx.reshape(ctx.shape),
+                dgb[:d].to(gdt),
+                dgb[d:].to(bdt),
+                dwab[:h].to(adt),
+                dwab[h:].to(bwdt),
+                dws.to(sdt),
+                None,
+            )
         dx, dgam, dbeta, dwa, dwb, dws = _bwd_launch(
             dy.reshape(-1, dy.shape[-1]).contiguous(),
             flat,
@@ -755,7 +897,7 @@ def transition_wide_sm100a(x, gamma, beta, wa, wb, ws, eps):
             lambda: (
                 gamma.float().contiguous(),
                 beta.float().contiguous(),
-                tuple(w.to(x.dtype).contiguous() for w in (wa, wb, ws)),
+                _bf16_forms(wa, wb, ws, x.dtype),
             ),
         )
         out, *_ = _fwd_launch(
