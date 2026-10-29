@@ -13,6 +13,7 @@ import functools
 from pathlib import Path
 
 import torch
+from torch.multiprocessing.reductions import StorageWeakRef
 
 _dir = Path(__file__).parent
 STAT_W = (
@@ -124,6 +125,18 @@ def _tf32_wab(wab, ht=128):
     )[0]
 
 
+def _pair_bias_wide(z2d, wf, mask, L):
+    """``apb.pair_bias`` for a pair wider than its 128-wide ring at the token DiT's 12 / 16 / 24 heads (256: Protenix-v2's diffusion
+    pair): the CUDA LayerNorm rows, one cuBLAS GEMM, the masked keys at -1e30. Built once per trajectory (the hoisted bias), so the
+    two passes and the mask fill cost nothing a solver step."""
+    zh = torch.empty_like(z2d)
+    layernorm_rows(z2d, zh)
+    bias = torch.mm(wf, zh.t()).view(wf.shape[0], L, L)
+    if mask is not None:
+        bias.masked_fill_(~mask.reshape(1, 1, L), -1e30)
+    return bias
+
+
 def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=None):
     """Hopper port of the B200 token block's fusion and saved-buffer boundaries.
 
@@ -149,12 +162,13 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         or (heads, D) not in ((16, 768), (24, 768), (12, 768), (16, 1024))
         or L % 128
         or cond.shape[-1] != 384
-        or tuple(pair.shape) != (B, L, L, 128)
+        or tuple(pair.shape[:3]) != (B, L, L)
+        or pair.shape[3] not in (128, 256)   # 256: Protenix-v2's diffusion pair
         or not pair.is_contiguous()
         or torch.cuda.get_device_capability(single.device) != (9, 0)
     ):
         raise ValueError(
-            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / 128"
+            "Hopper token CUDA candidate requires inference BF16/FP32 bucketed 768 (12 / 16 / 24 heads) or 1024 (16 heads) / 384 / pair 128 or 256"
         )
     if extra is not None and tuple(extra.shape) != (L, L):
         raise ValueError("Hopper token extra pair bias requires an [L, L] bias")
@@ -219,7 +233,16 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
     # AttentionPairBias has a separate zero-probability reference contract.
     def make_bias():
         if fp32:
-            if _FUSED_PAIR_BIAS_F32 and heads in (12, 16, 24) and pair.is_contiguous() and wf.is_contiguous():
+            dp = pair.shape[-1]
+            if dp == 256 and heads == 16:
+                # the 256-wide pair (Protenix-v2's diffusion pair), 16 heads: the same one pass, built per width for the augmented
+                # attention's TF32 path (``augmented_attention/cuda/pair_rows.cu`` bias32_k: LN + the projections + the key
+                # permutation + the mask, Wf in shared memory)
+                from miniworld_engine.kernels.augmented_attention.cuda.fused_pair import _rows_ext
+
+                bias = single.new_empty((heads, L, L))
+                _rows_ext().pair_bias_rows32(pair.view(L * L, dp), wf, bias, mask, int(L), 1e-5, -1e30)
+            elif dp == 128 and _FUSED_PAIR_BIAS_F32 and heads in (12, 16, 24) and pair.is_contiguous() and wf.is_contiguous():
                 # LayerNorm + the projections + the key permutation + the mask in ONE pass over the pair (the LN, a cuBLAS GEMM and
                 # the mask fill read / wrote it three times: 302 MB each at fp32); masked keys take the same -1e30 as token_mask90
                 from miniworld_engine.kernels.bias_only_dit.cuda.tf32 import rows32
@@ -227,8 +250,9 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 bias = single.new_empty((heads, L, L))
                 rows32().pair_bias_tok_cuda(pair.view(L * L, 128), wf, bias, mask, int(L), 1e-5, True, -1e30)
             else:
-                zh = single.new_empty((L * L, 128))
-                _ext().layernorm128_rows(pair.view(L * L, 128), zh, 1e-5, True)
+                # LayerNorm rows written in the TF32 core's key order, one cuBLAS GEMM, the mask (128 or 256 channels)
+                zh = single.new_empty((L * L, dp))
+                _ext().layernorm128_rows(pair.view(L * L, dp), zh, 1e-5, True)
                 bias = torch.mm(wf, zh.t()).view(heads, L, L)
                 if mask is not None:
                     _ext().token_mask90(bias, mask)
@@ -236,16 +260,23 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
                 # the TF32 core reads the keys in key_perm order: the extra term is laid out the same way (masked keys stay at -1e30)
                 bias += (extra.float() * 1.4426950408889634)[:, key_perm(L, single.device)]
         else:
+            dp = pair.shape[-1]
+            one = (lambda z: apb.pair_bias(z, wf, mask, L, 1e-5, -1e30)) if dp == 128 else (lambda z: _pair_bias_wide(z, wf, mask, L))
             if B == 1:
-                bias = apb.pair_bias(pair.view(L * L, 128), wf, mask, L, 1e-5, -1e30)
+                bias = one(pair.view(L * L, dp))
             else:
                 # one bias per trunk_seed (its own pair), laid out [H, B, L, L] for the grouped attention (NBG = B); built once per trajectory
-                bias = torch.stack([apb.pair_bias(pair[b].reshape(L * L, 128), wf, mask, L, 1e-5, -1e30) for b in range(B)], dim=1).contiguous()
+                bias = torch.stack([one(pair[b].reshape(L * L, dp)) for b in range(B)], dim=1).contiguous()
             if extra is not None:
                 # the bias is in the attention's base-2 domain (``wf`` carries log2 e); a masked key stays at -1e30
                 bias += extra.float() * 1.4426950408889634
-        # the entry keeps its key tensors alive: a freed address cannot alias another tensor
-        return bias, pair, mask, wf, extra
+        # the small key tensors stay referenced (a freed address cannot alias another tensor); the pair -- the input whose storage
+        # and bias are big -- only weakly, by its storage (the pair arrives as a fresh alias of the caller's storage at every call):
+        # a hit must read that very storage, and the entry goes with it. Holding the pair kept
+        # every past trajectory's biases (and, with the static captures pinning them, filled the store so the next trajectory's
+        # entries were evicted before its capture read them: the rebuild was recorded into every replay -- +41 % on a 512-token
+        # Protenix-v2 sampler from its second call).
+        return bias, StorageWeakRef(pair.untyped_storage()), mask, wf, extra
 
     # The pair bias depends on the pair, the key mask and the weights only: the same at every solver step. Served from the
     # per-input cache (``static_inputs()``: a replay re-runs no producing kernel, as the harness and a sampler declare);
@@ -265,6 +296,8 @@ def token_inference(single, cond, pair, mask, weights, qk, eq, ek, heads, extra=
         ),
         make_bias,
         limit=_capture.BLOCK_CACHE_LIMIT,
+        valid=lambda e: not e[1].expired() and e[1].cdata == StorageWeakRef(pair.untyped_storage()).cdata,
+        alive=lambda e: not e[1].expired(),
     )[0]
     shared = cond.shape[0] == 1 or cond.stride(0) == 0
     c = cond[0].reshape(-1, 384) if shared else cond.reshape(-1, 384)   # shared: the [B L] table of the trunk_seeds (rows are [A][B][L]: row % (B L))

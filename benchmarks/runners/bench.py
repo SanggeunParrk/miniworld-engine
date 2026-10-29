@@ -4783,9 +4783,9 @@ def bench_module_dit(conf, seq_len, implementation, fabric):
         ):
             reasons.append("use_qk_norm (the fused step's QK-norm pass is B200-only)")
         widths = (single.shape[-1], att.n_head, cond.shape[-1], pair.shape[-1])
-        if (widths[1], widths[0]) not in token_dit.LAYOUTS or widths[2:] != (384, 128):
+        if (widths[1], widths[0]) not in token_dit.LAYOUTS or widths[2] != 384 or widths[3] not in token_dit.PAIR_WIDTHS_H100:
             reasons.append(
-                f"widths d/heads/cond/pair={widths}, runner serves (heads, d) in {token_dit.LAYOUTS}, cond 384, pair 128"
+                f"widths d/heads/cond/pair={widths}, runner serves (heads, d) in {token_dit.LAYOUTS}, cond 384, pair 128 (H100: or 256)"
             )
         on_b200 = single.is_cuda and torch.cuda.get_device_capability(
             single.device

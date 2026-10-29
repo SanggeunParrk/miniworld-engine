@@ -9,7 +9,7 @@
 //   * the block input is read as it comes (bf16) and the fp32 residual x1 = x + sigmoid(g1) y is never stored: each kernel
 //     that needs it rebuilds it with one FMA (the same bits everywhere).
 //
-//   forward   pair_bias    bias [16, R] = LN(pair) Wf^T on mma.sync, (mean, rstd)                    (R = L^2 pair rows of 128)
+//   forward   pair_bias    bias [16, R] = LN(pair) Wf^T on mma.sync, (mean, rstd)             (R = L^2 pair rows of 128 or 256)
 //             cond_ln      c_hat = LN(c) bf16, (mean, rstd)                                          (d_cond = 384)
 //             adaln_a      xa = sigmoid(G[:, 0:D] + bs1) LN(x) + G[:, D:2D]                          (x = the input, D = 768)
 //             res_adaln_b  x1 = x + sigmoid(Gg[:, 0:D] + bg1) y;  xt = sigmoid(G[:, 2D:3D] + bs2) LN(x1) + G[:, 3D:4D]
@@ -375,19 +375,21 @@ __device__ __forceinline__ int fcol(int kk, int q, int s) { return 8 * (q + 4 * 
 __device__ __forceinline__ int bcol(int t, int n) { return 8 * (n / 2 + 4 * (t / 4)) + 2 * (t % 4) + n % 2; }
 
 // forward: 64 rows per warp item (four 16-row tiles), the bias staged per warp and stored as 128 bytes per head. NH heads (16 or
-// 24; 12 padded to 16 with zero weights) are NHP / 8 n-tiles of the product.
-template <int NH, typename OT = bf>                  // OT = float: the accumulators stored as they are (no BF16 rounding), straight from the registers
+// 24; 12 padded to 16 with zero weights) are NHP / 8 n-tiles of the product. CP: the pair width (128 or 256 channels: CP / 32
+// 16-byte chunks per lane and row, CP / 16 k-steps).
+template <int NH, typename OT = bf, int CP = 128>   // OT = float: the accumulators stored as they are (no BF16 rounding), straight from the registers
 __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict__ Z, const bf* __restrict__ WF, OT* __restrict__ BIAS,
     float2* __restrict__ PST, long R, float eps) {
-  constexpr int NHP = (NH + 7) / 8 * 8, NT = NHP / 8;
+  static_assert(CP == 128 || CP == 256, "pair width 128 or 256");
+  constexpr int NHP = (NH + 7) / 8 * 8, NT = NHP / 8, KS = CP / 16, NCH = CP / 32;
   __shared__ __align__(16) bf stg[WPB][NHP][64 + 8];
-  __shared__ uint2 bw[8][NT][32];                      // Wf^T fragments per k-step, n-tile (heads 8 t ..) and lane: (b0, b1)
+  __shared__ uint2 bw[KS][NT][32];                     // Wf^T fragments per k-step, n-tile (heads 8 t ..) and lane: (b0, b1)
   const int lane = threadIdx.x % 32, w = threadIdx.x / 32, g = lane / 4, q = lane % 4;
   const long wid = (long)blockIdx.x * WPB + w, nw = (long)gridDim.x * WPB;
-  for (int i = threadIdx.x; i < 8 * NT * 32; i += blockDim.x) {
+  for (int i = threadIdx.x; i < KS * NT * 32; i += blockDim.x) {
     const int l = i % 32, t = (i / 32) % NT, kk = i / (32 * NT);
     auto f = [&](int h) {
-      return 8 * t + l / 4 < NH ? *reinterpret_cast<const uint32_t*>(WF + (8 * t + l / 4) * 128 + fcol(kk, l % 4, 2 * h)) : 0u;
+      return 8 * t + l / 4 < NH ? *reinterpret_cast<const uint32_t*>(WF + (8 * t + l / 4) * CP + fcol(kk, l % 4, 2 * h)) : 0u;
     };
     bw[kk][t][l] = make_uint2(f(0), f(1));
   }
@@ -396,30 +398,30 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict_
 #pragma unroll 1
     for (int tt = 0; tt < 4; ++tt) {
       const long rb = r0 + tt * 16;
-      uint4 u[2][4];
+      uint4 u[2][NCH];
 #pragma unroll
       for (int hr = 0; hr < 2; ++hr)
 #pragma unroll
-        for (int m = 0; m < 4; ++m) u[hr][m] = *reinterpret_cast<const uint4*>(Z + (rb + g + 8 * hr) * 128 + 8 * (q + 4 * m));
+        for (int m = 0; m < NCH; ++m) u[hr][m] = *reinterpret_cast<const uint4*>(Z + (rb + g + 8 * hr) * CP + 8 * (q + 4 * m));
       float mean[2], rs[2];
 #pragma unroll
       for (int hr = 0; hr < 2; ++hr) {
         float v[8], s1 = 0.f, s2 = 0.f;
 #pragma unroll
-        for (int m = 0; m < 4; ++m) { unpack8(u[hr][m], v); for (int e = 0; e < 8; ++e) s1 += v[e]; }
+        for (int m = 0; m < NCH; ++m) { unpack8(u[hr][m], v); for (int e = 0; e < 8; ++e) s1 += v[e]; }
         s1 += __shfl_xor_sync(0xffffffffu, s1, 1); s1 += __shfl_xor_sync(0xffffffffu, s1, 2);
-        mean[hr] = s1 * (1.f / 128);
+        mean[hr] = s1 * (1.f / CP);
 #pragma unroll
-        for (int m = 0; m < 4; ++m) { unpack8(u[hr][m], v); for (int e = 0; e < 8; ++e) s2 += (v[e] - mean[hr]) * (v[e] - mean[hr]); }
+        for (int m = 0; m < NCH; ++m) { unpack8(u[hr][m], v); for (int e = 0; e < 8; ++e) s2 += (v[e] - mean[hr]) * (v[e] - mean[hr]); }
         s2 += __shfl_xor_sync(0xffffffffu, s2, 1); s2 += __shfl_xor_sync(0xffffffffu, s2, 2);
-        rs[hr] = rsqrtf(s2 * (1.f / 128) + eps);
+        rs[hr] = rsqrtf(s2 * (1.f / CP) + eps);
       }
       float acc[NT][4];
 #pragma unroll
       for (int t = 0; t < NT; ++t) acc[t][0] = acc[t][1] = acc[t][2] = acc[t][3] = 0.f;
       const float nmr[2] = {-mean[0] * rs[0], -mean[1] * rs[1]};  // LN = pair rstd - mean rstd: one FMA per element
 #pragma unroll
-      for (int kk = 0; kk < 8; ++kk) {
+      for (int kk = 0; kk < KS; ++kk) {
         float v0[8], v1[8];
         unpack8(u[0][kk / 2], v0); unpack8(u[1][kk / 2], v1);
         const int e = 4 * (kk % 2);
@@ -468,60 +470,74 @@ __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_k(const bf* __restrict_
 // n-tiles of 8, K = rows: no padding). dWf leaves as one [NH, 128] partial per block (every block writes its row; finalize sums).
 // The next item's pair rows and dbias stream into the other half of a double buffer (cp.async) while this one is worked on;
 // the pair rows sit in 16-byte chunks XOR-swizzled by row so the per-lane chunk reads and the ldmatrix rows are conflict-free.
-template <int NH> struct PB {
+// CP = 256 (the pair width): items of 64 rows, so an item is the same 32 KB; warp w takes rows 16 (w % 4) and channels
+// 128 (w / 4) .. + 127 in the two passes (the two warps of a row tile add their halves of the row sums through shared memory,
+// in a fixed order), and dWf columns 32 w .. 32 w + 31 over the item's 64 rows. Every warp runs the 128-channel work of CP = 128.
+template <int NH, int CP = 128> struct PB {
+  static_assert(CP == 128 || CP == 256, "pair width 128 or 256");
   static constexpr int NHP = NH <= 16 ? 16 : 24;       // dbias rows in shared memory: 12 heads padded to 16 with zeros
-  static constexpr int ZS = 128 * 256, DS = NHP * 136 * 2, BW = 8 * 32 * 16 + (NH > 16 ? 8 * 32 * 8 : 0);
-  static constexpr int SMEM = 2 * ZS + 2 * DS + BW;
+  static constexpr int RI = 128 * 128 / CP;            // pair rows per item
+  static constexpr int RT = RI / 16, CH = WPB / RT;    // 16-row tiles per item, channel parts per tile (warps sharing it)
+  static constexpr int NG = CP / 128;                  // 16-column groups per warp of the dWf product
+  static constexpr int DPI = RI + 8;                   // dbias tile pitch (elements)
+  static constexpr int ZS = RI * CP * 2, DS = NHP * DPI * 2, BW = (CP / 16) * 32 * 16 + (NH > 16 ? (CP / 16) * 32 * 8 : 0);
+  static constexpr int XS = CH > 1 ? CH * RI * 8 : 0;  // the row-sum halves (sum d LN, sum d LN (pair - mean)) per channel part
+  static constexpr int SMEM = 2 * ZS + 2 * DS + BW + XS;
 };
 
-template <int NH>
+template <int NH, int CP = 128>
 __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, const bf* __restrict__ Z,
     const float2* __restrict__ PST, const bf* __restrict__ WF, bf* __restrict__ DZ, float* __restrict__ DWF, long R) {
-  using C = PB<NH>;
+  using C = PB<NH, CP>;
   constexpr int NHP = C::NHP, NT = NHP / 8;           // head n-tiles of the dWf product
+  constexpr int RI = C::RI, RT = C::RT, CH = C::CH, NG = C::NG, DPI = C::DPI;
   static_assert(NH == 12 || NH == 16 || NH == 24, "12, 16 or 24 heads");
   extern __shared__ __align__(16) uint8_t smem[];
   // Wf fragments per lane: heads 0-15 for n-tiles 2 p, 2 p + 1 ({b0, b1, b0', b1'}); heads 16-23 (k8) for n-tiles 2 p, 2 p + 1
   uint4 (*bw)[32] = reinterpret_cast<uint4 (*)[32]>(smem + 2 * C::ZS + 2 * C::DS);
-  uint2 (*bw8)[32] = reinterpret_cast<uint2 (*)[32]>(smem + 2 * C::ZS + 2 * C::DS + 8 * 32 * 16);
+  uint2 (*bw8)[32] = reinterpret_cast<uint2 (*)[32]>(smem + 2 * C::ZS + 2 * C::DS + (CP / 16) * 32 * 16);
+  float2* xsum = reinterpret_cast<float2*>(smem + 2 * C::ZS + 2 * C::DS + C::BW);   // [CH][RI] (CH > 1)
   const uint32_t s_base = static_cast<uint32_t>(__cvta_generic_to_shared(smem));
   const int lane = threadIdx.x % 32, w = threadIdx.x / 32, g = lane / 4, q = lane % 4;
-  auto zs_off = [](int b, int row, int chunk) { return b * C::ZS + row * 256 + ((chunk ^ (row & 7)) * 16); };
+  const int part = w / RT, c16 = 16 * part;           // the warp's channel part: chunks c16 .., n-tiles c16 ..
+  auto zs_off = [](int b, int row, int chunk) { return b * C::ZS + row * (CP * 2) + ((chunk ^ (row & 7)) * 16); };
   auto prefetch = [&](long b0, int b) {               // the item's pair rows (8 chunks per thread) and dbias
-    for (int i = threadIdx.x; i < 128 * 16; i += blockDim.x) {
-      const int row = i / 16, c = i % 16;
-      cp_async16(s_base + zs_off(b, row, c), Z + (b0 + row) * 128 + 8 * c);
+    for (int i = threadIdx.x; i < RI * (CP / 8); i += blockDim.x) {
+      const int row = i / (CP / 8), c = i % (CP / 8);
+      cp_async16(s_base + zs_off(b, row, c), Z + (b0 + row) * CP + 8 * c);
     }
-    for (int i = threadIdx.x; i < NH * 16; i += blockDim.x) {
-      const int h = i / 16, c = i % 16;
-      cp_async16(s_base + 2 * C::ZS + b * C::DS + (h * 136 + 8 * c) * 2, DB + (long)h * R + b0 + 8 * c);
+    for (int i = threadIdx.x; i < NH * (RI / 8); i += blockDim.x) {
+      const int h = i / (RI / 8), c = i % (RI / 8);
+      cp_async16(s_base + 2 * C::ZS + b * C::DS + (h * DPI + 8 * c) * 2, DB + (long)h * R + b0 + 8 * c);
     }
   };
-  for (int i = threadIdx.x; i < 8 * 32; i += blockDim.x) {
+  for (int i = threadIdx.x; i < (CP / 16) * 32; i += blockDim.x) {
     const int l = i % 32, p = i / 32;
     auto f = [&](int t, int k) {                       // heads >= NH (12 padded to 16) weigh 0
       const int c = bcol(t, l / 4);
-      return k < NH ? pack2(WF[k * 128 + c], WF[(k + 1) * 128 + c]) : 0u;
+      return k < NH ? pack2(WF[k * CP + c], WF[(k + 1) * CP + c]) : 0u;
     };
     const int k = 2 * (l % 4);
     bw[p][l] = make_uint4(f(2 * p, k), f(2 * p, k + 8), f(2 * p + 1, k), f(2 * p + 1, k + 8));
     if (NH > 16) bw8[p][l] = make_uint2(f(2 * p, 16 + k), f(2 * p + 1, 16 + k));
   }
-  for (int i = threadIdx.x; i < 2 * (NHP - NH) * 136; i += blockDim.x) {   // the padding heads of both dbias buffers: zero
-    const int b = i / ((NHP - NH) * 136), k = i % ((NHP - NH) * 136);
-    reinterpret_cast<bf*>(smem + 2 * C::ZS + b * C::DS)[NH * 136 + k] = __float2bfloat16(0.f);
+  for (int i = threadIdx.x; i < 2 * (NHP - NH) * DPI; i += blockDim.x) {   // the padding heads of both dbias buffers: zero
+    const int b = i / ((NHP - NH) * DPI), k = i % ((NHP - NH) * DPI);
+    reinterpret_cast<bf*>(smem + 2 * C::ZS + b * C::DS)[NH * DPI + k] = __float2bfloat16(0.f);
   }
-  float dacc[NT][4];
+  float dacc[NG][NT][4];
 #pragma unroll
-  for (int t = 0; t < NT; ++t) dacc[t][0] = dacc[t][1] = dacc[t][2] = dacc[t][3] = 0.f;
-  const long step = (long)gridDim.x * 128;
-  if ((long)blockIdx.x * 128 < R) prefetch((long)blockIdx.x * 128, 0);
+  for (int c = 0; c < NG; ++c)
+#pragma unroll
+    for (int t = 0; t < NT; ++t) dacc[c][t][0] = dacc[c][t][1] = dacc[c][t][2] = dacc[c][t][3] = 0.f;
+  const long step = (long)gridDim.x * RI;
+  if ((long)blockIdx.x * RI < R) prefetch((long)blockIdx.x * RI, 0);
   cp_commit();
   int b = 0;
-  for (long b0 = (long)blockIdx.x * 128; b0 < R; b0 += step, b ^= 1) {
+  for (long b0 = (long)blockIdx.x * RI; b0 < R; b0 += step, b ^= 1) {
     if (b0 + step < R) prefetch(b0 + step, b ^ 1);
     cp_commit();
-    const int wr = 16 * w;
+    const int wr = 16 * (w % RT);
     const long rb = b0 + wr;
     const float2 st0 = PST[rb + g], st1 = PST[rb + g + 8];
     cp_wait<1>();                                  // this item's group (the next one may still be in flight)
@@ -531,17 +547,17 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
 #pragma unroll
     for (int hr = 0; hr < 2; ++hr)
 #pragma unroll
-      for (int m = 0; m < 4; ++m) u[hr][m] = *reinterpret_cast<const uint4*>(smem + zs_off(b, wr + g + 8 * hr, q + 4 * m));
+      for (int m = 0; m < 4; ++m) u[hr][m] = *reinterpret_cast<const uint4*>(smem + zs_off(b, wr + g + 8 * hr, c16 + q + 4 * m));
     // A = dbias^T [16 rows x heads]: the transposes of ds[heads 8 (i / 2) ..][rows wr + 8 (i % 2) ..]; heads 16-23 as a k8 step
     uint32_t a0, a1, a2, a3, e0 = 0, e1 = 0;
-    ldsm4t(ds_s + ((lane % 8 + 8 * (lane / 16)) * 136 + wr + 8 * ((lane / 8) % 2)) * 2, a0, a1, a2, a3);
-    if (NH > 16) ldsm2t(ds_s + ((16 + lane % 8) * 136 + wr + 8 * ((lane / 8) % 2)) * 2, e0, e1);
-    auto dln = [&](float (&d)[4], int t) {             // d LN(pair) for n-tile t
+    ldsm4t(ds_s + ((lane % 8 + 8 * (lane / 16)) * DPI + wr + 8 * ((lane / 8) % 2)) * 2, a0, a1, a2, a3);
+    if (NH > 16) ldsm2t(ds_s + ((16 + lane % 8) * DPI + wr + 8 * ((lane / 8) % 2)) * 2, e0, e1);
+    auto dln = [&](float (&d)[4], int t) {             // d LN(pair) for n-tile t of the warp's part (global n-tile c16 + t)
       d[0] = d[1] = d[2] = d[3] = 0.f;
-      const uint4 bb = bw[t / 2][lane];
+      const uint4 bb = bw[(c16 + t) / 2][lane];
       mma16816(d, a0, a1, a2, a3, t % 2 ? bb.z : bb.x, t % 2 ? bb.w : bb.y);
       if (NH > 16) {
-        const uint2 b8 = bw8[t / 2][lane];
+        const uint2 b8 = bw8[(c16 + t) / 2][lane];
         mma1688(d, e0, e1, t % 2 ? b8.y : b8.x);
       }
     };
@@ -570,7 +586,24 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
     for (int k = 0; k < 2; ++k) {
       sd[k] += __shfl_xor_sync(0xffffffffu, sd[k], 1); sd[k] += __shfl_xor_sync(0xffffffffu, sd[k], 2);
       sdv[k] += __shfl_xor_sync(0xffffffffu, sdv[k], 1); sdv[k] += __shfl_xor_sync(0xffffffffu, sdv[k], 2);
-      const float m1 = sd[k] * (1.f / 128), m2 = st[k].y * (sdv[k] - st[k].x * sd[k]) * (1.f / 128);
+    }
+    if constexpr (CH > 1) {                            // the row's other channel part: halves added in part order (both warps alike)
+      if (q == 0) {
+        xsum[part * RI + wr + g] = make_float2(sd[0], sdv[0]);
+        xsum[part * RI + wr + g + 8] = make_float2(sd[1], sdv[1]);
+      }
+      __syncthreads();
+#pragma unroll
+      for (int k = 0; k < 2; ++k) {
+        float2 s = xsum[wr + g + 8 * k];
+#pragma unroll
+        for (int p = 1; p < CH; ++p) { const float2 o = xsum[p * RI + wr + g + 8 * k]; s.x += o.x; s.y += o.y; }
+        sd[k] = s.x; sdv[k] = s.y;
+      }
+    }
+#pragma unroll
+    for (int k = 0; k < 2; ++k) {
+      const float m1 = sd[k] * (1.f / CP), m2 = st[k].y * (sdv[k] - st[k].x * sd[k]) * (1.f / CP);
       c1[k] = st[k].y * st[k].y * m2;
       c0[k] = -st[k].y * m1;
     }
@@ -594,52 +627,56 @@ __device__ __forceinline__ void pair_bias_bwd_body(const bf* __restrict__ DB, co
       }
 #pragma unroll
       for (int e = 0; e < 8; ++e) { v0[e] *= st0.y; v1[e] *= st1.y; }
-      const int col = 8 * (q + 4 * m);
-      *reinterpret_cast<uint4*>(DZ + (rb + g) * 128 + col) = pack8(o0);
-      *reinterpret_cast<uint4*>(DZ + (rb + g + 8) * 128 + col) = pack8(o1);
-      *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g, q + 4 * m)) = pack8(v0);
-      *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g + 8, q + 4 * m)) = pack8(v1);
+      const int col = 8 * (c16 + q + 4 * m);
+      *reinterpret_cast<uint4*>(DZ + (rb + g) * CP + col) = pack8(o0);
+      *reinterpret_cast<uint4*>(DZ + (rb + g + 8) * CP + col) = pack8(o1);
+      *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g, c16 + q + 4 * m)) = pack8(v0);
+      *reinterpret_cast<uint4*>(smem + zs_off(b, wr + g + 8, c16 + q + 4 * m)) = pack8(v1);
     }
     __syncthreads();                                   // LN of the item's rows
-    // dWf^T[16 w + m, head 8 t + n] over the item's rows: A = LN^T [16 columns x 16 rows], B = dbias^T [16 rows x 8 heads]
+    // dWf^T[16 (NG w + c) + m, head 8 t + n] over the item's rows: A = LN^T [16 columns x 16 rows], B = dbias^T [16 rows x 8 heads]
 #pragma unroll
-    for (int kk = 0; kk < 8; ++kk) {
-      const int k0 = 16 * kk, i = lane / 8, r8 = lane % 8;
-      uint32_t c0, c1, c2, c3;
-      // A: transposes of LN[rows k0 + r8 + 8 (i / 2)][columns 16 w + 8 (i % 2) ..] (chunk 2 w + i % 2 of the swizzled buffer)
-      ldsm4t(s_base + zs_off(b, k0 + r8 + 8 * (i / 2), 2 * w + i % 2), c0, c1, c2, c3);
-      // B: ds[heads 8 t + r8][rows k0 + 8 (i % 2) ..] for n-tiles t, t + 1 (i / 2)
+    for (int c = 0; c < NG; ++c)
 #pragma unroll
-      for (int t = 0; t + 1 < NT; t += 2) {
-        uint32_t b0, b1, b2, b3;
-        ldsm4(ds_s + ((8 * (t + i / 2) + r8) * 136 + k0 + 8 * (i % 2)) * 2, b0, b1, b2, b3);
-        mma16816(dacc[t], c0, c1, c2, c3, b0, b1);
-        mma16816(dacc[t + 1], c0, c1, c2, c3, b2, b3);
+      for (int kk = 0; kk < RI / 16; ++kk) {
+        const int k0 = 16 * kk, i = lane / 8, r8 = lane % 8;
+        uint32_t c0, c1, c2, c3;
+        // A: transposes of LN[rows k0 + r8 + 8 (i / 2)][columns 16 (NG w + c) + 8 (i % 2) ..] (chunk 2 (NG w + c) + i % 2, swizzled)
+        ldsm4t(s_base + zs_off(b, k0 + r8 + 8 * (i / 2), 2 * (NG * w + c) + i % 2), c0, c1, c2, c3);
+        // B: ds[heads 8 t + r8][rows k0 + 8 (i % 2) ..] for n-tiles t, t + 1 (i / 2)
+#pragma unroll
+        for (int t = 0; t + 1 < NT; t += 2) {
+          uint32_t b0, b1, b2, b3;
+          ldsm4(ds_s + ((8 * (t + i / 2) + r8) * DPI + k0 + 8 * (i % 2)) * 2, b0, b1, b2, b3);
+          mma16816(dacc[c][t], c0, c1, c2, c3, b0, b1);
+          mma16816(dacc[c][t + 1], c0, c1, c2, c3, b2, b3);
+        }
+        if (NT % 2) {
+          uint32_t b0, b1;
+          ldsm2(ds_s + ((8 * (NT - 1) + r8) * DPI + k0 + 8 * (i % 2)) * 2, b0, b1);
+          mma16816(dacc[c][NT - 1], c0, c1, c2, c3, b0, b1);
+        }
       }
-      if (NT % 2) {
-        uint32_t b0, b1;
-        ldsm2(ds_s + ((8 * (NT - 1) + r8) * 136 + k0 + 8 * (i % 2)) * 2, b0, b1);
-        mma16816(dacc[NT - 1], c0, c1, c2, c3, b0, b1);
-      }
-    }
     __syncthreads();                                   // before this buffer is refilled
   }
-  // dacc[t]: d0, d1 = column 16 w + g, heads 8 t + 2 q + {0, 1}; d2, d3 = column 16 w + g + 8
+  // dacc[c][t]: d0, d1 = column 16 (NG w + c) + g, heads 8 t + 2 q + {0, 1}; d2, d3 = column 16 (NG w + c) + g + 8
 #pragma unroll
-  for (int t = 0; t < NT; ++t)
+  for (int c = 0; c < NG; ++c)
 #pragma unroll
-    for (int e = 0; e < 2; ++e) {
-      const int h = 8 * t + 2 * q + e;
-      if (h < NH) {
-        DWF[((long)blockIdx.x * NH + h) * 128 + 16 * w + g] = dacc[t][e];
-        DWF[((long)blockIdx.x * NH + h) * 128 + 16 * w + g + 8] = dacc[t][2 + e];
+    for (int t = 0; t < NT; ++t)
+#pragma unroll
+      for (int e = 0; e < 2; ++e) {
+        const int h = 8 * t + 2 * q + e;
+        if (h < NH) {
+          DWF[((long)blockIdx.x * NH + h) * CP + 16 * (NG * w + c) + g] = dacc[c][t][e];
+          DWF[((long)blockIdx.x * NH + h) * CP + 16 * (NG * w + c) + g + 8] = dacc[c][t][2 + e];
+        }
       }
-    }
 }
-template <int NH>
+template <int NH, int CP = 128>
 __global__ void __launch_bounds__(WPB * 32, 2) pair_bias_bwd_k(const bf* __restrict__ DB, const bf* __restrict__ Z,
     const float2* __restrict__ PST, const bf* __restrict__ WF, bf* __restrict__ DZ, float* __restrict__ DWF, long R) {
-  pair_bias_bwd_body<NH>(DB, Z, PST, WF, DZ, DWF, R);
+  pair_bias_bwd_body<NH, CP>(DB, Z, PST, WF, DZ, DWF, R);
 }
 
 // -------------------------------------------------------------------------------------------- small weight gradients
@@ -680,13 +717,13 @@ __global__ void __launch_bounds__(DC) unfold_k(const float* __restrict__ DWN, co
 // (bias sums, cond-LN weights, ln_pair / to_bias), 248 blocks:
 //   0-95     the four bias sums (768 columns, 32 per block, over the rows the row kernels wrote)
 //   96-119   the two cond-LN weights (384 columns over unfold's 96 rows of each block)
-//   120-247  dWf [NH, 128] over pair_bias_bwd's per-block rows (one column of every head per block), then
-//                   ln_pair = sum_h dWf o Wb, to_bias = dWf diag(wp)
+//   120-247  dWf [NH, CP] over pair_bias_bwd's per-block rows (one column of every head per block; CP the pair width, 128 or
+//            256: blocks 120 .. 119 + CP), then ln_pair = sum_h dWf o Wb, to_bias = dWf diag(wp)
 // 16 row groups per block, eight independent loads in flight per thread: a few hundred partial rows in a few L2 round trips.
 struct Counts { int n[4]; };
-// OUT: bias sums [4, 768] | to_bias [NH, 128] in the projections' dtype; NOUT: cond-LN weights [2, 384] | ln_pair [128] in the
+// OUT: bias sums [4, 768] | to_bias [NH, CP] in the projections' dtype; NOUT: cond-LN weights [2, 384] | ln_pair [CP] in the
 // LayerNorm weights' dtype (the engine's LayerNorms may keep fp32 weights in a bf16 block)
-constexpr int FIN_PB = 0, FIN_TOB = 4 * D, FIN_DW = 0;   // FIN_LNP = 2 d_cond, FIN_NOUT = FIN_LNP + 128 (d_cond is a runtime argument)
+constexpr int FIN_PB = 0, FIN_TOB = 4 * D, FIN_DW = 0;   // FIN_LNP = 2 d_cond, FIN_NOUT = FIN_LNP + CP (d_cond and CP are runtime arguments)
 // rows g, g + RG, ... of a column, U (8 or 16) loads in flight
 template <int RG, int U = 8>
 __device__ __forceinline__ float colsum_rg(const float* base, long stride, int n, int g) {
@@ -704,14 +741,14 @@ __device__ __forceinline__ float colsum_rg(const float* base, long stride, int n
   for (int k = 8; k < U; ++k) t[k - 8] += t[k];
   return ((t[0] + t[1]) + (t[2] + t[3])) + ((t[4] + t[5]) + (t[6] + t[7]));
 }
-// one finalize job (0 .. FIN_JOBS - 1) by a block of RG warps: 4 x 24 bias-sum column groups, 2 x 12 cond-LN column groups, 128 dWf
+// one finalize job (0 .. FIN_JOBS - 1) by a block of RG warps: 4 x 24 bias-sum column groups, 2 x 12 cond-LN column groups, CP dWf
 // columns; RG row groups (16 in finalize_k's 512 threads, 8 in pair_bias_bwd_fin_k's 256)
-// jobs: 96 bias-sum groups, 2 d_cond / 32 cond-LN column groups, 128 dWf columns
-__host__ __device__ constexpr int fin_jobs(int dc) { return 96 + dc / 16 + 128; }
+// jobs: 96 bias-sum groups, 2 d_cond / 32 cond-LN column groups, CP dWf columns (CP the pair width)
+__host__ __device__ constexpr int fin_jobs(int dc, int cp = 128) { return 96 + dc / 16 + cp; }
 template <int NH, typename OT, typename NT, int RG, int U = 8>
 __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PART, long prow, const Counts& N,
     const float* __restrict__ PW, const float* __restrict__ PWF, int nwf, const float* __restrict__ WB, const float* __restrict__ WP,
-    OT* __restrict__ OUT, NT* __restrict__ NOUT, int DC) {
+    OT* __restrict__ OUT, NT* __restrict__ NOUT, int DC, int CPW = 128) {
   __shared__ float red[RG][33];
   const int G = DC / 32, J = 96 + 2 * G;               // column groups per cond-LN weight; jobs before the dWf ones
   const int y = x < 96 ? x / 24 : x < J ? 4 + (x - 96) / G : 6;
@@ -726,7 +763,7 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
   } else {
     // dWf: column bx of every head; thread (row group, head) sums rows rg, rg + RG, ...
     const int c = bx, h = lane, rg = g;
-    red[rg][h] = h < NH ? colsum_rg<RG, U>(PWF + h * 128 + c, NH * 128, nwf, rg) : 0.f;
+    red[rg][h] = h < NH ? colsum_rg<RG, U>(PWF + h * CPW + c, NH * CPW, nwf, rg) : 0.f;
   }
   __syncthreads();
   if (g == 0) {
@@ -739,8 +776,8 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
       NOUT[FIN_DW + (y - 4) * DC + bx * 32 + lane] = from_f<NT>(t);
     } else {
       const int c = bx, h = lane;                                       // t = dWf[h, c]
-      if (h < NH) OUT[FIN_TOB + h * 128 + c] = from_f<OT>(t * WP[c]);
-      const float u = warp_sum(h < NH ? t * WB[h * 128 + c] : 0.f);    // ln_pair[c] = sum_h dWf[h, c] Wb[h, c]
+      if (h < NH) OUT[FIN_TOB + h * CPW + c] = from_f<OT>(t * WP[c]);
+      const float u = warp_sum(h < NH ? t * WB[h * CPW + c] : 0.f);    // ln_pair[c] = sum_h dWf[h, c] Wb[h, c]
       if (h == 0) NOUT[2 * DC + c] = from_f<NT>(u);
     }
   }
@@ -749,8 +786,8 @@ __device__ __forceinline__ void finalize_job(int x, const float* __restrict__ PA
 template <int NH, typename OT, typename NT>
 __global__ void __launch_bounds__(512) finalize_k(const float* __restrict__ PART, long prow, const Counts N, const float* __restrict__ PW,
     const float* __restrict__ PWF, int nwf, const float* __restrict__ WB, const float* __restrict__ WP, OT* __restrict__ OUT,
-    NT* __restrict__ NOUT, int DC) {
-  finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT, DC);
+    NT* __restrict__ NOUT, int DC, int CPW) {
+  finalize_job<NH, OT, NT, 16>(blockIdx.x, PART, prow, N, PW, PWF, nwf, WB, WP, OUT, NOUT, DC, CPW);
 }
 
 // pair_bias_bwd + finalize in ONE launch (settings.bias_only_dit_bwd_pbfin): the persistent pair_bias_bwd blocks (grid <= the
@@ -1022,20 +1059,20 @@ void finalize(at::Tensor part, std::vector<int64_t> n, at::Tensor pw, at::Tensor
               at::Tensor out, at::Tensor nout) {
   f32c(part, "part"); f32c(pw, "pw"); f32c(pwf, "pwf"); f32c(wb, "Wb"); f32c(wp, "wp");
   TORCH_CHECK(part.dim() == 3 && part.size(0) == 4 && part.size(2) == D && n.size() == 4, "finalize: part [4, rows, 768], 4 counts");
-  const int64_t nh = wb.size(0);
+  const int64_t nh = wb.size(0), cp = wp.numel();      // cp: the pair width (128 or 256)
   const int DC = (int)(pw.numel() / UNF_BLOCKS);
   TORCH_CHECK((DC == 384 || DC == 768) && pw.numel() == UNF_BLOCKS * DC, "finalize: unfold partials [192, d_cond]");
-  TORCH_CHECK((nh == 12 || nh == 16 || nh == 24) && wb.numel() == nh * 128 && pwf.numel() >= nwf * nh * 128
-              && wp.numel() == 128, "finalize: dWf partials [>= nwf, nh, 128], Wb [nh, 128], wp [128]");
-  TORCH_CHECK(out.is_contiguous() && out.numel() == FIN_TOB + nh * 128 && nout.is_contiguous() && nout.numel() == 2 * DC + 128,
+  TORCH_CHECK((nh == 12 || nh == 16 || nh == 24) && (cp == 128 || cp == 256) && wb.numel() == nh * cp && pwf.numel() >= nwf * nh * cp,
+              "finalize: dWf partials [>= nwf, nh, cp], Wb [nh, cp], wp [cp] (cp 128 or 256)");
+  TORCH_CHECK(out.is_contiguous() && out.numel() == FIN_TOB + nh * cp && nout.is_contiguous() && nout.numel() == 2 * DC + cp,
               "finalize: out = bias sums | to_bias, nout = cond-LN weights | ln_pair");
   Counts c{};
   for (int i = 0; i < 4; ++i) { TORCH_CHECK(n[i] <= part.size(1), "finalize: row count"); c.n[i] = (int)n[i]; }
   TDT_DISPATCH(out.scalar_type(), OT, [&] {
     TDT_DISPATCH(nout.scalar_type(), NT, [&] {
       auto k = nh == 12 ? finalize_k<12, OT, NT> : nh == 16 ? finalize_k<16, OT, NT> : finalize_k<24, OT, NT>;
-      k<<<fin_jobs(DC), 512, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
-                                       CP<float>(wp), P<OT>(out), P<NT>(nout), DC);
+      k<<<fin_jobs(DC, (int)cp), 512, 0, S()>>>(CP<float>(part), part.size(1), c, CP<float>(pw), CP<float>(pwf), (int)nwf, CP<float>(wb),
+                                                CP<float>(wp), P<OT>(out), P<NT>(nout), DC, (int)cp);
     });
   });
   C10_CUDA_KERNEL_LAUNCH_CHECK();
@@ -1087,43 +1124,58 @@ void unfold(at::Tensor dwn, at::Tensor wraw, at::Tensor w1, at::Tensor w2, at::T
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-void pair_bias(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, double eps) {
-  const int64_t R = z.size(0);
-  bf16c(z, "pair"); bf16c(wf, "Wf");
-  const int64_t nh = wf.size(0);
-  TORCH_CHECK(z.is_contiguous() && z.size(1) == 128 && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
-              && wf.size(1) == 128, "pair_bias: pair [R, 128] (R a multiple of 128), Wf [12, 16 or 24, 128] bf16");
-  const bool f32 = bias.scalar_type() == at::kFloat;            // fp32 logits: the accumulators unrounded (Hopper training)
-  TORCH_CHECK(bias.is_contiguous() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.numel() == nh * R && pst.is_contiguous()
-              && pst.numel() == 2 * R, "pair_bias: bias [nh, R] bf16 or fp32, pst [R, 2]");
-  if (f32) {
-    auto k = nh == 12 ? pair_bias_k<12, float> : nh == 16 ? pair_bias_k<16, float> : pair_bias_k<24, float>;
+template <int PWD>                                             // PWD: the pair width
+void pair_bias_launch(const at::Tensor& z, const at::Tensor& wf, const at::Tensor& bias, const at::Tensor& pst, int64_t nh, int64_t R,
+                      double eps) {
+  if (bias.scalar_type() == at::kFloat) {                       // fp32 logits: the accumulators unrounded (Hopper training)
+    auto k = nh == 12 ? pair_bias_k<12, float, PWD> : nh == 16 ? pair_bias_k<16, float, PWD> : pair_bias_k<24, float, PWD>;
     k<<<grid(k, R / 64, 1), WPB * 32, 0, S()>>>(CP<bf>(z), CP<bf>(wf), P<float>(bias), P<float2>(pst), R, (float)eps);
   } else {
-    auto k = nh == 12 ? pair_bias_k<12> : nh == 16 ? pair_bias_k<16> : pair_bias_k<24>;
+    auto k = nh == 12 ? pair_bias_k<12, bf, PWD> : nh == 16 ? pair_bias_k<16, bf, PWD> : pair_bias_k<24, bf, PWD>;
     k<<<grid(k, R / 64, 1), WPB * 32, 0, S()>>>(CP<bf>(z), CP<bf>(wf), P<bf>(bias), P<float2>(pst), R, (float)eps);
   }
+}
+
+// bias [nh, R] = LN(pair) Wf^T: pair [R, 128 or 256] bf16 (R a multiple of 128), Wf [nh, pair width] bf16
+void pair_bias(at::Tensor z, at::Tensor wf, at::Tensor bias, at::Tensor pst, double eps) {
+  const int64_t R = z.size(0), cp = z.size(1);
+  bf16c(z, "pair"); bf16c(wf, "Wf");
+  const int64_t nh = wf.size(0);
+  TORCH_CHECK(z.is_contiguous() && (cp == 128 || cp == 256) && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
+              && wf.size(1) == cp, "pair_bias: pair [R, 128 or 256] (R a multiple of 128), Wf [12, 16 or 24, pair width] bf16");
+  const bool f32 = bias.scalar_type() == at::kFloat;
+  TORCH_CHECK(bias.is_contiguous() && (bias.scalar_type() == at::kBFloat16 || f32) && bias.numel() == nh * R && pst.is_contiguous()
+              && pst.numel() == 2 * R, "pair_bias: bias [nh, R] bf16 or fp32, pst [R, 2]");
+  if (cp == 128) pair_bias_launch<128>(z, wf, bias, pst, nh, R, eps);
+  else pair_bias_launch<256>(z, wf, bias, pst, nh, R, eps);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
-int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor dwf) {
-  const int64_t R = z.size(0), nh = wf.size(0);
-  bf16c(z, "pair"); bf16c(wf, "Wf"); f32c(dwf, "dWf partials");
-  TORCH_CHECK(z.is_contiguous() && z.size(1) == 128 && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
-              && wf.size(1) == 128, "pair_bias_bwd: pair [R, 128] (R a multiple of 128), Wf [12, 16 or 24, 128] bf16");
-  TORCH_CHECK(db.scalar_type() == at::kBFloat16 && db.is_contiguous() && db.numel() == nh * R, "pair_bias_bwd: dbias [nh, R]");
-  TORCH_CHECK(dz.is_contiguous() && dz.scalar_type() == at::kBFloat16 && pst.is_contiguous(), "pair_bias_bwd: d pair bf16");
+template <int PWD>                                             // PWD: the pair width
+unsigned pair_bias_bwd_launch(const at::Tensor& db, const at::Tensor& z, const at::Tensor& pst, const at::Tensor& wf, const at::Tensor& dz,
+                              const at::Tensor& dwf, int64_t nh, int64_t R) {
   static bool attr = [] {
-    return cudaFuncSetAttribute(pair_bias_bwd_k<12>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<12>::SMEM) == cudaSuccess
-        && cudaFuncSetAttribute(pair_bias_bwd_k<16>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<16>::SMEM) == cudaSuccess
-        && cudaFuncSetAttribute(pair_bias_bwd_k<24>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<24>::SMEM) == cudaSuccess;
+    return cudaFuncSetAttribute(pair_bias_bwd_k<12, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<12, PWD>::SMEM) == cudaSuccess
+        && cudaFuncSetAttribute(pair_bias_bwd_k<16, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<16, PWD>::SMEM) == cudaSuccess
+        && cudaFuncSetAttribute(pair_bias_bwd_k<24, PWD>, cudaFuncAttributeMaxDynamicSharedMemorySize, PB<24, PWD>::SMEM) == cudaSuccess;
   }();
   TORCH_CHECK(attr, "pair_bias_bwd: shared memory attribute");
-  auto k = nh == 12 ? pair_bias_bwd_k<12> : nh == 16 ? pair_bias_bwd_k<16> : pair_bias_bwd_k<24>;
-  const int smem = nh == 12 ? PB<12>::SMEM : nh == 16 ? PB<16>::SMEM : PB<24>::SMEM;
-  const unsigned g = grid(k, R / 128, 1, smem);
-  TORCH_CHECK(dwf.numel() >= (int64_t)g * nh * 128, "pair_bias_bwd: dWf partials [partial_rows, nh, 128]");
+  auto k = nh == 12 ? pair_bias_bwd_k<12, PWD> : nh == 16 ? pair_bias_bwd_k<16, PWD> : pair_bias_bwd_k<24, PWD>;
+  const int smem = nh == 12 ? PB<12, PWD>::SMEM : nh == 16 ? PB<16, PWD>::SMEM : PB<24, PWD>::SMEM;
+  const unsigned g = grid(k, R / PB<16, PWD>::RI, 1, smem);
+  TORCH_CHECK(dwf.numel() >= (int64_t)g * nh * PWD, "pair_bias_bwd: dWf partials [partial_rows, nh, pair width]");
   k<<<g, WPB * 32, smem, S()>>>(CP<bf>(db), CP<bf>(z), CP<float2>(pst), CP<bf>(wf), P<bf>(dz), P<float>(dwf), R);
+  return g;
+}
+
+int64_t pair_bias_bwd(at::Tensor db, at::Tensor z, at::Tensor pst, at::Tensor wf, at::Tensor dz, at::Tensor dwf) {
+  const int64_t R = z.size(0), nh = wf.size(0), cp = z.size(1);
+  bf16c(z, "pair"); bf16c(wf, "Wf"); f32c(dwf, "dWf partials");
+  TORCH_CHECK(z.is_contiguous() && (cp == 128 || cp == 256) && R % 128 == 0 && wf.is_contiguous() && (nh == 12 || nh == 16 || nh == 24)
+              && wf.size(1) == cp, "pair_bias_bwd: pair [R, 128 or 256] (R a multiple of 128), Wf [12, 16 or 24, pair width] bf16");
+  TORCH_CHECK(db.scalar_type() == at::kBFloat16 && db.is_contiguous() && db.numel() == nh * R, "pair_bias_bwd: dbias [nh, R]");
+  TORCH_CHECK(dz.is_contiguous() && dz.scalar_type() == at::kBFloat16 && pst.is_contiguous(), "pair_bias_bwd: d pair bf16");
+  const unsigned g = cp == 128 ? pair_bias_bwd_launch<128>(db, z, pst, wf, dz, dwf, nh, R) : pair_bias_bwd_launch<256>(db, z, pst, wf, dz, dwf, nh, R);
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return g;
 }
