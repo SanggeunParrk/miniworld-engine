@@ -52,7 +52,7 @@ class AttentionPairBias(nn.Module):
     ) -> None:
         super().__init__()
         self.n_head = n_head
-        #: A constant added to the gate logits (Chai-1's pairformer single attention: 1.0); the H100 inference kernels carry it in the packed gate bias, the B200 kernels take none.
+        #: A constant added to the gate logits (Chai-1's pairformer single attention: 1.0); the H100 / B200 inference kernels carry it in the packed gate bias (training kernels take none).
         self.gate_bias = float(gate_bias)
         self.use_qk_norm = use_qk_norm
         self.implementation = ImplementationType(implementation)

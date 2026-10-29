@@ -1563,7 +1563,7 @@ at::Tensor infer(const at::Tensor& single, const at::Tensor& pair, const c10::op
   ln_rows(x, packs[0], packs[1], xa, c10::nullopt, eps_s, y);
   at::Tensor qkvg = at::addmm(packs[3], xa, packs[2].t());
   at::Tensor bias = at::empty({NB * G.nh, L, L}, opts(x, at::kBFloat16));
-  pair_bias_fwd(pair.view({M * L, DP}), packs[4], flat_mask(mask, M), bias, L, eps_p, NEG_MASK);
+  pair_bias_fwd(pair.view({M * L, packs[4].size(1)}), packs[4], flat_mask(mask, M), bias, L, eps_p, NEG_MASK);   // d_pair 128 or 256
   inf_core(qkvg, bias, L, G, ns);
   return y.addmm_(qkvg.narrow(1, 0, width(G)), packs[5].t()).view({NB, L, D});
 }

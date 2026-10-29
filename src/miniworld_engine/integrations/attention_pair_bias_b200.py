@@ -10,7 +10,7 @@ latency do not describe this training default.
 
 Contract: bf16 activations, d_single 384 as 8 heads x 48, 12 x 32, 24 x 16 or 16 x 24 (AF3's Pairformer single attention),
 or d_single 512 as 16 x 32, d_pair
-128, no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
+128 (inference also 256 with 16 heads, and a gate bias: Chai-1's 16 x 24, d_pair 256, gate_bias 1.0), no QK-norm, ``implementation="miniworld"`` (engine backend not forced to Triton), sm_100. Inference: L a multiple of 16;
 training: L a multiple of 128. B200: any number of samples B (each its own pair and key mask; up to ``max_batch()`` per launch,
 more in fixed chunks of that size); H100: B = 1.
 
@@ -109,14 +109,15 @@ def _eligible(
         or tuple(module.to_query.weight.shape) != (D, D)
     ):
         return False
-    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0) is served on H100 for inference only: the gate bias
-    # and the 256-wide pair are the H100 inference op's (module docstring); every other call keeps d_pair 128 and no gate bias.
+    # Chai-1's pairformer single attention (16 x 24, d_pair 256, gate bias 1.0) is served on H100 and B200 for inference only: the
+    # gate bias rides on the g rows of the packed bias, the 256-wide pair takes pair_bias_fwd's 256-wide ring (module docstring);
+    # training keeps d_pair 128 and no gate bias.
     dp = module.to_bias.weight.shape[1]
-    hopper = torch.cuda.get_device_capability(single.device) == (9, 0)
+    native = torch.cuda.get_device_capability(single.device) in ((9, 0), (10, 0))
     if dp == WIDE_DP:
-        if not (hopper and H == WIDE_HEADS and not torch.is_grad_enabled()):
+        if not (native and H == WIDE_HEADS and not torch.is_grad_enabled()):
             return False
-    elif dp != DP or (module.gate_bias and (not hopper or torch.is_grad_enabled())):
+    elif dp != DP or (module.gate_bias and (not native or torch.is_grad_enabled())):
         return False
     if (
         tuple(module.to_bias.weight.shape) != (H, dp)
