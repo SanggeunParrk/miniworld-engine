@@ -173,6 +173,7 @@ void atom_pre_cross_fwd_sm90(const __grid_constant__ CUtensorMap ma,
 // the K / V projections; saved for the backward when ``save``). Q and G read the x1 tile as before. Input stages are 40 KB (a | s1 | bi1 | mkv)
 // so two (NI = 2) fit beside the x1 / xkv rings (3 tiles each) and the outputs; (NI = 3 needs a two-deep xkv ring, whose extra wait on
 // the previous tile's store cost 30 %: 167 us against 130 at 196608 rows.)
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -235,7 +236,7 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
                    const __grid_constant__ CUtensorMap mQ, const __grid_constant__ CUtensorMap mK, const __grid_constant__ CUtensorMap mV,
                    const __grid_constant__ CUtensorMap mG, const __grid_constant__ CUtensorMap mX, const __grid_constant__ CUtensorMap mMKV,
                    const __grid_constant__ CUtensorMap mXK, const float* __restrict__ BQ, const float* __restrict__ BS, int ntile, float eps,
-                   int save) {
+                   int save, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -274,9 +275,9 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
 #else
         mbar_expect_tx(&B.infull[s], (CROSS ? 10 : 6) * KBLK);
         if (CROSS)
-          for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + 3 * T_ + kb * KBLK, &mMKV, &B.infull[s], 64 * kb, r0);   // pre | shift
+          for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + 3 * T_ + kb * KBLK, &mMKV, &B.infull[s], 64 * kb, r0 % mrows);   // pre | shift
         for (int kb = 0; kb < 2; ++kb) tma_load_2d(st + kb * KBLK, &ma, &B.infull[s], 64 * kb, r0);
-        for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + T_ + kb * KBLK, &mmod, &B.infull[s], 64 * kb, r0);   // s1 | bi1
+        for (int kb = 0; kb < 4; ++kb) tma_load_2d(st + T_ + kb * KBLK, &mmod, &B.infull[s], 64 * kb, r0 % mrows);   // s1 | bi1
 #endif
       }
     }

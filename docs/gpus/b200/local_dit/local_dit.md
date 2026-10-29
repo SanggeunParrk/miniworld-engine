@@ -264,6 +264,45 @@ exp / reciprocal alone, and about 1600 instructions per tile per SMSP), `atom_dw
 epilogue into one wait (`cond_fwd`; `post_fwd` 136 -> 132), three input stages in the cross `pre_fwd` (a two-deep xkv ring waits on the
 previous tile's store: 167 us), staggering `pre_fwd`, mixing polynomial `ex2` into the sigmoids (MUFU and issue slots break even).
 
+## Conditioning shared by the samples (2026-10-29)
+
+The diffusion trainers and FoldForge pass the atom conditioning as one `[1, 1, N, 128]` tensor expanded over the A samples (stride 0). On
+B200 with bf16 activations (the AF3 / Protenix block in both modes and ESMFold2's block; inference and training) `block()` now hands the
+kernels that one `[1, 1, N, 128]` view (`_shared_cond`), and:
+
+- forward: the conditioning tables (mod [N, 768], the cross mode's LN(c) and K / V modulation, ESMFold2's [N, 1024]) are made once instead of
+  per sample row; every sm_100a row kernel (`pre_fwd`, `post_fwd`, `tr_bwd_gate`, `post_bwd`, `pre_bwd`, all builds) reads table row
+  `r % mrows` (a new kernel argument: the tables' row count, M for per-sample tables). The torch copy that materialised the expanded
+  conditioning (twice per step) is gone.
+- backward: the row kernels still write the tables' gradient per sample row (dmod, and dmkv into the same [A N, 1024] table);
+  `sm100_atom_local` `lcross.cu` `local_sample_sum` sums it over the samples in a fixed order (fp32 sums, deterministic), so `cond_bwd`, the
+  cross mode's `cond_ln_bwd` and K / V modulation product, ESMFold2's K = 1024 product and SiLU backward, and the conditioning's weight
+  gradients (their own `atom_dw` launch) run on N rows instead of A N. Autograd sums the `[1, 1, N, 128]` view's gradient back into the
+  expanded tensor's base.
+
+Measured, one block, forward + backward as one CUDA graph, bf16-mixed, the conditioning one expanded leaf; "per-sample" is the previous path
+(the same harness with `_shared_cond` off), ms:
+
+| block | (A, N) | per-sample tables | shared | x |
+|---|---|---|---|---|
+| cross, chained / pad | (48, 4096) | 1.642 | 1.280 | 1.28 |
+| cross, chained / pad | (48, 8192) | 3.118 | 2.352 | 1.33 |
+| cross, parallel / slide | (48, 4096) | 1.887 | 1.496 | 1.26 |
+| cross, parallel / slide | (48, 8192) | 3.341 | 2.562 | 1.30 |
+| ESMFold2 | (48, 4096) | 1.798 | 1.489 | 1.21 |
+| ESMFold2 | (48, 8192) | 3.389 | 2.761 | 1.23 |
+
+At (48, 4096), chained / pad (eager profile, us): cond_fwd 114 -> 9, cond_bwd 109 -> 11, atom_dw 252 -> 162 + 19 (the N-row launch), the
+materialising copies 77 -> 0; added: the sample sum 74 (400 MB read at 5.4 TB/s) and autograd's slice / expand backward of the view (~24).
+What is left: summing over the samples inside `tr_bwd_gate` / `post_bwd` / `pre_bwd` (a sample-inner tile schedule with fp32 accumulators;
+`pre_bwd`'s cross build is at its 168-register cap, its accumulators would go to its 128 free TMEM columns) would drop the sample sum and
+the per-sample table-gradient stores. The fp32 path keeps per-sample tables (its row kernels index the tables by row).
+
+Tests: `tests/gpu/sm100/test_b200_local_dit_af3_variant_gpu.py` (`-k shared`: cross / self mode x chained / pad and parallel / slide x
+three (A, N, real) shapes up to A = 16, every gradient of the expanded leaf against the fp64 module, `ef < 1.5 em + 3e-3`, the sample sum
+ran; the expanded and the materialised conditioning give bit-identical inference outputs); ESMFold2's training tests run the shared path
+(their shared cases).
+
 ## AlphaFold 3's options: parallel K/V norm, slid key window (2026-10-29)
 
 FoldForge builds its AF3-family atom blocks as `LocalDiTBlock(cross_attention=True, kv_norm=..., key_window=...)`; in its "fast" mode every

@@ -113,6 +113,7 @@ extern "C" __global__ void atom_pack_transpose_sm90(const __nv_bfloat16* wc,cons
 // (tcgen05.ld 16x256b), h / da / db stored transposed by stmatrix.trans into row-major tiles; the leader thread issues the TMA stores.
 // Stage (40 KB): dy -> dt | t -> dts | st | x2 | h [16][256] | dab [16][512].
 // TMEM: Wa (hidden 0-127, 128-255) 0 / 64, Wb 128 / 192, Ws^T 256 / 320; warpgroup w's accumulators at 384 + 64 w: a^T 0, b^T 16, dh^T 32.
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -156,7 +157,7 @@ extern "C" __global__ void __launch_bounds__(384, 1)
 atom_tr_bwd_gate_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_constant__ CUtensorMap mt, const __grid_constant__ CUtensorMap mmod,
                        const __grid_constant__ CUtensorMap mx2, const __grid_constant__ CUtensorMap mwu, const __grid_constant__ CUtensorMap mwst,
                        const __grid_constant__ CUtensorMap mdt, const __grid_constant__ CUtensorMap mdmod, const __grid_constant__ CUtensorMap mh,
-                       const __grid_constant__ CUtensorMap mdab, float* __restrict__ DBTS, int ntile) {
+                       const __grid_constant__ CUtensorMap mdab, float* __restrict__ DBTS, int ntile, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -203,7 +204,7 @@ atom_tr_bwd_gate_sm100(const __grid_constant__ CUtensorMap mdy, const __grid_con
         for (int kb = 0; kb < 2; ++kb) {
           tma_load_2d(st + O_DY + kb * KB, &mdy, bar, 64 * kb, r0);
           tma_load_2d(st + O_T + kb * KB, &mt, bar, 64 * kb, r0);
-          tma_load_2d(st + O_ST + kb * KB, &mmod, bar, 640 + 64 * kb, r0);   // st: the forward mod's block 5
+          tma_load_2d(st + O_ST + kb * KB, &mmod, bar, 640 + 64 * kb, r0 % mrows);   // st: the forward mod's block 5
           tma_load_2d(st + O_X2 + kb * KB, &mx2, bar, 64 * kb, r0);
         }
       }

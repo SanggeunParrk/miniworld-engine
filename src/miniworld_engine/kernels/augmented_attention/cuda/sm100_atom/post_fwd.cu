@@ -379,6 +379,7 @@ void atom_post_fwd_2stage_packed_sm90(const __nv_bfloat16* __restrict__ a,
 // Stage (28 KB): a -> a2 | o -> u | sg -> gated -> x2 | mod: so, s2 (-> h), bi2 (-> a3), st; the t save goes over h's first half.
 // TMEM: Wa (hidden 0-127, 128-255) 0 / 64, Wb 128 / 192, Ws 256 (128 columns); warpgroup w's accumulators at 384 + 64 w:
 // u^T / a0^T / t^T 0, b0^T 16, a1^T 32, b1^T 48.
+// mrows: the rows of the conditioning tables (mod, mkv): M, or N when the samples share one conditioning (table row = r % mrows)
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
 using namespace s100;
@@ -429,7 +430,7 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
                     const __grid_constant__ CUtensorMap mmod, const __grid_constant__ CUtensorMap mwo, const __grid_constant__ CUtensorMap mwu,
                     const __grid_constant__ CUtensorMap mwd, const __grid_constant__ CUtensorMap mout, const __grid_constant__ CUtensorMap mu,
                     const __grid_constant__ CUtensorMap ma2, const __grid_constant__ CUtensorMap mx2, const __grid_constant__ CUtensorMap mt,
-                    int ntile, float eps, int save) {
+                    int ntile, float eps, int save, int mrows) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -483,7 +484,7 @@ atom_post_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constan
           tma_load_2d(st + O_O + kb * KB, &mo, bar, 64 * kb, r0);
           tma_load_2d(st + O_G + kb * KB, &mg, bar, 64 * kb, r0);
         }
-        for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_M + kb * KB, &mmod, bar, 256 + 64 * kb, r0);   // os | sc2 | bi2 | ts
+        for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_M + kb * KB, &mmod, bar, 256 + 64 * kb, r0 % mrows);   // os | sc2 | bi2 | ts
       }
     } else if (lane == 1) {
       // the TMA stores of this warpgroup's tiles: issued (and waited for) off the compute threads, which go on to the next tile's row work

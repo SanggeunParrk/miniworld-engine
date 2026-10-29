@@ -192,3 +192,69 @@ def test_slid_window_training_is_deterministic(dtype):
         for k in ("out", "dsingle", "dpair", "attention.to_query.weight", "attention.to_key.weight", "attention.to_value.weight",
                   "attention.to_bias.weight", "attention.ln_pair.weight"):
             assert torch.equal(first[k], again[k]), k
+
+
+# ------------------------------------------------------------------------------------------------ a conditioning shared by the samples
+def _train_shared(m, s, c0, z, w, mask, dtype):
+    """Forward + backward with the conditioning one [1, 1, N, 128] leaf expanded over the samples (the diffusion trainers' call)."""
+    ls, lc, lz = (t.detach().clone().to(dtype).requires_grad_() for t in (s, c0, z))
+    out = m(ls, lc.expand(s.shape[0], -1, -1, -1), lz, mask)
+    (out.double() * w).sum().backward()
+    res = {"out": out.detach(), "dsingle": ls.grad, "dcond": lc.grad, "dpair": lz.grad}
+    res.update({n: p.grad.clone() for n, p in m.named_parameters()})
+    m.zero_grad(set_to_none=True)
+    return res
+
+
+@pytest.mark.parametrize("cross", [True, False], ids=["cross", "self"])
+@pytest.mark.parametrize(("kv_norm", "key_window"), [("chained", "pad"), ("parallel", "slide")])
+@pytest.mark.parametrize(("a", "n", "real"), [(4, 512, 450), (3, 300, 300), (16, 256, 256)])
+def test_shared_conditioning_training(cross, kv_norm, key_window, a, n, real, monkeypatch):
+    """The conditioning tables made once ([N, ..], read at row r % N) and their gradient summed over the samples: every gradient against the
+    fp64 module, no worse than the module path in bf16."""
+    if not cross and kv_norm == "parallel":
+        pytest.skip("the parallel K/V norm needs the cross mode")
+    torch.manual_seed(7)
+    kw = dict(cross_attention=cross, kv_norm=kv_norm, key_window=key_window)
+    ref = LocalDiTBlock(implementation=ImplementationType.PYTORCH, **kw)
+    with torch.no_grad():
+        for name, p in ref.named_parameters():
+            p.copy_(torch.randn_like(p) / p.shape[-1] ** 0.5 if p.ndim > 1 else torch.randn_like(p) * 0.1 + (1.0 if name.endswith("weight") else 0.0))
+    eng = LocalDiTBlock(implementation=ImplementationType.MINIWORLD, **kw)
+    eng.load_state_dict(ref.state_dict())
+    ref, eng = ref.cuda().double(), eng.cuda().to(BF)
+    s, c, z, mask = _inputs(a, n, real, seed=8)
+    c0 = c[:1]
+    w = torch.randn(a, 1, n, 128, device="cuda", dtype=torch.float64)
+    w[:, :, real:] = 0
+    truth = _train_shared(ref, s, c0, z, w, mask, torch.float64)
+    calls = []
+    from miniworld_engine.kernels.augmented_attention.cuda import sm100_atom_local as local
+
+    orig = local.sample_sum
+    monkeypatch.setattr(local, "sample_sum", lambda *x, **k: calls.append("sum") or orig(*x, **k))
+    fused = _train_shared(eng, s, c0, z, w, mask, BF)
+    assert calls == ["sum"], calls                       # the shared path ran (the tables' gradient summed once)
+    override_setting(monkeypatch, "local_dit_sm100", "0")
+    module = _train_shared(eng, s, c0, z, w, mask, BF)
+    assert set(fused) == set(truth)
+    for k in truth:
+        f, t, m = fused[k], truth[k], module[k]
+        if k == "out":
+            f, t, m = f[:, :, :real], t[:, :, :real], m[:, :, :real]
+        assert torch.isfinite(f).all(), k
+        ef, em = _rel(f, t), _rel(m, t)
+        assert ef < 1.5 * em + 3e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+def test_shared_conditioning_matches_the_materialised_one():
+    """The same block on the expanded conditioning (tables made once) and on its materialised copy (tables per sample row): the outputs are
+    equal bit for bit (the same table values)."""
+    _, eng = _blocks("parallel", "slide", seed=3)
+    eng = eng.to(BF)
+    s, c, z, mask = _inputs(4, 512, 480, seed=9)
+    s, c0, z = s.to(BF), c[:1].to(BF), z.to(BF)
+    with torch.no_grad():
+        a = eng(s, c0.expand(4, -1, -1, -1), z, mask)
+        b = eng(s, c0.expand(4, -1, -1, -1).contiguous(), z, mask)
+    assert torch.equal(a, b)
