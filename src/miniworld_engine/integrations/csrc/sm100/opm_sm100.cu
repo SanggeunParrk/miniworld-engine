@@ -1520,7 +1520,8 @@ __global__ void __launch_bounds__(256) opm_pbwd_finalize(const float* __restrict
 
 // dA, dB: [S, N*32] (a row's channels contiguous); m: [S, N, 64]; stats: [N, S, 2] from the forward prologue;
 // mask: bool [S, N].  Returns dm [1, S, N, 64] and dWa, dWb [32, 64] (fp32: the parameters may be an fp32 master; the integration casts
-// to theirs), dgamma, dbeta [64] (in gamma's dtype).
+// to theirs), dgamma, dbeta [64] (in gamma's dtype), and the summed partials (whose last 64 values, ssa, are RoseTTAFold3's projection-bias
+// gradients).
 std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, torch::Tensor m, torch::Tensor stats, torch::Tensor mask,
                                             torch::Tensor gamma, torch::Tensor beta, torch::Tensor wa, torch::Tensor wb) {
   using namespace pb;
@@ -1570,7 +1571,7 @@ std::vector<torch::Tensor> opm_prologue_bwd(torch::Tensor dA, torch::Tensor dB, 
       reinterpret_cast<const __nv_bfloat16*>(gamma.data_ptr<at::BFloat16>()), reinterpret_cast<const __nv_bfloat16*>(beta.data_ptr<at::BFloat16>()), dwap, dwbp,
       reinterpret_cast<__nv_bfloat16*>(dgam.data_ptr<at::BFloat16>()), reinterpret_cast<__nv_bfloat16*>(dbet.data_ptr<at::BFloat16>()));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
-  return {dm, dwa, dwb, dgam, dbet};
+  return {dm, dwa, dwb, dgam, dbet, red};   // red [(CM + 1) * CM]: R^T rows, then ssa (the masked column sums of [dA dB])
 }
 
 

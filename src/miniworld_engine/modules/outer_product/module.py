@@ -169,16 +169,17 @@ class OuterProductMean(nn.Module):
 
             # The H100 CUDA paths below step aside for the A/B switch (force_portable_kernels), which runs the Triton family below.
             native = self.implementation != ImplementationType.PYTORCH and not _dispatch.portable_forced(self.implementation)
-            # RoseTTAFold3 training (a grad-enabled call): the wide fused composition, the projection biases in the prologue and their
-            # gradients off dA / dB (``opm_train``, either normalisation order)
+            # RoseTTAFold3 (``opm_train``, either normalisation order): the projection biases in the prologue (masked like the
+            # projections) and their gradients the masked column sums of dA / dB.  H100: training (inference: the wide composition
+            # below); B200: training and inference
+            cap = torch.cuda.get_device_capability(msa.device) if msa.is_cuda else None
             if (
                 native
                 and self.groups == 1
                 and self.to_left.bias is not None
-                and torch.is_grad_enabled()
+                and (torch.is_grad_enabled() or cap == (10, 0))
                 and _opm_train.wanted(self.implementation)
-                and msa.is_cuda
-                and torch.cuda.get_device_capability(msa.device) == (9, 0)
+                and cap in ((9, 0), (10, 0))
                 and _opm_train.serves(msa, *(self.to_left.weight.shape[1], self.to_left.weight.shape[0], self.to_out.weight.shape[0]),
                                       interchain=bool(self.mask_interchain and token_asym_id is not None),
                                       normalize_before_proj=self.normalize_before_proj)
@@ -195,7 +196,13 @@ class OuterProductMean(nn.Module):
                                       interchain=False, normalize_before_proj=self.normalize_before_proj)
                 and not torch.is_grad_enabled()
             ):
-                return composed.biased_on_fused(self, msa, mask, token_asym_id, residual)
+                # H100 inference the wide composition does not take (a ragged length / depth: ``outer_product_mean`` pads): the biases
+                # are the kernels' own (``_inference_op`` hands them to the prologue), so nothing is added here
+                out = _opm_train.outer_product_mean(self, msa, mask if mask is not None else
+                                                    torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device), residual=None)
+                if self.mask_interchain and token_asym_id is not None:
+                    out = out * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(out.dtype)
+                return residual + out if residual is not None else out
             if native and self.groups > 1:   # Chai-1: the fused H100 passes (kernels.outer_product_mean.chai), inference and training
                 from miniworld_engine.kernels.outer_product_mean import chai as _chai
 
@@ -274,9 +281,8 @@ class OuterProductMean(nn.Module):
                     else torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
                 )
                 return _opm_train.outer_product_mean(self, msa, _m, residual=residual)
-        # B200 inference the sm_100a kernels do not take (d_msa / d_pair other than 64 / 128: Protenix-v2, OpenDDE, ESMFold2 widths; a
-        # batch of MSA stacks; the interchain mask): the composed CUDA / cuBLAS path (kernels.outer_product_mean.composed), not the PyTorch
-        # statements
+        # B200 inference the sm_100a kernels do not take (a batch of MSA stacks; the interchain mask; widths beyond opm_train.SM100_D_MSA /
+        # SM100_D_PAIR): the composed CUDA / cuBLAS path (kernels.outer_product_mean.composed), not the PyTorch statements
         if (
             self.implementation == ImplementationType.MINIWORLD
             and not torch.is_grad_enabled()

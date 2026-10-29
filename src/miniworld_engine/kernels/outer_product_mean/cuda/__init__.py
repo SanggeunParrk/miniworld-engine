@@ -1,5 +1,5 @@
 """CUDA pass of the composed OuterProductMean (``gather.cu``: plain CUDA, no architecture-specific instructions), built for the device's
-architecture (sm_90a on H100, sm_100a on B200: RoseTTAFold3's biased OPM on the fused B200 path finishes here too). Built on first use
+architecture (sm_90a on H100, sm_100a on B200). Built on first use
 (``load_extension``), never at import."""
 
 from __future__ import annotations
@@ -38,11 +38,6 @@ def gather(prod, groups, k, weight=None, bias=None, eps=0.1):
 def split_groups(x, b, s, n, groups, k):
     """x [B S N, G K] bf16 (the projection rows) -> [B G, S, N K] bf16: per group, the rows' K channels in row order."""
     return ext().opm_split_groups(x, int(b), int(s), int(n), int(groups), int(k))
-
-
-def bias_finish(out, c1, c2, count, c):
-    """In place: out += (c1 + c2) / max(count, 1) + (count > 0) c (out bf16 [..., F]; c1 / c2 fp32 like it; count fp32 per row; c fp32 [F])."""
-    ext().opm_bias_finish(out, c1, c2, count, c)
 
 
 @functools.lru_cache(maxsize=None)
