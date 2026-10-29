@@ -1,9 +1,9 @@
 # vendored from team-gm psk/benchmark : src/team_gm/modules/layers/triangle_updates.py
 """Triangle (gated self-)attention — model-level op connecting the fused
 triangle-attention kernel (and a cuequivariance baseline). On B200 the sm_100a kernels
-(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16- or
-32-channel heads, inference and training, 64-channel heads for inference; any L >= 16, B samples per call in deterministic chunks)
-serve the whole module, with the model options below (bias orientation, gate / out biases; Chai-1's outputs for inference)."""
+(``integrations.triattn_b200``: d_pair 128 / 4 heads fused, inference and training; other widths 64-512 with 16-, 32- or
+64-channel heads, inference and training; any L >= 16, B samples per call in deterministic chunks) serve the whole module, with the
+model options below (bias orientation, gate / out biases, Chai-1's outputs)."""
 
 import math
 from contextlib import contextmanager
@@ -384,7 +384,7 @@ class TriangleAttention(nn.Module):
         if self.dead and not (variant_output or self.training or torch.is_grad_enabled()):
             return pair
         if variant_output or self.to_gate.bias is not None or self.to_out.bias is not None:
-            # RoseTTAFold3's biases, Chai-1's output variants: the B200 kernels (Chai-1's outputs for inference), the H100 kernels
+            # RoseTTAFold3's biases, Chai-1's output variants: the B200 kernels (inference and training), the H100 kernels
             # for inference, else the torch statements
             from miniworld_engine.integrations import triattn_h100_sm90
             from miniworld_engine.kernels.triangle_attention.cuda import h100_dh

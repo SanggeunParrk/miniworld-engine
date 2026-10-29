@@ -6,8 +6,9 @@ untransposed; the confidence head's dual output).
 
 Inference (FoldForge's use) against the module's fp64 torch reference (``_biased_reference``), the yardstick the same reference
 run in bf16: the kernels may not be meaningfully worse (the bar of the other B200 TriangleAttention tests, on the update).
-Training (bias orientation and biases; the 64-channel heads and Chai-1's outputs are inference only) against fp32 autograd, the
-yardstick the bf16 PyTorch module."""
+Training (every option: the bias orientation, the biases, the 64-channel heads and Chai-1's outputs) against fp32 autograd, the
+yardstick the bf16 PyTorch module (its statements: ``_attention``, or ``_biased_reference`` for Chai-1's outputs, which ``_attention``
+does not compose)."""
 
 import copy
 
@@ -87,8 +88,8 @@ def test_variant_inference(variant, b, n, real):
 
 
 def test_paths():
-    """The d_pair-128 trunk on AF3's orientation keeps the fused kernels for inference; biases and Chai-1's outputs take the wide ones;
-    the 64-channel heads and Chai-1's outputs are not served with a backward (the module runs its PyTorch statements there)."""
+    """The d_pair-128 trunk on AF3's orientation keeps the fused kernels for inference; biases, the 64-channel heads and Chai-1's outputs
+    take the wide ones, inference and training."""
     x128 = torch.zeros(1, 128, 128, 128, device="cuda", dtype=torch.bfloat16)
     x256 = torch.zeros(1, 128, 128, 256, device="cuda", dtype=torch.bfloat16)
     af3 = _module(*VARIANTS["af3-trunk-ending"]).bfloat16()
@@ -100,15 +101,17 @@ def test_paths():
         assert tri.kind_of(chai, x256) == tri.GENERIC
     assert tri.kind_of(af3.train(), x128) == tri.GENERIC          # training: the wide path reads its bias gradient in either orientation
     assert tri.kind_of(rf3.train(), x128) == tri.GENERIC
-    assert tri.kind_of(chai.train(), x256) is None
+    assert tri.kind_of(chai.train(), x256) == tri.GENERIC
     plain64 = _module(256, 256, 4, True, True, {}).bfloat16()
     with torch.no_grad():
         assert tri.kind_of(plain64, x256) == tri.GENERIC
-    assert tri.kind_of(plain64.train(), x256) is None
+    assert tri.kind_of(plain64.train(), x256) == tri.GENERIC
 
 
-# training: the options whose kernels have a backward, at the family shapes
-TRAIN = ["af3-trunk-ending", "af3-template-ending", "boltz2-template-ending", "rf3-trunk-starting", "rf3-trunk-ending"]
+# training: every option, at the family shapes
+TRAIN = ["af3-trunk-ending", "af3-template-ending", "boltz2-template-ending", "rf3-trunk-starting", "rf3-trunk-ending",
+         "rf3-template-starting", "rf3-template-ending", "chai1-trunk-starting", "chai1-trunk-ending", "chai1-confidence-starting",
+         "chai1-confidence-ending", "chai1-template-ending", "if2-trunk-starting", "if2-trunk-ending"]
 
 
 def _trio(variant):
@@ -150,7 +153,8 @@ def test_variant_training(variant, p_drop):
         scale = ours._make_drop_scale(x, p_drop)                  # the same draw, same shape and dtype
     for name, m, xin in (("ref16", ref16, x), ("ref32", ref32, x.float())):
         xi = xin.clone().requires_grad_()
-        update = m._attention(xi, mask)                           # the module's PyTorch statements (biases in its Linear layers)
+        # the module's PyTorch statements (biases in its Linear layers; Chai-1's output compositions in _biased_reference)
+        update = m._biased_reference(xi, mask) if (m.untransposed_output or m.dual_output) else m._attention(xi, mask)
         yr = xi + (update * scale.to(xin.dtype) if scale is not None else update)
         yr.backward(dy.to(yr.dtype))
         got[name] = (yr, [xi.grad, *(p.grad for p in m.parameters())])

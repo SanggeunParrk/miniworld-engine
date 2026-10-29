@@ -152,25 +152,32 @@ def fused_forward(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e-5, d
 
 
 def split_grads(fused, raw, dtypes):
-    """(pair, lnw, lnb, wq, wk, wv, wg, wb, wo[, gate bias, out bias]) gradients from a backward's stacked outputs (views of them, cast
-    to ``dtypes``, the parameters' dtypes, where they differ); the bias gradients when ``dtypes`` has ten entries (None for an absent
-    bias: an empty stacked gradient)."""
-    dbias = None
+    """(pair, lnw, lnb, wq, wk, wv, wg, wb, wo[, gate bias, out bias[, Wo_t, out_t bias]]) gradients from a backward's stacked outputs
+    (views of them, cast to ``dtypes``, the parameters' dtypes, where they differ); the bias gradients when ``dtypes`` has ten entries,
+    also the dual output's second out-projection (Chai-1's ``to_out_t``) when it has twelve (None for an absent parameter: an empty
+    stacked gradient)."""
+    dbias = dwo2 = None
     if fused:
         dpair, dgb, dw, dwo = raw          # dgb = [dgamma; dbeta; dWb (4 rows)], dw = [dWq; dWk; dWv; dWg]
         wb = dgb[2:]
     else:
-        dpair, dgb, dw, wb, dwo, *rest = raw      # dgb = [dgamma; dbeta] fp32; rest = [[dbg; dbo]] (the gate / out biases)
+        # dgb = [dgamma; dbeta] fp32; rest = [[dbg; dbo]] (the gate / out biases)[, dWo_t (empty unless the dual output)]
+        dpair, dgb, dw, wb, dwo, *rest = raw
         dbias = rest[0] if rest else None
+        dwo2 = rest[1] if len(rest) > 1 and rest[1].numel() else None
     grads = (dpair, dgb[0].to(dtypes[0]), dgb[1].to(dtypes[1]), *(dw[i].to(dtypes[2 + i]) for i in range(4)), wb.to(dtypes[6]),
              dwo.to(dtypes[7]))
+    hd = dw.shape[1]
     if len(dtypes) > 8:                    # (gate bias, out bias) dtypes, None for an absent bias
         dbg = dbo = None
         if dbias is not None:
-            hd = dw.shape[1]
             dbg = dbias[:hd].to(dtypes[8]) if dtypes[8] is not None else None
             dbo = dbias[hd:].to(dtypes[9]) if dtypes[9] is not None else None
         grads += (dbg, dbo)
+    if len(dtypes) > 10:                   # (Wo_t, out_t bias): the second update's out bias sums the same dy_s rows as the first's
+        dwt = dwo2.to(dtypes[10]) if dwo2 is not None and dtypes[10] is not None else None
+        dbt = dbias[hd:].to(dtypes[11]) if dwo2 is not None and dbias is not None and dtypes[11] is not None else None
+        grads += (dwt, dbt)
     return grads
 
 
@@ -240,19 +247,21 @@ def triangle_attention(pair, lnw, lnb, wq, wk, wv, wg, wb, wo, mask=None, eps=1e
 # ------------------------------------------------------------------------------------------------------------------------------
 # Other widths: d_pair C in 64 .. 512 (a multiple of 64), heads of 16, 32 or 64 channels. Forward: tri_wfront (LN + the five
 # projections as 2-CTA products, weights streamed in 64-column chunks; row statistics kept when training) -> the head-dim-32
-# core above (a head dim of 16 is zero-padded to 32) or the head-dim-64 core (triattn_dh64_sm100.cu, inference) -> tri_wtail
-# (sigmoid gate + out-projection + dropout + residual).
+# core above (a head dim of 16 is zero-padded to 32) or the head-dim-64 core (triattn_dh64_sm100.cu, forward + backward) ->
+# tri_wtail (sigmoid gate + out-projection + dropout + residual).
 # The model options of FoldForge's families ride on the same kernels: the gate / out-projection biases (RoseTTAFold3; the front's
 # drain adds bg to g, the tail's drain bo to the update), AlphaFold 3's ending-node bias orientation (``bt``: the front writes the
-# bias of the pair as it is; the backward reads its gradient so), and Chai-1's outputs (``out_mode``, inference): 1 = the ending
-# node's update left as the transposed pair has it (the tail writes the starting-node layout), 2 = two out-projections, the second
-# tail adding its update transposed into the first's output in place (starting: kept + other^T, ending: kept^T + other).
+# bias of the pair as it is; the backward reads its gradient so), and Chai-1's outputs (``out_mode``): 1 = the ending node's update
+# left as the transposed pair has it (the tail writes the starting-node layout), 2 = two out-projections, the second tail adding its
+# update transposed into the first's output in place (starting: kept + other^T, ending: kept^T + other).  The dropout scale stays on
+# the caller's broadcast axis, which for those tails lies across the kernel rows (``dfirst``); their backward runs the gate backward in
+# the update's orientation (untransposed) or over both orientations at once (dual: du = dy_s . Wo + dy_s^T . Wo2, u kept in both).
 # Backward (WideTrain): tri_scale_rows (dropout) -> tri_wgbwd (du = dy_s . Wo on tcgen05, the gate math and delta in its
 # drain) -> the core's backward -> tri_whbwd ([dq | dk | dv | dg | db] . W on tcgen05, the LN backward and the residual in its
 # drain, xhat | 1 written) -> the weight gradients from G = D^T [xhat | 1] (one cuBLAS GEMM, K = L^2) by the algebra of the
 # d_pair 128 path, finished by tri_wfinish. All hand kernels in triattn_wide_sm100.cu.
 WIDE_HEAD_DIMS = (16, 32, 64)
-TRAIN_HEAD_DIMS = (16, 32)            # the head-dim-64 core is forward only
+TRAIN_HEAD_DIMS = (16, 32, 64)        # every head dim has a backward (64: triattn_dh64_sm100.cu)
 WIDE_MAX_HEADS = 16                   # the packed bias block is 16 rows
 WIDE_MAX_HDP = 512                    # the front's q | k | v | g blocks and the tail's K
 
@@ -260,14 +269,14 @@ WIDE_MAX_HDP = 512                    # the front's q | k | v | g blocks and the
 @functools.lru_cache(maxsize=1)
 def _wide():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_wide_v34", sources=[str(_SRC / "triattn_wide_sm100.cu")],
+    return load_extension(name="triattn_b200_wide_v35", sources=[str(_SRC / "triattn_wide_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
 @functools.lru_cache(maxsize=1)
 def _core64():
     ensure_cuda_home()
-    return load_extension(name="triattn_b200_dh64_v1", sources=[str(_SRC / "triattn_dh64_sm100.cu")],
+    return load_extension(name="triattn_b200_dh64_v2", sources=[str(_SRC / "triattn_dh64_sm100.cu")],
                           extra_cuda_cflags=_flags(), verbose=False)
 
 
@@ -277,7 +286,7 @@ def slot(head_dim: int) -> int:
 
 
 def wide_supports(d_pair: int, d_hidden: int, n_head: int, length: int, training: bool = False) -> bool:
-    """Shapes the wide path takes (``training``: with a backward; heads of 64 channels are inference only)."""
+    """Shapes the wide path takes (``training``: with a backward)."""
     if d_pair % 64 or not 64 <= d_pair <= 512 or d_hidden % n_head or not supports(length):
         return False
     hd = d_hidden // n_head
@@ -290,8 +299,8 @@ def pack_wide_weights(wq, wk, wv, wg, wb, wo, gb=None, ob=None, wo2=None, ob2=No
     padded q / k / v / g channels come out 0 and meet zero columns of Wo):
       wcat   [Wq; Wk; Wv; Wg; Wb (16 rows)]  [4 HDp + 16, C] bf16   the front's B
       wo_p   Wo                               [C, HDp] bf16          the tail's B
-      wo_t   Wo^T                             [HDp, C] bf16          the gate backward's B (None for heads of 64: no backward)
-      wall_t [Wq; Wk; Wv; Wg; Wb (64 rows)]^T [C, 4 HDp + 64] bf16   the head backward's B (likewise)
+      wo_t   Wo^T                             [HDp, C] bf16          the gate backward's B ([Wo^T | Wo2^T] [HDp, 2C] with wo2)
+      wall_t [Wq; Wk; Wv; Wg; Wb (64 rows)]^T [C, 4 HDp + 64] bf16   the head backward's B
       gb_p   the gate bias in the padded layout, fp32 [HDp], or None
       ob     the out-projection bias, fp32 [C], or None
       wo2_p, ob2  the dual output's second out-projection (Chai-1's ``to_out_t``) as wo_p / ob, or None"""
@@ -321,19 +330,18 @@ def pack_wide_weights(wq, wk, wv, wg, wb, wo, gb=None, ob=None, wo2=None, ob2=No
     rows = [pad_rows(w) for w in (wq, wk, wv, wg)]
     wcat = torch.cat(rows + [wb16]).contiguous()
     wo_p = pad_cols(wo)
-    wo_t = wall_t = None
-    if hd in TRAIN_HEAD_DIMS:
-        wb64 = wb.new_zeros(64, C, dtype=bf)
-        wb64[:n_head] = wb.to(bf)
-        wall_t = torch.cat(rows + [wb64]).t().contiguous()
-        wo_t = wo_p.t().contiguous()
+    wb64 = wb.new_zeros(64, C, dtype=bf)
+    wb64[:n_head] = wb.to(bf)
+    wall_t = torch.cat(rows + [wb64]).t().contiguous()
+    wo2_p = None if wo2 is None else pad_cols(wo2)
+    wo_t = (wo_p if wo2_p is None else torch.cat([wo_p, wo2_p])).t().contiguous()
     gb_p = None
     if gb is not None:
         gb_p = gb.new_zeros(n_head, S, dtype=torch.float32)
         gb_p[:, :hd] = gb.float().view(n_head, hd)
         gb_p = gb_p.view(-1)
     f32 = lambda t: None if t is None else t.float().contiguous()                          # noqa: E731
-    return wcat, wo_p, wo_t, wall_t, gb_p, f32(ob), None if wo2 is None else pad_cols(wo2), f32(ob2)
+    return wcat, wo_p, wo_t, wall_t, gb_p, f32(ob), wo2_p, f32(ob2)
 
 
 def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, out=None, trans=False, bt=False, out_mode=0):
@@ -345,20 +353,20 @@ def wide_inference(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5
     return y
 
 
-def _core64_forward(q, k, v, bias, scale):
-    """The head-dim-64 core over [B, N, S, H, 64] tensors -> out [B, N, S, H, 64] (inference)."""
-    return _core64().triattn_fwd64(q, k, v, bias, scale, q.new_empty(0))[0]
+def _core64_forward(q, k, v, bias, scale, need=False):
+    """The head-dim-64 core over [B, N, S, H, 64] tensors -> (out [B, N, S, H, 64], base-2 lse [B, N, H, S] or empty unless `need`)."""
+    o, lse, _ = _core64().triattn_fwd64(q, k, v, bias, scale, q.new_empty(0), need, q.new_empty(0, dtype=torch.float32))
+    return o, lse
 
 
 def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, drop=None, need=False, out=None, trans=False, bt=False,
                  out_mode=0):
     """-> (y [B, L, L, C], saved = (q, k, v, g, bias, o, lse, stats)): lse / stats empty unless `need`; every saved tensor is a fresh
-    allocation (none aliases an argument).  bt / out_mode: see the section header (out_mode and heads of 64: inference only)."""
+    allocation (none aliases an argument).  bt / out_mode: see the section header."""
     B, L, _, C = pair.shape
     wcat, wo_p, _, _, gb, ob, wo2, ob2 = packed
     S = slot(head_dim)
     HDp = n_head * S
-    assert not need or (S == D and out_mode == 0), "heads of 64 channels and Chai-1's outputs are served for inference only"
     w = _wide()
     E32 = pair.new_empty(0, dtype=torch.float32)
     x = pair.contiguous().view(-1, C)
@@ -369,14 +377,16 @@ def wide_forward(pair, lnw, lnb, packed, n_head, head_dim, mask=None, eps=1e-5, 
     if S == D:
         o, lse = _core_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
     else:
-        o, lse = _core64_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5), E32
+        o, lse = _core64_forward(q.view(shp), k.view(shp), v.view(shp), bias, head_dim ** -0.5, need)
     o2 = o.view(-1, HDp)
     dt = drop if drop is not None else x.new_empty(0)
-    # the first (or only) out-projection: the ending node's update goes back to the pair's layout, except Chai-1's untransposed output
+    # the first (or only) out-projection: the ending node's update goes back to the pair's layout, except Chai-1's untransposed output;
+    # the dropout scale is indexed on the caller's broadcast axis: the kernel row's first position where the tail's orientation is not
+    # the node's (dfirst)
     y = w.tri_wtail(g, o2, x, wo_p, dt, L, out if out is not None else x.new_empty(0), trans and out_mode != 1,
-                    ob if ob is not None else E32)
+                    ob if ob is not None else E32, trans and out_mode == 1)
     if out_mode == 2:                       # the second out-projection, transposed against the first, added in place
-        y = w.tri_wtail(g, o2, y.view(-1, C), wo2, dt, L, y, not trans, ob2 if ob2 is not None else E32)
+        y = w.tri_wtail(g, o2, y.view(-1, C), wo2, dt, L, y, not trans, ob2 if ob2 is not None else E32, True)
     return (out if out is not None else y.view(B, L, L, C)), (q, k, v, g, bias, o, lse, stats)
 
 
@@ -388,25 +398,36 @@ def _mm32(a, b):
         return torch.mm(a, b).float()
 
 
-def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved, dtypes, trans=False, bt=False):
-    """Stacked gradients (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo, [dbg; dbo]) of `wide_forward` (`split_grads`
-    takes them apart; the weight gradients in fp32 when Wq is fp32, else bf16; [dbg (d_hidden); dbo (C)] fp32, zeros for a bias the
-    module does not have -- one tensor: a custom op's outputs may not alias, and two empty ones would)."""
+def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved, dtypes, trans=False, bt=False, out_mode=0):
+    """Stacked gradients (dpair, [dgamma; dbeta] fp32, [dWq; dWk; dWv; dWg], dWb, dWo, [dbg; dbo], dWo_t) of `wide_forward`
+    (`split_grads` takes them apart; the weight gradients in fp32 when Wq is fp32, else bf16; [dbg (d_hidden); dbo (C)] fp32, zeros for a
+    bias the module does not have -- one tensor: a custom op's outputs may not alias, and two empty ones would; dWo_t: the dual output's
+    second out-projection (its bias's gradient is dbo: the same dy_s rows), else empty)."""
     q, k, v, g, bias, o, lse, stats = saved
     B, L, _, C = pair.shape
     x = pair.contiguous().view(-1, C)
     wcat, _, wo_t, wall_t, gb, ob = packed[:6]
-    HDp = n_head * D
+    S = slot(head_dim)
+    HDp = n_head * S
     R = B * L * L
-    w, e = _wide(), _core(_rows_per_task(L))
+    w = _wide()
     dy = dy.contiguous().view(-1, C)
-    dys = w.tri_scale_rows(dy, drop, L, trans) if drop is not None and drop.numel() else dy   # (the caller's layout, as u below)
+    # dy_s in the caller's layout (as u below); the dropout scale on the node's broadcast axis
+    dys = w.tri_scale_rows(dy, drop, L, trans) if drop is not None and drop.numel() else dy
     Dall = x.new_empty(R, 4 * HDp + 64)                       # [dq | dk | dv | dg | db rows], written in place by their producers
     cut = lambda i, n=HDp: Dall[:, i * HDp:i * HDp + n]
-    do, _, u, delta = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L, trans)
-    shp = (B, L, L, n_head, D)
-    _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
-                                q.new_empty(0, dtype=torch.float32), cut(0), cut(1), cut(2))
+    # the gate backward in the update's orientation (Chai-1's untransposed output: the starting-node layout); the dual output's
+    # wo_t is [Wo^T | Wo2^T] (both orientations in one K loop, u also stored in the other: u2)
+    do, _, u, delta, u2 = w.tri_wgbwd(dys, g, o.view(-1, HDp), wo_t, cut(3), B, L, trans and out_mode != 1)
+    shp = (B, L, L, n_head, S)
+    E32 = q.new_empty(0, dtype=torch.float32)
+    if S == D:
+        e = _core(_rows_per_task(L))
+        _, _, _, db = e.triattn_bwd(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
+                                    E32, cut(0), cut(1), cut(2))
+    else:                                                     # delta per 32-channel half [B, L, 2 heads, L]: the core adds the halves
+        _, _, _, db = _core64().triattn_bwd64(q.view(shp), k.view(shp), v.view(shp), bias, do.view(shp), lse, delta, head_dim ** -0.5,
+                                              cut(0), cut(1), cut(2))
     w.tri_db_rows(db, cut(4, 64), B, L, bt)
     dpair, xh = w.tri_whbwd(Dall, x, dy, lnw, stats, wall_t, L, trans)
     # parameter gradients: G = D^T [xhat | 1] (one GEMM, K = L^2), then dW / dgamma / dbeta / dWb by the d_pair 128 algebra
@@ -419,10 +440,13 @@ def wide_backward(dy, pair, lnw, lnb, packed, n_head, head_dim, eps, drop, saved
     # the biases: d bg = the column sums of dg (G's ones column, xh[:, C] = 1), d bo = the column sums of dy_s
     dbias = x.new_zeros(n_head * head_dim + C, dtype=torch.float32)
     if gb is not None:
-        dbias[:n_head * head_dim] = G[3 * HDp:4 * HDp, C].view(n_head, D)[:, :head_dim].reshape(-1)
+        dbias[:n_head * head_dim] = G[3 * HDp:4 * HDp, C].view(n_head, S)[:, :head_dim].reshape(-1)
     if ob is not None:
         dbias[n_head * head_dim:] = _mm32(dys.t(), xh[:, C:C + 1]).view(-1)
-    return dpair.view(B, L, L, C), dgb, dw, dwb, dwo, dbias
+    dwo2 = x.new_empty(0)
+    if out_mode == 2:                                         # dWo2 = dy_s^T u2 (the padded channels dropped), in Wo's dtype
+        dwo2 = _mm32(dys.t(), u2).view(C, n_head, S)[:, :, :head_dim].reshape(C, n_head * head_dim).to(dwo.dtype)
+    return dpair.view(B, L, L, C), dgb, dw, dwb, dwo, dbias, dwo2
 
 
 class WideTrain(torch.autograd.Function):
@@ -445,7 +469,7 @@ class WideTrain(torch.autograd.Function):
     def backward(ctx, dy):
         pair, lnw, lnb, drop, *saved = ctx.saved_tensors
         n_head, head_dim, eps = ctx.dims
-        raw = wide_backward(dy, pair, lnw, lnb, ctx.packed, n_head, head_dim, eps, drop if drop.numel() else None, saved, ctx.dtypes)
+        raw = wide_backward(dy, pair, lnw, lnb, ctx.packed, n_head, head_dim, eps, drop if drop.numel() else None, saved, ctx.dtypes)[:6]
         return (*split_grads(False, raw, ctx.dtypes), None, None, None, None, None, None)
 
 
