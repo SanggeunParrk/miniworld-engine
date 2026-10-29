@@ -29,6 +29,9 @@ using namespace s100;
 #ifndef ST
 #define ST (TST ? 3 : 4)
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16                         // heads (AttentionPairBias: 8, rows NHEAD * 48 wide)
 #endif
@@ -99,6 +102,9 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
                   const float* __restrict__ DD, float* __restrict__ DK, float* __restrict__ DV, float* __restrict__ DQZ, int L, int A
 #if QSPLIT
                   , int NQ
+#endif
+#if KMASK
+                  , const uint32_t* __restrict__ KMB
 #endif
                   ) {
 #if !QSPLIT
@@ -237,8 +243,21 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     const f2 CQL = mk2(RSQD * LOG2E, RSQD * LOG2E), L2E = mk2(LOG2E, LOG2E);
     if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
+#if KMASK
+    int kli = -1;
+    f2 keep = mk2(1.f, 1.f);                                               // this thread's key of the item: 1 attends, 0 masked
+#endif
     for (int G = w, li = 0, n = w; G < nblk; G += 2, n += 2) {
       if (n >= nb) { n -= nb; ++li; }
+#if KMASK
+      if (li != kli) {
+        int a, k0, head, qc; item_of(li, a, k0, head, qc);
+        const int key = k0 + (int)r;
+        const float kp = ((__ldg(KMB + (size_t)a * (L / 32) + (key >> 5)) >> (key & 31)) & 1u) ? 1.f : 0.f;
+        keep = mk2(kp, kp);
+        kli = li;
+      }
+#endif
       const int s = G % ST;
       const uint32_t st = su + O_ST + s * STB, sb = st + 2 * TQ, sl = sb + TBT;
       if (w == 0 && r == 0) TR(5, G);
@@ -272,7 +291,11 @@ augattn_dkv_sm100(const __grid_constant__ CUtensorMap mq, const __grid_constant_
             const int j = q * 4 + e, col = cc * 32 + 2 * j;
             const float2 lse = lds64f(sl + col * 4), dd = lds64f(sl + 512 + col * 4);
             const f2 x = fma2(mk2u(sv[2 * j], sv[2 * j + 1]), CQL, fma2(mk2(bf16lo(bb[e]), bf16hi(bb[e])), L2E, mk2(-lse.x, -lse.y)));
+#if KMASK
+            const f2 p = mul2(keep, (((j) % PMOD) < PCNT) ? ex2_poly2(x) : mk2(ex2f(lo2(x)), ex2f(hi2(x))));
+#else
             const f2 p = (((j) % PMOD) < PCNT) ? ex2_poly2(x) : mk2(ex2f(lo2(x)), ex2f(hi2(x)));
+#endif
             const f2 ds = mul2(p, add2(mk2u(dv[2 * j], dv[2 * j + 1]), mk2(-dd.x, -dd.y)));
             pp[j] = pack_bf16(lo2(p), hi2(p));
             pd[j] = pack_bf16(lo2(ds), hi2(ds));
