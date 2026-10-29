@@ -14,7 +14,8 @@ the batched GEMM, ``opm_chai_epilogue`` (the pair tile of O gathered by 5-D TMA 
 memory, one tcgen05 GEMM against W', y and the statistics saved for training), and in the backward ``opm_chai_lnbwd`` (the product
 norm's backward into the grouped layout) and ``opm_chai_prologue_bwd`` (dm and the projection / LayerNorm gradients, R and the masked
 column sums on the tensor core).  A length that is not a multiple of 32 / a depth that is not a multiple of 128 is padded (masked rows add
-no product; padded pairs are cut away).
+no product; padded pairs are cut away).  B200 also serves the interchain mask (chain ids into the epilogue: a pair of two chains gets no
+update; in training its y and rstd are saved as zero and its dbias weight is zero) and a batch of MSA stacks (one stack at a time).
 """
 
 from __future__ import annotations
@@ -31,13 +32,13 @@ def _sm100(t: torch.Tensor) -> bool:
 
 
 def serves_dims(msa: torch.Tensor, groups: int, group_width: int, d_pair: int, *, mask: torch.Tensor | None = None, projection_bias: bool = False) -> bool:
-    if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] != 1:
+    if not msa.is_cuda or msa.dtype != torch.bfloat16 or msa.ndim != 4 or msa.shape[0] < 1:
         return False
-    if _sm100(msa):   # B200: any length / depth (padded), c_z 128 / 256
+    if _sm100(msa):   # B200: any length / depth (padded), c_z 128 / 256, a batch (one stack at a time)
         _, s, n, cm = msa.shape
         return (groups == G and group_width == K and cm == CM and n > 0 and s > 0 and d_pair in (128, 256) and not projection_bias
                 and (mask is None or mask.shape == msa.shape[:3]))
-    if torch.cuda.get_device_capability(msa.device) != (9, 0):
+    if torch.cuda.get_device_capability(msa.device) != (9, 0) or msa.shape[0] != 1:
         return False
     _, s, n, cm = msa.shape
     return (groups == G and group_width == K and cm == CM and n % 64 == 0 and s > 0 and d_pair % 128 == 0 and not projection_bias
@@ -45,7 +46,7 @@ def serves_dims(msa: torch.Tensor, groups: int, group_width: int, d_pair: int, *
 
 
 def serves(module, msa: torch.Tensor, mask: torch.Tensor | None, *, training: bool = False, interchain: bool = False) -> bool:
-    if training and interchain:
+    if training and interchain and not _sm100(msa):   # B200: the epilogue applies it (and zeroes what the backward reads)
         return False
     return module.to_out.weight.shape[1] == P and serves_dims(msa, module.groups, module.group_width, module.to_out.weight.shape[0], mask=mask,
                                                             projection_bias=module.to_left.bias is not None)
@@ -91,9 +92,11 @@ def _fwd_op_fake(args, eps, eps_prod, train):
     _, s, n, _ = msa.shape
     bf = torch.bfloat16
     new = lambda *shape, dt=bf: msa.new_empty(shape, dtype=dt)
+    ws = new(n * n) if train and args[11].numel() else new(0)
     if not train:
-        return [new(1, n, n, wo.shape[0]), new(0), new(0), new(0), new(0, dt=torch.float32), new(0, dt=torch.float32)]
-    return [new(1, n, n, wo.shape[0]), new(G, s * n, K), new(G, s * n, K), new(n * n, P), new(n * n, 2, dt=torch.float32), new(s * n, 2, dt=torch.float32)]
+        return [new(1, n, n, wo.shape[0]), new(0), new(0), new(0), new(0, dt=torch.float32), new(0, dt=torch.float32), ws]
+    return [new(1, n, n, wo.shape[0]), new(G, s * n, K), new(G, s * n, K), new(n * n, P), new(n * n, 2, dt=torch.float32), new(s * n, 2, dt=torch.float32),
+            ws]
 
 
 def _ext100():
@@ -111,32 +114,35 @@ def _mask100(msa, mask):
 
 
 def _fwd_sm100(args, eps, eps_prod, train):
-    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
+    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual, asym = args
     _, s, n, _ = msa.shape
     ext = _ext100()
     lnw32, lnb32, wlr, wf, bf = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
     a, b, st1 = ext.opm_chai_prologue(msa[0].contiguous(), _mask100(msa, mask), lnw32, lnb32, float(eps), wlr[:G * K], wlr[G * K:], bool(train))
     o = torch.bmm(a.view(G, s, n * K).transpose(1, 2), b.view(G, s, n * K))     # [8, N K, N K]
-    z, y, st = ext.opm_chai_epilogue(o, wf, bf, residual if residual.numel() else None, bool(train), float(eps_prod))
+    z, y, st, ws = ext.opm_chai_epilogue(o, wf, bf, residual if residual.numel() else None, bool(train), float(eps_prod),
+                                         asym if asym.numel() else None)
     if not train:
-        return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32)]
-    return [z, a, b, y, st, st1.view(-1, 2)]    # st1: [N, S, 2] (token-major), viewed as the [S N, 2] the fake declares
+        return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32), ws]
+    return [z, a, b, y, st, st1.view(-1, 2), ws]    # st1: [N, S, 2] (token-major), viewed as the [S N, 2] the fake declares
 
 
 @opaque(fake=_fwd_op_fake, name="outer_product_mean_chai_fwd")
 def _fwd_op(args: list[torch.Tensor], eps: float, eps_prod: float, train: bool) -> list[torch.Tensor]:
-    """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual] (empty tensors for no mask / residual)."""
+    """The Chai-1 OPM forward: prologue, grouped products, fused epilogue. args = [msa, mask, lnw, lnb, wl, wr, gamma, beta, wo, bo, residual,
+    asym] (empty tensors for no mask / residual / chain ids; chain ids only on B200)."""
     from miniworld_engine.kernels.outer_product_mean import cuda
     if _sm100(args[0]):
         return _fwd_sm100(args, eps, eps_prod, train)
-    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual = args
+    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual, _ = args
     forms = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
     a, b, st1, o = _front(msa, mask, forms, eps, train)
     wf, bf = forms[3], forms[4]
     z, y, st = cuda.chai_epilogue(o, wf, bf, residual if residual.numel() else None, train, eps_prod)
     if not train:
-        return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32)]
-    return [z, a, b, y, st, st1]
+        return [z, msa.new_empty(0), msa.new_empty(0), msa.new_empty(0), msa.new_empty(0, dtype=torch.float32), msa.new_empty(0, dtype=torch.float32),
+                msa.new_empty(0)]
+    return [z, a, b, y, st, st1, msa.new_empty(0)]
 
 
 def _bwd_op_fake(args, kept, dz, eps, eps_prod):
@@ -149,8 +155,8 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     """Gradients of ``_fwd_op`` (train): [dmsa, dlnw, dlnb, dwl, dwr, dgamma, dbeta, dwo, dbo] from dz and the saved a, b, y, statistics."""
     from miniworld_engine.kernels.outer_product_mean import cuda
 
-    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, _ = args
-    a, b, y, st, st1 = kept
+    msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, _, _ = args
+    a, b, y, st, st1, ws = kept
     bf, f32 = torch.bfloat16, torch.float32
     _, s, n, _ = msa.shape
     t = s * n
@@ -158,7 +164,8 @@ def _bwd_op(args: list[torch.Tensor], kept: list[torch.Tensor], dz: torch.Tensor
     dz2 = dz.reshape(n * n, cz).contiguous()
     lnw32, lnb32, wlr, wf, _ = _forms(lnw, lnb, wl, wr, gam, bet, wo, bo)
     dy = torch.mm(dz2, wf)                                                          # [N N, 512] = dz W'
-    dbo = torch.mm(dz2.new_ones((1, n * n)), dz2, out_dtype=f32).reshape(-1)        # sum over the pairs
+    # sum over the pairs (the interchain mask: over the same-chain pairs, the epilogue's 1 / 0 weights; y and rstd are zero elsewhere)
+    dbo = torch.mm(ws.view(1, n * n) if ws.numel() else dz2.new_ones((1, n * n)), dz2, out_dtype=f32).reshape(-1)
     dwp = torch.mm(dz2.t(), y, out_dtype=f32)                                       # dW' = dz^T y
     w32 = wo.float()
     dwo = dwp * gam.float()[None, :] + dbo[:, None] * bet.float()[None, :]                  # W' = W gamma, b' = b + W beta
@@ -197,22 +204,26 @@ class _ChaiFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, eps, eps_prod, *args):
         tensors = list(args)
-        z, a, b, y, st, st1 = _fwd_op(tensors, eps, eps_prod, True)
+        z, a, b, y, st, st1, ws = _fwd_op(tensors, eps, eps_prod, True)
         ctx.eps, ctx.eps_prod, ctx.has_residual = eps, eps_prod, bool(tensors[10].numel())
-        ctx.save_for_backward(*tensors, a, b, y, st, st1)
+        ctx.save_for_backward(*tensors, a, b, y, st, st1, ws)
         return z
 
     @staticmethod
     def backward(ctx, dz):
         vals = ctx.saved_tensors
-        grads = _bwd_op(list(vals[:11]), list(vals[11:]), dz.contiguous(), ctx.eps, ctx.eps_prod)
-        # args: msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual
-        return (None, None, grads[0], None, *grads[1:], dz if ctx.has_residual else None)
+        grads = _bwd_op(list(vals[:12]), list(vals[12:]), dz.contiguous(), ctx.eps, ctx.eps_prod)
+        # args: msa, mask, lnw, lnb, wl, wr, gam, bet, wo, bo, residual, asym
+        return (None, None, grads[0], None, *grads[1:], dz if ctx.has_residual else None, None)
 
 
 def forward(module, msa, mask, token_asym_id=None, residual=None):
-    n = msa.shape[2]
     interchain = module.mask_interchain and token_asym_id is not None
+    if msa.shape[0] > 1:   # B200: one MSA stack at a time (each its own autograd node)
+        return torch.cat([forward(module, msa[b:b + 1], None if mask is None else mask[b:b + 1],
+                                  token_asym_id[b:b + 1] if interchain else None, None if residual is None else residual[b:b + 1])
+                          for b in range(msa.shape[0])])
+    n = msa.shape[2]
     empty = msa.new_empty(0)
     pn = ps = 0
     if _sm100(msa):   # B200: a length to a multiple of 32, a depth to a multiple of 128, with masked rows (no product)
@@ -222,10 +233,14 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
                 mask = torch.ones(msa.shape[:3], dtype=torch.bool, device=msa.device)
             msa = torch.nn.functional.pad(msa, (0, 0, 0, pn, 0, ps))
             mask = torch.nn.functional.pad(mask, (0, pn, 0, ps))
-    fuse = residual is not None and not interchain and residual.dtype == msa.dtype and not pn
+    # B200: the chain ids go into the epilogue (padded tokens -1: their pairs are cut away), which also takes the residual
+    asym = empty.to(torch.int32)
+    if interchain and _sm100(msa):
+        asym = torch.nn.functional.pad(token_asym_id[0].to(torch.int32), (0, pn), value=-1).contiguous()
+    fuse = residual is not None and (not interchain or asym.numel() > 0) and residual.dtype == msa.dtype and not pn
     args = [msa.contiguous(), empty if mask is None else mask, module.ln_msa.weight, module.ln_msa.bias, module.to_left.weight,
             module.to_right.weight, module.product_norm.weight, module.product_norm.bias, module.to_out.weight, module.to_out.bias,
-            residual.contiguous() if fuse else empty]
+            residual.contiguous() if fuse else empty, asym]
     eps, eps_prod = float(module.ln_msa.eps), float(module.product_norm.eps)
     if torch.is_grad_enabled():
         z = _ChaiFn.apply(eps, eps_prod, *args)
@@ -234,6 +249,6 @@ def forward(module, msa, mask, token_asym_id=None, residual=None):
     z = z.view(1, n + pn, n + pn, -1)
     if pn:
         z = z[:, :n, :n]
-    if interchain:
+    if interchain and not asym.numel():
         z = z * (token_asym_id[:, :, None] == token_asym_id[:, None, :])[..., None].to(z.dtype)
     return residual + z if residual is not None and not fuse else z

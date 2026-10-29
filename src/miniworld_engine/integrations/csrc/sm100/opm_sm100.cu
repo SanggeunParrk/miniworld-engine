@@ -43,7 +43,8 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
     const __grid_constant__ CUtensorMap rmap,     // the residual, same layout
     const float* __restrict__ NORM,               // [NI][NJ] mask counts (clamped >= 1), or nullptr: counted from BITS
     const uint32_t* __restrict__ BITS, int W,     // the prologue's bit mask [N][W = S/32]
-    const void* __restrict__ BIAS, int bias_bf16, int has_res, int after) {
+    const void* __restrict__ BIAS, int bias_bf16, int has_res, int after,
+    const int* __restrict__ ASYM) {               // chain ids [N] (the interchain mask: a pair of two chains gets no update), or nullptr
   using namespace ep;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -140,6 +141,8 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
         }
         inv = 1.0f / (float)max(cnt, 1);
       }
+      // the interchain mask: the update of a pair of two chains is zero (the residual passes through)
+      const uint32_t keep = (ASYM == nullptr || __ldg(ASYM + i0 + il) == __ldg(ASYM + j0 + jl)) ? 0xffffffffu : 0u;
       wait(accf + b, (lt >> 1) & 1);
       tc_fence_after();
       if (has_res) wait(resf, lt & 1);
@@ -171,6 +174,7 @@ __global__ void __launch_bounds__(ep::THREADS, 1) opm_epilogue_sm100(
             const float a0 = v[c8 * 8 + u * 2], a1 = v[c8 * 8 + u * 2 + 1];
             __nv_bfloat162 x = after ? __float22bfloat162_rn(make_float2((a0 + bb.x) * inv, (a1 + bb.y) * inv))
                                      : __float22bfloat162_rn(make_float2(fmaf(a0, inv, bb.x), fmaf(a1, inv, bb.y)));
+            *reinterpret_cast<uint32_t*>(&x) &= keep;
             if (has_res) x = __hadd2(x, rh[u]);  // round the update first: bf16 OPM + bf16 residual
             ow[u] = *reinterpret_cast<uint32_t*>(&x);
           }
@@ -461,7 +465,8 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
     const __grid_constant__ CUtensorMap womap,    // Wo  [CZ][NCH], box (64 n, 128 z), 128B swizzle
     const __grid_constant__ CUtensorMap domap,    // dO  as (32 e, NJ j, 32 c, NI i), box (32, BJ, 4, BI), 64B swizzle
     __nv_bfloat16* __restrict__ DZP,              // dz/n [NI][NJ][CZ]
-    const uint32_t* __restrict__ BITS, int W, float* __restrict__ DBO) {
+    const uint32_t* __restrict__ BITS, int W, float* __restrict__ DBO,
+    const int* __restrict__ ASYM) {               // chain ids [N] (interchain mask: the gradient of a pair of two chains is zero), or nullptr
   using namespace dg;
   extern __shared__ __align__(1024) unsigned char raw[];
   unsigned char* smb = raw + ((1024u - (sa(raw) & 1023u)) & 1023u);
@@ -477,10 +482,11 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
   uint64_t* accf = woe + NWO;        // [NACC]
   uint64_t* acce = accf + NACC;      // [NACC] count 8
   uint64_t* bod = acce + NACC;       // [1] the last dbias GEMM retired
-  uint32_t* tslot = reinterpret_cast<uint32_t*>(bod + 1);
+  uint64_t* dzm = bod + 1;           // [NDZ] count 8: the drain warps have zeroed the dz rows of interchain pairs (the dbias GEMM's operand)
+  uint32_t* tslot = reinterpret_cast<uint32_t*>(dzm + NDZ);
   const int tid = threadIdx.x, warp = tid >> 5, lane = tid & 31;
   if (tid == 0) {
-    for (int k = 0; k < NDZ; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); }
+    for (int k = 0; k < NDZ; ++k) { bar_init(dzf + k, 1); bar_init(dze + k, 9); bar_init(dzm + k, 8); }
     for (int k = 0; k < NWO; ++k) { bar_init(wof + k, 1); bar_init(woe + k, 1); }
     for (int k = 0; k < NACC; ++k) { bar_init(accf + k, 1); bar_init(acce + k, 8); }
     bar_init(bod, 1);
@@ -543,7 +549,9 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
           mma_commit(woe + w);
           mma_commit(accf + a);
         }
-        // dbias += dz^T . 1 over this tile's 128 pairs (raw dz, before the mask count divides it)
+        // dbias += dz^T . 1 over this tile's 128 pairs (raw dz, before the mask count divides it; interchain rows zeroed by the drain)
+        wait(dzm + d, (lt / NDZ) & 1);
+        tc_fence_after();
 #pragma unroll
         for (int kk = 0; kk < NP / 16; ++kk)
           mma_ss(tmem + BO_COL, desc_mn128(dz + kk * 16 * 64, NP * 64 * 2),
@@ -568,15 +576,17 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
         const uint4 x = __ldg(bi + w), y = __ldg(bj + w);
         cnt += __popc(x.x & y.x) + __popc(x.y & y.y) + __popc(x.z & y.z) + __popc(x.w & y.w);
       }
-      const float inv = 1.0f / (float)max(cnt, 1);
+      // the interchain mask: a pair of two chains passes no gradient (inv 0 for dO and dz/n; its dz row zeroed for dbias)
+      const bool same = ASYM == nullptr || __ldg(ASYM + i0 + il) == __ldg(ASYM + j0 + jl);
+      const float inv = same ? 1.0f / (float)max(cnt, 1) : 0.f;
       const float2 inv2 = make_float2(inv, inv);
       {                                          // dz/n for dWo: this pair's 128 z, straight to global
         wait(dzf + d, (lt / NDZ) & 1);
-        const __nv_bfloat16* dz = sDZ + d * DZT;
+        __nv_bfloat16* dz = sDZ + d * DZT;
         uint4* dst = reinterpret_cast<uint4*>(DZP + ((size_t)(i0 + il) * NJ + j0 + jl) * CZ);
         {
           const int h = grp;                     // this warp's 64 of the pair's 128 z
-          const __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
+          __nv_bfloat16* rp = dz + h * NP * 64 + p * 64;
 #pragma unroll
           for (int c8 = 0; c8 < 8; ++c8) {
             uint4 u = *reinterpret_cast<const uint4*>(rp + ((c8 ^ (p & 7)) << 3));
@@ -584,9 +594,14 @@ __global__ void __launch_bounds__(dg::THREADS, 1) opm_dgrad_sm100(
             u.x = pack2(x0.x, x0.y); u.y = pack2(x1.x, x1.y); u.z = pack2(x2.x, x2.y); u.w = pack2(x3.x, x3.y);
             dst[h * 8 + c8] = u;
           }
+          // the chunk GEMMs may read this row before or after the zeros land: its dO row is multiplied by inv = 0 either way
+          if (!same)
+#pragma unroll
+            for (int c8 = 0; c8 < 8; ++c8) *reinterpret_cast<uint4*>(rp + c8 * 8) = make_uint4(0u, 0u, 0u, 0u);
         }
+        fence_proxy_async();
         __syncwarp();
-        if (lane == 0) arrive(dze + d);
+        if (lane == 0) { arrive(dze + d); arrive(dzm + d); }
       }
       for (int k = 0; k < NCK; ++k, ++g) {
         const int a = g % NACC, ob = g % NOUT;
@@ -1320,8 +1335,14 @@ __global__ void __cluster_dims__(2, 1, 1) __launch_bounds__(fz::THREADS, 1) opm_
 }  // namespace
 
 // `norm`: fp32 [ni, nj] mask counts, or int32 [N, S/32] -- the prologue's bit mask, counted per pair in-kernel
+static const int* asym_ptr(const c10::optional<torch::Tensor>& asym, int64_t n) {
+  if (!asym.has_value() || asym->numel() == 0) return nullptr;
+  TORCH_CHECK(asym->scalar_type() == torch::kInt32 && asym->is_contiguous() && asym->numel() >= n, "asym: int32 [N] chain ids");
+  return asym->data_ptr<int>();
+}
+
 torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo, torch::Tensor bias,
-                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after) {
+                           int64_t ni, int64_t nj, c10::optional<torch::Tensor> residual, int64_t after, c10::optional<torch::Tensor> asym) {
   using namespace ep;
   TORCH_CHECK(O.is_cuda() && O.scalar_type() == torch::kBFloat16 && O.is_contiguous(), "O: contiguous cuda bf16");
   TORCH_CHECK(O.size(0) == ni * CH && O.size(1) == nj * CH, "O: [ni*32, nj*32]");
@@ -1349,7 +1370,7 @@ torch::Tensor opm_epilogue(torch::Tensor O, torch::Tensor norm, torch::Tensor wo
   opm_epilogue_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>(
       (int)ni, (int)nj, ntiles, am, bm, zm, rm, bits ? nullptr : norm.data_ptr<float>(),
       bits ? reinterpret_cast<const uint32_t*>(norm.data_ptr<int>()) : nullptr, bits ? (int)norm.size(1) : 0,
-      bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0, has_res ? 1 : 0, (int)after);
+      bias.data_ptr(), bias.scalar_type() == torch::kBFloat16 ? 1 : 0, has_res ? 1 : 0, (int)after, asym_ptr(asym, std::max(ni, nj)));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return out;
 }
@@ -1412,7 +1433,8 @@ std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, tor
   return {A2, BT, norm, stats, bits};
 }
 
-std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch::Tensor wo, int64_t ni, int64_t nj, int64_t grad_bf16) {
+std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch::Tensor wo, int64_t ni, int64_t nj, int64_t grad_bf16,
+                                     c10::optional<torch::Tensor> asym) {
   using namespace dg;
   TORCH_CHECK(dz.is_cuda() && dz.scalar_type() == torch::kBFloat16 && dz.is_contiguous() && dz.numel() == ni * nj * CZ, "dz: contiguous bf16 [ni, nj, 128]");
   TORCH_CHECK(bits.scalar_type() == torch::kInt32 && bits.is_contiguous() && bits.dim() == 2 && bits.size(1) % 4 == 0, "bits: int32 [N, S/32]");
@@ -1431,7 +1453,7 @@ std::vector<torch::Tensor> opm_dgrad(torch::Tensor dz, torch::Tensor bits, torch
   if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dgrad_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   opm_dgrad_sm100<<<grid, THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, dzm, wom, dom,
       reinterpret_cast<__nv_bfloat16*>(dzp.data_ptr<at::BFloat16>()),
-      reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)bits.size(1), dbo_part.data_ptr<float>());
+      reinterpret_cast<const uint32_t*>(bits.data_ptr<int>()), (int)bits.size(1), dbo_part.data_ptr<float>(), asym_ptr(asym, std::max(ni, nj)));
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return {dO, dzp, colsum(dbo_part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32)};
 }
@@ -1626,9 +1648,9 @@ torch::Tensor opm_fused_infer(torch::Tensor a2, torch::Tensor bt, torch::Tensor 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("opm_epilogue", &opm_epilogue, "sm100 fused OPM epilogue (div-norm + proj_out + bias + optional residual)",
         py::arg("O"), py::arg("norm"), py::arg("wo"), py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(),
-        py::arg("after") = 0);
+        py::arg("after") = 0, py::arg("asym") = py::none());
   m.def("opm_dgrad", &opm_dgrad, "sm100 fused OPM dO: (dz @ Wo) / n straight into the grouped layout, dz/n and dbias alongside",
-        py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
+        py::arg("dz"), py::arg("bits"), py::arg("wo"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("asym") = py::none());
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
   m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",

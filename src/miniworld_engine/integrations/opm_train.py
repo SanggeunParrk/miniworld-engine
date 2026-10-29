@@ -112,9 +112,9 @@ def refusal(
         sm100 = msa.is_cuda and torch.cuda.get_device_capability(msa.device) == (10, 0)
         if d_hidden != CH or (not sm100 and (d_msa, d_pair) not in SHAPES):
             return f"the kernels serve d_hidden={CH} and (d_msa, d_pair) in {SHAPES}, got ({d_msa}, {d_hidden}, {d_pair})"
-        if interchain:
+        if interchain and not sm100:
             return (
-                "mask_interchain is applied after the projection and is not fused here"
+                "mask_interchain is applied after the projection and is not fused here (sm_90a)"
             )
         if msa.dtype != torch.bfloat16:
             return f"the kernels are bf16, got {msa.dtype}"
@@ -127,7 +127,7 @@ def refusal(
             return "the sm_100a backward kernels are not built yet"
         if cap == (10, 0) and (d_msa not in SM100_D_MSA or d_pair not in SM100_D_PAIR):
             return f"the sm_100a kernels serve d_msa in {SM100_D_MSA} and d_pair in {SM100_D_PAIR} (either normalisation order)"
-        if msa.shape[0] != 1:
+        if msa.shape[0] != 1 and not sm100:   # sm_100a: `outer_product_mean` runs the batch one MSA stack at a time
             return f"one MSA stack per call, got batch {msa.shape[0]}"
         s, n = msa.shape[1], msa.shape[2]
         if n == 0 or s == 0:
@@ -493,13 +493,14 @@ def _ext_wide(device=None):
     return _EXT["sm100_wide"]
 
 
-def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None):
+def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None, asym=None):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
     statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, and the epilogue, which counts
     the mask per pair from the bits instead of taking a separate [N, N] count.  `after`: the count divides the projection
     and its bias (ESMFold2's order, and AF3's as released).  `pbias` (RoseTTAFold3's left | right projection biases, [64]):
     the prologue adds them to the projections, masked like them; widths other than MiniWorld's and the biases run
-    `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices)."""
+    `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices).  `asym` (int32 [N] chain ids, the interchain mask): the epilogue
+    zeroes the update of a pair of two chains (the residual passes through)."""
     bf = torch.bfloat16
     m = msa[0].contiguous()
     mk = mask[0].contiguous()
@@ -515,14 +516,14 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
             wa.detach().to(bf).contiguous(), wb.detach().to(bf).contiguous(), pb, bool(save_stats))
         n = m.shape[1]
         wo16, bo16 = wo.detach().to(bf).contiguous(), bo.detach().to(bf).contiguous()
-        if not save_stats and cz == CZ and _fused_sm100_enabled(m.shape[0], n):
+        if not save_stats and cz == CZ and asym is None and _fused_sm100_enabled(m.shape[0], n):
             z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
             return z, m, mk, bits, a2, bt, stats, None
         o = torch.matmul(a2, bt.t())
         if cz == CZ:
-            z = ext.opm_epilogue(o, bits, wo16, bo16, n, n, residual, int(after))
+            z = ext.opm_epilogue(o, bits, wo16, bo16, n, n, residual, int(after), asym)
         else:
-            z = wext.opm_wepilogue(o, bits, wo16, bo16, n, n, residual, int(after))
+            z = wext.opm_wepilogue(o, bits, wo16, bo16, n, n, residual, int(after), asym)
         return z, m, mk, bits, a2, bt, stats, o
     a2, bt, _, stats, bits = ext.opm_prologue(
         m,
@@ -536,7 +537,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         False,
     )
     n = m.shape[1]
-    if not save_stats and _fused_sm100_enabled(m.shape[0], n):
+    if not save_stats and asym is None and _fused_sm100_enabled(m.shape[0], n):
         # inference: the products stay on chip (k-permuted weight as H100's fused kernel; the bias rounded to bf16 as below)
         z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo.detach().to(bf).contiguous(), residual, int(after))
         return z, m, mk, bits, a2, bt, stats, None
@@ -550,6 +551,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         n,
         residual,
         int(after),
+        asym,
     )
     return z, m, mk, bits, a2, bt, stats, o
 
@@ -699,14 +701,16 @@ class _OpmMath(torch.autograd.Function):
         save_stats=True,
         after=False,
         pbias=None,
+        asym=None,
     ):
         cm, cz = msa.shape[3], wo.shape[0]
-        if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: every width of `refusal`, either order, the biases
+        if torch.cuda.get_device_capability(msa.device) == (10, 0):   # B200: every width of `refusal`, either order, the biases, interchain
             z, m, mk, bits, a2, bt, stats, o = _forward_sm100(
-                _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after, pbias
+                _ext(msa.device), msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after, pbias, asym
             )
             ctx.save_o = bool(save_o)
             ctx.has_bias = pbias is not None
+            ctx.asym = asym
             ctx.save_for_backward(m, mk, bits, a2, bt, stats, lnw, lnb, wa, wb, wo, bo, *((o,) if save_o else ()))
             ctx.eps = eps
             return z
@@ -874,7 +878,8 @@ class _OpmMath(torch.autograd.Function):
             wext = _ext_wide(dz.device) if (cm, cz) != (CM, CZ) else None
             wo16 = wo.detach().to(bf).contiguous()
             dgrad = ext.opm_dgrad if cz == CZ else wext.opm_wdgrad
-            dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf))
+            # the interchain mask (chain ids): a pair of two chains passes no gradient (dO, dz/n and dbias without it)
+            dO, dzp, dbo = dgrad(dz[0].contiguous(), norm, wo16, n, n, int(bo.dtype == bf), getattr(ctx, "asym", None))
             if getattr(ctx, "after", False):   # z = (O Wo^T + b) / n: dbias = sum dz / n (the dgrad's dz/n), one cuBLAS GEMV
                 dbo = torch.mm(dzp.new_ones((1, n * n)), dzp.view(n * n, cz), out_dtype=torch.float32).view(cz)
             dA = torch.mm(bt.t(), dO.t())  # [s, (i,c)]
@@ -995,13 +1000,24 @@ class _OpmMath(torch.autograd.Function):
 
 
 def outer_product_mean(
-    module, msa: torch.Tensor, mask: torch.Tensor, residual: torch.Tensor | None = None
+    module, msa: torch.Tensor, mask: torch.Tensor, residual: torch.Tensor | None = None, token_asym_id: torch.Tensor | None = None
 ) -> torch.Tensor:
     """OPM with optional pair residual fused into the CUDA epilogue; no OPM dropout in the model.
 
     A length that is not a multiple of 64 or an MSA depth that is not a multiple of 256 is padded with rows that carry mask 0
     (they add nothing to any count or product and the prologue zeroes their projections), and the pair output is cut back; the
-    gradient to the padded rows is dropped by the pad's own backward.  The pair residual is fused only for an unpadded length."""
+    gradient to the padded rows is dropped by the pad's own backward.  The pair residual is fused only for an unpadded length.
+
+    B200 (sm_100a): `token_asym_id` [B, N] (given only for the module's interchain mask) zeroes the update of a pair of two chains in the
+    epilogue and its gradient in the dgrad; a batch of MSA stacks runs one stack at a time (each its own autograd node, the parameter
+    gradients summed by autograd)."""
+    if msa.shape[0] > 1:
+        outs = [
+            outer_product_mean(module, msa[b:b + 1], mask[b:b + 1], None if residual is None else residual[b:b + 1],
+                               None if token_asym_id is None else token_asym_id[b:b + 1])
+            for b in range(msa.shape[0])
+        ]
+        return torch.cat(outs, 0)
     eps = float(getattr(module.ln_msa, "eps", 1e-5))
     after = not getattr(module, "normalize_before_proj", True)
     cz = module.to_out.weight.shape[0]
@@ -1021,6 +1037,13 @@ def outer_product_mean(
     # RoseTTAFold3: the left | right projection biases as one fp32 vector (an empty tensor: no biases)
     pbias = (torch.cat([module.to_left.bias, module.to_right.bias]) if module.to_left.bias is not None
              else msa.new_empty((0,), dtype=torch.float32))
+    # the interchain mask: chain ids as int32 [N] (padded tokens -1: their pairs are cut away), or an empty tensor
+    asym = msa.new_empty((0,), dtype=torch.int32)
+    if token_asym_id is not None:
+        asym = token_asym_id[0].to(torch.int32)
+        if pn:
+            asym = torch.nn.functional.pad(asym, (0, pn), value=-1)
+        asym = asym.contiguous()
     tensors = [
         msa.contiguous(),
         mask,
@@ -1032,6 +1055,7 @@ def outer_product_mean(
         module.to_out.bias,
         r,
         pbias,
+        asym,
     ]
     if torch.is_grad_enabled():
         save_o = settings.current().opm_train_save_o
@@ -1109,6 +1133,7 @@ def _forward_op(
         residual=args[8] if args[8].numel() else None,
         after=after,
         pbias=args[9].detach() if args[9].numel() else None,
+        asym=args[10] if args[10].numel() else None,
     )
     sv = ctx.saved_tensors
     kept = list(sv[1:6])
@@ -1137,6 +1162,7 @@ def _backward_op(
     ctx.save_o = save_o
     ctx.after = after
     ctx.has_bias = bool(args[9].numel())
+    ctx.asym = args[10] if args[10].numel() else None
     k5 = list(kept[:5])
     if k5[0].numel() == 0:
         k5[0] = args[1][0] if args[1].dtype == torch.bool else args[1][0] != 0
@@ -1149,8 +1175,8 @@ def _backward_op(
 class OpmTrainFn(torch.autograd.Function):
     @staticmethod
     def forward(ctx, *args):
-        tensors = list(args[:10])
-        ctx.eps, ctx.save_o, ctx.after = args[10:]
+        tensors = list(args[:11])
+        ctx.eps, ctx.save_o, ctx.after = args[11:]
         ctx.has_residual = bool(tensors[8].numel())
         ctx.has_bias = bool(tensors[9].numel())
         out, *kept = _forward_op(tensors, ctx.eps, ctx.save_o, ctx.after)
@@ -1161,7 +1187,7 @@ class OpmTrainFn(torch.autograd.Function):
     def backward(ctx, dz):
         vals = ctx.saved_tensors
         grads = _backward_op(
-            list(vals[:10]), list(vals[10:]), dz, ctx.eps, ctx.save_o, ctx.after
+            list(vals[:11]), list(vals[11:]), dz, ctx.eps, ctx.save_o, ctx.after
         )
         return (
             grads[0],
@@ -1169,6 +1195,7 @@ class OpmTrainFn(torch.autograd.Function):
             *grads[1:7],
             dz if ctx.has_residual else None,
             grads[7] if ctx.has_bias else None,
+            None,
             None,
             None,
             None,
@@ -1197,6 +1224,7 @@ def _inference_op(args: list[torch.Tensor], eps: float, after: bool) -> torch.Te
             save_stats=False,
             after=after,
             pbias=args[9] if args[9].numel() else None,
+            asym=args[10] if args[10].numel() else None,
         )[0]
     return _OpmMath.forward(
         _SavedContext(),
