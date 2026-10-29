@@ -495,8 +495,8 @@ def _ext_wide(device=None):
 
 def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save_stats, after=False, pbias=None, asym=None):
     """B200: the same three stages on sm_100a kernels -- prologue (LN + both projections + mask -> A2 / BT, the LN
-    statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, and the epilogue, which counts
-    the mask per pair from the bits instead of taking a separate [N, N] count.  `after`: the count divides the projection
+    statistics as [N][S] and the mask as bits), cuBLAS for the grouped outer product, the mask counts [N, N] off the bits (one small
+    kernel, kept for the dgrad), and the epilogue.  `after`: the count divides the projection
     and its bias (ESMFold2's order, and AF3's as released).  `pbias` (RoseTTAFold3's left | right projection biases, [64]):
     the prologue adds them to the projections, masked like them; widths other than MiniWorld's and the biases run
     `opm_wide_sm100.cu` (the epilogue cuts c_z into 128-wide slices).  `asym` (int32 [N] chain ids, the interchain mask): the epilogue
@@ -520,11 +520,12 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
             z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo16, residual, int(after))
             return z, m, mk, bits, a2, bt, stats, None
         o = torch.matmul(a2, bt.t())
+        norm = ext.opm_norm(bits)   # the mask counts [N, N] (one small kernel; the epilogue and the dgrad read them, one tile ahead)
         if cz == CZ:
-            z = ext.opm_epilogue(o, bits, wo16, bo16, n, n, residual, int(after), asym)
+            z = ext.opm_epilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
         else:
-            z = wext.opm_wepilogue(o, bits, wo16, bo16, n, n, residual, int(after), asym)
-        return z, m, mk, bits, a2, bt, stats, o
+            z = wext.opm_wepilogue(o, norm, wo16, bo16, n, n, residual, int(after), asym)
+        return z, m, mk, norm, a2, bt, stats, o
     a2, bt, _, stats, bits = ext.opm_prologue(
         m,
         mk,
@@ -542,9 +543,10 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         z = ext.opm_fused_infer(a2, bt, bits, _fused_weight(wo), bo.detach().to(bf).contiguous(), residual, int(after))
         return z, m, mk, bits, a2, bt, stats, None
     o = torch.matmul(a2, bt.t())  # the grouped outer product [(i,c), (j,e)], cuBLAS NT
+    norm = ext.opm_norm(bits)     # the mask counts [N, N], read by the epilogue and the dgrad
     z = ext.opm_epilogue(
         o,
-        bits,
+        norm,
         wo.detach().to(bf).contiguous(),
         bo.detach().to(bf).contiguous(),
         n,
@@ -553,7 +555,7 @@ def _forward_sm100(ext, msa, mask, lnw, lnb, wa, wb, wo, bo, eps, residual, save
         int(after),
         asym,
     )
-    return z, m, mk, bits, a2, bt, stats, o
+    return z, m, mk, norm, a2, bt, stats, o
 
 
 def _forward_wide(
@@ -872,7 +874,7 @@ class _OpmMath(torch.autograd.Function):
                 epi_half=_epilogue_half_enabled(s, n, training=True),
             )
         if sm100:
-            # sm_100a: `mask16` is the bool mask, `norm` the bit mask, `stats` [N][S][2] -- see _forward_sm100.  MiniWorld's width
+            # sm_100a: `mask16` is the bool mask, `norm` the fp32 [N, N] mask counts, `stats` [N][S][2] -- see _forward_sm100.  MiniWorld's width
             # runs opm_sm100.cu; c_z 256 / 384 the c_z-sliced dgrad / dWo and d_msa 128 the wide prologue backward (opm_wide_sm100.cu)
             cm, cz = m.shape[2], wo.shape[0]
             wext = _ext_wide(dz.device) if (cm, cz) != (CM, CZ) else None
@@ -1090,11 +1092,11 @@ def _forward_fake(args, eps, save_o, after):
     if torch.cuda.get_device_capability(m.device) == (
         10,
         0,
-    ):  # sm_100a keeps (nothing for the mask, its bits, A2, BT, stats [N, S, 2])
+    ):  # sm_100a keeps (nothing for the mask, the mask counts [N, N], A2, BT, stats [N, S, 2])
         return [
             torch.empty((1, n, n, CZ), device=m.device, dtype=torch.bfloat16),
             torch.empty((0,), device=m.device, dtype=m.dtype),
-            torch.empty((n, s // 32), device=m.device, dtype=torch.int32),
+            torch.empty((n, n), device=m.device, dtype=torch.float32),
             torch.empty((n * CH, s), device=m.device, dtype=torch.bfloat16),
             torch.empty((n * CH, s), device=m.device, dtype=torch.bfloat16),
             torch.empty((n, s, 2), device=m.device, dtype=torch.float32),
@@ -1120,7 +1122,7 @@ def _forward_fake(args, eps, save_o, after):
 from miniworld_engine.kernels._compile import opaque
 
 
-@opaque(fake=_forward_fake, name="opm_h100_fwd")
+@opaque(fake=_forward_fake, name="opm_train_fwd")   # (was opm_h100_fwd: the sm_100a forward now keeps the mask counts, a stale cached graph must not match)
 def _forward_op(
     args: list[torch.Tensor], eps: float, save_o: bool, after: bool
 ) -> list[torch.Tensor]:
@@ -1148,7 +1150,7 @@ def _backward_fake(args, kept, dz, eps, save_o, after):
     return [torch.empty_like(args[i]) for i in (0, 2, 3, 4, 5, 6, 7, 9)]
 
 
-@opaque(fake=_backward_fake, name="opm_h100_bwd")
+@opaque(fake=_backward_fake, name="opm_train_bwd")
 def _backward_op(
     args: list[torch.Tensor],
     kept: list[torch.Tensor],
