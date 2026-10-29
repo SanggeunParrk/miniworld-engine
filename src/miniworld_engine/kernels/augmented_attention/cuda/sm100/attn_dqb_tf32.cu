@@ -33,6 +33,9 @@ using namespace s100;
 #ifndef DHP
 #define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16
 #endif
@@ -90,7 +93,11 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        const __grid_constant__ CUtensorMap mka, const __grid_constant__ CUtensorMap mkb,
                        const __grid_constant__ CUtensorMap mkm, const __grid_constant__ CUtensorMap mb,
                        const float* __restrict__ LSE, const float* __restrict__ DD, float* __restrict__ DQ, float* __restrict__ DB,
-                       int L, int A, int NS, int ldq) {
+                       int L, int A, int NS, int ldq
+#if KMASK
+                       , const uint32_t* __restrict__ KMB
+#endif
+                       ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -305,6 +312,9 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
       mbar_wait(&B.s_full[w], g & 1);
       if (g >= 1) mbar_wait(&B.ds_free[w], (g - 1) & 1);                   // dQ(g - 1) has consumed the previous dS
       tc_fence_after();
+#if KMASK
+      const uint32_t km = __ldg(KMB + (size_t)a * (L / 32) + ((c * KC + w * BN) >> 5));   // this warpgroup's 32 keys of sample a
+#endif
       if (PP) named_bar_sync(3 + w, 256);                                  // my exp turn
 #pragma unroll
       for (int h = 0; h < 2; ++h) {                                        // halves of 16 keys: S / dP in, dS out
@@ -324,7 +334,11 @@ augattn_dqb_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
             const int j = 4 * q + e;
+#if KMASK
+            const float p = ((km >> (h * 16 + j)) & 1u) ? ex2f(fmaf(__uint_as_float(sv[j]), RSQD * LOG2E, fmaf(bb[e], LOG2E, -lse))) : 0.f;
+#else
             const float p = ex2f(fmaf(__uint_as_float(sv[j]), RSQD * LOG2E, fmaf(bb[e], LOG2E, -lse)));
+#endif
             const float ds = p * (__uint_as_float(dv[j]) - dd);
             db[h * 16 + j] += ds;
             sv[j] = __float_as_uint(ds);

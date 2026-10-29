@@ -36,6 +36,9 @@ using namespace s100;
 #ifndef DHP
 #define DHP 48                           // head width: 48 (16 x 48), 32 (24 x 32), 64 (12 x 64; 16 x 64 at d 1024)
 #endif
+#ifndef KMASK
+#define KMASK 0                          // -DKMASK=1: a key mask per sample, KMB [A, L / 32] bits (bit j of word n: key 32 n + j attends);
+#endif                                   // a masked key's logit is the masked bias's -1e30 (natural units), its P exactly 0 in the backward
 #ifndef NHEAD
 #define NHEAD 16
 #endif
@@ -82,7 +85,11 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
                        const __grid_constant__ CUtensorMap mb, const __grid_constant__ CUtensorMap mdka,
                        const __grid_constant__ CUtensorMap mdkb, const __grid_constant__ CUtensorMap mdva,
                        const __grid_constant__ CUtensorMap mdvb, const float* __restrict__ LSE, const float* __restrict__ DD,
-                       float* __restrict__ DQZ, int L, int A, int ldq) {
+                       float* __restrict__ DQZ, int L, int A, int ldq
+#if KMASK
+                       , const uint32_t* __restrict__ KMB
+#endif
+                       ) {
   extern __shared__ __align__(1024) uint8_t sm[];
   const uint32_t su = smem_u32(sm);
   Bars& B = *reinterpret_cast<Bars*>(sm + O_BAR);
@@ -251,8 +258,20 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
     const int w = (warp - 4) >> 2;
     const uint32_t lb = (uint32_t)(warp & 3) * 32, r = lb + lane, trow = tmem + (lb << 16);
     if (PP && w == 1) named_bar_arrive(3, 256);                          // warpgroup 0 takes the first exp turn
+#if KMASK
+    int kli = -1;
+    float keep = 1.f;                                                      // this thread's key of the item: 1 attends, 0 masked
+#endif
     for (int G = w, li = 0, n = w; G < nblk; G += 2, n += 2) {
       if (n >= nb) { n -= nb; ++li; }
+#if KMASK
+      if (li != kli) {
+        int a, k0, head; item_of(li, a, k0, head);
+        const int key = k0 + (int)r;
+        keep = ((__ldg(KMB + (size_t)a * (L / 32) + (key >> 5)) >> (key & 31)) & 1u) ? 1.f : 0.f;
+        kli = li;
+      }
+#endif
       const int s = G % ST;
       const uint32_t st = su + O_ST + s * STB;
       const uint32_t sb = st + S_BI + (r >> 5) * (BQ * 128) + (r & 31) * 4, sl = st + S_LD;
@@ -276,7 +295,11 @@ augattn_dkv_tf32_sm100(const __grid_constant__ CUtensorMap mqa, const __grid_con
         for (int j = 0; j < 16; ++j) {
           const int jq = h * 16 + j;
           const float lse = lds32f(sl + jq * 4), dd = lds32f(sl + 512 + jq * 4), b = lds32f(sb + jq * 128);
+#if KMASK
+          const float p = keep * ex2f(fmaf(__uint_as_float(sv[j]), RSQD * LOG2E, fmaf(b, LOG2E, -lse)));
+#else
           const float p = ex2f(fmaf(__uint_as_float(sv[j]), RSQD * LOG2E, fmaf(b, LOG2E, -lse)));
+#endif
           sv[j] = __float_as_uint(p);
           dv[j] = __float_as_uint(p * (__uint_as_float(dv[j]) - dd));
         }
