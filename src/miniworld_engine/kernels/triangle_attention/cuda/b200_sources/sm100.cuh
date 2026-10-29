@@ -97,48 +97,68 @@ __device__ __forceinline__ void store_4d(const void* map, const void* src, int c
   asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
                :: "l"(map), "r"(sa(src)), "r"(c0), "r"(c1), "r"(c2), "r"(c3) : "memory");
 }
-// ---------------------------------------------------------------- pair rows in either node's layout
-// The TriangleAttention kernels walk rows (b, n, s) of the starting-node layout ([B, L (n), L (s), C], row = (b L + n) L + s). The
-// ending node's pair is the same tensor transposed: (b, n, s) sits at [b, s, n] of the caller's [B, L, L, C]. With `trans` the
-// row-tile loads / stores of the caller's tensors (x, y, dy, dx) go through 4-D maps (c, j, i, b) (`make_rows_map`) at (c0, n, s, b):
-// a box of consecutive s at one n -- the same shared-memory image as the 2-D box of the starting node (no transposed copies).
+// ---------------------------------------------------------------- pair rows in either node's layout, any length
+// The TriangleAttention kernels walk rows (b, n, s) of the starting-node layout over whole 128-token tiles ([B, L (n), L (s), C],
+// L a multiple of 128, row = (b L + n) L + s). The ending node's pair is the same tensor transposed: (b, n, s) sits at [b, s, n] of the
+// caller's [B, L, L, C]. The row-tile loads / stores of the caller's tensors (x, y, dy, dx) take a geometry `g`:
+//   bit 0      the ending node's layout (trans);
+//   bits 1 ..  the caller's own length Lr when it is shorter than the kernels' L (a ragged length: the caller's tensor is [B, Lr, Lr, C],
+//              unpadded), else 0.
+// g = 0 is the 2-D row map of the starting node; otherwise a 4-D map (c, j, i, b) over the caller's [B, Lr, Lr, C] (`make_rows_map`)
+// with a box of consecutive s at one n: (c0, s, n, b) for the starting node, (c0, n, s, b) for the ending node -- the same shared-memory
+// image as the 2-D box. Rows beyond Lr are out of the map's bounds: TMA loads them as zeros (the zero padding) and drops their stores
+// and reduce-adds (the cut), so no padded copy of the caller's tensors is made.
 __device__ __forceinline__ void rows_nsb(int row0, int L, int& n, int& s, int& b) { b = row0 / (L * L); n = (row0 / L) % L; s = row0 % L; }
-__device__ __forceinline__ void load_rows(const void* map, void* dst, uint64_t* bar, int c0, int row0, int L, bool trans) {
-  if (!trans) { load_2d(map, dst, bar, c0, row0); return; }
+__device__ __forceinline__ int geo_len(int L, int g) { return (g >> 1) ? (g >> 1) : L; }   // the caller's length
+__device__ __forceinline__ void load_rows(const void* map, void* dst, uint64_t* bar, int c0, int row0, int L, int g) {
+  if (g == 0) { load_2d(map, dst, bar, c0, row0); return; }
   int n, s, b; rows_nsb(row0, L, n, s, b);
-  load_4d(map, dst, bar, c0, n, s, b);
+  if (g & 1) load_4d(map, dst, bar, c0, n, s, b); else load_4d(map, dst, bar, c0, s, n, b);
 }
-__device__ __forceinline__ void load_rows(const void* map, uint32_t dst, uint32_t bar, int c0, int row0, int L, bool trans) {
-  if (!trans) { load_2d(map, dst, bar, c0, row0); return; }
+__device__ __forceinline__ void load_rows(const void* map, uint32_t dst, uint32_t bar, int c0, int row0, int L, int g) {
+  if (g == 0) { load_2d(map, dst, bar, c0, row0); return; }
   int n, s, b; rows_nsb(row0, L, n, s, b);
+  const int d1 = (g & 1) ? n : s, d2 = (g & 1) ? s : n;
   asm volatile("cp.async.bulk.tensor.4d.shared::cluster.global.mbarrier::complete_tx::bytes [%0], [%1, {%3, %4, %5, %6}], [%2];\n"
-               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+               :: "r"(dst), "l"(map), "r"(bar), "r"(c0), "r"(d1), "r"(d2), "r"(b) : "memory");
 }
-__device__ __forceinline__ void store_rows(const void* map, uint32_t src, int c0, int row0, int L, bool trans) {
-  if (!trans) { store_2d(map, src, c0, row0); return; }
+__device__ __forceinline__ void store_rows(const void* map, uint32_t src, int c0, int row0, int L, int g) {
+  if (g == 0) { store_2d(map, src, c0, row0); return; }
   int n, s, b; rows_nsb(row0, L, n, s, b);
+  const int d1 = (g & 1) ? n : s, d2 = (g & 1) ? s : n;
   asm volatile("cp.async.bulk.tensor.4d.global.shared::cta.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
-               :: "l"(map), "r"(src), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+               :: "l"(map), "r"(src), "r"(c0), "r"(d1), "r"(d2), "r"(b) : "memory");
 }
-__device__ __forceinline__ void store_rows(const void* map, const void* src, int c0, int row0, int L, bool trans) {
-  store_rows(map, sa(src), c0, row0, L, trans);
+__device__ __forceinline__ void store_rows(const void* map, const void* src, int c0, int row0, int L, int g) {
+  store_rows(map, sa(src), c0, row0, L, g);
 }
 // bf16 / fp32 reduce-add of a row tile into the caller's tensor
-__device__ __forceinline__ void reduce_rows(const void* map, const void* src, int c0, int row0, int L, bool trans) {
-  if (!trans) {
+__device__ __forceinline__ void reduce_rows(const void* map, const void* src, int c0, int row0, int L, int g) {
+  if (g == 0) {
     asm volatile("cp.reduce.async.bulk.tensor.2d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3}], [%1];\n"
                  :: "l"(map), "r"(sa(src)), "r"(c0), "r"(row0) : "memory");
     return;
   }
   int n, s, b; rows_nsb(row0, L, n, s, b);
+  const int d1 = (g & 1) ? n : s, d2 = (g & 1) ? s : n;
   asm volatile("cp.reduce.async.bulk.tensor.4d.global.shared::cta.add.tile.bulk_group [%0, {%2, %3, %4, %5}], [%1];\n"
-               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(n), "r"(s), "r"(b) : "memory");
+               :: "l"(map), "r"(sa(src)), "r"(c0), "r"(d1), "r"(d2), "r"(b) : "memory");
 }
-// element offset of row `row` of the starting-node layout in the caller's tensor ([B, L, L, ld], rows of ld elements)
-__device__ __forceinline__ long row_at(long row, int L, bool trans) {
-  if (!trans) return row;
+// element-row offset of row `row` of the starting-node layout in the caller's tensor ([B, Lr, Lr, ld], rows of ld elements), or -1 for a
+// row beyond the caller's length (a ragged length's pad: read it as zeros)
+__device__ __forceinline__ long row_at(long row, int L, int g) {
+  if (g == 0) return row;
   const long ll = (long)L * L, b = row / ll, n = (row / L) % L, s = row % L;
-  return (b * L + s) * L + n;
+  const long lr = geo_len(L, g);
+  if (n >= lr || s >= lr) return -1;
+  return (g & 1) ? (b * lr + s) * lr + n : (b * lr + n) * lr + s;
+}
+// row of the dropout scale [B, Lr, C] (the caller's broadcast scale) for kernel row `row`: position s (the row's last) or, with `first`,
+// n; a position beyond the caller's length reads its last row (any finite scale: the pad rows' updates are cut, their dy is zero)
+__device__ __forceinline__ long drop_row(long row, int L, int g, bool first) {
+  const long lr = geo_len(L, g);
+  const long pos = first ? (row / L) % L : row % L;
+  return (row / ((long)L * L)) * lr + (pos < lr ? pos : lr - 1);
 }
 __device__ __forceinline__ void bulk_commit() { asm volatile("cp.async.bulk.commit_group;\n" ::: "memory"); }
 template <int N> __device__ __forceinline__ void bulk_wait_read() { asm volatile("cp.async.bulk.wait_group.read %0;\n" :: "n"(N) : "memory"); }
@@ -387,15 +407,21 @@ inline CUtensorMap make_map(const void* base, const uint64_t (&dims)[R], const u
   return m;
 }
 
-// A row-tile map over the caller's pair-shaped tensor [B, L, L, cols] (rows at stride ld): 2-D (cols, rows) for the starting node
-// (trans_L = 0), else 4-D (cols, L (j), L (i), B) with a box of br rows along i at one j (see load_rows).
+// A row-tile map over the caller's pair-shaped tensor for the kernels' rows = B L^2 (L a multiple of the box), geometry `g` (see
+// load_rows): 2-D (cols, rows) for g = 0, else 4-D (cols, Lr (j), Lr (i), B) over the caller's [B, Lr, Lr, cols] (rows at stride ld),
+// a box of br rows along s at one n (along j for the starting node, along i for the ending node).
 inline CUtensorMap make_rows_map(const void* base, uint64_t cols, uint64_t rows, uint64_t ld, uint32_t bc, uint32_t br, CUtensorMapSwizzle sw,
-                                 const char* what, long trans_L, CUtensorMapDataType dt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, int esize = 2) {
-  if (trans_L == 0) return make_map<2>(base, {cols, rows}, {ld}, {bc, br}, sw, what, dt, esize);
-  const uint64_t L = (uint64_t)trans_L, B = rows / (L * L);
-  TORCH_CHECK(B * L * L == rows && L % br == 0, what, ": rows = B L^2 and L a multiple of the box");
-  return make_map<4>(base, {cols, L, L, B}, {ld, ld * L, ld * L * L}, {bc, 1u, br, 1u}, sw, what, dt, esize);
+                                 const char* what, long L, int g, CUtensorMapDataType dt = CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, int esize = 2) {
+  if (g == 0) return make_map<2>(base, {cols, rows}, {ld}, {bc, br}, sw, what, dt, esize);
+  const uint64_t Lk = (uint64_t)L, B = rows / (Lk * Lk), Lr = (g >> 1) ? (uint64_t)(g >> 1) : Lk;
+  TORCH_CHECK(B * Lk * Lk == rows && Lk % br == 0 && Lr <= Lk, what, ": rows = B L^2, L a multiple of the box, Lr <= L");
+  if (g & 1) return make_map<4>(base, {cols, Lr, Lr, B}, {ld, ld * Lr, ld * Lr * Lr}, {bc, 1u, br, 1u}, sw, what, dt, esize);
+  return make_map<4>(base, {cols, Lr, Lr, B}, {ld, ld * Lr, ld * Lr * Lr}, {bc, br, 1u, 1u}, sw, what, dt, esize);
 }
+// the geometry of a call: trans (the ending node), lr = the caller's length when it is not the kernels' L (else 0 or L)
+inline int rows_geo(bool trans, long L, long lr) { return (trans ? 1 : 0) | ((lr > 0 && lr != L) ? (int)(lr << 1) : 0); }
+// the caller's length of a geometry
+inline long geo_rows_len(long L, int g) { return (g >> 1) ? (long)(g >> 1) : L; }
 
 // sum a [splits, ...] fp32 buffer over dim 0 -> dtype (fp32 or bf16), deterministic
 inline torch::Tensor colsum(const torch::Tensor& part, torch::ScalarType dtype = torch::kFloat32) {
