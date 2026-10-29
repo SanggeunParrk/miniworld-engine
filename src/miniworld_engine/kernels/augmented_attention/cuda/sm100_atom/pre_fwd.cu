@@ -168,6 +168,7 @@ void atom_pre_cross_fwd_sm90(const __grid_constant__ CUtensorMap ma,
 // Cross-attention mode (-DCROSS=1, ``pre_fwd_kv``): the keys and values are projected from a second AdaLN of x1,
 //   xkv = rn(LN(x1) sigmoid(mkv_pre + bs) + mkv_shift)      (mkv [M, 256] = [pre-sigmoid scale | shift]: the K / V modulation GEMM's output)
 //   K = rn(xkv Wk^T);  V = rn(xkv Wv^T)
+// (-DPARALLEL=1: AlphaFold 3's xkv = LN(a) sigmoid(mkv_pre + bs) + mkv_shift, the raw atoms' statistics reused)
 // computed from the registers that hold x1 (a second LayerNorm over the same eight threads), written to its own staging tile (the B operand of
 // the K / V projections; saved for the backward when ``save``). Q and G read the x1 tile as before. Input stages are 40 KB (a | s1 | bi1 | mkv)
 // so two (NI = 2) fit beside the x1 / xkv rings (3 tiles each) and the outputs; (NI = 3 needs a two-deep xkv ring, whose extra wait on
@@ -181,6 +182,9 @@ using namespace s100;
 #endif
 #ifndef CROSS
 #define CROSS 0
+#endif
+#ifndef PARALLEL
+#define PARALLEL 0                         // CROSS: the K / V AdaLN normalises the raw atoms a (AlphaFold 3) instead of x1 (Protenix)
 #endif
 #ifndef NI
 #define NI (CROSS ? 2 : 4)
@@ -385,7 +389,12 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
         sts128(xs + kb * KBLK + aoff, make_uint4(ox[kb][0], ox[kb][1], ox[kb][2], ox[kb][3]));
       }
       if (CROSS) {                                                         // xkv = LN(x1) sigmoid(pre + bs) + shift, from the x1 just rounded
-        float y[16];
+        float y[16];                                                       // (PARALLEL: LN(a), the statistics above)
+#if PARALLEL
+#pragma unroll
+        for (int e = 0; e < 16; ++e) y[e] = x[e];
+        const float mean2 = mean, rstd2 = rstd;
+#else
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb)
 #pragma unroll
@@ -400,6 +409,7 @@ atom_pre_fwd_sm100(const __grid_constant__ CUtensorMap ma, const __grid_constant
         for (int e = 0; e < 16; ++e) { const float d = y[e] - mean2; v2 += d * d; }
         v2 += __shfl_xor_sync(~0u, v2, 1); v2 += __shfl_xor_sync(~0u, v2, 2); v2 += __shfl_xor_sync(~0u, v2, 4);
         const float rstd2 = rsqrtf(v2 * (1.f / C) + eps);
+#endif
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
           const uint4 pu = lds128(st + 3 * T_ + kb * KBLK + aoff), hu = lds128(st + 3 * T_ + (2 + kb) * KBLK + aoff);

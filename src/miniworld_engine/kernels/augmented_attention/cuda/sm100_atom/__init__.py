@@ -101,11 +101,13 @@ KERNELS = {
     "cond": ("cond_fwd", "atom_cond_fwd_sm100", _SMEM, True),
     "pre": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True),
     "prex": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1",)),
+    "prexp": ("pre_fwd", "atom_pre_fwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1")),
     "post": ("post_fwd", "atom_post_fwd_sm100", _SMEM, True),
     "trg": ("tr_bwd_gate", "atom_tr_bwd_gate_sm100", _SMEM, True),
     "postb": ("post_bwd", "atom_post_bwd_sm100", _SMEM, True),
     "preb": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True),
     "prebx": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True, ("CROSS=1",)),
+    "prebxp": ("pre_bwd", "atom_pre_bwd_sm100", _SMEM, True, ("CROSS=1", "PARALLEL=1")),
     "condb": ("cond_bwd", "atom_cond_bwd_sm100", _SMEM, True),
 }
 
@@ -349,9 +351,10 @@ def pre_fwd(a, mod, W, bq, save=False, eps=1e-5, cross=False):
     return Q, K, V, G, X
 
 
-def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
+def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5, parallel=False):
     """The cross-attention mode's ``pre_fwd``: K and V from xkv = LN(x1) sigmoid(mkv[:, :128] + bs) + mkv[:, 128:] (a second AdaLN of x1)
-    instead of from x1. -> Q, K, V, G [M, 128] bf16 and, when ``save``, x1 and xkv (else X = G, XK = None)."""
+    instead of from x1; ``parallel`` (AlphaFold 3): of the raw atoms, xkv = LN(a) sigmoid(..) + .. -> Q, K, V, G [M, 128] bf16 and, when
+    ``save``, x1 and xkv (else X = G, XK = None)."""
     M = a.shape[0]
     Q, K, V, G = (
         torch.empty(M, DM, device=a.device, dtype=torch.bfloat16) for _ in range(4)
@@ -372,7 +375,7 @@ def pre_fwd_kv(a, mod, W, bq, mkv, bs, save=False, eps=1e-5):
     )
     ntile = M // 32
     d = _dev(a)
-    atom_kernel("prex", d)(
+    atom_kernel("prexp" if parallel else "prex", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
@@ -608,10 +611,11 @@ def pre_bwd(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, eps=1e-5):
     return DS
 
 
-def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5):
+def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5, parallel=False):
     """The cross-attention mode's ``pre_bwd``: dP = [dq | dk | dv | dg] with WT the real [Wq; Wk; Wv; Wg]^T; k and v come from xkv = LN(x1)
     sigmoid(mkv[:, :128] + bs) + mkv[:, 128:], whose backward (dxkv = dk Wk + dv Wv, in the kernel) is added to dx1 before AdaLN 1's.
-    -> d single [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | dxkv]; d bs (fp32 [128]) is added into DBS."""
+    -> d single [M, 128] and dmkv [M, 256] = [d pre-sigmoid scale | dxkv]; d bs (fp32 [128]) is added into DBS. ``parallel`` (AlphaFold 3,
+    xkv = LN(a) ..): the K / V AdaLN's LN backward goes into d single (x1 is not read)."""
     M = a.shape[0]
     DS = torch.empty(M, DM, device=a.device, dtype=torch.bfloat16)
     dmkv = torch.empty(M, 2 * DM, device=a.device, dtype=torch.bfloat16)
@@ -629,7 +633,7 @@ def pre_bwd_kv(dP, a, mod, DA, WT, dmod, DBIAS, DBQ, x1, mkv, bs, DBS, eps=1e-5)
     )
     ntile = M // 16
     d = _dev(a)
-    atom_kernel("prebx", d)(
+    atom_kernel("prebxp" if parallel else "prebx", d)(
         (min(num_sms(d), ntile), 1, 1),
         (384, 1, 1),
         *maps,
@@ -780,11 +784,12 @@ def _nfull(tiles, nsm_):
     return full if 0 < tail and 2 * tail <= nsm_ else tiles
 
 
-def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
+def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None, parallel=False):
     """Fused AdaLN 1 (+ the cross mode's K / V AdaLN, when mks / mkb are given) and the four input projections (``atom_pre_tf32``):
     s [M, 128] fp32 contiguous, s1 / b1 (and mks / mkb) fp32 [M, 128] views with a common row stride each, wp the tf32-rounded [512, 128]
     pack ([q; g; k; v] with mks, else [q; k; v; g]), bq [128] -> P [M, 512] fp32 (the blocks in rndmask tf32-rounded). ``nfull`` (default
-    ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves."""
+    ``_nfull``): the 128-row tiles run whole; the others as two 128 x 256 column halves. ``parallel`` (AlphaFold 3): the K / V AdaLN
+    normalises s instead of x1."""
     M = s.shape[0]
     assert (
         M % 128 == 0
@@ -814,7 +819,7 @@ def pre32(s, s1, b1, wp, bq, rndmask, mks=None, mkb=None, eps=1e-5, nfull=None):
         mkb,
         int(mks.stride(0)) if cross else 0,
         bq,
-        int(cross),
+        int(2 if cross and parallel else cross),
         int(rndmask),
         int(M),
         float(eps),

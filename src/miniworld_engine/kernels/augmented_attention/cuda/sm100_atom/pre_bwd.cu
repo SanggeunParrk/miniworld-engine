@@ -129,6 +129,8 @@ extern "C" __global__ void atom_grad_pack_sm90(const float* p0,const float* p1,c
 // which goes through the AdaLN's backward in the row stage (x1 and pre are staged: two more tiles) into dx1_kv, added to dx1 = rn(dg Wg + dq Wq)
 // in bf16 before AdaLN 1's backward; dmkv = [dpre | dxkv] is stored and d bs reduced. 44-KB stages, two per warpgroup. This replaces a K = 256
 // cuBLAS GEMM, a separate K / V AdaLN backward kernel and the dx1_kv round trip of the separate formulation.
+// -DPARALLEL=1 (AlphaFold 3, xkv = LN(a) sigmoid(pre + bs) + shift): the K / V AdaLN's backward reads the staged a (x1 is not loaded) and its
+// LN backward is added to d single instead of dx1.
 // TMEM: W^T 0 (256 columns, projection p at 64 p); warpgroup w's accumulators at 256 + 64 w + 16 p.
 // SPDX-License-Identifier: Apache-2.0
 #include "sm100.cuh"
@@ -136,6 +138,9 @@ using namespace s100;
 
 #ifndef CROSS
 #define CROSS 0
+#endif
+#ifndef PARALLEL
+#define PARALLEL 0                         // CROSS: the K / V AdaLN of the raw atoms a (AlphaFold 3): its LN backward goes to d single
 #endif
 #ifndef NSW
 #define NSW (CROSS ? 2 : 3)                // input stages per warpgroup
@@ -216,10 +221,10 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         if (i >= NSW) mbar_wait(&B.infree[w][s], ((i / NSW) - 1) & 1);
         const uint32_t st = stage(w, i);
         uint64_t* bar = &B.infull[w][s];
-        mbar_expect_tx(bar, (CROSS ? 18 : 14) * KB);
+        mbar_expect_tx(bar, (CROSS ? (PARALLEL ? 16 : 18) : 14) * KB);
         if (CROSS)
           for (int kb = 0; kb < 2; ++kb) {
-            tma_load_2d(st + O_X1 + kb * KB, &mx1, bar, 64 * kb, r0);
+            if (!PARALLEL) tma_load_2d(st + O_X1 + kb * KB, &mx1, bar, 64 * kb, r0);
             tma_load_2d(st + O_MP + kb * KB, &mmkv, bar, 64 * kb, r0);        // the pre-sigmoid scale: mkv's columns 0 .. 127
           }
         for (int kb = 0; kb < 8; ++kb) tma_load_2d(st + O_DP + kb * KB, &mdp, bar, 64 * kb, r0);
@@ -340,7 +345,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         float y[16], dy[16], dxn[16];
 #pragma unroll
         for (int kb = 0; kb < 2; ++kb) {
-          const uint4 yu = lds128(st + O_X1 + kb * KB + aoff), du = lds128(st + O_DXKV + kb * KB + aoff);
+          const uint4 yu = lds128(st + (PARALLEL ? O_A : O_X1) + kb * KB + aoff), du = lds128(st + O_DXKV + kb * KB + aoff);
           const uint32_t y4[4] = {yu.x, yu.y, yu.z, yu.w}, d4[4] = {du.x, du.y, du.z, du.w};
 #pragma unroll
           for (int e = 0; e < 4; ++e) {
@@ -421,7 +426,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
         for (int kb = 0; kb < 2; ++kb) {
           uint4 dxu = lds128(st + O_X + kb * KB + aoff);
           const uint4 gu = lds128(st + O_S1 + kb * KB + aoff);
-          if (CROSS) {                                                   // dx1 += dx1_kv (bf16), and dbi1 = the sum
+          if (CROSS && !PARALLEL) {                                      // dx1 += dx1_kv (bf16), and dbi1 = the sum
             dxu.x = badd2(dxu.x, kvo[kb][0]); dxu.y = badd2(dxu.y, kvo[kb][1]); dxu.z = badd2(dxu.z, kvo[kb][2]); dxu.w = badd2(dxu.w, kvo[kb][3]);
             sts128(st + O_X + kb * KB + aoff, dxu);
           }
@@ -450,6 +455,7 @@ atom_pre_bwd_sm100(const __grid_constant__ CUtensorMap mdp, const __grid_constan
           for (int e = 0; e < 4; ++e) {
             const int k = 8 * kb + 2 * e;
             ds[e] = badd2(y4[e], pack_bf16(rstd * (dxn[k] - m1 - x[k] * m2), rstd * (dxn[k + 1] - m1 - x[k + 1] * m2)));
+            if (CROSS && PARALLEL) ds[e] = badd2(ds[e], kvo[kb][e]);      // + the K / V AdaLN's LN backward (of a as well)
           }
           sts128(st + O_DA + kb * KB + aoff, make_uint4(ds[0], ds[1], ds[2], ds[3]));
           sts128(st + O_S1 + kb * KB + aoff, make_uint4(dsc[4 * kb], dsc[4 * kb + 1], dsc[4 * kb + 2], dsc[4 * kb + 3]));
