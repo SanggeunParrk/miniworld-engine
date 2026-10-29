@@ -1,8 +1,9 @@
 """The OuterProductMean options of FoldForge's families on B200 inference: Protenix-v2 / OpenDDE widths (d_msa 128, d_pair 256 / 384),
 either normalisation order, RoseTTAFold3's biased projections, Chai-1's 8 groups with the product LayerNorm, a batch of two MSA stacks.
-One MSA stack at the widths of ``opm_train.SM100_D_MSA`` / ``SM100_D_PAIR`` (the biases included) runs the sm_100a kernels
-(``integrations.opm_train``), Chai-1 its sm_100a passes (``kernels.outer_product_mean.chai``); a batch the composed CUDA / cuBLAS path.  Against the fp64 statements: the engine's bf16
-error held to 1.5x the bf16 statements' own, and the call must not run the PyTorch statements."""
+The widths of ``opm_train.SM100_D_MSA`` / ``SM100_D_PAIR`` (the biases included) run the sm_100a kernels (``integrations.opm_train``),
+Chai-1 its sm_100a passes (``kernels.outer_product_mean.chai``); a batch of MSA stacks runs the same kernels one stack at a time (since
+2026-10-29; it ran the composed CUDA / cuBLAS path before).  Against the fp64 statements: the engine's bf16 error held to 1.5x the bf16
+statements' own, and the call must not run the PyTorch statements."""
 
 import copy
 
@@ -49,8 +50,6 @@ def build(d_msa, d_pair, d_hidden, options):
 @pytest.mark.parametrize(("b", "s", "n", "residual"), [(1, 512, 128, True), (1, 1024, 256, False), (2, 256, 192, False), (1, 200, 100, True)])
 def test_variant_matches_fp64_statements(name, b, s, n, residual, monkeypatch):
     d_msa, d_pair, d_hidden, options, served_by = VARIANTS[name]
-    if b > 1 and served_by in ("opm_train", "chai"):
-        served_by = "inference"   # one MSA stack per call on the sm_100a kernels: a batch runs the composed path
     calls = []
     if served_by == "opm_train":
         real = opm_train.outer_product_mean
