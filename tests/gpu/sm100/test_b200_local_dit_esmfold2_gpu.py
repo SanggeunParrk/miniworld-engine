@@ -106,6 +106,7 @@ def test_what_is_served():
         assert local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 activations and parameters: the TF32 kernels
         with torch.autocast("cuda", dtype=torch.bfloat16):
             assert not local_dit.serves(blk.float(), s, c, z, mask, rope)   # fp32 under autocast: the module path
+    assert local_dit.serves(blk.float(), s, c, z, mask, rope)       # ... with a gradient too (_EsmBlock32)
 
 
 # ------------------------------------------------------------------------------------------------ the fp32 path (TF32), inference
@@ -212,6 +213,49 @@ def test_training_matches_the_pytorch_module(a, n, real, params, monkeypatch):
         assert torch.isfinite(f).all(), k
         ef, em = _rel(f, t), _rel(m, t)
         assert ef < 1.5 * em + 3e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+@pytest.mark.parametrize(("a", "n", "real"), TRAIN_CASES)
+def test_fp32_training_matches_the_pytorch_module(a, n, real, monkeypatch):
+    """fp32 activations and parameters (the TF32 kernels): every gradient against the fp64 module, no worse than the fp32 module path with TF32 on."""
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    ref = _block(ImplementationType.PYTORCH).cuda().double()
+    ref.load_state_dict(blk.state_dict())
+    s, c, z, mask, rope = _inputs(a, n, real, seed=5)
+    w = torch.randn(a, 1, n, 128, device="cuda", dtype=torch.float64)
+    w[:, :, real:] = 0
+    shared = a > 1 and n % 2 == 0
+    truth = _train(ref, (s, c, z), w, mask, tuple(t.double() for t in rope), dtype=torch.float64, shared=shared)
+    calls = []
+    orig = local_dit._EsmBlock32.apply
+    monkeypatch.setattr(local_dit._EsmBlock32, "apply", lambda *x: calls.append("train32") or orig(*x))
+    fused = _train(blk, (s, c, z), w, mask, rope, dtype=torch.float32, shared=shared)
+    assert calls == ["train32"], calls
+    override_setting(monkeypatch, "local_dit_sm100", "0")
+    tf32 = torch.backends.cuda.matmul.allow_tf32
+    torch.backends.cuda.matmul.allow_tf32 = True
+    try:
+        module = _train(blk, (s, c, z), w, mask, rope, dtype=torch.float32, shared=shared)
+    finally:
+        torch.backends.cuda.matmul.allow_tf32 = tf32
+    assert set(fused) == set(truth)
+    for k in truth:
+        f, t, m = fused[k], truth[k], module[k]
+        if k == "out":
+            f, t, m = f[:, :, :real], t[:, :, :real], m[:, :, :real]
+        assert f.dtype == torch.float32 and torch.isfinite(f).all(), k
+        ef, em = _rel(f, t), _rel(m, t)
+        assert ef < 1.5 * em + 1e-3, f"{k}: sm_100a {ef:.2e} vs module path {em:.2e}"
+
+
+def test_fp32_training_is_deterministic():
+    blk = _block(ImplementationType.MINIWORLD).cuda()
+    s, c, z, mask, rope = _inputs(3, 640, 600, seed=14)
+    w = torch.randn(3, 1, 640, 128, device="cuda", dtype=torch.float64)
+    first = _train(blk, (s, c, z), w, mask, rope, dtype=torch.float32, shared=True)
+    again = _train(blk, (s, c, z), w, mask, rope, dtype=torch.float32, shared=True)
+    for k in first:
+        assert torch.equal(first[k], again[k]), k
 
 
 def test_training_is_deterministic():

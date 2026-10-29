@@ -13,6 +13,7 @@ The attention stage of ``modules/atom_local``'s block, forward and backward; mma
                  over their slid keys after the window kernel (inference).
   lattn_esm.cu, lattn_esm_dq.cu, lattn_esm_dkv.cu, lesm.cu   ESMFold2's 192-key rank-window attention (forward; dQ + bias gradient;
                  dK / dV) and its q / k RMSNorm + rotary, position-indexed pair bias and conditioning SiLU (inference and training).
+                 Their fp32 twins: lattn_esm_tf32.cu, lattn_esm_dq_tf32.cu, lattn_esm_dkv_tf32.cu (tcgen05 kind::tf32).
   lcross.cu      the row kernels of the cross-attention mode (keys / values from a second AdaLN): LN of the conditioning, the K / V AdaLN
                  (the K / V AdaLN and its backward are inside ``sm100_atom``'s pre_fwd / pre_bwd, ``-DCROSS=1``).
 
@@ -523,6 +524,9 @@ KERNELS_ESM32 = {
     "esm_qk32": ("lesm", "local_esm_qkrope_f32", 0),
     "esm_qk_b32": ("lesm", "local_esm_qkrope_bwd_f32", 0),
     "esm_qk_fin": ("lesm", "local_esm_qk_fin", 0),
+    "esm_dq32": ("lattn_esm_dq_tf32", "local_attn_esm_dq_tf32", 229632),
+    "esm_dkv32": ("lattn_esm_dkv_tf32", "local_attn_esm_dkv_tf32", 166144),
+    "esm_bias_s": ("lesm", "local_esm_bias_scatter", 0),
 }
 
 
@@ -564,6 +568,48 @@ def esm_qkrope_bwd32(dq, dk, q, k, wq, wk, cos, sin, eps):
                                  int(M), int(cos.shape[0]), float(eps))
     _load_esm32("esm_qk_fin", d)((1, 1, 1), (512, 1, 1), part, int(nb), out)
     return out
+
+
+def attn_esm_bwd32(q, k, v, do, bias2, lse, dd, dq, dkv):
+    """The backward of :func:`attn_esm32` (tcgen05 kind::tf32): q, k, v, do fp32 [A, N, 128] views (tf32-rounded; unit column stride),
+    bias2, lse [A, 4, N], dd [A, 4, N] -> dQ fp32 into ``dq`` [A N, 128] and dK, dV into the columns 128..255 / 256..383 of ``dkv``
+    [A N, >= 384] (fp32 views with one row stride); returns the bias gradient [4, nwin, 32, 160] fp32 (natural units, summed over the
+    samples in a fixed order)."""
+    A, N, _ = q.shape
+    nwin = nwindows(N)
+    d = _dev(q)
+    ldd = dkv.stride(0)
+    assert dkv.dtype == dq.dtype == torch.float32 and dkv.stride(1) == dq.stride(1) == 1 and dq.stride(0) == ldd
+    nq = N // 128
+    sp = max(1, min(A, num_sms(d) // (nq * NH)))
+    dbias = torch.empty((sp, NH, nwin, WQ, ESM_SPAN) if sp > 1 else (NH, nwin, WQ, ESM_SPAN), device=q.device, dtype=torch.float32)
+    _load_esm32("esm_dq32", d)(
+        (nq * NH * sp, 1, 1), (512, 1, 1),
+        _rows32(q, 128), _rows32(k, 256), _rows32(v, 256), _rows32(do, 128), lse, dd, _rows32(k, 256, "128a32"),
+        bias2, dq, int(ldd), dbias, int(N), int(A), int(nwin), int(sp),
+    )
+    _load_esm32("esm_dkv32", d)(
+        (nq * NH * sp, 1, 1), (512, 1, 1),
+        _rows32(q, 256), _rows32(q, 256, "128a32"), _rows32(k, 128), _rows32(v, 128), _rows32(do, 256), _rows32(do, 256, "128a32"),
+        _vec(lse, 256), _vec(dd, 256), bias2, dkv, int(ldd), int(N), int(A), int(nwin), int(sp),   # dkv: dK at its column 128, dV at 256
+    )
+    return dbias.sum(0) if sp > 1 else dbias
+
+
+def esm_bias_bwd32(z, gamma, wb, dbias2, kmask, n0, eps=1e-5):
+    """:func:`esm_bias_bwd` for an fp32 trunked pair z [nwin, 32, 192, 16]: dbias2 scattered to the pair's slots (``lesm.cu``), then the fp32
+    pair-bias backward (``lbias_tf32.cu``) -> dz fp32, dgamma [16], dWb [4, 16]."""
+    nwin = z.shape[0]
+    N = 32 * nwin
+    assert tuple(z.shape) == (nwin, 32, ESM_KEYS, DP) and z.dtype == torch.float32 and N % 128 == 0
+    d = _dev(z)
+    km = _u8(kmask)
+    if km is not None and km.data_ptr() % 16:
+        km = km.clone()
+    rows = nwin * 32 * ESM_KEYS
+    db = torch.empty(NH, rows, device=z.device, dtype=torch.float32)
+    _load_esm32("esm_bias_s", d)((min(4 * num_sms(d), (rows + 255) // 256), 1, 1), (256, 1, 1), dbias2.contiguous(), km, db, int(N), int(n0))
+    return pair_bias_bwd32(z, gamma, wb, db, eps)
 
 
 def attn_esm32(q, k, v, bias2, lse=None):
