@@ -155,6 +155,18 @@ def test_ragged_matches_padded_call(name, length, train):
                 assert relative(a, b) <= bound, (n, relative(a, b))
 
 
+# B L^2 = 258 064 / 332 929: cuBLAS 12.9's split-K GEMM dropped the last K % 64 rows of the wide path's dWo = dy_s^T u (and of d bo)
+# over the caller's rows (2026-10-29: 0.4-2.7 % off the padded call); the wide configs only (the fused path's weight gradients are
+# fp32 atomics in its kernels)
+TAIL_LENGTHS = (508, 577)
+
+
+@pytest.mark.parametrize("length", TAIL_LENGTHS)
+@pytest.mark.parametrize("name", [n for n, c in CONFIGS.items() if c[0] != 128])
+def test_ragged_long_reduction_keeps_every_row(name, length):
+    test_ragged_matches_padded_call(name, length, True)
+
+
 def statements(cfg, ours, dtype, p_drop):
     ref = make(cfg, ImplementationType.PYTORCH, p_drop, dtype=dtype)
     ref.load_state_dict({k: v.to(dtype) for k, v in ours.state_dict().items()})
