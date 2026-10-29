@@ -20,6 +20,7 @@
 //             glu_bwd        d[g | v | u] of h = silu(g) v [u]
 //             res_adaln_bwd  the sequential block's middle: dx' = dout + LN-bwd(dxt f(scT)); dya = sigmoid(gA) dx'; dscT, dshT, dgA
 //             gate_o_bwd     og = sigmoid(g) o: do, dg and D = rowsum_head(dog og)
+//   B200      ogate_fwd      og = [sigmoid(g)] o from the sm_100a token cores' fp32 O (gate column of q|k|v|g; none: the cast)
 //             qkv_bwd        the attention core's dq / dk / dv back to the projections' outputs (kq-norm backward), column sums
 //             adaln_bwd      dx = pass + LN-bwd(sum_i da_i f(sc_i)); dsc_i, dsh_i
 #include <torch/extension.h>
@@ -182,6 +183,19 @@ __global__ void __launch_bounds__(Geo<NT>::THREADS) gate_fwd_k(const AT* __restr
   if (row >= M) return;
   const int col = Geo<NT>::col();
   V4<AT>::store(OG + row * D + col, mul4(V4<AT>::load(O + row * D + col), sig4(V4<AT>::load(G + row * sg + col))));
+}
+
+// og = sigmoid(g) o (or o without a gate), o fp32 [M, D] (the sm_100a token attention forward's O), g / og AT (g row stride sg)
+template <int NT, typename AT>
+__global__ void __launch_bounds__(Geo<NT>::THREADS) ogate_fwd_k(const float* __restrict__ O, const AT* __restrict__ G, long sg, AT* __restrict__ OG,
+                                                                long M) {
+  constexpr int D = NT * 4;
+  const long row = Geo<NT>::row();
+  if (row >= M) return;
+  const int col = Geo<NT>::col();
+  float4 o = V4<float>::load(O + row * D + col);
+  if (G) o = mul4(o, sig4(V4<AT>::load(G + row * sg + col)));
+  V4<AT>::store(OG + row * D + col, o);
 }
 
 template <typename AT, bool UP>
@@ -599,6 +613,19 @@ void gate_fwd(at::Tensor o, at::Tensor g, at::Tensor og) {
   C10_CUDA_KERNEL_LAUNCH_CHECK();
 }
 
+void ogate_fwd(at::Tensor o, c10::optional<at::Tensor> g, at::Tensor og) {
+  const c10::cuda::CUDAGuard guard(o.device());
+  const int D = o.size(1);
+  const long M = o.size(0);
+  TORCH_CHECK(o.scalar_type() == at::kFloat && o.is_contiguous() && og.is_contiguous() && og.sizes() == o.sizes(), "ogate_fwd: fp32 o, og like o");
+  TORCH_CHECK(!(g && g->defined()) || (g->stride(1) == 1 && g->scalar_type() == og.scalar_type()), "ogate_fwd: g rows of og's dtype");
+  const long sg = (g && g->defined()) ? g->stride(0) : 0;
+  DISPATCH_D(D, DISPATCH_A(og,
+    ogate_fwd_k<NT, AT><<<rgrid<NT>(M), rblock<NT>(), 0, S_()>>>(CP<float>(o), CPo<AT>(g), sg, P<AT>(og), M);
+  ))
+  C10_CUDA_KERNEL_LAUNCH_CHECK();
+}
+
 void glu_fwd(at::Tensor ab, at::Tensor h, bool up) {
   const c10::cuda::CUDAGuard guard(ab.device());
   const int N = h.size(1);
@@ -781,6 +808,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
   m.def("res_ln_fwd", &res_ln_fwd);
   m.def("res_out_fwd", &res_out_fwd);
   m.def("gate_fwd", &gate_fwd);
+  m.def("ogate_fwd", &ogate_fwd);
   m.def("glu_fwd", &glu_fwd);
   m.def("glu_bwd", &glu_bwd);
   m.def("res_bwd", &res_bwd);
