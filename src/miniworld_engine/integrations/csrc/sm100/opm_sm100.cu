@@ -443,14 +443,16 @@ constexpr int NCB = NHALF / 32;                           // c blocks per CTA
 constexpr int AT = NP * CZ;                               // dz/n tile [2 z blocks][64 pairs][64 z]
 constexpr int BT = NP * NHALF;                            // O tile [NCB c][64 pairs][32 e]
 constexpr int STAGE = AT + BT;
-constexpr int NST = 3;
+// ring depth: 3 stages on the whole GPU; 4 when the kernel runs on a few SMs beside the dA / dB GEMMs (opm_dwo(ctas > 0), a side
+// stream), where a CTA's bytes in flight bound it (L768 S1024 alone on 16 CTAs: 1111 us with 3 stages, 878 with 4; on 148 CTAs 228 / 243)
 constexpr int THREADS = 192;
-constexpr int SMEM = 1024 + NST * STAGE * 2 + 256;
+constexpr int smem(int nst) { return 1024 + nst * STAGE * 2 + 256; }
 constexpr int MN = NHALF < 256 ? NHALF : 256;               // MMA N
 constexpr uint32_t IDESC = idesc_bf16(128, MN, 1, 1);
-static_assert(SMEM <= 232448, "one CTA per SM");
+static_assert(smem(4) <= 232448, "one CTA per SM");
 }  // namespace dw
 
+template <int NST>
 __global__ void __launch_bounds__(dw::THREADS, 1) opm_dwo_sm100(
     int NI, int NJ, int ntiles, int nsplit,
     const __grid_constant__ CUtensorMap amap,     // dz/n as (64 z, NJ j, NI i, 2 halves), box (64, BJ, BI, 2), 128B swizzle
@@ -1248,22 +1250,32 @@ std::vector<torch::Tensor> opm_prologue(torch::Tensor m, torch::Tensor mask, tor
   return {A2, BT, norm, stats, bits};
 }
 
-torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16) {
+// ctas > 0: the kernel's CTA budget (a multiple of NPART; it runs on a side stream beside the dA / dB GEMMs, which leave it that many
+// SMs), with the deeper ring; 0: one CTA an SM.  The split count (and so the fp32 summation order) follows the budget: deterministic per budget.
+torch::Tensor opm_dwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16, int64_t ctas) {
   using namespace dw;
   TORCH_CHECK(dzp.is_contiguous() && dzp.scalar_type() == torch::kBFloat16 && dzp.numel() == ni * nj * CZ, "dzp: bf16 [ni, nj, 128]");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
   TORCH_CHECK(ni % BI == 0 && nj % BJ == 0, "the kernel steps ", BI, " x ", BJ, " tokens");
   const int ntiles = (int)((ni / BI) * (nj / BJ));
-  const int nsplit = std::max(1, std::min(ntiles, num_sms(O.device().index()) / NPART));
+  const bool few = ctas > 0 && ctas < num_sms(O.device().index());
+  const int nsplit = std::max(1, std::min(ntiles, (int)(few ? ctas : num_sms(O.device().index())) / NPART));
   auto part = torch::empty({nsplit, (long)CZ, (long)NCH}, O.options().dtype(torch::kFloat32));
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap am = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)ni, 2}, {(uint64_t)CZ, (uint64_t)nj * CZ, 64}, {64, BJ, BI, 2}, CU_TENSOR_MAP_SWIZZLE_128B, "dzp");
   CUtensorMap bm = make_map<4>(O.data_ptr(), {32, (uint64_t)nj, (uint64_t)ni, 32}, {32, 32 * M, M}, {32, BJ, BI, NCB}, CU_TENSOR_MAP_SWIZZLE_64B, "O");
-  static bool attr = false;
-  if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100, cudaFuncAttributeMaxDynamicSharedMemorySize, SMEM)); attr = true; }
   CUtensorMap pm = make_map<2>(part.data_ptr(), {(uint64_t)NCH, (uint64_t)nsplit * CZ}, {(uint64_t)NCH}, {32, CZ}, CU_TENSOR_MAP_SWIZZLE_128B, "part",
                                CU_TENSOR_MAP_DATA_TYPE_FLOAT32, 4);
-  opm_dwo_sm100<<<dim3(nsplit, NPART), THREADS, SMEM, at::cuda::getCurrentCUDAStream()>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
+  auto st = at::cuda::getCurrentCUDAStream();
+  if (few) {
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100<4>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem(4))); attr = true; }
+    opm_dwo_sm100<4><<<dim3(nsplit, NPART), THREADS, smem(4), st>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
+  } else {
+    static bool attr = false;
+    if (!attr) { C10_CUDA_CHECK(cudaFuncSetAttribute(opm_dwo_sm100<3>, cudaFuncAttributeMaxDynamicSharedMemorySize, smem(3))); attr = true; }
+    opm_dwo_sm100<3><<<dim3(nsplit, NPART), THREADS, smem(3), st>>>((int)ni, (int)nj, ntiles, nsplit, am, bm, pm);
+  }
   C10_CUDA_KERNEL_LAUNCH_CHECK();
   return colsum(part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32);                 // the splits, in split order
 }
@@ -1441,7 +1453,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("after") = 0, py::arg("asym") = py::none());
   m.def("opm_norm", &opm_norm, "sm100 OPM mask counts [N, N] (clamped >= 1) off the prologue's bit rows", py::arg("bits"));
   m.def("opm_prologue_bwd", &opm_prologue_bwd, "sm100 fused OPM prologue backward: mask, both projections and the LayerNorm in one pass");
-  m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
+  m.def("opm_dwo", &opm_dwo, "sm100 dWo straight off the grouped outer product, no permute", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("ctas") = 0);
   m.def("opm_prologue", &opm_prologue, "sm100 fused OPM prologue: LN + both projections + mask -> A2, BT (grouped layouts), mask count, LN stats [N][S]",
         py::arg("m"), py::arg("mask"), py::arg("lnw"), py::arg("lnb"), py::arg("eps"), py::arg("wa"), py::arg("wb"), py::arg("save_stats") = true, py::arg("want_norm") = false);
   m.def("opm_fused_infer", &opm_fused_infer, "sm100 fused outer product + projection (inference): the grouped product never reaches HBM",

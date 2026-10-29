@@ -2201,11 +2201,12 @@ std::vector<torch::Tensor> opm_wdgrad(torch::Tensor dz, torch::Tensor norm, torc
 }
 
 template <int CZ>
-static torch::Tensor dwo_launch(torch::Tensor& dzp, torch::Tensor& O, int64_t ni, int64_t nj, int64_t grad_bf16) {
+static torch::Tensor dwo_launch(torch::Tensor& dzp, torch::Tensor& O, int64_t ni, int64_t nj, int64_t grad_bf16, int64_t ctas) {
   using C = WDw<CZ>;
   TORCH_CHECK(ni % C::BI == 0 && nj % C::BJ == 0, "the kernel steps ", C::BI, " x ", C::BJ, " tokens");
   const int ntiles = (int)((ni / C::BI) * (nj / C::BJ));
-  const int nsplit = std::max(1, std::min(ntiles, num_sms(O.device().index()) / C::NPART));
+  const int sms = num_sms(O.device().index());
+  const int nsplit = std::max(1, std::min(ntiles, (int)(ctas > 0 && ctas < sms ? ctas : sms) / C::NPART));
   auto part = torch::empty({nsplit, (long)CZ, (long)NCH}, O.options().dtype(torch::kFloat32));
   const uint64_t M = (uint64_t)nj * CH;
   CUtensorMap am = make_map<4>(dzp.data_ptr(), {64, (uint64_t)nj, (uint64_t)ni, (uint64_t)(CZ / 64)}, {(uint64_t)CZ, (uint64_t)nj * CZ, 64},
@@ -2221,15 +2222,16 @@ static torch::Tensor dwo_launch(torch::Tensor& dzp, torch::Tensor& O, int64_t ni
   return colsum(part, grad_bf16 ? torch::kBFloat16 : torch::kFloat32);
 }
 
-// dz/n [ni, nj, CZ] bf16, O [ni*32, nj*32] bf16 -> dWo [CZ, 1024] (fp32, or bf16 with grad_bf16)
-torch::Tensor opm_wdwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16) {
+// dz/n [ni, nj, CZ] bf16, O [ni*32, nj*32] bf16 -> dWo [CZ, 1024] (fp32, or bf16 with grad_bf16).  ctas > 0: the CTA budget (beside the
+// dA / dB GEMMs on a side stream, as opm_sm100.cu's opm_dwo); the split count follows it (deterministic per budget)
+torch::Tensor opm_wdwo(torch::Tensor dzp, torch::Tensor O, int64_t ni, int64_t nj, int64_t grad_bf16, int64_t ctas) {
   TORCH_CHECK(dzp.is_contiguous() && dzp.scalar_type() == torch::kBFloat16 && dzp.dim() == 3, "dzp: bf16 [ni, nj, c_z]");
   TORCH_CHECK(O.is_contiguous() && O.scalar_type() == torch::kBFloat16 && O.size(0) == ni * CH && O.size(1) == nj * CH, "O: bf16 [ni*32, nj*32]");
   const long CZ = dzp.size(2);
-  if (CZ == 256) return dwo_launch<256>(dzp, O, ni, nj, grad_bf16);
-  if (CZ == 512) return dwo_launch<512>(dzp, O, ni, nj, grad_bf16);
+  if (CZ == 256) return dwo_launch<256>(dzp, O, ni, nj, grad_bf16, ctas);
+  if (CZ == 512) return dwo_launch<512>(dzp, O, ni, nj, grad_bf16, ctas);
   TORCH_CHECK(CZ == 384, "c_z 256, 384 or 512");
-  return dwo_launch<384>(dzp, O, ni, nj, grad_bf16);
+  return dwo_launch<384>(dzp, O, ni, nj, grad_bf16, ctas);
 }
 
 template <typename WT_, int NCTA>
@@ -2532,7 +2534,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
         py::arg("bias"), py::arg("ni"), py::arg("nj"), py::arg("residual") = py::none(), py::arg("after") = 0, py::arg("asym") = py::none());
   m.def("opm_wdgrad", &opm_wdgrad, "sm100 OPM dO at c_z 128 / 256 / 384 / 512", py::arg("dz"), py::arg("norm"), py::arg("wo"), py::arg("ni"),
         py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("asym") = py::none());
-  m.def("opm_wdwo", &opm_wdwo, "sm100 OPM dWo at c_z 256 / 384", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0);
+  m.def("opm_wdwo", &opm_wdwo, "sm100 OPM dWo at c_z 256 / 384", py::arg("dzp"), py::arg("O"), py::arg("ni"), py::arg("nj"), py::arg("grad_bf16") = 0, py::arg("ctas") = 0);
   m.def("opm_wprologue_bwd", &opm_wprologue_bwd, "sm100 OPM prologue backward at d_msa 128 / 256");
   m.def("opm_chai_prologue", &opm_chai_prologue, "sm100 Chai-1 OPM prologue: LN + both projections + mask, group-major");
   m.def("opm_chai_epilogue", &opm_chai_epilogue, "sm100 Chai-1 OPM epilogue: product LayerNorm + out-projection (+ residual), y / stats saved",
